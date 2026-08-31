@@ -2,6 +2,7 @@ use kdj_providers::qqmusic::login;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    kdj_core::ensure_rustls_ring();
     let http = reqwest::Client::builder()
         .user_agent("Mozilla/5.0")
         .build()?;

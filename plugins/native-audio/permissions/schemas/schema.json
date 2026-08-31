@@ -571,10 +571,22 @@
           "markdownDescription": "Denies the set_volume command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-apply-playback-snapshot`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-set-volume`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-set-lyrics-timeline`\n- `allow-set-lyrics-playback-clock`\n- `allow-set-lyrics-overlay`\n- `allow-check-overlay-permission`\n- `allow-request-overlay-permission`\n- `allow-dispose`\n- `allow-save-png-to-gallery`\n- `allow-open-local-path`\n- `allow-pick-library-folder`",
+          "description": "Enables the start_file_drag command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-file-drag",
+          "markdownDescription": "Enables the start_file_drag command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_file_drag command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-file-drag",
+          "markdownDescription": "Denies the start_file_drag command without any pre-configured scope."
+        },
+        {
+          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-apply-playback-snapshot`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-set-volume`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-set-lyrics-timeline`\n- `allow-set-lyrics-playback-clock`\n- `allow-set-lyrics-overlay`\n- `allow-check-overlay-permission`\n- `allow-request-overlay-permission`\n- `allow-dispose`\n- `allow-save-png-to-gallery`\n- `allow-open-local-path`\n- `allow-start-file-drag`\n- `allow-pick-library-folder`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-apply-playback-snapshot`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-set-volume`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-set-lyrics-timeline`\n- `allow-set-lyrics-playback-clock`\n- `allow-set-lyrics-overlay`\n- `allow-check-overlay-permission`\n- `allow-request-overlay-permission`\n- `allow-dispose`\n- `allow-save-png-to-gallery`\n- `allow-open-local-path`\n- `allow-pick-library-folder`"
+          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-apply-playback-snapshot`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-set-volume`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-set-lyrics-timeline`\n- `allow-set-lyrics-playback-clock`\n- `allow-set-lyrics-overlay`\n- `allow-check-overlay-permission`\n- `allow-request-overlay-permission`\n- `allow-dispose`\n- `allow-save-png-to-gallery`\n- `allow-open-local-path`\n- `allow-start-file-drag`\n- `allow-pick-library-folder`"
         }
       ]
     }

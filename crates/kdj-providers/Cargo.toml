@@ -16,12 +16,13 @@ ecb = { version = "0.1", features = ["alloc"] }
 flate2 = "1.1.9"
 futures-util = "0.3.33"
 hex = "0.4.3"
+hls-transmux = { version = "=0.2.1", default-features = false }
 # default features 会把 AVIF 编码器（rav1e）、OpenEXR、TIFF 全编进来，
 # 一次都没用到却占 597KB（实测，见 docs/rust-port/06-packaging-results.md §3）。
 # webp/gif/bmp 必须留：load_from_memory 靠嗅探魔数选解码器，
 # 四家平台的封面 CDN 就在发 webp，砍掉的表现是"某些歌没封面"、只在真机暴露。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
-kdj-core = { version = "0.2.44", path = "../kdj-core" }
+kdj-core = { version = "1.0.0-rc1", path = "../kdj-core", features = ["rustls-ring"] }
 lofty = "0.24.0"
 md-5 = "0.10"
 num-bigint = "0.4"
@@ -29,7 +30,7 @@ percent-encoding = "2.3.2"
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 rand = "0.8"
 regex = "1.13.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "charset", "http2", "cookies"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "json", "stream", "gzip", "charset", "http2", "cookies", "query", "form"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha1 = "0.10"

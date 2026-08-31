@@ -1,11 +1,11 @@
-import type { OneLibraryTarget, StreamPlaylist } from "../types";
+import type { StreamPlaylist } from "../types";
 import { writeLocalStorageNow, writeLocalStorageSoon } from "./storageWrite";
 
 const STORAGE_KEY = "kd-workspace-session-v1";
 const MAX_TEXT = 4_096;
 const MAX_SCROLL = 1_000_000_000;
 
-export type RestorableWorkspaceSource = "local" | "onelibrary" | "stream";
+export type RestorableWorkspaceSource = "local" | "stream";
 
 export interface LocalWorkspaceSession {
   folder: string;
@@ -18,14 +18,10 @@ export interface LocalWorkspaceSession {
   scrollTop: number;
 }
 
-export interface OneLibraryWorkspaceSession {
-  target: OneLibraryTarget | null;
-  focusedContentId: number | null;
-  scrollTop: number;
-}
-
 export interface StreamWorkspaceSession {
   playlist: StreamPlaylist | null;
+  /** 打开页面时的平台账号身份；换号后不得把上一账号的私人歌单误恢复到当前账号。 */
+  accountKey: string | null;
   inspectedGroup: string | null;
   scrollTop: number;
 }
@@ -34,7 +30,6 @@ export interface WorkspaceSession {
   version: 1;
   source: RestorableWorkspaceSource;
   local: LocalWorkspaceSession;
-  oneLibrary: OneLibraryWorkspaceSession;
   stream: StreamWorkspaceSession;
 }
 
@@ -51,13 +46,9 @@ export const DEFAULT_WORKSPACE_SESSION: WorkspaceSession = {
     selectedId: null,
     scrollTop: 0,
   },
-  oneLibrary: {
-    target: null,
-    focusedContentId: null,
-    scrollTop: 0,
-  },
   stream: {
     playlist: null,
+    accountKey: null,
     inspectedGroup: null,
     scrollTop: 0,
   },
@@ -83,26 +74,14 @@ function scroll(value: unknown): number {
     : 0;
 }
 
-function target(value: unknown): OneLibraryTarget | null {
-  const item = record(value);
-  if (!item) return null;
-  const devicePath = text(item.device_path);
-  const deviceName = text(item.device_name);
-  const playlistName = text(item.playlist_name);
-  const playlistId = positiveId(item.playlist_id);
-  if (!devicePath || !playlistId || typeof item.is_virtual !== "boolean") return null;
-  return {
-    device_path: devicePath,
-    device_name: deviceName,
-    is_virtual: item.is_virtual,
-    playlist_id: playlistId,
-    playlist_name: playlistName,
-  };
-}
-
 function playlist(value: unknown): StreamPlaylist | null {
   const item = record(value);
-  if (!item || !["wyy", "qqm", "bilibili"].includes(String(item.platform))) return null;
+  if (
+    !item ||
+    !["wyy", "qqm", "soundcloud", "ytm", "youtube", "bilibili"].includes(
+      String(item.platform),
+    )
+  ) return null;
   const key = text(item.key);
   const title = text(item.title);
   const cover = text(item.cover);
@@ -124,9 +103,8 @@ function playlist(value: unknown): StreamPlaylist | null {
 export function normalizeWorkspaceSession(value: unknown): WorkspaceSession {
   const root = record(value);
   const local = record(root?.local);
-  const oneLibrary = record(root?.oneLibrary);
   const streamState = record(root?.stream);
-  const source = root?.source === "onelibrary" || root?.source === "stream"
+  const source = root?.source === "stream"
     ? root.source
     : "local";
   return {
@@ -142,13 +120,12 @@ export function normalizeWorkspaceSession(value: unknown): WorkspaceSession {
       selectedId: positiveId(local?.selectedId),
       scrollTop: scroll(local?.scrollTop),
     },
-    oneLibrary: {
-      target: target(oneLibrary?.target),
-      focusedContentId: positiveId(oneLibrary?.focusedContentId),
-      scrollTop: scroll(oneLibrary?.scrollTop),
-    },
     stream: {
       playlist: playlist(streamState?.playlist),
+      accountKey:
+        typeof streamState?.accountKey === "string"
+          ? text(streamState.accountKey) || null
+          : null,
       inspectedGroup:
         typeof streamState?.inspectedGroup === "string"
           ? text(streamState.inspectedGroup) || null
@@ -156,6 +133,16 @@ export function normalizeWorkspaceSession(value: unknown): WorkspaceSession {
       scrollTop: scroll(streamState?.scrollTop),
     },
   };
+}
+
+/**
+ * source 只表示上次聚焦哪一栏；固定双栏时即使焦点在本地，右侧在线页也必须恢复。
+ */
+export function shouldRestoreStreamWorkspace(
+  session: WorkspaceSession,
+  localPanePinned: boolean,
+): boolean {
+  return Boolean(session.stream.playlist && (session.source === "stream" || localPanePinned));
 }
 
 function storage(): Storage | null {
@@ -200,13 +187,6 @@ export function setRestorableWorkspaceSource(source: RestorableWorkspaceSource):
 export function updateLocalWorkspaceSession(patch: Partial<LocalWorkspaceSession>): void {
   const current = readWorkspaceSession();
   commit({ ...current, local: { ...current.local, ...patch } });
-}
-
-export function updateOneLibraryWorkspaceSession(
-  patch: Partial<OneLibraryWorkspaceSession>,
-): void {
-  const current = readWorkspaceSession();
-  commit({ ...current, oneLibrary: { ...current.oneLibrary, ...patch } });
 }
 
 export function updateStreamWorkspaceSession(

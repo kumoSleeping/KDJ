@@ -4,6 +4,9 @@ import {
   detailWaveformBuckets,
   overviewWaveformFromDetail,
   performanceWaveformViewportSeconds,
+  managerWaveformRasterGeometry,
+  managerWaveformViewportSeconds,
+  managerWaveformRequestSeconds,
   projectedWaveformPosition,
   shouldAnimateWaveformRail,
   stabilizedWaveformPosition,
@@ -13,6 +16,11 @@ import {
   waveformPointerSeconds,
   waveformViewportLayout,
   beatMarkerRangePercent,
+  waveformCoversViewport,
+  waveformIntersectsViewport,
+  waveformSourceRange,
+  waveformWindowFromFullDetail,
+  shouldWriteWaveformTransform,
 } from "../src/lib/waveformViewport";
 import {
   correctedLiveWaveformRate,
@@ -33,29 +41,29 @@ test("DJ canvas bakes three screens and reuses the window while the playhead sta
   const first = waveformBakeWindow(180, 90, 12, null);
   assert.equal(first.widthScale, 3);
   assert.equal(first.translatePercent, 50);
-  assert.ok(Math.abs(first.endSec - first.startSec - 90) < 1e-9);
+  assert.ok(Math.abs(first.endSec - first.startSec - 36) < 1e-9);
 
   const inside = waveformBakeWindow(180, 91, 12, first);
   assert.equal(inside.startSec, first.startSec);
   assert.ok(inside.translatePercent > first.translatePercent);
 
-  const jumped = waveformBakeWindow(180, 140, 12, inside);
+  const jumped = waveformBakeWindow(180, 100, 12, inside);
   assert.notEqual(jumped.startSec, first.startSec);
   assert.equal(jumped.translatePercent, 50);
 });
 
 test("a rebaked DJ canvas is distinguished from ordinary rail movement", () => {
   const first = waveformBakeWindow(180, 90, 12, null);
-  // The 2.4s guard lets the 90s canvas reach 90% before it is replaced.
-  const moved = waveformBakeWindow(180, 126, 12, first);
-  const rebaked = waveformBakeWindow(180, 127, 12, moved);
+  // The 2.4s guard lets the native 36s canvas approach its last screen before replacement.
+  const moved = waveformBakeWindow(180, 99, 12, first);
+  const rebaked = waveformBakeWindow(180, 100, 12, moved);
 
   assert.equal(waveformBakeRangeChanged(first, moved), false);
   assert.equal(waveformBakeRangeChanged(moved, rebaked), true);
   // The new PCM pixels are centered at 50%; interpolating from `moved` would travel almost a
   // screen width and recreate the visible large-range migration regression.
   assert.equal(rebaked.translatePercent, 50);
-  assert.ok(moved.translatePercent > 80);
+  assert.ok(moved.translatePercent > 70);
 });
 
 test("a rebased canvas can land on raw time before starting its projected runway", () => {
@@ -64,14 +72,21 @@ test("a rebased canvas can land on raw time before starting its projected runway
   assert.ok(waveformBakeTranslatePercent(rebased, 102.24) > 50);
 });
 
-test("TEMPO / SYNC zoom reuses the baked canvas instead of redrawing PCM", () => {
+test("a native waveform always writes its initial transform before epsilon filtering", () => {
+  assert.equal(shouldWriteWaveformTransform(Number.NaN, 50), true);
+  assert.equal(shouldWriteWaveformTransform(50, 50), false);
+  assert.equal(shouldWriteWaveformTransform(50, 50.001), true);
+  assert.equal(shouldWriteWaveformTransform(50, Number.NaN), false);
+});
+
+test("a viewport scale change rebakes native PCM instead of stretching its bitmap", () => {
   const first = waveformBakeWindow(180, 90, 12, null);
   const halfTime = waveformBakeWindow(180, 90.05, 6, first);
   const doubleTime = waveformBakeWindow(180, 90.05, 24, first);
-  assert.equal(halfTime.startSec, first.startSec);
-  assert.equal(halfTime.endSec, first.endSec);
-  assert.equal(doubleTime.startSec, first.startSec);
-  assert.equal(doubleTime.endSec, first.endSec);
+  assert.notEqual(halfTime.startSec, first.startSec);
+  assert.equal(halfTime.endSec - halfTime.startSec, 18);
+  assert.notEqual(doubleTime.startSec, first.startSec);
+  assert.equal(doubleTime.endSec - doubleTime.startSec, 72);
 });
 
 test("DJ viewport keeps the playhead centered while the rail moves", () => {
@@ -177,10 +192,139 @@ test("Performance tempo changes velocity without changing the source-time zoom",
   assert.ok(slowTrackBeatWidth > fastTrackBeatWidth);
 });
 
-test("DJ detail keeps one hundred real envelope columns per second", () => {
+test("Manager waveform uses a tighter stable source-time window", () => {
+  assert.equal(managerWaveformViewportSeconds(0.5), 6);
+  assert.equal(managerWaveformViewportSeconds(1), 6);
+  assert.equal(managerWaveformViewportSeconds(2), 6);
+  assert.ok(managerWaveformViewportSeconds(1) < performanceWaveformViewportSeconds(1));
+});
+
+test("Manager renewal requests exactly the coverage margin it later requires", () => {
+  assert.equal(managerWaveformRequestSeconds(6, 0.75), 7.5);
+  assert.equal(managerWaveformRequestSeconds(Number.NaN, 0.75), 1.5);
+  assert.equal(managerWaveformRequestSeconds(6, -1), 6);
+});
+
+test("Manager raster density follows destination physical pixels rather than 400 Hz analysis", () => {
+  const raster = managerWaveformRasterGeometry(30, 42, 400, 2, 6);
+  assert.equal(raster.backingWidth, 1_600);
+  assert.equal(raster.cssWidth, 800);
+  assert.equal(raster.pixelsPerSecond, 400 / 3);
+  assert.ok(Math.abs(raster.spanSec - 12) < 1.0e-12);
+});
+
+test("overlapping Manager windows share one absolute destination-pixel lattice", () => {
+  const first = managerWaveformRasterGeometry(10.0025, 22.0025, 397, 2, 6);
+  const renewed = managerWaveformRasterGeometry(10.7525, 22.7525, 397, 2, 6);
+  assert.ok(Math.abs(first.startSec * first.pixelsPerSecond - first.firstPixel) < 1.0e-9);
+  assert.ok(Math.abs(first.endSec * first.pixelsPerSecond - first.lastPixel) < 1.0e-9);
+  assert.equal(first.pixelsPerSecond, renewed.pixelsPerSecond);
+  // The same absolute instant resolves to the same global physical column after renewal.
+  const sharedTime = 16.25;
+  const firstGlobalPixel = first.firstPixel
+    + Math.floor((sharedTime - first.startSec) * first.pixelsPerSecond);
+  const renewedGlobalPixel = renewed.firstPixel
+    + Math.floor((sharedTime - renewed.startSec) * renewed.pixelsPerSecond);
+  assert.equal(firstGlobalPixel, renewedGlobalPixel);
+});
+
+test("bounded Manager assets keep source-time ownership instead of stretching full-track", () => {
+  const waveform = {
+    track_id: 7,
+    duration: 180,
+    source_start: 84,
+    source_end: 96,
+    amp: new Float32Array([0.2, 0.8]),
+    r: new Uint8Array([1, 2]),
+    g: new Uint8Array([3, 4]),
+    b: new Uint8Array([5, 6]),
+  };
+  assert.deepEqual(waveformSourceRange(waveform), [84, 96]);
+  assert.equal(waveformCoversViewport(waveform, 7, 90, 6, 0.75), true);
+  assert.equal(waveformCoversViewport(waveform, 7, 93, 6, 0.75), false);
+  assert.equal(waveformCoversViewport(waveform, 8, 90, 6), false);
+});
+
+test("Manager distinguishes visible partial PCM from complete first-paint coverage", () => {
+  const waveform = {
+    track_id: 7,
+    duration: 180,
+    source_start: 90,
+    source_end: 92,
+    amp: new Float32Array([0.2, 0.8]),
+    r: new Uint8Array([1, 2]),
+    g: new Uint8Array([3, 4]),
+    b: new Uint8Array([5, 6]),
+  };
+  assert.equal(waveformCoversViewport(waveform, 7, 90, 6), false);
+  assert.equal(waveformIntersectsViewport(waveform, 7, 90, 6), true);
+  assert.equal(waveformIntersectsViewport(waveform, 7, 96, 6), false);
+  assert.equal(waveformIntersectsViewport(waveform, 8, 90, 6), false);
+});
+
+test("sparse Manager windows remain visible without claiming unknown coverage", () => {
+  const known = new Uint8Array(8);
+  known.set([1, 1], 4);
+  const waveform = {
+    track_id: 7,
+    duration: 8,
+    source_start: 0,
+    source_end: 8,
+    amp: new Float32Array(8).fill(0.5),
+    r: new Uint8Array(8),
+    g: new Uint8Array(8),
+    b: new Uint8Array(8),
+    known,
+  };
+  assert.equal(waveformIntersectsViewport(waveform, 7, 4, 4), true);
+  assert.equal(waveformCoversViewport(waveform, 7, 4, 4), false);
+  assert.equal(
+    waveformIntersectsViewport({ ...waveform, known: new Uint8Array(8) }, 7, 4, 4),
+    false,
+  );
+});
+
+test("a cached full detail master is sliced on its original source-time lattice", () => {
+  const full = {
+    track_id: 7,
+    duration: 8,
+    amp: Float32Array.from({ length: 8 }, (_, index) => index / 10),
+    minimum: Float32Array.from({ length: 8 }, (_, index) => -index / 10),
+    maximum: Float32Array.from({ length: 8 }, (_, index) => index / 10),
+    r: Uint8Array.from({ length: 8 }, (_, index) => index),
+    g: Uint8Array.from({ length: 8 }, (_, index) => index + 10),
+    b: Uint8Array.from({ length: 8 }, (_, index) => index + 20),
+    transient: Uint8Array.from({ length: 8 }, (_, index) => index + 30),
+  };
+  const window = waveformWindowFromFullDetail(full, 4, 4);
+  assert.ok(window);
+  assert.deepEqual(waveformSourceRange(window), [2, 6]);
+  assert.deepEqual([...window.amp], [...Float32Array.from([0.2, 0.3, 0.4, 0.5])]);
+  assert.deepEqual([...window.transient!], [32, 33, 34, 35]);
+});
+
+test("a canonical live window may trim only one 400 Hz cell at its PCM edges", () => {
+  const waveform = {
+    track_id: 7,
+    duration: 180,
+    source_start: 84.0025,
+    source_end: 95.9975,
+    amp: new Float32Array([0.2, 0.8]),
+    r: new Uint8Array([1, 2]),
+    g: new Uint8Array([3, 4]),
+    b: new Uint8Array([5, 6]),
+  };
+  assert.equal(waveformCoversViewport(waveform, 7, 90, 12), true);
+  assert.equal(
+    waveformCoversViewport({ ...waveform, source_start: 84.003 }, 7, 90, 12),
+    false,
+  );
+});
+
+test("DJ detail keeps four hundred independent evidence columns per second", () => {
   assert.equal(detailWaveformBuckets(0), 2_000);
-  assert.equal(detailWaveformBuckets(180), 18_000);
-  assert.equal(detailWaveformBuckets(600), 24_000);
+  assert.equal(detailWaveformBuckets(180), 72_000);
+  assert.equal(detailWaveformBuckets(600), 100_000);
 });
 
 test("full-track overview uses the same crest-aware RMS/peak pooling as the server", () => {
@@ -405,6 +549,30 @@ test("small native clock jitter never becomes a hidden waveform pitch bend", () 
   assert.ok(Math.abs(continued.anchorPosition - 10.1) < 1e-12);
   assert.equal(continued.rate, 1);
   assert.ok(Math.abs(waveformMotionClockPosition(continued, 1_116) - 10.116) < 1e-12);
+});
+
+test("a VSync detail rail never follows a small native clock sample backwards", () => {
+  const first = updateWaveformMotionClock(null, {
+    trackId: 7,
+    position: 10.1,
+    duration: 180,
+    rate: 1,
+    playing: true,
+    discrete: false,
+    motionRevision: 4,
+  }, 1_000);
+  const regressed = updateWaveformMotionClock(first, {
+    trackId: 7,
+    position: 10.08,
+    duration: 180,
+    rate: 1,
+    playing: true,
+    discrete: false,
+    motionRevision: 4,
+  }, 1_016);
+
+  assert.equal(regressed.snapped, false);
+  assert.ok(waveformMotionClockPosition(regressed, 1_016) > 10.1);
 });
 
 test("a late queued native sample leaves the already-running native timeline alone", () => {

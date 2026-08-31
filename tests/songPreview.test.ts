@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SongSource } from "../src/types";
 
+let stableLocalStorage: Storage | null = null;
+
 function installBrowserStubs(): void {
   const storage = new Map<string, string>();
-  const localStorage = {
+  const freshLocalStorage = {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => void storage.set(key, value),
     removeItem: (key: string) => void storage.delete(key),
@@ -14,6 +16,11 @@ function installBrowserStubs(): void {
       return storage.size;
     },
   };
+  // streamTrack 持有与真实 WebView 一样稳定的 Storage 对象；测试重建 window 时也应
+  // 保留这个对象，只清空内容，避免把“换了整个浏览器存储实现”误当成重启场景。
+  const localStorage = stableLocalStorage ?? freshLocalStorage;
+  stableLocalStorage = localStorage as Storage;
+  localStorage.clear();
   const events = new EventTarget();
   const audio = {
     preload: "",
@@ -23,6 +30,7 @@ function installBrowserStubs(): void {
   };
   const window = Object.assign(events, {
     kdj: { baseUrl: "http://127.0.0.1:43123", platform: "darwin" },
+    localStorage,
     addEventListener: events.addEventListener.bind(events),
     removeEventListener: events.removeEventListener.bind(events),
     dispatchEvent: events.dispatchEvent.bind(events),
@@ -90,8 +98,10 @@ test("playSongPreview puts the track on the Deck before the provider URL resolve
     const {
       isUnresolvedStreamTrack,
       mediaUrlForTrack,
+      streamWaveformTokenById,
       streamMediaUrl,
       streamTrackById,
+      subscribeStreamMeta,
     } = await import("../src/lib/streamTrack");
 
     const pending = playSongPreview({
@@ -115,12 +125,20 @@ test("playSongPreview puts the track on the Deck before the provider URL resolve
     assert.equal(streamMediaUrl(track), null);
     assert.equal(mediaUrlForTrack(track), "");
 
+    let metaUpdates = 0;
+    const unsubscribeMeta = subscribeStreamMeta(track.id, () => {
+      metaUpdates += 1;
+    });
+
     releasePreview?.();
     await pending;
     assert.equal(getSongPreviewState().phase, "ready");
     assert.equal(isUnresolvedStreamTrack(track), false);
     assert.equal(streamMediaUrl(track), "http://127.0.0.1:43123/api/song/preview/token");
     assert.equal(mediaUrlForTrack(track), "http://127.0.0.1:43123/api/song/preview/token");
+    assert.equal(streamWaveformTokenById(track.id), "wave-1");
+    assert.equal(metaUpdates, 1, "waveform polling must wake exactly when the token arrives");
+    unsubscribeMeta();
   } finally {
     api.songPreview = originalPreview;
   }
@@ -154,7 +172,7 @@ test("requestSongPreview starts the first double-click without waiting for an Ap
   }
 });
 
-test("unresolved stream tracks are identified so PlayerBar can hard-cut instead of DJ-wait", async () => {
+test("unresolved stream tracks remain identifiable while the DJ lane resolves them in place", async () => {
   installBrowserStubs();
   const { makePendingSongStreamTrack, makeSongStreamTrack, isUnresolvedStreamTrack } = await import(
     "../src/lib/streamTrack"
@@ -174,4 +192,41 @@ test("unresolved stream tracks never fall back to the local library audio URL", 
   assert.equal(isUnresolvedStreamTrack(track), true);
   assert.equal(mediaUrlForTrack(track), "");
   assert.equal(mediaUrlForTrack(track).includes(`/library/audio/${track.id}`), false);
+});
+
+test("YouTube Music playback exposes a first-attempt failure instead of refreshing proof automatically", async () => {
+  installBrowserStubs();
+  const { claimStreamCacheRetry, makeSongStreamTrack } = await import("../src/lib/streamTrack");
+  const track = makeSongStreamTrack(
+    ytmSource("Single path"),
+    "http://127.0.0.1:43123/api/song/preview/token",
+  );
+  assert.equal(claimStreamCacheRetry(track), null);
+  assert.equal(claimStreamCacheRetry(track), null);
+});
+
+test("online Deck persistence keeps a restartable source but never stores the short-lived media URL", async () => {
+  installBrowserStubs();
+  const {
+    makeSongStreamTrack,
+    publishStreamTrack,
+    publishedStreamSnapshot,
+  } = await import("../src/lib/streamTrack");
+  const source = ytmSource("Remember me");
+  const track = makeSongStreamTrack(
+    source,
+    "http://127.0.0.1:43123/api/song/preview/short-lived-secret",
+  );
+
+  publishStreamTrack(track);
+  const stored = globalThis.localStorage.getItem("kd-active-stream-track");
+  assert.ok(stored);
+  assert.equal(stored.includes("short-lived-secret"), false);
+  const snapshot = publishedStreamSnapshot(JSON.parse(stored));
+  assert.ok(snapshot);
+  assert.equal(snapshot.track.id, track.id);
+  assert.deepEqual(snapshot.source.payload, { video_id: "abc123" });
+
+  publishStreamTrack(null);
+  assert.equal(globalThis.localStorage.getItem("kd-active-stream-track"), null);
 });

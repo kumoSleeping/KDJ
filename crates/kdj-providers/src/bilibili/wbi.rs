@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
+use serde_json::Value;
 
 /// 64 项置换表。抄自 B 站前端，顺序不能动。
 const OE: [usize; 64] = [
@@ -57,11 +58,6 @@ pub fn sign_params(params: &[(&str, String)], mixin_key: &str, wts: i64) -> Stri
         .map(|(key, value)| ((*key).to_string(), value.clone()))
         .collect();
     sorted.insert("wts".into(), wts.to_string());
-    // web_location 不给的话会让一部分接口直接失败，默认补 1550101
-    sorted
-        .entry("web_location".into())
-        .or_insert_with(|| "1550101".to_string());
-
     let query = sorted
         .iter()
         .map(|(key, value)| format!("{}={}", urlencode(key), urlencode(value)))
@@ -92,6 +88,9 @@ fn urlencode(text: &str) -> String {
 #[derive(Default)]
 pub struct WbiKeyCache {
     inner: Mutex<Option<(String, Instant)>>,
+    // 多个请求同时发现 key 过期时，只允许一个请求去刷新 nav。否则一次搜索或
+    // 收藏夹展开就可能并发打出多条完全相同的 nav 请求。
+    refresh: tokio::sync::Mutex<()>,
 }
 
 impl WbiKeyCache {
@@ -99,25 +98,26 @@ impl WbiKeyCache {
         Self::default()
     }
 
-    pub async fn get(&self, http: &reqwest::Client, cookie: &str) -> Result<String> {
-        if let Some((key, at)) = self.inner.lock().unwrap().as_ref() {
-            if at.elapsed() < MIXIN_TTL {
-                return Ok(key.clone());
-            }
+    pub async fn get<F, Fut>(&self, fetch_nav: F) -> Result<String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Value>>,
+    {
+        if let Some(key) = self.cached() {
+            return Ok(key);
         }
-        let mut request = http.get("https://api.bilibili.com/x/web-interface/nav");
-        if !cookie.is_empty() {
-            request = request.header(reqwest::header::COOKIE, cookie);
+
+        let _refresh = self.refresh.lock().await;
+        // 等锁期间另一个请求可能已经刷新完，必须再检查一次。
+        if let Some(key) = self.cached() {
+            return Ok(key);
         }
-        let body: serde_json::Value = request
-            .send()
-            .await
-            .context("获取 B 站 nav 失败")?
-            .json()
-            .await
-            .context("B 站 nav 响应不是合法 JSON")?;
+
+        // nav 必须由 BiliClient 发出，才能和其它 B 站 API 共用同一把节流锁与
+        // 风控熔断器；WbiKeyCache 只负责 single-flight 和缓存。
+        let body = fetch_nav().await.context("获取 B 站 WBI key 失败")?;
         let wbi = body
-            .pointer("/data/wbi_img")
+            .pointer("/wbi_img")
             .context("B 站 nav 响应里没有 wbi_img")?;
         let img = wbi
             .get("img_url")
@@ -131,6 +131,15 @@ impl WbiKeyCache {
         anyhow::ensure!(key.len() == 32, "推导出来的 mixin key 长度不对：{key}");
         *self.inner.lock().unwrap() = Some((key.clone(), Instant::now()));
         Ok(key)
+    }
+
+    fn cached(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < MIXIN_TTL)
+            .map(|(key, _)| key.clone())
     }
 
     /// nav 里也带着登录态信息，顺手判断有没有登录。
@@ -179,6 +188,7 @@ mod tests {
                 ("fnval", "4048".into()),
                 ("otype", "json".into()),
                 ("platform", "pc".into()),
+                ("web_location", "1550101".into()),
             ],
             &mixin,
             1_700_000_000,
@@ -196,6 +206,23 @@ mod tests {
         let a = sign_params(&[("b", "2".into()), ("a", "1".into())], &mixin, 1);
         let b = sign_params(&[("a", "1".into()), ("b", "2".into())], &mixin, 1);
         assert_eq!(a, b, "签名必须和参数书写顺序无关");
+    }
+
+    #[test]
+    fn endpoint_context_must_be_supplied_by_the_caller() {
+        let mixin = derive_mixin_key(IMG, SUB);
+        let generic = sign_params(&[("keyword", "test".into())], &mixin, 1);
+        assert!(!generic.contains("web_location="));
+
+        let explicit = sign_params(
+            &[
+                ("keyword", "test".into()),
+                ("web_location", "1315873".into()),
+            ],
+            &mixin,
+            1,
+        );
+        assert!(explicit.contains("web_location=1315873"));
     }
 
     #[test]
@@ -217,5 +244,36 @@ mod tests {
         assert_eq!(urlencode("a~b.c-d_e"), "a~b.c-d_e");
         assert_eq!(urlencode("中"), "%E4%B8%AD");
         assert_eq!(urlencode("a/b"), "a%2Fb");
+    }
+
+    #[tokio::test]
+    async fn concurrent_cache_misses_share_one_nav_fetch() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let cache = Arc::new(WbiKeyCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_cache = cache.clone();
+        let first_calls = calls.clone();
+        let second_cache = cache.clone();
+        let second_calls = calls.clone();
+        let (first, second) = tokio::join!(
+            first_cache.get(|| async move {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                Ok(serde_json::json!({
+                    "wbi_img": { "img_url": IMG, "sub_url": SUB }
+                }))
+            }),
+            second_cache.get(|| async move {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                Ok(serde_json::json!({
+                    "wbi_img": { "img_url": IMG, "sub_url": SUB }
+                }))
+            })
+        );
+        assert_eq!(first.unwrap(), second.unwrap());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

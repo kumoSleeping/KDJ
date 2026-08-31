@@ -2,19 +2,44 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PERFORMANCE_DETAIL_BACKGROUND,
+  PERFORMANCE_DETAIL_CONTRAST,
+  RELEASE_OVERVIEW_CONTRAST,
+  RELEASE_OVERVIEW_LIGHT_BACKGROUND,
   performanceDetailWaveformDisplayRgb,
   releaseOverviewWaveformDisplayRgb,
   waveformDisplayRgb,
+  waveformSurfaceContrastRgb,
 } from "../src/lib/waveformPalette";
 
-test("v0.2.41 overview keeps its identity with restrained saturation", () => {
-  assert.deepEqual(releaseOverviewWaveformDisplayRgb(255, 31, 80), [218, 45, 86]);
-  assert.deepEqual(releaseOverviewWaveformDisplayRgb(31, 92, 255), [46, 97, 234]);
-  assert.deepEqual(releaseOverviewWaveformDisplayRgb(92, 255, 31), [97, 234, 46]);
+test("surface contrast factors are literal around their real backgrounds", () => {
+  const overview = waveformSurfaceContrastRgb(
+    [200, 180, 220],
+    RELEASE_OVERVIEW_LIGHT_BACKGROUND,
+    RELEASE_OVERVIEW_CONTRAST,
+  );
+  assert.deepEqual(overview, [195, 173, 217]);
+  assert.equal(
+    RELEASE_OVERVIEW_LIGHT_BACKGROUND[0] - overview[0],
+    Math.round((RELEASE_OVERVIEW_LIGHT_BACKGROUND[0] - 200) * 1.1),
+  );
+
+  const detail = waveformSurfaceContrastRgb(
+    [200, 180, 220],
+    PERFORMANCE_DETAIL_BACKGROUND,
+    PERFORMANCE_DETAIL_CONTRAST,
+  );
+  assert.deepEqual(detail, [181, 163, 199]);
+});
+
+test("release overview preserves evidence ratios with the approved display cap", () => {
+  assert.deepEqual(releaseOverviewWaveformDisplayRgb(255, 31, 80), [213, 54, 90]);
+  assert.deepEqual(releaseOverviewWaveformDisplayRgb(31, 92, 255), [56, 101, 221]);
+  assert.deepEqual(releaseOverviewWaveformDisplayRgb(92, 255, 31), [101, 221, 56]);
 
   const softened = releaseOverviewWaveformDisplayRgb(255, 31, 31);
   assert.ok(softened[0] > softened[1] && softened[0] > softened[2]);
-  assert.ok(Math.max(...softened) >= 205, "overview should remain clear rather than pale");
+  assert.ok(Math.max(...softened) >= 200, "overview should remain clear rather than pale");
 });
 
 test("performance detail shares overview hues but keeps navigation contrast", () => {
@@ -37,6 +62,18 @@ test("performance detail shares overview hues but keeps navigation contrast", ()
 
   const neutral = performanceDetailWaveformDisplayRgb(255, 255, 255, 1);
   assert.ok(Math.min(...neutral) >= 175 && Math.max(...neutral) <= 190);
+});
+
+test("detail texture and transient evidence lift value without changing frequency identity", () => {
+  const stable = performanceDetailWaveformDisplayRgb(232, 116, 58, 0.7, 0);
+  const textured = performanceDetailWaveformDisplayRgb(255, 128, 64, 0.7, 0);
+  const drumCore = performanceDetailWaveformDisplayRgb(255, 128, 64, 0.7, 1);
+  assert.equal(stable.indexOf(Math.max(...stable)), 0);
+  assert.equal(textured.indexOf(Math.max(...textured)), 0);
+  assert.equal(drumCore.indexOf(Math.max(...drumCore)), 0);
+  assert.ok(Math.max(...textured) > Math.max(...stable));
+  assert.ok(Math.max(...drumCore) > Math.max(...textured));
+  assert.ok(Math.max(...drumCore) <= 238);
 });
 
 test("waveform palette keeps unmistakable RGB frequency identities", () => {

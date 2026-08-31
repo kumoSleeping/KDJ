@@ -7,13 +7,16 @@ use serde::Serialize;
 
 pub struct HttpClient {
     base: String,
+    auth_token: String,
     inner: Client,
 }
 
 impl HttpClient {
-    pub fn new(base_url: &str) -> Self {
+    pub fn new(base_url: &str, auth_token: &str) -> Self {
+        kdj_core::ensure_rustls_ring();
         HttpClient {
             base: base_url.trim_end_matches('/').to_string(),
+            auth_token: auth_token.to_string(),
             inner: Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
@@ -22,7 +25,12 @@ impl HttpClient {
     }
 
     pub fn get_value(&self, path: &str) -> Result<serde_json::Value> {
-        self.read(self.inner.get(self.url(path)).send())
+        self.read(
+            self.inner
+                .get(self.url(path))
+                .bearer_auth(&self.auth_token)
+                .send(),
+        )
     }
 
     pub fn get_query<T: Serialize + ?Sized>(
@@ -30,7 +38,13 @@ impl HttpClient {
         path: &str,
         query: &T,
     ) -> Result<serde_json::Value> {
-        self.read(self.inner.get(self.url(path)).query(query).send())
+        self.read(
+            self.inner
+                .get(self.url(path))
+                .bearer_auth(&self.auth_token)
+                .query(query)
+                .send(),
+        )
     }
 
     pub fn send_json<T: Serialize>(
@@ -39,15 +53,17 @@ impl HttpClient {
         path: &str,
         body: &T,
     ) -> Result<serde_json::Value> {
-        self.read(self.inner.request(method, self.url(path)).json(body).send())
+        self.read(
+            self.inner
+                .request(method, self.url(path))
+                .bearer_auth(&self.auth_token)
+                .json(body)
+                .send(),
+        )
     }
 
     pub fn post_json<T: Serialize>(&self, path: &str, body: &T) -> Result<serde_json::Value> {
         self.send_json(reqwest::Method::POST, path, body)
-    }
-
-    pub fn patch_json<T: Serialize>(&self, path: &str, body: &T) -> Result<serde_json::Value> {
-        self.send_json(reqwest::Method::PATCH, path, body)
     }
 
     pub fn delete_query<T: Serialize + ?Sized>(
@@ -55,7 +71,13 @@ impl HttpClient {
         path: &str,
         query: &T,
     ) -> Result<serde_json::Value> {
-        self.read(self.inner.delete(self.url(path)).query(query).send())
+        self.read(
+            self.inner
+                .delete(self.url(path))
+                .bearer_auth(&self.auth_token)
+                .query(query)
+                .send(),
+        )
     }
 
     fn url(&self, path: &str) -> String {

@@ -33,7 +33,8 @@ const BRAND_PATH: Partial<Record<Platform, string>> = {
 
 /**
  * 品牌色。这是它们在用户脑子里的第一识别项——形状还没看清，
- * 颜色已经说明是谁了。只在选中时上色，见 design.css 的 .kd-plat。
+ * 颜色已经说明是谁了。工具栏默认只在选中时上色；明确承担来源识别的场景
+ * 可以传 branded，让图标直接使用平台品牌色。
  */
 export const PLATFORM_BRAND: Partial<Record<Platform, string>> = {
   wyy: "#e02020",
@@ -42,18 +43,43 @@ export const PLATFORM_BRAND: Partial<Record<Platform, string>> = {
   ytm: "#ff0000",
   youtube: "#ff0000",
   bilibili: "#fb7299",
+  local: "#3b82f6",
 };
 
-export function PlatformMark({ id, size = 15 }: { id: Platform; size?: number }) {
+export function PlatformMark({
+  id,
+  size = 15,
+  branded = false,
+}: {
+  id: Platform;
+  size?: number;
+  branded?: boolean;
+}) {
+  const style = branded ? { color: PLATFORM_BRAND[id] } : undefined;
   // 本地 = 在曲库全部文件夹里搜，用和左侧树一样的文件夹标，别用磁盘。
   // 实心品牌标是 fill 路径；描边图标略加重，视觉重量才跟得上。
   if (id === "local") {
-    return <Folder size={size} strokeWidth={2.1} absoluteStrokeWidth aria-hidden="true" />;
+    return (
+      <Folder
+        size={size}
+        strokeWidth={2.1}
+        absoluteStrokeWidth
+        style={style}
+        aria-hidden="true"
+      />
+    );
   }
   const d = BRAND_PATH[id];
   if (!d) return null;
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      style={style}
+      aria-hidden="true"
+    >
       {/* evenodd：ytm 的镂空三角要靠它；单子路径品牌标不受影响 */}
       <path d={d} fillRule="evenodd" />
     </svg>

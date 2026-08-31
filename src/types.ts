@@ -6,7 +6,14 @@
 export type Platform = "wyy" | "qqm" | "soundcloud" | "ytm" | "youtube" | "bilibili" | "local";
 export type Quality = "flac" | "320" | "128";
 export type SearchKind = "song" | "playlist" | "artist" | "album" | "radio";
-export type TaskState = "queued" | "running" | "processing" | "done" | "failed" | "canceled";
+export type TaskState =
+  | "queued"
+  | "running"
+  | "processing"
+  | "paused"
+  | "done"
+  | "failed"
+  | "canceled";
 export type TaskPhase =
   | "waiting"
   | "authorizing"
@@ -38,10 +45,10 @@ export type FileDisposalMode = "keep" | "trash" | "remove";
 
 export type VideoFormat = "mp4" | "mkv" | "mov";
 export type KeyNotation = "camelot" | "traditional";
-/** Performance 双极滤波器的共振档位；后端将其映射为稳定的 DSP Q。 */
+/** 播放控制面板双极滤波器的共振档位；后端将其映射为稳定的 DSP Q。 */
 export type FilterResonance = "low" | "medium" | "high";
-/** Fixed model-free two-track separator used by Performance. */
-export type StemMode = "classical_two";
+export type AutoAnalysisMode = "light" | "full" | "paused";
+export type OnlineVideoPlayer = "platform" | "kdj";
 
 export interface Settings {
   download_dir: string;
@@ -53,16 +60,20 @@ export interface Settings {
   stream_cache_enabled: boolean;
   /** 视频在线播放的画质上限，与视频下载画质分开。 */
   video_playback_max_height: number;
+  /** 在线 YouTube 预览窗口；本地文件不受影响。 */
+  youtube_preview_player: OnlineVideoPlayer;
+  /** 在线 B 站预览窗口；本地文件不受影响。 */
+  bilibili_preview_player: OnlineVideoPlayer;
   filename_template: string;
   concurrent_downloads: number;
   auto_analyze: boolean;
-  /** 下载完成后按来源 ID 保存 LRC 到曲库目录的 `.kdj/lyrics/`。 */
+  /** 自动曲库分析的资源档位；全力仍是有余量的后台策略。 */
+  auto_analysis_mode: AutoAnalysisMode;
+  /** 旧版兼容字段；下载完成后现在始终缓存可用歌词。 */
   download_lyrics: boolean;
   write_tags_after_analyze: boolean;
   analysis_duration: number;
   theme: "light" | "dark" | "system";
-  /** 是否显示顶栏里的实验性 DJ 模式入口；全新安装默认关闭，手动开启后持久化。 */
-  experimental_dj_mode: boolean;
   soundcloud_enabled: boolean;
   netease_use_download_api: boolean;
   video_max_height: number;
@@ -85,12 +96,8 @@ export interface Settings {
   player_waveform: boolean;
   /** Performance 双极滤波器的共振强度。 */
   filter_resonance: FilterResonance;
-  /** 本地与 OneLibrary 列表里的调性表示。 */
+  /** 曲目列表里的调性表示。 */
   key_notation: KeyNotation;
-  /** KDJ 虚拟磁盘空间不足时，创建更大的镜像、迁移数据并重试。 */
-  virtual_disk_auto_grow: boolean;
-  /** 实验性 OneLibrary 入口与板块；缺省关闭，手动开启后持久化。 */
-  experimental_one_library: boolean;
   /**
    * 只读派生字段（后端 GET/PUT /api/settings 附带）：全新安装的默认下载落点
    * ——系统「下载」目录 + KDJ。「保存到」菜单里的「系统下载」项用它。
@@ -107,6 +114,55 @@ export interface StreamCacheStats {
   partial_files: number;
   partial_bytes: number;
   active_writes: number;
+}
+
+export type CacheCategory = "media" | "waveform" | "lyrics" | "basic" | "logs";
+
+export interface CacheCategoryStats {
+  files: number;
+  bytes: number;
+  items: number;
+  active: number;
+  deletable: boolean;
+  estimated: boolean;
+}
+
+export interface CacheOverview {
+  media: CacheCategoryStats;
+  waveform: CacheCategoryStats;
+  lyrics: CacheCategoryStats;
+  basic: CacheCategoryStats;
+  logs: CacheCategoryStats;
+  other: CacheCategoryStats;
+}
+
+export type ActivityLogCategory = "network" | "analysis" | "user";
+export type ActivityLogLevel = "info" | "warn" | "error";
+
+export interface ActivityLogEntry {
+  id: number;
+  timestamp: string;
+  category: ActivityLogCategory;
+  level: ActivityLogLevel;
+  action: string;
+  detail?: string;
+  target?: string;
+  status?: number;
+  duration_ms?: number;
+  count: number;
+}
+
+export interface ActivityLogOverview {
+  entries: ActivityLogEntry[];
+  network_last_minute: number;
+  network_last_hour: number;
+  excessive: boolean;
+  dropped: number;
+}
+
+export interface ActivityLogSettings {
+  /** 0 = 不按日期清理；仍受后端总容量安全上限保护。 */
+  retention_days: 0 | 1 | 7 | 14 | 30 | 90;
 }
 
 export interface Account {
@@ -212,6 +268,8 @@ export interface LyricsRequest {
 
 export interface LyricsResponse {
   lrc: string;
+  /** 网易云 YRC 逐字时间轴；缺失/空串表示只有行级 LRC。 */
+  word_lrc?: string;
   translated_lrc: string;
   romaji_lrc?: string;
   platform: Platform;
@@ -223,8 +281,16 @@ export interface LyricsResponse {
 
 export interface LocalLyricsResponse {
   lrc: string;
+  /** 网易云 YRC 逐字时间轴；旧缓存没有时为空。 */
+  word_lrc?: string;
   translated_lrc: string;
   romaji_lrc: string;
+  /** 歌词实际匹配来源，不会改变本地音频自己的来源身份。 */
+  platform?: Platform | null;
+  key?: string;
+  title?: string;
+  artist?: string;
+  score?: number;
 }
 
 export interface MergedGroup {
@@ -327,14 +393,18 @@ export interface DownloadRequest {
   analyze?: boolean | null;
   /** 下载完成后挪进这个曲库文件夹；空 = 默认下载目录。 */
   dest_dir?: string;
+  /** 忽略全局自动下载，留在队列中等待显式开始。 */
+  hold?: boolean;
 }
 
-export type DownloadTaskKind = "audio" | "video" | "vj_export";
+export type DownloadTaskKind = "audio" | "video";
 
 export interface DownloadTask {
   id: string;
   kind: DownloadTaskKind;
   platform: Platform;
+  /** 平台公开来源编号；旧后端或旧队列记录可能缺失。 */
+  source_key?: string;
   title: string;
   artist: string;
   quality: string;
@@ -352,10 +422,16 @@ export interface DownloadTask {
   dest_dir?: string;
   /** 入队时冻结的实际成品目录；默认下载也必须明确展示。 */
   output_dir?: string;
-  /** 本地下载成功后，补写 OneLibrary/USB 目标失败的独立错误。 */
-  one_library_error?: string;
   /** 仅前端：搜索结果带来的封面 URL，占位行用来避免只剩 BV 号。 */
   cover?: string;
+  /** B 站视频当前下载的分 P；旧队列记录或其它平台可能没有。 */
+  video_page?: {
+    /** 从 0 起。 */
+    index: number;
+    /** 解析前可能为 0。 */
+    count: number;
+    title: string;
+  } | null;
   created_at: number;
   updated_at: number;
 }
@@ -390,6 +466,9 @@ export interface VideoDownloadRequest {
   url?: string;
   bvid?: string;
   page_index?: number;
+  /** 已解析分 P 的展示提示；后端仍会用平台元数据核准。 */
+  page_count?: number;
+  page_title?: string;
   max_height?: number;
   audio_only?: boolean;
   transcode?: boolean;
@@ -401,22 +480,6 @@ export interface VideoDownloadRequest {
   title?: string;
   artist?: string;
   cover?: string;
-}
-
-/** 「按顺序导出 VJ」入队请求；与下载队列共用 DownloadTask。 */
-export interface VjExportRequest {
-  folder: string;
-  track_ids: number[];
-  use_in_out_points: boolean;
-  snap_nearest_beat: boolean;
-  snap_whole_bar: boolean;
-  /** 固定秒数的淡入淡出；按小节时传 0。 */
-  fade_seconds: number;
-  /** 以上一首 BPM 换算的淡入淡出小节数；固定秒数时传 0。 */
-  fade_bars: number;
-  quality: "1080p" | "720p" | "480p";
-  keep_audio: boolean;
-  unify_gain: boolean;
 }
 
 export interface StreamPlaylist {
@@ -437,6 +500,13 @@ export interface StreamPlaylistResponse {
   sources: SongSource[];
 }
 
+export interface StreamPlaylistTrackRemoveResponse {
+  platform: Exclude<Platform, "local">;
+  key: string;
+  source_key: string;
+  removed: boolean;
+}
+
 export interface Track {
   id: number;
   path: string;
@@ -455,6 +525,8 @@ export interface Track {
   bpm: number | null;
   /** 当前展示的 BPM 来自现行 V2 分析结果；旧后端缺字段时按 false。 */
   bpm_v2?: boolean;
+  /** 当前展示的 BPM 来自现行 V3 分析结果；旧后端缺字段时按 false。 */
+  bpm_v3?: boolean;
   bpm_confidence: number | null;
   first_beat: number | null;
   beat_origin?: number | null;
@@ -482,8 +554,6 @@ export interface Track {
   cue_points?: CuePoint[];
   /** 本地 Cue 是否由 KDJ 显式管理；true 时导出会把清空也同步到目标曲库。 */
   cue_points_managed?: boolean;
-  /** OneLibrary 播放快照所关联的本地曲目，用于复用歌词等本地数据。 */
-  local_track_id?: number | null;
   source_platform: string;
   source_key: string;
   analyzed_at: string | null;
@@ -586,30 +656,6 @@ export interface TrackPage {
   limit: number;
 }
 
-export interface RemovableDevice {
-  path: string;
-  name: string;
-  file_system: string;
-  total_bytes: number;
-  available_bytes: number;
-  read_only: boolean;
-  one_library_file_system: boolean;
-  has_one_library: boolean;
-  is_virtual: boolean;
-}
-
-/** 直接来自外置卷 exportLibrary.db，而不是 KDJ 本地数据库。 */
-export interface OneLibraryPlaylist {
-  device_path: string;
-  id: number;
-  seq: number;
-  name: string;
-  /** 0 = playlist，1 = folder，4 = smart list。 */
-  attribute: number;
-  parent_id: number;
-  track_count: number;
-}
-
 /** 来自 DJ 曲库标准的只读 Cue；没有 hot_cue 编号时是 Memory Cue。 */
 export interface CuePoint {
   id: number;
@@ -623,69 +669,9 @@ export interface CuePoint {
   active_loop: boolean;
 }
 
-export interface OneLibraryTrack {
-  content_id: number;
-  sequence: number;
-  /** KDJ 自己导出的曲目所关联的本地曲目 id；外来曲目为 null。 */
-  local_track_id: number | null;
-  external_modified: boolean;
-  external_update_count: number;
-  title: string;
-  artist: string;
-  album: string;
-  genre: string;
-  year: string;
-  bpm: number | null;
-  music_key: string;
-  /** 从 OneLibrary 的自由文本调名派生，旧后端缺字段时为空。 */
-  camelot: string;
-  open_key: string;
-  duration: number | null;
-  bitrate: number | null;
-  samplerate: number | null;
-  size: number;
-  rating: number;
-  comment: string;
-  /** OneLibrary 封面关联/文件变化版本，用于刷新浏览器图片缓存。 */
-  cover_version: string;
-  cue_points: CuePoint[];
-  path: string;
-  filename: string;
-}
-
-export interface OneLibraryTarget {
-  device_path: string;
-  device_name: string;
-  is_virtual: boolean;
-  playlist_id: number;
-  playlist_name: string;
-}
-
-export interface OneLibraryCapacityPlan {
-  required_bytes: number;
-  available_bytes: number;
-  sufficient: boolean;
-}
-
-export interface OneLibraryImportResult {
-  track_ids: number[];
-  errors: Record<string, string>;
-}
-
-export interface PlaylistExportResult {
-  playlist_id: number;
-  playlist_name: string;
-  device_path: string;
-  copied_tracks: number;
-  reused_tracks: number;
-  skipped_tracks: number;
-  copied_bytes: number;
-  database_path: string;
-  analysis_note: string;
-  warnings: string[];
-}
-
 export interface TrackPatch {
+  /** Manual analyzer correction; changes the library BPM without changing current playback tempo. */
+  bpm?: number;
   rating?: number;
   color?: string;
   comment?: string;
@@ -726,63 +712,22 @@ export interface AnalyzeResponseLike {
 export interface Waveform {
   track_id: number;
   duration: number;
-  /** 每一列的 0..1 幅度（柱子高度），等分整轨；二进制响应保留零拷贝 f32 view。 */
+  /** Optional bounded source-time ownership. Arrays represent only this interval, not the song. */
+  source_start?: number;
+  source_end?: number;
+  /** 每一列的 0..1 幅度；v2 二进制由 signed min/max 原地重建。 */
   amp: number[] | Float32Array;
-  /** 每一列的颜色，0..255，长度和 amp 相同。红=低频/鼓、绿=中频/人声、蓝=高频/镲。 */
+  /** 兼容上下包络；正式 detail 为对称硬柱。旧来源省略时渲染器退回 ±amp。 */
+  minimum?: number[] | Float32Array;
+  maximum?: number[] | Float32Array;
+  /** 每列 0..255 的颜色坐标：低频瞬态 / 中频周期谐波 / 高频瞬态与原频带证据融合。 */
   r: number[] | Uint8Array;
   g: number[] | Uint8Array;
   b: number[] | Uint8Array;
+  /** 非 STEM 鼓击核心柱置信度；下采样时用于保留命中柱，而不是额外涂色。 */
+  transient?: number[] | Uint8Array;
   /** 渐进生成波形中已经真实分析的列；省略表示所有列均已完成。 */
   known?: boolean[] | Uint8Array;
-}
-
-export type StemName = "vocals" | "drums" | "bass" | "other";
-
-export interface StemRuntimeStatus {
-  id: string;
-  version: string;
-  state: "ready" | "error";
-  diagnostics: StemRuntimeDiagnostics;
-}
-
-/** Actual worker observations from the current live STEM runtime. */
-export interface StemRuntimeDiagnostics {
-  runtime: string;
-  provider: string;
-  initializationMs: number | null;
-  firstBlockMs: number | null;
-  lastBlockMs: number | null;
-  p95BlockMs: number | null;
-  chunkBudgetMs: number;
-  processedChunks: number;
-  lateChunks: number;
-  outputUnderruns: number;
-  memoryErrors: number;
-  lastError: string;
-  instantAvailable: boolean;
-  instantReadyDecks: number;
-  instantPcmPreloadMs: number | null;
-  instantPcmCacheHits: number;
-  instantFirstHopMs: number | null;
-  instantLastHopMs: number | null;
-  instantP95HopMs: number | null;
-  instantLateHops: number;
-  instantFailures: number;
-  refinementDeferred: number;
-}
-
-export interface TrackStemStatus {
-  trackId: number;
-  state:
-    | "missing"
-    | "queued"
-    | "separating"
-    | "ready"
-    | "error";
-  progress: number;
-  cachePath: string;
-  duration: number;
-  error: string;
 }
 
 /** 在线缓存已实际解码出的前缀波形。`covered_seconds` 只覆盖从 0 开始的真实 PCM；
@@ -791,10 +736,12 @@ export interface StreamWaveformProgress {
   /** 后端支持当前 token 的会话波形；不表示用户开启了持久磁盘缓存。 */
   enabled: boolean;
   waveform: Waveform | null;
-  /** 完整媒体生成的高密度 Performance 波形；与整曲 overview 分开。 */
-  detail_waveform?: Waveform | null;
   covered_seconds: number;
   revision: number;
+  /** 同一份播放代理/持久缓存已经真实落盘的媒体字节。 */
+  cached_bytes?: number;
+  /** 上游声明的整轨字节数；未知时为 0。 */
+  total_bytes?: number;
   complete: boolean;
   active: boolean;
   /** 完整音频分析；旧后端缺字段时前端按尚未提供处理。 */
@@ -852,6 +799,11 @@ export interface LibraryStats {
   /** 仍需由后台渐进回填 BPM/Key v2 的曲目数。 */
   bpm_key_v2_pending?: number;
   bpm_key_v2_revision?: string;
+  /** 当前算法修订已生成 BPM/Key v3 的曲目数。 */
+  bpm_key_v3_analyzed?: number;
+  /** 仍需由后台渐进回填 BPM/Key v3 的曲目数。 */
+  bpm_key_v3_pending?: number;
+  bpm_key_v3_revision?: string;
   total_duration: number;
   total_size: number;
   /** 旧后端可能不返回；前端缺失时退回原始 1–10 能量。 */
@@ -889,6 +841,8 @@ export interface AnalyzeProgress {
   total: number;
   current: string;
   track_id: number | null;
+  /** 用户停止了这批分析；旧后端没有该字段，所以保持可选。 */
+  cancelled?: boolean;
 }
 
 export interface MaintenanceProgress {
@@ -930,31 +884,140 @@ export interface SavedLoginQr {
   location: "downloads" | "pictures" | string;
 }
 
-export interface VirtualDiskStatus {
-  supported: boolean;
-  exists: boolean;
-  mounted: boolean;
-  name: string;
-  imagePath: string;
-  mountPath: string;
-  fileSystem: string;
-  partitionScheme: string;
-  imageFormat: string;
-  protocol: string;
-  totalBytes: number;
-  /** 镜像创建时选择的容量；挂载后的 totalBytes 是扣除分区开销的卷容量。 */
-  configuredBytes: number;
-  availableBytes: number;
-  writable: boolean;
-  /** Windows 的 DiskPart 挂载/推出会显示系统 UAC；macOS hdiutil 不需要 sudo。 */
-  requiresElevation: boolean;
+export type CliInstallState =
+  | "missing"
+  | "current"
+  | "outdated"
+  | "broken"
+  | "conflict"
+  | "unsupported";
+
+export interface CliInstallStatus {
+  state: CliInstallState;
+  currentVersion: string;
+  installedVersion: string | null;
+  installPath: string;
+  /** 可直接交给 AI 使用的完整命令入口，不依赖当前进程是否刷新 PATH。 */
+  invocation: string;
 }
 
 export interface KdjBridge {
   baseUrl: string;
+  /** 每次进程启动重新生成；只用于认证本机 HTTP/WS，不得写入日志或持久化到前端。 */
+  authToken: string;
+  /** 仅能读取显式媒体端点，不能访问设置、账号或其它控制 API。 */
+  mediaToken: string;
   platform: NodeJS.Platform | string;
+  /** macOS / Windows 桌面壳里的 CLI 入口检测与用户触发安装。 */
+  cliInstallStatus?: () => Promise<CliInstallStatus>;
+  installCli?: () => Promise<CliInstallStatus>;
+  /**
+   * macOS 系统 WebKit 的独立 WebPO 运行器。远程 BotGuard 只在无 Tauri IPC、
+   * 非持久的 YouTube-origin WebView 中执行；其它平台不伪装第二条实现。
+   */
+  mintYoutubeGvsPoToken?: (options: {
+    bundle: string;
+    binding: string;
+    forceFresh: boolean;
+    userAgent: string;
+  }) => Promise<string>;
+  runYoutubePlayer?: (options: {
+    bundle: string;
+    playerUrl: string;
+    javascript: string;
+    operation: "config" | "decipher" | "transform_n";
+    value: string;
+  }) => Promise<string>;
+  /**
+   * macOS 上与主 renderer 权限完全分离的官方 YouTube 播放子视图。页面本身没有
+   * Tauri IPC；这里只暴露固定视频编号、几何位置和播放器动作。
+   */
+  youtubeEmbed?: {
+    prewarm: () => Promise<void>;
+    open: (options: {
+      videoId: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }) => Promise<void>;
+    setBounds: (options: {
+      videoId: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }) => Promise<void>;
+    status: (videoId: string) => Promise<{
+      ready: boolean;
+      playing: boolean;
+      buffering: boolean;
+      ended: boolean;
+      position: number;
+      duration: number;
+      hasError: boolean;
+    }>;
+    control: (
+      videoId: string,
+      action: "play" | "pause" | "mute" | "unmute" | "seek",
+      value?: number,
+    ) => Promise<void>;
+    close: (videoId: string) => Promise<void>;
+  };
+  /** 与主 renderer 权限分离的 B站官方播放器子视图。 */
+  bilibiliEmbed?: {
+    open: (options: {
+      bvid: string;
+      page: number;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }) => Promise<void>;
+    setBounds: (options: {
+      bvid: string;
+      page: number;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }) => Promise<void>;
+    status: (bvid: string, page: number) => Promise<{
+      ready: boolean;
+      playing: boolean;
+      buffering: boolean;
+      ended: boolean;
+      position: number;
+      duration: number;
+      hasError: boolean;
+    }>;
+    control: (
+      bvid: string,
+      page: number,
+      action: "play" | "pause" | "mute" | "unmute" | "seek",
+      value?: number,
+    ) => Promise<void>;
+    close: (bvid: string, page: number) => Promise<void>;
+  };
   openPath: (path: string) => Promise<void>;
   revealPath: (path: string) => Promise<void>;
+  /** 从曲库启动 Finder / Explorer / Android 的真文件拖动；iOS/浏览器不提供。 */
+  startFileDrag?: (options: {
+    paths: string[];
+    label: string;
+    /** 128×128 PNG 的纯 Base64；桌面系统把它用作原生拖拽预览。 */
+    dragImage?: string;
+  }) => Promise<void>;
+  /** 把公开 URL 作为系统链接拖到浏览器、聊天或其他接收链接的应用。 */
+  startLinkDrag?: (options: {
+    url: string;
+    label: string;
+    /** 普通文本接收方拿到的内容；URL 接收方始终拿到 url。 */
+    text?: string;
+    dragImage?: string;
+  }) => Promise<void>;
+  /** macOS：按“真实 PNG 在前、分享文字在后”写入两个原生剪贴板项目。 */
+  writeShareClipboard?: (options: { text: string; png: string }) => Promise<void>;
   /** 把登录二维码 PNG 写到下载（桌面）或相册（手机），返回本机路径。 */
   saveLoginQr: (options: {
     platform: string;
@@ -963,11 +1026,6 @@ export interface KdjBridge {
   }) => Promise<SavedLoginQr>;
   pickFolder: () => Promise<string | null>;
   pickFolders: () => Promise<string[]>;
-  /** 覆盖导出 CLI skill 到 Claude Code / Codex / PI / Cursor 或自选文件夹。 */
-  exportCliSkill?: (options: {
-    preset?: "cursor" | "claude" | "codex" | "pi";
-    folder?: string;
-  }) => Promise<{ version: string; path: string; overwritten: boolean }>;
   /** 安卓：媒体读取权限（READ_MEDIA_AUDIO）是否已授予；桌面恒为 true。 */
   mediaPermissionGranted: () => Promise<boolean>;
   /** 用系统浏览器开外链（Release 页等）。 */
@@ -985,15 +1043,6 @@ export interface KdjBridge {
    * 各给各的操作（安卓开 Release 页下 APK，浏览器开发布页）。
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
-  /** macOS hdiutil / Windows VHD 生命周期；其它平台为空。 */
-  virtualDisk?: null | {
-    status: () => Promise<VirtualDiskStatus>;
-    mount: (sizeGib?: number, volumeName?: string) => Promise<VirtualDiskStatus>;
-    ensureCapacity: (requiredBytes: number) => Promise<VirtualDiskStatus>;
-    grow: (sizeGib: number, volumeName: string) => Promise<VirtualDiskStatus>;
-    eject: () => Promise<VirtualDiskStatus>;
-    delete: () => Promise<VirtualDiskStatus>;
-  };
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
   /** 同步原生窗口底色，避免 macOS 拖窗时露出与页面主题不符的底层。 */
   setWindowBackground: (theme: "dark" | "light") => void;
@@ -1040,7 +1089,13 @@ export interface KdjBridge {
     duration: number;
     /** 搜词中 / 没有歌词时的兜底文案。 */
     placeholder: string;
-    lines: { time: number; text: string; secondary?: string }[];
+    lines: {
+      time: number;
+      endTime?: number;
+      text: string;
+      secondary?: string;
+      words?: { start: number; end: number; text: string }[];
+    }[];
   }) => Promise<void>);
   /**
    * Android 浏览器试听的时钟镜像。流媒体临时曲目用负 ID，不能误进本地 Rust

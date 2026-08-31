@@ -6,10 +6,13 @@ import {
   Copy,
   Download,
   FolderOpen,
+  Link2,
   ListX,
   LoaderCircle,
+  Pause,
   Play,
   RotateCcw,
+  Search,
   Undo2,
   Trash2,
   Video,
@@ -20,6 +23,16 @@ import { TableRating } from "../common/TableRating";
 import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
 import { copyText } from "../../lib/copyText";
+import { copyShareContent } from "../../lib/shareClipboard";
+import {
+  bilibiliVideoShareSearchQuery,
+  formatShareText,
+  matchedBilibiliVideoShareLink,
+  matchedTrackShareLink,
+  trackShareLink,
+  trackShareSearchQuery,
+  writeShareLinkDrag,
+} from "../../lib/shareLink";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { getBridge } from "../../lib/bridge";
@@ -32,25 +45,23 @@ import {
   dispatchTrackCoverDrop,
   dispatchTrackDeckDrop,
   dispatchTrackSamplerDrop,
+  endTrackDrag,
   finishTrackDrop,
-  isTrackDrag,
   lockTrackPointerDragScroll,
-  readTrackDragIds,
   suppressCoverClickAfterTrackDrop,
+  systemFileDragPayload,
   trackDeckDropSideAt,
   TRACK_COVER_DROP_TARGET_ATTR,
   TRACK_DECK_DROP_TARGET_ATTR,
   TRACK_DECK_SPLIT_DROP_TARGET,
   TRACK_SAMPLER_DROP_TARGET_ATTR,
   TRACK_TRASH_DROP_EVENT,
+  writeTrackDragData,
   type TrackDragDetail,
 } from "../../lib/trackDrag";
 import {
   folderDropElementAt,
-  playlistDropElementAt,
   FOLDER_DROP_PATH_ATTR,
-  PLAYLIST_DROP_DEVICE_ATTR,
-  PLAYLIST_DROP_ID_ATTR,
 } from "../../lib/folderDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
@@ -71,7 +82,6 @@ import {
   type TrackSort,
 } from "../../stores/libraryStore";
 import type { DownloadTask } from "../../types";
-import { usePlaylistStore } from "../../stores/playlistStore";
 import type { FileDisposalMode, KeyNotation, Track } from "../../types";
 import { playTrack } from "../../lib/playTrack";
 import {
@@ -85,13 +95,14 @@ import {
   type TableColumnPrefs,
   type TableColumnPrefsSchema,
 } from "../../lib/tableColumnPrefs";
-import {
-  dispatchOneLibraryCoverDrop,
-  ONE_LIBRARY_COVER_CONTENT_ATTR,
-  ONE_LIBRARY_COVER_DEVICE_ATTR,
-  ONE_LIBRARY_COVER_TARGET_ATTR,
-} from "../../lib/oneLibraryCoverDrag";
 import { ContextMenu, EmptyState, InlineNotice } from "../common";
+import { dragPreviewFromBlob, vinylDragPreview } from "../../lib/dragPreview";
+import { usePlaybackPrefs } from "../../lib/playbackPrefs";
+import { useSharePrefs } from "../../lib/sharePrefs";
+import { requestExploreSearch } from "../../lib/vjSearch";
+import { isPlatformEnabled } from "../../lib/enabledPlatforms";
+import { normalizeEnabledPlatforms, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
+import { removeLocalStorage } from "../../lib/storageWrite";
 
 /** @deprecated 请从 `lib/playTrack` 引用；保留 re-export 以免旧 import 断掉。 */
 export { PLAY_EVENT, playTrack, parsePlayRequest, type PlayRequest } from "../../lib/playTrack";
@@ -265,9 +276,6 @@ export interface TrackTableProps {
   onSelect(id: number, mode: SelectMode, clickCount?: number): void;
   onSort(sort: TrackSort): void;
   onScrollEnd(): void;
-  /** 在单个文件夹视图里才能行内拖动换位（顺序写进该文件夹的清单）。 */
-  reorderable?: boolean;
-  onReorder?(ids: number[], targetId: number, before: boolean): void;
 }
 
 /**
@@ -281,10 +289,8 @@ export interface TrackTableProps {
  */
 function TrackCoverThumb({
   track,
-  onTrackDragStart,
 }: {
   track: Track;
-  onTrackDragStart?: (event: React.DragEvent<HTMLSpanElement>) => void;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [videoCover, setVideoCover] = useState("");
@@ -332,12 +338,7 @@ function TrackCoverThumb({
   }, [attempt, isVideo, track.id, track.modified_at]);
 
   return (
-    <span
-      className="kd-thumb"
-      draggable={Boolean(onTrackDragStart)}
-      onDragStart={onTrackDragStart}
-      title={onTrackDragStart ? "拖动封面移动所选曲目" : undefined}
-    >
+    <span className="kd-thumb" draggable={false}>
       {isVideo ? (
         videoCover ? <img key={videoCover} src={videoCover} alt="" draggable={false} /> : null
       ) : (
@@ -347,13 +348,81 @@ function TrackCoverThumb({
   );
 }
 
+const systemDragPreviewCache = new Map<string, Promise<string>>();
+
+/**
+ * 系统拖拽的图片必须在离开 WebView 前准备好。指针按下时就从本地封面路由预取，
+ * 并裁成固定方形，避免高分辨率封面在 Finder / Explorer 下变成巨大的拖拽浮图。
+ */
+function systemDragPreview(track: Track): Promise<string> {
+  const cacheKey = `${track.id}:${track.modified_at}`;
+  const cached = systemDragPreviewCache.get(cacheKey);
+  if (cached) return cached;
+  const pending = api.coverBlob(track.id)
+    .then(dragPreviewFromBlob)
+    .catch(() => vinylDragPreview());
+  systemDragPreviewCache.set(cacheKey, pending);
+  if (systemDragPreviewCache.size > 96) {
+    const oldest = systemDragPreviewCache.keys().next().value;
+    if (oldest) systemDragPreviewCache.delete(oldest);
+  }
+  return pending;
+}
+
+const localTrackShareLinkCache = new Map<string, Promise<string | null>>();
+const resolvedLocalTrackShareLinks = new Map<string, string | null>();
+
+function localTrackShareCacheKey(track: Track): string {
+  const query = isVideoTrack(track.format)
+    ? bilibiliVideoShareSearchQuery(track)
+    : trackShareSearchQuery(track);
+  return `${track.id}:${track.modified_at}:${query}`;
+}
+
+/** 旧本地曲目走严格同名匹配；B 站多 P 视频按 KDJ 固定文件名还原父标题。 */
+function resolveLocalTrackShareLink(track: Track): Promise<string | null> {
+  const direct = trackShareLink(track);
+  if (direct) return Promise.resolve(direct);
+  const video = isVideoTrack(track.format);
+  const query = video
+    ? bilibiliVideoShareSearchQuery(track)
+    : trackShareSearchQuery(track);
+  if (!query) return Promise.resolve(null);
+  const cacheKey = localTrackShareCacheKey(track);
+  if (resolvedLocalTrackShareLinks.has(cacheKey)) {
+    return Promise.resolve(resolvedLocalTrackShareLinks.get(cacheKey) ?? null);
+  }
+  const cached = localTrackShareLinkCache.get(cacheKey);
+  if (cached) return cached;
+  const pending = api.search({
+    query,
+    platforms: video ? ["bilibili"] : ["wyy", "qqm"],
+    limit: 8,
+    merge: false,
+    kind: "song",
+  }).then((response) => video
+    ? matchedBilibiliVideoShareLink(track, response.per_platform.bilibili ?? [])
+    : matchedTrackShareLink(
+      track,
+      response.groups.flatMap((group) => group.sources),
+    )).catch(() => null).then((link) => {
+    resolvedLocalTrackShareLinks.set(cacheKey, link);
+    return link;
+  });
+  localTrackShareLinkCache.set(cacheKey, pending);
+  if (localTrackShareLinkCache.size > 96) {
+    const oldest = localTrackShareLinkCache.keys().next().value;
+    if (oldest) localTrackShareLinkCache.delete(oldest);
+  }
+  return pending;
+}
+
 /** 每列的单元格。列可以被拖排 / 隐藏（见 COLUMN_PREFS_KEY），所以按 key 取，不写死顺序。 */
 function trackCell(
   track: Track,
   key: string,
   keyNotation: KeyNotation,
   selectionControl?: React.ReactNode,
-  onTrackDragStart?: (event: React.DragEvent<HTMLSpanElement>) => void,
   onRate?: (rating: number) => void,
 ) {
   switch (key) {
@@ -363,7 +432,7 @@ function trackCell(
           {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          <TrackCoverThumb track={track} onTrackDragStart={onTrackDragStart} />
+          <TrackCoverThumb track={track} />
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -440,23 +509,26 @@ function sameFolderPath(a: string, b: string): boolean {
   return Boolean(a) && norm(a) === norm(b);
 }
 
-const PENDING_STATES = new Set(["queued", "running", "processing", "failed"]);
+const PENDING_STATES = new Set(["queued", "running", "processing", "paused", "failed"]);
 
 /**
  * 虚拟滚动的兜底行高（= --kd-row-h）。真实行高以渲染出来的第一行为准
  * （见 TrackTable 里的量测 effect），这里只是首帧还没量到时的占位。
  */
 const FALLBACK_ROW_H = 36;
+/** 原生拖放结束回调早于 WebView 清掉边缘自动滚动，留一小段静默期吞掉尾帧。 */
+const EXTERNAL_DRAG_SCROLL_SETTLE_MS = 240;
 
 function pendingLabel(task: DownloadTask): string {
   if (task.state === "running") {
     const pct = Math.round(Math.max(0, Math.min(1, task.progress)) * 100);
-    const action = task.kind === "vj_export" ? "导出中" : "下载中";
+    const action = "下载中";
     return pct > 0 ? `${action} ${pct}%` : action;
   }
   if (task.state === "processing") {
-    return task.kind === "vj_export" ? "正在生成 VJ" : "正在生成文件";
+    return "正在生成文件";
   }
+  if (task.state === "paused") return "已暂停";
   if (task.state === "failed") return task.error ? `失败：${task.error}` : "下载失败";
   if (task.state === "done") return "入库中";
   return "待下载";
@@ -467,6 +539,8 @@ function PendingStateMark({ task }: { task: DownloadTask }) {
   const icon =
     task.state === "running" || task.state === "processing" ? (
       <LoaderCircle size={12} className="kd-spin" />
+    ) : task.state === "paused" ? (
+      <Pause size={12} />
     ) : task.state === "failed" ? (
       <CircleAlert size={12} />
     ) : task.state === "done" ? (
@@ -514,18 +588,33 @@ export function TrackTable({
   onSelect,
   onSort,
   onScrollEnd,
-  reorderable = false,
-  onReorder,
   shortcutActive,
 }: TrackTableProps) {
   const loadingMore = useLibraryStore((state) => state.loadingMore);
-  const keyNotation = useAppStore((state) => state.settings?.key_notation ?? "camelot");
+  const settings = useAppStore((state) => state.settings);
+  const keyNotation = settings?.key_notation ?? "camelot";
   const filterFolder = useLibraryStore((state) => state.filter.folder);
   const filterQuery = useLibraryStore((state) => state.filter.q);
   const removeTracks = useLibraryStore((state) => state.removeTracks);
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
+  const localExternalDragMode = usePlaybackPrefs((state) => state.localExternalDragMode);
+  const shareContentMode = useSharePrefs((state) => state.contentMode);
+  const selectedSameNamePlatforms = normalizeSearchPlatforms(settings?.search_platforms)
+    .filter((platform) => isPlatformEnabled(settings, platform));
+  const sameNameSearchPlatforms = selectedSameNamePlatforms.length > 0
+    ? selectedSameNamePlatforms
+    : normalizeEnabledPlatforms(settings?.enabled_platforms);
+  const formatTrackShareText = (track: Track, link: string) => formatShareText(
+    link,
+    { title: track.title || track.filename, artists: track.artist, album: track.album },
+    shareContentMode,
+  );
+  const htmlExternalLinkDrag =
+    localExternalDragMode === "share_link"
+    && !window.kdj?.startLinkDrag
+    && window.kdj?.platform === "win32";
   const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
   const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
   const undo = useLibraryStore((state) => state.undo);
@@ -541,9 +630,15 @@ export function TrackTable({
   const selected = new Set(selectedIds);
   const pressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef<number | null>(null);
+  /**
+   * The second click is the earliest reliable double-click edge. Submit playback there, before
+   * selection opens/re-renders the detail pane; the following `dblclick` remains a fallback for
+   * synthetic/accessibility dispatches that did not emit the preceding click pair.
+   */
+  const doubleClickPlaybackRef = useRef<{ trackId: number; at: number } | null>(null);
   const pointerDragCleanupRef = useRef<(() => void) | null>(null);
-  /** 行内拖动的插入位置指示：悬停行上半 = 插到它前面。 */
-  const [drop, setDrop] = useState<{ id: number; before: boolean } | null>(null);
+  const htmlExternalDragScrollUnlockRef = useRef<((settleMs?: number) => void) | null>(null);
+  const suppressContextMenuUntilRef = useRef(0);
 
   // Esc 的语义是取消这一轮显式批选：菜单、复选框和选区一起收掉。
   // 全选走 useLibraryClipboard（Cmd/Ctrl+A），不挂在「仅多选时」——
@@ -569,6 +664,11 @@ export function TrackTable({
   const backendPlatform = useAppStore((state) => state.health?.platform ?? "");
   const trashSupported = backendPlatform !== "android" && backendPlatform !== "ios";
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
+  const [menuShareResolution, setMenuShareResolution] = useState<{
+    cacheKey: string;
+    link: string | null;
+    loading: boolean;
+  } | null>(null);
   const [pendingMenu, setPendingMenu] = useState<{
     x: number;
     y: number;
@@ -582,11 +682,121 @@ export function TrackTable({
   useEffect(
     () => () => {
       pointerDragCleanupRef.current?.();
+      htmlExternalDragScrollUnlockRef.current?.();
       resizeObserverRef.current?.disconnect();
       if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
     },
     [],
   );
+
+  /** 触屏长按整行后启动系统文件拖动；明显纵向移动时优先让列表滚动。 */
+  const beginTrackSystemFileDrag = (
+    event: React.PointerEvent<HTMLTableRowElement>,
+    track: Track,
+  ): boolean => {
+    const startFileDrag = window.kdj?.startFileDrag;
+    const startLinkDrag = window.kdj?.startLinkDrag;
+    const canStart = localExternalDragMode === "share_link" ? startLinkDrag : startFileDrag;
+    if (!canStart || event.button !== 0 || event.pointerType === "mouse") return false;
+    if ((event.target as HTMLElement).closest("button, input, select, textarea, a, label")) return false;
+
+    pointerDragCleanupRef.current?.();
+    const sourceRow = event.currentTarget;
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const sourceScroller = sourceRow.closest<HTMLElement>(".kd-scroll");
+    const sourceScrollTop = sourceScroller?.scrollTop ?? 0;
+    const sourceScrollLeft = sourceScroller?.scrollLeft ?? 0;
+    const dragImage = systemDragPreview(track);
+    const shareLink = localExternalDragMode === "share_link"
+      ? resolveLocalTrackShareLink(track)
+      : Promise.resolve<string | null>(null);
+    let timer: number | null = null;
+    let launched = false;
+
+    try {
+      sourceRow.setPointerCapture(pointerId);
+    } catch {
+      // WebView 已取消指针时，window 监听仍会完成清理。
+    }
+
+    const cleanup = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", onEnd, true);
+      window.removeEventListener("pointercancel", onEnd, true);
+      try {
+        if (sourceRow.hasPointerCapture(pointerId)) sourceRow.releasePointerCapture(pointerId);
+      } catch {
+        // 原生拖动接管触摸序列后 capture 会自动释放。
+      }
+      if (pointerDragCleanupRef.current === cleanup) pointerDragCleanupRef.current = null;
+    };
+    const launch = () => {
+      if (launched) return;
+      launched = true;
+      const payload = systemFileDragPayload(tracks, selectedIds, track);
+      cleanup();
+      clearTextSelection();
+      cancelPress();
+      suppressClickRef.current = track.id;
+      suppressContextMenuUntilRef.current = Date.now() + 1_000;
+      if (!selected.has(track.id)) onSelect(track.id, "replace");
+      if (localExternalDragMode === "file" && payload.paths.length === 0) {
+        setNotice("这个曲目没有可拖出的本地文件");
+        return;
+      }
+      const releaseScroll = lockTrackPointerDragScroll(
+        sourceScroller,
+        sourceScrollTop,
+        sourceScrollLeft,
+      );
+      if (localExternalDragMode === "share_link") setNotice("正在查找分享链接…");
+      void Promise.all([dragImage, shareLink])
+        .then(async ([preview, link]) => {
+          if (localExternalDragMode === "share_link") {
+            if (!link || !startLinkDrag) {
+              setNotice("没有找到可确认的歌曲分享链接");
+              return;
+            }
+            await startLinkDrag({
+              url: link,
+              label: track.title || track.filename,
+              text: formatTrackShareText(track, link),
+              dragImage: preview || undefined,
+            });
+            setNotice("");
+            return;
+          }
+          if (!startFileDrag) return;
+          await startFileDrag({ ...payload, dragImage: preview || undefined });
+        })
+        .catch((error: unknown) => {
+          setNotice(`无法拖出${localExternalDragMode === "share_link" ? "分享链接" : "文件"}：${(error as Error).message}`);
+        })
+        .finally(() => releaseScroll(EXTERNAL_DRAG_SCROLL_SETTLE_MS));
+    };
+    const onMove = (move: PointerEvent) => {
+      if (move.pointerId !== pointerId) return;
+      const distance = Math.hypot(move.clientX - startX, move.clientY - startY);
+      if (distance > 10) {
+        // 手指明显移动就是滚列表，不抢成系统拖动。
+        cleanup();
+      }
+    };
+    const onEnd = (end: PointerEvent) => {
+      if (end.pointerId === pointerId) cleanup();
+    };
+
+    pointerDragCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", onMove, { capture: true, passive: false });
+    window.addEventListener("pointerup", onEnd, true);
+    window.addEventListener("pointercancel", onEnd, true);
+    timer = window.setTimeout(launch, 420);
+    return true;
+  };
 
   /**
    * 本地曲目不用 WebKit 的原生 draggable：它经常把按住移动解释成框选/多选，
@@ -595,12 +805,25 @@ export function TrackTable({
   const beginTrackPointerDrag = (event: React.PointerEvent<HTMLTableRowElement>, track: Track) => {
     if (event.pointerType !== "mouse" || event.button !== 0) return;
     if ((event.target as HTMLElement).closest("button, input, select, textarea, a, label")) return;
+    // Windows 的 URL 数据拖放交给 WebView2 原生 HTML5 链路；文件与 macOS 链接仍用
+    // pointer 状态机，保证应用内的文件夹 / Deck / 封面落点不受影响。
+    if (
+      localExternalDragMode === "share_link"
+      && !window.kdj?.startLinkDrag
+      && window.kdj?.platform === "win32"
+    ) return;
 
     pointerDragCleanupRef.current?.();
     const startX = event.clientX;
     const startY = event.clientY;
     const pointerId = event.pointerId;
     const ids = selected.has(track.id) ? [...selectedIds] : [track.id];
+    const startFileDrag = window.kdj?.startFileDrag;
+    const startLinkDrag = window.kdj?.startLinkDrag;
+    const dragImage = systemDragPreview(track);
+    const shareLink = localExternalDragMode === "share_link"
+      ? resolveLocalTrackShareLink(track)
+      : Promise.resolve<string | null>(null);
     const sourceRow = event.currentTarget;
     const sourceScroller = sourceRow.closest<HTMLElement>(".kd-scroll");
     const sourceScrollTop = sourceScroller?.scrollTop ?? 0;
@@ -609,7 +832,7 @@ export function TrackTable({
     sourceRow.style.userSelect = "none";
     let dragging = false;
     let ghost: HTMLDivElement | null = null;
-    let unlockScroll: () => void = () => undefined;
+    let unlockScroll: (settleMs?: number) => void = () => undefined;
 
     try {
       sourceRow.setPointerCapture(pointerId);
@@ -632,11 +855,6 @@ export function TrackTable({
       const folder = folderDropElementAt(x, y);
       if (folder) {
         folder.setAttribute("data-kd-pointer-track-over", "folder");
-        return;
-      }
-      const playlist = playlistDropElementAt(x, y);
-      if (playlist) {
-        playlist.setAttribute("data-kd-pointer-track-over", "playlist");
         return;
       }
       const splitDeck = Array.from(
@@ -674,11 +892,6 @@ export function TrackTable({
         sampler.setAttribute("data-kd-pointer-track-over", "sampler");
         return;
       }
-      const oneLibraryCover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
-      if (oneLibraryCover) {
-        oneLibraryCover.setAttribute("data-kd-pointer-track-over", "cover");
-        return;
-      }
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
       if (trash) {
         trash.setAttribute("data-kd-pointer-track-over", "trash");
@@ -687,22 +900,18 @@ export function TrackTable({
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
       if (cover) {
         cover.setAttribute("data-kd-pointer-track-over", "cover");
-        return;
       }
-      if (!reorderable) return;
-      const row = hit?.closest<HTMLElement>("tr[data-kd-track-id]");
-      if (!row) return;
-      const rect = row.getBoundingClientRect();
-      row.setAttribute("data-kd-pointer-track-over", y < rect.top + rect.height / 2 ? "before" : "after");
     };
-    const cleanup = () => {
+    const cleanup = (preserveScrollLock = false) => {
       window.removeEventListener("pointermove", onMove, true);
       window.removeEventListener("pointerup", onUp, true);
       window.removeEventListener("pointercancel", onCancel, true);
       window.removeEventListener("wheel", blockDragScroll, true);
       clearTargets();
-      unlockScroll();
-      unlockScroll = () => undefined;
+      if (!preserveScrollLock) {
+        unlockScroll();
+        unlockScroll = () => undefined;
+      }
       ghost?.remove();
       ghost = null;
       sourceRow.style.userSelect = previousUserSelect;
@@ -737,12 +946,58 @@ export function TrackTable({
       ghost.style.transform = `translate3d(${x + 12}px, ${y + 12}px, 0)`;
       paintTarget(x, y);
     };
+    const launchSystemExternalDrag = () => {
+      if (localExternalDragMode === "share_link" ? !startLinkDrag : !startFileDrag) return false;
+      const payload = systemFileDragPayload(tracks, selectedIds, track);
+      if (localExternalDragMode === "file" && payload.paths.length === 0) return false;
+      const releaseScroll = unlockScroll;
+      unlockScroll = () => undefined;
+      cleanup(true);
+      if (dragging) finishTrackDrop();
+      suppressClickRef.current = track.id;
+      suppressContextMenuUntilRef.current = Date.now() + 1_000;
+      if (localExternalDragMode === "share_link") setNotice("正在查找分享链接…");
+      void Promise.all([dragImage, shareLink])
+        .then(async ([preview, link]) => {
+          if (localExternalDragMode === "share_link") {
+            if (!link || !startLinkDrag) {
+              setNotice("没有找到可确认的歌曲分享链接");
+              return;
+            }
+            await startLinkDrag({
+              url: link,
+              label: track.title || track.filename,
+              text: formatTrackShareText(track, link),
+              dragImage: preview || undefined,
+            });
+            setNotice("");
+            return;
+          }
+          if (!startFileDrag) return;
+          await startFileDrag({ ...payload, dragImage: preview || undefined });
+        })
+        .catch((error: unknown) => {
+          setNotice(`无法拖出${localExternalDragMode === "share_link" ? "分享链接" : "文件"}：${(error as Error).message}`);
+        })
+        .finally(() => releaseScroll(EXTERNAL_DRAG_SCROLL_SETTLE_MS));
+      return true;
+    };
     const onMove = (move: PointerEvent) => {
       if (move.pointerId !== pointerId) return;
       const distance = Math.hypot(move.clientX - startX, move.clientY - startY);
       if (!dragging && distance < 5) return;
       move.preventDefault();
       if (!dragging) activate(move.clientX, move.clientY);
+      // 窗口内继续沿用 KDJ 的 Deck / 文件夹 / 废纸篓等落点；指针越过应用边缘时，
+      // 无缝把同一批真实文件交给 Finder / Explorer。这样整行都是拖动源，也不牺牲内部拖放。
+      // 在真正离开 WebView 前几像素就接管；部分系统离窗后不会再派发 pointermove。
+      const edgeThreshold = 6;
+      const outsideWindow =
+        move.clientX <= edgeThreshold
+        || move.clientY <= edgeThreshold
+        || move.clientX >= window.innerWidth - edgeThreshold
+        || move.clientY >= window.innerHeight - edgeThreshold;
+      if (outsideWindow && launchSystemExternalDrag()) return;
       ghost?.style.setProperty("transform", `translate3d(${move.clientX + 12}px, ${move.clientY + 12}px, 0)`);
       paintTarget(move.clientX, move.clientY);
     };
@@ -750,21 +1005,12 @@ export function TrackTable({
       if (up.pointerId !== pointerId) return;
       const folder = folderDropElementAt(up.clientX, up.clientY);
       const hit = hitAt(up.clientX, up.clientY);
-      const playlist = playlistDropElementAt(up.clientX, up.clientY);
       const deckSide = trackDeckDropSideAt(up.clientX, up.clientY);
       const sampler = hit?.closest<HTMLElement>(`[${TRACK_SAMPLER_DROP_TARGET_ATTR}]`);
       const samplerSlot = sampler ? Number(sampler.getAttribute(TRACK_SAMPLER_DROP_TARGET_ATTR)) : NaN;
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
-      const oneLibraryCover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
-      const row = reorderable ? hit?.closest<HTMLElement>("tr[data-kd-track-id]") : null;
-      const rowEdge = row?.getAttribute("data-kd-pointer-track-over");
       const coverTrackId = cover ? Number(cover.dataset.kdTrackId) : NaN;
-      const oneLibraryCoverContentId = oneLibraryCover
-        ? Number(oneLibraryCover.getAttribute(ONE_LIBRARY_COVER_CONTENT_ATTR))
-        : NaN;
-      const oneLibraryCoverDevice =
-        oneLibraryCover?.getAttribute(ONE_LIBRARY_COVER_DEVICE_ATTR)?.trim() ?? "";
       cleanup();
       if (!dragging) return;
       up.preventDefault();
@@ -799,41 +1045,10 @@ export function TrackTable({
           .catch((error: unknown) => setNotice(`操作失败：${(error as Error).message}`));
         return;
       }
-      if (playlist) {
-        const playlistId = Number(playlist.getAttribute(PLAYLIST_DROP_ID_ATTR));
-        const devicePath = playlist.getAttribute(PLAYLIST_DROP_DEVICE_ATTR)?.trim() ?? "";
-        const claimed = claimActiveTrackDragIds();
-        if (!devicePath || !Number.isFinite(playlistId) || claimed.length === 0) return;
-        void usePlaylistStore
-          .getState()
-          .addTracks(devicePath, playlistId, claimed)
-          .then((result) => {
-            // 全成功时目标列表的数量/内容就是回执，不把成功句子塞进“出错”浮条。
-            if (result.skipped_tracks > 0) {
-              setNotice(`有 ${result.skipped_tracks} 首未写入 OneLibrary`);
-            }
-          })
-          .catch((error: unknown) => setNotice(`写入 OneLibrary 失败：${(error as Error).message}`));
-        return;
-      }
       if (trash) {
         window.dispatchEvent(
           new CustomEvent<TrackDragDetail>(TRACK_TRASH_DROP_EVENT, { detail: { ids } }),
         );
-        finishTrackDrop();
-        return;
-      }
-      if (
-        oneLibraryCover
-        && oneLibraryCoverDevice
-        && Number.isFinite(oneLibraryCoverContentId)
-      ) {
-        suppressCoverClickAfterTrackDrop();
-        dispatchOneLibraryCoverDrop({
-          source: { kind: "local", ids },
-          targetDevicePath: oneLibraryCoverDevice,
-          targetContentId: oneLibraryCoverContentId,
-        });
         finishTrackDrop();
         return;
       }
@@ -842,14 +1057,6 @@ export function TrackTable({
         suppressCoverClickAfterTrackDrop();
         dispatchTrackCoverDrop(ids, coverTrackId);
         finishTrackDrop();
-        return;
-      }
-      if (row && (rowEdge === "before" || rowEdge === "after")) {
-        const targetId = Number(row.dataset.kdTrackId);
-        finishTrackDrop();
-        if (Number.isFinite(targetId) && !ids.includes(targetId)) {
-          onReorder?.(ids, targetId, rowEdge === "before");
-        }
         return;
       }
       finishTrackDrop();
@@ -882,12 +1089,54 @@ export function TrackTable({
   // 菜单开合都退膛：残留的"已确认"状态比误删只差一次点击
   useEffect(() => setArmed(false), [rowMenu]);
 
+  // 老版本入库的 B 站视频没有 BV 号。菜单打开时先严格找回，用户真正点击复制时
+  // 链接已经就绪，仍处在一次明确的复制手势里。
+  useEffect(() => {
+    setMenuShareResolution(null);
+    if (
+      !rowMenu
+      || trackShareLink(rowMenu.track)
+      || !isVideoTrack(rowMenu.track.format)
+      || !bilibiliVideoShareSearchQuery(rowMenu.track)
+    ) {
+      return;
+    }
+    let active = true;
+    const cacheKey = localTrackShareCacheKey(rowMenu.track);
+    setMenuShareResolution({ cacheKey, link: null, loading: true });
+    void resolveLocalTrackShareLink(rowMenu.track).then((link) => {
+      if (active) setMenuShareResolution({ cacheKey, link, loading: false });
+    });
+    return () => {
+      active = false;
+    };
+  }, [rowMenu]);
+
   /** 菜单操作作用的曲目：右键落在选区里 = 整批，落在选区外的行 = 只有它。 */
   const menuIds = rowMenu
     ? selected.has(rowMenu.track.id)
       ? selectedIds
       : [rowMenu.track.id]
     : [];
+  const rowShareCacheKey = rowMenu ? localTrackShareCacheKey(rowMenu.track) : "";
+  const directRowShareLink = rowMenu ? trackShareLink(rowMenu.track) : null;
+  const videoShareResolution =
+    rowMenu && menuShareResolution?.cacheKey === rowShareCacheKey
+      ? menuShareResolution
+      : null;
+  const rowShareLink = directRowShareLink ?? videoShareResolution?.link ?? null;
+  const rowSameNameQuery = rowMenu && !isVideoTrack(rowMenu.track.format)
+    ? trackShareSearchQuery(rowMenu.track)
+    : "";
+  const copyTrackShareLink = async (track: Track, link: string | null) => {
+    setRowMenu(null);
+    if (!link) return;
+    await copyShareContent(
+      formatTrackShareText(track, link),
+      shareContentMode,
+      () => api.coverBlob(track.id),
+    );
+  };
   const playFromTable = (track: Track) => {
     playTrack(track);
   };
@@ -985,11 +1234,8 @@ export function TrackTable({
     }
   }, []);
   // centerSelected 挂在 [] 上，靠 ref 拿最新值，不为它重挂全局事件
-  const tracksRef = useRef(tracks);
   const selectedIdRef = useRef(selectedId);
   const pendingCountRef = useRef(0);
-  const onReorderRef = useRef(onReorder);
-  onReorderRef.current = onReorder;
   useEffect(() => {
     const scrollTrackIntoCenter = (trackId: number | null | undefined, attemptsLeft = 40) => {
       const id = trackId ?? selectedIdRef.current;
@@ -1181,57 +1427,8 @@ export function TrackTable({
    * 所以只渲染视口附近的一小段，上下各垫一根占位行把总高度撑住——
    * 滚动条位置、行序号、拖放落点都和全量渲染时一致。
    */
-  tracksRef.current = tracks;
   selectedIdRef.current = selectedId;
   pendingCountRef.current = pendingDownloads.length;
-
-  // ↑↓：在可手排的文件夹里，按「当前列表顺序」把选中曲目上移/下移一格。
-  // 捕获阶段先于播放器音量快捷键，避免一边换位一边改音量。
-  // 不可手排（全部曲目 / 深目录）时不接管，↑↓ 仍归音量。
-  useEffect(() => {
-    if (!reorderable) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      if (isEditable(event.target)) return;
-      if ((event.target as HTMLElement | null)?.closest?.('[role="menu"]')) return;
-      const up = event.key === "ArrowUp";
-      const down = event.key === "ArrowDown";
-      if (!up && !down) return;
-      const reorder = onReorderRef.current;
-      if (!reorder) return;
-
-      const list = tracksRef.current;
-      const selectedSet = new Set(useLibraryStore.getState().selectedIds);
-      const ordered = list.filter((track) => selectedSet.has(track.id));
-      if (ordered.length === 0) return;
-
-      const firstIndex = list.findIndex((track) => track.id === ordered[0]!.id);
-      const lastIndex = list.findIndex((track) => track.id === ordered[ordered.length - 1]!.id);
-      if (firstIndex < 0 || lastIndex < 0) return;
-
-      if (up) {
-        event.preventDefault();
-        if (firstIndex === 0) return;
-        reorder(
-          ordered.map((track) => track.id),
-          list[firstIndex - 1]!.id,
-          true,
-        );
-        return;
-      }
-
-      event.preventDefault();
-      if (lastIndex >= list.length - 1) return;
-      reorder(
-        ordered.map((track) => track.id),
-        list[lastIndex + 1]!.id,
-        false,
-      );
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [reorderable]);
 
   // 行高以真实渲染出来的第一行为准（字号/主题变了它才变），不靠猜。
   useEffect(() => {
@@ -1480,7 +1677,7 @@ export function TrackTable({
                       />
                     ) : null}
                   </span>
-                  {(task.kind === "video" || task.kind === "vj_export") && (
+                  {task.kind === "video" && (
                     <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
                       <Video size={11} aria-hidden="true" />
                     </span>
@@ -1493,7 +1690,7 @@ export function TrackTable({
                   ) : null}
                   {showFormat ? (
                     <span className="kd-pending-side kd-mono kd-muted">
-                      {task.kind === "video" || task.kind === "vj_export" ? "视频" : task.quality || DASH}
+                      {task.kind === "video" ? "视频" : task.quality || DASH}
                     </span>
                   ) : null}
                 </span>
@@ -1515,10 +1712,42 @@ export function TrackTable({
               aria-selected={selected.has(track.id)}
               data-kd-track-id={track.id}
               data-focus={track.id === selectedId ? "true" : undefined}
-              data-drop={drop?.id === track.id ? (drop.before ? "before" : "after") : undefined}
               data-selecting={selectionMode ? "true" : undefined}
-              // 曲目移动走 pointer 状态机，不再把“框选文字还是原生拖动”交给 WKWebView 猜。
-              draggable={false}
+              // macOS 与文件外拖走 pointer 状态机；Windows 分享链接用 WebView2 原生
+              // text/uri-list，才能让浏览器、聊天等外部应用直接接住 URL。
+              draggable={htmlExternalLinkDrag}
+              onDragStart={htmlExternalLinkDrag ? (event) => {
+                const sourceScroller = event.currentTarget.closest<HTMLElement>(".kd-scroll");
+                htmlExternalDragScrollUnlockRef.current?.();
+                htmlExternalDragScrollUnlockRef.current = lockTrackPointerDragScroll(
+                  sourceScroller,
+                  sourceScroller?.scrollTop ?? 0,
+                  sourceScroller?.scrollLeft ?? 0,
+                );
+                const link = trackShareLink(track)
+                  ?? resolvedLocalTrackShareLinks.get(localTrackShareCacheKey(track))
+                  ?? null;
+                if (!link) {
+                  event.preventDefault();
+                  htmlExternalDragScrollUnlockRef.current?.();
+                  htmlExternalDragScrollUnlockRef.current = null;
+                  setNotice("正在查找分享链接，找到后请再拖一次");
+                  void resolveLocalTrackShareLink(track).then((resolved) => {
+                    setNotice(resolved ? "分享链接已找到，可以再次拖出" : "没有找到可确认的歌曲分享链接");
+                  });
+                  return;
+                }
+                const ids = selected.has(track.id) ? [...selectedIds] : [track.id];
+                writeTrackDragData(event.dataTransfer, ids);
+                writeShareLinkDrag(event.dataTransfer, link, event.currentTarget, {
+                  plainText: formatTrackShareText(track, link),
+                });
+              } : undefined}
+              onDragEnd={htmlExternalLinkDrag ? () => {
+                endTrackDrag();
+                htmlExternalDragScrollUnlockRef.current?.(EXTERNAL_DRAG_SCROLL_SETTLE_MS);
+                htmlExternalDragScrollUnlockRef.current = null;
+              } : undefined}
               onClick={(event) => {
                 if (hasTextSelectionWithin(event.currentTarget)) return;
                 if (suppressClickRef.current === track.id) {
@@ -1536,6 +1765,12 @@ export function TrackTable({
                 // 否则移动端会感觉点歌迟钝。键盘触发的 detail=0 不受影响。
                 if (playClick === "single" && event.detail > 1) return;
                 const mode = selectMode(event);
+                if (playClick === "double" && event.detail === 2 && mode === "replace") {
+                  // `click(detail=2)` precedes `dblclick`. Send the audio intent first so opening
+                  // TrackDetail cannot occupy the main thread before the native Load is queued.
+                  doubleClickPlaybackRef.current = { trackId: track.id, at: performance.now() };
+                  playFromTable(track);
+                }
                 onSelect(track.id, mode, event.detail);
                 // 带修饰键的多选不算——那是在攒选区。
                 if (mode !== "replace") return;
@@ -1546,6 +1781,11 @@ export function TrackTable({
                 }
               }}
               onPointerDown={(event) => {
+                if (htmlExternalLinkDrag) {
+                  void resolveLocalTrackShareLink(track);
+                  return;
+                }
+                if (beginTrackSystemFileDrag(event, track)) return;
                 if (event.pointerType === "mouse") {
                   beginTrackPointerDrag(event, track);
                 } else {
@@ -1556,52 +1796,25 @@ export function TrackTable({
               onPointerCancel={cancelPress}
               onPointerLeave={cancelPress}
               onDoubleClick={() => {
-                if (!selectionMode && playClick === "double") playFromTable(track);
+                if (selectionMode || playClick !== "double") return;
+                const submitted = doubleClickPlaybackRef.current;
+                doubleClickPlaybackRef.current = null;
+                if (
+                  submitted?.trackId === track.id &&
+                  performance.now() - submitted.at < 1_000
+                ) {
+                  return;
+                }
+                playFromTable(track);
               }}
               onContextMenu={(event) => {
                 event.preventDefault();
+                if (Date.now() < suppressContextMenuUntilRef.current) return;
                 cancelPress();
                 setPendingMenu(null);
                 // 右键只开菜单；用户明确点菜单里的「选择」后才显示复选框。
                 setRowMenu({ x: event.clientX, y: event.clientY, track });
               }}
-              // 同一份拖拽载荷两种落点：拖到左边文件夹树=移动文件，
-              // 落在列表行上=换顺序（只在单文件夹视图开）。
-              onDragOver={
-                reorderable
-                  ? (event) => {
-                      if (!isTrackDrag(event)) return;
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = "move";
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      const before = event.clientY < rect.top + rect.height / 2;
-                      setDrop((current) =>
-                        current?.id === track.id && current.before === before
-                          ? current
-                          : { id: track.id, before },
-                      );
-                    }
-                  : undefined
-              }
-              onDragLeave={
-                reorderable
-                  ? () => setDrop((current) => (current?.id === track.id ? null : current))
-                  : undefined
-              }
-              onDrop={
-                reorderable
-                  ? (event) => {
-                      const target = drop;
-                      setDrop(null);
-                      if (!target || target.id !== track.id) return;
-                      const ids = readTrackDragIds(event.dataTransfer);
-                      finishTrackDrop();
-                      if (ids.length === 0) return;
-                      event.preventDefault();
-                      if (!ids.includes(track.id)) onReorder?.(ids, track.id, target.before);
-                    }
-                  : undefined
-              }
             >
               {showIndexCol ? <td data-col="index">{winStart + index + 1}</td> : null}
               {visibleColumns.map((column) => {
@@ -1623,7 +1836,6 @@ export function TrackTable({
                       <Check size={9} />
                     </button>
                   ) : undefined,
-                  undefined,
                   column.key === "rating"
                     ? (rating) => {
                         void updateTrack(track.id, { rating });
@@ -1685,7 +1897,7 @@ export function TrackTable({
           <button
             type="button"
             onClick={() => {
-              localStorage.removeItem(COLUMN_PREFS_KEY);
+              removeLocalStorage(COLUMN_PREFS_KEY);
               const defaults = loadColumnPrefs();
               colPrefsRef.current = defaults;
               setColPrefs(defaults);
@@ -1763,6 +1975,34 @@ export function TrackTable({
             <Copy size={12} />
             复制标题
           </button>
+          {(rowShareLink || videoShareResolution) && (
+            <button
+              type="button"
+              disabled={!rowShareLink}
+              onClick={() => {
+                void copyTrackShareLink(rowMenu.track, rowShareLink);
+              }}
+            >
+              <Link2 size={12} />
+              {videoShareResolution?.loading
+                ? "查找分享链接…"
+                : rowShareLink
+                  ? "复制分享内容"
+                  : "没有找到分享链接"}
+            </button>
+          )}
+          {rowSameNameQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                requestExploreSearch(rowSameNameQuery, sameNameSearchPlatforms);
+                setRowMenu(null);
+              }}
+            >
+              <Search size={12} />
+              同名搜索
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {

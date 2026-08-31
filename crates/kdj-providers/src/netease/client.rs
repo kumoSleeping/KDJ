@@ -23,7 +23,6 @@ const UA_EAPI: &str =
     "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) \
                        Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/2.10.2.200154";
 const DEVICE_ID: &str = "pyncm!";
-
 /// eapi 请求的 header 字段，同时也作为 Cookie 发出去。
 fn eapi_config() -> BTreeMap<String, String> {
     [
@@ -66,12 +65,15 @@ pub struct NeteaseClient {
 
 impl NeteaseClient {
     pub fn new(session_dir: &Path) -> Result<Self> {
+        crate::session_fs::ensure_private_dir(session_dir)?;
         let http = crate::net::http_timeouts(reqwest::Client::builder().user_agent(UA_DEFAULT))
             .build()
             .context("构建网易云 HTTP 客户端失败")?;
+        let session_path = session_dir.join("netease.json");
+        crate::session_fs::protect_existing_private_file(&session_path)?;
         let client = NeteaseClient {
             http,
-            session_path: session_dir.join("netease.json"),
+            session_path,
             state: RwLock::new(SessionState::default()),
         };
         client.load_session(session_dir);
@@ -90,9 +92,13 @@ impl NeteaseClient {
         self.state.read().unwrap().profile.clone()
     }
 
-    pub fn set_profile(&self, profile: Option<Value>) {
-        self.state.write().unwrap().profile = profile;
-        self.save_session();
+    pub fn set_profile(&self, profile: Option<Value>) -> Result<()> {
+        let mut current = self.state.write().unwrap();
+        let mut next = current.clone();
+        next.profile = profile;
+        self.persist_state(&next)?;
+        *current = next;
+        Ok(())
     }
 
     // ------------------------------------------------------------ 登录态落盘
@@ -111,37 +117,32 @@ impl NeteaseClient {
             match parse_pyncm_dump(&dump) {
                 Ok(state) => {
                     tracing::info!("已从 netease.pyncm 迁移网易云登录态");
+                    if let Err(err) = self.persist_state(&state) {
+                        tracing::warn!("保存迁移后的网易云登录态失败：{err:#}");
+                    }
                     *self.state.write().unwrap() = state;
-                    self.save_session();
                 }
                 Err(err) => tracing::warn!("迁移 netease.pyncm 失败：{err}"),
             }
         }
     }
 
-    pub fn save_session(&self) {
-        let state = self.state.read().unwrap().clone();
-        if let Some(parent) = self.session_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let tmp = self.session_path.with_extension("json.tmp");
-        let body = match serde_json::to_string_pretty(&state) {
-            Ok(body) => body,
-            Err(err) => {
-                tracing::warn!("网易云登录态序列化失败：{err}");
-                return;
-            }
-        };
-        if let Err(err) =
-            std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &self.session_path))
-        {
-            tracing::warn!("网易云登录态写入失败：{err}");
-        }
+    fn persist_state(&self, state: &SessionState) -> Result<()> {
+        let body = serde_json::to_string_pretty(state).context("序列化网易云登录态失败")?;
+        crate::session_fs::write_private_atomic(&self.session_path, body.as_bytes())
+            .context("写入网易云登录态失败")
     }
 
-    pub fn clear_session(&self) {
-        *self.state.write().unwrap() = SessionState::default();
-        let _ = std::fs::remove_file(&self.session_path);
+    pub fn save_session(&self) -> Result<()> {
+        let current = self.state.read().unwrap();
+        self.persist_state(&current)
+    }
+
+    pub fn clear_session(&self) -> Result<()> {
+        let mut current = self.state.write().unwrap();
+        crate::session_fs::remove_private_file(&self.session_path)?;
+        *current = SessionState::default();
+        Ok(())
     }
 
     // ------------------------------------------------------------ Cookie
@@ -159,8 +160,10 @@ impl NeteaseClient {
     }
 
     /// 从响应里收 Set-Cookie。登录成功的 MUSIC_U 就是这么进来的。
-    fn absorb_cookies(&self, response: &reqwest::Response) {
-        let mut state = self.state.write().unwrap();
+    fn absorb_cookies(&self, response: &reqwest::Response) -> Result<()> {
+        let mut current = self.state.write().unwrap();
+        let mut state = current.clone();
+        let mut changed = false;
         for value in response.headers().get_all(reqwest::header::SET_COOKIE) {
             let Ok(text) = value.to_str() else { continue };
             let Some(pair) = text.split(';').next() else {
@@ -170,17 +173,57 @@ impl NeteaseClient {
                 continue;
             };
             let (name, value) = (name.trim(), value.trim());
-            if name.is_empty() || value.is_empty() || value == "EXPIRED" {
+            if name.is_empty() {
                 continue;
             }
-            state.cookies.insert(name.to_string(), value.to_string());
+            if value.is_empty() || value.eq_ignore_ascii_case("EXPIRED") {
+                changed |= state.cookies.remove(name).is_some();
+                if name == "__csrf" && !state.csrf_token.is_empty() {
+                    state.csrf_token.clear();
+                    changed = true;
+                }
+                continue;
+            }
+            if state
+                .cookies
+                .get(name)
+                .is_none_or(|current| current != value)
+            {
+                state.cookies.insert(name.to_string(), value.to_string());
+                changed = true;
+            }
             if name == "__csrf" {
-                state.csrf_token = value.to_string();
+                if state.csrf_token != value {
+                    state.csrf_token = value.to_string();
+                    changed = true;
+                }
             }
         }
+        if changed {
+            self.persist_state(&state)?;
+            *current = state;
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------ 请求
+
+    /// 登录态明文 API GET。只用于网易云仍由网页直接调用、无需 weapi 加密的接口。
+    pub async fn api_get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+        let response = self
+            .http
+            .get(format!("{HOST}{path}"))
+            .query(query)
+            .header(reqwest::header::USER_AGENT, UA_DEFAULT)
+            .header(reqwest::header::REFERER, HOST)
+            .header(reqwest::header::COOKIE, self.cookie_header())
+            .send()
+            .await
+            .with_context(|| format!("网易云请求失败：{path}"))?;
+        self.absorb_cookies(&response)?;
+        let text = response.text().await.context("读取网易云响应失败")?;
+        parse_json_body(&text)
+    }
 
     /// weapi 请求。`path` 形如 `/weapi/v3/song/detail`。
     pub async fn weapi(&self, path: &str, mut payload: Map<String, Value>) -> Result<Value> {
@@ -203,7 +246,7 @@ impl NeteaseClient {
             .send()
             .await
             .with_context(|| format!("网易云请求失败：{path}"))?;
-        self.absorb_cookies(&response);
+        self.absorb_cookies(&response)?;
         let text = response.text().await.context("读取网易云响应失败")?;
         parse_json_body(&text)
     }
@@ -237,7 +280,7 @@ impl NeteaseClient {
             .send()
             .await
             .with_context(|| format!("网易云请求失败：{path}"))?;
-        self.absorb_cookies(&response);
+        self.absorb_cookies(&response)?;
         let body = response.bytes().await.context("读取网易云响应失败")?;
 
         // eapi 响应通常是 AES-ECB 密文，但有些端点直接回明文 JSON，两种都要认。
@@ -404,13 +447,25 @@ mod tests {
                 .unwrap()
                 .cookies
                 .insert("MUSIC_U".into(), "zzz".into());
-            client.save_session();
+            client.save_session().unwrap();
         }
         let reopened = NeteaseClient::new(&dir).unwrap();
         assert!(reopened.logged_in());
-        reopened.clear_session();
+        reopened.clear_session().unwrap();
         assert!(!reopened.logged_in());
         assert!(!dir.join("netease.json").exists());
+    }
+
+    #[test]
+    fn failed_session_commit_does_not_publish_new_profile() {
+        let dir = scratch("failed-commit");
+        let client = NeteaseClient::new(&dir).unwrap();
+        std::fs::create_dir(dir.join("netease.json")).unwrap();
+
+        assert!(client
+            .set_profile(Some(serde_json::json!({ "nickname": "not-saved" })))
+            .is_err());
+        assert!(client.profile().is_none(), "磁盘失败时内存不能伪装成已保存");
     }
 
     #[test]

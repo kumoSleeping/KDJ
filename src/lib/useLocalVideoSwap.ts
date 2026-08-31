@@ -3,6 +3,7 @@ import {
   registerLocalVideoSeekPresenter,
   type PreparedLocalVideoSeek,
 } from "./localVideoSeekBridge";
+import { VideoTransportEchoGuard } from "./localVideoSync";
 
 const PREVIEW_DEBOUNCE_MS = 90;
 const DECODE_TIMEOUT_MS = 1_500;
@@ -23,11 +24,13 @@ export interface LocalVideoSwapOptions {
   desiredPlayingRef: MutableRefObject<boolean>;
   getRate(): number;
   onActivate?(video: HTMLVideoElement, target: number): void;
+  /** Exact event provenance for programmatic play/pause on a newly activated slot. */
+  transportEchoGuard?: VideoTransportEchoGuard;
 }
 
 function waitForEvent(
   video: HTMLVideoElement,
-  eventName: "loadedmetadata" | "seeked",
+  eventName: "loadedmetadata" | "seeked" | "pause",
   timeoutMs: number,
   isCurrent: () => boolean,
 ): Promise<boolean> {
@@ -53,6 +56,17 @@ function waitForEvent(
   });
 }
 
+async function pauseAndSettle(
+  video: HTMLVideoElement,
+  timeoutMs: number,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  if (video.paused) return isCurrent();
+  const settled = waitForEvent(video, "pause", timeoutMs, isCurrent);
+  video.pause();
+  return settled;
+}
+
 async function waitForDecodedTargetFrame(
   video: HTMLVideoElement,
   target: number,
@@ -63,7 +77,9 @@ async function waitForDecodedTargetFrame(
   }
   if (!isCurrent()) return false;
 
-  video.pause();
+  // A former active slot may still have a queued pause edge. Do not let that event cross the
+  // ownership swap and masquerade as a native-control Pause on its next activation.
+  if (!(await pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent))) return false;
   if (Math.abs(video.currentTime - target) > TARGET_EPSILON_SEC || video.readyState < 2) {
     video.currentTime = target;
     if (video.seeking) {
@@ -88,8 +104,7 @@ async function waitForDecodedTargetFrame(
     return false;
   }
   if (typeof video.requestVideoFrameCallback !== "function") {
-    video.pause();
-    return true;
+    return pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent);
   }
   const confirmed = await new Promise<boolean>((resolve) => {
     let settled = false;
@@ -102,8 +117,14 @@ async function waitForDecodedTargetFrame(
     const timer = window.setTimeout(() => finish(true), FRAME_CONFIRM_TIMEOUT_MS);
     video.requestVideoFrameCallback(() => finish(true));
   });
-  video.pause();
-  return confirmed;
+  if (!confirmed) {
+    video.pause();
+    return false;
+  }
+  // `pause()` changes `paused` synchronously but dispatches `pause` later. Activation must wait
+  // for that event, otherwise the standby's tail can arrive after it becomes the active video and
+  // stop the Rust audio transport probabilistically.
+  return pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent);
 }
 
 /**
@@ -219,8 +240,25 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
             const shouldPlay = optionsRef.current.desiredPlayingRef.current;
             activeSlotRef.current = nextSlot;
             setActiveSlot(nextSlot);
-            if (shouldPlay) void video.play().catch(() => undefined);
-            else video.pause();
+            if (shouldPlay && video.paused) {
+              const guard = optionsRef.current.transportEchoGuard;
+              const token = guard?.mark(video, "play");
+              void video.play().then(
+                () => {
+                  // `play` is dispatched before the play promise settles. If no surface observed
+                  // it (for example while React was swapping listeners), do not leave a stale tag
+                  // that could swallow a later genuine user action.
+                  if (token !== undefined) guard?.cancel(token);
+                },
+                () => {
+                  if (token !== undefined) guard?.cancel(token);
+                },
+              );
+            } else if (!shouldPlay && !video.paused) {
+              const guard = optionsRef.current.transportEchoGuard;
+              guard?.mark(video, "pause");
+              video.pause();
+            }
             // Change ownership before pausing the old slot so its pause event cannot be mistaken
             // for a user/system transport command.
             old?.pause();
@@ -275,6 +313,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
       for (const video of videoRefs.current) {
         video?.pause();
       }
+      optionsRef.current.transportEchoGuard?.clear();
     },
     [cancelPending],
   );

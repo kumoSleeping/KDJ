@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use kdj_core::models::{FolderNode, FolderTree};
 use kdj_providers::tags::is_media_extension;
+use serde::{Deserialize, Serialize};
 
 /// 每个受管目录都把 KDJ 自己的文件收进 `.kdj/`，不再把 sidecar 散在歌曲旁边。
 ///
@@ -33,50 +34,80 @@ pub const OUTSIDE_FOLDER: &str = "__kd_outside__";
 pub const LEGACY_MANIFEST_NAME: &str = ".kdj.json";
 const LEGACY_BACKUP_NAME: &str = "legacy-manifest-v1.json";
 const MANIFEST_VERSION: i64 = 1;
+static ATOMIC_WRITE_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default)]
 pub struct StoredLyrics {
     pub lrc: String,
+    pub word_lrc: String,
     pub translated_lrc: String,
     pub romaji_lrc: String,
+    pub platform: String,
+    pub key: String,
+    pub title: String,
+    pub artist: String,
+    pub score: f64,
 }
 
-/// 用平台 + 来源 key 生成稳定文件名；不使用数据库 track id，避免换库后歌词断链。
-fn lyrics_paths(
-    audio_path: &Path,
-    platform: &str,
-    key: &str,
-) -> Option<(PathBuf, PathBuf, PathBuf)> {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct StoredLyricsMetadata {
+    #[serde(default)]
+    platform: String,
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    artist: String,
+    #[serde(default)]
+    score: f64,
+}
+
+struct LyricsPaths {
+    main: PathBuf,
+    word: PathBuf,
+    translated: PathBuf,
+    romaji: PathBuf,
+    metadata: PathBuf,
+}
+
+fn local_lyrics_stem(audio_path: &Path) -> Option<String> {
+    let filename = audio_path.file_name()?.to_string_lossy();
+    // FNV-1a 足够充当同一目录内的稳定文件名键；不把可能接近 255 字节的原文件名
+    // 直接十六进制展开，否则长歌名会超过多数文件系统的单段长度上限。
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in filename.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Some(format!("local-{hash:016x}"))
+}
+
+/// 有下载来源时沿用平台 + key；手动入库、没有来源的歌曲则按文件名生成稳定本地键。
+/// 不使用数据库 track id，避免换库后歌词断链；文件移动/复制时 sidecar 会一起迁移。
+fn lyrics_paths(audio_path: &Path, platform: &str, key: &str) -> Option<LyricsPaths> {
     let parent = audio_path.parent()?;
     let platform = platform.trim();
     let key = key.trim();
-    if platform.is_empty() || key.is_empty() {
-        return None;
-    }
-    let encoded_key: String = key.bytes().map(|byte| format!("{byte:02x}")).collect();
-    let stem = format!("{platform}-{encoded_key}");
+    let stem = if !platform.is_empty() && platform != "local" && !key.is_empty() {
+        let encoded_key: String = key.bytes().map(|byte| format!("{byte:02x}")).collect();
+        format!("{platform}-{encoded_key}")
+    } else {
+        local_lyrics_stem(audio_path)?
+    };
     let dir = parent.join(METADATA_DIR_NAME).join(LYRICS_DIR_NAME);
-    Some((
-        dir.join(format!("{stem}.lrc")),
-        dir.join(format!("{stem}.trans.lrc")),
-        dir.join(format!("{stem}.roma.lrc")),
-    ))
+    Some(LyricsPaths {
+        main: dir.join(format!("{stem}.lrc")),
+        word: dir.join(format!("{stem}.word.lrc")),
+        translated: dir.join(format!("{stem}.trans.lrc")),
+        romaji: dir.join(format!("{stem}.roma.lrc")),
+        metadata: dir.join(format!("{stem}.meta.json")),
+    })
 }
 
 fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
-    // 重复下载/补词经常拿到完全相同的正文。先做一次小文件比较，避免在歌曲位于
-    // U 盘时仍创建 partial + rename；读几 KiB 比两次目录写便宜得多。
-    if std::fs::read(path).is_ok_and(|current| current == text.as_bytes()) {
-        return Ok(());
-    }
-    let tmp = path.with_extension("lrc.partial");
-    std::fs::write(&tmp, text.as_bytes())
-        .with_context(|| format!("写歌词临时文件失败：{}", tmp.display()))?;
-    if let Err(err) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err).with_context(|| format!("提交歌词文件失败：{}", path.display()));
-    }
-    Ok(())
+    atomic_write(path, text.as_bytes())
+        .with_context(|| format!("提交歌词文件失败：{}", path.display()))
 }
 
 fn write_optional_lyrics_file(path: &Path, text: &str) -> Result<()> {
@@ -100,30 +131,63 @@ pub fn write_lyrics(
     translated_lrc: &str,
     romaji_lrc: &str,
 ) -> Result<bool> {
-    let Some((main, translated, romaji)) = lyrics_paths(audio_path, platform, key) else {
+    write_lyrics_cache(
+        audio_path,
+        platform,
+        key,
+        &StoredLyrics {
+            lrc: lrc.to_string(),
+            translated_lrc: translated_lrc.to_string(),
+            romaji_lrc: romaji_lrc.to_string(),
+            platform: platform.trim().to_string(),
+            key: key.trim().to_string(),
+            score: 1.0,
+            ..StoredLyrics::default()
+        },
+    )
+}
+
+/// 保存完整歌词缓存。`storage_platform/key` 只决定 sidecar 放在哪里；歌词实际匹配到的
+/// 平台与 key 记录在 `lyrics` 元数据里，不能借此把本地音频伪装成平台来源歌曲。
+pub fn write_lyrics_cache(
+    audio_path: &Path,
+    storage_platform: &str,
+    storage_key: &str,
+    lyrics: &StoredLyrics,
+) -> Result<bool> {
+    let Some(paths) = lyrics_paths(audio_path, storage_platform, storage_key) else {
         return Ok(false);
     };
-    if lrc.trim().is_empty() {
+    if lyrics.lrc.trim().is_empty() {
         return Ok(false);
     }
-    std::fs::create_dir_all(main.parent().expect("歌词路径一定有父目录"))
-        .with_context(|| format!("创建歌词目录失败：{}", main.display()))?;
-    write_text_atomic(&main, lrc.trim())?;
-    write_optional_lyrics_file(&translated, translated_lrc)?;
-    write_optional_lyrics_file(&romaji, romaji_lrc)?;
+    std::fs::create_dir_all(paths.main.parent().expect("歌词路径一定有父目录"))
+        .with_context(|| format!("创建歌词目录失败：{}", paths.main.display()))?;
+    write_text_atomic(&paths.main, lyrics.lrc.trim())?;
+    write_optional_lyrics_file(&paths.word, &lyrics.word_lrc)?;
+    write_optional_lyrics_file(&paths.translated, &lyrics.translated_lrc)?;
+    write_optional_lyrics_file(&paths.romaji, &lyrics.romaji_lrc)?;
+    let metadata = StoredLyricsMetadata {
+        platform: lyrics.platform.trim().to_string(),
+        key: lyrics.key.trim().to_string(),
+        title: lyrics.title.trim().to_string(),
+        artist: lyrics.artist.trim().to_string(),
+        score: lyrics.score,
+    };
+    write_text_atomic(&paths.metadata, &serde_json::to_string(&metadata)?)?;
     Ok(true)
 }
 
 /// 读取下载时保存的歌词；只认有主 LRC 的完整条目。
 pub fn read_lyrics(audio_path: &Path, platform: &str, key: &str) -> Result<Option<StoredLyrics>> {
-    let Some((main, translated, romaji)) = lyrics_paths(audio_path, platform, key) else {
+    let Some(paths) = lyrics_paths(audio_path, platform, key) else {
         return Ok(None);
     };
-    if !main.is_file() {
+    if !paths.main.is_file() {
         return Ok(None);
     }
-    let lrc = std::fs::read_to_string(&main)
-        .with_context(|| format!("读取歌词失败：{}", main.display()))?;
+    let lrc = std::fs::read_to_string(&paths.main)
+        .with_context(|| format!("读取歌词失败：{}", paths.main.display()))?;
     if lrc.trim().is_empty() {
         return Ok(None);
     }
@@ -134,10 +198,34 @@ pub fn read_lyrics(audio_path: &Path, platform: &str, key: &str) -> Result<Optio
         Ok(std::fs::read_to_string(path)
             .with_context(|| format!("读取歌词附加文件失败：{}", path.display()))?)
     };
+    let metadata = std::fs::read(&paths.metadata)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<StoredLyricsMetadata>(&bytes).ok())
+        .unwrap_or_default();
     Ok(Some(StoredLyrics {
         lrc,
-        translated_lrc: read_optional(&translated)?,
-        romaji_lrc: read_optional(&romaji)?,
+        word_lrc: read_optional(&paths.word)?,
+        translated_lrc: read_optional(&paths.translated)?,
+        romaji_lrc: read_optional(&paths.romaji)?,
+        platform: if metadata.platform.is_empty() {
+            platform.trim().to_string()
+        } else {
+            metadata.platform
+        },
+        key: if metadata.key.is_empty() {
+            key.trim().to_string()
+        } else {
+            metadata.key
+        },
+        title: metadata.title,
+        artist: metadata.artist,
+        score: if metadata.score > 0.0 {
+            metadata.score
+        } else if !platform.trim().is_empty() && !key.trim().is_empty() {
+            1.0
+        } else {
+            0.0
+        },
     }))
 }
 
@@ -155,9 +243,11 @@ fn transfer_lyrics(
         return Ok(());
     };
     for (from, to) in [
-        (source.0, target.0),
-        (source.1, target.1),
-        (source.2, target.2),
+        (source.main, target.main),
+        (source.word, target.word),
+        (source.translated, target.translated),
+        (source.romaji, target.romaji),
+        (source.metadata, target.metadata),
     ] {
         if !from.is_file() {
             continue;
@@ -209,7 +299,13 @@ pub fn remove_lyrics(audio_path: &Path, platform: &str, key: &str) -> Result<()>
     let Some(paths) = lyrics_paths(audio_path, platform, key) else {
         return Ok(());
     };
-    for path in [paths.0, paths.1, paths.2] {
+    for path in [
+        paths.main,
+        paths.word,
+        paths.translated,
+        paths.romaji,
+        paths.metadata,
+    ] {
         if path.is_file() {
             std::fs::remove_file(&path)
                 .with_context(|| format!("删除歌词失败：{}", path.display()))?;
@@ -415,23 +511,60 @@ pub fn has_manifest(directory: &Path) -> bool {
 /// 同目录写临时文件再 rename。进程被 kill 时最多留一份 `.partial`，
 /// 永远不会把上一份好清单截成半个 JSON。
 fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::Ordering;
+
     if std::fs::read(path).is_ok_and(|current| current == body) {
         return Ok(());
     }
     let parent = path.parent().context("清单没有上级目录")?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("创建 KDJ 元数据目录失败：{}", parent.display()))?;
-    let nonce = std::time::SystemTime::now()
+    let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|delta| delta.as_nanos())
         .unwrap_or(0);
-    let tmp = parent.join(format!(".{MANIFEST_NAME}.{nonce}.partial"));
-    std::fs::write(&tmp, body).with_context(|| format!("写临时清单失败：{}", tmp.display()))?;
+    let mut temporary = None;
+    for _ in 0..32 {
+        let serial = ATOMIC_WRITE_SERIAL.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(
+            ".{MANIFEST_NAME}.{}-{timestamp:x}-{serial:x}.partial",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        match options.open(&tmp) {
+            Ok(file) => {
+                temporary = Some((tmp, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("创建临时清单失败：{}", tmp.display()));
+            }
+        }
+    }
+    let (tmp, mut file) = temporary.context("无法分配唯一的清单临时文件")?;
+    let write_result = (|| -> std::io::Result<()> {
+        file.write_all(body)?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error).with_context(|| format!("写临时清单失败：{}", tmp.display()));
+    }
+    drop(file);
     if let Err(first) = std::fs::rename(&tmp, path) {
         // Windows 不能 rename 覆盖已有目标。先把完整旧文件挪到同目录备份；
         // 新文件提交失败就立刻还原，任何时刻至少有一份完整清单可恢复。
+        #[cfg(windows)]
         if path.is_file() {
-            let rollback = parent.join(format!(".{MANIFEST_NAME}.{nonce}.rollback"));
+            let serial = ATOMIC_WRITE_SERIAL.fetch_add(1, Ordering::Relaxed);
+            let rollback = parent.join(format!(
+                ".{MANIFEST_NAME}.{}-{timestamp:x}-{serial:x}.rollback",
+                std::process::id()
+            ));
             std::fs::rename(path, &rollback)
                 .with_context(|| format!("暂存旧清单失败：{}", path.display()))?;
             if let Err(second) = std::fs::rename(&tmp, path) {
@@ -442,10 +575,21 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
                 });
             }
             let _ = std::fs::remove_file(rollback);
-        } else {
+        }
+        #[cfg(not(windows))]
+        {
             let _ = std::fs::remove_file(&tmp);
             return Err(first).with_context(|| format!("提交清单失败：{}", path.display()));
         }
+        #[cfg(windows)]
+        if !path.is_file() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(first).with_context(|| format!("提交清单失败：{}", path.display()));
+        }
+    }
+    #[cfg(unix)]
+    if let Ok(directory) = std::fs::File::open(parent) {
+        let _ = directory.sync_all();
     }
     Ok(())
 }
@@ -1097,7 +1241,7 @@ mod tests {
         let audio = dir.join("song.flac");
         std::fs::write(&audio, b"audio").unwrap();
         write_lyrics(&audio, "wyy", "42", "[00:01]词", "", "").unwrap();
-        let lyric = lyrics_paths(&audio, "wyy", "42").unwrap().0;
+        let lyric = lyrics_paths(&audio, "wyy", "42").unwrap().main;
         let lyric_before = std::fs::metadata(&lyric).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(25));
 
@@ -1132,10 +1276,48 @@ mod tests {
         .unwrap());
         let stored = read_lyrics(&audio, "wyy", "123/abc").unwrap().unwrap();
         assert_eq!(stored.lrc, "[00:01.00]主歌词");
+        assert!(stored.word_lrc.is_empty());
         assert_eq!(stored.translated_lrc, "[00:01.00]翻译");
         assert_eq!(stored.romaji_lrc, "[00:01.00]romaji");
+        assert_eq!(stored.platform, "wyy");
+        assert_eq!(stored.key, "123/abc");
         assert!(dir.join(".kdj/lyrics").is_dir());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_less_track_lyrics_roundtrip_under_a_local_stable_key() {
+        let dir = scratch("local-lyrics");
+        let audio = dir.join("没有来源的歌.flac");
+        std::fs::write(&audio, b"audio").unwrap();
+        let cached = StoredLyrics {
+            lrc: "[00:01.00]主歌词".into(),
+            word_lrc: "[1000,500](1000,500,0)逐字".into(),
+            translated_lrc: "[00:01.00]翻译".into(),
+            platform: "wyy".into(),
+            key: "42".into(),
+            title: "没有来源的歌".into(),
+            artist: "歌手".into(),
+            score: 0.92,
+            ..StoredLyrics::default()
+        };
+
+        assert!(write_lyrics_cache(&audio, "local", "", &cached).unwrap());
+        let stored = read_lyrics(&audio, "local", "").unwrap().unwrap();
+        assert_eq!(stored.lrc, cached.lrc);
+        assert_eq!(stored.word_lrc, cached.word_lrc);
+        assert_eq!(stored.translated_lrc, cached.translated_lrc);
+        assert_eq!(stored.platform, "wyy");
+        assert_eq!(stored.key, "42");
+        assert_eq!(stored.title, "没有来源的歌");
+        assert_eq!(stored.artist, "歌手");
+        assert_eq!(stored.score, 0.92);
+
+        let paths = lyrics_paths(&audio, "local", "").unwrap();
+        assert!(paths.main.is_file());
+        assert!(paths.word.is_file());
+        assert!(paths.metadata.is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

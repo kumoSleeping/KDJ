@@ -66,6 +66,219 @@ test("performance waveform headroom follows the mixer trim in real time", () => 
   assert.equal(performanceWaveformAmplitudeScale(Number.NaN), 0.7);
 });
 
+test("detail columns paint the exact target DPR backing store without CSS bitmap scaling", () => {
+  const rects: Array<{ x: number; y: number; width: number; height: number; alpha: number }> = [];
+  const transforms: number[][] = [];
+  const context = {
+    clearRect() {},
+    fillRect(x: number, y: number, width: number, height: number) {
+      rects.push({ x, y, width, height, alpha: this.globalAlpha });
+    },
+    fillStyle: "",
+    globalAlpha: 1,
+    setTransform(...values: number[]) { transforms.push(values); },
+  } as unknown as CanvasRenderingContext2D;
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => context,
+  } as unknown as HTMLCanvasElement;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { devicePixelRatio: 2 },
+  });
+  try {
+    drawWaveformCanvas(
+      canvas,
+      {
+        track_id: 1,
+        duration: 2,
+        amp: [0.75, 0.75],
+        minimum: [-0.25, -0.25],
+        maximum: [0.75, 0.75],
+        r: [255, 255],
+        g: [80, 80],
+        b: [40, 40],
+        transient: [255, 255],
+      },
+      10,
+      20,
+      undefined,
+      null,
+      null,
+      "performance-detail",
+    );
+    assert.equal(canvas.width, 20);
+    assert.equal(canvas.height, 40);
+    assert.deepEqual(transforms.at(-1), [1, 0, 0, 1, 0, 0]);
+    assert.equal(rects.length, 20, "one independent rectangle is painted per physical time column");
+    assert.ok(rects.every((rect) => rect.y === 6 && rect.height === 28));
+    assert.ok(rects.every((rect) => rect.width === 1), "detail columns are physical pixels");
+    assert.ok(rects.every((rect) => rect.alpha === 1), "hard columns do not blur vertical edges");
+  } finally {
+    Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("a rolling detail rail aggregates the source lattice into physical display pixels", () => {
+  let paints = 0;
+  const context = {
+    clearRect() {},
+    fillRect() { paints += 1; },
+    fillStyle: "",
+    globalAlpha: 1,
+    setTransform() {},
+  } as unknown as CanvasRenderingContext2D;
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => context,
+  } as unknown as HTMLCanvasElement;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { devicePixelRatio: 2 },
+  });
+  try {
+    drawWaveformCanvas(
+      canvas,
+      {
+        track_id: 1,
+        duration: 0.01,
+        source_start: 0,
+        source_end: 0.01,
+        amp: [0.1, 0.2, 0.3, 0.4],
+        minimum: [-0.1, -0.2, -0.3, -0.4],
+        maximum: [0.1, 0.2, 0.3, 0.4],
+        r: [255, 255, 255, 255],
+        g: [80, 80, 80, 80],
+        b: [40, 40, 40, 40],
+        transient: [0, 0, 0, 0],
+      },
+      1,
+      20,
+      undefined,
+      0,
+      0.01,
+      "performance-detail",
+      1,
+    );
+    assert.equal(canvas.width, 2, "one CSS pixel at DPR 2 owns two physical bitmap columns");
+    assert.equal(paints, 2, "four 400 Hz source cells are area-sampled into two display columns");
+  } finally {
+    Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("detail interval downsampling cannot skip a one-column kick", () => {
+  const rects: Array<{ y: number; height: number; fillStyle: string }> = [];
+  const context = {
+    clearRect() {},
+    fillRect(_x: number, y: number, _width: number, height: number) {
+      rects.push({ y, height, fillStyle: this.fillStyle });
+    },
+    fillStyle: "",
+    globalAlpha: 1,
+    setTransform() {},
+  } as unknown as CanvasRenderingContext2D;
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => context,
+  } as unknown as HTMLCanvasElement;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { devicePixelRatio: 1 },
+  });
+  try {
+    drawWaveformCanvas(
+      canvas,
+      {
+        track_id: 1,
+        duration: 4,
+        amp: [1, 0.1, 0.1, 0.1],
+        minimum: [-1, -0.1, -0.1, -0.1],
+        maximum: [1, 0.1, 0.1, 0.1],
+        r: [255, 40, 40, 40],
+        g: [40, 80, 80, 80],
+        b: [40, 255, 255, 255],
+        transient: [255, 0, 0, 0],
+      },
+      1,
+      20,
+      undefined,
+      null,
+      null,
+      "performance-detail",
+      1,
+    );
+
+    assert.ok(
+      rects.some((rect) => rect.y === 1 && rect.height === 18),
+      "the source interval peak must reach the detail rail edge even when its centre sample misses it",
+    );
+    const channels = rects[0].fillStyle.match(/\d+/g)?.map(Number) ?? [];
+    assert.ok(
+      channels[0] > channels[2],
+      "the measured onset column must keep its own fused colour instead of averaging into neighbours",
+    );
+  } finally {
+    Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("overview ignores signed detail contours and keeps the macro section envelope", () => {
+  const rects: Array<{ width: number; height: number }> = [];
+  const context = {
+    clearRect() {},
+    fillRect(_x: number, _y: number, width: number, height: number) {
+      rects.push({ width, height });
+    },
+    fillStyle: "",
+    globalAlpha: 1,
+    setTransform() {},
+  } as unknown as CanvasRenderingContext2D;
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => context,
+  } as unknown as HTMLCanvasElement;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { devicePixelRatio: 1 },
+  });
+  try {
+    drawWaveformCanvas(
+      canvas,
+      {
+        track_id: 1,
+        duration: 2,
+        amp: [0.1, 0.8],
+        // Deliberately uniform: if overview accidentally enters the signed-detail renderer, the
+        // two sections become the same height and each is painted as many physical-pixel rows.
+        minimum: [-0.9, -0.9],
+        maximum: [0.9, 0.9],
+        r: [255, 255],
+        g: [80, 80],
+        b: [40, 40],
+        transient: [255, 255],
+      },
+      2,
+      42,
+      undefined,
+      null,
+      null,
+      "release-overview",
+    );
+
+    assert.equal(rects.length, 2, "overview stays a single macro column per time interval");
+    assert.ok(Math.abs(rects[0].height / 40 - 0.1) < 1e-6);
+    assert.ok(Math.abs(rects[1].height / 40 - 0.8) < 1e-6);
+    assert.ok(rects.every((rect) => rect.width > 1), "overview uses logical interval columns");
+  } finally {
+    Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
 test("historical overview keeps hard energy columns while using backing-store resolution", () => {
   const fakeCanvas = () => {
     const calls = {

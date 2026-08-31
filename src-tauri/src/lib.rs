@@ -16,6 +16,8 @@
 #[cfg(target_os = "android")]
 mod android_media;
 #[cfg(desktop)]
+mod bilibili_embed;
+#[cfg(desktop)]
 pub mod cli;
 #[cfg(desktop)]
 mod desktop_media;
@@ -24,8 +26,12 @@ mod desktop_media;
 mod desktop_player;
 #[cfg(desktop)]
 mod midi;
-#[cfg(all(desktop, feature = "labs"))]
-mod virtual_disk;
+#[cfg(desktop)]
+mod share_clipboard;
+#[cfg(desktop)]
+mod youtube_embed;
+#[cfg(desktop)]
+mod youtube_proof;
 #[cfg(desktop)]
 #[cfg(desktop)]
 pub use cli::Launch;
@@ -41,6 +47,30 @@ pub fn set_no_gui(value: bool) {
 #[cfg(desktop)]
 struct RuntimeDir(PathBuf);
 
+#[cfg(desktop)]
+const MAIN_WINDOW_STATE_FILE: &str = "main-window-state.json";
+#[cfg(desktop)]
+const MAIN_WINDOW_STATE_VERSION: u8 = 1;
+
+#[cfg(desktop)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MainWindowState {
+    version: u8,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    maximized: bool,
+}
+
+#[cfg(desktop)]
+struct MainWindowStateCache {
+    data_dir: PathBuf,
+    state: Mutex<Option<MainWindowState>>,
+}
+
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -58,6 +88,58 @@ use tauri_plugin_opener::OpenerExt;
 /// 不用事件推送：窗口很可能在 `emit` 之前就跑完了 bootstrap，那是竞态。
 pub struct Bridge {
     base_url: String,
+    auth_token: String,
+    media_token: String,
+    config: Arc<AppConfig>,
+    activity_log: kdj_server::activity_log::ActivityLog,
+    picker_grants: Mutex<HashSet<PathBuf>>,
+}
+
+impl Bridge {
+    fn grant_picked_path(&self, path: &Path) {
+        if let Ok(canonical) = path.canonicalize() {
+            if let Ok(mut grants) = self.picker_grants.lock() {
+                grants.insert(canonical);
+            }
+        }
+    }
+
+    fn authorize_existing_path(&self, raw: &str, auxiliary_roots: bool) -> Result<PathBuf, String> {
+        let requested = PathBuf::from(raw.trim());
+        if !requested.is_absolute() {
+            return Err("路径必须是绝对路径".into());
+        }
+        let canonical = requested
+            .canonicalize()
+            .map_err(|err| format!("无法解析路径 {}：{err}", requested.display()))?;
+
+        let settings = self.config.to_settings();
+        let mut roots = vec![self.config.download_dir()];
+        roots.extend(
+            settings
+                .library_dirs
+                .iter()
+                .map(|path| kdj_core::config::expand_user(path)),
+        );
+        if auxiliary_roots {
+            roots.extend([
+                self.config.data_dir.clone(),
+                kdj_core::config::system_download_dir(),
+            ]);
+            if let Ok(grants) = self.picker_grants.lock() {
+                roots.extend(grants.iter().cloned());
+            }
+        }
+
+        let allowed = roots
+            .into_iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| canonical == root || canonical.starts_with(&root));
+        if !allowed {
+            return Err("路径不在 KDJ 管理范围或本次原生选择范围内".into());
+        }
+        Ok(canonical)
+    }
 }
 
 const RELEASE_PAGE: &str = "https://github.com/kumoSleeping/KDJ/releases/latest";
@@ -116,11 +198,25 @@ pub struct DesktopUpdateInfo {
     pub notes: String,
 }
 
+fn no_desktop_update(current: String) -> DesktopUpdateInfo {
+    DesktopUpdateInfo {
+        latest: current.clone(),
+        current,
+        newer: false,
+        url: RELEASE_PAGE.into(),
+        name: "KDJ".into(),
+        published_at: String::new(),
+        notes: String::new(),
+    }
+}
+
 /// 字段名对齐 `src/types.ts::KdjBridge`，所以要 camelCase。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeInfo {
     pub base_url: String,
+    pub auth_token: String,
+    pub media_token: String,
     /// 取值和 Electron 的 `process.platform` 对齐（darwin / win32 / linux / android…），
     /// 前端按它区分桌面专属功能，见 `docs/rust-port/00-architecture.md` §8。
     pub platform: String,
@@ -142,24 +238,256 @@ fn node_platform() -> &'static str {
 fn get_bridge_info(bridge: tauri::State<'_, Bridge>) -> BridgeInfo {
     BridgeInfo {
         base_url: bridge.base_url.clone(),
+        auth_token: bridge.auth_token.clone(),
+        media_token: bridge.media_token.clone(),
         platform: node_platform().to_string(),
     }
 }
 
+#[cfg(desktop)]
+#[tauri::command]
+fn cli_install_status() -> Result<cli::install::CliInstallStatus, String> {
+    cli::install::status().map_err(|error| format!("{error:#}"))
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn install_cli(bridge: tauri::State<'_, Bridge>) -> Result<cli::install::CliInstallStatus, String> {
+    let result = cli::install::install().map_err(|error| format!("{error:#}"));
+    match &result {
+        Ok(_) => bridge.activity_log.record_level(
+            kdj_server::activity_log::ActivityCategory::User,
+            kdj_server::activity_log::ActivityLevel::Info,
+            "安装命令行工具",
+            "",
+        ),
+        Err(error) => bridge.activity_log.record_level(
+            kdj_server::activity_log::ActivityCategory::User,
+            kdj_server::activity_log::ActivityLevel::Error,
+            "安装命令行工具失败",
+            error,
+        ),
+    }
+    result
+}
+
 /// 对应 `shell.openPath`：用系统默认程序打开（曲库里是「打开所在文件夹」）。
 #[tauri::command]
-fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+fn open_path(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, Bridge>,
+    path: String,
+) -> Result<(), String> {
+    let path = bridge.authorize_existing_path(&path, true)?;
     app.opener()
-        .open_path(path, None::<&str>)
+        .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|err| err.to_string())
 }
 
 /// 对应 `shell.showItemInFolder`：在文件管理器里选中这个文件本身。
 #[tauri::command]
-fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+fn reveal_path(
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, Bridge>,
+    path: String,
+) -> Result<(), String> {
+    let path = bridge.authorize_existing_path(&path, true)?;
     app.opener()
-        .reveal_item_in_dir(PathBuf::from(path))
+        .reveal_item_in_dir(path)
         .map_err(|err| err.to_string())
+}
+
+/// 把已有本地文件作为真正的系统拖放载荷交给 Finder / Explorer。
+///
+/// 只声明 Copy：外部播放器仍会直接打开原文件，文件管理器则复制它；绝不能让一次
+/// “拖出去试听”把曲库源文件搬走，导致数据库里的路径立刻失效。
+#[cfg(desktop)]
+#[tauri::command]
+async fn start_native_file_drag(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    bridge: tauri::State<'_, Bridge>,
+    paths: Vec<String>,
+    drag_image: Option<String>,
+) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        if paths.is_empty() {
+            return Err("没有可拖动的文件".into());
+        }
+        if paths.len() > 2_000 {
+            return Err("一次最多拖动 2000 个文件".into());
+        }
+
+        let mut files = Vec::with_capacity(paths.len());
+        for raw in paths {
+            // 拖出文件是数据离开应用的边界：只允许曲库根/下载根，不接受 app data、
+            // skill preset 或仅由 picker 临时授权的辅助路径。
+            let path = bridge.authorize_existing_path(&raw, false)?;
+            let metadata = std::fs::metadata(&path)
+                .map_err(|err| format!("无法读取拖动文件 {}：{err}", path.display()))?;
+            if !metadata.is_file() {
+                return Err(format!("拖动目标不是文件：{}", path.display()));
+            }
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+        if files.is_empty() {
+            return Err("没有可拖动的文件".into());
+        }
+
+        // 前端已把首首曲目的封面裁成 128×128 PNG。只接受小体积 PNG/JPEG，
+        // 避免损坏或伪造的数据让原生图片解码器崩掉；旧前端未传时才退回应用图标。
+        let preview = drag_image
+            .filter(|encoded| encoded.len() <= 4 * 1024 * 1024)
+            .and_then(|encoded| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()
+            })
+            .filter(|bytes| {
+                bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(&[0xff, 0xd8, 0xff])
+            })
+            .unwrap_or_else(|| include_bytes!("../icons/128x128.png").to_vec());
+
+        // 命令要等到用户真正松手（成功放下或取消）才结束。前端会在这段时间冻结
+        // 曲库滚动；如果这里只回报“已启动”，指针停在窗口边缘时 WebView 仍会
+        // 在系统拖动期间不断自动滚动源列表。
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        let main_thread_pending = std::sync::Arc::clone(&pending);
+        app.run_on_main_thread(move || {
+            let drop_pending = std::sync::Arc::clone(&main_thread_pending);
+            let started = drag::start_drag(
+                &window,
+                drag::DragItem::Files(files),
+                drag::Image::Raw(preview),
+                move |result, cursor| {
+                    tracing::debug!(?result, x = cursor.x, y = cursor.y, "系统文件拖动结束");
+                    if let Ok(mut sender) = drop_pending.lock() {
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(Ok(()));
+                        }
+                    }
+                },
+                drag::Options {
+                    mode: drag::DragMode::Copy,
+                    ..Default::default()
+                },
+            )
+            .map_err(|err| format!("无法启动系统文件拖动：{err}"));
+            if let Err(error) = started {
+                if let Ok(mut sender) = main_thread_pending.lock() {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(Err(error));
+                    }
+                }
+            }
+        })
+        .map_err(|err| format!("无法进入窗口线程：{err}"))?;
+
+        return rx
+            .await
+            .map_err(|_| "系统文件拖动结束状态丢失".to_string())?;
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (app, window, bridge, paths, drag_image);
+        Err("当前桌面系统尚不支持把文件拖出 KDJ".into())
+    }
+}
+
+/// 把公开歌曲链接作为系统 URL 拖放载荷交给浏览器、聊天或笔记应用。
+///
+/// drag 2.1 的数据载荷目前只在 macOS 原生实现；Windows 由 WebView2 的
+/// text/uri-list HTML5 拖放接管，避免伪装成一个 `.url` 文件改变用户拿到的内容。
+#[cfg(desktop)]
+#[tauri::command]
+async fn start_native_link_drag(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    url: String,
+    text: Option<String>,
+    drag_image: Option<String>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = url.trim().to_string();
+        if url.len() > 4_096 || !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err("分享链接无效".into());
+        }
+        let share_text = text
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value.len() <= 16 * 1024)
+            .unwrap_or_else(|| url.clone());
+        let preview = drag_image
+            .filter(|encoded| encoded.len() <= 4 * 1024 * 1024)
+            .and_then(|encoded| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()
+            })
+            .filter(|bytes| {
+                bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(&[0xff, 0xd8, 0xff])
+            })
+            .unwrap_or_else(|| include_bytes!("../icons/128x128.png").to_vec());
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        let main_thread_pending = std::sync::Arc::clone(&pending);
+        app.run_on_main_thread(move || {
+            let url_bytes = url.into_bytes();
+            let text_bytes = share_text.into_bytes();
+            let drop_pending = std::sync::Arc::clone(&main_thread_pending);
+            let started = drag::start_drag(
+                &window,
+                drag::DragItem::Data {
+                    provider: Box::new(move |data_type| match data_type {
+                        "public.url" => Some(url_bytes.clone()),
+                        "public.utf8-plain-text" => Some(text_bytes.clone()),
+                        _ => None,
+                    }),
+                    types: vec!["public.url".into(), "public.utf8-plain-text".into()],
+                },
+                drag::Image::Raw(preview),
+                move |result, cursor| {
+                    tracing::debug!(?result, x = cursor.x, y = cursor.y, "系统链接拖动结束");
+                    if let Ok(mut sender) = drop_pending.lock() {
+                        if let Some(sender) = sender.take() {
+                            let _ = sender.send(Ok(()));
+                        }
+                    }
+                },
+                drag::Options {
+                    mode: drag::DragMode::Copy,
+                    ..Default::default()
+                },
+            )
+            .map_err(|err| format!("无法启动系统链接拖动：{err}"));
+            if let Err(error) = started {
+                if let Ok(mut sender) = main_thread_pending.lock() {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(Err(error));
+                    }
+                }
+            }
+        })
+        .map_err(|err| format!("无法进入窗口线程：{err}"))?;
+
+        return rx
+            .await
+            .map_err(|_| "系统链接拖动结束状态丢失".to_string())?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, window, url, text, drag_image);
+        Err("当前桌面系统由浏览器原生链接拖动接管".into())
+    }
 }
 
 /// 登录二维码落盘结果。电脑进「下载」，手机进「图片/相册」目录。
@@ -210,13 +538,125 @@ fn save_login_qr(platform: String, label: String, image: String) -> Result<Saved
 #[cfg(not(target_os = "android"))]
 fn decode_png_data_url(image: &str) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
+    const MAX_QR_PNG_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_QR_BASE64_BYTES: usize = MAX_QR_PNG_BYTES.div_ceil(3) * 4;
+
     let payload = image
         .strip_prefix("data:image/png;base64,")
         .or_else(|| image.strip_prefix("data:image/PNG;base64,"))
         .ok_or_else(|| "二维码不是 PNG 图片".to_string())?;
-    base64::engine::general_purpose::STANDARD
+    if payload.len() > MAX_QR_BASE64_BYTES {
+        return Err("二维码图片超过 2 MiB 限制".into());
+    }
+    let png = base64::engine::general_purpose::STANDARD
         .decode(payload)
-        .map_err(|err| format!("解码二维码失败：{err}"))
+        .map_err(|err| format!("解码二维码失败：{err}"))?;
+    if png.len() > MAX_QR_PNG_BYTES {
+        return Err("二维码图片超过 2 MiB 限制".into());
+    }
+    validate_png(&png)?;
+    Ok(png)
+}
+
+#[cfg(not(target_os = "android"))]
+fn validate_png(png: &[u8]) -> Result<(), String> {
+    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    const MAX_SIDE: u32 = 4_096;
+    const MAX_PIXELS: u64 = 16_777_216;
+
+    if !png.starts_with(SIGNATURE) {
+        return Err("二维码内容不是 PNG".into());
+    }
+    let mut offset = SIGNATURE.len();
+    let mut saw_ihdr = false;
+    let mut saw_idat = false;
+    let mut saw_iend = false;
+    while offset < png.len() {
+        let header_end = offset
+            .checked_add(8)
+            .filter(|end| *end <= png.len())
+            .ok_or_else(|| "PNG chunk 头不完整".to_string())?;
+        let length = u32::from_be_bytes(png[offset..offset + 4].try_into().unwrap()) as usize;
+        let kind = &png[offset + 4..header_end];
+        if !kind.iter().all(u8::is_ascii_alphabetic) {
+            return Err("PNG chunk 类型无效".into());
+        }
+        let data_end = header_end
+            .checked_add(length)
+            .ok_or_else(|| "PNG chunk 长度溢出".to_string())?;
+        let chunk_end = data_end
+            .checked_add(4)
+            .filter(|end| *end <= png.len())
+            .ok_or_else(|| "PNG chunk 数据不完整".to_string())?;
+        let expected_crc = u32::from_be_bytes(png[data_end..chunk_end].try_into().unwrap());
+        if png_crc32(&png[offset + 4..data_end]) != expected_crc {
+            return Err("PNG chunk 校验失败".into());
+        }
+
+        match kind {
+            b"IHDR" => {
+                if saw_ihdr || offset != SIGNATURE.len() || length != 13 {
+                    return Err("PNG IHDR 无效".into());
+                }
+                let data = &png[header_end..data_end];
+                let width = u32::from_be_bytes(data[0..4].try_into().unwrap());
+                let height = u32::from_be_bytes(data[4..8].try_into().unwrap());
+                let valid_depth = matches!(
+                    (data[9], data[8]),
+                    (0, 1 | 2 | 4 | 8 | 16)
+                        | (2, 8 | 16)
+                        | (3, 1 | 2 | 4 | 8)
+                        | (4, 8 | 16)
+                        | (6, 8 | 16)
+                );
+                if width == 0
+                    || height == 0
+                    || width > MAX_SIDE
+                    || height > MAX_SIDE
+                    || u64::from(width) * u64::from(height) > MAX_PIXELS
+                    || !valid_depth
+                    || data[10] != 0
+                    || data[11] != 0
+                    || data[12] > 1
+                {
+                    return Err("PNG 尺寸或编码参数无效".into());
+                }
+                saw_ihdr = true;
+            }
+            b"IDAT" => {
+                if !saw_ihdr || length == 0 || saw_iend {
+                    return Err("PNG IDAT 无效".into());
+                }
+                saw_idat = true;
+            }
+            b"IEND" => {
+                if !saw_ihdr || !saw_idat || saw_iend || length != 0 || chunk_end != png.len() {
+                    return Err("PNG IEND 无效".into());
+                }
+                saw_iend = true;
+            }
+            _ if !saw_ihdr || saw_iend => return Err("PNG chunk 顺序无效".into()),
+            _ => {}
+        }
+        offset = chunk_end;
+    }
+    if !saw_iend {
+        return Err("PNG 缺少结束标记".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 /// 文件名里去掉路径分隔符和明显的非法字符，避免写到奇怪位置。
@@ -270,6 +710,20 @@ fn is_soundcloud_callback(url: &tauri::Url) -> bool {
     url.scheme() == "kdj" && url.host_str() == Some("soundcloud") && url.path() == "/callback"
 }
 
+#[cfg(desktop)]
+fn soundcloud_oauth_callback_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    auth_token: &str,
+    state: &str,
+    code: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .post(endpoint)
+        .bearer_auth(auth_token)
+        .json(&serde_json::json!({ "state": state, "code": code }))
+}
+
 /// 在独立原生窗口里完成 SoundCloud OAuth，并在导航发生前截住自定义协议回调。
 ///
 /// 这条路径不依赖操作系统注册 `kdj://`：macOS 的裸 `tauri dev`、Windows/Linux
@@ -291,7 +745,10 @@ fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<()
         let _ = existing.close();
     }
 
-    let base_url = app.state::<Bridge>().base_url.clone();
+    let (base_url, auth_token) = {
+        let bridge = app.state::<Bridge>();
+        (bridge.base_url.clone(), bridge.auth_token.clone())
+    };
     let completed = Arc::new(AtomicBool::new(false));
     let completed_on_navigation = completed.clone();
     let app_on_navigation = app.clone();
@@ -331,6 +788,7 @@ fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<()
             .unwrap_or_default();
         let app = app_on_navigation.clone();
         let endpoint = format!("{base_url}/api/accounts/soundcloud/login/oauth/callback");
+        let auth_token = auth_token.clone();
 
         tauri::async_runtime::spawn(async move {
             let result = if !oauth_error.is_empty() {
@@ -338,11 +796,16 @@ fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<()
             } else if state.is_empty() || code.is_empty() {
                 Err("SoundCloud 授权回调不完整".into())
             } else {
-                match reqwest::Client::new()
-                    .post(endpoint)
-                    .json(&serde_json::json!({ "state": state, "code": code }))
-                    .send()
-                    .await
+                let client = reqwest::Client::new();
+                match soundcloud_oauth_callback_request(
+                    &client,
+                    &endpoint,
+                    &auth_token,
+                    &state,
+                    &code,
+                )
+                .send()
+                .await
                 {
                     Ok(response) if response.status().is_success() => Ok(()),
                     Ok(response) => {
@@ -401,9 +864,17 @@ fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<()
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 async fn check_desktop_update(app: tauri::AppHandle) -> Result<DesktopUpdateInfo, String> {
+    let current = app.package_info().version.to_string();
+
+    // `npm run tauri:dev` 通过 `/tmp/KDJ Dev.app` 中的符号链接启动当前二进制。
+    // Tauri updater 会在访问更新清单前主动拒绝这种路径；开发态本来也不能原地
+    // 覆盖安装，因此直接返回正常的“无可安装更新”，避免后台轮询持续制造假错误。
+    if cfg!(debug_assertions) {
+        return Ok(no_desktop_update(current));
+    }
+
     use tauri_plugin_updater::UpdaterExt;
 
-    let current = app.package_info().version.to_string();
     let updater = app.updater().map_err(|err| err.to_string())?;
     let update = updater
         .check()
@@ -419,15 +890,7 @@ async fn check_desktop_update(app: tauri::AppHandle) -> Result<DesktopUpdateInfo
             published_at: update.date.map(|date| date.to_string()).unwrap_or_default(),
             notes: update.body.unwrap_or_default(),
         },
-        None => DesktopUpdateInfo {
-            latest: current.clone(),
-            current,
-            newer: false,
-            url: RELEASE_PAGE.into(),
-            name: "KDJ".into(),
-            published_at: String::new(),
-            notes: String::new(),
-        },
+        None => no_desktop_update(current),
     })
 }
 
@@ -459,6 +922,7 @@ fn fail_update(app: &tauri::AppHandle, error: impl ToString) -> String {
 #[tauri::command]
 async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
+    let started = std::time::Instant::now();
     app.state::<UpdateProgressState>().replace(UpdateProgress {
         stage: "checking",
         downloaded: 0,
@@ -513,6 +977,19 @@ async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
         total: completed.total.or(Some(completed.downloaded)),
         message: "安装完成，正在重启".into(),
     });
+    let activity_log = app.state::<Bridge>().activity_log.clone();
+    activity_log.record(kdj_server::activity_log::ActivityLogDraft {
+        category: kdj_server::activity_log::ActivityCategory::Network,
+        level: kdj_server::activity_log::ActivityLevel::Info,
+        action: "软件更新下载".into(),
+        detail: String::new(),
+        target: "GitHub · github.com".into(),
+        status: Some(200),
+        duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        count: 1,
+    });
+    // restart 会立即终止进程；这一个边界必须等此前的非阻塞记录真正落盘。
+    let _ = activity_log.flush();
     // 替换完的二进制要重启才生效；不重启的话用户看着"更新完了"但跑的还是旧版
     app.restart();
 }
@@ -538,12 +1015,16 @@ async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
             // 接收端只有在整个命令被取消时才会没了，忽略即可
             let _ = tx.send(picked);
         });
-        return rx
+        let selected = rx
             .await
             .ok()
             .flatten()
             .and_then(|file| file.into_path().ok())
             .map(|path| path.to_string_lossy().into_owned());
+        if let Some(path) = selected.as_deref() {
+            app.state::<Bridge>().grant_picked_path(Path::new(path));
+        }
+        return selected;
     }
     // 安卓正式选目录走前端 bridge → native-audio；这里只作兼容空实现。
     // iOS 仍回落应用可扫音乐目录。
@@ -567,7 +1048,7 @@ async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
         app.dialog().file().pick_folders(move |picked| {
             let _ = tx.send(picked);
         });
-        return rx
+        let selected: Vec<String> = rx
             .await
             .ok()
             .flatten()
@@ -576,6 +1057,10 @@ async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
             .filter_map(|file| file.into_path().ok())
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
+        for path in &selected {
+            app.state::<Bridge>().grant_picked_path(Path::new(path));
+        }
+        return selected;
     }
     // 安卓正式入口在前端 bridge → native-audio `pick_library_folder`
     //（ACTION_OPEN_DOCUMENT_TREE）；这里返回空，避免再整包塞入 Music/Download。
@@ -589,22 +1074,6 @@ async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
     {
         mobile_library_roots(&app)
     }
-}
-
-/// 把 CLI 指挥手册覆盖写入各家 Agent 的 skills/kdj/。
-#[cfg(desktop)]
-#[tauri::command]
-fn export_cli_skill(
-    preset: Option<String>,
-    folder: Option<String>,
-) -> Result<cli::SkillExportResult, String> {
-    if let Some(folder) = folder.filter(|value| !value.trim().is_empty()) {
-        return cli::export_skill_to(Path::new(&folder)).map_err(|err| format!("{err:#}"));
-    }
-    let Some(preset) = preset.as_deref().and_then(cli::SkillPreset::parse) else {
-        return Err("请选择 Claude Code / Codex / PI / Cursor，或自选文件夹".into());
-    };
-    cli::export_skill_preset(preset).map_err(|err| format!("{err:#}"))
 }
 
 /// 移动端可写、可扫的曲库候选根目录。
@@ -669,9 +1138,13 @@ fn window_control(
                 Err(err) => Err(err),
             },
             "close" => {
-                // 点叉 = 藏窗保活（分析/下载/CLI 还在）。真退出走菜单 / kdj quit。
                 if _window.label() == "main" {
-                    return _window.hide().map_err(|err| err.to_string());
+                    capture_main_window_state(&_app);
+                    persist_main_window_state(&_app);
+                    // 主窗口就是当前桌面应用的生命周期：关闭时连同播放、分析和
+                    // 其他辅助窗口一起直接结束，不再无状态栏地驻留后台。
+                    _app.exit(0);
+                    return Ok(());
                 }
                 _window.close()
             }
@@ -785,6 +1258,318 @@ fn clamp_desktop_lyrics_coordinates(
         i64::from(x).clamp(min_x, max_x) as i32,
         i64::from(y).clamp(min_y, max_y) as i32,
     )
+}
+
+#[cfg(desktop)]
+const MAIN_WINDOW_MIN_WIDTH: u32 = 360;
+#[cfg(desktop)]
+const MAIN_WINDOW_MIN_HEIGHT: u32 = 480;
+#[cfg(desktop)]
+const MAIN_WINDOW_MAX_DIMENSION: u32 = 32_768;
+#[cfg(desktop)]
+const MAIN_WINDOW_STATE_MAX_BYTES: u64 = 64 * 1024;
+
+#[cfg(desktop)]
+fn valid_main_window_state(state: MainWindowState) -> bool {
+    state.version == MAIN_WINDOW_STATE_VERSION
+        && (MAIN_WINDOW_MIN_WIDTH..=MAIN_WINDOW_MAX_DIMENSION).contains(&state.width)
+        && (MAIN_WINDOW_MIN_HEIGHT..=MAIN_WINDOW_MAX_DIMENSION).contains(&state.height)
+}
+
+#[cfg(desktop)]
+fn main_window_overlap_area(state: MainWindowState, monitor: &DesktopMonitorBounds) -> i64 {
+    let left = i64::from(state.x).max(i64::from(monitor.x));
+    let top = i64::from(state.y).max(i64::from(monitor.y));
+    let right = (i64::from(state.x) + i64::from(state.width))
+        .min(i64::from(monitor.x) + i64::from(monitor.width));
+    let bottom = (i64::from(state.y) + i64::from(state.height))
+        .min(i64::from(monitor.y) + i64::from(monitor.height));
+    (right - left).max(0) * (bottom - top).max(0)
+}
+
+#[cfg(desktop)]
+fn main_window_center_distance(state: MainWindowState, monitor: &DesktopMonitorBounds) -> i128 {
+    // 全程使用两倍坐标，避免多屏缩放下的浮点取整使“最近显示器”来回跳。
+    let window_x2 = i128::from(state.x) * 2 + i128::from(state.width);
+    let window_y2 = i128::from(state.y) * 2 + i128::from(state.height);
+    let monitor_x2 = i128::from(monitor.x) * 2 + i128::from(monitor.width);
+    let monitor_y2 = i128::from(monitor.y) * 2 + i128::from(monitor.height);
+    let dx = window_x2 - monitor_x2;
+    let dy = window_y2 - monitor_y2;
+    dx * dx + dy * dy
+}
+
+/// 屏幕拔掉、分辨率变化或缩放变化后，旧坐标仍需完整落在最相近的可用屏幕中。
+#[cfg(desktop)]
+fn clamp_main_window_state(
+    state: MainWindowState,
+    monitors: &[DesktopMonitorBounds],
+) -> MainWindowState {
+    let Some(target) = monitors
+        .iter()
+        .filter(|monitor| monitor.width > 0 && monitor.height > 0)
+        .max_by_key(|monitor| {
+            (
+                main_window_overlap_area(state, monitor),
+                std::cmp::Reverse(main_window_center_distance(state, monitor)),
+            )
+        })
+    else {
+        return state;
+    };
+
+    let min_width = MAIN_WINDOW_MIN_WIDTH.min(target.width);
+    let min_height = MAIN_WINDOW_MIN_HEIGHT.min(target.height);
+    let width = state.width.clamp(min_width, target.width);
+    let height = state.height.clamp(min_height, target.height);
+    let (x, y) = clamp_desktop_lyrics_coordinates(
+        std::slice::from_ref(target),
+        width,
+        height,
+        state.x,
+        state.y,
+    );
+    MainWindowState {
+        x,
+        y,
+        width,
+        height,
+        ..state
+    }
+}
+
+#[cfg(desktop)]
+fn quarantine_main_window_state(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    for _ in 0..16 {
+        let target = parent.join(format!(
+            "{MAIN_WINDOW_STATE_FILE}.corrupt-{:016x}",
+            rand::random::<u64>()
+        ));
+        if target.exists() {
+            continue;
+        }
+        if std::fs::rename(path, &target).is_ok() {
+            return Some(target);
+        }
+    }
+    None
+}
+
+#[cfg(desktop)]
+fn load_main_window_state(data_dir: &Path) -> Option<MainWindowState> {
+    let path = data_dir.join(MAIN_WINDOW_STATE_FILE);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!("读取主窗口状态失败：{error}");
+            return None;
+        }
+    };
+    let invalid_file = !metadata.file_type().is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAIN_WINDOW_STATE_MAX_BYTES;
+    let bytes = if invalid_file {
+        None
+    } else {
+        match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                // 权限/瞬时 I/O 错误不等于内容损坏，不能擅自移动用户仍可修复的文件。
+                tracing::warn!("读取主窗口状态失败：{error}");
+                return None;
+            }
+        }
+    };
+    let parsed = bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<MainWindowState>(bytes).ok())
+        .filter(|state| valid_main_window_state(*state));
+    if parsed.is_none() {
+        match quarantine_main_window_state(&path) {
+            Some(quarantine) => {
+                tracing::warn!("主窗口状态已损坏，已隔离到 {}", quarantine.display())
+            }
+            None => tracing::warn!("主窗口状态已损坏，且无法隔离 {}", path.display()),
+        }
+    }
+    parsed
+}
+
+#[cfg(desktop)]
+fn write_main_window_state(data_dir: &Path, state: MainWindowState) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    if !valid_main_window_state(state) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid main window state",
+        ));
+    }
+    std::fs::create_dir_all(data_dir)?;
+    let bytes = serde_json::to_vec_pretty(&state)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let target = data_dir.join(MAIN_WINDOW_STATE_FILE);
+    let mut temp = None;
+    for _ in 0..32 {
+        let path = data_dir.join(format!(
+            ".{MAIN_WINDOW_STATE_FILE}.tmp-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => {
+                temp = Some((path, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let Some((temp_path, mut file)) = temp else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "cannot allocate main window state temp file",
+        ));
+    };
+    let commit = (|| -> std::io::Result<()> {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        commit_main_window_temp(&temp_path, &target, data_dir)?;
+        #[cfg(unix)]
+        if let Ok(directory) = std::fs::File::open(data_dir) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if commit.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    commit
+}
+
+#[cfg(all(desktop, not(windows)))]
+fn commit_main_window_temp(tmp: &Path, target: &Path, _parent: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, target)
+}
+
+#[cfg(all(desktop, windows))]
+fn commit_main_window_temp(tmp: &Path, target: &Path, parent: &Path) -> std::io::Result<()> {
+    if !target.exists() {
+        return std::fs::rename(tmp, target);
+    }
+    let backup = parent.join(format!(
+        ".{MAIN_WINDOW_STATE_FILE}.backup-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::rename(target, &backup)?;
+    if let Err(commit_error) = std::fs::rename(tmp, target) {
+        if let Err(restore_error) = std::fs::rename(&backup, target) {
+            return Err(std::io::Error::other(format!(
+                "commit failed: {commit_error}; restore failed: {restore_error}; backup: {}",
+                backup.display()
+            )));
+        }
+        return Err(commit_error);
+    }
+    if let Err(error) = std::fs::remove_file(&backup) {
+        tracing::warn!("清理旧主窗口状态备份失败 {}：{error}", backup.display());
+    }
+    Ok(())
+}
+
+#[cfg(desktop)]
+fn restore_main_window_state(window: &tauri::WebviewWindow, state: MainWindowState) {
+    let monitors = window
+        .available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|monitor| DesktopMonitorBounds {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        })
+        .collect::<Vec<_>>();
+    let state = clamp_main_window_state(state, &monitors);
+    if let Some(cache) = window.app_handle().try_state::<MainWindowStateCache>() {
+        if let Ok(mut cached) = cache.state.lock() {
+            *cached = Some(state);
+        }
+    }
+    if let Err(error) = window.set_size(tauri::PhysicalSize::new(state.width, state.height)) {
+        tracing::warn!("恢复主窗口大小失败：{error}");
+    }
+    if let Err(error) = window.set_position(tauri::PhysicalPosition::new(state.x, state.y)) {
+        tracing::warn!("恢复主窗口位置失败：{error}");
+    }
+    if state.maximized {
+        if let Err(error) = window.maximize() {
+            tracing::warn!("恢复主窗口最大化状态失败：{error}");
+        }
+    }
+}
+
+#[cfg(desktop)]
+fn capture_main_window_state(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Some(cache) = app.try_state::<MainWindowStateCache>() else {
+        return;
+    };
+    let maximized = window.is_maximized().unwrap_or(false);
+    let minimized = window.is_minimized().unwrap_or(false);
+    let fullscreen = window.is_fullscreen().unwrap_or(false);
+    let Ok(mut cached) = cache.state.lock() else {
+        return;
+    };
+    if maximized || minimized || fullscreen {
+        // 最大化/最小化/全屏事件报告的是瞬时占屏尺寸，不能覆盖最后的普通窗口边界。
+        if maximized {
+            if let Some(state) = cached.as_mut() {
+                state.maximized = true;
+            }
+        }
+        return;
+    }
+    let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) else {
+        return;
+    };
+    let state = MainWindowState {
+        version: MAIN_WINDOW_STATE_VERSION,
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+        maximized: false,
+    };
+    if valid_main_window_state(state) {
+        *cached = Some(state);
+    }
+}
+
+#[cfg(desktop)]
+fn persist_main_window_state(app: &tauri::AppHandle) {
+    let Some(cache) = app.try_state::<MainWindowStateCache>() else {
+        return;
+    };
+    let state = cache.state.lock().ok().and_then(|state| *state);
+    if let Some(state) = state {
+        if let Err(error) = write_main_window_state(&cache.data_dir, state) {
+            tracing::warn!("保存主窗口状态失败：{error}");
+        }
+    }
 }
 
 #[cfg(desktop)]
@@ -961,6 +1746,34 @@ fn has_file_bytes(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 历史 KDJ 数据目录不会因为迁移完成就自动消失。旧版曾以 0644 写入 QQ/网易云
+/// 会话，因此启动时也要收紧这些遗留副本；只处理真实的 sessions 目录和其中的
+/// 普通文件，不跟随符号链接，也不删除或改写凭证内容。
+#[cfg(unix)]
+fn harden_session_permissions(data_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sessions = data_dir.join("sessions");
+    let Ok(metadata) = std::fs::symlink_metadata(&sessions) else {
+        return;
+    };
+    if !metadata.file_type().is_dir() {
+        return;
+    }
+    let _ = std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700));
+    let Ok(entries) = std::fs::read_dir(&sessions) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn harden_session_permissions(_data_dir: &Path) {}
+
 /// 把旧应用数据逐项迁移到新的 KDJ 数据目录。
 ///
 /// 不能只迁移 settings.json：曲库数据库、封面和 providers 的 sessions 都是
@@ -1033,6 +1846,84 @@ fn migrate_legacy_data(current: &Path, legacy: &Path, force: bool) -> anyhow::Re
 }
 
 const DB_ALIAS_MERGE_MARKER: &str = ".kdj-db-alias-merged-v1";
+const RETIRED_LABS_SESSION_MIGRATION_MARKER: &str = ".retired-labs-sessions-migrated-v1";
+
+/// Labs 曾是默认开发入口，因独立 bundle identifier 把登录态写进了
+/// `com.kdj.app.labs/data/sessions`。Labs 退役后只把正式目录缺少的会话补回来：
+///
+/// - 已存在的正式会话永不覆盖，避免旧凭证压掉更新凭证；
+/// - 只迁移普通文件，不跟随符号链接；
+/// - 成功扫描后写一次性标记，避免用户主动退出后旧会话在下次启动被复活。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn migrate_retired_labs_sessions(current: &Path, retired_labs: &Path) -> anyhow::Result<usize> {
+    use std::io::{Read as _, Write as _};
+
+    let marker = current.join(RETIRED_LABS_SESSION_MIGRATION_MARKER);
+    if marker.is_file() {
+        return Ok(0);
+    }
+
+    let source_dir = retired_labs.join("sessions");
+    match std::fs::symlink_metadata(&source_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    }
+
+    let target_dir = current.join("sessions");
+    std::fs::create_dir_all(&target_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&target_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let mut copied = 0usize;
+    for entry in std::fs::read_dir(&source_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let target = target_dir.join(entry.file_name());
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut output = match options.open(&target) {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+
+        let copy_result = (|| -> std::io::Result<()> {
+            let mut input = std::fs::File::open(entry.path())?;
+            let mut buffer = [0u8; 16 * 1024];
+            loop {
+                let read = input.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                output.write_all(&buffer[..read])?;
+            }
+            output.sync_all()
+        })();
+        if let Err(error) = copy_result {
+            drop(output);
+            let _ = std::fs::remove_file(&target);
+            return Err(error.into());
+        }
+        copied += 1;
+    }
+
+    std::fs::create_dir_all(current)?;
+    std::fs::write(&marker, format!("migrated {copied}\n"))?;
+    Ok(copied)
+}
 
 /// 修复曾发布过的分叉布局：迁移器写了 `kdj.db`，运行期却继续打开
 /// `kumodeck.db`。合并只补当前库没有的 path，绝不覆盖评分、备注和 Cue 等现有编辑。
@@ -1095,6 +1986,13 @@ fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
             base.join("kumodeck").join("data"),
             base.join("kdj").join("data"),
         ];
+        let retired_labs = base.join("com.kdj.app.labs").join("data");
+        for historical in legacy_candidates
+            .iter()
+            .chain(std::iter::once(&retired_labs))
+        {
+            harden_session_permissions(historical);
+        }
         let current_has_sessions = current.join("sessions").exists();
         let marker = current.join(".legacy-data-migrated");
         for legacy in legacy_candidates {
@@ -1114,6 +2012,11 @@ fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
                 break;
             }
         }
+        let restored_sessions = migrate_retired_labs_sessions(&current, &retired_labs)?;
+        if restored_sessions > 0 {
+            eprintln!("KDJ: 已从退役 Labs 补回 {restored_sessions} 份缺失的登录凭证");
+        }
+        harden_session_permissions(&current);
         reconcile_database_alias(&current);
         Ok(current)
     }
@@ -1164,7 +2067,8 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     let data_dir = env_path("KDJ_DATA_DIR")
         .map(Ok)
         .unwrap_or_else(|| default_data_dir(app))?;
-    // 调试覆盖目录同样可能来自出过问题的版本，不能绕过数据库别名修复。
+    // 调试覆盖目录同样可能来自出过问题的版本，不能绕过凭证权限收紧或数据库别名修复。
+    harden_session_permissions(&data_dir);
     reconcile_database_alias(&data_dir);
     let download_dir = resolve_download_dir(app, &data_dir);
 
@@ -1174,14 +2078,16 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     // show() 前要用这份主题垫原生底色，否则浅色用户会先看到配置默认底闪一下。
     let theme = config.to_settings().theme;
     let data_dir_for_runtime = config.data_dir.clone();
-    let (port, _serve_task, control_rx) =
-        tauri::async_runtime::block_on(kdj_server::serve(config))?;
+    let (port, auth_token, media_token, activity_log, _serve_task, control_rx) =
+        tauri::async_runtime::block_on(kdj_server::serve(config.clone()))?;
     let base_url = format!("http://127.0.0.1:{port}");
+    let auth_token = auth_token.expose().to_string();
+    let media_token = media_token.expose().to_string();
 
     #[cfg(desktop)]
     {
         let gui = !NO_GUI.load(std::sync::atomic::Ordering::SeqCst);
-        if let Err(err) = cli::write_runtime(&data_dir_for_runtime, &base_url, gui) {
+        if let Err(err) = cli::write_runtime(&data_dir_for_runtime, &base_url, &auth_token, gui) {
             tracing::warn!("写 runtime.json 失败：{err:#}");
         }
         app.manage(RuntimeDir(data_dir_for_runtime.clone()));
@@ -1211,14 +2117,23 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
         let _ = data_dir_for_runtime;
     }
 
-    Ok((Bridge { base_url }, theme))
+    Ok((
+        Bridge {
+            base_url,
+            auth_token,
+            media_token,
+            config,
+            activity_log,
+            picker_grants: Mutex::new(HashSet::new()),
+        },
+        theme,
+    ))
 }
 
-/// Activity 的全局 JNI 引用。局部引用只在创建它的 Java 线程内有效，
-/// 而播放器线程 / IPC 线程都要拿它调 JNI（cpal AAudio、权限检查），
-/// 所以必须转全局引用并保活——直接存局部引用会导致 CheckJNI SIGABRT。
+/// Application Context 的全局 JNI 引用。Activity 会重建，不能把它的生命周期当成
+/// 进程生命周期；ndk-context 又明确只允许初始化一次，所以保存稳定的 Application。
 #[cfg(target_os = "android")]
-static ANDROID_ACTIVITY_GLOBAL: std::sync::OnceLock<jni::objects::GlobalRef> =
+static ANDROID_APPLICATION_GLOBAL: std::sync::OnceLock<jni::objects::GlobalRef> =
     std::sync::OnceLock::new();
 
 /// 安卓 JNI 入口：Tauri 的 `mobile_entry_point` 不会初始化 `ndk-context`，
@@ -1231,28 +2146,55 @@ static ANDROID_ACTIVITY_GLOBAL: std::sync::OnceLock<jni::objects::GlobalRef> =
 pub extern "system" fn Java_com_kdj_app_MainActivity_initNdkContext(
     mut env: jni::JNIEnv,
     activity: jni::objects::JObject,
-) {
+) -> jni::sys::jboolean {
+    if ANDROID_APPLICATION_GLOBAL.get().is_some() {
+        return jni::sys::JNI_TRUE;
+    }
     let vm = match env.get_java_vm() {
         Ok(vm) => vm,
         Err(err) => {
             tracing::error!("KDJ: 拿不到 JavaVM，ndk-context 初始化失败：{err}");
-            return;
+            return jni::sys::JNI_FALSE;
         }
     };
-    let global = match env.new_global_ref(&activity) {
+    let application = match env
+        .call_method(
+            &activity,
+            "getApplicationContext",
+            "()Landroid/content/Context;",
+            &[],
+        )
+        .and_then(|value| value.l())
+    {
+        Ok(context) if !context.is_null() => context,
+        Ok(_) => {
+            tracing::error!("KDJ: Application Context 为空，ndk-context 初始化失败");
+            return jni::sys::JNI_FALSE;
+        }
+        Err(err) => {
+            tracing::error!("KDJ: 拿不到 Application Context，ndk-context 初始化失败：{err}");
+            return jni::sys::JNI_FALSE;
+        }
+    };
+    let global = match env.new_global_ref(application) {
         Ok(g) => g,
         Err(err) => {
             tracing::error!("KDJ: 转全局引用失败，ndk-context 初始化失败：{err}");
-            return;
+            return jni::sys::JNI_FALSE;
         }
     };
     let vm_ptr = vm.get_java_vm_pointer() as *mut std::ffi::c_void;
     let context_ptr = global.as_obj().as_raw() as *mut std::ffi::c_void;
-    unsafe {
-        ndk_context::initialize_android_context(vm_ptr, context_ptr);
-    }
-    let _ = ANDROID_ACTIVITY_GLOBAL.set(global);
-    tracing::info!("KDJ: ndk-context 已初始化（全局引用保活）");
+    // `get_or_init` 是最终进程级门禁：即使未来有别的 Java 入口绕过 Kotlin 的
+    // AtomicBoolean 并发调用，依赖的 unsafe 初始化也仍然只会执行一次。
+    ANDROID_APPLICATION_GLOBAL.get_or_init(|| {
+        unsafe {
+            ndk_context::initialize_android_context(vm_ptr, context_ptr);
+        }
+        global
+    });
+    tracing::info!("KDJ: ndk-context 已用 Application Context 初始化");
+    jni::sys::JNI_TRUE
 }
 
 /// 安卓：查询是否已授予媒体读取权限（READ_MEDIA_AUDIO / READ_EXTERNAL_STORAGE）。
@@ -1305,6 +2247,7 @@ fn media_permission_granted() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    kdj_core::ensure_rustls_ring();
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))
         .init();
@@ -1315,6 +2258,14 @@ pub fn run() {
     }
 
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder.register_uri_scheme_protocol("kdj-youtube", |_context, request| {
+        youtube_embed::blank_protocol_response(request.uri().path())
+    });
+    #[cfg(target_os = "macos")]
+    let builder = builder.register_uri_scheme_protocol("kdj-bilibili", |_context, request| {
+        bilibili_embed::blank_protocol_response(request.uri().path())
+    });
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_dialog::init());
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -1323,19 +2274,27 @@ pub fn run() {
     // 负责前台保活、歌词 overlay、相册等。iOS 仍由插件内 AVPlayer 出声。
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let builder = builder.plugin(tauri_plugin_native_audio::init());
-    // updater/process 只在桌面注册：安卓的更新走 Release 页下 APK
+    // updater 只在桌面注册：安卓的更新走 Release 页下 APK；重启使用 Tauri 核心能力。
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init());
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     let builder = builder.setup(|app| {
-        app.manage(UpdateProgressState::default());
-        #[cfg(all(desktop, feature = "labs"))]
-        {
-            virtual_disk::configure_resources(app.handle());
-            app.manage(virtual_disk::VirtualDiskManager::default());
+        #[cfg(all(desktop, debug_assertions))]
+        let youtube_playback_e2e = std::env::var_os("VITE_KDJ_YOUTUBE_E2E")
+            .is_some_and(|value| value.as_os_str() == std::ffi::OsStr::new("1"));
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if youtube_playback_e2e {
+            // The acceptance video must stay visibly composited, but its diagnostic app must not
+            // activate over the user's current work or appear as another normal Dock app.
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         }
+        app.manage(UpdateProgressState::default());
+        #[cfg(desktop)]
+        app.manage(youtube_proof::YoutubeProofState::default());
+        #[cfg(desktop)]
+        app.manage(youtube_embed::YoutubeEmbedState::default());
+        #[cfg(desktop)]
+        app.manage(bilibili_embed::BilibiliEmbedState::default());
         #[cfg(desktop)]
         app.manage(midi::MidiHub::spawn(app.handle().clone()));
         #[cfg(any(desktop, target_os = "android"))]
@@ -1345,9 +2304,16 @@ pub fn run() {
         );
         let (bridge, theme) = start_server(app.handle())?;
         tracing::info!("KDJ 后端就绪：{}", bridge.base_url);
+        #[cfg(desktop)]
+        {
+            let data_dir = bridge.config.data_dir.clone();
+            let state = load_main_window_state(&data_dir);
+            app.manage(MainWindowStateCache {
+                data_dir,
+                state: Mutex::new(state),
+            });
+        }
         app.manage(bridge);
-        #[cfg(all(desktop, feature = "labs"))]
-        virtual_disk::sync_existing(app.handle());
         // 服务起好再显示窗口。窗口在配置里是 visible:false，这里补一次 show()——
         // Electron 版靠 `ready-to-show` 做同样的事，为的是不让用户看见
         // 「空窗口 → 内容」的跳变。start_server 失败时直接返回 Err，
@@ -1358,6 +2324,18 @@ pub fn run() {
         if let Some(window) = app.get_webview_window("main") {
             #[cfg(desktop)]
             {
+                let restored_window_state = app
+                    .state::<MainWindowStateCache>()
+                    .state
+                    .lock()
+                    .ok()
+                    .and_then(|state| *state);
+                if let Some(state) = restored_window_state {
+                    restore_main_window_state(&window, state);
+                }
+                if let Err(err) = youtube_proof::apply_main_webview_user_agent(&window) {
+                    tracing::warn!("{err}");
+                }
                 let resolved = resolve_startup_theme(theme, &window);
                 if let Err(err) = apply_main_window_background(&window, resolved) {
                     tracing::warn!("启动时设置窗口底色失败：{err}");
@@ -1366,9 +2344,19 @@ pub fn run() {
                 if let Err(err) = window.set_decorations(false) {
                     tracing::warn!("关闭系统标题栏失败：{err}");
                 }
+                #[cfg(debug_assertions)]
+                if youtube_playback_e2e {
+                    if let Err(err) = window.set_focusable(false) {
+                        tracing::warn!("YouTube E2E 窗口无法设为不可聚焦：{err}");
+                    }
+                    if let Err(err) = window.set_skip_taskbar(true) {
+                        tracing::warn!("YouTube E2E 窗口无法隐藏任务栏入口：{err}");
+                    }
+                }
                 if !NO_GUI.load(std::sync::atomic::Ordering::SeqCst) {
                     let _ = window.show();
                 }
+                capture_main_window_state(app.handle());
             }
             #[cfg(not(desktop))]
             {
@@ -1379,11 +2367,16 @@ pub fn run() {
         Ok(())
     });
 
-    #[cfg(all(desktop, feature = "labs"))]
+    #[cfg(desktop)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_bridge_info,
+        cli_install_status,
+        install_cli,
         open_path,
         reveal_path,
+        share_clipboard::write_share_clipboard,
+        start_native_file_drag,
+        start_native_link_drag,
         save_login_qr,
         open_external,
         open_soundcloud_oauth_window,
@@ -1392,37 +2385,6 @@ pub fn run() {
         apply_update,
         pick_folder,
         pick_folders,
-        export_cli_skill,
-        window_control,
-        set_window_background,
-        set_desktop_lyrics,
-        virtual_disk::virtual_disk_status,
-        virtual_disk::virtual_disk_mount,
-        virtual_disk::virtual_disk_ensure_capacity,
-        virtual_disk::virtual_disk_grow,
-        virtual_disk::virtual_disk_eject,
-        virtual_disk::virtual_disk_delete,
-        desktop_player::playback_initialize,
-        desktop_player::playback_command,
-        desktop_player::playback_control,
-        desktop_player::playback_state,
-        midi::midi_devices,
-        midi::midi_send
-    ]);
-    #[cfg(all(desktop, not(feature = "labs")))]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        get_bridge_info,
-        open_path,
-        reveal_path,
-        save_login_qr,
-        open_external,
-        open_soundcloud_oauth_window,
-        check_desktop_update,
-        get_update_progress,
-        apply_update,
-        pick_folder,
-        pick_folders,
-        export_cli_skill,
         window_control,
         set_window_background,
         set_desktop_lyrics,
@@ -1430,8 +2392,22 @@ pub fn run() {
         desktop_player::playback_command,
         desktop_player::playback_control,
         desktop_player::playback_state,
+        desktop_player::playback_waveform_window,
         midi::midi_devices,
-        midi::midi_send
+        midi::midi_send,
+        youtube_proof::youtube_mint_gvs_po_token,
+        youtube_proof::youtube_run_player,
+        youtube_embed::youtube_embed_prewarm,
+        youtube_embed::youtube_embed_open,
+        youtube_embed::youtube_embed_set_bounds,
+        youtube_embed::youtube_embed_status,
+        youtube_embed::youtube_embed_control,
+        youtube_embed::youtube_embed_close,
+        bilibili_embed::bilibili_embed_open,
+        bilibili_embed::bilibili_embed_set_bounds,
+        bilibili_embed::bilibili_embed_status,
+        bilibili_embed::bilibili_embed_control,
+        bilibili_embed::bilibili_embed_close
     ]);
     #[cfg(all(mobile, target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -1452,6 +2428,7 @@ pub fn run() {
         desktop_player::playback_command,
         desktop_player::playback_control,
         desktop_player::playback_state,
+        desktop_player::playback_waveform_window,
         media_permission_granted
     ]);
     #[cfg(all(mobile, target_os = "ios"))]
@@ -1471,14 +2448,23 @@ pub fn run() {
         set_desktop_lyrics
     ]);
 
-    // 点叉只藏主窗，别拆 WebView——播放/分析/CLI 还在跑。
+    // macOS 原生红灯和 Windows/Linux 原生关闭路径都必须结束整个应用；
+    // 即使桌面歌词等辅助窗口仍存在，也不能让播放或后台任务继续驻留。
     #[cfg(desktop)]
     let builder = builder.on_window_event(|window, event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            if window.label() == "main" {
-                let _ = window.hide();
-                api.prevent_close();
+        if window.label() != "main" {
+            return;
+        }
+        match event {
+            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                capture_main_window_state(window.app_handle());
             }
+            tauri::WindowEvent::CloseRequested { .. } => {
+                capture_main_window_state(window.app_handle());
+                persist_main_window_state(window.app_handle());
+                window.app_handle().exit(0);
+            }
+            _ => {}
         }
     });
 
@@ -1489,20 +2475,10 @@ pub fn run() {
             .expect("KDJ 启动失败");
         app.run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = &event {
+                capture_main_window_state(app_handle);
+                persist_main_window_state(app_handle);
                 if let Some(dir) = app_handle.try_state::<RuntimeDir>() {
                     cli::remove_runtime(&dir.0);
-                }
-                #[cfg(feature = "labs")]
-                virtual_disk::eject_on_exit(app_handle);
-            }
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = &event {
-                // 程序坞图标再点一下：唤回被红灯藏起的主窗。
-                // 桌面歌词可能仍可见，所以不能只看 has_visible_windows。
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.unminimize();
-                    let _ = window.show();
-                    let _ = window.set_focus();
                 }
             }
             let _ = (app_handle, event);
@@ -1518,7 +2494,130 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_desktop_lyrics_coordinates, DesktopMonitorBounds};
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use base64::Engine as _;
+
+    #[cfg(desktop)]
+    use super::soundcloud_oauth_callback_request;
+    use super::{
+        clamp_desktop_lyrics_coordinates, clamp_main_window_state, decode_png_data_url,
+        harden_session_permissions, load_main_window_state, migrate_retired_labs_sessions,
+        write_main_window_state, Bridge, DesktopMonitorBounds, MainWindowState,
+        MAIN_WINDOW_STATE_FILE, MAIN_WINDOW_STATE_VERSION, RETIRED_LABS_SESSION_MIGRATION_MARKER,
+    };
+
+    #[test]
+    fn retired_labs_only_restores_missing_sessions_once() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-retired-labs-sessions-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let current = root.join("com.kdj.app/data");
+        let retired = root.join("com.kdj.app.labs/data");
+        let current_sessions = current.join("sessions");
+        let retired_sessions = retired.join("sessions");
+        std::fs::create_dir_all(&current_sessions).unwrap();
+        std::fs::create_dir_all(&retired_sessions).unwrap();
+        std::fs::write(current_sessions.join("qqmusic.json"), b"current-newer").unwrap();
+        std::fs::write(retired_sessions.join("qqmusic.json"), b"labs-older").unwrap();
+        std::fs::write(retired_sessions.join("netease.json"), b"labs-recent").unwrap();
+        std::fs::create_dir(retired_sessions.join("not-a-session-file")).unwrap();
+
+        let copied = migrate_retired_labs_sessions(&current, &retired).unwrap();
+
+        assert_eq!(copied, 1);
+        assert_eq!(
+            std::fs::read(current_sessions.join("qqmusic.json")).unwrap(),
+            b"current-newer"
+        );
+        assert_eq!(
+            std::fs::read(current_sessions.join("netease.json")).unwrap(),
+            b"labs-recent"
+        );
+        assert!(current
+            .join(RETIRED_LABS_SESSION_MIGRATION_MARKER)
+            .is_file());
+
+        // 一次性标记很重要：用户之后主动退出（会删除会话文件）时，旧 Labs
+        // 凭证不能在下次启动时再次出现。
+        std::fs::remove_file(current_sessions.join("netease.json")).unwrap();
+        std::fs::write(retired_sessions.join("netease.json"), b"must-not-return").unwrap();
+        assert_eq!(
+            migrate_retired_labs_sessions(&current, &retired).unwrap(),
+            0
+        );
+        assert!(!current_sessions.join("netease.json").exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&current_sessions)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn soundcloud_oauth_callback_carries_the_control_bearer() {
+        kdj_core::ensure_rustls_ring();
+        let request = soundcloud_oauth_callback_request(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:5274/api/accounts/soundcloud/login/oauth/callback",
+            "control-secret",
+            "oauth-state",
+            "authorization-code",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer control-secret"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_session_files_are_hardened_without_changing_contents() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "kdj-session-permissions-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let sessions = root.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let credential = sessions.join("qqmusic.json");
+        std::fs::write(&credential, b"unchanged").unwrap();
+        std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        harden_session_permissions(&root);
+
+        assert_eq!(std::fs::read(&credential).unwrap(), b"unchanged");
+        assert_eq!(
+            std::fs::metadata(&sessions).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&credential).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn desktop_lyrics_restore_stays_on_an_available_monitor() {
@@ -1544,5 +2643,118 @@ mod tests {
             clamp_desktop_lyrics_coordinates(&monitors[..1], 900, 100, 2500, 1200),
             (1020, 980),
         );
+    }
+
+    #[test]
+    fn main_window_state_round_trips_and_moves_back_onto_an_available_monitor() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-main-window-state-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let state = MainWindowState {
+            version: MAIN_WINDOW_STATE_VERSION,
+            x: 2400,
+            y: 1200,
+            width: 1360,
+            height: 880,
+            maximized: true,
+        };
+        write_main_window_state(&root, state).unwrap();
+        assert_eq!(load_main_window_state(&root), Some(state));
+
+        let monitor = DesktopMonitorBounds {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            clamp_main_window_state(state, &[monitor]),
+            MainWindowState {
+                x: 560,
+                y: 200,
+                ..state
+            }
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn corrupt_main_window_state_is_quarantined_without_blocking_startup() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-corrupt-main-window-state-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(MAIN_WINDOW_STATE_FILE), b"{ definitely not json").unwrap();
+
+        assert_eq!(load_main_window_state(&root), None);
+        assert!(!root.join(MAIN_WINDOW_STATE_FILE).exists());
+        assert!(std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("main-window-state.json.corrupt-")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn login_qr_accepts_a_real_bounded_png_and_rejects_spoofed_bytes() {
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(include_bytes!("../icons/128x128.png"));
+        let decoded = decode_png_data_url(&format!("data:image/png;base64,{encoded}")).unwrap();
+        assert!(decoded.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let spoofed = base64::engine::general_purpose::STANDARD.encode(b"not a png");
+        assert!(decode_png_data_url(&format!("data:image/png;base64,{spoofed}")).is_err());
+        let oversized = "A".repeat(2 * 1024 * 1024 / 3 * 4 + 16);
+        assert!(decode_png_data_url(&format!("data:image/png;base64,{oversized}")).is_err());
+    }
+
+    #[test]
+    fn ipc_paths_require_managed_roots_or_a_native_picker_grant() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-ipc-paths-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let download = root.join("downloads");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&download).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let managed_file = download.join("track.mp3");
+        let outside_file = outside.join("secret.txt");
+        std::fs::write(&managed_file, b"audio").unwrap();
+        std::fs::write(&outside_file, b"secret").unwrap();
+
+        let config = Arc::new(kdj_core::AppConfig::create(root.join("data"), download, 0));
+        let bridge = Bridge {
+            base_url: "http://127.0.0.1:1".into(),
+            auth_token: "test".into(),
+            media_token: "media-test".into(),
+            activity_log: kdj_server::activity_log::ActivityLog::new(config.data_dir.clone())
+                .unwrap(),
+            config,
+            picker_grants: Mutex::new(HashSet::new()),
+        };
+        assert!(bridge
+            .authorize_existing_path(&managed_file.to_string_lossy(), false)
+            .is_ok());
+        assert!(bridge
+            .authorize_existing_path(&outside_file.to_string_lossy(), true)
+            .is_err());
+        bridge.grant_picked_path(&outside);
+        assert!(bridge
+            .authorize_existing_path(&outside_file.to_string_lossy(), true)
+            .is_ok());
+        assert!(bridge
+            .authorize_existing_path(&outside_file.to_string_lossy(), false)
+            .is_err());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -27,7 +27,7 @@ function pitchClass(root: string): number | null {
   return byRoot[root.toLocaleLowerCase()] ?? null;
 }
 
-/** OneLibrary key.name 是自由文本；兼容 djay、ID3、KDJ 与 Camelot 四种常见形状。 */
+/** 兼容常见 DJ/ID3 自由文本以及 KDJ、Camelot 调名。 */
 export function keyTextToCamelot(value: string | null | undefined): string {
   const raw = value?.trim() ?? "";
   const direct = parseCamelot(raw);
@@ -61,6 +61,28 @@ function shortTraditionalLabel(camelot: string, fallback: string): string {
   if (!traditional) return fallback.trim();
   const [root, mode] = traditional.split(" ");
   return `${root} ${mode === "minor" ? "m" : "M"}`;
+}
+
+function transposeCamelot(camelot: string, semitones: number): string {
+  const parsed = parseCamelot(camelot);
+  if (!parsed) return "";
+  const table = parsed.letter === "A" ? MINOR_BY_PITCH : MAJOR_BY_PITCH;
+  const from = table.indexOf(`${parsed.number}${parsed.letter}`);
+  if (from < 0) return "";
+  const shift = Math.round(Number.isFinite(semitones) ? semitones : 0);
+  return table[(from + shift % 12 + 12) % 12] ?? "";
+}
+
+/** Display-only current KEY after the realtime player transposes the analyzed source. */
+export function displayTransposedTrackKey(
+  key: TrackKeyFields,
+  notation: KeyNotation,
+  semitones: number,
+): string {
+  const original = canonicalTrackCamelot(key);
+  const shifted = transposeCamelot(original, semitones);
+  if (!shifted) return displayTrackKey(key, notation);
+  return notation === "camelot" ? shifted : shortTraditionalLabel(shifted, key.music_key ?? "");
 }
 
 /** 显示偏好只决定渲染，不回写曲目；两种列表因此共用同一份确定转换。 */

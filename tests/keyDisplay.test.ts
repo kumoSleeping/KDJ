@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   canonicalTrackCamelot,
   displayTrackKey,
+  displayTransposedTrackKey,
   keyTextToCamelot,
   trackKeyMatches,
   trackKeySortValue,
@@ -35,4 +36,12 @@ test("unknown external key text is preserved instead of invented", () => {
   assert.equal(displayTrackKey(key, "traditional"), "custom mode");
   assert.equal(displayTrackKey(key, "camelot"), "custom mode");
   assert.equal(trackKeySortValue(key), null);
+});
+
+test("realtime semitone transpose keeps Camelot and traditional labels in sync", () => {
+  const key = { music_key: "A minor", camelot: "8A" };
+  assert.equal(displayTransposedTrackKey(key, "traditional", 1), "Bb m");
+  assert.equal(displayTransposedTrackKey(key, "camelot", 1), "3A");
+  assert.equal(displayTransposedTrackKey(key, "traditional", 12), "A m");
+  assert.equal(displayTransposedTrackKey(key, "camelot", -12), "8A");
 });

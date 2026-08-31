@@ -24,7 +24,10 @@ import {
   TRACK_DECK_DROP_TARGET_ATTR,
   TRACK_DECK_SPLIT_DROP_TARGET,
 } from "./trackDrag";
-import type { OneLibraryTarget, SongSource, VideoDownloadRequest } from "../types";
+import type { SongSource, VideoDownloadRequest } from "../types";
+import { dragPreviewFromBlob, vinylDragPreview } from "./dragPreview";
+import { firstSourceShareLink, formatShareText, writeShareLinkDrag } from "./shareLink";
+import { useSharePrefs } from "./sharePrefs";
 
 export { isSparseDownloadTitle, withDownloadDisplay } from "./downloadDisplay";
 
@@ -35,6 +38,7 @@ const SEARCH_DRAG_END_GRACE_MS = 1800;
 
 const SEARCH_TEXT_PREFIX = "kdj-download-sources:";
 const VIDEO_TEXT_PREFIX = "kdj-video-download:";
+const searchDragPreviewCache = new Map<string, Promise<string>>();
 
 /** 拖视频时顺带带上的展示信息（不下发给下载 API）。 */
 export interface VideoDragDisplay {
@@ -50,6 +54,29 @@ type VideoDragWire = {
 export type ActiveSearchDrag =
   | { kind: "audio"; sources: SongSource[] }
   | ({ kind: "video"; request: VideoDownloadRequest } & VideoDragDisplay);
+
+function searchAudioDragPreview(sources: readonly SongSource[]): Promise<string> {
+  const source = sources.find(
+    (candidate) =>
+      (candidate.platform === "wyy" || candidate.platform === "qqm")
+      && Boolean(candidate.cover?.trim()),
+  );
+  if (!source || (source.platform !== "wyy" && source.platform !== "qqm")) {
+    return Promise.resolve(vinylDragPreview());
+  }
+  const cacheKey = `${source.platform}:${source.key}:${source.cover}`;
+  const cached = searchDragPreviewCache.get(cacheKey);
+  if (cached) return cached;
+  const pending = api.onlineCover(source.platform, source.cover)
+    .then(dragPreviewFromBlob)
+    .catch(() => vinylDragPreview());
+  searchDragPreviewCache.set(cacheKey, pending);
+  if (searchDragPreviewCache.size > 96) {
+    const oldest = searchDragPreviewCache.keys().next().value;
+    if (oldest) searchDragPreviewCache.delete(oldest);
+  }
+  return pending;
+}
 
 let active: ActiveSearchDrag | null = null;
 let dragEpoch = 0;
@@ -123,7 +150,11 @@ export function isSearchDownloadDrag(event: { dataTransfer: DataTransfer | null 
   });
 }
 
-export function writeSearchSourcesDrag(dataTransfer: DataTransfer, sources: SongSource[]): void {
+export function writeSearchSourcesDrag(
+  dataTransfer: DataTransfer,
+  sources: SongSource[],
+  dragSource: Element | null = null,
+): void {
   const payload = JSON.stringify(sources);
   // 先登记进程内兜底、再写 WebKit 接受度最高的 text/plain。部分 WKWebView
   // 会拒绝自定义 MIME；它只能是增强项，不能让整次 dragstart 在这里抛断。
@@ -135,6 +166,19 @@ export function writeSearchSourcesDrag(dataTransfer: DataTransfer, sources: Song
     dataTransfer.setData(SEARCH_DOWNLOAD_DND_TYPE, payload);
   } catch {
     // text/plain + active 足以走完整条拖放链路。
+  }
+  const shareLink = firstSourceShareLink(sources);
+  // 外部应用既可能读 URL，也可能只读普通文本；公开链接覆盖 text/plain。
+  // KDJ 内部仍有自定义 MIME + active 进程内载荷两路，不依赖这份文本。
+  if (shareLink) {
+    const source = sources[0];
+    writeShareLinkDrag(dataTransfer, shareLink, dragSource, {
+      plainText: formatShareText(
+        shareLink,
+        { title: source?.title, artists: source?.artists, album: source?.album },
+        useSharePrefs.getState().contentMode,
+      ),
+    });
   }
 }
 
@@ -177,10 +221,27 @@ export function beginAudioPointerDrag(
   }
   const target = down.target as HTMLElement | null;
   if (target?.closest("button, input, select, textarea, a, label")) return () => undefined;
+  // Windows WebView2 的 HTML5 URL 外拖可靠，且 drag crate 尚不支持 Windows 数据载荷；
+  // 那边保留浏览器原生链路。macOS WKWebView 则继续走下面的 pointer + 原生接管。
+  if (!window.kdj?.startLinkDrag && window.kdj?.platform === "win32") {
+    return () => undefined;
+  }
 
   const { pointerId, clientX: startX, clientY: startY } = down;
   const payload: Extract<ActiveSearchDrag, { kind: "audio" }> = { kind: "audio", sources };
   const ghostTitle = displayTitle.trim() || sources[0]?.title || "在线歌曲";
+  const shareLink = firstSourceShareLink(sources);
+  const shareText = shareLink
+    ? formatShareText(
+        shareLink,
+        { title: ghostTitle, artists: sources[0]?.artists, album: sources[0]?.album },
+        useSharePrefs.getState().contentMode,
+      )
+    : "";
+  const startLinkDrag = window.kdj?.startLinkDrag;
+  const dragPreview = shareLink && startLinkDrag
+    ? searchAudioDragPreview(sources)
+    : Promise.resolve("");
   let dragging = false;
   let ghost: HTMLDivElement | null = null;
   const clearTargets = () => {
@@ -234,6 +295,20 @@ export function beginAudioPointerDrag(
     ghost = null;
     delete document.body.dataset.kdSearchPointerDragging;
   };
+  const launchSystemLinkDrag = () => {
+    if (!shareLink || !startLinkDrag) return false;
+    cleanup();
+    if (dragging) finishSearchDrop();
+    void dragPreview
+      .then((dragImage) => startLinkDrag({
+        url: shareLink,
+        label: ghostTitle,
+        text: shareText,
+        dragImage: dragImage || undefined,
+      }))
+      .catch(onError);
+    return true;
+  };
   const activate = (x: number, y: number) => {
     dragging = true;
     onActivated?.();
@@ -253,6 +328,13 @@ export function beginAudioPointerDrag(
     if (!dragging && Math.hypot(move.clientX - startX, move.clientY - startY) < 5) return;
     move.preventDefault();
     if (!dragging) activate(move.clientX, move.clientY);
+    const edgeThreshold = 6;
+    const outsideWindow =
+      move.clientX <= edgeThreshold
+      || move.clientY <= edgeThreshold
+      || move.clientX >= window.innerWidth - edgeThreshold
+      || move.clientY >= window.innerHeight - edgeThreshold;
+    if (outsideWindow && launchSystemLinkDrag()) return;
     ghost?.style.setProperty(
       "transform",
       `translate3d(${move.clientX + 12}px, ${move.clientY + 12}px, 0)`,
@@ -506,37 +588,6 @@ export async function enqueueSearchQueuePayload(payload: ActiveSearchDrag): Prom
   await enqueueMediaDownloads(payload.sources, { quality });
 }
 
-/** 在线歌曲直接下载到当前设备 OneLibrary 列表；成品先进入本地曲库，再由持久化补写器复制到设备。 */
-export async function enqueueSearchOneLibraryPayload(
-  payload: ActiveSearchDrag,
-  target: OneLibraryTarget,
-): Promise<void> {
-  if (payload.kind !== "audio" || payload.sources.length === 0) {
-    throw new Error("OneLibrary 列表当前只接受在线歌曲下载");
-  }
-  useAppStore.getState().openQueuePanel();
-  const quality = useAppStore.getState().settings?.default_quality ?? null;
-  await enqueueMediaDownloads(payload.sources, {
-    quality,
-    one_library_target: target,
-  });
-}
-
-/** 原生 drop 路径：读出拖动载荷后转入与 dragend 坐标兜底相同的入队函数。 */
-export async function enqueueSearchOneLibraryDrop(
-  event: { dataTransfer: DataTransfer },
-  target: OneLibraryTarget,
-): Promise<void> {
-  const payload = readSearchDrop(event.dataTransfer);
-  const alreadyClaimed = dropClaimed;
-  finishSearchDrop();
-  if (!payload) {
-    if (alreadyClaimed) return;
-    throw new Error("拖动的数据读不出来，请再拖一次");
-  }
-  await enqueueSearchOneLibraryPayload(payload, target);
-}
-
 /** 已经由 dragend 兜底认领的搜索载荷，直接送进指定文件夹。 */
 export async function enqueueSearchPayload(
   payload: ActiveSearchDrag,
@@ -567,7 +618,8 @@ export async function enqueueSearchPayload(
       {
         id: optimisticId,
         kind: "video",
-        platform: "bilibili",
+        platform: payload.request.platform === "youtube" ? "youtube" : "bilibili",
+        source_key: payload.request.bvid?.trim() || "",
         title,
         artist,
         quality: payload.request.audio_only ? "audio" : `${payload.request.max_height ?? 1080}p`,
@@ -582,6 +634,14 @@ export async function enqueueSearchPayload(
         track_id: null,
         dest_dir: dest,
         cover: cover || undefined,
+        video_page:
+          payload.request.platform === "youtube"
+            ? null
+            : {
+                index: payload.request.page_index ?? 0,
+                count: payload.request.page_count ?? 0,
+                title: payload.request.page_title?.trim() || "",
+              },
         created_at: Date.now() / 1000,
         updated_at: Date.now() / 1000,
       },

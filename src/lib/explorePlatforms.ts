@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Platform } from "../types";
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 import {
   DEFAULT_PRIORITY,
   normalizePriority,
@@ -18,7 +19,7 @@ export const DEFAULT_EXPLORE_PLATFORMS: readonly Platform[] = ["soundcloud", "bi
 
 function loadPlatforms(): Platform[] {
   try {
-    const raw = localStorage.getItem(PLATFORMS_KEY);
+    const raw = readLocalStorage(PLATFORMS_KEY);
     if (!raw) return [...DEFAULT_EXPLORE_PLATFORMS];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [...DEFAULT_EXPLORE_PLATFORMS];
@@ -30,7 +31,7 @@ function loadPlatforms(): Platform[] {
 
 function loadPriority(): Platform[] {
   try {
-    const raw = localStorage.getItem(PRIORITY_KEY);
+    const raw = readLocalStorage(PRIORITY_KEY);
     if (!raw) return normalizePriority([...DEFAULT_PRIORITY]);
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return normalizePriority([...DEFAULT_PRIORITY]);
@@ -58,13 +59,13 @@ export const useExplorePlatforms = create<ExplorePlatformState>((set, get) => ({
       : [...current, platform];
     // 全关掉就搜不了——至少留一个。
     if (next.length === 0) return;
-    localStorage.setItem(PLATFORMS_KEY, JSON.stringify(next));
+    writeLocalStorageNow(PLATFORMS_KEY, JSON.stringify(next));
     set({ platforms: next });
   },
 
   reorder(next) {
     const ordered = normalizePriority(next);
-    localStorage.setItem(PRIORITY_KEY, JSON.stringify(ordered));
+    writeLocalStorageNow(PRIORITY_KEY, JSON.stringify(ordered));
     set({ priority: ordered });
   },
 }));

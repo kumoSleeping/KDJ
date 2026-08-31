@@ -6,7 +6,6 @@ import { isOutsideFolder } from "./outsideFolder";
 import { enqueueMediaDownloads } from "./mediaActions";
 import { useAppStore } from "../stores/appStore";
 import { useLibraryStore } from "../stores/libraryStore";
-import { usePlaylistStore } from "../stores/playlistStore";
 
 /**
  * 曲目表 / 搜索结果表的复制 · 剪切 · 粘贴 · 全选快捷键。
@@ -80,8 +79,6 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
       const target = event.target as HTMLElement | null;
       const inResults = Boolean(target?.closest?.('[data-kind="results"]'));
       const inLibrary = Boolean(target?.closest?.('[data-kind="library"]'));
-      const inOneLibrary = Boolean(target?.closest?.('[data-kind="onelibrary"]'));
-      const oneLibraryTarget = usePlaylistStore.getState().selectedTarget;
       const searchActive = search?.active() ?? false;
       const searchPreferred = searchActive && (search?.preferred?.() ?? false);
       const chosen = searchActive ? search!.chosenSources() : [];
@@ -98,32 +95,6 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
             : librarySelected
               ? false
               : searchActive;
-
-      if (inOneLibrary && oneLibraryTarget) {
-        const playlist = usePlaylistStore.getState();
-        if (isA) {
-          event.preventDefault();
-          playlist.selectAllTracks();
-          return;
-        }
-        if (isC) {
-          const chosenIds = new Set(playlist.selectedContentIds);
-          const labels = playlist.selectedTracks
-            .filter((track) => chosenIds.has(track.content_id))
-            .map((track) => {
-              const title = track.title || track.filename;
-              return track.artist ? `${title} — ${track.artist}` : title;
-            });
-          if (labels.length > 0) {
-            event.preventDefault();
-            void copyText(labels.join("\n"));
-          }
-          return;
-        }
-        // OneLibrary 的 X 不删除外置文件，也不伪装成本地剪贴板；移除列表关联
-        // 走 Delete/Backspace 或明确菜单。
-        if (isX) return;
-      }
 
       if (isA) {
         event.preventDefault();
@@ -160,31 +131,6 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
       }
 
       // isV
-      if (oneLibraryTarget && (inOneLibrary || (!inLibrary && !inResults))) {
-        const store = useLibraryStore.getState();
-        if (store.clipboard?.ids.length) {
-          event.preventDefault();
-          void usePlaylistStore
-            .getState()
-            .addTracks(
-              oneLibraryTarget.device_path,
-              oneLibraryTarget.playlist_id,
-              store.clipboard.ids,
-            )
-            .catch(() => undefined);
-          return;
-        }
-        if (searchClip?.length) {
-          event.preventDefault();
-          const quality = useAppStore.getState().settings?.default_quality ?? null;
-          void enqueueMediaDownloads(searchClip, {
-            quality,
-            one_library_target: oneLibraryTarget,
-          }).catch(() => undefined);
-          return;
-        }
-      }
-
       if (preferSearch) {
         // 搜索里粘贴 = 把勾选（或刚复制的源）加入下载列表。
         const sources = chosen.length > 0 ? chosen : searchClip;

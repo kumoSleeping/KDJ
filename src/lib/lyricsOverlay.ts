@@ -90,46 +90,57 @@ export function effectiveLyricExtra(
   return "off";
 }
 
-/** 附加层与主词各有一套时间戳，靠时间对齐而不是靠下标——两边行数常常不等。 */
-function alignByTime(lines: LrcLine[]): Map<number, string> {
-  const map = new Map<number, string>();
+/** 附加层与主词各有一套时间戳，靠最近时间对齐而不是靠下标——两边行数常常不等。 */
+function alignedText(lines: LrcLine[], time: number): string | undefined {
+  let best: LrcLine | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
   for (const line of lines) {
     const text = line.text.trim();
-    if (text) map.set(Math.round(line.time * 100), text);
+    if (!text) continue;
+    const distance = Math.abs(line.time - time);
+    if (distance < bestDistance) {
+      best = line;
+      bestDistance = distance;
+    }
   }
-  return map;
+  // 网易云普通 LRC 与 YRC 常有几十毫秒取整差；更远则视为确实缺少该行。
+  return bestDistance <= 0.12 ? best?.text.trim() : undefined;
 }
 
 export interface OverlayTimelinePayload {
   trackId: number | null;
   duration: number;
   placeholder: string;
-  lines: { time: number; text: string; secondary?: string }[];
+  lines: {
+    time: number;
+    endTime?: number;
+    text: string;
+    secondary?: string;
+    words?: { start: number; end: number; text: string }[];
+  }[];
 }
 
 /**
  * 把歌词缓存里的一条 entry 摊平成原生时间轴。
  *
- * 还在搜词或压根没有歌词时返回空 lines + 一句 placeholder，与桌面歌词窗口
- * 显示的文案保持一致，免得两个平台看起来像两个功能。
+ * 还在搜词或确实没有歌词时返回空内容；只有真实错误才显示文案。
  */
 export function buildOverlayTimeline(options: {
   trackId: number | null;
-  title: string;
   duration: number;
   entry: LyricsEntry;
   extra: LyricsExtra;
 }): OverlayTimelinePayload {
-  const { trackId, title, duration, entry, extra } = options;
+  const { trackId, duration, entry, extra } = options;
   const base: Omit<OverlayTimelinePayload, "lines" | "placeholder"> = { trackId, duration };
 
   if (entry.status === "idle" || entry.status === "loading") {
-    return { ...base, placeholder: `${title} · 正在搜歌词…`, lines: [] };
+    return { ...base, placeholder: "", lines: [] };
   }
   if (entry.status === "error" || entry.status === "empty" || !entry.lines.length) {
     return {
       ...base,
-      placeholder: entry.status === "error" ? "歌词暂时不可用" : "未找到歌词",
+      placeholder: entry.status === "error" ? "歌词暂时不可用" : "",
       lines: [],
     };
   }
@@ -137,11 +148,11 @@ export function buildOverlayTimeline(options: {
   const hasMeaning = entry.translated.some((line) => line.text.trim());
   const hasRomaji = entry.romaji.some((line) => line.text.trim());
   const layer = effectiveLyricExtra(extra, hasMeaning, hasRomaji);
-  const secondaryByTime =
+  const secondaryLines =
     layer === "meaning"
-      ? alignByTime(entry.translated)
+      ? entry.translated
       : layer === "romaji"
-        ? alignByTime(entry.romaji)
+        ? entry.romaji
         : null;
 
   return {
@@ -149,8 +160,10 @@ export function buildOverlayTimeline(options: {
     placeholder: "",
     lines: entry.lines.map((line) => ({
       time: line.time,
+      endTime: line.endTime,
       text: line.text,
-      secondary: secondaryByTime?.get(Math.round(line.time * 100)),
+      secondary: secondaryLines ? alignedText(secondaryLines, line.time) : undefined,
+      words: line.words,
     })),
   };
 }

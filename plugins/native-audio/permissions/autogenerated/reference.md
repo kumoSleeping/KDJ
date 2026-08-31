@@ -26,6 +26,7 @@ Default permissions for the plugin
 - `allow-dispose`
 - `allow-save-png-to-gallery`
 - `allow-open-local-path`
+- `allow-start-file-drag`
 - `allow-pick-library-folder`
 
 ## Permission Table
@@ -631,6 +632,32 @@ Enables the set_volume command without any pre-configured scope.
 <td>
 
 Denies the set_volume command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-start-file-drag`
+
+</td>
+<td>
+
+Enables the start_file_drag command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-start-file-drag`
+
+</td>
+<td>
+
+Denies the start_file_drag command without any pre-configured scope.
 
 </td>
 </tr>

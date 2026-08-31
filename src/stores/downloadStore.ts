@@ -10,8 +10,7 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import { isSparseDownloadTitle, withDownloadDisplay } from "../lib/downloadDisplay";
-import { rememberVideoEnqueue } from "../lib/queueTaskDraft";
-import { shouldRefreshYtmDownloadAuthorization } from "../lib/downloadRetryPolicy";
+import { forgetQueueDraft, rememberVideoEnqueue } from "../lib/queueTaskDraft";
 import { sortDownloadTasks } from "../lib/downloadOrder";
 import {
   hintForDownload,
@@ -22,17 +21,36 @@ import {
 import type {
   DownloadRequest,
   DownloadTask,
-  OneLibraryTarget,
   Quality,
   SongSource,
   WsEvent,
 } from "../types";
 
 const ACTIVE_STATES = new Set(["queued", "running", "processing"]);
+/** 成功项只是一条完成通知，不属于待办队列；失败/取消仍保留，方便重试或确认。 */
+const belongsInQueue = (task: DownloadTask): boolean => task.state !== "done";
+/** 挡住完成事件之后迟到的旧进度、入队 HTTP 响应或旧队列快照。 */
+const completedTaskIds = new Set<string>();
+const MAX_COMPLETED_TOMBSTONES = 512;
 /** 兼容仍在运行的旧后端：queued 取消会回一条 canceled，前端必须把它挡掉。 */
 const removedQueuedTasks = new Set<string>();
-/** A failed YTM task gets one transparent fresh-POT retry; persistent failures remain visible. */
-const refreshedYtmAuthorization = new Set<string>();
+
+function rememberCompletedTask(taskId: string): void {
+  completedTaskIds.delete(taskId);
+  completedTaskIds.add(taskId);
+  while (completedTaskIds.size > MAX_COMPLETED_TOMBSTONES) {
+    const oldest = completedTaskIds.values().next().value;
+    if (oldest === undefined) break;
+    completedTaskIds.delete(oldest);
+  }
+}
+
+function prepareAuthorizingTask(task: DownloadTask): void {
+  if (task.state !== "running" || task.phase !== "authorizing") return;
+  void api.preparePendingDownloads(task.id).catch((error) => {
+    console.warn("下载来源准备失败", error);
+  });
+}
 
 interface Derived {
   list: DownloadTask[];
@@ -67,14 +85,7 @@ function mergeTask(prev: DownloadTask | undefined, next: DownloadTask): Download
     cover: prev?.cover,
     dest_dir: prev?.dest_dir,
   });
-  const merged = {
-    ...withDownloadDisplay(fromPrev, cached ?? {}),
-    ...(next.one_library_error !== undefined
-      ? { one_library_error: next.one_library_error }
-      : prev?.one_library_error !== undefined
-        ? { one_library_error: prev.one_library_error }
-        : {}),
-  };
+  const merged = withDownloadDisplay(fromPrev, cached ?? {});
   // 服务端已经解析出真标题时，别被缓存里的旧 BV 盖回去
   if (!isSparseDownloadTitle(next.title) && merged.title !== next.title) {
     return { ...merged, title: next.title };
@@ -97,6 +108,12 @@ function applyServerList(
   const map = new Map<string, DownloadTask>();
   for (const task of payload) {
     if (removedQueuedTasks.has(task.id)) continue;
+    if (!belongsInQueue(task)) {
+      rememberCompletedTask(task.id);
+      forgetQueueDraft(task.id);
+      continue;
+    }
+    if (completedTaskIds.has(task.id)) continue;
     map.set(task.id, mergeTask(prev.get(task.id), task));
   }
   for (const [id, task] of prev) {
@@ -119,11 +136,11 @@ export interface DownloadStore {
       quality?: Quality | null;
       analyze?: boolean | null;
       dest_dir?: string;
-      one_library_target?: OneLibraryTarget | null;
     },
   ): Promise<DownloadTask[]>;
   cancel(taskId: string): Promise<void>;
   cancelAll(): Promise<void>;
+  pauseAll(): Promise<void>;
   retry(taskId: string): Promise<void>;
   remove(taskId: string): Promise<void>;
   clear(): Promise<void>;
@@ -148,6 +165,7 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       const map = applyServerList(get().tasks, tasks);
       commitTasks(map);
       set({ tasks: map, ...derive(map), loading: false, error: "" });
+      map.forEach(prepareAuthorizingTask);
     } catch (error) {
       set({ loading: false, error: errorText(error) });
     }
@@ -165,11 +183,17 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     const tasks = await api.enqueue(body);
     tasks.forEach((task, index) => {
       const source = sources[index];
-      if (task.kind !== "video" || source?.platform !== "youtube") return;
+      if (
+        task.kind !== "video" ||
+        (source?.platform !== "youtube" && source?.platform !== "bilibili")
+      ) return;
       rememberVideoEnqueue(task.id, {
-        platform: "youtube",
+        platform: source.platform,
         bvid: source.key,
-        page_index: 0,
+        page_index: Number(source.payload.page_index) || 0,
+        page_count: Number(source.payload.page_count) || 0,
+        page_title:
+          typeof source.payload.page_title === "string" ? source.payload.page_title : undefined,
         max_height: Number(source.payload.max_height) || 1080,
         audio_only: Boolean(source.payload.audio_only),
         transcode: Boolean(source.payload.transcode),
@@ -179,16 +203,6 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
         dest_dir: destDir || undefined,
       });
     });
-    const explicitTarget = options && "one_library_target" in options
-      ? options.one_library_target
-      : undefined;
-    const target = explicitTarget === null
-      ? null
-      : explicitTarget ?? (await import("./playlistStore")).usePlaylistStore.getState().selectedTarget;
-    if (target) {
-      const { registerOneLibraryDownloads } = await import("../lib/oneLibraryDownloads");
-      registerOneLibraryDownloads(target, sources, tasks);
-    }
     // 旧后端可能不回 dest_dir；本地盖上，左表待下载行才能对上文件夹。
     const stamped = destDir
       ? tasks.map((task) => ({ ...task, dest_dir: task.dest_dir || destDir }))
@@ -196,10 +210,7 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     get().mergeTasks(stamped);
     const autoStart = (await import("./appStore")).useAppStore.getState().settings
       ?.auto_start_downloads;
-    if (
-      autoStart &&
-      stamped.some((task) => task.kind === "audio")
-    ) {
+    if (autoStart) {
       // 入队和播放授权是两件事：先把 queued 行交给统一下载管理并立即返回，
       // 再在后台运行平台注册的来源准备适配器。以前 await 在这里，调用方要等“解析”完
       // 才打开下载栏，看起来像根本没入队；QQ/网易云却立即出现，行为完全不一致。
@@ -221,10 +232,6 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       throw error;
     }
     if (wasQueued) {
-      const { removePendingOneLibraryDownloadTasks } = await import(
-        "../lib/oneLibraryDownloadPersistence"
-      );
-      removePendingOneLibraryDownloadTasks([taskId]);
       const map = new Map(get().tasks);
       map.delete(taskId);
       set({ tasks: map, ...derive(map) });
@@ -239,25 +246,24 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       .map((task) => task.id);
     if (ids.length === 0) return;
     await api.cancelAllDownloads();
-    const [{ removePendingOneLibraryDownloadTasks }, { forgetQueueDraft }] = await Promise.all([
-      import("../lib/oneLibraryDownloadPersistence"),
-      import("../lib/queueTaskDraft"),
-    ]);
-    removePendingOneLibraryDownloadTasks(ids);
     ids.forEach(forgetQueueDraft);
     await get().refresh();
   },
 
+  async pauseAll() {
+    await api.pauseDownloads();
+    // 暂停保留每条任务和改单曲质量草稿；完整快照负责把 queued/running
+    // 一次性收敛为 paused，避免逐条事件抵达时按钮短暂反复切换。
+    await get().refresh();
+  },
+
   async retry(taskId) {
-    // A manual retry starts a new user-owned attempt and may receive one automatic refresh again.
-    refreshedYtmAuthorization.delete(taskId);
     const task = await api.retryDownload(taskId);
     get().mergeTasks([task]);
   },
 
   async remove(taskId) {
     await api.removeDownload(taskId);
-    refreshedYtmAuthorization.delete(taskId);
     const map = new Map(get().tasks);
     map.delete(taskId);
     set({ tasks: map, ...derive(map) });
@@ -265,23 +271,37 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
 
   async clear() {
     await api.clearDownloads();
-    // 后端清掉的是已结束的任务，进行中的留着，所以这里重新拉一次而不是本地清空。
+    // 后端清掉未开始和已结束任务，进行中的留着，所以这里重新拉一次而不是本地清空。
     await get().refresh();
   },
 
   mergeTasks(tasks) {
     if (tasks.length === 0) return;
     const map = new Map(get().tasks);
+    let sawCompletedTask = false;
     for (const task of tasks) {
+      if (!belongsInQueue(task)) {
+        sawCompletedTask = true;
+        rememberCompletedTask(task.id);
+        map.delete(task.id);
+        forgetQueueDraft(task.id);
+        continue;
+      }
+      if (completedTaskIds.has(task.id)) continue;
       const merged = mergeTask(map.get(task.id), task);
       map.set(task.id, merged);
     }
+    if (sawCompletedTask) pruneDownloadDisplayCache(map.keys());
     rememberDownloadDisplays(
       tasks
         .map((task) => map.get(task.id))
         .filter((task): task is DownloadTask => Boolean(task)),
     );
     set({ tasks: map, ...derive(map) });
+    tasks
+      .map((task) => map.get(task.id))
+      .filter((task): task is DownloadTask => Boolean(task))
+      .forEach(prepareAuthorizingTask);
   },
 
   removeLocal(taskId) {
@@ -295,30 +315,13 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     if (event.type === "download.updated") {
       if (removedQueuedTasks.has(event.payload.id)) return;
       get().mergeTasks([event.payload]);
-      if (event.payload.state === "done" || event.payload.state === "canceled") {
-        refreshedYtmAuthorization.delete(event.payload.id);
-      } else if (
-        shouldRefreshYtmDownloadAuthorization(event.payload)
-        && !refreshedYtmAuthorization.has(event.payload.id)
-      ) {
-        refreshedYtmAuthorization.add(event.payload.id);
-        // retryDownload first asks the WebView to mint a new POT and resolve a fresh GVS URL,
-        // then restarts the same task id. Keep the guard set if it fails again to avoid a loop.
-        void api.retryDownload(event.payload.id)
-          .then((task) => get().mergeTasks([task]))
-          .catch((error: unknown) => {
-            console.warn("YouTube Music 下载授权自动刷新失败", error);
-          });
-      }
-      void import("../lib/oneLibraryDownloads").then(({ handleOneLibraryDownloadTask }) =>
-        handleOneLibraryDownloadTask(event.payload),
-      );
       return;
     }
     if (event.type === "download.list") {
       const map = applyServerList(get().tasks, event.payload);
       commitTasks(map);
       set({ tasks: map, ...derive(map), error: "" });
+      map.forEach(prepareAuthorizingTask);
     }
   },
 }));

@@ -1,5 +1,5 @@
 /**
- * 歌词后台调度：不挡播放。当前曲一开播就搜；右侧唱盘「下一首」一并预取。
+ * 歌词后台调度：不挡播放。只有用户打开歌词界面时才读取当前曲，不预取下一首。
  * 右栏与悬浮歌词各自由自己的按钮控制，不再由设置项自动弹出。
  *
  * 悬浮歌词有两种实现，这里都由同一份偏好驱动：桌面是独立透明置顶窗口，
@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   accentPaint,
   dimPaint,
@@ -17,17 +17,19 @@ import {
 } from "../../lib/lyricsPrefs";
 import { buildOverlayTimeline } from "../../lib/lyricsOverlay";
 import { setNativeStreamLyricsClockEnabled } from "../../lib/streamTrack";
-import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
+import {
+  ensureLyrics,
+  publishedLyricsEntry,
+  useLyricsStore,
+} from "../../stores/lyricsStore";
 import { useAppStore } from "../../stores/appStore";
 import type { Track } from "../../types";
 
 export function LyricsHost({
   current,
-  next,
   allowDesktop,
 }: {
   current: Track | null;
-  next: Track | null;
   /** 视频/VJ 模式只使用视频小窗，绝不同时拉起桌面歌词。 */
   allowDesktop: boolean;
 }) {
@@ -60,17 +62,38 @@ export function LyricsHost({
     return () => setNativeStreamLyricsClockEnabled(false);
   }, [overlayOn]);
 
-  // 右栏或独立悬浮歌词任一路径正在使用时搜词并预取。
-  // prefsEpoch：引擎偏好变更后清缓存再重搜。
+  // 只有用户打开右栏或悬浮歌词时才取当前曲；下一首不提前跨平台搜索。
+  // ensure 自带同歌并发去重，不会阻塞播放或产生重复请求。
   useEffect(() => {
     if (!showLyrics && !overlayOn) return;
     void ensureLyrics(current);
-    if (!next || next.id === current?.id) return;
-    const timer = window.setTimeout(() => {
-      void ensureLyrics(next);
-    }, 400);
-    return () => window.clearTimeout(timer);
-  }, [showLyrics, overlayOn, prefsEpoch, current?.id, next?.id]);
+  }, [showLyrics, overlayOn, prefsEpoch, current?.id]);
+
+  // 桌面歌词是另一张 WebView。在线请求只由主窗口拥有，结果通过 Tauri 事件推送；
+  // 这样悬浮窗挂载、StrictMode 重挂载都不会再补打一条 /lyrics。
+  useEffect(() => {
+    if (!current?.id) return;
+    void emitTo(
+      "lyrics-overlay",
+      "lyrics-entry-changed",
+      publishedLyricsEntry(current.id, entry),
+    ).catch(() => undefined);
+  }, [current?.id, entry]);
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    void listen("lyrics-state-request", () => {
+      if (!current?.id) return;
+      void emitTo(
+        "lyrics-overlay",
+        "lyrics-entry-changed",
+        publishedLyricsEntry(current.id, entry),
+      ).catch(() => undefined);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => unlisten?.();
+  }, [current?.id, entry]);
 
   // 悬浮窗由播放条自己的按钮独立控制；无曲目时隐藏。
   useEffect(() => {
@@ -149,7 +172,6 @@ export function LyricsHost({
     void push(
       buildOverlayTimeline({
         trackId: current?.id ?? null,
-        title: current?.title || current?.filename || "",
         duration: current?.duration ?? 0,
         entry,
         extra: lyricExtra,

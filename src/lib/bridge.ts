@@ -10,19 +10,19 @@ import {
   pickLibraryFolder,
   requestOverlayPermission,
   savePngToGallery,
+  startFileDrag,
   setLyricsOverlay,
   setLyricsPlaybackClock,
   setLyricsTimeline,
 } from "tauri-plugin-native-audio-api";
 import type {
+  CliInstallStatus,
   KdjBridge,
   SavedLoginQr,
   UpdateInfo,
   UpdateProgress,
-  VirtualDiskStatus,
 } from "../types";
 import { djEngine } from "./djMix";
-import { virtualDiskSizeMib } from "./virtualDisk";
 
 declare global {
   interface Window {
@@ -55,6 +55,8 @@ function silenceMediaForExit(): void {
 /** `get_bridge_info` 的返回：Rust 侧启动 axum 之后才知道端口和 token。 */
 interface BridgeInfo {
   baseUrl: string;
+  authToken: string;
+  mediaToken: string;
   platform: string;
 }
 
@@ -79,25 +81,96 @@ function normalizeInfo(raw: unknown): BridgeInfo {
     return "";
   };
   const baseUrl = str("baseUrl", "base_url");
-  if (!baseUrl) {
-    throw new Error(`get_bridge_info 返回不完整：${JSON.stringify(raw)}`);
+  const authToken = str("authToken", "auth_token");
+  const mediaToken = str("mediaToken", "media_token");
+  if (!baseUrl || !authToken || !mediaToken) {
+    // 不把 raw 串进错误：它包含本进程 bearer，错误可能进入 UI 或诊断日志。
+    throw new Error("get_bridge_info 返回不完整（缺少地址或认证信息）");
   }
-  return { baseUrl, platform: str("platform") || "unknown" };
+  return { baseUrl, authToken, mediaToken, platform: str("platform") || "unknown" };
 }
 
 async function createTauriBridge(): Promise<KdjBridge> {
   const info = normalizeInfo(await tauriInvoke<unknown>("get_bridge_info"));
   const desktop = ["darwin", "win32", "linux"].includes(info.platform);
+  const cliSupported = ["darwin", "win32"].includes(info.platform);
   // 只认 Rust 报的平台名。iOS 沙盒里不存在系统级浮层，那边这些命令没有实现，
   // 靠 UA 猜会在 iPhone 上调到不存在的插件命令。
   const android = info.platform === "android";
   return {
     ...info,
+    cliInstallStatus: cliSupported
+      ? () => tauriInvoke<CliInstallStatus>("cli_install_status")
+      : undefined,
+    installCli: cliSupported
+      ? () => tauriInvoke<CliInstallStatus>("install_cli")
+      : undefined,
+    mintYoutubeGvsPoToken: info.platform === "darwin"
+      ? (options) => tauriInvoke<string>("youtube_mint_gvs_po_token", options)
+      : undefined,
+    runYoutubePlayer: info.platform === "darwin"
+      ? (options) => tauriInvoke<string>("youtube_run_player", options)
+      : undefined,
+    youtubeEmbed: info.platform === "darwin"
+      ? {
+          prewarm: () => tauriInvoke<void>("youtube_embed_prewarm"),
+          open: (options) => tauriInvoke<void>("youtube_embed_open", options),
+          setBounds: (options) => tauriInvoke<void>("youtube_embed_set_bounds", options),
+          status: (videoId) =>
+            tauriInvoke<{
+              ready: boolean;
+              playing: boolean;
+              buffering: boolean;
+              ended: boolean;
+              position: number;
+              duration: number;
+              hasError: boolean;
+            }>("youtube_embed_status", { videoId }),
+          control: (videoId, action, value) =>
+            tauriInvoke<void>("youtube_embed_control", { videoId, action, value }),
+          close: (videoId) => tauriInvoke<void>("youtube_embed_close", { videoId }),
+        }
+      : undefined,
+    bilibiliEmbed: info.platform === "darwin"
+      ? {
+          open: (options) => tauriInvoke<void>("bilibili_embed_open", options),
+          setBounds: (options) => tauriInvoke<void>("bilibili_embed_set_bounds", options),
+          status: (bvid, page) =>
+            tauriInvoke<{
+              ready: boolean;
+              playing: boolean;
+              buffering: boolean;
+              ended: boolean;
+              position: number;
+              duration: number;
+              hasError: boolean;
+            }>("bilibili_embed_status", { bvid, page }),
+          control: (bvid, page, action, value) =>
+            tauriInvoke<void>("bilibili_embed_control", { bvid, page, action, value }),
+          close: (bvid, page) =>
+            tauriInvoke<void>("bilibili_embed_close", { bvid, page }),
+        }
+      : undefined,
     // 安卓：opener 的 reveal 不支持，open_path 也打不开 file://；走 MediaStore / FileProvider。
     openPath: (path: string) =>
       android ? openLocalPath(path) : tauriInvoke<void>("open_path", { path }),
     revealPath: (path: string) =>
       android ? openLocalPath(path) : tauriInvoke<void>("reveal_path", { path }),
+    startFileDrag: android
+      ? async ({ paths, label }) => {
+          await startFileDrag(paths, label);
+        }
+      : ["darwin", "win32"].includes(info.platform)
+        ? ({ paths, label: _label, dragImage }) =>
+            tauriInvoke<void>("start_native_file_drag", { paths, dragImage })
+        : undefined,
+    startLinkDrag: info.platform === "darwin"
+      ? ({ url, label: _label, text, dragImage }) =>
+          tauriInvoke<void>("start_native_link_drag", { url, text, dragImage })
+      : undefined,
+    writeShareClipboard: info.platform === "darwin"
+      ? (options) => tauriInvoke<void>("write_share_clipboard", options)
+      : undefined,
     saveLoginQr: (options) =>
       android
         ? savePngToGallery({
@@ -148,25 +221,6 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }
         }
       : null,
-    virtualDisk: ["darwin", "win32"].includes(info.platform)
-      ? {
-          status: () => tauriInvoke<VirtualDiskStatus>("virtual_disk_status"),
-          mount: (sizeGib = 8, volumeName = "KDJ") =>
-            tauriInvoke<VirtualDiskStatus>("virtual_disk_mount", {
-              sizeMib: virtualDiskSizeMib(sizeGib),
-              volumeName,
-            }),
-          ensureCapacity: (requiredBytes) =>
-            tauriInvoke<VirtualDiskStatus>("virtual_disk_ensure_capacity", { requiredBytes }),
-          grow: (sizeGib, volumeName) =>
-            tauriInvoke<VirtualDiskStatus>("virtual_disk_grow", {
-              sizeMib: virtualDiskSizeMib(sizeGib),
-              volumeName,
-            }),
-          eject: () => tauriInvoke<VirtualDiskStatus>("virtual_disk_eject"),
-          delete: () => tauriInvoke<VirtualDiskStatus>("virtual_disk_delete"),
-        }
-      : null,
     pickFolder: async () => {
       // 安卓 dialog 没有 folder picker；走系统 ACTION_OPEN_DOCUMENT_TREE。
       if (android) {
@@ -184,13 +238,6 @@ async function createTauriBridge(): Promise<KdjBridge> {
       const picked = await tauriInvoke<unknown>("pick_folders");
       return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
     },
-    exportCliSkill: desktop
-      ? (options) =>
-          tauriInvoke<{ version: string; path: string; overwritten: boolean }>("export_cli_skill", {
-            preset: options.preset,
-            folder: options.folder,
-          })
-      : undefined,
     // 安卓：查询是否已授予媒体读取权限（供扫描 0 首时区分「没权限」和「真没歌」）。
     mediaPermissionGranted: android
       ? () => tauriInvoke<boolean>("media_permission_granted")
@@ -284,6 +331,8 @@ function createBrowserBridge(): KdjBridge {
     "8788";
   return {
     baseUrl: `http://127.0.0.1:${port}`,
+    authToken: (import.meta.env.VITE_KDJ_AUTH_TOKEN as string | undefined) ?? "",
+    mediaToken: (import.meta.env.VITE_KDJ_MEDIA_TOKEN as string | undefined) ?? "",
     platform: "browser",
     // 浏览器里没有原生对话框和文件管理器，只能降级成提示
     openPath: async (path: string) => {

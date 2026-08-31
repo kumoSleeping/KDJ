@@ -3,7 +3,21 @@
  */
 
 import { getBridge } from "./bridge";
-import { createYoutubeSabrPreview, type YoutubeSabrBootstrap } from "./youtubeSabr";
+import {
+  describeApiActivity,
+  finishApiActivity,
+  type ApiActivityHint,
+} from "./activityLog";
+import type { YoutubeSabrBootstrap } from "./youtubeSabr";
+import {
+  decipherNativeYoutubeUrl,
+  mintNativeYoutubeGvsPoToken,
+  nativeYoutubePlayerConfig,
+  transformNativeYoutubeN,
+  YOUTUBE_HLS_USER_AGENT,
+  YOUTUBE_NATIVE_PROOF_SUPPORTED,
+} from "./youtubeNativePo";
+import { appendClientPlaybackNonce } from "./youtubePlaybackUrl";
 import {
   decodeWaveformBinary,
   isWaveformBinaryContentType,
@@ -30,12 +44,6 @@ import type {
   IntakeRequest,
   IntakeResponse,
   LibraryStats,
-  OneLibraryCapacityPlan,
-  OneLibraryImportResult,
-  OneLibraryPlaylist,
-  OneLibraryTrack,
-  PlaylistExportResult,
-  RemovableDevice,
   UpdateInfo,
   QrSession,
   QrState,
@@ -47,10 +55,9 @@ import type {
   ScanResponseLike,
   StreamPlaylist,
   StreamPlaylistResponse,
+  StreamPlaylistTrackRemoveResponse,
   StreamCacheStats,
   StreamWaveformProgress,
-  StemRuntimeStatus,
-  TrackStemStatus,
   LyricsRequest,
   LyricsResponse,
   LocalLyricsResponse,
@@ -66,8 +73,12 @@ import type {
   TrackPatchResult,
   VideoDownloadRequest,
   VideoInfo,
-  VjExportRequest,
   BrowserCatalog,
+  CacheCategory,
+  CacheOverview,
+  ActivityLogCategory,
+  ActivityLogOverview,
+  ActivityLogSettings,
   Waveform,
   WsEvent,
 } from "../types";
@@ -75,23 +86,6 @@ import type {
 // 壳可能是 Tauri / Electron / 浏览器预览，由 bridge.ts 运行时探测。
 // 保持同步取用：audioUrl / coverUrl / WebSocket 这些调用点不能改成 async。
 const bridge = () => getBridge();
-
-async function browserYoutubeBotguard(
-  operation: "Create" | "GenerateIT",
-  payload: unknown[],
-): Promise<unknown> {
-  const response = await fetch("https://www.youtube.com/api/jnn/v1/" + operation, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json+protobuf",
-      "X-Goog-Api-Key": "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw",
-      "X-User-Agent": "grpc-web-javascript/0.1",
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) throw new Error("YouTube BotGuard 返回 HTTP " + response.status);
-  return response.json();
-}
 
 export class ApiError extends Error {
   constructor(
@@ -104,9 +98,17 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const { baseUrl } = bridge();
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  activityHint?: ApiActivityHint,
+): Promise<T> {
+  const { baseUrl, authToken } = bridge();
+  const activity = describeApiActivity(path, init, activityHint);
+  const activityStarted = performance.now();
   const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${authToken}`);
+  if (activity) headers.set("X-KDJ-Activity-Recorded", "1");
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -114,6 +116,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     response = await fetch(`${baseUrl}/api${path}`, { ...init, headers });
   } catch (error) {
+    finishApiActivity(activity, {
+      status: 0,
+      durationMs: performance.now() - activityStarted,
+      ok: false,
+      error: (error as Error).message,
+    });
     throw new ApiError(`无法连接本地服务：${(error as Error).message}`, 0);
   }
   const text = await response.text();
@@ -123,21 +131,54 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       (data && typeof data === "object" && "detail" in data
         ? String((data as { detail: unknown }).detail)
         : "") || response.statusText;
-    throw new ApiError(detail || `HTTP ${response.status}`, response.status, data);
+    const message = detail || `HTTP ${response.status}`;
+    finishApiActivity(activity, {
+      status: response.status,
+      durationMs: performance.now() - activityStarted,
+      ok: false,
+      error: message,
+    });
+    throw new ApiError(message, response.status, data);
   }
+  finishApiActivity(activity, {
+    status: response.status,
+    durationMs: performance.now() - activityStarted,
+    ok: true,
+  });
   return data as T;
 }
 
 /** 和 request 共用同一套错误语义，但保留图片响应为 Blob。 */
-async function requestWaveform(path: string, profile: WaveformProfile): Promise<Waveform> {
-  const { baseUrl } = bridge();
+async function requestWaveform(
+  path: string,
+  profile: WaveformProfile,
+  signal?: AbortSignal,
+): Promise<Waveform> {
+  const { baseUrl, authToken } = bridge();
+  const activity = describeApiActivity(path, { method: "GET" });
+  const activityStarted = performance.now();
+  const headers = new Headers({
+    Accept: `${WAVEFORM_BINARY_MIME}, application/json;q=0.5`,
+    Authorization: `Bearer ${authToken}`,
+  });
+  if (activity) headers.set("X-KDJ-Activity-Recorded", "1");
   let response: Response;
   try {
     response = await fetch(`${baseUrl}/api${path}`, {
       cache: "no-store",
-      headers: { Accept: `${WAVEFORM_BINARY_MIME}, application/json;q=0.5` },
+      signal,
+      headers,
     });
   } catch (error) {
+    // Superseded waveform work is expected during a Deck switch. Preserve AbortError so the
+    // acquisition layer can keep it silent instead of presenting it as a server outage.
+    if (signal?.aborted) throw error;
+    finishApiActivity(activity, {
+      status: 0,
+      durationMs: performance.now() - activityStarted,
+      ok: false,
+      error: (error as Error).message,
+    });
     throw new ApiError(`无法连接本地服务：${(error as Error).message}`, 0);
   }
   if (!response.ok) {
@@ -147,24 +188,49 @@ async function requestWaveform(path: string, profile: WaveformProfile): Promise<
       (data && typeof data === "object" && "detail" in data
         ? String((data as { detail: unknown }).detail)
         : "") || response.statusText;
-    throw new ApiError(detail || `HTTP ${response.status}`, response.status, data);
+    const message = detail || `HTTP ${response.status}`;
+    finishApiActivity(activity, {
+      status: response.status,
+      durationMs: performance.now() - activityStarted,
+      ok: false,
+      error: message,
+    });
+    throw new ApiError(message, response.status, data);
   }
-  if (isWaveformBinaryContentType(response.headers.get("Content-Type"))) {
-    return decodeWaveformBinary(await response.arrayBuffer(), profile);
+  try {
+    if (isWaveformBinaryContentType(response.headers.get("Content-Type"))) {
+      return decodeWaveformBinary(await response.arrayBuffer(), profile);
+    }
+    // Compatibility with a Rust server that predates binary negotiation: it ignores `format` and
+    // returns the old JSON shape, so frontend HMR does not require an immediate backend restart.
+    const text = await response.text();
+    const data = text ? safeParse(text) : null;
+    if (!data || typeof data !== "object") {
+      throw new ApiError("波形响应格式无效", response.status, data);
+    }
+    return data as Waveform;
+  } catch (error) {
+    finishApiActivity(activity, {
+      status: response.status,
+      durationMs: performance.now() - activityStarted,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
-  // Compatibility with a Rust server that predates binary negotiation: it ignores `format` and
-  // returns the old JSON shape, so frontend HMR does not require an immediate backend restart.
-  const text = await response.text();
-  const data = text ? safeParse(text) : null;
-  if (!data || typeof data !== "object") {
-    throw new ApiError("波形响应格式无效", response.status, data);
-  }
-  return data as Waveform;
 }
 
-async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
-  const { baseUrl } = bridge();
+async function requestBlob(
+  path: string,
+  init: RequestInit = {},
+  activityHint?: ApiActivityHint,
+): Promise<Blob> {
+  const { baseUrl, authToken } = bridge();
+  const activity = describeApiActivity(path, init, activityHint);
+  const activityStarted = performance.now();
   const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${authToken}`);
+  if (activity) headers.set("X-KDJ-Activity-Recorded", "1");
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -176,6 +242,12 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
       cache: "no-store",
     });
   } catch (error) {
+    finishApiActivity(activity, {
+      status: 0,
+      durationMs: performance.now() - activityStarted,
+      ok: false,
+      error: (error as Error).message,
+    });
     throw new ApiError(`无法连接本地服务：${(error as Error).message}`, 0);
   }
   if (!response.ok) {
@@ -185,8 +257,20 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
       (data && typeof data === "object" && "detail" in data
         ? String((data as { detail: unknown }).detail)
         : "") || response.statusText;
-    throw new ApiError(detail || `HTTP ${response.status}`, response.status, data);
+    const message = detail || `HTTP ${response.status}`;
+    finishApiActivity(activity, {
+      status: response.status,
+      durationMs: performance.now() - activityStarted,
+      ok: false,
+      error: message,
+    });
+    throw new ApiError(message, response.status, data);
   }
+  finishApiActivity(activity, {
+    status: response.status,
+    durationMs: performance.now() - activityStarted,
+    ok: true,
+  });
   return response.blob();
 }
 
@@ -198,6 +282,14 @@ function safeParse(text: string): unknown {
   }
 }
 
+/** HTMLMediaElement/img 不能自定义 Authorization；GET 媒体 URL 使用独立的只读
+ * media capability。它不能访问通用 GET 或任何控制/写接口。 */
+function authenticatedGetUrl(raw: string): string {
+  const url = new URL(raw);
+  url.searchParams.set("kdj_media_token", bridge().mediaToken);
+  return url.toString();
+}
+
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 
@@ -207,18 +299,140 @@ interface YtmProtectedIdentity {
   gvs_binding: "video_id" | "data_sync_id" | "visitor_data";
 }
 
-function alternateYtmGvsBinding(identity: YtmProtectedIdentity): YtmProtectedIdentity["gvs_binding"] {
-  if (identity.gvs_binding === "video_id") {
-    return identity.data_sync_id ? "data_sync_id" : "visitor_data";
-  }
-  return "video_id";
+interface YoutubeHlsBegin extends YtmProtectedIdentity {
+  preparation_id: string;
+  n_challenge: string;
+  player_url: string;
 }
 
-interface PendingDownloadPreparation {
-  id: string;
-  platform: Platform;
-  source: SongSource;
-  quality: Quality;
+const playerScripts = new Map<string, Promise<string>>();
+
+function loadYoutubePlayerScript(route: string, playerUrl: string): Promise<string> {
+  const key = `${route}:${playerUrl}`;
+  let pending = playerScripts.get(key);
+  if (!pending) {
+    pending = post<string>(route, { player_url: playerUrl }).catch((error) => {
+      playerScripts.delete(key);
+      throw error;
+    });
+    playerScripts.set(key, pending);
+  }
+  return pending;
+}
+
+async function exactYtmPlayerScript(
+  requestedPlayerUrl: string,
+  requestedJavascript: string,
+  responsePlayerUrl: string,
+): Promise<string> {
+  if (responsePlayerUrl === requestedPlayerUrl) return requestedJavascript;
+  return loadYoutubePlayerScript("/song/preview/ytm/player-script", responsePlayerUrl);
+}
+
+async function prepareYoutubeVideoPreview(bvid: string, maxHeight?: number): Promise<string> {
+  if (!/^[A-Za-z0-9_-]{11}$/.test(bvid)) throw new Error("YouTube 视频 ID 无效");
+  const begun = await post<YoutubeHlsBegin>("/video/youtube/hls/begin", {
+    bvid,
+    user_agent: YOUTUBE_HLS_USER_AGENT,
+    max_height: maxHeight,
+  });
+  if (!/^[A-Fa-f0-9]{64}$/.test(begun.preparation_id)) {
+    throw new Error("YouTube HLS 准备标识无效");
+  }
+  const [gvsPoToken, nValue] = await Promise.all([
+    mintNativeYoutubeGvsPoToken(youtubeGvsBindingValue(bvid, begun)),
+    begun.n_challenge
+      ? loadYoutubePlayerScript("/video/youtube/player-script", begun.player_url)
+          .then((javascript) => transformNativeYoutubeN(
+            begun.n_challenge,
+            begun.player_url,
+            javascript,
+          ))
+      : Promise.resolve(""),
+  ]);
+  const prepared = await post<{ path: string }>("/video/youtube/hls/complete", {
+    preparation_id: begun.preparation_id,
+    n_value: nValue,
+    gvs_po_token: gvsPoToken,
+  });
+  if (!/^\/api\/video\/youtube\/hls\/[A-Fa-f0-9]{64}$/.test(prepared.path)) {
+    throw new Error("YouTube HLS 播放地址无效");
+  }
+  return authenticatedGetUrl(new URL(prepared.path, bridge().baseUrl).toString());
+}
+
+function youtubeHlsTicket(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  const base = new URL(bridge().baseUrl);
+  const match = url.pathname.match(/^\/api\/video\/youtube\/hls\/([A-Fa-f0-9]{64})$/);
+  if (url.origin !== base.origin || !match) throw new Error("YouTube HLS 本地票据无效");
+  return match[1];
+}
+
+async function startYoutubeVideoPlayback(preparedUrl: string): Promise<string> {
+  const sourceTicket = youtubeHlsTicket(preparedUrl);
+  const session = await post<{ path: string }>(
+    `/video/youtube/hls/${sourceTicket}/session`,
+  );
+  if (!/^\/api\/video\/youtube\/hls\/[A-Fa-f0-9]{64}$/.test(session.path)) {
+    throw new Error("YouTube HLS 播放会话无效");
+  }
+  return authenticatedGetUrl(new URL(session.path, bridge().baseUrl).toString());
+}
+
+async function revokeYoutubeVideoPlayback(playbackUrl: string): Promise<void> {
+  const ticket = youtubeHlsTicket(playbackUrl);
+  const result = await post<{ revoked: boolean }>(`/video/youtube/hls/${ticket}/revoke`);
+  if (!result.revoked) throw new Error("YouTube HLS 播放会话没有被撤销");
+}
+
+function youtubeGvsBindingValue(videoId: string, identity: YtmProtectedIdentity): string {
+  const binding = identity.gvs_binding === "video_id"
+    ? videoId
+    : identity.gvs_binding === "data_sync_id"
+      ? identity.data_sync_id
+      : identity.visitor_data;
+  if (!binding || binding.length > 4_096) throw new Error("YouTube GVS 绑定值不可用");
+  return binding;
+}
+
+type PendingDownloadPreparation =
+  | {
+      kind: "audio";
+      id: string;
+      attempt: number;
+      platform: Platform;
+      source: SongSource;
+      quality: Quality;
+    }
+  | {
+      kind: "video";
+      id: string;
+      attempt: number;
+      platform: Platform;
+      request: VideoDownloadRequest;
+    };
+
+const YTM_GVS_RANGE_CHUNK_BYTES = 10 * 1024 * 1024;
+const YTM_GVS_MAX_PROOFS = 64;
+
+export function ytmGvsProofCount(rawUrl: string): number {
+  const length = Number(new URL(rawUrl).searchParams.get("clen"));
+  if (!Number.isSafeInteger(length) || length <= 0) {
+    throw new Error("YouTube Music 播放流缺少有效媒体长度");
+  }
+  const count = Math.ceil(length / YTM_GVS_RANGE_CHUNK_BYTES);
+  if (count > YTM_GVS_MAX_PROOFS) {
+    throw new Error("YouTube Music 媒体过大，无法建立完整下载会话");
+  }
+  return count;
+}
+
+function ytmGvsStreamFingerprint(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  return ["clen", "mime", "itag"]
+    .map((key) => `${key}=${url.searchParams.get(key) ?? ""}`)
+    .join("&");
 }
 
 async function resolveYtmProtectedStream(
@@ -226,40 +440,25 @@ async function resolveYtmProtectedStream(
   quality?: Quality,
   knownIdentity?: YtmProtectedIdentity,
   forceFreshProof = false,
-  alternateBinding = false,
 ): Promise<{ poToken: string; poTokens: string[]; resolvedUrl: string; resolvedUrls: string[] }> {
   const videoId = source.payload?.video_id;
   if (source.platform !== "ytm" || typeof videoId !== "string") {
     throw new Error("YouTube Music 歌曲缺少视频 ID");
   }
-  const {
-    decipherYoutubeWebStream,
-    youtubeWebPlayerConfig,
-    youtubeWebPoSession,
-  } = await import("./youtubePoToken");
   const identity = knownIdentity ?? await request<YtmProtectedIdentity>(
     "/song/preview/ytm/identity",
     { cache: "no-store" },
   );
-  const gvsBinding = alternateBinding ? alternateYtmGvsBinding(identity) : identity.gvs_binding;
-  const proof = await youtubeWebPoSession(
-    videoId,
-    identity.visitor_data,
-    identity.data_sync_id,
-    gvsBinding,
-    browserYoutubeBotguard,
-    forceFreshProof,
-  );
+  const binding = youtubeGvsBindingValue(videoId, identity);
   const playerUrl = await request<string>("/song/preview/ytm/player-url", {
     cache: "no-store",
   });
-  const loadPlayerScript = (url: string) => post<string>(
+  const javascript = await loadYoutubePlayerScript(
     "/song/preview/ytm/player-script",
-    { player_url: url },
+    playerUrl,
   );
-  const playerConfig = await youtubeWebPlayerConfig(playerUrl, loadPlayerScript);
-  const resolvedUrls: string[] = [];
-  for (let index = 0; index < proof.gvsPoTokens.length; index += 1) {
+  const playerConfig = await nativeYoutubePlayerConfig(playerUrl, javascript);
+  const resolvePlayerStream = async (): Promise<string> => {
     const protectedPlayer = await post<{
       signature_cipher: string;
       player_url: string;
@@ -272,16 +471,41 @@ async function resolveYtmProtectedStream(
       player_url: playerUrl,
       signature_timestamp: playerConfig.signatureTimestamp,
     });
-    resolvedUrls.push(await decipherYoutubeWebStream(
+    const responseJavascript = await exactYtmPlayerScript(
+      playerUrl,
+      javascript,
+      protectedPlayer.player_url,
+    );
+    return decipherNativeYoutubeUrl(
       protectedPlayer.signature_cipher,
       protectedPlayer.player_url,
-      proof.gvsPoTokens[index],
-      loadPlayerScript,
-    ));
+      responseJavascript,
+    );
+  };
+  const firstRawUrl = await resolvePlayerStream();
+  const proofCount = ytmGvsProofCount(firstRawUrl);
+  const fingerprint = ytmGvsStreamFingerprint(firstRawUrl);
+  const poTokens: string[] = [];
+  const resolvedUrls: string[] = [];
+  for (let index = 0; index < proofCount; index += 1) {
+    // 每个有界 GVS 请求都使用新的 Player URL、proof 和 cpn。只复用同一个
+    // BotGuard minter；不能把一次签名上下文里的媒体 URL 横跨多个请求使用。
+    const rawUrl = index === 0 ? firstRawUrl : await resolvePlayerStream();
+    if (ytmGvsStreamFingerprint(rawUrl) !== fingerprint) {
+      throw new Error("YouTube Music 分段授权返回了不同的音频流");
+    }
+    const poToken = await mintNativeYoutubeGvsPoToken(
+      binding,
+      forceFreshProof && index === 0,
+    );
+    const resolved = new URL(rawUrl);
+    resolved.searchParams.set("pot", poToken);
+    poTokens.push(poToken);
+    resolvedUrls.push(appendClientPlaybackNonce(resolved.toString()));
   }
   return {
-    poToken: proof.gvsPoToken,
-    poTokens: proof.gvsPoTokens,
+    poToken: poTokens[0],
+    poTokens,
     resolvedUrl: resolvedUrls[0],
     resolvedUrls,
   };
@@ -290,43 +514,33 @@ async function resolveYtmProtectedStream(
 async function resolveYtmSabrPlayback(
   source: SongSource,
   forceFreshProof = false,
-  alternateBinding = false,
 ): Promise<YoutubeSabrBootstrap> {
   const videoId = source.payload?.video_id;
   if (source.platform !== "ytm" || typeof videoId !== "string") {
     throw new Error("YouTube Music 歌曲缺少视频 ID");
   }
-  const {
-    decipherYoutubeWebUrl,
-    youtubeWebPlayerConfig,
-    youtubeWebPoSession,
-  } = await import("./youtubePoToken");
   const identity = await request<YtmProtectedIdentity>(
     "/song/preview/ytm/identity",
     { cache: "no-store" },
   );
-  const gvsBinding = alternateBinding ? alternateYtmGvsBinding(identity) : identity.gvs_binding;
-  const proof = await youtubeWebPoSession(
-    videoId,
-    identity.visitor_data,
-    identity.data_sync_id,
-    gvsBinding,
-    browserYoutubeBotguard,
+  const gvsPoToken = await mintNativeYoutubeGvsPoToken(
+    youtubeGvsBindingValue(videoId, identity),
     forceFreshProof,
   );
   const playerUrl = await request<string>("/song/preview/ytm/player-url", {
     cache: "no-store",
   });
-  const loadPlayerScript = (url: string) => post<string>(
+  const javascript = await loadYoutubePlayerScript(
     "/song/preview/ytm/player-script",
-    { player_url: url },
+    playerUrl,
   );
-  const playerConfig = await youtubeWebPlayerConfig(playerUrl, loadPlayerScript);
+  const playerConfig = await nativeYoutubePlayerConfig(playerUrl, javascript);
   const player = await post<{
     player_url: string;
     sabr_url?: string;
     video_playback_ustreamer_config?: string;
     sabr_formats: unknown[];
+    sabr_audio_itag: number;
     duration_ms: number;
   }>("/song/preview/ytm/player", {
     source,
@@ -341,42 +555,49 @@ async function resolveYtmSabrPlayback(
     || !player.video_playback_ustreamer_config
     || !Array.isArray(player.sabr_formats)
     || player.sabr_formats.length === 0
+    || !Number.isSafeInteger(player.sabr_audio_itag)
+    || player.sabr_audio_itag <= 0
     || !Number.isSafeInteger(player.duration_ms)
     || player.duration_ms <= 0
   ) {
     throw new Error("YouTube Music Player 没有返回 SABR 音频会话");
   }
+  const responseJavascript = await exactYtmPlayerScript(
+    playerUrl,
+    javascript,
+    player.player_url,
+  );
   return {
-    serverAbrStreamingUrl: await decipherYoutubeWebUrl(
+    serverAbrStreamingUrl: await decipherNativeYoutubeUrl(
       player.sabr_url,
       player.player_url,
-      loadPlayerScript,
+      responseJavascript,
     ),
     videoPlaybackUstreamerConfig: player.video_playback_ustreamer_config,
     formats: player.sabr_formats,
+    audioItag: player.sabr_audio_itag,
     durationMs: player.duration_ms,
-    poToken: proof.gvsPoToken,
+    poToken: gvsPoToken,
   };
 }
 
 let ytmPlaybackPrewarm: Promise<void> | null = null;
 
 async function prewarmYtmPlayback(): Promise<void> {
+  if (!YOUTUBE_NATIVE_PROOF_SUPPORTED) return;
   if (ytmPlaybackPrewarm) return ytmPlaybackPrewarm;
   ytmPlaybackPrewarm = (async () => {
-    const {
-      prewarmYoutubeWebPoMinter,
-      youtubeWebPlayerConfig,
-    } = await import("./youtubePoToken");
     const playerUrlPromise = request<string>("/song/preview/ytm/player-url", {
       cache: "no-store",
     });
     await Promise.all([
       request<YtmProtectedIdentity>("/song/preview/ytm/identity", { cache: "no-store" }),
-      prewarmYoutubeWebPoMinter(browserYoutubeBotguard),
-      playerUrlPromise.then((playerUrl) => youtubeWebPlayerConfig(
+      // Warm only the expensive BotGuard environment. A real video id here would cache/cross a
+      // content context before either YouTube or YouTube Music has begun its signed playback.
+      mintNativeYoutubeGvsPoToken("KDJ-proof-minter-prewarm-v1"),
+      playerUrlPromise.then(async (playerUrl) => nativeYoutubePlayerConfig(
         playerUrl,
-        (url) => post<string>("/song/preview/ytm/player-script", { player_url: url }),
+        await loadYoutubePlayerScript("/song/preview/ytm/player-script", playerUrl),
       )),
     ]);
   })().catch((error) => {
@@ -394,12 +615,15 @@ type DownloadPreparationHandler = (
   item: PendingDownloadPreparation,
   context: DownloadPreparationContext,
   forceFreshProof?: boolean,
-  alternateBinding?: boolean,
-) => Promise<{ proof: string; resolvedUrl: string }>;
+) => Promise<
+  | { proofs: string[]; resolved_urls: string[] }
+  | { youtube_hls_ticket: string }
+>;
 
 /** 平台挑战只在这个注册表里注入；下载 store、面板和按钮不再识别平台。 */
 const downloadPreparationHandlers: Partial<Record<Platform, DownloadPreparationHandler>> = {
-  ytm: async (item, context, forceFreshProof = false, alternateBinding = false) => {
+  ytm: async (item, context, forceFreshProof = false) => {
+    if (item.kind !== "audio") throw new Error("YouTube Music 下载任务形状无效");
     if (forceFreshProof) context.ytmIdentity = undefined;
     context.ytmIdentity ??= await request<YtmProtectedIdentity>(
       "/song/preview/ytm/identity",
@@ -410,11 +634,80 @@ const downloadPreparationHandlers: Partial<Record<Platform, DownloadPreparationH
       item.quality,
       context.ytmIdentity,
       forceFreshProof,
-      alternateBinding,
     );
-    return { proof: stream.poToken, resolvedUrl: stream.resolvedUrl };
+    return { proofs: stream.poTokens, resolved_urls: stream.resolvedUrls };
+  },
+  youtube: async (item) => {
+    if (item.kind !== "video") throw new Error("YouTube 视频下载任务形状无效");
+    const videoId = item.request.bvid?.trim() || "";
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+      throw new Error("YouTube 视频下载缺少有效视频 ID");
+    }
+    const preparedUrl = await prepareYoutubeVideoPreview(
+      videoId,
+      item.request.max_height,
+    );
+    return { youtube_hls_ticket: youtubeHlsTicket(preparedUrl) };
   },
 };
+
+const activeDownloadPreparations = new Map<string, Promise<void>>();
+
+async function prepareDownloadItem(
+  item: PendingDownloadPreparation,
+  context: DownloadPreparationContext,
+): Promise<void> {
+  const preparationKey = `${item.id}:${item.attempt}`;
+  const existing = activeDownloadPreparations.get(preparationKey);
+  if (existing) return existing;
+  const running = (async () => {
+    let preparedYoutubeTicket = "";
+    try {
+      const handler = downloadPreparationHandlers[item.platform];
+      if (!handler) throw new Error("平台 " + item.platform + " 没有注册下载准备适配器");
+      let prepared = await handler(item, context);
+      if ("youtube_hls_ticket" in prepared) {
+        preparedYoutubeTicket = prepared.youtube_hls_ticket;
+      }
+      try {
+        await post(`/downloads/${encodeURIComponent(item.id)}/prepared-source`, {
+          ...prepared,
+          attempt: item.attempt,
+        });
+      } catch (error) {
+        const retryableYtmSession = item.platform === "ytm"
+          && error instanceof ApiError
+          && [401, 403, 502].includes(error.status);
+        if (!retryableYtmSession) throw error;
+        // 与其他下载的“重试”语义相同：整条受保护来源作废，重新取身份、Player URL
+        // 和每一段 proof；绝不把部分旧会话与新会话拼在一起。
+        prepared = await handler(item, context, true);
+        await post(`/downloads/${encodeURIComponent(item.id)}/prepared-source`, {
+          ...prepared,
+          attempt: item.attempt,
+        });
+      }
+    } catch (error) {
+      if (preparedYoutubeTicket) {
+        await post(`/video/youtube/hls/${preparedYoutubeTicket}/revoke`).catch(() => undefined);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      await post(`/downloads/${encodeURIComponent(item.id)}/preparation-failed`, {
+        attempt: item.attempt,
+        error: message,
+      }).catch(() => undefined);
+      throw error;
+    }
+  })();
+  activeDownloadPreparations.set(preparationKey, running);
+  try {
+    await running;
+  } finally {
+    if (activeDownloadPreparations.get(preparationKey) === running) {
+      activeDownloadPreparations.delete(preparationKey);
+    }
+  }
+}
 
 async function preparePendingDownloads(onlyId?: string): Promise<void> {
   const pending = await request<PendingDownloadPreparation[]>("/downloads/preparations/pending", {
@@ -424,43 +717,12 @@ async function preparePendingDownloads(onlyId?: string): Promise<void> {
   if (selected.length === 0) return;
   const context: DownloadPreparationContext = {};
   let firstError: unknown = null;
-  // 浏览器挑战按队列顺序串行；真正的媒体传输仍由后端按统一并发设置调度。
+  // 原生 proof 按队列顺序串行；真正的媒体传输仍由后端按统一并发设置调度。
   for (const item of selected) {
     try {
-      const handler = downloadPreparationHandlers[item.platform];
-      if (!handler) throw new Error("平台 " + item.platform + " 没有注册下载准备适配器");
-      let prepared = await handler(item, context);
-      try {
-        await post(`/downloads/${encodeURIComponent(item.id)}/prepared-source`, {
-          proof: prepared.proof,
-          resolved_url: prepared.resolvedUrl,
-        });
-      } catch (error) {
-        const rejectedProof = error instanceof ApiError && (error.status === 401 || error.status === 403);
-        if (item.platform !== "ytm" || !rejectedProof) throw error;
-        prepared = await handler(item, context, true);
-        try {
-          await post(`/downloads/${encodeURIComponent(item.id)}/prepared-source`, {
-            proof: prepared.proof,
-            resolved_url: prepared.resolvedUrl,
-          });
-        } catch (freshError) {
-          const freshRejected = freshError instanceof ApiError
-            && (freshError.status === 401 || freshError.status === 403);
-          if (!freshRejected) throw freshError;
-          prepared = await handler(item, context, true, true);
-          await post(`/downloads/${encodeURIComponent(item.id)}/prepared-source`, {
-            proof: prepared.proof,
-            resolved_url: prepared.resolvedUrl,
-          });
-        }
-      }
+      await prepareDownloadItem(item, context);
     } catch (error) {
       firstError ??= error;
-      const message = error instanceof Error ? error.message : String(error);
-      await post(`/downloads/${encodeURIComponent(item.id)}/preparation-failed`, {
-        error: message,
-      }).catch(() => undefined);
     }
   }
   if (firstError) throw firstError;
@@ -473,8 +735,24 @@ export const api = {
   getSettings: () => request<Settings>("/settings"),
   putSettings: (settings: Settings) =>
     request<Settings>("/settings", { method: "PUT", body: JSON.stringify(settings) }),
+  activityLogs: (category: ActivityLogCategory, limit = 160) =>
+    request<ActivityLogOverview>(
+      `/activity/logs?category=${encodeURIComponent(category)}&limit=${limit}`,
+      { cache: "no-store" },
+    ),
+  activityLogSettings: () => request<ActivityLogSettings>("/activity/settings"),
+  updateActivityLogSettings: (settings: ActivityLogSettings) =>
+    request<ActivityLogSettings>("/activity/settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
+  clearActivityLogs: () => request<void>("/activity/logs", { method: "DELETE" }),
+  cacheOverview: () => request<CacheOverview>("/cache", { cache: "no-store" }),
+  clearCacheCategory: (category: CacheCategory) =>
+    request<CacheOverview>(`/cache/${category}`, { method: "DELETE" }),
 
   accounts: () => request<Account[]>("/accounts"),
+  cachedAccounts: () => request<Account[]>("/accounts/cached"),
   loginQr: (platform: string) => post<QrSession>(`/accounts/${platform}/login/qr`),
   loginQrState: (platform: string, sessionId: string) =>
     request<QrState>(`/accounts/${platform}/login/qr/${sessionId}`),
@@ -514,45 +792,27 @@ export const api = {
   /** 按曲名/艺人自动搜歌词（网易云 / QQ / YouTube Music）；有来源 key 时优先直取。 */
   lyrics: (body: LyricsRequest) => post<LyricsResponse>("/lyrics", body),
   libraryLyrics: (trackId: number) => request<LocalLyricsResponse>(`/library/lyrics/${trackId}`),
+  cacheLibraryLyrics: (trackId: number, lyrics: LyricsResponse) =>
+    request<LocalLyricsResponse>(`/library/lyrics/${trackId}`, {
+      method: "PUT",
+      body: JSON.stringify(lyrics),
+    }),
   /**
    * 歌曲试听代理（使用设置中的试听音质，不下载）。整个 SongSource 发过去：
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
    */
   songPreview: async (source: SongSource, bypassCache = false) => {
-    // Normal path: cached selected binding -> fresh selected binding -> fresh alternate binding.
-    // An explicit cache-bypass already starts fresh, so it only needs selected -> alternate.
-    const attempts = source.platform === "ytm" ? (bypassCache ? 2 : 3) : 1;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      try {
-        if (source.platform === "ytm") {
-          const bootstrap = await resolveYtmSabrPlayback(
-            source,
-            bypassCache || attempt > 0,
-            bypassCache ? attempt > 0 : attempt > 1,
-          );
-          return await createYoutubeSabrPreview(source, bootstrap, bypassCache);
-        }
-        let poToken: string | undefined;
-        let poTokens: string[] | undefined;
-        let resolvedUrl: string | undefined;
-        let resolvedUrls: string[] | undefined;
-        const result = await post<{ url: string; cached?: boolean; waveform_token?: string }>("/song/preview", {
-          source,
-          bypass_cache: bypassCache,
-          po_token: poToken,
-          po_tokens: poTokens,
-          resolved_url: resolvedUrl,
-          resolved_urls: resolvedUrls,
-        });
-        if (!result.url.startsWith("/")) return result;
-        return { ...result, url: bridge().baseUrl + result.url };
-      } catch (error) {
-        const rejectedProof = error instanceof ApiError && (error.status === 401 || error.status === 403);
-        if (source.platform !== "ytm" || !rejectedProof || attempt + 1 >= attempts) throw error;
-        // The next iteration drops both the WebPO token cache and its attestation minter.
-      }
+    if (source.platform === "ytm") {
+      const bootstrap = await resolveYtmSabrPlayback(source, bypassCache);
+      const { createYoutubeSabrPreview } = await import("./youtubeSabr");
+      return createYoutubeSabrPreview(source, bootstrap, bypassCache);
     }
-    throw new ApiError("YouTube Music 没有返回可播放地址", 502);
+    const result = await post<{ url: string; cached?: boolean; waveform_token?: string }>("/song/preview", {
+      source,
+      bypass_cache: bypassCache,
+    });
+    if (!result.url.startsWith("/")) return result;
+    return { ...result, url: authenticatedGetUrl(bridge().baseUrl + result.url) };
   },
   /** token 只由 songPreview 返回；服务端据此查当前会话，绝不让前端传缓存路径/key。 */
   songPreviewWaveform: (token: string) =>
@@ -569,38 +829,58 @@ export const api = {
   enqueue: (body: DownloadRequest) => post<DownloadTask[]>("/downloads", body),
   preparePendingDownloads: (onlyId?: string) => preparePendingDownloads(onlyId),
   startDownloads: async () => {
-    // 某条外部挑战失败已经写回该任务；不能因此挡住同批普通平台任务开始。
-    await preparePendingDownloads().catch(() => undefined);
-    return post<{ started: boolean; retried: number }>("/downloads/start");
+    const started = await post<{ started: boolean; retried: number }>("/downloads/start");
+    // worker 先按统一并发闸门进入 authorizing，外部准备才有资格开始。后续排到
+    // 闸门的任务由 download.updated 事件触发，不会提前偷跑媒体传输。
+    void preparePendingDownloads().catch(() => undefined);
+    return started;
   },
+  pauseDownloads: () => post<{ paused: number }>("/downloads/pause"),
   cancelDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/cancel`),
   cancelAllDownloads: () => post<{ canceled: number }>("/downloads/cancel-all"),
   retryDownload: async (id: string) => {
-    await preparePendingDownloads(id);
-    return post<DownloadTask>(`/downloads/${id}/retry`);
+    const task = await post<DownloadTask>(`/downloads/${id}/retry`);
+    void preparePendingDownloads(id).catch(() => undefined);
+    return task;
   },
+  updateDownloadQuality: (id: string, quality: Quality) =>
+    post<DownloadTask>(`/downloads/${id}/quality`, { quality }),
+  updateDownloadHeight: (id: string, maxHeight: number) =>
+    post<DownloadTask>(`/downloads/${id}/height`, { max_height: maxHeight }),
   /** 只移除一条已结束的队列记录，避免「清空」影响其他历史任务。 */
   removeDownload: (id: string) => request<{ removed: boolean }>(`/downloads/${id}`, { method: "DELETE" }),
   clearDownloads: () => post<{ removed: number }>("/downloads/clear"),
 
   videoResolve: (url: string, platform?: "bilibili" | "youtube") =>
     post<VideoInfo>("/video/resolve", { url, platform }),
-  videoDownload: (body: VideoDownloadRequest) => post<DownloadTask>("/video/download", body),
-  /** 按顺序导出 VJ：由下载队列统一调度、显示进度并支持取消。 */
-  vjExport: (body: VjExportRequest) => post<DownloadTask>("/vj/export", body),
+  videoDownload: async (body: VideoDownloadRequest) => {
+    const task = await post<DownloadTask>("/video/download", body);
+    // 自动下载开启时 worker 会立即进入 authorizing；关闭时查询为空，不会准备。
+    void preparePendingDownloads(task.id).catch(() => undefined);
+    return task;
+  },
   videoCalibrate: (trackId: number, bvid: string, page = 0) =>
     post<{ offset_ms: number; score: number }>("/video/calibrate", {
       track_id: trackId,
       bvid,
       page,
     }),
-  /**
-   * 视频预览流（后端代理 B 站 CDN，见 routes.rs::video_preview）。
-   * 后端代理 B 站防盗链；本机 API 开放，无需额外令牌。
-   */
-  videoPreviewUrl: (bvid: string, page = 0) => {
+  prepareYoutubeVideoPreview: (bvid: string, maxHeight?: number) =>
+    prepareYoutubeVideoPreview(bvid, maxHeight),
+  startYoutubeVideoPlayback: (preparedUrl: string) =>
+    startYoutubeVideoPlayback(preparedUrl),
+  revokeYoutubeVideoPlayback: (playbackUrl: string) =>
+    revokeYoutubeVideoPlayback(playbackUrl),
+  /** 平台视频预览流；鉴权、防盗链与 Range 刷新由对应 VideoProvider 处理。 */
+  videoPreviewUrl: (
+    platform: "bilibili" | "youtube",
+    bvid: string,
+    page = 0,
+    track: "muxed" | "video" | "audio" = "muxed",
+  ) => {
     const { baseUrl } = bridge();
-    return `${baseUrl}/api/video/preview?bvid=${encodeURIComponent(bvid)}&page=${page}`;
+    const query = new URLSearchParams({ platform, bvid, page: String(page), track });
+    return authenticatedGetUrl(`${baseUrl}/api/video/preview?${query}`);
   },
 
   tracks: (params: Record<string, string | number | undefined>) => {
@@ -611,114 +891,6 @@ export const api = {
     const suffix = query.toString();
     return request<TrackPage>(`/library/tracks${suffix ? `?${suffix}` : ""}`);
   },
-  removableDevices: () => request<RemovableDevice[]>("/library/devices"),
-  authorizeRemovableDevice: (path: string) =>
-    post<RemovableDevice>("/library/devices/authorize", { path }),
-  oneLibraryPlaylists: (devicePath: string) => {
-    const query = new URLSearchParams({ device_path: devicePath });
-    return request<OneLibraryPlaylist[]>(`/library/onelibrary/playlists?${query}`);
-  },
-  oneLibraryPlaylistTracks: (devicePath: string, id: number) => {
-    const query = new URLSearchParams({ device_path: devicePath });
-    return request<OneLibraryTrack[]>(`/library/onelibrary/playlists/${id}/tracks?${query}`);
-  },
-  reorderOneLibraryPlaylistTracks: (devicePath: string, id: number, contentIds: number[]) =>
-    request<OneLibraryTrack[]>(`/library/onelibrary/playlists/${id}/tracks`, {
-      method: "PUT",
-      body: JSON.stringify({ device_path: devicePath, content_ids: contentIds }),
-    }),
-  removeOneLibraryPlaylistTracks: (devicePath: string, id: number, contentIds: number[]) =>
-    post<OneLibraryTrack[]>(`/library/onelibrary/playlists/${id}/tracks/remove`, {
-      device_path: devicePath,
-      content_ids: contentIds,
-    }),
-  copyOneLibraryPlaylistTracks: (
-    sourceDevicePath: string,
-    sourcePlaylistId: number,
-    targetDevicePath: string,
-    targetPlaylistId: number,
-    contentIds: number[],
-  ) =>
-    post<OneLibraryTrack[]>("/library/onelibrary/tracks/copy", {
-      source_device_path: sourceDevicePath,
-      source_playlist_id: sourcePlaylistId,
-      target_device_path: targetDevicePath,
-      target_playlist_id: targetPlaylistId,
-      content_ids: contentIds,
-    }),
-  setOneLibraryRating: (devicePath: string, contentId: number, rating: number) =>
-    request<{ ok: boolean }>(`/library/onelibrary/tracks/${contentId}/rating`, {
-      method: "PATCH",
-      body: JSON.stringify({ device_path: devicePath, rating }),
-    }),
-  createOneLibraryPlaylist: (
-    devicePath: string,
-    name: string,
-    parentId: number | null = null,
-    folder = false,
-  ) =>
-    post<OneLibraryPlaylist>("/library/onelibrary/playlists", {
-      device_path: devicePath,
-      name,
-      parent_id: parentId,
-      folder,
-    }),
-  renameOneLibraryPlaylist: (devicePath: string, id: number, name: string) =>
-    request<{ ok: boolean }>(`/library/onelibrary/playlists/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ device_path: devicePath, name }),
-    }),
-  moveOneLibraryPlaylist: (
-    devicePath: string,
-    id: number,
-    parentId: number,
-    sequence: number | null,
-  ) =>
-    post<OneLibraryPlaylist[]>(`/library/onelibrary/playlists/${id}/move`, {
-      device_path: devicePath,
-      parent_id: parentId,
-      sequence,
-    }),
-  deleteOneLibraryPlaylist: (devicePath: string, id: number) =>
-    request<{ ok: boolean }>(`/library/onelibrary/playlists/${id}`, {
-      method: "DELETE",
-      body: JSON.stringify({ device_path: devicePath }),
-    }),
-  addOneLibraryPlaylistTracks: (devicePath: string, id: number, trackIds: number[]) =>
-    post<PlaylistExportResult>(`/library/onelibrary/playlists/${id}/tracks/add`, {
-      device_path: devicePath,
-      track_ids: trackIds,
-    }),
-  oneLibraryCapacity: (devicePath: string, trackIds: number[]) =>
-    post<OneLibraryCapacityPlan>("/library/onelibrary/capacity", {
-      device_path: devicePath,
-      track_ids: trackIds,
-    }),
-  importOneLibraryTracks: (
-    devicePath: string,
-    playlistId: number,
-    contentIds: number[],
-    dest: string,
-  ) =>
-    post<OneLibraryImportResult>("/library/onelibrary/import", {
-      device_path: devicePath,
-      playlist_id: playlistId,
-      content_ids: contentIds,
-      dest,
-    }),
-  oneLibraryCoverBlob: (devicePath: string, contentId: number) =>
-    requestBlob(
-      `/library/onelibrary/cover?device_path=${encodeURIComponent(devicePath)}&content_id=${contentId}`,
-    ),
-  setOneLibraryCover: (devicePath: string, contentId: number, file: Blob) =>
-    request<{ ok: boolean }>(
-      `/library/onelibrary/cover?device_path=${encodeURIComponent(devicePath)}&content_id=${contentId}`,
-      {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type || "application/octet-stream" },
-      },
-    ),
   track: (id: number) => request<Track>(`/library/tracks/${id}`),
   patchTrack: (id: number, patch: TrackPatch) =>
     request<TrackPatchResult>(`/library/tracks/${id}`, {
@@ -782,7 +954,7 @@ export const api = {
     trackIds: number[] | null,
     force = false,
     priority = false,
-    version: "v1" | "v2" = "v1",
+    version: "v1" | "v2" | "v3" = "v1",
     limit?: number,
     folder = "",
   ) =>
@@ -803,36 +975,45 @@ export const api = {
     id: number,
     buckets = 640,
     profile: WaveformProfile = "current",
+    background = false,
+    intent: "visible" | "player" | "prefetch" = "visible",
+    requestId = 0,
+    signal?: AbortSignal,
   ) =>
     requestWaveform(
-      `/library/waveform/${id}?buckets=${buckets}&profile=${profile}&format=binary`,
+      `/library/waveform/${id}?buckets=${buckets}&profile=${profile}&format=binary&intent=${intent}&request_id=${requestId}${background ? "&background=true" : ""}`,
       profile,
+      signal,
     ),
-  stemRuntimeStatus: () => request<StemRuntimeStatus>("/stems/runtime"),
-  resetStemRuntime: () => post<StemRuntimeStatus>("/stems/runtime/reset", {}),
-  trackStemStatus: (id: number) => request<TrackStemStatus>(`/tracks/${id}/stems`),
-  oneLibraryWaveform: (
-    devicePath: string,
-    contentId: number,
-    playbackId: number,
-    buckets = 640,
-    profile: WaveformProfile = "current",
-  ) => {
-    const query = new URLSearchParams({
-      device_path: devicePath,
-      content_id: String(contentId),
-      playback_id: String(playbackId),
-      buckets: String(buckets),
-      profile,
-      format: "binary",
-    });
-    return requestWaveform(`/library/onelibrary/waveform?${query}`, profile);
-  },
+  /** Advance a latest-wins waveform lane even when the requested track is already in JS memory. */
+  waveformIntent: (
+    id: number,
+    intent: "player" | "prefetch",
+    requestId: number,
+  ) =>
+    request<void>(
+      `/library/waveform/${id}?profile=release-overview&intent=${intent}&request_id=${requestId}&intent_only=true`,
+    ),
   harmonic: (id: number, tolerance = 12, limit = 60, folder = "") =>
     request<HarmonicMatch[]>(
       `/library/harmonic/${id}?bpm_tolerance=${tolerance}&limit=${limit}` +
         (folder ? `&folder=${encodeURIComponent(folder)}` : ""),
     ),
+  /** 没有本地曲库 id 的临时曲目，直接用完整分析得到的 BPM/Camelot 匹配本地候选。 */
+  harmonicProfile: (
+    track: Pick<Track, "bpm" | "camelot">,
+    tolerance = 12,
+    limit = 60,
+    folder = "",
+  ) =>
+    post<HarmonicMatch[]>("/library/harmonic", {
+      bpm: track.bpm,
+      camelot: track.camelot,
+      bpm_tolerance: tolerance,
+      limit,
+      wide: true,
+      folder,
+    }),
   stats: () => request<LibraryStats>("/library/stats"),
   /** 检查更新走后端：CSP/证书链三个壳一条路，见 routes.rs::update_check。 */
   checkUpdate: () => request<UpdateInfo>("/update/check"),
@@ -844,6 +1025,13 @@ export const api = {
       platform: playlist.platform,
       key: playlist.key,
       limit,
+    }),
+  /** 真正请求平台服务器移除；成功响应前不改前端目录。 */
+  removeStreamPlaylistTrack: (playlist: StreamPlaylist, source: SongSource) =>
+    post<StreamPlaylistTrackRemoveResponse>("/stream/playlist/remove-track", {
+      platform: playlist.platform,
+      key: playlist.key,
+      source,
     }),
 
   folders: () => request<FolderTree>("/library/folders"),
@@ -879,11 +1067,13 @@ export const api = {
 
   audioUrl: (id: number) => {
     const { baseUrl } = bridge();
-    return `${baseUrl}/api/library/audio/${id}`;
+    return authenticatedGetUrl(`${baseUrl}/api/library/audio/${id}`);
   },
   videoUrl: (id: number, compatible = false) => {
     const { baseUrl } = bridge();
-    return `${baseUrl}/api/library/video/${id}${compatible ? "?compat=true" : ""}`;
+    return authenticatedGetUrl(
+      `${baseUrl}/api/library/video/${id}${compatible ? "?compat=true" : ""}`,
+    );
   },
   /**
    * `version` 是 cache-buster，不是后端认识的参数。
@@ -894,16 +1084,7 @@ export const api = {
   coverUrl: (id: number, version?: number | string) => {
     const { baseUrl } = bridge();
     const suffix = version === undefined || version === "" ? "" : `?v=${encodeURIComponent(version)}`;
-    return `${baseUrl}/api/library/cover/${id}${suffix}`;
-  },
-  oneLibraryCoverUrl: (devicePath: string, contentId: number, version?: number | string) => {
-    const { baseUrl } = bridge();
-    const query = new URLSearchParams({
-      device_path: devicePath,
-      content_id: String(contentId),
-    });
-    if (version !== undefined && version !== "") query.set("v", String(version));
-    return `${baseUrl}/api/library/onelibrary/cover?${query}`;
+    return authenticatedGetUrl(`${baseUrl}/api/library/cover/${id}${suffix}`);
   },
 };
 
@@ -928,9 +1109,9 @@ class EventStream {
 
   private ensure(): void {
     if (this.socket || this.stopped) return;
-    const { baseUrl } = bridge();
+    const { baseUrl, authToken } = bridge();
     const url = `${baseUrl.replace(/^http/, "ws")}/ws`;
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(url, ["kdj-v1", `kdj-auth.${authToken}`]);
     this.socket = socket;
     socket.onopen = () => {
       this.retry = 0;

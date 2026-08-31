@@ -46,7 +46,7 @@ data class NativeAudioProgressCheckpoint(
 )
 
 /**
- * 悬浮歌词的时间轴只需要这三个值。单独开一个读取口是为了不走 [NativeAudioRuntime.getState]：
+ * 悬浮歌词的播放时钟只需要这些值。单独开一个读取口是为了不走 [NativeAudioRuntime.getState]：
  * 那个会 `ensure` 出播放器，而歌词侧被 60Hz 调用，不该有副作用。
  */
 data class NativeAudioClock(
@@ -106,11 +106,20 @@ class ApplyPlaybackSnapshotArgs {
 }
 
 @InvokeArg
+class LyricsWordArgs {
+    var start: Double? = null
+    var end: Double? = null
+    var text: String? = null
+}
+
+@InvokeArg
 class LyricsLineArgs {
     var time: Double? = null
+    var endTime: Double? = null
     var text: String? = null
     /** 翻译或罗马音，由前端按当前附加层选好，原生侧不必懂这层语义。 */
     var secondary: String? = null
+    var words: Array<LyricsWordArgs>? = null
 }
 
 @InvokeArg
@@ -166,6 +175,12 @@ class SavePngToGalleryArgs {
 @InvokeArg
 class OpenLocalPathArgs {
     var path: String? = null
+}
+
+@InvokeArg
+class StartFileDragArgs {
+    var paths: Array<String>? = null
+    var label: String? = null
 }
 
 @TauriPlugin(
@@ -399,10 +414,23 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
             val time = line.time ?: return@mapNotNull null
             val text = line.text?.trim().orEmpty()
             if (!time.isFinite() || text.isEmpty()) return@mapNotNull null
+            val words = line.words.orEmpty().mapNotNull wordLoop@{ word ->
+                val start = word.start ?: return@wordLoop null
+                val end = word.end ?: return@wordLoop null
+                val wordText = word.text.orEmpty()
+                if (!start.isFinite() || !end.isFinite() || end < start || wordText.isEmpty()) {
+                    return@wordLoop null
+                }
+                LyricsOverlayWord(start, end, wordText)
+            }.sortedBy { it.startSec }
             LyricsOverlayLine(
                 timeSec = max(0.0, time),
+                endTimeSec = line.endTime
+                    ?.takeIf { it.isFinite() && it > time }
+                    ?.coerceAtLeast(0.0),
                 text = text,
                 secondary = line.secondary?.trim().orEmpty(),
+                words = words,
             )
         }.sortedBy { it.timeSec }
 
@@ -603,6 +631,40 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         }.onFailure {
             invoke.reject(it.message ?: "openLocalPath failed")
+        }
+    }
+
+    /** 长按曲目封面后，把真实媒体文件交给 Android 的跨窗口拖放会话。 */
+    @Command
+    fun startFileDrag(invoke: Invoke) {
+        val args = invoke.parseArgs(StartFileDragArgs::class.java)
+        val paths = args.paths
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.distinct()
+            .orEmpty()
+        if (paths.isEmpty()) {
+            invoke.reject("paths are required")
+            return
+        }
+
+        // startDragAndDrop 必须在 UI 线程、并且仍处于这次长按触摸序列中。
+        activity.runOnUiThread {
+            runCatching {
+                FileDragHelper.start(
+                    activity,
+                    paths,
+                    args.label?.trim().orEmpty().ifEmpty { "KDJ 本地文件" },
+                )
+            }.onSuccess { started ->
+                if (started) {
+                    invoke.resolve(JSObject().apply { put("started", true) })
+                } else {
+                    invoke.reject("系统拒绝启动文件拖动")
+                }
+            }.onFailure {
+                invoke.reject(it.message ?: "startFileDrag failed")
+            }
         }
     }
 

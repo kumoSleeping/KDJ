@@ -18,66 +18,74 @@
 
   <br>
 
-  <img src="docs/readme-assets/01-library.png" alt="KDJ 曲库界面" width="920">
+  <img src="docs/readme-assets/01-library.webp" alt="KDJ 曲库界面" width="920">
 </div>
 
 ---
 
 **中文** · [English](README.en.md)
 
-KDJ 把跨平台搜歌、下载、本地曲库和音乐分析放进一个桌面应用。无需在多个网站、下载器和标签工具之间来回切换，将准备音乐构筑为一条连续的工作流。
+KDJ 是一款面向音乐收集、整理、分析和播放的跨平台应用。它将多个音乐平台的搜索、试听、缓存与格式转换，以及本地曲库、BPM / 调性分析、波形、歌词和播放控制整合在同一个工作区，让准备音乐成为一条连续的工作流。
 
 ## 下载 & 安装 & 更新
 
 按系统选择下方入口，打开最新 [Releases](https://github.com/kumoSleeping/KDJ/releases/latest) 获取安装包。
 
+<!-- release-package-size-badges:start -->
 <p>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/macOS-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/macOS-15.3_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 15.3 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Windows-6.2_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 6.2 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Linux-9.1_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 9.1 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Android-42.8_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 42.8 MB"></a>
 </p>
+<!-- release-package-size-badges:end -->
 
-安装时需要在系统中允许安装来自未知来源的应用。MacOS 需要在“系统偏好设置 → 安全性与隐私 → 通用”中允许打开。
+安装时可能需要在系统中允许安装来自未知来源的应用。macOS 可在“系统设置 → 隐私与安全性”中允许打开。
 
 当软件所在环境可以联通 GitHub 时，KDJ 会在启动时自动检查更新。也可以在“设置”中手动检查。
 
 > [!NOTE]
-> 常规曲库管理和音乐分析不依赖 FFmpeg。视频混流、抽取视频音轨及 VJ 导出等功能需要系统已安装 [FFmpeg](https://ffmpeg.org/download.html)。
+> 常规曲库管理、音乐分析和音频播放不依赖 FFmpeg；视频音画合并、视频音轨提取及部分格式处理需要系统已安装 [FFmpeg](https://ffmpeg.org/download.html)。
 
 ## 核心功能
-- 下载
-  - 跨平台聚合搜索
-  - 扫码登录与来源优先级
-  - 结果合并去重；单曲 / 歌单链接与批量投喂
-  - 在线试听与音质降级（FLAC / 320 / 128）
-  - 歌单一键下载与可配置下载队列
-  - Explore：搜索 Remix 与 VJ
-- 曲库管理
-  - 自由拖动设计理念
-  - 本地曲库 / 文件夹扫描与标签编辑
-  - 左侧虚拟播放列表（只保存本地曲目引用，不重复复制音频）
-  - 桌面端识别可移动存储，并导出 OneLibrary + M3U8 便携 U 盘库
-  - Camelot 色轮与 BPM / 能量筛选
-  - 自动分析 BPM、调性、Camelot / Open Key、响度与能量
-  - 和声相似推荐（全库 / 文件夹 / 临时列表）
-  - 波形起止点、星级评分与封面
-  - 自动 VJ 导出（依赖 [FFmpeg](https://ffmpeg.org/download.html)）
 
-> [!NOTE]
-> OneLibrary 便携导出会把音频实体复制到 U 盘；只保存在本机的播放列表引用无法在另一台电脑上脱离原文件使用。已有完整 KDJ 分析的曲目会同时写入 BPM、Key、beatgrid 和 OneLibrary 波形；没有完整分析的曲目仍交给目标 DJ 软件补算。KDJ 另在卷内的 `.kdj` 保存便携波形缓存，软盘重挂载后不必重新解码。
-- 播放
-  - 系统级音频输出与音量控制
-  - Rubber Band R3 保调 Tempo / BPM Sync；普通立体声与 8 声道 STEM 共用原生处理链
-  - rkb 风格波形预览
-  - 多种切歌效果（交叉 / 低频交接 / 滤波 / FX）
-  - 视频浮窗与系统画中画；视频混流与抽取音轨
-  - VJ 导出（视频混流 + 音频混音）
-  - 歌词索引与系统级悬窗显示
-- 其他
-  - 浅色 / 深色 / 跟随系统；精心设计的交互逻辑
-  - 基于 Tauri 的轻量桌面应用；支持 Android
-  - 启动自动检查更新
+### 搜索与下载
+
+- 聚合搜索网易云音乐、QQ 音乐、SoundCloud、YouTube Music、YouTube 和哔哩哔哩等来源。
+- 支持扫码登录、来源优先级、结果合并去重，以及单曲、歌单和合集链接解析。
+- 支持在线试听与音质自动降级，并可从播放器直接下载当前在线歌曲。
+- 歌单、专辑、艺人和电台结果提供独立详情页面，可翻页浏览或整页下载。
+- 下载队列支持批量开始、失败重试、状态清理，以及在下载前调整音质或视频清晰度。
+- 歌曲可按链接、基础信息或完整信息分享，也可在支持的平台上拖出文件或分享链接。
+- Explore 可组合关键词搜索 Remix、Mashup、MV 和 VJ 素材。
+
+### 曲库与音乐分析
+
+- 支持本地文件夹扫描、标签编辑、星级评分、封面管理和不重复复制文件的虚拟播放列表。
+- 自动分析 BPM、调性、Camelot / Open Key、响度和能量，并支持手动修正 BPM。
+- 自动分析提供轻量、完整和暂停三种模式，播放时会优先保证音频流畅。
+- 支持按 BPM、能量和 Camelot 调性筛选，并从全库、文件夹或临时列表中寻找和声相近的歌曲。
+- 高精度波形能够呈现歌曲强弱、鼓点与频段变化，在线歌曲也可随播放逐步生成波形。
+- 曲目详情可查看媒体、波形、歌词和分析数据的缓存状态，设置中可按类别统一管理缓存。
+
+### 播放与控制
+
+- 本地歌曲和在线歌曲使用统一的播放流程，并支持可开关的自动换曲与多种切歌效果。
+- 当前曲目详情提供 Tempo、调性、增益、滤波器和三段均衡控制。
+- 控制面板提供实时频谱和滚动波形，曲目详情可固定显示或自动跟随播放。
+- 播放栏提供音量峰值与削波提示，时间可切换为已播放或剩余时间。
+- 方向键可自定义为进度跳转、上下曲切换、列表选择或音量调整。
+- 在线队列结束后，可按照 BPM 与调性从本地曲库继续选择适合衔接的歌曲。
+- 支持视频预览和可调整的浮动小窗，macOS 还可预览允许公开嵌入的 YouTube 视频。
+
+### 歌词与平台体验
+
+- 支持普通歌词与网易云 YRC 逐字歌词，并可同时显示翻译和罗马音。
+- 当前歌曲和下一首歌曲的歌词会提前获取并缓存，间奏期间不会停留显示上一句歌词。
+- 桌面歌词与 Android 歌词浮窗共享逐字进度，并提供外观与显示方式设置。
+- 提供浅色、深色和跟随系统主题，并可从顶部快捷切换日间与夜间外观。
+- macOS 和 Windows 可在设置中安装 KDJ 命令行工具，并复制供 AI 操作 KDJ 使用的提示词。
+- KDJ 基于 Rust 与 Tauri 构建，支持 macOS、Windows、Linux 和 Android，并可在启动时自动检查更新。
 
 ## 使用说明
 

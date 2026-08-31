@@ -77,6 +77,27 @@ export function deckSyncRate(
 }
 
 /**
+ * Song-to-song transition tempo policy. Merely enabling automatic continuation must not retune a
+ * Deck: only the separate beat-sync preference authorizes a non-neutral rate. The 25% ceiling is
+ * a musical quality guard, not the wider physical engine range used by explicit manual SYNC.
+ */
+export function automaticTransitionRate(
+  autoBeatSync: boolean,
+  outgoingEffectiveBpm: number | null | undefined,
+  incomingBpm: number | null | undefined,
+): number {
+  if (!autoBeatSync) return 1;
+  const matched = deckSyncRate(
+    outgoingEffectiveBpm ?? null,
+    incomingBpm ?? null,
+    ENGINE_TEMPO_MIN,
+    ENGINE_TEMPO_MAX,
+  );
+  if (!matched) return 1;
+  return matched.rate >= 0.8 && matched.rate <= 1.25 ? matched.rate : 1;
+}
+
+/**
  * 点击落点 = 被点 1/4 小节（一拍）内、与当前播放头相同的相位。
  * 例如现在在拍内 1/3 处，点到另一拍就落到那一拍的 1/3 处。
  */
@@ -546,6 +567,37 @@ export function msUntilNextBoundary(
     waitMs = (until / playbackRate) * 1000;
   }
   return waitMs;
+}
+
+/**
+ * Whether a future beat/bar boundary still leaves the complete crossfade audible.
+ *
+ * `remainingSourceSec` is measured on the song timeline while the transition and scheduler are
+ * measured in wall-clock seconds. Comparing them directly works only at 1×: at 2× it can approve
+ * a wait that consumes the whole outro, and at 0.5× it can unnecessarily discard alignment.
+ */
+export function hasRoomForAlignedTransition(
+  remainingSourceSec: number,
+  playbackRate: number,
+  transitionWallSec: number,
+  alignmentWaitMs: number | null,
+  safetyWallSec = 0.25,
+): boolean {
+  if (
+    alignmentWaitMs == null
+    || !Number.isFinite(alignmentWaitMs)
+    || alignmentWaitMs < 0
+    || !Number.isFinite(remainingSourceSec)
+    || !Number.isFinite(playbackRate)
+    || playbackRate <= 0
+    || !Number.isFinite(transitionWallSec)
+    || transitionWallSec < 0
+  ) {
+    return false;
+  }
+  const remainingWallSec = Math.max(0, remainingSourceSec) / playbackRate;
+  const reserve = Math.max(0, Number.isFinite(safetyWallSec) ? safetyWallSec : 0);
+  return remainingWallSec > transitionWallSec + alignmentWaitMs / 1_000 + reserve;
 }
 
 function clamp(value: number, min: number, max: number): number {

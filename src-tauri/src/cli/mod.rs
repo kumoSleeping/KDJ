@@ -3,10 +3,8 @@
 mod args;
 mod commands;
 mod http;
+pub(crate) mod install;
 mod runtime;
-pub mod skill;
-
-pub use skill::{export_skill_preset, export_skill_to, SkillExportResult, SkillPreset};
 
 /// 无子命令、或只有 `--no-gui`/`--hidden`：继续进 Tauri。
 /// 其余 argv 当 CLI 客户端处理并退出。
@@ -33,13 +31,19 @@ pub fn run_client() -> i32 {
     commands::run()
 }
 
-pub fn write_runtime(data_dir: &std::path::Path, base_url: &str, gui: bool) -> anyhow::Result<()> {
+pub fn write_runtime(
+    data_dir: &std::path::Path,
+    base_url: &str,
+    auth_token: &str,
+    gui: bool,
+) -> anyhow::Result<()> {
     runtime::write_runtime(
         data_dir,
         &runtime::RuntimeInfo {
             pid: std::process::id(),
             version: kdj_core::VERSION.to_string(),
             base_url: base_url.to_string(),
+            auth_token: auth_token.to_string(),
             started_at: iso_now(),
             gui,
         },
@@ -57,10 +61,10 @@ pub fn maybe_handoff_gui() -> bool {
     let Some((_, info)) = runtime::read_runtime(None) else {
         return false;
     };
-    if runtime::probe_health(&info.base_url).is_none() {
+    if runtime::probe_health(&info).is_none() {
         return false;
     }
-    let client = http::HttpClient::new(&info.base_url);
+    let client = http::HttpClient::new(&info.base_url, &info.auth_token);
     client
         .post_json("/api/control/show", &serde_json::json!({}))
         .is_ok()

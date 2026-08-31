@@ -1,18 +1,29 @@
 import type { Waveform as WaveformData } from "../../types";
+import { waveformSourceRange } from "../../lib/waveformViewport";
 import { waveformEdgeScales } from "../../lib/waveformRenderPolicy";
 import {
+  PERFORMANCE_DETAIL_BACKGROUND,
+  PERFORMANCE_DETAIL_CONTRAST,
+  RELEASE_OVERVIEW_CONTRAST,
+  RELEASE_OVERVIEW_DARK_BACKGROUND,
+  RELEASE_OVERVIEW_LIGHT_BACKGROUND,
   performanceDetailWaveformDisplayRgb,
   releaseOverviewWaveformDisplayRgb,
   waveformDisplayRgb,
+  waveformSurfaceContrastRgb,
+  type WaveformDisplayRgb,
 } from "../../lib/waveformPalette";
 
 export type WaveformCanvasProfile = "current" | "performance-detail" | "release-overview";
 
 interface WaveformDrawBuffers {
   amp: Float32Array;
+  minimum: Float32Array;
+  maximum: Float32Array;
   r: Uint8Array;
   g: Uint8Array;
   b: Uint8Array;
+  transient: Uint8Array;
   known: Uint8Array;
   edgeScale: Float32Array;
 }
@@ -22,19 +33,184 @@ interface WaveformDrawBuffers {
 // delta; ResizeObserver replaces it only when the actual rendered column count changes.
 const waveformDrawBuffers = new WeakMap<HTMLCanvasElement, WaveformDrawBuffers>();
 
+const srgbLinearLookup = Float32Array.from({ length: 256 }, (_, value) => {
+  const normalized = value / 255;
+  return normalized <= 0.04045
+    ? normalized / 12.92
+    : Math.pow((normalized + 0.055) / 1.055, 2.4);
+});
+
 function drawBuffersFor(canvas: HTMLCanvasElement, width: number): WaveformDrawBuffers {
   const cached = waveformDrawBuffers.get(canvas);
   if (cached?.amp.length === width) return cached;
   const buffers: WaveformDrawBuffers = {
     amp: new Float32Array(width),
+    minimum: new Float32Array(width),
+    maximum: new Float32Array(width),
     r: new Uint8Array(width),
     g: new Uint8Array(width),
     b: new Uint8Array(width),
+    transient: new Uint8Array(width),
     known: new Uint8Array(width),
     edgeScale: new Float32Array(width),
   };
   waveformDrawBuffers.set(canvas, buffers);
   return buffers;
+}
+
+function srgbToLinear(value: number): number {
+  return srgbLinearLookup[Math.max(0, Math.min(255, Math.round(value)))] ?? 0;
+}
+
+function linearToSrgb(value: number): number {
+  const normalized = Math.max(0, Math.min(1, value));
+  const srgb = normalized <= 0.0031308
+    ? normalized * 12.92
+    : 1.055 * Math.pow(normalized, 1 / 2.4) - 0.055;
+  return Math.round(srgb * 255);
+}
+
+function contourAvailable(wave: WaveformData): boolean {
+  const count = wave.amp.length;
+  return count > 0
+    && wave.minimum?.length === count
+    && wave.maximum?.length === count
+    && wave.transient?.length === count;
+}
+
+/**
+ * Destination-pixel detail renderer. Analysis stays on the absolute 400 Hz source lattice, while
+ * every bitmap column integrates the exact source-time interval covered by one physical display
+ * pixel. This is temporal area sampling rather than horizontal blur: height retains the interval
+ * peak and a detected core onset owns the colour instead of disappearing into its neighbours.
+ */
+function drawTargetDetailColumns(
+  canvas: HTMLCanvasElement,
+  ctx: CanvasRenderingContext2D,
+  wave: WaveformData,
+  known: ArrayLike<boolean | number> | undefined,
+  timeStart: number | null,
+  timeEnd: number | null,
+  profile: WaveformCanvasProfile,
+  amplitudeScale: number,
+) {
+  const count = wave.amp.length;
+  const transient = wave.transient as ArrayLike<number> | undefined;
+  const width = canvas.width;
+  const height = canvas.height;
+  const duration = Math.max(1e-9, wave.duration || 0);
+  const [sourceStartSec, sourceEndSec] = waveformSourceRange(wave);
+  const sourceSpanSec = Math.max(1e-9, sourceEndSec - sourceStartSec);
+  const startSec = timeStart ?? 0;
+  const endSec = timeEnd ?? duration;
+  const spanSec = Math.max(1e-9, endSec - startSec);
+  const mid = height / 2;
+  const availableHalfHeight = Math.max(0.5, mid - 1);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const localSourceColumns = count * spanSec / sourceSpanSec;
+  const magnifying = width >= localSourceColumns;
+
+  for (let x = 0; x < width; x += 1) {
+    const t0 = startSec + (x / width) * spanSec;
+    const t1 = startSec + ((x + 1) / width) * spanSec;
+    const center = (t0 + t1) / 2;
+    if (t1 <= sourceStartSec || t0 >= sourceEndSec) continue;
+    let displayAmp = 0;
+    let linearR = 0;
+    let linearG = 0;
+    let linearB = 0;
+    let colorWeight = 0;
+    let displayTransient = 0;
+    let coreStrength = -1;
+    let coreR = 0;
+    let coreG = 0;
+    let coreB = 0;
+    if (magnifying) {
+      if (center < sourceStartSec || center >= sourceEndSec) continue;
+      const source = Math.max(
+        0,
+        Math.min(count - 1, Math.floor((center - sourceStartSec) / sourceSpanSec * count)),
+      );
+      if (known && !known[source]) continue;
+      displayAmp = Math.max(0, Math.min(1, wave.amp[source] ?? 0));
+      linearR = srgbToLinear(wave.r[source] ?? 0);
+      linearG = srgbToLinear(wave.g[source] ?? 0);
+      linearB = srgbToLinear(wave.b[source] ?? 0);
+      colorWeight = 1;
+      displayTransient = Math.max(0, Math.min(1, (transient?.[source] ?? 0) / 255));
+    } else {
+      const sourceStart = Math.max(
+        0,
+        (Math.max(sourceStartSec, t0) - sourceStartSec) / sourceSpanSec * count,
+      );
+      const sourceEnd = Math.min(
+        count,
+        (Math.min(sourceEndSec, t1) - sourceStartSec) / sourceSpanSec * count,
+      );
+      const firstSource = Math.floor(sourceStart);
+      const lastSource = Math.min(count, Math.ceil(sourceEnd));
+      for (let source = firstSource; source < lastSource; source += 1) {
+        if (known && !known[source]) continue;
+        const overlap = Math.max(
+          0,
+          Math.min(sourceEnd, source + 1) - Math.max(sourceStart, source),
+        );
+        if (overlap <= 0) continue;
+        const amplitude = Math.max(0, Math.min(1, wave.amp[source] ?? 0));
+        displayAmp = Math.max(displayAmp, amplitude);
+        const weight = overlap * (amplitude + 0.001);
+        linearR += srgbToLinear(wave.r[source] ?? 0) * weight;
+        linearG += srgbToLinear(wave.g[source] ?? 0) * weight;
+        linearB += srgbToLinear(wave.b[source] ?? 0) * weight;
+        colorWeight += weight;
+        const onset = (transient?.[source] ?? 0) / 255;
+        displayTransient = Math.max(displayTransient, onset);
+        if (onset > coreStrength) {
+          coreStrength = onset;
+          coreR = wave.r[source] ?? 0;
+          coreG = wave.g[source] ?? 0;
+          coreB = wave.b[source] ?? 0;
+        }
+      }
+    }
+    if (colorWeight <= 0) continue;
+    let sourceR = linearToSrgb(linearR / colorWeight);
+    let sourceG = linearToSrgb(linearG / colorWeight);
+    let sourceB = linearToSrgb(linearB / colorWeight);
+    // A reliable onset is a measured source column, not an extra painted stripe. Selecting its
+    // already-fused RGB merely prevents downsampling from averaging that fact away.
+    if (coreStrength >= 0.20) {
+      sourceR = coreR;
+      sourceG = coreG;
+      sourceB = coreB;
+    }
+    const paletteDisplay = profile === "performance-detail"
+      ? performanceDetailWaveformDisplayRgb(
+        sourceR,
+        sourceG,
+        sourceB,
+        displayAmp,
+        displayTransient,
+      )
+      : waveformDisplayRgb(sourceR, sourceG, sourceB, displayAmp);
+    const display = profile === "performance-detail"
+      ? waveformSurfaceContrastRgb(
+        paletteDisplay,
+        PERFORMANCE_DETAIL_BACKGROUND,
+        PERFORMANCE_DETAIL_CONTRAST,
+      )
+      : paletteDisplay;
+    const half = Math.max(
+      0.5,
+      displayAmp * amplitudeScale * availableHalfHeight,
+    );
+    const top = Math.max(0, Math.round(mid - half));
+    const bottom = Math.min(height, Math.round(mid + half));
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = `rgb(${display[0]},${display[1]},${display[2]})`;
+    ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
+  }
 }
 
 /**
@@ -50,6 +226,7 @@ function drawReleaseOverviewColumns(
   mid: number,
   availableHalfHeight: number,
   edgeScales: ArrayLike<number> | null,
+  background: WaveformDisplayRgb,
 ) {
   const columnWidth = cssWidth / width;
   for (let index = 0; index < width; index += 1) {
@@ -63,10 +240,15 @@ function drawReleaseOverviewColumns(
         * (edgeScales?.[index] ?? 1)
         * availableHalfHeight,
     );
-    const [r, g, b] = releaseOverviewWaveformDisplayRgb(
+    const colour = releaseOverviewWaveformDisplayRgb(
       columns.r[index],
       columns.g[index],
       columns.b[index],
+    );
+    const [r, g, b] = waveformSurfaceContrastRgb(
+      colour,
+      background,
+      RELEASE_OVERVIEW_CONTRAST,
     );
     ctx.fillStyle = `rgb(${r},${g},${b})`;
     ctx.fillRect(index * columnWidth, mid - half, columnWidth + 0.01, half * 2);
@@ -82,12 +264,10 @@ export function drawWaveformCanvas(
   timeStart: number | null = null,
   timeEnd: number | null = null,
   profile: WaveformCanvasProfile = "current",
+  amplitudeScale = 1,
 ) {
   const dpr = window.devicePixelRatio || 1;
-  // 局部 DJ 轨道会比视口宽数倍；限制 backing store，避免长曲在 Retina 屏上
-  // 超过 WebKit 的 canvas 尺寸上限。CSS 仍保持完整时间尺度。
-  const maxBackingWidth = 16_384;
-  const backingWidth = Math.max(1, Math.min(maxBackingWidth, Math.round(cssWidth * dpr)));
+  const backingWidth = Math.max(1, Math.round(cssWidth * dpr));
   const backingHeight = Math.max(1, Math.round(cssHeight * dpr));
   // Assigning either canvas dimension reallocates and clears the backing store. The old code did
   // that on every live STEM delta even when the rail size had not changed, synchronously flushing
@@ -96,6 +276,21 @@ export function drawWaveformCanvas(
   if (canvas.height !== backingHeight) canvas.height = backingHeight;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
+  // Full-track overview is a structure map, not an oscilloscope. It keeps the historical `amp`
+  // envelope and non-overlapping median intervals; detail integrates into destination pixels.
+  if (contourAvailable(wave) && profile !== "release-overview") {
+    drawTargetDetailColumns(
+      canvas,
+      ctx,
+      wave,
+      known,
+      timeStart,
+      timeEnd,
+      profile,
+      Math.max(0, Math.min(1, amplitudeScale)),
+    );
+    return;
+  }
   ctx.setTransform(canvas.width / cssWidth, 0, 0, canvas.height / cssHeight, 0, 0);
   ctx.clearRect(0, 0, cssWidth, cssHeight);
 
@@ -262,6 +457,10 @@ export function drawWaveformCanvas(
     ? waveformEdgeScales(columnAmp, columnKnown, 4, 0.02, columns.edgeScale)
     : null;
   if (releaseOverview) {
+    const background = typeof document !== "undefined"
+      && document.documentElement?.dataset.theme === "light"
+      ? RELEASE_OVERVIEW_LIGHT_BACKGROUND
+      : RELEASE_OVERVIEW_DARK_BACKGROUND;
     drawReleaseOverviewColumns(
       ctx,
       columns,
@@ -270,6 +469,7 @@ export function drawWaveformCanvas(
       mid,
       availableHalfHeight,
       edgeScales,
+      background,
     );
     return;
   }
@@ -305,7 +505,7 @@ export function drawWaveformCanvas(
         sourceB = Math.round(blue / colorWeight);
       }
     }
-    const [displayR, displayG, displayB] = (performanceDetail
+    const paletteDisplay = (performanceDetail
       ? performanceDetailWaveformDisplayRgb
       : waveformDisplayRgb)(
       sourceR,
@@ -313,6 +513,13 @@ export function drawWaveformCanvas(
       sourceB,
       displayAmp,
     );
+    const [displayR, displayG, displayB] = performanceDetail
+      ? waveformSurfaceContrastRgb(
+        paletteDisplay,
+        PERFORMANCE_DETAIL_BACKGROUND,
+        PERFORMANCE_DETAIL_CONTRAST,
+      )
+      : paletteDisplay;
     ctx.fillStyle = `rgb(${displayR},${displayG},${displayB})`;
     // 最小 1px：静音段也留一条中线，否则波形会断成几截看着像坏了
     const half = Math.max(
@@ -327,4 +534,3 @@ export function drawWaveformCanvas(
     );
   }
 }
-

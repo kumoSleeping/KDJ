@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 /**
  * 接歌的候选范围。
@@ -30,9 +31,9 @@ interface HarmonicScopeState {
  * 不是一次性的临时筛选，每次开软件都要重设一遍很烦。
  */
 export const useHarmonicScope = create<HarmonicScopeState>((set) => ({
-  scope: ((value) => (isScope(value) ? value : "all"))(localStorage.getItem(STORAGE_KEY)),
+  scope: ((value) => (isScope(value) ? value : "all"))(readLocalStorage(STORAGE_KEY)),
   setScope(scope) {
-    localStorage.setItem(STORAGE_KEY, scope);
+    writeLocalStorageNow(STORAGE_KEY, scope);
     set({ scope });
   },
 }));

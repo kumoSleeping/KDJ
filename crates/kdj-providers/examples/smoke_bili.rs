@@ -1,4 +1,4 @@
-//! 真机冒烟：cargo run -p kdj-providers --example smoke_bili -- <BV号或链接>
+//! 真机冒烟：cargo run -p kdj-providers --example smoke_bili -- <AV/BV号或链接>
 use kdj_core::models::{Quality, VideoDownloadRequest};
 use kdj_providers::{
     bilibili::BilibiliProvider, provider::noop_progress, MusicProvider, ProviderContext,

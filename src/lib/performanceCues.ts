@@ -1,4 +1,4 @@
-import type { CuePoint } from "../types";
+import type { CuePoint, Track } from "../types";
 
 export const HOT_CUE_COLORS = [
   { index: 1, name: "pink", css: "#e6579a" },
@@ -18,6 +18,32 @@ export interface BeatGridMarker {
   positionSec: number;
   beat: 1 | 2 | 3 | 4;
   bar: number;
+}
+
+/**
+ * Pick the most musical bar origin available. A live detail rail may fall back
+ * to the beat lattice (or zero) while analysis metadata is still incomplete;
+ * library overviews keep rejecting uncertain grids.
+ */
+export function waveformBeatGridOrigin(track: Track, allowApproximate: boolean): number | null {
+  const confidentDownbeat = (track.downbeat_confidence ?? 0) >= 0.45
+    ? track.downbeat_origin ?? track.downbeats?.[0]
+    : null;
+  const candidates = allowApproximate
+    ? [
+        confidentDownbeat,
+        track.downbeat_origin,
+        track.downbeats?.[0],
+        track.beat_origin,
+        track.first_beat,
+        track.beat_times?.[0],
+      ]
+    : [confidentDownbeat, track.beat_origin, track.first_beat, track.beat_times?.[0]];
+  const found = candidates.find((value) => value != null && Number.isFinite(value));
+  if (found != null) return found;
+  return allowApproximate && track.bpm != null && Number.isFinite(track.bpm) && track.bpm > 0
+    ? 0
+    : null;
 }
 
 const MAX_BEAT_MARKERS = 8_192;

@@ -13,6 +13,7 @@ pub use contract::{
     CommandAck, ControlAck, PlaybackBeatGrid, PlaybackClock, PlaybackCommand, PlaybackDeckClock,
     PlaybackLevels, PlaybackPhase, PlaybackPlatterPhase, PlaybackSnapshot, PlaybackSource,
     PlaybackSourceKind, PlaybackSyncPhase, PlaybackSyncSnapshot, PlaybackTransitionPlan,
+    PlaybackWaveformWindow,
 };
 pub use coordinator::PlaybackCoordinator;
 pub use platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory, PlaybackOutputSpec};

@@ -18,9 +18,9 @@ tauri-build = { version = "2.6", features = [] }
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.22"
-kdj-core = { version = "0.2.44", path = "../crates/kdj-core" }
-kdj-library = { version = "0.2.44", path = "../crates/kdj-library" }
-kdj-server = { version = "0.2.44", path = "../crates/kdj-server", default-features = false }
+kdj-core = { version = "1.0.0-rc1", path = "../crates/kdj-core", features = ["rustls-ring"] }
+kdj-library = { version = "1.0.0-rc1", path = "../crates/kdj-library" }
+kdj-server = { version = "1.0.0-rc1", path = "../crates/kdj-server", default-features = false }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # tauri.conf.json 里一有 `plugins` 段，`generate_context!` 展开出来的代码就会
@@ -29,20 +29,19 @@ serde = { version = "1.0.229", features = ["derive"] }
 # 看着完全不像是"加了个 updater 配置"引起的。
 serde_json = "1.0"
 # macOS 的透明 WebView 构建器受该 feature 保护；桌面歌词窗口需要真透明背景。
-tauri = { version = "2.11", features = ["macos-private-api"] }
+tauri = { version = "2.11", features = ["macos-private-api", "unstable"] }
 tauri-plugin-opener = "2.5"
-tokio = { version = "1.53.1", features = ["sync"] }
+tokio = { version = "1.53.1", features = ["sync", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
-# 一键更新：updater 下载+minisign 校验+原地替换，process 提供替换后的自重启。
+# 一键更新：updater 下载+minisign 校验+原地替换，随后使用 Tauri 核心 AppHandle 重启。
 # 只在桌面有意义（安卓走 Release 页下 APK），target 限定住免得安卓交叉编译多拖依赖。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-kdj-playback = { version = "0.2.44", path = "../crates/kdj-playback" }
+kdj-playback = { version = "1.0.0-rc1", path = "../crates/kdj-playback" }
 tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
-reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
 midir = "0.11"
 clap = { version = "4.5", features = ["derive"] }
 tauri-plugin-dialog = "2.7"
@@ -51,18 +50,50 @@ tauri-plugin-dialog = "2.7"
 tauri-plugin-deep-link = "2.4.9"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+winreg = "0.55"
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# 把曲库里的真实文件交给 Finder / Explorer 的系统拖放会话；不经过 WebView DataTransfer。
+drag = "=2.1.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# hdiutil / diskutil 的 -plist 输出不受系统显示语言影响；不要解析本地化文本。
-plist = { version = "1.10", optional = true }
+# YouTube WebPO 在一个无 Tauri IPC、非持久的系统 WKWebView 中运行。复用 Tauri 已经
+# 链入的 WebKit/Objective-C 绑定，不引入 JS 引擎或 Node sidecar。
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "NSPasteboard",
+  "NSPasteboardItem",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "NSArray",
+  "NSData",
+  "NSError",
+  "NSObject",
+  "NSString",
+  "NSURL",
+  "NSURLRequest",
+] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+  "WKContentWorld",
+  "WKFrameInfo",
+  "WKNavigation",
+  "WKUserContentController",
+  "WKWebView",
+  "block2",
+] }
 
 # Android Playback v2：与桌面共用 coordinator + CPAL/AAudio；Kotlin 插件只留
 # MediaSession / 前台保活 / 歌词 overlay，不再用 ExoPlayer 出声。
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk-context = "0.1"
-kdj-playback = { version = "0.2.44", path = "../crates/kdj-playback" }
+kdj-playback = { version = "1.0.0-rc1", path = "../crates/kdj-playback" }
 tauri-plugin-native-audio = { version = "=1.0.5", path = "../plugins/native-audio" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
@@ -72,8 +103,6 @@ tauri-plugin-native-audio = { version = "=1.0.5", path = "../plugins/native-audi
 
 [features]
 default = []
-# Separate KDJ Labs product: enables every experimental desktop surface and OneLibrary backend.
-labs = ["kdj-server/onelibrary", "dep:plist"]
 # `tauri build` 会自动带上这个 feature，`generate_context!` 才会去读
 # frontendDist 把前端产物嵌进二进制；不带的时候（`cargo build` / `tauri dev`）
 # 走 devUrl。**不要删**：删了之后光 `cargo build` 就会因为找不到 dist-tauri/ 而失败。

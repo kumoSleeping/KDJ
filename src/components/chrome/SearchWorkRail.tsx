@@ -1,6 +1,15 @@
-import { CheckSquare, Download, ListCollapse, ListMusic } from "lucide-react";
+import {
+  ArrowLeft,
+  CheckSquare,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  ListCollapse,
+  ListMusic,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import type { IntakeItem, Platform } from "../../types";
+import type { CollectionPageWindow } from "../../lib/searchCollections";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { Button, InlineNotice } from "../common";
 import { SEARCH_PLATFORMS } from "../download/SearchBar";
@@ -36,6 +45,13 @@ function countSourcesByPlatform(items: IntakeItem[]): Partial<Record<Platform, n
 
 export interface SearchWorkRailProps {
   items: IntakeItem[];
+  /** 唯一已打开的合集；非空时工作条切换为合集详情导航。 */
+  collection: IntakeItem | null;
+  collectionWindow: CollectionPageWindow | null;
+  canGoBack: boolean;
+  onGoBack(): void;
+  onCollectionPageChange(page: number): void;
+  onDownloadCollection(): void;
   /** 查询仍在进行时，零条目不等于最终没有结果。 */
   loading: boolean;
   selectionCount: number;
@@ -61,6 +77,12 @@ export interface SearchWorkRailProps {
  */
 export function SearchWorkRail({
   items,
+  collection,
+  collectionWindow,
+  canGoBack,
+  onGoBack,
+  onCollectionPageChange,
+  onDownloadCollection,
   loading,
   selectionCount,
   selecting,
@@ -83,6 +105,7 @@ export function SearchWorkRail({
 
   const glyphs: ReactNode[] = [];
   const texts: ReactNode[] = [];
+  const collections = items.flatMap((item) => item.collections);
 
   if (selecting) {
     glyphs.push(
@@ -119,6 +142,73 @@ export function SearchWorkRail({
       />,
     );
   } else {
+    if (collection) {
+      if (canGoBack) {
+        glyphs.push(
+          <button
+            key="collection-back"
+            type="button"
+            className="kd-collection-rail-back"
+            data-kind={collection.kind}
+            aria-label="返回合集搜索结果"
+            title="返回合集搜索结果"
+            onClick={onGoBack}
+          >
+            <ArrowLeft size={15} strokeWidth={2.15} aria-hidden="true" />
+          </button>,
+        );
+      }
+      glyphs.push(
+        <span
+          key="collection-platform"
+          className="kd-collection-rail-platform"
+          data-platform={collection.platform ?? undefined}
+          title={collection.platform ? PLATFORM_LABEL[collection.platform] : undefined}
+          aria-hidden="true"
+        >
+          {collection.platform ? (
+            <PlatformMark id={collection.platform} size={13} />
+          ) : (
+            <ListMusic size={13} strokeWidth={2.25} />
+          )}
+        </span>,
+      );
+      const unit = collection.kind === "radio"
+        ? "集"
+        : collection.platform === "bilibili" || collection.platform === "youtube"
+          ? "个视频"
+          : "首";
+      texts.push(
+        <span
+          key="opened-collection"
+          className="kd-activity-text kd-collection-rail-title"
+          title={collection.title || collection.entry}
+        >
+          {collection.title || collection.entry}
+        </span>,
+        <span key="opened-collection-count" className="kd-collection-rail-count">
+          {collectionWindow?.total ?? collection.groups.length} {unit}
+        </span>,
+        <span
+          key="opened-collection-download"
+          className="kd-collection-rail-actions"
+          data-kind={collection.kind}
+        >
+          <button
+            type="button"
+            className="kd-collection-rail-download"
+            disabled={collection.groups.length === 0}
+            aria-label={`全部下载「${collection.title || collection.entry}」`}
+            title="全部下载"
+            onClick={onDownloadCollection}
+          >
+            <Download size={13} strokeWidth={2.1} aria-hidden="true" />
+            <span>全部下载</span>
+          </button>
+        </span>,
+      );
+    }
+
     if (activeDownloads > 0) {
       glyphs.push(
         <span key="dl" className="kd-activity-glyph kd-activity-glyph-dl" aria-hidden="true">
@@ -134,50 +224,36 @@ export function SearchWorkRail({
       );
     }
 
-    const openedCollection = items.find(
-      (item) =>
-        item.groups.length > 0 &&
-        (item.kind === "playlist" || item.kind === "artist" || item.kind === "album"),
-    );
-    const collections = items.flatMap((item) => item.collections);
-    if (openedCollection || collections.length > 0) {
+    if (!collection && collections.length > 0) {
+      const kinds = new Set(collections.map((item) => item.kind));
+      const singleKind = kinds.size === 1 ? collections[0]!.kind : undefined;
       glyphs.push(
-        <span key="collections" className="kd-activity-glyph" aria-hidden="true">
+        <span
+          key="collections"
+          className="kd-activity-glyph kd-collection-search-glyph"
+          data-kind={singleKind}
+          aria-hidden="true"
+        >
           <ListMusic size={13} strokeWidth={2.25} />
         </span>,
       );
-      if (openedCollection) {
-        const unit = openedCollection.platform === "bilibili" || openedCollection.platform === "youtube"
-          ? "个视频"
-          : "首";
-        texts.push(
-          <span
-            key="opened-collection"
-            className="kd-activity-text kd-truncate"
-            title={`${openedCollection.title} · ${openedCollection.groups.length} ${unit}`}
-          >
-            {openedCollection.title} · {openedCollection.groups.length} {unit}
-          </span>,
-        );
-      }
-      if (collections.length > 0) {
-        const kinds = new Set(collections.map((collection) => collection.kind));
-        const kind = kinds.size === 1 ? COLLECTION_LABEL[collections[0]!.kind] : "集合";
-        texts.push(
-          <span key="collection-count" className="kd-activity-text">
-            {collections.length} 个{kind}
-          </span>,
-        );
-      }
+      const kind = singleKind ? COLLECTION_LABEL[singleKind] : "集合";
+      texts.push(
+        <span key="collection-count" className="kd-activity-text">
+          {collections.length} 个{kind}
+        </span>,
+      );
     }
 
-    const counts = countSourcesByPlatform(items);
+    // 合集详情的来源与总数已由标题旁的品牌图标和曲目数表达；不再重复一份
+    // “网易云 60”之类的平台统计。候选列表和普通歌曲搜索才展示来源汇总。
+    const counts = collection ? {} : countSourcesByPlatform(items);
     const rows = PLATFORM_ORDER.filter((id) => (counts[id] ?? 0) > 0);
     if (
       rows.length === 0 &&
       activeDownloads === 0 &&
       !loading &&
-      !openedCollection &&
+      !collection &&
       collections.length === 0
     ) {
       glyphs.push(
@@ -217,6 +293,34 @@ export function SearchWorkRail({
       texts={texts}
       actions={
         <>
+          {!selecting && collection && collectionWindow && collectionWindow.pageCount > 1 ? (
+            <span className="kd-collection-rail-actions" data-kind={collection.kind}>
+              <span
+                className="kd-collection-rail-pagination"
+                aria-label={`第 ${collectionWindow.page} 页，共 ${collectionWindow.pageCount} 页`}
+              >
+                <button
+                  type="button"
+                  disabled={loading || collectionWindow.page <= 1}
+                  aria-label="上一页"
+                  title="上一页"
+                  onClick={() => onCollectionPageChange(collectionWindow.page - 1)}
+                >
+                  <ChevronLeft size={14} aria-hidden="true" />
+                </button>
+                <span>{collectionWindow.page} / {collectionWindow.pageCount}</span>
+                <button
+                  type="button"
+                  disabled={loading || collectionWindow.page >= collectionWindow.pageCount}
+                  aria-label="下一页"
+                  title="下一页"
+                  onClick={() => onCollectionPageChange(collectionWindow.page + 1)}
+                >
+                  <ChevronRight size={14} aria-hidden="true" />
+                </button>
+              </span>
+            </span>
+          ) : null}
           <button
             type="button"
             className="kd-chrome-btn"
@@ -231,7 +335,15 @@ export function SearchWorkRail({
         </>
       }
       label={
-        selecting ? "搜索多选" : loading ? "正在处理" : idle ? "搜索结果概况" : "下载任务"
+        selecting
+          ? "搜索多选"
+          : collection
+            ? "合集详情"
+            : loading
+              ? "正在处理"
+              : idle
+                ? "搜索结果概况"
+                : "下载任务"
       }
     />
   );

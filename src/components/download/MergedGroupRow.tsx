@@ -1,5 +1,14 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Check,
+  Copy,
+  Download,
+  Link2,
+  ListMinus,
+  Play,
+} from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
 import { requestSongPreview, type SongPreviewItem } from "../../lib/songPreview";
@@ -7,6 +16,9 @@ import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelect
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import type { MergedGroup, Platform, SongSource } from "../../types";
 import { copyText } from "../../lib/copyText";
+import { copyShareContent, songSourcesArtwork } from "../../lib/shareClipboard";
+import { firstSourceShareLink, formatShareText } from "../../lib/shareLink";
+import { useSharePrefs } from "../../lib/sharePrefs";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
@@ -54,6 +66,10 @@ export interface MergedGroupRowProps {
   onInspect(index: number): void;
   /** 把当前选中来源直接丢进下载队列，省掉先勾选再找顶栏。 */
   onDownload(): void;
+  /** 仅远端账号收藏/本人歌单提供；调用后由上层等待平台服务器确认。 */
+  onRemoveFromStreamPlaylist?(): void;
+  removeFromStreamPlaylistLabel?: string;
+  removingFromStreamPlaylist?: boolean;
   /** 当前搜索结果里排在本行之后的可播放歌曲。 */
   followingSongs?: SongPreviewItem[];
   onDragStart?(event: React.DragEvent<HTMLElement>): void;
@@ -89,12 +105,17 @@ export function MergedGroupRow({
   onPickSource,
   onInspect,
   onDownload,
+  onRemoveFromStreamPlaylist,
+  removeFromStreamPlaylistLabel,
+  removingFromStreamPlaylist = false,
   followingSongs = [],
   onDragStart,
   onDragEnd,
   onPointerDragStart,
 }: MergedGroupRowProps) {
   const active = group.sources[sourceIndex] ?? group.sources[0];
+  const shareLink = firstSourceShareLink(group.sources, sourceIndex);
+  const shareContentMode = useSharePrefs((state) => state.contentMode);
   const multi = group.sources.length > 1;
   const pressTimerRef = useRef<number | null>(null);
   const pointerDragCleanupRef = useRef<(() => void) | null>(null);
@@ -294,7 +315,12 @@ export function MergedGroupRow({
     switch (key) {
       case "title":
         return (
-          <td key={key} colSpan={1} className="kd-muted" style={{ paddingLeft: "1.4rem" }}>
+          <td
+            key={key}
+            colSpan={1}
+            className="kd-muted kd-result-source-child"
+            data-parent-indented={indent ? "true" : undefined}
+          >
             <span className="kd-row" style={{ gap: "0.4rem" }}>
               {index === sourceIndex ? <Check size={12} /> : <span style={{ width: 12 }} />}
               <span className="kd-truncate">{source.title}</span>
@@ -344,6 +370,8 @@ export function MergedGroupRow({
     <Fragment>
       <tr
         aria-selected={selected || inspected}
+        data-kd-search-result=""
+        data-inspected={inspected ? "true" : undefined}
         aria-label={
           layout === "narrow"
             ? `${group.title}，单击播放`
@@ -523,6 +551,40 @@ export function MergedGroupRow({
             <Copy size={12} />
             复制标题
           </button>
+          {shareLink && (
+            <button
+              type="button"
+              onClick={() => {
+                void copyShareContent(
+                  formatShareText(
+                    shareLink,
+                    { title: group.title, artists: group.artists, album: group.album },
+                    shareContentMode,
+                  ),
+                  shareContentMode,
+                  songSourcesArtwork(group.sources, sourceIndex),
+                );
+                setRowMenu(null);
+              }}
+            >
+              <Link2 size={12} />
+              复制分享内容
+            </button>
+          )}
+          {onRemoveFromStreamPlaylist && removeFromStreamPlaylistLabel && (
+            <button
+              type="button"
+              disabled={removingFromStreamPlaylist}
+              onClick={() => {
+                if (removingFromStreamPlaylist) return;
+                setRowMenu(null);
+                onRemoveFromStreamPlaylist();
+              }}
+            >
+              <ListMinus size={12} />
+              {removingFromStreamPlaylist ? "正在移除…" : removeFromStreamPlaylistLabel}
+            </button>
+          )}
           {selectable && (
             <button
               type="button"

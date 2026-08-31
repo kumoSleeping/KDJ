@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   BEATS_PER_BAR,
   applySyncRateBeforePhase,
+  automaticTransitionRate,
   barPhase,
   barPhaseAlignedSeek,
   barPhaseLock,
@@ -11,6 +12,7 @@ import {
   deckSyncRate,
   ENGINE_TEMPO_MAX,
   ENGINE_TEMPO_MIN,
+  hasRoomForAlignedTransition,
   manualSyncBarInput,
   linkedDeckRates,
   adoptNativeSyncRelation,
@@ -161,6 +163,13 @@ test("handoff waits for the next bar when auto-sync is on, otherwise the next be
   almost(msUntilNextBoundary(0.5, 120, 0.1, 1, 1) ?? -1, 100);
 });
 
+test("handoff overlap compares source time with wall time at the actual Tempo", () => {
+  assert.equal(hasRoomForAlignedTransition(4, 2, 2, 500), false);
+  assert.equal(hasRoomForAlignedTransition(7, 2, 2, 1_000), true);
+  assert.equal(hasRoomForAlignedTransition(4, 0.5, 4, 1_000), true);
+  assert.equal(hasRoomForAlignedTransition(8, 1, 4, null), false);
+});
+
 test("sync play-quantize only fires for the deck that just started against a live counterpart", () => {
   assert.equal(shouldQuantizeSyncOnPlay(true, false, true), true);
   assert.equal(shouldQuantizeSyncOnPlay(true, true, true), false);
@@ -227,6 +236,14 @@ test("native promotion owns seek lead for both original and STEM followers", () 
   };
   almost(syncFollowerSeekPositionWithLead(input, syncSeekLeadSeconds(true)) ?? -1, 10);
   almost(syncFollowerSeekPositionWithLead(input, syncSeekLeadSeconds(false)) ?? -1, 10);
+});
+
+test("automatic continuation stays at original speed unless beat sync explicitly owns tempo", () => {
+  assert.equal(automaticTransitionRate(false, 140, 128), 1);
+  almost(automaticTransitionRate(true, 140, 128), 140 / 128);
+  assert.equal(automaticTransitionRate(true, 140, 70), 1, "half-time relation stays neutral");
+  assert.equal(automaticTransitionRate(true, 200, 70), 1, "an excessive stretch is refused");
+  assert.equal(automaticTransitionRate(true, null, 128), 1);
 });
 
 test("manual SYNC matches 80.9 to 128.4 as half-time without pinning to a ±10% fader", () => {

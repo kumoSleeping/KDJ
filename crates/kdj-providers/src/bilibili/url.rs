@@ -1,4 +1,4 @@
-//! B 站分享文案 → (BV 号, 分 P 下标)。
+//! B 站分享文案 → (BV/AV 号, 分 P 下标)。
 //!
 //! 短链展开是这里最敏感的部分：`b23.tv` 必须**逐跳**校验域名白名单 + 目标 IP 是公网。
 //! 一次性 follow 到底再校验最终 URL 是不够的——中间跳转可以是任意内网地址，
@@ -23,8 +23,8 @@ const ALLOWED_HOSTS: [&str; 4] = [
 /// 移植时我把它当成"全局 UA"复用到了搜索上，于是搜索接口的风控把请求判成机器人：
 /// 返回 `code=0` + `data: {v_voucher}`，一条结果都没有却**不报错**。
 ///
-/// 实测二分过：cookie（buvid3/buvid4/空 SESSDATA）、query 参数顺序、
-/// Referer 结尾的斜杠都不影响结果，**只有 UA 会**。
+/// 当时的实测二分中，直接触发软风控的是 UA；但搜索接口仍要求稳定的 `buvid3`
+/// 设备 Cookie，不能把那次结果推广成“Cookie 永远无关”。设备初始化由 BiliClient 负责。
 /// playurl / view 不受这条风控管，所以只有搜索是瞎的，很难从现象反推原因。
 pub const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
                               (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
@@ -38,6 +38,7 @@ pub fn host_allowed(host: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoTarget {
     pub bvid: String,
+    pub aid: Option<u64>,
     pub page_index: usize,
     pub resolved_url: String,
 }
@@ -58,6 +59,40 @@ pub fn normalize_bvid(text: &str) -> String {
         }
     }
     String::new()
+}
+
+/// 提取并规范化 AV 号。
+///
+/// 前缀大小写不敏感；数字必须紧跟 `av`，且 AV 号本身必须大于 0。
+/// 两侧的 ASCII 字母/数字边界用于避免把 `brav123` 之类的普通文本误判成视频号。
+pub fn normalize_aid(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while start + 2 < bytes.len() {
+        let has_prefix = bytes[start].eq_ignore_ascii_case(&b'a')
+            && bytes[start + 1].eq_ignore_ascii_case(&b'v');
+        let starts_at_boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        if !has_prefix || !starts_at_boundary {
+            start += 1;
+            continue;
+        }
+
+        let digit_start = start + 2;
+        let mut end = digit_start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let ends_at_boundary = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if end > digit_start && ends_at_boundary {
+            if let Ok(aid) = text[digit_start..end].parse::<u64>() {
+                if aid > 0 {
+                    return Some(aid);
+                }
+            }
+        }
+        start = end.max(start + 1);
+    }
+    None
 }
 
 /// 从文本里挑出第一个通过白名单的 B 站链接。
@@ -152,13 +187,14 @@ pub fn normalize_shared_text(value: &str) -> String {
         .replace("\\/", "/")
 }
 
-/// 把「分享文案 / 链接 / 裸 BV 号」解析成目标。
+/// 把「分享文案 / 链接 / 裸 BV/AV 号」解析成目标。
 ///
 /// 需要发网络请求（展开 b23.tv）时才用到 `http`。
 pub async fn resolve_video_target(http: &reqwest::Client, source: &str) -> Result<VideoTarget> {
     let text = normalize_shared_text(source.trim());
     let shared_url = pick_bilibili_url(&text);
     let direct_bvid = normalize_bvid(&text);
+    let direct_aid = normalize_aid(&text);
     let page_index = if shared_url.is_empty() {
         0
     } else {
@@ -174,6 +210,15 @@ pub async fn resolve_video_target(http: &reqwest::Client, source: &str) -> Resul
         if !direct_bvid.is_empty() && host != "b23.tv" {
             return Ok(VideoTarget {
                 bvid: direct_bvid,
+                aid: None,
+                page_index,
+                resolved_url: shared_url,
+            });
+        }
+        if direct_aid.is_some() && host != "b23.tv" {
+            return Ok(VideoTarget {
+                bvid: String::new(),
+                aid: direct_aid,
                 page_index,
                 resolved_url: shared_url,
             });
@@ -194,6 +239,15 @@ pub async fn resolve_video_target(http: &reqwest::Client, source: &str) -> Resul
             return Ok(VideoTarget {
                 page_index: page_index_from_url(&resolved),
                 bvid: resolved_bvid,
+                aid: None,
+                resolved_url: resolved,
+            });
+        }
+        if let Some(aid) = normalize_aid(&resolved) {
+            return Ok(VideoTarget {
+                page_index: page_index_from_url(&resolved),
+                bvid: String::new(),
+                aid: Some(aid),
                 resolved_url: resolved,
             });
         }
@@ -202,11 +256,20 @@ pub async fn resolve_video_target(http: &reqwest::Client, source: &str) -> Resul
     if !direct_bvid.is_empty() {
         return Ok(VideoTarget {
             bvid: direct_bvid,
+            aid: None,
             page_index,
             resolved_url: String::new(),
         });
     }
-    bail!("没有找到有效的哔哩哔哩 BV 号或分享链接")
+    if let Some(aid) = direct_aid {
+        return Ok(VideoTarget {
+            bvid: String::new(),
+            aid: Some(aid),
+            page_index,
+            resolved_url: String::new(),
+        });
+    }
+    bail!("没有找到有效的哔哩哔哩 BV/AV 号或分享链接")
 }
 
 /// 搜索接口的标题带 `<em class="keyword">` 高亮标签，展示前要剥掉再反转义。
@@ -269,6 +332,19 @@ mod tests {
         );
         assert_eq!(normalize_bvid("没有号"), "");
         assert_eq!(normalize_bvid("BV123"), "", "位数不够不能算");
+    }
+
+    #[test]
+    fn aid_is_accepted_case_insensitively_with_boundaries() {
+        assert_eq!(normalize_aid("av170001"), Some(170001));
+        assert_eq!(normalize_aid("AV170001"), Some(170001));
+        assert_eq!(
+            normalize_aid("看这个 https://www.bilibili.com/video/av170001?p=2"),
+            Some(170001)
+        );
+        assert_eq!(normalize_aid("brav170001"), None);
+        assert_eq!(normalize_aid("av170001x"), None);
+        assert_eq!(normalize_aid("av0"), None);
     }
 
     #[test]
@@ -378,24 +454,51 @@ mod tests {
     #[tokio::test]
     async fn plain_links_with_a_bvid_do_not_hit_the_network() {
         // 没有网络也必须能解析：直链里已经有 BV 号，不该去展开
+        kdj_core::ensure_rustls_ring();
         let http = reqwest::Client::new();
         let target = resolve_video_target(&http, "https://www.bilibili.com/video/BV1L94y1H7CV?p=2")
             .await
             .unwrap();
         assert_eq!(target.bvid, "BV1L94y1H7CV");
+        assert_eq!(target.aid, None);
         assert_eq!(target.page_index, 1);
     }
 
     #[tokio::test]
     async fn bare_bvid_is_accepted() {
+        kdj_core::ensure_rustls_ring();
         let http = reqwest::Client::new();
         let target = resolve_video_target(&http, "BV1L94y1H7CV").await.unwrap();
         assert_eq!(target.bvid, "BV1L94y1H7CV");
+        assert_eq!(target.aid, None);
         assert_eq!(target.page_index, 0);
     }
 
     #[tokio::test]
+    async fn bare_aid_is_accepted_without_a_request() {
+        kdj_core::ensure_rustls_ring();
+        let http = reqwest::Client::new();
+        let target = resolve_video_target(&http, "AV170001").await.unwrap();
+        assert_eq!(target.bvid, "");
+        assert_eq!(target.aid, Some(170001));
+        assert_eq!(target.page_index, 0);
+    }
+
+    #[tokio::test]
+    async fn plain_links_with_an_aid_preserve_the_page_without_a_request() {
+        kdj_core::ensure_rustls_ring();
+        let http = reqwest::Client::new();
+        let target = resolve_video_target(&http, "https://www.bilibili.com/video/av170001?p=3")
+            .await
+            .unwrap();
+        assert_eq!(target.bvid, "");
+        assert_eq!(target.aid, Some(170001));
+        assert_eq!(target.page_index, 2);
+    }
+
+    #[tokio::test]
     async fn garbage_input_is_rejected_without_a_request() {
+        kdj_core::ensure_rustls_ring();
         let http = reqwest::Client::new();
         assert!(resolve_video_target(&http, "随便一句话").await.is_err());
     }

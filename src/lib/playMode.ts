@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 /**
  * 播放模式：一首放完之后接什么。
@@ -29,9 +30,9 @@ interface PlayModeState {
 }
 
 export const usePlayMode = create<PlayModeState>((set, get) => ({
-  mode: ((value) => (isMode(value) ? value : "harmonic"))(localStorage.getItem(STORAGE_KEY)),
+  mode: ((value) => (isMode(value) ? value : "harmonic"))(readLocalStorage(STORAGE_KEY)),
   setMode(mode) {
-    localStorage.setItem(STORAGE_KEY, mode);
+    writeLocalStorageNow(STORAGE_KEY, mode);
     set({ mode });
   },
   cycleMode() {

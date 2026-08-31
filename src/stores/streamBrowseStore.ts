@@ -7,6 +7,7 @@
 
 import { create } from "zustand";
 import { api } from "../lib/api";
+import type { StreamPlaylistRecentEntry } from "../lib/streamPlaylistOrder";
 import type { Account, Platform, StreamPlaylist } from "../types";
 
 export const STREAM_BROWSE_PLATFORMS = [
@@ -30,15 +31,22 @@ export const STREAM_PLAYLIST_SECTION_IDS = [
 export type StreamPlaylistSectionId =
   (typeof STREAM_PLAYLIST_SECTION_IDS)[number];
 
-/** 成功缓存十分钟后才由普通生命周期刷新。 */
+/** 成功缓存十分钟；只有用户展开目录时才会按需刷新。 */
 export const STREAM_PLAYLIST_CACHE_TTL_MS = 10 * 60 * 1000;
-/** 自动刷新失败时，focus/visible 等信号至少隔五分钟再试。 */
-export const STREAM_PLAYLIST_AUTO_REFRESH_GAP_MS = 5 * 60 * 1000;
+/** 持久时间戳最多容忍五分钟系统时钟偏差；与网络请求频率无关。 */
+const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
 
-const STREAM_PLAYLIST_CACHE_VERSION = 2;
+const STREAM_PLAYLIST_CACHE_VERSION = 3;
 const STREAM_PLAYLIST_CACHE_KEY = `kd-stream-playlist-directory-v${STREAM_PLAYLIST_CACHE_VERSION}`;
+const STREAM_PLAYLIST_LEGACY_CACHE_KEYS = [
+  "kd-stream-playlist-directory-v1",
+  "kd-stream-playlist-directory-v2",
+] as const;
+const STREAM_PLAYLIST_RECENT_VERSION = 1;
+const STREAM_PLAYLIST_RECENT_KEY = `kd-stream-playlist-recent-v${STREAM_PLAYLIST_RECENT_VERSION}`;
 const STREAM_BROWSE_LAYOUT_KEY = "kd-stream-browse-layout-v1";
 const MAX_CACHED_PLAYLISTS = 500;
+const MAX_RECENT_PLAYLISTS = 200;
 const MAX_KEY_LENGTH = 512;
 const MAX_TITLE_LENGTH = 512;
 const MAX_COVER_LENGTH = 4096;
@@ -65,7 +73,7 @@ export interface StreamAccountBinding {
 }
 
 export interface StreamPlaylistRefreshOptions {
-  /** 手动刷新、启动校准和登录变化使用：绕过 TTL 与五分钟自动防抖。 */
+  /** 仅供用户明确点击刷新使用：绕过十分钟目录缓存。 */
   force?: boolean;
 }
 
@@ -80,6 +88,16 @@ interface PersistedDirectoryCache {
   platforms: Partial<Record<StreamBrowsePlatform, PersistedPlatformCache>>;
 }
 
+interface PersistedPlatformRecents {
+  accountSignature: string;
+  entries: StreamPlaylistRecentEntry[];
+}
+
+interface PersistedPlaylistRecents {
+  version: number;
+  platforms: Partial<Record<StreamBrowsePlatform, PersistedPlatformRecents>>;
+}
+
 interface StreamBrowseStore {
   /** null = 尚无可展示目录；[] = 已成功读取但账号没有歌单。 */
   playlists: PlatformMap<StreamPlaylist[] | null>;
@@ -88,14 +106,13 @@ interface StreamBrowseStore {
   expanded: PlatformMap<boolean>;
   /** 二级分组独立折叠；与平台根节点分开，宽/窄侧栏共享当前会话状态。 */
   sectionExpanded: PlatformMap<SectionMap<boolean>>;
+  /** 当前账号在 KDJ 中最近打开过的歌单；只用于覆盖平台目录的展示顺序。 */
+  recentlyOpened: PlatformMap<StreamPlaylistRecentEntry[]>;
   /** 最近点开的远程歌单，仅用于侧栏高亮，不代表本地曲库选择。 */
   active: ActiveStreamPlaylist | null;
   accountKeys: PlatformMap<string | null>;
   cacheSignatures: PlatformMap<string | null>;
   updatedAt: PlatformMap<number>;
-  lastAttemptAt: PlatformMap<number>;
-  /** 同一账号在本次应用加载期间只做一次强制后台校准。 */
-  calibratedAccountKeys: PlatformMap<string | null>;
   /** 登出/换号期间让在途旧请求失效。 */
   revisions: PlatformMap<number>;
 
@@ -232,14 +249,7 @@ function sanitizePlaylist(
   };
 }
 
-function originRank(playlist: StreamPlaylist): number {
-  if (playlist.is_favorite || playlist.origin === "favorite") return 0;
-  if (playlist.origin === "created") return 1;
-  if (playlist.origin === "collected") return 2;
-  return 3;
-}
-
-/** 平台偶尔会回重复项；稳定键去重后再按来源和标题排，避免展开顺序跳动。 */
+/** 平台偶尔会回重复项；稳定去重，但绝不能覆盖平台接口给出的默认顺序。 */
 function normalizePlaylists(
   value: unknown,
   platform: StreamBrowsePlatform,
@@ -255,15 +265,15 @@ function normalizePlaylists(
   if (value.length > 0 && playlists.length === 0) {
     throw new Error("平台返回的歌单目录无法校验");
   }
-  return playlists.sort(
-    (left, right) =>
-      originRank(left) - originRank(right) ||
-      left.title.localeCompare(right.title, "zh-CN", { numeric: true }),
-  );
+  return playlists;
 }
 
 function emptyPersistedCache(): PersistedDirectoryCache {
   return { version: STREAM_PLAYLIST_CACHE_VERSION, platforms: {} };
+}
+
+function emptyPersistedRecents(): PersistedPlaylistRecents {
+  return { version: STREAM_PLAYLIST_RECENT_VERSION, platforms: {} };
 }
 
 function browserStorage(): Storage | null {
@@ -326,11 +336,99 @@ function writePersistedCache(cache: PersistedDirectoryCache): void {
   }
 }
 
+function writePersistedRecents(recents: PersistedPlaylistRecents): void {
+  const storage = browserStorage();
+  if (!storage) return;
+  try {
+    if (Object.keys(recents.platforms).length === 0) {
+      storage.removeItem(STREAM_PLAYLIST_RECENT_KEY);
+      return;
+    }
+    storage.setItem(STREAM_PLAYLIST_RECENT_KEY, JSON.stringify(recents));
+  } catch {
+    // 最近打开记录写失败时只失去跨启动排序，不影响平台目录和打开歌单。
+  }
+}
+
+function sanitizeRecentEntries(value: unknown): StreamPlaylistRecentEntry[] {
+  if (!Array.isArray(value)) return [];
+  const now = Date.now();
+  const seen = new Set<string>();
+  const entries = value
+    .slice(0, MAX_RECENT_PLAYLISTS * 2)
+    .flatMap((candidate) => {
+      if (!isRecord(candidate)) return [];
+      const key = boundedString(candidate.key, MAX_KEY_LENGTH);
+      const openedAt = candidate.openedAt;
+      if (
+        !key ||
+        seen.has(key) ||
+        typeof openedAt !== "number" ||
+        !Number.isFinite(openedAt) ||
+        openedAt <= 0 ||
+        openedAt > now + MAX_FUTURE_TIMESTAMP_SKEW_MS
+      ) {
+        return [];
+      }
+      seen.add(key);
+      return [{ key, openedAt }];
+    });
+  entries.sort((left, right) => right.openedAt - left.openedAt);
+  return entries.slice(0, MAX_RECENT_PLAYLISTS);
+}
+
+/** 最近打开记录和目录缓存分开保存，避免本地排序覆盖平台原始回包顺序。 */
+function readPersistedRecents(): PersistedPlaylistRecents {
+  const storage = browserStorage();
+  if (!storage) return emptyPersistedRecents();
+  try {
+    const raw = storage.getItem(STREAM_PLAYLIST_RECENT_KEY);
+    if (!raw) return emptyPersistedRecents();
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      !isRecord(parsed) ||
+      parsed.version !== STREAM_PLAYLIST_RECENT_VERSION ||
+      !isRecord(parsed.platforms)
+    ) {
+      throw new Error("recent schema mismatch");
+    }
+    const safe = emptyPersistedRecents();
+    for (const platform of STREAM_BROWSE_PLATFORMS) {
+      const candidate = parsed.platforms[platform];
+      if (
+        !isRecord(candidate) ||
+        typeof candidate.accountSignature !== "string" ||
+        candidate.accountSignature.length === 0 ||
+        candidate.accountSignature.length > MAX_SIGNATURE_LENGTH
+      ) {
+        continue;
+      }
+      const entries = sanitizeRecentEntries(candidate.entries);
+      safe.platforms[platform] = {
+        accountSignature: candidate.accountSignature,
+        entries,
+      };
+    }
+    if (JSON.stringify(parsed) !== JSON.stringify(safe)) writePersistedRecents(safe);
+    return safe;
+  } catch {
+    try {
+      storage.removeItem(STREAM_PLAYLIST_RECENT_KEY);
+    } catch {
+      // 删除也受限时维持纯内存运行。
+    }
+    return emptyPersistedRecents();
+  }
+}
+
 /** 读取时逐字段校验；坏 JSON/旧版本/越界内容会被删掉或重写成安全子集。 */
 function readPersistedCache(): PersistedDirectoryCache {
   const storage = browserStorage();
   if (!storage) return emptyPersistedCache();
   try {
+    // 旧缓存已经丢失平台原始顺序，不能迁移成新的默认顺序；同时避免换号/登出后
+    // 留下一份再也不会被当前版本读取或清理的私人目录元数据。
+    for (const key of STREAM_PLAYLIST_LEGACY_CACHE_KEYS) storage.removeItem(key);
     const raw = storage.getItem(STREAM_PLAYLIST_CACHE_KEY);
     if (!raw) return emptyPersistedCache();
     const parsed: unknown = JSON.parse(raw);
@@ -353,7 +451,7 @@ function readPersistedCache(): PersistedDirectoryCache {
         typeof candidate.updatedAt !== "number" ||
         !Number.isFinite(candidate.updatedAt) ||
         candidate.updatedAt <= 0 ||
-        candidate.updatedAt > now + STREAM_PLAYLIST_AUTO_REFRESH_GAP_MS
+        candidate.updatedAt > now + MAX_FUTURE_TIMESTAMP_SKEW_MS
       ) {
         continue;
       }
@@ -390,6 +488,13 @@ function removePersistedPlatform(platform: StreamBrowsePlatform): void {
   writePersistedCache(cache);
 }
 
+function removePersistedPlatformRecents(platform: StreamBrowsePlatform): void {
+  const recents = readPersistedRecents();
+  if (!recents.platforms[platform]) return;
+  delete recents.platforms[platform];
+  writePersistedRecents(recents);
+}
+
 function matchingPersistedPlatform(
   platform: StreamBrowsePlatform,
   accountSignature: string,
@@ -402,6 +507,20 @@ function matchingPersistedPlatform(
   delete cache.platforms[platform];
   writePersistedCache(cache);
   return null;
+}
+
+function matchingPersistedPlatformRecents(
+  platform: StreamBrowsePlatform,
+  accountSignature: string,
+): StreamPlaylistRecentEntry[] {
+  const recents = readPersistedRecents();
+  const candidate = recents.platforms[platform];
+  if (!candidate) return [];
+  if (candidate.accountSignature === accountSignature) return candidate.entries;
+  // 账号切换后不能让上一账号的私人使用记录影响当前目录。
+  delete recents.platforms[platform];
+  writePersistedRecents(recents);
+  return [];
 }
 
 function persistPlatform(
@@ -419,6 +538,19 @@ function persistPlatform(
   writePersistedCache(cache);
 }
 
+function persistPlatformRecents(
+  platform: StreamBrowsePlatform,
+  accountSignature: string,
+  entries: StreamPlaylistRecentEntry[],
+): void {
+  const recents = readPersistedRecents();
+  recents.platforms[platform] = {
+    accountSignature,
+    entries: entries.slice(0, MAX_RECENT_PLAYLISTS),
+  };
+  writePersistedRecents(recents);
+}
+
 const initialBrowseLayout = readPersistedBrowseLayout();
 
 export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
@@ -427,12 +559,11 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
   errors: platformMap(() => ""),
   expanded: initialBrowseLayout.expanded,
   sectionExpanded: initialBrowseLayout.sectionExpanded,
+  recentlyOpened: platformMap(() => []),
   active: null,
   accountKeys: platformMap(() => null),
   cacheSignatures: platformMap(() => null),
   updatedAt: platformMap(() => 0),
-  lastAttemptAt: platformMap(() => 0),
-  calibratedAccountKeys: platformMap(() => null),
   revisions: platformMap(() => 0),
 
   async bindAccount(platform, binding) {
@@ -446,15 +577,20 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
     if (!binding) {
       // 只有 FolderTree 已确认账号 missing/expired（或 bootstrap 明确无此账号）才走这里。
       removePersistedPlatform(platform);
+      removePersistedPlatformRecents(platform);
     } else if (!nextCacheSignature) {
       // 无法证明账号身份时宁可不缓存，也不能冒险展示另一账号的私人列表。
       removePersistedPlatform(platform);
+      removePersistedPlatformRecents(platform);
     }
 
     if (changed) {
       const persisted = nextCacheSignature
         ? matchingPersistedPlatform(platform, nextCacheSignature)
         : null;
+      const persistedRecents = nextCacheSignature
+        ? matchingPersistedPlatformRecents(platform, nextCacheSignature)
+        : [];
       set((state) => ({
         playlists: {
           ...state.playlists,
@@ -467,14 +603,13 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
           ...state.cacheSignatures,
           [platform]: nextCacheSignature,
         },
+        recentlyOpened: {
+          ...state.recentlyOpened,
+          [platform]: persistedRecents,
+        },
         updatedAt: {
           ...state.updatedAt,
           [platform]: persisted?.updatedAt ?? 0,
-        },
-        lastAttemptAt: { ...state.lastAttemptAt, [platform]: 0 },
-        calibratedAccountKeys: {
-          ...state.calibratedAccountKeys,
-          [platform]: null,
         },
         revisions: {
           ...state.revisions,
@@ -484,22 +619,7 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
       }));
     }
 
-    if (!nextKey) return;
-    const current = get();
-    if (
-      current.accountKeys[platform] !== nextKey ||
-      current.calibratedAccountKeys[platform] === nextKey
-    ) {
-      return;
-    }
-    // 先占位再发请求，避免宽/窄两个 FolderTree 同时 mount 时重复强刷。
-    set((state) => ({
-      calibratedAccountKeys: {
-        ...state.calibratedAccountKeys,
-        [platform]: nextKey,
-      },
-    }));
-    await get().refreshIfStale(platform, { force: true });
+    // 账号绑定到此为止：目录只在用户展开或按刷新按钮时读取。
   },
 
   async refreshIfStale(platform, options = {}) {
@@ -514,20 +634,14 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
       snapshot.updatedAt[platform] <= 0 ||
       now - snapshot.updatedAt[platform] >= STREAM_PLAYLIST_CACHE_TTL_MS;
     if (!options.force && !stale) return cached;
+    // 用户主动刷新立即执行；同一时刻的重复调用只由 loading 单飞合并。
     if (snapshot.loading[platform]) return cached ?? [];
-    if (
-      !options.force &&
-      now - snapshot.lastAttemptAt[platform] < STREAM_PLAYLIST_AUTO_REFRESH_GAP_MS
-    ) {
-      return cached ?? [];
-    }
 
     const revision = snapshot.revisions[platform];
     const cacheSignature = snapshot.cacheSignatures[platform];
     set((state) => ({
       loading: { ...state.loading, [platform]: true },
       errors: { ...state.errors, [platform]: "" },
-      lastAttemptAt: { ...state.lastAttemptAt, [platform]: now },
     }));
     try {
       const playlists = normalizePlaylists(await api.streamPlaylists(platform), platform);
@@ -577,7 +691,6 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
       loading: { ...state.loading, [platform]: false },
       errors: { ...state.errors, [platform]: "" },
       updatedAt: { ...state.updatedAt, [platform]: 0 },
-      lastAttemptAt: { ...state.lastAttemptAt, [platform]: 0 },
       revisions: { ...state.revisions, [platform]: state.revisions[platform] + 1 },
       active: state.active?.platform === platform ? null : state.active,
     }));
@@ -606,7 +719,35 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
   },
 
   setActive(active) {
-    set({ active });
+    if (!active) {
+      set({ active: null });
+      return;
+    }
+    const snapshot = get();
+    const key = active.key.trim();
+    if (
+      !key ||
+      key.length > MAX_KEY_LENGTH ||
+      !snapshot.accountKeys[active.platform]
+    ) {
+      set({ active });
+      return;
+    }
+    const entries = [
+      { key, openedAt: Date.now() },
+      ...snapshot.recentlyOpened[active.platform].filter((entry) => entry.key !== key),
+    ].slice(0, MAX_RECENT_PLAYLISTS);
+    set((state) => ({
+      active: { ...active, key },
+      recentlyOpened: {
+        ...state.recentlyOpened,
+        [active.platform]: entries,
+      },
+    }));
+    const accountSignature = snapshot.cacheSignatures[active.platform];
+    if (accountSignature) {
+      persistPlatformRecents(active.platform, accountSignature, entries);
+    }
   },
 
   setError(platform, error) {

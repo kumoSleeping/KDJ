@@ -1,7 +1,19 @@
 /** 一行带时间轴的 LRC。 */
+export interface LrcWord {
+  /** 绝对播放时间（秒）。 */
+  start: number;
+  /** 绝对播放时间（秒）。 */
+  end: number;
+  text: string;
+}
+
 export interface LrcLine {
   time: number;
   text: string;
+  /** 平台明确给出的行结束；到点后应清空，不能一直挂到下一句或曲终。 */
+  endTime?: number;
+  /** 平台给出的真实逐字/音节区间；缺失时只做行级高亮。 */
+  words?: LrcWord[];
 }
 
 function parseStamp(min: string, sec: string, frac: string | undefined): number {
@@ -22,9 +34,15 @@ export interface ParseLrcOptions {
   honorOffset?: boolean;
 }
 
-/** 把 LRC 文本拆成按时间排序的行；纯元数据行（空正文）丢掉。 */
+/**
+ * 把 LRC 文本拆成按时间排序的可见行。
+ *
+ * 空正文时间戳不渲染成空行，但会成为上一句的明确结束边界。网易云常用这种
+ * 写法清掉间奏/尾奏前的歌词；丢掉它会让上一句错误地挂到下一句或曲终。
+ */
 export function parseLrc(raw: string, options: ParseLrcOptions = {}): LrcLine[] {
   const lines: LrcLine[] = [];
+  const emptyBoundaries: number[] = [];
   const rows = raw.split(/\r?\n/);
   // LRC 的全局 offset 单位是毫秒：正数让歌词更早出现，负数让歌词更晚出现。
   // 目前只为 QQ 开启；忽略它时整首词会保持一个固定的提前/延后量。
@@ -43,18 +61,29 @@ export function parseLrc(raw: string, options: ParseLrcOptions = {}): LrcLine[] 
     const stamps = [...trimmed.matchAll(/\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g)];
     if (!stamps.length) continue;
     const text = trimmed.replace(/^(?:\[[^\]]*\])+\s*/, "").trim();
-    if (!text) continue;
     for (const stamp of stamps) {
       const time = parseStamp(stamp[1]!, stamp[2]!, stamp[3]);
-      if (Number.isFinite(time)) lines.push({ time: time - offsetSec, text });
+      if (!Number.isFinite(time)) continue;
+      const adjusted = time - offsetSec;
+      if (text) lines.push({ time: adjusted, text });
+      else emptyBoundaries.push(adjusted);
     }
   }
   lines.sort((a, b) => a.time - b.time);
+  emptyBoundaries.sort((a, b) => a - b);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const nextTime = lines[index + 1]?.time ?? Number.POSITIVE_INFINITY;
+    const boundary = emptyBoundaries.find(
+      (time) => time > line.time && time < nextTime,
+    );
+    if (boundary !== undefined) line.endTime = boundary;
+  }
   return lines;
 }
 
-/** 当前播放位置应对齐的行下标；还没到第一句时返回 -1。 */
-export function activeLrcIndex(lines: LrcLine[], position: number): number {
+/** 不考虑结束边界，返回已经开始的最后一行；还没到第一句时返回 -1。 */
+export function startedLrcIndex(lines: LrcLine[], position: number): number {
   if (!lines.length) return -1;
   let lo = 0;
   let hi = lines.length - 1;
@@ -69,6 +98,63 @@ export function activeLrcIndex(lines: LrcLine[], position: number): number {
     }
   }
   return hit;
+}
+
+/** 当前播放位置应对齐的行下标；前奏或明确的空白区间返回 -1。 */
+export function activeLrcIndex(lines: LrcLine[], position: number): number {
+  const hit = startedLrcIndex(lines, position);
+  if (hit < 0) return -1;
+  const endTime = lines[hit]!.endTime;
+  return endTime !== undefined && position >= endTime ? -1 : hit;
+}
+
+/** 解析网易云 `/song/lyric/v1` 返回的 YRC 逐字时间轴。 */
+export function parseNeteaseWordLrc(raw: string): LrcLine[] {
+  const lines: LrcLine[] = [];
+  for (const row of raw.split(/\r?\n/)) {
+    const header = row.match(/^\[(-?\d+),(-?\d+)\]/);
+    if (!header) continue; // 新版响应开头可能是 JSON 创作者元数据。
+    const lineStartMs = Number(header[1]);
+    const lineDurationMs = Number(header[2]);
+    if (!Number.isFinite(lineStartMs) || !Number.isFinite(lineDurationMs)) continue;
+
+    const body = row.slice(header[0].length);
+    const markers = [...body.matchAll(/\((-?\d+),(-?\d+),[^)]*\)/g)];
+    const words: LrcWord[] = [];
+    for (let index = 0; index < markers.length; index += 1) {
+      const marker = markers[index]!;
+      const startMs = Number(marker[1]);
+      const durationMs = Number(marker[2]);
+      const textStart = (marker.index ?? 0) + marker[0].length;
+      const textEnd = markers[index + 1]?.index ?? body.length;
+      const text = body.slice(textStart, textEnd);
+      if (
+        !text ||
+        !Number.isFinite(startMs) ||
+        !Number.isFinite(durationMs) ||
+        durationMs < 0
+      ) continue;
+      words.push({
+        start: startMs / 1_000,
+        end: (startMs + durationMs) / 1_000,
+        text,
+      });
+    }
+    const text = words.map((word) => word.text).join("");
+    if (!text.trim()) continue;
+    const time = lineStartMs / 1_000;
+    const declaredEnd = (lineStartMs + Math.max(0, lineDurationMs)) / 1_000;
+    const lastWordEnd = words.at(-1)?.end ?? time;
+    const endTime = Math.max(declaredEnd, lastWordEnd);
+    lines.push({
+      time,
+      text,
+      ...(endTime > time ? { endTime } : {}),
+      words,
+    });
+  }
+  lines.sort((a, b) => a.time - b.time);
+  return lines;
 }
 
 /**
@@ -102,30 +188,41 @@ export function projectLoopedPlaybackTime(
   return loopStart + (relative < 0 ? relative + loopLength : relative);
 }
 
-/** 与 Android `LyricsOverlayRuntime.fillOf` 对齐：行内演唱进度 0..1。 */
-const MIN_FILL_SEC = 1.2;
-const PER_CHAR_SEC = 0.34;
-const TAIL_LINE_SEC = 6;
-
 /**
- * LRC 只有行级时间戳，行内只能线性推算。直接用「到下一行的间隔」当分母，
- * 遇到间奏会让填充慢到看不出在动，所以再按字数估一个合理演唱时长，取较小值：
- * 唱完就填满，剩下的时间停在满格等下一句。
+ * 与 Android `LyricsOverlayRuntime.fillOf` 对齐：按平台逐字区间计算 0..1。
+ * 只有行级 LRC 时用本句到下一句/空白边界的区间推进，不再按字数猜时长。
  */
 export function lineFillProgress(
   lines: LrcLine[],
   index: number,
   positionSec: number,
-  durationSec = 0,
 ): number {
   if (index < 0 || index >= lines.length) return 0;
   const line = lines[index]!;
-  const nextTime =
-    lines[index + 1]?.time ??
-    (durationSec > line.time ? durationSec : line.time + TAIL_LINE_SEC);
-  const gap = nextTime - line.time;
-  if (gap <= 0) return 1;
-  const estimated = Math.max(MIN_FILL_SEC, line.text.length * PER_CHAR_SEC);
-  const span = Math.min(gap, estimated);
-  return Math.min(1, Math.max(0, (positionSec - line.time) / span));
+  if (positionSec < line.time) return 0;
+  const words = line.words?.filter((word) => word.text.length > 0) ?? [];
+  if (!words.length) {
+    const endTime = line.endTime ?? lines[index + 1]?.time ?? line.time + FALLBACK_LINE_SEC;
+    const span = endTime - line.time;
+    if (span <= 0) return 1;
+    return Math.min(1, Math.max(0, (positionSec - line.time) / span));
+  }
+
+  const total = words.reduce((sum, word) => sum + word.text.length, 0);
+  if (total <= 0) return 1;
+  let completed = 0;
+  for (const word of words) {
+    const weight = word.text.length;
+    if (positionSec < word.start) return completed / total;
+    const span = word.end - word.start;
+    if (span > 0 && positionSec < word.end) {
+      const within = Math.min(1, Math.max(0, (positionSec - word.start) / span));
+      return (completed + weight * within) / total;
+    }
+    completed += weight;
+  }
+  return 1;
 }
+
+/** 最后一行既没有结束标记也没有下一句时，只能给出有限的行级退回区间。 */
+const FALLBACK_LINE_SEC = 6;

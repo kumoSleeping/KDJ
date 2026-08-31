@@ -319,6 +319,54 @@ impl QqMusicProvider {
             .unwrap_or(Value::Null))
     }
 
+    async fn editable_playlist_target(&self, key: &str) -> Result<(i64, i64)> {
+        if key == "__qq_favorite__" {
+            return Ok((201, 0));
+        }
+        let credential = self.client.credential();
+        anyhow::ensure!(credential.is_present(), "请先登录 QQ 音乐");
+        let data = self
+            .client
+            .call(
+                "music.musicasset.PlaylistBaseRead",
+                "GetPlaylistByUin",
+                json!({ "uin": credential.str_musicid() }),
+                QqPlatform::Desktop,
+            )
+            .await
+            .context("重新核验 QQ 音乐歌单归属失败")?;
+        let target = playlist_entries(&data)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| qq_playlist_key(entry).is_some_and(|candidate| candidate == key))
+            })
+            .context("当前账号的歌单目录里没有这个 QQ 音乐歌单")?;
+        anyhow::ensure!(
+            qq_playlist_origin(target) == "created",
+            "收藏的他人歌单不能移除其中的歌曲"
+        );
+        let dir_id = loose_int(target.get("dirid").or_else(|| target.get("dirId")));
+        let tid = loose_int(target.get("tid"));
+        anyhow::ensure!(dir_id > 0, "QQ 音乐歌单缺少可写目录 ID");
+        Ok((dir_id, tid.max(0)))
+    }
+
+    async fn song_write_identity(&self, source: &SongSource) -> Result<(i64, i64)> {
+        let mut raw = Value::Object(source.payload.clone());
+        let mut song_id = loose_int(first_truthy(&raw, &["id", "songid", "songId"]));
+        if song_id <= 0 {
+            raw = self
+                .query_song(&source.key)
+                .await
+                .context("补全 QQ 音乐歌曲写操作标识失败")?;
+            song_id = loose_int(first_truthy(&raw, &["id", "songid", "songId"]));
+        }
+        anyhow::ensure!(song_id > 0, "QQ 音乐歌曲缺少数字 songId");
+        let song_type = loose_int(first_truthy(&raw, &["type", "songtype", "songType"])).max(0);
+        Ok((song_id, song_type))
+    }
+
     /// 歌单分页拉取：hasmore 与 total 双终止条件，任一到头就停。
     async fn playlist_tracks(
         &self,
@@ -863,6 +911,38 @@ impl MusicProvider for QqMusicProvider {
         account
     }
 
+    async fn cached_account(&self) -> Account {
+        let credential = self.client.credential();
+        if !credential.is_present() {
+            return Account::new(Platform::Qqm, LABEL, AccountState::Missing, "未登录");
+        }
+        if self.client.credential_invalid() || credential.is_expired() {
+            return Account::new(
+                Platform::Qqm,
+                LABEL,
+                AccountState::Expired,
+                "登录凭证已过期，请刷新或重新扫码",
+            );
+        }
+        let cached_profile = self
+            .profile
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(profile, _)| profile.clone())
+            .unwrap_or_default();
+        let mut account = Account::new(
+            Platform::Qqm,
+            LABEL,
+            AccountState::Valid,
+            "登录状态尚未联网核验",
+        );
+        account.account_key = credential.str_musicid();
+        account.nickname = cached_profile.0;
+        account.avatar = cached_profile.1;
+        account
+    }
+
     async fn create_qr(&self) -> Result<QrSession> {
         // 同时下发 QQ 音乐 App 码 + QQ 互联码；用户扫任意一张即可。
         // 单路失败时仍返回成功的那一路，避免整次登录不可用。
@@ -940,11 +1020,16 @@ impl MusicProvider for QqMusicProvider {
                 Ok((QrStateValue::Expired, "二维码已过期，请重新获取".into()))
             }
             Ok(login::DualQrOutcome::Done(credential)) => {
+                if let Err(error) = self.client.store_credential(credential) {
+                    return Ok((
+                        QrStateValue::Error,
+                        truncate(&format!("保存 QQ 音乐登录态失败：{error:#}"), 160),
+                    ));
+                }
                 self.qr_sessions.lock().unwrap().remove(session_id);
                 if let Some(mobile) = &session.mobile {
                     mobile.abort();
                 }
-                self.client.store_credential(credential);
                 *self.profile.lock().unwrap() = None;
                 Ok((QrStateValue::Done, "登录成功".into()))
             }
@@ -968,7 +1053,7 @@ impl MusicProvider for QqMusicProvider {
                 )
                 .await;
         }
-        self.client.clear_credential();
+        self.client.clear_credential()?;
         *self.profile.lock().unwrap() = None;
         self.qr_sessions.lock().unwrap().clear();
         Ok(())
@@ -1049,21 +1134,13 @@ impl MusicProvider for QqMusicProvider {
                         continue;
                     };
                     let fallback_title = "QQ 音乐歌单";
-                    let mut title = qq_playlist_title(entry)
+                    let title = qq_playlist_title(entry)
                         .unwrap_or(fallback_title)
                         .to_string();
                     // `dirid=201` 就是“我喜欢/我的收藏”。上面已经放了稳定的
                     // `__qq_favorite__` 虚拟 key，再保留这条会在侧栏出现两个同义节点。
                     if is_qq_favorite_playlist(entry) || !seen_keys.insert(key.clone()) {
                         continue;
-                    }
-                    // 老回包没有目录名时，再到同一歌单的详情接口补标题。
-                    if title == fallback_title {
-                        if let Ok((resolved, _)) = self.playlist_tracks(&key, 1).await {
-                            if !resolved.trim().is_empty() {
-                                title = resolved;
-                            }
-                        }
                     }
                     playlists.push(StreamPlaylist {
                         platform: Platform::Qqm,
@@ -1124,15 +1201,42 @@ impl MusicProvider for QqMusicProvider {
             .map(|entry| to_source(entry.get("songInfo").unwrap_or(entry)))
             .filter(|source| !source.key.is_empty())
             .collect();
-        if sources.is_empty() {
-            return Ok(None);
-        }
         Ok(Some(StreamPlaylistResponse {
             platform: Platform::Qqm,
             key: key.to_string(),
             title,
             sources,
         }))
+    }
+
+    async fn remove_stream_playlist_track(&self, key: &str, source: &SongSource) -> Result<()> {
+        anyhow::ensure!(source.platform == Platform::Qqm, "歌曲来源不是 QQ 音乐");
+        let key = key.trim();
+        anyhow::ensure!(!key.is_empty(), "QQ 音乐歌单 ID 为空");
+        let (dir_id, tid) = self.editable_playlist_target(key).await?;
+        let (song_id, song_type) = self.song_write_identity(source).await?;
+        let data = self
+            .client
+            .call(
+                "music.musicasset.PlaylistDetailWrite",
+                "DelSonglist",
+                json!({
+                    "dirId": dir_id,
+                    "tid": tid,
+                    "bFmtUtf8": true,
+                    "v_songInfo": [{"songId": song_id, "songType": song_type}],
+                }),
+                QqPlatform::Desktop,
+            )
+            .await
+            .context("请求 QQ 音乐移除歌曲失败")?;
+        let ret_code = data
+            .get("retCode")
+            .or_else(|| data.get("ret_code"))
+            .map(|value| loose_int(Some(value)))
+            .context("QQ 音乐移除响应缺少 retCode")?;
+        anyhow::ensure!(ret_code == 0, "QQ 音乐移除歌曲失败：retCode={ret_code}");
+        Ok(())
     }
 
     async fn resolve_collection(
@@ -1847,6 +1951,7 @@ fn qq_lyric_text(body: &Value) -> Option<LyricText> {
     }
     Some(LyricText {
         lrc,
+        word_lrc: String::new(),
         translated_lrc: clean_qq_translation(decode_qq_lyric_field(body.get("trans"))),
         // crypt=0 下主词/翻译是 Base64 LRC；QQ 偶尔仍把 roma 作为 QRC 密文回传。
         // decode_qq_lyric_field 会拒绝密文，避免生成一个不可解析的 .roma.lrc。

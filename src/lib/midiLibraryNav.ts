@@ -1,7 +1,7 @@
 /**
  * MIDI 选歌旋钮：侧边栏 ↔ 列表板块，转动步进，Load 装入 Deck。
  * Reloop Buddy 的 browse 旋钮按下会在这两个焦点之间切换；侧边栏当前项
- * 决定进哪一个板块（本地曲库 / OneLibrary / 搜索）。
+ * 决定进哪一个板块（本地曲库 / 搜索）。
  */
 
 export const MIDI_BROWSE_EVENT = "kd:midi-browse";
@@ -20,7 +20,7 @@ export function midiBrowseItemProps(pane: MidiBrowsePane, id: string): Record<st
 }
 
 export type MidiBrowseFocus = "sidebar" | "pane";
-export type MidiBrowsePane = "local" | "onelibrary" | "search";
+export type MidiBrowsePane = "local" | "search";
 
 export type MidiBrowseDetail =
   | { type: "step"; delta: number }
@@ -38,7 +38,7 @@ export function toggleBrowseFocus(focus: MidiBrowseFocus): MidiBrowseFocus {
 }
 
 export function paneForSidebarHint(value: string | undefined): MidiBrowsePane {
-  if (value === "onelibrary" || value === "search" || value === "local") return value;
+  if (value === "search" || value === "local") return value;
   return "local";
 }
 

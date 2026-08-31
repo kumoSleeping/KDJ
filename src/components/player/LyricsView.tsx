@@ -6,7 +6,7 @@ import {
   useLyricsPrefs,
   type LyricsExtra,
 } from "../../lib/lyricsPrefs";
-import { activeLrcIndex } from "../../lib/lrc";
+import { activeLrcIndex, startedLrcIndex } from "../../lib/lrc";
 import {
   getLatestPlayerSync,
   MEDIA_SYNC_EVENT,
@@ -83,6 +83,7 @@ export function LyricsView({ track }: { track: Track | null }) {
   const cycleLyricExtra = useLyricsPrefs((state) => state.cycleLyricExtra);
   const position = usePlayerPosition(trackId);
   const active = activeLrcIndex(entry.lines ?? [], position);
+  const started = startedLrcIndex(entry.lines ?? [], position);
   const listRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLButtonElement>(null);
   const [coverFailed, setCoverFailed] = useState(false);
@@ -109,16 +110,31 @@ export function LyricsView({ track }: { track: Track | null }) {
   }, [active, trackId]);
 
   if (!track) {
+    return <div className="kd-lyrics" />;
+  }
+
+  if (
+    entry.status === "loading" ||
+    entry.status === "idle" ||
+    entry.status === "empty"
+  ) {
     return (
       <div className="kd-lyrics">
-        <div className="kd-lyrics-stage">
-          <p className="kd-lyrics-empty">播放一首歌后会自动搜歌词</p>
-        </div>
+        <LyricsHead
+          track={track}
+          source=""
+          coverFailed={coverFailed}
+          onCoverFail={() => setCoverFailed(true)}
+          layer="off"
+          canCycle={false}
+          onCycle={() => undefined}
+        />
+        <div className="kd-lyrics-stage" />
       </div>
     );
   }
 
-  if (entry.status === "loading" || entry.status === "idle") {
+  if (entry.status === "error") {
     return (
       <div className="kd-lyrics">
         <LyricsHead
@@ -131,28 +147,7 @@ export function LyricsView({ track }: { track: Track | null }) {
           onCycle={() => undefined}
         />
         <div className="kd-lyrics-stage">
-          <p className="kd-lyrics-empty">正在搜歌词…</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (entry.status === "error" || entry.status === "empty") {
-    return (
-      <div className="kd-lyrics">
-        <LyricsHead
-          track={track}
-          source=""
-          coverFailed={coverFailed}
-          onCoverFail={() => setCoverFailed(true)}
-          layer="off"
-          canCycle={false}
-          onCycle={() => undefined}
-        />
-        <div className="kd-lyrics-stage">
-          <p className="kd-lyrics-empty">
-            {entry.status === "error" ? "歌词暂时不可用" : "未找到歌词"}
-          </p>
+          <p className="kd-lyrics-empty">歌词暂时不可用</p>
         </div>
       </div>
     );
@@ -174,7 +169,9 @@ export function LyricsView({ track }: { track: Track | null }) {
       <div className="kd-lyrics-stage">
         <div ref={listRef} className="kd-lyrics-scroll" aria-live="polite">
           {lines.map((line, index) => {
-            const distance = active < 0 ? index + 1 : Math.abs(index - active);
+            const context = active >= 0 ? active : started;
+            const distance = context < 0 ? index + 1 : Math.abs(index - context);
+            const past = active >= 0 ? index < active : started >= 0 && index <= started;
             const roma =
               layer === "romaji" ? alignedText(romaji, line.time) : undefined;
             const trans =
@@ -186,7 +183,7 @@ export function LyricsView({ track }: { track: Track | null }) {
                 ref={index === active ? activeRef : undefined}
                 className="kd-lyrics-line"
                 data-active={index === active ? "true" : undefined}
-                data-past={index < active ? "true" : undefined}
+                data-past={past ? "true" : undefined}
                 data-dist={String(Math.min(distance, 4))}
                 title={`跳到 ${formatStamp(line.time)}`}
                 onClick={() => {

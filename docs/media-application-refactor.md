@@ -23,7 +23,7 @@ UI intent
   preparation-handler registry instead of being called by panels or stores.
 - `src/lib/mediaActions.ts` is the only normal song-download UI use case. It reveals the queue
   before network preparation and then delegates task ownership to `downloadStore`.
-- ordinary PlayerBar loads resolve local, OneLibrary and provider streams through
+- ordinary PlayerBar loads resolve local and provider streams through
   `playbackSourceForTrack` into the same `UnifiedPlayerSource` contract.
 - video resolve/download now use an injected `VideoProvider` capability registry; server routes
   and the download coordinator no longer match concrete YouTube/Bilibili provider fields.
@@ -34,7 +34,7 @@ UI intent
    is task-scoped and failures are published on the task rather than only logged.
 2. Split the broad `MusicProvider` trait into catalog, account, playback, download, lyrics and
    browser-challenge capability ports. Construct them in one composition root.
-3. Replace boolean aside flags with one discriminated aside state and adapt local, OneLibrary and
+3. Replace boolean aside flags with one discriminated aside state and adapt local and
    online detail data into a shared detail shell.
 4. Remove source-kind inference from numeric track ids. Use an explicit media reference at every
    play/download boundary.

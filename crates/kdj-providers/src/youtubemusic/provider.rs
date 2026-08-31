@@ -298,7 +298,6 @@ impl YoutubeMusicProvider {
             .len();
         job.check_canceled()?;
         if tokio::fs::rename(&source, destination).await.is_ok() {
-            job.report(total, total);
             return Ok(());
         }
         let result: Result<()> = async {
@@ -310,7 +309,8 @@ impl YoutubeMusicProvider {
                 .context("创建下载临时文件失败")?;
             let mut copied = 0_u64;
             let mut buffer = vec![0_u8; 256 * 1024];
-            job.report(0, total);
+            // 网络落盘阶段已经通过统一队列上报到 100%；这里是跨文件系统时的本地
+            // 搬运，不能再把进度倒回 0 并伪装成第二次下载。
             loop {
                 job.check_canceled()?;
                 let read = tokio::io::AsyncReadExt::read(&mut input, &mut buffer)
@@ -324,7 +324,6 @@ impl YoutubeMusicProvider {
                     .await
                     .context("写入下载临时文件失败")?;
                 copied += read as u64;
-                job.report(copied, total);
             }
             anyhow::ensure!(copied == total, "媒体会话文件复制不完整");
             output.flush().await.context("提交下载缓冲失败")?;
@@ -377,6 +376,25 @@ impl MusicProvider for YoutubeMusicProvider {
         account
     }
 
+    async fn cached_account(&self) -> Account {
+        let mut account = Account::new(Platform::Ytm, LABEL, AccountState::Missing, "未登录");
+        account.login_method = "browser".into();
+        account.credential_kind = "anonymous".into();
+        let Some(session) = self.auth.snapshot() else {
+            account.detail = if self.ctx.ytm_enabled() {
+                "可匿名搜索；导入浏览器会话后解锁账号内容".into()
+            } else {
+                DISABLED_MESSAGE.into()
+            };
+            return account;
+        };
+        account.account_key = session.x_goog_authuser;
+        account.state = AccountState::Valid;
+        account.credential_kind = "browser_session".into();
+        account.detail = session.imported_from;
+        account
+    }
+
     async fn create_qr(&self) -> Result<QrSession> {
         no_login::create_qr(LABEL)
     }
@@ -386,7 +404,7 @@ impl MusicProvider for YoutubeMusicProvider {
     }
 
     async fn logout(&self) -> Result<()> {
-        self.auth.clear();
+        self.auth.clear()?;
         Ok(())
     }
 
@@ -410,15 +428,9 @@ impl MusicProvider for YoutubeMusicProvider {
             .library_playlists()
             .await
             .context("读取 YouTube Music 播放列表失败")?;
-        let mut playlists = ytm_library_playlists(&body);
-        // 目录把「赞过的音乐」标成自动列表，不提供曲目数；单独读一次头部，
-        // 避免侧栏把已有内容误写成 0。失败时仍保留可点击入口。
-        if let Some(liked) = playlists.iter_mut().find(|playlist| playlist.key == "LM") {
-            if let Ok(body) = self.client.browse("VLLM").await {
-                liked.count = playlist_count_from_browse(&body).unwrap_or(liked.count);
-            }
-        }
-        Ok(playlists)
+        // 目录响应没有「赞过的音乐」数量时保持未知/0；不能为了侧栏数字再打一条
+        // browse。用户真正打开该列表时才读取内容。
+        Ok(ytm_library_playlists(&body))
     }
 
     async fn stream_playlist_tracks(
@@ -442,6 +454,49 @@ impl MusicProvider for YoutubeMusicProvider {
             title,
             sources: sources.into_iter().take(full_listing(limit)).collect(),
         }))
+    }
+
+    async fn remove_stream_playlist_track(&self, key: &str, source: &SongSource) -> Result<()> {
+        anyhow::ensure!(self.auth.is_logged_in(), "请先连接 YouTube Music 登录态");
+        anyhow::ensure!(
+            source.platform == Platform::Ytm,
+            "歌曲来源不是 YouTube Music"
+        );
+        let playlist_id = key.trim().trim_start_matches("VL");
+        let video_id = source.key.trim();
+        anyhow::ensure!(!playlist_id.is_empty(), "YouTube Music 歌单 ID 为空");
+        anyhow::ensure!(!video_id.is_empty(), "YouTube Music 歌曲 ID 为空");
+
+        // 目录回包里的编辑/删除 endpoint 是当前账号是否拥有歌单的权威信号。
+        let playlists = self.stream_playlists().await?;
+        let target = playlists
+            .iter()
+            .find(|playlist| playlist.key == playlist_id)
+            .context("当前账号的目录里没有这个 YouTube Music 歌单")?;
+        let response = if playlist_id == "LM" && target.origin == "favorite" {
+            self.client.remove_song_like(video_id).await?
+        } else {
+            anyhow::ensure!(
+                target.origin == "created",
+                "收藏的他人歌单不能移除其中的歌曲"
+            );
+            let set_video_id = source
+                .payload
+                .get("set_video_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .context("YouTube Music 歌单项缺少 setVideoId，请刷新歌单后重试")?;
+            self.client
+                .remove_playlist_item(playlist_id, video_id, set_video_id)
+                .await?
+        };
+        if let Some(status) = response.get("status").and_then(Value::as_str) {
+            anyhow::ensure!(
+                status.contains("SUCCEEDED"),
+                "YouTube Music 移除歌曲失败：{status}"
+            );
+        }
+        Ok(())
     }
 
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
@@ -538,7 +593,14 @@ impl MusicProvider for YoutubeMusicProvider {
             !format.cipher.is_empty(),
             "YouTube Music Web player 没有返回 signatureCipher"
         );
-        let player_url = self.client.protected_player_url(Some(player_url)).await?;
+        // The response's assets.js is the authoritative decipher program for this exact Player
+        // response. It normally matches the requested script; if YouTube rolls the player between
+        // the homepage and this request, return the new trusted URL as part of the same path.
+        let response_player_url = player.pointer("/assets/js").and_then(Value::as_str);
+        let player_url = self
+            .client
+            .protected_player_url(response_player_url.or(Some(player_url)))
+            .await?;
         let sabr_url = player
             .pointer("/streamingData/serverAbrStreamingUrl")
             .and_then(Value::as_str)
@@ -574,6 +636,7 @@ impl MusicProvider for YoutubeMusicProvider {
             sabr_url,
             video_playback_ustreamer_config,
             sabr_formats,
+            sabr_audio_itag: format.itag,
             duration_ms,
         }))
     }
@@ -588,16 +651,6 @@ impl MusicProvider for YoutubeMusicProvider {
 
     async fn protected_preview_identity(&self) -> Result<Option<ProtectedPreviewIdentity>> {
         Ok(Some(self.client.protected_web_identity().await?))
-    }
-
-    async fn protected_preview_botguard(
-        &self,
-        operation: &str,
-        payload: &Value,
-    ) -> Result<Option<Value>> {
-        Ok(Some(
-            self.client.protected_botguard(operation, payload).await?,
-        ))
     }
 
     async fn lyric(&self, key: &str) -> Result<Option<LyricText>> {
@@ -674,6 +727,7 @@ impl MusicProvider for YoutubeMusicProvider {
                     // 与试听代理使用同样的裸 reqwest client。不要复用 InnerTube client
                     // 上伪装的 Chrome UA：GVS URL/PO Token 来自当前 WebView 播放会话，
                     // 下载请求必须保持播放链路的请求身份与重定向策略。
+                    kdj_core::ensure_rustls_ring();
                     let playback_http = reqwest::Client::builder()
                         .redirect(reqwest::redirect::Policy::limited(5))
                         .build()
@@ -823,6 +877,7 @@ fn gvs_download_range(start: u64) -> String {
 
 #[derive(Debug, Clone)]
 struct AudioFormat {
+    itag: u32,
     bitrate: i64,
     mime: String,
     url: Option<String>,
@@ -839,6 +894,11 @@ fn audio_formats(player: &Value) -> Vec<AudioFormat> {
                     str_field(format, "mimeType").is_some_and(|mime| mime.starts_with("audio/"))
                 })
                 .map(|format| AudioFormat {
+                    itag: format
+                        .get("itag")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .unwrap_or_default(),
                     bitrate: format.get("bitrate").and_then(Value::as_i64).unwrap_or(0),
                     mime: str_field(format, "mimeType")
                         .unwrap_or_default()
@@ -1054,6 +1114,28 @@ fn item_video_id(item: &Value) -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
+fn item_set_video_id(item: &Value) -> Option<String> {
+    fn find(value: &Value) -> Option<&str> {
+        match value {
+            Value::Object(map) => {
+                for key in ["playlistSetVideoId", "setVideoId"] {
+                    if let Some(text) = map
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                    {
+                        return Some(text);
+                    }
+                }
+                map.values().find_map(find)
+            }
+            Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(item).map(str::to_string)
+}
+
 fn song_source(item: &Value) -> Option<SongSource> {
     let item = item.get("musicResponsiveListItemRenderer")?;
     let video_id = item_video_id(item)?;
@@ -1076,6 +1158,9 @@ fn song_source(item: &Value) -> Option<SongSource> {
         .to_string();
     let mut payload = serde_json::Map::new();
     payload.insert("video_id".into(), json!(video_id));
+    if let Some(set_video_id) = item_set_video_id(item) {
+        payload.insert("set_video_id".into(), json!(set_video_id));
+    }
     Some(SongSource {
         platform: Platform::Ytm,
         key: video_id,
@@ -1284,6 +1369,7 @@ fn ytm_playlist_tile(renderer: &Value) -> Option<StreamPlaylist> {
     })
 }
 
+#[cfg(test)]
 fn playlist_count_from_browse(body: &Value) -> Option<usize> {
     [
         "/header/musicResponsiveHeaderRenderer/secondSubtitle",
@@ -1415,6 +1501,7 @@ fn lyric_text_from_browse(body: &Value) -> Option<LyricText> {
     if let Some(lrc) = timed_lrc_from_browse(body) {
         return Some(LyricText {
             lrc,
+            word_lrc: String::new(),
             translated_lrc: String::new(),
             romaji_lrc: String::new(),
         });
@@ -1433,6 +1520,7 @@ fn lyric_text_from_browse(body: &Value) -> Option<LyricText> {
     }
     Some(LyricText {
         lrc,
+        word_lrc: String::new(),
         translated_lrc: String::new(),
         romaji_lrc: String::new(),
     })
@@ -1682,6 +1770,15 @@ mod tests {
     }
 
     #[test]
+    fn playlist_item_identity_is_kept_for_exact_remote_removal() {
+        let mut item = song_item("abcDEF12345", "T");
+        item["musicResponsiveListItemRenderer"]["playlistItemData"]["playlistSetVideoId"] =
+            json!("SET-ITEM-42");
+        let source = song_source(&item).unwrap();
+        assert_eq!(source.payload_str("set_video_id"), "SET-ITEM-42");
+    }
+
+    #[test]
     fn explicit_badge_does_not_mark_a_song_as_vip() {
         // VIP 是"会员/版权"语义；YouTube Music 的 E 标是脏标，不能混用
         let mut item = song_item("abcDEF12345", "T");
@@ -1703,34 +1800,39 @@ mod tests {
     fn audio_formats_only_keep_audio_mimes() {
         let player = json!({
             "streamingData": {"adaptiveFormats": [
-                {"mimeType": "audio/mp4; codecs=\"opus\"", "bitrate": 131072, "url": "https://goo/a"},
+                {"itag": 140, "mimeType": "audio/mp4; codecs=\"opus\"", "bitrate": 131072, "url": "https://goo/a"},
                 {"mimeType": "video/mp4; codecs=\"avc1\"", "bitrate": 999999, "url": "https://goo/v"},
-                {"mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 70000, "signatureCipher": "s=SG&sp=sig&url=https%3A%2F%2Fgoo%2Fb"}
+                {"itag": 251, "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 70000, "signatureCipher": "s=SG&sp=sig&url=https%3A%2F%2Fgoo%2Fb"}
             ]}
         });
         let formats = audio_formats(&player);
         assert_eq!(formats.len(), 2);
+        assert_eq!(formats[0].itag, 140);
         assert_eq!(formats[0].bitrate, 131_072);
         assert_eq!(formats[0].url.as_deref(), Some("https://goo/a"));
         assert_eq!(formats[1].mime, "audio/webm; codecs=\"opus\"");
+        assert_eq!(formats[1].itag, 251);
     }
 
     #[test]
     fn quality_gradient_picks_the_best_meeting_the_floor() {
         let formats = vec![
             AudioFormat {
+                itag: 251,
                 bitrate: 70_000,
                 mime: "audio/webm".into(),
                 url: Some("lo".into()),
                 cipher: String::new(),
             },
             AudioFormat {
+                itag: 140,
                 bitrate: 140_000,
                 mime: "audio/mp4".into(),
                 url: Some("mid".into()),
                 cipher: String::new(),
             },
             AudioFormat {
+                itag: 141,
                 bitrate: 260_000,
                 mime: "audio/mp4".into(),
                 url: Some("hi".into()),
@@ -1759,12 +1861,14 @@ mod tests {
         );
         let webm_closer = vec![
             AudioFormat {
+                itag: 251,
                 bitrate: 128_000,
                 mime: "audio/webm; codecs=opus".into(),
                 url: Some("opus".into()),
                 cipher: String::new(),
             },
             AudioFormat {
+                itag: 140,
                 bitrate: 140_000,
                 mime: "audio/mp4; codecs=mp4a.40.2".into(),
                 url: Some("aac".into()),
@@ -1786,12 +1890,14 @@ mod tests {
     #[test]
     fn ext_follows_the_container() {
         let mp4 = AudioFormat {
+            itag: 140,
             bitrate: 1,
             mime: "audio/mp4".into(),
             url: None,
             cipher: String::new(),
         };
         let webm = AudioFormat {
+            itag: 251,
             bitrate: 1,
             mime: "audio/webm".into(),
             url: None,

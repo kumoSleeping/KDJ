@@ -11,10 +11,15 @@ members = [
     "crates/kdj-server",
     "src-tauri",
 ]
-exclude = ["vendor/rbox", "vendor/rookie"]
+exclude = ["vendor/rookie", "vendor/glib-0.18.5"]
+
+[patch.crates-io]
+# Tauri's GTK3 stack still requires glib 0.18. Backport the upstream 0.20 pointer
+# fix for RUSTSEC-2024-0429 until that dependency chain moves to a maintained API.
+glib = { path = "vendor/glib-0.18.5" }
 
 [workspace.package]
-version = "0.2.44"
+version = "1.0.0-rc1"
 edition = "2021"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -73,11 +78,15 @@ opt-level = 2
 opt-level = 2
 
 # tauri:dev 默认是 debug：波形/分析在未优化下单曲要几十秒，播放条会一直空着。
-# `package."*"` 只覆盖 crates.io 依赖，不覆盖 workspace member——所以 kdj-analysis
-# 必须单独开。业务 UI / 路由 crate 仍保持未优化，增量编译友好。
+# `package."*"` 只覆盖 crates.io 依赖，不覆盖 workspace member——所以分析、STEM 和
+# callback 前的实时播放热路径必须单独开。业务 UI / 路由 crate 仍保持未优化，增量编译友好。
 [profile.dev.package."*"]
 opt-level = 2
 [profile.dev.package.kdj-analysis]
 opt-level = 2
 [profile.dev.package.kdj-stems]
+opt-level = 2
+[profile.dev.package.kdj-player]
+opt-level = 2
+[profile.dev.package.kdj-playback]
 opt-level = 2

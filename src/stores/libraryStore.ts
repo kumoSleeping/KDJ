@@ -272,7 +272,7 @@ export interface LibraryStore {
     trackIds: number[] | null,
     force?: boolean,
     priority?: boolean,
-    version?: "v1" | "v2",
+    version?: "v1" | "v2" | "v3",
     limit?: number,
     folder?: string,
   ): Promise<AnalyzeResponseLike>;
@@ -833,7 +833,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   handleEvent(event) {
     switch (event.type) {
       case "download.updated": {
-        // 下载 / VJ 导出写进曲库后，曲目表会由紧随其后的 library.updated 回刷；
+        // 下载写进曲库后，曲目表会由紧随其后的 library.updated 回刷；
         // 文件夹树还要单独重算计数，否则磁盘和表里都已有成品，树上仍少一首。
         if (event.payload.state === "done" && event.payload.track_id != null) {
           void get().refreshFolders();
@@ -855,6 +855,14 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         if (quietJobs.has(payload.job_id)) {
           // 插队那一首：不碰进度条。结果照样会随 library.updated 刷进列表。
           if (finished) quietJobs.delete(payload.job_id);
+          return;
+        }
+        if (payload.cancelled) {
+          // cancelAnalyze() 的 HTTP 响应会先把进度收掉；worker 随后发来的终局事件
+          // 不能又把“正在分析 total/total”挂回来。若用户已经手动起了另一批，
+          // 旧批次的迟到终局也不能清掉新进度。
+          const current = get().analyze;
+          if (!current || current.job_id === payload.job_id) set({ analyze: null });
           return;
         }
         set({ analyze: claimProgress(get().analyze, payload) });

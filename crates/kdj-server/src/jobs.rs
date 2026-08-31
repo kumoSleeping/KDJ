@@ -5,9 +5,10 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use kdj_analysis::engine::analyze_file_timed;
+use kdj_analysis::engine::analyze_file_timed_cancellable;
+use kdj_core::config::AutoAnalysisMode;
 use kdj_core::work_scheduler::{
     work_scheduler, WorkAcquireError, WorkActivityGuard, WorkClass, WorkRequest,
 };
@@ -22,15 +23,29 @@ fn new_job_id() -> String {
 }
 
 fn write_kdj_log(data_dir: &Path, line: &str) {
+    const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = data_dir.join("kdj.log");
+    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= MAX_LOG_BYTES) {
+        let backup = data_dir.join("kdj.log.1");
+        let _ = std::fs::remove_file(&backup);
+        let _ = std::fs::rename(&path, backup);
+    }
     let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
         let _ = writeln!(file, "{stamp} {line}");
     }
 }
@@ -49,14 +64,11 @@ fn process_rss_mb() -> Option<f64> {
     None
 }
 
-fn escape_log_file_name(name: &str) -> String {
-    name.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 #[derive(Default)]
 struct AnalysisBatchStats {
     saved: usize,
     failed: usize,
+    warnings: usize,
     total_ms: u64,
     probe_ms: u64,
     decode_ms: u64,
@@ -174,6 +186,12 @@ pub fn spawn_scan(
             Ok(report) => report,
             Err(err) => {
                 tracing::error!("导入失败：{err:#}");
+                state.activity_log.record_level(
+                    crate::activity_log::ActivityCategory::User,
+                    crate::activity_log::ActivityLevel::Error,
+                    "扫描本地曲库失败",
+                    format!("{err:#}"),
+                );
                 // 失败原因必须**跟着终局事件一起走**。前端不再有浮层通知，
                 // 只回一个 0/0 的 done 的话，用户看到的是进度条闪一下就没了、
                 // 一首歌都没进来，而"为什么"全在他看不见的服务端日志里。
@@ -208,6 +226,14 @@ pub fn spawn_scan(
                 total == 0,
             ))
         };
+        if let Some(message) = &error {
+            state.activity_log.record_level(
+                crate::activity_log::ActivityCategory::User,
+                crate::activity_log::ActivityLevel::Warn,
+                "扫描本地曲库有未读目录",
+                message,
+            );
+        }
         hub.publish(
             "scan.progress",
             &scan_done_event(&job, total, total, error, false),
@@ -229,7 +255,12 @@ pub fn spawn_scan(
                     // 扫描顺带跑的批量分析是后台活，「停止分析」应该停得掉
                     spawn_analysis(state.clone(), pending, false);
                 }
-                Err(err) => tracing::warn!("取待分析队列失败：{err:#}"),
+                Err(err) => {
+                    tracing::warn!("取待分析队列失败：{err:#}");
+                    state
+                        .activity_log
+                        .record_analysis_warning("建立分析队列失败", format!("{err:#}"));
+                }
             }
         }
         state.scans.unregister(&job);
@@ -354,6 +385,14 @@ pub fn spawn_folder_manifest_upgrade(state: Arc<AppState>) -> String {
                 .join("；");
             Some(format!("{} 个文件夹升级失败。{}", report.failed, preview))
         };
+        if let Some(message) = &error {
+            state.activity_log.record_level(
+                crate::activity_log::ActivityCategory::User,
+                crate::activity_log::ActivityLevel::Warn,
+                "文件夹元数据升级异常",
+                message,
+            );
+        }
         hub.publish(
             "maintenance.progress",
             &json!({
@@ -389,6 +428,9 @@ pub fn spawn_waveform_backfill(state: Arc<AppState>) -> String {
         ) {
             Ok(items) => items,
             Err(err) => {
+                state
+                    .activity_log
+                    .record_analysis_warning("读取波形待办失败", format!("{err:#}"));
                 hub.publish(
                     "maintenance.progress",
                     &json!({
@@ -455,6 +497,11 @@ pub fn spawn_waveform_backfill(state: Arc<AppState>) -> String {
                     .join("；")
             ))
         };
+        if let Some(message) = &error {
+            state
+                .activity_log
+                .record_analysis_warning("波形补齐出现异常", message);
+        }
         hub.publish(
             "maintenance.progress",
             &json!({
@@ -474,6 +521,17 @@ pub(crate) fn acquire_scheduled_work(class: WorkClass) -> WorkActivityGuard {
     work_scheduler()
         .acquire(WorkRequest::new(class), || false)
         .expect("non-cancellable DJ work admission")
+}
+
+/// Latest-wins interactive owners must be able to leave the scheduler queue before admission.
+pub(crate) fn acquire_scheduled_work_cancellable<F>(
+    class: WorkClass,
+    cancelled: F,
+) -> Result<WorkActivityGuard, WorkAcquireError>
+where
+    F: Fn() -> bool,
+{
+    work_scheduler().acquire(WorkRequest::new(class), cancelled)
 }
 
 // ---------------------------------------------------------------- 停止分析
@@ -496,8 +554,8 @@ pub struct CancelReport {
 
 /// 「停止分析」用的进程内注册表，一个实例挂在 `AppState` 上。
 ///
-/// 取消是**协作式**的：只在每首歌开始之前看一眼 token。正在解码的那一首会跑完，
-/// 因为分析一首要好几秒，中途硬掐会留下半写的数据库行——为了早停几秒不值得。
+/// 取消是**协作式**的：解码、重采样和逐帧 FFT 都会检查 token；分析结果完整产出后
+/// 才进入数据库写入，所以中途停止不会留下半写的行。
 #[derive(Default)]
 pub struct AnalysisRegistry {
     jobs: Mutex<BTreeMap<String, AnalysisJob>>,
@@ -581,6 +639,7 @@ impl AnalysisRegistry {
 enum AnalysisWriteTarget {
     V1,
     BpmKeyV2,
+    BpmKeyV3,
 }
 
 pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool) -> String {
@@ -590,6 +649,11 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
 /// 起一批只写 BPM/Key v2 的重分析任务。v1 数据由存储层按字段成功情况逐步退役。
 pub fn spawn_bpm_key_analysis_v2(state: Arc<AppState>, track_ids: Vec<i64>) -> String {
     spawn_analysis_target(state, track_ids, false, AnalysisWriteTarget::BpmKeyV2)
+}
+
+/// 起一批只写 BPM/Key V3 的任务。存储层会在每首保存时原子退役旧代结果。
+pub fn spawn_bpm_key_analysis_v3(state: Arc<AppState>, track_ids: Vec<i64>) -> String {
+    spawn_analysis_target(state, track_ids, false, AnalysisWriteTarget::BpmKeyV3)
 }
 
 fn spawn_analysis_target(
@@ -606,6 +670,7 @@ fn spawn_analysis_target(
     let settings = state.config.to_settings();
     let duration_limit = settings.analysis_duration;
     let write_tags = settings.write_tags_after_analyze;
+    let lightweight = !priority && settings.auto_analysis_mode == AutoAnalysisMode::Light;
 
     let total = track_ids.len();
     let done = Arc::new(AtomicUsize::new(0));
@@ -619,17 +684,24 @@ fn spawn_analysis_target(
         let hub = state.hub.clone();
         let updated: Arc<std::sync::Mutex<Vec<i64>>> = Default::default();
         let stats = Arc::new(Mutex::new(AnalysisBatchStats::default()));
-        let log_dir = state.config.data_dir.clone();
         let batch_started = Instant::now();
         let rss_before = process_rss_mb();
-        let version = if target == AnalysisWriteTarget::V1 {
-            "v1"
-        } else {
-            "v2"
+        let version = match target {
+            AnalysisWriteTarget::V1 => "v1",
+            AnalysisWriteTarget::BpmKeyV2 => "v2",
+            AnalysisWriteTarget::BpmKeyV3 => "v3",
         };
 
         // 手工分块而不是拉 rayon：只有这一处需要并行，一个依赖不值得
-        let analysis_workers = work_scheduler().snapshot().heavy_limit;
+        // "Full" is deliberately capped by the process scheduler (two owners while idle, none
+        // while a Deck is audible). Light mode starts only one background-QoS owner and leaves a
+        // quiet gap between tracks. It may keep running at normal playback pressure, but the
+        // scheduler stops admitting the next track as soon as ring/model/tempo pressure appears.
+        let analysis_workers = if lightweight {
+            1
+        } else {
+            work_scheduler().snapshot().heavy_limit
+        };
         let chunks: Vec<Vec<i64>> = track_ids
             .chunks(track_ids.len().div_ceil(analysis_workers).max(1))
             .map(<[i64]>::to_vec)
@@ -643,24 +715,24 @@ fn spawn_analysis_target(
                 let done = done.clone();
                 let updated = updated.clone();
                 let stats = stats.clone();
-                let log_dir = log_dir.clone();
                 let cancel = cancel.clone();
                 scope.spawn(move || {
                     kdj_core::thread_qos::prefer_background();
                     for track_id in chunk {
                         // 先排队拿全局额度，**拿到之后**再看取消：闸门里等了
                         // 半分钟才轮到的线程，看到的必须是最新的取消状态
-                        // 每首歌之间查一次。查在循环顶上而不是分析中途：
-                        // 解码/FFT 是一整块 CPU 活，切进去只能靠杀线程
+                        // 循环顶先查一次；进入分析后，解码/重采样/FFT 还有更细的检查点。
                         if cancel.is_cancelled() {
                             break;
                         }
                         let class = if priority {
                             WorkClass::NowPlayingAnalysis
+                        } else if lightweight {
+                            WorkClass::LibraryAnalysisLight
                         } else {
                             WorkClass::LibraryAnalysis
                         };
-                        let _permit = match work_scheduler()
+                        let permit = match work_scheduler()
                             .acquire(WorkRequest::new(class), || cancel.is_cancelled())
                         {
                             Ok(permit) => permit,
@@ -673,13 +745,27 @@ fn spawn_analysis_target(
                             continue;
                         };
                         let path = std::path::PathBuf::from(&track.path);
-                        let (result, timing) = analyze_file_timed(&path, duration_limit);
+                        let Some((result, timing)) =
+                            analyze_file_timed_cancellable(&path, duration_limit, &|| {
+                                cancel.is_cancelled()
+                            })
+                        else {
+                            break;
+                        };
+                        // 取消可能恰好落在分析完成与存储之间。完整结果尚未写库时，
+                        // 用户的停止意图仍然优先。
+                        if cancel.is_cancelled() {
+                            break;
+                        }
                         let saved = match target {
                             AnalysisWriteTarget::V1 => {
                                 state.library.save_analysis(track_id, &result)
                             }
                             AnalysisWriteTarget::BpmKeyV2 => {
                                 state.library.save_bpm_key_analysis_v2(track_id, &result)
+                            }
+                            AnalysisWriteTarget::BpmKeyV3 => {
+                                state.library.save_bpm_key_analysis_v3(track_id, &result)
                             }
                         };
                         let saved_ok = match saved {
@@ -689,8 +775,9 @@ fn spawn_analysis_target(
                                 false
                             }
                         };
+                        let mut warning_count = result.errors.len();
                         if saved_ok && target == AnalysisWriteTarget::V1 && write_tags {
-                            if kdj_providers::tags::write_analysis_tags(
+                            if let Err(error) = kdj_providers::tags::write_analysis_tags(
                                 &path,
                                 result.bpm,
                                 &result.camelot,
@@ -699,48 +786,15 @@ fn spawn_analysis_target(
                                 // 备注是用户自己的话，comment 的组法在 tags 层：
                                 // "8A - Energy 7 - 备注"，备注必须原样保留在最后
                                 &track.comment,
-                            )
-                            .is_ok()
-                            {
+                            ) {
+                                warning_count = warning_count.saturating_add(1);
+                                tracing::warn!(track_id, "写回分析标签失败：{error:#}");
+                            } else {
                                 // 标签写入会改变 mtime；先同步曲库快照，后面的波形缓存
-                                // 才会用最终时间戳命名，拖到 OneLibrary 时可以直接复用。
+                                // 才会用最终时间戳命名，后续读取可以直接复用。
                                 let _ = state.library.sync_file_stat(track_id);
                             }
                         }
-                        let errors = if result.errors.is_empty() {
-                            String::new()
-                        } else {
-                            result.errors.join(";").replace(' ', "_")
-                        };
-                        let line = format!(
-                            "analysis track job={job} id={track_id} file=\"{}\" total_ms={} probe_ms={} decode_ms={} tempo_ms={} key_ms={} loud_ms={} audio_s={:.1} offset_s={:.1} sr={} bpm={} camelot={} energy={} saved={} errors={errors}",
-                            escape_log_file_name(&track.filename),
-                            timing.total_ms,
-                            timing.probe_ms,
-                            timing.decode_ms,
-                            timing.tempo_ms,
-                            timing.key_ms,
-                            timing.loudness_ms,
-                            timing.decoded_seconds,
-                            timing.offset_seconds,
-                            timing.sample_rate,
-                            result
-                                .bpm
-                                .map(|value| format!("{value:.2}"))
-                                .unwrap_or_else(|| "-".into()),
-                            if result.camelot.is_empty() {
-                                "-"
-                            } else {
-                                result.camelot.as_str()
-                            },
-                            result
-                                .energy
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "-".into()),
-                            u8::from(saved_ok),
-                        );
-                        tracing::info!("{line}");
-                        write_kdj_log(&log_dir, &line);
                         {
                             let mut stats = stats.lock().expect("analysis batch stats");
                             if saved_ok {
@@ -748,6 +802,7 @@ fn spawn_analysis_target(
                             } else {
                                 stats.failed += 1;
                             }
+                            stats.warnings = stats.warnings.saturating_add(warning_count);
                             stats.total_ms += timing.total_ms;
                             stats.probe_ms += timing.probe_ms;
                             stats.decode_ms += timing.decode_ms;
@@ -772,6 +827,11 @@ fn spawn_analysis_target(
                                 "version": version
                             }),
                         );
+
+                        drop(permit);
+                        if lightweight && !cancel.is_cancelled() {
+                            std::thread::sleep(Duration::from_millis(1_500));
+                        }
                     }
                 });
             }
@@ -786,11 +846,15 @@ fn spawn_analysis_target(
 
         let ids = updated.lock().unwrap().clone();
         hub.publish_library_updated(&ids);
+        let was_cancelled = cancel.is_cancelled();
         // 取消也要发这条收尾事件，而且 done 直接顶到 total：
         // 停在半路的进度条前端不会自己收，会一直挂在那里
         hub.publish(
             "analyze.progress",
-            &json!({"job_id": job, "done": total, "total": total, "current": "", "track_id": null}),
+            &json!({
+                "job_id": job, "done": total, "total": total,
+                "current": "", "track_id": null, "cancelled": was_cancelled
+            }),
         );
         let wall_ms = u64::try_from(batch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let stats = stats.lock().expect("analysis batch stats");
@@ -808,9 +872,10 @@ fn spawn_analysis_target(
             (None, None) => "-".into(),
         };
         let summary = format!(
-            "analysis batch job={job} version={version} queued={total} saved={} failed={} wall_ms={wall_ms} cpu_ms={} avg_ms={avg_ms} max_ms={} probe_ms={} decode_ms={} tempo_ms={} key_ms={} loud_ms={} audio_s={:.1} rss_mb={rss} waveform=skipped",
+            "analysis batch job={job} version={version} queued={total} saved={} failed={} warnings={} wall_ms={wall_ms} cpu_ms={} avg_ms={avg_ms} max_ms={} probe_ms={} decode_ms={} tempo_ms={} key_ms={} loud_ms={} audio_s={:.1} rss_mb={rss} waveform=skipped",
             stats.saved,
             stats.failed,
+            stats.warnings,
             stats.total_ms,
             stats.max_ms,
             stats.probe_ms,
@@ -820,8 +885,17 @@ fn spawn_analysis_target(
             stats.loudness_ms,
             stats.decoded_seconds,
         );
-        tracing::info!("{summary}");
-        write_kdj_log(&log_dir, &summary);
+        if stats.failed > 0 || stats.warnings > 0 {
+            tracing::warn!("{summary}");
+            write_kdj_log(&state.config.data_dir, &summary);
+            state.activity_log.record_analysis_warning(
+                "曲库分析出现异常",
+                format!(
+                    "本批共 {total} 首，{} 首保存失败，发现 {} 个分析警告",
+                    stats.failed, stats.warnings
+                ),
+            );
+        }
     });
     job_id
 }
@@ -829,6 +903,37 @@ fn spawn_analysis_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analysis_log_rotates_and_uses_private_permissions() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-analysis-log-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let log = root.join("kdj.log");
+        let file = std::fs::File::create(&log).unwrap();
+        file.set_len(8 * 1024 * 1024).unwrap();
+        drop(file);
+
+        write_kdj_log(&root, "fresh");
+
+        assert_eq!(
+            std::fs::metadata(root.join("kdj.log.1")).unwrap().len(),
+            8 * 1024 * 1024
+        );
+        assert!(std::fs::read_to_string(&log).unwrap().contains(" fresh\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn maintenance_jobs_are_singleflight_per_kind() {

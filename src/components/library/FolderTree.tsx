@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   BarChart3,
-  Clapperboard,
   ClipboardPaste,
   Copy,
   Folder,
@@ -32,8 +31,6 @@ import { api } from "../../lib/api";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
   FOLDER_DROP_PATH_ATTR,
-  PLAYLIST_DROP_DEVICE_ATTR,
-  PLAYLIST_DROP_ID_ATTR,
   SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR,
   SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
 } from "../../lib/folderDrop";
@@ -42,14 +39,22 @@ import {
   readSidebarTreeState,
   writeLocalFolderTreeState,
 } from "../../lib/sidebarState";
+import {
+  mergeSidebarRootOrder,
+  moveSidebarRootOrder,
+  orderSidebarRootItems,
+  readSidebarRootOrder,
+  writeSidebarRootOrder,
+  type SidebarRootDropEdge,
+} from "../../lib/sidebarRootOrder";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder, OUTSIDE_FOLDER } from "../../lib/outsideFolder";
 import {
   enqueueSearchDrop,
-  enqueueSearchOneLibraryDrop,
   isSearchDownloadDrag,
 } from "../../lib/searchDrag";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
+import { orderStreamPlaylistsByRecent } from "../../lib/streamPlaylistOrder";
 import {
   finishTrackDrop,
   isTrackDrag,
@@ -58,7 +63,6 @@ import {
 } from "../../lib/trackDrag";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import { usePlaylistStore } from "../../stores/playlistStore";
 import {
   STREAM_BROWSE_PLATFORMS,
   streamAccountBinding,
@@ -67,19 +71,19 @@ import {
   type StreamBrowsePlatform,
   type StreamPlaylistSectionId,
 } from "../../stores/streamBrowseStore";
-import { useVjExportStore } from "../../stores/vjExportStore";
 import type { AccountState, FolderNode, StreamPlaylist } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
-import { PlaylistSection } from "./PlaylistSection";
 import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
-const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
+import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 
 /** @deprecated 请从 `lib/trackDrag` 引用；保留 re-export 以免旧 import 断掉。 */
 export { TRACK_DND_TYPE };
 /** 拖文件夹换顺序用的 MIME，和上面分开，dragover 时才好区别对待。 */
 const FOLDER_DND_TYPE = "application/x-kdj-folder";
 const ALL_TRACKS_DROP_TARGET = "__kd_all_tracks__";
+const ALL_TRACKS_ROOT_ID = "library:all";
+const OUTSIDE_ROOT_ID = "library:outside";
 
 const STREAM_ROOTS: ReadonlyArray<{ id: StreamBrowsePlatform; label: string }> = [
   { id: "wyy", label: "NetEase" },
@@ -90,12 +94,21 @@ const STREAM_ROOTS: ReadonlyArray<{ id: StreamBrowsePlatform; label: string }> =
   { id: "bilibili", label: "Bilibili" },
 ];
 
+type SidebarRootItem =
+  | { id: typeof ALL_TRACKS_ROOT_ID; kind: "all" }
+  | {
+      id: `stream:${StreamBrowsePlatform}`;
+      kind: "stream";
+      streamRoot: (typeof STREAM_ROOTS)[number];
+    }
+  | { id: `local:${string}`; kind: "local"; root: FolderNode }
+  | { id: typeof OUTSIDE_ROOT_ID; kind: "outside" };
+
 const NARROW_RAIL_SOURCE_KEY = "kd-narrow-rail-source-v1";
 
 type NarrowRailSource =
   | { kind: "local"; rootPath: string }
-  | { kind: "stream"; platform: StreamBrowsePlatform }
-  | { kind: "onelibrary" };
+  | { kind: "stream"; platform: StreamBrowsePlatform };
 
 export interface StreamPlaylistBrowseProps {
   onOpenStreamPlaylist?: (playlist: StreamPlaylist) => void | Promise<void>;
@@ -153,7 +166,7 @@ function readNarrowRailSource(): NarrowRailSource | null {
   if (typeof window === "undefined") return null;
   try {
     const value: unknown = JSON.parse(
-      window.localStorage.getItem(NARROW_RAIL_SOURCE_KEY) ?? "null",
+      readLocalStorage(NARROW_RAIL_SOURCE_KEY) ?? "null",
     );
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return null;
@@ -166,7 +179,6 @@ function readNarrowRailSource(): NarrowRailSource | null {
     ) {
       return { kind: "stream", platform: record.platform as StreamBrowsePlatform };
     }
-    if (record.kind === "onelibrary") return { kind: "onelibrary" };
     if (
       record.kind === "local" &&
       typeof record.rootPath === "string" &&
@@ -181,15 +193,12 @@ function readNarrowRailSource(): NarrowRailSource | null {
 }
 
 function writeNarrowRailSource(source: NarrowRailSource): void {
-  try {
-    window.localStorage.setItem(NARROW_RAIL_SOURCE_KEY, JSON.stringify(source));
-  } catch {
-    // 隐私模式下存储不可写也不影响本次会话切换。
-  }
+  writeLocalStorageNow(NARROW_RAIL_SOURCE_KEY, JSON.stringify(source));
 }
 
 /**
- * 宽树和手机窄轨互斥挂载，但两者都必须拥有同一套账号绑定、缓存校准和刷新节奏。
+ * 宽树和手机窄轨互斥挂载，但两者都必须拥有同一套账号绑定与持久缓存。
+ * 绑定账号只恢复本地目录；平台请求只允许由展开或刷新按钮触发。
  * enabled=false 时保留 hook 顺序却不注册副作用，展开态交给内部 FolderTree 接管。
  */
 function useStreamBrowseLifecycle(enabled: boolean) {
@@ -197,15 +206,12 @@ function useStreamBrowseLifecycle(enabled: boolean) {
   const accountsError = useAppStore((state) => state.accountsError);
   const appBooting = useAppStore((state) => state.booting);
   const bindStreamAccount = useStreamBrowseStore((state) => state.bindAccount);
-  const refreshStreamPlaylistsIfStale = useStreamBrowseStore(
-    (state) => state.refreshIfStale,
-  );
   useEffect(() => {
     if (!enabled) return;
     for (const platform of STREAM_BROWSE_PLATFORMS) {
       const account = accounts.find((candidate) => candidate.platform === platform);
       if (account) {
-        // 先同步账号匹配的持久缓存，再由 store 为本次启动强制校准一次。
+        // 只同步账号匹配的持久缓存；不能因为侧栏挂载就访问平台。
         void bindStreamAccount(platform, streamAccountBinding(account));
       } else if (!appBooting && !accountsError) {
         // 账号接口明确返回空才按登出处理；接口失败不能误删可用缓存。
@@ -213,25 +219,6 @@ function useStreamBrowseLifecycle(enabled: boolean) {
       }
     }
   }, [accounts, accountsError, appBooting, bindStreamAccount, enabled]);
-
-  useEffect(() => {
-    if (!enabled) return;
-    const refreshVisibleStaleDirectories = () => {
-      if (document.visibilityState !== "visible") return;
-      const currentAccounts = useAppStore.getState().accounts;
-      for (const platform of STREAM_BROWSE_PLATFORMS) {
-        const account = currentAccounts.find((candidate) => candidate.platform === platform);
-        if (!accountCanBrowse(account?.state)) continue;
-        void refreshStreamPlaylistsIfStale(platform);
-      }
-    };
-    window.addEventListener("focus", refreshVisibleStaleDirectories);
-    document.addEventListener("visibilitychange", refreshVisibleStaleDirectories);
-    return () => {
-      window.removeEventListener("focus", refreshVisibleStaleDirectories);
-      document.removeEventListener("visibilitychange", refreshVisibleStaleDirectories);
-    };
-  }, [enabled, refreshStreamPlaylistsIfStale]);
 
   return { accounts, accountsError };
 }
@@ -258,7 +245,7 @@ function folderPurpose(path: string, audioDir?: string, videoDir?: string) {
 
 /**
  * 文件夹类型与“默认下载落点”只占一个图标位。
- * 旧版在 Folder 后面再排 Music/Clapperboard，看起来像两个独立操作；
+ * 旧版在 Folder 后面再排媒体类型图标，看起来像多个独立操作；
  * 默认目录现在直接用 FolderDown，具体是音乐、视频还是两者仍由 title 说明。
  */
 function FolderGlyph({
@@ -324,24 +311,18 @@ export function NarrowFolderRail({
 }: {
   expanded: boolean;
   /** 点选文件夹 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
-  onNavigate?: (kind?: "onelibrary") => void;
+  onNavigate?: () => void;
 } & StreamPlaylistBrowseProps) {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const settings = useAppStore((state) => state.settings);
-  const experimentalOneLibrary = LABS_BUILD && (settings?.experimental_one_library ?? false);
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
-  const oneLibraryDevices = usePlaylistStore((state) => state.devices);
-  const oneLibraryPlaylists = usePlaylistStore((state) => state.playlistsByDevice);
-  const selectedOneLibrary = usePlaylistStore((state) => state.selectedTarget);
-  const refreshOneLibrary = usePlaylistStore((state) => state.refreshDevices);
-  const openOneLibrary = usePlaylistStore((state) => state.openPlaylist);
-  const addOneLibraryTracks = usePlaylistStore((state) => state.addTracks);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
   const streamLoading = useStreamBrowseStore((state) => state.loading);
   const streamErrors = useStreamBrowseStore((state) => state.errors);
   const streamSectionExpanded = useStreamBrowseStore((state) => state.sectionExpanded);
+  const streamRecentlyOpened = useStreamBrowseStore((state) => state.recentlyOpened);
   const cachedActiveStreamPlaylist = useStreamBrowseStore((state) => state.active);
   const loadStreamPlaylists = useStreamBrowseStore((state) => state.loadPlaylists);
   const setStreamSectionExpanded = useStreamBrowseStore(
@@ -379,14 +360,6 @@ export function NarrowFolderRail({
   const roots = folders?.roots ?? [];
 
   useEffect(() => writeNarrowRailSource(narrowSource), [narrowSource]);
-
-  useEffect(() => {
-    if (!expanded) void refreshOneLibrary();
-  }, [expanded, refreshOneLibrary]);
-
-  useEffect(() => {
-    if (selectedOneLibrary) setNarrowSource({ kind: "onelibrary" });
-  }, [selectedOneLibrary?.device_path, selectedOneLibrary?.playlist_id]);
 
   useEffect(() => {
     const previousKey = previousEffectiveActiveStreamKeyRef.current;
@@ -552,12 +525,16 @@ export function NarrowFolderRail({
     const accountState = account?.state;
     const canBrowse = accountCanBrowse(accountState);
     const playlists = streamPlaylists[platform];
+    const orderedPlaylists = orderStreamPlaylistsByRecent(
+      playlists ?? [],
+      streamRecentlyOpened[platform],
+    );
     const loading = streamLoading[platform];
     const platformError = streamErrors[platform];
-    const favoritePlaylists = (playlists ?? []).filter(
+    const favoritePlaylists = orderedPlaylists.filter(
       (playlist) => playlist.is_favorite || playlist.origin === "favorite",
     );
-    const sections = streamPlaylistSections(playlists ?? [], platform);
+    const sections = streamPlaylistSections(orderedPlaylists, platform);
 
     return (
       <>
@@ -715,19 +692,6 @@ export function NarrowFolderRail({
       <span className="kd-narrow-rail-sep" />
       <div className="kd-narrow-source-roots kd-scroll" aria-label="媒体来源">
         {roots.map((root) => renderLocalFolderButton(root, true))}
-        {experimentalOneLibrary ? (
-          <button
-            type="button"
-            data-active={narrowSource.kind === "onelibrary" || undefined}
-            {...midiBrowseItemProps("onelibrary", "onelibrary:root")}
-            aria-label="显示 OneLibrary 列表"
-            title="在下方显示 OneLibrary 列表"
-            onClick={() => setNarrowSource({ kind: "onelibrary" })}
-          >
-            <ListMusic size={15} />
-            <small>OneLibrary</small>
-          </button>
-        ) : null}
         {enabledStreamRoots.map((streamRoot) => (
           <button
             key={`narrow-stream-root:${streamRoot.id}`}
@@ -761,9 +725,7 @@ export function NarrowFolderRail({
         aria-label={
           narrowSource.kind === "stream"
             ? "在线歌单目录"
-            : narrowSource.kind === "onelibrary"
-              ? "OneLibrary 列表目录"
-              : "本地文件夹目录"
+            : "本地文件夹目录"
         }
       >
         {narrowSource.kind === "local" &&
@@ -783,78 +745,6 @@ export function NarrowFolderRail({
         )}
         {narrowSource.kind === "stream" &&
           renderStreamChildren(narrowSource.platform)}
-        {narrowSource.kind === "onelibrary" &&
-          oneLibraryDevices.flatMap((device) =>
-            (oneLibraryPlaylists[device.path] ?? [])
-              .filter((playlist) => playlist.attribute === 0)
-              .sort((left, right) => left.parent_id - right.parent_id || left.seq - right.seq)
-              .map((playlist) => {
-                const target = {
-                  device_path: device.path,
-                  device_name: device.name,
-                  is_virtual: device.is_virtual,
-                  playlist_id: playlist.id,
-                  playlist_name: playlist.name,
-                };
-                const active =
-                  selectedOneLibrary?.device_path === device.path &&
-                  selectedOneLibrary.playlist_id === playlist.id;
-                const writable = !device.read_only && device.one_library_file_system;
-                const dropKey = `one:${device.path}:${playlist.id}`;
-                return (
-                  <button
-                    key={`narrow-onelibrary:${device.path}:${playlist.id}`}
-                    type="button"
-                    {...(writable
-                      ? {
-                          [PLAYLIST_DROP_ID_ATTR]: String(playlist.id),
-                          [PLAYLIST_DROP_DEVICE_ATTR]: device.path,
-                        }
-                      : {})}
-                    data-active={active || undefined}
-                    data-drop={narrowDrop === dropKey || undefined}
-                    {...midiBrowseItemProps("onelibrary", `onelibrary:${device.path}:${playlist.id}`)}
-                    title={`${device.name} · ${playlist.name} · ${playlist.track_count} 首`}
-                    onClick={() => {
-                      useAppStore.getState().focusLibrary();
-                      onNavigate?.("onelibrary");
-                      void openOneLibrary(target).catch((reason: unknown) =>
-                        setError((reason as Error).message),
-                      );
-                    }}
-                    onDragOverCapture={(event) => {
-                      if (!writable || (!isTrackDrag(event) && !isSearchDownloadDrag(event))) return;
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = "copy";
-                      setNarrowDrop(dropKey);
-                    }}
-                    onDragLeave={() =>
-                      setNarrowDrop((current) => current === dropKey ? "" : current)
-                    }
-                    onDropCapture={(event) => {
-                      if (!writable) return;
-                      setNarrowDrop("");
-                      if (isSearchDownloadDrag(event)) {
-                        event.preventDefault();
-                        void enqueueSearchOneLibraryDrop(event, target).catch((reason: unknown) =>
-                          setError((reason as Error).message),
-                        );
-                        return;
-                      }
-                      const ids = trackIdsFromDrop(event);
-                      if (ids.length === 0) return;
-                      event.preventDefault();
-                      void addOneLibraryTracks(device.path, playlist.id, ids).catch(
-                        (reason: unknown) => setError((reason as Error).message),
-                      );
-                    }}
-                  >
-                    {device.is_virtual ? <HardDrive size={14} /> : <ListMusic size={14} />}
-                    <small>{playlist.name}</small>
-                  </button>
-                );
-              }),
-          )}
       </div>
     </aside>
   );
@@ -924,7 +814,7 @@ export function FolderTree({
   activeStreamPlaylist,
 }: {
   /** 点选文件夹 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
-  onNavigate?: (kind?: "onelibrary") => void;
+  onNavigate?: () => void;
 } & StreamPlaylistBrowseProps = {}) {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
@@ -950,6 +840,7 @@ export function FolderTree({
   const streamErrors = useStreamBrowseStore((state) => state.errors);
   const streamExpanded = useStreamBrowseStore((state) => state.expanded);
   const streamSectionExpanded = useStreamBrowseStore((state) => state.sectionExpanded);
+  const streamRecentlyOpened = useStreamBrowseStore((state) => state.recentlyOpened);
   const cachedActiveStreamPlaylist = useStreamBrowseStore((state) => state.active);
   const loadStreamPlaylists = useStreamBrowseStore((state) => state.loadPlaylists);
   const setStreamExpanded = useStreamBrowseStore((state) => state.setExpanded);
@@ -967,6 +858,34 @@ export function FolderTree({
     () => STREAM_ROOTS.filter((streamRoot) => isPlatformEnabled(settings, streamRoot.id)),
     [settings],
   );
+  const [rootOrder, setRootOrder] = useState(readSidebarRootOrder);
+  const sidebarRootItems = useMemo<SidebarRootItem[]>(
+    () => [
+      { id: ALL_TRACKS_ROOT_ID, kind: "all" },
+      ...enabledStreamRoots.map(
+        (streamRoot): SidebarRootItem => ({
+          id: `stream:${streamRoot.id}`,
+          kind: "stream",
+          streamRoot,
+        }),
+      ),
+      ...roots.map(
+        (root): SidebarRootItem => ({
+          id: `local:${root.path}`,
+          kind: "local",
+          root,
+        }),
+      ),
+      ...((folders?.outside ?? 0) > 0
+        ? [{ id: OUTSIDE_ROOT_ID, kind: "outside" } satisfies SidebarRootItem]
+        : []),
+    ],
+    [enabledStreamRoots, folders?.outside, roots],
+  );
+  const orderedRootItems = useMemo(
+    () => orderSidebarRootItems(sidebarRootItems, rootOrder),
+    [rootOrder, sidebarRootItems],
+  );
   const allTrackCount =
     statsTotal ??
     roots.reduce((sum, root) => sum + root.total_count, 0) + (folders?.outside ?? 0);
@@ -974,6 +893,14 @@ export function FolderTree({
   const [importing, setImporting] = useState("");
   const [dropTarget, setDropTarget] = useState("");
   const [dropEdge, setDropEdge] = useState<"" | "before" | "after">("");
+  const [rootDragging, setRootDragging] = useState("");
+  const [rootDrop, setRootDrop] = useState<{
+    id: string;
+    edge: SidebarRootDropEdge;
+  } | null>(null);
+  const rootListRef = useRef<HTMLDivElement | null>(null);
+  const rootPointerCleanupRef = useRef<(() => void) | null>(null);
+  const suppressRootClickRef = useRef(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [allMenu, setAllMenu] = useState<{ x: number; y: number } | null>(null);
   /** 整库重扫会遍历所有根：第一次点只在原右键面板里上膛，第二次才启动。 */
@@ -1038,6 +965,111 @@ export function FolderTree({
     return false;
   };
 
+  const commitRootReorder = (
+    from: string,
+    to: string,
+    edge: SidebarRootDropEdge,
+  ) => {
+    const visibleOrder = orderedRootItems.map((item) => item.id);
+    const moved = moveSidebarRootOrder(visibleOrder, from, to, edge);
+    if (moved.every((id, index) => id === visibleOrder[index])) return;
+    const next = mergeSidebarRootOrder(rootOrder, moved);
+    setRootOrder(next);
+    writeSidebarRootOrder(next);
+  };
+
+  /**
+   * 根项混合了按钮、远程目录和真实文件夹，原生 HTML 拖放在 WKWebView 里容易
+   * 丢失 drop。这里直接跟踪指针，越过 5px 后才进入排序，不影响普通点击。
+   */
+  const beginRootPointerReorder = (
+    event: React.PointerEvent<HTMLElement>,
+    sourceId: string,
+  ) => {
+    if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) return;
+    if (event.target instanceof Element && event.target.closest("button")) return;
+
+    rootPointerCleanupRef.current?.();
+    setRootDragging("");
+    setRootDrop(null);
+    suppressRootClickRef.current = false;
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let active = false;
+    let targetId: string | null = null;
+    let targetEdge: SidebarRootDropEdge = "before";
+
+    const rootSlotAt = (x: number, y: number) => {
+      const hit = document.elementFromPoint(x, y) as HTMLElement | null;
+      const slot = hit?.closest<HTMLElement>("[data-sidebar-root-id]") ?? null;
+      return slot?.parentElement === rootListRef.current ? slot : null;
+    };
+    const stopTracking = () => {
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointercancel", onCancel, true);
+      document.body.removeAttribute("data-kd-sidebar-root-dragging");
+      rootPointerCleanupRef.current = null;
+    };
+    const finish = () => {
+      stopTracking();
+      setRootDragging("");
+      setRootDrop(null);
+    };
+    const onMove = (move: PointerEvent) => {
+      if (move.pointerId !== pointerId) return;
+      if (!active && Math.hypot(move.clientX - startX, move.clientY - startY) < 5) return;
+      move.preventDefault();
+      if (!active) {
+        active = true;
+        clearTextSelection();
+        document.body.dataset.kdSidebarRootDragging = "true";
+        setRootDragging(sourceId);
+      }
+
+      const slot = rootSlotAt(move.clientX, move.clientY);
+      const nextTargetId = slot?.dataset.sidebarRootId ?? null;
+      if (!slot || !nextTargetId || nextTargetId === sourceId) {
+        targetId = null;
+        setRootDrop(null);
+        return;
+      }
+      const row = slot.querySelector<HTMLElement>("[data-sidebar-root-row]");
+      const rect = row?.getBoundingClientRect() ?? slot.getBoundingClientRect();
+      targetId = nextTargetId;
+      targetEdge = move.clientY < rect.top + rect.height / 2 ? "before" : "after";
+      setRootDrop((current) =>
+        current?.id === targetId && current.edge === targetEdge
+          ? current
+          : { id: targetId!, edge: targetEdge },
+      );
+    };
+    const onUp = (up: PointerEvent) => {
+      if (up.pointerId !== pointerId) return;
+      const shouldCommit = active && targetId !== null;
+      if (active) {
+        // pointerup 后浏览器可能补发 click；只拦这一次，避免拖完顺手打开落点。
+        suppressRootClickRef.current = true;
+        window.setTimeout(() => {
+          suppressRootClickRef.current = false;
+        }, 0);
+      }
+      const destination = targetId;
+      const edge = targetEdge;
+      finish();
+      if (shouldCommit && destination) commitRootReorder(sourceId, destination, edge);
+    };
+    const onCancel = (cancel: PointerEvent) => {
+      if (cancel.pointerId === pointerId) finish();
+    };
+
+    rootPointerCleanupRef.current = stopTracking;
+    window.addEventListener("pointermove", onMove, { capture: true, passive: false });
+    window.addEventListener("pointerup", onUp, true);
+    window.addEventListener("pointercancel", onCancel, true);
+  };
+
   useEffect(() => {
     const clearDrop = () => {
       setDropTarget("");
@@ -1046,6 +1078,13 @@ export function FolderTree({
     window.addEventListener("dragend", clearDrop, true);
     return () => window.removeEventListener("dragend", clearDrop, true);
   }, []);
+
+  useEffect(
+    () => () => {
+      rootPointerCleanupRef.current?.();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!undoError) return;
@@ -1233,15 +1272,19 @@ export function FolderTree({
     const platform = streamRoot.id;
     const open = streamExpanded[platform];
     const playlists = streamPlaylists[platform];
+    const orderedPlaylists = orderStreamPlaylistsByRecent(
+      playlists ?? [],
+      streamRecentlyOpened[platform],
+    );
     const loading = streamLoading[platform];
     const error = streamErrors[platform];
     const accountState = accounts.find((account) => account.platform === platform)?.state;
     const canBrowse = accountCanBrowse(accountState);
     // 平台的默认收藏直接作为可点击项展示；不再套一层只有一个子项的目录。
-    const favoritePlaylists = (playlists ?? []).filter(
+    const favoritePlaylists = orderedPlaylists.filter(
       (playlist) => playlist.is_favorite || playlist.origin === "favorite",
     );
-    const sections = streamPlaylistSections(playlists ?? [], platform);
+    const sections = streamPlaylistSections(orderedPlaylists, platform);
     const count = playlists?.length;
     const rootHint = !accountState
       ? accountsError || "正在读取账号状态"
@@ -1255,13 +1298,17 @@ export function FolderTree({
       <div key={`stream-root:${platform}`} className="kd-stream-root">
         <div
           className="kd-folder kd-folder-stream-root"
+          data-sidebar-root-row=""
           data-stream-platform={platform}
           {...midiBrowseItemProps("search", `search:root:${platform}`)}
           style={{ paddingLeft: "0.35rem" }}
           role="button"
           tabIndex={0}
           aria-expanded={open}
-          title={rootHint}
+          title={`${rootHint} · 拖动调整侧栏顺序`}
+          onPointerDown={(event) =>
+            beginRootPointerReorder(event, `stream:${platform}`)
+          }
           onClick={() => {
             if (isMidiBrowseActivate() && streamExpanded[platform]) return;
             toggleStreamRoot(platform, accountState);
@@ -1456,6 +1503,7 @@ export function FolderTree({
       <div key={node.path}>
         <div
           className="kd-folder"
+          data-sidebar-root-row={depth === 0 ? "" : undefined}
           {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
           {...midiBrowseItemProps("local", `local:folder:${node.path}`)}
           data-active={active}
@@ -1463,9 +1511,12 @@ export function FolderTree({
           data-drop={dropTarget === node.path && dropEdge === ""}
           data-edge={dropTarget === node.path ? dropEdge || undefined : undefined}
           style={{ paddingLeft: `${0.35 + depth * 0.85}rem` }}
-          title={node.path}
-          // 根目录不参与排序：它的顺序在设置里的曲库目录列表决定，
-          // 而且它没有"父目录的清单"可写。
+          title={depth === 0 ? `${node.path} · 拖动调整侧栏顺序` : node.path}
+          onPointerDown={
+            depth === 0
+              ? (event) => beginRootPointerReorder(event, `local:${node.path}`)
+              : undefined
+          }
           onClick={(event) => {
             if (hasTextSelectionWithin(event.currentTarget)) return;
             if (selectFolderRow(event, node)) return;
@@ -1597,7 +1648,7 @@ export function FolderTree({
           <span
             className="kd-folder-drag"
             draggable={!node.is_root}
-            title={node.is_root ? undefined : "拖动文件夹图标移动或排序"}
+            title={node.is_root ? "拖动调整侧栏顺序" : "拖动文件夹图标移动或排序"}
             onDragStart={(event) => {
               if (node.is_root) return;
               event.stopPropagation();
@@ -1676,6 +1727,103 @@ export function FolderTree({
     );
   };
 
+  const renderAllTracksRoot = () => (
+    <div
+      className="kd-folder"
+      data-sidebar-root-row=""
+      {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
+      {...midiBrowseItemProps("local", "local:all")}
+      data-active={filter.folder === ""}
+      data-drop={dropTarget === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
+      style={{ paddingLeft: "0.35rem" }}
+      title="拖动调整侧栏顺序；拖入下载会落到默认下载文件夹"
+      onPointerDown={(event) => beginRootPointerReorder(event, ALL_TRACKS_ROOT_ID)}
+      onClick={() => {
+        setSelectedFolders(new Set());
+        setFilter({ folder: "", sort: "added_at", order: "desc" });
+        onNavigate?.();
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu(null);
+        setSelectedFolders(new Set());
+        setRescanArmed(false);
+        setAllMenu({ x: event.clientX, y: event.clientY });
+      }}
+      onDragOverCapture={(event) => {
+        if (!isSearchDownloadDrag(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setDropTarget(ALL_TRACKS_DROP_TARGET);
+        setDropEdge("");
+      }}
+      onDragLeave={() =>
+        setDropTarget((current) => {
+          if (current !== ALL_TRACKS_DROP_TARGET) return current;
+          setDropEdge("");
+          return "";
+        })
+      }
+      onDropCapture={(event) => {
+        event.preventDefault();
+        setDropTarget("");
+        setDropEdge("");
+        if (!isSearchDownloadDrag(event)) return;
+        void enqueueSearchDrop(event, SEARCH_DEFAULT_DOWNLOAD_SENTINEL).catch(
+          (error: unknown) => setNotice((error as Error).message),
+        );
+      }}
+    >
+      <span className="kd-folder-caret" />
+      <Library size={13} />
+      <span className="kd-truncate">全部曲目</span>
+      <span className="kd-folder-count">{allTrackCount}</span>
+      <button
+        type="button"
+        className="kd-folder-more"
+        aria-label="全部曲目操作"
+        onClick={(event) => {
+          event.stopPropagation();
+          setMenu(null);
+          setSelectedFolders(new Set());
+          setRescanArmed(false);
+          const rect = event.currentTarget.getBoundingClientRect();
+          setAllMenu({ x: rect.left, y: rect.bottom + 2 });
+        }}
+      >
+        <MoreHorizontal size={12} />
+      </button>
+    </div>
+  );
+
+  const renderOutsideRoot = () => (
+    <div
+      className="kd-folder"
+      data-sidebar-root-row=""
+      data-active={isOutsideFolder(filter.folder)}
+      {...midiBrowseItemProps("local", "local:outside")}
+      style={{ paddingLeft: "0.35rem" }}
+      title="不在曲库目录里的曲目 · 拖动调整侧栏顺序"
+      onPointerDown={(event) => beginRootPointerReorder(event, OUTSIDE_ROOT_ID)}
+      onClick={() => {
+        setFilter({ folder: OUTSIDE_FOLDER, sort: "added_at", order: "desc" });
+        onNavigate?.();
+      }}
+    >
+      <span className="kd-folder-caret" />
+      <Files size={13} />
+      <span className="kd-truncate">其他</span>
+      <span className="kd-folder-count">{folders!.outside}</span>
+    </div>
+  );
+
+  const renderSidebarRoot = (item: SidebarRootItem) => {
+    if (item.kind === "all") return renderAllTracksRoot();
+    if (item.kind === "stream") return renderStreamRoot(item.streamRoot);
+    if (item.kind === "local") return render(item.root, 0);
+    return renderOutsideRoot();
+  };
+
   const menuPaths = menu
     ? selectedFolders.has(menu.node.path)
       ? [...selectedFolders]
@@ -1705,9 +1853,17 @@ export function FolderTree({
           · 含子级——选中一个歌单文件夹时，想看的本来就是它整棵子树里的曲目，
             默认就该是"含"。做成开关只是把一个没人会关的选项摆在最显眼的位置。
       `folderDeep` 字段保留在 store 里（后端 API 仍然收它），默认恒为 true。 */}
-      <div className="kd-scroll kd-folder-list">
-        {/* 添加是曲库入口，不是底部工具：和「全部曲目」并列放在
-            列表最上面，点它直接选择磁盘目录并开始后台扫描。 */}
+      <div
+        ref={rootListRef}
+        className="kd-scroll kd-folder-list"
+        onClickCapture={(event) => {
+          if (!suppressRootClickRef.current) return;
+          event.preventDefault();
+          event.stopPropagation();
+          suppressRootClickRef.current = false;
+        }}
+      >
+        {/* 添加是固定入口；其余根项都在下面按用户保存的顺序渲染。 */}
         <button
           type="button"
           className="kd-folder kd-folder-action"
@@ -1719,95 +1875,21 @@ export function FolderTree({
           <FolderInput size={13} />
           <span className="kd-truncate">添加</span>
         </button>
-        <div
-          className="kd-folder"
-          {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
-          {...midiBrowseItemProps("local", "local:all")}
-          data-active={filter.folder === ""}
-          data-drop={dropTarget === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
-          style={{ paddingLeft: "0.35rem" }}
-          title="拖入下载会落到默认下载文件夹"
-          onClick={() => {
-            setSelectedFolders(new Set());
-            setFilter({ folder: "", sort: "added_at", order: "desc" });
-            onNavigate?.();
-          }}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            setMenu(null);
-            setSelectedFolders(new Set());
-            setRescanArmed(false);
-            setAllMenu({ x: event.clientX, y: event.clientY });
-          }}
-          onDragOverCapture={(event) => {
-            if (!isSearchDownloadDrag(event)) return;
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "copy";
-            setDropTarget(ALL_TRACKS_DROP_TARGET);
-            setDropEdge("");
-          }}
-          onDragLeave={() =>
-            setDropTarget((current) => {
-              if (current !== ALL_TRACKS_DROP_TARGET) return current;
-              setDropEdge("");
-              return "";
-            })
-          }
-          onDropCapture={(event) => {
-            event.preventDefault();
-            setDropTarget("");
-            setDropEdge("");
-            if (!isSearchDownloadDrag(event)) return;
-            void enqueueSearchDrop(event, SEARCH_DEFAULT_DOWNLOAD_SENTINEL).catch(
-              (error: unknown) => setNotice((error as Error).message),
-            );
-          }}
-        >
-          <span className="kd-folder-caret" />
-          <Library size={13} />
-          <span className="kd-truncate">全部曲目</span>
-          <span className="kd-folder-count">{allTrackCount}</span>
-          <button
-            type="button"
-            className="kd-folder-more"
-            aria-label="全部曲目操作"
-            onClick={(event) => {
-              event.stopPropagation();
-              setMenu(null);
-              setSelectedFolders(new Set());
-              setRescanArmed(false);
-              const rect = event.currentTarget.getBoundingClientRect();
-              setAllMenu({ x: rect.left, y: rect.bottom + 2 });
-            }}
+        {orderedRootItems.map((item) => (
+          <div
+            key={item.id}
+            className="kd-sidebar-root-slot"
+            data-sidebar-root-id={item.id}
+            data-root-dragging={rootDragging === item.id ? "true" : undefined}
+            data-root-edge={rootDrop?.id === item.id ? rootDrop.edge : undefined}
           >
-            <MoreHorizontal size={12} />
-          </button>
-        </div>
-        <PlaylistSection onNavigate={onNavigate} onNotice={setNotice} />
-        {enabledStreamRoots.map(renderStreamRoot)}
-        {roots.map((root) => render(root, 0))}
+            {renderSidebarRoot(item)}
+          </div>
+        ))}
         {roots.length === 0 && (
           <p className="kd-faint" style={{ padding: "0.6rem 0.5rem", lineHeight: 1.5 }}>
             还没有文件夹。点上方的「添加」选一个本地目录，剩下的交给后台。
           </p>
-        )}
-        {(folders?.outside ?? 0) > 0 && (
-          <div
-            className="kd-folder"
-            data-active={isOutsideFolder(filter.folder)}
-            {...midiBrowseItemProps("local", "local:outside")}
-            style={{ paddingLeft: "0.35rem" }}
-            title="不在曲库目录里的曲目"
-            onClick={() => {
-              setFilter({ folder: OUTSIDE_FOLDER, sort: "added_at", order: "desc" });
-              onNavigate?.();
-            }}
-          >
-            <span className="kd-folder-caret" />
-            <Files size={13} />
-            <span className="kd-truncate">其他</span>
-            <span className="kd-folder-count">{folders!.outside}</span>
-          </div>
         )}
       </div>
 
@@ -1990,18 +2072,6 @@ export function FolderTree({
           }}>
             <BarChart3 size={12} />
             仅分析当前层
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const folder = menu.node.path;
-              setMenu(null);
-              useAppStore.getState().openVjExportPanel();
-              void useVjExportStore.getState().open(folder);
-            }}
-          >
-            <Clapperboard size={12} />
-            按顺序导出 VJ
           </button>
           {(() => {
             const path = menu.node.path;

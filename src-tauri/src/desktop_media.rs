@@ -313,6 +313,7 @@ fn local_artwork_url(source_url: &str, track_id: Option<i64>) -> Result<String, 
     let cache_dir = std::env::temp_dir().join("kdj-media-artwork");
     fs::create_dir_all(&cache_dir).map_err(|error| format!("创建封面缓存目录失败：{error}"))?;
 
+    kdj_core::ensure_rustls_ring();
     let response = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -320,8 +321,12 @@ fn local_artwork_url(source_url: &str, track_id: Option<i64>) -> Result<String, 
         .map_err(|error| format!("创建封面下载客户端失败：{error}"))?
         .get(source_url)
         .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|error| format!("下载封面失败：{error}"))?;
+        // reqwest errors can include the complete request URL. Local artwork URLs carry a
+        // media capability in their query string, so never surface the original error here.
+        .map_err(|error| artwork_request_error(&error))?;
+    if !response.status().is_success() {
+        return Err(format!("下载封面失败：HTTP {}", response.status()));
+    }
     if response
         .content_length()
         .is_some_and(|size| size > 16 * 1024 * 1024)
@@ -342,7 +347,7 @@ fn local_artwork_url(source_url: &str, track_id: Option<i64>) -> Result<String, 
     if !path.is_file() {
         let bytes = response
             .bytes()
-            .map_err(|error| format!("读取封面响应失败：{error}"))?;
+            .map_err(|_| "读取封面响应失败".to_string())?;
         if bytes.len() > 16 * 1024 * 1024 {
             return Err("封面超过 16MB".into());
         }
@@ -356,6 +361,16 @@ fn local_artwork_url(source_url: &str, track_id: Option<i64>) -> Result<String, 
         }
     }
     Ok(file_url(&path))
+}
+
+fn artwork_request_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        "下载封面失败：请求超时".into()
+    } else if error.is_connect() {
+        "下载封面失败：无法连接封面服务".into()
+    } else {
+        "下载封面失败：请求未完成".into()
+    }
 }
 
 fn image_extension(content_type: Option<&str>) -> &'static str {
@@ -473,6 +488,32 @@ mod tests {
         assert!(same_artwork(&base, &later));
         later.artwork_url = Some("http://127.0.0.1/other".into());
         assert!(!same_artwork(&base, &later));
+    }
+
+    #[test]
+    fn artwork_errors_never_expose_the_media_capability() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("监听测试端口");
+        let address = listener.local_addr().expect("测试地址");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("接收封面请求");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .expect("返回测试错误");
+        });
+
+        let secret = "media-capability-must-not-be-logged";
+        let error = local_artwork_url(
+            &format!("http://{address}/api/library/cover/1?kdj_media_token={secret}"),
+            Some(1),
+        )
+        .expect_err("404 应返回错误");
+        server.join().expect("封面服务线程");
+
+        assert!(error.contains("HTTP 404"));
+        assert!(!error.contains(secret));
+        assert!(!error.contains("kdj_media_token"));
     }
 
     #[test]

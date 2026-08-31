@@ -23,5 +23,6 @@ permissions = [
   "allow-dispose",
   "allow-save-png-to-gallery",
   "allow-open-local-path",
+  "allow-start-file-drag",
   "allow-pick-library-folder",
 ]

@@ -50,6 +50,53 @@ fn level_of(quality: Quality) -> (&'static str, &'static str) {
     }
 }
 
+fn netease_lyric_field(body: &Value, pointer: &str) -> String {
+    body.pointer(pointer)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn first_netease_lyric_field(body: &Value, pointers: &[&str]) -> String {
+    pointers
+        .iter()
+        .map(|pointer| netease_lyric_field(body, pointer))
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
+}
+
+/// 新版歌词接口的 `yrc` 是逐字时间轴；`ytlrc` / `yromalrc` 与它使用同一组
+/// 行时间。没有 YRC 时仍返回普通 LRC，让前端明确退回行级高亮。
+fn netease_lyric_text(body: &Value) -> Option<LyricText> {
+    if body.get("nolyric").and_then(Value::as_bool) == Some(true)
+        || body.get("uncollected").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let lrc = netease_lyric_field(body, "/lrc/lyric");
+    if lrc.is_empty() {
+        return None;
+    }
+    let word_lrc = netease_lyric_field(body, "/yrc/lyric");
+    let translated_lrc = if word_lrc.is_empty() {
+        netease_lyric_field(body, "/tlyric/lyric")
+    } else {
+        first_netease_lyric_field(body, &["/ytlrc/lyric", "/tlyric/lyric"])
+    };
+    let romaji_lrc = if word_lrc.is_empty() {
+        netease_lyric_field(body, "/romalrc/lyric")
+    } else {
+        first_netease_lyric_field(body, &["/yromalrc/lyric", "/romalrc/lyric"])
+    };
+    Some(LyricText {
+        lrc,
+        word_lrc,
+        translated_lrc,
+        romaji_lrc,
+    })
+}
+
 pub struct NeteaseProvider {
     ctx: ProviderContext,
     client: NeteaseClient,
@@ -467,16 +514,16 @@ impl NeteaseProvider {
     }
 
     /// 扫码成功后拉一次登录态写进会话，重启后不用发请求就能显示昵称。
-    async fn finish_login(&self) {
+    async fn finish_login(&self) -> Result<()> {
         match self
             .client
             .weapi("/weapi/w/nuser/account/get", Map::new())
             .await
         {
-            Ok(status) => self.client.set_profile(Some(status)),
+            Ok(status) => self.client.set_profile(Some(status))?,
             Err(err) => tracing::warn!("写入网易云登录信息失败：{err}"),
         }
-        self.client.save_session();
+        self.client.save_session()
     }
 }
 
@@ -527,7 +574,9 @@ impl MusicProvider for NeteaseProvider {
         let account_id = data.get("account").and_then(|a| a.get("id"));
         if let (Some(profile), Some(account_id)) = (profile, account_id) {
             if !profile.is_null() {
-                self.client.set_profile(Some(status.clone()));
+                if let Err(error) = self.client.set_profile(Some(status.clone())) {
+                    tracing::warn!("更新网易云账号缓存失败：{error:#}");
+                }
                 let vip_type = profile.get("vipType").and_then(Value::as_i64).unwrap_or(0);
                 let mut account = Account::new(
                     Platform::Wyy,
@@ -559,6 +608,30 @@ impl MusicProvider for NeteaseProvider {
             AccountState::Expired,
             "登录态已失效，请重新扫码",
         )
+    }
+
+    async fn cached_account(&self) -> Account {
+        if !self.client.logged_in() {
+            return Account::new(Platform::Wyy, LABEL, AccountState::Missing, "未登录");
+        }
+        let cached = self.client.profile();
+        let mut account = Account::new(
+            Platform::Wyy,
+            LABEL,
+            AccountState::Valid,
+            "登录状态尚未联网核验",
+        );
+        account.account_key = cached_account_key(&cached).unwrap_or_default();
+        account.nickname = cached_nickname(&cached).unwrap_or_default();
+        account.avatar = cached
+            .as_ref()
+            .and_then(|root| root.get("data").or(Some(root)))
+            .and_then(|data| data.get("profile"))
+            .and_then(|profile| profile.get("avatarUrl"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        account
     }
 
     async fn create_qr(&self) -> Result<QrSession> {
@@ -659,8 +732,8 @@ impl MusicProvider for NeteaseProvider {
                 Ok((QrStateValue::Scanned, or_default(message, &fallback)))
             }
             803 => {
+                self.finish_login().await?;
                 self.qr_sessions.lock().unwrap().remove(session_id);
-                self.finish_login().await;
                 Ok((QrStateValue::Done, or_default(message, "登录成功")))
             }
             _ => Ok((QrStateValue::Waiting, message)),
@@ -669,7 +742,7 @@ impl MusicProvider for NeteaseProvider {
 
     async fn logout(&self) -> Result<()> {
         let _ = self.client.weapi("/weapi/logout", Map::new()).await;
-        self.client.clear_session();
+        self.client.clear_session()?;
         self.qr_sessions.lock().unwrap().clear();
         Ok(())
     }
@@ -808,7 +881,7 @@ impl MusicProvider for NeteaseProvider {
             )
             .await?;
         expect_ok(&body, "读取网易云歌单")?;
-        let mut playlists: Vec<StreamPlaylist> = body
+        let playlists: Vec<StreamPlaylist> = body
             .get("playlist")
             .and_then(Value::as_array)
             .into_iter()
@@ -845,7 +918,8 @@ impl MusicProvider for NeteaseProvider {
                 })
             })
             .collect();
-        playlists.sort_by_key(|item| (!item.is_favorite, item.title.to_lowercase()));
+        // 最近打开顺序由前端本地记录维护。目录刷新只请求目录本身，不再为了排序
+        // 额外读取网易云播放历史。
         Ok(playlists)
     }
 
@@ -860,15 +934,53 @@ impl MusicProvider for NeteaseProvider {
         }
         let limit = full_listing(limit);
         let (title, songs) = self.playlist_tracks(key, limit).await?;
-        if songs.is_empty() {
-            bail!("网易云歌单没有可用歌曲（{key}）");
-        }
         Ok(Some(StreamPlaylistResponse {
             platform: Platform::Wyy,
             key: key.to_string(),
             title,
             sources: songs.iter().take(limit).map(to_source).collect(),
         }))
+    }
+
+    async fn remove_stream_playlist_track(&self, key: &str, source: &SongSource) -> Result<()> {
+        anyhow::ensure!(self.client.logged_in(), "请先登录网易云音乐");
+        anyhow::ensure!(source.platform == Platform::Wyy, "歌曲来源不是网易云音乐");
+        let playlist_id = key.trim();
+        let track_id = source.key.trim();
+        anyhow::ensure!(
+            !playlist_id.is_empty() && playlist_id.chars().all(|ch| ch.is_ascii_digit()),
+            "网易云歌单 ID 无效"
+        );
+        anyhow::ensure!(
+            !track_id.is_empty() && track_id.chars().all(|ch| ch.is_ascii_digit()),
+            "网易云歌曲 ID 无效"
+        );
+
+        // 不能相信前端保存的 origin：每次写之前重读当前账号目录，确保它仍然是
+        // “我喜欢的音乐”或本人创建的歌单，而不是收藏的他人歌单。
+        let playlists = self.stream_playlists().await?;
+        let target = playlists
+            .iter()
+            .find(|playlist| playlist.key == playlist_id)
+            .context("当前账号的歌单目录里没有这个网易云歌单")?;
+        anyhow::ensure!(
+            matches!(target.origin.as_str(), "favorite" | "created"),
+            "收藏的他人歌单不能移除其中的歌曲"
+        );
+
+        let body = self
+            .client
+            .weapi(
+                "/weapi/playlist/manipulate/tracks",
+                payload([
+                    ("op", Value::String("del".into())),
+                    ("pid", Value::String(playlist_id.to_string())),
+                    ("trackIds", Value::String(json!([track_id]).to_string())),
+                    ("imme", Value::String("true".into())),
+                ]),
+            )
+            .await?;
+        expect_ok(&body, "从网易云歌单移除歌曲")
     }
 
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
@@ -950,53 +1062,74 @@ impl MusicProvider for NeteaseProvider {
         if key.is_empty() {
             return Ok(None);
         }
-        let body = self
+        // `/song/lyric/v1` 才返回 YRC 逐字时间轴。旧 weapi 仍作为兼容回退，
+        // 避免少数网络环境无法访问 interfacepc 时连行级歌词也丢失。
+        let modern = self
             .client
-            .weapi(
-                "/weapi/song/lyric",
+            .eapi(
+                "/eapi/song/lyric/v1",
                 payload([
                     ("id", Value::String(key.to_string())),
-                    ("lv", json!(-1)),
-                    ("tv", json!(-1)),
-                    ("rv", json!(-1)),
-                    ("kv", json!(-1)),
+                    ("cp", json!(false)),
+                    ("lv", json!(0)),
+                    ("tv", json!(0)),
+                    ("rv", json!(0)),
+                    ("kv", json!(0)),
+                    ("yv", json!(0)),
+                    ("ytv", json!(0)),
+                    ("yrv", json!(0)),
                 ]),
             )
-            .await
-            .context("请求网易云歌词失败")?;
-        // nolyric / uncollected 表示确实没词；lrc 空串也当没有。
-        if body.get("nolyric").and_then(Value::as_bool) == Some(true)
-            || body.get("uncollected").and_then(Value::as_bool) == Some(true)
-        {
-            return Ok(None);
-        }
-        let lrc = body
-            .pointer("/lrc/lyric")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if lrc.is_empty() {
-            return Ok(None);
-        }
-        let translated_lrc = body
-            .pointer("/tlyric/lyric")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        // rv=-1 已请求；有罗马音时落在 romalrc.lyric。
-        let romaji_lrc = body
-            .pointer("/romalrc/lyric")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        Ok(Some(LyricText {
-            lrc,
-            translated_lrc,
-            romaji_lrc,
-        }))
+            .await;
+        let body = match modern {
+            Ok(body)
+                if body.get("code").and_then(Value::as_i64).unwrap_or(200) == 200
+                    && (body
+                        .pointer("/lrc/lyric")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                        || body.get("nolyric").and_then(Value::as_bool) == Some(true)
+                        || body.get("uncollected").and_then(Value::as_bool) == Some(true)) =>
+            {
+                body
+            }
+            Ok(body) => {
+                tracing::debug!(
+                    code = ?body.get("code"),
+                    "网易云新版歌词接口未成功，退回行级接口"
+                );
+                self.client
+                    .weapi(
+                        "/weapi/song/lyric",
+                        payload([
+                            ("id", Value::String(key.to_string())),
+                            ("lv", json!(-1)),
+                            ("tv", json!(-1)),
+                            ("rv", json!(-1)),
+                            ("kv", json!(-1)),
+                        ]),
+                    )
+                    .await
+                    .context("请求网易云歌词失败")?
+            }
+            Err(error) => {
+                tracing::debug!("网易云新版歌词接口不可用，退回行级接口：{error:#}");
+                self.client
+                    .weapi(
+                        "/weapi/song/lyric",
+                        payload([
+                            ("id", Value::String(key.to_string())),
+                            ("lv", json!(-1)),
+                            ("tv", json!(-1)),
+                            ("rv", json!(-1)),
+                            ("kv", json!(-1)),
+                        ]),
+                    )
+                    .await
+                    .context("请求网易云歌词失败")?
+            }
+        };
+        Ok(netease_lyric_text(&body))
     }
 
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
@@ -1493,6 +1626,48 @@ fn stringify_id(value: &Value) -> String {
     }
 }
 
+#[cfg(test)]
+fn netease_recent_playlist_times(body: &Value) -> HashMap<String, i64> {
+    let mut recent: HashMap<String, i64> = HashMap::new();
+    for entry in body
+        .pointer("/data/list")
+        .or_else(|| body.get("list"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let key = entry
+            .get("resourceId")
+            .or_else(|| entry.pointer("/resource/id"))
+            .or_else(|| entry.pointer("/data/id"))
+            .map(stringify_id)
+            .filter(|key| !key.is_empty());
+        let play_time = loose_int(entry.get("playTime").or_else(|| entry.get("lastPlayTime")));
+        if let Some(key) = key.filter(|_| play_time > 0) {
+            recent
+                .entry(key)
+                .and_modify(|current| *current = (*current).max(play_time))
+                .or_insert(play_time);
+        }
+    }
+    recent
+}
+
+#[cfg(test)]
+fn sort_netease_playlists_by_recent(
+    playlists: &mut [StreamPlaylist],
+    recent: &HashMap<String, i64>,
+) {
+    // `sort_by` 是稳定排序：相同时间以及完全没有历史的项目保留接口原位。
+    playlists.sort_by(|left, right| {
+        recent
+            .get(&right.key)
+            .copied()
+            .unwrap_or(i64::MIN)
+            .cmp(&recent.get(&left.key).copied().unwrap_or(i64::MIN))
+    });
+}
+
 fn html_unescape(text: &str) -> String {
     text.replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -1551,6 +1726,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_lyric_response_prefers_word_synchronized_extra_layers() {
+        let body = json!({
+            "lrc": {"lyric": "[00:01.00]普通主词"},
+            "yrc": {"lyric": "[1000,500](1000,500,0)逐字"},
+            "tlyric": {"lyric": "[00:01.00]行级翻译"},
+            "ytlrc": {"lyric": "[00:01.00]逐字翻译"},
+            "romalrc": {"lyric": "[00:01.00]line roma"},
+            "yromalrc": {"lyric": "[00:01.00]word roma"}
+        });
+        let lyric = netease_lyric_text(&body).expect("应解析主歌词");
+        assert_eq!(lyric.lrc, "[00:01.00]普通主词");
+        assert_eq!(lyric.word_lrc, "[1000,500](1000,500,0)逐字");
+        assert_eq!(lyric.translated_lrc, "[00:01.00]逐字翻译");
+        assert_eq!(lyric.romaji_lrc, "[00:01.00]word roma");
+    }
+
+    #[test]
+    fn old_lyric_response_stays_a_line_timeline() {
+        let body = json!({
+            "lrc": {"lyric": "[00:01.00]普通主词"},
+            "tlyric": {"lyric": "[00:01.00]翻译"},
+            "romalrc": {"lyric": "[00:01.00]roma"}
+        });
+        let lyric = netease_lyric_text(&body).expect("应解析主歌词");
+        assert!(lyric.word_lrc.is_empty());
+        assert_eq!(lyric.translated_lrc, "[00:01.00]翻译");
+        assert_eq!(lyric.romaji_lrc, "[00:01.00]roma");
+    }
+
+    #[test]
     fn podcast_link_ids_are_picked_from_radio_and_program_links() {
         assert_eq!(
             netease_radio_id("https://music.163.com/#/djradio?id=9657249"),
@@ -1565,6 +1770,47 @@ mod tests {
             Some("2491967534".into())
         );
         assert_eq!(netease_radio_id("https://music.163.com/#/song?id=1"), None);
+    }
+
+    #[test]
+    fn recent_playlist_times_accept_current_and_compatible_response_shapes() {
+        let body = json!({
+            "data": {"list": [
+                {"resourceId": 20, "playTime": 2000},
+                {"resource": {"id": "10"}, "lastPlayTime": "1000"},
+                {"resourceId": 20, "playTime": 1500},
+                {"resourceId": 30, "playTime": 0}
+            ]}
+        });
+        let times = netease_recent_playlist_times(&body);
+        assert_eq!(times.get("20"), Some(&2000));
+        assert_eq!(times.get("10"), Some(&1000));
+        assert!(!times.contains_key("30"));
+    }
+
+    #[test]
+    fn recent_playlist_sort_keeps_default_order_for_missing_history() {
+        let mut playlists: Vec<StreamPlaylist> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|key| StreamPlaylist {
+                platform: Platform::Wyy,
+                key: key.into(),
+                title: key.into(),
+                cover: String::new(),
+                count: 0,
+                is_favorite: false,
+                origin: "created".into(),
+            })
+            .collect();
+        let recent = HashMap::from([("c".into(), 100), ("b".into(), 200)]);
+        sort_netease_playlists_by_recent(&mut playlists, &recent);
+        assert_eq!(
+            playlists
+                .iter()
+                .map(|playlist| playlist.key.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "c", "a", "d"]
+        );
     }
 
     #[test]

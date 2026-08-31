@@ -29,18 +29,31 @@ fn round2(value: f64) -> f64 {
 }
 
 pub fn analyze_loudness(samples: &[f32]) -> LoudnessResult {
+    analyze_loudness_cancellable(samples, &|| false).expect("不可取消的响度分析不应提前退出")
+}
+
+pub fn analyze_loudness_cancellable(
+    samples: &[f32],
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<LoudnessResult> {
+    if cancelled() {
+        return None;
+    }
     if samples.is_empty() {
         let floor_db = 20.0 * FLOOR.log10();
-        return LoudnessResult {
+        return Some(LoudnessResult {
             rms_db: floor_db,
             peak_db: floor_db,
             crest_db: 0.0,
             energy: 1,
-        };
+        });
     }
     let mut sum_sq = 0.0f64;
     let mut peak = 0.0f64;
-    for sample in samples {
+    for (index, sample) in samples.iter().enumerate() {
+        if index % 16_384 == 0 && cancelled() {
+            return None;
+        }
         let value = *sample as f64;
         sum_sq += value * value;
         peak = peak.max(value.abs());
@@ -48,12 +61,15 @@ pub fn analyze_loudness(samples: &[f32]) -> LoudnessResult {
     let rms = (sum_sq / samples.len() as f64).sqrt();
     let rms_db = 20.0 * rms.max(FLOOR).log10();
     let peak_db = 20.0 * peak.max(FLOOR).log10();
-    LoudnessResult {
+    if cancelled() {
+        return None;
+    }
+    Some(LoudnessResult {
         rms_db: round2(rms_db),
         peak_db: round2(peak_db),
         crest_db: round2(peak_db - rms_db),
         energy: energy_from_rms_db(rms_db),
-    }
+    })
 }
 
 #[cfg(test)]

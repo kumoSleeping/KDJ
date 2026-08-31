@@ -1,18 +1,8 @@
-import {
-  Disc3,
-  Download,
-  Library,
-  Settings,
-  Upload,
-} from "lucide-react";
+import { Download, Moon, Settings, Sun, Upload } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
-import type { WorkMode } from "../../lib/workMode";
-const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
 
 export interface ChromeActionsProps {
-  workMode: WorkMode;
-  onWorkModeChange(mode: WorkMode): void;
   settingsOpen: boolean;
   onSettings(): void;
   queueOpen: boolean;
@@ -24,8 +14,6 @@ export interface ChromeActionsProps {
 
 /** 主栏顶部右侧的工作模式、设置和下载入口。 */
 export function ChromeActions({
-  workMode,
-  onWorkModeChange,
   settingsOpen,
   onSettings,
   queueOpen,
@@ -37,28 +25,16 @@ export function ChromeActions({
   const latest = useUpdateStore((s) => s.info?.latest ?? "");
   const openUpdateSection = useUpdateStore((s) => s.openUpdateSection);
   const openUpdate = onOpenUpdate ?? openUpdateSection;
-  const configuredWorkModeSwitch = useAppStore(
-    (state) => state.settings?.experimental_dj_mode ?? false,
-  );
-  const showWorkModeSwitch = LABS_BUILD && configuredWorkModeSwitch;
-
+  const theme = useAppStore((state) => state.settings?.theme ?? "system");
+  const saveSettings = useAppStore((state) => state.saveSettings);
+  const resolvedTheme =
+    theme === "system"
+      ? document.documentElement.dataset.theme ??
+        (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+      : theme;
+  const isDark = resolvedTheme !== "light";
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
-      {showWorkModeSwitch ? (
-        <button
-          type="button"
-          className="kd-chrome-btn kd-work-mode-switch"
-          data-mode={workMode}
-          aria-label={workMode === "manager" ? "切换到 DJ 模式" : "切换到管理器模式"}
-          title={workMode === "manager" ? "进入 DJ 模式" : "返回管理器模式"}
-          onClick={() => onWorkModeChange(workMode === "manager" ? "dj" : "manager")}
-        >
-          <span className="kd-work-mode-glyph" aria-hidden="true">
-            <Library className="kd-work-mode-manager" size={16} />
-            <Disc3 className="kd-work-mode-dj" size={16} />
-          </span>
-        </button>
-      ) : null}
       {updateReady ? (
         <button
           type="button"
@@ -84,6 +60,15 @@ export function ChromeActions({
         onClick={onSettings}
       >
         <Settings size={16} />
+      </button>
+      <button
+        type="button"
+        className="kd-chrome-btn"
+        aria-label={isDark ? "切到日间模式" : "切到夜间模式"}
+        title={isDark ? "日间模式" : "夜间模式"}
+        onClick={() => void saveSettings({ theme: isDark ? "light" : "dark" }).catch(() => undefined)}
+      >
+        {isDark ? <Sun size={16} /> : <Moon size={16} />}
       </button>
       <button
         type="button"

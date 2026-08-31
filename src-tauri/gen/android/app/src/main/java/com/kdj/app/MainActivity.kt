@@ -8,12 +8,14 @@ import android.util.Log
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : TauriActivity() {
   companion object {
     private const val REQ_MEDIA_AUDIO = 4001
     private const val PREFS = "kdj-perms"
     private const val KEY_AUDIO_ASKED = "media-audio-asked"
+    private val ndkContextInitialized = AtomicBoolean(false)
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -24,9 +26,18 @@ class MainActivity : TauriActivity() {
       System.loadLibrary("kdj_app_lib")
       // CPAL/AAudio 需要 JNI 上下文，必须在 Tauri setup（播放器线程）之前就位。
       // Rust 侧对应 Java_com_kdj_app_MainActivity_initNdkContext。
-      initNdkContext(this)
-      Log.i("KDJ-JNI", "initNdkContext 返回")
+      if (ndkContextInitialized.compareAndSet(false, true)) {
+        if (initNdkContext(this)) {
+          Log.i("KDJ-JNI", "initNdkContext 返回")
+        } else {
+          ndkContextInitialized.set(false)
+          Log.e("KDJ-JNI", "initNdkContext 未完成")
+        }
+      } else {
+        Log.i("KDJ-JNI", "ndk-context 已在本进程初始化，跳过 Activity 重建调用")
+      }
     } catch (err: Throwable) {
+      ndkContextInitialized.set(false)
       Log.e("KDJ-JNI", "initNdkContext 失败", err)
     }
     enableEdgeToEdge()
@@ -36,7 +47,7 @@ class MainActivity : TauriActivity() {
     requestMediaPermissionIfNeeded()
   }
 
-  private external fun initNdkContext(activity: MainActivity)
+  private external fun initNdkContext(activity: MainActivity): Boolean
 
   /**
    * 曲库扫描公共目录需要媒体权限（Android 13+ READ_MEDIA_AUDIO/VIDEO，

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 /**
  * 「搜索 SoundCloud」的风格预设（精选，约两行）。
@@ -48,14 +49,14 @@ function sameList(a: string[], b: readonly string[]): boolean {
 
 function load(): string[] {
   try {
-    const raw = localStorage.getItem(KEYWORDS_KEY);
+    const raw = readLocalStorage(KEYWORDS_KEY);
     if (!raw) return DEFAULT_SC_KEYWORDS;
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return DEFAULT_SC_KEYWORDS;
     const list = parsed.filter((item): item is string => typeof item === "string");
     // 还停在旧默认长表上 → 收成精选，不打扰用户自己加过的词。
     if (sameList(list, LEGACY_SC_KEYWORDS)) {
-      localStorage.setItem(KEYWORDS_KEY, JSON.stringify(DEFAULT_SC_KEYWORDS));
+      writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(DEFAULT_SC_KEYWORDS));
       return DEFAULT_SC_KEYWORDS;
     }
     return list;
@@ -66,7 +67,7 @@ function load(): string[] {
 
 function loadPicked(): string[] {
   try {
-    const raw = localStorage.getItem(PICKED_KEY);
+    const raw = readLocalStorage(PICKED_KEY);
     if (raw === null) return DEFAULT_SC_PICKED;
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed)
@@ -93,14 +94,14 @@ export const useScKeywords = create<ScKeywordState>((set, get) => ({
   keywords: load(),
   picked: loadPicked(),
   // 未写过开关时默认带上艺人；显式存 "0" 才关掉。
-  withArtist: localStorage.getItem(ARTIST_KEY) !== "0",
+  withArtist: readLocalStorage(ARTIST_KEY) !== "0",
 
   toggle(word) {
     const picked = get().picked;
     const next = picked.includes(word)
       ? picked.filter((k) => k !== word)
       : [...picked, word];
-    localStorage.setItem(PICKED_KEY, JSON.stringify(next));
+    writeLocalStorageNow(PICKED_KEY, JSON.stringify(next));
     set({ picked: next });
   },
 
@@ -108,26 +109,26 @@ export const useScKeywords = create<ScKeywordState>((set, get) => ({
     const clean = word.trim();
     if (!clean || get().keywords.some((k) => k.toLowerCase() === clean.toLowerCase())) return;
     const next = [...get().keywords, clean];
-    localStorage.setItem(KEYWORDS_KEY, JSON.stringify(next));
+    writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(next));
     set({ keywords: next });
   },
 
   remove(word) {
     const next = get().keywords.filter((k) => k !== word);
-    localStorage.setItem(KEYWORDS_KEY, JSON.stringify(next));
+    writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(next));
     const picked = get().picked.filter((k) => k !== word);
-    localStorage.setItem(PICKED_KEY, JSON.stringify(picked));
+    writeLocalStorageNow(PICKED_KEY, JSON.stringify(picked));
     set({ keywords: next, picked });
   },
 
   reset() {
-    localStorage.removeItem(KEYWORDS_KEY);
-    localStorage.removeItem(PICKED_KEY);
+    removeLocalStorage(KEYWORDS_KEY);
+    removeLocalStorage(PICKED_KEY);
     set({ keywords: DEFAULT_SC_KEYWORDS, picked: DEFAULT_SC_PICKED });
   },
 
   setWithArtist(value) {
-    localStorage.setItem(ARTIST_KEY, value ? "1" : "0");
+    writeLocalStorageNow(ARTIST_KEY, value ? "1" : "0");
     set({ withArtist: value });
   },
 }));

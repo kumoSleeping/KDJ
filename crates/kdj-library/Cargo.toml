@@ -7,16 +7,14 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 chrono = "0.4.45"
-kdj-analysis = { version = "0.2.44", path = "../kdj-analysis" }
-kdj-core = { version = "0.2.44", path = "../kdj-core" }
-kdj-providers = { version = "0.2.44", path = "../kdj-providers" }
+kdj-analysis = { version = "1.0.0-rc1", path = "../kdj-analysis" }
+kdj-core = { version = "1.0.0-rc1", path = "../kdj-core" }
+kdj-providers = { version = "1.0.0-rc1", path = "../kdj-providers" }
 lofty = "0.24.0"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.28"
-# 桌面端的 OneLibrary 写入器会把同一版 libsqlite3-sys 切到 SQLCipher；这里不能在
-# 所有桌面平台无条件打开普通 bundled SQLite。Windows runner 没有 sqlite3.lib，
-# 因此与移动端一样显式启用 bundled；Labs 的 bundled-sqlcipher 特性会统一覆盖它。
-# macOS/Linux 继续使用系统 SQLite，避免稳定版无谓编译 SQLCipher。
+# Windows runner 与移动端没有系统 sqlite3，因此只在这些平台启用 bundled；
+# macOS/Linux 继续使用系统 SQLite。
 rusqlite = "0.35"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

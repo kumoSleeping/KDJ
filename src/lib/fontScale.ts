@@ -5,8 +5,6 @@
  */
 export const APP_FONT_SCALE_MIN = 75;
 export const APP_FONT_SCALE_MAX = 150;
-/** 滑条显示四个边界刻度，实际可按 1% 微调。 */
-export const APP_FONT_SCALE_TICKS = [75, 100, 125, 150] as const;
 
 export type AppFontScale = number;
 

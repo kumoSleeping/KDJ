@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ use kdj_core::models::{
     SongSource, StreamPlaylist, StreamPlaylistResponse, VideoDownloadRequest, VideoInfo, VideoPage,
 };
 use kdj_core::paths::{finalize_filename, sanitize_filename_value};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::sync::CancellationToken;
 
@@ -25,7 +25,7 @@ use super::client::BiliClient;
 use super::streams::{self, MediaStream, PlayUrlData};
 use super::url::{
     normalize_bvid, normalize_pic, parse_clock, pick_favlist_id, resolve_video_target,
-    strip_search_markup, USER_AGENT,
+    strip_search_markup, VideoTarget, USER_AGENT,
 };
 use super::{login, qn_for_height};
 use crate::ffmpeg;
@@ -33,7 +33,7 @@ use crate::net::{create_download_writer, ensure_media_url, AtomicDownload};
 use crate::provider::{
     effective_limit, full_listing, loose_int, qr_data_url_from_text, str_field,
     unique_download_path, Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext,
-    VideoProvider,
+    VideoPreviewStream, VideoPreviewTrack, VideoProvider,
 };
 
 const LABEL: &str = "哔哩哔哩";
@@ -44,30 +44,43 @@ const QR_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 
 /// 拖一次进度条就是一串 Range 请求，每个都重新 view+playurl 的话，
 /// 正好凑成最容易被风控的形状（短时间高频打接口）。
 const PREVIEW_URL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+const FAVORITE_FOLDER_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_FAVORITE_FOLDER_CACHES: usize = 16;
 
 /// 预览的清晰度档位（qn=64 → 720P）。预览回答的是"是不是要找的那支片子"，
 /// 不是拿来审画质的；档位越高首帧越慢。
 const PREVIEW_QN: i64 = 64;
 
-/// 预览流的转发包裹：状态码 + 要透传的几个头 + 字节流。
-///
-/// 不直接把 `reqwest::Response` 交出去——server 层不依赖 reqwest，
-/// 让它拿着裸 `Bytes` 流自己包成 HTTP 响应。
-pub struct PreviewStream {
-    /// 200（整份）或 206（Range 片段），照抄上游。
-    pub status: u16,
-    pub content_type: String,
-    pub content_length: Option<u64>,
-    pub content_range: Option<String>,
-    pub body: futures_util::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>,
+struct FavoriteFolderCache {
+    title: String,
+    sources: Vec<SongSource>,
+    next_page: i64,
+    complete: bool,
+    updated_at: Instant,
+}
+
+impl FavoriteFolderCache {
+    fn new(media_id: &str) -> Self {
+        Self {
+            title: format!("Bilibili Favorites {media_id}"),
+            sources: Vec::new(),
+            next_page: 1,
+            complete: false,
+            updated_at: Instant::now(),
+        }
+    }
 }
 
 pub struct BilibiliProvider {
     ctx: ProviderContext,
     client: BiliClient,
     qr_sessions: Mutex<HashMap<String, (String, Instant)>>,
-    /// (bvid, 分P) → (直链, 解析时刻)。见 `PREVIEW_URL_TTL`。
-    preview_urls: Mutex<HashMap<(String, usize), (String, Instant)>>,
+    /// (bvid, 分P, qn) → (直链, 解析时刻)。见 `PREVIEW_URL_TTL`。
+    preview_urls: Mutex<HashMap<(String, usize, i64), (String, Instant)>>,
+    /// 多个 Range 首包同时到达时，只有第一个可以执行 view + playurl。
+    preview_resolve: tokio::sync::Mutex<()>,
+    /// 收藏夹按需扩展；同一歌单后续翻页只补未读取的 B 站页，不从第 1 页重来。
+    favorite_folders: tokio::sync::Mutex<HashMap<String, FavoriteFolderCache>>,
 }
 
 impl BilibiliProvider {
@@ -79,6 +92,8 @@ impl BilibiliProvider {
             ctx,
             qr_sessions: Mutex::new(HashMap::new()),
             preview_urls: Mutex::new(HashMap::new()),
+            preview_resolve: tokio::sync::Mutex::new(()),
+            favorite_folders: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -96,28 +111,22 @@ impl BilibiliProvider {
         )
     }
 
-    /// 解析视频信息，供前端画质下拉框用。
-    pub async fn resolve_video(&self, url: &str) -> Result<VideoInfo> {
-        let target = resolve_video_target(self.client.http(), url).await?;
-        let logged_in = self.logged_in().await;
-        let info = self.client.view(&target.bvid).await?;
+    /// 解析视频元信息与分 P。这里只打一条 view 请求；画质与播放地址必须等用户
+    /// 真正预览或下载时再取，不能因为结果行出现就提前请求 playurl。
+    pub async fn resolve_video(&self, input: &str) -> Result<VideoInfo> {
+        let target = resolve_video_target(self.client.http(), input).await?;
+        let info = self.view_target(&target).await?;
+        let bvid = target_bvid(&target, &info)?;
 
         let pages: Vec<Value> = info
             .get("pages")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let index = target.page_index.min(pages.len().saturating_sub(1));
-        let cid = cid_at(&info, &pages, index);
-        let playurl = self.client.playurl(&target.bvid, cid, 127, true).await?;
-
         Ok(VideoInfo {
             platform: Platform::Bilibili,
-            // 空串要退回请求里的 BV 号（Python 的 `str(info.get("bvid") or target.bvid)`）
-            bvid: str_field(&info, "bvid").unwrap_or(&target.bvid).to_string(),
-            title: str_field(&info, "title")
-                .unwrap_or(&target.bvid)
-                .to_string(),
+            bvid: bvid.clone(),
+            title: str_field(&info, "title").unwrap_or(&bvid).to_string(),
             author: info
                 .pointer("/owner/name")
                 .and_then(Value::as_str)
@@ -140,9 +149,17 @@ impl BilibiliProvider {
                     duration: page.get("duration").and_then(Value::as_i64).unwrap_or(0),
                 })
                 .collect(),
-            options: streams::stream_options(&playurl),
-            logged_in,
+            options: Vec::new(),
+            logged_in: self.client.has_credential(),
         })
+    }
+
+    async fn view_target(&self, target: &VideoTarget) -> Result<Value> {
+        if !target.bvid.is_empty() {
+            return self.client.view(&target.bvid).await;
+        }
+        let aid = target.aid.context("视频目标缺少 BV/AV 号")?;
+        self.client.view_by_aid(aid).await
     }
 
     /// 预览用的直链：durl 单文件 mp4（fnval=1）。
@@ -150,10 +167,25 @@ impl BilibiliProvider {
     /// `<video>` 不经 MSE 只放得了单流，DASH 音画分离的形态在预览里没法用；
     /// 单流 mp4 恰好也是安卓下载走的那条路，B 站对它的支持是稳定的。
     async fn preview_url(&self, bvid: &str, page_index: usize) -> Result<String> {
+        self.preview_url_for_qn(bvid, page_index, PREVIEW_QN).await
+    }
+
+    async fn preview_url_for_qn(&self, bvid: &str, page_index: usize, qn: i64) -> Result<String> {
+        let key = (bvid.to_string(), page_index, qn);
         if let Some(url) = {
             let cache = self.preview_urls.lock().unwrap();
             cache
-                .get(&(bvid.to_string(), page_index))
+                .get(&key)
+                .filter(|(_, born)| born.elapsed() < PREVIEW_URL_TTL)
+                .map(|(url, _)| url.clone())
+        } {
+            return Ok(url);
+        }
+        let _resolve = self.preview_resolve.lock().await;
+        if let Some(url) = {
+            let cache = self.preview_urls.lock().unwrap();
+            cache
+                .get(&key)
                 .filter(|(_, born)| born.elapsed() < PREVIEW_URL_TTL)
                 .map(|(url, _)| url.clone())
         } {
@@ -167,7 +199,7 @@ impl BilibiliProvider {
             .unwrap_or_default();
         let index = page_index.min(pages.len().saturating_sub(1));
         let cid = cid_at(&info, &pages, index);
-        let playurl = self.client.playurl(bvid, cid, PREVIEW_QN, false).await?;
+        let playurl = self.client.playurl(bvid, cid, qn, false).await?;
         let PlayUrlData::Single { url, .. } = streams::parse_playurl(&playurl) else {
             bail!("哔哩哔哩没有返回可直接播放的预览流");
         };
@@ -175,10 +207,7 @@ impl BilibiliProvider {
         let mut cache = self.preview_urls.lock().unwrap();
         // 顺手清掉过期的：预览是"搜一批、点着看"的用法，不清会越攒越多
         cache.retain(|_, (_, born)| born.elapsed() <= PREVIEW_URL_TTL);
-        cache.insert(
-            (bvid.to_string(), page_index),
-            (url.clone(), Instant::now()),
-        );
+        cache.insert(key, (url.clone(), Instant::now()));
         Ok(url)
     }
 
@@ -188,23 +217,8 @@ impl BilibiliProvider {
         page_index: usize,
         max_height: i64,
     ) -> Result<String> {
-        let info = self.client.view(bvid).await?;
-        let pages: Vec<Value> = info
-            .get("pages")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let index = page_index.min(pages.len().saturating_sub(1));
-        let cid = cid_at(&info, &pages, index);
-        let playurl = self
-            .client
-            .playurl(bvid, cid, super::qn_for_height(max_height), false)
-            .await?;
-        let PlayUrlData::Single { url, .. } = streams::parse_playurl(&playurl) else {
-            bail!("哔哩哔哩没有返回可直接播放的预览流");
-        };
-        ensure_media_url(&url).await?;
-        Ok(url)
+        self.preview_url_for_qn(bvid, page_index, super::qn_for_height(max_height))
+            .await
     }
 
     /// 自动音频对齐给 ffmpeg 使用的预览源。URL 仍由同一套缓存/过期刷新逻辑
@@ -255,7 +269,7 @@ impl BilibiliProvider {
         bvid: &str,
         page_index: usize,
         range: Option<&str>,
-    ) -> Result<PreviewStream> {
+    ) -> Result<VideoPreviewStream> {
         self.preview_stream_at_height(bvid, page_index, 0, range)
             .await
     }
@@ -266,7 +280,7 @@ impl BilibiliProvider {
         page_index: usize,
         max_height: i64,
         range: Option<&str>,
-    ) -> Result<PreviewStream> {
+    ) -> Result<VideoPreviewStream> {
         let bvid = normalize_bvid(bvid);
         anyhow::ensure!(!bvid.is_empty(), "BV 号格式不正确");
         let cookies = self.client.cookie_header();
@@ -301,7 +315,9 @@ impl BilibiliProvider {
             self.preview_urls
                 .lock()
                 .unwrap()
-                .remove(&(bvid.clone(), page_index));
+                .retain(|(cached_bvid, cached_page, _), _| {
+                    cached_bvid != &bvid || *cached_page != page_index
+                });
             let fresh = if max_height > 0 {
                 self.preview_url_at_height(&bvid, page_index, max_height)
                     .await?
@@ -337,9 +353,13 @@ impl BilibiliProvider {
             .bytes_stream()
             .map(|chunk| chunk.map_err(std::io::Error::other))
             .boxed();
-        Ok(PreviewStream {
+        Ok(VideoPreviewStream {
             status: status.as_u16(),
             content_type,
+            codec: None,
+            init_range: None,
+            index_range: None,
+            duration_ms: None,
             content_length,
             content_range,
             body,
@@ -524,7 +544,13 @@ impl BilibiliProvider {
         } else {
             target.page_index
         };
-        Ok((target.bvid, index))
+        let bvid = if target.bvid.is_empty() {
+            let info = self.view_target(&target).await?;
+            target_bvid(&target, &info)?
+        } else {
+            target.bvid
+        };
+        Ok((bvid, index))
     }
 
     /// 把这次任务要下的所有流当成一条进度上报（video + audio 字节数累加）。
@@ -746,31 +772,76 @@ impl BilibiliProvider {
         media_id: &str,
         limit: usize,
     ) -> Result<(String, Vec<SongSource>)> {
-        let title = match self.client.fav_folder_info(media_id).await {
-            Ok(info) => favorite_folder_title(&info, media_id),
-            Err(_) => format!("Bilibili Favorites {media_id}"),
-        };
         let limit = full_listing(limit);
-        let mut sources = Vec::new();
-        // 每页 20 条是 B 站硬限制；翻页直到空页。500 页只用于防御异常回包。
-        for page in 1..=500i64 {
-            if sources.len() >= limit {
+        let now = Instant::now();
+        let mut folders = self.favorite_folders.lock().await;
+        folders.retain(|_, cache| {
+            now.saturating_duration_since(cache.updated_at) < FAVORITE_FOLDER_CACHE_TTL
+        });
+        if !folders.contains_key(media_id) {
+            while folders.len() >= MAX_FAVORITE_FOLDER_CACHES {
+                let Some(oldest) = folders
+                    .iter()
+                    .min_by_key(|(_, cache)| cache.updated_at)
+                    .map(|(key, _)| key.clone())
+                else {
+                    break;
+                };
+                folders.remove(&oldest);
+            }
+            folders.insert(media_id.to_string(), FavoriteFolderCache::new(media_id));
+        }
+
+        // 每页 20 条是 B 站硬限制。缓存保留已经读过的页；打开列表只取前 50 条，
+        // 用户翻页时再补齐目标数量，不会再次从第 1 页扫描 800 多条。
+        loop {
+            let Some(cache) = folders.get(media_id) else {
+                unreachable!()
+            };
+            if cache.complete || cache.sources.len() >= limit {
                 break;
             }
-            let medias = self.client.fav_resource_list(media_id, page).await?;
+            let page = cache.next_page;
+            if page > 500 {
+                folders
+                    .get_mut(media_id)
+                    .expect("folder cache exists")
+                    .complete = true;
+                break;
+            }
+            let data = self.client.fav_resource_list(media_id, page).await?;
+            let cache = folders.get_mut(media_id).expect("folder cache exists");
+            if page == 1 {
+                if let Some(info) = data.get("info") {
+                    cache.title = favorite_folder_title(info, media_id);
+                }
+            }
+            let medias = data
+                .get("medias")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             if medias.is_empty() {
+                cache.complete = true;
+                cache.updated_at = Instant::now();
                 break;
             }
             for item in &medias {
                 if let Some(source) = favorite_media_source(item) {
-                    sources.push(source);
-                }
-                if sources.len() >= limit {
-                    break;
+                    cache.sources.push(source);
                 }
             }
+            cache.next_page += 1;
+            cache.updated_at = Instant::now();
+            if medias.len() < 20 || data.get("has_more").and_then(Value::as_bool) == Some(false) {
+                cache.complete = true;
+            }
         }
-        Ok((title, sources))
+        let cache = folders.get(media_id).expect("folder cache exists");
+        Ok((
+            cache.title.clone(),
+            cache.sources.iter().take(limit).cloned().collect(),
+        ))
     }
 }
 
@@ -828,6 +899,20 @@ impl MusicProvider for BilibiliProvider {
         account
     }
 
+    async fn cached_account(&self) -> Account {
+        if !self.client.has_credential() {
+            return Account::new(Platform::Bilibili, LABEL, AccountState::Missing, "未登录");
+        }
+        let mut account = Account::new(
+            Platform::Bilibili,
+            LABEL,
+            AccountState::Valid,
+            "登录状态尚未联网核验",
+        );
+        account.account_key = self.client.credential_user_id();
+        account
+    }
+
     async fn create_qr(&self) -> Result<QrSession> {
         let session = login::create_qr(self.client.http()).await?;
         let session_id = format!("{:032x}", rand::random::<u128>());
@@ -867,7 +952,17 @@ impl MusicProvider for BilibiliProvider {
                 Ok((QrStateValue::Expired, "二维码已过期，请重新获取".into()))
             }
             Ok(login::QrPoll::Done(cookies)) => {
-                self.client.store_cookies(&cookies);
+                if let Err(error) = self.client.store_cookies(&cookies) {
+                    return Ok((
+                        QrStateValue::Error,
+                        format!("保存 B 站登录态失败：{error:#}")
+                            .chars()
+                            .take(160)
+                            .collect(),
+                    ));
+                }
+                self.favorite_folders.lock().await.clear();
+                self.preview_urls.lock().unwrap().clear();
                 self.qr_sessions.lock().unwrap().remove(session_id);
                 Ok((QrStateValue::Done, "登录成功".into()))
             }
@@ -882,8 +977,10 @@ impl MusicProvider for BilibiliProvider {
     }
 
     async fn logout(&self) -> Result<()> {
-        self.client.clear_session();
+        self.client.clear_session()?;
         self.qr_sessions.lock().unwrap().clear();
+        self.favorite_folders.lock().await.clear();
+        self.preview_urls.lock().unwrap().clear();
         Ok(())
     }
 
@@ -943,26 +1040,26 @@ impl MusicProvider for BilibiliProvider {
     }
 
     async fn stream_playlists(&self) -> Result<Vec<StreamPlaylist>> {
-        let nav = self.client.nav().await?;
-        if nav.get("isLogin").and_then(Value::as_bool) != Some(true) {
-            bail!("登录哔哩哔哩后才能查看收藏夹");
+        anyhow::ensure!(self.client.has_credential(), "登录哔哩哔哩后才能查看收藏夹");
+        let mut mid = self.client.credential_user_id().parse::<i64>().unwrap_or(0);
+        if mid <= 0 {
+            // 只给缺少 DedeUserID 的旧会话补查一次；新登录态直接用 Cookie 里的 ID，
+            // 收藏夹目录本身已足以验证登录是否仍有效。
+            let nav = self.client.nav().await?;
+            mid = loose_int(nav.get("mid"));
         }
-        let mid = loose_int(nav.get("mid"));
         if mid <= 0 {
             bail!("哔哩哔哩账号信息缺少用户 ID");
         }
-        let mut playlists: Vec<StreamPlaylist> = self
+        let playlists: Vec<StreamPlaylist> = self
             .client
             .fav_created_folders(mid)
             .await?
             .iter()
             .filter_map(favorite_folder_playlist)
             .collect();
-        playlists.sort_by(|left, right| {
-            (!left.is_favorite)
-                .cmp(&(!right.is_favorite))
-                .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
-        });
+        // created/list-all 已按 B 站当前账号的收藏夹顺序返回；默认收藏夹在前端
+        // 单独固定展示，其他收藏夹必须保留这份平台顺序，不能再按标题重排。
         Ok(playlists)
     }
 
@@ -982,6 +1079,52 @@ impl MusicProvider for BilibiliProvider {
             title,
             sources,
         }))
+    }
+
+    async fn remove_stream_playlist_track(&self, key: &str, source: &SongSource) -> Result<()> {
+        anyhow::ensure!(
+            source.platform == Platform::Bilibili,
+            "歌曲来源不是哔哩哔哩"
+        );
+        let media_id = key.trim();
+        anyhow::ensure!(
+            !media_id.is_empty() && media_id.chars().all(|ch| ch.is_ascii_digit()),
+            "B 站收藏夹 ID 无效"
+        );
+        let nav = self.client.nav().await?;
+        anyhow::ensure!(
+            nav.get("isLogin").and_then(Value::as_bool) == Some(true),
+            "请先登录哔哩哔哩"
+        );
+        let mid = loose_int(nav.get("mid"));
+        anyhow::ensure!(mid > 0, "哔哩哔哩账号信息缺少用户 ID");
+        let owned = self
+            .client
+            .fav_created_folders(mid)
+            .await?
+            .iter()
+            .any(|folder| loose_int(folder.get("id")).to_string() == media_id);
+        anyhow::ensure!(owned, "当前账号没有这个 B 站收藏夹的编辑权限");
+
+        let mut resource_id = loose_int(source.payload.get("fav_resource_id"));
+        let mut resource_type = loose_int(source.payload.get("fav_resource_type"));
+        if resource_id <= 0 {
+            let view = self
+                .client
+                .view(&source.key)
+                .await
+                .context("补全 B 站收藏资源标识失败")?;
+            resource_id = loose_int(view.get("aid"));
+        }
+        if resource_type <= 0 {
+            resource_type = 2;
+        }
+        anyhow::ensure!(resource_id > 0, "B 站收藏资源缺少 aid");
+        self.client
+            .fav_delete_resource(media_id, resource_id, resource_type)
+            .await?;
+        self.favorite_folders.lock().await.remove(media_id);
+        Ok(())
     }
 
     /// B 站链接由 `/api/video/resolve` 单独处理，音乐管线这里只认领收藏夹：
@@ -1102,6 +1245,15 @@ fn favorite_media_source(item: &Value) -> Option<SongSource> {
         .trim();
     let mut payload = serde_json::Map::new();
     payload.insert("bvid".into(), Value::String(bvid.to_string()));
+    let resource_id = loose_int(item.get("id").or_else(|| item.get("aid")));
+    if resource_id > 0 {
+        payload.insert("fav_resource_id".into(), json!(resource_id));
+    }
+    let resource_type = loose_int(item.get("type"));
+    payload.insert(
+        "fav_resource_type".into(),
+        json!(if resource_type > 0 { resource_type } else { 2 }),
+    );
     Some(SongSource {
         platform: Platform::Bilibili,
         key: bvid.to_string(),
@@ -1147,6 +1299,13 @@ fn cid_at(info: &Value, pages: &[Value], index: usize) -> i64 {
         .unwrap_or(0)
 }
 
+fn target_bvid(target: &VideoTarget, info: &Value) -> Result<String> {
+    let candidate = str_field(info, "bvid").unwrap_or(&target.bvid);
+    let bvid = normalize_bvid(candidate);
+    anyhow::ensure!(!bvid.is_empty(), "B 站视频详情没有返回有效的 BV 号");
+    Ok(bvid)
+}
+
 fn compose_title(info: &Value, pages: &[Value], index: usize, bvid: &str) -> String {
     let title = str_field(info, "title").unwrap_or(bvid).to_string();
     if pages.len() <= 1 {
@@ -1183,6 +1342,21 @@ impl VideoProvider for BilibiliProvider {
 
     async fn resolve_video(&self, input: &str) -> Result<VideoInfo> {
         BilibiliProvider::resolve_video(self, input).await
+    }
+
+    async fn preview_stream(
+        &self,
+        input: &str,
+        page_index: usize,
+        max_height: i64,
+        track: VideoPreviewTrack,
+        range: Option<&str>,
+    ) -> Result<VideoPreviewStream> {
+        anyhow::ensure!(
+            track == VideoPreviewTrack::Muxed,
+            "哔哩哔哩预览使用单文件音视频流"
+        );
+        BilibiliProvider::preview_stream_at_height(self, input, page_index, max_height, range).await
     }
 
     async fn download_video(
@@ -1233,6 +1407,21 @@ mod tests {
         // Python 是 `str(info.get("title") or bvid)`：空串也要退回 BV 号，
         // 否则文件名会被净化成 "track.mp4"
         assert_eq!(compose_title(&json!({"title": ""}), &[], 0, "BV1"), "BV1");
+    }
+
+    #[test]
+    fn aid_targets_use_the_bvid_returned_by_video_details() {
+        let target = VideoTarget {
+            bvid: String::new(),
+            aid: Some(170001),
+            page_index: 0,
+            resolved_url: String::new(),
+        };
+        assert_eq!(
+            target_bvid(&target, &json!({"bvid": "BV17x411w7KC"})).unwrap(),
+            "BV17x411w7KC"
+        );
+        assert!(target_bvid(&target, &json!({})).is_err());
     }
 
     #[test]
@@ -1288,6 +1477,8 @@ mod tests {
         assert!(favorite_media_source(&json!({"title": "已失效视频"})).is_none());
         let source = favorite_media_source(&json!({
             "bvid": "BV1L94y1H7CV",
+            "id": 123456,
+            "type": 2,
             "title": "现场录像",
             "duration": 232,
             "cover": "//i2.hdslb.com/x.jpg",
@@ -1298,6 +1489,20 @@ mod tests {
         assert_eq!(source.artists, vec!["UP主"]);
         assert_eq!(source.duration, Some(232.0));
         assert_eq!(source.cover, "https://i2.hdslb.com/x.jpg");
+        assert_eq!(
+            source
+                .payload
+                .get("fav_resource_id")
+                .and_then(Value::as_i64),
+            Some(123456)
+        );
+        assert_eq!(
+            source
+                .payload
+                .get("fav_resource_type")
+                .and_then(Value::as_i64),
+            Some(2)
+        );
     }
 
     #[test]

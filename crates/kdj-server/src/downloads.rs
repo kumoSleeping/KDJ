@@ -1,18 +1,20 @@
 //! 下载队列：并发控制、进度上报、取消。
 
 use std::collections::{BTreeMap, VecDeque};
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use kdj_core::models::{
-    DownloadTask, Platform, Quality, SongSource, TaskKind, TaskPhase, TaskState, Track,
-    VideoDownloadRequest, VjExportRequest,
+    DownloadTask, DownloadVideoPage, Platform, Quality, SongSource, TaskKind, TaskPhase, TaskState,
+    VideoDownloadRequest, VideoInfo,
 };
 use kdj_core::EventHub;
 use kdj_providers::DownloadJob;
-use serde::Serialize;
-use tokio::sync::{watch, Semaphore};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::state::AppState;
@@ -32,6 +34,9 @@ const SPEED_WINDOW: f64 = 3.0;
 
 /// 滑窗最多留这么多个采样点，够覆盖 3 秒还不至于无限涨。
 const SPEED_SAMPLES: usize = 64;
+
+const DOWNLOAD_JOURNAL_VERSION: u32 = 1;
+const DOWNLOAD_JOURNAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 fn now_secs() -> f64 {
     std::time::SystemTime::now()
@@ -59,6 +64,12 @@ fn is_terminal(state: TaskState) -> bool {
     )
 }
 
+/// 对当前 worker 而言已经不可再写的状态。Paused 不是历史终态，但暂停前的
+/// 网络/FFmpeg future 可能晚到一拍，必须和取消一样挡住这些迟到回调。
+fn stops_worker_updates(state: TaskState) -> bool {
+    state == TaskState::Paused || is_terminal(state)
+}
+
 /// 滑动窗口测速：窗口两端的字节差 / 时间差。
 fn window_speed(samples: &mut VecDeque<(f64, u64)>, now: f64) -> f64 {
     while samples.len() > 2 && now - samples[0].0 > SPEED_WINDOW {
@@ -77,7 +88,7 @@ fn window_speed(samples: &mut VecDeque<(f64, u64)>, now: f64) -> f64 {
     ((b1 as f64 - b0 as f64) / dt).max(0.0)
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AudioRetry {
     source: SongSource,
     quality: Quality,
@@ -86,13 +97,27 @@ struct AudioRetry {
     external_preparation: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VideoRetry {
+    request: VideoDownloadRequest,
+    /// 入队时冻结的实际成品目录；request.dest_dir 为空时它仍可能是默认下载目录。
+    output_dir: String,
+    /// 与音频任务相同：只声明“需要一次性来源”，平台挑战仍由外部适配器完成。
+    #[serde(default)]
+    external_preparation: bool,
+}
+
 struct Entry {
     task: DownloadTask,
     cancel: CancellationToken,
     audio_retry: Option<AudioRetry>,
+    video_retry: Option<VideoRetry>,
     /// WebView 在“开始/重试”这一刻生成的短期播放流。消费一次即清空；失败重试
     /// 必须重新生成，绝不能拿过期 POT/GVS URL 再撞一次 403。
     prepared_source_url: Option<String>,
+    /// 每次真正获得并发槽、开始外部准备时递增。所有回传都必须带同一代号，防止
+    /// 暂停/重试边界上的旧异步响应污染新一轮任务。
+    preparation_attempt: u64,
     /// 测速滑窗：(单调秒, 已下字节)
     samples: VecDeque<(f64, u64)>,
     /// 上一次真正广播出去的时刻 / 进度。`-1.0` = 还没广播过，第一次一定放行。
@@ -106,7 +131,9 @@ impl Entry {
             task,
             cancel,
             audio_retry: None,
+            video_retry: None,
             prepared_source_url: None,
+            preparation_attempt: 0,
             samples: VecDeque::new(),
             last_emit: -1.0,
             last_progress: -1.0,
@@ -114,18 +141,315 @@ impl Entry {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedEntry {
+    task: DownloadTask,
+    #[serde(default)]
+    audio_retry: Option<AudioRetry>,
+    #[serde(default)]
+    video_retry: Option<VideoRetry>,
+}
+
+impl PersistedEntry {
+    fn snapshot(entry: &Entry) -> Self {
+        Self {
+            task: entry.task.clone(),
+            audio_retry: entry.audio_retry.clone(),
+            video_retry: entry.video_retry.clone(),
+        }
+    }
+
+    fn restore(mut self) -> Option<(String, Entry)> {
+        if self.task.id.trim().is_empty() {
+            return None;
+        }
+        // v1 旧 journal 的 task 没有公开 source_key，但可恢复的请求里仍然保留着。
+        // 启动时就地回填，已下完的 B 站视频不用重下也能复制分享。
+        if self.task.source_key.trim().is_empty() {
+            self.task.source_key = match self.task.kind {
+                TaskKind::Audio => self
+                    .audio_retry
+                    .as_ref()
+                    .map(|retry| retry.source.key.trim())
+                    .unwrap_or_default(),
+                TaskKind::Video => self
+                    .video_retry
+                    .as_ref()
+                    .map(|retry| retry.request.bvid.trim())
+                    .unwrap_or_default(),
+            }
+            .to_string();
+        }
+        match self.task.kind {
+            TaskKind::Audio => self.video_retry = None,
+            TaskKind::Video => self.audio_retry = None,
+        }
+        // v1 队列没有把分 P 放在公开任务字段里，但重试请求一直保存着 page_index。
+        // 恢复时补回，避免应用重启后把原本的 P3 显示/重试成看不出的普通视频。
+        if self.task.kind == TaskKind::Video
+            && self.task.platform == Platform::Bilibili
+            && self.task.video_page.is_none()
+        {
+            if let Some(request) = self.video_retry.as_ref().map(|retry| &retry.request) {
+                self.task.video_page = Some(DownloadVideoPage {
+                    index: request.page_index,
+                    count: request.page_count,
+                    title: request.page_title.clone(),
+                });
+            }
+        }
+        // 旧 journal 没有视频外部准备字段。普通 YouTube 的直接 HLS/DASH 已失效，
+        // 恢复后的失败项也必须走当前受保护 HLS 路径，不能因升级而继续撞 403。
+        if self.task.platform == Platform::Youtube {
+            if let Some(retry) = &mut self.video_retry {
+                retry.external_preparation = true;
+            }
+        }
+        self.task.progress = if self.task.progress.is_finite() {
+            self.task.progress.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.task.speed_bps = 0.0;
+        if !self.task.created_at.is_finite() {
+            self.task.created_at = now_secs();
+        }
+        if !self.task.updated_at.is_finite() {
+            self.task.updated_at = self.task.created_at;
+        }
+
+        // 进程消失后没有任何旧 worker 还活着。所有未完成状态统一恢复为 Paused，
+        // 用户点“开始”时用冻结的 retry 参数创建新 worker；绝不能恢复成一个永远
+        // 没有执行者的 queued/running 假状态。
+        if matches!(
+            self.task.state,
+            TaskState::Queued | TaskState::Running | TaskState::Processing
+        ) {
+            if self.audio_retry.is_some() || self.video_retry.is_some() {
+                self.task.state = TaskState::Paused;
+                self.task.phase = TaskPhase::Waiting;
+                self.task.error.clear();
+            } else {
+                self.task.state = TaskState::Failed;
+                self.task.phase = TaskPhase::Waiting;
+                self.task.error = "任务缺少可恢复的下载参数".into();
+            }
+            self.task.updated_at = now_secs();
+        }
+        if self.task.state == TaskState::Done {
+            self.task.phase = TaskPhase::Completed;
+        }
+
+        let id = self.task.id.clone();
+        let mut entry = Entry::new(self.task, CancellationToken::new());
+        entry.audio_retry = self.audio_retry;
+        entry.video_retry = self.video_retry;
+        Some((id, entry))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DownloadJournal {
+    version: u32,
+    entries: Vec<PersistedEntry>,
+}
+
+fn quarantine_invalid_journal(path: &Path, error: &anyhow::Error) -> Result<()> {
+    let name = path
+        .file_name()
+        .context("下载队列文件缺少文件名")?
+        .to_string_lossy();
+    let backup = path.with_file_name(format!(
+        "{name}.corrupt-{}-{:08x}",
+        now_secs() as u64,
+        rand::random::<u32>()
+    ));
+    fs::rename(path, &backup).with_context(|| {
+        format!(
+            "下载队列损坏（{error:#}），且无法保留到 {}",
+            backup.display()
+        )
+    })?;
+    tracing::warn!(
+        "下载队列文件损坏，已保留副本 {}：{error:#}",
+        backup.display()
+    );
+    Ok(())
+}
+
+fn load_journal(path: &Path) -> Result<BTreeMap<String, Entry>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if !metadata.file_type().is_file()
+                || metadata.len() == 0
+                || metadata.len() > DOWNLOAD_JOURNAL_MAX_BYTES =>
+        {
+            let error = anyhow::anyhow!("下载队列文件类型或大小无效");
+            quarantine_invalid_journal(path, &error)?;
+            return Ok(BTreeMap::new());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("检查下载队列失败：{}", path.display()))
+        }
+    }
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取下载队列失败：{}", path.display()))
+        }
+    };
+    let journal = match serde_json::from_slice::<DownloadJournal>(&body) {
+        Ok(journal) if journal.version == DOWNLOAD_JOURNAL_VERSION => journal,
+        Ok(journal) => {
+            let error = anyhow::anyhow!("不支持的下载队列版本：{}", journal.version);
+            quarantine_invalid_journal(path, &error)?;
+            return Ok(BTreeMap::new());
+        }
+        Err(parse_error) => {
+            let error = anyhow::Error::new(parse_error).context("解析下载队列失败");
+            quarantine_invalid_journal(path, &error)?;
+            return Ok(BTreeMap::new());
+        }
+    };
+    let mut entries = BTreeMap::new();
+    for persisted in journal.entries {
+        if let Some((id, entry)) = persisted.restore() {
+            entries.insert(id, entry);
+        }
+    }
+    trim_locked(&mut entries);
+    Ok(entries)
+}
+
+#[cfg(not(windows))]
+fn commit_journal_temp(tmp: &Path, path: &Path) -> Result<()> {
+    fs::rename(tmp, path).with_context(|| format!("提交下载队列失败：{}", path.display()))
+}
+
+#[cfg(windows)]
+fn commit_journal_temp(tmp: &Path, path: &Path) -> Result<()> {
+    if !path.exists() {
+        return fs::rename(tmp, path)
+            .with_context(|| format!("提交下载队列失败：{}", path.display()));
+    }
+    let parent = path.parent().context("下载队列文件缺少父目录")?;
+    let name = path
+        .file_name()
+        .context("下载队列文件缺少文件名")?
+        .to_string_lossy();
+    let backup = parent.join(format!(
+        ".{name}.backup-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    fs::rename(path, &backup).with_context(|| format!("暂存旧下载队列失败：{}", path.display()))?;
+    if let Err(commit_error) = fs::rename(tmp, path) {
+        if let Err(restore_error) = fs::rename(&backup, path) {
+            anyhow::bail!(
+                "提交新下载队列失败：{commit_error}；恢复旧队列也失败：{restore_error}；旧队列保留在 {}",
+                backup.display()
+            );
+        }
+        return Err(commit_error).with_context(|| format!("提交下载队列失败：{}", path.display()));
+    }
+    if let Err(error) = fs::remove_file(&backup) {
+        tracing::warn!("清理旧下载队列备份失败 {}：{error}", backup.display());
+    }
+    Ok(())
+}
+
+fn write_journal(path: &Path, entries: &BTreeMap<String, Entry>) -> Result<()> {
+    let parent = path.parent().context("下载队列文件缺少父目录")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("创建下载队列目录失败：{}", parent.display()))?;
+    let journal = DownloadJournal {
+        version: DOWNLOAD_JOURNAL_VERSION,
+        entries: entries.values().map(PersistedEntry::snapshot).collect(),
+    };
+    let mut body = serde_json::to_vec_pretty(&journal).context("序列化下载队列失败")?;
+    body.push(b'\n');
+    let name = path
+        .file_name()
+        .context("下载队列文件缺少文件名")?
+        .to_string_lossy();
+    let tmp = parent.join(format!(
+        ".{name}.tmp-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&tmp)
+        .with_context(|| format!("创建下载队列临时文件失败：{}", tmp.display()))?;
+    let write_result = file
+        .write_all(&body)
+        .and_then(|_| file.sync_all())
+        .with_context(|| format!("写入下载队列临时文件失败：{}", tmp.display()));
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    if let Err(error) = commit_journal_temp(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("保护下载队列文件失败 {}：{error}", path.display());
+        }
+        if let Ok(directory) = fs::File::open(parent) {
+            if let Err(error) = directory.sync_all() {
+                tracing::warn!("同步下载队列目录失败 {}：{error}", parent.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 外部准备适配器为任务生成受保护媒体源所需的稳定输入。
 #[derive(Debug, Clone, Serialize)]
-pub struct PendingDownloadPreparation {
-    pub id: String,
-    pub platform: Platform,
-    pub source: SongSource,
-    pub quality: Quality,
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum PendingDownloadPreparation {
+    Audio {
+        id: String,
+        attempt: u64,
+        platform: Platform,
+        source: SongSource,
+        quality: Quality,
+    },
+    Video {
+        id: String,
+        attempt: u64,
+        platform: Platform,
+        request: VideoDownloadRequest,
+    },
+}
+
+impl PendingDownloadPreparation {
+    fn id(&self) -> &str {
+        match self {
+            Self::Audio { id, .. } | Self::Video { id, .. } => id,
+        }
+    }
 }
 
 pub struct DownloadManager {
     hub: EventHub,
     entries: Mutex<BTreeMap<String, Entry>>,
+    /// None 只用于这一模块的纯内存单元测试；桌面服务始终传正式 journal 路径。
+    journal_path: Option<PathBuf>,
     /// 并发闸门 + 它当前的额度。设置里的 `concurrent_downloads` 变了才重建。
     ///
     /// 额度要一起存着：换掉 `Semaphore` 意味着**正在下的那几条还攥着旧闸门的令牌**，
@@ -143,14 +467,57 @@ pub struct DownloadManager {
 
 impl DownloadManager {
     pub fn new(hub: EventHub, concurrency: u32, auto_start: bool) -> Self {
+        Self::from_entries(hub, concurrency, auto_start, BTreeMap::new(), None)
+    }
+
+    /// 打开持久下载队列。启动时会把上次未完成的 worker 状态规范成 Paused 并立即
+    /// 回写，因此即使下一次又异常退出，journal 也不会长期停留在假的 Running。
+    pub fn open(
+        hub: EventHub,
+        concurrency: u32,
+        auto_start: bool,
+        journal_path: PathBuf,
+    ) -> Result<Self> {
+        let entries = load_journal(&journal_path)?;
+        let manager = Self::from_entries(hub, concurrency, auto_start, entries, Some(journal_path));
+        manager.persist_now()?;
+        Ok(manager)
+    }
+
+    fn from_entries(
+        hub: EventHub,
+        concurrency: u32,
+        auto_start: bool,
+        entries: BTreeMap<String, Entry>,
+        journal_path: Option<PathBuf>,
+    ) -> Self {
         let concurrency = concurrency.max(1);
         DownloadManager {
             hub,
-            entries: Mutex::new(BTreeMap::new()),
+            entries: Mutex::new(entries),
+            journal_path,
             permits: Mutex::new((concurrency, Arc::new(Semaphore::new(concurrency as usize)))),
             auto_start: watch::channel(auto_start).0,
             start_generation: watch::channel(0).0,
         }
+    }
+
+    fn persist_locked(&self, entries: &BTreeMap<String, Entry>) -> Result<()> {
+        let Some(path) = self.journal_path.as_deref() else {
+            return Ok(());
+        };
+        write_journal(path, entries)
+    }
+
+    fn persist_locked_or_warn(&self, entries: &BTreeMap<String, Entry>) {
+        if let Err(error) = self.persist_locked(entries) {
+            tracing::error!("下载队列持久化失败：{error:#}");
+        }
+    }
+
+    fn persist_now(&self) -> Result<()> {
+        let entries = self.entries.lock().unwrap();
+        self.persist_locked(&entries)
     }
 
     pub fn set_concurrency(&self, concurrency: u32) {
@@ -209,75 +576,142 @@ impl DownloadManager {
         let mut pending = entries
             .values()
             .filter(|entry| {
-                entry.task.kind == TaskKind::Audio
-                    && entry
-                        .audio_retry
-                        .as_ref()
-                        .is_some_and(|retry| retry.external_preparation)
-                    && matches!(
-                        entry.task.state,
-                        TaskState::Queued | TaskState::Failed | TaskState::Running
-                    )
+                entry.task.state == TaskState::Running
+                    && entry.task.phase == TaskPhase::Authorizing
                     && entry.prepared_source_url.is_none()
             })
             .filter_map(|entry| {
-                let retry = entry.audio_retry.as_ref()?;
-                Some((
-                    entry.task.created_at,
-                    PendingDownloadPreparation {
-                        id: entry.task.id.clone(),
-                        platform: entry.task.platform,
-                        source: retry.source.clone(),
-                        quality: retry.quality,
-                    },
-                ))
+                let item = match entry.task.kind {
+                    TaskKind::Audio => {
+                        let retry = entry
+                            .audio_retry
+                            .as_ref()
+                            .filter(|retry| retry.external_preparation)?;
+                        PendingDownloadPreparation::Audio {
+                            id: entry.task.id.clone(),
+                            attempt: entry.preparation_attempt,
+                            platform: entry.task.platform,
+                            source: retry.source.clone(),
+                            quality: retry.quality,
+                        }
+                    }
+                    TaskKind::Video => {
+                        let retry = entry
+                            .video_retry
+                            .as_ref()
+                            .filter(|retry| retry.external_preparation)?;
+                        PendingDownloadPreparation::Video {
+                            id: entry.task.id.clone(),
+                            attempt: entry.preparation_attempt,
+                            platform: entry.task.platform,
+                            request: retry.request.clone(),
+                        }
+                    }
+                };
+                Some((entry.task.created_at, item))
             })
             .collect::<Vec<_>>();
-        pending.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        pending.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.id().cmp(b.1.id())));
         pending.into_iter().map(|(_, item)| item).collect()
     }
 
-    pub fn attach_prepared_source(&self, id: &str, url: String) -> Result<()> {
+    pub fn preparation_is_current(&self, id: &str, attempt: u64) -> bool {
+        self.entries.lock().unwrap().get(id).is_some_and(|entry| {
+            attempt > 0
+                && entry.preparation_attempt == attempt
+                && matches!(entry.task.state, TaskState::Running | TaskState::Processing)
+                && !matches!(entry.task.phase, TaskPhase::Waiting | TaskPhase::Resolving)
+                && entry.prepared_source_url.is_none()
+                && (entry
+                    .audio_retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.external_preparation)
+                    || entry
+                        .video_retry
+                        .as_ref()
+                        .is_some_and(|retry| retry.external_preparation))
+        })
+    }
+
+    pub fn video_preparation_request(
+        &self,
+        id: &str,
+        attempt: u64,
+    ) -> Option<VideoDownloadRequest> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|entry| entry.preparation_attempt == attempt)
+            .and_then(|entry| entry.video_retry.as_ref())
+            .filter(|retry| retry.external_preparation)
+            .map(|retry| retry.request.clone())
+    }
+
+    pub fn attach_prepared_source(&self, id: &str, attempt: u64, url: String) -> Result<()> {
         let mut entries = self.entries.lock().unwrap();
         let entry = entries.get_mut(id).context("任务不存在")?;
         anyhow::ensure!(
-            entry.task.kind == TaskKind::Audio
-                && entry
-                    .audio_retry
+            entry
+                .audio_retry
+                .as_ref()
+                .is_some_and(|retry| retry.external_preparation)
+                || entry
+                    .video_retry
                     .as_ref()
                     .is_some_and(|retry| retry.external_preparation),
             "这条任务不接受外部准备的媒体源"
         );
         anyhow::ensure!(
-            matches!(entry.task.state, TaskState::Queued | TaskState::Failed)
-                || (entry.task.state == TaskState::Running && entry.prepared_source_url.is_none()),
-            "任务已经开始，不能替换播放流"
+            attempt > 0
+                && entry.preparation_attempt == attempt
+                && matches!(entry.task.state, TaskState::Running | TaskState::Processing)
+                && entry.prepared_source_url.is_none(),
+            "下载准备已经过期，不能替换当前来源"
         );
         entry.prepared_source_url = Some(url);
         Ok(())
     }
 
     /// 外部挑战失败必须立即落在原任务上，不能只写前端控制台后让任务等满超时。
-    pub fn fail_preparation(&self, id: &str, error: &str) -> Result<DownloadTask> {
-        {
-            let entries = self.entries.lock().unwrap();
-            let entry = entries.get(id).context("任务不存在")?;
+    pub fn fail_preparation(&self, id: &str, attempt: u64, error: &str) -> Result<DownloadTask> {
+        let (task, changed) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id).context("任务不存在")?;
             anyhow::ensure!(
                 entry
                     .audio_retry
                     .as_ref()
-                    .is_some_and(|retry| retry.external_preparation),
+                    .is_some_and(|retry| retry.external_preparation)
+                    || entry
+                        .video_retry
+                        .as_ref()
+                        .is_some_and(|retry| retry.external_preparation),
                 "这条任务不需要外部媒体准备"
             );
-            entry.cancel.cancel();
+            if attempt == 0
+                || entry.preparation_attempt != attempt
+                || stops_worker_updates(entry.task.state)
+            {
+                (entry.task.clone(), false)
+            } else {
+                entry.cancel.cancel();
+                entry.task.state = TaskState::Failed;
+                entry.task.phase = TaskPhase::Authorizing;
+                entry.task.error = error.to_string();
+                entry.task.speed_bps = 0.0;
+                entry.task.updated_at = now_secs();
+                entry.last_emit = monotonic();
+                entry.last_progress = entry.task.progress;
+                let task = entry.task.clone();
+                self.persist_locked_or_warn(&entries);
+                (task, true)
+            }
+        };
+        if changed {
+            self.hub.publish("download.updated", &task);
         }
-        self.update(id, |task| {
-            task.state = TaskState::Failed;
-            task.phase = TaskPhase::Authorizing;
-            task.error = error.to_string();
-            task.speed_bps = 0.0;
-        })
-        .context("任务不存在")
+        Ok(task)
     }
 
     fn peek_prepared_source_url(&self, id: &str) -> Option<String> {
@@ -301,18 +735,45 @@ impl DownloadManager {
         self.hub.publish("download.list", &self.list());
     }
 
+    #[cfg(test)]
     fn insert(&self, task: DownloadTask, cancel: CancellationToken) {
+        self.insert_with_retry(task, cancel, None, None);
+    }
+
+    fn insert_with_retry(
+        &self,
+        task: DownloadTask,
+        cancel: CancellationToken,
+        audio_retry: Option<AudioRetry>,
+        video_retry: Option<VideoRetry>,
+    ) {
         {
             let mut entries = self.entries.lock().unwrap();
-            entries.insert(task.id.clone(), Entry::new(task.clone(), cancel));
+            let mut entry = Entry::new(task.clone(), cancel);
+            entry.audio_retry = audio_retry;
+            entry.video_retry = video_retry;
+            entries.insert(task.id.clone(), entry);
             trim_locked(&mut entries);
+            self.persist_locked_or_warn(&entries);
         }
         self.hub.publish("download.updated", &task);
     }
 
+    #[cfg(test)]
     fn attach_audio_retry(&self, id: &str, retry: AudioRetry) {
-        if let Some(entry) = self.entries.lock().unwrap().get_mut(id) {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(entry) = entries.get_mut(id) {
             entry.audio_retry = Some(retry);
+            self.persist_locked_or_warn(&entries);
+        }
+    }
+
+    #[cfg(test)]
+    fn attach_video_retry(&self, id: &str, retry: VideoRetry) {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(entry) = entries.get_mut(id) {
+            entry.video_retry = Some(retry);
+            self.persist_locked_or_warn(&entries);
         }
     }
 
@@ -325,8 +786,8 @@ impl DownloadManager {
             let entry = entries.get_mut(id).context("任务不存在")?;
             anyhow::ensure!(entry.task.kind == TaskKind::Audio, "只有歌曲下载支持重试");
             anyhow::ensure!(
-                entry.task.state == TaskState::Failed,
-                "只有失败的任务可以重试"
+                matches!(entry.task.state, TaskState::Paused | TaskState::Failed),
+                "只有暂停或失败的任务可以重新开始"
             );
             let retry = entry
                 .audio_retry
@@ -337,6 +798,7 @@ impl DownloadManager {
             entry.samples.clear();
             entry.last_emit = monotonic();
             entry.last_progress = 0.0;
+            entry.prepared_source_url = None;
             entry.task.state = TaskState::Queued;
             entry.task.phase = TaskPhase::Waiting;
             entry.task.progress = 0.0;
@@ -347,22 +809,246 @@ impl DownloadManager {
             entry.task.error.clear();
             entry.task.track_id = None;
             entry.task.updated_at = now_secs();
-            (entry.task.clone(), retry, cancel)
+            let prepared = (entry.task.clone(), retry, cancel);
+            self.persist_locked(&entries)?;
+            prepared
         };
         self.hub.publish("download.updated", &task);
         Ok((task, retry, cancel))
     }
 
-    /// 「开始」除了放行 queued，也要把能重试的失败歌曲一并带上。
+    /// 排队期间改单曲音质：任务 worker 真正开跑时才从这里读取冻结参数，
+    /// 因此不会出现 UI 已改成 FLAC、后台仍拿旧 320K 下载的假设置。
+    pub fn set_queued_audio_quality(&self, id: &str, quality: Quality) -> Result<DownloadTask> {
+        let task = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id).context("任务不存在")?;
+            anyhow::ensure!(entry.task.kind == TaskKind::Audio, "这条任务不是歌曲下载");
+            anyhow::ensure!(
+                matches!(
+                    entry.task.state,
+                    TaskState::Queued | TaskState::Paused | TaskState::Failed
+                ),
+                "只有待开始、已暂停或上次失败的歌曲可以改音质"
+            );
+            let retry = entry
+                .audio_retry
+                .as_mut()
+                .context("这条旧任务没有可用的下载参数")?;
+            retry.quality = quality;
+            entry.prepared_source_url = None;
+            entry.task.quality = quality.as_str().to_string();
+            entry.task.updated_at = now_secs();
+            let task = entry.task.clone();
+            self.persist_locked(&entries)?;
+            task
+        };
+        self.hub.publish("download.updated", &task);
+        Ok(task)
+    }
+
+    /// 取最新的单曲参数并把 queued → running 放在同一把锁里。
+    /// 这样“改单曲音质”和 worker 启动不会互相穿透。
+    fn start_audio(&self, id: &str) -> Option<AudioRetry> {
+        let (task, retry) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id)?;
+            if entry.task.state != TaskState::Queued {
+                return None;
+            }
+            let retry = entry.audio_retry.clone()?;
+            if retry.external_preparation {
+                entry.preparation_attempt = entry.preparation_attempt.saturating_add(1).max(1);
+            }
+            entry.samples.push_back((monotonic(), 0));
+            entry.task.state = TaskState::Running;
+            entry.task.phase = if retry.external_preparation {
+                TaskPhase::Authorizing
+            } else {
+                TaskPhase::Resolving
+            };
+            entry.task.updated_at = now_secs();
+            entry.last_emit = monotonic();
+            entry.last_progress = entry.task.progress;
+            let started = (entry.task.clone(), retry);
+            self.persist_locked_or_warn(&entries);
+            started
+        };
+        self.hub.publish("download.updated", &task);
+        Some(retry)
+    }
+
+    fn prepare_video_retry(
+        &self,
+        id: &str,
+    ) -> Result<(DownloadTask, VideoRetry, CancellationToken)> {
+        let (task, retry, cancel) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id).context("任务不存在")?;
+            anyhow::ensure!(entry.task.kind == TaskKind::Video, "这条任务不是视频下载");
+            anyhow::ensure!(
+                matches!(entry.task.state, TaskState::Paused | TaskState::Failed),
+                "只有暂停或失败的任务可以重新开始"
+            );
+            let retry = entry
+                .video_retry
+                .clone()
+                .context("这条旧任务没有可用的重试参数")?;
+            let cancel = CancellationToken::new();
+            entry.cancel = cancel.clone();
+            entry.samples.clear();
+            entry.last_emit = monotonic();
+            entry.last_progress = 0.0;
+            entry.prepared_source_url = None;
+            entry.task.state = TaskState::Queued;
+            entry.task.phase = TaskPhase::Waiting;
+            entry.task.progress = 0.0;
+            entry.task.downloaded_bytes = 0;
+            entry.task.total_bytes = 0;
+            entry.task.speed_bps = 0.0;
+            entry.task.path.clear();
+            entry.task.error.clear();
+            entry.task.track_id = None;
+            entry.task.updated_at = now_secs();
+            let prepared = (entry.task.clone(), retry, cancel);
+            self.persist_locked(&entries)?;
+            prepared
+        };
+        self.hub.publish("download.updated", &task);
+        Ok((task, retry, cancel))
+    }
+
+    pub fn set_pending_video_height(&self, id: &str, max_height: i64) -> Result<DownloadTask> {
+        anyhow::ensure!((144..=4320).contains(&max_height), "视频画质超出支持范围");
+        let task = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id).context("任务不存在")?;
+            anyhow::ensure!(entry.task.kind == TaskKind::Video, "这条任务不是视频下载");
+            anyhow::ensure!(
+                matches!(
+                    entry.task.state,
+                    TaskState::Queued | TaskState::Paused | TaskState::Failed
+                ),
+                "只有待开始、已暂停或上次失败的视频可以改画质"
+            );
+            let retry = entry
+                .video_retry
+                .as_mut()
+                .context("这条旧任务没有可用的下载参数")?;
+            anyhow::ensure!(!retry.request.audio_only, "纯音频任务没有视频画质");
+            retry.request.max_height = max_height;
+            entry.prepared_source_url = None;
+            entry.task.quality = format!("{max_height}p");
+            entry.task.updated_at = now_secs();
+            let task = entry.task.clone();
+            self.persist_locked(&entries)?;
+            task
+        };
+        self.hub.publish("download.updated", &task);
+        Ok(task)
+    }
+
+    fn start_video(&self, id: &str) -> Option<VideoRetry> {
+        let (task, retry) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id)?;
+            if entry.task.state != TaskState::Queued {
+                return None;
+            }
+            let retry = entry.video_retry.clone()?;
+            if retry.external_preparation {
+                entry.preparation_attempt = entry.preparation_attempt.saturating_add(1).max(1);
+            }
+            entry.samples.push_back((monotonic(), 0));
+            entry.task.state = TaskState::Running;
+            // 视频都先解析元数据。YouTube 分享链接可能只带 url、没有 bvid；等解析
+            // 回填出稳定 video id 后再进入 Authorizing，外部 HLS 票据才能与任务严格匹配。
+            entry.task.phase = TaskPhase::Resolving;
+            entry.task.updated_at = now_secs();
+            entry.last_emit = monotonic();
+            entry.last_progress = entry.task.progress;
+            let started = (entry.task.clone(), retry);
+            self.persist_locked_or_warn(&entries);
+            started
+        };
+        self.hub.publish("download.updated", &task);
+        Some(retry)
+    }
+
+    /// 把解析得到的视频身份、展示字段和可重试请求一次性写回。外部准备随后读取
+    /// `video_retry.request`，因此 URL-only 入队也能获得与任务绑定的 YouTube HLS 票据。
+    fn apply_video_resolution(&self, id: &str, info: &VideoInfo) {
+        let updated = {
+            let mut entries = self.entries.lock().unwrap();
+            let Some(entry) = entries.get_mut(id) else {
+                return;
+            };
+            let placeholder = entry
+                .video_retry
+                .as_ref()
+                .map(|retry| video_placeholder_title(&retry.request));
+            let source_key = info.bvid.trim();
+            if !source_key.is_empty() {
+                entry.task.source_key = source_key.to_string();
+                if let Some(retry) = entry.video_retry.as_mut() {
+                    retry.request.bvid = source_key.to_string();
+                }
+            }
+            // 入队时搜索结果可能已经盖过标题/封面；解析结果只补空缺，别把好的冲掉。
+            if !info.title.is_empty()
+                && (entry.task.title.is_empty()
+                    || entry.task.title == "未命名"
+                    || entry.task.title.starts_with("BV")
+                    || placeholder.as_deref() == Some(entry.task.title.as_str()))
+            {
+                entry.task.title = info.title.clone();
+            }
+            if entry.task.artist.trim().is_empty() {
+                entry.task.artist = info.author.clone();
+            }
+            if entry.task.cover.trim().is_empty() && !info.cover.trim().is_empty() {
+                entry.task.cover = info.cover.clone();
+            }
+            if entry.task.platform == Platform::Bilibili {
+                let page_index = entry
+                    .video_retry
+                    .as_ref()
+                    .map(|retry| retry.request.page_index)
+                    .unwrap_or_default();
+                let resolved_page = info.pages.get(page_index);
+                entry.task.video_page = Some(DownloadVideoPage {
+                    index: page_index,
+                    count: info.pages.len(),
+                    title: resolved_page
+                        .map(|page| page.title.clone())
+                        .unwrap_or_default(),
+                });
+                if let Some(retry) = entry.video_retry.as_mut() {
+                    retry.request.page_count = info.pages.len();
+                    retry.request.page_title = resolved_page
+                        .map(|page| page.title.clone())
+                        .unwrap_or_default();
+                }
+            }
+            entry.task.updated_at = now_secs();
+            entry.last_emit = monotonic();
+            entry.last_progress = entry.task.progress;
+            let task = entry.task.clone();
+            self.persist_locked_or_warn(&entries);
+            task
+        };
+        self.hub.publish("download.updated", &updated);
+    }
+
+    /// 「开始」除了放行 queued，也要把暂停和能重试的失败媒体一并带上。
     /// 先拍快照再逐条重试，避免在持有 entries 锁时启动异步任务。
-    pub fn retryable_failed_audio_ids(&self) -> Vec<String> {
+    pub fn restartable_ids(&self) -> Vec<String> {
         let entries = self.entries.lock().unwrap();
         let mut ids: Vec<(f64, String)> = entries
             .iter()
             .filter(|(_, entry)| {
-                entry.task.kind == TaskKind::Audio
-                    && entry.task.state == TaskState::Failed
-                    && entry.audio_retry.is_some()
+                matches!(entry.task.state, TaskState::Paused | TaskState::Failed)
+                    && (entry.audio_retry.is_some() || entry.video_retry.is_some())
             })
             .map(|(id, entry)| (entry.task.created_at, id.clone()))
             .collect();
@@ -370,16 +1056,26 @@ impl DownloadManager {
         ids.into_iter().map(|(_, id)| id).collect()
     }
 
-    /// 改任务并**立刻**广播。状态变更走这里，进度走 `progress`（有节流）。
-    fn update(&self, id: &str, mutate: impl FnOnce(&mut DownloadTask)) -> Option<DownloadTask> {
+    /// 只改仍在活动中的任务，并把“检查状态 + 修改”放在同一把锁里。
+    /// 取消、完成与异步 worker 回调互相竞速时，先落下的终态必须永久胜出。
+    fn update_active(
+        &self,
+        id: &str,
+        mutate: impl FnOnce(&mut DownloadTask),
+    ) -> Option<DownloadTask> {
         let updated = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id)?;
+            if stops_worker_updates(entry.task.state) {
+                return None;
+            }
             mutate(&mut entry.task);
             entry.task.updated_at = now_secs();
             entry.last_emit = monotonic();
             entry.last_progress = entry.task.progress;
-            entry.task.clone()
+            let task = entry.task.clone();
+            self.persist_locked_or_warn(&entries);
+            task
         };
         self.hub.publish("download.updated", &updated);
         Some(updated)
@@ -388,13 +1084,7 @@ impl DownloadManager {
     /// 落到终态。已经是终态的不再改——否则下载完成的那一瞬间收到取消
     /// 会把"完成"覆盖成"已取消"。
     fn settle(&self, id: &str, state: TaskState, error: &str) -> Option<DownloadTask> {
-        {
-            let entries = self.entries.lock().unwrap();
-            if is_terminal(entries.get(id)?.task.state) {
-                return None;
-            }
-        }
-        self.update(id, |task| {
+        self.update_active(id, |task| {
             task.state = state;
             if state == TaskState::Done {
                 task.phase = TaskPhase::Completed;
@@ -405,32 +1095,65 @@ impl DownloadManager {
     }
 
     /// 任务开跑：记一个零点采样，滑窗才有起点。
+    #[cfg(test)]
     fn start(&self, id: &str, phase: TaskPhase) {
-        {
+        let updated = {
             let mut entries = self.entries.lock().unwrap();
             let Some(entry) = entries.get_mut(id) else {
                 return;
             };
+            // 取消与 worker 拿到并发令牌可能同时发生。终态一旦落下，迟到的
+            // worker 绝不能再把它翻回 running。
+            if stops_worker_updates(entry.task.state) {
+                return;
+            }
             entry.samples.push_back((monotonic(), 0));
-        }
-        self.update(id, |task| {
-            task.state = TaskState::Running;
-            task.phase = phase;
-        });
+            entry.task.state = TaskState::Running;
+            entry.task.phase = phase;
+            entry.task.updated_at = now_secs();
+            entry.last_emit = monotonic();
+            entry.last_progress = entry.task.progress;
+            let task = entry.task.clone();
+            self.persist_locked_or_warn(&entries);
+            task
+        };
+        self.hub.publish("download.updated", &updated);
     }
 
     fn phase(&self, id: &str, phase: TaskPhase) {
-        self.update(id, |task| task.phase = phase);
+        self.update_active(id, |task| task.phase = phase);
     }
 
     /// provider 的下载循环每收到一块就调一次：更新字节数和速度，广播则要过节流。
     pub(crate) fn progress(&self, id: &str, downloaded: u64, total: u64) {
+        self.progress_inner(id, None, downloaded, total);
+    }
+
+    /// 外部准备的进度还要绑定尝试代号；旧请求即使在暂停/重试后迟到，也不能把
+    /// 新任务的字节数和阶段改回去。
+    pub(crate) fn preparation_progress(&self, id: &str, attempt: u64, downloaded: u64, total: u64) {
+        self.progress_inner(id, Some(attempt), downloaded, total);
+    }
+
+    fn progress_inner(&self, id: &str, attempt: Option<u64>, downloaded: u64, total: u64) {
         let payload = {
             let mut entries = self.entries.lock().unwrap();
             let Some(entry) = entries.get_mut(id) else {
                 return;
             };
+            if attempt.is_some_and(|attempt| attempt == 0 || entry.preparation_attempt != attempt) {
+                return;
+            }
+            // 网络 future 收到取消后仍可能交付最后一个已经到达的 chunk。
+            // 已取消是单向终态，迟到的进度只能丢弃，不能复活任务。
+            if stops_worker_updates(entry.task.state) {
+                return;
+            }
             let now = monotonic();
+            // 解析 / 授权结束后第一次 report 往往是 (0, unknown)。字节没有前进，
+            // 但阶段已经真实切到下载；这条事件必须绕过 250ms / 1% 的进度节流。
+            let entered_downloading = entry.task.state != TaskState::Running
+                || entry.task.phase != TaskPhase::Downloading;
             entry.task.downloaded_bytes = downloaded;
             entry.task.state = TaskState::Running;
             entry.task.phase = TaskPhase::Downloading;
@@ -459,7 +1182,8 @@ impl DownloadManager {
             entry.task.speed_bps = window_speed(&mut entry.samples, now);
             entry.task.updated_at = now_secs();
 
-            let due = entered_processing
+            let due = entered_downloading
+                || entered_processing
                 || now - entry.last_emit >= PROGRESS_MIN_INTERVAL
                 || entry.task.progress - entry.last_progress >= PROGRESS_MIN_DELTA;
             if !due {
@@ -497,21 +1221,13 @@ impl DownloadManager {
         error: &str,
         track_id: Option<i64>,
     ) {
-        {
-            let entries = self.entries.lock().unwrap();
-            match entries.get(id) {
-                Some(entry) if is_terminal(entry.task.state) => return,
-                Some(_) => {}
-                None => return,
-            }
-        }
         let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         let suffix = path
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        self.update(id, |task| {
+        self.update_active(id, |task| {
             task.state = state;
             if state == TaskState::Done {
                 task.phase = TaskPhase::Completed;
@@ -558,7 +1274,9 @@ impl DownloadManager {
                 Some(entry) if entry.task.state == TaskState::Queued => {
                     let entry = entries.remove(id)?;
                     entry.cancel.cancel();
-                    Some(entry.task)
+                    let task = entry.task;
+                    self.persist_locked_or_warn(&entries);
+                    Some(task)
                 }
                 _ => None,
             }
@@ -605,12 +1323,16 @@ impl DownloadManager {
                         entry.task.updated_at = now_secs();
                         updated.push(entry.task.clone());
                     }
-                    TaskState::Done | TaskState::Failed | TaskState::Canceled => {}
+                    TaskState::Paused
+                    | TaskState::Done
+                    | TaskState::Failed
+                    | TaskState::Canceled => {}
                 }
             }
             for id in &queued {
                 entries.remove(id);
             }
+            self.persist_locked_or_warn(&entries);
             (queued.len() + updated.len(), updated)
         };
         for task in updated {
@@ -620,26 +1342,77 @@ impl DownloadManager {
         count
     }
 
+    /// 暂停整批尚未完成的任务。包括正在传输/处理的项目，也包括已经被「开始」
+    /// 放行但还在等待并发令牌的 queued 项；否则前几首停下后，后面的会继续启动。
+    ///
+    /// Paused 会挡住旧 worker 的迟到回调。下一次「开始」使用每条 Entry 中冻结的
+    /// retry 参数创建新 worker，因此不会把“暂停”伪装成不可恢复的“取消”。
+    pub fn pause_all(&self) -> usize {
+        let updated = {
+            let mut entries = self.entries.lock().unwrap();
+            let mut updated = Vec::new();
+            for entry in entries.values_mut() {
+                if !matches!(
+                    entry.task.state,
+                    TaskState::Queued | TaskState::Running | TaskState::Processing
+                ) {
+                    continue;
+                }
+                entry.cancel.cancel();
+                entry.prepared_source_url = None;
+                entry.task.state = TaskState::Paused;
+                entry.task.phase = TaskPhase::Waiting;
+                entry.task.speed_bps = 0.0;
+                entry.task.error.clear();
+                entry.task.updated_at = now_secs();
+                updated.push(entry.task.clone());
+            }
+            self.persist_locked_or_warn(&entries);
+            updated
+        };
+        for task in &updated {
+            self.hub.publish("download.updated", task);
+        }
+        if !updated.is_empty() {
+            self.broadcast_list();
+        }
+        updated.len()
+    }
+
     /// 只移除一条已结束任务。用于清理某次导出记录，不能误伤同队列中的其他任务。
     pub fn remove_finished(&self, id: &str) -> Option<DownloadTask> {
         let removed = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get(id)?;
-            if !is_terminal(entry.task.state) {
+            if !is_terminal(entry.task.state) && entry.task.state != TaskState::Paused {
                 return None;
             }
-            entries.remove(id).map(|entry| entry.task)
+            let removed = entries.remove(id).map(|entry| entry.task);
+            self.persist_locked_or_warn(&entries);
+            removed
         };
         self.broadcast_list();
         removed
     }
 
-    /// 清掉所有已结束的任务，返回清掉几条。
-    pub fn clear_finished(&self) -> usize {
+    /// 清掉所有当前没有在执行的任务，返回清掉几条。
+    ///
+    /// 队列里的失败项仍是一首待下载的歌，只带着“上次下载失败”的状态；
+    /// 因而「清理」既要移除这些失败/已结束记录，也要移除尚未开始的 queued。
+    /// 正在下载或处理的任务不受影响。
+    pub fn clear_inactive(&self) -> usize {
         let removed = {
             let mut entries = self.entries.lock().unwrap();
             let before = entries.len();
-            entries.retain(|_, entry| !is_terminal(entry.task.state));
+            entries.retain(|_, entry| {
+                let keep = matches!(entry.task.state, TaskState::Running | TaskState::Processing);
+                if !keep {
+                    // queued worker 可能还在等显式 start；移出 map 前先唤醒它退出。
+                    entry.cancel.cancel();
+                }
+                keep
+            });
+            self.persist_locked_or_warn(&entries);
             before - entries.len()
         };
         self.broadcast_list();
@@ -668,6 +1441,7 @@ async fn wait_until_started(
     manager: &DownloadManager,
     cancel: &CancellationToken,
     queued_generation: u64,
+    allow_auto_start: bool,
 ) -> bool {
     // 先订阅再判断：反过来的话，两步之间拨开的开关会漏掉，任务永远醒不过来
     let mut rx = manager.auto_start.subscribe();
@@ -676,7 +1450,7 @@ async fn wait_until_started(
         if cancel.is_cancelled() {
             return false;
         }
-        if *rx.borrow_and_update() {
+        if allow_auto_start && *rx.borrow_and_update() {
             return true;
         }
         if *start_rx.borrow_and_update() > queued_generation {
@@ -698,6 +1472,20 @@ async fn wait_until_started(
     }
 }
 
+/// 等下载并发令牌时也响应取消。单纯在拿到令牌后检查 token 会让一个已取消的
+/// 大歌单 worker 继续在信号量里排很久，占着任务和 future 不退出。
+async fn acquire_download_permit(
+    manager: &DownloadManager,
+    cancel: &CancellationToken,
+) -> Option<OwnedSemaphorePermit> {
+    let permits = manager.permits();
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        permit = permits.acquire_owned() => permit.ok(),
+    }
+}
+
 /// 需要外部挑战的 Provider 必须等适配器提交一次性媒体源；任务已经可见并处于
 /// authorizing，相同等待/取消/超时语义不再散落在平台分支里。
 async fn wait_for_prepared_source(
@@ -708,7 +1496,8 @@ async fn wait_for_prepared_source(
     // A protected YTM source is now materialized by one uninterrupted GVS transfer before the
     // provider consumes its local file. Long mixes must not time out while progress is advancing.
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let mut last_activity = tokio::time::Instant::now();
+    let mut last_downloaded = 0_u64;
     loop {
         if cancel.is_cancelled() {
             return false;
@@ -716,16 +1505,27 @@ async fn wait_for_prepared_source(
         if manager.peek_prepared_source_url(id).is_some() {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        if let Some(task) = manager.get(id) {
+            if task.downloaded_bytes > last_downloaded {
+                last_downloaded = task.downloaded_bytes;
+                last_activity = tokio::time::Instant::now();
+            }
+        }
+        if tokio::time::Instant::now().duration_since(last_activity) >= TIMEOUT {
             return false;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return false,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+        }
     }
 }
 
 fn new_task(
     kind: TaskKind,
     platform: Platform,
+    source_key: String,
     title: &str,
     artist: &str,
     quality: String,
@@ -738,6 +1538,7 @@ fn new_task(
         id: new_id(),
         kind,
         platform,
+        source_key,
         // 空标题在队列面板上就是一行空白，用户认不出这是哪一条
         title: if title.is_empty() {
             "未命名".to_string()
@@ -758,6 +1559,7 @@ fn new_task(
         dest_dir,
         output_dir,
         cover,
+        video_page: None,
         created_at: now,
         updated_at: now,
     }
@@ -808,6 +1610,7 @@ pub fn enqueue_audio(
     quality: Quality,
     analyze: bool,
     dest_dir: String,
+    hold: bool,
 ) -> DownloadTask {
     let external_preparation = state
         .provider(source.platform)
@@ -821,6 +1624,7 @@ pub fn enqueue_audio(
     let task = new_task(
         TaskKind::Audio,
         source.platform,
+        source.key.clone(),
         &source.title,
         &source.artist_text(),
         quality.as_str().to_string(),
@@ -829,35 +1633,23 @@ pub fn enqueue_audio(
         source.cover.clone(),
     );
     let cancel = CancellationToken::new();
-    manager.insert(task.clone(), cancel.clone());
-    manager.attach_audio_retry(
-        &task.id,
-        AudioRetry {
+    manager.insert_with_retry(
+        task.clone(),
+        cancel.clone(),
+        Some(AudioRetry {
             source: source.clone(),
             quality,
             analyze,
             dest_dir: output_dir.clone(),
             external_preparation,
-        },
+        }),
+        None,
     );
     let queued_generation = manager.start_generation();
 
     let id = task.id.clone();
     tokio::spawn(async move {
-        run_audio(
-            state,
-            manager,
-            id,
-            source,
-            quality,
-            analyze,
-            external_preparation,
-            output_dir,
-            cancel,
-            queued_generation,
-            false,
-        )
-        .await;
+        run_audio(state, manager, id, cancel, queued_generation, !hold, false).await;
     });
     task
 }
@@ -870,7 +1662,7 @@ pub fn retry_audio(
     manager: Arc<DownloadManager>,
     id: &str,
 ) -> Result<DownloadTask> {
-    let (task, retry, cancel) = manager.prepare_audio_retry(id)?;
+    let (task, _retry, cancel) = manager.prepare_audio_retry(id)?;
     let task_id = task.id.clone();
     let queued_generation = manager.start_generation();
     tokio::spawn(async move {
@@ -878,13 +1670,9 @@ pub fn retry_audio(
             state,
             manager,
             task_id,
-            retry.source,
-            retry.quality,
-            retry.analyze,
-            retry.external_preparation,
-            retry.dest_dir,
             cancel,
             queued_generation,
+            true,
             true,
         )
         .await;
@@ -892,13 +1680,49 @@ pub fn retry_audio(
     Ok(task)
 }
 
-/// 重试当前快照里所有可重试的失败歌曲。单条可能被另一个点击抢先重试，
+/// 用原任务冻结的视频参数重新执行失败项，并沿用原 id/排序位置。
+pub fn retry_video(
+    state: Arc<AppState>,
+    manager: Arc<DownloadManager>,
+    id: &str,
+) -> Result<DownloadTask> {
+    let (task, _retry, cancel) = manager.prepare_video_retry(id)?;
+    let task_id = task.id.clone();
+    let queued_generation = manager.start_generation();
+    tokio::spawn(async move {
+        run_video(
+            state,
+            manager,
+            task_id,
+            cancel,
+            queued_generation,
+            true,
+            true,
+        )
+        .await;
+    });
+    Ok(task)
+}
+
+/// 单条重试的统一入口；行内“重试”和队列“开始”都走同一套状态重置。
+pub fn retry_task(
+    state: Arc<AppState>,
+    manager: Arc<DownloadManager>,
+    id: &str,
+) -> Result<DownloadTask> {
+    match manager.get(id).context("任务不存在")?.kind {
+        TaskKind::Audio => retry_audio(state, manager, id),
+        TaskKind::Video => retry_video(state, manager, id),
+    }
+}
+
+/// 重新开始当前快照里所有暂停或可重试的失败媒体。单条可能被另一个点击抢先，
 /// 这种竞态直接跳过即可，其余任务仍照常启动。
-pub fn retry_failed_audio(state: Arc<AppState>, manager: Arc<DownloadManager>) -> usize {
+pub fn restart_inactive_tasks(state: Arc<AppState>, manager: Arc<DownloadManager>) -> usize {
     manager
-        .retryable_failed_audio_ids()
+        .restartable_ids()
         .into_iter()
-        .filter(|id| retry_audio(state.clone(), manager.clone(), id).is_ok())
+        .filter(|id| retry_task(state.clone(), manager.clone(), id).is_ok())
         .count()
 }
 
@@ -907,37 +1731,36 @@ async fn run_audio(
     state: Arc<AppState>,
     manager: Arc<DownloadManager>,
     id: String,
-    source: SongSource,
-    quality: Quality,
-    analyze: bool,
-    external_preparation: bool,
-    dest_dir: String,
     cancel: CancellationToken,
     queued_generation: u64,
+    allow_auto_start: bool,
     start_immediately: bool,
 ) {
-    if !start_immediately && !wait_until_started(&manager, &cancel, queued_generation).await {
+    if !start_immediately
+        && !wait_until_started(&manager, &cancel, queued_generation, allow_auto_start).await
+    {
         return;
     }
-    let permits = manager.permits();
-    let Ok(_permit) = permits.acquire_owned().await else {
+    let Some(_permit) = acquire_download_permit(&manager, &cancel).await else {
         return;
     };
     if cancel.is_cancelled() {
         return;
     }
+    let Some(retry) = manager.start_audio(&id) else {
+        return;
+    };
+    let AudioRetry {
+        source,
+        quality,
+        analyze,
+        dest_dir,
+        external_preparation,
+    } = retry;
     if let Err(message) = validate_download_target(Path::new(&dest_dir)) {
         manager.settle(&id, TaskState::Failed, &message);
         return;
     }
-    manager.start(
-        &id,
-        if external_preparation {
-            TaskPhase::Authorizing
-        } else {
-            TaskPhase::Resolving
-        },
-    );
     if external_preparation && !wait_for_prepared_source(&manager, &id, &cancel).await {
         if cancel.is_cancelled() {
             manager.settle(&id, TaskState::Canceled, "已取消");
@@ -946,7 +1769,16 @@ async fn run_audio(
         }
         return;
     }
-    manager.phase(&id, TaskPhase::Resolving);
+    manager.phase(
+        &id,
+        if external_preparation {
+            // YTM 的受保护来源在准备路由里已经按真实网络字节完整落盘；provider
+            // 接下来只做容器整理/搬运，不能让 UI 从 100% 又退回“解析中”。
+            TaskPhase::PostProcessing
+        } else {
+            TaskPhase::Resolving
+        },
+    );
     let Some(provider) = state.provider(source.platform).cloned() else {
         manager.settle(
             &id,
@@ -968,7 +1800,16 @@ async fn run_audio(
         .with_cancel(cancel.clone())
         .with_progress(progress)
         .with_prepared_source_url(prepared_source_url.as_deref());
-    let result = provider.download(job).await;
+    // Provider 的解析阶段通常在等一个平台 HTTP 请求，未必有自己的取消检查点。
+    // 直接等它返回会继续占住下载并发；在任务层竞速 token，取消即可丢弃请求 future。
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            manager.settle(&id, TaskState::Canceled, "已取消");
+            return;
+        }
+        result = provider.download(job) => result,
+    };
 
     match result {
         // 取消是协作式的，provider 有可能在收到取消之前就把最后一块下完了。
@@ -990,30 +1831,66 @@ async fn run_audio(
                     return;
                 }
             };
+            if cancel.is_cancelled() {
+                manager.settle(&id, TaskState::Canceled, "已取消");
+                return;
+            }
             // 音频已经完整落到目标目录，先释放下载并发槽。歌词接口可能很慢，
             // 不该让网络取词占住一个下载名额、挡住队列里的下一首。
             drop(_permit);
 
-            // 歌词跟着下载结果的精确平台 key 保存，不经过标题模糊匹配。
+            // 歌词很小，下载完成后一律按精确平台 key 缓存，不再受设置开关控制。
             // 歌曲本体已经完成后，歌词失败只记日志，不影响下载任务成功。
-            if state.config.to_settings().download_lyrics {
-                manager.phase(&id, TaskPhase::PostProcessing);
-                match provider.lyric(&source.key).await {
-                    Ok(Some(text)) => {
-                        if let Err(err) = kdj_library::folders::write_lyrics(
+            manager.phase(&id, TaskPhase::PostProcessing);
+            let lyric = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    manager.settle(&id, TaskState::Canceled, "已取消");
+                    return;
+                }
+                lyric = provider.lyric(&source.key) => lyric,
+            };
+            match lyric {
+                Ok(Some(text)) => {
+                    if !crate::lyrics::lyric_timeline_compatible(
+                        source.duration,
+                        &text.lrc,
+                        &text.word_lrc,
+                    ) {
+                        tracing::warn!(
+                            platform = source.platform.as_str(),
+                            key = source.key,
+                            title = source.title,
+                            "下载后的歌词时间轴超出音频时长，跳过缓存"
+                        );
+                    } else {
+                        let cached = kdj_library::folders::StoredLyrics {
+                            lrc: text.lrc,
+                            word_lrc: text.word_lrc,
+                            translated_lrc: text.translated_lrc,
+                            romaji_lrc: text.romaji_lrc,
+                            platform: source.platform.as_str().to_string(),
+                            key: source.key.clone(),
+                            title: source.title.clone(),
+                            artist: source.artist_text(),
+                            score: 1.0,
+                        };
+                        if let Err(err) = kdj_library::folders::write_lyrics_cache(
                             &path,
                             source.platform.as_str(),
                             &source.key,
-                            &text.lrc,
-                            &text.translated_lrc,
-                            &text.romaji_lrc,
+                            &cached,
                         ) {
                             tracing::warn!("下载后写歌词失败 {}：{err:#}", path.display());
                         }
                     }
-                    Ok(None) => {}
-                    Err(err) => tracing::warn!("下载后取歌词失败 {}：{err:#}", source.title),
                 }
+                Ok(None) => {}
+                Err(err) => tracing::warn!("下载后取歌词失败 {}：{err:#}", source.title),
+            }
+            if cancel.is_cancelled() {
+                manager.settle(&id, TaskState::Canceled, "已取消");
+                return;
             }
             // 下载完立刻入库，并把来源信息带上，这样曲库里能看出这首是从哪来的
             manager.phase(&id, TaskPhase::Importing);
@@ -1069,323 +1946,15 @@ fn video_placeholder_title(req: &VideoDownloadRequest) -> String {
     "视频".to_string()
 }
 
-/// 一段已验证的 VJ 裁切。`duration` 是裁切后的有效时长，专门用于把淡入淡出
-/// 夹在两段都留有内容的范围内。
-struct VjClipPlan {
-    track: Track,
-    start: f64,
-    end: f64,
-    duration: f64,
-}
-
-/// 把时间吸到分析出的第一拍网格。没有可信 BPM 或第一拍时宁可不动，不能用
-/// 文件开头假装 downbeat；整小节就是每 4 拍取一个点。
-fn snap_vj_time(track: &Track, time: f64, whole_bar: bool) -> Option<f64> {
-    let bpm = track.bpm.filter(|bpm| bpm.is_finite() && *bpm > 0.0)?;
-    let first_beat = track
-        .first_beat
-        .filter(|beat| beat.is_finite() && *beat >= 0.0)?;
-    let step = 60.0 / bpm * if whole_bar { 4.0 } else { 1.0 };
-    Some(first_beat + ((time - first_beat) / step).round() * step)
-}
-
-fn vj_interval(
-    track: &Track,
-    use_in_out_points: bool,
-    snap_nearest_beat: bool,
-    snap_whole_bar: bool,
-) -> Result<(f64, f64)> {
-    let duration = track
-        .duration
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .or_else(|| kdj_providers::tags::read_duration_secs(Path::new(&track.path)))
-        .context("读不到素材时长；请重新扫描该 VJ 后再导出")?;
-    let start = if use_in_out_points {
-        track.cue_ms.unwrap_or(0).max(0) as f64 / 1000.0
-    } else {
-        0.0
-    };
-    let end = if use_in_out_points {
-        track
-            .end_ms
-            .map(|value| value as f64 / 1000.0)
-            .unwrap_or(duration)
-    } else {
-        duration
-    }
-    .min(duration);
-    let (start, end) = if snap_nearest_beat {
-        let snapped_start = snap_vj_time(track, start, snap_whole_bar)
-            .map(|value| value.clamp(0.0, duration))
-            .unwrap_or(start);
-        let snapped_end = snap_vj_time(track, end, snap_whole_bar)
-            .map(|value| value.clamp(0.0, duration))
-            .unwrap_or(end);
-        // 一个短片段吸到同一拍会成为零长度，保留用户原来的精确裁切比导出失败好。
-        if snapped_end - snapped_start >= 0.1 {
-            (snapped_start, snapped_end)
-        } else {
-            (start, end)
-        }
-    } else {
-        (start, end)
-    };
-    if !start.is_finite() || !end.is_finite() || end - start < 0.1 {
-        bail!("{} 的开始 / 结束点没有可导出的内容", track.filename);
-    }
-    Ok((start, end))
-}
-
-/// 把请求里的 id 严格按用户给出的次序取回。不能用 SQL 的 `IN` 排序：它会悄悄
-/// 丢掉用户在面板里排好的顺序，VJ 接歌就完全变味了。
-fn vj_clip_plans(state: &AppState, req: &VjExportRequest) -> Result<Vec<VjClipPlan>> {
-    let selected_folder = kdj_library::service::normalize_path(Path::new(&req.folder));
-    req.track_ids
-        .iter()
-        .map(|id| {
-            let track = state
-                .library
-                .get(*id)?
-                .with_context(|| format!("曲目不存在：{id}"))?;
-            let parent = Path::new(&track.path)
-                .parent()
-                .map(kdj_library::service::normalize_path)
-                .unwrap_or_default();
-            if parent != selected_folder {
-                bail!("{} 不在本次选择的文件夹内", track.filename);
-            }
-            if !Path::new(&track.path).is_file() {
-                bail!("找不到 VJ 素材：{}", track.path);
-            }
-            let (start, end) = vj_interval(
-                &track,
-                req.use_in_out_points,
-                req.snap_nearest_beat,
-                req.snap_whole_bar,
-            )?;
-            Ok(VjClipPlan {
-                track,
-                start,
-                end,
-                duration: end - start,
-            })
-        })
-        .collect()
-}
-
-/// 小节模式的每个过渡都取**上一首**的 BPM：退场素材的节拍才是观众正在听的节拍。
-/// 未分析素材按 120 BPM 兜底，保证导出不会因一条缺分析数据而失败。
-fn vj_fade_seconds(req: &VjExportRequest, previous: &Track) -> f64 {
-    if req.fade_bars > 0 {
-        let bpm = previous
-            .bpm
-            .filter(|bpm| bpm.is_finite() && *bpm > 0.0)
-            .unwrap_or(120.0);
-        f64::from(req.fade_bars) * 4.0 * 60.0 / bpm
-    } else {
-        req.fade_seconds
-    }
-}
-
-fn vj_output_path(directory: &Path) -> Result<(PathBuf, PathBuf)> {
-    validate_download_target(directory).map_err(anyhow::Error::msg)?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let output = directory.join(format!("VJ Export {stamp}.mp4"));
-    let partial = directory.join(format!("VJ Export {stamp}.partial.mp4"));
-    Ok((output, partial))
-}
-
-/// 默认下载目录可能只是系统 Downloads，也可能正好是用户登记过的曲库文件夹。
-/// 后一种情况下，VJ 成品必须像拖进文件夹的普通视频一样立刻入库；否则文件已经
-/// 在磁盘上，左表和文件夹计数却一直少一首，只能靠用户再手动扫描一次。
-fn vj_output_belongs_to_library(path: &Path, library_dirs: &[String]) -> bool {
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    let roots: Vec<PathBuf> = library_dirs.iter().map(PathBuf::from).collect();
-    !roots.is_empty() && kdj_library::folders::ensure_inside(parent, &roots).is_ok()
-}
-
-/// 建一条「按顺序导出 VJ」任务，走同一条下载队列和取消令牌。
-pub fn enqueue_vj_export(
-    state: Arc<AppState>,
-    manager: Arc<DownloadManager>,
-    req: VjExportRequest,
-    folder_label: &str,
-) -> DownloadTask {
-    let count = req.track_ids.len();
-    let title = if folder_label.is_empty() {
-        "VJ 导出".into()
-    } else {
-        format!("VJ 导出 · {folder_label}")
-    };
-    let artist = format!("{count} 首");
-    let quality = if req.quality.trim().is_empty() {
-        "1080p".into()
-    } else {
-        req.quality.trim().to_string()
-    };
-    // 入队时冻结目录；真正开跑前还会重新验证移动盘是否在线。
-    let output_dir = state.config.download_dir();
-    let task = new_task(
-        TaskKind::VjExport,
-        Platform::Local,
-        &title,
-        &artist,
-        quality,
-        String::new(),
-        output_dir.to_string_lossy().into_owned(),
-        String::new(),
-    );
-    let cancel = CancellationToken::new();
-    manager.insert(task.clone(), cancel.clone());
-    let queued_generation = manager.start_generation();
-
-    let id = task.id.clone();
-    tokio::spawn(async move {
-        if !wait_until_started(&manager, &cancel, queued_generation).await {
-            return;
-        }
-        let permits = manager.permits();
-        let Ok(_permit) = permits.acquire_owned().await else {
-            return;
-        };
-        if cancel.is_cancelled() {
-            return;
-        }
-        run_vj_export(state, manager, id, req, output_dir, cancel).await;
-    });
-    task
-}
-
-async fn run_vj_export(
-    state: Arc<AppState>,
-    manager: Arc<DownloadManager>,
-    id: String,
-    req: VjExportRequest,
-    output_dir: PathBuf,
-    cancel: CancellationToken,
-) {
-    manager.start(&id, TaskPhase::PostProcessing);
-    if !kdj_providers::ffmpeg::available() {
-        manager.settle(
-            &id,
-            TaskState::Failed,
-            "系统里没有 ffmpeg，无法渲染 VJ 导出",
-        );
-        return;
-    }
-    let result: Result<PathBuf> = async {
-        let plans = vj_clip_plans(&state, &req)?;
-        let mut clips = Vec::with_capacity(plans.len());
-        for (index, plan) in plans.iter().enumerate() {
-            let desired_fade = plans
-                .get(index + 1)
-                .map(|_| vj_fade_seconds(&req, &plan.track))
-                .unwrap_or(0.0);
-            // 不让一次过长的淡化吞掉任一首；ffmpeg 的 xfade 也要求这个约束。
-            let next_duration = plans
-                .get(index + 1)
-                .map(|next| next.duration)
-                .unwrap_or(0.0);
-            let fade_to_next = if next_duration > 0.0 {
-                desired_fade
-                    .max(0.0)
-                    .min(plan.duration * 0.5)
-                    .min(next_duration * 0.5)
-            } else {
-                0.0
-            };
-            clips.push(kdj_providers::ffmpeg::VjExportClip {
-                source: PathBuf::from(&plan.track.path),
-                start: plan.start,
-                end: plan.end,
-                fade_to_next,
-            });
-        }
-        let (output, partial) = vj_output_path(&output_dir)?;
-        let encoder = kdj_providers::ffmpeg::preferred_vj_video_encoder();
-        let args = kdj_providers::ffmpeg::vj_export_args_with_encoder(
-            &clips,
-            &partial,
-            &req.quality,
-            req.keep_audio,
-            req.keep_audio && req.unify_gain,
-            encoder,
-        )?;
-        manager.update(&id, |task| task.state = TaskState::Processing);
-        let log = partial.with_extension("log");
-        let rendered = kdj_providers::ffmpeg::run(&args, &log, &cancel).await;
-        if let Err(err) = rendered {
-            // FFmpeg 能列出硬件编码器不代表本机驱动 / 会话一定可实际打开；失败后
-            // 无需用户改设置，立刻用 libx264 重试同一份临时文件。
-            if encoder != kdj_providers::ffmpeg::VjVideoEncoder::Software && !cancel.is_cancelled()
-            {
-                tracing::warn!(?encoder, "VJ 硬件编码失败，回退到 libx264：{err:#}");
-                let fallback = kdj_providers::ffmpeg::vj_export_args_with_encoder(
-                    &clips,
-                    &partial,
-                    &req.quality,
-                    req.keep_audio,
-                    req.keep_audio && req.unify_gain,
-                    kdj_providers::ffmpeg::VjVideoEncoder::Software,
-                )?;
-                kdj_providers::ffmpeg::run(&fallback, &log, &cancel).await?;
-            } else {
-                let _ = std::fs::remove_file(&partial);
-                return Err(err);
-            }
-        }
-        if std::fs::metadata(&partial)
-            .map(|meta| meta.len())
-            .unwrap_or(0)
-            == 0
-        {
-            bail!("FFmpeg 没有写出 VJ 成品");
-        }
-        std::fs::rename(&partial, &output).context("提交 VJ 成品失败")?;
-        // 成功日志只是 FFmpeg 诊断用的临时物；留在导出文件夹里会让成品旁边
-        // 永远多一份 `*.partial.log`，看起来像导出没有真正收尾。
-        let _ = std::fs::remove_file(&log);
-        Ok(output)
-    }
-    .await;
-
-    match result {
-        Ok(path) if cancel.is_cancelled() => {
-            let _ = std::fs::remove_file(path);
-            manager.settle(&id, TaskState::Canceled, "已取消");
-        }
-        Ok(path) => {
-            let settings = state.config.to_settings();
-            let track_id = if vj_output_belongs_to_library(&path, &settings.library_dirs) {
-                match state.library.upsert_file(&path, "local", "") {
-                    Ok(track_id) => Some(track_id),
-                    Err(err) => {
-                        let message = format!("VJ 已导出，但加入曲库失败：{err:#}");
-                        tracing::error!("{} {}", message, path.display());
-                        manager.fail_after_download(&id, &path, &message);
-                        return;
-                    }
-                }
-            } else {
-                None
-            };
-            manager.finish(&id, &path, track_id);
-            if let Some(track_id) = track_id {
-                state.hub.publish_library_updated(&[track_id]);
-            }
-        }
-        Err(_err) if cancel.is_cancelled() => {
-            manager.settle(&id, TaskState::Canceled, "已取消");
-        }
-        Err(err) => {
-            manager.settle(&id, TaskState::Failed, &format!("{err:#}"));
-        }
-    };
+fn local_youtube_hls_ticket(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value).ok()?;
+    let ticket = url.path().strip_prefix("/api/video/youtube/hls/")?;
+    (matches!(
+        url.host_str(),
+        Some("127.0.0.1") | Some("localhost") | Some("::1")
+    ) && ticket.len() == 64
+        && ticket.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| ticket.to_string())
 }
 
 /// 建一条视频下载任务。
@@ -1393,7 +1962,11 @@ pub fn enqueue_video(
     state: Arc<AppState>,
     manager: Arc<DownloadManager>,
     req: VideoDownloadRequest,
+    hold: bool,
 ) -> DownloadTask {
+    let external_preparation = state
+        .provider(req.platform)
+        .is_some_and(|provider| provider.capabilities().external_download_preparation);
     // 只要音轨时画质选项无意义，标成 audio；否则是 "1080p" 这样的高度
     let quality = if req.audio_only {
         "audio".to_string()
@@ -1415,9 +1988,10 @@ pub fn enqueue_video(
         }
     };
     let platform = req.platform;
-    let task = new_task(
+    let mut task = new_task(
         TaskKind::Video,
         platform,
+        req.bvid.trim().to_string(),
         &title,
         req.artist.trim(),
         quality,
@@ -1425,127 +1999,203 @@ pub fn enqueue_video(
         dest_dir.clone(),
         req.cover.trim().to_string(),
     );
+    if platform == Platform::Bilibili {
+        task.video_page = Some(DownloadVideoPage {
+            index: req.page_index,
+            count: req.page_count,
+            title: req.page_title.trim().to_string(),
+        });
+    }
     let cancel = CancellationToken::new();
-    manager.insert(task.clone(), cancel.clone());
+    manager.insert_with_retry(
+        task.clone(),
+        cancel.clone(),
+        None,
+        Some(VideoRetry {
+            request: req.clone(),
+            output_dir: dest_dir.clone(),
+            external_preparation,
+        }),
+    );
     let queued_generation = manager.start_generation();
 
     let id = task.id.clone();
-    tokio::spawn(async move {
-        if !wait_until_started(&manager, &cancel, queued_generation).await {
-            return;
-        }
-        let permits = manager.permits();
-        let Ok(_permit) = permits.acquire_owned().await else {
-            return;
-        };
-        if cancel.is_cancelled() {
-            return;
-        }
-        if let Err(message) = validate_download_target(Path::new(&dest_dir)) {
-            manager.settle(&id, TaskState::Failed, &message);
-            return;
-        }
-        manager.start(&id, TaskPhase::Resolving);
-        let Some(video_provider) = state.video_provider(platform).cloned() else {
-            manager.settle(&id, TaskState::Failed, "视频 Provider 不可用");
-            return;
-        };
+    tokio::spawn(run_video(
+        state,
+        manager,
+        id,
+        cancel,
+        queued_generation,
+        !hold,
+        false,
+    ));
+    task
+}
 
-        // 先解析一次拿标题：队列里挂个 BV 号用户根本认不出是哪个视频。
-        // 放在这里而不是放在 HTTP 处理函数里：B 站这一跳可能要好几秒（限流时更久），
-        // 同步等的话「点下载」按钮要卡住那么久才回应。解析失败不影响下载。
-        // 探针优先用 url：用户贴的短链里带 p= 分 P 信息，bvid 没有。
-        let probe = if req.url.trim().is_empty() {
-            req.bvid.clone()
-        } else {
-            req.url.clone()
-        };
-        let resolved = video_provider.resolve_video(&probe).await;
-        match resolved {
-            Ok(info) if !info.title.is_empty() => {
-                manager.update(&id, |task| {
-                    // 入队时搜索结果可能已经盖过标题/封面；解析结果只补空缺，别把好的冲掉。
-                    if task.title.is_empty()
-                        || task.title == "未命名"
-                        || task.title.starts_with("BV")
-                    {
-                        task.title = info.title.clone();
-                    }
-                    if task.artist.trim().is_empty() {
-                        task.artist = info.author.clone();
-                    }
-                    if task.cover.trim().is_empty() && !info.cover.trim().is_empty() {
-                        task.cover = info.cover.clone();
-                    }
-                });
+#[allow(clippy::too_many_arguments)]
+async fn run_video(
+    state: Arc<AppState>,
+    manager: Arc<DownloadManager>,
+    id: String,
+    cancel: CancellationToken,
+    queued_generation: u64,
+    allow_auto_start: bool,
+    start_immediately: bool,
+) {
+    if !start_immediately
+        && !wait_until_started(&manager, &cancel, queued_generation, allow_auto_start).await
+    {
+        return;
+    }
+    let Some(_permit) = acquire_download_permit(&manager, &cancel).await else {
+        return;
+    };
+    if cancel.is_cancelled() {
+        return;
+    }
+    let Some(retry) = manager.start_video(&id) else {
+        return;
+    };
+    let VideoRetry {
+        request: req,
+        output_dir: dest_dir,
+        external_preparation,
+    } = retry;
+    let platform = req.platform;
+    let explicit_dest = !req.dest_dir.trim().is_empty();
+    if let Err(message) = validate_download_target(Path::new(&dest_dir)) {
+        manager.settle(&id, TaskState::Failed, &message);
+        return;
+    }
+    let Some(video_provider) = state.video_provider(platform).cloned() else {
+        manager.settle(&id, TaskState::Failed, "视频 Provider 不可用");
+        return;
+    };
+
+    // 先解析一次拿标题：队列里挂个 BV 号用户根本认不出是哪个视频。
+    // 放在这里而不是放在 HTTP 处理函数里：B 站这一跳可能要好几秒（限流时更久），
+    // 同步等的话「点下载」按钮要卡住那么久才回应。解析失败不影响下载。
+    // 探针优先用 url：用户贴的短链里带 p= 分 P 信息，bvid 没有。
+    let probe = if req.url.trim().is_empty() {
+        req.bvid.clone()
+    } else {
+        req.url.clone()
+    };
+    let resolved = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            manager.settle(&id, TaskState::Canceled, "已取消");
+            return;
+        }
+        resolved = video_provider.resolve_video(&probe) => resolved,
+    };
+    let mut resolved_source_key = req.bvid.trim().to_string();
+    match resolved {
+        Ok(info) => {
+            if !info.bvid.trim().is_empty() {
+                resolved_source_key = info.bvid.trim().to_string();
             }
-            Ok(_) => {}
-            Err(err) => tracing::debug!("视频信息预解析失败（不影响下载）：{err:#}"),
+            manager.apply_video_resolution(&id, &info);
         }
-        let progress_manager = manager.clone();
-        let progress_id = id.clone();
-        let progress: kdj_providers::ProgressSink = Arc::new(move |downloaded: u64, total: u64| {
-            progress_manager.progress(&progress_id, downloaded, total);
-        });
-
-        let downloaded = video_provider
-            .download_video(&req, &cancel, &progress)
-            .await;
-        match downloaded {
-            // 和音频一路同理：取消撞上"最后一块刚好下完"不能算成功
-            Ok(_) if cancel.is_cancelled() => {
+        Err(err) => tracing::debug!("视频信息预解析失败（不影响下载）：{err:#}"),
+    }
+    if external_preparation {
+        manager.phase(&id, TaskPhase::Authorizing);
+        if !wait_for_prepared_source(&manager, &id, &cancel).await {
+            if cancel.is_cancelled() {
                 manager.settle(&id, TaskState::Canceled, "已取消");
+            } else {
+                manager.settle(&id, TaskState::Failed, "下载来源未及时就绪，请重试");
             }
-            Ok(path) => {
-                manager.phase(&id, TaskPhase::Relocating);
-                let path = match relocate_download(&path, &dest_dir) {
-                    Ok(path) => path,
-                    Err(message) => {
-                        manager.settle(
-                            &id,
-                            TaskState::Failed,
-                            &format!("已下载但移入目标文件夹失败：{message}"),
-                        );
+            return;
+        }
+    }
+    let progress_manager = manager.clone();
+    let progress_id = id.clone();
+    let progress: kdj_providers::ProgressSink = Arc::new(move |downloaded: u64, total: u64| {
+        progress_manager.progress(&progress_id, downloaded, total);
+    });
+
+    let prepared_source_url = manager.take_prepared_source_url(&id);
+    let prepared_hls_ticket = prepared_source_url
+        .as_deref()
+        .and_then(local_youtube_hls_ticket);
+    let downloaded = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            if let Some(ticket) = prepared_hls_ticket.as_deref() {
+                state.cancel_youtube_hls_resource(ticket);
+            }
+            manager.settle(&id, TaskState::Canceled, "已取消");
+            return;
+        }
+        downloaded = video_provider.download_video_prepared(
+            &req,
+            &cancel,
+            &progress,
+            prepared_source_url.as_deref(),
+        ) => downloaded,
+    };
+    if let Some(ticket) = prepared_hls_ticket.as_deref() {
+        state.cancel_youtube_hls_resource(ticket);
+    }
+    match downloaded {
+        // 和音频一路同理：取消撞上"最后一块刚好下完"不能算成功
+        Ok(_) if cancel.is_cancelled() => {
+            manager.settle(&id, TaskState::Canceled, "已取消");
+        }
+        Ok(path) => {
+            manager.phase(&id, TaskPhase::Relocating);
+            let path = match relocate_download(&path, &dest_dir) {
+                Ok(path) => path,
+                Err(message) => {
+                    manager.settle(
+                        &id,
+                        TaskState::Failed,
+                        &format!("已下载但移入目标文件夹失败：{message}"),
+                    );
+                    return;
+                }
+            };
+            if cancel.is_cancelled() {
+                manager.settle(&id, TaskState::Canceled, "已取消");
+                return;
+            }
+            // 只要音轨：进曲库。完整视频默认不进（免得搅乱曲库），
+            // 但拖进某个文件夹时用户就是要它出现在那里——dest_dir 非空也入库。
+            let should_import = req.audio_only || explicit_dest;
+            let track_id = if should_import {
+                manager.phase(&id, TaskPhase::Importing);
+                match state
+                    .library
+                    .upsert_file(&path, platform.as_str(), &resolved_source_key)
+                {
+                    Ok(id) => Some(id),
+                    Err(err) => {
+                        let message = format!("视频已下载，但加入曲库失败：{err:#}");
+                        tracing::error!("{} {}", message, path.display());
+                        manager.fail_after_download(&id, &path, &message);
                         return;
                     }
-                };
-                // 只要音轨：进曲库。完整视频默认不进（免得搅乱曲库），
-                // 但拖进某个文件夹时用户就是要它出现在那里——dest_dir 非空也入库。
-                let should_import = req.audio_only || explicit_dest;
-                let track_id = if should_import {
-                    manager.phase(&id, TaskPhase::Importing);
-                    match state
-                        .library
-                        .upsert_file(&path, platform.as_str(), &req.bvid)
-                    {
-                        Ok(id) => Some(id),
-                        Err(err) => {
-                            let message = format!("视频已下载，但加入曲库失败：{err:#}");
-                            tracing::error!("{} {}", message, path.display());
-                            manager.fail_after_download(&id, &path, &message);
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
-                manager.finish(&id, &path, track_id);
-                if let Some(track_id) = track_id {
-                    state.hub.publish_library_updated(&[track_id]);
                 }
-            }
-            Err(err) if cancel.is_cancelled() => {
-                tracing::debug!("视频下载取消：{err:#}");
-                manager.settle(&id, TaskState::Canceled, "已取消");
-            }
-            Err(err) => {
-                let message = format!("{err:#}");
-                // 同上：settle 已把原因带给队列面板，不再另发浮层事件
-                manager.settle(&id, TaskState::Failed, &message);
+            } else {
+                None
+            };
+            manager.finish(&id, &path, track_id);
+            if let Some(track_id) = track_id {
+                state.hub.publish_library_updated(&[track_id]);
             }
         }
-    });
-    task
+        Err(err) if cancel.is_cancelled() => {
+            tracing::debug!("视频下载取消：{err:#}");
+            manager.settle(&id, TaskState::Canceled, "已取消");
+        }
+        Err(err) => {
+            let message = format!("{err:#}");
+            // 同上：settle 已把原因带给队列面板，不再另发浮层事件
+            manager.settle(&id, TaskState::Failed, &message);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1561,6 +2211,7 @@ mod tests {
             id: id.into(),
             kind: TaskKind::Audio,
             platform: Platform::Wyy,
+            source_key: String::new(),
             title: "t".into(),
             artist: String::new(),
             quality: "flac".into(),
@@ -1580,9 +2231,222 @@ mod tests {
             dest_dir: String::new(),
             output_dir: String::new(),
             cover: String::new(),
+            video_page: None,
             created_at,
             updated_at: created_at,
         }
+    }
+
+    fn sample_audio_retry(external_preparation: bool) -> AudioRetry {
+        AudioRetry {
+            source: SongSource {
+                platform: Platform::Ytm,
+                key: "source-key".into(),
+                title: "song".into(),
+                artists: vec!["artist".into()],
+                album: String::new(),
+                duration: None,
+                cover: String::new(),
+                max_quality: Some(Quality::Flac),
+                vip: false,
+                payload: Default::default(),
+            },
+            quality: Quality::Flac,
+            analyze: true,
+            dest_dir: "/tmp/music".into(),
+            external_preparation,
+        }
+    }
+
+    fn journal_path(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-download-journal-{name}-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        (root.join("download-queue.json"), root)
+    }
+
+    #[test]
+    fn unfinished_downloads_restore_paused_with_retry_parameters() {
+        let (path, root) = journal_path("resume");
+        {
+            let manager =
+                DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+            let mut task = sample_task("resume", TaskState::Queued, 1.0);
+            task.kind = TaskKind::Audio;
+            task.platform = Platform::Ytm;
+            manager.insert_with_retry(
+                task,
+                CancellationToken::new(),
+                Some(sample_audio_retry(true)),
+                None,
+            );
+            manager.start_audio("resume").unwrap();
+            manager.progress("resume", 62, 100);
+            manager
+                .attach_prepared_source("resume", 1, "https://temporary.invalid/media".into())
+                .unwrap();
+        }
+
+        let reopened = DownloadManager::open(EventHub::default(), 2, false, path).unwrap();
+        let task = reopened.get("resume").unwrap();
+        assert_eq!(task.state, TaskState::Paused);
+        assert_eq!(task.phase, TaskPhase::Waiting);
+        assert_eq!(reopened.restartable_ids(), vec!["resume"]);
+        assert!(reopened.pending_download_preparations().is_empty());
+        reopened.prepare_audio_retry("resume").unwrap();
+        reopened.start_audio("resume").unwrap();
+        assert_eq!(
+            reopened.pending_download_preparations()[0].id(),
+            "resume",
+            "短期媒体 URL 不能跨重启复用，必须重新准备"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminal_history_and_removal_survive_reopen() {
+        let (path, root) = journal_path("terminal");
+        {
+            let manager =
+                DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+            manager.insert(
+                sample_task("done", TaskState::Done, 1.0),
+                CancellationToken::new(),
+            );
+        }
+        {
+            let manager =
+                DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+            assert_eq!(manager.get("done").unwrap().state, TaskState::Done);
+            assert!(manager.remove_finished("done").is_some());
+        }
+        let reopened = DownloadManager::open(EventHub::default(), 2, false, path).unwrap();
+        assert!(reopened.get("done").is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_video_history_recovers_the_bilibili_share_key() {
+        let mut task = sample_task("bili-share", TaskState::Done, 1.0);
+        task.kind = TaskKind::Video;
+        task.platform = Platform::Bilibili;
+        let persisted = PersistedEntry {
+            task,
+            audio_retry: None,
+            video_retry: Some(VideoRetry {
+                request: VideoDownloadRequest {
+                    platform: Platform::Bilibili,
+                    bvid: "BV1eiXRYHEzL".into(),
+                    page_index: 2,
+                    ..Default::default()
+                },
+                output_dir: "/video".into(),
+                external_preparation: false,
+            }),
+        };
+
+        let (_, restored) = persisted.restore().expect("队列记录应可恢复");
+        assert_eq!(restored.task.source_key, "BV1eiXRYHEzL");
+        assert_eq!(
+            restored.task.video_page.as_ref().map(|page| page.index),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn bilibili_resolution_writes_the_real_page_label_into_the_task() {
+        let manager = manager();
+        let mut task = sample_task("bili-p3", TaskState::Queued, 1.0);
+        task.kind = TaskKind::Video;
+        task.platform = Platform::Bilibili;
+        manager.insert(task, CancellationToken::new());
+        manager.attach_video_retry(
+            "bili-p3",
+            VideoRetry {
+                request: VideoDownloadRequest {
+                    platform: Platform::Bilibili,
+                    bvid: "BV1L94y1H7CV".into(),
+                    page_index: 2,
+                    ..Default::default()
+                },
+                output_dir: "/video".into(),
+                external_preparation: false,
+            },
+        );
+
+        manager.apply_video_resolution(
+            "bili-p3",
+            &VideoInfo {
+                platform: Platform::Bilibili,
+                bvid: "BV1L94y1H7CV".into(),
+                title: "合集".into(),
+                author: "UP主".into(),
+                cover: String::new(),
+                duration: 360,
+                pages: vec![
+                    kdj_core::models::VideoPage {
+                        index: 0,
+                        title: "第一段".into(),
+                        duration: 120,
+                    },
+                    kdj_core::models::VideoPage {
+                        index: 1,
+                        title: "第二段".into(),
+                        duration: 120,
+                    },
+                    kdj_core::models::VideoPage {
+                        index: 2,
+                        title: "第三段".into(),
+                        duration: 120,
+                    },
+                ],
+                options: Vec::new(),
+                logged_in: false,
+            },
+        );
+
+        let task = manager.get("bili-p3").expect("任务仍在队列中");
+        let page = task.video_page.expect("B 站任务应公开分 P");
+        assert_eq!(page.index, 2);
+        assert_eq!(page.count, 3);
+        assert_eq!(page.title, "第三段");
+    }
+
+    #[test]
+    fn corrupt_download_journal_is_quarantined_instead_of_blocking_startup() {
+        let (path, root) = journal_path("corrupt");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&path, b"{ definitely not json").unwrap();
+
+        let manager = DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+        assert!(manager.list().is_empty());
+        assert!(path.is_file(), "启动后要建立新的空 journal");
+        assert!(fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_download_journal_is_quarantined_before_it_is_read() {
+        let (path, root) = journal_path("oversized");
+        fs::create_dir_all(&root).unwrap();
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(DOWNLOAD_JOURNAL_MAX_BYTES + 1).unwrap();
+        drop(file);
+
+        let manager = DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+
+        assert!(manager.list().is_empty());
+        assert!(path.is_file());
+        assert!(fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1617,7 +2481,7 @@ mod tests {
             },
         );
 
-        assert_eq!(manager.retryable_failed_audio_ids(), vec!["retry"]);
+        assert_eq!(manager.restartable_ids(), vec!["retry"]);
         let (task, retry, fresh_cancel) = manager.prepare_audio_retry("retry").unwrap();
         assert_eq!(task.state, TaskState::Queued);
         assert_eq!(task.progress, 0.0);
@@ -1627,8 +2491,139 @@ mod tests {
         assert_eq!(retry.source.key, "123");
         assert_eq!(retry.dest_dir, "/music");
         assert!(!fresh_cancel.is_cancelled());
-        assert!(manager.retryable_failed_audio_ids().is_empty());
+        assert!(manager.restartable_ids().is_empty());
         assert!(manager.prepare_audio_retry("retry").is_err());
+    }
+
+    #[test]
+    fn queued_audio_quality_updates_the_task_and_worker_parameters_together() {
+        let manager = manager();
+        manager.insert(
+            sample_task("quality", TaskState::Queued, 1.0),
+            CancellationToken::new(),
+        );
+        manager.attach_audio_retry(
+            "quality",
+            AudioRetry {
+                source: SongSource {
+                    platform: Platform::Wyy,
+                    key: "123".into(),
+                    title: "song".into(),
+                    artists: vec!["artist".into()],
+                    album: String::new(),
+                    duration: None,
+                    cover: String::new(),
+                    max_quality: None,
+                    vip: false,
+                    payload: Default::default(),
+                },
+                quality: Quality::Flac,
+                analyze: true,
+                dest_dir: "/music".into(),
+                external_preparation: false,
+            },
+        );
+
+        let task = manager
+            .set_queued_audio_quality("quality", Quality::Q128)
+            .unwrap();
+        assert_eq!(task.quality, "128");
+        let retry = manager.start_audio("quality").unwrap();
+        assert_eq!(retry.quality, Quality::Q128);
+        assert!(manager
+            .set_queued_audio_quality("quality", Quality::Q320)
+            .is_err());
+    }
+
+    #[test]
+    fn failed_video_can_be_reset_with_its_original_request() {
+        let manager = manager();
+        let mut task = sample_task("video-retry", TaskState::Failed, 1.0);
+        task.kind = TaskKind::Video;
+        task.platform = Platform::Bilibili;
+        task.error = "网络失败".into();
+        manager.insert(task, CancellationToken::new());
+        manager.attach_video_retry(
+            "video-retry",
+            VideoRetry {
+                request: VideoDownloadRequest {
+                    platform: Platform::Bilibili,
+                    bvid: "BV1example".into(),
+                    max_height: 1440,
+                    ..Default::default()
+                },
+                output_dir: "/video".into(),
+                external_preparation: false,
+            },
+        );
+
+        assert_eq!(manager.restartable_ids(), vec!["video-retry"]);
+        let updated = manager
+            .set_pending_video_height("video-retry", 720)
+            .unwrap();
+        assert_eq!(updated.quality, "720p");
+        let (task, retry, cancel) = manager.prepare_video_retry("video-retry").unwrap();
+        assert_eq!(task.state, TaskState::Queued);
+        assert!(task.error.is_empty());
+        assert_eq!(retry.request.max_height, 720);
+        assert_eq!(retry.output_dir, "/video");
+        assert!(!cancel.is_cancelled());
+        let retry = manager.start_video("video-retry").unwrap();
+        assert_eq!(retry.request.max_height, 720);
+        assert_eq!(
+            manager.get("video-retry").unwrap().phase,
+            TaskPhase::Resolving
+        );
+    }
+
+    #[test]
+    fn url_only_youtube_video_is_resolved_before_external_preparation() {
+        let manager = manager();
+        let mut task = sample_task("youtube-url", TaskState::Queued, 1.0);
+        task.kind = TaskKind::Video;
+        task.platform = Platform::Youtube;
+        task.title = "https://youtu.be/dQw4w9WgXcQ".into();
+        manager.insert(task, CancellationToken::new());
+        manager.attach_video_retry(
+            "youtube-url",
+            VideoRetry {
+                request: VideoDownloadRequest {
+                    platform: Platform::Youtube,
+                    url: "https://youtu.be/dQw4w9WgXcQ".into(),
+                    max_height: 1080,
+                    ..Default::default()
+                },
+                output_dir: "/video".into(),
+                external_preparation: true,
+            },
+        );
+
+        manager.start_video("youtube-url").unwrap();
+        assert!(manager.pending_download_preparations().is_empty());
+        manager.apply_video_resolution(
+            "youtube-url",
+            &VideoInfo {
+                platform: Platform::Youtube,
+                bvid: "dQw4w9WgXcQ".into(),
+                title: "resolved title".into(),
+                author: "resolved author".into(),
+                cover: "https://i.ytimg.com/cover.jpg".into(),
+                duration: 180,
+                pages: Vec::new(),
+                options: Vec::new(),
+                logged_in: true,
+            },
+        );
+        manager.phase("youtube-url", TaskPhase::Authorizing);
+
+        let pending = manager.pending_download_preparations();
+        let PendingDownloadPreparation::Video { request, .. } = &pending[0] else {
+            panic!("YouTube 视频应返回视频准备请求");
+        };
+        assert_eq!(request.bvid, "dQw4w9WgXcQ");
+        let task = manager.get("youtube-url").unwrap();
+        assert_eq!(task.source_key, request.bvid);
+        assert_eq!(task.title, "resolved title");
     }
 
     #[test]
@@ -1656,13 +2651,28 @@ mod tests {
     }
 
     #[test]
+    fn entering_download_bypasses_byte_progress_throttling() {
+        let hub = EventHub::default();
+        let mut events = hub.subscribe();
+        let manager = DownloadManager::new(hub, 1, true);
+        manager.insert(
+            sample_task("phase-event", TaskState::Queued, 1.0),
+            CancellationToken::new(),
+        );
+        manager.start("phase-event", TaskPhase::Resolving);
+        while events.try_recv().is_ok() {}
+
+        // 0 / 0 是 HLS 等未知总量下载的真实起点；即使字节尚未前进也要立即通知 UI。
+        manager.progress("phase-event", 0, 0);
+        let event = events.try_recv().expect("下载阶段切换应立即广播");
+        assert!(event.contains(r#""phase":"downloading""#), "{event}");
+    }
+
+    #[test]
     fn externally_prepared_sources_cover_task_lifecycle_and_are_consumed_once() {
         let manager = manager();
-        for (id, state, created_at) in [
-            ("later", TaskState::Failed, 2.0),
-            ("first", TaskState::Queued, 1.0),
-        ] {
-            let mut task = sample_task(id, state, created_at);
+        for (id, created_at) in [("later", 2.0), ("first", 1.0)] {
+            let mut task = sample_task(id, TaskState::Queued, created_at);
             task.platform = Platform::Ytm;
             manager.insert(task, CancellationToken::new());
             manager.attach_audio_retry(
@@ -1686,22 +2696,25 @@ mod tests {
                     external_preparation: true,
                 },
             );
+            manager.start_audio(id).unwrap();
         }
 
         let pending = manager.pending_download_preparations();
         assert_eq!(
             pending
                 .iter()
-                .map(|item| item.id.as_str())
+                .map(PendingDownloadPreparation::id)
                 .collect::<Vec<_>>(),
             vec!["first", "later"]
         );
-        let failed = manager.fail_preparation("later", "浏览器挑战失败").unwrap();
+        let failed = manager
+            .fail_preparation("later", 1, "浏览器挑战失败")
+            .unwrap();
         assert_eq!(failed.state, TaskState::Failed);
         assert_eq!(failed.phase, TaskPhase::Authorizing);
         assert_eq!(failed.error, "浏览器挑战失败");
         manager
-            .attach_prepared_source("first", "https://googlevideo.test/audio".into())
+            .attach_prepared_source("first", 1, "https://googlevideo.test/audio".into())
             .unwrap();
         assert_eq!(
             manager.take_prepared_source_url("first").as_deref(),
@@ -1709,7 +2722,7 @@ mod tests {
         );
         assert!(manager.take_prepared_source_url("first").is_none());
 
-        let mut running = sample_task("running", TaskState::Running, 3.0);
+        let mut running = sample_task("running", TaskState::Queued, 3.0);
         running.platform = Platform::Ytm;
         manager.insert(running, CancellationToken::new());
         manager.attach_audio_retry(
@@ -1733,69 +2746,40 @@ mod tests {
                 external_preparation: true,
             },
         );
+        manager.start_audio("running").unwrap();
         manager
-            .attach_prepared_source("running", "https://googlevideo.test/audio".into())
+            .attach_prepared_source("running", 1, "https://googlevideo.test/audio".into())
             .unwrap();
         assert!(manager
-            .attach_prepared_source("running", "https://googlevideo.test/other".into())
+            .attach_prepared_source("running", 1, "https://googlevideo.test/other".into())
             .is_err());
     }
 
     #[test]
-    fn vj_outputs_inside_a_library_are_imported_like_regular_videos() {
-        let base = std::env::temp_dir().join(format!("kdj-vj-library-{}", std::process::id()));
-        let library = base.join("library");
-        let inside = library.join("set/VJ Export 1.mp4");
-        let outside = base.join("downloads/VJ Export 2.mp4");
-        std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
-        let roots = vec![library.to_string_lossy().into_owned()];
+    fn stale_preparation_cannot_overwrite_a_retried_task() {
+        let manager = manager();
+        let mut task = sample_task("attempt", TaskState::Queued, 1.0);
+        task.platform = Platform::Ytm;
+        manager.insert(task, CancellationToken::new());
+        manager.attach_audio_retry("attempt", sample_audio_retry(true));
+        manager.start_audio("attempt").unwrap();
+        assert_eq!(manager.pause_all(), 1);
+        manager.prepare_audio_retry("attempt").unwrap();
+        manager.start_audio("attempt").unwrap();
 
-        assert!(vj_output_belongs_to_library(&inside, &roots));
-        assert!(!vj_output_belongs_to_library(&outside, &roots));
-        assert!(!vj_output_belongs_to_library(&inside, &[]));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn vj_trims_snap_to_analyzed_beats_or_bars() {
-        let track = Track {
-            duration: Some(20.0),
-            bpm: Some(120.0),
-            first_beat: Some(0.2),
-            cue_ms: Some(1100),
-            end_ms: Some(4500),
-            ..Default::default()
-        };
-        let beats = vj_interval(&track, true, true, false).unwrap();
-        assert_eq!(beats, (1.2, 4.7));
-        let bars = vj_interval(&track, true, true, true).unwrap();
-        assert_eq!(bars, (0.2, 4.2));
-
-        let no_grid = Track {
-            first_beat: None,
-            ..track.clone()
-        };
-        assert_eq!(
-            vj_interval(&no_grid, true, true, false).unwrap(),
-            (1.1, 4.5)
-        );
-    }
-
-    #[test]
-    fn vj_bar_fade_uses_the_outgoing_tracks_bpm() {
-        let req = VjExportRequest {
-            fade_bars: 4,
-            fade_seconds: 99.0,
-            ..Default::default()
-        };
-        let previous = Track {
-            bpm: Some(100.0),
-            ..Default::default()
-        };
-        // 4 小节 × 4 拍 × (60 / 100) 秒；不能误拿下一首或固定秒数。
-        assert!((vj_fade_seconds(&req, &previous) - 9.6).abs() < 1e-9);
-        assert!((vj_fade_seconds(&req, &Track::default()) - 8.0).abs() < 1e-9);
+        assert!(!manager.preparation_is_current("attempt", 1));
+        assert!(manager.preparation_is_current("attempt", 2));
+        assert!(manager
+            .attach_prepared_source("attempt", 1, "https://stale.invalid/audio".into())
+            .is_err());
+        let still_running = manager
+            .fail_preparation("attempt", 1, "旧请求迟到")
+            .unwrap();
+        assert_eq!(still_running.state, TaskState::Running);
+        assert!(still_running.error.is_empty());
+        manager
+            .attach_prepared_source("attempt", 2, "https://current.invalid/audio".into())
+            .unwrap();
     }
 
     #[test]
@@ -1880,6 +2864,25 @@ mod tests {
     }
 
     #[test]
+    fn late_worker_updates_cannot_resurrect_a_cancelled_task() {
+        let manager = manager();
+        let cancel = CancellationToken::new();
+        manager.insert(sample_task("x", TaskState::Running, 1.0), cancel);
+        manager.cancel("x").unwrap();
+
+        // 取消可能正好撞上 worker 的 start/phase，或已经到达的最后一个网络 chunk。
+        manager.start("x", TaskPhase::Resolving);
+        manager.phase("x", TaskPhase::Importing);
+        manager.progress("x", 50, 100);
+
+        let task = manager.get("x").unwrap();
+        assert_eq!(task.state, TaskState::Canceled);
+        assert_eq!(task.phase, TaskPhase::Waiting);
+        assert_eq!(task.downloaded_bytes, 0);
+        assert_eq!(task.progress, 0.0);
+    }
+
+    #[test]
     fn cancel_all_removes_queued_and_stops_every_active_task() {
         let manager = manager();
         let queued_cancel = CancellationToken::new();
@@ -1916,7 +2919,61 @@ mod tests {
     }
 
     #[test]
-    fn clear_only_removes_finished_tasks() {
+    fn pause_all_keeps_tasks_restartable_and_blocks_late_worker_updates() {
+        let manager = manager();
+        let queued_cancel = CancellationToken::new();
+        let running_cancel = CancellationToken::new();
+        manager.insert(
+            sample_task("queued", TaskState::Queued, 1.0),
+            queued_cancel.clone(),
+        );
+        manager.insert(
+            sample_task("running", TaskState::Running, 2.0),
+            running_cancel.clone(),
+        );
+        manager.attach_audio_retry(
+            "running",
+            AudioRetry {
+                source: SongSource {
+                    platform: Platform::Wyy,
+                    key: "123".into(),
+                    title: "song".into(),
+                    artists: vec!["artist".into()],
+                    album: String::new(),
+                    duration: None,
+                    cover: String::new(),
+                    max_quality: None,
+                    vip: false,
+                    payload: Default::default(),
+                },
+                quality: Quality::Flac,
+                analyze: true,
+                dest_dir: "/music".into(),
+                external_preparation: false,
+            },
+        );
+
+        assert_eq!(manager.pause_all(), 2);
+        assert!(queued_cancel.is_cancelled());
+        assert!(running_cancel.is_cancelled());
+        assert_eq!(manager.get("queued").unwrap().state, TaskState::Paused);
+        assert_eq!(manager.get("running").unwrap().state, TaskState::Paused);
+
+        // 暂停前的 worker 可能晚到一帧；这些回调都不能把 Paused 改成别的状态。
+        manager.phase("running", TaskPhase::Importing);
+        manager.progress("running", 100, 100);
+        manager.settle("running", TaskState::Canceled, "已取消");
+        assert_eq!(manager.get("running").unwrap().state, TaskState::Paused);
+
+        assert_eq!(manager.restartable_ids(), vec!["running"]);
+        let (task, retry, fresh_cancel) = manager.prepare_audio_retry("running").unwrap();
+        assert_eq!(task.state, TaskState::Queued);
+        assert_eq!(retry.source.key, "123");
+        assert!(!fresh_cancel.is_cancelled());
+    }
+
+    #[test]
+    fn clear_removes_every_inactive_task() {
         let manager = manager();
         manager.insert(
             sample_task("done", TaskState::Done, 1.0),
@@ -1938,10 +2995,14 @@ mod tests {
             sample_task("queued", TaskState::Queued, 5.0),
             CancellationToken::new(),
         );
+        manager.insert(
+            sample_task("paused", TaskState::Paused, 6.0),
+            CancellationToken::new(),
+        );
 
-        assert_eq!(manager.clear_finished(), 3);
+        assert_eq!(manager.clear_inactive(), 5);
         let ids: Vec<String> = manager.list().into_iter().map(|task| task.id).collect();
-        assert_eq!(ids, vec!["running", "queued"], "正在跑和排队的不能被清掉");
+        assert_eq!(ids, vec!["running"], "只有正在执行的任务不能被清掉");
     }
 
     #[test]
@@ -2166,6 +3227,7 @@ mod tests {
         let task = new_task(
             TaskKind::Audio,
             Platform::Wyy,
+            String::new(),
             "",
             "",
             "flac".into(),
@@ -2294,7 +3356,7 @@ mod tests {
             let manager = manager.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                wait_until_started(&manager, &cancel, manager.start_generation()).await
+                wait_until_started(&manager, &cancel, manager.start_generation(), true).await
             })
         };
         // 开关关着就该一直挂着
@@ -2311,7 +3373,48 @@ mod tests {
         let manager = Arc::new(DownloadManager::new(EventHub::default(), 3, false));
         let cancel = CancellationToken::new();
         cancel.cancel();
-        assert!(!wait_until_started(&manager, &cancel, manager.start_generation()).await);
+        assert!(!wait_until_started(&manager, &cancel, manager.start_generation(), true).await);
+    }
+
+    #[tokio::test]
+    async fn task_level_hold_ignores_global_auto_start_until_explicit_release() {
+        let manager = Arc::new(DownloadManager::new(EventHub::default(), 3, true));
+        let cancel = CancellationToken::new();
+        let queued_generation = manager.start_generation();
+        let waiter = {
+            let manager = manager.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                wait_until_started(&manager, &cancel, queued_generation, false).await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "任务级 hold 必须覆盖全局自动下载");
+
+        manager.release_queued();
+        assert!(waiter.await.unwrap(), "显式开始必须仍能放行 held 任务");
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_download_slot_is_immediately_cancellable() {
+        let manager = Arc::new(DownloadManager::new(EventHub::default(), 1, true));
+        let held = manager.permits().acquire_owned().await.unwrap();
+        let cancel = CancellationToken::new();
+        let waiter = {
+            let manager = manager.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move { acquire_download_permit(&manager, &cancel).await.is_some() })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "并发槽被占用时 worker 应当等待");
+
+        cancel.cancel();
+        let acquired = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("取消后不应继续卡在信号量")
+            .unwrap();
+        assert!(!acquired);
+        drop(held);
     }
 
     #[tokio::test]
@@ -2320,7 +3423,7 @@ mod tests {
         let old_generation = manager.start_generation();
         manager.release_queued();
         assert!(
-            wait_until_started(&manager, &CancellationToken::new(), old_generation).await,
+            wait_until_started(&manager, &CancellationToken::new(), old_generation, true,).await,
             "点击开始应放行点击前已经排队的任务"
         );
 
@@ -2329,9 +3432,9 @@ mod tests {
         let waiter = {
             let manager = manager.clone();
             let cancel = cancel.clone();
-            tokio::spawn(
-                async move { wait_until_started(&manager, &cancel, future_generation).await },
-            )
+            tokio::spawn(async move {
+                wait_until_started(&manager, &cancel, future_generation, true).await
+            })
         };
         tokio::task::yield_now().await;
         assert!(!waiter.is_finished(), "点击后新加入的任务必须继续排队");

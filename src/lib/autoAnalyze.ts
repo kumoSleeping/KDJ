@@ -28,7 +28,8 @@ import { selectAnalyzing, useLibraryStore } from "../stores/libraryStore";
 import { isOutsideFolder } from "./outsideFolder";
 import { isStreamTrack } from "./streamTrack";
 import { runtimePlayer } from "./unifiedPlayer";
-import type { Track } from "../types";
+import { resolveAutoAnalysisMode } from "./autoAnalysisMode";
+import type { AutoAnalysisMode, Track } from "../types";
 
 /**
  * 选中触发分析的去抖。按住方向键划过一列表曲目时，每一下都发请求
@@ -80,6 +81,10 @@ const VIEWPORT_YIELD_MS = 10000;
  */
 const BACKFILL_BATCH = 20;
 
+/** Light mode intentionally releases the CPU between small backfill batches. */
+const LIGHT_BACKFILL_BATCH = 4;
+const LIGHT_BACKFILL_COOLDOWN_MS = 15_000;
+
 /** 空闲探测间隔。只是读几个 store 的字段，空转成本可以忽略。 */
 const IDLE_POLL_MS = 4000;
 
@@ -101,10 +106,36 @@ let backfillInFlight = false;
  * 后台补齐读它来让路。0 = 本会话还没滚过。
  */
 let viewportAt = 0;
+let lastLightBackfillAt = 0;
+
+function autoAnalysisMode(): AutoAnalysisMode {
+  if (useLibraryStore.getState().autoAnalyzeSuspended) return "paused";
+  return resolveAutoAnalysisMode(useAppStore.getState().settings);
+}
+
+function playbackActive(): boolean {
+  const playback = runtimePlayer().state();
+  return playback.playing || playback.decks.some((deck) => deck.playing || deck.desiredPlaying);
+}
+
+/**
+ * Both active modes keep accepting work during playback, but their request batches shrink so the
+ * backend never receives a large speculative queue while the user is listening or operating UI.
+ */
+function automaticBatchLimit(
+  lightIdle: number,
+  fullIdle: number,
+  lightPlaying: number,
+  fullPlaying: number,
+): number {
+  const mode = autoAnalysisMode();
+  if (mode === "paused") return 0;
+  if (playbackActive()) return mode === "full" ? fullPlaying : lightPlaying;
+  return mode === "full" ? fullIdle : lightIdle;
+}
 
 function autoAnalyzeAllowed(): boolean {
-  if (useLibraryStore.getState().autoAnalyzeSuspended) return false;
-  return useAppStore.getState().settings?.auto_analyze ?? true;
+  return autoAnalysisMode() !== "paused";
 }
 
 /**
@@ -114,17 +145,11 @@ function autoAnalyzeAllowed(): boolean {
  * `autoAnalyzeSuspended` 是用户刚按过「停止」——几秒后空闲探测又排一批上来的话，
  * 那个按钮等于没按。重新点「分析」才解除。
  *
- * 批量路径还要给正在响的 Deck 让路：旧版一开 Performance 就整库补齐，和
- * Rubber Band/STEM 抢 CPU，听起来像 SYNC 卡拍。正在播的那一首走插队通道，
- * 不走这条。
+ * 播放期间不再完全冻结自动工作：请求会缩成很小的批次，后端也会把所有重任务
+ * 收窄到一个低优先级 owner。这样波形/BPM 仍会慢慢补，但不会为了补库停掉用户操作。
  */
 function autoBatchAllowed(): boolean {
-  if (!autoAnalyzeAllowed()) return false;
-  const playback = runtimePlayer().state();
-  if (playback.playing || playback.decks.some((deck) => deck.playing || deck.desiredPlaying)) {
-    return false;
-  }
-  return true;
+  return autoAnalyzeAllowed();
 }
 
 function autoEnabled(): boolean {
@@ -175,6 +200,8 @@ function scheduleSelection(): void {
  */
 async function analyzeSelection(): Promise<void> {
   if (!autoEnabled()) return;
+  const batchLimit = automaticBatchLimit(5, SELECTION_NEIGHBOR_BATCH, 1, 4);
+  if (batchLimit <= 0) return;
   const state = useLibraryStore.getState();
   const anchorId = state.selectedId;
   if (anchorId === null) return;
@@ -183,12 +210,12 @@ async function analyzeSelection(): Promise<void> {
   const candidates: Track[] = [];
   if (anchor >= 0) {
     candidates.push(state.tracks[anchor]);
-    for (let distance = 1; candidates.length < SELECTION_NEIGHBOR_BATCH; distance += 1) {
+    for (let distance = 1; candidates.length < batchLimit; distance += 1) {
       const before = state.tracks[anchor - distance];
       const after = state.tracks[anchor + distance];
       if (!before && !after) break;
       if (before) candidates.push(before);
-      if (after && candidates.length < SELECTION_NEIGHBOR_BATCH) candidates.push(after);
+      if (after && candidates.length < batchLimit) candidates.push(after);
     }
   } else if (state.selectedTrack?.id === anchorId) {
     // 从和声推荐等页外入口选中的曲目不属于当前页面，不能臆造它的邻居。
@@ -253,7 +280,7 @@ function findScroller(): HTMLElement | null {
  * 混在一起的话用户眼前那几行可能被排到屏幕外的行后面——
  * 那就又回到"忙着背后的工作"了。
  */
-function viewportIds(): number[] {
+function viewportIds(limit: number): number[] {
   const box = findScroller();
   const body = box?.querySelector("tbody");
   if (!box || !body) return [];
@@ -280,7 +307,7 @@ function viewportIds(): number[] {
     if (!track || track.analyzed_at || queued.has(track.id)) continue;
     const visible = rect.bottom > view.top && rect.top < view.bottom;
     (visible ? inView : nearby).push(track.id);
-    if (inView.length + nearby.length >= VIEWPORT_BATCH) break;
+    if (inView.length + nearby.length >= limit) break;
   }
   return [...inView, ...nearby];
 }
@@ -293,7 +320,9 @@ function viewportIds(): number[] {
  */
 async function analyzeViewport(): Promise<void> {
   if (!autoEnabled()) return;
-  const ids = viewportIds();
+  const limit = automaticBatchLimit(12, VIEWPORT_BATCH, 2, 12);
+  if (limit <= 0) return;
+  const ids = viewportIds(limit);
   if (ids.length === 0) return;
   for (const id of ids) queued.add(id);
   // 先记时间再发请求：这一批还在路上时后台补齐就该让开，
@@ -350,15 +379,21 @@ function idle(): boolean {
 async function backfill(): Promise<boolean> {
   if (backfillInFlight || stalled) return false;
   if (!autoEnabled() || !idle()) return false;
+  const mode = autoAnalysisMode();
+  if (mode === "light" && Date.now() - lastLightBackfillAt < LIGHT_BACKFILL_COOLDOWN_MS) {
+    return false;
+  }
+  const batchLimit = automaticBatchLimit(LIGHT_BACKFILL_BATCH, BACKFILL_BATCH, 1, 4);
+  if (batchLimit <= 0) return false;
   // 用户刚在看列表：CPU 先留给他眼前那一屏。
   // 后端每批各起各的线程组，一起跑就是一起慢，所以"低优先级"只能靠**晚点提交**。
   if (Date.now() - viewportAt < VIEWPORT_YIELD_MS) return false;
   const library = useLibraryStore.getState();
   const pendingV1 = library.stats ? library.stats.total - library.stats.analyzed : 0;
-  const pendingV2 = library.stats?.bpm_key_v2_pending ?? 0;
+  const pendingV3 = library.stats?.bpm_key_v3_pending ?? 0;
   const activeFolder =
     library.filter.folder && !isOutsideFolder(library.filter.folder) ? library.filter.folder : "";
-  if (pendingV1 <= 0 && pendingV2 <= 0) return false;
+  if (pendingV1 <= 0 && pendingV3 <= 0) return false;
 
   backfillInFlight = true;
   try {
@@ -370,7 +405,7 @@ async function backfill(): Promise<boolean> {
         folder_deep: activeFolder ? "true" : undefined,
         sort: "added_at",
         order: "desc",
-        limit: BACKFILL_BATCH,
+        limit: batchLimit,
         offset: 0,
       });
       // 当前文件夹的 v1 已补完后，继续全曲库，不让空文件夹把后台回填卡住。
@@ -379,7 +414,7 @@ async function backfill(): Promise<boolean> {
           analyzed: "false",
           sort: "added_at",
           order: "desc",
-          limit: BACKFILL_BATCH,
+          limit: batchLimit,
           offset: 0,
         });
       }
@@ -393,23 +428,25 @@ async function backfill(): Promise<boolean> {
       // 这中间隔了一次网络往返，用户可能刚好点了播放或开始下载，再确认一次
       if (!autoEnabled() || !idle()) return false;
       for (const id of ids) queued.add(id);
+      if (mode === "light") lastLightBackfillAt = Date.now();
       const response = await library.startAnalyze(ids, false, false);
       return response.queued > 0;
     }
 
-    // v1 已补齐后，后端按当前 revision 挑最近加入的 20 首缺失 v2 曲目重跑。
-    // 不把 id 拉到前端：v2 是否过期由数据库里的修订号判断，避免前端复制版本逻辑。
+    // v1 已补齐后，后端按当前 revision 挑最近加入的 20 首缺失 V3 曲目重跑。
+    // 不把 id 拉到前端：V3 是否过期由数据库里的修订号判断，避免前端复制版本逻辑。
     const response = await library.startAnalyze(
       null,
       false,
       false,
-      "v2",
-      BACKFILL_BATCH,
+      "v3",
+      batchLimit,
       activeFolder,
     );
+    if (mode === "light") lastLightBackfillAt = Date.now();
     if (response.queued > 0 || !activeFolder) return response.queued > 0;
-    // 当前文件夹已没有待处理 v2 时，回到全曲库继续，不会反复请求一个空范围。
-    const global = await library.startAnalyze(null, false, false, "v2", BACKFILL_BATCH);
+    // 当前文件夹已没有待处理 V3 时，回到全曲库继续，不会反复请求一个空范围。
+    const global = await library.startAnalyze(null, false, false, "v3", batchLimit);
     return global.queued > 0;
   } catch {
     // 后端没起来之类：下一轮再试，不打扰用户
@@ -441,6 +478,7 @@ async function tick(): Promise<void> {
 export function forgetQueuedAnalysis(): void {
   queued.clear();
   stalled = false;
+  lastLightBackfillAt = 0;
 }
 
 /** 挂上选中订阅和空闲探测，返回停掉它们的函数。连不上后端时不该跑，所以由 App 控制。 */
@@ -458,6 +496,7 @@ export function startAutoAnalyze(): () => void {
   document.addEventListener("scroll", onScrollCapture, true);
   // 兜底轮询。空闲与否是三个 store 合起来的状态（分析、扫描、下载），
   // 全靠事件推的话每多一个来源就要记得补一条订阅，漏一条就再也不补齐了。
+  void tick();
   const timer = setInterval(() => void tick(), IDLE_POLL_MS);
   return () => {
     unsubscribe();

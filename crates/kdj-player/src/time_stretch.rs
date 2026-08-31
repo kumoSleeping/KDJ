@@ -36,11 +36,18 @@ const OPTION_ENGINE_FINER: i32 = 0x2000_0000;
 const OPTION_THREADING_NEVER: i32 = 0x0001_0000;
 /// R3 short-window mode trades a little low-frequency resolution for live-control latency.
 const OPTION_WINDOW_SHORT: i32 = 0x0010_0000;
+/// Dynamic KEY moves should favour a stable pitch response over the cheapest resampling path.
+const OPTION_PITCH_HIGH_CONSISTENCY: i32 = 0x0400_0000;
 const RUBBER_BAND_OPTIONS: i32 = OPTION_PROCESS_REAL_TIME
     | OPTION_CHANNELS_TOGETHER
     | OPTION_ENGINE_FINER
     | OPTION_THREADING_NEVER
-    | OPTION_WINDOW_SHORT;
+    | OPTION_WINDOW_SHORT
+    | OPTION_PITCH_HIGH_CONSISTENCY;
+
+pub const MIN_PITCH_SEMITONES: f32 = -12.0;
+pub const MAX_PITCH_SEMITONES: f32 = 12.0;
+const UNITY_PITCH_EPSILON: f32 = 0.0005;
 
 type RubberBandState = *mut c_void;
 
@@ -56,6 +63,7 @@ unsafe extern "C" {
     fn rubberband_reset(state: RubberBandState);
     fn rubberband_get_engine_version(state: RubberBandState) -> i32;
     fn rubberband_set_time_ratio(state: RubberBandState, ratio: f64);
+    fn rubberband_set_pitch_scale(state: RubberBandState, scale: f64);
     fn rubberband_get_preferred_start_pad(state: RubberBandState) -> u32;
     fn rubberband_get_start_delay(state: RubberBandState) -> u32;
     fn rubberband_set_max_process_size(state: RubberBandState, frames: u32);
@@ -79,6 +87,8 @@ pub struct TempoControl {
     lane: TempoLane,
     applied_rate_bits: Arc<AtomicU32>,
     applied_revision: Arc<AtomicU64>,
+    pitch_semitones_bits: Arc<AtomicU32>,
+    pitch_revision: Arc<AtomicU64>,
     deck: Option<usize>,
 }
 
@@ -89,6 +99,8 @@ impl TempoControl {
         Self {
             applied_rate_bits: Arc::new(AtomicU32::new(rate.to_bits())),
             applied_revision: Arc::new(AtomicU64::new(lane.revision())),
+            pitch_semitones_bits: Arc::new(AtomicU32::new(0.0f32.to_bits())),
+            pitch_revision: Arc::new(AtomicU64::new(0)),
             lane,
             deck: None,
         }
@@ -103,6 +115,8 @@ impl TempoControl {
         Self {
             applied_rate_bits: Arc::new(AtomicU32::new(rate.to_bits())),
             applied_revision: Arc::new(AtomicU64::new(lane.revision())),
+            pitch_semitones_bits: Arc::new(AtomicU32::new(0.0f32.to_bits())),
+            pitch_revision: Arc::new(AtomicU64::new(0)),
             lane,
             deck: Some(deck),
         }
@@ -146,6 +160,28 @@ impl TempoControl {
     pub fn is_unity(&self) -> bool {
         is_unity_rate(self.rate())
     }
+
+    /// Persistent KEY transpose, independent from pitch-preserving TEMPO.
+    pub fn set_pitch_semitones(&self, semitones: f32) {
+        let semitones = normalize_pitch_semitones(semitones);
+        self.pitch_semitones_bits
+            .store(semitones.to_bits(), Ordering::Release);
+        self.pitch_revision.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn pitch_semitones(&self) -> f32 {
+        normalize_pitch_semitones(f32::from_bits(
+            self.pitch_semitones_bits.load(Ordering::Acquire),
+        ))
+    }
+
+    fn pitch_scale(&self) -> f64 {
+        2.0f64.powf(f64::from(self.pitch_semitones()) / 12.0)
+    }
+
+    fn pitch_revision(&self) -> u64 {
+        self.pitch_revision.load(Ordering::Acquire)
+    }
 }
 
 fn is_unity_rate(rate: f32) -> bool {
@@ -158,6 +194,18 @@ pub fn normalize_rate(rate: f32) -> f32 {
     } else {
         1.0
     }
+}
+
+pub fn normalize_pitch_semitones(semitones: f32) -> f32 {
+    if semitones.is_finite() {
+        semitones.clamp(MIN_PITCH_SEMITONES, MAX_PITCH_SEMITONES)
+    } else {
+        0.0
+    }
+}
+
+fn is_unity_pitch(semitones: f32) -> bool {
+    semitones.abs() < UNITY_PITCH_EPSILON
 }
 
 /// Maps one KDJ ring frame to Rubber Band's deinterleaved channel API.
@@ -335,8 +383,10 @@ pub struct PitchPreservingStretcher<F: TimeStretchFrame> {
     next_required: usize,
     applied_rate: f32,
     applied_revision: u64,
+    applied_pitch_scale: f64,
+    applied_pitch_revision: u64,
     engine_engaged: bool,
-    tempo_engaged: bool,
+    processing_engaged: bool,
     source_frames_since_rate_update: usize,
     remaining_start_delay: usize,
     expected_output_frames: f64,
@@ -366,6 +416,9 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
 
         let rate = control.rate();
         let revision = control.revision();
+        let pitch_semitones = control.pitch_semitones();
+        let pitch_scale = control.pitch_scale();
+        let pitch_revision = control.pitch_revision();
         // SAFETY: the vendored C API returns one uniquely-owned state or null on failure.
         let state = unsafe {
             rubberband_new(
@@ -373,7 +426,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
                 F::CHANNELS as u32,
                 RUBBER_BAND_OPTIONS,
                 1.0 / f64::from(rate),
-                1.0,
+                pitch_scale,
             )
         };
         let state =
@@ -395,8 +448,10 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             next_required: 1,
             applied_rate: rate,
             applied_revision: revision,
+            applied_pitch_scale: pitch_scale,
+            applied_pitch_revision: pitch_revision,
             engine_engaged: !is_unity_rate(rate) || Self::keep_engine_primed(),
-            tempo_engaged: !is_unity_rate(rate),
+            processing_engaged: !is_unity_rate(rate) || !is_unity_pitch(pitch_semitones),
             source_frames_since_rate_update: 0,
             remaining_start_delay: 0,
             expected_output_frames: 0.0,
@@ -445,9 +500,12 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         self.finished = false;
         let rate = self.control.rate();
         let revision = self.control.revision();
+        let pitch_semitones = self.control.pitch_semitones();
+        self.applied_pitch_scale = self.control.pitch_scale();
+        self.applied_pitch_revision = self.control.pitch_revision();
         self.engine_engaged = !is_unity_rate(rate) || Self::keep_engine_primed();
-        self.tempo_engaged = !is_unity_rate(rate);
-        self.sync_realtime_activity(rate);
+        self.processing_engaged = !is_unity_rate(rate) || !is_unity_pitch(pitch_semitones);
+        self.sync_realtime_activity(rate, pitch_semitones);
         if !self.engine_engaged {
             self.applied_rate = 1.0;
             self.applied_revision = revision;
@@ -497,11 +555,12 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             return Ok(());
         }
         let rate = self.control.rate();
-        if !is_unity_rate(rate) {
-            self.tempo_engaged = true;
+        let pitch_semitones = self.control.pitch_semitones();
+        if !is_unity_rate(rate) || !is_unity_pitch(pitch_semitones) {
+            self.processing_engaged = true;
         }
-        self.sync_realtime_activity(rate);
-        if is_unity_rate(rate) && !self.tempo_engaged {
+        self.sync_realtime_activity(rate, pitch_semitones);
+        if is_unity_rate(rate) && is_unity_pitch(pitch_semitones) && !self.processing_engaged {
             self.applied_rate = 1.0;
             self.applied_revision = self.control.revision();
             self.control.mark_applied(1.0, self.applied_revision);
@@ -550,7 +609,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         if self.finished {
             return Ok(());
         }
-        if !self.tempo_engaged && self.input_len() == 0 {
+        if !self.processing_engaged && self.input_len() == 0 {
             self.finished = true;
             return Ok(());
         }
@@ -575,6 +634,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             // headroom before live playback, then restore the actual target.
             rubberband_set_time_ratio(self.state.as_ptr(), 2.0);
             rubberband_set_time_ratio(self.state.as_ptr(), 1.0 / f64::from(rate));
+            rubberband_set_pitch_scale(self.state.as_ptr(), self.control.pitch_scale());
             self.remaining_start_delay = rubberband_get_start_delay(self.state.as_ptr()) as usize;
         }
 
@@ -603,10 +663,13 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         self.input.first().map_or(0, Vec::len)
     }
 
-    fn update_rate(&mut self, incoming_frames: usize) {
+    fn update_controls(&mut self, incoming_frames: usize) {
         let rate = self.control.rate();
         let revision = self.control.revision();
-        self.sync_realtime_activity(rate);
+        let pitch_semitones = self.control.pitch_semitones();
+        let pitch_scale = self.control.pitch_scale();
+        let pitch_revision = self.control.pitch_revision();
+        self.sync_realtime_activity(rate, pitch_semitones);
         self.source_frames_since_rate_update = self
             .source_frames_since_rate_update
             .saturating_add(incoming_frames);
@@ -628,19 +691,30 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             self.applied_revision = revision;
             self.control.mark_applied(rate, revision);
         }
+        if (pitch_scale - self.applied_pitch_scale).abs() > f64::EPSILON
+            || pitch_revision != self.applied_pitch_revision
+        {
+            // SAFETY: target updates are applied from the same worker that calls process().
+            unsafe { rubberband_set_pitch_scale(self.state.as_ptr(), pitch_scale) };
+            self.applied_pitch_scale = pitch_scale;
+            self.applied_pitch_revision = pitch_revision;
+        }
     }
 
-    fn sync_realtime_activity(&mut self, rate: f32) {
-        if (!is_unity_rate(rate) || self.tempo_engaged) && self.realtime_activity.is_none() {
+    fn sync_realtime_activity(&mut self, rate: f32, pitch_semitones: f32) {
+        if (!is_unity_rate(rate) || !is_unity_pitch(pitch_semitones) || self.processing_engaged)
+            && self.realtime_activity.is_none()
+        {
             self.realtime_activity = Some(work_scheduler().activity(WorkClass::TempoStretch));
-        } else if is_unity_rate(rate) && !self.tempo_engaged {
+        } else if is_unity_rate(rate) && is_unity_pitch(pitch_semitones) && !self.processing_engaged
+        {
             self.realtime_activity = None;
         }
     }
 
     fn process_input(&mut self, final_block: bool) -> Result<()> {
         let frames = self.input_len();
-        self.update_rate(frames);
+        self.update_controls(frames);
         if frames > MAX_PROCESS_FRAMES {
             bail!("Rubber Band input block exceeded its preallocated maximum");
         }
@@ -939,6 +1013,54 @@ mod tests {
                 "rate={rate} frequency={frequency}"
             );
         }
+    }
+
+    #[test]
+    fn r3_transposes_key_without_changing_tempo() {
+        let sample_rate = 48_000;
+        let input = sine(220.0, 2.0, sample_rate);
+        let control = TempoControl::new(1.0);
+        control.set_pitch_semitones(12.0);
+        let mut processor = PitchPreservingStretcher::new(control, sample_rate).unwrap();
+        let mut output = Vec::new();
+        for frame in input.iter().copied() {
+            processor
+                .push(frame, |frame, _, _| {
+                    output.push(frame);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        processor
+            .finish(|frame, _, _| {
+                output.push(frame);
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(
+            (output.len() as isize - input.len() as isize).unsigned_abs()
+                < sample_rate as usize / 25,
+            "KEY must not change duration: input={} output={}",
+            input.len(),
+            output.len()
+        );
+        let frequency = frequency_from_crossings(&output, sample_rate);
+        assert!(
+            (frequency - 440.0).abs() < 10.0,
+            "+12 st should transpose 220 Hz to 440 Hz, got {frequency}"
+        );
+    }
+
+    #[test]
+    fn pitch_control_clamps_non_finite_and_out_of_range_values() {
+        let control = TempoControl::new(1.0);
+        control.set_pitch_semitones(99.0);
+        assert_eq!(control.pitch_semitones(), MAX_PITCH_SEMITONES);
+        control.set_pitch_semitones(-99.0);
+        assert_eq!(control.pitch_semitones(), MIN_PITCH_SEMITONES);
+        control.set_pitch_semitones(f32::NAN);
+        assert_eq!(control.pitch_semitones(), 0.0);
     }
 
     #[test]

@@ -10,23 +10,11 @@ export interface SidebarTreeState {
     expanded: string[];
     knownRoots: string[];
   };
-  oneLibrary: {
-    open: boolean;
-    openDevices: string[];
-    openFolders: string[];
-    knownDevices: string[];
-  };
 }
 
 export const DEFAULT_SIDEBAR_TREE_STATE: SidebarTreeState = {
   version: 1,
   local: { expanded: [], knownRoots: [] },
-  oneLibrary: {
-    open: true,
-    openDevices: [],
-    openFolders: [],
-    knownDevices: [],
-  },
 };
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -55,18 +43,11 @@ function stringList(value: unknown): string[] {
 export function normalizeSidebarTreeState(value: unknown): SidebarTreeState {
   const root = record(value);
   const local = record(root?.local);
-  const oneLibrary = record(root?.oneLibrary);
   return {
     version: 1,
     local: {
       expanded: stringList(local?.expanded),
       knownRoots: stringList(local?.knownRoots),
-    },
-    oneLibrary: {
-      open: typeof oneLibrary?.open === "boolean" ? oneLibrary.open : true,
-      openDevices: stringList(oneLibrary?.openDevices),
-      openFolders: stringList(oneLibrary?.openFolders),
-      knownDevices: stringList(oneLibrary?.knownDevices),
     },
   };
 }
@@ -98,12 +79,6 @@ export function readSidebarTreeState(): SidebarTreeState {
       expanded: [...cached.local.expanded],
       knownRoots: [...cached.local.knownRoots],
     },
-    oneLibrary: {
-      open: cached.oneLibrary.open,
-      openDevices: [...cached.oneLibrary.openDevices],
-      openFolders: [...cached.oneLibrary.openFolders],
-      knownDevices: [...cached.oneLibrary.knownDevices],
-    },
   };
 }
 
@@ -124,11 +99,4 @@ export function writeLocalFolderTreeState(
       knownRoots: [...knownRoots],
     },
   });
-}
-
-export function writeOneLibraryTreeState(
-  state: SidebarTreeState["oneLibrary"],
-): void {
-  const current = readSidebarTreeState();
-  commit({ ...current, oneLibrary: state });
 }

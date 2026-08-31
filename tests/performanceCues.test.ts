@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CuePoint } from "../src/types";
-import { beatGridMarkers, channelFaderGain, crossfaderChannelGains, eqBandDb, HOT_CUE_COLORS, HOT_CUE_PAD_COUNT, nextLoadedDeckIndex, performanceLoadDeckIndex, removeHotCue, shouldDropSeekPreview, snapCueSeconds, updateHotCueComment, upsertHotCue, validateCuePoints } from "../src/lib/performanceCues";
+import { beatGridMarkers, channelFaderGain, crossfaderChannelGains, eqBandDb, HOT_CUE_COLORS, HOT_CUE_PAD_COUNT, nextLoadedDeckIndex, performanceLoadDeckIndex, removeHotCue, shouldDropSeekPreview, snapCueSeconds, updateHotCueComment, upsertHotCue, validateCuePoints, waveformBeatGridOrigin } from "../src/lib/performanceCues";
+import type { Track } from "../src/types";
 
 const cue = (values: Partial<CuePoint>): CuePoint => ({ id: 1, hot_cue: null, start_ms: 0, end_ms: null, color_index: null, color: "", comment: "", active_loop: false, ...values });
 
@@ -64,6 +65,22 @@ test("beat grid does not invent phase or show a rejected low-confidence fit", ()
   assert.deepEqual(beatGridMarkers(20, 120, null), []);
   assert.deepEqual(beatGridMarkers(20, 120, 0.1, 0, 20, 0.2), []);
   assert.ok(beatGridMarkers(20, 120, 0.1, 0, 20, 0.8).length > 0);
+});
+
+test("playing detail can recover a bar origin from incomplete analysis metadata", () => {
+  const track = {
+    bpm: 128,
+    bpm_confidence: 0.2,
+    first_beat: null,
+    beat_origin: null,
+    beat_times: [],
+    downbeat_origin: null,
+    downbeats: [],
+    downbeat_confidence: 0.2,
+  } as unknown as Track;
+  assert.equal(waveformBeatGridOrigin(track, false), null);
+  assert.equal(waveformBeatGridOrigin(track, true), 0);
+  assert.ok(beatGridMarkers(20, track.bpm, waveformBeatGridOrigin(track, true)).length > 0);
 });
 
 test("a distinct track is loaded on the opposite fixed deck", () => {

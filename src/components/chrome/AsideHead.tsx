@@ -71,7 +71,7 @@ export interface AsideHeadProps {
   onFaceChange?: (face: TrackAsideFace) => void;
   /** 宽屏右栏开合键：弹出时挂在右栏顶条最右端。 */
   asideToggle?: ReactNode;
-  /** 当前面板自己的动作，例如下载队列固定键。 */
+  /** 当前面板自己的动作，例如下载队列固定、当前播放详情固定。 */
   tools?: ReactNode;
 }
 

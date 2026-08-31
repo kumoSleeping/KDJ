@@ -4,14 +4,66 @@
 //! 每一个都必须和 numpy 版**数值一致**——用户曲库里 1379 首歌已经按旧结果分析过，
 //! 这一层差一点，BPM 和调号就会整片漂移，和声推荐跟着重排。
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use rustfft::num_complex::Complex32;
-use rustfft::FftPlanner;
+use rustfft::{Fft, FftPlanner};
 
 pub const N_FFT: usize = 2048;
 pub const HOP: usize = 512;
 pub const N_MELS: usize = 64;
 pub const MEL_FMIN: f64 = 30.0;
 pub const MEL_FMAX: f64 = 11000.0;
+
+type SharedFft32 = Arc<dyn Fft<f32>>;
+
+static FFT32_PLANS: OnceLock<Mutex<HashMap<usize, SharedFft32>>> = OnceLock::new();
+static HANN_WINDOWS: OnceLock<Mutex<HashMap<usize, Arc<[f64]>>>> = OnceLock::new();
+
+struct Fft64Pair {
+    forward: Arc<dyn Fft<f64>>,
+    inverse: Arc<dyn Fft<f64>>,
+}
+
+static FFT64_PAIRS: OnceLock<Mutex<HashMap<usize, Arc<Fft64Pair>>>> = OnceLock::new();
+
+fn fft32_plan(n_fft: usize) -> SharedFft32 {
+    let plans = FFT32_PLANS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut plans = plans
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(plans.entry(n_fft).or_insert_with(|| {
+        let mut planner = FftPlanner::<f32>::new();
+        planner.plan_fft_forward(n_fft)
+    }))
+}
+
+fn fft64_pair(n_fft: usize) -> Arc<Fft64Pair> {
+    let plans = FFT64_PAIRS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut plans = plans
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(plans.entry(n_fft).or_insert_with(|| {
+        let mut planner = FftPlanner::<f64>::new();
+        Arc::new(Fft64Pair {
+            forward: planner.plan_fft_forward(n_fft),
+            inverse: planner.plan_fft_inverse(n_fft),
+        })
+    }))
+}
+
+fn cached_hann_window(n: usize) -> Arc<[f64]> {
+    let windows = HANN_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut windows = windows
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(
+        windows
+            .entry(n)
+            .or_insert_with(|| Arc::from(hann_window(n))),
+    )
+}
 
 /// 周期型 Hann 窗（`sym=False`）。
 ///
@@ -30,6 +82,7 @@ pub fn hann_window(n: usize) -> Vec<f64> {
 ///
 /// `center = true` 时两端反射补零，使第 i 帧的时间中心正好是 `i*hop/sr`——
 /// 拍点时间戳直接用 `frame*hop/sr` 就对齐了，不用再补半窗偏移。
+#[derive(Clone)]
 pub struct Spectrogram {
     pub bins: usize,
     pub frames: usize,
@@ -45,39 +98,129 @@ impl Spectrogram {
 }
 
 pub fn stft_magnitude(samples: &[f32], n_fft: usize, hop: usize) -> Spectrogram {
-    let padded = reflect_pad(samples, n_fft / 2, n_fft);
-    let bins = n_fft / 2 + 1;
+    stft_magnitude_impl_cancellable(samples, n_fft, hop, None, None, &|| false)
+        .expect("不可取消的 STFT 不应提前退出")
+}
+
+/// 与 [`stft_magnitude`] 使用完全相同的 FFT，只保存调用方实际需要的频率 bin。
+/// `selected` 的顺序就是返回矩阵的行顺序；这不会近似或重采样频谱。
+pub fn stft_magnitude_selected(
+    samples: &[f32],
+    n_fft: usize,
+    hop: usize,
+    selected: &[usize],
+) -> Spectrogram {
+    stft_magnitude_impl_cancellable(samples, n_fft, hop, Some(selected), None, &|| false)
+        .expect("不可取消的 STFT 不应提前退出")
+}
+
+/// 与先创建 `samples / peak` 再调用 [`stft_magnitude_selected`] 逐位等价，但把归一化
+/// 合并到必需的反射填充缓冲区，避免同时保留两份整段 PCM。
+pub fn stft_magnitude_selected_peak_normalized(
+    samples: &[f32],
+    peak: f32,
+    n_fft: usize,
+    hop: usize,
+    selected: &[usize],
+) -> Spectrogram {
+    stft_magnitude_selected_peak_normalized_cancellable(
+        samples,
+        peak,
+        n_fft,
+        hop,
+        selected,
+        &|| false,
+    )
+    .expect("不可取消的 STFT 不应提前退出")
+}
+
+/// 峰值归一化 selected-bin STFT 的可取消入口。取消时丢弃整张尚未完成的频谱，
+/// 因此调用方永远不会看到半张矩阵。
+pub fn stft_magnitude_selected_peak_normalized_cancellable(
+    samples: &[f32],
+    peak: f32,
+    n_fft: usize,
+    hop: usize,
+    selected: &[usize],
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Spectrogram> {
+    stft_magnitude_impl_cancellable(samples, n_fft, hop, Some(selected), Some(peak), cancelled)
+}
+
+fn stft_magnitude_impl_cancellable(
+    samples: &[f32],
+    n_fft: usize,
+    hop: usize,
+    selected: Option<&[usize]>,
+    normalization_peak: Option<f32>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Spectrogram> {
+    if cancelled() {
+        return None;
+    }
+    let padded = reflect_pad_normalized(samples, n_fft / 2, n_fft, normalization_peak);
+    if cancelled() {
+        return None;
+    }
+    let fft_bins = n_fft / 2 + 1;
+    let output_bins = selected.map_or(fft_bins, <[usize]>::len);
     if padded.len() < n_fft {
-        return Spectrogram {
-            bins,
+        return Some(Spectrogram {
+            bins: output_bins,
             frames: 0,
             data: Vec::new(),
-        };
+        });
     }
     let frames = 1 + (padded.len() - n_fft) / hop;
-    let window = hann_window(n_fft);
+    let window = cached_hann_window(n_fft);
 
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(n_fft);
+    let fft = fft32_plan(n_fft);
     let mut scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
     let mut buffer = vec![Complex32::new(0.0, 0.0); n_fft];
-    let mut data = vec![0.0f32; bins * frames];
+    let mut data = vec![0.0f32; output_bins * frames];
 
     for frame in 0..frames {
+        if frame % 8 == 0 && cancelled() {
+            return None;
+        }
         let start = frame * hop;
         for (i, slot) in buffer.iter_mut().enumerate() {
             *slot = Complex32::new(padded[start + i] * window[i] as f32, 0.0);
         }
         fft.process_with_scratch(&mut buffer, &mut scratch);
-        for bin in 0..bins {
-            data[bin * frames + frame] = buffer[bin].norm();
+        if let Some(selected) = selected {
+            for (row, bin) in selected.iter().copied().enumerate() {
+                debug_assert!(bin < fft_bins);
+                data[row * frames + frame] = buffer[bin].norm();
+            }
+        } else {
+            for bin in 0..fft_bins {
+                data[bin * frames + frame] = buffer[bin].norm();
+            }
         }
     }
-    Spectrogram { bins, frames, data }
+    if cancelled() {
+        return None;
+    }
+    Some(Spectrogram {
+        bins: output_bins,
+        frames,
+        data,
+    })
 }
 
 /// numpy `np.pad(y, pad, mode="reflect")`，长度不足时退回补零（和 Python 一致）。
+#[cfg(test)]
 fn reflect_pad(samples: &[f32], pad: usize, min_len: usize) -> Vec<f32> {
+    reflect_pad_normalized(samples, pad, min_len, None)
+}
+
+fn reflect_pad_normalized(
+    samples: &[f32],
+    pad: usize,
+    min_len: usize,
+    normalization_peak: Option<f32>,
+) -> Vec<f32> {
     let n = samples.len();
     if n == 0 {
         return vec![0.0; min_len];
@@ -100,6 +243,11 @@ fn reflect_pad(samples: &[f32], pad: usize, min_len: usize) -> Vec<f32> {
     }
     while out.len() < min_len {
         out.push(0.0);
+    }
+    if let Some(peak) = normalization_peak.filter(|peak| *peak > 0.0) {
+        for sample in &mut out {
+            *sample /= peak;
+        }
     }
     out
 }
@@ -150,6 +298,156 @@ pub fn mel_filterbank(sr: f64, n_fft: usize, n_mels: usize, fmin: f64, fmax: f64
         .collect()
 }
 
+/// 一个 Mel 三角带只有很短一段连续非零权重。保存该区间可跳过绝大多数零乘法，
+/// 同时仍按原来的 bin 顺序累加，因此浮点结果与稠密实现一致。
+#[derive(Clone, Debug)]
+pub struct SparseMelBand {
+    pub start_bin: usize,
+    pub weights: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct MelFilterbankKey {
+    sr_bits: u64,
+    n_fft: usize,
+    n_mels: usize,
+    fmin_bits: u64,
+    fmax_bits: u64,
+}
+
+static SPARSE_MEL_FILTERBANKS: OnceLock<Mutex<HashMap<MelFilterbankKey, Arc<[SparseMelBand]>>>> =
+    OnceLock::new();
+
+pub fn sparse_mel_filterbank(
+    sr: f64,
+    n_fft: usize,
+    n_mels: usize,
+    fmin: f64,
+    fmax: f64,
+) -> Arc<[SparseMelBand]> {
+    let key = MelFilterbankKey {
+        sr_bits: sr.to_bits(),
+        n_fft,
+        n_mels,
+        fmin_bits: fmin.to_bits(),
+        fmax_bits: fmax.to_bits(),
+    };
+    let cache = SPARSE_MEL_FILTERBANKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(cache.entry(key).or_insert_with(|| {
+        let dense = mel_filterbank(sr, n_fft, n_mels, fmin, fmax);
+        let sparse: Vec<SparseMelBand> = dense
+            .into_iter()
+            .map(|row| {
+                let start = row.iter().position(|weight| *weight != 0.0).unwrap_or(0);
+                let end = row
+                    .iter()
+                    .rposition(|weight| *weight != 0.0)
+                    .map_or(start, |index| index + 1);
+                SparseMelBand {
+                    start_bin: start,
+                    weights: row[start..end].to_vec(),
+                }
+            })
+            .collect();
+        Arc::from(sparse)
+    }))
+}
+
+/// 直接从逐帧 FFT 生成 log-Mel 矩阵，避免先写一张大型 bin×frame 频谱再以
+/// 跨行方式读回来。每个 Mel 带内部的乘加顺序保持不变。
+pub fn stft_logmel(
+    samples: &[f32],
+    n_fft: usize,
+    hop: usize,
+    filterbank: &[SparseMelBand],
+) -> (Vec<f64>, usize) {
+    stft_logmel_impl_cancellable(samples, None, n_fft, hop, filterbank, &|| false)
+        .expect("不可取消的 log-Mel STFT 不应提前退出")
+}
+
+/// [`stft_logmel`] 的峰值归一化入口；与预先构造完整归一化 PCM 的结果逐位相同。
+pub fn stft_logmel_peak_normalized(
+    samples: &[f32],
+    peak: f32,
+    n_fft: usize,
+    hop: usize,
+    filterbank: &[SparseMelBand],
+) -> (Vec<f64>, usize) {
+    stft_logmel_peak_normalized_cancellable(samples, peak, n_fft, hop, filterbank, &|| false)
+        .expect("不可取消的 log-Mel STFT 不应提前退出")
+}
+
+/// 峰值归一化 log-Mel STFT 的可取消入口。检查点位于逐帧 FFT 循环中；
+/// 完成时的矩阵与 [`stft_logmel_peak_normalized`] 完全一致。
+pub fn stft_logmel_peak_normalized_cancellable(
+    samples: &[f32],
+    peak: f32,
+    n_fft: usize,
+    hop: usize,
+    filterbank: &[SparseMelBand],
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<(Vec<f64>, usize)> {
+    stft_logmel_impl_cancellable(samples, Some(peak), n_fft, hop, filterbank, cancelled)
+}
+
+fn stft_logmel_impl_cancellable(
+    samples: &[f32],
+    normalization_peak: Option<f32>,
+    n_fft: usize,
+    hop: usize,
+    filterbank: &[SparseMelBand],
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<(Vec<f64>, usize)> {
+    if cancelled() {
+        return None;
+    }
+    let padded = reflect_pad_normalized(samples, n_fft / 2, n_fft, normalization_peak);
+    if cancelled() {
+        return None;
+    }
+    if padded.len() < n_fft {
+        return Some((Vec::new(), 0));
+    }
+    let frames = 1 + (padded.len() - n_fft) / hop;
+    let bins = n_fft / 2 + 1;
+    let window = cached_hann_window(n_fft);
+    let fft = fft32_plan(n_fft);
+    let mut scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
+    let mut buffer = vec![Complex32::new(0.0, 0.0); n_fft];
+    let mut magnitudes = vec![0.0f32; bins];
+    let mut logmel = vec![0.0f64; filterbank.len() * frames];
+
+    for frame in 0..frames {
+        if frame % 8 == 0 && cancelled() {
+            return None;
+        }
+        let start = frame * hop;
+        for (i, slot) in buffer.iter_mut().enumerate() {
+            *slot = Complex32::new(padded[start + i] * window[i] as f32, 0.0);
+        }
+        fft.process_with_scratch(&mut buffer, &mut scratch);
+        for (magnitude, value) in magnitudes.iter_mut().zip(&buffer[..bins]) {
+            *magnitude = value.norm();
+        }
+        for (mel, band) in filterbank.iter().enumerate() {
+            debug_assert!(band.start_bin + band.weights.len() <= bins);
+            let mut acc = 0.0f64;
+            for (offset, weight) in band.weights.iter().enumerate() {
+                acc += *weight as f64 * magnitudes[band.start_bin + offset] as f64;
+            }
+            logmel[mel * frames + frame] = (1.0 + 10.0 * acc).ln();
+        }
+    }
+    if cancelled() {
+        None
+    } else {
+        Some((logmel, frames))
+    }
+}
+
 /// 滑动均值（边缘 edge 复制补齐），前缀和实现 O(n)。
 pub fn moving_average(x: &[f64], win: usize) -> Vec<f64> {
     let win = win.max(1);
@@ -184,21 +482,28 @@ pub fn autocorrelate(x: &[f64], max_lag: usize) -> Vec<f64> {
     let mean = x.iter().sum::<f64>() / n as f64;
     let nfft = (2 * n).max(2).next_power_of_two();
 
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(nfft);
-    let ifft = planner.plan_fft_inverse(nfft);
+    let plans = fft64_pair(nfft);
     let mut buffer: Vec<rustfft::num_complex::Complex<f64>> = (0..nfft)
         .map(|i| {
             let value = if i < n { x[i] - mean } else { 0.0 };
             rustfft::num_complex::Complex::new(value, 0.0)
         })
         .collect();
-    fft.process(&mut buffer);
+    let scratch_len = plans
+        .forward
+        .get_inplace_scratch_len()
+        .max(plans.inverse.get_inplace_scratch_len());
+    let mut scratch = vec![rustfft::num_complex::Complex::new(0.0, 0.0); scratch_len];
+    plans
+        .forward
+        .process_with_scratch(&mut buffer, &mut scratch);
     for slot in buffer.iter_mut() {
         // |X|²：功率谱，逆变换回来就是自相关
         *slot = rustfft::num_complex::Complex::new(slot.norm_sqr(), 0.0);
     }
-    ifft.process(&mut buffer);
+    plans
+        .inverse
+        .process_with_scratch(&mut buffer, &mut scratch);
 
     (0..=max_lag.min(nfft - 1))
         .map(|lag| {
@@ -349,6 +654,81 @@ mod tests {
         let samples = vec![0.1f32; 22050];
         let spec = stft_magnitude(&samples, N_FFT, HOP);
         assert_eq!(spec.frames, 1 + 22050 / HOP);
+    }
+
+    #[test]
+    fn selected_stft_rows_are_bit_identical_to_the_full_matrix() {
+        let samples: Vec<f32> = (0..8192)
+            .map(|index| {
+                let phase = index as f64 / 22050.0;
+                ((2.0 * std::f64::consts::PI * 173.0 * phase).sin()
+                    + 0.37 * (2.0 * std::f64::consts::PI * 2137.0 * phase).sin())
+                    as f32
+            })
+            .collect();
+        let selected_bins = [0, 1, 17, 233, N_FFT / 2];
+        let full = stft_magnitude(&samples, N_FFT, HOP);
+        let selected = stft_magnitude_selected(&samples, N_FFT, HOP, &selected_bins);
+        assert_eq!(selected.frames, full.frames);
+        assert_eq!(selected.bins, selected_bins.len());
+        for (row, bin) in selected_bins.into_iter().enumerate() {
+            for frame in 0..full.frames {
+                assert_eq!(
+                    selected.at(row, frame).to_bits(),
+                    full.at(bin, frame).to_bits()
+                );
+            }
+        }
+
+        let peak = samples
+            .iter()
+            .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
+        let normalized: Vec<f32> = samples.iter().map(|sample| sample / peak).collect();
+        let explicit = stft_magnitude_selected(&normalized, N_FFT, HOP, &selected_bins);
+        let fused =
+            stft_magnitude_selected_peak_normalized(&samples, peak, N_FFT, HOP, &selected_bins);
+        assert_eq!(fused.data, explicit.data);
+    }
+
+    #[test]
+    fn fused_sparse_logmel_is_bit_identical_to_the_dense_pipeline() {
+        let sr = 22050.0;
+        let samples: Vec<f32> = (0..16384)
+            .map(|index| {
+                let phase = index as f64 / sr;
+                ((2.0 * std::f64::consts::PI * 90.0 * phase).sin()
+                    + 0.41 * (2.0 * std::f64::consts::PI * 880.0 * phase).sin())
+                    as f32
+            })
+            .collect();
+        let dense_spec = stft_magnitude(&samples, N_FFT, HOP);
+        let dense = mel_filterbank(sr, N_FFT, N_MELS, MEL_FMIN, MEL_FMAX);
+        let sparse = sparse_mel_filterbank(sr, N_FFT, N_MELS, MEL_FMIN, MEL_FMAX);
+        let (fused, frames) = stft_logmel(&samples, N_FFT, HOP, &sparse);
+        assert_eq!(frames, dense_spec.frames);
+
+        for (mel, row) in dense.iter().enumerate() {
+            for frame in 0..frames {
+                let mut acc = 0.0f64;
+                for (bin, weight) in row.iter().enumerate() {
+                    if *weight != 0.0 {
+                        acc += *weight as f64 * dense_spec.at(bin, frame) as f64;
+                    }
+                }
+                let expected = (1.0 + 10.0 * acc).ln();
+                assert_eq!(fused[mel * frames + frame].to_bits(), expected.to_bits());
+            }
+        }
+
+        let peak = samples
+            .iter()
+            .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
+        let normalized: Vec<f32> = samples.iter().map(|sample| sample / peak).collect();
+        let (explicit, explicit_frames) = stft_logmel(&normalized, N_FFT, HOP, &sparse);
+        let (peak_fused, peak_fused_frames) =
+            stft_logmel_peak_normalized(&samples, peak, N_FFT, HOP, &sparse);
+        assert_eq!(peak_fused_frames, explicit_frames);
+        assert_eq!(peak_fused, explicit);
     }
 
     #[test]

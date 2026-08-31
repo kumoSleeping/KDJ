@@ -1,12 +1,14 @@
 //! B 站扫码登录（web 端 passport 接口）。
 //!
 //! 比 QQ 那条链路简单得多：生成二维码拿 `qrcode_key`，轮询同一个 key，
-//! 成功时 cookie 直接在响应头的 Set-Cookie 里。
+//! 成功时 cookie 在响应头的 Set-Cookie 里，刷新令牌在响应体的 refresh_token。
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+
+use super::client::collect_response_cookies;
 
 #[derive(Debug, Clone)]
 pub struct BiliQrSession {
@@ -25,6 +27,7 @@ pub enum QrPoll {
 pub async fn create_qr(http: &reqwest::Client) -> Result<BiliQrSession> {
     let body: Value = http
         .get("https://passport.bilibili.com/x/passport-login/web/qrcode/generate")
+        .query(&[("source", "main-fe-header")])
         .send()
         .await
         .context("获取 B 站二维码失败")?
@@ -54,36 +57,34 @@ pub async fn poll_qr(http: &reqwest::Client, qrcode_key: &str) -> Result<QrPoll>
         .context("轮询 B 站二维码失败")?;
 
     // cookie 要在读 body 之前拿，body 一读 response 就被消费了
-    let cookies = collect_cookies(&response);
+    let cookies = collect_response_cookies(&response);
     let body: Value = response
         .json()
         .await
         .context("B 站二维码状态不是合法 JSON")?;
+    Ok(classify_poll(&body, cookies))
+}
+
+fn classify_poll(body: &Value, mut cookies: BTreeMap<String, String>) -> QrPoll {
     let code = body
         .pointer("/data/code")
         .and_then(Value::as_i64)
         .unwrap_or(-1);
-
-    // 0 成功 / 86038 已失效 / 86090 已扫待确认 / 86101 未扫
-    Ok(match code {
-        0 => QrPoll::Done(cookies),
+    match code {
+        0 => {
+            if let Some(refresh_token) = body
+                .pointer("/data/refresh_token")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+            {
+                cookies.insert("ac_time_value".into(), refresh_token.into());
+            }
+            QrPoll::Done(cookies)
+        }
         86090 => QrPoll::Scanned,
         86038 => QrPoll::Expired,
         _ => QrPoll::Waiting,
-    })
-}
-
-fn collect_cookies(response: &reqwest::Response) -> BTreeMap<String, String> {
-    response
-        .headers()
-        .get_all(reqwest::header::SET_COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .filter_map(|text| text.split(';').next())
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
-        .filter(|(name, value)| !name.is_empty() && !value.is_empty())
-        .collect()
+    }
 }
 
 #[cfg(test)]
@@ -95,13 +96,29 @@ mod tests {
     fn poll_codes_map_to_the_right_states() {
         let cases = [(0i64, true), (86090, false), (86038, false), (86101, false)];
         for (code, is_done) in cases {
-            let mapped = match code {
-                0 => QrPoll::Done(BTreeMap::new()),
-                86090 => QrPoll::Scanned,
-                86038 => QrPoll::Expired,
-                _ => QrPoll::Waiting,
-            };
+            let mapped = classify_poll(
+                &serde_json::json!({"data": {"code": code}}),
+                BTreeMap::new(),
+            );
             assert_eq!(matches!(mapped, QrPoll::Done(_)), is_done, "code={code}");
         }
+    }
+
+    #[test]
+    fn successful_poll_persists_the_refresh_token() {
+        let result = classify_poll(
+            &serde_json::json!({
+                "data": {"code": 0, "refresh_token": "refresh-me"}
+            }),
+            BTreeMap::from([("SESSDATA".into(), "session".into())]),
+        );
+        let QrPoll::Done(cookies) = result else {
+            panic!("扫码成功应返回登录态");
+        };
+        assert_eq!(
+            cookies.get("ac_time_value").map(String::as_str),
+            Some("refresh-me")
+        );
+        assert_eq!(cookies.get("SESSDATA").map(String::as_str), Some("session"));
     }
 }

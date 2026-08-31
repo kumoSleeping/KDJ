@@ -8,10 +8,12 @@
 # 发版流程（人只做第一步）：
 #   1. 同步修改 tauri.conf.json / package.json / Cargo.toml 的版本，提交、推 main；
 #   2. 本工作流发现 v{version} 这个 tag 还不存在 → 打 tag、建 Release
-#      （--latest=false，不抢更新通道；自动生成 notes）；
+#      （包括带 -rc 后缀的正式推送；先用 --latest=false 等待产物，再提升 Latest）；
 #   3. dispatch 两条打包线到 refs/tags/v{version} 上——它们各自的
 #      「发布 Release（仅 tag）」步骤会把产物传进同一个 Release；
 #      rust-build 的 latest-json 写入本版清单后再提升为 Latest。
+#   4. update-readme-release-sizes.yml 等四平台产物到齐后读取真实体积，
+#      自动更新 main 上中英文 README 的下载按钮。
 #
 # 为什么不是"打了 tag 自动触发打包"而要显式 dispatch：
 # 用 GITHUB_TOKEN push 的 tag **不会**触发任何 on:tags 工作流
@@ -25,8 +27,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # 打 tag + 建 Release
-  actions: write # dispatch 两条打包线
+  contents: read
 
 # 排队而不是取消：两次连续推送要是都带版本号变更，各自都该发出去
 concurrency:
@@ -40,7 +41,9 @@ jobs:
       version: ${{ steps.probe.outputs.version }}
       new: ${{ steps.probe.outputs.new }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: 校验三处版本号一致
         run: |
@@ -67,7 +70,7 @@ jobs:
           version=$(jq -r '.version' src-tauri/tauri.conf.json)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           # 形状不对宁可不发也别打出 v null 这种 tag
-          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'; then
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
             echo "::error::tauri.conf.json 里的 version 不像语义化版本：$version"
             exit 1
           fi
@@ -76,6 +79,12 @@ jobs:
             echo "v$version 已存在，本次推送不发行"
             echo "new=false" >> "$GITHUB_OUTPUT"
           else
+            latest_version=$(
+              git ls-remote --tags --refs origin 'refs/tags/v*' \
+                | awk '{ sub(/^refs\/tags\/v/, "", $2); print $2 }' \
+                | python3 scripts/check-release-version.py "$version"
+            )
+            echo "远端最新 tag：${latest_version:+v$latest_version}"
             echo "发现新版本 v$version"
             echo "new=true" >> "$GITHUB_OUTPUT"
           fi
@@ -84,21 +93,38 @@ jobs:
     needs: gate
     if: needs.gate.outputs.new == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 打 tag + 建 Release
+      actions: write # dispatch 两条打包线
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ needs.gate.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: 正式发行密钥门禁
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
-          for name in TAURI_SIGNING_PRIVATE_KEY ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS; do
+          for name in \
+            TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+            ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS \
+            APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+            WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD; do
             if [ -z "${!name:-}" ]; then
               echo "::error::缺少正式发行 GitHub Secret：$name；不创建 tag/空 Release"
               exit 1
@@ -132,31 +158,31 @@ jobs:
             echo "- **Windows 10/11 64 位（企业或批量部署）**：[下载 MSI 安装程序]($base_url/KDJ_${VERSION}_x64_en-US.msi)"
             echo
             echo "### macOS"
-            echo "- **Apple Silicon 与 Intel Mac 通用**：[下载 DMG 安装包]($base_url/KDJ_${VERSION}_universal.dmg)"
+            echo "- **Apple Silicon（M 系列）**：[下载 ARM64 DMG]($base_url/KDJ_${VERSION}_aarch64.dmg)"
+            echo "- **Intel Mac**：[下载 x64 DMG]($base_url/KDJ_${VERSION}_x64.dmg)"
+            echo "- 应用内自动更新会识别当前 Mac 架构，只下载对应的薄包。"
             echo
             echo "### Linux（x86_64）"
             echo "- **Ubuntu / Debian**：[下载 DEB 安装包]($base_url/KDJ_${VERSION}_amd64.deb)"
             echo "- **Fedora / RHEL / openSUSE**：[下载 RPM 安装包]($base_url/KDJ-${VERSION}-1.x86_64.rpm)"
             echo "- **其他发行版**：[下载 AppImage]($base_url/KDJ_${VERSION}_amd64.AppImage)"
             echo
-            echo "### KDJ Labs（实验版，桌面）"
-            echo "Labs 与稳定 KDJ 独立安装、独立更新，包含实验 DJ 与 OneLibrary。"
-            echo "请在下方 Assets 中选择文件名以 KDJ Labs 开头的对应桌面安装包。"
-            echo
             echo "### Android"
             echo "- **大多数新设备（ARM64，推荐）**：[下载 APK]($base_url/app-arm64-release.apk)"
             echo
-            echo "> .sig、.app.tar.gz、latest.json 和 latest-labs.json 是自动更新所需文件，普通用户无需下载。"
+            echo "> .sig、.app.tar.gz 和 latest.json 是自动更新所需文件，普通用户无需下载。"
             echo ">"
             echo "> 本 Release 在桌面更新清单就绪前不会被标为 Latest；"
             echo "> 自动更新通道在构建完成前仍指向上一可用版本。"
           } > release-notes.md
 
-          gh release create "v$VERSION" \
-            --title "KDJ v$VERSION" \
-            --generate-notes \
-            --notes-file release-notes.md \
+          release_args=(
+            --title "KDJ v$VERSION"
+            --generate-notes
+            --notes-file release-notes.md
             --latest=false
+          )
+          gh release create "v$VERSION" "${release_args[@]}"
 
       - name: 调度打包线到 tag 上
         run: |

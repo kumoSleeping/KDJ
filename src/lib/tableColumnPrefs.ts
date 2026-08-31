@@ -3,6 +3,8 @@
  * 存 id 列表而不是完整快照——以后加新列时旧存档仍可用。
  */
 
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
+
 export interface TableColumnPrefs {
   order: string[];
   hidden: string[];
@@ -107,7 +109,7 @@ export function loadTableColumnPrefs(
   schema: TableColumnPrefsSchema,
 ): TableColumnPrefs {
   try {
-    const raw: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "null");
+    const raw: unknown = JSON.parse(readLocalStorage(storageKey) ?? "null");
     return normalizeTableColumnPrefs(raw, schema);
   } catch {
     // 存档坏了就用默认
@@ -122,7 +124,7 @@ export function saveTableColumnPrefs(
 ): TableColumnPrefs {
   const normalized = normalizeTableColumnPrefs(prefs, schema);
   try {
-    localStorage.setItem(storageKey, JSON.stringify(normalized));
+    writeLocalStorageNow(storageKey, JSON.stringify(normalized));
   } catch {
     // 存储不可用时不该让拖拽本身失效；本次会话仍由 React state 保留。
   }
@@ -204,7 +206,6 @@ export function beginColumnPointerReorder(
     if (!active) {
       active = true;
       document.body.dataset.kdColDragging = "true";
-      callbacks.onDragged?.();
       callbacks.onStart(sourceKey);
     }
     moveEvent.preventDefault();
@@ -218,6 +219,10 @@ export function beginColumnPointerReorder(
 
   const onUp = () => {
     finish();
+    // 浏览器会在 pointerup 后补发 click。必须在松手这一刻才上锁：若在刚越过
+    // 阈值时上锁，用户多拖一会儿，0ms 解锁早已执行，最终仍会误触发表头排序。
+    // 只要定位线曾进入拖动态就消费 click，与是否命中有效落点无关。
+    if (active) callbacks.onDragged?.();
     if (active && targetKey) callbacks.onMove(sourceKey, targetKey);
     callbacks.onEnd();
   };

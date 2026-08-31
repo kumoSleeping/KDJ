@@ -4,13 +4,7 @@ import type {
   PointerEvent as ReactPointerEvent,
   RefObject,
 } from "react";
-import { ChevronDown, ChevronRight, Monitor, Moon, Sun, Trash2 } from "lucide-react";
-import {
-  DJ_BARS_OPTIONS,
-  DJ_TRANSITIONS,
-  mixSeconds,
-  useDjConfig,
-} from "../../lib/djMix";
+import { ChevronDown, ChevronRight, Copy, Download, RefreshCw, Trash2 } from "lucide-react";
 import {
   HUE_LINE_GRADIENT,
   hexToT,
@@ -32,32 +26,50 @@ import {
   useLyricsPrefs,
   type LyricsEngineMode,
 } from "../../lib/lyricsPrefs";
-import { usePlaybackPrefs } from "../../lib/playbackPrefs";
+import {
+  TEMPO_RANGE_OPTIONS,
+  usePlaybackPrefs,
+  type LocalExternalDragMode,
+  type TempoRange,
+  type TimeDisplayMode,
+} from "../../lib/playbackPrefs";
 import { useTrackClickPrefs } from "../../lib/trackClickPrefs";
-const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
+import { useArrowKeyControl } from "../../lib/arrowKeyControl";
 import {
   APP_FONT_SCALE_MAX,
   APP_FONT_SCALE_MIN,
-  APP_FONT_SCALE_TICKS,
   readAppFontScale,
   setAppFontScale,
   type AppFontScale,
 } from "../../lib/fontScale";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
+import { copyText } from "../../lib/copyText";
 import { formatBytes } from "../../lib/format";
+import { createKdjAiPrompt } from "../../lib/kdjAiPrompt";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
+import { clearStreamAnalysisCache } from "../../lib/streamAnalysis";
+import { clearStreamCacheProgressCache } from "../../lib/streamCacheProgress";
+import { useSharePrefs, type ShareContentMode } from "../../lib/sharePrefs";
+import { clearAllWaveformCaches } from "../../lib/waveformCache";
 import { useAppStore } from "../../stores/appStore";
+import { useLibraryStore } from "../../stores/libraryStore";
+import { useLyricsStore } from "../../stores/lyricsStore";
 import type {
+  ActivityLogSettings,
+  CacheCategory,
+  CacheCategoryStats,
+  CacheOverview,
+  CliInstallStatus,
   KeyNotation,
   Quality,
   StreamCacheStats,
 } from "../../types";
-import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { Button, InlineNotice, Panel } from "../common";
 import { AccountRow } from "./AccountRow";
+import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
 
 /**
@@ -65,10 +77,6 @@ import { UpdateRow } from "./UpdateRow";
  *
  * General 含外观（无小标题）、列表手势与接播（小标题）。流媒体与歌词同板，歌词保留小标题。
  */
-
-function formatSeconds(value: number): string {
-  return value >= 10 ? `${Math.round(value)} 秒` : `${value.toFixed(1)} 秒`;
-}
 
 function Switch({
   checked,
@@ -108,8 +116,75 @@ function Switch({
   );
 }
 
+const CACHE_CATEGORY_LABEL: Record<CacheCategory | "other", string> = {
+  media: "媒体",
+  waveform: "波形",
+  lyrics: "歌词",
+  basic: "基本信息",
+  logs: "日志",
+  other: "其他",
+};
+
+function cacheCategoryDetail(category: CacheCategory | "other", stats: CacheCategoryStats): string {
+  const count = category === "basic"
+    ? `调性 / 响度 / BPM · ${stats.items} 首`
+    : category === "logs"
+      ? `最近 ${stats.items} 条 · ${stats.files} 个文件`
+      : `${stats.files} 个文件`;
+  const size = stats.bytes > 0
+    ? `${stats.estimated ? "约 " : ""}${formatBytes(stats.bytes)}`
+    : "0 B";
+  const active = stats.active > 0
+    ? category === "basic"
+      ? ` · ${stats.active} 个任务运行中`
+      : ` · ${stats.active} 首写入中`
+    : "";
+  return `${count} · ${size}${active}`;
+}
+
+function CacheOverviewRow({
+  category,
+  stats,
+  busy,
+  confirming,
+  onClear,
+}: {
+  category: CacheCategory | "other";
+  stats: CacheCategoryStats;
+  busy: boolean;
+  confirming: boolean;
+  onClear(category: CacheCategory): void;
+}) {
+  const empty = stats.items === 0 && stats.files === 0 && stats.bytes === 0 && stats.active === 0;
+  return (
+    <div className="kd-cache-overview-row" data-confirming={confirming || undefined}>
+      <span className="kd-cache-overview-copy">
+        <span className="kd-cache-overview-label">{CACHE_CATEGORY_LABEL[category]}</span>
+        <span className="kd-cache-overview-detail">{cacheCategoryDetail(category, stats)}</span>
+      </span>
+      {category !== "other" ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy || empty}
+          className="kd-cache-overview-clear"
+          data-confirming={confirming || undefined}
+          aria-label={confirming
+            ? `再次点击确认清理${CACHE_CATEGORY_LABEL[category]}`
+            : `清理${CACHE_CATEGORY_LABEL[category]}`}
+          title={confirming ? "再次点击才会真正清理" : "第一次点击进入确认状态"}
+          onClick={() => onClear(category)}
+        >
+          <Trash2 size={12} aria-hidden="true" />
+          {confirming ? "再次点击" : "清理"}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 /** 左文右态：点击右侧文案循环搜词引擎模式。 */
-function CycleToggle<T extends string>({
+function CycleToggle<T extends string | number>({
   label,
   value,
   options,
@@ -190,148 +265,51 @@ function usePointerSlider(
   return { onPointerDown, onPointerMove, onPointerUp };
 }
 
-/** 离散档位滑条（接歌小节）。 */
-function BarsSlider({
-  bars,
-  onChange,
-  hint,
-}: {
-  bars: number;
-  onChange(next: number): void;
-  hint: string;
-}) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const index = Math.max(
-    0,
-    DJ_BARS_OPTIONS.findIndex((value) => value === bars),
-  );
-  const max = DJ_BARS_OPTIONS.length - 1;
-  const fill = max <= 0 ? 0 : index / max;
-  const handlers = usePointerSlider(trackRef, (t) => {
-    const next = DJ_BARS_OPTIONS[Math.round(t * max)];
-    if (next != null) onChange(next);
-  });
-
-  return (
-    <div className="kd-djp-slider-block" title={hint}>
-      <div className="kd-djp-slider-row">
-        <div className="kd-djp-slider-main">
-          <div
-            ref={trackRef}
-            className="kd-djp-slider"
-            role="slider"
-            tabIndex={0}
-            aria-label="接歌长度"
-            aria-valuemin={DJ_BARS_OPTIONS[0]}
-            aria-valuemax={DJ_BARS_OPTIONS[max]}
-            aria-valuenow={bars}
-            aria-valuetext={`${bars} 小节`}
-            style={{ "--kd-djp-fill": `${fill * 100}%` } as CSSProperties}
-            {...handlers}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
-                event.preventDefault();
-                onChange(DJ_BARS_OPTIONS[Math.max(0, index - 1)]!);
-              } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
-                event.preventDefault();
-                onChange(DJ_BARS_OPTIONS[Math.min(max, index + 1)]!);
-              } else if (event.key === "Home") {
-                event.preventDefault();
-                onChange(DJ_BARS_OPTIONS[0]!);
-              } else if (event.key === "End") {
-                event.preventDefault();
-                onChange(DJ_BARS_OPTIONS[max]!);
-              }
-            }}
-          >
-            <span className="kd-djp-slider-track" aria-hidden="true" />
-          </div>
-          <div className="kd-djp-slider-ticks" aria-hidden="true">
-            {DJ_BARS_OPTIONS.map((value) => (
-              <span key={value} className="kd-num">
-                {value}
-              </span>
-            ))}
-          </div>
-        </div>
-        <span className="kd-djp-slider-value kd-num">
-          {bars} 小节
-          <small>{hint}</small>
-        </span>
-      </div>
-    </div>
-  );
-}
-
-/** 主界面字号：75–150%，鼠标和方向键都可按 1% 微调。 */
-function FontScaleSlider({
+/** 主界面字号：不再使用连续滑条，每次明确增减 5%。 */
+function FontScaleStepper({
   value,
   onChange,
 }: {
   value: AppFontScale;
   onChange(next: AppFontScale): void;
 }) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const span = APP_FONT_SCALE_MAX - APP_FONT_SCALE_MIN;
-  const fill = span <= 0 ? 0 : (value - APP_FONT_SCALE_MIN) / span;
   const choose = (nextValue: number) => {
     onChange(Math.max(APP_FONT_SCALE_MIN, Math.min(APP_FONT_SCALE_MAX, Math.round(nextValue))));
   };
-  const handlers = usePointerSlider(trackRef, (t) => choose(APP_FONT_SCALE_MIN + t * span));
 
   return (
-    <div className="kd-djp-slider-block" title="调整主界面的文字大小；悬浮歌词可在歌词设置中单独调整。">
-      <div className="kd-djp-slider-row">
-        <div className="kd-djp-slider-main">
-          <div
-            ref={trackRef}
-            className="kd-djp-slider"
-            role="slider"
-            tabIndex={0}
-            aria-label="界面字号"
-            aria-valuemin={APP_FONT_SCALE_MIN}
-            aria-valuemax={APP_FONT_SCALE_MAX}
-            aria-valuenow={value}
-            aria-valuetext={`${value}%`}
-            style={{ "--kd-djp-fill": `${fill * 100}%` } as CSSProperties}
-            {...handlers}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
-                event.preventDefault();
-                choose(value - 1);
-              } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
-                event.preventDefault();
-                choose(value + 1);
-              } else if (event.key === "PageDown") {
-                event.preventDefault();
-                choose(value - 5);
-              } else if (event.key === "PageUp") {
-                event.preventDefault();
-                choose(value + 5);
-              } else if (event.key === "Home") {
-                event.preventDefault();
-                choose(APP_FONT_SCALE_MIN);
-              } else if (event.key === "End") {
-                event.preventDefault();
-                choose(APP_FONT_SCALE_MAX);
-              }
-            }}
-          >
-            <span className="kd-djp-slider-track" aria-hidden="true" />
-          </div>
-          <div className="kd-djp-slider-ticks" aria-hidden="true">
-            {APP_FONT_SCALE_TICKS.map((scale) => (
-              <span key={scale} className="kd-num">
-                {scale}
-              </span>
-            ))}
-          </div>
-        </div>
-        <span className="kd-djp-slider-value kd-num">
+    <div
+      className="kd-djp-font-stepper"
+      role="group"
+      aria-label="界面字号"
+      title="调整主界面的文字大小；悬浮歌词可在歌词设置中单独调整。"
+    >
+      <span className="kd-djp-font-copy">
+        <span className="kd-djp-toggle-label">界面字号</span>
+        <output className="kd-djp-font-value kd-num" aria-live="polite">
           {value}%
-          <small>界面字号</small>
-        </span>
-      </div>
+        </output>
+      </span>
+      <span className="kd-djp-font-actions">
+        <button
+          type="button"
+          disabled={value <= APP_FONT_SCALE_MIN}
+          aria-label="界面字号减小 5%"
+          title="减小 5%"
+          onClick={() => choose(value - 5)}
+        >
+          −
+        </button>
+        <button
+          type="button"
+          disabled={value >= APP_FONT_SCALE_MAX}
+          aria-label="界面字号增大 5%"
+          title="增大 5%"
+          onClick={() => choose(value + 5)}
+        >
+          +
+        </button>
+      </span>
     </div>
   );
 }
@@ -574,11 +552,6 @@ function LyricsColorRow({
   );
 }
 
-/** 接播只保留低频交接与共振滤波两种方案。 */
-const HANDOFF_TRANSITIONS = DJ_TRANSITIONS.filter(
-  (item) => item.id === "eq" || item.id === "filter",
-);
-
 function SettingsExpandToggle({
   expanded,
   onToggle,
@@ -602,67 +575,145 @@ function SettingsExpandToggle({
   );
 }
 
-function CliSkillExport() {
+function KdjAiPromptPanel() {
   const bridge = getBridge();
-  const exportSkill = bridge.exportCliSkill;
-  const [busy, setBusy] = useState("");
+  const [cliStatus, setCliStatus] = useState<CliInstallStatus | null>(null);
+  const [cliBusy, setCliBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [ok, setOk] = useState(false);
-  if (!exportSkill) return null;
+  const prompt = useMemo(
+    () => createKdjAiPrompt(cliStatus?.invocation ?? "kdj"),
+    [cliStatus?.invocation],
+  );
 
-  const run = (preset?: "cursor" | "claude" | "codex" | "pi", folder?: string, key = preset ?? "folder") => {
-    setBusy(key);
-    setNotice("");
-    setOk(false);
-    void (async () => {
-      try {
-        const result = await exportSkill({ preset, folder });
-        setOk(true);
-        setNotice(`v${result.version} → ${result.path}`);
-        await bridge.revealPath(result.path);
-      } catch (error) {
+  useEffect(() => {
+    let disposed = false;
+    const readStatus = bridge.cliInstallStatus;
+    if (!readStatus) return;
+    setCliBusy(true);
+    void readStatus()
+      .then((status) => {
+        if (disposed) return;
+        setCliStatus(status);
+      })
+      .catch((error) => {
+        if (disposed) return;
         setOk(false);
         setNotice(error instanceof Error ? error.message : String(error));
-      } finally {
-        setBusy("");
-      }
-    })();
+      })
+      .finally(() => {
+        if (!disposed) setCliBusy(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [bridge]);
+
+  const installCli = () => {
+    const install = bridge.installCli;
+    if (!install || cliBusy) return;
+    setCliBusy(true);
+    setNotice("");
+    setOk(false);
+    void install()
+      .then((status) => {
+        setCliStatus(status);
+        setOk(true);
+        setNotice(`CLI 已安装 · v${status.installedVersion ?? status.currentVersion}`);
+      })
+      .catch((error) => {
+        setOk(false);
+        setNotice(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setCliBusy(false));
   };
 
+  const copyPrompt = () => {
+    setNotice("");
+    setOk(false);
+    void copyText(prompt)
+      .then(() => {
+        setOk(true);
+        setNotice("已复制完整 Prompt");
+      })
+      .catch((error) => {
+        setOk(false);
+        setNotice(error instanceof Error ? error.message : String(error));
+      });
+  };
+
+  const installedVersion = cliStatus?.installedVersion;
+  const cliState = (() => {
+    if (!cliStatus) return { label: "正在检测 CLI…", detail: "", action: "" };
+    switch (cliStatus.state) {
+      case "current":
+        return {
+          label: `CLI 已安装 · v${installedVersion ?? cliStatus.currentVersion}`,
+          detail: "与当前版本一致",
+          action: "",
+        };
+      case "outdated":
+        return {
+          label: `CLI 已安装 · v${installedVersion ?? "未知"}`,
+          detail: `当前 v${cliStatus.currentVersion}`,
+          action: "更新 CLI",
+        };
+      case "broken":
+        return {
+          label: "CLI 入口失效",
+          detail: `当前 v${cliStatus.currentVersion}`,
+          action: "更新 CLI",
+        };
+      case "conflict":
+        return {
+          label: "CLI 安装位置已被其他命令占用",
+          detail: cliStatus.installPath,
+          action: "",
+        };
+      case "missing":
+        return {
+          label: "CLI 未安装",
+          detail: `当前 v${cliStatus.currentVersion}`,
+          action: "安装 CLI",
+        };
+      default:
+        return { label: "当前平台不支持 CLI", detail: "", action: "" };
+    }
+  })();
+
   return (
-    <Panel heading="操作 skills" dense>
-      <div className="kd-djp-choice" role="group" aria-label="导出 CLI 手册">
-        {(
-          [
-            ["claude", "Claude Code"],
-            ["codex", "Codex"],
-            ["pi", "PI"],
-            ["cursor", "Cursor"],
-          ] as const
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            className="kd-djp-choice-btn"
-            disabled={busy !== ""}
-            aria-busy={busy === id || undefined}
-            onClick={() => run(id)}
-          >
-            {label}
-          </button>
-        ))}
-        <button
-          type="button"
-          className="kd-djp-choice-btn"
-          disabled={busy !== ""}
-          onClick={() => {
-            void bridge.pickFolder().then((folder) => {
-              if (folder) run(undefined, folder, "folder");
-            });
-          }}
-        >
-          文件夹
-        </button>
+    <Panel heading="让 AI 操作 KDJ" dense>
+      <div className="kd-ai-prompt">
+        <div className="kd-cli-install-row" title={cliStatus?.installPath}>
+          <span className="kd-cli-install-copy">
+            <strong>{cliState.label}</strong>
+            {cliState.detail ? <small>{cliState.detail}</small> : null}
+          </span>
+          {cliState.action ? (
+            <Button variant="ghost" size="sm" disabled={cliBusy} onClick={installCli}>
+              {cliStatus?.state === "missing" ? (
+                <Download size={12} aria-hidden="true" />
+              ) : (
+                <RefreshCw size={12} aria-hidden="true" />
+              )}
+              {cliBusy ? "处理中…" : cliState.action}
+            </Button>
+          ) : null}
+        </div>
+        <p className="kd-ai-prompt-copy">把下面整段发给 AI，它会先读取当前 CLI 能力，再操作 KDJ。</p>
+        <textarea
+          className="kd-textarea kd-ai-prompt-textarea"
+          value={prompt}
+          readOnly
+          spellCheck={false}
+          aria-label="KDJ AI 操作 Prompt"
+        />
+        <div className="kd-ai-prompt-actions">
+          <Button variant="ghost" size="sm" disabled={!cliStatus || cliBusy} onClick={copyPrompt}>
+            <Copy size={12} aria-hidden="true" />
+            复制 Prompt
+          </Button>
+        </div>
       </div>
       <InlineNotice
         text={notice}
@@ -677,35 +728,40 @@ function CliSkillExport() {
 }
 
 export function SettingsPanel() {
-  const theme = useAppStore((state) => state.settings?.theme ?? "system");
+  const showKdjAiPrompt = ["darwin", "win32"].includes(getBridge().platform);
   const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const [appFontScale, setFontScale] = useState(readAppFontScale);
   const [streamCacheStats, setStreamCacheStats] = useState<StreamCacheStats | null>(null);
   const [streamCacheBusy, setStreamCacheBusy] = useState(false);
   const [streamCacheError, setStreamCacheError] = useState("");
-  const transitions = useDjConfig((state) => state.transitions);
-  const bars = useDjConfig((state) => state.bars);
-  const vocalCut = useDjConfig((state) => state.vocalCut);
-  const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
-  const autoBeatSync = useDjConfig((state) => state.autoBeatSync);
-  const playOnLoad = useDjConfig((state) => state.playOnLoad);
-  const toggleTransition = useDjConfig((state) => state.toggleTransition);
-  const setBars = useDjConfig((state) => state.setBars);
-  const setVocalCut = useDjConfig((state) => state.setVocalCut);
-  const setApplyInOutPoints = useDjConfig((state) => state.setApplyInOutPoints);
-  const setAutoBeatSync = useDjConfig((state) => state.setAutoBeatSync);
-  const setPlayOnLoad = useDjConfig((state) => state.setPlayOnLoad);
+  const [cacheOverview, setCacheOverview] = useState<CacheOverview | null>(null);
+  const [cacheBusy, setCacheBusy] = useState<CacheCategory | null>(null);
+  const [cacheConfirm, setCacheConfirm] = useState<CacheCategory | null>(null);
+  const [cacheError, setCacheError] = useState("");
+  const [activityLogSettings, setActivityLogSettings] = useState<ActivityLogSettings | null>(null);
+  const [activityLogSettingsBusy, setActivityLogSettingsBusy] = useState(false);
+  const [activityLogSettingsError, setActivityLogSettingsError] = useState("");
   const [lyricsExpanded, setLyricsExpanded] = useState(false);
-  const [djExpanded, setDjExpanded] = useState(false);
-  const [oneLibraryExpanded, setOneLibraryExpanded] = useState(false);
 
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const setWidePlay = useTrackClickPrefs((state) => state.setWidePlay);
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
-  const quantize = usePlaybackPrefs((state) => state.quantize);
-  const setQuantize = usePlaybackPrefs((state) => state.setQuantize);
+  const tempoRange = usePlaybackPrefs((state) => state.tempoRange);
+  const setTempoRange = usePlaybackPrefs((state) => state.setTempoRange);
+  const timeDisplayMode = usePlaybackPrefs((state) => state.timeDisplayMode);
+  const setTimeDisplayMode = usePlaybackPrefs((state) => state.setTimeDisplayMode);
+  const localExternalDragMode = usePlaybackPrefs((state) => state.localExternalDragMode);
+  const setLocalExternalDragMode = usePlaybackPrefs((state) => state.setLocalExternalDragMode);
+  const arrowKeyControlEnabled = useArrowKeyControl((state) => state.enabled);
+  const setArrowKeyControlEnabled = useArrowKeyControl((state) => state.setEnabled);
+  const horizontalArrowKeyMode = useArrowKeyControl((state) => state.horizontalMode);
+  const setHorizontalArrowKeyMode = useArrowKeyControl((state) => state.setHorizontalMode);
+  const verticalArrowKeyMode = useArrowKeyControl((state) => state.verticalMode);
+  const setVerticalArrowKeyMode = useArrowKeyControl((state) => state.setVerticalMode);
+  const shareContentMode = useSharePrefs((state) => state.contentMode);
+  const setShareContentMode = useSharePrefs((state) => state.setContentMode);
   const lyricsEngines = useLyricsPrefs((state) => state.engines);
   const setLyricsEngines = useLyricsPrefs((state) => state.setEngines);
   const tryOnlineWhenMissing = useLyricsPrefs((state) => state.tryOnlineWhenMissing);
@@ -759,28 +815,51 @@ export function SettingsPanel() {
 
   const accounts = useAppStore((state) => state.accounts);
   const accountsError = useAppStore((state) => state.accountsError);
-  const refreshAccounts = useAppStore((state) => state.refreshAccounts);
-
-  useEffect(() => {
-    void refreshAccounts();
-  }, [refreshAccounts]);
+  const settingsError = useAppStore((state) => state.settingsError);
+  const refreshLibrary = useLibraryStore((state) => state.refresh);
+  const refreshLibraryStats = useLibraryStore((state) => state.refreshStats);
 
   useEffect(() => {
     let disposed = false;
     const refresh = () => {
-      void api
-        .streamCacheStats()
-        .then((stats) => {
-          if (!disposed) {
-            setStreamCacheStats(stats);
-            setStreamCacheError("");
-          }
-        })
-        .catch((error: unknown) => {
-          if (!disposed) {
-            setStreamCacheError(error instanceof Error ? error.message : String(error));
-          }
-        });
+      void Promise.allSettled([
+        api.streamCacheStats(),
+        api.cacheOverview(),
+        api.activityLogSettings(),
+      ]).then((results) => {
+        if (disposed) return;
+        const [streamResult, overviewResult, logSettingsResult] = results;
+        if (streamResult.status === "fulfilled") {
+          setStreamCacheStats(streamResult.value);
+          setStreamCacheError("");
+        } else {
+          setStreamCacheError(
+            streamResult.reason instanceof Error
+              ? streamResult.reason.message
+              : String(streamResult.reason),
+          );
+        }
+        if (overviewResult.status === "fulfilled") {
+          setCacheOverview(overviewResult.value);
+          setCacheError("");
+        } else {
+          setCacheError(
+            overviewResult.reason instanceof Error
+              ? overviewResult.reason.message
+              : String(overviewResult.reason),
+          );
+        }
+        if (logSettingsResult.status === "fulfilled") {
+          setActivityLogSettings(logSettingsResult.value);
+          setActivityLogSettingsError("");
+        } else {
+          setActivityLogSettingsError(
+            logSettingsResult.reason instanceof Error
+              ? logSettingsResult.reason.message
+              : String(logSettingsResult.reason),
+          );
+        }
+      });
     };
     refresh();
     // 关闭/清理后仍短轮询：在途 writer 会异步收尾，不能把“缓存中”永久留在 UI。
@@ -792,12 +871,18 @@ export function SettingsPanel() {
     };
   }, [settings?.download_dir, settings?.stream_cache_enabled]);
 
+  useEffect(() => {
+    if (!cacheConfirm) return;
+    const timer = window.setTimeout(() => setCacheConfirm(null), 4_000);
+    return () => window.clearTimeout(timer);
+  }, [cacheConfirm]);
+
   const toggleStreamCache = async () => {
     if (!settings || streamCacheBusy) return;
     setStreamCacheBusy(true);
     setStreamCacheError("");
-    await saveSettings({ stream_cache_enabled: !settings.stream_cache_enabled });
     try {
+      await saveSettings({ stream_cache_enabled: !settings.stream_cache_enabled });
       setStreamCacheStats(await api.streamCacheStats());
     } catch (error) {
       setStreamCacheError(error instanceof Error ? error.message : String(error));
@@ -806,23 +891,53 @@ export function SettingsPanel() {
     }
   };
 
-  const clearStreamCache = async () => {
-    if (streamCacheBusy) return;
-    setStreamCacheBusy(true);
-    setStreamCacheError("");
+  const clearCache = async (category: CacheCategory) => {
+    if (cacheBusy) return;
+    if (cacheConfirm !== category) {
+      setCacheConfirm(category);
+      return;
+    }
+    setCacheConfirm(null);
+    setCacheBusy(category);
+    setCacheError("");
     try {
-      setStreamCacheStats(await api.clearStreamCache());
+      const overview = await api.clearCacheCategory(category);
+      setCacheOverview(overview);
+      if (category === "media") {
+        clearStreamCacheProgressCache();
+        setStreamCacheStats(await api.streamCacheStats());
+      } else if (category === "waveform") {
+        clearAllWaveformCaches();
+      } else if (category === "lyrics") {
+        useLyricsStore.getState().clear();
+      } else if (category === "basic") {
+        clearStreamAnalysisCache();
+        await Promise.all([refreshLibrary(), refreshLibraryStats()]);
+      }
     } catch (error) {
-      setStreamCacheError(error instanceof Error ? error.message : String(error));
+      setCacheError(error instanceof Error ? error.message : String(error));
     } finally {
-      setStreamCacheBusy(false);
+      setCacheBusy(null);
     }
   };
 
-  const selected = useLibraryStore(selectSelectedTrack);
-  const bpm = selected?.bpm ?? null;
-  const bpmLabel = bpm ? `${Math.round(bpm)} BPM` : "120 BPM（未分析，按默认估）";
-  const lengthHint = `约 ${formatSeconds(mixSeconds(bpm, bars))} · ${bpmLabel}`;
+  const changeActivityLogRetention = async (
+    retentionDays: ActivityLogSettings["retention_days"],
+  ) => {
+    if (activityLogSettingsBusy) return;
+    setActivityLogSettingsBusy(true);
+    setActivityLogSettingsError("");
+    try {
+      setActivityLogSettings(
+        await api.updateActivityLogSettings({ retention_days: retentionDays }),
+      );
+      setCacheOverview(await api.cacheOverview());
+    } catch (error) {
+      setActivityLogSettingsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setActivityLogSettingsBusy(false);
+    }
+  };
 
   // 各平台账号与下载源开关合并在同一面板。
   const accountsByPlatform = useMemo(
@@ -857,6 +972,7 @@ export function SettingsPanel() {
   return (
     <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
       <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}>
+        <InlineNotice text={settingsError} block />
         <div ref={updateSectionRef} id="kd-settings-update">
           <Panel heading="软件更新" dense>
             <UpdateRow />
@@ -874,34 +990,7 @@ export function SettingsPanel() {
         <Panel heading="General" dense>
           <div className="kd-djp-groups" aria-label="General">
             <div>
-              <div
-                className="kd-djp-choice kd-djp-theme"
-                role="radiogroup"
-                aria-label="外观主题"
-              >
-                {(
-                  [
-                    ["light", "浅色", Sun],
-                    ["dark", "深色", Moon],
-                    ["system", "跟随系统", Monitor],
-                  ] as const
-                ).map(([value, label, Icon]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    role="radio"
-                    aria-checked={theme === value}
-                    aria-label={label}
-                    title={label}
-                    className="kd-djp-theme-btn"
-                    data-theme={value}
-                    onClick={() => void saveSettings({ theme: value })}
-                  >
-                    <Icon size={16} strokeWidth={2} aria-hidden="true" />
-                  </button>
-                ))}
-              </div>
-              <FontScaleSlider
+              <FontScaleStepper
                 value={appFontScale}
                 onChange={(next) => {
                   setFontScale(next);
@@ -917,8 +1006,8 @@ export function SettingsPanel() {
                   { id: "camelot", text: "Camelot" },
                   { id: "traditional", text: "音名" },
                 ]}
-                title="本地与 OneLibrary 歌曲列表统一显示 Camelot 数字制或传统音名；不会改写曲目数据。"
-                onChange={(next) => void saveSettings({ key_notation: next })}
+                title="歌曲列表统一显示 Camelot 数字制或传统音名；不会改写曲目数据。"
+                onChange={(next) => void saveSettings({ key_notation: next }).catch(() => undefined)}
               />
               <Switch
                 checked={widePlay === "double"}
@@ -943,27 +1032,78 @@ export function SettingsPanel() {
                 title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
                 onChange={() => setTransportFade(!transportFade)}
               />
-              <Switch
-                checked={quantize}
-                label="小节线自动对齐"
-                title="主 CUE、Hot Cue 与 Loop 起点吸附到分析节拍网格。"
-                onChange={() => setQuantize(!quantize)}
+              <CycleToggle<TimeDisplayMode>
+                label="计时方式"
+                value={timeDisplayMode}
+                options={[
+                  { id: "elapsed", text: "正计时" },
+                  { id: "remaining", text: "倒计时" },
+                ]}
+                title="播放条显示已经播放的时间，或显示距离歌曲结束的剩余时间。"
+                onChange={setTimeDisplayMode}
+              />
+              <CycleToggle<TempoRange>
+                label="Tempo 最大范围"
+                value={tempoRange}
+                options={TEMPO_RANGE_OPTIONS.map((value) => ({ id: value, text: `±${value}%` }))}
+                title="管理模式当前歌曲的 Tempo 滑杆相对原速可调整的最大范围。"
+                onChange={setTempoRange}
+              />
+              <CycleToggle<LocalExternalDragMode>
+                label="本地歌曲外拖"
+                value={localExternalDragMode}
+                options={[
+                  { id: "file", text: "歌曲文件" },
+                  { id: "share_link", text: "分享链接" },
+                ]}
+                title="本地歌曲拖出 KDJ 时，选择交给其他应用真实歌曲文件或可公开打开的来源链接。"
+                onChange={setLocalExternalDragMode}
+              />
+              <CycleToggle<ShareContentMode>
+                label="分享内容"
+                value={shareContentMode}
+                options={[
+                  { id: "link_only", text: "原链接" },
+                  { id: "song_info", text: "包含信息" },
+                  { id: "more_info", text: "更多信息" },
+                ]}
+                title="原链接仅分享网址；包含信息会附上歌曲名与艺术家；更多信息还会补充专辑、来源、Share from KDJ 版本水印和小尺寸缩略封面。"
+                onChange={setShareContentMode}
               />
             </div>
-            <div className="kd-djp-group">
-              <span className="kd-djp-label">接播</span>
-              <div className="kd-djp-switch-list" aria-label="接播选项">
-                {HANDOFF_TRANSITIONS.map((item) => (
-                  <Switch
-                    key={item.id}
-                    checked={transitions.includes(item.id)}
-                    label={item.label}
-                    title={`${item.hint}。每次接歌会从已选方案中随机组合。`}
-                    onChange={() => toggleTransition(item.id)}
-                  />
-                ))}
-              </div>
-            </div>
+          </div>
+        </Panel>
+
+        <Panel heading="快捷键方向键控制" dense>
+          <div className="kd-djp-switch-list" aria-label="快捷键方向键控制">
+            <Switch
+              checked={arrowKeyControlEnabled}
+              label="启用"
+              title="开启后由 KDJ 接管四个方向键；关闭后方向键保留给当前界面。"
+              onChange={() => setArrowKeyControlEnabled(!arrowKeyControlEnabled)}
+            />
+            <Switch
+              checked={horizontalArrowKeyMode === "seek"}
+              disabled={!arrowKeyControlEnabled}
+              label="左右键"
+              onState="歌曲内跳转"
+              offState="切换歌曲"
+              title="左右键在当前歌曲内快退 / 快进，或切换上一首 / 下一首。"
+              onChange={() =>
+                setHorizontalArrowKeyMode(horizontalArrowKeyMode === "seek" ? "track" : "seek")
+              }
+            />
+            <Switch
+              checked={verticalArrowKeyMode === "volume"}
+              disabled={!arrowKeyControlEnabled}
+              label="上下键"
+              onState="音量"
+              offState="列表位置"
+              title="上下键调整音量，或在当前歌曲列表中向上 / 向下移动。"
+              onChange={() =>
+                setVerticalArrowKeyMode(verticalArrowKeyMode === "volume" ? "list" : "volume")
+              }
+            />
           </div>
         </Panel>
 
@@ -979,7 +1119,7 @@ export function SettingsPanel() {
                   { id: "flac", text: "FLAC" },
                 ]}
                 title="在线流媒体播放请求的起始音质；平台、版权或会员不允许时会自动降级。"
-                onChange={(next) => void saveSettings({ stream_quality: next })}
+                onChange={(next) => void saveSettings({ stream_quality: next }).catch(() => undefined)}
               />
               <CycleToggle
                 label="视频画质"
@@ -992,7 +1132,33 @@ export function SettingsPanel() {
                   { id: "2160", text: "4K" },
                 ]}
                 title="视频在线播放画质上限；实际画质仍由平台账号和视频本身决定。"
-                onChange={(next) => void saveSettings({ video_playback_max_height: Number(next) })}
+                onChange={(next) => void saveSettings({
+                  video_playback_max_height: Number(next),
+                }).catch(() => undefined)}
+              />
+              <CycleToggle
+                label="YouTube 预览"
+                value={settings?.youtube_preview_player ?? "kdj"}
+                options={[
+                  { id: "platform", text: "平台播放器" },
+                  { id: "kdj", text: "内置播放器" },
+                ]}
+                title="默认使用内置播放器；只影响尚未下载的在线视频，下载完成后的本地视频始终使用内置播放器。"
+                onChange={(next) => void saveSettings({
+                  youtube_preview_player: next,
+                }).catch(() => undefined)}
+              />
+              <CycleToggle
+                label="B站预览"
+                value={settings?.bilibili_preview_player ?? "kdj"}
+                options={[
+                  { id: "platform", text: "平台播放器" },
+                  { id: "kdj", text: "内置播放器" },
+                ]}
+                title="默认使用内置播放器；只影响尚未下载的在线视频，下载完成后的本地视频始终使用内置播放器。"
+                onChange={(next) => void saveSettings({
+                  bilibili_preview_player: next,
+                }).catch(() => undefined)}
               />
               <Switch
                 checked={settings?.stream_cache_enabled ?? false}
@@ -1005,34 +1171,6 @@ export function SettingsPanel() {
                 }
                 onChange={() => void toggleStreamCache()}
               />
-              <div className="kd-stream-cache-row" title={streamCacheStats?.path}>
-                <span className="kd-muted">
-                  {streamCacheStats
-                    ? `${streamCacheStats.files} 首 · ${formatBytes(streamCacheStats.bytes)}`
-                    : "正在读取缓存…"}
-                  {streamCacheStats?.active_writes
-                    ? ` · ${streamCacheStats.active_writes} 首缓存中`
-                    : streamCacheStats?.partial_files
-                      ? ` · ${streamCacheStats.partial_files} 个未完成 · ${formatBytes(streamCacheStats.partial_bytes)}`
-                      : ""}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={
-                    streamCacheBusy ||
-                    !streamCacheStats ||
-                    (streamCacheStats.files === 0 &&
-                      streamCacheStats.partial_files === 0 &&
-                      streamCacheStats.active_writes === 0)
-                  }
-                  title="清理已完成和未完成的在线播放缓存"
-                  onClick={() => void clearStreamCache()}
-                >
-                  <Trash2 size={12} aria-hidden="true" />
-                  清理
-                </Button>
-              </div>
               <InlineNotice
                 text={streamCacheError}
                 block
@@ -1050,14 +1188,6 @@ export function SettingsPanel() {
               </div>
               {lyricsExpanded ? (
                 <div className="kd-djp-switch-list" aria-label="歌词选项">
-                <Switch
-                  checked={settings?.download_lyrics ?? true}
-                  label="下载歌词"
-                  title="下载音频后按当前平台歌曲 ID 获取 LRC，保存到歌曲所在目录的 .kdj/lyrics/；歌词失败不影响歌曲下载。"
-                  onChange={() =>
-                    void saveSettings({ download_lyrics: !(settings?.download_lyrics ?? true) })
-                  }
-                />
                 <Switch
                   checked={tryOnlineWhenMissing}
                   label="无歌词时尝试匹配"
@@ -1111,7 +1241,7 @@ export function SettingsPanel() {
                     />
                     <LyricsColorRow
                       label="副行颜色"
-                      title="翻译或下一句已唱部分：跟随主行 / 黑 / 白 / 单色 / 渐变。超长句跟着进度滚动。"
+                      title="翻译或罗马音已唱部分：跟随主行 / 黑 / 白 / 单色 / 渐变。下一句保持未唱色。"
                       value={desktopSecondary}
                       onChange={setDesktopSecondaryPaint}
                       allowFollow
@@ -1156,7 +1286,9 @@ export function SettingsPanel() {
                   sourceToggleDisabled={!settings || (enabled && current.length <= 1)}
                   onToggleSource={() => {
                     if (!settings) return;
-                    void saveSettings(patchEnabledPlatform(settings, item.id, !enabled));
+                    void saveSettings(patchEnabledPlatform(settings, item.id, !enabled)).catch(
+                      () => undefined,
+                    );
                   }}
                 />
               );
@@ -1164,107 +1296,53 @@ export function SettingsPanel() {
           </div>
         </Panel>
 
-        {LABS_BUILD ? <Panel heading="实验性内容" dense>
-          <div className="kd-djp-groups">
-            <div className="kd-djp-switch-list" aria-label="实验性内容">
-              <Switch
-                checked={settings?.experimental_dj_mode ?? false}
-                disabled={!settings}
-                label="DJ 模式"
-                title="开启后在顶栏显示 DJ 模式切换按钮；关闭后返回管理器模式并隐藏入口。"
-                onChange={() =>
-                  void saveSettings({
-                    experimental_dj_mode: !(settings?.experimental_dj_mode ?? false),
-                  })
-                }
-              />
-              <Switch
-                checked={settings?.experimental_one_library ?? false}
-                disabled={!settings}
-                label="OneLibrary"
-                title="开启后在侧栏与多板块中显示 OneLibrary 入口。"
-                onChange={() =>
-                  void saveSettings({
-                    experimental_one_library: !(settings?.experimental_one_library ?? false),
-                  })
-                }
-              />
-            </div>
-            {settings?.experimental_dj_mode ? (
-              <div className="kd-djp-group">
-                <div className="kd-djp-label-row">
-                  <span className="kd-djp-label">DJ 模式</span>
-                  <SettingsExpandToggle
-                    expanded={djExpanded}
-                    onToggle={() => setDjExpanded((open) => !open)}
-                    label="DJ 模式"
-                  />
-                </div>
-                {djExpanded ? (
-                  <div className="kd-djp-switch-list" aria-label="DJ 模式选项">
-                    <Switch
-                      checked={vocalCut}
-                      label="人声渐消"
-                      title="接歌时渐进削弱上一首的中置人声；保留立体声侧声道和补偿增益。"
-                      onChange={() => setVocalCut(!vocalCut)}
-                    />
-                    <Switch
-                      checked={applyInOutPoints}
-                      label="应用开始 / 结束点"
-                      title="自动接播与自动续播时：有开始点就从那里起播，有结束点就到点切下一首；关掉则按首拍起播、波形尾段切歌。"
-                      onChange={() => setApplyInOutPoints(!applyInOutPoints)}
-                    />
-                    <Switch
-                      checked={autoBeatSync}
-                      label="自动对拍"
-                      title="开启后：点波形落到被点 1/4 小节内与当前播放相同的相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。关掉则点击精确落点，SYNC 只锁拍子（灰线对齐）。"
-                      onChange={() => setAutoBeatSync(!autoBeatSync)}
-                    />
-                    <Switch
-                      checked={playOnLoad}
-                      label="加载后立即播放"
-                      title="DJ 模式下把曲目装入 Deck 后立即从首拍起播；关掉则只装盘，停在首拍等你按播放。"
-                      onChange={() => setPlayOnLoad(!playOnLoad)}
-                    />
-                    <div className="kd-djp-group">
-                      <span className="kd-djp-label">接歌长度</span>
-                      <BarsSlider bars={bars} onChange={setBars} hint={lengthHint} />
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            {settings?.experimental_one_library ? (
-              <div className="kd-djp-group">
-                <div className="kd-djp-label-row">
-                  <span className="kd-djp-label">OneLibrary</span>
-                  <SettingsExpandToggle
-                    expanded={oneLibraryExpanded}
-                    onToggle={() => setOneLibraryExpanded((open) => !open)}
-                    label="OneLibrary"
-                  />
-                </div>
-                {oneLibraryExpanded ? (
-                  <div className="kd-djp-switch-list" aria-label="OneLibrary 选项">
-                    <Switch
-                      checked={settings?.virtual_disk_auto_grow ?? true}
-                      disabled={!settings}
-                      label="空间不足时自动迁移至更大的镜像"
-                      title="仅用于 KDJ 虚拟磁盘；关闭后空间不足会停止写入并报错。"
-                      onChange={() =>
-                        void saveSettings({
-                          virtual_disk_auto_grow: !(settings?.virtual_disk_auto_grow ?? true),
-                        })
-                      }
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
+        <Panel heading="存储空间" dense>
+          <div className="kd-cache-overview" aria-label="存储空间占用">
+            {cacheOverview ? (
+              (["media", "waveform", "lyrics", "basic", "logs", "other"] as const).map((category) => (
+                <CacheOverviewRow
+                  key={category}
+                  category={category}
+                  stats={cacheOverview[category]}
+                  busy={cacheBusy !== null}
+                  confirming={cacheConfirm === category}
+                  onClear={(next) => void clearCache(next)}
+                />
+              ))
+            ) : cacheError ? null : (
+              <div className="kd-cache-overview-loading">正在统计…</div>
+            )}
           </div>
-        </Panel> : null}
+          {activityLogSettings ? (
+            <CycleToggle<ActivityLogSettings["retention_days"]>
+              label="日志自动清理"
+              value={activityLogSettings.retention_days}
+              options={[
+                { id: 7, text: "7 天" },
+                { id: 14, text: "14 天" },
+                { id: 30, text: "30 天" },
+                { id: 90, text: "90 天" },
+                { id: 0, text: "手动" },
+              ]}
+              title="手动模式仍保留 128 MB 安全上限"
+              onChange={(next) => void changeActivityLogRetention(next)}
+            />
+          ) : null}
+          <InlineNotice
+            text={cacheError}
+            block
+            onDismiss={() => setCacheError("")}
+          />
+          <InlineNotice
+            text={activityLogSettingsError}
+            block
+            onDismiss={() => setActivityLogSettingsError("")}
+          />
+        </Panel>
 
-        <CliSkillExport />
+        <ActivityLogPanel />
+
+        {showKdjAiPrompt ? <KdjAiPromptPanel /> : null}
       </div>
     </div>
   );

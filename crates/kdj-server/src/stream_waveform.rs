@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use kdj_analysis::engine::AnalysisResult;
 use kdj_core::models::Waveform;
+use kdj_core::work_scheduler::WorkClass;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
@@ -68,10 +69,13 @@ pub struct StreamWaveformProgress {
     /// 已成功解码并分析的媒体前缀。`duration` 是这个前缀的实际秒数，而非
     /// 容器头可能声明的整曲时长。
     pub waveform: Option<Waveform>,
-    /// 完整文件就绪后生成的 100 列/秒 DJ 主波形；渐进 overview 不可冒充它。
-    pub detail_waveform: Option<Waveform>,
     pub covered_seconds: f64,
     pub revision: u64,
+    /// 当前会话已真实落盘、可供播放器/缓存复用的媒体字节。它来自同一份代理响应
+    /// 或持久 stream-cache，不会为了进度条再发一份下载。
+    pub cached_bytes: u64,
+    /// 上游媒体声明的完整字节数；未知时为 0。完整缓存命中时等于 cached_bytes。
+    pub total_bytes: u64,
     /// 缓存文件已经完整落盘；若 waveform 仍为空，表示格式不支持前缀解码或
     /// 完整解码失败，前端可停止轮询并继续用 analyser 的已播兜底。
     pub complete: bool,
@@ -107,6 +111,7 @@ struct StreamWaveformEntry {
     epoch: u64,
     path: Option<PathBuf>,
     bytes: u64,
+    total_bytes: u64,
     requested_until: Option<Instant>,
     complete: bool,
     inflight: bool,
@@ -130,7 +135,6 @@ struct StreamWaveformEntry {
     analysis_not_before: Option<Instant>,
     cleanup_scheduled: bool,
     waveform: Option<Waveform>,
-    detail_waveform: Option<Waveform>,
     covered_seconds: f64,
     revision: u64,
     last_access: Instant,
@@ -142,6 +146,7 @@ impl Default for StreamWaveformEntry {
             epoch: 0,
             path: None,
             bytes: 0,
+            total_bytes: 0,
             requested_until: None,
             complete: false,
             inflight: false,
@@ -160,7 +165,6 @@ impl Default for StreamWaveformEntry {
             analysis_not_before: None,
             cleanup_scheduled: false,
             waveform: None,
-            detail_waveform: None,
             covered_seconds: 0.0,
             revision: 0,
             last_access: Instant::now(),
@@ -173,6 +177,7 @@ pub struct StreamWaveformCoordinator {
     inner: Arc<Mutex<StreamWaveformInner>>,
     cleaned_session_roots: Arc<tokio::sync::Mutex<HashSet<PathBuf>>>,
     session_limits: SessionLimits,
+    activity_log: Option<crate::activity_log::ActivityLog>,
 }
 
 impl Default for StreamWaveformCoordinator {
@@ -181,6 +186,7 @@ impl Default for StreamWaveformCoordinator {
             inner: Arc::new(Mutex::new(StreamWaveformInner::default())),
             cleaned_session_roots: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             session_limits: SessionLimits::default(),
+            activity_log: None,
         }
     }
 }
@@ -198,9 +204,16 @@ struct AnalyzeJob {
 
 struct AnalyzeJobResult {
     waveform: Option<(Waveform, f64)>,
-    detail_waveform: Option<Waveform>,
     analysis: Option<AnalysisResult>,
     analysis_error: String,
+}
+
+fn work_class_for_job(complete: bool) -> WorkClass {
+    if complete {
+        WorkClass::LibraryAnalysisLight
+    } else {
+        WorkClass::InteractiveWaveform
+    }
 }
 
 #[derive(Debug)]
@@ -243,6 +256,13 @@ pub(crate) struct StreamWaveformCapturePlan {
 }
 
 impl StreamWaveformCoordinator {
+    pub fn with_activity_log(activity_log: crate::activity_log::ActivityLog) -> Self {
+        Self {
+            activity_log: Some(activity_log),
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     fn with_session_limits(file_bytes: u64, total_bytes: u64) -> Self {
         Self {
@@ -379,6 +399,7 @@ impl StreamWaveformCoordinator {
                 entry.epoch = epoch;
                 entry.path = Some(file_lease.path.clone());
                 entry.bytes = 0;
+                entry.total_bytes = media_total_bytes;
                 entry.complete = false;
                 entry.inflight = false;
                 entry.complete_analyzed = false;
@@ -393,7 +414,6 @@ impl StreamWaveformCoordinator {
                 entry.last_requested_bytes = 0;
                 entry.last_analysis_started_at = None;
                 entry.waveform = None;
-                entry.detail_waveform = None;
                 entry.covered_seconds = 0.0;
                 entry.revision = 0;
                 entry.last_access = Instant::now();
@@ -428,6 +448,7 @@ impl StreamWaveformCoordinator {
                 || !entry.capture_continuable
                 || entry.bytes != start
                 || entry.capture_file_bytes != start
+                || entry.total_bytes != media_total_bytes
             {
                 return Ok(None);
             }
@@ -487,6 +508,7 @@ impl StreamWaveformCoordinator {
         entry.epoch = next_epoch;
         entry.path = None;
         entry.bytes = 0;
+        entry.total_bytes = 0;
         entry.capture_file_bytes = 0;
         entry.capture_open = false;
         entry.capture_continuable = false;
@@ -497,7 +519,6 @@ impl StreamWaveformCoordinator {
         entry.analysis_complete = false;
         entry.analysis = None;
         entry.analysis_error.clear();
-        entry.detail_waveform = None;
         entry.last_requested_path = None;
         entry.last_requested_bytes = 0;
     }
@@ -524,7 +545,6 @@ impl StreamWaveformCoordinator {
             entry.complete |= complete;
             if complete {
                 entry.complete_analyzed = false;
-                entry.detail_waveform = None;
                 entry.analysis_complete = false;
                 entry.analysis = None;
                 entry.analysis_error.clear();
@@ -667,6 +687,19 @@ impl StreamWaveformCoordinator {
     /// stream-cache 每写完一段就报告当前临时文件。这里不写文件、不碰网络；只有
     /// 当前播放器实际轮询过本曲（仍在租约内）才会占后台分析额度。
     pub fn observe(&self, key: String, path: PathBuf, bytes: u64, complete: bool) {
+        self.observe_with_total(key, path, bytes, if complete { bytes } else { 0 }, complete);
+    }
+
+    /// 与 `observe` 相同，但在后台顺序缓存尚未完成时也保留响应声明的整轨字节数，
+    /// 供前端展示真实 0..100% 缓存进度。
+    pub fn observe_with_total(
+        &self,
+        key: String,
+        path: PathBuf,
+        bytes: u64,
+        total_bytes: u64,
+        complete: bool,
+    ) {
         let job = {
             let mut inner = self.inner.lock().expect("stream waveform state");
             let path_changed = inner
@@ -684,6 +717,11 @@ impl StreamWaveformCoordinator {
             let became_complete = complete && !entry.complete;
             entry.path = Some(path);
             entry.bytes = bytes;
+            if total_bytes > 0 {
+                entry.total_bytes = total_bytes.max(bytes);
+            } else if complete {
+                entry.total_bytes = bytes;
+            }
             entry.complete = complete;
             entry.capture_open = false;
             entry.capture_file_bytes = 0;
@@ -696,7 +734,6 @@ impl StreamWaveformCoordinator {
             let same_download_commit = path_changed && !was_complete && complete;
             if path_changed && !same_download_commit {
                 entry.waveform = None;
-                entry.detail_waveform = None;
                 entry.covered_seconds = 0.0;
                 entry.revision = 0;
                 entry.last_analysis_started_at = None;
@@ -705,7 +742,6 @@ impl StreamWaveformCoordinator {
             }
             if path_changed || became_complete {
                 entry.complete_analyzed = false;
-                entry.detail_waveform = None;
                 entry.analysis_complete = false;
             }
             // partial 原子改名为最终 media（或用户重试时换了一份 partial）后，旧
@@ -743,13 +779,18 @@ impl StreamWaveformCoordinator {
     fn spawn(&self, job: AnalyzeJob) {
         let coordinator = self.clone();
         tokio::task::spawn_blocking(move || {
-            // 渐进波形属于后台分析，不得绕过整库分析的并发上限。
-            let _permit = crate::jobs::acquire_scheduled_work(
-                kdj_core::work_scheduler::WorkClass::LibraryAnalysis,
-            );
-            let (waveform, detail_waveform) = decode_cached_waveforms(&job.path, job.complete)
-                .map(|(overview, detail, covered)| (Some((overview, covered)), detail))
-                .unwrap_or((None, None));
+            kdj_core::thread_qos::prefer_background();
+            // The online track currently feeding the Deck is not a bulk-library job. Classifying
+            // it as `LibraryAnalysis` made the scheduler wait for `live_audio_decks == 0`, so the
+            // exact moment a user pressed Play was also the moment every online waveform and
+            // metric disappeared. A growing, visible overview is interactive work; the one final
+            // BPM/key/loudness pass is the single light-analysis owner. Both still yield when the
+            // output ring reports pressure, and the process-wide heavy budget remains one while
+            // audio is live.
+            let class = work_class_for_job(job.complete);
+            let _permit = crate::jobs::acquire_scheduled_work(class);
+            let waveform = decode_cached_waveform(&job.path, job.complete)
+                .map(|(overview, covered)| (overview, covered));
             let (analysis, analysis_error) = if job.complete {
                 analyze_complete_stream(&job.path, job.analysis_duration)
             } else {
@@ -757,7 +798,6 @@ impl StreamWaveformCoordinator {
             };
             let result = AnalyzeJobResult {
                 waveform,
-                detail_waveform,
                 analysis,
                 analysis_error,
             };
@@ -766,6 +806,8 @@ impl StreamWaveformCoordinator {
     }
 
     fn finish_job(&self, job: AnalyzeJob, result: AnalyzeJobResult) {
+        let analysis_warning = (job.complete && !result.analysis_error.is_empty())
+            .then(|| result.analysis_error.clone());
         let next = {
             let mut inner = self.inner.lock().expect("stream waveform state");
             let Some(current) = inner.entries.get(&job.key) else {
@@ -800,7 +842,6 @@ impl StreamWaveformCoordinator {
                 // 即便格式不支持，完整文件也只尝试一次；否则前端每轮轮询都可能再开一
                 // 条昂贵的解码任务。
                 entry.complete_analyzed = true;
-                entry.detail_waveform = result.detail_waveform;
                 entry.analysis_complete = true;
                 entry.analysis = result.analysis;
                 entry.analysis_error = result.analysis_error;
@@ -818,6 +859,9 @@ impl StreamWaveformCoordinator {
             );
             next
         };
+        if let (Some(log), Some(detail)) = (&self.activity_log, analysis_warning) {
+            log.record_analysis_warning("在线曲目分析异常", detail);
+        }
         if let Some(next) = next {
             self.spawn(next);
         }
@@ -1001,9 +1045,10 @@ fn snapshot(entry: &StreamWaveformEntry) -> StreamWaveformProgress {
     };
     StreamWaveformProgress {
         waveform: entry.waveform.clone(),
-        detail_waveform: entry.detail_waveform.clone(),
         covered_seconds: entry.covered_seconds,
         revision: entry.revision,
+        cached_bytes: entry.bytes,
+        total_bytes: entry.total_bytes,
         complete: entry.complete,
         // complete 可能刚好落在节流窗口内，最终 pass 尚未启动；仍报 active 让
         // PlayerBar 续租，窗口结束后 request 才有机会真正排入。否则前端会因
@@ -1130,22 +1175,60 @@ async fn create_ephemeral_file(
     ))
 }
 
-fn decode_cached_waveforms(
-    path: &Path,
-    include_detail: bool,
-) -> Option<(Waveform, Option<Waveform>, f64)> {
+fn decode_cached_waveform(path: &Path, complete: bool) -> Option<(Waveform, f64)> {
     let decoded = kdj_analysis::decode::decode_audio_native(path, None).ok()?;
     let covered_seconds =
         ((decoded.samples.len() as f64 / decoded.sample_rate as f64) * 1000.0).round() / 1000.0;
     if covered_seconds <= 0.0 {
         return None;
     }
-    // Bottom overview and Performance detail are different assets. The overview remains the
-    // release STFT profile; only a complete file may publish the 100-columns/sec DJ rail.
-    let mut overview = kdj_analysis::waveform::release_overview_waveform(
-        &decoded.samples,
-        decoded.sample_rate as f64,
+    if !complete {
+        // A growing media file is decoded repeatedly. Running the full semantic/inverse-FFT
+        // pipeline on every prefix competes with the very playback that is filling this file and
+        // produces periodic CPU/IO spikes. The temporary preview keeps the release structure and
+        // base RGB on one low-QoS worker; the exact release overview replaces it once complete.
+        let mut overview = kdj_analysis::waveform::progressive_release_overview_waveform(
+            &decoded.samples,
+            f64::from(decoded.sample_rate),
+            crate::waveform::RELEASE_OVERVIEW_BUCKETS,
+        );
+        if overview.amp.is_empty() {
+            return None;
+        }
+        overview.duration = covered_seconds;
+        return Some((overview, covered_seconds));
+    }
+    // The complete online file needs one exact release overview for the bottom rail. Do not also
+    // build/serialize the old 400-columns/sec full-song DJ asset: Manager now gets a six-second
+    // window from playback PCM, so that large array had no consumer and caused the heaviest CPU
+    // spike precisely when a download completed.
+    let evidence_resampled = (decoded.sample_rate != kdj_analysis::waveform::WAVEFORM_EVIDENCE_SR)
+        .then(|| {
+            kdj_analysis::decode::resample_mono(
+                &decoded.samples,
+                decoded.sample_rate,
+                kdj_analysis::waveform::WAVEFORM_EVIDENCE_SR,
+            )
+        });
+    let evidence_samples = evidence_resampled.as_deref().unwrap_or(&decoded.samples);
+    let evidence = kdj_analysis::waveform::analyze_waveform_evidence(
+        evidence_samples,
+        f64::from(kdj_analysis::waveform::WAVEFORM_EVIDENCE_SR),
+    );
+    let release_resampled = (decoded.sample_rate != kdj_analysis::waveform::RELEASE_OVERVIEW_SR)
+        .then(|| {
+            kdj_analysis::decode::resample_mono(
+                &decoded.samples,
+                decoded.sample_rate,
+                kdj_analysis::waveform::RELEASE_OVERVIEW_SR,
+            )
+        });
+    let release_samples = release_resampled.as_deref().unwrap_or(&decoded.samples);
+    let mut overview = kdj_analysis::waveform::release_overview_waveform_with_evidence(
+        release_samples,
+        f64::from(kdj_analysis::waveform::RELEASE_OVERVIEW_SR),
         crate::waveform::RELEASE_OVERVIEW_BUCKETS,
+        &evidence,
     );
     if overview.amp.is_empty() {
         return None;
@@ -1153,25 +1236,12 @@ fn decode_cached_waveforms(
     // 前端把渐进 overview 投影到整曲时长；这里保留真实可解码长度，不能把前缀
     // 拉伸成完整曲目。
     overview.duration = covered_seconds;
-    let detail = include_detail
-        .then(|| {
-            let buckets = kdj_analysis::waveform::detail_waveform_buckets(covered_seconds);
-            let mut waveform = kdj_analysis::waveform::band_waveform(
-                &decoded.samples,
-                decoded.sample_rate as f64,
-                buckets,
-            );
-            waveform.duration = covered_seconds;
-            waveform
-        })
-        .filter(|waveform| !waveform.amp.is_empty());
-    Some((overview, detail, covered_seconds))
+    Some((overview, covered_seconds))
 }
 
 #[cfg(test)]
 fn decode_cached_prefix(path: &Path) -> Option<(Waveform, f64)> {
-    decode_cached_waveforms(path, false)
-        .map(|(overview, _, covered_seconds)| (overview, covered_seconds))
+    decode_cached_waveform(path, false)
 }
 
 fn analyze_complete_stream(path: &Path, duration_limit: f64) -> (Option<AnalysisResult>, String) {
@@ -1303,16 +1373,29 @@ mod tests {
             r: vec![255],
             g: vec![128],
             b: vec![64],
+            ..Default::default()
         }
     }
 
     fn test_job_result() -> AnalyzeJobResult {
         AnalyzeJobResult {
             waveform: Some((test_waveform(), 1.0)),
-            detail_waveform: None,
             analysis: None,
             analysis_error: "test analysis omitted".to_string(),
         }
+    }
+
+    #[test]
+    fn snapshot_reports_real_cache_byte_progress() {
+        let entry = StreamWaveformEntry {
+            bytes: 3,
+            total_bytes: 10,
+            ..Default::default()
+        };
+        let progress = snapshot(&entry);
+        assert_eq!(progress.cached_bytes, 3);
+        assert_eq!(progress.total_bytes, 10);
+        assert!(!progress.complete);
     }
 
     fn capture_plan(
@@ -1346,6 +1429,20 @@ mod tests {
         assert_eq!(
             next_analysis_bytes(FIRST_ANALYSIS_BYTES * 8),
             FIRST_ANALYSIS_BYTES * 16
+        );
+    }
+
+    #[test]
+    fn current_online_work_never_enters_the_idle_only_bulk_lane() {
+        assert_eq!(
+            work_class_for_job(false),
+            WorkClass::InteractiveWaveform,
+            "the visible progressive rail must remain admissible during playback"
+        );
+        assert_eq!(
+            work_class_for_job(true),
+            WorkClass::LibraryAnalysisLight,
+            "the final temporary metrics get one throttled live-audio slot"
         );
     }
 
@@ -1865,16 +1962,12 @@ mod tests {
         assert!(progress.complete);
         assert!(progress.covered_seconds > 2.5);
         assert!(progress.waveform.is_some());
-        let overview_columns = progress
-            .waveform
-            .as_ref()
-            .map_or(0, |waveform| waveform.amp.len());
         assert!(
             progress
-                .detail_waveform
+                .waveform
                 .as_ref()
-                .is_some_and(|waveform| waveform.amp.len() > overview_columns),
-            "complete stream must publish a distinct high-density Performance waveform"
+                .is_some_and(|waveform| !waveform.amp.is_empty()),
+            "complete stream must publish its exact release overview"
         );
         assert_eq!(progress.analysis_status, StreamAnalysisStatus::Ready);
         assert!(

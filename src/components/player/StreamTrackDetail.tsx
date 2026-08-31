@@ -1,33 +1,39 @@
 import { useCallback, useState, useSyncExternalStore, type CSSProperties } from "react";
-import { Download, LoaderCircle, Pause, Play, RotateCcw } from "lucide-react";
 import { DASH, formatBpm, formatDate, formatDuration } from "../../lib/format";
-import {
-  getPlayerSession,
-  requestPlayerCommand,
-  subscribePlayerSession,
-} from "../../lib/playerSession";
+import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
 import {
   getSongPreviewState,
-  playSongPreview,
-  retrySongPreview,
   sourceKey,
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
-import { streamCoverUrl, streamMeta } from "../../lib/streamTrack";
-import { enqueueMediaDownloads } from "../../lib/mediaActions";
+import { streamCoverUrl, streamMeta, streamTrackById } from "../../lib/streamTrack";
 import {
   streamAnalysisSnapshot,
   subscribeStreamAnalysis,
+  trackWithStreamAnalysis,
   type StreamAnalysisSnapshot,
 } from "../../lib/streamAnalysis";
+import {
+  streamCueSnapshot,
+  subscribeStreamCue,
+  trackWithStreamCue,
+  updateStreamCue,
+} from "../../lib/streamCue";
 import { useAppStore } from "../../stores/appStore";
+import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track } from "../../types";
-import { Button, InlineNotice, Panel } from "../common";
+import { InlineNotice, Panel, PanelStack } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
 import { CamelotWheel } from "../library/CamelotWheel";
+import { HarmonicList } from "../library/HarmonicList";
+import { pointPatch, Waveform } from "../library/Waveform";
+import { EnergyMeter } from "../library/TrackTable";
 import { VjSearchPanel } from "../library/VjSearchPanel";
+import { NowPlayingControlPanel } from "./NowPlayingControlPanel";
+import { OnlineTrackCacheFacts } from "./OnlineTrackCacheFacts";
+import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 
 const STATUS_LABEL = {
   idle: "等待播放",
@@ -45,38 +51,26 @@ function qualityLabel(value: string | null | undefined): string {
   return value === "flac" ? "FLAC" : `${value}K`;
 }
 
-function StreamAnalysisPanel({ snapshot }: { snapshot: StreamAnalysisSnapshot }) {
+function StreamAnalysisPanel({
+  snapshot,
+  track,
+  position,
+  duration,
+  showWaveform,
+}: {
+  snapshot: StreamAnalysisSnapshot;
+  track: Track;
+  position: number;
+  duration: number;
+  showWaveform: boolean;
+}) {
+  const keyFilter = useLibraryStore((state) => state.filter.key);
+  const setFilter = useLibraryStore((state) => state.setFilter);
   const result = snapshot.result;
   const ready = snapshot.phase === "ready" && result;
 
-  if (!ready) {
-    const copy =
-      snapshot.phase === "analyzing"
-        ? "完整音频已就绪，正在分析 BPM、调号与响度…"
-        : snapshot.phase === "waiting"
-          ? "正在等待播放器收齐完整音频…"
-          : snapshot.phase === "failed"
-            ? "完整音频已收到，但没有生成可用的分析结果。"
-            : "开始播放后，完整音频一旦收齐就会自动分析。";
-    return (
-      <Panel heading="Analysis" padded dense>
-        <div
-          className="kd-stream-analysis-status"
-          data-state={snapshot.phase}
-          aria-live="polite"
-        >
-          {snapshot.phase === "analyzing" ? (
-            <LoaderCircle size={15} className="kd-spin" aria-hidden="true" />
-          ) : null}
-          <div>
-            <strong>{copy}</strong>
-            <span>直接复用在线播放已经落盘的媒体，不会为分析再下载一份。</span>
-          </div>
-        </div>
-        <InlineNotice text={snapshot.phase === "failed" ? snapshot.error : ""} block />
-      </Panel>
-    );
-  }
+  // 未分析、分析中和失败都不占一个空面板；真正有结果时才出现 Analysis。
+  if (!ready) return null;
 
   const bpmConfidence =
     result.bpm_confidence !== null ? Math.round(result.bpm_confidence * 100) : null;
@@ -89,15 +83,33 @@ function StreamAnalysisPanel({ snapshot }: { snapshot: StreamAnalysisSnapshot })
       <div className="kd-analysis-deck">
         <div
           className="kd-analysis-wheel"
-          title={`${result.key || "调号未知"}${keyConfidence !== null ? ` · 置信度 ${keyConfidence}%` : ""}`}
+          title="亮起的是能和它接上的调；点任意一格按调筛选曲库"
         >
-          <CamelotWheel code={result.camelot} size={112} />
+          <CamelotWheel
+            code={track.camelot}
+            size={128}
+            onPick={(code) => setFilter({ key: keyFilter === code ? "" : code })}
+          />
+          {keyFilter && (
+            <button
+              type="button"
+              className="kd-wheel-filter"
+              title="清除调号筛选"
+              onClick={() => setFilter({ key: "" })}
+            >
+              正在筛选 {keyFilter}
+              <span aria-hidden="true">×</span>
+            </button>
+          )}
         </div>
 
         <div className="kd-analysis-readout" aria-label="在线歌曲节奏与响度">
           <div className="kd-analysis-metric">
             <span className="kd-analysis-metric-label">BPM</span>
-            <span className="kd-analysis-metric-value">{formatBpm(result.bpm)}</span>
+            <span className="kd-analysis-metric-value" data-with-version="true">
+              {formatBpm(track.bpm)}
+              <small className="kd-analysis-version">V3</small>
+            </span>
             <div
               className="kd-analysis-meter"
               style={
@@ -118,43 +130,55 @@ function StreamAnalysisPanel({ snapshot }: { snapshot: StreamAnalysisSnapshot })
           <div className="kd-analysis-metric-sep" aria-hidden="true" />
 
           <div className="kd-analysis-metric">
-            <span className="kd-analysis-metric-label">能量 / 响度</span>
+            <span className="kd-analysis-metric-label">相对响度</span>
             <span className="kd-analysis-metric-value">
-              {result.energy !== null ? `${result.energy}/10` : DASH}
+              <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
             </span>
             <span className="kd-analysis-metric-hint">
-              {result.rms_db !== null ? `RMS ${result.rms_db.toFixed(1)} dBFS` : DASH}
-              {result.peak_db !== null ? ` · Peak ${result.peak_db.toFixed(1)}` : ""}
+              {track.rms_db !== null ? `${track.rms_db.toFixed(1)} dBFS` : DASH}
+              {track.peak_db !== null ? ` · peak ${track.peak_db.toFixed(1)}` : ""}
             </span>
           </div>
         </div>
       </div>
 
+      {showWaveform ? (
+        <Waveform
+          trackId={track.id}
+          track={track}
+          renderProfile="release-overview"
+          position={position}
+          duration={duration}
+          cueMs={track.cue_ms}
+          endMs={track.end_ms}
+          height={56}
+          onSetPoint={(kind, at) => {
+            const patch = pointPatch(kind, at, track.cue_ms, track.end_ms);
+            if (typeof patch === "string") return patch;
+            updateStreamCue(track, patch);
+          }}
+        />
+      ) : null}
       <div className="kd-row kd-faint kd-analysis-meta">
-        调号 {result.key || result.key_short || DASH}
+        开始 {track.cue_ms !== null ? `${(track.cue_ms / 1000).toFixed(2)}s` : DASH}
+        <span className="kd-toolbar-gap" />
+        结束 {track.end_ms !== null ? `${(track.end_ms / 1000).toFixed(2)}s` : DASH}
+        <span className="kd-toolbar-gap" />
+        首拍 {track.first_beat !== null ? `${track.first_beat.toFixed(3)}s` : DASH}
         <span className="kd-toolbar-gap" />
         调性置信度 {keyConfidence !== null ? `${keyConfidence}%` : DASH}
         <span className="kd-toolbar-gap" />
-        首拍 {result.first_beat !== null ? `${result.first_beat.toFixed(3)}s` : DASH}
-        <span className="kd-toolbar-gap" />
-        分析长度 {formatDuration(result.duration)}
-        {snapshot.completedAt ? (
-          <>
-            <span className="kd-toolbar-gap" />
-            分析于 {formatDate(snapshot.completedAt)}
-          </>
-        ) : null}
+        {snapshot.completedAt ? `分析于 ${formatDate(snapshot.completedAt)}` : null}
       </div>
       {warning ? <p className="kd-stream-analysis-warning">部分分析提示：{warning}</p> : null}
-      <p className="kd-faint kd-stream-analysis-note">本次在线试听的临时结果，不会写入曲库或文件标签。</p>
     </Panel>
   );
 }
 
 /**
- * 在线曲目沿用本地详情的“封面 + 标题事实 + 文字动作 + Explore”骨架。
+ * 在线曲目沿用本地详情的“封面 + 标题事实 + Explore”骨架。
  * 它没有曲库记录，但代理收到完整媒体后会复用会话文件做一次临时分析；
- * 真正的媒体元素仍只在底部 PlayerBar，这里只发播放命令或展示共享分析快照。
+ * 真正的媒体元素与列表动作都留在播放器 / 结果列表，这里只展示共享快照。
  */
 export function StreamTrackDetail({ track }: { track: Track }) {
   const session = useSyncExternalStore(
@@ -168,80 +192,44 @@ export function StreamTrackDetail({ track }: { track: Track }) {
     getSongPreviewState,
   );
   const settings = useAppStore((state) => state.settings);
-  const [downloadBusy, setDownloadBusy] = useState(false);
+  const detailWaveformVisible = usePlaybackPrefs((state) => state.detailWaveformVisible);
+  const detailControlVisible = usePlaybackPrefs((state) => state.detailControlVisible);
+  const selectTrack = useLibraryStore((state) => state.selectTrack);
   const [actionError, setActionError] = useState("");
-  const subscribeAnalysis = useCallback(
-    (listener: () => void) => subscribeStreamAnalysis(track.id, listener),
-    [track.id],
-  );
-  const readAnalysis = useCallback(() => streamAnalysisSnapshot(track.id), [track.id]);
-  const analysis = useSyncExternalStore(subscribeAnalysis, readAnalysis, readAnalysis);
-
   const meta = streamMeta(track);
   const source = meta?.source ?? null;
-  const active = session.trackId === track.id;
-  const duration = active ? session.duration || track.duration || 0 : track.duration || 0;
   const matchingPreview = source && preview.sourceKey === sourceKey(source) ? preview : null;
+  // 搜索列表条目与真正装进播放器的临时曲目编号不同；同一来源必须跟到播放器实例，
+  // 否则状态、波形和缓存会永远停在“未开始”。
+  const detailTrackId = matchingPreview?.trackId ?? track.id;
+  const detailTrack = streamTrackById(detailTrackId) ?? track;
+  const subscribeAnalysis = useCallback(
+    (listener: () => void) => subscribeStreamAnalysis(detailTrackId, listener),
+    [detailTrackId],
+  );
+  const readAnalysis = useCallback(
+    () => streamAnalysisSnapshot(detailTrackId),
+    [detailTrackId],
+  );
+  const analysis = useSyncExternalStore(subscribeAnalysis, readAnalysis, readAnalysis);
+  const subscribeCue = useCallback(
+    (listener: () => void) => subscribeStreamCue(detailTrackId, listener),
+    [detailTrackId],
+  );
+  const readCue = useCallback(() => streamCueSnapshot(detailTrackId), [detailTrackId]);
+  useSyncExternalStore(subscribeCue, readCue, readCue);
+  const analyzedTrack = trackWithStreamCue(trackWithStreamAnalysis(detailTrack, analysis));
+  const analysisReady = analysis.phase === "ready" && analysis.result !== null;
+
+  const active = session.trackId === detailTrackId;
+  const duration = active
+    ? session.duration || detailTrack.duration || 0
+    : detailTrack.duration || 0;
   const status = matchingPreview?.phase === "resolving"
     ? "resolving"
     : active
       ? session.status
       : "idle";
-
-  const togglePlayback = async () => {
-    if (!source) return;
-    setActionError("");
-    if (active) {
-      requestPlayerCommand({ type: "toggle" });
-      return;
-    }
-    try {
-      await playSongPreview({
-        source,
-        title: track.title,
-        artist: track.artist,
-        autoPlay: true,
-      });
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const retry = async () => {
-    if (!source) return;
-    setActionError("");
-    try {
-      if (matchingPreview?.request) await retrySongPreview(matchingPreview.request);
-      else {
-        await playSongPreview({
-          source,
-          title: track.title,
-          artist: track.artist,
-          autoPlay: true,
-          bypassCache: true,
-        });
-      }
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const download = async () => {
-    if (!source || downloadBusy) return;
-    setDownloadBusy(true);
-    setActionError("");
-    try {
-      await enqueueMediaDownloads([source], {
-        quality: settings?.default_quality ?? null,
-        // 这里只不覆盖“下载后入库分析”策略；上面的试听临时分析与下载任务无关。
-        analyze: null,
-      });
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setDownloadBusy(false);
-    }
-  };
 
   const errorText =
     actionError || matchingPreview?.error || (active ? session.error : "");
@@ -249,20 +237,25 @@ export function StreamTrackDetail({ track }: { track: Track }) {
 
   return (
     <div className="kd-col kd-track-detail" style={{ gap: "0.6rem", padding: "0.7rem" }}>
-      <div className="kd-row" style={{ gap: "0.6rem", alignItems: "flex-start" }}>
-        <div
-          className="kd-cover kd-stream-detail-cover"
-          style={{ width: 76, height: 76 }}
-          aria-label="在线曲目封面"
-        >
-          <CoverImage
-            src={cover}
-            alt=""
-            className="kd-stream-detail-cover-image"
-            loading="eager"
-          />
+      <div
+        className="kd-row kd-track-detail-hero"
+        style={{ gap: "0.6rem", alignItems: "flex-start" }}
+      >
+        <div className="kd-stream-detail-cover-stack">
+          <div
+            className="kd-cover kd-stream-detail-cover"
+            style={{ width: 88, height: 88 }}
+            aria-label="在线曲目封面"
+          >
+            <CoverImage
+              src={cover}
+              alt=""
+              className="kd-stream-detail-cover-image"
+              loading="eager"
+            />
+          </div>
         </div>
-        <div style={{ minWidth: 0 }}>
+        <div className="kd-track-detail-summary" style={{ minWidth: 0 }}>
           <div
             className="kd-truncate"
             style={{ fontWeight: 700, fontSize: "var(--kd-size-lg)" }}
@@ -277,11 +270,16 @@ export function StreamTrackDetail({ track }: { track: Track }) {
             {track.album || "—"}
           </div>
           <div
-            className="kd-row kd-faint kd-stream-detail-facts"
-            style={{ gap: "0.4rem", fontSize: "var(--kd-size-xs)" }}
+            className="kd-row kd-faint kd-track-detail-facts"
+            style={{
+              columnGap: "0.4rem",
+              rowGap: 0,
+              fontSize: "var(--kd-size-xs)",
+              flexWrap: "wrap",
+            }}
             aria-live="polite"
           >
-            {source ? <PlatformMark id={source.platform} size={13} /> : null}
+            {source ? <PlatformMark id={source.platform} size={13} branded /> : null}
             <span>{source ? PLATFORM_LABEL[source.platform] : "在线来源"}</span>
             <span>{qualityLabel(source?.max_quality)}</span>
             <span>{formatDuration(duration)}</span>
@@ -291,53 +289,13 @@ export function StreamTrackDetail({ track }: { track: Track }) {
               </span>
             ) : null}
             <span>{STATUS_LABEL[status]}</span>
+            <OnlineTrackCacheFacts
+              source={source}
+              preview={matchingPreview}
+              trackId={detailTrackId}
+            />
           </div>
         </div>
-      </div>
-
-      <div className="kd-row" style={{ flexWrap: "wrap", gap: "0.3rem" }}>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={!source || matchingPreview?.phase === "resolving"}
-          onClick={() => void togglePlayback()}
-        >
-          {matchingPreview?.phase === "resolving" ? (
-            <LoaderCircle size={12} className="kd-spin" />
-          ) : session.playing && active ? (
-            <Pause size={12} />
-          ) : (
-            <Play size={12} />
-          )}
-          {matchingPreview?.phase === "resolving"
-            ? "解析中…"
-            : session.playing && active
-              ? "暂停"
-              : "播放"}
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={!source || downloadBusy}
-          onClick={() => void download()}
-        >
-          {downloadBusy ? (
-            <LoaderCircle size={12} className="kd-spin" />
-          ) : (
-            <Download size={12} />
-          )}
-          {downloadBusy ? "正在加入…" : "下载"}
-        </Button>
-        {(status === "error" || matchingPreview?.canRetry) && source ? (
-          <Button size="sm" variant="ghost" onClick={() => void retry()}>
-            {matchingPreview?.phase === "resolving" ? (
-              <LoaderCircle size={12} className="kd-spin" />
-            ) : (
-              <RotateCcw size={12} />
-            )}
-            重试试听
-          </Button>
-        ) : null}
       </div>
 
       <InlineNotice
@@ -345,11 +303,43 @@ export function StreamTrackDetail({ track }: { track: Track }) {
         onDismiss={actionError ? () => setActionError("") : undefined}
       />
 
-      <StreamAnalysisPanel snapshot={analysis} />
+      <PanelStack
+        storageKey="kd-detail-panels"
+        defaultFirstIds={["now-playing-control"]}
+      >
+        {detailControlVisible ? (
+          <NowPlayingControlPanel
+            key="now-playing-control"
+            track={analyzedTrack}
+            keyNotation={settings?.key_notation ?? "camelot"}
+            filterResonance={settings?.filter_resonance ?? "high"}
+            onError={setActionError}
+          />
+        ) : null}
 
-      <Panel heading="Explore" padded dense>
-        <VjSearchPanel track={track} />
-      </Panel>
+        {analysisReady && (
+          <StreamAnalysisPanel
+            key="analysis"
+            snapshot={analysis}
+            track={analyzedTrack}
+            position={active ? session.position : 0}
+            duration={duration}
+            showWaveform={detailWaveformVisible}
+          />
+        )}
+
+        {analysisReady && analyzedTrack.bpm && analyzedTrack.camelot ? (
+          <Panel key="harmonic" heading="Next" padded dense>
+            <div className="kd-scroll" style={{ maxHeight: "13rem" }}>
+              <HarmonicList track={analyzedTrack} onSelect={selectTrack} />
+            </div>
+          </Panel>
+        ) : null}
+
+        <Panel key="vj" heading="Explore" padded dense>
+          <VjSearchPanel track={analyzedTrack} />
+        </Panel>
+      </PanelStack>
     </div>
   );
 }

@@ -1,0 +1,109 @@
+# Release 的桌面与 Android 打包线相互独立，谁先完成不确定。本工作流在任一条
+# 成功结束后检查一次：只有触发标签已经成为 Latest，且四个平台的目标资产全部
+# 到齐，才把真实体积写回 README。缺一项时正常跳过，另一条打包线结束会再检查。
+name: update-readme-release-sizes
+
+on:
+  workflow_run:
+    workflows: [rust-build, rust-android]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-readme-release-sizes
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: 同步 Latest 安装包体积到 README
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: 读取 Latest Release 并更新 README
+        id: sync
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_REF: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          latest_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          if ! [[ "$latest_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::Latest Release tag 不合法：$latest_tag"
+            exit 1
+          fi
+          echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
+          # main 分支的普通 rust-build 也会产生 workflow_run；只接受 Latest 的 tag 构建。
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$TRIGGER_REF" != "$latest_tag" ]; then
+            echo "触发 ref $TRIGGER_REF 不是 Latest $latest_tag，本次跳过"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          release_json="$RUNNER_TEMP/kdj-latest-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$latest_tag" > "$release_json"
+
+          set +e
+          node scripts/update-readme-release-sizes.mjs "$release_json"
+          update_status=$?
+          set -e
+          if [ "$update_status" -eq 2 ]; then
+            echo "四平台资产尚未到齐，本次正常跳过"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$update_status" -ne 0 ]; then
+            exit "$update_status"
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: 提交更新到默认分支
+        if: steps.sync.outputs.ready == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.sync.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- README.md README.en.md; then
+            echo "$RELEASE_TAG 的 README 安装包体积已经是最新值"
+            exit 0
+          fi
+
+          # 避免刚同步完旧 Latest，新 Release 又在并行提升。
+          current_latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          if [ "$current_latest" != "$RELEASE_TAG" ]; then
+            echo "Latest 已从 $RELEASE_TAG 变为 $current_latest，本次放弃提交"
+            exit 0
+          fi
+
+          git diff --check -- README.md README.en.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md README.en.md
+          git commit -m "docs: update $RELEASE_TAG package sizes"
+          git pull --rebase origin "$DEFAULT_BRANCH"
+
+          current_latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          if [ "$current_latest" != "$RELEASE_TAG" ]; then
+            echo "Latest 已从 $RELEASE_TAG 变为 $current_latest，本次放弃推送"
+            exit 0
+          fi
+          git push origin "HEAD:$DEFAULT_BRANCH"

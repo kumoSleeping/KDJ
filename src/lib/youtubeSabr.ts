@@ -3,12 +3,15 @@ import type { SabrFormat } from "googlevideo/shared-types";
 import { buildSabrFormat, EnabledTrackTypes } from "googlevideo/utils";
 
 import type { SongSource } from "../types";
+import { finishApiActivity } from "./activityLog";
 import { getBridge } from "./bridge";
+import { sanitizeYoutubeSabrFailure } from "./youtubeSabrFailure";
 
 export interface YoutubeSabrBootstrap {
   serverAbrStreamingUrl: string;
   videoPlaybackUstreamerConfig: string;
   formats: unknown[];
+  audioItag: number;
   durationMs: number;
   poToken: string;
 }
@@ -19,8 +22,18 @@ export interface YoutubeSabrPreview {
   waveform_token?: string;
 }
 
+/** Playback reliability is measured on the first request; failures are never hidden by retries. */
+export const YOUTUBE_SABR_MAX_RETRIES = 0;
+export const YOUTUBE_SABR_FIRST_PUBLISH_BYTES = 128 * 1024;
+const YOUTUBE_SABR_NEXT_PUBLISH_BYTES = 256 * 1024;
+
 async function localFetch(path: string, init: RequestInit): Promise<Response> {
-  return fetch(getBridge().baseUrl + "/api" + path, init);
+  const bridge = getBridge();
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${bridge.authToken}`);
+  // 一个 SABR 会话会拆成 spool/proxy/segment 等多次本地请求；会话层只记一条。
+  headers.set("X-KDJ-Activity-Recorded", "1");
+  return fetch(bridge.baseUrl + "/api" + path, { ...init, headers });
 }
 
 async function localJson<T>(path: string, init: RequestInit): Promise<T> {
@@ -64,7 +77,7 @@ async function failSpool(token: string, reason: unknown): Promise<void> {
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: reason instanceof Error ? reason.message : String(reason) }),
+      body: JSON.stringify({ error: sanitizeYoutubeSabrFailure(reason) }),
     },
   ).catch(() => undefined);
 }
@@ -82,8 +95,8 @@ async function pumpAudio(
       if (done) break;
       pending = concatenate(pending, value);
       const ready = firstSegmentPublished
-        ? pending.length >= 256 * 1024
-        : pending.length >= 1024 * 1024;
+        ? pending.length >= YOUTUBE_SABR_NEXT_PUBLISH_BYTES
+        : pending.length >= YOUTUBE_SABR_FIRST_PUBLISH_BYTES;
       if (ready) {
         await appendSpool(token, pending);
         pending = new Uint8Array();
@@ -99,8 +112,9 @@ async function pumpAudio(
     );
     if (!complete.ok) throw new Error((await complete.text()) || "提交 SABR 媒体失败");
   } catch (error) {
+    await reader.cancel().catch(() => undefined);
     await failSpool(token, error);
-    throw error;
+    throw new Error(sanitizeYoutubeSabrFailure(error));
   }
 }
 
@@ -111,24 +125,55 @@ export async function createYoutubeSabrPreview(
 ): Promise<YoutubeSabrPreview> {
   const formats = bootstrap.formats.map((format) => buildSabrFormat(format as never));
   const audioFormat = formats
-    .filter((format: SabrFormat) => String(format.mimeType).startsWith("audio/mp4"))
-    .sort((left: SabrFormat, right: SabrFormat) => (left.bitrate || 0) - (right.bitrate || 0))[0];
+    .find((format: SabrFormat) =>
+      format.itag === bootstrap.audioItag
+      && String(format.mimeType).startsWith("audio/mp4"));
   const total = Number(audioFormat?.contentLength || 0);
   if (!audioFormat || !Number.isSafeInteger(total) || total <= 0) {
     throw new Error("YouTube SABR 没有返回可解码的完整 AAC 音频");
   }
-  const preview = await localJson<YoutubeSabrPreview>("/song/preview/ytm/sabr/spools", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      source,
-      total,
-      content_type: "audio/mp4",
-      bypass_cache: bypassCache,
-    }),
-  });
+  const activityStarted = performance.now();
+  let preview: YoutubeSabrPreview;
+  try {
+    preview = await localJson<YoutubeSabrPreview>("/song/preview/ytm/sabr/spools", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source,
+        total,
+        content_type: "audio/mp4",
+        bypass_cache: bypassCache,
+      }),
+    });
+    finishApiActivity(
+      {
+        category: "network",
+        action: "在线预览 API",
+        target: "YouTube Music · music.youtube.com",
+      },
+      { status: 200, durationMs: performance.now() - activityStarted, ok: true },
+    );
+  } catch (error) {
+    finishApiActivity(
+      {
+        category: "network",
+        action: "在线预览 API",
+        target: "YouTube Music · music.youtube.com",
+      },
+      {
+        status: 0,
+        durationMs: performance.now() - activityStarted,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    throw error;
+  }
   if (!preview.url.startsWith("/")) return preview;
-  const result = { ...preview, url: getBridge().baseUrl + preview.url };
+  const bridge = getBridge();
+  const url = new URL(bridge.baseUrl + preview.url);
+  url.searchParams.set("kdj_media_token", bridge.mediaToken);
+  const result = { ...preview, url: url.toString() };
   if (preview.cached) return result;
   const token = preview.waveform_token;
   if (!token) throw new Error("YouTube SABR 媒体会话缺少上传票据");
@@ -153,16 +198,26 @@ export async function createYoutubeSabrPreview(
       return response;
     },
   });
-  const { audioStream } = await sabr.start({
-    audioFormat,
-    preferMP4: true,
-    preferOpus: false,
-    enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
-    maxRetries: 2,
-    stallDetectionMs: 15_000,
-  });
-  void pumpAudio(token, audioStream).catch((error) => {
-    console.warn("YouTube SABR 媒体会话失败", error);
+  let audioStream: ReadableStream<Uint8Array>;
+  try {
+    ({ audioStream } = await sabr.start({
+      audioFormat,
+      preferMP4: true,
+      preferOpus: false,
+      enabledTrackTypes: EnabledTrackTypes.AUDIO_ONLY,
+      // A failed SABR request is a failed playback session. Retrying here would hide an unstable
+      // proof/network contract and make first-play success look better than it really is.
+      maxRetries: YOUTUBE_SABR_MAX_RETRIES,
+      stallDetectionMs: 15_000,
+    }));
+  } catch (error) {
+    sabr.abort();
+    await failSpool(token, error);
+    throw new Error(sanitizeYoutubeSabrFailure(error));
+  }
+  void pumpAudio(token, audioStream).catch(() => {
+    sabr.abort();
+    console.warn("YouTube SABR 媒体会话失败");
   });
   return result;
 }

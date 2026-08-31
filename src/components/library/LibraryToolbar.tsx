@@ -128,6 +128,8 @@ export function LibraryToolbar() {
         data-visible={dragIds.length > 0 ? "true" : undefined}
         data-over={trashOver ? "true" : undefined}
         aria-hidden={dragIds.length === 0}
+        aria-label="移到废纸篓"
+        title="移到废纸篓"
         onDragOver={(event) => {
           if (dragIds.length === 0) return;
           event.preventDefault();
@@ -144,8 +146,7 @@ export function LibraryToolbar() {
           finishTrackDrop();
         }}
       >
-        <Trash2 size={13} />
-        移到废纸篓
+        <Trash2 size={17} aria-hidden="true" />
       </div>
       {(notice || importError) && (
         <div className="kd-toolbar" style={{ gap: "0.75rem" }}>

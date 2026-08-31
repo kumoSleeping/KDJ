@@ -21,6 +21,7 @@ const COMMANDS: &[&str] = &[
     "dispose",
     "save_png_to_gallery",
     "open_local_path",
+    "start_file_drag",
     "pick_library_folder",
 ];
 

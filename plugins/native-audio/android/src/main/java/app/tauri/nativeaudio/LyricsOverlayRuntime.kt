@@ -8,14 +8,20 @@ import android.os.PowerManager
 import android.os.SystemClock
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
-import kotlin.math.max
-import kotlin.math.min
+
+data class LyricsOverlayWord(
+    val startSec: Double,
+    val endSec: Double,
+    val text: String,
+)
 
 /** 一行歌词：主词 + 可选副行（翻译或罗马音，由前端按当前附加层选好）。 */
 data class LyricsOverlayLine(
     val timeSec: Double,
+    val endTimeSec: Double?,
     val text: String,
     val secondary: String,
+    val words: List<LyricsOverlayWord>,
 )
 
 /**
@@ -326,20 +332,29 @@ object LyricsOverlayRuntime {
             snapshotTimeline.trackId != clock.trackId
 
         if (clock == null || lines.isEmpty() || stale) {
-            overlay.setFrame(snapshotTimeline.placeholder, "", 0f)
+            overlay.setFrame(snapshotTimeline.placeholder, "", 0f, 0f, 0f, 0f)
             return SLOW_TICK_MS
         }
 
-        // 还没唱到第一句时停在第一句上，与桌面歌词窗口的行为一致。
-        val index = max(0, indexAt(lines, clock.positionSec))
-        val line = lines[index]
-        val duration = if (snapshotTimeline.durationSec > 0.0) {
-            snapshotTimeline.durationSec
-        } else {
-            clock.durationSec
+        val activeIndex = indexAt(lines, clock.positionSec)
+        // 前奏可以预告第一句；平台明确给出的行间/尾奏空白必须清屏。
+        if (activeIndex < 0 && clock.positionSec >= lines.first().timeSec) {
+            overlay.setFrame("", "", 0f, 0f, 0f, 0f)
+            return if (clock.isPlaying && isInteractive()) FAST_TICK_MS else SLOW_TICK_MS
         }
+        val index = if (activeIndex < 0) 0 else activeIndex
+        val line = lines[index]
+        val fill = fillOf(lines, index, clock.positionSec)
+        val synchronizedSecondary = line.secondary.isNotEmpty()
         val secondary = line.secondary.ifEmpty { lines.getOrNull(index + 1)?.text.orEmpty() }
-        overlay.setFrame(line.text, secondary, fillOf(lines, index, duration, clock.positionSec))
+        overlay.setFrame(
+            line.text,
+            secondary,
+            fill,
+            if (synchronizedSecondary) fill else 0f,
+            fill,
+            if (synchronizedSecondary) fill else 0f,
+        )
 
         return if (clock.isPlaying && isInteractive()) FAST_TICK_MS else SLOW_TICK_MS
     }
@@ -358,31 +373,46 @@ object LyricsOverlayRuntime {
                 hi = mid - 1
             }
         }
-        return hit
+        if (hit < 0) return -1
+        val endTime = lines[hit].endTimeSec
+        return if (endTime != null && positionSec >= endTime) -1 else hit
     }
 
     /**
      * 行内演唱进度 0..1。
      *
-     * LRC 只有行级时间戳，行内只能线性推算。直接用「到下一行的间隔」当分母，
-     * 遇到间奏（两句之间空十几秒）会让填充慢到看不出在动，所以再按字数估一个
-     * 合理的演唱时长，取两者较小值：唱完就填满，剩下的时间停在满格等下一句。
+     * 有 YRC 时按平台逐字区间推进；只有行级 LRC 时使用本句到下一句/空白边界，
+     * 不再按字数猜一个演唱速度。
      */
     private fun fillOf(
         lines: List<LyricsOverlayLine>,
         index: Int,
-        durationSec: Double,
         positionSec: Double,
     ): Float {
         val line = lines[index]
-        val nextTime = lines.getOrNull(index + 1)?.timeSec
-            ?: durationSec.takeIf { it > line.timeSec }
-            ?: (line.timeSec + TAIL_LINE_SEC)
-        val gap = nextTime - line.timeSec
-        if (gap <= 0.0) return 1f
-        val estimated = max(MIN_FILL_SEC, line.text.length * PER_CHAR_SEC)
-        val span = min(gap, estimated)
-        return ((positionSec - line.timeSec) / span).coerceIn(0.0, 1.0).toFloat()
+        if (positionSec < line.timeSec) return 0f
+        if (line.words.isEmpty()) {
+            val endTime = line.endTimeSec
+                ?: lines.getOrNull(index + 1)?.timeSec
+                ?: (line.timeSec + FALLBACK_LINE_SEC)
+            val span = endTime - line.timeSec
+            if (span <= 0.0) return 1f
+            return ((positionSec - line.timeSec) / span).coerceIn(0.0, 1.0).toFloat()
+        }
+        val total = line.words.sumOf { it.text.length }
+        if (total <= 0) return 1f
+        var completed = 0
+        for (word in line.words) {
+            val weight = word.text.length
+            if (positionSec < word.startSec) return completed.toFloat() / total
+            val span = word.endSec - word.startSec
+            if (span > 0.0 && positionSec < word.endSec) {
+                val within = ((positionSec - word.startSec) / span).coerceIn(0.0, 1.0)
+                return ((completed + weight * within) / total).toFloat()
+            }
+            completed += weight
+        }
+        return 1f
     }
 
     /**
@@ -409,7 +439,5 @@ object LyricsOverlayRuntime {
 
     private const val FAST_TICK_MS = 16L
     private const val SLOW_TICK_MS = 250L
-    private const val MIN_FILL_SEC = 1.2
-    private const val PER_CHAR_SEC = 0.34
-    private const val TAIL_LINE_SEC = 6.0
+    private const val FALLBACK_LINE_SEC = 6.0
 }

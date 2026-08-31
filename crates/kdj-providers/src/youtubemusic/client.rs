@@ -32,8 +32,7 @@ const IOS_USER_AGENT: &str =
 // Keep these in lock-step with Metrolist's working WEB_REMIX playback path.
 const PLAYBACK_WEB_VERSION: &str = "1.20260707.12.00";
 pub const PLAYBACK_WEB_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0";
-const BOTGUARD_API_KEY: &str = "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw";
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
 /// 只搜单曲的 filter 参数（ytmusicapi 的 songs filter 同款）。
 pub const SONG_FILTER_PARAMS: &str = "EgWKAQIIAWoMEA4QChADEAQQCRAF";
 
@@ -337,33 +336,14 @@ impl YtmClient {
                 return Ok(identity.clone());
             }
         }
-        let mut response = None;
-        let mut last_error = None;
-        for attempt in 0..3_u64 {
-            let mut request = self.http.get("https://music.youtube.com/");
-            for (name, value) in self.auth.request_headers("https://music.youtube.com") {
-                request = request.header(name, value);
-            }
-            match request.send().await {
-                Ok(value) => {
-                    response = Some(value);
-                    break;
-                }
-                Err(error) => {
-                    last_error = Some(error);
-                    tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1))).await;
-                }
-            }
+        let mut request = self.http.get("https://music.youtube.com/");
+        for (name, value) in self.auth.request_headers("https://music.youtube.com") {
+            request = request.header(name, value);
         }
-        let html = response
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "打开 YouTube Music 首页失败: {}",
-                    last_error
-                        .map(|error| error.to_string())
-                        .unwrap_or_default()
-                )
-            })?
+        let html = request
+            .send()
+            .await
+            .context("打开 YouTube Music 首页失败")?
             .error_for_status()
             .context("YouTube Music 首页返回错误")?
             .text()
@@ -384,31 +364,6 @@ impl YtmClient {
         *self.protected_identity.write().unwrap() =
             Some((std::time::Instant::now(), identity.clone()));
         Ok(identity)
-    }
-
-    pub async fn protected_botguard(&self, operation: &str, payload: &Value) -> Result<Value> {
-        anyhow::ensure!(
-            matches!(operation, "Create" | "GenerateIT"),
-            "BotGuard 操作无效"
-        );
-        let response = self
-            .http
-            .post(format!("https://www.youtube.com/api/jnn/v1/{operation}"))
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::CONTENT_TYPE, "application/json+protobuf")
-            .header(reqwest::header::USER_AGENT, PLAYBACK_WEB_USER_AGENT)
-            .header("x-goog-api-key", BOTGUARD_API_KEY)
-            .header("x-user-agent", "grpc-web-javascript/0.1")
-            .json(payload)
-            .send()
-            .await
-            .context("YouTube BotGuard 请求失败")?
-            .error_for_status()
-            .context("YouTube BotGuard 返回错误")?;
-        response
-            .json()
-            .await
-            .context("YouTube BotGuard 响应不是合法 JSON")
     }
 
     /// player 响应偶尔省略 assets.js；此时从已登录音乐首页读取当前脚本版本。
@@ -492,6 +447,37 @@ impl YtmClient {
         self.browse("FEmusic_liked_playlists").await
     }
 
+    /// 取消歌曲的 Like；`LM`（赞过的音乐）就是由这份评分状态实时生成的。
+    pub async fn remove_song_like(&self, video_id: &str) -> Result<Value> {
+        let mut body = Self::web_remix_context();
+        body.as_object_mut()
+            .expect("context 一定是对象")
+            .insert("target".into(), json!({"videoId": video_id}));
+        self.post("like/removelike", body).await
+    }
+
+    /// 从本人歌单移除一个具体条目。`setVideoId` 是歌单项实例 ID；同一首歌即使
+    /// 重复出现，也只会删掉用户右键点中的那一项。
+    pub async fn remove_playlist_item(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+        set_video_id: &str,
+    ) -> Result<Value> {
+        let mut body = Self::web_remix_context();
+        let map = body.as_object_mut().expect("context 一定是对象");
+        map.insert("playlistId".into(), Value::String(playlist_id.to_string()));
+        map.insert(
+            "actions".into(),
+            json!([{
+                "setVideoId": set_video_id,
+                "removedVideoId": video_id,
+                "action": "ACTION_REMOVE_VIDEO",
+            }]),
+        );
+        self.post("browse/edit_playlist", body).await
+    }
+
     /// 登录账号菜单。成功返回就说明 Cookie + SAPISIDHASH 仍然有效。
     pub async fn account_menu(&self) -> Result<Value> {
         self.post("account/account_menu", Self::web_remix_context())
@@ -531,15 +517,17 @@ impl YtmClient {
         for (name, value) in self.auth.request_headers("https://music.youtube.com") {
             request = request.header(name, value);
         }
-        let html = request
-            .send()
-            .await
-            .context("打开 YouTube Music 首页失败")?
-            .error_for_status()
-            .context("YouTube Music 首页返回错误")?
-            .text()
-            .await
-            .context("读取 YouTube Music 首页失败")?;
+        let html = {
+            request
+                .send()
+                .await
+                .context("打开 YouTube Music 首页失败")?
+                .error_for_status()
+                .context("YouTube Music 首页返回错误")?
+                .text()
+                .await
+                .context("读取 YouTube Music 首页失败")?
+        };
         let url = extract_player_url(&html).context("从首页找不到播放器脚本地址")?;
         let js = self.fetch_text(&url).await?;
         Ok((url, js))

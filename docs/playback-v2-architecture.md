@@ -134,7 +134,7 @@ the Rust library-selection service is exposed directly to the application layer.
 
 ### Track/source normalization
 
-Frontend surfaces must not implement local, OneLibrary and provider-stream Decks as separate
+Frontend surfaces must not implement local and provider-stream Decks as separate
 feature branches. `src/lib/playbackTrack.ts` is the adapter boundary:
 
 1. `PlaybackTrackRequest` normalizes a database id, an existing `Track`, or a provider

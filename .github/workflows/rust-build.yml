@@ -1,6 +1,6 @@
 # 纯 Rust + Tauri 的桌面三平台打包（macOS / Windows / Linux）。
 # 2026-07-27 起这是 main 的**正式**流水线（rust-rewrite 已扶正并入 main）；
-# v0.1.0 的 Electron 线（build.yml / test.yml）已归档成 workflow_dispatch-only。
+# 旧 Electron 构建与测试工作流已删除；桌面端只保留这一条正式流水线。
 #
 # 触发：
 #   - push 到 main：跑测试 + 打包，产物只当 artifact；
@@ -16,10 +16,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# 发 Release 需要写权限。默认的 GITHUB_TOKEN 是只读的——v0.1.0 首跑三平台
-# 包全打出来了、栽在最后一步上传，就是漏了这三行（见 docs/05-tabs-git-and-ci.md）。
+# 测试、签名、打包 job 默认只读；只有独立 publish/latest-json job 临时获得 contents:write。
 permissions:
-  contents: write
+  contents: read
 
 # 同一分支上连续 push 时取消上一次：release 档 LTO + codegen-units=1 很慢，
 # 排队会把 runner 全占住。tag 的构建不能取消，所以 group 里带上 ref。
@@ -28,63 +27,99 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  quality:
+    name: 发布前安全与前端门禁
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Rust 审计缓存
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: security-audit
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: npm 依赖漏洞门禁
+        run: |
+          npm audit --audit-level=low
+          npm audit signatures
+
+      - name: 前端逻辑测试
+        run: npm run test:frontend-logic
+
+      - name: 前端生产构建
+        run: npm run tauri:web:build
+
+      - name: Cargo 依赖漏洞门禁
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --version 0.22.2
+          # RUSTSEC-2024-0429 已在 vendor/glib-0.18.5 逐行回补上游 0.20 修复；
+          # path source 会被 cargo-audit 正确排除，不设置 ignore，任何普通漏洞仍硬失败。
+          cargo audit
+
   desktop:
-    name: ${{ matrix.label }} / ${{ matrix.flavor }}
+    name: ${{ matrix.label }}
+    needs: quality
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS runner 现在是 Apple Silicon。打 universal 二进制一次覆盖
-          # arm64 + x64（v0.1.0 是两个 DMG，Tauri 这边合成一个），
-          # 代价是要装两个 rust target 并编译两遍。
+          # macOS 分架构编译、签名和公证。updater 根据当前进程的
+          # target_arch 请求 darwin-aarch64 / darwin-x86_64，不再下载
+          # 大一倍的 universal 包。旧 universal 安装也能按实际 slice 平滑迁移。
           - os: macos-latest
-            label: macos-universal
-            flavor: stable
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            tauri_args: --target universal-apple-darwin
-          - os: macos-latest
-            label: macos-universal
-            flavor: labs
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            tauri_args: --target universal-apple-darwin
+            label: macos-arm64
+            rust_targets: aarch64-apple-darwin
+            tauri_args: --target aarch64-apple-darwin
+            mac_arch: aarch64
+          # GitHub 当前的 macos-latest 是 Apple Silicon；Intel 使用官方保留到
+          # 2027-08 的原生 x86_64 runner，避免在 ARM runner 上交叉编译 Swift/原生插件。
+          - os: macos-15-intel
+            label: macos-x86_64
+            rust_targets: x86_64-apple-darwin
+            tauri_args: --target x86_64-apple-darwin
+            mac_arch: x86_64
           - os: ubuntu-latest
             label: linux-x86_64
-            flavor: stable
-            rust_targets: ""
-            tauri_args: ""
-          - os: ubuntu-latest
-            label: linux-x86_64
-            flavor: labs
             rust_targets: ""
             tauri_args: ""
           - os: windows-latest
             label: windows-x86_64
-            flavor: stable
-            rust_targets: ""
-            tauri_args: ""
-          - os: windows-latest
-            label: windows-x86_64
-            flavor: labs
             rust_targets: ""
             tauri_args: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.rust_targets }}
 
       # 缓存 target/ 与 ~/.cargo。symphonia + rustfft + rusqlite(bundled) 冷编
       # 十几分钟，缓存命中后只重编本仓库的 5 个 crate。
       - name: Rust 构建缓存
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: ${{ matrix.label }}-${{ matrix.flavor }}
+          key: ${{ matrix.label }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -141,39 +176,15 @@ jobs:
       # 真库集成测试（tests/real_library.rs）靠 KDJ_TEST_DB 环境变量开关，
       # CI 上没有这个变量，会自己跳过。
       #
-      # 测试与打包解耦：continue-on-error 让后续步骤能看到 outcome。
-      # main 分支仍硬失败（见下一 step）；正式 tag 允许测试红了也继续打包——
-      # 否则一个 Windows 时序/权限 flaky 测试会卡死全平台更新通道。
+      # tag 与 main 使用同一硬门禁。任一平台的单元/集成测试失败都会停止该平台，
+      # 不能把已知红灯的二进制上传到正式 Release。
       - name: Rust 全量测试
-        id: rust_test
-        if: matrix.flavor == 'stable'
-        continue-on-error: true
         # Vendored rookie's rustdoc examples open real browser profiles and are not hermetic CI
         # tests. Run every workspace unit/integration target while deliberately excluding doctests.
         run: cargo test --workspace --lib --bins --tests
 
-      - name: KDJ Labs OneLibrary 测试
-        id: labs_test
-        if: matrix.flavor == 'labs'
-        continue-on-error: true
-        run: cargo test -p kdj-server --features onelibrary --lib
-
-      - name: 分支构建要求测试通过
-        if: ${{ !startsWith(github.ref, 'refs/tags/') && (steps.rust_test.outcome == 'failure' || steps.labs_test.outcome == 'failure') }}
-        run: |
-          echo "::error::main 分支构建要求 cargo test 通过"
-          exit 1
-
-      - name: 正式 tag 测试失败仅告警
-        if: ${{ startsWith(github.ref, 'refs/tags/') && (steps.rust_test.outcome == 'failure' || steps.labs_test.outcome == 'failure') }}
-        run: |
-          echo "::warning::tag 构建上 cargo test 失败，仍继续打包以便更新通道不因单测卡死；请尽快修测试。"
-
       - name: 安装前端依赖
         run: npm ci
-
-      - name: 前端类型检查
-        run: npm run typecheck
 
       # M7（Tauri 壳）落地之前 src-tauri/ 还不完整。这里探测一下而不是硬跑，
       # 让这条流水线在壳做好之前仍然能当"三平台 Rust 测试"用，红叉只留给真问题。
@@ -190,9 +201,69 @@ jobs:
             echo "::warning::src-tauri/tauri.conf.json 还不存在（M7 未完成），本次跳过打包，只跑测试。"
           fi
 
+      - name: 配置 macOS 正式代码签名
+        if: steps.shell.outputs.present == 'true' && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::正式 macOS 构建缺少 $name"
+              exit 1
+            fi
+          done
+          certificate="$RUNNER_TEMP/kdj-signing.p12"
+          keychain="$RUNNER_TEMP/kdj-signing.keychain-db"
+          keychain_password=$(uuidgen)
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security default-keychain -s "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security find-identity -v -p codesigning "$keychain" | grep -F "$APPLE_SIGNING_IDENTITY" \
+            || { echo "::error::导入证书后找不到 APPLE_SIGNING_IDENTITY"; exit 1; }
+
+      - name: 配置 Windows 正式代码签名
+        if: steps.shell.outputs.present == 'true' && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw '正式 Windows 构建缺少 WINDOWS_CERTIFICATE 或 WINDOWS_CERTIFICATE_PASSWORD'
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'kdj-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfxPath -Password $password -CertStoreLocation 'Cert:\CurrentUser\My' |
+            Where-Object { $_.HasPrivateKey } |
+            Select-Object -First 1
+          if (-not $certificate) {
+            throw 'Windows PFX 未导入出可用私钥'
+          }
+          $configPath = Join-Path $env:RUNNER_TEMP 'kdj-tauri-signing.json'
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $certificate.Thumbprint
+                digestAlgorithm = 'sha256'
+                timestampUrl = 'https://timestamp.digicert.com'
+              }
+            }
+          } | ConvertTo-Json -Depth 4 | Set-Content -Path $configPath -Encoding utf8
+          "TAURI_RELEASE_CONFIG=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "KDJ_WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       # 脚本名以 package.json 为准：有 tauri:build 就用它（能带上项目自己的
-      # 前置步骤），没有就直接调 CLI。`npx tauri` 会去装 npm 上那个 v1 时代的
-      # 同名废弃包，所以必须写全 `@tauri-apps/cli@^2`。
+      # 前置步骤），没有就直接调 npm ci 已从 lockfile 安装的本地 CLI；
+      # --no-install 禁止 npx 在构建时临时解析或下载可漂移的 registry 包。
       #
       # Windows 首次打 NSIS 时还会从 GitHub 下载工具包，偶发的 CDN 断连会在
       # 应用、MSI 都已编好后报 `io: Peer disconnected`。Windows runner 对整个
@@ -202,33 +273,40 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         shell: bash
         env:
-          # macOS 上 Tauri 默认会找钥匙串里的签名证书；和 v0.1.0 一样不签名，
-          # 用户首次打开要右键 → 打开。
-          APPLE_SIGNING_IDENTITY: "-"
+          # tag 必须使用已导入的 Developer ID 并完成 notarization；普通分支显式 ad-hoc。
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          APPLE_ID: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
           CI: "true"
           # 一键更新的 minisign 私钥（见 docs/rust-port/08 §密钥）。
           # 分支构建没配 secret 时摘掉 createUpdaterArtifacts，只做普通包验证；
           # 正式 tag 缺密钥必须失败，不能发布一个更新链断掉的版本。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
             if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-              echo "::error::正式发行缺少 TAURI_SIGNING_PRIVATE_KEY；拒绝发布一个后续无法一键升级的版本"
+              echo "::error::正式发行缺少 TAURI_SIGNING_PRIVATE_KEY 或 TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
               exit 1
             fi
-            echo "::warning::分支构建没有 TAURI_SIGNING_PRIVATE_KEY，本次只验证普通安装包"
+            echo "::warning::分支构建的 updater 私钥或口令不完整，本次只验证普通安装包"
             jq 'del(.bundle.createUpdaterArtifacts)' src-tauri/tauri.conf.json > /tmp/conf.json
             mv /tmp/conf.json src-tauri/tauri.conf.json
           fi
           run_tauri_build() {
-            if [ "${{ matrix.flavor }}" = "labs" ]; then
-              npm run tauri:build:labs -- ${{ matrix.tauri_args }}
-            elif node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
-              npm run tauri:build -- ${{ matrix.tauri_args }}
+            build_args=()
+            if [ -n "${{ matrix.tauri_args }}" ]; then
+              read -r -a build_args <<< "${{ matrix.tauri_args }}"
+            fi
+            if [ -n "${TAURI_RELEASE_CONFIG:-}" ]; then
+              build_args+=(--config "$TAURI_RELEASE_CONFIG")
+            fi
+            if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
+              npm run tauri:build -- "${build_args[@]}"
             else
-              npx --yes @tauri-apps/cli@^2 build ${{ matrix.tauri_args }}
+              npx --no-install tauri build "${build_args[@]}"
             fi
           }
 
@@ -248,10 +326,134 @@ jobs:
             sleep 20
           done
 
-      - name: 记录安装包体积
+      # Tauri 两个 macOS target 生成的 updater 归档都叫 KDJ.app.tar.gz。
+      # 上传到同一 Release 前加架构后缀，避免后上传的包覆盖前者；
+      # 重命名不会改变文件内容，原 minisign 签名仍然有效。
+      - name: 区分 macOS updater 架构包
+        if: steps.shell.outputs.present == 'true' && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          KDJ_MAC_ARCH: ${{ matrix.mac_arch }}
+        run: |
+          set -euo pipefail
+          archives=()
+          while IFS= read -r -d '' archive; do archives+=("$archive"); done \
+            < <(find target src-tauri/target -type f -path '*/release/bundle/macos/KDJ.app.tar.gz' -print0 2>/dev/null || true)
+          if (( ${#archives[@]} != 1 )); then
+            echo "::error::${KDJ_MAC_ARCH} 应恰好生成一个 macOS updater 归档，实际为 ${#archives[@]}"
+            exit 1
+          fi
+          archive=${archives[0]}
+          signature="$archive.sig"
+          [ -f "$signature" ] || { echo "::error::$archive 缺少签名"; exit 1; }
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          destination="$(dirname "$archive")/KDJ_${version}_${KDJ_MAC_ARCH}.app.tar.gz"
+          mv "$archive" "$destination"
+          mv "$signature" "$destination.sig"
+          echo "macOS ${KDJ_MAC_ARCH} updater: $(basename "$destination")"
+
+      - name: 验证 updater 签名对应内置公钥
+        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install rsign2 --locked --version 0.6.6
+          # Tauri 配置保存的是整份 minisign .pub 文件的 base64；rsign -P 需要其中
+          # 最后一行的原始公钥字符串。
+          public_key=$(node -e '
+            const value = require("./src-tauri/tauri.conf.json").plugins.updater.pubkey;
+            const lines = Buffer.from(value, "base64").toString("utf8").trim().split(/\r?\n/);
+            process.stdout.write(lines.at(-1));
+          ')
+          sigs=()
+          while IFS= read -r -d '' sig; do
+            sigs+=("$sig")
+          done < <(find target src-tauri/target -type f -path '*/release/bundle/*/*.sig' -print0 2>/dev/null || true)
+          if (( ${#sigs[@]} == 0 )); then
+            echo "::error::正式构建没有生成 updater .sig"
+            exit 1
+          fi
+          for sig in "${sigs[@]}"; do
+            artifact=${sig%.sig}
+            [ -f "$artifact" ] || { echo "::error::$sig 没有对应更新包"; exit 1; }
+            rsign verify "$artifact" -P "$public_key" -x "$sig" -q
+          done
+          echo "✓ updater 私钥与 tauri.conf.json 内置公钥匹配"
+
+      - name: 验证 macOS Developer ID 与 notarization
+        if: steps.shell.outputs.present == 'true' && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          apps=()
+          while IFS= read -r -d '' app; do apps+=("$app"); done \
+            < <(find target -type d -path '*/release/bundle/macos/*.app' -print0)
+          dmgs=()
+          while IFS= read -r -d '' dmg; do dmgs+=("$dmg"); done \
+            < <(find target -type f -path '*/release/bundle/dmg/*.dmg' -print0)
+          (( ${#apps[@]} > 0 && ${#dmgs[@]} > 0 )) \
+            || { echo "::error::缺少可验证的 .app 或 .dmg"; exit 1; }
+          for app in "${apps[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+          done
+          for dmg in "${dmgs[@]}"; do
+            xcrun stapler validate "$dmg"
+            spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+          done
+
+      - name: 验证 Windows Authenticode 签名
+        if: steps.shell.outputs.present == 'true' && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $bundles = Get-ChildItem -Path target -Recurse -File -Include '*.exe','*.msi' |
+            Where-Object { $_.FullName -match '[\\/]release[\\/]bundle[\\/]' }
+          if (-not $bundles) { throw '没有找到 Windows 安装包' }
+          foreach ($bundle in $bundles) {
+            $signature = Get-AuthenticodeSignature -FilePath $bundle.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "$($bundle.Name) Authenticode 状态不是 Valid：$($signature.Status)"
+            }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:KDJ_WINDOWS_CERT_THUMBPRINT) {
+              throw "$($bundle.Name) 的签名证书与本次导入证书不一致"
+            }
+          }
+
+      - name: 清理 macOS runner 签名材料
+        if: ${{ always() && steps.shell.outputs.present == 'true' && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          security delete-keychain "$RUNNER_TEMP/kdj-signing.keychain-db" 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/kdj-signing.p12" ]; then
+            rm -P "$RUNNER_TEMP/kdj-signing.p12"
+          fi
+
+      - name: 清理 Windows runner 签名材料
+        if: ${{ always() && steps.shell.outputs.present == 'true' && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/') }}
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:KDJ_WINDOWS_CERT_THUMBPRINT)) {
+            $certPath = "Cert:\CurrentUser\My\$env:KDJ_WINDOWS_CERT_THUMBPRINT"
+            if (Test-Path $certPath) { Remove-Item -LiteralPath $certPath -Force }
+          }
+          foreach ($path in @(
+            (Join-Path $env:RUNNER_TEMP 'kdj-signing.pfx'),
+            (Join-Path $env:RUNNER_TEMP 'kdj-tauri-signing.json')
+          )) {
+            if (Test-Path $path) { Remove-Item -LiteralPath $path -Force }
+          }
+
+      - name: 桌面安装包体积回归门禁
         if: steps.shell.outputs.present == 'true'
         shell: bash
-        run: bash scripts/report-bundle-size.sh target | tee -a "$GITHUB_STEP_SUMMARY"
+        env:
+          KDJ_BUNDLE_LABEL: ${{ matrix.label }}
+          KDJ_REQUIRE_UPDATER: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          bash scripts/check-desktop-bundle-size.sh \
+            "$KDJ_BUNDLE_LABEL" "$version" "$KDJ_REQUIRE_UPDATER" target src-tauri/target \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
       # 产物路径用宽松的 `**` 通配：src-tauri 是不是 workspace 成员会决定
       # 产物落在 `target/` 还是 `src-tauri/target/`，加上 --target 又会多一层
@@ -259,15 +461,15 @@ jobs:
       #
       # 本机实测（不带 --target 时）落点是根 `target/release/bundle/`：
       #   bundle/macos/KDJ.app  和  bundle/dmg/KDJ_0.2.0_aarch64.dmg
-      # 也就是 src-tauri 作为 workspace 成员那一支。带 --target universal-apple-darwin
-      # 时会变成 target/universal-apple-darwin/release/bundle/，通配仍然兜得住。
+      # 也就是 src-tauri 作为 workspace 成员那一支。带 --target
+      # aarch64/x86_64-apple-darwin 时会多一层 target triple，通配仍然兜得住。
       # *.tar.gz / *.sig / setup.exe 的 sig 是 updater 的更新包与签名，
       # latest-json 那个 job 和终端用户都要从 Release 上取，一并上传
       - name: 上传产物
         if: steps.shell.outputs.present == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: kdj-rust-${{ matrix.flavor }}-${{ matrix.label }}
+          name: kdj-rust-${{ matrix.label }}
           path: |
             **/release/bundle/dmg/*.dmg
             **/release/bundle/macos/*.app.tar.gz
@@ -284,21 +486,27 @@ jobs:
             **/release/bundle/rpm/*.rpm.sig
           if-no-files-found: error
 
-      - name: 发布 Release（仅 tag）
-        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
-        shell: bash
+  publish:
+    name: 发布桌面安装包
+    needs: desktop
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载桌面 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: bundles
+
+      - name: 上传安装包到 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # macOS runner still ships Bash 3.2, which has no `globstar`. Use portable find
-          # patterns rather than ** expansion so the exact same step works on all runners.
-          files=()
-          while IFS= read -r -d '' file; do
-            files+=("$file")
-          done < <(find . -type f \( -path '*/release/bundle/dmg/*.dmg' -o -path '*/release/bundle/macos/*.app.tar.gz' -o -path '*/release/bundle/macos/*.app.tar.gz.sig' -o -path '*/release/bundle/nsis/*.exe' -o -path '*/release/bundle/nsis/*.exe.sig' -o -path '*/release/bundle/msi/*.msi' -o -path '*/release/bundle/msi/*.msi.sig' -o -path '*/release/bundle/appimage/*.AppImage' -o -path '*/release/bundle/appimage/*.AppImage.sig' -o -path '*/release/bundle/deb/*.deb' -o -path '*/release/bundle/deb/*.deb.sig' -o -path '*/release/bundle/rpm/*.rpm' -o -path '*/release/bundle/rpm/*.rpm.sig' \) -print0)
+          mapfile -d '' files < <(find bundles -type f ! -name 'artifact-id.txt' -print0)
           if (( ${#files[@]} == 0 )); then
-            echo "::error::没有找到可上传的 Release 产物"
+            echo "::error::没有找到可上传的桌面 Release 产物"
             exit 1
           fi
           for file in "${files[@]}"; do
@@ -317,28 +525,26 @@ jobs:
             fi
           done
 
-  # 两个独立应用身份的更新清单：稳定 KDJ 读取 latest.json，KDJ Labs 读取
-  # latest-labs.json。两个清单必须从各自 flavor 的 artifact 取包，不能串台。
-  # 旧规则是三平台全绿才写清单；任一平台挂掉就 skip，再叠加「新 Release
-  # 立刻变 Latest + 旧清单占位」，客户端会静默冻结在旧 version。
-  # 新规则：
-  #   1. 有任意成功平台的 artifact 就拼清单（缺的平台只 warning，不堵死别人）；
-  #   2. 至少一个平台成功才上传，并 gh release edit --latest 提升本版；
-  #   3. 全部失败则不上传、不提升，上一版继续当 Latest。
+  # 正式 KDJ 每个 Release 都发布一份 latest.json 更新清单。
+  # 三个平台的测试、原生签名与 updater 验签必须全部通过，publish 才会上传安装包；
+  # 清单最后生成并提升 Latest；带 -rc 后缀的正式推送同样进入全体用户更新通道。
+  # 任一门禁失败都让上一可用版本继续作为 Latest。
   latest-json:
     name: 更新清单 latest.json
-    needs: desktop
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.desktop.result != 'cancelled' }}
+    needs: [desktop, publish]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.desktop.result != 'cancelled' && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: 下载已有平台产物
         id: download
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: bundles
 
-      - name: 拼 latest.json、上传并提升 Latest
+      - name: 拼 latest.json、上传并处理更新通道
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -347,7 +553,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$DOWNLOAD_OUTCOME" != "success" ]; then
-            echo "::error::没有任何桌面构建产物可下载；拒绝写入 latest.json，也不提升 Latest"
+            echo "::error::没有任何桌面构建产物可下载；拒绝写入 latest.json"
             exit 1
           fi
           python3 - <<'PY'
@@ -359,8 +565,8 @@ jobs:
           repo = os.environ["REPO"]
           version = tag.lstrip("v")
 
-          def find(flavor, pattern):
-              hits = sorted(glob.glob(f"bundles/kdj-rust-{flavor}-*/**/{pattern}", recursive=True))
+          def find(label, pattern):
+              hits = sorted(glob.glob(f"bundles/kdj-rust-{label}/**/{pattern}", recursive=True))
               return next((hit for hit in hits if not hit.endswith(".sig")), None)
 
           def entry(artifact):
@@ -373,20 +579,21 @@ jobs:
                   "url": f"https://github.com/{repo}/releases/download/{tag}/{quote(name)}",
               }
 
-          def build_manifest(flavor, product):
+          def build_manifest(product):
               platforms = {}
               missing = []
-              mac = find(flavor, "*.app.tar.gz")
-              if mac:
+              for label, arch in (("macos-arm64", "aarch64"), ("macos-x86_64", "x86_64")):
+                  mac = find(label, f"KDJ_{version}_{arch}.app.tar.gz")
+                  if not mac:
+                      raise SystemExit(f"::error::macOS {arch} updater 包缺失，拒绝发布残缺清单")
                   item = entry(mac)
-                  for arch in ("aarch64", "x86_64"):
-                      platforms[f"darwin-{arch}-app"] = item
-                      platforms[f"darwin-{arch}"] = item
-              else:
-                  missing.append("macOS")
+                  # Tauri v2 在 macOS 优先查 *-app，再回退到 OS-ARCH。
+                  # 两个 key 指向同一个当前架构的薄归档。
+                  platforms[f"darwin-{arch}-app"] = item
+                  platforms[f"darwin-{arch}"] = item
 
-              nsis = find(flavor, "*-setup.exe")
-              msi = find(flavor, "*.msi")
+              nsis = find("windows-x86_64", "*-setup.exe")
+              msi = find("windows-x86_64", "*.msi")
               if nsis:
                   item = entry(nsis)
                   platforms["windows-x86_64-nsis"] = item
@@ -396,9 +603,9 @@ jobs:
               if not nsis and not msi:
                   missing.append("Windows")
 
-              appimage = find(flavor, "*.AppImage")
-              deb = find(flavor, "*.deb")
-              rpm = find(flavor, "*.rpm")
+              appimage = find("linux-x86_64", "*.AppImage")
+              deb = find("linux-x86_64", "*.deb")
+              rpm = find("linux-x86_64", "*.rpm")
               if appimage:
                   item = entry(appimage)
                   platforms["linux-x86_64-appimage"] = item
@@ -421,20 +628,16 @@ jobs:
                   "platforms": platforms,
               }
 
-          manifests = {
-              "latest.json": build_manifest("stable", "KDJ"),
-              "latest-labs.json": build_manifest("labs", "KDJ Labs"),
-          }
-          for filename, manifest in manifests.items():
-              with open(filename, "w") as handle:
-                  json.dump(manifest, handle, indent=2)
-                  handle.write("\n")
-              print(f"{filename}: {len(manifest['platforms'])} platform keys")
+          manifest = build_manifest("KDJ")
+          with open("latest.json", "w") as handle:
+              json.dump(manifest, handle, indent=2)
+              handle.write("\n")
+          print(f"latest.json: {len(manifest['platforms'])} platform keys")
           PY
 
           upload_ok=0
           for attempt in 1 2 3 4; do
-            if gh release upload "$TAG" latest.json latest-labs.json --repo "$REPO" --clobber; then
+            if gh release upload "$TAG" latest.json --repo "$REPO" --clobber; then
               upload_ok=1
               break
             fi
@@ -445,8 +648,9 @@ jobs:
             echo "::error::更新清单连续上传失败"
             exit 1
           fi
+          served=$(python3 -c "import json;print(json.load(open('latest.json'))['version'])")
           # 清单就绪后才抢 Latest；此前 release.yml 用 --latest=false 建的空壳
           # 不会让 /releases/latest/download/latest.json 指向残缺发版。
+          # `-rc` 是版本字符串的一部分，但本项目仍把这类推送作为正式全量更新。
           gh release edit "$TAG" --repo "$REPO" --latest
-          served=$(python3 -c "import json;print(json.load(open('latest.json'))['version'])")
           echo "已上传 latest.json 并提升 $TAG 为 Latest（version=$served）"

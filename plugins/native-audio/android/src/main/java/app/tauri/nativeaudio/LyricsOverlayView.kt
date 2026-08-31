@@ -16,9 +16,9 @@ import kotlin.math.min
  * 悬浮歌词的绘制层。只画字，不碰窗口层级也不读播放器：
  * 帧数据由 [LyricsOverlayRuntime] 在主线程推进来。
  *
- * 视觉对齐桌面的 `.kd-desktop-lyrics`（可配填色/描边 + 投影）。主行与副行都做
- * 逐字填充：未唱部分压暗，已唱部分用各自强调色，分界线按行内进度水平推进；
- * 超长句先缩字号，再跟着填充点横向平移。
+ * 视觉对齐桌面的 `.kd-desktop-lyrics`（可配填色/描边 + 投影）。主行与同句的
+ * 翻译/罗马音逐字填充；副行是下一句时保持未唱色。超长句先缩字号，
+ * 再跟着各自的填充点横向平移。
  *
  * 字号在两处出现：`baseSize` 是配置算出来的基准，绘制时按 [squeeze] 收缩。
  * 每次 onMeasure / onDraw 都把 paint 的 textSize 显式设成当次要用的值，
@@ -35,7 +35,10 @@ class LyricsOverlayView(context: Context) : View(context) {
 
     private var primaryText = ""
     private var secondaryText = ""
-    private var fill = 0f
+    private var primaryFill = 0f
+    private var secondaryFill = 0f
+    private var primaryMotion = 0f
+    private var secondaryMotion = 0f
     private var fontScale = 1f
     private var accent = LyricsColorPaint(false, Color.WHITE, Color.WHITE)
     private var secondary = LyricsColorPaint(false, SECONDARY_COLOR, SECONDARY_COLOR)
@@ -98,13 +101,33 @@ class LyricsOverlayView(context: Context) : View(context) {
      * 推进一帧。播放中这是 60Hz 调用的，所以完全没变化时直接返回，
      * 让 View 不必进 onDraw。
      */
-    fun setFrame(primary: String, secondary: String, progress: Float) {
-        val nextFill = progress.coerceIn(0f, 1f)
-        if (primaryText == primary && secondaryText == secondary && fill == nextFill) return
+    fun setFrame(
+        primary: String,
+        secondary: String,
+        primaryProgress: Float,
+        secondaryProgress: Float,
+        primaryMotionProgress: Float,
+        secondaryMotionProgress: Float,
+    ) {
+        val nextPrimaryFill = primaryProgress.coerceIn(0f, 1f)
+        val nextSecondaryFill = secondaryProgress.coerceIn(0f, 1f)
+        val nextPrimaryMotion = primaryMotionProgress.coerceIn(0f, 1f)
+        val nextSecondaryMotion = secondaryMotionProgress.coerceIn(0f, 1f)
+        if (
+            primaryText == primary &&
+            secondaryText == secondary &&
+            primaryFill == nextPrimaryFill &&
+            secondaryFill == nextSecondaryFill &&
+            primaryMotion == nextPrimaryMotion &&
+            secondaryMotion == nextSecondaryMotion
+        ) return
         val textChanged = primaryText != primary || secondaryText != secondary
         primaryText = primary
         secondaryText = secondary
-        fill = nextFill
+        primaryFill = nextPrimaryFill
+        secondaryFill = nextSecondaryFill
+        primaryMotion = nextPrimaryMotion
+        secondaryMotion = nextSecondaryMotion
         if (textChanged) invalidateLayoutCache()
         invalidate()
     }
@@ -132,7 +155,7 @@ class LyricsOverlayView(context: Context) : View(context) {
 
         val primaryWidth = primaryDim.measureText(primaryText)
         val centered = paddingLeft + max(0f, (available - primaryWidth) / 2f)
-        val baseX = centered + overflowShift(primaryWidth, available)
+        val baseX = centered + overflowShift(primaryWidth, available, primaryMotion)
         val baseY = paddingTop - primaryDim.ascent()
 
         applyPaint(primaryLit, accent, baseX, baseX + primaryWidth)
@@ -146,9 +169,9 @@ class LyricsOverlayView(context: Context) : View(context) {
 
         // 已唱部分：同一串字重画一遍，按行内进度裁出分界线。裁剪比渐变
         // shader 更好控制，CJK 与拉丁混排时也不会在字形内部糊掉。
-        if (fill > 0f) {
+        if (primaryFill > 0f) {
             canvas.save()
-            canvas.clipRect(0f, 0f, baseX + primaryWidth * fill, height.toFloat())
+            canvas.clipRect(0f, 0f, baseX + primaryWidth * primaryFill, height.toFloat())
             canvas.drawText(primaryText, baseX, baseY, primaryLit)
             canvas.restore()
         }
@@ -162,7 +185,11 @@ class LyricsOverlayView(context: Context) : View(context) {
         secondaryLit.textSize = secondarySize
         val secondaryWidth = secondaryDim.measureText(secondaryText)
         val secondaryCentered = paddingLeft + max(0f, (available - secondaryWidth) / 2f)
-        val secondaryX = secondaryCentered + overflowShift(secondaryWidth, available)
+        val secondaryX = secondaryCentered + overflowShift(
+            secondaryWidth,
+            available,
+            secondaryMotion,
+        )
         val secondaryY = baseY + primaryDim.descent() + dp(LINE_GAP_DP) - secondaryDim.ascent()
 
         applyPaint(secondaryLit, secondary, secondaryX, secondaryX + secondaryWidth)
@@ -173,9 +200,14 @@ class LyricsOverlayView(context: Context) : View(context) {
             canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryStroke)
         }
         canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryDim)
-        if (fill > 0f) {
+        if (secondaryFill > 0f) {
             canvas.save()
-            canvas.clipRect(0f, 0f, secondaryX + secondaryWidth * fill, height.toFloat())
+            canvas.clipRect(
+                0f,
+                0f,
+                secondaryX + secondaryWidth * secondaryFill,
+                height.toFloat(),
+            )
             canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryLit)
             canvas.restore()
         }
@@ -199,10 +231,10 @@ class LyricsOverlayView(context: Context) : View(context) {
      * 缩到下限还是放不下时，跟着填充点横向平移，保证正在唱的那几个字始终
      * 在屏幕里。省略号会把最该看的部分吃掉，所以不用截断。
      */
-    private fun overflowShift(primaryWidth: Float, available: Float): Float {
-        val overflow = primaryWidth - available
+    private fun overflowShift(textWidth: Float, available: Float, progress: Float): Float {
+        val overflow = textWidth - available
         if (overflow <= 0f) return 0f
-        return -min(overflow, overflow * fill)
+        return -min(overflow, overflow * progress)
     }
 
     private fun invalidateLayoutCache() {

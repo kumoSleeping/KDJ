@@ -7,6 +7,7 @@ pub mod net;
 pub mod netease;
 pub mod provider;
 pub mod qqmusic;
+mod session_fs;
 pub mod soundcloud;
 pub mod tags;
 pub mod update;
@@ -15,5 +16,5 @@ pub mod youtubemusic;
 
 pub use provider::{
     Capabilities, DownloadJob, MusicProvider, ProgressSink, ProtectedPreviewIdentity,
-    ProviderContext, ProviderLiveSettings, VideoProvider,
+    ProviderContext, ProviderLiveSettings, VideoPreviewStream, VideoPreviewTrack, VideoProvider,
 };

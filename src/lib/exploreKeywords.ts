@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 /**
  * Explore 的预设词（作者另算，不进这张表）。
@@ -48,7 +49,7 @@ function sameList(a: string[], b: readonly string[]): boolean {
 
 function loadFrom(key: string, fallback: string[]): string[] {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = readLocalStorage(key);
     if (!raw) return fallback;
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return fallback;
@@ -59,7 +60,7 @@ function loadFrom(key: string, fallback: string[]): string[] {
 }
 
 function loadKeywords(): string[] {
-  const own = localStorage.getItem(KEYWORDS_KEY);
+  const own = readLocalStorage(KEYWORDS_KEY);
   if (own !== null) {
     try {
       const parsed: unknown = JSON.parse(own);
@@ -78,7 +79,7 @@ function loadKeywords(): string[] {
   const scLegacy = LEGACY_DEFAULTS.some((list) => sameList(sc, list)) || sc.length === 0;
   const vjLegacy = LEGACY_DEFAULTS.some((list) => sameList(vj, list)) || vj.length === 0;
   if (scLegacy && vjLegacy) {
-    localStorage.setItem(KEYWORDS_KEY, JSON.stringify(DEFAULT_EXPLORE_KEYWORDS));
+    writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(DEFAULT_EXPLORE_KEYWORDS));
     return DEFAULT_EXPLORE_KEYWORDS;
   }
   const merged: string[] = [];
@@ -86,12 +87,12 @@ function loadKeywords(): string[] {
     if (!merged.some((k) => k.toLowerCase() === word.toLowerCase())) merged.push(word);
   }
   const next = merged.length > 0 ? merged : DEFAULT_EXPLORE_KEYWORDS;
-  localStorage.setItem(KEYWORDS_KEY, JSON.stringify(next));
+  writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(next));
   return next;
 }
 
 function loadPicked(): string[] {
-  const own = localStorage.getItem(PICKED_KEY);
+  const own = readLocalStorage(PICKED_KEY);
   if (own !== null) {
     try {
       const parsed: unknown = JSON.parse(own);
@@ -104,7 +105,7 @@ function loadPicked(): string[] {
     return DEFAULT_EXPLORE_PICKED;
   }
   const sc = loadFrom("kd-sc-picked", DEFAULT_EXPLORE_PICKED);
-  localStorage.setItem(PICKED_KEY, JSON.stringify(sc));
+  writeLocalStorageNow(PICKED_KEY, JSON.stringify(sc));
   return sc;
 }
 
@@ -120,12 +121,12 @@ interface ExploreKeywordState {
 }
 
 function loadWithArtist(): boolean {
-  const own = localStorage.getItem(ARTIST_KEY);
+  const own = readLocalStorage(ARTIST_KEY);
   if (own !== null) return own !== "0";
   // 旧两块只要有一个显式关掉，就默认关
   if (
-    localStorage.getItem("kd-sc-with-artist") === "0" ||
-    localStorage.getItem("kd-vj-with-artist") === "0"
+    readLocalStorage("kd-sc-with-artist") === "0" ||
+    readLocalStorage("kd-vj-with-artist") === "0"
   ) {
     return false;
   }
@@ -142,7 +143,7 @@ export const useExploreKeywords = create<ExploreKeywordState>((set, get) => ({
     const next = picked.includes(word)
       ? picked.filter((k) => k !== word)
       : [...picked, word];
-    localStorage.setItem(PICKED_KEY, JSON.stringify(next));
+    writeLocalStorageNow(PICKED_KEY, JSON.stringify(next));
     set({ picked: next });
   },
 
@@ -150,26 +151,26 @@ export const useExploreKeywords = create<ExploreKeywordState>((set, get) => ({
     const clean = word.trim();
     if (!clean || get().keywords.some((k) => k.toLowerCase() === clean.toLowerCase())) return;
     const next = [...get().keywords, clean];
-    localStorage.setItem(KEYWORDS_KEY, JSON.stringify(next));
+    writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(next));
     set({ keywords: next });
   },
 
   remove(word) {
     const next = get().keywords.filter((k) => k !== word);
-    localStorage.setItem(KEYWORDS_KEY, JSON.stringify(next));
+    writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(next));
     const picked = get().picked.filter((k) => k !== word);
-    localStorage.setItem(PICKED_KEY, JSON.stringify(picked));
+    writeLocalStorageNow(PICKED_KEY, JSON.stringify(picked));
     set({ keywords: next, picked });
   },
 
   reset() {
-    localStorage.removeItem(KEYWORDS_KEY);
-    localStorage.removeItem(PICKED_KEY);
+    removeLocalStorage(KEYWORDS_KEY);
+    removeLocalStorage(PICKED_KEY);
     set({ keywords: DEFAULT_EXPLORE_KEYWORDS, picked: DEFAULT_EXPLORE_PICKED });
   },
 
   setWithArtist(value) {
-    localStorage.setItem(ARTIST_KEY, value ? "1" : "0");
+    writeLocalStorageNow(ARTIST_KEY, value ? "1" : "0");
     set({ withArtist: value });
   },
 }));

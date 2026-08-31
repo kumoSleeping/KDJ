@@ -7,7 +7,7 @@ import {
   type CSSProperties,
   type RefObject,
 } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api } from "../../lib/api";
 import { activeLrcIndex, lineFillProgress, projectLoopedPlaybackTime } from "../../lib/lrc";
 import { effectiveLyricExtra } from "../../lib/lyricsOverlay";
@@ -32,7 +32,11 @@ import {
   subscribeLivePlaybackClock,
   type UnifiedPlayerState,
 } from "../../lib/unifiedPlayer";
-import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
+import {
+  acceptPublishedLyricsEntry,
+  useLyricsStore,
+  type PublishedLyricsEntry,
+} from "../../stores/lyricsStore";
 import type { Track } from "../../types";
 
 const MIN_SQUEEZE = 0.62;
@@ -41,7 +45,7 @@ function alignedText(
   lines: { time: number; text: string }[],
   time: number,
 ): string | undefined {
-  return lines.find((line) => Math.abs(line.time - time) < 0.05)?.text;
+  return lines.find((line) => Math.abs(line.time - time) <= 0.12)?.text;
 }
 
 function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
@@ -227,17 +231,19 @@ function useKaraokeLayout(
 function DesktopLyricsLine({
   text,
   fill,
+  motion,
   role,
   fontScale,
 }: {
   text: string;
   fill: number;
+  motion: number;
   role: "primary" | "secondary";
   fontScale: number;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
-  const layout = useKaraokeLayout(text, fill, fontScale, viewportRef, measureRef);
+  const layout = useKaraokeLayout(text, motion, fontScale, viewportRef, measureRef);
   const safeFill = Math.min(1, Math.max(0, fill));
 
   return (
@@ -339,7 +345,12 @@ export function DesktopLyricsOverlay() {
     let unlistenPrefs: UnlistenFn | null = null;
     let unlistenStreamTrack: UnlistenFn | null = null;
     let unlistenStreamPlayback: UnlistenFn | null = null;
-    void listen("lyrics-prefs-changed", sync).then((dispose) => {
+    let unlistenLyrics: UnlistenFn | null = null;
+    let lyricsSnapshotRetry: number | null = null;
+    void listen<unknown>("lyrics-prefs-changed", (event) => {
+      if (event.payload === undefined || event.payload === null) sync();
+      else useLyricsPrefs.getState().syncFromSnapshot(event.payload);
+    }).then((dispose) => {
       unlistenPrefs = dispose;
     });
     void listen<Track | null>("stream-track-changed", (event) => {
@@ -367,6 +378,17 @@ export function DesktopLyricsOverlay() {
     ).then((dispose) => {
       unlistenStreamPlayback = dispose;
     });
+    void listen<PublishedLyricsEntry>("lyrics-entry-changed", (event) => {
+      acceptPublishedLyricsEntry(event.payload);
+    }).then((dispose) => {
+      unlistenLyrics = dispose;
+      const requestLyricsSnapshot = () => {
+        void emitTo("main", "lyrics-state-request").catch(() => undefined);
+      };
+      requestLyricsSnapshot();
+      // 两张 WebView 都在异步注册监听；本地事件补发一次，不会触碰歌词平台。
+      lyricsSnapshotRetry = window.setTimeout(requestLyricsSnapshot, 160);
+    });
     // 打开时再读一次，避免主窗先写入、本窗后挂上监听的竞态。
     sync();
     syncPublishedStream();
@@ -375,6 +397,8 @@ export function DesktopLyricsOverlay() {
       unlistenPrefs?.();
       unlistenStreamTrack?.();
       unlistenStreamPlayback?.();
+      unlistenLyrics?.();
+      if (lyricsSnapshotRetry !== null) window.clearTimeout(lyricsSnapshotRetry);
     };
   }, []);
 
@@ -407,10 +431,8 @@ export function DesktopLyricsOverlay() {
       const published = track?.id === trackId ? track : readPublishedStreamTrack(trackId);
       if (published) {
         setTrack(published);
-        void ensureLyrics(published);
       } else {
         setTrack(null);
-        setTrackError("在线试听曲目信息尚未同步");
       }
       return () => {
         alive = false;
@@ -421,7 +443,6 @@ export function DesktopLyricsOverlay() {
       .then((next) => {
         if (!alive) return;
         setTrack(next);
-        return ensureLyrics(next);
       })
       .catch((error) => {
         if (alive) setTrackError(error instanceof Error ? error.message : String(error));
@@ -435,9 +456,11 @@ export function DesktopLyricsOverlay() {
   if (activePlayback.trackId == null) return null;
 
   const active = activeLrcIndex(entry.lines, smoothTime);
-  const currentIndex = active < 0 ? 0 : active;
-  const current = entry.lines[currentIndex];
-  const next = entry.lines[currentIndex + 1];
+  const beforeFirst = Boolean(entry.lines[0] && smoothTime < entry.lines[0].time);
+  // 前奏可以预告第一句；平台明确给出的行间/尾奏空白则必须清屏。
+  const currentIndex = active >= 0 ? active : beforeFirst ? 0 : -1;
+  const current = currentIndex >= 0 ? entry.lines[currentIndex] : undefined;
+  const next = currentIndex >= 0 ? entry.lines[currentIndex + 1] : undefined;
   const hasMeaning = entry.translated.some((line) => line.text.trim());
   const hasRomaji = entry.romaji.some((line) => line.text.trim());
   const layer = effectiveLyricExtra(lyricExtra, hasMeaning, hasRomaji);
@@ -449,23 +472,29 @@ export function DesktopLyricsOverlay() {
         : undefined
     : undefined;
 
-  let primary = "正在读取曲目信息…";
+  let primary = "";
   let secondary = "";
+  let secondaryFollowsPrimary = false;
   let karaoke = false;
   if (trackError) primary = trackError;
-  else if (track && (entry.status === "idle" || entry.status === "loading")) {
-    primary = `${track.title || track.filename} · 正在搜歌词…`;
-  } else if (entry.status === "error" || entry.status === "empty") {
-    primary = entry.status === "error" ? "歌词暂时不可用" : "未找到歌词";
-  } else if (current) {
+  else if (entry.status === "error") primary = "歌词暂时不可用";
+  else if (current) {
     primary = current.text;
-    secondary = extra || next?.text || "";
+    const synchronizedSecondary = extra?.trim() || "";
+    secondary = synchronizedSecondary || next?.text || "";
+    secondaryFollowsPrimary = Boolean(synchronizedSecondary);
     karaoke = entry.status === "ready";
   }
 
   const fill = karaoke
-    ? lineFillProgress(entry.lines, currentIndex, smoothTime, activePlayback.duration)
+    ? lineFillProgress(entry.lines, currentIndex, smoothTime)
     : 1;
+  // 翻译/罗马音与主词属于同一句，跟随主行填充；作为预告的下一句尚未唱到，
+  // 必须保持未唱色，不能借用当前句的进度。
+  const secondaryFill = secondaryFollowsPrimary ? fill : 0;
+  // YRC 使用真实逐字区间；行级歌词使用本句到下一句/空白边界的区间。
+  const motion = current ? fill : 0;
+  const secondaryMotion = secondaryFollowsPrimary ? motion : 0;
 
   const accent = paintCss(accentPaint(prefs));
   const secondaryColor = paintCss(resolvedSecondaryPaint(prefs));
@@ -506,11 +535,18 @@ export function DesktopLyricsOverlay() {
           }}
         />
         <div className="kd-desktop-lyrics-content" aria-live="polite">
-          <DesktopLyricsLine text={primary} fill={fill} role="primary" fontScale={fontScale} />
+          <DesktopLyricsLine
+            text={primary}
+            fill={fill}
+            motion={motion}
+            role="primary"
+            fontScale={fontScale}
+          />
           {secondary ? (
             <DesktopLyricsLine
               text={secondary}
-              fill={fill}
+              fill={secondaryFill}
+              motion={secondaryMotion}
               role="secondary"
               fontScale={fontScale}
             />

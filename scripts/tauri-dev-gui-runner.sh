@@ -19,4 +19,9 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>LSMinimumSystemVersion</key><string>10.15</string>
 </dict></plist>
 PLIST
+if [[ "${VITE_KDJ_YOUTUBE_E2E:-}" == "1" ]]; then
+  # Acceptance video must remain visibly composited for WKWebView, but the diagnostic app must
+  # never become the user's foreground application or add a second KDJ icon to the Dock.
+  /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$bundle/Contents/Info.plist"
+fi
 exec "$bundle/Contents/MacOS/kdj-app" "$@"

@@ -1,10 +1,16 @@
 import { Children, isValidElement, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { GripVertical } from "lucide-react";
 import { clearTextSelection } from "../../lib/textSelection";
+import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 
 export interface PanelStackProps {
   /** localStorage 的键。不同的面板栈各存各的顺序。 */
   storageKey: string;
+  /**
+   * 新增但尚未进入用户排序记录的面板，可以先放在栈顶。它一旦被用户拖动，
+   * 保存顺序里就会出现自己的 id，之后完全服从用户选择。
+  */
+  defaultFirstIds?: readonly string[];
   /**
    * 每个直接子元素必须带 `key`——它就是这个面板的 id。
    * 用 key 而不是另开一个 `panelId` prop 的理由：这些子元素本来就要有 key，
@@ -15,7 +21,7 @@ export interface PanelStackProps {
 
 function load(storageKey: string): string[] {
   try {
-    const raw = localStorage.getItem(storageKey);
+    const raw = readLocalStorage(storageKey);
     const parsed: unknown = raw ? JSON.parse(raw) : null;
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
   } catch {
@@ -30,10 +36,14 @@ function load(storageKey: string): string[] {
  * 评分）谁在上面，完全取决于当下在干什么——整理曲库时看元数据，
  * 排 set 时看接下一首。与其替用户选一个，不如让他自己拖一次、然后永远不用再想。
  *
- * 存的是 id 列表而不是完整顺序快照：以后加/删面板时，没记录过的新面板
- * 自动排在末尾（见下面的 `rank`），旧的存档不会因此失效。
+ * 存的是 id 列表而不是完整顺序快照：以后加/删面板时，普通新面板自动排在末尾；
+ * 少数显式列入 defaultFirstIds 的主面板先插到顶部，旧存档仍不会因此失效。
  */
-export function PanelStack({ storageKey, children }: PanelStackProps) {
+export function PanelStack({
+  storageKey,
+  defaultFirstIds = [],
+  children,
+}: PanelStackProps) {
   const [order, setOrder] = useState(() => load(storageKey));
   /** 正在拖的那块的 id。 */
   const [dragging, setDragging] = useState<string | null>(null);
@@ -52,10 +62,13 @@ export function PanelStack({ storageKey, children }: PanelStackProps) {
   // React 给 Children.toArray 的 key 加了 ".$" 前缀，剥掉才是我们写的那个
   const idOf = (child: { key: string | null }) => String(child.key ?? "").replace(/^\.\$/, "");
 
-  // 没记录过的排末尾：新增面板不需要动存档，老用户下次打开就看到它在最下面
+  // 已经排过的面板完全服从用户顺序；defaultFirstIds 只把尚未进入旧存档的
+  // 新主面板放到顶部。用户拖过一次后，它也会进入 order 并服从保存的位置。
   const rank = (id: string) => {
-    const index = order.indexOf(id);
-    return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+    const storedIndex = order.indexOf(id);
+    if (storedIndex !== -1) return storedIndex;
+    const defaultIndex = defaultFirstIds.indexOf(id);
+    return defaultIndex === -1 ? Number.MAX_SAFE_INTEGER : Number.MIN_SAFE_INTEGER + defaultIndex;
   };
   const sorted = [...items].sort((a, b) => rank(idOf(a)) - rank(idOf(b)));
 
@@ -68,7 +81,7 @@ export function PanelStack({ storageKey, children }: PanelStackProps) {
     // 目标在移除源面板后可能向前挪一格，必须按 next 找位置；否则从上往下拖
     // 会落到目标的下面，看起来就像排序失效。
     next.splice(next.indexOf(to), 0, from);
-    localStorage.setItem(storageKey, JSON.stringify(next));
+    writeLocalStorageNow(storageKey, JSON.stringify(next));
     setOrder(next);
   };
 

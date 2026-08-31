@@ -1,12 +1,12 @@
 /**
  * 歌词缓存：听歌优先——播放绝不被搜词挡住；词到了再补上，并按当前进度对齐。
- * 同时给右侧唱盘预告的「下一首」预取，切歌时尽量已经就绪。
+ * 调用方只在歌词界面需要当前曲时触发；store 负责同歌单飞和持久缓存。
  */
 
 import { create } from "zustand";
 import { api, ApiError } from "../lib/api";
 import { useLyricsPrefs } from "../lib/lyricsPrefs";
-import { parseLrc, type LrcLine } from "../lib/lrc";
+import { parseLrc, parseNeteaseWordLrc, type LrcLine } from "../lib/lrc";
 import { localLibraryDataTrackId } from "../lib/playbackTrackSource";
 import type { LyricsResponse, Platform, Track } from "../types";
 
@@ -19,11 +19,16 @@ export interface LyricsEntry {
   romaji: LrcLine[];
   meta: LyricsResponse | null;
   error: string;
+  /** 本地曲目的歌词是否已经写入 `.kdj/lyrics/`；在线试听始终为 false。 */
+  persisted: boolean;
   /** 与 lyricsPrefs 搜词相关项对应；偏好变了视为未缓存。 */
   fingerprint: string;
   /** 正在飞的请求；同歌并发 ensure 共用一个 promise。 */
   inflight: Promise<void> | null;
 }
+
+/** 独立歌词窗口可接收的纯数据快照；Promise 只属于发起请求的主窗口。 */
+export type PublishedLyricsEntry = Omit<LyricsEntry, "inflight"> & { trackId: number };
 
 function prefsFingerprint(): string {
   const prefs = useLyricsPrefs.getState();
@@ -38,6 +43,7 @@ function emptyEntry(status: LyricsStatus = "idle"): LyricsEntry {
     romaji: [],
     meta: null,
     error: "",
+    persisted: false,
     fingerprint: "",
     inflight: null,
   };
@@ -51,6 +57,7 @@ function normalizeEntry(entry: LyricsEntry): LyricsEntry {
     entry.romaji &&
     entry.meta !== undefined &&
     entry.error !== undefined &&
+    entry.persisted !== undefined &&
     entry.fingerprint !== undefined &&
     entry.inflight !== undefined
   ) {
@@ -63,6 +70,7 @@ function normalizeEntry(entry: LyricsEntry): LyricsEntry {
     romaji: entry.romaji ?? [],
     meta: entry.meta ?? null,
     error: entry.error ?? "",
+    persisted: entry.persisted ?? false,
     fingerprint: entry.fingerprint ?? "",
     inflight: entry.inflight ?? null,
   };
@@ -143,7 +151,10 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
     if (
       existing &&
       existing.fingerprint === fingerprint &&
-      (existing.status === "ready" || existing.status === "empty")
+      (
+        existing.status === "empty"
+        || (existing.status === "ready" && (track.id < 0 || existing.persisted === true))
+      )
     ) {
       return;
     }
@@ -161,34 +172,40 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
             status: "loading",
             fingerprint,
             error: "",
+            persisted: false,
           },
         },
       }));
       try {
         const prefs = useLyricsPrefs.getState();
         let meta: LyricsResponse | null = null;
+        let persisted = false;
+        let cacheDirty = false;
 
-        // 下载时已经落盘的歌词优先；KDJ 导出的 OneLibrary 快照虽是负数播放 id，
-        // 仍可通过 local_track_id 复用原曲的歌词。
+        // 下载时已经落盘的歌词优先。
         const localLyricsTrackId = localLibraryDataTrackId(track);
         if (localLyricsTrackId) {
           try {
             const local = await api.libraryLyrics(localLyricsTrackId);
+            const localPlatform = local.platform ?? platformOf(track) ?? "local";
             // sidecar 只要文件存在不代表里面有可解析的 LRC；损坏/仅元数据时
             // 继续走在线匹配，避免一个空本地文件把正确歌词永久挡住。
             if (
-              parseLrc(local.lrc, { honorOffset: platformOf(track) === "qqm" }).length
+              parseLrc(local.lrc, { honorOffset: localPlatform === "qqm" }).length
+              || (localPlatform === "wyy" && parseNeteaseWordLrc(local.word_lrc || "").length)
             ) {
               meta = {
                 lrc: local.lrc,
+                word_lrc: local.word_lrc || "",
                 translated_lrc: local.translated_lrc,
                 romaji_lrc: local.romaji_lrc,
-                platform: platformOf(track) ?? "local",
-                key: track.source_key || "",
-                title: track.title || track.filename,
-                artist: track.artist || "",
-                score: 1,
+                platform: localPlatform,
+                key: local.key || track.source_key || "",
+                title: local.title || track.title || track.filename,
+                artist: local.artist || track.artist || "",
+                score: local.score ?? 1,
               };
+              persisted = true;
             }
           } catch (error) {
             // 404 = 尚未下载本地歌词；其它本地读取异常也只降级到在线兜底，
@@ -218,6 +235,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
                 translated_lrc: online.translated_lrc,
                 romaji_lrc: meta.romaji_lrc || online.romaji_lrc,
               };
+              cacheDirty = true;
             }
           } catch {
             // 附加翻译失败不影响已经可用的本地主歌词，离线时照常显示原词。
@@ -227,6 +245,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         // 本地没有歌词时，在线匹配是显式偏好；在线试听仍按来源 key 直取。
         if (!meta && (track.id < 0 || prefs.tryOnlineWhenMissing)) {
           meta = await api.lyrics(requestOf(track));
+          cacheDirty = track.id > 0;
         }
         if (!meta) {
           set((state) => ({
@@ -239,6 +258,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
                 romaji: [],
                 meta: null,
                 error: "",
+                persisted: false,
                 fingerprint,
                 inflight: null,
               },
@@ -246,8 +266,21 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
           }));
           return;
         }
+        if (track.id > 0 && cacheDirty) {
+          try {
+            await api.cacheLibraryLyrics(track.id, meta);
+            persisted = true;
+          } catch (error) {
+            // 已经匹配到的歌词仍可用于当前播放；落盘失败单独反映在顶部缓存状态，
+            // 不应该把可用歌词降级成整块不可用。
+            console.warn("缓存匹配歌词失败", error);
+          }
+        }
         const lrcOptions = { honorOffset: meta.platform === "qqm" };
-        const lines = parseLrc(meta.lrc, lrcOptions);
+        const lineLyrics = parseLrc(meta.lrc, lrcOptions);
+        const wordLyrics =
+          meta.platform === "wyy" ? parseNeteaseWordLrc(meta.word_lrc || "") : [];
+        const lines = wordLyrics.length ? wordLyrics : lineLyrics;
         const translated = parseLrc(meta.translated_lrc || "", lrcOptions);
         const romaji = parseLrc(meta.romaji_lrc || "", lrcOptions);
         set((state) => ({
@@ -260,6 +293,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
               romaji,
               meta,
               error: "",
+              persisted,
               fingerprint,
               inflight: null,
             },
@@ -280,6 +314,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
               romaji: [],
               meta: null,
               error: "",
+              persisted: false,
               fingerprint,
               inflight: null,
             },
@@ -295,6 +330,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
           ...(state.byId[track.id] ?? emptyEntry("loading")),
           status: "loading",
           fingerprint,
+          persisted: false,
           inflight: run,
         },
       },
@@ -305,4 +341,36 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
 
 export function ensureLyrics(track: Track | null | undefined): Promise<void> {
   return useLyricsStore.getState().ensure(track);
+}
+
+export function publishedLyricsEntry(
+  trackId: number,
+  entry: LyricsEntry,
+): PublishedLyricsEntry {
+  const normalized = normalizeEntry(entry);
+  return {
+    trackId,
+    status: normalized.status,
+    lines: normalized.lines,
+    translated: normalized.translated,
+    romaji: normalized.romaji,
+    meta: normalized.meta,
+    error: normalized.error,
+    persisted: normalized.persisted,
+    fingerprint: normalized.fingerprint,
+  };
+}
+
+/** 主窗口拥有在线请求；独立歌词窗口只接收结果，不再自己调用歌词 API。 */
+export function acceptPublishedLyricsEntry(snapshot: PublishedLyricsEntry): void {
+  if (!Number.isFinite(snapshot.trackId) || snapshot.trackId === 0) return;
+  useLyricsStore.setState((state) => ({
+    byId: {
+      ...state.byId,
+      [snapshot.trackId]: normalizeEntry({
+        ...snapshot,
+        inflight: null,
+      }),
+    },
+  }));
 }

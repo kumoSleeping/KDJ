@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, FolderOpen, Library, LoaderCircle, Play } from "lucide-react";
+import { Check, FolderOpen, Library, Link2, LoaderCircle, Play, Search } from "lucide-react";
 import { api } from "../../lib/api";
+import { copyShareContent } from "../../lib/shareClipboard";
 import { formatBpm } from "../../lib/format";
 import { useHarmonicScope } from "../../lib/harmonicScope";
 import { isOutsideFolder } from "../../lib/outsideFolder";
+import { formatShareText, trackShareLink, trackShareSearchQuery } from "../../lib/shareLink";
+import { useSharePrefs } from "../../lib/sharePrefs";
+import { requestExploreSearch } from "../../lib/vjSearch";
+import { isPlatformEnabled } from "../../lib/enabledPlatforms";
+import { normalizeEnabledPlatforms, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
+import { isStreamTrack } from "../../lib/streamTrack";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { endTrackDrag, writeTrackDragData } from "../../lib/trackDrag";
 import { useLibraryStore } from "../../stores/libraryStore";
+import { useAppStore } from "../../stores/appStore";
 import type { HarmonicMatch, Track } from "../../types";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
@@ -45,6 +53,15 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   // 不如让它退回全库并在按钮上说清楚。「其他」也不是真实目录，同样退回全库。
   const activeFolder = scope === "folder" && !isOutsideFolder(folder) ? folder : "";
   const selected = new Set(selectedIds);
+  const shareContentMode = useSharePrefs((state) => state.contentMode);
+  const settings = useAppStore((state) => state.settings);
+  const selectedSameNamePlatforms = normalizeSearchPlatforms(settings?.search_platforms)
+    .filter((platform) => isPlatformEnabled(settings, platform));
+  const sameNameSearchPlatforms = selectedSameNamePlatforms.length > 0
+    ? selectedSameNamePlatforms
+    : normalizeEnabledPlatforms(settings?.enabled_platforms);
+  const rowShareLink = rowMenu ? trackShareLink(rowMenu.track) : null;
+  const rowSameNameQuery = rowMenu ? trackShareSearchQuery(rowMenu.track) : "";
 
   useEffect(() => {
     if (!selectionMode) return;
@@ -74,8 +91,10 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
     }
     let alive = true;
     setLoading(true);
-    api
-      .harmonic(track.id, 12, 60, activeFolder)
+    const request = isStreamTrack(track)
+      ? api.harmonicProfile(track, 12, 60, activeFolder)
+      : api.harmonic(track.id, 12, 60, activeFolder);
+    request
       .then((result) => {
         if (alive) {
           setMatches(result);
@@ -330,6 +349,42 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
             <Play size={12} />
             播放
           </button>
+          {rowShareLink && (
+            <button
+              type="button"
+              onClick={() => {
+                void copyShareContent(
+                  formatShareText(
+                    rowShareLink,
+                    {
+                      title: rowMenu.track.title || rowMenu.track.filename,
+                      artists: rowMenu.track.artist,
+                      album: rowMenu.track.album,
+                    },
+                    shareContentMode,
+                  ),
+                  shareContentMode,
+                  () => api.coverBlob(rowMenu.track.id),
+                );
+                setRowMenu(null);
+              }}
+            >
+              <Link2 size={12} />
+              复制分享内容
+            </button>
+          )}
+          {rowSameNameQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                requestExploreSearch(rowSameNameQuery, sameNameSearchPlatforms);
+                setRowMenu(null);
+              }}
+            >
+              <Search size={12} />
+              同名搜索
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {

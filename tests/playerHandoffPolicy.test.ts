@@ -20,6 +20,11 @@ import {
   nextCandidateRoute,
   samePredictionPolicy,
 } from "../src/lib/nextCandidatePolicy.ts";
+import {
+  shouldBeginManagerTransition,
+  shouldClearLocalVideoSessionForTrack,
+  shouldRequestLocalVideoSessionForTrack,
+} from "../src/lib/playerTransitionPolicy.ts";
 
 test("a buffered predicted deck survives native-to-browser clock adoption", () => {
   const prepared = { deckIndex: 1 as const, trackId: -8, source: "http://127.0.0.1/stream/8" };
@@ -93,9 +98,75 @@ test("stale adoption cleanup cannot pause a newer deck owner", () => {
   assert.equal(ownsExternalAdoption(handle, 7, 1, "local://track-b"), false);
 });
 
+test("a pending online source keeps the playing Deck alive for a DJ handoff", () => {
+  const onlineReplacement = {
+    autoPlay: true,
+    currentPlaying: true,
+    transitionEnabled: true,
+    realtimeTransitionAvailable: true,
+    dualDeck: false,
+    currentTrackId: -1,
+    nextTrackId: -2,
+  };
+  assert.equal(shouldBeginManagerTransition(onlineReplacement), true);
+  assert.equal(
+    shouldBeginManagerTransition({ ...onlineReplacement, transitionEnabled: false }),
+    false,
+    "without Blend the unresolved source must use the ordinary replacement fence",
+  );
+  assert.equal(
+    shouldBeginManagerTransition({ ...onlineReplacement, currentPlaying: false }),
+    false,
+    "a stopped Deck has no outgoing audio to preserve",
+  );
+  assert.equal(
+    shouldBeginManagerTransition({ ...onlineReplacement, realtimeTransitionAvailable: false }),
+    false,
+    "platforms without two realtime Decks must keep the safe hard-cut path",
+  );
+});
+
+test("an automatic audio handoff clears only the stale local-video session", () => {
+  assert.equal(shouldClearLocalVideoSessionForTrack("local", 8, 9, false), true);
+  assert.equal(
+    shouldClearLocalVideoSessionForTrack("local", 8, 9, true),
+    true,
+    "a missed video-session replacement must not keep the outgoing video",
+  );
+  assert.equal(shouldClearLocalVideoSessionForTrack("local", 9, 9, true), false);
+  assert.equal(
+    shouldClearLocalVideoSessionForTrack("network", null, 9, false),
+    false,
+    "an unrelated network preview owns its own lifecycle",
+  );
+});
+
+test("a direct Deck handoff creates the incoming local-video session exactly once", () => {
+  assert.equal(shouldRequestLocalVideoSessionForTrack(null, null, 9, true), true);
+  assert.equal(shouldRequestLocalVideoSessionForTrack("local", 8, 9, true), true);
+  assert.equal(
+    shouldRequestLocalVideoSessionForTrack("local", 9, 9, true),
+    false,
+    "an explicit play request may already have prepared this video session",
+  );
+  assert.equal(
+    shouldRequestLocalVideoSessionForTrack("network", null, 9, true),
+    true,
+    "the incoming local video replaces an unrelated network preview just like playTrack does",
+  );
+  assert.equal(shouldRequestLocalVideoSessionForTrack(null, null, 9, false), false);
+});
+
 test("an exhausted online chain predicts from the local library", () => {
-  assert.equal(nextCandidateRoute(true, false, "harmonic", false), "local-start");
+  assert.equal(nextCandidateRoute(true, false, "harmonic", false), "harmonic-profile");
   assert.equal(nextCandidateRoute(true, true, "harmonic", false), "stream-successor");
+  assert.equal(nextCandidateRoute(true, false, "order", false), "local-start");
+});
+
+test("single repeat keeps auto-repeat but manual next predicts a distinct route", () => {
+  assert.equal(nextCandidateRoute(false, false, "one", false), "repeat-current");
+  assert.equal(nextCandidateRoute(false, false, "one", true), "harmonic");
+  assert.equal(nextCandidateRoute(true, true, "one", true), "stream-successor");
 });
 
 test("a mode change invalidates the still-visible old prediction", () => {

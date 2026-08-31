@@ -7,7 +7,7 @@ import {
   type LyricsSecondaryMode,
   type LyricsStrokeMode,
 } from "./lyricsColor";
-import { writeLocalStorageSoon } from "./storageWrite";
+import { readLocalStorage, writeLocalStorageSoon } from "./storageWrite";
 
 export type {
   LyricsColorMode,
@@ -80,7 +80,7 @@ export interface LyricsPrefs {
   desktopAccentMode: LyricsFillMode;
   desktopAccent: string;
   desktopAccentEnd: string;
-  /** 副行（翻译 / 下一句）已唱填色；`follow` = 跟主行。 */
+  /** 副行（翻译 / 罗马音）已唱填色；`follow` = 跟主行。下一句保持未唱色。 */
   desktopSecondaryMode: LyricsSecondaryMode;
   desktopSecondaryAccent: string;
   desktopSecondaryAccentEnd: string;
@@ -319,17 +319,17 @@ function pickPrefs(state: LyricsPrefs): LyricsPrefs {
   };
 }
 
-function load(): LyricsPrefs {
-  try {
-    const raw: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
-    if (!raw || typeof raw !== "object") return { ...DEFAULTS, engines: [...DEFAULTS.engines] };
-    const data = raw as Partial<LyricsPrefs> & {
+type StoredLyricsPrefs = Partial<LyricsPrefs> & {
       floatWindow?: boolean;
       showTranslation?: boolean;
       showRomaji?: boolean;
       desktopLockConfigured?: boolean;
       lyricsPrefsVersion?: number;
-    };
+};
+
+function normalizePrefs(raw: unknown): LyricsPrefs {
+    if (!raw || typeof raw !== "object") return { ...DEFAULTS, engines: [...DEFAULTS.engines] };
+    const data = raw as StoredLyricsPrefs;
     // 兼容旧键 floatWindow
     const autoShow =
       typeof data.autoShow === "boolean"
@@ -429,28 +429,35 @@ function load(): LyricsPrefs {
       })(),
       desktopOpacity: normalizeOpacity(data.desktopOpacity),
     };
+}
+
+function load(): LyricsPrefs {
+  try {
+    return normalizePrefs(JSON.parse(readLocalStorage(STORAGE_KEY) ?? "null"));
   } catch {
     return { ...DEFAULTS, engines: [...DEFAULTS.engines] };
   }
 }
 
-function save(prefs: LyricsPrefs): void {
-  writeLocalStorageSoon(
-    STORAGE_KEY,
-    JSON.stringify({
-      ...pickPrefs(prefs),
-      desktopLockConfigured: true,
-      lyricsPrefsVersion: ONLINE_LYRICS_PREF_VERSION,
-    }),
-    750,
-  );
-  // 桌面歌词是独立 WebView：WKWebView 往往不派发跨窗 storage 事件，改用 Tauri 广播。
-  notifyPrefsChanged();
+function storedPrefs(prefs: LyricsPrefs): StoredLyricsPrefs {
+  return {
+    ...pickPrefs(prefs),
+    desktopLockConfigured: true,
+    lyricsPrefsVersion: ONLINE_LYRICS_PREF_VERSION,
+  };
 }
 
-function notifyPrefsChanged(): void {
+function save(prefs: LyricsPrefs): void {
+  const snapshot = storedPrefs(prefs);
+  writeLocalStorageSoon(STORAGE_KEY, JSON.stringify(snapshot), 750);
+  // 桌面歌词是独立 WebView：WKWebView 往往不共享或不派发跨窗 storage 事件。
+  // 广播直接携带快照，不能只通知对方再读盘——合并写入的 750ms 窗口内读到的仍是旧值。
+  notifyPrefsChanged(snapshot);
+}
+
+function notifyPrefsChanged(snapshot: StoredLyricsPrefs): void {
   void import("@tauri-apps/api/event")
-    .then(({ emit }) => emit("lyrics-prefs-changed"))
+    .then(({ emit }) => emit("lyrics-prefs-changed", snapshot))
     .catch(() => {});
 }
 
@@ -485,7 +492,9 @@ interface LyricsPrefsState extends LyricsPrefs {
   setDesktopVerticalOffset(y: number): void;
   /** 从另一个 WebView 写入的 localStorage 重新同步偏好。 */
   syncFromStorage(): void;
-  /** 每次启动：收起桌面歌词，不自动弹出。 */
+  /** 从主窗口广播的快照同步偏好，不依赖多个 WebView 是否共享 localStorage。 */
+  syncFromSnapshot(snapshot: unknown): void;
+  /** 每次启动先隐藏原生空窗；曲目恢复后按上次的 desktopEnabled 状态重新显示。 */
   prepareForStartup(): void;
   /** 按本首歌可用层循环切换。 */
   cycleLyricExtra(hasMeaning: boolean, hasRomaji: boolean): void;
@@ -664,12 +673,12 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
     const next = load();
     set((state) => ({ ...next, prefsEpoch: state.prefsEpoch + 1 }));
   },
+  syncFromSnapshot(snapshot) {
+    const next = normalizePrefs(snapshot);
+    set((state) => ({ ...next, prefsEpoch: state.prefsEpoch + 1 }));
+  },
   prepareForStartup() {
     const state = get();
-    if (state.desktopEnabled) {
-      set({ desktopEnabled: false });
-      save({ ...pickPrefs(state), desktopEnabled: false });
-    }
     const control = window.kdj?.desktopLyrics;
     if (!control) return;
     void control({

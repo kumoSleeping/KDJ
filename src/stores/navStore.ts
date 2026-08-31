@@ -15,9 +15,7 @@ export type OverlayKind =
   | "queue"
   | "preview"
   | "folders"
-  | "vjExport"
   | "duplicates"
-  | "virtualDisk"
   | "lyrics";
 
 export interface Place {
@@ -36,9 +34,7 @@ function overlayOf(): OverlayKind | null {
   if (app.showSettings) return "settings";
   if (app.showPreview) return "preview";
   if (app.showQueue) return "queue";
-  if (app.showVjExport) return "vjExport";
   if (app.showDuplicates) return "duplicates";
-  if (app.showVirtualDisk) return "virtualDisk";
   if (app.showLyrics) return "lyrics";
   return null;
 }
@@ -78,13 +74,11 @@ function applyOverlay(overlay: OverlayKind | null): void {
   else if (overlay === "preview") app.openPreviewPanel();
   else if (overlay === "queue") app.openQueuePanel();
   else if (overlay === "folders") app.openFoldersPanel();
-  else if (overlay === "vjExport") app.openVjExportPanel();
   else if (overlay === "duplicates")
     app.openDuplicatePanel(app.duplicateFolders, {
       all: app.duplicateAll,
       includeSubfolders: app.duplicateIncludeSubfolders,
     });
-  else if (overlay === "virtualDisk") app.openVirtualDiskPanel();
   else if (overlay === "lyrics") app.openLyricsPanel();
   else app.dismissOverlay();
 }
@@ -97,12 +91,11 @@ export function applyPlace(place: Place): void {
     useAppStore.setState({
       listMode: place.listMode,
       showSettings: false,
+      settingsPinned: false,
       showQueue: false,
       showPreview: false,
       showFolders: false,
-      showVjExport: false,
       showDuplicates: false,
-      showVirtualDisk: false,
       showLyrics: false,
       queuePinned: false,
     });

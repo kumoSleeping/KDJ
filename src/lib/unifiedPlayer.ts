@@ -84,6 +84,8 @@ export interface UnifiedDeckState {
   /** Post-EQ peak in linear full scale; values >= 1 indicate clipping. */
   peakLevel: number;
   rate: number;
+  /** Persistent musical-key transpose, in equal-tempered semitones. */
+  pitchSemitones: number;
   /** Worker-adopted Rubber Band rate; this can lead the PCM already queued for the callback. */
   appliedRate: number;
   /** Rate tagged on PCM that has reached the callback-facing output ring. */
@@ -214,6 +216,7 @@ export interface UnifiedPlayer {
   /** Transient jog-wheel pitch bend; does not mutate the Deck's persistent TEMPO. */
   nudgeDeck(deck: 0 | 1, amount: number): Promise<UnifiedPlayerState>;
   setDeckRate(deck: 0 | 1, rate: number): Promise<UnifiedPlayerState>;
+  setDeckPitch(deck: 0 | 1, semitones: number): Promise<UnifiedPlayerState>;
   /** Linked SYNC tempo update applied to both callback clocks at one boundary. */
   setDeckRates(rates: [number, number]): Promise<UnifiedPlayerState>;
   /** Native-clock BPM + downbeat alignment for one follower Deck. */
@@ -282,6 +285,7 @@ const INITIAL_STATE: UnifiedPlayerState = {
     scratchCacheFailures: 0,
     peakLevel: 0,
     rate: 1,
+    pitchSemitones: 0,
     appliedRate: 1,
     audibleRate: 1,
     targetRateRevision: 0,
@@ -478,6 +482,10 @@ class MobileNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return Promise.reject(new Error("iOS 连续播放模式不支持双 Deck"));
   }
 
+  setDeckPitch(): Promise<UnifiedPlayerState> {
+    return Promise.reject(new Error("iOS 连续播放模式不支持实时调性调整"));
+  }
+
   setDeckRates(): Promise<UnifiedPlayerState> {
     return Promise.reject(new Error("iOS 连续播放模式不支持双 Deck"));
   }
@@ -598,6 +606,7 @@ interface DesktopDeckSnapshotRaw {
   desiredPlaying: boolean;
   isPlaying: boolean;
   rate: number;
+  pitchSemitones?: number;
   appliedRate?: number;
   audibleRate?: number;
   targetRateRevision?: number;
@@ -793,6 +802,9 @@ function normalizedDesktop(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState 
       scratchCacheFailures: Math.max(0, deck.scratchCacheFailures ?? 0),
       peakLevel: Number.isFinite(deck.peakLevel) ? Math.max(0, deck.peakLevel ?? 0) : 0,
       rate: Number.isFinite(deck.rate) && deck.rate > 0 ? deck.rate : 1,
+      pitchSemitones: Number.isFinite(deck.pitchSemitones)
+        ? Math.max(-12, Math.min(12, deck.pitchSemitones as number))
+        : 0,
       appliedRate: Number.isFinite(deck.appliedRate) && (deck.appliedRate ?? 0) > 0
         ? deck.appliedRate as number
         : Number.isFinite(deck.rate) && deck.rate > 0 ? deck.rate : 1,
@@ -821,6 +833,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   readonly kind = "desktop-native" as const;
   readonly supportsRealtimeDj = true;
   private initPromise: Promise<UnifiedPlayerState> | null = null;
+  private initialized = false;
   private unlisten: UnlistenFn | null = null;
   private unlistenLevels: UnlistenFn | null = null;
   private unlistenClock: UnlistenFn | null = null;
@@ -828,6 +841,8 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private nextCommandId = 1;
   /** Tauri invoke 可以并发越序到达；播放命令必须和 commandId 保持同一顺序。 */
   private commandTail: Promise<void> = Promise.resolve();
+  /** Number of commands running or already reserved behind the serialized tail. */
+  private commandDepth = 0;
   /** 队列更新是可丢弃的后台意图；只合并尚未进入 IPC 的旧队列更新。 */
   private queueRevision = 0;
   /** 预测预热同样只保留最后一个尚未进入 IPC 的候选。 */
@@ -836,6 +851,8 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private transportRevision = 0;
   private volumeRevision = 0;
   private loadRevision = 0;
+  /** Latest user intent, included atomically in every manager Load. */
+  private intendedVolume = 1;
   /** TEMPO 走独立控制通道，不占用 load/seek 的 commandId 队列。 */
   private rateTails: [Promise<void>, Promise<void>] = [Promise.resolve(), Promise.resolve()];
   /** Jog 边缘缓动同样走最新值控制通道；旧 tick 不得积压到下一次表演。 */
@@ -852,6 +869,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private seekTails: [Promise<void>, Promise<void>] = [Promise.resolve(), Promise.resolve()];
   /** TEMPO 与混音手势相同：每个物理 Deck 只保留尚未进入 IPC 的最新值。 */
   private deckRateRevisions: [number, number] = [0, 0];
+  private deckPitchRevisions: [number, number] = [0, 0];
   private deckNudgeRevisions: [number, number] = [0, 0];
   private deckSeekRevisions: [number, number] = [0, 0];
   /** Resize keeps only the latest value; queued toggle edges retain their final parity. */
@@ -896,7 +914,9 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
         (event: TauriEvent<DesktopPlaybackClockRaw>) => acceptPlaybackClock(event.payload),
       );
       const snapshot = await invoke<DesktopPlaybackSnapshotRaw>("playback_initialize");
-      return this.accept(snapshot);
+      const accepted = this.accept(snapshot);
+      this.initialized = true;
+      return accepted;
     })().catch((error) => {
       this.unlisten?.();
       this.unlisten = null;
@@ -905,6 +925,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       this.unlistenClock?.();
       this.unlistenClock = null;
       this.initPromise = null;
+      this.initialized = false;
       throw error;
     });
     return this.initPromise;
@@ -913,6 +934,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private accept(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState {
     if (raw.sequence < this.sequence) return this.snapshot;
     this.sequence = raw.sequence;
+    if (Number.isFinite(raw.volume)) this.intendedVolume = Math.min(1, Math.max(0, raw.volume));
     this.nextCommandId = Math.max(this.nextCommandId, raw.lastCommandId + 1);
     return this.publish(normalizedDesktop(raw));
   }
@@ -922,10 +944,14 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     isCurrent: () => boolean = () => true,
     acceptAcknowledgement = true,
   ): Promise<UnifiedPlayerState> {
-    const operation = this.commandTail.then(async () => {
+    const run = async () => {
       // 只在真正进入 IPC 前检查；旧的后台预热因此不会占用 Rust actor 的命令槽。
       if (!isCurrent()) return this.snapshot;
-      await this.initialize();
+      // Once initialization is complete, avoid an unconditional `await` here: calling invoke in
+      // the original input stack lets a local Load cross the Tauri boundary before React commits
+      // the selected row and detail canvases.
+      if (!this.initialized) await this.initialize();
+      if (!isCurrent()) return this.snapshot;
       const commandId = this.nextCommandId++;
       const ack = await invoke<DesktopCommandAckRaw>("playback_command", { commandId, command });
       // A TEMPO fader acknowledgement contains a full Deck snapshot. Applying dozens of those
@@ -933,11 +959,18 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       // The coordinator emits the authoritative latest rate on its normal 100ms state cadence;
       // continuous controls use that edge while ordinary transport commands still accept at once.
       return acceptAcknowledgement ? this.accept(ack.snapshot) : this.snapshot;
-    });
+    };
+    const startImmediately = this.initialized && this.commandDepth === 0;
+    this.commandDepth += 1;
+    const operation = startImmediately ? run() : this.commandTail.then(run);
     // 失败不能堵死后续播放命令，但调用方仍会收到本次 operation 的原始错误。
     this.commandTail = operation.then(
-      () => undefined,
-      () => undefined,
+      () => {
+        this.commandDepth = Math.max(0, this.commandDepth - 1);
+      },
+      () => {
+        this.commandDepth = Math.max(0, this.commandDepth - 1);
+      },
     );
     return operation;
   }
@@ -1019,7 +1052,11 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.platterSessions = [null, null];
     const revision = ++this.loadRevision;
     return this.command(
-      { type: "load", source: this.source(source) },
+      {
+        type: "load",
+        source: this.source(source),
+        masterVolume: this.intendedVolume,
+      },
       () => revision === this.loadRevision,
     );
   }
@@ -1272,6 +1309,16 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return operation;
   }
 
+  setDeckPitch(deck: 0 | 1, semitones: number): Promise<UnifiedPlayerState> {
+    const bounded = Number.isFinite(semitones) ? Math.max(-12, Math.min(12, semitones)) : 0;
+    const revision = this.deckPitchRevisions[deck] + 1;
+    this.deckPitchRevisions[deck] = revision;
+    return this.control(
+      { type: "setDeckPitch", deck, semitones: bounded },
+      () => this.deckPitchRevisions[deck] === revision,
+    );
+  }
+
   setDeckRates(rates: [number, number]): Promise<UnifiedPlayerState> {
     const revisions: [number, number] = [
       this.deckRateRevisions[0] + 1,
@@ -1407,9 +1454,11 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   setVolume(volume: number): Promise<UnifiedPlayerState> {
+    const bounded = Math.min(1, Math.max(0, volume));
+    this.intendedVolume = bounded;
     const revision = ++this.volumeRevision;
     return this.command(
-      { type: "setVolume", volume: Math.min(1, Math.max(0, volume)) },
+      { type: "setVolume", volume: bounded },
       () => revision === this.volumeRevision,
     );
   }
@@ -1466,7 +1515,9 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     liveClockOffsetMs = null;
     liveClockLastOutputFrame = 0;
     this.initPromise = null;
+    this.initialized = false;
     this.sequence = 0;
+    this.commandDepth = 0;
     this.commandTail = Promise.resolve();
     this.publish(INITIAL_STATE);
   }
@@ -1509,6 +1560,7 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.deckBaseRates = [1, 1];
     const audio = djEngine.frontElement();
     audio.src = source.src;
+    audio.playbackRate = 1;
     audio.load();
     if ((source.position ?? 0) > 0) {
       const seek = () => {
@@ -1526,7 +1578,9 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
       currentTime: source.position ?? 0,
       duration: source.track.duration ?? 0,
       playing: source.autoplay ?? false,
-      rate: source.rate ?? 1,
+      // Browser preview mirrors native Manager ownership: a new song is always neutral even if a
+      // stale transition caller supplied a Deck rate in an older payload.
+      rate: 1,
       error: "",
       decks: INITIAL_STATE.decks,
     });
@@ -1571,6 +1625,7 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
       scratchCacheFailures: 0,
       peakLevel: 0,
       rate: this.deckBaseRates[deck],
+      pitchSemitones: 0,
       appliedRate: this.deckBaseRates[deck],
       audibleRate: this.deckBaseRates[deck],
       targetRateRevision: 0,
@@ -1725,6 +1780,10 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.deckBaseRates[deck] = rate;
     if (!this.deckScratchHeld[deck]) djEngine.deckElement(deck).playbackRate = rate;
     return this.refresh();
+  }
+
+  setDeckPitch(): Promise<UnifiedPlayerState> {
+    return Promise.reject(new Error("浏览器预览不支持实时调性调整"));
   }
 
   setDeckRates(rates: [number, number]): Promise<UnifiedPlayerState> {

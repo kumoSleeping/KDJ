@@ -3,11 +3,10 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
   Disc3,
-  LoaderCircle,
   ListMusic,
+  LoaderCircle,
   RotateCcw,
   SearchX,
 } from "lucide-react";
@@ -49,14 +48,15 @@ import {
   RESULT_COLUMN_PREFS_KEY,
   RESULT_COLUMNS,
   RESULT_LEAD_WIDTH,
+  resultColumnKeysWithData,
   type ResultColumn,
 } from "./resultColumns";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import {
   collectionPageWindow,
   collectionToken,
+  isResolvedCollectionItem,
   RESOLVED_COLLECTION_PAGE_SIZE,
-  type CollectionPageWindow,
 } from "../../lib/searchCollections";
 import { CoverImage } from "../common/VinylPlaceholder";
 import {
@@ -64,6 +64,7 @@ import {
   selectableGroups,
   selectionKey,
 } from "../../lib/resultSelection";
+import { removeLocalStorage } from "../../lib/storageWrite";
 
 export {
   resultRowActionUsesSelection,
@@ -81,13 +82,6 @@ const KIND_LABEL: Record<IntakeKind, string> = {
   unknown: "链接",
   error: "失败",
 };
-
-function isResolvedCollectionItem(item: IntakeItem): boolean {
-  return (
-    item.groups.length > 0 &&
-    (item.kind === "playlist" || item.kind === "artist" || item.kind === "album")
-  );
-}
 
 function previewItem(group: MergedGroup, preferredIndex: number): SongPreviewItem | null {
   if (isVideoGroup(group)) return null;
@@ -125,19 +119,24 @@ export interface ResultTableProps {
   sourceIndex: Record<string, number>;
   /** 最后由用户点开的在线曲目；由工作台持久化以便重启恢复。 */
   inspectedGroup: string | null;
+  /** 已打开合集的当前页；合集标题和翻页入口由顶部工作条统一承载。 */
+  collectionPage: number;
   onToggleSelect(key: string): void;
   onToggleExpand(groupId: string): void;
   onPickSource(groupId: string, index: number): void;
   onToggleItem(index: number): void;
   onToggleItemAll(index: number): void;
   onToggleAll(): void;
-  onDownloadItem(index: number): void;
   /** 单曲显式下载入口（右键菜单等；序号列本身不再放下载键）。 */
   onDownloadGroup(group: MergedGroup): void;
   /** 右键落在现有选区内时，把整组选中结果加入队列。 */
   onDownloadSelected(): void;
   /** 普通单击在线曲目时选中来源并打开右侧详情。 */
   onInspectGroup(group: MergedGroup, sourceIndex: number, groupKey: string): void;
+  /** 当前列表来自可编辑的平台歌单时，右键菜单显示真实远端移除操作。 */
+  onRemoveStreamGroup?(group: MergedGroup, sourceIndex: number): void;
+  removeStreamGroupLabel?: string;
+  removingStreamGroupIds?: ReadonlySet<string>;
   /** 作者/专辑集合必须先展开为歌曲，不能直接入队。 */
   onLoadCollection(collection: CollectionResult): void;
   loadingCollections: Set<string>;
@@ -170,16 +169,19 @@ export function ResultTable({
   collapsedItems,
   sourceIndex,
   inspectedGroup,
+  collectionPage,
   onToggleSelect,
   onToggleExpand,
   onPickSource,
   onToggleItem,
   onToggleItemAll,
   onToggleAll,
-  onDownloadItem,
   onDownloadGroup,
   onDownloadSelected,
   onInspectGroup,
+  onRemoveStreamGroup,
+  removeStreamGroupLabel,
+  removingStreamGroupIds,
   onLoadCollection,
   loadingCollections,
 }: ResultTableProps) {
@@ -191,7 +193,6 @@ export function ResultTable({
   const suppressParentClickRef = useRef<number | null>(null);
   const totalGroups = items.reduce((sum, item) => sum + item.groups.length, 0);
 
-  const [collectionPages, setCollectionPages] = useState<Record<string, number>>({});
   const [colPrefs, setColPrefs] = useState(loadPrefs);
   const colPrefsRef = useRef(colPrefs);
   colPrefsRef.current = colPrefs;
@@ -231,7 +232,11 @@ export function ResultTable({
   const widthFor = (key: string, fallback: string) => colPrefs.widths[key] ?? fallback;
   const orderedColumns = orderByPrefs(RESULT_COLUMNS, colPrefs.order);
   const colIds = orderedColumns.map((column) => column.key);
-  const visibleColumns = orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key));
+  const columnsWithData = resultColumnKeysWithData(items, video);
+  const visibleColumns = orderedColumns.filter(
+    (column) =>
+      !colPrefs.hidden.includes(column.key) && columnsWithData.has(column.key),
+  );
   const leadWidth = widthFor("lead", RESULT_LEAD_WIDTH);
   // 批选列只在 selectionMode 时占满勾选宽；平时留一点左边距，别贴死边缘。
   // 不能继续写死 2.2rem：fixed 布局下 <col> 会盖过 .kd-selection-cell { width: 0 }。
@@ -339,8 +344,12 @@ export function ResultTable({
     );
   }
 
-  // 单条关键词搜索就是普通列表，不套壳——套一层"包"只会平白多一行。
-  const flat = items.length === 1 && items[0].kind === "search";
+  // 单条关键词搜索和单次合集搜索都直接铺列表：查询词与结果总数已经在顶部
+  // 工作条表达，再套一层“查询词 · N 个集合”的父行只会重复语义。
+  const flat =
+    items.length === 1 &&
+    (items[0].kind === "search" ||
+      (items[0].groups.length === 0 && items[0].collections.length > 0));
   // 全选只管得着可下载且尚未入库的行；歌曲与 B 站视频使用同一组选择键。
   const selectableTotal = items.reduce((sum, item) => sum + selectableGroups(item).length, 0);
   const allSelected =
@@ -349,10 +358,11 @@ export function ResultTable({
       selectableGroups(item).every((group) => selected.has(selectionKey(index, group.group_id))),
     );
 
-  const renderCollectionRows = (item: IntakeItem) =>
+  const renderCollectionRows = (item: IntakeItem, indent: boolean) =>
     item.collections.map((collection, collectionIndex) => {
       const token = collectionToken(collection);
       const loadingCollection = loadingCollections.has(token);
+      const collectionLabel = KIND_LABEL[collection.kind];
       const openCollection = () => {
         if (!loadingCollection) onLoadCollection(collection);
       };
@@ -361,9 +371,27 @@ export function ResultTable({
           case "title":
             return (
               <td key={key} className="kd-td-strong" data-col="title" title={collection.title}>
-                <span className="kd-result-title">
-                  <span className="kd-thumb">
-                    <CoverImage src={collection.cover} alt="" loading="lazy" />
+                <span
+                  className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}
+                  data-last={
+                    indent &&
+                    collectionIndex === item.collections.length - 1 &&
+                    item.groups.length === 0
+                      ? "true"
+                      : undefined
+                  }
+                >
+                  <span className="kd-thumb kd-result-collection-cover">
+                    <CoverImage
+                      src={collection.cover}
+                      alt=""
+                      loading="lazy"
+                      fallback={(
+                        <span className="kd-result-collection-cover-fallback" aria-hidden="true">
+                          <ListMusic size={17} strokeWidth={2.15} />
+                        </span>
+                      )}
+                    />
                   </span>
                   <span className="kd-result-title-text">{collection.title}</span>
                 </span>
@@ -390,7 +418,11 @@ export function ResultTable({
           case "sources":
             return (
               <td key={key} data-col="sources">
-                <span className="kd-row kd-muted" style={{ gap: "0.35rem" }}>
+                <span
+                  className="kd-row kd-muted kd-result-collection-source"
+                  data-platform={collection.platform}
+                  style={{ gap: "0.35rem" }}
+                >
                   <PlatformMark id={collection.platform} size={12} />
                   {PLATFORM_LABEL[collection.platform]}
                 </span>
@@ -404,9 +436,10 @@ export function ResultTable({
         <tr
           key={`collection:${token}`}
           data-collection="true"
+          data-collection-kind={collection.kind}
           data-loading={loadingCollection || undefined}
           aria-busy={loadingCollection || undefined}
-          aria-label={`${collection.title}，打开并载入曲目`}
+          aria-label={`${collection.title}，进入${collectionLabel}`}
           tabIndex={0}
           onClick={openCollection}
           onKeyDown={(event) => {
@@ -414,7 +447,7 @@ export function ResultTable({
             event.preventDefault();
             openCollection();
           }}
-          title="打开并载入曲目"
+          title={`进入${collectionLabel}`}
         >
           <td className="kd-selection-cell" />
           <td className="kd-result-lead" data-col="index">
@@ -429,131 +462,6 @@ export function ResultTable({
         </tr>
       );
     });
-
-  const showCollectionPage = (
-    entry: string,
-    requestedPage: number,
-    pageCount: number,
-  ) => {
-    const page = Math.min(pageCount, Math.max(1, requestedPage));
-    setCollectionPages((current) =>
-      current[entry] === page ? current : { ...current, [entry]: page },
-    );
-    // Keep the user's scroll anchor and the pager under the pointer. scrollIntoView used to move
-    // every scrollable ancestor to the collection's first row; with the taller DJ dock that also
-    // pushed the footer pager under an overlay immediately after one click.
-  };
-
-  const renderCollectionPager = (
-    item: IntakeItem,
-    pageWindow: CollectionPageWindow,
-    compact = false,
-  ) => {
-    if (pageWindow.pageCount <= 1) return null;
-    const firstVisible = pageWindow.start + 1;
-    const status = compact
-      ? `${pageWindow.page} / ${pageWindow.pageCount}`
-      : `${pageWindow.page} / ${pageWindow.pageCount} · ${firstVisible}–${pageWindow.end} / ${item.groups.length}`;
-    return (
-      <span
-        className="kd-result-pagination"
-        data-compact={compact || undefined}
-        aria-label={`第 ${pageWindow.page} 页，共 ${pageWindow.pageCount} 页`}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <button
-          type="button"
-          className="kd-result-page-btn"
-          disabled={pageWindow.page <= 1}
-          aria-label="上一页"
-          title="上一页"
-          onClick={() => showCollectionPage(item.entry, pageWindow.page - 1, pageWindow.pageCount)}
-        >
-          <ChevronLeft size={13} aria-hidden="true" />
-        </button>
-        <span className="kd-result-page-status">{status}</span>
-        <button
-          type="button"
-          className="kd-result-page-btn"
-          disabled={pageWindow.page >= pageWindow.pageCount}
-          aria-label="下一页"
-          title="下一页"
-          onClick={() => showCollectionPage(item.entry, pageWindow.page + 1, pageWindow.pageCount)}
-        >
-          <ChevronRight size={13} aria-hidden="true" />
-        </button>
-      </span>
-    );
-  };
-
-  const renderOpenedCollectionHead = (
-    item: IntakeItem,
-    index: number,
-    pickableCount: number,
-    collapsed: boolean,
-    pageWindow: CollectionPageWindow,
-  ) => (
-    <tr
-      data-collection-open="true"
-      data-collapsed={collapsed || undefined}
-      aria-expanded={!collapsed}
-      aria-label={`${item.title || item.entry}，${collapsed ? "展开" : "收起"}曲目`}
-      tabIndex={0}
-      title={collapsed ? "展开曲目" : "收起曲目"}
-      onClick={(event) => {
-        if ((event.target as HTMLElement).closest("button")) return;
-        onToggleItem(index);
-      }}
-      onKeyDown={(event) => {
-        if ((event.target as HTMLElement).closest("button")) return;
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        onToggleItem(index);
-      }}
-    >
-      <td className="kd-selection-cell" />
-      <td className="kd-result-lead" data-col="index">
-        {collapsed ? (
-          <ChevronRight size={13} aria-hidden="true" />
-        ) : (
-          <ChevronDown size={13} aria-hidden="true" />
-        )}
-      </td>
-      <td colSpan={Math.max(1, visibleColumns.length + 1)}>
-        <span className="kd-row" style={{ gap: "0.45rem", minWidth: 0 }}>
-          {item.groups[0]?.cover ? (
-            <span className="kd-thumb">
-              <CoverImage src={item.groups[0].cover} alt="" loading="lazy" />
-            </span>
-          ) : null}
-          {item.platform ? <PlatformMark id={item.platform} size={13} /> : null}
-          <strong className="kd-truncate" title={item.title || item.entry}>
-            {item.title || item.entry}
-          </strong>
-          {pickableCount > 0 ? (
-            <button
-              type="button"
-              className="kd-result-download-inline"
-              aria-label={`下载「${item.title || item.entry}」全部曲目`}
-              title="下载全部曲目"
-              onClick={(event) => {
-                event.stopPropagation();
-                onDownloadItem(index);
-              }}
-            >
-              下载
-            </button>
-          ) : null}
-          <span className="kd-faint">
-            {item.groups.length} {item.platform === "bilibili" ? "个视频" : "首"}
-          </span>
-          <span className="kd-result-package-actions" style={{ marginLeft: "auto" }}>
-            {!collapsed ? renderCollectionPager(item, pageWindow, true) : null}
-          </span>
-        </span>
-      </td>
-    </tr>
-  );
 
   const renderColumnHead = (column: ResultColumn) => {
     const colWidth = widthFor(column.key, column.width);
@@ -660,11 +568,15 @@ export function ResultTable({
           )}
           {items.map((item, index) => {
             const directCollection = isResolvedCollectionItem(item);
+            const collectionKind =
+              item.kind === "playlist" || item.kind === "artist" || item.kind === "album"
+                ? item.kind
+                : null;
             const itemFlat = flat || directCollection;
             const pageWindow = directCollection
               ? collectionPageWindow(
                   item.groups.length,
-                  collectionPages[item.entry],
+                  collectionPage,
                   RESOLVED_COLLECTION_PAGE_SIZE,
                 )
               : null;
@@ -679,7 +591,8 @@ export function ResultTable({
                   .filter(isResolvedCollectionItem)
                   .reduce((sum, previous) => sum + previous.groups.length, 0)
               : 0;
-            const collapsed = collapsedItems.has(index);
+            // 合集详情已经是独立页面，不再有可折叠的父行；普通批量包仍保留折叠。
+            const collapsed = !directCollection && collapsedItems.has(index);
             const pickable = selectableGroups(item);
             const itemSelected =
               pickable.length > 0 &&
@@ -722,8 +635,7 @@ export function ResultTable({
                   }];
                 });
               };
-              // 视频行横跨整张表，所以它不吃 indent/last 那套导引线——
-              // 一条挂在两倍高的块上的肘线只会显得断掉
+              // 视频与歌曲共用父包层级；分 P 若展开，会在视频自身的层级上再退一层。
               return isVideoGroup(group) ? (
                     <VideoResultRow
                       key={group.group_id}
@@ -732,9 +644,13 @@ export function ResultTable({
                       totalColumns={totalColumns}
                       layout={layout}
                       rowNumber={flatRowOffset + position + 1}
+                      indent={!itemFlat}
+                      last={position === item.groups.length - 1}
                       selectable={group.sources.some((source) => source.platform !== "local")}
                       selected={selected.has(selectionKey(index, group.group_id))}
                       selectionMode={selectionMode}
+                      expanded={expandedGroups.has(group.group_id)}
+                      onToggleExpand={() => onToggleExpand(group.group_id)}
                       onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
                       onEnterSelection={() => onSelectionModeChange(true)}
                       onDownloadSelected={
@@ -745,6 +661,13 @@ export function ResultTable({
                           ? onDownloadSelected
                           : undefined
                       }
+                      onRemoveFromStreamPlaylist={
+                        onRemoveStreamGroup
+                          ? () => onRemoveStreamGroup(group, 0)
+                          : undefined
+                      }
+                      removeFromStreamPlaylistLabel={removeStreamGroupLabel}
+                      removingFromStreamPlaylist={removingStreamGroupIds?.has(group.group_id)}
                     />
                   ) : (
                     <MergedGroupRow
@@ -783,8 +706,22 @@ export function ResultTable({
                         if (resultRowActionUsesSelection(selected, groupKey)) onDownloadSelected();
                         else onDownloadGroup(group);
                       }}
+                      onRemoveFromStreamPlaylist={
+                        onRemoveStreamGroup
+                          ? () => onRemoveStreamGroup(
+                              group,
+                              sourceIndex[group.group_id] ?? group.best_source_index,
+                            )
+                          : undefined
+                      }
+                      removeFromStreamPlaylistLabel={removeStreamGroupLabel}
+                      removingFromStreamPlaylist={removingStreamGroupIds?.has(group.group_id)}
                       onDragStart={(event) => {
-                        writeSearchSourcesDrag(event.dataTransfer, dragSources());
+                        writeSearchSourcesDrag(
+                          event.dataTransfer,
+                          dragSources(),
+                          event.currentTarget,
+                        );
                       }}
                       onDragEnd={() => endSearchDrag()}
                       onPointerDragStart={(event, onActivated) =>
@@ -798,38 +735,25 @@ export function ResultTable({
                     />
                   );
             });
-            // 已经解析成真实曲目的远程集合保持普通曲目行，只在第一行上方留一条
-            // 当前集合标题。它不是可折叠父包，不画树枝，也不会把歌曲再次套层级。
+            // 已解析合集是独立详情页：这里仅渲染当前页歌曲，不再在表内重复合集头、
+            // 下载和分页。它们统一由顶部工作条承载。
             const rows =
               !collapsed ? (
                 <>
-                  {renderCollectionRows(item)}
+                  {renderCollectionRows(item, !itemFlat)}
                   {groupRows}
-                  {directCollection && pageWindow && pageWindow.pageCount > 1 ? (
-                    <tr data-collection-pagination="true">
-                      <td colSpan={totalColumns}>
-                        {renderCollectionPager(item, pageWindow)}
-                      </td>
-                    </tr>
-                  ) : null}
                 </>
               ) : null;
 
             if (itemFlat) {
-              return (
-                <Fragment key={item.entry}>
-                  {directCollection && pageWindow
-                    ? renderOpenedCollectionHead(item, index, pickable.length, collapsed, pageWindow)
-                    : null}
-                  {rows}
-                </Fragment>
-              );
+              return <Fragment key={item.entry}>{rows}</Fragment>;
             }
 
             return (
               <Fragment key={`${index}:${item.entry}`}>
                 <tr
                   data-tree="parent"
+                  data-collection-kind={collectionKind ?? undefined}
                   data-selecting={selectionMode ? "true" : undefined}
                   onClick={() => {
                     if (suppressParentClickRef.current === index) {
@@ -893,35 +817,33 @@ export function ResultTable({
                     )}
                   </td>
                   <td colSpan={Math.max(1, visibleColumns.length + 1)}>
-                    <span className="kd-row" style={{ gap: "0.45rem", minWidth: 0 }}>
-                      {item.kind === "playlist" || item.kind === "artist" || item.kind === "album" ? (
-                        <ListMusic size={13} className="kd-muted" />
-                      ) : (
+                    <span className="kd-result-package-head">
+                      {collectionKind && item.groups[0]?.cover ? (
+                        <span className="kd-thumb kd-result-collection-cover">
+                          <CoverImage src={item.groups[0].cover} alt="" loading="lazy" />
+                        </span>
+                      ) : null}
+                      {!collectionKind ? (
                         <span
                           className="kd-chip"
                           data-tone={item.kind === "error" ? "danger" : "theme"}
                         >
                           {KIND_LABEL[item.kind]}
                         </span>
-                      )}
+                      ) : null}
                       <strong className="kd-truncate" title={item.title || item.entry}>
                         {item.title || item.entry}
                       </strong>
-                      {(item.kind === "playlist" || item.kind === "artist" || item.kind === "album") &&
-                        pickable.length > 0 ? (
-                          <button
-                            type="button"
-                            className="kd-result-download-inline"
-                            aria-label={`下载「${item.title || item.entry}」全部曲目`}
-                            title="下载全部曲目"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onDownloadItem(index);
-                            }}
-                          >
-                            下载
-                          </button>
-                        ) : null}
+                      {collectionKind && item.platform ? (
+                        <span
+                          className="kd-result-collection-platform"
+                          data-platform={item.platform}
+                          title={`来源：${PLATFORM_LABEL[item.platform] ?? item.platform}`}
+                          aria-label={`来源：${PLATFORM_LABEL[item.platform] ?? item.platform}`}
+                        >
+                          <PlatformMark id={item.platform} size={12} />
+                        </span>
+                      ) : null}
                       {item.error && (
                         <span
                           className="kd-row kd-truncate"
@@ -943,9 +865,13 @@ export function ResultTable({
                           失败
                         </span>
                       ))}
-                      <span className="kd-result-package-actions" style={{ marginLeft: "auto" }}>
-                        {item.collections.length > 0 ? `${item.collections.length} 个集合` : ""}
-                        {item.groups.length > 0 ? `${item.collections.length > 0 ? " · " : ""}${item.groups.length} 首` : ""}
+                      <span className="kd-result-package-actions">
+                        {(item.collections.length > 0 || item.groups.length > 0) && (
+                          <span className="kd-result-collection-count">
+                            {item.collections.length > 0 ? `${item.collections.length} 个集合` : ""}
+                            {item.groups.length > 0 ? `${item.collections.length > 0 ? " · " : ""}${item.groups.length} 首` : ""}
+                          </span>
+                        )}
                       </span>
                     </span>
                   </td>
@@ -959,18 +885,25 @@ export function ResultTable({
       {colMenu && (
         <ContextMenu x={colMenu.x} y={colMenu.y} onClose={() => setColMenu(null)}>
           {orderedColumns.map((column) => {
-            const isHidden = colPrefs.hidden.includes(column.key);
+            const hasData = columnsWithData.has(column.key);
+            const isHidden = colPrefs.hidden.includes(column.key) || !hasData;
             const locked = column.hideable === false;
             return (
               <button
                 key={column.key}
                 type="button"
-                disabled={locked}
-                title={locked ? "标题列不能藏" : undefined}
+                disabled={locked || !hasData}
+                title={
+                  locked
+                    ? "标题列不能藏"
+                    : !hasData
+                      ? `当前结果没有${column.label}信息`
+                      : undefined
+                }
                 onClick={() =>
                   saveColPrefs({
                     ...colPrefs,
-                    hidden: isHidden
+                    hidden: colPrefs.hidden.includes(column.key)
                       ? colPrefs.hidden.filter((key) => key !== column.key)
                       : [...colPrefs.hidden, column.key],
                   })
@@ -984,7 +917,7 @@ export function ResultTable({
           <button
             type="button"
             onClick={() => {
-              localStorage.removeItem(RESULT_COLUMN_PREFS_KEY);
+              removeLocalStorage(RESULT_COLUMN_PREFS_KEY);
               const defaults = loadPrefs();
               colPrefsRef.current = defaults;
               setColPrefs(defaults);

@@ -1,11 +1,12 @@
 //! 联网冒烟：cargo run -p kdj-providers --example smoke_youtube -- <关键词或链接>
 use std::sync::Arc;
 
+use futures_util::StreamExt as _;
 use kdj_core::models::{Quality, VideoDownloadRequest};
 use kdj_providers::provider::noop_progress;
 use kdj_providers::{
     youtube::YoutubeProvider, youtubemusic::auth::YoutubeAuth, MusicProvider, ProviderContext,
-    ProviderLiveSettings,
+    ProviderLiveSettings, VideoPreviewTrack,
 };
 
 #[tokio::main]
@@ -59,6 +60,21 @@ async fn main() -> anyhow::Result<()> {
                 response.title,
                 response.sources.len()
             );
+        }
+        if args.iter().any(|arg| arg == "--preview") {
+            for track in [VideoPreviewTrack::Video, VideoPreviewTrack::Audio] {
+                let mut preview = provider
+                    .preview_stream_at_height(&input, 720, track, Some("bytes=0-65535"))
+                    .await?;
+                let mut bytes = 0usize;
+                while let Some(chunk) = preview.body.next().await {
+                    bytes += chunk?.len();
+                }
+                println!(
+                    "preview {track:?}: HTTP {} | {} | {:?} | {} bytes",
+                    preview.status, preview.content_type, preview.codec, bytes
+                );
+            }
         }
         if args.iter().any(|arg| arg == "--download") {
             let path = provider

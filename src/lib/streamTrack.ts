@@ -7,10 +7,15 @@
 import { api } from "./api";
 import { thumbUrl } from "./format";
 import {
-  isOneLibraryPlaybackTrack,
   usesRemotePlaybackSource,
 } from "./playbackTrackSource";
-import { discardLocalStorageWrite, writeLocalStorageSoon } from "./storageWrite";
+import {
+  discardLocalStorageWrite,
+  readLocalStorage,
+  removeLocalStorage,
+  writeLocalStorageNow,
+  writeLocalStorageSoon,
+} from "./storageWrite";
 import type { SongSource, Track } from "../types";
 
 export type StreamKind = "song" | "video";
@@ -37,6 +42,7 @@ interface StreamMeta {
 const STREAM_TRACK_CACHE_LIMIT = 1024;
 const metaById = new Map<number, StreamMeta>();
 const trackById = new Map<number, Track>();
+const metaListeners = new Map<number, Set<() => void>>();
 let nextId = -1;
 let publishedStreamTrackId: number | null = null;
 
@@ -54,6 +60,15 @@ const NATIVE_LYRICS_CLOCK_SEEK_EPSILON_SEC = 0.75;
 /** 给独立歌词 WebView 读：主窗写入当前试听曲目快照。 */
 const PUBLISHED_STREAM_KEY = "kd-active-stream-track";
 const PUBLISHED_STREAM_PLAYBACK_KEY = "kd-active-stream-playback";
+const PUBLISHED_STREAM_VERSION = 1;
+const MAX_PUBLISHED_STREAM_BYTES = 512 * 1024;
+
+interface PublishedStreamSnapshot {
+  version: 1;
+  track: Track;
+  /** 只保存搜索结果元数据，不保存已签名/短效媒体 URL；重启后必须重新向 provider 解析。 */
+  source: SongSource;
+}
 
 export interface PublishedStreamPlayback {
   trackId: number;
@@ -66,6 +81,129 @@ export interface PublishedStreamPlayback {
 export interface PublishedStreamPlaybackEvent {
   track: Track;
   playback: PublishedStreamPlayback;
+}
+
+function object(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function boundedText(value: unknown, max = 16_384): value is string {
+  return typeof value === "string" && value.length <= max;
+}
+
+function validRestoredTrack(value: unknown): value is Track {
+  const track = object(value);
+  return Boolean(
+    track &&
+      typeof track.id === "number" &&
+      Number.isSafeInteger(track.id) &&
+      track.id < 0 &&
+      track.id >= -1_000_000_000 &&
+      boundedText(track.path) &&
+      boundedText(track.filename) &&
+      boundedText(track.title) &&
+      boundedText(track.artist) &&
+      boundedText(track.album) &&
+      boundedText(track.format, 64) &&
+      boundedText(track.source_platform, 64) &&
+      boundedText(track.source_key),
+  );
+}
+
+function validRestoredSource(value: unknown): value is SongSource {
+  const source = object(value);
+  const platform = source?.platform;
+  return Boolean(
+    source &&
+      (platform === "wyy" ||
+        platform === "qqm" ||
+        platform === "soundcloud" ||
+        platform === "ytm" ||
+        platform === "youtube" ||
+        platform === "bilibili") &&
+      boundedText(source.key) &&
+      source.key.length > 0 &&
+      boundedText(source.title) &&
+      Array.isArray(source.artists) &&
+      source.artists.length <= 64 &&
+      source.artists.every((artist) => boundedText(artist, 4_096)) &&
+      boundedText(source.album) &&
+      (source.duration === null ||
+        (typeof source.duration === "number" &&
+          Number.isFinite(source.duration) &&
+          source.duration >= 0)) &&
+      boundedText(source.cover, 32_768) &&
+      (source.max_quality === null ||
+        source.max_quality === "flac" ||
+        source.max_quality === "320" ||
+        source.max_quality === "128") &&
+      typeof source.vip === "boolean" &&
+      Boolean(object(source.payload)),
+  );
+}
+
+/** 兼容升级前只存 Track 的快照；能从稳定平台键重建的来源仍可重新解析。 */
+function legacySource(track: Track): SongSource | null {
+  if (
+    !["wyy", "qqm", "soundcloud", "ytm", "youtube", "bilibili"].includes(
+      track.source_platform,
+    ) ||
+    !track.source_key
+  ) return null;
+  return {
+    platform: track.source_platform as SongSource["platform"],
+    key: track.source_key,
+    title: track.title || track.filename,
+    artists: track.artist ? track.artist.split(/\s*[,，/]\s*/).filter(Boolean) : [],
+    album: track.album || "",
+    duration: track.duration,
+    cover: "",
+    max_quality: null,
+    vip: false,
+    payload: track.source_platform === "ytm" ? { video_id: track.source_key } : {},
+  };
+}
+
+export function publishedStreamSnapshot(value: unknown): PublishedStreamSnapshot | null {
+  const record = object(value);
+  if (record?.version === PUBLISHED_STREAM_VERSION) {
+    if (!validRestoredTrack(record.track) || !validRestoredSource(record.source)) return null;
+    if (
+      record.track.source_platform !== record.source.platform ||
+      record.track.source_key !== record.source.key
+    ) return null;
+    return {
+      version: PUBLISHED_STREAM_VERSION,
+      track: record.track,
+      source: record.source,
+    };
+  }
+  if (!validRestoredTrack(value)) return null;
+  const source = legacySource(value);
+  return source ? { version: PUBLISHED_STREAM_VERSION, track: value, source } : null;
+}
+
+function registerRestoredStreamTrack(track: Track, source: SongSource): void {
+  const existing = metaById.get(track.id);
+  if (!existing) {
+    metaById.set(track.id, {
+      url: "",
+      waveformToken: "",
+      cover: source.cover || "",
+      kind: "song",
+      sourceKey: `${source.platform}:${source.key}`,
+      source,
+      nextTrack: null,
+      cacheRetryUsed: false,
+      preload: null,
+    });
+  }
+  trackById.set(track.id, track);
+  nextId = Math.min(nextId, track.id - 1);
+  publishedStreamTrackId = track.id;
+  pruneStreamTracks();
 }
 
 function monotonicNow(): number {
@@ -162,16 +300,22 @@ export function publishStreamTrack(track: Track | null): void {
   }
   if (publishedStreamTrackId !== null) touchStreamTrack(publishedStreamTrackId);
   pruneStreamTracks();
-  try {
-    if (track && track.id < 0) {
-      localStorage.setItem(PUBLISHED_STREAM_KEY, JSON.stringify(track));
-    } else {
-      discardLocalStorageWrite(PUBLISHED_STREAM_PLAYBACK_KEY);
-      localStorage.removeItem(PUBLISHED_STREAM_KEY);
-      localStorage.removeItem(PUBLISHED_STREAM_PLAYBACK_KEY);
+  if (track && track.id < 0) {
+    const source = streamMeta(track)?.source;
+    if (source) {
+      writeLocalStorageNow(
+        PUBLISHED_STREAM_KEY,
+        JSON.stringify({
+          version: PUBLISHED_STREAM_VERSION,
+          track,
+          source,
+        } satisfies PublishedStreamSnapshot),
+      );
     }
-  } catch {
-    // localStorage 满了也不挡播放。
+  } else {
+    discardLocalStorageWrite(PUBLISHED_STREAM_PLAYBACK_KEY);
+    removeLocalStorage(PUBLISHED_STREAM_KEY);
+    removeLocalStorage(PUBLISHED_STREAM_PLAYBACK_KEY);
   }
   notifyStreamTrackChanged(track && track.id < 0 ? track : null);
 }
@@ -213,10 +357,22 @@ export function publishStreamTrackState(
 export function readPublishedStreamTrack(trackId?: number): Track | null {
   if (trackId !== undefined && trackId >= 0) return null;
   try {
-    const raw: unknown = JSON.parse(localStorage.getItem(PUBLISHED_STREAM_KEY) ?? "null");
-    if (!raw || typeof raw !== "object") return null;
-    const track = raw as Track;
-    return track.id < 0 && (trackId === undefined || track.id === trackId) ? track : null;
+    const stored = readLocalStorage(PUBLISHED_STREAM_KEY);
+    if (!stored || stored.length > MAX_PUBLISHED_STREAM_BYTES) {
+      if (stored) removeLocalStorage(PUBLISHED_STREAM_KEY);
+      return null;
+    }
+    const raw: unknown = JSON.parse(stored);
+    const snapshot = publishedStreamSnapshot(raw);
+    if (!snapshot) {
+      removeLocalStorage(PUBLISHED_STREAM_KEY);
+      removeLocalStorage(PUBLISHED_STREAM_PLAYBACK_KEY);
+      return null;
+    }
+    const { track, source } = snapshot;
+    if (trackId !== undefined && track.id !== trackId) return null;
+    registerRestoredStreamTrack(track, source);
+    return track;
   } catch {
     return null;
   }
@@ -224,9 +380,7 @@ export function readPublishedStreamTrack(trackId?: number): Track | null {
 
 export function readPublishedStreamPlayback(): PublishedStreamPlayback | null {
   try {
-    const raw: unknown = JSON.parse(
-      localStorage.getItem(PUBLISHED_STREAM_PLAYBACK_KEY) ?? "null",
-    );
+    const raw: unknown = JSON.parse(readLocalStorage(PUBLISHED_STREAM_PLAYBACK_KEY) ?? "null");
     if (!raw || typeof raw !== "object") return null;
     const value = raw as Partial<PublishedStreamPlayback>;
     const track = readPublishedStreamTrack();
@@ -271,16 +425,40 @@ export function streamWaveformToken(track: Track | null | undefined): string {
   return streamMeta(track)?.waveformToken || "";
 }
 
+/**
+ * Provider resolution mutates the short-lived side table rather than the Track object. Expose a
+ * tiny external-store edge so React does not have to rely on an unrelated playback clock render
+ * before it notices that the waveform token has arrived.
+ */
+export function subscribeStreamMeta(trackId: number, listener: () => void): () => void {
+  if (trackId >= 0) return () => {};
+  let current = metaListeners.get(trackId);
+  if (!current) {
+    current = new Set();
+    metaListeners.set(trackId, current);
+  }
+  current.add(listener);
+  return () => {
+    current?.delete(listener);
+    if (!current?.size) metaListeners.delete(trackId);
+  };
+}
+
+export function streamWaveformTokenById(trackId: number): string {
+  return trackId < 0 ? metaById.get(trackId)?.waveformToken || "" : "";
+}
+
+function notifyStreamMeta(trackId: number): void {
+  for (const listener of metaListeners.get(trackId) ?? []) listener();
+}
+
 export function streamCoverUrl(track: Track): string {
   const cover = streamMeta(track)?.cover ?? "";
   return cover ? thumbUrl(cover, 96) : "";
 }
 
-/** 主播放条 / DJ 引擎装 src 时用：在线流优先，否则走曲库音频接口。 */
+/** 主播放条装 src 时用：在线流优先，否则走曲库音频接口。 */
 export function mediaUrlForTrack(track: Track): string {
-  // OneLibrary 的 path 已是挂载卷里的真实文件。把它的负数临时 id 交给
-  // /api/library/audio/:id 只会查一条不存在的 KDJ 曲库记录并返回 404。
-  if (isOneLibraryPlaybackTrack(track)) return track.path;
   // 未解析完的在线占位曲目同样没有曲库音频；不能退回 /library/audio/:负id。
   if (isStreamTrack(track)) return streamMediaUrl(track) ?? "";
   return api.audioUrl(track.id);
@@ -375,10 +553,15 @@ export function streamNextTrack(track: Track | null | undefined): Track | null {
   return streamMeta(track)?.nextTrack ?? null;
 }
 
-/** 媒体 decode/读取失败时领取一次强制回源资格；返回 null 表示已经重试过。 */
+/**
+ * 媒体 decode/读取失败时领取一次强制回源资格；返回 null 表示不允许自动重试。
+ * YouTube Music 的 proof、Player、SABR 和音频代理是一条原子链路。失败时必须暴露
+ * 原因，不能靠重新签发 proof 掩盖首轮失败；用户仍可从错误界面显式重新播放。
+ */
 export function claimStreamCacheRetry(track: Track): SongSource | null {
   const meta = streamMeta(track);
   if (!meta || meta.kind !== "song" || !meta.source || meta.cacheRetryUsed) return null;
+  if (meta.source.platform === "ytm") return null;
   meta.cacheRetryUsed = true;
   return meta.source;
 }
@@ -403,6 +586,7 @@ export function preloadStreamTrack(track: Track): Promise<void> {
       if (!url) throw new Error("平台没有返回可播放地址");
       meta.url = url;
       meta.waveformToken = waveformToken || "";
+      notifyStreamMeta(track.id);
     })
     .finally(() => {
       if (meta.preload === request) meta.preload = null;
@@ -461,5 +645,6 @@ function pruneStreamTracks(): void {
     if (protectedIds.has(id)) continue;
     metaById.delete(id);
     trackById.delete(id);
+    notifyStreamMeta(id);
   }
 }

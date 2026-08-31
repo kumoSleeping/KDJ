@@ -1,7 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { FolderOpen, Pencil, Play, Plus, RotateCcw, Search, Star, Trash2, Upload } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
+import { Pencil, Plus, RotateCcw, Search, Star, Upload } from "lucide-react";
 import { api } from "../../lib/api";
-import { getBridge } from "../../lib/bridge";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isVideoTrack } from "../../lib/format";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import { normalizePriority, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
@@ -26,7 +32,15 @@ import { useVideoPip } from "../../lib/videoPip";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { VjSearchPanel } from "./VjSearchPanel";
 import { pointPatch, Waveform } from "./Waveform";
-import { EnergyMeter, playTrack } from "./TrackTable";
+import { EnergyMeter } from "./TrackTable";
+import { NowPlayingControlPanel } from "../player/NowPlayingControlPanel";
+import { usePlaybackPrefs } from "../../lib/playbackPrefs";
+import { PLATFORM_LABEL } from "../download/MergedGroupRow";
+import { PlatformMark } from "../download/PlatformMark";
+import {
+  LocalTrackCacheFacts,
+  localDownloadPlatform,
+} from "../player/LocalTrackCacheFacts";
 
 /** PlayerBar 播放时广播的位置，用来在节拍网格上画播放头。 */
 export const POSITION_EVENT = "kd:position";
@@ -166,10 +180,11 @@ function buildPatch(track: Track, draft: Draft): TrackPatch {
 
 export function TrackDetail({ track }: { track: Track }) {
   const settings = useAppStore((state) => state.settings);
+  const detailWaveformVisible = usePlaybackPrefs((state) => state.detailWaveformVisible);
+  const detailControlVisible = usePlaybackPrefs((state) => state.detailControlVisible);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
   const setCover = useLibraryStore((state) => state.setCover);
   const rereadTags = useLibraryStore((state) => state.rereadTags);
-  const removeTrack = useLibraryStore((state) => state.removeTrack);
   const selectTrack = useLibraryStore((state) => state.selectTrack);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const keyFilter = useLibraryStore((state) => state.filter.key);
@@ -186,17 +201,14 @@ export function TrackDetail({ track }: { track: Track }) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Draft>(() => toDraft(track));
-  /**
-   * 封面 URL 的 cache-buster。后端给封面带了 `Cache-Control: max-age`，
-   * 换完图 URL 不变的话浏览器会一直拿缓存里那张旧的——表现是"换封面没反应"。
-   */
-  const [coverKey, setCoverKey] = useState("");
   /** 没封面时后端 404。记下来换成一个可以点的占位块，而不是留一个破图标。 */
   const [hasCover, setHasCover] = useState(true);
+  /** 冷读内嵌封面时保留可见反馈，避免把尚未返回误看成“没有封面”。 */
+  const [coverLoading, setCoverLoading] = useState(true);
   const [dropping, setDropping] = useState(false);
   /**
-   * 这一栏里所有操作（在文件夹中显示 / 移出曲库 / 评分 / 保存元数据 / 换封面）的失败原因。
-   * 就摆在按钮那一排底下——这些操作失败时界面上都是"什么都没发生"，
+   * 这一栏里所有操作（评分 / 保存元数据 / 换封面）的失败原因。
+   * 就摆在详情摘要底下——这些操作失败时界面上都是"什么都没发生"，
    * 不说一声用户只会以为按钮点空了。
    */
   const [notice, setNotice] = useState("");
@@ -226,8 +238,8 @@ export function TrackDetail({ track }: { track: Track }) {
     setDraft(toDraft(track));
     setPosition(null);
     setNotice("");
-    setCoverKey("");
     setHasCover(true);
+    setCoverLoading(true);
     setCoverSearchBusy(false);
     setCoverCandidates([]);
     coverSearchEpochRef.current += 1;
@@ -290,7 +302,7 @@ export function TrackDetail({ track }: { track: Track }) {
         const file = await load();
         await setCover(track.id, file);
         setHasCover(true);
-        setCoverKey(String(Date.now()));
+        setCoverLoading(true);
         return true;
       } catch (error: unknown) {
         setNotice(`${label}失败：${(error as Error).message}`);
@@ -471,13 +483,30 @@ export function TrackDetail({ track }: { track: Track }) {
     finishTrackDrop();
   };
 
-  const coverUrl = api.coverUrl(track.id, coverKey);
+  // 列表、详情与播放器必须共享同一 cache key。modified_at 在换封面后由后端更新，
+  // 既能复用已经加载的缩略图，也能在图片变化时可靠失效。
+  const coverUrl = api.coverUrl(track.id, track.modified_at);
+  useEffect(() => {
+    setHasCover(true);
+    setCoverLoading(true);
+  }, [coverUrl]);
+  const downloadPlatform = localDownloadPlatform(track);
+  const fileFactsText = [
+    downloadPlatform ? PLATFORM_LABEL[downloadPlatform] : "",
+    track.format.toUpperCase() || DASH,
+    track.bitrate ? `${track.bitrate} kbps` : "",
+    formatDuration(track.duration),
+    `文件 ${formatBytes(track.size)}`,
+  ].filter(Boolean).join(" ");
   const bpmConfPct =
     track.bpm_confidence !== null ? Math.round(track.bpm_confidence * 100) : null;
 
   return (
     <div className="kd-col kd-track-detail" style={{ gap: "0.6rem", padding: "0.7rem" }}>
-      <div className="kd-row" style={{ gap: "0.6rem", alignItems: "flex-start" }}>
+      <div
+        className="kd-row kd-track-detail-hero"
+        style={{ gap: "0.6rem", alignItems: "flex-start" }}
+      >
         <div className="kd-cover-edit-stack">
           <div
             className="kd-cover kd-cover-edit"
@@ -490,8 +519,8 @@ export function TrackDetail({ track }: { track: Track }) {
           data-kd-track-id={track.id}
           {...{ [TRACK_COVER_DROP_TARGET_ATTR]: "true" }}
           style={{
-            width: 76,
-            height: 76,
+            width: 88,
+            height: 88,
             cursor: "pointer",
             display: "grid",
             placeItems: "center",
@@ -512,14 +541,26 @@ export function TrackDetail({ track }: { track: Track }) {
           onDrop={coverDrop}
         >
           {hasCover ? (
-            <img
-              src={coverUrl}
-              alt=""
-              draggable={false}
-              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-              // 没封面时后端返回 404
-              onError={() => setHasCover(false)}
-            />
+            <>
+              {coverLoading ? (
+                <span className="kd-cover-loading-placeholder" aria-hidden="true">
+                  <VinylPlaceholder />
+                </span>
+              ) : null}
+              <img
+                src={coverUrl}
+                alt=""
+                className="kd-cover-edit-image"
+                draggable={false}
+                data-loading={coverLoading ? "true" : undefined}
+                onLoad={() => setCoverLoading(false)}
+                // 没封面时后端返回 404
+                onError={() => {
+                  setCoverLoading(false);
+                  setHasCover(false);
+                }}
+              />
+            </>
           ) : (
             <VinylPlaceholder />
           )}
@@ -527,7 +568,7 @@ export function TrackDetail({ track }: { track: Track }) {
               <span className="kd-cover-plus" aria-hidden="true">
                 <Plus size={14} strokeWidth={2.5} />
               </span>
-            )}
+          )}
           </div>
         </div>
         <input
@@ -541,67 +582,50 @@ export function TrackDetail({ track }: { track: Track }) {
             event.target.value = "";
           }}
         />
-        <div style={{ minWidth: 0 }}>
+        <div className="kd-track-detail-summary" style={{ minWidth: 0 }}>
           <div className="kd-truncate" style={{ fontWeight: 700, fontSize: "var(--kd-size-lg)" }}>
             {track.title || track.filename}
           </div>
           <div className="kd-truncate kd-muted">{track.artist || DASH}</div>
           <div className="kd-truncate kd-faint">{track.album || DASH}</div>
-          <div className="kd-row kd-faint" style={{ gap: "0.4rem", fontSize: "var(--kd-size-xs)" }}>
-            <span>{track.format.toUpperCase() || DASH}</span>
-            {track.bitrate ? <span>{track.bitrate} kbps</span> : null}
-            <span>{formatDuration(track.duration)}</span>
-            <span>{formatBytes(track.size)}</span>
+          <div
+            className="kd-faint kd-track-detail-local-facts"
+            style={{ fontSize: "var(--kd-size-xs)" }}
+          >
+            <div className="kd-track-detail-file-facts" title={fileFactsText}>
+              {downloadPlatform ? (
+                <PlatformMark id={downloadPlatform} size={13} branded />
+              ) : null}
+              <span className="kd-track-detail-file-facts-copy">{fileFactsText}</span>
+            </div>
+            <LocalTrackCacheFacts track={track} />
           </div>
         </div>
-      </div>
-
-      <div className="kd-row" style={{ flexWrap: "wrap", gap: "0.3rem" }}>
-        <Button size="sm" variant="ghost" onClick={() => playTrack(track)}>
-          <Play size={12} />
-          播放
-        </Button>
-        {/* 分析和写标签都不再摆按钮：分析由后台自动跑（播放/选中会插队），
-            写标签跟着分析一起做。手动按钮只会让人以为"不点就不会发生"。 */}
-        {/* 带上文字。它原来是个光秃秃的文件夹图标，用户直接问"这个有什么用"——
-            一个说不出自己是干嘛的图标按钮，等于没有这个功能。 */}
-        <Button
-          size="sm"
-          variant="ghost"
-          title="在系统的文件管理器里定位这个文件"
-          disabled={busy}
-          // 走 run() 而不是裸调用：直接 fire-and-forget 时错误不会进详情栏，
-          // 桥接没就位或系统调用失败时被 `?.` 和 `void` 一起吞掉，
-          // 表现就是"这个按钮点了没反应"。
-          onClick={run("在文件夹中显示", () => getBridge().revealPath(track.path))}
-        >
-          <FolderOpen size={12} />
-          定位
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="kd-detail-delete"
-          disabled={busy}
-          title="只移出曲库，不删文件"
-          onClick={run("移出曲库", () => removeTrack(track.id, false))}
-        >
-          <Trash2 size={12} />
-          删除
-        </Button>
       </div>
 
       <InlineNotice text={notice} onDismiss={() => setNotice("")} />
 
       {/* 这几块的顺序用户可以拖着调，长期记住——整理曲库时想先看元数据，
           排 set 时想先看接下一首，与其替他选一个，不如让他拖一次然后不用再想。 */}
-      <PanelStack storageKey="kd-detail-panels">
-      {isVideoTrack(track.format) && !pipOwnsVideo && (
-        <Panel key="video" heading="Video" padded={false} dense>
-          <LocalVideoPlayer track={track} />
-        </Panel>
-      )}
-      <Panel
+      <PanelStack
+        storageKey="kd-detail-panels"
+        defaultFirstIds={["now-playing-control"]}
+      >
+        {isVideoTrack(track.format) && !pipOwnsVideo && (
+          <Panel key="video" heading="Video" padded={false} dense>
+            <LocalVideoPlayer track={track} />
+          </Panel>
+        )}
+        {detailControlVisible ? (
+          <NowPlayingControlPanel
+            key="now-playing-control"
+            track={track}
+            keyNotation={settings?.key_notation ?? "camelot"}
+            filterResonance={settings?.filter_resonance ?? "high"}
+            onError={setNotice}
+          />
+        ) : null}
+        <Panel
         key="metadata"
         heading="Metadata"
         padded
@@ -612,8 +636,7 @@ export function TrackDetail({ track }: { track: Track }) {
               <Button size="sm" variant="ghost" disabled={busy} onClick={closeMetadataEditor}>
                 取消
               </Button>
-              {/* 不用 primary/danger：这一栏的红色已经被「移出曲库」占了，
-                  再来一块红的，真正危险的那个按钮就不显眼了 */}
+              {/* 编辑器里的并列动作保持中性，避免每次保存都变成整栏的视觉焦点。 */}
               <Button size="sm" disabled={busy} onClick={save}>
                 保存
               </Button>
@@ -854,10 +877,14 @@ export function TrackDetail({ track }: { track: Track }) {
               <span className="kd-analysis-metric-label">BPM</span>
               <span
                 className="kd-analysis-metric-value"
-                data-with-version={track.bpm_v2 || undefined}
+                data-with-version={track.bpm_v3 || track.bpm_v2 || undefined}
               >
                 {formatBpm(track.bpm)}
-                {track.bpm_v2 ? <small className="kd-analysis-version">V2</small> : null}
+                {track.bpm_v3 ? (
+                  <small className="kd-analysis-version">V3</small>
+                ) : track.bpm_v2 ? (
+                  <small className="kd-analysis-version">V2</small>
+                ) : null}
               </span>
               <div
                 className="kd-analysis-meter"
@@ -892,21 +919,23 @@ export function TrackDetail({ track }: { track: Track }) {
         </div>
 
         {/* 波形独占底行。KEY 已由左侧圆图表达，不再重复。 */}
-        <Waveform
-          trackId={track.id}
-          track={track}
-          renderProfile="release-overview"
-          position={position}
-          duration={track.duration ?? 0}
-          cueMs={track.cue_ms}
-          endMs={track.end_ms}
-          height={56}
-          onSetPoint={async (kind, at) => {
-            const patch = pointPatch(kind, at, track.cue_ms, track.end_ms);
-            if (typeof patch === "string") return patch;
-            await updateTrack(track.id, patch);
-          }}
-        />
+        {detailWaveformVisible ? (
+          <Waveform
+            trackId={track.id}
+            track={track}
+            renderProfile="release-overview"
+            position={position}
+            duration={track.duration ?? 0}
+            cueMs={track.cue_ms}
+            endMs={track.end_ms}
+            height={56}
+            onSetPoint={async (kind, at) => {
+              const patch = pointPatch(kind, at, track.cue_ms, track.end_ms);
+              if (typeof patch === "string") return patch;
+              await updateTrack(track.id, patch);
+            }}
+          />
+        ) : null}
         <div className="kd-row kd-faint kd-analysis-meta">
           开始{" "}
           {track.cue_ms !== null ? `${(track.cue_ms / 1000).toFixed(2)}s` : DASH}

@@ -143,6 +143,10 @@ impl YoutubeAuth {
             _ => anyhow::bail!("YouTubeAuth 只支持 YouTube Music 或 YouTube 视频"),
         };
         let path = ctx.session_file(file);
+        if let Some(parent) = path.parent() {
+            crate::session_fs::ensure_private_dir(parent)?;
+        }
+        crate::session_fs::protect_existing_private_file(&path)?;
         let session =
             std::fs::read_to_string(&path).ok().and_then(|text| {
                 match serde_json::from_str::<BrowserSession>(&text) {
@@ -182,11 +186,12 @@ impl YoutubeAuth {
         if session.created_at == 0 {
             session.created_at = unix_now();
         }
-        write_session_file(&self.path, &session)?;
-        *self
+        let mut current = self
             .session
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        write_session_file(&self.path, &session)?;
+        *current = Some(session);
         // 只由 YouTube Music 清理它自己的退休 OAuth token；普通 YouTube 不碰。
         if self.platform == Platform::Ytm {
             if let Some(parent) = self.path.parent() {
@@ -196,17 +201,19 @@ impl YoutubeAuth {
         Ok(())
     }
 
-    pub fn clear(&self) {
-        *self
+    pub fn clear(&self) -> Result<()> {
+        let mut current = self
             .session
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-        let _ = std::fs::remove_file(&self.path);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::session_fs::remove_private_file(&self.path)?;
         if self.platform == Platform::Ytm {
             if let Some(parent) = self.path.parent() {
-                let _ = std::fs::remove_file(parent.join("ytmusic.json"));
+                crate::session_fs::remove_private_file(&parent.join("ytmusic.json"))?;
             }
         }
+        *current = None;
+        Ok(())
     }
 
     pub fn request_headers(&self, origin: &str) -> Vec<(String, String)> {
@@ -351,20 +358,8 @@ fn normalize_cookie(raw: &str) -> String {
 }
 
 fn write_session_file(path: &std::path::Path, session: &BrowserSession) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("创建 YouTube 会话目录失败")?;
-    }
     let body = serde_json::to_vec_pretty(session).context("序列化 YouTube 会话失败")?;
-    std::fs::write(&tmp, body).context("保存 YouTube 会话失败")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .context("保护 YouTube 会话失败")?;
-    }
-    std::fs::rename(&tmp, path).context("提交 YouTube 会话失败")?;
-    Ok(())
+    crate::session_fs::write_private_atomic(path, &body).context("提交 YouTube 会话失败")
 }
 
 fn cookie_map(raw: &str) -> BTreeMap<String, String> {
@@ -466,7 +461,7 @@ mod tests {
         assert!(!video.is_logged_in());
 
         video.save(session("video-session")).unwrap();
-        music.clear();
+        music.clear().unwrap();
         assert!(!music.is_logged_in());
         assert!(video.is_logged_in());
         assert!(!ctx.session_file(YTM_SESSION_FILE).exists());

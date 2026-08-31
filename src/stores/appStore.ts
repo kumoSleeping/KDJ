@@ -23,6 +23,13 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function mergeAccount(accounts: Account[], account: Account): Account[] {
+  const index = accounts.findIndex((item) => item.platform === account.platform);
+  return index >= 0
+    ? accounts.map((item, itemIndex) => (itemIndex === index ? account : item))
+    : [...accounts, account];
+}
+
 /**
  * 把主题写到 <html data-theme>，design.css 只认这个属性。
  * system 时读一次 prefers-color-scheme；系统切换的监听在 main.tsx（那里才有生命周期）。
@@ -57,6 +64,8 @@ export interface AppStore {
   showSettings: boolean;
   /** 每次显式打开设置面板都递增；即使面板已是打开态，也能重新拉开窄屏抽屉。 */
   settingsPanelEpoch: number;
+  /** 手动固定后，被动选歌或切换中间列表不能顶掉设置面板。 */
+  settingsPinned: boolean;
   /** 强制把右栏/抽屉切到下载队列（曲库页也能看队列，不必先搜一次）。 */
   showQueue: boolean;
   queuePanelEpoch: number;
@@ -68,18 +77,12 @@ export interface AppStore {
   /** 单栏布局下用抽屉装文件夹树（宽屏左栏常驻，不必走这条）。 */
   showFolders: boolean;
   foldersPanelEpoch: number;
-  /** 右栏显示「按顺序导出 VJ」设置面板。 */
-  showVjExport: boolean;
-  vjExportPanelEpoch: number;
   /** 右栏显示所选本地文件夹的重复曲目分析结果。 */
   showDuplicates: boolean;
   duplicateFolders: string[];
   duplicateAll: boolean;
   duplicateIncludeSubfolders: boolean;
   duplicatesPanelEpoch: number;
-  /** 右栏显示 KDJ 虚拟磁盘的正式创建与挂载管理面板。 */
-  showVirtualDisk: boolean;
-  virtualDiskPanelEpoch: number;
   /** 右栏显示歌词（播放时后台搜到的 LRC）。 */
   showLyrics: boolean;
   lyricsPanelEpoch: number;
@@ -94,6 +97,8 @@ export interface AppStore {
   /** health 拉不通时的原因；空串 = sidecar 正常。 */
   bootError: string;
   savingSettings: boolean;
+  /** 最近一次设置落盘失败；成功提交后清空。 */
+  settingsError: string;
 
   setListMode(mode: ListMode): void;
   setHasResults(value: boolean): void;
@@ -106,6 +111,7 @@ export interface AppStore {
   focusLibrary(): void;
   toggleSettingsPanel(): void;
   openSettingsPanel(): void;
+  setSettingsPinned(value: boolean): void;
   toggleQueuePanel(): void;
   openQueuePanel(): void;
   setQueuePinned(value: boolean): void;
@@ -113,13 +119,10 @@ export interface AppStore {
   openPreviewPanel(): void;
   toggleFoldersPanel(): void;
   openFoldersPanel(): void;
-  /** 打开「按顺序导出 VJ」旁路（由文件夹右键触发）。 */
-  openVjExportPanel(): void;
   openDuplicatePanel(
     folders: string[],
     options?: { all?: boolean; includeSubfolders?: boolean },
   ): void;
-  openVirtualDiskPanel(): void;
   /** 打开右栏歌词面板。 */
   openLyricsPanel(): void;
   toggleLyricsPanel(): void;
@@ -131,13 +134,12 @@ export interface AppStore {
     | "queue"
     | "preview"
     | "folders"
-    | "vjExport"
     | "duplicates"
-    | "virtualDisk"
     | "lyrics"
     | null;
   bootstrap(): Promise<void>;
   refreshAccounts(): Promise<void>;
+  setAccount(account: Account): void;
   saveSettings(patch: Partial<Settings>): Promise<void>;
   handleEvent(event: WsEvent): void;
 }
@@ -146,19 +148,23 @@ export interface AppStore {
 function clearOverlays() {
   return {
     showSettings: false,
+    settingsPinned: false,
     showQueue: false,
     showPreview: false,
     showFolders: false,
-    showVjExport: false,
     showDuplicates: false,
-    showVirtualDisk: false,
     showLyrics: false,
     queuePinned: false,
   } as const;
 }
 
 /** 被动导航尊重手动固定的下载栏；显式打开其它旁路仍走 clearOverlays。 */
-function clearPassiveOverlays(state: Pick<AppStore, "showQueue" | "queuePinned">) {
+function clearPassiveOverlays(
+  state: Pick<AppStore, "showSettings" | "settingsPinned" | "showQueue" | "queuePinned">,
+) {
+  if (state.showSettings && state.settingsPinned) {
+    return { ...clearOverlays(), showSettings: true, settingsPinned: true } as const;
+  }
   if (state.showQueue && state.queuePinned) {
     return { ...clearOverlays(), showQueue: true, queuePinned: true } as const;
   }
@@ -167,12 +173,18 @@ function clearPassiveOverlays(state: Pick<AppStore, "showQueue" | "queuePinned">
 
 /** StrictMode 下 effect 会跑两次，用同一个 promise 挡掉重复的启动请求。 */
 let bootInFlight: Promise<void> | null = null;
+/** 设置写入只有一条顺序通道；响应只允许兑现到发起它时的 intent。 */
+let settingsSaveTail: Promise<void> = Promise.resolve();
+let settingsIntent = 0;
+let settingsPending = 0;
+let persistedSettings: Settings | null = null;
 
 export const useAppStore = create<AppStore>()((set, get) => ({
   listMode: "library",
   hasResults: false,
   showSettings: false,
   settingsPanelEpoch: 0,
+  settingsPinned: false,
   showQueue: false,
   queuePanelEpoch: 0,
   queuePinned: false,
@@ -180,15 +192,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   previewPanelEpoch: 0,
   showFolders: false,
   foldersPanelEpoch: 0,
-  showVjExport: false,
-  vjExportPanelEpoch: 0,
   showDuplicates: false,
   duplicateFolders: [],
   duplicateAll: false,
   duplicateIncludeSubfolders: true,
   duplicatesPanelEpoch: 0,
-  showVirtualDisk: false,
-  virtualDiskPanelEpoch: 0,
   showLyrics: false,
   lyricsPanelEpoch: 0,
   health: null,
@@ -199,6 +207,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   booting: true,
   bootError: "",
   savingSettings: false,
+  settingsError: "",
 
   setListMode(mode) {
     // 用户点了曲库/搜索/文件夹，就是在切换当前关注的内容；旁路面板
@@ -217,18 +226,19 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   focusLibrary() {
-    set((state) => state.showQueue && state.queuePinned ? {
+    set((state) => (
+      (state.showSettings && state.settingsPinned) || (state.showQueue && state.queuePinned)
+    ) ? {
       listMode: "library",
       ...clearPassiveOverlays(state),
     } : {
       listMode: "library",
       showSettings: false,
+      settingsPinned: false,
       showQueue: false,
       showPreview: false,
       showFolders: false,
-      showVjExport: false,
       showDuplicates: false,
-      showVirtualDisk: false,
       queuePinned: false,
     });
   },
@@ -250,6 +260,10 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       showSettings: true,
       settingsPanelEpoch: get().settingsPanelEpoch + 1,
     });
+  },
+
+  setSettingsPinned(value) {
+    set({ settingsPinned: get().showSettings ? value : false });
   },
 
   toggleQueuePanel() {
@@ -303,14 +317,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     });
   },
 
-  openVjExportPanel() {
-    set({
-      ...clearOverlays(),
-      showVjExport: true,
-      vjExportPanelEpoch: get().vjExportPanelEpoch + 1,
-    });
-  },
-
   openDuplicatePanel(folders, options) {
     const unique = [...new Set(folders.map((folder) => folder.trim()).filter(Boolean))];
     const all = options?.all === true;
@@ -322,14 +328,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       duplicateAll: all,
       duplicateIncludeSubfolders: options?.includeSubfolders ?? true,
       duplicatesPanelEpoch: get().duplicatesPanelEpoch + 1,
-    });
-  },
-
-  openVirtualDiskPanel() {
-    set({
-      ...clearOverlays(),
-      showVirtualDisk: true,
-      virtualDiskPanelEpoch: get().virtualDiskPanelEpoch + 1,
     });
   },
 
@@ -356,9 +354,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (state.showSettings) return "settings";
     if (state.showPreview) return "preview";
     if (state.showQueue) return "queue";
-    if (state.showVjExport) return "vjExport";
     if (state.showDuplicates) return "duplicates";
-    if (state.showVirtualDisk) return "virtualDisk";
     if (state.showLyrics) return "lyrics";
     return null;
   },
@@ -380,7 +376,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       const [health, settings, accounts, searchCapabilities] = await Promise.allSettled([
         api.health(),
         api.getSettings(),
-        api.accounts(),
+        api.cachedAccounts(),
         api.searchCapabilities(),
       ]);
       if (health.status === "fulfilled") {
@@ -389,7 +385,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         set({ health: null, bootError: errorText(health.reason) });
       }
       if (settings.status === "fulfilled") {
-        set({ settings: settings.value });
+        persistedSettings = settings.value;
+        set({ settings: settings.value, settingsError: "" });
         applyTheme(settings.value.theme);
       }
       // 账号拉不到不挡启动，但要把原因留下：登录面板不然只会一直写着"稍等一下"
@@ -417,45 +414,58 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     }
   },
 
-  async saveSettings(patch) {
+  setAccount(account) {
+    set({ accounts: mergeAccount(get().accounts, account) });
+  },
+
+  saveSettings(patch) {
     const current = get().settings;
-    if (!current) return;
+    if (!current) return Promise.resolve();
+    persistedSettings ??= current;
     const next: Settings = { ...current, ...patch };
+    const intent = ++settingsIntent;
+    settingsPending += 1;
     // 先本地生效（主题切换要立刻看到），失败再回滚
-    set({ settings: next, savingSettings: true });
+    set({ settings: next, savingSettings: true, settingsError: "" });
     applyTheme(next.theme);
-    try {
-      const saved = await api.putSettings(next);
-      set({ settings: saved, savingSettings: false });
-      applyTheme(saved.theme);
-      if (
-        saved.auto_start_downloads &&
-        !current.auto_start_downloads
-      ) {
-        void import("../lib/mediaActions").then(({ resumePendingDownloadPreparations }) =>
-          resumePendingDownloadPreparations(),
-        );
+
+    const commit = async () => {
+      try {
+        const saved = await api.putSettings(next);
+        persistedSettings = saved;
+        // 后面还有用户操作时，这个旧响应只更新“已落盘基线”，不能盖掉新意图。
+        if (intent === settingsIntent) {
+          set({ settings: saved, settingsError: "" });
+          applyTheme(saved.theme);
+          if (saved.auto_start_downloads && !current.auto_start_downloads) {
+            void import("../lib/mediaActions").then(({ resumePendingDownloadPreparations }) =>
+              resumePendingDownloadPreparations(),
+            );
+          }
+        }
+      } catch (error) {
+        if (intent === settingsIntent && persistedSettings) {
+          set({
+            settings: persistedSettings,
+            settingsError: `设置没有保存：${errorText(error)}`,
+          });
+          applyTheme(persistedSettings.theme);
+        }
+        throw error;
+      } finally {
+        settingsPending = Math.max(0, settingsPending - 1);
+        set({ savingSettings: settingsPending > 0 });
       }
-    } catch (error) {
-      set({ settings: current, savingSettings: false });
-      applyTheme(current.theme);
-      // 保存失败时先回滚；主题会当场恢复，其他设置也会回到原值。
-      // 拨过去的开关会自己弹回来。详情只留给控制台。
-      console.error(`设置保存失败：${errorText(error)}`);
-    }
+    };
+    const queued = settingsSaveTail.then(commit, commit);
+    // 通道本身永远恢复为 fulfilled，单次调用仍把错误交给明确 await/catch 的调用者。
+    settingsSaveTail = queued.catch(() => undefined);
+    return queued;
   },
 
   handleEvent(event) {
     if (event.type === "account.changed") {
-      const account = event.payload;
-      const accounts = get().accounts;
-      const index = accounts.findIndex((item) => item.platform === account.platform);
-      set({
-        accounts:
-          index >= 0
-            ? accounts.map((item, i) => (i === index ? account : item))
-            : [...accounts, account],
-      });
+      set({ accounts: mergeAccount(get().accounts, event.payload) });
     }
   },
 }));

@@ -1,5 +1,8 @@
 //! 调性识别：chroma → Krumhansl-Schmuckler → 24 调 → Camelot / OpenKey。
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use crate::dsp::{self, median, rfft_freqs};
 use kdj_core::musical_key::{camelot_to_open_key as shared_open_key, MusicalKey};
 
@@ -15,6 +18,19 @@ const HARMONIC_MEDIAN: usize = 17;
 /// 实际频谱的三次谐波落在基频的纯五度上。直接拿 chroma 匹配调性模板时，
 /// 这层泄漏会把主音系统性误判成属音（Camelot 同侧偏移一格）。
 const FIFTH_HARMONIC_LEAKAGE: f64 = 0.30;
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct ChromaBasisKey {
+    sr_bits: u64,
+    n_fft: usize,
+}
+
+struct ChromaBasis {
+    contributions: Vec<Vec<(usize, f32)>>,
+    selected: Vec<usize>,
+}
+
+static CHROMA_BASES: OnceLock<Mutex<HashMap<ChromaBasisKey, Arc<ChromaBasis>>>> = OnceLock::new();
 
 /// Krumhansl-Schmuckler 模板（索引 0 = 主音）
 const MAJOR_PROFILE: [f64; 12] = [
@@ -64,23 +80,75 @@ pub fn camelot_to_open_key(camelot: &str) -> String {
 }
 
 /// 沿时间做中值滤波：谐波成分保留、瞬态打击成分被压掉。
+#[cfg(test)]
 fn median_filter_time(spec: &mut dsp::Spectrogram, size: usize) {
+    let completed = median_filter_time_cancellable(spec, size, &|| false);
+    debug_assert!(completed, "不可取消的中值滤波不应提前退出");
+}
+
+fn median_filter_time_cancellable(
+    spec: &mut dsp::Spectrogram,
+    size: usize,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> bool {
+    if cancelled() {
+        return false;
+    }
     if size <= 1 || spec.frames < size {
-        return;
+        return true;
     }
     let pad = size / 2;
-    let mut window = vec![0.0f64; size];
     let mut row_out = vec![0.0f32; spec.frames];
     for bin in 0..spec.bins {
-        for frame in 0..spec.frames {
-            for (slot, offset) in window.iter_mut().zip(0..size) {
-                // edge 复制补齐
-                let index = (frame + offset).saturating_sub(pad).min(spec.frames - 1);
-                *slot = spec.at(bin, index) as f64;
-            }
-            row_out[frame] = median(&mut window) as f32;
+        if bin % 8 == 0 && cancelled() {
+            return false;
         }
-        spec.data[bin * spec.frames..(bin + 1) * spec.frames].copy_from_slice(&row_out);
+        let start = bin * spec.frames;
+        let end = start + spec.frames;
+        let row = &spec.data[start..end];
+        let mut sorted: Vec<f32> = (0..size)
+            .map(|offset| {
+                let index = offset.saturating_sub(pad).min(spec.frames - 1);
+                row[index]
+            })
+            .collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        for frame in 0..spec.frames {
+            row_out[frame] = sorted_median(&sorted) as f32;
+            if frame + 1 == spec.frames {
+                continue;
+            }
+            let outgoing = row[frame.saturating_sub(pad)];
+            let incoming = row[(frame + pad + 1).min(spec.frames - 1)];
+            let outgoing_index = sorted
+                .binary_search_by(|value| {
+                    value
+                        .partial_cmp(&outgoing)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .expect("滑动中值窗口必须包含待移除值");
+            sorted.remove(outgoing_index);
+            let incoming_index = sorted
+                .binary_search_by(|value| {
+                    value
+                        .partial_cmp(&incoming)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|index| index);
+            sorted.insert(incoming_index, incoming);
+        }
+        spec.data[start..end].copy_from_slice(&row_out);
+    }
+    !cancelled()
+}
+
+fn sorted_median(values: &[f32]) -> f64 {
+    let mid = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[mid - 1] as f64 + values[mid] as f64) / 2.0
+    } else {
+        values[mid] as f64
     }
 }
 
@@ -114,43 +182,82 @@ pub fn chroma_weights(sr: f64, n_fft: usize) -> (Vec<[f32; 12]>, Vec<usize>) {
     (weights, selected)
 }
 
+fn cached_chroma_basis(sr: f64, n_fft: usize) -> Arc<ChromaBasis> {
+    let key = ChromaBasisKey {
+        sr_bits: sr.to_bits(),
+        n_fft,
+    };
+    let bases = CHROMA_BASES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut bases = bases
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(bases.entry(key).or_insert_with(|| {
+        let (weights, selected) = chroma_weights(sr, n_fft);
+        let contributions = weights
+            .into_iter()
+            .map(|column| {
+                column
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, weight)| *weight != 0.0)
+                    .collect()
+            })
+            .collect();
+        Arc::new(ChromaBasis {
+            contributions,
+            selected,
+        })
+    }))
+}
+
 /// 12 维 chroma（已归一到最大值 1）。
 pub fn compute_chroma(samples: &[f32], sr: f64) -> Vec<f64> {
+    compute_chroma_cancellable(samples, sr, &|| false).expect("不可取消的调性分析不应提前退出")
+}
+
+fn compute_chroma_cancellable(
+    samples: &[f32],
+    sr: f64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<f64>> {
+    if cancelled() {
+        return None;
+    }
     if samples.len() < N_FFT {
-        return vec![0.0; 12];
+        return Some(vec![0.0; 12]);
     }
     let peak = samples.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
-    let normalized: Vec<f32> = if peak > 0.0 {
-        samples.iter().map(|s| s / peak).collect()
-    } else {
-        samples.to_vec()
-    };
-
-    let full = dsp::stft_magnitude(&normalized, N_FFT, HOP);
-    let (weights, selected) = chroma_weights(sr, N_FFT);
-    if selected.is_empty() || full.frames == 0 {
-        return vec![0.0; 12];
+    let basis = cached_chroma_basis(sr, N_FFT);
+    if basis.selected.is_empty() {
+        return Some(vec![0.0; 12]);
     }
-    // 只留选中的 bin，后续中值滤波和矩阵乘都在这个小得多的谱上做
-    let mut spec = dsp::Spectrogram {
-        bins: selected.len(),
-        frames: full.frames,
-        data: vec![0.0f32; selected.len() * full.frames],
-    };
-    for (row, bin) in selected.iter().enumerate() {
-        let src = &full.data[bin * full.frames..(bin + 1) * full.frames];
-        spec.data[row * full.frames..(row + 1) * full.frames].copy_from_slice(src);
+    // FFT 仍然计算完整频域；这里只是不再把 C2–C7 之外、随后必然丢弃的 bin 写入内存。
+    let mut spec = dsp::stft_magnitude_selected_peak_normalized_cancellable(
+        samples,
+        peak,
+        N_FFT,
+        HOP,
+        &basis.selected,
+        cancelled,
+    )?;
+    if spec.frames == 0 {
+        return Some(vec![0.0; 12]);
     }
-    median_filter_time(&mut spec, HARMONIC_MEDIAN);
+    if !median_filter_time_cancellable(&mut spec, HARMONIC_MEDIAN, cancelled) {
+        return None;
+    }
 
     // 每帧 L2 归一（抵消音量起伏），再沿时间取中位数（比均值抗鼓点/瞬态干扰）
     let mut per_class: Vec<Vec<f64>> = vec![Vec::with_capacity(spec.frames); 12];
     for frame in 0..spec.frames {
+        if frame % 16 == 0 && cancelled() {
+            return None;
+        }
         let mut acc = [0.0f64; 12];
-        for (row, column) in weights.iter().enumerate() {
+        for (row, contributions) in basis.contributions.iter().enumerate() {
             let value = spec.at(row, frame) as f64;
-            for class in 0..12 {
-                acc[class] += column[class] as f64 * value;
+            for (class, weight) in contributions {
+                acc[*class] += *weight as f64 * value;
             }
         }
         let norm = acc.iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -167,7 +274,11 @@ pub fn compute_chroma(samples: &[f32], sr: f64) -> Vec<f64> {
             *value /= top;
         }
     }
-    chroma
+    if cancelled() {
+        None
+    } else {
+        Some(chroma)
+    }
 }
 
 fn pearson(a: &[f64], b: &[f64]) -> f64 {
@@ -265,9 +376,62 @@ pub fn analyze_key(samples: &[f32], sr: f64) -> KeyResult {
     key_from_chroma(&compute_chroma(samples, sr))
 }
 
+pub fn analyze_key_cancellable(
+    samples: &[f32],
+    sr: f64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<KeyResult> {
+    Some(key_from_chroma(&compute_chroma_cancellable(
+        samples, sr, cancelled,
+    )?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reference_median_filter_time(spec: &mut dsp::Spectrogram, size: usize) {
+        if size <= 1 || spec.frames < size {
+            return;
+        }
+        let pad = size / 2;
+        let mut window = vec![0.0f64; size];
+        let mut row_out = vec![0.0f32; spec.frames];
+        for bin in 0..spec.bins {
+            for frame in 0..spec.frames {
+                for (slot, offset) in window.iter_mut().zip(0..size) {
+                    let index = (frame + offset).saturating_sub(pad).min(spec.frames - 1);
+                    *slot = spec.at(bin, index) as f64;
+                }
+                row_out[frame] = median(&mut window) as f32;
+            }
+            spec.data[bin * spec.frames..(bin + 1) * spec.frames].copy_from_slice(&row_out);
+        }
+    }
+
+    #[test]
+    fn sliding_median_is_bit_identical_to_the_reference_window_sort() {
+        let bins = 5;
+        let frames = 43;
+        let data: Vec<f32> = (0..bins * frames)
+            .map(|index| {
+                if index % 9 == 0 {
+                    0.25
+                } else {
+                    ((index * 37 % 101) as f32 / 101.0).sin().abs()
+                }
+            })
+            .collect();
+        let mut expected = dsp::Spectrogram {
+            bins,
+            frames,
+            data: data.clone(),
+        };
+        let mut actual = dsp::Spectrogram { bins, frames, data };
+        reference_median_filter_time(&mut expected, HARMONIC_MEDIAN);
+        median_filter_time(&mut actual, HARMONIC_MEDIAN);
+        assert_eq!(actual.data, expected.data);
+    }
 
     #[test]
     fn camelot_table_matches_the_contract() {

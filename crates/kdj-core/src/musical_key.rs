@@ -1,8 +1,7 @@
-//! 跨本地曲库与 OneLibrary 的调性契约。
+//! 本地曲库使用的调性契约。
 //!
-//! OneLibrary 的 `key.name` 是自由文本；djay 常写 `F# M` / `F# m`，KDJ 分析器
-//! 历史上写 `F# major` / `F# minor`，列表还会显示 Camelot `2B` / `11A`。
-//! 这三种只是同一调性的不同表示，不能在导入、筛选和导出边界各维护一张映射表。
+//! KDJ 同时接受短音名、传统长名、Camelot 与 Open Key，并统一成同一份结构，避免
+//! 分析、筛选和播放控制各自维护一张映射表。
 
 /// Camelot → KDJ 规范传统调名。顺序是轮盘上的 1A、1B、2A、2B……。
 pub const CAMELOT_TO_KEY: [(&str, &str); 24] = [
@@ -54,15 +53,6 @@ impl MusicalKey {
             open_key: camelot_to_open_key(&camelot),
             camelot,
         })
-    }
-
-    /// djay/OneLibrary 常用的短音名；大调的 `M` 必须大写，避免和小调 `m` 混淆。
-    pub fn one_library_name(&self) -> String {
-        let (root, mode) = self
-            .traditional
-            .split_once(' ')
-            .unwrap_or((&self.traditional, "major"));
-        format!("{root} {}", if mode == "minor" { "m" } else { "M" })
     }
 }
 
@@ -172,17 +162,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn djay_and_kdj_notations_resolve_to_one_key() {
+    fn supported_notations_resolve_to_one_key() {
         for value in ["F# M", "F# major", "F#", "2B", "Gb maj", "F♯ M"] {
             let key = parse_musical_key(value).unwrap_or_else(|| panic!("无法解析 {value}"));
             assert_eq!(key.camelot, "2B", "输入 {value}");
             assert_eq!(key.traditional, "F# major", "输入 {value}");
-            assert_eq!(key.one_library_name(), "F# M", "输入 {value}");
         }
         for value in ["F# m", "F#m", "F# minor", "11A", "Gb min"] {
             let key = parse_musical_key(value).unwrap_or_else(|| panic!("无法解析 {value}"));
             assert_eq!(key.camelot, "11A", "输入 {value}");
-            assert_eq!(key.one_library_name(), "F# m", "输入 {value}");
         }
     }
 

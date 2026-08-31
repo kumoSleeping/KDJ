@@ -4,10 +4,12 @@ import {
   dispatchStreamDeckDrop,
   lockTrackPointerDragScroll,
   STREAM_DECK_DROP_EVENT,
+  systemFileDragPayload,
   trackDeckSideForPoint,
   type StreamDeckDropDetail,
   type TrackDeckDropRegion,
 } from "../src/lib/trackDrag";
+import type { Track } from "../src/types";
 
 const regions: TrackDeckDropRegion[] = [
   { side: "0", left: 0, right: 500, top: 600, bottom: 700 },
@@ -81,4 +83,47 @@ test("pointer drag scroll lock restores the source list and releases its overflo
   release();
   assert.equal(target.style.overflow, "auto");
   assert.equal(listeners.has("scroll"), false);
+});
+
+test("pointer drag scroll lock can absorb the native drop autoscroll tail", async () => {
+  const listeners = new Map<string, EventListener>();
+  const target = {
+    scrollTop: 120,
+    scrollLeft: 18,
+    style: { overflow: "auto" },
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      listeners.set(type, listener as EventListener);
+    },
+    removeEventListener(type: string) {
+      listeners.delete(type);
+    },
+  } as unknown as HTMLElement;
+
+  const release = lockTrackPointerDragScroll(target, 120, 18);
+  release(20);
+  target.scrollTop = 480;
+  listeners.get("scroll")?.(new Event("scroll"));
+  assert.equal(target.scrollTop, 120);
+  assert.equal(target.style.overflow, "hidden");
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(target.scrollTop, 120);
+  assert.equal(target.style.overflow, "auto");
+  assert.equal(listeners.has("scroll"), false);
+});
+
+test("system file drag follows the active selection and keeps absolute paths", () => {
+  const tracks = [
+    { id: 1, path: "/Music/one.flac", title: "One", filename: "one.flac" },
+    { id: 2, path: "/Music/two.mp3", title: "Two", filename: "two.mp3" },
+  ] as Track[];
+
+  assert.deepEqual(systemFileDragPayload(tracks, [1, 2], tracks[0]), {
+    paths: ["/Music/one.flac", "/Music/two.mp3"],
+    label: "2 首曲目",
+  });
+  assert.deepEqual(systemFileDragPayload(tracks, [1], tracks[1]), {
+    paths: ["/Music/two.mp3"],
+    label: "Two",
+  });
 });

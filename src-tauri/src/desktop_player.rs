@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 use kdj_playback::{
     CommandAck, ControlAck, PlaybackCommand, PlaybackCoordinator, PlaybackSnapshot,
+    PlaybackWaveformWindow,
 };
 use tauri::{AppHandle, Emitter};
 
@@ -21,6 +22,68 @@ use crate::desktop_media::DesktopMediaSession;
 pub const STATE_EVENT: &str = "playback-state";
 pub const LEVEL_EVENT: &str = "playback-levels";
 pub const CLOCK_EVENT: &str = "playback-clock";
+
+const WINDOW_WIRE_MAGIC: &[u8; 8] = b"KDJWIN\0\0";
+const WINDOW_WIRE_VERSION: u16 = 1;
+const WINDOW_WIRE_HEADER_BYTES: usize = 48;
+const WINDOW_WIRE_BYTES_PER_COLUMN: usize = 12;
+
+/// Manager waveform IPC is a compact structure-of-arrays payload rather than serde JSON.
+///
+/// A normal twelve-second window has roughly 4,800 columns. JSON used to allocate seven large
+/// JS Number arrays on the WebView main thread every time that window advanced; the exact same
+/// evidence now crosses IPC in twelve bytes per column and is decoded directly into typed arrays.
+fn encode_playback_waveform_window(window: PlaybackWaveformWindow) -> Result<Vec<u8>, String> {
+    let wave = window.waveform;
+    let count = wave.amp.len();
+    let valid_channels = count > 0
+        && wave.minimum.len() == count
+        && wave.maximum.len() == count
+        && wave.r.len() == count
+        && wave.g.len() == count
+        && wave.b.len() == count
+        && wave.transient.len() == count;
+    if !valid_channels
+        || !wave.duration.is_finite()
+        || wave.duration < 0.0
+        || !window.source_start.is_finite()
+        || !window.source_end.is_finite()
+        || window.source_start < 0.0
+        || window.source_end <= window.source_start
+        || window.source_end > wave.duration + 1.0e-3
+        || count > u32::MAX as usize
+        || wave
+            .minimum
+            .iter()
+            .chain(&wave.maximum)
+            .any(|value| !value.is_finite())
+    {
+        return Err("局部波形数据无效".into());
+    }
+
+    let mut body =
+        Vec::with_capacity(WINDOW_WIRE_HEADER_BYTES + count * WINDOW_WIRE_BYTES_PER_COLUMN);
+    body.extend_from_slice(WINDOW_WIRE_MAGIC);
+    body.extend_from_slice(&WINDOW_WIRE_VERSION.to_le_bytes());
+    body.extend_from_slice(&0u16.to_le_bytes()); // flags / reserved
+    body.extend_from_slice(&wave.track_id.to_le_bytes());
+    body.extend_from_slice(&wave.duration.to_le_bytes());
+    body.extend_from_slice(&window.source_start.to_le_bytes());
+    body.extend_from_slice(&window.source_end.to_le_bytes());
+    body.extend_from_slice(&(count as u32).to_le_bytes());
+    debug_assert_eq!(body.len(), WINDOW_WIRE_HEADER_BYTES);
+    for value in &wave.minimum {
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in &wave.maximum {
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    body.extend_from_slice(&wave.r);
+    body.extend_from_slice(&wave.g);
+    body.extend_from_slice(&wave.b);
+    body.extend_from_slice(&wave.transient);
+    Ok(body)
+}
 
 pub struct DesktopPlayerHandle {
     coordinator: Arc<PlaybackCoordinator>,
@@ -179,4 +242,32 @@ pub fn playback_state(
     player: tauri::State<'_, DesktopPlayerHandle>,
 ) -> Result<PlaybackSnapshot, String> {
     player.snapshot()
+}
+
+/// Return only the detailed source-time window needed by the six-second Manager rail.
+///
+/// The coordinator lends its already-decoded scratch PCM and the bounded analysis runs on a
+/// blocking worker. Tauri's command thread, playback actor and CoreAudio/AAudio callback never do
+/// FFT work or serialize a full-song waveform.
+#[tauri::command]
+pub async fn playback_waveform_window(
+    player: tauri::State<'_, DesktopPlayerHandle>,
+    track_id: i64,
+    position: f64,
+    viewport_seconds: f64,
+    urgent: Option<bool>,
+) -> Result<tauri::ipc::Response, String> {
+    let coordinator = Arc::clone(&player.coordinator);
+    let window = tauri::async_runtime::spawn_blocking(move || {
+        coordinator.waveform_window(track_id, position, viewport_seconds, urgent.unwrap_or(true))
+    })
+    .await
+    .map_err(|error| format!("局部波形任务异常退出：{error}"))??;
+    let body = match window {
+        Some(window) => encode_playback_waveform_window(window)?,
+        // An empty raw response is the allocation-free "not ready yet" sentinel. It avoids
+        // serializing JSON null on the hot retry path while scratch PCM catches up.
+        None => Vec::new(),
+    };
+    Ok(tauri::ipc::Response::new(body))
 }

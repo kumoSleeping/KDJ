@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 /**
  * Explore「搜索 VJ」的候选关键词。
@@ -35,7 +36,7 @@ const PICKED_KEY = "kd-vj-picked";
 
 function load(): string[] {
   try {
-    const raw = localStorage.getItem(KEYWORDS_KEY);
+    const raw = readLocalStorage(KEYWORDS_KEY);
     if (!raw) return DEFAULT_VJ_KEYWORDS;
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return DEFAULT_VJ_KEYWORDS;
@@ -62,7 +63,7 @@ interface VjKeywordState {
 
 function loadPicked(): string[] {
   try {
-    const raw = localStorage.getItem(PICKED_KEY);
+    const raw = readLocalStorage(PICKED_KEY);
     if (raw === null) return DEFAULT_VJ_PICKED;
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : DEFAULT_VJ_PICKED;
@@ -81,14 +82,14 @@ export const useVjKeywords = create<VjKeywordState>((set, get) => ({
   keywords: load(),
   picked: loadPicked(),
   // 未写过开关时默认带上艺人（和旧版「永远带艺人」一致）；显式存 "0" 才关掉。
-  withArtist: localStorage.getItem(ARTIST_KEY) !== "0",
+  withArtist: readLocalStorage(ARTIST_KEY) !== "0",
 
   toggle(word) {
     const picked = get().picked;
     const next = picked.includes(word)
       ? picked.filter((k) => k !== word)
       : [...picked, word];
-    localStorage.setItem(PICKED_KEY, JSON.stringify(next));
+    writeLocalStorageNow(PICKED_KEY, JSON.stringify(next));
     set({ picked: next });
   },
 
@@ -97,27 +98,27 @@ export const useVjKeywords = create<VjKeywordState>((set, get) => ({
     // 去重不区分大小写：加了 "mv" 又加 "MV" 只会得到两颗一模一样的按钮
     if (!clean || get().keywords.some((k) => k.toLowerCase() === clean.toLowerCase())) return;
     const next = [...get().keywords, clean];
-    localStorage.setItem(KEYWORDS_KEY, JSON.stringify(next));
+    writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(next));
     set({ keywords: next });
   },
 
   remove(word) {
     const next = get().keywords.filter((k) => k !== word);
-    localStorage.setItem(KEYWORDS_KEY, JSON.stringify(next));
+    writeLocalStorageNow(KEYWORDS_KEY, JSON.stringify(next));
     // 勾选里也要摘掉：留着的话它会继续参与拼词，而界面上已经看不见这个词了
     const picked = get().picked.filter((k) => k !== word);
-    localStorage.setItem(PICKED_KEY, JSON.stringify(picked));
+    writeLocalStorageNow(PICKED_KEY, JSON.stringify(picked));
     set({ keywords: next, picked });
   },
 
   reset() {
-    localStorage.removeItem(KEYWORDS_KEY);
-    localStorage.removeItem(PICKED_KEY);
+    removeLocalStorage(KEYWORDS_KEY);
+    removeLocalStorage(PICKED_KEY);
     set({ keywords: DEFAULT_VJ_KEYWORDS, picked: DEFAULT_VJ_PICKED });
   },
 
   setWithArtist(value) {
-    localStorage.setItem(ARTIST_KEY, value ? "1" : "0");
+    writeLocalStorageNow(ARTIST_KEY, value ? "1" : "0");
     set({ withArtist: value });
   },
 }));

@@ -177,6 +177,7 @@ pub fn parse_ptui_callback(text: &str) -> Result<QrOutcome> {
 pub async fn authorize(http: &reqwest::Client, uin: &str, sigx: &str) -> Result<Credential> {
     // check_sig 必须**不跟随重定向**：p_skey 只出现在这一跳的 Set-Cookie 里，
     // 跟到下一跳就丢了。
+    kdj_core::ensure_rustls_ring();
     let no_redirect = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()

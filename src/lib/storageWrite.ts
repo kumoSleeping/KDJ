@@ -84,33 +84,85 @@ export class DeferredStorageWriter {
 
 let browserWriter: DeferredStorageWriter | null = null;
 
+function browserStorage(): Storage | null {
+  try {
+    if (typeof window !== "undefined") return window.localStorage;
+    // 单测、预渲染或未来的非 Window 宿主可以注入同一份 Storage。读取与“立即写”
+    // 仍应保持一致；只有需要定时器合并的浏览器路径才依赖 window。
+    return (globalThis as typeof globalThis & { localStorage?: Storage }).localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function writer(): DeferredStorageWriter | null {
   if (browserWriter) return browserWriter;
-  if (typeof window === "undefined" || typeof localStorage === "undefined") return null;
+  if (typeof window === "undefined") return null;
+  const storage = browserStorage();
+  if (!storage) return null;
   browserWriter = new DeferredStorageWriter(
-    localStorage,
+    storage,
     (callback, delayMs) => window.setTimeout(callback, delayMs),
     (timer) => window.clearTimeout(timer),
   );
   return browserWriter;
 }
 
+export function readLocalStorage(key: string): string | null {
+  try {
+    return browserStorage()?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function writeLocalStorageSoon(key: string, value: string, delayMs?: number): void {
-  writer()?.writeSoon(key, value, delayMs);
+  const deferred = writer();
+  if (deferred) {
+    deferred.writeSoon(key, value, delayMs);
+    return;
+  }
+  // 没有 Window 就没有 pagehide/beforeunload 可供最终 flush；此时直接提交，避免
+  // 非浏览器宿主出现“本次能改、下一次读不到”的行为差异。
+  writeDirectly(key, value);
 }
 
 export function writeLocalStorageNow(key: string, value: string): void {
-  writer()?.writeNow(key, value);
+  const deferred = writer();
+  if (deferred) {
+    deferred.writeNow(key, value);
+    return;
+  }
+  writeDirectly(key, value);
 }
 
 export function discardLocalStorageWrite(key: string): void {
   writer()?.discard(key);
 }
 
+export function removeLocalStorage(key: string): void {
+  writer()?.discard(key);
+  try {
+    browserStorage()?.removeItem(key);
+  } catch {
+    // 与写入相同：偏好存储受限不应阻断主功能。
+  }
+}
+
 export function flushLocalStorageWrites(): void {
   browserWriter?.flushAll();
 }
 
+function writeDirectly(key: string, value: string): void {
+  try {
+    const storage = browserStorage();
+    if (storage?.getItem(key) !== value) storage?.setItem(key, value);
+  } catch {
+    // 与浏览器合并写一致：存储不可用不应阻断播放或 UI。
+  }
+}
+
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", flushLocalStorageWrites);
+  window.addEventListener("beforeunload", flushLocalStorageWrites);
 }

@@ -18,7 +18,7 @@
 
   <br>
 
-  <img src="docs/readme-assets/01-library.png" alt="KDJ library" width="920">
+  <img src="docs/readme-assets/01-library.webp" alt="KDJ library" width="920">
 </div>
 
 ---
@@ -29,12 +29,14 @@
 
 Choose your platform below to open the latest [Releases](https://github.com/kumoSleeping/KDJ/releases/latest). Available for macOS, Windows, Linux, and Android.
 
+<!-- release-package-size-badges:start -->
 <p>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/macOS-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/macOS-15.3_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 15.3 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Windows-6.2_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 6.2 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Linux-9.1_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 9.1 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Android-42.8_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 42.8 MB"></a>
 </p>
+<!-- release-package-size-badges:end -->
 
 You may need to allow apps from unidentified developers. On macOS, allow the app under System Settings → Privacy & Security → General.
 
@@ -58,7 +60,6 @@ KDJ packs cross-platform search, download, local library management, and music a
   - Drag-first organization
   - Local library / folder scanning and tag editing
   - Sidebar virtual playlists that reference local tracks without duplicating audio
-  - Desktop removable-drive discovery and portable OneLibrary + M3U8 export
   - Camelot wheel with BPM / energy filters
   - Automatic BPM, key, Camelot / Open Key, loudness, and energy analysis
   - Harmonic similarity recommendations (library / folder / temporary queue)
@@ -66,7 +67,6 @@ KDJ packs cross-platform search, download, local library management, and music a
   - Automatic VJ export (requires [FFmpeg](https://ffmpeg.org/download.html))
 
 > [!NOTE]
-> Portable OneLibrary export copies the audio files to the drive; a playlist that only references files on the current computer cannot work elsewhere. Tracks with complete KDJ analysis also export BPM, key, beatgrid, and OneLibrary waveform data. The target DJ app fills in tracks that are still missing analysis. KDJ keeps a portable waveform cache under `.kdj` on the drive so remounting the virtual disk does not decode the same tracks again.
 - Playback
   - System-level audio output and volume control
   - Rubber Band R3 pitch-preserving Tempo/BPM Sync for stereo and eight-channel STEM playback

@@ -15,6 +15,10 @@ import {
   X,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import {
+  nextAutoAnalysisMode,
+  resolveAutoAnalysisMode,
+} from "../../lib/autoAnalysisMode";
 import { forgetQueuedAnalysis } from "../../lib/autoAnalyze";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import {
@@ -99,7 +103,7 @@ function LibrarySearchField({
  * 曲库半栏工作条，与搜索半栏 SearchWorkRail 同行对齐。
  *
  * - 平常：概况 + 右侧小搜索入口
- * - 点开搜索：整条换成搜索框；多选再顶掉搜索
+ * - 点开搜索：左侧概况 / 任务保持可见，搜索框在右侧展开；多选再顶掉搜索
  *
  * `showDownloads`：搜索半栏没开时，下载进度暂挂这里，避免任务悬空。
  */
@@ -117,7 +121,7 @@ export function LibraryWorkRail({
   /** 顶栏混合搜索是否展开；收起时在定位右侧显示重新打开。 */
   aggregateSearchOpen?: boolean;
   onOpenAggregateSearch?(): void;
-  /** 固定本地曲库后，OneLibrary 与在线内容在右侧并排打开。 */
+  /** 固定本地曲库后，在线内容在右侧并排打开。 */
   localPanePinned?: boolean;
   onLocalPanePinnedChange?(pinned: boolean): void;
 }) {
@@ -137,7 +141,7 @@ export function LibraryWorkRail({
   const activeDownloads = useDownloadStore((state) => state.activeCount);
   const downloadList = useDownloadStore((state) => state.list);
   const running = downloadList.find((task) => task.state === "running");
-  const autoAnalyze = useAppStore((state) => state.settings?.auto_analyze ?? true);
+  const settings = useAppStore((state) => state.settings);
   const savingSettings = useAppStore((state) => state.savingSettings);
   const saveSettings = useAppStore((state) => state.saveSettings);
 
@@ -233,22 +237,26 @@ export function LibraryWorkRail({
   // 成功或带错误结束都属于已结束，不能把一次失败永久钉在主界面上。
   const activeMaintenance = maintenance.filter((item) => item.phase !== "done");
   const downloading = showDownloads && activeDownloads > 0;
-  const autoPaused = autoAnalyzeSuspended || !autoAnalyze;
+  const autoAnalysisMode = autoAnalyzeSuspended
+    ? "paused"
+    : resolveAutoAnalysisMode(settings);
+  const autoPaused = autoAnalysisMode === "paused";
   const searchExpanded = !selecting && searchOpen;
 
   const toggleAutoAnalyze = () => {
-    if (autoPaused) {
+    const nextMode = nextAutoAnalysisMode(autoAnalysisMode);
+    if (nextMode !== "paused") {
       // 取消过的 id 不能一直留在本会话去重集合里，否则恢复后它们不会再入队。
-      forgetQueuedAnalysis();
+      if (autoPaused) forgetQueuedAnalysis();
       useLibraryStore.getState().setAutoAnalyzeSuspended(false);
-      void saveSettings({ auto_analyze: true });
+      void saveSettings({ auto_analyze: true, auto_analysis_mode: nextMode }).catch(() => undefined);
       return;
     }
 
-    // 取消是协作式的：正在解码的一两首会安全收尾，之后不再接下一首。
+    // 取消是协作式的：正在解码 / FFT 的任务会在细粒度检查点退出，完整结果才写库。
     // 配置先落盘；后端扫描若恰好尚未结束，也会在 jobs.rs 再读这个开关。
     void Promise.all([
-      saveSettings({ auto_analyze: false }),
+      saveSettings({ auto_analyze: false, auto_analysis_mode: "paused" }),
       useLibraryStore.getState().cancelAnalyze(),
     ])
       // 保存设置自行回滚；取消请求失败也不能让这个点击留下未处理的 Promise。
@@ -306,7 +314,7 @@ export function LibraryWorkRail({
       aria-label={localPanePinned ? "取消固定本地曲库" : "固定本地曲库"}
       title={
         localPanePinned
-          ? "本地曲库已固定；OneLibrary 和在线内容会并排打开"
+          ? "本地曲库已固定；在线内容会并排打开"
           : "当前为覆盖打开；点击固定本地曲库"
       }
       onClick={() => onLocalPanePinnedChange(!localPanePinned)}
@@ -333,8 +341,22 @@ export function LibraryWorkRail({
     ) : null;
 
   const trailingTools = (
-    <span className="kd-activity-trailing-tools">
-      {folderSearchToggle}
+    <span
+      className="kd-activity-trailing-tools"
+      data-searching={searchExpanded ? "true" : undefined}
+    >
+      {searchExpanded ? (
+        <LibrarySearchField
+          inputRef={searchInputRef}
+          value={filter.q}
+          folder={filter.folder}
+          onChange={(value) => setFilter({ q: value })}
+          onClear={clearSearch}
+          onBlurEmpty={() => setSearchOpen(false)}
+        />
+      ) : (
+        folderSearchToggle
+      )}
       {locatePlayingToggle}
       {localPanePinToggle}
       {aggregateSearchToggle}
@@ -385,33 +407,6 @@ export function LibraryWorkRail({
         ]}
         trailing={trailingTools}
         label="曲库多选"
-      />
-    );
-  }
-
-  if (searchExpanded) {
-    return (
-      <WorkRail
-        idle
-        glyphs={[]}
-        texts={[]}
-        trailing={
-          <span className="kd-activity-trailing-tools">
-            <LibrarySearchField
-              inputRef={searchInputRef}
-              value={filter.q}
-              folder={filter.folder}
-              onChange={(value) => setFilter({ q: value })}
-              onClear={clearSearch}
-              onBlurEmpty={() => setSearchOpen(false)}
-            />
-            {locatePlayingToggle}
-            {localPanePinToggle}
-            {aggregateSearchToggle}
-            {asideToggle}
-          </span>
-        }
-        label="曲库搜索"
       />
     );
   }
@@ -512,17 +507,26 @@ export function LibraryWorkRail({
       key="auto-analyze"
       type="button"
       className="kd-activity-control"
-      aria-pressed={!autoPaused}
+      aria-label={`自动分析：${autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}`}
       disabled={savingSettings}
       title={
-        autoPaused
-          ? "恢复后会分析新导入、正在播放和空闲时尚未分析的曲目"
-          : "暂停自动分析；已开始分析的曲目会安全完成当前一首"
+        autoAnalysisMode === "light"
+          ? "轻量：单线程并主动留空；点击切换到有余量的全力模式"
+          : autoAnalysisMode === "full"
+            ? "全力：最多两个后台任务，播放时自动收窄；点击暂停"
+            : "已暂停；点击后从轻量模式恢复"
       }
       onClick={toggleAutoAnalyze}
     >
-      {autoPaused ? <Play size={11} /> : <Pause size={11} />}
-      自动分析：{autoPaused ? "已暂停" : "运行中"}
+      {autoAnalysisMode === "light" ? (
+        <Play size={11} />
+      ) : autoAnalysisMode === "full" ? (
+        <BarChart3 size={11} />
+      ) : (
+        <Pause size={11} />
+      )}
+      自动分析：
+      {autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}
     </button>,
   );
 

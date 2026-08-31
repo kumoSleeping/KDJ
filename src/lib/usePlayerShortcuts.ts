@@ -1,5 +1,10 @@
 import { useEffect, useRef } from "react";
-import { isEditable } from "./useLibraryClipboard";
+import {
+  resolveArrowKeyAction,
+  useArrowKeyControl,
+  type ArrowKeyControlPrefs,
+} from "./arrowKeyControl";
+import { shouldIgnorePlayerShortcut } from "./playerShortcutPolicy";
 
 /** 普通快进/快退步长（秒）。和多数桌面播放器的默认一致。 */
 const SEEK_STEP = 5;
@@ -13,6 +18,7 @@ export interface PlayerShortcutHandlers {
   /** 相对当前位置跳转；正数快进，负数快退。 */
   seekBy(delta: number): void;
   nudgeVolume(delta: number): void;
+  moveListSelection(delta: -1 | 1): void;
   goNext(): void;
   goPrevious(): void;
 }
@@ -25,58 +31,70 @@ export interface PlayerShortcutHandlers {
  *
  * 键位尽量贴近常见播放器（PotPlayer / VLC / 网页视频）：
  * - 空格 / 媒体键：播放暂停
- * - ← → / 小键盘 4·6：快退快进 5 秒；Shift 加持变 15 秒
- * - ↑ ↓：音量
+ * - 方向键：按设置映射为歌内跳转 / 换歌 / 列表位置 / 音量
+ * - 小键盘 4·6：固定快退快进 5 秒；Shift 加持变 15 秒
  * - 媒体上一曲 / 下一曲
  */
 export function usePlayerShortcuts(handlers: PlayerShortcutHandlers): void {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  const arrowKeyPrefs: ArrowKeyControlPrefs = {
+    enabled: useArrowKeyControl((state) => state.enabled),
+    horizontalMode: useArrowKeyControl((state) => state.horizontalMode),
+    verticalMode: useArrowKeyControl((state) => state.verticalMode),
+  };
+  const arrowKeyPrefsRef = useRef(arrowKeyPrefs);
+  arrowKeyPrefsRef.current = arrowKeyPrefs;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (isEditable(event.target)) return;
+      const key = event.key;
+      const code = event.code;
+      if (shouldIgnorePlayerShortcut(event.target, key, code)) return;
       // 菜单打开时方向键留给菜单自己；空格也不要隔空切走带。
       if ((event.target as HTMLElement | null)?.closest?.('[role="menu"]')) return;
 
       const api = handlersRef.current;
-      const key = event.key;
-      const code = event.code;
       const shift = event.shiftKey;
       const seekAmount = shift ? SEEK_STEP_LARGE : SEEK_STEP;
 
-      if (key === " " || key === "MediaPlayPause") {
+      if (key === " " || key === "Spacebar" || code === "Space" || key === "MediaPlayPause") {
         event.preventDefault();
+        if (event.repeat) return;
         api.togglePlay(key === "MediaPlayPause" ? "media-key" : undefined);
         return;
       }
 
+      const arrowAction = resolveArrowKeyAction(key, arrowKeyPrefsRef.current);
+      if (arrowAction) {
+        event.preventDefault();
+        if (arrowAction === "seek-backward" || arrowAction === "seek-forward") {
+          api.seekBy(arrowAction === "seek-backward" ? -seekAmount : seekAmount);
+        } else if (arrowAction === "previous-track" || arrowAction === "next-track") {
+          if (event.repeat) return;
+          if (arrowAction === "previous-track") api.goPrevious();
+          else api.goNext();
+        } else if (arrowAction === "list-up" || arrowAction === "list-down") {
+          api.moveListSelection(arrowAction === "list-up" ? -1 : 1);
+        } else {
+          api.nudgeVolume(arrowAction === "volume-up" ? VOLUME_STEP : -VOLUME_STEP);
+        }
+        return;
+      }
+
       const rewind =
-        key === "ArrowLeft" ||
         key === "MediaRewind" ||
         code === "Numpad4" ||
         code === "NumpadLeft";
       const forward =
-        key === "ArrowRight" ||
         key === "MediaFastForward" ||
         code === "Numpad6" ||
         code === "NumpadRight";
       if (rewind || forward) {
         event.preventDefault();
         api.seekBy(rewind ? -seekAmount : seekAmount);
-        return;
-      }
-
-      if (key === "ArrowUp") {
-        event.preventDefault();
-        api.nudgeVolume(VOLUME_STEP);
-        return;
-      }
-      if (key === "ArrowDown") {
-        event.preventDefault();
-        api.nudgeVolume(-VOLUME_STEP);
         return;
       }
 

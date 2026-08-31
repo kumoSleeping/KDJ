@@ -14,12 +14,16 @@ use kdj_core::models::{
     ResolveResponse, SongSource,
 };
 use kdj_core::paths::render_filename;
+use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
-use crate::net::{create_download_writer, host_is, AtomicDownload};
+use crate::net::{
+    create_download_writer, guarded_media_get, guarded_media_get_with_host, host_is,
+    parse_guarded_media_url, response_bytes_limited, AtomicDownload, GuardedMediaPolicy,
+};
 use crate::provider::{
     effective_limit, no_login, str_field, unique_download_path, Capabilities, DownloadJob,
     MusicProvider, ProviderContext,
@@ -29,10 +33,15 @@ use crate::tags;
 const LABEL: &str = "SoundCloud";
 const DISABLED_MESSAGE: &str = "未启用，在「下载」里打开开关";
 const API: &str = "https://api-v2.soundcloud.com";
+const SOUNDCLOUD_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+     (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 /// SoundCloud 在部分网络下首包和 CDN 分片都明显慢于其它来源。
 /// 这里只放宽 SoundCloud，避免把四个平台共同的故障发现时间一起拖长。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
+const STREAM_AUTH_MAX_BYTES: usize = 256 * 1024;
+const COVER_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// client_id 大约每几周换一次，缓存半天足够。
 const CLIENT_ID_TTL: Duration = Duration::from_secs(12 * 3600);
 const OAUTH_STATE_TTL: Duration = Duration::from_secs(10 * 60);
@@ -42,6 +51,34 @@ const CREDENTIAL_BROWSER: &str = "browser_session";
 
 fn default_credential_kind() -> String {
     CREDENTIAL_OAUTH.into()
+}
+
+fn soundcloud_media_policy() -> GuardedMediaPolicy {
+    GuardedMediaPolicy {
+        max_redirects: 5,
+        connect_timeout: CONNECT_TIMEOUT,
+        read_timeout: READ_TIMEOUT,
+    }
+}
+
+fn soundcloud_media_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(SOUNDCLOUD_USER_AGENT));
+    headers
+}
+
+fn soundcloud_transcoding_target(url: &url::Url) -> bool {
+    matches!(
+        url.host_str(),
+        Some("api-v2.soundcloud.com") | Some("api.soundcloud.com")
+    )
+}
+
+fn soundcloud_cover_target(url: &url::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        let host = host.trim_end_matches('.');
+        host == "sndcdn.com" || host.ends_with(".sndcdn.com")
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,18 +128,20 @@ pub struct SoundCloudProvider {
 
 impl SoundCloudProvider {
     pub fn new(ctx: ProviderContext) -> Result<Self> {
+        kdj_core::ensure_rustls_ring();
         // 不设全程 timeout：歌曲一直有数据就允许下多久都行。read_timeout
         // 只限制相邻两次读取的空窗，给慢速 SoundCloud CDN 留足恢复时间。
         let http = reqwest::Client::builder()
-            .user_agent(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
+            .user_agent(SOUNDCLOUD_USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .build()
             .context("构建 SoundCloud HTTP 客户端失败")?;
         let session_path = ctx.session_file("soundcloud.json");
+        if let Some(parent) = session_path.parent() {
+            crate::session_fs::ensure_private_dir(parent)?;
+        }
+        crate::session_fs::protect_existing_private_file(&session_path)?;
         let session =
             std::fs::read_to_string(&session_path).ok().and_then(
                 |text| match serde_json::from_str::<SoundCloudSession>(&text) {
@@ -175,20 +214,8 @@ impl SoundCloudProvider {
 
     fn save_session(&self, session: &SoundCloudSession) -> Result<()> {
         let path = self.session_path();
-        let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_vec_pretty(session).context("序列化 SoundCloud 登录态失败")?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).context("创建 SoundCloud 会话目录失败")?;
-        }
-        std::fs::write(&tmp, body).context("保存 SoundCloud 登录态失败")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .context("保护 SoundCloud 登录态失败")?;
-        }
-        std::fs::rename(&tmp, &path).context("写入 SoundCloud 登录态失败")?;
-        Ok(())
+        crate::session_fs::write_private_atomic(&path, &body).context("写入 SoundCloud 登录态失败")
     }
 
     fn session_snapshot(&self) -> Option<SoundCloudSession> {
@@ -196,14 +223,17 @@ impl SoundCloudProvider {
     }
 
     fn set_session(&self, session: SoundCloudSession) -> Result<()> {
+        let mut current = self.session.write().unwrap();
         self.save_session(&session)?;
-        *self.session.write().unwrap() = Some(session);
+        *current = Some(session);
         Ok(())
     }
 
-    fn clear_session(&self) {
-        *self.session.write().unwrap() = None;
-        let _ = std::fs::remove_file(self.session_path());
+    fn clear_session(&self) -> Result<()> {
+        let mut current = self.session.write().unwrap();
+        crate::session_fs::remove_private_file(&self.session_path())?;
+        *current = None;
+        Ok(())
     }
 
     fn prune_oauth(&self) {
@@ -370,21 +400,23 @@ impl SoundCloudProvider {
                 return Ok(id.clone());
             }
         }
-        let home = self
-            .http
-            .get("https://soundcloud.com/")
-            .send()
-            .await
-            .context("打开 SoundCloud 首页失败")?
-            .text()
-            .await
-            .context("读取 SoundCloud 首页失败")?;
+        let home = {
+            self.http
+                .get("https://soundcloud.com/")
+                .send()
+                .await
+                .context("打开 SoundCloud 首页失败")?
+                .text()
+                .await
+                .context("读取 SoundCloud 首页失败")?
+        };
 
         // 越靠后的 bundle 越可能带 client_id，倒着扫命中更快
         let mut scripts = extract_script_urls(&home);
         scripts.reverse();
-        for url in scripts {
-            let Ok(response) = self.http.get(&url).send().await else {
+        for url in scripts.into_iter().take(12) {
+            let response = self.http.get(&url).send().await;
+            let Ok(response) = response else {
                 continue;
             };
             let Ok(body) = response.text().await else {
@@ -572,26 +604,117 @@ impl SoundCloudProvider {
         Ok(body)
     }
 
+    async fn authenticated_write_once(
+        &self,
+        token: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<(reqwest::StatusCode, Value)> {
+        let mut request = self
+            .http
+            .request(method, format!("{OAUTH_API}{path}"))
+            .header(reqwest::header::AUTHORIZATION, format!("OAuth {token}"))
+            .header(reqwest::header::ACCEPT, "application/json; charset=utf-8");
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("SoundCloud 写接口请求失败：{path}"))?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .with_context(|| format!("读取 SoundCloud 写接口响应失败：{path}"))?;
+        let body = if text.trim().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&text)
+                .with_context(|| format!("解析 SoundCloud 写接口响应失败：{path}"))?
+        };
+        Ok((status, body))
+    }
+
+    /// SoundCloud 官方写接口只接受 KDJ 自己完成的 OAuth 授权。浏览器 Cookie
+    /// 属于网页私有 client，不能拿去冒充公开 API access token。
+    async fn api_write_authenticated(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value> {
+        let current = self.session_snapshot().context("SoundCloud 尚未登录")?;
+        anyhow::ensure!(
+            current.credential_kind == CREDENTIAL_OAUTH,
+            "修改 SoundCloud 收藏或歌单需要改用官方 OAuth 登录"
+        );
+        let token = if oauth_session_needs_refresh(&current) {
+            self.refresh_access_token(None).await?
+        } else {
+            current.access_token.clone()
+        };
+        let (status, response) = self
+            .authenticated_write_once(&token, method.clone(), path, body)
+            .await?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let refreshed = self.refresh_access_token(Some(&token)).await?;
+            let (retry_status, retry_body) = self
+                .authenticated_write_once(&refreshed, method, path, body)
+                .await?;
+            anyhow::ensure!(
+                retry_status.is_success(),
+                "SoundCloud 写接口返回 {}：{}",
+                retry_status,
+                oauth_error(&retry_body)
+            );
+            return Ok(retry_body);
+        }
+        anyhow::ensure!(
+            status.is_success(),
+            "SoundCloud 写接口返回 {}：{}",
+            status,
+            oauth_error(&response)
+        );
+        Ok(response)
+    }
+
     /// 把 transcoding 的授权地址换成真正的 CDN 直链。
     async fn authorize_stream(&self, transcoding_url: &str) -> Result<String> {
         let client_id = self.client_id().await?;
-        let body: Value = self
-            .http
-            .get(transcoding_url)
-            .query(&[("client_id", client_id)])
-            .send()
+        let mut transcoding =
+            parse_guarded_media_url(transcoding_url).context("SoundCloud 音频授权地址无效")?;
+        anyhow::ensure!(
+            soundcloud_transcoding_target(&transcoding),
+            "SoundCloud 音频授权地址不受信任"
+        );
+        transcoding
+            .query_pairs_mut()
+            .append_pair("client_id", &client_id);
+        let response = guarded_media_get_with_host(
+            transcoding.as_str(),
+            &soundcloud_media_headers(),
+            soundcloud_media_policy(),
+            &soundcloud_transcoding_target,
+        )
+        .await
+        .context("获取 SoundCloud 音频地址失败")?
+        .error_for_status()
+        .context("获取 SoundCloud 音频地址失败")?;
+        let bytes = response_bytes_limited(response, STREAM_AUTH_MAX_BYTES)
             .await
-            .context("获取 SoundCloud 音频地址失败")?
-            .error_for_status()
-            .context("获取 SoundCloud 音频地址失败")?
-            .json()
-            .await
-            .context("SoundCloud 音频地址响应不是合法 JSON")?;
-        body.get("url")
+            .context("SoundCloud 音频地址响应过大或读取失败")?;
+        let body: Value =
+            serde_json::from_slice(&bytes).context("SoundCloud 音频地址响应不是合法 JSON")?;
+        let url = body
+            .get("url")
             .and_then(Value::as_str)
             .filter(|url| !url.is_empty())
             .map(str::to_string)
-            .context("SoundCloud 没有返回音频地址")
+            .context("SoundCloud 没有返回音频地址")?;
+        parse_guarded_media_url(&url).context("SoundCloud 返回了不安全的音频地址")?;
+        Ok(url)
     }
 
     async fn fetch_cover(&self, url: &str) -> Option<Vec<u8>> {
@@ -600,11 +723,18 @@ impl SoundCloudProvider {
         }
         // `-large` 是 100x100 的缩略图，`-t500x500` 才是能看的封面
         let full = url.replace("-large.", "-t500x500.");
-        let response = self.http.get(&full).send().await.ok()?;
+        let response = guarded_media_get_with_host(
+            &full,
+            &soundcloud_media_headers(),
+            soundcloud_media_policy(),
+            &soundcloud_cover_target,
+        )
+        .await
+        .ok()?;
         if !response.status().is_success() {
             return None;
         }
-        response.bytes().await.ok().map(|bytes| bytes.to_vec())
+        response_bytes_limited(response, COVER_MAX_BYTES).await.ok()
     }
 }
 
@@ -687,6 +817,39 @@ impl MusicProvider for SoundCloudProvider {
         account
     }
 
+    async fn cached_account(&self) -> Account {
+        let mut account =
+            Account::new(Platform::Soundcloud, LABEL, AccountState::Missing, "未登录");
+        account.login_method = "browser".into();
+        account.credential_kind = "anonymous".into();
+        if !self.ctx.soundcloud_enabled() {
+            account.detail = DISABLED_MESSAGE.into();
+            return account;
+        }
+        let Some(session) = self.session_snapshot() else {
+            account.detail = "可先搜索公开内容".into();
+            return account;
+        };
+        let expired = browser_session_expired(&session);
+        account.state = if expired {
+            AccountState::Expired
+        } else {
+            AccountState::Valid
+        };
+        account.detail = if expired {
+            "浏览器会话已过期，请重新连接".into()
+        } else if session.imported_from.is_empty() {
+            "登录状态尚未联网核验".into()
+        } else {
+            session.imported_from.clone()
+        };
+        account.account_key = session.user_urn;
+        account.credential_kind = session.credential_kind;
+        account.nickname = session.nickname;
+        account.avatar = session.avatar;
+        account
+    }
+
     async fn create_qr(&self) -> Result<QrSession> {
         no_login::create_qr(LABEL)
     }
@@ -707,7 +870,7 @@ impl MusicProvider for SoundCloudProvider {
                 .send()
                 .await;
         }
-        self.clear_session();
+        self.clear_session()?;
         self.oauth.lock().unwrap().clear();
         Ok(())
     }
@@ -739,45 +902,37 @@ impl MusicProvider for SoundCloudProvider {
         let Some(session) = self.session_snapshot() else {
             return Ok(Vec::new());
         };
-        let me = self.api_get_authenticated("/me", &[]).await?;
-        let user_id = me
-            .get("id")
-            .map(value_id)
-            .filter(|value| !value.is_empty())
-            .or_else(|| (!session.user_urn.is_empty()).then(|| session.user_urn.clone()))
-            .context("SoundCloud 登录资料缺少用户 ID")?;
-
-        // 网页 token 走 api-v2；它的 likes 是 track / playlist 混合流。官方 OAuth
-        // 才使用拆开的 `/likes/tracks` 与 `/likes/playlists`。
         let browser_session = session.credential_kind == CREDENTIAL_BROWSER;
-        let likes_path = if browser_session {
-            format!("/users/{user_id}/likes")
+        let cached_user_id = if browser_session {
+            soundcloud_legacy_id(&session.user_urn)
         } else {
-            format!("/users/{user_id}/likes/tracks")
+            (!session.user_urn.is_empty()).then(|| session.user_urn.clone())
         };
-        let likes = self
-            .api_get_authenticated(
-                &likes_path,
-                &[
-                    ("limit", "200".into()),
-                    ("linked_partitioning", "true".into()),
-                ],
-            )
-            .await?;
-        let favorite_count = if browser_session {
-            collection(&likes)
-                .iter()
-                .filter(|entry| soundcloud_like_track(entry).is_some())
-                .count()
+        let user_id = if let Some(user_id) = cached_user_id.filter(|value| !value.is_empty()) {
+            user_id
         } else {
-            collection(&likes).len()
+            // 旧版登录文件可能没有 user_urn；只为这种一次性迁移情况补查 /me。
+            let me = self.api_get_authenticated("/me", &[]).await?;
+            (if browser_session {
+                me.get("id").map(value_id)
+            } else {
+                me.get("urn")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| me.get("id").map(value_id))
+            })
+            .filter(|value| !value.is_empty())
+            .context("SoundCloud 登录资料缺少用户 ID")?
         };
+
+        // 收藏数量不是目录功能的必要数据；展开“我的收藏”时再读取内容，不能只为
+        // 显示一个数字提前扫一遍 likes。
         let mut playlists = vec![kdj_core::models::StreamPlaylist {
             platform: Platform::Soundcloud,
             key: "__soundcloud_favorites__".into(),
             title: "我的收藏".into(),
             cover: String::new(),
-            count: favorite_count,
+            count: 0,
             is_favorite: true,
             origin: "favorite".into(),
         }];
@@ -847,20 +1002,37 @@ impl MusicProvider for SoundCloudProvider {
         limit: usize,
     ) -> Result<Option<kdj_core::models::StreamPlaylistResponse>> {
         let key = key.trim();
-        if key.is_empty() || self.session_snapshot().is_none() {
+        let Some(session) = self.session_snapshot() else {
+            return Ok(None);
+        };
+        if key.is_empty() {
             return Ok(None);
         }
         let limit = effective_limit(limit, 500).min(200);
         let (title, entries) = if key == "__soundcloud_favorites__" {
-            let session = self.session_snapshot().context("SoundCloud 尚未登录")?;
-            let me = self.api_get_authenticated("/me", &[]).await?;
-            let user_id = me
-                .get("id")
-                .map(value_id)
+            let browser_session = session.credential_kind == CREDENTIAL_BROWSER;
+            let cached_user_id = if browser_session {
+                soundcloud_legacy_id(&session.user_urn)
+            } else {
+                (!session.user_urn.is_empty()).then(|| session.user_urn.clone())
+            };
+            let user_id = if let Some(user_id) = cached_user_id.filter(|value| !value.is_empty()) {
+                user_id
+            } else {
+                // 仅兼容没有 user_urn 的旧会话；新会话不重复请求 /me。
+                let me = self.api_get_authenticated("/me", &[]).await?;
+                (if browser_session {
+                    me.get("id").map(value_id)
+                } else {
+                    me.get("urn")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| me.get("id").map(value_id))
+                })
                 .filter(|value| !value.is_empty())
-                .or_else(|| (!session.user_urn.is_empty()).then(|| session.user_urn.clone()))
-                .context("SoundCloud 登录资料缺少用户 ID")?;
-            let likes_path = if session.credential_kind == CREDENTIAL_BROWSER {
+                .context("SoundCloud 登录资料缺少用户 ID")?
+            };
+            let likes_path = if browser_session {
                 format!("/users/{user_id}/likes")
             } else {
                 format!("/users/{user_id}/likes/tracks")
@@ -876,9 +1048,14 @@ impl MusicProvider for SoundCloudProvider {
                 .await?;
             ("我的收藏".to_string(), collection(&body).to_vec())
         } else {
+            let request_key = if session.credential_kind == CREDENTIAL_BROWSER {
+                soundcloud_legacy_id(key).unwrap_or_else(|| key.to_string())
+            } else {
+                key.to_string()
+            };
             let body = self
                 .api_get_authenticated(
-                    &format!("/playlists/{key}"),
+                    &format!("/playlists/{request_key}"),
                     &[("show_tracks", "true".into())],
                 )
                 .await?;
@@ -897,15 +1074,80 @@ impl MusicProvider for SoundCloudProvider {
             .filter_map(|entry| soundcloud_like_track(entry).and_then(to_source))
             .take(limit)
             .collect();
-        if sources.is_empty() {
-            return Ok(None);
-        }
         Ok(Some(kdj_core::models::StreamPlaylistResponse {
             platform: Platform::Soundcloud,
             key: key.to_string(),
             title,
             sources,
         }))
+    }
+
+    async fn remove_stream_playlist_track(&self, key: &str, source: &SongSource) -> Result<()> {
+        anyhow::ensure!(
+            source.platform == Platform::Soundcloud,
+            "歌曲来源不是 SoundCloud"
+        );
+        let session = self.session_snapshot().context("SoundCloud 尚未登录")?;
+        anyhow::ensure!(
+            session.credential_kind == CREDENTIAL_OAUTH,
+            "修改 SoundCloud 收藏或歌单需要改用官方 OAuth 登录"
+        );
+        let track_urn =
+            soundcloud_source_urn(source).context("SoundCloud 歌曲缺少 URN，请刷新歌单后重试")?;
+        if key.trim() == "__soundcloud_favorites__" {
+            self.api_write_authenticated(
+                reqwest::Method::DELETE,
+                &format!("/likes/tracks/{track_urn}"),
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let playlist_urn = normalize_soundcloud_urn(key, "playlists")
+            .context("SoundCloud 歌单缺少 URN，请刷新目录后重试")?;
+        let me = self.api_get_authenticated("/me", &[]).await?;
+        let me_urn = me
+            .get("urn")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| me.get("id").map(value_id))
+            .or_else(|| (!session.user_urn.is_empty()).then(|| session.user_urn.clone()))
+            .context("SoundCloud 登录资料缺少用户 URN")?;
+        let playlist = self
+            .api_get_authenticated(
+                &format!("/playlists/{playlist_urn}"),
+                &[("show_tracks", "true".into())],
+            )
+            .await?;
+        anyhow::ensure!(
+            soundcloud_playlist_owned_by(&playlist, &me_urn),
+            "收藏的他人 SoundCloud 歌单不能移除其中的歌曲"
+        );
+        let tracks = playlist
+            .get("tracks")
+            .and_then(Value::as_array)
+            .context("SoundCloud 歌单响应缺少 tracks")?;
+        let mut removed = false;
+        let mut remaining = Vec::with_capacity(tracks.len().saturating_sub(1));
+        for track in tracks {
+            let urn = soundcloud_value_urn(track, "tracks")
+                .context("SoundCloud 歌单中有曲目缺少 URN，已拒绝覆盖歌单")?;
+            if !removed && soundcloud_same_resource(&urn, &track_urn) {
+                removed = true;
+                continue;
+            }
+            remaining.push(json!({"urn": urn}));
+        }
+        anyhow::ensure!(removed, "这首歌已不在 SoundCloud 歌单中，请刷新后重试");
+        let body = json!({"playlist": {"tracks": remaining}});
+        self.api_write_authenticated(
+            reqwest::Method::PUT,
+            &format!("/playlists/{playlist_urn}"),
+            Some(&body),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
@@ -1015,14 +1257,12 @@ impl MusicProvider for SoundCloudProvider {
         let final_path = unique_download_path(&output_dir, &filename);
 
         let guard = AtomicDownload::new(&final_path);
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .context("SoundCloud 音频下载失败")?
-            .error_for_status()
-            .context("SoundCloud 音频下载失败")?;
+        let response =
+            guarded_media_get(&url, &soundcloud_media_headers(), soundcloud_media_policy())
+                .await
+                .context("SoundCloud 音频下载失败")?
+                .error_for_status()
+                .context("SoundCloud 音频下载失败")?;
         let total = response.content_length().unwrap_or(0);
         job.report(0, total);
 
@@ -1235,12 +1475,67 @@ fn soundcloud_playlist_owned_by(entry: &Value, user_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn normalize_soundcloud_urn(value: &str, resource: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let prefix = format!("soundcloud:{resource}:");
+    if value.starts_with(&prefix) {
+        return Some(value.to_string());
+    }
+    if value.starts_with("soundcloud:") || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{prefix}{value}"))
+}
+
+fn soundcloud_legacy_id(value: &str) -> Option<String> {
+    value
+        .trim()
+        .rsplit(':')
+        .next()
+        .filter(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
+        .map(str::to_string)
+}
+
+fn soundcloud_value_urn(value: &Value, resource: &str) -> Option<String> {
+    let legacy_field = match resource {
+        "tracks" => "track_id",
+        "playlists" => "playlist_id",
+        "users" => "user_id",
+        _ => "id",
+    };
+    value
+        .get("urn")
+        .and_then(Value::as_str)
+        .and_then(|urn| normalize_soundcloud_urn(urn, resource))
+        .or_else(|| {
+            value
+                .get("id")
+                .or_else(|| value.get(legacy_field))
+                .map(value_id)
+                .and_then(|id| normalize_soundcloud_urn(&id, resource))
+        })
+}
+
+fn soundcloud_source_urn(source: &SongSource) -> Option<String> {
+    source
+        .payload
+        .get("urn")
+        .and_then(Value::as_str)
+        .and_then(|urn| normalize_soundcloud_urn(urn, "tracks"))
+        .or_else(|| normalize_soundcloud_urn(&source.key, "tracks"))
+}
+
+fn soundcloud_same_resource(left: &str, right: &str) -> bool {
+    left == right
+        || left.rsplit(':').next().filter(|value| !value.is_empty())
+            == right.rsplit(':').next().filter(|value| !value.is_empty())
+}
+
 fn soundcloud_playlist(entry: &Value, origin: &str) -> Option<kdj_core::models::StreamPlaylist> {
-    let key = entry
-        .get("id")
-        .or_else(|| entry.get("playlist_id"))
-        .map(value_id)
-        .filter(|value| !value.is_empty())?;
+    let key = soundcloud_value_urn(entry, "playlists")?;
     let tracks = entry.get("tracks").and_then(Value::as_array);
     Some(kdj_core::models::StreamPlaylist {
         platform: Platform::Soundcloud,
@@ -1386,14 +1681,7 @@ fn to_source(track: &Value) -> Option<SongSource> {
         return None;
     }
     let permalink = str_field(track, "permalink_url").unwrap_or_default();
-    let id = track
-        .get("id")
-        .map(|value| match value {
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
-        })
-        .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| permalink.to_string());
+    let id = soundcloud_value_urn(track, "tracks").unwrap_or_else(|| permalink.to_string());
     if id.is_empty() {
         return None;
     }
@@ -1413,6 +1701,9 @@ fn to_source(track: &Value) -> Option<SongSource> {
 
     let mut payload = Map::new();
     payload.insert("permalink_url".into(), Value::String(permalink.to_string()));
+    if let Some(urn) = soundcloud_value_urn(track, "tracks") {
+        payload.insert("urn".into(), Value::String(urn));
+    }
     if let Some((transcoding, ext)) = pick_transcoding(track) {
         payload.insert("transcoding_url".into(), Value::String(transcoding));
         payload.insert("transcoding_ext".into(), Value::String(ext));
@@ -1450,6 +1741,25 @@ fn to_source(track: &Value) -> Option<SongSource> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn guarded_soundcloud_targets_stay_on_official_hosts() {
+        let transcoding = url::Url::parse(
+            "https://api-v2.soundcloud.com/media/soundcloud:tracks:1/stream/progressive",
+        )
+        .unwrap();
+        let oauth_api = url::Url::parse("https://api.soundcloud.com/tracks/1/stream").unwrap();
+        let disguised =
+            url::Url::parse("https://api-v2.soundcloud.com.evil.example/stream").unwrap();
+        let cover = url::Url::parse("https://i1.sndcdn.com/artworks-test-t500x500.jpg").unwrap();
+        let disguised_cover = url::Url::parse("https://sndcdn.com.evil.example/cover.jpg").unwrap();
+
+        assert!(soundcloud_transcoding_target(&transcoding));
+        assert!(soundcloud_transcoding_target(&oauth_api));
+        assert!(!soundcloud_transcoding_target(&disguised));
+        assert!(soundcloud_cover_target(&cover));
+        assert!(!soundcloud_cover_target(&disguised_cover));
+    }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn browser_cookie(
@@ -1643,7 +1953,11 @@ mod tests {
             ]}
         });
         let source = to_source(&track).unwrap();
-        assert_eq!(source.key, "12345");
+        assert_eq!(source.key, "soundcloud:tracks:12345");
+        assert_eq!(
+            source.payload.get("urn").and_then(Value::as_str),
+            Some("soundcloud:tracks:12345")
+        );
         assert_eq!(source.artists, vec!["Real Artist"]);
         assert_eq!(source.album, "Night");
         assert_eq!(source.duration, Some(245.0), "duration 是毫秒");
@@ -1652,6 +1966,23 @@ mod tests {
             source.payload.get("transcoding_url").unwrap(),
             "https://api/prog"
         );
+    }
+
+    #[test]
+    fn soundcloud_write_identifiers_use_urns_but_accept_legacy_numeric_ids() {
+        assert_eq!(
+            normalize_soundcloud_urn("123", "tracks").as_deref(),
+            Some("soundcloud:tracks:123")
+        );
+        assert_eq!(
+            normalize_soundcloud_urn("soundcloud:playlists:456", "playlists").as_deref(),
+            Some("soundcloud:playlists:456")
+        );
+        assert!(normalize_soundcloud_urn("https://soundcloud.com/x", "tracks").is_none());
+        assert!(soundcloud_same_resource(
+            "soundcloud:tracks:123",
+            "soundcloud:tracks:123"
+        ));
     }
 
     #[test]

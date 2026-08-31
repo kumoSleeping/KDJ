@@ -22,14 +22,14 @@ Spleeter/HS-TasNet 原生 session、整轨波形和曲库分析都有不同的�
 
 ## 2. 代码位置与所有权
 
-| 层 | 位置 | 责任 |
-| --- | --- | --- |
-| 公共策略/状态 | `crates/kdj-core/src/work_scheduler.rs` | `WorkClass`、重型准入、状态快照、TEMPO lane |
-| TEMPO 执行 | `crates/kdj-player/src/time_stretch.rs` | 读取 Deck lane，在专用 worker 驱动 Rubber Band |
-| 播放状态 | `crates/kdj-playback/src/coordinator.rs` | 创建 Deck lane、发布 SYNC/TEMPO 最新目标 |
-| STEM 模型队列 | `crates/kdj-stems/src/live.rs` | Audio/LookAhead 本地严格优先队列；向核心发布 queued/active |
-| 即时 STEM | `crates/kdj-stems/src/instant.rs` | HS-TasNet session 线程；推理时发布 `StemInstant` activity |
-| 曲库/波形分析 | `crates/kdj-server/src/jobs.rs`、`waveform.rs`、`stream_waveform.rs` | 通过统一重型准入后才开始整轨 CPU/IO 工作 |
+| 层            | 位置                                                                 | 责任                                                       |
+| ------------- | -------------------------------------------------------------------- | ---------------------------------------------------------- |
+| 公共策略/状态 | `crates/kdj-core/src/work_scheduler.rs`                              | `WorkClass`、重型准入、状态快照、TEMPO lane                |
+| TEMPO 执行    | `crates/kdj-player/src/time_stretch.rs`                              | 读取 Deck lane，在专用 worker 驱动 Rubber Band             |
+| 播放状态      | `crates/kdj-playback/src/coordinator.rs`                             | 创建 Deck lane、发布 SYNC/TEMPO 最新目标                   |
+| STEM 模型队列 | `crates/kdj-stems/src/live.rs`                                       | Audio/LookAhead 本地严格优先队列；向核心发布 queued/active |
+| 即时 STEM     | `crates/kdj-stems/src/instant.rs`                                    | HS-TasNet session 线程；推理时发布 `StemInstant` activity  |
+| 曲库/波形分析 | `crates/kdj-server/src/jobs.rs`、`waveform.rs`、`stream_waveform.rs` | 通过统一重型准入后才开始整轨 CPU/IO 工作                   |
 
 `kdj-core` 不依赖 player、stems、server，所以上述依赖方向不会形成环。全局实例由
 `work_scheduler()` 的 `OnceLock<Arc<WorkScheduler>>` 创建。
@@ -38,16 +38,19 @@ Spleeter/HS-TasNet 原生 session、整轨波形和曲库分析都有不同的�
 
 数字越小越优先；同等级先比较 deadline，再按提交顺序 FIFO。
 
-| 顺序 | `WorkClass` | 示例 | 是否占重型 permit |
-| ---: | --- | --- | --- |
-| 0 | `TempoStretch` | 已进入非 1.0 的 Rubber Band Deck | 否，发布实时压力 |
-| 1 | `StemInstant` | HS-TasNet seek hop | 否，专用 session |
-| 2 | `StemAudible` | 当前可听 STEM tile/refinement | 否，STEM pool 自有 worker |
-| 3 | `StemLookAhead` | 下一块/下两块可听预取 | 否 |
-| 4 | `InteractiveWaveform` | 用户正在等待的完整波形 | 是 |
-| 5 | `NowPlayingAnalysis` | 当前曲 BPM/Key 插队 | 是 |
-| 6 | `LibraryAnalysis` | 批量 BPM/Key、完整流分析 | 是 |
-| 7 | `Maintenance` | 波形预热/补齐 | 是 |
+| 顺序 | `WorkClass`            | 示例                                       | 是否占重型 permit         |
+| ---: | ---------------------- | ------------------------------------------ | ------------------------- |
+|    0 | `TempoStretch`         | 已进入非 1.0 的 Rubber Band Deck           | 否，发布实时压力          |
+|    1 | `StemInstant`          | HS-TasNet seek hop                         | 否，专用 session          |
+|    2 | `StemAudible`          | 当前可听 STEM tile/refinement              | 否，STEM pool 自有 worker |
+|    3 | `StemLookAhead`        | 下一块/下两块可听预取                      | 否                        |
+|    4 | `InteractiveWaveform`  | Manager 跳转后有界的局部 PCM + 详细波形    | 是                        |
+|    5 | `WaveformRenewal`      | 已有完整首屏时延长 Manager 窗口边缘        | 是                        |
+|    6 | `VisibleWaveform`      | 当前可见但尚未缓存的 PlayerBar 整曲预览    | 是                        |
+|    7 | `NowPlayingAnalysis`   | 当前曲 BPM/Key 插队                        | 是                        |
+|    8 | `LibraryAnalysisLight` | 单 worker 自动分析、当前曲整曲详细波形预热 | 是                        |
+|    9 | `LibraryAnalysis`      | 完整批量 BPM/Key、完整流分析               | 是                        |
+|   10 | `Maintenance`          | 非当前曲波形预热/补齐                      | 是                        |
 
 音频 callback 不在表中，因为它从不排队：只消费预渲染 ring、读原子控制并报告 underrun。
 
@@ -55,17 +58,28 @@ Spleeter/HS-TasNet 原生 session、整轨波形和曲库分析都有不同的�
 
 - macOS/Android/Linux 默认最多 2 个重型任务，Windows 为 1；这个限制跨批次、波形和
   流分析生效，不再是每个调用方各自的局部 semaphore。
-- `LibraryAnalysis`/`Maintenance` 在 live STEM Deck、TEMPO stretch、可听/即时模型压力、
-  交互波形或当前曲分析存在时不再启动下一项。已经进入 native/整曲分析的一项跑到下个
-  协作边界。
-- `NowPlayingAnalysis` 仍让位于 TEMPO 与可听模型 deadline。
-- `InteractiveWaveform` 是用户可见请求，可以取得一个有界重型 slot；它只避让正在执行
-  或排队的可听/即时模型任务。
-- 两个 audio lease 只是“可能很快需要音频”，不是排队的推理；它们只阻止长时后台维护。
+- `LibraryAnalysisLight` 只有一个 background-QoS owner。普通播放且 ring 压力为 `Normal`
+  时允许继续；live STEM、TEMPO stretch、可听/即时模型、Manager 局部波形、可见整曲预览
+  或当前曲分析出现后不再启动下一项。自动 BPM/Key 在曲目边界让出；整曲详细波形在解码、
+  重采样和 FFT 检查点协作取消。
+- 完整 `LibraryAnalysis`/`Maintenance` 在任一可听 Deck 下都不再启动下一项；它们还会让位于
+  live STEM、TEMPO stretch、可听/即时模型、Manager 局部波形、可见整曲预览和当前曲分析。
+- `NowPlayingAnalysis` 同样等待可听 Deck 空闲，并继续让位于 TEMPO 与可听模型 deadline。
+- `InteractiveWaveform` 只承载 Manager 可视窗口所需的有界随机解码与 FFT；它不会解整首歌。
+  `VisibleWaveform` 承载当前界面确实缺少的 PlayerBar 整曲预览，并会抢占正在后台慢慢生成的
+  `LibraryAnalysisLight` 整曲详细资产。
+- `WaveformRenewal` 只在已经发布过完整首屏、缺的只是移动窗口边缘时使用。它不取消正在运行的
+  `VisibleWaveform` 或 `LibraryAnalysisLight`，也不突破播放期单重型任务上限；首次加载/真实跳转
+  先通过有界随机读取准备足够的可视跑道，让整曲预览可以独占完成。续算拿不到 permit 就快速
+  返回并保留现有像素。真实跳转仍使用 `InteractiveWaveform` 严格抢占。
+- audio lease 表示 callback 正在或即将需要连续 PCM；它会挡住可延后的整轨 CPU/IO 工作，
+  但不会挡住当前可听 STEM、TEMPO、Manager 有界局部波形或健康水位下的可见整曲预览。
 - 输出 ring 进入 `Low` 时不再启动交互/当前曲/曲库波形分析和维护任务；
   `Critical` 时连 look-ahead 也让路，只保留 TEMPO、即时和当前可听 STEM。恢复阈值高于
   进入阈值，避免水位在边缘反复启动完整分析。该状态由 coordinator 发布，callback 本身
   仍只访问 ring 和 atomics。
+- 排队选择只比较**当前策略允许**的 waiter，避免一个播放期被挡住的完整批量扫描占住队头，
+  反过来饿死本来允许运行的轻量分析或其他安全工作。
 
 ## 4. 公共 API
 
@@ -144,7 +158,7 @@ let snapshot = work_scheduler().snapshot();
 SYNC 的执行顺序是：
 
 ```text
-PerformanceWorkspace 计算 rate
+管理模式播放控制计算 rate
   -> PlaybackCoordinator::set_deck_rate
   -> 物理 Deck TempoLane（latest value）
   -> Deck preparation worker 在下个输入块读取

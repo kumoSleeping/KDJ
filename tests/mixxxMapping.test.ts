@@ -30,11 +30,12 @@ test("Mixxx XML exposes device IDs, scripts, and direct controls without executi
   assert.equal(mappingMatchesDevice(parsed, parsed.devices[0]), true);
 });
 
-test("supported Mixxx controls translate to stable KDJ performance targets", () => {
-  assert.deepEqual(mixxxControlTarget("[Channel1]", "play"), { kind: "deck-play", deck: 0 });
+test("Mixxx compatibility is limited to manager mixer controls", () => {
+  assert.deepEqual(mixxxControlTarget("[Channel1]", "pregain"), { kind: "deck-gain", deck: 0 });
   assert.deepEqual(mixxxControlTarget("[Channel2]", "filterMid"), { kind: "deck-mid", deck: 1 });
-  assert.deepEqual(mixxxControlTarget("[Channel1]", "hotcue_8_activate"), { kind: "deck-hot-cue", deck: 0, slot: 8 });
-  assert.deepEqual(mixxxControlTarget("[Master]", "crossfader"), { kind: "crossfader" });
-  assert.deepEqual(mixxxControlTarget("[Master]", "crossfader_enable"), { kind: "crossfader-enable" });
+  assert.deepEqual(mixxxControlTarget("[Channel1]", "filterQuickEffect"), { kind: "deck-filter", deck: 0 });
+  assert.equal(mixxxControlTarget("[Channel1]", "sync_enabled"), null);
+  assert.equal(mixxxControlTarget("[Channel1]", "hotcue_8_activate"), null);
+  assert.equal(mixxxControlTarget("[Master]", "crossfader"), null);
   assert.equal(mixxxControlTarget("[Channel3]", "play"), null);
 });

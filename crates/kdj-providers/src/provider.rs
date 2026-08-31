@@ -115,7 +115,11 @@ impl ProviderContext {
 
     /// 各平台登录态落盘目录。
     pub fn session_dir(&self) -> PathBuf {
-        self.data_dir.join("sessions")
+        let dir = self.data_dir.join("sessions");
+        if let Err(error) = crate::session_fs::ensure_private_dir(&dir) {
+            tracing::warn!("无法保护登录态目录：{error:#}");
+        }
+        dir
     }
 
     /// 下载落盘目录。直接用设置里的下载根目录，不再按平台分子目录。
@@ -251,6 +255,7 @@ pub struct ProtectedPreviewCipher {
     pub sabr_url: Option<String>,
     pub video_playback_ustreamer_config: Option<String>,
     pub sabr_formats: Vec<Value>,
+    pub sabr_audio_itag: u32,
     pub duration_ms: u64,
 }
 
@@ -277,6 +282,12 @@ pub trait MusicProvider: Send + Sync {
     /// 当前登录态。**不要返回 Err**——网络问题一律降级成 `state = unknown`，
     /// 否则前端每次抖动都会把"已登录"闪成"未登录"。
     async fn account(&self) -> Account;
+
+    /// 只读取落盘凭证或内存缓存，不发任何平台请求。应用启动用这条；用户明确刷新
+    /// 账号状态时才调用 [`MusicProvider::account`] 做联网核验。
+    async fn cached_account(&self) -> Account {
+        self.account().await
+    }
 
     /// 新建扫码会话。
     async fn create_qr(&self) -> Result<QrSession>;
@@ -321,6 +332,14 @@ pub trait MusicProvider: Send + Sync {
         _limit: usize,
     ) -> Result<Option<StreamPlaylistResponse>> {
         Ok(None)
+    }
+
+    /// 从当前账号的收藏或本人可编辑歌单中移除一首歌。
+    ///
+    /// 实现必须在服务端重新确认歌单所有权，并真正等待平台写接口成功；不能只改
+    /// KDJ 的目录缓存。收藏的他人歌单不属于“可编辑歌单”。
+    async fn remove_stream_playlist_track(&self, _key: &str, _source: &SongSource) -> Result<()> {
+        anyhow::bail!("该平台暂不支持从在线歌单移除歌曲")
     }
 
     /// 解析歌曲/歌单链接。
@@ -378,15 +397,6 @@ pub trait MusicProvider: Send + Sync {
         Ok(None)
     }
 
-    /// 固定 YouTube BotGuard Create/GenerateIT RPC；不接受任意 URL。
-    async fn protected_preview_botguard(
-        &self,
-        _operation: &str,
-        _payload: &Value,
-    ) -> Result<Option<Value>> {
-        Ok(None)
-    }
-
     /// 按平台歌曲 id / mid 取 LRC。没有歌词能力的平台默认 `Ok(None)`。
     async fn lyric(&self, key: &str) -> Result<Option<LyricText>> {
         let _ = key;
@@ -399,12 +409,68 @@ pub trait MusicProvider: Send + Sync {
 pub trait VideoProvider: Send + Sync {
     fn platform(&self) -> Platform;
     async fn resolve_video(&self, input: &str) -> Result<VideoInfo>;
+    /// 按平台自己的鉴权/防盗链规则代理一段视频预览媒体流。
+    ///
+    /// `input` 是平台视频 ID 或其等价输入；`page_index` 给支持分 P 的平台使用。
+    /// Range 语义由 provider 原样转发，应用层只负责把统一响应重新包成 HTTP。
+    async fn preview_stream(
+        &self,
+        input: &str,
+        page_index: usize,
+        max_height: i64,
+        track: VideoPreviewTrack,
+        range: Option<&str>,
+    ) -> Result<VideoPreviewStream>;
     async fn download_video(
         &self,
         request: &VideoDownloadRequest,
         cancel: &CancellationToken,
         progress: &ProgressSink,
     ) -> Result<PathBuf>;
+
+    /// 下载前需要浏览器/原生挑战的来源，可通过这一入口消费刚生成的一次性媒体源。
+    /// 普通视频平台沿用 `download_video`；受保护来源必须自行校验该地址，不能把它
+    /// 当成任意网络 URL 转交给 FFmpeg。
+    async fn download_video_prepared(
+        &self,
+        request: &VideoDownloadRequest,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+        prepared_source_url: Option<&str>,
+    ) -> Result<PathBuf> {
+        anyhow::ensure!(
+            prepared_source_url.is_none(),
+            "该视频平台不接受外部准备的下载来源"
+        );
+        self.download_video(request, cancel, progress).await
+    }
+}
+
+/// 预览媒体的轨道形态。B 站 durl 使用 `Muxed`；YouTube DASH 使用独立
+/// `Video` / `Audio`，由 WebView 的 MediaSource 在播放器内部合流。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoPreviewTrack {
+    Muxed,
+    Video,
+    Audio,
+}
+
+/// 视频 provider 返回给本地 HTTP 层的统一流响应。
+///
+/// 不暴露 `reqwest::Response`，避免 server 绑定 provider 的 HTTP 客户端实现；
+/// 同时保留媒体元素拖动所需的状态码与 Range 响应头。
+pub struct VideoPreviewStream {
+    pub status: u16,
+    pub content_type: String,
+    /// MediaSource 创建 SourceBuffer 所需的 RFC 6381 codec（例如 avc1 / mp4a）。
+    pub codec: Option<String>,
+    /// DASH 初始化段和 SIDX 索引段的闭区间；单文件流为 `None`。
+    pub init_range: Option<(u64, u64)>,
+    pub index_range: Option<(u64, u64)>,
+    pub duration_ms: Option<u64>,
+    pub content_length: Option<u64>,
+    pub content_range: Option<String>,
+    pub body: futures_util::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>,
 }
 
 /// 没有登录体系的 provider 可以直接复用这几个默认实现。

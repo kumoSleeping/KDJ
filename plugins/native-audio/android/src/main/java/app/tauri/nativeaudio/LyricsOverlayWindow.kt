@@ -155,8 +155,22 @@ class LyricsOverlayWindow(context: Context) {
             .onFailure { Log.w(TAG, "overlay updateViewLayout failed", it) }
     }
 
-    fun setFrame(primary: String, secondary: String, fill: Float) {
-        view?.setFrame(primary, secondary, fill)
+    fun setFrame(
+        primary: String,
+        secondary: String,
+        primaryFill: Float,
+        secondaryFill: Float,
+        primaryMotion: Float,
+        secondaryMotion: Float,
+    ) {
+        view?.setFrame(
+            primary,
+            secondary,
+            primaryFill,
+            secondaryFill,
+            primaryMotion,
+            secondaryMotion,
+        )
     }
 
     fun setReserveSecondary(reserve: Boolean) {

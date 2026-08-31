@@ -924,8 +924,28 @@ impl AudioRenderer {
                 let raw = self.smooth_stream_edge(1, sources[1], raw_b, advance_b);
                 self.mix_replacement(1, raw, advance_b, replacement_sources[1])
             };
+            // A starved-but-live stream must hold the crossfade clock: progressing through a
+            // decoder underrun would turn a temporary missing packet into an audible level jump.
+            // EOF is different. Automatic handoffs deliberately start near the end of the
+            // outgoing song, so that side may drain before the requested fade duration. Treating
+            // a confirmed EOF as starvation froze the transition forever and made the eventual
+            // next-song adoption sound like a hard cut. The remaining incoming samples must keep
+            // advancing the equal-power envelope to its deterministic endpoint.
+            let finished = [
+                callback_source_ended(
+                    sources[0],
+                    self.deck_positions[0],
+                    self.loop_transport_active(0),
+                ),
+                callback_source_ended(
+                    sources[1],
+                    self.deck_positions[1],
+                    self.loop_transport_active(1),
+                ),
+            ];
             let transition_can_advance = self.transition.is_none()
-                || (!required[0] || advance_a) && (!required[1] || advance_b);
+                || (!required[0] || advance_a || finished[0])
+                    && (!required[1] || advance_b || finished[1]);
             let (transition_a, transition_b) = self.transition_gains();
             let (a, b) = if self.rendering_active() {
                 (
@@ -1050,9 +1070,11 @@ impl AudioRenderer {
 
     #[inline]
     fn observe_deck_levels(&mut self, a: [f32; 2], b: [f32; 2]) {
-        // Fast attack with a ~0.35s visual release at 48 kHz so meters feel responsive. The callback
-        // remains allocation/lock free; levels may exceed 1.0 so the UI can report clipping.
-        const RELEASE_PER_FRAME: f32 = 0.999_94;
+        // Fast attack with a ~52ms visual release at 48 kHz. The old ~350ms hold flattened nearly
+        // every mastered track into a static full meter before the 30fps UI sampler could observe
+        // any transient fall. The callback remains allocation/lock free; levels may exceed 1.0 so
+        // the UI can still report clipping.
+        const RELEASE_PER_FRAME: f32 = 0.999_6;
         for (index, input) in [a, b].into_iter().enumerate() {
             let active = self.playing && self.deck_playing[index] || self.platter_active(index);
             if !active {
@@ -4236,7 +4258,7 @@ mod tests {
         let cache = Arc::new(ScratchPcmCache::new(48_000));
         cache.request_prefetch(10.0 * 48_000.0);
         let mut seen = 0;
-        let (generation, _) = cache.next_request(&mut seen).unwrap();
+        let (generation, _, _) = cache.next_request(&mut seen).unwrap();
         assert!(cache.publish(
             generation,
             &crate::DecodedScratchWindow {
@@ -4366,7 +4388,7 @@ mod tests {
         let cache = Arc::new(ScratchPcmCache::new(48_000));
         cache.request_prefetch(480_000.0);
         let mut seen = 0;
-        let (generation, _) = cache.next_request(&mut seen).unwrap();
+        let (generation, _, _) = cache.next_request(&mut seen).unwrap();
         assert!(cache.publish(
             generation,
             &crate::DecodedScratchWindow {
@@ -4782,6 +4804,22 @@ mod tests {
     }
 
     #[test]
+    fn realtime_peak_snapshot_releases_between_visible_level_ticks() {
+        let (mut controller, mut renderer) = command_channel(4);
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        let mut impulse_output = [0.0; 2];
+        renderer.render(&[1.0; 2], &[], &mut impulse_output, 1);
+        let mut silence_output = [0.0; 4_800];
+        renderer.render(&[0.0; 4_800], &[], &mut silence_output, 1);
+        assert!(controller.snapshot().deck_peak_levels[0] < 0.16);
+    }
+
+    #[test]
     fn realtime_snapshot_exposes_independent_post_eq_spectrum_bands() {
         let (mut controller, mut renderer) = command_channel(4);
         controller
@@ -4883,6 +4921,63 @@ mod tests {
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.active_deck, DeckId::B);
         assert_eq!(snapshot.deck_frames, [4, 8_004]);
+    }
+
+    #[test]
+    fn prepared_stream_handoff_finishes_after_the_outgoing_source_reaches_eof() {
+        let (outgoing, mut outgoing_writer) = StreamSource::<[f32; 2]>::bounded(32);
+        for _ in 0..2 {
+            outgoing_writer.push([1.0, 1.0], || false).unwrap();
+        }
+        drop(outgoing_writer);
+        let (incoming, mut incoming_writer) = StreamSource::<[f32; 2]>::bounded(32);
+        for _ in 0..16 {
+            incoming_writer.push([0.5, 0.5], || false).unwrap();
+        }
+        drop(incoming_writer);
+
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                101,
+                SourceKind::Stream,
+                Arc::as_ptr(&outgoing) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .install_prepared(
+                DeckId::B,
+                102,
+                SourceKind::Stream,
+                Arc::as_ptr(&incoming) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::HandoffPrepared {
+                to: DeckId::B,
+                target_frame: 0,
+                transition_frames: 8,
+                plan: TransitionPlan::default(),
+            })
+            .unwrap();
+
+        renderer.render_prepared(&mut [0.0; 10], 48_000, 1);
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.active_deck, DeckId::B);
+        assert!(
+            !snapshot.transitioning,
+            "a confirmed outgoing EOF must not freeze the crossfade clock"
+        );
+        assert_eq!(snapshot.deck_source_ids, [101, 102]);
     }
 
     #[test]

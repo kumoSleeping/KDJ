@@ -23,6 +23,27 @@ const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
 const AUDIO_QUALITIES: Quality[] = ["flac", "320", "128"];
 
 const infoCache = new Map<string, VideoInfo>();
+const infoRequests = new Map<string, Promise<VideoInfo>>();
+
+function resolveInfoOnce(cacheKey: string, bvid: string, platform: "bilibili" | "youtube") {
+  const cached = infoCache.get(cacheKey);
+  if (cached) return Promise.resolve(cached);
+  const pending = infoRequests.get(cacheKey);
+  if (pending) return pending;
+  const request = api
+    .videoResolve(bvid, platform)
+    .then((result) => {
+      if (infoCache.size >= 128) {
+        const oldest = infoCache.keys().next().value;
+        if (oldest) infoCache.delete(oldest);
+      }
+      infoCache.set(cacheKey, result);
+      return result;
+    })
+    .finally(() => infoRequests.delete(cacheKey));
+  infoRequests.set(cacheKey, request);
+  return request;
+}
 
 function useDraft(taskId: string) {
   return useSyncExternalStore(
@@ -93,17 +114,19 @@ export function QueueRowConfig({
     const bvidMatch = task.title.match(/\bBV[0-9A-Za-z]{10}\b/);
     rememberVideoEnqueue(task.id, {
       platform: task.platform === "youtube" ? "youtube" : "bilibili",
-      bvid: bvidMatch?.[0],
-      page_index: 0,
+      bvid: task.source_key?.trim() || bvidMatch?.[0],
+      page_index: task.video_page?.index ?? 0,
+      page_count: task.video_page?.count ?? 0,
+      page_title: task.video_page?.title || undefined,
       max_height: Number.isFinite(height) && height > 0 ? height : (settings?.video_max_height ?? 1080),
       audio_only: task.quality === "audio",
-      transcode: true,
+      transcode: videoPlatform !== "youtube",
       title: task.title,
       artist: task.artist,
       cover: task.cover,
       dest_dir: task.dest_dir,
     });
-  }, [open, task, draft, settings?.video_max_height]);
+  }, [open, task, draft, settings?.video_max_height, videoPlatform]);
 
   useEffect(() => {
     if (!open || task.kind !== "video" || !bvid) return;
@@ -114,10 +137,8 @@ export function QueueRowConfig({
       return;
     }
     let alive = true;
-    void api
-      .videoResolve(bvid, videoPlatform)
+    void resolveInfoOnce(cacheKey, bvid, videoPlatform)
       .then((result) => {
-        infoCache.set(cacheKey, result);
         if (alive) setInfo(result);
       })
       .catch(() => undefined);
@@ -160,13 +181,20 @@ export function QueueRowConfig({
   const audioOnly = Boolean(videoDraft?.request.audio_only);
   const maxHeight = videoDraft?.request.max_height ?? settings?.video_max_height ?? 1080;
   const offsetMode: OffsetMode = videoDraft?.offsetMode ?? "none";
-  const canEdit = task.state === "queued";
+  const canEdit =
+    task.state === "queued" ||
+    (task.kind === "audio" && (task.state === "paused" || task.state === "failed"));
 
   const qualityLabel = useMemo(() => {
     if (task.kind !== "audio") return null;
-    const q = (draft?.kind === "audio" ? draft.quality : null) ?? settings?.default_quality ?? "flac";
+    const taskQuality = AUDIO_QUALITIES.find((quality) => quality === task.quality.toLowerCase());
+    const q =
+      (draft?.kind === "audio" ? draft.quality : null) ??
+      taskQuality ??
+      settings?.default_quality ??
+      "flac";
     return q === "flac" ? "FLAC" : `${q}K`;
-  }, [task.kind, draft, settings?.default_quality]);
+  }, [task.kind, task.quality, draft, settings?.default_quality]);
 
   if (!open) return null;
 
@@ -206,22 +234,29 @@ export function QueueRowConfig({
             disabled={!canEdit || Boolean(busy)}
             title={
               canEdit
-                ? `本条音质：${qualityLabel}（覆盖全局默认）。点一下切换并重新排队`
+                ? `本条音质：${qualityLabel}（覆盖全局默认）。点一下切换`
                 : "已开始的任务不能改音质"
             }
             onClick={() => {
               const current =
                 (draft?.kind === "audio" ? draft.quality : null) ??
+                AUDIO_QUALITIES.find((quality) => quality === task.quality.toLowerCase()) ??
                 settings?.default_quality ??
                 "flac";
               const index = AUDIO_QUALITIES.indexOf(current);
               const next =
                 AUDIO_QUALITIES[(index + 1 + AUDIO_QUALITIES.length) % AUDIO_QUALITIES.length];
-              setQueueDraft(task.id, { kind: "audio", quality: next });
               void run("改音质", async () => {
-                // 音频改参：取消后按同来源重入队做不到（任务不带 SongSource）。
-                // 先把草稿记上；真正覆盖要等后续后端支持。至少 UI 标明本条意图。
-                if (task.state !== "queued") throw new Error("只有排队中的任务还能改");
+                if (
+                  task.state !== "queued" &&
+                  task.state !== "paused" &&
+                  task.state !== "failed"
+                ) {
+                  throw new Error("只有待开始、已暂停或上次失败的歌曲可以改音质");
+                }
+                const updated = await api.updateDownloadQuality(task.id, next);
+                useDownloadStore.getState().mergeTasks([updated]);
+                setQueueDraft(task.id, { kind: "audio", quality: next });
               });
             }}
           >
@@ -266,7 +301,13 @@ export function QueueRowConfig({
               title={`${pages[pageIndex]?.title ?? `P${pageIndex + 1}`} · 点击切换`}
               onClick={() => {
                 const nextPage = (pageIndex + 1) % pages.length;
-                const next = patchVideoDraft(task.id, { request: { page_index: nextPage } });
+                const next = patchVideoDraft(task.id, {
+                  request: {
+                    page_index: nextPage,
+                    page_count: pages.length,
+                    page_title: pages[nextPage]?.title,
+                  },
+                });
                 if (!next) return;
                 void run("改分 P", () => applyVideoDraft(task, next));
               }}
@@ -316,7 +357,7 @@ export function QueueRowConfig({
 
       {videoPlatform === "bilibili" ? (
       <div className="kd-queue-config-block">
-        <div className="kd-queue-config-label">Offset 自动识别下载</div>
+        <div className="kd-queue-config-label">时间偏移</div>
         <label className="kd-queue-radio">
           <input
             type="radio"
@@ -332,7 +373,7 @@ export function QueueRowConfig({
               void run("清 Offset", () => applyVideoDraft(task, next));
             }}
           />
-          <span>不用 Offset（按原片）</span>
+          <span>保持原片</span>
         </label>
         <label className="kd-queue-radio">
           <input
@@ -359,7 +400,7 @@ export function QueueRowConfig({
             }}
           />
           <span>
-            按当前播放器歌曲相同 Offset 自动识别
+            匹配当前播放曲目
             {playerTrack ? (
               <span className="kd-faint">
                 {" "}
@@ -380,7 +421,7 @@ export function QueueRowConfig({
               patchVideoDraft(task.id, { offsetMode: "bound" });
             }}
           />
-          <span>绑定一首歌曲的 Offset 下载</span>
+          <span>匹配指定曲目</span>
         </label>
 
         {offsetMode === "bound" ? (
@@ -432,7 +473,7 @@ export function QueueRowConfig({
                   ) : null}
                 </span>
               ) : (
-                <span className="kd-faint">把曲库歌曲拖到这里，或用下面搜索</span>
+                <span className="kd-faint">拖入曲目或搜索</span>
               )}
             </div>
             <div className="kd-queue-bind-search">
@@ -492,7 +533,7 @@ export function QueueRowConfig({
       {error ? <p className="kd-queue-config-error">{error}</p> : null}
       {!canEdit ? (
         <p className="kd-faint" style={{ margin: 0, fontSize: "var(--kd-size-xs)" }}>
-          已开始下载，参数已锁定。要改请取消后重新加入队列。
+          下载已开始，参数已锁定。
         </p>
       ) : null}
     </div>

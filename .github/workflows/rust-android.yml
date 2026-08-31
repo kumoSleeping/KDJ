@@ -15,9 +15,9 @@ on:
   push:
     tags: ["v*"]
 
-# 发 Release 需要写权限（老 build.yml 首跑就是栽在只读 token 上）
+# APK 构建 job 只读；只有独立 publish job 临时获得 contents:write。
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: rust-android-${{ github.ref }}
@@ -35,32 +35,37 @@ env:
   # Tauri 的 gradle 插件要求 JDK 17+。**上限也要管**：本机用系统的 JDK 22 时
   # sdkmanager 直接起不来，所以这里钉 17 而不是 latest。
   JAVA_VERSION: "17"
+  # 从已发布的 v0.2.44 app-arm64-release.apk（apksig 验证通过）提取的正式证书。
+  # 证书是公开身份锚；后续轮换必须作为显式迁移处理，不能随 keystore secret 漂移。
+  ANDROID_RELEASE_CERT_SHA256: BD0C0FBEBB1FDE10AC910458542E46C6204FAC3F3B4E3F27B0255D4E6480EA72
 
 jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
-      - name: 安装 Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          # The action's default includes the obsolete `tools` package, which aliases the
-          # emulator and intermittently downloads a corrupt archive. We install every required
-          # SDK/NDK package explicitly below, so only bootstrap platform-tools here.
-          packages: platform-tools
+      # GitHub Ubuntu runner 预装并维护 Android cmdline-tools；直接验证官方 sdkmanager，
+      # 避免为一次 PATH/bootstrap 操作引入一个未签名的第三方 Action 提交。
+      - name: 验证 Android SDK 工具链
+        run: |
+          set -euo pipefail
+          command -v sdkmanager
+          sdkmanager --version
 
-      # setup-android 只给 cmdline-tools，NDK 要自己点名装。
+      # NDK 要自己点名装。
       # ANDROID_NDK_HOME / NDK_HOME 两个变量都要给：Tauri 读前者，
       # cc-rs（ring / libsqlite3-sys 的构建脚本）读后者，只给一个会在
       # "gradle 跑起来了但 cargo 编不过" 的地方失败，很难看出是缺变量。
@@ -82,24 +87,38 @@ jobs:
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
-      # SCNet Vulkan 的 pinned ExecuTorch AAR 只带 arm64-v8a / x86_64；本测试版只发
-      # 真机主流的 aarch64，不能再假装 armv7 能运行后把 APK 交给用户。i686/x86_64
-      # 是模拟器用的，要跑模拟器再补对应 target 和 AAR ABI。
-      #
       # 注意：`android init` 自己还会 rustup 补装 i686 / x86_64（本机实测），
       # 所以这里少装两个不会让 init 失败，只是 init 那一步会多花一点时间下载。
       - name: 安装 Rust 与安卓 target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: aarch64-linux-android
 
       - name: Rust 构建缓存
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: android
 
       - name: 安装前端依赖
         run: npm ci
+
+      - name: npm 依赖漏洞与注册表签名门禁
+        run: |
+          npm audit --audit-level=low
+          npm audit signatures
+
+      - name: 前端逻辑与生产构建门禁
+        run: |
+          npm run test:frontend-logic
+          npm run tauri:web:build
+
+      - name: Cargo 依赖漏洞门禁
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --version 0.22.2
+          # RUSTSEC-2024-0429 已在 vendor/glib-0.18.5 逐行回补上游 0.20 修复；
+          # path source 会被 cargo-audit 正确排除，不设置 ignore，任何普通漏洞仍硬失败。
+          cargo audit
 
       # 判据同 rust-build.yml：看 tauri.conf.json 而不是目录，
       # 半成品的 src-tauri/ 目录会让 `android init` 报一堆没头没尾的错。
@@ -127,10 +146,11 @@ jobs:
       #     否则每次 init 都会把手改冲掉。
       - name: tauri android init
         if: steps.shell.outputs.present == 'true'
-        run: npx --yes @tauri-apps/cli@^2 android init
+        run: npx --no-install tauri android init
 
-      # Tag 是正式交付物，缺任意正式密钥都必须在耗时构建之前停下。
-      - name: 验证正式发行签名密钥
+      # Secret 只进入这一小步：脚本将 keystore 与 Gradle properties 写入生成目录，
+      # 后续耗时构建不再继承 base64、口令或 alias。并在编译前核对既有发布证书身份。
+      - name: 配置并验证正式发行签名
         if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
@@ -145,23 +165,21 @@ jobs:
               exit 1
             fi
           done
-
-      # 正式 tag 使用稳定的发布密钥；把 secret 写进环境而不是直接传给 post-init，
-      # 这样测试签名和正式签名走同一个脚本分支，且脚本不必知道 GitHub Actions。
-      - name: 配置正式发行签名环境
-        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-        run: |
-          set -euo pipefail
-          {
-            echo "ANDROID_KEYSTORE_BASE64=$ANDROID_KEYSTORE_BASE64"
-            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
-            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
-          } >> "$GITHUB_ENV"
+          ./scripts/android-postinit.sh
+          actual=$(
+            LC_ALL=C keytool -list -v \
+              -keystore src-tauri/gen/android/app/release.jks \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+              -alias "$ANDROID_KEY_ALIAS" \
+              | sed -n 's/^[[:space:]]*SHA256:[[:space:]]*//p' \
+              | tr -d ':' \
+              | tr '[:lower:]' '[:upper:]'
+          )
+          if [ "$actual" != "$ANDROID_RELEASE_CERT_SHA256" ]; then
+            echo "::error::Android keystore 证书不匹配：expected=$ANDROID_RELEASE_CERT_SHA256 actual=${actual:-missing}"
+            exit 1
+          fi
+          echo "✓ Android 发布证书身份已确认"
 
       # workflow_dispatch 的分支 APK 也要能实际装进设备收诊断，不能上传一个只能
       # 验证编译的 unsigned 文件。每次 runner 生成独立测试证书：它绝不能用于发布，
@@ -177,22 +195,11 @@ jobs:
             -alias kdj-device-test -keypass kdj-device-test \
             -dname 'CN=KDJ Device Test, OU=Test, O=KDJ, C=ZZ' \
             -keyalg RSA -keysize 2048 -validity 7
-          {
-            echo "ANDROID_KEYSTORE_PATH=$key_store"
-            echo 'ANDROID_KEYSTORE_PASSWORD=kdj-device-test'
-            echo 'ANDROID_KEY_ALIAS=kdj-device-test'
-            echo 'ANDROID_KEY_PASSWORD=kdj-device-test'
-          } >> "$GITHUB_ENV"
-
-      # init 之后必须重做的五件事（明文放行 / 权限 / ExecuTorch / 签名 / 图标）统一交给
-      # scripts/android-postinit.sh —— 本地和 CI 跑**同一份**脚本。
-      # 各写一套的下场是"我这儿能装、CI 出来的装不上"，而且这种差异
-      # 只有等到把 APK 拷进手机那一刻才会暴露。
-      #
-      # 签名环境在上两步确定：tag 用 repo secrets，非 tag 用一次性的设备测试证书。
-      - name: init 后置补丁（明文 / 权限 / ExecuTorch / 签名 / 图标）
-        if: steps.shell.outputs.present == 'true'
-        run: ./scripts/android-postinit.sh
+          ANDROID_KEYSTORE_PATH="$key_store" \
+          ANDROID_KEYSTORE_PASSWORD=kdj-device-test \
+          ANDROID_KEY_ALIAS=kdj-device-test \
+          ANDROID_KEY_PASSWORD=kdj-device-test \
+            ./scripts/android-postinit.sh
 
       # 风险表已按本机实测（NDK r27c）重排。**先看下面这三条已经被证伪的**，
       # 别再花时间去调 CC_*/AR_*：
@@ -208,9 +215,8 @@ jobs:
       #    manifest-merger report 确认合进去了。（旧注释把它列成第一风险，是猜的。）
       #
       # 还没被证伪、真正要担心的（按概率排）：
-      #   1. ✅ ~~明文 HTTP 被禁~~ 已解决：init 之后的「放行 localhost 明文」
-      #      步骤把 release 的 usesCleartextTraffic 翻成 true（本机 merged
-      #      manifest 已验证），细节与取舍见 06-packaging-results.md §4.7 后记。
+      #   1. ✅ ~~明文 HTTP 被禁~~ 已解决：network-security-config 只对
+      #      localhost / 127.0.0.1 放行，其余目标继续拒绝明文。
       #   2. ✅ ~~签名~~ 已解决：android-postinit.sh 注入 signingConfigs；tag 还原
       #      正式 keystore，测试构建生成一次性设备签名，产物始终是可安装的
       #      app-arm64-release.apk（不带 -unsigned 后缀）。
@@ -225,16 +231,23 @@ jobs:
       # 上面的 rust-cache 因此是刚需，不是优化。
       - name: tauri android build --apk
         if: steps.shell.outputs.present == 'true'
-        # ExecuTorch Vulkan 的 arm64 native runtime 与 Rust 主库只发一份。模型 .pte 在
-        # 首次启用 STEM 时下载到 app data，不打进 APK；不要构造包含不支持 armv7 的
-        # universal 包。
-        run: npx --yes @tauri-apps/cli@^2 android build --apk --split-per-abi --target aarch64
+        # 正式移动端只交付主流真机的 arm64 包；不打包已停用的模型 runtime。
+        env:
+          KDJ_ANDROID_BUILD_MARKER: ${{ runner.temp }}/kdj-android-build-start
+        run: |
+          # 后续门禁只接受比这个标记新的 APK，不能把缓存或工作目录里的旧包当成本次结果。
+          touch "$KDJ_ANDROID_BUILD_MARKER"
+          npx --no-install tauri android build --apk --split-per-abi --target aarch64
 
       - name: APK 单包体积门禁
         if: steps.shell.outputs.present == 'true'
-        run: ./scripts/check-android-apk-size.sh
+        env:
+          KDJ_ANDROID_BUILD_MARKER: ${{ runner.temp }}/kdj-android-build-start
+        run: |
+          set -o pipefail
+          ./scripts/check-android-apk-size.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: 验证测试 APK 可安装签名
+      - name: 验证 APK 签名与正式证书身份
         if: steps.shell.outputs.present == 'true'
         shell: bash
         run: |
@@ -245,37 +258,59 @@ jobs:
             exit 1
           fi
           for apk in "${apks[@]}"; do
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify -v "$apk"
+            certs=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs -v "$apk")
+            printf '%s\n' "$certs"
+            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              actual=$(
+                printf '%s\n' "$certs" \
+                  | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+                  | tr -d ':' \
+                  | tr '[:lower:]' '[:upper:]'
+              )
+              if [ "$actual" != "$ANDROID_RELEASE_CERT_SHA256" ]; then
+                echo "::error::正式 APK 证书不匹配：expected=$ANDROID_RELEASE_CERT_SHA256 actual=${actual:-missing}"
+                exit 1
+              fi
+            fi
           done
 
-      - name: 验证正式 APK 确实已签名
-        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
+      - name: 清理 runner 上的 Android 签名材料
+        if: ${{ always() && steps.shell.outputs.present == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -path '*/release/*-release.apk' -print | sort)
-          if [ "${#apks[@]}" -eq 0 ]; then
-            echo "::error::没有找到已签名的 *-release.apk"
-            exit 1
-          fi
-          for apk in "${apks[@]}"; do
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs -v "$apk"
+          for secret_file in \
+            src-tauri/gen/android/app/release.jks \
+            src-tauri/gen/android/app/keystore.properties; do
+            if [ -f "$secret_file" ]; then
+              shred --remove --zero "$secret_file"
+            fi
           done
 
       - name: 上传 APK
         if: steps.shell.outputs.present == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: kdj-android-apk
           path: |
             src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
-      # 和 rust-build.yml 的桌面产物进**同一个** Release（softprops 对已存在的
-      # Release 是追加文件，不会另建）。tag 的来源有两条路都成立：
-      # release.yml 检测到新版本号后 dispatch 到 tag ref，或者手动 push tag。
-      - name: 发布 Release（仅 tag）
-        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
+  publish:
+    name: 发布 Android APK
+    needs: apk
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载 APK artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kdj-android-apk
+          path: bundles
+
+      - name: 上传 APK 到 Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -284,7 +319,7 @@ jobs:
           files=()
           while IFS= read -r -d '' file; do
             files+=("$file")
-          done < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path '*/release/*-release.apk' -print0)
+          done < <(find bundles -type f -name '*-release.apk' -print0)
           if (( ${#files[@]} == 0 )); then
             echo "::error::没有找到可发布的 APK"
             exit 1

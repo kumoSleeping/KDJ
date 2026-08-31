@@ -6,7 +6,7 @@
  */
 
 import type { DownloadTask } from "../types";
-import { writeLocalStorageNow } from "./storageWrite";
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 const STORAGE_KEY = "kd-download-display-v1";
 
@@ -22,7 +22,7 @@ let memoryCache: Record<string, DownloadDisplayHint> | null = null;
 function readAll(): Record<string, DownloadDisplayHint> {
   if (memoryCache) return memoryCache;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readLocalStorage(STORAGE_KEY);
     if (!raw) return (memoryCache = {});
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return (memoryCache = {});

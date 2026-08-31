@@ -84,6 +84,17 @@ pub fn decode_audio_native(path: &Path, max_seconds: Option<f64>) -> Result<Deco
     decode_audio_inner(path, None, max_seconds, 0.0)
 }
 
+/// Decode the same native-rate PCM as [`decode_audio_native`], but let an optional visual owner
+/// abandon the scan between compressed packets. A completed value is byte-for-byte the ordinary
+/// path; cancellation never publishes partial PCM.
+pub fn decode_audio_native_cancellable(
+    path: &Path,
+    max_seconds: Option<f64>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<DecodedAudio>> {
+    decode_audio_inner_cancellable(path, None, max_seconds, 0.0, cancelled)
+}
+
 /// 带起始偏移的解码。
 ///
 /// 分析窗从曲子 15% 处开始（跳过 intro 的静音铺垫），所以需要 seek。
@@ -96,12 +107,38 @@ pub fn decode_audio_from(
     decode_audio_inner(path, Some(target_sr), max_seconds, offset)
 }
 
+/// 与 [`decode_audio_from`] 完全相同，但允许后台分析在压缩包边界和重采样循环中
+/// 协作取消。返回 `Ok(None)` 表示用户取消；不会把不完整 PCM 当成解码失败。
+pub fn decode_audio_from_cancellable(
+    path: &Path,
+    target_sr: u32,
+    max_seconds: Option<f64>,
+    offset: f64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<DecodedAudio>> {
+    decode_audio_inner_cancellable(path, Some(target_sr), max_seconds, offset, cancelled)
+}
+
 fn decode_audio_inner(
     path: &Path,
     target_sr: Option<u32>,
     max_seconds: Option<f64>,
     offset: f64,
 ) -> Result<DecodedAudio> {
+    decode_audio_inner_cancellable(path, target_sr, max_seconds, offset, &|| false)?
+        .context("音频解码被取消")
+}
+
+fn decode_audio_inner_cancellable(
+    path: &Path,
+    target_sr: Option<u32>,
+    max_seconds: Option<f64>,
+    offset: f64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<DecodedAudio>> {
+    if cancelled() {
+        return Ok(None);
+    }
     let file = File::open(path).with_context(|| format!("打开音频失败：{}", path.display()))?;
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -160,6 +197,11 @@ fn decode_audio_inner(
     let mut decoded_samples = 0usize;
 
     loop {
+        // Packet boundaries are codec-defined and normally a few milliseconds apart. This keeps
+        // a cold preview decoder pre-emptible without adding a branch to the audio callback.
+        if cancelled() {
+            return Ok(None);
+        }
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             // 正常读到结尾
@@ -225,7 +267,10 @@ fn decode_audio_inner(
         bail!("解码结果为空（文件可能没有音轨）");
     }
     // 极少数损坏文件会解出 nan/inf，后面的 FFT 会被整片污染，这里直接清零
-    for sample in mono.iter_mut() {
+    for (index, sample) in mono.iter_mut().enumerate() {
+        if index % 16_384 == 0 && cancelled() {
+            return Ok(None);
+        }
         if !sample.is_finite() {
             *sample = 0.0;
         }
@@ -235,7 +280,10 @@ fn decode_audio_inner(
     let samples = if source_sr == output_sr {
         mono
     } else {
-        resample_mono(&mono, source_sr, output_sr)
+        match resample_mono_cancellable(&mono, source_sr, output_sr, cancelled) {
+            Some(samples) => samples,
+            None => return Ok(None),
+        }
     };
     let samples = match max_seconds {
         Some(secs) => {
@@ -245,13 +293,16 @@ fn decode_audio_inner(
         None => samples,
     };
 
-    Ok(DecodedAudio {
+    if cancelled() {
+        return Ok(None);
+    }
+    Ok(Some(DecodedAudio {
         samples,
         sample_rate: output_sr,
         duration,
         channels,
         source_sample_rate: source_sr,
-    })
+    }))
 }
 
 /// 加窗 sinc 重采样（Blackman 窗，16 taps）。
@@ -347,9 +398,24 @@ fn sinc_kernel(from_sr: u32, to_sr: u32) -> Arc<SincKernel> {
 /// 每个输出样本执行一次 `u128` 乘除和取模，结果仍与逐样本坐标公式一致。
 /// 采样率必须非零。
 pub fn resample_mono(input: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
+    resample_mono_cancellable(input, from_sr, to_sr, &|| false).unwrap_or_default()
+}
+
+/// Exact polyphase sinc resampling with cooperative cancellation for optional UI assets.
+/// Checkpoints do not alter phase accumulation, so every completed output is identical to
+/// [`resample_mono`].
+pub fn resample_mono_cancellable(
+    input: &[f32],
+    from_sr: u32,
+    to_sr: u32,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<f32>> {
     assert!(from_sr > 0 && to_sr > 0, "重采样率必须非零");
+    if cancelled() {
+        return None;
+    }
     if input.is_empty() || from_sr == to_sr {
-        return input.to_vec();
+        return Some(input.to_vec());
     }
     let kernel = sinc_kernel(from_sr, to_sr);
     let out_len = ((input.len() as u128 * to_sr as u128) / from_sr as u128) as usize;
@@ -358,7 +424,10 @@ pub fn resample_mono(input: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
     let mut base = 0usize;
     let mut phase = 0usize;
 
-    for _ in 0..out_len {
+    for output_index in 0..out_len {
+        if output_index % 2_048 == 0 && cancelled() {
+            return None;
+        }
         let weights =
             &kernel.weights[phase * RESAMPLE_KERNEL_WIDTH..(phase + 1) * RESAMPLE_KERNEL_WIDTH];
         let first = base as i64 - RESAMPLE_TAPS + 1;
@@ -385,7 +454,11 @@ pub fn resample_mono(input: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
             base += 1;
         }
     }
-    output
+    if cancelled() {
+        None
+    } else {
+        Some(output)
+    }
 }
 
 #[cfg(test)]
@@ -505,6 +578,34 @@ mod tests {
     fn same_rate_is_a_passthrough() {
         let input: Vec<f32> = vec![1.0, 2.0, 3.0];
         assert_eq!(resample_mono(&input, 22050, 22050), input);
+    }
+
+    #[test]
+    fn cancellable_resampler_is_exact_when_allowed_and_stops_when_requested() {
+        let input: Vec<f32> = (0..48_000)
+            .map(|index| ((index as f64 * 0.031).sin() * 0.8) as f32)
+            .collect();
+        let expected = resample_mono(&input, 48_000, 16_000);
+        let actual = resample_mono_cancellable(&input, 48_000, 16_000, &|| false)
+            .expect("healthy output keeps optional resampling admitted");
+        assert_eq!(actual, expected);
+
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let cancelled = resample_mono_cancellable(&input, 48_000, 16_000, &|| {
+            checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 2
+        });
+        assert!(cancelled.is_none());
+    }
+
+    #[test]
+    fn native_decoder_can_yield_before_touching_the_file() {
+        let result = decode_audio_native_cancellable(
+            Path::new("/this/path/must/not/be-opened-when-cancelled.wav"),
+            None,
+            &|| true,
+        )
+        .unwrap();
+        assert!(result.is_none());
     }
 
     #[test]

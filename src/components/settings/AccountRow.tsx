@@ -71,11 +71,12 @@ const STATE_COLOR: Record<AccountState, string> = {
 export const settingRow = {
   row: {
     position: "relative",
-    display: "flex",
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) auto",
     alignItems: "center",
-    flexWrap: "wrap",
     // 老的 1.5rem 间距在 350px 里是纯浪费，够把文字和按钮分开就行
-    gap: "0.75rem",
+    columnGap: "0.75rem",
+    rowGap: "0.3rem",
     padding: "0.55rem 0",
     borderBottom: "1px solid var(--kd-line-soft)",
   },
@@ -125,7 +126,7 @@ export const settingRow = {
     color: "var(--kd-muted)",
   },
   /** 按钮列：不伸不缩，宽度完全由按钮自己的文字定 */
-  control: { flex: "0 0 auto" },
+  control: { minWidth: "max-content", whiteSpace: "nowrap" },
 } satisfies Record<string, CSSProperties>;
 
 const AVATAR_IMG: CSSProperties = {
@@ -174,7 +175,7 @@ export function AccountRow({
   sourceToggleDisabled?: boolean;
   onToggleSource(): void;
 }) {
-  const refreshAccounts = useAppStore((state) => state.refreshAccounts);
+  const setAccount = useAppStore((state) => state.setAccount);
   const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
   const [busy, setBusy] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
@@ -287,7 +288,7 @@ export function AccountRow({
           if (generation !== qrGenerationRef.current) return;
           setQrState(state.state);
           if (state.state === "done") {
-            await refreshAccounts();
+            if (state.account) setAccount(state.account);
             return;
           }
           if (QR_FINAL_STATES.has(state.state)) return;
@@ -323,9 +324,9 @@ export function AccountRow({
     setBusy(true);
     setNotice("");
     try {
-      await api.logout(account.platform);
+      const loggedOut = await api.logout(account.platform);
+      setAccount(loggedOut);
       // 成功不用报：这一行的状态当场从"已登录"变成"未登录"，按钮也换成保存登录二维码
-      await refreshAccounts();
     } catch (error) {
       setNotice(`退出失败：${(error as Error).message}`);
     } finally {
@@ -352,9 +353,7 @@ export function AccountRow({
             oauthUnlistenRef.current?.();
             oauthUnlistenRef.current = null;
             setOauthBusy(false);
-            if (event.payload.status === "done") {
-              void refreshAccounts();
-            } else {
+            if (event.payload.status !== "done") {
               setNotice(event.payload.message || "SoundCloud 登录未完成");
             }
           },
@@ -393,8 +392,10 @@ export function AccountRow({
           }
           const code = url.searchParams.get("code");
           if (!code) continue;
-          void api.soundcloudOAuthCallback({ state: session.state, code }).catch(
-            (error: unknown) => {
+          void api
+            .soundcloudOAuthCallback({ state: session.state, code })
+            .then(setAccount)
+            .catch((error: unknown) => {
               if (generation === qrGenerationRef.current) {
                 oauthUnlistenRef.current?.();
                 oauthUnlistenRef.current = null;
@@ -403,8 +404,7 @@ export function AccountRow({
                   `SoundCloud 授权回调处理失败：${error instanceof Error ? error.message : String(error)}`,
                 );
               }
-            },
-          );
+            });
           break;
         }
       });
@@ -419,7 +419,6 @@ export function AccountRow({
             oauthUnlistenRef.current?.();
             oauthUnlistenRef.current = null;
             setOauthBusy(false);
-            await refreshAccounts();
             return;
           }
           if (state.status === "error") {
@@ -510,15 +509,14 @@ export function AccountRow({
     setNotice("");
     try {
       if (soundcloudAccount) {
-        await api.soundcloudBrowserLogin(youtubeBrowser, youtubeProfile);
+        setAccount(await api.soundcloudBrowserLogin(youtubeBrowser, youtubeProfile));
       } else if (account.platform === "ytm") {
-        await api.ytmBrowserLogin(youtubeBrowser, youtubeProfile);
+        setAccount(await api.ytmBrowserLogin(youtubeBrowser, youtubeProfile));
       } else {
-        await api.youtubeBrowserLogin(youtubeBrowser, youtubeProfile);
+        setAccount(await api.youtubeBrowserLogin(youtubeBrowser, youtubeProfile));
       }
       setYoutubeLoginOpen(false);
       setYoutubeAdvancedOpen(false);
-      await refreshAccounts();
     } catch (error) {
       setNotice(`连接 ${account.label} 浏览器会话失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -532,13 +530,12 @@ export function AccountRow({
     setNotice("");
     try {
       if (account.platform === "ytm") {
-        await api.ytmHeadersLogin(youtubeHeaders);
+        setAccount(await api.ytmHeadersLogin(youtubeHeaders));
       } else {
-        await api.youtubeHeadersLogin(youtubeHeaders);
+        setAccount(await api.youtubeHeadersLogin(youtubeHeaders));
       }
       setYoutubeHeaders("");
       setYoutubeLoginOpen(false);
-      await refreshAccounts();
     } catch (error) {
       setNotice(`导入 ${account.label} 请求头失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -641,9 +638,23 @@ export function AccountRow({
             无需登录
           </span>
         ) : loggedIn ? (
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>
-            退出
-          </Button>
+          <>
+            {soundcloudAccount && account.credential_kind !== "oauth" && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={oauthBusy}
+                title="官方 OAuth 才能修改 SoundCloud 收藏和歌单"
+                onClick={() => void oauthLogin()}
+              >
+                {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
+                {oauthBusy ? "等待授权" : "改用 OAuth"}
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>
+              退出
+            </Button>
+          </>
         ) : oauthAccount ? (
           <Button size="sm" variant="ghost" disabled={oauthBusy} onClick={() => void oauthLogin()}>
             {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
@@ -688,7 +699,7 @@ export function AccountRow({
       {browserAccount && youtubeLoginOpen && !loggedIn && !browserMobile && (
         <div
           style={{
-            flex: "1 0 100%",
+            gridColumn: "1 / -1",
             minWidth: 0,
             display: "grid",
             gap: "0.3rem",
@@ -771,6 +782,22 @@ export function AccountRow({
                   ? "读取所选 Profile 的 SoundCloud 登录状态，不读取密码。"
                   : `只连接 ${account.label}；不会改变另一个 YouTube 来源的登录状态。`}
               </small>
+              {soundcloudAccount && (
+                <div>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={oauthBusy}
+                    onClick={() => void oauthLogin()}
+                  >
+                    {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
+                    {oauthBusy ? "等待授权" : "使用官方 OAuth 登录"}
+                  </Button>
+                  <small className="kd-faint" style={{ marginLeft: "0.35rem" }}>
+                    支持修改收藏和本人歌单
+                  </small>
+                </div>
+              )}
               {selectedYoutubeProfile?.requires_elevation && (
                 <small style={{ color: "var(--kd-warn)", lineHeight: 1.35 }}>
                   此 Windows Profile 使用应用绑定加密；请以管理员运行，或改用 Firefox。

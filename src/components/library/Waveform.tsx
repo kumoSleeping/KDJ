@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { CuePoint, Track, Waveform as WaveformData } from "../../types";
 import {
   PERFORMANCE_WAVEFORM_BAKE_SCREENS,
@@ -8,6 +8,7 @@ import {
   PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS,
   projectedWaveformPosition,
   shouldAnimateWaveformRail,
+  shouldWriteWaveformTransform,
   stabilizedWaveformPosition,
   waveformBakeTranslatePercent,
   waveformBakeWindow,
@@ -17,7 +18,11 @@ import {
   beatMarkerRangePercent,
   type WaveformBakeWindow,
 } from "../../lib/waveformViewport";
-import { beatGridMarkers, type BeatGridMarker } from "../../lib/performanceCues";
+import {
+  beatGridMarkers,
+  waveformBeatGridOrigin,
+  type BeatGridMarker,
+} from "../../lib/performanceCues";
 import { barPhaseAlignedSeek } from "../../lib/beatGridSync";
 import {
   correctedLiveWaveformRate,
@@ -77,14 +82,18 @@ function WaveformBeatGrid({
       {markers.map((marker) => (
         <i
           key={`${marker.positionSec}:${marker.beat}`}
+          data-beat={marker.beat}
           data-bar={marker.beat === 1 ? "true" : undefined}
           style={{
             left: `${beatMarkerRangePercent(marker.positionSec, rangeStartSec, rangeEndSec)}%`,
-            transform: unstretch,
-            transformOrigin: "0 50%",
-          }}
+            "--kd-wave-beat-local-width": `${1 / tempoScaleX}px`,
+          } as CSSProperties}
         >
-          {marker.beat === 1 ? marker.bar : null}
+          {marker.beat === 1 ? (
+            <span style={{ transform: unstretch, transformOrigin: "0 50%" }}>
+              {marker.bar}
+            </span>
+          ) : null}
         </i>
       ))}
     </span>
@@ -96,14 +105,15 @@ function WaveformBeatGrid({
  *
  * 绘制方式来自 libdjwaveform：**一列 = 一根柱子**，高度是这一列的响度，
  * 颜色是这一列的频谱构成（红=低频鼓组、绿=中频人声、蓝=高频镲片）。
- * 后端 `/api/library/waveform` 已经把每列的 amp + rgb 算好，这里只负责画。
+ * 整曲预览由曲库 API 提供；Manager 的滚动条由播放器 PCM 按需提供局部窗口。
+ * 两种来源都已经把每列的 amp + rgb 算好，这里只负责画。
  *
  * 用 canvas 而不是 SVG：几百到上千根柱子如果各是一个 <rect>，
  * 光是 DOM 节点就够让曲库切曲卡一下；canvas 一次 fillRect 循环画完。
  */
 export interface WaveformProps {
   trackId: number;
-  /** 负数 id 不再等同于在线试听；OneLibrary 需要这份来源快照加载外置文件波形。 */
+  /** 负数 id 表示在线试听；这份来源快照用于渐进波形。 */
   track?: Track | null;
   /** 播放位置（秒）。传 null 就不画播放头。 */
   position?: number | null;
@@ -139,6 +149,8 @@ export interface WaveformProps {
   preserveBarPhase?: boolean;
   /** 按分析 BPM / 首拍绘制拍线；每四拍加重为小节线。 */
   showBeatGrid?: boolean;
+  /** 播放详情即使分析置信度偏低，也使用现有 BPM/拍点绘制可见参考网格。 */
+  allowApproximateBeatGrid?: boolean;
   /** 请求的波形采样列数；演出视图使用高精度档，普通预览保持默认值。 */
   buckets?: number;
   /** DJ 局部窗口（秒）。有值时播放线固定居中，整条波形轨道在其下方移动。 */
@@ -150,6 +162,8 @@ export interface WaveformProps {
   className?: string;
   /** Precomputed waveform; bypasses the library waveform API. */
   waveform?: WaveformData;
+  /** Never acquire a library/full-song fallback when the caller's local window is absent. */
+  providedOnly?: boolean;
   /** Display-only vertical envelope scale; Performance uses it to visualize live mixer trim. */
   amplitudeScale?: number;
   /** A held hardware platter may move backward at frame rate; interpolate both directions. */
@@ -162,6 +176,8 @@ export interface WaveformProps {
   nativeDeck?: 0 | 1;
   /** 整曲预览专用：恢复 v0.2.41 的 STFT 数据、原始高饱和 RGB 与像素汇聚。 */
   renderProfile?: "current" | "release-overview";
+  /** PlayerBar owns a latest-wins lane; other visible overviews are allowed to coexist. */
+  releaseOverviewIntent?: "visible" | "player";
   /** Performance may upgrade a cached preview sooner without owning a second acquisition hook. */
   detailUpgradeDelayMs?: number;
 }
@@ -184,18 +200,21 @@ export function Waveform({
   onSeek,
   preserveBarPhase = false,
   showBeatGrid = false,
+  allowApproximateBeatGrid = false,
   buckets = 640,
   viewportSeconds = null,
   playing = false,
   playbackRate = 1,
   className,
   waveform: providedWaveform,
+  providedOnly = false,
   amplitudeScale = 1,
   interactiveScrub = false,
   snapRail = false,
   motionRevision = 0,
   nativeDeck,
   renderProfile = "current",
+  releaseOverviewIntent = "visible",
   detailUpgradeDelayMs,
 }: WaveformProps) {
   const {
@@ -208,7 +227,9 @@ export function Waveform({
     duration,
     buckets,
     providedWaveform,
+    providedOnly,
     renderProfile,
+    releaseOverviewIntent,
     detailUpgradeDelayMs,
   });
   // 右键设点永远取当时正在播放的位置，不能让鼠标点到波形哪里就误落到哪里。
@@ -241,6 +262,7 @@ export function Waveform({
     loopStartSec: number | null;
     loopLengthSec: number | null;
     loopGeneration: number;
+    layoutRevision: number;
   } | null>(null);
   const customSeekRef = useRef(onSeek);
   const draggingRef = useRef(false);
@@ -252,6 +274,7 @@ export function Waveform({
   const [railAnimationReady, setRailAnimationReady] = useState(
     () => document.visibilityState === "visible",
   );
+  const [layoutRevision, setLayoutRevision] = useState(0);
   const [liveLoopOverride, setLiveLoopOverride] = useState<{
     trackId: number;
     generation: number;
@@ -282,6 +305,13 @@ export function Waveform({
       document.removeEventListener("visibilitychange", syncVisibility);
     };
   }, []);
+
+  useEffect(() => {
+    if (!(viewportSeconds !== null && viewportSeconds > 0)) return;
+    const rebaseAfterPaneResize = () => setLayoutRevision((current) => current + 1);
+    window.addEventListener("kd:pane-resize-end", rebaseAfterPaneResize);
+    return () => window.removeEventListener("kd:pane-resize-end", rebaseAfterPaneResize);
+  }, [viewportSeconds]);
 
   useEffect(
     () => () => {
@@ -607,7 +637,8 @@ export function Waveform({
       && Math.abs(owner.railLeadInSec - railLeadInSec) < 1e-6
       && owner.loopStartSec === clock.loopStart
       && owner.loopLengthSec === clock.loopLength
-      && owner.loopGeneration === effectiveLoopGeneration;
+      && owner.loopGeneration === effectiveLoopGeneration
+      && owner.layoutRevision === layoutRevision;
 
     /**
      * Each Web Animation uses source milliseconds as its local timeline. TEMPO is therefore a
@@ -721,6 +752,7 @@ export function Waveform({
       loopStartSec: clock.loopStart,
       loopLengthSec: clock.loopLength,
       loopGeneration: effectiveLoopGeneration,
+      layoutRevision,
     };
   }, [
     bake?.endSec,
@@ -730,6 +762,7 @@ export function Waveform({
     continuousRailMotion,
     interactiveScrub,
     loopReadyForCompositor,
+    layoutRevision,
     effectiveLoopGeneration,
     motionRevision,
     nativeDeck,
@@ -783,13 +816,13 @@ export function Waveform({
       }
       if (inBake) {
         const nextBake = waveformBakeTranslatePercent(bake, sourcePosition);
-        if (Math.abs(nextBake - lastBake) > 1.0e-7) {
+        if (shouldWriteWaveformTransform(lastBake, nextBake)) {
           bakeElement.style.transform = "translate3d(-" + nextBake + "%, 0, 0)";
           lastBake = nextBake;
         }
       }
       const nextRail = sourcePosition / total * 100;
-      if (Math.abs(nextRail - lastRail) > 1.0e-7) {
+      if (shouldWriteWaveformTransform(lastRail, nextRail)) {
         railElement.style.transform = "translate3d(-" + nextRail + "%, 0, 0)";
         lastRail = nextRail;
       }
@@ -958,6 +991,9 @@ export function Waveform({
     : viewport.active
       ? "performance-detail"
       : "current";
+  const renderedAmplitudeScale = Number.isFinite(amplitudeScale)
+    ? Math.min(1, Math.max(0, amplitudeScale))
+    : 1;
 
   // Viewport Decks paint a 3-screen sliding window; overview still uses the host width.
   useLayoutEffect(() => {
@@ -965,11 +1001,13 @@ export function Waveform({
     const rail = railRef.current;
     const canvas = canvasRef.current;
     if (!host || !rail || !canvas || !displayWave) return;
-    const render = () => {
-      const renderedHeight = (viewport.active ? host.clientHeight : rail.clientHeight) || height;
-      const width = viewport.active && bake
-        ? host.clientWidth * bake.widthScale
-        : rail.clientWidth;
+    let resizeFrame = 0;
+    let deferredForPaneResize = false;
+    const renderNow = () => {
+      // clientWidth/clientHeight are the canvas's untransformed CSS box. Painting that exact box
+      // at DPR avoids both stale rail math and measuring a CSS-scaled compositor result.
+      const width = canvas.clientWidth;
+      const renderedHeight = canvas.clientHeight || height;
       if (width <= 0 || renderedHeight <= 0) return;
       drawWaveformCanvas(
         canvas,
@@ -980,12 +1018,31 @@ export function Waveform({
         bake?.startSec ?? null,
         bake?.endSec ?? null,
         canvasProfile,
+        renderedAmplitudeScale,
       );
     };
-    render();
-    const observer = new ResizeObserver(render);
+    const scheduleRender = () => {
+      if (document.body.dataset.kdPaneResizing === "right") {
+        deferredForPaneResize = true;
+        return;
+      }
+      if (resizeFrame) return;
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = 0;
+        renderNow();
+      });
+    };
+    const finishPaneResize = () => {
+      if (!deferredForPaneResize) return;
+      deferredForPaneResize = false;
+      scheduleRender();
+    };
+    renderNow();
+    const observer = new ResizeObserver(scheduleRender);
     observer.observe(host);
-    window.addEventListener("resize", render);
+    observer.observe(canvas);
+    window.addEventListener("resize", scheduleRender);
+    window.addEventListener("kd:pane-resize-end", finishPaneResize);
     // Moving a Tauri window between Retina and non-Retina displays can change DPR without changing
     // the host's CSS box, so ResizeObserver alone leaves a stale backing-store resolution.
     let dprQuery: MediaQueryList | null = null;
@@ -995,19 +1052,22 @@ export function Waveform({
       dprQuery.addEventListener("change", handleDprChange);
     };
     const handleDprChange = () => {
-      render();
+      scheduleRender();
       watchDpr();
     };
     watchDpr();
     return () => {
+      if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
       observer.disconnect();
-      window.removeEventListener("resize", render);
+      window.removeEventListener("resize", scheduleRender);
+      window.removeEventListener("kd:pane-resize-end", finishPaneResize);
       dprQuery?.removeEventListener("change", handleDprChange);
     };
   }, [
     displayWave,
     height,
     canvasProfile,
+    renderedAmplitudeScale,
     viewport.active,
     bake?.startSec,
     bake?.endSec,
@@ -1019,16 +1079,6 @@ export function Waveform({
   const ready = displayWave !== null
     && displayWave.amp.length > 0
     && (displayWave.known === undefined || displayWave.known.some(Boolean));
-  const renderedAmplitudeScale = Number.isFinite(amplitudeScale)
-    ? Math.min(1, Math.max(0, amplitudeScale))
-    : 1;
-  const canvasAmplitudeStyle = renderedAmplitudeScale === 1
-    ? undefined
-    : {
-        transform: `scaleY(${renderedAmplitudeScale})`,
-        transformOrigin: "50% 50%",
-        willChange: "transform",
-      };
   const beatRangeMargin = viewport.active ? (viewportSeconds ?? 0) / 2 + 1 : 0;
   const beatRangeStart = viewport.active && bake
     ? bake.startSec
@@ -1048,10 +1098,10 @@ export function Waveform({
     ? beatGridMarkers(
         total,
         track.bpm,
-        track.first_beat,
+        waveformBeatGridOrigin(track, allowApproximateBeatGrid),
         beatRangeStart,
         beatRangeEnd,
-        track.bpm_confidence,
+        allowApproximateBeatGrid ? null : track.bpm_confidence,
       )
     : [];
 
@@ -1115,8 +1165,9 @@ export function Waveform({
           style={{
             position: "absolute",
             inset: 0,
-            transform: `scaleX(${viewport.tempoScaleX})`,
-            transformOrigin: "50% 50%",
+            // The bake range already uses the requested viewport seconds. Scaling this bitmap a
+            // second time was the right-panel zoom/blur bug.
+            transform: "none",
             pointerEvents: "none",
             zIndex: 2,
           }}
@@ -1144,7 +1195,6 @@ export function Waveform({
                 display: ready ? "block" : "none",
                 width: "100%",
                 height: "100%",
-                ...canvasAmplitudeStyle,
               }}
               role="img"
               aria-label="频谱波形"
@@ -1154,7 +1204,7 @@ export function Waveform({
                 markers={beatMarkers}
                 rangeStartSec={bake.startSec}
                 rangeEndSec={bake.endSec}
-                tempoScaleX={viewport.tempoScaleX}
+                tempoScaleX={1}
               />
             ) : null}
           </div>
@@ -1203,7 +1253,6 @@ export function Waveform({
           zIndex: 1,
           width: "100%",
           height: "100%",
-          ...canvasAmplitudeStyle,
         }}
         role="img"
         aria-label="频谱波形"

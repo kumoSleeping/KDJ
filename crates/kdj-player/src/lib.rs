@@ -41,12 +41,15 @@ pub use output::{
     open_dynamic_default, open_prepared_default, DeviceOutput, DynamicPlayer, OutputError,
     OutputSpec,
 };
-pub use scratch_cache::{DecodedScratchWindow, ScratchPcmCache, SCRATCH_CACHE_WINDOW_SECONDS};
+pub use scratch_cache::{
+    DecodedScratchWindow, ScratchMonoWindow, ScratchPcmCache, SCRATCH_CACHE_WINDOW_SECONDS,
+};
 pub use state::{OutputCallbackTiming, TransportSnapshot};
 pub use stream::{
     decode_file_scratch_window, decode_file_streaming, decode_file_streaming_seekable,
-    decode_live_stem_streaming, decode_source_scratch_window, decode_source_streaming,
-    decode_source_streaming_seekable, decode_stem_cache_streaming, format_loop_clock,
+    decode_file_streaming_seekable_observed, decode_live_stem_streaming,
+    decode_source_scratch_window, decode_source_streaming, decode_source_streaming_seekable,
+    decode_source_streaming_seekable_observed, decode_stem_cache_streaming, format_loop_clock,
     run_pitch_preserving_pipeline, FrameLerp, LoopWindow, StemFrame, StreamMetadata,
     StreamSeekControl, StreamSource, StreamWriter, StreamingMediaSource,
     DEFAULT_STREAM_BUFFER_SECONDS, LOOP_CAPTURE_HISTORY_SECONDS, MAX_TRANSPORT_LOOP_PCM_BYTES,
@@ -54,6 +57,6 @@ pub use stream::{
 };
 pub use stretch::{stretch_preserving_pitch, stretch_preserving_pitch_with_cancel};
 pub use time_stretch::{
-    normalize_rate, PitchPreservingStretcher, TempoControl, TimeStretchFrame, MAX_TEMPO_RATE,
-    MIN_TEMPO_RATE,
+    normalize_rate, PitchPreservingStretcher, TempoControl, TimeStretchFrame, MAX_PITCH_SEMITONES,
+    MAX_TEMPO_RATE, MIN_PITCH_SEMITONES, MIN_TEMPO_RATE,
 };

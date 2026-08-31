@@ -1,22 +1,29 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use kdj_core::work_scheduler::{work_scheduler, AudioPressure};
+use kdj_analysis::waveform::{
+    analyze_waveform_evidence_cancellable, band_waveform_and_texture_with_evidence,
+    DETAIL_WAVEFORM_COLUMNS_PER_SECOND,
+};
+use kdj_core::work_scheduler::{work_scheduler, AudioPressure, WorkClass, WorkRequest};
 use kdj_core::FilterResonance;
 #[cfg(test)]
 use kdj_player::DecodedTrack;
 use kdj_player::{
-    decode_file_scratch_window, decode_file_streaming_seekable, decode_live_stem_streaming,
-    decode_source_scratch_window, decode_source_streaming_seekable, format_loop_clock,
-    run_pitch_preserving_pipeline, DeckFxKind, DeckFxSlot, DeckId, LoopWindow, PlatterPhase,
-    PlayerMode, RtCommand, ScratchPcmCache, StemFrame, StreamMetadata, StreamSeekControl,
-    StreamSource, StreamWriter, TempoControl, TransitionPlan, DEFAULT_FILTER_RESONANCE_Q,
+    decode_file_scratch_window, decode_file_streaming_seekable_observed,
+    decode_live_stem_streaming, decode_source_scratch_window,
+    decode_source_streaming_seekable_observed, format_loop_clock, run_pitch_preserving_pipeline,
+    DeckFxKind, DeckFxSlot, DeckId, LoopWindow, PlatterPhase, PlayerMode, RtCommand,
+    ScratchMonoWindow, ScratchPcmCache, StemFrame, StreamMetadata, StreamSeekControl, StreamSource,
+    StreamWriter, TempoControl, TransitionPlan, DEFAULT_FILTER_RESONANCE_Q,
     DEFAULT_STREAM_BUFFER_SECONDS, FILTER_RESONANCE_HIGH_Q, FILTER_RESONANCE_LOW_Q,
-    FILTER_RESONANCE_MEDIUM_Q, LOOP_CAPTURE_HISTORY_SECONDS, MAX_TRANSPORT_LOOP_PCM_BYTES,
-    MAX_TRANSPORT_LOOP_SECONDS, PERFORMANCE_PREROLL_SECONDS, STEM_GAIN_MAX,
+    FILTER_RESONANCE_MEDIUM_Q, LOOP_CAPTURE_HISTORY_SECONDS, MAX_PITCH_SEMITONES,
+    MAX_TRANSPORT_LOOP_PCM_BYTES, MAX_TRANSPORT_LOOP_SECONDS, MIN_PITCH_SEMITONES,
+    PERFORMANCE_PREROLL_SECONDS, STEM_GAIN_MAX,
 };
 #[cfg(test)]
 use kdj_stems::record_stem_output_underrun;
@@ -29,7 +36,7 @@ use crate::contract::{
     CommandAck, ControlAck, PlaybackBeatGrid, PlaybackClock, PlaybackCommand, PlaybackDeckClock,
     PlaybackFxKind, PlaybackFxSlot, PlaybackLevels, PlaybackPhase, PlaybackPlatterPhase,
     PlaybackSnapshot, PlaybackSource, PlaybackSourceKind, PlaybackSyncPhase, PlaybackSyncSnapshot,
-    PlaybackTransitionPlan,
+    PlaybackTransitionPlan, PlaybackWaveformWindow,
 };
 use crate::platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory};
 use crate::remote_source::{is_loopback_http_url, HttpRangeSource};
@@ -46,6 +53,12 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const TEMPO_OUTPUT_BUFFER_MS: u64 = 96;
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 120;
+/// The transport decoder stays six source seconds ahead while the post-tempo output ring remains
+/// only 96 ms. That symmetric runway lets the Manager reuse transport-owned PCM for a centred
+/// six-second view without increasing control latency. Do not grow this merely to refresh the
+/// visualization less often: an eight-second experiment reduced FFT frequency but caused audible
+/// startup underruns. Audio continuity owns the stricter budget.
+const TRANSPORT_DECODE_BUFFER_SECONDS: usize = 6;
 /// Vinyl coast must be audible before the coordinator may rebuild a decoder at the needle.
 const SCRATCH_COAST_HANDOFF_DELAY: Duration = Duration::from_millis(400);
 // classical Redress separation and tile assembly stay outside the callback. Once a fixed tile is ready, this
@@ -101,9 +114,12 @@ const STEM_SEEK_CATCHUP_STALL: Duration = Duration::from_millis(40);
 const STEM_RECOVERY_BASE_DELAY: Duration = Duration::from_millis(900);
 const STEM_RECOVERY_MAX_DELAY: Duration = Duration::from_secs(8);
 const AUDIO_CRITICAL_BUFFER_MS: u64 = 30;
-const AUDIO_LOW_BUFFER_MS: u64 = 60;
+// Optional FFT work stops with roughly three CoreAudio callbacks of runway still available. The
+// previous 60 ms edge left too little time for a 10 ms actor tick plus cooperative cancellation
+// on a heavily descheduled dev build.
+const AUDIO_LOW_BUFFER_MS: u64 = 72;
 const STEM_AUDIO_LOW_BUFFER_MS: u64 = 100;
-const AUDIO_RECOVER_BUFFER_MS: u64 = 80;
+const AUDIO_RECOVER_BUFFER_MS: u64 = 88;
 const STEM_AUDIO_RECOVER_BUFFER_MS: u64 = 140;
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
@@ -112,10 +128,416 @@ type StateReply = SyncSender<PlaybackSnapshot>;
 type StateEmitter = Arc<dyn Fn(PlaybackSnapshot) + Send + Sync>;
 type LevelEmitter = Arc<dyn Fn(PlaybackLevels) + Send + Sync>;
 type ClockEmitter = Arc<dyn Fn(PlaybackClock) + Send + Sync>;
+type WaveformSourceReply = SyncSender<Option<PlaybackWaveformSource>>;
+
+#[derive(Clone)]
+struct PlaybackWaveformSource {
+    duration: f64,
+    transport_observer: bool,
+    transport_start_frame: i64,
+    cache: Arc<ScratchPcmCache>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaybackWaveformPcmLane {
+    Transport,
+    Scratch,
+    Composite,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PlaybackWaveformPcmPlan {
+    lane: Option<PlaybackWaveformPcmLane>,
+    request_scratch: bool,
+}
+
+/// Last analysis result for one immutable PCM publication.
+///
+/// Frontend coverage polling is allowed to ask twice before the transport observer publishes its
+/// next second. Keeping this single weakly-owned entry prevents those polls from repeating FFT and
+/// colour analysis, without extending an old Deck cache's lifetime after a track replacement.
+struct CachedPlaybackWaveform {
+    cache: Weak<ScratchPcmCache>,
+    lane: PlaybackWaveformPcmLane,
+    track_id: i64,
+    start_frame: i64,
+    sample_count: usize,
+    duration_bits: u64,
+    window: PlaybackWaveformWindow,
+}
+
+impl CachedPlaybackWaveform {
+    fn matches(
+        &self,
+        cache: &Arc<ScratchPcmCache>,
+        lane: PlaybackWaveformPcmLane,
+        track_id: i64,
+        start_frame: i64,
+        sample_count: usize,
+        duration: f64,
+    ) -> bool {
+        self.lane == lane
+            && self.track_id == track_id
+            && self.start_frame == start_frame
+            && self.sample_count == sample_count
+            && self.duration_bits == duration.to_bits()
+            && self
+                .cache
+                .upgrade()
+                .is_some_and(|cached| Arc::ptr_eq(&cached, cache))
+    }
+}
+
+fn transport_observer_is_catching_up(
+    enabled: bool,
+    observed: Option<(i64, i64)>,
+    transport_start_frame: i64,
+    required_start: i64,
+    required_end: i64,
+) -> bool {
+    enabled
+        && match observed {
+            // Before the first publication, wait only when this forward decoder can eventually
+            // own the whole request. A decoder opened at a non-zero cue can never backfill the
+            // viewport's missing left side, so local playback should start random access now.
+            None => required_start >= transport_start_frame,
+            // A forward-growing observer already overlaps the requested viewport. Wait for its
+            // next coarse publication; only a true jump outside that range needs random access.
+            Some((start, end)) => {
+                required_start >= start && required_start <= end && required_end > end
+            }
+        }
+}
+
+fn range_covers(range: Option<(i64, i64)>, required_start: i64, required_end: i64) -> bool {
+    range.is_some_and(|(start, end)| required_start >= start && required_end <= end)
+}
+
+fn joined_ranges_cover(
+    first: Option<(i64, i64)>,
+    second: Option<(i64, i64)>,
+    required_start: i64,
+    required_end: i64,
+) -> bool {
+    let (Some(first), Some(second)) = (first, second) else {
+        return false;
+    };
+    let (left, right) = if first.0 <= second.0 {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    left.0 <= required_start && left.1 >= right.0 && right.1 >= required_end
+}
+
+fn joined_observer_is_catching_up(
+    enabled: bool,
+    observed: Option<(i64, i64)>,
+    available: Option<(i64, i64)>,
+    required_start: i64,
+    required_end: i64,
+) -> bool {
+    let (Some(observed), Some(available)) = (observed, available) else {
+        return false;
+    };
+    enabled
+        && available.0 <= required_start
+        && available.1 >= observed.0
+        && observed.1 < required_end
+}
+
+fn compose_waveform_pcm(
+    scratch: &ScratchMonoWindow,
+    observed: &ScratchMonoWindow,
+    required_start: i64,
+    required_end: i64,
+) -> Option<ScratchMonoWindow> {
+    if required_end <= required_start
+        || !joined_ranges_cover(
+            Some((
+                scratch.start_frame,
+                scratch
+                    .start_frame
+                    .saturating_add(scratch.samples.len() as i64),
+            )),
+            Some((
+                observed.start_frame,
+                observed
+                    .start_frame
+                    .saturating_add(observed.samples.len() as i64),
+            )),
+            required_start,
+            required_end,
+        )
+    {
+        return None;
+    }
+    let scratch_end = scratch
+        .start_frame
+        .saturating_add(scratch.samples.len() as i64);
+    let observed_end = observed
+        .start_frame
+        .saturating_add(observed.samples.len() as i64);
+    let output_start = scratch.start_frame.min(observed.start_frame);
+    let output_end = scratch_end.max(observed_end);
+    let count = usize::try_from(output_end.saturating_sub(output_start)).ok()?;
+    let sample_at = |window: &ScratchMonoWindow, frame: i64| {
+        let offset = frame.checked_sub(window.start_frame)?;
+        window.samples.get(usize::try_from(offset).ok()?).copied()
+    };
+    let mut samples = Vec::with_capacity(count);
+    for frame in output_start..output_end {
+        // The transport decoder owns the audible/right side. Use it throughout any overlap and
+        // reserve random access for history that the forward decoder can never backfill.
+        samples.push(sample_at(observed, frame).or_else(|| sample_at(scratch, frame))?);
+    }
+    Some(ScratchMonoWindow {
+        start_frame: output_start,
+        samples: samples.into(),
+    })
+}
+
+fn playback_waveform_pcm_plan(
+    transport_observer: bool,
+    urgent: bool,
+    transport_start_frame: i64,
+    observed: Option<(i64, i64)>,
+    available: Option<(i64, i64)>,
+    required_start: i64,
+    required_end: i64,
+) -> PlaybackWaveformPcmPlan {
+    if range_covers(observed, required_start, required_end) {
+        return PlaybackWaveformPcmPlan {
+            lane: Some(PlaybackWaveformPcmLane::Transport),
+            request_scratch: false,
+        };
+    }
+
+    if range_covers(available, required_start, required_end) {
+        return PlaybackWaveformPcmPlan {
+            lane: Some(PlaybackWaveformPcmLane::Scratch),
+            request_scratch: false,
+        };
+    }
+
+    if joined_ranges_cover(observed, available, required_start, required_end) {
+        return PlaybackWaveformPcmPlan {
+            lane: Some(PlaybackWaveformPcmLane::Composite),
+            request_scratch: false,
+        };
+    }
+
+    let observer_is_catching_up = transport_observer_is_catching_up(
+        transport_observer && !urgent,
+        observed,
+        transport_start_frame,
+        required_start,
+        required_end,
+    );
+    let joined_observer_is_catching_up = joined_observer_is_catching_up(
+        transport_observer && !urgent,
+        observed,
+        available,
+        required_start,
+        required_end,
+    );
+    PlaybackWaveformPcmPlan {
+        // Never publish a one-sided rail. When a decoder starts at a non-zero cue it cannot grow
+        // backwards, so the local/HTTP random-access worker supplies only the missing history;
+        // publication waits until the joined ranges cover the complete visible window.
+        lane: None,
+        request_scratch: !observer_is_catching_up && !joined_observer_is_catching_up,
+    }
+}
+
+fn playback_waveform_scratch_required_end(
+    transport_observer: bool,
+    urgent: bool,
+    transport_start_frame: i64,
+    required_start: i64,
+    required_end: i64,
+) -> i64 {
+    if !urgent
+        && transport_observer
+        && required_start < transport_start_frame
+        && transport_start_frame < required_end
+    {
+        // Routine refreshes reuse the live decoder for the future side and random access only for
+        // history. A first paint/real jump cannot wait seconds for that future side to grow: its
+        // bounded random reader owns the complete runway in one request.
+        transport_start_frame
+    } else {
+        required_end
+    }
+}
+
+const TRANSPORT_WAVEFORM_PUBLISH_QUEUE: usize = 8;
+const TRANSPORT_WAVEFORM_BATCH_IDLE: Duration = Duration::from_millis(2);
+
+struct TransportWaveformChunk {
+    start_frame: i64,
+    samples: Vec<f32>,
+}
+
+/// Rebuild the optional rolling visualization window away from the live decoder.
+///
+/// The transport can decode its six-second cushion much faster than real time. Copying the whole
+/// growing window at every source-second boundary therefore used to perform 1 + 2 + ... + 6
+/// seconds of allocation/copy work in one startup burst on the *audible decoder thread*. Later it
+/// copied the full twelve-second window once per second. Both violate the ownership rule that the
+/// audio producer may only do bounded per-frame work.
+///
+/// The decoder now moves one-second chunks through a bounded, non-blocking queue. This background
+/// owner coalesces startup bursts, maintains the twelve-second history, and performs the immutable
+/// snapshot copy. If it ever falls behind, the decoder drops visualization PCM instead of waiting;
+/// the UI retains its previous pixels until a later contiguous window is available.
+fn run_transport_waveform_publisher(
+    cache: Arc<ScratchPcmCache>,
+    receiver: Receiver<TransportWaveformChunk>,
+) {
+    kdj_core::thread_qos::prefer_background();
+    let capacity = cache.capacity_frames();
+    let mut samples = VecDeque::with_capacity(capacity);
+    let mut start_frame = 0i64;
+
+    let append =
+        |chunk: TransportWaveformChunk, samples: &mut VecDeque<f32>, start_frame: &mut i64| {
+            let expected = start_frame.saturating_add(samples.len() as i64);
+            if samples.is_empty() || chunk.start_frame != expected {
+                samples.clear();
+                *start_frame = chunk.start_frame.max(0);
+            }
+            for sample in chunk.samples {
+                if samples.len() == capacity {
+                    samples.pop_front();
+                    *start_frame = start_frame.saturating_add(1);
+                }
+                samples.push_back(if sample.is_finite() { sample } else { 0.0 });
+            }
+        };
+
+    while let Ok(first) = receiver.recv() {
+        append(first, &mut samples, &mut start_frame);
+        let disconnected = loop {
+            match receiver.recv_timeout(TRANSPORT_WAVEFORM_BATCH_IDLE) {
+                Ok(chunk) => append(chunk, &mut samples, &mut start_frame),
+                Err(RecvTimeoutError::Timeout) => break false,
+                Err(RecvTimeoutError::Disconnected) => break true,
+            }
+        };
+        cache.publish_observed_mono(start_frame, samples.iter().copied().collect());
+        if disconnected {
+            break;
+        }
+    }
+}
+
+/// Worker-local chunk capture of PCM the active transport decoder already produced.
+///
+/// The hot path performs only a mono average and `Vec::push`. Whole-window assembly, copying, FFT
+/// and colour extraction live on lower-priority optional workers. This is the crucial distinction
+/// from both retired failure modes: opening another local/HTTP decoder every few seconds, and
+/// copying a growing twelve-second preview directly on the live decoder.
+struct TransportWaveformObserver {
+    sender: Option<SyncSender<TransportWaveformChunk>>,
+    samples: Vec<f32>,
+    chunk_start_frame: i64,
+    last_frame: Option<i64>,
+    publish_interval: usize,
+}
+
+impl TransportWaveformObserver {
+    fn new(cache: Arc<ScratchPcmCache>) -> Self {
+        let publish_interval = cache.sample_rate().max(1) as usize;
+        let (sender, receiver) = mpsc::sync_channel(TRANSPORT_WAVEFORM_PUBLISH_QUEUE);
+        let publisher = std::thread::Builder::new()
+            .name("kdj-waveform-publish".to_string())
+            .spawn(move || run_transport_waveform_publisher(cache, receiver));
+        Self {
+            sender: publisher.ok().map(|_| sender),
+            samples: Vec::with_capacity(publish_interval),
+            chunk_start_frame: 0,
+            last_frame: None,
+            publish_interval,
+        }
+    }
+
+    fn reset_at(&mut self, frame: i64) {
+        self.samples.clear();
+        self.chunk_start_frame = frame.max(0);
+        self.last_frame = None;
+    }
+
+    fn push(&mut self, frame: [f32; 2], media_time: f64, sample_rate: u32) {
+        if !media_time.is_finite() {
+            return;
+        }
+        let absolute = (media_time * f64::from(sample_rate)).round().max(0.0) as i64;
+        if let Some(last) = self.last_frame {
+            // Packet/resampler boundaries can report the same timestamp twice or regress by a
+            // couple of rounding frames. Ignore that duplicate; only a meaningful rewind is a
+            // new transport window.
+            if absolute <= last && last.saturating_sub(absolute) <= 4 {
+                return;
+            }
+            let gap = absolute.saturating_sub(last);
+            if absolute < last || gap > i64::from(sample_rate) / 20 {
+                self.reset_at(absolute);
+            } else if gap > 1 {
+                let fill = self.samples.last().copied().unwrap_or(0.0);
+                for _ in 1..gap {
+                    self.push_mono(fill);
+                }
+            }
+        } else {
+            self.chunk_start_frame = absolute;
+        }
+        self.push_mono((frame[0] + frame[1]) * 0.5);
+        self.last_frame = Some(absolute);
+        if self.samples.len() >= self.publish_interval {
+            self.publish();
+        }
+    }
+
+    fn push_mono(&mut self, sample: f32) {
+        self.samples
+            .push(if sample.is_finite() { sample } else { 0.0 });
+    }
+
+    fn publish(&mut self) {
+        if self.samples.is_empty() {
+            return;
+        }
+        let samples =
+            std::mem::replace(&mut self.samples, Vec::with_capacity(self.publish_interval));
+        let chunk = TransportWaveformChunk {
+            start_frame: self.chunk_start_frame,
+            samples,
+        };
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        match sender.try_send(chunk) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(chunk)) => {
+                // Visualization is explicitly lossy under pressure. Reuse the allocation so the
+                // live decoder also avoids an avoidable allocator call on the next source second.
+                self.samples = chunk.samples;
+                self.samples.clear();
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => self.sender = None,
+        }
+        self.chunk_start_frame = self
+            .last_frame
+            .unwrap_or(self.chunk_start_frame)
+            .saturating_add(1);
+    }
+}
 
 pub struct PlaybackCoordinator {
     sender: Sender<Request>,
     next_command_id: AtomicU64,
+    waveform_cache: Mutex<Option<CachedPlaybackWaveform>>,
 }
 
 impl PlaybackCoordinator {
@@ -137,6 +559,7 @@ impl PlaybackCoordinator {
         Ok(Self {
             sender,
             next_command_id: AtomicU64::new(1),
+            waveform_cache: Mutex::new(None),
         })
     }
 
@@ -208,6 +631,252 @@ impl PlaybackCoordinator {
             .recv_timeout(ACK_TIMEOUT)
             .map_err(|_| "播放协调器没有及时返回状态".to_string())
     }
+
+    /// Build the Manager's local detail rail from PCM that the playback scratch cache has already
+    /// decoded. The actor only lends an `Arc`; copying and analysis happen on the caller's blocking
+    /// worker, never on the coordinator or hardware callback threads.
+    pub fn waveform_window(
+        &self,
+        track_id: i64,
+        position: f64,
+        viewport_seconds: f64,
+        urgent: bool,
+    ) -> Result<Option<PlaybackWaveformWindow>, String> {
+        if !position.is_finite() || !viewport_seconds.is_finite() || viewport_seconds <= 0.0 {
+            return Err("局部波形窗口参数无效".into());
+        }
+        let (reply, response) = mpsc::sync_channel(1);
+        self.sender
+            .send(Request::WaveformSource { track_id, reply })
+            .map_err(|_| "播放协调器已经退出".to_string())?;
+        let Some(source) = response
+            .recv_timeout(ACK_TIMEOUT)
+            .map_err(|_| "播放协调器没有及时返回局部波形来源".to_string())?
+        else {
+            return Ok(None);
+        };
+        let sample_rate = f64::from(source.cache.sample_rate());
+        let viewport = viewport_seconds.clamp(1.0, 12.0);
+        let duration = source.duration.max(0.0);
+        let position = if duration > 0.0 {
+            position.clamp(0.0, duration)
+        } else {
+            position.max(0.0)
+        };
+        let required_start_seconds = (position - viewport * 0.5).max(0.0);
+        let required_end_seconds = if duration > 0.0 {
+            (position + viewport * 0.5).min(duration)
+        } else {
+            position + viewport * 0.5
+        };
+        let required_start = (required_start_seconds * sample_rate).floor() as i64;
+        let required_end = (required_end_seconds * sample_rate).ceil() as i64;
+        if required_end <= required_start {
+            return Ok(None);
+        }
+
+        // Stereo Decks expose the exact post-resample PCM already entering playback. Prefer that
+        // immutable observer lane whenever it owns both sides of the needle. A decoder opened at
+        // a non-zero cue cannot grow backwards; in that case the bounded random-access worker
+        // supplies the missing history and joins it to the live future side. Its HTTP reader also
+        // reuses the shared encoded range cache.
+        let observed = source.cache.observed_range();
+        let available = source.cache.available_range();
+        let plan = playback_waveform_pcm_plan(
+            source.transport_observer,
+            urgent,
+            source.transport_start_frame,
+            observed,
+            available,
+            required_start,
+            required_end,
+        );
+        let scratch_required_end = playback_waveform_scratch_required_end(
+            source.transport_observer,
+            urgent,
+            source.transport_start_frame,
+            required_start,
+            required_end,
+        );
+        if plan.request_scratch {
+            // STEM output has no stereo transport observer, while a decoder opened at a non-zero
+            // cue cannot backfill the left half of a centred viewport. Wake the existing bounded
+            // random-access worker immediately; presentation waits for both visible sides.
+            let pending = source.cache.pending_request_range();
+            tracing::debug!(
+                target: "kdj_playback_waveform",
+                track_id,
+                position,
+                required_start,
+                required_end,
+                observed = ?observed,
+                available = ?available,
+                pending = ?pending,
+                requests = source.cache.request_count(),
+                loads = source.cache.load_count(),
+                failures = source.cache.failure_count(),
+                "Manager random-access PCM is not ready"
+            );
+            // Polling must not move a compressed seek that already owns the viewport. A
+            // generation that chases the playhead can never publish and starves playback.
+            let scratch_ready = range_covers(available, required_start, scratch_required_end);
+            if !scratch_ready
+                && !pending.is_some_and(|(start, end)| {
+                    required_start >= start && scratch_required_end <= end
+                })
+            {
+                source
+                    .cache
+                    .request_waveform(required_start, scratch_required_end);
+            }
+        }
+        let Some(lane) = plan.lane else {
+            return Ok(None);
+        };
+
+        // A true first paint/seek preempts whole-track presentation work. Once a complete
+        // six-second rail has already been published, renewal uses a distinct short-burst class.
+        // It waits behind the strict heavy-work ceiling without cancelling or contending with a
+        // whole-track owner; first paint reserves enough PCM runway for that preview to finish.
+        // Both classes still abandon immediately under audio, tempo or audible STEM pressure.
+        let work_class = if urgent {
+            WorkClass::InteractiveWaveform
+        } else {
+            WorkClass::WaveformRenewal
+        };
+        let _activity = match work_scheduler().acquire(
+            WorkRequest::new(work_class).with_timeout(Duration::from_millis(40)),
+            || false,
+        ) {
+            Ok(activity) => activity,
+            Err(_) => return Ok(None),
+        };
+        let snapshot = match lane {
+            PlaybackWaveformPcmLane::Transport => source
+                .cache
+                .observed_mono_covering(required_start, required_end),
+            PlaybackWaveformPcmLane::Scratch => source
+                .cache
+                .snapshot_mono_covering(required_start, required_end),
+            PlaybackWaveformPcmLane::Composite => source
+                .cache
+                .snapshot_mono_window()
+                .zip(source.cache.observed_mono_window())
+                .and_then(|(scratch, observed)| {
+                    compose_waveform_pcm(&scratch, &observed, required_start, required_end)
+                }),
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        let source_start = snapshot.start_frame as f64 / sample_rate;
+        let source_end = source_start + snapshot.samples.len() as f64 / sample_rate;
+        let local_duration = (source_end - source_start).max(0.0);
+        if local_duration < 0.010 {
+            return Ok(None);
+        }
+        let output_duration = duration.max(source_end);
+        {
+            let cached = self
+                .waveform_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cached.as_ref().filter(|cached| {
+                cached.matches(
+                    &source.cache,
+                    lane,
+                    track_id,
+                    snapshot.start_frame,
+                    snapshot.samples.len(),
+                    output_duration,
+                )
+            }) {
+                tracing::debug!(
+                    target: "kdj_playback_waveform",
+                    track_id,
+                    position,
+                    source_start,
+                    source_end,
+                    "reused bounded Manager waveform for unchanged playback PCM"
+                );
+                return Ok(Some(cached.window.clone()));
+            }
+        }
+        // This Tauri blocking-pool task is optional presentation work. Lower its OS scheduling
+        // class before entering FFT so the decoder/stretch workers keep their live-audio QoS.
+        kdj_core::thread_qos::prefer_background();
+        let visualization_must_yield = || {
+            !work_scheduler().allows(work_class)
+                || work_scheduler().audio_pressure() != AudioPressure::Normal
+        };
+        let started = Instant::now();
+        let Some(evidence) = analyze_waveform_evidence_cancellable(
+            &snapshot.samples,
+            sample_rate,
+            &visualization_must_yield,
+        ) else {
+            tracing::debug!(
+                target: "kdj_playback_waveform",
+                track_id,
+                position,
+                "abandoned bounded Manager waveform to protect live audio"
+            );
+            return Ok(None);
+        };
+        if visualization_must_yield() {
+            return Ok(None);
+        }
+        let columns = (local_duration * DETAIL_WAVEFORM_COLUMNS_PER_SECOND)
+            .ceil()
+            .max(64.0) as usize;
+        let (mut waveform, _) = band_waveform_and_texture_with_evidence(
+            &snapshot.samples,
+            sample_rate,
+            columns,
+            &evidence,
+        );
+        if visualization_must_yield() {
+            return Ok(None);
+        }
+        if waveform.amp.is_empty() {
+            return Ok(None);
+        }
+        waveform.track_id = track_id;
+        waveform.duration = output_duration;
+        tracing::debug!(
+            target: "kdj_playback_waveform",
+            track_id,
+            position,
+            sample_rate,
+            source_start,
+            source_end,
+            required_start_seconds,
+            required_end_seconds,
+            urgent,
+            columns = waveform.amp.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+            "built bounded Manager waveform from playback PCM"
+        );
+        let window = PlaybackWaveformWindow {
+            waveform,
+            source_start,
+            source_end,
+        };
+        let mut cached = self
+            .waveform_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cached = Some(CachedPlaybackWaveform {
+            cache: Arc::downgrade(&source.cache),
+            lane,
+            track_id,
+            start_frame: snapshot.start_frame,
+            sample_count: snapshot.samples.len(),
+            duration_bits: output_duration.to_bits(),
+            window: window.clone(),
+        });
+        Ok(Some(window))
+    }
 }
 
 impl Drop for PlaybackCoordinator {
@@ -232,6 +901,10 @@ enum Request {
     },
     State {
         reply: StateReply,
+    },
+    WaveformSource {
+        track_id: i64,
+        reply: WaveformSourceReply,
     },
     WorkerFinished {
         deck: DeckId,
@@ -606,6 +1279,7 @@ impl Actor {
         self.invalidate(DeckId::A);
         self.invalidate(DeckId::B);
         self.player.take();
+        work_scheduler().set_live_audio_decks(0);
         work_scheduler().set_audio_pressure(AudioPressure::Normal);
     }
 
@@ -683,6 +1357,51 @@ impl Actor {
                     self.publish(true);
                 }
                 let _ = reply.send(self.state.clone());
+            }
+            Request::WaveformSource { track_id, reply } => {
+                // Prefer a replacement that is already becoming the visible song. The outgoing
+                // runtime may still share the same physical side during a transition, and lending
+                // its cache would briefly repaint old pixels under the new title.
+                let source = self
+                    .pending
+                    .iter()
+                    .flatten()
+                    .find(|pending| pending.request.track_id == track_id)
+                    .and_then(|pending| {
+                        pending
+                            .scratch_cache
+                            .as_ref()
+                            .map(|cache| PlaybackWaveformSource {
+                                duration: pending.request.duration.unwrap_or(0.0),
+                                transport_observer: !pending.request.stem_enabled,
+                                transport_start_frame: (pending.request.position.max(0.0)
+                                    * f64::from(cache.sample_rate()))
+                                .floor()
+                                    as i64,
+                                cache: Arc::clone(cache),
+                            })
+                    })
+                    .or_else(|| {
+                        self.decks
+                            .iter()
+                            .flatten()
+                            .find(|runtime| runtime.request.track_id == track_id)
+                            .and_then(|runtime| {
+                                runtime
+                                    .scratch_cache
+                                    .as_ref()
+                                    .map(|cache| PlaybackWaveformSource {
+                                        duration: runtime.duration(),
+                                        transport_observer: !runtime.request.stem_enabled,
+                                        transport_start_frame: (runtime.request.position.max(0.0)
+                                            * f64::from(cache.sample_rate()))
+                                        .floor()
+                                            as i64,
+                                        cache: Arc::clone(cache),
+                                    })
+                            })
+                    });
+                let _ = reply.send(source);
             }
             Request::WorkerFinished {
                 deck,
@@ -772,7 +1491,17 @@ impl Actor {
         self.state.last_command_id = command_id;
         self.state.error.clear();
         match command {
-            PlaybackCommand::Load { source } => self.load(source),
+            PlaybackCommand::Load {
+                source,
+                master_volume,
+            } => {
+                // Load is the manager ownership boundary. Apply its gain before any replacement
+                // stream can be promoted, without a separate frontend command/ACK round trip.
+                if let Some(volume) = master_volume {
+                    self.set_volume(volume)?;
+                }
+                self.load(source)
+            }
             PlaybackCommand::Prepare { source } => self.prepare(source),
             PlaybackCommand::LoadDeck { deck, source } => self.load_deck(deck, source),
             PlaybackCommand::SetQueue { sources } => {
@@ -813,6 +1542,9 @@ impl Actor {
             PlaybackCommand::NudgeDeck { deck, amount } => self.nudge_deck(deck, amount),
             PlaybackCommand::SetDeckRate { deck, rate } => {
                 self.set_sync_aware_deck_rate(deck, rate)
+            }
+            PlaybackCommand::SetDeckPitch { deck, semitones } => {
+                self.set_deck_pitch(deck, semitones)
             }
             PlaybackCommand::SetDeckRates { rates } => self.set_deck_rates(rates),
             PlaybackCommand::SyncDeck {
@@ -937,6 +1669,10 @@ impl Actor {
         // sides because the continuous player may choose either one as its next decode target.
         // `LoadDeck`, by contrast, is the DJ boundary and preserves the addressed Deck controls.
         self.reset_performance_controls_for_manager_load()?;
+        // The Manager is a song-level player, not a physical DJ channel. A rate attached to an
+        // old prediction/transition must never become the next song's visible TEMPO. Explicit
+        // Deck loads keep their physical fader below; only this ownership boundary is neutral.
+        source.rate = 1.0;
         source.position = source.position.max(0.0);
         // 状态先落账、激活后执行：一旦激活失败必须整体回滚，
         // 否则状态层声称新曲目、硬件却还在旧 Deck 上发声。
@@ -1059,6 +1795,7 @@ impl Actor {
         view.desired_playing = source.autoplay;
         view.is_playing = false;
         view.rate = source.rate;
+        view.pitch_semitones = 0.0;
         view.buffering = true;
         // classical Redress is a background tile model. Even an explicit STEM load starts with ORG and records
         // a follow-up request; only a context-safe prepared cushion may replace it.
@@ -1713,6 +2450,27 @@ impl Actor {
         if live {
             self.send(RtCommand::SetRate { deck, rate })?;
         }
+        Ok(())
+    }
+
+    fn set_deck_pitch(&mut self, deck: u8, semitones: f32) -> Result<(), String> {
+        if !semitones.is_finite()
+            || !(MIN_PITCH_SEMITONES..=MAX_PITCH_SEMITONES).contains(&semitones)
+        {
+            return Err("调性必须在 -12 到 +12 个半音之间".into());
+        }
+        let deck = deck_id(deck)?;
+        let index = deck as usize;
+        if self.decks[index].is_none() && self.pending[index].is_none() {
+            return Err("目标曲目尚未装入 Deck".to_string());
+        }
+        if let Some(runtime) = self.decks[index].as_mut() {
+            runtime.tempo.set_pitch_semitones(semitones);
+        }
+        if let Some(pending) = self.pending[index].as_mut() {
+            pending.tempo.set_pitch_semitones(semitones);
+        }
+        self.state.decks[index].pitch_semitones = semitones;
         Ok(())
     }
 
@@ -2549,6 +3307,13 @@ impl Actor {
 
     fn reset_deck_controls_for_manager_load(&mut self, deck: DeckId) -> Result<(), String> {
         let index = deck as usize;
+        if let Some(runtime) = self.decks[index].as_mut() {
+            runtime.tempo.set_pitch_semitones(0.0);
+        }
+        if let Some(pending) = self.pending[index].as_mut() {
+            pending.tempo.set_pitch_semitones(0.0);
+        }
+        self.state.decks[index].pitch_semitones = 0.0;
         self.set_deck_mixer(deck as u8, DeckMixer::default())?;
         self.set_deck_fx(deck as u8, [PlaybackFxSlot::default(); 3], 0, 0.5)?;
         self.send(RtCommand::SetDeckPfl {
@@ -2565,7 +3330,17 @@ impl Actor {
     }
 
     fn reset_performance_controls_for_manager_load(&mut self) -> Result<(), String> {
+        // SYNC can leave a transient follower correction in the realtime renderer. Clear its
+        // ownership first without restoring the old base rate; the Manager boundary below writes
+        // one authoritative neutral target to live, pending, state and callback lanes.
+        self.clear_native_sync(false);
         for deck in [DeckId::A, DeckId::B] {
+            self.clear_jog_nudge(deck);
+            self.retarget_deck_tempo(deck, 1.0);
+            self.set_sync_phase_correction(deck, 1.0);
+            if self.decks[deck as usize].is_some() {
+                self.send(RtCommand::SetRate { deck, rate: 1.0 })?;
+            }
             self.reset_deck_controls_for_manager_load(deck)?;
         }
         Ok(())
@@ -2849,6 +3624,10 @@ impl Actor {
         self.adopt_metadata(request);
         self.state.current_time = transition.position.max(0.0);
         self.state.duration = request.duration.unwrap_or(0.0).max(0.0);
+        // Once track_id points at the incoming song, every song-level field must share that owner.
+        // Leaving the outgoing rate here made the UI publish old TEMPO until decode installation,
+        // then jump to the incoming rate at a timing determined by disk/network speed.
+        self.state.rate = request.rate;
         self.state.desired_playing = true;
         self.state.buffering = true;
     }
@@ -2955,7 +3734,8 @@ impl Actor {
             .map(|player| player.spec())
             .ok_or_else(|| "原生音频输出未初始化".to_string())?
             .sample_rate;
-        let raw_capacity = output_rate as usize * DEFAULT_STREAM_BUFFER_SECONDS;
+        let raw_capacity = output_rate as usize
+            * DEFAULT_STREAM_BUFFER_SECONDS.max(TRANSPORT_DECODE_BUFFER_SECONDS);
         let output_buffer_ms = if request.stem_enabled {
             STEM_TEMPO_OUTPUT_BUFFER_MS
         } else {
@@ -3028,9 +3808,9 @@ impl Actor {
         let cancel = Arc::new(AtomicU64::new(revision));
         let seek = StreamSeekControl::new();
         let scratch_cache = Arc::new(ScratchPcmCache::new(output_rate));
-        if request.source_kind == PlaybackSourceKind::Local && activation.is_some() {
-            scratch_cache.request_prefetch(request.position * f64::from(output_rate));
-        }
+        // Ordinary waveform display observes the transport decoder below. Leave the independent
+        // random-access cache cold until an actual platter touch (or a STEM-only fallback) asks
+        // for it; eager MP3 seeks used to compete with the stream at every track change.
         self.pending[deck as usize] = Some(PendingStream {
             revision,
             source: source.clone(),
@@ -3052,6 +3832,7 @@ impl Actor {
             Arc::clone(&cancel),
             revision,
         );
+        let waveform_observer_cache = Arc::clone(&scratch_cache);
         let sender = self.sender.clone();
         let worker_cancel = Arc::clone(&cancel);
         let stream_worker = std::thread::Builder::new()
@@ -3108,6 +3889,7 @@ impl Actor {
                             let path = PathBuf::from(&worker_request.path);
                             let position = worker_request.position;
                             let worker_seek = seek.clone();
+                            let observed_cache = Arc::clone(&waveform_observer_cache);
                             run_pitch_preserving_pipeline(
                                 tempo.clone(),
                                 output_rate,
@@ -3115,14 +3897,23 @@ impl Actor {
                                 writer,
                                 move |raw_writer, cancelled| {
                                     let is_cancelled = || cancelled();
-                                    decode_file_streaming_seekable(
+                                    let mut observer =
+                                        TransportWaveformObserver::new(observed_cache);
+                                    let result = decode_file_streaming_seekable_observed(
                                         &path,
                                         position,
                                         output_rate,
                                         raw_writer,
                                         &is_cancelled,
                                         Some(worker_seek),
-                                    )
+                                        |frame, media_time| {
+                                            observer.push(frame, media_time, output_rate)
+                                        },
+                                    );
+                                    // EOF/interrupt can leave a sub-second tail. Publishing it
+                                    // keeps the last valid detail pixels without another decoder.
+                                    observer.publish();
+                                    result
                                 },
                                 Arc::clone(&cancellation),
                                 Some(Arc::clone(&loop_window)),
@@ -3134,6 +3925,7 @@ impl Actor {
                             let position = worker_request.position;
                             let remote_fence = Arc::clone(&fence);
                             let worker_seek = seek.clone();
+                            let observed_cache = Arc::clone(&waveform_observer_cache);
                             run_pitch_preserving_pipeline(
                                 tempo.clone(),
                                 output_rate,
@@ -3147,7 +3939,9 @@ impl Actor {
                                     );
                                     opened.map_err(anyhow::Error::new).and_then(|opened| {
                                         let is_cancelled = || cancelled();
-                                        decode_source_streaming_seekable(
+                                        let mut observer =
+                                            TransportWaveformObserver::new(observed_cache);
+                                        let result = decode_source_streaming_seekable_observed(
                                             Box::new(opened.source),
                                             opened.hint_extension.as_deref(),
                                             &path,
@@ -3156,7 +3950,15 @@ impl Actor {
                                             raw_writer,
                                             &is_cancelled,
                                             Some(worker_seek),
-                                        )
+                                            |frame, media_time| {
+                                                observer.push(frame, media_time, output_rate)
+                                            },
+                                        );
+                                        // EOF/interrupt can leave a sub-second tail. Publishing it
+                                        // here costs no decoder work and keeps the last visible
+                                        // segment from disappearing simply because it was short.
+                                        observer.publish();
+                                        result
                                     })
                                 },
                                 Arc::clone(&cancellation),
@@ -3583,6 +4385,10 @@ impl Actor {
                 scratch_cache: pending.scratch_cache,
             });
             self.state.decks[deck as usize].stem_enabled = pending.request.stem_enabled;
+            self.state.decks[deck as usize].pitch_semitones = self.decks[deck as usize]
+                .as_ref()
+                .map(|runtime| runtime.tempo.pitch_semitones())
+                .unwrap_or(0.0);
             let preroll = self.pending_preroll[deck as usize].take();
             let _ = self.send(RtCommand::SetRate {
                 deck,
@@ -3796,6 +4602,7 @@ impl Actor {
                 view.duration = runtime.duration();
                 view.rate = runtime.request.rate;
             }
+            view.pitch_semitones = runtime.tempo.pitch_semitones();
             if audio.deck_source_ids[index] == runtime.source_id {
                 if live_decoder_clock_is_outgoing(self.pending[index].as_ref(), runtime) {
                     // Live is still the pre-seek decoder. Publishing that clock snaps the
@@ -3808,12 +4615,27 @@ impl Actor {
                 view.buffering = self.manual_desired_playing[index]
                     && runtime.source.buffered_frames() == 0
                     && !runtime.source.ended();
-                view.output_buffer_ms =
+                let output_buffer_ms =
                     frames_to_ms(runtime.source.buffered_frames(), runtime.output_sample_rate);
-                view.minimum_output_buffer_ms = frames_to_ms(
+                let minimum_output_buffer_ms = frames_to_ms(
                     audio.deck_min_buffered_frames[index],
                     runtime.output_sample_rate,
                 );
+                if audio.deck_output_underruns[index] > view.output_underruns {
+                    tracing::warn!(
+                        target: "kdj_audio_health",
+                        deck = index,
+                        track_id = runtime.request.track_id,
+                        output_buffer_ms,
+                        minimum_output_buffer_ms,
+                        output_underruns = audio.deck_output_underruns[index],
+                        rate = runtime.tempo.applied_rate(),
+                        pitch_semitones = runtime.tempo.pitch_semitones(),
+                        "audio output ring underrun"
+                    );
+                }
+                view.output_buffer_ms = output_buffer_ms;
+                view.minimum_output_buffer_ms = minimum_output_buffer_ms;
                 view.output_underruns = audio.deck_output_underruns[index];
                 if let Some(cache) = &runtime.scratch_cache {
                     view.scratch_cache_requests = cache.request_count();
@@ -4072,44 +4894,55 @@ impl Actor {
 
     fn publish_audio_pressure(&self) {
         let mut pressure = AudioPressure::Normal;
+        let mut live_audio_decks = 0usize;
         let prior = work_scheduler().audio_pressure();
         for index in 0..2 {
-            let Some(runtime) = self.decks[index].as_ref() else {
-                continue;
-            };
             let wants_audio = if self.manual_mode {
                 self.manual_desired_playing[index]
             } else {
                 self.state.decks[index].is_playing
                     || (index == self.front as usize && self.state.desired_playing)
             };
-            if !wants_audio || runtime.source.ended() {
-                continue;
+            let mut deck_is_live = false;
+            let mut deck_pressure = AudioPressure::Normal;
+
+            if let Some(runtime) = self.decks[index].as_ref() {
+                if wants_audio && !runtime.source.ended() {
+                    deck_is_live = true;
+                    deck_pressure = deck_pressure.max(audio_buffer_pressure(
+                        frames_to_ms(runtime.source.buffered_frames(), runtime.output_sample_rate),
+                        runtime.request.stem_enabled,
+                        prior,
+                    ));
+                }
             }
-            let buffered_ms =
-                frames_to_ms(runtime.source.buffered_frames(), runtime.output_sample_rate);
-            let low_ms = if runtime.request.stem_enabled {
-                STEM_AUDIO_LOW_BUFFER_MS
-            } else {
-                AUDIO_LOW_BUFFER_MS
-            };
-            let recover_ms = if runtime.request.stem_enabled {
-                STEM_AUDIO_RECOVER_BUFFER_MS
-            } else {
-                AUDIO_RECOVER_BUFFER_MS
-            };
-            let deck_pressure = if buffered_ms <= AUDIO_CRITICAL_BUFFER_MS {
-                AudioPressure::Critical
-            } else if buffered_ms < low_ms
-                || (prior != AudioPressure::Normal && buffered_ms < recover_ms)
-            {
-                AudioPressure::Low
-            } else {
-                AudioPressure::Normal
-            };
+
+            // A Hard load, seek or committed transition is already part of the audible path even
+            // before its short output ring is installed in the callback. The old publisher only
+            // inspected installed Decks, leaving this most fragile startup interval classified as
+            // idle and allowing a cold FFT to launch beside a nearly empty replacement ring.
+            if let Some(pending) = self.pending[index].as_ref() {
+                let committed = pending.activation.is_some()
+                    || pending.clocked_seek.is_some()
+                    || pending.release_scratch_hold;
+                if committed && !pending.source.ended() {
+                    deck_is_live = true;
+                    deck_pressure = deck_pressure.max(audio_buffer_pressure(
+                        frames_to_ms(pending.source.buffered_frames(), pending.output_sample_rate),
+                        pending.request.stem_enabled,
+                        prior,
+                    ));
+                }
+            }
+
+            if deck_is_live {
+                live_audio_decks += 1;
+            }
             pressure = pressure.max(deck_pressure);
         }
-        work_scheduler().set_audio_pressure(pressure);
+        let scheduler = work_scheduler();
+        scheduler.set_live_audio_decks(live_audio_decks);
+        scheduler.set_audio_pressure(pressure);
     }
 
     fn reusable_deck(&self, request: &PlaybackSource) -> Option<DeckId> {
@@ -4598,18 +5431,37 @@ fn spawn_scratch_cache_worker(
         }
         let mut seen_generation = 0;
         while !cancelled() {
-            let Some((generation, start_frame)) = cache.next_request(&mut seen_generation) else {
+            let Some((generation, start_frame, frame_limit)) =
+                cache.next_request(&mut seen_generation)
+            else {
                 std::thread::sleep(Duration::from_millis(4));
                 continue;
             };
+            // Random-access PCM is the prerequisite for both platter authority and a complete
+            // Manager first paint. Register the decode itself, not merely the later FFT, so a
+            // speculative full-song warmup cooperatively releases the single heavy slot before
+            // an online Range read begins.
+            let request_cancelled = || cancelled() || !cache.request_is_current(generation);
+            let _work = match work_scheduler().acquire(
+                WorkRequest::new(WorkClass::InteractiveWaveform),
+                request_cancelled,
+            ) {
+                Ok(work) => work,
+                Err(_) if cancelled() => break,
+                Err(_) => continue,
+            };
             let position = start_frame as f64 / f64::from(cache.sample_rate());
+            let started = Instant::now();
+            let decode_cancelled = || {
+                request_cancelled() || work_scheduler().audio_pressure() != AudioPressure::Normal
+            };
             let decoded = match request.source_kind {
                 PlaybackSourceKind::Local => decode_file_scratch_window(
                     &PathBuf::from(&request.path),
                     position,
                     cache.sample_rate(),
-                    cache.capacity_frames(),
-                    cancelled,
+                    frame_limit,
+                    decode_cancelled,
                 ),
                 PlaybackSourceKind::Remote => {
                     HttpRangeSource::open(&request.path, Arc::clone(&cancel), revision)
@@ -4621,16 +5473,28 @@ fn spawn_scratch_cache_worker(
                                 &request.path,
                                 position,
                                 cache.sample_rate(),
-                                cache.capacity_frames(),
-                                cancelled,
+                                frame_limit,
+                                decode_cancelled,
                             )
                         })
                 }
             };
             match decoded {
                 Ok(window) => {
-                    cache.publish(generation, &window);
+                    let published = cache.publish(generation, &window);
+                    tracing::debug!(
+                        target: "kdj_playback_waveform",
+                        track_id = request.track_id,
+                        source_kind = ?request.source_kind,
+                        start_frame,
+                        requested_frames = frame_limit,
+                        decoded_frames = window.frames.len(),
+                        elapsed_ms = started.elapsed().as_millis(),
+                        published,
+                        "bounded random-access PCM decoded"
+                    );
                 }
+                Err(_) if !cache.request_is_current(generation) => continue,
                 Err(error) if !cancelled() => {
                     cache.record_failure(generation);
                     tracing::debug!(
@@ -4796,6 +5660,30 @@ fn frames_to_ms(frames: u64, sample_rate: u32) -> u64 {
     frames.saturating_mul(1_000) / u64::from(sample_rate)
 }
 
+fn audio_buffer_pressure(
+    buffered_ms: u64,
+    stem_enabled: bool,
+    prior: AudioPressure,
+) -> AudioPressure {
+    let low_ms = if stem_enabled {
+        STEM_AUDIO_LOW_BUFFER_MS
+    } else {
+        AUDIO_LOW_BUFFER_MS
+    };
+    let recover_ms = if stem_enabled {
+        STEM_AUDIO_RECOVER_BUFFER_MS
+    } else {
+        AUDIO_RECOVER_BUFFER_MS
+    };
+    if buffered_ms <= AUDIO_CRITICAL_BUFFER_MS {
+        AudioPressure::Critical
+    } else if buffered_ms < low_ms || (prior != AudioPressure::Normal && buffered_ms < recover_ms) {
+        AudioPressure::Low
+    } else {
+        AudioPressure::Normal
+    }
+}
+
 fn filter_resonance_q(resonance: FilterResonance) -> f32 {
     match resonance {
         // Preserve the former fixed-Q sound as the explicit low setting.
@@ -4891,6 +5779,226 @@ mod tests {
     use kdj_player::TransportSnapshot;
     use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
+
+    #[test]
+    fn stereo_output_pressure_keeps_a_safe_cancellation_runway() {
+        assert_eq!(
+            audio_buffer_pressure(95, false, AudioPressure::Normal),
+            AudioPressure::Normal
+        );
+        assert_eq!(
+            audio_buffer_pressure(71, false, AudioPressure::Normal),
+            AudioPressure::Low
+        );
+        assert_eq!(
+            audio_buffer_pressure(30, false, AudioPressure::Normal),
+            AudioPressure::Critical
+        );
+        assert_eq!(
+            audio_buffer_pressure(80, false, AudioPressure::Low),
+            AudioPressure::Low,
+            "hysteresis must not restart optional FFT in an 8 ms oscillation"
+        );
+        assert_eq!(
+            audio_buffer_pressure(88, false, AudioPressure::Low),
+            AudioPressure::Normal
+        );
+    }
+
+    #[test]
+    fn local_or_remote_transport_observer_publishes_without_a_random_cache_request() {
+        let cache = Arc::new(ScratchPcmCache::new(100));
+        let mut observer = TransportWaveformObserver::new(Arc::clone(&cache));
+        for frame in 0..800 {
+            let sample = frame as f32 / 800.0;
+            observer.push([sample, sample], frame as f64 / 100.0, 100);
+        }
+        observer.publish();
+        drop(observer);
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while cache.observed_range() != Some((0, 800)) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(cache.request_count(), 0);
+        assert_eq!(cache.available_range(), None);
+        assert_eq!(cache.observed_range(), Some((0, 800)));
+        let window = cache.observed_mono_covering(250, 700).unwrap();
+        assert!((window.samples[400] - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn sequential_observer_waits_only_for_forward_overlap() {
+        assert!(transport_observer_is_catching_up(true, None, 100, 100, 700,));
+        assert!(!transport_observer_is_catching_up(
+            true, None, 500, 100, 700,
+        ));
+        assert!(transport_observer_is_catching_up(
+            true,
+            Some((0, 500)),
+            0,
+            100,
+            700,
+        ));
+        assert!(!transport_observer_is_catching_up(
+            false,
+            Some((0, 500)),
+            0,
+            100,
+            700,
+        ));
+        // A true forward jump has no overlap and must be allowed to use random access.
+        assert!(!transport_observer_is_catching_up(
+            true,
+            Some((0, 500)),
+            0,
+            700,
+            900,
+        ));
+        // A backward platter jump is likewise outside the sequential observer.
+        assert!(!transport_observer_is_catching_up(
+            true,
+            Some((500, 1_000)),
+            500,
+            100,
+            300,
+        ));
+    }
+
+    #[test]
+    fn waveform_pcm_plan_waits_for_both_visible_sides() {
+        assert_eq!(
+            playback_waveform_pcm_plan(true, false, 500, Some((500, 800)), None, 200, 900,),
+            PlaybackWaveformPcmPlan {
+                lane: None,
+                request_scratch: true,
+            }
+        );
+        assert_eq!(
+            playback_waveform_pcm_plan(true, false, 500, Some((100, 1_000)), None, 200, 900,),
+            PlaybackWaveformPcmPlan {
+                lane: Some(PlaybackWaveformPcmLane::Transport),
+                request_scratch: false,
+            }
+        );
+        assert_eq!(
+            playback_waveform_pcm_plan(
+                true,
+                false,
+                500,
+                Some((500, 900)),
+                Some((100, 600)),
+                200,
+                900,
+            ),
+            PlaybackWaveformPcmPlan {
+                lane: Some(PlaybackWaveformPcmLane::Composite),
+                request_scratch: false,
+            }
+        );
+        assert_eq!(
+            playback_waveform_pcm_plan(
+                true,
+                false,
+                500,
+                Some((500, 800)),
+                Some((100, 600)),
+                200,
+                900,
+            ),
+            PlaybackWaveformPcmPlan {
+                lane: None,
+                request_scratch: false,
+            },
+            "history is ready, so wait for the forward observer instead of decoding it twice"
+        );
+    }
+
+    #[test]
+    fn urgent_waveform_uses_bounded_random_access_instead_of_waiting_for_future_audio() {
+        assert_eq!(
+            playback_waveform_pcm_plan(true, false, 0, Some((0, 500)), None, 0, 900,),
+            PlaybackWaveformPcmPlan {
+                lane: None,
+                request_scratch: false,
+            },
+            "a routine renewal can reuse a sequential decoder that is already catching up"
+        );
+        assert_eq!(
+            playback_waveform_pcm_plan(true, true, 0, Some((0, 500)), None, 0, 900,),
+            PlaybackWaveformPcmPlan {
+                lane: None,
+                request_scratch: true,
+            },
+            "first paint must decode its complete runway immediately"
+        );
+        assert_eq!(
+            playback_waveform_scratch_required_end(true, false, 500, 200, 900),
+            500,
+        );
+        assert_eq!(
+            playback_waveform_scratch_required_end(true, true, 500, 200, 900),
+            900,
+        );
+    }
+
+    #[test]
+    fn composed_waveform_pcm_uses_scratch_history_and_transport_future_without_a_gap() {
+        let scratch = ScratchMonoWindow {
+            start_frame: 100,
+            samples: (100..610).map(|frame| frame as f32).collect(),
+        };
+        let observed = ScratchMonoWindow {
+            start_frame: 600,
+            samples: (600..1_000).map(|frame| -(frame as f32)).collect(),
+        };
+        let composed = compose_waveform_pcm(&scratch, &observed, 200, 900).unwrap();
+        assert_eq!(composed.start_frame, 100);
+        assert_eq!(composed.samples.len(), 900);
+        assert_eq!(composed.samples[499], 599.0);
+        assert_eq!(composed.samples[500], -600.0);
+        assert_eq!(composed.samples[899], -999.0);
+        assert!(compose_waveform_pcm(&scratch, &observed, 50, 900).is_none());
+    }
+
+    #[test]
+    fn nonzero_start_uses_random_access_to_backfill_history() {
+        assert_eq!(
+            playback_waveform_pcm_plan(true, false, 500, Some((500, 800)), None, 200, 900,),
+            PlaybackWaveformPcmPlan {
+                lane: None,
+                request_scratch: true,
+            }
+        );
+        assert_eq!(
+            playback_waveform_pcm_plan(true, false, 500, None, None, 200, 900,),
+            PlaybackWaveformPcmPlan {
+                lane: None,
+                request_scratch: true,
+            }
+        );
+        assert_eq!(
+            playback_waveform_pcm_plan(true, false, 0, None, None, 0, 300,),
+            PlaybackWaveformPcmPlan {
+                lane: None,
+                request_scratch: false,
+            }
+        );
+        assert_eq!(
+            playback_waveform_pcm_plan(
+                true,
+                false,
+                500,
+                Some((500, 800)),
+                Some((100, 1_000)),
+                200,
+                900,
+            ),
+            PlaybackWaveformPcmPlan {
+                lane: Some(PlaybackWaveformPcmLane::Scratch),
+                request_scratch: false,
+            }
+        );
+    }
 
     #[test]
     fn remote_http_failure_is_not_misreported_as_an_audio_codec_error() {
@@ -5063,7 +6171,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_onelibrary_ids_are_valid_local_playback_sources() {
+    fn negative_remote_ids_are_valid_playback_sources() {
         let local = source(-1_000_000_042, 0.0);
         assert!(validate_source(&local).is_ok());
 
@@ -6396,7 +7504,9 @@ mod tests {
         actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
         actor.state.track_id = Some(1);
         actor.state.phase = PlaybackPhase::Playing;
-        actor.prepare(source(2, 0.0)).expect("预热下一首");
+        let mut incoming = source(2, 0.0);
+        incoming.rate = 1.17;
+        actor.prepare(incoming).expect("预热下一首");
         actor
             .handoff(
                 2,
@@ -6422,6 +7532,7 @@ mod tests {
         ));
         assert!((actor.state.current_time - 45.0).abs() < 0.001);
         assert_eq!(actor.state.track_id, Some(2));
+        assert!((actor.state.rate - 1.17).abs() < 0.001);
         assert_eq!(actor.state.phase, PlaybackPhase::Loading);
     }
 
@@ -7060,10 +8171,18 @@ mod tests {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
-        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
-        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 18.0));
+        let mut deck_a = live_runtime(1, 12.0);
+        deck_a.request.rate = 0.82;
+        deck_a.tempo.set(0.82);
+        let mut deck_b = live_runtime(2, 18.0);
+        deck_b.request.rate = 1.25;
+        deck_b.tempo.set(1.25);
+        actor.decks[DeckId::A as usize] = Some(deck_a);
+        actor.decks[DeckId::B as usize] = Some(deck_b);
         actor.state.decks[DeckId::A as usize].track_id = Some(1);
         actor.state.decks[DeckId::B as usize].track_id = Some(2);
+        actor.state.decks[DeckId::A as usize].rate = 0.82;
+        actor.state.decks[DeckId::B as usize].rate = 1.25;
         actor.deck_mixers = [DeckMixer {
             channel_gain: 0.2,
             trim_db: -6.0,
@@ -7076,7 +8195,9 @@ mod tests {
         actor.loop_windows[DeckId::B as usize].set(8.0, 4.0);
         knobs.sent.lock().unwrap().clear();
 
-        actor.load(source(3, 0.0)).expect("管理器装入新歌");
+        let mut replacement = source(3, 0.0);
+        replacement.rate = 1.4;
+        actor.load(replacement).expect("管理器装入新歌");
 
         for deck in [DeckId::A, DeckId::B] {
             let mixer = actor.deck_mixers[deck as usize];
@@ -7087,9 +8208,24 @@ mod tests {
             assert!(mixer.high_db.abs() < f32::EPSILON);
             assert!(mixer.filter.abs() < f32::EPSILON);
             assert!(actor.loop_windows[deck as usize].snapshot().is_none());
+            assert!((actor.state.decks[deck as usize].rate - 1.0).abs() < f32::EPSILON);
+            if let Some(runtime) = &actor.decks[deck as usize] {
+                assert!((runtime.request.rate - 1.0).abs() < f32::EPSILON);
+                assert!((runtime.tempo.rate() - 1.0).abs() < f32::EPSILON);
+            }
+            if let Some(pending) = &actor.pending[deck as usize] {
+                assert!((pending.request.rate - 1.0).abs() < f32::EPSILON);
+                assert!((pending.tempo.rate() - 1.0).abs() < f32::EPSILON);
+            }
         }
+        assert!((actor.state.rate - 1.0).abs() < f32::EPSILON);
         let sent = knobs.sent.lock().unwrap();
         for deck in [DeckId::A, DeckId::B] {
+            assert!(sent.iter().any(|command| matches!(
+                command,
+                RtCommand::SetRate { deck: target, rate }
+                    if *target == deck && (*rate - 1.0).abs() < f32::EPSILON
+            )));
             assert!(sent.iter().any(|command| matches!(
                 command,
                 RtCommand::SetDeckGain { deck: target, gain }

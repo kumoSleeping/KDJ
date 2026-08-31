@@ -9,6 +9,7 @@ import {
 import { deckGain, previewGain, useCrossfade } from "../../lib/crossfade";
 import { djEngine } from "../../lib/djMix";
 import { formatDuration } from "../../lib/format";
+import { attachYoutubeVideoPreview } from "../../lib/youtubeVideoPreview";
 import {
   MEDIA_SYNC_EVENT,
   broadcastMediaSync,
@@ -23,6 +24,7 @@ import { Button, InlineNotice } from "../common";
 export const VIDEO_PREVIEW_EVENT = "kd:video-preview";
 
 export interface VideoPreviewRequest {
+  platform: "bilibili" | "youtube";
   bvid: string;
   title: string;
   author: string;
@@ -80,6 +82,29 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (req.platform !== "youtube") return;
+    const video = videoRef.current;
+    if (!video) return;
+    setError("");
+    let active = true;
+    const controller = attachYoutubeVideoPreview(video, {
+      platform: "youtube",
+      bvid: req.bvid,
+      page: req.page,
+    });
+    void controller.done.catch((reason: unknown) => {
+      if (!active) return;
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setPlaying(false);
+      setError(reason instanceof Error ? reason.message : String(reason));
+    });
+    return () => {
+      active = false;
+      controller.dispose();
+    };
+  }, [req.platform, req.bvid, req.page]);
 
   const coplay = useCrossfade((state) => state.coplay);
   const fadeX = useCrossfade((state) => state.x);
@@ -320,7 +345,10 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
       // 发声，WebKit 的网络视频可能停在起播阶段；用户手动暂停唱盘后才会恢复。
       // 协同模式由 PlayerBar 的焦点例外保留双路声音。
       announceAudioFocus("preview");
-      void video.play().catch(() => undefined);
+      void video.play().catch((reason: unknown) => {
+        setPlaying(false);
+        setError(`播放启动失败：${reason instanceof Error ? reason.message : String(reason)}`);
+      });
     } else video.pause();
   }, []);
 
@@ -362,8 +390,12 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
       setSyncError("自动校准需要先在曲库里选中一首本地歌曲");
       return;
     }
+    if (req.platform !== "bilibili") {
+      setSyncError("YouTube 视频暂不支持自动 Offset 校准");
+      return;
+    }
     video?.pause();
-    const cacheKey = `${selectedTrack.id}:${req.bvid}:${req.page}`;
+    const cacheKey = `${req.platform}:${selectedTrack.id}:${req.bvid}:${req.page}`;
     const cached = calibrationCache.get(cacheKey);
     if (cached) {
       setOffsetMs(cached.offsetMs);
@@ -391,7 +423,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
       .finally(() => {
         if (requestSeq === calibrationSeqRef.current) setCalibrating(false);
       });
-  }, [clearDelay, req.bvid, req.page, selectedTrack, setCoplay, startCoplay]);
+  }, [clearDelay, req.platform, req.bvid, req.page, selectedTrack, setCoplay, startCoplay]);
 
   /** ± 一下：Offset 记账，同时把视频 seek 同样的量，耳朵立刻听到新的对位。 */
   const nudge = useCallback((deltaMs: number) => {
@@ -406,13 +438,15 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
       setSendError("");
       try {
         const task = await api.videoDownload({
+          platform: req.platform,
           bvid: req.bvid,
           page_index: req.page,
           max_height: settings?.video_max_height ?? 1080,
           audio_only: false,
-          // 恒真，理由同 VideoResultRow：不转码的封装一部分软件打不开
-          transcode: true,
-          offset_ms: withOffset ? Math.round(offsetMs) : 0,
+          // YouTube 的固定原生链路直接把 H.264/AAC 封装为 MP4，不做解码或重编码。
+          // B站继续保留原来的兼容转码及 Offset 语义。
+          transcode: req.platform !== "youtube",
+          offset_ms: withOffset && req.platform !== "youtube" ? Math.round(offsetMs) : 0,
           title: req.title.trim() || undefined,
           artist: req.author.trim() || undefined,
         });
@@ -430,10 +464,11 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
         setSending(false);
       }
     },
-    [req.bvid, req.page, req.title, req.author, settings?.video_max_height, offsetMs, mergeTasks],
+    [req.platform, req.bvid, req.page, req.title, req.author, settings?.video_max_height, offsetMs, mergeTasks],
   );
 
   const offsetText = `${offsetMs < 0 ? "" : "+"}${(offsetMs / 1000).toFixed(2)}s`;
+  const nativeYoutubeDownload = req.platform === "youtube";
   const ratio = duration > 0 ? Math.min(1, Math.max(0, position / duration)) : 0;
 
   return (
@@ -454,7 +489,11 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
             服务端 CORS 全放开（只监听回环 + token），所以敢写 anonymous。 */}
         <video
           ref={videoRef}
-          src={api.videoPreviewUrl(req.bvid, req.page)}
+          src={
+            req.platform === "bilibili"
+              ? api.videoPreviewUrl(req.platform, req.bvid, req.page)
+              : undefined
+          }
           crossOrigin="anonymous"
           preload="none"
           playsInline
@@ -481,7 +520,10 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           }}
           onError={() => {
             setPlaying(false);
-            setError("预览加载失败：可能被风控或视频不可用，稍后再试");
+            const code = videoRef.current?.error?.code;
+            setError(req.platform === "youtube"
+              ? `YouTube HLS 播放失败${code ? `（媒体错误 ${code}）` : ""}`
+              : `预览加载失败${code ? `（媒体错误 ${code}）` : ""}`);
           }}
         />
         {/* 暂停时给一颗居中的播放键：没有原生 controls，不给的话
@@ -557,9 +599,11 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           data-on={coplay ? "true" : undefined}
           aria-pressed={coplay}
           aria-label="协同播放"
-          disabled={calibrating}
+          disabled={calibrating || req.platform !== "bilibili"}
           title={
-            coplay
+            req.platform !== "bilibili"
+              ? "YouTube 视频暂不支持自动 Offset 校准"
+              : coplay
               ? "协同播放中：预览和唱盘一起响，音量归推子管。点一下回到互斥出声"
               : "协同播放：两边同时从头开播（时间线对齐，预览按 Offset 对位），用推子在两边之间混"
           }
@@ -606,7 +650,10 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
             type="button"
             className="kd-player-step"
             aria-label="Offset 减 0.1 秒"
-            title="−0.1s（Shift −1s）：视频回退一点；负到头就是在开头补留白"
+            title={nativeYoutubeDownload
+              ? "YouTube 原生下载固定保留原始时间轴"
+              : "−0.1s（Shift −1s）：视频回退一点；负到头就是在开头补留白"}
+            disabled={nativeYoutubeDownload}
             onClick={(event) => nudge(event.shiftKey ? -1000 : -100)}
           >
             <Minus size={13} />
@@ -615,7 +662,8 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
             type="button"
             className="kd-offset-value"
             data-live={offsetMs !== 0 ? "true" : undefined}
-            title="当前 Offset，点一下归零"
+            title={nativeYoutubeDownload ? "YouTube 原生下载固定保留原始时间轴" : "当前 Offset，点一下归零"}
+            disabled={nativeYoutubeDownload}
             onClick={() => nudge(-offsetMs)}
           >
             {offsetText}
@@ -624,7 +672,10 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
             type="button"
             className="kd-player-step"
             aria-label="Offset 加 0.1 秒"
-            title="+0.1s（Shift +1s）：视频快进一点，下载时掐掉的开头就多一点"
+            title={nativeYoutubeDownload
+              ? "YouTube 原生下载固定保留原始时间轴"
+              : "+0.1s（Shift +1s）：视频快进一点，下载时掐掉的开头就多一点"}
+            disabled={nativeYoutubeDownload}
             onClick={(event) => nudge(event.shiftKey ? 1000 : 100)}
           >
             <Plus size={13} />
@@ -633,9 +684,11 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
         <span className="kd-toolbar-gap" />
         <Button
           size="sm"
-          disabled={sending || offsetMs === 0}
+          disabled={sending || offsetMs === 0 || nativeYoutubeDownload}
           title={
-            offsetMs === 0
+            nativeYoutubeDownload
+              ? "YouTube 原生下载不解码，不能改写时间轴"
+              : offsetMs === 0
               ? "先用 +/− 校出一个 Offset"
               : offsetMs > 0
                 ? `下载并掐掉开头 ${(offsetMs / 1000).toFixed(2)} 秒`
@@ -649,7 +702,9 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
         <Button
           size="sm"
           disabled={sending}
-          title="按原片下载（画质/格式随全局设置）"
+          title={nativeYoutubeDownload
+            ? "原生下载并封装为 MP4，不依赖 FFmpeg"
+            : "按原片下载（画质/格式随全局设置）"}
           onClick={() => void download(false)}
         >
           <Download size={12} />

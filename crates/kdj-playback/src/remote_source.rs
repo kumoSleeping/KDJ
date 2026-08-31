@@ -241,6 +241,7 @@ fn cached_metadata(key: &str) -> Option<RangeCacheMetadata> {
 
 fn shared_http_client() -> io::Result<Client> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    kdj_core::ensure_rustls_ring();
     CLIENT
         .get_or_init(|| {
             Client::builder()

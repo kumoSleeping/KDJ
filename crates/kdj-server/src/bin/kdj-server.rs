@@ -29,7 +29,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(8788);
 
     let config = Arc::new(AppConfig::create(data_dir, download_dir, port));
-    let (port, handle, _control) = kdj_server::serve(config.clone()).await?;
+    let (port, _auth_token, _media_token, _activity_log, handle, _control) =
+        kdj_server::serve(config.clone()).await?;
 
     println!("KDJ Rust 服务已启动");
     println!("  http://127.0.0.1:{port}");

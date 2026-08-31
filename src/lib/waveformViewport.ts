@@ -1,9 +1,12 @@
 import type { Waveform } from "../types";
 
-const WAVEFORM_COLUMNS_PER_SECOND = 100;
+/** Absolute source-time lattice shared by stored detail assets and live playback windows. */
+export const DETAIL_WAVEFORM_COLUMNS_PER_SECOND = 400;
 const MIN_DETAIL_WAVEFORM_BUCKETS = 2_000;
-const MAX_DETAIL_WAVEFORM_BUCKETS = 24_000;
+const MAX_DETAIL_WAVEFORM_BUCKETS = 100_000;
 export const PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN = 30;
+/** Manager detail panel favors closer beat-level inspection over Performance's wider runway. */
+export const MANAGER_WAVEFORM_SECONDS_PER_SCREEN = 6;
 /** Baked DJ canvas covers this many screens so CSS can interpolate between 100ms snapshots. */
 export const PERFORMANCE_WAVEFORM_BAKE_SCREENS = 3;
 /**
@@ -35,6 +38,261 @@ function clamp(value: number, min: number, max: number): number {
  */
 export function performanceWaveformViewportSeconds(_playbackRate: number): number {
   return PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN;
+}
+
+export function managerWaveformViewportSeconds(_playbackRate: number): number {
+  return MANAGER_WAVEFORM_SECONDS_PER_SCREEN;
+}
+
+/**
+ * Native request width for the Manager detail rail.
+ *
+ * Always request the same margin used by the coverage predicate. A non-zero local or online cue
+ * can then backfill both visible sides with one stable random-access generation instead of
+ * cancelling a narrow first pass for a wider second one.
+ */
+export function managerWaveformRequestSeconds(
+  viewportSeconds: number,
+  renewalMarginSeconds: number,
+): number {
+  const viewport = Number.isFinite(viewportSeconds) ? Math.max(0, viewportSeconds) : 0;
+  const margin = Number.isFinite(renewalMarginSeconds)
+    ? Math.max(0, renewalMarginSeconds)
+    : 0;
+  return viewport + margin * 2;
+}
+
+export interface ManagerWaveformRasterGeometry {
+  /** Absolute display-pixel index on the track-time lattice. */
+  firstPixel: number;
+  /** Exclusive absolute display-pixel index on the track-time lattice. */
+  lastPixel: number;
+  startSec: number;
+  endSec: number;
+  spanSec: number;
+  backingWidth: number;
+  cssWidth: number;
+  pixelsPerSecond: number;
+}
+
+/**
+ * Raster geometry for the Manager rail, anchored to absolute track time.
+ *
+ * Analysis remains on its lossless 400 Hz lattice, but the bitmap has exactly one column per
+ * destination physical pixel. Anchoring the destination lattice at track time zero means two
+ * overlapping rolling windows partition the same kick into the same display columns, so a window
+ * renewal cannot make an already-visible transient shimmer merely because its left edge moved.
+ */
+export function managerWaveformRasterGeometry(
+  sourceStartSeconds: number,
+  sourceEndSeconds: number,
+  viewportCssWidth: number,
+  devicePixelRatio: number,
+  viewportSeconds: number,
+): ManagerWaveformRasterGeometry {
+  const sourceStart = Number.isFinite(sourceStartSeconds)
+    ? Math.max(0, sourceStartSeconds)
+    : 0;
+  const sourceEnd = Number.isFinite(sourceEndSeconds)
+    ? Math.max(sourceStart, sourceEndSeconds)
+    : sourceStart;
+  const width = Number.isFinite(viewportCssWidth) ? Math.max(0, viewportCssWidth) : 0;
+  const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0
+    ? devicePixelRatio
+    : 1;
+  const viewport = Number.isFinite(viewportSeconds) ? Math.max(0, viewportSeconds) : 0;
+  const pixelsPerSecond = width > 0 && viewport > 0 ? width * dpr / viewport : 0;
+  if (pixelsPerSecond <= 0 || sourceEnd <= sourceStart) {
+    return {
+      firstPixel: 0,
+      lastPixel: 0,
+      startSec: sourceStart,
+      endSec: sourceEnd,
+      spanSec: sourceEnd - sourceStart,
+      backingWidth: 0,
+      cssWidth: 0,
+      pixelsPerSecond,
+    };
+  }
+
+  // The epsilon keeps an endpoint that is already on a display-pixel boundary from growing a
+  // duplicate edge column because of floating-point multiplication noise.
+  const epsilon = 1.0e-9;
+  const firstPixel = Math.floor(sourceStart * pixelsPerSecond + epsilon);
+  const lastPixel = Math.max(
+    firstPixel + 1,
+    Math.ceil(sourceEnd * pixelsPerSecond - epsilon),
+  );
+  const backingWidth = lastPixel - firstPixel;
+  const startSec = firstPixel / pixelsPerSecond;
+  const endSec = lastPixel / pixelsPerSecond;
+  return {
+    firstPixel,
+    lastPixel,
+    startSec,
+    endSec,
+    spanSec: endSec - startSec,
+    backingWidth,
+    cssWidth: backingWidth / dpr,
+    pixelsPerSecond,
+  };
+}
+
+export function waveformSourceRange(waveform: Waveform): [number, number] {
+  const duration = Number.isFinite(waveform.duration) ? Math.max(0, waveform.duration) : 0;
+  const start = Number.isFinite(waveform.source_start)
+    ? Math.max(0, Math.min(duration, waveform.source_start as number))
+    : 0;
+  const end = Number.isFinite(waveform.source_end)
+    ? Math.max(start, Math.min(duration, waveform.source_end as number))
+    : duration;
+  return [start, end];
+}
+
+function waveformViewportRange(
+  durationSeconds: number,
+  positionSeconds: number,
+  viewportSeconds: number,
+  marginSeconds: number,
+): [number, number] {
+  const duration = Math.max(0, durationSeconds || 0);
+  const position = duration > 0
+    ? Math.max(0, Math.min(duration, positionSeconds))
+    : Math.max(0, positionSeconds);
+  const half = Math.max(0, viewportSeconds) * 0.5;
+  const margin = Math.max(0, marginSeconds);
+  return [
+    Math.max(0, position - half - margin),
+    duration > 0
+      ? Math.min(duration, position + half + margin)
+      : position + half + margin,
+  ];
+}
+
+function knownRangeState(
+  waveform: Waveform,
+  rangeStart: number,
+  rangeEnd: number,
+): "none" | "partial" | "complete" {
+  const known = waveform.known;
+  if (!known || known.length !== waveform.amp.length) return "complete";
+  const [sourceStart, sourceEnd] = waveformSourceRange(waveform);
+  const span = sourceEnd - sourceStart;
+  if (span <= 0 || rangeEnd <= rangeStart) return "none";
+  const overlapStart = Math.max(sourceStart, rangeStart);
+  const overlapEnd = Math.min(sourceEnd, rangeEnd);
+  if (overlapEnd <= overlapStart) return "none";
+  const count = waveform.amp.length;
+  const first = Math.max(
+    0,
+    Math.min(count - 1, Math.floor(((overlapStart - sourceStart) / span) * count)),
+  );
+  const last = Math.max(
+    first + 1,
+    Math.min(count, Math.ceil(((overlapEnd - sourceStart) / span) * count)),
+  );
+  let seen = false;
+  let missing = false;
+  for (let index = first; index < last; index += 1) {
+    if (known[index]) {
+      seen = true;
+    } else {
+      missing = true;
+    }
+  }
+  if (!seen) return "none";
+  return missing ? "partial" : "complete";
+}
+
+/** Crop a full-song detail asset without stretching its source-time columns. */
+export function waveformWindowFromFullDetail(
+  waveform: Waveform,
+  centerSeconds: number,
+  windowSeconds: number,
+): Waveform | null {
+  const duration = Number.isFinite(waveform.duration) ? Math.max(0, waveform.duration) : 0;
+  const count = waveform.amp.length;
+  if (
+    duration <= 0
+    || count === 0
+    || waveform.r.length !== count
+    || waveform.g.length !== count
+    || waveform.b.length !== count
+  ) return null;
+  const center = Math.max(0, Math.min(duration, centerSeconds));
+  const half = Math.max(0, windowSeconds) * 0.5;
+  const desiredStart = Math.max(0, center - half);
+  const desiredEnd = Math.min(duration, center + half);
+  const first = Math.max(0, Math.min(count - 1, Math.floor((desiredStart / duration) * count)));
+  const last = Math.max(
+    first + 1,
+    Math.min(count, Math.ceil((desiredEnd / duration) * count)),
+  );
+  const hasContour = waveform.minimum?.length === count
+    && waveform.maximum?.length === count
+    && waveform.transient?.length === count;
+  return {
+    track_id: waveform.track_id,
+    duration,
+    source_start: first / count * duration,
+    source_end: last / count * duration,
+    amp: waveform.amp.slice(first, last),
+    minimum: hasContour ? waveform.minimum?.slice(first, last) : undefined,
+    maximum: hasContour ? waveform.maximum?.slice(first, last) : undefined,
+    r: waveform.r.slice(first, last),
+    g: waveform.g.slice(first, last),
+    b: waveform.b.slice(first, last),
+    transient: hasContour ? waveform.transient?.slice(first, last) : undefined,
+    known: waveform.known?.length === count
+      ? waveform.known.slice(first, last)
+      : undefined,
+  };
+}
+
+/** Whether any bounded PCM is currently visible in the centred Manager interval. */
+export function waveformIntersectsViewport(
+  waveform: Waveform | null,
+  trackId: number,
+  positionSeconds: number,
+  viewportSeconds: number,
+): boolean {
+  if (!waveform || waveform.track_id !== trackId || waveform.amp.length === 0) return false;
+  const [desiredStart, desiredEnd] = waveformViewportRange(
+    waveform.duration,
+    positionSeconds,
+    viewportSeconds,
+    0,
+  );
+  const [sourceStart, sourceEnd] = waveformSourceRange(waveform);
+  return sourceStart < desiredEnd
+    && sourceEnd > desiredStart
+    && knownRangeState(waveform, desiredStart, desiredEnd) !== "none";
+}
+
+/** Whether a bounded PCM asset owns the complete visible interval plus renewal margin. */
+export function waveformCoversViewport(
+  waveform: Waveform | null,
+  trackId: number,
+  positionSeconds: number,
+  viewportSeconds: number,
+  renewalMarginSeconds = 0,
+): boolean {
+  if (!waveform || waveform.track_id !== trackId || waveform.amp.length === 0) return false;
+  const [desiredStart, desiredEnd] = waveformViewportRange(
+    waveform.duration,
+    positionSeconds,
+    viewportSeconds,
+    renewalMarginSeconds,
+  );
+  const [sourceStart, sourceEnd] = waveformSourceRange(waveform);
+  // A live window is canonicalised to the whole-track 400 Hz lattice before publication. Its
+  // first/last *complete* cell can sit less than one lattice step inside the PCM snapshot even
+  // though the requested viewport is covered. Treat only that sub-column trim as equivalent;
+  // larger gaps still renew the native window.
+  const gridTolerance = 1 / DETAIL_WAVEFORM_COLUMNS_PER_SECOND + 1e-6;
+  return sourceStart <= desiredStart + gridTolerance
+    && sourceEnd + gridTolerance >= desiredEnd
+    && knownRangeState(waveform, desiredStart, desiredEnd) === "complete";
 }
 
 /**
@@ -94,7 +352,10 @@ export function detailWaveformBuckets(durationSec: number): number {
   if (!Number.isFinite(durationSec) || durationSec <= 0) return MIN_DETAIL_WAVEFORM_BUCKETS;
   return Math.min(
     MAX_DETAIL_WAVEFORM_BUCKETS,
-    Math.max(MIN_DETAIL_WAVEFORM_BUCKETS, Math.ceil(durationSec * WAVEFORM_COLUMNS_PER_SECOND)),
+    Math.max(
+      MIN_DETAIL_WAVEFORM_BUCKETS,
+      Math.ceil(durationSec * DETAIL_WAVEFORM_COLUMNS_PER_SECOND),
+    ),
   );
 }
 
@@ -118,6 +379,12 @@ export function overviewWaveformFromDetail(wave: Waveform, requestedColumns: num
   const r: number[] = [];
   const g: number[] = [];
   const b: number[] = [];
+  const hasContour = wave.minimum?.length === sourceLength
+    && wave.maximum?.length === sourceLength
+    && wave.transient?.length === sourceLength;
+  const minimum: number[] = [];
+  const maximum: number[] = [];
+  const transient: number[] = [];
   for (let target = 0; target < columns; target += 1) {
     const start = target * sourceLength / columns;
     const end = (target + 1) * sourceLength / columns;
@@ -130,6 +397,9 @@ export function overviewWaveformFromDetail(wave: Waveform, requestedColumns: num
     let green = 0;
     let blue = 0;
     let colorWeight = 0;
+    let lower = 0;
+    let upper = 0;
+    let onset = 0;
     for (let source = first; source < last; source += 1) {
       const overlap = Math.max(0, Math.min(end, source + 1) - Math.max(start, source));
       if (overlap <= 0) continue;
@@ -142,6 +412,11 @@ export function overviewWaveformFromDetail(wave: Waveform, requestedColumns: num
       green += (wave.g[source] ?? 0) * weight;
       blue += (wave.b[source] ?? 0) * weight;
       colorWeight += weight;
+      if (hasContour) {
+        lower = Math.min(lower, wave.minimum?.[source] ?? 0);
+        upper = Math.max(upper, wave.maximum?.[source] ?? 0);
+        onset = Math.max(onset, wave.transient?.[source] ?? 0);
+      }
     }
     const fallback = Math.min(sourceLength - 1, first);
     const rms = amplitudeWeight > 0 ? Math.sqrt(squareSum / amplitudeWeight) : peak;
@@ -149,8 +424,23 @@ export function overviewWaveformFromDetail(wave: Waveform, requestedColumns: num
     r.push(colorWeight > 0 ? Math.round(red / colorWeight) : wave.r[fallback] ?? 0);
     g.push(colorWeight > 0 ? Math.round(green / colorWeight) : wave.g[fallback] ?? 0);
     b.push(colorWeight > 0 ? Math.round(blue / colorWeight) : wave.b[fallback] ?? 0);
+    if (hasContour) {
+      minimum.push(lower);
+      maximum.push(upper);
+      transient.push(onset);
+    }
   }
-  return { track_id: wave.track_id, duration: wave.duration, amp, r, g, b };
+  return {
+    track_id: wave.track_id,
+    duration: wave.duration,
+    amp,
+    minimum: hasContour ? minimum : undefined,
+    maximum: hasContour ? maximum : undefined,
+    r,
+    g,
+    b,
+    transient: hasContour ? transient : undefined,
+  };
 }
 
 export interface WaveformViewportLayout {
@@ -296,6 +586,25 @@ export function waveformBakeTranslatePercent(
 }
 
 /**
+ * Whether a VSync-owned transform needs its first write or a later position update.
+ *
+ * The initial sentinel is `NaN`. Comparing `Math.abs(next - NaN)` is always false, which used to
+ * leave both native rails permanently at their untransformed CSS origin. Keep the finite guard in
+ * this shared helper so a future epsilon optimisation cannot silently reintroduce that freeze.
+ */
+export function shouldWriteWaveformTransform(
+  previousPercent: number,
+  nextPercent: number,
+  epsilon = 1.0e-7,
+): boolean {
+  return Number.isFinite(nextPercent)
+    && (
+      !Number.isFinite(previousPercent)
+      || Math.abs(nextPercent - previousPercent) > Math.max(0, epsilon)
+    );
+}
+
+/**
  * A rebake replaces the canvas pixels with a different source-time range. Its translate must
  * land synchronously: interpolating from the old range would briefly put the newly painted
  * playhead nearly a whole screen away from the fixed needle.
@@ -319,9 +628,9 @@ export function waveformBakeRangeChanged(
 }
 
 /**
- * Sliding window for the DJ canvas. Pixels are baked in a TEMPO-independent
- * 1× track-time window; SYNC / fader zoom is CSS `scaleX` around the playhead.
- * Rebuilding on every rate tick used to freeze both Deck rails at once.
+ * Sliding window for the DJ canvas. The source-time window is baked at the requested viewport
+ * scale, so Manager's 5.5-second detail rail and Performance's 30-second rail both remain native
+ * backing-store pixels instead of stretching the same 30-second bitmap with CSS.
  */
 export function waveformBakeWindow(
   durationSec: number,
@@ -333,11 +642,12 @@ export function waveformBakeWindow(
     ? viewportSeconds
     : PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN;
   const duration = Number.isFinite(durationSec) ? durationSec : 0;
-  const windowSec = PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN * PERFORMANCE_WAVEFORM_BAKE_SCREENS;
+  const windowSec = displayView * PERFORMANCE_WAVEFORM_BAKE_SCREENS;
   const position = Number.isFinite(positionSec) ? (positionSec as number) : 0;
   if (
     previous
     && Math.abs(previous.durationSec - duration) < 1e-6
+    && Math.abs(previous.viewportSeconds - displayView) < 1e-6
     && previous.endSec - previous.startSec > 0
   ) {
     const visibleHalf = displayView / 2;

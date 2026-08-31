@@ -77,6 +77,16 @@ export function streamAnalysisSnapshot(trackId: number): StreamAnalysisSnapshot 
   return snapshots.get(trackId) ?? EMPTY_SNAPSHOT;
 }
 
+/** 设置里清理“基础信息”时同步丢弃在线试听的内存分析结果。 */
+export function clearStreamAnalysisCache(): void {
+  const affected = new Set([...snapshots.keys(), ...listeners.keys()]);
+  snapshots.clear();
+  signatures.clear();
+  for (const trackId of affected) {
+    for (const listener of listeners.get(trackId) ?? []) listener();
+  }
+}
+
 /** Project temporary full-file analysis onto the in-memory stream Track used by Performance. */
 export function trackWithStreamAnalysis(
   track: Track,
@@ -88,7 +98,8 @@ export function trackWithStreamAnalysis(
     ...track,
     duration: track.duration ?? result.duration,
     bpm: result.bpm ?? track.bpm,
-    bpm_v2: result.bpm !== null,
+    bpm_v2: false,
+    bpm_v3: result.bpm !== null,
     bpm_confidence: result.bpm_confidence ?? track.bpm_confidence,
     first_beat: result.first_beat ?? track.first_beat,
     beat_origin: result.beat_origin ?? track.beat_origin,

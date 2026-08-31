@@ -41,11 +41,19 @@ export declare const clearProgressCheckpoint: () => Promise<void>;
 export declare const dispose: () => Promise<void>;
 export declare const addStateListener: (handler: (state: NativeAudioState) => void) => Promise<() => void>;
 
+export type NativeLyricsWord = {
+  start: number;
+  end: number;
+  text: string;
+};
+
 /** 一行歌词；`secondary` 是翻译或罗马音，由调用方按当前附加层选好。 */
 export type NativeLyricsLine = {
   time: number;
+  endTime?: number;
   text: string;
   secondary?: string;
+  words?: NativeLyricsWord[];
 };
 
 export type NativeLyricsTimelinePayload = {
@@ -129,5 +137,10 @@ export declare const savePngToGallery: (payload: {
   image: string;
 }) => Promise<SavedGalleryPng>;
 export declare const openLocalPath: (path: string) => Promise<void>;
+/** 安卓：把已有本地文件作为 content URI 启动跨窗口系统拖动。 */
+export declare const startFileDrag: (
+  paths: string[],
+  label: string,
+) => Promise<{ started: true }>;
 /** 安卓：系统文件夹选择器；取消返回 null。 */
 export declare const pickLibraryFolder: () => Promise<string | null>;

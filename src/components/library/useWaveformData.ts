@@ -2,29 +2,33 @@ import { useEffect, useState } from "react";
 import {
   cachedReleaseOverviewWaveform,
   cachedWaveform,
+  deferredOverviewRetryDelay,
+  isPlaybackDeferredWaveformError,
+  isSupersededWaveformError,
   loadReleaseOverviewById,
-  loadReleaseOverviewForTrack,
   loadWaveformById,
-  loadWaveformForTrack,
   streamWaveformSnapshot,
   subscribeStreamWaveform,
   updateStreamWaveform,
+  type ReleaseOverviewRequestIntent,
   type StreamWaveformSnapshot,
 } from "../../lib/waveformCache";
-import { isOneLibraryPlaybackTrack } from "../../lib/playbackTrackSource";
 import { waveformUsesReleaseOverviewPalette } from "../../lib/waveformRenderPolicy";
 import type { Track, Waveform } from "../../types";
 
 /** Let a newly loaded Deck paint/respond before upgrading its cached 640-column preview. */
 const DETAIL_WAVEFORM_IDLE_DELAY_MS = 750;
-
 export interface WaveformDataRequest {
   trackId: number;
   track: Track | null;
   duration: number;
   buckets: number;
   providedWaveform?: Waveform;
+  /** Render only caller-owned data; never fall back to a full-track library request. */
+  providedOnly?: boolean;
   renderProfile: "current" | "release-overview";
+  /** Global PlayerBar is latest-wins; ordinary visible rails may coexist. */
+  releaseOverviewIntent?: Exclude<ReleaseOverviewRequestIntent, "prefetch">;
   /** Cached previews paint immediately; this controls only the high-density background upgrade. */
   detailUpgradeDelayMs?: number;
 }
@@ -42,26 +46,25 @@ interface OwnedWaveformError {
 /**
  * Own waveform acquisition separately from the renderer and transport UI.
  *
- * Local, OneLibrary and progressive-stream tracks deliberately have different data sources. This
+ * Local and progressive-stream tracks deliberately have different data sources. This
  * hook keeps those cache/profile rules in one place while the main component only consumes the
  * selected display waveform and progressive metadata.
  */
 export function useWaveformData({
   trackId,
-  track,
   duration,
   buckets,
   providedWaveform,
+  providedOnly = false,
   renderProfile,
+  releaseOverviewIntent = "visible",
   detailUpgradeDelayMs = DETAIL_WAVEFORM_IDLE_DELAY_MS,
 }: WaveformDataRequest): {
   displayReleaseOverview: boolean;
   displayWave: Waveform | null;
   error: string;
 } {
-  const oneLibraryTrack =
-    track?.id === trackId && isOneLibraryPlaybackTrack(track) ? track : null;
-  const progressiveStream = trackId < 0 && oneLibraryTrack === null;
+  const progressiveStream = trackId < 0;
   const releaseOverview = renderProfile === "release-overview";
   const displayReleaseOverview = waveformUsesReleaseOverviewPalette(renderProfile);
   // Callers that acquire the high-density rail in a parent hook also preserve that hook's state
@@ -73,14 +76,19 @@ export function useWaveformData({
   // so the first render of the replacement cannot paint one frame of the previous track before
   // the acquisition effect resets it. Bucket upgrades intentionally share an owner: the cached
   // 640-column rail remains a valid preview while the detailed request is pending.
-  const waveOwner = `${trackId}:${releaseOverview ? "release" : "current"}:${oneLibraryTrack?.source_key ?? ""}`;
+  const waveOwner = `${trackId}:${releaseOverview ? "release" : "current"}:${providedOnly ? "provided" : "library"}`;
+  const immediateWave = ownedProvidedWaveform ?? (providedOnly
+    ? null
+    : releaseOverview
+      ? cachedReleaseOverviewWaveform(trackId)
+      : cachedWaveform(trackId, buckets) ?? cachedReleaseOverviewWaveform(trackId));
   const [waveState, setWaveState] = useState<OwnedWaveformState>(() => ({
     owner: waveOwner,
-    waveform: ownedProvidedWaveform ?? (releaseOverview
-      ? cachedReleaseOverviewWaveform(trackId)
-      : cachedWaveform(trackId, buckets)),
+    waveform: immediateWave,
   }));
-  const wave = waveState.owner === waveOwner ? waveState.waveform : null;
+  // A Deck swap reuses this hook instance. Read the replacement track's cached overview during
+  // render instead of waiting one effect/paint before replacing the old owner's state.
+  const wave = waveState.owner === waveOwner ? waveState.waveform : immediateWave;
   const [streamSnapshot, setStreamSnapshot] = useState<StreamWaveformSnapshot | null>(() =>
     progressiveStream ? streamWaveformSnapshot(trackId) : null,
   );
@@ -93,6 +101,11 @@ export function useWaveformData({
   useEffect(() => {
     const setWave = (waveform: Waveform | null) => setWaveState({ owner: waveOwner, waveform });
     const setError = (message: string) => setErrorState({ owner: waveOwner, message });
+    if (providedOnly) {
+      setWave(ownedProvidedWaveform ?? null);
+      setError("");
+      return;
+    }
     if (ownedProvidedWaveform) {
       setWave(ownedProvidedWaveform);
       setError("");
@@ -106,49 +119,83 @@ export function useWaveformData({
     }
     let alive = true;
     if (releaseOverview) {
+      let retryTimer: number | null = null;
+      let deferredAttempts = 0;
       const cached = cachedReleaseOverviewWaveform(trackId);
       setWave(cached);
       setError("");
-      if (cached) return;
-      const request = oneLibraryTrack
-        ? loadReleaseOverviewForTrack(oneLibraryTrack)
-        : loadReleaseOverviewById(trackId);
-      void request
-        .then((result) => {
-          if (alive) setWave(result);
-        })
-        .catch((reason: unknown) => {
-          if (alive) setError(reason instanceof Error ? reason.message : String(reason));
-        });
+      if (cached) {
+        // A JS-memory hit still advances the PlayerBar's native latest-wins lane, cancelling a
+        // detached cold decode for the track that was visible one render ago.
+        if (releaseOverviewIntent === "player") {
+          void loadReleaseOverviewById(trackId, releaseOverviewIntent).catch(() => undefined);
+        }
+        return;
+      }
+      const load = () => {
+        retryTimer = null;
+        void loadReleaseOverviewById(trackId, releaseOverviewIntent)
+          .then((result) => {
+            if (alive) setWave(result);
+          })
+          .catch((reason: unknown) => {
+            if (!alive) return;
+            if (isSupersededWaveformError(reason)) {
+              setError("");
+              return;
+            }
+            if (isPlaybackDeferredWaveformError(reason)) {
+              // Deferral is a scheduling result, not an asset failure. Keep the rail quiet and
+              // retry so a later Pause/healthy gap cannot leave this mounted preview blank for
+              // the rest of the session.
+              setError("");
+              const retryDelay = deferredOverviewRetryDelay(deferredAttempts);
+              deferredAttempts += 1;
+              retryTimer = window.setTimeout(load, retryDelay);
+              return;
+            }
+            setError(reason instanceof Error ? reason.message : String(reason));
+          });
+      };
+      load();
       return () => {
         alive = false;
+        if (retryTimer !== null) window.clearTimeout(retryTimer);
       };
     }
 
-    // Performance 的局部滚动波形会按曲长要 100 列/秒，但曲库分析预先写好的是 640 桶。
-    // 先拿 canonical 预览立即画，再在它之后后台升级；旧逻辑直接等详细档，等于
-    // 每次装盘都绕开已有缓存现场整轨解码，overview 还会再用 960 解第二次。
+    // Generic current-profile callers may still request a dense full-song asset. The Manager
+    // never enters this branch: `providedOnly` binds it to bounded playback PCM and prevents a
+    // future refactor from silently reviving full-track decode on its compact rail.
     const previewBuckets = Math.min(640, buckets);
     const detailed = cachedWaveform(trackId, buckets);
-    const preview = detailed ?? cachedWaveform(trackId, previewBuckets);
+    const releasePreview = cachedReleaseOverviewWaveform(trackId);
+    const preview = detailed
+      // A 4,096-column release asset is a better generic preview than the 640-column overview.
+      ?? releasePreview
+      ?? cachedWaveform(trackId, previewBuckets);
     setWave(preview);
     setError("");
     if (detailed) return;
-    const loadAt = (count: number) => oneLibraryTrack
-      ? loadWaveformForTrack(oneLibraryTrack, count)
-      : loadWaveformById(trackId, count);
+    const loadAt = (count: number) => loadWaveformById(trackId, count);
     // Keep a cached canonical rail responsive through a new Deck load. The detailed request is
     // intentionally deferred and globally serialized by the backend; current/predicted Decks
     // must not launch several full-track decodes while a platter or waveform needs input now.
     let detailTimer: number | null = null;
-    const request = preview && buckets > previewBuckets
-      ? new Promise<Waveform>((resolve, reject) => {
-          detailTimer = window.setTimeout(() => {
-            detailTimer = null;
-            void loadAt(buckets).then(resolve, reject);
-          }, Math.max(0, detailUpgradeDelayMs));
-        })
-      : loadAt(buckets);
+    const loadDetailed = () => new Promise<Waveform>((resolve, reject) => {
+      detailTimer = window.setTimeout(() => {
+        detailTimer = null;
+        void loadAt(buckets).then(resolve, reject);
+      }, Math.max(0, detailUpgradeDelayMs));
+    });
+    const request = preview
+      ? buckets > previewBuckets ? loadDetailed() : Promise.resolve(preview)
+      : buckets > previewBuckets
+        ? loadAt(previewBuckets).then((initial) => {
+            if (alive) setWave(initial);
+            return loadDetailed();
+          })
+        : loadAt(buckets);
     request
       .then((result) => {
         if (alive) setWave(result);
@@ -163,11 +210,12 @@ export function useWaveformData({
     };
   }, [
     trackId,
-    oneLibraryTrack?.source_key,
     progressiveStream,
     buckets,
     ownedProvidedWaveform,
+    providedOnly,
     releaseOverview,
+    releaseOverviewIntent,
     detailUpgradeDelayMs,
   ]);
 
@@ -196,9 +244,7 @@ export function useWaveformData({
   const activeStreamSnapshot =
     streamSnapshot?.waveform.track_id === trackId ? streamSnapshot : null;
   const displayWave = progressiveStream
-    ? releaseOverview
-      ? activeStreamSnapshot?.waveform ?? null
-      : activeStreamSnapshot?.detailWaveform ?? activeStreamSnapshot?.waveform ?? null
+    ? activeStreamSnapshot?.waveform ?? null
     : wave;
 
   return {

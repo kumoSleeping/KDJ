@@ -3,6 +3,7 @@
 #
 # 用法：
 #   scripts/release.sh 0.2.13            # 全量校验后发版
+#   scripts/release.sh 1.0.0-rc1         # 带 RC 后缀，也按正式全量更新发布
 #   SKIP_VALIDATION=1 scripts/release.sh 0.2.13   # 跳过本地 typecheck/build/test（慎用）
 #   WATCH=0 scripts/release.sh 0.2.13    # 推完就退出，不等 CI
 #
@@ -11,8 +12,9 @@
 #     五处版本必须一致，release.yml 的 gate 会拒发不一致的推送；
 #   - 新版本必须大于远端最新 v* tag（本地 tag 不算数）；
 #   - 推送前要求工作区干净，避免把半成品改动混进 release 提交；
-#   - 新 Release 以 --latest=false 创建，不会抢占更新通道；latest-json 在至少
-#     一个平台产物就绪后写入本版清单并提升 Latest。单平台失败不再用旧清单
+#   - 新 Release 以 --latest=false 创建，不会抢占更新通道；桌面三平台（macOS
+#     arm64/x86_64 分架构）的测试、签名和打包全部通过后才写入
+#     latest-json 并提升 Latest；带 -rc 后缀的版本也进入正式更新通道。失败时不再用旧清单
 #     占位伪装「已是最新」。脚本最后仍必须验证
 #     releases/latest/download/latest.json 的 version 真的变成了新版本。
 set -euo pipefail
@@ -21,8 +23,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 VERSION="${1:-}"
-if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "用法：scripts/release.sh <x.y.z>" >&2
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+  echo "用法：scripts/release.sh <x.y.z[-prerelease]>" >&2
   exit 2
 fi
 
@@ -48,15 +50,12 @@ if [[ -z "$(git log origin/main..HEAD --oneline)" ]]; then
 fi
 
 # 版本必须大于远端最新 tag（语义化比较，不是字符串比较）
-latest_tag=$(git ls-remote --tags origin 'v*' \
-  | awk -F/ '{print $3}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-  | sort -V | tail -1)
-info "远端最新 tag：${latest_tag:-（无）}"
-if [[ -n "$latest_tag" ]]; then
-  newest=$(printf '%s\n%s\n' "$latest_tag" "v$VERSION" | sort -V | tail -1)
-  [[ "$newest" == "v$VERSION" && "$latest_tag" != "v$VERSION" ]] \
-    || { red "v$VERSION 必须大于远端最新 tag $latest_tag"; exit 1; }
-fi
+latest_version=$(
+  git ls-remote --tags --refs origin 'refs/tags/v*' \
+    | awk '{ sub(/^refs\/tags\/v/, "", $2); print $2 }' \
+    | python3 scripts/check-release-version.py "$VERSION"
+)
+info "远端最新 tag：${latest_version:+v$latest_version}"
 
 # ---- bump 五处版本号 -------------------------------------------------------
 info "bump 版本号到 $VERSION"
@@ -71,8 +70,8 @@ json.dump(conf, open(p, "w"), indent=2, ensure_ascii=False)
 open(p, "a").write("\n")
 PY
 # Cargo 侧：workspace 版本 + 所有内部 crate 互相引用的版本约束
-sed -i '' "s/^version = \"[0-9.]*\"$/version = \"$VERSION\"/" Cargo.toml
-sed -i '' "s/\(kdj-[a-z]* = { version = \"\)[0-9.]*\"/\1$VERSION\"/g" \
+sed -i '' "s/^version = \"[^\"]*\"$/version = \"$VERSION\"/" Cargo.toml
+sed -i '' "s/\(kdj-[a-z-]* = { version = \"\)[^\"]*\"/\1$VERSION\"/g" \
   Cargo.toml src-tauri/Cargo.toml crates/*/Cargo.toml
 cargo metadata --format-version 1 >/dev/null   # 让 Cargo.lock 跟着走
 
@@ -85,12 +84,20 @@ cargo_v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' C
 
 # ---- 本地校验 ---------------------------------------------------------------
 if [[ "${SKIP_VALIDATION:-0}" != "1" ]]; then
+  info "npm audit --audit-level=low"
+  npm audit --audit-level=low
+  info "npm audit signatures"
+  npm audit signatures
+  info "npm run test:frontend-logic"
+  npm run test:frontend-logic
   info "npm run typecheck"
   npm run typecheck
   info "npm run tauri:web:build"
   npm run tauri:web:build
   info "cargo test --workspace"
   cargo test --workspace
+  info "cargo audit（vendor/glib-0.18.5 已回补 RUSTSEC-2024-0429）"
+  cargo audit
 else
   info "SKIP_VALIDATION=1，跳过本地校验"
 fi
@@ -106,7 +113,7 @@ green "已推送。release.yml 检测到新版本后会自动打 tag v$VERSION �
 
 [[ "${WATCH:-1}" == "1" ]] || exit 0
 
-# ---- 盯 CI：tag 构建必须全绿，否则 latest.json 不会更新 ----------------------
+# ---- 盯 CI：tag 构建必须全绿，否则该 Release 的 latest.json 不会更新 ---------
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 info "等待 tag v$VERSION 出现"
 for _ in $(seq 1 30); do
@@ -152,35 +159,33 @@ watch_run() { # $1=workflow 名
   return 1
 }
 
-info "盯桌面三平台构建（rust-build）"
+info "盯桌面三平台构建（macOS 双架构，rust-build）"
 build_ok=1
 watch_run rust-build || {
   build_ok=0
-  red "rust-build 失败或超时。若 latest-json 也没跑成，Latest 不会被提升，更新通道仍指向上一版。"
+  red "rust-build 失败或超时。Latest 不会被提升，更新通道仍指向上一版。"
 }
 
 info "盯安卓构建（rust-android）"
 watch_run rust-android || red "安卓构建失败，桌面更新不受影响但 APK 缺失"
 
 # ---- 终检：更新端点必须已经是新版本 ------------------------------------------
-info "验证更新端点"
+info "验证更新清单"
 served=""
-served_labs=""
+manifest_url="https://github.com/$repo/releases/latest/download/latest.json"
 for i in $(seq 1 10); do
-  served=$(curl -sL "https://github.com/$repo/releases/latest/download/latest.json" \
+  served=$(curl -sL "$manifest_url" \
     | python3 -c "import json,sys;print(json.load(sys.stdin)['version'])" 2>/dev/null || true)
-  served_labs=$(curl -sL "https://github.com/$repo/releases/latest/download/latest-labs.json" \
-    | python3 -c "import json,sys;print(json.load(sys.stdin)['version'])" 2>/dev/null || true)
-  [[ "$served" == "$VERSION" && "$served_labs" == "$VERSION" ]] && break
+  [[ "$served" == "$VERSION" ]] && break
   [[ "$i" == "10" ]] && {
-    red "更新清单未全部就绪：stable=${served:-未知} labs=${served_labs:-未知}"
+    red "更新清单未就绪：${served:-未知}"
     [[ "$build_ok" == "1" ]] || red "（rust-build 本身也没有成功）"
     exit 1
   }
   sleep 20
 done
 if [[ "$build_ok" != "1" ]]; then
-  green "✅ KDJ v$VERSION 双更新通道已就绪（stable=${served}, labs=${served_labs}），但 rust-build 有失败步骤，请去 Actions 核对缺了哪些平台。"
+  green "✅ KDJ v$VERSION 更新清单已就绪（version=${served}），但 rust-build 有失败步骤，请去 Actions 核对缺了哪些平台。"
 else
-  green "✅ KDJ v$VERSION 发版完成，stable/labs 更新清单均为该版本。"
+  green "✅ KDJ v$VERSION 发版完成，更新清单已为该版本。"
 fi

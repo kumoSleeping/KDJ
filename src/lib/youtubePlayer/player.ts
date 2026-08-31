@@ -3,6 +3,7 @@
  *
  * The AST extraction machinery is adapted from YouTube.js 17.2.0 under MIT, but this wrapper
  * deliberately omits its general InnerTube client, parser registry, protobufs, OAuth and cache.
+ * Extracted transforms execute only in KDJ's dedicated native, isolated YouTube-origin WebView.
  */
 import { JsAnalyzer } from "./JsAnalyzer";
 import { JsExtractor } from "./JsExtractor";
@@ -33,12 +34,20 @@ function nsigProcessor(n?: string | null, sp?: string | null, s?: string | null)
   ].join("\n");
 }
 
+/** This function must only run inside the dedicated, opaque-origin YouTube proof sandbox. */
 function evaluate(program: PlayerProgram, args: Record<string, string | undefined>): unknown {
   const names = Object.keys(args);
   const values = Object.values(args);
   return new Function(...names, program.output + "\n" + nsigProcessor(args.n, args.sp, args.sig))(
     ...values,
   );
+}
+
+function assertTrustedMediaUrl(url: URL): void {
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || (host !== "googlevideo.com" && !host.endsWith(".googlevideo.com"))) {
+    throw new Error("YouTube 媒体地址不受信任");
+  }
 }
 
 export class LightweightYoutubePlayer {
@@ -73,9 +82,11 @@ export class LightweightYoutubePlayer {
   decipher(signatureCipher: string): string {
     const args = new URLSearchParams(signatureCipher);
     const url = new URL(args.get("url") || signatureCipher);
+    assertTrustedMediaUrl(url);
     const n = url.searchParams.get("n");
     const s = args.get("s");
     const sp = args.get("sp") || "signature";
+    if (!n && !s) return url.toString();
     if ((n || s) && !this.hasTransform) {
       throw new Error("当前 YouTube 播放器未暴露可提取的 n/sig 变换");
     }
@@ -101,5 +112,20 @@ export class LightweightYoutubePlayer {
       url.searchParams.set("n", result.n);
     }
     return url.toString();
+  }
+
+  transformN(value: string): string {
+    if (!value || value.length > 512 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+      throw new Error("YouTube HLS n challenge 无效");
+    }
+    if (!this.hasTransform) {
+      throw new Error("当前 YouTube 播放器未暴露可提取的 n 变换");
+    }
+    const transformed = evaluate(this.program, { n: value });
+    const result = transformed as { n?: unknown } | null;
+    if (!result || typeof result.n !== "string" || !/^[A-Za-z0-9_-]{1,512}$/.test(result.n)) {
+      throw new Error("YouTube 播放器没有还原 HLS n challenge");
+    }
+    return result.n;
   }
 }

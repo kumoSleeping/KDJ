@@ -21,7 +21,7 @@ use kdj_stems::{
 };
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_MP3, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
@@ -463,6 +463,11 @@ impl<F: Copy> StreamSource<F> {
 const SEEK_END_MARGIN_SECONDS: f64 = 0.25;
 /// seek 失败后的回退步长：逐级提前重试，直到落进流内。
 const SEEK_RETRY_STEP_SECONDS: f64 = 1.0;
+/// MP3 Layer III frames may borrow up to 511 bytes from the preceding bit reservoir. Seeking
+/// directly onto the requested frame leaves Symphonia without that history and can make several
+/// compressed packets disappear audibly. Decode a bounded lead-in, then discard it below before
+/// publishing the exact requested media time.
+const MP3_SEEK_PREROLL_SECONDS: f64 = 1.0;
 
 /// Decode-thread half. It blocks only on its worker thread when read-ahead is full.
 pub struct StreamWriter<F: Copy = [f32; 2]> {
@@ -1390,11 +1395,12 @@ fn apply_decode_landing(
 fn seek_format_time(
     format: &mut dyn symphonia::core::formats::FormatReader,
     track_id: u32,
-    mut position: f64,
+    position: f64,
     time_base: Option<TimeBase>,
+    preroll_seconds: f64,
 ) -> Result<DecodeSeekLanding> {
-    position = position.max(0.0);
-    let mut attempt = position;
+    let target = position.max(0.0);
+    let mut attempt = (target - preroll_seconds.max(0.0)).max(0.0);
     loop {
         match format.seek(
             SeekMode::Accurate,
@@ -1405,7 +1411,7 @@ fn seek_format_time(
         ) {
             Ok(seeked) => {
                 return Ok(DecodeSeekLanding {
-                    target: attempt,
+                    target,
                     actual: timestamp_seconds(time_base, seeked.actual_ts, attempt).max(0.0),
                 });
             }
@@ -1428,12 +1434,48 @@ pub fn decode_source_streaming_seekable<F>(
     source_label: &str,
     position: f64,
     output_sample_rate: u32,
-    mut writer: StreamWriter,
+    writer: StreamWriter,
     cancelled: F,
     seek: Option<StreamSeekControl>,
 ) -> Result<StreamMetadata>
 where
     F: Fn() -> bool + Copy,
+{
+    decode_source_streaming_seekable_observed(
+        source,
+        hint_extension,
+        source_label,
+        position,
+        output_sample_rate,
+        writer,
+        cancelled,
+        seek,
+        |_, _| {},
+    )
+}
+
+/// Decode the transport stream while exposing the exact post-resample source frames to one
+/// worker-local observer.
+///
+/// The observer runs on the decoder thread before `StreamWriter` applies tempo. It is intended for
+/// bounded visualization capture: no audio-callback locks, second decoder, or duplicate network
+/// request is introduced. Callers must keep the observer O(1) per frame and publish any heavier
+/// work in coarse batches.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_source_streaming_seekable_observed<F, O>(
+    source: Box<dyn StreamingMediaSource>,
+    hint_extension: Option<&str>,
+    source_label: &str,
+    position: f64,
+    output_sample_rate: u32,
+    mut writer: StreamWriter,
+    cancelled: F,
+    seek: Option<StreamSeekControl>,
+    mut observer: O,
+) -> Result<StreamMetadata>
+where
+    F: Fn() -> bool + Copy,
+    O: FnMut([f32; 2], f64),
 {
     let metadata = decode_source_core(
         source,
@@ -1442,7 +1484,10 @@ where
         position,
         output_sample_rate,
         None,
-        |frame, media_time| writer.push_at(frame, media_time, cancelled),
+        |frame, media_time| {
+            observer(frame, media_time);
+            writer.push_at(frame, media_time, cancelled)
+        },
         cancelled,
         seek,
     )?;
@@ -1592,8 +1637,19 @@ where
         position = position.min(limit - SEEK_END_MARGIN_SECONDS);
     }
     let mut source_sample_rate = params.sample_rate.filter(|rate| *rate > 0).unwrap_or(0);
+    let seek_preroll_seconds = if params.codec == CODEC_TYPE_MP3 {
+        MP3_SEEK_PREROLL_SECONDS
+    } else {
+        0.0
+    };
     let initial_landing = if position > 0.0 {
-        let landing = seek_format_time(&mut *format, track_id, position, params.time_base)?;
+        let landing = seek_format_time(
+            &mut *format,
+            track_id,
+            position,
+            params.time_base,
+            seek_preroll_seconds,
+        )?;
         decoder.reset();
         landing
     } else {
@@ -1622,7 +1678,13 @@ where
         }
         if let Some(control) = &seek {
             if let Some(at) = control.observe(&mut seen_seek) {
-                let landing = seek_format_time(&mut *format, track_id, at, params.time_base)?;
+                let landing = seek_format_time(
+                    &mut *format,
+                    track_id,
+                    at,
+                    params.time_base,
+                    seek_preroll_seconds,
+                )?;
                 decoder.reset();
                 apply_decode_landing(
                     landing,
@@ -1770,6 +1832,40 @@ where
         writer,
         cancelled,
         seek,
+    )
+}
+
+/// Local-file adapter for the transport-owned visualization observer.
+///
+/// Keeping this beside [`decode_file_streaming_seekable`] is important: playback and the
+/// six-second Manager rail must share the same decoder/resampler. Opening a second MP3 decoder
+/// for ordinary waveform display caused periodic seeks, CPU spikes and output-ring underruns.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_file_streaming_seekable_observed<F, O>(
+    path: &Path,
+    position: f64,
+    output_sample_rate: u32,
+    writer: StreamWriter,
+    cancelled: F,
+    seek: Option<StreamSeekControl>,
+    observer: O,
+) -> Result<StreamMetadata>
+where
+    F: Fn() -> bool + Copy,
+    O: FnMut([f32; 2], f64),
+{
+    let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
+    let extension = path.extension().and_then(|value| value.to_str());
+    decode_source_streaming_seekable_observed(
+        Box::new(file),
+        extension,
+        &path.display().to_string(),
+        position,
+        output_sample_rate,
+        writer,
+        cancelled,
+        seek,
+        observer,
     )
 }
 
@@ -3082,6 +3178,28 @@ mod tests {
         seek.publish_clock(48.0);
         assert!((seek.clock().unwrap() - 48.0).abs() < 1e-9);
         assert!(seek.observe(&mut decode_seen).is_none());
+    }
+
+    #[test]
+    fn mp3_seek_preroll_is_discarded_before_the_requested_clock_is_published() {
+        let sample_rate = 44_100;
+        let target = 32.0;
+        let landing = DecodeSeekLanding {
+            target,
+            actual: target - MP3_SEEK_PREROLL_SECONDS,
+        };
+        let first_output_position = landing_output_position(landing, sample_rate);
+
+        assert_eq!(first_output_position, sample_rate as f64);
+        assert_eq!(
+            logical_media_time(
+                target,
+                first_output_position,
+                first_output_position,
+                sample_rate,
+            ),
+            target,
+        );
     }
 
     #[test]

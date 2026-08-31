@@ -185,9 +185,8 @@ src/lib/bridge.ts           运行时探测壳（Tauri / Electron / 浏览器）
 vite.tauri.config.ts        Tauri 专用前端构建（端口 5275、产物 dist-tauri/、剥 index.html 的 CSP meta）
 docs/rust-port/             本目录，每步一份
 .github/workflows/
-  build.yml / test.yml      旧 Electron 线，已归档成 workflow_dispatch-only
   release.yml               版本号哨兵：main 上 tauri.conf.json 的 version 没发行过
-                            就自动 tag + Release + dispatch 两条打包线
+                            就自动 tag + Release + dispatch 正式构建线
   rust-build.yml            Tauri 桌面三平台（src-tauri 不存在时自动只跑测试）
   rust-android.yml          安卓 APK 骨架，风险写在 YAML 注释里
 ```

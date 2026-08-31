@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+} from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Blend,
@@ -17,8 +24,6 @@ import {
   PictureInPicture2,
   SkipBack,
   SkipForward,
-  Volume2,
-  VolumeX,
   Waypoints,
 } from "lucide-react";
 import { api } from "../../lib/api";
@@ -35,27 +40,24 @@ import {
 } from "../../lib/autoplay";
 import type { PredictionPolicySnapshot } from "../../lib/nextCandidatePolicy";
 import {
-  DJ_TRANSITIONS,
-  bpmSyncRate,
   djEngine,
   findMixStartTime,
   mixSeconds,
   mixStartFromDuration,
   useDjConfig,
 } from "../../lib/djMix";
-import { BEATS_PER_BAR, msUntilNextBoundary } from "../../lib/beatGridSync";
+import {
+  automaticTransitionRate,
+  BEATS_PER_BAR,
+  hasRoomForAlignedTransition,
+  msUntilNextBoundary,
+} from "../../lib/beatGridSync";
 import { useAppStore } from "../../stores/appStore";
 import { useCrossfade, deckGain } from "../../lib/crossfade";
 import { useHarmonicScope } from "../../lib/harmonicScope";
 import { useLyricsPrefs } from "../../lib/lyricsPrefs";
 import { ensureOverlayPermission } from "../../lib/lyricsOverlay";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
-import {
-  isDualDeckSession,
-  shouldDriveGlobalTransport,
-  shouldReconcileSingleTrackOwner,
-  type WorkMode,
-} from "../../lib/workMode";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { usePlayMode, type PlayMode } from "../../lib/playMode";
 import {
@@ -82,38 +84,47 @@ import {
   isStreamTrack,
   isUnresolvedStreamTrack,
   mediaUrlForTrack,
-  preloadStreamTrack,
   publishStreamTrack,
   publishStreamTrackState,
+  readPublishedStreamPlayback,
+  readPublishedStreamTrack,
   streamMeta,
   streamNextTrack,
   streamWaveformToken,
+  streamWaveformTokenById,
+  subscribeStreamMeta,
 } from "../../lib/streamTrack";
 import { playSongPreview } from "../../lib/songPreview";
 import { enqueueMediaDownloads } from "../../lib/mediaActions";
 import {
+  rememberedLocalVideoTrackId,
   requestLocalVideo,
   seekVideoPip,
   toggleVideoPip,
   useVideoPip,
 } from "../../lib/videoPip";
-import type { CuePoint, StemRuntimeStatus, Track, TrackStemStatus } from "../../types";
+import type { Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useToastStore } from "../../stores/toastStore";
 import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
 import { PLAY_EVENT, parsePlayRequest, playTrack } from "../../lib/playTrack";
 import { getPlayingTrack, setPlayingTrack } from "../../lib/playingTrack";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
-import { recordStreamAnalysisProgress } from "../../lib/streamAnalysis";
 import {
+  ARROW_KEY_LIST_STEP_EVENT,
+  type ArrowKeyListStepDetail,
+} from "../../lib/arrowKeyControl";
+import { recordStreamAnalysisProgress } from "../../lib/streamAnalysis";
+import { recordStreamCacheProgress } from "../../lib/streamCacheProgress";
+import { updateStreamCue } from "../../lib/streamCue";
+import {
+  cachedReleaseOverviewWaveform,
   mergeCachedStreamWaveform,
-  loadWaveformForTrack,
   mediaBufferedRanges,
   prefetchWaveform,
   updateStreamWaveform,
 } from "../../lib/waveformCache";
 import {
-  isOneLibraryPlaybackTrack,
   usesLocalLibraryRecord,
 } from "../../lib/playbackTrackSource";
 import {
@@ -136,28 +147,38 @@ import {
   readSearchDrop,
   searchAudioSource,
 } from "../../lib/searchDrag";
-import { runtimePlayer, usesNativeMobilePlayer } from "../../lib/unifiedPlayer";
+import {
+  getLiveDeckPeak,
+  runtimePlayer,
+  usesNativeMobilePlayer,
+} from "../../lib/unifiedPlayer";
 import { bindTracksToPhysicalDecks } from "../../lib/deckTrackBinding";
 import {
   playbackArtworkUrl,
   playbackSourceForTrack,
   ensurePlaybackTrackReady,
+  hydratePlaybackTrack,
   resolvePlaybackTrack,
   songSourceRequest,
+  subscribePlaybackTrackMetadata,
   trackIdRequest,
   type PlaybackTrackRequest,
 } from "../../lib/playbackTrack";
 import { decideNativeLatestIntent, LatestIntentGate } from "../../lib/latestIntentGate";
-import { LyricsHost } from "./LyricsHost";
 import {
-  clearPerformanceMixerSession,
-  PerformanceWorkspace,
-  type PerformanceDeckModel,
-  type PerformanceStemDeckModel,
-} from "./PerformanceWorkspace";
-import { eqBandDb, nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
-import { allStemMask as stemMaskForMode, STEM_MODE } from "../../lib/stemMode";
-import { writeLocalStorageSoon } from "../../lib/storageWrite";
+  shouldBeginManagerTransition,
+  shouldClearLocalVideoSessionForTrack,
+  shouldRequestLocalVideoSessionForTrack,
+} from "../../lib/playerTransitionPolicy";
+import { LyricsHost } from "./LyricsHost";
+import { nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
+import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
+import {
+  playerVolumeMeterClipping,
+  playerVolumeMeterLevel,
+  playerVolumeMeterLagMs,
+  smoothPlayerVolumeMeter,
+} from "../../lib/playerVolumeMeter";
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
@@ -184,6 +205,28 @@ interface StreamAnalysisPollSession {
   inflight: boolean;
   disposed: boolean;
   lastRevision: number;
+}
+
+/** Manager view of the two low-level playback Decks. The public performance surface is gone,
+ * but retaining this neutral projection keeps handoff/preload state out of React media elements. */
+interface PerformanceDeckModel {
+  track: Track | null;
+  position: number;
+  duration: number;
+  active: boolean;
+  playing: boolean;
+  transportRunning: boolean;
+  peakLevel: number;
+  rate: number;
+  audibleRate: number;
+  scratchHeld: boolean;
+  discontinuityRevision: number;
+  cover: string;
+  loopStart: number | null;
+  loopLength: number | null;
+  effectiveLoopStart: number | null;
+  effectiveLoopLength: number | null;
+  effectiveLoopGeneration: number;
 }
 
 /** One token owns one poller even when the manager and both Performance Decks observe it. */
@@ -234,6 +277,7 @@ function subscribeStreamAnalysisPoll(
     void api.songPreviewWaveform(token)
       .then((progress) => {
         if (session!.disposed) return;
+        recordStreamCacheProgress(track.id, progress);
         recordStreamAnalysisProgress(track.id, progress);
         if (progress.waveform && progress.revision > session!.lastRevision) {
           const total = totalDuration();
@@ -245,7 +289,7 @@ function subscribeStreamAnalysisPoll(
             progress.waveform,
             progress.revision,
             covered > 0 ? [{ start: 0, end: covered }] : [],
-            progress.detail_waveform,
+            progress.complete,
           );
           session!.lastRevision = progress.revision;
         }
@@ -279,18 +323,6 @@ function subscribeStreamAnalysisPoll(
     if (session!.timer !== null) window.clearTimeout(session!.timer);
     if (streamAnalysisPollers.get(track.id) === session) streamAnalysisPollers.delete(track.id);
   };
-}
-
-function sameStemStatus(left: TrackStemStatus | null, right: TrackStemStatus): boolean {
-  return Boolean(
-    left
-      && left.trackId === right.trackId
-      && left.state === right.state
-      && left.progress === right.progress
-      && left.cachePath === right.cachePath
-      && left.duration === right.duration
-      && left.error === right.error,
-  );
 }
 
 type SystemMediaAction = "play" | "pause" | "toggle" | "next" | "previous";
@@ -400,18 +432,25 @@ interface PlayerDeckMemory {
   leftId: number | null;
   rightId: number | null;
   activeIndex: 0 | 1;
+  positionTrackId: number | null;
+  position: number;
 }
 
 function readPlayerDeckMemory(): PlayerDeckMemory {
   try {
-    const raw = JSON.parse(localStorage.getItem(PLAYER_DECK_MEMORY_KEY) ?? "null") as Partial<PlayerDeckMemory> | null;
+    const raw = JSON.parse(readLocalStorage(PLAYER_DECK_MEMORY_KEY) ?? "null") as Partial<PlayerDeckMemory> | null;
     return {
       leftId: typeof raw?.leftId === "number" ? raw.leftId : null,
       rightId: typeof raw?.rightId === "number" ? raw.rightId : null,
       activeIndex: raw?.activeIndex === 1 ? 1 : 0,
+      positionTrackId: typeof raw?.positionTrackId === "number" ? raw.positionTrackId : null,
+      position:
+        typeof raw?.position === "number" && Number.isFinite(raw.position) && raw.position >= 0
+          ? raw.position
+          : 0,
     };
   } catch {
-    return { leftId: null, rightId: null, activeIndex: 0 };
+    return { leftId: null, rightId: null, activeIndex: 0, positionTrackId: null, position: 0 };
   }
 }
 
@@ -422,7 +461,7 @@ function playbackCoverUrl(track: Track): string {
 function viewForTrack(track: Track): PlayerDeckView {
   const streaming = isStreamTrack(track);
   return {
-    key: `${streaming ? "stream" : isOneLibraryPlaybackTrack(track) ? "onelibrary" : "library"}:${track.id}`,
+    key: `${streaming ? "stream" : "library"}:${track.id}`,
     track,
     title: track.title || track.filename,
     subtitle: track.artist || "\u00a0",
@@ -538,15 +577,7 @@ function PlayerDeck({
   );
 }
 
-interface PlayerBarProps {
-  workMode: WorkMode;
-  performanceOpen: boolean;
-}
-
-export function PlayerBar({
-  workMode,
-  performanceOpen,
-}: PlayerBarProps) {
+export function PlayerBar() {
   const { portrait } = useLayoutSignals();
   const mobileNative = usesNativeMobilePlayer();
   const playerRuntime = runtimePlayer();
@@ -563,21 +594,20 @@ export function PlayerBar({
   const libraryOrder = useLibraryStore((state) => state.filter.order);
   const coplay = useCrossfade((state) => state.coplay);
   const fadeX = useCrossfade((state) => state.x);
-  const djConfigured = useDjConfig((state) => state.enabled);
-  // 手机仍由系统连续播放服务持有输出；实时双 Deck 只在共享 Rust 桌面引擎和
-  // 浏览器预览 adapter 中开放，不能亮着 DJ 灯却在移动端偷偷退化成硬切。
-  const djEnabled = djConfigured && !mobileNative;
-  const djTransitions = useDjConfig((state) => state.transitions);
+  // “自动切歌”是一条完整链路：同一个开关既决定曲末是否续播，也决定播放中的
+  // 双击/下一首是否由双 Deck 接手。此前这里只把续播 UI 点亮、却把混音硬编码关闭，
+  // 所以所有显式换歌都必然退化为普通换源。
+  const autoAdvance = useDjConfig((state) => state.enabled);
+  const djEnabled = autoAdvance && !mobileNative;
   const djBars = useDjConfig((state) => state.bars);
   const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
   const autoBeatSync = useDjConfig((state) => state.autoBeatSync);
   const toggleDjEnabled = useDjConfig((state) => state.toggleEnabled);
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
+  const timeDisplayMode = usePlaybackPrefs((state) => state.timeDisplayMode);
   const focusLibrary = useAppStore((state) => state.focusLibrary);
   const defaultQuality = useAppStore((state) => state.settings?.default_quality ?? null);
   const filterResonance = useAppStore((state) => state.settings?.filter_resonance ?? "high");
-  const stemMode = STEM_MODE;
-  const allStemMask = stemMaskForMode(stemMode);
   const [enqueueBusy, setEnqueueBusy] = useState(false);
   const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
   const setDesktopLyricsOn = useLyricsPrefs((state) => state.setDesktopEnabled);
@@ -692,9 +722,24 @@ export function PlayerBar({
 
   // PlayerBar 因 HMR/连接态切换重挂载时，模块级主唱盘仍持有本地或在线曲目；
   // 从它起步可以避免先画出旧标题、真正 transport 却还是空的中间态。
-  const [track, setTrack] = useState<Track | null>(() => getPlayingTrack());
-  const activeStreamWaveformToken =
-    track && isStreamTrack(track) ? streamWaveformToken(track) : "";
+  const [track, setTrack] = useState<Track | null>(
+    () => getPlayingTrack() ?? readPublishedStreamTrack(),
+  );
+  const [restoredStreamPlayback] = useState(() => readPublishedStreamPlayback());
+  const activeStreamTrackId = track && isStreamTrack(track) ? track.id : 0;
+  const subscribeActiveStreamMeta = useCallback(
+    (listener: () => void) => subscribeStreamMeta(activeStreamTrackId, listener),
+    [activeStreamTrackId],
+  );
+  const readActiveStreamWaveformToken = useCallback(
+    () => streamWaveformTokenById(activeStreamTrackId),
+    [activeStreamTrackId],
+  );
+  const activeStreamWaveformToken = useSyncExternalStore(
+    subscribeActiveStreamMeta,
+    readActiveStreamWaveformToken,
+    readActiveStreamWaveformToken,
+  );
   /** 纯浏览器开发预览仍由 Web Audio 双 Deck 持有；正式 Tauri 壳不再切换 owner。 */
   const [browserDjSession, setBrowserDjSession] = useState(
     () => playerRuntime.kind === "browser-preview" && isStreamTrack(track),
@@ -703,36 +748,24 @@ export function PlayerBar({
   // Rust→WebAudio 接管曾同时造成交接爆音、在线 seek 冷启动和渐变 transport 分叉。
   const nativePlayer = playerRuntime.kind === "browser-preview" ? null : playerRuntime;
   const [playing, setPlaying] = useState(false);
+  const autoAdvanceRef = useRef(autoAdvance);
+  autoAdvanceRef.current = autoAdvance;
+  const toggleAutoAdvance = useCallback(() => {
+    const next = !useDjConfig.getState().enabled;
+    autoAdvanceRef.current = next;
+    toggleDjEnabled();
+  }, [toggleDjEnabled]);
   const [performanceDeckStates, setPerformanceDeckStates] = useState(
     () => playerRuntime.state().decks,
   );
-  const [performanceSyncState, setPerformanceSyncState] = useState(
-    () => playerRuntime.state().sync,
-  );
-  /** Manager loads increment this generation; DJ source replacements preserve Deck controls. */
-  const [performanceDeckResetRevisions, setPerformanceDeckResetRevisions] = useState<[
-    number,
-    number,
-  ]>([0, 0]);
-  const [performanceStems, setPerformanceStems] = useState<[
-    PerformanceStemDeckModel,
-    PerformanceStemDeckModel,
-  ]>([
-    { status: null, enabled: false, mask: allStemMask, gains: [1, 1, 1, 1] },
-    { status: null, enabled: false, mask: allStemMask, gains: [1, 1, 1, 1] },
-  ]);
-  const [performanceStemRuntime, setPerformanceStemRuntime] = useState<StemRuntimeStatus | null>(null);
-  const reportedStemRuntimeErrorRef = useRef("");
-  const stemDeckTrackIdsRef = useRef<[number | null, number | null]>([null, null]);
   const [playerVolume, setPlayerVolume] = useState(() => {
-    const raw = localStorage.getItem("kd-player-volume");
+    const raw = readLocalStorage("kd-player-volume");
     if (raw === null) return 1;
     const saved = Number(raw);
     return Number.isFinite(saved) ? Math.min(1, Math.max(0, saved)) : 1;
   });
   const playerVolumeRef = useRef(playerVolume);
-  /** 点喇叭静音前记住的音量；取消静音时还原，而不是硬回到 100%。 */
-  const volumeBeforeMuteRef = useRef(playerVolume > 0 ? playerVolume : 1);
+  const playerVolumeMeterRef = useRef<HTMLSpanElement | null>(null);
   /**
    * MASTER 是最终输出闸门，不能等 React effect 才同步到原生引擎。尤其是控制器把
    * 推子拉到 0 后紧接着装入另一台 Deck 时，装盘命令可能先进入 IPC；那会让新流以
@@ -744,19 +777,29 @@ export function PlayerBar({
   const setMasterVolume = useCallback((rawVolume: number) => {
     const volume = Number.isFinite(rawVolume) ? Math.min(1, Math.max(0, rawVolume)) : 0;
     playerVolumeRef.current = volume;
-    if (volume > 0) volumeBeforeMuteRef.current = volume;
     setPlayerVolume(volume);
     const effective = volume * deckGain(useCrossfade.getState().coplay, useCrossfade.getState().x);
     if (nativePlayer) void nativePlayer.setVolume(effective);
     else djEngine.setVolume(effective);
   }, [nativePlayer]);
-  const [position, setPosition] = useState(0);
+  const [position, setPosition] = useState(() =>
+    track &&
+    track.id < 0 &&
+    restoredStreamPlayback?.trackId === track.id
+      ? restoredStreamPlayback.position
+      : 0,
+  );
   const [duration, setDuration] = useState(() => track?.duration ?? 0);
   const [predicted, setPredicted] = useState<Track | null>(null);
   const [refreshingPrediction, setRefreshingPrediction] = useState(false);
   /** 只在首次恢复会话唱盘时用 localStorage 里的另一台；改范围/模式后必须重新预测。 */
   const useRetainedNextOnceRef = useRef(true);
   const deckMemoryRef = useRef<PlayerDeckMemory>(readPlayerDeckMemory());
+  const restoredPositionRef = useRef<{ trackId: number; position: number } | null>(
+    track && track.id < 0 && restoredStreamPlayback?.trackId === track.id
+      ? { trackId: track.id, position: restoredStreamPlayback.position }
+      : null,
+  );
   const [retainedDecks, setRetainedDecks] = useState<[Track | null, Track | null]>([null, null]);
   /** 明确拖到 A/B 的曲目固定在指定唱盘；预测逻辑不能把它下一帧覆盖。 */
   const [performanceDeckOverrides, setPerformanceDeckOverrides] = useState<[
@@ -768,7 +811,7 @@ export function PlayerBar({
     Track | null,
     Track | null,
   ]>([null, null]);
-  const dualDeck = isDualDeckSession(workMode, performanceOpen);
+  const dualDeck = false;
   useEffect(() => {
     if (dualDeck) return;
     setPerformancePendingDecks([null, null]);
@@ -793,14 +836,6 @@ export function PlayerBar({
     autoplay: boolean,
     position?: number,
   ) => Promise<void>>(async () => {});
-  /** A tempo drag can arrive while a Deck is still being installed. One source load per physical
-   * side is enough; every later tempo value waits on it and then collapses through the native
-   * latest-value lane instead of queuing duplicate loadDeck IPC calls. */
-  const performanceDeckEnsureRef = useRef<[
-    { trackId: number; promise: Promise<void> } | null,
-    { trackId: number; promise: Promise<void> } | null,
-  ]>([null, null]);
-  const performanceDeckEnsureGenerationRef = useRef<[number, number]>([0, 0]);
   const [retainedDecksLoaded, setRetainedDecksLoaded] = useState(false);
   const [visualActiveIndex, setVisualActiveIndex] = useState<0 | 1>(deckMemoryRef.current.activeIndex);
 
@@ -813,15 +848,12 @@ export function PlayerBar({
     setVisualActiveIndex(physicalSide);
   }, [dualDeck, track?.id, performanceDeckStates[0].trackId, performanceDeckStates[1].trackId]);
 
-  // 当前正主和预测出来的下一台 Deck 都提前读波形。真正接歌时只画 canvas，
-  // 不在切换临界点再发整轨波形请求。
+  // 当前正主由已挂载的全局波形以可见优先级读取；这里只低优先级预取下一首。
+  // 两者若同时冷启动，可见请求会抢先，预测曲不会排在当前曲前面。
   useEffect(() => {
-    prefetchWaveform(track);
     prefetchWaveform(predicted);
-    // 先把在线后继的 provider 直链解析掉；真正把 cue 位置装进浏览器备用 Deck
-    // 由下方 prepareNext effect 负责，二者缺一都会把网络等待暴露在交接临界点。
-    const next = track && isStreamTrack(track) ? streamNextTrack(track) : null;
-    if (next) void preloadStreamTrack(next).catch(() => {});
+    // 在线后继只保留展示元数据；真正轮到播放时才向平台解析直链。
+    // 否则暂停在一首在线曲目上也会产生用户未发起的平台请求。
   }, [track?.id, predicted?.id]);
   const visualActiveIndexRef = useRef<0 | 1>(deckMemoryRef.current.activeIndex);
   const [djTransition, setDjTransition] = useState(() => djEngine.transitionState());
@@ -843,6 +875,8 @@ export function PlayerBar({
     else useToastStore.getState().dismiss();
   }, []);
   const [browserMediaStatus, setBrowserMediaStatus] = useState<PlayerSessionStatus>("idle");
+  /** 已恢复的在线曲目首次解析失败后，登录/联网再按播放可原地重走装源。 */
+  const [sourceLoadEpoch, setSourceLoadEpoch] = useState(0);
   const [deckDropSide, setDeckDropSide] = useState<"left" | "right" | null>(null);
 
   useEffect(() => {
@@ -897,8 +931,26 @@ export function PlayerBar({
     trackRef.current = track;
     // 右侧歌词也需要知道当前的在线试听；曲库定位按钮会单独过滤负数临时曲目。
     setPlayingTrack(track);
-    // 独立桌面歌词 WebView 不共享主窗状态；在线试听和 OneLibrary 都是负数播放 id，
-    // 两者都要显式发布完整曲目快照。
+    // 自动接歌直接提交双 Deck handoff，不会再经过 playTrack(audio) 那条清理路径。
+    // 在新曲目成为 UI 正主的同一边沿撤掉旧本地视频会话；否则旧 session 会继续
+    // 保留视频宿主，详情重渲染时还能把退场视频重新接回来。
+    if (track) {
+      const pip = useVideoPip.getState();
+      const localSessionTrackId =
+        pip.session?.source === "local" ? pip.session.trackId : null;
+      if (
+        shouldClearLocalVideoSessionForTrack(
+          pip.session?.source ?? null,
+          localSessionTrackId,
+          track.id,
+          isVideoTrack(track.format),
+        )
+      ) {
+        pip.clear();
+      }
+    }
+    // 独立桌面歌词 WebView 不共享主窗状态；在线试听使用负数播放 id，
+    // 需要显式发布完整曲目快照。
     publishStreamTrack(track && track.id < 0 ? track : null);
     setBrowserMediaStatus(
       track && isUnresolvedStreamTrack(track)
@@ -908,6 +960,23 @@ export function PlayerBar({
           : "idle",
     );
   }, [track]);
+
+  // 在线完整分析回填后，当前唱盘也换成与本地曲目相同的 Track 元数据契约。
+  // 详情、节拍网格、调号/Tempo 读数和后继策略因此共用同一份 BPM/Key/Grid，
+  // 而不是只有 Analysis 面板看得到临时结果。
+  useEffect(() => {
+    if (!track || !isStreamTrack(track)) return;
+    const sourceTrack = track;
+    const hydrate = () => {
+      void hydratePlaybackTrack(sourceTrack).then((next) => {
+        if (next === sourceTrack || trackRef.current?.id !== sourceTrack.id) return;
+        trackRef.current = next;
+        setTrack(next);
+      });
+    };
+    hydrate();
+    return subscribePlaybackTrackMetadata(sourceTrack, hydrate);
+  }, [track?.id]);
 
   useEffect(() => {
     const fatal = /播放失败|放不了|解析失败|无法播放/.test(notice);
@@ -1039,6 +1108,12 @@ export function PlayerBar({
   const nativeLoadGenerationRef = useRef(0);
   /** Load ACK 只代表协调器接单；目标 Deck 真正激活前必须继续压住旧 transport。 */
   const nativeLoadTargetRef = useRef<{ trackId: number; generation: number } | null>(null);
+  /**
+   * Local desktop playback is submitted directly from PLAY_EVENT. The track effect observes this
+   * token and skips its legacy post-render Load, preserving one physical load per user intent.
+   */
+  const eagerManagerLoadRef = useRef<(next: Track, autoPlay: boolean) => boolean>(() => false);
+  const eagerManagerLoadTokenRef = useRef<{ trackId: number; generation: number } | null>(null);
   /** 解析在线地址时旧 Deck 必须先停；这里单独保留“解析成功后自动播放”的意图。 */
   const deferredStreamAutoplayRef = useRef<number | null>(null);
   /** UI 已切到新曲、Rust 仍报告旧物理 Deck 的窗口。旧快照不得冒充新曲状态。 */
@@ -1130,18 +1205,37 @@ export function PlayerBar({
    * 从首屏开始就走同一条正常 transport，不再各自猜 retainedDecks。
    */
   const restorePausedTrack = useCallback(
-    (restored: Track, restoredIndex: 0 | 1) => {
+    (restored: Track, restoredIndex: 0 | 1, rememberedPosition: number) => {
       if (trackRef.current) return;
+      const restoreVideoPresentation =
+        isVideoTrack(restored.format) && rememberedLocalVideoTrackId() === restored.id;
+      const duration = restored.duration ?? 0;
+      const boundedPosition =
+        Number.isFinite(rememberedPosition) && rememberedPosition > 0
+          ? duration > 0
+            ? rememberedPosition < Math.max(0, duration - 1)
+              ? Math.min(rememberedPosition, duration)
+              : 0
+            : rememberedPosition
+          : 0;
       trackRef.current = restored;
-      positionRef.current = 0;
-      durationRef.current = restored.duration ?? 0;
+      positionRef.current = boundedPosition;
+      durationRef.current = duration;
+      restoredPositionRef.current = { trackId: restored.id, position: boundedPosition };
       visualActiveIndexRef.current = restoredIndex;
       setVisualActiveIndex(restoredIndex);
       setTrack(restored);
-      setPosition(0);
-      setDuration(restored.duration ?? 0);
+      setPosition(boundedPosition);
+      setDuration(duration);
       commitPlaying(false);
       if (usesLocalLibraryRecord(restored)) selectTrack(restored);
+      if (restoreVideoPresentation) {
+        // VideoPipHost 的监听与 PlayerBar 同轮挂载；下一任务再恢复画面，既不丢事件，
+        // 也不把上次的“正在播放”意图带回来——重启后一律停在记住的进度。
+        window.setTimeout(() => {
+          if (trackRef.current?.id === restored.id) requestLocalVideo(restored, false);
+        }, 0);
+      }
     },
     [commitPlaying, selectTrack],
   );
@@ -1162,9 +1256,12 @@ export function PlayerBar({
       const other = memory.activeIndex === 0 ? right : left;
       const restored = active ?? other;
       if (restored) {
+        const rememberedPosition =
+          memory.positionTrackId === restored.id ? memory.position : 0;
         restorePausedTrack(
           restored,
           active ? memory.activeIndex : memory.activeIndex === 0 ? 1 : 0,
+          rememberedPosition,
         );
       }
     });
@@ -1219,13 +1316,30 @@ export function PlayerBar({
       const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints, autoBeatSync } =
         useDjConfig.getState();
       if (!enabled) return false;
-      // YouTube Music 等尚未解析直链的在线曲：接歌会把唱盘 UI 绑在网络完成上，
-      // 双击后长时间无反馈。退回硬切，让 setTrack 立刻换盘，load effect 再等直链。
-      if (isUnresolvedStreamTrack(next)) return false;
+      // 在线占位曲也属于过渡链路：保持旧 Deck 出声，在下面异步解析应用内代理
+      // URL，随后把新源预读进第二台 Deck。这里若按“还没有 src”提前拒绝，所有
+      // 在线下一首都会退化成普通换源，Blend 按钮看起来就完全没有作用。
       const outgoingIndex = visualActiveIndexRef.current;
       const intent = playbackIntentRef.current;
       const stillCurrent = () =>
         playbackIntentRef.current === intent && trackRef.current?.id === from.id;
+      const prepareIncomingVideoPresentation = () => {
+        const pip = useVideoPip.getState();
+        const sessionTrackId =
+          pip.session?.source === "local" ? pip.session.trackId : null;
+        if (
+          shouldRequestLocalVideoSessionForTrack(
+            pip.session?.source ?? null,
+            sessionTrackId,
+            next.id,
+            isVideoTrack(next.format),
+          )
+        ) {
+          // Direct Deck handoffs bypass playTrack/LOCAL_VIDEO. Establish the picture only after
+          // the audio handoff succeeds, and let the authoritative player sync start it at the cue.
+          requestLocalVideo(next, false);
+        }
+      };
 
       if (desktopNative && nativePlayer?.supportsRealtimeDj) {
         if (manualNextDispatchingRef.current) {
@@ -1242,7 +1356,10 @@ export function PlayerBar({
         const generation = ++nativeDjGenerationRef.current;
         const currentRate = nativePlayer.state().rate || 1;
         const effectiveFromBpm = from.bpm ? from.bpm * currentRate : null;
-        const rate = bpmSyncRate(effectiveFromBpm, next.bpm);
+        // Automatic beat sync is an explicit user choice. A prepared Deck used to inherit this
+        // computed rate even while the switch was off, so the next Manager song arrived with a
+        // visibly random TEMPO value despite never entering a SYNC group.
+        const rate = automaticTransitionRate(autoBeatSync, effectiveFromBpm, next.bpm);
         const tempo = effectiveFromBpm ?? next.bpm ?? 120;
         const seconds = mixSeconds(tempo, bars);
         const chosenTransitions = transitions.filter(() => Math.random() >= 0.5);
@@ -1263,6 +1380,7 @@ export function PlayerBar({
           beatSeconds: 60 / Math.max(1, tempo),
         };
         const commitUi = () => {
+          prepareIncomingVideoPresentation();
           const incomingIndex: 0 | 1 = outgoingIndex === 0 ? 1 : 0;
           const visual = { outgoingIndex, incomingIndex, from, next };
           transitionVisualRef.current = visual;
@@ -1292,7 +1410,9 @@ export function PlayerBar({
               src: mediaUrlForTrack(next),
               track: next,
               position: cue,
-              rate,
+              // A failed overlap is now an ordinary Manager replacement. There is no second Deck
+              // left to synchronize to, so carrying the transition rate would only retune the UI.
+              rate: 1,
               autoplay: true,
             })
             .then((state) => {
@@ -1302,6 +1422,7 @@ export function PlayerBar({
               if (state.status === "error") {
                 throw new Error(state.error || "原生播放器无法播放这个文件");
               }
+              prepareIncomingVideoPresentation();
               focusLibrary();
               trackRef.current = next;
               djViaRef.current = next.id;
@@ -1345,14 +1466,36 @@ export function PlayerBar({
             });
             if (generation !== nativeDjGenerationRef.current || !stillCurrent()) return;
             if (autoBeatSync) {
+              const handoffState = nativePlayer.state();
               const waitMs = msUntilNextBoundary(
-                nativePlayer.state().currentTime,
+                handoffState.currentTime,
                 from.bpm,
                 from.first_beat,
-                nativePlayer.state().rate || currentRate,
+                handoffState.rate || currentRate,
                 BEATS_PER_BAR,
               );
-              if (waitMs != null) {
+              // A user end point is the audible handoff deadline even though the decoder can
+              // continue to the physical EOF. Also keep source seconds and wall seconds separate:
+              // TEMPO changes how much of the source timeline one second of crossfade consumes.
+              const transitionEnd = applyInOutPoints && from.end_ms != null
+                ? Math.min(
+                    handoffState.duration || from.duration || from.end_ms / 1_000,
+                    from.end_ms / 1_000,
+                  )
+                : (handoffState.duration || from.duration || 0);
+              const remainingSource = transitionEnd > 0
+                ? Math.max(0, transitionEnd - handoffState.currentTime)
+                : 0;
+              // Near EOF the overlap itself is more important than waiting for another bar. The
+              // former unconditional wait consumed up to one full bar after the auto trigger,
+              // leaving no outgoing audio for the requested transition.
+              const hasRoomForAlignedOverlap = hasRoomForAlignedTransition(
+                remainingSource,
+                handoffState.rate || currentRate,
+                seconds,
+                waitMs,
+              );
+              if (hasRoomForAlignedOverlap && waitMs != null) {
                 await new Promise<void>((resolve) => window.setTimeout(resolve, waitMs));
                 if (generation !== nativeDjGenerationRef.current || !stillCurrent()) return;
               }
@@ -1378,6 +1521,7 @@ export function PlayerBar({
       // 在线流可能还是搜索结果里的占位曲目。先在后台解析直链，再让第二台
       // Deck 起播；解析期间当前曲目继续出声，不把网络等待暴露成暂停。
       const commitBrowserUi = (cue: number) => {
+        prepareIncomingVideoPresentation();
         const incomingIndex: 0 | 1 = outgoingIndex === 0 ? 1 : 0;
         const visual = { outgoingIndex, incomingIndex, from, next };
         transitionVisualRef.current = visual;
@@ -1455,7 +1599,6 @@ export function PlayerBar({
         setPerformanceDeckOverrides([null, null]);
         setPerformancePendingDecks([null, null]);
       }
-      const oneLibraryNext = isOneLibraryPlaybackTrack(next);
       const autoPlay = parsed.autoPlay !== false;
       if (!manualNextDispatchingRef.current) {
         // 双击指定曲目是比“稍后再下一首”更明确的新意图，不能让排队的连点
@@ -1479,10 +1622,23 @@ export function PlayerBar({
         djEngine.setVolume(playerVolumeRef.current);
       }
       const isLocalVideo = isVideoTrack(next.format);
+      const current = trackRef.current;
+      // Freeze the route before the unresolved-source fence below can pause/clear the current
+      // Deck. Provider resolution belongs inside a DJ handoff: the old song must remain audible
+      // until the new stream is buffered and ready to overlap it.
+      const wantsDjTransition = shouldBeginManagerTransition({
+        autoPlay,
+        currentPlaying: playingRef.current,
+        transitionEnabled: useDjConfig.getState().enabled,
+        realtimeTransitionAvailable: playerRuntime.supportsRealtimeDj,
+        dualDeck,
+        currentTrackId: current?.id ?? null,
+        nextTrackId: next.id,
+      });
       // 在线占位曲目的封面/标题会立刻换，但媒体 URL 还在 BotGuard/player 请求中。
-      // 必须在 PLAY_EVENT 这一拍就停掉旧 Deck；等 React 的 load effect 才 pause，
-      // 网络慢或失败时用户会看到新标题却持续听到上一首，误以为双击播错歌。
-      if (autoPlay && isUnresolvedStreamTrack(next)) {
+      // 普通换源必须在 PLAY_EVENT 这一拍停掉旧 Deck；DJ handoff 则刻意保留它，
+      // 否则第二台 Deck 即使稍后准备成功，也已经没有可供交叉渐变的退场音频。
+      if (autoPlay && isUnresolvedStreamTrack(next) && !wantsDjTransition) {
         deferredStreamAutoplayRef.current = next.id;
         pendingTrackSwitchRef.current = {
           trackId: next.id,
@@ -1515,7 +1671,7 @@ export function PlayerBar({
         if (useVideoPip.getState().mode === "panel" && !isStreamTrack(next)) {
           window.dispatchEvent(new Event(DETAIL_EVENT));
         }
-      } else if (!isStreamTrack(next) && !oneLibraryNext) {
+      } else if (!isStreamTrack(next)) {
         // 音频起播只清设置/队列等旁路，不自动钉详情；歌词内容面要保留，
         // 否则双击刚钉住的歌词栏会被 showTrackDetail 的 clearOverlays 拆掉。
         focusLibrary();
@@ -1541,13 +1697,7 @@ export function PlayerBar({
       // DJ 亮着且正在放别的歌：**所有**播放入口（双击、右键播放、自动续播
       // 挑的下一首）都从当前位置接歌，不硬切。网络视频预览不走 PLAY_EVENT；
       // 曲库里的本地视频则和音频一样由 Rust Deck 发声，必须允许进入这条过渡。
-      const current = trackRef.current;
-      const wantsDjTransition =
-        autoPlay &&
-        current &&
-        playingRef.current &&
-        next.id !== current.id;
-      if (wantsDjTransition) {
+      if (wantsDjTransition && current) {
         if (isLocalVideo) {
           // playTrack 已同步建立视频 session。先在同一事件循环把它改为“装画面但
           // 暂不走带”，否则 Rust 还在准备淡入 Deck 时，静音视频会先从 0 独自跑。
@@ -1579,6 +1729,12 @@ export function PlayerBar({
       );
       visualActiveIndexRef.current = incomingIndex;
       setVisualActiveIndex(incomingIndex);
+      // Native local playback must enter the command lane before React commits the selected row,
+      // TrackDetail and the manager Control canvases. Unsupported sources keep the effect path.
+      eagerManagerLoadRef.current(next, autoPlay);
+      // The first authoritative snapshot for a new song must update detail immediately; only
+      // steady-state position traffic is allowed to use the 200ms broadcast throttle.
+      lastBroadcast.current = Number.NEGATIVE_INFINITY;
       // 同一用户手势里的后续 transport/seek 读 ref；不能等下一轮 effect 才同步，
       // 否则启动恢复请求恰好在这两帧间返回时会把旧唱盘抢回来。
       trackRef.current = next;
@@ -1616,8 +1772,9 @@ export function PlayerBar({
     pip.clear();
   }, [track?.id, djTransition.phase]);
 
-  // 起手点：有结束点 → 从结束点倒推 N 小节；否则波形找真实尾音，再不行按时长倒推。
-  // 在线试听也走同一条逻辑：波形是后台懒加载的，没赶上时先按媒体时长兜底。
+  // 起手点：有结束点 → 从结束点倒推 N 小节；否则只读取已经存在的 overview 来找
+  // 真实尾音，再按时长倒推。播放临界路径绝不为这个优化启动整轨解码；冷缓存的
+  // overview 由独立预取在音频空闲时补齐，当前接歌始终有同步的时长兜底。
   useEffect(() => {
     djOutroRef.current = { trackId: track?.id ?? -1, at: null };
     if (!track || !djEnabled || dualDeck) return;
@@ -1630,7 +1787,6 @@ export function PlayerBar({
       };
       return;
     }
-    let alive = true;
     if (isStreamTrack(track)) {
       djOutroRef.current = {
         trackId: track.id,
@@ -1638,24 +1794,14 @@ export function PlayerBar({
       };
       return;
     }
-    const waveform = loadWaveformForTrack(track);
-    waveform
-      .then((wave) => {
-        if (!alive) return;
-        const at =
-          findMixStartTime(wave, lead) ??
-          mixStartFromDuration(wave.duration, track.bpm, djBars);
-        djOutroRef.current = { trackId: track.id, at };
-      })
-      .catch(() => {
-        if (!alive) return;
-        djOutroRef.current = {
-          trackId: track.id,
-          at: mixStartFromDuration(track.duration ?? 0, track.bpm, djBars),
-        };
-      });
-    return () => {
-      alive = false;
+    const waveform = cachedReleaseOverviewWaveform(track.id);
+    const at = waveform
+      ? findMixStartTime(waveform, lead)
+        ?? mixStartFromDuration(waveform.duration, track.bpm, djBars)
+      : mixStartFromDuration(track.duration ?? 0, track.bpm, djBars);
+    djOutroRef.current = {
+      trackId: track.id,
+      at,
     };
   }, [track?.id, track?.duration, track?.end_ms, track?.bpm, djEnabled, djBars, applyInOutPoints, dualDeck]);
 
@@ -1669,12 +1815,16 @@ export function PlayerBar({
   // Web Audio preview adapter。选择集中在这里，其他播放入口不感知声卡后端。
   useEffect(() => {
     if (!track) return;
-    if (workMode === "manager") {
-      // Manager playback owns a fresh, neutral single-track context. Clear the software session
-      // at the same semantic boundary as Rust `Load`; returning to DJ later must not resurrect
-      // controls from the prior performance.
-      resetPerformanceControlsForManagerLoad();
+    const eagerLoad = eagerManagerLoadTokenRef.current;
+    if (
+      eagerLoad?.trackId === track.id &&
+      eagerLoad.generation === nativeLoadGenerationRef.current
+    ) {
+      eagerManagerLoadTokenRef.current = null;
+      return;
     }
+    if (eagerLoad) eagerManagerLoadTokenRef.current = null;
+    resetPerformanceControlsForManagerLoad();
     // DJ prepare/handoff 已把曲目装进第二台 Rust/Web Audio Deck；不能让换曲 effect
     // 再执行一次普通 load，把正在进行的 sample-clock 过渡重置掉。
     if (djViaRef.current === track.id) {
@@ -1683,8 +1833,18 @@ export function PlayerBar({
       return;
     }
     const applyAutomaticCue = autoInOutCueRef.current === track.id;
-    const initialPosition =
-      applyAutomaticCue && track.cue_ms != null ? Math.max(0, track.cue_ms / 1000) : 0;
+    const restoredPosition =
+      restoredPositionRef.current?.trackId === track.id
+        ? restoredPositionRef.current.position
+        : null;
+    if (restoredPositionRef.current?.trackId === track.id) restoredPositionRef.current = null;
+    const retainRestoredPositionAfterFailure = () => {
+      if (restoredPosition !== null && trackRef.current?.id === track.id) {
+        restoredPositionRef.current = { trackId: track.id, position: restoredPosition };
+      }
+    };
+    const initialPosition = restoredPosition ??
+      (applyAutomaticCue && track.cue_ms != null ? Math.max(0, track.cue_ms / 1000) : 0);
     autoInOutCueRef.current = null;
     const loadGeneration = ++nativeLoadGenerationRef.current;
     nativeLoadInFlightRef.current = true;
@@ -1716,7 +1876,7 @@ export function PlayerBar({
             djEngine.hardPause(djEngine.frontElement());
           }
         }
-        // 本地文件、OneLibrary 与平台流只在 playbackTrack adapter 内解析来源；
+        // 本地文件与平台流只在 playbackTrack adapter 内解析来源；
         // 从这里开始全部使用同一个 UnifiedPlayerSource 契约。
         const prepared = await playbackSourceForTrack(track, {
           position: initialPosition,
@@ -1730,11 +1890,9 @@ export function PlayerBar({
             djEngine.cancel();
             djEngine.hardPause(djEngine.frontElement());
           }
-          // A cancelled native→WebAudio bridge may already have queued setVolume(0). Every new
-          // native load therefore reasserts the user-visible volume before it installs/plays media;
-          // DesktopPlayer serializes these commands, so a late old mute cannot strand this new song
-          // at zero gain.
-          void player.setVolume(playerVolumeRef.current).catch(() => {});
+          // Desktop Load carries the latest master gain atomically. Mobile keeps its existing
+          // explicit volume command because it owns a different native media contract.
+          if (!desktopNative) void player.setVolume(playerVolumeRef.current).catch(() => {});
           void player
             .load(prepared)
             .then((state) => {
@@ -1743,6 +1901,7 @@ export function PlayerBar({
                 if (deferredStreamAutoplayRef.current === track.id) {
                   deferredStreamAutoplayRef.current = null;
                 }
+                retainRestoredPositionAfterFailure();
                 stopAfterFailedLoad();
                 nativeLoadTargetRef.current = null;
                 nativeLoadInFlightRef.current = false;
@@ -1763,6 +1922,7 @@ export function PlayerBar({
               }
               nativeLoadTargetRef.current = null;
               nativeLoadInFlightRef.current = false;
+              retainRestoredPositionAfterFailure();
               stopAfterFailedLoad();
               setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
             })
@@ -1809,6 +1969,7 @@ export function PlayerBar({
         }
       } catch (error: unknown) {
         if (!stillCurrent()) return;
+        retainRestoredPositionAfterFailure();
         stopAfterFailedLoad();
         if (deferredStreamAutoplayRef.current === track.id) {
           deferredStreamAutoplayRef.current = null;
@@ -1823,7 +1984,7 @@ export function PlayerBar({
     // playing 不进依赖：它变化时由下面的 effect 处理，这里只管换曲。
     // frontEl 也不进：它只在 DJ 接歌互换时变，而那条路在上面已经 return 了
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [track?.id, nativePlayer, desktopNative, playerRuntime, commitPlaying]);
+  }, [track?.id, sourceLoadEpoch, nativePlayer, desktopNative, playerRuntime, commitPlaying]);
 
   // 把用户明确排好的下一首预装进系统播放器。更新队尾只修改 Media3 timeline
   // 的非当前项，不重建正在发声的 MediaSource，因此不会因排队操作产生卡顿。
@@ -1919,7 +2080,7 @@ export function PlayerBar({
       });
   }, [nativePlayer, track?.id, nativeQueueRetry, dualDeck]);
 
-  const driveGlobalTransport = shouldDriveGlobalTransport(workMode, performanceOpen);
+  const driveGlobalTransport = true;
   const droveGlobalTransportRef = useRef(driveGlobalTransport);
   useEffect(() => {
     if (!track) return;
@@ -2014,26 +2175,24 @@ export function PlayerBar({
         commitPlaying(false);
       } else if (detail.action === "seek" && detail.position !== undefined) {
         const at = Math.max(0, detail.position);
-        if (!shouldCommitSeek(track.id, at)) return;
-        if (nativePlayer) {
-          requestNativeSeek(track.id, at);
-        } else {
-          void djEngine
-            .seamlessSeek(mediaUrlForTrack(track), at, playingRef.current)
-            .then(setFrontEl);
-        }
-        setPosition(at);
-        broadcastMediaSync({
-          owner: "player",
-          action: "seek",
-          trackId: track.id,
-          position: at,
-        });
+        // Native video controls must enter the same transaction as the main waveform. This pins
+        // the visible playhead while Rust lands, keeps the latest-value seek lane, and coordinates
+        // the dual-video presenter instead of maintaining a weaker second seek implementation.
+        window.dispatchEvent(
+          new CustomEvent<SeekDetail>(SEEK_EVENT, {
+            detail: {
+              trackId: track.id,
+              position: at,
+              scrubbing: false,
+              forceCommit: true,
+            },
+          }),
+        );
       }
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onMediaSync);
-  }, [frontEl, track?.id, nativePlayer, commitPlaying, requestNativeSeek, shouldCommitSeek]);
+  }, [track?.id, commitPlaying]);
 
   // 播放器是同步时钟：视频只在明显漂移时纠偏，避免每个 timeupdate 都 seek
   // 造成画面抖动。播放/暂停/跳转动作仍然双向广播。
@@ -2060,20 +2219,50 @@ export function PlayerBar({
     }
   }, [playing, track?.id, frontEl, nativePlayer]);
 
-  // 不做音量控制：这里只是预听，音量交给系统。软件里再放一个滑块只是多一个要照看的东西。
-
-  // ……推子除外：协同播放时预览面板那把交叉推子按等功率曲线分走一部分音量，
-  // 协同一关立刻回满。这不是「音量设置」，是混音动作，值也从不落盘。
+  // 底栏推子是持久化 MASTER 音量；协同播放时再与等功率交叉推子相乘。
   useEffect(() => {
     playerVolumeRef.current = playerVolume;
     writeLocalStorageSoon("kd-player-volume", String(playerVolume), 1_000);
-    if (playerVolume > 0) volumeBeforeMuteRef.current = playerVolume;
     // 用户音量与协同交叉推子相乘；移动端直接落到系统 player，桌面两台 deck
     // 一起设，接歌中途也保持一致。
     const effective = playerVolume * deckGain(coplay, fadeX);
     if (nativePlayer) void nativePlayer.setVolume(effective);
     else djEngine.setVolume(effective);
   }, [playerVolume, coplay, fadeX, nativePlayer]);
+
+  useEffect(() => {
+    let frame = 0;
+    let currentShown = 0;
+    let clipHoldUntil = 0;
+    let previousAt = performance.now();
+    const history: Array<{ at: number; level: number }> = [];
+    const paint = (at: number) => {
+      const dt = Math.min(0.1, Math.max(0, (at - previousAt) / 1_000));
+      previousAt = at;
+      const state = playerRuntime.state();
+      let peak = 0;
+      ([0, 1] as const).forEach((side) => {
+        const deck = state.decks[side];
+        if (!deck.playing && !deck.desiredPlaying) return;
+        peak = Math.max(peak, getLiveDeckPeak(side) ?? deck.peakLevel ?? 0);
+      });
+      const volume = playerVolumeRef.current;
+      const target = playerVolumeMeterLevel(peak, volume);
+      if (playerVolumeMeterClipping(peak, volume)) clipHoldUntil = at + 1_000;
+      currentShown = smoothPlayerVolumeMeter(currentShown, target, dt);
+      history.push({ at, level: currentShown });
+      const delayedAt = at - playerVolumeMeterLagMs(track?.bpm);
+      while (history.length > 1 && history[1].at <= delayedAt) history.shift();
+      const previousSlice = history[0]?.level ?? 0;
+      const meter = playerVolumeMeterRef.current;
+      meter?.style.setProperty("--kd-volume-current", `${currentShown * 100}%`);
+      meter?.style.setProperty("--kd-volume-previous", `${previousSlice * 100}%`);
+      meter?.toggleAttribute("data-clipping", at < clipHoldUntil);
+      frame = window.requestAnimationFrame(paint);
+    };
+    frame = window.requestAnimationFrame(paint);
+    return () => window.cancelAnimationFrame(frame);
+  }, [playerRuntime, track?.bpm]);
 
   // 拨开协同播放（epoch +1）= 「两边同时从头来」：唱盘倒回 0 起播，
   // 预览那侧按 Offset 自己对位。不从头对齐的话，两条时间线的相对位置
@@ -2305,6 +2494,10 @@ export function PlayerBar({
         commitPlaying(otherStillPlaying);
         return;
       }
+      if (!autoAdvanceRef.current) {
+        commitPlaying(false);
+        return;
+      }
       // 正在挑歌 / 原生 prepare·handoff / UI 已切到接歌目标：别硬切把过渡顶掉。
       // djBusy 在 djSwitchTo 同步返回后就会清掉，必须同时看 nativeDjBusy。
       if (
@@ -2326,6 +2519,7 @@ export function PlayerBar({
       const request = { trackId: finished.id, intent };
       endedAdvanceRef.current = request;
       const stillCurrent = () =>
+        autoAdvanceRef.current &&
         endedAdvanceRef.current === request &&
         playbackIntentRef.current === intent &&
         trackRef.current?.id === finished.id;
@@ -2400,7 +2594,6 @@ export function PlayerBar({
     });
     const unsubscribe = nativePlayer.subscribe((state, previous) => {
       setPerformanceDeckStates(state.decks);
-      setPerformanceSyncState(state.sync);
       const pendingSwitch = pendingTrackSwitchRef.current;
       const pendingCurrent = trackRef.current;
       if (
@@ -2556,7 +2749,6 @@ export function PlayerBar({
       // 自愈。移动端有自己的 adopt 逻辑，不走这里。
       if (
         desktopNative &&
-        shouldReconcileSingleTrackOwner(workMode, performanceOpen) &&
         state.trackId !== null &&
         current &&
         state.trackId !== current.id &&
@@ -2685,8 +2877,6 @@ export function PlayerBar({
     selectTrack,
     continueAfterEnded,
     dualDeck,
-    workMode,
-    performanceOpen,
   ]);
 
   /**
@@ -2830,7 +3020,7 @@ export function PlayerBar({
     if (useDjConfig.getState().applyInOutPoints && !isStreamTrack(next)) {
       autoInOutCueRef.current = next.id;
     }
-    if (manualNextDispatchingRef.current && nativePlayer) {
+    if (manualNextDispatchingRef.current && nativePlayer && djEnabled) {
       manualNextTargetRef.current = next.id;
     }
     // 在线下一首也立刻装盘；直链解析失败由 load effect 写 notice，不能挡唱盘反馈。
@@ -2838,6 +3028,15 @@ export function PlayerBar({
   };
 
   canRunManualNextRef.current = () => {
+    // 正式管理模式的“下一首”是一次普通换源，可以直接用最新播放意图覆盖尚未
+    // 落地的预载/旧快照。此前仍套用双 Deck 的安全等待条件，播放器只要处于
+    // loading、短暂 track-id 不一致或残留 transitioning，点击就会无限挂起，
+    // 用户看到的结果就是按钮按了毫无反应。
+    if (!dualDeck && !djEnabled) {
+      manualNextTargetRef.current = null;
+      nativeManualChainDepthRef.current = 0;
+      return true;
+    }
     if (djBusyRef.current || nativeDjBusyRef.current || hybridDjBusyRef.current) return false;
     if (!nativePlayer) {
       // Standalone browser adapter has no native target/command acknowledgement.
@@ -2917,7 +3116,6 @@ export function PlayerBar({
     playbackIntentRef.current += 1;
     nativeDjGenerationRef.current += 1;
     nativeDjBusyRef.current = false;
-    if (!playingRef.current && !nativePlayer) djEngine.resume();
     if (!trackRef.current) {
       // 重启后 track 尚未装载，但底栏已经恢复了上次正主唱盘；首按应直接
       // 播放眼前这首，而不是要求用户先回曲库重新选中一次。
@@ -2925,6 +3123,17 @@ export function PlayerBar({
       if (pick) playTrack(pick);
       return;
     }
+    const current = trackRef.current;
+    if (!playingRef.current && isUnresolvedStreamTrack(current)) {
+      // 启动时账号尚未绑定/网络未就绪会让后台预装失败。用户登录后第一次按播放
+      // 必须重试同一首、同一进度，而不是对一张没有 source 的 Deck 直接发 Play。
+      deferredStreamAutoplayRef.current = current.id;
+      setBrowserMediaStatus("resolving");
+      setNotice("");
+      setSourceLoadEpoch((value) => value + 1);
+      return;
+    }
+    if (!playingRef.current && !nativePlayer) djEngine.resume();
     const nextPlaying = !playingRef.current;
     transportHandledRef.current = true;
     if (nativePlayer) {
@@ -3087,6 +3296,13 @@ export function PlayerBar({
     seekBy,
     nudgeVolume: (delta) => {
       setMasterVolume(playerVolumeRef.current + delta);
+    },
+    moveListSelection: (delta) => {
+      window.dispatchEvent(
+        new CustomEvent<ArrowKeyListStepDetail>(ARROW_KEY_LIST_STEP_EVENT, {
+          detail: { delta },
+        }),
+      );
     },
     goNext: () => {
       void goNext();
@@ -3577,11 +3793,14 @@ export function PlayerBar({
     }
     useRetainedNextOnceRef.current = false;
     let alive = true;
-    void previewNext(base).then((next) => {
+    // “下一首”唱盘描述的是用户按下一首键后会听到什么。单曲循环只影响自动续播；
+    // 用户手动下一首仍应预告另一首，不能把当前曲复制到另一台并标成“下一首”。
+    void previewNext(base, mode === "one").then((next) => {
       if (!alive || predictionEpochRef.current !== epoch) return;
-      predictedRef.current = next;
-      predictedPolicyRef.current = next ? generatedPolicy : null;
-      setPredicted(next);
+      const distinct = next?.id === base.id ? null : next;
+      predictedRef.current = distinct;
+      predictedPolicyRef.current = distinct ? generatedPolicy : null;
+      setPredicted(distinct);
     });
     return () => {
       alive = false;
@@ -3671,7 +3890,6 @@ export function PlayerBar({
     track?.id,
     predicted?.id,
     playing,
-    djTransitions,
     djBars,
     applyInOutPoints,
   ]);
@@ -3692,7 +3910,13 @@ export function PlayerBar({
     if (predicted.id === track.id) return;
     const currentRate = nativePlayer.state().rate || 1;
     const effectiveFromBpm = track.bpm ? track.bpm * currentRate : null;
-    const rate = djEnabled ? bpmSyncRate(effectiveFromBpm, predicted.bpm) : 1;
+    // Prewarm and final prepare must agree exactly. Otherwise `same_source` rejects the warm Deck
+    // at the transition boundary and starts another decoder just when both Decks need CPU.
+    const rate = automaticTransitionRate(
+      djEnabled && autoBeatSync,
+      effectiveFromBpm,
+      predicted.bpm,
+    );
     const cue = djEnabled
       ? applyInOutPoints && predicted.cue_ms !== null
         ? predicted.cue_ms / 1000
@@ -3735,10 +3959,14 @@ export function PlayerBar({
     predicted?.cue_ms,
     predicted?.first_beat,
     applyInOutPoints,
+    autoBeatSync,
   ]);
 
   const transitionShowing = djTransition.phase !== "idle" && transitionVisual !== null;
-  const predictedDeckView = predicted ? viewForTrack(predicted) : null;
+  // 最后一层视觉约束：无论异步预测、会话恢复还是播放器 ACK 以什么顺序到达，
+  // 非当前唱盘都不能再拿当前曲目的同一个 id 冒充“下一首”。
+  const visiblePredicted = predicted?.id === currentDeckView?.track?.id ? null : predicted;
+  const predictedDeckView = visiblePredicted ? viewForTrack(visiblePredicted) : null;
   let leftDeckView: PlayerDeckView | null;
   let rightDeckView: PlayerDeckView | null;
   if (transitionShowing) {
@@ -3786,6 +4014,7 @@ export function PlayerBar({
   // 音频元数据尚未加载（例如恢复上次的唱盘）时，曲库已有的时长仍应先显示；
   // 否则波形都在却只剩一串 --:--，看不出整首还有多久。
   const playbackDuration = pipDriving ? pipDuration : duration || displayTrack?.duration || 0;
+  const elapsed = Math.max(0, Math.min(playbackDuration, playbackPosition));
   const remaining = Math.max(0, playbackDuration - playbackPosition);
   // 随机播放的右唱盘只是预告，不必先切走正在放的歌才能换一个候选。
   const canRefreshPrediction =
@@ -3832,15 +4061,33 @@ export function PlayerBar({
       ? rightDeckView.track.id
       : deckMemoryRef.current.rightId;
     if (leftId === null && rightId === null) return;
-    const memory: PlayerDeckMemory = { leftId, rightId, activeIndex: visualActiveIndex };
+    const memory: PlayerDeckMemory = {
+      ...deckMemoryRef.current,
+      leftId,
+      rightId,
+      activeIndex: visualActiveIndex,
+    };
     deckMemoryRef.current = memory;
-    localStorage.setItem(PLAYER_DECK_MEMORY_KEY, JSON.stringify(memory));
+    writeLocalStorageSoon(PLAYER_DECK_MEMORY_KEY, JSON.stringify(memory), 250);
   }, [
     transitionShowing,
     leftDeckView?.track?.id,
     rightDeckView?.track?.id,
     visualActiveIndex,
   ]);
+
+  // 活动曲目的暂停位置也属于会话状态。固定窗口合并写入，播放时不会按每个时钟帧
+  // 敲磁盘；pagehide/beforeunload 会把最后一个尚未到期的窗口统一 flush。
+  useEffect(() => {
+    if (!usesLocalLibraryRecord(track)) return;
+    const memory: PlayerDeckMemory = {
+      ...deckMemoryRef.current,
+      positionTrackId: track.id,
+      position: Math.max(0, Number.isFinite(position) ? position : 0),
+    };
+    deckMemoryRef.current = memory;
+    writeLocalStorageSoon(PLAYER_DECK_MEMORY_KEY, JSON.stringify(memory), 1_000);
+  }, [track?.id, position]);
 
   const lastDeckOpenRef = useRef<{ trackId: number; at: number } | null>(null);
   const openDeck = (view: PlayerDeckView | null, active: boolean) => {
@@ -3857,7 +4104,9 @@ export function PlayerBar({
     lastDeckOpenRef.current = { trackId: deckTrack.id, at: now };
     if (usesLocalLibraryRecord(deckTrack) && selected?.id !== deckTrack.id) selectTrack(deckTrack);
     window.dispatchEvent(
-      new CustomEvent(DETAIL_EVENT, { detail: { source: "player-deck" } }),
+      new CustomEvent(DETAIL_EVENT, {
+        detail: { source: "player-deck", trackId: deckTrack.id },
+      }),
     );
   };
 
@@ -4037,278 +4286,15 @@ export function PlayerBar({
     performanceStreamTokens[0],
     performanceStreamTokens[1],
   ]);
-  const performanceStemsRef = useRef(performanceStems);
-  performanceStemsRef.current = performanceStems;
-  const performanceStemRuntimeRef = useRef(performanceStemRuntime);
-  performanceStemRuntimeRef.current = performanceStemRuntime;
-
-  useEffect(() => {
-    if (!dualDeck) {
-      setPerformanceStemRuntime(null);
-      return;
-    }
-    let alive = true;
-    let timer: number | null = null;
-    const refresh = () => {
-      void api.stemRuntimeStatus().then((status) => {
-        if (!alive) return;
-        setPerformanceStemRuntime(status);
-        const message = status.diagnostics.lastError.trim();
-        if (message && reportedStemRuntimeErrorRef.current !== message) {
-          reportedStemRuntimeErrorRef.current = message;
-          setNotice("STEM 运行失败：" + message);
-        } else if (!message) {
-          reportedStemRuntimeErrorRef.current = "";
-        }
-        timer = window.setTimeout(refresh, 2_000);
-      }).catch((error: unknown) => {
-        if (!alive) return;
-        const message = error instanceof Error ? error.message : String(error);
-        if (reportedStemRuntimeErrorRef.current !== message) {
-          reportedStemRuntimeErrorRef.current = message;
-          setNotice("读取 STEM 状态失败：" + message);
-        }
-        timer = window.setTimeout(refresh, 1_000);
-      });
-    };
-    refresh();
-    return () => {
-      alive = false;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [dualDeck]);
-
-  const stemGainTimersRef = useRef<[number | null, number | null]>([null, null]);
-  const stemGainDraftRef = useRef<[
-    [number, number, number, number],
-    [number, number, number, number],
-  ]>([[1, 1, 1, 1], [1, 1, 1, 1]]);
-  // STEM 启动要先创建异步分离流，而 EQ 是实时控制。两者若并发到达 actor，较早的
-  // “全开/全增益”启动命令可能在第一次旋钮命令之后才落地，覆盖用户刚调好的值。
-  // 每个 Deck 保持一个短串行通道：启动先写入 pending stream，紧随的 EQ 再更新同一
-  // pending stream 的增益，等它真正安装时便已经是用户首次调节后的值。
-  const stemModeTailsRef = useRef<[Promise<void>, Promise<void>]>([
-    Promise.resolve(),
-    Promise.resolve(),
-  ]);
-  const waitForInstalledStemMode = async (side: 0 | 1, trackId: number, enabled: boolean) => {
-    const deadline = performance.now() + 12_000;
-    while (performance.now() < deadline) {
-      const installed = playerRuntime.state().decks[side];
-      if (installed.trackId !== trackId) return false;
-      if (installed.stemEnabled === enabled) return true;
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 20));
-    }
-    throw new Error(enabled ? "STEM 安全缓冲等待超时" : "原曲安全缓冲等待超时");
-  };
-  const applyStemModeNow = async (
-    side: 0 | 1,
-    trackId: number,
-    enabled: boolean,
-    mask: number,
-  ) => {
-    const deck = performanceDecksRef.current[side];
-    const deckTrack = deck.track;
-    if (!deckTrack || deckTrack.id !== trackId) return;
-    let status = performanceStemsRef.current[side].status;
-    if (!status || status.trackId !== deckTrack.id || status.state !== "ready" || !status.cachePath) {
-      const fetched = await api.trackStemStatus(deckTrack.id);
-      if (performanceDecksRef.current[side].track?.id !== trackId) return;
-      status = fetched;
-      setPerformanceStems((current) => {
-        if (sameStemStatus(current[side].status, fetched)) return current;
-        const next: [PerformanceStemDeckModel, PerformanceStemDeckModel] = [
-          { ...current[0] },
-          { ...current[1] },
-        ];
-        next[side].status = status;
-        return next;
-      });
-    }
-    if (!status || status.trackId !== deckTrack.id || status.state !== "ready" || !status.cachePath) {
-      throw new Error("STEM 尚未就绪");
-    }
-    await ensurePerformanceDeck(side, deck.playing);
-    if (performanceDecksRef.current[side].track?.id !== trackId) return;
-    // 读取即时 draft，而非排队前的 React state 快照。这样在 STEM 流准备期间发生的
-    // 第一次 EQ 拧动会随流的首次安装一起交给渲染线程。
-    const liveGains = [...stemGainDraftRef.current[side]] as [number, number, number, number];
-    try {
-      await playerRuntime.setDeckStems(deckTrack.id, enabled, status.cachePath, mask, liveGains);
-      await waitForInstalledStemMode(side, trackId, enabled);
-    } catch (error) {
-      if (enabled) {
-        setPerformanceStems((current) => {
-          const next: [PerformanceStemDeckModel, PerformanceStemDeckModel] = [
-            { ...current[0] },
-            { ...current[1] },
-          ];
-          next[side].enabled = false;
-          return next;
-        });
-      }
-      throw error;
-    }
-    if (performanceDecksRef.current[side].track?.id !== trackId) return;
-    setPerformanceStems((current) => {
-      const next: [PerformanceStemDeckModel, PerformanceStemDeckModel] = [
-        { ...current[0] },
-        { ...current[1] },
-      ];
-      next[side].enabled = enabled;
-      next[side].mask = mask & 0b1111;
-      if (stemGainTimersRef.current[side] === null) {
-        next[side].gains = liveGains;
-      }
-      return next;
-    });
-  };
-  const applyStemMode = (
-    side: 0 | 1,
-    enabled: boolean,
-    mask: number,
-  ) => {
-    const trackId = performanceDecksRef.current[side].track?.id;
-    if (trackId === undefined) return Promise.reject(new Error("STEM 尚未就绪"));
-    const operation = stemModeTailsRef.current[side].then(() =>
-      applyStemModeNow(side, trackId, enabled, mask),
-    );
-    // A failed request must not prevent the next EQ gesture from reaching the Deck.
-    stemModeTailsRef.current[side] = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return operation;
-  };
-  const applyStemModeRef = useRef(applyStemMode);
-  applyStemModeRef.current = applyStemMode;
-
-  const togglePerformanceLoop = (side: 0 | 1, length: number, quantize: boolean) => {
-    const deckTrack = performanceDecks[side].track;
-    if (!deckTrack) return Promise.resolve();
-    if (playerRuntime.state().decks[side].trackId !== deckTrack.id) {
-      // A replacement acknowledgement can lead the React row by one paint. This is a stale
-      // generation, not an operational failure; the physical binding will reconcile next.
-      return Promise.resolve();
-    }
-    return playerRuntime.toggleDeckLoop(side, length, quantize).then(() => undefined).catch((error: unknown) => {
-      setNotice("LOOP 失败：" + (error instanceof Error ? error.message : String(error)));
-      throw error;
-    });
-  };
-
-  const resizePerformanceLoop = (side: 0 | 1, length: number) => {
-    const deckTrack = performanceDecks[side].track;
-    if (!deckTrack) return Promise.resolve();
-    if (playerRuntime.state().decks[side].trackId !== deckTrack.id) return Promise.resolve();
-    return playerRuntime.resizeDeckLoop(side, length).then(() => undefined).catch((error: unknown) => {
-      setNotice("调整 LOOP 失败：" + (error instanceof Error ? error.message : String(error)));
-      throw error;
-    });
-  };
-
-  const togglePerformanceStem = (side: 0 | 1) => {
-    const deckTrack = performanceDecksRef.current[side].track;
-    if (!deckTrack || !usesLocalLibraryRecord(deckTrack)) {
-      setNotice("STEM 仅支持本机曲库文件");
-      return;
-    }
-    if (performanceStemsRef.current[side].enabled) {
-      restorePerformanceOriginal(side);
-      return;
-    }
-    void applyStemMode(side, true, allStemMask).catch((error: unknown) => {
-      setNotice(`STEM 切换失败：${error instanceof Error ? error.message : String(error)}`);
-    });
-  };
-
-  const restorePerformanceOriginal = (side: 0 | 1) => {
-    if (!performanceStems[side].enabled) return;
-    void applyStemMode(side, false, performanceStems[side].mask).catch((error: unknown) => {
-      setNotice(`原曲切换失败：${error instanceof Error ? error.message : String(error)}`);
-    });
-  };
-
-  useEffect(() => {
-    if (!dualDeck) {
-      // Preserve the mounted audio state while the Performance surface is closed. Clearing the
-      // identity is enough to force a safe state refresh when it is opened again.
-      stemDeckTrackIdsRef.current = [null, null];
-      return;
-    }
-    const nextTrackIds: [number | null, number | null] = [
-      performanceDecks[0].track?.id ?? null,
-      performanceDecks[1].track?.id ?? null,
-    ];
-    setPerformanceStems((current) => {
-      const next: [PerformanceStemDeckModel, PerformanceStemDeckModel] = [
-        { ...current[0] },
-        { ...current[1] },
-      ];
-      let changed = false;
-      ([0, 1] as const).forEach((side) => {
-        if (stemDeckTrackIdsRef.current[side] === nextTrackIds[side]) return;
-        next[side] = {
-          ...current[side],
-          status: null,
-          enabled: false,
-        };
-        // Active STEM audio is source-specific, but its mask/gain knobs are Deck controls. Keep
-        // the latter so hardware and software resume from the same values on the replacement.
-        stemGainDraftRef.current[side] = [...current[side].gains] as [number, number, number, number];
-        if (stemGainTimersRef.current[side] !== null) {
-          window.clearTimeout(stemGainTimersRef.current[side]!);
-          stemGainTimersRef.current[side] = null;
-        }
-        changed = true;
-      });
-      stemDeckTrackIdsRef.current = nextTrackIds;
-      return changed ? next : current;
-    });
-  }, [
-    allStemMask,
-    dualDeck,
-    performanceDecks[0].track?.id,
-    performanceDecks[1].track?.id,
-  ]);
-
-  const savePerformanceCues = async (deckTrack: Track, cuePoints: CuePoint[]) => {
-    if (!usesLocalLibraryRecord(deckTrack)) throw new Error("在线与外置曲目暂不写回本地 Cue");
-    const updated = await updateTrack(deckTrack.id, { cue_points: cuePoints });
-    if (trackRef.current?.id === updated.id) setTrack(updated);
-    if (predictedRef.current?.id === updated.id) {
-      predictedRef.current = updated;
-      setPredicted(updated);
-    }
-    setRetainedDecks((current) =>
-      current.map((item) => (item?.id === updated.id ? updated : item)) as [Track | null, Track | null],
-    );
-    setPerformanceDeckOverrides((current) =>
-      current.map((item) => (item?.id === updated.id ? updated : item)) as [Track | null, Track | null],
-    );
-  };
-
-  const savePerformanceMainCue = async (deckTrack: Track, cueMs: number) => {
-    if (!usesLocalLibraryRecord(deckTrack)) throw new Error("在线与外置曲目暂不写回本地 Cue");
-    const updated = await updateTrack(deckTrack.id, { cue_ms: cueMs });
-    if (trackRef.current?.id === updated.id) setTrack(updated);
-    if (predictedRef.current?.id === updated.id) {
-      predictedRef.current = updated;
-      setPredicted(updated);
-    }
-    setRetainedDecks((current) =>
-      current.map((item) => (item?.id === updated.id ? updated : item)) as [Track | null, Track | null],
-    );
-    setPerformanceDeckOverrides((current) =>
-      current.map((item) => (item?.id === updated.id ? updated : item)) as [Track | null, Track | null],
-    );
+  const resetPerformanceControlsForManagerLoad = () => {
+    performanceChannelGainsRef.current = [1, 1];
   };
 
   const focusPerformanceDeck = (side: 0 | 1, deckTrack: Track, at: number) => {
     visualActiveIndexRef.current = side;
     setVisualActiveIndex(side);
     if (trackRef.current?.id !== deckTrack.id) {
-      // Performance 已自行装盘，跳过单轨 load effect；否则会回收另一侧并破坏同时播放。
+      // Hidden Deck preloads must not enter the ordinary single-track load effect a second time.
       djViaRef.current = deckTrack.id;
       trackRef.current = deckTrack;
       setTrack(deckTrack);
@@ -4319,64 +4305,61 @@ export function PlayerBar({
     setDuration(deckTrack.duration ?? 0);
   };
 
-  const resetPerformanceControlsForManagerLoad = () => {
-    clearPerformanceMixerSession();
-    performanceChannelGainsRef.current = [1, 1];
-    setPerformanceDeckResetRevisions((current) => {
-      return [current[0] + 1, current[1] + 1];
-    });
-    setPerformanceStems([
-      {
-        status: null,
-        enabled: false,
-        mask: allStemMask,
-        gains: [1, 1, 1, 1],
-      },
-      {
-        status: null,
-        enabled: false,
-        mask: allStemMask,
-        gains: [1, 1, 1, 1],
-      },
-    ]);
-    stemDeckTrackIdsRef.current = [null, null];
-    stemGainDraftRef.current = [[1, 1, 1, 1], [1, 1, 1, 1]];
-    ([0, 1] as const).forEach((side) => {
-      if (stemGainTimersRef.current[side] !== null) {
-        window.clearTimeout(stemGainTimersRef.current[side]!);
-        stemGainTimersRef.current[side] = null;
-      }
-    });
-  };
-
-  const ensurePerformanceDeck = async (side: 0 | 1, autoplay: boolean) => {
-    const deck = performanceDecks[side];
-    const deckTrack = deck.track;
-    if (!deckTrack) return;
-    const nativeDecks = playerRuntime.state().decks;
-    if (nativeDecks[side].trackId === deckTrack.id) return;
-    const inFlight = performanceDeckEnsureRef.current[side];
-    if (inFlight?.trackId === deckTrack.id) return inFlight.promise;
-    const generation = ++performanceDeckEnsureGenerationRef.current[side];
-    const promise = (async () => {
-      const source = await playbackSourceForTrack(deckTrack, {
-        position: deck.position,
-        rate: deck.rate,
-        autoplay,
-      });
-      // An older resolve may finish after the user replaced this side. Do not let it install the
-      // wrong Deck merely because a high-frequency fader callback was still awaiting it.
-      if (performanceDeckEnsureGenerationRef.current[side] !== generation) return;
-      await playerRuntime.loadDeck(side, source);
-    })();
-    performanceDeckEnsureRef.current[side] = { trackId: deckTrack.id, promise };
-    try {
-      await promise;
-    } finally {
-      if (performanceDeckEnsureRef.current[side]?.promise === promise) {
-        performanceDeckEnsureRef.current[side] = null;
-      }
+  eagerManagerLoadRef.current = (next, autoPlay) => {
+    // Provider streams still need async URL resolution, mobile owns a different media lifecycle,
+    // and dual-Deck loads preserve physical Deck controls. Only the desktop manager's local path
+    // can safely construct and submit its source synchronously in the original user gesture.
+    if (!desktopNative || !nativePlayer || dualDeck || isStreamTrack(next)) {
+      return false;
     }
+
+    resetPerformanceControlsForManagerLoad();
+    const applyAutomaticCue = autoInOutCueRef.current === next.id;
+    const initialPosition =
+      applyAutomaticCue && next.cue_ms != null ? Math.max(0, next.cue_ms / 1_000) : 0;
+    autoInOutCueRef.current = null;
+    const loadGeneration = ++nativeLoadGenerationRef.current;
+    nativeLoadInFlightRef.current = true;
+    nativeLoadTargetRef.current = { trackId: next.id, generation: loadGeneration };
+    eagerManagerLoadTokenRef.current = { trackId: next.id, generation: loadGeneration };
+    const stillCurrent = () => loadGeneration === nativeLoadGenerationRef.current;
+    const prepared = {
+      src: mediaUrlForTrack(next),
+      track: next,
+      artworkUrl: playbackArtworkUrl(next),
+      position: initialPosition,
+      autoplay: autoPlay,
+    };
+
+    // The desktop-native owner is authoritative in Tauri. Tear down a stale browser bridge before
+    // issuing IPC, but do not wait for React or for any visual panel to mount.
+    djEngine.cancel();
+    djEngine.hardPause(djEngine.frontElement());
+    void nativePlayer
+      .load(prepared)
+      .then((state) => {
+        if (!stillCurrent()) return;
+        if (state.status === "error") {
+          commitPlaying(false);
+          nativeLoadTargetRef.current = null;
+          nativeLoadInFlightRef.current = false;
+          setNotice(state.error || "原生播放器无法播放这个文件");
+          void nativePlayer.pause().catch(() => {});
+          return;
+        }
+        setPosition(state.currentTime);
+        setDuration(state.duration || next.duration || 0);
+        setNotice("");
+      })
+      .catch((error: unknown) => {
+        if (!stillCurrent()) return;
+        nativeLoadTargetRef.current = null;
+        nativeLoadInFlightRef.current = false;
+        commitPlaying(false);
+        void nativePlayer.pause().catch(() => {});
+        setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+    return true;
   };
 
   const performanceDeckInstallGenerationRef = useRef<[number, number]>([0, 0]);
@@ -4456,195 +4439,16 @@ export function PlayerBar({
   };
   loadPerformanceTrackRef.current = installPerformanceTrack;
 
-  const loadPerformanceTrackRequest = async (
-    side: 0 | 1,
-    request: PlaybackTrackRequest,
-  ) => {
-    try {
-      const dropped = await resolvePlaybackTrack(request);
-      const at = Math.max(0, dropped.first_beat ?? 0);
-      await installPerformanceTrack(side, dropped, useDjConfig.getState().playOnLoad, at);
-    } catch (error: unknown) {
-      setNotice(`装入 Deck ${side === 0 ? "A" : "B"} 失败：${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-
-  const performanceWorkspace = (
-    <PerformanceWorkspace
-      decks={performanceDecks}
-      nativeSync={performanceSyncState}
-      deckResetRevisions={performanceDeckResetRevisions}
-      stems={performanceStems}
-      stemRuntime={performanceStemRuntime}
-      stemMode={stemMode}
-      masterVolume={playerVolume}
-      onSeek={(side, detail) => {
-        const deckTrack = performanceDecks[side].track;
-        if (!deckTrack || detail.preview) return Promise.resolve(false);
-        focusPerformanceDeck(side, deckTrack, detail.position);
-        return ensurePerformanceDeck(side, false)
-          .then(() => playerRuntime.seekDeck(side, detail.position))
-          .then(() => true)
-          .catch((error: unknown) => {
-            setNotice(`Deck 跳转失败：${error instanceof Error ? error.message : String(error)}`);
-            return false;
-          });
-      }}
-      onJogSeek={(side, position) => {
-        const deckTrack = performanceDecks[side].track;
-        // Hardware jog input is never an implicit load/focus request. A stale visual row used to
-        // call ensurePerformanceDeck for every tick, which could replace a source, restart a
-        // stream at 0, or flip the global player while the other Deck was performing.
-        if (!deckTrack || playerRuntime.state().decks[side].trackId !== deckTrack.id) return;
-        void playerRuntime.seekDeck(side, position).catch(() => {
-          // This is a hot input path. The next physical-state snapshot is authoritative; showing
-          // a notice for every dropped tick would itself make the Performance surface stutter.
-        });
-      }}
-      onJogNudge={(side, amount) => {
-        const deckTrack = performanceDecks[side].track;
-        if (!deckTrack || playerRuntime.state().decks[side].trackId !== deckTrack.id) return;
-        void playerRuntime.nudgeDeck(side, amount).catch(() => {
-          // See onJogSeek: do not turn a transient controller packet into a global UI mutation.
-        });
-      }}
-      onPlatter={(side, event) => {
-        if (event.phase === "end") {
-          // End is generation-fenced inside the unified runtime. It must still pass when the
-          // visual row changed first, otherwise the departing physical Deck stays grabbed.
-          void playerRuntime.controlDeckPlatter(side, event).catch(() => undefined);
-          return;
-        }
-        const deckTrack = performanceDecks[side].track;
-        const physical = playerRuntime.state().decks[side];
-        // Platter input is physical-Deck scoped and never loads/focuses a stale visual row.
-        if (!deckTrack || physical.trackId !== deckTrack.id) return;
-        void playerRuntime.controlDeckPlatter(side, event).catch(() => {
-          // High-rate input must not create a notice/render storm. The next native state is truth.
-        });
-      }}
-      onTrackLoad={(side, request) => void loadPerformanceTrackRequest(side, request)}
-      onTogglePlay={(side) => {
-        const deck = performanceDecks[side];
-        const deckTrack = deck.track;
-        if (!deckTrack) return;
-        focusPerformanceDeck(side, deckTrack, deck.position);
-        void ensurePerformanceDeck(side, !deck.playing)
-          .then(() => deck.playing ? playerRuntime.pauseDeck(side) : playerRuntime.playDeck(side))
-          .catch((error: unknown) => setNotice(`Deck 播放失败：${error instanceof Error ? error.message : String(error)}`));
-      }}
-      onMainCue={(side, cuePosition) => {
-        const deck = performanceDecks[side];
-        const deckTrack = deck.track;
-        if (!deckTrack) return;
-        focusPerformanceDeck(side, deckTrack, cuePosition);
-        void ensurePerformanceDeck(side, false)
-          .then(async () => {
-            if (deck.playing) await playerRuntime.pauseDeck(side);
-            await playerRuntime.seekDeck(side, cuePosition);
-          })
-          .catch((error: unknown) => setNotice(`主 CUE 失败：${error instanceof Error ? error.message : String(error)}`));
-      }}
-      onRateChange={(side, rate) => {
-        const deckTrack = performanceDecks[side].track;
-        if (!deckTrack) return false;
-        return playerRuntime.setDeckRate(side, Math.min(2, Math.max(0.5, rate)))
-          .then(() => true)
-          .catch((error: unknown) => {
-            setNotice(`TEMPO 调整失败：${error instanceof Error ? error.message : String(error)}`);
-            return false;
-          });
-      }}
-      onRatePairChange={(rates) => {
-        const physical = playerRuntime.state().decks;
-        if (
-          !performanceDecks[0].track
-          || !performanceDecks[1].track
-          || physical[0].trackId !== performanceDecks[0].track.id
-          || physical[1].trackId !== performanceDecks[1].track.id
-        ) return false;
-        const bounded: [number, number] = [
-          Math.min(2, Math.max(0.5, rates[0])),
-          Math.min(2, Math.max(0.5, rates[1])),
-        ];
-        return playerRuntime.setDeckRates(bounded)
-          .then(() => true)
-          .catch((error: unknown) => {
-            setNotice("SYNC TEMPO 调整失败：" + (error instanceof Error ? error.message : String(error)));
-            return false;
-          });
-      }}
-      onSync={(request) => {
-        const followerTrack = performanceDecks[request.follower].track;
-        const masterTrack = performanceDecks[request.master].track;
-        const physical = playerRuntime.state().decks;
-        if (
-          !followerTrack
-          || !masterTrack
-          || physical[request.follower].trackId !== followerTrack.id
-          || physical[request.master].trackId !== masterTrack.id
-        ) return false;
-        return playerRuntime.syncDeck(request)
-          .then(() => true)
-          .catch((error: unknown) => {
-            setNotice("SYNC 对齐失败：" + (error instanceof Error ? error.message : String(error)));
-            return false;
-          });
-      }}
-      onClearSync={() => {
-        void playerRuntime.clearSync();
-      }}
-      onMixerChange={(side, expectedTrackId, values, channelGain) => {
-        performanceChannelGainsRef.current[side] = channelGain;
-        const installedTrackId = playerRuntime.state().decks[side].trackId;
-        // Mixer state publishes on mount and after every Deck reset. A React snapshot can trail
-        // the native load acknowledgement by one render; that lifecycle edge is not a user error.
-        // Ignore the stale generation. The binding id participates in the child signature, so the
-        // exact same neutral/control state is resent as soon as the physical row is confirmed.
-        if (expectedTrackId === null || installedTrackId !== expectedTrackId) return;
-        void playerRuntime.setDeckMixer(side, {
-          channelGain,
-          trimDb: values.gain < 0 ? values.gain * 24 : values.gain * 6,
-          lowDb: eqBandDb(values.low),
-          midDb: eqBandDb(values.mid),
-          highDb: eqBandDb(values.high),
-          filter: values.filter,
-        })
-          .catch((error: unknown) => {
-            setNotice(`Deck ${side === 0 ? "A" : "B"} 混音控制失败：${error instanceof Error ? error.message : String(error)}`);
-          });
-      }}
-      onDeckFx={(side, fx) => {
-        void playerRuntime.setDeckFx(side, fx).catch((error: unknown) => {
-          setNotice(`Deck ${side === 0 ? "A" : "B"} 效果器失败：${error instanceof Error ? error.message : String(error)}`);
-        });
-      }}
-      onMasterVolumeChange={setMasterVolume}
-      onToggleStemAll={togglePerformanceStem}
-      onDeckPfl={(side, enabled) => {
-        void playerRuntime.setDeckPfl(side, enabled).catch((error: unknown) => {
-          setNotice(`Deck ${side === 0 ? "A" : "B"} 监听失败：${error instanceof Error ? error.message : String(error)}`);
-        });
-      }}
-      onToggleLoop={togglePerformanceLoop}
-      onResizeLoop={resizePerformanceLoop}
-      onSaveCuePoints={savePerformanceCues}
-      onSaveMainCue={savePerformanceMainCue}
-    />
-  );
-
   return (
     <div
       className="kd-player"
       data-pip={pipDriving ? "true" : undefined}
-      data-performance-dock={performanceOpen ? "true" : undefined}
     >
-      {performanceOpen ? performanceWorkspace : null}
       {/* 这里不再渲染 <audio>：播放元素归 djEngine 所有（两台 deck 互换正主），
           事件监听在上面的 effect 里挂到 frontEl 上 */}
       {/* 不再挂隐藏视频实例：详情面板已有可见播放器，双实例会同时解码并
           互相回传 seek，画面就一卡一卡。音频是主时钟，打开详情时再对齐即可。 */}
-      <LyricsHost current={track} next={predicted} allowDesktop={!video} />
+      <LyricsHost current={track} allowDesktop={!video} />
 
       <div className="kd-player-leading">
         <PlayerDeck
@@ -4674,43 +4478,76 @@ export function PlayerBar({
           而且它们本来就在同一组里，靠间距分得开。 */}
       <div className="kd-player-transport">
         <div className="kd-player-transport-side" data-side="left">
-          {canDownloadStreamTrack(track) ? (
+          <div className="kd-player-float-tools">
             <button
               type="button"
-              className="kd-player-step kd-player-stream-download"
-              disabled={enqueueBusy}
-              aria-label={enqueueBusy ? "正在创建下载任务" : "下载当前在线歌曲"}
-              title={enqueueBusy ? "正在创建下载任务…" : "下载当前在线歌曲"}
-              onClick={() => downloadStreamTrack(track)}
+              className="kd-player-step kd-player-auto-advance"
+              aria-label={autoAdvance ? "关闭自动切歌" : "开启自动切歌"}
+              aria-pressed={autoAdvance}
+              data-on={autoAdvance ? "true" : undefined}
+              title={
+                mobileNative
+                  ? autoAdvance
+                    ? "自动切歌：开。曲目结束后继续播放；移动端使用普通切换"
+                    : "自动切歌：关。曲目结束后停止"
+                  : autoAdvance
+                    ? `自动切歌：开。双击、下一首和曲目结束都会使用 ${djBars} 小节过渡`
+                    : "自动切歌：关。显式换歌直接切换，曲目结束后停止"
+              }
+              onClick={toggleAutoAdvance}
             >
-              <Download size={14} aria-hidden="true" />
+              <Blend size={14} />
             </button>
-          ) : null}
+            {canDesktopLyrics ? (
+              <button
+                type="button"
+                className="kd-player-step kd-player-lyricsbtn"
+                aria-label={
+                  networkPreview
+                    ? "B站预览使用浮动小窗"
+                    : video
+                      ? sharedFloatOn
+                        ? "本地视频改用详情播放"
+                        : "本地视频改用悬浮小窗播放"
+                      : sharedFloatOn
+                        ? "关闭悬浮歌词"
+                        : "打开悬浮歌词"
+                }
+                aria-pressed={sharedFloatOn}
+                data-on={sharedFloatOn ? "true" : undefined}
+                disabled={networkPreview}
+                title={
+                  networkPreview
+                    ? "B站搜索结果固定使用浮动小窗；此设置只影响本地视频"
+                    : video
+                      ? sharedFloatOn
+                        ? "本地视频：浮动小窗。点一下改为详情播放"
+                        : "本地视频：详情播放。点一下改为浮动小窗"
+                      : sharedFloatOn
+                        ? "悬浮歌词：开。点一下关闭"
+                        : "打开悬浮歌词"
+                }
+                onClick={() => {
+                  if (networkPreview) return;
+                  if (video) cyclePipMode();
+                  else void toggleLyricsOverlay();
+                }}
+              >
+                <PictureInPicture2 size={13} />
+              </button>
+            ) : null}
+          </div>
           <label
             className="kd-player-volume"
             title={`音量 ${Math.round(playerVolume * 100)}%（↑↓）`}
             data-muted={playerVolume === 0 ? "true" : undefined}
+            style={{ "--kd-volume-fill": `${playerVolume * 100}%` } as CSSProperties}
           >
-            <button
-              type="button"
-              className="kd-player-mute"
-              aria-label={playerVolume === 0 ? "取消静音" : "静音"}
-              aria-pressed={playerVolume === 0}
-              title={playerVolume === 0 ? "取消静音" : "静音"}
-              onClick={(event) => {
-                // 喇叭在 label 里：不拦的话点一下还会顺带拨滑条。
-                event.preventDefault();
-                event.stopPropagation();
-                if (playerVolume > 0) {
-                  volumeBeforeMuteRef.current = playerVolume;
-                  setMasterVolume(0);
-                } else {
-                  setMasterVolume(volumeBeforeMuteRef.current || 1);
-                }
-              }}
-            >
-              {playerVolume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
-            </button>
+            <span ref={playerVolumeMeterRef} className="kd-player-volume-leds" aria-hidden="true">
+              <span className="kd-player-volume-row" data-slice="previous"><i /></span>
+              <span className="kd-player-volume-row" data-slice="current"><i /></span>
+            </span>
+            <b className="kd-player-volume-thumb" aria-hidden="true" />
             <input
               type="range"
               min={0}
@@ -4718,73 +4555,12 @@ export function PlayerBar({
               step={0.01}
               value={playerVolume}
               aria-label="播放器音量"
-              style={{ "--kd-volume-fill": `${playerVolume * 100}%` } as CSSProperties}
               onChange={(event) => setMasterVolume(Number(event.currentTarget.value))}
             />
           </label>
-          {/* 接播只留开关；旁边一颗悬浮键由音频歌词与视频/VJ 共用。 */}
-          <div className="kd-player-dj">
-          <button
-            type="button"
-            className="kd-player-step kd-player-djbtn"
-            aria-label={djEnabled ? "关闭自动接播" : "开启自动接播"}
-            aria-pressed={djEnabled}
-            data-on={djEnabled ? "true" : undefined}
-            disabled={mobileNative}
-            title={
-              mobileNative
-                ? "移动端实时 DJ 引擎迁移中；普通播放已使用原生后台播放器"
-                : !djEnabled
-                  ? "自动接播：关。点一下开启"
-                  : `自动接播：${djTransitions
-                      .map((id) => DJ_TRANSITIONS.find((item) => item.id === id)?.label)
-                      .filter(Boolean)
-                      .join(" + ")}，${djBars} 小节。点一下关闭`
-            }
-            onClick={toggleDjEnabled}
-          >
-            <Blend size={14} />
-          </button>
-          {canDesktopLyrics ? (
-            <button
-              type="button"
-              className="kd-player-step kd-player-lyricsbtn"
-              aria-label={
-                networkPreview
-                  ? "B站预览使用浮动小窗"
-                  : video
-                    ? sharedFloatOn
-                      ? "本地视频改用详情播放"
-                      : "本地视频改用悬浮小窗播放"
-                    : sharedFloatOn
-                      ? "关闭悬浮歌词"
-                      : "打开悬浮歌词"
-              }
-              aria-pressed={sharedFloatOn}
-              data-on={sharedFloatOn ? "true" : undefined}
-              disabled={networkPreview}
-              title={
-                networkPreview
-                  ? "B站搜索结果固定使用浮动小窗；此设置只影响本地视频"
-                  : video
-                    ? sharedFloatOn
-                      ? "本地视频：浮动小窗。点一下改为详情播放"
-                      : "本地视频：详情播放。点一下改为浮动小窗"
-                    : sharedFloatOn
-                      ? "悬浮歌词：开。点一下关闭"
-                      : "打开悬浮歌词"
-              }
-              onClick={() => {
-                if (networkPreview) return;
-                if (video) cyclePipMode();
-                else void toggleLyricsOverlay();
-              }}
-            >
-              <PictureInPicture2 size={13} />
-            </button>
-          ) : null}
-          </div>
+        </div>
 
+        <div className="kd-player-transport-core">
           <button
             type="button"
             className="kd-player-step"
@@ -4795,7 +4571,6 @@ export function PlayerBar({
           >
             <SkipBack size={15} fill="currentColor" />
           </button>
-        </div>
 
         <button
           type="button"
@@ -4844,7 +4619,6 @@ export function PlayerBar({
           )}
         </button>
 
-        <div className="kd-player-transport-side" data-side="right">
         <button
           type="button"
           className="kd-player-step"
@@ -4855,6 +4629,9 @@ export function PlayerBar({
         >
           <SkipForward size={15} fill="currentColor" />
         </button>
+        </div>
+
+        <div className="kd-player-transport-side" data-side="right">
 
         {/* 播放模式 + 范围，紧挨走带键：它们改的就是"下一首是谁"。
             各一颗按钮循环切换，图标即状态——模式是四选一（调性/顺序/随机/单曲循环），
@@ -4872,27 +4649,40 @@ export function PlayerBar({
             return <Icon size={14} />;
           })()}
         </button>
-        <button
-          type="button"
-          className="kd-player-step"
-          aria-label={
-            scope === "folder"
-              ? "范围：当前文件夹"
-              : "范围：全部曲库"
-          }
-          title={
-            scope === "folder"
-              ? "只在当前文件夹里挑下一首。点一下改成全部曲库"
-              : "在全部曲库里挑下一首。点一下改成只在当前文件夹里挑"
-          }
-          onClick={() => setScope(scope === "all" ? "folder" : "all")}
-        >
-          {scope === "folder" ? (
-            <FolderOpen size={14} />
-          ) : (
-            <Library size={14} />
-          )}
-        </button>
+        {canDownloadStreamTrack(track) ? (
+          <button
+            type="button"
+            className="kd-player-step kd-player-stream-download"
+            disabled={enqueueBusy}
+            aria-label={enqueueBusy ? "正在创建下载任务" : "下载当前在线歌曲"}
+            title={enqueueBusy ? "正在创建下载任务…" : "下载当前在线歌曲"}
+            onClick={() => downloadStreamTrack(track)}
+          >
+            <Download size={14} aria-hidden="true" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="kd-player-step"
+            aria-label={
+              scope === "folder"
+                ? "范围：当前文件夹"
+                : "范围：全部曲库"
+            }
+            title={
+              scope === "folder"
+                ? "只在当前文件夹里挑下一首。点一下改成全部曲库"
+                : "在全部曲库里挑下一首。点一下改成只在当前文件夹里挑"
+            }
+            onClick={() => setScope(scope === "all" ? "folder" : "all")}
+          >
+            {scope === "folder" ? (
+              <FolderOpen size={14} />
+            ) : (
+              <Library size={14} />
+            )}
+          </button>
+        )}
         {canRefreshPrediction && (
           <button
             type="button"
@@ -4907,10 +4697,15 @@ export function PlayerBar({
         )}
         {/* 时间属于走带状态，不属于波形本身：放在模式 / 范围两键后，读起来也不必
             从右下角追到波形末端。 */}
-        <span className="kd-player-time kd-player-time-header" aria-label="剩余时间和总时长">
+        <span
+          className="kd-player-time kd-player-time-header"
+          aria-label={timeDisplayMode === "elapsed" ? "已播放时间和总时长" : "剩余时间和总时长"}
+        >
           {playbackDuration > 0
-            ? `−${formatDuration(remaining)} / ${formatDuration(playbackDuration)}`
-            : "−−:−− / −−:−−"}
+            ? timeDisplayMode === "elapsed"
+              ? `${formatDuration(elapsed)} / ${formatDuration(playbackDuration)}`
+              : `−${formatDuration(remaining)} / ${formatDuration(playbackDuration)}`
+            : timeDisplayMode === "elapsed" ? "--:-- / --:--" : "−−:−− / −−:−−"}
         </span>
         </div>
       </div>
@@ -4946,6 +4741,7 @@ export function PlayerBar({
           <Waveform
             className="kd-player-wave"
             renderProfile="release-overview"
+            releaseOverviewIntent="player"
             trackId={pipSession.trackId}
             track={track?.id === pipSession.trackId ? track : undefined}
             position={pipPosition}
@@ -5008,6 +4804,7 @@ export function PlayerBar({
           <Waveform
             className="kd-player-wave"
             renderProfile="release-overview"
+            releaseOverviewIntent="player"
             trackId={displayTrack.id}
             track={displayTrack}
             position={track?.id === displayTrack.id ? position : 0}
@@ -5033,6 +4830,7 @@ export function PlayerBar({
           <Waveform
             className="kd-player-wave"
             renderProfile="release-overview"
+            releaseOverviewIntent="player"
             trackId={track.id}
             track={track}
             position={position}
@@ -5042,6 +4840,13 @@ export function PlayerBar({
             preserveBarPhase={autoBeatSync}
             playing={deckPlaying}
             playbackRate={playbackVisualRate}
+            cueMs={track.cue_ms}
+            endMs={track.end_ms}
+            onSetPoint={(kind, at) => {
+              const patch = pointPatch(kind, at, track.cue_ms, track.end_ms);
+              if (typeof patch === "string") return patch;
+              updateStreamCue(track, patch);
+            }}
           />
         ) : (
           <div className="kd-player-wave-idle" aria-hidden="true" />

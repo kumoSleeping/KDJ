@@ -114,6 +114,7 @@ fn triple(version: &str) -> (u64, u64, u64) {
 }
 
 pub async fn check(current: &str) -> Result<UpdateInfo> {
+    kdj_core::ensure_rustls_ring();
     let client = reqwest::Client::builder()
         // GitHub API 拒绝没有 UA 的请求（403），这不是可选项
         .user_agent(format!("KDJ/{current}"))

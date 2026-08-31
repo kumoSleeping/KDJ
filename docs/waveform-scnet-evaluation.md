@@ -221,7 +221,7 @@ KDJ 当前只有 Rust + Tauri 是活动架构。若以后确认一个 SCNet 模�
 1. `crates/kdj-analysis` 负责模型 manifest、checkpoint hash、chunk inference 契约，不让 `kdj-player` 知道 PyTorch 或模型下载细节；
 2. `kdj-server` 增加独立 StemCoordinator，按 `(track, mtime, model hash, chunk start, chunk length)` 单飞和缓存。Hot Cue 请求抢占普通预热，但不能在音频 callback 里跑模型或写文件；
 3. `kdj-player` 只接收已经可读的四轨 PCM/ring buffer，在现有 engine/stream mixer 里做 Vocals / Drums / Bass / Other gain/mute。cache miss 时继续播原混音，四轨就绪后在 block 边界短 crossfade，不能阻塞设备线程；
-4. `PerformanceWorkspace` 只保留原曲波形；STEM state 仅驱动实时音频增益和 Vocal FX，不生成、传输或绘制分轨波形；
+4. 管理模式只绘制当前原曲波形；实时音频处理不生成、传输或绘制额外分轨波形；
 5. 设置只允许下载和选中一个模型。模型切换后按 hash 隔离缓存，不设计运行时双模型兜底。
 
 完整 11 秒 float stem cache 已经是 14.8 MiB，整轨无压缩约 323 MiB。正式方案要么按 11 秒附近按需缓存并做 LRU，要么采用可随机访问的无损压缩；不能把全库四轨 float 当成和 164 KiB 波形缓存同一类资产。

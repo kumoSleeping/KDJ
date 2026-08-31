@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { PanelTopClose, Pin } from "lucide-react";
+import { PanelTopClose, Pin, SlidersHorizontal } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
 import { clearTextSelection } from "../../lib/textSelection";
 import {
   activeSearchDrag,
   claimActiveSearchDrag,
   enqueueSearchDrop,
-  enqueueSearchOneLibraryDrop,
-  enqueueSearchOneLibraryPayload,
   enqueueSearchPayload,
   enqueueSearchQueuePayload,
   finishSearchDrop,
@@ -16,25 +14,17 @@ import {
   SEARCH_DRAG_STATE_EVENT,
 } from "../../lib/searchDrag";
 import {
-  PLAYLIST_DROP_DEVICE_ATTR,
-  PLAYLIST_DROP_ID_ATTR,
   SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
   SEARCH_DROP_PATH_ATTR,
-  playlistDropAt,
   searchDropPathAt,
   searchQueueDropAt,
 } from "../../lib/folderDrop";
 import {
-  activeTrackDragIds,
   claimActiveTrackDragIds,
   dispatchStreamDeckDrop,
   dispatchTrackCoverDrop,
-  finishTrackDrop,
-  isTrackDrag,
-  readTrackDragIds,
   trackDeckDropSideAt,
   TRACK_COVER_DROP_TARGET_ATTR,
-  TRACK_DRAG_STATE_EVENT,
 } from "../../lib/trackDrag";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import {
@@ -53,6 +43,7 @@ import { enqueueMediaDownloads } from "../../lib/mediaActions";
 import { useUpdateStore } from "../../stores/updateStore";
 import {
   STREAM_BROWSE_PLATFORMS,
+  useStreamBrowseStore,
   type ActiveStreamPlaylist,
   type StreamBrowsePlatform,
 } from "../../stores/streamBrowseStore";
@@ -64,10 +55,6 @@ import {
 import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
-import {
-  oneLibraryPlayableTrack,
-  resolveOneLibraryDropTarget,
-} from "../../lib/oneLibraryTrack";
 import {
   MIDI_BROWSE_CURSOR_ATTR,
   MIDI_BROWSE_EVENT,
@@ -86,11 +73,24 @@ import {
 import {
   moveWorkspacePane,
   normalizedWorkspacePaneFractions,
+  resolveWorkspaceDetailTrack,
+  resolveWorkspacePlaybackDetailTarget,
+  resolveWorkspaceRequestedTrack,
   restoreWorkspacePaneState,
   visibleWorkspacePanes,
   type WorkspacePaneKind,
   type WorkspacePaneState,
 } from "../../lib/workspacePanes";
+import { usePlaybackPrefs } from "../../lib/playbackPrefs";
+import {
+  readLocalStorage,
+  removeLocalStorage,
+  writeLocalStorageNow,
+} from "../../lib/storageWrite";
+import {
+  ARROW_KEY_LIST_STEP_EVENT,
+  type ArrowKeyListStepDetail,
+} from "../../lib/arrowKeyControl";
 import {
   readWorkspaceSession,
   setRestorableWorkspaceSource,
@@ -98,7 +98,9 @@ import {
   updateStreamWorkspaceSession,
 } from "../../lib/workspaceSession";
 import {
-  promoteResolvedCollection,
+  collectionPageWindow,
+  openedCollectionItem,
+  RESOLVED_COLLECTION_PAGE_SIZE,
   resolvedCollectionItem,
 } from "../../lib/searchCollections";
 import { useLibraryClipboard } from "../../lib/useLibraryClipboard";
@@ -107,16 +109,16 @@ import {
   useLibraryStore,
   type SelectMode,
 } from "../../stores/libraryStore";
-import { usePlaylistStore } from "../../stores/playlistStore";
 import type {
   CollectionResult,
   IntakeItem,
   MergedGroup,
-  OneLibraryTrack,
   Platform,
   SearchKind,
   SongSource,
   StreamPlaylist,
+  StreamPlaylistResponse,
+  Track,
   VideoInfo,
 } from "../../types";
 import { Button, InlineNotice, Sheet } from "../common";
@@ -131,25 +133,20 @@ import { burstToneForPlatforms, type SearchBurstTone } from "../download/SearchB
 import { ensureLyrics } from "../../stores/lyricsStore";
 import { ChromeActions } from "../chrome/ChromeActions";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
-import { OneLibraryWorkRail } from "../chrome/OneLibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
 import { QueuePanel } from "../download/QueuePanel";
 import { DuplicateAnalysisPanel } from "../library/DuplicateAnalysisPanel";
 import { isApplyingNav, readPlace, useNavStore } from "../../stores/navStore";
 import { useVideoPip } from "../../lib/videoPip";
-import type { WorkMode } from "../../lib/workMode";
 import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
 import {
   DEFAULT_PRIORITY,
   normalizeSearchPlatforms,
   SearchBar,
 } from "../download/SearchBar";
+import { SearchTipsPanel } from "../download/SearchTipsPanel";
 import { VideoPreview } from "../download/VideoPreview";
 import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
-import { VjExportPanel } from "../library/VjExportPanel";
-import { VirtualDiskPanel } from "../library/VirtualDiskPanel";
-import { OneLibraryTrackTable } from "../library/OneLibraryTrackTable";
-import { OneLibraryTrackDetail } from "../library/OneLibraryTrackDetail";
 import { DETAIL_EVENT } from "../library/TrackTable";
 import { LyricsView } from "../player/LyricsView";
 import { StreamTrackDetail } from "../player/StreamTrackDetail";
@@ -158,11 +155,40 @@ import { LibraryToolbar } from "../library/LibraryToolbar";
 import { TrackDetail } from "../library/TrackDetail";
 import { TrackTable } from "../library/TrackTable";
 
-const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
-
 function errorText(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   return error instanceof Error ? error.message : String(error);
+}
+
+function matchesEditableStreamOrigin(origin: StreamPlaylist["origin"]): boolean {
+  return origin === "favorite" || origin === "created";
+}
+
+function streamPlaylistItem(
+  playlist: StreamPlaylist,
+  response: StreamPlaylistResponse,
+): IntakeItem {
+  const token = `${response.platform}:playlist:${response.key}`;
+  return {
+    entry: token,
+    kind: "playlist",
+    platform: response.platform,
+    title: response.title || playlist.title,
+    groups: response.sources.map((source, index) => ({
+      group_id: `${token}:${source.key}:${index}`,
+      title: source.title,
+      artists: source.artists,
+      album: source.album,
+      duration: source.duration,
+      cover: source.cover || playlist.cover,
+      sources: [source],
+      best_source_index: 0,
+      score: 0,
+    })),
+    collections: [],
+    errors: {},
+    error: "",
+  };
 }
 
 /** 视频链接识别：单视频直接进视频行；B 站收藏夹和 YouTube 播放列表
@@ -179,16 +205,22 @@ const LEGACY_WORKSPACE_PANES_KEY = "kd-workspace-panes-v1";
 
 const WORKSPACE_PANE_LABELS: Record<WorkspacePaneKind, string> = {
   local: "本地曲库",
-  onelibrary: "OneLibrary",
   search: "在线内容",
 };
 
 type WorkspacePaneWeights = Record<WorkspacePaneKind, number>;
 type MovableWorkspacePaneKind = Exclude<WorkspacePaneKind, "local">;
 
+interface CollectionSearchSnapshot {
+  items: IntakeItem[];
+  video: VideoInfo | null;
+  scrollTop: number;
+  scrollLeft: number;
+}
+
 function storedJson(key: string): unknown {
   try {
-    return JSON.parse(localStorage.getItem(key) ?? "null") as unknown;
+    return JSON.parse(readLocalStorage(key) ?? "null") as unknown;
   } catch {
     return null;
   }
@@ -202,9 +234,7 @@ function loadWorkspacePanes(): WorkspacePaneState {
   const session = readWorkspaceSession();
   const active = session.source === "stream" && session.stream.playlist
     ? "search"
-    : session.source === "onelibrary" && session.oneLibrary.target
-      ? "onelibrary"
-      : "local";
+    : "local";
   return { ...restored, active };
 }
 
@@ -212,26 +242,14 @@ function loadWorkspacePanes(): WorkspacePaneState {
  * 唯一的工作台。没有"下载板块"和"曲库板块"之分。
  *
  * 平时它就是曲库：左边固定本地来源导航，右边的统一舞台承载本地曲目、
- * OneLibrary 与在线内容。本地曲库钉住时同时显示最多三块；否则新内容覆盖当前板块。
- * 本地曲库固定最左，OneLibrary 和在线内容可在它右边拖动换位，每条分隔线都能独立调宽。
+ * 在线内容。本地曲库钉住时同时显示两块；否则新内容覆盖当前板块。
  * 详情 / 队列 / 账号等旁路面板仍按需在最右侧出现。
  * 真正把歌加入下载（按钮 / 拖进文件夹）时，才把右栏切成下载队列。
  *
  * 这么排的理由：找歌 → 下载 → 进曲库 → 排 set 本来就是一条线上的动作，
  * 搜的时候本地还在眼前，也不被队列面板打断。
  */
-interface WorkspaceProps {
-  workMode: WorkMode;
-  onWorkModeChange(mode: WorkMode): void;
-}
-
-export function Workspace({
-  workMode,
-  onWorkModeChange,
-}: WorkspaceProps) {
-  const selectedOneLibrary = usePlaylistStore((state) => state.selectedTarget);
-  const oneLibraryDevices = usePlaylistStore((state) => state.devices);
-  const selectedOneLibraryTracks = usePlaylistStore((state) => state.selectedTracks);
+export function Workspace() {
   const settings = useAppStore((state) => state.settings);
   const searchCapabilities = useAppStore((state) => state.searchCapabilities);
   const listMode = useAppStore((state) => state.listMode);
@@ -242,15 +260,19 @@ export function Workspace({
   const showTrackDetail = useAppStore((state) => state.showTrackDetail);
   const showSettings = useAppStore((state) => state.showSettings);
   const settingsPanelEpoch = useAppStore((state) => state.settingsPanelEpoch);
+  const settingsPinned = useAppStore((state) => state.settingsPinned);
+  const setSettingsPinned = useAppStore((state) => state.setSettingsPinned);
   const showQueue = useAppStore((state) => state.showQueue);
   const queuePanelEpoch = useAppStore((state) => state.queuePanelEpoch);
   const queuePinned = useAppStore((state) => state.queuePinned);
   const setQueuePinned = useAppStore((state) => state.setQueuePinned);
+  const playingDetailPinned = usePlaybackPrefs((state) => state.playingDetailPinned);
+  const setPlayingDetailPinned = usePlaybackPrefs((state) => state.setPlayingDetailPinned);
+  const detailControlVisible = usePlaybackPrefs((state) => state.detailControlVisible);
+  const setDetailControlVisible = usePlaybackPrefs((state) => state.setDetailControlVisible);
   const showPreview = useAppStore((state) => state.showPreview);
   const showFolders = useAppStore((state) => state.showFolders);
   const foldersPanelEpoch = useAppStore((state) => state.foldersPanelEpoch);
-  const showVjExport = useAppStore((state) => state.showVjExport);
-  const vjExportPanelEpoch = useAppStore((state) => state.vjExportPanelEpoch);
   const showDuplicates = useAppStore((state) => state.showDuplicates);
   const duplicateFolders = useAppStore((state) => state.duplicateFolders);
   const duplicateAll = useAppStore((state) => state.duplicateAll);
@@ -258,8 +280,6 @@ export function Workspace({
     (state) => state.duplicateIncludeSubfolders,
   );
   const duplicatesPanelEpoch = useAppStore((state) => state.duplicatesPanelEpoch);
-  const showVirtualDisk = useAppStore((state) => state.showVirtualDisk);
-  const virtualDiskPanelEpoch = useAppStore((state) => state.virtualDiskPanelEpoch);
   const showLyrics = useAppStore((state) => state.showLyrics);
   const lyricsPanelEpoch = useAppStore((state) => state.lyricsPanelEpoch);
   const openLyricsPanel = useAppStore((state) => state.openLyricsPanel);
@@ -271,12 +291,19 @@ export function Workspace({
     getPlayingTrack,
     getPlayingTrack,
   );
+  // “固定当前播放”必须跨过播放器换源/HMR 的短暂空快照；一旦看见有效播放对象，
+  // 后续空拍只能保留它，不能把当时恰好选中的列表曲目冒充成播放曲目。
+  const retainedPlayingDetailTrackRef = useRef<Track | null>(playingTrack);
+  if (playingTrack !== null) retainedPlayingDetailTrackRef.current = playingTrack;
+  // 只记最后一个非空 id：换源边沿的短暂 null 不能把“退场 A → 入场 B”切断。
+  const previousPlayingTrackIdRef = useRef<number | null>(playingTrack?.id ?? null);
   const songPreviewState = useSyncExternalStore(
     subscribeSongPreviewState,
     getSongPreviewState,
     getSongPreviewState,
   );
   const activeDownloads = useDownloadStore((state) => state.activeCount);
+  const streamAccountKeys = useStreamBrowseStore((state) => state.accountKeys);
   const { columns: layout, chrome, portrait } = useLayoutSignals();
 
   const tracks = useLibraryStore((state) => state.tracks);
@@ -289,7 +316,6 @@ export function Workspace({
   const selected = useLibraryStore(selectSelectedTrack);
   const loadMore = useLibraryStore((state) => state.loadMore);
   const select = useLibraryStore((state) => state.select);
-  const setFilter = useLibraryStore((state) => state.setFilter);
   const refreshStats = useLibraryStore((state) => state.refreshStats);
   const refresh = useLibraryStore((state) => state.refresh);
 
@@ -324,7 +350,6 @@ export function Workspace({
   const merge = true;
   const [aggregateSearchOpen, setAggregateSearchOpen] = useState(true);
   const [aggregateSearchRevealed, setAggregateSearchRevealed] = useState(true);
-  const experimentalOneLibrary = LABS_BUILD && (settings?.experimental_one_library ?? false);
   const dismissAggregateSearch = useCallback(() => {
     setAggregateSearchRevealed(false);
     window.setTimeout(() => setAggregateSearchOpen(false), 280);
@@ -347,73 +372,74 @@ export function Workspace({
     setAggregateSearchRevealed(false);
   }, [aggregateSearchOpen]);
   const [busy, setBusy] = useState(false);
+  const restoredLocalPanePinnedRef = useRef(
+    readLocalStorage(LOCAL_PANE_PIN_KEY) === "1",
+  );
   const restoredWorkspaceSessionRef = useRef(readWorkspaceSession());
-  const restoredStream = restoredWorkspaceSessionRef.current.source === "stream"
-    ? restoredWorkspaceSessionRef.current.stream
-    : null;
   const [items, setItems] = useState<IntakeItem[] | null>(null);
-  const [activeStreamPlaylist, setActiveStreamPlaylist] = useState<ActiveStreamPlaylist | null>(
-    () => restoredStream?.playlist
-      ? { platform: restoredStream.playlist.platform as StreamBrowsePlatform, key: restoredStream.playlist.key }
-      : null,
+  /** 从合集候选进入详情时保存上一页；返回只恢复这一次搜索现场。 */
+  const [collectionSearchSnapshot, setCollectionSearchSnapshot] =
+    useState<CollectionSearchSnapshot | null>(null);
+  const [collectionPage, setCollectionPage] = useState(1);
+  const [activeStreamPlaylist, setActiveStreamPlaylist] = useState<ActiveStreamPlaylist | null>(null);
+  const activeStreamPlaylistRef = useRef(activeStreamPlaylist);
+  activeStreamPlaylistRef.current = activeStreamPlaylist;
+  const [openedStreamPlaylist, setOpenedStreamPlaylist] = useState<StreamPlaylist | null>(null);
+  const [removingStreamGroupIds, setRemovingStreamGroupIds] = useState<Set<string>>(
+    new Set(),
   );
-  const [inspectedOnlineGroup, setInspectedOnlineGroup] = useState<string | null>(
-    () => restoredStream?.inspectedGroup ?? null,
-  );
+  const [inspectedOnlineGroup, setInspectedOnlineGroup] = useState<string | null>(null);
   /** 贴链接解析出来的那一个视频，置顶在结果列表最前面；关键词搜索会把它顶掉。 */
   const [video, setVideo] = useState<VideoInfo | null>(null);
   /**
-   * 三处失败各有各的现场，所以分成三条，不合并成一个全局的错误：
-   * 搜索失败要顶在结果列表的摘要位、入队失败要贴在「加入队列」旁边、
-   * 拖动排序失败要出现在曲目表上方。合成一条就总有两处放错地方。
+   * 两处失败各有各的现场，所以分开显示：搜索失败要顶在结果列表的摘要位，
+   * 入队失败要贴在「加入队列」旁边。
    */
   const [searchError, setSearchError] = useState("");
   const [queueError, setQueueError] = useState("");
   /** B 站批量下载的「只要音频」：入队时盖进来源 payload，后端据此下 m4a。 */
   const [videoAudioOnly, setVideoAudioOnly] = useState(false);
-  const [reorderError, setReorderError] = useState("");
   const [folderDropError, setFolderDropError] = useState("");
   const [localDropActive, setLocalDropActive] = useState(false);
-  const [oneLibraryDropActive, setOneLibraryDropActive] = useState(false);
   const [searchDragActive, setSearchDragActive] = useState(() => Boolean(activeSearchDrag()));
-  const [localTrackDragActive, setLocalTrackDragActive] = useState(
-    () => activeTrackDragIds().length > 0,
-  );
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [searchSelectionMode, setSearchSelectionMode] = useState(false);
   const [loadingCollections, setLoadingCollections] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<number>>(new Set());
   const [sourceIndex, setSourceIndex] = useState<Record<string, number>>({});
+  useEffect(() => {
+    if (!activeStreamPlaylist) {
+      setOpenedStreamPlaylist(null);
+      setRemovingStreamGroupIds(new Set());
+    }
+  }, [activeStreamPlaylist]);
   /**
-   * 三种列表共用同一套板块状态。钉住本地曲库时最多同时挂三块；未钉住只显示
+   * 两种列表共用同一套板块状态。钉住本地曲库时最多同时挂两块；未钉住只显示
    * 当前板块。切换只改变可见性，不卸载结果与排序偏好。
    */
   const [localPanePinned, setLocalPanePinned] = useState(
-    () => localStorage.getItem(LOCAL_PANE_PIN_KEY) === "1",
+    () => restoredLocalPanePinnedRef.current,
   );
   const [workspacePaneState, setWorkspacePaneState] =
     useState<WorkspacePaneState>(loadWorkspacePanes);
-  const [oneLibraryPaneCollapsed, setOneLibraryPaneCollapsed] = useState(false);
   const [browseFocus, setBrowseFocus] = useState<MidiBrowseFocus>("pane");
   const browseFocusRef = useRef(browseFocus);
   browseFocusRef.current = browseFocus;
   const browseCursorIdRef = useRef<string | null>(null);
   useEffect(() => {
-    localStorage.setItem(LOCAL_PANE_PIN_KEY, localPanePinned ? "1" : "0");
+    writeLocalStorageNow(LOCAL_PANE_PIN_KEY, localPanePinned ? "1" : "0");
   }, [localPanePinned]);
   useEffect(() => {
-    localStorage.setItem(WORKSPACE_PANES_KEY, JSON.stringify(workspacePaneState));
+    writeLocalStorageNow(WORKSPACE_PANES_KEY, JSON.stringify(workspacePaneState));
   }, [workspacePaneState]);
   const activateWorkspacePane = useCallback((kind: WorkspacePaneKind) => {
-    if (kind === "onelibrary") setOneLibraryPaneCollapsed(false);
     setWorkspacePaneState((current) =>
       current.active === kind ? current : { ...current, active: kind },
     );
   }, []);
   const focusWorkspacePane = useCallback((kind: WorkspacePaneKind) => {
     if (kind === "local") setRestorableWorkspaceSource("local");
-    else if (kind === "onelibrary") setRestorableWorkspaceSource("onelibrary");
     else if (activeStreamPlaylist) setRestorableWorkspaceSource("stream");
     setWorkspacePaneState((current) =>
       current.active === kind ? current : { ...current, active: kind },
@@ -422,18 +448,9 @@ export function Workspace({
   const workspacePaneAvailability = useMemo(
     () => ({
       local: true,
-      onelibrary:
-        experimentalOneLibrary && Boolean(selectedOneLibrary) && !oneLibraryPaneCollapsed,
       search: hasResults,
     }),
-    [experimentalOneLibrary, hasResults, oneLibraryPaneCollapsed, selectedOneLibrary],
-  );
-  const oneLibraryPaneWritable = Boolean(
-    selectedOneLibrary &&
-    !oneLibraryDevices.find((device) => device.path === selectedOneLibrary.device_path)?.read_only,
-  );
-  const onlineAudioDragActive = Boolean(
-    searchDragActive && activeSearchDrag()?.kind === "audio",
+    [hasResults],
   );
   const visiblePaneOrder = useMemo(
     () => visibleWorkspacePanes(
@@ -446,33 +463,74 @@ export function Workspace({
   const activeWorkspacePane = workspacePaneAvailability[workspacePaneState.active]
     ? workspacePaneState.active
     : visiblePaneOrder[0] ?? "local";
-  // 不把“暂时尚未挂载”写回 active：搜索/OneLibrary 的点击会先切意图，再异步提供内容。
+  // 不把“暂时尚未挂载”写回 active：在线内容会先切意图，再异步提供内容。
   // 单栏布局当前先安全显示本地页，目标内容一可用便自动成为唯一可见板块。
   const paneOrder = (kind: WorkspacePaneKind) =>
     Math.max(0, visiblePaneOrder.indexOf(kind)) * 2;
-  const collapseOneLibraryPane = useCallback(() => {
-    setOneLibraryPaneCollapsed(true);
-    setRestorableWorkspaceSource("local");
-    setWorkspacePaneState((current) =>
-      current.active === "onelibrary" ? { ...current, active: "local" } : current,
-    );
-  }, []);
-
-  useEffect(() => {
-    const onTrackDragState = (event: Event) => {
-      const detail = (event as CustomEvent<{ ids?: number[] }>).detail;
-      const active = Boolean(detail?.ids?.length);
-      setLocalTrackDragActive(active);
-      if (!active) setOneLibraryDropActive(false);
-    };
-    window.addEventListener(TRACK_DRAG_STATE_EVENT, onTrackDragState);
-    return () => window.removeEventListener(TRACK_DRAG_STATE_EVENT, onTrackDragState);
-  }, []);
   const revealSearchPane = useCallback(() => {
     activateWorkspacePane("search");
     setHasResults(true);
   }, [activateWorkspacePane, setHasResults]);
   const searchScrollRef = useRef<HTMLDivElement>(null);
+  const openedCollection = useMemo(
+    () => openedCollectionItem(items ?? []),
+    [items],
+  );
+  const openedCollectionWindow = useMemo(
+    () => {
+      if (!openedCollection) return null;
+      const total = openedStreamPlaylist?.platform === "bilibili"
+        ? Math.max(openedCollection.groups.length, openedStreamPlaylist.count)
+        : openedCollection.groups.length;
+      return collectionPageWindow(total, collectionPage);
+    },
+    [collectionPage, openedCollection, openedStreamPlaylist],
+  );
+  const changeCollectionPage = useCallback((requestedPage: number) => {
+    if (!openedCollection) return;
+    const playlist = openedStreamPlaylist;
+    const total = playlist?.platform === "bilibili"
+      ? Math.max(openedCollection.groups.length, playlist.count)
+      : openedCollection.groups.length;
+    const window = collectionPageWindow(total, requestedPage);
+    const scrollTop = () => requestAnimationFrame(() => {
+      searchScrollRef.current?.scrollTo({ top: 0, left: 0 });
+    });
+    if (
+      playlist?.platform !== "bilibili"
+      || window.end <= openedCollection.groups.length
+    ) {
+      setCollectionPage(window.page);
+      scrollTop();
+      return;
+    }
+
+    const requestId = ++resultRequestSeqRef.current;
+    setBusy(true);
+    setSearchError("");
+    void api
+      .streamPlaylist(playlist, window.end)
+      .then((response) => {
+        if (requestId !== resultRequestSeqRef.current) return;
+        const resolved = streamPlaylistItem(playlist, response);
+        const reachedEnd = response.sources.length < window.end;
+        const actualTotal = reachedEnd
+          ? response.sources.length
+          : Math.max(playlist.count, response.sources.length);
+        setOpenedStreamPlaylist({ ...playlist, count: actualTotal });
+        setItems([resolved]);
+        setCollectionPage(collectionPageWindow(actualTotal, window.page).page);
+        scrollTop();
+      })
+      .catch((error) => {
+        if (requestId === resultRequestSeqRef.current) {
+          setSearchError(`载入下一页失败：${errorText(error)}`);
+        }
+      })
+      .finally(() => {
+        if (requestId === resultRequestSeqRef.current) setBusy(false);
+      });
+  }, [openedCollection, openedStreamPlaylist]);
   const revealLoadedCollection = useCallback(() => {
     revealSearchPane();
     // 搜索面板可能刚从另一栏恢复；等它挂载并完成结果表布局后再回到新集合顶部。
@@ -482,7 +540,6 @@ export function Workspace({
   }, [revealSearchPane]);
   const localPaneVisible = visiblePaneOrder.includes("local");
   const searchPaneVisible = visiblePaneOrder.includes("search");
-  const oneLibraryPaneVisible = visiblePaneOrder.includes("onelibrary");
   const [dragWorkspacePane, setDragWorkspacePane] = useState<WorkspacePaneKind | null>(null);
   const [workspacePaneDropTarget, setWorkspacePaneDropTarget] =
     useState<WorkspacePaneKind | null>(null);
@@ -521,7 +578,7 @@ export function Workspace({
     const value = (target as Element | null)
       ?.closest<HTMLElement>("[data-workspace-pane-kind]")
       ?.dataset.workspacePaneKind;
-    return value === "local" || value === "onelibrary" || value === "search" ? value : null;
+    return value === "local" || value === "search" ? value : null;
   };
   const onWorkspacePaneDragOverCapture = (event: React.DragEvent) => {
     if (!dragWorkspacePane) return;
@@ -546,6 +603,38 @@ export function Workspace({
   const resultRequestSeqRef = useRef(0);
   /** FolderTree 在远程歌单点击后还会调用 onNavigate；同一调用栈内不能清高亮。 */
   const streamOpenNavigationRef = useRef(false);
+  const returnToCollectionSearch = useCallback(() => {
+    if (!collectionSearchSnapshot) return;
+    resultRequestSeqRef.current += 1;
+    const snapshot = collectionSearchSnapshot;
+    setItems(snapshot.items);
+    setVideo(snapshot.video);
+    setCollectionSearchSnapshot(null);
+    setCollectionPage(1);
+    setLoadingCollections(new Set());
+    setChosen(new Set());
+    setSearchSelectionMode(false);
+    setCollapsedItems(new Set());
+    setExpandedGroups(new Set());
+    setSourceIndex({});
+    setActiveStreamPlaylist(null);
+    setInspectedOnlineGroup(null);
+    updateStreamWorkspaceSession({
+      playlist: null,
+      accountKey: null,
+      inspectedGroup: null,
+      scrollTop: 0,
+    });
+    setRestorableWorkspaceSource("local");
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        searchScrollRef.current?.scrollTo({
+          top: snapshot.scrollTop,
+          left: snapshot.scrollLeft,
+        });
+      });
+    });
+  }, [collectionSearchSnapshot]);
 
   /**
    * 批量与否不再是一个要手动按的开关：贴进来的内容有换行、或一口气贴了
@@ -560,6 +649,8 @@ export function Workspace({
     if (hasResults) return;
     setChosen(new Set());
     setSearchSelectionMode(false);
+    setCollectionSearchSnapshot(null);
+    setCollectionPage(1);
   }, [hasResults]);
 
   useEffect(() => {
@@ -568,7 +659,6 @@ export function Workspace({
       setSearchDragActive(Boolean(detail?.active));
       if (!detail?.active) {
         setLocalDropActive(false);
-        setOneLibraryDropActive(false);
       }
     };
     window.addEventListener(SEARCH_DRAG_STATE_EVENT, onSearchDragState);
@@ -577,22 +667,20 @@ export function Workspace({
 
   useEffect(() => {
     /**
-     * WKWebView 能开始原生拖动，却偶尔不把 drop 送给文件夹、队列或 OneLibrary。
+     * WKWebView 能开始原生拖动，却偶尔不把 drop 送给文件夹或队列。
      * dragend 仍有松手坐标：命中目标时直接完成操作。claim 闩锁会挡住
      * 随后迟到的原生 drop，确保同一次拖动只执行一次。
      */
     let lastDropPath = "";
     let lastQueueDrop = false;
-    let lastPlaylistDrop: ReturnType<typeof playlistDropAt> = null;
     let lastCoverTrackId: number | null = null;
     let lastDeckDropSide: 0 | 1 | null = null;
     const rememberDropTargetUnderPointer = (event: DragEvent) => {
       // 某些 WKWebView 的 dragend 坐标会退回 0,0；持续记录最后一次 dragover
-      // 命中的文件夹、当前曲目表、下载队列、OneLibrary 或封面框，同时在
+      // 命中的文件夹、当前曲目表、下载队列或封面框，同时在
       // 指针移出时清掉旧目标。
       lastDropPath = searchDropPathAt(event.clientX, event.clientY);
       lastQueueDrop = searchQueueDropAt(event.clientX, event.clientY);
-      lastPlaylistDrop = playlistDropAt(event.clientX, event.clientY);
       lastDeckDropSide = trackDeckDropSideAt(event.clientX, event.clientY);
       const hit = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
@@ -601,8 +689,6 @@ export function Workspace({
     };
     const onDragEndFallback = (event: DragEvent) => {
       const queueDrop = searchQueueDropAt(event.clientX, event.clientY) || lastQueueDrop;
-      const playlistDrop =
-        playlistDropAt(event.clientX, event.clientY) || lastPlaylistDrop;
       const dest = searchDropPathAt(event.clientX, event.clientY) || lastDropPath;
       const deckDropSide = trackDeckDropSideAt(event.clientX, event.clientY) ?? lastDeckDropSide;
       const hit = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
@@ -613,7 +699,6 @@ export function Workspace({
         : lastCoverTrackId;
       lastDropPath = "";
       lastQueueDrop = false;
-      lastPlaylistDrop = null;
       lastCoverTrackId = null;
       lastDeckDropSide = null;
 
@@ -643,31 +728,6 @@ export function Workspace({
           void enqueueSearchQueuePayload(payload).catch((error: unknown) =>
             setFolderDropError(errorText(error)),
           );
-        }
-        return;
-      }
-      if (playlistDrop) {
-        const payload = claimActiveSearchDrag();
-        if (payload) {
-          const playlists = usePlaylistStore.getState();
-          const target = resolveOneLibraryDropTarget(
-            playlistDrop.devicePath,
-            playlistDrop.playlistId,
-            playlists.devices,
-            playlists.playlistsByDevice,
-          );
-          if (!target) {
-            const message = "OneLibrary 目标已断开或不可写，请刷新后重试";
-            setSearchError(message);
-            usePlaylistStore.setState({ deviceError: message });
-          } else {
-            usePlaylistStore.setState({ deviceError: "" });
-            void enqueueSearchOneLibraryPayload(payload, target).catch((error: unknown) => {
-              const message = `加入 OneLibrary 下载失败：${errorText(error)}`;
-              setSearchError(message);
-              usePlaylistStore.setState({ deviceError: message });
-            });
-          }
         }
         return;
       }
@@ -720,7 +780,7 @@ export function Workspace({
         : [...current, platform];
       // 全关掉就搜不了——至少留一个；想换平台先勾上再去掉旧的。
       if (next.length === 0) return;
-      void saveSettings({ search_platforms: next });
+      void saveSettings({ search_platforms: next }).catch(() => undefined);
     },
     [saveSettings],
   );
@@ -733,9 +793,16 @@ export function Workspace({
     const text = query.trim();
     if (!text) return;
     const requestId = ++resultRequestSeqRef.current;
+    setCollectionSearchSnapshot(null);
+    setCollectionPage(1);
     setActiveStreamPlaylist(null);
     setInspectedOnlineGroup(null);
-    updateStreamWorkspaceSession({ playlist: null, inspectedGroup: null, scrollTop: 0 });
+    updateStreamWorkspaceSession({
+      playlist: null,
+      accountKey: null,
+      inspectedGroup: null,
+      scrollTop: 0,
+    });
     setRestorableWorkspaceSource("local");
     setLoadingCollections(new Set());
 
@@ -838,16 +905,22 @@ export function Workspace({
    * 左侧平台歌单/收藏夹只是远程浏览入口：点开后复用搜索结果这张表和下载队列，
    * 不写本地曲库，也不恢复已经退役的 stream_library 持久化表。
    */
-  const openStreamPlaylist = useCallback(async (
-    playlist: StreamPlaylist,
-    restore?: { inspectedGroup: string | null; scrollTop: number },
-  ) => {
+  const openStreamPlaylist = useCallback(async (playlist: StreamPlaylist) => {
     const browsePlatform = STREAM_BROWSE_PLATFORMS.includes(
       playlist.platform as StreamBrowsePlatform,
     )
       ? (playlist.platform as StreamBrowsePlatform)
       : null;
+    const currentAccountKey = browsePlatform
+      ? useStreamBrowseStore.getState().accountKeys[browsePlatform]
+      : null;
+    const revealTargetPane = () => {
+      setHasResults(true);
+      activateWorkspacePane("search");
+    };
     const requestId = ++resultRequestSeqRef.current;
+    setCollectionSearchSnapshot(null);
+    setCollectionPage(1);
     streamOpenNavigationRef.current = true;
     queueMicrotask(() => {
       streamOpenNavigationRef.current = false;
@@ -855,8 +928,9 @@ export function Workspace({
     setRestorableWorkspaceSource("stream");
     updateStreamWorkspaceSession({
       playlist,
-      inspectedGroup: restore?.inspectedGroup ?? null,
-      scrollTop: restore?.scrollTop ?? 0,
+      accountKey: currentAccountKey,
+      inspectedGroup: null,
+      scrollTop: 0,
     });
     setBusy(true);
     setVideo(null);
@@ -866,65 +940,62 @@ export function Workspace({
     setExpandedGroups(new Set());
     setCollapsedItems(new Set());
     setSourceIndex({});
-    setInspectedOnlineGroup(restore?.inspectedGroup ?? null);
+    setInspectedOnlineGroup(null);
     setLoadingCollections(new Set());
     setSearchError("");
-    revealSearchPane();
+    setOpenedStreamPlaylist(playlist);
+    revealTargetPane();
     if (browsePlatform) {
-      setActiveStreamPlaylist({ platform: browsePlatform, key: playlist.key });
+      const active = { platform: browsePlatform, key: playlist.key } as const;
+      setActiveStreamPlaylist(active);
+      useStreamBrowseStore.getState().setActive(active);
     }
     try {
-      const response = await api.streamPlaylist(playlist, 0);
-      if (requestId !== resultRequestSeqRef.current) return;
-      const token = `${response.platform}:playlist:${response.key}`;
-      const groups: MergedGroup[] = response.sources.map((source, index) => ({
-        group_id: `${token}:${source.key}:${index}`,
-        title: source.title,
-        artists: source.artists,
-        album: source.album,
-        duration: source.duration,
-        cover: source.cover || playlist.cover,
-        sources: [source],
-        best_source_index: 0,
-        score: 0,
-      }));
-      const restoredInspect = restore?.inspectedGroup ?? null;
-      const inspectedGroup = restoredInspect && groups.some(
-        (group) => selectionKey(0, group.group_id) === restoredInspect,
-      )
-        ? restoredInspect
-        : null;
-      setInspectedOnlineGroup(inspectedGroup);
-      updateStreamWorkspaceSession({ inspectedGroup });
-      setItems(groups.length > 0
-        ? [
-            {
-              entry: token,
-              kind: "playlist",
-              platform: response.platform,
-              title: response.title || playlist.title,
-              groups,
-              collections: [],
-              errors: {},
-              error: "",
-            },
-          ]
-        : []);
-      if (browsePlatform) {
-        setActiveStreamPlaylist({ platform: browsePlatform, key: playlist.key });
+      // B 站收藏夹每页只有 20 条；初次只取够当前 UI 页的数量。后续翻页由
+      // provider 的累计缓存补齐，不能因为点开 800 条收藏夹就立刻扫完整站列表。
+      const initialLimit = playlist.platform === "bilibili"
+        ? RESOLVED_COLLECTION_PAGE_SIZE
+        : 0;
+      const response = await api.streamPlaylist(playlist, initialLimit);
+      if (requestId !== resultRequestSeqRef.current) return false;
+      if (
+        browsePlatform &&
+        useStreamBrowseStore.getState().accountKeys[browsePlatform] !== currentAccountKey
+      ) {
+        // 请求发出后登出/换号：旧账号迟到的私人歌单绝不能落到新账号页面。
+        return false;
       }
-      const scrollTop = restore?.scrollTop ?? 0;
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (searchScrollRef.current) searchScrollRef.current.scrollTop = scrollTop;
-        });
+      const resolved = streamPlaylistItem(playlist, response);
+      const resolvedPlaylist = playlist.platform === "bilibili"
+        && initialLimit > 0
+        && response.sources.length < initialLimit
+        ? { ...playlist, count: response.sources.length }
+        : playlist;
+      setOpenedStreamPlaylist(resolvedPlaylist);
+      setInspectedOnlineGroup(null);
+      updateStreamWorkspaceSession({
+        accountKey: currentAccountKey,
+        inspectedGroup: null,
       });
+      setItems([resolved]);
+      if (browsePlatform) {
+        const active = { platform: browsePlatform, key: playlist.key } as const;
+        setActiveStreamPlaylist(active);
+        useStreamBrowseStore.getState().setActive(active);
+      }
+      return true;
     } catch (error) {
-      if (requestId !== resultRequestSeqRef.current) return;
+      if (requestId !== resultRequestSeqRef.current) return false;
       const message = errorText(error);
       setItems([]);
       setActiveStreamPlaylist(null);
-      updateStreamWorkspaceSession({ playlist: null, inspectedGroup: null, scrollTop: 0 });
+      setOpenedStreamPlaylist(null);
+      updateStreamWorkspaceSession({
+        playlist: null,
+        accountKey: null,
+        inspectedGroup: null,
+        scrollTop: 0,
+      });
       setRestorableWorkspaceSource("local");
       activateWorkspacePane("local");
       setSearchError(`打开歌单失败：${message}`);
@@ -932,24 +1003,94 @@ export function Workspace({
     } finally {
       if (requestId === resultRequestSeqRef.current) setBusy(false);
     }
-  }, [activateWorkspacePane, revealSearchPane]);
+  }, [activateWorkspacePane, setHasResults]);
+
+  const openStreamPlaylistFromUser = useCallback(async (playlist: StreamPlaylist) => {
+    await openStreamPlaylist(playlist);
+  }, [openStreamPlaylist]);
+
+  const removeStreamGroup = useCallback(async (
+    group: MergedGroup,
+    requestedSourceIndex: number,
+  ) => {
+    const playlist = openedStreamPlaylist;
+    if (!playlist || !matchesEditableStreamOrigin(playlist.origin)) return;
+    const source = group.sources[requestedSourceIndex] ?? group.sources[0];
+    if (!source || source.platform !== playlist.platform) {
+      setSearchError("移除失败：歌曲来源与当前歌单不一致");
+      return;
+    }
+    const groupId = group.group_id;
+    if (removingStreamGroupIds.has(groupId)) return;
+    const viewRequestId = resultRequestSeqRef.current;
+    setRemovingStreamGroupIds((current) => new Set(current).add(groupId));
+    setSearchError("");
+    try {
+      const response = await api.removeStreamPlaylistTrack(playlist, source);
+      if (!response.removed) throw new Error("平台没有确认移除成功");
+      // 写响应已经确认成功，当前列表与数量直接在本地收敛；不再额外刷新平台目录。
+      // 用户可能在平台响应前切走，旧歌单状态不能写进当前新页面。
+      const active = activeStreamPlaylistRef.current;
+      if (
+        resultRequestSeqRef.current !== viewRequestId ||
+        active?.platform !== playlist.platform ||
+        active.key !== playlist.key
+      ) return;
+      setItems((current) => {
+        if (!current) return current;
+        const next = current.map((item) => ({
+          ...item,
+          groups: item.groups.filter((candidate) => candidate.group_id !== groupId),
+        }));
+        return next;
+      });
+      setChosen(new Set());
+      setSearchSelectionMode(false);
+      const removedGroupKey = selectionKey(0, groupId);
+      const nextPlaylist = {
+        ...playlist,
+        count: Math.max(0, playlist.count - 1),
+      };
+      setOpenedStreamPlaylist(nextPlaylist);
+      if (inspectedOnlineGroup === removedGroupKey) {
+        setInspectedOnlineGroup(null);
+        updateStreamWorkspaceSession({
+          playlist: nextPlaylist,
+          inspectedGroup: null,
+        });
+      } else {
+        updateStreamWorkspaceSession({ playlist: nextPlaylist });
+      }
+    } catch (error) {
+      const active = activeStreamPlaylistRef.current;
+      if (
+        resultRequestSeqRef.current === viewRequestId &&
+        active?.platform === playlist.platform &&
+        active.key === playlist.key
+      ) {
+        setSearchError(`移除失败：${errorText(error)}`);
+      }
+    } finally {
+      setRemovingStreamGroupIds((current) => {
+        const next = new Set(current);
+        next.delete(groupId);
+        return next;
+      });
+    }
+  }, [inspectedOnlineGroup, openedStreamPlaylist, removingStreamGroupIds]);
+
+  const removeStreamGroupLabel = openedStreamPlaylist?.origin === "favorite"
+    ? "从收藏中移除"
+    : openedStreamPlaylist?.origin === "created"
+      ? "从此歌单中移除"
+      : undefined;
 
   const restoredWorkspaceAppliedRef = useRef(false);
   useEffect(() => {
     if (restoredWorkspaceAppliedRef.current) return;
     restoredWorkspaceAppliedRef.current = true;
     const session = restoredWorkspaceSessionRef.current;
-    if (session.source === "stream" && session.stream.playlist) {
-      void openStreamPlaylist(session.stream.playlist, {
-        inspectedGroup: session.stream.inspectedGroup,
-        scrollTop: session.stream.scrollTop,
-      }).catch(() => undefined);
-      return;
-    }
-    if (session.source === "onelibrary" && session.oneLibrary.target) {
-      activateWorkspacePane("onelibrary");
-      return;
-    }
+    // 在线页面只记住目标，不在启动时回源。用户再次点击侧栏歌单才读取平台。
     setRestorableWorkspaceSource("local");
     activateWorkspacePane("local");
     if (session.local.selectedId !== null) {
@@ -967,7 +1108,29 @@ export function Workspace({
         }
       })();
     }
-  }, [activateWorkspacePane, openStreamPlaylist]);
+  }, [activateWorkspacePane]);
+
+  // 登出或换号时立即撤下已经展开的私人在线内容；重新登录后也必须由用户再点歌单。
+  useEffect(() => {
+    const session = readWorkspaceSession();
+    const desired = session.stream;
+    if (!desired.playlist) return;
+    const platform = desired.playlist.platform as StreamBrowsePlatform;
+    const currentAccountKey = streamAccountKeys[platform];
+    if (
+      currentAccountKey &&
+      (!desired.accountKey || desired.accountKey === currentAccountKey)
+    ) return;
+
+    resultRequestSeqRef.current += 1;
+    setBusy(false);
+    setItems([]);
+    if (currentAccountKey && desired.accountKey !== currentAccountKey) {
+      setSearchError("当前登录账号与上次在线页面不同，已停止显示上一账号的内容");
+    } else {
+      setSearchError("");
+    }
+  }, [activeStreamPlaylist, streamAccountKeys]);
 
   /* ------------------------------------------------------------ 布局档位 */
   // columns：wide 展开旁路栏，narrow 只收右侧旁路。
@@ -979,7 +1142,7 @@ export function Workspace({
   // 否则桌面启动会先渲染一帧窄轨再被下面的 effect 撑开。
   const [compactTreeExpanded, setCompactTreeExpanded] = useState(() => {
     if (!portrait) return true;
-    const saved = localStorage.getItem("kd-compact-tree-expanded");
+    const saved = readLocalStorage("kd-compact-tree-expanded");
     if (saved !== null) return saved === "1";
     return false;
   });
@@ -992,7 +1155,7 @@ export function Workspace({
     // 目标布局的状态并跳过本轮写入，避免桌面的展开值覆盖手机保存值。
     if (portrait !== previousPortrait) {
       if (portrait) {
-        const saved = localStorage.getItem("kd-compact-tree-expanded");
+        const saved = readLocalStorage("kd-compact-tree-expanded");
         setCompactTreeExpanded(saved === null ? false : saved === "1");
       } else {
         setCompactTreeExpanded(true);
@@ -1000,7 +1163,7 @@ export function Workspace({
       return;
     }
     if (portrait) {
-      localStorage.setItem("kd-compact-tree-expanded", compactTreeExpanded ? "1" : "0");
+      writeLocalStorageNow("kd-compact-tree-expanded", compactTreeExpanded ? "1" : "0");
     }
   }, [compactTreeExpanded, portrait]);
   const workspacePaneSizeKey = portrait
@@ -1009,8 +1172,8 @@ export function Workspace({
   const defaultWorkspacePaneWeights = useMemo<WorkspacePaneWeights>(
     () =>
       portrait
-        ? { local: 8, onelibrary: 92, search: 92 }
-        : { local: 1, onelibrary: 1, search: 1 },
+        ? { local: 8, search: 92 }
+        : { local: 1, search: 1 },
     [portrait],
   );
   const [workspacePaneWeights, setWorkspacePaneWeights] =
@@ -1022,12 +1185,10 @@ export function Workspace({
       const value = saved as Partial<WorkspacePaneWeights>;
       if (
         Number.isFinite(value.local) && Number(value.local) > 0 &&
-        Number.isFinite(value.onelibrary) && Number(value.onelibrary) > 0 &&
         Number.isFinite(value.search) && Number(value.search) > 0
       ) {
         setWorkspacePaneWeights({
           local: Number(value.local),
-          onelibrary: Number(value.onelibrary),
           search: Number(value.search),
         });
         return;
@@ -1036,14 +1197,13 @@ export function Workspace({
 
     // 旧版只保存“本地 / 另一块”的百分比；迁移成按板块身份保存的权重。
     const oldPercent = Number(
-      localStorage.getItem(
+      readLocalStorage(
         portrait ? "kd-search-split-portrait" : "kd-search-split-regular",
       ),
     );
     if (Number.isFinite(oldPercent) && oldPercent > 0 && oldPercent < 100) {
       setWorkspacePaneWeights({
         local: oldPercent,
-        onelibrary: 100 - oldPercent,
         search: 100 - oldPercent,
       });
       return;
@@ -1058,7 +1218,7 @@ export function Workspace({
     .map((_, index) => `minmax(4rem, ${visiblePaneFractions[index]}fr)`)
     .join(" 1px ");
   const persistWorkspacePaneWeights = (weights: WorkspacePaneWeights) => {
-    localStorage.setItem(workspacePaneSizeKey, JSON.stringify(weights));
+    writeLocalStorageNow(workspacePaneSizeKey, JSON.stringify(weights));
   };
   const startWorkspacePaneResize =
     (left: WorkspacePaneKind, right: WorkspacePaneKind) =>
@@ -1112,32 +1272,33 @@ export function Workspace({
   };
   /** 当前拉开的是哪个抽屉。null = 都收着。 */
   const [sheet, setSheet] = useState<"aside" | null>(null);
+  /** 搜索提示是临时旁路：不写导航/设置，关闭后可回到原先钉住的详情。 */
+  const [showSearchTips, setShowSearchTips] = useState(false);
+  useEffect(() => {
+    if (!showSearchTips) return;
+    const dismissOnOtherPointer = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(
+          ".kd-search-tip-action, .kd-split-aside, .kd-sheet",
+        )
+      ) return;
+      setShowSearchTips(false);
+    };
+    window.addEventListener("pointerdown", dismissOnOtherPointer, true);
+    return () => window.removeEventListener("pointerdown", dismissOnOtherPointer, true);
+  }, [showSearchTips]);
   /** 锁定只拦横屏里由歌曲/视频触发的自动展开；显式入口会解除锁定并强制打开。 */
   const [asideLocked, setAsideLocked] = useState(false);
   const asideLockedRef = useRef(false);
   useEffect(() => {
     asideLockedRef.current = asideLocked;
   }, [asideLocked]);
-  /** 用户点曲目或「正在播」入口后钉住详情/歌词内容面；关闭后下一次单击曲目会重新打开。 */
+  /** 当前详情/歌词内容面是否展开；只管可见性，不是右上角“跟随当前播放”的固定偏好。 */
   const [detailPinned, setDetailPinned] = useState(false);
   const [asideTrackId, setAsideTrackId] = useState<number | null>(null);
-  const [oneLibraryDetail, setOneLibraryDetail] = useState<{
-    track: OneLibraryTrack;
-    target: NonNullable<typeof selectedOneLibrary>;
-  } | null>(null);
-  useEffect(() => {
-    setOneLibraryDetail((current) => {
-      if (!current || !selectedOneLibrary) return current;
-      if (
-        current.target.device_path !== selectedOneLibrary.device_path
-        || current.target.playlist_id !== selectedOneLibrary.playlist_id
-      ) return null;
-      const track = selectedOneLibraryTracks.find(
-        (candidate) => candidate.content_id === current.track.content_id,
-      );
-      return track ? { track, target: selectedOneLibrary } : null;
-    });
-  }, [selectedOneLibrary, selectedOneLibraryTracks]);
+  /** 未固定详情的最后一个明确目标；列表换页时 selected 会短暂消失，目标对象不能跟着丢。 */
+  const asideTrackSnapshotRef = useRef<Track | null>(null);
   /** 歌词模式下右栏双极：详情 ↔ 歌词。关歌词模式时点歌仍只开详情。 */
   const [trackAsideFace, setTrackAsideFace] = useState<TrackAsideFace>(
     () => useLyricsPrefs.getState().asideFace,
@@ -1147,6 +1308,21 @@ export function Workspace({
     trackAsideFaceRef.current = trackAsideFace;
   }, [trackAsideFace]);
   const prevShowLyricsRef = useRef(showLyrics);
+
+  // “固定当前播放详情”本身已经持久化；启动恢复出本地或在线唱盘后，把内容面也
+  // 一次性重新打开。只做启动这一回，用户本次会话手动收起后不会被 effect 顶回来。
+  const restoredPlayingAsideRef = useRef(false);
+  useEffect(() => {
+    if (restoredPlayingAsideRef.current || !playingDetailPinned || !playingTrack) return;
+    restoredPlayingAsideRef.current = true;
+    asideTrackSnapshotRef.current = playingTrack;
+    trackAsideFaceRef.current = "detail";
+    setAsideTrackId(playingTrack.id);
+    setTrackAsideFace("detail");
+    setDetailPinned(true);
+    showTrackDetail();
+    if (layout === "narrow") setSheet("aside");
+  }, [layout, playingDetailPinned, playingTrack, showTrackDetail]);
 
   /** 点曲目只负责详情；歌词由右栏/播放器上的歌词入口显式打开。 */
   const faceForTrackPin = useCallback((): LyricsAsideFace => "detail", []);
@@ -1174,6 +1350,16 @@ export function Workspace({
       const currentPlaying = getPlayingTrack();
       const targetId =
         trackId ?? selectSelectedTrack(useLibraryStore.getState())?.id ?? currentPlaying?.id ?? null;
+      const library = useLibraryStore.getState();
+      const selectedTarget = selectSelectedTrack(library);
+      const target = resolveWorkspaceRequestedTrack(
+        targetId,
+        currentPlaying,
+        selectedTarget,
+        targetId !== null ? streamTrackById(targetId) : null,
+        asideTrackSnapshotRef.current,
+      );
+      asideTrackSnapshotRef.current = target;
       setAsideTrackId(targetId);
       if (face === "lyrics") {
         openLyricsPanel();
@@ -1194,7 +1380,15 @@ export function Workspace({
 
   const selectTrack = useCallback(
     (id: number, mode: SelectMode, clickCount = 1) => {
-      setOneLibraryDetail(null);
+      if (mode === "replace") {
+        // 选择先于 300ms 的单击/双击判定发生。先写这次导航目标，再更新外部列表
+        // store；即使外部 store 同步触发渲染，未固定详情也不会过渡到正在播放页。
+        const library = useLibraryStore.getState();
+        const selectedTarget = library.tracks.find((track) => track.id === id)
+          ?? (library.selectedTrack?.id === id ? library.selectedTrack : null);
+        asideTrackSnapshotRef.current = selectedTarget;
+        setAsideTrackId(id);
+      }
       select(id, mode);
       // 普通单击既选择曲目，也明确表达“查看这首”的意图。修饰键/勾选多选
       // 只维护选区，不能让详情抽屉跟着每次批量选择反复弹出。
@@ -1221,33 +1415,7 @@ export function Workspace({
     [clearDetailTimer, faceForTrackPin, layout, pinTrackAside, select],
   );
 
-  const inspectOneLibraryTrack = useCallback(
-    (track: OneLibraryTrack, clickCount = 1) => {
-      if (!selectedOneLibrary) return;
-      const detail = { track, target: selectedOneLibrary };
-      const playable = oneLibraryPlayableTrack(track, selectedOneLibrary);
-      setOneLibraryDetail(detail);
-      if (asideLockedRef.current) return;
-      if (!shouldPinDetailOnClick(useTrackClickPrefs.getState(), layout)) return;
-      clearDetailTimer();
-      if (clickCount >= 2) {
-        pinTrackAside("detail", playable.id);
-        return;
-      }
-      detailTimerRef.current = window.setTimeout(() => {
-        detailTimerRef.current = null;
-        pinTrackAside("detail", playable.id);
-      }, 300);
-    },
-    [clearDetailTimer, layout, pinTrackAside, selectedOneLibrary],
-  );
-
   useEffect(() => {
-    const scrollRow = (selector: string) => {
-      requestAnimationFrame(() => {
-        document.querySelector<HTMLElement>(selector)?.scrollIntoView({ block: "center" });
-      });
-    };
     const sidebarItems = () =>
       [...document.querySelectorAll<HTMLElement>(`.kd-tree-slot [${MIDI_BROWSE_ITEM_ATTR}]`)];
     const markSidebarCursor = (items: HTMLElement[], index: number) => {
@@ -1276,17 +1444,6 @@ export function Workspace({
       requestAnimationFrame(() => revealSidebarCursor(browseCursorIdRef.current));
     };
     const stepPane = (delta: number) => {
-      if (activeWorkspacePane === "onelibrary") {
-        const { selectedTracks, focusedContentId, selectTrack: selectOne } = usePlaylistStore.getState();
-        const current = selectedTracks.findIndex((track) => track.content_id === focusedContentId);
-        const next = nextBrowseIndex(selectedTracks.length, current, delta);
-        const track = selectedTracks[next];
-        if (!track) return;
-        selectOne(track.content_id, "replace");
-        inspectOneLibraryTrack(track, 1);
-        scrollRow(`[data-kd-onelibrary-content-id="${track.content_id}"]`);
-        return;
-      }
       const library = useLibraryStore.getState();
       const current = library.tracks.findIndex((track) => track.id === library.selectedId);
       const next = nextBrowseIndex(library.tracks.length, current, delta);
@@ -1297,22 +1454,20 @@ export function Workspace({
         detail: { source: "midi-browse", trackId: track.id },
       }));
     };
+    const stepSearchPane = (delta: number) => {
+      const rows = [
+        ...document.querySelectorAll<HTMLTableRowElement>(
+          '.kd-workspace-pane-remote[data-pane-active="true"] tr[data-kd-search-result]',
+        ),
+      ];
+      const current = rows.findIndex((row) => row.dataset.inspected === "true");
+      const next = nextBrowseIndex(rows.length, current, delta);
+      const row = rows[next];
+      if (!row) return;
+      row.click();
+      requestAnimationFrame(() => row.scrollIntoView({ block: "nearest" }));
+    };
     const playableSelection = () => {
-      const hint = sidebarItems().find(
-        (item) => item.getAttribute(MIDI_BROWSE_ID_ATTR) === browseCursorIdRef.current
-          || item.getAttribute(MIDI_BROWSE_CURSOR_ATTR) === "true",
-      )?.getAttribute(MIDI_BROWSE_PANE_ATTR);
-      const pane = browseFocusRef.current === "sidebar"
-        ? paneForSidebarHint(hint ?? undefined)
-        : activeWorkspacePane;
-      if (pane === "onelibrary") {
-        const { selectedTracks, focusedContentId, selectedContentIds, selectedTarget } =
-          usePlaylistStore.getState();
-        if (!selectedTarget) return null;
-        const id = focusedContentId ?? selectedContentIds[0];
-        const track = selectedTracks.find((item) => item.content_id === id) ?? selectedTracks[0];
-        return track ? oneLibraryPlayableTrack(track, selectedTarget) : null;
-      }
       return selectSelectedTrack(useLibraryStore.getState());
     };
     const onBrowse = (event: Event) => {
@@ -1340,9 +1495,19 @@ export function Workspace({
       if (!track) return;
       window.dispatchEvent(new CustomEvent(MIDI_LOAD_DECK_EVENT, { detail: { side: detail.deck, track } }));
     };
+    const onArrowKeyListStep = (event: Event) => {
+      const detail = (event as CustomEvent<ArrowKeyListStepDetail>).detail;
+      if (!detail || (detail.delta !== -1 && detail.delta !== 1)) return;
+      if (activeWorkspacePane === "search") stepSearchPane(detail.delta);
+      else stepPane(detail.delta);
+    };
     window.addEventListener(MIDI_BROWSE_EVENT, onBrowse);
-    return () => window.removeEventListener(MIDI_BROWSE_EVENT, onBrowse);
-  }, [activateWorkspacePane, activeWorkspacePane, inspectOneLibraryTrack, selectTrack]);
+    window.addEventListener(ARROW_KEY_LIST_STEP_EVENT, onArrowKeyListStep);
+    return () => {
+      window.removeEventListener(MIDI_BROWSE_EVENT, onBrowse);
+      window.removeEventListener(ARROW_KEY_LIST_STEP_EVENT, onArrowKeyListStep);
+    };
+  }, [activateWorkspacePane, activeWorkspacePane, selectTrack]);
 
   /**
    * 在线结果单击只建立一个可供详情栏读取的元数据快照，不解析直链、也不换主唱盘。
@@ -1387,7 +1552,8 @@ export function Workspace({
   const previewJumpRef = useRef(false);
   useEffect(() => {
     const onDetail = (event: Event) => {
-      const source = (event as CustomEvent<{ source?: string }>).detail?.source;
+      const detail = (event as CustomEvent<{ source?: string; trackId?: number }>).detail;
+      const source = detail?.source;
       const isLocatePlaying = source === "locate-playing";
       const explicitLocate = source === "player-deck" || isLocatePlaying;
       // 竖屏只有显式定位（唱盘 / 「定位正在播」）可以拉开详情；被动事件不弹抽屉。
@@ -1406,7 +1572,7 @@ export function Workspace({
       // 唱盘 / 其他显式查看：钉住内容面
       pinTrackAside(
         faceForTrackPin(),
-        source === "player-deck" ? getPlayingTrack()?.id : undefined,
+        detail?.trackId ?? (source === "player-deck" ? getPlayingTrack()?.id : undefined),
       );
       if (layout === "narrow") setSheet("aside");
     };
@@ -1448,33 +1614,52 @@ export function Workspace({
   // 暂时关掉右栏网络视频预览面板：细项改到下载队列里配；双击仍走浮动 / 系统 PiP。
   const previewAside = false;
   const realOverlayAside =
+    showSearchTips ||
     showFolders ||
     showSettings ||
-    showVjExport ||
     showDuplicates ||
-    showVirtualDisk ||
     previewAside ||
     queueAside;
-  const oneLibraryDetailTrack = oneLibraryDetail
-    ? oneLibraryPlayableTrack(oneLibraryDetail.track, oneLibraryDetail.target)
-    : null;
-  // 歌词优先跟随正在播放；未播放时，OneLibrary 详情不能落回左侧另一首本地歌。
-  const lyricsTrack = playingTrack ?? oneLibraryDetailTrack ?? selected;
-  const pinnedStreamTrack = asideTrackId !== null ? streamTrackById(asideTrackId) : null;
-  const detailTrack =
-    asideTrackId === playingTrack?.id
-      ? playingTrack
-      : asideTrackId === selected?.id
-        ? selected
-        : pinnedStreamTrack ?? (isStreamTrack(playingTrack) ? playingTrack : selected);
-  const activeOneLibraryDetail =
-    oneLibraryDetail && asideTrackId === oneLibraryDetailTrack?.id ? oneLibraryDetail : null;
-  const trackDetailPanel = activeOneLibraryDetail ? (
-    <OneLibraryTrackDetail
-      track={activeOneLibraryDetail.track}
-      target={activeOneLibraryDetail.target}
-    />
-  ) : detailTrack ? (
+  const lyricsTrack = playingTrack ?? selected;
+  // 普通详情保持用户明确查看的目标；但如果它正好就是退场曲目，则在播放切到
+  // 下一首时同步推进。直接用派生 id 渲染，避免等 effect 后多留一帧旧 VIDEO 面板。
+  const renderedAsideTrackId =
+    detailPinned && trackAsideFace === "detail"
+      ? resolveWorkspacePlaybackDetailTarget(
+          asideTrackId,
+          previousPlayingTrackIdRef.current,
+          playingTrack?.id ?? null,
+          playingDetailPinned,
+        )
+      : asideTrackId;
+  useEffect(() => {
+    const nextPlayingTrackId = playingTrack?.id ?? null;
+    if (nextPlayingTrackId === null) return;
+    previousPlayingTrackIdRef.current = nextPlayingTrackId;
+    if (renderedAsideTrackId !== asideTrackId) setAsideTrackId(renderedAsideTrackId);
+  }, [asideTrackId, playingTrack?.id, renderedAsideTrackId]);
+
+  const registeredAsideTrack =
+    renderedAsideTrackId !== null ? streamTrackById(renderedAsideTrackId) : null;
+  const requestedDetailTrack = resolveWorkspaceRequestedTrack(
+    renderedAsideTrackId,
+    playingTrack,
+    selected,
+    registeredAsideTrack,
+    asideTrackSnapshotRef.current,
+  );
+  if (renderedAsideTrackId !== null && requestedDetailTrack !== null) {
+    asideTrackSnapshotRef.current = requestedDetailTrack;
+  }
+  // “固定”锁的是整块详情的数据来源：只要播放器有曲目，就忽略列表选择并读取
+  // 当前播放对象。playingTrack 在自动接到下一首时会更新，所以详情也同一拍切换。
+  const detailTrack = resolveWorkspaceDetailTrack(
+    playingDetailPinned,
+    playingTrack,
+    requestedDetailTrack,
+    retainedPlayingDetailTrackRef.current,
+  );
+  const trackDetailPanel = detailTrack ? (
     isStreamTrack(detailTrack) ? (
       <StreamTrackDetail key={detailTrack.id} track={detailTrack} />
     ) : (
@@ -1489,38 +1674,39 @@ export function Workspace({
     !realOverlayAside &&
     detailPinned &&
     trackAsideFace === "detail" &&
-    Boolean(activeOneLibraryDetail || detailTrack);
+    Boolean(detailTrack);
   const trackAside = lyricsAside || detailAside;
   const hasAsideContent = realOverlayAside || trackAside;
   const showAside = layout === "wide" && hasAsideContent;
   const showTrackFaceSwitch = trackAside;
 
   const closeAside = useCallback(() => {
+    if (showSearchTips) {
+      setShowSearchTips(false);
+      setSheet(null);
+      return;
+    }
     setDetailPinned(false);
     setSheet(null);
     useAppStore.getState().dismissOverlay();
-  }, []);
+  }, [showSearchTips]);
 
   const closeAsideForUser = useCallback(() => {
-    setAsideLocked(true);
+    // 提示只是在当前内容上临时盖一层；关提示不应把原详情也锁住。
+    if (!showSearchTips) setAsideLocked(true);
     closeAside();
-  }, [closeAside]);
+  }, [closeAside, showSearchTips]);
 
   /** 窄屏：点左侧文件夹后只收右侧详情抽屉；左侧展开宽度由用户拖动手势决定并持久化。 */
-  const onFolderNavigate = useCallback((kind?: "onelibrary") => {
+  const onFolderNavigate = useCallback(() => {
     if (streamOpenNavigationRef.current) {
       // 在线歌单已经把唯一板块切到 search；侧栏的通用 navigate 回调不能再抢回 local。
       if (layout === "narrow") closeAside();
       return;
     }
-    if (kind === "onelibrary") {
-      setRestorableWorkspaceSource("onelibrary");
-      activateWorkspacePane("onelibrary");
-    } else {
-      setActiveStreamPlaylist(null);
-      setRestorableWorkspaceSource("local");
-      activateWorkspacePane("local");
-    }
+    setActiveStreamPlaylist(null);
+    setRestorableWorkspaceSource("local");
+    activateWorkspacePane("local");
     if (layout === "narrow") closeAside();
   }, [activateWorkspacePane, layout, closeAside]);
 
@@ -1530,14 +1716,17 @@ export function Workspace({
       return;
     }
     const onlineTrack = isStreamTrack(playingTrack) ? playingTrack : null;
-    const oneLibraryTrack = oneLibraryDetail
-      ? oneLibraryPlayableTrack(oneLibraryDetail.track, oneLibraryDetail.target)
-      : null;
-    const track =
+    const requestedTrack =
       onlineTrack ??
       (showLyrics
-        ? (playingTrack ?? selected ?? oneLibraryTrack)
-        : (oneLibraryTrack ?? selected ?? playingTrack));
+        ? (playingTrack ?? selected)
+        : (selected ?? playingTrack));
+    const track = resolveWorkspaceDetailTrack(
+      playingDetailPinned,
+      playingTrack,
+      requestedTrack,
+      retainedPlayingDetailTrackRef.current,
+    );
     if (!track) return;
     setAsideLocked(false);
     // 通用的「展开右栏」不是歌词手势：即使当前正在在线试听，也先开详情。
@@ -1547,8 +1736,8 @@ export function Workspace({
   }, [
     closeAsideForUser,
     faceForTrackPin,
-    oneLibraryDetail,
     pinTrackAside,
+    playingDetailPinned,
     playingTrack,
     selected,
     showAside,
@@ -1559,12 +1748,12 @@ export function Workspace({
     layout === "wide" ? (
       <AsideToggleButton
         open={showAside}
-        canOpen={Boolean(oneLibraryDetail ?? selected ?? playingTrack)}
+        canOpen={Boolean(selected ?? playingTrack)}
         onToggle={toggleAside}
       />
     ) : null;
 
-  const queuePinButton = queueAside ? (
+  const queuePinButton = queueAside && !showSearchTips ? (
     <button
       type="button"
       className="kd-aside-head-close"
@@ -1572,11 +1761,98 @@ export function Workspace({
       aria-pressed={queuePinned}
       aria-label={queuePinned ? "取消固定下载队列" : "固定下载队列"}
       title={queuePinned ? "下载队列已固定；点击取消固定" : "固定下载队列，不被选歌和切换列表顶掉"}
+      onPointerDown={(event) => event.stopPropagation()}
       onClick={() => setQueuePinned(!queuePinned)}
     >
       <Pin size={13} fill={queuePinned ? "currentColor" : "none"} />
     </button>
   ) : null;
+
+  const settingsPinButton = showSettings && !showSearchTips ? (
+    <button
+      type="button"
+      className="kd-aside-head-close"
+      data-pinned={settingsPinned ? "true" : undefined}
+      aria-pressed={settingsPinned}
+      aria-label={settingsPinned ? "取消固定设置" : "固定设置"}
+      title={settingsPinned ? "设置已固定；点击恢复随内容切换自动收起" : "固定设置，不被选歌和切换列表顶掉"}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={() => setSettingsPinned(!settingsPinned)}
+    >
+      <Pin size={13} fill={settingsPinned ? "currentColor" : "none"} />
+    </button>
+  ) : null;
+
+  const togglePlayingDetailPin = useCallback(() => {
+    const nextPinned = !playingDetailPinned;
+    // 没有播放对象时不能新建“当前播放”固定；但若这是重启恢复的已固定状态，
+    // 仍允许用户关闭它。这样偏好既可记住，也不会凭空固定到所选曲目。
+    if (nextPinned && !playingTrack) return;
+    setPlayingDetailPinned(nextPinned);
+    setAsideLocked(false);
+    trackAsideFaceRef.current = "detail";
+    setTrackAsideFace("detail");
+    setDetailPinned(true);
+    // 不改 asideTrackId：它继续记住固定前（以及固定期间）用户最后查看的曲目，
+    // 取消固定时才能准确回到列表详情，在线临时曲目也不会丢。
+    showTrackDetail();
+    if (layout === "narrow") setSheet("aside");
+  }, [
+    layout,
+    playingDetailPinned,
+    playingTrack,
+    setPlayingDetailPinned,
+    showTrackDetail,
+  ]);
+
+  // 只在“详情”内容面出现，并与收起键并排。它不属于 CONTROL，也不改变详情
+  // 内部面板的拖动顺序；本地与在线详情共用这一枚容器级按钮。
+  const playingDetailPinButton = detailAside ? (
+    <button
+      type="button"
+      className="kd-aside-head-close"
+      data-pinned={playingDetailPinned ? "true" : undefined}
+      aria-pressed={playingDetailPinned}
+      aria-label={
+        playingDetailPinned
+          ? "取消始终显示当前播放歌曲详情"
+          : "始终显示当前播放歌曲详情"
+      }
+      title={
+        playingDetailPinned
+          ? playingTrack
+            ? "已固定：详情会跟随当前播放歌曲；点击恢复跟随列表选择"
+            : "已记住固定偏好；开始播放后详情会自动跟随"
+          : playingTrack
+            ? "始终显示当前播放歌曲的详情，并在切歌时自动跟随"
+            : "开始播放后可固定当前播放歌曲的详情"
+      }
+      disabled={!playingTrack && !playingDetailPinned}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={togglePlayingDetailPin}
+    >
+      <Pin size={13} fill={playingDetailPinned ? "currentColor" : "none"} />
+    </button>
+  ) : null;
+  const restoreControlButton = detailAside && !detailControlVisible ? (
+    <button
+      type="button"
+      className="kd-aside-head-close"
+      aria-label="展开 Control 面板"
+      title="展开 Control 面板"
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={() => setDetailControlVisible(true)}
+    >
+      <SlidersHorizontal size={14} strokeWidth={2.25} aria-hidden="true" />
+    </button>
+  ) : null;
+  const detailAsideTools = detailAside ? (
+    <>
+      {restoreControlButton}
+      {playingDetailPinButton}
+    </>
+  ) : null;
+  const asideTools = settingsPinButton ?? queuePinButton ?? detailAsideTools;
 
   const onTrackAsideFace = useCallback(
     (face: TrackAsideFace) => {
@@ -1587,26 +1863,23 @@ export function Workspace({
         openLyricsPanel();
         void ensureLyrics(
           getPlayingTrack()
-          ?? oneLibraryDetailTrack
           ?? selectSelectedTrack(useLibraryStore.getState()),
         );
         return;
       }
       showTrackDetail();
     },
-    [oneLibraryDetailTrack, openLyricsPanel, setPreferredAsideFace, showTrackDetail],
+    [openLyricsPanel, setPreferredAsideFace, showTrackDetail],
   );
 
-  const asideLabel = showFolders
+  const asideLabel = showSearchTips
+    ? "使用提示"
+    : showFolders
       ? "文件夹"
     : showSettings
       ? "设置"
-      : showVjExport
-        ? "导出 VJ"
-        : showDuplicates
+      : showDuplicates
           ? "曲库优化分析"
-          : showVirtualDisk
-            ? "OneLibrary"
         : previewAside
           ? "预览"
           : queueAside
@@ -1620,30 +1893,29 @@ export function Workspace({
                 : detailAside
                   ? "曲目详情"
                   : "";
-  const asidePanel = showFolders ? (
+  const asidePanel = showSearchTips ? (
+    <SearchTipsPanel />
+  ) : showFolders ? (
     <FolderTree
       onNavigate={onFolderNavigate}
-      onOpenStreamPlaylist={openStreamPlaylist}
+      onOpenStreamPlaylist={openStreamPlaylistFromUser}
       activeStreamPlaylist={activeStreamPlaylist}
     />
   ) : showSettings ? (
     <SettingsPanel />
-  ) : showVjExport ? (
-    <VjExportPanel />
   ) : showDuplicates ? (
     <DuplicateAnalysisPanel
       all={duplicateAll}
       folders={duplicateFolders}
       initialIncludeSubfolders={duplicateIncludeSubfolders}
     />
-  ) : showVirtualDisk ? (
-    <VirtualDiskPanel />
   ) : previewAside ? (
     <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
       {videoPipSession?.source === "network" ? (
         <VideoPreview
-          key={`${videoPipSession.bvid}#${videoPipSession.page}`}
+          key={`${videoPipSession.platform}:${videoPipSession.bvid}#${videoPipSession.page}`}
           req={{
+            platform: videoPipSession.platform,
             bvid: videoPipSession.bvid,
             title: videoPipSession.title,
             author: videoPipSession.author,
@@ -1660,12 +1932,11 @@ export function Workspace({
   ) : detailAside ? trackDetailPanel : null;
   const queueOpen =
     showQueue &&
+    !showSearchTips &&
     !showSettings &&
     !showFolders &&
     !showPreview &&
-    !showVjExport &&
     !showDuplicates &&
-    !showVirtualDisk &&
     !showLyrics;
 
   // 窄屏下换了标签（曲库 ↔ 搜索）就把抽屉收起来：抽屉里装的内容会跟着变，
@@ -1687,8 +1958,10 @@ export function Workspace({
   // 歌词属于曲目内容面（详情 ↔ 歌词），上面已有 effect 钉住；这里不能 unpin，
   // 否则一点「歌词」就被拆掉，看起来像弹不出来。
   useEffect(() => {
-    if (!(showSettings || showFolders || showVjExport || showDuplicates || showVirtualDisk || showQueue)) return;
-    setDetailPinned(false);
+    if (!(showSettings || showFolders || showDuplicates || showQueue)) return;
+    // 固定详情把设置/下载等视为临时覆盖：覆盖期间详情不渲染，关掉后仍回到
+    // 当前播放歌曲。未固定时保留旧行为，打开旁路即结束本次详情查看。
+    if (!playingDetailPinned) setDetailPinned(false);
     setAsideLocked(false);
     if (layout === "narrow") setSheet("aside");
   }, [
@@ -1696,36 +1969,63 @@ export function Workspace({
     showSettings,
     showQueue,
     showFolders,
-    showVjExport,
     showDuplicates,
-    showVirtualDisk,
     settingsPanelEpoch,
     foldersPanelEpoch,
-    vjExportPanelEpoch,
     duplicatesPanelEpoch,
-    virtualDiskPanelEpoch,
     queuePanelEpoch,
+    playingDetailPinned,
   ]);
 
+  // 这是一个“临时盖层”：不清掉原来的右栏状态；关掉后自然回到原面板。
+  // 反过来，用户显式打开设置/队列等正式旁路时，提示应立即让位。
+  useEffect(() => {
+    setShowSearchTips(false);
+  }, [
+    settingsPanelEpoch,
+    queuePanelEpoch,
+    foldersPanelEpoch,
+    duplicatesPanelEpoch,
+    lyricsPanelEpoch,
+  ]);
+
+  const toggleSearchTipsPanel = useCallback(() => {
+    if (showSearchTips) {
+      setShowSearchTips(false);
+      if (layout === "narrow") setSheet(null);
+      return;
+    }
+    setAsideLocked(false);
+    setShowSearchTips(true);
+    if (layout === "narrow") setSheet("aside");
+  }, [layout, showSearchTips]);
+
   const toggleQueueDrawer = useCallback(() => {
+    const revealingCoveredQueue = showSearchTips && useAppStore.getState().showQueue;
+    setShowSearchTips(false);
+    if (revealingCoveredQueue) return;
     const opening = !useAppStore.getState().showQueue;
-    if (opening) setDetailPinned(false);
+    if (opening && !playingDetailPinned) setDetailPinned(false);
     toggleQueuePanel();
     if (opening) {
       setAsideLocked(false);
       if (layout === "narrow") setSheet("aside");
     }
-  }, [layout, toggleQueuePanel]);
+  }, [layout, playingDetailPinned, showSearchTips, toggleQueuePanel]);
 
   const openSettingsFromChrome = useCallback(() => {
-    setDetailPinned(false);
+    const revealingCoveredSettings = showSearchTips && useAppStore.getState().showSettings;
+    setShowSearchTips(false);
+    if (revealingCoveredSettings) return;
+    if (!playingDetailPinned) setDetailPinned(false);
     toggleSettingsPanel();
-  }, [toggleSettingsPanel]);
+  }, [playingDetailPinned, showSearchTips, toggleSettingsPanel]);
 
   const openUpdateFromChrome = useCallback(() => {
-    setDetailPinned(false);
+    setShowSearchTips(false);
+    if (!playingDetailPinned) setDetailPinned(false);
     useUpdateStore.getState().openUpdateSection();
-  }, []);
+  }, [playingDetailPinned]);
 
   /* ------------------------------------------------------------ 导航栏 / 旁路栏拖宽 */
   const shellRef = useRef<HTMLDivElement | null>(null);
@@ -1738,7 +2038,7 @@ export function Workspace({
     const el = shellRef.current;
     if (!el) return;
     for (const side of ["left", "right"] as const) {
-      const saved = localStorage.getItem(`kd-split-${side}`);
+      const saved = readLocalStorage(`kd-split-${side}`);
       if (saved) el.style.setProperty(`--kd-${side}`, `${saved}px`);
     }
   }, []);
@@ -1761,9 +2061,13 @@ export function Workspace({
       ? LEFT_COLUMN_BOUNDS
       : [Math.min(240, rightHostWidth), rightHostWidth] as const;
     let treeExpanded = compactTreeExpanded;
-    const onMove = (move: PointerEvent) => {
+    let pendingClientX = event.clientX;
+    let resizeFrame = 0;
+    if (side === "right") document.body.dataset.kdPaneResizing = "right";
+    const applyWidth = () => {
+      resizeFrame = 0;
       // 左把手往右拖 = 左栏变宽；右把手往右拖 = 右栏变窄
-      const delta = side === "left" ? move.clientX - startX : startX - move.clientX;
+      const delta = side === "left" ? pendingClientX - startX : startX - pendingClientX;
       if (side === "left") {
         const rawWidth = startWidth + delta;
         if (rawWidth <= LEFT_RAIL_SNAP) {
@@ -1781,24 +2085,41 @@ export function Workspace({
       const width = Math.round(Math.min(max, Math.max(min, startWidth + delta)));
       shell.style.setProperty(`--kd-${side}`, `${width}px`);
     };
+    const onMove = (move: PointerEvent) => {
+      pendingClientX = move.clientX;
+      if (!resizeFrame) resizeFrame = window.requestAnimationFrame(applyWidth);
+    };
     const onUp = () => {
+      if (resizeFrame) {
+        window.cancelAnimationFrame(resizeFrame);
+        applyWidth();
+      }
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("blur", onUp);
+      if (side === "right") {
+        delete document.body.dataset.kdPaneResizing;
+        window.dispatchEvent(new Event("kd:pane-resize-end"));
+      }
       if (side === "left" && !treeExpanded) {
         // 最小轨道是一个布局状态，不把 58px 当作展开宽度存下来。
         shell.style.setProperty("--kd-left", `${Math.max(min, LEFT_RAIL_WIDTH)}px`);
         return;
       }
       const value = shell.style.getPropertyValue(`--kd-${side}`).replace("px", "");
-      if (value) localStorage.setItem(`kd-split-${side}`, value);
+      if (value) writeLocalStorageNow(`kd-split-${side}`, value);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("blur", onUp);
   };
 
   const resetColumn = (side: "left" | "right") => {
     shellRef.current?.style.removeProperty(`--kd-${side}`);
-    localStorage.removeItem(`kd-split-${side}`);
+    removeLocalStorage(`kd-split-${side}`);
+    if (side === "right") window.dispatchEvent(new Event("kd:pane-resize-end"));
   };
 
   /**
@@ -1848,7 +2169,7 @@ export function Workspace({
             dirty = true;
           }
         }
-        if (dirty) void saveSettings(patch);
+        if (dirty) void saveSettings(patch).catch(() => undefined);
       }
       void submit(plats);
     }
@@ -1920,20 +2241,36 @@ export function Workspace({
   }, [items]);
 
   const loadCollection = useCallback(async (collection: CollectionResult) => {
-    const resultGeneration = resultRequestSeqRef.current;
+    const requestId = ++resultRequestSeqRef.current;
     const token = `${collection.platform}:${collection.kind}:${collection.key}`;
+    const hasCandidate = items?.some((item) =>
+      item.collections.some(
+        (candidate) =>
+          candidate.platform === collection.platform &&
+          candidate.kind === collection.kind &&
+          candidate.key === collection.key,
+      ),
+    );
+    const snapshot = hasCandidate && items
+      ? {
+          items,
+          video,
+          scrollTop: searchScrollRef.current?.scrollTop ?? 0,
+          scrollLeft: searchScrollRef.current?.scrollLeft ?? 0,
+        }
+      : null;
     setSearchError("");
     setLoadingCollections((current) => new Set(current).add(token));
     try {
       const response = await api.resolveCollection(collection, 0);
-      if (resultGeneration !== resultRequestSeqRef.current) return;
+      if (requestId !== resultRequestSeqRef.current) return;
       const resolved = resolvedCollectionItem(collection, response);
-      setItems((current) =>
-        current ? promoteResolvedCollection(current, collection, resolved) : current,
-      );
-      // 提升新包会改变所有 item 下标；当前选择键仍包含下标，先清掉旧选择/
-      // 折叠状态，避免它们意外命中新位置并下载错误来源。
+      // 候选列表与合集详情是两个页面状态；详情页只保留这一个合集的歌曲。
+      setCollectionSearchSnapshot(snapshot);
+      setCollectionPage(1);
+      setItems([resolved]);
       setChosen(new Set());
+      setSearchSelectionMode(false);
       setCollapsedItems(new Set());
       setExpandedGroups(new Set());
       setSourceIndex({});
@@ -1942,20 +2279,21 @@ export function Workspace({
         (collection.platform === "wyy" || collection.platform === "qqm")
       ) {
         setActiveStreamPlaylist({ platform: collection.platform, key: collection.key });
+      } else {
+        setActiveStreamPlaylist(null);
       }
       revealLoadedCollection();
     } catch (error) {
-      if (resultGeneration !== resultRequestSeqRef.current) return;
+      if (requestId !== resultRequestSeqRef.current) return;
       setSearchError(`载入集合失败：${errorText(error)}`);
     } finally {
-      if (resultGeneration !== resultRequestSeqRef.current) return;
       setLoadingCollections((current) => {
         const next = new Set(current);
         next.delete(token);
         return next;
       });
     }
-  }, [revealLoadedCollection]);
+  }, [items, revealLoadedCollection, video]);
 
   const chosenSources = useMemo(() => {
     const picked: SongSource[] = [];
@@ -1989,7 +2327,6 @@ export function Workspace({
       // 而且勾选被清空、这条动作栏跟着收起来，做成了看得一清二楚
       await enqueueMediaDownloads(chosenSources, {
         quality: settings?.default_quality ?? null,
-        one_library_target: oneLibraryPaneVisible ? selectedOneLibrary : null,
         video: {
           audioOnly: videoAudioOnly,
           maxHeight: settings?.video_max_height ?? 1080,
@@ -2003,7 +2340,7 @@ export function Workspace({
     } catch (error) {
       setQueueError(`加入队列失败：${errorText(error)}`);
     }
-  }, [chosenSources, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, oneLibraryPaneVisible, selectedOneLibrary, refreshStats, videoAudioOnly]);
+  }, [chosenSources, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, refreshStats, videoAudioOnly]);
 
   // 曲目表 / 搜索结果：Cmd/Ctrl + A · C · X · V（Option+V 强制移动）。
   useLibraryClipboard({
@@ -2017,11 +2354,8 @@ export function Workspace({
     enqueueChosen: () => addToQueue(),
   });
 
-  /** 歌单/专辑父行的明确主动作：无需先全选再找顶部按钮，整包直接进下载队列。 */
-  const downloadItem = useCallback(
-    async (index: number) => {
-      const item = items?.[index];
-      if (!item) return;
+  const downloadResolvedItem = useCallback(
+    async (item: IntakeItem) => {
       const seen = new Set<string>();
       const sources = selectableGroups(item).flatMap((group) => {
         const pickedIndex = sourceIndex[group.group_id] ?? group.best_source_index;
@@ -2037,7 +2371,6 @@ export function Workspace({
       try {
         await enqueueMediaDownloads(sources, {
           quality: settings?.default_quality ?? null,
-          one_library_target: oneLibraryPaneVisible ? selectedOneLibrary : null,
           video: {
             audioOnly: videoAudioOnly,
             maxHeight: settings?.video_max_height ?? 1080,
@@ -2049,8 +2382,38 @@ export function Workspace({
         setQueueError(`整包下载失败：${errorText(error)}`);
       }
     },
-    [items, sourceIndex, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, oneLibraryPaneVisible, selectedOneLibrary, refreshStats, videoAudioOnly],
+    [sourceIndex, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, refreshStats, videoAudioOnly],
   );
+
+  const downloadOpenedCollection = useCallback(async () => {
+    let item = openedCollection;
+    const playlist = openedStreamPlaylist;
+    if (!item) return;
+    // “全部下载”是明确的全量动作；只有这时才允许把尚未浏览的 B 站页补齐。
+    if (
+      playlist?.platform === "bilibili"
+      && playlist.count > item.groups.length
+    ) {
+      const requestId = ++resultRequestSeqRef.current;
+      setBusy(true);
+      setQueueError("");
+      try {
+        const response = await api.streamPlaylist(playlist, 0);
+        if (requestId !== resultRequestSeqRef.current) return;
+        item = streamPlaylistItem(playlist, response);
+        setItems([item]);
+        setOpenedStreamPlaylist({ ...playlist, count: item.groups.length });
+      } catch (error) {
+        if (requestId === resultRequestSeqRef.current) {
+          setQueueError(`读取完整收藏夹失败：${errorText(error)}`);
+        }
+        return;
+      } finally {
+        if (requestId === resultRequestSeqRef.current) setBusy(false);
+      }
+    }
+    await downloadResolvedItem(item);
+  }, [downloadResolvedItem, openedCollection, openedStreamPlaylist]);
 
   const downloadGroup = useCallback(
     async (group: MergedGroup) => {
@@ -2065,51 +2428,13 @@ export function Workspace({
       try {
         await enqueueMediaDownloads([source], {
           quality: settings?.default_quality ?? null,
-          one_library_target: oneLibraryPaneVisible ? selectedOneLibrary : null,
         });
         void refreshStats();
       } catch (error) {
         setQueueError(`加入队列失败：${errorText(error)}`);
       }
     },
-    [sourceIndex, settings?.default_quality, oneLibraryPaneVisible, selectedOneLibrary, refreshStats],
-  );
-
-  /**
-   * 本地列表里拖动换位：把整个文件夹的曲目顺序写回它的 .kdj/manifest.json。
-   * 先按当前排序取全量（分页外的也要参与），再把拖动的块插到目标位置。
-   */
-  const reorderTracks = useCallback(
-    async (ids: number[], targetId: number, before: boolean) => {
-      const folder = filter.folder;
-      if (!folder) return;
-      setReorderError("");
-      try {
-        const page = await api.tracks({
-          folder,
-          sort: filter.sort,
-          order: filter.order,
-          limit: 2000,
-          offset: 0,
-        });
-        const all = page.items;
-        const moved = all.filter((t) => ids.includes(t.id));
-        const rest = all.filter((t) => !ids.includes(t.id));
-        const targetIndex = rest.findIndex((t) => t.id === targetId);
-        if (moved.length === 0 || targetIndex < 0) return;
-        const insertAt = before ? targetIndex : targetIndex + 1;
-        const names = [...rest.slice(0, insertAt), ...moved, ...rest.slice(insertAt)].map(
-          (t) => t.filename,
-        );
-        await api.orderFolder(folder, names);
-        // 手排完立刻按手排顺序看；setFilter 的防抖会触发 refresh
-        setFilter({ sort: "custom" });
-      } catch (error) {
-        // 拖完之后列表会自己弹回原来的顺序，得说清楚这不是"拖歪了"
-        setReorderError(`排序失败：${errorText(error)}`);
-      }
-    },
-    [filter.folder, filter.sort, filter.order, setFilter],
+    [sourceIndex, settings?.default_quality, refreshStats],
   );
 
   // 主/副两级排序的三段式点击语义全在 store 里（cycleSort），
@@ -2132,8 +2457,6 @@ export function Workspace({
     showQueue,
     showPreview,
     showFolders,
-    showVjExport,
-    showVirtualDisk,
   ]);
 
   return (
@@ -2153,9 +2476,7 @@ export function Workspace({
           }
           actions={
             <ChromeActions
-              workMode={workMode}
-              onWorkModeChange={onWorkModeChange}
-              settingsOpen={showSettings}
+              settingsOpen={showSettings && !showSearchTips}
               onSettings={openSettingsFromChrome}
               queueOpen={queueOpen}
               queueCount={activeDownloads}
@@ -2184,7 +2505,7 @@ export function Workspace({
               <NarrowFolderRail
                 expanded={compactTreeExpanded}
                 onNavigate={onFolderNavigate}
-                onOpenStreamPlaylist={openStreamPlaylist}
+                onOpenStreamPlaylist={openStreamPlaylistFromUser}
                 activeStreamPlaylist={activeStreamPlaylist}
               />
             </div>
@@ -2220,6 +2541,8 @@ export function Workspace({
                     batch={batch}
                     busy={busy}
                     onSubmit={() => void submit()}
+                    tipsOpen={showSearchTips}
+                    onTips={toggleSearchTipsPanel}
                     burstNonce={searchBurstNonce}
                     burstTone={searchBurstTone}
                     platforms={platforms}
@@ -2324,11 +2647,6 @@ export function Workspace({
                     </div>
                   )}
                   <InlineNotice
-                    text={reorderError}
-                    onDismiss={() => setReorderError("")}
-                    block
-                  />
-                  <InlineNotice
                     text={folderDropError}
                     onDismiss={() => setFolderDropError("")}
                     block
@@ -2349,101 +2667,7 @@ export function Workspace({
                     sort2={filter.sort2}
                     order2={filter.order2}
                     onScrollEnd={() => void loadMore()}
-                    reorderable={Boolean(filter.folder) && !filter.folderDeep && !isOutsideFolder(filter.folder)}
-                    onReorder={(ids, targetId, before) => void reorderTracks(ids, targetId, before)}
                   />
-                </div>
-
-                <div
-                  className="kd-workspace-pane kd-workspace-pane-onelibrary"
-                  data-workspace-pane-kind="onelibrary"
-                  data-pane-visible={oneLibraryPaneVisible ? "true" : undefined}
-                  data-pane-active={activeWorkspacePane === "onelibrary" ? "true" : undefined}
-                  data-pane-drop-target={workspacePaneDropTarget === "onelibrary" ? "true" : undefined}
-                  data-pane-dragging={dragWorkspacePane === "onelibrary" ? "true" : undefined}
-                  style={{ order: paneOrder("onelibrary") }}
-                  data-drop-offered={
-                    oneLibraryPaneWritable && (onlineAudioDragActive || localTrackDragActive)
-                      ? "true"
-                      : undefined
-                  }
-                  data-drop-active={oneLibraryDropActive ? "true" : undefined}
-                  {...(oneLibraryPaneWritable && selectedOneLibrary
-                    ? {
-                        [PLAYLIST_DROP_ID_ATTR]: String(selectedOneLibrary.playlist_id),
-                        [PLAYLIST_DROP_DEVICE_ATTR]: selectedOneLibrary.device_path,
-                      }
-                    : {})}
-                  onPointerDownCapture={() => focusWorkspacePane("onelibrary")}
-                  onFocusCapture={() => focusWorkspacePane("onelibrary")}
-                  onDragOver={(event) => {
-                    if (
-                      !oneLibraryPaneWritable ||
-                      (!isTrackDrag(event) && !isSearchDownloadDrag(event))
-                    ) return;
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "copy";
-                    setOneLibraryDropActive(true);
-                  }}
-                  onDragLeave={(event) => {
-                    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                      setOneLibraryDropActive(false);
-                    }
-                  }}
-                  onDrop={(event) => {
-                    setOneLibraryDropActive(false);
-                    if (!oneLibraryPaneWritable || !selectedOneLibrary) return;
-                    if (isSearchDownloadDrag(event)) {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      void enqueueSearchOneLibraryDrop(event, selectedOneLibrary).catch(
-                        (error: unknown) =>
-                          usePlaylistStore.setState({ deviceError: errorText(error) }),
-                      );
-                      return;
-                    }
-                    if (!isTrackDrag(event)) return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const ids = readTrackDragIds(event.dataTransfer);
-                    finishTrackDrop();
-                    if (ids.length > 0) {
-                      void usePlaylistStore
-                        .getState()
-                        .addTracks(
-                          selectedOneLibrary.device_path,
-                          selectedOneLibrary.playlist_id,
-                          ids,
-                        )
-                        .catch(() => undefined);
-                    }
-                  }}
-                >
-                  {selectedOneLibrary ? (
-                    <>
-                      <button
-                        type="button"
-                        className="kd-workspace-pane-grip"
-                        {...workspacePaneGripProps("onelibrary")}
-                      />
-                      <div className="kd-workspace-drop-overlay" aria-hidden="true">
-                        <span>放入 {selectedOneLibrary.playlist_name}</span>
-                      </div>
-                      <OneLibraryWorkRail
-                        onCollapse={collapseOneLibraryPane}
-                        asideToggle={
-                          !localPaneVisible && !searchPaneVisible && !showAside
-                            ? asideToggle
-                            : undefined
-                        }
-                      />
-                      <OneLibraryTrackTable
-                        layout={layout}
-                        onInspect={inspectOneLibraryTrack}
-                        shortcutActive={activeWorkspacePane === "onelibrary"}
-                      />
-                    </>
-                  ) : null}
                 </div>
 
                 {visiblePaneOrder.slice(0, -1).map((left, index) => {
@@ -2474,13 +2698,21 @@ export function Workspace({
                       onPointerDownCapture={() => focusWorkspacePane("search")}
                       onFocusCapture={() => focusWorkspacePane("search")}
                     >
-                      <button
-                        type="button"
-                        className="kd-workspace-pane-grip"
-                        {...workspacePaneGripProps("search")}
-                      />
+                      {visiblePaneOrder.length > 1 ? (
+                        <button
+                          type="button"
+                          className="kd-workspace-pane-grip"
+                          {...workspacePaneGripProps("search")}
+                        />
+                      ) : null}
                       <SearchWorkRail
                         items={items ?? []}
+                        collection={openedCollection}
+                        collectionWindow={openedCollectionWindow}
+                        canGoBack={collectionSearchSnapshot !== null}
+                        onGoBack={returnToCollectionSearch}
+                        onCollectionPageChange={changeCollectionPage}
+                        onDownloadCollection={() => void downloadOpenedCollection()}
                         loading={busy || loadingCollections.size > 0}
                         selectionCount={chosen.size}
                         selecting={searchSelectionMode || chosen.size > 0}
@@ -2498,7 +2730,7 @@ export function Workspace({
                         videoAudioOnly={videoAudioOnly}
                         onToggleVideoAudioOnly={setVideoAudioOnly}
                         asideToggle={
-                          !localPaneVisible && !oneLibraryPaneVisible && !showAside
+                          !localPaneVisible && !showAside
                             ? asideToggle
                             : undefined
                         }
@@ -2506,10 +2738,13 @@ export function Workspace({
                           resultRequestSeqRef.current += 1;
                           setBusy(false);
                           setHasResults(false);
+                          setCollectionSearchSnapshot(null);
+                          setCollectionPage(1);
                           setActiveStreamPlaylist(null);
                           setInspectedOnlineGroup(null);
                           updateStreamWorkspaceSession({
                             playlist: null,
+                            accountKey: null,
                             inspectedGroup: null,
                             scrollTop: 0,
                           });
@@ -2566,16 +2801,23 @@ export function Workspace({
                           collapsedItems={collapsedItems}
                           sourceIndex={sourceIndex}
                           inspectedGroup={inspectedOnlineGroup}
+                          collectionPage={collectionPage}
                           onToggleSelect={toggleSelect}
                           onToggleExpand={toggleExpand}
                           onPickSource={pickSource}
                           onToggleItem={toggleItem}
                           onToggleItemAll={toggleItemAll}
                           onToggleAll={toggleAll}
-                          onDownloadItem={(index) => void downloadItem(index)}
                           onDownloadGroup={(group) => void downloadGroup(group)}
                           onDownloadSelected={() => void addToQueue()}
                           onInspectGroup={inspectOnlineGroup}
+                          onRemoveStreamGroup={
+                            removeStreamGroupLabel
+                              ? (group, sourceIdx) => void removeStreamGroup(group, sourceIdx)
+                              : undefined
+                          }
+                          removeStreamGroupLabel={removeStreamGroupLabel}
+                          removingStreamGroupIds={removingStreamGroupIds}
                           onLoadCollection={(collection) => void loadCollection(collection)}
                           loadingCollections={loadingCollections}
                         />
@@ -2599,7 +2841,7 @@ export function Workspace({
                       title={asideLabel}
                       face={showTrackFaceSwitch ? trackAsideFace : undefined}
                       onFaceChange={showTrackFaceSwitch ? onTrackAsideFace : undefined}
-                      tools={queuePinButton}
+                      tools={asideTools}
                       asideToggle={asideToggle}
                     />
                     <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
@@ -2623,7 +2865,7 @@ export function Workspace({
                 <AsideFaceSwitch face={trackAsideFace} onFaceChange={onTrackAsideFace} />
               ) : undefined
             }
-            tools={queuePinButton}
+            tools={asideTools}
             onClose={closeAsideForUser}
           >
             {asidePanel}

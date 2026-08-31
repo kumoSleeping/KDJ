@@ -1,17 +1,16 @@
 /**
  * 媒体用例门面。列表、详情、播放条和拖放入口只表达用户意图，不自行决定
- * 队列何时打开、平台准备何时开始或任务如何注册到 OneLibrary。
+ * 队列何时打开或平台准备何时开始。
  */
 
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
-import type { DownloadTask, OneLibraryTarget, Quality, SongSource } from "../types";
+import type { DownloadTask, Quality, SongSource } from "../types";
 
 export interface EnqueueMediaOptions {
   quality?: Quality | null;
   analyze?: boolean | null;
   dest_dir?: string;
-  one_library_target?: OneLibraryTarget | null;
   /** 默认 true。显式 false 只给恢复/后台维护用。 */
   revealQueue?: boolean;
   video?: {
@@ -34,7 +33,9 @@ function normalizedDownloadSources(
             ...source.payload,
             audio_only: options.video?.audioOnly,
             max_height: options.video?.maxHeight,
-            transcode: options.video?.transcode,
+            // YouTube's fixed native path already produces MP4 by transmuxing H.264/AAC.
+            // Applying the cross-platform re-encode toggle would reintroduce FFmpeg.
+            transcode: source.platform === "youtube" ? false : options.video?.transcode,
           },
         }
       : source,

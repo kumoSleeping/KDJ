@@ -5,6 +5,11 @@ import {
   streamAnalysisSnapshot,
   trackWithStreamAnalysis,
 } from "../src/lib/streamAnalysis";
+import {
+  subscribeStreamCue,
+  trackWithStreamCue,
+  updateStreamCue,
+} from "../src/lib/streamCue";
 import { beatGridMarkers } from "../src/lib/performanceCues";
 import type { StreamAnalysisResult, StreamWaveformProgress, Track } from "../src/types";
 
@@ -122,4 +127,28 @@ test("old backends without analysis fields do not erase a stream result", () => 
   });
   recordStreamAnalysisProgress(trackId, emptyProgress);
   assert.equal(streamAnalysisSnapshot(trackId).phase, "ready");
+});
+
+test("stream cue points are session metadata and notify the mounted player", () => {
+  const track = {
+    id: -98_762,
+    cue_ms: null,
+    end_ms: null,
+  } as Track;
+  let notifications = 0;
+  const unsubscribe = subscribeStreamCue(track.id, () => {
+    notifications += 1;
+  });
+
+  updateStreamCue(track, { cue_ms: 12_500 });
+  const withStart = trackWithStreamCue(track);
+  assert.equal(withStart.cue_ms, 12_500);
+  assert.equal(withStart.end_ms, null);
+
+  updateStreamCue(withStart, { end_ms: 150_000 });
+  const complete = trackWithStreamCue(track);
+  assert.equal(complete.cue_ms, 12_500);
+  assert.equal(complete.end_ms, 150_000);
+  assert.equal(notifications, 2);
+  unsubscribe();
 });

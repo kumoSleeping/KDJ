@@ -1,4 +1,4 @@
-use kdj_core::FilterResonance;
+use kdj_core::{models::Waveform, FilterResonance};
 use kdj_player::EQ_SPECTRUM_BANDS;
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +44,19 @@ pub struct PlaybackDeckClock {
     pub loop_length: Option<f64>,
     pub loop_wrap_count: u64,
     pub loop_stall_frames: u64,
+}
+
+/// Detailed waveform evidence for one bounded source-time window.
+///
+/// `waveform.duration` remains the full song duration so transport geometry and Cue positions use
+/// one clock. `source_start` / `source_end` say which part the arrays actually represent; callers
+/// must leave the rest blank rather than stretching these columns across the whole song.
+#[derive(Clone, Debug, Serialize)]
+pub struct PlaybackWaveformWindow {
+    #[serde(flatten)]
+    pub waveform: Waveform,
+    pub source_start: f64,
+    pub source_end: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -209,6 +222,10 @@ pub struct PlaybackTransitionPlan {
 pub enum PlaybackCommand {
     Load {
         source: PlaybackSource,
+        /// Manager source replacement carries the authoritative master gain in the same actor
+        /// command. Older frontends omit it and retain the coordinator's current value.
+        #[serde(default, rename = "masterVolume")]
+        master_volume: Option<f32>,
     },
     Prepare {
         source: PlaybackSource,
@@ -274,6 +291,12 @@ pub enum PlaybackCommand {
     SetDeckRate {
         deck: u8,
         rate: f32,
+    },
+    /// Persistent KEY transpose in equal-tempered semitones. TEMPO remains unchanged.
+    SetDeckPitch {
+        deck: u8,
+        #[serde(rename = "semitones")]
+        semitones: f32,
     },
     /// Linked SYNC tempo gesture. Both rates reach the realtime renderer in one command.
     SetDeckRates {
@@ -468,6 +491,8 @@ pub struct PlaybackDeckSnapshot {
     pub desired_playing: bool,
     pub is_playing: bool,
     pub rate: f32,
+    /// Persistent musical-key transpose, in equal-tempered semitones.
+    pub pitch_semitones: f32,
     /// Rubber Band worker target already adopted; old-rate PCM may still be queued afterward.
     pub applied_rate: f32,
     /// Rate tagged on the PCM currently consumed by the audio callback.
@@ -544,6 +569,33 @@ mod tests {
     use super::{PlaybackCommand, PlaybackFxKind, PlaybackLevels, PlaybackPlatterPhase};
 
     #[test]
+    fn manager_load_accepts_an_atomic_master_volume_and_keeps_legacy_payloads_compatible() {
+        let current: PlaybackCommand = serde_json::from_str(
+            r#"{"type":"load","source":{"trackId":7,"path":"/tmp/song.mp3"},"masterVolume":0.42}"#,
+        )
+        .expect("带主音量的 Load 命令应可解析");
+        assert!(matches!(
+            current,
+            PlaybackCommand::Load {
+                master_volume: Some(volume),
+                ..
+            } if (volume - 0.42).abs() < f32::EPSILON
+        ));
+
+        let legacy: PlaybackCommand = serde_json::from_str(
+            r#"{"type":"load","source":{"trackId":7,"path":"/tmp/song.mp3"}}"#,
+        )
+        .expect("旧 Load 命令仍应可解析");
+        assert!(matches!(
+            legacy,
+            PlaybackCommand::Load {
+                master_volume: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn manual_fx_wire_contract_preserves_three_slots_and_camel_case_kinds() {
         let command: PlaybackCommand = serde_json::from_str(
             r#"{"type":"setDeckFx","deck":1,"slots":[{"kind":"bitCrusher","enabled":true,"mix":0.25,"parameter":0.75},{"kind":"hydrant","enabled":false,"mix":0.5,"parameter":0.6},{"kind":"rocket","enabled":true,"mix":1.0,"parameter":0.9}],"pad":0,"beatSeconds":0.48}"#,
@@ -579,6 +631,18 @@ mod tests {
                 position,
                 play_when_ready: true,
             } if (position - 12.5).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn pitch_shift_wire_contract_uses_semitones() {
+        let command: PlaybackCommand =
+            serde_json::from_str(r#"{"type":"setDeckPitch","deck":0,"semitones":-3.0}"#)
+                .expect("前端 Key 调整命令应可解析");
+        assert!(matches!(
+            command,
+            PlaybackCommand::SetDeckPitch { deck: 0, semitones }
+                if (semitones + 3.0).abs() < f32::EPSILON
         ));
     }
 

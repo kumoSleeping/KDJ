@@ -18,6 +18,7 @@ use kdj_providers::youtube::YoutubeProvider;
 use kdj_providers::youtubemusic::auth::YoutubeAuth;
 use kdj_providers::youtubemusic::YoutubeMusicProvider;
 use kdj_providers::{MusicProvider, ProviderContext, ProviderLiveSettings, VideoProvider};
+use tokio_util::sync::CancellationToken;
 
 /// 账号页和搜索页的平台顺序。`local` 不是真的 provider，不在这里。
 pub const PLATFORMS: [Platform; 6] = [
@@ -32,6 +33,46 @@ pub const PLATFORMS: [Platform; 6] = [
 const MAX_FOLDER_UNDO_BATCHES: usize = 50;
 const MAX_SONG_PREVIEW_TICKETS: usize = 256;
 const SONG_PREVIEW_TICKET_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+const YOUTUBE_HLS_RESOURCE_TTL: Duration = Duration::from_secs(30 * 60);
+const MAX_YOUTUBE_HLS_RESOURCES: usize = 8 * 1024;
+const YOUTUBE_HLS_PREPARATION_TTL: Duration = Duration::from_secs(2 * 60);
+const MAX_YOUTUBE_HLS_PREPARATIONS: usize = 32;
+
+pub(crate) fn trusted_googlevideo_media_target(url: &reqwest::Url) -> bool {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let path = url.path();
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && (host == "googlevideo.com" || host.ends_with(".googlevideo.com"))
+        && (path.starts_with("/api/manifest/")
+            || path == "/videoplayback"
+            || path.starts_with("/videoplayback/"))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+}
+
+#[derive(Clone)]
+pub struct YoutubeHlsResource {
+    pub video_id: String,
+    pub url: String,
+    pub user_agent: String,
+    pub proof_token: String,
+    pub max_height: i64,
+    pub cancel: CancellationToken,
+    pub response: Arc<tokio::sync::OnceCell<crate::youtube_hls::YoutubeHlsCachedResult>>,
+    last_used_at: Instant,
+}
+
+#[derive(Clone)]
+pub struct YoutubeHlsPreparation {
+    pub video_id: String,
+    pub manifest: String,
+    pub n_challenge: String,
+    pub user_agent: String,
+    pub max_height: i64,
+    created_at: Instant,
+}
 
 /// 本地试听代理票据必须保留原始来源与音质：平台 CDN 的直链通常是短期链接，
 /// GET 遇到鉴权/过期状态时需要按同一请求重新解析一次，而不是让用户重新点歌。
@@ -175,33 +216,41 @@ pub struct FolderUndoBatch {
     pub items: Vec<FolderUndoItem>,
 }
 
-#[derive(Debug, Clone)]
-pub struct OneLibrarySyncSnapshot {
-    pub rating: i64,
-    pub cover_version: String,
-    pub update_count: i32,
-}
-
 pub struct AppState {
     pub config: Arc<AppConfig>,
+    /// 面向用户的有界审计日志；写盘走独立线程，不反压业务路径。
+    pub activity_log: crate::activity_log::ActivityLog,
     /// 在线媒体代理共用连接池。Range seek 每次都新建 Client 会让即使命中 CDN
     /// 缓存的请求仍重复支付 DNS/TCP/TLS 建链时间。
     pub preview_http: reqwest::Client,
+    /// YouTube media carries short-lived signed paths/proofs. Unlike the general preview client,
+    /// every redirect hop stays inside the exact GoogleVideo HTTPS media boundary.
+    pub youtube_media_http: reqwest::Client,
     pub hub: EventHub,
     pub library: Arc<LibraryService>,
     providers: BTreeMap<Platform, Arc<dyn MusicProvider>>,
     video_providers: BTreeMap<Platform, Arc<dyn VideoProvider>>,
-    /// 旧 B 站预览/校准端口；解析与下载已迁移到 video_providers，后续再拆成预览能力。
+    /// B 站自动校准仍需要其纯音轨/Cookie 能力；通用视频预览已走 video_providers。
     pub bilibili_preview: Arc<BilibiliProvider>,
+    /// Ordinary YouTube has a browser-proof preparation handshake in addition to VideoProvider.
+    pub youtube: Arc<YoutubeProvider>,
     /// SoundCloud OAuth 回调需要访问具体 provider 的短期 PKCE 会话。
     pub soundcloud: Arc<SoundCloudProvider>,
     /// 两个平台的登录态严格隔离；退出或重新连接任一来源不会影响另一个。
     pub ytm_auth: Arc<YoutubeAuth>,
     pub youtube_auth: Arc<YoutubeAuth>,
+    /// Opaque HLS resource capabilities. Upstream GoogleVideo URLs never enter the WebView;
+    /// playlists are rewritten into these short-lived local tickets.
+    youtube_hls_resources: Mutex<HashMap<String, YoutubeHlsResource>>,
+    /// One-shot handshakes keep the raw GoogleVideo capability in Rust while the isolated native
+    /// player transforms only the non-secret `n` challenge.
+    youtube_hls_preparations: Mutex<HashMap<String, YoutubeHlsPreparation>>,
     /// 所有 provider 共享的 live 设置句柄；`PUT /api/settings` 后刷这份即可。
     provider_ctx: ProviderContext,
     /// 在线歌曲试听的短期代理票据：浏览器只拿本地 URL，不直接碰各平台 CDN。
     pub song_previews: Mutex<SongPreviewTickets>,
+    /// 主窗与桌面歌词窗共享；同一首只允许一条在线搜词链，404 也会限时记忆。
+    pub lyric_lookups: crate::lyrics::LyricsLookupCache,
     /// 在线音频的旁路磁盘缓存；共享 generation 用于关闭/清理时取消在途写入。
     pub stream_cache: crate::stream_cache::StreamCache,
     /// 复用在线缓存临时文件的渐进波形；只在前端实际请求时才开始解码。
@@ -213,17 +262,12 @@ pub struct AppState {
     pub scans: crate::jobs::ScanRegistry,
     /// 波形单飞：同一首歌的并发请求共享一次解码。
     pub waveforms: Arc<crate::waveform::WaveformCoordinator>,
-    /// The fixed classical Redress STEM coordinator owns background separation; it never enters playback
-    /// or audio callback threads.
-    pub stems: kdj_stems::StemCoordinator,
     /// 文件夹与波形升级各自只允许一个实例；前端重连/HMR 不会重复开整库任务。
     pub maintenance: crate::jobs::MaintenanceRegistry,
     /// 串行化曲目文件操作，避免撤回与复制/移动/删除同时改同一路径。
     pub folder_operations: Mutex<()>,
     /// 最近成功的曲目复制/移动/删除批次；进程重启后故意清空，避免误改用户后来变动的文件。
     pub folder_undo: Mutex<VecDeque<FolderUndoBatch>>,
-    /// 已观察到的外置曲目状态，用来区分“本轮 djay 改了”与普通三秒轮询。
-    pub one_library_sync: Mutex<HashMap<String, OneLibrarySyncSnapshot>>,
     /// CLI / 第二次启动用来唤回窗口或真退出。测试里接收端会被丢掉，send 失败即可。
     pub control: tokio::sync::mpsc::UnboundedSender<UiControl>,
 }
@@ -243,15 +287,37 @@ impl AppState {
     pub fn new_with_control(
         config: Arc<AppConfig>,
     ) -> Result<(Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<UiControl>)> {
+        kdj_core::ensure_rustls_ring();
+        crate::cache_overview::cleanup_retired_data(&config.data_dir);
         crate::protected_media::cleanup_stale(&config.data_dir);
         let database = Database::open(&config.db_path())?;
         let library = Arc::new(LibraryService::new(database));
+        if let Ok(track_paths) = library.all_paths() {
+            crate::cache_overview::cleanup_retired_metadata(&track_paths, &config.download_dir());
+        }
         let preview_http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
+            // CDN 签名参数不能作为自动 Referer 泄露给跨主机重定向目标。
+            .referer(false)
             .connect_timeout(std::time::Duration::from_secs(10))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
             .context("构建在线媒体代理 HTTP 客户端失败")?;
+        let youtube_media_http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    return attempt.error("YouTube 媒体重定向次数过多");
+                }
+                if trusted_googlevideo_media_target(attempt.url()) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .context("构建 YouTube 媒体 HTTP 客户端失败")?;
         let ctx = provider_context(&config);
         let netease = Arc::new(NeteaseProvider::new(ctx.clone())?);
         let qqmusic = Arc::new(QqMusicProvider::new(ctx.clone())?);
@@ -269,37 +335,44 @@ impl AppState {
         providers.insert(Platform::Youtube, youtube.clone());
         providers.insert(Platform::Bilibili, bilibili.clone());
         let mut video_providers: BTreeMap<Platform, Arc<dyn VideoProvider>> = BTreeMap::new();
-        video_providers.insert(Platform::Youtube, youtube);
+        video_providers.insert(Platform::Youtube, youtube.clone());
         video_providers.insert(Platform::Bilibili, bilibili.clone());
         let waveforms = crate::waveform::WaveformCoordinator::new(library.clone());
-        let stems = kdj_stems::StemCoordinator::new(&config.data_dir);
         let stream_cache = crate::stream_cache::StreamCache::default();
         stream_cache.set_enabled(config.to_settings().stream_cache_enabled);
+        let activity_log = crate::activity_log::ActivityLog::new(config.data_dir.clone())?;
+        let stream_waveforms = crate::stream_waveform::StreamWaveformCoordinator::with_activity_log(
+            activity_log.clone(),
+        );
         let (control, rx) = tokio::sync::mpsc::unbounded_channel();
         Ok((
             Arc::new(AppState {
                 config,
+                activity_log,
                 preview_http,
+                youtube_media_http,
                 hub: EventHub::default(),
                 library,
                 providers,
                 video_providers,
                 bilibili_preview: bilibili,
+                youtube,
                 soundcloud,
                 ytm_auth,
                 youtube_auth,
+                youtube_hls_resources: Mutex::new(HashMap::new()),
+                youtube_hls_preparations: Mutex::new(HashMap::new()),
                 provider_ctx: ctx,
                 song_previews: Mutex::new(SongPreviewTickets::default()),
+                lyric_lookups: Default::default(),
                 stream_cache,
-                stream_waveforms: Default::default(),
+                stream_waveforms,
                 analysis: Default::default(),
                 scans: Default::default(),
                 waveforms,
-                stems,
                 maintenance: Default::default(),
                 folder_operations: Mutex::new(()),
                 folder_undo: Mutex::new(VecDeque::new()),
-                one_library_sync: Mutex::new(HashMap::new()),
                 control,
             }),
             rx,
@@ -309,6 +382,160 @@ impl AppState {
     pub fn folder_undo_status(&self) -> FolderUndoStatus {
         let stack = self.folder_undo.lock().unwrap();
         folder_undo_status(&stack)
+    }
+
+    pub fn issue_youtube_hls_resource(
+        &self,
+        video_id: String,
+        url: String,
+        user_agent: String,
+        proof_token: String,
+        max_height: i64,
+        cancel: CancellationToken,
+    ) -> String {
+        let now = Instant::now();
+        let mut resources = self
+            .youtube_hls_resources
+            .lock()
+            .unwrap_or_else(|lock| lock.into_inner());
+        resources.retain(|_, resource| {
+            now.saturating_duration_since(resource.last_used_at) < YOUTUBE_HLS_RESOURCE_TTL
+        });
+        while resources.len() >= MAX_YOUTUBE_HLS_RESOURCES {
+            let Some(oldest) = resources
+                .iter()
+                .min_by_key(|(_, resource)| resource.last_used_at)
+                .map(|(ticket, _)| ticket.clone())
+            else {
+                break;
+            };
+            resources.remove(&oldest);
+        }
+        let ticket = format!(
+            "{:016x}{:016x}{:016x}{:016x}",
+            rand::random::<u64>(),
+            rand::random::<u64>(),
+            rand::random::<u64>(),
+            rand::random::<u64>()
+        );
+        resources.insert(
+            ticket.clone(),
+            YoutubeHlsResource {
+                video_id,
+                url,
+                user_agent,
+                proof_token,
+                max_height,
+                cancel,
+                response: Arc::new(tokio::sync::OnceCell::new()),
+                last_used_at: now,
+            },
+        );
+        ticket
+    }
+
+    pub fn issue_youtube_hls_preparation(
+        &self,
+        video_id: String,
+        manifest: String,
+        n_challenge: String,
+        user_agent: String,
+        max_height: i64,
+    ) -> String {
+        let now = Instant::now();
+        let mut preparations = self
+            .youtube_hls_preparations
+            .lock()
+            .unwrap_or_else(|lock| lock.into_inner());
+        preparations.retain(|_, preparation| {
+            now.saturating_duration_since(preparation.created_at) < YOUTUBE_HLS_PREPARATION_TTL
+        });
+        while preparations.len() >= MAX_YOUTUBE_HLS_PREPARATIONS {
+            let Some(oldest) = preparations
+                .iter()
+                .min_by_key(|(_, preparation)| preparation.created_at)
+                .map(|(ticket, _)| ticket.clone())
+            else {
+                break;
+            };
+            preparations.remove(&oldest);
+        }
+        let id = format!(
+            "{:016x}{:016x}{:016x}{:016x}",
+            rand::random::<u64>(),
+            rand::random::<u64>(),
+            rand::random::<u64>(),
+            rand::random::<u64>()
+        );
+        preparations.insert(
+            id.clone(),
+            YoutubeHlsPreparation {
+                video_id,
+                manifest,
+                n_challenge,
+                user_agent,
+                max_height,
+                created_at: now,
+            },
+        );
+        id
+    }
+
+    pub fn take_youtube_hls_preparation(&self, id: &str) -> Option<YoutubeHlsPreparation> {
+        if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let now = Instant::now();
+        let mut preparations = self
+            .youtube_hls_preparations
+            .lock()
+            .unwrap_or_else(|lock| lock.into_inner());
+        preparations.retain(|_, preparation| {
+            now.saturating_duration_since(preparation.created_at) < YOUTUBE_HLS_PREPARATION_TTL
+        });
+        preparations.remove(id)
+    }
+
+    pub fn youtube_hls_resource(&self, ticket: &str) -> Option<YoutubeHlsResource> {
+        if ticket.len() != 64 || !ticket.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let now = Instant::now();
+        let mut resources = self
+            .youtube_hls_resources
+            .lock()
+            .unwrap_or_else(|lock| lock.into_inner());
+        let expired = resources.get(ticket).is_some_and(|resource| {
+            now.saturating_duration_since(resource.last_used_at) >= YOUTUBE_HLS_RESOURCE_TTL
+        });
+        if expired {
+            resources.remove(ticket);
+            return None;
+        }
+        let resource = resources.get_mut(ticket)?;
+        resource.last_used_at = now;
+        Some(resource.clone())
+    }
+
+    pub fn cancel_youtube_hls_resource(&self, ticket: &str) -> bool {
+        if ticket.len() != 64 || !ticket.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+        let mut resources = self
+            .youtube_hls_resources
+            .lock()
+            .unwrap_or_else(|lock| lock.into_inner());
+        let Some(cancel) = resources
+            .get(ticket)
+            .map(|resource| resource.cancel.clone())
+        else {
+            return false;
+        };
+        cancel.cancel();
+        // A master playlist and every child ticket share one cancellation token. Dropping all of
+        // them here also closes the only upstream transfer and removes its disk-backed segments.
+        resources.retain(|_, resource| !resource.cancel.is_cancelled());
+        true
     }
 
     pub fn push_folder_undo(&self, batch: FolderUndoBatch) -> FolderUndoStatus {

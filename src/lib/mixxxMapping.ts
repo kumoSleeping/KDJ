@@ -34,10 +34,7 @@ export interface MixxxMappingManifest {
 }
 
 export type KdjControllerTarget =
-  | { kind: "deck-play" | "deck-cue" | "deck-sync"; deck: 0 | 1 }
-  | { kind: "deck-hot-cue"; deck: 0 | 1; slot: number }
-  | { kind: "deck-volume" | "deck-gain" | "deck-high" | "deck-mid" | "deck-low" | "deck-filter" | "deck-fx"; deck: 0 | 1 }
-  | { kind: "crossfader" | "crossfader-enable" | "head-mix" | "head-gain" | "master-gain" };
+  { kind: "deck-volume" | "deck-gain" | "deck-high" | "deck-mid" | "deck-low" | "deck-filter"; deck: 0 | 1 };
 
 type DeckContinuousTarget =
   | "deck-volume"
@@ -45,8 +42,7 @@ type DeckContinuousTarget =
   | "deck-high"
   | "deck-mid"
   | "deck-low"
-  | "deck-filter"
-  | "deck-fx";
+  | "deck-filter";
 
 function decodeXml(value: string): string {
   return value
@@ -139,11 +135,6 @@ export function mixxxControlTarget(group: string, key: string): KdjControllerTar
   const channel = group.match(/^\[Channel([12])\]$/i);
   if (channel) {
     const deck = (Number(channel[1]) - 1) as 0 | 1;
-    if (/^(play|play_indicator)$/i.test(key)) return { kind: "deck-play", deck };
-    if (/^cue_default$/i.test(key)) return { kind: "deck-cue", deck };
-    if (/^sync_enabled$/i.test(key)) return { kind: "deck-sync", deck };
-    const hotCue = key.match(/^hotcue_([1-8])_activate$/i);
-    if (hotCue) return { kind: "deck-hot-cue", deck, slot: Number(hotCue[1]) };
     const controls: Record<string, DeckContinuousTarget> = {
       volume: "deck-volume",
       pregain: "deck-gain",
@@ -151,21 +142,9 @@ export function mixxxControlTarget(group: string, key: string): KdjControllerTar
       filtermid: "deck-mid",
       filterlow: "deck-low",
       filterquickeffect: "deck-filter",
-      super1: "deck-fx",
     };
     const kind = controls[key.toLowerCase()];
     return kind ? { kind, deck } : null;
-  }
-  if (/^\[Master\]$/i.test(group)) {
-    const controls: Record<string, KdjControllerTarget["kind"]> = {
-      crossfader: "crossfader",
-      crossfader_enable: "crossfader-enable",
-      headmix: "head-mix",
-      headgain: "head-gain",
-      gain: "master-gain",
-    };
-    const kind = controls[key.toLowerCase()];
-    return kind ? { kind: kind as "crossfader" | "crossfader-enable" | "head-mix" | "head-gain" | "master-gain" } : null;
   }
   return null;
 }

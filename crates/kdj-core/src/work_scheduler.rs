@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-const CLASS_COUNT: usize = 8;
+const CLASS_COUNT: usize = 11;
 const WAIT_POLL: Duration = Duration::from_millis(20);
 
 /// Process-wide output-ring pressure published by the playback coordinator. The hardware callback
@@ -39,7 +39,10 @@ pub enum WorkClass {
     StemAudible,
     StemLookAhead,
     InteractiveWaveform,
+    WaveformRenewal,
+    VisibleWaveform,
     NowPlayingAnalysis,
+    LibraryAnalysisLight,
     LibraryAnalysis,
     Maintenance,
 }
@@ -51,7 +54,10 @@ impl WorkClass {
         Self::StemAudible,
         Self::StemLookAhead,
         Self::InteractiveWaveform,
+        Self::WaveformRenewal,
+        Self::VisibleWaveform,
         Self::NowPlayingAnalysis,
+        Self::LibraryAnalysisLight,
         Self::LibraryAnalysis,
         Self::Maintenance,
     ];
@@ -67,9 +73,12 @@ impl WorkClass {
             Self::StemAudible => 2,
             Self::StemLookAhead => 3,
             Self::InteractiveWaveform => 4,
-            Self::NowPlayingAnalysis => 5,
-            Self::LibraryAnalysis => 6,
-            Self::Maintenance => 7,
+            Self::WaveformRenewal => 5,
+            Self::VisibleWaveform => 6,
+            Self::NowPlayingAnalysis => 7,
+            Self::LibraryAnalysisLight => 8,
+            Self::LibraryAnalysis => 9,
+            Self::Maintenance => 10,
         }
     }
 }
@@ -122,6 +131,7 @@ pub struct TempoLaneSnapshot {
 pub struct WorkSchedulerSnapshot {
     pub heavy_limit: usize,
     pub heavy_in_use: usize,
+    pub live_audio_decks: usize,
     pub live_stem_decks: usize,
     pub audio_pressure: AudioPressure,
     pub classes: Vec<WorkClassSnapshot>,
@@ -179,6 +189,7 @@ struct SchedulerState {
     next_id: u64,
     heavy_limit: usize,
     heavy_in_use: usize,
+    live_audio_decks: usize,
     live_stem_decks: usize,
     audio_pressure: AudioPressure,
     active: [usize; CLASS_COUNT],
@@ -190,6 +201,7 @@ pub struct WorkScheduler {
     state: Mutex<SchedulerState>,
     wakeup: Condvar,
     tempo: [TempoLane; 2],
+    live_audio_decks: AtomicUsize,
     live_stem_decks: AtomicUsize,
     audio_pressure: AtomicU8,
 }
@@ -201,6 +213,7 @@ impl WorkScheduler {
                 next_id: 1,
                 heavy_limit: heavy_limit.max(1),
                 heavy_in_use: 0,
+                live_audio_decks: 0,
                 live_stem_decks: 0,
                 audio_pressure: AudioPressure::Normal,
                 active: [0; CLASS_COUNT],
@@ -209,6 +222,7 @@ impl WorkScheduler {
             }),
             wakeup: Condvar::new(),
             tempo: [TempoLane::standalone(1.0), TempoLane::standalone(1.0)],
+            live_audio_decks: AtomicUsize::new(0),
             live_stem_decks: AtomicUsize::new(0),
             audio_pressure: AtomicU8::new(AudioPressure::Normal as u8),
         })
@@ -233,6 +247,23 @@ impl WorkScheduler {
         self.wakeup.notify_all();
     }
 
+    /// Publish how many Decks currently want audible PCM. User-visible overview work and one
+    /// throttled light-analysis owner remain available at normal pressure; bulk analysis and
+    /// maintenance wait until every audible Deck is idle.
+    pub fn set_live_audio_decks(&self, decks: usize) {
+        if self.live_audio_decks.swap(decks, Ordering::AcqRel) == decks {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        state.live_audio_decks = decks;
+        drop(state);
+        self.wakeup.notify_all();
+    }
+
+    pub fn live_audio_decks(&self) -> usize {
+        self.live_audio_decks.load(Ordering::Acquire)
+    }
+
     pub fn set_audio_pressure(&self, pressure: AudioPressure) {
         if self.audio_pressure.swap(pressure as u8, Ordering::AcqRel) == pressure as u8 {
             return;
@@ -252,7 +283,7 @@ impl WorkScheduler {
     /// Dedicated owners such as the STEM inference pool do not pass through `acquire`; they use
     /// this non-blocking policy check before dequeuing optional work.
     pub fn allows(&self, class: WorkClass) -> bool {
-        pressure_allows(self.audio_pressure(), class)
+        policy_allows(&self.state.lock().unwrap(), class)
     }
 
     pub fn activity(self: &Arc<Self>, class: WorkClass) -> WorkActivityGuard {
@@ -314,7 +345,8 @@ impl WorkScheduler {
                 self.wakeup.notify_all();
                 return Err(WorkAcquireError::DeadlineExceeded);
             }
-            if state.heavy_in_use < state.heavy_limit
+            let effective_heavy_limit = effective_heavy_limit(&state);
+            if heavy_capacity_allows(&state)
                 && policy_allows(&state, request.class)
                 && is_next_waiter(&state, id)
             {
@@ -326,7 +358,7 @@ impl WorkScheduler {
                     target: "kdj_work_scheduler",
                     class = ?request.class,
                     heavy_in_use = state.heavy_in_use,
-                    heavy_limit = state.heavy_limit,
+                    heavy_limit = effective_heavy_limit,
                     "DJ work admitted"
                 );
                 return Ok(WorkActivityGuard {
@@ -349,6 +381,7 @@ impl WorkScheduler {
         WorkSchedulerSnapshot {
             heavy_limit: state.heavy_limit,
             heavy_in_use: state.heavy_in_use,
+            live_audio_decks: self.live_audio_decks.load(Ordering::Acquire),
             live_stem_decks: self.live_stem_decks.load(Ordering::Acquire),
             audio_pressure: self.audio_pressure(),
             classes: WorkClass::ALL
@@ -364,6 +397,21 @@ impl WorkScheduler {
     }
 }
 
+fn effective_heavy_limit(state: &SchedulerState) -> usize {
+    if state.live_audio_decks > 0 {
+        1
+    } else {
+        state.heavy_limit
+    }
+}
+
+/// Heavy analysis has one hard process-wide ceiling. Manager first paint reserves enough bounded
+/// PCM runway before whole-track preview work begins; routine renewals therefore never need to
+/// overbook that preview or make both FFT jobs several times slower through CPU/cache contention.
+fn heavy_capacity_allows(state: &SchedulerState) -> bool {
+    state.heavy_in_use < effective_heavy_limit(state)
+}
+
 fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
     let active = |class: WorkClass| state.active[class.index()] > 0;
     let queued = |class: WorkClass| state.queued[class.index()] > 0;
@@ -375,19 +423,54 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
         return false;
     }
     match class {
-        WorkClass::LibraryAnalysis | WorkClass::Maintenance => {
+        WorkClass::LibraryAnalysisLight => {
             state.live_stem_decks == 0
                 && !active(WorkClass::TempoStretch)
                 && !immediate_model_pressure
                 && !active(WorkClass::InteractiveWaveform)
+                && !queued(WorkClass::InteractiveWaveform)
+                && !active(WorkClass::VisibleWaveform)
+                && !queued(WorkClass::VisibleWaveform)
+                && !active(WorkClass::NowPlayingAnalysis)
+                && !queued(WorkClass::NowPlayingAnalysis)
+        }
+        WorkClass::LibraryAnalysis | WorkClass::Maintenance => {
+            state.live_audio_decks == 0
+                && state.live_stem_decks == 0
+                && !active(WorkClass::TempoStretch)
+                && !immediate_model_pressure
+                && !active(WorkClass::InteractiveWaveform)
+                && !active(WorkClass::WaveformRenewal)
+                && !active(WorkClass::VisibleWaveform)
                 && !active(WorkClass::NowPlayingAnalysis)
         }
-        // The user is waiting for an interactive waveform, so it may use one bounded heavy slot
-        // while playback continues. Now-playing BPM/key is less immediate and waits for the
-        // current tempo transition/model deadline.
+        // InteractiveWaveform remains reserved for bounded first paint/seek PCM. The explicit
+        // current-song full-detail warmup uses LibraryAnalysisLight above: one background owner,
+        // admitted only at normal pressure and behind urgent/visible work.
         WorkClass::InteractiveWaveform => !immediate_model_pressure,
+        // A renewal already has a complete visible rail. It waits quietly behind the hard heavy
+        // ceiling; a real seek/first paint still cancels lower-priority work immediately.
+        WorkClass::WaveformRenewal => {
+            state.live_stem_decks == 0
+                && !active(WorkClass::TempoStretch)
+                && !immediate_model_pressure
+                && !active(WorkClass::InteractiveWaveform)
+                && !queued(WorkClass::InteractiveWaveform)
+        }
+        // A cold PlayerBar preview is whole-track work, so it cannot borrow the bounded Manager
+        // class. It may run beside healthy stereo playback, but yields to tempo/STEM work and to
+        // actual output pressure. Its distinct class lets it preempt speculative full detail.
+        WorkClass::VisibleWaveform => {
+            state.live_stem_decks == 0
+                && !active(WorkClass::TempoStretch)
+                && !immediate_model_pressure
+                && !active(WorkClass::InteractiveWaveform)
+                && !queued(WorkClass::InteractiveWaveform)
+        }
         WorkClass::NowPlayingAnalysis => {
-            !active(WorkClass::TempoStretch) && !immediate_model_pressure
+            state.live_audio_decks == 0
+                && !active(WorkClass::TempoStretch)
+                && !immediate_model_pressure
         }
         _ => true,
     }
@@ -399,7 +482,10 @@ fn pressure_allows(pressure: AudioPressure, class: WorkClass) -> bool {
         AudioPressure::Low => !matches!(
             class,
             WorkClass::InteractiveWaveform
+                | WorkClass::WaveformRenewal
+                | WorkClass::VisibleWaveform
                 | WorkClass::NowPlayingAnalysis
+                | WorkClass::LibraryAnalysisLight
                 | WorkClass::LibraryAnalysis
                 | WorkClass::Maintenance
         ),
@@ -427,6 +513,10 @@ fn is_next_waiter(state: &SchedulerState, id: u64) -> bool {
     state
         .waiting
         .iter()
+        // A higher-priority class can be policy-blocked for minutes (for example a bulk scan
+        // while a Deck is audible). It must not head-of-line block a lower-priority class that is
+        // explicitly safe in the current state.
+        .filter(|waiter| policy_allows(state, waiter.class))
         .min_by(|left, right| waiter_cmp(left, right))
         .is_some_and(|waiter| waiter.id == id)
 }
@@ -548,6 +638,9 @@ mod tests {
         let scheduler = WorkScheduler::new(2);
         scheduler.set_audio_pressure(AudioPressure::Low);
         assert!(!scheduler.allows(WorkClass::InteractiveWaveform));
+        assert!(!scheduler.allows(WorkClass::WaveformRenewal));
+        assert!(!scheduler.allows(WorkClass::VisibleWaveform));
+        assert!(!scheduler.allows(WorkClass::LibraryAnalysisLight));
         assert!(scheduler.allows(WorkClass::StemAudible));
 
         let result = scheduler.acquire(
@@ -606,6 +699,185 @@ mod tests {
         }
         assert!(peak.load(Ordering::SeqCst) <= 2);
         assert_eq!(scheduler.snapshot().heavy_in_use, 0);
+    }
+
+    #[test]
+    fn audible_playback_defers_optional_work_but_keeps_bounded_waveform_available() {
+        let scheduler = WorkScheduler::new(2);
+        scheduler.set_live_audio_decks(1);
+        assert_eq!(scheduler.snapshot().live_audio_decks, 1);
+
+        assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
+        assert!(!scheduler.allows(WorkClass::LibraryAnalysis));
+        assert!(!scheduler.allows(WorkClass::Maintenance));
+        assert!(!scheduler.allows(WorkClass::NowPlayingAnalysis));
+        assert!(scheduler.allows(WorkClass::InteractiveWaveform));
+        assert!(scheduler.allows(WorkClass::WaveformRenewal));
+        assert!(scheduler.allows(WorkClass::VisibleWaveform));
+
+        let result = scheduler.acquire(
+            WorkRequest::new(WorkClass::Maintenance).with_timeout(Duration::from_millis(5)),
+            || false,
+        );
+        assert!(matches!(result, Err(WorkAcquireError::DeadlineExceeded)));
+
+        let bounded_waveform = scheduler
+            .acquire(WorkRequest::new(WorkClass::InteractiveWaveform), || false)
+            .unwrap();
+        drop(bounded_waveform);
+        let light = scheduler
+            .acquire(WorkRequest::new(WorkClass::LibraryAnalysisLight), || false)
+            .unwrap();
+        drop(light);
+        scheduler.set_live_audio_decks(0);
+        assert!(scheduler
+            .acquire(WorkRequest::new(WorkClass::Maintenance), || false)
+            .is_ok());
+    }
+
+    #[test]
+    fn queued_interactive_waveform_preempts_running_light_analysis_cooperatively() {
+        let scheduler = WorkScheduler::new(1);
+        scheduler.set_live_audio_decks(1);
+        assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
+        let _interactive = scheduler.queued(WorkClass::InteractiveWaveform);
+        assert!(!scheduler.allows(WorkClass::LibraryAnalysisLight));
+        assert!(scheduler.allows(WorkClass::InteractiveWaveform));
+    }
+
+    #[test]
+    fn queued_visible_waveform_preempts_speculative_detail_but_not_audio() {
+        let scheduler = WorkScheduler::new(1);
+        scheduler.set_live_audio_decks(1);
+        assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
+        let _visible = scheduler.queued(WorkClass::VisibleWaveform);
+        assert!(!scheduler.allows(WorkClass::LibraryAnalysisLight));
+        assert!(scheduler.allows(WorkClass::VisibleWaveform));
+        scheduler.set_audio_pressure(AudioPressure::Low);
+        assert!(!scheduler.allows(WorkClass::VisibleWaveform));
+    }
+
+    #[test]
+    fn bounded_manager_window_preempts_a_visible_whole_track_preview() {
+        let scheduler = WorkScheduler::new(1);
+        scheduler.set_live_audio_decks(1);
+        assert!(scheduler.allows(WorkClass::VisibleWaveform));
+        let _manager = scheduler.queued(WorkClass::InteractiveWaveform);
+        assert!(!scheduler.allows(WorkClass::VisibleWaveform));
+        assert!(scheduler.allows(WorkClass::InteractiveWaveform));
+    }
+
+    #[test]
+    fn routine_waveform_renewal_does_not_restart_whole_track_background_work() {
+        let scheduler = WorkScheduler::new(1);
+        scheduler.set_live_audio_decks(1);
+        let warm = scheduler
+            .acquire(WorkRequest::new(WorkClass::LibraryAnalysisLight), || false)
+            .unwrap();
+
+        assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
+        let renewal = scheduler.acquire(
+            WorkRequest::new(WorkClass::WaveformRenewal).with_timeout(Duration::from_millis(5)),
+            || false,
+        );
+        let snapshot = scheduler.snapshot();
+        assert_eq!(snapshot.heavy_limit, 1);
+        assert_eq!(snapshot.heavy_in_use, 1);
+        assert!(matches!(renewal, Err(WorkAcquireError::DeadlineExceeded)));
+        assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
+
+        drop(warm);
+        let renewal = scheduler
+            .acquire(WorkRequest::new(WorkClass::WaveformRenewal), || false)
+            .unwrap();
+        assert_eq!(scheduler.snapshot().heavy_in_use, 1);
+        drop(renewal);
+        assert_eq!(scheduler.snapshot().heavy_in_use, 0);
+    }
+
+    #[test]
+    fn routine_waveform_renewal_never_overbooks_a_visible_preview() {
+        let scheduler = WorkScheduler::new(2);
+        scheduler.set_live_audio_decks(1);
+        let preview = scheduler
+            .acquire(WorkRequest::new(WorkClass::VisibleWaveform), || false)
+            .unwrap();
+
+        let renewal = scheduler.acquire(
+            WorkRequest::new(WorkClass::WaveformRenewal).with_timeout(Duration::from_millis(5)),
+            || false,
+        );
+        let snapshot = scheduler.snapshot();
+        assert_eq!(snapshot.heavy_limit, 2);
+        assert_eq!(snapshot.heavy_in_use, 1);
+        assert!(matches!(renewal, Err(WorkAcquireError::DeadlineExceeded)));
+        assert!(scheduler.allows(WorkClass::VisibleWaveform));
+
+        drop(preview);
+        assert_eq!(scheduler.snapshot().heavy_in_use, 0);
+    }
+
+    #[test]
+    fn true_first_paint_still_preempts_a_routine_waveform_renewal() {
+        let scheduler = WorkScheduler::new(1);
+        scheduler.set_live_audio_decks(1);
+        let _manager = scheduler.queued(WorkClass::InteractiveWaveform);
+        assert!(!scheduler.allows(WorkClass::WaveformRenewal));
+        assert!(scheduler.allows(WorkClass::InteractiveWaveform));
+    }
+
+    #[test]
+    fn routine_renewal_never_bursts_over_unrelated_heavy_work() {
+        let scheduler = WorkScheduler::new(1);
+        let bulk = scheduler
+            .acquire(WorkRequest::new(WorkClass::LibraryAnalysis), || false)
+            .unwrap();
+        scheduler.set_live_audio_decks(1);
+        let visible_state = scheduler.activity(WorkClass::VisibleWaveform);
+        let result = scheduler.acquire(
+            WorkRequest::new(WorkClass::WaveformRenewal).with_timeout(Duration::from_millis(5)),
+            || false,
+        );
+        assert!(matches!(result, Err(WorkAcquireError::DeadlineExceeded)));
+        drop(visible_state);
+        drop(bulk);
+    }
+
+    #[test]
+    fn policy_blocked_bulk_waiter_does_not_block_safe_light_analysis() {
+        let scheduler = WorkScheduler::new(2);
+        scheduler.set_live_audio_decks(1);
+
+        let bulk_scheduler = Arc::clone(&scheduler);
+        let bulk = std::thread::spawn(move || {
+            bulk_scheduler.acquire(
+                WorkRequest::new(WorkClass::LibraryAnalysis)
+                    .with_timeout(Duration::from_millis(100)),
+                || false,
+            )
+        });
+        let queued_deadline = Instant::now() + Duration::from_millis(50);
+        while scheduler.snapshot().classes[WorkClass::LibraryAnalysis.index()].queued == 0
+            && Instant::now() < queued_deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            scheduler.snapshot().classes[WorkClass::LibraryAnalysis.index()].queued,
+            1
+        );
+
+        let light = scheduler.acquire(
+            WorkRequest::new(WorkClass::LibraryAnalysisLight)
+                .with_timeout(Duration::from_millis(50)),
+            || false,
+        );
+        assert!(light.is_ok());
+        drop(light);
+        assert!(matches!(
+            bulk.join().unwrap(),
+            Err(WorkAcquireError::DeadlineExceeded)
+        ));
     }
 
     #[test]

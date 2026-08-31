@@ -18,7 +18,6 @@ const MUSICU: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const MUSICS: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const DESKTOP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                           (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
 /// 请求平台。Desktop 是默认；Mobile 用于作者/专辑搜索和集合详情。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QqPlatform {
@@ -187,12 +186,15 @@ pub struct QqClient {
 
 impl QqClient {
     pub fn new(session_dir: &Path) -> Result<Self> {
+        crate::session_fs::ensure_private_dir(session_dir)?;
         let http = crate::net::http_timeouts(reqwest::Client::builder().user_agent(DESKTOP_UA))
             .build()
             .context("构建 QQ 音乐 HTTP 客户端失败")?;
+        let session_path = session_dir.join("qqmusic.json");
+        crate::session_fs::protect_existing_private_file(&session_path)?;
         let client = QqClient {
             http,
-            session_path: session_dir.join("qqmusic.json"),
+            session_path,
             credential: RwLock::new(Credential::default()),
             credential_invalid: RwLock::new(false),
             guid: new_guid(),
@@ -233,7 +235,9 @@ impl QqClient {
             return;
         }
         *self.credential_invalid.write().unwrap() = true;
-        let _ = std::fs::remove_file(&self.session_path);
+        if let Err(error) = crate::session_fs::remove_private_file(&self.session_path) {
+            tracing::warn!("QQ 音乐凭证已作废，但会话文件删除失败：{error:#}");
+        }
         tracing::warn!("QQ 音乐凭证被接口拒绝，已作废：{message}");
     }
 
@@ -247,29 +251,22 @@ impl QqClient {
         }
     }
 
-    pub fn store_credential(&self, credential: Credential) {
-        if let Some(parent) = self.session_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match serde_json::to_string_pretty(&credential) {
-            Ok(body) => {
-                let tmp = self.session_path.with_extension("json.tmp");
-                if let Err(err) = std::fs::write(&tmp, body)
-                    .and_then(|_| std::fs::rename(&tmp, &self.session_path))
-                {
-                    tracing::warn!("写入 QQ 音乐凭证失败：{err}");
-                }
-            }
-            Err(err) => tracing::warn!("序列化 QQ 音乐凭证失败：{err}"),
-        }
-        *self.credential.write().unwrap() = credential;
+    pub fn store_credential(&self, credential: Credential) -> Result<()> {
+        let mut current = self.credential.write().unwrap();
+        let body = serde_json::to_string_pretty(&credential).context("序列化 QQ 音乐凭证失败")?;
+        crate::session_fs::write_private_atomic(&self.session_path, body.as_bytes())
+            .context("写入 QQ 音乐凭证失败")?;
+        *current = credential;
         *self.credential_invalid.write().unwrap() = false;
+        Ok(())
     }
 
-    pub fn clear_credential(&self) {
-        *self.credential.write().unwrap() = Credential::default();
+    pub fn clear_credential(&self) -> Result<()> {
+        let mut current = self.credential.write().unwrap();
+        crate::session_fs::remove_private_file(&self.session_path)?;
+        *current = Credential::default();
         *self.credential_invalid.write().unwrap() = false;
-        let _ = std::fs::remove_file(&self.session_path);
+        Ok(())
     }
 
     /// 组 comm。Desktop/Web 都不需要 QIMEI。
@@ -406,7 +403,7 @@ impl QqClient {
         let refreshed: Credential =
             serde_json::from_value(data).context("刷新回来的凭证字段不完整")?;
         anyhow::ensure!(!refreshed.musickey.is_empty(), "刷新没有拿到新的 musickey");
-        self.store_credential(refreshed.clone());
+        self.store_credential(refreshed.clone())?;
         Ok(refreshed)
     }
 
@@ -447,11 +444,11 @@ impl QqClient {
             .send()
             .await
             .with_context(|| format!("QQ 音乐请求失败：{module}.{method}"))?;
-        anyhow::ensure!(
-            response.status().is_success(),
-            "QQ 音乐 HTTP 状态异常：{}",
-            response.status()
-        );
+        let status = response.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            bail!("QQ 音乐请求过于频繁；当前操作已停止且不会自动重试");
+        }
+        anyhow::ensure!(status.is_success(), "QQ 音乐 HTTP 状态异常：{status}");
         let value: Value = response.json().await.context("QQ 音乐响应不是合法 JSON")?;
 
         let outer_code = value.get("code").and_then(Value::as_i64).unwrap_or(0);
@@ -464,7 +461,7 @@ impl QqClient {
             0 => Ok(item.get("data").cloned().unwrap_or(Value::Null)),
             // 这三个码是接口在明说"凭证没了"，上层据此作废本地登录态
             1000 | 104401 | 104400 => bail!("登录凭证已过期"),
-            2001 => bail!("QQ 音乐请求过于频繁，请稍后再试"),
+            2001 => bail!("QQ 音乐请求过于频繁；当前操作已停止且不会自动重试"),
             other => bail!("QQ 音乐接口返回 code={other}"),
         }
     }
@@ -592,11 +589,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let client = QqClient::new(&dir).unwrap();
-        client.store_credential(Credential {
-            musicid: 1,
-            musickey: "k".into(),
-            ..Default::default()
-        });
+        client
+            .store_credential(Credential {
+                musicid: 1,
+                musickey: "k".into(),
+                ..Default::default()
+            })
+            .unwrap();
         assert!(dir.join("qqmusic.json").exists());
         assert!(!client.credential_invalid());
 
@@ -606,6 +605,28 @@ mod tests {
         client.note_error("登录凭证已过期");
         assert!(client.credential_invalid());
         assert!(!dir.join("qqmusic.json").exists(), "失效的凭证要从磁盘删掉");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_credential_commit_keeps_the_previous_runtime_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "kdj-qq-failed-commit-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = QqClient::new(&dir).unwrap();
+        std::fs::create_dir(dir.join("qqmusic.json")).unwrap();
+
+        assert!(client
+            .store_credential(Credential {
+                musicid: 1,
+                musickey: "not-saved".into(),
+                ..Default::default()
+            })
+            .is_err());
+        assert!(!client.has_credential());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

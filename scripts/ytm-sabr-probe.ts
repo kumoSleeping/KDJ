@@ -33,7 +33,7 @@ const videoId = process.argv[2] || "wO3lCCoWuSc";
 const outputPath = process.argv[3] || "/tmp/kdj-ytm-sabr-probe.m4a";
 const sessionPath = process.env.KDJ_YTM_SESSION
   || (process.env.HOME
-    + "/Library/Application Support/com.kdj.app.labs/data/sessions/youtube-music-browser.json");
+    + "/Library/Application Support/com.kdj.app/data/sessions/youtube-music-browser.json");
 
 if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw new Error("invalid YouTube video ID");
 

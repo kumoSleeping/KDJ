@@ -5,7 +5,9 @@
 
 import { create } from "zustand";
 import { api } from "../lib/api";
+import { finishApiActivity } from "../lib/activityLog";
 import { getBridge } from "../lib/bridge";
+import { readLocalStorage, writeLocalStorageNow } from "../lib/storageWrite";
 import type { UpdateInfo, UpdateProgress } from "../types";
 import { useAppStore } from "./appStore";
 
@@ -13,21 +15,13 @@ const AUTO_KEY = "kd-auto-update-check";
 const INTERVAL_MS = 5 * 60 * 1000;
 
 function readAutoCheck(): boolean {
-  try {
-    const raw = localStorage.getItem(AUTO_KEY);
-    if (raw === null) return true;
-    return raw !== "0" && raw !== "false";
-  } catch {
-    return true;
-  }
+  const raw = readLocalStorage(AUTO_KEY);
+  if (raw === null) return true;
+  return raw !== "0" && raw !== "false";
 }
 
 function writeAutoCheck(value: boolean): void {
-  try {
-    localStorage.setItem(AUTO_KEY, value ? "1" : "0");
-  } catch {
-    /* ignore */
-  }
+  writeLocalStorageNow(AUTO_KEY, value ? "1" : "0");
 }
 
 function errorText(error: unknown): string {
@@ -36,7 +30,33 @@ function errorText(error: unknown): string {
 
 async function fetchUpdateInfo(): Promise<UpdateInfo> {
   const bridge = getBridge();
-  return bridge.checkUpdate ? bridge.checkUpdate() : api.checkUpdate();
+  if (!bridge.checkUpdate) return api.checkUpdate();
+  const started = performance.now();
+  try {
+    const info = await bridge.checkUpdate();
+    // Tauri 开发包不能自更新，也不会访问 GitHub；不要把本地的开发态短路
+    // 伪装成一条网络请求。正式安装包仍完整记录检查结果。
+    if (!import.meta.env.DEV) {
+      finishApiActivity(
+        { category: "network", action: "更新检查 API", target: "GitHub · github.com" },
+        { status: 200, durationMs: performance.now() - started, ok: true },
+      );
+    }
+    return info;
+  } catch (error) {
+    if (!import.meta.env.DEV) {
+      finishApiActivity(
+        { category: "network", action: "更新检查 API", target: "GitHub · github.com" },
+        {
+          status: 0,
+          durationMs: performance.now() - started,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+    }
+    throw error;
+  }
 }
 
 interface UpdateStore {
@@ -103,6 +123,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     if (!info?.newer) return;
     const bridge = getBridge();
     const canSelfUpdate = typeof bridge.applyUpdate === "function";
+    const updateStarted = performance.now();
     set({ applying: true, manualError: "", progress: null });
     try {
       if (!canSelfUpdate) {
@@ -123,6 +144,17 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         onProgress?.(p);
       });
     } catch (error) {
+      if (canSelfUpdate) {
+        finishApiActivity(
+          { category: "network", action: "软件更新下载", target: "GitHub · github.com" },
+          {
+            status: 0,
+            durationMs: performance.now() - updateStarted,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
       set({
         applying: false,
         progress: null,

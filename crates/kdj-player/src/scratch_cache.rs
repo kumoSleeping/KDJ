@@ -2,6 +2,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -17,6 +18,17 @@ const ACTIVE_NONE: u8 = u8::MAX;
 pub struct DecodedScratchWindow {
     pub start_frame: i64,
     pub frames: Vec<[f32; 2]>,
+}
+
+/// An owned mono copy of one already-decoded scratch window.
+///
+/// This is intentionally a control/UI-side type. Creating it copies PCM and must never happen in
+/// the hardware callback; the callback continues to use [`ScratchPcmCache::sample`] without a
+/// lock, allocation, decode or `Arc` operation.
+#[derive(Clone, Debug)]
+pub struct ScratchMonoWindow {
+    pub start_frame: i64,
+    pub samples: Arc<[f32]>,
 }
 
 struct ScratchWindow {
@@ -58,13 +70,18 @@ pub struct ScratchPcmCache {
     windows: [ScratchWindow; 2],
     active: AtomicU8,
     requested_start: AtomicI64,
+    requested_frames: AtomicUsize,
     request_generation: AtomicU64,
+    published_generation: AtomicU64,
     failed_generation: AtomicU64,
     urgent: AtomicBool,
     request_count: AtomicU64,
     miss_count: AtomicU64,
     load_count: AtomicU64,
     failure_count: AtomicU64,
+    /// Sequential transport-decoder PCM for visualization. It is never read by the audio
+    /// callback and therefore stays outside the lock-free scratch double buffer above.
+    observed_mono: RwLock<Option<ScratchMonoWindow>>,
 }
 
 // SAFETY: ScratchWindow samples follow the double-buffer reader protocol documented above. There
@@ -97,13 +114,16 @@ impl ScratchPcmCache {
             windows: [ScratchWindow::new(capacity), ScratchWindow::new(capacity)],
             active: AtomicU8::new(ACTIVE_NONE),
             requested_start: AtomicI64::new(REQUEST_NONE),
+            requested_frames: AtomicUsize::new(capacity),
             request_generation: AtomicU64::new(0),
+            published_generation: AtomicU64::new(0),
             failed_generation: AtomicU64::new(0),
             urgent: AtomicBool::new(false),
             request_count: AtomicU64::new(0),
             miss_count: AtomicU64::new(0),
             load_count: AtomicU64::new(0),
             failure_count: AtomicU64::new(0),
+            observed_mono: RwLock::new(None),
         }
     }
 
@@ -135,8 +155,46 @@ impl ScratchPcmCache {
         self.urgent.load(Ordering::Acquire)
     }
 
+    /// Whether an in-flight decoder still owns the newest requested landing.
+    ///
+    /// Remote Range reads can take much longer than a user takes to issue another seek. Workers
+    /// poll this at packet boundaries so obsolete windows never block the final landing.
+    pub fn request_is_current(&self, generation: u64) -> bool {
+        generation != 0 && generation == self.request_generation.load(Ordering::Acquire)
+    }
+
     pub fn request_prefetch(&self, position_frames: f64) {
         self.request_position(position_frames, 0.0, false);
+    }
+
+    /// Request a centred 12-second window around a visual playhead.
+    ///
+    /// The right-side Manager rail shows only six seconds, so keeping roughly six seconds on
+    /// either side lets it reuse one decoded window for several seconds instead of
+    /// seeking and decoding on every 30 Hz clock event.
+    pub fn request_viewport(&self, position_frames: f64) {
+        self.request_position(position_frames, 0.0, false);
+    }
+
+    /// Request only the bounded PCM interval needed by the visible Manager waveform.
+    ///
+    /// Platter motion keeps the full twelve-second cache, but an online first paint should not
+    /// download and decode twelve seconds merely to own an 8.5-second viewport. A small leading
+    /// quantum and trailing guard absorb compressed packet/seek boundaries while keeping the
+    /// generation materially shorter. Marking it urgent also skips the worker's startup grace.
+    pub fn request_waveform(&self, required_start_frame: i64, required_end_frame: i64) {
+        if required_end_frame <= required_start_frame {
+            return;
+        }
+        let rate = i64::from(self.sample_rate);
+        let quantum = (rate / 4).max(1);
+        let start = required_start_frame.max(0) / quantum * quantum;
+        let guard = (rate / 4).max(1);
+        let frames = required_end_frame
+            .saturating_sub(start)
+            .saturating_add(guard)
+            .clamp(1, self.capacity as i64) as usize;
+        self.request_start(start, frames, true);
     }
 
     pub fn request_touch(&self, position_frames: f64) {
@@ -173,17 +231,21 @@ impl ScratchPcmCache {
 
     fn request_position(&self, position_frames: f64, velocity: f64, urgent: bool) {
         let requested = self.desired_start(position_frames, velocity);
+        self.request_start(requested, self.capacity, urgent);
+    }
+
+    fn request_start(&self, requested: i64, frames: usize, urgent: bool) {
+        let frames = frames.clamp(1, self.capacity);
         let observed = self.requested_start.load(Ordering::Acquire);
+        let observed_frames = self.requested_frames.load(Ordering::Acquire);
         let generation = self.request_generation.load(Ordering::Acquire);
-        let retry = observed == requested
+        let same_request = observed == requested && observed_frames == frames;
+        let retry = same_request
             && generation != 0
             && self.failed_generation.load(Ordering::Acquire) == generation;
-        let previous = if observed == requested {
-            observed
-        } else {
-            self.requested_start.swap(requested, Ordering::AcqRel)
-        };
-        if previous != requested || retry {
+        if !same_request || retry {
+            self.requested_start.store(requested, Ordering::Release);
+            self.requested_frames.store(frames, Ordering::Release);
             self.request_generation.fetch_add(1, Ordering::AcqRel);
             self.failed_generation.store(0, Ordering::Release);
             self.request_count.fetch_add(1, Ordering::Relaxed);
@@ -193,17 +255,18 @@ impl ScratchPcmCache {
         }
     }
 
-    pub fn next_request(&self, seen_generation: &mut u64) -> Option<(u64, i64)> {
+    pub fn next_request(&self, seen_generation: &mut u64) -> Option<(u64, i64, usize)> {
         let generation = self.request_generation.load(Ordering::Acquire);
         if generation == *seen_generation {
             return None;
         }
         let start = self.requested_start.load(Ordering::Acquire);
+        let frames = self.requested_frames.load(Ordering::Acquire);
         if start == REQUEST_NONE {
             return None;
         }
         *seen_generation = generation;
-        Some((generation, start.max(0)))
+        Some((generation, start.max(0), frames.clamp(1, self.capacity)))
     }
 
     pub fn publish(&self, generation: u64, decoded: &DecodedScratchWindow) -> bool {
@@ -230,6 +293,8 @@ impl ScratchPcmCache {
             return false;
         }
         self.active.store(target as u8, Ordering::Release);
+        self.published_generation
+            .store(generation, Ordering::Release);
         self.urgent.store(false, Ordering::Release);
         self.failed_generation.store(0, Ordering::Release);
         self.load_count.fetch_add(1, Ordering::Relaxed);
@@ -249,6 +314,140 @@ impl ScratchPcmCache {
             let _ = window;
             (start, start.saturating_add(len as i64))
         })
+    }
+
+    /// Source-frame interval already assigned to the single random-access decoder.
+    ///
+    /// A Manager waveform miss is polled while its first MP3 seek is still running. Treating an
+    /// unpublished request as "nothing pending" moves that request roughly once per second as
+    /// the playhead advances; every move invalidates the decoder generation, so a slow seek can
+    /// chase playback indefinitely and never publish pixels. Callers use this range to wait for
+    /// the existing generation when it already covers their viewport. Failed generations are
+    /// deliberately hidden so the normal request path can retry them.
+    pub fn pending_request_range(&self) -> Option<(i64, i64)> {
+        let generation = self.request_generation.load(Ordering::Acquire);
+        if generation == 0
+            || self.published_generation.load(Ordering::Acquire) == generation
+            || self.failed_generation.load(Ordering::Acquire) == generation
+        {
+            return None;
+        }
+        let start = self.requested_start.load(Ordering::Acquire);
+        let frames = self.requested_frames.load(Ordering::Acquire);
+        (start != REQUEST_NONE).then(|| {
+            let start = start.max(0);
+            (start, start.saturating_add(frames as i64))
+        })
+    }
+
+    /// Publish a rolling mono window observed by the *existing* transport decoder.
+    ///
+    /// Remote Manager waveforms prefer this lane for the forward/playback side of the viewport;
+    /// the random-access worker only backfills history that this decoder cannot grow. The caller
+    /// batches at source-time intervals; no per-frame lock is taken here or in the decoder hot loop.
+    pub fn publish_observed_mono(&self, start_frame: i64, samples: Vec<f32>) {
+        if samples.is_empty() {
+            return;
+        }
+        let (start_frame, samples) = if samples.len() > self.capacity {
+            let skipped = samples.len() - self.capacity;
+            (
+                start_frame.saturating_add(skipped as i64),
+                samples[skipped..].to_vec(),
+            )
+        } else {
+            (start_frame.max(0), samples)
+        };
+        if let Ok(mut observed) = self.observed_mono.write() {
+            *observed = Some(ScratchMonoWindow {
+                start_frame,
+                samples: samples.into(),
+            });
+        }
+    }
+
+    pub fn observed_range(&self) -> Option<(i64, i64)> {
+        let observed = self.observed_mono.read().ok()?;
+        let window = observed.as_ref()?;
+        Some((
+            window.start_frame,
+            window
+                .start_frame
+                .saturating_add(window.samples.len() as i64),
+        ))
+    }
+
+    /// Clone the complete immutable transport observation for control-side composition.
+    pub fn observed_mono_window(&self) -> Option<ScratchMonoWindow> {
+        self.observed_mono.read().ok()?.as_ref().cloned()
+    }
+
+    /// Clone one immutable Arc-backed decoder observation without copying its PCM payload.
+    pub fn observed_mono_covering(
+        &self,
+        required_start_frame: i64,
+        required_end_frame: i64,
+    ) -> Option<ScratchMonoWindow> {
+        if required_end_frame <= required_start_frame {
+            return None;
+        }
+        let observed = self.observed_mono.read().ok()?;
+        let window = observed.as_ref()?;
+        let end = window
+            .start_frame
+            .saturating_add(window.samples.len() as i64);
+        (required_start_frame >= window.start_frame && required_end_frame <= end)
+            .then(|| window.clone())
+    }
+
+    /// Copy the active decoded window only when it fully covers the requested source range.
+    ///
+    /// The double-buffer pin makes this coherent with a concurrent decoder publication. This
+    /// method is for a background visualization worker; unlike [`Self::sample`], it allocates and
+    /// performs an O(window) copy and therefore must never be called by the audio callback.
+    pub fn snapshot_mono_covering(
+        &self,
+        required_start_frame: i64,
+        required_end_frame: i64,
+    ) -> Option<ScratchMonoWindow> {
+        if required_end_frame <= required_start_frame {
+            return None;
+        }
+        self.with_active(|window, start, len| {
+            let end = start.saturating_add(len as i64);
+            if len == 0 || required_start_frame < start || required_end_frame > end {
+                return None;
+            }
+            let samples: Arc<[f32]> = window
+                .iter()
+                .map(|frame| (frame[0] + frame[1]) * 0.5)
+                .collect::<Vec<_>>()
+                .into();
+            Some(ScratchMonoWindow {
+                start_frame: start,
+                samples,
+            })
+        })
+        .flatten()
+    }
+
+    /// Copy the complete active random-access window for control-side composition.
+    pub fn snapshot_mono_window(&self) -> Option<ScratchMonoWindow> {
+        self.with_active(|window, start, len| {
+            if len == 0 {
+                return None;
+            }
+            let samples: Arc<[f32]> = window
+                .iter()
+                .map(|frame| (frame[0] + frame[1]) * 0.5)
+                .collect::<Vec<_>>()
+                .into();
+            Some(ScratchMonoWindow {
+                start_frame: start,
+                samples,
+            })
+        })
+        .flatten()
     }
 
     pub fn sample(&self, position_frames: f64, velocity: f64) -> Option<[f32; 2]> {
@@ -370,8 +569,9 @@ mod tests {
         let cache = ScratchPcmCache::new(100);
         cache.request_prefetch(700.0);
         let mut seen = 0;
-        let (generation, start) = cache.next_request(&mut seen).unwrap();
+        let (generation, start, frames) = cache.next_request(&mut seen).unwrap();
         assert_eq!(start, 100);
+        assert_eq!(frames, 1_200);
         assert!(cache.publish(generation, &window(100, 1_200)));
         let sample = cache.sample(321.5, -1.0).unwrap();
         assert!((sample[0] - 321.5).abs() < 1e-3);
@@ -385,14 +585,29 @@ mod tests {
     }
 
     #[test]
+    fn sequential_decoder_observation_is_arc_backed_and_range_checked() {
+        let cache = ScratchPcmCache::new(100);
+        cache.publish_observed_mono(250, (0..500).map(|value| value as f32).collect());
+        assert_eq!(cache.observed_range(), Some((250, 750)));
+        assert!(cache.observed_mono_covering(249, 300).is_none());
+        let first = cache.observed_mono_covering(300, 700).unwrap();
+        let second = cache.observed_mono_covering(350, 650).unwrap();
+        assert!(Arc::ptr_eq(&first.samples, &second.samples));
+        assert_eq!(first.samples[0], 0.0);
+        assert_eq!(first.samples[499], 499.0);
+        // The transport observer is a separate lane; it cannot become platter authority.
+        assert_eq!(cache.available_range(), None);
+    }
+
+    #[test]
     fn reverse_edge_requests_an_overlapping_lookbehind_without_hard_stopping() {
         let cache = ScratchPcmCache::new(100);
         cache.request_prefetch(1_000.0);
         let mut seen = 0;
-        let (generation, _) = cache.next_request(&mut seen).unwrap();
+        let (generation, _, _) = cache.next_request(&mut seen).unwrap();
         assert!(cache.publish(generation, &window(400, 1_200)));
         assert!(cache.sample(450.0, -1.0).is_some());
-        let (_, requested) = cache.next_request(&mut seen).unwrap();
+        let (_, requested, _) = cache.next_request(&mut seen).unwrap();
         assert_eq!(requested, 0);
     }
 
@@ -401,8 +616,10 @@ mod tests {
         let cache = ScratchPcmCache::new(100);
         cache.request_prefetch(700.0);
         let mut seen = 0;
-        let (old_generation, _) = cache.next_request(&mut seen).unwrap();
+        let (old_generation, _, _) = cache.next_request(&mut seen).unwrap();
+        assert!(cache.request_is_current(old_generation));
         assert!(cache.sample(2_000.0, -1.0).is_none());
+        assert!(!cache.request_is_current(old_generation));
         assert!(!cache.publish(old_generation, &window(100, 1_200)));
         assert_eq!(cache.load_count(), 0);
     }
@@ -412,10 +629,93 @@ mod tests {
         let cache = ScratchPcmCache::new(100);
         cache.request_touch(700.0);
         let mut seen = 0;
-        let (failed_generation, _) = cache.next_request(&mut seen).unwrap();
+        let (failed_generation, _, _) = cache.next_request(&mut seen).unwrap();
         cache.record_failure(failed_generation);
         assert!(cache.sample(700.0, 0.0).is_none());
-        let (retry_generation, _) = cache.next_request(&mut seen).unwrap();
+        let (retry_generation, _, _) = cache.next_request(&mut seen).unwrap();
         assert!(retry_generation > failed_generation);
+    }
+
+    #[test]
+    fn viewport_request_centres_a_reusable_six_second_view() {
+        let cache = ScratchPcmCache::new(100);
+        cache.request_viewport(1_000.0);
+        let mut seen = 0;
+        let (generation, start, frames) = cache.next_request(&mut seen).unwrap();
+        assert_eq!(start, 400, "12s cache should keep 6s around the playhead");
+        assert_eq!(frames, 1_200);
+        assert_eq!(cache.pending_request_range(), Some((400, 1_600)));
+        assert!(cache.publish(generation, &window(start, 1_200)));
+        assert_eq!(cache.pending_request_range(), None);
+    }
+
+    #[test]
+    fn visible_waveform_requests_only_its_bounded_interval_and_wakes_the_worker() {
+        let cache = ScratchPcmCache::new(100);
+        cache.request_waveform(575, 1_425);
+        let mut seen = 0;
+        let (generation, start, frames) = cache.next_request(&mut seen).unwrap();
+        assert_eq!(
+            start, 575,
+            "quarter-second lattice keeps this exact boundary"
+        );
+        assert_eq!(frames, 875, "8.5s view plus a 250ms packet guard");
+        assert!(frames < cache.capacity_frames());
+        assert!(cache.urgent());
+        assert_eq!(cache.pending_request_range(), Some((575, 1_450)));
+        assert!(cache.publish(generation, &window(start, frames)));
+        assert!(!cache.urgent());
+    }
+
+    #[test]
+    fn pending_viewport_range_prevents_polling_from_retargeting_its_decoder() {
+        let cache = ScratchPcmCache::new(100);
+        cache.request_prefetch(1_000.0);
+        let mut seen = 0;
+        let (generation, start, _) = cache.next_request(&mut seen).unwrap();
+        let requested = cache.pending_request_range().unwrap();
+        assert_eq!(requested, (start, start + 1_200));
+        assert!(700 >= requested.0 && 1_300 <= requested.1);
+
+        // A UI poll for the same six-second viewport must wait for this generation instead of
+        // moving it to a future-biased range and throwing the already-running MP3 seek away.
+        assert_eq!(cache.request_count(), 1);
+        assert!(cache.next_request(&mut seen).is_none());
+        assert_eq!(cache.request_count(), 1);
+
+        cache.record_failure(generation);
+        assert_eq!(
+            cache.pending_request_range(),
+            None,
+            "a failed seek remains retryable"
+        );
+    }
+
+    #[test]
+    fn mono_snapshot_requires_complete_coverage_and_keeps_absolute_origin() {
+        let cache = ScratchPcmCache::new(100);
+        cache.request_viewport(1_000.0);
+        let mut seen = 0;
+        let (generation, start, _) = cache.next_request(&mut seen).unwrap();
+        let decoded = DecodedScratchWindow {
+            start_frame: start,
+            frames: (0..1_200)
+                .map(|offset| {
+                    let value = offset as f32 / 100.0;
+                    [value, value * 0.5]
+                })
+                .collect(),
+        };
+        assert!(cache.publish(generation, &decoded));
+
+        assert!(cache
+            .snapshot_mono_covering(start - 1, start + 10)
+            .is_none());
+        let snapshot = cache
+            .snapshot_mono_covering(start + 10, start + 900)
+            .expect("covered view");
+        assert_eq!(snapshot.start_frame, start);
+        assert_eq!(snapshot.samples.len(), 1_200);
+        assert!((snapshot.samples[100] - 0.75).abs() < 1e-6);
     }
 }

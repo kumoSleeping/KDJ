@@ -8,6 +8,7 @@ import type {
 export const RESOLVED_COLLECTION_PAGE_SIZE = 50;
 
 export interface CollectionPageWindow {
+  total: number;
   page: number;
   pageCount: number;
   start: number;
@@ -33,6 +34,7 @@ export function collectionPageWindow(
   const page = Math.min(pageCount, Math.max(1, numericPage));
   const start = Math.min(safeTotal, (page - 1) * safePageSize);
   return {
+    total: safeTotal,
     page,
     pageCount,
     start,
@@ -42,17 +44,6 @@ export function collectionPageWindow(
 
 export function collectionToken(collection: CollectionResult): string {
   return `${collection.platform}:${collection.kind}:${collection.key}`;
-}
-
-function isSameCollection(
-  candidate: CollectionResult,
-  collection: CollectionResult,
-): boolean {
-  return (
-    candidate.platform === collection.platform &&
-    candidate.kind === collection.kind &&
-    candidate.key === collection.key
-  );
 }
 
 /** 把集合详情响应转换成结果表可直接播放、选择和下载的普通曲目包。 */
@@ -85,45 +76,20 @@ export function resolvedCollectionItem(
   };
 }
 
-/**
- * 从搜索结果中移除已展开的集合，并把它的曲目包提升到第一项。
- *
- * 旧实现把新包插在命中的搜索包之后；几十条歌单结果会把刚载入的曲目压到
- * 当前视口下面，看起来就像没有打开。提升到首位既保留其余搜索结果，也让
- * 这次明确打开的内容立即成为当前上下文。
- */
-export function promoteResolvedCollection(
-  items: IntakeItem[],
-  collection: CollectionResult,
-  resolved: IntakeItem,
-): IntakeItem[] {
-  let matched = false;
-  const remaining: IntakeItem[] = [];
+export function isResolvedCollectionItem(item: IntakeItem): boolean {
+  return (
+    item.groups.length > 0 &&
+    (
+      item.kind === "playlist" ||
+      item.kind === "artist" ||
+      item.kind === "album" ||
+      item.kind === "radio"
+    )
+  );
+}
 
-  for (const item of items) {
-    const containsCollection = item.collections.some((candidate) =>
-      isSameCollection(candidate, collection),
-    );
-    if (!containsCollection) {
-      // 同一个集合曾被打开过时移除旧副本，新的响应会回到第一项。
-      if (item.entry !== resolved.entry) remaining.push(item);
-      continue;
-    }
-
-    matched = true;
-    const parent: IntakeItem = {
-      ...item,
-      collections: item.collections.filter(
-        (candidate) => !isSameCollection(candidate, collection),
-      ),
-    };
-    const parentStillUseful =
-      parent.groups.length > 0 ||
-      parent.collections.length > 0 ||
-      parent.error.length > 0 ||
-      Object.keys(parent.errors).length > 0;
-    if (parentStillUseful) remaining.push(parent);
-  }
-
-  return matched ? [resolved, ...remaining] : items;
+/** 集合详情是独立页面：只有唯一一个已解析合集时才进入详情语义。 */
+export function openedCollectionItem(items: IntakeItem[]): IntakeItem | null {
+  const item = items.length === 1 ? items[0] : undefined;
+  return item && isResolvedCollectionItem(item) ? item : null;
 }

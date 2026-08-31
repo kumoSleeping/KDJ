@@ -7,10 +7,11 @@ license.workspace = true
 
 [dependencies]
 anyhow = "=1.0.104"
-kdj-core = { version = "0.2.44", path = "../kdj-core" }
-kdj-player = { version = "0.2.44", path = "../kdj-player" }
-kdj-stems = { version = "0.2.44", path = "../kdj-stems" }
-reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
+kdj-analysis = { version = "1.0.0-rc1", path = "../kdj-analysis" }
+kdj-core = { version = "1.0.0-rc1", path = "../kdj-core", features = ["rustls-ring"] }
+kdj-player = { version = "1.0.0-rc1", path = "../kdj-player" }
+kdj-stems = { version = "1.0.0-rc1", path = "../kdj-stems" }
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "rustls-no-provider"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tracing = "0.1.44"
 

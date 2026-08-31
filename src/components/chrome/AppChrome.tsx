@@ -23,7 +23,7 @@ export interface AppChromeProps {
 
 /**
  * 整窗顶栏：拖窗区 + 历史导航 + 右侧全局动作。
- * 在线搜索在内容区顶上；主题切换只放设置面板。
+ * 在线搜索在内容区顶上；设置与主题切换放在顶部右侧动作区。
  */
 export function AppChrome({
   history,

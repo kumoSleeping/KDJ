@@ -2,6 +2,7 @@ import type { PlayMode } from "./playMode";
 
 export type NextCandidateRoute =
   | "stream-successor"
+  | "harmonic-profile"
   | "repeat-current"
   | "local-start"
   | "order"
@@ -47,7 +48,8 @@ export function nextCandidateRoute(
 ): NextCandidateRoute {
   if (mode === "one" && !manual) return "repeat-current";
   if (currentIsStream && hasStreamSuccessor) return "stream-successor";
-  if (currentIsStream && (mode === "harmonic" || mode === "order" || mode === "one")) {
+  if (currentIsStream && mode === "harmonic") return "harmonic-profile";
+  if (currentIsStream && (mode === "order" || mode === "one")) {
     return "local-start";
   }
   return mode === "one" ? "harmonic" : mode;

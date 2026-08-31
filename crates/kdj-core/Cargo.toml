@@ -4,11 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+rustls-ring = ["dep:rustls"]
+
 [dependencies]
 anyhow = "1.0.104"
 directories = "6.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "io-util"] }
 tracing = "0.1.44"

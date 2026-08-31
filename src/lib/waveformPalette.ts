@@ -19,25 +19,62 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 }
 
-const SHARED_LOW_DOMINANCE = 0.9;
-const RELEASE_SATURATION_RETENTION = 0.84;
-const DETAIL_SATURATION_RETENTION = 0.7;
-const DETAIL_NEUTRAL_VALUE = 178;
-const DETAIL_COLOR_VALUE_LIFT = 50;
-const DETAIL_AMPLITUDE_VALUE_LIFT = 6;
+const RELEASE_LOW_DOMINANCE = 0.95;
+const DETAIL_LOW_DOMINANCE = 0.93;
+// The light PlayerBar only needs a restrained colour lift. The earlier 0.82 proposal targeted
+// roughly 1.5x perceived contrast; 0.74 is the proportional 1.1x trial requested by the user.
+const RELEASE_SATURATION_RETENTION = 0.74;
+const DETAIL_SATURATION_RETENTION = 0.60;
+const DETAIL_NEUTRAL_VALUE = 174;
+const DETAIL_COLOR_VALUE_LIFT = 42;
+const DETAIL_AMPLITUDE_VALUE_LIFT = 4;
+const DETAIL_TEXTURE_VALUE_LIFT = 12;
+const DETAIL_TRANSIENT_VALUE_LIFT = 4;
+const TEXTURE_SOURCE_VALUE_FLOOR = 0.91;
+const TEXTURE_SOURCE_VALUE_RANGE = 0.09;
+const RELEASE_VALUE_CAP = 238;
+const DETAIL_VALUE_CAP = 238;
+
+/** Surface-relative contrast trials requested for the two waveform views. */
+export const RELEASE_OVERVIEW_CONTRAST = 1.1;
+export const PERFORMANCE_DETAIL_CONTRAST = 0.9;
+export const RELEASE_OVERVIEW_LIGHT_BACKGROUND: WaveformDisplayRgb = [249, 250, 251];
+export const RELEASE_OVERVIEW_DARK_BACKGROUND: WaveformDisplayRgb = [1, 4, 9];
+export const PERFORMANCE_DETAIL_BACKGROUND: WaveformDisplayRgb = [8, 10, 13];
+
+/**
+ * Scale a rendered colour around the surface it is actually composited onto.
+ *
+ * Multiplying RGB directly does not mean "10% more contrast" on a near-white surface, and CSS
+ * `filter: contrast()` pivots around middle grey rather than the waveform background. This helper
+ * keeps the requested 1.10/0.90 factors literal for both light overview and dark detail rails.
+ */
+export function waveformSurfaceContrastRgb(
+  colour: WaveformDisplayRgb,
+  background: WaveformDisplayRgb,
+  contrast: number,
+): WaveformDisplayRgb {
+  const factor = Number.isFinite(contrast) ? Math.max(0, contrast) : 1;
+  return [0, 1, 2].map((channel) => Math.round(clamp(
+    background[channel] + (colour[channel] - background[channel]) * factor,
+    0,
+    255,
+  ))) as unknown as WaveformDisplayRgb;
+}
 
 /** Low/mid/high keep one hue language across overview and DJ detail without sharing contrast. */
 function balancedFrequencyRgb(
   lowValue: number,
   midValue: number,
   highValue: number,
+  lowDominance: number,
 ): [number, number, number] {
   let low = clamp(lowValue, 0, 255);
   const middle = clamp(midValue, 0, 255);
   const high = clamp(highValue, 0, 255);
   const strongestSecondary = Math.max(middle, high);
   if (low > strongestSecondary) {
-    low = strongestSecondary + (low - strongestSecondary) * SHARED_LOW_DOMINANCE;
+    low = strongestSecondary + (low - strongestSecondary) * lowDominance;
   }
   return [low, middle, high];
 }
@@ -55,9 +92,8 @@ function retainedSaturation(
 }
 
 /**
- * Keep the v0.2.41 colour identity, but take only the harshest edge off it: compress red dominance
- * first, then move every channel 16% toward that column's own neutral value. Full render opacity
- * is retained, so the result stays clear without becoming neon or washed out.
+ * Preserve the analytical ratios used by the approved comparison. This only caps display value
+ * and chroma; it does not steer a detected feature toward a chosen hue.
  */
 export function releaseOverviewWaveformDisplayRgb(
   lowValue: number,
@@ -65,13 +101,15 @@ export function releaseOverviewWaveformDisplayRgb(
   highValue: number,
 ): WaveformDisplayRgb {
   const softened = retainedSaturation(
-    balancedFrequencyRgb(lowValue, midValue, highValue),
+    balancedFrequencyRgb(lowValue, midValue, highValue, RELEASE_LOW_DOMINANCE),
     RELEASE_SATURATION_RETENTION,
   );
+  const peak = Math.max(...softened);
+  const scale = peak > RELEASE_VALUE_CAP ? RELEASE_VALUE_CAP / peak : 1;
   return [
-    Math.round(softened[0]),
-    Math.round(softened[1]),
-    Math.round(softened[2]),
+    Math.round(softened[0] * scale),
+    Math.round(softened[1] * scale),
+    Math.round(softened[2] * scale),
   ];
 }
 
@@ -86,8 +124,27 @@ export function performanceDetailWaveformDisplayRgb(
   midValue: number,
   highValue: number,
   amplitude = 1,
+  transient = 0,
 ): WaveformDisplayRgb {
-  const source = balancedFrequencyRgb(lowValue, midValue, highValue);
+  const rawPeak = Math.max(
+    clamp(lowValue, 0, 255),
+    clamp(midValue, 0, 255),
+    clamp(highValue, 0, 255),
+  );
+  // The analysis stores texture novelty in the otherwise redundant source-value envelope:
+  // max(R,G,B) = 255 × (0.91 + 0.09 × sqrt(novelty)). Recovering it here avoids a new cache/wire
+  // channel while leaving the measured frequency ratios untouched.
+  const textureNoveltyRoot = clamp(
+    (rawPeak / 255 - TEXTURE_SOURCE_VALUE_FLOOR) / TEXTURE_SOURCE_VALUE_RANGE,
+    0,
+    1,
+  );
+  const source = balancedFrequencyRgb(
+    lowValue,
+    midValue,
+    highValue,
+    DETAIL_LOW_DOMINANCE,
+  );
   const peak = Math.max(source[0], source[1], source[2]);
   if (peak <= 0) return [0, 0, 0];
   const floor = Math.min(source[0], source[1], source[2]);
@@ -96,12 +153,14 @@ export function performanceDetailWaveformDisplayRgb(
   const softenedPeak = Math.max(softened[0], softened[1], softened[2]);
   const value = DETAIL_NEUTRAL_VALUE
     + DETAIL_COLOR_VALUE_LIFT * Math.sqrt(chroma)
-    + DETAIL_AMPLITUDE_VALUE_LIFT * Math.sqrt(clamp(amplitude, 0, 1));
+    + DETAIL_AMPLITUDE_VALUE_LIFT * Math.sqrt(clamp(amplitude, 0, 1))
+    + DETAIL_TEXTURE_VALUE_LIFT * textureNoveltyRoot
+    + DETAIL_TRANSIENT_VALUE_LIFT * Math.pow(clamp(transient, 0, 1), 0.7);
   const scale = softenedPeak > 0 ? value / softenedPeak : 0;
   return [
-    Math.round(clamp(softened[0] * scale, 0, 255)),
-    Math.round(clamp(softened[1] * scale, 0, 255)),
-    Math.round(clamp(softened[2] * scale, 0, 255)),
+    Math.round(clamp(softened[0] * scale, 0, DETAIL_VALUE_CAP)),
+    Math.round(clamp(softened[1] * scale, 0, DETAIL_VALUE_CAP)),
+    Math.round(clamp(softened[2] * scale, 0, DETAIL_VALUE_CAP)),
   ];
 }
 

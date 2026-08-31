@@ -35,6 +35,9 @@ export const addOverlayMovedListener = async (handler) =>
 export const savePngToGallery = async (payload) => await call('save_png_to_gallery', payload);
 /** 安卓：用系统查看器打开本地路径或 content URI。 */
 export const openLocalPath = async (path) => await call('open_local_path', { path });
+/** 安卓：把已有本地文件作为 content URI 启动跨窗口系统拖动。 */
+export const startFileDrag = async (paths, label) =>
+  await call('start_file_drag', { paths, label });
 /** 安卓：系统文件夹选择器，返回可扫描的真实路径；取消为 null。 */
 export const pickLibraryFolder = async () => {
   const result = await call('pick_library_folder');

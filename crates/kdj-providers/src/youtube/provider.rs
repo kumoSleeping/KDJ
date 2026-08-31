@@ -20,20 +20,56 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::sync::CancellationToken;
 
-use crate::ffmpeg;
 use crate::provider::{
     effective_limit, full_listing, no_login, unique_download_path, Capabilities, DownloadJob,
-    MusicProvider, ProgressSink, ProviderContext, VideoProvider,
+    MusicProvider, ProgressSink, ProviderContext, VideoPreviewStream, VideoPreviewTrack,
+    VideoProvider,
 };
 use crate::tags;
 use crate::youtubemusic::auth::YoutubeAuth;
 
 #[cfg(test)]
-use super::client::MediaMime;
-use super::client::{Thumbnail, VideoDetails, VideoFormat, YoutubeClient, USER_AGENT};
+use super::client::{MediaMime, USER_AGENT};
+use super::client::{ProtectedHlsContext, Thumbnail, VideoDetails, VideoFormat, YoutubeClient};
+use super::hls_download;
 
 const LABEL: &str = "YouTube Video";
 const DISABLED_MESSAGE: &str = "未启用，在「下载源」里打开开关";
+
+fn validated_local_youtube_hls_url(value: &str) -> Result<&str> {
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 8 * 1024 && !value.contains(['\r', '\n']),
+        "YouTube 本地 HLS 下载来源无效"
+    );
+    let url = url::Url::parse(value).context("YouTube 本地 HLS 下载来源无效")?;
+    let loopback = matches!(
+        url.host_str(),
+        Some("127.0.0.1") | Some("localhost") | Some("::1")
+    );
+    let ticket = url
+        .path()
+        .strip_prefix("/api/video/youtube/hls/")
+        .unwrap_or_default();
+    let mut query = url.query_pairs();
+    let media_capability = query
+        .next()
+        .is_some_and(|(key, token)| key == "kdj_media_token" && !token.is_empty());
+    anyhow::ensure!(
+        url.scheme() == "http"
+            && loopback
+            && url.port().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none()
+            && ticket.len() == 64
+            && ticket.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && media_capability
+            && query.next().is_none(),
+        "YouTube 本地 HLS 下载来源不受信任"
+    );
+    Ok(value)
+}
+
 const YOUTUBE_SEARCH_KINDS: &[SearchKind] = &[SearchKind::Song];
 const INNERTUBE_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
 
@@ -52,6 +88,22 @@ impl YoutubeProvider {
     fn ensure_enabled(&self) -> Result<()> {
         anyhow::ensure!(self.ctx.youtube_enabled(), "{DISABLED_MESSAGE}");
         Ok(())
+    }
+
+    pub async fn protected_preview_player_script(&self, player_url: &str) -> Result<String> {
+        self.ensure_enabled()?;
+        self.client.protected_player_script(player_url).await
+    }
+
+    pub async fn protected_hls_context(
+        &self,
+        video_id: &str,
+        user_agent: &str,
+    ) -> Result<ProtectedHlsContext> {
+        self.ensure_enabled()?;
+        self.client
+            .protected_hls_context(video_id, user_agent)
+            .await
     }
 
     async fn video_source(&self, id: &str) -> Result<SongSource> {
@@ -92,7 +144,7 @@ impl YoutubeProvider {
         for (name, value) in self.auth.request_headers("https://www.youtube.com") {
             request = request.header(name, value);
         }
-        let response = request.send().await.context("读取 YouTube 播放列表失败")?;
+        let response = { request.send().await.context("读取 YouTube 播放列表失败")? };
         let status = response.status();
         let body: Value = response
             .json()
@@ -123,10 +175,12 @@ impl YoutubeProvider {
             for (name, value) in self.auth.request_headers("https://www.youtube.com") {
                 request = request.header(name, value);
             }
-            let response = request
-                .send()
-                .await
-                .context("继续读取 YouTube 播放列表失败")?;
+            let response = {
+                request
+                    .send()
+                    .await
+                    .context("继续读取 YouTube 播放列表失败")?
+            };
             let status = response.status();
             let page: Value = response
                 .json()
@@ -168,10 +222,12 @@ impl YoutubeProvider {
         for (name, value) in self.auth.request_headers("https://www.youtube.com") {
             request = request.header(name, value);
         }
-        let response = request
-            .send()
-            .await
-            .context("读取 YouTube 播放列表目录失败")?;
+        let response = {
+            request
+                .send()
+                .await
+                .context("读取 YouTube 播放列表目录失败")?
+        };
         let status = response.status();
         let body: Value = response
             .json()
@@ -225,17 +281,44 @@ impl YoutubeProvider {
         })
     }
 
+    /// 普通 YouTube 预览只有原生 HLS 一条路径；旧的 DASH + MediaSource 入口永久关闭。
+    pub async fn preview_stream_at_height(
+        &self,
+        input: &str,
+        max_height: i64,
+        track: VideoPreviewTrack,
+        range: Option<&str>,
+    ) -> Result<VideoPreviewStream> {
+        self.ensure_enabled()?;
+        let _ = (input, max_height, track, range);
+        bail!("YouTube 视频预览只允许使用受保护的原生 HLS 链路")
+    }
+
     pub async fn download_video(
         &self,
         req: &VideoDownloadRequest,
         cancel: &CancellationToken,
         progress: &ProgressSink,
     ) -> Result<PathBuf> {
+        self.download_video_with_source(req, cancel, progress, None)
+            .await
+    }
+
+    async fn download_video_with_source(
+        &self,
+        req: &VideoDownloadRequest,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+        prepared_source_url: Option<&str>,
+    ) -> Result<PathBuf> {
         self.ensure_enabled()?;
         anyhow::ensure!(
-            ffmpeg::available(),
-            "YouTube 音视频流需要 FFmpeg 合并或提取；请安装 FFmpeg 后重试"
+            req.offset_ms == 0,
+            "原生 YouTube 下载暂不支持音画时间偏移；请关闭音画匹配后重试"
         );
+        // Older queued tasks may still carry `transcode=true` from the shared Bilibili control.
+        // The fixed native YouTube path already guarantees an MP4 container, so migrate that
+        // legacy compatibility intent to the decode-free path instead of making Retry fail.
         let target = if !req.url.trim().is_empty() {
             req.url.trim()
         } else {
@@ -260,17 +343,15 @@ impl YoutubeProvider {
             self.ctx.video_output_dir()?
         };
         let extension = if req.audio_only {
-            "m4a".to_string()
+            "m4a"
         } else {
-            let configured = self.ctx.video_format();
-            if configured.is_empty() {
-                "mp4".into()
-            } else {
-                configured
-            }
+            // This path intentionally has one deterministic container. A legacy/global video
+            // format preference must not turn an otherwise valid native YouTube download into a
+            // failure or reintroduce a transcoder.
+            "mp4"
         };
         let stem = sanitize_filename_value(title, &details.video_id);
-        let filename = finalize_filename(&format!("{stem}.{extension}"), &extension);
+        let filename = finalize_filename(&format!("{stem}.{extension}"), extension);
         let output = unique_download_path(&output_dir, &filename);
         let temp = output_dir.join(format!(
             ".partial-youtube-{}-{:08x}",
@@ -280,44 +361,33 @@ impl YoutubeProvider {
         std::fs::create_dir_all(&temp).context("创建 YouTube 下载暂存目录失败")?;
         let _guard = TempDirGuard(temp.clone());
         let staged = temp.join(format!("output.{extension}"));
-        let log = temp.join("ffmpeg.log");
-
-        // HLS 是当前不依赖 GVS PO Token 的优先退路。拿得到时让 FFmpeg 自己处理分片。
-        if let Some(hls) = info
-            .hls_manifest_url
-            .as_deref()
-            .filter(|url| !url.is_empty())
-        {
-            self.download_hls(hls, &staged, req, &log, cancel).await?;
+        // 桌面队列使用与原生播放相同的受保护 HLS 会话。上游 URL、proof 与固定
+        // Safari 身份都留在本地服务里；纯 Rust 封装器只读取一次性的回环
+        // capability，不会接触或泄露上游授权参数。
+        let protected_hls = prepared_source_url
+            .map(validated_local_youtube_hls_url)
+            .transpose()?;
+        if req.audio_only {
+            let format = native_audio_format(&info.formats).context(
+                "YouTube 没有返回可直接保存的 AAC/M4A 音轨；该视频可能需要重新连接浏览器",
+            )?;
+            self.fetch_format(&format, &staged, cancel, progress)
+                .await?;
+        } else if let Some(hls) = protected_hls {
+            // HLS 没有可靠 Content-Length，但从这里开始已经不再是解析。先报告
+            // 未知总量的下载起点，让任务条切到「解析完成 → 下载中」。
+            progress(0, 0);
+            hls_download::download_muxed_h264_aac(hls, &staged, cancel, progress).await?;
             let size = std::fs::metadata(&staged)
                 .map(|meta| meta.len())
                 .unwrap_or(0);
             progress(size, size);
         } else {
-            let selected = select_formats(&info.formats, req.max_height, req.audio_only)?;
-            let mut inputs = Vec::new();
-            for (index, format) in selected.iter().enumerate() {
-                let input = temp.join(format!("input-{index}.{}", format.mime_type.container));
-                self.fetch_format(format, &input, cancel, progress).await?;
-                inputs.push(input);
-            }
-            if req.audio_only {
-                let args = ffmpeg::extract_audio_args(&inputs[0], &staged, false, req.offset_ms);
-                ffmpeg::run(&args, &log, cancel)
-                    .await
-                    .context("FFmpeg 提取 YouTube 音轨失败")?;
-            } else {
-                let args = ffmpeg::mux_args(
-                    &inputs,
-                    &staged,
-                    req.transcode,
-                    req.max_height,
-                    req.offset_ms,
-                );
-                ffmpeg::run(&args, &log, cancel)
-                    .await
-                    .context("FFmpeg 合并 YouTube 音视频失败")?;
-            }
+            let format = native_progressive_mp4(&info.formats, req.max_height).context(
+                "YouTube 没有返回可直接保存的 H.264/AAC MP4，且受保护 HLS 尚未就绪；请重试",
+            )?;
+            self.fetch_format(&format, &staged, cancel, progress)
+                .await?;
         }
         if cancel.is_cancelled() {
             bail!("下载已取消");
@@ -407,77 +477,6 @@ impl YoutubeProvider {
         file.flush().await.context("提交 YouTube 暂存缓冲失败")?;
         Ok(())
     }
-
-    async fn download_hls(
-        &self,
-        url: &str,
-        output: &Path,
-        req: &VideoDownloadRequest,
-        log: &Path,
-        cancel: &CancellationToken,
-    ) -> Result<()> {
-        let mut args = vec!["-y".to_string()];
-        if let Some(session) = self.auth.snapshot() {
-            args.extend([
-                "-headers".into(),
-                format!("Cookie: {}\r\nUser-Agent: {USER_AGENT}\r\n", session.cookie),
-            ]);
-        }
-        if req.offset_ms > 0 {
-            args.extend([
-                "-ss".into(),
-                format!("{:.3}", req.offset_ms as f64 / 1000.0),
-            ]);
-        }
-        args.extend(["-i".into(), url.into()]);
-        if req.audio_only {
-            args.extend([
-                "-vn".into(),
-                "-c:a".into(),
-                "aac".into(),
-                "-b:a".into(),
-                "128k".into(),
-            ]);
-            if req.offset_ms < 0 {
-                args.extend(["-af".into(), format!("adelay={}:all=1", -req.offset_ms)]);
-            }
-        } else if req.transcode || req.offset_ms != 0 {
-            let mut filter = format!(r"scale=-2:min({}\,ih)", req.max_height.max(1));
-            if req.offset_ms < 0 {
-                filter = format!(
-                    "tpad=start_duration={:.3},{filter}",
-                    -req.offset_ms as f64 / 1000.0
-                );
-            }
-            args.extend([
-                "-c:v".into(),
-                "libx264".into(),
-                "-preset".into(),
-                "medium".into(),
-                "-crf".into(),
-                "20".into(),
-                "-vf".into(),
-                filter,
-                "-c:a".into(),
-                "aac".into(),
-                "-b:a".into(),
-                "192k".into(),
-            ]);
-            if req.offset_ms < 0 {
-                args.extend(["-af".into(), format!("adelay={}:all=1", -req.offset_ms)]);
-            }
-        } else {
-            args.extend(["-c".into(), "copy".into()]);
-        }
-        args.extend([
-            "-movflags".into(),
-            "+faststart".into(),
-            output.to_string_lossy().into_owned(),
-        ]);
-        ffmpeg::run(&args, log, cancel)
-            .await
-            .context("FFmpeg 下载 YouTube HLS 失败")
-    }
 }
 
 #[async_trait]
@@ -492,6 +491,7 @@ impl MusicProvider for YoutubeProvider {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            external_download_preparation: true,
             search_kinds: YOUTUBE_SEARCH_KINDS,
             ..Capabilities::VIDEO
         }
@@ -523,7 +523,7 @@ impl MusicProvider for YoutubeProvider {
     }
 
     async fn logout(&self) -> Result<()> {
-        self.auth.clear();
+        self.auth.clear()?;
         Ok(())
     }
 
@@ -593,6 +593,33 @@ impl MusicProvider for YoutubeProvider {
             title,
             sources,
         }))
+    }
+
+    async fn remove_stream_playlist_track(&self, key: &str, source: &SongSource) -> Result<()> {
+        anyhow::ensure!(self.auth.is_logged_in(), "请先连接 YouTube 登录态");
+        anyhow::ensure!(source.platform == Platform::Youtube, "歌曲来源不是 YouTube");
+        let playlist_id = key.trim().trim_start_matches("VL");
+        let video_id = source.key.trim();
+        // 普通 YouTube 目录目前只能可靠证明 LL 的写语义：它是账号 Like 状态的
+        // 投影视图。其它列表尚不能稳定区分“本人创建”和“收藏”，因此拒绝猜测。
+        anyhow::ensure!(playlist_id == "LL", "这个 YouTube 播放列表暂不支持移除歌曲");
+        anyhow::ensure!(!video_id.is_empty(), "YouTube 视频 ID 为空");
+        let playlists = self.stream_playlists().await?;
+        anyhow::ensure!(
+            playlists
+                .iter()
+                .any(|playlist| playlist.key == "LL" && playlist.origin == "favorite"),
+            "当前账号目录里没有 YouTube 喜欢的视频"
+        );
+        let mut body = YoutubeClient::web_context();
+        body.as_object_mut()
+            .expect("WEB context is an object")
+            .insert("target".into(), json!({"videoId": video_id}));
+        self.client
+            .post_web("like/removelike", &body)
+            .await
+            .context("从 YouTube 喜欢的视频中移除失败")?;
+        Ok(())
     }
 
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
@@ -1206,54 +1233,52 @@ fn best_thumbnail(items: &[Thumbnail]) -> String {
         .unwrap_or_default()
 }
 
-fn select_formats(
-    formats: &[VideoFormat],
-    max_height: i64,
-    audio_only: bool,
-) -> Result<Vec<VideoFormat>> {
+fn native_audio_format(formats: &[VideoFormat]) -> Option<VideoFormat> {
     let usable = |format: &&VideoFormat| !format.url.is_empty() && !format.is_live;
-    let best_audio = || {
-        formats
-            .iter()
-            .filter(usable)
-            .filter(|format| format.has_audio && !format.has_video)
-            .max_by_key(|format| format.audio_bitrate.unwrap_or(format.bitrate))
-            .cloned()
-    };
-    if audio_only {
-        return best_audio()
-            .or_else(|| {
-                formats
-                    .iter()
-                    .filter(usable)
-                    .filter(|format| format.has_audio)
-                    .max_by_key(|format| format.audio_bitrate.unwrap_or(format.bitrate))
-                    .cloned()
-            })
-            .map(|format| vec![format])
-            .context("YouTube 没有返回可下载的音频流；请重新导入浏览器会话");
-    }
+    formats
+        .iter()
+        .filter(usable)
+        .filter(|format| format.has_audio && !format.has_video)
+        .filter(|format| format.mime_type.container.eq_ignore_ascii_case("mp4"))
+        .filter(|format| {
+            format
+                .mime_type
+                .audio_codec
+                .as_deref()
+                .is_some_and(|codec| codec.to_ascii_lowercase().starts_with("mp4a"))
+        })
+        .max_by_key(|format| format.audio_bitrate.unwrap_or(format.bitrate))
+        .cloned()
+}
+
+fn native_progressive_mp4(formats: &[VideoFormat], max_height: i64) -> Option<VideoFormat> {
+    let usable = |format: &&VideoFormat| !format.url.is_empty() && !format.is_live;
     let ceiling = max_height.max(1) as u64;
-    if let Some(progressive) = formats
+    formats
         .iter()
         .filter(usable)
         .filter(|format| format.has_video && format.has_audio)
         .filter(|format| format.height.unwrap_or(0) <= ceiling)
+        .filter(|format| format.mime_type.container.eq_ignore_ascii_case("mp4"))
+        .filter(|format| {
+            format
+                .mime_type
+                .video_codec
+                .as_deref()
+                .is_some_and(|codec| {
+                    let codec = codec.to_ascii_lowercase();
+                    codec.starts_with("avc1") || codec.starts_with("avc3")
+                })
+        })
+        .filter(|format| {
+            format
+                .mime_type
+                .audio_codec
+                .as_deref()
+                .is_some_and(|codec| codec.to_ascii_lowercase().starts_with("mp4a"))
+        })
         .max_by_key(|format| (format.height.unwrap_or(0), format.bitrate))
         .cloned()
-    {
-        return Ok(vec![progressive]);
-    }
-    let video = formats
-        .iter()
-        .filter(usable)
-        .filter(|format| format.has_video && !format.has_audio)
-        .filter(|format| format.height.unwrap_or(0) <= ceiling)
-        .max_by_key(|format| (format.height.unwrap_or(0), format.bitrate))
-        .cloned()
-        .context("YouTube 没有返回可下载的视频流；该视频可能需要 PO Token")?;
-    let audio = best_audio().context("YouTube 没有返回可下载的音频流")?;
-    Ok(vec![video, audio])
 }
 
 struct TempDirGuard(PathBuf);
@@ -1274,6 +1299,17 @@ impl VideoProvider for YoutubeProvider {
         YoutubeProvider::resolve_video(self, input).await
     }
 
+    async fn preview_stream(
+        &self,
+        input: &str,
+        _page_index: usize,
+        max_height: i64,
+        track: VideoPreviewTrack,
+        range: Option<&str>,
+    ) -> Result<VideoPreviewStream> {
+        YoutubeProvider::preview_stream_at_height(self, input, max_height, track, range).await
+    }
+
     async fn download_video(
         &self,
         request: &VideoDownloadRequest,
@@ -1282,11 +1318,46 @@ impl VideoProvider for YoutubeProvider {
     ) -> Result<PathBuf> {
         YoutubeProvider::download_video(self, request, cancel, progress).await
     }
+
+    async fn download_video_prepared(
+        &self,
+        request: &VideoDownloadRequest,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+        prepared_source_url: Option<&str>,
+    ) -> Result<PathBuf> {
+        let prepared_source_url =
+            prepared_source_url.context("YouTube 下载授权尚未就绪，请重试")?;
+        self.download_video_with_source(request, cancel, progress, Some(prepared_source_url))
+            .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_hls_download_source_must_be_a_single_loopback_capability() {
+        let ticket = "a".repeat(64);
+        let valid =
+            format!("http://127.0.0.1:41234/api/video/youtube/hls/{ticket}?kdj_media_token=secret");
+        assert_eq!(validated_local_youtube_hls_url(&valid).unwrap(), valid);
+        for invalid in [
+            format!(
+                "https://127.0.0.1:41234/api/video/youtube/hls/{ticket}?kdj_media_token=secret"
+            ),
+            format!(
+                "http://example.com:41234/api/video/youtube/hls/{ticket}?kdj_media_token=secret"
+            ),
+            format!(
+                "http://127.0.0.1:41234/api/video/youtube/hls/{ticket}?kdj_media_token=secret&extra=1"
+            ),
+            format!("http://127.0.0.1:41234/api/video/youtube/hls/{ticket}"),
+        ] {
+            assert!(validated_local_youtube_hls_url(&invalid).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn disabled_download_source_does_not_hide_its_own_login() {
@@ -1476,29 +1547,52 @@ mod tests {
     }
 
     #[test]
-    fn format_selection_prefers_progressive_under_ceiling() {
-        let format = |height: u64, video: bool, audio: bool, bitrate: u64| VideoFormat {
+    fn native_format_selection_requires_mp4_compatible_codecs() {
+        let format = |height: u64,
+                      video: bool,
+                      audio: bool,
+                      bitrate: u64,
+                      container: &str,
+                      video_codec: Option<&str>,
+                      audio_codec: Option<&str>| VideoFormat {
             itag: height,
             mime_type: MediaMime {
-                container: "mp4".into(),
-                video_codec: Some("avc1.4d401f".into()),
+                container: container.into(),
+                video_codec: video_codec.map(str::to_string),
+                audio_codec: audio_codec.map(str::to_string),
             },
             bitrate,
             height: Some(height),
             content_length: None,
+            init_range: None,
+            index_range: None,
+            approx_duration_ms: None,
             quality_label: Some(format!("{height}p")),
             audio_bitrate: None,
+            cipher: String::new(),
             url: "https://cdn.example/x".into(),
             has_video: video,
             has_audio: audio,
             is_live: false,
         };
         let formats = vec![
-            format(1080, true, true, 10),
-            format(720, true, true, 20),
-            format(0, false, true, 30),
+            format(1080, true, true, 40, "webm", Some("vp9"), Some("opus")),
+            format(
+                720,
+                true,
+                true,
+                20,
+                "mp4",
+                Some("avc1.4d401f"),
+                Some("mp4a.40.2"),
+            ),
+            format(0, false, true, 30, "mp4", None, Some("mp4a.40.2")),
+            format(0, false, true, 50, "webm", None, Some("opus")),
         ];
-        let picked = select_formats(&formats, 720, false).unwrap();
-        assert_eq!(picked[0].height, Some(720));
+        assert_eq!(
+            native_progressive_mp4(&formats, 720).unwrap().height,
+            Some(720)
+        );
+        assert_eq!(native_audio_format(&formats).unwrap().bitrate, 30);
     }
 }

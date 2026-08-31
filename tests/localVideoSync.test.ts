@@ -4,6 +4,8 @@ import {
   initialVideoSyncPolicyState,
   LocalVideoSynchronizer,
   planVideoSync,
+  VideoSeekEchoGuard,
+  VideoTransportEchoGuard,
 } from "../src/lib/localVideoSync";
 
 const heartbeat = (target: number, presentedTime: number, baseRate = 1) =>
@@ -124,4 +126,62 @@ test("one explicit seek followed by heartbeats writes currentTime exactly once",
 
   assert.equal(timeWrites, 1);
   assert.equal(currentTime, 600);
+});
+
+test("player-driven video seek is consumed instead of being echoed back to audio", () => {
+  const video = {} as HTMLVideoElement;
+  const guard = new VideoSeekEchoGuard();
+
+  guard.mark(video, 120, 1_000);
+
+  assert.equal(guard.consume(video, 120.2, 1_100), true);
+  assert.equal(guard.consume(video, 120.2, 1_101), false);
+});
+
+test("a native video-control seek remains distinguishable from a pending alignment", () => {
+  const video = {} as HTMLVideoElement;
+  const guard = new VideoSeekEchoGuard();
+
+  guard.mark(video, 30, 1_000);
+
+  assert.equal(guard.consume(video, 180, 1_100), false);
+  assert.equal(guard.consume(video, 30, 1_101), true);
+});
+
+test("expired or different-element video seeks are not treated as player echoes", () => {
+  const first = {} as HTMLVideoElement;
+  const second = {} as HTMLVideoElement;
+  const guard = new VideoSeekEchoGuard();
+
+  guard.mark(first, 45, 1_000);
+
+  assert.equal(guard.consume(second, 45, 1_100), false);
+  assert.equal(guard.consume(first, 45, 3_001), false);
+});
+
+test("standby play/pause tails stay tagged after that video becomes active", () => {
+  const standby = {} as HTMLVideoElement;
+  const guard = new VideoTransportEchoGuard();
+
+  guard.mark(standby, "play", 1_000);
+  guard.mark(standby, "pause", 1_001);
+
+  // WebKit may deliver these in either order around the ownership swap.
+  assert.equal(guard.consume(standby, "pause", 1_100), true);
+  assert.equal(guard.consume(standby, "play", 1_101), true);
+  assert.equal(guard.consume(standby, "pause", 1_102), false);
+});
+
+test("transport echo tags are exact, cancellable, and expire", () => {
+  const first = {} as HTMLVideoElement;
+  const second = {} as HTMLVideoElement;
+  const guard = new VideoTransportEchoGuard();
+
+  const rejectedPlay = guard.mark(first, "play", 1_000);
+  guard.cancel(rejectedPlay);
+  guard.mark(first, "pause", 1_000);
+
+  assert.equal(guard.consume(first, "play", 1_100), false);
+  assert.equal(guard.consume(second, "pause", 1_100), false);
+  assert.equal(guard.consume(first, "pause", 3_001), false);
 });

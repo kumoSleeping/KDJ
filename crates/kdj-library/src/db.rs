@@ -90,6 +90,27 @@ CREATE TABLE IF NOT EXISTS track_bpm_key_analysis_v2 (
   analyzed_at TEXT NOT NULL,
   analysis_error TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS track_bpm_key_analysis_v3 (
+  track_id INTEGER PRIMARY KEY,
+  analyzer_revision TEXT NOT NULL,
+  bpm REAL,
+  bpm_raw REAL,
+  bpm_confidence REAL,
+  first_beat REAL,
+  beat_origin REAL,
+  beat_times_json TEXT NOT NULL DEFAULT '[]',
+  downbeat_origin REAL,
+  downbeats_json TEXT NOT NULL DEFAULT '[]',
+  downbeat_confidence REAL,
+  music_key TEXT,
+  key_short TEXT,
+  camelot TEXT,
+  open_key TEXT,
+  key_confidence REAL,
+  chroma_json TEXT NOT NULL DEFAULT '[]',
+  analyzed_at TEXT NOT NULL,
+  analysis_error TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS kdj_schema_migrations (
   name TEXT PRIMARY KEY,
   applied_at TEXT NOT NULL
@@ -101,6 +122,10 @@ END;
 CREATE TRIGGER IF NOT EXISTS cleanup_track_bpm_key_analysis_v2
 AFTER DELETE ON tracks BEGIN
   DELETE FROM track_bpm_key_analysis_v2 WHERE track_id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS cleanup_track_bpm_key_analysis_v3
+AFTER DELETE ON tracks BEGIN
+  DELETE FROM track_bpm_key_analysis_v3 WHERE track_id = OLD.id;
 END;
 CREATE TRIGGER IF NOT EXISTS cleanup_playlist_track_reference
 AFTER DELETE ON tracks BEGIN
@@ -125,6 +150,8 @@ CREATE INDEX IF NOT EXISTS idx_playlist_items_position
 CREATE INDEX IF NOT EXISTS idx_waveform_assets_profile ON waveform_assets(profile, revision);
 CREATE INDEX IF NOT EXISTS idx_track_bpm_key_analysis_v2_revision
   ON track_bpm_key_analysis_v2(analyzer_revision, analyzed_at);
+CREATE INDEX IF NOT EXISTS idx_track_bpm_key_analysis_v3_revision
+  ON track_bpm_key_analysis_v3(analyzer_revision, analyzed_at);
 "#;
 
 /// 老库升级用：只列可空列，或带常量默认值、可安全补入旧行的 NOT NULL 列。
@@ -268,22 +295,22 @@ impl Database {
             }
         }
 
-        let analysis_columns: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(track_bpm_key_analysis_v2)")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        for (name, decl) in [
-            ("beat_origin", "REAL"),
-            ("downbeat_origin", "REAL"),
-            ("downbeats_json", "TEXT NOT NULL DEFAULT '[]'"),
-            ("downbeat_confidence", "REAL"),
-        ] {
-            if !analysis_columns.iter().any(|column| column == name) {
-                conn.execute_batch(&format!(
-                    "ALTER TABLE track_bpm_key_analysis_v2 ADD COLUMN {name} {decl}"
-                ))
-                .with_context(|| format!("补分析列 {name} 失败"))?;
+        for table in ["track_bpm_key_analysis_v2", "track_bpm_key_analysis_v3"] {
+            let analysis_columns: Vec<String> = {
+                let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
+            for (name, decl) in [
+                ("beat_origin", "REAL"),
+                ("downbeat_origin", "REAL"),
+                ("downbeats_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("downbeat_confidence", "REAL"),
+            ] {
+                if !analysis_columns.iter().any(|column| column == name) {
+                    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {decl}"))
+                        .with_context(|| format!("补 {table} 分析列 {name} 失败"))?;
+                }
             }
         }
 
@@ -293,7 +320,7 @@ impl Database {
     }
 }
 
-/// 旧库和 OneLibrary 导入曾可能只保存自由文本 `music_key`。这里只补空的派生列，
+/// 旧库曾可能只保存自由文本 `music_key`。这里只补空的派生列，
 /// 绝不改原调名、也不覆盖已有 Camelot/Open Key；重复启动执行结果相同。
 fn migrate_key_notations(conn: &mut rusqlite::Connection) -> Result<()> {
     const MIGRATION: &str = "key-notations-v1";
@@ -327,8 +354,13 @@ fn migrate_key_notations(conn: &mut rusqlite::Connection) -> Result<()> {
 
     let legacy = candidates(conn, "tracks")?;
     let v2 = candidates(conn, "track_bpm_key_analysis_v2")?;
+    let v3 = candidates(conn, "track_bpm_key_analysis_v3")?;
     let tx = conn.transaction().context("开始调性表示迁移失败")?;
-    for (table, rows) in [("tracks", legacy), ("track_bpm_key_analysis_v2", v2)] {
+    for (table, rows) in [
+        ("tracks", legacy),
+        ("track_bpm_key_analysis_v2", v2),
+        ("track_bpm_key_analysis_v3", v3),
+    ] {
         let id_column = if table == "tracks" { "id" } else { "track_id" };
         let sql = format!(
             "UPDATE {table} SET \

@@ -20,8 +20,6 @@ import {
   type PredictionPolicySnapshot,
 } from "./nextCandidatePolicy";
 import { isStreamTrack, streamNextTrack, streamTrackById } from "./streamTrack";
-import { isOneLibraryPlaybackTrack } from "./playbackTrackSource";
-import { oneLibraryTrackByPlaybackId } from "./oneLibraryTrack";
 import type { HarmonicMatch, Track } from "../types";
 
 /** 本次运行放过的曲目。刷新页面即清空——这是有意的，见文件头。 */
@@ -107,9 +105,6 @@ export function clearPlayHistory(): void {
 export async function trackById(id: number): Promise<Track | null> {
   const stream = streamTrackById(id);
   if (stream) return stream;
-  const oneLibrary = oneLibraryTrackByPlaybackId(id);
-  if (oneLibrary) return oneLibrary;
-  // OneLibrary 的负数稳定 id 若不在本次运行快照里，不能拿去请求本地 tracks API。
   if (id < 0) return null;
   const inPage = useLibraryStore.getState().tracks.find((track) => track.id === id) ?? null;
   try {
@@ -220,7 +215,7 @@ export async function pickNext(
   const listFolder = rawFolder;
 
   const streaming = isStreamTrack(current);
-  const external = streaming || isOneLibraryPlaybackTrack(current);
+  const external = streaming;
   const streamSuccessor = streaming ? streamNextTrack(current) : null;
   const route = nextCandidateRoute(external, Boolean(streamSuccessor), mode, manual);
   if (route === "repeat-current") return current;
@@ -234,9 +229,12 @@ export async function pickNext(
   ) {
     return preferred;
   }
-  // 在线试听没有曲库分析出来的 BPM / 调号，不能把负 id 交给 harmonic API。
-  // 在线链耗尽后回到本地范围起点；本地 harmonic 暂时不可用时则按眼前排序兜底，
-  // 不能因为一次推荐请求失败就把已经预热好的第二台 Deck 清成“等待下一首”。
+  // 在线链耗尽后，已完成分析的试听曲目可以直接拿 BPM/Camelot 匹配本地曲库；
+  // 尚未分析或推荐暂时不可用时仍按眼前排序兜底，不能因为一次请求失败就把
+  // 已经预热好的第二台 Deck 清成“等待下一首”。
+  if (route === "harmonic-profile") {
+    return (await harmonicProfilePick(current, folder)) ?? firstInOrder(listFolder);
+  }
   if (route === "local-start") return firstInOrder(listFolder);
   if (route === "order") return nextInOrder(current, listFolder);
   if (route === "shuffle") return randomPick(current, listFolder);
@@ -267,11 +265,14 @@ export async function previewNext(
   const listFolder = rawFolder;
 
   const streaming = isStreamTrack(current);
-  const external = streaming || isOneLibraryPlaybackTrack(current);
+  const external = streaming;
   const streamSuccessor = streaming ? streamNextTrack(current) : null;
   const route = nextCandidateRoute(external, Boolean(streamSuccessor), mode, manual);
   if (route === "repeat-current") return current;
   if (route === "stream-successor") return streamSuccessor;
+  if (route === "harmonic-profile") {
+    return (await harmonicProfilePick(current, folder)) ?? firstInOrder(listFolder);
+  }
   if (route === "local-start") return firstInOrder(listFolder);
   if (route === "order") return nextInOrder(current, listFolder);
   if (route === "shuffle") return randomPick(current, listFolder, excludeIds);
@@ -305,6 +306,20 @@ async function harmonicPick(current: Track, folder: string): Promise<Track | nul
   // 不在这里回收已经播放的最佳匹配，否则小候选池会稳定 A↔B。调用方会改走
   // 当前排序的下一首，既保持“下一首”不空，也不会破坏本次运行的去重历史。
   return fresh?.track ?? null;
+}
+
+/** 临时在线曲没有数据库 id；完整分析后直接用它的 BPM/Camelot 查询同一候选池。 */
+async function harmonicProfilePick(current: Track, folder: string): Promise<Track | null> {
+  if (!current.camelot || !current.bpm) return null;
+  let matches: HarmonicMatch[];
+  try {
+    matches = await api.harmonicProfile(current, 8, 40, folder);
+  } catch {
+    return null;
+  }
+  return matches.find(
+    (match) => !played.has(match.track.id) && !sameSong(current, match.track),
+  )?.track ?? null;
 }
 
 /**

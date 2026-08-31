@@ -6,13 +6,14 @@
 //! fallback for restricted metadata and legacy signatureCipher responses.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use crate::net::http_timeouts;
+use crate::provider::{ProtectedPoTokenBinding, ProtectedPreviewIdentity};
 use crate::youtubemusic::auth::YoutubeAuth;
 use crate::youtubemusic::client::extract_player_url;
 use crate::youtubemusic::decipher::PlayerScript;
@@ -45,6 +46,7 @@ pub struct VideoDetails {
 pub struct MediaMime {
     pub container: String,
     pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,10 +58,22 @@ pub struct VideoFormat {
     pub quality_label: Option<String>,
     pub audio_bitrate: Option<u64>,
     pub content_length: Option<u64>,
+    pub init_range: Option<(u64, u64)>,
+    pub index_range: Option<(u64, u64)>,
+    pub approx_duration_ms: Option<u64>,
+    /// Raw WEB player cipher. It is executed only by the isolated frontend proof sandbox.
+    pub cipher: String,
     pub url: String,
     pub has_video: bool,
     pub has_audio: bool,
     pub is_live: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtectedHlsContext {
+    pub manifest: String,
+    pub player_url: String,
+    pub identity: ProtectedPreviewIdentity,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,6 +95,9 @@ pub struct YoutubeClient {
     auth: Arc<YoutubeAuth>,
     script: RwLock<ScriptState>,
     videos: RwLock<HashMap<String, (Instant, VideoInfo)>>,
+    /// Two MediaSource tracks start together. Without a per-video gate, both cache misses issue
+    /// the same Player request and can even receive different short-lived GVS sessions.
+    video_requests: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl YoutubeClient {
@@ -94,6 +111,7 @@ impl YoutubeClient {
             auth,
             script: RwLock::new(ScriptState::None),
             videos: RwLock::new(HashMap::new()),
+            video_requests: Mutex::new(HashMap::new()),
         })
     }
 
@@ -156,6 +174,12 @@ impl YoutubeClient {
         if let Some(info) = self.cached_video(video_id) {
             return Ok(info);
         }
+        let gate = self.video_request_gate(video_id);
+        let _request = gate.lock().await;
+        // The other audio/video request may have populated the cache while this one waited.
+        if let Some(info) = self.cached_video(video_id) {
+            return Ok(info);
+        }
         let ios = self.player_ios(video_id).await;
         let mut ios_error = None;
         if let Ok(payload) = ios {
@@ -185,6 +209,95 @@ impl YoutubeClient {
             )
         })?;
         Ok(self.remember_video(video_id, info))
+    }
+
+    fn video_request_gate(&self, video_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut requests = self
+            .video_requests
+            .lock()
+            .unwrap_or_else(|lock| lock.into_inner());
+        // Weak entries make the single-flight table self-cleaning after requests finish.
+        requests.retain(|_, request| request.strong_count() > 0);
+        if let Some(request) = requests.get(video_id).and_then(Weak::upgrade) {
+            return request;
+        }
+        let request = Arc::new(tokio::sync::Mutex::new(()));
+        requests.insert(video_id.to_string(), Arc::downgrade(&request));
+        request
+    }
+
+    async fn protected_page_html(&self, url: &str, user_agent: &str) -> Result<String> {
+        anyhow::ensure!(
+            valid_browser_user_agent(user_agent),
+            "YouTube 浏览器标识无效"
+        );
+        let session = self
+            .auth
+            .snapshot()
+            .context("YouTube 播放需要先连接浏览器会话")?;
+        let response = self
+            .http
+            .get(url)
+            .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml")
+            .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.7")
+            .header(reqwest::header::USER_AGENT, user_agent)
+            .header(reqwest::header::COOKIE, session.cookie)
+            .send()
+            .await
+            .context("打开 YouTube 页面失败")?
+            .error_for_status()
+            .context("YouTube 页面返回错误")?;
+        let bytes = response.bytes().await.context("读取 YouTube 页面失败")?;
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024,
+            "YouTube 页面大小异常"
+        );
+        String::from_utf8(bytes.to_vec()).context("YouTube 页面编码无效")
+    }
+
+    pub async fn protected_player_script(&self, value: &str) -> Result<String> {
+        let url = trusted_player_url(value)?;
+        let javascript = self.fetch_text(&url).await?;
+        anyhow::ensure!(
+            javascript.len() <= 8 * 1024 * 1024,
+            "YouTube 播放器脚本异常过大"
+        );
+        Ok(javascript)
+    }
+
+    pub async fn protected_hls_context(
+        &self,
+        video_id: &str,
+        user_agent: &str,
+    ) -> Result<ProtectedHlsContext> {
+        anyhow::ensure!(
+            video_id.len() == 11
+                && video_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+            "YouTube 视频 ID 无效"
+        );
+        anyhow::ensure!(
+            valid_browser_user_agent(user_agent) && user_agent.contains("Safari/"),
+            "YouTube HLS 需要 WebKit 浏览器标识"
+        );
+        // Since 2026-07 YouTube returns muxed Safari HLS only to a trusted browser session. The
+        // authenticated watch page is the source of truth; a hand-built Player request can be
+        // internally valid yet still return UNPLAYABLE for the same account.
+        let html = self
+            .protected_page_html(
+                &format!("https://www.youtube.com/watch?v={video_id}"),
+                user_agent,
+            )
+            .await?;
+        let manifest = extract_json_string_value(&html, "hlsManifestUrl")
+            .context("YouTube 登录会话没有返回 WebKit HLS 播放清单")?;
+        let player_url = extract_player_url(&html).context("YouTube 页面没有播放器脚本地址")?;
+        Ok(ProtectedHlsContext {
+            manifest: trusted_hls_url(&manifest)?,
+            player_url: trusted_player_url(&player_url)?,
+            identity: protected_identity_from_html(&html)?,
+        })
     }
 
     fn cached_video(&self, video_id: &str) -> Option<VideoInfo> {
@@ -224,6 +337,14 @@ impl YoutubeClient {
     }
 
     async fn parse_player(&self, player: &Value) -> Result<VideoInfo> {
+        self.parse_player_with_mode(player, true).await
+    }
+
+    async fn parse_player_with_mode(
+        &self,
+        player: &Value,
+        decipher_ciphers: bool,
+    ) -> Result<VideoInfo> {
         ensure_playable(player)?;
         if let Some(url) = player.pointer("/assets/js").and_then(Value::as_str) {
             self.refresh_script_url(url);
@@ -251,7 +372,7 @@ impl YoutubeClient {
             );
         let mut formats = Vec::new();
         for row in rows {
-            if let Some(format) = self.video_format(row, is_live).await {
+            if let Some(format) = self.video_format(row, is_live, decipher_ciphers).await {
                 formats.push(format);
             }
         }
@@ -268,7 +389,26 @@ impl YoutubeClient {
         })
     }
 
-    async fn video_format(&self, row: &Value, is_live: bool) -> Option<VideoFormat> {
+    async fn video_format(
+        &self,
+        row: &Value,
+        is_live: bool,
+        decipher_ciphers: bool,
+    ) -> Option<VideoFormat> {
+        let byte_range = |key: &str| {
+            let value = row.get(key)?;
+            let number = |field: &str| {
+                value.get(field).and_then(|value| {
+                    value
+                        .as_str()
+                        .and_then(|text| text.parse().ok())
+                        .or_else(|| value.as_u64())
+                })
+            };
+            let start = number("start")?;
+            let end = number("end")?;
+            (end >= start).then_some((start, end))
+        };
         let mime = row.get("mimeType")?.as_str()?;
         let (kind, rest) = mime.split_once('/')?;
         let container = rest.split(';').next()?.trim().to_string();
@@ -298,28 +438,38 @@ impl YoutubeClient {
                     || codec.starts_with("av01")
             })
             .map(|codec| (*codec).to_string());
+        let audio_codec = codecs
+            .iter()
+            .find(|codec| {
+                codec.starts_with("mp4a")
+                    || codec.starts_with("opus")
+                    || codec.starts_with("vorbis")
+                    || codec.starts_with("aac")
+            })
+            .map(|codec| (*codec).to_string());
+        let cipher = row
+            .get("signatureCipher")
+            .or_else(|| row.get("cipher"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let url = match row.get("url").and_then(Value::as_str) {
             Some(url) if !url.is_empty() => url.to_string(),
-            _ => {
-                let cipher = row
-                    .get("signatureCipher")
-                    .or_else(|| row.get("cipher"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                match self.decipher_url(cipher).await {
-                    Ok(url) => url,
-                    Err(error) => {
-                        tracing::debug!("跳过无法还原的 YouTube itag：{error:#}");
-                        String::new()
-                    }
+            _ if decipher_ciphers => match self.decipher_url(&cipher).await {
+                Ok(url) => url,
+                Err(error) => {
+                    tracing::debug!("跳过无法还原的 YouTube itag：{error:#}");
+                    String::new()
                 }
-            }
+            },
+            _ => String::new(),
         };
         Some(VideoFormat {
             itag: row.get("itag").and_then(Value::as_u64).unwrap_or(0),
             mime_type: MediaMime {
                 container,
                 video_codec,
+                audio_codec,
             },
             bitrate: row.get("bitrate").and_then(Value::as_u64).unwrap_or(0),
             height: row.get("height").and_then(Value::as_u64),
@@ -341,6 +491,15 @@ impl YoutubeClient {
                     .and_then(|text| text.parse().ok())
                     .or_else(|| value.as_u64())
             }),
+            init_range: byte_range("initRange"),
+            index_range: byte_range("indexRange"),
+            approx_duration_ms: row.get("approxDurationMs").and_then(|value| {
+                value
+                    .as_str()
+                    .and_then(|text| text.parse().ok())
+                    .or_else(|| value.as_u64())
+            }),
+            cipher,
             url,
             has_video,
             has_audio,
@@ -420,11 +579,19 @@ impl YoutubeClient {
     }
 
     async fn player_script_from_homepage(&self) -> Result<(String, String)> {
+        let html = self.homepage_html().await?;
+        let url = extract_player_url(&html).context("YouTube 首页没有播放器脚本地址")?;
+        let url = trusted_player_url(&url)?;
+        let javascript = self.fetch_text(&url).await?;
+        Ok((url, javascript))
+    }
+
+    async fn homepage_html(&self) -> Result<String> {
         let mut request = self.http.get("https://www.youtube.com/");
         for (name, value) in self.auth.request_headers("https://www.youtube.com") {
             request = request.header(name, value);
         }
-        let html = request
+        request
             .send()
             .await
             .context("打开 YouTube 首页失败")?
@@ -432,11 +599,7 @@ impl YoutubeClient {
             .context("YouTube 首页返回错误")?
             .text()
             .await
-            .context("读取 YouTube 首页失败")?;
-        let url = extract_player_url(&html).context("YouTube 首页没有播放器脚本地址")?;
-        let url = trusted_player_url(&url)?;
-        let javascript = self.fetch_text(&url).await?;
-        Ok((url, javascript))
+            .context("读取 YouTube 首页失败")
     }
 
     async fn fetch_text(&self, url: &str) -> Result<String> {
@@ -459,10 +622,26 @@ async fn read_json(request: reqwest::RequestBuilder, endpoint: &str) -> Result<V
         .await
         .with_context(|| format!("YouTube 请求失败：{endpoint}"))?;
     let status = response.status();
-    let payload: Value = response
-        .json()
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .split(';')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
+    let bytes = response
+        .bytes()
         .await
-        .with_context(|| format!("YouTube 响应不是合法 JSON：{endpoint}"))?;
+        .with_context(|| format!("读取 YouTube 响应失败：{endpoint}"))?;
+    let payload: Value = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "YouTube 响应不是合法 JSON：{endpoint} HTTP {} {content_type} {} bytes",
+            status.as_u16(),
+            bytes.len()
+        )
+    })?;
     if !status.is_success() {
         let detail = payload
             .pointer("/error/message")
@@ -489,6 +668,86 @@ fn ensure_playable(player: &Value) -> Result<()> {
         bail!("YouTube 视频不可播放（{status}）")
     }
     bail!("YouTube 视频不可播放：{reason}")
+}
+
+pub fn valid_proof_token(value: &str) -> bool {
+    (20..=4096).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+' | b'/' | b'=')
+        })
+}
+
+pub fn valid_browser_user_agent(value: &str) -> bool {
+    (20..=512).contains(&value.len())
+        && value.is_ascii()
+        && value.bytes().all(|byte| !byte.is_ascii_control())
+        && value.starts_with("Mozilla/5.0 ")
+        && (value.contains("AppleWebKit/") || value.contains("Chrome/"))
+}
+
+fn generates_content_po_token(html: &str) -> bool {
+    [
+        "html5_generate_content_po_token=true",
+        "html5_generate_content_po_token%3Dtrue",
+        r"html5_generate_content_po_token\u003dtrue",
+    ]
+    .iter()
+    .any(|marker| html.contains(marker))
+}
+
+fn select_gvs_binding(html: &str, data_sync_id: &str) -> ProtectedPoTokenBinding {
+    if generates_content_po_token(html) {
+        ProtectedPoTokenBinding::VideoId
+    } else if !data_sync_id.is_empty() {
+        ProtectedPoTokenBinding::DataSyncId
+    } else {
+        ProtectedPoTokenBinding::VisitorData
+    }
+}
+
+fn protected_identity_from_html(html: &str) -> Result<ProtectedPreviewIdentity> {
+    let visitor_data = extract_ytcfg_value(html, "VISITOR_DATA")
+        .context("YouTube watch page 没有返回 Visitor Data")?;
+    let data_sync_id = extract_ytcfg_value(html, "DATASYNC_ID").unwrap_or_default();
+    Ok(ProtectedPreviewIdentity {
+        visitor_data,
+        data_sync_id: data_sync_id.clone(),
+        gvs_binding: select_gvs_binding(html, &data_sync_id),
+    })
+}
+
+fn extract_json_string_value(html: &str, key: &str) -> Option<String> {
+    let marker = format!(r#""{key}":""#);
+    let remainder = &html[html.find(&marker)? + marker.len()..];
+    let mut escaped = false;
+    let mut end = None;
+    for (offset, byte) in remainder.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            end = Some(offset);
+            break;
+        }
+        if offset > 16 * 1024 {
+            return None;
+        }
+    }
+    let raw = remainder.get(..end?)?;
+    serde_json::from_str::<String>(&format!(r#""{raw}""#)).ok()
+}
+
+fn extract_ytcfg_value(html: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{key}\":\"");
+    let start = html.find(&marker)? + marker.len();
+    let value = html[start..].split('"').next()?.trim();
+    (!value.is_empty()
+        && value.len() <= 4096
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'\\'))
+    .then(|| value.to_string())
 }
 
 fn video_details(value: &Value) -> VideoDetails {
@@ -555,6 +814,26 @@ fn trusted_player_url(value: &str) -> Result<String> {
     Ok(url.into())
 }
 
+fn trusted_hls_url(value: &str) -> Result<String> {
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 16 * 1024 && !value.contains(['\r', '\n']),
+        "YouTube HLS URL 无效"
+    );
+    let url = url::Url::parse(value).context("YouTube HLS URL 无效")?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    anyhow::ensure!(
+        url.scheme() == "https"
+            && url.port_or_known_default() == Some(443)
+            && (host == "googlevideo.com" || host.ends_with(".googlevideo.com"))
+            && url.path().starts_with("/api/manifest/hls_")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none(),
+        "YouTube HLS URL 不受信任"
+    );
+    Ok(url.into())
+}
+
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name)
         .ok()
@@ -607,5 +886,49 @@ mod tests {
         assert!(trusted_player_url("/s/player/abc/player_ias.vflset/en_US/base.js").is_ok());
         assert!(trusted_player_url("https://example.test/s/player/x/base.js").is_err());
         assert!(trusted_player_url("https://www.youtube.com/watch?v=x").is_err());
+    }
+
+    #[test]
+    fn only_googlevideo_hls_manifests_are_trusted() {
+        assert!(trusted_hls_url(
+            "https://rr1---sn.example.googlevideo.com/api/manifest/hls_variant/id/x/file/index.m3u8"
+        )
+        .is_ok());
+        assert!(trusted_hls_url(
+            "https://attacker.example/api/manifest/hls_variant/id/x/file/index.m3u8"
+        )
+        .is_err());
+        assert!(
+            trusted_hls_url("https://rr1---sn.example.googlevideo.com/videoplayback/id/x").is_err()
+        );
+    }
+
+    #[test]
+    fn protected_browser_identity_rejects_header_injection_and_non_browser_values() {
+        assert!(valid_browser_user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+        ));
+        assert!(!valid_browser_user_agent("curl/8.7.1"));
+        assert!(!valid_browser_user_agent(
+            "Mozilla/5.0 AppleWebKit/605.1.15\r\nX-Evil: true"
+        ));
+    }
+
+    #[test]
+    fn proof_token_accepts_standard_and_url_safe_base64_alphabets() {
+        assert!(valid_proof_token("abcdEFGH0123_-.+/=abcd"));
+        assert!(!valid_proof_token("abcdEFGH0123_-.+/=\r\n"));
+    }
+
+    #[test]
+    fn watch_page_is_the_single_source_for_hls_identity_and_binding() {
+        let html = r#"{"VISITOR_DATA":"visitor_123","DATASYNC_ID":"sync_456","flags":"html5_generate_content_po_token=true"}"#;
+        let identity = protected_identity_from_html(html).unwrap();
+        assert_eq!(identity.visitor_data, "visitor_123");
+        assert_eq!(identity.data_sync_id, "sync_456");
+        assert!(matches!(
+            identity.gvs_binding,
+            ProtectedPoTokenBinding::VideoId
+        ));
     }
 }

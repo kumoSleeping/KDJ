@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use kdj_analysis::engine::AnalysisResult;
 use kdj_core::models::{
-    HarmonicMatch, HarmonicRelation, LibraryStats, LocalPlaylist, LocalPlaylistPatch,
-    PortableTrackMetadata, Track, TrackPage, TrackPatch,
+    HarmonicMatch, HarmonicRelation, LibraryStats, LocalPlaylist, LocalPlaylistPatch, Track,
+    TrackPage, TrackPatch,
 };
 use kdj_providers::tags::{read_tags, write_cover, write_metadata, MetadataEdit, TrackTags};
 use rusqlite::types::Value as SqlValue;
@@ -28,9 +28,13 @@ use crate::db::{Conn, Database};
 /// v2 表与旧 tracks 分析列物理隔离；以后更换算法时只需提升这个值，所有旧修订
 /// 就会重新进入渐进回填队列，同时 v1 仍可作为读取兜底。
 pub const BPM_KEY_V2_REVISION: &str = "kdj-rust-bpm-key-v2.0.0";
+/// BPM/Key 第三代元数据当前使用的算法修订。
+///
+/// V3 改用短分析窗口，避免长 Funkot 曲目被 4:3 候选误判为约 120 BPM。
+pub const BPM_KEY_V3_REVISION: &str = "kdj-rust-bpm-key-v3.0.0";
 
 #[derive(Default)]
-struct BpmKeyV2Overlay {
+struct BpmKeyOverlay {
     bpm: Option<f64>,
     bpm_confidence: Option<f64>,
     first_beat: Option<f64>,
@@ -195,9 +199,13 @@ fn restore_from_trash(handle: &TrashHandle, original: &Path) -> Result<()> {
 /// 也不能只做转义——SQLite 的标识符引用规则太松，白名单映射是唯一安全的做法。
 fn effective_bpm_key_column(column: &str) -> String {
     format!(
-        "COALESCE((SELECT v2.{column} FROM track_bpm_key_analysis_v2 v2 \
-         WHERE v2.track_id = tracks.id AND v2.analyzer_revision = '{}'), tracks.{column})",
-        BPM_KEY_V2_REVISION
+        "COALESCE(\
+           NULLIF((SELECT v3.{column} FROM track_bpm_key_analysis_v3 v3 \
+             WHERE v3.track_id = tracks.id AND v3.analyzer_revision = '{}'), ''), \
+           NULLIF((SELECT v2.{column} FROM track_bpm_key_analysis_v2 v2 \
+             WHERE v2.track_id = tracks.id), ''), \
+           tracks.{column})",
+        BPM_KEY_V3_REVISION
     )
 }
 
@@ -437,6 +445,16 @@ pub struct LibraryService {
     db: Database,
 }
 
+/// 曲库数据库中可重建的基础分析缓存占用。
+///
+/// `bytes` 是调性、BPM、响度及拍点 JSON 的逻辑负载大小，不包含 SQLite 页、索引和
+/// 用户不可重建的曲目/歌单字段，因此可以和设置页“其他”一栏分开解释。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BasicAnalysisCacheUsage {
+    pub tracks: u64,
+    pub bytes: u64,
+}
+
 impl LibraryService {
     pub fn new(db: Database) -> Self {
         LibraryService { db }
@@ -444,6 +462,111 @@ impl LibraryService {
 
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// 统计可重建的调性、BPM、响度与拍点数据。
+    pub fn basic_analysis_cache_usage(&self) -> Result<BasicAnalysisCacheUsage> {
+        let conn = self.db.conn()?;
+        let tracks = conn.query_row(
+            "SELECT COUNT(*) FROM tracks
+             WHERE analyzed_at IS NOT NULL OR bpm IS NOT NULL OR first_beat IS NOT NULL
+                OR TRIM(COALESCE(music_key, '')) != '' OR TRIM(COALESCE(camelot, '')) != ''
+                OR energy IS NOT NULL OR rms_db IS NOT NULL OR peak_db IS NOT NULL
+                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v2 v2 WHERE v2.track_id = tracks.id)
+                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+
+        let legacy_bytes = conn.query_row(
+            "SELECT COALESCE(SUM(
+                 CASE WHEN bpm IS NULL THEN 0 ELSE 8 END
+               + CASE WHEN bpm_confidence IS NULL THEN 0 ELSE 8 END
+               + CASE WHEN first_beat IS NULL THEN 0 ELSE 8 END
+               + CASE WHEN key_confidence IS NULL THEN 0 ELSE 8 END
+               + CASE WHEN energy IS NULL THEN 0 ELSE 8 END
+               + CASE WHEN rms_db IS NULL THEN 0 ELSE 8 END
+               + CASE WHEN peak_db IS NULL THEN 0 ELSE 8 END
+               + LENGTH(CAST(COALESCE(music_key, '') AS BLOB))
+               + LENGTH(CAST(COALESCE(camelot, '') AS BLOB))
+               + LENGTH(CAST(COALESCE(open_key, '') AS BLOB))
+               + LENGTH(CAST(COALESCE(analyzed_at, '') AS BLOB))
+               + LENGTH(CAST(COALESCE(analysis_error, '') AS BLOB))
+             ), 0) FROM tracks",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let mut bytes = legacy_bytes;
+        for table in ["track_bpm_key_analysis_v2", "track_bpm_key_analysis_v3"] {
+            let sql = format!(
+                "SELECT COALESCE(SUM(
+                     8
+                   + CASE WHEN bpm IS NULL THEN 0 ELSE 8 END
+                   + CASE WHEN bpm_raw IS NULL THEN 0 ELSE 8 END
+                   + CASE WHEN bpm_confidence IS NULL THEN 0 ELSE 8 END
+                   + CASE WHEN first_beat IS NULL THEN 0 ELSE 8 END
+                   + CASE WHEN beat_origin IS NULL THEN 0 ELSE 8 END
+                   + CASE WHEN downbeat_origin IS NULL THEN 0 ELSE 8 END
+                   + CASE WHEN downbeat_confidence IS NULL THEN 0 ELSE 8 END
+                   + CASE WHEN key_confidence IS NULL THEN 0 ELSE 8 END
+                   + LENGTH(CAST(COALESCE(analyzer_revision, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(beat_times_json, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(downbeats_json, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(music_key, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(key_short, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(camelot, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(open_key, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(chroma_json, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(analyzed_at, '') AS BLOB))
+                   + LENGTH(CAST(COALESCE(analysis_error, '') AS BLOB))
+                 ), 0) FROM {table}"
+            );
+            bytes = bytes.saturating_add(conn.query_row(&sql, [], |row| row.get::<_, u64>(0))?);
+        }
+        Ok(BasicAnalysisCacheUsage { tracks, bytes })
+    }
+
+    /// 清空所有可重建的基础分析结果，保留文件标签、人工 CUE、评分、备注与歌单关系。
+    pub fn clear_basic_analysis_cache(&self) -> Result<u64> {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+        let tracks = tx.query_row(
+            "SELECT COUNT(*) FROM tracks
+             WHERE analyzed_at IS NOT NULL OR bpm IS NOT NULL OR first_beat IS NOT NULL
+                OR TRIM(COALESCE(music_key, '')) != '' OR TRIM(COALESCE(camelot, '')) != ''
+                OR energy IS NOT NULL OR rms_db IS NOT NULL OR peak_db IS NOT NULL
+                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v2 v2 WHERE v2.track_id = tracks.id)
+                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        tx.execute("DELETE FROM track_bpm_key_analysis_v2", [])?;
+        tx.execute("DELETE FROM track_bpm_key_analysis_v3", [])?;
+        tx.execute(
+            "UPDATE tracks SET
+               bpm = NULL, bpm_confidence = NULL, first_beat = NULL,
+               music_key = NULL, camelot = NULL, open_key = NULL, key_confidence = NULL,
+               energy = NULL, rms_db = NULL, peak_db = NULL,
+               analyzed_at = NULL, analysis_error = NULL",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(tracks)
+    }
+
+    pub fn waveform_cache_record_count(&self) -> Result<u64> {
+        let conn = self.db.conn()?;
+        conn.query_row("SELECT COUNT(*) FROM waveform_assets", [], |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    pub fn clear_waveform_cache_records(&self) -> Result<u64> {
+        let conn = self.db.conn()?;
+        let count = conn.query_row("SELECT COUNT(*) FROM waveform_assets", [], |row| {
+            row.get::<_, u64>(0)
+        })?;
+        conn.execute("DELETE FROM waveform_assets", [])?;
+        Ok(count)
     }
 
     // ------------------------------------------------------------ 读
@@ -594,7 +717,7 @@ impl LibraryService {
                 .take(limit as usize)
                 .collect();
             return Ok(TrackPage {
-                items: self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, page)?)?,
+                items: self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, page)?)?,
                 total,
                 offset,
                 limit,
@@ -636,7 +759,7 @@ impl LibraryService {
             .collect::<std::result::Result<_, _>>()?;
 
         Ok(TrackPage {
-            items: self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, rows)?)?,
+            items: self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, rows)?)?,
             total,
             offset,
             limit,
@@ -651,7 +774,7 @@ impl LibraryService {
             return Ok(None);
         };
         Ok(self
-            .attach_tags(&conn, self.apply_bpm_key_v2(&conn, vec![track])?)?
+            .attach_tags(&conn, self.apply_bpm_key_analysis(&conn, vec![track])?)?
             .into_iter()
             .next())
     }
@@ -665,7 +788,7 @@ impl LibraryService {
             return Ok(None);
         };
         Ok(self
-            .attach_tags(&conn, self.apply_bpm_key_v2(&conn, vec![track])?)?
+            .attach_tags(&conn, self.apply_bpm_key_analysis(&conn, vec![track])?)?
             .into_iter()
             .next())
     }
@@ -1015,97 +1138,98 @@ impl LibraryService {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(TrackPage {
-            items: self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, rows)?)?,
+            items: self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, rows)?)?,
             total,
             offset,
             limit,
         })
     }
 
-    /// OneLibrary 导出必须拿到完整顺序，不能受 HTTP 单页上限影响。
-    pub fn playlist_tracks(&self, playlist_id: i64) -> Result<Vec<Track>> {
-        let conn = self.db.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT tracks.* FROM playlist_items pi JOIN tracks ON tracks.id = pi.track_id \
-             WHERE pi.playlist_id = ? ORDER BY pi.position, tracks.id",
-        )?;
-        let rows = stmt
-            .query_map([playlist_id], |row| Ok(row_to_track(row)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, rows)?)?)
-    }
-
-    /// 把当前修订的 v2 BPM/Key 覆盖到 API 返回对象上，但不改 tracks 里的 v1。
+    /// 把当前 V3 BPM/Key 覆盖到 API 返回对象上；V3 缺失的字段依次回退 V2、V1。
     ///
-    /// 每个字段独立回退：例如 v2 只算出了 Key，BPM 仍沿用 v1；解码失败产生的
-    /// 空 v2 行也不会把一条原本完整的 v1 曲目显示成空白。
-    fn apply_bpm_key_v2(&self, conn: &Conn, mut tracks: Vec<Track>) -> Result<Vec<Track>> {
+    /// 迁移是逐曲完成的，因此同一页可以同时含 V3、V2 和 V1。每个字段独立回退，
+    /// 解码失败产生的空 V3 行不会把一条原本完整的旧曲目显示成空白。
+    fn apply_bpm_key_analysis(&self, conn: &Conn, mut tracks: Vec<Track>) -> Result<Vec<Track>> {
         if tracks.is_empty() {
             return Ok(tracks);
         }
-        let mut by_id: HashMap<i64, BpmKeyV2Overlay> = HashMap::new();
-        for chunk in tracks.chunks(900) {
-            let ids: Vec<i64> = chunk.iter().map(|track| track.id).collect();
-            let placeholders = vec!["?"; ids.len()].join(",");
-            let sql = format!(
-                "SELECT track_id, bpm, bpm_confidence, first_beat, beat_origin, beat_times_json, \
-                 downbeat_origin, downbeats_json, downbeat_confidence, music_key, camelot, open_key, \
-                 key_confidence FROM track_bpm_key_analysis_v2 \
-                 WHERE analyzer_revision = ? AND track_id IN ({placeholders})"
-            );
-            let mut params = Vec::with_capacity(ids.len() + 1);
-            params.push(SqlValue::Text(BPM_KEY_V2_REVISION.to_string()));
-            params.extend(ids.into_iter().map(SqlValue::Integer));
-            let mut stmt = conn.prepare(&sql)?;
-            for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    BpmKeyV2Overlay {
-                        bpm: row.get(1)?,
-                        bpm_confidence: row.get(2)?,
-                        first_beat: row.get(3)?,
-                        beat_origin: row.get(4)?,
-                        beat_times: serde_json::from_str(
-                            &row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                        )
-                        .unwrap_or_default(),
-                        downbeat_origin: row.get(6)?,
-                        downbeats: serde_json::from_str(
-                            &row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                        )
-                        .unwrap_or_default(),
-                        downbeat_confidence: row.get(8)?,
-                        key: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                        camelot: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-                        open_key: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                        key_confidence: row.get(12)?,
-                    },
-                ))
-            })? {
-                let (id, values) = row?;
-                by_id.insert(id, values);
+        // 先套 V2，再套当前 V3；后一层只覆盖自己确实产出的字段。
+        for (table, revision, generation) in [
+            ("track_bpm_key_analysis_v2", None, 2_u8),
+            ("track_bpm_key_analysis_v3", Some(BPM_KEY_V3_REVISION), 3_u8),
+        ] {
+            let mut by_id: HashMap<i64, BpmKeyOverlay> = HashMap::new();
+            for chunk in tracks.chunks(900) {
+                let ids: Vec<i64> = chunk.iter().map(|track| track.id).collect();
+                let placeholders = vec!["?"; ids.len()].join(",");
+                let revision_clause = if revision.is_some() {
+                    "analyzer_revision = ? AND "
+                } else {
+                    ""
+                };
+                let sql = format!(
+                    "SELECT track_id, bpm, bpm_confidence, first_beat, beat_origin, beat_times_json, \
+                     downbeat_origin, downbeats_json, downbeat_confidence, music_key, camelot, open_key, \
+                     key_confidence FROM {table} \
+                     WHERE {revision_clause}track_id IN ({placeholders})"
+                );
+                let mut params = Vec::with_capacity(ids.len() + usize::from(revision.is_some()));
+                if let Some(revision) = revision {
+                    params.push(SqlValue::Text(revision.to_string()));
+                }
+                params.extend(ids.into_iter().map(SqlValue::Integer));
+                let mut stmt = conn.prepare(&sql)?;
+                for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        BpmKeyOverlay {
+                            bpm: row.get(1)?,
+                            bpm_confidence: row.get(2)?,
+                            first_beat: row.get(3)?,
+                            beat_origin: row.get(4)?,
+                            beat_times: serde_json::from_str(
+                                &row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                            )
+                            .unwrap_or_default(),
+                            downbeat_origin: row.get(6)?,
+                            downbeats: serde_json::from_str(
+                                &row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                            )
+                            .unwrap_or_default(),
+                            downbeat_confidence: row.get(8)?,
+                            key: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                            camelot: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                            open_key: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                            key_confidence: row.get(12)?,
+                        },
+                    ))
+                })? {
+                    let (id, values) = row?;
+                    by_id.insert(id, values);
+                }
             }
-        }
-        for track in &mut tracks {
-            let Some(overlay) = by_id.remove(&track.id) else {
-                continue;
-            };
-            if overlay.bpm.is_some() {
-                track.bpm = overlay.bpm;
-                track.bpm_v2 = true;
-                track.bpm_confidence = overlay.bpm_confidence;
-                track.first_beat = overlay.first_beat;
-                track.beat_origin = overlay.beat_origin;
-                track.beat_times = overlay.beat_times;
-                track.downbeat_origin = overlay.downbeat_origin;
-                track.downbeats = overlay.downbeats;
-                track.downbeat_confidence = overlay.downbeat_confidence;
-            }
-            if !overlay.key.is_empty() {
-                track.music_key = overlay.key;
-                track.camelot = overlay.camelot.to_uppercase();
-                track.open_key = overlay.open_key;
-                track.key_confidence = overlay.key_confidence;
+            for track in &mut tracks {
+                let Some(overlay) = by_id.remove(&track.id) else {
+                    continue;
+                };
+                if overlay.bpm.is_some() {
+                    track.bpm = overlay.bpm;
+                    track.bpm_v2 = generation == 2;
+                    track.bpm_v3 = generation == 3;
+                    track.bpm_confidence = overlay.bpm_confidence;
+                    track.first_beat = overlay.first_beat;
+                    track.beat_origin = overlay.beat_origin;
+                    track.beat_times = overlay.beat_times;
+                    track.downbeat_origin = overlay.downbeat_origin;
+                    track.downbeats = overlay.downbeats;
+                    track.downbeat_confidence = overlay.downbeat_confidence;
+                }
+                if !overlay.key.is_empty() {
+                    track.music_key = overlay.key;
+                    track.camelot = overlay.camelot.to_uppercase();
+                    track.open_key = overlay.open_key;
+                    track.key_confidence = overlay.key_confidence;
+                }
             }
         }
         Ok(tracks)
@@ -1143,8 +1267,9 @@ impl LibraryService {
     // ------------------------------------------------------------ 写
 
     pub fn patch(&self, track_id: i64, patch: &TrackPatch) -> Result<Track> {
-        let conn = self.db.conn()?;
-        let exists: i64 = conn.query_row(
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction().context("开始曲目修改事务失败")?;
+        let exists: i64 = tx.query_row(
             "SELECT COUNT(*) FROM tracks WHERE id = ?",
             [track_id],
             |row| row.get(0),
@@ -1154,6 +1279,14 @@ impl LibraryService {
         // 列名全是这里写死的字面量，不来自外部输入
         let mut assignments: Vec<&str> = Vec::new();
         let mut values: Vec<SqlValue> = Vec::new();
+        if let Some(bpm) = patch.bpm {
+            anyhow::ensure!(
+                bpm.is_finite() && (20.0..=400.0).contains(&bpm),
+                "BPM 必须在 20 到 400 之间"
+            );
+            assignments.push("bpm = ?");
+            values.push(SqlValue::Real(bpm));
+        }
         if let Some(rating) = patch.rating {
             assignments.push("rating = ?");
             values.push(SqlValue::Integer(rating.clamp(0, 5)));
@@ -1209,13 +1342,32 @@ impl LibraryService {
             assignments.push("modified_at = ?");
             values.push(SqlValue::Text(stamp.clone()));
             values.push(SqlValue::Integer(track_id));
-            conn.execute(
+            tx.execute(
                 &format!("UPDATE tracks SET {} WHERE id = ?", assignments.join(", ")),
                 rusqlite::params_from_iter(values.iter()),
             )?;
         }
+        if patch.bpm.is_some() {
+            // A manual BPM edit becomes the source of truth. Keep analysed keys, but clear every
+            // generation's now-inconsistent tempo/grid so an overlay cannot hide the edit.
+            for (table, revision) in [
+                ("track_bpm_key_analysis_v2", BPM_KEY_V2_REVISION),
+                ("track_bpm_key_analysis_v3", BPM_KEY_V3_REVISION),
+            ] {
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET
+                           bpm = NULL, bpm_raw = NULL, bpm_confidence = NULL, first_beat = NULL,
+                           beat_origin = NULL, beat_times_json = '[]', downbeat_origin = NULL,
+                           downbeats_json = '[]', downbeat_confidence = NULL
+                         WHERE track_id = ? AND analyzer_revision = ?"
+                    ),
+                    rusqlite::params![track_id, revision],
+                )?;
+            }
+        }
         if let Some(tags) = &patch.tags {
-            conn.execute("DELETE FROM tags WHERE track_id = ?", [track_id])?;
+            tx.execute("DELETE FROM tags WHERE track_id = ?", [track_id])?;
             let mut cleaned: Vec<&str> = tags
                 .iter()
                 .map(|tag| tag.trim())
@@ -1224,19 +1376,20 @@ impl LibraryService {
             cleaned.sort();
             cleaned.dedup();
             for tag in cleaned {
-                conn.execute(
+                tx.execute(
                     "INSERT OR IGNORE INTO tags (track_id, tag) VALUES (?, ?)",
                     rusqlite::params![track_id, tag],
                 )?;
             }
             if assignments.is_empty() {
-                conn.execute(
+                tx.execute(
                     "UPDATE tracks SET modified_at = ? WHERE id = ?",
                     rusqlite::params![stamp, track_id],
                 )?;
             }
         }
 
+        tx.commit().context("提交曲目修改事务失败")?;
         // 先还连接再读回：`get` 要从池里再借一条，握着不放的话
         // 并发的 patch 会把池占满，表现是随机的"获取曲库连接失败"
         drop(conn);
@@ -1324,52 +1477,6 @@ impl LibraryService {
         self.get(track_id)?.context("刚重读的曲目查不到了")
     }
 
-    /// 把 DJ 曲库数据库中的可移植字段作为一个事务写入刚导入的本地记录。
-    /// 文件标签扫描与这份快照可能不同；外置数据库是这次显式导入的来源，因此由它
-    /// 覆盖同名字段。KDJ 私有分析（能量、置信度、拍点）不在此列，绝不清空。
-    pub fn apply_portable_metadata(
-        &self,
-        track_id: i64,
-        metadata: &PortableTrackMetadata,
-    ) -> Result<Track> {
-        let conn = self.db.conn()?;
-        let changed = conn.execute(
-            "UPDATE tracks SET title = ?, artist = ?, album = ?, genre = ?, year = ?, \
-             duration = COALESCE(?, duration), bitrate = COALESCE(?, bitrate), \
-             samplerate = COALESCE(?, samplerate), size = CASE WHEN ? > 0 THEN ? ELSE size END, \
-             bpm = COALESCE(?, bpm), music_key = CASE WHEN ? != '' THEN ? ELSE music_key END, \
-             camelot = CASE WHEN ? != '' THEN ? ELSE camelot END, \
-             open_key = CASE WHEN ? != '' THEN ? ELSE open_key END, \
-             rating = ?, comment = ?, modified_at = ? WHERE id = ?",
-            rusqlite::params![
-                metadata.title,
-                metadata.artist,
-                metadata.album,
-                metadata.genre,
-                metadata.year,
-                metadata.duration,
-                metadata.bitrate,
-                metadata.samplerate,
-                metadata.size,
-                metadata.size,
-                metadata.bpm,
-                metadata.music_key,
-                metadata.music_key,
-                metadata.camelot,
-                metadata.camelot,
-                metadata.open_key,
-                metadata.open_key,
-                metadata.rating.clamp(0, 5),
-                metadata.comment,
-                now_iso(),
-                track_id,
-            ],
-        )?;
-        anyhow::ensure!(changed == 1, "导入元数据对应的曲目不存在：{track_id}");
-        drop(conn);
-        self.get(track_id)?.context("导入元数据后的曲目查不到了")
-    }
-
     /// 写文件之后一律同步一次 stat，**哪怕写失败**：
     /// lofty 是"改完再落盘"，失败点可能在落盘之后，那时 mtime 已经变了。
     /// 只在成功路径上同步的话，这条失败会留下一个错的 mtime 埋在库里。
@@ -1395,13 +1502,33 @@ impl LibraryService {
         // 不支持回收站的网络盘上）就原样报错、什么都不动，用户看到的是
         // "没删成"而不是"库里没了文件还在"的半截状态。
         // 文件已经不在原地则视作无事可做——记录照删，这正是清理死条目的场景。
-        if disposal == FileDisposal::Trash {
+        let trash = if disposal == FileDisposal::Trash {
             let file = Path::new(&track.path);
             if file.exists() {
-                let _ = move_to_trash(file)?;
+                move_to_trash(file)?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        match self.delete_rows(&track, disposal) {
+            Ok(removed) => Ok(removed),
+            Err(error) => {
+                if let Some(handle) = trash.as_ref() {
+                    if let Err(rollback) = restore_from_trash(handle, Path::new(&track.path)) {
+                        anyhow::bail!(
+                            "删除曲库记录失败：{error:#}；文件也无法从回收站恢复：{rollback:#}"
+                        );
+                    }
+                } else if disposal == FileDisposal::Trash && !Path::new(&track.path).exists() {
+                    anyhow::bail!(
+                        "删除曲库记录失败：{error:#}；文件已进入系统回收站，但系统没有返回可恢复句柄"
+                    );
+                }
+                Err(error)
             }
         }
-        self.delete_rows(&track, disposal)
     }
 
     /// 删除并保留一份可撤回快照。
@@ -1422,7 +1549,20 @@ impl LibraryService {
         } else {
             None
         };
-        self.delete_rows(&track, disposal)?;
+        if let Err(error) = self.delete_rows(&track, disposal) {
+            if let Some(handle) = trash.as_ref() {
+                if let Err(rollback) = restore_from_trash(handle, Path::new(&track.path)) {
+                    anyhow::bail!(
+                        "删除曲库记录失败：{error:#}；文件也无法从回收站恢复：{rollback:#}"
+                    );
+                }
+            } else if disposal == FileDisposal::Trash && !Path::new(&track.path).exists() {
+                anyhow::bail!(
+                    "删除曲库记录失败：{error:#}；文件已进入系统回收站，但系统没有返回可恢复句柄"
+                );
+            }
+            return Err(error);
+        }
 
         let undo = if disposal != FileDisposal::Remove
             && (trash.is_some() || Path::new(&track.path).is_file())
@@ -1449,10 +1589,12 @@ impl LibraryService {
     }
 
     fn delete_rows(&self, track: &Track, disposal: FileDisposal) -> Result<bool> {
-        let conn = self.db.conn()?;
-        conn.execute("DELETE FROM tracks WHERE id = ?", [track.id])?;
-        conn.execute("DELETE FROM tags WHERE track_id = ?", [track.id])?;
-        conn.execute("DELETE FROM playlist_items WHERE track_id = ?", [track.id])?;
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction().context("开始删除曲目事务失败")?;
+        tx.execute("DELETE FROM tracks WHERE id = ?", [track.id])?;
+        tx.execute("DELETE FROM tags WHERE track_id = ?", [track.id])?;
+        tx.execute("DELETE FROM playlist_items WHERE track_id = ?", [track.id])?;
+        tx.commit().context("提交删除曲目事务失败")?;
         if disposal == FileDisposal::Remove {
             // 直接删除维持宽容语义：文件删不掉（权限/已被移走）不该让接口失败，
             // 记录已从库里移除即可
@@ -1587,8 +1729,9 @@ impl LibraryService {
     pub fn forget_under(&self, dir: &Path) -> Result<Vec<i64>> {
         let prefix = format!("{}{SEP}", normalize_path(dir));
         let like = format!("{}%", escape_like(&prefix));
-        let conn = self.db.conn()?;
-        let mut stmt = conn.prepare("SELECT id FROM tracks WHERE path LIKE ? ESCAPE '\\'")?;
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction().context("开始移出曲库事务失败")?;
+        let mut stmt = tx.prepare("SELECT id FROM tracks WHERE path LIKE ? ESCAPE '\\'")?;
         let ids: Vec<i64> = stmt
             .query_map([&like], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1596,17 +1739,18 @@ impl LibraryService {
         if ids.is_empty() {
             return Ok(ids);
         }
-        conn.execute(
+        tx.execute(
             "DELETE FROM tags WHERE track_id IN \
              (SELECT id FROM tracks WHERE path LIKE ? ESCAPE '\\')",
             [&like],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM playlist_items WHERE track_id IN \
              (SELECT id FROM tracks WHERE path LIKE ? ESCAPE '\\')",
             [&like],
         )?;
-        conn.execute("DELETE FROM tracks WHERE path LIKE ? ESCAPE '\\'", [&like])?;
+        tx.execute("DELETE FROM tracks WHERE path LIKE ? ESCAPE '\\'", [&like])?;
+        tx.commit().context("提交移出曲库事务失败")?;
         Ok(ids)
     }
 
@@ -1921,6 +2065,103 @@ impl LibraryService {
         Ok(())
     }
 
+    /// 原子保存一首曲目的 BPM/Key V3，并立即退役已被 V3 替代的旧字段。
+    ///
+    /// V3 写入、V1 清列和 V2 清理共享同一个 SQLite 事务；任一步失败都会让这一首
+    /// 完整回滚。BPM 与 Key 可分别迁移，尚未成功生成的类别继续由 V2/V1 兜底。
+    pub fn save_bpm_key_analysis_v3(&self, track_id: i64, result: &AnalysisResult) -> Result<()> {
+        let mut conn = self.db.conn()?;
+        let beat_times = serde_json::to_string(&result.beat_times).context("序列化 v3 拍点失败")?;
+        let downbeats = serde_json::to_string(&result.downbeats).context("序列化 v3 小节拍失败")?;
+        let chroma = serde_json::to_string(&result.chroma).context("序列化 v3 chroma 失败")?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO track_bpm_key_analysis_v3 (
+               track_id, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
+               beat_origin, beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence,
+               music_key, key_short, camelot, open_key, key_confidence,
+               chroma_json, analyzed_at, analysis_error
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(track_id) DO UPDATE SET
+               analyzer_revision = excluded.analyzer_revision,
+               bpm = excluded.bpm,
+               bpm_raw = excluded.bpm_raw,
+               bpm_confidence = excluded.bpm_confidence,
+               first_beat = excluded.first_beat,
+               beat_origin = excluded.beat_origin,
+               beat_times_json = excluded.beat_times_json,
+               downbeat_origin = excluded.downbeat_origin,
+               downbeats_json = excluded.downbeats_json,
+               downbeat_confidence = excluded.downbeat_confidence,
+               music_key = excluded.music_key,
+               key_short = excluded.key_short,
+               camelot = excluded.camelot,
+               open_key = excluded.open_key,
+               key_confidence = excluded.key_confidence,
+               chroma_json = excluded.chroma_json,
+               analyzed_at = excluded.analyzed_at,
+               analysis_error = excluded.analysis_error",
+            rusqlite::params![
+                track_id,
+                BPM_KEY_V3_REVISION,
+                result.bpm,
+                result.bpm_raw,
+                result.bpm_confidence,
+                result.first_beat,
+                result.beat_origin,
+                beat_times,
+                result.downbeat_origin,
+                downbeats,
+                result.downbeat_confidence,
+                result.key,
+                result.key_short,
+                result.camelot.to_uppercase(),
+                result.open_key,
+                result.key_confidence,
+                chroma,
+                now_iso(),
+                result.errors.join("; "),
+            ],
+        )?;
+
+        if result.bpm.is_some() {
+            tx.execute(
+                "UPDATE tracks SET bpm = NULL, bpm_confidence = NULL, first_beat = NULL WHERE id = ?",
+                [track_id],
+            )?;
+            tx.execute(
+                "UPDATE track_bpm_key_analysis_v2 SET
+                   bpm = NULL, bpm_raw = NULL, bpm_confidence = NULL, first_beat = NULL,
+                   beat_origin = NULL, beat_times_json = '[]', downbeat_origin = NULL,
+                   downbeats_json = '[]', downbeat_confidence = NULL
+                 WHERE track_id = ?",
+                [track_id],
+            )?;
+        }
+        if !result.key.is_empty() {
+            tx.execute(
+                "UPDATE tracks SET music_key = NULL, camelot = NULL, open_key = NULL, \
+                 key_confidence = NULL WHERE id = ?",
+                [track_id],
+            )?;
+            tx.execute(
+                "UPDATE track_bpm_key_analysis_v2 SET
+                   music_key = NULL, key_short = NULL, camelot = NULL, open_key = NULL,
+                   key_confidence = NULL, chroma_json = '[]'
+                 WHERE track_id = ?",
+                [track_id],
+            )?;
+        }
+        // 两类旧结果都已被替代时立即删除 V2 行；若只有一类成功，则只保留另一类兜底。
+        tx.execute(
+            "DELETE FROM track_bpm_key_analysis_v2
+             WHERE track_id = ? AND bpm IS NULL AND TRIM(COALESCE(music_key, '')) = ''",
+            [track_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 返回需要分析的 track id。
     ///
     /// **默认只挑 `analyzed_at IS NULL` 的**——这条是硬约束：Rust 版和 Python 版的
@@ -2055,6 +2296,87 @@ impl LibraryService {
             .collect())
     }
 
+    /// 返回需要生成当前 BPM/Key V3 修订的曲目 id。
+    ///
+    /// 是否缺失只看 V3 表；旧 V2/V1 仅作为迁移期间的读取兜底，不会阻止自动升级。
+    pub fn pending_bpm_key_analysis_v3_ids(
+        &self,
+        track_ids: Option<&[i64]>,
+        force: bool,
+        limit: Option<usize>,
+        folder: Option<&str>,
+    ) -> Result<Vec<i64>> {
+        let conn = self.db.conn()?;
+        let needs_v3 = if force {
+            ""
+        } else {
+            " AND (v3.track_id IS NULL OR v3.analyzer_revision != ?)"
+        };
+
+        let Some(wanted) = track_ids else {
+            let folder = folder.map(str::trim).filter(|value| !value.is_empty());
+            let folder_clause = if folder.is_some() {
+                " AND tracks.path LIKE ? ESCAPE '\\'"
+            } else {
+                ""
+            };
+            let sql = format!(
+                "SELECT tracks.id FROM tracks
+                 LEFT JOIN track_bpm_key_analysis_v3 v3 ON v3.track_id = tracks.id
+                 WHERE 1 = 1{needs_v3}{folder_clause}
+                 ORDER BY tracks.added_at DESC, tracks.id DESC{}",
+                if limit.is_some() { " LIMIT ?" } else { "" }
+            );
+            let mut params: Vec<SqlValue> = Vec::new();
+            if !force {
+                params.push(SqlValue::Text(BPM_KEY_V3_REVISION.to_string()));
+            }
+            if let Some(folder) = folder {
+                let prefix = format!("{}{SEP}", normalize_path(Path::new(folder)));
+                params.push(SqlValue::Text(format!("{}%", escape_like(&prefix))));
+            }
+            if let Some(limit) = limit {
+                params.push(SqlValue::Integer(limit.clamp(1, 2000) as i64));
+            }
+            let mut stmt = conn.prepare(&sql)?;
+            return stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into);
+        };
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut found: HashSet<i64> = Default::default();
+        for chunk in wanted.chunks(899) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT tracks.id FROM tracks
+                 LEFT JOIN track_bpm_key_analysis_v3 v3 ON v3.track_id = tracks.id
+                 WHERE tracks.id IN ({placeholders}){needs_v3}"
+            );
+            let mut params: Vec<SqlValue> = chunk.iter().copied().map(SqlValue::Integer).collect();
+            if !force {
+                params.push(SqlValue::Text(BPM_KEY_V3_REVISION.to_string()));
+            }
+            let mut stmt = conn.prepare(&sql)?;
+            for row in
+                stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?
+            {
+                found.insert(row?);
+            }
+        }
+        let max = limit.unwrap_or(usize::MAX);
+        let mut seen: HashSet<i64> = Default::default();
+        Ok(wanted
+            .iter()
+            .copied()
+            .filter(|id| found.contains(id) && seen.insert(*id))
+            .take(max)
+            .collect())
+    }
+
     // ------------------------------------------------------------ 和声推荐
 
     /// Camelot 兼容 + BPM 接近的候选，score 越大越靠前。
@@ -2075,13 +2397,60 @@ impl LibraryService {
         let Some(source) = self.get(track_id)? else {
             return Ok(Vec::new());
         };
-        if source.camelot.is_empty() {
+        self.harmonic_matches_for_profile_excluding(
+            &source.camelot,
+            source.bpm,
+            bpm_tolerance,
+            limit,
+            wide,
+            folder,
+            Some(track_id),
+        )
+    }
+
+    /// 给没有本地曲库 id 的临时来源（例如在线试听）按分析结果推荐本地曲目。
+    ///
+    /// 查询与本地曲目的推荐共用同一套 Camelot/BPM 关系、目录范围、排序和去重；
+    /// 唯一差异是来源本身不在 tracks 表里，因此没有需要排除的本地 id。
+    pub fn harmonic_matches_for_profile(
+        &self,
+        camelot: &str,
+        bpm: Option<f64>,
+        bpm_tolerance: f64,
+        limit: usize,
+        wide: bool,
+        folder: &str,
+    ) -> Result<Vec<HarmonicMatch>> {
+        self.harmonic_matches_for_profile_excluding(
+            camelot,
+            bpm,
+            bpm_tolerance,
+            limit,
+            wide,
+            folder,
+            None,
+        )
+    }
+
+    fn harmonic_matches_for_profile_excluding(
+        &self,
+        camelot: &str,
+        bpm: Option<f64>,
+        bpm_tolerance: f64,
+        limit: usize,
+        wide: bool,
+        folder: &str,
+        exclude_track_id: Option<i64>,
+    ) -> Result<Vec<HarmonicMatch>> {
+        let source_camelot = camelot.trim().to_ascii_uppercase();
+        if source_camelot.is_empty() {
             return Ok(Vec::new());
         }
-        let relations = camelot_relations(&source.camelot, wide);
+        let relations = camelot_relations(&source_camelot, wide);
         if relations.is_empty() {
             return Ok(Vec::new());
         }
+        let source_bpm = bpm.filter(|value| value.is_finite() && *value > 0.0);
         let tolerance = if bpm_tolerance > 0.0 {
             bpm_tolerance
         } else {
@@ -2097,10 +2466,15 @@ impl LibraryService {
             .iter()
             .map(|(code, _)| SqlValue::Text(code.clone()))
             .collect();
-        params.push(SqlValue::Integer(track_id));
+        let exclude_clause = if let Some(track_id) = exclude_track_id {
+            params.push(SqlValue::Integer(track_id));
+            " AND id != ?"
+        } else {
+            ""
+        };
 
         let mut bpm_clause = String::new();
-        if let Some(bpm) = source.bpm.filter(|value| *value > 0.0) {
+        if let Some(bpm) = source_bpm {
             // BPM 范围下推到 SQL，别把整个兼容调的曲目都拉进内存再筛。
             // BETWEEN 遇到 NULL 为假，顺带把没分析出 BPM 的候选也挡掉了。
             let (low, high) = (bpm - tolerance, bpm + tolerance);
@@ -2132,14 +2506,15 @@ impl LibraryService {
         let effective_camelot = effective_bpm_key_column("camelot");
         let mut stmt = conn.prepare(&format!(
             "SELECT * FROM tracks WHERE UPPER(COALESCE(({effective_camelot}), '')) IN ({placeholders}) \
-             AND id != ?{bpm_clause}{folder_clause}"
+             {exclude_clause}{bpm_clause}{folder_clause}"
         ))?;
         let candidates: Vec<Track> = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok(row_to_track(row))
             })?
             .collect::<std::result::Result<_, _>>()?;
-        let candidates = self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, candidates)?)?;
+        let candidates =
+            self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, candidates)?)?;
 
         let relation_of: HashMap<&str, HarmonicRelation> = relations
             .iter()
@@ -2148,10 +2523,11 @@ impl LibraryService {
 
         let mut matches: Vec<HarmonicMatch> = Vec::new();
         for track in candidates {
-            let Some(relation) = relation_of.get(track.camelot.as_str()).copied() else {
+            let candidate_camelot = track.camelot.trim().to_ascii_uppercase();
+            let Some(relation) = relation_of.get(candidate_camelot.as_str()).copied() else {
                 continue;
             };
-            let (ratio, delta) = match (source.bpm, track.bpm) {
+            let (ratio, delta) = match (source_bpm, track.bpm) {
                 (Some(source_bpm), Some(candidate_bpm)) if source_bpm > 0.0 => {
                     match best_tempo(candidate_bpm, source_bpm, tolerance) {
                         Some(aligned) => aligned,
@@ -2217,7 +2593,15 @@ impl LibraryService {
 
     pub fn stats(&self) -> Result<LibraryStats> {
         let conn = self.db.conn()?;
-        let (total, analyzed, bpm_key_v2_analyzed, total_duration, total_size): (
+        let (
+            total,
+            analyzed,
+            bpm_key_v2_analyzed,
+            bpm_key_v3_analyzed,
+            total_duration,
+            total_size,
+        ): (
+            i64,
             i64,
             i64,
             i64,
@@ -2226,16 +2610,20 @@ impl LibraryService {
         ) = conn.query_row(
             "SELECT COUNT(*), SUM(CASE WHEN tracks.analyzed_at IS NOT NULL THEN 1 ELSE 0 END),
              SUM(CASE WHEN v2.analyzer_revision = ? THEN 1 ELSE 0 END),
+             SUM(CASE WHEN v3.analyzer_revision = ? THEN 1 ELSE 0 END),
              COALESCE(SUM(tracks.duration), 0), COALESCE(SUM(tracks.size), 0)
-             FROM tracks LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id",
-            [BPM_KEY_V2_REVISION],
+             FROM tracks
+             LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id
+             LEFT JOIN track_bpm_key_analysis_v3 v3 ON v3.track_id = tracks.id",
+            rusqlite::params![BPM_KEY_V2_REVISION, BPM_KEY_V3_REVISION],
             |row| {
                 Ok((
                     row.get(0)?,
                     row.get::<_, Option<i64>>(1)?.unwrap_or(0),
                     row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    row.get(3)?,
+                    row.get::<_, Option<i64>>(3)?.unwrap_or(0),
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )?;
@@ -2349,6 +2737,9 @@ impl LibraryService {
             bpm_key_v2_analyzed,
             bpm_key_v2_pending: total.saturating_sub(bpm_key_v2_analyzed),
             bpm_key_v2_revision: BPM_KEY_V2_REVISION.to_string(),
+            bpm_key_v3_analyzed,
+            bpm_key_v3_pending: total.saturating_sub(bpm_key_v3_analyzed),
+            bpm_key_v3_revision: BPM_KEY_V3_REVISION.to_string(),
             total_duration,
             total_size,
             energy_median,
@@ -2446,9 +2837,10 @@ impl LibraryService {
     pub fn rebase_paths(&self, old_dir: &Path, new_dir: &Path) -> Result<Vec<i64>> {
         let old_prefix = format!("{}{SEP}", normalize_path(old_dir));
         let new_prefix = format!("{}{SEP}", normalize_path(new_dir));
-        let conn = self.db.conn()?;
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction().context("开始路径重定位事务失败")?;
 
-        let mut stmt = conn.prepare("SELECT id, path FROM tracks WHERE path LIKE ? ESCAPE '\\'")?;
+        let mut stmt = tx.prepare("SELECT id, path FROM tracks WHERE path LIKE ? ESCAPE '\\'")?;
         let rows: Vec<(i64, String)> = stmt
             .query_map([format!("{}%", escape_like(&old_prefix))], |row| {
                 Ok((row.get(0)?, row.get(1)?))
@@ -2461,11 +2853,12 @@ impl LibraryService {
         let stamp = now_iso();
         for (id, path) in &rows {
             let rebased = format!("{new_prefix}{}", &path[old_prefix.len()..]);
-            conn.execute(
+            tx.execute(
                 "UPDATE tracks SET path = ?, modified_at = ? WHERE id = ?",
                 rusqlite::params![rebased, stamp, id],
             )?;
         }
+        tx.commit().context("提交路径重定位事务失败")?;
         Ok(rows.into_iter().map(|(id, _)| id).collect())
     }
 
@@ -2484,9 +2877,10 @@ impl LibraryService {
             .map(|name| format!("{} = ?", name.trim()))
             .collect();
 
-        let conn = self.db.conn()?;
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction().context("开始复制曲目元数据事务失败")?;
         let values: Vec<SqlValue> = {
-            let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM tracks WHERE id = ?"))?;
+            let mut stmt = tx.prepare(&format!("SELECT {COLUMNS} FROM tracks WHERE id = ?"))?;
             let mut rows = stmt.query([source_id])?;
             let Some(row) = rows.next()? else {
                 return Ok(());
@@ -2499,43 +2893,48 @@ impl LibraryService {
         let mut params = values;
         params.push(SqlValue::Text(now_iso()));
         params.push(SqlValue::Integer(target_id));
-        conn.execute(
+        tx.execute(
             &format!(
                 "UPDATE tracks SET {}, modified_at = ? WHERE id = ?",
                 assignments.join(", ")
             ),
             rusqlite::params_from_iter(params.iter()),
         )?;
-        conn.execute(
-            "INSERT INTO track_bpm_key_analysis_v2 (
-               track_id, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
-               beat_origin, beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence,
-               music_key, key_short, camelot, open_key, key_confidence,
-               chroma_json, analyzed_at, analysis_error
-             )
-             SELECT ?, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
-               beat_origin, beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence,
-               music_key, key_short, camelot, open_key, key_confidence,
-               chroma_json, analyzed_at, analysis_error
-             FROM track_bpm_key_analysis_v2 WHERE track_id = ?
-             ON CONFLICT(track_id) DO UPDATE SET
-               analyzer_revision = excluded.analyzer_revision,
-               bpm = excluded.bpm, bpm_raw = excluded.bpm_raw,
-               bpm_confidence = excluded.bpm_confidence, first_beat = excluded.first_beat,
-               beat_origin = excluded.beat_origin, beat_times_json = excluded.beat_times_json,
-               downbeat_origin = excluded.downbeat_origin, downbeats_json = excluded.downbeats_json,
-               downbeat_confidence = excluded.downbeat_confidence, music_key = excluded.music_key,
-               key_short = excluded.key_short, camelot = excluded.camelot,
-               open_key = excluded.open_key, key_confidence = excluded.key_confidence,
-               chroma_json = excluded.chroma_json, analyzed_at = excluded.analyzed_at,
-               analysis_error = excluded.analysis_error",
-            rusqlite::params![target_id, source_id],
-        )?;
-        conn.execute("DELETE FROM tags WHERE track_id = ?", [target_id])?;
-        conn.execute(
+        for table in ["track_bpm_key_analysis_v2", "track_bpm_key_analysis_v3"] {
+            tx.execute(
+                &format!(
+                    "INSERT INTO {table} (
+                       track_id, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
+                       beat_origin, beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence,
+                       music_key, key_short, camelot, open_key, key_confidence,
+                       chroma_json, analyzed_at, analysis_error
+                     )
+                     SELECT ?, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
+                       beat_origin, beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence,
+                       music_key, key_short, camelot, open_key, key_confidence,
+                       chroma_json, analyzed_at, analysis_error
+                     FROM {table} WHERE track_id = ?
+                     ON CONFLICT(track_id) DO UPDATE SET
+                       analyzer_revision = excluded.analyzer_revision,
+                       bpm = excluded.bpm, bpm_raw = excluded.bpm_raw,
+                       bpm_confidence = excluded.bpm_confidence, first_beat = excluded.first_beat,
+                       beat_origin = excluded.beat_origin, beat_times_json = excluded.beat_times_json,
+                       downbeat_origin = excluded.downbeat_origin, downbeats_json = excluded.downbeats_json,
+                       downbeat_confidence = excluded.downbeat_confidence, music_key = excluded.music_key,
+                       key_short = excluded.key_short, camelot = excluded.camelot,
+                       open_key = excluded.open_key, key_confidence = excluded.key_confidence,
+                       chroma_json = excluded.chroma_json, analyzed_at = excluded.analyzed_at,
+                       analysis_error = excluded.analysis_error"
+                ),
+                rusqlite::params![target_id, source_id],
+            )?;
+        }
+        tx.execute("DELETE FROM tags WHERE track_id = ?", [target_id])?;
+        tx.execute(
             "INSERT OR IGNORE INTO tags (track_id, tag) SELECT ?, tag FROM tags WHERE track_id = ?",
             rusqlite::params![target_id, source_id],
         )?;
+        tx.commit().context("提交复制曲目元数据事务失败")?;
         Ok(())
     }
 
@@ -2602,6 +3001,7 @@ fn row_to_track(row: &Row) -> Track {
             .unwrap_or(0),
         bpm: row.get("bpm").ok().flatten(),
         bpm_v2: false,
+        bpm_v3: false,
         bpm_confidence: row.get("bpm_confidence").ok().flatten(),
         first_beat: row.get("first_beat").ok().flatten(),
         beat_origin: None,
@@ -2718,51 +3118,6 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    #[test]
-    fn portable_metadata_updates_shared_fields_without_erasing_kdj_analysis() {
-        let service = service();
-        let id = insert(
-            &service,
-            Row {
-                path: "/lib/portable.mp3",
-                title: "file tag title",
-                ..Row::default()
-            },
-        );
-        service
-            .db()
-            .conn()
-            .unwrap()
-            .execute(
-                "UPDATE tracks SET energy = 7, key_confidence = 0.91 WHERE id = ?",
-                [id],
-            )
-            .unwrap();
-        let metadata = PortableTrackMetadata {
-            title: "OneLibrary title".into(),
-            artist: "Artist".into(),
-            bpm: Some(128.5),
-            music_key: "F# M".into(),
-            camelot: "2B".into(),
-            open_key: "7d".into(),
-            rating: 4,
-            comment: "portable".into(),
-            ..PortableTrackMetadata::default()
-        };
-
-        let track = service.apply_portable_metadata(id, &metadata).unwrap();
-        assert_eq!(track.title, "OneLibrary title");
-        assert_eq!(track.artist, "Artist");
-        assert_eq!(track.bpm, Some(128.5));
-        assert_eq!(track.music_key, "F# M");
-        assert_eq!(track.camelot, "2B");
-        assert_eq!(track.open_key, "7d");
-        assert_eq!(track.rating, 4);
-        assert_eq!(track.comment, "portable");
-        assert_eq!(track.energy, Some(7));
-        assert_eq!(track.key_confidence, Some(0.91));
-    }
-
     fn query(folder: &str, deep: bool) -> TrackQuery {
         TrackQuery {
             folder: folder.to_string(),
@@ -2774,6 +3129,71 @@ mod tests {
 
     fn paths(page: &TrackPage) -> Vec<String> {
         page.items.iter().map(|t| t.path.clone()).collect()
+    }
+
+    #[test]
+    fn cache_overview_clears_only_rebuildable_analysis_data() {
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: "/lib/cache-overview.mp3",
+                title: "Keep me",
+                camelot: "8A",
+                bpm: Some(128.0),
+                analyzed: true,
+            },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "UPDATE tracks SET music_key = 'A minor', open_key = '1m', energy = 8,
+             rms_db = -10.5, peak_db = -0.8, rating = 4, comment = 'keep', cue_ms = 1250
+             WHERE id = ?",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_bpm_key_analysis_v3 (
+               track_id, analyzer_revision, bpm, beat_times_json, music_key, camelot,
+               chroma_json, analyzed_at
+             ) VALUES (?, 'cache-test', 128.0, '[0.1,0.6]', 'A minor', '8A',
+               '[0.1,0.2]', 'now')",
+            [id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let usage = service.basic_analysis_cache_usage().unwrap();
+        assert_eq!(usage.tracks, 1);
+        assert!(usage.bytes > 0);
+        assert_eq!(service.clear_basic_analysis_cache().unwrap(), 1);
+        assert_eq!(
+            service.basic_analysis_cache_usage().unwrap(),
+            BasicAnalysisCacheUsage::default()
+        );
+
+        let conn = service.db().conn().unwrap();
+        let preserved: (String, i64, String, Option<i64>, i64) = conn
+            .query_row(
+                "SELECT title, rating, comment, cue_ms,
+                   (SELECT COUNT(*) FROM track_bpm_key_analysis_v3 WHERE track_id = tracks.id)
+                 FROM tracks WHERE id = ?",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            preserved,
+            ("Keep me".into(), 4, "keep".into(), Some(1250), 0)
+        );
     }
 
     #[test]
@@ -3223,6 +3643,96 @@ mod tests {
     }
 
     #[test]
+    fn forget_under_rolls_back_tags_and_playlist_membership_on_failure() {
+        let service = service();
+        let path = format!("{ROOT}{SEP}set{SEP}rollback.mp3");
+        let id = insert(
+            &service,
+            Row {
+                path: &path,
+                ..Default::default()
+            },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute("INSERT INTO tags (track_id, tag) VALUES (?, 'keep')", [id])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO playlists (name, note, created_at) VALUES ('set', '', 'now')",
+            [],
+        )
+        .unwrap();
+        let playlist_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO playlist_items (playlist_id, track_id, position) VALUES (?, ?, 1)",
+            rusqlite::params![playlist_id, id],
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TEMP TRIGGER fail_forget BEFORE DELETE ON tracks
+             WHEN OLD.id = {id} BEGIN SELECT RAISE(ABORT, 'forced forget failure'); END;"
+        ))
+        .unwrap();
+        drop(conn);
+
+        let folder = format!("{ROOT}{SEP}set");
+        assert!(service.forget_under(Path::new(&folder)).is_err());
+
+        let conn = service.db().conn().unwrap();
+        let counts: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM tracks WHERE id = ?),
+                   (SELECT COUNT(*) FROM tags WHERE track_id = ?),
+                   (SELECT COUNT(*) FROM playlist_items WHERE track_id = ?)",
+                rusqlite::params![id, id, id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1, 1), "失败必须恢复整份用户整理数据");
+    }
+
+    #[test]
+    fn delete_rolls_back_every_user_row_when_one_table_fails() {
+        let service = service();
+        let id = insert(&service, Row::default());
+        let conn = service.db().conn().unwrap();
+        conn.execute("INSERT INTO tags (track_id, tag) VALUES (?, 'keep')", [id])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO playlists (name, note, created_at) VALUES ('delete', '', 'now')",
+            [],
+        )
+        .unwrap();
+        let playlist_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO playlist_items (playlist_id, track_id, position) VALUES (?, ?, 1)",
+            rusqlite::params![playlist_id, id],
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TEMP TRIGGER fail_tag_delete BEFORE DELETE ON tags
+             WHEN OLD.track_id = {id} BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END;"
+        ))
+        .unwrap();
+        drop(conn);
+
+        assert!(service.delete(id, FileDisposal::Keep).is_err());
+
+        let conn = service.db().conn().unwrap();
+        let counts: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM tracks WHERE id = ?),
+                   (SELECT COUNT(*) FROM tags WHERE track_id = ?),
+                   (SELECT COUNT(*) FROM playlist_items WHERE track_id = ?)",
+                rusqlite::params![id, id, id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1, 1), "任一删除失败都必须回滚整条曲目");
+    }
+
+    #[test]
     fn paging_clamps_limit_and_offset() {
         let service = service();
         for index in 0..5 {
@@ -3369,6 +3879,76 @@ mod tests {
             service.patch(id + 999, &TrackPatch::default()).is_err(),
             "不存在的 id 要报错"
         );
+    }
+
+    #[test]
+    fn patch_rolls_back_track_fields_when_replacing_tags_fails() {
+        let service = service();
+        let id = insert(&service, Row::default());
+        let conn = service.db().conn().unwrap();
+        conn.execute("INSERT INTO tags (track_id, tag) VALUES (?, 'keep')", [id])
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_tag_insert BEFORE INSERT ON tags
+             WHEN NEW.tag = 'boom' BEGIN SELECT RAISE(ABORT, 'forced tag failure'); END;",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(service
+            .patch(
+                id,
+                &TrackPatch {
+                    rating: Some(5),
+                    tags: Some(vec!["boom".into()]),
+                    ..Default::default()
+                },
+            )
+            .is_err());
+
+        let track = service.get(id).unwrap().unwrap();
+        assert_eq!(track.rating, 0);
+        assert_eq!(track.tags, vec!["keep"], "标签删除也必须被回滚");
+    }
+
+    #[test]
+    fn manual_bpm_patch_wins_over_v2_without_discarding_the_key() {
+        let service = service();
+        let id = insert(&service, Row::default());
+        service
+            .save_bpm_key_analysis_v2(
+                id,
+                &AnalysisResult {
+                    bpm: Some(128.0),
+                    bpm_raw: Some(127.98),
+                    bpm_confidence: Some(0.94),
+                    first_beat: Some(0.12),
+                    beat_origin: Some(0.12),
+                    beat_times: vec![0.12, 0.58875],
+                    key: "E minor".into(),
+                    camelot: "9A".into(),
+                    open_key: "4m".into(),
+                    key_confidence: Some(0.88),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let track = service
+            .patch(
+                id,
+                &TrackPatch {
+                    bpm: Some(126.5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(track.bpm, Some(126.5));
+        assert!(!track.bpm_v2);
+        assert!(track.beat_times.is_empty());
+        assert_eq!(track.music_key, "E minor");
+        assert_eq!(track.camelot, "9A");
     }
 
     #[test]
@@ -4115,6 +4695,210 @@ mod tests {
     }
 
     #[test]
+    fn v3_migrates_each_track_atomically_and_retires_replaced_v2_and_v1_data() {
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: "/lib/v3-atomic.mp3",
+                camelot: "8A",
+                bpm: Some(120.0),
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        let v2 = AnalysisResult {
+            bpm: Some(119.96),
+            bpm_raw: Some(89.67),
+            bpm_confidence: Some(0.95),
+            key: "E minor".into(),
+            key_short: "Em".into(),
+            camelot: "9A".into(),
+            open_key: "4m".into(),
+            key_confidence: Some(0.85),
+            ..Default::default()
+        };
+        service.save_bpm_key_analysis_v2(id, &v2).unwrap();
+        let conn = service.db().conn().unwrap();
+        // 模拟升级前仍带重复 V1 列的旧库，同时保留不属于 BPM/Key 的能量结果。
+        conn.execute(
+            "UPDATE tracks SET bpm = 120, bpm_confidence = 0.7, first_beat = 0.2,
+             music_key = 'A minor', camelot = '8A', open_key = '1m', key_confidence = 0.7,
+             energy = 8 WHERE id = ?",
+            [id],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            service
+                .pending_bpm_key_analysis_v3_ids(Some(&[id]), false, None, None)
+                .unwrap(),
+            vec![id]
+        );
+        let before = service.get(id).unwrap().unwrap();
+        assert_eq!(before.bpm, Some(119.96));
+        assert!(before.bpm_v2);
+        assert!(!before.bpm_v3);
+
+        let v3 = AnalysisResult {
+            bpm: Some(180.02),
+            bpm_raw: Some(89.62),
+            bpm_confidence: Some(0.79),
+            first_beat: Some(0.12),
+            beat_origin: Some(0.12),
+            beat_times: vec![0.12, 0.453],
+            key: "F minor".into(),
+            key_short: "Fm".into(),
+            camelot: "4A".into(),
+            open_key: "9m".into(),
+            key_confidence: Some(0.9),
+            ..Default::default()
+        };
+
+        // 人为让最后一步失败，证明 V3 写入和两代清理不是分开的提交。
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_v3_atomic_cleanup BEFORE DELETE ON track_bpm_key_analysis_v2
+                 WHEN OLD.track_id = {id} BEGIN SELECT RAISE(ABORT, 'forced cleanup failure'); END;"
+            ))
+            .unwrap();
+        assert!(service.save_bpm_key_analysis_v3(id, &v3).is_err());
+        let conn = service.db().conn().unwrap();
+        let rolled_back: (i64, Option<f64>, Option<String>, Option<f64>) = conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM track_bpm_key_analysis_v3 WHERE track_id = tracks.id),
+                   (SELECT bpm FROM track_bpm_key_analysis_v2 WHERE track_id = tracks.id),
+                   (SELECT music_key FROM track_bpm_key_analysis_v2 WHERE track_id = tracks.id),
+                   tracks.bpm
+                 FROM tracks WHERE id = ?",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            rolled_back,
+            (0, Some(119.96), Some("E minor".into()), Some(120.0))
+        );
+        conn.execute_batch("DROP TRIGGER fail_v3_atomic_cleanup")
+            .unwrap();
+        drop(conn);
+
+        service.save_bpm_key_analysis_v3(id, &v3).unwrap();
+        let conn = service.db().conn().unwrap();
+        let migrated: (
+            String,
+            Option<f64>,
+            i64,
+            Option<f64>,
+            Option<String>,
+            Option<i64>,
+        ) = conn
+            .query_row(
+                "SELECT v3.analyzer_revision, v3.bpm,
+                   (SELECT COUNT(*) FROM track_bpm_key_analysis_v2 WHERE track_id = tracks.id),
+                   tracks.bpm, tracks.music_key, tracks.energy
+                 FROM tracks JOIN track_bpm_key_analysis_v3 v3 ON v3.track_id = tracks.id
+                 WHERE tracks.id = ?",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            migrated,
+            (
+                BPM_KEY_V3_REVISION.into(),
+                Some(180.02),
+                0,
+                None,
+                None,
+                Some(8)
+            )
+        );
+        drop(conn);
+
+        let effective = service.get(id).unwrap().unwrap();
+        assert_eq!(effective.bpm, Some(180.02));
+        assert_eq!(effective.camelot, "4A");
+        assert!(!effective.bpm_v2);
+        assert!(effective.bpm_v3);
+        assert!(service
+            .pending_bpm_key_analysis_v3_ids(Some(&[id]), false, None, None)
+            .unwrap()
+            .is_empty());
+        let stats = service.stats().unwrap();
+        assert_eq!(stats.bpm_key_v3_analyzed, 1);
+        assert_eq!(stats.bpm_key_v3_pending, 0);
+        assert_eq!(stats.bpm_key_v3_revision, BPM_KEY_V3_REVISION);
+    }
+
+    #[test]
+    fn empty_v3_marks_completion_without_deleting_the_v2_fallback() {
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: "/lib/v3-error.mp3",
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        service
+            .save_bpm_key_analysis_v2(
+                id,
+                &AnalysisResult {
+                    bpm: Some(128.0),
+                    key: "A minor".into(),
+                    camelot: "8A".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        service
+            .save_bpm_key_analysis_v3(
+                id,
+                &AnalysisResult {
+                    errors: vec!["decode: broken".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let effective = service.get(id).unwrap().unwrap();
+        assert_eq!(effective.bpm, Some(128.0));
+        assert_eq!(effective.camelot, "8A");
+        assert!(effective.bpm_v2);
+        assert!(!effective.bpm_v3);
+        let conn = service.db().conn().unwrap();
+        let v2_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_bpm_key_analysis_v2 WHERE track_id = ?",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v2_rows, 1);
+        drop(conn);
+        assert!(service
+            .pending_bpm_key_analysis_v3_ids(Some(&[id]), false, None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn waveform_readiness_tracks_profile_revision_mtime_and_errors() {
         let service = service();
         let id = insert(
@@ -4198,6 +4982,43 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn harmonic_profile_matches_library_without_a_source_track_id() {
+        let service = service();
+        insert(
+            &service,
+            Row {
+                path: "/lib/set/match.mp3",
+                title: "match",
+                camelot: "9a",
+                bpm: Some(127.0),
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: "/lib/other/outside.mp3",
+                title: "outside",
+                camelot: "8A",
+                bpm: Some(128.0),
+                ..Default::default()
+            },
+        );
+
+        let matches = service
+            .harmonic_matches_for_profile("8a", Some(128.0), 6.0, 50, false, "/lib/set")
+            .unwrap();
+        assert_eq!(
+            matches
+                .iter()
+                .map(|item| item.track.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["match"]
+        );
+        assert_eq!(matches[0].relation, HarmonicRelation::EnergyUp);
     }
 
     #[test]
@@ -4349,6 +5170,46 @@ mod tests {
         assert_eq!(
             service.get(id).unwrap().unwrap().path,
             format!("{ROOT}{SEP}set2{SEP}set1{SEP}a.mp3")
+        );
+    }
+
+    #[test]
+    fn rebase_rolls_back_every_path_when_one_target_conflicts() {
+        let service = service();
+        let old = format!("{ROOT}{SEP}old");
+        let new = format!("{ROOT}{SEP}new");
+        let first_path = format!("{old}{SEP}a.mp3");
+        let conflicting_source = format!("{old}{SEP}b.mp3");
+        let occupied_target = format!("{new}{SEP}b.mp3");
+        let first = insert(
+            &service,
+            Row {
+                path: &first_path,
+                ..Default::default()
+            },
+        );
+        let second = insert(
+            &service,
+            Row {
+                path: &conflicting_source,
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: &occupied_target,
+                ..Default::default()
+            },
+        );
+
+        assert!(service
+            .rebase_paths(Path::new(&old), Path::new(&new))
+            .is_err());
+        assert_eq!(service.get(first).unwrap().unwrap().path, first_path);
+        assert_eq!(
+            service.get(second).unwrap().unwrap().path,
+            conflicting_source
         );
     }
 }

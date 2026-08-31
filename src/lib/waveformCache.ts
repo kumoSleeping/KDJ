@@ -1,10 +1,6 @@
 import type { Track, Waveform } from "../types";
 import { api } from "./api";
 import { isStreamTrack } from "./streamTrack";
-import {
-  isOneLibraryPlaybackTrack,
-  oneLibraryPlaybackSource,
-} from "./playbackTrackSource";
 import { overviewWaveformFromDetail } from "./waveformViewport";
 
 /** 当前曲、下一台 Deck 和最近查看过的歌曲足够；避免整晚演出后数组只增不减。 */
@@ -15,10 +11,66 @@ const cache = new Map<string, Waveform>();
 const inflight = new Map<string, Promise<Waveform>>();
 /** v0.2.41 整曲预览和当前高密度波形不能互相派生或覆盖。 */
 const releaseOverviewCache = new Map<number, Waveform>();
-const releaseOverviewInflight = new Map<number, Promise<Waveform>>();
+/** 详情栏与 PlayerBar 可能并发请求同一份 overview；任一路完成都要同步给其他消费者。 */
+const releaseOverviewListeners = new Map<number, Set<() => void>>();
+export type ReleaseOverviewRequestIntent = "visible" | "player" | "prefetch";
+
+interface ReleaseOverviewInflight {
+  trackId: number;
+  intent: ReleaseOverviewRequestIntent;
+  requestId: number;
+  controller: AbortController;
+  promise: Promise<Waveform>;
+}
+
+const releaseOverviewInflight = new Map<number, ReleaseOverviewInflight>();
+const releaseOverviewRequests = new Set<ReleaseOverviewInflight>();
+const latestReleaseOverviewLane: Partial<
+  Record<"player" | "prefetch", ReleaseOverviewInflight>
+> = {};
+// Millisecond epoch plus a per-module suffix stays below JS's exact-integer ceiling for centuries
+// and remains newer after HMR reloads, unlike a counter that restarts from zero.
+let releaseOverviewRequestSequence = Math.floor(Date.now() * 1_000);
+
+/** A cold whole-track asset deliberately yields while the native output path is endangered. */
+const PLAYBACK_DEFERRED_WAVEFORM_MESSAGE = "播放已开始，整曲波形生成已延后";
+const SUPERSEDED_WAVEFORM_MESSAGE = "波形请求已被更新的曲目取代";
+
+function nextReleaseOverviewRequestId(): number {
+  releaseOverviewRequestSequence = Math.max(
+    releaseOverviewRequestSequence + 1,
+    Math.floor(Date.now() * 1_000),
+  );
+  return releaseOverviewRequestSequence;
+}
+
+/** Only scheduler deferral is retryable; corrupt files and protocol errors must stay visible. */
+export function isPlaybackDeferredWaveformError(reason: unknown): boolean {
+  const message = reason instanceof Error ? reason.message : String(reason ?? "");
+  return message.includes(PLAYBACK_DEFERRED_WAVEFORM_MESSAGE);
+}
+
+/** Switching Decks is normal control flow, never a waveform/server failure. */
+export function isSupersededWaveformError(reason: unknown): boolean {
+  if (typeof DOMException !== "undefined" && reason instanceof DOMException && reason.name === "AbortError") {
+    return true;
+  }
+  const candidate = reason as { name?: unknown; message?: unknown } | null;
+  if (candidate?.name === "AbortError") return true;
+  const message = reason instanceof Error ? reason.message : String(reason ?? "");
+  return message.includes(SUPERSEDED_WAVEFORM_MESSAGE);
+}
+
+/** Back off repeated output-pressure cancellations instead of restarting a full decode at 10 Hz. */
+export function deferredOverviewRetryDelay(attempt: number): number {
+  return 500 * (2 ** Math.min(3, Math.max(0, Math.floor(attempt))));
+}
 
 function normalizedBuckets(buckets: number): number {
-  return Math.min(24_000, Math.max(64, Math.round(Number.isFinite(buckets) ? buckets : DEFAULT_WAVEFORM_BUCKETS)));
+  return Math.min(
+    100_000,
+    Math.max(64, Math.round(Number.isFinite(buckets) ? buckets : DEFAULT_WAVEFORM_BUCKETS)),
+  );
 }
 
 function waveformCacheKey(trackId: number, buckets: number): string {
@@ -44,6 +96,8 @@ function waveformKeyParts(key: string): [number, number] | null {
 // Progressive entries differ only in their known/unknown coverage, not in visual resolution.
 const STREAM_BUCKETS = RELEASE_OVERVIEW_BUCKETS;
 const STREAM_CACHE_LIMIT = 24;
+/** PCM/analyser can arrive at display-frame cadence; waveform presentation never needs that. */
+const STREAM_SNAPSHOT_INTERVAL_MS = 200;
 
 export interface StreamWaveformSample {
   /** analyser 归一化后的真实响度，范围 0..1。 */
@@ -61,8 +115,6 @@ export interface StreamBufferedRange {
 
 export interface StreamWaveformSnapshot {
   waveform: Waveform;
-  /** 完整文件生成的高密度 DJ 主波形；overview 永远保留在 waveform。 */
-  detailWaveform: Waveform | null;
   /** 与 waveform.amp 等长；false 表示该桶还没有真实 analyser 或缓存 PCM 分析。 */
   known: readonly boolean[];
   /** 媒体元素当前实际缓存的秒区间，用来画“缓存到哪里”的低透明占位。 */
@@ -72,7 +124,6 @@ export interface StreamWaveformSnapshot {
 
 interface StreamWaveformEntry {
   snapshot: StreamWaveformSnapshot;
-  detailWaveform: Waveform | null;
   /** 同一时间桶会收到多帧 analyser 采样；频段做稳定均值，幅度保留峰值。 */
   counts: number[];
   rawAmp: number[];
@@ -87,6 +138,10 @@ interface StreamWaveformEntry {
     coveredSeconds: number;
     revision: number;
   } | null;
+  /** Whether the server-side cached prefix has reached the end of an online media stream. */
+  complete: boolean;
+  /** Raw evidence keeps accumulating; immutable presentation snapshots publish at most 5 Hz. */
+  lastSnapshotAtMs: number;
 }
 
 const streamCache = new Map<number, StreamWaveformEntry>();
@@ -109,12 +164,10 @@ function emptyStreamEntry(trackId: number, duration: number): StreamWaveformEntr
         b: Array(STREAM_BUCKETS).fill(0),
         known,
       },
-      detailWaveform: null,
       known,
       bufferedRanges: [],
       revision: 0,
     },
-    detailWaveform: null,
     counts: Array(STREAM_BUCKETS).fill(0),
     rawAmp: Array(STREAM_BUCKETS).fill(0),
     low: Array(STREAM_BUCKETS).fill(0),
@@ -122,6 +175,8 @@ function emptyStreamEntry(trackId: number, duration: number): StreamWaveformEntr
     high: Array(STREAM_BUCKETS).fill(0),
     analyserKnown: Array(STREAM_BUCKETS).fill(false),
     cachedPrefix: null,
+    complete: false,
+    lastSnapshotAtMs: -Infinity,
   };
 }
 
@@ -205,7 +260,7 @@ function normalizeKnownStreamBuckets(
 }
 
 /**
- * 把后端的“从 0 开始、已解码 N 秒”的波形投影到整曲固定 640 桶。
+ * 把后端的“从 0 开始、已解码 N 秒”的波形投影到整曲固定 4,096 桶。
  *
  * 不能直接把 prefix 的 640 列拉满画布：那会把前 20 秒错误拉伸成整首歌。每个
  * 目标桶按自己的整曲时间窗口反查 prefix 中相交的列，只有真正覆盖到的桶才置 true。
@@ -217,6 +272,9 @@ function overlayCachedPrefix(
   r: number[],
   g: number[],
   b: number[],
+  minimum: number[],
+  maximum: number[],
+  transient: number[],
   cacheKnown: boolean[],
 ): void {
   const prefix = entry.cachedPrefix;
@@ -245,6 +303,12 @@ function overlayCachedPrefix(
     let green = 0;
     let blue = 0;
     let weight = 0;
+    let lower = 0;
+    let upper = 0;
+    let onset = 0;
+    const hasContour = source.minimum?.length === n
+      && source.maximum?.length === n
+      && source.transient?.length === n;
     for (let index = from; index < to; index += 1) {
       const value = clamp(source.amp[index] ?? 0, 0, 1);
       peak = Math.max(peak, value);
@@ -253,12 +317,18 @@ function overlayCachedPrefix(
       green += (source.g[index] ?? 0) * colorWeight;
       blue += (source.b[index] ?? 0) * colorWeight;
       weight += colorWeight;
+      lower = Math.min(lower, hasContour ? source.minimum?.[index] ?? 0 : -value);
+      upper = Math.max(upper, hasContour ? source.maximum?.[index] ?? 0 : value);
+      onset = Math.max(onset, hasContour ? source.transient?.[index] ?? 0 : 0);
     }
     if (weight <= 0) continue;
     amp[bucket] = peak;
     r[bucket] = Math.round(red / weight);
     g[bucket] = Math.round(green / weight);
     b[bucket] = Math.round(blue / weight);
+    minimum[bucket] = lower;
+    maximum[bucket] = upper;
+    transient[bucket] = onset;
     cacheKnown[bucket] = true;
   }
 }
@@ -274,21 +344,83 @@ function buildStreamSnapshot(
   const r = Array(STREAM_BUCKETS).fill(0) as number[];
   const g = Array(STREAM_BUCKETS).fill(0) as number[];
   const b = Array(STREAM_BUCKETS).fill(0) as number[];
+  const minimum = Array(STREAM_BUCKETS).fill(0) as number[];
+  const maximum = Array(STREAM_BUCKETS).fill(0) as number[];
+  const transient = Array(STREAM_BUCKETS).fill(0) as number[];
   // analyser 值和服务端波形的归一策略不同；先画已播 analyser，再由缓存前缀
   // 覆盖同一区间，避免缓存更新时把播放头之后的真实 analyser 样本清空。
   normalizeKnownStreamBuckets(entry, entry.analyserKnown, amp, r, g, b);
+  for (let index = 0; index < STREAM_BUCKETS; index += 1) {
+    if (!entry.analyserKnown[index]) continue;
+    minimum[index] = -(amp[index] ?? 0);
+    maximum[index] = amp[index] ?? 0;
+  }
   const cacheKnown = Array(STREAM_BUCKETS).fill(false) as boolean[];
-  overlayCachedPrefix(entry, total, amp, r, g, b, cacheKnown);
+  overlayCachedPrefix(entry, total, amp, r, g, b, minimum, maximum, transient, cacheKnown);
   const known = entry.analyserKnown.map((value, index) => value || cacheKnown[index]);
   return {
     // Progressive coverage is part of the canonical Waveform contract. Renderers no longer need
     // a stream-only side channel to decide which columns are real.
-    waveform: { track_id: trackId, duration: total, amp, r, g, b, known },
-    detailWaveform: entry.detailWaveform,
+    waveform: {
+      track_id: trackId,
+      duration: total,
+      amp,
+      minimum,
+      maximum,
+      r,
+      g,
+      b,
+      transient,
+      known,
+    },
     known,
     bufferedRanges,
     revision,
   };
+}
+
+/**
+ * Once an absolute progressive time bucket has reached the screen, keep its approved pixels stable.
+ *
+ * Progressive prefixes are necessarily normalized against a growing amount of music. Replacing
+ * earlier columns on every prefix made the same sound change height, colour and transient score
+ * while it was playing. Raw analyser/cache evidence still accumulates in StreamWaveformEntry; this
+ * presentation hand-off freezes only buckets already published at the same duration/grid.
+ */
+function preservePublishedStreamColumns(
+  previous: StreamWaveformSnapshot,
+  next: StreamWaveformSnapshot,
+): StreamWaveformSnapshot {
+  const previousWave = previous.waveform;
+  const nextWave = next.waveform;
+  const count = nextWave.amp.length;
+  if (
+    previousWave.duration !== nextWave.duration
+    || previousWave.amp.length !== count
+    || previous.known.length !== count
+    || next.known.length !== count
+  ) return next;
+  const hasPreviousContour = previousWave.minimum?.length === count
+    && previousWave.maximum?.length === count
+    && previousWave.transient?.length === count;
+  const hasNextContour = nextWave.minimum?.length === count
+    && nextWave.maximum?.length === count
+    && nextWave.transient?.length === count;
+  for (let index = 0; index < count; index += 1) {
+    if (!previous.known[index]) continue;
+    nextWave.amp[index] = previousWave.amp[index] ?? 0;
+    nextWave.r[index] = previousWave.r[index] ?? 0;
+    nextWave.g[index] = previousWave.g[index] ?? 0;
+    nextWave.b[index] = previousWave.b[index] ?? 0;
+    if (hasPreviousContour && hasNextContour) {
+      nextWave.minimum![index] = previousWave.minimum![index] ?? 0;
+      nextWave.maximum![index] = previousWave.maximum![index] ?? 0;
+      nextWave.transient![index] = previousWave.transient![index] ?? 0;
+    }
+    (next.known as boolean[])[index] = true;
+    if (nextWave.known) nextWave.known[index] = true;
+  }
+  return next;
 }
 
 function touchStreamEntry(trackId: number, entry: StreamWaveformEntry): void {
@@ -407,13 +539,25 @@ export function updateStreamWaveform(
     entry.analyserKnown[bucket] = true;
     entry.counts[bucket] = nextCount;
   }
-  entry.snapshot = buildStreamSnapshot(
-    entry,
-    trackId,
-    total,
-    nextRanges,
-    previous.revision + 1,
+  const now = performance.now();
+  const shouldPublish = durationChanged
+    || rangesChanged
+    || now - entry.lastSnapshotAtMs >= STREAM_SNAPSHOT_INTERVAL_MS;
+  if (!shouldPublish) {
+    touchStreamEntry(trackId, entry);
+    return previous;
+  }
+  entry.snapshot = preservePublishedStreamColumns(
+    previous,
+    buildStreamSnapshot(
+      entry,
+      trackId,
+      total,
+      nextRanges,
+      previous.revision + 1,
+    ),
   );
+  entry.lastSnapshotAtMs = now;
   touchStreamEntry(trackId, entry);
   trimStreamCache();
   notifyStreamWaveform(trackId);
@@ -427,16 +571,15 @@ export function updateStreamWaveform(
  * 这里的 `buildStreamSnapshot` 会只覆盖前者对应的固定桶，保留其他区域已有的 analyser
  * 样本和 `buffered` 占位。
  */
-export function mergeCachedStreamWaveform(
+function mergeProgressiveOverviewWaveform(
   trackId: number,
   duration: number,
   coveredSeconds: number,
   waveform: Waveform,
   sourceRevision: number,
   bufferedRanges?: readonly StreamBufferedRange[],
-  detailWaveform?: Waveform | null,
+  complete = false,
 ): StreamWaveformSnapshot {
-  if (trackId >= 0) throw new Error("渐进在线波形只接受负 track id");
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const entry = streamCache.get(trackId) ?? emptyStreamEntry(trackId, safeDuration);
   const previous = entry.snapshot;
@@ -467,30 +610,44 @@ export function mergeCachedStreamWaveform(
     coveredSeconds,
     revision: sourceRevision,
   };
-  if (
-    detailWaveform
-    && detailWaveform.amp.length > 0
-    && detailWaveform.r.length === detailWaveform.amp.length
-    && detailWaveform.g.length === detailWaveform.amp.length
-    && detailWaveform.b.length === detailWaveform.amp.length
-  ) {
-    entry.detailWaveform = {
-      ...detailWaveform,
-      track_id: trackId,
-      duration: total || detailWaveform.duration,
-    };
-  }
-  entry.snapshot = buildStreamSnapshot(
-    entry,
-    trackId,
-    total,
-    nextRanges,
-    previous.revision + 1,
+  entry.complete ||= complete;
+  entry.snapshot = preservePublishedStreamColumns(
+    previous,
+    buildStreamSnapshot(
+      entry,
+      trackId,
+      total,
+      nextRanges,
+      previous.revision + 1,
+    ),
   );
+  entry.lastSnapshotAtMs = performance.now();
   touchStreamEntry(trackId, entry);
   trimStreamCache();
   notifyStreamWaveform(trackId);
-  return entry.snapshot;
+  const snapshot = entry.snapshot;
+  return snapshot;
+}
+
+export function mergeCachedStreamWaveform(
+  trackId: number,
+  duration: number,
+  coveredSeconds: number,
+  waveform: Waveform,
+  sourceRevision: number,
+  bufferedRanges?: readonly StreamBufferedRange[],
+  complete = false,
+): StreamWaveformSnapshot {
+  if (trackId >= 0) throw new Error("渐进在线波形只接受负 track id");
+  return mergeProgressiveOverviewWaveform(
+    trackId,
+    duration,
+    coveredSeconds,
+    waveform,
+    sourceRevision,
+    bufferedRanges,
+    complete,
+  );
 }
 
 export function streamWaveformSnapshot(trackId: number): StreamWaveformSnapshot | null {
@@ -509,7 +666,9 @@ export function subscribeStreamWaveform(trackId: number, listener: () => void): 
   listeners.add(listener);
   return () => {
     listeners?.delete(listener);
-    if (!listeners?.size) streamListeners.delete(trackId);
+    if (!listeners?.size) {
+      streamListeners.delete(trackId);
+    }
     trimStreamCache();
   };
 }
@@ -517,6 +676,20 @@ export function subscribeStreamWaveform(trackId: number, listener: () => void): 
 export function clearStreamWaveform(trackId: number): void {
   if (!streamCache.delete(trackId)) return;
   notifyStreamWaveform(trackId);
+}
+
+/** 设置里的全局清理同时覆盖本地与在线试听的前端内存缓存。 */
+export function clearAllWaveformCaches(): void {
+  const affected = new Set([...streamCache.keys(), ...streamListeners.keys()]);
+  for (const request of releaseOverviewRequests) request.controller.abort();
+  cache.clear();
+  releaseOverviewCache.clear();
+  releaseOverviewInflight.clear();
+  releaseOverviewRequests.clear();
+  delete latestReleaseOverviewLane.player;
+  delete latestReleaseOverviewLane.prefetch;
+  streamCache.clear();
+  for (const trackId of affected) notifyStreamWaveform(trackId);
 }
 
 function remember(trackId: number, buckets: number, wave: Waveform): Waveform {
@@ -532,6 +705,7 @@ function remember(trackId: number, buckets: number, wave: Waveform): Waveform {
 }
 
 function rememberReleaseOverview(trackId: number, wave: Waveform): Waveform {
+  const changed = releaseOverviewCache.get(trackId) !== wave;
   releaseOverviewCache.delete(trackId);
   releaseOverviewCache.set(trackId, wave);
   while (releaseOverviewCache.size > CACHE_LIMIT) {
@@ -539,7 +713,30 @@ function rememberReleaseOverview(trackId: number, wave: Waveform): Waveform {
     if (oldest === undefined) break;
     releaseOverviewCache.delete(oldest);
   }
+  if (changed) {
+    for (const listener of releaseOverviewListeners.get(trackId) ?? []) listener();
+  }
   return wave;
+}
+
+/**
+ * 监听某首曲的整曲 overview 进入共享内存缓存。
+ * 请求自身失败不等于未缓存：另一个并发消费者可能已经成功。
+ */
+export function subscribeReleaseOverviewWaveform(
+  trackId: number,
+  listener: () => void,
+): () => void {
+  let listeners = releaseOverviewListeners.get(trackId);
+  if (!listeners) {
+    listeners = new Set();
+    releaseOverviewListeners.set(trackId, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners?.delete(listener);
+    if (!listeners?.size) releaseOverviewListeners.delete(trackId);
+  };
 }
 
 export function cachedReleaseOverviewWaveform(trackId: number): Waveform | null {
@@ -594,7 +791,11 @@ function sparserInflight(trackId: number, buckets: number): Promise<Waveform> | 
   return null;
 }
 
-export function loadWaveform(trackId: number, buckets = DEFAULT_WAVEFORM_BUCKETS): Promise<Waveform> {
+export function loadWaveform(
+  trackId: number,
+  buckets = DEFAULT_WAVEFORM_BUCKETS,
+  background = false,
+): Promise<Waveform> {
   const normalized = normalizedBuckets(buckets);
   const key = waveformCacheKey(trackId, normalized);
   const hit = cachedWaveform(trackId, normalized);
@@ -604,39 +805,12 @@ export function loadWaveform(trackId: number, buckets = DEFAULT_WAVEFORM_BUCKETS
   const pending = inflight.get(key);
   if (pending) return pending;
   const preview = sparserInflight(trackId, normalized);
-  if (preview) return preview.then(() => loadWaveform(trackId, normalized));
+  if (preview) return preview.then(() => loadWaveform(trackId, normalized, background));
   const request = api
-    .waveform(trackId, normalized)
+    .waveform(trackId, normalized, "current", background)
     .then((data) => {
       inflight.delete(key);
       return remember(trackId, normalized, data);
-    })
-    .catch((error: unknown) => {
-      inflight.delete(key);
-      throw error;
-    });
-  inflight.set(key, request);
-  return request;
-}
-
-function loadOneLibraryWaveform(track: Track, buckets = DEFAULT_WAVEFORM_BUCKETS): Promise<Waveform> {
-  const normalized = normalizedBuckets(buckets);
-  const key = waveformCacheKey(track.id, normalized);
-  const hit = cachedWaveform(track.id, normalized);
-  if (hit) return Promise.resolve(hit);
-  const denser = denserInflight(track.id, normalized);
-  if (denser) return denser;
-  const pending = inflight.get(key);
-  if (pending) return pending;
-  const preview = sparserInflight(track.id, normalized);
-  if (preview) return preview.then(() => loadOneLibraryWaveform(track, normalized));
-  const source = oneLibraryPlaybackSource(track);
-  if (!source) return Promise.reject(new Error("OneLibrary 播放来源无效"));
-  const request = api
-    .oneLibraryWaveform(source.devicePath, source.contentId, track.id, normalized)
-    .then((data) => {
-      inflight.delete(key);
-      return remember(track.id, normalized, data);
     })
     .catch((error: unknown) => {
       inflight.delete(key);
@@ -656,7 +830,6 @@ export function loadWaveformById(trackId: number, buckets = DEFAULT_WAVEFORM_BUC
 }
 
 export function loadWaveformForTrack(track: Track, buckets = DEFAULT_WAVEFORM_BUCKETS): Promise<Waveform> {
-  if (isOneLibraryPlaybackTrack(track)) return loadOneLibraryWaveform(track, buckets);
   return isStreamTrack(track) ? loadWaveformById(track.id, buckets) : loadWaveform(track.id, buckets);
 }
 
@@ -664,68 +837,119 @@ export function loadWaveformForTrack(track: Track, buckets = DEFAULT_WAVEFORM_BU
  * 普通底栏和 DJ A/B overview 的专用资产。它不复用 detail cache，避免当前高密度
  * Mixxx 波形再次覆盖用户要求恢复的 v0.2.41 整曲结构。
  */
-export function loadReleaseOverviewForTrack(track: Track): Promise<Waveform> {
-  if (isStreamTrack(track) && !isOneLibraryPlaybackTrack(track)) {
+export function loadReleaseOverviewForTrack(
+  track: Track,
+  intent: ReleaseOverviewRequestIntent = "visible",
+): Promise<Waveform> {
+  if (isStreamTrack(track)) {
     const snapshot = streamWaveformSnapshot(track.id);
     return snapshot
       ? Promise.resolve(snapshot.waveform)
       : Promise.reject(new Error("在线试听波形正在随媒体缓存生成"));
   }
-  if (!isOneLibraryPlaybackTrack(track)) {
-    return loadReleaseOverviewById(track.id);
-  }
-  const hit = cachedReleaseOverviewWaveform(track.id);
-  if (hit) return Promise.resolve(hit);
-  const pending = releaseOverviewInflight.get(track.id);
-  if (pending) return pending;
-  const source = oneLibraryPlaybackSource(track);
-  if (!source) return Promise.reject(new Error("OneLibrary 播放来源无效"));
-  const request = api.oneLibraryWaveform(
-    source.devicePath,
-    source.contentId,
-    track.id,
-    RELEASE_OVERVIEW_BUCKETS,
-    "release-overview",
-  );
-  const tracked = request
-    .then((wave) => {
-      releaseOverviewInflight.delete(track.id);
-      return rememberReleaseOverview(track.id, wave);
-    })
-    .catch((error: unknown) => {
-      releaseOverviewInflight.delete(track.id);
-      throw error;
-    });
-  releaseOverviewInflight.set(track.id, tracked);
-  return tracked;
+  return loadReleaseOverviewById(track.id, intent);
 }
 
-export function loadReleaseOverviewById(trackId: number): Promise<Waveform> {
+function latestLaneIntent(
+  intent: ReleaseOverviewRequestIntent,
+): intent is "player" | "prefetch" {
+  return intent === "player" || intent === "prefetch";
+}
+
+function releaseOverviewIntentPriority(intent: ReleaseOverviewRequestIntent): number {
+  if (intent === "prefetch") return 0;
+  return intent === "visible" ? 1 : 2;
+}
+
+export function loadReleaseOverviewById(
+  trackId: number,
+  intent: ReleaseOverviewRequestIntent = "visible",
+): Promise<Waveform> {
+  const latestIntent = latestLaneIntent(intent) ? intent : null;
+  const activeLane = latestIntent ? latestReleaseOverviewLane[latestIntent] : undefined;
+  if (activeLane && activeLane.trackId !== trackId) activeLane.controller.abort();
+
   const hit = cachedReleaseOverviewWaveform(trackId);
-  if (hit) return Promise.resolve(hit);
-  const pending = releaseOverviewInflight.get(trackId);
-  if (pending) return pending;
-  const tracked = api
-    .waveform(trackId, RELEASE_OVERVIEW_BUCKETS, "release-overview")
-    .then((wave) => {
+  const requestId = nextReleaseOverviewRequestId();
+  if (hit) {
+    // The native worker must still hear about a cached Deck switch: the previous cold request may
+    // be detached in spawn_blocking even though aborting its HTTP fetch stopped the response.
+    if (latestIntent) {
+      void api.waveformIntent(trackId, latestIntent, requestId).catch(() => undefined);
+    }
+    return Promise.resolve(hit);
+  }
+  let pending = releaseOverviewInflight.get(trackId);
+  // A rapid A → B → A switch can revisit the first key before its rejected fetch reaches finally.
+  // Never attach the new rail to that already-aborted promise.
+  if (pending?.controller.signal.aborted) {
+    if (releaseOverviewInflight.get(trackId) === pending) {
       releaseOverviewInflight.delete(trackId);
+    }
+    pending = undefined;
+  }
+  if (pending) {
+    if (releaseOverviewIntentPriority(pending.intent) >= releaseOverviewIntentPriority(intent)) {
+      if (latestIntent && pending.intent !== latestIntent) {
+        void api.waveformIntent(trackId, latestIntent, requestId).catch(() => undefined);
+      }
+      return pending.promise;
+    }
+    // Keep an already-visible secondary consumer alive while the PlayerBar submits the promoted
+    // native request. It will either join the completed cache or receive a pressure deferral and
+    // retry; prefetch has no visible consumer and can be aborted immediately.
+    if (!(pending.intent === "visible" && intent === "player")) {
+      pending.controller.abort();
+    }
+    if (releaseOverviewInflight.get(trackId) === pending) {
+      releaseOverviewInflight.delete(trackId);
+    }
+  }
+
+  const controller = new AbortController();
+  let entry: ReleaseOverviewInflight;
+  const tracked = api
+    .waveform(
+      trackId,
+      RELEASE_OVERVIEW_BUCKETS,
+      "release-overview",
+      false,
+      intent,
+      requestId,
+      controller.signal,
+    )
+    .then((wave) => {
+      if (releaseOverviewInflight.get(trackId) === entry) {
+        releaseOverviewInflight.delete(trackId);
+      }
       return rememberReleaseOverview(trackId, wave);
     })
     .catch((error: unknown) => {
-      releaseOverviewInflight.delete(trackId);
+      if (releaseOverviewInflight.get(trackId) === entry) {
+        releaseOverviewInflight.delete(trackId);
+      }
       throw error;
+    })
+    .finally(() => {
+      releaseOverviewRequests.delete(entry);
+      if (latestIntent && latestReleaseOverviewLane[latestIntent] === entry) {
+        delete latestReleaseOverviewLane[latestIntent];
+      }
     });
-  releaseOverviewInflight.set(trackId, tracked);
+  entry = { trackId, intent, requestId, controller, promise: tracked };
+  releaseOverviewInflight.set(trackId, entry);
+  releaseOverviewRequests.add(entry);
+  if (latestIntent) latestReleaseOverviewLane[latestIntent] = entry;
   return tracked;
 }
 
 /**
- * Current and predicted tracks only prefetch the canonical first-paint waveform. A detailed
- * master is requested by a mounted rail after it has stayed visible; eagerly decoding every
- * current/predicted Deck made one load compete with the other Deck's live transport.
+ * Only the predicted track prefetches the canonical first-paint waveform. The mounted PlayerBar
+ * owns the current track's visible request; keeping it out of this speculative lane prevents the
+ * next Deck from making the current blank rail wait.
  */
 export function prefetchWaveform(track: Track | null | undefined): void {
   if (!track || isStreamTrack(track)) return;
-  void loadReleaseOverviewForTrack(track)
+  void loadReleaseOverviewForTrack(track, "prefetch")
     .catch(() => undefined);
 }

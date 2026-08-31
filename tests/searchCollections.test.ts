@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   collectionPageWindow,
-  promoteResolvedCollection,
+  openedCollectionItem,
   RESOLVED_COLLECTION_PAGE_SIZE,
   resolvedCollectionItem,
 } from "../src/lib/searchCollections.ts";
@@ -64,31 +64,25 @@ test("resolved collection keeps the collection cover", () => {
   assert.equal(resolved.groups[0]?.cover, "playlist-cover");
 });
 
-test("loaded collection is promoted while the remaining search results stay available", () => {
-  const other = { ...collection, key: "99", title: "另一个歌单" };
-  const resolved = resolvedCollectionItem(collection, response);
-  const next = promoteResolvedCollection([searchItem([collection, other])], collection, resolved);
-
-  assert.equal(next[0]?.entry, "wyy:playlist:42");
-  assert.deepEqual(next[1]?.collections, [other]);
-});
-
-test("stale collection result does not replace a newer result set", () => {
-  const newer = searchItem([{ ...collection, key: "new" }]);
+test("a resolved collection becomes a standalone detail page", () => {
   const resolved = resolvedCollectionItem(collection, response);
 
-  assert.equal(promoteResolvedCollection([newer], collection, resolved)[0], newer);
+  assert.equal(openedCollectionItem([resolved]), resolved);
+  assert.equal(openedCollectionItem([resolved, searchItem([collection])]), null);
+  assert.equal(openedCollectionItem([searchItem([collection])]), null);
 });
 
 test("loaded collections paginate fifty tracks without changing the full total", () => {
   assert.equal(RESOLVED_COLLECTION_PAGE_SIZE, 50);
   assert.deepEqual(collectionPageWindow(300, 1), {
+    total: 300,
     page: 1,
     pageCount: 6,
     start: 0,
     end: 50,
   });
   assert.deepEqual(collectionPageWindow(300, 6), {
+    total: 300,
     page: 6,
     pageCount: 6,
     start: 250,
@@ -98,12 +92,14 @@ test("loaded collections paginate fifty tracks without changing the full total",
 
 test("collection pagination clamps stale pages after a shorter refresh", () => {
   assert.deepEqual(collectionPageWindow(71, 99), {
+    total: 71,
     page: 2,
     pageCount: 2,
     start: 50,
     end: 71,
   });
   assert.deepEqual(collectionPageWindow(0, Number.NaN), {
+    total: 0,
     page: 1,
     pageCount: 1,
     start: 0,

@@ -2,9 +2,9 @@
  * DJ 接歌：双 deck + Web Audio 的过渡引擎。
  *
  * 平时播放器只有一个 <audio>，换歌是硬切。开了 DJ 预设之后，换歌变成
- * 「两台唱机同时转」：下一首在暗处起播（BPM 拉到和当前一致），两边按预设的
+ * 「两台唱机同时转」：下一首在暗处起播（用户打开自动对拍时才同步 BPM），两边按预设的
  * 自动化曲线交接（交叉渐变 / 低频交棒 / 共振滤波扫频 / 人声消除）。接入后
- * 保持本场 master tempo，后续曲目继续向它同步，避免在满幅播放中重配保调变速器。
+ * 默认回到文件原速；自动对拍打开时才保持本场 master tempo 并让后续曲目继续同步。
  *
  * 结构上引擎**拥有**两个 audio 元素（PlayerBar 不再自己渲染 <audio>）：
  * 交叉渐变要求两个元素同时出声，而「接完之后谁是正主」必须能互换——
@@ -41,8 +41,13 @@ import {
   type ExternalAdoptionKey,
 } from "./browserDeckPreload";
 import { mediaUrlForTrack } from "./streamTrack";
-import { BEATS_PER_BAR as GRID_BEATS_PER_BAR, msUntilNextBoundary } from "./beatGridSync";
+import {
+  automaticTransitionRate,
+  BEATS_PER_BAR as GRID_BEATS_PER_BAR,
+  msUntilNextBoundary,
+} from "./beatGridSync";
 import { CHANNEL_FILTER_RESONANCE_SCALE } from "./eqGraph";
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 import type { FilterResonance, Track } from "../types";
 
 /* ---------------------------------------------------------------- 配置 */
@@ -50,29 +55,19 @@ import type { FilterResonance, Track } from "../types";
 export type DjTransition = "cross" | "eq" | "filter";
 export type DjEffect = "alarm" | "hydrant" | "echo";
 
-export const DJ_TRANSITIONS: { id: DjTransition; label: string; hint: string }[] = [
-  { id: "cross", label: "交叉渐变", hint: "等功率淡入淡出，最朴素也最不会出错" },
-  { id: "eq", label: "低频交接", hint: "新歌先没低音，中点两边低频交棒——两首歌的鼓不打架" },
-  { id: "filter", label: "共振滤波", hint: "旧歌收进低通扫频，新歌从高通里放出来，气氛型" },
-];
-
-export const DJ_EFFECTS: { id: DjEffect; label: string; hint: string }[] = [
-  { id: "alarm", label: "Alarm", hint: "警报式共振扫频，越接近交棒越紧张" },
-  { id: "hydrant", label: "Hydrant", hint: "循环逐拍缩短，叠加滤波与空间尾音，制造喷射式上升" },
-  { id: "echo", label: "Echo", hint: "按节拍重复旧歌尾音，干声退场时回声继续收尾" },
-];
-
 /** 接歌长度的可选小节数（按 4/4 拍换算成秒）。 */
 export const DJ_BARS_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 
 const STORAGE_KEY = "kd-dj-config";
 /** v1 只存预设的旧键。读到就迁移（含 "vocal" 预设 → cross + 人声剔除开）。 */
 const LEGACY_KEY = "kd-dj-preset";
+/** 管理器分支曾短暂把同一颗按钮改成只存“曲末续播”；读取它以无损恢复开关状态。 */
+const LEGACY_AUTO_ADVANCE_KEY = "kd-player-auto-advance";
 
 const isTransition = (value: unknown): value is DjTransition =>
-  typeof value === "string" && DJ_TRANSITIONS.some((item) => item.id === value);
+  value === "cross" || value === "eq" || value === "filter";
 const isEffect = (value: unknown): value is DjEffect =>
-  typeof value === "string" && DJ_EFFECTS.some((item) => item.id === value);
+  value === "alarm" || value === "hydrant" || value === "echo";
 const pickIds = <T extends string>(value: unknown, valid: (item: unknown) => item is T): T[] =>
   Array.isArray(value) ? [...new Set(value.filter(valid))] : [];
 
@@ -103,19 +98,19 @@ interface DjConfig {
 }
 
 const DEFAULT_CONFIG: DjConfig = {
-  enabled: true,
-  transitions: ["filter"],
-  effects: ["echo"],
+  enabled: false,
+  transitions: ["cross"],
+  effects: [],
   bars: 1,
-  vocalCut: true,
-  applyInOutPoints: true,
-  autoBeatSync: true,
-  playOnLoad: true,
+  vocalCut: false,
+  applyInOutPoints: false,
+  autoBeatSync: false,
+  playOnLoad: false,
 };
 
 function loadDjConfig(): DjConfig {
   try {
-    const raw: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+    const raw: unknown = JSON.parse(readLocalStorage(STORAGE_KEY) ?? "null");
     if (raw && typeof raw === "object") {
       const {
         enabled,
@@ -128,29 +123,33 @@ function loadDjConfig(): DjConfig {
         autoBeatSync,
         playOnLoad,
       } = raw as Record<string, unknown>;
-      const pickNumber = (value: unknown, allowed: readonly number[], fallback: number) =>
-        allowed.includes(value as number) ? (value as number) : fallback;
       const selected = pickIds(transitions, isTransition);
       const legacyTransition = isTransition(preset) ? preset : null;
       return {
         enabled: typeof enabled === "boolean" ? enabled : preset !== "off",
         transitions: selected.length ? selected : legacyTransition ? [legacyTransition] : ["cross"],
         effects: pickIds(effects, isEffect),
-        bars: pickNumber(bars, DJ_BARS_OPTIONS, DEFAULT_CONFIG.bars),
+        bars: (DJ_BARS_OPTIONS as readonly unknown[]).includes(bars)
+          ? (bars as number)
+          : DEFAULT_CONFIG.bars,
         vocalCut: vocalCut === true,
-        // 缺字段按开：旧配置没有这项时保持「cue 起播」的既有行为。
-        applyInOutPoints: applyInOutPoints !== false,
-        autoBeatSync: autoBeatSync !== false,
-        playOnLoad: playOnLoad !== false,
+        applyInOutPoints: applyInOutPoints === true,
+        autoBeatSync: autoBeatSync === true,
+        playOnLoad: playOnLoad === true,
       };
     }
-    // 旧版只存了预设名。"vocal" 已从预设降级成独立开关，语义原样迁过来
-    const legacy = localStorage.getItem(LEGACY_KEY);
+
+    // 兼容旧自动接播预设，以及本分支已经写下的“自动切歌”布尔值。
+    const legacy = readLocalStorage(LEGACY_KEY);
     if (legacy === "vocal") return { ...DEFAULT_CONFIG, enabled: true, vocalCut: true };
     if (legacy === "off") return { ...DEFAULT_CONFIG };
     if (isTransition(legacy)) return { ...DEFAULT_CONFIG, enabled: true, transitions: [legacy] };
+    const autoAdvance = readLocalStorage(LEGACY_AUTO_ADVANCE_KEY);
+    if (autoAdvance === "true" || autoAdvance === "false") {
+      return { ...DEFAULT_CONFIG, enabled: autoAdvance === "true" };
+    }
   } catch {
-    /* 存档坏了用默认，不值得报错 */
+    /* 存档损坏或隐私模式禁止读取时使用安全默认值。 */
   }
   return { ...DEFAULT_CONFIG };
 }
@@ -169,7 +168,7 @@ interface DjConfigState extends DjConfig {
 function saveDjConfig(state: DjConfig): void {
   const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints, autoBeatSync, playOnLoad } =
     state;
-  localStorage.setItem(
+  writeLocalStorageNow(
     STORAGE_KEY,
     JSON.stringify({
       enabled,
@@ -182,6 +181,8 @@ function saveDjConfig(state: DjConfig): void {
       playOnLoad,
     }),
   );
+  // 让短暂使用过独立续播键的版本仍能读到同一颗按钮的最新状态。
+  writeLocalStorageNow(LEGACY_AUTO_ADVANCE_KEY, String(enabled));
 }
 
 export const useDjConfig = create<DjConfigState>((set, get) => ({
@@ -243,8 +244,6 @@ const FALLBACK_BPM = 120;
 /** 交接时长的硬边界（秒）：慢歌 32 小节能超过一分钟，不设顶就荒唐了。 */
 const MIX_MIN_S = 2;
 const MIX_MAX_S = 60;
-/** 两边 BPM 差出这个倍率就放弃同步：拉伸 25% 以上人耳听着已经是变了一首歌。 */
-const SYNC_MAX_RATIO = 1.25;
 /**
  * 自动化结束后多留几个音频渲染量子再 pause 旧 deck。
  *
@@ -279,28 +278,6 @@ export function mixSeconds(bpm: number | null | undefined, bars: number): number
   const beats = bars * BEATS_PER_BAR;
   const tempo = bpm && bpm > 0 ? bpm : FALLBACK_BPM;
   return Math.min(MIX_MAX_S, Math.max(MIX_MIN_S, (60 / tempo) * beats));
-}
-
-/**
- * 新歌该用什么速率起播，才能和旧歌合拍。
- *
- * 先试半倍/原倍/双倍三种解读——140 的 Drum&Bass 接 70 的 Hip-Hop 是半拍关系，
- * 不试倍率的话会被硬拉一倍速。取对数距离最近的那档，仍超出容差就放弃（返回 1）：
- * 强行同步一首差太远的歌，比不同步更破坏气氛。
- */
-export function bpmSyncRate(fromBpm: number | null, toBpm: number | null): number {
-  if (!fromBpm || !toBpm || fromBpm <= 0 || toBpm <= 0) return 1;
-  let best = 1;
-  let bestDistance = Infinity;
-  for (const multiple of [0.5, 1, 2]) {
-    const rate = fromBpm / (toBpm * multiple);
-    const distance = Math.abs(Math.log2(rate));
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = rate;
-    }
-  }
-  return best > SYNC_MAX_RATIO || best < 1 / SYNC_MAX_RATIO ? 1 : best;
 }
 
 export { deckSyncRate } from "./beatGridSync";
@@ -1817,7 +1794,11 @@ export const djEngine = {
     );
     const outgoingRate = Math.max(0.25, fromRate ?? (out.el.playbackRate || 1));
     const effectiveFromBpm = options.from.bpm ? options.from.bpm * outgoingRate : null;
-    const rate = bpmSyncRate(effectiveFromBpm, next.bpm);
+    const rate = automaticTransitionRate(
+      options.autoBeatSync === true,
+      effectiveFromBpm,
+      next.bpm,
+    );
     const reusable = canReusePreparedBrowserDeck(preparedNextDeck, {
       deckIndex: backIndex,
       trackId: next.id,
@@ -2492,12 +2473,16 @@ export const djEngine = {
     // 否则第二次接歌会把半截滤波继续带下去，直到用户 seek/重播才被 transport 清掉。
     neutralize(ctx, out);
 
-    // 已经接进来的曲目可能仍维持本场 master tempo。后续必须按实际听到的 BPM
-    // 继续同步，不能拿文件标签里的原始 BPM，否则每接一首都会让速度基准漂移。
+    // 自动对拍打开时，已经接进来的曲目可能仍维持本场 master tempo。后续必须按
+    // 实际听到的 BPM 继续同步；关闭时每个新源都保持 1×，不能暗中继承旧会话速度。
     const effectiveFromBpm = options.from.bpm
       ? options.from.bpm * Math.max(0.25, out.el.playbackRate || 1)
       : null;
-    const rate = bpmSyncRate(effectiveFromBpm, next.bpm);
+    const rate = automaticTransitionRate(
+      options.autoBeatSync === true,
+      effectiveFromBpm,
+      next.bpm,
+    );
     const seconds = mixSeconds(effectiveFromBpm ?? next.bpm, options.bars);
     const tempo = effectiveFromBpm ?? next.bpm ?? FALLBACK_BPM;
     const beatSeconds = 60 / Math.max(1, tempo);

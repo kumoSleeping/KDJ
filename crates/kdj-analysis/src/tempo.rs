@@ -7,8 +7,8 @@
 //! **不要凭直觉改**——Python 版的注释里已经记了两次"试过 X，实测更差"的结论。
 
 use crate::dsp::{
-    self, autocorrelate, hann_window, interp_at, median, mel_filterbank, moving_average,
-    parabolic_peak, percentile, HOP, MEL_FMAX, MEL_FMIN, N_FFT, N_MELS,
+    self, autocorrelate, hann_window, interp_at, median, moving_average, parabolic_peak,
+    percentile, HOP, MEL_FMAX, MEL_FMIN, N_FFT, N_MELS,
 };
 
 pub const BPM_MIN: f64 = 60.0;
@@ -36,43 +36,38 @@ pub struct TempoResult {
 /// 减滑动均值是为了压掉长音符的持续能量，只留下"变化"，
 /// 对 pad / 人声铺底的曲子很关键。
 pub fn onset_envelope(samples: &[f32], sr: f64) -> (Vec<f64>, f64) {
+    onset_envelope_cancellable(samples, sr, &|| false).expect("不可取消的速度分析不应提前退出")
+}
+
+fn onset_envelope_cancellable(
+    samples: &[f32],
+    sr: f64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<(Vec<f64>, f64)> {
     let fps = sr / HOP as f64;
+    if cancelled() {
+        return None;
+    }
     if samples.is_empty() {
-        return (Vec::new(), fps);
+        return Some((Vec::new(), fps));
     }
     let peak = samples.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
-    // 归一化，让 log1p(10*S) 的压缩量和音量无关
-    let normalized: Vec<f32> = if peak > 0.0 {
-        samples.iter().map(|s| s / peak).collect()
-    } else {
-        samples.to_vec()
-    };
-
-    let spec = dsp::stft_magnitude(&normalized, N_FFT, HOP);
-    if spec.frames == 0 {
-        return (Vec::new(), fps);
-    }
-    let fb = mel_filterbank(sr, N_FFT, N_MELS, MEL_FMIN, MEL_FMAX.min(sr / 2.0));
-
-    // logmel[(mel, frame)]，随后沿时间一阶差分
-    let mut logmel = vec![0.0f64; N_MELS * spec.frames];
-    for (mel, row) in fb.iter().enumerate() {
-        for frame in 0..spec.frames {
-            let mut acc = 0.0f64;
-            for (bin, weight) in row.iter().enumerate() {
-                if *weight != 0.0 {
-                    acc += *weight as f64 * spec.at(bin, frame) as f64;
-                }
-            }
-            logmel[mel * spec.frames + frame] = (1.0 + 10.0 * acc).ln();
-        }
+    let fb = dsp::sparse_mel_filterbank(sr, N_FFT, N_MELS, MEL_FMIN, MEL_FMAX.min(sr / 2.0));
+    // 归一化让 log1p(10*S) 的压缩量和音量无关；合并进 STFT 的反射填充可少留一份 PCM。
+    let (logmel, frames) =
+        dsp::stft_logmel_peak_normalized_cancellable(samples, peak, N_FFT, HOP, &fb, cancelled)?;
+    if frames == 0 {
+        return Some((Vec::new(), fps));
     }
 
     // np.diff(..., prepend=第一列) → 第 0 帧的差分恒为 0
-    let mut env = vec![0.0f64; spec.frames];
+    let mut env = vec![0.0f64; frames];
     for mel in 0..N_MELS {
-        let row = &logmel[mel * spec.frames..(mel + 1) * spec.frames];
-        for frame in 1..spec.frames {
+        if mel % 4 == 0 && cancelled() {
+            return None;
+        }
+        let row = &logmel[mel * frames..(mel + 1) * frames];
+        for frame in 1..frames {
             let diff = row[frame] - row[frame - 1];
             if diff > 0.0 {
                 env[frame] += diff;
@@ -95,7 +90,11 @@ pub fn onset_envelope(samples: &[f32], sr: f64) -> (Vec<f64>, f64) {
             *value /= top;
         }
     }
-    (env, fps)
+    if cancelled() {
+        None
+    } else {
+        Some((env, fps))
+    }
 }
 
 // ---------------------------------------------------------------- 速度估计
@@ -653,13 +652,24 @@ fn round_to(value: f64, digits: i32) -> f64 {
 
 /// 完整速度分析。`samples` 是单声道 f32。
 pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
-    let (env, fps) = onset_envelope(samples, sr);
+    analyze_tempo_cancellable(samples, sr, &|| false).expect("不可取消的速度分析不应提前退出")
+}
+
+pub fn analyze_tempo_cancellable(
+    samples: &[f32],
+    sr: f64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<TempoResult> {
+    let (env, fps) = onset_envelope_cancellable(samples, sr, cancelled)?;
     if env.len() < 16 || env.iter().cloned().fold(0.0f64, f64::max) <= 0.0 {
-        return TempoResult::default();
+        return Some(TempoResult::default());
     }
     let (bpm_guess, bpm_raw) = choose_tempo(&env, fps);
+    if cancelled() {
+        return None;
+    }
     if bpm_guess <= 0.0 {
-        return TempoResult::default();
+        return Some(TempoResult::default());
     }
 
     let period = 60.0 * fps / bpm_guess;
@@ -667,7 +677,7 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
     let beat_times: Vec<f64> = frames.iter().map(|f| *f as f64 / fps).collect();
     if frames.len() < 3 {
         let interval = 60.0 / bpm_guess;
-        return TempoResult {
+        return Some(TempoResult {
             bpm: round_to(bpm_guess, 2),
             bpm_raw: round_to(bpm_raw, 2),
             confidence: 0.0,
@@ -678,7 +688,7 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
                 .iter()
                 .map(|frame| env.get(*frame).copied().unwrap_or(0.0))
                 .collect(),
-        };
+        });
     }
 
     let (refined_period, confidence) = refine_period(&frames, period);
@@ -689,7 +699,10 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
     }
 
     let beat_interval = 60.0 / bpm;
-    TempoResult {
+    if cancelled() {
+        return None;
+    }
+    Some(TempoResult {
         bpm: round_to(bpm, 2),
         bpm_raw: round_to(bpm_raw, 2),
         confidence: round_to(confidence, 3),
@@ -700,7 +713,7 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
             .iter()
             .map(|frame| env.get(*frame).copied().unwrap_or(0.0))
             .collect(),
-    }
+    })
 }
 
 #[cfg(test)]

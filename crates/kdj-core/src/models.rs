@@ -126,6 +126,8 @@ pub enum TaskState {
     Running,
     /// 媒体字节已拉完，正在由 FFmpeg 合并/转码，或移动、入库。
     Processing,
+    /// 用户暂停了这一批任务；保留原始请求，下一次「开始」会重新执行。
+    Paused,
     Done,
     Failed,
     Canceled,
@@ -320,6 +322,9 @@ pub struct QrState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LyricText {
     pub lrc: String,
+    /// 平台提供的逐字时间轴；当前为网易云 YRC 原文，空串表示只有行级时间戳。
+    #[serde(default)]
+    pub word_lrc: String,
     #[serde(default)]
     pub translated_lrc: String,
     /// 罗马音 / 音译 LRC（网易云 romalrc、QQ roma）。
@@ -331,6 +336,8 @@ pub struct LyricText {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LyricsResponse {
     pub lrc: String,
+    #[serde(default)]
+    pub word_lrc: String,
     #[serde(default)]
     pub translated_lrc: String,
     #[serde(default)]
@@ -349,10 +356,24 @@ pub struct LyricsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalLyricsResponse {
     pub lrc: String,
+    /// 网易云 YRC 逐字时间轴；旧缓存没有该文件时为空。
+    #[serde(default)]
+    pub word_lrc: String,
     #[serde(default)]
     pub translated_lrc: String,
     #[serde(default)]
     pub romaji_lrc: String,
+    /// 实际提供歌词的平台；与音频文件本身的来源相互独立。
+    #[serde(default)]
+    pub platform: Option<Platform>,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -609,6 +630,9 @@ pub struct DownloadRequest {
     /// 下载完成后挪进这个曲库文件夹（绝对路径）。空 = 留在默认下载目录。
     #[serde(default)]
     pub dest_dir: String,
+    /// 任务级暂停：true 时忽略全局“自动下载”，等待显式 start。
+    #[serde(default)]
+    pub hold: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,8 +640,19 @@ pub struct DownloadRequest {
 pub enum TaskKind {
     Audio,
     Video,
-    /// 本地曲库按顺序拼成 VJ 片子；走同一条下载队列统一调度 / 取消 / 清理。
-    VjExport,
+}
+
+/// 视频任务当前选中的分段。B 站用它表达分 P；其它视频平台没有分段时留空。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DownloadVideoPage {
+    /// 从 0 起，与 `VideoDownloadRequest::page_index` 一致。
+    #[serde(default)]
+    pub index: usize,
+    /// 解析前可能未知（0）；解析成功后写回真实总 P 数。
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -625,6 +660,10 @@ pub struct DownloadTask {
     pub id: String,
     pub kind: TaskKind,
     pub platform: Platform,
+    /// 可公开分享的平台来源编号（如 B 站 BV 号）。完整视频默认不进曲库，
+    /// 队列右键菜单仍需要靠它生成分享链接。
+    #[serde(default)]
+    pub source_key: String,
     pub title: String,
     #[serde(default)]
     pub artist: String,
@@ -653,6 +692,9 @@ pub struct DownloadTask {
     /// 搜索结果带来的封面 URL；刷新页面后左表待下载行还要能画出缩略图。
     #[serde(default)]
     pub cover: String,
+    /// 下载队列里直接显示 P 序号；不能只藏在重试请求里，否则刷新后会丢。
+    #[serde(default)]
+    pub video_page: Option<DownloadVideoPage>,
     pub created_at: f64,
     pub updated_at: f64,
 }
@@ -695,7 +737,7 @@ pub struct VideoInfo {
     pub logged_in: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoDownloadRequest {
     #[serde(default = "default_video_platform")]
     pub platform: Platform,
@@ -705,6 +747,12 @@ pub struct VideoDownloadRequest {
     pub bvid: String,
     #[serde(default)]
     pub page_index: usize,
+    /// 前端已经解析出分 P 时顺带提供的展示提示；后端启动任务后会用平台
+    /// 元数据重新核准，不能把它们当作下载寻址依据。
+    #[serde(default)]
+    pub page_count: usize,
+    #[serde(default)]
+    pub page_title: String,
     #[serde(default = "default_video_height")]
     pub max_height: i64,
     #[serde(default)]
@@ -735,6 +783,8 @@ impl Default for VideoDownloadRequest {
             url: String::new(),
             bvid: String::new(),
             page_index: 0,
+            page_count: 0,
+            page_title: String::new(),
             max_height: default_video_height(),
             audio_only: false,
             transcode: false,
@@ -745,36 +795,6 @@ impl Default for VideoDownloadRequest {
             cover: String::new(),
         }
     }
-}
-
-/// 「按顺序导出 VJ」入队请求。
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct VjExportRequest {
-    /// 源文件夹（曲库内绝对路径）；展示用，也作后续写回参考。
-    #[serde(default)]
-    pub folder: String,
-    /// 本次导出顺序（曲目 id）。
-    #[serde(default)]
-    pub track_ids: Vec<i64>,
-    #[serde(default = "default_true")]
-    pub use_in_out_points: bool,
-    #[serde(default)]
-    pub snap_nearest_beat: bool,
-    #[serde(default)]
-    pub snap_whole_bar: bool,
-    /// 固定秒数的淡入淡出；和 `fade_bars` 二选一，后者优先。
-    #[serde(default)]
-    pub fade_seconds: f64,
-    /// 淡入淡出按几小节走。每次衔接都以上一首的 BPM 换算，未分析时按 120 BPM。
-    #[serde(default)]
-    pub fade_bars: u8,
-    /// `1080p` / `720p` / `480p`
-    #[serde(default = "default_vj_quality")]
-    pub quality: String,
-    #[serde(default = "default_true")]
-    pub keep_audio: bool,
-    #[serde(default = "default_true")]
-    pub unify_gain: bool,
 }
 
 // ---------------------------------------------------------------- 曲库
@@ -811,6 +831,9 @@ pub struct Track {
     /// 当前 API 返回的 BPM 是否由现行 V2 分析结果覆盖。
     #[serde(default)]
     pub bpm_v2: bool,
+    /// 当前 API 返回的 BPM 是否由现行 V3 分析结果覆盖。
+    #[serde(default)]
+    pub bpm_v3: bool,
     #[serde(default)]
     pub bpm_confidence: Option<f64>,
     #[serde(default)]
@@ -910,6 +933,23 @@ pub struct StreamPlaylistResponse {
     pub sources: Vec<SongSource>,
 }
 
+/// 从账号侧歌单移除一条真实平台来源。`source` 保留平台回包中的写操作标识，
+/// 但 provider 仍必须重新核验目标歌单归属，不能只相信前端传来的 `origin`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamPlaylistTrackRemoveRequest {
+    pub platform: Platform,
+    pub key: String,
+    pub source: SongSource,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamPlaylistTrackRemoveResponse {
+    pub platform: Platform,
+    pub key: String,
+    pub source_key: String,
+    pub removed: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TrackPage {
     pub items: Vec<Track>,
@@ -956,46 +996,8 @@ pub struct LocalPlaylistPatch {
     pub note: Option<String>,
 }
 
-/// 操作系统当前挂载的可移动存储。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RemovableDevice {
-    /// 当前挂载点就是一次会话内的稳定键，同时也是导出请求唯一接受的目标。
-    pub path: String,
-    pub name: String,
-    #[serde(default)]
-    pub file_system: String,
-    #[serde(default)]
-    pub total_bytes: u64,
-    #[serde(default)]
-    pub available_bytes: u64,
-    #[serde(default)]
-    pub read_only: bool,
-    /// FAT32 / exFAT / HFS+；这是 OneLibrary 合作软件共同声明支持的文件系统集合。
-    #[serde(default)]
-    pub one_library_file_system: bool,
-    #[serde(default)]
-    pub has_one_library: bool,
-    /// 由 KDJ 管理的虚拟磁盘；真实 U 盘即使卷名也叫 KDJ 仍为 false。
-    #[serde(default)]
-    pub is_virtual: bool,
-}
-
-/// 直接来自外置卷 `exportLibrary.db` 的 OneLibrary 列表节点。
-/// `attribute`: 0 = playlist，1 = folder，4 = smart list。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OneLibraryPlaylist {
-    pub device_path: String,
-    pub id: i32,
-    pub seq: i32,
-    pub name: String,
-    pub attribute: i32,
-    pub parent_id: i32,
-    #[serde(default)]
-    pub track_count: usize,
-}
-
-/// OneLibrary `cue` 表中的只读演出标记。
-/// `hot_cue = None` 表示 Memory Cue；有值时是 Hot Cue 的 1-based 编号。
+/// 曲目的 Cue / Loop 标记。`hot_cue = None` 表示 Memory Cue；有值时是 Hot Cue 的
+/// 1-based 编号。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CuePoint {
     pub id: i32,
@@ -1011,132 +1013,9 @@ pub struct CuePoint {
     pub active_loop: bool,
 }
 
-/// OneLibrary `playlist_content` 中按设备顺序展开的曲目。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OneLibraryTrack {
-    pub content_id: i32,
-    pub sequence: i32,
-    /// KDJ 自己导出时写入的本地曲目 id；外来 OneLibrary 曲目没有这个关联。
-    #[serde(default)]
-    pub local_track_id: Option<i64>,
-    /// 目标 DJ 软件是否把这条 OneLibrary 内容标记为已修改。
-    #[serde(default)]
-    pub external_modified: bool,
-    #[serde(default)]
-    pub external_update_count: i32,
-    pub title: String,
-    pub artist: String,
-    pub album: String,
-    #[serde(default)]
-    pub genre: String,
-    #[serde(default)]
-    pub year: String,
-    pub bpm: Option<f64>,
-    pub music_key: String,
-    /// 从 OneLibrary 自由文本 key.name 规范化出的 Camelot；原文本仍保留在 music_key。
-    #[serde(default)]
-    pub camelot: String,
-    #[serde(default)]
-    pub open_key: String,
-    pub duration: Option<i64>,
-    #[serde(default)]
-    pub bitrate: Option<i64>,
-    #[serde(default)]
-    pub samplerate: Option<i64>,
-    #[serde(default)]
-    pub size: i64,
-    #[serde(default)]
-    pub rating: i64,
-    #[serde(default)]
-    pub comment: String,
-    /// 封面关联或文件内容发生变化时随之变化，供前端打破图片缓存。
-    #[serde(default)]
-    pub cover_version: String,
-    #[serde(default)]
-    pub cue_points: Vec<CuePoint>,
-    pub path: String,
-    pub filename: String,
-}
-
-/// 本地曲库接收外置 DJ 曲库元数据时的协议无关边界。
-///
-/// OneLibrary 的表/外键形状不进入 kdj-library；server 在 IO 边界展开后，曲库只负责
-/// 一次事务写入这份可移植快照。后续支持其它 DJ 协议时可以复用同一入口。
-#[derive(Debug, Clone, Default)]
-pub struct PortableTrackMetadata {
-    pub title: String,
-    pub artist: String,
-    pub album: String,
-    pub genre: String,
-    pub year: String,
-    pub bpm: Option<f64>,
-    pub music_key: String,
-    pub camelot: String,
-    pub open_key: String,
-    pub duration: Option<f64>,
-    pub bitrate: Option<i64>,
-    pub samplerate: Option<i64>,
-    pub size: i64,
-    pub rating: i64,
-    pub comment: String,
-}
-
-impl From<&OneLibraryTrack> for PortableTrackMetadata {
-    fn from(track: &OneLibraryTrack) -> Self {
-        Self {
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
-            genre: track.genre.clone(),
-            year: track.year.clone(),
-            bpm: track.bpm,
-            music_key: track.music_key.clone(),
-            camelot: track.camelot.clone(),
-            open_key: track.open_key.clone(),
-            duration: track.duration.map(|value| value as f64),
-            bitrate: track.bitrate,
-            samplerate: track.samplerate,
-            size: track.size,
-            rating: track.rating,
-            comment: track.comment.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OneLibraryCapacityPlan {
-    pub required_bytes: u64,
-    pub available_bytes: u64,
-    pub sufficient: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OneLibraryImportResult {
-    #[serde(default)]
-    pub track_ids: Vec<i64>,
-    #[serde(default)]
-    pub errors: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PlaylistExportResult {
-    pub playlist_id: i64,
-    pub playlist_name: String,
-    pub device_path: String,
-    pub copied_tracks: usize,
-    pub reused_tracks: usize,
-    pub skipped_tracks: usize,
-    pub copied_bytes: u64,
-    pub database_path: String,
-    /// 本次有多少本地分析被复用，以及哪些曲目仍需目标软件按原流程分析。
-    #[serde(default)]
-    pub analysis_note: String,
-    #[serde(default)]
-    pub warnings: Vec<String>,
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TrackPatch {
+    pub bpm: Option<f64>,
     pub rating: Option<i64>,
     pub color: Option<String>,
     pub comment: Option<String>,
@@ -1192,6 +1071,7 @@ pub enum AnalysisVersion {
     #[default]
     V1,
     V2,
+    V3,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1203,13 +1083,13 @@ pub struct AnalyzeRequest {
     /// 走插队通道，给"正在放的这首"用
     #[serde(default)]
     pub priority: bool,
-    /// 元数据代际。v1 写旧 tracks 列；v2 写独立的 BPM/Key v2 存储。
+    /// 元数据代际。v1 写旧 tracks 列；v2/v3 写各自独立的 BPM/Key 存储。
     #[serde(default)]
     pub version: AnalysisVersion,
     /// 仅在 track_ids 为空时限制后端挑选的数量，供渐进回填使用。
     #[serde(default)]
     pub limit: Option<usize>,
-    /// v2 渐进回填优先范围；空串表示全曲库。
+    /// 新版渐进回填优先范围；空串表示全曲库。
     #[serde(default)]
     pub folder: String,
 }
@@ -1394,6 +1274,12 @@ pub struct LibraryStats {
     pub bpm_key_v2_pending: i64,
     /// v2 行里的算法修订号；修订号变化会自然产生一轮新的待回填任务。
     pub bpm_key_v2_revision: String,
+    /// 当前 BPM/Key v3 算法修订下已经完成的曲目数。
+    pub bpm_key_v3_analyzed: i64,
+    /// 当前 BPM/Key v3 算法修订下仍需回填的曲目数。
+    pub bpm_key_v3_pending: i64,
+    /// v3 行里的算法修订号；修订号变化会自然产生一轮新的待回填任务。
+    pub bpm_key_v3_revision: String,
     pub total_duration: f64,
     pub total_size: i64,
     /// 已分析曲目的全库中位数。前端用它把响度显示成相对 100%，不拿当前分页假算。
@@ -1405,15 +1291,25 @@ pub struct LibraryStats {
     pub by_platform: std::collections::BTreeMap<String, i64>,
 }
 
-/// 波形：每列一个幅度 + RGB 三条频段能量。
+/// 波形：每列一个兼容上下包络、瞬态置信度与 RGB 三维声学证据。
+///
+/// `amp` 继续保留给旧缓存、渐进在线波形和非轮廓调用方；新生成的本地波形同时提供
+/// `minimum` / `maximum`。正式 detail 使用对称硬柱以避免相邻列拟合成圆角；读取旧 JSON
+/// 时后三个字段默认为空，前端会自动退回对称幅度。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Waveform {
     pub track_id: i64,
     pub duration: f64,
     pub amp: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub minimum: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maximum: Vec<f32>,
     pub r: Vec<u8>,
     pub g: Vec<u8>,
     pub b: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transient: Vec<u8>,
 }
 
 // ---------------------------------------------------------------- serde 默认值
@@ -1444,9 +1340,6 @@ fn default_video_platform() -> Platform {
 }
 fn default_video_height() -> i64 {
     1080
-}
-fn default_vj_quality() -> String {
-    "1080p".into()
 }
 fn default_local() -> String {
     "local".to_string()
@@ -1550,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_request_defaults_to_v1_and_accepts_a_limited_v2_backfill() {
+    fn analyze_request_defaults_to_v1_and_accepts_versioned_backfills() {
         let legacy: AnalyzeRequest = serde_json::from_str(r#"{"track_ids":[1]}"#).unwrap();
         assert_eq!(legacy.version, AnalysisVersion::V1);
         assert_eq!(legacy.limit, None);
@@ -1560,5 +1453,8 @@ mod tests {
         assert_eq!(v2.version, AnalysisVersion::V2);
         assert_eq!(v2.limit, Some(20));
         assert_eq!(v2.folder, "/Music/set");
+
+        let v3: AnalyzeRequest = serde_json::from_str(r#"{"version":"v3"}"#).unwrap();
+        assert_eq!(v3.version, AnalysisVersion::V3);
     }
 }

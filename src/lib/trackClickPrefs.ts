@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { LayoutMode } from "./useLayoutMode";
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 /**
  * 曲目列表的点击手势偏好。
@@ -31,7 +32,7 @@ function isPlayClick(value: unknown): value is TrackPlayClick {
 
 function load(): TrackClickPrefs {
   try {
-    const raw: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+    const raw: unknown = JSON.parse(readLocalStorage(STORAGE_KEY) ?? "null");
     if (!raw || typeof raw !== "object") return { ...DEFAULTS };
     const data = raw as Partial<TrackClickPrefs>;
     const widePlay = isPlayClick(data.widePlay) ? data.widePlay : DEFAULTS.widePlay;
@@ -48,7 +49,7 @@ function load(): TrackClickPrefs {
 }
 
 function save(prefs: TrackClickPrefs): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+  writeLocalStorageNow(STORAGE_KEY, JSON.stringify(prefs));
 }
 
 interface TrackClickPrefsState extends TrackClickPrefs {

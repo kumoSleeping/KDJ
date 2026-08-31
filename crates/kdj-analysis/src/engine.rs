@@ -5,11 +5,11 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::decode::{decode_audio_from, probe_duration, DEFAULT_SR};
+use crate::decode::{decode_audio_from_cancellable, probe_duration, DEFAULT_SR};
 use crate::dj_grid::{fit_dj_grid, GridMode};
-use crate::key::analyze_key;
-use crate::loudness::analyze_loudness;
-use crate::tempo::analyze_tempo;
+use crate::key::analyze_key_cancellable;
+use crate::loudness::analyze_loudness_cancellable;
+use crate::tempo::analyze_tempo_cancellable;
 
 /// 短于这个长度的曲子不做 15% 偏移，直接整段分析（interlude / 采样包常见）
 const SHORT_TRACK_SECONDS: f64 = 60.0;
@@ -91,6 +91,19 @@ pub fn analyze_samples(samples: &[f32], sr: f64, offset: f64) -> AnalysisResult 
 }
 
 fn analyze_samples_timed(samples: &[f32], sr: f64, offset: f64) -> (AnalysisResult, u64, u64, u64) {
+    analyze_samples_timed_cancellable(samples, sr, offset, &|| false)
+        .expect("不可取消的整曲分析不应提前退出")
+}
+
+fn analyze_samples_timed_cancellable(
+    samples: &[f32],
+    sr: f64,
+    offset: f64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<(AnalysisResult, u64, u64, u64)> {
+    if cancelled() {
+        return None;
+    }
     let mut result = AnalysisResult {
         duration: offset
             + if sr > 0.0 {
@@ -102,7 +115,7 @@ fn analyze_samples_timed(samples: &[f32], sr: f64, offset: f64) -> (AnalysisResu
     };
 
     let tempo_started = Instant::now();
-    let tempo = analyze_tempo(samples, sr);
+    let tempo = analyze_tempo_cancellable(samples, sr, cancelled)?;
     let tempo_ms = elapsed_ms(tempo_started);
     if tempo.bpm > 0.0 {
         // `beat_times[0] % interval` 会把分析窗中段的一次整数帧误差外推到整首；BPM 只要
@@ -149,9 +162,12 @@ fn analyze_samples_timed(samples: &[f32], sr: f64, offset: f64) -> (AnalysisResu
             result.first_beat = Some(round_to(origin, 4));
         }
     }
+    if cancelled() {
+        return None;
+    }
 
     let key_started = Instant::now();
-    let key = analyze_key(samples, sr);
+    let key = analyze_key_cancellable(samples, sr, cancelled)?;
     let key_ms = elapsed_ms(key_started);
     result.key = key.key;
     result.key_short = key.key_short;
@@ -161,14 +177,18 @@ fn analyze_samples_timed(samples: &[f32], sr: f64, offset: f64) -> (AnalysisResu
     result.chroma = key.chroma;
 
     let loud_started = Instant::now();
-    let loud = analyze_loudness(samples);
+    let loud = analyze_loudness_cancellable(samples, cancelled)?;
     let loudness_ms = elapsed_ms(loud_started);
     result.rms_db = Some(loud.rms_db);
     result.peak_db = Some(loud.peak_db);
     result.crest_db = Some(loud.crest_db);
     result.energy = Some(loud.energy);
 
-    (result, tempo_ms, key_ms, loudness_ms)
+    if cancelled() {
+        None
+    } else {
+        Some((result, tempo_ms, key_ms, loudness_ms))
+    }
 }
 
 /// Choose one of four beat-index phases only when its accents remain stronger in both halves of
@@ -237,37 +257,56 @@ pub fn analyze_file(path: &Path, duration_limit: f64) -> AnalysisResult {
 
 /// 与 [`analyze_file`] 相同，并带上各阶段耗时，供曲库任务写入 KDJ 日志。
 pub fn analyze_file_timed(path: &Path, duration_limit: f64) -> (AnalysisResult, AnalysisTiming) {
+    analyze_file_timed_cancellable(path, duration_limit, &|| false)
+        .expect("不可取消的文件分析不应提前退出")
+}
+
+/// 可取消的完整文件分析。所有阶段只在结果完整时才返回 `Some`；取消不会伪装成
+/// decode error，也不会把半套 BPM/Key 交给存储层。
+pub fn analyze_file_timed_cancellable(
+    path: &Path,
+    duration_limit: f64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<(AnalysisResult, AnalysisTiming)> {
+    if cancelled() {
+        return None;
+    }
     let started = Instant::now();
     let duration_limit = duration_limit.abs().clamp(1.0, ANALYSIS_AUDIO_CAP);
 
     let probe_started = Instant::now();
     let probed_duration = probe_duration(path).ok().flatten();
     let probe_ms = elapsed_ms(probe_started);
+    if cancelled() {
+        return None;
+    }
     let (offset, max_seconds) = analysis_window(probed_duration, duration_limit);
 
     let decode_started = Instant::now();
-    let decoded = match decode_audio_from(path, DEFAULT_SR, max_seconds, offset) {
-        Ok(decoded) => decoded,
-        Err(err) => {
-            return (
-                AnalysisResult {
-                    duration: probed_duration.unwrap_or(0.0),
-                    errors: vec![format!("decode: {err}")],
-                    ..Default::default()
-                },
-                AnalysisTiming {
-                    probe_ms,
-                    decode_ms: elapsed_ms(decode_started),
-                    total_ms: elapsed_ms(started),
-                    offset_seconds: offset,
-                    ..Default::default()
-                },
-            );
-        }
-    };
+    let decoded =
+        match decode_audio_from_cancellable(path, DEFAULT_SR, max_seconds, offset, cancelled) {
+            Ok(Some(decoded)) => decoded,
+            Ok(None) => return None,
+            Err(err) => {
+                return Some((
+                    AnalysisResult {
+                        duration: probed_duration.unwrap_or(0.0),
+                        errors: vec![format!("decode: {err}")],
+                        ..Default::default()
+                    },
+                    AnalysisTiming {
+                        probe_ms,
+                        decode_ms: elapsed_ms(decode_started),
+                        total_ms: elapsed_ms(started),
+                        offset_seconds: offset,
+                        ..Default::default()
+                    },
+                ));
+            }
+        };
     let decode_ms = elapsed_ms(decode_started);
     if decoded.samples.is_empty() {
-        return (
+        return Some((
             AnalysisResult {
                 duration: probed_duration.unwrap_or(0.0),
                 errors: vec!["decode: 解出 0 个采样点".to_string()],
@@ -281,7 +320,7 @@ pub fn analyze_file_timed(path: &Path, duration_limit: f64) -> (AnalysisResult, 
                 sample_rate: decoded.sample_rate,
                 ..Default::default()
             },
-        );
+        ));
     }
 
     let sr = decoded.sample_rate as f64;
@@ -291,14 +330,17 @@ pub fn analyze_file_timed(path: &Path, duration_limit: f64) -> (AnalysisResult, 
         0.0
     };
     let (mut result, tempo_ms, key_ms, loudness_ms) =
-        analyze_samples_timed(&decoded.samples, sr, offset);
+        analyze_samples_timed_cancellable(&decoded.samples, sr, offset, cancelled)?;
     result.duration = round_to(
         probed_duration
             .or(decoded.duration)
             .unwrap_or(result.duration),
         3,
     );
-    (
+    if cancelled() {
+        return None;
+    }
+    Some((
         result,
         AnalysisTiming {
             probe_ms,
@@ -311,12 +353,40 @@ pub fn analyze_file_timed(path: &Path, duration_limit: f64) -> (AnalysisResult, 
             decoded_seconds,
             sample_rate: decoded.sample_rate,
         },
-    )
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_pre_cancelled_analysis_never_opens_the_file() {
+        let result = analyze_file_timed_cancellable(
+            Path::new("/this/file/does/not/exist.mp3"),
+            90.0,
+            &|| true,
+        );
+        assert!(result.is_none(), "取消不能被伪装成 decode error");
+    }
+
+    #[test]
+    fn sample_analysis_can_stop_inside_the_fft_pass() {
+        let sr = DEFAULT_SR as f64;
+        let samples: Vec<f32> = (0..DEFAULT_SR as usize * 5)
+            .map(|index| (2.0 * std::f64::consts::PI * 120.0 * index as f64 / sr).sin() as f32)
+            .collect();
+        let checks = AtomicUsize::new(0);
+        let result = analyze_samples_timed_cancellable(&samples, sr, 0.0, &|| {
+            checks.fetch_add(1, Ordering::Relaxed) >= 10
+        });
+        assert!(result.is_none());
+        assert!(
+            checks.load(Ordering::Relaxed) > 10,
+            "分析应在逐帧检查点观察到取消"
+        );
+    }
 
     #[test]
     fn short_tracks_are_analysed_whole() {

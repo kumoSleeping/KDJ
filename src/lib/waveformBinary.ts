@@ -5,15 +5,15 @@ export const WAVEFORM_BINARY_MIME = "application/vnd.kdj.waveform";
 export type WaveformProfile = "current" | "release-overview";
 
 const WIRE_MAGIC = [0x4b, 0x44, 0x4a, 0x57, 0x56, 0x46, 0x4d, 0x00] as const; // KDJWVFM\0
-const WIRE_VERSION = 1;
+const WIRE_VERSION = 2;
 const WIRE_HEADER_BYTES = 36;
-const WIRE_BYTES_PER_COLUMN = 7;
+const WIRE_BYTES_PER_COLUMN = 8;
 const MAX_WIRE_COLUMNS = 100_000;
 const NATIVE_LITTLE_ENDIAN = new Uint8Array(Uint16Array.of(1).buffer)[0] === 1;
 
 const PROFILE_CONTRACT: Record<WaveformProfile, { code: number; revision: number }> = {
-  current: { code: 1, revision: 6 },
-  "release-overview": { code: 2, revision: 5 },
+  current: { code: 1, revision: 9 },
+  "release-overview": { code: 2, revision: 9 },
 };
 
 export function isWaveformBinaryContentType(contentType: string | null): boolean {
@@ -21,7 +21,7 @@ export function isWaveformBinaryContentType(contentType: string | null): boolean
 }
 
 /**
- * Decode the server's little-endian waveform wire v1.
+ * Decode the server's little-endian waveform wire v2.
  *
  * The header includes the algorithm profile and revision, so a current-band detail response can
  * never silently enter the historical release-overview cache (or vice versa). Length and channel
@@ -73,31 +73,43 @@ export function decodeWaveformBinary(
   }
 
   let offset = WIRE_HEADER_BYTES;
-  // Every supported KDJ target is little-endian. Keep typed views into the response buffer so a
-  // 24k detail rail occupies its 168 KiB wire size instead of expanding into four boxed JS arrays.
-  // The fallback preserves the explicit little-endian contract on a theoretical big-endian host.
-  const amp = NATIVE_LITTLE_ENDIAN
-    ? new Float32Array(payload, offset, columns)
-    : Float32Array.from(
-        { length: columns },
-        (_, index) => view.getFloat32(offset + index * 4, true),
-      );
-  for (let index = 0; index < columns; index += 1) {
-    if (!Number.isFinite(amp[index])) throw new Error(`波形第 ${index} 列振幅非法`);
-  }
-  offset += columns * 4;
+  // Decode compact i16 min/max into normalized float arrays. `amp` is materialized as their
+  // symmetric fallback because progressive and legacy consumers still use that common field.
+  const decodeContour = (byteOffset: number): Float32Array => {
+    if (NATIVE_LITTLE_ENDIAN) {
+      const source = new Int16Array(payload, byteOffset, columns);
+      return Float32Array.from(source, (value) => value / 32767);
+    }
+    return Float32Array.from(
+      { length: columns },
+      (_, index) => view.getInt16(byteOffset + index * 2, true) / 32767,
+    );
+  };
+  const minimum = decodeContour(offset);
+  offset += columns * 2;
+  const maximum = decodeContour(offset);
+  offset += columns * 2;
+  const amp = Float32Array.from(
+    { length: columns },
+    (_, index) => Math.min(1, Math.max(0, maximum[index] ?? 0, -(minimum[index] ?? 0))),
+  );
   const r = bytes.subarray(offset, offset + columns);
   offset += columns;
   const g = bytes.subarray(offset, offset + columns);
   offset += columns;
   const b = bytes.subarray(offset, offset + columns);
+  offset += columns;
+  const transient = bytes.subarray(offset, offset + columns);
 
   return {
     track_id: Number(trackIdBigInt),
     duration,
     amp,
+    minimum,
+    maximum,
     r,
     g,
     b,
+    transient,
   };
 }

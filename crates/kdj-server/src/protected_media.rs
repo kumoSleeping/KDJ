@@ -2,8 +2,8 @@
 //!
 //! A WebPO/GVS URL is a short-lived playback capability, not a normal CDN file. Reopening it for
 //! every decoder seek can turn an already accepted session into a later 403. This module follows
-//! yt-dlp's current 10 MiB bounded GVS transfer contract, continuously spools those sequential
-//! chunks to a local file, and serves arbitrary decoder ranges from that growing local file.
+//! a 10 MiB bounded GVS transfer policy, continuously spools those sequential chunks to a local
+//! file, and serves arbitrary decoder ranges from that growing local file.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +17,10 @@ use tokio::sync::Notify;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 const RANGE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
-const GVS_RANGE_CHUNK_BYTES: u64 = 1024 * 1024;
+/// KDJ's bounded GVS request size. Every continuation gets a freshly minted proof, so keep this
+/// in sync with the frontend's proof-count calculation.
+pub const GVS_RANGE_CHUNK_BYTES: u64 = 10 * 1024 * 1024;
+pub const GVS_MAX_PROOFS: usize = 64;
 pub const LOCAL_RANGE_CHUNK_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -73,35 +76,15 @@ impl ProtectedMediaSpool {
         .await
         .context("YouTube GVS 连接超时")?
         .context("连接 YouTube GVS 失败")?;
-        let mut status = response.status();
-        if matches!(status.as_u16(), 401 | 403) {
-            tracing::warn!(%status, "受保护媒体首个有界 Range 被 GVS 拒绝，重试一次");
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            response = tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                kdj_providers::youtubemusic::gvs_playback_request(client, first_url)
-                    .header(reqwest::header::RANGE, &initial_range)
-                    .send(),
-            )
-            .await
-            .context("YouTube GVS Range 连接超时")?
-            .context("连接 YouTube GVS Range 失败")?;
-            status = response.status();
-        }
+        let status = response.status();
         if matches!(status.as_u16(), 401 | 403) {
             tracing::warn!(%status, "受保护媒体证明被 GVS 拒绝");
-            let detail = response.text().await.unwrap_or_default();
-            let detail = detail.trim().chars().take(300).collect::<String>();
-            bail!(
-                "YouTube GVS 播放授权已失效（HTTP {status}{}）",
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!("：{detail}")
-                }
-            );
+            // Never reflect a CDN body into renderer-visible errors or logs: an upstream error can
+            // echo signed request data. The status is enough to classify the one failed request.
+            bail!("YouTube GVS 播放授权已失效（HTTP {status}）");
         }
         let (total, content_type) = media_response_metadata(url, status, response.headers())?;
+        let first_response_end = media_response_end(status, response.headers(), total)?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -154,8 +137,15 @@ impl ProtectedMediaSpool {
         let pump_client = client.clone();
         let pump_urls = media_urls;
         tokio::spawn(async move {
-            let result =
-                pump_remaining(&pump, &mut response, &mut writer, &pump_client, &pump_urls).await;
+            let result = pump_remaining(
+                &pump,
+                &mut response,
+                first_response_end,
+                &mut writer,
+                &pump_client,
+                &pump_urls,
+            )
+            .await;
             let mut state = pump.state.lock().unwrap();
             match result {
                 Ok(()) if state.available == pump.total => state.complete = true,
@@ -338,23 +328,21 @@ impl ProtectedMediaSpool {
     }
 
     pub async fn wait_complete(&self) -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(10 * 60), async {
-            loop {
-                let notified = self.changed.notified();
-                {
-                    let state = self.state.lock().unwrap();
-                    if let Some(error) = &state.error {
-                        return Err(anyhow!(error.clone()));
-                    }
-                    if state.complete {
-                        return Ok(());
-                    }
+        loop {
+            let notified = self.changed.notified();
+            {
+                let state = self.state.lock().unwrap();
+                if let Some(error) = &state.error {
+                    return Err(anyhow!(error.clone()));
                 }
-                notified.await;
+                if state.complete {
+                    return Ok(());
+                }
             }
-        })
-        .await
-        .context("等待受保护媒体下载完成超时")?
+            // 每个 GVS 连接和媒体块都有自己的超时；不再另设整轨 10 分钟上限，
+            // 否则长音频即使持续前进也会被误判为失败。
+            notified.await;
+        }
     }
 
     /// Transfers cleanup ownership to the download provider.
@@ -398,52 +386,48 @@ fn gvs_range(start: u64, total: u64) -> String {
 async fn pump_remaining(
     spool: &ProtectedMediaSpool,
     response: &mut reqwest::Response,
+    mut response_end: u64,
     writer: &mut tokio::fs::File,
     client: &reqwest::Client,
     urls: &[String],
 ) -> Result<()> {
-    let mut continuation_attempts = 0_u32;
     let mut token_index = 0_usize;
     loop {
-        loop {
-            if spool.cancelled.load(Ordering::Acquire) {
-                bail!("媒体会话已取消");
-            }
-            let chunk = tokio::time::timeout(CHUNK_TIMEOUT, response.chunk())
-                .await
-                .context("YouTube GVS 连续 30 秒没有返回数据")?
-                .context("YouTube GVS 媒体流中断")?;
-            let Some(chunk) = chunk else {
-                break;
-            };
+        if spool.cancelled.load(Ordering::Acquire) {
+            bail!("媒体会话已取消");
+        }
+        let chunk = tokio::time::timeout(CHUNK_TIMEOUT, response.chunk())
+            .await
+            .context("YouTube GVS 连续 30 秒没有返回数据")?
+            .context("YouTube GVS 媒体流中断")?;
+        if let Some(chunk) = chunk {
             writer
                 .write_all(&chunk)
                 .await
                 .context("写入媒体会话文件失败")?;
             let mut state = spool.state.lock().unwrap();
             state.available = state.available.saturating_add(chunk.len() as u64);
-            if state.available > spool.total {
-                bail!("YouTube GVS 返回内容超过声明长度");
+            if state.available > response_end.saturating_add(1) || state.available > spool.total {
+                bail!("YouTube GVS 返回内容超过声明范围");
             }
             drop(state);
             spool.changed.notify_waiters();
+            continue;
         }
+
         let offset = spool.state.lock().unwrap().available;
+        anyhow::ensure!(
+            offset == response_end.saturating_add(1),
+            "YouTube GVS 媒体流提前结束（{offset}/{} 字节）",
+            response_end.saturating_add(1)
+        );
         if offset >= spool.total {
             break;
         }
-        continuation_attempts += 1;
-        anyhow::ensure!(
-            continuation_attempts <= 8,
-            "YouTube GVS 媒体流续传失败次数过多"
-        );
-        let delay_ms = 150_u64.saturating_mul(1_u64 << continuation_attempts.min(4));
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         let range = gvs_range(offset, spool.total);
         token_index += 1;
         let url = urls
             .get(token_index)
-            .or_else(|| urls.last())
             .context("YouTube GVS 证明数量不足，无法继续读取整轨")?;
         let next = tokio::time::timeout(
             CONNECT_TIMEOUT,
@@ -454,11 +438,7 @@ async fn pump_remaining(
         .await
         .context("YouTube GVS 续传连接超时")?
         .context("连接 YouTube GVS 续传失败")?;
-        if matches!(next.status().as_u16(), 401 | 403) {
-            continue;
-        }
-        validate_continuation(&next, offset, spool.total)?;
-        continuation_attempts = 0;
+        response_end = validate_continuation(&next, offset, spool.total)?;
         *response = next;
     }
     writer.flush().await.context("提交媒体会话文件失败")?;
@@ -469,7 +449,7 @@ fn validate_continuation(
     response: &reqwest::Response,
     expected_start: u64,
     total: u64,
-) -> Result<()> {
+) -> Result<u64> {
     anyhow::ensure!(
         response.status() == reqwest::StatusCode::PARTIAL_CONTENT,
         "YouTube GVS 续传返回 HTTP {}",
@@ -498,7 +478,40 @@ fn validate_continuation(
         start == expected_start && start <= end && actual_total == total,
         "YouTube GVS 续传范围不连续"
     );
-    Ok(())
+    Ok(end)
+}
+
+fn media_response_end(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    total: u64,
+) -> Result<u64> {
+    if status == reqwest::StatusCode::OK {
+        return Ok(total - 1);
+    }
+    let raw = headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .context("YouTube GVS 缺少 Content-Range")?;
+    let value = raw
+        .strip_prefix("bytes ")
+        .context("YouTube GVS Content-Range 无效")?;
+    let (span, actual_total) = value
+        .split_once('/')
+        .context("YouTube GVS Content-Range 无效")?;
+    let (start, end) = span
+        .split_once('-')
+        .context("YouTube GVS Content-Range 无效")?;
+    let start = start.parse::<u64>().context("YouTube GVS 起点无效")?;
+    let end = end.parse::<u64>().context("YouTube GVS 终点无效")?;
+    let actual_total = actual_total
+        .parse::<u64>()
+        .context("YouTube GVS 总长度无效")?;
+    anyhow::ensure!(
+        start == 0 && start <= end && actual_total == total,
+        "YouTube GVS 首段范围无效"
+    );
+    Ok(end)
 }
 
 fn media_response_metadata(
@@ -598,7 +611,7 @@ pub fn cleanup_stale(root: &Path) {
         if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("ytm-"))
+            .is_some_and(|name| name.starts_with("ytm-") || name.starts_with("yt-hls-"))
         {
             let _ = std::fs::remove_file(path);
         }
@@ -635,7 +648,10 @@ mod tests {
                     let requests = Arc::clone(&requests);
                     async move {
                         requests.fetch_add(1, Ordering::SeqCst);
-                        assert_eq!(headers.get(header::RANGE).unwrap(), "bytes=0-1048575");
+                        assert_eq!(
+                            headers.get(header::RANGE).unwrap(),
+                            format!("bytes=0-{}", payload.len() - 1).as_str()
+                        );
                         Response::builder()
                             .status(StatusCode::OK)
                             .header(header::CONTENT_TYPE, "audio/mp4")
@@ -653,6 +669,7 @@ mod tests {
             "kdj-protected-media-test-{:016x}",
             rand::random::<u64>()
         ));
+        kdj_core::ensure_rustls_ring();
         let client = reqwest::Client::new();
         let spool = ProtectedMediaSpool::start(
             &client,
@@ -681,7 +698,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capped_gvs_response_recovers_from_transient_continuation_403() {
+    async fn capped_gvs_responses_use_each_distinct_proof_once() {
         let payload = Arc::new((0..=255_u8).cycle().take(768 * 1024).collect::<Vec<_>>());
         let requests = Arc::new(AtomicUsize::new(0));
         let split = 256 * 1024;
@@ -717,23 +734,19 @@ mod tests {
                                     format!("bytes={split}-{}", payload.len() - 1).as_str()
                                 );
                                 Response::builder()
-                                    .status(StatusCode::FORBIDDEN)
-                                    .body(Body::empty())
+                                    .status(StatusCode::PARTIAL_CONTENT)
+                                    .header(header::CONTENT_TYPE, "audio/mp4")
+                                    .header(
+                                        header::CONTENT_RANGE,
+                                        format!(
+                                            "bytes {split}-{}/{}",
+                                            payload.len() - 1,
+                                            payload.len()
+                                        ),
+                                    )
+                                    .body(Body::from(payload[split..].to_vec()))
                                     .unwrap()
                             }
-                            2 => Response::builder()
-                                .status(StatusCode::PARTIAL_CONTENT)
-                                .header(header::CONTENT_TYPE, "audio/mp4")
-                                .header(
-                                    header::CONTENT_RANGE,
-                                    format!(
-                                        "bytes {split}-{}/{}",
-                                        payload.len() - 1,
-                                        payload.len()
-                                    ),
-                                )
-                                .body(Body::from(payload[split..].to_vec()))
-                                .unwrap(),
                             _ => panic!("unexpected extra GVS request"),
                         }
                     }
@@ -744,24 +757,88 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let temp = std::env::temp_dir().join(format!(
-            "kdj-protected-media-retry-test-{:016x}",
+            "kdj-protected-media-capped-test-{:016x}",
             rand::random::<u64>()
         ));
+        let url = format!(
+            "http://{address}/audio?mime=audio%2Fmp4&clen={}",
+            payload.len()
+        );
+        kdj_core::ensure_rustls_ring();
         let spool = ProtectedMediaSpool::start(
             &reqwest::Client::new(),
-            &format!(
-                "http://{address}/audio?mime=audio%2Fmp4&clen={}",
-                payload.len()
-            ),
-            &[],
+            &url,
+            &[url.clone(), url.clone()],
             spool_path(&temp, "m4a"),
         )
         .await
         .unwrap();
         spool.wait_complete().await.unwrap();
         assert_eq!(tokio::fs::read(spool.persist()).await.unwrap(), *payload);
-        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
         server.abort();
+        let _ = tokio::fs::remove_dir_all(temp).await;
+    }
+
+    #[tokio::test]
+    async fn continuation_failure_is_exposed_without_retrying_another_proof() {
+        let payload = Arc::new((0..=255_u8).cycle().take(768 * 1024).collect::<Vec<_>>());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let split = 256 * 1024;
+        let app = Router::new().route(
+            "/audio",
+            get({
+                let payload = Arc::clone(&payload);
+                let requests = Arc::clone(&requests);
+                move |_headers: HeaderMap| {
+                    let payload = Arc::clone(&payload);
+                    let requests = Arc::clone(&requests);
+                    async move {
+                        match requests.fetch_add(1, Ordering::SeqCst) {
+                            0 => Response::builder()
+                                .status(StatusCode::PARTIAL_CONTENT)
+                                .header(header::CONTENT_TYPE, "audio/mp4")
+                                .header(
+                                    header::CONTENT_RANGE,
+                                    format!("bytes 0-{}/{}", split - 1, payload.len()),
+                                )
+                                .body(Body::from(payload[..split].to_vec()))
+                                .unwrap(),
+                            1 => Response::builder()
+                                .status(StatusCode::FORBIDDEN)
+                                .body(Body::empty())
+                                .unwrap(),
+                            _ => panic!("failed continuation must not be retried"),
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let temp = std::env::temp_dir().join(format!(
+            "kdj-protected-media-no-retry-test-{:016x}",
+            rand::random::<u64>()
+        ));
+        let url = format!(
+            "http://{address}/audio?mime=audio%2Fmp4&clen={}",
+            payload.len()
+        );
+        kdj_core::ensure_rustls_ring();
+        let spool = ProtectedMediaSpool::start(
+            &reqwest::Client::new(),
+            &url,
+            &[url.clone(), url.clone(), url.clone()],
+            spool_path(&temp, "m4a"),
+        )
+        .await
+        .unwrap();
+        let error = spool.wait_complete().await.unwrap_err();
+        assert!(error.to_string().contains("续传返回 HTTP 403 Forbidden"));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+        drop(spool);
         let _ = tokio::fs::remove_dir_all(temp).await;
     }
 }

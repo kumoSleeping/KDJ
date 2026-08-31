@@ -17,7 +17,7 @@ function colorDefinition(cue: CuePoint) {
   return name ? CUE_COLORS[name] ?? null : null;
 }
 
-/** OneLibrary 颜色表只存标准色名；这里给波形和色块统一转换为可见的 sRGB。 */
+/** 把标准色名转换为波形和色块共用的可见 sRGB。 */
 export function cueColor(cue: CuePoint): string {
   return colorDefinition(cue)?.css ?? "#7d8796";
 }

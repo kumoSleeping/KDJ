@@ -1,4 +1,4 @@
-import type { SongSource } from "../types";
+import type { SongSource, Track } from "../types";
 
 export const TRACK_DRAG_STATE_EVENT = "kd:track-drag-state";
 export const TRACK_TRASH_DROP_EVENT = "kd:track-trash-drop";
@@ -109,10 +109,12 @@ export function lockTrackPointerDragScroll(
   target: HTMLElement | null,
   top: number,
   left: number,
-): () => void {
+): (settleMs?: number) => void {
   if (!target) return () => undefined;
   const previousOverflow = target.style.overflow;
   let restoring = false;
+  let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+  let released = false;
   const restore = () => {
     if (restoring || (target.scrollTop === top && target.scrollLeft === left)) return;
     restoring = true;
@@ -123,10 +125,24 @@ export function lockTrackPointerDragScroll(
   target.style.overflow = "hidden";
   target.addEventListener("scroll", restore, { passive: true });
   restore();
-  return () => {
-    target.removeEventListener("scroll", restore);
+  const finishRelease = () => {
+    if (released) return;
+    released = true;
+    releaseTimer = null;
+    // 先在 overflow:hidden 下吃掉最后一次系统边缘滚动，再恢复滚动能力；恢复样式
+    // 本身也可能触发布局，所以最后再校正一次位置。
     restore();
+    target.removeEventListener("scroll", restore);
     target.style.overflow = previousOverflow;
+    restore();
+  };
+  return (settleMs = 0) => {
+    if (released || releaseTimer !== null) return;
+    if (settleMs > 0) {
+      releaseTimer = globalThis.setTimeout(finishRelease, settleMs);
+      return;
+    }
+    finishRelease();
   };
 }
 
@@ -138,6 +154,35 @@ const TRACK_DRAG_END_GRACE_MS = 1800;
 
 export interface TrackDragDetail {
   ids: number[];
+}
+
+export interface SystemFileDragPayload {
+  paths: string[];
+  label: string;
+}
+
+/**
+ * 封面拖出时沿用当前多选，但只交出当前已加载且有真实路径的曲目。
+ * 源曲目不在选区时只拖它，避免“点住一首却把旧选区一起带走”。
+ */
+export function systemFileDragPayload(
+  tracks: readonly Track[],
+  selectedIds: readonly number[],
+  source: Track,
+): SystemFileDragPayload {
+  const byId = new Map(tracks.map((track) => [track.id, track]));
+  const ids = selectedIds.includes(source.id) ? selectedIds : [source.id];
+  const paths: string[] = [];
+  for (const id of ids) {
+    const path = (byId.get(id) ?? (id === source.id ? source : null))?.path.trim();
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return {
+    paths,
+    label: paths.length > 1
+      ? `${paths.length} 首曲目`
+      : (source.title.trim() || source.filename.trim() || "本地文件"),
+  };
 }
 
 /** pointer 拖放结束后，挡住封面框上的合成 click，避免误打开文件选择器。 */
@@ -256,7 +301,7 @@ export function isTrackDrag(event: { dataTransfer: DataTransfer | null }): boole
 export function writeTrackDragData(dataTransfer: DataTransfer, ids: number[]): void {
   const payload = JSON.stringify(ids);
   // 先登记，再写 WebKit 接受度最高的 text/plain；自定义 MIME 被拒绝时，
-  // text/plain + activeIds 仍能让文件夹、OneLibrary 和播放器完成 drop。
+  // text/plain + activeIds 仍能让文件夹和播放器完成 drop。
   announceTrackDrag(ids);
   dataTransfer.effectAllowed = "copyMove";
   dataTransfer.setData("text/plain", `${TRACK_DND_TEXT_PREFIX}${payload}`);
