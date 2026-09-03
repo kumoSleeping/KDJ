@@ -81,12 +81,25 @@ supplied by macOS; KDJ does not vendor or redistribute their binaries.
 - npm package: `bgutils-js`
 - License: MIT
 
-KDJ runs BgUtils' BotGuard client only in a non-persistent hidden native
-WKWebView. The view has a fixed YouTube origin and user agent, but no imported
-cookies, Tauri IPC bridge, application storage or media URL. Its restrictive
-CSP permits only the anonymous YouTube challenge, Google's allowlisted
-interpreter and GenerateIT request. The minter is warmed and reused for
-content-bound tokens inside that isolated realm.
+On macOS, KDJ runs BgUtils' BotGuard client only in a non-persistent hidden
+native WKWebView. The view has a fixed YouTube origin and user agent, but no
+imported cookies, Tauri IPC bridge, application storage or media URL. Its
+restrictive CSP permits only the anonymous YouTube challenge, Google's
+allowlisted interpreter and GenerateIT request. The minter is warmed and reused
+for content-bound tokens inside that isolated realm. Linux/Windows reuse the
+same local proof IIFE only for player s/n transforms inside a bare Deno/V8
+isolate; BotGuard minting on those platforms uses rustypipe-botguard instead.
+
+## rustypipe-botguard 0.1.2
+
+- Project: <https://codeberg.org/ThetaDev/rustypipe-botguard>
+- Crate: `rustypipe-botguard`
+- License: MIT
+
+On Linux and Windows, KDJ statically links rustypipe-botguard to mint YouTube
+WebPO tokens inside an embedded Deno/V8 realm (JSDOM-style browser shim). This
+keeps BotGuard out of the main Tauri renderer (SEC-005) without a Node/Python
+sidecar. The library is based on the same BgUtils reverse-engineering lineage.
 
 ## GoogleVideo 4.1.1
 

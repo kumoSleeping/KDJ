@@ -59,7 +59,8 @@ async function main() {
   const nativeProofWorker = assets.some((file) => (
     /^youtubeNativePo\.worker-[^/]+\.js$/.test(path.basename(file))
   ));
-  const maxTotal = platform === "darwin" ? 1_500_000 : 1_250_000;
+  const desktopProof = ["darwin", "linux", "windows", "win32"].includes(platform);
+  const maxTotal = desktopProof ? 1_500_000 : 1_250_000;
 
   console.log(
     `Frontend bundle (${platform}): total=${total} B, `
@@ -67,8 +68,12 @@ async function main() {
   );
 
   let failed = false;
-  if (platform !== "darwin" && nativeProofWorker) {
-    report("error", `${platform} 不应打包 macOS 专用 YouTube proof worker`);
+  if (!desktopProof && nativeProofWorker) {
+    report("error", `${platform} 不应打包桌面专用 YouTube proof worker`);
+    failed = true;
+  }
+  if (desktopProof && !nativeProofWorker) {
+    report("error", `${platform} 缺少 YouTube proof worker 产物`);
     failed = true;
   }
   if (total > maxTotal) {

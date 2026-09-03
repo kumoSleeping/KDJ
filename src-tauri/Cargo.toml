@@ -90,6 +90,12 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "block2",
 ] }
 
+[target.'cfg(all(not(target_os = "macos"), not(target_os = "android"), not(target_os = "ios")))'.dependencies]
+# Linux/Windows YouTube WebPO: rustypipe-botguard embeds Deno/V8 away from the main WebView
+# (SEC-005). Player transforms use a bare deno_core isolate with the existing proof IIFE.
+rustypipe-botguard = "0.1.2"
+deno_core = { version = "0.331.0", default-features = false, features = ["v8_use_custom_libcxx"] }
+
 # Android Playback v2：与桌面共用 coordinator + CPAL/AAudio；Kotlin 插件只留
 # MediaSession / 前台保活 / 歌词 overlay，不再用 ExoPlayer 出声。
 [target.'cfg(target_os = "android")'.dependencies]
