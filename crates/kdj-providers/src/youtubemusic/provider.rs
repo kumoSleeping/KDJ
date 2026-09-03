@@ -1459,21 +1459,42 @@ fn ytm_library_playlists(body: &Value) -> Vec<StreamPlaylist> {
 ///
 /// 从 browse / 续页 JSON 里取出下一页 token。
 ///
-/// 2025 起 token 是曲目列表末尾的 `continuationItemRenderer`（也可能嵌在
-/// `commandExecutorCommand.commands` 里）；老布局还有 shelf 级 `continuations`。
+/// 同一份 browse 里经常**同时**存在两种 token：
+/// 1. 曲目列表末尾的 `continuationItemRenderer`（2025 / ytmusicapi
+///    `get_continuations_2025`）→ 响应走 `onResponseReceivedActions`
+/// 2. `sectionListRenderer.continuations` 老字段 → 响应走 `continuationContents`
+///
+/// 深度优先时会先撞上 (2)，续页却解析不出新曲目，歌单就卡在首屏 ~100 首。
+/// 因此**必须优先**用 shelf 尾的 2025 token；找不到再退回老 `continuations`。
 fn playlist_continuation_token(value: &Value) -> Option<String> {
+    item_renderer_continuation_token(value).or_else(|| legacy_continuations_token(value))
+}
+
+/// 2025 列表尾续页项（含 commandExecutorCommand / ViewModel）。
+fn item_renderer_continuation_token(value: &Value) -> Option<String> {
     match value {
         Value::Array(items) => {
-            // 优先看列表末尾的续页项（与 ytmusicapi get_continuation_token 一致）
+            // 与 ytmusicapi get_continuation_token 一致：优先看列表末尾
             if let Some(token) = items.last().and_then(continuation_token_from_item) {
                 return Some(token);
             }
-            items.iter().find_map(playlist_continuation_token)
+            items.iter().find_map(item_renderer_continuation_token)
         }
         Value::Object(map) => {
             if let Some(token) = continuation_token_from_item(value) {
                 return Some(token);
             }
+            map.values().find_map(item_renderer_continuation_token)
+        }
+        _ => None,
+    }
+}
+
+/// 老布局：`continuations[].nextContinuationData.continuation`。
+fn legacy_continuations_token(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => items.iter().find_map(legacy_continuations_token),
+        Value::Object(map) => {
             if let Some(token) = map
                 .get("continuations")
                 .and_then(Value::as_array)
@@ -1487,7 +1508,7 @@ fn playlist_continuation_token(value: &Value) -> Option<String> {
             {
                 return Some(token.to_string());
             }
-            map.values().find_map(playlist_continuation_token)
+            map.values().find_map(legacy_continuations_token)
         }
         _ => None,
     }
@@ -1527,7 +1548,9 @@ fn continuation_token_from_item(item: &Value) -> Option<String> {
     None
 }
 
-/// 续页响应：`onResponseReceivedActions[].appendContinuationItemsAction.continuationItems`。
+/// 续页响应：
+/// - 2025：`onResponseReceivedActions[].appendContinuationItemsAction.continuationItems`
+/// - 老 token：`continuationContents.*(musicPlaylistShelfContinuation|…)`
 fn songs_from_continuation_page(page: &Value) -> Vec<SongSource> {
     let mut sources = Vec::new();
     if let Some(actions) = page
@@ -1544,9 +1567,50 @@ fn songs_from_continuation_page(page: &Value) -> Vec<SongSource> {
         }
     }
     if sources.is_empty() {
+        sources.extend(songs_from_continuation_contents(page));
+    }
+    if sources.is_empty() {
         // 少数响应仍包一层 shelf / sectionListContinuation，退回通用解析。
         let (_, fallback) = playlist_contents_from_browse(page);
         sources = fallback;
+    }
+    sources
+}
+
+/// 老续页：`continuationContents` 下的 shelf / sectionList continuation。
+fn songs_from_continuation_contents(page: &Value) -> Vec<SongSource> {
+    let Some(contents) = page.get("continuationContents").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    for (key, node) in contents {
+        if key == "sectionListContinuation" {
+            let Some(sections) = node.get("contents").and_then(Value::as_array) else {
+                continue;
+            };
+            for section in sections {
+                let Some(shelf) = section
+                    .get("musicPlaylistShelfRenderer")
+                    .or_else(|| section.get("musicShelfRenderer"))
+                    .or_else(|| section.get("itemSectionRenderer"))
+                else {
+                    continue;
+                };
+                let Some(shelf_items) = shelf.get("contents").and_then(Value::as_array).or_else(|| {
+                    shelf
+                        .pointer("/contents/0/musicPlaylistShelfRenderer/contents")
+                        .and_then(Value::as_array)
+                }) else {
+                    continue;
+                };
+                sources.extend(shelf_items.iter().filter_map(song_source));
+            }
+            continue;
+        }
+        // musicPlaylistShelfContinuation / musicShelfContinuation 等：contents 直接是曲目
+        if let Some(items) = node.get("contents").and_then(Value::as_array) {
+            sources.extend(items.iter().filter_map(song_source));
+        }
     }
     sources
 }
@@ -2280,6 +2344,81 @@ mod tests {
         assert_eq!(
             playlist_continuation_token(&page).as_deref(),
             Some("page-3")
+        );
+    }
+
+    #[test]
+    fn shelf_tail_token_wins_over_section_list_continuations() {
+        // 实况 browse：sectionListRenderer.continuations 与 shelf 尾
+        // continuationItemRenderer 同时存在；必须取后者，否则续页卡在 100 首。
+        let body = json!({
+            "contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {
+                "sectionListRenderer": {
+                    "contents": [
+                        {"musicPlaylistShelfRenderer": {"contents": [
+                            song_item("aaaaaaaaaaa", "One"),
+                            {"continuationItemRenderer": {"continuationEndpoint": {
+                                "continuationCommand": {"token": "tail-2025"}
+                            }}}
+                        ]}}
+                    ],
+                    "continuations": [{
+                        "nextContinuationData": {"continuation": "legacy-section-token"}
+                    }]
+                }
+            }}}
+        });
+        assert_eq!(
+            playlist_continuation_token(&body).as_deref(),
+            Some("tail-2025")
+        );
+    }
+
+    #[test]
+    fn legacy_section_continuations_used_when_no_item_renderer() {
+        let body = json!({
+            "contents": {"singleColumnBrowseResultsRenderer": {
+                "tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {
+                    "contents": [
+                        {"musicShelfRenderer": {"contents": [song_item("aaaaaaaaaaa", "One")]}}
+                    ],
+                    "continuations": [{
+                        "nextContinuationData": {"continuation": "legacy-only"}
+                    }]
+                }}}}]
+            }}
+        });
+        assert_eq!(
+            playlist_continuation_token(&body).as_deref(),
+            Some("legacy-only")
+        );
+    }
+
+    #[test]
+    fn continuation_contents_shelf_songs_are_extracted() {
+        let page = json!({
+            "continuationContents": {
+                "musicPlaylistShelfContinuation": {
+                    "contents": [
+                        song_item("ddddddddddd", "Four"),
+                        song_item("eeeeeeeeeee", "Five"),
+                        {"continuationItemRenderer": {"continuationEndpoint": {
+                            "continuationCommand": {"token": "legacy-next"}
+                        }}}
+                    ],
+                    "continuations": [{
+                        "nextContinuationData": {"continuation": "legacy-next-2"}
+                    }]
+                }
+            }
+        });
+        let sources = songs_from_continuation_page(&page);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].title, "Four");
+        assert_eq!(
+            playlist_continuation_token(&page).as_deref(),
+            Some("legacy-next"),
+            "有 item renderer 时仍优先 2025 token"
         );
     }
 
