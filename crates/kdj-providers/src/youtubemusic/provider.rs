@@ -188,14 +188,58 @@ impl YoutubeMusicProvider {
         playlist_id: &str,
         limit: usize,
     ) -> Result<(String, Vec<SongSource>)> {
+        let (title, sources) = self
+            .playlist_sources(playlist_id, limit)
+            .await
+            .context("读取 YouTube Music 歌单失败")?;
+        anyhow::ensure!(
+            !sources.is_empty(),
+            "YouTube Music 歌单里没有可用歌曲"
+        );
+        Ok((title, sources))
+    }
+
+    /// 拉完整歌单：首屏 browse + 2025 续页 token，直到达到 limit 或没有下一页。
+    /// 与普通 YouTube `playlist_sources` / ytmusicapi `get_continuations_2025` 对齐。
+    async fn playlist_sources(
+        &self,
+        playlist_id: &str,
+        limit: usize,
+    ) -> Result<(String, Vec<SongSource>)> {
         let body = self
             .client
             .browse(&format!("VL{playlist_id}"))
             .await
             .context("读取 YouTube Music 歌单失败")?;
-        let (title, sources) =
-            playlist_from_browse(&body).context("YouTube Music 歌单里没有可用歌曲")?;
-        Ok((title, sources.into_iter().take(limit).collect()))
+        let (title, mut sources) = playlist_contents_from_browse(&body);
+        if sources.len() > limit {
+            sources.truncate(limit);
+        }
+        let mut continuation = playlist_continuation_token(&body);
+        let mut seen_tokens = std::collections::HashSet::new();
+        while sources.len() < limit {
+            let Some(token) = continuation.take() else {
+                break;
+            };
+            if !seen_tokens.insert(token.clone()) {
+                break;
+            }
+            let page = self
+                .client
+                .browse_continuation(&token)
+                .await
+                .context("继续读取 YouTube Music 歌单失败")?;
+            let before = sources.len();
+            sources.extend(songs_from_continuation_page(&page));
+            if sources.len() > limit {
+                sources.truncate(limit);
+            }
+            continuation = playlist_continuation_token(&page);
+            if sources.len() == before && continuation.is_none() {
+                break;
+            }
+        }
+        Ok((title, sources))
     }
 
     /// HLS 音频轨提取：`-vn -c:a copy` 把 TS 里的 AAC 原样装进 m4a。
@@ -442,17 +486,13 @@ impl MusicProvider for YoutubeMusicProvider {
         if key.is_empty() {
             return Ok(None);
         }
-        let body = self
-            .client
-            .browse(&format!("VL{key}"))
-            .await
-            .context("读取 YouTube Music 歌单失败")?;
-        let (title, sources) = playlist_contents_from_browse(&body);
+        let limit = full_listing(limit);
+        let (title, sources) = self.playlist_sources(key, limit).await?;
         Ok(Some(StreamPlaylistResponse {
             platform: Platform::Ytm,
             key: key.to_string(),
             title,
-            sources: sources.into_iter().take(full_listing(limit)).collect(),
+            sources,
         }))
     }
 
@@ -1417,6 +1457,100 @@ fn ytm_library_playlists(body: &Value) -> Vec<StreamPlaylist> {
 
 /// 歌单浏览页：标题 + 全部可见歌曲。
 ///
+/// 从 browse / 续页 JSON 里取出下一页 token。
+///
+/// 2025 起 token 是曲目列表末尾的 `continuationItemRenderer`（也可能嵌在
+/// `commandExecutorCommand.commands` 里）；老布局还有 shelf 级 `continuations`。
+fn playlist_continuation_token(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => {
+            // 优先看列表末尾的续页项（与 ytmusicapi get_continuation_token 一致）
+            if let Some(token) = items.last().and_then(continuation_token_from_item) {
+                return Some(token);
+            }
+            items.iter().find_map(playlist_continuation_token)
+        }
+        Value::Object(map) => {
+            if let Some(token) = continuation_token_from_item(value) {
+                return Some(token);
+            }
+            if let Some(token) = map
+                .get("continuations")
+                .and_then(Value::as_array)
+                .and_then(|list| list.first())
+                .and_then(|item| {
+                    item.pointer("/nextContinuationData/continuation")
+                        .or_else(|| item.pointer("/nextRadioContinuationData/continuation"))
+                        .and_then(Value::as_str)
+                        .filter(|token| !token.is_empty())
+                })
+            {
+                return Some(token.to_string());
+            }
+            map.values().find_map(playlist_continuation_token)
+        }
+        _ => None,
+    }
+}
+
+fn continuation_token_from_item(item: &Value) -> Option<String> {
+    const PATHS: [&str; 3] = [
+        "/continuationItemRenderer/continuationEndpoint/continuationCommand/token",
+        "/continuationItemRenderer/continuationEndpoint/commandExecutorCommand/commands",
+        "/continuationItemViewModel/continuationCommand/innertubeCommand/continuationCommand/token",
+    ];
+    if let Some(token) = item
+        .pointer(PATHS[0])
+        .or_else(|| item.pointer(PATHS[2]))
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+    {
+        return Some(token.to_string());
+    }
+    let commands = item.pointer(PATHS[1]).and_then(Value::as_array)?;
+    for command in commands {
+        let request = command
+            .pointer("/continuationCommand/request")
+            .and_then(Value::as_str);
+        if request == Some("CONTINUATION_REQUEST_TYPE_BROWSE")
+            || command.pointer("/continuationCommand/token").is_some()
+        {
+            if let Some(token) = command
+                .pointer("/continuationCommand/token")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+            {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 续页响应：`onResponseReceivedActions[].appendContinuationItemsAction.continuationItems`。
+fn songs_from_continuation_page(page: &Value) -> Vec<SongSource> {
+    let mut sources = Vec::new();
+    if let Some(actions) = page
+        .get("onResponseReceivedActions")
+        .and_then(Value::as_array)
+    {
+        for action in actions {
+            if let Some(items) = action
+                .pointer("/appendContinuationItemsAction/continuationItems")
+                .and_then(Value::as_array)
+            {
+                sources.extend(items.iter().filter_map(song_source));
+            }
+        }
+    }
+    if sources.is_empty() {
+        // 少数响应仍包一层 shelf / sectionListContinuation，退回通用解析。
+        let (_, fallback) = playlist_contents_from_browse(page);
+        sources = fallback;
+    }
+    sources
+}
+
 /// 布局随客户端形态在变：老版是 `singleColumnBrowseResultsRenderer`，
 /// 现在网页端是 `twoColumnBrowseResultsRenderer`（主栏放标题头、
 /// 次栏放曲目 shelf）。三处 shelf 都扫一遍，标题带 microformat 兜底。
@@ -1611,6 +1745,7 @@ fn format_lrc_stamp(ms: u64) -> String {
     format!("[{minutes:02}:{seconds:02}.{cs:02}]")
 }
 
+#[cfg(test)]
 fn playlist_from_browse(body: &Value) -> Option<(String, Vec<SongSource>)> {
     let contents = playlist_contents_from_browse(body);
     (!contents.1.is_empty()).then_some(contents)
@@ -2082,6 +2217,70 @@ mod tests {
             }}
         });
         assert_eq!(playlist_count_from_browse(&body), Some(3));
+    }
+
+    #[test]
+    fn playlist_continuation_token_is_read_from_shelf_tail() {
+        let body = json!({
+            "contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {
+                "sectionListRenderer": {"contents": [
+                    {"musicPlaylistShelfRenderer": {"contents": [
+                        song_item("aaaaaaaaaaa", "One"),
+                        {"continuationItemRenderer": {"continuationEndpoint": {
+                            "continuationCommand": {"token": "page-2"}
+                        }}}
+                    ]}}
+                ]}
+            }}}
+        });
+        assert_eq!(
+            playlist_continuation_token(&body).as_deref(),
+            Some("page-2")
+        );
+        let (_, sources) = playlist_contents_from_browse(&body);
+        assert_eq!(sources.len(), 1, "续页项不能被当成歌曲");
+    }
+
+    #[test]
+    fn nested_command_executor_continuation_token_is_parsed() {
+        let item = json!({
+            "continuationItemRenderer": {"continuationEndpoint": {
+                "commandExecutorCommand": {"commands": [
+                    {"playlistVotingRefreshPopupCommand": {}},
+                    {"continuationCommand": {
+                        "request": "CONTINUATION_REQUEST_TYPE_BROWSE",
+                        "token": "nested-token"
+                    }}
+                ]}
+            }}
+        });
+        assert_eq!(
+            continuation_token_from_item(&item).as_deref(),
+            Some("nested-token")
+        );
+    }
+
+    #[test]
+    fn continuation_page_songs_and_next_token_are_extracted() {
+        let page = json!({
+            "onResponseReceivedActions": [{
+                "appendContinuationItemsAction": {"continuationItems": [
+                    song_item("bbbbbbbbbbb", "Two"),
+                    song_item("ccccccccccc", "Three"),
+                    {"continuationItemRenderer": {"continuationEndpoint": {
+                        "continuationCommand": {"token": "page-3"}
+                    }}}
+                ]}
+            }]
+        });
+        let sources = songs_from_continuation_page(&page);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].title, "Two");
+        assert_eq!(sources[1].title, "Three");
+        assert_eq!(
+            playlist_continuation_token(&page).as_deref(),
+            Some("page-3")
+        );
     }
 
     #[test]

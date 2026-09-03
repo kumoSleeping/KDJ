@@ -91,6 +91,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/accounts/ytm/login/browsers", get(browser_catalog))
         .route("/api/accounts/ytm/login/browser", post(ytm_browser_login))
         .route("/api/accounts/ytm/login/headers", post(ytm_headers_login))
+        .route("/api/accounts/ytm/login/webview", post(ytm_webview_login))
         .route("/api/accounts/youtube/login/browsers", get(browser_catalog))
         .route(
             "/api/accounts/youtube/login/browser",
@@ -704,6 +705,13 @@ struct YoutubeHeadersLoginBody {
     headers: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct YoutubeWebviewLoginBody {
+    cookie: String,
+    #[serde(default)]
+    user_agent: String,
+}
+
 /// 只探测本机浏览器与 Profile；不会读取 Cookie 内容或触发系统钥匙串。
 async fn browser_catalog() -> ApiResult<Json<kdj_providers::browser::BrowserCatalog>> {
     let catalog = tokio::task::spawn_blocking(kdj_providers::browser::catalog)
@@ -809,6 +817,33 @@ async fn ytm_headers_login(
     Json(payload): Json<YoutubeHeadersLoginBody>,
 ) -> ApiResult<Json<Account>> {
     save_headers_session(&state.ytm_auth, &payload.headers)?;
+    let account = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
+        .account()
+        .await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+/// 桌面 WebView 登录：Cookie 只在 Rust 侧流转，不进 renderer。
+async fn ytm_webview_login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<YoutubeWebviewLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let cookie = payload.cookie.trim();
+    if cookie.is_empty() || cookie.len() > 256 * 1024 {
+        return Err(ApiError::bad_request("YouTube Music 登录窗口没有返回有效会话"));
+    }
+    let mut session = kdj_providers::youtubemusic::auth::BrowserSession::from_cookie_header(
+        cookie,
+        "WebView 登录 · music.youtube.com",
+    )?;
+    let ua = payload.user_agent.trim();
+    if !ua.is_empty() && !ua.contains(['\r', '\n']) {
+        session.user_agent = ua.to_string();
+    }
+    state.ytm_auth.save(session)?;
     let account = state
         .provider(Platform::Ytm)
         .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?

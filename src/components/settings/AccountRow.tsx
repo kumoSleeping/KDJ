@@ -209,6 +209,8 @@ export function AccountRow({
   const browserMobile = ["android", "ios"].includes(String(getBridge().platform));
   const soundcloudWebLoginAvailable =
     soundcloudAccount && Boolean(getBridge().openSoundcloudWebLogin);
+  const ytmWebLoginAvailable =
+    account.platform === "ytm" && Boolean(getBridge().openYtmWebLogin);
   const stateLabel = browserAccount
     ? account.state === "valid"
       ? account.credential_kind === "ytm_oauth"
@@ -544,6 +546,49 @@ export function AccountRow({
     }
   };
 
+  const openYtmWebLogin = async () => {
+    if (!sourceEnabled) {
+      setNotice("请先开启 YouTube Music 搜索与下载，再连接账号。");
+      return;
+    }
+    const bridge = getBridge();
+    if (!bridge.openYtmWebLogin) {
+      setNotice("当前系统没有可用的 YouTube Music 登录窗口。");
+      return;
+    }
+    const generation = ++qrGenerationRef.current;
+    setWebLoginBusy(true);
+    setNotice("");
+    try {
+      const unlisten = await listen<SoundCloudOAuthWindowResult>(
+        "ytm-web-login://result",
+        (event) => {
+          if (generation !== qrGenerationRef.current) return;
+          webLoginUnlistenRef.current?.();
+          webLoginUnlistenRef.current = null;
+          setWebLoginBusy(false);
+          if (event.payload.status === "done") {
+            setYoutubeLoginOpen(false);
+            void refreshAccounts();
+          } else {
+            setNotice(event.payload.message || "YouTube Music 登录未完成");
+          }
+        },
+      );
+      webLoginUnlistenRef.current = unlisten;
+      await bridge.openYtmWebLogin();
+    } catch (error) {
+      if (generation === qrGenerationRef.current) {
+        webLoginUnlistenRef.current?.();
+        webLoginUnlistenRef.current = null;
+        setWebLoginBusy(false);
+        setNotice(
+          `打开 YouTube Music 登录失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
   const toggleYoutubeLogin = () => {
     if (youtubeLoginOpen) {
       setYoutubeLoginOpen(false);
@@ -744,7 +789,7 @@ export function AccountRow({
             padding: "0 0 0.45rem 2.4rem",
           }}
         >
-          {soundcloudWebLoginAvailable && (
+          {(soundcloudWebLoginAvailable || ytmWebLoginAvailable) && (
             <div
               style={{
                 display: "flex",
@@ -760,12 +805,20 @@ export function AccountRow({
                 size="sm"
                 variant="primary"
                 disabled={webLoginBusy}
-                onClick={() => void openSoundcloudWebLogin()}
+                onClick={() =>
+                  void (ytmWebLoginAvailable ? openYtmWebLogin() : openSoundcloudWebLogin())
+                }
               >
                 {webLoginBusy && <LoaderCircle size={13} className="kd-spin" />}
                 {webLoginBusy ? "等待登录" : "打开登录窗口"}
               </Button>
             </div>
+          )}
+          {ytmWebLoginAvailable && (
+            <small className="kd-faint" style={{ lineHeight: 1.35 }}>
+              在应用内打开 music.youtube.com，用 Google 账号登录；Cookie 只保存在本机
+              Rust 侧。下方浏览器导入与请求头粘贴仍可作为备用。
+            </small>
           )}
           {youtubeBusy && !youtubeCatalog && (
             <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
@@ -774,9 +827,9 @@ export function AccountRow({
           )}
           {youtubeCatalog && youtubeCatalog.browsers.length > 0 && (
             <>
-              {soundcloudAccount && (
+              {(soundcloudAccount || ytmWebLoginAvailable) && (
                 <small className="kd-faint" style={{ lineHeight: 1.35 }}>
-                  直接连接浏览器
+                  {ytmWebLoginAvailable ? "其它方式 · 浏览器 Profile" : "直接连接浏览器"}
                 </small>
               )}
               <div

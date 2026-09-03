@@ -51,6 +51,20 @@ fn default_user_agent() -> String {
 }
 
 impl BrowserSession {
+    /// WebView / 原生 cookie manager 读到的 Cookie 头；不经过前端。
+    pub fn from_cookie_header(cookie: &str, imported_from: impl Into<String>) -> Result<Self> {
+        let mut session = BrowserSession {
+            cookie: normalize_cookie(cookie),
+            x_goog_authuser: default_auth_user(),
+            user_agent: default_user_agent(),
+            visitor_data: String::new(),
+            imported_from: imported_from.into(),
+            created_at: unix_now(),
+        };
+        session.validate()?;
+        Ok(session)
+    }
+
     pub fn from_headers(raw: &str) -> Result<Self> {
         let raw = raw.trim();
         anyhow::ensure!(!raw.is_empty(), "请粘贴 YouTube 请求头");
@@ -404,6 +418,17 @@ mod tests {
     fn missing_sapisid_is_rejected() {
         let error = BrowserSession::from_headers("cookie: SID=x; LOGIN_INFO=y").unwrap_err();
         assert!(error.to_string().contains("SAPISID"));
+    }
+
+    #[test]
+    fn cookie_header_import_accepts_sapisid() {
+        let session = BrowserSession::from_cookie_header(
+            sample_cookie(),
+            "WebView 登录 · music.youtube.com",
+        )
+        .unwrap();
+        assert!(session.sid().is_some());
+        assert_eq!(session.imported_from, "WebView 登录 · music.youtube.com");
     }
 
     #[test]

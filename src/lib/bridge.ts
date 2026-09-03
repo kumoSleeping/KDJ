@@ -203,6 +203,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
     openSoundcloudWebLogin: desktop
       ? () => tauriInvoke<void>("open_soundcloud_web_login_window")
       : undefined,
+    openYtmWebLogin: desktop
+      ? () => tauriInvoke<void>("open_ytm_web_login_window")
+      : undefined,
     // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
     // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json
     // 或当前 bundle 的签名包还不存在。

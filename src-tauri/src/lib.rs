@@ -1150,6 +1150,235 @@ fn open_soundcloud_web_login_window(app: tauri::AppHandle) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(desktop)]
+const YTM_WEB_LOGIN_WINDOW: &str = "ytm-web-login";
+#[cfg(desktop)]
+const YTM_WEB_LOGIN_EVENT: &str = "ytm-web-login://result";
+
+/// 登录窗口没有地址栏；只允许 YouTube Music 与 Google 登录相关主机。
+#[cfg(desktop)]
+fn ytm_web_login_navigation_allowed(url: &tauri::Url) -> bool {
+    if url.scheme() == "about" && url.path() == "blank" {
+        return true;
+    }
+    if url.scheme() != "https" {
+        return false;
+    }
+    url.host_str().is_some_and(|host| {
+        ["music.youtube.com", "youtube.com", "google.com", "gstatic.com", "googleusercontent.com"]
+            .iter()
+            .any(|domain| domain_matches(host, domain))
+    })
+}
+
+/// 从 WebView cookie manager 拼出可用的 YouTube Cookie 头（须含 SAPISID 类）。
+#[cfg(desktop)]
+fn ytm_web_cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> Option<String> {
+    let mut pairs = Vec::new();
+    let mut has_sapisid = false;
+    for cookie in cookies {
+        let host = cookie
+            .domain()
+            .map(|domain| domain.trim_start_matches('.').to_string())
+            .unwrap_or_default();
+        if !domain_matches(&host, "youtube.com") {
+            continue;
+        }
+        let name = cookie.name();
+        let value = cookie.value().trim();
+        if name.is_empty() || value.is_empty() {
+            continue;
+        }
+        if name == "SAPISID"
+            || name == "__Secure-3PAPISID"
+            || name == "__Secure-1PAPISID"
+        {
+            has_sapisid = true;
+        }
+        pairs.push(format!("{name}={value}"));
+    }
+    if !has_sapisid || pairs.is_empty() {
+        return None;
+    }
+    Some(pairs.join("; "))
+}
+
+#[cfg(desktop)]
+fn ytm_web_login_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    auth_token: &str,
+    cookie: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .post(endpoint)
+        .bearer_auth(auth_token)
+        .json(&serde_json::json!({ "cookie": cookie }))
+}
+
+#[cfg(desktop)]
+async fn ytm_web_login_response(response: reqwest::Response) -> Result<(), String> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let text = response.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+    Err(format!(
+        "YouTube Music 登录失败：{}",
+        detail.chars().take(320).collect::<String>()
+    ))
+}
+
+#[cfg(desktop)]
+fn finish_ytm_web_login(
+    app: &tauri::AppHandle,
+    completed: &std::sync::atomic::AtomicBool,
+    status: &'static str,
+    message: String,
+) {
+    use std::sync::atomic::Ordering;
+
+    if completed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = app.emit(
+        YTM_WEB_LOGIN_EVENT,
+        SoundCloudOAuthWindowResult { status, message },
+    );
+    if let Some(window) = app.get_webview_window(YTM_WEB_LOGIN_WINDOW) {
+        let _ = window.close();
+    }
+}
+
+/// 一次性 WebView 打开 music.youtube.com；登录产生的 SAPISID Cookie 由原生
+/// cookie manager 读取并直接交给本机后端写入 BrowserSession，不经过 renderer。
+#[cfg(desktop)]
+#[tauri::command]
+fn open_ytm_web_login_window(app: tauri::AppHandle) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    if let Some(existing) = app.get_webview_window(YTM_WEB_LOGIN_WINDOW) {
+        let _ = existing.show();
+        existing
+            .set_focus()
+            .map_err(|error| format!("聚焦 YouTube Music 登录窗口失败：{error}"))?;
+        return Ok(());
+    }
+
+    let login_url = tauri::Url::parse("https://music.youtube.com/")
+        .map_err(|error| format!("构建 YouTube Music 登录地址失败：{error}"))?;
+    let cookie_url = tauri::Url::parse("https://music.youtube.com/")
+        .map_err(|error| format!("构建 YouTube Music 会话地址失败：{error}"))?;
+    let cookie_url_www = tauri::Url::parse("https://www.youtube.com/")
+        .map_err(|error| format!("构建 YouTube 会话地址失败：{error}"))?;
+    let (base_url, auth_token) = {
+        let bridge = app.state::<Bridge>();
+        (bridge.base_url.clone(), bridge.auth_token.clone())
+    };
+    let completed = Arc::new(AtomicBool::new(false));
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        YTM_WEB_LOGIN_WINDOW,
+        tauri::WebviewUrl::External(login_url),
+    )
+    .title("YouTube Music 登录 · music.youtube.com")
+    .inner_size(980.0, 720.0)
+    .min_inner_size(640.0, 520.0)
+    .center()
+    .resizable(true)
+    .incognito(true)
+    .on_navigation(ytm_web_login_navigation_allowed)
+    .build()
+    .map_err(|error| format!("打开 YouTube Music 登录窗口失败：{error}"))?;
+
+    let app_on_close = app.clone();
+    let completed_on_close = Arc::clone(&completed);
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            && !completed_on_close.swap(true, Ordering::SeqCst)
+        {
+            let _ = app_on_close.emit(
+                YTM_WEB_LOGIN_EVENT,
+                SoundCloudOAuthWindowResult {
+                    status: "cancelled",
+                    message: "已取消 YouTube Music 登录".into(),
+                },
+            );
+        }
+    });
+
+    let app_on_poll = app.clone();
+    let completed_on_poll = Arc::clone(&completed);
+    tauri::async_runtime::spawn(async move {
+        let endpoint = format!("{base_url}/api/accounts/ytm/login/webview");
+        let client = reqwest::Client::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
+        loop {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            if completed_on_poll.load(Ordering::SeqCst) {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                finish_ytm_web_login(
+                    &app_on_poll,
+                    &completed_on_poll,
+                    "error",
+                    "YouTube Music 登录已超时，请重试".into(),
+                );
+                return;
+            }
+            let Some(window) = app_on_poll.get_webview_window(YTM_WEB_LOGIN_WINDOW) else {
+                return;
+            };
+            let mut cookies = window
+                .cookies_for_url(cookie_url.clone())
+                .unwrap_or_default();
+            if let Ok(extra) = window.cookies_for_url(cookie_url_www.clone()) {
+                cookies.extend(extra);
+            }
+            let Some(cookie) = ytm_web_cookie_header(&cookies) else {
+                continue;
+            };
+            let result = match ytm_web_login_request(&client, &endpoint, &auth_token, &cookie)
+                .send()
+                .await
+            {
+                Ok(response) => ytm_web_login_response(response).await,
+                Err(error) => Err(format!("处理 YouTube Music 登录失败：{error}")),
+            };
+            match result {
+                Ok(()) => finish_ytm_web_login(
+                    &app_on_poll,
+                    &completed_on_poll,
+                    "done",
+                    String::new(),
+                ),
+                Err(message) => {
+                    // 会话尚未完全落定（例如刚进 Google 账密页）时后端会拒；继续轮询。
+                    if message.contains("SAPISID") || message.contains("没有找到") {
+                        continue;
+                    }
+                    finish_ytm_web_login(&app_on_poll, &completed_on_poll, "error", message)
+                }
+            }
+            return;
+        }
+    });
+
+    Ok(())
+}
+
 /// 桌面检查必须直接问 updater 清单，而不是只问 GitHub 最新 Release。
 /// Release 是先建空壳、各平台包后上传的；只有 updater.check() 找得到当前
 /// OS/架构/安装格式对应的签名包，按钮才应该告诉用户「可以更新」。
@@ -2556,6 +2785,7 @@ pub fn run() {
         open_external,
         open_soundcloud_oauth_window,
         open_soundcloud_web_login_window,
+        open_ytm_web_login_window,
         check_desktop_update,
         get_update_progress,
         apply_update,
@@ -2679,7 +2909,8 @@ mod tests {
     #[cfg(desktop)]
     use super::{
         soundcloud_oauth_callback_request, soundcloud_web_login_navigation_allowed,
-        soundcloud_web_login_request, soundcloud_web_session, SoundCloudWebSession,
+        soundcloud_web_login_request, soundcloud_web_session, ytm_web_cookie_header,
+        ytm_web_login_navigation_allowed, ytm_web_login_request, SoundCloudWebSession,
     };
 
     #[cfg(desktop)]
@@ -2757,6 +2988,71 @@ mod tests {
                 .unwrap(),
             "Bearer control-secret"
         );
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn ytm_web_login_only_accepts_expected_navigation_hosts() {
+        assert!(ytm_web_login_navigation_allowed(
+            &tauri::Url::parse("https://music.youtube.com/").unwrap()
+        ));
+        assert!(ytm_web_login_navigation_allowed(
+            &tauri::Url::parse("https://accounts.google.com/ServiceLogin").unwrap()
+        ));
+        assert!(ytm_web_login_navigation_allowed(
+            &tauri::Url::parse("https://www.youtube.com/signin").unwrap()
+        ));
+        assert!(!ytm_web_login_navigation_allowed(
+            &tauri::Url::parse("http://music.youtube.com/").unwrap()
+        ));
+        assert!(!ytm_web_login_navigation_allowed(
+            &tauri::Url::parse("https://music.youtube.com.evil.example/").unwrap()
+        ));
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn ytm_web_login_builds_cookie_header_from_youtube_sapisid() {
+        let sapisid = tauri::webview::Cookie::build(("SAPISID", "secret"))
+            .domain(".youtube.com")
+            .build();
+        let sid = tauri::webview::Cookie::build(("SID", "sid-value"))
+            .domain(".youtube.com")
+            .build();
+        let unrelated = tauri::webview::Cookie::build(("SAPISID", "other"))
+            .domain("example.com")
+            .build();
+        let header = ytm_web_cookie_header(&[unrelated, sapisid, sid]).unwrap();
+        assert!(header.contains("SAPISID=secret"));
+        assert!(header.contains("SID=sid-value"));
+        assert!(!header.contains("other"));
+        let stray = tauri::webview::Cookie::build(("SAPISID", "other"))
+            .domain("example.com")
+            .build();
+        assert!(ytm_web_cookie_header(&[stray]).is_none());
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn ytm_web_login_request_carries_the_control_bearer() {
+        kdj_core::ensure_rustls_ring();
+        let request = ytm_web_login_request(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:5274/api/accounts/ytm/login/webview",
+            "control-secret",
+            "SAPISID=secret; SID=x",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer control-secret"
+        );
+        let body = String::from_utf8(request.body().unwrap().as_bytes().unwrap().to_vec()).unwrap();
+        assert!(body.contains("SAPISID=secret"));
     }
 
     #[cfg(unix)]

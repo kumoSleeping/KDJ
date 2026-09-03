@@ -394,6 +394,18 @@ impl YtmClient {
         self.post("browse", body).await
     }
 
+    /// 歌单续页：与 ytmusicapi `get_continuations_2025` 同款，把 continuation
+    /// token 放进 browse body。首屏约 100 首，后续页靠这个接口往下翻。
+    pub async fn browse_continuation(&self, continuation: &str) -> Result<Value> {
+        let mut body = Self::web_remix_context();
+        let map = body.as_object_mut().expect("context 一定是对象");
+        map.insert(
+            "continuation".into(),
+            Value::String(continuation.to_string()),
+        );
+        self.post("browse", body).await
+    }
+
     /// 打开一首歌的「下一首 / 相关」面板（`next`），用来拿歌词 browseId（`MPLYt…`）。
     /// 与 ytmusicapi `get_watch_playlist` 同款请求体；不拉续页曲目。
     pub async fn next_watch(&self, video_id: &str) -> Result<Value> {
