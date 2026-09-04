@@ -108,7 +108,7 @@ Windows/Linux 的最终差值应在 CI 产物生成后与同版本基线安装�
 | 架构收敛 | 普通 revert 移除 Deno/V8；三端只保留隐藏 Tauri WebView + 一份 worker + 一份 Rust 回调桥 | 已完成 |
 | 最小功能 | 真实 YouTube challenge 回传 124 字节 proof 且进程存活；macOS 搜索到本地 HLS 后媒体时钟推进 | 已通过 |
 | 本地静态门禁 | `cargo fmt --check`、`cargo check -p kdj-app --lib`、TypeScript 检查和 Tauri Web 生产构建；按本轮要求不运行测试集 | 已通过 |
-| PR 门禁 | 快进更新原 PR，三平台 release 编译/打包完成；失败时只修对应平台编译或产物问题 | 更新 PR 后执行 |
+| PR 门禁 | 快进更新原 PR；仓库当前没有 `pull_request` workflow，本轮按要求不手动触发含完整测试集的发布流水线 | PR 已更新，自动检查不适用 |
 | 发布门禁 | Windows/Linux 实机各做 proof/player + YTM 试听；Google 拒绝内嵌登录时验证 profile/header 回退 | 合并前人工项 |
 
 ## PR 收口策略
