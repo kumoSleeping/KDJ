@@ -1,21 +1,15 @@
-//! YouTube WebPO / player runners.
+//! macOS YouTube WebPO runner.
 //!
-//! - **macOS**: BotGuard binds the homepage challenge to a real network-created YouTube security
-//!   origin. A local HTML string with a YouTube base URL looks correct to JavaScript but GVS
-//!   rejects proofs minted from that synthetic document. We therefore navigate a non-persistent
-//!   hidden WKWebView to YouTube's inert `robots.txt` document. Before navigation, all Tauri user
-//!   scripts and the Wry IPC message handler are removed. The local proof bundle then installs a
-//!   restrictive CSP before any further request; the realm receives no login cookies or upstream
-//!   media URL.
-//! - **Linux / Windows**: `youtube_proof_v8` mints via the `rustypipe-botguard` Deno/V8 library and
-//!   runs player transforms in a bare `deno_core` isolate with DOM stubs. BotGuard stays out of
-//!   the main Tauri renderer (SEC-005).
+//! BotGuard binds the homepage challenge to a real network-created YouTube security origin. A
+//! local HTML string with a YouTube base URL looks correct to JavaScript but GVS rejects proofs
+//! minted from that synthetic document. On macOS we therefore navigate a non-persistent hidden
+//! WKWebView to YouTube's inert `robots.txt` document. Before navigation, all Tauri user scripts
+//! and the Wry IPC message handler are removed. The local proof bundle then installs a restrictive
+//! CSP before any further request; the realm receives no login cookies or upstream media URL.
 
-#[cfg(target_os = "macos")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[cfg(target_os = "macos")]
 use tauri::Manager;
 
 const PROOF_WINDOW_LABEL: &str = "youtube-proof-runtime";
@@ -23,7 +17,7 @@ const PROOF_DOCUMENT_URL: &str = "https://www.youtube.com/robots.txt";
 const MAIN_WEBVIEW_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
                                        AppleWebKit/605.1.15 (KHTML, like Gecko) \
                                        Version/18.5 Safari/605.1.15";
-pub(crate) const PROOF_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+const PROOF_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
                                 AppleWebKit/537.36(KHTML, like Gecko)";
 const PROOF_CSP: &str = "default-src 'none'; \
                          script-src 'unsafe-eval' https://www.google.com; \
@@ -32,19 +26,15 @@ const PROOF_CSP: &str = "default-src 'none'; \
                          object-src 'none'; frame-src 'none'; worker-src 'none'; \
                          base-uri 'none'; form-action 'none'";
 const MAX_BUNDLE_BYTES: usize = 256 * 1024;
-pub(crate) const MAX_PLAYER_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const PROOF_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PLAYER_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
+const PROOF_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub struct YoutubeProofState {
     /// Read guards are active native evaluations and may run concurrently. Window creation and
     /// realm replacement take the write guard, so a failed operation cannot tear down another
     /// request that is still in flight.
-    #[cfg(target_os = "macos")]
     lifecycle: tokio::sync::RwLock<()>,
-    /// Linux/Windows Deno/V8 BotGuard + player isolate (see `youtube_proof_v8`).
-    #[cfg(all(not(target_os = "macos"), not(target_os = "android"), not(target_os = "ios")))]
-    pub(crate) v8: crate::youtube_proof_v8::V8ProofState,
 }
 
 #[cfg(target_os = "macos")]
@@ -65,32 +55,32 @@ pub fn apply_main_webview_user_agent(_window: &tauri::WebviewWindow) -> Result<(
     Ok(())
 }
 
-pub(crate) fn valid_user_agent(value: &str) -> bool {
+fn valid_user_agent(value: &str) -> bool {
     value == PROOF_USER_AGENT
 }
 
-pub(crate) fn valid_binding(value: &str) -> bool {
+fn valid_binding(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 4_096
         && value.is_ascii()
         && value.bytes().all(|byte| !byte.is_ascii_control())
 }
 
-pub(crate) fn valid_bundle(value: &str) -> bool {
+fn valid_bundle(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_BUNDLE_BYTES
         && value.contains("__KDJ_YOUTUBE_NATIVE_PO__")
         && !value.contains('\0')
 }
 
-pub(crate) fn valid_proof_token(value: &str) -> bool {
+fn valid_proof_token(value: &str) -> bool {
     (20..=4_096).contains(&value.len())
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'='))
 }
 
-pub(crate) fn valid_player_url(value: &str) -> bool {
+fn valid_player_url(value: &str) -> bool {
     if value.is_empty() || value.len() > 4_096 || value.contains(['\r', '\n']) {
         return false;
     }
@@ -110,14 +100,14 @@ pub(crate) fn valid_player_url(value: &str) -> bool {
         && url.fragment().is_none()
 }
 
-pub(crate) fn valid_n_value(value: &str) -> bool {
+fn valid_n_value(value: &str) -> bool {
     (1..=512).contains(&value.len())
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-pub(crate) fn valid_googlevideo_url(value: &str) -> bool {
+fn valid_googlevideo_url(value: &str) -> bool {
     if value.is_empty() || value.len() > 16 * 1024 || value.contains(['\r', '\n']) {
         return false;
     }
@@ -400,22 +390,9 @@ pub async fn youtube_mint_gvs_po_token(
         };
     }
 
-    #[cfg(all(not(target_os = "macos"), not(target_os = "android"), not(target_os = "ios")))]
+    #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
-        crate::youtube_proof_v8::mint_gvs_po_token(
-            &state.v8,
-            bundle,
-            binding,
-            force_fresh,
-            user_agent,
-        )
-        .await
-    }
-
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    {
-        let _ = (app, bundle, binding, force_fresh, user_agent);
+        let _ = (app, bundle, binding, force_fresh);
         Err("当前桌面系统没有可用的 YouTube 原生 proof 运行器".into())
     }
 }
@@ -526,21 +503,7 @@ pub async fn youtube_run_player(
         };
     }
 
-    #[cfg(all(not(target_os = "macos"), not(target_os = "android"), not(target_os = "ios")))]
-    {
-        let _ = app;
-        crate::youtube_proof_v8::run_player(
-            &state.v8,
-            bundle,
-            player_url,
-            javascript,
-            operation,
-            value,
-        )
-        .await
-    }
-
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, bundle, player_url, javascript, operation, value);
         Err("当前桌面系统没有可用的 YouTube 原生 player 运行器".into())

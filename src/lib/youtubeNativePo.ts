@@ -47,7 +47,7 @@ async function nativeBundle(): Promise<string> {
   return bundlePromise;
 }
 
-/** The sole GVS proof path used by ordinary YouTube and YouTube Music on desktop. */
+/** The sole GVS proof path used by ordinary YouTube and YouTube Music on macOS. */
 export async function mintNativeYoutubeGvsPoToken(
   binding: string,
   forceFresh = false,

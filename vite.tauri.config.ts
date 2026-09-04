@@ -28,12 +28,11 @@ import { defineConfig, type Plugin } from "vite";
 const YOUTUBE_NATIVE_PO_DEV_PATH = "/__kdj_youtube_native_po.js";
 const tauriPlatform = process.env.TAURI_ENV_PLATFORM;
 // Tauri builds provide the target-triple platform (`darwin`, `windows`, `linux`, `androideabi`,
-// …). Desktop platforms ship the proof worker (macOS WKWebView; Linux/Windows Deno/V8). Mobile
-// builds keep the unsupported stubs so the worker never ships there.
-const nativeYoutubeDesktop = new Set(["darwin", "linux", "windows", "win32"]);
+// …). A direct Vite build falls back to its host, so Linux/Windows CI cannot accidentally retain
+// a worker that only macOS can invoke.
 const nativeYoutubeRuntime = tauriPlatform
-  ? nativeYoutubeDesktop.has(tauriPlatform)
-  : nativeYoutubeDesktop.has(process.platform);
+  ? tauriPlatform === "darwin"
+  : process.platform === "darwin";
 
 function stripElectronCsp(): Plugin {
   return {

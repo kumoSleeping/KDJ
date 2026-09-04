@@ -34,8 +34,6 @@ mod share_clipboard;
 mod youtube_embed;
 #[cfg(desktop)]
 mod youtube_proof;
-#[cfg(all(not(target_os = "macos"), not(target_os = "android"), not(target_os = "ios")))]
-mod youtube_proof_v8;
 #[cfg(desktop)]
 #[cfg(desktop)]
 pub use cli::Launch;
