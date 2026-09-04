@@ -3667,6 +3667,20 @@ body[data-kd-search-pointer-dragging="true"] * {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.kd-result-resolving {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.2rem;
+  margin-left: 0.45rem;
+  color: var(--kd-theme);
+  font-size: var(--kd-size-xs);
+  font-weight: 650;
+  white-space: nowrap;
+}
+.kd-table tbody tr[data-resolving="true"] {
+  cursor: progress;
+}
 .kd-video-page-count {
   flex: none;
   margin-left: 0.45rem;
@@ -4346,6 +4360,12 @@ body[data-kd-search-pointer-dragging="true"] * {
   background: transparent;
   color: var(--kd-faint);
   cursor: default;
+}
+.kd-player-go[data-loading="true"]:disabled {
+  border-color: color-mix(in srgb, var(--kd-theme) 55%, var(--kd-line));
+  color: var(--kd-theme);
+  cursor: progress;
+  opacity: 1;
 }
 .kd-player-btn {
   appearance: none;

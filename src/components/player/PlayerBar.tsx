@@ -14,6 +14,7 @@ import {
   Download,
   FolderOpen,
   Library,
+  LoaderCircle,
   Music2,
   Pause,
   Play,
@@ -2690,15 +2691,19 @@ export function PlayerBar() {
         });
         if (isStreamTrack(current)) {
           const streamStatus: PlayerSessionStatus =
-            state.status === "error"
-              ? "error"
-              : state.status === "ended"
-                ? "ended"
-                : state.buffering || state.status === "loading"
-                  ? "buffering"
-                  : state.playing
-                    ? "playing"
-                    : "paused";
+            isUnresolvedStreamTrack(current)
+              ? "resolving"
+              : nativeLoadInFlightRef.current
+                ? "loading"
+                : state.status === "error"
+                  ? "error"
+                  : state.status === "ended"
+                    ? "ended"
+                    : state.buffering || state.status === "loading"
+                      ? "buffering"
+                      : state.playing
+                        ? "playing"
+                        : "paused";
           setBrowserMediaStatus(streamStatus);
         }
         if (current.id < 0) {
@@ -3108,6 +3113,18 @@ export function PlayerBar() {
       toggleVideoPip();
       return;
     }
+    const current = trackRef.current;
+    // 解析/装载尚未落地时，播放键不是“暂停后可再播放”的状态。键盘快捷键和
+    // 系统媒体键也必须与禁用中的前端按钮一致，不能重复启动同一条解析链。
+    if (
+      !playingRef.current &&
+      current &&
+      (nativeLoadInFlightRef.current ||
+        (isUnresolvedStreamTrack(current) &&
+          deferredStreamAutoplayRef.current === current.id))
+    ) {
+      return;
+    }
     // 暂停/恢复也是用户意图：暂停期间完成的异步接播不能把声音擅自拉回来。
     manualNextGateRef.current?.cancel();
     manualNextTargetRef.current = null;
@@ -3115,14 +3132,13 @@ export function PlayerBar() {
     playbackIntentRef.current += 1;
     nativeDjGenerationRef.current += 1;
     nativeDjBusyRef.current = false;
-    if (!trackRef.current) {
+    if (!current) {
       // 重启后 track 尚未装载，但底栏已经恢复了上次正主唱盘；首按应直接
       // 播放眼前这首，而不是要求用户先回曲库重新选中一次。
       const pick = retainedDecks[visualActiveIndex] ?? selectedRef.current;
       if (pick) playTrack(pick);
       return;
     }
-    const current = trackRef.current;
     if (!playingRef.current && isUnresolvedStreamTrack(current)) {
       // 启动时账号尚未绑定/网络未就绪会让后台预装失败。用户登录后第一次按播放
       // 必须重试同一首、同一进度，而不是对一张没有 source 的 Deck 直接发 Play。
@@ -3681,6 +3697,21 @@ export function PlayerBar() {
     Boolean(pipSession) &&
     !(pipFailed && pipSession?.source === "network") &&
     !(pipSession?.source === "local" && pipMode === "panel");
+  const transportLoading = Boolean(
+    !pipDriving &&
+      streaming &&
+      !playing &&
+      (isUnresolvedStreamTrack(displayTrack) ||
+        nativeLoadInFlightRef.current ||
+        browserMediaStatus === "resolving" ||
+        browserMediaStatus === "loading" ||
+        browserMediaStatus === "buffering"),
+  );
+  const transportLoadingLabel = browserMediaStatus === "buffering"
+    ? "正在缓冲"
+    : isUnresolvedStreamTrack(displayTrack) || browserMediaStatus === "resolving"
+      ? "正在解析播放地址"
+      : "正在加载";
   const titleText = pipDriving && pipSession
     ? pipSession.title || "视频预览"
     : displayTrack
@@ -4580,23 +4611,29 @@ export function PlayerBar() {
         <button
           type="button"
           className="kd-player-go"
+          aria-busy={transportLoading ? "true" : undefined}
           aria-label={
-            pipDriving && pipSession?.source === "network"
-              ? pipPlaying
-                ? "暂停预览"
-                : "播放预览"
-              : playing
-                ? "暂停"
-                : "播放"
+            transportLoading
+              ? transportLoadingLabel
+              : pipDriving && pipSession?.source === "network"
+                ? pipPlaying
+                  ? "暂停预览"
+                  : "播放预览"
+                : playing
+                  ? "暂停"
+                  : "播放"
           }
           data-playing={
             (pipDriving && pipSession?.source === "network" ? pipPlaying : playing) ? "true" : undefined
           }
-          disabled={!displayTrack && !pipDriving}
+          data-loading={transportLoading ? "true" : undefined}
+          disabled={transportLoading || (!displayTrack && !pipDriving)}
           title={
-            pipDriving && pipSession?.source === "network"
-              ? "播放 / 暂停预览（空格）"
-              : "播放 / 暂停（空格）"
+            transportLoading
+              ? `${transportLoadingLabel}，请稍候`
+              : pipDriving && pipSession?.source === "network"
+                ? "播放 / 暂停预览（空格）"
+                : "播放 / 暂停（空格）"
           }
           onPointerDown={(event) => {
             if (event.button !== 0) return;
@@ -4617,7 +4654,9 @@ export function PlayerBar() {
             toggleTransport();
           }}
         >
-          {(pipDriving && pipSession?.source === "network" ? pipPlaying : playing) ? (
+          {transportLoading ? (
+            <LoaderCircle className="kd-spin" size={15} aria-hidden="true" />
+          ) : (pipDriving && pipSession?.source === "network" ? pipPlaying : playing) ? (
             <Pause size={14} fill="currentColor" />
           ) : (
             <Play size={14} fill="currentColor" />

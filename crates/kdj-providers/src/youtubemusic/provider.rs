@@ -1495,30 +1495,69 @@ fn continuation_from_items(items: Option<&Vec<Value>>) -> Option<String> {
     items?.last().and_then(continuation_token_from_item)
 }
 
-fn track_shelf(section: &Value) -> Option<&Value> {
-    section
-        .get("musicPlaylistShelfRenderer")
-        .or_else(|| section.get("musicShelfRenderer"))
+struct TrackShelves<'a> {
+    shelves: Vec<&'a Value>,
+    /// `musicPlaylistShelfRenderer` 是歌单曲目的权威容器。只要响应里出现它，
+    /// 同级的通用 `musicShelfRenderer` 就是推荐等附属内容，不能混进歌单。
+    explicit: bool,
 }
 
-/// 只从真正交给歌曲解析器的列表尾部读取 2025 continuation。
-/// 响应里可能还有推荐、搜索建议等其它货架，它们的 token 不能用于歌单翻页。
-fn playlist_tail_continuation_token(value: &Value) -> Option<String> {
+fn preferred_track_shelves<'a>(sections: impl IntoIterator<Item = &'a Value>) -> TrackShelves<'a> {
+    let mut playlist = Vec::new();
+    let mut fallback = Vec::new();
+    for section in sections {
+        if let Some(shelf) = section.get("musicPlaylistShelfRenderer") {
+            playlist.push(shelf);
+        } else if let Some(shelf) = section
+            .get("musicShelfRenderer")
+            .or_else(|| section.get("itemSectionRenderer"))
+        {
+            fallback.push(shelf);
+        }
+    }
+    if playlist.is_empty() {
+        TrackShelves {
+            shelves: fallback,
+            explicit: false,
+        }
+    } else {
+        TrackShelves {
+            shelves: playlist,
+            explicit: true,
+        }
+    }
+}
+
+fn browse_track_shelves(value: &Value) -> TrackShelves<'_> {
+    let mut sections = Vec::new();
     for pointer in PLAYLIST_SECTION_LISTS {
-        let Some(sections) = value
+        let Some(items) = value
             .pointer(pointer)
             .and_then(|section_list| section_list.get("contents"))
             .and_then(Value::as_array)
         else {
             continue;
         };
-        for section in sections {
-            if let Some(token) = track_shelf(section).and_then(|shelf| {
-                continuation_from_items(shelf.get("contents").and_then(Value::as_array))
-            }) {
-                return Some(token);
-            }
+        sections.extend(items);
+    }
+    preferred_track_shelves(sections)
+}
+
+/// 只从真正交给歌曲解析器的列表尾部读取 2025 continuation。
+/// 响应里可能还有推荐、搜索建议等其它货架，它们的 token 不能用于歌单翻页。
+fn playlist_tail_continuation_token(value: &Value) -> Option<String> {
+    let browse_shelves = browse_track_shelves(value);
+    for shelf in &browse_shelves.shelves {
+        if let Some(token) =
+            continuation_from_items(shelf.get("contents").and_then(Value::as_array))
+        {
+            return Some(token);
         }
+    }
+    // 显式歌单 shelf 已经给出了曲目范围；它没有尾 token 就代表曲目到此结束。
+    // 外层 sectionList 的 token 可能打开「推荐歌曲」，不能继续向下泛搜。
+    if browse_shelves.explicit {
+        return None;
     }
 
     if let Some(actions) = value
@@ -1542,12 +1581,16 @@ fn playlist_tail_continuation_token(value: &Value) -> Option<String> {
             let Some(sections) = node.get("contents").and_then(Value::as_array) else {
                 continue;
             };
-            for section in sections {
-                if let Some(token) = track_shelf(section).and_then(|shelf| {
+            let continuation_shelves = preferred_track_shelves(sections);
+            for shelf in &continuation_shelves.shelves {
+                if let Some(token) =
                     continuation_from_items(shelf.get("contents").and_then(Value::as_array))
-                }) {
+                {
                     return Some(token);
                 }
+            }
+            if continuation_shelves.explicit {
+                return None;
             }
         } else if matches!(
             kind.as_str(),
@@ -1578,6 +1621,18 @@ fn legacy_continuation_from_node(node: &Value) -> Option<String> {
 
 /// 老布局同样只看歌单 section/shelf 自己的 `continuations`，不扫描整份响应。
 fn playlist_legacy_continuation_token(value: &Value) -> Option<String> {
+    let browse_shelves = browse_track_shelves(value);
+    for shelf in &browse_shelves.shelves {
+        if let Some(token) = legacy_continuation_from_node(shelf) {
+            return Some(token);
+        }
+    }
+    // 当前网页会把「推荐歌曲」放在 sectionList 的续页里。显式歌单 shelf
+    // 没有自己的 continuation 时，外层 continuation 不是歌单分页。
+    if browse_shelves.explicit {
+        return None;
+    }
+
     for pointer in PLAYLIST_SECTION_LISTS {
         let Some(section_list) = value.pointer(pointer) else {
             continue;
@@ -1585,24 +1640,30 @@ fn playlist_legacy_continuation_token(value: &Value) -> Option<String> {
         if let Some(token) = legacy_continuation_from_node(section_list) {
             return Some(token);
         }
-        let Some(sections) = section_list.get("contents").and_then(Value::as_array) else {
-            continue;
-        };
-        for section in sections {
-            if let Some(token) = track_shelf(section).and_then(legacy_continuation_from_node) {
-                return Some(token);
-            }
-        }
     }
 
     let contents = value.get("continuationContents")?.as_object()?;
     for (kind, node) in contents {
-        if kind == "sectionListContinuation"
-            || matches!(
-                kind.as_str(),
-                "musicPlaylistShelfContinuation" | "musicShelfContinuation"
-            )
-        {
+        if kind == "sectionListContinuation" {
+            let Some(sections) = node.get("contents").and_then(Value::as_array) else {
+                continue;
+            };
+            let continuation_shelves = preferred_track_shelves(sections);
+            for shelf in &continuation_shelves.shelves {
+                if let Some(token) = legacy_continuation_from_node(shelf) {
+                    return Some(token);
+                }
+            }
+            if continuation_shelves.explicit {
+                return None;
+            }
+            if let Some(token) = legacy_continuation_from_node(node) {
+                return Some(token);
+            }
+        } else if matches!(
+            kind.as_str(),
+            "musicPlaylistShelfContinuation" | "musicShelfContinuation"
+        ) {
             if let Some(token) = legacy_continuation_from_node(node) {
                 return Some(token);
             }
@@ -1685,14 +1746,8 @@ fn songs_from_continuation_contents(page: &Value) -> Vec<SongSource> {
             let Some(sections) = node.get("contents").and_then(Value::as_array) else {
                 continue;
             };
-            for section in sections {
-                let Some(shelf) = section
-                    .get("musicPlaylistShelfRenderer")
-                    .or_else(|| section.get("musicShelfRenderer"))
-                    .or_else(|| section.get("itemSectionRenderer"))
-                else {
-                    continue;
-                };
+            let continuation_shelves = preferred_track_shelves(sections);
+            for shelf in continuation_shelves.shelves {
                 let Some(shelf_items) =
                     shelf.get("contents").and_then(Value::as_array).or_else(|| {
                         shelf
@@ -1707,8 +1762,13 @@ fn songs_from_continuation_contents(page: &Value) -> Vec<SongSource> {
             continue;
         }
         // musicPlaylistShelfContinuation / musicShelfContinuation 等：contents 直接是曲目
-        if let Some(items) = node.get("contents").and_then(Value::as_array) {
-            sources.extend(items.iter().filter_map(song_source));
+        if matches!(
+            key.as_str(),
+            "musicPlaylistShelfContinuation" | "musicShelfContinuation"
+        ) {
+            if let Some(items) = node.get("contents").and_then(Value::as_array) {
+                sources.extend(items.iter().filter_map(song_source));
+            }
         }
     }
     sources
@@ -1716,7 +1776,8 @@ fn songs_from_continuation_contents(page: &Value) -> Vec<SongSource> {
 
 /// 布局随客户端形态在变：老版是 `singleColumnBrowseResultsRenderer`，
 /// 现在网页端是 `twoColumnBrowseResultsRenderer`（主栏放标题头、
-/// 次栏放曲目 shelf）。三处 shelf 都扫一遍，标题带 microformat 兜底。
+/// 次栏放曲目 shelf）。三处位置都检查，但显式 playlist shelf 一旦存在就排除
+/// 通用 music shelf（后者通常是推荐歌曲）；标题带 microformat 兜底。
 fn playlist_contents_from_browse(body: &Value) -> (String, Vec<SongSource>) {
     let title = [
         "/header/musicDetailHeaderRenderer/title/runs/0/text",
@@ -1732,24 +1793,11 @@ fn playlist_contents_from_browse(body: &Value) -> (String, Vec<SongSource>) {
     .to_string();
 
     let mut sources = Vec::new();
-    for pointer in PLAYLIST_SECTION_LISTS {
-        let Some(sections) = body
-            .pointer(pointer)
-            .and_then(|section_list| section_list.get("contents"))
-            .and_then(Value::as_array)
-        else {
+    for shelf in browse_track_shelves(body).shelves {
+        let Some(items) = shelf.get("contents").and_then(Value::as_array) else {
             continue;
         };
-        for section in sections {
-            // 歌单页里可能混着别的 section（作者卡片、继续项等），跳过而不是整体放弃
-            let Some(shelf) = track_shelf(section) else {
-                continue;
-            };
-            let Some(items) = shelf.get("contents").and_then(Value::as_array) else {
-                continue;
-            };
-            sources.extend(items.iter().filter_map(song_source));
-        }
+        sources.extend(items.iter().filter_map(song_source));
     }
     (title, sources)
 }
@@ -2467,7 +2515,9 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_continuation_item_is_not_used_for_playlist_paging() {
+    fn section_list_recommendation_continuation_is_not_used_after_playlist_shelf() {
+        // 当前网页的真实短歌单：曲目在显式 playlist shelf；外层 sectionList
+        // continuation 打开的却是「推荐歌曲」。跟它会把推荐误追加到歌单。
         let body = json!({
             "header": {"continuationItemRenderer": {"continuationEndpoint": {
                 "continuationCommand": {"token": "unrelated-header-token"}
@@ -2480,15 +2530,12 @@ mod tests {
                         ]}}
                     ],
                     "continuations": [{
-                        "nextContinuationData": {"continuation": "playlist-token"}
+                        "nextContinuationData": {"continuation": "recommendations-token"}
                     }]
                 }
             }}}
         });
-        assert_eq!(
-            playlist_continuation_token(&body).as_deref(),
-            Some("playlist-token")
-        );
+        assert_eq!(playlist_continuation_token(&body), None);
     }
 
     #[test]
@@ -2509,6 +2556,29 @@ mod tests {
             playlist_continuation_token(&body).as_deref(),
             Some("legacy-only")
         );
+    }
+
+    #[test]
+    fn explicit_playlist_shelf_excludes_generic_recommendations() {
+        let body = json!({
+            "contents": {"twoColumnBrowseResultsRenderer": {
+                "tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [
+                    {"musicShelfRenderer": {"contents": [
+                        song_item("rrrrrrrrrrr", "Recommended")
+                    ]}}
+                ]}}}}],
+                "secondaryContents": {"sectionListRenderer": {"contents": [
+                    {"musicPlaylistShelfRenderer": {"contents": [
+                        song_item("aaaaaaaaaaa", "One"),
+                        song_item("bbbbbbbbbbb", "Two")
+                    ]}}
+                ]}}
+            }}
+        });
+        let (_, sources) = playlist_contents_from_browse(&body);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].title, "One");
+        assert_eq!(sources[1].title, "Two");
     }
 
     #[test]

@@ -5,6 +5,7 @@
  */
 
 import { playTrack } from "./playTrack";
+import { getPlayerSession, subscribePlayerSession } from "./playerSession";
 import {
   makePendingSongStreamTrack,
   makeSongStreamTrack,
@@ -77,14 +78,100 @@ function errorText(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason || "在线试听解析失败");
 }
 
+const INTERACTIVE_PREVIEW_GUARD_MS = 1_000;
+const INTERACTIVE_PREVIEW_GUARD_TIMEOUT_MS = 30_000;
+const PENDING_PLAYER_STATUSES = new Set(["resolving", "loading", "buffering"]);
+
+interface InteractivePreviewGuard {
+  sourceKey: string;
+  trackId: number | null;
+  providerDone: boolean;
+  sawPlayerTrack: boolean;
+  releaseNotBefore: number;
+  releaseTimer: number | null;
+  forceTimer: number | null;
+  unsubscribe: (() => void) | null;
+}
+
+let interactivePreview: InteractivePreviewGuard | null = null;
+
+function clearInteractivePreview(guard: InteractivePreviewGuard): void {
+  if (guard.releaseTimer !== null) window.clearTimeout(guard.releaseTimer);
+  if (guard.forceTimer !== null) window.clearTimeout(guard.forceTimer);
+  guard.unsubscribe?.();
+  guard.unsubscribe = null;
+  if (interactivePreview === guard) interactivePreview = null;
+}
+
+function releaseInteractivePreviewWhenSettled(guard: InteractivePreviewGuard): void {
+  if (interactivePreview !== guard) {
+    clearInteractivePreview(guard);
+    return;
+  }
+  const session = getPlayerSession();
+  if (session.trackId === guard.trackId) {
+    guard.sawPlayerTrack = true;
+    if (PENDING_PLAYER_STATUSES.has(session.status)) return;
+  } else if (!guard.sawPlayerTrack) {
+    // playTrack 的事件是同步的，但 PlayerBar 的 React 会话快照要到下一次提交才更新。
+    // 这里仍看到上一首时不能提前开锁，否则快速重复双击会穿过渲染窗口。
+    return;
+  }
+  if (!guard.providerDone) return;
+  const delay = guard.releaseNotBefore - performance.now();
+  if (delay > 0) {
+    if (guard.releaseTimer !== null) return;
+    guard.releaseTimer = window.setTimeout(() => {
+      guard.releaseTimer = null;
+      releaseInteractivePreviewWhenSettled(guard);
+    }, delay);
+    return;
+  }
+  clearInteractivePreview(guard);
+}
+
 export function requestSongPreview(request: SongPreviewRequest): void {
   // Do not bounce this user gesture through a temporary window listener. During startup/HMR the
   // result table can become interactive one passive-effect tick before App installs that listener;
   // the first double-click was then dropped while the second worked. Start the owned async lane
   // directly; playSongPreview already has latest-intent sequencing for late provider responses.
-  void playSongPreview(request).catch((reason: unknown) => {
-    console.warn("在线试听解析失败", reason);
+  const key = sourceKey(request.source);
+  // 同一行在解析完成前只接受一次播放意图。没有明确反馈时用户很容易连续双击，
+  // 每次都新建临时 Track 和 provider 请求，最终由迟到响应反复抢占播放器。
+  // 点另一首仍然立即生效，下面的 latest-intent 序号会作废旧响应。
+  if (interactivePreview?.sourceKey === key) return;
+  if (interactivePreview) clearInteractivePreview(interactivePreview);
+  const pending = playSongPreview(request);
+  const guard: InteractivePreviewGuard = {
+    sourceKey: key,
+    trackId: previewState.sourceKey === key ? previewState.trackId : null,
+    providerDone: false,
+    sawPlayerTrack: false,
+    releaseNotBefore: performance.now() + INTERACTIVE_PREVIEW_GUARD_MS,
+    releaseTimer: null,
+    forceTimer: null,
+    unsubscribe: null,
+  };
+  interactivePreview = guard;
+  guard.unsubscribe = subscribePlayerSession(() => {
+    releaseInteractivePreviewWhenSettled(guard);
   });
+  // 最后的保险只处理 PlayerBar 被卸载/热更新等非常态；正常路径由播放器状态精确开锁。
+  guard.forceTimer = window.setTimeout(() => {
+    clearInteractivePreview(guard);
+  }, INTERACTIVE_PREVIEW_GUARD_TIMEOUT_MS);
+  void pending.then(
+    () => {
+      guard.providerDone = true;
+      releaseInteractivePreviewWhenSettled(guard);
+    },
+    (reason: unknown) => {
+      guard.providerDone = true;
+      console.warn("在线试听解析失败", reason);
+      releaseInteractivePreviewWhenSettled(guard);
+    },
+  );
+  releaseInteractivePreviewWhenSettled(guard);
 }
 
 export function sourceKey(source: SongSource): string {
