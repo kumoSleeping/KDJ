@@ -331,6 +331,13 @@ export class JsAnalyzer {
             }
         ];
         const currentScope = () => scopeStack[scopeStack.length - 1];
+        const currentFunctionScope = () => {
+            for (let i = scopeStack.length - 1; i >= 0; i--) {
+                if (scopeStack[i].type === 'function')
+                    return scopeStack[i];
+            }
+            return currentScope();
+        };
         const isInScope = (name) => {
             for (let i = scopeStack.length - 1; i >= 0; i--) {
                 if (scopeStack[i].names.has(name))
@@ -414,7 +421,7 @@ export class JsAnalyzer {
                     case 'VariableDeclaration': {
                         // var hoists to function scope...
                         const targetScope = n.kind === 'var'
-                            ? scopeStack.findLast((s) => s.type === 'function') ?? currentScope()
+                            ? currentFunctionScope()
                             : currentScope();
                         for (const d of n.declarations) {
                             collectBindingIdentifiers(d.id, targetScope.names);

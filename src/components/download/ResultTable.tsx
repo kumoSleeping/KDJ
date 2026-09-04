@@ -137,6 +137,9 @@ export interface ResultTableProps {
   onRemoveStreamGroup?(group: MergedGroup, sourceIndex: number): void;
   removeStreamGroupLabel?: string;
   removingStreamGroupIds?: ReadonlySet<string>;
+  /** 双击后仍在解析或装载中的来源，用于把加载反馈钉在原行。 */
+  previewPendingSourceKey?: string;
+  previewPendingLabel?: string;
   /** 作者/专辑集合必须先展开为歌曲，不能直接入队。 */
   onLoadCollection(collection: CollectionResult): void;
   loadingCollections: Set<string>;
@@ -182,6 +185,8 @@ export function ResultTable({
   onRemoveStreamGroup,
   removeStreamGroupLabel,
   removingStreamGroupIds,
+  previewPendingSourceKey,
+  previewPendingLabel,
   onLoadCollection,
   loadingCollections,
 }: ResultTableProps) {
@@ -716,6 +721,8 @@ export function ResultTable({
                       }
                       removeFromStreamPlaylistLabel={removeStreamGroupLabel}
                       removingFromStreamPlaylist={removingStreamGroupIds?.has(group.group_id)}
+                      previewPendingSourceKey={previewPendingSourceKey}
+                      previewPendingLabel={previewPendingLabel}
                       onDragStart={(event) => {
                         writeSearchSourcesDrag(
                           event.dataTransfer,

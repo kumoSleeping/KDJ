@@ -113,10 +113,10 @@ async function createTauriBridge(): Promise<KdjBridge> {
     installCli: cliSupported
       ? () => tauriInvoke<CliInstallStatus>("install_cli")
       : undefined,
-    mintYoutubeGvsPoToken: info.platform === "darwin"
+    mintYoutubeGvsPoToken: desktop
       ? (options) => tauriInvoke<string>("youtube_mint_gvs_po_token", options)
       : undefined,
-    runYoutubePlayer: info.platform === "darwin"
+    runYoutubePlayer: desktop
       ? (options) => tauriInvoke<string>("youtube_run_player", options)
       : undefined,
     youtubeEmbed: info.platform === "darwin"
@@ -202,6 +202,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
       : undefined,
     openSoundcloudWebLogin: desktop
       ? () => tauriInvoke<void>("open_soundcloud_web_login_window")
+      : undefined,
+    openYtmWebLogin: desktop
+      ? () => tauriInvoke<void>("open_ytm_web_login_window")
       : undefined,
     // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
     // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json

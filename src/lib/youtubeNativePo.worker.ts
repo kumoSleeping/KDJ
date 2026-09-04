@@ -1,9 +1,10 @@
 /**
  * Runs only in KDJ's non-persistent native proof WebView.
  *
- * The document is local HTML committed with a YouTube base URL by WKWebView. It has no Tauri IPC,
- * no imported cookies and a restrictive CSP; only the anonymous YouTube homepage, Google's fixed
- * BotGuard interpreter path and GenerateIT are reachable.
+ * The system WebView loads YouTube's inert robots.txt without imported cookies, then installs a
+ * restrictive CSP before evaluating this local bundle. Only the anonymous YouTube homepage,
+ * Google's fixed BotGuard interpreter path and GenerateIT are reachable. The window matches no
+ * Tauri capability; results leave the realm through Tauri's Rust-owned evaluation callback.
  */
 import { BotGuardClient } from "bgutils-js/botguard";
 import type { WebPoSignalOutput } from "bgutils-js/shared-types";
@@ -52,22 +53,14 @@ function hardenProofDocument(): void {
   const head = document.head;
   if (!head) throw new Error("YouTube proof 网络文档结构无效");
   head.prepend(meta);
-  document.body?.replaceChildren();
-  document.title = "KDJ YouTube proof runtime";
+  if (document.body) document.body.textContent = "";
 }
 
 hardenProofDocument();
 
 function securityBoundaryIntact(): boolean {
-  const global = globalThis as typeof globalThis & {
-    __TAURI_INTERNALS__?: unknown;
-    ipc?: unknown;
-    webkit?: { messageHandlers?: { ipc?: unknown } };
-  };
   return location.href === PROOF_DOCUMENT_URL
-    && global.__TAURI_INTERNALS__ === undefined
-    && global.ipc === undefined
-    && global.webkit?.messageHandlers?.ipc === undefined;
+    && window.top === window;
 }
 
 function extractBalancedObjectAfter(html: string, marker: string): string | null {

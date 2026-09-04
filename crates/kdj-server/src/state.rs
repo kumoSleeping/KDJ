@@ -236,6 +236,8 @@ pub struct AppState {
     pub youtube: Arc<YoutubeProvider>,
     /// SoundCloud OAuth 回调需要访问具体 provider 的短期 PKCE 会话。
     pub soundcloud: Arc<SoundCloudProvider>,
+    /// WebView 登录先通过具体 provider 验证候选 Cookie，成功后才写入 ytm_auth。
+    pub youtubemusic: Arc<YoutubeMusicProvider>,
     /// 两个平台的登录态严格隔离；退出或重新连接任一来源不会影响另一个。
     pub ytm_auth: Arc<YoutubeAuth>,
     pub youtube_auth: Arc<YoutubeAuth>,
@@ -358,6 +360,7 @@ impl AppState {
                 bilibili_preview: bilibili,
                 youtube,
                 soundcloud,
+                youtubemusic,
                 ytm_auth,
                 youtube_auth,
                 youtube_hls_resources: Mutex::new(HashMap::new()),

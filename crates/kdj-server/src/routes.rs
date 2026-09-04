@@ -91,6 +91,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/accounts/ytm/login/browsers", get(browser_catalog))
         .route("/api/accounts/ytm/login/browser", post(ytm_browser_login))
         .route("/api/accounts/ytm/login/headers", post(ytm_headers_login))
+        .route("/api/accounts/ytm/login/webview", post(ytm_webview_login))
         .route("/api/accounts/youtube/login/browsers", get(browser_catalog))
         .route(
             "/api/accounts/youtube/login/browser",
@@ -704,6 +705,11 @@ struct YoutubeHeadersLoginBody {
     headers: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct YoutubeWebviewLoginBody {
+    cookie: String,
+}
+
 /// 只探测本机浏览器与 Profile；不会读取 Cookie 内容或触发系统钥匙串。
 async fn browser_catalog() -> ApiResult<Json<kdj_providers::browser::BrowserCatalog>> {
     let catalog = tokio::task::spawn_blocking(kdj_providers::browser::catalog)
@@ -784,6 +790,11 @@ async fn youtube_browser_login(
     Json(payload): Json<BrowserLoginBody>,
 ) -> ApiResult<Json<Account>> {
     let session = import_youtube_browser(state.youtube_auth.clone(), payload).await?;
+    state
+        .youtube
+        .validate_browser_session(&session)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("YouTube 登录会话验证失败：{error}")))?;
     state.youtube_auth.save(session)?;
     let account = state
         .provider(Platform::Youtube)
@@ -818,12 +829,51 @@ async fn ytm_headers_login(
     Ok(Json(account))
 }
 
+/// 桌面 WebView 登录：Cookie 只在 Rust 侧流转，不进 renderer。
+async fn ytm_webview_login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<YoutubeWebviewLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let cookie = payload.cookie.trim();
+    if cookie.is_empty() || cookie.len() > 256 * 1024 {
+        return Err(ApiError::bad_request(
+            "YouTube Music 登录窗口没有返回有效会话",
+        ));
+    }
+    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_cookie_header(
+        cookie,
+        "WebView 登录 · music.youtube.com",
+    )?;
+    state
+        .youtubemusic
+        .validate_browser_session(&session)
+        .await
+        .map_err(|error| {
+            ApiError::bad_request(format!("YouTube Music 登录会话验证失败：{error}"))
+        })?;
+    state.ytm_auth.save(session)?;
+    let account = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
+        .account()
+        .await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
 /// 普通 YouTube 请求头回退；不会覆盖 YouTube Music 会话。
 async fn youtube_headers_login(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<YoutubeHeadersLoginBody>,
 ) -> ApiResult<Json<Account>> {
-    save_headers_session(&state.youtube_auth, &payload.headers)?;
+    let session =
+        kdj_providers::youtubemusic::auth::BrowserSession::from_headers(&payload.headers)?;
+    state
+        .youtube
+        .validate_browser_session(&session)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("YouTube 登录会话验证失败：{error}")))?;
+    state.youtube_auth.save(session)?;
     let account = state
         .provider(Platform::Youtube)
         .ok_or_else(|| ApiError::bad_request("YouTube provider 不可用"))?
@@ -4865,7 +4915,12 @@ async fn stream_playlists(
         .ok_or_else(|| ApiError::not_found("平台不可用"))?;
     // 一个侧栏根只允许访问自己的平台。YouTube 与 YouTube Music 可能显示同一
     // 播放列表，但不能为了去重偷偷再刷新另一边的目录。
-    let playlists = provider.stream_playlists().await?;
+    let playlists = match provider.stream_playlists().await {
+        Ok(playlists) => playlists,
+        Err(error) => {
+            return Err(reconcile_stream_account_failure(&state, provider.as_ref(), error).await)
+        }
+    };
     if playlists
         .iter()
         .any(|playlist| playlist.platform != platform)
@@ -4888,10 +4943,16 @@ async fn stream_playlist(
     let provider = state
         .provider(payload.platform)
         .ok_or_else(|| ApiError::not_found("平台不可用"))?;
-    let response = provider
+    let response = match provider
         .stream_playlist_tracks(&payload.key, payload.limit)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("该平台暂不支持歌单展开"))?;
+        .await
+    {
+        Ok(Some(response)) => response,
+        Ok(None) => return Err(ApiError::bad_request("该平台暂不支持歌单展开")),
+        Err(error) => {
+            return Err(reconcile_stream_account_failure(&state, provider.as_ref(), error).await)
+        }
+    };
     if response.platform != payload.platform
         || response
             .sources
@@ -4926,15 +4987,38 @@ async fn stream_playlist_remove_track(
     let provider = state
         .provider(payload.platform)
         .ok_or_else(|| ApiError::not_found("平台不可用"))?;
-    provider
+    if let Err(error) = provider
         .remove_stream_playlist_track(key, &payload.source)
-        .await?;
+        .await
+    {
+        return Err(reconcile_stream_account_failure(&state, provider.as_ref(), error).await);
+    }
     Ok(Json(StreamPlaylistTrackRemoveResponse {
         platform: payload.platform,
         key: key.to_string(),
         source_key: payload.source.key,
         removed: true,
     }))
+}
+
+/// 私人目录操作失败后只做一次账号核验。明确失效才广播登出态；网络抖动或平台
+/// 普通错误保留原错误，不能把用户误踢下线。
+async fn reconcile_stream_account_failure(
+    state: &Arc<AppState>,
+    provider: &dyn MusicProvider,
+    error: anyhow::Error,
+) -> ApiError {
+    let account = provider.account().await;
+    if account.state == AccountState::Expired {
+        state.hub.publish("account.changed", &account);
+        let detail = if account.detail.trim().is_empty() {
+            format!("{} 登录已失效，请重新登录", account.label)
+        } else {
+            account.detail
+        };
+        return ApiError::new(StatusCode::UNAUTHORIZED, detail);
+    }
+    error.into()
 }
 
 async fn library_tracks(

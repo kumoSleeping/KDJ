@@ -96,7 +96,8 @@ jobs:
             rust_targets: x86_64-apple-darwin
             tauri_args: --target x86_64-apple-darwin
             mac_arch: x86_64
-          - os: ubuntu-latest
+          # 固定 WebKitGTK 构建基线，避免 runner 滚动升级让同一提交的 Linux ABI 漂移。
+          - os: ubuntu-22.04
             label: linux-x86_64
             rust_targets: ""
             tauri_args: ""

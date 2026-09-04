@@ -949,8 +949,8 @@ export interface KdjBridge {
   cliInstallStatus?: () => Promise<CliInstallStatus>;
   installCli?: () => Promise<CliInstallStatus>;
   /**
-   * macOS 系统 WebKit 的独立 WebPO 运行器。远程 BotGuard 只在无 Tauri IPC、
-   * 非持久的 YouTube-origin WebView 中执行；其它平台不伪装第二条实现。
+   * 桌面 Tauri 系统 WebView 的独立 WebPO 运行器。远程 BotGuard 只在无命令
+   * capability、非持久的 YouTube-origin 窗口中执行；移动端不伪装第二条实现。
    */
   mintYoutubeGvsPoToken?: (options: {
     bundle: string;
@@ -1073,6 +1073,8 @@ export interface KdjBridge {
   openSoundcloudOAuth?: (url: string) => Promise<void>;
   /** 桌面：在一次性 soundcloud.com WebView 中登录，不读取外部浏览器数据。 */
   openSoundcloudWebLogin?: () => Promise<void>;
+  /** 桌面：在一次性 music.youtube.com WebView 中登录，Cookie 只留在 Rust。 */
+  openYtmWebLogin?: () => Promise<void>;
   /**
    * 桌面直接问 Tauri Updater 的清单；只有当前安装格式真的存在签名更新包时
    * 才会返回 newer=true。移动端/浏览器没有它，继续走 GitHub Release API。
