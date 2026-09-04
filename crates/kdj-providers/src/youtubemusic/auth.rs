@@ -139,6 +139,23 @@ impl BrowserSession {
         let digest = Sha1::digest(format!("{timestamp} {sid} {origin}").as_bytes());
         Some(format!("SAPISIDHASH {timestamp}_{}", hex::encode(digest)))
     }
+
+    pub fn request_headers(&self, origin: &str) -> Vec<(String, String)> {
+        let mut headers = vec![
+            ("Cookie".into(), self.cookie.clone()),
+            ("X-Goog-AuthUser".into(), self.x_goog_authuser.clone()),
+            ("Origin".into(), origin.to_string()),
+            ("X-Origin".into(), origin.to_string()),
+            ("User-Agent".into(), self.user_agent.clone()),
+        ];
+        if let Some(authorization) = self.authorization(origin) {
+            headers.push(("Authorization".into(), authorization));
+        }
+        if !self.visitor_data.is_empty() {
+            headers.push(("X-Goog-Visitor-Id".into(), self.visitor_data.clone()));
+        }
+        headers
+    }
 }
 
 /// 单个平台独占的一份浏览器会话。YouTube Music 与 YouTube 视频即使来源于
@@ -231,23 +248,9 @@ impl YoutubeAuth {
     }
 
     pub fn request_headers(&self, origin: &str) -> Vec<(String, String)> {
-        let Some(session) = self.snapshot() else {
-            return Vec::new();
-        };
-        let mut headers = vec![
-            ("Cookie".into(), session.cookie.clone()),
-            ("X-Goog-AuthUser".into(), session.x_goog_authuser.clone()),
-            ("Origin".into(), origin.to_string()),
-            ("X-Origin".into(), origin.to_string()),
-            ("User-Agent".into(), session.user_agent.clone()),
-        ];
-        if let Some(authorization) = session.authorization(origin) {
-            headers.push(("Authorization".into(), authorization));
-        }
-        if !session.visitor_data.is_empty() {
-            headers.push(("X-Goog-Visitor-Id".into(), session.visitor_data));
-        }
-        headers
+        self.snapshot()
+            .map(|session| session.request_headers(origin))
+            .unwrap_or_default()
     }
 
     pub fn browser_catalog() -> BrowserCatalog {
@@ -422,11 +425,9 @@ mod tests {
 
     #[test]
     fn cookie_header_import_accepts_sapisid() {
-        let session = BrowserSession::from_cookie_header(
-            sample_cookie(),
-            "WebView 登录 · music.youtube.com",
-        )
-        .unwrap();
+        let session =
+            BrowserSession::from_cookie_header(sample_cookie(), "WebView 登录 · music.youtube.com")
+                .unwrap();
         assert!(session.sid().is_some());
         assert_eq!(session.imported_from, "WebView 登录 · music.youtube.com");
     }

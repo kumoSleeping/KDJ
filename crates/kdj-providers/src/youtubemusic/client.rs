@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::auth::YoutubeAuth;
+use super::auth::{BrowserSession, YoutubeAuth};
 use super::decipher::PlayerScript;
 use crate::net::http_timeouts;
 use crate::provider::{ProtectedPoTokenBinding, ProtectedPreviewIdentity};
@@ -140,15 +140,25 @@ impl YtmClient {
     }
 
     async fn post_with_auth(&self, endpoint: &str, body: Value, with_auth: bool) -> Result<Value> {
+        let headers = with_auth
+            .then(|| self.auth.request_headers("https://music.youtube.com"))
+            .unwrap_or_default();
+        self.post_with_headers(endpoint, body, headers).await
+    }
+
+    async fn post_with_headers(
+        &self,
+        endpoint: &str,
+        body: Value,
+        headers: Vec<(String, String)>,
+    ) -> Result<Value> {
         let url = format!(
             "{BASE}/{endpoint}?key={}&prettyPrint=false",
             self.innertube_key
         );
         let mut request = self.http.post(&url).json(&body);
-        if with_auth {
-            for (name, value) in self.auth.request_headers("https://music.youtube.com") {
-                request = request.header(name, value);
-            }
+        for (name, value) in headers {
+            request = request.header(name, value);
         }
         let response = request
             .send()
@@ -397,6 +407,14 @@ impl YtmClient {
     /// 歌单续页：与 ytmusicapi `get_continuations_2025` 同款，把 continuation
     /// token 放进 browse body。首屏约 100 首，后续页靠这个接口往下翻。
     pub async fn browse_continuation(&self, continuation: &str) -> Result<Value> {
+        let continuation = continuation.trim();
+        anyhow::ensure!(
+            !continuation.is_empty()
+                && continuation.len() <= 16 * 1024
+                && continuation.is_ascii()
+                && !continuation.bytes().any(|byte| byte.is_ascii_control()),
+            "YouTube Music 歌单续页标识无效"
+        );
         let mut body = Self::web_remix_context();
         let map = body.as_object_mut().expect("context 一定是对象");
         map.insert(
@@ -494,6 +512,18 @@ impl YtmClient {
     pub async fn account_menu(&self) -> Result<Value> {
         self.post("account/account_menu", Self::web_remix_context())
             .await
+    }
+
+    /// 新会话必须先验证再落盘，避免一个只有 SAPISID 形状但已失效的 Cookie
+    /// 覆盖用户原本可用的登录态。
+    pub async fn validate_browser_session(&self, session: &BrowserSession) -> Result<()> {
+        self.post_with_headers(
+            "account/account_menu",
+            Self::web_remix_context(),
+            session.request_headers("https://music.youtube.com"),
+        )
+        .await?;
+        Ok(())
     }
 
     /// 取（并缓存）播放器脚本，供签名解密用。解析成功前不缓存，下次重试。

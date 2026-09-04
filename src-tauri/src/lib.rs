@@ -1165,9 +1165,16 @@ fn ytm_web_login_navigation_allowed(url: &tauri::Url) -> bool {
         return false;
     }
     url.host_str().is_some_and(|host| {
-        ["music.youtube.com", "youtube.com", "google.com", "gstatic.com", "googleusercontent.com"]
-            .iter()
-            .any(|domain| domain_matches(host, domain))
+        matches!(
+            host,
+            "music.youtube.com"
+                | "www.youtube.com"
+                | "accounts.youtube.com"
+                | "consent.youtube.com"
+                | "accounts.google.com"
+                | "consent.google.com"
+                | "myaccount.google.com"
+        )
     })
 }
 
@@ -1189,10 +1196,7 @@ fn ytm_web_cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> Option<
         if name.is_empty() || value.is_empty() {
             continue;
         }
-        if name == "SAPISID"
-            || name == "__Secure-3PAPISID"
-            || name == "__Secure-1PAPISID"
-        {
+        if name == "SAPISID" || name == "__Secure-3PAPISID" || name == "__Secure-1PAPISID" {
             has_sapisid = true;
         }
         pairs.push(format!("{name}={value}"));
@@ -1299,6 +1303,7 @@ fn open_ytm_web_login_window(app: tauri::AppHandle) -> Result<(), String> {
     .resizable(true)
     .incognito(true)
     .on_navigation(ytm_web_login_navigation_allowed)
+    .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
     .build()
     .map_err(|error| format!("打开 YouTube Music 登录窗口失败：{error}"))?;
 
@@ -1324,6 +1329,7 @@ fn open_ytm_web_login_window(app: tauri::AppHandle) -> Result<(), String> {
         let endpoint = format!("{base_url}/api/accounts/ytm/login/webview");
         let client = reqwest::Client::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
+        let mut validation_failures = 0u8;
         loop {
             tokio::time::sleep(Duration::from_millis(800)).await;
             if completed_on_poll.load(Ordering::SeqCst) {
@@ -1341,6 +1347,14 @@ fn open_ytm_web_login_window(app: tauri::AppHandle) -> Result<(), String> {
             let Some(window) = app_on_poll.get_webview_window(YTM_WEB_LOGIN_WINDOW) else {
                 return;
             };
+            // Google can set some YouTube-domain cookies before the account flow has returned to
+            // Music. Do not submit those intermediate cookies as a completed login.
+            let at_music = window.url().ok().is_some_and(|url| {
+                url.scheme() == "https" && url.host_str() == Some("music.youtube.com")
+            });
+            if !at_music {
+                continue;
+            }
             let mut cookies = window
                 .cookies_for_url(cookie_url.clone())
                 .unwrap_or_default();
@@ -1358,14 +1372,16 @@ fn open_ytm_web_login_window(app: tauri::AppHandle) -> Result<(), String> {
                 Err(error) => Err(format!("处理 YouTube Music 登录失败：{error}")),
             };
             match result {
-                Ok(()) => finish_ytm_web_login(
-                    &app_on_poll,
-                    &completed_on_poll,
-                    "done",
-                    String::new(),
-                ),
+                Ok(()) => {
+                    finish_ytm_web_login(&app_on_poll, &completed_on_poll, "done", String::new())
+                }
                 Err(message) => {
-                    // 会话尚未完全落定（例如刚进 Google 账密页）时后端会拒；继续轮询。
+                    // 页面刚返回 Music 时 Cookie store 仍可能晚一拍；候选会话最多复验
+                    // 三次。验证期间后端尚未保存它，不会覆盖用户原来的有效会话。
+                    if message.contains("登录会话验证失败") && validation_failures < 2 {
+                        validation_failures += 1;
+                        continue;
+                    }
                     if message.contains("SAPISID") || message.contains("没有找到") {
                         continue;
                     }
@@ -3007,6 +3023,9 @@ mod tests {
         ));
         assert!(!ytm_web_login_navigation_allowed(
             &tauri::Url::parse("https://music.youtube.com.evil.example/").unwrap()
+        ));
+        assert!(!ytm_web_login_navigation_allowed(
+            &tauri::Url::parse("https://usercontent.googleusercontent.com/phishing").unwrap()
         ));
     }
 

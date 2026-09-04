@@ -708,8 +708,6 @@ struct YoutubeHeadersLoginBody {
 #[derive(Debug, Deserialize)]
 struct YoutubeWebviewLoginBody {
     cookie: String,
-    #[serde(default)]
-    user_agent: String,
 }
 
 /// 只探测本机浏览器与 Profile；不会读取 Cookie 内容或触发系统钥匙串。
@@ -833,16 +831,21 @@ async fn ytm_webview_login(
 ) -> ApiResult<Json<Account>> {
     let cookie = payload.cookie.trim();
     if cookie.is_empty() || cookie.len() > 256 * 1024 {
-        return Err(ApiError::bad_request("YouTube Music 登录窗口没有返回有效会话"));
+        return Err(ApiError::bad_request(
+            "YouTube Music 登录窗口没有返回有效会话",
+        ));
     }
-    let mut session = kdj_providers::youtubemusic::auth::BrowserSession::from_cookie_header(
+    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_cookie_header(
         cookie,
         "WebView 登录 · music.youtube.com",
     )?;
-    let ua = payload.user_agent.trim();
-    if !ua.is_empty() && !ua.contains(['\r', '\n']) {
-        session.user_agent = ua.to_string();
-    }
+    state
+        .youtubemusic
+        .validate_browser_session(&session)
+        .await
+        .map_err(|error| {
+            ApiError::bad_request(format!("YouTube Music 登录会话验证失败：{error}"))
+        })?;
     state.ytm_auth.save(session)?;
     let account = state
         .provider(Platform::Ytm)

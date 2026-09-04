@@ -20,7 +20,7 @@ use kdj_core::paths::render_filename;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 
-use super::auth::YoutubeAuth;
+use super::auth::{BrowserSession, YoutubeAuth};
 use super::client::{YtmClient, PLAYBACK_WEB_USER_AGENT};
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
@@ -31,6 +31,14 @@ use crate::tags;
 
 const LABEL: &str = "YouTube Music";
 const DISABLED_MESSAGE: &str = "未启用，在「下载」里打开开关";
+const MAX_PLAYLIST_CONTINUATION_PAGES: usize = 512;
+const PLAYLIST_SECTION_LISTS: [&str; 3] = [
+    "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/\
+     sectionListRenderer",
+    "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/\
+     sectionListRenderer",
+    "/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer",
+];
 /// WEB_REMIX player 发下来的 GVS URL 不是普通公开文件地址。媒体 GET 必须保持
 /// 同一 Music origin / referer / client UA；遗漏这些头时 player 请求本身成功，
 /// 随后的试听和下载却都会在 googlevideo 上变成 403。
@@ -88,6 +96,10 @@ impl YoutubeMusicProvider {
     fn ensure_enabled(&self) -> Result<()> {
         anyhow::ensure!(self.ctx.ytm_enabled(), "{DISABLED_MESSAGE}");
         Ok(())
+    }
+
+    pub async fn validate_browser_session(&self, session: &BrowserSession) -> Result<()> {
+        self.client.validate_browser_session(session).await
     }
 
     fn video_id(source: &SongSource) -> Result<String> {
@@ -192,10 +204,7 @@ impl YoutubeMusicProvider {
             .playlist_sources(playlist_id, limit)
             .await
             .context("读取 YouTube Music 歌单失败")?;
-        anyhow::ensure!(
-            !sources.is_empty(),
-            "YouTube Music 歌单里没有可用歌曲"
-        );
+        anyhow::ensure!(!sources.is_empty(), "YouTube Music 歌单里没有可用歌曲");
         Ok((title, sources))
     }
 
@@ -217,6 +226,7 @@ impl YoutubeMusicProvider {
         }
         let mut continuation = playlist_continuation_token(&body);
         let mut seen_tokens = std::collections::HashSet::new();
+        let mut page_count = 0usize;
         while sources.len() < limit {
             let Some(token) = continuation.take() else {
                 break;
@@ -224,6 +234,11 @@ impl YoutubeMusicProvider {
             if !seen_tokens.insert(token.clone()) {
                 break;
             }
+            anyhow::ensure!(
+                page_count < MAX_PLAYLIST_CONTINUATION_PAGES,
+                "YouTube Music 歌单续页数量异常"
+            );
+            page_count += 1;
             let page = self
                 .client
                 .browse_continuation(&token)
@@ -1467,51 +1482,127 @@ fn ytm_library_playlists(body: &Value) -> Vec<StreamPlaylist> {
 /// 深度优先时会先撞上 (2)，续页却解析不出新曲目，歌单就卡在首屏 ~100 首。
 /// 因此**必须优先**用 shelf 尾的 2025 token；找不到再退回老 `continuations`。
 fn playlist_continuation_token(value: &Value) -> Option<String> {
-    item_renderer_continuation_token(value).or_else(|| legacy_continuations_token(value))
+    playlist_tail_continuation_token(value).or_else(|| playlist_legacy_continuation_token(value))
 }
 
-/// 2025 列表尾续页项（含 commandExecutorCommand / ViewModel）。
-fn item_renderer_continuation_token(value: &Value) -> Option<String> {
-    match value {
-        Value::Array(items) => {
-            // 与 ytmusicapi get_continuation_token 一致：优先看列表末尾
-            if let Some(token) = items.last().and_then(continuation_token_from_item) {
+fn continuation_from_items(items: Option<&Vec<Value>>) -> Option<String> {
+    items?.last().and_then(continuation_token_from_item)
+}
+
+fn track_shelf(section: &Value) -> Option<&Value> {
+    section
+        .get("musicPlaylistShelfRenderer")
+        .or_else(|| section.get("musicShelfRenderer"))
+}
+
+/// 只从真正交给歌曲解析器的列表尾部读取 2025 continuation。
+/// 响应里可能还有推荐、搜索建议等其它货架，它们的 token 不能用于歌单翻页。
+fn playlist_tail_continuation_token(value: &Value) -> Option<String> {
+    for pointer in PLAYLIST_SECTION_LISTS {
+        let Some(sections) = value
+            .pointer(pointer)
+            .and_then(|section_list| section_list.get("contents"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for section in sections {
+            if let Some(token) = track_shelf(section).and_then(|shelf| {
+                continuation_from_items(shelf.get("contents").and_then(Value::as_array))
+            }) {
                 return Some(token);
             }
-            items.iter().find_map(item_renderer_continuation_token)
         }
-        Value::Object(map) => {
-            if let Some(token) = continuation_token_from_item(value) {
-                return Some(token);
-            }
-            map.values().find_map(item_renderer_continuation_token)
-        }
-        _ => None,
     }
-}
 
-/// 老布局：`continuations[].nextContinuationData.continuation`。
-fn legacy_continuations_token(value: &Value) -> Option<String> {
-    match value {
-        Value::Array(items) => items.iter().find_map(legacy_continuations_token),
-        Value::Object(map) => {
-            if let Some(token) = map
-                .get("continuations")
-                .and_then(Value::as_array)
-                .and_then(|list| list.first())
-                .and_then(|item| {
-                    item.pointer("/nextContinuationData/continuation")
-                        .or_else(|| item.pointer("/nextRadioContinuationData/continuation"))
-                        .and_then(Value::as_str)
-                        .filter(|token| !token.is_empty())
-                })
+    if let Some(actions) = value
+        .get("onResponseReceivedActions")
+        .and_then(Value::as_array)
+    {
+        for action in actions {
+            if let Some(token) = continuation_from_items(
+                action
+                    .pointer("/appendContinuationItemsAction/continuationItems")
+                    .and_then(Value::as_array),
+            ) {
+                return Some(token);
+            }
+        }
+    }
+
+    let contents = value.get("continuationContents")?.as_object()?;
+    for (kind, node) in contents {
+        if kind == "sectionListContinuation" {
+            let Some(sections) = node.get("contents").and_then(Value::as_array) else {
+                continue;
+            };
+            for section in sections {
+                if let Some(token) = track_shelf(section).and_then(|shelf| {
+                    continuation_from_items(shelf.get("contents").and_then(Value::as_array))
+                }) {
+                    return Some(token);
+                }
+            }
+        } else if matches!(
+            kind.as_str(),
+            "musicPlaylistShelfContinuation" | "musicShelfContinuation"
+        ) {
+            if let Some(token) =
+                continuation_from_items(node.get("contents").and_then(Value::as_array))
             {
-                return Some(token.to_string());
+                return Some(token);
             }
-            map.values().find_map(legacy_continuations_token)
         }
-        _ => None,
     }
+    None
+}
+
+fn legacy_continuation_from_node(node: &Value) -> Option<String> {
+    node.get("continuations")
+        .and_then(Value::as_array)
+        .and_then(|list| list.first())
+        .and_then(|item| {
+            item.pointer("/nextContinuationData/continuation")
+                .or_else(|| item.pointer("/nextRadioContinuationData/continuation"))
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+        })
+        .map(str::to_string)
+}
+
+/// 老布局同样只看歌单 section/shelf 自己的 `continuations`，不扫描整份响应。
+fn playlist_legacy_continuation_token(value: &Value) -> Option<String> {
+    for pointer in PLAYLIST_SECTION_LISTS {
+        let Some(section_list) = value.pointer(pointer) else {
+            continue;
+        };
+        if let Some(token) = legacy_continuation_from_node(section_list) {
+            return Some(token);
+        }
+        let Some(sections) = section_list.get("contents").and_then(Value::as_array) else {
+            continue;
+        };
+        for section in sections {
+            if let Some(token) = track_shelf(section).and_then(legacy_continuation_from_node) {
+                return Some(token);
+            }
+        }
+    }
+
+    let contents = value.get("continuationContents")?.as_object()?;
+    for (kind, node) in contents {
+        if kind == "sectionListContinuation"
+            || matches!(
+                kind.as_str(),
+                "musicPlaylistShelfContinuation" | "musicShelfContinuation"
+            )
+        {
+            if let Some(token) = legacy_continuation_from_node(node) {
+                return Some(token);
+            }
+        }
+    }
+    None
 }
 
 fn continuation_token_from_item(item: &Value) -> Option<String> {
@@ -1596,11 +1687,13 @@ fn songs_from_continuation_contents(page: &Value) -> Vec<SongSource> {
                 else {
                     continue;
                 };
-                let Some(shelf_items) = shelf.get("contents").and_then(Value::as_array).or_else(|| {
-                    shelf
-                        .pointer("/contents/0/musicPlaylistShelfRenderer/contents")
-                        .and_then(Value::as_array)
-                }) else {
+                let Some(shelf_items) =
+                    shelf.get("contents").and_then(Value::as_array).or_else(|| {
+                        shelf
+                            .pointer("/contents/0/musicPlaylistShelfRenderer/contents")
+                            .and_then(Value::as_array)
+                    })
+                else {
                     continue;
                 };
                 sources.extend(shelf_items.iter().filter_map(song_source));
@@ -1632,25 +1725,18 @@ fn playlist_contents_from_browse(body: &Value) -> (String, Vec<SongSource>) {
     .unwrap_or("YouTube Music 歌单")
     .to_string();
 
-    const SHELF_LISTS: [&str; 3] = [
-        "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/\
-         sectionListRenderer/contents",
-        "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/\
-         sectionListRenderer/contents",
-        "/contents/twoColumnBrowseResultsRenderer/secondaryContents/\
-         sectionListRenderer/contents",
-    ];
     let mut sources = Vec::new();
-    for pointer in SHELF_LISTS {
-        let Some(sections) = body.pointer(pointer).and_then(Value::as_array) else {
+    for pointer in PLAYLIST_SECTION_LISTS {
+        let Some(sections) = body
+            .pointer(pointer)
+            .and_then(|section_list| section_list.get("contents"))
+            .and_then(Value::as_array)
+        else {
             continue;
         };
         for section in sections {
             // 歌单页里可能混着别的 section（作者卡片、继续项等），跳过而不是整体放弃
-            let Some(shelf) = section
-                .get("musicPlaylistShelfRenderer")
-                .or_else(|| section.get("musicShelfRenderer"))
-            else {
+            let Some(shelf) = track_shelf(section) else {
                 continue;
             };
             let Some(items) = shelf.get("contents").and_then(Value::as_array) else {
@@ -2371,6 +2457,31 @@ mod tests {
         assert_eq!(
             playlist_continuation_token(&body).as_deref(),
             Some("tail-2025")
+        );
+    }
+
+    #[test]
+    fn unrelated_continuation_item_is_not_used_for_playlist_paging() {
+        let body = json!({
+            "header": {"continuationItemRenderer": {"continuationEndpoint": {
+                "continuationCommand": {"token": "unrelated-header-token"}
+            }}},
+            "contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {
+                "sectionListRenderer": {
+                    "contents": [
+                        {"musicPlaylistShelfRenderer": {"contents": [
+                            song_item("aaaaaaaaaaa", "One")
+                        ]}}
+                    ],
+                    "continuations": [{
+                        "nextContinuationData": {"continuation": "playlist-token"}
+                    }]
+                }
+            }}}
+        });
+        assert_eq!(
+            playlist_continuation_token(&body).as_deref(),
+            Some("playlist-token")
         );
     }
 
