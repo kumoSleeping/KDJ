@@ -36,6 +36,49 @@ pub const PLAYBACK_WEB_USER_AGENT: &str =
 /// 只搜单曲的 filter 参数（ytmusicapi 的 songs filter 同款）。
 pub const SONG_FILTER_PARAMS: &str = "EgWKAQIIAWoMEA4QChADEAQQCRAF";
 
+#[derive(Debug, thiserror::Error)]
+#[error("YouTube Music 接口返回 {status}：{endpoint} {detail}")]
+struct YtmApiError {
+    status: reqwest::StatusCode,
+    endpoint: String,
+    detail: String,
+}
+
+pub(super) fn is_auth_rejection(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<YtmApiError>().is_some_and(|error| {
+        matches!(
+            error.status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        )
+    })
+}
+
+fn contains_json_key(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.contains_key(expected)
+                || map.values().any(|child| contains_json_key(child, expected))
+        }
+        Value::Array(items) => items.iter().any(|child| contains_json_key(child, expected)),
+        _ => false,
+    }
+}
+
+fn ensure_authenticated_library_response(body: Value) -> Result<Value> {
+    // YouTube Music 的私人目录在 Cookie 失效时仍返回 HTTP 200；区别只在正文
+    // 变成带 signInEndpoint 的「登录即可畅听」占位页。若把它当成正常空目录，
+    // 前端会缓存 []，用户看到的就只是一个永远展开不出内容的根节点。
+    if contains_json_key(&body, "signInEndpoint") {
+        return Err(YtmApiError {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            endpoint: "browse".into(),
+            detail: "登录会话已失效".into(),
+        }
+        .into());
+    }
+    Ok(body)
+}
+
 /// 网页端版本号跟着日期走（ytmusicapi 的做法）：YouTube 会拒绝过老的
 /// 客户端版本，写死一个版本号迟早失效，`1.YYYYMMDD.01.00` 永远"够新"。
 fn web_remix_version() -> String {
@@ -175,7 +218,12 @@ impl YtmClient {
                 .or_else(|| payload.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            bail!("YouTube Music 接口返回 {status}：{endpoint} {detail}");
+            return Err(YtmApiError {
+                status,
+                endpoint: endpoint.to_string(),
+                detail: detail.to_string(),
+            }
+            .into());
         }
         Ok(payload)
     }
@@ -474,7 +522,7 @@ impl YtmClient {
 
     /// 登录账号的 YouTube Music 播放列表目录；与 ytmusicapi 使用同一 browseId。
     pub async fn library_playlists(&self) -> Result<Value> {
-        self.browse("FEmusic_liked_playlists").await
+        ensure_authenticated_library_response(self.browse("FEmusic_liked_playlists").await?)
     }
 
     /// 取消歌曲的 Like；`LM`（赞过的音乐）就是由这份评分状态实时生成的。
@@ -508,21 +556,29 @@ impl YtmClient {
         self.post("browse/edit_playlist", body).await
     }
 
-    /// 登录账号菜单。成功返回就说明 Cookie + SAPISIDHASH 仍然有效。
+    /// 登录账号菜单只用于补充昵称，不能用于判断会话有效性：失效 Cookie 也可能
+    /// 得到一个匿名的 HTTP 200 菜单。
     pub async fn account_menu(&self) -> Result<Value> {
         self.post("account/account_menu", Self::web_remix_context())
             .await
     }
 
-    /// 新会话必须先验证再落盘，避免一个只有 SAPISID 形状但已失效的 Cookie
-    /// 覆盖用户原本可用的登录态。
+    /// 新会话必须用侧栏实际依赖的私人目录验证后再落盘。account_menu 对失效
+    /// Cookie 也会返回 200，无法作为登录判据。
     pub async fn validate_browser_session(&self, session: &BrowserSession) -> Result<()> {
-        self.post_with_headers(
-            "account/account_menu",
-            Self::web_remix_context(),
-            session.request_headers("https://music.youtube.com"),
-        )
-        .await?;
+        let mut body = Self::web_remix_context();
+        body.as_object_mut().expect("context 一定是对象").insert(
+            "browseId".into(),
+            Value::String("FEmusic_liked_playlists".into()),
+        );
+        let response = self
+            .post_with_headers(
+                "browse",
+                body,
+                session.request_headers("https://music.youtube.com"),
+            )
+            .await?;
+        ensure_authenticated_library_response(response)?;
         Ok(())
     }
 

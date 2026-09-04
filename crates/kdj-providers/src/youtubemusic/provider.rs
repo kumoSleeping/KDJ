@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 
 use super::auth::{BrowserSession, YoutubeAuth};
-use super::client::{YtmClient, PLAYBACK_WEB_USER_AGENT};
+use super::client::{is_auth_rejection, YtmClient, PLAYBACK_WEB_USER_AGENT};
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
     effective_limit, full_listing, no_login, str_field, unique_download_path, Capabilities,
@@ -412,27 +412,33 @@ impl MusicProvider for YoutubeMusicProvider {
     }
 
     async fn account(&self) -> Account {
-        let mut account = Account::new(Platform::Ytm, LABEL, AccountState::Missing, "未登录");
-        account.login_method = "browser".into();
-        account.credential_kind = "anonymous".into();
-        let Some(session) = self.auth.snapshot() else {
-            account.detail = if self.ctx.ytm_enabled() {
-                "可匿名搜索；导入浏览器会话后解锁账号内容".into()
-            } else {
-                DISABLED_MESSAGE.into()
-            };
+        let mut account = self.cached_account().await;
+        if account.state != AccountState::Valid {
             return account;
-        };
-        account.account_key = session.x_goog_authuser.clone();
-        account.state = AccountState::Valid;
-        account.credential_kind = "browser_session".into();
-        account.detail = session.imported_from;
-        if let Ok(body) = self.client.account_menu().await {
-            if let Some(name) = first_text(&body, &["accountName", "name"]) {
-                account.nickname = name;
+        }
+        match self.client.library_playlists().await {
+            Ok(_) => {
+                if let Ok(body) = self.client.account_menu().await {
+                    if let Some(name) = first_text(&body, &["accountName", "name"]) {
+                        account.nickname = name;
+                    }
+                }
+                account
+            }
+            Err(error) if is_auth_rejection(&error) => {
+                account.state = AccountState::Expired;
+                account.detail = "登录已失效，请重新连接".into();
+                account
+            }
+            Err(error) => {
+                account.state = AccountState::Unknown;
+                account.detail = format!("登录态检查失败：{error:#}")
+                    .chars()
+                    .take(160)
+                    .collect();
+                account
             }
         }
-        account
     }
 
     async fn cached_account(&self) -> Account {
