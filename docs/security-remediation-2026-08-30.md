@@ -23,7 +23,7 @@
 | SEC-002 | Skill 导出递归删除既有目录 | 已修复 | 移除 `remove_dir_all`；只写 `kdj/SKILL.md` 受管文件；拒绝相对根目录；选择本身名为 `kdj` 的目录也不会删除其内容。 |
 | SEC-003 | Android 重复初始化 `ndk_context` | 代码已修复，待设备验收 | Kotlin `AtomicBoolean` 与 Rust `OnceLock` 双门禁，使用 Application Context，JNI 返回明确状态。 |
 | SEC-004 | NetEase/QQ 会话文件权限过宽 | 已修复 | 新增统一私密会话写入：目录 0700，临时/既有文件 0600，创建时限权、同步后原子替换。 |
-| SEC-005 | 高权限 WebView 执行远程 JavaScript | 已修复（隔离恢复功能） | 主 renderer 删除 BotGuard/player 动态执行并移除生产 CSP 的 `unsafe-eval`。普通 YouTube 使用唯一的官方 embed 子 WebView：非持久、无浏览器登录 Cookie，且首次远程导航前移除全部 Tauri user script/IPC；不再生成普通视频 proof、解析 `s`/`n` 或代理 GoogleVideo。YTM 必需的 challenge 与窄化 player 变换只在无 Cookie、无 Tauri IPC、网络受限的隐藏原生 WKWebView 中运行，并继续使用唯一的隔离 WebPO + SABR 音频链。 |
+| SEC-005 | 高权限 WebView 执行远程 JavaScript | 已修复（隔离恢复功能） | 主 renderer 删除 BotGuard/player 动态执行并移除生产 CSP 的 `unsafe-eval`。普通 YouTube 的官方 embed 子 WebView 非持久且不导入浏览器 Cookie。YTM 与 KDJ HLS 必需的 challenge/player 变换只在无导入 Cookie、无命令 capability、网络受限的隐藏 Tauri 系统 WebView 中运行；macOS、Windows、Linux 共用同一实现，不嵌入第二套 Deno/V8。 |
 | SEC-006 | tag 测试可失败、缺前端门禁 | 已修复 | tag/main Rust 测试硬失败；加入全部前端逻辑测试、生产 Web 构建、npm audit/签名与 cargo audit。 |
 | SEC-007 | CI 权限/Action/签名校验过宽 | 已修复 | 所有 Actions 固定完整 SHA；构建 job 只读、发布 job 独立写权限；updater 和 Android 均签后验证身份。 |
 | SEC-008 | 首次安装包缺平台原生可信签名 | 延期，沿用既有发布方式 | 本版与 `v0.2.44` 一致：macOS 使用 ad-hoc 签名，Windows 不做 Authenticode；Tauri updater 仍强制 minisign 验签。平台原生证书签名留待后续单独启用。 |
@@ -98,7 +98,7 @@
 
 ## 6. 功能兼容与已知风险
 
-- 普通 YouTube 改为无登录 Cookie、无 Tauri IPC、无持久存储的唯一官方 embed 子 WebView，不再保留 direct DASH/MSE、proof/HLS 代理或备用 client。代价是仅支持官方允许匿名嵌入的公开视频，并接受官方品牌、广告和自适应策略。YTM 的 BotGuard/WebPO 与 player `s`/`n` 仍在另一隔离 WebView 中完成；通用直链入口已关闭，GoogleVideo 与 Rust 代理均不在失败后自动换请求/proof 重试。详见 [YouTube 播放链路与凭证风险结论](youtube-playback-security-2026-08-30.md)。
+- macOS 普通 YouTube 优先使用无登录 Cookie、无命令 capability、无持久存储的官方 embed 子 WebView。KDJ HLS 回退的准备链可在三端工作，但最终播放仍要求系统 WebView 原生支持 HLS；Windows WebView2 通常不支持，本次也没有新增 MSE/hls.js。YTM 所需的 BotGuard/WebPO 与 player `s`/`n` 通过同一隐藏 Tauri 系统 WebView 完成；通用直链入口仍关闭，失败后不自动换 client、binding 或 proof 路径。详见 [YouTube 播放链路与凭证风险结论](youtube-playback-security-2026-08-30.md)。
 - Cargo 的 19 条停止维护提醒主要位于 Tauri/GTK 及宏工具上游依赖链。它们没有对应当前已登记漏洞，暂不作为本次安全阻断；后续升级 Tauri/GTK 时应继续清零。
 - 本轮是高覆盖发布前扫描、整改与自动化回归，不等同于第三方渗透测试或形式化安全证明。
 

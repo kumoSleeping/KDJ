@@ -949,8 +949,8 @@ export interface KdjBridge {
   cliInstallStatus?: () => Promise<CliInstallStatus>;
   installCli?: () => Promise<CliInstallStatus>;
   /**
-   * macOS 系统 WebKit 的独立 WebPO 运行器。远程 BotGuard 只在无 Tauri IPC、
-   * 非持久的 YouTube-origin WebView 中执行；其它平台不伪装第二条实现。
+   * 桌面 Tauri 系统 WebView 的独立 WebPO 运行器。远程 BotGuard 只在无命令
+   * capability、非持久的 YouTube-origin 窗口中执行；移动端不伪装第二条实现。
    */
   mintYoutubeGvsPoToken?: (options: {
     bundle: string;

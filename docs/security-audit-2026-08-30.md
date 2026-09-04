@@ -128,9 +128,9 @@
 
 Tauri 官方建议尽量严格限制 CSP，并把远程内容视为攻击面。[Tauri CSP 指南](https://v2.tauri.app/security/csp/)
 
-建议：不得在拥有 Tauri IPC、本地 API、localStorage、DOM 与通用网络权限的主 WebView 中 eval 远端代码。迁移到无 IPC、无本地 API、无持久存储、网络受限的隔离进程/Worker/WebView，或实现严格 AST/操作码解释器；完成隔离后移除 `unsafe-eval`。发布前必须用生产包人工验证 YouTube Music 登录与播放。
+建议：不得在拥有应用命令 capability、本地 API、localStorage、DOM 与通用网络权限的主 WebView 中 eval 远端代码。迁移到不匹配任何命令 capability、无导入 Cookie、无持久存储、网络受限的隔离进程/Worker/WebView；平台允许时进一步移除 IPC handler，或实现严格 AST/操作码解释器。完成隔离后移除主 renderer 的 `unsafe-eval`。发布前必须用生产包人工验证 YouTube Music 登录与播放。
 
-整改状态（2026-08-30）：主 renderer 的远程动态执行与生产 `unsafe-eval` 已移除。普通 YouTube 已改为唯一的官方 embed 子 WebView，并在首次远程导航前移除 Tauri user script/IPC，使用非持久数据存储且不导入浏览器登录 Cookie；它不再自行生成普通视频 proof、解析 `s`/`n` 或代理 GoogleVideo。YTM 必需的 WebPO/player 变换进入另一无 Cookie、无 IPC、网络受限的隐藏原生 WKWebView。最终 macOS 静音 E2E 已连续通过普通视频冷播、seek、两视频切换、热播与 YTM AAC；生产签名包仍应在发布负责人配置正式凭据后再做一次人工 smoke test。
+整改状态（2026-08-30，2026-09-04 更新）：主 renderer 的远程动态执行与生产 `unsafe-eval` 已移除。macOS 普通 YouTube 优先使用非持久且不导入浏览器 Cookie 的官方 embed 子 WebView；KDJ HLS 回退只有在系统 WebView 宣告原生 HLS 能力时才可播放，Windows WebView2 通常不满足，不能把“能准备 HLS”写成“三端均能播放”。YTM 与 HLS 准备链必需的 WebPO/player 变换进入无导入 Cookie、无命令 capability、网络受限的隐藏 Tauri 系统 WebView，三端共用同一 Tauri 回调适配，不嵌入 Deno/V8。本次统一的是 proof/player 与 YTM 链路，不额外引入 MSE/hls.js；最终仍需由各平台签名包做一次人工 smoke test。
 
 ### SEC-006 tag 发布允许 Rust 测试失败，且 CI 未运行前端逻辑测试
 

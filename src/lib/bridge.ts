@@ -113,10 +113,10 @@ async function createTauriBridge(): Promise<KdjBridge> {
     installCli: cliSupported
       ? () => tauriInvoke<CliInstallStatus>("install_cli")
       : undefined,
-    mintYoutubeGvsPoToken: info.platform === "darwin"
+    mintYoutubeGvsPoToken: desktop
       ? (options) => tauriInvoke<string>("youtube_mint_gvs_po_token", options)
       : undefined,
-    runYoutubePlayer: info.platform === "darwin"
+    runYoutubePlayer: desktop
       ? (options) => tauriInvoke<string>("youtube_run_player", options)
       : undefined,
     youtubeEmbed: info.platform === "darwin"

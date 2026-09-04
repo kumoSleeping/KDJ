@@ -28,11 +28,12 @@ import { defineConfig, type Plugin } from "vite";
 const YOUTUBE_NATIVE_PO_DEV_PATH = "/__kdj_youtube_native_po.js";
 const tauriPlatform = process.env.TAURI_ENV_PLATFORM;
 // Tauri builds provide the target-triple platform (`darwin`, `windows`, `linux`, `androideabi`,
-// …). A direct Vite build falls back to its host, so Linux/Windows CI cannot accidentally retain
-// a worker that only macOS can invoke.
+// …). A direct Vite build falls back to its host. Only mobile bundles replace the desktop proof
+// and SABR modules with explicit unsupported stubs.
+const nativeYoutubePlatforms = new Set(["darwin", "windows", "win32", "linux"]);
 const nativeYoutubeRuntime = tauriPlatform
-  ? tauriPlatform === "darwin"
-  : process.platform === "darwin";
+  ? nativeYoutubePlatforms.has(tauriPlatform)
+  : nativeYoutubePlatforms.has(process.platform);
 
 function stripElectronCsp(): Plugin {
   return {
@@ -49,7 +50,7 @@ function stripElectronCsp(): Plugin {
 }
 
 /**
- * Vite serves `?worker&url` as an ES module graph in development, whereas WKWebView's isolated
+ * Vite serves `?worker&url` as an ES module graph in development, whereas the isolated system
  * proof page deliberately accepts only one local eval bundle and cannot import localhost modules.
  * Production already emits a self-contained worker chunk; this endpoint gives development the
  * same artifact shape without adding a runtime or a second proof implementation.
