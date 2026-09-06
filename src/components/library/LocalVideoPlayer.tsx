@@ -7,11 +7,15 @@ import {
 import {
   broadcastMediaSync,
   getLatestPlayerSync,
+  getLocalVideoClock,
+  subscribeLocalVideoClock,
+  usesLocalVideoDeviceClock,
   MEDIA_SYNC_EVENT,
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
 import {
   LocalVideoSynchronizer,
+  applyLocalVideoClock,
   VideoSeekEchoGuard,
   VideoTransportEchoGuard,
 } from "../../lib/localVideoSync";
@@ -43,8 +47,12 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     enabled: !hidden,
     trackId: hidden ? null : track.id,
     desiredPlayingRef,
-    getRate: () => getLatestPlayerSync(track.id)?.rate ?? 1,
-    onActivate: (video) => synchronizerRef.current?.reset(video),
+    getRate: () => getLocalVideoClock(track.id)?.rate ?? getLatestPlayerSync(track.id)?.rate ?? 1,
+    onActivate: (video) => {
+      const clock = getLocalVideoClock(track.id);
+      if (clock) synchronizerRef.current?.adoptClock(video, clock);
+      else synchronizerRef.current?.reset();
+    },
     transportEchoGuard: videoTransportEchoGuardRef.current,
   });
   const activeVideo = localSwap.activeVideo;
@@ -114,9 +122,30 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   }, []);
 
   useEffect(() => {
+    if (hidden || !usesLocalVideoDeviceClock()) return;
+    const apply = () => {
+      const video = activeVideo();
+      if (!video || localSwap.isHoldingPosition()) return;
+      const clock = getLocalVideoClock(track.id);
+      if (clock) desiredPlayingRef.current = clock.playing;
+      applyLocalVideoClock(video, clock, synchronizerRef.current!, videoSeekEchoGuardRef.current!, videoTransportEchoGuardRef.current!,
+        () => localSwap.correctClock(synchronizerRef.current!));
+    };
+    const unsubscribe = subscribeLocalVideoClock(track.id, apply);
+    const video = activeVideo();
+    video?.addEventListener("loadeddata", apply);
+    video?.addEventListener("seeked", apply);
+    apply();
+    return () => { unsubscribe(); video?.removeEventListener("loadeddata", apply); video?.removeEventListener("seeked", apply); };
+  }, [track.id, hidden, localSwap.activeSlot]);
+
+  useEffect(() => {
     const onMediaSync = (event: Event) => {
       const detail = (event as CustomEvent<MediaSyncDetail>).detail;
       if (detail.owner !== "player" || detail.trackId !== track.id) return;
+      // Native transport intent/pinned UI positions are not decoded audio positions. The DAC
+      // subscription owns video alignment and transport, including post-seek catch-up.
+      if (usesLocalVideoDeviceClock()) return;
       const video = activeVideo();
       if (!video) return;
       const synchronizer = synchronizerRef.current;
@@ -172,6 +201,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   // 让视频从当前音频位置开始静音播放，而不是因为 preload=none 停在封面上。
   // 这里只在面板挂载时做一次，不会因为每个 position 事件重新 load 视频。
   useEffect(() => {
+    if (usesLocalVideoDeviceClock()) return;
     const video = activeVideo();
     const state = getLatestPlayerSync(track.id);
     if (!video || !state) return;
@@ -181,9 +211,13 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     if (state.action === "play") {
       desiredPlayingRef.current = true;
       const start = () => {
+        const current = getLatestPlayerSync(track.id);
+        if (!current) return;
+        desiredPlayingRef.current = current.action === "play";
         withSuppressed(() => {
-          synchronizerRef.current?.sync(video, startAt, "explicit", rate, alignVideo);
-          void video.play().catch(() => undefined);
+          synchronizerRef.current?.sync(video, current.position ?? 0, "explicit", current.rate ?? 1, alignVideo);
+          if (desiredPlayingRef.current) void video.play().catch(() => undefined);
+          else video.pause();
         }, 800);
       };
       video.addEventListener("loadedmetadata", start, { once: true });

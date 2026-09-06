@@ -1,3 +1,4 @@
+import { isImageTrack } from "./format";
 /**
  * 自动续播：一首放完，从和声推荐里挑下一首接上。
  *
@@ -111,7 +112,8 @@ export async function trackById(id: number): Promise<Track | null> {
     // Deck memory/history only stores ids, so this boundary must fetch the authoritative row.
     // An in-page object can predate a v2 BPM analysis and still contain BPM/Key while missing
     // first_beat; reusing it makes the restored second Deck lose its grid and disables SYNC.
-    return await api.track(id);
+    const track=await api.track(id);
+    return isImageTrack(track.format) ? null : track;
   } catch {
     // 摘要没有拍点/Cue，不能冒充可播放的完整 Track。
     return cached?.id === id ? cached : null;
@@ -119,7 +121,7 @@ export async function trackById(id: number): Promise<Track | null> {
 }
 
 async function detailFor(summary: TrackSummary | null | undefined): Promise<Track | null> {
-  if (!summary) return null;
+  if (!summary || isImageTrack(summary.format)) return null;
   const cached = useLibraryStore.getState().selectedTrack;
   if (cached?.id === summary.id) return cached;
   try {
@@ -346,8 +348,13 @@ async function harmonicProfilePick(current: Track, folder: string): Promise<Trac
 async function firstInOrder(folder: string): Promise<Track | null> {
   const { sort, order } = useLibraryStore.getState().filter;
   try {
-    const page = await api.tracks({ folder, sort, order, limit: 1, offset: 0 });
-    return await detailFor(page.items[0]);
+    let offset=0;
+    for (;;) {
+      const page=await api.tracks({folder,sort,order,limit:100,offset});
+      const candidate=page.items.find(t=>!isImageTrack(t.format));
+      if(candidate) return await detailFor(candidate);
+      offset+=page.items.length;if(!page.items.length || offset>=page.total) return null;
+    }
   } catch {
     return null;
   }
@@ -355,47 +362,20 @@ async function firstInOrder(folder: string): Promise<Track | null> {
 
 async function nextInOrder(current: Track, folder: string): Promise<Track | null> {
   const state = useLibraryStore.getState();
-  if (state.filter.folder === folder) {
-    const index = state.tracks.findIndex((item) => item.id === current.id);
-    if (index !== -1) {
-      if (index + 1 < state.tracks.length) return await detailFor(state.tracks[index + 1]);
-      if (state.tracks.length < state.total) {
-        // 正好放到已加载分页的末尾：把下一页拉进来接着放
-        await state.loadMore();
-        const after = useLibraryStore.getState().tracks;
-        return await detailFor(after[index + 1] ?? after[0]);
-      }
-      const first = state.tracks[0];
-      return first && first.id !== current.id ? await detailFor(first) : null;
-    }
-  }
-
-  // 当前视图对不上范围：按同一套排序去后端翻页找到这首，取它的下一首
-  const { sort, order } = state.filter;
   try {
-    const pageSize = 200;
-    for (let offset = 0; ; offset += pageSize) {
-      const page = await api.tracks({ folder, sort, order, limit: pageSize, offset });
-      const index = page.items.findIndex((item) => item.id === current.id);
-      if (index !== -1) {
-        if (index + 1 < page.items.length) return await detailFor(page.items[index + 1]);
-        if (offset + page.items.length < page.total) {
-          const next = await api.tracks({ folder, sort, order, limit: 1, offset: offset + index + 1 });
-          return await detailFor(next.items[0]);
-        }
-        const first = await api.tracks({ folder, sort, order, limit: 1, offset: 0 });
-        return first.items[0] && first.items[0].id !== current.id
-          ? await detailFor(first.items[0])
-          : null;
-      }
-      // 整个范围都翻完了还没找到（比如正放的这首不属于这个文件夹）：
-      // 没有"它的下一首"可言，从范围的第一首开始
-      if (offset + pageSize >= page.total) {
-        return await detailFor(page.items.find((item) => item.id !== current.id));
-      }
+    const ids = state.filter.folder === folder
+      ? state.orderedIds
+      : (await api.trackIndex({ folder, folder_deep: true, sort: state.filter.sort,
+          order: state.filter.order, sort2: state.filter.sort2 ?? undefined, order2: state.filter.order2 })).track_ids;
+    const index = ids.indexOf(current.id);
+    for(let step=1;step<=ids.length;step++) {
+      const id=ids[(Math.max(-1,index)+step)%ids.length];
+      if(id===current.id) continue;
+      const candidate=await api.track(id);if(!isImageTrack(candidate.format)) return candidate;
     }
+    return null;
   } catch {
-    return null; // 和 harmonicPick 一个道理：安静停下
+    return null;
   }
 }
 
@@ -422,7 +402,7 @@ async function randomPick(
       const offset = Math.floor(Math.random() * probe.total);
       const candidate = (await api.tracks({ folder, limit: 1, offset })).items[0];
       if (
-        !candidate ||
+        !candidate || isImageTrack(candidate.format) ||
         candidate.id === current.id ||
         excludeIds.has(candidate.id) ||
         seen.has(candidate.id)

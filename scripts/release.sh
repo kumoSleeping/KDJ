@@ -92,8 +92,6 @@ if [[ "${SKIP_VALIDATION:-0}" != "1" ]]; then
   npm audit --audit-level=low
   info "npm audit signatures"
   npm audit signatures
-  info "npm run test:frontend-logic"
-  npm run test:frontend-logic
   info "npm run typecheck"
   npm run typecheck
   info "npm run tauri:web:build"

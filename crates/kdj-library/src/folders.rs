@@ -52,6 +52,8 @@ pub struct StoredLyrics {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct StoredLyricsMetadata {
     #[serde(default)]
+    invalidated: bool,
+    #[serde(default)]
     platform: String,
     #[serde(default)]
     key: String,
@@ -168,6 +170,7 @@ pub fn write_lyrics_cache(
     write_optional_lyrics_file(&paths.translated, &lyrics.translated_lrc)?;
     write_optional_lyrics_file(&paths.romaji, &lyrics.romaji_lrc)?;
     let metadata = StoredLyricsMetadata {
+        invalidated: false,
         platform: lyrics.platform.trim().to_string(),
         key: lyrics.key.trim().to_string(),
         title: lyrics.title.trim().to_string(),
@@ -202,6 +205,7 @@ pub fn read_lyrics(audio_path: &Path, platform: &str, key: &str) -> Result<Optio
         .ok()
         .and_then(|bytes| serde_json::from_slice::<StoredLyricsMetadata>(&bytes).ok())
         .unwrap_or_default();
+    if metadata.invalidated { return Ok(None); }
     Ok(Some(StoredLyrics {
         lrc,
         word_lrc: read_optional(&paths.word)?,
@@ -227,6 +231,17 @@ pub fn read_lyrics(audio_path: &Path, platform: &str, key: &str) -> Result<Optio
             0.0
         },
     }))
+}
+
+/// Keep the cached text recoverable, but stop serving timing tied to replaced media.
+/// Authored sidecars outside the application's metadata directory are not touched.
+pub fn invalidate_lyrics_cache(audio_path: &Path, platform: &str, key: &str) -> Result<()> {
+    let Some(paths) = lyrics_paths(audio_path, platform, key) else { return Ok(()); };
+    if !paths.main.is_file() { return Ok(()); }
+    let mut metadata = std::fs::read(&paths.metadata).ok()
+        .and_then(|bytes| serde_json::from_slice::<StoredLyricsMetadata>(&bytes).ok()).unwrap_or_default();
+    metadata.invalidated = true;
+    write_text_atomic(&paths.metadata, &serde_json::to_string(&metadata)?)
 }
 
 fn transfer_lyrics(
@@ -313,12 +328,6 @@ pub fn remove_lyrics(audio_path: &Path, platform: &str, key: &str) -> Result<()>
     }
     Ok(())
 }
-
-/// 扫描目录树的深度上限。DJ 的歌单目录一般 1~2 层，给到 6 层足够，
-/// 同时挡住 node_modules 那种病态深度把 UI 卡死。
-const MAX_DEPTH: usize = 6;
-/// 单个目录下的子目录上限，防止误选了一个几万条目的目录
-const MAX_CHILDREN: usize = 500;
 
 const SKIP_DIRS: [&str; 6] = [
     ".git",
@@ -679,14 +688,22 @@ struct DirectorySnapshot {
 /// 一次 readdir 同时拿子目录和本层媒体数。文件夹树原来为这两项各扫一遍目录，
 /// 外置盘上每次刷新都会把目录 I/O 翻倍。
 fn inspect_directory(directory: &Path) -> DirectorySnapshot {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return DirectorySnapshot::default();
-    };
+    inspect_directory_checked(directory).unwrap_or_default()
+}
+
+/// Snapshot persistence must distinguish a genuinely empty directory from an offline or
+/// unreadable one. The ordinary tree builder remains best-effort for backward-compatible file
+/// operations; the checked builder below uses this variant and refuses partial enumeration.
+fn inspect_directory_checked(directory: &Path) -> Result<DirectorySnapshot> {
+    let entries = std::fs::read_dir(directory)
+        .with_context(|| format!("无法读取曲库目录：{}", directory.display()))?;
     let mut snapshot = DirectorySnapshot::default();
-    for entry in entries.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("曲库目录枚举不完整：{}", directory.display()))?;
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("无法读取目录项类型：{}", entry.path().display()))?;
         if kind.is_symlink() {
             continue;
         }
@@ -706,7 +723,7 @@ fn inspect_directory(directory: &Path) -> DirectorySnapshot {
         }
     }
     snapshot.child_names.sort_by_key(|name| name.to_lowercase());
-    snapshot
+    Ok(snapshot)
 }
 
 fn child_names(directory: &Path) -> Vec<String> {
@@ -767,7 +784,7 @@ where
 {
     ensure_inside(directory, roots)?;
     let mut directories = Vec::new();
-    collect_directories(directory, 0, &mut directories);
+    collect_directories(directory, &mut directories);
     let total = directories.len();
     let mut changed = 0;
     for (index, current) in directories.iter().enumerate() {
@@ -779,12 +796,10 @@ where
     Ok(changed)
 }
 
-fn collect_directories(directory: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+fn collect_directories(directory: &Path, out: &mut Vec<PathBuf>) {
     out.push(directory.to_path_buf());
-    if depth < MAX_DEPTH {
-        for name in child_names(directory) {
-            collect_directories(&directory.join(name), depth + 1, out);
-        }
+    for name in child_names(directory) {
+        collect_directories(&directory.join(name), out);
     }
 }
 
@@ -815,7 +830,7 @@ where
 {
     let mut directories = Vec::new();
     for root in roots {
-        collect_directories(root, 0, &mut directories);
+        collect_directories(root, &mut directories);
     }
     directories.sort();
     directories.dedup();
@@ -844,27 +859,155 @@ where
 /// "库里这些歌分别躺在哪"，重新遍历文件系统既慢又会把没入库的文件算进来。
 pub fn build_tree(dirs: &[String], track_paths: &[String]) -> FolderTree {
     let roots = resolve_roots(dirs);
-    let mut counts: HashMap<String, i64> = HashMap::new();
-    for path in track_paths {
-        if let Some(parent) = Path::new(path).parent() {
-            *counts
-                .entry(kdj_core::paths::path_identity(parent))
-                .or_insert(0) += 1;
-        }
-    }
+    let counts = track_folder_counts(&roots, track_paths);
 
-    let mut nodes: Vec<FolderNode> = roots.iter().map(|root| walk(root, &counts, 0)).collect();
+    let mut nodes: Vec<FolderNode> = roots
+        .iter()
+        .map(|root| walk(root, &counts.direct, &counts.subtree))
+        .collect();
     for node in nodes.iter_mut() {
         node.is_root = true;
     }
-    let inside: i64 = nodes.iter().map(|node| node.total_count).sum();
     FolderTree {
         roots: nodes,
-        outside: (track_paths.len() as i64 - inside).max(0),
+        outside: counts.outside,
     }
 }
 
-fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> FolderNode {
+/// Build a complete tree suitable for replacing the startup snapshot. Every configured root is
+/// validated before redundant nested roots are collapsed, and every directory entry used by the
+/// visible depth is read without loss. An offline drive or one denied child therefore returns an
+/// error instead of a plausible-looking empty/partial tree.
+pub fn build_tree_checked(dirs: &[String], track_paths: &[String]) -> Result<FolderTree> {
+    let mut configured: Vec<PathBuf> = Vec::new();
+    for item in dirs.iter().filter(|item| !item.trim().is_empty()) {
+        let root = norm(Path::new(item));
+        anyhow::ensure!(root.is_dir(), "曲库根目录离线或不可读：{}", root.display());
+        if !configured
+            .iter()
+            .any(|existing| kdj_core::paths::paths_equivalent(existing, &root))
+        {
+            configured.push(root);
+        }
+    }
+    let roots: Vec<PathBuf> = configured
+        .iter()
+        .filter(|path| {
+            !configured
+                .iter()
+                .any(|other| other != *path && within(path, other))
+        })
+        .cloned()
+        .collect();
+    let counts = track_folder_counts(&roots, track_paths);
+
+    let mut nodes = Vec::with_capacity(roots.len());
+    for root in &roots {
+        let mut node = walk_checked(root, &counts.direct, &counts.subtree)?;
+        node.is_root = true;
+        nodes.push(node);
+    }
+    Ok(FolderTree {
+        roots: nodes,
+        outside: counts.outside,
+    })
+}
+
+#[derive(Default)]
+struct TrackFolderCounts {
+    direct: HashMap<String, i64>,
+    subtree: HashMap<String, i64>,
+    outside: i64,
+}
+
+/// Count database paths independently from the rendered directory children. Hidden/noisy
+/// directories and symlink entries are intentionally absent from the UI hierarchy, but a track
+/// lexically located under a configured root still belongs to that root and to every visible
+/// ancestor. Deriving totals from rendered children would misclassify those tracks as `outside`.
+fn track_folder_counts(roots: &[PathBuf], track_paths: &[String]) -> TrackFolderCounts {
+    let mut counts = TrackFolderCounts::default();
+    for path in track_paths {
+        let Some(parent) = Path::new(path).parent() else {
+            counts.outside += 1;
+            continue;
+        };
+        let parent = norm(parent);
+        *counts
+            .direct
+            .entry(kdj_core::paths::path_identity(&parent))
+            .or_insert(0) += 1;
+        let Some(root) = roots.iter().find(|root| within(&parent, root)) else {
+            counts.outside += 1;
+            continue;
+        };
+        let mut current = Some(parent.as_path());
+        while let Some(directory) = current {
+            if !within(directory, root) {
+                break;
+            }
+            *counts
+                .subtree
+                .entry(kdj_core::paths::path_identity(directory))
+                .or_insert(0) += 1;
+            if kdj_core::paths::paths_equivalent(directory, root) {
+                break;
+            }
+            current = directory.parent();
+        }
+    }
+    counts
+}
+
+fn walk_checked(
+    directory: &Path,
+    direct_counts: &HashMap<String, i64>,
+    subtree_counts: &HashMap<String, i64>,
+) -> Result<FolderNode> {
+    let manifest = read_manifest(directory);
+    let listed = manifest_order(&manifest);
+    let managed = !manifest.is_empty();
+    let snapshot = inspect_directory_checked(directory)?;
+    let files = snapshot.media_files;
+    let mut children = Vec::new();
+    for name in apply_order_to_actual(snapshot.child_names, &listed) {
+        children.push(walk_checked(
+            &directory.join(name),
+            direct_counts,
+            subtree_counts,
+        )?);
+    }
+    let identity = kdj_core::paths::path_identity(directory);
+    let direct = direct_counts.get(&identity).copied().unwrap_or(0);
+    let total = subtree_counts.get(&identity).copied().unwrap_or(0);
+    Ok(FolderNode {
+        path: directory.to_string_lossy().into_owned(),
+        name: directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| directory.to_string_lossy().into_owned()),
+        parent: directory
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        track_count: direct,
+        file_count: files,
+        total_count: total,
+        pending_count: (files - direct).max(0)
+            + children
+                .iter()
+                .map(|child| child.pending_count)
+                .sum::<i64>(),
+        children,
+        is_root: false,
+        managed,
+    })
+}
+
+fn walk(
+    directory: &Path,
+    direct_counts: &HashMap<String, i64>,
+    subtree_counts: &HashMap<String, i64>,
+) -> FolderNode {
     // 清单和目录都只读一次：树刷新是外置曲库最常走的只读路径。
     let manifest = read_manifest(directory);
     let listed = manifest_order(&manifest);
@@ -872,21 +1015,16 @@ fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> Folder
     let snapshot = inspect_directory(directory);
     let files = snapshot.media_files;
     let mut children: Vec<FolderNode> = Vec::new();
-    if depth < MAX_DEPTH {
-        // 顺序由目录自己的清单决定，不是字母序：DJ 的 set 目录是按演出顺序排的，
-        // 按字母排会把「5月 / 6yue / 7yue」打散成毫无意义的次序。
-        for name in apply_order_to_actual(snapshot.child_names, &listed)
-            .into_iter()
-            .take(MAX_CHILDREN)
-        {
-            children.push(walk(&directory.join(name), counts, depth + 1));
-        }
+    // 顺序由目录自己的清单决定，不是字母序：DJ 的 set 目录是按演出顺序排的，
+    // 按字母排会把「5月 / 6yue / 7yue」打散成毫无意义的次序。这里不能截断层级或
+    // 同级数量，否则被省掉目录里的曲目会被误计为 outside，快照还会把错误固化。
+    for name in apply_order_to_actual(snapshot.child_names, &listed) {
+        children.push(walk(&directory.join(name), direct_counts, subtree_counts));
     }
 
-    let direct = counts
-        .get(&kdj_core::paths::path_identity(directory))
-        .copied()
-        .unwrap_or(0);
+    let identity = kdj_core::paths::path_identity(directory);
+    let direct = direct_counts.get(&identity).copied().unwrap_or(0);
+    let total = subtree_counts.get(&identity).copied().unwrap_or(0);
     FolderNode {
         path: directory.to_string_lossy().into_owned(),
         name: directory
@@ -900,7 +1038,7 @@ fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> Folder
         track_count: direct,
         file_count: files,
         // 累计计数让人一眼看出哪个分支是空的，不用一层层点开
-        total_count: direct + children.iter().map(|child| child.total_count).sum::<i64>(),
+        total_count: total,
         // 未入库 = 磁盘上有、库里没有。负数没有意义（库里可能还留着已删文件的记录）
         pending_count: (files - direct).max(0)
             + children
@@ -1502,6 +1640,94 @@ mod tests {
         assert_eq!(root_node.total_count, 1, "累计到根");
         assert_eq!(root_node.track_count, 0, "根目录本层没有歌");
         assert_eq!(root_node.pending_count, 1, "磁盘 2 个、库里 1 个");
+        assert_eq!(tree.outside, 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn checked_tree_keeps_tracks_below_six_nested_directories() {
+        let base = scratch("tree-deep");
+        let root = base.join("lib");
+        let mut leaf = root.clone();
+        for index in 0..10 {
+            leaf = leaf.join(format!("level-{index}"));
+        }
+        std::fs::create_dir_all(&leaf).unwrap();
+        let track = leaf.join("deep.mp3").to_string_lossy().into_owned();
+
+        let tree = build_tree_checked(&[root.to_string_lossy().into_owned()], &[track]).unwrap();
+        assert_eq!(tree.roots[0].total_count, 1);
+        assert_eq!(tree.outside, 0, "深层曲目不能被误算进其他");
+        let mut node = &tree.roots[0];
+        for index in 0..10 {
+            assert_eq!(node.children.len(), 1, "level {index} 被截断");
+            node = &node.children[0];
+        }
+        assert_eq!(node.track_count, 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn checked_tree_keeps_more_than_five_hundred_sibling_directories() {
+        let base = scratch("tree-wide");
+        let root = base.join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..501 {
+            std::fs::create_dir(root.join(format!("set-{index:03}"))).unwrap();
+        }
+        let track = root
+            .join("set-500")
+            .join("last.mp3")
+            .to_string_lossy()
+            .into_owned();
+
+        let tree = build_tree_checked(&[root.to_string_lossy().into_owned()], &[track]).unwrap();
+        assert_eq!(tree.roots[0].children.len(), 501);
+        assert_eq!(tree.roots[0].total_count, 1);
+        assert_eq!(tree.outside, 0, "第 501 个目录里的曲目不能落进其他");
+        assert_eq!(tree.roots[0].children.last().unwrap().track_count, 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn hidden_and_skipped_database_tracks_still_belong_to_the_root() {
+        let base = scratch("tree-hidden-counts");
+        let root = base.join("lib");
+        let hidden = root.join(".private");
+        let skipped = root.join("node_modules");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::create_dir_all(&skipped).unwrap();
+        let tracks = vec![
+            hidden.join("hidden.mp3").to_string_lossy().into_owned(),
+            skipped.join("skipped.mp3").to_string_lossy().into_owned(),
+        ];
+
+        let tree = build_tree_checked(&[root.to_string_lossy().into_owned()], &tracks).unwrap();
+        assert!(tree.roots[0].children.is_empty(), "隐藏目录本身不应渲染");
+        assert_eq!(tree.roots[0].track_count, 0);
+        assert_eq!(tree.roots[0].total_count, 2);
+        assert_eq!(tree.outside, 0, "根内隐藏路径不能被误算进其他");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_database_track_under_a_skipped_symlink_still_counts_inside_its_root() {
+        let base = scratch("tree-symlink-count");
+        let root = base.join("lib");
+        let target = base.join("target");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("linked")).unwrap();
+        let track = root
+            .join("linked")
+            .join("song.mp3")
+            .to_string_lossy()
+            .into_owned();
+
+        let tree = build_tree_checked(&[root.to_string_lossy().into_owned()], &[track]).unwrap();
+        assert!(tree.roots[0].children.is_empty(), "符号链接目录不能被遍历");
+        assert_eq!(tree.roots[0].total_count, 1);
         assert_eq!(tree.outside, 0);
         let _ = std::fs::remove_dir_all(&base);
     }

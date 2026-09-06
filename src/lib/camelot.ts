@@ -1,6 +1,6 @@
 /**
  * Camelot（调号轮）纯函数 + 配色。
- * 映射表逐条对应 docs/00-architecture.md §3.3 的表格，不要凭印象改。
+ * 映射表须与 `crates/kdj-library/src/camelot.rs` 保持一致，不要凭印象改。
  */
 
 export type CamelotLetter = "A" | "B";

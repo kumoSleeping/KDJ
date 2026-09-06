@@ -93,6 +93,9 @@ pub struct PlaybackBeatGrid {
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackSource {
     pub track_id: i64,
+    /// Monotonic manager replacement intent. Zero is reserved for legacy/non-manager callers.
+    #[serde(default)]
+    pub intent_id: u64,
     pub path: String,
     #[serde(default)]
     pub source_kind: PlaybackSourceKind,
@@ -230,6 +233,10 @@ pub enum PlaybackCommand {
     Prepare {
         source: PlaybackSource,
     },
+    /// Replace a composition mix on the current timeline without restarting transport.
+    ReplaceAudio {
+        source: PlaybackSource,
+    },
     /// Performance 模式固定装入一侧 Deck；不会替换或回收另一侧。
     LoadDeck {
         deck: u8,
@@ -237,6 +244,15 @@ pub enum PlaybackCommand {
     },
     SetQueue {
         sources: Vec<PlaybackSource>,
+    },
+    /// Enrich an accepted source after async detail returns without rebuilding its decoder.
+    UpdateBeatGrid {
+        #[serde(rename = "trackId")]
+        track_id: i64,
+        #[serde(default, rename = "intentId")]
+        intent_id: u64,
+        #[serde(default, rename = "beatGrid")]
+        beat_grid: Option<PlaybackBeatGrid>,
     },
     Play,
     Pause,

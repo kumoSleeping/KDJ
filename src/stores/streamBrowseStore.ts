@@ -8,6 +8,11 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import type { StreamPlaylistRecentEntry } from "../lib/streamPlaylistOrder";
+import {
+  resolveForegroundStreamStartup,
+  type ForegroundStreamStartup,
+} from "../lib/streamStartup";
+import type { WorkspaceSession } from "../lib/workspaceSession";
 import type { Account, Platform, StreamPlaylist } from "../types";
 
 export const STREAM_BROWSE_PLATFORMS = [
@@ -110,11 +115,21 @@ interface StreamBrowseStore {
   recentlyOpened: PlatformMap<StreamPlaylistRecentEntry[]>;
   /** 最近点开的远程歌单，仅用于侧栏高亮，不代表本地曲库选择。 */
   active: ActiveStreamPlaylist | null;
+  /** 启动前台在线歌单；只由账号匹配的 WorkspaceSession 产生。 */
+  startupForeground: ForegroundStreamStartup | null;
+  /** 账号目录缓存是否已在工作台首帧前完成批量恢复。 */
+  startupHydrated: boolean;
   accountKeys: PlatformMap<string | null>;
   cacheSignatures: PlatformMap<string | null>;
   updatedAt: PlatformMap<number>;
   /** 登出/换号期间让在途旧请求失效。 */
   revisions: PlatformMap<number>;
+
+  /** 一次读取全部持久缓存并一次提交，避免各平台在挂载后逐个弹进侧栏。 */
+  hydrateForStartup(
+    accounts: Account[],
+    session: WorkspaceSession,
+  ): ForegroundStreamStartup | null;
 
   /** 绑定 null 表示已确认登出；会清内存与该平台持久缓存。 */
   bindAccount(
@@ -182,27 +197,9 @@ export function streamAccountBinding(account: Account | undefined): StreamAccoun
       cacheSignature,
     };
   }
-  const nickname = account.nickname.trim();
-  const avatar = account.avatar.trim();
-  const identityFields = [nickname, avatar];
-  if (
-    identityFields.some(Boolean) &&
-    identityFields.every((field) => field.length <= MAX_IDENTITY_FIELD_LENGTH)
-  ) {
-    // 兼容缺少 account_key 的旧后端。detail 是状态文案：同一网易云账号在
-    // 正常/unknown 时可能从“普通用户”变成动态网络错误，不能参与持久身份。
-    const cacheSignature = JSON.stringify([
-      "account-v2-profile",
-      account.platform,
-      nickname,
-      avatar,
-    ]);
-    return {
-      sessionKey: `persistent:${cacheSignature}`,
-      cacheSignature,
-    };
-  }
-
+  // 昵称和头像都不是账号主键：两个人可以同名，同一账号也会改头像。缺少后端
+  // account_key 时只允许本次进程内浏览，绝不能凭资料相似恢复上一份私人目录，
+  // 更不能据此自动打开上次的在线歌单。
   let sessionKey = volatileAccountKeys.get(account);
   if (!sessionKey) {
     volatileAccountSerial += 1;
@@ -561,10 +558,114 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
   sectionExpanded: initialBrowseLayout.sectionExpanded,
   recentlyOpened: platformMap(() => []),
   active: null,
+  startupForeground: null,
+  startupHydrated: false,
   accountKeys: platformMap(() => null),
   cacheSignatures: platformMap(() => null),
   updatedAt: platformMap(() => 0),
   revisions: platformMap(() => 0),
+
+  hydrateForStartup(accounts, session) {
+    // readPersistedCache/readPersistedRecents both validate and sanitize their whole payload.
+    // Read each once here; calling bindAccount six times would parse the same JSON six times and
+    // publish six intermediate trees, which is the startup pop this path exists to remove.
+    const persistedCache = readPersistedCache();
+    const persistedRecents = readPersistedRecents();
+    let cacheDirty = false;
+    let recentsDirty = false;
+    const accountKeys = platformMap<string | null>(() => null);
+    const cacheSignatures = platformMap<string | null>(() => null);
+    const playlists = platformMap<StreamPlaylist[] | null>(() => null);
+    const recentlyOpened = platformMap<StreamPlaylistRecentEntry[]>(() => []);
+    const updatedAt = platformMap(() => 0);
+
+    for (const platform of STREAM_BROWSE_PLATFORMS) {
+      const account = accounts.find((candidate) => candidate.platform === platform);
+      const binding = streamAccountBinding(account);
+      if (!binding) {
+        if (persistedCache.platforms[platform]) {
+          delete persistedCache.platforms[platform];
+          cacheDirty = true;
+        }
+        if (persistedRecents.platforms[platform]) {
+          delete persistedRecents.platforms[platform];
+          recentsDirty = true;
+        }
+        continue;
+      }
+
+      accountKeys[platform] = binding.sessionKey;
+      cacheSignatures[platform] = binding.cacheSignature;
+      if (!binding.cacheSignature) {
+        if (persistedCache.platforms[platform]) {
+          delete persistedCache.platforms[platform];
+          cacheDirty = true;
+        }
+        if (persistedRecents.platforms[platform]) {
+          delete persistedRecents.platforms[platform];
+          recentsDirty = true;
+        }
+        continue;
+      }
+
+      const cached = persistedCache.platforms[platform];
+      if (cached?.accountSignature === binding.cacheSignature) {
+        playlists[platform] = cached.playlists;
+        updatedAt[platform] = cached.updatedAt;
+      } else if (cached) {
+        delete persistedCache.platforms[platform];
+        cacheDirty = true;
+      }
+
+      const recent = persistedRecents.platforms[platform];
+      if (recent?.accountSignature === binding.cacheSignature) {
+        recentlyOpened[platform] = recent.entries;
+      } else if (recent) {
+        delete persistedRecents.platforms[platform];
+        recentsDirty = true;
+      }
+    }
+
+    if (cacheDirty) writePersistedCache(persistedCache);
+    if (recentsDirty) writePersistedRecents(persistedRecents);
+
+    const startupForeground = resolveForegroundStreamStartup(session, accountKeys);
+    const before = get();
+    const expanded = { ...before.expanded };
+    for (const platform of STREAM_BROWSE_PLATFORMS) {
+      // An expanded root without a trustworthy directory is visually indistinguishable from an
+      // empty account. Collapse it; a deliberate click will load exactly that provider.
+      if (playlists[platform] === null) expanded[platform] = false;
+    }
+    if (startupForeground) expanded[startupForeground.playlist.platform] = true;
+    writePersistedBrowseLayout({ expanded, sectionExpanded: before.sectionExpanded });
+
+    set((state) => ({
+      playlists,
+      loading: platformMap(() => false),
+      errors: platformMap(() => ""),
+      expanded,
+      recentlyOpened,
+      active: startupForeground
+        ? {
+            platform: startupForeground.playlist.platform as StreamBrowsePlatform,
+            key: startupForeground.playlist.key,
+          }
+        : null,
+      startupForeground,
+      startupHydrated: true,
+      accountKeys,
+      cacheSignatures,
+      updatedAt,
+      revisions: platformMap((platform) =>
+        state.accountKeys[platform] === accountKeys[platform] &&
+        state.cacheSignatures[platform] === cacheSignatures[platform]
+          ? state.revisions[platform]
+          : state.revisions[platform] + 1,
+      ),
+    }));
+    return startupForeground;
+  },
 
   async bindAccount(platform, binding) {
     const before = get();
@@ -574,17 +675,16 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
       before.accountKeys[platform] !== nextKey ||
       before.cacheSignatures[platform] !== nextCacheSignature;
 
-    if (!binding) {
-      // 只有 FolderTree 已确认账号 missing/expired（或 bootstrap 明确无此账号）才走这里。
-      removePersistedPlatform(platform);
-      removePersistedPlatformRecents(platform);
-    } else if (!nextCacheSignature) {
-      // 无法证明账号身份时宁可不缓存，也不能冒险展示另一账号的私人列表。
-      removePersistedPlatform(platform);
-      removePersistedPlatformRecents(platform);
-    }
-
     if (changed) {
+      if (!binding) {
+        // 只有 FolderTree 已确认账号 missing/expired（或 bootstrap 明确无此账号）才走这里。
+        removePersistedPlatform(platform);
+        removePersistedPlatformRecents(platform);
+      } else if (!nextCacheSignature) {
+        // 无法证明账号身份时宁可不缓存，也不能冒险展示另一账号的私人列表。
+        removePersistedPlatform(platform);
+        removePersistedPlatformRecents(platform);
+      }
       const persisted = nextCacheSignature
         ? matchingPersistedPlatform(platform, nextCacheSignature)
         : null;
@@ -616,6 +716,10 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
           [platform]: state.revisions[platform] + 1,
         },
         active: state.active?.platform === platform ? null : state.active,
+        startupForeground:
+          state.startupForeground?.playlist.platform === platform
+            ? null
+            : state.startupForeground,
       }));
     }
 
@@ -720,7 +824,7 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
 
   setActive(active) {
     if (!active) {
-      set({ active: null });
+      set({ active: null, startupForeground: null });
       return;
     }
     const snapshot = get();
@@ -739,6 +843,11 @@ export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
     ].slice(0, MAX_RECENT_PLAYLISTS);
     set((state) => ({
       active: { ...active, key },
+      startupForeground:
+        state.startupForeground?.playlist.platform === active.platform &&
+        state.startupForeground.playlist.key === key
+          ? state.startupForeground
+          : null,
       recentlyOpened: {
         ...state.recentlyOpened,
         [active.platform]: entries,

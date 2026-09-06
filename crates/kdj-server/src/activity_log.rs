@@ -4,7 +4,7 @@
 //! 真实平台请求，以及分析的警告/错误。前端先做短时去重并批量提交；这里再通过
 //! 有界通道顺序落盘，业务请求永远不会等待日志磁盘 I/O。
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -30,6 +30,8 @@ const LOAD_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 const WRITER_QUEUE_CAPACITY: usize = 256;
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const CLEANUP_AFTER_WRITTEN_BYTES: u64 = 8 * 1024 * 1024;
+/// 前端把 ID 当作 JavaScript number；超过 2^53 - 1 后将失去整数精度。
+const MAX_SAFE_ENTRY_ID: u64 = (1_u64 << 53) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,13 +161,8 @@ impl ActivityLog {
     pub fn new(data_dir: PathBuf) -> Result<Self> {
         let initial_settings = load_settings(&data_dir);
         cleanup_files(&data_dir, initial_settings)?;
-        let loaded = load_recent_entries(&data_dir)?;
-        let next_id = loaded
-            .iter()
-            .map(|entry| entry.id)
-            .max()
-            .unwrap_or_default()
-            .saturating_add(1);
+        let loaded = load_recent_entries(&data_dir);
+        let loaded_entries = loaded.len();
         let entries = Arc::new(Mutex::new(loaded.into()));
         let settings = Arc::new(RwLock::new(initial_settings));
         let (writer, receiver) = mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
@@ -174,11 +171,17 @@ impl ActivityLog {
             .name("kdj-activity-log".into())
             .spawn(move || writer_loop(&writer_data_dir, initial_settings, receiver))
             .context("启动日志写入线程失败")?;
+        tracing::debug!(
+            loaded_entries,
+            retention_days = initial_settings.retention_days,
+            queue_capacity = WRITER_QUEUE_CAPACITY,
+            "用户活动日志已就绪"
+        );
         Ok(Self {
             data_dir: Arc::new(data_dir),
             entries,
             settings,
-            next_id: Arc::new(AtomicU64::new(next_id)),
+            next_id: Arc::new(AtomicU64::new(random_entry_id())),
             dropped: Arc::new(AtomicU64::new(0)),
             writer,
         })
@@ -223,12 +226,14 @@ impl ActivityLog {
             if draft.category == ActivityCategory::Analysis && draft.level == ActivityLevel::Info {
                 continue;
             }
-            let action = clean_text(&draft.action, MAX_ACTION_CHARS);
+            let action = redact_sensitive(clean_text(&draft.action, MAX_ACTION_CHARS));
             if action.is_empty() {
                 continue;
             }
             let entry = ActivityLogEntry {
-                id: self.next_id.fetch_add(1, Ordering::Relaxed),
+                // 从随机种子开始的 53-bit 序列避免两个 KDJ 实例或热重启从同一个
+                // 磁盘最大值续写；同一进程内保持严格递增，前端也能精确表示。
+                id: next_entry_id(&self.next_id),
                 timestamp: now.clone(),
                 category: draft.category,
                 level: draft.level,
@@ -262,8 +267,21 @@ impl ActivityLog {
                 .try_send(WriterCommand::Append(batch.clone()))
                 .is_err()
             {
-                self.dropped
-                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
+                let dropped = batch.len() as u64;
+                let previous = self.dropped.fetch_add(dropped, Ordering::Relaxed);
+                let total = previous.saturating_add(dropped);
+                let next_report = previous
+                    .saturating_add(1)
+                    .checked_next_power_of_two()
+                    .unwrap_or(u64::MAX);
+                if previous == 0 || total >= next_report {
+                    tracing::warn!(
+                        dropped,
+                        dropped_total = total,
+                        queue_capacity = WRITER_QUEUE_CAPACITY,
+                        "用户活动日志写入队列已满，记录只保留在本次运行的内存中"
+                    );
+                }
             }
         }
         batch.len()
@@ -404,11 +422,59 @@ fn clean_text(raw: &str, max_chars: usize) -> String {
         .to_string()
 }
 
+fn random_entry_id() -> u64 {
+    (rand::random::<u64>() & MAX_SAFE_ENTRY_ID).max(1)
+}
+
+fn next_entry_id(counter: &AtomicU64) -> u64 {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(if current >= MAX_SAFE_ENTRY_ID {
+                1
+            } else {
+                current + 1
+            })
+        })
+        .unwrap_or_else(|current| current)
+}
+
 fn redact_sensitive(value: String) -> String {
     let lower = value.to_ascii_lowercase();
-    if ["authorization", "cookie", "password", "token=", "secret="]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    if [
+        "http://",
+        "https://",
+        "authorization",
+        "bearer ",
+        "cookie",
+        "password",
+        "passwd",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "media_token",
+        "control_token",
+        "client_secret",
+        "token=",
+        "token:",
+        "token\"",
+        "secret=",
+        "secret:",
+        "secret\"",
+        "refresh_key",
+        "musickey",
+        "sapisid",
+        "po_token",
+        "visitor_data",
+        "file://",
+        "/users/",
+        "/home/",
+        "/volumes/",
+        "/tmp/",
+        "/private/var/",
+        "\\users\\",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
     {
         "[敏感信息已隐藏]".into()
     } else {
@@ -520,28 +586,53 @@ fn writer_loop(
     }
 }
 
-fn current_log_path(data_dir: &Path) -> PathBuf {
+fn regular_file_len(path: &Path) -> Result<Option<u64>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(Some(metadata.len())),
+        Ok(_) => bail!("拒绝使用非普通活动日志文件"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn current_log_path(data_dir: &Path) -> Result<PathBuf> {
     let directory = data_dir.join(LOG_DIR_NAME);
     let date = Local::now().format("%Y-%m-%d");
-    let base = directory.join(format!("activity-{date}.jsonl"));
-    if fs::metadata(&base).is_ok_and(|metadata| metadata.len() >= MAX_LOG_FILE_BYTES) {
+    // 一个进程一份文件：Dev 热重启或误开两个 KDJ 实例时，不能让两个 writer
+    // 同时 append 同一份 JSONL，否则即使 ID 不重复，半行交错也会破坏记录。
+    let process = std::process::id();
+    let base = directory.join(format!("activity-{date}-{process}.jsonl"));
+    if regular_file_len(&base)?.is_some_and(|length| length >= MAX_LOG_FILE_BYTES) {
         for index in 1..10_000 {
-            let candidate = directory.join(format!("activity-{date}-{index}.jsonl"));
-            if !candidate.exists()
-                || fs::metadata(&candidate)
-                    .is_ok_and(|metadata| metadata.len() < MAX_LOG_FILE_BYTES)
-            {
-                return candidate;
+            let candidate = directory.join(format!("activity-{date}-{process}-{index}.jsonl"));
+            match regular_file_len(&candidate)? {
+                None => return Ok(candidate),
+                Some(length) if length < MAX_LOG_FILE_BYTES => return Ok(candidate),
+                Some(_) => {}
             }
         }
     }
-    base
+    Ok(base)
+}
+
+fn ensure_log_directory(data_dir: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(data_dir)?;
+    let directory = data_dir.join(LOG_DIR_NAME);
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => bail!("拒绝使用非普通活动日志目录"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&directory)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    protect_directory(&directory);
+    Ok(directory)
 }
 
 fn append_entries(data_dir: &Path, entries: &[ActivityLogEntry]) -> Result<u64> {
-    let directory = data_dir.join(LOG_DIR_NAME);
-    fs::create_dir_all(&directory)?;
-    let path = current_log_path(data_dir);
+    ensure_log_directory(data_dir)?;
+    let path = current_log_path(data_dir)?;
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -569,6 +660,14 @@ fn protect_file(path: &Path) {
     }
 }
 
+fn protect_directory(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+}
+
 fn is_activity_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension == "jsonl")
@@ -579,15 +678,35 @@ fn is_activity_file(path: &Path) -> bool {
 }
 
 fn activity_files(data_dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(data_dir.join(LOG_DIR_NAME)) else {
+    let directory = data_dir.join(LOG_DIR_NAME);
+    let Ok(metadata) = fs::symlink_metadata(&directory) else {
+        return Vec::new();
+    };
+    if !metadata.file_type().is_dir() {
+        tracing::warn!("活动日志目录不是普通目录，已拒绝读取");
+        return Vec::new();
+    }
+    protect_directory(&directory);
+    let Ok(entries) = fs::read_dir(directory) else {
         return Vec::new();
     };
     let mut paths = entries
         .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .map(|entry| entry.path())
         .filter(|path| is_activity_file(path))
         .collect::<Vec<_>>();
-    paths.sort();
+    // 文件名中包含 PID，不能再依赖字典序判断新旧；读取最近窗口时按真实修改时间。
+    paths.sort_by(|left, right| {
+        let modified = |path: &PathBuf| {
+            fs::symlink_metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        };
+        modified(left)
+            .cmp(&modified(right))
+            .then_with(|| left.cmp(right))
+    });
     paths
 }
 
@@ -596,7 +715,10 @@ fn cleanup_files(data_dir: &Path, settings: ActivityLogSettings) -> Result<()> {
     let mut files = activity_files(data_dir)
         .into_iter()
         .filter_map(|path| {
-            let metadata = fs::metadata(&path).ok()?;
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            if !metadata.file_type().is_file() {
+                return None;
+            }
             Some((
                 path,
                 metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
@@ -647,33 +769,95 @@ fn clear_files(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn load_recent_entries(data_dir: &Path) -> Result<Vec<ActivityLogEntry>> {
+fn load_recent_entries(data_dir: &Path) -> Vec<ActivityLogEntry> {
     let mut loaded = Vec::new();
     for path in activity_files(data_dir).into_iter().rev() {
-        let file = File::open(&path)?;
-        let length = file.metadata()?.len();
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("activity-unknown.jsonl");
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(file = name, %error, "活动日志文件无法打开，已跳过");
+                continue;
+            }
+        };
+        let length = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                tracing::warn!(file = name, %error, "活动日志元数据无法读取，已跳过");
+                continue;
+            }
+        };
         let start = length.saturating_sub(LOAD_TAIL_BYTES);
         let mut reader = BufReader::new(file);
         if start > 0 {
-            reader.seek(SeekFrom::Start(start))?;
+            if let Err(error) = reader.seek(SeekFrom::Start(start)) {
+                tracing::warn!(file = name, %error, "活动日志尾部无法定位，已跳过");
+                continue;
+            }
             let mut partial = String::new();
-            reader.read_line(&mut partial)?;
+            if let Err(error) = reader.read_line(&mut partial) {
+                tracing::warn!(file = name, %error, "活动日志尾部无法读取，已跳过");
+                continue;
+            }
         }
-        let mut file_entries = reader
-            .lines()
-            .map_while(std::result::Result::ok)
-            .filter_map(|line| serde_json::from_str::<ActivityLogEntry>(&line).ok())
-            .collect::<Vec<_>>();
+        let mut invalid_lines = 0_u64;
+        let mut unreadable_lines = 0_u64;
+        let mut file_entries = Vec::new();
+        for line in reader.lines() {
+            match line {
+                Ok(line) => match serde_json::from_str::<ActivityLogEntry>(&line) {
+                    Ok(entry) => file_entries.push(entry),
+                    Err(_) => invalid_lines = invalid_lines.saturating_add(1),
+                },
+                Err(_) => unreadable_lines = unreadable_lines.saturating_add(1),
+            }
+        }
+        if invalid_lines > 0 || unreadable_lines > 0 {
+            tracing::warn!(
+                file = name,
+                invalid_lines,
+                unreadable_lines,
+                "活动日志包含损坏记录，已跳过"
+            );
+        }
         loaded.append(&mut file_entries);
         if loaded.len() >= MEMORY_ENTRY_LIMIT {
             break;
         }
     }
-    loaded.sort_by_key(|entry| entry.id);
+    // ID 为跨进程随机值，只承担稳定身份；展示顺序必须由真实时间决定。
+    loaded.sort_by(|left, right| {
+        let timestamp = |entry: &ActivityLogEntry| {
+            DateTime::parse_from_rfc3339(&entry.timestamp)
+                .map(|value| value.timestamp_millis())
+                .unwrap_or(i64::MIN)
+        };
+        timestamp(left)
+            .cmp(&timestamp(right))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut seen = HashSet::with_capacity(loaded.len());
+    let mut repaired_ids = 0_u64;
+    for entry in &mut loaded {
+        if entry.id == 0 || entry.id > MAX_SAFE_ENTRY_ID || !seen.insert(entry.id) {
+            let mut replacement = random_entry_id();
+            while !seen.insert(replacement) {
+                replacement = random_entry_id();
+            }
+            entry.id = replacement;
+            repaired_ids = repaired_ids.saturating_add(1);
+        }
+    }
+    if repaired_ids > 0 {
+        tracing::warn!(repaired_ids, "活动日志存在重复或越界 ID，已在内存中修复");
+    }
     if loaded.len() > MEMORY_ENTRY_LIMIT {
         loaded.drain(..loaded.len() - MEMORY_ENTRY_LIMIT);
     }
-    Ok(loaded)
+    loaded
 }
 
 fn scan_log_files(data_dir: &Path) -> ActivityDiskStats {
@@ -722,6 +906,15 @@ mod tests {
         assert_eq!(overview.entries[0].detail, "[敏感信息已隐藏]");
         assert_eq!(overview.entries[0].target, "music.163.com");
         assert_eq!(overview.network_last_minute, 2);
+        log.flush().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(log.log_dir()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
         log.clear().unwrap();
         assert!(log.overview(None, 20).entries.is_empty());
         assert_eq!(log.disk_stats().bytes, 0);
@@ -734,6 +927,143 @@ mod tests {
             clean_target("https://user:password@example.com/private?q=secret#part"),
             "example.com"
         );
+    }
+
+    #[test]
+    fn sensitive_markers_are_redacted_from_all_free_text_fields() {
+        let root = scratch("redaction");
+        let log = ActivityLog::new(root.clone()).unwrap();
+        assert!(log.record(ActivityLogDraft {
+            category: ActivityCategory::Network,
+            level: ActivityLevel::Error,
+            action: "Bearer should-not-survive".into(),
+            detail: r#"{"access_token":"should-not-survive"}"#.into(),
+            target: "SAPISID=should-not-survive".into(),
+            status: Some(401),
+            duration_ms: Some(5),
+            count: 1,
+        }));
+        let entry = log.overview(None, 1).entries.pop().unwrap();
+        assert_eq!(entry.action, "[敏感信息已隐藏]");
+        assert_eq!(entry.detail, "[敏感信息已隐藏]");
+        assert_eq!(entry.target, "[敏感信息已隐藏]");
+
+        assert!(log.record(ActivityLogDraft {
+            category: ActivityCategory::Network,
+            level: ActivityLevel::Error,
+            action: "媒体请求失败".into(),
+            detail: "https://media.example/audio?sig=should-not-survive".into(),
+            target: "https://user:password@example.com/private?token=hidden".into(),
+            status: Some(502),
+            duration_ms: Some(10),
+            count: 1,
+        }));
+        let entry = log.overview(None, 1).entries.pop().unwrap();
+        assert_eq!(entry.detail, "[敏感信息已隐藏]");
+        assert_eq!(entry.target, "example.com");
+
+        assert!(log.record(ActivityLogDraft {
+            category: ActivityCategory::User,
+            level: ActivityLevel::Error,
+            action: "本地文件操作失败".into(),
+            detail: "/Users/private/Music/secret.flac 写入失败".into(),
+            target: String::new(),
+            status: None,
+            duration_ms: None,
+            count: 1,
+        }));
+        let entry = log.overview(None, 1).entries.pop().unwrap();
+        assert_eq!(entry.detail, "[敏感信息已隐藏]");
+        log.clear().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn corrupt_lines_do_not_prevent_activity_log_startup() {
+        let root = scratch("corrupt-lines");
+        let directory = root.join(LOG_DIR_NAME);
+        fs::create_dir_all(&directory).unwrap();
+        let valid = ActivityLogEntry {
+            id: 7,
+            timestamp: "2026-09-01T00:00:00+08:00".into(),
+            category: ActivityCategory::User,
+            level: ActivityLevel::Warn,
+            action: "可恢复记录".into(),
+            detail: String::new(),
+            target: String::new(),
+            status: None,
+            duration_ms: None,
+            count: 1,
+        };
+        let duplicate = ActivityLogEntry {
+            timestamp: "2026-09-01T00:00:01+08:00".into(),
+            action: "较新的重复 ID 记录".into(),
+            ..valid.clone()
+        };
+        let body = format!(
+            "not-json\n{}\n{}\n",
+            serde_json::to_string(&duplicate).unwrap(),
+            serde_json::to_string(&valid).unwrap()
+        );
+        fs::write(directory.join("activity-corrupt.jsonl"), body).unwrap();
+
+        let log = ActivityLog::new(root.clone()).unwrap();
+        let entries = log.overview(None, 20).entries;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].action, "较新的重复 ID 记录");
+        assert_ne!(entries[0].id, entries[1].id);
+        assert!(entries.iter().all(|entry| entry.id <= MAX_SAFE_ENTRY_ID));
+        log.clear().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn entry_id_sequence_stays_within_javascript_integer_range() {
+        let counter = AtomicU64::new(MAX_SAFE_ENTRY_ID);
+        assert_eq!(next_entry_id(&counter), MAX_SAFE_ENTRY_ID);
+        assert_eq!(next_entry_id(&counter), 1);
+        assert_eq!(next_entry_id(&counter), 2);
+        assert!((1..=MAX_SAFE_ENTRY_ID).contains(&random_entry_id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_log_targets_are_never_followed() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("symlink-file");
+        let directory = root.join(LOG_DIR_NAME);
+        fs::create_dir_all(&directory).unwrap();
+        let victim = root.join("victim.txt");
+        fs::write(&victim, b"unchanged").unwrap();
+        let log_path = current_log_path(&root).unwrap();
+        symlink(&victim, &log_path).unwrap();
+        let entry = ActivityLogEntry {
+            id: 1,
+            timestamp: Local::now().to_rfc3339(),
+            category: ActivityCategory::User,
+            level: ActivityLevel::Warn,
+            action: "测试".into(),
+            detail: String::new(),
+            target: String::new(),
+            status: None,
+            duration_ms: None,
+            count: 1,
+        };
+        assert!(append_entries(&root, &[entry]).is_err());
+        assert_eq!(fs::read(&victim).unwrap(), b"unchanged");
+        assert!(activity_files(&root).is_empty());
+        let _ = fs::remove_dir_all(root);
+
+        let root = scratch("symlink-directory");
+        let outside = scratch("symlink-directory-outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join(LOG_DIR_NAME)).unwrap();
+        assert!(ensure_log_directory(&root).is_err());
+        assert!(activity_files(&root).is_empty());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[test]

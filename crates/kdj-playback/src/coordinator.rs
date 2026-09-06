@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use kdj_analysis::waveform::{
@@ -42,6 +42,123 @@ use crate::platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory};
 use crate::remote_source::{is_loopback_http_url, HttpRangeSource};
 
 const ACTOR_TICK: Duration = Duration::from_millis(10);
+static ACTIVE_STREAM_WORKERS: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_SCRATCH_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+type LatestWorkerJob = Box<dyn FnOnce() + Send + 'static>;
+
+struct LatestJobSlot {
+    pending: Mutex<Option<LatestWorkerJob>>,
+    wake: Condvar,
+}
+
+impl LatestJobSlot {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(None),
+            wake: Condvar::new(),
+        }
+    }
+
+    /// Capacity one with replacement: a job that has not started never survives a newer intent.
+    fn replace(&self, job: LatestWorkerJob) -> Result<(), String> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| "播放工作邮箱已损坏".to_string())?;
+        *pending = Some(job);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    fn wait(&self) -> Option<LatestWorkerJob> {
+        let mut pending = self.pending.lock().ok()?;
+        while pending.is_none() {
+            pending = self.wake.wait(pending).ok()?;
+        }
+        pending.take()
+    }
+}
+
+/// A physical Deck can own one audible decoder and one shadow replacement. Two persistent
+/// workers per Deck therefore cover every valid state while keeping rapid replacement bounded.
+/// Scratch is optional and uses one persistent worker per Deck; it starts the next cache only
+/// after the old activated source retires.
+struct LatestDeckWorkerPool {
+    slots: [Arc<LatestJobSlot>; 2],
+}
+
+impl LatestDeckWorkerPool {
+    fn new(prefix: &'static str, workers_per_deck: usize) -> Result<Self, String> {
+        let slots: [Arc<LatestJobSlot>; 2] =
+            std::array::from_fn(|_| Arc::new(LatestJobSlot::new()));
+        for (deck_index, slot) in slots.iter().enumerate() {
+            for worker_index in 0..workers_per_deck {
+                let slot = Arc::clone(slot);
+                std::thread::Builder::new()
+                    .name(format!("{prefix}-{deck_index}-{worker_index}"))
+                    .spawn(move || {
+                        while let Some(job) = slot.wait() {
+                            job();
+                        }
+                    })
+                    .map_err(|error| format!("启动 {prefix} 固定工作线程失败：{error}"))?;
+            }
+        }
+        Ok(Self { slots })
+    }
+
+    fn submit(&self, deck: DeckId, job: LatestWorkerJob) -> Result<(), String> {
+        self.slots[deck as usize].replace(job)
+    }
+}
+
+static STREAM_WORKER_POOL: OnceLock<Result<LatestDeckWorkerPool, String>> = OnceLock::new();
+static SCRATCH_WORKER_POOL: OnceLock<Result<LatestDeckWorkerPool, String>> = OnceLock::new();
+
+fn stream_worker_pool() -> Result<&'static LatestDeckWorkerPool, String> {
+    STREAM_WORKER_POOL
+        .get_or_init(|| LatestDeckWorkerPool::new("kdj-stream", 2))
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn scratch_worker_pool() -> Result<&'static LatestDeckWorkerPool, String> {
+    SCRATCH_WORKER_POOL
+        .get_or_init(|| LatestDeckWorkerPool::new("kdj-scratch", 1))
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+struct ActiveStreamWorkerGuard;
+
+impl ActiveStreamWorkerGuard {
+    fn enter() -> Self {
+        ACTIVE_STREAM_WORKERS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for ActiveStreamWorkerGuard {
+    fn drop(&mut self) {
+        ACTIVE_STREAM_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct ActiveScratchWorkerGuard;
+
+impl ActiveScratchWorkerGuard {
+    fn enter() -> Self {
+        ACTIVE_SCRATCH_WORKERS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for ActiveScratchWorkerGuard {
+    fn drop(&mut self) {
+        ACTIVE_SCRATCH_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 /// Seeking 时加密轮询，尽快提权已就绪的 shadow Deck（不降低预缓冲）。
 const SEEK_ACTOR_TICK: Duration = Duration::from_millis(1);
 const STATE_INTERVAL: Duration = Duration::from_millis(100);
@@ -1035,6 +1152,7 @@ enum Activation {
     Hard,
     Seek,
     Transition(PendingTransition),
+    ReplaceAudio,
 }
 
 #[derive(Debug)]
@@ -1148,6 +1266,14 @@ impl Default for DeckMixer {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PendingAudioHandoff {
+    source_id: u64,
+    track_id: i64,
+    intent_id: u64,
+    submitted_at: Instant,
+}
+
 struct Actor {
     sender: Sender<Request>,
     receiver: Receiver<Request>,
@@ -1172,6 +1298,9 @@ struct Actor {
     clock_emit: Option<ClockEmitter>,
     last_clock_tick: Instant,
     latest_audio: kdj_player::TransportSnapshot,
+    /// Install commands are asynchronous with respect to the real-time callback. Keep the
+    /// identity until a transport snapshot proves that callback consumed the new source.
+    pending_audio_handoffs: [Option<PendingAudioHandoff>; 2],
     sync_group: Option<NativeSyncGroup>,
     volume: f32,
     eq: (f32, f32),
@@ -1190,12 +1319,17 @@ struct Actor {
     /// Negative requested Deck positions waiting for a frame-0 source to install.
     pending_preroll: [Option<f64>; 2],
     jog_nudges: [Option<JogNudge>; 2],
+    /// The single-track Manager owns one session mixer even though decoding alternates between
+    /// physical Decks. Performance mode keeps using the independent per-Deck values below.
+    manager_mixer: DeckMixer,
     deck_mixers: [DeckMixer; 2],
     stem_pool: Option<(PathBuf, Arc<StemInferencePool>, StemPoolGuard)>,
     observed_stem_underruns: [u64; 2],
     stem_recoveries: [Option<StemRecovery>; 2],
     shutdown: bool,
     queue: Vec<PlaybackSource>,
+    /// Manager source replacement is latest-wins; Deck/manual commands keep their own ordering.
+    latest_manager_intent: u64,
 }
 
 impl Actor {
@@ -1229,6 +1363,7 @@ impl Actor {
             clock_emit: None,
             last_clock_tick: Instant::now(),
             latest_audio: kdj_player::TransportSnapshot::default(),
+            pending_audio_handoffs: [None, None],
             sync_group: None,
             volume: 1.0,
             eq: (0.0, 0.0),
@@ -1244,12 +1379,14 @@ impl Actor {
             scratch_gesture_sequences: [0; 2],
             pending_preroll: [None, None],
             jog_nudges: [None, None],
+            manager_mixer: DeckMixer::default(),
             deck_mixers: [DeckMixer::default(); 2],
             stem_pool: None,
             observed_stem_underruns: stem_output_underruns_by_deck(),
             stem_recoveries: [None, None],
             shutdown: false,
             queue: Vec::new(),
+            latest_manager_intent: 0,
         };
         if let Err(error) = actor.open_output() {
             actor.fail(error);
@@ -1437,7 +1574,26 @@ impl Actor {
                         // intent and return that still-installed source to audible playback.
                         self.release_scratch_hold(deck);
                     }
-                    if activation.is_none() && self.decks[deck as usize].is_some() {
+                    if failed.is_none() {
+                        // No pending replacement means the installed decoder itself died.
+                        // Retire it so Play/Load cannot reuse its exhausted ring as a live source.
+                        self.invalidate(deck);
+                        self.decks[deck as usize] = None;
+                        if let Some(player) = self.player.as_mut() {
+                            let _ = player.clear(deck);
+                        }
+                        self.manual_desired_playing[deck as usize] = false;
+                        self.state.decks[deck as usize].is_playing = false;
+                        self.state.decks[deck as usize].desired_playing = false;
+                        self.state.decks[deck as usize].buffering = false;
+                        if deck == self.front {
+                            self.fail(error);
+                        } else {
+                            self.state.prepared_track_id = None;
+                            self.state.error = error;
+                        }
+                    } else if (activation.is_none() || matches!(activation, Some(Activation::ReplaceAudio)))
+                        && self.decks[deck as usize].is_some() {
                         self.state.decks[deck as usize].buffering = false;
                         self.state.buffering = false;
                         if failed_stem {
@@ -1467,6 +1623,10 @@ impl Actor {
                             // runtime if its replacement decode fails.
                             self.state.error = format!("音频模式切换失败，已保留当前声音：{error}");
                         }
+                    } else if matches!(activation, Some(Activation::Hard))
+                        && self.decks[self.front as usize].is_some()
+                    {
+                        self.restore_audible_manager_deck(error);
                     } else if activation.is_some() || deck == self.front {
                         self.fail(error);
                     } else {
@@ -1510,10 +1670,32 @@ impl Actor {
                 self.load(source)
             }
             PlaybackCommand::Prepare { source } => self.prepare(source),
+            PlaybackCommand::ReplaceAudio { source } => self.replace_audio(source),
             PlaybackCommand::LoadDeck { deck, source } => self.load_deck(deck, source),
             PlaybackCommand::SetQueue { sources } => {
                 self.queue = sources;
                 self.prewarm_queue()
+            }
+            PlaybackCommand::UpdateBeatGrid {
+                track_id,
+                intent_id,
+                beat_grid,
+            } => {
+                for pending in self.pending.iter_mut().flatten() {
+                    if pending.request.track_id == track_id
+                        && (intent_id == 0 || pending.request.intent_id == intent_id)
+                    {
+                        pending.request.beat_grid = beat_grid.clone();
+                    }
+                }
+                for runtime in self.decks.iter_mut().flatten() {
+                    if runtime.request.track_id == track_id
+                        && (intent_id == 0 || runtime.request.intent_id == intent_id)
+                    {
+                        runtime.request.beat_grid = beat_grid.clone();
+                    }
+                }
+                Ok(())
             }
             PlaybackCommand::Play => self.set_playing(true),
             PlaybackCommand::Pause => self.set_playing(false),
@@ -1666,15 +1848,27 @@ impl Actor {
     }
 
     fn load(&mut self, mut source: PlaybackSource) -> Result<(), String> {
+        if source.intent_id > 0 {
+            if source.intent_id < self.latest_manager_intent {
+                tracing::debug!(
+                    event = "manager_load_superseded_before_prepare",
+                    track_id = source.track_id,
+                    intent_id = source.intent_id,
+                    latest_intent_id = self.latest_manager_intent,
+                );
+                return Ok(());
+            }
+            self.latest_manager_intent = source.intent_id;
+        }
         self.open_output()?;
         validate_source(&source)?;
         self.manual_mode = false;
         self.manual_desired_playing = [false; 2];
         self.settle_transition()?;
-        // `Load` is the manager/single-track boundary. A song selected there must never inherit
-        // a hidden Performance channel's EQ, fader, FX or source-scoped loop state. Reset both
-        // sides because the continuous player may choose either one as its next decode target.
-        // `LoadDeck`, by contrast, is the DJ boundary and preserves the addressed Deck controls.
+        // `Load` is the manager/single-track boundary. Tempo, pitch, FX and source-scoped loop/STEM
+        // state belong to the departing song, while GAIN/EQ/FILTER belong to the continuous Manager
+        // session. Restore that mixer to both sides because either one may be the next decode target.
+        // `LoadDeck`, by contrast, is the DJ boundary and preserves every addressed Deck control.
         self.reset_performance_controls_for_manager_load()?;
         // The Manager is a song-level player, not a physical DJ channel. A rate attached to an
         // old prediction/transition must never become the next song's visible TEMPO. Explicit
@@ -1712,6 +1906,36 @@ impl Actor {
             self.state = checkpoint;
         }
         result
+    }
+
+    fn replace_audio(&mut self, mut source: PlaybackSource) -> Result<(), String> {
+        validate_source(&source)?;
+        let deck = self.front;
+        let live = self.decks[deck as usize].as_ref()
+            .ok_or_else(|| "没有正在播放的作品".to_string())?;
+        if self.manual_mode || self.state.track_id != Some(source.track_id)
+            || live.request.track_id != source.track_id
+            || live.request.duration != source.duration
+            || live.request.stem_enabled || source.stem_enabled
+        {
+            return Err("试听音轨所属播放会话已变化".into());
+        }
+        source.intent_id = live.request.intent_id;
+        source.rate = live.request.rate;
+        source.autoplay = self.state.desired_playing;
+        if let Some(target) = self.pending.iter().position(|p| p.as_ref().is_some_and(|p|
+            matches!(p.activation, Some(Activation::Seek)) && p.request.track_id == source.track_id)) {
+            source.position = self.pending[target].as_ref().unwrap().request.position;
+            let deck = if target == 0 { DeckId::A } else { DeckId::B };
+            return self.start_stream(deck, source, Some(Activation::Seek));
+        }
+        source.position = self.live_deck_seconds(deck);
+        let clock = clocked_deck_seek(source.position, source.rate, source.duration, false, false);
+        // The installed stream remains audible. Read its device clock again at
+        // promotion so decoding time, pauses and buffering cannot move the picture.
+        self.start_stream(deck, source, Some(Activation::ReplaceAudio))?;
+        self.pending[deck as usize].as_mut().unwrap().clocked_seek = Some(clock);
+        Ok(())
     }
 
     fn prepare(&mut self, mut source: PlaybackSource) -> Result<(), String> {
@@ -2716,9 +2940,22 @@ impl Actor {
         mixer.mid_db = finite_clamp(mixer.mid_db, -48.0, 12.0, 0.0);
         mixer.high_db = finite_clamp(mixer.high_db, -48.0, 12.0, 0.0);
         mixer.filter = finite_clamp(mixer.filter, -1.0, 1.0, 0.0);
-        self.deck_mixers[deck as usize] = mixer;
-        if self.decks[deck as usize].is_some() {
-            self.apply_deck_mixer(deck, mixer)?;
+        if self.manual_mode {
+            self.deck_mixers[deck as usize] = mixer;
+            if self.decks[deck as usize].is_some() {
+                self.apply_deck_mixer(deck, mixer)?;
+            }
+            return Ok(());
+        }
+
+        // Manager controls are logical rather than physical. Mirror each move immediately so a
+        // seamless seek or the next song cannot expose the other decoder's stale channel strip.
+        self.manager_mixer = mixer;
+        for target in [DeckId::A, DeckId::B] {
+            self.deck_mixers[target as usize] = mixer;
+            if self.decks[target as usize].is_some() {
+                self.apply_deck_mixer(target, mixer)?;
+            }
         }
         Ok(())
     }
@@ -3321,7 +3558,10 @@ impl Actor {
             pending.tempo.set_pitch_semitones(0.0);
         }
         self.state.decks[index].pitch_semitones = 0.0;
-        self.set_deck_mixer(deck as u8, DeckMixer::default())?;
+        self.deck_mixers[index] = self.manager_mixer;
+        if self.decks[index].is_some() {
+            self.apply_deck_mixer(deck, self.manager_mixer)?;
+        }
         self.set_deck_fx(deck as u8, [PlaybackFxSlot::default(); 3], 0, 0.5)?;
         self.send(RtCommand::SetDeckPfl {
             deck,
@@ -3546,11 +3786,11 @@ impl Actor {
             return Ok(());
         }
         self.settle_transition()?;
-        let current = self.decks[self.front as usize]
-            .as_ref()
-            .ok_or_else(|| "当前没有可跳转曲目".to_string())?
-            .request
-            .clone();
+        let current = self.pending[self.front as usize].as_ref()
+            .filter(|pending| matches!(pending.activation, Some(Activation::ReplaceAudio)))
+            .map(|pending| pending.request.clone())
+            .or_else(|| self.decks[self.front as usize].as_ref().map(|live| live.request.clone()))
+            .ok_or_else(|| "当前没有可跳转曲目".to_string())?;
         let mut source = current;
         source.position = clamp_position(position, source.duration);
         source.autoplay = self.state.desired_playing;
@@ -3735,6 +3975,7 @@ impl Actor {
         request: PlaybackSource,
         activation: Option<Activation>,
     ) -> Result<(), String> {
+        let stream_workers = stream_worker_pool()?;
         let output_rate = self
             .player
             .as_ref()
@@ -3799,6 +4040,7 @@ impl Actor {
                 Some(Activation::Hard) => "hard",
                 Some(Activation::Seek) => "seek",
                 Some(Activation::Transition(_)) => "transition",
+                Some(Activation::ReplaceAudio) => "replace-audio",
                 None => "shadow",
             },
             "Deck stream worker generation created"
@@ -3833,7 +4075,8 @@ impl Actor {
             seek: seek.clone(),
             scratch_cache: Some(Arc::clone(&scratch_cache)),
         });
-        spawn_scratch_cache_worker(
+        schedule_scratch_cache_worker(
+            deck,
             request.clone(),
             Arc::clone(&scratch_cache),
             Arc::clone(&cancel),
@@ -3842,9 +4085,10 @@ impl Actor {
         let waveform_observer_cache = Arc::clone(&scratch_cache);
         let sender = self.sender.clone();
         let worker_cancel = Arc::clone(&cancel);
-        let stream_worker = std::thread::Builder::new()
-            .name(format!("kdj-stream-{}-{revision}", request.track_id))
-            .spawn(move || {
+        let stream_worker = stream_workers.submit(
+            deck,
+            Box::new(move || {
+                let _worker_guard = ActiveStreamWorkerGuard::enter();
                 let worker_request = request.clone();
                 let cancellation: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new({
                     let cancel = Arc::clone(&worker_cancel);
@@ -3980,9 +4224,7 @@ impl Actor {
                         format!("实时 STEM 无法启动：{error:#}")
                     } else {
                         match request.source_kind {
-                            PlaybackSourceKind::Local => format!(
-                                "本地音频文件无法播放，可能已被移动或所在设备已断开：{error:#}"
-                            ),
+                            PlaybackSourceKind::Local => format!("本地音频播放失败：{error:#}"),
                             PlaybackSourceKind::Remote => remote_playback_error(&error),
                         }
                     }
@@ -3992,11 +4234,12 @@ impl Actor {
                     revision,
                     result,
                 });
-            });
+            }),
+        );
         if let Err(error) = stream_worker {
             cancel_stream(&cancel);
             self.pending[deck as usize] = None;
-            return Err(format!("启动流式解码线程失败：{error}"));
+            return Err(format!("提交流式解码任务失败：{error}"));
         }
         Ok(())
     }
@@ -4183,6 +4426,63 @@ impl Actor {
             };
             if self.revisions[deck as usize] != pending.revision {
                 continue;
+            }
+            if matches!(pending.activation, Some(Activation::Hard))
+                && pending.request.intent_id > 0
+                && pending.request.intent_id != self.latest_manager_intent
+            {
+                tracing::debug!(
+                    event = "manager_load_superseded_before_activation",
+                    track_id = pending.request.track_id,
+                    intent_id = pending.request.intent_id,
+                    latest_intent_id = self.latest_manager_intent,
+                );
+                cancel_stream(&pending.cancel);
+                continue;
+            }
+            tracing::info!(
+                target: "kdj_playback_latency",
+                event = "decode_first_frame_ready",
+                deck = deck as u8,
+                track_id = pending.request.track_id,
+                intent_id = pending.request.intent_id,
+                revision = pending.revision,
+                buffered_frames = pending.source.buffered_frames(),
+                active_workers = ACTIVE_STREAM_WORKERS.load(Ordering::Acquire),
+                active_scratch_workers = ACTIVE_SCRATCH_WORKERS.load(Ordering::Acquire),
+                scratch_bytes = pending
+                    .scratch_cache
+                    .as_ref()
+                    .map_or(0, |cache| cache.allocated_bytes()),
+            );
+            if matches!(pending.activation, Some(Activation::ReplaceAudio)) {
+                let same_session = self.front == deck && self.state.track_id == Some(pending.request.track_id)
+                    && self.decks[deck as usize].as_ref().is_some_and(|live|
+                        live.request.track_id == pending.request.track_id
+                        && live.request.intent_id == pending.request.intent_id);
+                if !same_session {
+                    cancel_stream(&pending.cancel);
+                    self.bump_pending_revision(deck);
+                    continue;
+                }
+                let now = self.live_deck_seconds(deck);
+                let clocked = pending.clocked_seek.as_mut().unwrap();
+                let desired = (((now - clocked.position).max(0.) / f64::from(clocked.rate))
+                    * f64::from(pending.output_sample_rate)).round() as u64;
+                let remaining = desired.saturating_sub(clocked.skipped_output_frames);
+                // Keep a callback cushion; an exhausted replacement must never
+                // displace a still-audible original with an empty ring.
+                let keep = u64::from(pending.output_sample_rate) * 20 / 1000;
+                let available = pending.source.buffered_frames().saturating_sub(keep);
+                clocked.skipped_output_frames += pending.source.discard_frames(remaining.min(available));
+                if clocked.skipped_output_frames < desired {
+                    if pending.source.ended() {
+                        cancel_stream(&pending.cancel);
+                        self.bump_pending_revision(deck);
+                        self.state.error = "试听音轨未能追上当前进度，已保留当前声音".into();
+                    } else { self.pending[deck as usize] = Some(pending); }
+                    continue;
+                }
             }
             if let Some(mut clocked) = pending.clocked_seek {
                 let desired_skip = if clocked.advancing {
@@ -4391,6 +4691,12 @@ impl Actor {
                 seek: pending.seek,
                 scratch_cache: pending.scratch_cache,
             });
+            self.pending_audio_handoffs[deck as usize] = Some(PendingAudioHandoff {
+                source_id,
+                track_id: pending.request.track_id,
+                intent_id: pending.request.intent_id,
+                submitted_at: Instant::now(),
+            });
             self.state.decks[deck as usize].stem_enabled = pending.request.stem_enabled;
             self.state.decks[deck as usize].pitch_semitones = self.decks[deck as usize]
                 .as_ref()
@@ -4419,7 +4725,12 @@ impl Actor {
             let mixer = self.deck_mixers[deck as usize];
             let _ = self.apply_deck_mixer(deck, mixer);
             let _ = self.apply_engine_loop(deck);
-            if let Some(activation) = pending.activation {
+            if matches!(pending.activation, Some(Activation::ReplaceAudio)) {
+                // install_stream already replaces the audio in this same Deck.
+                // No handoff, Play, Pause or transport seek belongs to a mix switch.
+                self.state.current_time = clocked_position.unwrap_or(pending.request.position);
+                self.state.decks[deck as usize].current_time = self.state.current_time;
+            } else if let Some(activation) = pending.activation {
                 if let Err(error) = self.activate(deck, activation, pending.request.position) {
                     self.fail(error);
                 }
@@ -4511,7 +4822,7 @@ impl Actor {
         }
         let position = match activation {
             Activation::Transition(transition) => transition.position.max(0.0),
-            Activation::Hard | Activation::Seek => requested_position.max(0.0),
+            Activation::Hard | Activation::Seek | Activation::ReplaceAudio => requested_position.max(0.0),
         };
         let target_frame = runtime.frame_for_seconds(position);
         let old = self.front;
@@ -4533,7 +4844,7 @@ impl Actor {
                 },
             ),
             Activation::Seek => (0, TransitionPlan::default()),
-            Activation::Hard => (0, TransitionPlan::default()),
+            Activation::Hard | Activation::ReplaceAudio => (0, TransitionPlan::default()),
         };
         self.send(RtCommand::SetMode(if transition_frames > 0 {
             PlayerMode::RealtimeDj
@@ -4587,6 +4898,28 @@ impl Actor {
             None => return,
         };
         self.latest_audio = audio;
+        for index in 0..2 {
+            let Some(handoff) = self.pending_audio_handoffs[index] else {
+                continue;
+            };
+            if audio.deck_source_ids[index] != handoff.source_id {
+                continue;
+            }
+            self.pending_audio_handoffs[index] = None;
+            tracing::info!(
+                target: "kdj_playback_latency",
+                event = "audio_callback_handoff_complete",
+                deck = index,
+                track_id = handoff.track_id,
+                intent_id = handoff.intent_id,
+                source_id = handoff.source_id,
+                handoff_ms = handoff.submitted_at.elapsed().as_secs_f64() * 1_000.0,
+                output_frame = audio.output_frames,
+                active_workers = ACTIVE_STREAM_WORKERS.load(Ordering::Acquire),
+                active_scratch_workers = ACTIVE_SCRATCH_WORKERS.load(Ordering::Acquire),
+                "audio callback consumed the installed playback source"
+            );
+        }
         self.latest_levels = PlaybackLevels {
             peaks: audio.deck_peak_levels,
             bands: audio.deck_spectrum_levels,
@@ -5003,6 +5336,7 @@ impl Actor {
             let _ = player.clear(deck);
         }
         self.decks[deck as usize] = None;
+        self.pending_audio_handoffs[deck as usize] = None;
         self.manual_desired_playing[deck as usize] = false;
         self.scratch_held[deck as usize] = false;
         self.scratch_coasting[deck as usize] = false;
@@ -5055,12 +5389,14 @@ impl Actor {
         self.pending = [None, None];
         self.deferred_stream = None;
         self.decks = [None, None];
+        self.pending_audio_handoffs = [None, None];
         self.stem_recoveries = [None, None];
         self.manual_mode = false;
         self.manual_desired_playing = [false; 2];
         self.scratch_held = [false; 2];
         self.scratch_coasting = [false; 2];
         self.scratch_coast_started = [None, None];
+        self.manager_mixer = DeckMixer::default();
         self.deck_mixers = [DeckMixer {
             low_db: self.eq.0,
             high_db: self.eq.1,
@@ -5216,6 +5552,33 @@ impl Actor {
         }
     }
 
+    /// A failed replacement never owns transport. The old Deck was intentionally kept installed
+    /// while the new source filled its startup cushion, so restore its song-level snapshot and let
+    /// it continue instead of turning a bad file into a command to silence good audio.
+    fn restore_audible_manager_deck(&mut self, error: String) {
+        let Some(runtime) = self.decks[self.front as usize].as_ref() else {
+            self.fail(error);
+            return;
+        };
+        let request = runtime.request.clone();
+        let deck = self.state.decks[self.front as usize].clone();
+        self.state.track_id = Some(request.track_id);
+        self.adopt_metadata(&request);
+        self.state.current_time = deck.current_time.max(request.position);
+        self.state.duration = request.duration.unwrap_or(deck.duration).max(0.0);
+        self.state.rate = deck.rate;
+        self.state.is_playing = deck.is_playing;
+        self.state.desired_playing = deck.desired_playing;
+        self.state.phase = if deck.is_playing {
+            PlaybackPhase::Playing
+        } else {
+            PlaybackPhase::Paused
+        };
+        self.state.buffering = false;
+        self.state.transitioning = false;
+        self.state.error = error;
+    }
+
     fn bump_sequence(&mut self) {
         self.state.sequence = self.state.sequence.wrapping_add(1).max(1);
     }
@@ -5369,6 +5732,7 @@ fn sync_fold_multiple(leader_effective_bpm: f64, follower_bpm: f64) -> f64 {
 }
 
 fn validate_source(source: &PlaybackSource) -> Result<(), String> {
+    if std::path::Path::new(&source.path).extension().and_then(|e|e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png"|"jpg"|"jpeg"|"gif"|"webp"|"bmp")) { return Err("图片素材没有音频".into()); }
     if source.track_id == 0 {
         return Err("曲目 id 无效".into());
     }
@@ -5417,15 +5781,16 @@ fn cancel_stream(token: &Arc<AtomicU64>) {
     token.store(0, Ordering::Release);
 }
 
-fn spawn_scratch_cache_worker(
+fn schedule_scratch_cache_worker(
+    deck: DeckId,
     request: PlaybackSource,
     cache: Arc<ScratchPcmCache>,
     cancel: Arc<AtomicU64>,
     revision: u64,
 ) {
     let track_id = request.track_id;
-    let name = format!("kdj-scratch-cache-{track_id}-{revision}");
-    if let Err(error) = std::thread::Builder::new().name(name).spawn(move || {
+    let job: LatestWorkerJob = Box::new(move || {
+        let _worker_guard = ActiveScratchWorkerGuard::enter();
         kdj_core::thread_qos::prefer_background();
         let cancelled = || cancel.load(Ordering::Acquire) != revision;
         // Let the transport build its startup cushion first. A real touch marks the cache urgent
@@ -5515,7 +5880,8 @@ fn spawn_scratch_cache_worker(
                 Err(_) => break,
             }
         }
-    }) {
+    });
+    if let Err(error) = scratch_worker_pool().and_then(|pool| pool.submit(deck, job)) {
         // The transport source remains fully usable without the optional random cache.
         tracing::warn!(track_id, error = %error, "scratch cache worker unavailable");
     }
@@ -6159,6 +6525,7 @@ mod tests {
     fn source(track_id: i64, position: f64) -> PlaybackSource {
         PlaybackSource {
             track_id,
+            intent_id: 0,
             path: format!("/nonexistent/{track_id}.flac"),
             source_kind: PlaybackSourceKind::Local,
             title: format!("曲目 {track_id}"),
@@ -6670,6 +7037,78 @@ mod tests {
     }
 
     #[test]
+    fn replace_audio_follows_device_position_without_transport_commands() {
+        for playing in [true, false] {
+            let knobs = Arc::new(FakeKnobs::default());
+            let mut actor = test_actor(&knobs);
+            actor.open_output().unwrap();
+            let live = live_runtime(7, 12.);
+            knobs.snapshot.lock().unwrap().deck_source_ids[0] = live.source_id;
+            knobs.snapshot.lock().unwrap().deck_frames[0] = 636000; // 13.25 s after decode work
+            actor.decks[0] = Some(live);
+            actor.state.track_id = Some(7);
+            actor.state.decks[0].track_id = Some(7);
+            actor.state.desired_playing = playing;
+            actor.state.is_playing = playing;
+            actor.state.phase = if playing { PlaybackPhase::Playing } else { PlaybackPhase::Paused };
+            let before = actor.state.clone();
+            assert!(actor.replace_audio(source(8, 0.)).is_err());
+            assert_eq!(actor.state, before, "a late audition cannot replace another song");
+            let (stream, mut writer) = StreamSource::bounded(96001);
+            for _ in 0..96000 { writer.push([0.2, 0.2], ||false).unwrap(); }
+            let mut request = source(7, 12.);
+            request.path = "/replacement.wav".into();
+            actor.revisions[0] = 42;
+            actor.pending[0] = Some(PendingStream {
+                revision: 42, source: PlaybackStream::Stereo(stream), request,
+                tempo: TempoControl::new(1.), output_sample_rate: 48000, startup_buffer_frames: 100,
+                activation: Some(Activation::ReplaceAudio), cancel: Arc::new(AtomicU64::new(42)),
+                followup_stems: false, release_scratch_hold: false,
+                clocked_seek: Some(clocked_deck_seek(12., 1., Some(180.), false, false)),
+                seek: StreamSeekControl::new(), scratch_cache: None,
+            });
+            knobs.sent.lock().unwrap().clear();
+            actor.promote_ready_streams();
+            assert!(actor.pending[0].is_none());
+            assert_eq!(actor.decks[0].as_ref().unwrap().request.path, "/replacement.wav");
+            assert_eq!(actor.state.current_time, 13.25);
+            assert_eq!(knobs.snapshot.lock().unwrap().deck_frames[0], 636000);
+            assert_eq!(actor.state.desired_playing, playing);
+            assert_eq!(actor.state.is_playing, playing);
+            assert_eq!(actor.state.phase, before.phase);
+            assert!(!actor.state.buffering);
+            assert!(knobs.sent.lock().unwrap().iter().all(|c| !matches!(c,
+                RtCommand::SetPlaying{..} | RtCommand::SetDeckPlaying{..} | RtCommand::HandoffPrepared{..})),
+                "mix replacement must never pause, replay, or seek the transport");
+        }
+    }
+
+    #[test]
+    fn callback_snapshot_acknowledges_an_installed_handoff_once() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let mut runtime = live_runtime(7, 0.0);
+        runtime.request.intent_id = 42;
+        let source_id = runtime.source_id;
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.pending_audio_handoffs[DeckId::A as usize] = Some(PendingAudioHandoff {
+            source_id,
+            track_id: 7,
+            intent_id: 42,
+            submitted_at: Instant::now(),
+        });
+
+        actor.refresh_from_audio();
+        assert!(actor.pending_audio_handoffs[DeckId::A as usize].is_some());
+
+        knobs.snapshot.lock().unwrap().deck_source_ids[DeckId::A as usize] = source_id;
+        actor.refresh_from_audio();
+        assert!(actor.pending_audio_handoffs[DeckId::A as usize].is_none());
+        actor.refresh_from_audio();
+        assert!(actor.pending_audio_handoffs[DeckId::A as usize].is_none());
+    }
+
+    #[test]
     fn explicit_clear_removes_the_previous_physical_source_before_online_resolution() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
@@ -6938,6 +7377,44 @@ mod tests {
         assert_eq!(actor.state.phase, PlaybackPhase::Playing);
         assert!(actor.state.desired_playing);
         assert_eq!(actor.front, DeckId::A);
+    }
+
+    #[test]
+    fn failed_installed_decoder_is_retired_and_the_next_song_can_play() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().unwrap();
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 0.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Playing;
+        actor.state.is_playing = true;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        let revision = actor.revisions[DeckId::A as usize];
+
+        actor.handle(Request::WorkerFinished {
+            deck: DeckId::A, revision, result: Err("audio decoder panicked".into()),
+        });
+
+        assert!(actor.decks[DeckId::A as usize].is_none());
+        assert!(actor.reusable_deck(&source(1, 12.0)).is_none());
+        assert_eq!(actor.state.phase, PlaybackPhase::Error);
+        assert!(!actor.state.decks[DeckId::A as usize].is_playing);
+        assert!(!actor.state.error.contains("已保留当前声音"));
+        let mut next = source(2, 0.0);
+        next.autoplay = true;
+        actor.apply_command(1, PlaybackCommand::Load { source: next, master_volume: None }).unwrap();
+        assert_eq!(actor.state.track_id, Some(2));
+        assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+        assert!(actor.state.is_playing);
+        assert!(actor.state.error.is_empty());
+        actor.handle(Request::WorkerFinished {
+            deck: DeckId::A, revision, result: Err("late decoder failure".into()),
+        });
+        assert_eq!(actor.state.track_id, Some(2));
+        assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+        assert!(actor.state.error.is_empty());
     }
 
     #[test]
@@ -7840,6 +8317,7 @@ mod tests {
         // Mixer controls belong to their channel strip, not to a track ID.
         actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
         actor.decks[DeckId::B as usize] = Some(live_runtime(1, 18.0));
+        actor.enter_manual_mode();
         knobs.sent.lock().unwrap().clear();
 
         actor
@@ -8174,7 +8652,7 @@ mod tests {
     }
 
     #[test]
-    fn manager_load_resets_both_possible_decode_targets_to_defaults() {
+    fn manager_load_preserves_mixer_but_resets_song_controls_and_tempo() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -8190,14 +8668,17 @@ mod tests {
         actor.state.decks[DeckId::B as usize].track_id = Some(2);
         actor.state.decks[DeckId::A as usize].rate = 0.82;
         actor.state.decks[DeckId::B as usize].rate = 1.25;
-        actor.deck_mixers = [DeckMixer {
+        let retained_mixer = DeckMixer {
             channel_gain: 0.2,
             trim_db: -6.0,
             low_db: -12.0,
             mid_db: 4.0,
             high_db: -3.0,
             filter: 0.75,
-        }; 2];
+        };
+        actor
+            .set_deck_mixer(DeckId::A as u8, retained_mixer)
+            .expect("调整管理器混音");
         actor.loop_windows[DeckId::A as usize].set(4.0, 2.0);
         actor.loop_windows[DeckId::B as usize].set(8.0, 4.0);
         knobs.sent.lock().unwrap().clear();
@@ -8208,12 +8689,12 @@ mod tests {
 
         for deck in [DeckId::A, DeckId::B] {
             let mixer = actor.deck_mixers[deck as usize];
-            assert!((mixer.channel_gain - 1.0).abs() < f32::EPSILON);
-            assert!(mixer.trim_db.abs() < f32::EPSILON);
-            assert!(mixer.low_db.abs() < f32::EPSILON);
-            assert!(mixer.mid_db.abs() < f32::EPSILON);
-            assert!(mixer.high_db.abs() < f32::EPSILON);
-            assert!(mixer.filter.abs() < f32::EPSILON);
+            assert!((mixer.channel_gain - retained_mixer.channel_gain).abs() < f32::EPSILON);
+            assert!((mixer.trim_db - retained_mixer.trim_db).abs() < f32::EPSILON);
+            assert!((mixer.low_db - retained_mixer.low_db).abs() < f32::EPSILON);
+            assert!((mixer.mid_db - retained_mixer.mid_db).abs() < f32::EPSILON);
+            assert!((mixer.high_db - retained_mixer.high_db).abs() < f32::EPSILON);
+            assert!((mixer.filter - retained_mixer.filter).abs() < f32::EPSILON);
             assert!(actor.loop_windows[deck as usize].snapshot().is_none());
             assert!((actor.state.decks[deck as usize].rate - 1.0).abs() < f32::EPSILON);
             if let Some(runtime) = &actor.decks[deck as usize] {
@@ -8236,7 +8717,24 @@ mod tests {
             assert!(sent.iter().any(|command| matches!(
                 command,
                 RtCommand::SetDeckGain { deck: target, gain }
-                    if *target == deck && (*gain - 1.0).abs() < f32::EPSILON
+                    if *target == deck
+                        && (*gain - retained_mixer.channel_gain).abs() < f32::EPSILON
+            )));
+            assert!(sent.iter().any(|command| matches!(
+                command,
+                RtCommand::SetEq {
+                    deck: target,
+                    trim_db,
+                    low_db,
+                    mid_db,
+                    high_db,
+                    filter,
+                } if *target == deck
+                    && (*trim_db - retained_mixer.trim_db).abs() < f32::EPSILON
+                    && (*low_db - retained_mixer.low_db).abs() < f32::EPSILON
+                    && (*mid_db - retained_mixer.mid_db).abs() < f32::EPSILON
+                    && (*high_db - retained_mixer.high_db).abs() < f32::EPSILON
+                    && (*filter - retained_mixer.filter).abs() < f32::EPSILON
             )));
             assert!(sent.iter().any(|command| matches!(
                 command,
@@ -8248,6 +8746,61 @@ mod tests {
                 RtCommand::SetDeckPfl { deck: target, enabled: false } if *target == deck
             )));
         }
+    }
+
+    #[test]
+    fn rapid_manager_loads_keep_only_the_latest_intent_pending() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+
+        for intent_id in 1..=50_u64 {
+            let mut request = source(intent_id as i64, 0.0);
+            request.intent_id = intent_id;
+            request.autoplay = true;
+            actor.load(request).expect("连续换源应被接受");
+        }
+
+        assert_eq!(actor.latest_manager_intent, 50);
+        let pending: Vec<&PendingStream> = actor.pending.iter().flatten().collect();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request.track_id, 50);
+        assert_eq!(pending[0].request.intent_id, 50);
+        assert_eq!(
+            pending[0].scratch_cache.as_ref().unwrap().allocated_bytes(),
+            0
+        );
+
+        let revisions = actor.revisions;
+        let mut stale = source(999, 0.0);
+        stale.intent_id = 49;
+        actor.load(stale).expect("旧意图应幂等丢弃");
+        assert_eq!(actor.revisions, revisions);
+        assert_eq!(
+            actor
+                .pending
+                .iter()
+                .flatten()
+                .next()
+                .unwrap()
+                .request
+                .track_id,
+            50
+        );
+    }
+
+    #[test]
+    fn fixed_worker_mailbox_keeps_only_the_latest_not_started_job() {
+        let slot = LatestJobSlot::new();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        for generation in 1..=50 {
+            let ran = Arc::clone(&ran);
+            slot.replace(Box::new(move || ran.lock().unwrap().push(generation)))
+                .unwrap();
+        }
+        let job = slot.pending.lock().unwrap().take().unwrap();
+        job();
+        assert_eq!(*ran.lock().unwrap(), vec![50]);
     }
 
     #[test]

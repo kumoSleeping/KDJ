@@ -32,8 +32,9 @@ const belongsInQueue = (task: DownloadTask): boolean => task.state !== "done";
 /** 挡住完成事件之后迟到的旧进度、入队 HTTP 响应或旧队列快照。 */
 const completedTaskIds = new Set<string>();
 const MAX_COMPLETED_TOMBSTONES = 512;
-/** 兼容仍在运行的旧后端：queued 取消会回一条 canceled，前端必须把它挡掉。 */
-const removedQueuedTasks = new Set<string>();
+/** 挡住取消/清记录之后才抵达的旧事件，避免刚删掉的行又闪回来。 */
+const removedTaskIds = new Set<string>();
+const MAX_REMOVED_TOMBSTONES = 512;
 
 function rememberCompletedTask(taskId: string): void {
   completedTaskIds.delete(taskId);
@@ -42,6 +43,16 @@ function rememberCompletedTask(taskId: string): void {
     const oldest = completedTaskIds.values().next().value;
     if (oldest === undefined) break;
     completedTaskIds.delete(oldest);
+  }
+}
+
+function rememberRemovedTask(taskId: string): void {
+  removedTaskIds.delete(taskId);
+  removedTaskIds.add(taskId);
+  while (removedTaskIds.size > MAX_REMOVED_TOMBSTONES) {
+    const oldest = removedTaskIds.values().next().value;
+    if (oldest === undefined) break;
+    removedTaskIds.delete(oldest);
   }
 }
 
@@ -63,7 +74,8 @@ interface Derived {
  * zustand v5 每次 render 都会拿到新数组引用，直接触发无限重渲染。
  */
 function derive(tasks: Map<string, DownloadTask>): Derived {
-  const list = sortDownloadTasks(tasks.values());
+  // 这里再守一次边界：即使以后某条新合并路径漏掉完成态，组件也永远拿不到完成行。
+  const list = sortDownloadTasks([...tasks.values()].filter(belongsInQueue));
   let activeCount = 0;
   for (const task of list) if (ACTIVE_STATES.has(task.state)) activeCount += 1;
   return { list, activeCount };
@@ -107,7 +119,7 @@ function applyServerList(
 ): Map<string, DownloadTask> {
   const map = new Map<string, DownloadTask>();
   for (const task of payload) {
-    if (removedQueuedTasks.has(task.id)) continue;
+    if (removedTaskIds.has(task.id)) continue;
     if (!belongsInQueue(task)) {
       rememberCompletedTask(task.id);
       forgetQueueDraft(task.id);
@@ -223,12 +235,12 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
 
   async cancel(taskId) {
     const wasQueued = get().tasks.get(taskId)?.state === "queued";
-    if (wasQueued) removedQueuedTasks.add(taskId);
+    if (wasQueued) rememberRemovedTask(taskId);
     let task: DownloadTask;
     try {
       task = await api.cancelDownload(taskId);
     } catch (error) {
-      if (wasQueued) removedQueuedTasks.delete(taskId);
+      if (wasQueued) removedTaskIds.delete(taskId);
       throw error;
     }
     if (wasQueued) {
@@ -264,8 +276,10 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
 
   async remove(taskId) {
     await api.removeDownload(taskId);
+    rememberRemovedTask(taskId);
     const map = new Map(get().tasks);
     map.delete(taskId);
+    pruneDownloadDisplayCache(map.keys());
     set({ tasks: map, ...derive(map) });
   },
 
@@ -283,8 +297,8 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       if (!belongsInQueue(task)) {
         sawCompletedTask = true;
         rememberCompletedTask(task.id);
-        map.delete(task.id);
         forgetQueueDraft(task.id);
+        map.delete(task.id);
         continue;
       }
       if (completedTaskIds.has(task.id)) continue;
@@ -313,7 +327,7 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
 
   handleEvent(event) {
     if (event.type === "download.updated") {
-      if (removedQueuedTasks.has(event.payload.id)) return;
+      if (removedTaskIds.has(event.payload.id)) return;
       get().mergeTasks([event.payload]);
       return;
     }

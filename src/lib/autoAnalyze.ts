@@ -206,19 +206,21 @@ async function analyzeSelection(): Promise<void> {
   const anchorId = state.selectedId;
   if (anchorId === null) return;
 
-  const anchor = state.tracks.findIndex((track) => track.id === anchorId);
+  const anchor = state.indexById.get(anchorId) ?? -1;
   const candidates: TrackSummary[] = [];
   if (anchor >= 0) {
-    candidates.push(state.tracks[anchor]);
-    for (let distance = 1; candidates.length < batchLimit; distance += 1) {
-      const before = state.tracks[anchor - distance];
-      const after = state.tracks[anchor + distance];
-      if (!before && !after) break;
-      if (before) candidates.push(before);
-      if (after && candidates.length < batchLimit) candidates.push(after);
+    const ids = [anchorId];
+    for (let distance = 1; ids.length < batchLimit; distance += 1) {
+      const before = state.orderedIds[anchor - distance];
+      const after = state.orderedIds[anchor + distance];
+      if (before === undefined && after === undefined) break;
+      if (before !== undefined) ids.push(before);
+      if (after !== undefined && ids.length < batchLimit) ids.push(after);
     }
+    const version = state.queryVersion;
+    try { candidates.push(...await state.resolveSummaries(ids)); } catch { return; }
+    if (useLibraryStore.getState().queryVersion !== version || useLibraryStore.getState().selectedId !== anchorId) return;
   } else if (state.selectedTrack?.id === anchorId) {
-    // 从和声推荐等页外入口选中的曲目不属于当前页面，不能臆造它的邻居。
     candidates.push(state.selectedTrack);
   }
 
@@ -284,9 +286,7 @@ function viewportIds(limit: number): number[] {
   const box = findScroller();
   const body = box?.querySelector("tbody");
   if (!box || !body) return [];
-  const { tracks } = useLibraryStore.getState();
-  const byId = new Map<number, TrackSummary>();
-  for (const track of tracks) byId.set(track.id, track);
+  const byId = useLibraryStore.getState().summaryById;
 
   const view = box.getBoundingClientRect();
   const margin = view.height * VIEWPORT_MARGIN_SCREENS;
@@ -400,9 +400,9 @@ async function backfill(): Promise<boolean> {
     if (pendingV1 > 0) {
       // 从最近加进来的开始补：新下的歌最可能是用户下一步要用的
       let page = await api.tracks({
-        analyzed: "false",
+        analyzed: false,
         folder: activeFolder || undefined,
-        folder_deep: activeFolder ? "true" : undefined,
+        folder_deep: activeFolder ? true : undefined,
         sort: "added_at",
         order: "desc",
         limit: batchLimit,
@@ -411,7 +411,7 @@ async function backfill(): Promise<boolean> {
       // 当前文件夹的 v1 已补完后，继续全曲库，不让空文件夹把后台回填卡住。
       if (page.items.length === 0 && activeFolder) {
         page = await api.tracks({
-          analyzed: "false",
+          analyzed: false,
           sort: "added_at",
           order: "desc",
           limit: batchLimit,
@@ -488,7 +488,7 @@ export function startAutoAnalyze(): () => void {
     // 列表换了内容也要重看一眼视口：首屏（用户一次都没滚过）、切文件夹、
     // 改筛选、翻下一页，这些时候"眼前是什么"全变了，但一个 scroll 事件都不会有。
     // 已排过队的 id 会在 viewportIds 里被滤掉，所以稳态下这条不会打出多余请求。
-    if (state.tracks !== previous.tracks) scheduleViewport();
+    if (state.summaryById !== previous.summaryById) scheduleViewport();
     // 一批跑完立刻接上下一批。等下一次轮询的话中间空 4 秒，
     // 那条进度行会灭一下再亮，底下整张表跟着跳一次高度。
     if (state.analyze !== previous.analyze && !selectAnalyzing(state)) void tick();

@@ -306,6 +306,7 @@ pub fn read_tags(path: &Path) -> TrackTags {
             .to_ascii_lowercase(),
         ..Default::default()
     };
+    if crate::workshop_images::is_image_path(path) { return out; }
     let Ok(tagged) = Probe::open(path).and_then(|probe| probe.read()) else {
         return out;
     };

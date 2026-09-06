@@ -19,6 +19,7 @@ const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS tracks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   path TEXT NOT NULL UNIQUE,
+  path_key TEXT NOT NULL DEFAULT '',
   filename TEXT NOT NULL,
   title TEXT, artist TEXT, album TEXT, genre TEXT, year TEXT,
   duration REAL,
@@ -69,6 +70,10 @@ CREATE TABLE IF NOT EXISTS waveform_assets (
   file_mtime INTEGER NOT NULL,
   generated_at TEXT NOT NULL,
   error TEXT
+);
+CREATE TABLE IF NOT EXISTS composition_reservations (
+  track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+  receipt TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS track_bpm_key_analysis_v2 (
   track_id INTEGER PRIMARY KEY,
@@ -144,8 +149,10 @@ CREATE INDEX IF NOT EXISTS idx_tracks_camelot ON tracks(camelot);
 CREATE INDEX IF NOT EXISTS idx_tracks_bpm ON tracks(bpm);
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
+CREATE INDEX IF NOT EXISTS idx_tracks_path_key ON tracks(path_key);
+CREATE INDEX IF NOT EXISTS idx_tracks_path_key_nocase ON tracks(path_key COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_tracks_file_created_at
-  ON tracks(file_created_at DESC, file_mtime DESC, id DESC);
+  ON tracks(file_created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_playlists_name ON playlists(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_playlist_items_position
@@ -157,10 +164,188 @@ CREATE INDEX IF NOT EXISTS idx_track_bpm_key_analysis_v3_revision
   ON track_bpm_key_analysis_v3(analyzer_revision, analyzed_at);
 "#;
 
+const FILE_CREATED_SORT_TRIGGER_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS normalize_file_created_sort_key_after_insert
+AFTER INSERT ON tracks
+WHEN NEW.file_created_at IS NULL OR NEW.file_created_at <= 0
+BEGIN
+  UPDATE tracks
+     SET file_created_at = COALESCE(
+       NULLIF(NEW.file_mtime, 0), CAST(strftime('%s', NEW.added_at) AS REAL), 0
+     )
+   WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS normalize_file_created_sort_key_after_update
+AFTER UPDATE OF file_created_at, file_mtime, added_at ON tracks
+WHEN NEW.file_created_at IS NULL OR NEW.file_created_at <= 0
+BEGIN
+  UPDATE tracks
+     SET file_created_at = COALESCE(
+       NULLIF(NEW.file_mtime, 0), CAST(strftime('%s', NEW.added_at) AS REAL), 0
+     )
+   WHERE id = NEW.id;
+END;
+"#;
+
+/// 列表专用物化投影。不含 comment、Cue 数组、标签或拍点数组；V2/V3 的有效分析值
+/// 仍通过每表一次 LEFT JOIN 覆盖，避免把分析数组复制进长期驻留的列表数据。
+const TRACK_LIST_PROJECTION_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS track_list_projection (
+  id INTEGER PRIMARY KEY,
+  path TEXT NOT NULL,
+  path_key TEXT NOT NULL DEFAULT '',
+  filename TEXT NOT NULL,
+  title TEXT,
+  artist TEXT,
+  album TEXT,
+  genre TEXT,
+  year TEXT,
+  duration REAL,
+  format TEXT,
+  size INTEGER,
+  bpm REAL,
+  bpm_confidence REAL,
+  first_beat REAL,
+  music_key TEXT,
+  camelot TEXT,
+  open_key TEXT,
+  energy INTEGER,
+  rms_db REAL,
+  peak_db REAL,
+  rating INTEGER,
+  source_platform TEXT,
+  source_key TEXT,
+  analyzed_at TEXT,
+  file_created_at REAL NOT NULL,
+  added_at TEXT NOT NULL,
+  modified_at TEXT NOT NULL,
+  cue_ms INTEGER,
+  end_ms INTEGER
+);
+
+CREATE TRIGGER IF NOT EXISTS sync_track_list_projection_after_insert
+AFTER INSERT ON tracks BEGIN
+  INSERT OR REPLACE INTO track_list_projection (
+    id, path, path_key, filename, title, artist, album, genre, year, duration, format, size,
+    bpm, bpm_confidence, first_beat, music_key, camelot, open_key, energy, rms_db,
+    peak_db, rating, source_platform, source_key, analyzed_at, file_created_at,
+    added_at, modified_at, cue_ms, end_ms
+  ) VALUES (
+    NEW.id, NEW.path, __KDJ_PATH_KEY_NEW__, NEW.filename, NEW.title, NEW.artist, NEW.album, NEW.genre,
+    NEW.year, NEW.duration, NEW.format, NEW.size, NEW.bpm, NEW.bpm_confidence,
+    NEW.first_beat, NEW.music_key, NEW.camelot, NEW.open_key, NEW.energy,
+    NEW.rms_db, NEW.peak_db, NEW.rating, NEW.source_platform, NEW.source_key,
+    NEW.analyzed_at,
+    COALESCE(NULLIF(NEW.file_created_at, 0), NULLIF(NEW.file_mtime, 0),
+             CAST(strftime('%s', NEW.added_at) AS REAL), 0),
+    NEW.added_at, NEW.modified_at, NEW.cue_ms, NEW.end_ms
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS sync_track_list_projection_after_update
+AFTER UPDATE ON tracks BEGIN
+  INSERT OR REPLACE INTO track_list_projection (
+    id, path, path_key, filename, title, artist, album, genre, year, duration, format, size,
+    bpm, bpm_confidence, first_beat, music_key, camelot, open_key, energy, rms_db,
+    peak_db, rating, source_platform, source_key, analyzed_at, file_created_at,
+    added_at, modified_at, cue_ms, end_ms
+  ) VALUES (
+    NEW.id, NEW.path, __KDJ_PATH_KEY_NEW__, NEW.filename, NEW.title, NEW.artist, NEW.album, NEW.genre,
+    NEW.year, NEW.duration, NEW.format, NEW.size, NEW.bpm, NEW.bpm_confidence,
+    NEW.first_beat, NEW.music_key, NEW.camelot, NEW.open_key, NEW.energy,
+    NEW.rms_db, NEW.peak_db, NEW.rating, NEW.source_platform, NEW.source_key,
+    NEW.analyzed_at,
+    COALESCE(NULLIF(NEW.file_created_at, 0), NULLIF(NEW.file_mtime, 0),
+             CAST(strftime('%s', NEW.added_at) AS REAL), 0),
+    NEW.added_at, NEW.modified_at, NEW.cue_ms, NEW.end_ms
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS sync_track_list_projection_after_delete
+AFTER DELETE ON tracks BEGIN
+  DELETE FROM track_list_projection WHERE id = OLD.id;
+END;
+
+CREATE INDEX IF NOT EXISTS idx_track_list_file_created
+  ON track_list_projection(file_created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_track_list_title
+  ON track_list_projection(title, id DESC);
+CREATE INDEX IF NOT EXISTS idx_track_list_artist
+  ON track_list_projection(artist, id DESC);
+CREATE INDEX IF NOT EXISTS idx_track_list_album
+  ON track_list_projection(album, id DESC);
+CREATE INDEX IF NOT EXISTS idx_track_list_duration
+  ON track_list_projection(duration, id DESC);
+CREATE INDEX IF NOT EXISTS idx_track_list_energy
+  ON track_list_projection(energy, id DESC);
+CREATE INDEX IF NOT EXISTS idx_track_list_rating
+  ON track_list_projection(rating, id DESC);
+CREATE INDEX IF NOT EXISTS idx_track_list_added
+  ON track_list_projection(added_at, id DESC);
+CREATE INDEX IF NOT EXISTS idx_track_list_path_key
+  ON track_list_projection(path_key);
+CREATE INDEX IF NOT EXISTS idx_track_list_path_key_nocase
+  ON track_list_projection(path_key COLLATE NOCASE);
+"#;
+
+#[cfg(windows)]
+fn path_key_sql(expression: &str) -> String {
+    format!("REPLACE({expression}, char(92), '/')")
+}
+
+#[cfg(not(windows))]
+fn path_key_sql(expression: &str) -> String {
+    expression.to_string()
+}
+
+fn track_path_key_trigger_sql() -> String {
+    let new_key = path_key_sql("NEW.path");
+    format!(
+        "CREATE TRIGGER IF NOT EXISTS sync_track_path_key_after_insert
+         AFTER INSERT ON tracks
+         WHEN NEW.path_key != {new_key}
+         BEGIN
+           UPDATE tracks SET path_key = {new_key} WHERE id = NEW.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS sync_track_path_key_after_update
+         AFTER UPDATE OF path ON tracks
+         WHEN NEW.path_key != {new_key}
+         BEGIN
+           UPDATE tracks SET path_key = {new_key} WHERE id = NEW.id;
+         END;"
+    )
+}
+
+fn ensure_projection_path_key_column(conn: &rusqlite::Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'track_list_projection')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    let columns: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(track_list_projection)")?;
+        let columns = stmt
+            .query_map([], |row| row.get(1))?
+            .collect::<std::result::Result<_, _>>()?;
+        columns
+    };
+    if !columns.iter().any(|column| column == "path_key") {
+        conn.execute_batch(
+            "ALTER TABLE track_list_projection ADD COLUMN path_key TEXT NOT NULL DEFAULT '';",
+        )
+        .context("补曲目列表投影 path_key 失败")?;
+    }
+    Ok(())
+}
+
 /// 老库升级用：只列可空列，或带常量默认值、可安全补入旧行的 NOT NULL 列。
 /// 没有默认值的 NOT NULL 列没法 ALTER ADD，而它们从 v1 起就存在。
 /// 名字是模块常量、不来自外部输入，拼进 DDL 是安全的。
 const MIGRATION_COLUMNS: &[(&str, &str)] = &[
+    ("path_key", "TEXT NOT NULL DEFAULT ''"),
     ("title", "TEXT"),
     ("artist", "TEXT"),
     ("album", "TEXT"),
@@ -318,12 +503,157 @@ impl Database {
             }
         }
 
+        migrate_file_created_sort_key(&mut conn)?;
+        conn.execute_batch(FILE_CREATED_SORT_TRIGGER_SQL)
+            .context("建立曲目创建时间排序键触发器失败")?;
+        conn.execute_batch(&track_path_key_trigger_sql())
+            .context("建立规范路径键触发器失败")?;
+        ensure_projection_path_key_column(&conn)?;
+        // v2 projection rows carry path_key. Drop the v1 triggers explicitly: IF NOT EXISTS
+        // alone would leave their old column list installed forever on an upgraded database.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS sync_track_list_projection_after_insert;
+             DROP TRIGGER IF EXISTS sync_track_list_projection_after_update;
+             DROP TRIGGER IF EXISTS sync_track_list_projection_after_delete;",
+        )?;
+        let projection_sql =
+            TRACK_LIST_PROJECTION_SQL.replace("__KDJ_PATH_KEY_NEW__", &path_key_sql("NEW.path"));
+        conn.execute_batch(&projection_sql)
+            .context("建立曲目列表投影失败")?;
+        migrate_track_list_projection(&mut conn)?;
+        migrate_track_path_keys(&mut conn)?;
+        migrate_library_folder_snapshot(&mut conn)?;
         conn.execute_batch(INDEX_SQL).context("建索引失败")?;
         migrate_key_notations(&mut conn)?;
         #[cfg(windows)]
         repair_case_insensitive_path_duplicates(&mut conn, true)?;
         Ok(())
     }
+}
+
+/// 把旧库的可空创建时间固化成非空排序键，默认列表便可沿复合索引直接读取，
+/// 无需为 COALESCE/NULL 规则建立临时 B-tree。用户字段和分析数据均不参与迁移。
+fn migrate_file_created_sort_key(conn: &mut rusqlite::Connection) -> Result<()> {
+    const MIGRATION: &str = "file-created-sort-key-v1";
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM kdj_schema_migrations WHERE name = ?)",
+        [MIGRATION],
+        |row| row.get(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "UPDATE tracks
+            SET file_created_at = COALESCE(
+              NULLIF(file_created_at, 0), NULLIF(file_mtime, 0),
+              CAST(strftime('%s', added_at) AS REAL), 0
+            )
+          WHERE file_created_at IS NULL OR file_created_at <= 0;
+         DROP INDEX IF EXISTS idx_tracks_file_created_at;
+         CREATE INDEX idx_tracks_file_created_at
+           ON tracks(file_created_at DESC, id DESC);",
+    )?;
+    tx.execute(
+        "INSERT INTO kdj_schema_migrations(name, applied_at) VALUES (?, datetime('now'))",
+        [MIGRATION],
+    )?;
+    tx.commit().context("提交曲目创建时间排序键迁移失败")?;
+    Ok(())
+}
+
+fn migrate_track_list_projection(conn: &mut rusqlite::Connection) -> Result<()> {
+    const MIGRATION: &str = "track-list-projection-v1";
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM kdj_schema_migrations WHERE name = ?)",
+        [MIGRATION],
+        |row| row.get(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "INSERT OR REPLACE INTO track_list_projection (
+           id, path, path_key, filename, title, artist, album, genre, year, duration, format, size,
+           bpm, bpm_confidence, first_beat, music_key, camelot, open_key, energy, rms_db,
+           peak_db, rating, source_platform, source_key, analyzed_at, file_created_at,
+           added_at, modified_at, cue_ms, end_ms
+         )
+         SELECT
+           id, path, path_key, filename, title, artist, album, genre, year, duration, format, size,
+           bpm, bpm_confidence, first_beat, music_key, camelot, open_key, energy, rms_db,
+           peak_db, rating, source_platform, source_key, analyzed_at,
+           COALESCE(NULLIF(file_created_at, 0), NULLIF(file_mtime, 0),
+                    CAST(strftime('%s', added_at) AS REAL), 0),
+           added_at, modified_at, cue_ms, end_ms
+         FROM tracks;",
+    )?;
+    tx.execute(
+        "INSERT INTO kdj_schema_migrations(name, applied_at) VALUES (?, datetime('now'))",
+        [MIGRATION],
+    )?;
+    tx.commit().context("提交曲目列表投影迁移失败")?;
+    Ok(())
+}
+
+fn migrate_track_path_keys(conn: &mut rusqlite::Connection) -> Result<()> {
+    const MIGRATION: &str = "track-path-key-v1";
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM kdj_schema_migrations WHERE name = ?)",
+        [MIGRATION],
+        |row| row.get(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    let track_key = path_key_sql("path");
+    let tx = conn.transaction()?;
+    tx.execute_batch(&format!(
+        "UPDATE tracks SET path_key = {track_key} WHERE path_key != {track_key};
+         UPDATE track_list_projection
+            SET path_key = COALESCE(
+              (SELECT tracks.path_key FROM tracks WHERE tracks.id = track_list_projection.id),
+              path_key
+            );"
+    ))?;
+    tx.execute(
+        "INSERT INTO kdj_schema_migrations(name, applied_at) VALUES (?, datetime('now'))",
+        [MIGRATION],
+    )?;
+    tx.commit().context("提交规范路径键迁移失败")?;
+    Ok(())
+}
+
+/// 文件夹树需要同步枚举磁盘，不能挡住启动首帧。快照单独版本化，未来 FolderTree
+/// 字段变化时可精准作废并重建，不和曲目投影或用户数据迁移绑在一起。
+fn migrate_library_folder_snapshot(conn: &mut rusqlite::Connection) -> Result<()> {
+    const MIGRATION: &str = "library-folder-snapshot-v1";
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS library_folder_snapshot (
+           singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+           schema_version INTEGER NOT NULL,
+           roots_fingerprint TEXT NOT NULL,
+           tree_json TEXT NOT NULL,
+           generated_at TEXT NOT NULL
+         );",
+    )
+    .context("建立曲库文件夹快照表失败")?;
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM kdj_schema_migrations WHERE name = ?)",
+        [MIGRATION],
+        |row| row.get(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO kdj_schema_migrations(name, applied_at) VALUES (?, datetime('now'))",
+        [MIGRATION],
+    )
+    .context("记录曲库文件夹快照迁移失败")?;
+    Ok(())
 }
 
 /// Windows 文件系统通常把路径大小写视为同一位置；旧版数据库的 `UNIQUE(path)`
@@ -354,7 +684,7 @@ fn repair_case_insensitive_path_duplicates(
 ) -> Result<PathDuplicateRepairReport> {
     use std::collections::BTreeMap;
 
-    const INDEX: &str = "idx_tracks_path_windows_nocase";
+    const INDEX: &str = "idx_tracks_path_key_windows_unique";
     let index_exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)",
         [INDEX],
@@ -478,7 +808,7 @@ fn repair_case_insensitive_path_duplicates(
     }
     if create_unique_index {
         tx.execute_batch(&format!(
-            "CREATE UNIQUE INDEX IF NOT EXISTS {INDEX} ON tracks(path COLLATE NOCASE)"
+            "CREATE UNIQUE INDEX IF NOT EXISTS {INDEX} ON tracks(path_key COLLATE NOCASE)"
         ))
         .context("建立 Windows 路径唯一索引失败")?;
     }
@@ -1014,7 +1344,7 @@ mod tests {
         assert_eq!(filename, "b.mp3");
         assert_eq!(cue_points, "[]");
         assert!(!cue_points_managed);
-        assert_eq!(file_created_at, None);
+        assert_eq!(file_created_at, Some(1_577_836_800.0));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

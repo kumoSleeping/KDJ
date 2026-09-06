@@ -10,7 +10,7 @@ Linux AppImage 204MB。体积来源实测：
 
 | 来源 | 大小 | 能不能砍 |
 | --- | --- | --- |
-| `node_modules/electron/dist` | 242MB（打包后压到 ~80MB） | 换 Tauri 就没了（系统 WebView） |
+| 捆绑式浏览器运行时 | 242MB（打包后压到约 80MB） | Tauri 使用系统 WebView，无需随包携带 |
 | `sidecar/.venv` | 163MB | 只有不要 Python 才没 |
 | ├ numpy | 25MB | 分析算法自己写就没了 |
 | ├ lxml | 20MB | bilibili-api 拖进来的 |
@@ -47,7 +47,7 @@ Linux AppImage 204MB。体积来源实测：
   相对于要砍掉的 300MB 是噪声。
 - 现有 5792 行 TSX 是"和原本一模一样"这个验收标准的直接载体。重写它等于
   把风险从"后端算法对不对"扩大到"UI 每一个像素对不对"。
-- 真正要改的只有 240 行 Electron glue（`window.kdj.*` → Tauri plugin）。
+- 真正要改的只有约 240 行桌面桥接代码（`window.kdj.*` → Tauri plugin）。
 
 如果之后想换 Svelte，那是独立一件事，不该和"砍体积 + 上安卓"绑在一起。
 
@@ -164,7 +164,7 @@ provider 自己不知道别人的存在——和现在一样。
 5. **M4** 下载队列 + WS 事件 + 标签写入。
 6. **M5** 分析管线 + golden 验证。
 7. **M6** 曲库写操作（scan/folders/move/link/manifest）。
-8. **M7** 前端接线（Tauri plugin 替 Electron IPC）+ 桌面三平台打包。
+8. **M7** 前端接入 Tauri plugin + 桌面三平台打包。
 9. **M8** 安卓 APK。
 
 ## 10. 体积预算（目标）

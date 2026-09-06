@@ -1,39 +1,44 @@
 import type { PreparedLocalVideoSeek } from "./localVideoSeekBridge";
 
-export type LocalVideoSeekResult = "activated" | "fallback" | "stale";
+export type LocalVideoSeekResult = "activated" | "fallback" | "stale" | "canceled";
 
 interface LocalVideoSeekActions {
-  commitAudio(): void | Promise<void>;
+  /** false = the native landing failed/timed out; never decode or publish a guessed target. */
+  commitAudio(): void | boolean | Promise<void | boolean>;
   publishVideoSeek(): void;
   isCurrent(): boolean;
+  cancelVideo?(): void;
 }
 
-/**
- * Starts the audible transport edge synchronously, then lets the muted picture catch up.
- * The ordering is deliberate: video decode latency must never delay the Rust audio seek.
- */
-export function coordinateLocalVideoSeek(
+/** Audio owns the landing; video decode and presentation follow that accepted source clock. */
+export async function coordinateLocalVideoSeek(
   prepareVideo: () => Promise<PreparedLocalVideoSeek | null>,
   actions: LocalVideoSeekActions,
 ): Promise<LocalVideoSeekResult> {
-  const audioReady = actions.commitAudio();
-  return Promise.resolve(audioReady)
-    .then(() => {
-      if (!actions.isCurrent()) return null;
-      return prepareVideo();
-    })
-    .then((prepared) => {
-      if (!actions.isCurrent()) {
-        prepared?.cancel();
-        return "stale" as const;
-      }
-      const activated = prepared?.activate() ?? false;
-      actions.publishVideoSeek();
-      return activated ? ("activated" as const) : ("fallback" as const);
-    })
-    .catch(() => {
-      if (!actions.isCurrent()) return "stale" as const;
-      actions.publishVideoSeek();
-      return "fallback" as const;
-    });
+  try {
+    const committed = await actions.commitAudio();
+    if (!actions.isCurrent()) return "stale";
+    if (committed === false) {
+      actions.cancelVideo?.();
+      return "canceled";
+    }
+  } catch {
+    if (!actions.isCurrent()) return "stale";
+    actions.cancelVideo?.();
+    return "canceled";
+  }
+
+  let prepared: PreparedLocalVideoSeek | null = null;
+  try {
+    prepared = await prepareVideo();
+    if (!actions.isCurrent()) { prepared?.cancel(); return "stale"; }
+    if (prepared?.activate()) return "activated";
+  } catch {
+    if (!actions.isCurrent()) { prepared?.cancel(); return "stale"; }
+  }
+  // Only decode failure falls back. A successful slot already follows the device clock;
+  // publishing the original gesture target would rewind and flush its freshly decoded frame.
+  actions.cancelVideo?.();
+  actions.publishVideoSeek();
+  return "fallback";
 }

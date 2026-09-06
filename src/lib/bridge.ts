@@ -1,6 +1,5 @@
 /**
  * KDJ 运行时桥接层：正式环境走 Tauri，独立 Rust Web 调试走浏览器降级。
- * Electron 已停用，不再探测或兼容它的 preload 全局对象。
  */
 
 import {
@@ -254,12 +253,17 @@ async function createTauriBridge(): Promise<KdjBridge> {
       const picked = await tauriInvoke<unknown>("pick_folders");
       return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
     },
+    importWorkshopFiles: desktop ? input => tauriInvoke("workshop_import_files", {input}) : undefined,
+    onMediaDrop: desktop ? async handler => {
+      const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      return getCurrentWebviewWindow().listen<import("../types/workshop").WorkshopNativeDrop>("kdj:media-drop", e => handler(e.payload));
+    } : undefined,
     // 安卓：查询是否已授予媒体读取权限（供扫描 0 首时区分「没权限」和「真没歌」）。
     mediaPermissionGranted: android
       ? () => tauriInvoke<boolean>("media_permission_granted")
       : () => Promise.resolve(true),
-    // 契约里 windowControl 是同步的（Electron 走 ipcRenderer.send 不等回包），
-    // 改成 async 会波及所有窗口控制入口，所以这里 fire-and-forget 保持签名不变
+    // 契约里 windowControl 是同步的；改成 async 会波及所有窗口控制入口，
+    // 所以这里 fire-and-forget 保持签名不变
     windowControl: (action) => {
       // 自绘关闭键：先静音再关窗，否则 webview 拆掉时 MediaElement 会硬断爆音
       if (action === "close") silenceMediaForExit();
@@ -433,8 +437,8 @@ export function initBridge(): Promise<KdjBridge> {
 /**
  * 同步取桥接层。调用点全部发生在 React 挂载之后，此时 `initBridge` 已经 resolve。
  *
- * 没初始化时不静默降级：Electron 下 preload 本来就是同步可用的，直接兜底；
- * 其余情况宁可抛出来，也好过悄悄连到一个错的 baseUrl 上排查半天。
+ * 没初始化时不静默降级：只接受已经同步注入的 `window.kdj`；其余情况宁可
+ * 抛出来，也好过悄悄连到一个错的 baseUrl 上排查半天。
  */
 export function getBridge(): KdjBridge {
   if (current) return current;

@@ -1,6 +1,6 @@
 """FastAPI 应用：全部 HTTP 路由 + 鉴权中间件 + WS hub。
 
-路由一一对应 docs/00-architecture.md 第 2.2 / 2.3 节。
+这里保留历史 HTTP/WS 路由，仅供迁移时查阅。
 
 线程模型：
 - 绝大多数路由写成同步 `def`，FastAPI 会自动丢到 anyio 线程池里跑。

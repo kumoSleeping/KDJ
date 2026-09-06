@@ -156,6 +156,8 @@ pub struct ScanReport {
     /// **包含未变化的曲目**，这样调用方可以直接拿它当"这批文件对应的曲目集合"
     /// 去做后续的自动分析；要不要重分析由 `pending_analysis_ids` 决定。
     pub track_ids: Vec<i64>,
+    /// Exact insert receipt, used by explicit imports for cancellation.
+    pub created_ids: Vec<i64>,
     /// 请求的根里**存在但 readdir 失败**的（权限被拒 / 挂载断开 / TCC 拦截）。
     ///
     /// 扫描本身不算失败，但调用方必须让用户知道——否则一次"成功"的扫描
@@ -163,7 +165,7 @@ pub struct ScanReport {
     /// TCC 被拒、外置盘掉线，全是这个形状）。不存在的路径不算在内：
     /// 那是"还没建好"，不是"读不了"。
     pub unreadable_roots: Vec<String>,
-    /// 用户是否在任务结束前请求了取消。已经提交的小批次不会回滚。
+    /// 用户是否在任务结束前请求了取消。取消会撤回本次新增记录。
     pub cancelled: bool,
 }
 
@@ -188,7 +190,7 @@ pub fn scan_paths(
     scan_paths_cancellable(service, paths, recursive, on_progress, &|| false)
 }
 
-/// 可取消的扫描入口。取消是协作式的：已经提交的批次保留，尚未开始的批次不再读取。
+/// 可取消的扫描入口；出错或取消时撤回本次新增记录。
 pub fn scan_paths_cancellable(
     service: &LibraryService,
     paths: &[String],
@@ -196,12 +198,33 @@ pub fn scan_paths_cancellable(
     on_progress: ProgressFn<'_>,
     should_cancel: CancelFn<'_>,
 ) -> Result<ScanReport> {
+    let mut created_ids = Vec::new();
+    let result = scan_paths_inner(service, paths, recursive, on_progress, should_cancel, &mut created_ids);
+    if result.as_ref().map_or(true, |report| report.cancelled) {
+        service.rollback_import(&created_ids)?;
+    }
+    result.map(|mut report| {
+        if report.cancelled { report.track_ids.retain(|id| !created_ids.contains(id)); }
+        else { report.created_ids = created_ids; }
+        report
+    })
+}
+
+fn scan_paths_inner(
+    service: &LibraryService,
+    paths: &[String],
+    recursive: bool,
+    on_progress: ProgressFn<'_>,
+    should_cancel: CancelFn<'_>,
+    created_ids: &mut Vec<i64>,
+) -> Result<ScanReport> {
     let (files, cancelled) = collect_files_cancellable(paths, recursive, should_cancel);
     let total = files.len();
     on_progress(0, total, "");
     if cancelled || should_cancel() {
         return Ok(ScanReport {
             track_ids: Vec::new(),
+            created_ids: Vec::new(),
             unreadable_roots: Vec::new(),
             cancelled: true,
         });
@@ -210,6 +233,7 @@ pub fn scan_paths_cancellable(
     if total == 0 {
         return Ok(ScanReport {
             track_ids: Vec::new(),
+            created_ids: Vec::new(),
             unreadable_roots,
             cancelled: false,
         });
@@ -224,6 +248,7 @@ pub fn scan_paths_cancellable(
         if should_cancel() {
             return Ok(ScanReport {
                 track_ids,
+                created_ids: Vec::new(),
                 unreadable_roots,
                 cancelled: true,
             });
@@ -261,7 +286,7 @@ pub fn scan_paths_cancellable(
         }
 
         if !changed_paths.is_empty() {
-            match service.upsert_files_batched(&changed_paths, "local", "") {
+            match service.upsert_files_batched_tracked(&changed_paths, "local", "", should_cancel, created_ids) {
                 Ok(changed_ids) => {
                     for (position, id) in changed_positions.iter().zip(changed_ids) {
                         ids[*position] = id;
@@ -272,8 +297,9 @@ pub fn scan_paths_cancellable(
                     // 把同批其余 63 首一起漏掉。正常路径不会走这里。
                     tracing::warn!("批量入库失败，改用逐文件重试：{error:#}");
                     for (position, path) in changed_positions.iter().zip(&changed_paths) {
-                        match service.upsert_file(path, "local", "") {
-                            Ok(id) => ids[*position] = Some(id),
+                        if should_cancel() { break; }
+                        match service.upsert_files_batched_tracked(std::slice::from_ref(path), "local", "", should_cancel, created_ids) {
+                            Ok(result) => ids[*position] = result[0],
                             Err(error) => tracing::debug!("跳过 {}：{error:#}", path.display()),
                         }
                     }
@@ -291,6 +317,7 @@ pub fn scan_paths_cancellable(
     service.sync_file_created_times(&created_time_updates)?;
     Ok(ScanReport {
         track_ids,
+        created_ids: Vec::new(),
         unreadable_roots,
         // 最后一批提交后也再看一次；取消恰好落在末批时仍要阻止后续自动分析。
         cancelled: should_cancel(),
@@ -484,6 +511,30 @@ mod tests {
         assert!(report.track_ids.is_empty());
         assert!(service.all_paths().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancellation_after_a_committed_batch_removes_only_this_import() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = scratch("cancel-committed");
+        let service = LibraryService::new(crate::db::Database::open_in_memory().unwrap());
+        let old = dir.join("000-old.mp3");
+        std::fs::write(&old, b"old").unwrap();
+        let old_id = service.upsert_file(&old, "local", "").unwrap();
+        service.db().conn().unwrap().execute("UPDATE tracks SET rating = 5, comment = 'keep' WHERE id = ?", [old_id]).unwrap();
+        for n in 0..70 { std::fs::write(dir.join(format!("new-{n:03}.mp3")), b"new").unwrap(); }
+        let cancel = AtomicBool::new(false);
+        let report = scan_paths_cancellable(&service, &[dir.to_string_lossy().into_owned()], true,
+            &|done, _, _| { if done == 1 { cancel.store(true, Ordering::SeqCst); } },
+            &|| cancel.load(Ordering::SeqCst)).unwrap();
+        assert!(report.cancelled);
+        assert!(report.created_ids.is_empty());
+        assert_eq!(service.all_paths().unwrap().len(), 1);
+        let kept = service.get(old_id).unwrap().unwrap();
+        assert_eq!(kept.rating, 5);
+        assert_eq!(kept.comment, "keep");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 71, "never remove source files");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

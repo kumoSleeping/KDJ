@@ -1,6 +1,7 @@
 use std::cell::UnsafeCell;
 use std::fs::File;
 use std::io::{Read, Seek};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -1169,21 +1170,42 @@ where
         + Send
         + 'static,
 {
+    if cancelled() {
+        bail!("stream preparation cancelled before buffer allocation");
+    }
     let (raw, raw_writer) = StreamSource::bounded(raw_capacity_frames);
+    if cancelled() {
+        bail!("stream preparation cancelled before decoder start");
+    }
     let (decoder_done, decoder_result) = mpsc::sync_channel(1);
     let decoder_cancelled = Arc::clone(&cancelled);
     thread::Builder::new()
         .name("kdj-tempo-decode".to_string())
         .spawn(move || {
             kdj_core::thread_qos::prefer_live_audio();
-            let result = decode(raw_writer, decoder_cancelled);
+            // A codec panic must travel through the normal worker-failure path. Dropping the
+            // result sender loses its cause and used to leave the UI with a channel error.
+            let result = catch_unwind(AssertUnwindSafe(|| if decoder_cancelled() {
+                Err(anyhow::anyhow!(
+                    "stream preparation cancelled before media open"
+                ))
+            } else {
+                decode(raw_writer, decoder_cancelled)
+            })).unwrap_or_else(|panic| {
+                let detail = panic.downcast_ref::<String>().map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown decoder panic");
+                Err(anyhow::anyhow!("audio decoder panicked: {detail}"))
+            });
             let _ = decoder_done.send(result);
         })
         .context("start tempo decode worker")?;
 
     kdj_core::thread_qos::prefer_live_audio();
 
-    let mut stretcher = PitchPreservingStretcher::new(tempo.clone(), output_sample_rate)?;
+    // 1× playback writes decoded PCM straight through. Rubber Band is constructed lazily only
+    // after a surviving generation receives a real TEMPO/KEY request.
+    let mut stretcher: Option<PitchPreservingStretcher<T>> = None;
     let mut loop_reader = PcmLoopReader::new(output_sample_rate);
     let mut seen_seek = seek
         .as_ref()
@@ -1198,7 +1220,9 @@ where
                 loop_reader.reset();
                 while raw.pop_consumer().is_some() {}
                 output_writer.begin_discontinuity();
-                stretcher.reset()?;
+                if let Some(stretcher) = &mut stretcher {
+                    stretcher.reset()?;
+                }
                 control.acknowledge_pipeline(seen_seek);
                 continue;
             }
@@ -1214,38 +1238,54 @@ where
         if let Some(packet) = loop_reader.next(&raw) {
             let packet_loop_generation = packet.source_timing.loop_generation;
             let mut superseded = false;
-            stretcher.push_transport_timed(
-                packet.frame,
-                packet.source_timing,
-                |output, media_advance, tempo_revision, source_timing| {
-                    if superseded {
-                        return Ok(());
-                    }
-                    let delivered = output_writer.push_with_transport_timing_interruptible(
-                        output,
-                        media_advance,
-                        tempo_revision,
-                        source_timing,
-                        &*cancelled,
-                        || {
-                            seek.as_ref()
-                                .is_some_and(|control| control.generation() != seen_seek)
-                                || loop_window.as_ref().is_some_and(|window| {
-                                    let (generation, snapshot) = window.versioned_snapshot();
-                                    snapshot.is_some_and(|window| {
-                                        generation != packet_loop_generation
-                                            && source_timing.media_time.is_finite()
-                                            && source_timing.media_time
-                                                + 0.5 / f64::from(output_sample_rate.max(1))
-                                                >= window.end()
-                                    })
+            if stretcher.is_none()
+                && (!tempo.is_unity() || tempo.pitch_semitones().abs() > f32::EPSILON)
+            {
+                if cancelled() {
+                    bail!("stream preparation cancelled before Rubber Band init");
+                }
+                stretcher = Some(PitchPreservingStretcher::new(
+                    tempo.clone(),
+                    output_sample_rate,
+                )?);
+                if cancelled() {
+                    bail!("stream preparation cancelled after Rubber Band init");
+                }
+            }
+            let mut deliver = |output, media_advance, tempo_revision, source_timing| {
+                if superseded {
+                    return Ok(());
+                }
+                let delivered = output_writer.push_with_transport_timing_interruptible(
+                    output,
+                    media_advance,
+                    tempo_revision,
+                    source_timing,
+                    &*cancelled,
+                    || {
+                        seek.as_ref()
+                            .is_some_and(|control| control.generation() != seen_seek)
+                            || loop_window.as_ref().is_some_and(|window| {
+                                let (generation, snapshot) = window.versioned_snapshot();
+                                snapshot.is_some_and(|window| {
+                                    generation != packet_loop_generation
+                                        && source_timing.media_time.is_finite()
+                                        && source_timing.media_time
+                                            + 0.5 / f64::from(output_sample_rate.max(1))
+                                            >= window.end()
                                 })
-                        },
-                    )?;
-                    superseded = !delivered;
-                    Ok(())
-                },
-            )?;
+                            })
+                    },
+                )?;
+                superseded = !delivered;
+                Ok(())
+            };
+            if let Some(stretcher) = &mut stretcher {
+                stretcher.push_transport_timed(packet.frame, packet.source_timing, &mut deliver)?;
+            } else {
+                tempo.mark_passthrough_applied();
+                deliver(packet.frame, 1.0, tempo.revision(), packet.source_timing)?;
+            }
             continue;
         }
         if raw.ended() && !loop_reader.is_replaying() {
@@ -1255,15 +1295,19 @@ where
         // only; yielding here keeps it from stealing the UI/audio callback's time slice.
         thread::sleep(Duration::from_millis(1));
     }
-    stretcher.finish_transport_timed(|output, media_advance, tempo_revision, source_timing| {
-        output_writer.push_with_transport_timing(
-            output,
-            media_advance,
-            tempo_revision,
-            source_timing,
-            &*cancelled,
-        )
-    })?;
+    if let Some(stretcher) = &mut stretcher {
+        stretcher.finish_transport_timed(
+            |output, media_advance, tempo_revision, source_timing| {
+                output_writer.push_with_transport_timing(
+                    output,
+                    media_advance,
+                    tempo_revision,
+                    source_timing,
+                    &*cancelled,
+                )
+            },
+        )?;
+    }
     output_writer.finish();
     decoder_result
         .recv()
@@ -3265,6 +3309,38 @@ mod tests {
             output_frames += 1;
         }
         assert!((output_frames as f32 - input_frames as f32 / 1.5).abs() < 1_000.0);
+        assert!(output.drained());
+    }
+
+    #[test]
+    fn pipeline_reports_decoder_panic_and_allows_the_next_stream() {
+        for panic_after_audio in [false, true] {
+            let (output, writer) = StreamSource::<[f32; 2]>::bounded(64);
+            let result = run_pitch_preserving_pipeline(
+                TempoControl::new(1.0), 48_000, 64, writer,
+                move |mut raw_writer, cancelled| {
+                    if panic_after_audio {
+                        raw_writer.push([0.25, 0.25], &*cancelled)?;
+                    }
+                    panic!("injected mid-track codec failure");
+                },
+                Arc::new(|| false), None, None,
+            );
+            assert!(result.unwrap_err().to_string().contains("injected mid-track codec failure"));
+            assert!(output.ended());
+        }
+        let (output, writer) = StreamSource::<[f32; 2]>::bounded(64);
+        run_pitch_preserving_pipeline(
+            TempoControl::new(1.0), 48_000, 64, writer,
+            |mut raw_writer, cancelled| {
+                raw_writer.push([0.5, 0.5], &*cancelled)?;
+                Ok(StreamMetadata {
+                    duration: None, source_sample_rate: 48_000, output_sample_rate: 48_000,
+                })
+            },
+            Arc::new(|| false), None, None,
+        ).unwrap();
+        assert_eq!(output.pop_consumer().unwrap(), [0.5, 0.5]);
         assert!(output.drained());
     }
 

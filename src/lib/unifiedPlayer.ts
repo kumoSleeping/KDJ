@@ -164,6 +164,8 @@ export interface UnifiedTransitionPlan {
 export interface UnifiedPlayerSource {
   src: string;
   track: Track;
+  /** Monotonic manager replacement intent. Rust uses it in addition to track identity. */
+  intentId?: number;
   artworkUrl?: string;
   position?: number;
   rate?: number;
@@ -192,6 +194,8 @@ export interface UnifiedPlayer {
   load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
   loadDeck(deck: 0 | 1, source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
   prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
+  /** Same project and duration; the native device clock survives a mix change. */
+  replaceAudio?(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
   handoff(
     trackId: number,
     position: number,
@@ -199,6 +203,8 @@ export interface UnifiedPlayer {
     plan?: UnifiedTransitionPlan,
   ): Promise<UnifiedPlayerState>;
   setQueue(sources: UnifiedPlayerSource[]): Promise<UnifiedPlayerState>;
+  /** Update musical metadata for the accepted source without reopening media. */
+  updateBeatGrid?(track: Track, intentId: number): Promise<UnifiedPlayerState>;
   play(): Promise<UnifiedPlayerState>;
   pause(): Promise<UnifiedPlayerState>;
   /** Explicit source replacement fence: silence current output without waiting behind UI commandTail. */
@@ -843,6 +849,9 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private commandTail: Promise<void> = Promise.resolve();
   /** Number of commands running or already reserved behind the serialized tail. */
   private commandDepth = 0;
+  /** Manager source replacement bypasses background/transport work and keeps one latest waiter. */
+  private loadTail: Promise<void> = Promise.resolve();
+  private loadDepth = 0;
   /** 队列更新是可丢弃的后台意图；只合并尚未进入 IPC 的旧队列更新。 */
   private queueRevision = 0;
   /** 预测预热同样只保留最后一个尚未进入 IPC 的候选。 */
@@ -944,6 +953,9 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     isCurrent: () => boolean = () => true,
     acceptAcknowledgement = true,
   ): Promise<UnifiedPlayerState> {
+    // Reserve while still in the caller's stack. If a newer Load overtakes this queued command,
+    // Rust can reject the older id instead of letting it acquire a new id after the replacement.
+    const reservedCommandId = this.initialized ? this.nextCommandId++ : null;
     const run = async () => {
       // 只在真正进入 IPC 前检查；旧的后台预热因此不会占用 Rust actor 的命令槽。
       if (!isCurrent()) return this.snapshot;
@@ -952,7 +964,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       // the selected row and detail canvases.
       if (!this.initialized) await this.initialize();
       if (!isCurrent()) return this.snapshot;
-      const commandId = this.nextCommandId++;
+      const commandId = reservedCommandId ?? this.nextCommandId++;
       const ack = await invoke<DesktopCommandAckRaw>("playback_command", { commandId, command });
       // A TEMPO fader acknowledgement contains a full Deck snapshot. Applying dozens of those
       // per second re-renders every waveform despite the compositor having nothing new to draw.
@@ -960,9 +972,11 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       // continuous controls use that edge while ordinary transport commands still accept at once.
       return acceptAcknowledgement ? this.accept(ack.snapshot) : this.snapshot;
     };
-    const startImmediately = this.initialized && this.commandDepth === 0;
+    const startImmediately = this.initialized && this.commandDepth === 0 && this.loadDepth === 0;
     this.commandDepth += 1;
-    const operation = startImmediately ? run() : this.commandTail.then(run);
+    const operation = startImmediately
+      ? run()
+      : this.commandTail.then(() => this.loadTail).then(run);
     // 失败不能堵死后续播放命令，但调用方仍会收到本次 operation 的原始错误。
     this.commandTail = operation.then(
       () => {
@@ -970,6 +984,37 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       },
       () => {
         this.commandDepth = Math.max(0, this.commandDepth - 1);
+      },
+    );
+    return operation;
+  }
+
+  /** Independent latest-wins manager source lane. At most one Load is in IPC and one waits. */
+  private latestLoad(
+    command: Record<string, unknown>,
+    isCurrent: () => boolean,
+  ): Promise<UnifiedPlayerState> {
+    const reservedCommandId = this.initialized ? this.nextCommandId++ : null;
+    const run = async () => {
+      if (!isCurrent()) return this.snapshot;
+      if (!this.initialized) await this.initialize();
+      if (!isCurrent()) return this.snapshot;
+      const commandId = reservedCommandId ?? this.nextCommandId++;
+      const ack = await invoke<DesktopCommandAckRaw>("playback_command", {
+        commandId,
+        command,
+      });
+      return isCurrent() ? this.accept(ack.snapshot) : this.snapshot;
+    };
+    const startImmediately = this.initialized && this.loadDepth === 0;
+    this.loadDepth += 1;
+    const operation = startImmediately ? run() : this.loadTail.then(run);
+    this.loadTail = operation.then(
+      () => {
+        this.loadDepth = Math.max(0, this.loadDepth - 1);
+      },
+      () => {
+        this.loadDepth = Math.max(0, this.loadDepth - 1);
       },
     );
     return operation;
@@ -1011,6 +1056,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       : null;
     return {
       trackId: source.track.id,
+      intentId: source.intentId ?? 0,
       // Online previews stay behind the loopback proxy; Rust owns the final PCM/output path on
       // desktop and Android just as it does for local files.
       path: remote ? source.src : source.track.path,
@@ -1051,7 +1097,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.platterRevisions[1] += 1;
     this.platterSessions = [null, null];
     const revision = ++this.loadRevision;
-    return this.command(
+    return this.latestLoad(
       {
         type: "load",
         source: this.source(source),
@@ -1059,6 +1105,16 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       },
       () => revision === this.loadRevision,
     );
+  }
+
+  updateBeatGrid(track: Track, intentId: number): Promise<UnifiedPlayerState> {
+    const encoded = this.source({ src: "", track, intentId });
+    return this.command({
+      type: "updateBeatGrid",
+      trackId: track.id,
+      intentId,
+      beatGrid: encoded.beatGrid ?? null,
+    });
   }
 
   loadDeck(deck: 0 | 1, source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
@@ -1073,6 +1129,10 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.platterRevisions[deck] += 1;
     this.platterSessions[deck] = null;
     return this.command({ type: "loadDeck", deck, source: this.source(source) });
+  }
+
+  replaceAudio(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+    return this.command({ type: "replaceAudio", source: this.source(source) });
   }
 
   prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
@@ -1519,6 +1579,8 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.sequence = 0;
     this.commandDepth = 0;
     this.commandTail = Promise.resolve();
+    this.loadDepth = 0;
+    this.loadTail = Promise.resolve();
     this.publish(INITIAL_STATE);
   }
 }

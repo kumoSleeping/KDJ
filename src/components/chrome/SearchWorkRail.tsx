@@ -1,10 +1,10 @@
+import { WorkRailCollapse } from "./WorkRailControls";
 import {
   ArrowLeft,
   CheckSquare,
   ChevronLeft,
   ChevronRight,
   Download,
-  ListCollapse,
   ListMusic,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -321,16 +321,7 @@ export function SearchWorkRail({
               </span>
             </span>
           ) : null}
-          <button
-            type="button"
-            className="kd-chrome-btn"
-            data-action="dismiss-results"
-            aria-label="收起在线结果"
-            title="收起在线结果"
-            onClick={onClose}
-          >
-            <ListCollapse size={15} strokeWidth={2.15} />
-          </button>
+          <WorkRailCollapse label="收起在线结果" onClick={onClose} />
           {asideToggle}
         </>
       }

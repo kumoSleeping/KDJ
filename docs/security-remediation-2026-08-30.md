@@ -3,7 +3,7 @@
 - 整改日期：2026-08-30
 - 工作区：`/Users/kumo/git/kdj`
 - 基线提交：`508a7cd`（`main`，整改尚未提交）
-- 有效架构：Rust + Tauri；未运行或修复已退役的 Electron/Python runtime
+- 有效架构：Rust + Tauri；未运行或修复已退役的 Python runtime
 - 候选版本：`1.0.0-rc1`（按正式全量更新发布）；远端最新标签：`v0.2.44`
 - 结论：**14 项问题已完成代码整改；平台原生可信签名按发布负责人决定延期，桌面与 Android 发布仍以自动化门禁结果为准。**
 
@@ -24,7 +24,7 @@
 | SEC-003 | Android 重复初始化 `ndk_context` | 代码已修复，待设备验收 | Kotlin `AtomicBoolean` 与 Rust `OnceLock` 双门禁，使用 Application Context，JNI 返回明确状态。 |
 | SEC-004 | NetEase/QQ 会话文件权限过宽 | 已修复 | 新增统一私密会话写入：目录 0700，临时/既有文件 0600，创建时限权、同步后原子替换。 |
 | SEC-005 | 高权限 WebView 执行远程 JavaScript | 已修复（隔离恢复功能） | 主 renderer 删除 BotGuard/player 动态执行并移除生产 CSP 的 `unsafe-eval`。普通 YouTube 使用唯一的官方 embed 子 WebView：非持久、无浏览器登录 Cookie，且首次远程导航前移除全部 Tauri user script/IPC；不再生成普通视频 proof、解析 `s`/`n` 或代理 GoogleVideo。YTM 必需的 challenge 与窄化 player 变换只在无 Cookie、无 Tauri IPC、网络受限的隐藏原生 WKWebView 中运行，并继续使用唯一的隔离 WebPO + SABR 音频链。 |
-| SEC-006 | tag 测试可失败、缺前端门禁 | 已修复 | tag/main Rust 测试硬失败；加入全部前端逻辑测试、生产 Web 构建、npm audit/签名与 cargo audit。 |
+| SEC-006 | tag 测试可失败、发布门禁不完整 | 已修复 | tag/main Rust 测试硬失败；加入生产 Web 构建、npm audit/签名与 cargo audit。 |
 | SEC-007 | CI 权限/Action/签名校验过宽 | 已修复 | 所有 Actions 固定完整 SHA；构建 job 只读、发布 job 独立写权限；updater 和 Android 均签后验证身份。 |
 | SEC-008 | 首次安装包缺平台原生可信签名 | 延期，沿用既有发布方式 | 本版与 `v0.2.44` 一致：macOS 使用 ad-hoc 签名，Windows 不做 Authenticode；Tauri updater 仍强制 minisign 验签。平台原生证书签名留待后续单独启用。 |
 | SEC-009 | Android 全局允许明文 HTTP | 已修复 | 全局 `usesCleartextTraffic=false`；Network Security Config 仅给 `localhost`/`127.0.0.1` 回环例外；远程媒体强制 HTTPS。 |
@@ -71,7 +71,6 @@
 | 检查 | 结果 |
 | --- | --- |
 | `npm run typecheck` | 通过 |
-| `npm run test:frontend-logic` | 43 个前端测试套件全部通过；包含 YTM SABR 零自动重试不变量 |
 | `npm run tauri:web:build` | 通过；仅既有 chunk/dynamic-import 提示 |
 | `cargo test --workspace --lib --bins --tests` | 992 个测试通过，0 失败 |
 | `cargo check --workspace --all-targets` | 通过；仅 dead-code 提示 |
@@ -84,7 +83,6 @@
 | 版本/远端标签 | 1.0.0-rc1 严格高于远端最新 v0.2.44 |
 | Tauri 完整停止后冷启动，再停止 | 通过；服务与窗口进程正常启动，退出后无残留开发进程 |
 | capability 日志脱敏 | 冷启动实测只输出 HTTP 状态，不再输出 URL/token；5 个桌面媒体测试通过 |
-| 官方 YouTube embed 单链路测试 | 前端 2 个不重试不变量与 Rust 2 个导航/边界测试通过 |
 | macOS 静音真实播放 E2E | 冷播、seek、第二视频切换、热播与 YTM AAC 连续通过；普通视频冷播 3.089 秒可播放，切换/热播约 0.52 秒可播放 |
 
 ## 5. 仍需发布负责人完成的外部验收

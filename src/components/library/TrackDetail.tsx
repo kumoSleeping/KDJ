@@ -8,7 +8,7 @@ import {
 } from "react";
 import { Pencil, Plus, RotateCcw, Search, Star, Upload } from "lucide-react";
 import { api } from "../../lib/api";
-import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isVideoTrack } from "../../lib/format";
+import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isVideoTrack } from "../../lib/format";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import { normalizePriority, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
@@ -29,6 +29,7 @@ import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
 import { CamelotWheel } from "./CamelotWheel";
 import { HarmonicList } from "./HarmonicList";
 import { useVideoPip } from "../../lib/videoPip";
+import { DETAIL_PANELS_DEFAULT_FIRST_IDS, DETAIL_PANELS_STORAGE_KEY } from "../../lib/detailPanelPrefs";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { VjSearchPanel } from "./VjSearchPanel";
 import { pointPatch, Waveform } from "./Waveform";
@@ -440,7 +441,7 @@ export function TrackDetail({ track }: { track: Track }) {
     requestAnimationFrame(() => {
       document
         .querySelector<HTMLElement>(
-          '.kd-panel-slot[data-panel-stack="kd-detail-panels"][data-panel-id="metadata"]',
+          `.kd-panel-slot[data-panel-stack="${DETAIL_PANELS_STORAGE_KEY}"][data-panel-id="metadata"]`,
         )
         ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
@@ -609,8 +610,8 @@ export function TrackDetail({ track }: { track: Track }) {
       {/* 这几块的顺序用户可以拖着调，长期记住——整理曲库时想先看元数据，
           排 set 时想先看接下一首，与其替他选一个，不如让他拖一次然后不用再想。 */}
       <PanelStack
-        storageKey="kd-detail-panels"
-        defaultFirstIds={["now-playing-control"]}
+        storageKey={DETAIL_PANELS_STORAGE_KEY}
+        defaultFirstIds={DETAIL_PANELS_DEFAULT_FIRST_IDS}
       >
         {isVideoTrack(track.format) && !pipOwnsVideo && (
           <Panel key="video" heading="Video" padded={false} dense>
@@ -675,7 +676,7 @@ export function TrackDetail({ track }: { track: Track }) {
       >
         {editing ? (
           <div className="kd-col" style={{ gap: "0.4rem" }}>
-            <div className="kd-cover-tools">
+            {!isImageTrack(track.format) && <div className="kd-cover-tools">
               <div className="kd-cover-tools-head">
                 <span>封面</span>
                 <span className="kd-faint">
@@ -747,7 +748,7 @@ export function TrackDetail({ track }: { track: Track }) {
                   <span className="kd-faint">把左侧歌曲拖到这里复用封面，或点击上面的在线匹配</span>
                 )}
               </div>
-            </div>
+            </div>}
             <Field label="标题">
               <input
                 className="kd-input"

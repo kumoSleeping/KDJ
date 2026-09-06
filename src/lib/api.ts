@@ -1,8 +1,11 @@
+import type { WorkshopSnapshot, WorkshopEdit, WorkshopPositionResults } from "../types/workshop";
 /**
  * 本地后端客户端。所有网络访问都必须走这里，组件里不要出现裸 fetch。
  */
 
 import { getBridge } from "./bridge";
+import type { LibraryQuery, TrackIndex } from "./libraryWindow";
+import type { CompositionLane, CompositionOptions, CompositionPatch, CompositionSnapshot } from "../types/composition";
 import {
   describeApiActivity,
   finishApiActivity,
@@ -18,6 +21,7 @@ import {
   YOUTUBE_NATIVE_PROOF_SUPPORTED,
 } from "./youtubeNativePo";
 import { appendClientPlaybackNonce } from "./youtubePlaybackUrl";
+import { waitForSettingsWrites } from "./settingsWriteBarrier";
 import {
   decodeWaveformBinary,
   isWaveformBinaryContentType,
@@ -36,11 +40,13 @@ import type {
   FileDisposalMode,
   FolderForgetResult,
   FolderOpResult,
+  FolderSnapshotResponse,
   FolderTree,
   FolderUndoResponse,
   FolderUndoStatus,
   HarmonicMatch,
   Health,
+  FfmpegInstallationStatus,
   IntakeRequest,
   IntakeResponse,
   LibraryStats,
@@ -84,7 +90,7 @@ import type {
   WsEvent,
 } from "../types";
 
-// 壳可能是 Tauri / Electron / 浏览器预览，由 bridge.ts 运行时探测。
+// 运行环境可能是 Tauri 或浏览器预览，由 bridge.ts 运行时探测。
 // 保持同步取用：audioUrl / coverUrl / WebSocket 这些调用点不能改成 async。
 const bridge = () => getBridge();
 
@@ -729,21 +735,81 @@ async function preparePendingDownloads(onlyId?: string): Promise<void> {
   if (firstError) throw firstError;
 }
 
-/** 单击选择与双击播放会在同一拍请求同一条详情；只合并在途请求，不缓存完成值。 */
-const trackDetailRequests = new Map<number, Promise<Track>>();
+export interface TrackDetailRequestOptions {
+  signal?: AbortSignal;
+  /** 摘要版本；同一 id 被重新分析/编辑后不会命中旧详情。 */
+  modifiedAt?: string;
+}
 
-function requestTrackDetail(id: number): Promise<Track> {
-  const existing = trackDetailRequests.get(id);
-  if (existing) return existing;
-  const pending = request<Track>(`/library/tracks/${id}`).finally(() => {
-    if (trackDetailRequests.get(id) === pending) trackDetailRequests.delete(id);
-  });
-  trackDetailRequests.set(id, pending);
+const TRACK_DETAIL_CACHE_LIMIT = 64;
+const trackDetailRequests = new Map<string, Promise<Track>>();
+const trackDetailCache = new Map<string, Track>();
+const trackDetailEpoch = new Map<number, number>();
+
+function trackDetailKey(id: number, modifiedAt?: string): string {
+  return `${id}:${modifiedAt || "latest"}`;
+}
+
+function cacheTrackDetail(key: string, track: Track): Track {
+  trackDetailCache.delete(key);
+  trackDetailCache.set(key, track);
+  while (trackDetailCache.size > TRACK_DETAIL_CACHE_LIMIT) {
+    const oldest = trackDetailCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    trackDetailCache.delete(oldest);
+  }
+  return track;
+}
+
+function invalidateTrackDetail(ids: number | number[]): void {
+  const wanted = new Set(Array.isArray(ids) ? ids : [ids]);
+  for (const id of wanted) {
+    trackDetailEpoch.set(id, (trackDetailEpoch.get(id) ?? 0) + 1);
+  }
+  for (const key of trackDetailCache.keys()) {
+    if (wanted.has(Number(key.slice(0, key.indexOf(":"))))) trackDetailCache.delete(key);
+  }
+  // 已发出的 HTTP 不能替所有消费者强行 abort，但失效后不得再被新读取复用。
+  for (const key of trackDetailRequests.keys()) {
+    if (wanted.has(Number(key.slice(0, key.indexOf(":"))))) trackDetailRequests.delete(key);
+  }
+}
+
+function requestTrackDetail(
+  id: number,
+  options: TrackDetailRequestOptions = {},
+): Promise<Track> {
+  const key = trackDetailKey(id, options.modifiedAt);
+  const cached = trackDetailCache.get(key);
+  if (cached) {
+    trackDetailCache.delete(key);
+    trackDetailCache.set(key, cached);
+    return Promise.resolve(cached);
+  }
+
+  // 可取消的“当前选中”请求不能与别的消费者共用 AbortSignal；无 signal 的读取才合并。
+  if (!options.signal) {
+    const existing = trackDetailRequests.get(key);
+    if (existing) return existing;
+  }
+  const epoch = trackDetailEpoch.get(id) ?? 0;
+  const pending = request<Track>(`/library/tracks/${id}`, {
+    signal: options.signal,
+  }).then((track) =>
+    (trackDetailEpoch.get(id) ?? 0) === epoch ? cacheTrackDetail(key, track) : track,
+  );
+  if (!options.signal) {
+    trackDetailRequests.set(key, pending);
+    void pending.finally(() => {
+      if (trackDetailRequests.get(key) === pending) trackDetailRequests.delete(key);
+    }).catch(() => undefined);
+  }
   return pending;
 }
 
 export const api = {
   health: () => request<Health>("/health"),
+  ffmpegInstallationStatus: () => request<FfmpegInstallationStatus>("/tools/ffmpeg"),
   prewarmYtmPlayback,
 
   getSettings: () => request<Settings>("/settings"),
@@ -839,8 +905,45 @@ export const api = {
   resolve: (url: string, limit = 0) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
+  intakeWorkshop: (input: import("../types/workshop").WorkshopIntake) => input.paths.length && bridge().importWorkshopFiles
+    ? bridge().importWorkshopFiles!(input)
+    : post<import("../types/workshop").WorkshopIntakeResult>("/workshop/intake", input),
+  workshop: () => request<WorkshopSnapshot>("/workshop"),
+  createWorkshop: () => post<WorkshopSnapshot>("/workshop", {}),
+  editWorkshop: (id: string, revision: number, edit: WorkshopEdit) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ revision, ...edit }) }),
+  deleteWorkshop: (id: string, revision: number) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ revision }) }),
+  addWorkshopSources: (id: string, revision: number, track_ids: number[], at_ms: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/sources`, { revision, track_ids, at_ms }),
+  alignWorkshop: (id: string, revision: number, clip_id: string, reference_id: string) => post<{start_ms: number; revision: number}>(`/workshop/${encodeURIComponent(id)}/align`, {revision, clip_id, reference_id}),
+  previewWorkshop: (id: string, revision: number, auditionAfterLayer?: string) => post<{ticket: string; revision: number}>(`/workshop/${encodeURIComponent(id)}/preview`, {revision, audition_after_layer: auditionAfterLayer}),
+  releaseWorkshop: (ticket: string) => request(`/workshop/preview/${encodeURIComponent(ticket)}`, {method: "DELETE"}),
+  workshopPositions: (id:string) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions`,{}),
+  controlWorkshopPositions: (id:string, stopped:boolean, layer_id?:string) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions/control`,{stopped,layer_id}),
+  applyWorkshopPositions: (id:string, revision:number, layer_id:string, analysis_id:string, preset_id:string) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/positions/apply`,{revision,layer_id,analysis_id,preset_id}),
+  workshopFrameUrl: (project: string, source: string, ms: number, width: 160 | 320 | 960 = 160) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/${encodeURIComponent(project)}/sources/${encodeURIComponent(source)}/frame?ms=${Math.max(0,ms).toFixed(3)}&width=${width}`),
+  workshopAudioUrl: (ticket: string) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/media/${encodeURIComponent(ticket)}/audio.wav`),
+  workshopVideoUrl: (ticket: string, clip: string, part: number) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/media/${encodeURIComponent(ticket)}/video/${encodeURIComponent(clip)}/${part}`),
+  exportWorkshop: (id: string, revision: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/export`, {revision}),
+  cancelWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/cancel`, {}),
+  importWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/import`, {}),
+  compositions: () => request<CompositionSnapshot>("/compositions"),
+  enqueueCompositions: async (trackIds: number[]) => {
+    await waitForSettingsWrites();
+    return post<CompositionSnapshot>("/compositions", { track_ids: trackIds });
+  },
+  compositionDefaults: (options: CompositionOptions) => post<CompositionSnapshot>("/compositions/defaults", options),
+  reorderCompositions: (lane: CompositionLane, entryIds: string[]) => post<CompositionSnapshot>("/compositions/order", { lane, entry_ids: entryIds }),
+  stackCompositionVideo: (sourceEntryId: string, targetTaskId: string) => post<CompositionSnapshot>("/compositions/stack-video", { source_entry_id: sourceEntryId, target_task_id: targetTaskId }),
+  patchComposition: (id: string, patch: CompositionPatch) => request<CompositionSnapshot>(`/compositions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  reanalyzeComposition: (id: string, generation: number) => post<CompositionSnapshot>(`/compositions/${encodeURIComponent(id)}/analyze`, { generation }),
+  startCompositions: (ids?: string[]) => post<CompositionSnapshot>("/compositions/start", { ids }),
+  cancelCompositions: (ids?: string[]) => post<CompositionSnapshot>("/compositions/cancel", { ids }),
+  removeComposition: (id?: string, lane?: CompositionLane) => request<CompositionSnapshot>(`/compositions${id ? `/${encodeURIComponent(id)}${lane ? `/${lane}` : ""}` : ""}`, { method: "DELETE" }),
   downloads: () => request<DownloadTask[]>("/downloads"),
-  enqueue: (body: DownloadRequest) => post<DownloadTask[]>("/downloads", body),
+  enqueue: async (body: DownloadRequest) => {
+    // 目录选择先乐观更新 UI、再异步落盘。入队若抢在落盘前，后端会冻结上一个目录。
+    await waitForSettingsWrites();
+    return post<DownloadTask[]>("/downloads", body);
+  },
   preparePendingDownloads: (onlyId?: string) => preparePendingDownloads(onlyId),
   startDownloads: async () => {
     const started = await post<{ started: boolean; retried: number }>("/downloads/start");
@@ -868,6 +971,8 @@ export const api = {
   videoResolve: (url: string, platform?: "bilibili" | "youtube") =>
     post<VideoInfo>("/video/resolve", { url, platform }),
   videoDownload: async (body: VideoDownloadRequest) => {
+    // 视频直达入口很多，也必须与音频共用同一条设置提交屏障。
+    await waitForSettingsWrites();
     const task = await post<DownloadTask>("/video/download", body);
     // 自动下载开启时 worker 会立即进入 authorizing；关闭时查询为空，不会准备。
     void preparePendingDownloads(task.id).catch(() => undefined);
@@ -903,7 +1008,14 @@ export const api = {
     return authenticatedGetUrl(`${baseUrl}/api/video/preview?${query}`);
   },
 
-  tracks: (params: Record<string, string | number | undefined>) => {
+  trackIndex: (params: LibraryQuery, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== "" && !["limit", "offset", "cursor"].includes(key)) query.set(key, String(value));
+    }
+    return request<TrackIndex>(`/library/tracks/index?${query}`, { signal });
+  },
+  tracks: (params: LibraryQuery) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
@@ -913,12 +1025,13 @@ export const api = {
   },
   trackSummaries: (
     trackIds: number[],
-    params: Record<string, string | number | undefined> = {},
-  ) => post<TrackSummary[]>("/library/tracks/summaries", {
-    ...params,
-    track_ids: trackIds,
+    params: LibraryQuery = {},
+    signal?: AbortSignal,
+  ) => request<TrackSummary[]>("/library/tracks/summaries", {
+    method: "POST", signal, body: JSON.stringify({ ...params, track_ids: trackIds }),
   }),
-  track: (id: number) => requestTrackDetail(id),
+  track: (id: number, options?: TrackDetailRequestOptions) => requestTrackDetail(id, options),
+  invalidateTrackDetail,
   patchTrack: (id: number, patch: TrackPatch) =>
     request<TrackPatchResult>(`/library/tracks/${id}`, {
       method: "PATCH",
@@ -1061,6 +1174,8 @@ export const api = {
       source,
     }),
 
+  folderSnapshot: () =>
+    request<FolderSnapshotResponse>("/library/folders/snapshot"),
   folders: () => request<FolderTree>("/library/folders"),
   createFolder: (parent: string, name: string) =>
     post<FolderTree>("/library/folders/create", { parent, name }),
@@ -1145,6 +1260,7 @@ class EventStream {
     this.socket = socket;
     socket.onopen = () => {
       this.retry = 0;
+      for (const listener of this.listeners) listener({ type: "connection.open", payload: {} });
     };
     socket.onmessage = (message) => {
       let event: WsEvent;

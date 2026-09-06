@@ -18,7 +18,7 @@
 在 M4 MacBook（arm64、macOS 15、Xcode 15.2、rustc 1.90.0）上跑
 `npx tauri build`，一次通过，没有改任何配置。
 
-| 产物 | v0.1.0（Electron + PyInstaller） | v0.2.0（Rust + Tauri） | 变化 |
+| 产物 | v0.1.0（旧桌面运行时 + Python） | v0.2.0（Rust + Tauri） | 变化 |
 | --- | --- | --- | --- |
 | macOS arm64 DMG | 155 MB | **5,911,874 B ≈ 5.64 MiB** | **−96.2%**，小 26.2 倍 |
 | macOS `.app` 目录 | — | **10,096 KiB ≈ 9.9 MiB** | — |
@@ -33,9 +33,9 @@ KDJ.app/Contents/
 └── Resources/icon.icns       348,956 B
 ```
 
-**没有 `node_modules`、没有 `.venv`、没有 Electron Framework、没有 sidecar 子进程。**
+**没有 `node_modules`、没有 `.venv`、没有捆绑式浏览器框架、没有 sidecar 子进程。**
 对照 v0.1.0 的体积来源（`00-architecture.md` §1，本机现在还能量到）：
-`node_modules/electron/dist` 242 MB、`sidecar/.venv` 163 MB。这两坨整个消失了。
+旧桌面运行时 242 MB、`sidecar/.venv` 163 MB。这两部分已经消失。
 
 前端不是外挂目录而是**编进二进制**的（`custom-protocol` feature 让
 `generate_context!` 把 `dist-tauri/` 嵌进去）：
@@ -56,8 +56,8 @@ KDJ.app/Contents/
 Tauri 壳（wry + tao + 两个插件 + 嵌进去的 334 KB 前端）把它推到 9,980,144 B，
 **净增 1,730,560 B ≈ 1.65 MiB**。
 
-macOS 的 WebView 是系统的 WKWebView，不随包携带——这是和 Electron 拉开 26 倍的
-根本原因，不是"Rust 比 JS 小"。
+macOS 的 WebView 是系统的 WKWebView，不随包携带——这是包体缩小 26 倍的
+根本原因，不是“Rust 比 JS 小”。
 
 ### DMG 压缩比
 

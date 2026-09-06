@@ -71,6 +71,7 @@ import { Button, InlineNotice, Panel } from "../common";
 import { AccountRow } from "./AccountRow";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
+import { FfmpegPanel } from "./FfmpegPanel";
 
 /**
  * 「设置」住在右侧详情栏，由顶栏那颗小齿轮呼出。
@@ -815,9 +816,16 @@ export function SettingsPanel() {
 
   const accounts = useAppStore((state) => state.accounts);
   const accountsError = useAppStore((state) => state.accountsError);
+  const verifyAccountsIfStale = useAppStore((state) => state.verifyAccountsIfStale);
   const settingsError = useAppStore((state) => state.settingsError);
   const refreshLibrary = useLibraryStore((state) => state.refresh);
   const refreshLibraryStats = useLibraryStore((state) => state.refreshStats);
+
+  useEffect(() => {
+    // 启动只读离线快照；账号设置挂载后静默核验。Store 同时做 single-flight 与
+    // 半小时冷却，StrictMode 或反复开关面板都不会频繁请求第三方平台。
+    void verifyAccountsIfStale();
+  }, [verifyAccountsIfStale]);
 
   useEffect(() => {
     let disposed = false;
@@ -1342,6 +1350,7 @@ export function SettingsPanel() {
 
         <ActivityLogPanel />
 
+        {["darwin", "win32", "linux"].includes(getBridge().platform) ? <FfmpegPanel /> : null}
         {showKdjAiPrompt ? <KdjAiPromptPanel /> : null}
       </div>
     </div>

@@ -848,6 +848,9 @@ pub struct Track {
     pub downbeats: Vec<f64>,
     #[serde(default)]
     pub downbeat_confidence: Option<f64>,
+    /** Analyzer generation that owns the scalar grid above. */
+    #[serde(default)]
+    pub beat_grid_revision: String,
     #[serde(default)]
     pub music_key: String,
     #[serde(default)]
@@ -932,6 +935,18 @@ pub struct TrackSummary {
     #[serde(default)]
     pub bpm_v3: bool,
     #[serde(default)]
+    pub bpm_confidence: Option<f64>,
+    #[serde(default)]
+    pub first_beat: Option<f64>,
+    #[serde(default)]
+    pub beat_origin: Option<f64>,
+    #[serde(default)]
+    pub downbeat_origin: Option<f64>,
+    #[serde(default)]
+    pub downbeat_confidence: Option<f64>,
+    #[serde(default)]
+    pub beat_grid_revision: String,
+    #[serde(default)]
     pub music_key: String,
     #[serde(default)]
     pub camelot: String,
@@ -958,6 +973,10 @@ pub struct TrackSummary {
     pub added_at: String,
     #[serde(default)]
     pub modified_at: String,
+    #[serde(default)]
+    pub cue_ms: Option<i64>,
+    #[serde(default)]
+    pub end_ms: Option<i64>,
     /// 所在目录（= path 的父目录）。前端文件夹范围和拖放仍需要它。
     #[serde(default)]
     pub folder: String,
@@ -1022,11 +1041,19 @@ pub struct TrackPage {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TrackIndex {
+    pub track_ids: Vec<i64>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TrackSummaryPage {
     pub items: Vec<TrackSummary>,
     pub total: i64,
     pub offset: i64,
     pub limit: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// KDJ 本地虚拟播放列表。
@@ -1194,7 +1221,7 @@ pub struct HarmonicMatch {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FolderNode {
     pub path: String,
     pub name: String,
@@ -1213,7 +1240,7 @@ pub struct FolderNode {
     pub managed: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FolderTree {
     pub roots: Vec<FolderNode>,
     /// 落在所有曲库根目录之外的曲目数

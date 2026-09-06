@@ -32,7 +32,8 @@ pub struct ScratchMonoWindow {
 }
 
 struct ScratchWindow {
-    samples: UnsafeCell<Box<[[f32; 2]]>>,
+    /// Allocated only when a real platter/waveform request publishes its first decoded window.
+    samples: UnsafeCell<Option<Box<[[f32; 2]]>>>,
     start_frame: AtomicI64,
     len: AtomicUsize,
     readers: AtomicU32,
@@ -47,9 +48,9 @@ impl Drop for ScratchReaderPin<'_> {
 }
 
 impl ScratchWindow {
-    fn new(capacity: usize) -> Self {
+    fn new(_capacity: usize) -> Self {
         Self {
-            samples: UnsafeCell::new(vec![[0.0; 2]; capacity].into_boxed_slice()),
+            samples: UnsafeCell::new(None),
             start_frame: AtomicI64::new(0),
             len: AtomicUsize::new(0),
             readers: AtomicU32::new(0),
@@ -79,6 +80,7 @@ pub struct ScratchPcmCache {
     miss_count: AtomicU64,
     load_count: AtomicU64,
     failure_count: AtomicU64,
+    allocated_bytes: AtomicUsize,
     /// Sequential transport-decoder PCM for visualization. It is never read by the audio
     /// callback and therefore stays outside the lock-free scratch double buffer above.
     observed_mono: RwLock<Option<ScratchMonoWindow>>,
@@ -123,6 +125,7 @@ impl ScratchPcmCache {
             miss_count: AtomicU64::new(0),
             load_count: AtomicU64::new(0),
             failure_count: AtomicU64::new(0),
+            allocated_bytes: AtomicUsize::new(0),
             observed_mono: RwLock::new(None),
         }
     }
@@ -149,6 +152,11 @@ impl ScratchPcmCache {
 
     pub fn failure_count(&self) -> u64 {
         self.failure_count.load(Ordering::Acquire)
+    }
+
+    /// Physical stereo scratch bytes, excluding the small cache/control structure itself.
+    pub fn allocated_bytes(&self) -> usize {
+        self.allocated_bytes.load(Ordering::Acquire)
     }
 
     pub fn urgent(&self) -> bool {
@@ -283,7 +291,14 @@ impl ScratchPcmCache {
         }
         let len = decoded.frames.len().min(self.capacity);
         // SAFETY: target is inactive and has no pinned readers. Only this single worker writes it.
-        let samples = unsafe { &mut *window.samples.get() };
+        let storage = unsafe { &mut *window.samples.get() };
+        let samples = storage.get_or_insert_with(|| {
+            self.allocated_bytes.fetch_add(
+                self.capacity * std::mem::size_of::<[f32; 2]>(),
+                Ordering::AcqRel,
+            );
+            vec![[0.0; 2]; self.capacity].into_boxed_slice()
+        });
         samples[..len].copy_from_slice(&decoded.frames[..len]);
         window
             .start_frame
@@ -493,7 +508,11 @@ impl ScratchPcmCache {
             let len = window.len.load(Ordering::Acquire).min(self.capacity);
             // SAFETY: this reader pins the active window. The worker cannot recycle it until the
             // reader count returns to zero, and never mutates the active window.
-            let samples = unsafe { &*window.samples.get() };
+            let storage = unsafe { &*window.samples.get() };
+            let Some(samples) = storage.as_deref() else {
+                drop(pin);
+                return None;
+            };
             let value = operation(&samples[..len], start, len);
             drop(pin);
             return Some(value);
@@ -567,12 +586,17 @@ mod tests {
     #[test]
     fn publishes_and_interpolates_an_absolute_source_window() {
         let cache = ScratchPcmCache::new(100);
+        assert_eq!(cache.allocated_bytes(), 0);
         cache.request_prefetch(700.0);
         let mut seen = 0;
         let (generation, start, frames) = cache.next_request(&mut seen).unwrap();
         assert_eq!(start, 100);
         assert_eq!(frames, 1_200);
         assert!(cache.publish(generation, &window(100, 1_200)));
+        assert_eq!(
+            cache.allocated_bytes(),
+            cache.capacity_frames() * std::mem::size_of::<[f32; 2]>()
+        );
         let sample = cache.sample(321.5, -1.0).unwrap();
         assert!((sample[0] - 321.5).abs() < 1e-3);
         assert!((sample[1] + 321.5).abs() < 1e-3);

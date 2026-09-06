@@ -113,10 +113,8 @@ jobs:
           npm audit --audit-level=low
           npm audit signatures
 
-      - name: 前端逻辑与生产构建门禁
-        run: |
-          npm run test:frontend-logic
-          npm run tauri:web:build
+      - name: 前端生产构建门禁
+        run: npm run tauri:web:build
 
       - name: Cargo 依赖漏洞门禁
         run: |

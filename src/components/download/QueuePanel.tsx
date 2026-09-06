@@ -1,19 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
-  AlertTriangle,
-  Ban,
-  Check,
-  ChevronDown,
   CircleMinus,
-  Clock3,
   Copy,
   FolderOpen,
   Link2,
-  Loader2,
   Music2,
-  Pause,
   PencilLine,
-  Play,
   RotateCcw,
   Trash2,
   Video,
@@ -34,10 +26,9 @@ import {
 import { forgetQueueDraft, patchVideoDraft, setQueueDraft } from "../../lib/queueTaskDraft";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
-import { useLibraryStore } from "../../stores/libraryStore";
-import type { DownloadTask, FolderNode, Quality, TaskPhase, TaskState } from "../../types";
+import type { DownloadTask, Quality, TaskPhase, TaskState } from "../../types";
 import { Button, ContextMenu, InlineNotice } from "../common";
-import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
+import { QueueChoice, QueueCover, QueueFrame, QueueList, QueueOverview, QueueStateMark } from "../queue/QueuePrimitives";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 import { PlatformMark } from "./PlatformMark";
 
@@ -63,6 +54,9 @@ const PHASE_LABEL: Record<TaskPhase, string> = {
 };
 
 function stateLabel(task: DownloadTask): string {
+  if (task.state === "failed" && task.path.trim()) {
+    return "已下载，入库失败";
+  }
   if (
     task.state === "queued" ||
     task.state === "running" ||
@@ -78,15 +72,7 @@ const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
 const AUDIO_QUALITIES: Quality[] = ["flac", "320", "128"];
 
 function TaskStateMark({ task }: { task: DownloadTask }) {
-  const props = { size: 12, strokeWidth: 2.1, "aria-hidden": true as const };
-  if (task.state === "running" || task.state === "processing") {
-    return <Loader2 className="kd-download-task-spinner" {...props} />;
-  }
-  if (task.state === "done") return <Check {...props} />;
-  if (task.state === "paused") return <Pause {...props} />;
-  if (task.state === "failed") return <AlertTriangle {...props} />;
-  if (task.state === "canceled") return <Ban {...props} />;
-  return <Clock3 {...props} />;
+  return <QueueStateMark state={task.state} />;
 }
 
 /**
@@ -94,50 +80,7 @@ function TaskStateMark({ task }: { task: DownloadTask }) {
  * 固定尺寸外框始终保留，因此图片挂载/卸载不会推动文字或滚动位置。
  */
 function QueueTaskCover({ task }: { task: DownloadTask }) {
-  const hostRef = useRef<HTMLSpanElement>(null);
-  const [visible, setVisible] = useState(false);
-  const artwork = task.cover?.trim() || "";
-  const fallback = task.kind === "video" ? (
-    <span className="kd-download-task-cover-fallback">
-      <Video size={18} />
-    </span>
-  ) : (
-    <VinylPlaceholder />
-  );
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host || !artwork) {
-      setVisible(false);
-      return;
-    }
-    if (!("IntersectionObserver" in window)) {
-      setVisible(true);
-      return;
-    }
-    const root = host.closest(".kd-download-task-list");
-    const observer = new IntersectionObserver(
-      ([entry]) => setVisible(Boolean(entry?.isIntersecting)),
-      { root },
-    );
-    observer.observe(host);
-    return () => observer.disconnect();
-  }, [artwork]);
-
-  return (
-    <span ref={hostRef} className="kd-download-task-cover" aria-hidden="true">
-      {visible && artwork ? (
-        <CoverImage
-          src={thumbUrl(artwork, 96)}
-          className="kd-download-task-cover-image"
-          loading="lazy"
-          draggable={false}
-          referrerPolicy="no-referrer"
-          fallback={fallback}
-        />
-      ) : fallback}
-    </span>
-  );
+  return <QueueCover artwork={task.cover?.trim() ? thumbUrl(task.cover, 96) : ""} video={task.kind === "video"} />;
 }
 
 /**
@@ -190,18 +133,13 @@ function QueueQualityControl({
         ];
 
   return (
-    <label
-      className="kd-download-task-quality kd-download-task-quality-control kd-mono"
-      data-busy={busy || undefined}
-      title={`调整本条${task.kind === "video" ? "视频画质" : "音质"}`}
-    >
-      {icon}
-      <select
+    <QueueChoice
+      icon={icon}
+      options={options}
+      label={`本条${task.kind === "video" ? "视频画质" : "音质"}，当前 ${label}`}
         value={task.kind === "audio" ? normalizedQuality : String(videoHeight)}
         disabled={busy}
-        aria-label={`本条${task.kind === "video" ? "视频画质" : "音质"}，当前 ${label}`}
-        onChange={(event) => {
-          const nextValue = event.currentTarget.value;
+        onChange={(nextValue) => {
           setBusy(true);
           onError("");
           void (async () => {
@@ -223,15 +161,7 @@ function QueueQualityControl({
             )
             .finally(() => setBusy(false));
         }}
-      >
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      <ChevronDown size={9} aria-hidden="true" />
-    </label>
+      />
   );
 }
 
@@ -274,6 +204,9 @@ function QueueRow({
       ? { page_index: videoPage.index, page_count: videoPage.count }
       : undefined,
   );
+  const recordedTarget = task.path.trim()
+    ? task.path.replace(/[\\/][^\\/]*$/, "") || task.path
+    : task.output_dir || task.dest_dir || "";
 
   return (
     <article
@@ -315,13 +248,13 @@ function QueueRow({
               {task.quality ? (
                 <QueueQualityControl task={task} onError={setCancelError} />
               ) : null}
-              {(task.output_dir || task.dest_dir)?.trim() ? (
+              {recordedTarget.trim() ? (
                 <span
                   className="kd-download-task-target kd-mono"
-                  title={task.output_dir || task.dest_dir}
+                  title={recordedTarget}
                 >
                   <FolderOpen size={10} />
-                  {folderName(task.output_dir || task.dest_dir || "")}
+                  {folderName(recordedTarget)}
                 </span>
               ) : null}
             </span>
@@ -381,15 +314,13 @@ function QueueRow({
             >
               <CircleMinus size={12} />
             </Button>
-          ) : task.state === "done" && task.path ? (
+          ) : !active && task.path ? (
             <Button
               variant="ghost"
               size="sm"
               iconOnly
-              aria-label={
-                task.track_id == null ? "在访达中显示下载文件" : "在曲库中打开所在文件夹"
-              }
-              title={task.track_id == null ? "在访达中显示" : "在曲库中打开"}
+              aria-label="在文件管理器中显示下载文件"
+              title={`在文件管理器中显示：${task.path}`}
               onClick={() => onOpenTask(task)}
             >
               <FolderOpen size={12} />
@@ -401,7 +332,7 @@ function QueueRow({
               size="sm"
               iconOnly
               aria-label="移除队列记录"
-              title="移除记录"
+              title="只移除队列记录，不删除下载文件"
               onClick={() =>
                 void remove(task.id)
                   .then(() => forgetQueueDraft(task.id))
@@ -473,6 +404,18 @@ function QueueRow({
               复制分享内容
             </button>
           ) : null}
+          {task.path.trim() ? (
+            <button
+              type="button"
+              onClick={() => {
+                void copyText(task.path);
+                setMenu(null);
+              }}
+            >
+              <Copy size={12} />
+              复制文件路径
+            </button>
+          ) : null}
         </ContextMenu>
       )}
     </article>
@@ -481,7 +424,7 @@ function QueueRow({
 
 /**
  * 队列概览只保留两层：当前真正可执行的动作，以及一条紧凑的默认参数带。
- * 开始 / 清理始终占住固定位置；空队列时置灰，避免按钮随状态左右跳动。
+ * 开始 / 清记录始终占住固定位置；空队列时置灰，避免按钮随状态左右跳动。
  */
 function QueuePrefsBar({
   canStart,
@@ -540,49 +483,14 @@ function QueuePrefsBar({
   ].filter((fact): fact is { count: number; label: string; tone: string } => fact !== null);
   if (summaryFacts.length === 0 && totalCount > 0) {
     summaryFacts.push({ count: totalCount, label: "已结束", tone: "finished" });
-  } else if (summaryFacts.length === 0) {
-    summaryFacts.push({ count: 0, label: "待开始", tone: "queued" });
   }
   return (
     <section className="kd-download-prefs" aria-label="下载队列概览">
-      <div className="kd-download-overview">
-        <div className="kd-download-summary" title={`队列共 ${totalCount} 项`} aria-live="polite">
-          {summaryFacts.map((fact) => (
-            <span key={fact.label} className="kd-download-summary-fact" data-tone={fact.tone}>
-              <strong>{fact.count}</strong>
-              <span>{fact.label}</span>
-            </span>
-          ))}
-        </div>
-        <div className="kd-download-overview-actions">
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={!canStart}
-            title={canStart ? `${startActions}（下载 / 导出）` : "没有待开始的任务"}
-            onClick={onStart}
-          >
-            <Play size={11} />
-            开始
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={canPause ? false : !canClear}
-            title={
-              canPause
-                ? "暂停当前整批下载"
-                : canClear
-                ? `清理 ${clearableCount} 个未开始或已结束任务`
-                : "没有可清理的任务"
-            }
-            onClick={canPause ? onPause : onClear}
-          >
-            {canPause ? <Pause size={11} /> : <Trash2 size={11} />}
-            {canPause ? "暂停" : "清理"}
-          </Button>
-        </div>
-      </div>
+      <QueueOverview facts={summaryFacts} total={totalCount} canStart={canStart} canSecondary={canPause || canClear}
+        startTitle={canStart ? `${startActions}（下载 / 导出）` : "没有待开始的任务"}
+        secondaryTitle={canPause ? "暂停当前整批下载" : `只清除 ${clearableCount} 条队列记录，不删除下载文件`}
+        secondaryKind={canPause ? "pause" : "clear"} secondaryLabel={canPause ? "暂停" : "清记录"}
+        onStart={onStart} onSecondary={canPause ? onPause : onClear} />
 
       <div className="kd-download-defaults" aria-label="默认下载参数">
         <span className="kd-download-defaults-label">默认</span>
@@ -660,9 +568,6 @@ export function QueuePanel() {
   const clear = useDownloadStore((store) => store.clear);
   const pauseAll = useDownloadStore((store) => store.pauseAll);
   const [dropActive, setDropActive] = useState(false);
-  const folders = useLibraryStore((store) => store.folders);
-  const setFilter = useLibraryStore((store) => store.setFilter);
-  const setListMode = useAppStore((store) => store.setListMode);
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
   const pausedCount = list.reduce((sum, task) => sum + (task.state === "paused" ? 1 : 0), 0);
   const failedCount = list.reduce(
@@ -688,36 +593,15 @@ export function QueuePanel() {
 
   const openTask = (task: DownloadTask) => {
     const path = task.path;
-    // 没有曲库 id 说明它只是下到了默认视频目录，或入库失败。旧逻辑仍把应用
-    // 筛选切到那个曲库外目录，得到一张空表，看起来就像文件消失；此时直接在
-    // 系统文件管理器中定位成品才是可执行的答案。
-    if (task.track_id == null) {
-      void window.kdj?.revealPath(path).catch((error: unknown) =>
-        setActionError(`定位下载文件失败：${(error as Error).message}`),
-      );
-      return;
-    }
-    const wanted = path.replaceAll("\\", "/").replace(/\/+$/, "");
-    let best = "";
-    const visit = (nodes: FolderNode[]) => {
-      for (const node of nodes) {
-        const folder = node.path.replaceAll("\\", "/").replace(/\/+$/, "");
-        if (wanted === folder || wanted.startsWith(`${folder}/`)) {
-          if (folder.length > best.length) best = node.path;
-          visit(node.children);
-        }
-      }
-    };
-    visit(folders?.roots ?? []);
-    setListMode("library");
-    // 树刚启动尚未拉回来时，至少选文件所在的父目录；不能把文件本身
-    // 当成 folder filter，否则中间列表会显示为空，看起来像下载丢了。
-    const parent = path.replace(/[\\/][^\\/]*$/, "") || path;
-    setFilter({ folder: best || parent, q: "" });
+    // 入库失败等异常任务会保留最终落盘路径；直接让文件管理器选中成品，
+    // 比切到一个可能尚未入库的目录筛选更可靠。
+    void window.kdj?.revealPath(path).catch((error: unknown) =>
+      setActionError(`定位下载文件失败：${(error as Error).message}`),
+    );
   };
 
   return (
-    <div
+    <QueueFrame
       className="kd-col kd-download-dropzone"
       data-drop-active={dropActive ? "true" : undefined}
       {...{ [SEARCH_QUEUE_DROP_ATTR]: "true" }}
@@ -771,7 +655,7 @@ export function QueuePanel() {
         onClear={() => {
           setActionError("");
           void clear().catch((error: unknown) =>
-            setActionError(`清理失败：${(error as Error).message}`),
+            setActionError(`清除记录失败：${(error as Error).message}`),
           );
         }}
         onError={setActionError}
@@ -779,7 +663,7 @@ export function QueuePanel() {
 
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
-      <div className="kd-scroll kd-grow kd-download-task-list" style={{ minHeight: 0 }}>
+      <QueueList>
         {list.map((task, index) => (
           <QueueRow
             key={task.id}
@@ -788,7 +672,7 @@ export function QueuePanel() {
             onOpenTask={openTask}
           />
         ))}
-      </div>
-    </div>
+      </QueueList>
+    </QueueFrame>
   );
 }

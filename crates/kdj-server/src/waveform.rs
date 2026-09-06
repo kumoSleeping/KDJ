@@ -360,6 +360,18 @@ pub struct WaveformCoordinator {
 }
 
 impl WaveformCoordinator {
+    pub fn invalidate_track(&self, track_id: i64) {
+        self.prepared_evidence.lock().unwrap().entries.retain(|(key, _)| key.track_id != track_id);
+        self.warm.lock().unwrap().requests.retain(|request| request.key.track_id != track_id);
+        let mut intents = self.release_intents.lock().unwrap();
+        let ReleaseIntentState { player, prefetch, .. } = &mut *intents;
+        for slot in [player, prefetch] {
+            if slot.as_ref().is_some_and(|slot| slot.track_id == track_id) {
+                if let Some(slot) = slot.take() { slot.token.cancellation.cancel(); }
+            }
+        }
+    }
+
     pub fn new(library: Arc<LibraryService>) -> Arc<Self> {
         let coordinator = Arc::new(Self {
             inflight: Default::default(),

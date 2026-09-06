@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useToastStore } from "../../stores/toastStore";
+import { LibrarySearchTools, WorkRailPin } from "./WorkRailControls";
+import { useState, useSyncExternalStore } from "react";
 import {
   BarChart3,
   CheckSquare,
@@ -7,11 +9,9 @@ import {
   LocateFixed,
   Music2,
   Pause,
-  Pin,
   Play,
   Scissors,
   ScanSearch,
-  Search,
   X,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -40,62 +40,6 @@ function ScanGlyph() {
       <rect x="2" y="7.2" width="9" height="1.6" />
       <rect x="2" y="11.4" width="11" height="1.6" />
     </svg>
-  );
-}
-
-function LibrarySearchField({
-  inputRef,
-  value,
-  folder,
-  onChange,
-  onClear,
-  onBlurEmpty,
-}: {
-  inputRef?: React.RefObject<HTMLInputElement | null>;
-  value: string;
-  folder: string;
-  onChange(value: string): void;
-  onClear(): void;
-  onBlurEmpty?: () => void;
-}) {
-  return (
-    <label className="kd-activity-search kd-activity-search-expanded">
-      <Search size={13} aria-hidden="true" />
-      <input
-        ref={inputRef}
-        type="search"
-        value={value}
-        placeholder={
-          folder && !isOutsideFolder(folder) ? "在当前文件夹中搜索" : "在全部歌曲中搜索"
-        }
-        aria-label={
-          folder && !isOutsideFolder(folder)
-            ? "搜索当前文件夹的曲目名称"
-            : folder
-              ? "搜索目录外曲目的名称"
-              : "搜索全部曲目的名称"
-        }
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onClear();
-          }
-        }}
-        onBlur={() => {
-          if (!value.trim()) onBlurEmpty?.();
-        }}
-      />
-      <button
-        type="button"
-        aria-label="关闭曲目搜索"
-        title="关闭曲目搜索"
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={onClear}
-      >
-        <X size={12} />
-      </button>
-    </label>
   );
 }
 
@@ -146,8 +90,6 @@ export function LibraryWorkRail({
   const saveSettings = useAppStore((state) => state.saveSettings);
 
   const selecting = selectionMode || selectedIds.length > 1;
-  const [searchOpen, setSearchOpen] = useState(() => Boolean(filter.q.trim()));
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const playingTrack = useSyncExternalStore(
     subscribePlayingTrack,
     getPlayingTrack,
@@ -175,7 +117,7 @@ export function LibraryWorkRail({
         const store = useLibraryStore.getState();
         store.selectTrack(locatableTrack);
         await store.ensureTrackLoaded(locatableTrack.id);
-        if (!useLibraryStore.getState().tracks.some((track) => track.id === locatableTrack.id)) {
+        if (!useLibraryStore.getState().indexById.has(locatableTrack.id)) {
           return false;
         }
         // 等虚拟列表吃进新页再滚，否则 rAF 时行还没挂上会看起来像「点了没反应」。
@@ -222,16 +164,6 @@ export function LibraryWorkRail({
     }
   };
 
-  // 多选顶掉搜索；有残留 query 时退出多选再把搜索展开回来。
-  useEffect(() => {
-    if (selecting) setSearchOpen(false);
-    else if (filter.q.trim()) setSearchOpen(true);
-  }, [selecting, filter.q]);
-
-  useEffect(() => {
-    if (!selecting && searchOpen) searchInputRef.current?.focus();
-  }, [selecting, searchOpen]);
-
   const scanning = scan !== null && scan.phase !== "done";
   // maintenance 会在 store 里保留最终结果供诊断；工作条只展示仍在执行的升级。
   // 成功或带错误结束都属于已结束，不能把一次失败永久钉在主界面上。
@@ -241,7 +173,6 @@ export function LibraryWorkRail({
     ? "paused"
     : resolveAutoAnalysisMode(settings);
   const autoPaused = autoAnalysisMode === "paused";
-  const searchExpanded = !selecting && searchOpen;
 
   const toggleAutoAnalyze = () => {
     const nextMode = nextAutoAnalysisMode(autoAnalysisMode);
@@ -264,27 +195,6 @@ export function LibraryWorkRail({
       .finally(forgetQueuedAnalysis);
   };
 
-  const clearSearch = () => {
-    setFilter({ q: "" });
-    setSearchOpen(false);
-  };
-
-  const folderSearchToggle = (
-    <button
-      type="button"
-      className="kd-activity-search-toggle"
-      aria-label="搜索曲目"
-      title={
-        filter.folder && !isOutsideFolder(filter.folder)
-          ? "在当前文件夹中搜索"
-          : "在全部歌曲中搜索"
-      }
-      onClick={() => setSearchOpen(true)}
-    >
-      <Search size={14} strokeWidth={2.25} />
-    </button>
-  );
-
   const locatePlayingToggle = (
     <button
       type="button"
@@ -305,26 +215,8 @@ export function LibraryWorkRail({
   );
 
   const localPanePinToggle = onLocalPanePinnedChange ? (
-    <button
-      type="button"
-      className="kd-activity-search-toggle"
-      data-action="workspace-pin"
-      data-pinned={localPanePinned ? "true" : undefined}
-      aria-pressed={localPanePinned}
-      aria-label={localPanePinned ? "取消固定本地曲库" : "固定本地曲库"}
-      title={
-        localPanePinned
-          ? "本地曲库已固定；在线内容会并排打开"
-          : "当前为覆盖打开；点击固定本地曲库"
-      }
-      onClick={() => onLocalPanePinnedChange(!localPanePinned)}
-    >
-      <Pin
-        size={14}
-        strokeWidth={2.25}
-        fill={localPanePinned ? "currentColor" : "none"}
-      />
-    </button>
+    <WorkRailPin pinned={localPanePinned} onChange={onLocalPanePinnedChange} label="本地曲库"
+      title={localPanePinned ? "本地曲库已固定；在线内容会并排打开" : "当前为覆盖打开；点击固定本地曲库"} />
   ) : null;
 
   const aggregateSearchToggle =
@@ -341,27 +233,13 @@ export function LibraryWorkRail({
     ) : null;
 
   const trailingTools = (
-    <span
-      className="kd-activity-trailing-tools"
-      data-searching={searchExpanded ? "true" : undefined}
-    >
-      {searchExpanded ? (
-        <LibrarySearchField
-          inputRef={searchInputRef}
-          value={filter.q}
-          folder={filter.folder}
-          onChange={(value) => setFilter({ q: value })}
-          onClear={clearSearch}
-          onBlurEmpty={() => setSearchOpen(false)}
-        />
-      ) : (
-        folderSearchToggle
-      )}
+    <LibrarySearchTools value={filter.q} folder={filter.folder} selecting={selecting}
+      onChange={(value) => setFilter({ q: value })}>
       {locatePlayingToggle}
       {localPanePinToggle}
       {aggregateSearchToggle}
       {asideToggle}
-    </span>
+    </LibrarySearchTools>
   );
 
   if (selecting) {
@@ -444,11 +322,11 @@ export function LibraryWorkRail({
         type="button"
         className="kd-activity-control"
         disabled={scan.current === "正在取消…"}
-        title="停止扫描；已经完成入库的曲目会保留"
-        onClick={() => void cancelScan().catch(() => undefined)}
+        title="取消导入并清除本次新增记录；保留原文件和原有曲库"
+        onClick={() => void cancelScan().catch(error => useToastStore.getState().show(`取消导入失败：${String(error)}`))}
       >
         <X size={11} />
-        {scan.current === "正在取消…" ? "正在取消扫描" : "取消扫描"}
+        {scan.current === "正在取消…" ? "正在取消导入" : "取消导入"}
       </button>,
     );
   }

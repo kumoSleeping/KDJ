@@ -1,3 +1,4 @@
+import type { LibraryPaneStore } from "../stores/temporaryLibraryStore";
 import { useEffect, useRef } from "react";
 import type { SongSource } from "../types";
 import { copyText } from "./copyText";
@@ -45,7 +46,9 @@ function isModKey(event: KeyboardEvent, letter: string): boolean {
   return event.code === `Key${letter.toUpperCase()}` || event.key.toLowerCase() === letter;
 }
 
-export function useLibraryClipboard(search?: SearchListClipboard): void {
+export function useLibraryClipboard(search?: SearchListClipboard, library: () => LibraryPaneStore = useLibraryStore.getState): void {
+  const libraryRef = useRef(library);
+  libraryRef.current = library;
   const searchRef = useRef(search);
   searchRef.current = search;
 
@@ -68,7 +71,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
       if (isZ) {
         // Shift+Cmd/Ctrl+Z 是重做，当前只实现单向撤回，不拦截系统快捷键。
         if (event.shiftKey) return;
-        const store = useLibraryStore.getState();
+        const store = libraryRef.current();
         if (!store.undo.available) return;
         event.preventDefault();
         void store.undoLast().catch(() => undefined);
@@ -82,7 +85,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
       const searchActive = search?.active() ?? false;
       const searchPreferred = searchActive && (search?.preferred?.() ?? false);
       const chosen = searchActive ? search!.chosenSources() : [];
-      const librarySelected = useLibraryStore.getState().selectedIds.length > 0;
+      const librarySelected = libraryRef.current().selectedIds.length > 0;
       // 点在哪张表就听哪张；否则有勾选的那边优先；都没有时搜索开着归搜索。
       const preferSearch = inResults
         ? searchActive
@@ -102,7 +105,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
           search!.selectAll();
           return;
         }
-        useLibraryStore.getState().selectAll();
+        libraryRef.current().selectAll();
         return;
       }
 
@@ -123,7 +126,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
           return;
         }
 
-        const store = useLibraryStore.getState();
+        const store = libraryRef.current();
         if (store.selectedIds.length === 0) return;
         event.preventDefault();
         store.copyToClipboard(isX ? "move" : "copy");
@@ -145,7 +148,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
         return;
       }
 
-      const store = useLibraryStore.getState();
+      const store = libraryRef.current();
 
       // 曲库剪贴板优先；没有的话，搜索复制过来的源可以 V 进当前文件夹下载。
       if (!store.clipboard && searchClip && searchClip.length > 0) {

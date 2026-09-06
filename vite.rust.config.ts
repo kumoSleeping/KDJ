@@ -1,9 +1,7 @@
 /**
  * 纯 Rust 后端的开发预览配置。
  *
- * 和 vite.config.ts 的区别只有两点：
- *  1. 不加载 electron 插件（这是浏览器里跑的预览）；
- *  2. 注入一段 shim 提供 `window.kdj`，
+ * 这是浏览器里运行的预览，并注入一段 shim 提供 `window.kdj`，
  *     让前端能连上 `kdj-server` 这个独立进程。
  *
  * 用法：

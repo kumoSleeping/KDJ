@@ -1,0 +1,164 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { COMPOSITION_DEFAULTS, compositionDifferences, compositionTimeline, compositionSegmentTimeline, moveEntry, overlayAlpha, seconds } from "../src/lib/composition";
+
+test("both output policies share a signed timeline and never accept no overlap", () => {
+  const keep = compositionTimeline(10000, 13000, -1000, false)!;
+  assert.deepEqual([keep.duration_ms, keep.crop_head_ms, keep.crop_tail_ms, keep.black_head_ms], [10000, 1000, 2000, 0]);
+  const full = compositionTimeline(10000, 13000, -1000, true)!;
+  assert.deepEqual([full.duration_ms, full.black_head_ms, full.black_tail_ms, full.video_start_ms, full.audio_start_ms], [13000, 1000, 2000, 1000, 0]);
+  const silence = compositionTimeline(10000, 6000, 1000, false)!;
+  assert.deepEqual(compositionDifferences(silence), ["片头静音 1 s", "片尾静音 3 s"]);
+  assert.equal(compositionTimeline(1000, 1000, 1000, true), null);
+  assert.equal(compositionTimeline(1000, 1000, -1000, false), null);
+  assert.equal(compositionTimeline(1000, 1000, NaN, false), null);
+  assert.deepEqual(compositionDifferences(compositionTimeline(1000, 1000, 0, false)!), []);
+  assert.equal(seconds(0), "0 s");
+  assert.equal(COMPOSITION_DEFAULTS.length_policy, "full_audio");
+});
+
+test("independent reorder is immutable and overlay alpha is bounded to the clip", () => {
+  const original = ["v1", "v2", "v3"];
+  assert.deepEqual(moveEntry(original, "v1", "v3"), ["v2", "v3", "v1"]);
+  assert.deepEqual(original, ["v1", "v2", "v3"]);
+  assert.equal(overlayAlpha(0, 2, 4, 0.5, 500), 0);
+  assert.equal(overlayAlpha(2.25, 2, 4, 0.5, 500), 0.25);
+  assert.equal(overlayAlpha(3, 2, 4, 0.5, 500), 0.5);
+  assert.equal(overlayAlpha(3.75, 2, 4, 0.5, 500), 0.25);
+  assert.equal(overlayAlpha(4, 2, 4, 0.5, 500), 0);
+  assert.equal(COMPOSITION_DEFAULTS.overlay.audio, "main");
+});
+
+test("source trims keep placement stable and reject inverted or out-of-file ranges", () => {
+  const segment = { source_start_ms: 2000, source_end_ms: 5000 };
+  const t = compositionSegmentTimeline(10000, 8000, 2000, false, segment)!;
+  assert.deepEqual([t.audio_start_ms, t.silence_tail_ms], [4000, 3000]);
+  assert.equal(compositionSegmentTimeline(10000, 4000, 0, false, segment), null);
+  assert.equal(compositionSegmentTimeline(10000, 8000, 0, false, { source_start_ms: 5000, source_end_ms: 5000 }), null);
+  assert.equal(compositionSegmentTimeline(10000, 8000, Number.MAX_SAFE_INTEGER, false, segment), null);
+});
+
+test("queue UI stays blank without rows and its permanent entry opens the empty panel", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM("<!doctype html><html data-theme='dark'><body><div id='root'></div></body></html>", { url: "http://localhost" });
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document, localStorage: dom.window.localStorage, HTMLElement: dom.window.HTMLElement,
+    CustomEvent: dom.window.CustomEvent, Event: dom.window.Event,
+    requestAnimationFrame: (callback: () => void) => setTimeout(callback, 0), cancelAnimationFrame: clearTimeout, IS_REACT_ACT_ENVIRONMENT: true });
+  dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as typeof window.matchMedia;
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { CompositionPanel } = await import("../src/components/composition/CompositionPanel");
+  const { ChromeActions } = await import("../src/components/chrome/ChromeActions");
+  const { useCompositionStore } = await import("../src/stores/compositionStore");
+  const { useAppStore } = await import("../src/stores/appStore");
+  const { api } = await import("../src/lib/api");
+  api.coverUrl = () => "/fixture-cover";
+  api.videoUrl = () => "/fixture-video";
+  dom.window.HTMLMediaElement.prototype.pause = () => {};
+  dom.window.HTMLCanvasElement.prototype.getContext = (() => null) as typeof dom.window.HTMLCanvasElement.prototype.getContext;
+  const root = createRoot(document.getElementById("root")!);
+  const chrome = createElement(ChromeActions, { settingsOpen: false, onSettings() {}, queueOpen: false, queueCount: 0, onQueue() {} });
+  await act(async () => root.render(createElement("div", {}, chrome, createElement(CompositionPanel))));
+  assert.equal(document.querySelector("[data-composition-hint]"), null);
+  const emptyEntry = document.querySelector<HTMLButtonElement>('button[aria-label="VJ 工坊"]')!;
+  assert.ok(emptyEntry);
+  await act(async () => emptyEntry.click());
+  assert.equal(useAppStore.getState().showComposition, true);
+  await act(async () => useAppStore.getState().toggleCompositionPanel());
+  assert.equal(document.querySelectorAll(".kd-composition-pair").length, 0);
+  assert.equal(document.querySelector(".kd-download-list")?.textContent ?? "", "");
+  const entry = { id: "v1", track_id: 1, path: "/fixture.mp4", title: "视频一", artist: "", format: "mp4", is_video: true, duration_ms: 10000, options: COMPOSITION_DEFAULTS };
+  const task = { id: "v1", video: entry, audio: null, phase: "waiting_pair" as const, generation: 1, released: false, busy: false,
+    offset_ms: null, matched: false, force_confirmed: false, video_duration_ms: null, audio_duration_ms: null, timeline: null, progress: null, error: "", output_path: "" };
+  await act(async () => useCompositionStore.getState().accept({ session_id: "first", revision: 1, defaults: COMPOSITION_DEFAULTS, tasks: [task] }));
+  assert.equal(useCompositionStore.getState().tasks.length, 1);
+  assert.equal(document.querySelector('[data-lane="audio"]')?.textContent, "");
+  await act(async () => { useAppStore.getState().openCompositionPanel(); });
+  assert.equal(useAppStore.getState().compositionPinned, true);
+  await act(async () => { useAppStore.getState().showTrackDetail(); });
+  assert.equal(useAppStore.getState().showComposition, true, "picking the next source keeps the workshop available");
+  await act(async () => { useAppStore.getState().openSettingsPanel(); });
+  assert.equal(useAppStore.getState().showComposition, false, "settings and workshop share one side panel");
+  await act(async () => { useAppStore.getState().setCompositionPinned(true); useAppStore.getState().openCompositionPanel(); });
+  assert.equal(useAppStore.getState().compositionPinned, true);
+  await act(async () => useCompositionStore.getState().accept({ session_id: "first", revision: 3, defaults: COMPOSITION_DEFAULTS, tasks: [] }));
+  await act(async () => useCompositionStore.getState().accept({ session_id: "first", revision: 2, defaults: COMPOSITION_DEFAULTS, tasks: [task] }));
+  assert.equal(document.querySelector("[data-composition-hint]"), null, "late snapshots cannot revive deleted rows");
+  await act(async () => useCompositionStore.getState().accept({ session_id: "restarted", revision: 1, defaults: COMPOSITION_DEFAULTS, tasks: [] }));
+  await act(async () => useCompositionStore.getState().accept({ session_id: "first", revision: 100, defaults: COMPOSITION_DEFAULTS, tasks: [task] }));
+  assert.equal(document.querySelector("[data-composition-hint]"), null, "a retired server session cannot restore rows");
+  const paired = { ...task, audio: { ...entry, id: "a1", track_id: 2, is_video: false, format: "wav", duration_ms: 8000 },
+    phase: "needs_review" as const, video_duration_ms: 10000, audio_duration_ms: 8000, offset_ms: 0 };
+  await act(async () => useCompositionStore.getState().accept({ session_id: "restarted", revision: 2, defaults: COMPOSITION_DEFAULTS, tasks: [paired] }));
+  assert.ok(document.querySelector('[aria-label="素材音量"]'), "audio pair automatically opens its output controls");
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="收起操作面板"]')!.click());
+  await act(async () => useCompositionStore.getState().accept({ session_id: "restarted", revision: 3, defaults: COMPOSITION_DEFAULTS, tasks: [{ ...paired }] }));
+  assert.equal(document.querySelector('[aria-label="素材音量"]'), null, "snapshot refresh respects a manual collapse");
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="展开操作面板"]')!.click());
+  assert.equal(document.querySelector('[aria-label="预览位置"]'), null, "transport belongs to the real main player");
+  assert.ok(document.querySelector('[aria-label="输出时间轴"]'));
+  assert.equal(document.querySelector<HTMLElement>('.kd-composition-rail > [data-kind="video"]')!.style.width, "100%");
+  assert.equal(document.querySelector<HTMLElement>('.kd-composition-rail > [data-kind="audio"]')!.style.width, "80%");
+  let requestedTrack: unknown;
+  const listener = (event: Event) => { requestedTrack = (event as CustomEvent).detail; };
+  window.addEventListener("kd:play", listener);
+  const playable = { id: 2, path: "/audio.wav", title: "音频", format: "wav", tags: [] } as unknown as Awaited<ReturnType<typeof api.track>>;
+  api.track = async () => playable;
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="播放合成预览"]')!.click());
+  assert.equal((requestedTrack as { purpose: string }).purpose, "composition");
+  assert.equal((requestedTrack as { track: typeof playable }).track.id, 2, "the combined preview uses the full song as its clock");
+  requestedTrack = undefined;
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "音频试听")!.click());
+  assert.equal((requestedTrack as { purpose: string }).purpose, "composition");
+  assert.equal((requestedTrack as { track: typeof playable }).track.id, 2);
+  window.removeEventListener("kd:play", listener);
+  const { publishPlayerSession } = await import("../src/lib/playerSession");
+  const { runtimePlayer } = await import("../src/lib/unifiedPlayer");
+  const player = runtimePlayer(), originalPlay = player.play, originalPause = player.pause;
+  let pauses = 0, resumes = 0;
+  const session = { trackId: 2, status: "playing" as const, playing: true, position: 1, duration: 8, error: "" };
+  player.pause = async () => { pauses++; publishPlayerSession({ ...session, status: "paused", playing: false }); return player.state(); };
+  player.play = async () => { resumes++; publishPlayerSession(session); return player.state(); };
+  await act(async () => publishPlayerSession(session));
+  assert.equal(document.querySelector<HTMLElement>('.kd-composition-playhead')!.style.left, "10%", "both bars follow the source audio clock");
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="暂停合成预览"]')!.click());
+  assert.equal(pauses, 1);
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="播放合成预览"]')!.click());
+  assert.equal(resumes, 1, "resume does not reload the song or lose its position");
+  player.play = originalPlay; player.pause = originalPause;
+  await act(async () => publishPlayerSession({ trackId: null, status: "idle", playing: false, position: 0, duration: 0, error: "" }));
+  const setInput = async (label: string, value: string) => {
+    const input = document.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    });
+  };
+  await setInput("放入位置秒", "4");
+  await setInput("素材入点秒", "2");
+  await setInput("素材出点秒", "5");
+  assert.equal(document.querySelector<HTMLElement>('.kd-composition-rail > [data-kind="audio"]')!.style.left, "40%", "placement updates the red timeline immediately");
+  assert.equal(document.querySelector<HTMLElement>('.kd-composition-rail > [data-kind="audio"]')!.style.width, "30%", "the red timeline shows only the selected range");
+  await act(async () => document.querySelector<HTMLInputElement>('.kd-composition-force input')!.click());
+  let patch: unknown;
+  await act(async () => useCompositionStore.setState({ patch: async (_task, update) => { patch = update; } }));
+  await act(async () => document.querySelector<HTMLFormElement>("form.kd-composition-details")!.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })));
+  assert.deepEqual(patch, { options: { ...COMPOSITION_DEFAULTS, segment: { source_start_ms: 2000, source_end_ms: 5000 } }, offset_ms: 2000, force_confirmed: true });
+  await setInput("素材出点秒", "1");
+  assert.equal(document.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled, true);
+  const audioOnly = { ...task, id: "audio-only", video: null, audio: { ...paired.audio, id: "a2" } };
+  await act(async () => useCompositionStore.getState().accept({ session_id: "restarted", revision: 4, defaults: COMPOSITION_DEFAULTS, tasks: [paired, audioOnly] }));
+  assert.equal(document.querySelector<HTMLInputElement>('[aria-label="素材出点秒"]')!.value, "1", "new rows do not discard an invalid draft");
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "还原")!.click());
+  assert.equal(document.querySelector('[aria-label="素材音量"]'), null);
+  assert.ok(document.querySelectorAll(".kd-composition-pair")[1].querySelector('[aria-expanded="true"]'), "deferred audio opens after the draft is restored");
+  assert.match(document.querySelectorAll(".kd-composition-pair")[1].textContent!, /音频试听/);
+  // Pairing the audio and then completing analysis both surface the operation panel.
+  const analyzing = { ...paired, id: audioOnly.id, audio: audioOnly.audio, phase: "analyzing" as const, offset_ms: null, busy: true };
+  await act(async () => useCompositionStore.getState().accept({ session_id: "restarted", revision: 5, defaults: COMPOSITION_DEFAULTS, tasks: [analyzing] }));
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="收起操作面板"]')!.click());
+  await act(async () => useCompositionStore.getState().accept({ session_id: "restarted", revision: 6, defaults: COMPOSITION_DEFAULTS, tasks: [{ ...analyzing, phase: "needs_review", busy: false, offset_ms: -1000 }] }));
+  assert.ok(document.querySelector('[aria-label="素材音量"]'), "the completed detection opens its controls");
+  await act(async () => root.unmount());
+  dom.window.close();
+});

@@ -1,7 +1,7 @@
 """所有 HTTP / WS 出入参模型。
 
 这是前后端契约（对应 `src/types.ts`），字段名两边必须一一对应。
-改这里必须同步改 `src/types.ts` 和 `docs/00-architecture.md`。
+历史模型仅供迁移时与 `src/types.ts`、Rust 模型对照。
 """
 
 from __future__ import annotations

@@ -135,3 +135,5 @@ const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm", "mkv"]);
 export function isVideoTrack(format: string): boolean {
   return VIDEO_EXTENSIONS.has(format.trim().toLowerCase());
 }
+
+export function isImageTrack(format: string): boolean { return ["png", "jpg", "jpeg", "webp", "bmp", "gif"].includes(format.trim().toLowerCase()); }

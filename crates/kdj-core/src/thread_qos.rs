@@ -35,6 +35,20 @@ pub fn prefer_background() {
     }
 }
 
+/// Set the child's priority without changing a Tokio runtime thread's QoS.
+pub fn background_command(command: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe { command.pre_exec(|| { libc::setpriority(libc::PRIO_PROCESS, 0, 10); Ok(()) }); }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000 | 0x00004000); // NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS
+    }
+}
+
 #[cfg(windows)]
 const THREAD_PRIORITY_ABOVE_NORMAL: i32 = 1;
 #[cfg(windows)]

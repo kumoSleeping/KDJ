@@ -1,6 +1,16 @@
-import { Download, Moon, Settings, Sun, Upload } from "lucide-react";
+import { Clapperboard, Download, Moon, Settings, Sun, Upload } from "lucide-react";
+import { formatPercent } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
+import { useDownloadStore } from "../../stores/downloadStore";
 import { useUpdateStore } from "../../stores/updateStore";
+import { useWorkshopStore } from "../../stores/workshopStore";
+
+/** 多项显示正在执行 / 待完成总数；单项才显示具体进度。 */
+function taskProgressLabel(tasks: { progress: number }[], running: number): string | null {
+  if (tasks.length === 0) return null;
+  if (tasks.length > 1) return `${running}/${tasks.length}`;
+  return formatPercent(tasks[0].progress);
+}
 
 export interface ChromeActionsProps {
   settingsOpen: boolean;
@@ -8,6 +18,8 @@ export interface ChromeActionsProps {
   queueOpen: boolean;
   queueCount: number;
   onQueue(): void;
+  compositionOpen?: boolean;
+  onComposition?(): void;
   /** 打开设置并定位到软件更新区；默认走 updateStore。 */
   onOpenUpdate?(): void;
 }
@@ -19,9 +31,27 @@ export function ChromeActions({
   queueOpen,
   queueCount,
   onQueue,
+  compositionOpen,
+  onComposition,
   onOpenUpdate,
 }: ChromeActionsProps) {
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
+  const compositionCount = useWorkshopStore((s) => s.projects.length);
+  const workshopJobs = useWorkshopStore(s => s.jobs);
+  const exporting = workshopJobs.filter(j => ["queued", "rendering", "validating", "committing", "importing"].includes(j.phase));
+  const runningExports = exporting.filter(j => j.phase !== "queued").length;
+  const exportProgress = taskProgressLabel(exporting, runningExports);
+  const workshopLabel = exporting.length > 1
+    ? `VJ 工坊，${runningExports} 个正在导出，共 ${exporting.length} 个待完成`
+    : exportProgress !== null ? `VJ 工坊，导出 ${exportProgress}`
+    : compositionCount > 0 ? `VJ 工坊，${compositionCount} 个任务` : "VJ 工坊";
+  const downloadTasks = useDownloadStore(s => s.list);
+  const downloading = downloadTasks.filter(t => ["queued", "running", "processing"].includes(t.state));
+  const runningDownloads = downloading.filter(t => t.state !== "queued").length;
+  const downloadProgress = taskProgressLabel(downloading, runningDownloads);
+  const downloadLabel = downloading.length > 1
+    ? `下载队列，${runningDownloads} 个正在下载，共 ${downloading.length} 个待完成`
+    : downloadProgress !== null ? `下载队列，${downloadProgress}` : "下载队列";
   const latest = useUpdateStore((s) => s.info?.latest ?? "");
   const openUpdateSection = useUpdateStore((s) => s.openUpdateSection);
   const openUpdate = onOpenUpdate ?? openUpdateSection;
@@ -61,6 +91,13 @@ export function ChromeActions({
       >
         <Settings size={16} />
       </button>
+        <button type="button" className="kd-chrome-btn" data-composition-hint={compositionCount > 0 ? "true" : undefined}
+          aria-label={workshopLabel} title={workshopLabel}
+          aria-pressed={compositionOpen} data-open={compositionOpen || undefined}
+          onClick={onComposition ?? (() => useAppStore.getState().toggleCompositionPanel())}>
+          <Clapperboard size={16} />
+          {exportProgress !== null ? <span className="kd-chrome-export-progress">{exportProgress}</span> : compositionCount > 0 && <span className="kd-chrome-dot" aria-hidden="true" />}
+        </button>
       <button
         type="button"
         className="kd-chrome-btn"
@@ -74,14 +111,14 @@ export function ChromeActions({
         type="button"
         className="kd-chrome-btn"
         data-queue-hint={queueCount > 0 ? "true" : undefined}
-        aria-label={queueCount > 0 ? `下载队列，${queueCount} 个进行中` : "下载队列"}
+        aria-label={downloadLabel}
         aria-pressed={queueOpen}
         data-open={queueOpen || undefined}
-        title={queueCount > 0 ? `下载队列（${queueCount} 进行中）` : "下载队列"}
+        title={downloadLabel}
         onClick={onQueue}
       >
         <Download size={16} />
-        {queueCount > 0 ? <span className="kd-chrome-dot" aria-hidden="true" /> : null}
+        {downloadProgress !== null ? <span className="kd-chrome-export-progress">{downloadProgress}</span> : null}
       </button>
     </div>
   );

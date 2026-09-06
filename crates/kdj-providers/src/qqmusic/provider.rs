@@ -1516,6 +1516,22 @@ fn qq_alias_count(entry: &Value, keys: &[&str]) -> usize {
         .unwrap_or(0)
 }
 
+/// 集合搜索即使传了 highlight=false，QQ 仍会在名称里返回 <em> 高亮。
+/// 只去掉搜索标记，保留标题自己的尖括号；实体在去标记后解码，避免把
+/// 用户写下的 &lt;em&gt; 再误当成接口高亮。
+fn normalize_qq_search_text(text: &str) -> String {
+    text.replace("<em>", "")
+        .replace("</em>", "")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+}
+
 fn qq_collection_results(data: &Value, kind: SearchKind, limit: usize) -> Vec<CollectionResult> {
     qq_collection_entries(data, kind)
         .into_iter()
@@ -1528,16 +1544,18 @@ fn qq_collection_results(data: &Value, kind: SearchKind, limit: usize) -> Vec<Co
                     if key.is_empty() || key == "0" {
                         return None;
                     }
-                    let title = qq_playlist_title(entry)?.to_string();
+                    let title = normalize_qq_search_text(qq_playlist_title(entry)?);
                     let count = qq_alias_count(
                         entry,
                         &["songnum", "songNum", "song_num", "song_cnt", "song_count"],
                     );
-                    let creator = qq_alias_text(
-                        entry,
-                        &["nickname", "creatorName", "creator_name", "ownerName"],
-                    )
-                    .unwrap_or("未知创建者");
+                    let creator = normalize_qq_search_text(
+                        qq_alias_text(
+                            entry,
+                            &["nickname", "creatorName", "creator_name", "ownerName"],
+                        )
+                        .unwrap_or("未知创建者"),
+                    );
                     (
                         key,
                         title,
@@ -1556,8 +1574,10 @@ fn qq_collection_results(data: &Value, kind: SearchKind, limit: usize) -> Vec<Co
                     if key.is_empty() {
                         return None;
                     }
-                    let title =
-                        qq_alias_text(entry, &["singerName", "singer_name", "name"])?.to_string();
+                    let title = normalize_qq_search_text(qq_alias_text(
+                        entry,
+                        &["singerName", "singer_name", "name"],
+                    )?);
                     let count = qq_alias_count(entry, &["songNum", "song_num", "songnum"]);
                     let albums = qq_alias_count(entry, &["albumNum", "album_num", "albumnum"]);
                     (
@@ -1585,15 +1605,19 @@ fn qq_collection_results(data: &Value, kind: SearchKind, limit: usize) -> Vec<Co
                     if key.is_empty() {
                         return None;
                     }
-                    let title = qq_alias_text(entry, &["name", "albumname", "albumName", "title"])?
-                        .to_string();
-                    let artist = entry
-                        .get("singer")
-                        .and_then(Value::as_array)
-                        .and_then(|list| list.first())
-                        .and_then(|singer| qq_alias_text(singer, &["name", "singerName"]))
-                        .or_else(|| qq_alias_text(entry, &["singerName", "singer_name"]))
-                        .unwrap_or("未知艺人");
+                    let title = normalize_qq_search_text(qq_alias_text(
+                        entry,
+                        &["name", "albumname", "albumName", "title"],
+                    )?);
+                    let artist = normalize_qq_search_text(
+                        entry
+                            .get("singer")
+                            .and_then(Value::as_array)
+                            .and_then(|list| list.first())
+                            .and_then(|singer| qq_alias_text(singer, &["name", "singerName"]))
+                            .or_else(|| qq_alias_text(entry, &["singerName", "singer_name"]))
+                            .unwrap_or("未知艺人"),
+                    );
                     let count = qq_alias_count(entry, &["song_num", "songNum", "songnum"]);
                     let cover = qq_alias_text(entry, &["pic", "picUrl", "picurl", "cover"])
                         .filter(|value| !value.is_empty())
@@ -2327,6 +2351,21 @@ mod tests {
     }
 
     #[test]
+    fn qq_search_text_removes_highlights_and_decodes_entities_once() {
+        assert_eq!(
+            normalize_qq_search_text("『<em>超时空辉夜姬</em>！』 &amp; OST"),
+            "『超时空辉夜姬！』 & OST"
+        );
+        assert_eq!(
+            normalize_qq_search_text("&quot;A&quot;&nbsp;&lt;B&gt; &apos;C&#39; &#x27;D&#x27;"),
+            "\"A\" <B> 'C' 'D'"
+        );
+        assert_eq!(normalize_qq_search_text("普通标题 <3 & DJ"), "普通标题 <3 & DJ");
+        assert_eq!(normalize_qq_search_text("&lt;em&gt;原文&lt;/em&gt;"), "<em>原文</em>");
+        assert_eq!(normalize_qq_search_text("&amp;lt;原文&amp;gt;"), "&lt;原文&gt;");
+    }
+
+    #[test]
     fn playlist_search_rows_accept_qq_schema_aliases() {
         let data = json!({
             "body": {
@@ -2345,7 +2384,81 @@ mod tests {
         assert_eq!(rows[0].key, "8674642290");
         assert_eq!(rows[0].title, "夜间 Set");
         assert_eq!(rows[0].subtitle, "42 首 · DJ Kumo");
+        assert_eq!(rows[0].cover, "https://qpic.cn/cover.jpg");
         assert_eq!(rows[0].count, 42);
+    }
+
+    #[test]
+    fn playlist_search_rows_clean_display_text_without_changing_identity_or_cover() {
+        let cover = "http://y.gtimg.cn/music/photo_new/T002R300x300M000000GFM7M3igU02.jpg?n=1";
+        let data = json!({
+            "body": {
+                "item_songlist": [{
+                    "id": 9654669371_u64,
+                    "name": "<em>超时空辉夜姬</em>！ &amp; OST",
+                    "songnum": 11,
+                    "picurl": cover,
+                    "nickname": "<em>DJ</em>&nbsp;&quot;Kumo&quot;"
+                }, {
+                    "id": 9653919784_u64,
+                    "name": "普通歌单",
+                    "songnum": 15,
+                    "picurl": "",
+                    "nickname": "创建者"
+                }]
+            }
+        });
+        let rows = qq_collection_results(&data, SearchKind::Playlist, 10);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].kind, SearchKind::Playlist);
+        assert_eq!(rows[0].platform, Platform::Qqm);
+        assert_eq!(rows[0].key, "9654669371");
+        assert_eq!(rows[0].title, "超时空辉夜姬！ & OST");
+        assert_eq!(rows[0].subtitle, "11 首 · DJ \"Kumo\"");
+        assert_eq!(rows[0].cover, cover, "缩略图协议与尺寸由展示层处理");
+        assert_eq!(rows[0].count, 11);
+        assert_eq!(rows[1].title, "普通歌单");
+        assert_eq!(rows[1].cover, "", "接口无封面时保留空值");
+    }
+
+    #[test]
+    fn artist_and_album_search_rows_clean_titles_and_artist_names() {
+        let artist_data = json!({
+            "body": {
+                "singer": [{
+                    "singerMID": "artist-mid",
+                    "singerName": "<em>歌手</em> &amp; Friends",
+                    "songNum": 12,
+                    "albumNum": 3,
+                    "singerPic": "http://y.gtimg.cn/artist.jpg"
+                }]
+            }
+        });
+        let artists = qq_collection_results(&artist_data, SearchKind::Artist, 10);
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].key, "artist-mid");
+        assert_eq!(artists[0].title, "歌手 & Friends");
+        assert_eq!(artists[0].subtitle, "12 首 · 3 张专辑");
+        assert_eq!(artists[0].cover, "http://y.gtimg.cn/artist.jpg");
+
+        let album_data = json!({
+            "body": {
+                "item_album": [{
+                    "albummid": "album-mid",
+                    "name": "<em>专辑</em> &amp; OST",
+                    "song_num": 10,
+                    "singer": [{"name": "<em>歌手</em> &#39;A&#39;"}],
+                    "pic": "http://y.gtimg.cn/album.jpg"
+                }]
+            }
+        });
+        let albums = qq_collection_results(&album_data, SearchKind::Album, 10);
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].key, "album-mid");
+        assert_eq!(albums[0].title, "专辑 & OST");
+        assert_eq!(albums[0].subtitle, "10 首 · 歌手 'A'");
+        assert_eq!(albums[0].cover, "http://y.gtimg.cn/album.jpg");
+        assert_eq!(albums[0].count, 10);
     }
 
     #[test]

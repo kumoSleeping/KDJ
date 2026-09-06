@@ -269,6 +269,7 @@ export function endTrackDrag(): void {
 
 /** drop 已经读取完 id 时立即收尾；与 dragend 的容错延迟分开。 */
 export function finishTrackDrop(): void {
+  dropClaimed = true;
   dragEpoch += 1;
   activeIds = [];
   emitTrackDragState([]);

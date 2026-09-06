@@ -5,7 +5,12 @@
 
 import { create } from "zustand";
 import { api } from "../lib/api";
+import {
+  restoreFolderTreeForStartup,
+  type FolderStartupSource,
+} from "../lib/folderStartup";
 import { resolveLibraryPasteOp } from "../lib/libraryPaste";
+import { LibraryWindow, type LibraryQuery } from "../lib/libraryWindow";
 import { isOutsideFolder } from "../lib/outsideFolder";
 import { cycleTableSort } from "../lib/tableSort";
 import {
@@ -119,12 +124,19 @@ const FILTER_DEBOUNCE_MS = 250;
  */
 let filterTimer: ReturnType<typeof setTimeout> | null = null;
 /** 请求序号：慢的旧响应回来时直接丢弃，避免覆盖新筛选的结果。 */
-let requestSeq = 0;
+let windowQueryKey = "";
+let libraryUpdateMaxTimer: ReturnType<typeof setTimeout> | null = null;
 /** 曲库事件与筛选输入使用不同计时器，后台分析不能取消用户刚输入的搜索。 */
 let libraryUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 const pendingLibraryUpdateIds = new Set<number>();
 /** 单曲详情的迟到响应不能覆盖用户后来选中的另一首。 */
 let selectedDetailRequestSeq = 0;
+let selectedDetailAbort: AbortController | null = null;
+/** 快照和实时磁盘树也必须最终请求优先，避免旧刷新覆盖刚改完的目录。 */
+let folderRequestSeq = 0;
+/** StrictMode / 重试共用同一份启动恢复；实时刷新另走 refreshFolders。 */
+let folderStartupInFlight: Promise<void> | null = null;
+/** 当前已加载前缀的服务端续页令牌；旧后端缺字段时自动回退 offset。 */
 
 function cancelPending(): void {
   if (filterTimer !== null) {
@@ -151,6 +163,12 @@ function toTrackSummary(track: Track): TrackSummary {
     bpm: track.bpm,
     bpm_v2: track.bpm_v2,
     bpm_v3: track.bpm_v3,
+    bpm_confidence: track.bpm_confidence,
+    first_beat: track.first_beat,
+    beat_origin: track.beat_origin,
+    downbeat_origin: track.downbeat_origin,
+    downbeat_confidence: track.downbeat_confidence,
+    beat_grid_revision: track.beat_grid_revision,
     music_key: track.music_key,
     camelot: track.camelot,
     open_key: track.open_key,
@@ -165,68 +183,9 @@ function toTrackSummary(track: Track): TrackSummary {
     added_at: track.added_at,
     modified_at: track.modified_at,
     folder: track.folder,
+    cue_ms: track.cue_ms,
+    end_ms: track.end_ms,
   };
-}
-
-function summarySortValue(track: TrackSummary, key: TrackSort): string | number | null {
-  switch (key) {
-    case "title": return track.title;
-    case "artist": return track.artist;
-    case "album": return track.album;
-    case "bpm": return track.bpm;
-    case "camelot": {
-      const match = /^(\d{1,2})([AB])$/i.exec(track.camelot.trim());
-      return match ? Number(match[1]) * 2 + (match[2].toUpperCase() === "B" ? 1 : 0) : null;
-    }
-    case "energy": return track.energy;
-    case "duration": return track.duration;
-    case "rating": return track.rating;
-    case "file_created_at": return track.file_created_at;
-    case "added_at": return track.added_at;
-    case "custom": return null;
-  }
-}
-
-function compareSummaryValue(
-  left: string | number | null,
-  right: string | number | null,
-  order: SortOrder,
-): number {
-  const leftMissing = left === null;
-  const rightMissing = right === null;
-  if (leftMissing || rightMissing) {
-    if (leftMissing && rightMissing) return 0;
-    return leftMissing ? 1 : -1;
-  }
-  const compared = typeof left === "number" && typeof right === "number"
-    ? left - right
-    : String(left) < String(right)
-      ? -1
-      : String(left) > String(right)
-        ? 1
-        : 0;
-  return order === "asc" ? compared : -compared;
-}
-
-function sortTrackSummaries(items: TrackSummary[], filter: LibraryFilter): TrackSummary[] {
-  if (filter.sort === "custom") return items;
-  return items.sort((left, right) => {
-    const primary = compareSummaryValue(
-      summarySortValue(left, filter.sort),
-      summarySortValue(right, filter.sort),
-      filter.order,
-    );
-    if (primary !== 0) return primary;
-    if (filter.sort2) {
-      const secondary = compareSummaryValue(
-        summarySortValue(left, filter.sort2),
-        summarySortValue(right, filter.sort2),
-        filter.order2,
-      );
-      if (secondary !== 0) return secondary;
-    }
-    return right.id - left.id;
-  });
 }
 
 function folderTreeContains(nodes: FolderTree["roots"], path: string): boolean {
@@ -266,17 +225,17 @@ function claimProgress(current: AnalyzeProgress | null, next: AnalyzeProgress): 
 function toQuery(
   filter: LibraryFilter,
   offset: number,
-): Record<string, string | number | undefined> {
+): LibraryQuery {
   return {
     q: filter.q.trim(),
     key: filter.key,
     bpm_min: filter.bpmMin ?? undefined,
     bpm_max: filter.bpmMax ?? undefined,
     energy_min: filter.energyMin ?? undefined,
-    analyzed: filter.analyzed === "all" ? undefined : String(filter.analyzed === "yes"),
+    analyzed: filter.analyzed === "all" ? undefined : filter.analyzed === "yes",
     folder: filter.folder,
     folder_deep:
-      filter.folder && !isOutsideFolder(filter.folder) && filter.folderDeep ? "true" : undefined,
+      filter.folder && !isOutsideFolder(filter.folder) && filter.folderDeep ? true : undefined,
     sort: filter.sort,
     order: filter.order,
     sort2: filter.sort2 ?? undefined,
@@ -293,7 +252,14 @@ export interface LibraryClipboard {
 }
 
 export interface LibraryStore {
-  tracks: TrackSummary[];
+  orderedIds: number[];
+  indexById: ReadonlyMap<number, number>;
+  summaryById: ReadonlyMap<number, TrackSummary>;
+  queryVersion: number;
+  requestLatency: number;
+  ensureRange(start: number, end: number, visibleStart?: number, visibleEnd?: number): Promise<void>;
+  resolveSummaries(ids: number[]): Promise<TrackSummary[]>;
+  retryList(): Promise<void>;
   total: number;
   loading: boolean;
   loadingMore: boolean;
@@ -315,6 +281,10 @@ export interface LibraryStore {
   selectedTrack: Track | null;
   clipboard: LibraryClipboard | null;
   folders: FolderTree | null;
+  /** 工作台挂载前的目录恢复是否已经结束（成功来源可见于 folderStartupSource）。 */
+  folderStartupReady: boolean;
+  folderStartupSource: FolderStartupSource | null;
+  folderSnapshotGeneratedAt: string | null;
   stats: LibraryStats | null;
   undo: FolderUndoStatus;
   undoError: string;
@@ -329,14 +299,16 @@ export interface LibraryStore {
    */
   autoAnalyzeSuspended: boolean;
   refresh(): Promise<void>;
-  /** 按事件携带的 id 局部回填摘要，并用一个很小的尾部窗口保持已加载前缀完整。 */
+  /** 按事件 ID 回填缓存摘要，并校验完整顺序索引。 */
   refreshTrackSummaries(ids: number[]): Promise<void>;
   /** 为当前选中项按需读取完整拍点、Cue、标签和备注。 */
   ensureSelectedTrack(id?: number | null, force?: boolean): Promise<Track | null>;
-  /** 连续翻页直到列表里出现该 id（或已到库底）。 */
+  /** 通过完整索引直接定位并读取目标摘要。 */
   ensureTrackLoaded(id: number): Promise<void>;
-  loadMore(): Promise<void>;
   refreshStats(): Promise<void>;
+  /** 优先读 SQLite 快照；没有快照的首次升级才等待一次完整磁盘树。 */
+  restoreFoldersForStartup(): Promise<void>;
+  /** 首帧后的实时校验；保留当前树，完整响应回来后才原子替换。 */
   refreshFolders(): Promise<void>;
   refreshUndo(): Promise<void>;
   setFilter(patch: Partial<LibraryFilter>): void;
@@ -413,7 +385,10 @@ export interface LibraryStore {
 }
 
 export const useLibraryStore = create<LibraryStore>()((set, get) => ({
-  tracks: [],
+  orderedIds: [], indexById: new Map(), summaryById: new Map(), queryVersion: 0, requestLatency: 200,
+  ensureRange: (start, end, visibleStart, visibleEnd) => libraryWindow.ensureRange(start, end, visibleStart, visibleEnd),
+  resolveSummaries: (ids) => libraryWindow.resolveIds(ids),
+  retryList: () => libraryWindow.retry(),
   total: 0,
   loading: false,
   loadingMore: false,
@@ -428,6 +403,9 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   selectedTrack: null,
   clipboard: null,
   folders: null,
+  folderStartupReady: false,
+  folderStartupSource: null,
+  folderSnapshotGeneratedAt: null,
   stats: null,
   undo: { available: false, op: null, count: 0 },
   undoError: "",
@@ -438,170 +416,56 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async refresh() {
     cancelPending();
-    const seq = ++requestSeq;
-    // 删曲 / 分析回填都会触发 library.updated → refresh。
-    // 若永远只拉第一页，用户滚到第 500 首时列表高度突然塌回 200 行，
-    // 视口就会「弹回顶部」——保留当前已加载深度，滚动位置才站得住。
-    const keepCount = Math.max(PAGE_SIZE, get().tracks.length);
-    set({ loading: true });
-    try {
-      const items: TrackSummary[] = [];
-      const seen = new Set<number>();
-      let total = 0;
-      while (items.length < keepCount) {
-        const page = await api.tracks({
-          ...toQuery(get().filter, items.length),
-          // 摘要足够轻时直接恢复当前已加载深度，避免每 200 首重复一次 COUNT/排序。
-          limit: Math.min(10_000, Math.max(PAGE_SIZE, keepCount - items.length)),
-        });
-        if (seq !== requestSeq) return;
-        total = page.total;
-        if (page.items.length === 0) break;
-        for (const item of page.items) {
-          if (seen.has(item.id)) continue;
-          seen.add(item.id);
-          items.push(item);
-        }
-        if (items.length >= total || page.items.length < PAGE_SIZE) break;
-      }
-      if (seq !== requestSeq) return;
-      // 故意不动 selectedId：分析进度会不停触发 refresh，
-      // 一旦顺手清选中，用户看详情时会被反复踢出去。选中项落在页外时
-      // selectSelectedTrack 自然返回 null，交给视图处理。
-      set({ tracks: items, total, loading: false, error: "" });
-      if (get().selectedId !== null) void get().ensureSelectedTrack(get().selectedId, true);
-    } catch (error) {
-      if (seq !== requestSeq) return;
-      set({ loading: false, error: errorText(error) });
-    }
+    prepareWindowQuery(get().filter);
+    await libraryWindow.refreshIndex();
+    if (get().selectedId !== null) void get().ensureSelectedTrack(get().selectedId, true);
   },
 
   async refreshTrackSummaries(ids) {
-    const uniqueIds = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))];
-    if (uniqueIds.length === 0) return;
-    // 大批导入属于结构性变化；切成数十个增量请求反而比一次同步更重。
-    if (uniqueIds.length > 500) {
-      await get().refresh();
-      return;
-    }
-    const snapshot = get();
-    const filter = snapshot.filter;
-    // 手排顺序只存在文件夹清单里，前端不能从摘要字段重新推导。局部合并会把
-    // 被更新的行挪到末尾，因此这一种模式仍走一次轻量摘要刷新。
-    if (filter.sort === "custom") {
-      await get().refresh();
-      return;
-    }
-    const seq = requestSeq;
-    const loadedCount = snapshot.tracks.length;
-    if (loadedCount === 0) return;
-    const refillSize = Math.min(500, uniqueIds.length + 8);
-    const refillOffset = Math.max(0, loadedCount - refillSize);
+    const unique = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))];
+    if (!unique.length) return;
+    prepareWindowQuery(get().filter);
+    libraryWindow.invalidate(unique);
+    const version = get().queryVersion;
     try {
-      const filterQuery = toQuery(filter, 0);
-      const [updated, refill] = await Promise.all([
-        api.trackSummaries(uniqueIds, {
-          ...filterQuery,
-          limit: undefined,
-          offset: undefined,
-        }),
-        api.tracks({
-          ...toQuery(filter, refillOffset),
-          limit: refillSize,
-          offset: refillOffset,
-        }),
-      ]);
-      if (seq !== requestSeq || get().filter !== filter) return;
-      const requested = new Set(uniqueIds);
-      set((current) => {
-        if (current.filter !== filter) return {};
-        const merged = [
-          ...current.tracks.filter((track) => !requested.has(track.id)),
-          ...updated,
-          ...refill.items,
-        ];
-        const byId = new Map<number, TrackSummary>();
-        for (const track of merged) byId.set(track.id, track);
-        const targetLength = Math.min(loadedCount, refill.total);
-        return {
-          tracks: sortTrackSummaries([...byId.values()], filter).slice(0, targetLength),
-          total: refill.total,
-          error: "",
-        };
-      });
-      if (get().selectedId !== null && uniqueIds.includes(get().selectedId as number)) {
+      await libraryWindow.refreshChanged(unique);
+      if (get().queryVersion === version && get().selectedId !== null && unique.includes(get().selectedId!)) {
         void get().ensureSelectedTrack(get().selectedId, true);
       }
-    } catch (error) {
-      // 增量失败不清空现有列表；下一次用户筛选或结构性刷新会重新同步。
-      set({ error: errorText(error) });
     }
+    catch { /* The data lane publishes the error without dropping cached rows. */ }
   },
 
   async ensureSelectedTrack(id = get().selectedId, force = false) {
-    if (id === null) return null;
+    if (id === null) {
+      selectedDetailAbort?.abort();
+      selectedDetailAbort = null;
+      return null;
+    }
     const cached = get().selectedTrack;
     if (!force && cached?.id === id) return cached;
     const seq = ++selectedDetailRequestSeq;
+    selectedDetailAbort?.abort();
+    const controller = new AbortController();
+    selectedDetailAbort = controller;
+    const modifiedAt = get().summaryById.get(id)?.modified_at;
     try {
-      const track = await api.track(id);
+      const track = await api.track(id, { signal: controller.signal, modifiedAt });
       if (seq !== selectedDetailRequestSeq || get().selectedId !== id) return null;
       set({ selectedTrack: track });
       return track;
     } catch {
       return null;
+    } finally {
+      if (selectedDetailAbort === controller) selectedDetailAbort = null;
     }
   },
 
-  /**
-   * 把指定曲目滚进已加载窗口：定位「正在播」时，refresh 塌页或尚未翻到那一页
-   * 都会让表里找不到行。连续 loadMore，直到看见它或到库底。
-   */
+  /** ID 索引直接定位，不再为了找一首歌逐页读取前缀。 */
   async ensureTrackLoaded(id: number) {
-    // refresh 进行中先等它结束，否则 loadMore 会被 loading 守卫挡住。
-    for (let i = 0; i < 80 && get().loading; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    for (;;) {
-      const { tracks, total, loadingMore } = get();
-      if (tracks.some((track) => track.id === id)) return;
-      if (tracks.length >= total) return;
-      if (loadingMore) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        continue;
-      }
-      const before = tracks.length;
-      await get().loadMore();
-      if (get().tracks.length <= before) return;
-    }
-  },
-
-  async loadMore() {
-    const { tracks, total, loadingMore, loading } = get();
-    if (loadingMore || loading || tracks.length >= total) return;
-    const seq = requestSeq;
-    set({ loadingMore: true });
-    try {
-      const page = await api.tracks(toQuery(get().filter, tracks.length));
-      if (seq !== requestSeq) {
-        // 页作废，但 loadingMore 必须跟着复位：后台分析每推一次
-        // library.updated 就会触发 refresh 把 requestSeq 往前推，
-        // 翻页请求撞上就被作废——不复位的话这道守卫会把之后所有
-        // loadMore 都挡掉，底部「加载更多」永远转圈。曲库越大、
-        // 后台分析越忙，这个竞态越容易中。
-        set({ loadingMore: false });
-        return;
-      }
-      const seen = new Set(get().tracks.map((item) => item.id));
-      const merged = [...get().tracks, ...page.items.filter((item) => !seen.has(item.id))];
-      set({ tracks: merged, total: page.total, loadingMore: false });
-    } catch (error) {
-      // 已被新筛选取代的请求失败，只复位状态，别把过期错误糊到现在的筛选上
-      if (seq !== requestSeq) {
-        set({ loadingMore: false });
-        return;
-      }
-      set({ loadingMore: false, error: errorText(error) });
+    if (!get().indexById.has(id)) await get().refresh();
+    if (get().indexById.has(id)) {
+      try { await libraryWindow.resolveIds([id]); } catch { /* Retry is exposed beside the list error. */ }
     }
   },
 
@@ -625,7 +489,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   setFilter(patch) {
     cancelPending();
-    const filter = { ...get().filter, ...patch };
+    // 界面已经没有“仅当前层”模式；侧栏显示累计子树数量，列表始终使用同一范围。
+    const filter = { ...get().filter, ...patch, folderDeep: true };
     const folderChanged = "folder" in patch && filter.folder !== get().filter.folder;
     updateLocalWorkspaceSession({
       folder: filter.folder,
@@ -634,8 +499,10 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       order: filter.order,
       sort2: filter.sort2,
       order2: filter.order2,
-      ...(folderChanged ? { selectedId: null, scrollTop: 0 } : {}),
+      scrollTop: 0, topVisibleTrackId: null, rowOffset: 0,
+      ...(folderChanged ? { selectedId: null } : {}),
     });
+    prepareWindowQuery(filter);
     set({
       filter,
       ...(folderChanged
@@ -659,15 +526,78 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       order2: DEFAULT_FILTER.order2,
       scrollTop: 0,
     });
-    set({
-      filter: { ...DEFAULT_FILTER },
-    });
+    prepareWindowQuery(DEFAULT_FILTER);
+    set({ filter: { ...DEFAULT_FILTER } });
     void get().refresh();
   },
 
+  restoreFoldersForStartup() {
+    if (folderStartupInFlight) return folderStartupInFlight;
+    const seq = ++folderRequestSeq;
+    set({ folderStartupReady: false });
+    const run = (async () => {
+      try {
+        const restored = await restoreFolderTreeForStartup(
+          api.folderSnapshot,
+          api.folders,
+        );
+        if (seq !== folderRequestSeq) return;
+        const filter = get().filter;
+        const folderGone =
+          (isOutsideFolder(filter.folder) && restored.tree.outside <= 0) ||
+          (filter.folder &&
+            !isOutsideFolder(filter.folder) &&
+            !folderTreeContains(restored.tree.roots, filter.folder));
+        if (folderGone) {
+          const nextFilter = { ...filter, folder: "", folderDeep: true };
+          updateLocalWorkspaceSession({
+            folder: "",
+            folderDeep: true,
+            selectedId: null,
+            scrollTop: 0,
+          });
+          set({
+            folders: restored.tree,
+            folderStartupReady: true,
+            folderStartupSource: restored.source,
+            folderSnapshotGeneratedAt: restored.generatedAt,
+            filter: nextFilter,
+            selectedId: null,
+            selectedIds: [],
+            selectedTrack: null,
+          });
+          void get().refresh();
+          return;
+        }
+        set({
+          folders: restored.tree,
+          folderStartupReady: true,
+          folderStartupSource: restored.source,
+          folderSnapshotGeneratedAt: restored.generatedAt,
+        });
+      } catch {
+        if (seq === folderRequestSeq) {
+          // 启动不能无限卡住；已有树（例如一次重试）仍完整保留。
+          set({ folderStartupReady: true });
+        }
+      }
+    })().finally(() => {
+      folderStartupInFlight = null;
+    });
+    folderStartupInFlight = run;
+    return run;
+  },
+
   async refreshFolders() {
+    // 启动快照正在恢复时，WS 的目录变化事件可能先到。让实时刷新接在恢复之后，
+    // 不能用自己的请求序号把启动结果作废，留下 folderStartupReady=false 的半状态。
+    if (folderStartupInFlight && !get().folderStartupReady) {
+      await folderStartupInFlight;
+    }
+    const seq = ++folderRequestSeq;
     try {
       const folders = await api.folders();
+      if (seq !== folderRequestSeq) return;
       const filter = get().filter;
       // 「其他」里已经没有歌了：退回全部曲目，别留在空哨兵筛选上。
       if (
@@ -676,8 +606,13 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
           !isOutsideFolder(filter.folder) &&
           !folderTreeContains(folders.roots, filter.folder))
       ) {
-        const nextFilter = { ...filter, folder: "" };
-        updateLocalWorkspaceSession({ folder: "", selectedId: null, scrollTop: 0 });
+        const nextFilter = { ...filter, folder: "", folderDeep: true };
+        updateLocalWorkspaceSession({
+          folder: "",
+          folderDeep: true,
+          selectedId: null,
+          scrollTop: 0,
+        });
         set({
           folders,
           filter: nextFilter,
@@ -705,13 +640,15 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   select(id, mode = "replace") {
     if (id === null) {
       selectedDetailRequestSeq += 1;
+      selectedDetailAbort?.abort();
+      selectedDetailAbort = null;
       updateLocalWorkspaceSession({ selectedId: null });
       set({ selectedId: null, selectedIds: [], selectedTrack: null, selectionMode: false });
       return;
     }
     // 摘要行不能冒充完整 Track；保留同一首已经取回的详情，换歌时再按需读取。
     if (get().selectedTrack?.id !== id) set({ selectedTrack: null });
-    const { selectedId, selectedIds, tracks } = get();
+    const { selectedId, selectedIds, orderedIds, indexById } = get();
     if (mode === "toggle") {
       // Cmd/Ctrl 点：加进去或拿出来。锚点跟着最后动的那一条走。
       const has = selectedIds.includes(id);
@@ -724,12 +661,12 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     }
     if (mode === "range" && selectedId !== null) {
       // Shift 点：按**当前显示顺序**取区间，不是按 id——用户看到的是排序后的表。
-      const from = tracks.findIndex((track) => track.id === selectedId);
-      const to = tracks.findIndex((track) => track.id === id);
+      const from = indexById.get(selectedId) ?? -1;
+      const to = indexById.get(id) ?? -1;
       if (from >= 0 && to >= 0) {
         const [lo, hi] = from <= to ? [from, to] : [to, from];
         updateLocalWorkspaceSession({ selectedId: id });
-        set({ selectedIds: tracks.slice(lo, hi + 1).map((track) => track.id), selectedId: id });
+        set({ selectedIds: orderedIds.slice(lo, hi + 1), selectedId: id });
         void get().ensureSelectedTrack(id);
         return;
       }
@@ -741,16 +678,18 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   selectTrack(track) {
     selectedDetailRequestSeq += 1;
+    selectedDetailAbort?.abort();
+    selectedDetailAbort = null;
     updateLocalWorkspaceSession({ selectedId: track.id });
     set({ selectedId: track.id, selectedIds: [track.id], selectedTrack: track });
   },
 
   selectAll() {
-    const { tracks } = get();
-    const selectedId = get().selectedId ?? (tracks[0]?.id ?? null);
+    const { orderedIds } = get();
+    const selectedId = get().selectedId ?? (orderedIds[0] ?? null);
     updateLocalWorkspaceSession({ selectedId });
     set({
-      selectedIds: tracks.map((track) => track.id),
+      selectedIds: [...orderedIds],
       selectedId,
     });
   },
@@ -911,8 +850,9 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async updateTrack(id, patch) {
     const track = await api.patchTrack(id, patch);
+    api.invalidateTrackDetail(id);
+    libraryWindow.update(toTrackSummary(track));
     set({
-      tracks: get().tracks.map((item) => (item.id === id ? toTrackSummary(track) : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
     });
     return track;
@@ -920,8 +860,9 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async writeTags(id) {
     const track = await api.writeTags(id);
+    api.invalidateTrackDetail(id);
+    libraryWindow.update(toTrackSummary(track));
     set({
-      tracks: get().tracks.map((item) => (item.id === id ? toTrackSummary(track) : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
     });
     return track;
@@ -929,8 +870,9 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async setCover(id, file) {
     const track = await api.setCover(id, file);
+    api.invalidateTrackDetail(id);
+    libraryWindow.update(toTrackSummary(track));
     set({
-      tracks: get().tracks.map((item) => (item.id === id ? toTrackSummary(track) : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
     });
     return track;
@@ -938,8 +880,9 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async rereadTags(id) {
     const track = await api.rereadTags(id);
+    api.invalidateTrackDetail(id);
+    libraryWindow.update(toTrackSummary(track));
     set({
-      tracks: get().tracks.map((item) => (item.id === id ? toTrackSummary(track) : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
     });
     return track;
@@ -961,14 +904,14 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     const failed = new Set(Object.keys(result.errors).map(Number));
     const gone = new Set(ids.filter((id) => !failed.has(id)));
     if (gone.size > 0) {
+      api.invalidateTrackDetail([...gone]);
       const {
-        tracks: prevTracks,
+        orderedIds: prevIds,
         selectedId,
         selectedIds,
         selectedTrack,
-        total,
       } = get();
-      const nextTracks = prevTracks.filter((item) => !gone.has(item.id));
+      const nextIds = prevIds.filter((id) => !gone.has(id));
       let nextSelectedIds = selectedIds.filter((id) => !gone.has(id));
       let nextSelectedId =
         selectedId !== null && !gone.has(selectedId) ? selectedId : null;
@@ -978,21 +921,20 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       // 锚点被删：落到原位置邻近的一首（同下标=下一首，删到末尾则上一首），
       // 选中不会飞走，详情栏也能继续钉在邻曲上。
       if (selectedId !== null && gone.has(selectedId)) {
-        const focusIndex = prevTracks.findIndex((track) => track.id === selectedId);
+        const focusIndex = prevIds.indexOf(selectedId);
         const neighbor =
-          nextTracks.length === 0 || focusIndex < 0
+          nextIds.length === 0 || focusIndex < 0
             ? null
-            : (nextTracks[Math.min(focusIndex, nextTracks.length - 1)] ?? null);
-        nextSelectedId = neighbor?.id ?? null;
-        nextSelectedIds = neighbor ? [neighbor.id] : [];
+            : (nextIds[Math.min(focusIndex, nextIds.length - 1)] ?? null);
+        nextSelectedId = neighbor ?? null;
+        nextSelectedIds = neighbor ? [neighbor] : [];
         nextSelectedTrack = null;
       } else if (nextSelectedId === null && nextSelectedIds.length > 0) {
         nextSelectedId = nextSelectedIds[nextSelectedIds.length - 1] ?? null;
       }
 
+      libraryWindow.remove(gone);
       set({
-        tracks: nextTracks,
-        total: Math.max(0, total - gone.size),
         selectedId: nextSelectedId,
         selectedIds: nextSelectedIds,
         selectedTrack:
@@ -1078,15 +1020,22 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         return;
       }
       case "library.updated": {
+        api.invalidateTrackDetail(event.payload.track_ids);
         for (const id of event.payload.track_ids) pendingLibraryUpdateIds.add(id);
+        libraryWindow.invalidate(event.payload.track_ids);
         if (libraryUpdateTimer !== null) clearTimeout(libraryUpdateTimer);
-        libraryUpdateTimer = setTimeout(() => {
+        const flush = () => {
+          if (libraryUpdateTimer !== null) clearTimeout(libraryUpdateTimer);
+          if (libraryUpdateMaxTimer !== null) clearTimeout(libraryUpdateMaxTimer);
           libraryUpdateTimer = null;
+          libraryUpdateMaxTimer = null;
           const ids = [...pendingLibraryUpdateIds];
           pendingLibraryUpdateIds.clear();
           void get().refreshTrackSummaries(ids);
           void get().refreshStats();
-        }, FILTER_DEBOUNCE_MS);
+        };
+        libraryUpdateTimer = setTimeout(flush, FILTER_DEBOUNCE_MS);
+        libraryUpdateMaxTimer ??= setTimeout(flush, 1000);
         return;
       }
       case "library.folders.updated": {
@@ -1100,6 +1049,22 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     }
   },
 }));
+
+const libraryWindow = new LibraryWindow({
+  index: (query, signal) => api.trackIndex(query, signal),
+  summaries: (ids, query, signal) => api.trackSummaries(ids, query, signal),
+  publish: (snapshot) => useLibraryStore.setState(snapshot),
+});
+
+function prepareWindowQuery(filter: LibraryFilter): void {
+  const query = toQuery(filter, 0);
+  delete query.limit;
+  delete query.offset;
+  const key = JSON.stringify(query);
+  if (key === windowQueryKey) return;
+  windowQueryKey = key;
+  libraryWindow.changeQuery(query);
+}
 
 /**
  * 有没有一批分析正在跑。工具栏的进度条和后台补齐的空闲判断共用这一条，

@@ -20,8 +20,10 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Maximize2, Minimize2, Pause, PictureInPicture2, Play, X } from "lucide-react";
+import { PictureInPicture2 } from "lucide-react";
+import { FloatingVideoControls, FloatingVideoScrub } from "./FloatingVideoControls";
 import { api } from "../../lib/api";
+import { observeVideoPreview } from "../../lib/videoPreviewDiagnostics";
 import { BilibiliEmbedController } from "../../lib/bilibiliEmbed";
 import { getBridge } from "../../lib/bridge";
 import {
@@ -29,11 +31,11 @@ import {
   announceAudioFocus,
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
-import { formatDuration } from "../../lib/format";
 import { previewGain, useCrossfade } from "../../lib/crossfade";
 import { useMasterVolume } from "../../lib/masterVolume";
 import {
   LocalVideoSynchronizer,
+  applyLocalVideoClock,
   VideoSeekEchoGuard,
   VideoTransportEchoGuard,
 } from "../../lib/localVideoSync";
@@ -67,6 +69,9 @@ import {
 import {
   broadcastMediaSync,
   getLatestPlayerSync,
+  getLocalVideoClock,
+  subscribeLocalVideoClock,
+  usesLocalVideoDeviceClock,
   MEDIA_SYNC_EVENT,
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
@@ -411,10 +416,13 @@ export function VideoPipHost() {
     desiredPlayingRef,
     getRate: () => {
       const current = useVideoPip.getState().session;
-      return current?.source === "local" ? (getLatestPlayerSync(current.trackId)?.rate ?? 1) : 1;
+      return current?.source === "local" ? (getLocalVideoClock(current.trackId)?.rate ?? getLatestPlayerSync(current.trackId)?.rate ?? 1) : 1;
     },
     onActivate: (video, target) => {
-      localSynchronizerRef.current?.reset(video);
+      const current = useVideoPip.getState().session;
+      const clock = current?.source === "local" ? getLocalVideoClock(current.trackId) : null;
+      if (clock) localSynchronizerRef.current?.adoptClock(video, clock);
+      else localSynchronizerRef.current?.reset();
       useVideoPip.getState().setPosition(target);
     },
     transportEchoGuard: videoTransportEchoGuardRef.current,
@@ -428,6 +436,13 @@ export function VideoPipHost() {
     setPlatformFallbackSessionKey(null);
   }, [session ? sessionKey(session) : "", onlinePlayerPreference]);
   const activeVideo = localSwap.activeVideo;
+
+  useEffect(() => {
+    const video = activeVideo();
+    if (!active || session?.source !== "network" || isPlatformPlayer || !video) return;
+    return observeVideoPreview(video, session,
+      () => useVideoPip.getState().session === session && activeVideo() === video);
+  }, [active, session, isPlatformPlayer, activeVideo, localSwap.activeSlot]);
 
   const commitPreviewAudioFocus = (sessionKeyValue: string) => {
     if (focusedPreviewKeyRef.current === sessionKeyValue) return;
@@ -460,12 +475,13 @@ export function VideoPipHost() {
     return source;
   }, [activeVideo, isLocal]);
 
-  // A stable canvas-backed video remains bound to macOS PiP while the two source videos swap.
-  // Safari 18+ supports MediaStream PiP; older WebKit falls back to the active source element.
+  // Only Chromium uses the canvas-backed PiP stream. WebKit presents the source video directly;
+  // copying every frame into an unused 720p stream there wastes compositor time during playback.
   useEffect(() => {
     const canvas = pipCanvasRef.current;
     const output = pipVideoRef.current;
-    if (!isLocal || !hostActive || !canvas || !output || typeof canvas.captureStream !== "function") {
+    if (!isLocal || !hostActive || !canvas || !output || typeof canvas.captureStream !== "function"
+      || "webkitSetPresentationMode" in HTMLVideoElement.prototype) {
       return;
     }
     const context = canvas.getContext("2d", { alpha: false });
@@ -1300,10 +1316,36 @@ export function VideoPipHost() {
 
   // 本地小窗：跟主播放条时钟（监听常挂，不依赖 hostActive，避免错过起播那一帧）
   useEffect(() => {
+    if (!isLocal || session?.source !== "local" || !usesLocalVideoDeviceClock()) return;
+    const trackId = session.trackId;
+    const apply = () => {
+      const pip = useVideoPip.getState();
+      if (!pip.active || pip.mode !== "float" || pip.session?.source !== "local" || pip.session.trackId !== trackId) return;
+      const video = activeVideo();
+      if (!video || localSwap.isHoldingPosition()) return;
+      const clock = getLocalVideoClock(trackId);
+      if (clock) desiredPlayingRef.current = clock.playing;
+      applyLocalVideoClock(video, clock, localSynchronizerRef.current!, videoSeekEchoGuardRef.current!, videoTransportEchoGuardRef.current!,
+        pip.systemPip ? undefined : () => localSwap.correctClock(localSynchronizerRef.current!));
+      if (pip.systemPip && pipVideoRef.current?.srcObject) {
+        if (clock?.playing) void pipVideoRef.current.play().catch(() => undefined);
+        else pipVideoRef.current.pause();
+      }
+    };
+    const unsubscribe = subscribeLocalVideoClock(trackId, apply);
+    const video = activeVideo();
+    video?.addEventListener("loadeddata", apply);
+    video?.addEventListener("seeked", apply);
+    apply();
+    return () => { unsubscribe(); video?.removeEventListener("loadeddata", apply); video?.removeEventListener("seeked", apply); };
+  }, [isLocal, session?.source === "local" ? session.trackId : null, localSwap.activeSlot, hostActive, systemPip]);
+
+  useEffect(() => {
     if (!isLocal || !session || session.source !== "local") return;
     const trackId = session.trackId;
     const applySync = (detail: MediaSyncDetail) => {
       if (detail.owner !== "player" || detail.trackId !== trackId) return;
+      if (usesLocalVideoDeviceClock()) return;
       if (detail.action === "play") desiredPlayingRef.current = true;
       if (detail.action === "pause") desiredPlayingRef.current = false;
       const pip = useVideoPip.getState();
@@ -1901,78 +1943,28 @@ export function VideoPipHost() {
             aria-hidden="true"
           />
           {showFloating && (
-            <div className="kd-pip-float-chrome" title={title}>
-              <div className="kd-pip-float-top">
-                <span className="kd-truncate">{title}</span>
-                <button
-                  type="button"
-                  className="kd-pip-float-x"
-                  aria-label="关闭预览"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    close();
-                  }}
-                >
-                  <X size={13} />
-                </button>
-              </div>
-              <div className="kd-pip-float-bottom">
-                <button
-                  type="button"
-                  aria-label={playing ? "暂停" : "播放"}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggle();
-                  }}
-                >
-                  {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
-                </button>
-                <span className="kd-mono">
-                  {formatDuration(position)} / {formatDuration(duration)}
-                </span>
-                <button
-                  type="button"
-                  aria-label={videoFullscreen ? "退出全屏" : "全屏播放"}
-                  aria-pressed={videoFullscreen}
-                  title={videoFullscreen ? "退出全屏（Esc）" : "全屏播放"}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void applyVideoFullscreen(!videoFullscreen);
-                  }}
-                >
-                  {videoFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-                </button>
-                {!isPlatformPlayer && canSystemPip() && (
-                  <button
-                    type="button"
-                    aria-label="系统画中画"
-                    title="系统画中画（切走应用时也会自动打开）"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                      const video = systemPipTarget();
-                      if (!video) return;
-                      void (async () => {
-                        if (fullscreenRef.current) await applyVideoFullscreen(false);
-                        await enterSystemPip(video);
-                      })();
-                    }}
-                  >
-                    <PictureInPicture2 size={13} />
-                  </button>
-                )}
-              </div>
-              {error && <div className="kd-pip-float-error">{error}</div>}
-            </div>
+            <FloatingVideoControls title={title} playing={playing} position={position} duration={duration}
+              fullscreen={videoFullscreen} onClose={close} onToggle={toggle}
+              onFullscreen={() => void applyVideoFullscreen(!videoFullscreen)} error={error}
+              extra={!isPlatformPlayer && canSystemPip() ? <button type="button" aria-label="系统画中画"
+                title="系统画中画（切走应用时也会自动打开）" onClick={event => {
+                  event.stopPropagation();
+                  const video = systemPipTarget();
+                  if (!video) return;
+                  void (async () => {
+                    if (fullscreenRef.current) await applyVideoFullscreen(false);
+                    await enterSystemPip(video);
+                  })();
+                }}><PictureInPicture2 size={13} /></button> : null} />
           )}
           {/* 进度条独立于 chrome：不悬停也看得见、可拖；本地会同步拽主条音轨 */}
           {showFloating && !isPlatformPlayer && (
-            <div
-              className="kd-pip-float-scrub"
-              role="slider"
-              aria-label="视频进度"
-              aria-valuemin={0}
-              aria-valuemax={duration}
-              aria-valuenow={position}
+            <FloatingVideoScrub position={position} duration={duration}
+              onKeyDown={event => {
+                if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                event.preventDefault(); event.stopPropagation();
+                seekTo(event.key === "Home" ? 0 : event.key === "End" ? duration : position + (event.key === "ArrowRight" ? 5 : -5));
+              }}
               onPointerDown={(event) => {
                 event.stopPropagation();
                 if (event.button !== 0) return;
@@ -2009,14 +2001,7 @@ export function VideoPipHost() {
                   );
                 }
               }}
-            >
-              <span
-                className="kd-pip-float-scrub-fill"
-                style={{
-                  width: `${duration > 0 ? Math.min(100, (position / duration) * 100) : 0}%`,
-                }}
-              />
-            </div>
+            />
           )}
           {showFloating &&
             RESIZE_EDGES.filter((edge) => !isPlatformPlayer || edge === "se").map((edge) => (

@@ -3,6 +3,8 @@
 //! 这一层不碰网络、不碰数据库，provider / analysis / library / server 都依赖它。
 
 pub mod config;
+pub mod composition;
+pub mod workshop;
 pub mod events;
 pub mod models;
 pub mod musical_key;

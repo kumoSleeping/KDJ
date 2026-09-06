@@ -13,14 +13,7 @@ import {
 import { getLiveDeckSpectrum } from "../../lib/unifiedPlayer";
 import { knobBias, snapKnobToCenter } from "../../lib/stemDeckLog";
 
-export interface ManagerMixerValues {
-  gain: number;
-  high: number;
-  mid: number;
-  low: number;
-  filter: number;
-  volume: number;
-}
+export type { ManagerMixerValues } from "../../lib/managerMixer";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));

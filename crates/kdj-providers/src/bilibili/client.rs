@@ -460,6 +460,23 @@ impl BiliClient {
             .cloned()
             .unwrap_or_default())
     }
+
+    /// 批量补齐稿件元数据。关键词搜索结果不含分 P 数，而文章卡片接口会在
+    /// `videos` 中返回这个值；一次请求可覆盖整页结果，避免逐稿件请求 view。
+    pub async fn article_cards(&self, aids: &[i64]) -> Result<Value> {
+        let ids = aids
+            .iter()
+            .copied()
+            .filter(|aid| *aid > 0)
+            .map(|aid| format!("av{aid}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        if ids.is_empty() {
+            return Ok(Value::Object(Default::default()));
+        }
+        let url = query_url("https://api.bilibili.com/x/article/cards", &[("ids", ids)])?;
+        self.get_json(&url).await
+    }
 }
 
 fn response_code(body: Option<&Value>) -> Option<i64> {

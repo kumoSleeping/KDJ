@@ -7,6 +7,7 @@
 pub mod activity_log;
 pub mod aggregate;
 pub mod cache_overview;
+pub mod compositions;
 pub mod downloads;
 pub mod error;
 pub mod jobs;
@@ -134,7 +135,11 @@ fn media_path_allowed(path: &str) -> bool {
     ) || matches!(
         segments.as_slice(),
         ["api", "video", "youtube", "hls", ticket] if !ticket.is_empty()
-    )
+    ) || matches!(
+        segments.as_slice(),
+        ["api", "workshop", "media", ticket, "audio.wav"]
+        | ["api", "workshop", "media", ticket, "video", _, _] if !ticket.is_empty()
+    ) || matches!(segments.as_slice(), ["api","workshop",pid,"sources",sid,"frame"] if !pid.is_empty() && !sid.is_empty())
 }
 
 fn request_authorized(request: &Request<Body>, auth: &AuthState) -> bool {
@@ -182,6 +187,16 @@ async fn require_auth(
 }
 
 const ACTIVITY_RECORDED_HEADER: &str = "x-kdj-activity-recorded";
+
+fn activity_level(status: StatusCode) -> activity_log::ActivityLevel {
+    if status.is_success() {
+        activity_log::ActivityLevel::Info
+    } else if status.is_client_error() {
+        activity_log::ActivityLevel::Warn
+    } else {
+        activity_log::ActivityLevel::Error
+    }
+}
 
 fn http_activity(
     method: &Method,
@@ -319,13 +334,7 @@ async fn record_activity_requests(
     if only_failures && status.is_success() {
         return response;
     }
-    let level = if status == StatusCode::TOO_MANY_REQUESTS {
-        activity_log::ActivityLevel::Warn
-    } else if status.is_success() {
-        activity_log::ActivityLevel::Info
-    } else {
-        activity_log::ActivityLevel::Error
-    };
+    let level = activity_level(status);
     state.activity_log.record(activity_log::ActivityLogDraft {
         category,
         level,
@@ -342,14 +351,17 @@ async fn record_activity_requests(
 /// 组装完整的应用路由。
 pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) -> Result<Router> {
     let settings = state.config.to_settings();
-    let downloads = Arc::new(downloads::DownloadManager::open(
-        state.hub.clone(),
-        settings.concurrent_downloads,
-        // 「开始下载」现在是一次性放行当前队列，不再持久化成未来任务自动开始。
-        // 旧 settings.json 即使残留 true，也不能把新入队任务直接启动。
-        false,
-        state.config.data_dir.join("download-queue.json"),
-    )?);
+    let downloads = Arc::new(
+        downloads::DownloadManager::open(
+            state.hub.clone(),
+            settings.concurrent_downloads,
+            // 「开始下载」现在是一次性放行当前队列，不再持久化成未来任务自动开始。
+            // 旧 settings.json 即使残留 true，也不能把新入队任务直接启动。
+            false,
+            state.config.data_dir.join("download-queue.json"),
+        )?
+        .with_activity_log(state.activity_log.clone()),
+    );
     let ctx = routes::Ctx {
         state: state.clone(),
         downloads,
@@ -359,7 +371,11 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         control: control.clone(),
         media: media.clone(),
     };
+    let compositions = compositions::CompositionManager::open(state.clone())?;
+    let workshop = compositions::workshop::Workshop::open(state.clone(), &compositions)?;
     let router = routes::router(ctx)
+        .merge(compositions::workshop::routes::router(workshop))
+        .merge(compositions::routes::router(compositions))
         .route("/ws", axum::routing::get(ws::handler))
         .layer(Extension(control))
         .layer(Extension(media))
@@ -548,6 +564,26 @@ mod auth_tests {
         assert!(http_activity(&Method::PUT, "/api/settings").is_none());
         assert!(http_activity(&Method::GET, "/api/activity/logs").is_none());
         assert!(http_activity(&Method::GET, "/api/accounts/qqm/login/qr/session-id").is_none());
+    }
+
+    #[test]
+    fn activity_severity_separates_rejected_requests_from_server_failures() {
+        assert_eq!(
+            activity_level(StatusCode::OK),
+            activity_log::ActivityLevel::Info
+        );
+        assert_eq!(
+            activity_level(StatusCode::NOT_FOUND),
+            activity_log::ActivityLevel::Warn
+        );
+        assert_eq!(
+            activity_level(StatusCode::UNPROCESSABLE_ENTITY),
+            activity_log::ActivityLevel::Warn
+        );
+        assert_eq!(
+            activity_level(StatusCode::INTERNAL_SERVER_ERROR),
+            activity_log::ActivityLevel::Error
+        );
     }
 
     #[tokio::test]

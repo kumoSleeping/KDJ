@@ -19,7 +19,7 @@ from .folders import link_state
 
 # ---------------------------------------------------------------- Camelot 表
 
-# 逐条对应 docs/00-architecture.md 第 5 节的调号轮表格
+# 历史调号轮映射；当前实现以 Rust crate 为准
 CAMELOT_TO_KEY: dict[str, str] = {
     "1A": "Ab minor", "1B": "B major",
     "2A": "Eb minor", "2B": "F# major",

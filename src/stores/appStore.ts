@@ -6,9 +6,16 @@
 
 import { create } from "zustand";
 import { api, events } from "../lib/api";
+import { enqueueSettingsWrite } from "../lib/settingsWriteBarrier";
+import { isPlatformEnabled, normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
+import { readWorkspaceSession } from "../lib/workspaceSession";
 import type { Account, Health, SearchCapabilities, Settings, WsEvent } from "../types";
 import { useDownloadStore } from "./downloadStore";
+import { useWorkshopStore } from "./workshopStore";
+import { useCompositionStore } from "./compositionStore";
 import { useLibraryStore } from "./libraryStore";
+import { useStreamBrowseStore } from "./streamBrowseStore";
+import { useSidebarVisibilityStore } from "./sidebarVisibilityStore";
 
 /**
  * hasResults 只管中间搜索半栏是否展开；右栏下载队列只看 showQueue。
@@ -28,6 +35,27 @@ function mergeAccount(accounts: Account[], account: Account): Account[] {
   return index >= 0
     ? accounts.map((item, itemIndex) => (itemIndex === index ? account : item))
     : [...accounts, account];
+}
+
+/**
+ * 联网核验失败只说明“现在问不到平台”，不说明本地凭证或账号身份消失了。
+ * provider 会把失败原因放进 detail；这里保留离线快照里的身份字段，避免一次网络
+ * 抖动同时抹掉昵称、头像和在线目录的账号绑定。
+ */
+function mergeVerifiedAccounts(cached: Account[], verified: Account[]): Account[] {
+  const cachedByPlatform = new Map(cached.map((account) => [account.platform, account]));
+  return verified.map((account) => {
+    if (account.state !== "unknown") return account;
+    const previous = cachedByPlatform.get(account.platform);
+    if (!previous) return account;
+    return {
+      ...account,
+      account_key: account.account_key || previous.account_key,
+      nickname: account.nickname || previous.nickname,
+      avatar: account.avatar || previous.avatar,
+      credential_kind: account.credential_kind || previous.credential_kind,
+    };
+  });
 }
 
 /**
@@ -71,6 +99,9 @@ export interface AppStore {
   queuePanelEpoch: number;
   /** 手动固定后，被动选歌/切换中间列表不能顶掉下载队列。 */
   queuePinned: boolean;
+  showComposition: boolean;
+  compositionPanelEpoch: number;
+  compositionPinned: boolean;
   /** 右栏/抽屉显示搜索结果预览（音频试听或视频预览），与下载队列互斥。 */
   showPreview: boolean;
   previewPanelEpoch: number;
@@ -93,6 +124,8 @@ export interface AppStore {
   searchCapabilities: SearchCapabilities;
   /** 账号状态刷新失败的原因；空串 = 正常。登录面板自己显示这一行。 */
   accountsError: string;
+  /** 设置页正在向各平台核验账号；离线快照仍留在界面上。 */
+  accountsRefreshing: boolean;
   booting: boolean;
   /** health 拉不通时的原因；空串 = sidecar 正常。 */
   bootError: string;
@@ -115,6 +148,9 @@ export interface AppStore {
   toggleQueuePanel(): void;
   openQueuePanel(): void;
   setQueuePinned(value: boolean): void;
+  toggleCompositionPanel(): void;
+  openCompositionPanel(): void;
+  setCompositionPinned(value: boolean): void;
   /** 打开预览旁路（点搜索结果音频/视频时走这条，不跟下载队列挤一栏）。 */
   openPreviewPanel(): void;
   toggleFoldersPanel(): void;
@@ -132,12 +168,15 @@ export interface AppStore {
   currentOverlay():
     | "settings"
     | "queue"
+    | "composition"
     | "preview"
     | "folders"
     | "duplicates"
     | "lyrics"
     | null;
   bootstrap(): Promise<void>;
+  /** 账号面板使用：仅在后台核验结果过旧时检查，不向用户暴露刷新操作。 */
+  verifyAccountsIfStale(): Promise<void>;
   refreshAccounts(): Promise<void>;
   setAccount(account: Account): void;
   saveSettings(patch: Partial<Settings>): Promise<void>;
@@ -150,6 +189,8 @@ function clearOverlays() {
     showSettings: false,
     settingsPinned: false,
     showQueue: false,
+    showComposition: false,
+    compositionPinned: false,
     showPreview: false,
     showFolders: false,
     showDuplicates: false,
@@ -160,7 +201,7 @@ function clearOverlays() {
 
 /** 被动导航尊重手动固定的下载栏；显式打开其它旁路仍走 clearOverlays。 */
 function clearPassiveOverlays(
-  state: Pick<AppStore, "showSettings" | "settingsPinned" | "showQueue" | "queuePinned">,
+  state: Pick<AppStore, "showSettings" | "settingsPinned" | "showQueue" | "queuePinned" | "showComposition" | "compositionPinned">,
 ) {
   if (state.showSettings && state.settingsPinned) {
     return { ...clearOverlays(), showSettings: true, settingsPinned: true } as const;
@@ -168,13 +209,24 @@ function clearPassiveOverlays(
   if (state.showQueue && state.queuePinned) {
     return { ...clearOverlays(), showQueue: true, queuePinned: true } as const;
   }
+  if (state.showComposition && state.compositionPinned) {
+    return { ...clearOverlays(), showComposition: true, compositionPinned: true } as const;
+  }
   return clearOverlays();
 }
 
 /** StrictMode 下 effect 会跑两次，用同一个 promise 挡掉重复的启动请求。 */
 let bootInFlight: Promise<void> | null = null;
+/** 工作台启动闸门也要单飞；否则 StrictMode 会重复恢复缓存与目录快照。 */
+let bootAllInFlight: Promise<void> | null = null;
+/** 快照启动只在首个工作台画面之后校验一次磁盘；StrictMode 不能重复枚举。 */
+let folderLiveRefreshScheduled = false;
+/** 设置重复挂载与登录回调可能撞在一起；全平台账号核验只保留一趟。 */
+let accountsRefreshInFlight: Promise<void> | null = null;
+/** 自动核验失败也进入冷却，避免用户反复开关设置时持续请求第三方平台。 */
+let accountsLastVerificationAttemptAt: number | null = null;
+const ACCOUNT_VERIFICATION_COOLDOWN_MS = 30 * 60 * 1000;
 /** 设置写入只有一条顺序通道；响应只允许兑现到发起它时的 intent。 */
-let settingsSaveTail: Promise<void> = Promise.resolve();
 let settingsIntent = 0;
 let settingsPending = 0;
 let persistedSettings: Settings | null = null;
@@ -188,6 +240,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   showQueue: false,
   queuePanelEpoch: 0,
   queuePinned: false,
+  showComposition: false,
+  compositionPanelEpoch: 0,
+  compositionPinned: false,
   showPreview: false,
   previewPanelEpoch: 0,
   showFolders: false,
@@ -204,6 +259,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   accounts: [],
   searchCapabilities: {},
   accountsError: "",
+  accountsRefreshing: false,
   booting: true,
   bootError: "",
   savingSettings: false,
@@ -227,7 +283,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   focusLibrary() {
     set((state) => (
-      (state.showSettings && state.settingsPinned) || (state.showQueue && state.queuePinned)
+      (state.showSettings && state.settingsPinned) || (state.showQueue && state.queuePinned) || (state.showComposition && state.compositionPinned)
     ) ? {
       listMode: "library",
       ...clearPassiveOverlays(state),
@@ -236,6 +292,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       showSettings: false,
       settingsPinned: false,
       showQueue: false,
+      showComposition: false,
+      compositionPinned: false,
       showPreview: false,
       showFolders: false,
       showDuplicates: false,
@@ -291,6 +349,17 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   setQueuePinned(value) {
     set({ queuePinned: get().showQueue ? value : false });
   },
+
+  toggleCompositionPanel() {
+    const open = !get().showComposition;
+    set({ ...clearOverlays(), showComposition: open, compositionPinned: open,
+      compositionPanelEpoch: get().compositionPanelEpoch + (open ? 1 : 0) });
+  },
+  openCompositionPanel() {
+    set({ ...clearOverlays(), showComposition: true, compositionPinned: true,
+      compositionPanelEpoch: get().compositionPanelEpoch + 1 });
+  },
+  setCompositionPinned(value) { set({ compositionPinned: get().showComposition ? value : false }); },
 
   openPreviewPanel() {
     set({
@@ -354,6 +423,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (state.showSettings) return "settings";
     if (state.showPreview) return "preview";
     if (state.showQueue) return "queue";
+    if (state.showComposition) return "composition";
     if (state.showDuplicates) return "duplicates";
     if (state.showLyrics) return "lyrics";
     return null;
@@ -371,7 +441,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   bootstrap() {
     if (bootInFlight) return bootInFlight;
-    set({ booting: true });
     const run = (async () => {
       const [health, settings, accounts, searchCapabilities] = await Promise.allSettled([
         api.health(),
@@ -390,15 +459,27 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         applyTheme(settings.value.theme);
       }
       // 账号拉不到不挡启动，但要把原因留下：登录面板不然只会一直写着"稍等一下"
-      if (accounts.status === "fulfilled") set({ accounts: accounts.value, accountsError: "" });
-      else set({ accountsError: `账号状态拉取失败：${errorText(accounts.reason)}` });
+      if (accounts.status === "fulfilled") {
+        const startupForeground = useStreamBrowseStore
+          .getState()
+          .hydrateForStartup(accounts.value, readWorkspaceSession());
+        set({
+          accounts: accounts.value,
+          accountsError: "",
+          // 在线前台的目标、侧栏高亮与工作区可见性必须在第一次挂载前一起就绪。
+          ...(startupForeground ? { listMode: "search" as const, hasResults: true } : {}),
+        });
+      } else {
+        // 读取失败时不调用 hydrateForStartup：不能把“接口暂时失败”误判成全部登出，
+        // 从而删掉仍可信的账号绑定缓存。
+        set({ accountsError: `账号状态拉取失败：${errorText(accounts.reason)}` });
+      }
       if (searchCapabilities.status === "fulfilled") {
         set({ searchCapabilities: searchCapabilities.value });
       } else {
         // 能力接口失败不影响单曲搜索；UI 会退回“单曲”且不冒充支持集合。
         set({ searchCapabilities: {} });
       }
-      set({ booting: false });
     })().finally(() => {
       bootInFlight = null;
     });
@@ -406,12 +487,41 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     return run;
   },
 
-  async refreshAccounts() {
-    try {
-      set({ accounts: await api.accounts(), accountsError: "" });
-    } catch (error) {
-      set({ accountsError: `账号状态刷新失败：${errorText(error)}` });
+  verifyAccountsIfStale() {
+    if (accountsRefreshInFlight) return accountsRefreshInFlight;
+    const now = Date.now();
+    if (
+      accountsLastVerificationAttemptAt !== null
+      && now - accountsLastVerificationAttemptAt >= 0
+      && now - accountsLastVerificationAttemptAt < ACCOUNT_VERIFICATION_COOLDOWN_MS
+    ) {
+      return Promise.resolve();
     }
+    return get().refreshAccounts();
+  },
+
+  refreshAccounts() {
+    if (accountsRefreshInFlight) return accountsRefreshInFlight;
+    accountsLastVerificationAttemptAt = Date.now();
+    set({ accountsRefreshing: true, accountsError: "" });
+    const run = (async () => {
+      try {
+        const verified = await api.accounts();
+        set((state) => ({
+          accounts: mergeVerifiedAccounts(state.accounts, verified),
+          accountsError: "",
+        }));
+      } catch (error) {
+        // 保留已经显示的离线快照；请求本身失败不等于六个平台全掉线。
+        set({ accountsError: `账号状态刷新失败：${errorText(error)}` });
+      } finally {
+        set({ accountsRefreshing: false });
+      }
+    })().finally(() => {
+      accountsRefreshInFlight = null;
+    });
+    accountsRefreshInFlight = run;
+    return run;
   },
 
   setAccount(account) {
@@ -436,6 +546,12 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       try {
         const saved = await api.putSettings(next);
         persistedSettings = saved;
+        // 重新启用下载源时恢复被右键收起的侧栏入口；保存失败则保留隐藏偏好。
+        useSidebarVisibilityStore.getState().restorePlatforms(
+          normalizeEnabledPlatforms(saved.enabled_platforms).filter(
+            (platform) => !isPlatformEnabled(current, platform),
+          ),
+        );
         // 后面还有用户操作时，这个旧响应只更新“已落盘基线”，不能盖掉新意图。
         if (intent === settingsIntent) {
           set({ settings: saved, settingsError: "" });
@@ -474,10 +590,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         set({ savingSettings: settingsPending > 0 });
       }
     };
-    const queued = settingsSaveTail.then(commit, commit);
-    // 通道本身永远恢复为 fulfilled，单次调用仍把错误交给明确 await/catch 的调用者。
-    settingsSaveTail = queued.catch(() => undefined);
-    return queued;
+    return enqueueSettingsWrite(commit);
   },
 
   handleEvent(event) {
@@ -493,16 +606,41 @@ export function selectConnected(state: AppStore): boolean {
 }
 
 /**
- * 启动 / 重试：health + settings + accounts + downloads + 曲库统计 一起打。
- * 统计是标题栏的曲库数量要用的，所以也放进首屏。
+ * 启动 / 重试统一闸门：health、设置、账号目录缓存、曲库目录快照、下载与统计一起恢复。
+ * 工作台只在这批完成后挂载；有目录快照时，真实磁盘校验延到首帧之后。
  */
 export async function bootAll(): Promise<void> {
-  await Promise.allSettled([
-    useAppStore.getState().bootstrap(),
-    useDownloadStore.getState().refresh(),
-    useLibraryStore.getState().refreshStats(),
-    useLibraryStore.getState().refreshUndo(),
-  ]);
+  if (bootAllInFlight) return bootAllInFlight;
+  useAppStore.setState({ booting: true });
+  const run = (async () => {
+    await Promise.allSettled([
+      useAppStore.getState().bootstrap(),
+      useDownloadStore.getState().refresh(),
+      useCompositionStore.getState().refresh(),
+      useLibraryStore.getState().restoreFoldersForStartup(),
+      useLibraryStore.getState().refreshStats(),
+      useLibraryStore.getState().refreshUndo(),
+    ]);
+    useAppStore.setState({ booting: false });
+    const library = useLibraryStore.getState();
+    if (library.folderStartupSource === "snapshot" && !folderLiveRefreshScheduled) {
+      folderLiveRefreshScheduled = true;
+      const refresh = () => {
+        void useLibraryStore.getState().refreshFolders();
+      };
+      // 两个 animation frame 把实时磁盘枚举明确放到工作台首帧之后；刷新期间 Store
+      // 继续持有快照，完整结果回来才一次替换。
+      if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(refresh));
+      } else {
+        setTimeout(refresh, 0);
+      }
+    }
+  })().finally(() => {
+    bootAllInFlight = null;
+  });
+  bootAllInFlight = run;
+  return run;
 }
 
 /** 全局唯一的 WS 订阅点：一条事件按 type 分发给各 store 自己的 handleEvent。 */
@@ -510,6 +648,8 @@ export function connectEvents(): () => void {
   return events.subscribe((event) => {
     useAppStore.getState().handleEvent(event);
     useDownloadStore.getState().handleEvent(event);
+    useCompositionStore.getState().handleEvent(event);
+    useWorkshopStore.getState().handleEvent(event);
     useLibraryStore.getState().handleEvent(event);
   });
 }

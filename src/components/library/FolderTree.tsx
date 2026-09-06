@@ -1,3 +1,4 @@
+import { FOLDER_DND_TYPE, beginTemporaryFolderDrag, endTemporaryFolderDrag } from "../../lib/temporaryFolderDrag";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
@@ -28,6 +29,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../../lib/api";
+import { pickAndScanFolders } from "../../lib/importFolders";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
   FOLDER_DROP_PATH_ATTR,
@@ -55,6 +57,7 @@ import {
 } from "../../lib/searchDrag";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { orderStreamPlaylistsByRecent } from "../../lib/streamPlaylistOrder";
+import { withForegroundStreamPlaceholder } from "../../lib/streamStartup";
 import {
   finishTrackDrop,
   isTrackDrag,
@@ -63,6 +66,7 @@ import {
 } from "../../lib/trackDrag";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
+import { useSidebarVisibilityStore } from "../../stores/sidebarVisibilityStore";
 import {
   STREAM_BROWSE_PLATFORMS,
   streamAccountBinding,
@@ -80,7 +84,6 @@ import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 /** @deprecated 请从 `lib/trackDrag` 引用；保留 re-export 以免旧 import 断掉。 */
 export { TRACK_DND_TYPE };
 /** 拖文件夹换顺序用的 MIME，和上面分开，dragover 时才好区别对待。 */
-const FOLDER_DND_TYPE = "application/x-kdj-folder";
 const ALL_TRACKS_DROP_TARGET = "__kd_all_tracks__";
 const ALL_TRACKS_ROOT_ID = "library:all";
 const OUTSIDE_ROOT_ID = "library:outside";
@@ -93,6 +96,36 @@ const STREAM_ROOTS: ReadonlyArray<{ id: StreamBrowsePlatform; label: string }> =
   { id: "youtube", label: "YouTube Video" },
   { id: "bilibili", label: "Bilibili" },
 ];
+
+function useStreamRootMenu() {
+  const [menu, setMenu] = useState<{
+    platform: StreamBrowsePlatform;
+    x: number;
+    y: number;
+  } | null>(null);
+  return {
+    openStreamRootMenu(event: React.MouseEvent, platform: StreamBrowsePlatform) {
+      event.preventDefault();
+      event.stopPropagation();
+      setMenu({ platform, x: event.clientX, y: event.clientY });
+    },
+    streamRootMenu: menu && (
+      <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            useSidebarVisibilityStore.getState().hidePlatform(menu.platform);
+            setMenu(null);
+          }}
+        >
+          <ChevronDown size={12} />
+          收起
+        </button>
+      </ContextMenu>
+    ),
+  };
+}
 
 type SidebarRootItem =
   | { id: typeof ALL_TRACKS_ROOT_ID; kind: "all" }
@@ -276,24 +309,7 @@ function FolderGlyph({
   );
 }
 
-/** 所有“添加音乐”入口共用同一个动作：选目录后登记、扫描；是否自动分析由全局开关决定。 */
-export async function pickAndScanFolders(): Promise<void> {
-  const paths = await window.kdj?.pickFolders();
-  if (!paths?.length) return;
-  const autoAnalyze = useAppStore.getState().settings?.auto_analyze ?? true;
-  await useLibraryStore.getState().startScan(paths, autoAnalyze);
-  // 安卓兜底：服务端 found 恒为 0（数量走 scan.progress 事件），这里只能靠
-  // 权限状态区分「没权限」和「真没歌」。正常路径上插件交还目录前已验证过
-  // 可读性，这条兜的是权限在系统设置里被收回这类非常规情况。
-  if (
-    window.kdj?.mediaPermissionGranted &&
-    !(await window.kdj.mediaPermissionGranted())
-  ) {
-    throw new Error(
-      "没有在手机存储里找到音乐。KDJ 需要「媒体和照片」权限才能读取公共 Music 目录——请到 系统设置 → 应用 → KDJ → 权限 里允许后，再点一次添加。",
-    );
-  }
-}
+export { pickAndScanFolders };
 
 function flattenFolders(nodes: FolderNode[]): FolderNode[] {
   return nodes.flatMap((node) => [node, ...flattenFolders(node.children)]);
@@ -317,6 +333,8 @@ export function NarrowFolderRail({
   const filter = useLibraryStore((state) => state.filter);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const settings = useAppStore((state) => state.settings);
+  const hiddenPlatforms = useSidebarVisibilityStore((state) => state.hiddenPlatforms);
+  const { openStreamRootMenu, streamRootMenu } = useStreamRootMenu();
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
   const streamLoading = useStreamBrowseStore((state) => state.loading);
@@ -324,6 +342,7 @@ export function NarrowFolderRail({
   const streamSectionExpanded = useStreamBrowseStore((state) => state.sectionExpanded);
   const streamRecentlyOpened = useStreamBrowseStore((state) => state.recentlyOpened);
   const cachedActiveStreamPlaylist = useStreamBrowseStore((state) => state.active);
+  const startupForeground = useStreamBrowseStore((state) => state.startupForeground);
   const loadStreamPlaylists = useStreamBrowseStore((state) => state.loadPlaylists);
   const setStreamSectionExpanded = useStreamBrowseStore(
     (state) => state.setSectionExpanded,
@@ -346,6 +365,17 @@ export function NarrowFolderRail({
       ? cachedNarrowActiveStreamPlaylist
       : activeStreamPlaylist;
   const [narrowSource, setNarrowSource] = useState<NarrowRailSource>(() => {
+    const foregroundPlatform = startupForeground?.playlist.platform as
+      | StreamBrowsePlatform
+      | undefined;
+    // 前台在线会话优先于窄轨自身的旧来源偏好。否则桌面上能看到已恢复的高亮，
+    // 竖屏首帧却仍停在本地目录，要等请求完成后再“跳”到在线来源。
+    if (
+      foregroundPlatform &&
+      STREAM_BROWSE_PLATFORMS.includes(foregroundPlatform)
+    ) {
+      return { kind: "stream", platform: foregroundPlatform };
+    }
     const storedSource = readNarrowRailSource();
     if (storedSource) return storedSource;
     if (effectiveActiveStreamPlaylist) {
@@ -368,13 +398,14 @@ export function NarrowFolderRail({
     // 在线歌单，才跟随到对应平台。否则刷新/横竖屏切换会被旧播放状态抢走。
     if (!effectiveActiveStreamPlaylist || effectiveActiveStreamKey === previousKey) return;
     if (!isPlatformEnabled(settings, effectiveActiveStreamPlaylist.platform)) return;
+    if (hiddenPlatforms.includes(effectiveActiveStreamPlaylist.platform)) return;
     setNarrowSource((current) =>
       current.kind === "stream" &&
       current.platform === effectiveActiveStreamPlaylist.platform
         ? current
         : { kind: "stream", platform: effectiveActiveStreamPlaylist.platform },
     );
-  }, [effectiveActiveStreamKey, effectiveActiveStreamPlaylist, settings]);
+  }, [effectiveActiveStreamKey, effectiveActiveStreamPlaylist, hiddenPlatforms, settings]);
 
   useEffect(() => {
     if (narrowSource.kind !== "local") return;
@@ -388,16 +419,21 @@ export function NarrowFolderRail({
 
   useEffect(() => {
     if (narrowSource.kind !== "stream") return;
-    if (isPlatformEnabled(settings, narrowSource.platform)) return;
+    if (
+      isPlatformEnabled(settings, narrowSource.platform) &&
+      !hiddenPlatforms.includes(narrowSource.platform)
+    ) return;
     const fallback = roots[0];
     setNarrowSource(
       fallback ? { kind: "local", rootPath: fallback.path } : { kind: "local", rootPath: "" },
     );
-  }, [narrowSource, roots, settings]);
+  }, [hiddenPlatforms, narrowSource, roots, settings]);
 
   const enabledStreamRoots = useMemo(
-    () => STREAM_ROOTS.filter((streamRoot) => isPlatformEnabled(settings, streamRoot.id)),
-    [settings],
+    () => STREAM_ROOTS.filter((streamRoot) =>
+      isPlatformEnabled(settings, streamRoot.id) && !hiddenPlatforms.includes(streamRoot.id),
+    ),
+    [hiddenPlatforms, settings],
   );
 
   useEffect(() => {
@@ -420,7 +456,9 @@ export function NarrowFolderRail({
 
   const choose = (folder: string) => {
     setActiveStreamPlaylist(null);
-    setFilter({ folder, folderDeep: false });
+    // 侧栏数字展示的是整棵子树的累计曲目数；点击后的列表必须使用同一口径。
+    // 旧版窄轨在这里悄悄切成“仅当前层”，父目录便会出现有数字却无曲目的假空态。
+    setFilter({ folder, folderDeep: true });
     onNavigate?.();
   };
 
@@ -526,7 +564,7 @@ export function NarrowFolderRail({
     const canBrowse = accountCanBrowse(accountState);
     const playlists = streamPlaylists[platform];
     const orderedPlaylists = orderStreamPlaylistsByRecent(
-      playlists ?? [],
+      withForegroundStreamPlaceholder(playlists ?? [], platform, startupForeground),
       streamRecentlyOpened[platform],
     );
     const loading = streamLoading[platform];
@@ -704,6 +742,7 @@ export function NarrowFolderRail({
             {...midiBrowseItemProps("search", `search:root:${streamRoot.id}`)}
             aria-label={`显示 ${streamRoot.label} 歌单`}
             title={`在下方显示 ${streamRoot.label} 收藏和歌单`}
+            onContextMenu={(event) => openStreamRootMenu(event, streamRoot.id)}
             onClick={() => {
               setNarrowSource({ kind: "stream", platform: streamRoot.id });
               const account = accounts.find(
@@ -744,8 +783,10 @@ export function NarrowFolderRail({
           </button>
         )}
         {narrowSource.kind === "stream" &&
+          !hiddenPlatforms.includes(narrowSource.platform) &&
           renderStreamChildren(narrowSource.platform)}
       </div>
+      {streamRootMenu}
     </aside>
   );
 }
@@ -834,6 +875,8 @@ export function FolderTree({
   const clearUndoError = useLibraryStore((state) => state.clearUndoError);
   const settings = useAppStore((state) => state.settings);
   const { accounts, accountsError } = useStreamBrowseLifecycle(true);
+  const hiddenPlatforms = useSidebarVisibilityStore((state) => state.hiddenPlatforms);
+  const { openStreamRootMenu, streamRootMenu } = useStreamRootMenu();
   const saveSettings = useAppStore((state) => state.saveSettings);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
   const streamLoading = useStreamBrowseStore((state) => state.loading);
@@ -842,6 +885,7 @@ export function FolderTree({
   const streamSectionExpanded = useStreamBrowseStore((state) => state.sectionExpanded);
   const streamRecentlyOpened = useStreamBrowseStore((state) => state.recentlyOpened);
   const cachedActiveStreamPlaylist = useStreamBrowseStore((state) => state.active);
+  const startupForeground = useStreamBrowseStore((state) => state.startupForeground);
   const loadStreamPlaylists = useStreamBrowseStore((state) => state.loadPlaylists);
   const setStreamExpanded = useStreamBrowseStore((state) => state.setExpanded);
   const setStreamSectionExpanded = useStreamBrowseStore(
@@ -855,8 +899,10 @@ export function FolderTree({
 
   const roots = folders?.roots ?? [];
   const enabledStreamRoots = useMemo(
-    () => STREAM_ROOTS.filter((streamRoot) => isPlatformEnabled(settings, streamRoot.id)),
-    [settings],
+    () => STREAM_ROOTS.filter((streamRoot) =>
+      isPlatformEnabled(settings, streamRoot.id) && !hiddenPlatforms.includes(streamRoot.id),
+    ),
+    [hiddenPlatforms, settings],
   );
   const [rootOrder, setRootOrder] = useState(readSidebarRootOrder);
   const sidebarRootItems = useMemo<SidebarRootItem[]>(
@@ -1010,6 +1056,7 @@ export function FolderTree({
       window.removeEventListener("pointerup", onUp, true);
       window.removeEventListener("pointercancel", onCancel, true);
       document.body.removeAttribute("data-kd-sidebar-root-dragging");
+      if (sourceId.startsWith("local:")) endTemporaryFolderDrag();
       rootPointerCleanupRef.current = null;
     };
     const finish = () => {
@@ -1026,6 +1073,7 @@ export function FolderTree({
         clearTextSelection();
         document.body.dataset.kdSidebarRootDragging = "true";
         setRootDragging(sourceId);
+        if (sourceId.startsWith("local:")) beginTemporaryFolderDrag(sourceId.slice("local:".length));
       }
 
       const slot = rootSlotAt(move.clientX, move.clientY);
@@ -1110,10 +1158,6 @@ export function FolderTree({
       setNotice(`添加文件夹失败：${(error as Error).message}`);
     }
   };
-  useEffect(() => {
-    if (useLibraryStore.getState().folders === null) void refreshFolders();
-  }, [refreshFolders]);
-
   // 扫描结束（scan.progress 到 done → refreshFolders）后清掉"导入中"标记
   useEffect(() => {
     setImporting((current) => {
@@ -1180,7 +1224,7 @@ export function FolderTree({
       while (true) {
         const page = await api.tracks({
           folder,
-          folder_deep: includeSubfolders ? 1 : 0,
+          folder_deep: includeSubfolders,
           limit: 1000,
           offset,
         });
@@ -1273,7 +1317,7 @@ export function FolderTree({
     const open = streamExpanded[platform];
     const playlists = streamPlaylists[platform];
     const orderedPlaylists = orderStreamPlaylistsByRecent(
-      playlists ?? [],
+      withForegroundStreamPlaceholder(playlists ?? [], platform, startupForeground),
       streamRecentlyOpened[platform],
     );
     const loading = streamLoading[platform];
@@ -1306,6 +1350,7 @@ export function FolderTree({
           tabIndex={0}
           aria-expanded={open}
           title={`${rootHint} · 拖动调整侧栏顺序`}
+          onContextMenu={(event) => openStreamRootMenu(event, platform)}
           onPointerDown={(event) =>
             beginRootPointerReorder(event, `stream:${platform}`)
           }
@@ -1512,6 +1557,19 @@ export function FolderTree({
           data-edge={dropTarget === node.path ? dropEdge || undefined : undefined}
           style={{ paddingLeft: `${0.35 + depth * 0.85}rem` }}
           title={depth === 0 ? `${node.path} · 拖动调整侧栏顺序` : node.path}
+          draggable={!node.is_root}
+          onDragStart={(event) => {
+            if (node.is_root) return;
+            event.stopPropagation();
+            clearTextSelection();
+            event.dataTransfer.setData(
+              FOLDER_DND_TYPE,
+              JSON.stringify({ parent: node.parent, name: node.name } satisfies DragInfo),
+            );
+            event.dataTransfer.effectAllowed = "copyMove";
+            beginTemporaryFolderDrag(node.path, () => importPending(node));
+          }}
+          onDragEnd={endTemporaryFolderDrag}
           onPointerDown={
             depth === 0
               ? (event) => beginRootPointerReorder(event, `local:${node.path}`)
@@ -1524,8 +1582,8 @@ export function FolderTree({
             // 回到全库时手排没有意义，还原成默认的文件创建顺序。
             setFilter(
               active && !isMidiBrowseActivate()
-                ? { folder: "", sort: "file_created_at", order: "desc" }
-                : { folder: node.path, sort: "custom" },
+                ? { folder: "", folderDeep: true, sort: "file_created_at", order: "desc" }
+                : { folder: node.path, folderDeep: true, sort: "custom" },
             );
             if (!active) importPending(node);
             onNavigate?.();
@@ -1647,18 +1705,7 @@ export function FolderTree({
           </button>
           <span
             className="kd-folder-drag"
-            draggable={!node.is_root}
-            title={node.is_root ? "拖动调整侧栏顺序" : "拖动文件夹图标移动或排序"}
-            onDragStart={(event) => {
-              if (node.is_root) return;
-              event.stopPropagation();
-              clearTextSelection();
-              event.dataTransfer.setData(
-                FOLDER_DND_TYPE,
-                JSON.stringify({ parent: node.parent, name: node.name } satisfies DragInfo),
-              );
-              event.dataTransfer.effectAllowed = "move";
-            }}
+            title={node.is_root ? "拖动调整侧栏顺序" : "拖到右侧临时打开，或拖到侧栏移动、排序"}
           >
             <FolderGlyph
               path={node.path}
@@ -1740,7 +1787,7 @@ export function FolderTree({
       onPointerDown={(event) => beginRootPointerReorder(event, ALL_TRACKS_ROOT_ID)}
       onClick={() => {
         setSelectedFolders(new Set());
-        setFilter({ folder: "", sort: "file_created_at", order: "desc" });
+        setFilter({ folder: "", folderDeep: true, sort: "file_created_at", order: "desc" });
         onNavigate?.();
       }}
       onContextMenu={(event) => {
@@ -1806,7 +1853,12 @@ export function FolderTree({
       title="不在曲库目录里的曲目 · 拖动调整侧栏顺序"
       onPointerDown={(event) => beginRootPointerReorder(event, OUTSIDE_ROOT_ID)}
       onClick={() => {
-        setFilter({ folder: OUTSIDE_FOLDER, sort: "file_created_at", order: "desc" });
+        setFilter({
+          folder: OUTSIDE_FOLDER,
+          folderDeep: true,
+          sort: "file_created_at",
+          order: "desc",
+        });
         onNavigate?.();
       }}
     >
@@ -1886,11 +1938,6 @@ export function FolderTree({
             {renderSidebarRoot(item)}
           </div>
         ))}
-        {roots.length === 0 && (
-          <p className="kd-faint" style={{ padding: "0.6rem 0.5rem", lineHeight: 1.5 }}>
-            还没有文件夹。点上方的「添加」选一个本地目录，剩下的交给后台。
-          </p>
-        )}
       </div>
 
       {/* 文件夹操作出错时，消息必须留在被操作的树旁边。 */}
@@ -1901,6 +1948,7 @@ export function FolderTree({
         onDismiss={() => setNotice("")}
       />
 
+      {streamRootMenu}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
           <button

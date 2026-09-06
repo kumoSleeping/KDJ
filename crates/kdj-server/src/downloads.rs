@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use crate::activity_log::{ActivityCategory, ActivityLevel, ActivityLog, ActivityLogDraft};
 use crate::state::AppState;
 
 /// 队列只留这么多条，超出的从最老的**终态**任务开始丢（正在跑的不能丢）。
@@ -68,6 +69,68 @@ fn is_terminal(state: TaskState) -> bool {
 /// 网络/FFmpeg future 可能晚到一拍，必须和取消一样挡住这些迟到回调。
 fn stops_worker_updates(state: TaskState) -> bool {
     state == TaskState::Paused || is_terminal(state)
+}
+
+fn task_phase_name(phase: TaskPhase) -> &'static str {
+    match phase {
+        TaskPhase::Waiting => "waiting",
+        TaskPhase::Authorizing => "authorizing",
+        TaskPhase::Resolving => "resolving",
+        TaskPhase::Downloading => "downloading",
+        TaskPhase::PostProcessing => "post_processing",
+        TaskPhase::Relocating => "relocating",
+        TaskPhase::Importing => "importing",
+        TaskPhase::Completed => "completed",
+    }
+}
+
+/// 把可能含 URL、查询参数、本地路径或账号信息的原始错误归成有限类别。
+/// Debug 日志和用户活动日志都只写类别；完整错误仍留在下载任务 UI 中供当次排查。
+fn safe_failure_kind(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("取消") || lower.contains("cancel") {
+        "canceled"
+    } else if lower.contains("移入目标文件夹") || lower.contains("relocat") {
+        "relocation"
+    } else if lower.contains("加入曲库") || lower.contains("入库") || lower.contains("import")
+    {
+        "library_import"
+    } else if lower.contains("429") || lower.contains("-509") || lower.contains("限流") {
+        "rate_limited"
+    } else if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("鉴权")
+        || lower.contains("登录")
+        || lower.contains("auth")
+    {
+        "authentication"
+    } else if lower.contains("超时") || lower.contains("timeout") || lower.contains("timed out") {
+        "timeout"
+    } else if lower.contains("decode") || lower.contains("解码") {
+        "decode"
+    } else if lower.contains("ffmpeg") || lower.contains("转码") || lower.contains("合并") {
+        "post_processing"
+    } else if lower.contains("provider") || lower.contains("来源") {
+        "provider"
+    } else if lower.contains("磁盘")
+        || lower.contains("permission")
+        || lower.contains("denied")
+        || lower.contains("io error")
+    {
+        "local_io"
+    } else if error.trim().is_empty() {
+        "none"
+    } else {
+        "other"
+    }
+}
+
+fn task_lifetime_ms(task: &DownloadTask) -> u64 {
+    let seconds = task.updated_at - task.created_at;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return 0;
+    }
+    (seconds * 1_000.0).min(u64::MAX as f64) as u64
 }
 
 /// 滑动窗口测速：窗口两端的字节差 / 时间差。
@@ -447,6 +510,7 @@ impl PendingDownloadPreparation {
 
 pub struct DownloadManager {
     hub: EventHub,
+    activity_log: Option<ActivityLog>,
     entries: Mutex<BTreeMap<String, Entry>>,
     /// None 只用于这一模块的纯内存单元测试；桌面服务始终传正式 journal 路径。
     journal_path: Option<PathBuf>,
@@ -494,11 +558,87 @@ impl DownloadManager {
         let concurrency = concurrency.max(1);
         DownloadManager {
             hub,
+            activity_log: None,
             entries: Mutex::new(entries),
             journal_path,
             permits: Mutex::new((concurrency, Arc::new(Semaphore::new(concurrency as usize)))),
             auto_start: watch::channel(auto_start).0,
             start_generation: watch::channel(0).0,
+        }
+    }
+
+    pub fn with_activity_log(mut self, activity_log: ActivityLog) -> Self {
+        self.activity_log = Some(activity_log);
+        self
+    }
+
+    /// 为异步任务补齐 HTTP「已受理」之后的最终结果。只写有限、脱敏字段；
+    /// title/source_key/path/error 都可能包含隐私或短期凭据，禁止进入 Debug 输出。
+    fn record_terminal(&self, task: &DownloadTask) {
+        let lifetime_ms = task_lifetime_ms(task);
+        let failure_kind = safe_failure_kind(&task.error);
+        let phase = task_phase_name(task.phase);
+        let kind = match task.kind {
+            TaskKind::Audio => "音频",
+            TaskKind::Video => "视频",
+        };
+        let result = match task.state {
+            TaskState::Done => "完成",
+            TaskState::Failed => "失败",
+            TaskState::Canceled => "取消",
+            _ => return,
+        };
+        let detail = format!(
+            "阶段：{phase}；已下载：{} 字节；总量：{} 字节；已生成文件：{}；已入库：{}；失败类别：{failure_kind}",
+            task.downloaded_bytes,
+            task.total_bytes,
+            if task.path.is_empty() { "否" } else { "是" },
+            if task.track_id.is_some() { "是" } else { "否" },
+        );
+        if let Some(activity_log) = &self.activity_log {
+            activity_log.record(ActivityLogDraft {
+                category: ActivityCategory::Network,
+                level: if task.state == TaskState::Failed {
+                    ActivityLevel::Error
+                } else {
+                    ActivityLevel::Info
+                },
+                action: format!("{kind}下载{result}"),
+                detail,
+                target: task.platform.as_str().into(),
+                status: None,
+                duration_ms: Some(lifetime_ms),
+                count: 1,
+            });
+        }
+        if task.state == TaskState::Failed {
+            tracing::warn!(
+                task_id = %task.id,
+                kind,
+                platform = task.platform.as_str(),
+                phase,
+                lifetime_ms,
+                downloaded_bytes = task.downloaded_bytes,
+                total_bytes = task.total_bytes,
+                has_output = !task.path.is_empty(),
+                imported = task.track_id.is_some(),
+                failure_kind,
+                "下载任务结束"
+            );
+        } else {
+            tracing::info!(
+                task_id = %task.id,
+                kind,
+                platform = task.platform.as_str(),
+                state = ?task.state,
+                phase,
+                lifetime_ms,
+                downloaded_bytes = task.downloaded_bytes,
+                total_bytes = task.total_bytes,
+                has_output = !task.path.is_empty(),
+                imported = task.track_id.is_some(),
+                "下载任务结束"
+            );
         }
     }
 
@@ -1084,14 +1224,18 @@ impl DownloadManager {
     /// 落到终态。已经是终态的不再改——否则下载完成的那一瞬间收到取消
     /// 会把"完成"覆盖成"已取消"。
     fn settle(&self, id: &str, state: TaskState, error: &str) -> Option<DownloadTask> {
-        self.update_active(id, |task| {
+        let updated = self.update_active(id, |task| {
             task.state = state;
             if state == TaskState::Done {
                 task.phase = TaskPhase::Completed;
             }
             task.error = error.to_string();
             task.speed_bps = 0.0;
-        })
+        });
+        if let Some(task) = &updated {
+            self.record_terminal(task);
+        }
+        updated
     }
 
     /// 任务开跑：记一个零点采样，滑窗才有起点。
@@ -1227,7 +1371,7 @@ impl DownloadManager {
             .and_then(|ext| ext.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        self.update_active(id, |task| {
+        let updated = self.update_active(id, |task| {
             task.state = state;
             if state == TaskState::Done {
                 task.phase = TaskPhase::Completed;
@@ -1262,6 +1406,9 @@ impl DownloadManager {
                 task.quality = suffix.clone();
             }
         });
+        if let Some(task) = &updated {
+            self.record_terminal(task);
+        }
     }
 
     pub fn cancel(&self, id: &str) -> Option<DownloadTask> {
@@ -1337,6 +1484,7 @@ impl DownloadManager {
         };
         for task in updated {
             self.hub.publish("download.updated", &task);
+            self.record_terminal(&task);
         }
         self.broadcast_list();
         count
@@ -1858,9 +2006,9 @@ async fn run_audio(
                         &text.word_lrc,
                     ) {
                         tracing::warn!(
+                            task_id = %id,
                             platform = source.platform.as_str(),
-                            key = source.key,
-                            title = source.title,
+                            source_duration_seconds = source.duration.unwrap_or_default(),
                             "下载后的歌词时间轴超出音频时长，跳过缓存"
                         );
                     } else {
@@ -1881,12 +2029,22 @@ async fn run_audio(
                             &source.key,
                             &cached,
                         ) {
-                            tracing::warn!("下载后写歌词失败 {}：{err:#}", path.display());
+                            tracing::warn!(
+                                task_id = %id,
+                                platform = source.platform.as_str(),
+                                failure_kind = safe_failure_kind(&format!("{err:#}")),
+                                "下载后写歌词失败"
+                            );
                         }
                     }
                 }
                 Ok(None) => {}
-                Err(err) => tracing::warn!("下载后取歌词失败 {}：{err:#}", source.title),
+                Err(err) => tracing::warn!(
+                    task_id = %id,
+                    platform = source.platform.as_str(),
+                    failure_kind = safe_failure_kind(&format!("{err:#}")),
+                    "下载后取歌词失败"
+                ),
             }
             if cancel.is_cancelled() {
                 manager.settle(&id, TaskState::Canceled, "已取消");
@@ -1902,7 +2060,6 @@ async fn run_audio(
                     Ok(id) => id,
                     Err(err) => {
                         let message = format!("文件已下载，但加入曲库失败：{err:#}");
-                        tracing::error!("{} {}", message, path.display());
                         manager.fail_after_download(&id, &path, &message);
                         return;
                     }
@@ -1916,12 +2073,20 @@ async fn run_audio(
                         crate::jobs::spawn_analysis(state.clone(), pending, false);
                     }
                     Ok(_) => {}
-                    Err(err) => tracing::warn!("取待分析队列失败：{err:#}"),
+                    Err(err) => tracing::warn!(
+                        task_id = %id,
+                        failure_kind = safe_failure_kind(&format!("{err:#}")),
+                        "取待分析队列失败"
+                    ),
                 }
             }
         }
         Err(err) if cancel.is_cancelled() => {
-            tracing::debug!("下载取消：{err:#}");
+            tracing::debug!(
+                task_id = %id,
+                failure_kind = safe_failure_kind(&format!("{err:#}")),
+                "下载已取消"
+            );
             manager.settle(&id, TaskState::Canceled, "已取消");
         }
         Err(err) => {
@@ -2097,7 +2262,12 @@ async fn run_video(
             }
             manager.apply_video_resolution(&id, &info);
         }
-        Err(err) => tracing::debug!("视频信息预解析失败（不影响下载）：{err:#}"),
+        Err(err) => tracing::debug!(
+            task_id = %id,
+            platform = platform.as_str(),
+            failure_kind = safe_failure_kind(&format!("{err:#}")),
+            "视频信息预解析失败（不影响下载）"
+        ),
     }
     if external_preparation {
         manager.phase(&id, TaskPhase::Authorizing);
@@ -2173,7 +2343,6 @@ async fn run_video(
                     Ok(id) => Some(id),
                     Err(err) => {
                         let message = format!("视频已下载，但加入曲库失败：{err:#}");
-                        tracing::error!("{} {}", message, path.display());
                         manager.fail_after_download(&id, &path, &message);
                         return;
                     }
@@ -2187,7 +2356,11 @@ async fn run_video(
             }
         }
         Err(err) if cancel.is_cancelled() => {
-            tracing::debug!("视频下载取消：{err:#}");
+            tracing::debug!(
+                task_id = %id,
+                failure_kind = safe_failure_kind(&format!("{err:#}")),
+                "视频下载已取消"
+            );
             manager.settle(&id, TaskState::Canceled, "已取消");
         }
         Err(err) => {
@@ -2265,6 +2438,48 @@ mod tests {
             rand::random::<u64>()
         ));
         (root.join("download-queue.json"), root)
+    }
+
+    #[test]
+    fn terminal_activity_is_detailed_without_copying_private_task_fields() {
+        let (_journal, root) = journal_path("terminal-activity");
+        let activity_log = ActivityLog::new(root.clone()).unwrap();
+        let manager = DownloadManager::new(EventHub::default(), 1, true)
+            .with_activity_log(activity_log.clone());
+        let mut task = sample_task("safe-task-id", TaskState::Running, now_secs() - 1.0);
+        task.title = "private title".into();
+        task.source_key = "private-source-key".into();
+        task.dest_dir = "/Users/example/private".into();
+        task.phase = TaskPhase::Importing;
+        manager.insert(task, CancellationToken::new());
+
+        manager.settle(
+            "safe-task-id",
+            TaskState::Failed,
+            "403 https://media.invalid/file?access_token=private-token",
+        );
+        let entry = activity_log
+            .overview(Some(ActivityCategory::Network), 1)
+            .entries
+            .pop()
+            .unwrap();
+        assert_eq!(entry.action, "音频下载失败");
+        assert_eq!(entry.target, "wyy");
+        assert!(entry.detail.contains("阶段：importing"));
+        assert!(entry.detail.contains("失败类别：authentication"));
+        let serialized = serde_json::to_string(&entry).unwrap();
+        for private in [
+            "private title",
+            "private-source-key",
+            "/Users/example/private",
+            "media.invalid",
+            "private-token",
+        ] {
+            assert!(!serialized.contains(private), "泄露了：{private}");
+        }
+
+        activity_log.clear().unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

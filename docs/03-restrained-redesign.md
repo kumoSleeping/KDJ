@@ -4,19 +4,17 @@
 
 ## 改了什么
 
-### 1. 红色按钮收敛（核心诉求）
+### 当前界面规则（2026-09-06 更新）
 
-改前一屏最多同时亮着 5 处主题红：搜索、批量（激活时）、加入队列、若干
-分段开关的激活块、分析(N)。改后的规则：**红色只给"动作"，不给"状态"；
-每个可视区域同时最多一个红块。**
+- 图标和文字的选中状态使用主题红，不增加选中底色、边框、阴影或装饰线。
+- 主操作使用简洁图标与文字，不采用实心红块。
+- 不再继承其他项目的强制直角风格；禁止全局覆盖所有元素的圆角。
+- 滑块使用细轨道和小圆形滑钮，避免红色矩形手柄。
+- 工坊素材、位置分析与时间轴图层合并。本地视频与工坊视频共用
+  `FloatingVideoControls` / `FloatingVideoScrub` 和 `kd-pip-float` 样式。
+  画面就是小窗；标题、播放、全屏和进度控件浮在画面内，不添加白色顶栏。
 
-- `kd-segment`（音乐/视频、平台选择、全部/已分析）激活态从主题红填充改成
-  中性 `--kd-selected` 底色。开关是状态，不是动作。
-- 曲库工具栏的「分析(N)」从 primary 降为默认中性——它和顶部「搜索」原来
-  上下叠成两个常亮红块。「停止分析」保持 danger（瞬态）。
-- 「加入队列」从常驻页头挪到**勾选后才浮出的底部动作条**（`.kd-picked-bar`，
-  含"已选 N 首 / 清除 / 加入队列"）。没勾任何歌时整个面板没有红色。
-- 最终清点（CDP 实测）：曲库模式全屏 `data-variant="primary"` 只剩「搜索」。
+下文保留历史功能改动记录，不作为视觉样式规范。
 
 ### 2. 曲库/搜索结果开关挪到面板"眉目"上
 
@@ -62,11 +60,6 @@
   粘贴三行文本自动切 textarea、按钮变「批量处理（3）」。
 
 ## 坑 / 排查记录
-
-- **dev 模式 CDP 端口"不生效"的真相**：`vite.config.ts` 里
-  `onstart: (args) => args.startup([".", "--remote-debugging-port=9333"])`
-  是对的；之前不生效只是因为 dev 进程在配置改动前就启动了，重启 dev 即好。
-  注意 `args.startup(argv)` 会**整体替换**默认 `[".", "--no-sandbox"]`。
 - **窗口被遮挡时 CDP 截图会挂死**：`document.visibilityState === "hidden"`
   时 macOS 停止出帧，`Page.captureScreenshot`（`fromSurface` 真假都一样）
   一直等不到帧直到超时；页面里的 `setTimeout` 也被节流到 ≥1s。对策：
@@ -107,15 +100,6 @@ Python 侧 AST 扫 import 只剩 `from __future__ import annotations` 误报。
 
 ### 新坑
 
-- **vite-plugin-electron 的 onstart 是碰运气的**：`:startup` 钩子在 main/preload
-  两个构建间共用 `closeBundleCount` 计数器，**谁后构建完就触发谁的 onstart**。
-  只给 main 配 onstart 传启动参数，输了竞态就静默用默认 argv。
-  正解：`electron/main.ts` 里 `app.commandLine.appendSwitch("remote-debugging-port", "9333")`
-  （仅 DEV_URL 存在时），vite.config 里不要 onstart。
-- **连续触发两次自动重启会把 app 撞挂**：改 main.ts（触发 Electron 重启）后
-  紧接着改 vite.config.ts（触发整个 dev server 重启），两次重启竞态后剩下一个
-  没有渲染进程也没有 sidecar 的僵尸 Electron。表现：CDP 目标还在但
-  `Runtime.evaluate` 永远超时。处理：pkill 全家 → 重启 dev。
 - **给运行中的 app 做合成点击会和正在用它的人打架**：两次 eval 之间用户一操作，
   第一步找到的节点第二步就没了。要么整条链路放进一个 eval（页面可见时
   setTimeout 不被节流），要么别碰，让用户自己验。

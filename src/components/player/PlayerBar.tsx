@@ -1,3 +1,4 @@
+import { isCompositionPreview } from "../../lib/streamTrack";
 import {
   useCallback,
   useEffect,
@@ -69,6 +70,9 @@ import { formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
 import {
   MEDIA_SYNC_EVENT,
   broadcastMediaSync,
+  captureLocalVideoSeekFence,
+  getLocalVideoClock,
+  waitForLocalVideoSeekLanding,
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
 import {
@@ -104,11 +108,17 @@ import {
   toggleVideoPip,
   useVideoPip,
 } from "../../lib/videoPip";
-import type { Track } from "../../types";
+import type { SongSource, Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useToastStore } from "../../stores/toastStore";
 import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
-import { PLAY_EVENT, parsePlayRequest, playTrack } from "../../lib/playTrack";
+import {
+  PLAY_EVENT,
+  isCompleteTrack,
+  materializePlayableTrack,
+  parsePlayRequest,
+  playTrack,
+} from "../../lib/playTrack";
 import { getPlayingTrack, setPlayingTrack } from "../../lib/playingTrack";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
 import {
@@ -587,6 +597,7 @@ export function PlayerBar() {
   const playerRuntime = runtimePlayer();
   const desktopNative = playerRuntime.kind === "desktop-native";
   const selected = useLibraryStore(selectSelectedTrack);
+  const selectLibraryTrack = useLibraryStore((state) => state.select);
   const selectTrack = useLibraryStore((state) => state.selectTrack);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
   const mode = usePlayMode((state) => state.mode);
@@ -1093,7 +1104,7 @@ export function PlayerBar() {
   /** 已提交、等待后端落地的跳转；期间迟到的旧位置事件不能把进度条弹回去。 */
   const pendingSeekRef = useRef<{ trackId: number; position: number; at: number } | null>(null);
   /** 原生 seek 单飞：请求槽只保留最后一个目标，避免 Android commandTail 被连续点击填满。 */
-  const nativeSeekRequestRef = useRef<{ trackId: number; position: number } | null>(null);
+  const nativeSeekRequestRef = useRef<{ trackId: number; position: number; onDispatch?(): void; onCancel?(): void } | null>(null);
   const nativeSeekInFlightRef = useRef(false);
   const nativeSeekDrainRef = useRef<() => void>(() => {});
   /**
@@ -1107,14 +1118,32 @@ export function PlayerBar() {
   const nativeLoadInFlightRef = useRef(false);
   /** 快速连点换歌时，迟到的旧 decode 结果不能覆盖新曲目的 UI/transport。 */
   const nativeLoadGenerationRef = useRef(0);
+  /** UI、详情、波形与原生事件共同使用的最终播放意图栅栏。 */
+  const latestPlayIntentRef = useRef(0);
+  const trackPlayIntentRef = useRef<{ trackId: number; intentId: number } | null>(null);
+  const summaryPlaybackRef = useRef<{ trackId: number; intentId: number } | null>(null);
+  const replacementFallbackRef = useRef<{
+    targetId: number;
+    intentId: number;
+    previous: Track;
+  } | null>(null);
   /** Load ACK 只代表协调器接单；目标 Deck 真正激活前必须继续压住旧 transport。 */
   const nativeLoadTargetRef = useRef<{ trackId: number; generation: number } | null>(null);
   /**
    * Local desktop playback is submitted directly from PLAY_EVENT. The track effect observes this
    * token and skips its legacy post-render Load, preserving one physical load per user intent.
    */
-  const eagerManagerLoadRef = useRef<(next: Track, autoPlay: boolean) => boolean>(() => false);
-  const eagerManagerLoadTokenRef = useRef<{ trackId: number; generation: number } | null>(null);
+  const eagerManagerLoadRef = useRef<(
+    next: Track,
+    autoPlay: boolean,
+    intentId: number,
+    previous: Track | null,
+  ) => boolean>(() => false);
+  const eagerManagerLoadTokenRef = useRef<{
+    trackId: number;
+    generation: number;
+    intentId: number;
+  } | null>(null);
   /** 解析在线地址时旧 Deck 必须先停；这里单独保留“解析成功后自动播放”的意图。 */
   const deferredStreamAutoplayRef = useRef<number | null>(null);
   /** UI 已切到新曲、Rust 仍报告旧物理 Deck 的窗口。旧快照不得冒充新曲状态。 */
@@ -1136,6 +1165,7 @@ export function PlayerBar() {
 
     const current = trackRef.current;
     if (!current || current.id !== request.trackId) {
+      request.onCancel?.();
       nativeSeekRequestRef.current = null;
       return;
     }
@@ -1153,9 +1183,11 @@ export function PlayerBar() {
     const target = request.position;
     // 旧曲目的状态边沿可能已清掉 pendingSeek；在真正发命令前重新 pin 一次。
     pendingSeekRef.current = { trackId: request.trackId, position: target, at: performance.now() };
+    request.onDispatch?.();
     void player
       .seek(target)
       .catch(() => {
+        request.onCancel?.();
         // 失败时只清理仍指向这次目标的槽位；更晚的点击不能被旧错误抹掉。
         const latest = nativeSeekRequestRef.current;
         if (
@@ -1163,6 +1195,7 @@ export function PlayerBar() {
           latest.trackId === request.trackId &&
           Math.abs(latest.position - target) < 0.001
         ) {
+          latest.onCancel?.();
           nativeSeekRequestRef.current = null;
         }
         const pending = pendingSeekRef.current;
@@ -1184,17 +1217,23 @@ export function PlayerBar() {
   nativeSeekDrainRef.current = drainNativeSeek;
 
   const requestNativeSeek = useCallback(
-    (trackId: number, target: number) => {
+    (trackId: number, target: number, callbacks?: { onDispatch(): void; onCancel(): void }) => {
       if (!nativePlayer) return;
       const position = Math.max(0, target);
+      nativeSeekRequestRef.current?.onCancel?.();
       pendingSeekRef.current = { trackId, position, at: performance.now() };
-      nativeSeekRequestRef.current = { trackId, position };
+      nativeSeekRequestRef.current = { trackId, position, ...callbacks };
       nativeSeekDrainRef.current();
     },
     [nativePlayer],
   );
 
   const invalidateNativeSeek = useCallback(() => {
+    seekGenerationRef.current += 1;
+    const trackId = trackRef.current?.id;
+    if (trackId !== undefined) cancelLocalVideoSeekPreview(trackId);
+    scrubbingRef.current = false;
+    nativeSeekRequestRef.current?.onCancel?.();
     nativeSeekRequestRef.current = null;
     pendingSeekRef.current = null;
   }, []);
@@ -1593,7 +1632,21 @@ export function PlayerBar() {
     const onPlay = (event: Event) => {
       const parsed = parsePlayRequest((event as CustomEvent).detail);
       if (!parsed) return;
-      const next = parsed.track;
+      const requestTrack = parsed.track;
+      const requestHasDetail = isCompleteTrack(requestTrack);
+      const next = materializePlayableTrack(requestTrack);
+      if (parsed.position !== undefined) restoredPositionRef.current = { trackId: next.id, position: parsed.position };
+      latestPlayIntentRef.current = parsed.intentId;
+      trackPlayIntentRef.current = { trackId: next.id, intentId: parsed.intentId };
+      summaryPlaybackRef.current = requestHasDetail
+        ? null
+        : { trackId: next.id, intentId: parsed.intentId };
+      if (parsed.receivedAt !== undefined) {
+        performance.measure(`kdj-play-ui-${parsed.intentId}`, {
+          start: parsed.receivedAt,
+          end: performance.now(),
+        });
+      }
       // 管理器模式的普通点播会重建单轨上下文；双盘会话必须保留另一台
       // 物理 Deck，不能因为双击一首歌就把两侧手动装盘状态一起清空。
       if (!dualDeck) {
@@ -1627,7 +1680,7 @@ export function PlayerBar() {
       // Freeze the route before the unresolved-source fence below can pause/clear the current
       // Deck. Provider resolution belongs inside a DJ handoff: the old song must remain audible
       // until the new stream is buffered and ready to overlap it.
-      const wantsDjTransition = shouldBeginManagerTransition({
+      const wantsDjTransition = parsed.purpose !== "composition" && shouldBeginManagerTransition({
         autoPlay,
         currentPlaying: playingRef.current,
         transitionEnabled: useDjConfig.getState().enabled,
@@ -1668,16 +1721,16 @@ export function PlayerBar() {
       }
       // 本地视频的 LOCAL_VIDEO 已在 playTrack 发出；这里只补面板档的详情栏。
       // 音频：playTrack 已 clear 预览会话；非流媒体仍进曲库详情。
-      if (isLocalVideo) {
+      if (isLocalVideo && parsed.purpose !== "composition") {
         if (useVideoPip.getState().mode === "panel" && !isStreamTrack(next)) {
           window.dispatchEvent(new Event(DETAIL_EVENT));
         }
-      } else if (!isStreamTrack(next)) {
+      } else if (!isStreamTrack(next) && parsed.purpose !== "composition") {
         // 音频起播只清设置/队列等旁路，不自动钉详情；歌词内容面要保留，
         // 否则双击刚钉住的歌词栏会被 showTrackDetail 的 clearOverlays 拆掉。
         focusLibrary();
       }
-      if (dualDeck && nativePlayer?.supportsRealtimeDj) {
+      if (dualDeck && nativePlayer?.supportsRealtimeDj && parsed.purpose !== "composition") {
         const nativeDecks = nativePlayer.state().decks;
         const loadedSide = nativeDecks.findIndex((deck) => deck.trackId === next.id);
         const side = loadedSide === 0 || loadedSide === 1
@@ -1713,7 +1766,10 @@ export function PlayerBar() {
       }
       // 详情视频控件再点播放：同一首只需恢复播放，绝不能把进度打回 0。
       if (current && next.id === current.id) {
-        if (usesLocalLibraryRecord(next)) selectTrack(next);
+        if (usesLocalLibraryRecord(next)) {
+          if (requestHasDetail) selectTrack(next);
+          else selectLibraryTrack(next.id);
+        }
         commitPlaying(autoPlay);
         if (autoPlay) markPlayed(next.id);
         return;
@@ -1732,7 +1788,7 @@ export function PlayerBar() {
       setVisualActiveIndex(incomingIndex);
       // Native local playback must enter the command lane before React commits the selected row,
       // TrackDetail and the manager Control canvases. Unsupported sources keep the effect path.
-      eagerManagerLoadRef.current(next, autoPlay);
+      eagerManagerLoadRef.current(next, autoPlay, parsed.intentId, current);
       // The first authoritative snapshot for a new song must update detail immediately; only
       // steady-state position traffic is allowed to use the 200ms broadcast throttle.
       lastBroadcast.current = Number.NEGATIVE_INFINITY;
@@ -1742,7 +1798,10 @@ export function PlayerBar() {
       setTrack(next);
       // 右侧详情跟着切到正在放的这首。自动续播接下一首时尤其重要——
       // 不跟的话详情栏还停在上一首，用户看着 A 的 BPM 听着 B
-      if (usesLocalLibraryRecord(next)) selectTrack(next);
+      if (usesLocalLibraryRecord(next)) {
+        if (requestHasDetail) selectTrack(next);
+        else selectLibraryTrack(next.id);
+      }
       setPosition(0);
       setDuration(next.duration ?? 0);
       commitPlaying(autoPlay && !isUnresolvedStreamTrack(next));
@@ -1753,6 +1812,7 @@ export function PlayerBar() {
     return () => window.removeEventListener(PLAY_EVENT, onPlay);
   }, [
     selectTrack,
+    selectLibraryTrack,
     focusLibrary,
     djSwitchTo,
     commitPlaying,
@@ -1760,6 +1820,29 @@ export function PlayerBar() {
     nativePlayer,
     dualDeck,
   ]);
+
+  // 列表点播先用摘要同帧换标题/封面并提交音频。完整详情迟到后只丰富当前 UI；
+  // track id 不变，因此不会触发下方换源 effect，更不能让 A/B 的迟到详情抢回 C。
+  useEffect(() => {
+    const pending = summaryPlaybackRef.current;
+    if (
+      !selected ||
+      !pending ||
+      pending.trackId !== selected.id ||
+      pending.intentId !== latestPlayIntentRef.current ||
+      trackRef.current?.id !== selected.id
+    ) {
+      return;
+    }
+    summaryPlaybackRef.current = null;
+    trackRef.current = selected;
+    setTrack(selected);
+    const updateBeatGrid = nativePlayer?.updateBeatGrid;
+    if (updateBeatGrid) {
+      const intentId = pending.intentId;
+      void updateBeatGrid.call(nativePlayer, selected, intentId).catch(() => undefined);
+    }
+  }, [selected, nativePlayer]);
 
   // 本地视频会话只能属于正在走带的那首。自动续播 / DJ 过渡直接在 PlayerBar
   // 内部 setTrack，不一定经过 playTrack（后者原本才会清视频会话）；因此旧视频会在
@@ -1819,7 +1902,8 @@ export function PlayerBar() {
     const eagerLoad = eagerManagerLoadTokenRef.current;
     if (
       eagerLoad?.trackId === track.id &&
-      eagerLoad.generation === nativeLoadGenerationRef.current
+      eagerLoad.generation === nativeLoadGenerationRef.current &&
+      eagerLoad.intentId === latestPlayIntentRef.current
     ) {
       eagerManagerLoadTokenRef.current = null;
       return;
@@ -1848,10 +1932,15 @@ export function PlayerBar() {
       (applyAutomaticCue && track.cue_ms != null ? Math.max(0, track.cue_ms / 1000) : 0);
     autoInOutCueRef.current = null;
     const loadGeneration = ++nativeLoadGenerationRef.current;
+    const sourceIntentId = trackPlayIntentRef.current?.trackId === track.id
+      ? trackPlayIntentRef.current.intentId
+      : 0;
     nativeLoadInFlightRef.current = true;
     nativeLoadTargetRef.current = { trackId: track.id, generation: loadGeneration };
     const player = nativePlayer;
-    const stillCurrent = () => loadGeneration === nativeLoadGenerationRef.current;
+    const stillCurrent = () =>
+      loadGeneration === nativeLoadGenerationRef.current
+      && (sourceIntentId === 0 || latestPlayIntentRef.current === sourceIntentId);
     const autoplayAfterResolve = deferredStreamAutoplayRef.current === track.id;
     const stopAfterFailedLoad = () => {
       // Native handoff keeps the old Deck audible until the replacement is ready. If the new
@@ -1895,7 +1984,7 @@ export function PlayerBar() {
           // explicit volume command because it owns a different native media contract.
           if (!desktopNative) void player.setVolume(playerVolumeRef.current).catch(() => {});
           void player
-            .load(prepared)
+            .load({ ...prepared, intentId: sourceIntentId })
             .then((state) => {
               if (!stillCurrent()) return;
               if (state.status === "error") {
@@ -1915,6 +2004,7 @@ export function PlayerBar() {
               // 会向仍装着上一首的物理 front Deck 发 Play，正是“双击后立即播放旧歌”。
               // 真正激活由原生 snapshot 的 target-id + !buffering 边沿提交。
               setNotice("");
+              prefetchWaveform(track);
             })
             .catch((error: unknown) => {
               if (!stillCurrent()) return;
@@ -1962,6 +2052,7 @@ export function PlayerBar() {
         if (!isStreamTrack(track)) {
           djEngine.prepareSeek(source);
           djEngine.prepareDecodedSeek(track, source);
+          prefetchWaveform(track);
         }
         setNotice("");
         if (autoplayAfterResolve) {
@@ -2336,38 +2427,59 @@ export function PlayerBar() {
       }
       if (!shouldCommitSeek(track.id, target, detail.forceCommit)) return;
       const generation = ++seekGenerationRef.current;
+      const isCurrentSeek = () => generation === seekGenerationRef.current && trackRef.current?.id === track.id;
       const publishVideoSeek = () => {
-        if (generation !== seekGenerationRef.current) return;
+        if (!isCurrentSeek()) return;
+        const clock = desktopNative ? getLocalVideoClock(track.id) : null;
+        if (desktopNative && !clock) return;
         broadcastMediaSync({
           owner: "player",
           action: "seek",
           trackId: track.id,
-          position: target,
+          position: clock?.position ?? (nativePlayer?.state().currentTime ?? djEngine.currentTime(frontElRef.current)),
+          rate: clock?.rate ?? nativePlayer?.state().rate ?? frontElRef.current.playbackRate,
         });
       };
-      const commitAudioTransport = (): Promise<void> | void => {
-        if (generation !== seekGenerationRef.current) return;
+      const commitAudioTransport = (): Promise<void | boolean> | void => {
+        if (!isCurrentSeek()) return;
         if (nativePlayer) {
           // 后端会把换曲/接歌装载期的跳转折进待激活流；先按住用户点下的位置，
           // 等状态事件落到目标附近再交回跟随。请求槽只保留最后一个目标，避免
           // Android 快速点波形时把旧 seek 一层层排进原生命令队列。
-          requestNativeSeek(track.id, target);
-          // Give the Tauri/Rust command lane one short uncontended head start. Waiting for the
-          // playback-state landing here pinned the progress/video for seconds on large MP4s;
-          // 120ms is enough for IPC dispatch while keeping the visual catch-up prompt.
-          return new Promise<void>((resolve) => window.setTimeout(resolve, 120));
+          // Audio starts immediately. Only a new device/source revision authorizes video to
+          // take over: an elapsed timer or the pinned UI position cannot prove a seek landed.
+          if (!desktopNative) { requestNativeSeek(track.id, target); return; }
+          return new Promise<boolean>((resolve) => {
+            let settled = false;
+            const finish = (landed: boolean) => {
+              if (settled) return;
+              settled = true; window.clearTimeout(timer); resolve(landed);
+            };
+            const timer = window.setTimeout(() => finish(false), 4_000);
+            requestNativeSeek(track.id, target, {
+              onDispatch: () => {
+                // Capture after earlier queued seeks have finished. Their landing cannot
+                // satisfy the fence belonging to this newer gesture.
+                const fence = captureLocalVideoSeekFence(track.id);
+                void waitForLocalVideoSeekLanding(fence, () => !settled && isCurrentSeek())
+                  .then((clock) => finish(clock !== null));
+              },
+              onCancel: () => finish(false),
+            });
+          });
         } else {
           return djEngine
             .seamlessSeek(mediaUrlForTrack(track), target, playingRef.current)
             .then((element) => {
-              if (generation !== seekGenerationRef.current) return;
+              if (!isCurrentSeek()) return;
               setFrontEl(element);
             });
         }
       };
       const commitTransport = () => {
-        publishVideoSeek();
-        commitAudioTransport();
+        void Promise.resolve(commitAudioTransport()).then((committed) => {
+          if (committed !== false) publishVideoSeek();
+        }).catch(() => undefined);
       };
 
       const dualVideo = isVideoTrack(track.format) && hasLocalVideoSeekPresenter(track.id);
@@ -2402,7 +2514,7 @@ export function PlayerBar() {
               resolve(prepared);
             };
             const timer = window.setTimeout(() => {
-              cancelLocalVideoSeekPreview(track.id);
+              if (isCurrentSeek()) cancelLocalVideoSeekPreview(track.id);
               finish(null);
             }, 1_200);
             void preparation.then(finish, () => finish(null));
@@ -2411,7 +2523,8 @@ export function PlayerBar() {
         {
           commitAudio: commitAudioTransport,
           publishVideoSeek,
-          isCurrent: () => generation === seekGenerationRef.current,
+          isCurrent: isCurrentSeek,
+          cancelVideo: () => cancelLocalVideoSeekPreview(track.id),
         },
       ).then((result) => {
         if (result !== "stale" && generation === seekGenerationRef.current) {
@@ -2421,7 +2534,7 @@ export function PlayerBar() {
     };
     window.addEventListener(SEEK_EVENT, onSeek);
     return () => window.removeEventListener(SEEK_EVENT, onSeek);
-  }, [track, nativePlayer, requestNativeSeek, shouldCommitSeek]);
+  }, [track, nativePlayer, desktopNative, requestNativeSeek, shouldCommitSeek]);
 
   // 和视频预览互斥出声（见 audioFocus.ts）：这边一开始放就喊一嗓子，
   // 预览听到会自己暂停；反过来预览开声时这边也自动停，只暂停不清进度。
@@ -2493,7 +2606,7 @@ export function PlayerBar() {
         commitPlaying(otherStillPlaying);
         return;
       }
-      if (!autoAdvanceRef.current) {
+      if (!autoAdvanceRef.current || isCompositionPreview(finished)) {
         commitPlaying(false);
         return;
       }
@@ -2621,8 +2734,12 @@ export function PlayerBar() {
         !state.buffering &&
         state.status !== "loading"
       ) {
+        performance.mark(`kdj-play-handoff-${latestPlayIntentRef.current}`);
         nativeLoadTargetRef.current = null;
         nativeLoadInFlightRef.current = false;
+        if (replacementFallbackRef.current?.targetId === loadTarget.trackId) {
+          replacementFallbackRef.current = null;
+        }
         if (pendingTrackSwitchRef.current?.trackId === loadTarget.trackId) {
           pendingTrackSwitchRef.current = null;
         }
@@ -2636,6 +2753,22 @@ export function PlayerBar() {
           // deadlock because Clear + Load intentionally left transport paused.
           commitPlaying(true);
         }
+      }
+      const replacementFallback = replacementFallbackRef.current;
+      if (
+        replacementFallback &&
+        state.error &&
+        state.trackId === replacementFallback.previous.id &&
+        trackRef.current?.id === replacementFallback.targetId &&
+        latestPlayIntentRef.current === replacementFallback.intentId
+      ) {
+        replacementFallbackRef.current = null;
+        nativeLoadTargetRef.current = null;
+        nativeLoadInFlightRef.current = false;
+        trackRef.current = replacementFallback.previous;
+        setTrack(replacementFallback.previous);
+        setNotice(`播放失败：${state.error}`);
+        commitPlaying(state.playing);
       }
       // 跳转回声抑制：seek 已提交但状态还没落到目标附近时，在飞的旧位置
       // 事件会把进度条弹回去再跳回来；落地、超时或换曲后恢复正常跟随。
@@ -2710,6 +2843,7 @@ export function PlayerBar() {
           state.playing &&
           !state.buffering &&
           djEnabled &&
+          !isCompositionPreview(current) &&
           !state.transitioning &&
           !nativeDjBusyRef.current &&
           !djBusyRef.current &&
@@ -4166,19 +4300,42 @@ export function PlayerBar() {
     setDeckDropSide(side);
   };
 
-  const downloadStreamTrack = (streamTrack: Track | null) => {
-    const source = streamTrack && isStreamTrack(streamTrack) ? streamMeta(streamTrack)?.source : null;
-    if (!source || enqueueBusy) return;
+  // Match the transport owner: a network preview may leave a paused song in track.
+  const downloadSource: SongSource | null = pipDriving
+    ? pipSession?.source === "network"
+      ? {
+          platform: pipSession.platform,
+          key: pipSession.bvid,
+          title: pipSession.title,
+          artists: pipSession.author ? [pipSession.author] : [],
+          album: "",
+          duration: pipDuration > 0 ? pipDuration : null,
+          cover: pipSession.cover ?? "",
+          max_quality: null,
+          vip: false,
+          payload: { page_index: pipSession.page, audio_only: false },
+        }
+      : null
+    : track && isStreamTrack(track) ? streamMeta(track)?.source ?? null : null;
+  const downloadLabel = networkPreview ? "下载当前视频" : "下载当前在线歌曲";
+
+  const downloadCurrentMedia = () => {
+    if (!downloadSource || enqueueBusy) return;
+    const settings = useAppStore.getState().settings;
     setEnqueueBusy(true);
-    void enqueueMediaDownloads([source], { quality: defaultQuality })
+    void enqueueMediaDownloads([downloadSource], {
+      quality: defaultQuality,
+      video: networkPreview ? {
+        audioOnly: false,
+        maxHeight: settings?.video_max_height ?? 1080,
+        transcode: settings?.video_transcode ?? false,
+      } : undefined,
+    })
       .catch((error: unknown) => {
         setNotice(`下载失败：${error instanceof Error ? error.message : String(error)}`);
       })
       .finally(() => setEnqueueBusy(false));
   };
-
-  const canDownloadStreamTrack = (streamTrack: Track | null) =>
-    Boolean(streamTrack && isStreamTrack(streamTrack) && streamMeta(streamTrack)?.source);
 
   const performanceStateFor = (side: 0 | 1, deckTrack: Track | null) => {
     const state = performanceDeckStates[side];
@@ -4310,7 +4467,7 @@ export function PlayerBar() {
     setDuration(deckTrack.duration ?? 0);
   };
 
-  eagerManagerLoadRef.current = (next, autoPlay) => {
+  eagerManagerLoadRef.current = (next, autoPlay, intentId, previous) => {
     // Provider streams still need async URL resolution, mobile owns a different media lifecycle,
     // and dual-Deck loads preserve physical Deck controls. Only the desktop manager's local path
     // can safely construct and submit its source synchronously in the original user gesture.
@@ -4326,11 +4483,18 @@ export function PlayerBar() {
     const loadGeneration = ++nativeLoadGenerationRef.current;
     nativeLoadInFlightRef.current = true;
     nativeLoadTargetRef.current = { trackId: next.id, generation: loadGeneration };
-    eagerManagerLoadTokenRef.current = { trackId: next.id, generation: loadGeneration };
-    const stillCurrent = () => loadGeneration === nativeLoadGenerationRef.current;
+    replacementFallbackRef.current = previous
+      ? { targetId: next.id, intentId, previous }
+      : null;
+    eagerManagerLoadTokenRef.current = { trackId: next.id, generation: loadGeneration, intentId };
+    const stillCurrent = () =>
+      loadGeneration === nativeLoadGenerationRef.current
+      && latestPlayIntentRef.current === intentId
+      && trackPlayIntentRef.current?.trackId === next.id;
     const prepared = {
       src: mediaUrlForTrack(next),
       track: next,
+      intentId,
       artworkUrl: playbackArtworkUrl(next),
       position: initialPosition,
       autoplay: autoPlay,
@@ -4340,28 +4504,43 @@ export function PlayerBar() {
     // issuing IPC, but do not wait for React or for any visual panel to mount.
     djEngine.cancel();
     djEngine.hardPause(djEngine.frontElement());
+    performance.mark(`kdj-play-native-submit-${intentId}`);
     void nativePlayer
+      // Mark immediately before crossing IPC; this is deliberately ahead of React commit.
       .load(prepared)
       .then((state) => {
         if (!stillCurrent()) return;
         if (state.status === "error") {
-          commitPlaying(false);
           nativeLoadTargetRef.current = null;
           nativeLoadInFlightRef.current = false;
           setNotice(state.error || "原生播放器无法播放这个文件");
-          void nativePlayer.pause().catch(() => {});
+          // 失败的新 generation 不拥有旧 Deck。保留用户在列表选中的目标，但播放器
+          // 标题恢复到仍可听的上一首；后端也会继续让旧 Deck 走带。
+          if (previous) {
+            trackRef.current = previous;
+            setTrack(previous);
+            setDuration(previous.duration ?? 0);
+          } else {
+            commitPlaying(false);
+          }
           return;
         }
         setPosition(state.currentTime);
         setDuration(state.duration || next.duration || 0);
         setNotice("");
+        prefetchWaveform(next);
       })
       .catch((error: unknown) => {
         if (!stillCurrent()) return;
         nativeLoadTargetRef.current = null;
         nativeLoadInFlightRef.current = false;
-        commitPlaying(false);
-        void nativePlayer.pause().catch(() => {});
+        if (previous) {
+          trackRef.current = previous;
+          setTrack(previous);
+          setDuration(previous.duration ?? 0);
+        } else {
+          commitPlaying(false);
+        }
         setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
       });
     return true;
@@ -4654,14 +4833,14 @@ export function PlayerBar() {
             return <Icon size={14} />;
           })()}
         </button>
-        {canDownloadStreamTrack(track) ? (
+        {downloadSource ? (
           <button
             type="button"
             className="kd-player-step kd-player-stream-download"
             disabled={enqueueBusy}
-            aria-label={enqueueBusy ? "正在创建下载任务" : "下载当前在线歌曲"}
-            title={enqueueBusy ? "正在创建下载任务…" : "下载当前在线歌曲"}
-            onClick={() => downloadStreamTrack(track)}
+            aria-label={enqueueBusy ? "正在创建下载任务" : downloadLabel}
+            title={enqueueBusy ? "正在创建下载任务…" : downloadLabel}
+            onClick={downloadCurrentMedia}
           >
             <Download size={14} aria-hidden="true" />
           </button>

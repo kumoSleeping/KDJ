@@ -19,6 +19,10 @@ import {
   reconcileManagerControlView,
   sameManagerControlView,
 } from "../../lib/managerControlView";
+import {
+  useManagerMixer,
+  type ManagerMixerValues,
+} from "../../lib/managerMixer";
 import { usePlaybackPrefs, type TempoRange } from "../../lib/playbackPrefs";
 import { channelFaderGain, eqBandDb } from "../../lib/performanceCues";
 import { runtimePlayer, type UnifiedPlayerState } from "../../lib/unifiedPlayer";
@@ -27,18 +31,8 @@ import { Panel } from "../common";
 import {
   ArcKnob,
   EqSpectrumChart,
-  type ManagerMixerValues,
 } from "./ManagerMixerControls";
 import { ManagerWaveform } from "./ManagerWaveform";
-
-const DEFAULT_MIXER: ManagerMixerValues = {
-  gain: 0,
-  high: 0,
-  mid: 0,
-  low: 0,
-  filter: 0,
-  volume: 1,
-};
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
@@ -117,7 +111,8 @@ export function NowPlayingControlPanel({
   const [controlState, setControlState] = useState(() =>
     managerControlView(player.state(), track.id),
   );
-  const [mixer, setMixerState] = useState<ManagerMixerValues>({ ...DEFAULT_MIXER });
+  const mixer = useManagerMixer((state) => state.values);
+  const setMixerState = useManagerMixer((state) => state.setValues);
   const [tempoState, setTempoState] = useState(() => ({ owner: track.id, value: 1 }));
   const [pitchState, setPitchState] = useState(() => ({ owner: track.id, value: 0 }));
   const tempoRange = usePlaybackPrefs((state) => state.tempoRange);
@@ -191,16 +186,15 @@ export function NowPlayingControlPanel({
     }
   }, [deck?.rate, deck?.pitchSemitones, deck?.trackId]);
 
-  // Manager loads are intentionally song-scoped: every new song starts from neutral controls.
+  // Tempo and pitch are song-owned, but the Manager mixer is one continuous session strip. The
+  // detail panel is keyed by track and may remount on every song, so restore the retained mixer to
+  // the newly selected native side instead of painting or sounding a neutral frame.
   useEffect(() => {
-    const neutral = { ...DEFAULT_MIXER };
-    mixerRef.current = neutral;
     pendingTempoRef.current = null;
     pendingPitchRef.current = null;
-    setMixerState(neutral);
     if (side === null || player.state().decks[side].trackId !== track.id) return;
-    void player.setDeckMixer(side, runtimeMixer(DEFAULT_MIXER)).catch((error: unknown) => {
-      onError(`控制区复位失败：${error instanceof Error ? error.message : String(error)}`);
+    void player.setDeckMixer(side, runtimeMixer(mixerRef.current)).catch((error: unknown) => {
+      onError(`控制区恢复失败：${error instanceof Error ? error.message : String(error)}`);
     });
   }, [track.id, side]); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -6,7 +6,7 @@
 - 审计日期：2026-08-30
 - 审计对象：当前工作区 `/Users/kumo/git/kdj`
 - 当前提交：`508a7cd`（`main`）
-- 有效架构：Rust + Tauri；已按仓库规则排除 Electron 与 Python sidecar 历史代码
+- 有效架构：Rust + Tauri；已按仓库规则排除 Python sidecar 历史代码
 - 结论：**NO-GO，暂不建议发布**
 
 ## 1. 执行摘要
@@ -132,13 +132,13 @@ Tauri 官方建议尽量严格限制 CSP，并把远程内容视为攻击面。[
 
 整改状态（2026-08-30）：主 renderer 的远程动态执行与生产 `unsafe-eval` 已移除。普通 YouTube 已改为唯一的官方 embed 子 WebView，并在首次远程导航前移除 Tauri user script/IPC，使用非持久数据存储且不导入浏览器登录 Cookie；它不再自行生成普通视频 proof、解析 `s`/`n` 或代理 GoogleVideo。YTM 必需的 WebPO/player 变换进入另一无 Cookie、无 IPC、网络受限的隐藏原生 WKWebView。最终 macOS 静音 E2E 已连续通过普通视频冷播、seek、两视频切换、热播与 YTM AAC；生产签名包仍应在发布负责人配置正式凭据后再做一次人工 smoke test。
 
-### SEC-006 tag 发布允许 Rust 测试失败，且 CI 未运行前端逻辑测试
+### SEC-006 tag 发布允许 Rust 测试失败，发布门禁不完整
 
 - `.github/workflows/rust-build.yml:126-145` 对测试使用 `continue-on-error`；main 会在后续失败，但 tag 仅警告并继续。
-- `.github/workflows/rust-build.yml:147-151` 只执行安装和 typecheck，未运行 `package.json` 已定义的 `test:frontend-logic`。
-- `scripts/release.sh:86-95` 运行 typecheck、web build 与 Cargo 测试，但同样未运行前端逻辑测试。
+- `.github/workflows/rust-build.yml:147-151` 只执行安装和 typecheck，覆盖范围不足。
+- `scripts/release.sh:86-95` 运行 typecheck、web build 与 Cargo 测试，但 CI 与本地门禁仍未完全对齐。
 
-建议：tag 与 main 都必须 hard-fail；真正 flaky 的测试应被单独隔离并明确审批。把前端逻辑测试、web build、npm audit、cargo audit 纳入不可绕过的 release gate。
+建议：tag 与 main 都必须 hard-fail；真正 flaky 的检查应被单独隔离并明确审批。把 web build、npm audit、cargo audit 纳入不可绕过的 release gate。
 
 ### SEC-007 CI 权限、第三方 Action 与签名身份校验过宽
 
@@ -233,7 +233,7 @@ renderer 被攻陷时可造成内存/磁盘 DoS，或写入伪装成 PNG 的任�
 1. 修复 SEC-001、SEC-002、SEC-003，并为三项补充回归测试。
 2. 修复 SEC-004、SEC-006、SEC-007、SEC-009、SEC-010；对其余 P2 明确风险接受人和截止日期。
 3. 将版本同步提升到高于 `0.2.44`，清理并审阅工作区，确保发布提交可复现。
-4. 重新执行 npm/Cargo 审计、前端逻辑测试、typecheck、Tauri web build、Cargo workspace check/test。
+4. 重新执行 npm/Cargo 审计、typecheck、Tauri web build、Cargo workspace check/test。
 5. 使用正式证书验证 macOS notarization、Windows Authenticode、Android 预期证书指纹和 updater 签名。
 6. 做生产包 smoke test：本地 API 鉴权、WebSocket、音视频播放、文件删除确认、CLI、YouTube Music、Android Activity recreate。
 

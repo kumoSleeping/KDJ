@@ -15,6 +15,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use tokio_util::sync::CancellationToken;
 
+mod status;
+pub use status::{installation_status, FfmpegInstallationStatus};
+
 pub const FFMPEG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const TRANSCODE_CRF: u32 = 20;
 const TRANSCODE_PRESET: &str = "veryfast";
@@ -28,13 +31,20 @@ pub fn binary() -> Result<PathBuf> {
     which("ffmpeg").context("没有找到 ffmpeg，请先安装 FFmpeg")
 }
 
+pub fn probe_binary() -> Result<PathBuf> {
+    let ffmpeg = binary()?;
+    let adjacent = ffmpeg.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" });
+    if adjacent.is_file() { return Ok(adjacent); }
+    which("ffprobe").context("没有找到 ffprobe，请安装完整的 FFmpeg")
+}
+
 /// GUI 启动的 app 看不见的常见安装位置。
 ///
 /// **macOS 的坑**：从 Finder/Dock 双击的 .app 继承的是 launchd 的极简
 /// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`，Homebrew 的 `/opt/homebrew/bin`
 /// 根本不在里面。症状是**终端里起 dev 一切正常，装好的 App 里视频放不了**
 /// （视频播放/分析要先用 ffmpeg 抽音轨），且 /api/health 报 ffmpeg=false。
-/// v0.1.0 的 Electron 壳靠 `fix-path` 这个 npm 包兜的，纯 Rust 壳要自己兜。
+/// 当前原生壳需要自行补齐这些 GUI 环境不可见的路径。
 const GUI_BLIND_DIRS: &[&str] = &[
     "/opt/homebrew/bin", // Apple Silicon Homebrew
     "/usr/local/bin",    // Intel Homebrew / 手动安装

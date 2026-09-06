@@ -3,7 +3,8 @@ import {
   registerLocalVideoSeekPresenter,
   type PreparedLocalVideoSeek,
 } from "./localVideoSeekBridge";
-import { VideoTransportEchoGuard } from "./localVideoSync";
+import { VideoTransportEchoGuard, type LocalVideoSynchronizer } from "./localVideoSync";
+import { captureLocalVideoSeekFence, getLocalVideoClock, localVideoSeekHasLanded, usesLocalVideoDeviceClock, type LocalVideoSeekFence } from "./mediaSync";
 
 const PREVIEW_DEBOUNCE_MS = 90;
 const DECODE_TIMEOUT_MS = 1_500;
@@ -61,6 +62,7 @@ async function pauseAndSettle(
   timeoutMs: number,
   isCurrent: () => boolean,
 ): Promise<boolean> {
+  if (!isCurrent()) return false;
   if (video.paused) return isCurrent();
   const settled = waitForEvent(video, "pause", timeoutMs, isCurrent);
   video.pause();
@@ -99,10 +101,8 @@ async function waitForDecodedTargetFrame(
   } catch {
     // Some older WebKit builds reject background play. `seeked` remains a valid fallback signal.
   }
-  if (!isCurrent()) {
-    video.pause();
-    return false;
-  }
+  // A newer preparation may already own this same element. A stale decoder must never pause it.
+  if (!isCurrent()) return false;
   if (typeof video.requestVideoFrameCallback !== "function") {
     return pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent);
   }
@@ -118,7 +118,7 @@ async function waitForDecodedTargetFrame(
     video.requestVideoFrameCallback(() => finish(true));
   });
   if (!confirmed) {
-    video.pause();
+    if (isCurrent()) video.pause();
     return false;
   }
   // `pause()` changes `paused` synchronously but dispatches `pause` later. Activation must wait
@@ -141,6 +141,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
   const sourceUrlRef = useRef("");
   const generationRef = useRef(0);
   const holdingPositionRef = useRef(false);
+  const seekFenceRef = useRef<LocalVideoSeekFence | null>(null);
   const previewTimerRef = useRef(0);
   const pendingRef = useRef<PendingPreparation | null>(null);
   const optionsRef = useRef(options);
@@ -168,6 +169,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     previewTimerRef.current = 0;
     pendingRef.current = null;
     holdingPositionRef.current = false;
+    seekFenceRef.current = null;
   }, []);
 
   const load = useCallback(
@@ -219,9 +221,12 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
       }
       video.muted = true;
       const rate = optionsRef.current.getRate();
-      if (Number.isFinite(rate) && rate > 0) video.playbackRate = rate;
-
-      const promise = waitForDecodedTargetFrame(video, normalized, isCurrent).then((ready) => {
+      if (Number.isFinite(rate) && rate > 0 && Math.abs(video.playbackRate - rate) > 0.001) video.playbackRate = rate;
+      const trackId = optionsRef.current.trackId;
+      const clock = trackId === null ? null : getLocalVideoClock(trackId);
+      const fence = seekFenceRef.current;
+      const decodeTarget = fence && localVideoSeekHasLanded(fence, clock) ? clock!.position : normalized;
+      const promise = waitForDecodedTargetFrame(video, decodeTarget, isCurrent).then((ready) => {
         if (!ready || !isCurrent()) {
           if (pendingRef.current?.generation === generation) pendingRef.current = null;
           if (generationRef.current === generation) holdingPositionRef.current = false;
@@ -232,12 +237,21 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
           target: normalized,
           activate: () => {
             if (!available || !isCurrent()) return false;
+            const trackId = optionsRef.current.trackId;
+            const clock = trackId === null ? null : getLocalVideoClock(trackId);
+            if (usesLocalVideoDeviceClock() && (!clock
+              || (seekFenceRef.current && !localVideoSeekHasLanded(seekFenceRef.current, clock)))) {
+              cancelPending(); return false;
+            }
             available = false;
             pendingRef.current = null;
             holdingPositionRef.current = false;
+            seekFenceRef.current = null;
             const old = activeVideo();
             const nextSlot: Slot = activeSlotRef.current === 0 ? 1 : 0;
-            const shouldPlay = optionsRef.current.desiredPlayingRef.current;
+            const shouldPlay = clock ? clock.playing && clock.rate > 0 : optionsRef.current.desiredPlayingRef.current;
+            const rate = clock?.rate ?? optionsRef.current.getRate();
+            if (Number.isFinite(rate) && rate > 0 && Math.abs(video.playbackRate - rate) > 0.001) video.playbackRate = rate;
             activeSlotRef.current = nextSlot;
             setActiveSlot(nextSlot);
             if (shouldPlay && video.paused) {
@@ -262,7 +276,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
             // Change ownership before pausing the old slot so its pause event cannot be mistaken
             // for a user/system transport command.
             old?.pause();
-            optionsRef.current.onActivate?.(video, normalized);
+            optionsRef.current.onActivate?.(video, clock?.position ?? normalized);
             return true;
           },
           cancel: () => {
@@ -290,11 +304,31 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     [prepare],
   );
 
+  const correctClock = useCallback((synchronizer: LocalVideoSynchronizer) => {
+    const old = activeVideo(), next = standbyVideo(), generation = generationRef.current;
+    if (!old || !next || holdingPositionRef.current || pendingRef.current || !optionsRef.current.enabled) return;
+    const isCurrent = () => generationRef.current === generation && optionsRef.current.enabled
+      && activeVideo() === old && !holdingPositionRef.current && !pendingRef.current;
+    void synchronizer.alignStandby(old, next, isCurrent, () => {
+      if (!isCurrent()) return false;
+      activeSlotRef.current = activeSlotRef.current === 0 ? 1 : 0;
+      setActiveSlot(activeSlotRef.current);
+      old.pause();
+      optionsRef.current.onActivate?.(next, next.currentTime);
+      return true;
+    });
+  }, [activeVideo, standbyVideo]);
+
   const hold = useCallback(() => {
+    // A new transport owns a new handle even when it repeats a preview target. Otherwise an old
+    // coordinator's prepared.cancel() can invalidate the handle shared by the newer request.
+    cancelPending();
     holdingPositionRef.current = true;
+    const trackId = optionsRef.current.trackId;
+    seekFenceRef.current = trackId !== null && usesLocalVideoDeviceClock() ? captureLocalVideoSeekFence(trackId) : null;
     window.clearTimeout(previewTimerRef.current);
     previewTimerRef.current = 0;
-  }, []);
+  }, [cancelPending]);
 
   useEffect(() => {
     const { enabled, trackId } = optionsRef.current;
@@ -328,6 +362,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     isHoldingPosition: () => holdingPositionRef.current,
     load,
     cancelPending,
+    correctClock,
     prepare,
     preview,
   };

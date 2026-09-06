@@ -18,6 +18,7 @@ import type {
   VideoInfo,
 } from "../../types";
 import type { SongPreviewItem } from "../../lib/songPreview";
+import { thumbUrl } from "../../lib/format";
 import {
   beginColumnPointerReorder,
   loadTableColumnPrefs,
@@ -383,7 +384,7 @@ export function ResultTable({
                 >
                   <span className="kd-thumb kd-result-collection-cover">
                     <CoverImage
-                      src={collection.cover}
+                      src={thumbUrl(collection.cover)}
                       alt=""
                       loading="lazy"
                       fallback={(
@@ -820,7 +821,7 @@ export function ResultTable({
                     <span className="kd-result-package-head">
                       {collectionKind && item.groups[0]?.cover ? (
                         <span className="kd-thumb kd-result-collection-cover">
-                          <CoverImage src={item.groups[0].cover} alt="" loading="lazy" />
+                          <CoverImage src={thumbUrl(item.groups[0].cover)} alt="" loading="lazy" />
                         </span>
                       ) : null}
                       {!collectionKind ? (

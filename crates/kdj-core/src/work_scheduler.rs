@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-const CLASS_COUNT: usize = 11;
+const CLASS_COUNT: usize = 12;
 const WAIT_POLL: Duration = Duration::from_millis(20);
 
 /// Process-wide output-ring pressure published by the playback coordinator. The hardware callback
@@ -44,6 +44,7 @@ pub enum WorkClass {
     NowPlayingAnalysis,
     LibraryAnalysisLight,
     LibraryAnalysis,
+    MediaComposition,
     Maintenance,
 }
 
@@ -59,6 +60,7 @@ impl WorkClass {
         Self::NowPlayingAnalysis,
         Self::LibraryAnalysisLight,
         Self::LibraryAnalysis,
+        Self::MediaComposition,
         Self::Maintenance,
     ];
 
@@ -78,7 +80,8 @@ impl WorkClass {
             Self::NowPlayingAnalysis => 7,
             Self::LibraryAnalysisLight => 8,
             Self::LibraryAnalysis => 9,
-            Self::Maintenance => 10,
+            Self::MediaComposition => 10,
+            Self::Maintenance => 11,
         }
     }
 }
@@ -423,7 +426,7 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
         return false;
     }
     match class {
-        WorkClass::LibraryAnalysisLight => {
+        WorkClass::LibraryAnalysisLight | WorkClass::MediaComposition => {
             state.live_stem_decks == 0
                 && !active(WorkClass::TempoStretch)
                 && !immediate_model_pressure
@@ -487,6 +490,7 @@ fn pressure_allows(pressure: AudioPressure, class: WorkClass) -> bool {
                 | WorkClass::NowPlayingAnalysis
                 | WorkClass::LibraryAnalysisLight
                 | WorkClass::LibraryAnalysis
+                | WorkClass::MediaComposition
                 | WorkClass::Maintenance
         ),
         AudioPressure::Critical => matches!(

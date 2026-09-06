@@ -10,6 +10,7 @@ pub mod qqmusic;
 mod session_fs;
 pub mod soundcloud;
 pub mod tags;
+pub mod workshop_images;
 pub mod update;
 pub mod youtube;
 pub mod youtubemusic;

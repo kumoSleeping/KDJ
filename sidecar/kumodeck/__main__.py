@@ -1,7 +1,4 @@
-"""命令行入口：`python -m kumodeck --host 127.0.0.1 --port 8788 --token xxx ...`
-
-由 Electron 主进程拉起（见 electron/main.ts），端口和 token 都是它随机生成后传进来的。
-"""
+"""历史命令行入口：`python -m kumodeck --host 127.0.0.1 --port 8788 --token xxx ...`。"""
 
 from __future__ import annotations
 
@@ -57,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     app = create_app(config)
 
-    # Electron 靠轮询 /api/health 判断就绪，这行主要是给开发时看日志用的。
+    # 就绪信息只供历史调试记录使用。
     print(f"kumodeck sidecar ready on http://{config.host}:{config.port}", flush=True)
 
     uvicorn.run(app, host=config.host, port=config.port, log_level=args.log_level)

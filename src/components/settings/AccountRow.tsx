@@ -53,6 +53,8 @@ const STATE_COLOR: Record<AccountState, string> = {
   unknown: "inherit",
 };
 
+const INTERNAL_UNVERIFIED_DETAIL = "登录状态尚未联网核验";
+
 /**
  * 账号面板这一行的排版就地写死，不再走 design.css 的 `.kd-set-*`。
  *
@@ -201,7 +203,8 @@ export function AccountRow({
   /** 退出失败就贴在这一行自己底下：状态还写着"已登录"，得说清楚为什么。 */
   const [notice, setNotice] = useState("");
 
-  const loggedIn = account.state === "valid";
+  // unknown 是“本地凭证仍在，但这次没问到平台”，不能因此改成重新登录入口。
+  const hasCredential = account.state === "valid" || account.state === "unknown";
   const browserAccount = account.login_method === "browser";
   const youtubeAccount =
     (account.platform === "youtube" || account.platform === "ytm") && browserAccount;
@@ -635,11 +638,12 @@ export function AccountRow({
             {account.nickname && ` · ${account.nickname}`}
             {/* detail 常常就是状态本身（"未登录"），或 UID/musicid 这类机器码——都不展示 */}
             {account.detail &&
+              account.detail !== INTERNAL_UNVERIFIED_DETAIL &&
               account.detail !== stateLabel &&
               !isMachineIdDetail(account.detail) &&
               ` · ${account.detail}`}
           </div>
-          {savedPath && !loggedIn && (
+          {savedPath && !hasCredential && (
             <div style={settingRow.hint} title={savedDisplayPath || savedPath}>
               {savedHint}
               {" · "}
@@ -687,7 +691,7 @@ export function AccountRow({
           <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
             无需登录
           </span>
-        ) : loggedIn ? (
+        ) : hasCredential ? (
           <>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>
               退出
@@ -734,7 +738,7 @@ export function AccountRow({
           </Button>
         )}
       </div>
-      {browserAccount && youtubeLoginOpen && !loggedIn && !browserMobile && (
+      {browserAccount && youtubeLoginOpen && !hasCredential && !browserMobile && (
         <div
           style={{
             gridColumn: "1 / -1",

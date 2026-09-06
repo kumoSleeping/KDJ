@@ -9,10 +9,12 @@
 import { create } from "zustand";
 import { useAppStore, type ListMode } from "./appStore";
 import { useLibraryStore } from "./libraryStore";
+import { useCompositionStore } from "./compositionStore";
 
 export type OverlayKind =
   | "settings"
   | "queue"
+  | "composition"
   | "preview"
   | "folders"
   | "duplicates"
@@ -34,6 +36,7 @@ function overlayOf(): OverlayKind | null {
   if (app.showSettings) return "settings";
   if (app.showPreview) return "preview";
   if (app.showQueue) return "queue";
+  if (app.showComposition) return "composition";
   if (app.showDuplicates) return "duplicates";
   if (app.showLyrics) return "lyrics";
   return null;
@@ -73,6 +76,7 @@ function applyOverlay(overlay: OverlayKind | null): void {
   if (overlay === "settings") app.openSettingsPanel();
   else if (overlay === "preview") app.openPreviewPanel();
   else if (overlay === "queue") app.openQueuePanel();
+  else if (overlay === "composition" && useCompositionStore.getState().tasks.length > 0) app.openCompositionPanel();
   else if (overlay === "folders") app.openFoldersPanel();
   else if (overlay === "duplicates")
     app.openDuplicatePanel(app.duplicateFolders, {
@@ -93,6 +97,8 @@ export function applyPlace(place: Place): void {
       showSettings: false,
       settingsPinned: false,
       showQueue: false,
+      showComposition: false,
+      compositionPinned: false,
       showPreview: false,
       showFolders: false,
       showDuplicates: false,

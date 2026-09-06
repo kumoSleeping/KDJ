@@ -1,3 +1,7 @@
+import { useStore } from "zustand";
+import { createTemporaryLibrary, type TemporaryLibrary, type LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
+import { useTemporaryFolderDrop } from "../../lib/temporaryFolderDrag";
+import { TemporaryFolderPane } from "../library/TemporaryFolderPane";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { PanelTopClose, Pin, SlidersHorizontal } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
@@ -98,6 +102,10 @@ import {
   updateStreamWorkspaceSession,
 } from "../../lib/workspaceSession";
 import {
+  loadForegroundStreamOnce,
+  type ForegroundStreamStartup,
+} from "../../lib/streamStartup";
+import {
   collectionPageWindow,
   openedCollectionItem,
   RESOLVED_COLLECTION_PAGE_SIZE,
@@ -135,6 +143,7 @@ import { ChromeActions } from "../chrome/ChromeActions";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
 import { QueuePanel } from "../download/QueuePanel";
+import { CompositionWorkshop } from "../composition/CompositionWorkshop";
 import { DuplicateAnalysisPanel } from "../library/DuplicateAnalysisPanel";
 import { isApplyingNav, readPlace, useNavStore } from "../../stores/navStore";
 import { useVideoPip } from "../../lib/videoPip";
@@ -218,6 +227,10 @@ interface CollectionSearchSnapshot {
   scrollLeft: number;
 }
 
+interface OpenStreamPlaylistOptions {
+  startup?: ForegroundStreamStartup;
+}
+
 function storedJson(key: string): unknown {
   try {
     return JSON.parse(readLocalStorage(key) ?? "null") as unknown;
@@ -266,6 +279,10 @@ export function Workspace() {
   const queuePanelEpoch = useAppStore((state) => state.queuePanelEpoch);
   const queuePinned = useAppStore((state) => state.queuePinned);
   const setQueuePinned = useAppStore((state) => state.setQueuePinned);
+  const showComposition = useAppStore((state) => state.showComposition);
+  const compositionPanelEpoch = useAppStore((state) => state.compositionPanelEpoch);
+  const compositionPinned = useAppStore((state) => state.compositionPinned);
+  const setCompositionPinned = useAppStore((state) => state.setCompositionPinned);
   const playingDetailPinned = usePlaybackPrefs((state) => state.playingDetailPinned);
   const setPlayingDetailPinned = usePlaybackPrefs((state) => state.setPlayingDetailPinned);
   const detailControlVisible = usePlaybackPrefs((state) => state.detailControlVisible);
@@ -304,9 +321,9 @@ export function Workspace() {
   );
   const activeDownloads = useDownloadStore((state) => state.activeCount);
   const streamAccountKeys = useStreamBrowseStore((state) => state.accountKeys);
+  const startupForeground = useStreamBrowseStore((state) => state.startupForeground);
   const { columns: layout, chrome, portrait } = useLayoutSignals();
 
-  const tracks = useLibraryStore((state) => state.tracks);
   const total = useLibraryStore((state) => state.total);
   const loading = useLibraryStore((state) => state.loading);
   const libError = useLibraryStore((state) => state.error);
@@ -314,15 +331,12 @@ export function Workspace() {
   const selectedId = useLibraryStore((state) => state.selectedId);
   const selectedIds = useLibraryStore((state) => state.selectedIds);
   const selected = useLibraryStore(selectSelectedTrack);
-  const loadMore = useLibraryStore((state) => state.loadMore);
-  const loadMoreTracks = useCallback(() => { void loadMore(); }, [loadMore]);
-  const select = useLibraryStore((state) => state.select);
   const refreshStats = useLibraryStore((state) => state.refreshStats);
   const refresh = useLibraryStore((state) => state.refresh);
 
   // 首次进来拉一次曲库；之后的刷新由筛选变化和 WS 事件驱动
   useEffect(() => {
-    if (useLibraryStore.getState().tracks.length === 0) void refresh();
+    if (useLibraryStore.getState().orderedIds.length === 0) void refresh();
   }, [refresh]);
 
   const [query, setQuery] = useState("");
@@ -372,7 +386,7 @@ export function Workspace() {
     }
     setAggregateSearchRevealed(false);
   }, [aggregateSearchOpen]);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(() => Boolean(startupForeground));
   const restoredLocalPanePinnedRef = useRef(
     readLocalStorage(LOCAL_PANE_PIN_KEY) === "1",
   );
@@ -382,10 +396,19 @@ export function Workspace() {
   const [collectionSearchSnapshot, setCollectionSearchSnapshot] =
     useState<CollectionSearchSnapshot | null>(null);
   const [collectionPage, setCollectionPage] = useState(1);
-  const [activeStreamPlaylist, setActiveStreamPlaylist] = useState<ActiveStreamPlaylist | null>(null);
+  const [activeStreamPlaylist, setActiveStreamPlaylist] = useState<ActiveStreamPlaylist | null>(
+    () => startupForeground
+      ? {
+          platform: startupForeground.playlist.platform as StreamBrowsePlatform,
+          key: startupForeground.playlist.key,
+        }
+      : null,
+  );
   const activeStreamPlaylistRef = useRef(activeStreamPlaylist);
   activeStreamPlaylistRef.current = activeStreamPlaylist;
-  const [openedStreamPlaylist, setOpenedStreamPlaylist] = useState<StreamPlaylist | null>(null);
+  const [openedStreamPlaylist, setOpenedStreamPlaylist] = useState<StreamPlaylist | null>(
+    () => startupForeground?.playlist ?? null,
+  );
   const [removingStreamGroupIds, setRemovingStreamGroupIds] = useState<Set<string>>(
     new Set(),
   );
@@ -422,6 +445,8 @@ export function Workspace() {
   const [localPanePinned, setLocalPanePinned] = useState(
     () => restoredLocalPanePinnedRef.current,
   );
+  const [temporaryLibrary, setTemporaryLibrary] = useState<TemporaryLibrary | null>(null);
+  const temporarySelected = useStore(temporaryLibrary?.store ?? useLibraryStore, (state) => state.selectedTrack);
   const [workspacePaneState, setWorkspacePaneState] =
     useState<WorkspacePaneState>(loadWorkspacePanes);
   const [browseFocus, setBrowseFocus] = useState<MidiBrowseFocus>("pane");
@@ -449,9 +474,9 @@ export function Workspace() {
   const workspacePaneAvailability = useMemo(
     () => ({
       local: true,
-      search: hasResults,
+      search: hasResults || temporaryLibrary !== null,
     }),
-    [hasResults],
+    [hasResults, temporaryLibrary],
   );
   const visiblePaneOrder = useMemo(
     () => visibleWorkspacePanes(
@@ -469,6 +494,7 @@ export function Workspace() {
   const paneOrder = (kind: WorkspacePaneKind) =>
     Math.max(0, visiblePaneOrder.indexOf(kind)) * 2;
   const revealSearchPane = useCallback(() => {
+    setTemporaryLibrary(null);
     activateWorkspacePane("search");
     setHasResults(true);
   }, [activateWorkspacePane, setHasResults]);
@@ -602,6 +628,17 @@ export function Workspace() {
   };
   /** 搜索、链接解析和侧栏云歌单共用结果区；只有最后一次请求可以落状态。 */
   const resultRequestSeqRef = useRef(0);
+  const openTemporaryFolder = useCallback((folder: string) => {
+    resultRequestSeqRef.current += 1;
+    setBusy(false);
+    setLoadingCollections(new Set());
+    setActiveStreamPlaylist(null);
+    setTemporaryLibrary(createTemporaryLibrary(folder));
+    setLocalPanePinned(true);
+    activateWorkspacePane("search");
+    setRestorableWorkspaceSource("local");
+  }, [activateWorkspacePane]);
+  const temporaryFolderDrop = useTemporaryFolderDrop(openTemporaryFolder, layout === "wide");
   /** FolderTree 在远程歌单点击后还会调用 onNavigate；同一调用栈内不能清高亮。 */
   const streamOpenNavigationRef = useRef(false);
   const returnToCollectionSearch = useCallback(() => {
@@ -793,6 +830,7 @@ export function Workspace() {
   const submit = useCallback(async (platformsOverride?: Platform[]) => {
     const text = query.trim();
     if (!text) return;
+    revealSearchPane();
     const requestId = ++resultRequestSeqRef.current;
     setCollectionSearchSnapshot(null);
     setCollectionPage(1);
@@ -906,7 +944,10 @@ export function Workspace() {
    * 左侧平台歌单/收藏夹只是远程浏览入口：点开后复用搜索结果这张表和下载队列，
    * 不写本地曲库，也不恢复已经退役的 stream_library 持久化表。
    */
-  const openStreamPlaylist = useCallback(async (playlist: StreamPlaylist) => {
+  const openStreamPlaylist = useCallback(async (
+    playlist: StreamPlaylist,
+    options: OpenStreamPlaylistOptions = {},
+  ) => {
     const browsePlatform = STREAM_BROWSE_PLATFORMS.includes(
       playlist.platform as StreamBrowsePlatform,
     )
@@ -915,6 +956,7 @@ export function Workspace() {
     const currentAccountKey = browsePlatform
       ? useStreamBrowseStore.getState().accountKeys[browsePlatform]
       : null;
+    setTemporaryLibrary(null);
     const revealTargetPane = () => {
       setHasResults(true);
       activateWorkspacePane("search");
@@ -957,7 +999,12 @@ export function Workspace() {
       const initialLimit = playlist.platform === "bilibili"
         ? RESOLVED_COLLECTION_PAGE_SIZE
         : 0;
-      const response = await api.streamPlaylist(playlist, initialLimit);
+      const response = options.startup
+        ? await loadForegroundStreamOnce(
+            options.startup,
+            () => api.streamPlaylist(playlist, initialLimit),
+          )
+        : await api.streamPlaylist(playlist, initialLimit);
       if (requestId !== resultRequestSeqRef.current) return false;
       if (
         browsePlatform &&
@@ -984,10 +1031,23 @@ export function Workspace() {
         setActiveStreamPlaylist(active);
         useStreamBrowseStore.getState().setActive(active);
       }
+      if (options.startup) {
+        const top = restoredWorkspaceSessionRef.current.stream.scrollTop;
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => searchScrollRef.current?.scrollTo({ top, left: 0 }));
+        });
+      }
       return true;
     } catch (error) {
       if (requestId !== resultRequestSeqRef.current) return false;
       const message = errorText(error);
+      if (options.startup) {
+        // A startup provider failure must not erase the trusted directory cache or the user's
+        // restorable target. Keep the online pane in place so an explicit retry remains possible.
+        setItems([]);
+        setSearchError(`打开歌单失败：${message}`);
+        return false;
+      }
       setItems([]);
       setActiveStreamPlaylist(null);
       setOpenedStreamPlaylist(null);
@@ -1091,25 +1151,32 @@ export function Workspace() {
     if (restoredWorkspaceAppliedRef.current) return;
     restoredWorkspaceAppliedRef.current = true;
     const session = restoredWorkspaceSessionRef.current;
-    // 在线页面只记住目标，不在启动时回源。用户再次点击侧栏歌单才读取平台。
+    if (startupForeground) {
+      setRestorableWorkspaceSource("stream");
+      activateWorkspacePane("search");
+      void openStreamPlaylist(startupForeground.playlist, {
+        startup: startupForeground,
+      });
+      return;
+    }
     setRestorableWorkspaceSource("local");
     activateWorkspacePane("local");
     if (session.local.selectedId !== null) {
       void (async () => {
         for (let attempt = 0; attempt < 100; attempt += 1) {
           const library = useLibraryStore.getState();
-          if (!library.loading && library.tracks.length > 0) break;
+          if (!library.loading && library.orderedIds.length > 0) break;
           await new Promise((resolve) => window.setTimeout(resolve, 50));
         }
         const trackId = session.local.selectedId as number;
         await useLibraryStore.getState().ensureTrackLoaded(trackId);
-        if (!useLibraryStore.getState().tracks.some((track) => track.id === trackId)) {
+        if (!useLibraryStore.getState().indexById.has(trackId)) {
           useLibraryStore.getState().select(null);
           updateLocalWorkspaceSession({ selectedId: null, scrollTop: 0 });
         }
       })();
     }
-  }, [activateWorkspacePane]);
+  }, [activateWorkspacePane, openStreamPlaylist, startupForeground]);
 
   // 登出或换号时立即撤下已经展开的私人在线内容；重新登录后也必须由用户再点歌单。
   useEffect(() => {
@@ -1352,7 +1419,9 @@ export function Workspace() {
       const targetId =
         trackId ?? selectSelectedTrack(useLibraryStore.getState())?.id ?? currentPlaying?.id ?? null;
       const library = useLibraryStore.getState();
-      const selectedTarget = selectSelectedTrack(library);
+      const selectedTarget = temporaryLibrary?.store.getState().selectedTrack?.id === targetId
+        ? temporaryLibrary.store.getState().selectedTrack
+        : selectSelectedTrack(library);
       const target = resolveWorkspaceRequestedTrack(
         targetId,
         currentPlaying,
@@ -1377,20 +1446,20 @@ export function Workspace() {
         showTrackDetail();
       }
     },
-    [openLyricsPanel, showTrackDetail],
+    [openLyricsPanel, showTrackDetail, temporaryLibrary],
   );
 
   const selectTrack = useCallback(
-    (id: number, mode: SelectMode, clickCount = 1) => {
+    (id: number, mode: SelectMode, clickCount = 1, libraryStore: LibraryPaneStoreApi = useLibraryStore) => {
       if (mode === "replace") {
         // 选择先于 300ms 的单击/双击判定发生。先写这次导航目标，再更新外部列表
         // store；即使外部 store 同步触发渲染，未固定详情也不会过渡到正在播放页。
-        const library = useLibraryStore.getState();
+        const library = libraryStore.getState();
         const selectedTarget = library.selectedTrack?.id === id ? library.selectedTrack : null;
         asideTrackSnapshotRef.current = selectedTarget;
         setAsideTrackId(id);
       }
-      select(id, mode);
+      libraryStore.getState().select(id, mode);
       // 普通单击既选择曲目，也明确表达“查看这首”的意图。修饰键/勾选多选
       // 只维护选区，不能让详情抽屉跟着每次批量选择反复弹出。
       if (mode !== "replace") return;
@@ -1413,7 +1482,7 @@ export function Workspace() {
         pinTrackAside(face, id);
       }, 300);
     },
-    [clearDetailTimer, faceForTrackPin, layout, pinTrackAside, select],
+    [clearDetailTimer, faceForTrackPin, layout, pinTrackAside],
   );
 
   useEffect(() => {
@@ -1445,17 +1514,19 @@ export function Workspace() {
       requestAnimationFrame(() => revealSidebarCursor(browseCursorIdRef.current));
     };
     const stepPane = (delta: number) => {
-      const library = useLibraryStore.getState();
-      const current = library.tracks.findIndex((track) => track.id === library.selectedId);
-      const next = nextBrowseIndex(library.tracks.length, current, delta);
-      const track = library.tracks[next];
-      if (!track) return;
-      selectTrack(track.id, "replace");
+      const store = activeWorkspacePane === "search" && temporaryLibrary ? temporaryLibrary.store : useLibraryStore;
+      const library = store.getState();
+      const current = library.selectedId === null ? -1 : (library.indexById.get(library.selectedId) ?? -1);
+      const next = nextBrowseIndex(library.orderedIds.length, current, delta);
+      const trackId = library.orderedIds[next];
+      if (trackId === undefined) return;
+      selectTrack(trackId, "replace", 1, store);
       window.dispatchEvent(new CustomEvent(DETAIL_EVENT, {
-        detail: { source: "midi-browse", trackId: track.id },
+        detail: { source: "midi-browse", trackId },
       }));
     };
     const stepSearchPane = (delta: number) => {
+      if (temporaryLibrary) { stepPane(delta); return; }
       const rows = [
         ...document.querySelectorAll<HTMLTableRowElement>(
           '.kd-workspace-pane-remote[data-pane-active="true"] tr[data-kd-search-result]',
@@ -1469,7 +1540,9 @@ export function Workspace() {
       requestAnimationFrame(() => row.scrollIntoView({ block: "nearest" }));
     };
     const playableSelection = () => {
-      return selectSelectedTrack(useLibraryStore.getState());
+      return activeWorkspacePane === "search" && temporaryLibrary
+        ? temporaryLibrary.store.getState().selectedTrack
+        : selectSelectedTrack(useLibraryStore.getState());
     };
     const onBrowse = (event: Event) => {
       const detail = (event as CustomEvent<MidiBrowseDetail>).detail;
@@ -1508,7 +1581,7 @@ export function Workspace() {
       window.removeEventListener(MIDI_BROWSE_EVENT, onBrowse);
       window.removeEventListener(ARROW_KEY_LIST_STEP_EVENT, onArrowKeyListStep);
     };
-  }, [activateWorkspacePane, activeWorkspacePane, selectTrack]);
+  }, [activateWorkspacePane, activeWorkspacePane, selectTrack, temporaryLibrary]);
 
   /**
    * 在线结果单击只建立一个可供详情栏读取的元数据快照，不解析直链、也不换主唱盘。
@@ -1620,7 +1693,8 @@ export function Workspace() {
     showSettings ||
     showDuplicates ||
     previewAside ||
-    queueAside;
+    queueAside ||
+    showComposition;
   const lyricsTrack = playingTrack ?? selected;
   // 普通详情保持用户明确查看的目标；但如果它正好就是退场曲目，则在播放切到
   // 下一首时同步推进。直接用派生 id 渲染，避免等 effect 后多留一帧旧 VIDEO 面板。
@@ -1645,7 +1719,7 @@ export function Workspace() {
   const requestedDetailTrack = resolveWorkspaceRequestedTrack(
     renderedAsideTrackId,
     playingTrack,
-    selected,
+    temporarySelected?.id === renderedAsideTrackId ? temporarySelected : selected,
     registeredAsideTrack,
     asideTrackSnapshotRef.current,
   );
@@ -1784,6 +1858,21 @@ export function Workspace() {
     </button>
   ) : null;
 
+  const compositionPinButton = showComposition && !showSearchTips ? (
+    <button
+      type="button"
+      className="kd-aside-head-close"
+      data-pinned={compositionPinned ? "true" : undefined}
+      aria-pressed={compositionPinned}
+      aria-label={compositionPinned ? "取消固定 VJ 工坊" : "固定 VJ 工坊"}
+      title={compositionPinned ? "VJ 工坊已固定；点击恢复随内容切换自动收起" : "固定 VJ 工坊，不被选歌和切换列表顶掉"}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={() => setCompositionPinned(!compositionPinned)}
+    >
+      <Pin size={13} fill={compositionPinned ? "currentColor" : "none"} />
+    </button>
+  ) : null;
+
   const togglePlayingDetailPin = useCallback(() => {
     const nextPinned = !playingDetailPinned;
     // 没有播放对象时不能新建“当前播放”固定；但若这是重启恢复的已固定状态，
@@ -1853,7 +1942,7 @@ export function Workspace() {
       {playingDetailPinButton}
     </>
   ) : null;
-  const asideTools = settingsPinButton ?? queuePinButton ?? detailAsideTools;
+  const asideTools = settingsPinButton ?? queuePinButton ?? compositionPinButton ?? detailAsideTools;
 
   const onTrackAsideFace = useCallback(
     (face: TrackAsideFace) => {
@@ -1885,6 +1974,8 @@ export function Workspace() {
           ? "预览"
           : queueAside
             ? "下载队列"
+            : showComposition
+              ? "VJ 工坊"
             : showTrackFaceSwitch
               ? trackAsideFace === "lyrics"
                 ? "歌词"
@@ -1928,6 +2019,8 @@ export function Workspace() {
     </div>
   ) : queueAside ? (
     <QueuePanel />
+  ) : showComposition ? (
+    <CompositionWorkshop />
   ) : lyricsAside ? (
     <LyricsView track={lyricsTrack} />
   ) : detailAside ? trackDetailPanel : null;
@@ -1959,7 +2052,7 @@ export function Workspace() {
   // 歌词属于曲目内容面（详情 ↔ 歌词），上面已有 effect 钉住；这里不能 unpin，
   // 否则一点「歌词」就被拆掉，看起来像弹不出来。
   useEffect(() => {
-    if (!(showSettings || showFolders || showDuplicates || showQueue)) return;
+    if (!(showSettings || showFolders || showDuplicates || showQueue || showComposition)) return;
     // 固定详情把设置/下载等视为临时覆盖：覆盖期间详情不渲染，关掉后仍回到
     // 当前播放歌曲。未固定时保留旧行为，打开旁路即结束本次详情查看。
     if (!playingDetailPinned) setDetailPinned(false);
@@ -1976,6 +2069,8 @@ export function Workspace() {
     duplicatesPanelEpoch,
     queuePanelEpoch,
     playingDetailPinned,
+    showComposition,
+    compositionPanelEpoch,
   ]);
 
   // 这是一个“临时盖层”：不清掉原来的右栏状态；关掉后自然回到原面板。
@@ -1986,6 +2081,7 @@ export function Workspace() {
     settingsPanelEpoch,
     queuePanelEpoch,
     foldersPanelEpoch,
+    compositionPanelEpoch,
     duplicatesPanelEpoch,
     lyricsPanelEpoch,
   ]);
@@ -2345,7 +2441,7 @@ export function Workspace() {
 
   // 曲目表 / 搜索结果：Cmd/Ctrl + A · C · X · V（Option+V 强制移动）。
   useLibraryClipboard({
-    active: () => Boolean(searchPaneVisible && items && items.length > 0),
+    active: () => Boolean(!temporaryLibrary && searchPaneVisible && items && items.length > 0),
     preferred: () => activeWorkspacePane === "search",
     selectAll: () => {
       setSearchSelectionMode(true);
@@ -2353,7 +2449,9 @@ export function Workspace() {
     },
     chosenSources: () => chosenSources,
     enqueueChosen: () => addToQueue(),
-  });
+  }, () => temporaryLibrary && activeWorkspacePane === "search"
+    ? temporaryLibrary.store.getState()
+    : useLibraryStore.getState());
 
   const downloadResolvedItem = useCallback(
     async (item: IntakeItem) => {
@@ -2458,6 +2556,7 @@ export function Workspace() {
     showQueue,
     showPreview,
     showFolders,
+    showComposition,
   ]);
 
   return (
@@ -2482,6 +2581,12 @@ export function Workspace() {
               queueOpen={queueOpen}
               queueCount={activeDownloads}
               onQueue={toggleQueueDrawer}
+              compositionOpen={showComposition && !showSearchTips}
+              onComposition={() => {
+                const app = useAppStore.getState();
+                if (showSearchTips && app.showComposition) { setShowSearchTips(false); app.openCompositionPanel(); }
+                else app.toggleCompositionPanel();
+              }}
               onOpenUpdate={openUpdateFromChrome}
             />
           }
@@ -2567,6 +2672,10 @@ export function Workspace() {
               </div>
             ) : null}
             <div className="kd-local-list-slot" data-aside={showAside ? "open" : "closed"}>
+              {temporaryFolderDrop.offered && <div className="kd-temporary-folder-drop"
+                data-kd-temporary-folder-drop="true" data-hovered={temporaryFolderDrop.hovered || undefined}>
+                临时打开文件夹
+              </div>}
               <div
                 ref={workspacePaneRef}
                 className="kd-workspace-panes"
@@ -2645,6 +2754,7 @@ export function Workspace() {
                   {libError && (
                     <div className="kd-toolbar" style={{ color: "var(--kd-danger)" }}>
                       {libError}
+                      <button type="button" onClick={() => { void useLibraryStore.getState().retryList(); }}>重试</button>
                     </div>
                   )}
                   <InlineNotice
@@ -2653,7 +2763,6 @@ export function Workspace() {
                     block
                   />
                   <TrackTable
-                    tracks={tracks}
                     total={total}
                     loading={loading}
                     layout={layout}
@@ -2667,7 +2776,6 @@ export function Workspace() {
                     onSort={sortBy}
                     sort2={filter.sort2}
                     order2={filter.order2}
-                    onScrollEnd={loadMoreTracks}
                   />
                 </div>
 
@@ -2687,7 +2795,7 @@ export function Workspace() {
                   );
                 })}
 
-                {hasResults && (
+                {(hasResults || temporaryLibrary) && (
                     <div
                       className="kd-workspace-pane kd-workspace-pane-remote"
                       data-workspace-pane-kind="search"
@@ -2699,6 +2807,15 @@ export function Workspace() {
                       onPointerDownCapture={() => focusWorkspacePane("search")}
                       onFocusCapture={() => focusWorkspacePane("search")}
                     >
+                      {temporaryLibrary ? <TemporaryFolderPane key={temporaryLibrary.id} library={temporaryLibrary}
+                        active={activeWorkspacePane === "search"} layout={layout}
+                        onSelect={(id, mode, clickCount) => selectTrack(id, mode, clickCount, temporaryLibrary.store)}
+                        onClose={() => {
+                          setTemporaryLibrary(null);
+                          setHasResults(false);
+                          activateWorkspacePane("local");
+                        }}
+                      /> : <>
                       {visiblePaneOrder.length > 1 ? (
                         <button
                           type="button"
@@ -2823,6 +2940,7 @@ export function Workspace() {
                           loadingCollections={loadingCollections}
                         />
                       </div>
+                      </>}
                     </div>
                 )}
               </div>

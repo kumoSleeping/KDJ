@@ -68,6 +68,10 @@ impl Default for LyricsLookupCache {
 }
 
 impl LyricsLookupCache {
+    pub fn invalidate_song(&self, title: &str, artist: &str) {
+        self.entries.lock().unwrap().retain(|key, _| key.title != normalized_identity(title) || key.artist != normalized_identity(artist));
+    }
+
     fn result_ttl(result: &CachedLyricsResult) -> Option<Duration> {
         match result {
             Ok(_) => Some(LYRIC_SUCCESS_TTL),

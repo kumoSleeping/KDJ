@@ -1,20 +1,10 @@
 /**
  * Tauri 壳的前端构建配置。
  *
- * 和 vite.config.ts（Electron 那份，保持不动）的区别有三点：
- *
- *  1. 不加载 electron 插件——Tauri 不需要 main/preload 两个 CJS 产物；
- *  2. 端口固定 5274 且 strictPort。`src-tauri/tauri.conf.json` 的 devUrl 写死了它，
+ *  1. 端口固定 5274 且 strictPort。`src-tauri/tauri.conf.json` 的 devUrl 写死了它，
  *     端口一漂移 dev 窗口就是白屏，而且白屏不会报错，很难一眼看出根因；
- *  3. 产物落 `dist-tauri/` 而不是 `dist/`。两个壳会并存一段时间，
- *     共用一个 outDir 意味着「刚打完 Electron 包再跑 tauri build」会拿到上一份产物。
- *
- * 另外要剥掉 index.html 里那段 <meta http-equiv="Content-Security-Policy">。
- * 那份是给 Electron 写的，而 meta 和响应头两份 CSP 是**取交集**、不是后者覆盖前者：
- * 留着它意味着以后每次在 tauri.conf.json 里放宽一条（比如给播放器加
- * `media-src blob:`），都必须记得同步改 index.html，否则症状是「配置里明明写了
- * 却还是被拦」——CSP 拦截只在 devtools 控制台留一行，非常难联想到根因。
- * 删掉之后 Tauri 侧只剩 tauri.conf.json 的 app.security.csp / devCsp 一个来源。
+ *  2. 产物固定落在 `dist-tauri/`；
+ *  3. CSP 只由 `src-tauri/tauri.conf.json` 的 app.security.csp / devCsp 管理。
  *
  * 用法：
  *   npm run tauri:dev     # 起窗口（内部会先跑 tauri:web）
@@ -33,20 +23,6 @@ const tauriPlatform = process.env.TAURI_ENV_PLATFORM;
 const nativeYoutubeRuntime = tauriPlatform
   ? tauriPlatform === "darwin"
   : process.platform === "darwin";
-
-function stripElectronCsp(): Plugin {
-  return {
-    name: "kdj-strip-retired-electron-csp",
-    transformIndexHtml(html) {
-      // [^>]* 而不是 [\s\S]*?：属性值里不会有 '>'，这样匹配绝不会越过标签边界
-      // 把后面的内容一起吃掉（属性是折行写的，所以不能用 . 匹配）。
-      return html.replace(
-        /\s*<meta\s+http-equiv="Content-Security-Policy"[^>]*>/i,
-        "",
-      );
-    },
-  };
-}
 
 /**
  * Vite serves `?worker&url` as an ES module graph in development, whereas WKWebView's isolated
@@ -111,7 +87,13 @@ function youtubeNativePoDevBundle(): Plugin {
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
-  plugins: [react(), stripElectronCsp(), youtubeNativePoDevBundle()],
+  // Codex worktrees / proof copies intentionally reuse the repository's node_modules symlink.
+  // Vite's default node_modules/.vite cache would then be shared by multiple dev servers: one
+  // optimizer rewrite can leave another WebView loading React DOM and Zustand from different
+  // dependency generations, which manifests as an otherwise inexplicable Invalid Hook Call.
+  // `target/` is checkout-local, so every Tauri session gets one coherent dependency graph.
+  cacheDir: "target/vite-tauri-cache",
+  plugins: [react(), youtubeNativePoDevBundle()],
   resolve: nativeYoutubeRuntime
     ? undefined
     : {

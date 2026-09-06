@@ -1289,6 +1289,20 @@ impl MusicProvider for BilibiliProvider {
         // Python 是 `max(1, min(int(limit or 20), 50))`：0 退回默认 20，再夹到 50
         let limit = effective_limit(limit, 20).min(50);
         let results = self.client.search_videos(keyword).await?;
+        let aids = results
+            .iter()
+            .take(limit)
+            .map(|item| loose_int(item.get("aid")))
+            .filter(|aid| *aid > 0)
+            .collect::<Vec<_>>();
+        let page_counts = match self.client.article_cards(&aids).await {
+            Ok(cards) => article_card_page_counts(&cards),
+            Err(error) => {
+                // 分 P 数只是展示元数据，补查失败不能让整次关键词搜索跟着失败。
+                tracing::warn!(%error, "B 站搜索结果分 P 数补查失败");
+                HashMap::new()
+            }
+        };
         Ok(results
             .iter()
             .filter_map(|item| {
@@ -1304,6 +1318,10 @@ impl MusicProvider for BilibiliProvider {
                     .to_string();
                 let mut payload = serde_json::Map::new();
                 payload.insert("bvid".into(), Value::String(bvid.to_string()));
+                copy_page_count(item, &mut payload);
+                if let Some(page_count) = page_counts.get(bvid) {
+                    payload.insert("page_count".into(), json!(page_count));
+                }
                 Some(SongSource {
                     platform: Platform::Bilibili,
                     key: bvid.to_string(),
@@ -1538,6 +1556,7 @@ fn favorite_media_source(item: &Value) -> Option<SongSource> {
         .trim();
     let mut payload = serde_json::Map::new();
     payload.insert("bvid".into(), Value::String(bvid.to_string()));
+    copy_page_count(item, &mut payload);
     let resource_id = loose_int(item.get("id").or_else(|| item.get("aid")));
     if resource_id > 0 {
         payload.insert("fav_resource_id".into(), json!(resource_id));
@@ -1568,6 +1587,32 @@ fn favorite_media_source(item: &Value) -> Option<SongSource> {
         vip: false,
         payload,
     })
+}
+
+/// 收藏夹资源会直接返回稿件的分 P 数；搜索接口若将来补上同名字段，也沿用
+/// 同一份契约。未知数量保持缺省，不能把“有 BV 号”误当成“存在多个分 P”。
+fn copy_page_count(item: &Value, payload: &mut serde_json::Map<String, Value>) {
+    let page_count = loose_int(item.get("page"));
+    if page_count > 0 {
+        payload.insert("page_count".into(), json!(page_count));
+    }
+}
+
+fn article_card_page_counts(cards: &Value) -> HashMap<String, i64> {
+    cards
+        .as_object()
+        .into_iter()
+        .flat_map(|cards| cards.values())
+        .filter_map(|card| {
+            let bvid = str_field(card, "bvid")?.trim();
+            let page_count = loose_int(card.get("videos"));
+            if bvid.is_empty() || page_count <= 0 {
+                None
+            } else {
+                Some((bvid.to_string(), page_count))
+            }
+        })
+        .collect()
 }
 
 /// 搜索结果的 `duration` 摊成字符串，对应 Python 的 `str(item.get("duration") or "")`。
@@ -1810,6 +1855,7 @@ mod tests {
             "bvid": "BV1L94y1H7CV",
             "id": 123456,
             "type": 2,
+            "page": 4,
             "title": "现场录像",
             "duration": 232,
             "cover": "//i2.hdslb.com/x.jpg",
@@ -1820,6 +1866,10 @@ mod tests {
         assert_eq!(source.artists, vec!["UP主"]);
         assert_eq!(source.duration, Some(232.0));
         assert_eq!(source.cover, "https://i2.hdslb.com/x.jpg");
+        assert_eq!(
+            source.payload.get("page_count").and_then(Value::as_i64),
+            Some(4)
+        );
         assert_eq!(
             source
                 .payload
@@ -1834,6 +1884,18 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(2)
         );
+    }
+
+    #[test]
+    fn article_cards_distinguish_single_and_multi_page_videos() {
+        let counts = article_card_page_counts(&json!({
+            "av1": {"aid": 1, "bvid": "BVsingle", "videos": 1},
+            "av2": {"aid": 2, "bvid": "BVmulti", "videos": 7},
+            "av3": {"aid": 3, "bvid": "BVunknown", "videos": 0}
+        }));
+        assert_eq!(counts.get("BVsingle"), Some(&1));
+        assert_eq!(counts.get("BVmulti"), Some(&7));
+        assert!(!counts.contains_key("BVunknown"));
     }
 
     #[test]

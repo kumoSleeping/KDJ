@@ -157,6 +157,10 @@ impl TempoControl {
         self.applied_revision.store(revision, Ordering::Release);
     }
 
+    pub(crate) fn mark_passthrough_applied(&self) {
+        self.mark_applied(1.0, self.revision());
+    }
+
     pub fn is_unity(&self) -> bool {
         is_unity_rate(self.rate())
     }
@@ -479,7 +483,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
     /// Prime the worker-owned R3 state once at construction. Unity PCM still uses the direct
     /// passthrough branch, so this removes first-fader reset latency without steady-state R3 CPU.
     fn keep_engine_primed() -> bool {
-        true
+        false
     }
 
     pub fn engine_version(&self) -> i32 {

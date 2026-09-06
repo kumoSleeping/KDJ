@@ -263,9 +263,12 @@ export function settingsActivityHint(changedKeys: readonly string[]): ApiActivit
     : null;
 }
 
-function cleanFailureDetail(value: string): string {
+function cleanFailureDetail(value: string, action: string, status: number): string {
   const trimmed = value.replace(/[\r\n\t]+/g, " ").trim().slice(0, 160);
   const lower = trimmed.toLowerCase();
+  // 歌词接口的 404 会把完整曲名放进错误文案；诊断只需要知道“没命中”，
+  // 不应把用户的检索/收听历史再复制一份到活动日志。
+  if (action === "歌词 API" && status === 404) return "未找到匹配歌词";
   if (/https?:\/\//.test(trimmed) || ["token", "cookie", "authorization", "password", "secret"]
     .some((word) => lower.includes(word))) {
     return "请求失败，敏感详情已隐藏";
@@ -278,11 +281,25 @@ export function finishApiActivity(
   outcome: { status: number; durationMs: number; ok: boolean; error?: string },
 ): void {
   if (!descriptor || (descriptor.onlyFailures && outcome.ok)) return;
-  const error = outcome.ok ? "" : cleanFailureDetail(outcome.error || `HTTP ${outcome.status || "连接失败"}`);
+  const error = outcome.ok
+    ? ""
+    : cleanFailureDetail(
+      outcome.error || `HTTP ${outcome.status || "连接失败"}`,
+      descriptor.action,
+      outcome.status,
+    );
   const detail = [descriptor.detail, error].filter(Boolean).join(" · ");
+  // 4xx 通常是资源不存在、状态冲突、限流或用户输入被拒绝，保留为可排查的警告；
+  // 只有断网/无响应和 5xx 才表示服务链路本身出错。这样预期的歌词 404、播放中
+  // 波形让位 422 不会淹没真正的后端故障。
+  const level: ActivityLogLevel = outcome.ok
+    ? "info"
+    : outcome.status === 0 || outcome.status >= 500
+      ? "error"
+      : "warn";
   enqueue({
     category: descriptor.category,
-    level: outcome.ok ? "info" : outcome.status === 429 ? "warn" : "error",
+    level,
     action: descriptor.action,
     detail,
     target: descriptor.target ?? "",

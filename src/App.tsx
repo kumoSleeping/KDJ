@@ -13,6 +13,7 @@ import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/a
 import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 import { flushLocalStorageWrites } from "./lib/storageWrite";
+import { useWorkshopDrop } from "./lib/workshopDrop";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
 // 队列、设置与日夜模式从顶栏专用按钮进入。
@@ -36,11 +37,14 @@ export default function App() {
   const booting = useAppStore((state) => state.booting);
   const bootError = useAppStore((state) => state.bootError);
   const connected = useAppStore(selectConnected);
+  const ready = connected && !booting;
   const { columns, chrome, portrait } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
+
+  useWorkshopDrop(ready);
 
   useEffect(() => {
     // 全应用只有这一处订阅 WS；卸载时断开（StrictMode 的二次挂载会自动重订）
@@ -78,16 +82,16 @@ export default function App() {
   // 分析不该由人来推动：选中、播放、以及空闲时的后台补齐都自动排队。
   // 挂在 connected 上而不是无条件挂——后端还没起来时轮询只会打出一串失败请求。
   useEffect(() => {
-    if (!connected) return;
+    if (!ready) return;
     startDataUpgrade();
     return startAutoAnalyze();
-  }, [connected]);
+  }, [ready]);
 
   // 软件更新：连通后启动静默检查（启动一次 + 每 5 分钟；受「自动检测」开关控制）。
   useEffect(() => {
-    if (!connected) return;
+    if (!ready) return;
     return useUpdateStore.getState().startBackgroundChecks();
-  }, [connected]);
+  }, [ready]);
 
   const retry = useCallback(() => {
     setRetrying(true);
@@ -105,7 +109,7 @@ export default function App() {
       data-work-mode="manager"
     >
       <div className="kd-body">
-        {connected ? (
+        {ready ? (
           <Workspace />
         ) : (
           <section className="kd-section">
@@ -136,7 +140,7 @@ export default function App() {
 
       <ToastHost />
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
-      {connected && (
+      {ready && (
         <>
           <PlayerBar />
           <VideoPipHost />

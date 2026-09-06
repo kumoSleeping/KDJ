@@ -108,7 +108,7 @@ class AppConfig:
         """命令行参数 → AppConfig，并把 settings.json 叠加上来。
 
         命令行给的 download_dir 只是**默认值**：用户在设置界面改过之后，
-        settings.json 里的值优先，否则每次启动都会被 Electron 传的默认目录覆盖回去。
+        settings.json 里的值优先，避免每次启动都被命令行默认目录覆盖。
         """
         config = cls(
             data_dir=Path(data_dir),

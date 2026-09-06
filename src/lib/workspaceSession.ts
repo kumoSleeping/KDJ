@@ -16,6 +16,8 @@ export interface LocalWorkspaceSession {
   sort2: string | null;
   order2: "asc" | "desc";
   selectedId: number | null;
+  topVisibleTrackId: number | null;
+  rowOffset: number;
   scrollTop: number;
 }
 
@@ -45,6 +47,8 @@ export const DEFAULT_WORKSPACE_SESSION: WorkspaceSession = {
     sort2: null,
     order2: "asc",
     selectedId: null,
+    topVisibleTrackId: null,
+    rowOffset: 0,
     scrollTop: 0,
   },
   stream: {
@@ -114,7 +118,9 @@ export function normalizeWorkspaceSession(value: unknown): WorkspaceSession {
     source,
     local: {
       folder: text(local?.folder),
-      folderDeep: local?.folderDeep !== false,
+      // 文件夹侧栏展示的是累计子树数量，界面也已移除“仅当前层”开关。
+      // 旧会话里遗留的 false 会造成“侧栏有数量、主列表却为空”，升级时统一迁移。
+      folderDeep: true,
       // added_at 是旧版不可见的默认键，不是用户从列头选择的偏好。恢复旧会话时
       // 一并迁移，否则升级后仍会继续把重新入库的老文件排到最前。
       sort: storedSort === "added_at" ? DEFAULT_LOCAL_SORT : storedSort,
@@ -122,6 +128,8 @@ export function normalizeWorkspaceSession(value: unknown): WorkspaceSession {
       sort2: typeof local?.sort2 === "string" ? text(local.sort2) || null : null,
       order2: local?.order2 === "desc" ? "desc" : "asc",
       selectedId: positiveId(local?.selectedId),
+      topVisibleTrackId: positiveId(local?.topVisibleTrackId),
+      rowOffset: scroll(local?.rowOffset),
       scrollTop: scroll(local?.scrollTop),
     },
     stream: {

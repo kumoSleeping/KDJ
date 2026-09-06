@@ -34,6 +34,7 @@ import { VjSearchPanel } from "../library/VjSearchPanel";
 import { NowPlayingControlPanel } from "./NowPlayingControlPanel";
 import { OnlineTrackCacheFacts } from "./OnlineTrackCacheFacts";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
+import { DETAIL_PANELS_DEFAULT_FIRST_IDS, DETAIL_PANELS_STORAGE_KEY } from "../../lib/detailPanelPrefs";
 
 const STATUS_LABEL = {
   idle: "等待播放",
@@ -304,8 +305,8 @@ export function StreamTrackDetail({ track }: { track: Track }) {
       />
 
       <PanelStack
-        storageKey="kd-detail-panels"
-        defaultFirstIds={["now-playing-control"]}
+        storageKey={DETAIL_PANELS_STORAGE_KEY}
+        defaultFirstIds={DETAIL_PANELS_DEFAULT_FIRST_IDS}
       >
         {detailControlVisible ? (
           <NowPlayingControlPanel

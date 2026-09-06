@@ -50,6 +50,15 @@ fn write_kdj_log(data_dir: &Path, line: &str) {
     }
 }
 
+fn refresh_folder_snapshot(state: &AppState) {
+    let roots = state.config.to_settings().library_dirs;
+    if let Err(error) = state.library.build_and_store_folder_tree(&roots) {
+        // An offline or unreadable root is expected to fail closed: the previous complete
+        // snapshot remains in SQLite and startup never receives a plausible partial tree.
+        tracing::warn!(error = %error, "扫描后曲库文件夹快照未更新");
+    }
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn process_rss_mb() -> Option<f64> {
     let pid = sysinfo::Pid::from_u32(std::process::id());
@@ -69,6 +78,8 @@ struct AnalysisBatchStats {
     saved: usize,
     failed: usize,
     warnings: usize,
+    decode_warnings: usize,
+    tag_warnings: usize,
     total_ms: u64,
     probe_ms: u64,
     decode_ms: u64,
@@ -117,6 +128,24 @@ pub struct ScanCancelReport {
 }
 
 impl ScanRegistry {
+    fn register_exclusive(&self, job_id: &str) -> anyhow::Result<CancellationToken> {
+        let mut jobs = self.jobs.lock().unwrap();
+        anyhow::ensure!(jobs.is_empty(), "已有导入正在进行，请先完成或取消导入");
+        let cancel = CancellationToken::new();
+        jobs.insert(job_id.to_owned(), cancel.clone());
+        Ok(cancel)
+    }
+
+    /// Commit and cancel share a lock: an accepted cancellation always wins over commit.
+    fn commit(&self, job_id: &str, apply: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<bool> {
+        let mut jobs = self.jobs.lock().unwrap();
+        if jobs.get(job_id).is_none_or(CancellationToken::is_cancelled) { return Ok(false); }
+        apply()?;
+        jobs.remove(job_id);
+        Ok(true)
+    }
+
+    #[cfg(test)]
     fn register(&self, job_id: &str) -> CancellationToken {
         let cancel = CancellationToken::new();
         self.jobs
@@ -153,11 +182,11 @@ pub fn spawn_scan(
     paths: Vec<String>,
     recursive: bool,
     analyze: bool,
-) -> String {
+) -> anyhow::Result<String> {
     let job_id = new_job_id();
     let job = job_id.clone();
     // 在 blocking 任务排队前登记，用户看到进度后立刻点取消也不会扑空。
-    let cancel = state.scans.register(&job_id);
+    let cancel = state.scans.register_exclusive(&job_id)?;
     // 扫描是阻塞 IO，放 blocking 线程池，别占着 async 执行器
     tokio::task::spawn_blocking(move || {
         let hub = state.hub.clone();
@@ -205,14 +234,19 @@ pub fn spawn_scan(
         };
 
         let total = report.track_ids.len();
-        if report.cancelled || cancel.is_cancelled() {
-            hub.publish(
-                "scan.progress",
-                &scan_done_event(&job, total, total, None, true),
-            );
-            if !report.track_ids.is_empty() {
-                hub.publish_library_updated(&report.track_ids);
-            }
+        let committed = state.scans.commit(&job, || {
+            crate::routes::register_library_roots(&state, &paths)
+                .map_err(|error| anyhow::anyhow!("登记导入目录失败：{error:?}"))
+        });
+        if !matches!(committed, Ok(true)) {
+            let cleanup = state.library.rollback_import(&report.created_ids);
+            let error = match (committed, cleanup) {
+                (_, Err(error)) => Some(format!("撤销导入失败：{error:#}")),
+                (Err(error), _) => Some(format!("{error:#}")),
+                _ => None,
+            };
+            hub.publish("scan.progress", &scan_done_event(&job, 0, total, error, cancel.is_cancelled()));
+            hub.publish_library_updated(&report.track_ids);
             state.scans.unregister(&job);
             return;
         }
@@ -239,6 +273,8 @@ pub fn spawn_scan(
             &scan_done_event(&job, total, total, error, false),
         );
         hub.publish_library_updated(&report.track_ids);
+        refresh_folder_snapshot(&state);
+        hub.publish("library.folders.updated", &json!({}));
 
         // 扫描可能比用户点「暂停自动分析」早开始许久。这里重新读设置，
         // 才不会在暂停后仍把刚导入的一整批曲目塞进分析队列。
@@ -265,7 +301,7 @@ pub fn spawn_scan(
         }
         state.scans.unregister(&job);
     });
-    job_id
+    Ok(job_id)
 }
 
 /// 终局事件里"根目录读不了"的措辞。全灭和部分可读分开说：
@@ -745,6 +781,8 @@ fn spawn_analysis_target(
                             continue;
                         };
                         let path = std::path::PathBuf::from(&track.path);
+                        let source_version = std::fs::metadata(&path)
+                            .and_then(|m| Ok((m.len(), m.modified()?))).ok();
                         let Some((result, timing)) =
                             analyze_file_timed_cancellable(&path, duration_limit, &|| {
                                 cancel.is_cancelled()
@@ -756,6 +794,14 @@ fn spawn_analysis_target(
                         // 用户的停止意图仍然优先。
                         if cancel.is_cancelled() {
                             break;
+                        }
+                        // A composition may replace this path while analysis is decoding.
+                        // Never write an old waveform/beat result or tags into the new media.
+                        let file_guard = state.folder_operations.lock().unwrap();
+                        let current_version = std::fs::metadata(&path)
+                            .and_then(|m| Ok((m.len(), m.modified()?))).ok();
+                        if source_version.is_none() || current_version != source_version {
+                            continue;
                         }
                         let saved = match target {
                             AnalysisWriteTarget::V1 => {
@@ -776,6 +822,12 @@ fn spawn_analysis_target(
                             }
                         };
                         let mut warning_count = result.errors.len();
+                        let decode_warnings = result
+                            .errors
+                            .iter()
+                            .filter(|error| error.starts_with("decode:"))
+                            .count();
+                        let mut tag_warning = false;
                         if saved_ok && target == AnalysisWriteTarget::V1 && write_tags {
                             if let Err(error) = kdj_providers::tags::write_analysis_tags(
                                 &path,
@@ -788,6 +840,7 @@ fn spawn_analysis_target(
                                 &track.comment,
                             ) {
                                 warning_count = warning_count.saturating_add(1);
+                                tag_warning = true;
                                 tracing::warn!(track_id, "写回分析标签失败：{error:#}");
                             } else {
                                 // 标签写入会改变 mtime；先同步曲库快照，后面的波形缓存
@@ -795,6 +848,7 @@ fn spawn_analysis_target(
                                 let _ = state.library.sync_file_stat(track_id);
                             }
                         }
+                        drop(file_guard);
                         {
                             let mut stats = stats.lock().expect("analysis batch stats");
                             if saved_ok {
@@ -803,6 +857,11 @@ fn spawn_analysis_target(
                                 stats.failed += 1;
                             }
                             stats.warnings = stats.warnings.saturating_add(warning_count);
+                            stats.decode_warnings =
+                                stats.decode_warnings.saturating_add(decode_warnings);
+                            if tag_warning {
+                                stats.tag_warnings = stats.tag_warnings.saturating_add(1);
+                            }
                             stats.total_ms += timing.total_ms;
                             stats.probe_ms += timing.probe_ms;
                             stats.decode_ms += timing.decode_ms;
@@ -871,11 +930,17 @@ fn spawn_analysis_target(
             (Some(before), None) => format!("{before:.0}"),
             (None, None) => "-".into(),
         };
+        let other_warnings = stats
+            .warnings
+            .saturating_sub(stats.decode_warnings)
+            .saturating_sub(stats.tag_warnings);
         let summary = format!(
-            "analysis batch job={job} version={version} queued={total} saved={} failed={} warnings={} wall_ms={wall_ms} cpu_ms={} avg_ms={avg_ms} max_ms={} probe_ms={} decode_ms={} tempo_ms={} key_ms={} loud_ms={} audio_s={:.1} rss_mb={rss} waveform=skipped",
+            "analysis batch job={job} version={version} queued={total} saved={} failed={} warnings={} decode_warnings={} tag_warnings={} other_warnings={other_warnings} wall_ms={wall_ms} cpu_ms={} avg_ms={avg_ms} max_ms={} probe_ms={} decode_ms={} tempo_ms={} key_ms={} loud_ms={} audio_s={:.1} rss_mb={rss} waveform=skipped",
             stats.saved,
             stats.failed,
             stats.warnings,
+            stats.decode_warnings,
+            stats.tag_warnings,
             stats.total_ms,
             stats.max_ms,
             stats.probe_ms,
@@ -891,8 +956,8 @@ fn spawn_analysis_target(
             state.activity_log.record_analysis_warning(
                 "曲库分析出现异常",
                 format!(
-                    "本批共 {total} 首，{} 首保存失败，发现 {} 个分析警告",
-                    stats.failed, stats.warnings
+                    "本批共 {total} 首，{} 首保存失败，发现 {} 个分析警告（解码 {}、标签 {}、其他 {other_warnings}）",
+                    stats.failed, stats.warnings, stats.decode_warnings, stats.tag_warnings
                 ),
             );
         }
@@ -1095,6 +1160,19 @@ mod tests {
         let registry = AnalysisRegistry::default();
         register(&registry, "job-a", 3, 5);
         assert_eq!(registry.cancel("job-a").remaining, 0);
+    }
+
+    #[test]
+    fn scan_cancellation_prevents_commit_and_duplicate_imports() {
+        let registry = ScanRegistry::default();
+        registry.register_exclusive("a").unwrap();
+        assert!(registry.register_exclusive("b").is_err());
+        assert_eq!(registry.cancel("a").canceled, 1);
+        assert!(!registry.commit("a", || panic!("cancelled import must not register roots")).unwrap());
+        registry.unregister("a");
+        registry.register_exclusive("b").unwrap();
+        assert!(registry.commit("b", || Ok(())).unwrap());
+        assert_eq!(registry.cancel("b").canceled, 0);
     }
 
     #[test]

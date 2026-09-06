@@ -15,7 +15,8 @@ import {
   writeLocalStorageNow,
 } from "./storageWrite";
 
-const STORAGE_KEY = "kdj.videoPreviewMode";
+// Compact layout starts with a floating preview; subsequent user choices persist.
+const STORAGE_KEY = "kdj.videoPreviewModeV3";
 const LOCAL_PRESENTATION_KEY = "kdj.localVideoPresentationV1";
 
 export type VideoPreviewMode = "panel" | "float";
@@ -98,8 +99,6 @@ function isMode(value: string | null): value is VideoPreviewMode {
 
 function readMode(): VideoPreviewMode {
   const raw = readLocalStorage(STORAGE_KEY);
-  // 旧三态存档：system / "1" 都归到浮动小窗
-  if (raw === "0" || raw === "1" || raw === "system") return "float";
   return isMode(raw) ? raw : "float";
 }
 

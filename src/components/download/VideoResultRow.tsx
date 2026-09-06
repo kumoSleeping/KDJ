@@ -44,6 +44,8 @@ export { VIDEO_DOWNLOAD_DND_TYPE } from "../../lib/searchDrag";
 export interface VideoSeed {
   platform: "bilibili" | "youtube";
   bvid: string;
+  /** 已知的分 P 数；后端无法确定时保持 null，不能据此虚构展开入口。 */
+  pageCount: number | null;
   title: string;
   author: string;
   cover: string;
@@ -66,9 +68,14 @@ export function isVideoGroup(group: MergedGroup): boolean {
 
 export function videoSeedFromGroup(group: MergedGroup): VideoSeed {
   const source = group.sources[0];
+  const rawPageCount = source?.payload?.page_count;
+  const parsedPageCount =
+    typeof rawPageCount === "number" ? rawPageCount : Number(rawPageCount);
   return {
     platform: source?.platform === "youtube" ? "youtube" : "bilibili",
     bvid: String(source?.payload?.bvid ?? source?.payload?.video_id ?? source?.key ?? ""),
+    pageCount:
+      Number.isInteger(parsedPageCount) && parsedPageCount > 0 ? parsedPageCount : null,
     title: group.title,
     author: group.artists.join(", "),
     cover: group.cover,
@@ -80,6 +87,7 @@ export function videoSeedFromInfo(info: VideoInfo): VideoSeed {
   return {
     platform: info.platform,
     bvid: info.bvid,
+    pageCount: info.platform === "bilibili" ? info.pages.length : null,
     title: info.title,
     author: info.author,
     cover: info.cover,
@@ -149,7 +157,7 @@ function resolveVideoOnce(cacheKey: string, bvid: string, platform: VideoSeed["p
 }
 
 export interface VideoResultRowProps extends VideoSeed {
-  /** 已经解析好的完整信息（贴链接那条路）。不给时只在用户明确展开分 P 后补查。 */
+  /** 已解析的完整信息；不给时，仅对元数据已确认的多 P 在用户展开后补查。 */
   info?: VideoInfo | null;
   /** 可见数据列（与 ResultTable / MergedGroupRow 同一套偏好）。 */
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
@@ -189,6 +197,7 @@ export interface VideoResultRowProps extends VideoSeed {
 export function VideoResultRow({
   platform,
   bvid,
+  pageCount,
   title,
   author,
   cover,
@@ -243,9 +252,10 @@ export function VideoResultRow({
   // VideoInfo.pages 对 B 站表示真正可独立下载的分 P。YouTube 当前返回的单元素
   // pages 只是统一视频协议的占位，播放列表另走 collection，不能混成这里的分 P。
   const pages = platform === "bilibili" ? (info?.pages ?? []) : [];
-  const hasMultiplePages = pages.length > 1;
-  const canExpandParts =
-    platform === "bilibili" && (hasMultiplePages || (!info && Boolean(bvid)));
+  const knownPageCount =
+    platform === "bilibili" ? (info ? pages.length : (pageCount ?? 0)) : 0;
+  const hasMultiplePages = knownPageCount > 1;
+  const canExpandParts = platform === "bilibili" && hasMultiplePages;
 
   const toggleParts = useCallback(() => {
     if (resolvingParts) return;
@@ -275,7 +285,7 @@ export function VideoResultRow({
       platform,
       bvid,
       page_index: pageIndex,
-      page_count: pages.length,
+      page_count: knownPageCount,
       page_title: page?.title?.trim() || undefined,
       max_height: effectiveHeight,
       audio_only: false,
@@ -286,7 +296,17 @@ export function VideoResultRow({
       artist: author.trim() || undefined,
       cover: displayCover || undefined,
     };
-  }, [platform, bvid, pages, effectiveHeight, settings?.video_transcode, title, author, displayCover]);
+  }, [
+    platform,
+    bvid,
+    pages,
+    knownPageCount,
+    effectiveHeight,
+    settings?.video_transcode,
+    title,
+    author,
+    displayCover,
+  ]);
 
   const download = useCallback(async (pageIndex = 0) => {
     setSending(true);
@@ -501,21 +521,17 @@ export function VideoResultRow({
                         aria-label={
                           resolvingParts
                             ? "正在读取分 P"
-                            : info
-                              ? partsExpanded
-                                ? "收起分 P"
-                                : `展开 ${pages.length} 个分 P`
-                              : "查看分 P"
+                            : partsExpanded
+                              ? "收起分 P"
+                              : `展开 ${knownPageCount} 个分 P`
                         }
                         aria-expanded={partsExpanded}
                         title={
                           resolvingParts
                             ? "正在读取分 P"
-                            : info
-                              ? partsExpanded
-                                ? "收起分 P"
-                                : `展开 ${pages.length} 个分 P`
-                              : "查看分 P"
+                            : partsExpanded
+                              ? "收起分 P"
+                              : `展开 ${knownPageCount} 个分 P`
                         }
                         onClick={(event) => {
                           event.stopPropagation();
@@ -546,7 +562,7 @@ export function VideoResultRow({
                     </span>
                     <span className="kd-result-title-text">{title}</span>
                     {hasMultiplePages ? (
-                      <span className="kd-video-page-count kd-mono">{pages.length}P</span>
+                      <span className="kd-video-page-count kd-mono">{knownPageCount}P</span>
                     ) : null}
                   </span>
                 </td>
@@ -687,7 +703,7 @@ export function VideoResultRow({
             platform,
             bvid,
             rowMenu.part || hasMultiplePages
-              ? { page_index: rowMenu.pageIndex, page_count: pages.length }
+              ? { page_index: rowMenu.pageIndex, page_count: knownPageCount }
               : undefined,
           ) ? (
             <button
@@ -698,7 +714,7 @@ export function VideoResultRow({
                   platform,
                   bvid,
                   rowMenu.part || hasMultiplePages
-                    ? { page_index: rowMenu.pageIndex, page_count: pages.length }
+                    ? { page_index: rowMenu.pageIndex, page_count: knownPageCount }
                     : undefined,
                 );
                 if (!shareLink) return;

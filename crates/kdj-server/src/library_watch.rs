@@ -113,7 +113,21 @@ async fn run(state: Arc<AppState>) -> Result<()> {
                         .folder_operations
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    reconcile_batch(&reconcile_state.library, &roots, &events)
+                    let report = reconcile_batch(&reconcile_state.library, &roots, &events)?;
+                    if report.folder_changed
+                        || !report.updated_ids.is_empty()
+                        || !report.removed_ids.is_empty()
+                    {
+                        let configured_roots =
+                            reconcile_state.config.to_settings().library_dirs;
+                        if let Err(error) = reconcile_state
+                            .library
+                            .build_and_store_folder_tree(&configured_roots)
+                        {
+                            tracing::warn!(error = %error, "自动重载后曲库文件夹快照未更新");
+                        }
+                    }
+                    Ok::<_, anyhow::Error>(report)
                 }).await;
                 match report {
                     Ok(Ok(report)) => publish_report(&state, report),
@@ -206,7 +220,7 @@ fn is_media_path(path: &Path) -> bool {
 
 fn is_internal_metadata(path: &Path) -> bool {
     path.components().any(|component| {
-        matches!(component, Component::Normal(name) if name == kdj_library::folders::METADATA_DIR_NAME)
+        matches!(component, Component::Normal(name) if name == kdj_library::folders::METADATA_DIR_NAME || name.to_string_lossy().starts_with(".kdj-composition-"))
     })
 }
 

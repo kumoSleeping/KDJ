@@ -1,4 +1,7 @@
-import { cloneElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { dropWorkshopTracks, paintWorkshopDrop } from "../../lib/workshopDrop";
+import { useStore } from "zustand";
+import type { LibraryPaneStore, LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
+import { cloneElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   BarChart3,
@@ -16,8 +19,13 @@ import {
   Undo2,
   Trash2,
   Video,
+  Image as ImageIcon,
 } from "lucide-react";
+import { libraryViewport, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { api } from "../../lib/api";
+import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
+import { acquireCoverThumbnail, type CoverThumbnailLease } from "../../lib/coverThumbnailQueue";
+import { OverlayScrollbars } from "../common/OverlayScrollbars";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { TableRating } from "../common/TableRating";
 import { TableSortMark } from "../common/TableSortMark";
@@ -65,7 +73,7 @@ import {
 } from "../../lib/folderDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
-import { DASH, formatBpm, formatDate, formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
+import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isVideoTrack, thumbUrl } from "../../lib/format";
 import { playClickForLayout, useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
@@ -95,7 +103,7 @@ import {
   type TableColumnPrefs,
   type TableColumnPrefsSchema,
 } from "../../lib/tableColumnPrefs";
-import { ContextMenu, EmptyState, InlineNotice } from "../common";
+import { ContextMenu, InlineNotice } from "../common";
 import { dragPreviewFromBlob, vinylDragPreview } from "../../lib/dragPreview";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { useSharePrefs } from "../../lib/sharePrefs";
@@ -200,6 +208,7 @@ const COLUMNS: Column[] = [
   { id: "energy", label: "响度", width: "3.8rem", key: "energy" },
   { id: "duration", label: "时长", width: "4rem", align: "num", key: "duration" },
   { id: null, label: "格式", width: "3.4rem", key: "format" },
+  { id: null, label: "大小", width: "4.6rem", align: "num", key: "size" },
   { id: "file_created_at", label: "文件创建", width: "8.5rem", key: "file_created_at" },
   { id: "rating", label: "评分", width: "4.2rem", key: "rating" },
 ];
@@ -227,6 +236,7 @@ const COLUMN_MIN_WIDTH: Record<string, string> = {
   energy: "2.8rem",
   duration: "2.8rem",
   format: "2.6rem",
+  size: "3.4rem",
   file_created_at: "6.5rem",
   rating: "3rem",
 };
@@ -247,7 +257,8 @@ function loadColumnPrefs(): ColumnPrefs {
 }
 
 export interface TrackTableProps {
-  tracks: TrackSummary[];
+  libraryStore?: LibraryPaneStoreApi;
+  persistentSession?: boolean;
   total: number;
   loading: boolean;
   /**
@@ -277,7 +288,6 @@ export interface TrackTableProps {
    */
   onSelect(id: number, mode: SelectMode, clickCount?: number): void;
   onSort(sort: TrackSort): void;
-  onScrollEnd(): void;
 }
 
 /**
@@ -289,14 +299,11 @@ export interface TrackTableProps {
  * 这样 WKWebView 不会把开发时后端重启造成的图片加载失败永久黏在原节点上。普通
  * 音频没有内嵌图很常见，仍直接退回灰色占位，避免为每一首无图文件轮询。
  */
-function TrackCoverThumb({
-  track,
-}: {
-  track: TrackSummary;
-}) {
+function TrackCoverThumb({ track, priority }: { track: TrackSummary; priority: number }) {
   const [attempt, setAttempt] = useState(0);
-  const [videoCover, setVideoCover] = useState("");
+  const [cover, setCover] = useState("");
   const retryTimer = useRef<number | null>(null);
+  const leaseRef = useRef<CoverThumbnailLease | null>(null);
   const isVideo = isVideoTrack(track.format);
 
   useEffect(() => {
@@ -304,26 +311,18 @@ function TrackCoverThumb({
   }, [track.id, track.modified_at]);
 
   useEffect(() => {
-    if (!isVideo) return;
-    const controller = new AbortController();
     let alive = true;
-    let objectUrl = "";
-    setVideoCover("");
-
-    void fetch(api.coverUrl(track.id, `${track.modified_at}-${attempt}`, 64), {
-      signal: controller.signal,
-      cache: "no-store",
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`封面 HTTP ${response.status}`);
-        return response.blob();
-      })
-      .then((blob) => {
-        objectUrl = URL.createObjectURL(blob);
-        if (alive) setVideoCover(objectUrl);
+    setCover("");
+    const revision = isVideo ? `${track.modified_at}-${attempt}` : track.modified_at;
+    const key = `${track.id}:${revision}:64`;
+    const lease = acquireCoverThumbnail(key, api.coverUrl(track.id, revision, 64), priority);
+    leaseRef.current = lease;
+    void lease.promise
+      .then((objectUrl) => {
+        if (alive && objectUrl) setCover(objectUrl);
       })
       .catch(() => {
-        if (!alive || controller.signal.aborted || attempt >= 12) return;
+        if (!alive || !isVideo || attempt >= 12) return;
         // 后端热重启 / 首次抽帧排队时稍候再试。每次换 URL，失败缓存不会卡住重试。
         retryTimer.current = window.setTimeout(() => {
           retryTimer.current = null;
@@ -333,18 +332,19 @@ function TrackCoverThumb({
 
     return () => {
       alive = false;
-      controller.abort();
+      lease.release();
+      if (leaseRef.current === lease) leaseRef.current = null;
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [attempt, isVideo, track.id, track.modified_at]);
+  useEffect(() => { leaseRef.current?.setPriority(priority); }, [priority]);
 
   return (
     <span className="kd-thumb" draggable={false}>
       {isVideo ? (
-        videoCover ? <img key={videoCover} src={videoCover} alt="" draggable={false} /> : null
+        cover ? <img key={cover} src={cover} alt="" draggable={false} /> : null
       ) : (
-        <CoverImage src={api.coverUrl(track.id, track.modified_at, 64)} loading="lazy" />
+        <CoverImage src={cover} loading="lazy" />
       )}
     </span>
   );
@@ -424,9 +424,9 @@ function trackCell(
   track: TrackSummary,
   key: string,
   keyNotation: KeyNotation,
-  loadArtwork: boolean,
   selectionControl?: React.ReactNode,
   onRate?: (rating: number) => void,
+  coverPriority = 1,
 ) {
   switch (key) {
     case "title":
@@ -435,13 +435,14 @@ function trackCell(
           {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          {loadArtwork ? <TrackCoverThumb track={track} /> : <span className="kd-thumb" aria-hidden="true" />}
+          <TrackCoverThumb track={track} priority={coverPriority} />
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
               <Video size={11} aria-hidden="true" />
             </span>
           )}
+          {isImageTrack(track.format) && <span className="kd-video-mark" title={track.format.toLowerCase() === "gif" ? "GIF" : "图片"} role="img" aria-label={track.format.toLowerCase() === "gif" ? "GIF" : "图片"}><ImageIcon size={11} aria-hidden="true" /></span>}
           {track.title || track.filename}
         </td>
       );
@@ -489,6 +490,12 @@ function trackCell(
           {track.format.toUpperCase() || DASH}
         </td>
       );
+    case "size":
+      return (
+        <td key={key} data-col="size" className="kd-td-num kd-mono kd-muted">
+          {formatBytes(track.size)}
+        </td>
+      );
     case "file_created_at":
       return (
         <td key={key} data-col="file_created_at" className="kd-mono kd-muted">
@@ -509,10 +516,10 @@ function trackCell(
 interface TrackCellsProps {
   track: TrackSummary;
   displayIndex: number;
+  coverPriority: number;
   showIndex: boolean;
   columns: readonly Column[];
   keyNotation: KeyNotation;
-  loadArtwork: boolean;
   selectionMode: boolean;
   selected: boolean;
   onToggle(id: number): void;
@@ -526,10 +533,10 @@ interface TrackCellsProps {
 const TrackCells = memo(function TrackCells({
   track,
   displayIndex,
+  coverPriority,
   showIndex,
   columns,
   keyNotation,
-  loadArtwork,
   selectionMode,
   selected,
   onToggle,
@@ -543,7 +550,6 @@ const TrackCells = memo(function TrackCells({
           track,
           column.key,
           keyNotation,
-          loadArtwork,
           column.key === "title" && selectionMode ? (
             <button
               type="button"
@@ -559,6 +565,7 @@ const TrackCells = memo(function TrackCells({
             </button>
           ) : undefined,
           column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
+          coverPriority,
         ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
         return cloneElement(
           cell,
@@ -633,7 +640,7 @@ function PendingStateMark({ task }: { task: DownloadTask }) {
 }
 
 /** 当前文件夹下载任务的即时反馈；文件实际入库后由正式曲目行替代。 */
-function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: TrackSummary[]): boolean {
+function isPendingForFolder(task: DownloadTask, filterFolder: string, indexById: ReadonlyMap<number, number>): boolean {
   const dest = task.dest_dir?.trim() || "";
   if (!dest) return false;
   const folder = filterFolder.trim();
@@ -646,11 +653,12 @@ function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: Tr
   if (PENDING_STATES.has(task.state)) return true;
   if (task.state !== "done") return false;
   if (task.track_id == null) return true;
-  return !tracks.some((track) => track.id === task.track_id);
+  return !indexById.has(task.track_id);
 }
 
 export const TrackTable = memo(function TrackTable({
-  tracks,
+  libraryStore = useLibraryStore,
+  persistentSession = true,
   total,
   loading,
   layout,
@@ -663,16 +671,23 @@ export const TrackTable = memo(function TrackTable({
   order2,
   onSelect,
   onSort,
-  onScrollEnd,
   shortcutActive,
 }: TrackTableProps) {
-  const loadingMore = useLibraryStore((state) => state.loadingMore);
+  const useTableStore = <T,>(selector: (state: LibraryPaneStore) => T) => useStore(libraryStore, selector);
+  const shortcutActiveRef = useRef(shortcutActive);
+  shortcutActiveRef.current = shortcutActive;
+  const orderedIds = useTableStore((state) => state.orderedIds);
+  const indexById = useTableStore((state) => state.indexById);
+  const summaryById = useTableStore((state) => state.summaryById);
+  const queryVersion = useTableStore((state) => state.queryVersion);
+  const requestLatency = useTableStore((state) => state.requestLatency);
+  const ensureRange = useTableStore((state) => state.ensureRange);
+  const loadingMore = useTableStore((state) => state.loadingMore);
   const settings = useAppStore((state) => state.settings);
   const keyNotation = settings?.key_notation ?? "camelot";
-  const filterFolder = useLibraryStore((state) => state.filter.folder);
-  const filterQuery = useLibraryStore((state) => state.filter.q);
-  const removeTracks = useLibraryStore((state) => state.removeTracks);
-  const startAnalyze = useLibraryStore((state) => state.startAnalyze);
+  const filterFolder = useTableStore((state) => state.filter.folder);
+  const removeTracks = useTableStore((state) => state.removeTracks);
+  const startAnalyze = useTableStore((state) => state.startAnalyze);
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
   const localExternalDragMode = usePlaybackPrefs((state) => state.localExternalDragMode);
@@ -697,11 +712,11 @@ export const TrackTable = memo(function TrackTable({
     && !window.kdj?.startLinkDrag
     && window.kdj?.platform === "win32";
   const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
-  const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
-  const undo = useLibraryStore((state) => state.undo);
-  const undoLast = useLibraryStore((state) => state.undoLast);
+  const copyToClipboard = useTableStore((state) => state.copyToClipboard);
+  const undo = useTableStore((state) => state.undo);
+  const undoLast = useTableStore((state) => state.undoLast);
   const undoName = undo.op === "copy" ? "复制" : undo.op === "delete" ? "删除" : "移动";
-  const updateTrack = useLibraryStore((state) => state.updateTrack);
+  const updateTrack = useTableStore((state) => state.updateTrack);
   const toggleTrackSelection = useCallback(
     (id: number) => onSelect(id, "toggle"),
     [onSelect],
@@ -710,12 +725,12 @@ export const TrackTable = memo(function TrackTable({
     (id: number, rating: number) => { void updateTrack(id, { rating }); },
     [updateTrack],
   );
-  const selectionMode = useLibraryStore((state) => state.selectionMode);
-  const setSelectionMode = useLibraryStore((state) => state.setSelectionMode);
+  const selectionMode = useTableStore((state) => state.selectionMode);
+  const setSelectionMode = useTableStore((state) => state.setSelectionMode);
   const downloadTasks = useDownloadStore((state) => state.list);
   const pendingDownloads = useMemo(
-    () => downloadTasks.filter((task) => isPendingForFolder(task, filterFolder, tracks)),
-    [downloadTasks, filterFolder, tracks],
+    () => downloadTasks.filter((task) => isPendingForFolder(task, filterFolder, indexById)),
+    [downloadTasks, filterFolder, indexById],
   );
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
   const pressTimerRef = useRef<number | null>(null);
@@ -734,16 +749,16 @@ export const TrackTable = memo(function TrackTable({
   // 全选走 useLibraryClipboard（Cmd/Ctrl+A），不挂在「仅多选时」——
   // 只选了一首时也要能全选。
   useEffect(() => {
-    if (!selectionMode && selectedIds.length <= 1) return;
+    if (!shortcutActive || (!selectionMode && selectedIds.length <= 1)) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       setSelectionMode(false);
-      useLibraryStore.getState().select(null);
+      libraryStore.getState().select(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectionMode, selectedIds.length]);
+  }, [shortcutActive, selectionMode, selectedIds.length, libraryStore, setSelectionMode]);
 
   /* ------------------------------------------------ 行右键菜单（多选操作） */
   /**
@@ -828,25 +843,24 @@ export const TrackTable = memo(function TrackTable({
     const launch = () => {
       if (launched) return;
       launched = true;
-      const payload = systemFileDragPayload(tracks, selectedIds, track);
+      const dragIds = selected.has(track.id) ? [...selectedIds] : [track.id];
       cleanup();
       clearTextSelection();
       cancelPress();
       suppressClickRef.current = track.id;
       suppressContextMenuUntilRef.current = Date.now() + 1_000;
       if (!selected.has(track.id)) onSelect(track.id, "replace");
-      if (localExternalDragMode === "file" && payload.paths.length === 0) {
-        setNotice("这个曲目没有可拖出的本地文件");
-        return;
-      }
       const releaseScroll = lockTrackPointerDragScroll(
         sourceScroller,
         sourceScrollTop,
         sourceScrollLeft,
       );
       if (localExternalDragMode === "share_link") setNotice("正在查找分享链接…");
-      void Promise.all([dragImage, shareLink])
-        .then(async ([preview, link]) => {
+      const files = localExternalDragMode === "file"
+        ? libraryStore.getState().resolveSummaries(dragIds)
+        : Promise.resolve([] as TrackSummary[]);
+      void Promise.all([dragImage, shareLink, files])
+        .then(async ([preview, link, rows]) => {
           if (localExternalDragMode === "share_link") {
             if (!link || !startLinkDrag) {
               setNotice("没有找到可确认的歌曲分享链接");
@@ -863,6 +877,9 @@ export const TrackTable = memo(function TrackTable({
             return;
           }
           if (!startFileDrag) return;
+          if (rows.length !== dragIds.length) throw new Error("部分曲目信息无法读取，请重试");
+          const payload = systemFileDragPayload(rows, dragIds, track);
+          if (!payload.paths.length) throw new Error("这个曲目没有可拖出的本地文件");
           await startFileDrag({ ...payload, dragImage: preview || undefined });
         })
         .catch((error: unknown) => {
@@ -937,6 +954,7 @@ export const TrackTable = memo(function TrackTable({
     };
 
     const clearTargets = () => {
+      paintWorkshopDrop();
       document
         .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over]")
         .forEach((node) => node.removeAttribute("data-kd-pointer-track-over"));
@@ -944,6 +962,7 @@ export const TrackTable = memo(function TrackTable({
     const hitAt = (x: number, y: number) => document.elementFromPoint(x, y) as HTMLElement | null;
     const paintTarget = (x: number, y: number) => {
       clearTargets();
+      if (paintWorkshopDrop(x, y)) return;
       const folder = folderDropElementAt(x, y);
       if (folder) {
         folder.setAttribute("data-kd-pointer-track-over", "folder");
@@ -1040,8 +1059,7 @@ export const TrackTable = memo(function TrackTable({
     };
     const launchSystemExternalDrag = () => {
       if (localExternalDragMode === "share_link" ? !startLinkDrag : !startFileDrag) return false;
-      const payload = systemFileDragPayload(tracks, selectedIds, track);
-      if (localExternalDragMode === "file" && payload.paths.length === 0) return false;
+      const dragIds = selected.has(track.id) ? [...selectedIds] : [track.id];
       const releaseScroll = unlockScroll;
       unlockScroll = () => undefined;
       cleanup(true);
@@ -1049,8 +1067,11 @@ export const TrackTable = memo(function TrackTable({
       suppressClickRef.current = track.id;
       suppressContextMenuUntilRef.current = Date.now() + 1_000;
       if (localExternalDragMode === "share_link") setNotice("正在查找分享链接…");
-      void Promise.all([dragImage, shareLink])
-        .then(async ([preview, link]) => {
+      const files = localExternalDragMode === "file"
+        ? libraryStore.getState().resolveSummaries(dragIds)
+        : Promise.resolve([] as TrackSummary[]);
+      void Promise.all([dragImage, shareLink, files])
+        .then(async ([preview, link, rows]) => {
           if (localExternalDragMode === "share_link") {
             if (!link || !startLinkDrag) {
               setNotice("没有找到可确认的歌曲分享链接");
@@ -1067,6 +1088,9 @@ export const TrackTable = memo(function TrackTable({
             return;
           }
           if (!startFileDrag) return;
+          if (rows.length !== dragIds.length) throw new Error("部分曲目信息无法读取，请重试");
+          const payload = systemFileDragPayload(rows, dragIds, track);
+          if (!payload.paths.length) throw new Error("这个曲目没有可拖出的本地文件");
           await startFileDrag({ ...payload, dragImage: preview || undefined });
         })
         .catch((error: unknown) => {
@@ -1107,6 +1131,7 @@ export const TrackTable = memo(function TrackTable({
       cleanup();
       if (!dragging) return;
       up.preventDefault();
+      if (dropWorkshopTracks(up.clientX, up.clientY)) return;
 
       if (deckSide !== null) {
         dispatchTrackDeckDrop(ids, deckSide);
@@ -1125,7 +1150,7 @@ export const TrackTable = memo(function TrackTable({
         const claimed = claimActiveTrackDragIds();
         if (!dest || claimed.length === 0) return;
         const op = resolveLibraryPasteOp({ forceMove: up.altKey });
-        void useLibraryStore
+        void libraryStore
           .getState()
           .applyFolderOp(claimed, dest, op)
           .then((result) => {
@@ -1231,14 +1256,10 @@ export const TrackTable = memo(function TrackTable({
     );
   };
   const playFromTable = (track: TrackSummary) => {
-    const cached = useLibraryStore.getState().selectedTrack;
-    if (cached?.id === track.id) {
-      playTrack(cached);
-      return;
-    }
-    void api.track(track.id)
-      .then((detail) => playTrack(detail))
-      .catch((error: unknown) => setNotice(`无法读取曲目：${(error as Error).message}`));
+    if (isImageTrack(track.format)) return;
+    // 摘要已经包含换源所需的全部标量。播放意图必须在当前点击栈同步发出；
+    // 详情、拍点数组、标签和备注由选中态异步补齐，不能挡在音频前面。
+    playTrack(track);
   };
 
   const deleteWithNotice = (ids: number[], file: FileDisposalMode) => {
@@ -1272,7 +1293,7 @@ export const TrackTable = memo(function TrackTable({
         event.key,
         event.metaKey || event.ctrlKey,
       )) return;
-      const ids = useLibraryStore.getState().selectedIds;
+      const ids = libraryStore.getState().selectedIds;
       if (ids.length === 0) return;
       event.preventDefault();
       deleteWithNotice(ids, "trash");
@@ -1284,6 +1305,7 @@ export const TrackTable = memo(function TrackTable({
   }, [shortcutActive, trashSupported]);
 
   useEffect(() => {
+    if (!shortcutActive) return;
     const onTrashDrop = (event: Event) => {
       const ids = (event as CustomEvent<TrackDragDetail>).detail?.ids ?? [];
       if (ids.length === 0) return;
@@ -1297,12 +1319,17 @@ export const TrackTable = memo(function TrackTable({
     return () => window.removeEventListener(TRACK_TRASH_DROP_EVENT, onTrashDrop);
     // deleteWithNotice 只封装稳定的 store action；不让每次渲染重挂全局事件。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trashSupported]);
+  }, [trashSupported, shortcutActive]);
 
   /* ------------------------------------------------ 回到正在播的那首 */
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const restoredScrollTopRef = useRef(readWorkspaceSession().local.scrollTop);
-  const scrollRestoreDoneRef = useRef(restoredScrollTopRef.current <= 0);
+  const initialSessionRef = useRef(persistentSession ? readWorkspaceSession().local : { scrollTop: 0, topVisibleTrackId: null, rowOffset: 0 });
+  const scrollRestoreDoneRef = useRef(false);
+  const anchorRef = useRef({ id: null as number | null, index: 0, offset: 0 });
+  const previousQueryRef = useRef(queryVersion);
+  const scrollVelocityRef = useRef(0);
+  const [headerH, setHeaderH] = useState(28);
+  const [rootFont, setRootFont] = useState(16);
   /** 虚拟滚动需要的滚动位置/视口高度；一帧最多重算一次（见 onScroll）。 */
   const [view, setView] = useState({ top: 0, height: 0 });
   const [fastScrolling, setFastScrolling] = useState(false);
@@ -1320,7 +1347,7 @@ export const TrackTable = memo(function TrackTable({
   const trackScrollerRef = useCallback((el: HTMLDivElement | null) => {
     scrollerRef.current = el;
     scrollTopRef.current = el?.scrollTop ?? 0;
-    observeTrackScroller(el);
+    if (persistentSession) observeTrackScroller(el);
     // 视口高度决定渲染窗口：面板拖宽拖窄、窗口缩放都要重算。
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
@@ -1353,8 +1380,7 @@ export const TrackTable = memo(function TrackTable({
         return;
       }
 
-      const tracks = useLibraryStore.getState().tracks;
-      const index = tracks.findIndex((track) => track.id === id);
+      const index = libraryStore.getState().indexById.get(id) ?? -1;
       if (index < 0) {
         if (attemptsLeft > 0) {
           requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
@@ -1388,9 +1414,11 @@ export const TrackTable = memo(function TrackTable({
     };
 
     // 有精确的关闭前滚动位置时优先恢复它；没有存档才按选中行居中。
-    if (scrollRestoreDoneRef.current) scrollTrackIntoCenter(selectedIdRef.current);
+
     const onDetail = (event: Event) => {
       const detail = (event as CustomEvent<DetailEventDetail>).detail;
+      const explicitLocate = detail?.source === "locate-playing" || detail?.source === "player-deck";
+      if (explicitLocate ? !persistentSession : !shortcutActiveRef.current) return;
       requestAnimationFrame(() => {
         scrollTrackIntoCenter(detail?.trackId ?? selectedIdRef.current);
       });
@@ -1398,21 +1426,6 @@ export const TrackTable = memo(function TrackTable({
     window.addEventListener(DETAIL_EVENT, onDetail);
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
   }, []);
-
-  useEffect(() => {
-    if (loading || scrollRestoreDoneRef.current) return;
-    const scroller = scrollerRef.current;
-    if (!scroller) return;
-    const desired = restoredScrollTopRef.current;
-    const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    scroller.scrollTop = Math.min(desired, maxTop);
-    if (maxTop + 1 >= desired || tracks.length >= total) {
-      scrollRestoreDoneRef.current = true;
-      return;
-    }
-    // 深位置尚未有足够分页撑起滚动高度，继续拉一页再重试。
-    onScrollEnd();
-  }, [loading, onScrollEnd, total, tracks.length]);
 
   /* ---------------------------------------------------- 列拖排 / 显隐 / 列宽 */
   const [colPrefs, setColPrefs] = useState(loadColumnPrefs);
@@ -1514,19 +1527,17 @@ export const TrackTable = memo(function TrackTable({
     [configuredVisibleColumns, fitWidth],
   );
   /** 只有曲库行需要序号列；纯待下载占位时不占左侧空白。 */
-  const showIndexCol = tracks.length > 0;
+  const showIndexCol = total > 0;
   const indexWidth = fitWidth ? "10%" : widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
   const displayWidthFor = (column: Column) => fitWidth
     ? DJ_TRACK_TABLE_COLUMN_WIDTHS[column.key as keyof typeof DJ_TRACK_TABLE_COLUMN_WIDTHS]
     : widthFor(column.key, column.width ?? "4rem");
   const tableColSpan = visibleColumns.length + (showIndexCol ? 1 : 0) + 1;
-  const tableMinWidthPx = fitWidth
-    ? "100%"
-    : (showIndexCol ? remStringToPx(indexWidth) : 0) +
-      visibleColumns.reduce(
-        (sum, column) => sum + remStringToPx(displayWidthFor(column)),
-        0,
-      );
+  const tableMinWidthPx = useMemo(() => {
+    const px = (value: string) => Number.parseFloat(value) * (value.endsWith("px") ? 1 : rootFont);
+    return fitWidth ? "100%" : (showIndexCol ? px(indexWidth) : 0)
+      + visibleColumns.reduce((sum, column) => sum + px(displayWidthFor(column)), 0);
+  }, [fitWidth, showIndexCol, indexWidth, visibleColumns, colPrefs.widths, rootFont]);
 
   /* ---------------------------------------------------- 虚拟滚动 */
   /**
@@ -1539,30 +1550,69 @@ export const TrackTable = memo(function TrackTable({
   selectedIdRef.current = selectedId;
   pendingCountRef.current = pendingDownloads.length;
 
-  // 行高以真实渲染出来的第一行为准（字号/主题变了它才变），不靠猜。
-  useEffect(() => {
-    const row = scrollerRef.current?.querySelector<HTMLTableRowElement>("tr[data-kd-track-id]");
-    const height = row?.getBoundingClientRect().height ?? 0;
-    if (height > 0 && Math.abs(height - rowHRef.current) > 0.5) {
-      rowHRef.current = height;
-      setRowH(height);
+  useLayoutEffect(() => {
+    const box = scrollerRef.current;
+    if (!box) return;
+    const measure = () => {
+      setRootFont(Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16);
+      const row = box.querySelector<HTMLTableRowElement>("tbody tr:not([data-spacer])");
+      const height = row?.getBoundingClientRect().height ?? FALLBACK_ROW_H;
+      if (height > 0 && Math.abs(height - rowHRef.current) > 0.5) {
+        rowHRef.current = height;
+        setRowH(height);
+      }
+      const header = box.querySelector("thead")?.getBoundingClientRect().height ?? 28;
+      setHeaderH((old) => Math.abs(old - header) > 0.5 ? header : old);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(box);
+    const row = box.querySelector("tbody tr:not([data-spacer])");
+    if (row) observer.observe(row);
+    const theme = new MutationObserver(measure);
+    theme.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "data-theme", "class"] });
+    return () => { observer.disconnect(); theme.disconnect(); };
+  }, [total > 0, layout, colPrefs, pendingDownloads.length > 0]);
+
+  const viewport = libraryViewport({ total, pending: pendingDownloads.length, top: view.top,
+    height: view.height || 720, rowHeight: rowH, headerHeight: headerH,
+    velocity: fastScrolling ? scrollVelocityRef.current : 0, latency: requestLatency });
+  const { start: winStart, end: winEnd } = viewport;
+  const windowedTracks = orderedIds.slice(viewport.trackStart, viewport.trackEnd)
+    .map((id, offset) => ({ id, track: summaryById.get(id), index: viewport.trackStart + offset }));
+
+  useLayoutEffect(() => {
+    const box = scrollerRef.current;
+    if (!box) return;
+    let desired = box.scrollTop;
+    if (previousQueryRef.current !== queryVersion) {
+      if (previousQueryRef.current > 0) scrollRestoreDoneRef.current = true;
+      previousQueryRef.current = queryVersion;
+      // The initial index starts a query too; persisted position applies once on startup.
+      if (scrollRestoreDoneRef.current) desired = 0;
+      anchorRef.current = { id: null, index: 0, offset: 0 };
     }
-  });
-  // 占位行上方还有若干「待下载」行，算窗口时先把它们的高度扣掉。
-  const pendingH = pendingDownloads.length * rowH;
-  // 慢滚保留一屏余量；高速扫列表时缩成少量行并暂停封面，避免离屏 I/O 追着滚轮跑。
-  const overscan = fastScrolling
-    ? Math.max(4, Math.ceil(view.height / rowH / 6))
-    : Math.max(10, Math.ceil(view.height / rowH));
-  const winStart =
-    view.height > 0 ? Math.max(0, Math.floor((view.top - pendingH) / rowH) - overscan) : 0;
-  const winEnd =
-    view.height > 0
-      ? Math.min(tracks.length, Math.ceil((view.top + view.height - pendingH) / rowH) + overscan)
-      : // 首帧还没量到视口：先渲染一小段，ref 回调量到高度后立刻换成真实窗口。
-        // 不能一次全渲染——1400 行一次性进 DOM 正是要避开的那个卡顿。
-        Math.min(tracks.length, 60);
-  const windowedTracks = tracks.slice(winStart, winEnd);
+    if (!scrollRestoreDoneRef.current && total > 0) {
+      const saved = initialSessionRef.current;
+      desired = saved.topVisibleTrackId !== null
+        ? restoreLibraryAnchor(orderedIds, saved.topVisibleTrackId, Math.floor(saved.scrollTop / rowH), saved.rowOffset, rowH, pendingDownloads.length)
+        : saved.scrollTop;
+      scrollRestoreDoneRef.current = true;
+    } else if (total > 0 && anchorRef.current.id !== null) {
+      const anchor = anchorRef.current;
+      desired = restoreLibraryAnchor(orderedIds, anchor.id, anchor.index, anchor.offset, rowH, pendingDownloads.length);
+    }
+    desired = Math.min(viewport.maxTop, Math.max(0, desired));
+    if (Math.abs(box.scrollTop - desired) > 0.5) box.scrollTop = desired;
+    scrollTopRef.current = box.scrollTop;
+    setView((old) => old.top === desired && old.height === box.clientHeight ? old : { top: desired, height: box.clientHeight });
+    const index = Math.max(0, Math.floor(desired / rowH) - pendingDownloads.length);
+    anchorRef.current = { id: orderedIds[index] ?? null, index, offset: desired % rowH };
+  }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop]);
+
+  useEffect(() => {
+    if (total > 0) void ensureRange(viewport.fetchStart, viewport.fetchEnd, viewport.visibleTrackStart, viewport.visibleTrackEnd);
+  }, [ensureRange, total, orderedIds, queryVersion, viewport.fetchStart, viewport.fetchEnd, viewport.visibleTrackStart, viewport.visibleTrackEnd]);
 
   const moveColumn = (from: string, to: string) => {
     if (from === to) return;
@@ -1570,25 +1620,12 @@ export const TrackTable = memo(function TrackTable({
     saveColPrefs({ ...colPrefs, order: moveColumnOrder(colPrefs.order, colIds, from, to) });
   };
 
-  if (loading && tracks.length === 0 && pendingDownloads.length === 0) {
-    return <EmptyState icon={<LoaderCircle className="kd-spin" size={22} />} title="正在读取曲库" />;
-  }
-
-  if (tracks.length === 0 && pendingDownloads.length === 0) {
-    const query = filterQuery.trim();
-    return (
-      <EmptyState
-        icon={<FolderOpen size={22} />}
-        title={query ? "没有匹配的曲目" : filterFolder ? "这个文件夹是空的" : "还没有曲目"}
-        hint={query ? "换个曲目名称试试" : "把音频或视频拖进来"}
-      />
-    );
-  }
-
   return (
+    <div className="kd-overlay-scroll-host">
     <div
       className="kd-scroll"
-      style={{ height: "100%" }}
+      style={{ height: "100%", overflowAnchor: "none" }}
+      aria-busy={loading || loadingMore}
       // 可视区域优先分析要知道"曲目表滚到哪了"。不挂这个 ref 它也能靠
       // DOM 自己找到表（认 td[data-col="title"]），但那条路在列结构变动时
       // 会静默失效——显式挂上就不再依赖任何选择器。
@@ -1607,35 +1644,37 @@ export const TrackTable = memo(function TrackTable({
         // 横滚完全不影响虚拟窗口，必须在进入 React/预取路径前同步退出。
         if (top === scrollTopRef.current) return;
         scrollTopRef.current = top;
-        updateLocalWorkspaceSession({ scrollTop: top });
-        // 距底 200px 就预取下一页，滚到底再等请求会有明显空白
-        if (el.scrollHeight - top - el.clientHeight < 200) onScrollEnd();
         // 竖向滚动事件比帧率高得多；只对真正变化的 scrollTop 一帧合并一次。
         if (scrollRafRef.current) return;
         scrollRafRef.current = requestAnimationFrame(() => {
           scrollRafRef.current = 0;
           const node = scrollerRef.current;
           if (!node) return;
+          const count = libraryStore.getState().orderedIds.length + pendingCountRef.current;
+          const maxTop = Math.max(0, count * rowHRef.current + headerH - node.clientHeight);
+          if (node.scrollTop > maxTop) node.scrollTop = maxTop;
           const now = performance.now();
           const previous = scrollSampleRef.current;
           const elapsed = Math.max(1, now - previous.at);
-          const velocity = previous.at > 0 ? Math.abs(node.scrollTop - previous.top) / elapsed : 0;
+          const signedVelocity = previous.at > 0 ? (node.scrollTop - previous.top) / elapsed : 0;
+          const velocity = Math.abs(signedVelocity);
+          scrollVelocityRef.current = signedVelocity;
           scrollSampleRef.current = { top: node.scrollTop, at: now };
-          if (velocity > 0.8) {
-            if (!fastScrollingRef.current) {
-              fastScrollingRef.current = true;
-              setFastScrolling(true);
-            }
-            if (scrollIdleTimerRef.current !== null) {
-              window.clearTimeout(scrollIdleTimerRef.current);
-            }
-            scrollIdleTimerRef.current = window.setTimeout(() => {
-              scrollIdleTimerRef.current = null;
-              fastScrollingRef.current = false;
-              setFastScrolling(false);
-            }, 140);
+          if (velocity > 0.8 && !fastScrollingRef.current) {
+            fastScrollingRef.current = true;
+            setFastScrolling(true);
           }
-          const next = { top: node.scrollTop, height: node.clientHeight };
+          if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
+          scrollIdleTimerRef.current = window.setTimeout(() => {
+            scrollIdleTimerRef.current = null;
+            fastScrollingRef.current = false;
+            setFastScrolling(false);
+            const anchor = anchorRef.current;
+            if (persistentSession) updateLocalWorkspaceSession({ scrollTop: node.scrollTop, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
+          }, 140);
+          const index = Math.max(0, Math.floor(node.scrollTop / rowHRef.current) - pendingCountRef.current);
+          anchorRef.current = { id: libraryStore.getState().orderedIds[index] ?? null, index, offset: node.scrollTop % rowHRef.current };
+          const next = { top: Math.floor(node.scrollTop / rowHRef.current) * rowHRef.current, height: node.clientHeight };
           setView((current) =>
             current.top === next.top && current.height === next.height ? current : next,
           );
@@ -1767,7 +1806,8 @@ export const TrackTable = memo(function TrackTable({
           </tr>
         </thead>
         <tbody>
-          {pendingDownloads.map((task) => {
+          {winStart > 0 && <tr data-spacer="top" aria-hidden="true"><td colSpan={tableColSpan} style={{ height: winStart * rowH }} /></tr>}
+          {pendingDownloads.slice(winStart, Math.min(winEnd, pendingDownloads.length)).map((task) => {
             /** 有曲目时下载态占独立序号列，和下面 1/2/3 同宽；无曲目时不单独占一列。 */
             const showArtist = visibleColumns.some((column) => column.key === "artist");
             const showFormat = visibleColumns.some((column) => column.key === "format");
@@ -1829,14 +1869,7 @@ export const TrackTable = memo(function TrackTable({
             </tr>
             );
           })}
-          {/* 虚拟滚动：只渲染视口附近的行，上方的高度由这根占位行撑住。
-              行序号、拖放、选中都按 tracks 里的真实下标走，不被窗口影响。 */}
-          {winStart > 0 && (
-            <tr data-spacer="top" aria-hidden="true">
-              <td colSpan={tableColSpan} style={{ height: winStart * rowH }} />
-            </tr>
-          )}
-          {windowedTracks.map((track, index) => (
+          {windowedTracks.map(({ id, track, index }) => track ? (
             <tr
               key={track.id}
               aria-selected={selected.has(track.id)}
@@ -1948,23 +1981,27 @@ export const TrackTable = memo(function TrackTable({
             >
               <TrackCells
                 track={track}
-                displayIndex={winStart + index + 1}
+                displayIndex={index + 1}
+                coverPriority={index >= viewport.visibleTrackStart && index < viewport.visibleTrackEnd ? 0 : 1}
                 showIndex={showIndexCol}
                 columns={visibleColumns}
                 keyNotation={keyNotation}
-                loadArtwork={!fastScrolling}
                 selectionMode={selectionMode}
                 selected={selected.has(track.id)}
                 onToggle={toggleTrackSelection}
                 onRate={rateTrack}
               />
             </tr>
+          ) : (
+            <tr key={id} data-loading-track="true" aria-busy="true">
+              <td colSpan={tableColSpan} style={{ height: rowH }}><span className="kd-track-loading-skeleton" /></td>
+            </tr>
           ))}
-          {winEnd < tracks.length && (
+          {winEnd < viewport.count && (
             <tr data-spacer="bottom" aria-hidden="true">
               <td
                 colSpan={tableColSpan}
-                style={{ height: (tracks.length - winEnd) * rowH }}
+                style={{ height: (viewport.count - winEnd) * rowH }}
               />
             </tr>
           )}
@@ -2050,6 +2087,7 @@ export const TrackTable = memo(function TrackTable({
           </button>
           <button
             type="button"
+            disabled={isImageTrack(rowMenu.track.format)}
             onClick={() => {
               setRowMenu(null);
               playFromTable(rowMenu.track);
@@ -2117,7 +2155,11 @@ export const TrackTable = memo(function TrackTable({
             <Copy size={12} />
             复制曲目{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
-          <button type="button" onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true); }}>
+          <WorkshopAddMenu ids={() => {
+            const chosen = new Set(menuIds);
+            return orderedIds.filter(id => chosen.has(id));
+          }} close={() => setRowMenu(null)} />
+          <button type="button" disabled={menuIds.length === 1 && isImageTrack(rowMenu.track.format)} onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true); }}>
             <BarChart3 size={12} />
             重新分析{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
@@ -2171,11 +2213,9 @@ export const TrackTable = memo(function TrackTable({
           <InlineNotice text={notice} onDismiss={() => setNotice("")} />
         </div>
       )}
-      {loadingMore && (
-        <div className="kd-row kd-muted" style={{ justifyContent: "center", padding: "0.6rem" }}>
-          <LoaderCircle className="kd-spin" size={13} /> 加载更多
-        </div>
-      )}
+
+    </div>
+    <OverlayScrollbars scroller={scrollerRef} />
     </div>
   );
 });

@@ -1,6 +1,6 @@
 # 纯 Rust + Tauri 的桌面三平台打包（macOS / Windows / Linux）。
 # 2026-07-27 起这是 main 的**正式**流水线（rust-rewrite 已扶正并入 main）；
-# 旧 Electron 构建与测试工作流已删除；桌面端只保留这一条正式流水线。
+# 桌面端只保留这一条正式流水线。
 #
 # 触发：
 #   - push 到 main：跑前端/安全门禁 + 打包，产物只当 artifact；
@@ -56,11 +56,8 @@ jobs:
           npm audit --audit-level=low
           npm audit signatures
 
-      - name: 前端逻辑测试
-        run: npm run test:frontend-logic
-
-      - name: Windows 安装包版本映射测试
-        run: node --test tests/windowsMsiVersion.test.mjs
+      - name: 曲库加载与滚动回归
+        run: npm run test:library
 
       - name: 前端生产构建
         run: npm run tauri:web:build

@@ -1,8 +1,7 @@
 //! Tauri 桌面壳。
 //!
-//! 和 v0.1.0 的 Electron 版结构上只差一处，但那一处就是全部理由：那边
-//! `electron/main.ts` 把 Python sidecar **spawn 成独立进程**，这边 axum server
-//! 就在同一个进程里跑一个 tokio 任务。安卓上应用根本没法 spawn 任意可执行文件，
+//! axum server 在同一个进程里运行一个 tokio 任务，不依赖外部 sidecar 进程。
+//! 安卓上应用根本没法 spawn 任意可执行文件，
 //! 所以「没有 sidecar 进程」是能出 APK 的前提，而不是省事
 //! （见 `docs/rust-port/00-architecture.md` §1）。
 //!
@@ -10,8 +9,8 @@
 //! `src/lib/api.ts` 因此一行不用改，播放器也要靠 Range 请求才能拖进度条。
 //! 服务只绑回环地址，Tauri 与本机浏览器调试都可以直接访问。
 //!
-//! 这里实现的 6 条命令是 `electron/preload.ts` 的一比一替代品，
-//! 名字和参数由 `src/lib/bridge.ts` 固定，改名等于把前端按钮变哑巴。
+//! 这里实现的 6 条命令由 `src/lib/bridge.ts` 固定名字和参数，
+//! 改名等于把前端按钮变哑巴。
 
 #[cfg(target_os = "android")]
 mod android_media;
@@ -23,6 +22,8 @@ pub mod cli;
 mod data_recovery;
 #[cfg(desktop)]
 mod desktop_media;
+#[cfg(desktop)]
+mod folder_drop;
 /// 桌面 + Android 共用 playback_* 命令；iOS 仍走 native-audio 插件。
 #[cfg(any(desktop, target_os = "android"))]
 mod desktop_player;
@@ -97,6 +98,7 @@ use std::sync::{Arc, Mutex};
 
 use kdj_core::AppConfig;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::{Emitter, Manager};
 #[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
@@ -104,8 +106,7 @@ use tauri_plugin_opener::OpenerExt;
 
 /// 前端连本地 server 需要的两件东西，放进 Tauri 的全局状态。
 ///
-/// Electron 版是通过 `additionalArguments` 把它们塞进渲染进程的 argv，
-/// preload 一读就有。Tauri 没有对应机制，所以改成「前端主动来问一次」。
+/// 前端启动时通过 Tauri command 主动读取一次。
 /// 不用事件推送：窗口很可能在 `emit` 之前就跑完了 bootstrap，那是竞态。
 pub struct Bridge {
     base_url: String,
@@ -125,6 +126,47 @@ impl Bridge {
         }
     }
 
+    /// 下载目录切换竞态曾让成品落到后端最后已提交的旧目录。完成任务的 journal
+    /// 保存了最终绝对路径；只额外放行其中逐字记录的现存文件，不能把它的父目录
+    /// 整棵授权给 WebView。
+    fn is_recorded_download_path(&self, canonical: &Path) -> bool {
+        const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
+        let journal = self.config.data_dir.join("download-queue.json");
+        let Ok(metadata) = std::fs::symlink_metadata(&journal) else {
+            return false;
+        };
+        if !metadata.file_type().is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_JOURNAL_BYTES
+        {
+            return false;
+        }
+        let Ok(body) = std::fs::read(&journal) else {
+            return false;
+        };
+        let Ok(Value::Object(root)) = serde_json::from_slice::<Value>(&body) else {
+            return false;
+        };
+        root.get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("task"))
+            .filter(|task| {
+                matches!(
+                    task.get("state").and_then(Value::as_str),
+                    Some("done" | "failed")
+                )
+            })
+            .filter_map(|task| task.get("path").and_then(Value::as_str))
+            .filter(|path| !path.trim().is_empty())
+            .any(|path| {
+                Path::new(path)
+                    .canonicalize()
+                    .is_ok_and(|path| path == canonical)
+            })
+    }
+
     fn authorize_existing_path(&self, raw: &str, auxiliary_roots: bool) -> Result<PathBuf, String> {
         let requested = PathBuf::from(raw.trim());
         if !requested.is_absolute() {
@@ -133,6 +175,10 @@ impl Bridge {
         let canonical = requested
             .canonicalize()
             .map_err(|err| format!("无法解析路径 {}：{err}", requested.display()))?;
+
+        if auxiliary_roots && self.is_recorded_download_path(&canonical) {
+            return Ok(canonical);
+        }
 
         let settings = self.config.to_settings();
         let mut roots = vec![self.config.download_dir()];
@@ -161,6 +207,36 @@ impl Bridge {
         }
         Ok(canonical)
     }
+}
+
+#[tauri::command]
+async fn workshop_import_files(app: tauri::AppHandle, mut input: Value) -> Result<Value, String> {
+    let (base, token) = {
+        let bridge = app.state::<Bridge>();
+        let paths = input.get("paths").and_then(Value::as_array).ok_or("缺少文件列表")?;
+        if paths.len() > 500 { return Err("一次最多导入 500 个素材，请分批拖入".into()); }
+        let mut accepted = vec![];
+        let mut errors = vec![];
+        for raw in paths {
+            let raw = raw.as_str().ok_or("文件路径无效")?;
+            match bridge.authorize_existing_path(raw, true) {
+                Ok(path) if path.is_file() => accepted.push(path.to_string_lossy().into_owned()),
+                Ok(_) => errors.push(format!("{raw}：请拖入本地文件")),
+                Err(e) => errors.push(format!("{raw}：{e}")),
+            }
+        }
+        input["paths"] = serde_json::json!(accepted);
+        input["native_errors"] = serde_json::json!(errors);
+        (bridge.base_url.clone(), bridge.auth_token.clone())
+    };
+    let response = reqwest::Client::new().post(format!("{base}/api/workshop/intake")).bearer_auth(token).json(&input).send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    let mut result: Value = response.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() { return Err(result.get("detail").or_else(|| result.get("error")).and_then(Value::as_str).unwrap_or("导入失败").to_owned()); }
+    if let Some(errors) = result.get_mut("errors").and_then(Value::as_array_mut) {
+        errors.extend(input["native_errors"].as_array().into_iter().flatten().cloned());
+    }
+    Ok(result)
 }
 
 const RELEASE_PAGE: &str = "https://github.com/kumoSleeping/KDJ/releases/latest";
@@ -238,8 +314,8 @@ pub struct BridgeInfo {
     pub base_url: String,
     pub auth_token: String,
     pub media_token: String,
-    /// 取值和 Electron 的 `process.platform` 对齐（darwin / win32 / linux / android…），
-    /// 前端按它区分桌面专属功能，见 `docs/rust-port/00-architecture.md` §8。
+    /// 取值遵循前端既有平台契约（darwin / win32 / linux / android…），
+    /// 用于区分桌面专属功能，见 `docs/rust-port/00-architecture.md` §8。
     pub platform: String,
 }
 
@@ -1294,7 +1370,7 @@ async fn apply_update() -> Result<(), String> {
     Err("这个平台不支持一键更新，请去 Release 页下载最新安装包".into())
 }
 
-/// 选一个目录，取消返回 `null`（和 Electron 的 `canceled → null` 一致）。
+/// 选一个目录，取消返回 `null`。
 ///
 /// 用回调版而不是 `blocking_pick_folder`：命令有可能落在事件循环所在的线程上，
 /// 阻塞式对话框在那里会和事件循环互等死锁。oneshot 把回调转回 async。
@@ -1331,7 +1407,7 @@ async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
     }
 }
 
-/// 选多个目录，取消返回 `[]`（Electron 版同样返回空数组而不是 null）。
+/// 选多个目录，取消返回 `[]` 而不是 `null`。
 #[tauri::command]
 async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
     #[cfg(desktop)]
@@ -2047,10 +2123,10 @@ fn set_desktop_lyrics(
 
 // ------------------------------------------------------------------ 启动
 
-/// v0.1.0（Electron）用的数据目录。
+/// v0.1.0 使用的 product-name 数据目录。
 ///
 /// **必须沿用它，不能用 Tauri 的 `app_data_dir()`。** 后者会按 bundle identifier
-/// 落在 `.../com.kdj.app/data`，而 Electron 版按 productName 落在
+/// 落在 `.../com.kdj.app/data`，而早期桌面版本按 productName 落在
 /// `.../kdj/data`。换目录 = 老用户打开新版本看到的是一个空应用：
 ///
 /// - 曲库里 1379 首的记录、评分、备注、cue 点全都读不到；
@@ -2059,13 +2135,13 @@ fn set_desktop_lyrics(
 ///
 /// 用户说过"本地清理重算没问题"，那指的是**分析结果**，不包括重新登录。
 ///
-/// Electron 的 `app.getPath("userData")` 各平台落点：
+/// 早期桌面版本的用户数据基目录：
 /// - macOS   `~/Library/Application Support/<productName>`
 /// - Windows `%APPDATA%\<productName>`
 /// - Linux   `~/.config/<productName>`
 ///
 /// Tauri 的 `app_config_dir()` 是同样的三个基目录（只是拼的是 identifier），
-/// 所以这里取它的父目录再拼死 `kdj`，就等价于 Electron 的落点。
+/// 所以这里取它的父目录再拼 `kdj`，即可沿用原有落点。
 fn has_file_bytes(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|meta| meta.len() > 0)
@@ -2131,7 +2207,7 @@ fn reconcile_database_alias(data_dir: &Path) {
 }
 
 fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
-    // 移动端：只使用应用沙箱目录。不要做桌面 Electron 那套 parent()/kdj 迁移——
+    // 移动端只使用应用沙箱目录，不做桌面的 parent()/kdj 历史迁移——
     // 那是为 macOS/Windows/Linux 的 productName 布局写的；在安卓上乱翻父目录
     // 既无意义，也更容易在 Path/JNI 未就绪时踩坑。
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -2157,7 +2233,7 @@ fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
             .map(Path::to_path_buf)
             .ok_or_else(|| anyhow::anyhow!("拿不到配置目录的父目录"))?;
 
-        // 历史版本同时出现过 Electron productName、Tauri identifier、正式版/Labs
+        // 历史版本同时出现过 productName、Tauri identifier、正式版/Labs
         // 等目录名。恢复器按真实内容合并、按路径身份去重，不把 Labs 当成唯一解释。
         let legacy_candidates = [
             base.join("kumodeck").join("data"),
@@ -2236,8 +2312,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     reconcile_database_alias(&data_dir);
     let download_dir = resolve_download_dir(app, &data_dir);
 
-    // 端口传 0 让内核挑：Electron 版是先 listen(0) 探一个再关掉再交给 Python，
-    // 那中间有一段「探到的端口被别人抢走」的竞态窗口，这里直接没有。
+    // 端口传 0 让内核直接选择并占用，避免探测后释放再绑定的竞态窗口。
     let config = Arc::new(AppConfig::create(data_dir, download_dir, 0));
     #[cfg(desktop)]
     match data_recovery::repair_library_roots(&config) {
@@ -2423,8 +2498,14 @@ fn media_permission_granted() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     kdj_core::ensure_rustls_ring();
+    let debug_build = cfg!(debug_assertions);
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))
+        .with_target(true)
+        .with_thread_ids(debug_build)
+        .with_thread_names(debug_build)
+        .with_file(debug_build)
+        .with_line_number(debug_build)
         .init();
 
     #[cfg(desktop)]
@@ -2432,7 +2513,16 @@ pub fn run() {
         return;
     }
 
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        profile = if debug_build { "debug" } else { "release" },
+        pid = std::process::id(),
+        "KDJ 启动"
+    );
+
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    #[cfg(desktop)]
+    let builder = builder.on_window_event(folder_drop::handle_event).on_webview_event(folder_drop::handle_webview_event);
     #[cfg(target_os = "macos")]
     let builder = builder.register_uri_scheme_protocol("kdj-youtube", |_context, request| {
         youtube_embed::blank_protocol_response(request.uri().path())
@@ -2490,8 +2580,8 @@ pub fn run() {
         }
         app.manage(bridge);
         // 服务起好再显示窗口。窗口在配置里是 visible:false，这里补一次 show()——
-        // Electron 版靠 `ready-to-show` 做同样的事，为的是不让用户看见
-        // 「空窗口 → 内容」的跳变。start_server 失败时直接返回 Err，
+        // 服务就绪后再显示窗口，避免用户看见「空窗口 → 内容」的跳变。
+        // start_server 失败时直接返回 Err，
         // 窗口不会露面，也就不会出现一个连不上后端的空壳。
         //
         // show 之前必须先按 settings 垫好原生底色：WebView 首帧前用户看到的是
@@ -2551,6 +2641,7 @@ pub fn run() {
         reveal_path,
         share_clipboard::write_share_clipboard,
         start_native_file_drag,
+        workshop_import_files,
         start_native_link_drag,
         save_login_qr,
         open_external,
@@ -2899,10 +2990,33 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let managed_file = download.join("track.mp3");
         let outside_file = outside.join("secret.txt");
+        let recorded_file = outside.join("old-download.mp3");
+        let recorded_failed_file = outside.join("downloaded-but-not-imported.mp3");
         std::fs::write(&managed_file, b"audio").unwrap();
         std::fs::write(&outside_file, b"secret").unwrap();
+        std::fs::write(&recorded_file, b"old audio").unwrap();
+        std::fs::write(&recorded_failed_file, b"unimported audio").unwrap();
 
         let config = Arc::new(kdj_core::AppConfig::create(root.join("data"), download, 0));
+        std::fs::write(
+            config.data_dir.join("download-queue.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "entries": [{
+                    "task": {
+                        "state": "done",
+                        "path": recorded_file.to_string_lossy()
+                    }
+                }, {
+                    "task": {
+                        "state": "failed",
+                        "path": recorded_failed_file.to_string_lossy()
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let bridge = Bridge {
             base_url: "http://127.0.0.1:1".into(),
             auth_token: "test".into(),
@@ -2918,6 +3032,15 @@ mod tests {
         assert!(bridge
             .authorize_existing_path(&outside_file.to_string_lossy(), true)
             .is_err());
+        assert!(bridge
+            .authorize_existing_path(&recorded_file.to_string_lossy(), true)
+            .is_ok());
+        assert!(bridge
+            .authorize_existing_path(&recorded_file.to_string_lossy(), false)
+            .is_err());
+        assert!(bridge
+            .authorize_existing_path(&recorded_failed_file.to_string_lossy(), true)
+            .is_ok());
         bridge.grant_picked_path(&outside);
         assert!(bridge
             .authorize_existing_path(&outside_file.to_string_lossy(), true)

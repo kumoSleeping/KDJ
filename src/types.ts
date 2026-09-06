@@ -1,6 +1,6 @@
 /**
  * 前后端契约（Rust 侧对应 crates/kdj-core/src/models.rs）。
- * 改这里必须同步改 models.rs 和 docs/00-architecture.md。
+ * 改这里必须同步检查 `crates/kdj-core/src/models.rs` 与前后端序列化契约。
  */
 
 export type Platform = "wyy" | "qqm" | "soundcloud" | "ytm" | "youtube" | "bilibili" | "local";
@@ -25,6 +25,20 @@ export type TaskPhase =
   | "completed";
 export type AccountState = "missing" | "valid" | "expired" | "unknown";
 export type QrStateValue = "waiting" | "scanned" | "done" | "expired" | "refused" | "error";
+
+export interface FfmpegToolStatus {
+  state: "missing" | "ready" | "broken";
+  path: string | null;
+  version: string | null;
+  error: string | null;
+}
+
+export interface FfmpegInstallationStatus {
+  platform: string;
+  arch: string;
+  ffmpeg: FfmpegToolStatus;
+  ffprobe: FfmpegToolStatus;
+}
 
 export interface Health {
   ok: boolean;
@@ -521,6 +535,13 @@ export interface TrackSummary {
   bpm: number | null;
   bpm_v2?: boolean;
   bpm_v3?: boolean;
+  /** 播放首帧所需的轻量网格标量；大拍点数组仍只存在于 Track 详情。 */
+  bpm_confidence?: number | null;
+  first_beat?: number | null;
+  beat_origin?: number | null;
+  downbeat_origin?: number | null;
+  downbeat_confidence?: number | null;
+  beat_grid_revision?: string;
   music_key: string;
   camelot: string;
   open_key: string;
@@ -536,9 +557,15 @@ export interface TrackSummary {
   added_at: string;
   modified_at: string;
   folder: string;
+  /** 播放起止点是标量，随摘要下发，点击路径不再等待完整 Cue 列表。 */
+  cue_ms?: number | null;
+  end_ms?: number | null;
 }
 
-export interface Track extends TrackSummary {
+/** 播放器换源所需的最小契约。列表摘要可以直接、同步地满足它。 */
+export interface PlayableTrack extends TrackSummary {}
+
+export interface Track extends PlayableTrack {
   id: number;
   path: string;
   filename: string;
@@ -621,6 +648,11 @@ export interface FolderTree {
   outside: number;
 }
 
+export interface FolderSnapshotResponse {
+  tree: FolderTree | null;
+  generated_at?: string;
+}
+
 export interface DuplicateCandidate {
   track: Track;
   quality_score: number;
@@ -686,6 +718,8 @@ export interface TrackPage {
   total: number;
   offset: number;
   limit: number;
+  /** Opaque keyset/page continuation. Old offset-only servers simply omit it. */
+  next_cursor?: string | null;
 }
 
 /** 来自 DJ 曲库标准的只读 Cue；没有 hot_cue 编号时是 Memory Cue。 */
@@ -900,6 +934,11 @@ export interface MaintenanceProgress {
  * 收到就当没这回事，各 store 的 switch 落到 default 直接忽略。
  */
 export type WsEvent =
+  | { type: "connection.open"; payload: Record<string, never> }
+  | { type: "workshop.positions"; payload: import("./types/workshop").WorkshopPositionResults }
+  | { type: "workshop.updated"; payload: import("./types/workshop").WorkshopSnapshot }
+  | { type: "composition.list" | "composition.updated"; payload: import("./types/composition").CompositionSnapshot }
+  | { type: "composition.completed"; payload: { track_id: number; path: string; replaced: boolean } }
   | { type: "download.updated"; payload: DownloadTask }
   | { type: "download.list"; payload: DownloadTask[] }
   | { type: "scan.progress"; payload: ScanProgress }
@@ -1065,6 +1104,9 @@ export interface KdjBridge {
   }) => Promise<SavedLoginQr>;
   pickFolder: () => Promise<string | null>;
   pickFolders: () => Promise<string[]>;
+  /** 桌面主窗口接收系统文件夹；原生端验证目录并授予与选择器相同的访问范围。 */
+  importWorkshopFiles?: (input: import("./types/workshop").WorkshopIntake) => Promise<import("./types/workshop").WorkshopIntakeResult>;
+  onMediaDrop?: (handler: (drop: import("./types/workshop").WorkshopNativeDrop) => void) => Promise<() => void>;
   /** 安卓：媒体读取权限（READ_MEDIA_AUDIO）是否已授予；桌面恒为 true。 */
   mediaPermissionGranted: () => Promise<boolean>;
   /** 用系统浏览器开外链（Release 页等）。 */

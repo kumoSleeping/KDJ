@@ -42,6 +42,7 @@ pub struct Ctx {
 pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
     let router = Router::new()
         .route("/api/health", get(health))
+        .route("/api/tools/ffmpeg", get(ffmpeg_installation_status))
         .route("/api/control/show", post(control_show))
         .route("/api/control/quit", post(control_quit))
         .route("/api/settings", get(get_settings).put(put_settings))
@@ -195,6 +196,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/video/preview", get(video_preview))
         .route("/api/video/calibrate", post(video_calibrate))
         .route("/api/library/tracks", get(library_tracks))
+        .route("/api/library/tracks/index", get(library_track_index))
         .route(
             "/api/library/tracks/summaries",
             post(library_track_summaries),
@@ -221,6 +223,10 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/update/check", get(update_check))
         .route("/api/library/harmonic", post(library_harmonic_profile))
         .route("/api/library/harmonic/{id}", get(library_harmonic))
+        .route(
+            "/api/library/folders/snapshot",
+            get(library_folders_snapshot),
+        )
         .route("/api/library/folders", get(library_folders))
         .route("/api/library/folders/create", post(folder_create))
         .route("/api/library/folders/rename", post(folder_rename))
@@ -265,6 +271,10 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
 }
 
 // ---------------------------------------------------------------- 基础
+
+async fn ffmpeg_installation_status() -> Json<kdj_providers::ffmpeg::FfmpegInstallationStatus> {
+    Json(kdj_providers::ffmpeg::installation_status().await)
+}
 
 async fn health() -> Json<Value> {
     // 健康检查只用于版本/能力探测。设置接口已经在认证后提供用户配置，没必要在这里
@@ -494,6 +504,7 @@ async fn put_settings(
                 duration_ms: None,
                 count: 1,
             });
+        refresh_folder_snapshot(Arc::clone(&state));
     }
     Ok(Json(settings_view(settings)))
 }
@@ -4802,19 +4813,27 @@ async fn video_calibrate(
 
 // ---------------------------------------------------------------- 曲库
 
-/// SQLite、标签和媒体容器解析都是同步阻塞工作。曲库请求先经过这道有界闸门再进
-/// blocking 池，避免快速滚动或封面瀑布把 Tokio 的工作线程与阻塞线程同时塞满。
-static LIBRARY_READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+/// 交互详情、批量列表和封面各有自己的有界车道。共享的公平 semaphore 会让一屏
+/// 封面把刚点击的曲目详情排在几十个后台任务后面，形成肉眼可见的优先级倒置。
+static LIBRARY_INTERACTIVE_READ_SLOTS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(2);
+static LIBRARY_BULK_READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+static LIBRARY_COVER_READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+static LIBRARY_FOLDER_REFRESH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-async fn run_library_read<T, F>(work: F) -> ApiResult<T>
+async fn run_library_read_on<T, F>(
+    slots: &'static tokio::sync::Semaphore,
+    lane: &'static str,
+    work: F,
+) -> ApiResult<T>
 where
     T: Send + 'static,
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
-    let _permit = LIBRARY_READ_SLOTS.acquire().await.map_err(|err| {
+    let _permit = slots.acquire().await.map_err(|err| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("曲库读取通道不可用：{err}"),
+            format!("曲库{lane}读取通道不可用：{err}"),
         )
     })?;
     tokio::task::spawn_blocking(work)
@@ -4828,7 +4847,31 @@ where
         .map_err(ApiError::from)
 }
 
-#[derive(Debug, Default, Deserialize)]
+async fn run_library_bulk_read<T, F>(work: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    run_library_read_on(&LIBRARY_BULK_READ_SLOTS, "批量", work).await
+}
+
+async fn run_library_interactive_read<T, F>(work: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    run_library_read_on(&LIBRARY_INTERACTIVE_READ_SLOTS, "交互", work).await
+}
+
+async fn run_library_cover_read<T, F>(work: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    run_library_read_on(&LIBRARY_COVER_READ_SLOTS, "封面", work).await
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
 struct TrackQueryParams {
     #[serde(default)]
     q: String,
@@ -4853,6 +4896,80 @@ struct TrackQueryParams {
     order2: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    /// Opaque continuation returned by the previous summary page.
+    cursor: Option<String>,
+    #[serde(default)]
+    include_total: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LibraryCursor {
+    /// 兼容首版 cursor 和非默认排序；旧 offset 参数本身也继续可用。
+    Offset { offset: i64, total: i64 },
+    /// 默认创建时间排序使用真正的键集边界，不随页深增加扫描量。
+    FileCreated {
+        created_at: f64,
+        id: i64,
+        total: i64,
+        descending: bool,
+    },
+}
+
+impl LibraryCursor {
+    fn total(self) -> i64 {
+        match self {
+            Self::Offset { total, .. } | Self::FileCreated { total, .. } => total,
+        }
+    }
+}
+
+fn decode_library_cursor(value: &str) -> Option<LibraryCursor> {
+    if let Some(payload) = value.strip_prefix("kdj1-") {
+        let mut parts = payload.split('-');
+        let offset = i64::from_str_radix(parts.next()?, 16).ok()?;
+        let total = i64::from_str_radix(parts.next()?, 16).ok()?;
+        if parts.next().is_some() || offset < 0 || total < 0 {
+            return None;
+        }
+        return Some(LibraryCursor::Offset { offset, total });
+    }
+
+    let mut parts = value.strip_prefix("kdj2-")?.split('-');
+    let descending = match parts.next()? {
+        "d" => true,
+        "a" => false,
+        _ => return None,
+    };
+    let created_at = f64::from_bits(u64::from_str_radix(parts.next()?, 16).ok()?);
+    let id = i64::from_str_radix(parts.next()?, 16).ok()?;
+    let total = i64::from_str_radix(parts.next()?, 16).ok()?;
+    if parts.next().is_some() || !created_at.is_finite() || created_at < 0.0 || id <= 0 || total < 0
+    {
+        return None;
+    }
+    Some(LibraryCursor::FileCreated {
+        created_at,
+        id,
+        total,
+        descending,
+    })
+}
+
+fn encode_offset_library_cursor(offset: i64, total: i64) -> String {
+    format!("kdj1-{offset:x}-{total:x}")
+}
+
+fn encode_file_created_library_cursor(
+    created_at: f64,
+    id: i64,
+    total: i64,
+    descending: bool,
+) -> String {
+    let direction = if descending { 'd' } else { 'a' };
+    format!(
+        "kdj2-{direction}-{:x}-{id:x}-{total:x}",
+        created_at.to_bits()
+    )
 }
 
 async fn stream_playlists(
@@ -4937,18 +5054,84 @@ async fn stream_playlist_remove_track(
     }))
 }
 
+async fn library_track_index(
+    State(state): State<Arc<AppState>>,
+    Query(mut params): Query<TrackQueryParams>,
+) -> ApiResult<Json<TrackIndex>> {
+    if params.cursor.is_some() {
+        return Err(ApiError::bad_request("顺序索引不接受分页游标"));
+    }
+    params.offset = None;
+    let query = library_track_query(&state, params)?;
+    let library = Arc::clone(&state.library);
+    Ok(Json(run_library_bulk_read(move || library.track_index(&query)).await?))
+}
+
 async fn library_tracks(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TrackQueryParams>,
 ) -> ApiResult<Json<TrackSummaryPage>> {
+    let cursor = params.cursor.as_deref().and_then(decode_library_cursor);
+    let total_hint = if params.include_total == Some(true) {
+        None
+    } else {
+        cursor.map(LibraryCursor::total)
+    };
     let query = library_track_query(&state, params)?;
+    let keyset_eligible = query.sort == "file_created_at" && query.sort2.trim().is_empty();
+    let descending = !query.order.trim().eq_ignore_ascii_case("asc");
     let library = Arc::clone(&state.library);
-    Ok(Json(
-        run_library_read(move || library.list_track_summaries(&query)).await?,
-    ))
+    let mut page =
+        run_library_bulk_read(move || library.list_track_summaries_with_total(&query, total_hint))
+            .await?;
+    let page_is_full = !page.items.is_empty() && page.items.len() as i64 == page.limit;
+    page.next_cursor = if keyset_eligible && page_is_full {
+        page.items.last().and_then(|track| {
+            track.file_created_at.map(|created_at| {
+                encode_file_created_library_cursor(created_at, track.id, page.total, descending)
+            })
+        })
+    } else {
+        let previous_offset = match cursor {
+            Some(LibraryCursor::Offset { offset, .. }) => offset,
+            Some(LibraryCursor::FileCreated { .. }) => 0,
+            None => page.offset,
+        };
+        let next_offset = previous_offset.saturating_add(page.items.len() as i64);
+        (next_offset < page.total && page_is_full)
+            .then(|| encode_offset_library_cursor(next_offset, page.total))
+    };
+    Ok(Json(page))
 }
 
 fn library_track_query(state: &AppState, params: TrackQueryParams) -> ApiResult<TrackQuery> {
+    let cursor = params
+        .cursor
+        .as_deref()
+        .map(|value| {
+            decode_library_cursor(value).ok_or_else(|| ApiError::bad_request("曲库分页游标无效"))
+        })
+        .transpose()?;
+    let sort = params.sort.unwrap_or_else(|| "file_created_at".into());
+    let order = params.order.unwrap_or_else(|| "desc".into());
+    let sort2 = params.sort2.unwrap_or_default();
+    let keyset_eligible = sort == "file_created_at" && sort2.trim().is_empty();
+    let descending = !order.trim().eq_ignore_ascii_case("asc");
+    let (cursor_offset, after_file_created_at, after_track_id) = match cursor {
+        Some(LibraryCursor::Offset { offset, .. }) => (Some(offset), None, None),
+        Some(LibraryCursor::FileCreated {
+            created_at,
+            id,
+            descending: cursor_descending,
+            ..
+        }) if keyset_eligible && cursor_descending == descending => {
+            (Some(0), Some(created_at), Some(id))
+        }
+        Some(LibraryCursor::FileCreated { .. }) => {
+            return Err(ApiError::bad_request("曲库分页游标与当前排序不匹配"));
+        }
+        None => (None, None, None),
+    };
     let outside = params.folder.trim() == kdj_library::folders::OUTSIDE_FOLDER;
     let exclude_under = if outside {
         library_roots(state)?
@@ -4972,12 +5155,14 @@ fn library_track_query(state: &AppState, params: TrackQueryParams) -> ApiResult<
         },
         folder_deep: params.folder_deep,
         exclude_under,
-        sort: params.sort.unwrap_or_else(|| "file_created_at".into()),
-        order: params.order.unwrap_or_else(|| "desc".into()),
-        sort2: params.sort2.unwrap_or_default(),
+        sort,
+        order,
+        sort2,
         order2: params.order2.unwrap_or_else(|| "asc".into()),
-        limit: params.limit.unwrap_or(200).clamp(1, 10_000),
-        offset: params.offset.unwrap_or(0).max(0),
+        limit: params.limit.unwrap_or(200).clamp(1, 500),
+        offset: cursor_offset.unwrap_or_else(|| params.offset.unwrap_or(0).max(0)),
+        after_file_created_at,
+        after_track_id,
     })
 }
 
@@ -5002,7 +5187,7 @@ async fn library_track_summaries(
     let track_ids = payload.track_ids;
     let library = Arc::clone(&state.library);
     Ok(Json(
-        run_library_read(move || library.track_summaries(&query, &track_ids)).await?,
+        run_library_bulk_read(move || library.track_summaries(&query, &track_ids)).await?,
     ))
 }
 
@@ -5083,7 +5268,7 @@ async fn library_track(
     AxumPath(id): AxumPath<i64>,
 ) -> ApiResult<Json<Track>> {
     let library = Arc::clone(&state.library);
-    run_library_read(move || library.get(id))
+    run_library_interactive_read(move || library.get(id))
         .await?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("曲目不存在"))
@@ -5260,6 +5445,8 @@ async fn library_delete(
     }
     let undo = finish_delete_undo(&state, deleted.into_iter().map(delete_undo_item).collect());
     state.hub.publish_library_updated(&[id]);
+    drop(_operations);
+    refresh_folder_snapshot(Arc::clone(&state));
     Ok(Json(json!({ "ok": true, "undo": undo })))
 }
 
@@ -5314,6 +5501,10 @@ async fn library_delete_batch(
     };
     if !removed.is_empty() {
         state.hub.publish_library_updated(&removed);
+    }
+    drop(_operations);
+    if changed {
+        refresh_folder_snapshot(Arc::clone(&state));
     }
     Ok(Json(
         json!({ "removed": removed.len(), "errors": errors, "undo": undo }),
@@ -5514,13 +5705,41 @@ fn normalize_dest_dir(state: &AppState, raw: &str) -> ApiResult<String> {
     Ok(dest.to_string_lossy().into_owned())
 }
 
-fn folder_tree(state: &AppState) -> ApiResult<FolderTree> {
-    let paths = state.library.all_paths()?;
-    let roots: Vec<String> = library_roots(state)?
-        .into_iter()
-        .map(|root| root.to_string_lossy().into_owned())
-        .collect();
-    Ok(kdj_library::folders::build_tree(&roots, &paths))
+async fn folder_tree(state: Arc<AppState>) -> ApiResult<FolderTree> {
+    let _ = library_roots(&state)?;
+    // Two bulk jobs may run concurrently, but folder snapshots themselves must commit in request
+    // order; otherwise an older walk can finish last and overwrite a newer mutation's tree.
+    let _refresh = LIBRARY_FOLDER_REFRESH_SLOTS.acquire().await.map_err(|error| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("曲库文件夹刷新通道不可用：{error}"),
+        )
+    })?;
+    let roots = state.config.to_settings().library_dirs;
+    let library = Arc::clone(&state.library);
+    run_library_bulk_read(move || match library.build_and_store_folder_tree(&roots) {
+        Ok(tree) => Ok(tree),
+        Err(error) => {
+            // Never turn one offline/denied root into a newly persisted partial hierarchy.
+            // Mutation responses may still use the last complete tree, or a first-run
+            // best-effort view when no matching snapshot has ever existed.
+            tracing::warn!(error = %error, "曲库文件夹树不完整，未覆盖完整快照");
+            if let Some(snapshot) = library.folder_snapshot(&roots)? {
+                Ok(snapshot)
+            } else {
+                library.build_folder_tree_best_effort(&roots)
+            }
+        }
+    })
+    .await
+}
+
+fn refresh_folder_snapshot(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        if let Err(error) = folder_tree(state).await {
+            tracing::warn!(error = ?error, "刷新曲库文件夹快照失败");
+        }
+    });
 }
 
 #[derive(Deserialize)]
@@ -5825,8 +6044,37 @@ async fn analyze_duplicate_tracks(
     }))
 }
 
+#[derive(Serialize)]
+struct FolderSnapshotResponse {
+    tree: Option<FolderTree>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generated_at: Option<String>,
+}
+
+async fn library_folders_snapshot(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<FolderSnapshotResponse>> {
+    // Keep startup off the disk-walk path. `library_roots` may infer roots from SQLite on a first
+    // run, but it never enumerates configured directories here.
+    let _ = library_roots(&state)?;
+    let roots = state.config.to_settings().library_dirs;
+    let library = Arc::clone(&state.library);
+    let snapshot =
+        run_library_interactive_read(move || library.folder_snapshot_record(&roots)).await?;
+    Ok(Json(match snapshot {
+        Some(snapshot) => FolderSnapshotResponse {
+            tree: Some(snapshot.tree),
+            generated_at: Some(snapshot.generated_at),
+        },
+        None => FolderSnapshotResponse {
+            tree: None,
+            generated_at: None,
+        },
+    }))
+}
+
 async fn library_folders(State(state): State<Arc<AppState>>) -> ApiResult<Json<FolderTree>> {
-    Ok(Json(folder_tree(&state)?))
+    Ok(Json(folder_tree(state).await?))
 }
 
 async fn folder_create(
@@ -5839,7 +6087,8 @@ async fn folder_create(
         &payload.name,
         &require_roots(&state)?,
     )?;
-    Ok(Json(folder_tree(&state)?))
+    drop(_operations);
+    Ok(Json(folder_tree(state).await?))
 }
 
 async fn folder_rename(
@@ -5873,7 +6122,8 @@ async fn folder_rename(
         }
     };
     state.hub.publish_library_updated(&ids);
-    Ok(Json(folder_tree(&state)?))
+    drop(_operations);
+    Ok(Json(folder_tree(state).await?))
 }
 
 async fn folder_delete(
@@ -5882,7 +6132,8 @@ async fn folder_delete(
 ) -> ApiResult<Json<FolderTree>> {
     let _operations = state.folder_operations.lock().unwrap();
     kdj_library::folders::delete_folder(Path::new(&payload.path), &require_roots(&state)?)?;
-    Ok(Json(folder_tree(&state)?))
+    drop(_operations);
+    Ok(Json(folder_tree(state).await?))
 }
 
 /// 从软件里移出文件夹：库记录摘掉、曲库根注销，磁盘文件一字不动。
@@ -5965,9 +6216,11 @@ async fn folder_forget(
     if !removed_ids.is_empty() {
         state.hub.publish_library_updated(&removed_ids);
     }
+    drop(_operations);
+    let tree = folder_tree(Arc::clone(&state)).await?;
     Ok(Json(FolderForgetResult {
         removed: removed_ids.len(),
-        tree: folder_tree(&state)?,
+        tree,
     }))
 }
 
@@ -6013,7 +6266,8 @@ async fn folder_init(
     for target in targets {
         kdj_library::folders::init_manifests(&target, &roots)?;
     }
-    Ok(Json(folder_tree(&state)?))
+    drop(_operations);
+    Ok(Json(folder_tree(state).await?))
 }
 
 /// 启动旧文件夹清单升级。请求本身立即返回；进度统一走活动栏事件。
@@ -6060,7 +6314,8 @@ async fn folder_move(
         };
         state.hub.publish_library_updated(&ids);
     }
-    Ok(Json(folder_tree(&state)?))
+    drop(_operations);
+    Ok(Json(folder_tree(state).await?))
 }
 
 #[derive(Deserialize)]
@@ -6192,8 +6447,10 @@ async fn folder_merge(
     changed_ids.sort_unstable();
     changed_ids.dedup();
     state.hub.publish_library_updated(&changed_ids);
+    drop(_operations);
+    let tree = folder_tree(Arc::clone(&state)).await?;
     Ok(Json(FolderMergeResponse {
-        tree: folder_tree(&state)?,
+        tree,
         target: target.to_string_lossy().into_owned(),
     }))
 }
@@ -6235,7 +6492,8 @@ async fn folder_order(
         &target,
         &merge_manifest_order(&existing, &payload.names),
     )?;
-    Ok(Json(folder_tree(&state)?))
+    drop(_operations);
+    Ok(Json(folder_tree(state).await?))
 }
 
 async fn folder_undo_status(State(state): State<Arc<AppState>>) -> Json<FolderUndoStatus> {
@@ -6281,7 +6539,6 @@ async fn folder_undo(State(state): State<Arc<AppState>>) -> ApiResult<Json<Folde
     if !changed_ids.is_empty() {
         state.hub.publish_library_updated(&changed_ids);
     }
-
     let status = stack
         .back()
         .map(|next| FolderUndoStatus {
@@ -6290,6 +6547,11 @@ async fn folder_undo(State(state): State<Arc<AppState>>) -> ApiResult<Json<Folde
             count: next.items.len(),
         })
         .unwrap_or_default();
+    drop(stack);
+    drop(_operations);
+    if !changed_ids.is_empty() {
+        refresh_folder_snapshot(Arc::clone(&state));
+    }
     Ok(Json(FolderUndoResponse {
         undone,
         track_ids: changed_ids,
@@ -6656,6 +6918,10 @@ async fn folder_apply(
             items: undo_items,
         })
     };
+    drop(_operations);
+    if !track_ids.is_empty() {
+        refresh_folder_snapshot(Arc::clone(&state));
+    }
     Ok(Json(FolderOpResult {
         track_ids,
         op: payload.op,
@@ -6701,7 +6967,7 @@ fn merge_library_roots(existing: &[String], paths: &[String]) -> Vec<String> {
     merged
 }
 
-fn register_library_roots(state: &AppState, paths: &[String]) -> ApiResult<()> {
+pub(crate) fn register_library_roots(state: &AppState, paths: &[String]) -> ApiResult<()> {
     let mut settings = state.config.to_settings();
     let merged = merge_library_roots(&settings.library_dirs, paths);
     if merged != settings.library_dirs {
@@ -6723,24 +6989,12 @@ async fn library_scan(
         .filter(|item| !item.trim().is_empty())
         .cloned()
         .collect();
-    // 不传路径就扫全部曲库根
-    let paths = if requested.is_empty() {
-        library_roots(&state)?
-            .into_iter()
-            .map(|root| root.to_string_lossy().into_owned())
-            .collect()
-    } else {
-        register_library_roots(&state, &requested)?;
-        requested
-    };
-    if paths.is_empty() {
-        // 既没给目录、也没有曲库根，起个任务也是扫 0 个文件，不如直接说清楚。
-        // 措辞不提"扫描"：界面上这条路径只有「添加文件夹」一个入口，
-        // 冒出一个用户没听说过的词只会让他不知道自己刚才操作的是什么
-        // （参照实现在这里回的是"没有可扫描的目录"，状态码/时机保持一致）。
-        return Err(ApiError::bad_request("没有可添加的目录"));
+    // Empty selections are never an implicit whole-library scan.
+    if requested.is_empty() {
+        return Err(ApiError::bad_request("没有可添加的文件或目录"));
     }
-    let job_id = crate::jobs::spawn_scan(state.clone(), paths, payload.recursive, payload.analyze);
+    // Root registration is committed only after the cancellable import succeeds.
+    let job_id = crate::jobs::spawn_scan(state.clone(), requested, payload.recursive, payload.analyze)?;
     // `found` 恒为 0，真实数量走 `scan.progress` 的第一条事件（它已经带着总数）。
     // 在这里先 collect_files 一遍拿准数看着更漂亮，代价是把整棵目录树**同步**走一遍：
     // 大目录要几十秒，HTTP 请求会被拖到超时，而且那是在 async 执行器上做阻塞 IO。
@@ -6906,6 +7160,7 @@ async fn library_audio(
         .library
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+    if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) { return Err(ApiError::bad_request("图片素材没有音频")); }
     let mut path = PathBuf::from(&track.path);
     if !path.is_file() {
         return Err(ApiError::not_found("音频文件已丢失"));
@@ -7113,7 +7368,7 @@ pub(crate) async fn audio_response(
 }
 
 /// `bytes=0-1023` / `bytes=1024-` / `bytes=-500`
-fn parse_range(value: &str, total: u64) -> Option<(u64, u64)> {
+pub(crate) fn parse_range(value: &str, total: u64) -> Option<(u64, u64)> {
     if total == 0 {
         return None;
     }
@@ -7177,10 +7432,16 @@ async fn library_cover(
     Query(params): Query<CoverQueryParams>,
 ) -> ApiResult<Response> {
     let library = Arc::clone(&state.library);
-    let source = run_library_read(move || library.media_source(id))
+    let source = run_library_cover_read(move || library.media_source(id))
         .await?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
     let path = PathBuf::from(&source.path);
+    if kdj_providers::workshop_images::is_image_path(&path) {
+        let width = params.size.unwrap_or(960).clamp(32, 1920);
+        let animated = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("gif"));
+        let data = run_library_cover_read(move || kdj_providers::workshop_images::frame_png(&path, animated, 0, width)).await?;
+        return Ok((StatusCode::OK, cover_headers("image/png".into()), data).into_response());
+    }
     if let Some(size) = params.size {
         if let Some(data) =
             cover_thumbnail(&source, &state.config.data_dir.join("covers"), size).await
@@ -7192,7 +7453,7 @@ async fn library_cover(
 
     let cover_path = path.clone();
     if let Some((data, mime)) =
-        run_library_read(move || Ok(kdj_providers::tags::read_cover(&cover_path))).await?
+        run_library_cover_read(move || Ok(kdj_providers::tags::read_cover(&cover_path))).await?
     {
         return Ok((StatusCode::OK, cover_headers(mime), data).into_response());
     }
@@ -7476,6 +7737,7 @@ async fn library_waveform(
         .library
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+    if kdj_providers::workshop_images::is_image_path(Path::new(&track.path)) { return Err(ApiError::bad_request("图片没有音频波形")); }
     let release_intent = crate::waveform::ReleaseOverviewIntent::from(params.intent);
     if params.profile == WaveformRequestProfile::ReleaseOverview && params.intent_only {
         state
@@ -8459,6 +8721,22 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         AppState::new(config).unwrap()
     }
 
+    #[tokio::test]
+    async fn empty_import_never_scans_registered_library_roots() {
+        let base = scratch("empty-import");
+        let state = undo_test_state(&base);
+        let mut settings = state.config.to_settings();
+        settings.library_dirs = vec![base.to_string_lossy().into_owned()];
+        state.config.apply_settings(settings).unwrap();
+        for paths in [vec![], vec![" ".to_owned()]] {
+            let result = library_scan(State(state.clone()), Json(ScanRequest { paths, ..Default::default() })).await;
+            assert_eq!(result.unwrap_err().status, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(state.scans.cancel("").canceled, 0);
+        drop(state);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     fn insert_undo_track(state: &AppState, path: &Path) -> i64 {
         let path_text = path.to_string_lossy().into_owned();
         let filename = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -8470,6 +8748,34 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[tokio::test]
+    async fn folder_snapshot_endpoint_returns_tree_and_generation_time() {
+        let base = scratch("folder-snapshot-contract");
+        let state = undo_test_state(&base);
+        let root = base.join("library");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut settings = state.config.to_settings();
+        settings.library_dirs = vec![root.to_string_lossy().into_owned()];
+        state.config.apply_settings(settings).unwrap();
+        let tree = FolderTree {
+            roots: Vec::new(),
+            outside: 3,
+        };
+        state
+            .library
+            .store_folder_snapshot(&state.config.to_settings().library_dirs, &tree)
+            .unwrap();
+
+        let response = library_folders_snapshot(State(Arc::clone(&state)))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(response.tree, Some(tree));
+        assert!(response.generated_at.is_some());
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
@@ -8834,5 +9140,32 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
             ..original.clone()
         };
         assert!(duplicate_groups(vec![original, live]).is_empty());
+    }
+
+    #[test]
+    fn library_cursor_roundtrips_keyset_and_keeps_legacy_offset_compatibility() {
+        let encoded = encode_file_created_library_cursor(1_700_000_123.5, 42, 50_000, true);
+        match decode_library_cursor(&encoded) {
+            Some(LibraryCursor::FileCreated {
+                created_at,
+                id,
+                total,
+                descending,
+            }) => {
+                assert_eq!(created_at, 1_700_000_123.5);
+                assert_eq!(id, 42);
+                assert_eq!(total, 50_000);
+                assert!(descending);
+            }
+            other => panic!("键集游标解码错误：{other:?}"),
+        }
+        match decode_library_cursor(&encode_offset_library_cursor(500, 50_000)) {
+            Some(LibraryCursor::Offset { offset, total }) => {
+                assert_eq!(offset, 500);
+                assert_eq!(total, 50_000);
+            }
+            other => panic!("旧 offset 游标兼容失败：{other:?}"),
+        }
+        assert!(decode_library_cursor("kdj2-d-nan-1-2").is_none());
     }
 }

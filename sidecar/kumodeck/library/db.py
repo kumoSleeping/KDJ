@@ -1,6 +1,6 @@
 """SQLite 连接管理 + 建表 / 迁移。
 
-建表语句逐字对应 `docs/00-architecture.md` 第 5 节，改这里必须先改文档。
+建表语句仅保留为历史实现参考，不得作为当前 Rust 数据库契约。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-# --- 逐字照抄 docs/00-architecture.md 第 5 节 ---------------------------------
+# --- 历史 schema ------------------------------------------------------------
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS tracks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

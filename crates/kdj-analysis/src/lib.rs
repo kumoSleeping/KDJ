@@ -5,6 +5,7 @@
 //! （现状是完全用不了）。
 
 pub mod decode;
+pub mod alignment;
 pub mod dj_grid;
 pub mod dsp;
 pub mod engine;

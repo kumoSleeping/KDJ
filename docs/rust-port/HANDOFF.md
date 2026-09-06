@@ -181,7 +181,7 @@ crates/kdj-server/     routes.rs(34 条路由) ws.rs auth.rs downloads.rs jobs.r
 src-tauri/                  Tauri 壳：lib.rs 里 6 条命令 + 进程内起 axum；main.rs 只转调
 sidecar/                    Python 原版，**保留着当参照物**，最后再删
 src/                        现有 React 前端，保留
-src/lib/bridge.ts           运行时探测壳（Tauri / Electron / 浏览器），装回 window.kdj
+src/lib/bridge.ts           运行时探测壳（Tauri / 浏览器），装回 window.kdj
 vite.tauri.config.ts        Tauri 专用前端构建（端口 5275、产物 dist-tauri/、剥 index.html 的 CSP meta）
 docs/rust-port/             本目录，每步一份
 .github/workflows/
