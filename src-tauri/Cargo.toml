@@ -23,6 +23,8 @@ kdj-library = { version = "1.0.0-rc3", path = "../crates/kdj-library" }
 kdj-providers = { version = "1.0.0-rc3", path = "../crates/kdj-providers" }
 kdj-server = { version = "1.0.0-rc3", path = "../crates/kdj-server", default-features = false }
 rand = "0.10.2"
+# The workshop import command proxies to the embedded server on every platform.
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls-no-provider"] }
 serde = { version = "1.0.229", features = ["derive"] }
 # tauri.conf.json 里一有 `plugins` 段，`generate_context!` 展开出来的代码就会
 # 直接引用 ::serde_json 反序列化插件配置——不显式依赖它，报的是
@@ -42,7 +44,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 kdj-playback = { version = "1.0.0-rc3", path = "../crates/kdj-playback" }
 tauri-plugin-updater = "2"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
-reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["blocking"] }
 midir = "0.11"
 clap = { version = "4.5", features = ["derive"] }
 tauri-plugin-dialog = "2.7"
