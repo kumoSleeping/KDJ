@@ -59,7 +59,11 @@ async function main() {
   const nativeProofWorker = assets.some((file) => (
     /^youtubeNativePo\.worker-[^/]+\.js$/.test(path.basename(file))
   ));
-  const maxTotal = platform === "darwin" ? 1_500_000 : 1_250_000;
+  // RC3 adds the VJ workshop and windowed library UI. Production baselines:
+  // macOS 1,679,478 B; Android/Linux 1,421,669 B; shared CSS 226,203 B.
+  // Keep less than 10% headroom while retaining the entry, worker and source-map gates.
+  const maxTotal = platform === "darwin" ? 1_800_000 : 1_550_000;
+  const maxCss = 245_000;
 
   console.log(
     `Frontend bundle (${platform}): total=${total} B, `
@@ -79,8 +83,8 @@ async function main() {
     report("error", `前端主 JS ${mainJsBytes} B 超过 1050000 B 预算`);
     failed = true;
   }
-  if (cssBytes > 200_000) {
-    report("error", `前端全部 CSS ${cssBytes} B 超过 200000 B 预算`);
+  if (cssBytes > maxCss) {
+    report("error", `前端全部 CSS ${cssBytes} B 超过 ${maxCss} B 预算`);
     failed = true;
   }
   if (failed) process.exitCode = 1;
