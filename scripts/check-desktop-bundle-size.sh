@@ -8,8 +8,9 @@ set -euo pipefail
 #
 # Limits use decimal bytes, matching the GitHub Releases API. Baselines are the
 # v0.2.44 release (macOS thin-package values are the measured split estimates).
-# A roughly 15% allowance absorbs signatures/bundler drift while still catching
-# an accidentally reintroduced runtime or universal macOS binary.
+# Original limits allow roughly 15% over that baseline. RC3's workshop raises the
+# measured macOS DMGs to 8.80/9.99 MB; their limits retain about 5% headroom.
+# These bounds still catch a reintroduced runtime or universal macOS binary.
 
 if [ "$#" -lt 3 ]; then
   echo "usage: $0 <macos-arm64|macos-x86_64|windows-x86_64|linux-x86_64> <x.y.z[-suffix]> <true|false> [target roots...]" >&2
@@ -131,7 +132,7 @@ check_optional_mac_updater() {
 
 echo "### Desktop bundle size gate — \`$label\`"
 echo
-echo "Limits are decimal MB and include approximately 15% headroom over v0.2.44."
+echo "Limits are decimal MB; macOS budgets include about 5% headroom over measured RC3 DMGs."
 echo
 echo '| Artifact | Actual | v0.2.44 baseline | Budget | Result |'
 echo '| --- | ---: | ---: | ---: | --- |'
@@ -139,7 +140,7 @@ echo '| --- | ---: | ---: | ---: | --- |'
 case "$label" in
   macos-arm64)
     baseline=7500000
-    budget=8700000
+    budget=9200000
     check_artifact "macOS arm64 DMG" dmg "KDJ_${version}_aarch64.dmg" "$baseline" "$budget"
     if [ "$require_updater" = true ]; then
       updater="KDJ_${version}_aarch64.app.tar.gz"
@@ -151,7 +152,7 @@ case "$label" in
     ;;
   macos-x86_64)
     baseline=8570000
-    budget=9900000
+    budget=10500000
     check_artifact "macOS x86_64 DMG" dmg "KDJ_${version}_x64.dmg" "$baseline" "$budget"
     if [ "$require_updater" = true ]; then
       updater="KDJ_${version}_x86_64.app.tar.gz"
