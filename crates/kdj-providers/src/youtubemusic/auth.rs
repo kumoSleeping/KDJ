@@ -51,6 +51,20 @@ fn default_user_agent() -> String {
 }
 
 impl BrowserSession {
+    /// WebView / 原生 cookie manager 读到的 Cookie 头；不经过前端。
+    pub fn from_cookie_header(cookie: &str, imported_from: impl Into<String>) -> Result<Self> {
+        let mut session = BrowserSession {
+            cookie: normalize_cookie(cookie),
+            x_goog_authuser: default_auth_user(),
+            user_agent: default_user_agent(),
+            visitor_data: String::new(),
+            imported_from: imported_from.into(),
+            created_at: unix_now(),
+        };
+        session.validate()?;
+        Ok(session)
+    }
+
     pub fn from_headers(raw: &str) -> Result<Self> {
         let raw = raw.trim();
         anyhow::ensure!(!raw.is_empty(), "请粘贴 YouTube 请求头");
@@ -124,6 +138,23 @@ impl BrowserSession {
         let timestamp = unix_now();
         let digest = Sha1::digest(format!("{timestamp} {sid} {origin}").as_bytes());
         Some(format!("SAPISIDHASH {timestamp}_{}", hex::encode(digest)))
+    }
+
+    pub fn request_headers(&self, origin: &str) -> Vec<(String, String)> {
+        let mut headers = vec![
+            ("Cookie".into(), self.cookie.clone()),
+            ("X-Goog-AuthUser".into(), self.x_goog_authuser.clone()),
+            ("Origin".into(), origin.to_string()),
+            ("X-Origin".into(), origin.to_string()),
+            ("User-Agent".into(), self.user_agent.clone()),
+        ];
+        if let Some(authorization) = self.authorization(origin) {
+            headers.push(("Authorization".into(), authorization));
+        }
+        if !self.visitor_data.is_empty() {
+            headers.push(("X-Goog-Visitor-Id".into(), self.visitor_data.clone()));
+        }
+        headers
     }
 }
 
@@ -217,23 +248,9 @@ impl YoutubeAuth {
     }
 
     pub fn request_headers(&self, origin: &str) -> Vec<(String, String)> {
-        let Some(session) = self.snapshot() else {
-            return Vec::new();
-        };
-        let mut headers = vec![
-            ("Cookie".into(), session.cookie.clone()),
-            ("X-Goog-AuthUser".into(), session.x_goog_authuser.clone()),
-            ("Origin".into(), origin.to_string()),
-            ("X-Origin".into(), origin.to_string()),
-            ("User-Agent".into(), session.user_agent.clone()),
-        ];
-        if let Some(authorization) = session.authorization(origin) {
-            headers.push(("Authorization".into(), authorization));
-        }
-        if !session.visitor_data.is_empty() {
-            headers.push(("X-Goog-Visitor-Id".into(), session.visitor_data));
-        }
-        headers
+        self.snapshot()
+            .map(|session| session.request_headers(origin))
+            .unwrap_or_default()
     }
 
     pub fn browser_catalog() -> BrowserCatalog {
@@ -404,6 +421,15 @@ mod tests {
     fn missing_sapisid_is_rejected() {
         let error = BrowserSession::from_headers("cookie: SID=x; LOGIN_INFO=y").unwrap_err();
         assert!(error.to_string().contains("SAPISID"));
+    }
+
+    #[test]
+    fn cookie_header_import_accepts_sapisid() {
+        let session =
+            BrowserSession::from_cookie_header(sample_cookie(), "WebView 登录 · music.youtube.com")
+                .unwrap();
+        assert!(session.sid().is_some());
+        assert_eq!(session.imported_from, "WebView 登录 · music.youtube.com");
     }
 
     #[test]

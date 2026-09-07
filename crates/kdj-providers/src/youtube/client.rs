@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use crate::net::http_timeouts;
 use crate::provider::{ProtectedPoTokenBinding, ProtectedPreviewIdentity};
-use crate::youtubemusic::auth::YoutubeAuth;
+use crate::youtubemusic::auth::{BrowserSession, YoutubeAuth};
 use crate::youtubemusic::client::extract_player_url;
 use crate::youtubemusic::decipher::PlayerScript;
 
@@ -25,6 +25,25 @@ const IOS_USER_AGENT: &str =
     "com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)";
 pub const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const VIDEO_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, thiserror::Error)]
+#[error("YouTube 接口返回 {status}：{endpoint} {detail}")]
+struct YoutubeApiError {
+    status: reqwest::StatusCode,
+    endpoint: String,
+    detail: String,
+}
+
+pub(super) fn is_auth_rejection(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<YoutubeApiError>()
+        .is_some_and(|error| {
+            matches!(
+                error.status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            )
+        })
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Thumbnail {
@@ -152,12 +171,54 @@ impl YoutubeClient {
     }
 
     pub async fn post_web(&self, endpoint: &str, body: &Value) -> Result<Value> {
+        self.post_web_with_headers(
+            endpoint,
+            body,
+            self.auth.request_headers("https://www.youtube.com"),
+        )
+        .await
+    }
+
+    async fn post_web_with_headers(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        headers: Vec<(String, String)>,
+    ) -> Result<Value> {
         let url = format!("{BASE}/{endpoint}?key={}&prettyPrint=false", self.key);
         let mut request = self.http.post(url).json(body);
-        for (name, value) in self.auth.request_headers("https://www.youtube.com") {
+        for (name, value) in headers {
             request = request.header(name, value);
         }
         read_json(request, endpoint).await
+    }
+
+    fn account_playlist_directory_body() -> Value {
+        let mut body = Self::web_context();
+        body.as_object_mut()
+            .expect("WEB context is an object")
+            .insert(
+                "browseId".into(),
+                Value::String("FEplaylist_aggregation".into()),
+            );
+        body
+    }
+
+    /// 账号侧栏真正依赖的私人播放列表目录；它本身就是这份会话能力的判据。
+    pub async fn account_playlist_directory(&self) -> Result<Value> {
+        self.post_web("browse", &Self::account_playlist_directory_body())
+            .await
+    }
+
+    /// 候选会话必须先联网验证，成功后上层才允许替换已保存的登录态。
+    pub async fn validate_browser_session(&self, session: &BrowserSession) -> Result<()> {
+        self.post_web_with_headers(
+            "browse",
+            &Self::account_playlist_directory_body(),
+            session.request_headers("https://www.youtube.com"),
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn search(&self, query: &str) -> Result<Value> {
@@ -647,7 +708,12 @@ async fn read_json(request: reqwest::RequestBuilder, endpoint: &str) -> Result<V
             .pointer("/error/message")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        bail!("YouTube 接口返回 {status}：{endpoint} {detail}");
+        return Err(YoutubeApiError {
+            status,
+            endpoint: endpoint.to_string(),
+            detail: detail.to_string(),
+        }
+        .into());
     }
     Ok(payload)
 }

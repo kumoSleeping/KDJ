@@ -7,11 +7,16 @@ import {
   Download,
   Link2,
   ListMinus,
+  LoaderCircle,
   Play,
 } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
-import { requestSongPreview, type SongPreviewItem } from "../../lib/songPreview";
+import {
+  requestSongPreview,
+  sourceKey,
+  type SongPreviewItem,
+} from "../../lib/songPreview";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import type { MergedGroup, Platform, SongSource } from "../../types";
@@ -70,6 +75,9 @@ export interface MergedGroupRowProps {
   onRemoveFromStreamPlaylist?(): void;
   removeFromStreamPlaylistLabel?: string;
   removingFromStreamPlaylist?: boolean;
+  /** 正在解析或装载的在线来源；用于在用户双击的位置给出即时反馈。 */
+  previewPendingSourceKey?: string;
+  previewPendingLabel?: string;
   /** 当前搜索结果里排在本行之后的可播放歌曲。 */
   followingSongs?: SongPreviewItem[];
   onDragStart?(event: React.DragEvent<HTMLElement>): void;
@@ -108,6 +116,8 @@ export function MergedGroupRow({
   onRemoveFromStreamPlaylist,
   removeFromStreamPlaylistLabel,
   removingFromStreamPlaylist = false,
+  previewPendingSourceKey = "",
+  previewPendingLabel = "解析中",
   followingSongs = [],
   onDragStart,
   onDragEnd,
@@ -132,6 +142,9 @@ export function MergedGroupRow({
       : (group.sources.find(
           (source) => source.platform !== "bilibili" && source.platform !== "local",
         ) ?? null);
+  const previewPending = Boolean(
+    previewSource && previewPendingSourceKey === sourceKey(previewSource),
+  );
   useEffect(() => () => pointerDragCleanupRef.current?.(), []);
 
   const toggleSelection = () => {
@@ -141,6 +154,7 @@ export function MergedGroupRow({
   /** 把当前组/来源送进主播放条试听。双击或设置成单击时触发。 */
   const playGroup = () => {
     if (previewSource) {
+      if (previewPending) return;
       requestSongPreview({
         source: previewSource,
         title: group.title,
@@ -165,6 +179,7 @@ export function MergedGroupRow({
       return;
     }
     if (source.platform === "bilibili") return;
+    if (previewPendingSourceKey === sourceKey(source)) return;
     requestSongPreview({
       source,
       title: source.title || group.title,
@@ -211,6 +226,12 @@ export function MergedGroupRow({
         />
       </span>
       <span className="kd-result-title-text">{group.title}</span>
+      {previewPending && (
+        <span className="kd-result-resolving" role="status">
+          <LoaderCircle className="kd-spin" size={11} aria-hidden="true" />
+          {previewPendingLabel}
+        </span>
+      )}
     </>
   );
 
@@ -326,6 +347,12 @@ export function MergedGroupRow({
               <span className="kd-truncate">{source.title}</span>
               <span className="kd-faint">·</span>
               <span className="kd-truncate kd-faint">{source.artists.join(", ") || DASH}</span>
+              {previewPendingSourceKey === sourceKey(source) && (
+                <span className="kd-result-resolving" role="status">
+                  <LoaderCircle className="kd-spin" size={11} aria-hidden="true" />
+                  {previewPendingLabel}
+                </span>
+              )}
             </span>
           </td>
         );
@@ -372,6 +399,8 @@ export function MergedGroupRow({
         aria-selected={selected || inspected}
         data-kd-search-result=""
         data-inspected={inspected ? "true" : undefined}
+        data-resolving={previewPending ? "true" : undefined}
+        aria-busy={previewPending ? "true" : undefined}
         aria-label={
           layout === "narrow"
             ? `${group.title}，单击播放`
@@ -482,6 +511,8 @@ export function MergedGroupRow({
         group.sources.map((source, index) => (
           <tr
             key={`${source.platform}:${source.key}`}
+            data-resolving={previewPendingSourceKey === sourceKey(source) ? "true" : undefined}
+            aria-busy={previewPendingSourceKey === sourceKey(source) ? "true" : undefined}
             aria-label={
               layout === "narrow"
                 ? `${source.title || group.title}，单击播放此来源`

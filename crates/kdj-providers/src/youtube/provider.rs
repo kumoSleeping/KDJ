@@ -28,9 +28,11 @@ use crate::provider::{
 use crate::tags;
 use crate::youtubemusic::auth::YoutubeAuth;
 
+use super::client::{
+    is_auth_rejection, ProtectedHlsContext, Thumbnail, VideoDetails, VideoFormat, YoutubeClient,
+};
 #[cfg(test)]
 use super::client::{MediaMime, USER_AGENT};
-use super::client::{ProtectedHlsContext, Thumbnail, VideoDetails, VideoFormat, YoutubeClient};
 use super::hls_download;
 
 const LABEL: &str = "YouTube Video";
@@ -71,7 +73,6 @@ fn validated_local_youtube_hls_url(value: &str) -> Result<&str> {
 }
 
 const YOUTUBE_SEARCH_KINDS: &[SearchKind] = &[SearchKind::Song];
-const INNERTUBE_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
 
 pub struct YoutubeProvider {
     ctx: ProviderContext,
@@ -83,6 +84,34 @@ impl YoutubeProvider {
     pub fn new(ctx: ProviderContext, auth: Arc<YoutubeAuth>) -> Result<Self> {
         let client = YoutubeClient::new(auth.clone())?;
         Ok(Self { ctx, auth, client })
+    }
+
+    fn cached_account_snapshot(&self) -> Account {
+        let mut account = Account::new(Platform::Youtube, LABEL, AccountState::Missing, "未登录");
+        account.login_method = "browser".into();
+        account.credential_kind = "anonymous".into();
+        if let Some(session) = self.auth.snapshot() {
+            account.state = AccountState::Valid;
+            account.account_key = session.x_goog_authuser;
+            account.credential_kind = "browser_session".into();
+            account.detail = if session.imported_from.is_empty() {
+                "登录状态尚未联网核验".into()
+            } else {
+                session.imported_from
+            };
+        } else if !self.ctx.youtube_enabled() {
+            account.detail = DISABLED_MESSAGE.into();
+        } else {
+            account.detail = "公开内容可匿名访问；登录后可读取账号受限内容".into();
+        }
+        account
+    }
+
+    pub async fn validate_browser_session(
+        &self,
+        session: &crate::youtubemusic::auth::BrowserSession,
+    ) -> Result<()> {
+        self.client.validate_browser_session(session).await
     }
 
     fn ensure_enabled(&self) -> Result<()> {
@@ -137,22 +166,11 @@ impl YoutubeProvider {
             "browseId": format!("VL{playlist_id}")
         });
         let context = body.get("context").cloned().unwrap_or(Value::Null);
-        let url = format!(
-            "https://www.youtube.com/youtubei/v1/browse?key={INNERTUBE_KEY}&prettyPrint=false"
-        );
-        let mut request = self.client.http().post(&url).json(&body);
-        for (name, value) in self.auth.request_headers("https://www.youtube.com") {
-            request = request.header(name, value);
-        }
-        let response = { request.send().await.context("读取 YouTube 播放列表失败")? };
-        let status = response.status();
-        let body: Value = response
-            .json()
+        let body = self
+            .client
+            .post_web("browse", &body)
             .await
-            .context("YouTube 播放列表响应不是合法 JSON")?;
-        if !status.is_success() {
-            bail!("YouTube 播放列表接口返回 {status}");
-        }
+            .context("读取 YouTube 播放列表失败")?;
         let title = body
             .pointer("/metadata/playlistMetadataRenderer/title")
             .and_then(Value::as_str)
@@ -171,24 +189,11 @@ impl YoutubeProvider {
                 break;
             }
             let page_body = json!({ "context": context.clone(), "continuation": token });
-            let mut request = self.client.http().post(&url).json(&page_body);
-            for (name, value) in self.auth.request_headers("https://www.youtube.com") {
-                request = request.header(name, value);
-            }
-            let response = {
-                request
-                    .send()
-                    .await
-                    .context("继续读取 YouTube 播放列表失败")?
-            };
-            let status = response.status();
-            let page: Value = response
-                .json()
+            let page = self
+                .client
+                .post_web("browse", &page_body)
                 .await
-                .context("YouTube 播放列表分页响应不是合法 JSON")?;
-            if !status.is_success() {
-                bail!("YouTube 播放列表分页接口返回 {status}");
-            }
+                .context("继续读取 YouTube 播放列表失败")?;
             let before = sources.len();
             collect_playlist_lockups(&page, &mut sources, limit);
             continuation = playlist_continuation(&page);
@@ -204,38 +209,11 @@ impl YoutubeProvider {
     }
 
     async fn library_playlists(&self) -> Result<Vec<StreamPlaylist>> {
-        let body = json!({
-            "context": {
-                "client": {
-                    "clientName": "WEB",
-                    "clientVersion": web_client_version(),
-                    "hl": "zh-CN",
-                    "gl": "US"
-                }
-            },
-            "browseId": "FEplaylist_aggregation"
-        });
-        let url = format!(
-            "https://www.youtube.com/youtubei/v1/browse?key={INNERTUBE_KEY}&prettyPrint=false"
-        );
-        let mut request = self.client.http().post(&url).json(&body);
-        for (name, value) in self.auth.request_headers("https://www.youtube.com") {
-            request = request.header(name, value);
-        }
-        let response = {
-            request
-                .send()
-                .await
-                .context("读取 YouTube 播放列表目录失败")?
-        };
-        let status = response.status();
-        let body: Value = response
-            .json()
+        let body = self
+            .client
+            .account_playlist_directory()
             .await
-            .context("YouTube 播放列表目录响应不是合法 JSON")?;
-        if !status.is_success() {
-            bail!("YouTube 播放列表目录接口返回 {status}");
-        }
+            .context("读取 YouTube 播放列表目录失败")?;
         Ok(youtube_library_playlists(&body))
     }
 
@@ -498,20 +476,30 @@ impl MusicProvider for YoutubeProvider {
     }
 
     async fn account(&self) -> Account {
-        let mut account = Account::new(Platform::Youtube, LABEL, AccountState::Missing, "未登录");
-        account.login_method = "browser".into();
-        account.credential_kind = "anonymous".into();
-        if let Some(session) = self.auth.snapshot() {
-            account.state = AccountState::Valid;
-            account.account_key = session.x_goog_authuser;
-            account.credential_kind = "browser_session".into();
-            account.detail = session.imported_from;
-        } else if !self.ctx.youtube_enabled() {
-            account.detail = DISABLED_MESSAGE.into();
-        } else {
-            account.detail = "公开内容可匿名访问；登录后可读取账号受限内容".into();
+        let mut account = self.cached_account_snapshot();
+        if account.state != AccountState::Valid {
+            return account;
         }
-        account
+        match self.client.account_playlist_directory().await {
+            Ok(_) => account,
+            Err(error) if is_auth_rejection(&error) => {
+                account.state = AccountState::Expired;
+                account.detail = "登录已失效，请重新连接".into();
+                account
+            }
+            Err(error) => {
+                account.state = AccountState::Unknown;
+                account.detail = format!("登录态检查失败：{error:#}")
+                    .chars()
+                    .take(160)
+                    .collect();
+                account
+            }
+        }
+    }
+
+    async fn cached_account(&self) -> Account {
+        self.cached_account_snapshot()
     }
 
     async fn create_qr(&self) -> Result<QrSession> {
@@ -1360,7 +1348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_download_source_does_not_hide_its_own_login() {
+    async fn cached_account_keeps_login_visible_when_download_source_is_disabled() {
         use crate::provider::ProviderLiveSettings;
         use crate::youtubemusic::auth::BrowserSession;
 
@@ -1397,7 +1385,7 @@ mod tests {
         .unwrap();
         let provider = YoutubeProvider::new(ctx, auth).unwrap();
 
-        let account = provider.account().await;
+        let account = provider.cached_account().await;
         assert_eq!(account.state, AccountState::Valid);
         assert_eq!(account.account_key, "2");
         assert_eq!(account.credential_kind, "browser_session");

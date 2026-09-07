@@ -29,15 +29,15 @@
 - 安全整改最初采用 fail-closed：删除主窗口远程执行后，依赖 BotGuard、`s` 或 `n` 变换的受保护 YouTube Music 播放明确不可用。截图里的报错描述的就是这个阶段。它失去的是受保护的 YTM 试听/下载准备，不是 QQ 或网易云登录。
 - 随后的普通 YouTube 试验链使用 direct DASH、独立音视频轨、`s`/`n` 解码和 MSE/SIDX 拼接。它请求多、首播等待长、seek 要重建字节区间，WebKit 下也更容易出现音画轨不同步或某一路 403，因此没有保留为正式路径。
 
-## 3. 当前普通 YouTube 的唯一链路
+## 3. 当前普通 YouTube 桌面链路
 
-1. 应用启动或指针接近视频项时，只预创建一个本地黑色空白的原生子 WebView；这一步不访问 YouTube、不读取登录态，也不解析媒体。
-2. 用户按下播放后，Rust 校验 11 位 video id 和至少 `200×200` 的显示区域，再让这个子 WebView 直接打开唯一的官方 `https://www.youtube.com/embed/<video-id>` 页面。请求带 KDJ 项目来源的 `Referer`、`origin` 与 `widget_referrer`，避免官方播放器因缺少客户端标识而返回错误 153。
-3. 子 WebView 使用非持久数据存储，创建后会在首次远程导航前移除全部 Tauri user script 和 `ipc` message handler。官方页面拿不到主窗口的 invoke key、本地 HTTP bearer、媒体 capability、DOM、localStorage 或浏览器复用的 YouTube Cookie。
-4. 清晰度选择、自适应分片、解码、缓冲和拖动全部由 YouTube 官方播放器与系统 WKWebView 完成。KDJ 只通过隔离子视图查询有限状态，并发送播放、暂停、静音和 seek 控制；返回值只包含布尔状态、时长和当前位置。
-5. 切歌会在同一个隔离子视图中导航到新的精确 embed URL；关闭会先 `stopVideo` 再隐藏子视图。旧会话的迟到命令带旧 video id，Rust 会拒绝它操作新视频。
+1. macOS 优先使用官方 `https://www.youtube.com/embed/<video-id>` 子 WebView。它使用非持久数据存储，不导入浏览器登录 Cookie，并在首次远程导航前移除 Tauri user script 与 `ipc` handler；清晰度、自适应、解码和 seek 由官方播放器负责。
+2. macOS 官方 embed 明确失败、用户进入显式回退，或平台没有 embed bridge 时，前端只走 KDJ HLS 准备链：Rust 校验 11 位 video id，隔离 proof/player WebView 生成 GVS proof 并完成 `s`/`n` 变换，后端再签发本地不透明 HLS capability。
+3. proof/player WebView 是 incognito，固定在 YouTube `robots.txt` origin，拒绝其它导航和新窗口，不导入账号 Cookie，也不匹配任何 Tauri command capability。远程 BotGuard/player 代码不会进入主 renderer。
+4. 前端在创建播放会话前检查媒体元素的原生 HLS 能力。WKWebView 可进入系统 H.264/AAC 管线；WebView2 通常返回不支持并显式失败。本次没有重新引入 DASH/MSE 或 hls.js。
+5. 两条路径都不在一次失败后切换 client、binding、proof 服务或媒体编码；短时预热缓存仍属于同一次用户播放尝试，拒绝结果不会被第二次请求悄悄覆盖。
 
-这条正式路径不再读取普通 YouTube 浏览器会话，也不再为普通视频生成 GVS proof、解析 `s`/`n`、代理 GoogleVideo HLS、拼接 DASH/MSE，或在失败后换 client/binding/URL 重试。播放器状态轮询只是观察同一次官方导航，不是第二条播放链路。
+因此本次三端统一的是 proof/player 运行器，不是三端普通视频播放保证。普通 YouTube 也不读取浏览器登录会话；只有进入 KDJ HLS 回退时才生成 proof、解析 `s`/`n` 和代理 GoogleVideo HLS。
 
 ## 4. 当前 YouTube Music 音频链路
 
@@ -51,23 +51,22 @@ YTM 仍需要它自己的登录会话和 WEB_REMIX player：读取 identity 与 
 
 - 主 renderer 的生产 CSP 不需要 `unsafe-eval`，不执行 BotGuard 或 player 远程代码。
 - 普通视频的官方子 WebView 为 incognito；首次远程导航前移除全部 Tauri user script 和 `ipc` message handler，并以精确 host/path allowlist 拒绝非官方导航和新窗口。
-- 普通视频不读取浏览器会话，不生成或暴露 proof，不把 GoogleVideo URL、Cookie、本地控制 bearer 或媒体 capability 交给 renderer。
-- YTM 必需的 BotGuard/WebPO 仍只在加载固定本地壳、无 Cookie、无 IPC、无本地能力、网络受限的隐藏原生 WKWebView 中运行；proof 和上游媒体 URL不会进入主页面错误文案或日志。
+- 普通视频不读取浏览器会话；官方 embed 不生成 proof，KDJ HLS 回退会在隔离运行器内生成 proof。两条路径都不把 GoogleVideo URL、Cookie 或本地控制 bearer 交给 renderer；renderer 只拿到有界、可撤销的本地 HLS capability。
+- YTM 必需的 BotGuard/WebPO 只在无导入 Cookie、无命令 capability、网络受限的隐藏 Tauri 系统 WebView 中运行；macOS、Windows、Linux 共用同一 Rust/Tauri 适配，proof 和上游媒体 URL 不会进入主页面错误文案或日志。
 - QQ、网易云和 YouTube session 目录在 Unix 上为 `0700`、文件为 `0600`；当前版本还会收紧 `kumodeck` 与 Labs 历史数据目录中遗留的普通 session 文件。
 
 ### 失去或限制的功能
 
-- 普通视频现在是匿名官方 embed：需要登录、年龄验证、会员、私有或禁止嵌入的视频可能不能播放。它不会借用用户浏览器里的 YouTube 登录态。
-- KDJ 不再自己决定普通视频的精确编码轨、固定分辨率和码率切换；官方播放器负责自适应策略，并可能显示 YouTube 品牌、广告和自身控件。
-- KDJ 原有的系统画中画/自动画中画不再用于普通 YouTube；可用的全屏或其他能力以官方播放器实际提供的控件为准。
-- 当前隔离子 WebView 接入只在 macOS 启用；其他桌面系统会明确报不支持，不以低安全 WebView 或私有协议补齐。
+- macOS 官方 embed 仍受匿名、年龄、会员、私有与禁嵌条件限制，也可能显示 YouTube 品牌、广告和自身控件；它不会借用用户浏览器里的 YouTube 登录态。
+- KDJ HLS 回退固定选择一条受支持的 H.264/AAC 变体，不做自动 rendition/client 切换；系统画中画能力只在这条原生媒体路径实际可用时成立。
+- 普通视频的官方 embed 子视图仍只在 macOS 启用。KDJ HLS 准备链可在 Windows/Linux 运行，但媒体元素只有在系统 WebView 宣告原生 HLS 能力时才会进入播放；WebView2 通常不支持，因此本次不能视为补齐 Windows 普通视频播放。两条桌面链需要的 WebPO/player 隔离运行器已经统一到 Tauri 系统 WebView，不再为 Windows/Linux 嵌入 Deno/V8，也没有新增 MSE/hls.js。
 - 官方远程播放器、地区策略或网络仍可能令单次播放失败；工程上不能仅凭一次 E2E 声称 `99.9%` 成功率，需要发布后的匿名成功率与延迟遥测才能量化。
 
 ### 实际体积
 
-- 普通 YouTube 视频没有新增播放器 npm 包、JS 引擎、Node/Python sidecar、FFmpeg 或 yt-dlp；它复用 Tauri 已经依赖的系统 WKWebView。代价只是启用 Tauri 的 child-webview API 和少量 Rust/TypeScript 桥接代码。
+- 普通 YouTube 视频没有新增播放器 npm 包、JS 引擎、Node/Python sidecar、FFmpeg 或 yt-dlp；官方 embed 与 proof/player 都复用 Tauri 已经依赖的系统 WebView。新增的是少量 Rust/TypeScript 桥接与原本只在 macOS 打包的 worker 资产。
 - 官方播放器本体从 YouTube 远程加载，因此不会进入 KDJ 安装包，但冷启动仍有网络脚本、广告/策略检查和播放器资源开销；本地空白子视图预热只减少 WebView 创建时间，不伪装网络性能。
-- `googlevideo@4.1.1` 在开发机 `node_modules` 中约 `1.04 MiB`，但它现在只服务 YTM 的 SABR/UMP 音频；生产构建对应的延迟 chunk 是 `85.01 kB` raw / `20.32 kB` gzip。YTM 的原生 proof worker 另为 `170.69 kB` raw。普通 YouTube 视频不会加载这两项。
+- `googlevideo@4.1.1` 只服务 YTM 的 SABR/UMP 音频；当前生产延迟 chunk 是 `85,471 B` raw / `20,475 B` gzip，proof/player worker 是 `170,552 B` raw / `53,728 B` gzip。macOS 原本就包含两项；Windows/Linux 新增前端资产合计 `256,023 B` raw / `74,203 B` gzip，没有新增 Rust 依赖。安装包增量预算取 `< 0.5 MB`，最终值以三平台 CI 产物差分为准。
 
 ## 6. 风险评级与发布动作
 
@@ -76,7 +75,7 @@ YTM 仍需要它自己的登录会话和 WEB_REMIX player：读取 identity 与 
 | v0.2.44 安装包携带用户登录凭证 | 低 | 对公开 macOS release 的结构与强格式实扫未发现；正常 bundle 配置也不包含数据目录。 |
 | GitHub 实际存在 Secret scanning alert | 未知 | 需要仓库管理员登录后查看；公开 API、workflow 与 release 页面无法证明没有私有告警。最可能命中公开 Google client key。 |
 | QQ/YouTube 本机会话被同机其他账号读取 | 低 | 正式数据目录已是 0700/0600；发现的历史 QQ、网易云及其他 session 副本也已统一收紧，新版本会持续迁移权限，调试覆盖目录也不能绕过。会话一旦被复制仍属高影响凭证。 |
-| 远程 YouTube JavaScript 影响主窗口 | 低 | 官方脚本只在无登录 Cookie、无 Tauri IPC、无本地能力的非持久子 WebView 中运行；普通视频不再把远程程序抽取到主 renderer 执行。残余影响限于子视图和官方上游内容。 |
+| 远程 YouTube JavaScript 影响主窗口 | 低 | 官方 embed 会移除 Tauri IPC；proof/player 窗口保留 Tauri 的跨平台求值回调，但不匹配任何 command capability，且无登录 Cookie、非持久、网络和导航受限。两者都不把远程程序放进主 renderer。 |
 | 官方 embed 不支持某些视频/地区/账号条件 | 中 | 匿名、允许嵌入的公开视频是正式支持边界。登录、年龄、会员、私有或禁嵌内容会显式失败；不会为提高覆盖率而导入用户浏览器 Cookie。 |
 | YouTube 远程播放器或策略变更导致播放失效 | 中 | 无法从工程上降为零；官方 embed 比复制未公开 proof/HLS 协议少一层脆弱面，但仍依赖 YouTube 在线服务。失败会显式暴露，不静默换路。 |
 | GoogleVideo 依赖重量/攻击面 | 低 | 仅 YTM worker 使用，普通视频的官方 embed 不打包该库；YTM 的远程 URL 和请求仍经 Rust allowlist。 |

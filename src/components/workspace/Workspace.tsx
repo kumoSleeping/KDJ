@@ -41,6 +41,7 @@ import {
   retrySongPreview,
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
+import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { enqueueMediaDownloads } from "../../lib/mediaActions";
@@ -319,6 +320,20 @@ export function Workspace() {
     getSongPreviewState,
     getSongPreviewState,
   );
+  const playerSession = useSyncExternalStore(
+    subscribePlayerSession,
+    getPlayerSession,
+    getPlayerSession,
+  );
+  const previewPendingStatus =
+    songPreviewState.phase === "resolving"
+      ? "resolving"
+      : songPreviewState.trackId === playerSession.trackId &&
+          (playerSession.status === "resolving" ||
+            playerSession.status === "loading" ||
+            playerSession.status === "buffering")
+        ? playerSession.status
+        : null;
   const activeDownloads = useDownloadStore((state) => state.activeCount);
   const streamAccountKeys = useStreamBrowseStore((state) => state.accountKeys);
   const startupForeground = useStreamBrowseStore((state) => state.startupForeground);
@@ -2936,6 +2951,12 @@ export function Workspace() {
                           }
                           removeStreamGroupLabel={removeStreamGroupLabel}
                           removingStreamGroupIds={removingStreamGroupIds}
+                          previewPendingSourceKey={
+                            previewPendingStatus ? songPreviewState.sourceKey : ""
+                          }
+                          previewPendingLabel={
+                            previewPendingStatus === "resolving" ? "解析中" : "加载中"
+                          }
                           onLoadCollection={(collection) => void loadCollection(collection)}
                           loadingCollections={loadingCollections}
                         />

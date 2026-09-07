@@ -1,11 +1,11 @@
-//! macOS YouTube WebPO runner.
+//! Cross-platform YouTube WebPO runner backed by Tauri's system WebView.
 //!
 //! BotGuard binds the homepage challenge to a real network-created YouTube security origin. A
 //! local HTML string with a YouTube base URL looks correct to JavaScript but GVS rejects proofs
-//! minted from that synthetic document. On macOS we therefore navigate a non-persistent hidden
-//! WKWebView to YouTube's inert `robots.txt` document. Before navigation, all Tauri user scripts
-//! and the Wry IPC message handler are removed. The local proof bundle then installs a restrictive
-//! CSP before any further request; the realm receives no login cookies or upstream media URL.
+//! minted from that synthetic document. We therefore navigate a non-persistent hidden Tauri
+//! WebView to YouTube's inert `robots.txt` document. The proof window matches no capability, so
+//! remote content cannot invoke application commands. Results cross the boundary through Tauri's
+//! own cross-platform JavaScript callback adapter; there is no platform-specific proof backend.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +28,9 @@ const PROOF_CSP: &str = "default-src 'none'; \
 const MAX_BUNDLE_BYTES: usize = 256 * 1024;
 const MAX_PLAYER_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const PROOF_TIMEOUT: Duration = Duration::from_secs(30);
+const RESULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_CALLBACK_BYTES: usize = 64 * 1024;
+const MAX_RESULT_BYTES: usize = 32 * 1024;
 
 #[derive(Default)]
 pub struct YoutubeProofState {
@@ -135,13 +138,6 @@ const expectedPolicy = {policy};
 if (location.href !== expectedDocumentUrl) {{
   throw new Error("YouTube proof 网络文档不匹配");
 }}
-if (
-  globalThis.__TAURI_INTERNALS__ !== undefined
-  || globalThis.ipc !== undefined
-  || globalThis.webkit?.messageHandlers?.ipc !== undefined
-) {{
-  throw new Error("YouTube proof 原生隔离边界无效");
-}}
 let policyMeta = document.querySelector('meta[data-kdj-youtube-proof-csp="1"]');
 if (policyMeta && policyMeta.content !== expectedPolicy) {{
   throw new Error("YouTube proof 安全策略被修改");
@@ -154,19 +150,16 @@ if (!policyMeta) {{
   if (!document.head) throw new Error("YouTube proof 网络文档结构无效");
   document.head.prepend(policyMeta);
 }}
-document.body?.replaceChildren();
-document.title = "KDJ YouTube proof runtime";
+if (document.body) document.body.textContent = "";
 "#
     ))
 }
 
-#[cfg(target_os = "macos")]
 async fn ensure_proof_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use objc2_foundation::{NSString, NSURLRequest, NSURL};
-    use objc2_web_kit::{WKUserContentController, WKWebView};
-    use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
+    use tauri::{
+        webview::{NewWindowResponse, PageLoadEvent},
+        WebviewUrl, WebviewWindowBuilder,
+    };
 
     if let Some(window) = app.get_webview_window(PROOF_WINDOW_LABEL) {
         return Ok(window);
@@ -175,55 +168,34 @@ async fn ensure_proof_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWin
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
     let page_ready_tx = Arc::clone(&ready_tx);
-    let navigation_locked = Arc::new(AtomicBool::new(false));
-    let navigation_guard = Arc::clone(&navigation_locked);
-    let window = WebviewWindowBuilder::new(
-        app,
-        PROOF_WINDOW_LABEL,
-        WebviewUrl::App("__youtube_proof_blank__.html".into()),
-    )
-    .title("KDJ YouTube proof runtime")
-    .visible(false)
-    .skip_taskbar(true)
-    .decorations(false)
-    .resizable(false)
-    .inner_size(1.0, 1.0)
-    .incognito(true)
-    .user_agent(PROOF_USER_AGENT)
-    .on_navigation(move |url| {
-        !navigation_guard.load(Ordering::SeqCst) || url.as_str() == PROOF_DOCUMENT_URL
-    })
-    .on_page_load(move |_window, payload| {
-        if payload.event() != PageLoadEvent::Finished
-            || payload.url().as_str() != PROOF_DOCUMENT_URL
-        {
-            return;
-        }
-        if let Ok(mut sender) = page_ready_tx.lock() {
-            if let Some(sender) = sender.take() {
-                let _ = sender.send(());
-            }
-        }
-    })
-    .build()
-    .map_err(|error| format!("无法创建 YouTube proof 隔离窗口：{error}"))?;
-
-    let locked = Arc::clone(&navigation_locked);
-    window
-        .with_webview(move |webview| unsafe {
-            let view: &WKWebView = &*webview.inner().cast();
-            let controller: &WKUserContentController = &*webview.controller().cast();
-            // Removing both pieces is essential: a hidden remote-origin WebView must not inherit
-            // the main app's invoke bridge, even if current capability rules would reject it.
-            controller.removeAllUserScripts();
-            controller.removeScriptMessageHandlerForName(&NSString::from_str("ipc"));
-            locked.store(true, Ordering::SeqCst);
-            let url = NSURL::URLWithString(&NSString::from_str(PROOF_DOCUMENT_URL))
-                .expect("constant YouTube proof document URL is valid");
-            let request = NSURLRequest::requestWithURL(&url);
-            let _ = view.loadRequest(&request);
-        })
-        .map_err(|error| format!("无法初始化 YouTube proof 隔离窗口：{error}"))?;
+    let document_url = tauri::Url::parse(PROOF_DOCUMENT_URL)
+        .map_err(|_| "YouTube proof 文档地址无效".to_string())?;
+    let window =
+        WebviewWindowBuilder::new(app, PROOF_WINDOW_LABEL, WebviewUrl::External(document_url))
+            .title("KDJ YouTube proof runtime")
+            .visible(false)
+            .skip_taskbar(true)
+            .decorations(false)
+            .resizable(false)
+            .inner_size(1.0, 1.0)
+            .incognito(true)
+            .user_agent(PROOF_USER_AGENT)
+            .on_navigation(|url| url.as_str() == PROOF_DOCUMENT_URL)
+            .on_new_window(|_, _| NewWindowResponse::Deny)
+            .on_page_load(move |_window, payload| {
+                if payload.event() != PageLoadEvent::Finished
+                    || payload.url().as_str() != PROOF_DOCUMENT_URL
+                {
+                    return;
+                }
+                if let Ok(mut sender) = page_ready_tx.lock() {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(());
+                    }
+                }
+            })
+            .build()
+            .map_err(|error| format!("无法创建 YouTube proof 隔离窗口：{error}"))?;
 
     tokio::time::timeout(Duration::from_secs(10), ready_rx)
         .await
@@ -232,7 +204,6 @@ async fn ensure_proof_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWin
     Ok(window)
 }
 
-#[cfg(target_os = "macos")]
 async fn active_proof_window<'a>(
     app: &tauri::AppHandle,
     state: &'a YoutubeProofState,
@@ -255,7 +226,6 @@ async fn active_proof_window<'a>(
     Ok((window, exclusive.downgrade()))
 }
 
-#[cfg(target_os = "macos")]
 async fn replace_failed_realm(
     app: &tauri::AppHandle,
     active: tokio::sync::RwLockReadGuard<'_, ()>,
@@ -268,63 +238,128 @@ async fn replace_failed_realm(
     }
 }
 
-#[cfg(target_os = "macos")]
 async fn evaluate_javascript(
     window: &tauri::WebviewWindow,
     javascript: String,
     failure: &'static str,
 ) -> Result<String, String> {
-    use block2::RcBlock;
-    use objc2::{runtime::AnyObject, MainThreadMarker};
-    use objc2_foundation::{NSError, NSString};
-    use objc2_web_kit::{WKContentWorld, WKWebView};
+    let request_id = format!("{:032x}", rand::random::<u128>());
+    let request_id_json = serde_json::to_string(&request_id)
+        .map_err(|_| "YouTube proof 请求标识序列化失败".to_string())?;
+    let failure_json = serde_json::to_string(failure)
+        .map_err(|_| "YouTube proof 错误信息序列化失败".to_string())?;
+    let script = format!(
+        r#"
+void (async () => {{
+  const requestId = {request_id_json};
+  const fallbackError = {failure_json};
+  const tasks = globalThis.__KDJ_YOUTUBE_EVAL_TASKS__
+    || (globalThis.__KDJ_YOUTUBE_EVAL_TASKS__ = Object.create(null));
+  const task = {{ active: true, result: null }};
+  tasks[requestId] = task;
+  try {{
+    const value = await (async () => {{
+{javascript}
+    }})();
+    if (task.active) task.result = {{ ok: true, value }};
+  }} catch (error) {{
+    const detail = error instanceof Error && error.message ? error.message : fallbackError;
+    if (task.active) task.result = {{ ok: false, error: detail.slice(0, 2048) }};
+  }}
+  setTimeout(() => {{
+    if (tasks[requestId] === task) delete tasks[requestId];
+  }}, 60000);
+}})();
+"#
+    );
+    window
+        .eval(script)
+        .map_err(|error| format!("无法进入 YouTube proof WebView：{error}"))?;
 
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+    let poll_script = format!(
+        r#"(() => {{
+  try {{
+    const tasks = globalThis.__KDJ_YOUTUBE_EVAL_TASKS__;
+    const task = tasks && tasks[{request_id_json}];
+    if (!task || task.result === null) return null;
+    const result = task.result;
+    task.active = false;
+    delete tasks[{request_id_json}];
+    return result;
+  }} catch (_) {{
+    return {{ ok: false, error: "YouTube proof WebView 回传失败" }};
+  }}
+}})()"#
+    );
+    let poll_result = tokio::time::timeout(PROOF_TIMEOUT, async {
+        loop {
+            tokio::time::sleep(RESULT_POLL_INTERVAL).await;
+            let raw = eval_with_callback(window, poll_script.clone()).await?;
+            if raw.len() > MAX_CALLBACK_BYTES {
+                return Err("YouTube proof WebView 返回数据过大".to_string());
+            }
+            let envelope: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|_| "YouTube proof WebView 返回数据无效".to_string())?;
+            if envelope.is_null() {
+                continue;
+            }
+            return match envelope.get("ok").and_then(serde_json::Value::as_bool) {
+                Some(true) => envelope
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| value.len() <= MAX_RESULT_BYTES)
+                    .map(str::to_string)
+                    .ok_or_else(|| "YouTube proof WebView 返回结果无效".to_string()),
+                Some(false) => Err(envelope
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|error| !error.is_empty() && error.len() <= 2_048)
+                    .unwrap_or(failure)
+                    .to_string()),
+                None => Err("YouTube proof WebView 返回结果无效".to_string()),
+            };
+        }
+    })
+    .await;
+
+    if poll_result.is_err() {
+        cancel_evaluation(window, &request_id_json);
+    }
+    poll_result.unwrap_or_else(|_| Err("YouTube proof WebView 运算超时".to_string()))
+}
+
+async fn eval_with_callback(
+    window: &tauri::WebviewWindow,
+    javascript: String,
+) -> Result<String, String> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<String>();
     let result_tx = Arc::new(Mutex::new(Some(result_tx)));
     let callback_tx = Arc::clone(&result_tx);
     window
-        .with_webview(move |webview| unsafe {
-            let view: &WKWebView = &*webview.inner().cast();
-            let Some(main_thread) = MainThreadMarker::new() else {
-                if let Ok(mut sender) = callback_tx.lock() {
-                    if let Some(sender) = sender.take() {
-                        let _ = sender.send(Err("YouTube proof 没有运行在窗口线程".into()));
-                    }
+        .eval_with_callback(javascript, move |result| {
+            if let Ok(mut sender) = callback_tx.lock() {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(result);
                 }
-                return;
-            };
-            let world = WKContentWorld::pageWorld(main_thread);
-            let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-                let result = if !error.is_null() || value.is_null() {
-                    Err(failure.to_string())
-                } else {
-                    let text: &NSString = &*value.cast();
-                    Ok(text.to_string())
-                };
-                if let Ok(mut sender) = result_tx.lock() {
-                    if let Some(sender) = sender.take() {
-                        let _ = sender.send(result);
-                    }
-                }
-            });
-            view.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
-                &NSString::from_str(&javascript),
-                None,
-                None,
-                &world,
-                Some(&handler),
-            );
+            }
         })
-        .map_err(|error| format!("无法进入 YouTube proof 窗口线程：{error}"))?;
-
-    let raw = tokio::time::timeout(PROOF_TIMEOUT, result_rx)
+        .map_err(|error| format!("无法读取 YouTube proof WebView：{error}"))?;
+    result_rx
         .await
-        .map_err(|_| "YouTube proof 原生运算超时".to_string())?
-        .map_err(|_| "YouTube proof 原生运算状态丢失".to_string())??;
-    Ok(raw)
+        .map_err(|_| "YouTube proof WebView 回调状态丢失".to_string())
 }
 
-#[cfg(target_os = "macos")]
+fn cancel_evaluation(window: &tauri::WebviewWindow, request_id_json: &str) {
+    let _ = window.eval(format!(
+        r#"(() => {{
+  const tasks = globalThis.__KDJ_YOUTUBE_EVAL_TASKS__;
+  const task = tasks && tasks[{request_id_json}];
+  if (task) task.active = false;
+  if (tasks) delete tasks[{request_id_json}];
+}})()"#
+    ));
+}
+
 async fn evaluate_proof(
     window: &tauri::WebviewWindow,
     bundle: String,
@@ -345,7 +380,7 @@ const token = await globalThis.__KDJ_YOUTUBE_NATIVE_PO__.mint({binding_json}, {f
 return JSON.stringify({{ token }});
 "#
     );
-    let raw = evaluate_javascript(window, javascript, "YouTube proof 原生运算失败").await?;
+    let raw = evaluate_javascript(window, javascript, "YouTube proof WebView 运算失败").await?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|_| "YouTube proof 原生响应无效".to_string())?;
     let token = value
@@ -375,29 +410,19 @@ pub async fn youtube_mint_gvs_po_token(
         return Err("YouTube proof 浏览器标识不匹配".into());
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        let (window, active) = active_proof_window(&app, &state).await?;
-        let result = evaluate_proof(&window, bundle, binding, force_fresh).await;
-        return match result {
-            Ok(token) => Ok(token),
-            Err(error) => {
-                // Do not try another proof implementation. Destroy the possibly modified realm;
-                // this request fails visibly, and a later user action starts the same path cleanly.
-                replace_failed_realm(&app, active, &state).await;
-                Err(error)
-            }
-        };
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, bundle, binding, force_fresh);
-        Err("当前桌面系统没有可用的 YouTube 原生 proof 运行器".into())
+    let (window, active) = active_proof_window(&app, &state).await?;
+    let result = evaluate_proof(&window, bundle, binding, force_fresh).await;
+    match result {
+        Ok(token) => Ok(token),
+        Err(error) => {
+            // Do not try another proof implementation. Destroy the possibly modified realm;
+            // this request fails visibly, and a later user action starts the same path cleanly.
+            replace_failed_realm(&app, active, &state).await;
+            Err(error)
+        }
     }
 }
 
-#[cfg(target_os = "macos")]
 async fn evaluate_player(
     window: &tauri::WebviewWindow,
     bundle: String,
@@ -428,7 +453,7 @@ const value = await globalThis.__KDJ_YOUTUBE_NATIVE_PO__.player(
 return JSON.stringify({{ value }});
 "#
     );
-    let raw = evaluate_javascript(window, source, "YouTube player 原生运算失败").await?;
+    let raw = evaluate_javascript(window, source, "YouTube player WebView 运算失败").await?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|_| "YouTube player 原生响应无效".to_string())?;
     value
@@ -466,47 +491,38 @@ pub async fn youtube_run_player(
         _ => return Err("YouTube player 操作无效".into()),
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        let (window, active) = active_proof_window(&app, &state).await?;
-        let result = evaluate_player(
-            &window,
-            bundle,
-            player_url,
-            javascript,
-            operation.clone(),
-            value,
-        )
-        .await;
-        let validated = match result {
+    let (window, active) = active_proof_window(&app, &state).await?;
+    let result = evaluate_player(
+        &window,
+        bundle,
+        player_url,
+        javascript,
+        operation.clone(),
+        value,
+    )
+    .await;
+    let validated = match result {
+        Ok(output)
+            if operation == "config"
+                && output
+                    .parse::<u64>()
+                    .is_ok_and(|value| (10_000..=100_000).contains(&value)) =>
+        {
             Ok(output)
-                if operation == "config"
-                    && output
-                        .parse::<u64>()
-                        .is_ok_and(|value| (10_000..=100_000).contains(&value)) =>
-            {
-                Ok(output)
-            }
-            Ok(output) if operation == "transform_n" && valid_n_value(&output) => Ok(output),
-            Ok(output) if operation == "decipher" && valid_googlevideo_url(&output) => Ok(output),
-            Ok(_) => Err("YouTube player 返回结果无效".into()),
-            Err(error) => Err(error),
-        };
-        return match validated {
-            Ok(output) => Ok(output),
-            Err(error) => {
-                // A new official player script can change its runtime shape. Do not keep a realm
-                // that may have been partially modified, and do not try another implementation.
-                replace_failed_realm(&app, active, &state).await;
-                Err(error)
-            }
-        };
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, bundle, player_url, javascript, operation, value);
-        Err("当前桌面系统没有可用的 YouTube 原生 player 运行器".into())
+        }
+        Ok(output) if operation == "transform_n" && valid_n_value(&output) => Ok(output),
+        Ok(output) if operation == "decipher" && valid_googlevideo_url(&output) => Ok(output),
+        Ok(_) => Err("YouTube player 返回结果无效".into()),
+        Err(error) => Err(error),
+    };
+    match validated {
+        Ok(output) => Ok(output),
+        Err(error) => {
+            // A new official player script can change its runtime shape. Do not keep a realm
+            // that may have been partially modified, and do not try another implementation.
+            replace_failed_realm(&app, active, &state).await;
+            Err(error)
+        }
     }
 }
 
@@ -534,7 +550,7 @@ mod tests {
         let prelude = proof_document_prelude().expect("proof prelude");
         assert!(prelude.contains(PROOF_DOCUMENT_URL));
         assert!(prelude.contains(PROOF_CSP));
-        assert!(prelude.contains("__TAURI_INTERNALS__"));
+        assert!(!prelude.contains("__TAURI_INTERNALS__"));
     }
 
     #[test]
