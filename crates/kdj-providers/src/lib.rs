@@ -3,6 +3,7 @@
 pub mod bilibili;
 pub mod browser;
 pub mod ffmpeg;
+mod images;
 pub mod net;
 pub mod netease;
 pub mod provider;

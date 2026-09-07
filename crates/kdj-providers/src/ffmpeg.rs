@@ -285,7 +285,7 @@ pub async fn extract_frame(
 /// 解不出来的图一律当"不黑"：宁可放一张我们看不懂的封面出去，
 /// 也不要因为解码器不认它就把本来能用的图丢掉。
 pub fn frame_is_mostly_black(jpeg: &[u8]) -> bool {
-    let Ok(decoded) = image::load_from_memory(jpeg) else {
+    let Ok(decoded) = crate::images::decode_thumbnail_source(jpeg) else {
         return false;
     };
     let luma = decoded.to_luma8();

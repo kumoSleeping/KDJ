@@ -186,7 +186,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p kdj-player --lib pipeline_reports_decoder_panic_and_allows_the_next_stream
+          cargo test -p kdj-player --lib pipeline_reports_decoder
           cargo test -p kdj-playback --lib platform::tests
           cargo test -p kdj-app --lib diagnostics::tests
 
@@ -335,6 +335,22 @@ jobs:
             rsign verify "$artifact" -P "$public_key" -x "$decoded_signature" -q
           done
           echo "✓ updater 私钥与 tauri.conf.json 内置公钥匹配"
+
+      # Only the unsigned DMG container changes. Never recompress .app.tar.gz after
+      # Tauri signs it: that would invalidate the updater's minisign signature.
+      - name: 无损压缩 macOS DMG
+        if: steps.shell.outputs.present == 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          images=()
+          while IFS= read -r -d '' image; do images+=("$image"); done \
+            < <(find target src-tauri/target -type f -path '*/release/bundle/dmg/*.dmg' -print0 2>/dev/null || true)
+          if (( ${#images[@]} != 1 )); then
+            echo "::error::应恰好生成一个 macOS DMG，实际为 ${#images[@]}"
+            exit 1
+          fi
+          bash scripts/compress-macos-dmg.sh "${images[0]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: 桌面安装包体积回归门禁
         if: steps.shell.outputs.present == 'true'

@@ -129,6 +129,7 @@ pub fn probe_health(info: &RuntimeInfo) -> Option<serde_json::Value> {
         return None;
     }
     HttpClient::new(&info.base_url, &info.auth_token)
+        .ok()?
         .get_value("/api/health")
         .ok()
 }

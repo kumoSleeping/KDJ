@@ -19,7 +19,8 @@ path = "src/lib.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-tauri = { version = "2.10.2", features = [] }
+# The host selects Tauri runtime features; do not re-enable unused dynamic ACL support.
+tauri = { version = "2.10.2", default-features = false, features = [] }
 
 [build-dependencies]
 tauri-plugin = { version = "2.5.3", features = ["build"] }

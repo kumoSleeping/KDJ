@@ -12,16 +12,29 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
-    pub fn new(base_url: &str, auth_token: &str) -> Self {
+    pub fn new(base_url: &str, auth_token: &str) -> Result<Self> {
         kdj_core::ensure_rustls_ring();
-        HttpClient {
+        let url = reqwest::Url::parse(base_url).context("KDJ 服务地址无效")?;
+        let mut builder = Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            // The control API never redirects. Do not follow a stale/misconfigured endpoint
+            // into a different path or service with the session credential.
+            .redirect(reqwest::redirect::Policy::none());
+        if url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }) {
+            // A system HTTP proxy must never receive a loopback control bearer token.
+            builder = builder.no_proxy();
+        }
+        Ok(HttpClient {
             base: base_url.trim_end_matches('/').to_string(),
             auth_token: auth_token.to_string(),
-            inner: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .expect("构建 HTTP 客户端"),
-        }
+            inner: builder.build().context("构建 HTTP 客户端失败")?,
+        })
     }
 
     pub fn get_value(&self, path: &str) -> Result<serde_json::Value> {
@@ -113,5 +126,45 @@ impl HttpClient {
         } else {
             Ok(serde_json::Value::String(text))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn invalid_service_url_returns_an_error() {
+        assert!(HttpClient::new("not a URL", "test-token").is_err());
+    }
+
+    #[test]
+    fn loopback_control_api_does_not_follow_redirects() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = HttpClient::new(&format!("http://{address}"), "test-token").unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 8192);
+            }
+            stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let error = client.get_value("/api/health").unwrap_err();
+        assert!(error.to_string().contains("HTTP 302"), "{error:#}");
+        assert!(server
+            .join()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-token"));
     }
 }

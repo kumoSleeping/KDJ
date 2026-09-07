@@ -34,7 +34,7 @@ fn run_inner() -> Result<i32> {
         Commands::Spec => Ok(emit_ok(spec_doc())),
         other => {
             let runtime = runtime::ensure_running(cli.data_dir.as_deref(), cli.url.as_deref())?;
-            let http = HttpClient::new(&runtime.base_url, &runtime.auth_token);
+            let http = HttpClient::new(&runtime.base_url, &runtime.auth_token)?;
             dispatch(&http, other)
         }
     }

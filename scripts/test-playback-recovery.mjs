@@ -53,12 +53,44 @@ test('failed load remains an error after toast dismissal and stale resolving sna
   assert.equal(playerSession.playerSessionFailed(null, -1, 'error', ''), false, 'empty decks stay empty');
 });
 
-test('release profile preserves the unwind boundary used by decoder and output recovery', () => {
+test('release profile keeps the explicitly selected abort strategy', () => {
   const manifest = readFileSync(new URL('../Cargo.toml', import.meta.url), 'utf8');
   const release = manifest.match(/^\[profile\.release\]\s*\n([\s\S]*?)(?=^\[|$(?![\s\S]))/m)?.[1];
   assert.ok(release, 'release profile must be explicit');
-  assert.match(release, /^panic\s*=\s*"unwind"\s*$/m,
-    'panic=abort bypasses catch_unwind in shipped applications');
+  assert.match(release, /^panic\s*=\s*"abort"\s*$/m,
+    'release failures must use Result; debug panic recovery is not a release guarantee');
+});
+
+test('release size optimization never applies z to audio/DSP hot paths', () => {
+  const manifest = readFileSync(new URL('../Cargo.toml', import.meta.url), 'utf8');
+  const hotPackages = [
+    'kdj-analysis', 'kdj-stems', 'kdj-player', 'kdj-playback',
+    'rubato', 'rustfft', 'realfft', 'symphonia', 'symphonia-core',
+    'symphonia-bundle-flac', 'symphonia-bundle-mp3',
+    'symphonia-codec-aac', 'symphonia-codec-alac', 'symphonia-codec-pcm',
+    'symphonia-codec-vorbis', 'symphonia-format-isomp4', 'symphonia-format-mkv',
+    'symphonia-format-ogg', 'symphonia-format-riff',
+  ];
+  for (const name of hotPackages) {
+    const section = manifest.split(`[profile.release.package.${name}]`)[1]?.split(/^\[/m)[0];
+    assert.ok(section, `missing throughput override for ${name}`);
+    assert.match(section, /^opt-level\s*=\s*2\s*$/m, `${name} must remain throughput-optimized`);
+  }
+});
+
+test('host and mobile plugin do not re-enable unused dynamic ACL defaults', () => {
+  for (const file of ['src-tauri/Cargo.toml', 'plugins/native-audio/Cargo.toml']) {
+    const manifest = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    const dependency = manifest.match(/^tauri\s*=\s*\{[^}]+\}/m)?.[0];
+    assert.ok(dependency, `${file} must explicitly declare its Tauri feature policy`);
+    assert.match(dependency, /default-features\s*=\s*false/);
+    assert.doesNotMatch(dependency, /"dynamic-acl"/);
+    if (file === 'src-tauri/Cargo.toml') {
+      for (const feature of ['wry', 'compression', 'common-controls-v6', 'x11', 'dbus']) {
+        assert.ok(dependency.includes(`"${feature}"`), `retain Tauri feature ${feature}`);
+      }
+    }
+  }
 });
 
 function queueKeys(stream, head) {

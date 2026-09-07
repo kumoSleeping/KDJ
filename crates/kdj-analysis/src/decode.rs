@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
-use symphonia::core::audio::SampleBuffer;
+use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -19,6 +19,32 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 pub const DEFAULT_SR: u32 = 22050;
+
+// A decoded packet is normally a few KiB. Bound the conversion allocation before entering
+// Symphonia's infallible allocator; this is not a limit on track length or source file size.
+const MAX_PACKET_SAMPLES: usize = 4 * 1024 * 1024;
+
+fn packet_samples(capacity: usize, channels: usize) -> Result<usize> {
+    anyhow::ensure!(channels > 0, "音频包没有声道");
+    let samples = capacity.checked_mul(channels).context("音频包大小溢出")?;
+    anyhow::ensure!(samples <= MAX_PACKET_SAMPLES, "音频包超过转换缓冲区上限");
+    Ok(samples)
+}
+
+fn copy_audio_packet<'a>(
+    buffer: &'a mut Option<SampleBuffer<f32>>,
+    audio: AudioBufferRef<'_>,
+) -> Result<&'a [f32]> {
+    let required = packet_samples(audio.capacity(), audio.spec().channels.count())?;
+    // Packet frame counts/channel layouts may grow after the first packet. Reusing only the
+    // first packet's allocation makes copy_interleaved_ref assert, aborting release builds.
+    if buffer.as_ref().is_none_or(|slot| slot.capacity() < required) {
+        *buffer = Some(SampleBuffer::new(audio.capacity() as u64, *audio.spec()));
+    }
+    let slot = buffer.as_mut().context("音频转换缓冲区不可用")?;
+    slot.copy_interleaved_ref(audio);
+    Ok(slot.samples())
+}
 
 fn known_sample_rate(rate: Option<u32>) -> Option<u32> {
     rate.filter(|rate| *rate > 0)
@@ -139,6 +165,11 @@ fn decode_audio_inner_cancellable(
     if cancelled() {
         return Ok(None);
     }
+    anyhow::ensure!(offset.is_finite() && offset >= 0.0, "音频起始时间无效");
+    anyhow::ensure!(
+        max_seconds.is_none_or(|seconds| seconds.is_finite() && seconds >= 0.0),
+        "音频截取时长无效"
+    );
     let file = File::open(path).with_context(|| format!("打开音频失败：{}", path.display()))?;
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -237,11 +268,8 @@ fn decode_audio_inner_cancellable(
         if spec.rate > 0 {
             source_sr = spec.rate;
         }
-        let slot =
-            buffer.get_or_insert_with(|| SampleBuffer::<f32>::new(audio.capacity() as u64, spec));
-        slot.copy_interleaved_ref(audio);
-        let interleaved = slot.samples();
-        decoded_samples += interleaved.len();
+        let interleaved = copy_audio_packet(&mut buffer, audio)?;
+        decoded_samples = decoded_samples.saturating_add(interleaved.len());
 
         // 交错样本混成单声道。
         //
@@ -252,12 +280,12 @@ fn decode_audio_inner_cancellable(
         // 但 energy / rms_db / peak_db 是直接进曲库的字段，必须对齐。
         let ch = spec.channels.count().max(1);
         let gain = 1.0 / (ch as f32).sqrt();
-        mono.reserve(interleaved.len() / ch);
+        mono.try_reserve(interleaved.len() / ch).context("无法分配分析 PCM 缓冲区")?;
         for frame in interleaved.chunks(ch) {
             mono.push(frame.iter().sum::<f32>() * gain);
         }
         let wanted_source_samples =
-            max_seconds.map(|secs| ((secs + 1.0) * source_sr as f64) as usize * ch);
+            max_seconds.map(|secs| (((secs + 1.0) * source_sr as f64) as usize).saturating_mul(ch));
         if wanted_source_samples.is_some_and(|wanted| decoded_samples >= wanted) {
             break;
         }
@@ -464,6 +492,41 @@ pub fn resample_mono_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversion_grows_for_larger_packets_and_channel_layouts() {
+        use std::borrow::Cow;
+        use symphonia::core::audio::{AudioBuffer, Channels, Signal, SignalSpec};
+        let mut conversion = None;
+        for (frames, channels) in [(2, Channels::FRONT_LEFT), (16, Channels::FRONT_LEFT),
+            (16, Channels::FRONT_LEFT | Channels::FRONT_RIGHT), (1, Channels::FRONT_LEFT)] {
+            let mut audio = AudioBuffer::<f32>::new(frames, SignalSpec::new(48_000, channels));
+            audio.render_reserved(None);
+            for channel in 0..channels.count() {
+                audio.chan_mut(channel).fill((channel + 1) as f32);
+            }
+            let samples = copy_audio_packet(&mut conversion, AudioBufferRef::F32(Cow::Borrowed(&audio))).unwrap();
+            assert_eq!(samples.len(), frames as usize * channels.count());
+            for frame in samples.chunks_exact(channels.count()) {
+                for (channel, sample) in frame.iter().enumerate() {
+                    assert_eq!(*sample, (channel + 1) as f32);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_packet_allocations_and_times_return_errors() {
+        assert!(packet_samples(1, 0).is_err());
+        assert!(packet_samples(usize::MAX, 2).is_err());
+        assert!(packet_samples(MAX_PACKET_SAMPLES + 1, 1).is_err());
+        for seconds in [f64::NAN, f64::INFINITY, -1.0] {
+            let error = decode_audio_from(Path::new("/must-not-open.wav"), DEFAULT_SR, Some(seconds), 0.0).unwrap_err();
+            assert!(error.to_string().contains("时长无效"));
+            let error = decode_audio_from(Path::new("/must-not-open.wav"), DEFAULT_SR, None, seconds).unwrap_err();
+            assert!(error.to_string().contains("起始时间无效"));
+        }
+    }
 
     fn reference_resample(input: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
         if input.is_empty() || from_sr == to_sr {

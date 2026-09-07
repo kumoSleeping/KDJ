@@ -86,8 +86,9 @@ impl PlaybackOutputFactory for CpalOutputFactory {
 }
 
 // Some WASAPI initialization failures in CPAL still panic instead of returning an Error.
-// Recover only the unopened output boundary: no installed Deck/source ownership is resumed after
-// a panic. Callback faults, access violations and destructor failures are not hidden here.
+// In unwind builds only, recover the unopened output boundary: no installed Deck/source ownership
+// is resumed after a panic. Release uses panic=abort: this cannot protect it from upstream panics.
+// Callback faults, access violations and destructor failures are not hidden here.
 fn guard_output_open<T>(open: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(open)).unwrap_or_else(|panic| {
         let detail = panic.downcast_ref::<String>().map(String::as_str)
@@ -102,6 +103,7 @@ mod tests {
     use super::guard_output_open;
 
     #[test]
+    #[cfg(panic = "unwind")]
     fn output_initialization_panic_does_not_prevent_a_retry() {
         let result = guard_output_open::<()>(|| panic!("cpal: could not create output stream event"));
         assert!(result.unwrap_err().contains("could not create output stream event"));

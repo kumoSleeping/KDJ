@@ -1183,8 +1183,8 @@ where
         .name("kdj-tempo-decode".to_string())
         .spawn(move || {
             kdj_core::thread_qos::prefer_live_audio();
-            // A codec panic must travel through the normal worker-failure path. Dropping the
-            // result sender loses its cause and used to leave the UI with a channel error.
+            // Unwind builds preserve codec panic context. Release uses panic=abort, so only
+            // normal Result errors travel through this recovery path in shipped applications.
             let result = catch_unwind(AssertUnwindSafe(|| if decoder_cancelled() {
                 Err(anyhow::anyhow!(
                     "stream preparation cancelled before media open"
@@ -1777,7 +1777,8 @@ where
             next_output_position = ((emit_start - origin).max(0.0) * f64::from(spec.rate)).ceil();
         }
         source_sample_rate = spec.rate;
-        let channels = spec.channels.count().max(1);
+        let channels = spec.channels.count();
+        anyhow::ensure!(channels > 0, "decoded audio has no channels");
         let required_capacity = decoded.capacity() as u64;
         let recreate = conversion
             .as_ref()
@@ -1792,7 +1793,7 @@ where
                 spec.rate,
             ));
         }
-        let buffer = &mut conversion.as_mut().expect("stream conversion buffer").0;
+        let buffer = &mut conversion.as_mut().context("stream conversion buffer unavailable")?.0;
         buffer.copy_interleaved_ref(decoded);
         let step = f64::from(source_sample_rate) / f64::from(output_sample_rate);
         for input in buffer.samples().chunks_exact(channels) {
@@ -3313,7 +3314,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg(panic = "unwind")]
     fn pipeline_reports_decoder_panic_and_allows_the_next_stream() {
+        assert_decoder_failure_allows_next_stream(true);
+    }
+
+    #[test]
+    fn pipeline_reports_decoder_error_and_allows_the_next_stream() {
+        assert_decoder_failure_allows_next_stream(false);
+    }
+
+    fn assert_decoder_failure_allows_next_stream(inject_panic: bool) {
         for panic_after_audio in [false, true] {
             let (output, writer) = StreamSource::<[f32; 2]>::bounded(64);
             let result = run_pitch_preserving_pipeline(
@@ -3322,7 +3333,10 @@ mod tests {
                     if panic_after_audio {
                         raw_writer.push([0.25, 0.25], &*cancelled)?;
                     }
-                    panic!("injected mid-track codec failure");
+                    if inject_panic {
+                        panic!("injected mid-track codec failure");
+                    }
+                    anyhow::bail!("injected mid-track codec failure");
                 },
                 Arc::new(|| false), None, None,
             );

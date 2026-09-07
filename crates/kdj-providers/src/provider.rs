@@ -536,7 +536,7 @@ pub fn qr_data_url_from_png(data: &[u8]) -> String {
 fn upscale_qr(data: &[u8]) -> Option<Vec<u8>> {
     use image::ImageEncoder as _;
 
-    let decoded = image::load_from_memory(data).ok()?.to_rgb8();
+    let decoded = crate::images::decode_thumbnail_source(data).ok()?.to_rgb8();
     let longest = decoded.width().max(decoded.height()).max(1);
     if longest >= QR_MIN_SIZE {
         return None;

@@ -476,7 +476,7 @@ pub fn read_cover(path: &Path) -> Option<(Vec<u8>, String)> {
 /// 公开给视频抽帧复用，音频与视频缩略图由同一套尺寸约束产生。
 pub fn thumbnail_cover_data(data: &[u8], max_edge: u32) -> Option<Vec<u8>> {
     let max_edge = max_edge.clamp(16, 512);
-    let decoded = image::load_from_memory(data).ok()?;
+    let decoded = crate::images::decode_thumbnail_source(data).ok()?;
     let thumbnail = decoded
         .resize(max_edge, max_edge, FilterType::Triangle)
         .to_rgb8();

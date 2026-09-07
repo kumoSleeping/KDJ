@@ -160,7 +160,8 @@ where
             }
             sample_rate = spec.rate;
         }
-        let channels = spec.channels.count().max(1);
+        let channels = spec.channels.count();
+        anyhow::ensure!(channels > 0, "decoded audio has no channels");
         let required_capacity = decoded.capacity() as u64;
         let recreate = conversion
             .as_ref()
@@ -175,7 +176,7 @@ where
                 spec.rate,
             ));
         }
-        let buffer = &mut conversion.as_mut().expect("conversion buffer").0;
+        let buffer = &mut conversion.as_mut().context("audio conversion buffer unavailable")?.0;
         buffer.copy_interleaved_ref(decoded);
         let samples = buffer.samples();
         let appended_samples = samples.len() / channels * 2;
@@ -186,7 +187,7 @@ where
                 max_pcm_bytes / (1024 * 1024)
             );
         }
-        stereo.reserve(appended_samples);
+        stereo.try_reserve(appended_samples).context("allocate decoded stereo PCM")?;
         for frame in samples.chunks_exact(channels) {
             let (left, right) = if channels == 1 {
                 (frame[0], frame[0])

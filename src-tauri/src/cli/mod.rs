@@ -64,9 +64,8 @@ pub fn maybe_handoff_gui() -> bool {
     if runtime::probe_health(&info).is_none() {
         return false;
     }
-    let client = http::HttpClient::new(&info.base_url, &info.auth_token);
-    client
-        .post_json("/api/control/show", &serde_json::json!({}))
+    http::HttpClient::new(&info.base_url, &info.auth_token)
+        .and_then(|client| client.post_json("/api/control/show", &serde_json::json!({})))
         .is_ok()
 }
 

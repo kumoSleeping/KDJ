@@ -27,15 +27,14 @@ rust-version = "1.88"
 license = "GPL-3.0-or-later"
 
 [profile.release]
-# Audio decode, waveform extraction and realtime DSP are throughput paths. `z` more than doubled
-# cold waveform latency on M2. Keep the application/server/provider surface size-optimized while
-# pinning the actual audio/DSP packages back to level 2 below.
-opt-level = "s"
+# Size-optimize the shell/server/provider surface. Applying `z` to audio/DSP too previously
+# more than doubled cold waveform latency: the level-2 overrides below are required.
+opt-level = "z"
 lto = true
 codegen-units = 1
-# Decoder workers use catch_unwind to report failures and keep the next track playable.
-# Aborting here bypasses that boundary in shipped builds (including Windows GUI builds).
-panic = "unwind"
+# Explicit size/reliability tradeoff: anticipated failures must return Result. Release panics
+# abort the whole process; catch_unwind only protects development/unwind builds, not releases.
+panic = "abort"
 strip = true
 
 # Latency-sensitive workspace crates. These own decode, waveform, realtime playback and STEM DSP.

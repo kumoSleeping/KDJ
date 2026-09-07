@@ -221,7 +221,8 @@ impl StereoRegionDecoder {
                 bail!("音频内部采样率发生变化");
             }
             self.source_rate = spec.rate;
-            let channels = spec.channels.count().max(1);
+            let channels = spec.channels.count();
+            anyhow::ensure!(channels > 0, "解码音频没有声道");
             let required = decoded.capacity() as u64;
             let recreate =
                 self.conversion
@@ -237,7 +238,7 @@ impl StereoRegionDecoder {
                     spec.rate,
                 ));
             }
-            let buffer = &mut self.conversion.as_mut().expect("conversion buffer").0;
+            let buffer = &mut self.conversion.as_mut().context("音频转换缓冲区不可用")?.0;
             buffer.copy_interleaved_ref(decoded);
             let source_frames: Vec<[f32; 2]> = buffer
                 .samples()
