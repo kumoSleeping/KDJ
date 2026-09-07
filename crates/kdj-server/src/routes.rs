@@ -93,6 +93,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/accounts/ytm/login/browser", post(ytm_browser_login))
         .route("/api/accounts/ytm/login/headers", post(ytm_headers_login))
         .route("/api/accounts/ytm/login/webview", post(ytm_webview_login))
+        .route("/api/accounts/youtube/login/webview", post(youtube_webview_login))
         .route("/api/accounts/youtube/login/browsers", get(browser_catalog))
         .route(
             "/api/accounts/youtube/login/browser",
@@ -251,6 +252,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/scan", post(library_scan))
         .route("/api/library/scan/cancel", post(library_scan_cancel))
         .route("/api/library/analyze", post(library_analyze))
+        .route("/api/library/rhythm/{id}", get(crate::rhythm::read).post(crate::rhythm::start))
         .route("/api/library/analyze/cancel", post(library_analyze_cancel))
         .route("/api/library/audio/{id}", get(library_audio))
         .route("/api/library/video/{id}", get(library_video))
@@ -785,6 +787,8 @@ async fn ytm_browser_login(
     Json(payload): Json<BrowserLoginBody>,
 ) -> ApiResult<Json<Account>> {
     let session = import_youtube_browser(state.ytm_auth.clone(), payload).await?;
+    state.youtubemusic.validate_browser_session(&session).await
+        .map_err(|error| ApiError::bad_request(format!("YouTube Music 登录会话验证失败：{error}")))?;
     state.ytm_auth.save(session)?;
     let account = state
         .provider(Platform::Ytm)
@@ -816,21 +820,15 @@ async fn youtube_browser_login(
     Ok(Json(account))
 }
 
-fn save_headers_session(
-    auth: &kdj_providers::youtubemusic::auth::YoutubeAuth,
-    headers: &str,
-) -> ApiResult<()> {
-    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_headers(headers)?;
-    auth.save(session)?;
-    Ok(())
-}
-
 /// ytmusicapi 标准回退：只写 YouTube Music 请求头会话。
 async fn ytm_headers_login(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<YoutubeHeadersLoginBody>,
 ) -> ApiResult<Json<Account>> {
-    save_headers_session(&state.ytm_auth, &payload.headers)?;
+    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_headers(&payload.headers)?;
+    state.youtubemusic.validate_browser_session(&session).await
+        .map_err(|error| ApiError::bad_request(format!("YouTube Music 登录会话验证失败：{error}")))?;
+    state.ytm_auth.save(session)?;
     let account = state
         .provider(Platform::Ytm)
         .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
@@ -868,6 +866,27 @@ async fn ytm_webview_login(
         .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
         .account()
         .await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+/// 普通 YouTube 登录窗口只更新视频来源，验证成功前不替换现有会话。
+async fn youtube_webview_login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<YoutubeWebviewLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let cookie = payload.cookie.trim();
+    if cookie.is_empty() || cookie.len() > 256 * 1024 {
+        return Err(ApiError::bad_request("YouTube 登录窗口没有返回有效会话"));
+    }
+    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_cookie_header(
+        cookie, "WebView 登录 · www.youtube.com",
+    )?;
+    state.youtube.validate_browser_session(&session).await
+        .map_err(|error| ApiError::bad_request(format!("YouTube 登录会话验证失败：{error}")))?;
+    state.youtube_auth.save(session)?;
+    let account = state.provider(Platform::Youtube)
+        .ok_or_else(|| ApiError::bad_request("YouTube provider 不可用"))?.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }
@@ -7105,6 +7124,7 @@ async fn library_analyze(
     Json(payload): Json<AnalyzeRequest>,
 ) -> ApiResult<Json<AnalyzeResponse>> {
     let pending = match payload.version {
+        kdj_core::models::AnalysisVersion::V4 => state.library.pending_rhythm_ids(payload.track_ids.as_deref(), payload.force, payload.limit, &payload.folder)?,
         kdj_core::models::AnalysisVersion::V1 => state
             .library
             .pending_analysis_ids(payload.track_ids.as_deref(), payload.force)?,
@@ -7125,6 +7145,7 @@ async fn library_analyze(
     // `priority` 必须透传：前端「放到一首还没分析的歌」就是靠它插队的，
     // 吞掉这个字段的话，那一首会跟着「停止分析」一起被掐掉（见 jobs.rs）
     let job_id = match payload.version {
+        kdj_core::models::AnalysisVersion::V4 => crate::rhythm::spawn(state.clone(), pending, payload.priority, payload.precise),
         kdj_core::models::AnalysisVersion::V1 => {
             crate::jobs::spawn_analysis(state.clone(), pending, payload.priority)
         }

@@ -11,15 +11,17 @@ members = [
     "crates/kdj-server",
     "src-tauri",
 ]
-exclude = ["vendor/rookie", "vendor/glib-0.18.5"]
+exclude = ["vendor/rookie", "vendor/glib-0.18.5", "vendor/hls-transmux"]
 
 [patch.crates-io]
 # Tauri's GTK3 stack still requires glib 0.18. Backport the upstream 0.20 pointer
 # fix for RUSTSEC-2024-0429 until that dependency chain moves to a maintained API.
 glib = { path = "vendor/glib-0.18.5" }
+# Keep valid single-track TS tail fragments after the initial A/V codec setup.
+hls-transmux = { path = "vendor/hls-transmux" }
 
 [workspace.package]
-version = "1.0.0-rc3"
+version = "1.0.0-rc4"
 edition = "2021"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"

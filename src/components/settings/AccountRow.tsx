@@ -212,8 +212,10 @@ export function AccountRow({
   const browserMobile = ["android", "ios"].includes(String(getBridge().platform));
   const soundcloudWebLoginAvailable =
     soundcloudAccount && Boolean(getBridge().openSoundcloudWebLogin);
-  const ytmWebLoginAvailable =
-    account.platform === "ytm" && Boolean(getBridge().openYtmWebLogin);
+  const youtubeWebLogin = account.platform === "ytm"
+    ? getBridge().openYtmWebLogin
+    : account.platform === "youtube" ? getBridge().openYoutubeWebLogin : undefined;
+  const ytmWebLoginAvailable = Boolean(youtubeWebLogin);
   const stateLabel = browserAccount
     ? account.state === "valid"
       ? account.credential_kind === "ytm_oauth"
@@ -551,12 +553,11 @@ export function AccountRow({
 
   const openYtmWebLogin = async () => {
     if (!sourceEnabled) {
-      setNotice("请先开启 YouTube Music 搜索与下载，再连接账号。");
+      setNotice(`请先开启 ${account.label} 搜索与下载，再连接账号。`);
       return;
     }
-    const bridge = getBridge();
-    if (!bridge.openYtmWebLogin) {
-      setNotice("当前系统没有可用的 YouTube Music 登录窗口。");
+    if (!youtubeWebLogin) {
+      setNotice(`当前系统没有可用的 ${account.label} 登录窗口。`);
       return;
     }
     const generation = ++qrGenerationRef.current;
@@ -564,7 +565,7 @@ export function AccountRow({
     setNotice("");
     try {
       const unlisten = await listen<SoundCloudOAuthWindowResult>(
-        "ytm-web-login://result",
+        account.platform === "ytm" ? "ytm-web-login://result" : "youtube-web-login://result",
         (event) => {
           if (generation !== qrGenerationRef.current) return;
           webLoginUnlistenRef.current?.();
@@ -574,19 +575,19 @@ export function AccountRow({
             setYoutubeLoginOpen(false);
             void refreshAccounts();
           } else {
-            setNotice(event.payload.message || "YouTube Music 登录未完成");
+            setNotice(event.payload.message || `${account.label} 登录未完成`);
           }
         },
       );
       webLoginUnlistenRef.current = unlisten;
-      await bridge.openYtmWebLogin();
+      await youtubeWebLogin();
     } catch (error) {
       if (generation === qrGenerationRef.current) {
         webLoginUnlistenRef.current?.();
         webLoginUnlistenRef.current = null;
         setWebLoginBusy(false);
         setNotice(
-          `打开 YouTube Music 登录失败：${error instanceof Error ? error.message : String(error)}`,
+          `打开 ${account.label} 登录失败：${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
@@ -699,7 +700,7 @@ export function AccountRow({
           )}
           {/* 贴在状态行下面，而不是塞进右边那一列：那一列只有按钮那么宽，
               一句"退出失败：连接被拒绝"进去就只剩省略号了 */}
-          <InlineNotice text={notice} onDismiss={() => setNotice("")} />
+          <InlineNotice text={notice} className="kd-account-notice" onDismiss={() => setNotice("")} />
         </div>
       </div>
       <div
@@ -817,12 +818,6 @@ export function AccountRow({
                 {webLoginBusy ? "等待登录" : "打开登录窗口"}
               </Button>
             </div>
-          )}
-          {ytmWebLoginAvailable && (
-            <small className="kd-faint" style={{ lineHeight: 1.35 }}>
-              在应用内打开 music.youtube.com，用 Google 账号登录；Cookie 只保存在本机
-              Rust 侧。下方浏览器导入与请求头粘贴仍可作为备用。
-            </small>
           )}
           {youtubeBusy && !youtubeCatalog && (
             <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>

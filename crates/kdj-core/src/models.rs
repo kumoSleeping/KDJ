@@ -1170,10 +1170,13 @@ pub enum AnalysisVersion {
     V1,
     V2,
     V3,
+    V4,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AnalyzeRequest {
+    #[serde(default)]
+    pub precise: bool,
     #[serde(default)]
     pub track_ids: Option<Vec<i64>>,
     #[serde(default)]

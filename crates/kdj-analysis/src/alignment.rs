@@ -7,7 +7,7 @@ use rustfft::{num_complex::Complex32, FftPlanner};
 mod sections;
 pub use sections::align_sections;
 mod fuzzy;
-pub use fuzzy::{suggest_constant_speed, FuzzyPlacement};
+pub use fuzzy::{suggest_constant_speed, suggest_positions, FuzzyPlacement, PositionSuggestions};
 
 pub const SAMPLE_RATE: usize = 8000;
 const HOP: usize = 80;

@@ -1,4 +1,5 @@
 import { isCompositionPreview } from "../../lib/streamTrack";
+import { MarqueeText } from "../common/MarqueeText";
 import {
   useCallback,
   useEffect,
@@ -353,85 +354,6 @@ const MODE_UI: Record<PlayMode, { icon: typeof Repeat; label: string; hint: stri
   shuffle: { icon: Shuffle, label: "随机播放", hint: "在范围内随机挑，优先没放过的" },
   one: { icon: Repeat1, label: "单曲循环", hint: "一直放这一首；手动按下一首仍会换歌" },
 };
-
-/** 跑马灯速度（px/s）。再快像广告牌，再慢会让人以为界面卡住了。 */
-const MARQUEE_SPEED = 40;
-/**
- * 一个来回的周期里"在走"占的比例（单程 35%），剩下的是两端的停顿——
- * 停顿是留给人读字的，不停的跑马灯一句话都读不完。
- * 只有当 design.css 的 @keyframes kd-marquee 真的按 --kd-marquee-time 计时时
- * 这个数才有意义，两边的百分比要对得上；那边现在写的是固定时长，
- * 变量给了它用不用是那边的事，用不上也不会出错。
- */
-const MARQUEE_TRAVEL = 0.35;
-
-/**
- * 一行会被正确裁切的字：真的放不下时才横向滚动。
- *
- * 踩过的两个坑：
- * 1. 这里原来直接是个 <span>，而**行内元素不吃 overflow:hidden / width**——
- *    长曲名会一路铺出去，盖在右边的圆形播放键上，键都按不着。
- *    所以外壳必须有 display:block 的效果（.kd-player-title / .kd-player-artist
- *    的 display:block 在 design.css 里）。
- * 2. CSS 判断不了"放不放得下"，只能在 JS 里比 scrollWidth 和 clientWidth。
- *    量出来没溢出就一个像素都不动——短曲名乱滚比看不全更烦人。
- */
-function MarqueeText({ className, text }: { className: string; text: string }) {
-  const boxRef = useRef<HTMLSpanElement | null>(null);
-  /** 溢出的像素数，0 = 放得下 = 不滚 */
-  const [shift, setShift] = useState(0);
-
-  useEffect(() => {
-    const box = boxRef.current;
-    if (!box) return;
-    let alive = true;
-    const measure = () => {
-      // clientWidth 为 0 说明还没排上版（或者被藏起来了），这时量到的溢出是假的，
-      // 会把短曲名也判成要滚
-      if (!alive || !box.clientWidth) return;
-      // text-overflow: ellipsis 会让外壳自己的 scrollWidth 在部分 Chromium 版本里
-      // 被压成 clientWidth；量真正承载文字的内层，才能知道完整标题有多宽。
-      const content = box.firstElementChild as HTMLElement | null;
-      const over = (content?.scrollWidth ?? box.scrollWidth) - box.clientWidth;
-      // 留 1px 容差：亚像素排版常常差零点几，不留就会有一批"抖一下"的假滚动
-      setShift(over > 1 ? over : 0);
-    };
-    measure();
-    // 换歌那一帧量到的宽度是**不准的**：曲名里的中日文字形要 Chromium 去系统字体里
-    // 异步回退，回退完成后这行字会变宽（实测 533px → 573px，差的这 40px 正好是
-    // 跑马灯永远滚不到的尾巴）。这条路上一个事件都听不到——字体栈里没有 @font-face，
-    // document.fonts.ready 页面一加载就 resolve 了；连内层挂 ResizeObserver 都不响
-    // （实测换字形一次回调都没有）。所以只能隔几帧自己再量一遍：
-    // 下一帧接住绝大多数，400ms 那次兜底慢的。
-    const frame = requestAnimationFrame(measure);
-    const timer = window.setTimeout(measure, 400);
-    // 容器变宽变窄（窗口 resize、面板拖动）靠 RO。用它而不是 window.resize：
-    // 布局变了但窗口没变的情况它也接得住。
-    const observer = new ResizeObserver(measure);
-    observer.observe(box);
-    return () => {
-      alive = false;
-      cancelAnimationFrame(frame);
-      clearTimeout(timer);
-      observer.disconnect();
-    };
-  }, [text]);
-
-  // 把"要走多远、该走多久"按实际溢出量算好交给 CSS：关键帧是死的，
-  // 只有这两个变量能让长曲名和短曲名滚得一样快、并且不多走一步空转。
-  const style = shift
-    ? ({
-        "--kd-marquee-shift": `${-shift}px`,
-        "--kd-marquee-time": `${Math.max(4, shift / (MARQUEE_SPEED * MARQUEE_TRAVEL)).toFixed(1)}s`,
-      } as CSSProperties)
-    : undefined;
-
-  return (
-    <span ref={boxRef} className={className} data-marquee={shift ? "true" : undefined} style={style}>
-      <span className="kd-marquee">{text}</span>
-    </span>
-  );
-}
 
 interface PlayerDeckView {
   key: string;
@@ -2771,17 +2693,20 @@ export function PlayerBar() {
         setNotice(`播放失败：${state.error}`);
         commitPlaying(state.playing);
       }
-      // 跳转回声抑制：seek 已提交但状态还没落到目标附近时，在飞的旧位置
-      // 事件会把进度条弹回去再跳回来；落地、超时或换曲后恢复正常跟随。
+      // 慢 seek 不能按 1.5 秒计时解除保护：加载期的旧位置（常为 0）会让波形
+      // 先弹回再跳到目标。只接受已派发目标的非缓冲落点；失败、取消和换曲另行释放。
       let pendingSeek = pendingSeekRef.current;
       if (pendingSeek) {
         const landed =
+          !nativeSeekRequestRef.current &&
+          !state.buffering &&
+          state.status !== "loading" &&
           state.trackId === pendingSeek.trackId &&
           Math.abs(state.currentTime - pendingSeek.position) < 1.5;
         if (
           landed ||
           state.trackId !== pendingSeek.trackId ||
-          performance.now() - pendingSeek.at > 1500
+          state.status === "error"
         ) {
           pendingSeekRef.current = null;
           pendingSeek = null;

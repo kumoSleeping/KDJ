@@ -4,7 +4,7 @@ import type { CompositionProject } from "../src/types/workshop";
 import type { WorkshopPositionAnalysis } from "../src/types/workshop";
 test("workshop selection, split, deletion, undo, layer order and autosave share one project", async () => {
   const { JSDOM } = await import("jsdom");
-  const dom = new JSDOM("<!doctype html><body><div id='root'></div></body>", {
+  const dom = new JSDOM("<!doctype html><body><div id='workshop-back'></div><div id='workshop-tools'></div><div id='root'></div></body>", {
     url: "http://localhost",
   });
   Object.assign(globalThis, {
@@ -143,20 +143,26 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   });
   const root = createRoot(document.getElementById("root")!);
   await act(async () => {
-    root.render(createElement(CompositionWorkshop));
+    root.render(createElement(CompositionWorkshop, {toolbarTarget: document.getElementById('workshop-tools'), backTarget: document.getElementById('workshop-back')}));
   });
   assert.equal(document.querySelectorAll(".vj-track-row").length, 0, "collapsed tasks do not mount media decoders");
-  assert.equal(document.querySelector('.vj-task-summary'), null, "tasks default to one row");
-  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="展开详情 测试作品"]')!.click());
-  assert.ok(document.querySelector('.vj-task-summary'), "details can expand without editing");
-  assert.equal(document.querySelector('.vj-task-editor'), null);
-  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="展开详情 测试作品"]')!.click());
-  assert.equal(document.querySelector('.vj-task-summary'), null);
-
+  assert.ok(document.querySelector('.vj-task-summary'), "tasks show their fixed-height overview by default");
+  assert.equal(document.querySelector('.vj-task-editor'), null, "default overview does not mount the editor");
+  assert.equal(document.querySelector('.vj-task-edit-toggle,[aria-label^="展开详情"]'), null, "cards have no separate expand or edit controls");
+  assert.ok(document.querySelector('[aria-label="打开任务 测试作品"]'), "the task title remains a native keyboard-accessible entry");
+  const taskCard = document.querySelector('.vj-task-card')!;
+  const taskSummary = taskCard.querySelector('.vj-task-summary')!;
+  const cardContents = taskCard.textContent;
   await act(async () => {
-    document.querySelector<HTMLButtonElement>('[aria-label="展开编辑 测试作品"]')!.click();
+    document.querySelector<HTMLElement>('.vj-task-media-title')!.click();
     await useWorkshopStore.getState().flush();
   });
+  assert.ok(document.querySelector('.vj-task-editor'), "clicking summary content enters editing directly");
+  assert.equal(document.querySelector('.vj-task-card'), taskCard, 'editing reuses the same task card DOM');
+  assert.equal(document.querySelector('.vj-task-summary'), taskSummary, 'editing retains the original material summary');
+  assert.equal(taskCard.textContent, cardContents, 'opening the editor does not add or remove card controls');
+  assert.ok(document.querySelector('#workshop-back [aria-label="返回任务列表"]'), 'back action is in the workspace title slot');
+  assert.equal(document.querySelector('.vj-task-editor [aria-label="返回任务列表"]'), null, 'back action is removed from the editing toolbar');
   assert.equal(
     document.querySelector('[aria-label="添加素材"]'),
     null,
@@ -168,7 +174,46 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     "the workshop uses the shared side panel",
   );
   assert.equal(document.querySelectorAll(".vj-track-row").length, 1);
+  assert.equal(document.querySelector('#workshop-tools [data-workshop-toolbar]'), null, 'editor actions leave the distant workspace title row');
+  const editorToolbar = document.querySelector('.vj-task-editor [data-workshop-toolbar]')!;
+  assert.equal(editorToolbar.nextElementSibling, document.querySelector('.vj-timeline-scroll'), 'tools sit directly against the track ruler, below the information row');
+  assert.equal(editorToolbar.previousElementSibling, document.querySelector('.vj-timeline-scale'));
+  assert.ok(editorToolbar.querySelector('.vj-picture-tools'), 'picture settings share the magnet toolbar');
+  assert.ok(editorToolbar.querySelector('[aria-label="时间轴吸附"]'));
+  assert.equal(document.querySelector('[aria-label="画面工具"]'), null, 'there is no separate picture-settings band');
+  assert.equal(editorToolbar.lastElementChild?.getAttribute('aria-label'), '打开作品预览小窗', 'picture-in-picture stays at the far right');
+  assert.ok(editorToolbar.querySelector('[aria-label="作品菜单"]'), 'project menu belongs to the editor, not the shared card');
+  assert.ok(taskCard.querySelector('[aria-label="导出任务 测试作品"]'), 'export stays in the shared task card');
+  const outputSettings = editorToolbar.querySelector<HTMLDetailsElement>('.vj-export-settings')!;
+  assert.ok(outputSettings, 'output settings share the existing editing toolbar');
+  assert.equal(taskCard.querySelector('.vj-export-settings'), null, 'opening the editor does not change the card layout');
+  await act(async () => {
+    outputSettings.open = true;
+    outputSettings.querySelector('summary')!.focus();
+    outputSettings.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  });
+  assert.equal(outputSettings.open, false, 'Escape dismisses output settings');
+  await act(async () => {
+    outputSettings.open = true;
+    editorToolbar.dispatchEvent(new dom.window.MouseEvent('pointerdown', {bubbles: true}));
+  });
+  assert.equal(outputSettings.open, false, 'returning to timeline tools dismisses output settings');
+  assert.equal([...document.querySelectorAll('button')].some(b => b.textContent === '全部导出'), false);
+  assert.equal(document.querySelectorAll('[data-workshop-toolbar] button').length > 0, true);
+  assert.equal(document.querySelectorAll('[aria-label="时间轴吸附"] svg').length, 1);
+  assert.equal(document.querySelector('.vj-picture-scope'), null);
   assert.equal(document.querySelector(".vj-inspector"), null);
+  const beforeSpeedLabel = useWorkshopStore.getState().draft!;
+  for (const [speed, label] of [[0.9998000399920016, "0.9998×"], [1.25, "1.25×"], [1, ""]] as const) {
+    const draft = structuredClone(beforeSpeedLabel);
+    Object.assign(draft.layers[0].clips[0].speed, {start: speed, middle: speed, end: speed});
+    await act(async () => useWorkshopStore.setState({draft}));
+    assert.equal(document.querySelector('.vj-clip-title'), null, 'the source name is not repeated over the picture');
+    assert.equal(document.querySelector('.vj-clip-rate')?.textContent ?? "", label);
+    assert.equal(useWorkshopStore.getState().draft!.layers[0].clips[0].speed.start, speed,
+      'display rounding must not silently change saved or manual playback rates');
+  }
+  await act(async () => useWorkshopStore.setState({draft: beforeSpeedLabel}));
   const click = async (label: string) =>
     act(async () => {
       const button = document.querySelector<HTMLButtonElement>(
@@ -178,7 +223,23 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
       button.click();
       await useWorkshopStore.getState().flush();
     });
-  assert.equal(document.querySelector(".vj-task-export-meta"), null, "task heading does not repeat filename or output settings");
+  assert.equal(document.querySelector(".vj-task-export-meta"), null, "no export receipt before exporting");
+  const exportDraft = useWorkshopStore.getState().draft!;
+  await act(async () => useWorkshopStore.setState({draft: {...exportDraft, output: {...exportDraft.output, format: "wav"}}}));
+  assert.match(document.querySelector('.vj-export-settings summary')!.textContent!, /WAV · 仅音频/);
+  let revealed = "";
+  window.kdj!.revealPath = async path => { revealed = path; };
+  const exportedPath = "/exports/测试作品.mp4";
+  await act(async () => useWorkshopStore.setState({draft: exportDraft, jobs: [{
+    id: "export-receipt", project_id: p.id, revision: exportDraft.revision,
+    phase: "complete", progress: 1, path: exportedPath, detail: "合成画面", error: "", track_id: 1,
+  }]}));
+  assert.equal(document.querySelector('.vj-task-export-meta .vj-output-path')?.textContent, exportedPath);
+  assert.equal(document.querySelector('.vj-task-progress')?.getAttribute('title'), exportedPath);
+  assert.ok(!document.querySelector('.vj-task-export-meta')?.textContent?.includes('合成画面'));
+  await act(async () => [...document.querySelectorAll('button')].find(b => b.textContent === "打开所在文件夹")!.click());
+  assert.equal(revealed, exportedPath);
+  await act(async () => useWorkshopStore.setState({jobs: []}));
   await act(async () => useWorkshopStore.getState().select("c"));
   const pictureValue = (label: string) => document.querySelector<HTMLInputElement>(`.vj-picture-tools input[aria-label="${label}"]`)!;
   const setPictureValue = async (label: string, value: string) => {
@@ -205,6 +266,35 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   for (let i = 0; i < 4; i++) await click("撤销");
   assert.deepEqual(server.layers[0].clips[0].picture, p.layers[0].clips[0].picture);
   assert.equal(server.canvas.import_picture, undefined, "undo restores both the clip and import preferences");
+  const audioButton = () => document.querySelector<HTMLButtonElement>('.vj-layer-audio')!;
+  assert.equal(audioButton().textContent, '100%', 'videos expose the same music/percentage control');
+  await click('关闭轨道音频：动画');
+  assert.equal(server.layers[0].clips[0].sound.muted, true);
+  await click('开启轨道音频：动画');
+  assert.equal(server.layers[0].clips[0].sound.gain, 1, 'unmuting preserves gain');
+  const beforeVolumeHistory = useWorkshopStore.getState().past.length;
+  const audioPointer = async (type: string, y: number) => act(async () => {
+    audioButton().dispatchEvent(new dom.window.MouseEvent(type, {bubbles: true, cancelable: true, button: 0, clientY: y}));
+  });
+  await audioPointer('pointerdown', 100);
+  await audioPointer('pointermove', 80);
+  await audioPointer('pointermove', 50);
+  await audioPointer('pointerup', 50);
+  await act(async () => {
+    audioButton().dispatchEvent(new dom.window.MouseEvent('click', {bubbles: true, detail: 1}));
+    await useWorkshopStore.getState().flush();
+  });
+  assert.equal(server.layers[0].clips[0].sound.gain, 1.5);
+  assert.equal(server.layers[0].clips[0].sound.muted, false, 'ending a drag does not toggle mute');
+  assert.equal(useWorkshopStore.getState().past.length, beforeVolumeHistory + 1, 'the entire drag is one undo step');
+  await audioPointer('pointerdown', 100);
+  await audioPointer('pointermove', 500);
+  assert.equal(audioButton().textContent, '0%');
+  await audioPointer('pointercancel', 500);
+  assert.equal(audioButton().textContent, '150%', 'canceled volume gestures restore the original gain');
+  await click('撤销');
+  assert.equal(audioButton().textContent, '100%');
+  await click('撤销'); await click('撤销');
   const applyPositions = useWorkshopStore.getState().applyPositions;
   const appliedPositions: string[][] = [];
   await act(async () => useWorkshopStore.setState({
@@ -214,10 +304,54 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     }]}},
     applyPositions: async (...args) => { appliedPositions.push(args); },
   }));
-  const positionChoice = document.querySelector<HTMLButtonElement>('.vj-track-label .vj-position-choice-actions button')!;
-  assert.ok(positionChoice, "position choices live with the visibility and source controls in the track label");
+  const positionTrigger = document.querySelector<HTMLButtonElement>('.vj-track-label .vj-layer-position-trigger')!;
+  assert.ok(positionTrigger.closest('.vj-layer-details'), "position entry stays in the compact details row");
+  assert.equal(positionTrigger.textContent, "", "position control is icon-only, not an extra dropdown row");
+  assert.equal(positionTrigger.getAttribute('aria-label'), '片段定位：动画');
+  assert.ok(document.querySelector('.vj-layer-heading .vj-layer-name'));
+  assert.ok(document.querySelector('.vj-layer-heading .vj-source-remove'), "remove stays in the title row's fixed end slot");
+  assert.equal(document.querySelector('.vj-layer-heading .vj-layer-audio'), null, "audio controls do not crowd the title");
+  assert.ok(audioButton().closest('.vj-layer-details'));
+  assert.equal(document.querySelector('.vj-position-popup'), null, "analysis results never open automatically");
+  await act(async () => positionTrigger.click());
+  assert.equal(positionTrigger.getAttribute('aria-expanded'), 'true');
+  await act(async () => {
+    positionTrigger.dispatchEvent(new dom.window.MouseEvent('mousedown', {bubbles: true}));
+    positionTrigger.click();
+  });
+  assert.equal(document.querySelector('.vj-position-popup'), null, "clicking the locator again closes it");
+  await act(async () => positionTrigger.click());
+  const positionChoice = document.querySelector<HTMLButtonElement>('.vj-position-popup .vj-position-choice-actions button')!;
+  assert.ok(positionChoice && !positionChoice.closest('.vj-track-label'), "position choices float outside track layout");
   await act(async () => positionChoice.click());
   assert.deepEqual(appliedPositions, [["l", "analysis", "longest"]]);
+  await act(async () => useWorkshopStore.setState({
+    error: "位置方案保存失败",
+    positions: {p: {...useWorkshopStore.getState().positions.p, items: [{
+      ...useWorkshopStore.getState().positions.p.items[0],
+      presets: [{id: "fuzzy-speed-sections", label: "分段匹配", prerequisite: "按音乐编排 · 分段变速适配",
+        placements: [0, 5000].map(start_ms => ({clip_id: "c", source_in_ms: start_ms, source_out_ms: start_ms + 5000, start_ms}))}],
+    }]}},
+  }));
+  const notice = document.querySelector('.vj-operation-notice')!;
+  assert.match(notice.textContent!, /位置方案保存失败/);
+  assert.equal(document.querySelector('.vj-error-banner'), null, "errors do not insert a banner above the editor");
+  await act(async () => positionTrigger.click());
+  const twoPartChoice = document.querySelector<HTMLButtonElement>('.vj-position-choice-actions button')!;
+  assert.equal(twoPartChoice.textContent, '分段匹配 · 2 段');
+  assert.equal(twoPartChoice.disabled, false, "a previous save error must not disable reapplying");
+  await act(async () => twoPartChoice.click());
+  assert.deepEqual(appliedPositions.at(-1), ["l", "analysis", "fuzzy-speed-sections"]);
+  await act(async () => notice.querySelector<HTMLButtonElement>('button')!.click());
+  assert.equal(useWorkshopStore.getState().error, "");
+  assert.equal(document.querySelector('.vj-operation-notice'), null);
+  for (const phase of ['ready', 'unmatched', 'waiting'] as const) {
+    await act(async () => useWorkshopStore.setState({positions: {p: {
+      ...useWorkshopStore.getState().positions.p,
+      items: [{...useWorkshopStore.getState().positions.p.items[0], phase, presets: []}],
+    }}}));
+    assert.equal(document.querySelector('.vj-layer-position-trigger'), null, `${phase} without results has no gratuitous locator`);
+  }
   const controlApi = api.controlWorkshopPositions;
   const controls: [string, boolean, string | undefined][] = [];
   const currentRevision = useWorkshopStore.getState().projects[0].revision;
@@ -228,7 +362,10 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     return {...result, items: [{...analysis, id: stopped ? analysis.id : "restarted", phase: stopped ? "stopped" : "analyzing", progress: stopped ? 1 : 0, reason: stopped ? "已停止" : ""}]};
   };
   await act(async () => useWorkshopStore.setState({positions: {p: result}}));
-  assert.ok(document.querySelector('.vj-analysis-progress button'), "stop is next to the individual progress bar");
+  assert.equal(document.querySelector('.vj-analysis-progress'), null, "progress does not add height to the track");
+  assert.equal(document.querySelector('[aria-label="片段定位：动画"]'), null, 'analyzing without results is not presented as a locator');
+  await click('位置分析：动画');
+  assert.ok(document.querySelector('.vj-position-popup .vj-analysis-progress button'), "stop is next to the individual progress bar in the locator popup");
   await click("停止 动画 的自动分析");
   assert.deepEqual(controls.pop(), ["p", true, "l"]);
   assert.equal(document.querySelector('.vj-analysis-progress progress'), null);
@@ -241,11 +378,25 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   api.controlWorkshopPositions = controlApi;
   await act(async () => useWorkshopStore.setState({applyPositions, positions: {}}));
   const timeline = document.querySelector(".vj-timeline")!;
-  assert.equal(document.querySelector(".vj-timeline-overview")?.parentElement?.className, "vj-timeline-scale", "global overview shares the time readout row");
+  assert.equal(timeline.lastElementChild, document.querySelector(".vj-timeline-overview"), "scrollbar is at the editor bottom after the tracks");
+  assert.equal(document.querySelector('[aria-label="全局预览位置"]'), null, "duplicate playback navigator is removed");
   assert.equal(document.querySelector(".vj-sources"), null, "materials are not duplicated above the timeline");
-  assert.equal(document.querySelector(".vj-main"), null, "there is no reserved inline preview region");
-  assert.equal(document.querySelector(".vj-preview"), null, "opening an editor does not start video decoders");
-  await click("打开作品预览小窗");
+  const defaultPreview = document.querySelector<HTMLElement>('.vj-floating-preview')!;
+  assert.ok(defaultPreview?.querySelector('.vj-preview'), 'video projects open with picture-in-picture');
+  assert.equal(defaultPreview.style.top, '12px', 'PiP starts at the top of the window');
+  assert.equal(parseFloat(defaultPreview.style.left) + parseFloat(defaultPreview.style.width), window.innerWidth - 12, 'PiP starts against the right edge');
+  assert.equal(document.querySelector('.vj-inline-preview,.vj-overview-resize,.vj-overview'), null, 'removed inline layout reserves no extra space');
+  assert.ok(timeline.querySelector('.vj-timeline-scale'), 'information stays in the original editor row');
+  assert.equal(document.querySelector('[aria-label="打开作品预览小窗"]')?.getAttribute('aria-pressed'), 'true');
+  await click('全屏播放');
+  const fullscreenPreview = document.querySelector('.vj-floating-preview[data-fullscreen]')!;
+  assert.equal(fullscreenPreview.parentElement, document.body, 'fullscreen escapes the editor clipping region');
+  await act(async () => fullscreenPreview.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'Escape', bubbles: true})));
+  assert.equal(document.querySelector('.vj-floating-preview'), defaultPreview, 'leaving fullscreen retains the floating surface');
+  await click('打开作品预览小窗');
+  assert.equal(document.querySelector('.vj-preview'), null, 'the toggle closes the only preview');
+  await click('打开作品预览小窗');
+  assert.equal(document.querySelectorAll('.vj-preview').length, 1, 'only one preview surface is mounted');
   assert.equal(document.querySelector(".vj-floating-preview")?.parentElement, document.body, "preview escapes the clipping side panel");
   assert.equal(document.querySelector('[aria-label="调整轨道和素材区高度"]'), null);
   assert.ok(
@@ -284,12 +435,12 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
         bubbles: true,
         cancelable: true,
         deltaY: -200,
-        shiftKey: true,
+        altKey: true,
         clientX: 350,
       }),
     ),
   );
-  assert.ok(zoomWidth() > fittedWidth, "Shift+wheel zooms the rail");
+  assert.ok(zoomWidth() > fittedWidth, "Option/Alt+wheel zooms the rail");
   let overview = document.querySelector<HTMLElement>('[aria-label="时间轴全局位置"]')!;
   assert.ok(overview,"zoom overflow exposes the global navigator");
   const playheadBeforeOverview = useWorkshopStore.getState().position;
@@ -304,10 +455,10 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.ok(scroll.scrollLeft > 0,"navigator arrows scroll rather than nudge clips");
   assert.equal(useWorkshopStore.getState().position,playheadBeforeOverview,"navigator does not seek playback");
   assert.deepEqual(useWorkshopStore.getState().draft,draftBeforeOverview);
-  await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent("wheel",{bubbles:true,cancelable:true,deltaY:100000,shiftKey:true,clientX:350})));
+  await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent("wheel",{bubbles:true,cancelable:true,deltaY:100000,altKey:true,clientX:350})));
   assert.equal(document.querySelector('[aria-label="时间轴全局位置"]'),null,"fitted content does not show an unnecessary scrollbar");
   assert.equal(scroll.scrollLeft,0,"zooming to fit resets the old horizontal offset");
-  await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent("wheel",{bubbles:true,cancelable:true,deltaY:-200,shiftKey:true,clientX:350})));
+  await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent("wheel",{bubbles:true,cancelable:true,deltaY:-200,altKey:true,clientX:350})));
   overview = document.querySelector<HTMLElement>('[aria-label="时间轴全局位置"]')!;
   assert.ok(overview);
   const zoomBeforeScroll = zoomWidth();
@@ -329,8 +480,9 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   await act(async () => wheelInput({deltaX:-12,deltaY:-40,clientX:20}));
   assert.equal(scroll.scrollLeft,panLeft,"two-finger horizontal motion also works over material names");
   assert.equal(scroll.scrollTop,80);
-  await act(async () => wheelInput({deltaY:2,deltaMode:1,altKey:true}));
-  assert.equal(scroll.scrollLeft,panLeft+40,"Option/Alt+wheel pans by normalized line units");
+  await act(async () => wheelInput({deltaY:2,deltaMode:1,shiftKey:true}));
+  assert.equal(scroll.scrollLeft,panLeft+40,"Shift+wheel pans by normalized line units");
+  assert.equal(zoomWidth(),zoomBeforeScroll,"Shift+wheel never changes zoom");
   assert.equal(scroll.scrollTop,80);
   Object.defineProperty(scroll,"clientHeight",{configurable:true,value:180});
   await act(async () => wheelInput({deltaY:1,deltaMode:2}));
@@ -340,11 +492,11 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   const beforeBurst = zoomWidth();
   const anchorTime = (scroll.scrollLeft+142) / beforeBurst;
   await act(async () => {
-    wheelInput({deltaY:-20,shiftKey:true});
-    wheelInput({deltaY:-20,shiftKey:true});
-    wheelInput({deltaX:-20,shiftKey:true});
+    wheelInput({deltaY:-20,altKey:true});
+    wheelInput({deltaY:-20,altKey:true});
+    wheelInput({deltaX:-20,altKey:true});
   });
-  assert.ok(Math.abs(zoomWidth()/beforeBurst-Math.exp(.18))<1e-9,"rapid Shift wheel samples accumulate, including OS-remapped deltaX");
+  assert.ok(Math.abs(zoomWidth()/beforeBurst-Math.exp(.18))<1e-9,"rapid Option/Alt wheel samples accumulate, including deltaX");
   assert.ok(Math.abs((scroll.scrollLeft+142)/zoomWidth()-anchorTime)<1e-9,"zoom keeps the time under the pointer fixed");
   const beforeCtrl = zoomWidth();
   await act(async () => wheelInput({deltaY:-10,ctrlKey:true,clientX:20}));
@@ -372,16 +524,6 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(scroll.scrollLeft,beforeResume+10,"panning resumes after gestureend without a scale");
   assert.equal(useWorkshopStore.getState().position,playheadBeforeOverview,"scroll and zoom never seek playback");
   assert.deepEqual(useWorkshopStore.getState().draft,draftBeforeOverview,"scroll and zoom never edit material positions");
-  const globalPreview = document.querySelector<HTMLElement>('[aria-label="全局预览位置"]')!;
-  globalPreview.getBoundingClientRect = () => ({left:0,top:0,right:600,bottom:18,width:600,height:18,x:0,y:0,toJSON(){}});
-  await pointer(globalPreview,"pointerdown",300);
-  assert.equal(useWorkshopStore.getState().position,5000,"global preview click seeks to the corresponding project time");
-  assert.equal(useWorkshopStore.getState().scrubbing,true);
-  await pointer(globalPreview,"pointermove",450);
-  assert.ok(useWorkshopStore.getState().position > 7000,"global preview supports continuous scrubbing");
-  await pointer(globalPreview,"pointerup",450);
-  assert.equal(useWorkshopStore.getState().scrubbing,false,"global seek commits when released");
-  assert.deepEqual(useWorkshopStore.getState().draft,draftBeforeOverview,"global controls never edit clips");
   const beforeHide = structuredClone(useWorkshopStore.getState().draft);
   const saveBeforeHide = saves;
   await click("隐藏轨道画面：动画");
@@ -390,7 +532,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(saves,saveBeforeHide);
   await click("显示轨道画面：动画");
   assert.ok(document.querySelector('.vj-preview video'));
-  const editor = document.querySelector<HTMLElement>('[aria-label="VJ 剪辑工坊"]')!;
+  const editor = document.querySelector<HTMLElement>('.vj-workshop[tabindex="-1"]')!;
   assert.equal(document.querySelector('[aria-label="调整预览和轨道高度"]'), null);
   const floating = document.querySelector<HTMLElement>(".vj-floating-preview")!;
   await act(async () => useWorkshopStore.getState().select("c"));
@@ -444,7 +586,16 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   const beforePreviewClose = structuredClone(useWorkshopStore.getState().draft);
   await click("关闭作品预览小窗");
   assert.equal(document.querySelector('.vj-floating-preview'), null);
+  assert.equal(document.querySelectorAll('.vj-preview').length, 0, 'closing PiP releases the preview instead of creating an inline surface');
+  assert.ok(document.querySelector('.vj-task-card .vj-task-summary'), 'closing PiP leaves the original task summary intact');
   assert.deepEqual(useWorkshopStore.getState().draft, beforePreviewClose, "closing the preview does not edit the composition");
+  await act(async () => useWorkshopStore.setState({draft: {
+    ...beforePreviewClose!, sources: beforePreviewClose!.sources.map(source => ({...source, video: false})),
+  }}));
+  assert.equal(document.querySelector('.vj-inline-preview,.vj-floating-preview'), null, 'audio-only projects reserve no video area');
+  assert.equal(document.querySelector<HTMLButtonElement>('[aria-label="打开作品预览小窗"]')?.disabled, true);
+  await act(async () => useWorkshopStore.setState({draft: beforePreviewClose}));
+  assert.ok(document.querySelector('.vj-floating-preview'), 'adding video opens the default picture-in-picture');
   const trim = document.querySelector('[aria-label="调整片段入点"]')!;
   const savedPosition = useWorkshopStore.getState().position;
   await act(async () =>
@@ -456,8 +607,9 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
       }),
     ),
   );
-  assert.ok(document.querySelector('.vj-floating-preview .kd-pip-float-chrome'), "trimming automatically opens the shared floating preview");
-  assert.equal(document.querySelector('.vj-floating-preview header'), null, "preview has no separate header strip");
+  assert.ok(document.querySelector('.vj-floating-preview .kd-pip-float-chrome'), 'trimming uses the shared floating controls');
+  assert.equal(document.querySelector('.vj-inline-preview'), null);
+  assert.equal(document.querySelector('.vj-floating-preview header'), null, 'preview has no separate header strip');
   assert.deepEqual(useWorkshopStore.getState().trimPreview, {
     clipId: "c",
     edge: "in",
@@ -545,8 +697,10 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   await pointer(fadeHandle, "pointermove", 55);
   await pointer(fadeHandle, "pointerup", 55);
   assert.ok(useWorkshopStore.getState().draft!.layers[0].clips[0].fades.video_in_ms > 0, "dragging curve control changes fade duration");
-  assert.ok(document.querySelector('[aria-label="画面淡化曲线"] path'));
+  assert.ok(document.querySelector('[aria-label="画面淡化曲线"] path')?.getAttribute('d'));
   await click("撤销");
+  assert.equal(document.querySelector('[aria-label="画面淡化曲线"] path')?.getAttribute('d'), "",
+    'no white unity line crosses video without a fade');
   saves = 0;
   await click("剪断选中片段");
   assert.equal(document.querySelectorAll(".vj-clip").length, 2);
@@ -565,6 +719,43 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     await act(async () => { target.dispatchEvent(event); await useWorkshopStore.getState().flush(); });
     return event.defaultPrevented;
   };
+  await act(async () => useWorkshopStore.getState().seek(1234.567));
+  assert.ok(editorToolbar.contains(document.querySelector('[aria-label="添加标记"]')), 'mark stays with the tools next to the tracks');
+  await click('添加标记');
+  assert.equal(server.markers?.[0].position_ms, 1234.567, 'Mark uses the same precise playback clock');
+  await click('撤销');
+  assert.equal(await shortcut(editor, {key:"m"}), true);
+  assert.equal(server.markers?.[0].position_ms, 1234.567, "M marks the precise current position");
+  assert.equal(document.querySelectorAll('.vj-marker').length, 1);
+  const markerColor = document.querySelector<HTMLElement>('.vj-marker')!.style.getPropertyValue('--vj-marker-color');
+  await act(async () => useWorkshopStore.getState().seek(2400));
+  for (const options of [{key:"m", repeat:true}, {key:"m", ctrlKey:true}, {key:"m", metaKey:true}, {key:"m", altKey:true}, {key:"m", isComposing:true}]) await shortcut(editor, options);
+  await shortcut(document.querySelector('[aria-label="导出名称"]')!, {key:"m"});
+  await shortcut(document.body, {key:"m"});
+  assert.equal(server.markers?.length, 1, "typing, held keys and outside shortcuts do not mark");
+  const markerRail = document.querySelector<HTMLElement>('.vj-ruler-rail')!;
+  const markerScale = Number(markerRail.dataset.vjTimeScale);
+  await act(async () => markerRail.dispatchEvent(new dom.window.MouseEvent("contextmenu", {bubbles:true, clientX:markerRail.getBoundingClientRect().left + 3600 * markerScale, clientY:20})));
+  await act(async () => {
+    [...document.querySelectorAll<HTMLButtonElement>('.vj-clip-menu button')].find(b => b.textContent?.includes('添加标记'))!.click();
+    await useWorkshopStore.getState().flush();
+  });
+  assert.deepEqual(server.markers?.map(m => [m.number, m.position_ms]), [[1,1234.567],[2,3600]], "context mark uses clicked time, not the playhead");
+  assert.equal(document.activeElement, editor, "menu actions restore shortcut focus");
+  assert.notEqual(document.querySelectorAll<HTMLElement>('.vj-marker')[1].style.getPropertyValue('--vj-marker-color'), markerColor);
+  await act(async () => document.querySelector<HTMLButtonElement>('.vj-marker')!.click());
+  assert.equal(useWorkshopStore.getState().position, 1234.567, "triangles seek through the shared transport");
+  await act(async () => document.querySelector('.vj-marker')!.dispatchEvent(new dom.window.MouseEvent("contextmenu", {bubbles:true, clientX:20, clientY:20})));
+  await act(async () => {
+    [...document.querySelectorAll<HTMLButtonElement>('.vj-clip-menu button')].find(b => b.textContent === '删除标记')!.click();
+    await useWorkshopStore.getState().flush();
+  });
+  assert.deepEqual(server.markers?.map(m => m.number), [2], "deleting a marker preserves other labels");
+  await click("撤销"); await click("撤销"); await click("撤销");
+  assert.equal(server.markers?.length, 0, "undo saves an explicit empty marker list for old projects");
+  await click("重做");
+  assert.equal(server.markers?.[0].position_ms, 1234.567);
+  await click("撤销");
   await act(async () => editor.dispatchEvent(new dom.window.MouseEvent("pointerdown",{bubbles:true})));
   assert.equal(await shortcut(document.body,{key:"z",ctrlKey:true}),true);
   assert.equal(document.querySelectorAll(".vj-clip").length,1,"Ctrl Z works after drag focus returns to body");
@@ -572,6 +763,23 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(document.querySelectorAll(".vj-clip").length,2);
   const textInput = document.querySelector<HTMLInputElement>('[aria-label="导出名称"]')!;
   assert.equal(await shortcut(textInput,{key:"z",ctrlKey:true}),false,"text fields keep native text undo");
+  assert.equal(await shortcut(textInput,{key:"z",metaKey:true}),false,"Mac text undo stays native too");
+  await act(async () => {
+    textInput.focus();
+    editor.dispatchEvent(new dom.window.MouseEvent('pointerdown', {bubbles: true, cancelable: true}));
+  });
+  assert.equal(document.activeElement, editor, 'timeline interaction releases stale WebKit input focus');
+  assert.equal(await shortcut(document.activeElement!, {key:'z', code:'KeyZ', metaKey:true}), true);
+  assert.equal(document.querySelectorAll('.vj-clip').length, 1, 'Cmd Z undoes after editing an input');
+  await shortcut(document.querySelector('[data-workshop-toolbar] button')!, {key:'Z', code:'KeyZ', metaKey:true, shiftKey:true});
+  assert.equal(document.querySelectorAll('.vj-clip').length, 2, 'Cmd Shift Z works from portaled toolbar');
+  for (const [inputType, count] of [['historyUndo', 1], ['historyRedo', 2]] as const) {
+    await act(async () => {
+      editor.dispatchEvent(new dom.window.InputEvent('beforeinput', {bubbles: true, cancelable: true, inputType}));
+      await useWorkshopStore.getState().flush();
+    });
+    assert.equal(document.querySelectorAll('.vj-clip').length, count);
+  }
   await act(async () => document.body.dispatchEvent(new dom.window.MouseEvent("pointerdown",{bubbles:true})));
   assert.equal(await shortcut(document.body,{key:"z",ctrlKey:true}),false,"library interaction releases workshop shortcut ownership");
   assert.equal(document.querySelectorAll(".vj-clip").length,2);
@@ -613,15 +821,16 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   revision++;
   await act(async () => useWorkshopStore.getState().accept(await api.workshop()));
   assert.equal(document.querySelectorAll('.vj-task-entry').length, 1, "expanded editing hides other task cards");
-  assert.equal(document.querySelectorAll('.vj-task-summary').length, 0, "expanded task minimizes the overview to leave room for the bottom tracks");
-  await click("展开编辑 测试作品");
+  assert.equal(document.querySelectorAll('.vj-task-summary').length, 1, 'expanded task keeps its original summary above the editor');
+  await click("返回任务列表");
   assert.equal(document.querySelectorAll('.vj-task-entry').length, 2);
-  await click("展开编辑 任务 2");
+  assert.ok(document.querySelector('[data-vj-project="second"] .vj-task-summary'), "newly received tasks also show details by default");
+  await click("打开任务 任务 2");
   assert.equal(useWorkshopStore.getState().activeId, "second");
   assert.equal(document.querySelectorAll('.vj-task-entry[data-expanded="true"]').length, 1);
   assert.equal(document.querySelectorAll('.vj-task-editor').length, 1, "only the expanded task owns a preview");
-  await click("展开编辑 任务 2");
-  assert.equal(document.querySelectorAll('.vj-task-editor').length, 0, "collapse releases the editor and its decoders");
+  await click("返回任务列表");
+  assert.equal(document.querySelectorAll('.vj-task-editor').length, 0, "returning to the list releases the editor and its decoders");
   const snapshotBeforeSingleExport = api.workshop;
   let singleProgress = .31;
   api.exportWorkshop = async id => {
@@ -630,12 +839,12 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     api.workshop = async () => ({...await snapshotBeforeSingleExport(), jobs:[{id:"single",project_id:id,revision:server.revision,phase:"rendering",progress:singleProgress,error:"",path:"",track_id:null}]});
     return api.workshop();
   };
-  await click("展开编辑 任务 2");
+  await click("打开任务 任务 2");
   await act(async () => {
-    document.querySelector<HTMLButtonElement>('.vj-task-editor .vj-header > .vj-primary')!.click();
+    document.querySelector<HTMLButtonElement>('.vj-task-card [aria-label^="导出任务 "]')!.click();
     await useWorkshopStore.getState().flush();
   });
-  await click("展开编辑 任务 2");
+  await click("返回任务列表");
   assert.match(document.querySelector('.vj-task-heading-progress')!.textContent!, /导出中.*31\.0%/);
   assert.ok(document.querySelector('[aria-label="取消这项导出"]'), "single export can be canceled outside its editor");
   assert.equal(document.querySelector<HTMLButtonElement>('[aria-label="删除任务 任务 2"]')!.disabled,true);
@@ -751,6 +960,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     return api.workshop();
   };
   await act(async () => root.render(createElement(CompositionWorkshop)));
+  await click("作品菜单");
   await click("删除任务 任务 3");
   assert.deepEqual(deletedTasks,["new"]);
   assert.equal(document.querySelector('.vj-task-editor'),null,"deleting the expanded task unmounts its preview");
@@ -780,23 +990,37 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   await act(async () => root.render(createElement(WorkshopTaskSummary, {project: structuredClone(summary)})));
   assert.ok(document.querySelector('[aria-label="素材混合详情"]'));
   assert.equal(document.querySelectorAll('.vj-task-mini-track').length, 3);
-  assert.match(document.body.textContent!, /分段 Offset \+0\.000 s \/ \+7\.000 s/);
+  assert.match(document.body.textContent!, /Offset \+0\.000 s \/ \+7\.000 s · 分段/);
+  for (const row of document.querySelectorAll('.vj-task-timing')) {
+    assert.equal(row.parentElement?.className, 'vj-task-media', 'timing spans the full card rather than staying indented beside the cover');
+    assert.match(row.textContent!, /^Offset /, 'offset leads the entire timing line');
+    assert.ok(row.classList.contains('kd-marquee-viewport'), 'overflow uses the shared marquee');
+    assert.equal(row.getAttribute('title'), row.textContent, 'full timing remains available on hover');
+  }
+  const crowded = structuredClone(summary);
+  crowded.layers.push({...structuredClone(crowded.layers[0]), id:"fourth"});
+  await act(async () => root.render(createElement(WorkshopTaskSummary, {project: crowded})));
+  assert.equal(document.querySelectorAll('.vj-task-media').length, 3, "extra layers never create another row of covers");
+  assert.equal(document.querySelectorAll('.vj-task-mini-track').length, 3, "the right-hand indicators stay bounded too");
+  assert.match(document.querySelector('.vj-task-mix-facts')!.textContent!, /\+1.*4 轨合成/);
+  await act(async () => root.render(createElement(WorkshopTaskSummary, {project: {...structuredClone(p), layers:[], sources:[]}})));
+  assert.ok(document.querySelector('.vj-task-summary'), "empty tasks retain the same overview geometry");
+  assert.equal(document.querySelector('.vj-task-summary')!.textContent, "", "empty tasks have no filler copy");
   const { useWorkshopPlayback } = await import("../src/lib/workshopPlayback");
   const { WorkshopTimeline } = await import("../src/components/composition/WorkshopTimeline");
   function AuditionTimeline() { return createElement(WorkshopTimeline, {playback:useWorkshopPlayback()}); }
-  const beforeAudition = structuredClone(summary), savesBeforeAudition = saves;
+  const savesBeforeAudio = saves;
   await act(async () => {
     useWorkshopStore.setState({activeId:"p", draft:summary, position:4321});
     root.render(createElement(AuditionTimeline));
   });
-  await click("关闭音乐试听：配乐");
+  await click("关闭轨道音频：配乐");
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
   assert.equal(document.querySelector('.vj-layer-audio')?.getAttribute('aria-pressed'), 'false');
-  assert.equal(auditionRequests.at(-1), 'music-layer', "audio switch requests a separate preview mix");
-  assert.equal(useWorkshopStore.getState().position, 4321, "audition keeps the alignment playhead");
-  assert.deepEqual(useWorkshopStore.getState().draft, beforeAudition, "audition leaves cuts, fades and export sound unchanged");
-  assert.equal(saves, savesBeforeAudition, "audition never writes a project revision");
-  await click("恢复音乐试听：配乐");
+  assert.equal(useWorkshopStore.getState().position, 4321, "sound edit keeps the alignment playhead");
+  assert.ok(useWorkshopStore.getState().draft!.layers[0].clips.every(c => c.sound.muted && c.sound.manual));
+  assert.ok(saves > savesBeforeAudio, "track mute is saved for preview and export");
+  await click("开启轨道音频：配乐");
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
   assert.equal(document.querySelector('.vj-layer-audio')?.getAttribute('aria-pressed'), 'true');
   assert.equal(auditionRequests.at(-1), undefined, "second click prepares the saved mix without rebuilding video");
@@ -923,6 +1147,20 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   state = {...state, currentTime:2};
   transport.time();
   state = {...state, currentTime:4.321};
+  const startsBeforeMark = previewStarts.length, pausesBeforeMark = pauses, ticketBeforeMark = transport.ticket;
+  const { addWorkshopMarker } = await import("../src/lib/workshopMarkers");
+  await act(async () => {
+    const current = useWorkshopStore.getState().draft!;
+    server = structuredClone(current);
+    useWorkshopStore.setState({projects:[structuredClone(current)], saving:0, gesture:null});
+    useWorkshopStore.getState().edit(p => addWorkshopMarker(p, transport.time()));
+    await useWorkshopStore.getState().flush();
+  });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
+  assert.equal(useWorkshopStore.getState().draft!.markers?.[0].position_ms, 4321, "mark uses the live transport clock");
+  assert.equal(pauses, pausesBeforeMark, "saving a marker never pauses playback");
+  assert.equal(previewStarts.length, startsBeforeMark, "markers do not restart preview media");
+  assert.equal(transport.ticket, ticketBeforeMark);
   const startsBeforeAudio = previewStarts.length, pausesBeforeAudio = pauses, stableTicket = transport.ticket;
   await act(async () => { useWorkshopStore.getState().toggleAudioLayer("l"); });
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
@@ -935,6 +1173,16 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
   assert.equal(audioReplacements.length, 2, "restoring the cached mix also replaces only audio");
   assert.equal(transport.playing, true);
+  const startsBeforeFailure = previewStarts.length;
+  await act(async () => {
+    state = {...state, playing:false, buffering:false, status:"error", error:"在线试听代理返回 HTTP 400 Bad Request"};
+    notify();
+  });
+  assert.match(transport.error, /400/);
+  await act(async () => { transport.toggle(); await new Promise(resolve => setTimeout(resolve, 0)); });
+  assert.equal(previewStarts.length, startsBeforeFailure + 1, "retry requests a fresh preview instead of playing an expired URL");
+  await act(async () => { state = {...state, error:"", playing:true, status:"playing"}; notify(); });
+  assert.equal(transport.error, "", "recovered playback clears the stale failure");
   await act(async () => root.unmount());
   window.removeEventListener("kd:play", played);
   Object.assign(player, originals);
@@ -980,6 +1228,10 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
 });
 
 test("BPM prerequisite precedes two explicit matching choices with independent actions", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost" });
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true });
   const { createElement, act } = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { WorkshopPositionChoices } = await import("../src/components/composition/WorkshopPositionChoices");
@@ -1024,6 +1276,24 @@ test("BPM prerequisite precedes two explicit matching choices with independent a
     assert.ok(assembled[0].title.includes("一次应用全部匹配片段"));
     await act(async () => assembled[0].click());
     assert.equal(selected.at(-1), "fuzzy-speed-sections");
+    const reviewPresets = [1, 2].flatMap(n => ["longest", "sections"].map(kind => ({
+      id: `review-melody-${n}-${kind}`,
+      label: kind === "longest" ? "最大匹配 · 保留完整" : "裁切匹配段",
+      prerequisite: `旋律候选 ${n} · 00:${n === 1 ? "48.85" : "58.85"} · 1.000× · 待试听`,
+      placements: [placements[0]],
+    })));
+    await render(false, { ...analysis, applied: null, presets: reviewPresets });
+    assert.equal(host.querySelectorAll('[role="group"]').length, 2);
+    assert.equal(host.querySelectorAll('button[aria-pressed="true"]').length, 0);
+    assert.equal(selected.at(-1), "fuzzy-speed-sections", "showing alternatives must not apply one");
+    const reviewButtons = [...host.querySelectorAll("button")];
+    assert.equal(reviewButtons.length, 4);
+    assert.ok(reviewButtons.every(b => b.title.includes("尚未通过严格录音匹配")));
+    await act(async () => reviewButtons[2].click());
+    assert.equal(selected.at(-1), "review-melody-2-longest");
+    await render(false, { ...analysis, applied: "review-melody-2-longest", presets: reviewPresets });
+    assert.equal(host.querySelector('button[aria-pressed="true"]')?.getAttribute("aria-label"),
+      "视频：旋律候选 2 · 00:58.85 · 1.000× · 待试听，最大匹配 · 保留完整");
     await render(false, { ...analysis, presets: [] });
     assert.equal(host.textContent, "");
   } finally {

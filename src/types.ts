@@ -1117,6 +1117,7 @@ export interface KdjBridge {
   openSoundcloudWebLogin?: () => Promise<void>;
   /** 桌面：在一次性 music.youtube.com WebView 中登录，Cookie 只留在 Rust。 */
   openYtmWebLogin?: () => Promise<void>;
+  openYoutubeWebLogin?: () => Promise<void>;
   /**
    * 桌面直接问 Tauri Updater 的清单；只有当前安装格式真的存在签名更新包时
    * 才会返回 newer=true。移动端/浏览器没有它，继续走 GitHub Release API。

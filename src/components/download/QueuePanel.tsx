@@ -349,7 +349,7 @@ function QueueRow({
 
       {task.error && task.error.trim() !== stateLabel(task) ? (
         <div className="kd-download-task-error" title={task.error}>
-          <span className="kd-truncate">{task.error}</span>
+          {task.error}
         </div>
       ) : null}
       {/* 取消失败是"我按了但没反应"，必须留在这一条上：任务还在跑，

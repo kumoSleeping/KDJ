@@ -1,5 +1,7 @@
 use super::*;
 use kdj_core::work_scheduler::{work_scheduler, WorkClass, WorkRequest};
+mod timeline;
+use timeline::{context_clip, reference, restrict_placement, ReferenceTimeline};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Placement {
     pub clip_id: String,
@@ -17,6 +19,12 @@ pub struct PositionPreset {
     pub prerequisite: Option<String>,
     pub placements: Vec<Placement>,
 }
+impl PositionPreset {
+    fn permits_automatic_placement(&self) -> bool {
+        // New/review-only strategies must opt in, never inherit auto-apply.
+        matches!(self.id.as_str(), "longest" | "sections" | "timeline-sections")
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PositionAnalysis {
     pub id: String,
@@ -33,7 +41,7 @@ pub struct PositionAnalysis {
 pub(super) struct PositionTask {
     view: PositionAnalysis,
     base: Layer,
-    reference: Option<Clip>,
+    reference: Option<ReferenceTimeline>,
     reference_key: String,
     layouts: Vec<String>,
     origins: HashMap<String, String>,
@@ -80,42 +88,22 @@ pub(super) fn retain_pending_after_edit(
     }
     Ok(())
 }
-fn reference(p: &CompositionProject, layer: &Layer) -> Option<Clip> {
-    if let Some(music) = p.music_reference() {
-        // Music is the authority, never a target of video-driven correction.
-        return (p.source(&layer.source_id).is_some_and(|s| s.video) && music.duration() >= 6000.)
-            .then(|| music.clone());
-    }
-    p.layers
-        .iter()
-        .filter(|l| l.id != layer.id)
-        .flat_map(|l| &l.clips)
-        .filter(|c| p.source(&c.source_id).is_some_and(|s| s.audio) && c.duration() >= 6000.)
-        .max_by(|a, b| {
-            let score = |c: &Clip| (!p.source(&c.source_id).unwrap().video, !c.sound.muted);
-            score(a)
-                .cmp(&score(b))
-                .then_with(|| a.duration().total_cmp(&b.duration()))
-        })
-        .cloned()
-}
 fn reference_key(
     p: &CompositionProject,
     layer: &Layer,
-    reference: &Option<Clip>,
+    reference: &Option<ReferenceTimeline>,
 ) -> Result<String> {
     render::key(&(
         p.source(&layer.source_id).map(|s| (&s.path, &s.signature)),
-        reference.as_ref().map(|c| {
-            (
-                &c.id,
-                c.start_ms,
-                c.source_in_ms,
-                c.source_out_ms,
-                &c.speed,
-                p.source(&c.source_id).map(|s| (&s.path, &s.signature)),
-            )
-        }),
+        reference.as_ref().map(|r| (
+            r.composite,
+            r.parts.iter().map(|part| {
+                let c = &part.clip;
+                (&c.id, &c.source_id, c.start_ms, c.source_in_ms, c.source_out_ms,
+                    &c.speed, &c.sound, &c.fades, &part.ranges,
+                    p.source(&c.source_id).map(|s| (&s.path, &s.signature)))
+            }).collect::<Vec<_>>(),
+        )),
     ))
 }
 // Suggestions belong to the material slot, not to the latest cropped result.
@@ -351,12 +339,8 @@ impl Workshop {
                     layer_id: layer.id.clone(),
                     phase: phase.into(),
                     progress: 0.,
-                    reference_id: reference.as_ref().map(|c| c.id.clone()).unwrap_or_default(),
-                    reference_title: reference
-                        .as_ref()
-                        .and_then(|c| p.source(&c.source_id))
-                        .map(|s| s.title.clone())
-                        .unwrap_or_default(),
+                    reference_id: reference.as_ref().map(ReferenceTimeline::id).unwrap_or_default(),
+                    reference_title: reference.as_ref().map(|r| r.title(&p)).unwrap_or_default(),
                     reason: reason.into(),
                     presets: vec![],
                     applied: None,
@@ -472,12 +456,14 @@ impl Workshop {
         .await??;
         let reference = task.reference.as_ref().context("缺少参考音频")?;
         let cache_key = render::key(&(
-            "positions-v6-remix-assembly",
+            "positions-v10-melody-review",
             layout_key(&task.base)?,
             &task.reference_key,
         ))?;
         let cache = self.cache.join(format!("{cache_key}.positions.json"));
-        for source in [&task.base.source_id, &reference.source_id] {
+        let source_ids: std::collections::HashSet<_> = std::iter::once(&task.base.source_id)
+            .chain(reference.parts.iter().map(|r| &r.clip.source_id)).collect();
+        for source in source_ids {
             let s = p.source(source).context("素材不存在")?;
             if !s.signature.is_empty() && signature(Path::new(&s.path))? != s.signature {
                 bail!("素材已变化：{}，请重新添加", s.title)
@@ -489,10 +475,24 @@ impl Workshop {
             }
         }
         self.position_progress(&p.id, key, &task.view.id, 0.05);
-        let reference_pcm = Arc::new(render::alignment_pcm(p, reference, &task.cancel).await?);
+        let mut references = vec![];
+        for part in &reference.parts {
+            if part.ranges.is_empty() {
+                continue;
+            }
+            let clip = context_clip(&part.clip);
+            if clip.duration() < 5999. {
+                continue;
+            }
+            references.push((part, clip));
+        }
         self.position_progress(&p.id, key, &task.view.id, 0.2);
+        if references.is_empty() {
+            return Ok((vec![], "没有足够的独立音频可供匹配（重叠区不参与）".into()));
+        }
         let mut placements = vec![];
         let mut remix_placements = vec![];
+        let mut review_candidates = vec![];
         let mut reason = String::new();
         for (index, clip) in task.base.clips.iter().enumerate() {
             if task.cancel.is_cancelled() {
@@ -502,88 +502,134 @@ impl Workshop {
                 reason = "可用于匹配的片段不足 6 秒".into();
                 continue;
             }
-            let pcm = render::alignment_pcm(p, clip, &task.cancel).await?;
-            let a = reference_pcm.clone();
-            let cancel = task.cancel.clone();
-            let constant = clip.speed.preset == "constant" && reference.speed.preset == "constant";
-            let (offset, sections, fuzzy, message) =
-                tokio::task::spawn_blocking(move || -> Result<_> {
-                    kdj_core::thread_qos::prefer_background();
-                    let (result, sections) =
-                        kdj_analysis::alignment::align_sections(&a, &pcm, || {
+            let pcm = Arc::new(render::alignment_pcm(p, clip, &task.cancel).await?);
+            // All edits of one recording reuse one correspondence, not one fit
+            // per cut. Cache only the small result, never multiple full PCMs.
+            type Correspondence = (
+                Option<f64>,
+                Vec<kdj_core::composition::CompositionVideoSection>,
+                kdj_analysis::alignment::PositionSuggestions,
+                String,
+            );
+            let mut correspondences: HashMap<String, Correspondence> = HashMap::new();
+            for (reference_index, (part, reference_clip)) in references.iter().enumerate() {
+                let recording_key = render::key(&(&reference_clip.source_id,
+                    reference_clip.source_in_ms, reference_clip.source_out_ms, &reference_clip.speed))?;
+                let (offset, sections, fuzzy, message) = if let Some(found) = correspondences.get(&recording_key) {
+                    found.clone()
+                } else {
+                    let a = render::alignment_pcm(p, reference_clip, &task.cancel).await?;
+                    let pcm = pcm.clone();
+                    let cancel = task.cancel.clone();
+                    let constant = clip.speed.preset == "constant"
+                        && reference_clip.speed.preset == "constant";
+                    let found = tokio::task::spawn_blocking(move || -> Result<_> {
+                        kdj_core::thread_qos::prefer_background();
+                        let (result, sections) =
+                            kdj_analysis::alignment::align_sections(&a, &pcm, || {
+                                cancel.is_cancelled()
+                            })?;
+                        if result.matched {
+                            return Ok((
+                                Some(-result.offset_ms as f64),
+                                sections,
+                                kdj_analysis::alignment::PositionSuggestions::default(),
+                                String::new(),
+                            ));
+                        }
+                        let result = kdj_analysis::alignment::align_segment(&pcm, &a, || {
                             cancel.is_cancelled()
                         })?;
-                    if result.matched {
-                        return Ok((
-                            Some(-result.offset_ms as f64),
-                            sections,
+                        let fuzzy = if !result.matched && constant {
+                            kdj_analysis::alignment::suggest_positions(&pcm, &a, || {
+                                cancel.is_cancelled()
+                            })?
+                        } else {
+                            kdj_analysis::alignment::PositionSuggestions::default()
+                        };
+                        Ok((
+                            result.matched.then_some(result.offset_ms as f64),
                             vec![],
-                            String::new(),
-                        ));
+                            fuzzy,
+                            result.reason,
+                        ))
+                    })
+                    .await??;
+                    correspondences.insert(recording_key, found.clone());
+                    found
+                };
+                for candidate in &fuzzy.verified {
+                    let speed = clip.speed.start * candidate.speed;
+                    if !(0.5..=2.).contains(&speed) {
+                        continue;
                     }
-                    let result =
-                        kdj_analysis::alignment::align_segment(&pcm, &a, || cancel.is_cancelled())?;
-                    let fuzzy = if !result.matched && constant {
-                        kdj_analysis::alignment::suggest_constant_speed(&pcm, &a, || {
-                            cancel.is_cancelled()
-                        })?
-                    } else {
-                        vec![]
+                    let value = Placement {
+                        clip_id: clip.id.clone(),
+                        source_in_ms: clip.source_at(candidate.source_start_ms),
+                        source_out_ms: clip.source_at(candidate.source_end_ms),
+                        start_ms: reference_clip.start_ms + candidate.reference_start_ms,
+                        speed_multiplier: Some(candidate.speed),
                     };
-                    Ok((
-                        result.matched.then_some(result.offset_ms as f64),
-                        vec![],
-                        fuzzy,
-                        result.reason,
-                    ))
-                })
-                .await??;
-            for candidate in &fuzzy {
-                let speed = clip.speed.start * candidate.speed;
-                if !(0.5..=2.).contains(&speed) {
-                    continue;
+                    remix_placements.extend(restrict_placement(clip, &value, &part.ranges));
                 }
-                remix_placements.push(Placement {
-                    clip_id: clip.id.clone(),
-                    source_in_ms: clip.source_at(candidate.source_start_ms),
-                    source_out_ms: clip.source_at(candidate.source_end_ms),
-                    start_ms: reference.start_ms + candidate.reference_start_ms,
-                    speed_multiplier: Some(candidate.speed),
-                });
-            }
-            if !sections.is_empty() {
-                for section in sections {
-                    if let Some(value) = placement(
-                        clip,
-                        section.video_start_ms as f64,
-                        section.video_start_ms as f64 + section.duration_ms as f64,
-                        reference.start_ms + section.audio_start_ms as f64,
-                    ) {
-                        placements.push(value)
+                for candidate in &fuzzy.review {
+                    if !(0.5..=2.).contains(&(clip.speed.start * candidate.speed)) {
+                        continue;
+                    }
+                    let value = Placement {
+                        clip_id: clip.id.clone(),
+                        source_in_ms: clip.source_at(candidate.source_start_ms),
+                        source_out_ms: clip.source_at(candidate.source_end_ms),
+                        start_ms: reference_clip.start_ms + candidate.reference_start_ms,
+                        speed_multiplier: Some(candidate.speed),
+                    };
+                    let parts = restrict_placement(clip, &value, &part.ranges);
+                    if !parts.is_empty() {
+                        review_candidates.push((candidate.similarity, parts));
                     }
                 }
-            } else if let Some(offset) = offset {
-                let lo = (-offset).max(0.);
-                let hi = clip.duration().min(reference.duration() - offset);
-                if let Some(value) = placement(clip, lo, hi, reference.start_ms + offset + lo) {
-                    placements.push(value)
+                if !sections.is_empty() {
+                    for section in sections {
+                        if let Some(value) = placement(
+                            clip,
+                            section.video_start_ms as f64,
+                            section.video_start_ms as f64 + section.duration_ms as f64,
+                            reference_clip.start_ms + section.audio_start_ms as f64,
+                        ) {
+                            placements.extend(restrict_placement(clip, &value, &part.ranges))
+                        }
+                    }
+                } else if let Some(offset) = offset {
+                    let lo = (-offset).max(0.);
+                    let hi = clip.duration().min(reference_clip.duration() - offset);
+                    if let Some(value) = placement(clip, lo, hi, reference_clip.start_ms + offset + lo) {
+                        placements.extend(restrict_placement(clip, &value, &part.ranges))
+                    }
+                } else {
+                    reason = message;
                 }
-            } else {
-                reason = message;
+                self.position_progress(
+                    &p.id,
+                    key,
+                    &task.view.id,
+                    0.2 + 0.75 * (index * references.len() + reference_index + 1) as f64
+                        / (task.base.clips.len() * references.len()).max(1) as f64,
+                );
             }
-            self.position_progress(
-                &p.id,
-                key,
-                &task.view.id,
-                0.2 + 0.75 * (index + 1) as f64 / task.base.clips.len().max(1) as f64,
-            );
         }
-        let presets = if remix_placements.is_empty() {
-            make_presets(&task.base, &placements)
+        let has_remix = !remix_placements.is_empty();
+        placements.extend(remix_placements);
+        timeline::bridge_crossfades(&task.base, reference, &mut placements);
+        let mut presets = if !has_remix {
+            if reference.composite {
+                make_timeline_presets(&task.base, placements)
+            } else {
+                make_presets(&task.base, &placements)
+            }
         } else {
-            placements.extend(remix_placements);
             make_remix_presets(&task.base, placements)
         };
+        presets.extend(make_review_presets(&task.base, review_candidates));
         if !presets.is_empty() {
             reason.clear()
         } else if reason.is_empty() {
@@ -673,13 +719,17 @@ impl Workshop {
             None => task.view.presets.first(),
         }
         .context("位置方案不存在")?;
-        // Local remix suggestions are explicit cuts, not a safe automatic
-        // placement of newly imported full material.
-        if automatic && preset.id.starts_with("fuzzy-speed-") {
+        // A displayed alternative is not permission to move newly imported material.
+        if automatic && !preset.permits_automatic_placement() {
             return Ok(None);
         }
         let preset_id = preset.id.clone();
-        let (clips, origins) = apply_preset(&task.base, layer, preset, &task.origins)?;
+        let (mut clips, origins) = apply_preset(&task.base, layer, preset, &task.origins)?;
+        if p.source(&layer.source_id).is_some_and(|s| s.video) {
+            if let Some(reference) = &task.reference {
+                timeline::apply_reference_crossfades(reference, &mut clips);
+            }
+        }
         let layer = p.layers.iter_mut().find(|l| l.id == layer_id).unwrap();
         layer.clips = clips;
         // A full video can begin before the music. Add leading project time,
@@ -712,6 +762,7 @@ impl Workshop {
                 *layout = layout_key(layer)?;
             }
         }
+        let invalidated_revision = p.revision;
         p.revision += 1;
         next.revision += 1;
         self.save(&next)?;
@@ -721,7 +772,7 @@ impl Workshop {
         drop(journal);
         let snapshot = self.snapshot();
         self.state.hub.publish("workshop.updated", &snapshot);
-        self.cancel_previews(pid);
+        self.cancel_previews(pid, invalidated_revision);
         let _ = self.prepare_positions(pid);
         Ok(Some(snapshot))
     }
@@ -736,6 +787,16 @@ fn placement(c: &Clip, lo: f64, hi: f64, start: f64) -> Option<Placement> {
         speed_multiplier: None,
     })
 }
+fn make_timeline_presets(layer: &Layer, placements: Vec<Placement>) -> Vec<PositionPreset> {
+    let mut presets = make_remix_presets(layer, placements);
+    for preset in &mut presets {
+        preset.id = "timeline-sections".into();
+        preset.label = "音频时间轴匹配".into();
+        preset.prerequisite = Some("按各段音频编排 · 重叠区不参与".into());
+    }
+    presets
+}
+
 fn make_remix_presets(layer: &Layer, mut placements: Vec<Placement>) -> Vec<PositionPreset> {
     placements.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
     let duration = |p: &Placement| {
@@ -752,12 +813,61 @@ fn make_remix_presets(layer: &Layer, mut placements: Vec<Placement>) -> Vec<Posi
     {
         return vec![];
     }
+    // An audio cut that retains contiguous source time is not a video cut.
+    let mut continuous: Vec<Placement> = Vec::new();
+    for next in placements {
+        if let Some(last) = continuous.last_mut() {
+            if last.clip_id == next.clip_id
+                && (last.source_out_ms - next.source_in_ms).abs() < 0.01
+                && (last.start_ms + duration(last).unwrap() - next.start_ms).abs() < 0.01
+                && (last.speed_multiplier.unwrap_or(1.) - next.speed_multiplier.unwrap_or(1.)).abs() < 1e-9
+            {
+                last.source_out_ms = next.source_out_ms;
+                continue;
+            }
+        }
+        continuous.push(next);
+    }
     vec![PositionPreset {
         id: "fuzzy-speed-sections".into(),
         label: "分段匹配".into(),
         prerequisite: Some("按音乐编排 · 分段变速适配".into()),
-        placements,
+        placements: continuous,
     }]
+}
+
+/// Each weaker mapping is a separate choice, not a cut to concatenate with
+/// competing locations. Reuse the normal full/cropped application and undo path.
+fn make_review_presets(layer: &Layer, mut candidates: Vec<(f64, Vec<Placement>)>) -> Vec<PositionPreset> {
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut result: Vec<PositionPreset> = vec![];
+    for (_, placements) in candidates {
+        let mut choices = make_presets(layer, &placements);
+        let Some(full) = choices.first() else { continue };
+        if result.iter().filter(|p| p.id.ends_with("longest")).any(|old| {
+            old.placements.len() == full.placements.len()
+                && old.placements.iter().zip(&full.placements).all(|(a, b)| {
+                    a.clip_id == b.clip_id && (a.start_ms - b.start_ms).abs() <= 200.
+                        && (a.speed_multiplier.unwrap_or(1.) - b.speed_multiplier.unwrap_or(1.)).abs() < 0.001
+                })
+        }) {
+            continue;
+        }
+        let number = result.len() / 2 + 1;
+        let first = &full.placements[0];
+        let centiseconds = (first.start_ms.abs() / 10.).round() as u64;
+        let prerequisite = format!("旋律候选 {number} · {}{:02}:{:02}.{:02} · {:.3}× · 待试听",
+            if first.start_ms < 0. { "−" } else { "" },
+            centiseconds / 6000, centiseconds / 100 % 60, centiseconds % 100,
+            first.speed_multiplier.unwrap_or(1.));
+        for choice in &mut choices {
+            choice.id = format!("review-melody-{number}-{}", choice.id);
+            choice.prerequisite = Some(prerequisite.clone());
+        }
+        result.extend(choices);
+        if number == 3 { break }
+    }
+    result
 }
 
 fn make_presets(layer: &Layer, placements: &[Placement]) -> Vec<PositionPreset> {
@@ -842,10 +952,11 @@ fn apply_preset(
     preset: &PositionPreset,
     origins: &HashMap<String, String>,
 ) -> Result<(Vec<Clip>, HashMap<String, String>)> {
-    let mut clips = vec![];
+    let mut clips: Vec<Clip> = vec![];
     let mut used = std::collections::HashSet::new();
     let mut next_origins = HashMap::new();
     for placement in &preset.placements {
+        let first_piece = clips.len();
         let original = base
             .clips
             .iter()
@@ -918,11 +1029,39 @@ fn apply_preset(
                 clip.fades.audio_in_ms *= scale;
                 clip.fades.audio_out_ms *= scale;
             }
+            // A transition belongs to the incoming edit, not its old source
+            // timestamp. Keep it when the new plan trims that edit's head.
+            if clips.len() > first_piece && (pair[0] - template.source_in_ms).abs() > 0.01 {
+                clip.video_transition = None;
+            }
             clip.source_in_ms = pair[0];
             clip.source_out_ms = pair[1];
             clip.start_ms = placement.start_ms
                 + (original.output_at(pair[0]) - original.output_at(placement.source_in_ms))
                     / multiplier;
+            // Old automatic cuts are not effect edits. Restoring their missing
+            // handles must not recreate every obsolete boundary in the new plan.
+            if clips.len() > first_piece {
+                let last = clips.last_mut().unwrap();
+                if same_position_effects(last, &clip) {
+                    // A dissolve between identical, source-continuous pieces
+                    // is not an independent effect boundary. Carry the old
+                    // incoming edit's transition onto the restored head instead
+                    // of stranding it behind a tiny alignment correction.
+                    if clip.video_transition.is_some() {
+                        last.video_transition = clip.video_transition.clone();
+                    }
+                    last.source_out_ms = clip.source_out_ms;
+                    // Manual is ownership metadata, not a different sound. Keep
+                    // explicit ownership when folding an automatic handle into it.
+                    last.sound.manual |= clip.sound.manual;
+                    if inactive_fades(last) && inactive_fades(&clip) {
+                        last.fades.offset_ms = 0.;
+                        last.fades.span_ms = last.duration();
+                    }
+                    continue;
+                }
+            }
             next_origins.insert(clip.id.clone(), original.id.clone());
             clips.push(clip);
         }
@@ -930,9 +1069,109 @@ fn apply_preset(
     Ok((clips, next_origins))
 }
 
+fn inactive_fades(c: &Clip) -> bool {
+    [c.fades.video_in_ms, c.fades.video_out_ms, c.fades.audio_in_ms, c.fades.audio_out_ms]
+        .iter().all(|v| *v == 0.)
+}
+
+fn same_position_effects(a: &Clip, b: &Clip) -> bool {
+    let close = |a: f64, b: f64| (a - b).abs() < 0.01;
+    if a.source_id != b.source_id || a.speed != b.speed || a.picture != b.picture
+        || a.sound.muted != b.sound.muted || a.sound.gain != b.sound.gain
+        || a.display_duration_ms.is_some() || b.display_duration_ms.is_some()
+        || a.animation_offset_ms != b.animation_offset_ms
+        || !close(a.source_out_ms, b.source_in_ms)
+        || !close(a.start_ms + a.duration(), b.start_ms)
+    { return false; }
+    let fades = |c: &Clip| [c.fades.video_in_ms, c.fades.video_out_ms,
+        c.fades.audio_in_ms, c.fades.audio_out_ms];
+    let af = fades(a);
+    let bf = fades(b);
+    // Inactive envelope metadata differs between previously retimed cuts but
+    // has no observable effect. Active envelopes must be exactly continuous.
+    (af.iter().chain(&bf).all(|v| *v == 0.)) || (
+        af.iter().zip(&bf).all(|(a, b)| close(*a, *b))
+            && a.fades.linear == b.fades.linear
+            && close(a.fades.span_ms, b.fades.span_ms)
+            && close(a.fades.offset_ms + a.duration(), b.fades.offset_ms)
+    )
+}
+
 #[cfg(test)]
 mod speed_tests {
     use super::*;
+
+    #[test]
+    fn melody_review_keeps_alternatives_separate_and_never_opts_into_auto_placement() {
+        let p = super::super::naming::music_project();
+        let layer = &p.layers[0];
+        let candidates = [48850., 48880., 108850., 168850., 228850.].map(|start_ms| (0.54, vec![Placement {
+            clip_id: layer.clips[0].id.clone(), source_in_ms: 0., source_out_ms: 38000.,
+            start_ms, speed_multiplier: Some(1.),
+        }]));
+        let presets = make_review_presets(layer, candidates.to_vec());
+        assert_eq!(presets.len(), 6, "three distinct locations, full and cropped for each");
+        assert!(presets.iter().all(|p| !p.permits_automatic_placement()));
+        assert!(presets[0].prerequisite.as_ref().unwrap().contains("00:48.85"));
+        for (index, pair) in presets.chunks_exact(2).enumerate() {
+            assert_eq!(pair[0].id, format!("review-melody-{}-longest", index + 1));
+            assert_eq!(pair[1].id, format!("review-melody-{}-sections", index + 1));
+            assert_eq!(pair[0].placements.len(), 1);
+            assert_eq!(pair[1].placements.len(), 1);
+            assert_eq!(pair[0].placements[0].source_out_ms, 90000.);
+            assert_eq!(pair[1].placements[0].source_out_ms, 38000.);
+        }
+        let mut policy = presets[0].clone();
+        for (id, allowed) in [("longest", true), ("sections", true), ("timeline-sections", true),
+            ("fuzzy-speed-sections", false), ("new-strategy", false)] {
+            policy.id = id.into();
+            assert_eq!(policy.permits_automatic_placement(), allowed);
+        }
+    }
+
+    #[tokio::test]
+    async fn melody_review_is_applied_only_after_explicit_choice_and_can_switch_candidates() {
+        let f = super::super::super::media_tests::Fixture::new();
+        let config = Arc::new(kdj_core::AppConfig::create(f.path("data"), f.path("outputs"), 0));
+        let state = AppState::new(config).unwrap();
+        let legacy = CompositionManager::open(state.clone()).unwrap();
+        let m = Workshop::open(state, &legacy).unwrap();
+        let _slots = m.analysis_slots.acquire_many(m.analysis_slots.available_permits() as u32).await.unwrap();
+        let p = super::super::naming::music_project();
+        let layer = &p.layers[0];
+        let key = format!("{}:v", p.id);
+        m.change(|j| {
+            j.projects.push(p.clone());
+            j.pending_positions.insert(key.clone(), layout_key(layer)?);
+            Ok(())
+        }).unwrap();
+        m.prepare_positions(&p.id).unwrap();
+        let presets = make_review_presets(layer, [48850., 108850.].map(|start_ms| (0.54, vec![Placement {
+            clip_id: layer.clips[0].id.clone(), source_in_ms: 0., source_out_ms: 38000.,
+            start_ms, speed_multiplier: Some(1.),
+        }])).to_vec());
+        let request = {
+            let mut tasks = m.positions.lock().unwrap();
+            let task = tasks.get_mut(&key).unwrap();
+            task.view.phase = "ready".into();
+            task.view.presets = presets;
+            task.view.id.clone()
+        };
+        assert!(m.apply_position_choice(&p.id, None, "v", &request, None).unwrap().is_none());
+        assert_eq!(m.snapshot().projects[0].layers[0].clips[0].start_ms, 0.);
+        for (preset, expected) in [("review-melody-1-longest", 48850.), ("review-melody-2-longest", 108850.)] {
+            let revision = m.snapshot().projects[0].revision;
+            m.apply_positions(&p.id, revision, "v", &request, preset).unwrap();
+            let snapshot = m.snapshot();
+            let clips = &snapshot.projects[0].layers[0].clips;
+            assert_eq!(clips.len(), 1);
+            assert_eq!(clips[0].start_ms, expected);
+            assert_eq!(clips[0].source_out_ms, 90000.);
+            assert_eq!(clips[0].speed.start, 1.);
+        }
+        m.cancel_positions(&p.id);
+        tokio::task::yield_now().await;
+    }
     #[tokio::test]
     async fn stopping_position_analysis_is_selective_persistent_and_blocks_late_results() {
         let f = super::super::super::media_tests::Fixture::new();
@@ -968,6 +1207,7 @@ mod speed_tests {
         let mut edited = p.clone();
         edited.layers[0].clips[0].start_ms += 100.;
         m.patch(&p.id, p.revision, super::super::Edit {
+            markers: Some(edited.markers.clone()),
             name: edited.name.clone(), layers: edited.layers.clone(),
             canvas: edited.canvas.clone(), output: edited.output.clone(),
         }).unwrap();
@@ -1033,20 +1273,22 @@ mod speed_tests {
     fn music_is_only_the_reference_regardless_of_visual_layer_order() {
         let mut p = super::super::naming::music_project();
         assert!(reference(&p, &p.layers[1]).is_none());
-        assert_eq!(reference(&p, &p.layers[0]).unwrap().id, "clip-a");
+        assert_eq!(reference(&p, &p.layers[0]).unwrap().id(), "clip-a");
         p.layers.reverse();
         assert!(reference(&p, &p.layers[0]).is_none());
-        assert_eq!(reference(&p, &p.layers[1]).unwrap().id, "clip-a");
-        // Even a very short music clip must not make another video the authority.
+        assert_eq!(reference(&p, &p.layers[1]).unwrap().id(), "clip-a");
+        // Short edits use retained music handles for evidence, never another video.
         p.layers[0].clips[0].source_out_ms = 3000.;
-        assert!(reference(&p, &p.layers[1]).is_none());
+        assert_eq!(reference(&p, &p.layers[1]).unwrap().id(), "clip-a");
     }
 
     fn layer() -> Layer {
         Layer {
+            grid: None,
             id: "row".into(),
             source_id: "source".into(),
             clips: vec![Clip {
+                video_transition: None,
                 display_duration_ms: None,
                 animation_offset_ms: 0.,
                 id: "clip".into(),
@@ -1065,6 +1307,171 @@ mod speed_tests {
             }],
         }
     }
+    #[test]
+    fn applying_continuous_plan_removes_old_automatic_fragment_boundaries() {
+        let base = layer();
+        let mut current = base.clone();
+        let mut origins = HashMap::new();
+        current.clips = (0..7).map(|i| {
+            let mut clip = base.clips[0].clone();
+            clip.id = format!("old-{i}");
+            clip.source_in_ms = i as f64 * 12000.;
+            clip.source_out_ms = clip.source_in_ms + 8000.;
+            clip.start_ms = clip.source_in_ms;
+            clip.fades.offset_ms = clip.source_in_ms;
+            origins.insert(clip.id.clone(), "clip".into());
+            clip
+        }).collect();
+        let preset = PositionPreset { id: "continuous".into(), label: String::new(), prerequisite: None,
+            placements: vec![
+                Placement { clip_id: "clip".into(), source_in_ms: 0., source_out_ms: 30000., start_ms: 0., speed_multiplier: Some(1.001) },
+                Placement { clip_id: "clip".into(), source_in_ms: 50000., source_out_ms: 100000., start_ms: 30000./1.001, speed_multiplier: Some(1.001) },
+            ] };
+        let (clips, _) = apply_preset(&base, &current, &preset, &origins).unwrap();
+        assert_eq!(clips.len(), 2, "obsolete auto cuts must not survive a new two-part plan");
+        assert!((clips[0].duration() - clips[1].start_ms).abs() < 0.01);
+        current.clips[1].picture.opacity = 0.5;
+        let (edited, _) = apply_preset(&base, &current, &preset, &origins).unwrap();
+        assert_eq!(edited.len(), 4, "a real picture edit retains only its two necessary boundaries");
+        assert_eq!(edited[1].picture.opacity, 0.5);
+    }
+
+    #[test]
+    fn two_part_plan_merges_frame_fragment_and_extends_inactive_envelope() {
+        let mut p = super::super::naming::music_project();
+        let source_id = p.layers[0].source_id.clone();
+        p.sources.iter_mut().find(|s| s.id == source_id).unwrap().duration_ms = 281466.;
+        let mut base = p.layers[0].clone();
+        let original = &mut base.clips[0];
+        original.source_out_ms = 281466.;
+        original.speed = Speed::normal(281466.);
+        original.fades = Fades::new(281466., false);
+        original.sound.muted = true;
+        original.sound.manual = false;
+        let rate = 0.9998000399920016;
+        let mut current = base.clone();
+        let mut origins = HashMap::new();
+        current.clips = [
+            (713.8572285542893, 86004.5351473923, 0., true),
+            (86004.5351473923, 86037.86177345742, 85307.73605442177, false),
+            (160596.16329771097, 280925.8148370326, 85457.40208057742, true),
+        ].into_iter().enumerate().map(|(i, (lo, hi, at, manual))| {
+            let mut c = base.clips[0].clone();
+            c.id = format!("old-{i}");
+            c.source_in_ms = lo;
+            c.source_out_ms = hi;
+            c.start_ms = at;
+            c.speed.start = rate;
+            c.speed.middle = rate;
+            c.speed.end = rate;
+            c.sound.manual = manual;
+            c.fades = Fades::new(c.duration(), false);
+            origins.insert(c.id.clone(), base.clips[0].id.clone());
+            c
+        }).collect();
+        let preset = PositionPreset { id: "fuzzy-speed-sections".into(), label: String::new(), prerequisite: None,
+            placements: vec![
+                Placement { clip_id: base.clips[0].id.clone(), source_in_ms: 713.8572285542893,
+                    source_out_ms: 86154.17124632816, start_ms: 0., speed_multiplier: Some(rate) },
+                Placement { clip_id: base.clips[0].id.clone(), source_in_ms: 160596.16329771097,
+                    source_out_ms: 280925.8148370326, start_ms: 85457.40208057742, speed_multiplier: Some(rate) },
+            ] };
+        let (clips, origins) = apply_preset(&base, &current, &preset, &origins).unwrap();
+        assert_eq!(clips.len(), 2, "ownership flags must not preserve an obsolete one-frame cut");
+        assert!(clips.iter().all(|c| c.sound.manual));
+        assert!((clips[0].duration() - clips[1].start_ms).abs() < 0.01);
+        p.layers[0].clips = clips.clone();
+        p.validate().expect("merged envelope covers the restored handles");
+        let (again, _) = apply_preset(&base, &p.layers[0], &preset, &origins).unwrap();
+        assert_eq!(again, clips, "reapplying is stable");
+    }
+
+    #[test]
+    fn incoming_transition_follows_relocated_cut_without_creating_a_third_piece() {
+        let mut p = super::super::naming::music_project();
+        let source_id = p.layers[0].source_id.clone();
+        p.sources.iter_mut().find(|s| s.id == source_id).unwrap().duration_ms = 281466.;
+        let mut base = p.layers[0].clone();
+        let original = &mut base.clips[0];
+        original.source_out_ms = 281466.;
+        original.speed = Speed::normal(281466.);
+        original.fades = Fades::new(281466., false);
+        original.sound.muted = true;
+        original.sound.manual = false;
+        let incoming = kdj_core::workshop::VideoTransition {
+            duration_ms: 557.7582172699622, alignment: 0,
+        };
+        let at = 85457.40208057742;
+        let new_in = 160580.28253037046;
+        let old_in = 160596.16329771097;
+        let preset = PositionPreset {
+            id: "fuzzy-speed-sections".into(), label: String::new(), prerequisite: None,
+            placements: vec![
+                Placement { clip_id: original.id.clone(), source_in_ms: 666.,
+                    source_out_ms: 86123.40208057742, start_ms: 0., speed_multiplier: Some(1.) },
+                Placement { clip_id: original.id.clone(), source_in_ms: new_in,
+                    source_out_ms: 280934., start_ms: at, speed_multiplier: Some(1.) },
+            ],
+        };
+        // Both an untouched two-piece edit and the already persisted broken
+        // three-piece result must converge, without dropping the user's dissolve.
+        for fragmented in [false, true] {
+            let mut current = base.clone();
+            current.clips = [(666., 86123.40208057742, 0.),
+                (old_in, 280934., at + if fragmented { old_in - new_in } else { 0. })]
+                .into_iter().enumerate().map(|(i, (lo, hi, start))| {
+                    let mut c = base.clips[0].clone();
+                    c.id = format!("old-{i}");
+                    c.source_in_ms = lo;
+                    c.source_out_ms = hi;
+                    c.start_ms = start;
+                    c.sound.manual = true;
+                    c.fades = Fades::new(c.duration(), false);
+                    if i == 1 { c.video_transition = Some(incoming.clone()); }
+                    c
+                }).collect();
+            if fragmented {
+                let mut handle = base.clips[0].clone();
+                handle.id = "spurious-handle".into();
+                handle.source_in_ms = new_in;
+                handle.source_out_ms = old_in;
+                handle.start_ms = at;
+                handle.fades.offset_ms = new_in;
+                handle.video_transition = Some(kdj_core::workshop::VideoTransition {
+                    duration_ms: 274.52437575189106, alignment: 1,
+                });
+                current.clips.insert(1, handle);
+            }
+            let origins = current.clips.iter().map(|c| (c.id.clone(), base.clips[0].id.clone())).collect();
+            let (clips, origins) = apply_preset(&base, &current, &preset, &origins).unwrap();
+            assert_eq!(clips.len(), 2, "a 15.88ms restored head must not become a third clip");
+            assert_eq!(clips[1].video_transition, Some(incoming.clone()));
+            assert_eq!(clips[1].source_in_ms, new_in);
+            assert!((clips[0].duration() - clips[1].start_ms).abs() < 0.01);
+            p.layers[0].clips = clips.clone();
+            p.validate().unwrap();
+            let (again, _) = apply_preset(&base, &p.layers[0], &preset, &origins).unwrap();
+            assert_eq!(again, clips, "reapplying does not split or move the dissolve");
+
+            // An actual picture edit still owns its source boundary.
+            current.clips.last_mut().unwrap().picture.opacity = 0.4;
+            let origins = current.clips.iter().map(|c| (c.id.clone(), base.clips[0].id.clone())).collect();
+            let (edited, _) = apply_preset(&base, &current, &preset, &origins).unwrap();
+            assert_eq!(edited.len(), 3);
+            assert_eq!(edited[2].picture.opacity, 0.4);
+            assert_eq!(edited[2].video_transition, Some(incoming.clone()));
+        }
+        // Moving the cut forward trims the existing incoming piece instead of
+        // restoring a head; its transition must follow the new boundary too.
+        let current = p.layers[0].clone();
+        let origins = current.clips.iter().map(|c| (c.id.clone(), base.clips[0].id.clone())).collect();
+        let mut trimmed = preset;
+        trimmed.placements[1].source_in_ms = old_in;
+        let (clips, _) = apply_preset(&base, &current, &trimmed, &origins).unwrap();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[1].video_transition, Some(incoming));
+    }
+
     #[test]
     fn remix_choice_applies_all_cuts_and_preserves_repeated_occurrence_edits() {
         let base = layer();
@@ -1152,6 +1559,7 @@ mod speed_tests {
             assert_eq!(cut[0].source_in_ms, 20000.);
             assert_eq!(cut[0].source_out_ms, 80000.);
             let current = Layer {
+                grid: None,
                 clips: cut,
                 ..base.clone()
             };
@@ -1170,6 +1578,7 @@ mod speed_tests {
             }
             assert!((full[0].start_ms + 20000. / rate - match_span.start_ms).abs() < 0.001);
             let current = Layer {
+                grid: None,
                 clips: full.clone(),
                 ..base.clone()
             };
@@ -1288,6 +1697,7 @@ mod speed_tests {
         assert_eq!(first[0].sound, base.clips[0].sound);
         assert!((first[0].fades.offset_ms - 20000. / 0.985).abs() < 0.001);
         let current = Layer {
+            grid: None,
             clips: first.clone(),
             ..base.clone()
         };

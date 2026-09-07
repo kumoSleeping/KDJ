@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { runtimePlayer } from "./unifiedPlayer";
-import { getLocalVideoClock } from "./mediaSync";
+import { captureLocalVideoSeekFence, getLocalVideoClock, waitForLocalVideoSeekLanding } from "./mediaSync";
 import { makeCompositionPreviewTrack, updateCompositionPreviewAudio } from "./streamTrack";
 import { playTrack, PLAY_EVENT, type PlayRequest } from "./playTrack";
 import { useWorkshopStore } from "../stores/workshopStore";
@@ -19,6 +19,7 @@ export interface WorkshopPlayback {
   endScrub(): void;
   stop(): void;
   time(): number;
+  pendingSeek?(): boolean;
 }
 export function useWorkshopPlayback(): WorkshopPlayback {
   const projectId = useWorkshopStore((s) => s.activeId),
@@ -26,6 +27,10 @@ export function useWorkshopPlayback(): WorkshopPlayback {
     auditionAfterLayer = useWorkshopStore((s) => s.activeId ? s.auditionAfterLayer[s.activeId] : undefined),
     saving = useWorkshopStore((s) => s.saving),
     gesture = useWorkshopStore((s) => s.gesture !== null);
+  // Editorial markers do not invalidate the playing media or its preview lease.
+  const mediaKey = useWorkshopStore(s => s.draft
+    ? JSON.stringify([s.draft.id, s.draft.name, s.draft.sources, s.draft.layers, s.draft.canvas, s.draft.output]) : "");
+  const preparedMediaKey = useRef<string | null>(null);
   const [ticket, setTicket] = useState<string | null>(null),
     [playing, setPlaying] = useState(false),
     [loading, setLoading] = useState(false),
@@ -39,24 +44,21 @@ export function useWorkshopPlayback(): WorkshopPlayback {
     wantPlay = useRef(false),
     dispatching = useRef(false),
     projectRef = useRef(projectId),
-    seekTarget = useRef<{ ms: number; at: number } | null>(null),
+    seekTarget = useRef<{ ms: number } | null>(null),
     seekPending = useRef<number | null>(null),
     seeking = useRef(false),
     scrubResume = useRef(false),
     scrubEpoch = useRef(0),
     scrubPause = useRef<Promise<void>>(Promise.resolve()),
-    seekFlight = useRef<Promise<void> | null>(null);
+    seekFlight = useRef<Promise<void> | null>(null),
+    updatePlayback = useRef<() => void>(() => {});
   const time = useCallback(() => {
     const state = runtimePlayer().state();
     const current = useWorkshopStore.getState();
     if (current.scrubbing) return current.position;
-    if (seekTarget.current) {
-      if (Math.abs(state.currentTime * 1000 - seekTarget.current.ms) < 120)
-        seekTarget.current = null;
-      else if (performance.now() - seekTarget.current.at < 3000)
-        return seekTarget.current.ms;
-      else seekTarget.current = null;
-    }
+    // Command snapshots may already contain the requested cursor while the DAC
+    // still reports the old position. Only the seek transaction releases this pin.
+    if (seekTarget.current) return seekTarget.current.ms;
     if (
       track.current &&
       state.trackId === track.current.id &&
@@ -80,6 +82,8 @@ export function useWorkshopPlayback(): WorkshopPlayback {
     wantPlay.current = false;
     scrubResume.current = false;
     epoch.current++;
+    seekPending.current = null;
+    seekTarget.current = null;
     pause();
   }, [pause]);
   const prepare = useCallback(async () => {
@@ -143,6 +147,8 @@ export function useWorkshopPlayback(): WorkshopPlayback {
     }
   }, []);
   useEffect(() => {
+    if (preparedMediaKey.current === mediaKey && ticketRef.current) return;
+    preparedMediaKey.current = mediaKey;
     const changedProject = projectRef.current !== projectId;
     projectRef.current = projectId;
     if (changedProject) wantPlay.current = false;
@@ -170,7 +176,7 @@ export function useWorkshopPlayback(): WorkshopPlayback {
       const timer = setTimeout(() => void prepare(), 120);
       return () => clearTimeout(timer);
     }
-  }, [projectId, revision, saving, gesture, pause, prepare, time]);
+  }, [projectId, revision, saving, gesture, mediaKey, pause, prepare, time]);
   useEffect(() => {
     const player = runtimePlayer();
     if (auditionFlight.current || !ticketRef.current
@@ -216,9 +222,12 @@ export function useWorkshopPlayback(): WorkshopPlayback {
       const state = player.state(), active = track.current && state.trackId === track.current.id;
       const editor = useWorkshopStore.getState();
       if (!active) return;
-      setPlaying(state.playing && !state.buffering && !editor.scrubbing && !editor.gesture);
+      setPlaying(state.playing && !state.buffering && !editor.scrubbing && !editor.gesture && !seekTarget.current);
       setLoading(state.buffering || state.status === "loading");
-      if (state.error) setError(state.error);
+      if (state.error) {
+        setError(state.error);
+        wantPlay.current = false;
+      } else if (state.playing && !state.buffering) setError("");
       if (state.status === "ended") wantPlay.current = false;
       if (!state.buffering && !editor.scrubbing && !editor.gesture) {
         const next = time();
@@ -227,6 +236,7 @@ export function useWorkshopPlayback(): WorkshopPlayback {
     };
     // Native state events already pace the UI clock. A second RAF used to
     // wake the entire timeline even while paused or searching in the library.
+    updatePlayback.current = update;
     const unsubscribe = player.subscribe(update);
     const otherPlay = (event: Event) => {
       if (dispatching.current) return;
@@ -235,12 +245,15 @@ export function useWorkshopPlayback(): WorkshopPlayback {
       wantPlay.current = false;
       epoch.current++;
       track.current = null;
+      seekPending.current = null;
+      seekTarget.current = null;
       setPlaying(false);
       setLoading(false);
     };
     window.addEventListener(PLAY_EVENT, otherPlay);
     return () => {
       unsubscribe();
+      updatePlayback.current = () => {};
       window.removeEventListener(PLAY_EVENT, otherPlay);
       epoch.current++;
       pause();
@@ -257,10 +270,11 @@ export function useWorkshopPlayback(): WorkshopPlayback {
       return;
     }
     wantPlay.current = true;
+    setError("");
     if (
       track.current &&
       state.trackId === track.current.id &&
-      ticketRef.current
+      ticketRef.current && !state.error && state.status !== "error"
     ) {
       if (state.status === "ended") void runtimePlayer().seek(0);
       void runtimePlayer()
@@ -271,26 +285,48 @@ export function useWorkshopPlayback(): WorkshopPlayback {
   const seek = (ms: number) => {
     useWorkshopStore.getState().seek(ms);
     const target = useWorkshopStore.getState().position;
-    seekTarget.current = { ms: target, at: performance.now() };
-    if (useWorkshopStore.getState().scrubbing || !track.current || runtimePlayer().state().trackId !== track.current.id)
+    if (!track.current || runtimePlayer().state().trackId !== track.current.id) {
+      seekTarget.current = null;
       return;
+    }
+    seekTarget.current = { ms: target };
+    setPlaying(false);
+    if (useWorkshopStore.getState().scrubbing) return;
     seekPending.current = target;
     if (seeking.current) return seekFlight.current ?? undefined;
     seeking.current = true;
-    const id = track.current.id;
+    const id = track.current.id, request = epoch.current;
     seekFlight.current = (async () => {
       try {
-        while (seekPending.current !== null && track.current?.id === id) {
-          const next = seekPending.current;
+        while (seekPending.current !== null && track.current?.id === id && request === epoch.current) {
+          const next = seekPending.current, intent = seekTarget.current;
+          const scrubRequest = scrubEpoch.current, player = runtimePlayer();
+          const isCurrent = () => request === epoch.current && track.current?.id === id
+            && player.state().trackId === id && scrubRequest === scrubEpoch.current;
           seekPending.current = null;
-          await runtimePlayer().seek(next / 1000);
+          // Fence each dispatch, not the gesture: queued B must not accept A's clock.
+          const fence = player.kind === "desktop-native" ? captureLocalVideoSeekFence(id) : null;
+          await player.seek(next / 1000);
+          if (fence && isCurrent()) {
+            const landed = await waitForLocalVideoSeekLanding(fence, isCurrent);
+            if (!landed && isCurrent()) throw new Error("播放跳转未收到音频时钟确认");
+          }
+          if (isCurrent() && seekTarget.current === intent) seekTarget.current = null;
           if (useWorkshopStore.getState().scrubbing) { seekPending.current = null; break; }
         }
       } catch (e) {
-        setError(String(e));
+        if (request === epoch.current && track.current?.id === id) {
+          seekPending.current = null;
+          seekTarget.current = null;
+          wantPlay.current = false;
+          scrubResume.current = false;
+          await pause();
+          setError(String(e));
+        }
       } finally {
         seeking.current = false;
         seekFlight.current = null;
+        updatePlayback.current();
       }
     })();
     return seekFlight.current;
@@ -304,11 +340,12 @@ export function useWorkshopPlayback(): WorkshopPlayback {
   };
   const endScrub = () => {
     const resume = scrubResume.current, id = track.current?.id, request = epoch.current, scrubRequest = scrubEpoch.current;
+    const target = useWorkshopStore.getState().position;
     scrubResume.current = false;
     void (async () => {
       await scrubPause.current;
       if (request !== epoch.current || scrubRequest !== scrubEpoch.current) return;
-      await seek(useWorkshopStore.getState().position);
+      await seek(target);
       if (resume && scrubRequest === scrubEpoch.current && wantPlay.current && request === epoch.current && id != null && track.current?.id === id
         && runtimePlayer().state().trackId === id && !useWorkshopStore.getState().scrubbing)
         await runtimePlayer().play();
@@ -326,5 +363,6 @@ export function useWorkshopPlayback(): WorkshopPlayback {
     endScrub,
     stop,
     time,
+    pendingSeek: () => seekTarget.current !== null,
   };
 }

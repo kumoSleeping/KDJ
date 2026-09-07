@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use kdj_analysis::engine::AnalysisResult;
+use kdj_analysis::rhythm::REVISION as RHYTHM_REVISION;
 use kdj_core::models::{
     FolderTree, HarmonicMatch, HarmonicRelation, LibraryStats, LocalPlaylist, LocalPlaylistPatch,
     Track, TrackIndex, TrackPage, TrackPatch, TrackSummary, TrackSummaryPage,
@@ -207,7 +208,7 @@ fn restore_from_trash(handle: &TrashHandle, original: &Path) -> Result<()> {
 /// sort 白名单：绝对不能把 query string 直接拼进 ORDER BY（SQL 注入），
 /// 也不能只做转义——SQLite 的标识符引用规则太松，白名单映射是唯一安全的做法。
 fn effective_bpm_key_column(column: &str) -> String {
-    format!(
+    let old = format!(
         "COALESCE(\
            NULLIF((SELECT v3.{column} FROM track_bpm_key_analysis_v3 v3 \
              WHERE v3.track_id = tracks.id AND v3.analyzer_revision = '{}'), ''), \
@@ -215,7 +216,8 @@ fn effective_bpm_key_column(column: &str) -> String {
              WHERE v2.track_id = tracks.id), ''), \
            tracks.{column})",
         BPM_KEY_V3_REVISION
-    )
+    );
+    if column == "bpm" { format!("COALESCE((SELECT bpm FROM track_rhythm_v4 WHERE track_id=tracks.id AND revision='{RHYTHM_REVISION}' AND file_mtime IS (SELECT rhythm_source.file_mtime FROM tracks AS rhythm_source WHERE rhythm_source.id=tracks.id)), {old})") } else {old}
 }
 
 fn sort_column(key: &str) -> String {
@@ -283,20 +285,20 @@ fn track_summary_select() -> String {
         "tracks.id AS id, tracks.path AS path, tracks.filename AS filename, \
          tracks.title AS title, tracks.artist AS artist, tracks.album AS album, \
          tracks.duration AS duration, tracks.format AS format, tracks.size AS size, \
-         COALESCE(summary_v3.bpm, summary_v2.bpm, tracks.bpm) AS effective_bpm, \
-         summary_v3.bpm IS NOT NULL AS bpm_v3, \
-         summary_v3.bpm IS NULL AND summary_v2.bpm IS NOT NULL AS bpm_v2, \
-         COALESCE(summary_v3.bpm_confidence, summary_v2.bpm_confidence, tracks.bpm_confidence) \
+         COALESCE(summary_v4.bpm, summary_v3.bpm, summary_v2.bpm, tracks.bpm) AS effective_bpm, \
+         summary_v4.track_id IS NULL AND summary_v3.bpm IS NOT NULL AS bpm_v3, \
+         summary_v4.track_id IS NULL AND summary_v3.bpm IS NULL AND summary_v2.bpm IS NOT NULL AS bpm_v2, \
+         COALESCE(summary_v4.confidence, summary_v3.bpm_confidence, summary_v2.bpm_confidence, tracks.bpm_confidence) \
            AS effective_bpm_confidence, \
-         COALESCE(summary_v3.first_beat, summary_v2.first_beat, tracks.first_beat) \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN NULL ELSE COALESCE(summary_v3.first_beat, summary_v2.first_beat, tracks.first_beat) END \
            AS effective_first_beat, \
-         COALESCE(summary_v3.beat_origin, summary_v2.beat_origin, tracks.first_beat) \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN NULL ELSE COALESCE(summary_v3.beat_origin, summary_v2.beat_origin, tracks.first_beat) END \
            AS effective_beat_origin, \
-         COALESCE(summary_v3.downbeat_origin, summary_v2.downbeat_origin) \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN NULL ELSE COALESCE(summary_v3.downbeat_origin, summary_v2.downbeat_origin) END \
            AS effective_downbeat_origin, \
-         COALESCE(summary_v3.downbeat_confidence, summary_v2.downbeat_confidence) \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN NULL ELSE COALESCE(summary_v3.downbeat_confidence, summary_v2.downbeat_confidence) END \
            AS effective_downbeat_confidence, \
-         CASE WHEN summary_v3.bpm IS NOT NULL THEN '{BPM_KEY_V3_REVISION}' \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN '{RHYTHM_REVISION}' WHEN summary_v3.bpm IS NOT NULL THEN '{BPM_KEY_V3_REVISION}' \
               WHEN summary_v2.bpm IS NOT NULL THEN summary_v2.analyzer_revision \
               ELSE 'legacy-v1' END AS beat_grid_revision, \
          COALESCE(NULLIF(summary_v3.music_key, ''), NULLIF(summary_v2.music_key, ''), tracks.music_key) \
@@ -317,7 +319,7 @@ fn track_summary_select() -> String {
 /// V2/V3 索引十余次。详情仍保留数组解析，列表只读这里的标量。
 fn track_summary_joins() -> String {
     format!(
-        " LEFT JOIN track_bpm_key_analysis_v3 summary_v3 \
+        " LEFT JOIN track_rhythm_v4 summary_v4 ON summary_v4.track_id = tracks.id AND summary_v4.revision = '{RHYTHM_REVISION}' AND summary_v4.file_mtime IS (SELECT rhythm_source.file_mtime FROM tracks AS rhythm_source WHERE rhythm_source.id=tracks.id) LEFT JOIN track_bpm_key_analysis_v3 summary_v3 \
            ON summary_v3.track_id = tracks.id \
           AND summary_v3.analyzer_revision = '{BPM_KEY_V3_REVISION}' \
          LEFT JOIN track_bpm_key_analysis_v2 summary_v2 \
@@ -688,7 +690,8 @@ impl LibraryService {
                 OR TRIM(COALESCE(music_key, '')) != '' OR TRIM(COALESCE(camelot, '')) != ''
                 OR energy IS NOT NULL OR rms_db IS NOT NULL OR peak_db IS NOT NULL
                 OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v2 v2 WHERE v2.track_id = tracks.id)
-                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)",
+                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)
+                OR EXISTS (SELECT 1 FROM track_rhythm_v4 v4 WHERE v4.track_id = tracks.id)",
             [],
             |row| row.get::<_, u64>(0),
         )?;
@@ -738,6 +741,7 @@ impl LibraryService {
             );
             bytes = bytes.saturating_add(conn.query_row(&sql, [], |row| row.get::<_, u64>(0))?);
         }
+        bytes += conn.query_row("SELECT COALESCE(SUM(LENGTH(CAST(result_json AS BLOB))),0) FROM track_rhythm_v4", [], |r| r.get::<_,u64>(0))?;
         Ok(BasicAnalysisCacheUsage { tracks, bytes })
     }
 
@@ -751,12 +755,14 @@ impl LibraryService {
                 OR TRIM(COALESCE(music_key, '')) != '' OR TRIM(COALESCE(camelot, '')) != ''
                 OR energy IS NOT NULL OR rms_db IS NOT NULL OR peak_db IS NOT NULL
                 OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v2 v2 WHERE v2.track_id = tracks.id)
-                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)",
+                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)
+                OR EXISTS (SELECT 1 FROM track_rhythm_v4 v4 WHERE v4.track_id = tracks.id)",
             [],
             |row| row.get::<_, u64>(0),
         )?;
         tx.execute("DELETE FROM track_bpm_key_analysis_v2", [])?;
         tx.execute("DELETE FROM track_bpm_key_analysis_v3", [])?;
+        tx.execute("DELETE FROM track_rhythm_v4", [])?;
         tx.execute(
             "UPDATE tracks SET
                bpm = NULL, bpm_confidence = NULL, first_beat = NULL,
@@ -1698,6 +1704,7 @@ impl LibraryService {
                 }
             }
         }
+        self.overlay_rhythm(conn, &mut tracks)?;
         Ok(tracks)
     }
 
@@ -1814,6 +1821,7 @@ impl LibraryService {
             )?;
         }
         if patch.bpm.is_some() {
+            tx.execute("DELETE FROM track_rhythm_v4 WHERE track_id=?", [track_id])?;
             // A manual BPM edit becomes the source of truth. Keep analysed keys, but clear every
             // generation's now-inconsistent tempo/grid so an overlay cannot hide the edit.
             for (table, revision) in [
@@ -2740,7 +2748,7 @@ impl LibraryService {
 
         let Some(wanted) = track_ids else {
             let mut stmt =
-                conn.prepare(&format!("SELECT id FROM tracks WHERE lower(format) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){condition} ORDER BY id"))?;
+                conn.prepare(&format!("SELECT id FROM tracks WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){condition} ORDER BY id"))?;
             let ids = stmt
                 .query_map([], |row| row.get::<_, i64>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2759,7 +2767,7 @@ impl LibraryService {
                 " AND analyzed_at IS NULL"
             };
             let mut stmt = conn.prepare(&format!(
-                "SELECT id FROM tracks WHERE lower(format) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND id IN ({placeholders}){extra}"
+                "SELECT id FROM tracks WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND id IN ({placeholders}){extra}"
             ))?;
             let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
                 row.get::<_, i64>(0)
@@ -2805,7 +2813,7 @@ impl LibraryService {
             let sql = format!(
                 "SELECT tracks.id FROM tracks
                  LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id
-                 WHERE lower(format) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){needs_v2}{folder_clause}
+                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){needs_v2}{folder_clause}
                  ORDER BY tracks.added_at DESC, tracks.id DESC{}",
                 if limit.is_some() { " LIMIT ?" } else { "" }
             );
@@ -2837,7 +2845,7 @@ impl LibraryService {
             let sql = format!(
                 "SELECT tracks.id FROM tracks
                  LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id
-                 WHERE lower(format) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.id IN ({placeholders}){needs_v2}"
+                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.id IN ({placeholders}){needs_v2}"
             );
             let mut params: Vec<SqlValue> = chunk.iter().copied().map(SqlValue::Integer).collect();
             if !force {
@@ -2887,7 +2895,7 @@ impl LibraryService {
             let sql = format!(
                 "SELECT tracks.id FROM tracks
                  LEFT JOIN track_bpm_key_analysis_v3 v3 ON v3.track_id = tracks.id
-                 WHERE lower(format) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){needs_v3}{folder_clause}
+                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif'){needs_v3}{folder_clause}
                  ORDER BY tracks.added_at DESC, tracks.id DESC{}",
                 if limit.is_some() { " LIMIT ?" } else { "" }
             );
@@ -2919,7 +2927,7 @@ impl LibraryService {
             let sql = format!(
                 "SELECT tracks.id FROM tracks
                  LEFT JOIN track_bpm_key_analysis_v3 v3 ON v3.track_id = tracks.id
-                 WHERE lower(format) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.id IN ({placeholders}){needs_v3}"
+                 WHERE lower(COALESCE(format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.id IN ({placeholders}){needs_v3}"
             );
             let mut params: Vec<SqlValue> = chunk.iter().copied().map(SqlValue::Integer).collect();
             if !force {
@@ -3419,7 +3427,7 @@ impl LibraryService {
         let mut stmt = conn.prepare(
             "SELECT tracks.id, tracks.path FROM tracks \
              LEFT JOIN waveform_assets ON waveform_assets.track_id = tracks.id \
-             WHERE lower(tracks.format) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.analyzed_at IS NOT NULL AND (\
+             WHERE lower(COALESCE(tracks.format, '')) NOT IN ('png','jpg','jpeg','webp','bmp','gif') AND tracks.analyzed_at IS NOT NULL AND (\
                waveform_assets.track_id IS NULL OR waveform_assets.profile != ? OR \
                waveform_assets.revision != ? OR waveform_assets.error IS NOT NULL OR \
                (tracks.file_mtime IS NOT NULL AND \
@@ -5878,6 +5886,42 @@ mod tests {
         service.write_patch_to_file(id, &patch).unwrap();
         assert!((disk_mtime(&path) - before).abs() < 1e-6);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn analysis_queues_keep_unknown_formats_but_exclude_images() {
+        let service = service();
+        let audio = insert(
+            &service,
+            Row { path: "/lib/legacy.mp3", ..Default::default() },
+        );
+        let image = insert(
+            &service,
+            Row { path: "/lib/picture.png", ..Default::default() },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute("UPDATE tracks SET format = 'PNG' WHERE id = ?", [image]).unwrap();
+        drop(conn);
+        for force in [false, true] {
+            for ids in [None, Some([image, audio].as_slice())] {
+                assert_eq!(service.pending_analysis_ids(ids, force).unwrap(), vec![audio]);
+                assert_eq!(
+                    service.pending_bpm_key_analysis_v2_ids(ids, force, None, None).unwrap(),
+                    vec![audio],
+                );
+                assert_eq!(
+                    service.pending_bpm_key_analysis_v3_ids(ids, force, None, None).unwrap(),
+                    vec![audio],
+                );
+            }
+        }
+        service.db().conn().unwrap()
+            .execute("UPDATE tracks SET analyzed_at = '2026-09-07'", []).unwrap();
+        assert_eq!(
+            service.waveform_candidates("v2-640", 2).unwrap()
+                .iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![audio],
+        );
     }
 
     #[test]

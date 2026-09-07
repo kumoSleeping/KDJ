@@ -59,10 +59,10 @@ async function main() {
   const nativeProofWorker = assets.some((file) => (
     /^youtubeNativePo\.worker-[^/]+\.js$/.test(path.basename(file))
   ));
-  // RC3 adds the VJ workshop and windowed library UI. Production baselines:
-  // macOS 1,679,478 B; Android/Linux 1,421,669 B; shared CSS 226,203 B.
-  // Keep less than 10% headroom while retaining the entry, worker and source-map gates.
-  const maxTotal = platform === "darwin" ? 1_800_000 : 1_550_000;
+  // Every desktop target now ships the same proof/player and SABR runtime. Mobile alone
+  // uses unsupported stubs. Never let a successful Windows build silently omit the worker.
+  const desktop = ["darwin", "windows", "win32", "linux"].includes(platform);
+  const maxTotal = desktop ? 1_800_000 : 1_550_000;
   const maxCss = 245_000;
 
   console.log(
@@ -71,8 +71,10 @@ async function main() {
   );
 
   let failed = false;
-  if (platform !== "darwin" && nativeProofWorker) {
-    report("error", `${platform} 不应打包 macOS 专用 YouTube proof worker`);
+  if (desktop !== nativeProofWorker) {
+    report("error", desktop
+      ? `${platform} 缺少桌面 YouTube proof worker`
+      : `${platform} 不应打包桌面 YouTube proof worker`);
     failed = true;
   }
   if (total > maxTotal) {

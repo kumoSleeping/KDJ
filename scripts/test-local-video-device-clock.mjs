@@ -37,13 +37,14 @@ function environment() {
   const runtime = { kind: 'desktop-native', state: () => native, subscribe(fn) {
     runtimeListeners.add(fn); fn(native, native); return () => runtimeListeners.delete(fn);
   } };
-  const globals = { window: win, performance: { now: () => now }, HTMLMediaElement: { HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2 } };
+  const globals = { window: win, performance: { now: () => now }, AbortController, DOMException, HTMLMediaElement: { HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2 } };
   const media = load('src/lib/mediaSync.ts', {
     './waveformMotion': waveform,
     './unifiedPlayer': { runtimePlayer: () => runtime, getLiveForegroundDeck: () => 0, getLiveDeckClock: () => live,
       subscribeLivePlaybackClock(fn) { liveListeners.add(fn); return () => liveListeners.delete(fn); } },
   }, globals);
-  const sync = load('src/lib/localVideoSync.ts', {}, globals);
+  const frames = load('src/lib/videoFrames.ts', {}, globals);
+  const sync = load('src/lib/videoPlaybackEngine.ts', { './videoFrames': frames, './videoSeekQueue': load('src/lib/videoSeekQueue.ts', {}, { AbortController }) }, globals);
   return { media, sync, globals, live, native, runtime, timers, runtimeListeners, liveListeners,
     setNow(value) { now = value; },
     publish() { for (const fn of [...liveListeners]) fn(); },
@@ -68,7 +69,7 @@ test('three minutes of normal clock jitter do not keep retuning the video decode
   e.native.duration = 600;
   let rate = 1, writes = 0;
   Object.defineProperty(video, 'playbackRate', { get: () => rate, set(value) { rate = value; writes++; } });
-  const sync = new e.sync.LocalVideoSynchronizer();
+  const sync = new e.sync.VideoPlaybackEngine();
   sync.adoptClock(video, e.media.getLocalVideoClock(10));
   for (let step = 1; step <= 5400; step++) {
     video.time += rate / 30;
@@ -82,7 +83,7 @@ test('three minutes of normal clock jitter do not keep retuning the video decode
 
 test('short IPC gaps preserve running video and clock ownership, but real transport changes stop it', () => {
   const e = environment(), video = new Video(); video.time = 12; video.paused = false;
-  const sync = new e.sync.LocalVideoSynchronizer();
+  const sync = new e.sync.VideoPlaybackEngine();
   const seeks = new e.sync.VideoSeekEchoGuard(), transport = new e.sync.VideoTransportEchoGuard();
   const unsubscribe = e.media.subscribeLocalVideoClock(10, clock => e.sync.applyLocalVideoClock(video, clock, sync, seeks, transport));
   for (let step = 0; step < 20; step++) {
@@ -98,7 +99,7 @@ test('short IPC gaps preserve running video and clock ownership, but real transp
 test('temporary video decoder starvation does not issue pause commands', () => {
   const e = environment(), video = new Video(); video.time = 12; video.paused = false;
   video.readyState = 1;
-  e.sync.applyLocalVideoClock(video, e.media.getLocalVideoClock(10), new e.sync.LocalVideoSynchronizer(),
+  e.sync.applyLocalVideoClock(video, e.media.getLocalVideoClock(10), new e.sync.VideoPlaybackEngine(),
     new e.sync.VideoSeekEchoGuard(), new e.sync.VideoTransportEchoGuard());
   assert.equal(video.pauses, 0, 'let the media decoder resume when its buffer refills');
 });
@@ -107,7 +108,7 @@ test('rate correction is bounded and isolated between main and inset decoders', 
   const e = environment(), main = new Video(), inset = new Video();
   main.paused = inset.paused = false;
   main.time = 11.8; inset.time = 12.2;
-  const sync = new e.sync.LocalVideoSynchronizer(), clock = e.media.getLocalVideoClock(10);
+  const sync = new e.sync.VideoPlaybackEngine(), clock = e.media.getLocalVideoClock(10);
   sync.adoptClock(main, clock); sync.adoptClock(inset, clock);
   sync.followClock(main, clock, () => assert.fail());
   sync.followClock(inset, clock, () => assert.fail());
@@ -125,7 +126,7 @@ test('WebKit learns decode landing delay then plays three minutes without recurr
   const e = environment(), video = new Video();
   e.native.duration = video.duration = 600; e.live.audibleRate = 1;
   video.paused = false; video.time = 11.5;
-  const sync = new e.sync.LocalVideoSynchronizer('webkit');
+  const sync = new e.sync.VideoPlaybackEngine('webkit');
   sync.adoptClock(video, e.media.getLocalVideoClock(10));
   let decodeUntil = 0, rateWrites = 0, rate = 1;
   Object.defineProperty(video, 'playbackRate', { get: () => rate, set(value) { rate = value; rateWrites++; } });
@@ -151,7 +152,7 @@ test('WebKit backs off an uncorrectable decoder instead of repeatedly interrupti
   const e = environment(), video = new Video();
   e.native.duration = video.duration = 600; e.live.audibleRate = 1;
   video.paused = false;
-  const sync = new e.sync.LocalVideoSynchronizer('webkit');
+  const sync = new e.sync.VideoPlaybackEngine('webkit');
   sync.adoptClock(video, e.media.getLocalVideoClock(10));
   const seekTimes = [];
   for (let elapsed = 0; elapsed <= 180_000; elapsed += 50) {
@@ -238,7 +239,7 @@ test('decoded video converges to actual audible clock without repeated seeks, pa
   const e = environment();
   const video = new Video(); video.paused = false; video.time = 30;
   e.live.currentTime = 30.8;
-  const synchronizer = new e.sync.LocalVideoSynchronizer();
+  const synchronizer = new e.sync.VideoPlaybackEngine();
   const seekGuard = new e.sync.VideoSeekEchoGuard(), transportGuard = new e.sync.VideoTransportEchoGuard();
   synchronizer.adoptClock(video, e.media.getLocalVideoClock(10));
   assert.equal(video.playbackRate, 1.25);
@@ -262,7 +263,8 @@ test('a canceled standby play promise cannot pause the element after a newer pre
   let callbacks = [];
   const swapModule = load('src/lib/useLocalVideoSwap.ts', {
     react: { useRef: current => ({ current }), useState: value => [value, () => {}], useCallback: fn => fn, useEffect: fn => callbacks.push(fn) },
-    './localVideoSeekBridge': bridge, './localVideoSync': e.sync, './mediaSync': e.media,
+    './localVideoSeekBridge': bridge, './videoPlaybackEngine': e.sync, './mediaSync': e.media,
+    './videoFrames': load('src/lib/videoFrames.ts', {}, e.globals),
   }, e.globals);
   const active = new Video(), standby = new Video();
   let finishOldPlay, playCount = 0;
@@ -288,7 +290,7 @@ test('a canceled standby play promise cannot pause the element after a newer pre
 
 test('device-feed loss pauses presentation; returning samples and seek echoes preserve ownership', () => {
   const e = environment(), video = new Video(); video.paused = false; video.time = 12;
-  const synchronizer = new e.sync.LocalVideoSynchronizer();
+  const synchronizer = new e.sync.VideoPlaybackEngine();
   const seeks = new e.sync.VideoSeekEchoGuard(), transport = new e.sync.VideoTransportEchoGuard();
   const unsubscribe = e.media.subscribeLocalVideoClock(10, clock => e.sync.applyLocalVideoClock(video, clock, synchronizer, seeks, transport));
   e.advance(e.media.LOCAL_VIDEO_CLOCK_TIMEOUT_MS + 1);
@@ -331,7 +333,7 @@ test('composition main picture renders for solo video and video/audio pairs with
       '../../lib/api': { api: { videoUrl: id => `video:${id}`, coverUrl: id => `cover:${id}` } },
       '../../lib/composition': { ...composition, overlayAlpha: () => 0 },
       '../../lib/compositionPlayback': { getCompositionClock: () => clock, useCompositionClock: () => clock },
-      '../../lib/localVideoSync': environment().sync,
+      '../../lib/videoPlaybackEngine': environment().sync,
       '../common': { InlineNotice: 'Notice' },
     }, { requestAnimationFrame: () => 1, cancelAnimationFrame() {}, DOMException });
     const wrapper = preview.OverlayPreview({ task: { id: 'solo', video: { track_id: 10, duration_ms: 60000 }, audio }, offset: 0,
@@ -362,7 +364,7 @@ test('composition holds decoded frames through seek loading and converges withou
     '../../lib/api': { api: { videoUrl: id => `video:${id}`, coverUrl: id => `cover:${id}` } },
     '../../lib/composition': { ...composition, overlayAlpha: () => 1 },
     '../../lib/compositionPlayback': { getCompositionClock: () => clock, useCompositionClock: () => clock },
-    '../../lib/localVideoSync': e.sync,
+    '../../lib/videoPlaybackEngine': e.sync,
     '../common': { InlineNotice: 'Notice' },
   }, { requestAnimationFrame: callback => { frame = callback; return 1; }, cancelAnimationFrame() {}, DOMException });
   const wrapper = preview.OverlayPreview({ task: { id: 'pair', video: { track_id: 10, duration_ms: 60000 }, audio: { track_id: 11, is_video: true, duration_ms: 60000 } }, offset: 2000,
@@ -387,6 +389,61 @@ test('composition holds decoded frames through seek loading and converges withou
   assert.equal(main.currentTime, 30); assert.equal(inset.currentTime, 28);
   assert.equal(main.paused, true); assert.equal(inset.paused, true);
   cleanups.forEach(cleanup => cleanup?.());
+});
+
+test('actual PlayerBar waveform position stays pinned until a dispatched seek lands, not a timer', () => {
+  const path = new URL('../src/components/player/PlayerBar.tsx', import.meta.url);
+  const source = ts.createSourceFile(String(path), readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let statements;
+  function visit(node) {
+    if (ts.isVariableStatement(node)
+      && node.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === 'pendingSeek')) {
+      const siblings = [...node.parent.statements];
+      const start = siblings.indexOf(node);
+      const end = siblings.findIndex(statement => ts.isVariableStatement(statement)
+        && statement.declarationList.declarations.some(d => ts.isIdentifier(d.name) && d.name.text === 'shownTime'));
+      assert.ok(end > start);
+      statements = siblings.slice(start, end + 1).map(statement => statement.getText(source)).join('\n');
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source); assert.ok(statements);
+  const e = environment();
+  const pendingSeekRef = { current: null }, nativeSeekRequestRef = { current: null };
+  const sample = vm.runInNewContext(`() => { ${statements}; return shownTime; }`, {
+    ...e.globals, state: e.native, pendingSeekRef, nativeSeekRequestRef,
+  });
+  const pin = position => { pendingSeekRef.current = { trackId: 10, position, at: 1000 }; };
+
+  pin(60);
+  e.native.currentTime = 0;
+  for (const elapsed of [100, 1499, 1600, 2500, 5000]) {
+    e.setNow(1000 + elapsed);
+    assert.equal(sample(), 60, `old zero snapshot after ${elapsed}ms must not move the waveform`);
+    assert.ok(pendingSeekRef.current);
+  }
+  e.native.currentTime = 60; e.native.buffering = true;
+  assert.equal(sample(), 60);
+  assert.ok(pendingSeekRef.current, 'optimistic target during buffering is not a landing');
+  e.native.currentTime = 0;
+  assert.equal(sample(), 60, 'a subsequent loading snapshot cannot undo the pinned target');
+  e.native.currentTime = 60; e.native.buffering = false; e.native.status = 'loading';
+  sample(); assert.ok(pendingSeekRef.current);
+  e.native.status = 'playing'; e.native.currentTime = 60.2;
+  assert.equal(sample(), 60.2); assert.equal(pendingSeekRef.current, null);
+  e.native.currentTime = 61;
+  assert.equal(sample(), 61, 'normal position updates resume after landing');
+
+  pin(61.5); nativeSeekRequestRef.current = { trackId: 10, position: 61.5 };
+  assert.equal(sample(), 61.5);
+  assert.ok(pendingSeekRef.current, 'nearby old position cannot acknowledge an undispatched gesture');
+  nativeSeekRequestRef.current = null; e.native.currentTime = 61.5;
+  sample(); assert.equal(pendingSeekRef.current, null);
+
+  pin(80); e.native.status = 'error'; e.native.currentTime = 61.5;
+  assert.equal(sample(), 61.5); assert.equal(pendingSeekRef.current, null);
+  pin(80); e.native.status = 'playing'; e.native.trackId = 11; e.native.currentTime = 0;
+  assert.equal(sample(), 0); assert.equal(pendingSeekRef.current, null, 'track replacement releases the old pin');
 });
 
 test('actual PlayerBar dispatch callbacks fence queued B only after in-flight A lands', async () => {
@@ -444,7 +501,7 @@ test('actual PlayerBar dispatch callbacks fence queued B only after in-flight A 
 test('WebKit ongoing drift uses a spare decoder without seeking the visible frame', () => {
   const e = environment(), video = new Video();
   e.live.audibleRate = 1; video.paused = false;
-  const sync = new e.sync.LocalVideoSynchronizer('webkit');
+  const sync = new e.sync.VideoPlaybackEngine('webkit');
   sync.adoptClock(video, e.media.getLocalVideoClock(10));
   let corrections = 0;
   for (let step = 0; step < 400; step++) {
@@ -461,7 +518,7 @@ test('WebKit ongoing drift uses a spare decoder without seeking the visible fram
 test('spare alignment waits through post-seek freeze and only adopts a moving aligned decoder', async () => {
   const e = environment(), active = new Video(), spare = new Video();
   e.live.audibleRate = 1; active.time = 11.7; active.paused = false;
-  const sync = new e.sync.LocalVideoSynchronizer('webkit');
+  const sync = new e.sync.VideoPlaybackEngine('webkit');
   sync.adoptClock(active, e.media.getLocalVideoClock(10));
   sync.followClock(active, e.media.getLocalVideoClock(10), () => assert.fail(), () => {});
   let elapsed = 0, resumesAt = 0, activated = false, finished = false;
@@ -489,7 +546,7 @@ test('spare alignment waits through post-seek freeze and only adopts a moving al
 test('a superseded background alignment cannot pause a spare now owned by a user seek', async () => {
   const e = environment(), active = new Video(), spare = new Video();
   e.live.audibleRate = 1; active.time = 12; active.paused = false;
-  const sync = new e.sync.LocalVideoSynchronizer('webkit');
+  const sync = new e.sync.VideoPlaybackEngine('webkit');
   sync.adoptClock(active, e.media.getLocalVideoClock(10));
   sync.followClock(active, e.media.getLocalVideoClock(10), () => assert.fail(), () => {});
   let current = true;
@@ -497,4 +554,279 @@ test('a superseded background alignment cannot pause a spare now owned by a user
   await flush(); current = false;
   spare.currentTime = 80; await spare.play(); e.advance(50); await flush();
   assert.equal(await work, false); assert.equal(spare.pauses, 0); assert.equal(spare.currentTime, 80);
+});
+
+function frameVideo(e) {
+  const video = new Video(), callbacks = new Map();
+  let sequence = 0;
+  video.requestVideoFrameCallback = callback => { const id = ++sequence; callbacks.set(id, callback); return id; };
+  video.cancelVideoFrameCallback = id => callbacks.delete(id);
+  video.frame = time => {
+    video.time = time;
+    for (const [id, callback] of [...callbacks]) {
+      callbacks.delete(id); callback(0, { mediaTime: time });
+    }
+  };
+  video.callbacks = callbacks;
+  return video;
+}
+
+test('frame readiness rejects the old image and a frozen cursor; continuous output leaves no callbacks', async () => {
+  const e = environment(), video = frameVideo(e), abort = new AbortController();
+  const frames = load('src/lib/videoFrames.ts', {}, e.globals);
+  let ready = false;
+  video.paused = false;
+  const result = frames.waitForVideoFrames(video, 30, true, abort.signal).then(value => { ready = value; return value; });
+  video.frame(12); video.frame(12.04); video.frame(12.08); await flush(); assert.equal(ready, false);
+  video.frame(30); video.frame(30); video.frame(30); await flush(); assert.equal(ready, false);
+  e.advance(40); video.frame(30.04); await flush(); assert.equal(ready, false);
+  e.advance(40); video.frame(30.08);
+  assert.equal(await result, true); assert.equal(video.callbacks.size, 0); assert.equal(e.timers.size, 0);
+});
+
+test('missing compositor frames time out as failure, and cancellation releases a callback immediately', async () => {
+  const e = environment(), video = frameVideo(e), frames = load('src/lib/videoFrames.ts', {}, e.globals);
+  const timed = frames.waitForVideoFrames(video, 30, false, new AbortController().signal);
+  e.advance(900); assert.equal(await timed, false); assert.equal(video.callbacks.size, 0); assert.equal(e.timers.size, 0);
+  const abort = new AbortController();
+  const canceled = frames.waitForVideoFrames(video, 30, true, abort.signal);
+  abort.abort(); assert.equal(await canceled, false); assert.equal(video.callbacks.size, 0); assert.equal(e.timers.size, 0);
+});
+
+function swapEnvironment(e) {
+  const effects = [];
+  const module = load('src/lib/useLocalVideoSwap.ts', {
+    react: { useRef: current => ({ current }), useState: value => [value, () => {}], useCallback: fn => fn, useEffect: fn => effects.push(fn) },
+    './localVideoSeekBridge': bridge, './videoPlaybackEngine': e.sync, './mediaSync': e.media,
+    './videoFrames': load('src/lib/videoFrames.ts', {}, e.globals),
+  }, e.globals);
+  const old = frameVideo(e), spare = frameVideo(e);
+  const swap = module.useLocalVideoSwap({ enabled: true, trackId: 10, desiredPlayingRef: { current: true }, getRate: () => 1 });
+  swap.bindVideo(0)(old); swap.bindVideo(1)(spare);
+  const cleanups = effects.map(fn => fn()); swap.load('track10', 'video:10');
+  return { swap, old, spare, cleanup() { cleanups.forEach(fn => fn?.()); } };
+}
+
+test('a playing handoff waits for actual advancing frames and never pauses/restarts the prepared decoder', async () => {
+  const e = environment(), { swap, old, spare, cleanup } = swapEnvironment(e);
+  e.live.audibleRate = 1;
+  bridge.holdLocalVideoSeekPosition(10);
+  e.live.discontinuityRevision++; e.live.currentTime = 30;
+  await old.play();
+  const work = swap.prepare(30); await flush();
+  assert.equal(spare.callbacks.size, 1, 'observe before any compositor callback can arrive');
+  spare.frame(30); await flush();
+  assert.equal(swap.activeVideo(), old, 'the first frame is insufficient for a moving swap');
+  for (const position of [30.04, 30.08]) {
+    e.advance(40); e.live.currentTime = position; e.live.clientPresentationTimeMs += 40;
+    spare.frame(position); await flush();
+  }
+  const prepared = await work;
+  assert.ok(prepared); assert.equal(spare.paused, false); assert.equal(spare.pauses, 0);
+  assert.equal(prepared.activate(), true); assert.equal(swap.activeVideo(), spare);
+  assert.equal(spare.pauses, 0); assert.equal(old.paused, true);
+  assert.equal(spare.callbacks.size, 0); assert.equal(e.timers.size, 0);
+  cleanup();
+});
+
+test('canceling a preparation stops its spare and releases waits without touching the active video', async () => {
+  const e = environment(), { swap, old, spare, cleanup } = swapEnvironment(e);
+  await old.play();
+  const work = swap.prepare(30); await flush();
+  assert.equal(spare.paused, false); assert.equal(spare.callbacks.size, 1);
+  swap.cancelPending();
+  assert.equal(await work, null); assert.equal(spare.paused, true); assert.equal(old.paused, false);
+  assert.equal(spare.callbacks.size, 0); assert.equal(e.timers.size, 0); cleanup();
+});
+
+test('shared seek lane coalesces gestures for local files, proxy streams and YouTube HLS', async () => {
+  for (const source of ['video:local', 'https://loopback/video/preview', 'https://loopback/youtube/session.m3u8']) {
+    const e = environment(), video = new Video(), engine = new e.sync.VideoPlaybackEngine();
+    video.src = source;
+    Object.defineProperty(video, 'currentTime', { get: () => video.time, set(time) {
+      video.time = time; video.seeks.push(time); video.seeking = true;
+    } });
+    const first = engine.seek(video, 10), skipped = engine.seek(video, 20), latest = engine.seek(video, 30);
+    assert.deepEqual(video.seeks, [10]); assert.equal(await skipped, false);
+    video.seeking = false; video.dispatchEvent(new Event('seeked')); await flush();
+    assert.equal(await first, false); assert.deepEqual(video.seeks, [10, 30]);
+    video.seeking = false; video.dispatchEvent(new Event('seeked'));
+    assert.equal(await latest, true); assert.equal(e.timers.size, 0); engine.dispose();
+  }
+});
+
+test('source teardown cancels both in-flight waits and queued targets before a new source plays', async () => {
+  const e = environment(), video = new Video(), engine = new e.sync.VideoPlaybackEngine();
+  Object.defineProperty(video, 'currentTime', { get: () => video.time, set(time) {
+    video.time = time; video.seeks.push(time); video.seeking = true;
+  } });
+  const first = engine.seek(video, 10), queued = engine.seek(video, 20);
+  engine.dispose(); video.src = 'new-source';
+  assert.equal(await first, false); assert.equal(await queued, false);
+  assert.deepEqual(video.seeks, [10]); assert.equal(e.timers.size, 0);
+});
+
+test('official-player command adapters share bounded latest-target scheduling and cancel on disposal', async () => {
+  for (const platform of ['youtube', 'bilibili']) {
+    const queue = load('src/lib/videoSeekQueue.ts', {}, { AbortController });
+    const pending = [], commands = [];
+    const bridge = {
+      open: async () => {}, status: async () => ({ ready: true }), close: async () => {},
+      control(...args) {
+        if (args.at(-2) !== 'seek') return Promise.resolve();
+        commands.push(args.at(-1));
+        return new Promise(resolve => pending.push(resolve));
+      },
+    };
+    const e = environment();
+    const module = load(`src/lib/${platform}Embed.ts`, {
+      './videoSeekQueue': queue,
+      './bridge': { getBridge: () => ({ [`${platform}Embed`]: bridge }) },
+      './activityLog': { finishApiActivity() {} },
+    }, e.globals);
+    const Controller = module[platform === 'youtube' ? 'YoutubeEmbedController' : 'BilibiliEmbedController'];
+    const controller = new Controller({ videoId: 'id', bvid: 'id', page: 0, bounds: {}, muted: true, volume: 1,
+      onStatus() {}, onError(error) { assert.fail(String(error)); } });
+    await controller.done;
+    const first = controller.seek(10); await flush();
+    const skipped = controller.seek(20), latest = controller.seek(30);
+    await skipped; assert.deepEqual(commands, [10]); pending.shift()(); await first; await flush();
+    assert.deepEqual(commands, [10, 30]);
+    const abandoned = controller.seek(40); controller.dispose(); await abandoned;
+    pending.shift()(); await latest; assert.deepEqual(commands, [10, 30]); assert.equal(e.timers.size, 0);
+  }
+});
+
+test('rapid relative nudges retain every increment while absolute decoder targets are coalesced', async () => {
+  const e = environment(), video = new Video(), engine = new e.sync.VideoPlaybackEngine();
+  video.time = 10;
+  Object.defineProperty(video, 'currentTime', { get: () => video.time, set(time) {
+    video.time = time; video.seeks.push(time); video.seeking = true;
+  } });
+  const pending = [];
+  for (let i = 0; i < 5; i++) pending.push(engine.seek(video, engine.position(video) + 0.1));
+  assert.ok(Math.abs(engine.position(video) - 10.5) < 1e-9);
+  video.seeking = false; video.dispatchEvent(new Event('seeked')); await flush();
+  assert.equal(video.seeks.length, 2);
+  assert.ok(Math.abs(video.seeks[1] - 10.5) < 1e-9);
+  video.seeking = false; video.dispatchEvent(new Event('seeked'));
+  assert.deepEqual(await Promise.all(pending), [false, false, false, false, true]);
+  engine.dispose(); assert.equal(e.timers.size, 0);
+});
+
+function workshopTransport(e) {
+  const effects = [], cleanups = [], commands = [];
+  const editor = { activeId: 'project', draft: { id: 'project', revision: 1, name: 'Preview',
+    sources: [{ id: 'source', track_id: 1 }], layers: [{ source_id: 'source' }] },
+    auditionAfterLayer: {}, saving: 0, gesture: null, scrubbing: false, position: 12000,
+    seek(ms) { editor.position = ms; } };
+  const store = selector => selector(editor);
+  store.getState = () => editor;
+  const notify = () => { for (const fn of [...e.runtimeListeners]) fn(); };
+  e.runtime.pause = async () => { e.native.playing = false; e.native.status = 'paused'; notify(); };
+  e.runtime.play = async () => { e.native.playing = true; e.native.status = 'playing'; notify(); };
+  e.runtime.seek = async seconds => {
+    commands.push(seconds);
+    // The command response is optimistic; the audio callback has not landed yet.
+    e.native.currentTime = seconds; notify();
+  };
+  const hook = load('src/lib/workshopPlayback.ts', {
+    react: { useCallback: fn => fn, useRef: current => ({ current }),
+      useState: initial => [initial, () => {}], useEffect: fn => effects.push(fn) },
+    './api': { api: { previewWorkshop: async () => ({ ticket: 'ticket' }),
+      releaseWorkshop: async () => {}, track: async () => ({ id: 1 }), workshopAudioUrl: () => '/preview.wav' } },
+    './unifiedPlayer': { runtimePlayer: () => e.runtime },
+    './mediaSync': e.media,
+    './streamTrack': { makeCompositionPreviewTrack: () => ({ id: 10 }) },
+    './playTrack': { PLAY_EVENT: 'play', playTrack: () => { e.native.playing = true; notify(); } },
+    '../stores/workshopStore': { useWorkshopStore: store },
+    './workshop': { projectDuration: () => 120000 },
+  }, { ...e.globals, setTimeout: e.globals.window.setTimeout, clearTimeout: e.globals.window.clearTimeout });
+  const transport = hook.useWorkshopPlayback();
+  for (const effect of effects) cleanups.push(effect());
+  return { transport, editor, commands, notify, dispose() { for (const cleanup of cleanups) cleanup?.(); } };
+}
+
+test('workshop seek stays pinned through optimistic snapshots until the native clock lands', async () => {
+  const e = environment(), w = workshopTransport(e);
+  e.advance(120); await flush(); w.transport.toggle(); await flush();
+  const seek = w.transport.seek(30000);
+  await flush();
+  assert.equal(w.transport.time(), 30000, 'old DAC sample cannot bounce the pointer back');
+  assert.equal(w.editor.position, 30000);
+  assert.equal(w.transport.pendingSeek(), true, 'video cannot follow the old clock during the transaction');
+  e.native.decks[0].discontinuityRevision = 2; w.notify();
+  assert.equal(w.transport.time(), 30000, 'a command acknowledgement alone is not a landing');
+  e.live.discontinuityRevision = 2; e.live.currentTime = 30.2; e.live.clientPresentationTimeMs = 1120;
+  e.publish(); await seek;
+  assert.equal(w.transport.pendingSeek(), false);
+  assert.equal(w.transport.time(), 30200, 'handoff uses the actual landing, not the frozen requested time');
+  assert.equal(w.editor.position, 30200);
+  w.dispose(); assert.equal(e.timers.size, 0);
+});
+
+test('workshop scrub release keeps its pointer while pause and seek acknowledgements arrive late', async () => {
+  const e = environment(), w = workshopTransport(e);
+  e.advance(120); await flush(); w.transport.toggle(); await flush();
+  let finishPause;
+  e.runtime.pause = () => new Promise(resolve => { finishPause = () => {
+    e.native.playing = false; e.native.status = 'paused'; w.notify(); resolve();
+  }; });
+  let resumes = 0;
+  e.runtime.play = async () => { resumes++; e.native.playing = true; w.notify(); };
+  w.editor.scrubbing = true; w.transport.beginScrub();
+  w.transport.seek(20000); w.transport.seek(40000);
+  w.editor.scrubbing = false; w.transport.endScrub();
+  w.notify();
+  assert.equal(w.editor.position, 40000);
+  assert.deepEqual(w.commands, []);
+  finishPause(); await flush();
+  assert.deepEqual(w.commands, [40]);
+  assert.equal(w.transport.time(), 40000);
+  assert.equal(resumes, 0, 'resume must wait for the real audio landing');
+  e.live.discontinuityRevision = 2; e.live.currentTime = 40; e.live.clientPresentationTimeMs = 1120;
+  e.publish(); await flush();
+  assert.equal(resumes, 1);
+  assert.equal(w.transport.time(), 40000);
+  w.dispose(); finishPause(); assert.equal(e.timers.size, 0);
+});
+
+test('workshop queued seek keeps the newest pointer and does not accept the previous seek landing', async () => {
+  const e = environment(), w = workshopTransport(e);
+  e.advance(120); await flush(); w.transport.toggle(); await flush();
+  const first = w.transport.seek(30000); await flush();
+  const latest = w.transport.seek(50000); w.transport.seek(60000); await flush();
+  assert.deepEqual(w.commands, [30]);
+  e.live.discontinuityRevision = 2; e.live.currentTime = 30; e.live.clientPresentationTimeMs = 1120;
+  e.publish(); await flush();
+  assert.deepEqual(w.commands, [30, 60]);
+  assert.equal(w.transport.time(), 60000);
+  assert.equal(w.editor.position, 60000);
+  assert.equal(w.transport.pendingSeek(), true);
+  e.publish(); await flush();
+  assert.equal(w.transport.pendingSeek(), true, 'A cannot release B even after B command response');
+  e.live.discontinuityRevision = 3; e.live.currentTime = 60; e.publish();
+  await Promise.all([first, latest]);
+  assert.equal(w.transport.pendingSeek(), false);
+  assert.equal(w.transport.time(), 60000);
+  w.dispose(); assert.equal(e.timers.size, 0);
+});
+
+test('background correction cannot reveal a decoder whose cursor moves without compositor frames', async () => {
+  const e = environment(), active = new Video(), spare = frameVideo(e);
+  e.live.audibleRate = 1; active.time = 11.7; active.paused = false;
+  const engine = new e.sync.VideoPlaybackEngine('webkit');
+  engine.adoptClock(active, e.media.getLocalVideoClock(10));
+  engine.followClock(active, e.media.getLocalVideoClock(10), () => assert.fail(), () => {});
+  let finished = false;
+  const work = engine.alignStandby(active, spare, () => true, () => assert.fail('unpresented frames must not activate'))
+    .then(result => { assert.equal(result, false); finished = true; });
+  for (let elapsed = 0; elapsed < 2500 && !finished; elapsed += 50) {
+    spare.time += 0.05; e.live.currentTime += 0.05; e.live.clientPresentationTimeMs += 50;
+    e.advance(50); engine.followClock(active, e.media.getLocalVideoClock(10), () => assert.fail(), () => {});
+    await flush();
+  }
+  assert.equal(finished, true); await work;
+  assert.equal(active.pauses, 0); assert.equal(spare.paused, true);
+  assert.equal(spare.callbacks.size, 0); assert.equal(e.timers.size, 0);
 });

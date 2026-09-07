@@ -2,6 +2,8 @@
 use crate::composition::EncodingAcceleration;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+mod transitions;
+pub use transitions::{VideoTransition, video_transition_span};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
@@ -146,6 +148,8 @@ impl Fades {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Clip {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_transition: Option<VideoTransition>,
     #[serde(default)]
     pub display_duration_ms: Option<f64>,
     #[serde(default)]
@@ -232,7 +236,27 @@ impl Clip {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GridSegment {
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub bpm: f64,
+    pub confidence: f64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BeatGrid {
+    pub analysis_revision: String,
+    pub source_signature: String,
+    pub beats: Vec<f64>,
+    pub downbeats: Vec<f64>,
+    pub segments: Vec<GridSegment>,
+    pub beats_per_bar: u8,
+    pub downbeat_confidence: f64,
+    pub locked: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Layer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<BeatGrid>,
     pub id: String,
     pub source_id: String,
     pub clips: Vec<Clip>,
@@ -282,8 +306,11 @@ impl Default for Canvas {
         }
     }
 }
+fn default_output_format() -> String { "mp4".into() }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Output {
+    #[serde(default = "default_output_format")]
+    pub format: String,
     pub name: String,
     pub directory: String,
     pub in_ms: f64,
@@ -291,8 +318,16 @@ pub struct Output {
     pub quality: u8,
     pub acceleration: EncodingAcceleration,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Marker {
+    pub id: String,
+    pub position_ms: f64,
+    pub number: u32,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompositionProject {
+    #[serde(default)]
+    pub markers: Vec<Marker>,
     pub id: String,
     pub revision: u64,
     pub name: String,
@@ -304,6 +339,23 @@ pub struct CompositionProject {
     pub migrated_from: Option<String>,
 }
 impl CompositionProject {
+    pub fn has_picture(&self) -> bool {
+        self.layers.iter().flat_map(|layer| &layer.clips)
+            .any(|clip| self.source(&clip.source_id).is_some_and(Source::visual))
+    }
+
+    /// Follow changes in timeline content, not unused sources or preview visibility.
+    /// An explicit format edit takes precedence; existing audio-only choices survive
+    /// removal of the last picture. Keep the frontend draft rule in sync.
+    pub fn sync_output_format(&mut self, previous: &Self) {
+        if self.output.format != previous.output.format { return; }
+        match (previous.has_picture(), self.has_picture()) {
+            (false, true) => self.output.format = "mp4".into(),
+            (true, false) if self.output.format == "mp4" => self.output.format = "wav".into(),
+            _ => {}
+        }
+    }
+
     /// A standalone music clip is the timing/name authority. Prefer audible
     /// material, then the longest clip; visual layer ordering never wins ties.
     pub fn music_reference(&self) -> Option<&Clip> {
@@ -342,6 +394,14 @@ impl CompositionProject {
     }
     pub fn validate(&self) -> Result<(), String> {
         let fail = |s: &str| Err(s.to_owned());
+        let mut marker_ids = HashSet::new();
+        let mut marker_numbers = HashSet::new();
+        if self.markers.len() > 5000 || self.markers.iter().any(|m| {
+            m.id.is_empty() || !marker_ids.insert(&m.id) || m.number == 0
+                || !marker_numbers.insert(m.number) || !finite_range(m.position_ms, 0., 21_600_000.)
+        }) {
+            return fail("标记参数无效");
+        }
         if self.layers.len() > 1000
             || self.sources.len() > 1000
             || self.layers.iter().map(|l| l.clips.len()).sum::<usize>() > 5000
@@ -359,6 +419,7 @@ impl CompositionProject {
         if self.canvas.import_picture.as_ref().is_some_and(|p| !p.valid()) {
             return fail("新素材画面参数无效");
         }
+        if !["mp4", "wav", "flac", "mp3"].contains(&self.output.format.as_str()) { return fail("输出格式无效"); }
         let mut ids = HashSet::new();
         for s in &self.sources {
             if !matches!(s.kind.as_str(), "" | "audio" | "video" | "image" | "gif")
@@ -375,6 +436,15 @@ impl CompositionProject {
         for l in &self.layers {
             if !layers.insert(&l.id) || self.source(&l.source_id).is_none() {
                 return fail("素材行不存在");
+            }
+            if let Some(g) = &l.grid {
+                let duration = self.source(&l.source_id).unwrap().duration_ms / 1000.;
+                if !(1..=32).contains(&g.beats_per_bar) || !finite_range(g.downbeat_confidence, 0., 1.)
+                    || [&g.beats, &g.downbeats].iter().any(|events| events.iter().any(|&t| !finite_range(t, 0., duration + 0.001)) || events.windows(2).any(|w| w[1] <= w[0]))
+                    || g.segments.iter().any(|s| !finite_range(s.bpm, 20., 400.) || !finite_range(s.confidence, 0., 1.) || !finite_range(s.start_seconds, 0., duration) || !finite_range(s.end_seconds, s.start_seconds + 0.000001, duration + 0.001))
+                    || g.segments.windows(2).any(|w| w[0].end_seconds > w[1].start_seconds + 0.001) {
+                    return fail("小节网格参数无效");
+                }
             }
             let mut order: Vec<_> = l.clips.iter().collect();
             order.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
@@ -408,6 +478,10 @@ impl CompositionProject {
                     || v.domain_end_ms <= v.domain_start_ms
                 {
                     return fail("速度参数无效");
+                }
+                if c.video_transition.as_ref().is_some_and(|t| !s.video
+                    || !finite_range(t.duration_ms, 0., 10000.) || !(-1..=1).contains(&t.alignment)) {
+                    return fail("画面过渡参数无效");
                 }
                 let duration = c.duration();
                 if !finite_range(duration, 0.001, 21_600_000.) || c.start_ms + 0.001 < end {
@@ -468,6 +542,7 @@ mod tests {
     use super::*;
     fn clip() -> Clip {
         Clip {
+            video_transition: None,
             display_duration_ms: None, animation_offset_ms: 0.,
             id: "a".into(),
             source_id: "s".into(),
@@ -541,6 +616,7 @@ mod tests {
         c.fades = Fades::new(78000. * (1. / c.speed.start), true);
         assert!(c.fades.span_ms < c.duration(), "reproduce scaling roundoff");
         let mut p = CompositionProject {
+            markers: vec![],
             id: "project".into(),
             revision: 0,
             name: "project".into(),
@@ -559,12 +635,14 @@ mod tests {
                 signature: String::new(),
             }],
             layers: vec![Layer {
+                grid: None,
                 id: "layer".into(),
                 source_id: "s".into(),
                 clips: vec![c],
             }],
             canvas: Canvas::default(),
             output: Output {
+                format: "mp4".into(),
                 name: String::new(),
                 directory: String::new(),
                 in_ms: 0.,

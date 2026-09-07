@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { overlayAlpha, compositionUsesSections, compositionSectionVideoTime } from "../../lib/composition";
 import { getCompositionClock, useCompositionClock, type CompositionClock, type CompositionSegment } from "../../lib/compositionPlayback";
-import { LocalVideoSynchronizer } from "../../lib/localVideoSync";
+import { VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
 import type { LocalVideoClock } from "../../lib/mediaSync";
 import type { CompositionTask, OverlayOptions } from "../../types/composition";
 import { InlineNotice } from "../common";
@@ -36,7 +36,7 @@ function OverlayPreviewMedia({ task, offset, options, disabled, segment, followS
   const [compatibleMain, setCompatibleMain] = useState(false), [compatibleInset, setCompatibleInset] = useState(false);
   const pendingPlay = useRef(new WeakSet<HTMLVideoElement>());
   const shouldPlay = useRef(new WeakMap<HTMLVideoElement, boolean>());
-  const synchronizer = useRef(new LocalVideoSynchronizer());
+  const synchronizer = useRef(new VideoPlaybackEngine());
   const lastTime = useRef(0);
   const lastGeometry = useRef("");
   const visibleMedia = useRef(new WeakMap<HTMLVideoElement, boolean>());
@@ -86,7 +86,7 @@ function OverlayPreviewMedia({ task, offset, options, disabled, segment, followS
       if (Number.isFinite(target)) {
         const bounded = Math.max(0, Math.min(target, Number.isFinite(element.duration) ? element.duration : target));
         synchronizer.current.followClock(element, { ...authority, position: bounded, playing: play }, (video, position) => {
-          video.currentTime = position;
+          void synchronizer.current.seek(video, position).catch(() => undefined);
         });
       }
       if (play && element.paused && element.readyState >= 2 && !pendingPlay.current.has(element)) {
@@ -137,6 +137,7 @@ function OverlayPreviewMedia({ task, offset, options, disabled, segment, followS
     const video = main.current, overlay = inset.current;
     const wanted = shouldPlay.current;
     return () => {
+      synchronizer.current.dispose();
       for (const element of [video, overlay]) {
         if (element) { wanted.set(element, false); element.pause(); }
       }

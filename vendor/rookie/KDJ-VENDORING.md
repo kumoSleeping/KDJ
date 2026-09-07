@@ -16,6 +16,10 @@ Local changes:
   KDJ instead lists opaque profile ids so the user can explicitly choose the
   browser identity being connected without exposing filesystem paths to the
   WebView.
+- Firefox reads the live SQLite WAL with a read-only connection and a bounded busy timeout,
+  rather than `immutable=1` (which silently misses recent browser logins). Truncated Mozilla
+  recovery files return an error instead of panicking. The live-WAL regression uses a synthetic
+  profile and removes it after testing; it never reads the user's browser credentials.
 - The retired Internet Explorer ESE reader is behind a non-default
   `internet-explorer` feature. KDJ supports current Windows browsers and does
   not ship the unrelated native `libesedb` build.

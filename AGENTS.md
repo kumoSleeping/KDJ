@@ -11,6 +11,8 @@
 - Use `npm run build` or `npm run tauri:build` for production builds.
 - Backend work belongs in `crates/` and `src-tauri/`.
 - Frontend work belongs in `src/` and must be validated against the Tauri shell.
+- Video scheduling is shared through `src/lib/videoPlaybackEngine.ts`, `videoFrames.ts`, and `videoSeekQueue.ts`. Local playback, online previews, YouTube, and the mixing editor (formerly VJ workshop) must use this common scheduling layer; official embedded players adapt their commands to the shared seek queue.
+- Prioritize macOS and Windows while retaining Android support. Reuse system decoding; do not introduce a bundled decoder/player dependency merely to unify video controls. Keep native decoding, shared scheduling, and source-specific loading distinct when reporting capabilities.
 
 ## Disabled Legacy Runtime
 

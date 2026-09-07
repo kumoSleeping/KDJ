@@ -28,7 +28,7 @@ export function WorkshopPositionChoices({ analysis, sourceTitle, saving, onApply
           return <button key={preset.id} type="button" disabled={saving}
             aria-label={`${sourceTitle}：${prerequisite ? `${prerequisite}，` : ""}${preset.label}`}
             aria-pressed={analysis.applied === preset.id}
-            title={`${analysis.reference_title}；${prerequisite ? `${prerequisite}，` : ""}${detail}`}
+            title={`${analysis.reference_title}；${prerequisite ? `${prerequisite}，` : ""}${preset.id.startsWith("review-melody-") ? "旋律对应候选，尚未通过严格录音匹配；" : ""}${detail}`}
             onClick={() => onApply(preset.id)}>
             {preset.label}{!full && preset.placements.length > 1 ? ` · ${preset.placements.length} 段` : ""}
           </button>;

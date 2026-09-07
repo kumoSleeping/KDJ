@@ -1,12 +1,14 @@
 import { buildSync } from "esbuild";
 import { createRequire, Module } from "node:module";
 const require = createRequire(import.meta.url);
-const entry = new Module(`${process.cwd()}/tests/workshop-ui.test.cjs`);
+const requested = process.argv.slice(2);
+for (const name of requested.length ? requested : ["workshop-ui", "workstation-ui", "workshop-transitions-ui", "marquee-ui"]) {
+const entry = new Module(`${process.cwd()}/tests/${name}.test.cjs`);
 entry.filename = entry.id;
 entry.paths = require.resolve.paths("react");
 entry._compile(
   buildSync({
-    entryPoints: ["tests/workshop-ui.test.ts"],
+    entryPoints: [`tests/${name}.test.ts`],
     bundle: true,
     packages: "external",
     platform: "node",
@@ -17,3 +19,5 @@ entry._compile(
   }).outputFiles[0].text,
   entry.filename,
 );
+
+}

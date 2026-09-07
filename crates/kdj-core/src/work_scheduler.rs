@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-const CLASS_COUNT: usize = 12;
+const CLASS_COUNT: usize = 13;
 const WAIT_POLL: Duration = Duration::from_millis(20);
 
 /// Process-wide output-ring pressure published by the playback coordinator. The hardware callback
@@ -41,6 +41,7 @@ pub enum WorkClass {
     InteractiveWaveform,
     WaveformRenewal,
     VisibleWaveform,
+    WorkstationAnalysis,
     NowPlayingAnalysis,
     LibraryAnalysisLight,
     LibraryAnalysis,
@@ -57,6 +58,7 @@ impl WorkClass {
         Self::InteractiveWaveform,
         Self::WaveformRenewal,
         Self::VisibleWaveform,
+        Self::WorkstationAnalysis,
         Self::NowPlayingAnalysis,
         Self::LibraryAnalysisLight,
         Self::LibraryAnalysis,
@@ -77,11 +79,12 @@ impl WorkClass {
             Self::InteractiveWaveform => 4,
             Self::WaveformRenewal => 5,
             Self::VisibleWaveform => 6,
-            Self::NowPlayingAnalysis => 7,
-            Self::LibraryAnalysisLight => 8,
-            Self::LibraryAnalysis => 9,
-            Self::MediaComposition => 10,
-            Self::Maintenance => 11,
+            Self::WorkstationAnalysis => 7,
+            Self::NowPlayingAnalysis => 8,
+            Self::LibraryAnalysisLight => 9,
+            Self::LibraryAnalysis => 10,
+            Self::MediaComposition => 11,
+            Self::Maintenance => 12,
         }
     }
 }
@@ -470,6 +473,18 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
                 && !active(WorkClass::InteractiveWaveform)
                 && !queued(WorkClass::InteractiveWaveform)
         }
+        // Explicit streaming V4 editing work may run during healthy playback. Keep the old
+        // idle-only analysis policy separate, and do not let an editor waiter block waveforms.
+        WorkClass::WorkstationAnalysis => {
+            state.live_stem_decks == 0
+                && !active(WorkClass::TempoStretch)
+                && !queued(WorkClass::TempoStretch)
+                && !immediate_model_pressure
+                && !active(WorkClass::InteractiveWaveform)
+                && !queued(WorkClass::InteractiveWaveform)
+                && !active(WorkClass::VisibleWaveform)
+                && !queued(WorkClass::VisibleWaveform)
+        }
         WorkClass::NowPlayingAnalysis => {
             state.live_audio_decks == 0
                 && !active(WorkClass::TempoStretch)
@@ -488,6 +503,7 @@ fn pressure_allows(pressure: AudioPressure, class: WorkClass) -> bool {
                 | WorkClass::WaveformRenewal
                 | WorkClass::VisibleWaveform
                 | WorkClass::NowPlayingAnalysis
+                | WorkClass::WorkstationAnalysis
                 | WorkClass::LibraryAnalysisLight
                 | WorkClass::LibraryAnalysis
                 | WorkClass::MediaComposition
@@ -896,4 +912,28 @@ mod tests {
         assert!(matches!(result, Err(WorkAcquireError::DeadlineExceeded)));
         assert!(started.elapsed() < BOUNDED_TEST_LATENCY);
     }
+    #[test]
+    fn workstation_analysis_runs_during_playback_without_blocking_waveform_admission() {
+        let scheduler=WorkScheduler::new(2);
+        scheduler.set_live_audio_decks(1);
+        let waiting=scheduler.queued(WorkClass::WorkstationAnalysis);
+        assert!(scheduler.allows(WorkClass::WorkstationAnalysis));
+        assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
+        assert!(!scheduler.allows(WorkClass::NowPlayingAnalysis));
+        drop(waiting);
+        let permit=scheduler.acquire(WorkRequest::new(WorkClass::WorkstationAnalysis).with_timeout(Duration::from_millis(20)),||false).unwrap();
+        assert_eq!(scheduler.snapshot().heavy_in_use,1);
+        scheduler.set_audio_pressure(AudioPressure::Low);
+        assert!(!scheduler.allows(WorkClass::WorkstationAnalysis));
+        drop(permit);
+        scheduler.set_audio_pressure(AudioPressure::Normal);
+        let urgent=scheduler.queued(WorkClass::TempoStretch);
+        assert!(!scheduler.allows(WorkClass::WorkstationAnalysis));
+        drop(urgent);
+        let waveform=scheduler.queued(WorkClass::VisibleWaveform);
+        assert!(!scheduler.allows(WorkClass::WorkstationAnalysis));
+        drop(waveform);
+        assert!(scheduler.allows(WorkClass::WorkstationAnalysis));
+    }
+
 }

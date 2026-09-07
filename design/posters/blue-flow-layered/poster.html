@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KDJ — 让音乐自由流动</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="poster.css">
+</head>
+<body>
+<main id="poster" aria-label="KDJ：让音乐自由流动">
+  <div class="layer paper" data-name="01 · 纸面底色"></div>
+  <div class="layer atmosphere" data-name="02 · 蓝色光场"></div>
+  <svg class="layer coordinates" data-name="03 · 网格与细节" viewBox="0 0 1200 1800" aria-hidden="true">
+    <defs><pattern id="dots" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".7" fill="#204fe8" opacity=".22"/></pattern></defs>
+    <rect x="680" y="800" width="470" height="730" fill="url(#dots)"/>
+    <path d="M60 132H1140 M60 1662H1140" stroke="#224aca" stroke-width="1" opacity=".24"/>
+    <path d="M45 670h22m-11-11v22 M1124 740h22m-11-11v22 M65 1362h22m-11-11v22" stroke="#1744e6" stroke-width="1.2"/>
+  </svg>
+  <svg class="layer halo" data-name="04 · 环形声轨 后景" viewBox="0 0 1200 1800" aria-hidden="true">
+    <defs><linearGradient id="ring" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#c6fff4"/><stop offset=".48" stop-color="#5a9eff"/><stop offset="1" stop-color="#d4e8ff" stop-opacity="0"/></linearGradient></defs>
+    <circle cx="792" cy="942" r="554" fill="none" stroke="url(#ring)" stroke-width="60" opacity=".58"/>
+    <circle cx="792" cy="942" r="596" fill="none" stroke="#3966ec" stroke-width="1" opacity=".34"/>
+    <circle cx="792" cy="942" r="604" fill="none" stroke="#3966ec" stroke-width="1" opacity=".16"/>
+    <g id="radial-ticks"></g>
+  </svg>
+  <svg class="layer masthead" data-name="05 · KDJ 定制字形" viewBox="0 0 1200 1800" role="img" aria-label="KDJ">
+    <defs><linearGradient id="ink" x1="0" y1="0" x2="0.7" y2="1"><stop stop-color="#0c31d6"/><stop offset="1" stop-color="#2866ff"/></linearGradient></defs>
+    <g fill="url(#ink)">
+      <path d="M60 175H188V332L294 175H445L302 376L459 599H303L188 423V599H60Z"/>
+      <path fill-rule="evenodd" d="M471 175H644C775 175 841 243 841 384C841 526 775 599 644 599H471ZM598 281V493H630C687 493 710 459 710 385C710 311 687 281 630 281Z"/>
+      <path d="M1013 175H1140V423C1140 548 1082 606 970 606C897 606 848 579 821 526L918 454C929 480 943 493 966 493C997 493 1013 472 1013 426Z"/>
+    </g>
+    <path d="M60 620H363" stroke="#194be8" stroke-width="1.5"/>
+  </svg>
+  <svg class="layer ribbon-back" data-name="06 · 流线 后景" viewBox="0 0 1200 1800" aria-hidden="true">
+    <g id="back-lines" fill="none"></g>
+    <path d="M-60 1250C166 869 781 1517 1270 1009" fill="none" stroke="#a1f4e2" stroke-width="30" opacity=".4"/>
+  </svg>
+  <div class="layer character" data-name="07 · 角色 仅此层使用 AI">
+    <img src="assets/character.png" alt="戴着耳机的蓝色长发原创角色">
+  </div>
+  <svg class="layer title-edge" data-name="08 · KDJ 前景描边" viewBox="0 0 1200 1800" aria-hidden="true">
+    <path d="M60 175H188V332L294 175H445L302 376L459 599H303L188 423V599H60Z" fill="none" stroke="#f8ffff" stroke-width="1.5" opacity=".86"/>
+  </svg>
+  <div class="layer editorial" data-name="09 · 竖排中文标题">
+    <div class="eyebrow">MUSIC, IN MOTION.</div>
+    <h1><span class="first">让音乐</span><span class="second">自由流动</span></h1>
+    <div class="headline-note">收藏每一次心动<br>连接每一段节奏</div>
+  </div>
+  <svg class="layer ribbon-front" data-name="10 · 流线 前景" viewBox="0 0 1200 1800" aria-hidden="true">
+    <g id="front-lines" fill="none"></g>
+    <path d="M1040 1100C932 1259 1070 1292 1240 1208" fill="none" stroke="#b9fff0" stroke-width="6" opacity=".9"/>
+    <path d="M42 1305L47 1290L52 1305L67 1310L52 1315L47 1330L42 1315L27 1310Z" fill="#1ed6c2"/>
+  </svg>
+  <div class="layer lower-light" data-name="11 · 前景柔光"></div>
+  <div class="layer flow-type" data-name="12 · Flow 艺术字">
+    <span class="flow-overline">MAKE ROOM FOR MUSIC</span>
+    <span class="flow-word">flow.</span>
+    <svg viewBox="0 0 420 60" aria-hidden="true"><path d="M5 46C92 15 189 5 319 18M270 10L329 18L297 41" fill="none" stroke="#23cbb8" stroke-width="3"/></svg>
+  </div>
+  <div class="layer product-copy" data-name="13 · 产品说明">
+    <p class="product-label">你的音乐工作区</p>
+    <p class="product-desc">从发现，到下一次播放。</p>
+    <div class="features"><span>发现</span><i>·</i><span>整理</span><i>·</i><span>分析</span><i>·</i><span>播放</span></div>
+  </div>
+  <svg class="layer waveform" data-name="14 · 手绘节奏波形" viewBox="0 0 1200 1800" aria-hidden="true"><g id="wave-bars"></g></svg>
+  <div class="layer furniture" data-name="15 · 页眉页脚">
+    <header><span class="brand-name">Kumo's<br><b>Download &amp; Jockey</b></span><span class="issue">A SPACE FOR YOUR SOUND<br><b>KDJ / MUSIC LIBRARY</b></span></header>
+    <footer><a href="https://github.com/kumoSleeping/KDJ">github.com/kumoSleeping/KDJ <span>↗</span></a><span class="footer-right">COLLECT. CONNECT. PLAY.</span></footer>
+  </div>
+</main>
+<aside id="layers-panel" aria-label="图层控制">
+  <div class="panel-heading">KDJ <small>图层</small></div>
+  <p>文字、图形与人物均为独立层。</p>
+  <div id="layer-list"></div>
+  <button id="restore">显示全部</button>
+  <div class="panel-footer">1200 × 1800 · 2:3<br>仅角色使用 AI 生成</div>
+</aside>
+<script src="poster.js"></script>
+</body>
+</html>

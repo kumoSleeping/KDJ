@@ -37,6 +37,19 @@ fn skip_dir(name: &str) -> bool {
     SKIP_DIR_NAMES.contains(&lowered.as_str()) || (name.starts_with('.') && name != ".")
 }
 
+/// Internal working files are never library media, even when a watcher supplies
+/// a file directly (bypassing recursive directory pruning).
+pub fn is_internal_media_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let std::path::Component::Normal(name) = component else { return false };
+        let name = name.to_string_lossy();
+        name == crate::folders::METADATA_DIR_NAME
+            || name == ".partial"
+            || name.starts_with(".partial-")
+            || name.starts_with(".kdj-composition-")
+    })
+}
+
 fn is_audio(name: &str) -> bool {
     // macOS 在非 HFS 卷（U 盘 / 网盘）上给每个文件配一个 `._xxx.mp3` 资源叉，
     // 后缀和正主一模一样，不排掉会得到一堆 4KB 的"损坏音频"
@@ -70,6 +83,9 @@ fn collect_files_cancellable(
             return (found, true);
         }
         let root = PathBuf::from(normalize_path(Path::new(raw)));
+        if is_internal_media_path(&root) {
+            continue;
+        }
         if root.is_file() {
             let name = root
                 .file_name()
@@ -327,6 +343,26 @@ fn scan_paths_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_staging_is_ignored_even_for_explicit_file_events() {
+        let root = scratch("staging");
+        for name in [".partial-youtube-test-1234", ".partial-BV123-p0-abcd", ".partial"] {
+            let staging = root.join(name);
+            std::fs::create_dir_all(&staging).unwrap();
+            let file = staging.join("output.mp4");
+            std::fs::write(&file, b"partial media").unwrap();
+            for candidate in [&file, &staging] {
+                for recursive in [false, true] {
+                    assert!(collect_files(&[candidate.to_string_lossy().into_owned()], recursive).is_empty());
+                }
+            }
+        }
+        let legitimate = root.join("output.mp4");
+        std::fs::write(&legitimate, b"user media").unwrap();
+        assert_eq!(collect_files(&[root.to_string_lossy().into_owned()], true), vec![normalize_path(&legitimate)]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kdj-scan-{name}-{}", std::process::id()));

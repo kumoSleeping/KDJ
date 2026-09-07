@@ -15,6 +15,7 @@ fn manager(f: &Fixture) -> Arc<Workshop> {
 }
 fn edit(p: &CompositionProject) -> Edit {
     Edit {
+        markers: Some(p.markers.clone()),
         name: p.name.clone(),
         layers: p.layers.clone(),
         canvas: p.canvas.clone(),
@@ -204,6 +205,96 @@ async fn drafts_are_revisioned_duplicates_independent_and_restartable() {
     );
 }
 #[tokio::test]
+async fn deleting_last_picture_updates_output_format_and_survives_reload() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let original = naming::music_project();
+    m.change(|j| { j.projects.push(original.clone()); Ok(()) }).unwrap();
+    let mut p = original.clone();
+    // An empty visual layer and its retained source must not keep video enabled.
+    p.layers[0].clips.clear();
+    p = m.patch(&p.id, p.revision, edit(&p)).unwrap().projects[0].clone();
+    assert_eq!(p.output.format, "wav");
+    let restored = Workshop::open(m.state.clone(), &CompositionManager::open(m.state.clone()).unwrap()).unwrap();
+    assert_eq!(restored.snapshot().projects[0].output.format, "wav");
+    // Restoring picture clips without touching output settings promotes to MP4.
+    p.layers = original.layers.clone();
+    p = m.patch(&p.id, p.revision, edit(&p)).unwrap().projects[0].clone();
+    assert_eq!(p.output.format, "mp4");
+    for format in ["wav", "flac", "mp3"] {
+        p.layers = original.layers.clone();
+        p.output.format = format.into();
+        p = m.patch(&p.id, p.revision, edit(&p)).unwrap().projects[0].clone();
+        // Select explicitly after restoring content (WAV may have auto-promoted).
+        p.output.format = format.into();
+        p = m.patch(&p.id, p.revision, edit(&p)).unwrap().projects[0].clone();
+        p.layers.retain(|l| l.source_id != "v");
+        p = m.patch(&p.id, p.revision, edit(&p)).unwrap().projects[0].clone();
+        assert_eq!(p.output.format, format);
+    }
+}
+
+#[tokio::test]
+async fn preview_leases_survive_marker_then_audition_and_late_invalidation() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let p = naming::music_project();
+    m.change(|j| { j.projects.push(p.clone()); Ok(()) }).unwrap();
+    let original = m.preview(&p.id, p.revision, None).unwrap();
+    let mut e = edit(&p);
+    e.markers = Some(vec![Marker { id: "mark".into(), position_ms: 1000., number: 1 }]);
+    let saved = m.patch(&p.id, p.revision, e).unwrap().projects[0].clone();
+    let audition = m.preview(&saved.id, saved.revision, Some(&saved.layers[1].id)).unwrap();
+    assert!(m.ticket(&original).is_ok(), "new-revision audition must retain the original WAV and video");
+    assert!(m.ticket(&audition).is_ok());
+    m.cancel_previews(&p.id, p.revision);
+    assert!(m.ticket(&original).is_err());
+    assert!(m.ticket(&audition).is_ok(), "late old-revision invalidation cannot kill a new lease");
+    m.release(&original);
+    assert!(m.ticket(&audition).is_ok());
+    m.release(&audition);
+    assert!(m.ticket(&audition).is_err());
+}
+
+#[tokio::test]
+async fn markers_persist_validate_and_do_not_cancel_playing_preview() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let p = m.create().unwrap().projects[0].clone();
+    let mut legacy = serde_json::to_value(&p).unwrap();
+    legacy.as_object_mut().unwrap().remove("markers");
+    assert!(serde_json::from_value::<CompositionProject>(legacy).unwrap().markers.is_empty());
+    let cancel = CancellationToken::new();
+    m.previews.lock().unwrap().insert("marker-preview".into(), Preview { project: p.clone(), cancel: cancel.clone() });
+    let mut e = edit(&p);
+    e.markers = Some(vec![Marker { id: "mark-1".into(), position_ms: 1234.567, number: 1 }]);
+    let saved = m.patch(&p.id, p.revision, e).unwrap().projects[0].clone();
+    assert!(!cancel.is_cancelled(), "marking must keep the live preview lease");
+    let restored = Workshop::open(m.state.clone(), &CompositionManager::open(m.state.clone()).unwrap()).unwrap();
+    assert_eq!(restored.snapshot().projects[0].markers, saved.markers);
+    let mut old_edit = edit(&saved);
+    old_edit.markers = None;
+    let saved = m.patch(&saved.id, saved.revision, old_edit).unwrap().projects[0].clone();
+    assert_eq!(saved.markers.len(), 1, "older clients must not erase markers");
+    for (position_ms, number) in [(f64::NAN, 1), (-1., 1), (21_600_001., 1), (1., 0)] {
+        let mut invalid = edit(&saved);
+        invalid.markers = Some(vec![Marker { id: "bad".into(), position_ms, number }]);
+        assert!(m.patch(&saved.id, saved.revision, invalid).is_err());
+    }
+    let mut duplicate = edit(&saved);
+    duplicate.markers.as_mut().unwrap().push(saved.markers[0].clone());
+    assert!(m.patch(&saved.id, saved.revision, duplicate).is_err());
+    let mut clear = edit(&saved);
+    clear.markers = Some(vec![]);
+    let cleared = m.patch(&saved.id, saved.revision, clear).unwrap().projects[0].clone();
+    assert!(cleared.markers.is_empty());
+    assert!(!cancel.is_cancelled());
+    let mut media = edit(&cleared);
+    media.canvas.fps = 24.;
+    m.patch(&cleared.id, cleared.revision, media).unwrap();
+    assert!(cancel.is_cancelled(), "actual media edits still invalidate previews");
+}
+#[tokio::test]
 #[ignore = "requires local ffmpeg"]
 async fn imported_visuals_follow_saved_picture_layout() {
     let f = Fixture::new();
@@ -233,8 +324,8 @@ async fn imported_visuals_follow_saved_picture_layout() {
     p = m.patch(&p.id, p.revision, edit(&p)).unwrap().projects[0].clone();
     p = m.intake(intake::Intake { project_id: Some(p.id.clone()), revision: Some(p.revision),
         track_ids: vec![], paths: vec![image.to_string_lossy().into_owned()], at_ms: 0. }).await.unwrap().snapshot.projects[0].clone();
-    assert_eq!(p.layers[0].clips[0].picture, Picture::default());
-    assert_eq!(p.layers[1..], previous_layers);
+    assert_eq!(p.layers.last().unwrap().clips[0].picture, Picture::default());
+    assert_eq!(p.layers[..previous_layers.len()], previous_layers);
 }
 #[tokio::test]
 #[ignore = "requires local ffmpeg"]
@@ -250,9 +341,11 @@ async fn multilayer_export_preview_range_and_pitch_preserving_ramp() {
     assert_eq!(p.sources.len(), 2);
     assert_eq!(p.layers.len(), 3);
     assert_ne!(p.layers[0].clips[0].id, p.layers[1].clips[0].id);
-    assert!(p.layers[0].clips[0].sound.muted);
-    assert!(!p.layers[2].clips[0].sound.muted);
+    assert!(!p.layers[0].clips[0].sound.muted);
+    assert!(p.layers[2].clips[0].sound.muted);
     let mut p = p;
+    // Keep the established top-over-bottom compositor contract explicit.
+    p.layers.reverse();
     p.layers[0].clips[0].picture.scale = 0.5;
     p.layers[1].clips[0].picture.scale = 0.5;
     let c = &mut p.layers[0].clips[0];
@@ -456,7 +549,7 @@ async fn migration_is_once_only_and_music_defaults_preserve_manual_choices() {
         .unwrap()
         .projects[0]
         .clone();
-    assert!(p.layers[1].clips[0].sound.muted);
+    assert!(p.layers[0].clips[0].sound.muted);
 }
 
 #[tokio::test]
@@ -747,6 +840,91 @@ async fn automatic_position_presets_split_shared_recording_without_changing_effe
     restarted.cancel_positions(&batch.id);
 }
 
+#[test]
+fn video_joint_projection_preserves_nominal_audio_and_obeys_handle_limits() {
+    let mut p = naming::music_project();
+    let left = &mut p.layers[0].clips[0];
+    left.source_out_ms = 20000.;
+    left.fades = Fades::new(20000., false);
+    let mut right = left.clone();
+    right.id = "right".into(); right.start_ms = 20000.;
+    right.source_in_ms = 40000.; right.source_out_ms = 60000.;
+    right.video_transition = Some(VideoTransition { duration_ms: 1000., alignment: 0 });
+    p.layers[0].clips.push(right);
+    let original = serde_json::to_value(&p).unwrap();
+    for (alignment, before, after) in [(-1, 1000., 0.), (0, 500., 500.), (1, 0., 1000.)] {
+        p.layers[0].clips[1].video_transition.as_mut().unwrap().alignment = alignment;
+        let projected = p.video_project();
+        let clips = &projected.layers[0].clips;
+        assert_eq!(clips[0].source_out_ms, 20000. + after);
+        assert_eq!(clips[1].source_in_ms, 40000. - before);
+        assert_eq!(clips[1].start_ms, 20000. - before);
+        assert_eq!(clips[1].fades.video_in_ms, 1000.);
+        assert_eq!(clips[0].fades.video_out_ms, 0.);
+        assert!((clips[1].fades.alpha(500., false) - 0.5).abs() < 1e-9);
+        assert_eq!(projected.duration(), p.duration());
+        assert_eq!(projected.layers[1], p.layers[1], "music is never projected");
+    }
+    p.layers[0].clips[1].video_transition.as_mut().unwrap().alignment = 0;
+    assert_eq!(serde_json::to_value(&p).unwrap(), original, "projection must not mutate cuts or audio");
+    assert!(p.validate().is_ok());
+    let roundtrip: CompositionProject = serde_json::from_value(original).unwrap();
+    assert_eq!(roundtrip.layers[0].clips[1].video_transition.as_ref().unwrap().duration_ms, 1000.);
+    p.layers[0].clips[0].speed.domain_end_ms = 20100.;
+    assert_eq!(video_transition_span(&p.layers[0].clips[0], &p.layers[0].clips[1]), Some((100.,100.)));
+    p.layers[0].clips[1].start_ms += 1.;
+    assert!(video_transition_span(&p.layers[0].clips[0], &p.layers[0].clips[1]).is_none(), "real gaps never become transitions");
+    p.layers[0].clips[1].video_transition.as_mut().unwrap().duration_ms = f64::NAN;
+    assert!(p.validate().is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires local ffmpeg"]
+async fn video_joint_exports_a_bright_dissolve_without_changing_audio() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let path = f.generate("joint.mp4", &[
+        "-f","lavfi","-i","color=red:s=64x36:r=30:d=1.5",
+        "-f","lavfi","-i","color=blue:s=64x36:r=30:d=1.5",
+        "-f","lavfi","-i","sine=frequency=440:sample_rate=48000:duration=3",
+        "-filter_complex","[0:v][1:v]concat=n=2:v=1:a=0[v]",
+        "-map","[v]","-map","2:a","-c:v","libx264","-preset","ultrafast","-threads","1","-c:a","aac","-t","3",
+    ]);
+    let track = m.state.library.upsert_file(&path, "local", "").unwrap();
+    let p = m.create().unwrap().projects[0].clone();
+    let mut p = m.add(&p.id, p.revision, &[track], 0.).await.unwrap().projects[0].clone();
+    m.cancel_positions(&p.id);
+    let left = &mut p.layers[0].clips[0];
+    left.source_out_ms = 1000.; left.fades = Fades::new(1000., false);
+    let mut right = left.clone(); right.id = "incoming".into(); right.start_ms = 1000.;
+    right.source_in_ms = 2000.; right.source_out_ms = 3000.;
+    p.layers[0].clips.push(right);
+    let cancel = CancellationToken::new();
+    let original_audio = m.audio_chunk(&p, 0, &cancel).await.unwrap();
+    p.layers[0].clips[1].video_transition = Some(VideoTransition { duration_ms:1000., alignment:0 });
+    assert!(p.validate().is_ok());
+    assert_eq!(m.audio_chunk(&p, 0, &cancel).await.unwrap(), original_audio);
+    p.output.acceleration = kdj_core::composition::EncodingAcceleration::Software;
+    let jid = id();
+    m.change(|j| {
+        j.jobs.push(Job { id:jid.clone(), project_id:p.id.clone(), revision:p.revision,
+            phase:"queued".into(), progress:0., detail:String::new(), error:String::new(),
+            path:String::new(), signature:None, track_id:None }); Ok(())
+    }).unwrap();
+    m.render_export(&p, &jid, &cancel).await.unwrap();
+    let job = m.snapshot().jobs.into_iter().find(|j| j.id == jid).unwrap();
+    let output = std::process::Command::new(kdj_providers::ffmpeg::binary().unwrap()).args([
+        "-v","error","-threads","1","-i",&job.path,"-vf","scale=1:1,format=rgb24",
+        "-filter_threads","1","-f","rawvideo","pipe:1",
+    ]).output().unwrap();
+    assert!(output.status.success());
+    let frames: Vec<_> = output.stdout.chunks_exact(3).collect();
+    assert_eq!(frames.len(), 60, "joint must not change output duration");
+    assert!(frames.iter().all(|p| p[0] as u16 + p[2] as u16 > 200), "no double-alpha dip to black");
+    assert!(frames[30][0] > 90 && frames[30][2] > 90, "midpoint is a balanced dissolve: {:?}", frames[30]);
+    assert!(frames[5][0] > 200 && frames[55][2] > 200);
+}
+
 #[tokio::test]
 #[ignore = "requires local ffmpeg"]
 async fn adjacent_cuts_and_smooth_fades_export_without_black_frames() {
@@ -758,6 +936,7 @@ async fn adjacent_cuts_and_smooth_fades_export_without_black_frames() {
     let b = m.state.library.upsert_file(&red, "local", "").unwrap();
     let p = m.create().unwrap().projects[0].clone();
     let mut p = m.add(&p.id, 0, &[a, b], 0.).await.unwrap().projects[0].clone();
+    p.layers.reverse(); // Explicitly put the red overlay above the blue base.
     p.canvas.fps = 30.;
     let base = p.layers[1].clips[0].clone();
     let mut first = base.clone();
@@ -1012,10 +1191,10 @@ async fn audition_next_audio_is_preview_only_and_restores_saved_mix() {
     let mut silent_source = skipped.sources[1].clone();
     silent_source.id = id();
     silent_source.audio = false;
-    let silent = Layer { id: id(), source_id: silent_source.id.clone(), clips: vec![new_clip(&silent_source, 0.)] };
+    let silent = Layer { grid: None, id: id(), source_id: silent_source.id.clone(), clips: vec![new_clip(&silent_source, 0.)] };
     skipped.sources.push(silent_source);
     skipped.layers.insert(1, silent);
-    skipped.layers.insert(2, Layer { id: id(), source_id: skipped.layers[2].source_id.clone(), clips: vec![] });
+    skipped.layers.insert(2, Layer { grid: None, id: id(), source_id: skipped.layers[2].source_id.clone(), clips: vec![] });
     audition_next_layer(&mut skipped, &music_layer);
     for layer in &skipped.layers {
         assert!(layer.clips.iter().all(|c| c.sound.muted == (layer.id != video_layer)), "skip silent and empty rows");
@@ -1084,6 +1263,7 @@ async fn image_gif_intake_alpha_loop_and_restart() {
     assert!(m.state.library.pending_analysis_ids(None,true).unwrap().is_empty());
     assert!(m.state.library.pending_bpm_key_analysis_v2_ids(None,true,None,None).unwrap().is_empty());
     assert!(m.state.library.pending_bpm_key_analysis_v3_ids(None,true,None,None).unwrap().is_empty());
+    p.layers.reverse(); // The alpha image belongs above the GIF for this compositing check.
     p.canvas=Canvas {width:64,height:64,fps:30.,initialized:true,..Canvas::default()};
     for l in &mut p.layers {l.clips[0].fades=Fades::new(5000.,false);}
     p.output.out_ms=Some(600.);
@@ -1100,7 +1280,7 @@ async fn image_gif_intake_alpha_loop_and_restart() {
     let mixed=sample(Path::new(&job.path),0.15,32,32);assert!(mixed[0]>90 && mixed[2]>90,"alpha multiplied: {mixed:?}");
     let again=m.intake(intake::Intake {project_id:Some(p.id.clone()),revision:Some(p.revision),track_ids:vec![],paths:vec![png.to_string_lossy().into_owned()],at_ms:1000.}).await.unwrap();
     let updated=&again.snapshot.projects[0];assert_eq!(updated.sources.len(),2);assert_eq!(updated.layers.len(),3);
-    assert_eq!(updated.layers[0].clips[0].start_ms,1000.);
+    assert_eq!(updated.layers.last().unwrap().clips[0].start_ms,1000.);
     let all_bad=m.intake(intake::Intake {project_id:None,revision:None,track_ids:vec![],paths:vec![broken.to_string_lossy().into_owned()],at_ms:0.}).await.unwrap();assert_eq!(all_bad.snapshot.projects.len(),1);
 }
 
@@ -1183,4 +1363,161 @@ async fn image_crop_flip_rotate_and_fade_export_in_order() {
     assert!(fading[0]>35 && fading[0]<90,"{fading:?}");
     let after=sample(path,4.8,8,32);
     assert!(after.iter().all(|v|*v<10),"ended image must disappear: {after:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires local ffmpeg"]
+async fn audio_first_project_promotes_first_picture_to_video() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let audio = f.generate("music.wav", &["-f", "lavfi", "-i", "sine=duration=0.4"]);
+    let video = f.generate("picture.mp4", &["-f", "lavfi", "-i", "color=red:s=64x64:r=25:d=0.4", "-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+    let image = f.path("still.png");
+    image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 0, 255])).save(&image).unwrap();
+    let a = m.state.library.upsert_file(&audio, "local", "").unwrap();
+    for picture in [&video, &image] {
+        let v = m.state.library.upsert_file(picture, "local", "").unwrap();
+        let original = m.create().unwrap().projects.last().unwrap().clone();
+        let get = |s: Snapshot| s.projects.into_iter().find(|p| p.id == original.id).unwrap();
+        let mut p = get(m.add(&original.id, original.revision, &[a], 0.).await.unwrap());
+        assert_eq!(p.output.format, "wav");
+        p = get(m.add(&p.id, p.revision, &[a], 0.).await.unwrap());
+        assert_eq!(p.output.format, "wav", "more audio stays audio-only");
+        p = get(m.add(&p.id, p.revision, &[v], 0.).await.unwrap());
+        assert_eq!(p.output.format, "mp4", "first video or still enables video export");
+        p.output.out_ms = Some(400.);
+        p = get(m.patch(&p.id, p.revision, edit(&p)).unwrap());
+        let jid = m.export(&p.id, p.revision).unwrap().jobs.last().unwrap().id.clone();
+        let job = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let job = m.snapshot().jobs.into_iter().find(|j| j.id == jid).unwrap();
+                if ["complete", "failed", "import_failed"].contains(&job.phase.as_str()) { break job; }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(job.phase, "complete", "{}", job.error);
+        assert!(job.path.ends_with(".mp4"));
+        let probe = media::probe(Path::new(&job.path), &CancellationToken::new()).await.unwrap();
+        assert!(probe.video().is_some());
+        assert!(probe.audio().is_some());
+        p = get(m.add(&p.id, p.revision, &[a], 0.).await.unwrap());
+        assert_eq!(p.output.format, "mp4", "later audio does not downgrade video");
+        p.output.format = "flac".into();
+        p = get(m.patch(&p.id, p.revision, edit(&p)).unwrap());
+        p = get(m.add(&p.id, p.revision, &[v], 0.).await.unwrap());
+        assert_eq!(p.output.format, "flac", "preserve explicit audio-only export on a visual project");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires local ffmpeg"]
+async fn workstation_audio_formats_and_append_order() {
+    let f=Fixture::new();let m=manager(&f);
+    let first=f.generate("first.wav", &["-f","lavfi","-i","sine=frequency=440:duration=1.2"]);
+    let second=f.generate("second.wav", &["-f","lavfi","-i","sine=frequency=880:duration=1.2"]);
+    let a=m.state.library.upsert_file(&first,"local","").unwrap();
+    let b=m.state.library.upsert_file(&second,"local","").unwrap();
+    let original=m.create().unwrap().projects[0].clone();
+    let mut p=m.add(&original.id,original.revision,&[a,b],0.).await.unwrap().projects[0].clone();
+    assert_eq!(p.output.format,"wav");
+    assert_eq!(p.source(&p.layers[0].source_id).unwrap().track_id,a);
+    assert_eq!(p.source(&p.layers[1].source_id).unwrap().track_id,b);
+    let order=p.layers.clone();
+    p=m.add(&p.id,p.revision,&[a],0.).await.unwrap().projects[0].clone();
+    assert_eq!(&p.layers[..2],&order);
+    // A real source-time cut, with a bounded output region, uses no video stream.
+    p.layers.truncate(1);p.layers[0].clips[0].source_in_ms=100.125;p.layers[0].clips[0].source_out_ms=1000.125;
+    p.output.in_ms=50.;p.output.out_ms=Some(750.);
+    for format in ["wav","flac","mp3"] {
+        p.output.format=format.into();
+        p=m.patch(&p.id,p.revision,edit(&p)).unwrap().projects[0].clone();
+        let job=m.export(&p.id,p.revision).unwrap().jobs.last().unwrap().id.clone();
+        let result=tokio::time::timeout(std::time::Duration::from_secs(30),async{
+            loop {let j=m.snapshot().jobs.into_iter().find(|j|j.id==job).unwrap();
+                if ["complete","failed","import_failed"].contains(&j.phase.as_str()){break j;}
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(result.phase,"complete","{}",result.error);
+        assert!(result.path.ends_with(&format!(".{format}")));
+        let probe=media::probe(Path::new(&result.path),&CancellationToken::new()).await.unwrap();
+        assert!(probe.video().is_none());assert!((probe.check(false).unwrap()-700).abs()<100);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires local ffmpeg"]
+async fn audio_pure_splits_match_unsplit_pcm() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let source = f.generate("continuous.wav", &[
+        "-f", "lavfi", "-i",
+        "aevalsrc=0.2*sin(2*PI*443*t)+0.1*sin(2*PI*997*t):d=12:s=44100",
+    ]);
+    let tid = m.state.library.upsert_file(&source, "local", "").unwrap();
+    let empty = m.create().unwrap().projects[0].clone();
+    let base = m.add(&empty.id, empty.revision, &[tid], 0.).await.unwrap().projects[0].clone();
+    let cancel = CancellationToken::new();
+    for (preset, rate, end) in [("constant", 1., 1.), ("constant", 1.27, 1.27), ("ramp", 0.85, 1.65)] {
+        let mut whole = base.clone();
+        let c = &mut whole.layers[0].clips[0];
+        c.speed.preset = preset.into();
+        c.speed.start = rate;
+        c.speed.end = end;
+        c.sound.gain = 0.65;
+        c.fades = Fades::new(c.duration(), false);
+        c.fades.audio_in_ms = 800.;
+        c.fades.audio_out_ms = 1200.;
+        let original = c.clone();
+        let mut split = whole.clone();
+        // Fractional-sample cuts, including both sides of an 8-second cache boundary.
+        let cuts = [0., 1200.123, 7999.875, 8000.125, original.duration()];
+        split.layers[0].clips = cuts.windows(2).enumerate().map(|(i, span)| {
+            let mut child = original.clone();
+            child.id = id();
+            child.start_ms += span[0];
+            child.source_in_ms = original.source_at(span[0]);
+            child.source_out_ms = original.source_at(span[1]);
+            child.fades.offset_ms += span[0];
+            // Picture edits and storage order must not interrupt continuous sound.
+            child.picture.opacity = 1. / (i + 1) as f64;
+            child.fades.video_in_ms = i as f64 * 100.;
+            child.fades.video_out_ms = i as f64 * 50.;
+            child.sound.manual = i % 2 == 0;
+            child
+        }).collect();
+        split.layers[0].clips.reverse();
+        for n in 0..2 {
+            let expected = m.audio_chunk(&whole, n, &cancel).await.unwrap();
+            let actual = m.audio_chunk(&split, n, &cancel).await.unwrap();
+            assert_eq!(actual.len(), expected.len());
+            let changed = actual.iter().zip(&expected).filter(|(a, b)| a != b).count();
+            assert_eq!(changed, 0, "pure split changes PCM: {preset} {rate}, chunk {n}");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires local ffmpeg"]
+async fn audio_discontinuities_declick_without_changing_sample_count() {
+    let f=Fixture::new();let m=manager(&f);
+    let source=f.generate("dc.wav", &["-f","lavfi","-i","aevalsrc=0.5:d=1:s=48000"]);
+    let tid=m.state.library.upsert_file(&source,"local","").unwrap();
+    let empty=m.create().unwrap().projects[0].clone();
+    let mut p=m.add(&empty.id,empty.revision,&[tid],0.).await.unwrap().projects[0].clone();
+    let original=p.layers[0].clips[0].clone();
+    let mut first=original.clone();first.source_out_ms=250.;
+    let mut second=original;second.id=id();second.source_in_ms=750.;second.start_ms=250.;
+    p.layers[0].clips=vec![first,second];
+    let pcm=m.audio_chunk(&p,0,&CancellationToken::new()).await.unwrap();
+    assert_eq!(pcm.len(),24000*4);
+    let sample=|i:usize|i16::from_le_bytes([pcm[i*4],pcm[i*4+1]]).abs();
+    assert!(sample(11999)<300 && sample(12000)<300,"cut must not jump at DC");
+    assert!(sample(11800)>10000 && sample(12200)>10000,"only a short edge is faded");
+    // A pure split keeps the original sample phase and has no dip at the join.
+    p.layers[0].clips[1].source_in_ms=250.;p.layers[0].clips[1].source_out_ms=500.;
+    let pcm=m.audio_chunk(&p,0,&CancellationToken::new()).await.unwrap();
+    assert_eq!(pcm.len(),24000*4);
+    let sample=i16::from_le_bytes([pcm[12000*4],pcm[12000*4+1]]);
+    assert!(sample>10000,"continuous split must not add an audible dip");
 }

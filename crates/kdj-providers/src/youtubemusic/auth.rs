@@ -27,6 +27,34 @@ const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7
                                   Chrome/131.0.0.0 Safari/537.36";
 const MAX_HEADERS_BYTES: usize = 256 * 1024;
 
+#[derive(Debug, thiserror::Error)]
+#[error("登录会话已失效")]
+pub(crate) struct SignedOutLibrary;
+
+/// Private browse can return HTTP 200 for an anonymous user. Validate the body before saving
+/// credentials, and distinguish explicit sign-out from an unrecognised upstream response.
+pub(crate) fn validate_account_library(body: &serde_json::Value) -> Result<()> {
+    fn sign_in(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => map.contains_key("signInEndpoint") || map.values().any(sign_in),
+            serde_json::Value::Array(items) => items.iter().any(sign_in),
+            _ => false,
+        }
+    }
+    let logged_out = body.pointer("/responseContext/mainAppWebResponseContext/loggedOut")
+        .and_then(serde_json::Value::as_bool) == Some(true);
+    let tracking_signed_out = body.pointer("/responseContext/serviceTrackingParams")
+        .and_then(serde_json::Value::as_array).into_iter().flatten()
+        .filter_map(|service| service.get("params").and_then(serde_json::Value::as_array))
+        .flatten().any(|param| param["key"] == "logged_in" && param["value"] == "0");
+    if logged_out || tracking_signed_out || sign_in(body) {
+        return Err(SignedOutLibrary.into());
+    }
+    anyhow::ensure!(body.get("contents").is_some_and(serde_json::Value::is_object),
+        "账号目录响应无效，未替换已保存的会话");
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserSession {
     pub cookie: String,
@@ -401,6 +429,20 @@ mod tests {
 
     fn sample_cookie() -> &'static str {
         "LOGIN_INFO=x; SAPISID=secret; __Secure-3PAPISID=backup"
+    }
+
+    #[test]
+    fn account_library_rejects_anonymous_200_and_unknown_bodies() {
+        for body in [
+            serde_json::json!({"contents": {"signInEndpoint": {}}}),
+            serde_json::json!({"contents": {}, "responseContext": {"mainAppWebResponseContext": {"loggedOut": true}}}),
+            serde_json::json!({"contents": {}, "responseContext": {"serviceTrackingParams": [{"params": [{"key": "logged_in", "value": "0"}]}]}}),
+        ] {
+            assert!(validate_account_library(&body).unwrap_err().is::<SignedOutLibrary>());
+        }
+        assert!(validate_account_library(&serde_json::json!({"contents": {}})).is_ok(), "an empty signed-in library is valid");
+        let unknown = validate_account_library(&serde_json::json!({})).unwrap_err();
+        assert!(!unknown.is::<SignedOutLibrary>(), "unknown responses must not expire an existing account");
     }
 
     #[test]

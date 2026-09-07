@@ -1,4 +1,4 @@
-import { Clapperboard, Download, Moon, Settings, Sun, Upload } from "lucide-react";
+import { Scissors, Download, Moon, Settings, Sun, Upload } from "lucide-react";
 import { formatPercent } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -42,9 +42,9 @@ export function ChromeActions({
   const runningExports = exporting.filter(j => j.phase !== "queued").length;
   const exportProgress = taskProgressLabel(exporting, runningExports);
   const workshopLabel = exporting.length > 1
-    ? `VJ 工坊，${runningExports} 个正在导出，共 ${exporting.length} 个待完成`
-    : exportProgress !== null ? `VJ 工坊，导出 ${exportProgress}`
-    : compositionCount > 0 ? `VJ 工坊，${compositionCount} 个任务` : "VJ 工坊";
+    ? `工作站，${runningExports} 个正在导出，共 ${exporting.length} 个待完成`
+    : exportProgress !== null ? `工作站，导出 ${exportProgress}`
+    : compositionCount > 0 ? `工作站，${compositionCount} 个任务` : "工作站";
   const downloadTasks = useDownloadStore(s => s.list);
   const downloading = downloadTasks.filter(t => ["queued", "running", "processing"].includes(t.state));
   const runningDownloads = downloading.filter(t => t.state !== "queued").length;
@@ -95,7 +95,7 @@ export function ChromeActions({
           aria-label={workshopLabel} title={workshopLabel}
           aria-pressed={compositionOpen} data-open={compositionOpen || undefined}
           onClick={onComposition ?? (() => useAppStore.getState().toggleCompositionPanel())}>
-          <Clapperboard size={16} />
+          <Scissors size={16} />
           {exportProgress !== null ? <span className="kd-chrome-export-progress">{exportProgress}</span> : compositionCount > 0 && <span className="kd-chrome-dot" aria-hidden="true" />}
         </button>
       <button

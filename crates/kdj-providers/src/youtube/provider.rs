@@ -304,14 +304,29 @@ impl YoutubeProvider {
         };
         anyhow::ensure!(!target.is_empty(), "缺少 YouTube 视频链接或 ID");
         let video_id = video_id_from_input(target)?;
-        let info = self.client.video_info(&video_id).await?;
+        let protected_hls = prepared_source_url
+            .map(validated_local_youtube_hls_url)
+            .transpose()?;
         if cancel.is_cancelled() {
             bail!("下载已取消");
         }
-
-        let details = &info.video_details;
+        // A prepared video already has an authenticated, proof-bound source. Do not gate it
+        // on an unrelated iOS/WEB player request: that client may be rejected even while the
+        // exact same video plays through protected HLS. Only direct-format downloads need it.
+        let info = if protected_hls.is_some() && !req.audio_only {
+            None
+        } else {
+            Some(self.client.video_info(&video_id).await?)
+        };
+        if cancel.is_cancelled() {
+            bail!("下载已取消");
+        }
+        let formats = info.as_ref().map(|info| info.formats.as_slice()).unwrap_or(&[]);
         let title = if req.title.trim().is_empty() {
-            &details.title
+            info.as_ref()
+                .map(|info| info.video_details.title.as_str())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or(&video_id)
         } else {
             req.title.trim()
         };
@@ -328,25 +343,24 @@ impl YoutubeProvider {
             // failure or reintroduce a transcoder.
             "mp4"
         };
-        let stem = sanitize_filename_value(title, &details.video_id);
+        let stem = sanitize_filename_value(title, &video_id);
         let filename = finalize_filename(&format!("{stem}.{extension}"), extension);
         let output = unique_download_path(&output_dir, &filename);
         let temp = output_dir.join(format!(
             ".partial-youtube-{}-{:08x}",
-            details.video_id,
+            video_id,
             rand::random::<u32>()
         ));
         std::fs::create_dir_all(&temp).context("创建 YouTube 下载暂存目录失败")?;
         let _guard = TempDirGuard(temp.clone());
-        let staged = temp.join(format!("output.{extension}"));
+        // A playable fMP4 grows here before the final rename. Give it a non-media
+        // extension as defense in depth against filesystem watchers importing it.
+        let staged = temp.join("output.part");
         // 桌面队列使用与原生播放相同的受保护 HLS 会话。上游 URL、proof 与固定
         // Safari 身份都留在本地服务里；纯 Rust 封装器只读取一次性的回环
         // capability，不会接触或泄露上游授权参数。
-        let protected_hls = prepared_source_url
-            .map(validated_local_youtube_hls_url)
-            .transpose()?;
         if req.audio_only {
-            let format = native_audio_format(&info.formats).context(
+            let format = native_audio_format(formats).context(
                 "YouTube 没有返回可直接保存的 AAC/M4A 音轨；该视频可能需要重新连接浏览器",
             )?;
             self.fetch_format(&format, &staged, cancel, progress)
@@ -361,7 +375,7 @@ impl YoutubeProvider {
                 .unwrap_or(0);
             progress(size, size);
         } else {
-            let format = native_progressive_mp4(&info.formats, req.max_height).context(
+            let format = native_progressive_mp4(formats, req.max_height).context(
                 "YouTube 没有返回可直接保存的 H.264/AAC MP4，且受保护 HLS 尚未就绪；请重试",
             )?;
             self.fetch_format(&format, &staged, cancel, progress)
@@ -1392,6 +1406,78 @@ mod tests {
         assert_eq!(account.detail, "测试浏览器");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn prepared_hls_download_does_not_request_legacy_player_metadata() {
+        use crate::provider::ProviderLiveSettings;
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "kdj-youtube-prepared-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let _cleanup = TempDirGuard(root.clone());
+        let ctx = ProviderContext::new(
+            root.clone(),
+            ProviderLiveSettings {
+                download_dir: root.join("downloads"),
+                filename_template: "{title}".into(),
+                default_quality: kdj_core::models::Quality::Q128,
+                netease_use_download_api: false,
+                soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
+                ytm_enabled: true,
+                youtube_enabled: true,
+                video_dir: Some(root.join("videos")),
+                video_format: "mp4".into(),
+            },
+        );
+        let auth = Arc::new(YoutubeAuth::new(&ctx, Platform::Youtube).unwrap());
+        let mut provider = YoutubeProvider::new(ctx, auth).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        // Every legacy API request is trapped by this local proxy, never sent to YouTube.
+        provider.client.set_test_http(
+            reqwest::Client::builder()
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(&origin).unwrap())
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            let length = stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            String::from_utf8_lossy(&request[..length]).into_owned()
+        });
+        let req = VideoDownloadRequest {
+            platform: Platform::Youtube,
+            bvid: "abcDEF12345".into(),
+            // Even missing display metadata must not cause an extra player request.
+            title: String::new(),
+            ..Default::default()
+        };
+        let progress: ProgressSink = Arc::new(|_, _| {});
+        let cancel = CancellationToken::new();
+        let invalid = provider.download_video_with_source(
+            &req, &cancel, &progress, Some("https://example.com/untrusted.m3u8"),
+        ).await.unwrap_err();
+        assert!(invalid.to_string().contains("不受信任"));
+        let source = format!("{origin}/api/video/youtube/hls/{}?kdj_media_token=test", "a".repeat(64));
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.download_video_with_source(&req, &cancel, &progress, Some(&source)),
+        ).await;
+        assert!(outcome.unwrap().is_err(), "the fixture deliberately rejects the HLS request");
+        let request = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        assert!(request.starts_with("GET /api/video/youtube/hls/"), "must request HLS, not CONNECT to the legacy player");
+        assert_eq!(std::fs::read_dir(root.join("videos")).unwrap().count(), 0);
     }
 
     #[test]

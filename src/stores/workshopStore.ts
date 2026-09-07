@@ -5,6 +5,7 @@ import {
   findClip,
   isVisualSource,
   projectDuration,
+  syncOutputFormat,
   validateProject,
 } from "../lib/workshop";
 import type { WsEvent } from "../types";
@@ -37,6 +38,7 @@ interface WorkshopStore extends WorkshopSnapshot {
   handle: ClipHandle;
   position: number;
   snap: boolean;
+  barSnap: boolean;
   scrubbing: boolean;
   trimPreview: { clipId: string; edge: "in" | "out" } | null;
   saving: number;
@@ -72,8 +74,8 @@ interface WorkshopStore extends WorkshopSnapshot {
 let batchGeneration = 0;
 let tail: Promise<void> = Promise.resolve();
 const same = (a: CompositionProject, b: CompositionProject) =>
-  JSON.stringify([a.name, a.layers, a.canvas, a.output]) ===
-  JSON.stringify([b.name, b.layers, b.canvas, b.output]);
+  JSON.stringify([a.name, a.layers, a.canvas, a.output, a.markers ?? []]) ===
+  JSON.stringify([b.name, b.layers, b.canvas, b.output, b.markers ?? []]);
 const remembered = readLocalStorage("kdj-workshop-project");
 const retired = new Set<string>();
 function queue(action: () => Promise<void>): Promise<void> {
@@ -116,7 +118,7 @@ function save(p: CompositionProject) {
     const state = useWorkshopStore.getState(),
       base = state.projects.find((v) => v.id === p.id);
     if (!base) throw new Error("作品不存在");
-    const result = await api.editWorkshop(p.id, base.revision, p);
+    const result = await api.editWorkshop(p.id, base.revision, {...p, markers: p.markers ?? []});
     useWorkshopStore.getState().accept(result);
     const updated = result.projects.find((v) => v.id === p.id);
     useWorkshopStore.setState((s) => ({
@@ -155,6 +157,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
   handle: "move",
   position: 0,
   snap: true,
+  barSnap: true,
   scrubbing: false,
   trimPreview: null,
   saving: 0,
@@ -331,7 +334,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
       const updated = result.snapshot.projects.find(p => p.id === result.project_id);
       if (updated && result.before && (get().activeId === pid || (!pid && !get().expandedId))) {
         set(state => ({activeId: updated.id, expandedId: updated.id, draft: updated,
-          selectedId: updated.layers[0]?.clips[0]?.id ?? null,
+          selectedId: updated.layers.find(l => !result.before?.layers.some(old => old.id === l.id))?.clips[0]?.id ?? null,
           past: [...state.past, result.before!].slice(-100), future: [],
         }));
       }
@@ -349,6 +352,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
   },
   transient(p) {
     const state = get();
+    if (state.draft) syncOutputFormat(p, state.draft);
     const before = state.draft && findClip(state.draft, state.selectedId);
     const after = findClip(p, state.selectedId);
     // Keep right-click edits and preview drags in the same import workflow.

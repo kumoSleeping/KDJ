@@ -1,4 +1,6 @@
 import type { LocalVideoClock } from "./mediaSync";
+import { waitForVideoFrames } from "./videoFrames";
+import { VideoSeekQueue } from "./videoSeekQueue";
 
 export const VIDEO_SYNC_EXPLICIT_TOLERANCE_SEC = 0.05;
 
@@ -229,8 +231,12 @@ export class VideoSeekEchoGuard {
   }
 }
 
-/** Shared device-clock synchronizer with a stable-tempo path for WebKit. */
-export class LocalVideoSynchronizer {
+/** Shared video scheduling over the system media decoder. No copied pixels or bundled codecs.
+ * Local playback, streams, YouTube HLS and the mixing editor use the same seek lane and clock
+ * policy; official embeds use VideoSeekQueue with their platform command adapter. */
+export class VideoPlaybackEngine {
+  private seekQueues = new Map<HTMLVideoElement, VideoSeekQueue>();
+  private seekTargets = new WeakMap<HTMLVideoElement, { position: number }>();
   private policies = new WeakMap<HTMLVideoElement, VideoSyncPolicyState>();
   private deviceOwners = new WeakMap<HTMLVideoElement, string>();
   private stableClocks = new WeakMap<HTMLVideoElement, StableVideoClockState>();
@@ -240,6 +246,57 @@ export class LocalVideoSynchronizer {
   constructor(private readonly timing: "rate" | "webkit" =
     typeof HTMLVideoElement !== "undefined" && "webkitSetPresentationMode" in HTMLVideoElement.prototype
       ? "webkit" : "rate") {}
+
+  /** Coalesce rapid gestures instead of repeatedly flushing an in-flight decoder seek. */
+  seek(video: HTMLVideoElement, position: number, onDispatch?: ProgrammaticSeek): Promise<boolean> {
+    if (!Number.isFinite(position)) return Promise.resolve(false);
+    let queue = this.seekQueues.get(video);
+    if (!queue) { queue = new VideoSeekQueue(); this.seekQueues.set(video, queue); }
+    const source = video.src;
+    const requested = { position: Math.max(0, Number.isFinite(video.duration) ? Math.min(video.duration, position) : position) };
+    this.seekTargets.set(video, requested);
+    const result = queue.request(signal => new Promise<void>((resolve, reject) => {
+      if (signal.aborted || video.src !== source) {
+        reject(new DOMException("Video source changed", "AbortError")); return;
+      }
+      const target = requested.position;
+      const finish = (error?: unknown) => {
+        window.clearTimeout(timer);
+        video.removeEventListener("seeked", ready);
+        video.removeEventListener("error", failed);
+        video.removeEventListener("emptied", changed);
+        signal.removeEventListener("abort", changed);
+        error ? reject(error) : resolve();
+      };
+      const ready = () => finish();
+      const changed = () => finish(new DOMException("Video seek canceled", "AbortError"));
+      const failed = () => finish(new Error("视频跳转失败"));
+      const timer = window.setTimeout(() => finish(new Error("视频跳转超时")), 4000);
+      video.addEventListener("seeked", ready, { once: true });
+      video.addEventListener("error", failed, { once: true });
+      video.addEventListener("emptied", changed, { once: true });
+      signal.addEventListener("abort", changed, { once: true });
+      try {
+        if (onDispatch) onDispatch(video, target);
+        else video.currentTime = target;
+        if (!video.seeking) finish();
+      } catch (error) { finish(error); }
+    }));
+    return result.finally(() => {
+      if (this.seekTargets.get(video) === requested) this.seekTargets.delete(video);
+    });
+  }
+
+  /** Relative nudges accumulate against the latest intent, even while the decoder is busy. */
+  position(video: HTMLVideoElement): number {
+    return this.seekTargets.get(video)?.position ?? video.currentTime;
+  }
+
+  cancelSeek(video: HTMLVideoElement): void {
+    this.seekQueues.get(video)?.cancel();
+    this.seekQueues.delete(video);
+    this.seekTargets.delete(video);
+  }
 
   followClock(video: HTMLVideoElement, clock: LocalVideoClock, seek: ProgrammaticSeek, align?: BackgroundAlignment): void {
     this.observations.set(video, { clock, at: performance.now() });
@@ -333,6 +390,7 @@ export class LocalVideoSynchronizer {
     if (!currentClock()) return false;
     this.aligning.add(active);
     let adopted = false;
+    let frameWait: AbortController | undefined;
     const sleep = () => new Promise<void>(resolve => window.setTimeout(resolve, 50));
     try {
       spare.muted = true;
@@ -344,6 +402,9 @@ export class LocalVideoSynchronizer {
         const target = clock.position + lead * clock.rate;
         if (Number.isFinite(spare.duration) && target >= spare.duration - 0.1) return false;
         spare.currentTime = target;
+        frameWait?.abort();
+        frameWait = new AbortController();
+        const frames = waitForVideoFrames(spare, target, true, frameWait.signal, 1900);
         // Do not await an unbounded play promise: all waits below check ownership and a deadline.
         void spare.play().catch(() => undefined);
         const began = performance.now();
@@ -357,8 +418,9 @@ export class LocalVideoSynchronizer {
           previous = position;
           if (performance.now() - began >= 750 && advancing >= 3) break;
         }
+        if (advancing < 3 || !(await frames)) return false;
         const landed = currentClock();
-        if (!landed || advancing < 3) return false;
+        if (!landed) return false;
         const error = landed.position - spare.currentTime;
         if (Math.abs(error) <= 0.08) {
           adopted = activate();
@@ -369,6 +431,7 @@ export class LocalVideoSynchronizer {
       }
       return false;
     } finally {
+      frameWait?.abort();
       this.aligning.delete(active);
       // A user seek may have taken over the spare while this async decode was in flight.
       if (!adopted && isCurrent()) spare.pause();
@@ -383,6 +446,7 @@ export class LocalVideoSynchronizer {
   }
 
   releaseClock(video: HTMLVideoElement): void {
+    this.cancelSeek(video);
     this.observations.delete(video);
     this.deviceOwners.delete(video);
     this.policies.delete(video);
@@ -395,7 +459,7 @@ export class LocalVideoSynchronizer {
     kind: VideoSyncKind,
     baseRate = 1,
     seek: ProgrammaticSeek = (element, position) => {
-      element.currentTime = position;
+      void this.seek(element, position).catch(() => undefined);
     },
     now = performance.now(),
   ): VideoSyncDecision | null {
@@ -424,6 +488,7 @@ export class LocalVideoSynchronizer {
   }
 
   reset(video?: HTMLVideoElement | null): void {
+    for (const video of this.seekQueues.keys()) this.cancelSeek(video);
     this.observations = new WeakMap();
     this.policies = new WeakMap();
     this.deviceOwners = new WeakMap();
@@ -432,6 +497,7 @@ export class LocalVideoSynchronizer {
   }
 
   dispose(): void {
+    for (const video of this.seekQueues.keys()) this.cancelSeek(video);
     this.observations = new WeakMap();
     this.policies = new WeakMap();
     this.deviceOwners = new WeakMap();
@@ -448,14 +514,16 @@ export class LocalVideoSynchronizer {
 export function applyLocalVideoClock(
   video: HTMLVideoElement,
   clock: LocalVideoClock | null,
-  synchronizer: LocalVideoSynchronizer,
+  synchronizer: VideoPlaybackEngine,
   seekGuard: VideoSeekEchoGuard,
   transportGuard: VideoTransportEchoGuard,
   align?: BackgroundAlignment,
 ): void {
   video.muted = true;
   if (clock) synchronizer.followClock(video, clock, (element, position) => {
-    seekGuard.mark(element, position); element.currentTime = position;
+    void synchronizer.seek(element, position, (target, time) => {
+      seekGuard.mark(target, time); target.currentTime = time;
+    }).catch(() => undefined);
   }, align);
   else synchronizer.releaseClock(video);
   const shouldPlay = clock !== null && clock.playing && clock.rate > 0;

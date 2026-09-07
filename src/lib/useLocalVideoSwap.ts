@@ -3,7 +3,8 @@ import {
   registerLocalVideoSeekPresenter,
   type PreparedLocalVideoSeek,
 } from "./localVideoSeekBridge";
-import { VideoTransportEchoGuard, type LocalVideoSynchronizer } from "./localVideoSync";
+import { waitForVideoFrames } from "./videoFrames";
+import { VideoTransportEchoGuard, type VideoPlaybackEngine } from "./videoPlaybackEngine";
 import { captureLocalVideoSeekFence, getLocalVideoClock, localVideoSeekHasLanded, usesLocalVideoDeviceClock, type LocalVideoSeekFence } from "./mediaSync";
 
 const PREVIEW_DEBOUNCE_MS = 90;
@@ -34,6 +35,7 @@ function waitForEvent(
   eventName: "loadedmetadata" | "seeked" | "pause",
   timeoutMs: number,
   isCurrent: () => boolean,
+  signal: AbortSignal,
 ): Promise<boolean> {
   return new Promise((resolve) => {
     if (!isCurrent()) {
@@ -47,6 +49,7 @@ function waitForEvent(
       window.clearTimeout(timer);
       video.removeEventListener(eventName, onEvent);
       video.removeEventListener("error", onError);
+      signal.removeEventListener("abort", onError);
       resolve(value && isCurrent());
     };
     const onEvent = () => finish(true);
@@ -54,6 +57,7 @@ function waitForEvent(
     const timer = window.setTimeout(() => finish(false), timeoutMs);
     video.addEventListener(eventName, onEvent, { once: true });
     video.addEventListener("error", onError, { once: true });
+    signal.addEventListener("abort", onError, { once: true });
   });
 }
 
@@ -61,10 +65,11 @@ async function pauseAndSettle(
   video: HTMLVideoElement,
   timeoutMs: number,
   isCurrent: () => boolean,
+  signal: AbortSignal,
 ): Promise<boolean> {
   if (!isCurrent()) return false;
   if (video.paused) return isCurrent();
-  const settled = waitForEvent(video, "pause", timeoutMs, isCurrent);
+  const settled = waitForEvent(video, "pause", timeoutMs, isCurrent, signal);
   video.pause();
   return settled;
 }
@@ -73,65 +78,54 @@ async function waitForDecodedTargetFrame(
   video: HTMLVideoElement,
   target: number,
   isCurrent: () => boolean,
+  signal: AbortSignal,
+  keepPlaying: boolean,
 ): Promise<boolean> {
   if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
-    if (!(await waitForEvent(video, "loadedmetadata", DECODE_TIMEOUT_MS, isCurrent))) return false;
+    if (!(await waitForEvent(video, "loadedmetadata", DECODE_TIMEOUT_MS, isCurrent, signal))) return false;
   }
   if (!isCurrent()) return false;
 
-  // A former active slot may still have a queued pause edge. Do not let that event cross the
-  // ownership swap and masquerade as a native-control Pause on its next activation.
-  if (!(await pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent))) return false;
+  // Drain the previous owner's pause before starting this decoder. A queued pause event must
+  // never cross activation and become a user transport command.
+  if (!(await pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent, signal))) return false;
   if (Math.abs(video.currentTime - target) > TARGET_EPSILON_SEC || video.readyState < 2) {
     video.currentTime = target;
     if (video.seeking) {
-      if (!(await waitForEvent(video, "seeked", DECODE_TIMEOUT_MS, isCurrent))) return false;
+      if (!(await waitForEvent(video, "seeked", DECODE_TIMEOUT_MS, isCurrent, signal))) return false;
     }
   }
   if (!isCurrent() || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return false;
 
-  // WKWebView may leave a paused, transparent standby at HAVE_CURRENT_DATA without actually
-  // submitting its target frame to the compositor. A muted play pulse forces that decode; the
-  // first rVFC immediately pauses it again before the slot becomes visible.
-  try {
-    await Promise.race([
-      video.play(),
-      new Promise<void>((resolve) => window.setTimeout(resolve, FRAME_CONFIRM_TIMEOUT_MS)),
-    ]);
-  } catch {
-    // Some older WebKit builds reject background play. `seeked` remains a valid fallback signal.
-  }
-  // A newer preparation may already own this same element. A stale decoder must never pause it.
-  if (!isCurrent()) return false;
-  if (typeof video.requestVideoFrameCallback !== "function") {
-    return pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent);
-  }
-  const confirmed = await new Promise<boolean>((resolve) => {
-    let settled = false;
-    const finish = (value: boolean) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timer);
-      resolve(value && isCurrent());
+  // Subscribe BEFORE play: the first frame can arrive before the play promise resolves.
+  // A moving handoff needs continuous frames, and must stay running through activation.
+  const frames = waitForVideoFrames(video, target, keepPlaying, signal);
+  let playTimer = 0;
+  const played = new Promise<boolean>(resolve => {
+    const finish = (ok: boolean) => {
+      window.clearTimeout(playTimer);
+      signal.removeEventListener("abort", abort);
+      resolve(ok);
     };
-    const timer = window.setTimeout(() => finish(true), FRAME_CONFIRM_TIMEOUT_MS);
-    video.requestVideoFrameCallback(() => finish(true));
+    const abort = () => finish(false);
+    signal.addEventListener("abort", abort, { once: true });
+    playTimer = window.setTimeout(() => finish(false), 900);
+    void video.play().then(() => finish(true), () => finish(false));
   });
-  if (!confirmed) {
-    if (isCurrent()) video.pause();
-    return false;
-  }
-  // `pause()` changes `paused` synchronously but dispatches `pause` later. Activation must wait
-  // for that event, otherwise the standby's tail can arrive after it becomes the active video and
-  // stop the Rust audio transport probabilistically.
-  return pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent);
+  const [confirmed, playing] = await Promise.all([frames, played]);
+  if (!isCurrent()) return false;
+  if (!confirmed || !playing) { video.pause(); return false; }
+  if (keepPlaying) return true;
+  // A drag preview / paused transport keeps only its decoded frame, without running an idle
+  // second decoder. Settle the pause while the element is still owned by the standby slot.
+  return pauseAndSettle(video, FRAME_CONFIRM_TIMEOUT_MS, isCurrent, signal);
 }
 
 /**
  * Owns two muted video elements for one visible local-video surface.
  *
  * The active element keeps moving while the standby seeks and decodes. The caller gets a prepared
- * handle and activates it in the same task that commits the Rust audio seek.
+ * handle and activates it after the Rust audio seek lands and the standby starts presenting.
  */
 export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
   const videoRefs = useRef<[HTMLVideoElement | null, HTMLVideoElement | null]>([null, null]);
@@ -140,7 +134,9 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
   const sourceKeyRef = useRef("");
   const sourceUrlRef = useRef("");
   const generationRef = useRef(0);
+  const preparationAbortRef = useRef<AbortController | null>(null);
   const holdingPositionRef = useRef(false);
+  const committedSeekRef = useRef(false);
   const seekFenceRef = useRef<LocalVideoSeekFence | null>(null);
   const previewTimerRef = useRef(0);
   const pendingRef = useRef<PendingPreparation | null>(null);
@@ -165,12 +161,16 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
 
   const cancelPending = useCallback(() => {
     generationRef.current += 1;
+    preparationAbortRef.current?.abort();
+    preparationAbortRef.current = null;
+    standbyVideo()?.pause();
     window.clearTimeout(previewTimerRef.current);
     previewTimerRef.current = 0;
     pendingRef.current = null;
     holdingPositionRef.current = false;
+    committedSeekRef.current = false;
     seekFenceRef.current = null;
-  }, []);
+  }, [standbyVideo]);
 
   const load = useCallback(
     (sourceKey: string, sourceUrl: string) => {
@@ -209,11 +209,14 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
       window.clearTimeout(previewTimerRef.current);
       previewTimerRef.current = 0;
       const generation = ++generationRef.current;
+      preparationAbortRef.current?.abort();
+      const abort = new AbortController();
+      preparationAbortRef.current = abort;
       const video = standbyVideo();
       const sourceUrl = sourceUrlRef.current;
       if (!optionsRef.current.enabled || !video || !sourceUrl) return Promise.resolve(null);
       holdingPositionRef.current = true;
-      const isCurrent = () => generationRef.current === generation && optionsRef.current.enabled;
+      const isCurrent = () => generationRef.current === generation && !abort.signal.aborted && optionsRef.current.enabled;
       if (!video.src) {
         video.crossOrigin = "anonymous";
         video.src = sourceUrl;
@@ -226,7 +229,10 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
       const clock = trackId === null ? null : getLocalVideoClock(trackId);
       const fence = seekFenceRef.current;
       const decodeTarget = fence && localVideoSeekHasLanded(fence, clock) ? clock!.position : normalized;
-      const promise = waitForDecodedTargetFrame(video, decodeTarget, isCurrent).then((ready) => {
+      // Only a committed transport keeps the standby moving. Hover/drag previews remain paused.
+      const keepPlaying = committedSeekRef.current && (clock
+        ? clock.playing && clock.rate > 0 : optionsRef.current.desiredPlayingRef.current);
+      const promise = waitForDecodedTargetFrame(video, decodeTarget, isCurrent, abort.signal, keepPlaying).then((ready) => {
         if (!ready || !isCurrent()) {
           if (pendingRef.current?.generation === generation) pendingRef.current = null;
           if (generationRef.current === generation) holdingPositionRef.current = false;
@@ -246,6 +252,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
             available = false;
             pendingRef.current = null;
             holdingPositionRef.current = false;
+            committedSeekRef.current = false;
             seekFenceRef.current = null;
             const old = activeVideo();
             const nextSlot: Slot = activeSlotRef.current === 0 ? 1 : 0;
@@ -304,7 +311,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     [prepare],
   );
 
-  const correctClock = useCallback((synchronizer: LocalVideoSynchronizer) => {
+  const correctClock = useCallback((synchronizer: VideoPlaybackEngine) => {
     const old = activeVideo(), next = standbyVideo(), generation = generationRef.current;
     if (!old || !next || holdingPositionRef.current || pendingRef.current || !optionsRef.current.enabled) return;
     const isCurrent = () => generationRef.current === generation && optionsRef.current.enabled
@@ -324,6 +331,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     // coordinator's prepared.cancel() can invalidate the handle shared by the newer request.
     cancelPending();
     holdingPositionRef.current = true;
+    committedSeekRef.current = true;
     const trackId = optionsRef.current.trackId;
     seekFenceRef.current = trackId !== null && usesLocalVideoDeviceClock() ? captureLocalVideoSeekFence(trackId) : null;
     window.clearTimeout(previewTimerRef.current);
@@ -333,12 +341,13 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
   useEffect(() => {
     const { enabled, trackId } = optionsRef.current;
     if (!enabled || trackId === null) return;
-    return registerLocalVideoSeekPresenter(trackId, {
+    const unregister = registerLocalVideoSeekPresenter(trackId, {
       preview,
       hold,
       prepare,
       cancel: cancelPending,
     });
+    return () => { unregister(); cancelPending(); };
   }, [cancelPending, hold, options.enabled, options.trackId, prepare, preview]);
 
   useEffect(

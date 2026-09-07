@@ -66,6 +66,7 @@ pub(super) fn music_project() -> CompositionProject {
         let mut clip = new_clip(&source, 0.);
         clip.id = format!("clip-{id}");
         p.layers.push(Layer {
+            grid: None,
             id: id.into(),
             source_id: id.into(),
             clips: vec![clip],

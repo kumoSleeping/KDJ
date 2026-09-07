@@ -220,41 +220,9 @@ impl YoutubeMusicProvider {
             .browse(&format!("VL{playlist_id}"))
             .await
             .context("读取 YouTube Music 歌单失败")?;
-        let (title, mut sources) = playlist_contents_from_browse(&body);
-        if sources.len() > limit {
-            sources.truncate(limit);
-        }
-        let mut continuation = playlist_continuation_token(&body);
-        let mut seen_tokens = std::collections::HashSet::new();
-        let mut page_count = 0usize;
-        while sources.len() < limit {
-            let Some(token) = continuation.take() else {
-                break;
-            };
-            if !seen_tokens.insert(token.clone()) {
-                break;
-            }
-            anyhow::ensure!(
-                page_count < MAX_PLAYLIST_CONTINUATION_PAGES,
-                "YouTube Music 歌单续页数量异常"
-            );
-            page_count += 1;
-            let page = self
-                .client
-                .browse_continuation(&token)
-                .await
-                .context("继续读取 YouTube Music 歌单失败")?;
-            let before = sources.len();
-            sources.extend(songs_from_continuation_page(&page));
-            if sources.len() > limit {
-                sources.truncate(limit);
-            }
-            continuation = playlist_continuation_token(&page);
-            if sources.len() == before && continuation.is_none() {
-                break;
-            }
-        }
-        Ok((title, sources))
+        collect_playlist_pages(body, limit, |token| async move {
+            self.client.browse_continuation(&token).await
+        }).await
     }
 
     /// HLS 音频轨提取：`-vn -c:a copy` 把 TS 里的 AAC 原样装进 m4a。
@@ -1672,6 +1640,31 @@ fn playlist_legacy_continuation_token(value: &Value) -> Option<String> {
     None
 }
 
+/// Share the real pagination loop with deterministic multi-page acceptance tests. A broken
+/// continuation must fail explicitly, never present a partial listing as a complete playlist.
+async fn collect_playlist_pages<F, Fut>(body: Value, limit: usize, mut fetch: F)
+    -> Result<(String, Vec<SongSource>)>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    let (title, mut sources) = playlist_contents_from_browse(&body);
+    sources.truncate(limit);
+    let mut continuation = playlist_continuation_token(&body);
+    let mut seen_tokens = std::collections::HashSet::new();
+    while sources.len() < limit {
+        let Some(token) = continuation.take() else { break; };
+        anyhow::ensure!(seen_tokens.len() < MAX_PLAYLIST_CONTINUATION_PAGES,
+            "YouTube Music 歌单续页数量异常");
+        anyhow::ensure!(seen_tokens.insert(token.clone()), "YouTube Music 歌单续页标识重复，列表未完整加载");
+        let page = fetch(token).await.context("继续读取 YouTube Music 歌单失败")?;
+        sources.extend(songs_from_continuation_page(&page));
+        sources.truncate(limit);
+        continuation = playlist_continuation_token(&page);
+    }
+    Ok((title, sources))
+}
+
 fn continuation_token_from_item(item: &Value) -> Option<String> {
     const PATHS: [&str; 3] = [
         "/continuationItemRenderer/continuationEndpoint/continuationCommand/token",
@@ -2421,6 +2414,60 @@ mod tests {
             }}
         });
         assert_eq!(playlist_count_from_browse(&body), Some(3));
+    }
+
+    fn paged_fixture(start: usize, end: usize, token: Option<&str>, first: bool) -> Value {
+        let mut items: Vec<_> = (start..end).map(|n| song_item(&format!("{n:011}"), &format!("Song {n}"))).collect();
+        if let Some(token) = token {
+            items.push(json!({"continuationItemRenderer": {"continuationEndpoint": {
+                "continuationCommand": {"token": token}
+            }}}));
+        }
+        if first {
+            json!({"contents": {"twoColumnBrowseResultsRenderer": {"secondaryContents": {
+                "sectionListRenderer": {"contents": [{"musicPlaylistShelfRenderer": {"contents": items}}]}
+            }}}})
+        } else {
+            json!({"onResponseReceivedActions": [{"appendContinuationItemsAction": {"continuationItems": items}}]})
+        }
+    }
+
+    #[tokio::test]
+    async fn playlist_paging_loads_all_171_tracks_in_order() {
+        let mut requested = Vec::new();
+        let (_, songs) = collect_playlist_pages(paged_fixture(0, 100, Some("page-2"), true), usize::MAX, |token| {
+            requested.push(token);
+            std::future::ready(Ok(paged_fixture(100, 171, None, false)))
+        }).await.unwrap();
+        assert_eq!(requested, ["page-2"]);
+        assert_eq!(songs.len(), 171);
+        for (n, song) in songs.iter().enumerate() { assert_eq!(song.key, format!("{n:011}")); }
+    }
+
+    #[tokio::test]
+    async fn playlist_paging_honors_limits_and_preserves_duplicate_entries() {
+        let (_, songs) = collect_playlist_pages(paged_fixture(0, 100, Some("next"), true), 101, |_| {
+            std::future::ready(Ok(paged_fixture(0, 71, None, false)))
+        }).await.unwrap();
+        assert_eq!(songs.len(), 101);
+        assert_eq!(songs[0].key, songs[100].key);
+        let (_, songs) = collect_playlist_pages(paged_fixture(0, 100, Some("next"), true), 50, |_| {
+            panic!("must not fetch beyond the requested limit");
+            #[allow(unreachable_code)] std::future::ready(Ok(Value::Null))
+        }).await.unwrap();
+        assert_eq!(songs.len(), 50);
+    }
+
+    #[tokio::test]
+    async fn playlist_paging_does_not_report_partial_success_on_failure_or_cycle() {
+        let body = paged_fixture(0, 100, Some("next"), true);
+        assert!(collect_playlist_pages(body.clone(), usize::MAX, |_| {
+            std::future::ready(Err(anyhow::anyhow!("network failure")))
+        }).await.is_err());
+        let error = collect_playlist_pages(body, usize::MAX, |_| {
+            std::future::ready(Ok(paged_fixture(100, 101, Some("next"), false)))
+        }).await.unwrap_err();
+        assert!(error.to_string().contains("标识重复"));
     }
 
     #[test]

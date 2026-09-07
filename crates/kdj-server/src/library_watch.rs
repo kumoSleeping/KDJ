@@ -4,7 +4,9 @@
 //! scan.progress 抢掉用户眼前那一批任务的进度条。
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+
+use kdj_library::scan::is_internal_media_path as is_internal_metadata;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -218,12 +220,6 @@ fn is_media_path(path: &Path) -> bool {
         .is_some_and(is_media_extension)
 }
 
-fn is_internal_metadata(path: &Path) -> bool {
-    path.components().any(|component| {
-        matches!(component, Component::Normal(name) if name == kdj_library::folders::METADATA_DIR_NAME || name.to_string_lossy().starts_with(".kdj-composition-"))
-    })
-}
-
 fn containing_root<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
     roots
         .iter()
@@ -392,6 +388,31 @@ mod tests {
         assert_eq!(report.removed_ids, vec![id]);
         assert!(library.get(id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn download_staging_events_never_import_output_but_commit_imports_the_title() {
+        let root = scratch("download-staging");
+        let staging = root.join(".partial-youtube-test-1234");
+        std::fs::create_dir_all(&staging).unwrap();
+        let old = staging.join("output.mp4");
+        let new = root.join("Actual video title.mp4");
+        std::fs::write(&old, b"media").unwrap();
+        let library = library();
+        let created = Event::new(EventKind::Create(CreateKind::File)).add_path(old.clone());
+        let report = reconcile_batch(&library, std::slice::from_ref(&root), &[created]).unwrap();
+        assert!(report.updated_ids.is_empty());
+        assert!(library.get_by_path(&old).unwrap().is_none());
+        std::fs::rename(&old, &new).unwrap();
+        let renamed = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(old.clone())
+            .add_path(new.clone());
+        let report = reconcile_batch(&library, std::slice::from_ref(&root), &[renamed]).unwrap();
+        let track = library.get_by_path(&new).unwrap().unwrap();
+        assert_eq!(track.title, "Actual video title");
+        assert_eq!(report.updated_ids, vec![track.id]);
+        assert!(library.get_by_path(&old).unwrap().is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

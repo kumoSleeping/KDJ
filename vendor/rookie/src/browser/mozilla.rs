@@ -1,4 +1,4 @@
-use crate::common::{date, enums::*, sqlite, utils};
+use crate::common::{date, enums::*, utils};
 use eyre::{anyhow, bail, Result};
 use ini::Ini;
 use lz4_flex::block::decompress_size_prepended;
@@ -10,7 +10,14 @@ use std::{
 
 /// Returns cookies from mozilla based browsers
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-    let connection = sqlite::connect(db_path.clone())?;
+    // Firefox keeps recent logins in the WAL while it is running. immutable=1 ignores
+    // that WAL and can return an old/empty session even though the browser is signed in.
+    // Use SQLite's read-only snapshot/locking instead; never alter the browser database.
+    let connection = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_secs(2))?;
     let mut query = "
         SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite from moz_cookies 
     "
@@ -123,8 +130,9 @@ pub fn get_session_cookies_lz4(
     let mut cookies: Vec<Cookie> = vec![];
     let session_file_lz4 = cookies_dir.join("sessionstore-backups/recovery.jsonlz4");
     let compressed = fs::read(session_file_lz4)?;
-    let compressed = compressed[8..].to_vec();
-    let decompressed = decompress_size_prepended(&compressed)?;
+    let compressed = compressed.strip_prefix(b"mozLz40\0")
+        .ok_or_else(|| anyhow!("Invalid Mozilla session header"))?;
+    let decompressed = decompress_size_prepended(compressed)?;
     let plain = String::from_utf8(decompressed)?;
     let json: Value = serde_json::from_str(&plain)?;
     let cookies_json = json.get("cookies").ok_or(anyhow!("no cookies in json"))?;
@@ -225,4 +233,41 @@ pub fn get_default_profile(profiles_path: &Path) -> Result<String> {
         }
     }
     bail!("Can't find any profile")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn firefox_reads_live_wal_login_without_changing_database() {
+        let root = std::env::temp_dir().join(format!("kdj-firefox-wal-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let fixture = Fixture(root);
+        let db = fixture.0.join("cookies.sqlite");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE moz_cookies (host TEXT, path TEXT, isSecure INTEGER, expiry INTEGER,
+                name TEXT, value TEXT, isHttpOnly INTEGER, sameSite INTEGER);
+            PRAGMA wal_checkpoint(TRUNCATE);
+            INSERT INTO moz_cookies VALUES ('.youtube.com', '/', 1, 4102444800,
+                'SAPISID', 'test-only-session', 1, 0);").unwrap();
+        let before = fs::read(&db).unwrap();
+        let cookies = firefox_based(db.clone(), Some(vec!["youtube.com".into()])).unwrap();
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].name, "SAPISID");
+        assert_eq!(cookies[0].value, "test-only-session");
+        assert_eq!(fs::read(&db).unwrap(), before);
+        fs::create_dir(fixture.0.join("sessionstore-backups")).unwrap();
+        fs::write(fixture.0.join("sessionstore-backups/recovery.jsonlz4"), b"bad").unwrap();
+        // A partially written recovery file must not panic or hide the valid SQL session.
+        assert_eq!(firefox_based(db, None).unwrap().len(), 1);
+        drop(writer);
+    }
 }

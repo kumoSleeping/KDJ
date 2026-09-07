@@ -45,7 +45,7 @@ struct YtmApiError {
 }
 
 pub(super) fn is_auth_rejection(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<YtmApiError>().is_some_and(|error| {
+    error.is::<super::auth::SignedOutLibrary>() || error.downcast_ref::<YtmApiError>().is_some_and(|error| {
         matches!(
             error.status,
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
@@ -53,29 +53,8 @@ pub(super) fn is_auth_rejection(error: &anyhow::Error) -> bool {
     })
 }
 
-fn contains_json_key(value: &Value, expected: &str) -> bool {
-    match value {
-        Value::Object(map) => {
-            map.contains_key(expected)
-                || map.values().any(|child| contains_json_key(child, expected))
-        }
-        Value::Array(items) => items.iter().any(|child| contains_json_key(child, expected)),
-        _ => false,
-    }
-}
-
 fn ensure_authenticated_library_response(body: Value) -> Result<Value> {
-    // YouTube Music 的私人目录在 Cookie 失效时仍返回 HTTP 200；区别只在正文
-    // 变成带 signInEndpoint 的「登录即可畅听」占位页。若把它当成正常空目录，
-    // 前端会缓存 []，用户看到的就只是一个永远展开不出内容的根节点。
-    if contains_json_key(&body, "signInEndpoint") {
-        return Err(YtmApiError {
-            status: reqwest::StatusCode::UNAUTHORIZED,
-            endpoint: "browse".into(),
-            detail: "登录会话已失效".into(),
-        }
-        .into());
-    }
+    super::auth::validate_account_library(&body)?;
     Ok(body)
 }
 

@@ -20,6 +20,7 @@ import {
 } from "../../lib/waveformViewport";
 import {
   beatGridMarkers,
+  analyzedBeatMarkers,
   waveformBeatGridOrigin,
   type BeatGridMarker,
 } from "../../lib/performanceCues";
@@ -112,6 +113,8 @@ function WaveformBeatGrid({
  * 光是 DOM 节点就够让曲库切曲卡一下；canvas 一次 fillRect 循环画完。
  */
 export interface WaveformProps {
+  /** Caller-owned grid, in the supplied waveform clock. */
+  explicitBeatMarkers?: BeatGridMarker[];
   trackId: number;
   /** 负数 id 表示在线试听；这份来源快照用于渐进波形。 */
   track?: Track | null;
@@ -200,6 +203,7 @@ export function Waveform({
   onSeek,
   preserveBarPhase = false,
   showBeatGrid = false,
+  explicitBeatMarkers,
   allowApproximateBeatGrid = false,
   buckets = 640,
   viewportSeconds = null,
@@ -1094,7 +1098,7 @@ export function Waveform({
       : viewport.active
         ? viewport.viewEndSec + 1
         : total;
-  const beatMarkers = showBeatGrid && track
+  const beatMarkers = explicitBeatMarkers ?? (showBeatGrid && track ? analyzedBeatMarkers(track, beatRangeStart, beatRangeEnd) : undefined) ?? (showBeatGrid && track
     ? beatGridMarkers(
         total,
         track.bpm,
@@ -1103,7 +1107,7 @@ export function Waveform({
         beatRangeEnd,
         allowApproximateBeatGrid ? null : track.bpm_confidence,
       )
-    : [];
+    : []);
 
   const applyPoint = async (kind: "start" | "end") => {
     if (!menu || !onSetPoint) return;

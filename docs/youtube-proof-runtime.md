@@ -1,6 +1,10 @@
 # YouTube proof/player 桌面统一方案
 
-更新日期：2026-09-04
+更新日期：2026-09-07
+
+补充研究：[YouTube API / Safari HLS 实测与优化计划](youtube-api-validation-2026-09-07.md)。
+该实验确认部分无 Token 请求可播放，但也复现首片 403；直接 player API 的新鲜上下文可用，
+跨视频 bootstrap 缓存仍未通过媒体门禁。研究没有替换本文的正式播放路径。
 
 ## 结论
 
@@ -110,6 +114,57 @@ Windows/Linux 的最终差值应在 CI 产物生成后与同版本基线安装�
 | 本地静态门禁 | `cargo fmt --check`、`cargo check -p kdj-app --lib`、TypeScript 检查和 Tauri Web 生产构建；按本轮要求不运行测试集 | 已通过 |
 | PR 门禁 | 快进更新原 PR；仓库当前没有 `pull_request` workflow，本轮按要求不手动触发含完整测试集的发布流水线 | PR 已更新，自动检查不适用 |
 | 发布门禁 | Windows/Linux 实机各做 proof/player + YTM 试听；Google 拒绝内嵌登录时验证 profile/header 回退 | 合并前人工项 |
+
+## 合入 main 后的补充验证（2026-09-07）
+
+- 合并提交：`e3ccda6`；未推送。原工作区的工作站、曲库等未提交修改已保留。
+- 补充修复：Music/Video 独立的内嵌登录入口、窗口与会话；浏览器/请求头候选
+  会话先验证再保存；识别 HTTP 200 中的退出登录信号。Firefox 使用 SQLite 只读
+  连接读取实时 WAL，并拒绝截断的 Mozilla recovery 文件。
+- 回归测试：171 首跨页结果、顺序及重复歌曲保留、limit、中途请求失败与循环 token；
+  会话失效识别、Firefox WAL、Music/Video 登录 UI 分发与错误展示均通过。
+- macOS 正常 Tauri 开发壳使用原数据目录，确认载入 1620 首曲库与原登录状态。
+  从 Music 歌单双击歌曲，完成解析、缓存、波形与播放，时钟推进到 0:41，暂停成功。
+- macOS 普通 YouTube 视频：当前设置为 `youtube_preview_player=kdj`，即 KDJ 原生
+  HLS 路径。搜索 Big Buck Bunny 后双击出画面，时钟推进到 2:04；进度条跳转到
+  5:00 后继续推进，并在 5:27 暂停。**这不是官方 embed 成功的证据。**
+- 独立自动验收：YTM proof/SABR 音频约 2.37 秒可播放、3.28 秒确认时钟推进；
+  强制 `platform` 的官方 embed 测试仍失败（未推进时钟/缓冲超时），不能标记全套
+  E2E 通过。视频失败不会再跳过独立音频测试，音频通过后的错误阶段标记为
+  `official-video`，避免误报成 YTM 故障。
+- 后续「可预览但下载报机器人验证」反馈：受保护 HLS 已准备好后，视频下载仍先调用
+  旧 iOS/WEB `video_info`，导致不相关的旧接口拒绝阻断下载。已改为直接消费已校验的
+  本地 HLS capability；只有直接流/音频下载继续解析 formats。缺少展示标题时使用
+  视频 ID，不再为了命名重发 player 请求。离线回归用本地代理拦截所有旧接口，确认
+  首个请求是 HLS、非法来源被拒绝、失败不残留临时文件；测试通过。
+  下载队列错误同时改为完整换行展示。
+- 经用户同意完整重启开发壳，按原 1080p 与 `9.13` 目录重新提交两项视频下载：
+  两项均进入下载阶段，不再被旧 player 验证阻断。God-ish 首次上游 HLS 403，
+  重新准备会话后下载 8,734,480 字节；Morfonica 下载 263,285,728 字节。
+  两项最终均在转封装时报 `MPEG-TS segment does not contain an H.264 or HEVC
+  video stream`，未生成成品，停止继续重试。该结果仅证明旧接口阻断已解除，
+  **不代表视频下载端到端通过**。
+- 转封装补丁：本地固定 `hls-transmux 0.2.1` 源码及 MIT 许可，保留首片 A/V 初始化
+  校验，允许后续单轨分片，拒绝空片/无媒体样本片和损坏 TS；不跳过分片、不补造帧。
+  基于上游 TS fixture 的音频尾片/视频尾片测试先复现原错误，修复后逐轨 MP4 样本数
+  完整；3 项集成回归及 29 项上游单元测试通过。详见
+  `vendor/hls-transmux/KDJ-VENDORING.md`。
+- 补丁后经用户同意完整重启并重试原两项任务，均 `done/completed`：God-ish
+  成品 6,926,262 字节，1080×1080 H.264 + AAC，约 204.51 秒；Morfonica 成品
+  253,036,379 字节，1920×1080 H.264 + AAC，约 515.11 秒。只读探测完整遍历
+  两份文件的音视频包；macOS AVFoundation 成功解码两份文件接近末尾的画面。
+  成品保存在用户原 `9.13` 目录，其他暂停任务未启动。此结果是 macOS 真实下载
+  验收，不替代 Windows/Linux 实机验证。
+- `output` 误入库：只读检查确认曲库曾索引 `.partial-youtube-…/output.mp4`。
+  watcher 的单文件事件绕过了递归扫描的隐藏目录剪枝。现让扫描与 watcher 共享内部
+  暂存路径过滤，YouTube 暂存文件改为 `output.part`，完成后才原子更名为真实标题。
+  显式暂存文件/目录扫描与「暂存创建→成品改名」两项回归通过；普通用户自己的
+  `output.mp4` 不受过滤。经用户同意已仅清除确认来自暂存目录的误入库记录，
+  原暂存文件仍在；真实下载期间及完成后没有再索引暂存路径，成品文件名与曲库标题
+  正确，不再继承 `output`。
+- macOS/Windows/Linux/Android 前端目标构建及体积门禁通过；Windows/Linux 目标
+  的前端构建不代表相应系统的原生编译或实机验收。桌面 worker 必须打包，移动端
+  不得打包。普通视频跨平台 embed、Windows/Linux 实机及新的交互登录流程仍待验收。
 
 ## PR 收口策略
 

@@ -168,7 +168,8 @@ async function waitForIntegratedVideo(
     }
     await sleep(100);
   }
-  throw new Error("YouTube 官方播放器没有开始走时钟");
+  const state = store.getState();
+  throw new Error(`YouTube 播放时钟未推进（playing=${state.playing}, position=${state.position.toFixed(1)}, duration=${state.duration.toFixed(1)}）`);
 }
 
 async function seekIntegratedVideo(store: VideoPipStore): Promise<number> {
@@ -203,13 +204,19 @@ async function runIntegratedVideoSequence(): Promise<{
   switched: VideoMeasurement;
   warm: VideoMeasurement;
 }> {
-  const [{ createElement }, { createRoot }, { VideoPipHost }, { useVideoPip }] =
+  const [{ createElement }, { createRoot }, { VideoPipHost }, { useVideoPip }, { useAppStore }] =
     await Promise.all([
       import("react"),
       import("react-dom/client"),
       import("../components/player/VideoPipHost"),
       import("./videoPip"),
+      import("../stores/appStore"),
     ]);
+  // This sequence exercises the official embedded player, not the user's chosen HLS preview
+  // path. Set the test choice only in memory, never via putSettings.
+  const initialSettings = useAppStore.getState().settings;
+  const settings = initialSettings ?? await api.getSettings();
+  useAppStore.setState({ settings: { ...settings, youtube_preview_player: "platform" } });
   const host = document.createElement("div");
   host.id = "kdj-youtube-e2e-pip-host";
   host.style.cssText = "position:relative;z-index:2147483647";
@@ -242,6 +249,7 @@ async function runIntegratedVideoSequence(): Promise<{
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     root.unmount();
     host.remove();
+    useAppStore.setState({ settings: initialSettings });
   }
 }
 
@@ -295,17 +303,29 @@ export async function runYoutubePlaybackE2e(): Promise<void> {
 
     result.stage = "cold-video";
     await report(result);
-    const video = await runIntegratedVideoSequence();
-    result.coldVideo = video.cold;
-    result.seekMs = video.seekMs;
-    result.switchedVideo = video.switched;
-    result.warmVideo = video.warm;
+    // A video/embed failure must not skip the independent YTM proof + SABR acceptance.
+    let videoError: unknown;
+    try {
+      const video = await runIntegratedVideoSequence();
+      result.coldVideo = video.cold;
+      result.seekMs = video.seekMs;
+      result.switchedVideo = video.switched;
+      result.warmVideo = video.warm;
+    } catch (error) {
+      videoError = error;
+      result.error = sanitizeYoutubePlaybackE2eError(error);
+    }
 
     result.stage = "ytm-audio";
     await report(result);
     const audio = await measureYtmAudio();
     result.ytmAudioPlayableMs = audio.playableMs;
     result.ytmAudioAdvancingMs = audio.advancingMs;
+    if (videoError) {
+      // Audio passed: do not mislabel an official-player failure as a YTM failure.
+      result.stage = "official-video";
+      throw videoError;
+    }
     result.status = "passed";
     result.stage = "complete";
     await report(result);

@@ -2159,6 +2159,7 @@ export const TrackTable = memo(function TrackTable({
             const chosen = new Set(menuIds);
             return orderedIds.filter(id => chosen.has(id));
           }} close={() => setRowMenu(null)} />
+          <button type="button" disabled={menuIds.length === 1 && isImageTrack(rowMenu.track.format)} onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true, false, "v4"); }}><BarChart3 size={12} />BPM V4 分析</button>
           <button type="button" disabled={menuIds.length === 1 && isImageTrack(rowMenu.track.format)} onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true); }}>
             <BarChart3 size={12} />
             重新分析{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}

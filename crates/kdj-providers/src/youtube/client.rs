@@ -35,7 +35,7 @@ struct YoutubeApiError {
 }
 
 pub(super) fn is_auth_rejection(error: &anyhow::Error) -> bool {
-    error
+    error.is::<crate::youtubemusic::auth::SignedOutLibrary>() || error
         .downcast_ref::<YoutubeApiError>()
         .is_some_and(|error| {
             matches!(
@@ -138,6 +138,11 @@ impl YoutubeClient {
         &self.http
     }
 
+    #[cfg(test)]
+    pub(super) fn set_test_http(&mut self, http: reqwest::Client) {
+        self.http = http;
+    }
+
     pub fn web_context() -> Value {
         json!({
             "context": {
@@ -206,19 +211,20 @@ impl YoutubeClient {
 
     /// 账号侧栏真正依赖的私人播放列表目录；它本身就是这份会话能力的判据。
     pub async fn account_playlist_directory(&self) -> Result<Value> {
-        self.post_web("browse", &Self::account_playlist_directory_body())
-            .await
+        let body = self.post_web("browse", &Self::account_playlist_directory_body()).await?;
+        crate::youtubemusic::auth::validate_account_library(&body)?;
+        Ok(body)
     }
 
     /// 候选会话必须先联网验证，成功后上层才允许替换已保存的登录态。
     pub async fn validate_browser_session(&self, session: &BrowserSession) -> Result<()> {
-        self.post_web_with_headers(
+        let body = self.post_web_with_headers(
             "browse",
             &Self::account_playlist_directory_body(),
             session.request_headers("https://www.youtube.com"),
-        )
-        .await?;
-        Ok(())
+        ).await?;
+        crate::youtubemusic::auth::validate_account_library(&body)
+
     }
 
     pub async fn search(&self, query: &str) -> Result<Value> {

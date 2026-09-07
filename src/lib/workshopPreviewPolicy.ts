@@ -16,12 +16,12 @@ export class WorkshopSeekGate {
 
 /** Prewarm two upcoming clips so a subframe cut cannot hide the following clip. */
 export function prepareVideoClips(p: CompositionProject, ms: number, hiddenLayers: readonly string[] = []): WorkshopClip[] {
-  return p.layers.flatMap(layer => {
+  return [...p.layers].reverse().flatMap(layer => {
     if (hiddenLayers.includes(layer.id)) return [];
     if (!isVisualSource(p.sources.find(s => s.id === layer.source_id))) return [];
     const current = layer.clips.filter(c => ms >= c.start_ms && ms < c.start_ms + clipDuration(c));
     const next = layer.clips.filter(c => c.start_ms > ms && c.start_ms <= ms + 1000)
       .sort((a,b) => a.start_ms - b.start_ms).slice(0, 2);
-    return [...current, ...next];
-  }).reverse();
+    return [...current, ...next].sort((a, b) => a.start_ms - b.start_ms);
+  });
 }

@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { RotateCcw, Trash2 } from "lucide-react";
+import { MapPin, RotateCcw, Trash2 } from "lucide-react";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { deleteClip, findClip, updateClip, resetFadeSpan, isVisualSource, isImageSource } from "../../lib/workshop";
 import type { WorkshopClip } from "../../types/workshop";
-export function WorkshopClipMenu({ id, x, y, close }: { id: string; x: number; y: number; close(): void }) {
+import { addWorkshopMarker, removeWorkshopMarker } from "../../lib/workshopMarkers";
+export function WorkshopClipMenu({ id, markerId, markMs, x, y, close }: { id?: string; markerId?: string; markMs?: number; x: number; y: number; close(restoreFocus?: boolean): void }) {
   const p = useWorkshopStore(s => s.draft), ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(close);
   closeRef.current = close;
@@ -28,7 +29,7 @@ export function WorkshopClipMenu({ id, x, y, close }: { id: string; x: number; y
       // Commit the focused numeric field before unmounting it on outside clicks.
       const active = document.activeElement;
       if (active instanceof HTMLElement && ref.current?.contains(active)) active.blur();
-      closeRef.current();
+      closeRef.current(false);
     };
     const dismiss = (e: Event) => { if (!ref.current?.contains(e.target as Node)) finish(); };
     // Clip and trim gestures stop propagation; catch the outside press before
@@ -43,12 +44,12 @@ export function WorkshopClipMenu({ id, x, y, close }: { id: string; x: number; y
       window.removeEventListener("blur", finish);
     };
   }, []);
-  const c = p && findClip(p, id), source = c && p?.sources.find(s => s.id === c.source_id);
-  if (!c || !source) return null;
-  const edit = (fn: (c: WorkshopClip) => void) => useWorkshopStore.getState().edit(p => updateClip(p, id, fn));
-  const remove = (ripple: boolean) => {
+  const c = p && findClip(p, id ?? null), source = c && p?.sources.find(s => s.id === c.source_id);
+  if (!p) return null;
+  const edit = (fn: (c: WorkshopClip) => void) => { if (id) useWorkshopStore.getState().edit(p => updateClip(p, id, fn)); };
+  const remove = (ripple?: boolean) => {
     const state = useWorkshopStore.getState();
-    state.edit(p => deleteClip(p, id, ripple));
+    if (id) state.edit(p => deleteClip(p, id, ripple));
     state.select(null);
     close();
   };
@@ -57,13 +58,23 @@ export function WorkshopClipMenu({ id, x, y, close }: { id: string; x: number; y
     <label className="vj-context-number">{label}<input key={`${id}:${label}:${value}`} type="number" aria-label={label} defaultValue={value} min={min} max={max} step={suffix === "×" ? .05 : suffix === "秒" ? .001 : 1}
       onBlur={e => { const n = Number(e.currentTarget.value); if (e.currentTarget.value && Number.isFinite(n) && n >= min && n <= max && n !== value) fn(n); }}
       onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />{suffix}</label>;
-  return <div ref={ref} className="vj-clip-menu vj-menu" aria-label="片段操作菜单" tabIndex={-1} style={{left:x, top:y}}
+  return <div ref={ref} className="vj-clip-menu vj-menu" aria-label={id ? "片段操作菜单" : "标记操作菜单"} tabIndex={-1} style={{left:x, top:y}}
     onContextMenu={e => e.preventDefault()} onKeyDown={e => { e.stopPropagation(); if (e.key === "Escape") close(); }}>
+    {markMs !== undefined && !markerId && <button type="button" onClick={() => {
+      useWorkshopStore.getState().edit(p => addWorkshopMarker(p, markMs));
+      close();
+    }}><MapPin size={13} />添加标记 <kbd>M</kbd></button>}
+    {markerId && <button type="button" onClick={() => {
+      useWorkshopStore.getState().edit(p => removeWorkshopMarker(p, markerId));
+      close();
+    }}><Trash2 size={13} />删除标记</button>}
+    {c && source && <>
     {isVisualSource(source) && <button type="button" onClick={() => {
       edit(c => { c.picture = {...c.picture, x:.5, y:.5, scale:1}; });
       close();
     }}><RotateCcw size={13} />还原原始比例</button>}
-    <button type="button" onClick={() => remove(false)}><Trash2 size={13} />删除片段</button>
+    <button type="button" onClick={() => remove()}><Trash2 size={13} />删除片段</button>
+    <button type="button" onClick={() => remove(false)}>删除并保留位置</button>
     <button type="button" onClick={() => remove(true)}>删除并闭合本行空隙</button>
     {isVisualSource(source) && <details><summary>画面</summary><div className="vj-menu-options">
       <button onClick={() => edit(c => { c.picture = {...c.picture, x:.5, y:.5, scale:.5}; })}>居中 50%</button>
@@ -92,5 +103,6 @@ export function WorkshopClipMenu({ id, x, y, close }: { id: string; x: number; y
       {[.5,.75,1,1.25,1.5,2].map(n => <button key={n} aria-pressed={c.speed.preset === "constant" && c.speed.start === n} onClick={() => speed(n)}>{n}×</button>)}
       {number("自定速度", c.speed.start, .5, 2, speed, "×")}
     </div></details>}
+    </>}
   </div>;
 }

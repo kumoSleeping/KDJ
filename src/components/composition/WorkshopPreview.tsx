@@ -1,7 +1,8 @@
 import { WorkshopImage } from "./WorkshopImage";
 import { pictureBox as box } from "../../lib/workshopPicture";
 import { isVisualSource, isImageSource } from "../../lib/workshop";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { videoProject } from "../../lib/workshopTransitions";
 import { api } from "../../lib/api";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import {
@@ -12,7 +13,7 @@ import {
   sourceAt,
   updateClip,
 } from "../../lib/workshop";
-import { LocalVideoSynchronizer } from "../../lib/localVideoSync";
+import { VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
 import { getLocalVideoClock } from "../../lib/mediaSync";
 import { prepareVideoClips, WorkshopSeekGate } from "../../lib/workshopPreviewPolicy";
 import type { WorkshopPlayback } from "../../lib/workshopPlayback";
@@ -51,7 +52,7 @@ function PreviewVideo({ register, ...props }: React.VideoHTMLAttributes<HTMLVide
   }} />;
 }
 function PreviewVideoPair({ synchronizer, register, ...props }: React.VideoHTMLAttributes<HTMLVideoElement> & {
-  synchronizer: LocalVideoSynchronizer;
+  synchronizer: VideoPlaybackEngine;
   register(node: HTMLVideoElement, correct: () => void): () => void;
 }) {
   const nodes = useRef<[HTMLVideoElement | null, HTMLVideoElement | null]>([null, null]);
@@ -94,7 +95,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
   const [available, setAvailable] = useState({ width: 640, height: 360 });
   const surface = useRef<HTMLDivElement>(null),
     videos = useRef(new Map<string, HTMLVideoElement>()),
-    sync = useRef(new LocalVideoSynchronizer()),
+    sync = useRef(new VideoPlaybackEngine()),
     wanted = useRef(new WeakMap<HTMLVideoElement, boolean>()),
     decoded = useRef(new WeakSet<HTMLVideoElement>()),
     pending = useRef(new WeakSet<HTMLVideoElement>());
@@ -107,8 +108,9 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
     if (!(slot in old)) return old;
     const next = {...old}; delete next[slot]; return next;
   });
-  const latest = useRef({ project, playback, trimPreview });
-  latest.current = { project, playback, trimPreview };
+  const visual = useMemo(() => project ? videoProject(project) : null, [project]);
+  const latest = useRef({ project, visual, playback, trimPreview });
+  latest.current = { project, visual, playback, trimPreview };
   const gesture = useRef<{
     x: number;
     y: number;
@@ -121,11 +123,11 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
   const hiddenLayers = project ? hiddenVideoLayers[project.id] ?? [] : [];
   const active = trimClip
     ? [trimClip]
-    : (project?.layers
+    : (visual?.layers
         .filter(l => !hiddenLayers.includes(l.id))
         .flatMap((l) =>
           l.clips.filter((c) => {
-            const s = project.sources.find((s) => s.id === c.source_id);
+            const s = visual.sources.find((s) => s.id === c.source_id);
             return (
               isVisualSource(s) &&
               position >= c.start_ms &&
@@ -134,7 +136,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
           }),
         )
         .reverse() ?? []);
-  const prepared = trimClip ? [trimClip] : project ? prepareVideoClips(project, position, hiddenLayers) : [];
+  const prepared = trimClip ? [trimClip] : visual ? prepareVideoClips(visual, position, hiddenLayers) : [];
   const error = active.map(c => {
     const proxy = !trimPreview && playback.ticket && c.speed.preset !== "constant";
     const part = Math.max(0, Math.floor((position - c.start_ms) / 8000));
@@ -148,10 +150,11 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
     };
     const tick = (now: number) => {
       frame = 0;
-      const { project: p, playback: pb, trimPreview: inspecting } = latest.current;
+      const { project, visual, playback: pb, trimPreview: inspecting } = latest.current;
+      const p = inspecting ? project : visual;
       if (!p || document.hidden) return;
       const state = useWorkshopStore.getState();
-      const playing = pb.playing && !inspecting && !state.scrubbing && !state.gesture;
+      const playing = pb.playing && !pb.pendingSeek?.() && !inspecting && !state.scrubbing && !state.gesture;
       if (playing && now - lastTick < 1000 / 30) { schedule(); return; }
       lastTick = now;
       const time = pb.time(), align = !playing || now - lastSync >= 100;
@@ -172,16 +175,19 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
           : proxy ? Math.max(0, local / 1000 - part * 8) : sourceAt(c, local) / 1000;
         const currentPart = !proxy || Math.floor(local / 8000) === part;
         const shouldPlay = playing && inRange && currentPart;
+        // A scrub/seek takes ownership from background drift correction immediately.
+        // Otherwise a standby decoder can still adopt a frame from the old clock.
+        if (!shouldPlay && wanted.current.get(video)) sync.current.releaseClock(video);
         wanted.current.set(video, shouldPlay);
         if (!shouldPlay && !video.paused) video.pause();
         if (align && video.readyState >= 1) {
           const authority = pb.trackId !== null ? getLocalVideoClock(pb.trackId) : null;
           const sourceRate = proxy || c.speed.preset !== "constant" ? 1 : c.speed.start;
-          if (shouldPlay && authority) sync.current.followClock(video, {...authority, position: Math.max(0, target), rate: authority.rate * sourceRate}, (v, t) => { v.currentTime = t; }, corrections.current.get(video));
+          if (shouldPlay && authority) sync.current.followClock(video, {...authority, position: Math.max(0, target), rate: authority.rate * sourceRate}, (v, t) => { void sync.current.seek(v, t).catch(() => undefined); }, corrections.current.get(video));
           else {
             sync.current.setBaseRate(video, sourceRate);
             const seek = seekGate.current.request(video, target, shouldPlay, s.fps, now);
-            if (seek !== null) video.currentTime = seek;
+            if (seek !== null) void sync.current.seek(video, seek).catch(() => undefined);
             // A seek already decoding is awakened by seeked, not a busy loop.
             else if (!video.seeking && Math.abs(video.currentTime - target) > 0.5 / Math.max(1, s.fps)) retry = true;
           }

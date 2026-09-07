@@ -1,0 +1,23 @@
+:root{--blue:#1745e5;--ink:#09266f;--mint:#23cbb8}
+*{box-sizing:border-box}html,body{margin:0}body{background:#e7edf2;font-family:"Helvetica Neue",Arial,"PingFang SC",sans-serif;color:var(--ink);padding:32px}
+#poster{width:1200px;height:1800px;position:relative;overflow:hidden;isolation:isolate;transform-origin:top left;box-shadow:0 15px 65px #16335b18}
+.layer{position:absolute;inset:0;width:1200px;height:1800px;pointer-events:none}
+.paper{background:#fbfdff}
+.atmosphere{background:radial-gradient(ellipse at 100% 41%,#80c7ff73 0%,#c4e8ff42 29%,transparent 59%),radial-gradient(ellipse at 75% 76%,#bffcec6e 0%,transparent 38%),linear-gradient(108deg,transparent 44%,#e5f3ff77 100%)}
+.character{left:269px;top:359px;width:1030px;height:1545px;mask-image:linear-gradient(to bottom,#000 0%,#000 72%,transparent 91%)}
+.character img{display:block;width:100%;height:100%;object-fit:contain}
+.eyebrow{position:absolute;left:61px;top:648px;font-size:13px;letter-spacing:3.5px;font-weight:500}
+h1{margin:0;font-family:"Songti SC","Noto Serif CJK SC","STSong",serif;font-weight:900;color:var(--blue)}
+h1 span{position:absolute;writing-mode:vertical-rl;text-orientation:upright;font-size:104px;letter-spacing:10px;line-height:1}
+h1 .first{top:735px;left:194px}h1 .second{top:808px;left:62px}
+.headline-note{position:absolute;left:69px;top:1300px;font-size:18px;line-height:1.85;letter-spacing:3px;color:#4267a5}
+.lower-light{background:linear-gradient(to bottom,transparent 70%,#f9fdff16 74%,#f9fdffbd 85%,#fbfdff 93%)}
+.flow-overline{position:absolute;left:64px;top:1401px;font-size:13px;font-weight:500;letter-spacing:4.4px}
+.flow-word{position:absolute;left:103px;top:1403px;font-family:"Baskerville","Times New Roman",serif;font-size:235px;font-style:italic;letter-spacing:-13px;line-height:1;color:var(--blue);text-shadow:1px 2px 0 #ffffff}
+.flow-type svg{position:absolute;left:62px;top:1588px;width:420px;height:60px}
+.product-copy{padding:0}.product-label{position:absolute;left:762px;top:1480px;margin:0;font-size:30px;font-weight:600;letter-spacing:5px}.product-desc{position:absolute;left:765px;top:1532px;font-size:17px;letter-spacing:2px;margin:0;color:#63789c}.features{position:absolute;left:765px;top:1581px;display:flex;gap:15px;align-items:center;font-size:19px;letter-spacing:1px}.features i{font-style:normal;color:#48cabb}
+header{position:absolute;left:60px;right:60px;top:54px;display:flex;justify-content:space-between}.brand-name{font-size:21px;line-height:1.3;letter-spacing:.2px}.brand-name b{font-size:15px;font-weight:400;letter-spacing:.5px}.issue{text-align:right;font-size:12px;line-height:1.9;letter-spacing:1.8px}.issue b{font-weight:500;letter-spacing:2.3px}
+footer{position:absolute;left:60px;right:60px;top:1701px;display:flex;justify-content:space-between;align-items:center}footer a{color:var(--ink);text-decoration:none;font-size:19px;letter-spacing:.2px;pointer-events:auto}footer a span{margin-left:18px;font-size:25px;color:var(--blue)}.footer-right{font-size:12px;letter-spacing:2px}
+#layers-panel{position:fixed;right:28px;top:32px;width:278px;background:#fff;border-radius:12px;box-shadow:0 10px 50px #10234718;padding:22px;color:#193254;font-size:13px}.panel-heading{font-size:26px;font-weight:700;letter-spacing:-1px}.panel-heading small{float:right;font-size:13px;font-weight:400;letter-spacing:0;padding-top:8px}#layers-panel p{font-size:12px;color:#738398;margin:13px 0 20px}#layer-list label{display:flex;align-items:center;gap:9px;padding:7px 0;font-size:12px;cursor:pointer}#layer-list input{accent-color:#245be6;width:14px;height:14px}#restore{margin-top:14px;border:1px solid #dce4ee;border-radius:5px;background:#f6f9fe;color:#31548f;width:100%;padding:9px;cursor:pointer}.panel-footer{margin-top:15px;font-size:11px;line-height:1.8;color:#7b8ca2}
+body.export{padding:0;background:transparent}body.export #poster{transform:none!important;box-shadow:none}body.export #layers-panel{display:none}
+@media print{@page{size:1200px 1800px;margin:0}body{padding:0;background:transparent}#poster{transform:none!important;box-shadow:none}#layers-panel{display:none}}

@@ -6,6 +6,15 @@ use super::*;
 const PHRASE: usize = 120;
 const STRIDE: usize = 100;
 
+mod review;
+
+/// Review candidates are alternative mappings, never additional cuts in `verified`.
+#[derive(Debug, Clone, Default)]
+pub struct PositionSuggestions {
+    pub verified: Vec<FuzzyPlacement>,
+    pub review: Vec<FuzzyPlacement>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FuzzyPlacement {
     pub source_start_ms: f64,
@@ -92,13 +101,24 @@ fn normalize(frame: &mut [f32; 12]) {
 }
 
 /// Inputs are rendered mono PCM at SAMPLE_RATE (8 kHz), including existing clip
-/// speed. Suggestions cover only corroborated phrases, never the entire song by
-/// extrapolation. No result changes the strict matcher's acceptance thresholds.
+/// speed. Independent phrases establish mappings; bounded holes between evidence
+/// for the same mapping are interpolated, not treated as edit boundaries. No
+/// result changes the strict matcher's acceptance thresholds.
 pub fn suggest_constant_speed(
     source: &[f32],
     reference: &[f32],
     canceled: impl Fn() -> bool,
 ) -> Result<Vec<FuzzyPlacement>> {
+    Ok(suggest_positions(source, reference, canceled)?.verified)
+}
+
+/// Share proposal/refinement work, but keep weaker cover correspondences in an
+/// explicit review lane. They must not become automatic placements or remix cuts.
+pub fn suggest_positions(
+    source: &[f32],
+    reference: &[f32],
+    canceled: impl Fn() -> bool,
+) -> Result<PositionSuggestions> {
     if canceled() {
         bail!("匹配已取消")
     }
@@ -106,13 +126,14 @@ pub fn suggest_constant_speed(
         bail!("音频解码包含无效采样")
     }
     if source.len().min(reference.len()) < SAMPLE_RATE * 32 {
-        return Ok(vec![]);
+        return Ok(PositionSuggestions::default());
     }
     let a = chroma(source, &canceled)?;
     let b = chroma(reference, &canceled)?;
     let sa = spectra(source, &canceled)?;
     let sb = spectra(reference, &canceled)?;
     let mut anchors = Vec::new();
+    let mut review_anchors = Vec::new();
     // One phrase matrix at a time: memory remains bounded for long source files.
     for start in (0..=a.len().saturating_sub(PHRASE)).step_by(STRIDE) {
         if canceled() {
@@ -155,13 +176,15 @@ pub fn suggest_constant_speed(
             }
         }
         candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
-        for (_, target, slope) in candidates.into_iter().take(3) {
+        for (chroma_score, target, slope) in candidates.into_iter().take(3) {
             if canceled() {
                 bail!("匹配已取消")
             }
-            if let Some(anchor) = refine(&sa, &sb, start * 10, target * 10, slope, &canceled)? {
+            let anchor = refine(&sa, &sb, start * 10, target * 10, slope, &canceled)?;
+            if anchor.score >= 0.30 {
                 anchors.push(anchor);
             }
+            review::collect_anchor(&mut review_anchors, anchor, chroma_score, &sa, &sb);
         }
     }
     let groups = fit_groups(&anchors);
@@ -210,7 +233,77 @@ pub fn suggest_constant_speed(
         };
         verified.extend(verify_span(&sa, &sb, &full, &canceled)?);
     }
-    Ok(assemble_spans(&verified))
+    let continuous = continuous_spans(&verified);
+    let mut result = assemble_spans(&continuous);
+    retain_edge_handles(&mut result, source.len() as f64 / 8., reference.len() as f64 / 8.);
+    let review = review::suggestions(&review_anchors, &result);
+    Ok(PositionSuggestions { verified: result, review })
+}
+
+/// A weak two-second spectral window is not a cut. Keep an established affine
+/// mapping through bounded holes bracketed by independent evidence, unless a
+/// different source passage has corroborated evidence in that hole. This also
+/// avoids changing rate at every near-identical fit of the same recording.
+fn continuous_spans(candidates: &[FuzzyPlacement]) -> Vec<FuzzyPlacement> {
+    let end = |c: &FuzzyPlacement| c.reference_start_ms
+        + (c.source_end_ms - c.source_start_ms) / c.speed;
+    let source_at = |c: &FuzzyPlacement, t: f64| c.source_start_ms
+        + (t - c.reference_start_ms) * c.speed;
+    let same_mapping = |a: &FuzzyPlacement, b: &FuzzyPlacement| {
+        (a.speed - b.speed).abs() < 0.001
+            && (source_at(a, b.reference_start_ms) - b.source_start_ms).abs() < 200.
+            && (source_at(a, end(b)) - b.source_end_ms).abs() < 200.
+    };
+    let mut sorted = candidates.to_vec();
+    sorted.sort_by(|a, b| a.reference_start_ms.total_cmp(&b.reference_start_ms)
+        .then_with(|| b.anchors.cmp(&a.anchors)));
+    let mut result: Vec<FuzzyPlacement> = vec![];
+    for next in sorted {
+        let previous = result.iter_mut().find(|last| {
+            let gap = next.reference_start_ms - end(last);
+            same_mapping(last, &next) && (gap <= 0.01 || (
+                gap <= 32_000. && last.anchors >= 4 && next.anchors >= 4
+                && !candidates.iter().any(|other| {
+                    other.reference_start_ms < next.reference_start_ms
+                        && end(other) > end(last)
+                        && !same_mapping(last, other)
+                })
+            ))
+        });
+        if let Some(last) = previous {
+            let hi = end(last).max(end(&next));
+            last.source_end_ms = source_at(last, hi);
+            last.similarity = last.similarity.min(next.similarity);
+            last.anchors = last.anchors.max(next.anchors);
+        } else {
+            result.push(next);
+        }
+    }
+    result
+}
+
+/// Retain short original heads/tails at media boundaries, not the FFT window
+/// grid. These are presentation handles on an established long mapping, not
+/// evidence permitting arbitrary extrapolation of an isolated phrase.
+fn retain_edge_handles(spans: &mut [FuzzyPlacement], source_ms: f64, reference_ms: f64) {
+    if let Some(first) = spans.first_mut() {
+        let lo = (first.source_start_ms - first.reference_start_ms * first.speed).max(0.);
+        if first.anchors >= 4 && first.source_end_ms - first.source_start_ms >= 32_000.
+            && first.source_start_ms - lo <= 6000.
+        {
+            first.reference_start_ms -= (first.source_start_ms - lo) / first.speed;
+            first.source_start_ms = lo;
+        }
+    }
+    if let Some(last) = spans.last_mut() {
+        let hi = source_ms.min(last.source_start_ms
+            + (reference_ms - last.reference_start_ms) * last.speed);
+        if last.anchors >= 4 && last.source_end_ms - last.source_start_ms >= 32_000.
+            && hi - last.source_end_ms <= 6000.
+        {
+            last.source_end_ms = hi;
+        }
+    }
 }
 
 fn refine(
@@ -220,7 +313,7 @@ fn refine(
     target: usize,
     slope: f64,
     canceled: &impl Fn() -> bool,
-) -> Result<Option<Anchor>> {
+) -> Result<Anchor> {
     let mut best = Anchor {
         source: source as f64 * 10.,
         target: 0.,
@@ -249,7 +342,7 @@ fn refine(
             }
         }
     }
-    Ok((best.score >= 0.30).then_some(best))
+    Ok(best)
 }
 
 // Evaluate the final mapping without moving individual windows to a better peak.
@@ -294,7 +387,8 @@ fn verify_span(
     let finish = |run: &mut Vec<(usize, f64)>, result: &mut Vec<FuzzyPlacement>| {
         if run.len() * BLOCK >= 800 {
             let mean = run.iter().map(|v| v.1).sum::<f64>() / run.len() as f64;
-            if mean >= 0.40 {
+            if mean >= 0.40 || (candidate.anchors >= 4 && mean >= 0.35
+                && run.iter().any(|v| v.1 >= 0.45)) {
                 let start = run[0].0 as f64 * 10.;
                 result.push(FuzzyPlacement {
                     source_start_ms: start,
@@ -320,7 +414,11 @@ fn verify_span(
             .into_iter()
             .map(|delta| mapped_score(a, b, source, target + delta, 1. / candidate.speed, BLOCK))
             .fold(-1., f64::max);
-        if score >= 0.30 && score - alternative >= 0.08 {
+        // A sustained affine fit supplies independent context. Quiet vocals or
+        // a changed backing track may weaken a block without moving it in time;
+        // do not require every block to independently rediscover the mapping.
+        let supported = candidate.anchors >= 4 && score >= 0.20 && score - alternative >= 0.04;
+        if (score >= 0.30 && score - alternative >= 0.08) || supported {
             run.push((source, score));
         } else {
             finish(&mut run, &mut result);
@@ -390,6 +488,10 @@ fn assemble_spans(candidates: &[FuzzyPlacement]) -> Vec<FuzzyPlacement> {
 }
 
 fn fit_groups(anchors: &[Anchor]) -> Vec<FuzzyPlacement> {
+    fit_groups_with_minimum(anchors, 4)
+}
+
+fn fit_groups_with_minimum(anchors: &[Anchor], minimum: usize) -> Vec<FuzzyPlacement> {
     let mut groups: Vec<FuzzyPlacement> = Vec::new();
     for seed in anchors {
         let mut group = vec![*seed];
@@ -420,10 +522,10 @@ fn fit_groups(anchors: &[Anchor]) -> Vec<FuzzyPlacement> {
                 break;
             }
         }
-        if group.len() < 4 {
+        if group.len() < minimum {
             continue;
         }
-        let (slope, intercept) = fit(&group);
+        let (slope, intercept) = prefer_original_speed(&group, fit(&group));
         if group
             .iter()
             .any(|a| (a.target - slope * a.source - intercept).abs() > 100.)
@@ -462,6 +564,29 @@ fn fit_groups(anchors: &[Anchor]) -> Vec<FuzzyPlacement> {
     });
     groups
 }
+/// Prefer unchanged playback for sub-per-mille analysis jitter, but not when
+/// that small rate difference accumulates into meaningful drift. Refit the offset
+/// around all anchors rather than pinning one cut edge; verify_span subsequently
+/// verifies this exact unit-rate mapping against the spectra before accepting it.
+fn prefer_original_speed(group: &[Anchor], affine: (f64, f64)) -> (f64, f64) {
+    let (slope, intercept) = affine;
+    if (1. / slope - 1.).abs() > 0.001 {
+        return affine;
+    }
+    let offset = group.iter().map(|a| a.target - a.source).sum::<f64>() / group.len() as f64;
+    let start = group[0].source;
+    let end = group.last().unwrap().source + 8000.;
+    // At most 40 ms movement at either end (four spectral frames), and every
+    // anchor must still meet the existing 100 ms fit residual limit.
+    if [start, end].iter().all(|x| ((slope - 1.) * x + intercept - offset).abs() <= 40.)
+        && group.iter().all(|a| (a.target - a.source - offset).abs() <= 100.)
+    {
+        (1., offset)
+    } else {
+        affine
+    }
+}
+
 fn fit(group: &[Anchor]) -> (f64, f64) {
     if group.len() == 1 {
         let a = group[0];
@@ -480,6 +605,67 @@ fn fit(group: &[Anchor]) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn weak_windows_do_not_turn_one_recording_mapping_into_seven_cuts() {
+        let pieces: Vec<_> = [(2000., 12000.), (18000., 34000.), (50000., 66000.),
+            (80000., 100000.), (124000., 140000.), (142000., 150000.), (152000., 180000.)]
+            .into_iter().map(|(lo, hi)| FuzzyPlacement {
+                source_start_ms: lo, source_end_ms: hi, reference_start_ms: lo - 660.,
+                speed: 1., similarity: 0.45, anchors: 8,
+            }).collect();
+        let mut joined = assemble_spans(&continuous_spans(&pieces));
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].source_start_ms, 2000.);
+        assert_eq!(joined[0].source_end_ms, 180000.);
+        retain_edge_handles(&mut joined, 185000., 184340.);
+        assert_eq!(joined[0].reference_start_ms, 0.);
+        assert_eq!(joined[0].source_start_ms, 660.);
+        assert_eq!(joined[0].source_end_ms, 185000.);
+
+        let mut conflicting = pieces.clone();
+        conflicting.push(FuzzyPlacement { source_start_ms: 240000., source_end_ms: 256000.,
+            reference_start_ms: 100000., ..pieces[0].clone() });
+        let result = assemble_spans(&continuous_spans(&conflicting));
+        assert!(result.len() >= 3, "a verified different passage is a real edit: {result:?}");
+        let isolated: Vec<_> = pieces.iter().map(|p| FuzzyPlacement { anchors: 1, ..p.clone() }).collect();
+        assert_eq!(continuous_spans(&isolated).len(), 7, "isolated phrases do not justify interpolation");
+        let far = FuzzyPlacement { reference_start_ms: 250000., source_start_ms: 250660.,
+            source_end_ms: 280660., ..pieces[0].clone() };
+        assert_eq!(continuous_spans(&[pieces[0].clone(), far]).len(), 2);
+    }
+
+    #[test]
+    fn near_original_speed_jitter_refits_offset_without_changing_playback_rate() {
+        for speed in [0.9998000399920016, 1., 1.0002] {
+            let anchors: Vec<_> = (0..18).map(|i| {
+                let source = 20000. + i as f64 * 10000.;
+                Anchor { source, target: source / speed + 7019., slope: 1. / speed, score: 0.52 }
+            }).collect();
+            let result = fit_groups(&anchors);
+            assert_eq!(result.len(), 1, "{result:?}");
+            let r = &result[0];
+            assert_eq!(r.speed, 1., "jitter should not stretch playback: {r:?}");
+            let expected_offset = anchors.iter().map(|a| a.target - a.source).sum::<f64>() / anchors.len() as f64;
+            assert!((r.reference_start_ms - r.source_start_ms - expected_offset).abs() < 1e-8);
+            for anchor in &anchors {
+                assert!((r.reference_start_ms + anchor.source - r.source_start_ms - anchor.target).abs() < 40.);
+            }
+        }
+    }
+
+    #[test]
+    fn small_but_accumulating_drift_and_real_speed_changes_are_not_snapped() {
+        for (speed, count) in [(0.9998, 100), (1.0002, 100), (0.998, 7), (1.002, 7)] {
+            let anchors: Vec<_> = (0..count).map(|i| {
+                let source = i as f64 * 10000.;
+                Anchor { source, target: source / speed + 7019., slope: 1. / speed, score: 0.52 }
+            }).collect();
+            let result = fit_groups(&anchors);
+            assert_eq!(result.len(), 1, "{result:?}");
+            assert!((result[0].speed - speed).abs() < 1e-10, "{result:?}");
+        }
+    }
+
     #[test]
     fn affine_fit_recovers_speed_and_preserves_distinct_repeated_phrases() {
         let mut anchors = Vec::new();
@@ -520,6 +706,32 @@ mod tests {
         assert!(fit_groups(&anchors).is_empty());
         assert!(fit_groups(&anchors[..1]).is_empty());
     }
+    #[test]
+    fn established_mapping_survives_recurring_weak_spectral_blocks() {
+        let mut seed = 73u32;
+        let mut random = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let a: Vec<[f32; BANDS]> = (0..8002)
+            .map(|_| std::array::from_fn(|_| random())).collect();
+        let b: Vec<[f32; BANDS]> = a.iter().enumerate().map(|(frame, bands)| {
+            let correlation: f32 = if (frame / 200) % 3 == 1 { 0.26 } else { 0.65 };
+            std::array::from_fn(|band| correlation * bands[band]
+                + (1. - correlation * correlation).sqrt() * random())
+        }).collect();
+        let candidate = FuzzyPlacement { source_start_ms: 0., source_end_ms: 80000.,
+            reference_start_ms: 0., speed: 1., similarity: 0.5, anchors: 8 };
+        let result = verify_span(&a, &b, &candidate, &|| false).unwrap();
+        assert_eq!(result.len(), 1, "weak windows are not edits: {result:?}");
+        assert_eq!((result[0].source_start_ms, result[0].source_end_ms), (0., 80000.));
+        let isolated = FuzzyPlacement { anchors: 1, ..candidate };
+        let isolated_spans = verify_span(&a, &b, &isolated, &|| false).unwrap();
+        assert!(isolated_spans.iter().all(|span|
+            span.source_end_ms - span.source_start_ms < 80000.),
+            "without sustained anchors, weak blocks still interrupt the mapping");
+    }
+
     #[test]
     fn verification_cuts_unmatched_gaps_and_rejects_periodic_false_peaks() {
         let mut seed = 17u32;

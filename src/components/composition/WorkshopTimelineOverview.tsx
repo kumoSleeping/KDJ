@@ -1,18 +1,15 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import type { CompositionProject } from "../../types/workshop";
-import { clipDuration, projectDuration } from "../../lib/workshop";
 import { scrollFromThumb, thumbPosition } from "../../lib/scrollThumb";
 
-/** Global seeking below a separate, small viewport scroll handle. */
-export function WorkshopTimelineOverview({ project, viewport, content, offset, controls, position, onScroll, onSeek, onSeekStart, onSeekEnd }: {
-  project: CompositionProject; viewport: number; content: number; offset: number;
-  controls: string; position: number; onScroll(offset: number): void;
-  onSeek(ms:number): void; onSeekStart(): void; onSeekEnd(): void;
+/** Horizontal viewport scrollbar, kept below the scrolling track list. */
+export function WorkshopTimelineOverview({ viewport, content, offset, controls, onScroll }: {
+  viewport: number; content: number; offset: number;
+  controls: string; onScroll(offset: number): void;
 }) {
   const rail = useRef<HTMLDivElement>(null);
   const [measured, setMeasured] = useState(viewport), [dragging, setDragging] = useState(false);
   const drag = useRef<{pointer:number; x:number; initial:number; extent:number; travel:number} | null>(null);
-  const seeking = useRef<number | null>(null);
+  const scrollable = content - viewport > 1;
   useLayoutEffect(() => {
     const node = rail.current;
     if (!node) return;
@@ -20,20 +17,12 @@ export function WorkshopTimelineOverview({ project, viewport, content, offset, c
     measure();
     const observer = new ResizeObserver(measure); observer.observe(node);
     return () => observer.disconnect();
-  }, [viewport]);
+  }, [viewport, scrollable]);
   const width = measured || viewport, extent = Math.max(0, content-viewport);
   const length = Math.min(width, Math.max(28, width*viewport/Math.max(1,content)));
   const travel = Math.max(0,width-length), left = thumbPosition(offset,extent,travel);
-  const duration = Math.max(1,projectDuration(project));
-  const seekAt = (node:HTMLElement, clientX:number) => {
-    const rect=node.getBoundingClientRect(), span=rect.width || width;
-    const ms=Math.max(0,Math.min(1,(clientX-rect.left)/Math.max(1,span)))*duration;
-    const frame=1000/Math.max(1,project.canvas.fps);
-    onSeek(Math.min(duration,Math.round(ms/frame)*frame));
-  };
-  const finishSeek = () => {if(seeking.current !== null) {seeking.current=null; onSeekEnd();}};
-  return <div className="vj-timeline-overview">
-    {extent > 1 && <div className="vj-overview-viewport" role="scrollbar" tabIndex={0}
+  return <div className="vj-timeline-overview" hidden={!scrollable}>
+    {scrollable && <div ref={rail} className="vj-overview-viewport" role="scrollbar" tabIndex={0}
       aria-label="时间轴全局位置" aria-orientation="horizontal" aria-controls={controls}
       aria-valuemin={0} aria-valuemax={Math.round(extent)} aria-valuenow={Math.round(Math.max(0,Math.min(extent,offset)))}
       data-dragging={dragging || undefined}
@@ -57,21 +46,5 @@ export function WorkshopTimelineOverview({ project, viewport, content, offset, c
       }}>
       <div className="vj-overview-thumb" style={{left,width:length}} aria-hidden="true"><i /></div>
     </div>}
-    <div ref={rail} className="vj-overview-rail" role="slider" tabIndex={0} aria-label="全局预览位置"
-      aria-valuemin={0} aria-valuemax={Math.round(duration)} aria-valuenow={Math.round(position)}
-      onPointerDown={e => {if(e.button !== 0) return; e.preventDefault(); e.stopPropagation(); seeking.current=e.pointerId; onSeekStart(); e.currentTarget.focus({preventScroll:true}); e.currentTarget.setPointerCapture(e.pointerId); seekAt(e.currentTarget,e.clientX);}}
-      onPointerMove={e => {if(seeking.current !== null && seeking.current === e.pointerId) {e.preventDefault(); seekAt(e.currentTarget,e.clientX);}}}
-      onPointerUp={e => {if(seeking.current !== null && seeking.current === e.pointerId) {seekAt(e.currentTarget,e.clientX); finishSeek();}}}
-      onPointerCancel={finishSeek} onLostPointerCapture={finishSeek}
-      onKeyDown={e => {
-        const step=1000/Math.max(1,project.canvas.fps)*(e.shiftKey ? 10 : 1);
-        const next=e.key === "Home" ? 0 : e.key === "End" ? duration : e.key === "ArrowLeft" ? position-step : e.key === "ArrowRight" ? position+step : null;
-        if(next === null) return; e.preventDefault(); e.stopPropagation(); onSeek(Math.max(0,Math.min(duration,next)));
-      }}>
-      <div className="vj-overview-content" aria-hidden="true">{project.layers.map(layer => <div key={layer.id}>{layer.clips.map(c =>
-        <i key={c.id} style={{left:`${c.start_ms/duration*100}%`,width:`${clipDuration(c)/duration*100}%`}} />
-      )}</div>)}</div>
-      <i className="vj-overview-playhead" style={{left:`${Math.max(0,Math.min(1,position/duration))*100}%`}} aria-hidden="true" />
-    </div>
   </div>;
 }

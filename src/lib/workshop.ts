@@ -9,6 +9,15 @@ export const cloneProject = (p: CompositionProject): CompositionProject =>
   structuredClone(p);
 export const isImageSource = (s: WorkshopSource | undefined) => s?.kind === "image" || s?.kind === "gif";
 export const isVisualSource = (s: WorkshopSource | undefined) => Boolean(s?.video || isImageSource(s));
+// Match CompositionProject::sync_output_format so drafts and persisted edits agree.
+export function syncOutputFormat(p: CompositionProject, previous: CompositionProject): void {
+  if (p.output.format !== previous.output.format) return;
+  const hasPicture = (project: CompositionProject) => project.layers.some(layer =>
+    layer.clips.some(clip => isVisualSource(project.sources.find(s => s.id === clip.source_id))));
+  const before = hasPicture(previous), after = hasPicture(p);
+  if (!before && after) p.output.format = "mp4";
+  else if (before && !after && (p.output.format ?? "mp4") === "mp4") p.output.format = "wav";
+}
 export function imageTime(c: WorkshopClip, local: number): number { return (c.animation_offset_ms ?? 0) + clamp(local, 0, clipDuration(c)); }
 export const uid = () => crypto.randomUUID();
 export const clamp = (v: number, a: number, b: number) =>
@@ -144,6 +153,11 @@ export function resetFadeSpan(c: WorkshopClip): void {
     c.fades[k] = Math.min(c.fades[k], d / 2);
 }
 export function validateProject(p: CompositionProject): string {
+  const markers = p.markers ?? [];
+  if (markers.length > 5000 || new Set(markers.map(m => m.id)).size !== markers.length
+    || new Set(markers.map(m => m.number)).size !== markers.length
+    || markers.some(m => !m.id || !Number.isFinite(m.position_ms) || m.position_ms < 0 || m.position_ms > 21_600_000
+      || !Number.isInteger(m.number) || m.number < 1 || m.number > 4294967295)) return "标记参数无效";
   const layout = p.canvas.import_picture;
   if (layout && !([
     [layout.x, 0, 1], [layout.y, 0, 1],
@@ -173,6 +187,9 @@ export function validateProject(p: CompositionProject): string {
       if (!crop.every(n => Number.isFinite(n) && n >= 0 && n <= .99) || crop[0] + crop[2] >= .99 || crop[1] + crop[3] >= .99) return "裁剪范围无效";
       if (![c.picture.x, c.picture.y, c.picture.scale, c.picture.opacity, c.picture.rotation ?? 0].every(Number.isFinite)) return "画面参数无效";
       if (isImageSource(s) !== (c.display_duration_ms != null)) return "图片显示时长无效";
+      if (c.video_transition && (!s.video || !Number.isFinite(c.video_transition.duration_ms)
+        || c.video_transition.duration_ms < 0 || c.video_transition.duration_ms > 10000
+        || ![-1, 0, 1].includes(c.video_transition.alignment))) return "画面过渡参数无效";
       const duration = clipDuration(c);
       if (duration < 0.001 || !Number.isFinite(duration)) return "片段区间无效";
       if (c.start_ms + 0.001 < end) return "本行片段重叠，请先移动后续片段";
@@ -201,11 +218,12 @@ export function splitClip(
     c = layer?.clips.find((c) => c.id === id);
   if (!layer || !c) return p;
   const local = position - c.start_ms,
-    min = 1000 / p.canvas.fps;
+    min = clipQuantum(p, c);
   if (local < min - 0.001 || clipDuration(c) - local < min - 0.001) return p;
   const cut = sourceAt(c, local),
     right = structuredClone(c);
   right.id = uid();
+  delete right.video_transition;
   right.start_ms = position;
   if (c.display_duration_ms != null) {
     right.display_duration_ms = c.display_duration_ms - local;
@@ -220,7 +238,7 @@ export function splitClip(
 export function deleteClip(
   p: CompositionProject,
   id: string,
-  ripple = false,
+  ripple = activeLayerCount(p) === 1,
 ): CompositionProject {
   const next = cloneProject(p),
     layer = next.layers.find((l) => l.clips.some((c) => c.id === id)),
@@ -242,9 +260,10 @@ export function duplicateClip(
   const c = findClip(p, id);
   if (!c) return p;
   const next = cloneProject(p);
-  next.layers.unshift({
+  next.layers.push({
     id: uid(),
     source_id: c.source_id,
+    grid: structuredClone(p.layers.find(l => l.clips.some(clip => clip.id === id))?.grid),
     clips: [{ ...structuredClone(c), id: uid() }],
   });
   return next;
@@ -290,7 +309,7 @@ export function adjustClip(
   delta: number,
 ): CompositionProject {
   return updateClip(p, id, (c) => {
-    const frame = 1000 / p.canvas.fps;
+    const frame = clipQuantum(p, c);
     if (handle === "move") {
       c.start_ms = Math.max(0, c.start_ms + delta);
       return;
@@ -351,3 +370,6 @@ export function formatTime(ms: number): string {
   const total = Math.max(0, ms) / 1000;
   return `${Math.floor(total / 60)}:${(total % 60).toFixed(3).padStart(6, "0")}`;
 }
+
+export const activeLayerCount = (p: CompositionProject) => p.layers.filter(l => l.clips.length > 0).length;
+export const clipQuantum = (p: CompositionProject, c: WorkshopClip) => isVisualSource(p.sources.find(s => s.id === c.source_id)) ? 1000 / p.canvas.fps : 1000 / 48000;

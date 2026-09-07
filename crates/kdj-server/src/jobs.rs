@@ -604,7 +604,7 @@ impl AnalysisRegistry {
     /// 用户点「停止分析」要停的是那批几百首的后台活，把正在放的这首一起掐了，
     /// 界面上就是"放着的歌永远出不来 BPM/调号"。Python 版 `queue_analysis`
     /// 也是同一条规则（插队任务不进 `current_analysis`）。
-    fn register(
+    pub(crate) fn register(
         &self,
         job_id: &str,
         total: usize,
@@ -627,7 +627,7 @@ impl AnalysisRegistry {
     }
 
     /// 批次跑完（或被取消后收尾完）注销，否则注册表会一直涨。
-    fn unregister(&self, job_id: &str) {
+    pub(crate) fn unregister(&self, job_id: &str) {
         self.jobs.lock().unwrap().remove(job_id);
     }
 
