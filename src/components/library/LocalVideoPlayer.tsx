@@ -14,11 +14,11 @@ import {
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
 import {
-  LocalVideoSynchronizer,
+  VideoPlaybackEngine,
   applyLocalVideoClock,
   VideoSeekEchoGuard,
   VideoTransportEchoGuard,
-} from "../../lib/localVideoSync";
+} from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
 import { playTrack } from "./TrackTable";
 import type { Track } from "../../types";
@@ -34,10 +34,10 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   const suppressGenerationRef = useRef(0);
   const suppressTokensRef = useRef(new Set<number>());
   const userSeekTimerRef = useRef(0);
-  const synchronizerRef = useRef<LocalVideoSynchronizer | null>(null);
+  const synchronizerRef = useRef<VideoPlaybackEngine | null>(null);
   const videoSeekEchoGuardRef = useRef<VideoSeekEchoGuard | null>(null);
   const videoTransportEchoGuardRef = useRef<VideoTransportEchoGuard | null>(null);
-  if (!synchronizerRef.current) synchronizerRef.current = new LocalVideoSynchronizer();
+  if (!synchronizerRef.current) synchronizerRef.current = new VideoPlaybackEngine();
   if (!videoSeekEchoGuardRef.current) videoSeekEchoGuardRef.current = new VideoSeekEchoGuard();
   if (!videoTransportEchoGuardRef.current) {
     videoTransportEchoGuardRef.current = new VideoTransportEchoGuard();

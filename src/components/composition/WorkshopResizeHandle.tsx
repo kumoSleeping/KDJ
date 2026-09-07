@@ -6,7 +6,7 @@ export function WorkshopResizeHandle({ before, after }: { before: Part; after: P
   const drag = useRef<{root:HTMLElement; y:number; heights:Record<Part,number>; previous:string[]} | null>(null);
   const [value, setValue] = useState(50), [dragging, setDragging] = useState(false);
   const read = (node: HTMLElement) => {
-    const root = node.closest<HTMLElement>('[aria-label="VJ 剪辑工坊"]')!;
+    const root = node.closest<HTMLElement>('[aria-label="工作站"]')!;
     const heights = Object.fromEntries(Object.entries(selectors).map(([part, selector]) => [part, root.querySelector(selector)!.getBoundingClientRect().height])) as Record<Part,number>;
     return {root, heights};
   };

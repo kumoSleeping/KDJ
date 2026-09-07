@@ -16,6 +16,7 @@ pub mod library_watch;
 pub mod lyrics;
 pub mod protected_media;
 pub mod routes;
+pub mod rhythm;
 pub mod state;
 pub mod stream_cache;
 pub mod stream_waveform;

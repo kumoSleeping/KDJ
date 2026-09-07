@@ -29,7 +29,10 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
       y: Math.max(12, Math.min(window.innerHeight - width / ratio - 12, box.y)),
     };
   };
-  const [box, setBox] = useState(() => fit({width: 352, x: window.innerWidth - 376, y: 80}));
+  const [box, setBox] = useState(() => {
+    const width = fit({width: Math.min(512, window.innerWidth * .34), x: 0, y: 12}).width;
+    return fit({width, x: window.innerWidth - width - 12, y: 12});
+  });
   const [fullscreen, setFullscreen] = useState(false);
   const drag = useRef<{ x: number; y: number; box: Box; edge?: ResizeEdge } | null>(null);
   useEffect(() => {
@@ -77,7 +80,7 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
     if (rect.width > 0 && project) playback.seek(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * projectDuration(project));
   };
   if (!project) return null;
-  return createPortal(<div data-vj-drop="" data-vj-project={project.id} className="kd-pip-float vj-floating-preview" role="dialog" aria-label="作品预览小窗"
+  const preview = <div data-vj-drop="" data-vj-project={project.id} className="kd-pip-float vj-floating-preview" role="dialog" aria-label="作品预览小窗"
     data-fullscreen={fullscreen || undefined} data-picture-editing={editing || undefined} style={{left: box.x, top: box.y, width: box.width}}
     onPointerDown={e => down(e)} onPointerMove={move} onPointerUp={end}
     onPointerCancel={() => { if (drag.current) setBox(drag.current.box); end(); }} onLostPointerCapture={end}
@@ -118,5 +121,6 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
           setBox(b => fit({...b, width: b.width + (["ArrowRight", "ArrowUp"].includes(e.key) ? 24 : -24)}));
         }} />)}
     </div>
-  </div>, document.body);
+  </div>;
+  return createPortal(preview, document.body);
 }

@@ -66,6 +66,8 @@ export function AsideToggleButton({ open, canOpen, onToggle }: AsideToggleButton
 
 export interface AsideHeadProps {
   title: string;
+  /** 当前面板的返回操作，位于标题左侧。 */
+  leading?: ReactNode;
   /** 歌词模式下详情 / 歌词双极切换；有值时替代纯标题。 */
   face?: TrackAsideFace;
   onFaceChange?: (face: TrackAsideFace) => void;
@@ -79,7 +81,7 @@ export interface AsideHeadProps {
  * 右栏眉目：可拖窗口 + 当前面板标题（或详情/歌词分段）。
  * 开合键弹出时在右栏顶条右端；收起时在曲库工作条搜索键右侧。
  */
-export function AsideHead({ title, face, onFaceChange, asideToggle, tools }: AsideHeadProps) {
+export function AsideHead({ title, leading, face, onFaceChange, asideToggle, tools }: AsideHeadProps) {
   const bipolar = Boolean(face && onFaceChange);
 
   return (
@@ -92,6 +94,7 @@ export function AsideHead({ title, face, onFaceChange, asideToggle, tools }: Asi
         window.kdj?.windowControl("drag");
       }}
     >
+      {leading}
       {bipolar && face && onFaceChange ? (
         <AsideFaceSwitch face={face} onFaceChange={onFaceChange} />
       ) : title ? (

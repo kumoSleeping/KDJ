@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use kdj_analysis::engine::AnalysisResult;
+use kdj_analysis::rhythm::REVISION as RHYTHM_REVISION;
 use kdj_core::models::{
     FolderTree, HarmonicMatch, HarmonicRelation, LibraryStats, LocalPlaylist, LocalPlaylistPatch,
     Track, TrackIndex, TrackPage, TrackPatch, TrackSummary, TrackSummaryPage,
@@ -207,7 +208,7 @@ fn restore_from_trash(handle: &TrashHandle, original: &Path) -> Result<()> {
 /// sort 白名单：绝对不能把 query string 直接拼进 ORDER BY（SQL 注入），
 /// 也不能只做转义——SQLite 的标识符引用规则太松，白名单映射是唯一安全的做法。
 fn effective_bpm_key_column(column: &str) -> String {
-    format!(
+    let old = format!(
         "COALESCE(\
            NULLIF((SELECT v3.{column} FROM track_bpm_key_analysis_v3 v3 \
              WHERE v3.track_id = tracks.id AND v3.analyzer_revision = '{}'), ''), \
@@ -215,7 +216,8 @@ fn effective_bpm_key_column(column: &str) -> String {
              WHERE v2.track_id = tracks.id), ''), \
            tracks.{column})",
         BPM_KEY_V3_REVISION
-    )
+    );
+    if column == "bpm" { format!("COALESCE((SELECT bpm FROM track_rhythm_v4 WHERE track_id=tracks.id AND revision='{RHYTHM_REVISION}' AND file_mtime IS (SELECT rhythm_source.file_mtime FROM tracks AS rhythm_source WHERE rhythm_source.id=tracks.id)), {old})") } else {old}
 }
 
 fn sort_column(key: &str) -> String {
@@ -283,20 +285,20 @@ fn track_summary_select() -> String {
         "tracks.id AS id, tracks.path AS path, tracks.filename AS filename, \
          tracks.title AS title, tracks.artist AS artist, tracks.album AS album, \
          tracks.duration AS duration, tracks.format AS format, tracks.size AS size, \
-         COALESCE(summary_v3.bpm, summary_v2.bpm, tracks.bpm) AS effective_bpm, \
-         summary_v3.bpm IS NOT NULL AS bpm_v3, \
-         summary_v3.bpm IS NULL AND summary_v2.bpm IS NOT NULL AS bpm_v2, \
-         COALESCE(summary_v3.bpm_confidence, summary_v2.bpm_confidence, tracks.bpm_confidence) \
+         COALESCE(summary_v4.bpm, summary_v3.bpm, summary_v2.bpm, tracks.bpm) AS effective_bpm, \
+         summary_v4.track_id IS NULL AND summary_v3.bpm IS NOT NULL AS bpm_v3, \
+         summary_v4.track_id IS NULL AND summary_v3.bpm IS NULL AND summary_v2.bpm IS NOT NULL AS bpm_v2, \
+         COALESCE(summary_v4.confidence, summary_v3.bpm_confidence, summary_v2.bpm_confidence, tracks.bpm_confidence) \
            AS effective_bpm_confidence, \
-         COALESCE(summary_v3.first_beat, summary_v2.first_beat, tracks.first_beat) \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN NULL ELSE COALESCE(summary_v3.first_beat, summary_v2.first_beat, tracks.first_beat) END \
            AS effective_first_beat, \
-         COALESCE(summary_v3.beat_origin, summary_v2.beat_origin, tracks.first_beat) \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN NULL ELSE COALESCE(summary_v3.beat_origin, summary_v2.beat_origin, tracks.first_beat) END \
            AS effective_beat_origin, \
-         COALESCE(summary_v3.downbeat_origin, summary_v2.downbeat_origin) \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN NULL ELSE COALESCE(summary_v3.downbeat_origin, summary_v2.downbeat_origin) END \
            AS effective_downbeat_origin, \
-         COALESCE(summary_v3.downbeat_confidence, summary_v2.downbeat_confidence) \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN NULL ELSE COALESCE(summary_v3.downbeat_confidence, summary_v2.downbeat_confidence) END \
            AS effective_downbeat_confidence, \
-         CASE WHEN summary_v3.bpm IS NOT NULL THEN '{BPM_KEY_V3_REVISION}' \
+         CASE WHEN summary_v4.track_id IS NOT NULL THEN '{RHYTHM_REVISION}' WHEN summary_v3.bpm IS NOT NULL THEN '{BPM_KEY_V3_REVISION}' \
               WHEN summary_v2.bpm IS NOT NULL THEN summary_v2.analyzer_revision \
               ELSE 'legacy-v1' END AS beat_grid_revision, \
          COALESCE(NULLIF(summary_v3.music_key, ''), NULLIF(summary_v2.music_key, ''), tracks.music_key) \
@@ -317,7 +319,7 @@ fn track_summary_select() -> String {
 /// V2/V3 索引十余次。详情仍保留数组解析，列表只读这里的标量。
 fn track_summary_joins() -> String {
     format!(
-        " LEFT JOIN track_bpm_key_analysis_v3 summary_v3 \
+        " LEFT JOIN track_rhythm_v4 summary_v4 ON summary_v4.track_id = tracks.id AND summary_v4.revision = '{RHYTHM_REVISION}' AND summary_v4.file_mtime IS (SELECT rhythm_source.file_mtime FROM tracks AS rhythm_source WHERE rhythm_source.id=tracks.id) LEFT JOIN track_bpm_key_analysis_v3 summary_v3 \
            ON summary_v3.track_id = tracks.id \
           AND summary_v3.analyzer_revision = '{BPM_KEY_V3_REVISION}' \
          LEFT JOIN track_bpm_key_analysis_v2 summary_v2 \
@@ -688,7 +690,8 @@ impl LibraryService {
                 OR TRIM(COALESCE(music_key, '')) != '' OR TRIM(COALESCE(camelot, '')) != ''
                 OR energy IS NOT NULL OR rms_db IS NOT NULL OR peak_db IS NOT NULL
                 OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v2 v2 WHERE v2.track_id = tracks.id)
-                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)",
+                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)
+                OR EXISTS (SELECT 1 FROM track_rhythm_v4 v4 WHERE v4.track_id = tracks.id)",
             [],
             |row| row.get::<_, u64>(0),
         )?;
@@ -738,6 +741,7 @@ impl LibraryService {
             );
             bytes = bytes.saturating_add(conn.query_row(&sql, [], |row| row.get::<_, u64>(0))?);
         }
+        bytes += conn.query_row("SELECT COALESCE(SUM(LENGTH(CAST(result_json AS BLOB))),0) FROM track_rhythm_v4", [], |r| r.get::<_,u64>(0))?;
         Ok(BasicAnalysisCacheUsage { tracks, bytes })
     }
 
@@ -751,12 +755,14 @@ impl LibraryService {
                 OR TRIM(COALESCE(music_key, '')) != '' OR TRIM(COALESCE(camelot, '')) != ''
                 OR energy IS NOT NULL OR rms_db IS NOT NULL OR peak_db IS NOT NULL
                 OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v2 v2 WHERE v2.track_id = tracks.id)
-                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)",
+                OR EXISTS (SELECT 1 FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id)
+                OR EXISTS (SELECT 1 FROM track_rhythm_v4 v4 WHERE v4.track_id = tracks.id)",
             [],
             |row| row.get::<_, u64>(0),
         )?;
         tx.execute("DELETE FROM track_bpm_key_analysis_v2", [])?;
         tx.execute("DELETE FROM track_bpm_key_analysis_v3", [])?;
+        tx.execute("DELETE FROM track_rhythm_v4", [])?;
         tx.execute(
             "UPDATE tracks SET
                bpm = NULL, bpm_confidence = NULL, first_beat = NULL,
@@ -1698,6 +1704,7 @@ impl LibraryService {
                 }
             }
         }
+        self.overlay_rhythm(conn, &mut tracks)?;
         Ok(tracks)
     }
 
@@ -1814,6 +1821,7 @@ impl LibraryService {
             )?;
         }
         if patch.bpm.is_some() {
+            tx.execute("DELETE FROM track_rhythm_v4 WHERE track_id=?", [track_id])?;
             // A manual BPM edit becomes the source of truth. Keep analysed keys, but clear every
             // generation's now-inconsistent tempo/grid so an overlay cannot hide the edit.
             for (table, revision) in [

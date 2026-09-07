@@ -1,3 +1,4 @@
+import { VideoSeekQueue } from "./videoSeekQueue";
 import { getBridge } from "./bridge";
 import { finishApiActivity } from "./activityLog";
 
@@ -67,6 +68,7 @@ export class BilibiliEmbedController {
   private timer = 0;
   private ready = false;
   private disposed = false;
+  private readonly seeks = new VideoSeekQueue();
 
   constructor(private readonly options: BilibiliEmbedControllerOptions) {
     const started = performance.now();
@@ -160,9 +162,12 @@ export class BilibiliEmbedController {
   }
 
   async seek(position: number): Promise<void> {
-    await this.done;
-    if (this.disposed || !this.ready || !this.bridge) throw abortError();
-    await this.bridge.control(this.options.bvid, this.options.page, "seek", position);
+    if (!Number.isFinite(position)) return;
+    await this.seeks.request(async signal => {
+      await this.done;
+      if (signal.aborted || this.disposed || !this.ready || !this.bridge) throw abortError();
+      await this.bridge.control(this.options.bvid, this.options.page, "seek", Math.max(0, position));
+    });
   }
 
   async setVolume(volume: number): Promise<void> {
@@ -188,6 +193,7 @@ export class BilibiliEmbedController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.seeks.cancel();
     this.abort.abort();
     window.clearTimeout(this.timer);
     void this.bridge?.close(this.options.bvid, this.options.page).catch(() => undefined);

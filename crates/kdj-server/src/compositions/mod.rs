@@ -4,7 +4,7 @@ mod acceleration;
 pub mod workshop;
 #[cfg(test)]
 mod lifecycle_tests;
-mod media;
+pub(crate) mod media;
 #[cfg(test)]
 mod media_tests;
 pub mod routes;

@@ -297,3 +297,19 @@ export function beatGridMarkers(
     };
   });
 }
+
+/** V4's explicit events must not be replaced by an average-tempo lattice. */
+export function analyzedBeatMarkers(track: Track, start: number, end: number): BeatGridMarker[] | undefined {
+  if (!track.beat_grid_revision?.includes("v4")) return undefined;
+  const beats=track.beat_times ?? [], downs=track.downbeats ?? [];
+  let a=0,b=beats.length;
+  while(a<b){const m=(a+b)>>>1;if(beats[m]<start)a=m+1;else b=m;}
+  const result:BeatGridMarker[]=[];
+  let down=0;while(down<downs.length&&downs[down]<start-.03)down++;
+  for(let i=a;i<beats.length&&beats[i]<=end;i++){
+    while(down<downs.length&&downs[down]<beats[i]-.03)down++;
+    const first=downs[down]!==undefined&&Math.abs(downs[down]-beats[i])<.03;
+    result.push({positionSec:beats[i],beat:first?1:2,bar:down+1});
+  }
+  return result;
+}

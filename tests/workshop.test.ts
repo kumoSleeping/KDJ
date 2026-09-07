@@ -15,9 +15,117 @@ import {
   snapTime,
   sourceAt,
   splitClip,
+  syncOutputFormat,
   validateProject,
 } from "../src/lib/workshop";
 import type { CompositionProject, WorkshopClip } from "../src/types/workshop";
+import { addWorkshopMarker, removeWorkshopMarker, workshopMarkerColor } from "../src/lib/workshopMarkers";
+import { workshopFadeCurvePath } from "../src/lib/workshopFadeCurve";
+import { setVideoTransition, videoProject, videoTransitionSpan } from "../src/lib/workshopTransitions";
+import { prepareVideoClips } from "../src/lib/workshopPreviewPolicy";
+
+test("video joints borrow handles without moving cuts or changing audio", () => {
+  let p = project();
+  const left = p.layers[0].clips[0];
+  left.speed = {preset:"constant", start:1, middle:1, end:1, domain_start_ms:0, domain_end_ms:10000};
+  left.source_out_ms = 3000;
+  left.fades.span_ms = 3000;
+  const right = {...structuredClone(left), id:"right", start_ms:3000, source_in_ms:6000, source_out_ms:9000};
+  p.layers[0].clips.push(right);
+  const original = structuredClone(p);
+  for (const alignment of [-1,0,1] as const) {
+    p = setVideoTransition(original, "right", {duration_ms:1000, alignment});
+    const visual = videoProject(p), [a,b] = visual.layers[0].clips;
+    const before = (1-alignment)*500, after = 1000-before;
+    assert.equal(a.source_out_ms, 3000+after);
+    assert.equal(b.start_ms, 3000-before);
+    assert.equal(b.source_in_ms, 6000-before);
+    assert.equal(fadeAlpha(b, 500), .5);
+    assert.equal(a.fades.video_out_ms, 0, "opaque outgoing plane prevents a black dip");
+    assert.equal(projectDuration(visual), projectDuration(p));
+    assert.deepEqual(p.layers[0].clips.map(c=>[c.start_ms,c.source_in_ms,c.source_out_ms,c.sound,c.fades]),
+      original.layers[0].clips.map(c=>[c.start_ms,c.source_in_ms,c.source_out_ms,c.sound,c.fades]));
+    assert.equal(validateProject(p), "");
+  }
+  p = setVideoTransition(original,"right",{duration_ms:1000,alignment:0});
+  const visual = videoProject(p);
+  assert.deepEqual(prepareVideoClips(visual,3000).map(c=>c.id), [left.id,"right"], "incoming picture is above outgoing and both are decoded");
+  assert.deepEqual(setVideoTransition(p,"right",null),original);
+  const split = splitClip(p, "right", 4000);
+  assert.equal(split.layers[0].clips[2].video_transition, undefined, "splitting does not duplicate an incoming transition");
+  p.layers[0].clips[0].speed.domain_end_ms=3100;
+  assert.deepEqual(videoTransitionSpan(...p.layers[0].clips as [WorkshopClip,WorkshopClip]),{before:100,after:100});
+  p.layers[0].clips[1].start_ms+=1;
+  assert.equal(videoTransitionSpan(...p.layers[0].clips as [WorkshopClip,WorkshopClip]),null);
+});
+
+test("short fade curves on long clips meet their actual endpoints", () => {
+  const c = clip();
+  c.source_out_ms = 120000;
+  c.speed = {preset: "constant", start: 1, middle: 1, end: 1, domain_start_ms: 0, domain_end_ms: 120000};
+  c.fades = {offset_ms: 0, span_ms: 120000, audio_in_ms: 570, audio_out_ms: 280,
+    video_in_ms: 570, video_out_ms: 280, linear: false};
+  for (const audio of [true, false]) {
+    const points = workshopFadeCurvePath(c, audio).split(" ").map(p => p.slice(1).split(",").map(Number));
+    assert.ok(points.length <= 66, "curve cost is independent of clip length");
+    assert.ok(points.some(([x, y]) => Math.abs(x - 570 / 120000 * 100) < 1e-9 && y === 4), "fade-in reaches unity at the handle, not the next whole-clip sample");
+    assert.ok(points.some(([x, y]) => Math.abs(x - (120000 - 280) / 120000 * 100) < 1e-9 && y === 4));
+    assert.equal(points[0][1], 27);
+    assert.equal(points.at(-1)![1], 27);
+  }
+  c.fades.offset_ms = 200;
+  for (const linear of [true, false]) {
+    c.fades.linear = linear;
+    const points = workshopFadeCurvePath(c, true).split(" ").map(p => p.slice(1).split(",").map(Number));
+    assert.equal(points[0][1], 27 - fadeAlpha(c, 0, true) * 23, "trimmed fades retain inherited phase");
+    assert.ok(points.some(([x, y]) => Math.abs(x - 370 / 120000 * 100) < 1e-9 && y === 4));
+  }
+  Object.assign(c.fades, {audio_in_ms: 0, audio_out_ms: 0});
+  assert.equal(workshopFadeCurvePath(c, true), "M0,4 L100,4", "zero fades render flat");
+});
+
+test("audio and picture fades draw only changing gain/opacity, never a full-width unity line", () => {
+  for (const audio of [false, true]) {
+    const c = clip();
+    c.fades = {offset_ms: 0, span_ms: clipDuration(c), audio_in_ms: 0, audio_out_ms: 0,
+      video_in_ms: 0, video_out_ms: 0, linear: false};
+    assert.equal(workshopFadeCurvePath(c, audio, true), "");
+    c.fades[audio ? "audio_in_ms" : "video_in_ms"] = 300;
+    c.fades[audio ? "audio_out_ms" : "video_out_ms"] = 500;
+    const path = workshopFadeCurvePath(c, audio, true);
+    assert.equal(path.split("M").length - 1, 2, "separate fade-in and fade-out strokes, with no plateau joining them");
+    const points = path.split(" ").map(p => p.slice(1).split(",").map(Number));
+    assert.ok(points.every(([x]) => x <= 300 / clipDuration(c) * 100 || x >= (1 - 500 / clipDuration(c)) * 100));
+    for (const [x, y] of points) {
+      assert.ok(Math.abs(y - (27 - fadeAlpha(c, x / 100 * clipDuration(c), audio) * 23)) < 1e-9,
+        "visible curves still follow the actual envelope");
+    }
+    c.fades.offset_ms = 600;
+    c.fades.span_ms += 1200;
+    assert.equal(workshopFadeCurvePath(c, audio, true), "", "inherited fades outside a cut are invisible");
+  }
+});
+
+test("markers use stable sequential colors and absolute project time", () => {
+  const original = project();
+  let p = addWorkshopMarker(original, 2500.123);
+  p = addWorkshopMarker(p, 1000);
+  assert.deepEqual(p.markers?.map(m => [m.number, m.position_ms]), [[1,2500.123],[2,1000]]);
+  assert.equal(original.markers, undefined);
+  assert.equal(addWorkshopMarker(p, 1000), p, "same position does not stack markers");
+  assert.equal(addWorkshopMarker(p, NaN), p);
+  assert.equal(addWorkshopMarker(p, -1).markers?.at(-1)?.position_ms, 0);
+  assert.ok(Math.abs(addWorkshopMarker(p, 1e9).markers!.at(-1)!.position_ms - projectDuration(p)) < .001);
+  const remaining = removeWorkshopMarker(p, p.markers![0].id);
+  assert.equal(addWorkshopMarker(remaining, 500).markers?.at(-1)?.number, 3);
+  assert.equal(workshopMarkerColor(1), workshopMarkerColor(8));
+  assert.notEqual(workshopMarkerColor(1), workshopMarkerColor(2));
+  assert.equal(validateProject(p), "");
+  assert.equal(validateProject({...p, markers: [...p.markers!, p.markers![0]]}), "标记参数无效");
+  for (const position_ms of [NaN, Infinity, -1, 21_600_001]) {
+    assert.equal(validateProject({...p, markers: [{id:"invalid", number:1, position_ms}]}), "标记参数无效");
+  }
+});
 function clip(id = "clip"): WorkshopClip {
   return {
     id,
@@ -81,6 +189,40 @@ function project(): CompositionProject {
     migrated_from: null,
   };
 }
+test("output format follows the last picture clip, retaining explicit audio formats", () => {
+  for (const kind of ["video", "image", "gif"] as const) {
+    const before = project();
+    before.sources[0].kind = kind;
+    before.sources[0].video = kind === "video";
+    before.output.format = "mp4";
+    for (const emptyLayer of [false, true]) {
+      const after = structuredClone(before);
+      if (emptyLayer) after.layers[0].clips = [];
+      else after.layers = [];
+      syncOutputFormat(after, before);
+      assert.equal(after.output.format, "wav", "unused visual sources do not count");
+      const restored = structuredClone(before);
+      restored.output.format = after.output.format;
+      syncOutputFormat(restored, after);
+      assert.equal(restored.output.format, "mp4", "restoring a picture enables video");
+    }
+    const partial = structuredClone(before);
+    partial.layers[0].clips[0].picture.opacity = 0;
+    syncOutputFormat(partial, before);
+    assert.equal(partial.output.format, "mp4", "transparent pictures remain visual content");
+    for (const format of ["wav", "flac", "mp3"] as const) {
+      const audioChoice = structuredClone(before);
+      audioChoice.output.format = format;
+      const after = structuredClone(audioChoice);
+      after.layers = [];
+      syncOutputFormat(after, audioChoice);
+      assert.equal(after.output.format, format);
+      syncOutputFormat(after, before);
+      assert.equal(after.output.format, format, "explicit edit takes precedence");
+    }
+  }
+});
+
 test("split and trim preserve the parent speed curve and outer fades", () => {
   const p = project(),
     c = p.layers[0].clips[0],
@@ -124,15 +266,14 @@ test("deletion holds the musical placement; ripple affects only subsequent clips
   assert.equal(plain.layers[0].clips[0].source_in_ms, right.source_in_ms);
 });
 test("repeated occurrences and copied fragments are independent", () => {
-  const p = project(),
-    next = duplicateClip(p, "clip");
+  const p = project(), next = duplicateClip(p, "clip");
   assert.equal(next.layers.length, 2);
-  assert.notEqual(next.layers[0].clips[0].id, "clip");
-  next.layers[0].clips[0].picture.opacity = 0.2;
+  assert.notEqual(next.layers[1].clips[0].id, "clip");
+  next.layers[1].clips[0].picture.opacity = 0.2;
   assert.equal(p.layers[0].clips[0].picture.opacity, 1);
-  assert.equal(next.layers[1].clips[0].picture.opacity, 1);
-  const moved = moveLayer(next, next.layers[0].id, 1);
-  assert.equal(moved.layers[0].id, "layer");
+  assert.equal(next.layers[0].clips[0].picture.opacity, 1);
+  const moved = moveLayer(next, next.layers[1].id, 0);
+  assert.equal(moved.layers[1].id, "layer");
 });
 test("speed changes detect overlap without moving other clips", () => {
   const p = project(),
@@ -268,4 +409,32 @@ test("picture edges stay inside the canvas at 0 and 100 percent, including cropp
       }
     }
   }
+});
+
+import { editRanges, projectBeats, rebuildGridRegion, analysisGrid, layerWaveform } from "../src/lib/workstation";
+test("bar editing joins one occupied track and preserves multitrack positions",()=>{
+  const p=project();p.sources[0].video=false;p.sources[0].kind="audio";
+  const c=p.layers[0].clips[0];c.speed={...c.speed,preset:"constant",start:1,middle:1,end:1};
+  let next=editRanges(p,p.layers[0].id,[[2000,4000],[6000,8000]],"delete");
+  assert.deepEqual(next.layers[0].clips.map(c=>[c.start_ms,c.source_in_ms,c.source_out_ms]),[[0,0,2000],[2000,4000,6000],[4000,8000,10000]]);
+  p.layers.push({...structuredClone(p.layers[0]),id:"other",clips:[{...structuredClone(c),id:"other-clip"}]});
+  next=editRanges(p,p.layers[0].id,[[2000,4000]],"delete");assert.equal(next.layers[0].clips[1].start_ms,4000);assert.deepEqual(next.layers[1],p.layers[1]);
+  next=editRanges(p,p.layers[0].id,[[2000,4000],[6000,8000]],"keep");assert.deepEqual(next.layers[0].clips.map(c=>c.start_ms),[2000,6000]);
+});
+test("audio splits are sample precise and new copies append",()=>{
+  const p=project();p.sources[0].video=false;p.sources[0].kind="audio";
+  const c=p.layers[0].clips[0];c.speed={...c.speed,preset:"constant",start:1};
+  const next=splitClip(p,c.id,1);assert.equal(next.layers[0].clips.length,2);
+  assert.equal(duplicateClip(p,c.id).layers[0].id,p.layers[0].id);
+});
+test("bar grid maps source beats through trims and tempo without editing media",()=>{
+  const p=project(),c=p.layers[0].clips[0];c.speed={...c.speed,preset:"constant",start:2};c.source_in_ms=2000;c.start_ms=1000;
+  const grid=analysisGrid({revision:"v4",precise:false,duration:10,bpm:120,confidence:1,beats:Array.from({length:20},(_,i)=>i*.5),downbeats:[0,2,4,6,8],downbeat_confidence:1,segments:[{start_seconds:0,end_seconds:10,bpm:120,confidence:1}],coverage:[[0,10]]},"source");
+  const beats=projectBeats(p.layers[0],grid);assert.equal(beats[0].time,1000);assert.equal(beats[1].time,1250);assert.equal(beats[0].bar,2);
+  const changed=rebuildGridRegion(grid,0,100,.1);assert.equal(changed.locked,true);assert.equal(changed.beats[0],.1);assert.equal(grid.segments[0].bpm,120);assert.equal(c.source_in_ms,2000);
+});
+test("edited waveform leaves real gaps and reads the retained source interval",()=>{
+  const p=project(),c=p.layers[0].clips[0];c.speed={...c.speed,preset:"constant",start:1};c.start_ms=2000;c.source_in_ms=2000;c.source_out_ms=4000;
+  const w={track_id:1,duration:10,amp:[.1,.2,.3,.4,.5,.6,.7,.8,.9,1],r:Array(10).fill(255),g:Array(10).fill(0),b:Array(10).fill(0)};
+  const result=layerWaveform(w,p.layers[0],0,4000,4);assert.equal(result.amp[0],0);assert.equal(result.amp[1],0);assert.ok(Math.abs(result.amp[2]-.3)<1e-6);
 });

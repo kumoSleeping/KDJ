@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Blend, Clapperboard, Disc3, Download, LoaderCircle, Minus, Play, Plus, Scissors } from "lucide-react";
+import { VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
 import { api } from "../../lib/api";
 import {
   AUDIO_FOCUS_EVENT,
@@ -60,6 +61,15 @@ const calibrationCache = new Map<string, { offsetMs: number; score: number }>();
  */
 export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoEngine = useRef(new VideoPlaybackEngine());
+  const seekVideo = useCallback((video: HTMLVideoElement, position: number) => {
+    const source = video.src;
+    void videoEngine.current.seek(video, position).catch((reason: unknown) => {
+      if (video.src !== source || (reason instanceof DOMException && reason.name === "AbortError")) return;
+      setError(reason instanceof Error ? reason.message : String(reason));
+    });
+  }, []);
+  useEffect(() => () => videoEngine.current.dispose(), [req.platform, req.bvid, req.page]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -213,7 +223,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
         if (target < 0) {
           holdSuppress(200);
           video.pause();
-          video.currentTime = 0;
+          seekVideo(video, 0);
           delayTimerRef.current = window.setTimeout(() => {
             delayTimerRef.current = null;
             holdSuppress(200);
@@ -222,7 +232,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
         } else {
           if (Math.abs(video.currentTime - target) > 0.4) {
             holdSuppress(500);
-            video.currentTime = target;
+            seekVideo(video, target);
           } else {
             holdSuppress(200);
           }
@@ -245,7 +255,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           return;
         }
         holdSuppress(500);
-        video.currentTime = Math.max(0, target);
+        seekVideo(video, Math.max(0, target));
       }
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
@@ -364,13 +374,13 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     useCrossfade.getState().engage();
     if (alignedOffsetMs < 0) {
       video.pause();
-      video.currentTime = 0;
+      seekVideo(video, 0);
       delayTimerRef.current = window.setTimeout(() => {
         delayTimerRef.current = null;
         void video.play().catch(() => undefined);
       }, -alignedOffsetMs);
     } else {
-      video.currentTime = alignedOffsetMs / 1000;
+      seekVideo(video, alignedOffsetMs / 1000);
       void video.play().catch(() => undefined);
     }
   }, [clearDelay]);
@@ -427,7 +437,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
   const nudge = useCallback((deltaMs: number) => {
     setOffsetMs((value) => value + deltaMs);
     const video = videoRef.current;
-    if (video) video.currentTime = Math.max(0, video.currentTime + deltaMs / 1000);
+    if (video) seekVideo(video, Math.max(0, videoEngine.current.position(video) + deltaMs / 1000));
   }, []);
 
   const download = useCallback(
@@ -548,7 +558,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
             if (!video || duration <= 0) return;
             const rect = event.currentTarget.getBoundingClientRect();
             const at = ((event.clientX - rect.left) / rect.width) * duration;
-            video.currentTime = at;
+            seekVideo(video, at);
             setPosition(at);
             if (useCrossfade.getState().coplay) {
               broadcastMediaSync({

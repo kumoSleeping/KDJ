@@ -173,6 +173,93 @@ async fn verify_source(s: &Source, cancel: &CancellationToken) -> Result<media::
     media::probe(Path::new(&s.path), cancel).await
 }
 
+fn continuous_audio(a: &Clip, b: &Clip) -> bool {
+    a.id != b.id
+        && a.display_duration_ms.is_none()
+        && b.display_duration_ms.is_none()
+        && a.source_id == b.source_id
+        && (a.start_ms + a.duration() - b.start_ms).abs() < 1e-6
+        && (a.source_out_ms - b.source_in_ms).abs() < 1e-6
+        && a.speed == b.speed
+        && a.sound.muted == b.sound.muted
+        && a.sound.gain == b.sound.gain
+}
+
+/// Compile editorial splits into uninterrupted audio runs. Decoder, resampler and
+/// atempo state must survive a pure split, not restart and pad each child to length.
+/// This projection never changes the saved clips or their independent video edits.
+fn audio_runs(clips: &[Clip]) -> Vec<Clip> {
+    let mut ordered: Vec<_> = clips.iter().collect();
+    ordered.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+    let mut runs: Vec<Clip> = Vec::new();
+    for clip in ordered {
+        if let Some(previous) = runs.last_mut() {
+            let a = &previous.fades;
+            let b = &clip.fades;
+            let no_fades = a.audio_in_ms == 0. && a.audio_out_ms == 0.
+                && b.audio_in_ms == 0. && b.audio_out_ms == 0.;
+            let same_envelope = no_fades || (
+                a.audio_in_ms == b.audio_in_ms && a.audio_out_ms == b.audio_out_ms
+                && a.linear == b.linear && a.span_ms == b.span_ms
+                && (a.offset_ms + previous.duration() - b.offset_ms).abs() < 1e-6
+            );
+            if continuous_audio(previous, clip) && same_envelope {
+                previous.source_out_ms = clip.source_out_ms;
+                continue;
+            }
+        }
+        runs.push(clip.clone());
+    }
+    runs
+}
+
+#[test]
+fn audio_runs_preserve_real_edits() {
+    let left = Clip {
+        id: "left".into(), source_id: "source".into(), start_ms: 0.,
+        source_in_ms: 0., source_out_ms: 1000., speed: Speed::normal(2000.),
+        picture: Picture::default(),
+        sound: Sound { muted: false, gain: 1., manual: false },
+        fades: Fades { audio_in_ms: 200., audio_out_ms: 200., ..Fades::new(2000., false) },
+        video_transition: None, display_duration_ms: None, animation_offset_ms: 0.,
+    };
+    let mut right = left.clone();
+    right.id = "right".into();
+    right.start_ms = 1000.;
+    right.source_in_ms = 1000.;
+    right.source_out_ms = 2000.;
+    right.fades.offset_ms = 1000.;
+    let inputs = [left.clone(), right.clone()];
+    let runs = audio_runs(&inputs);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].source_out_ms, 2000.);
+    assert_eq!(inputs, [left.clone(), right.clone()], "projection must not edit the project");
+    let edits: &[fn(&mut Clip)] = &[
+        |c| c.source_id = "other".into(),
+        |c| c.source_in_ms += 10.,
+        |c| c.start_ms += 10.,
+        |c| c.start_ms -= 10.,
+        |c| c.sound.gain = 0.5,
+        |c| c.sound.muted = true,
+        |c| c.speed.start = 1.2,
+        |c| c.fades.audio_in_ms += 10.,
+        |c| c.fades.audio_out_ms += 10.,
+        |c| c.fades.offset_ms = 0.,
+        |c| c.fades.span_ms += 10.,
+        |c| c.fades.linear = true,
+        |c| c.display_duration_ms = Some(1000.),
+    ];
+    for (i, edit) in edits.iter().enumerate() {
+        let mut changed = right.clone();
+        edit(&mut changed);
+        assert_eq!(audio_runs(&[left.clone(), changed]).len(), 2, "real edit {i} must stay separate");
+    }
+    let mut left = left;
+    left.fades = Fades::new(1000., false);
+    right.fades = Fades::new(1000., false);
+    assert_eq!(audio_runs(&[left, right]).len(), 1, "inactive envelopes have no phase to reset");
+}
+
 /// Generate a bounded audio interval with pre-roll for stretch and limiter state.
 async fn audio_args(
     p: &CompositionProject,
@@ -236,7 +323,19 @@ async fn audio_args(
                 .join(";");
             filters.push_str(&format!(",asendcmd=c='{commands}'"));
         }
-        filters.push_str(&format!(",atempo@speed{index}={},aresample=48000,apad,atrim=end_sample={},asetpts=N/SR/TB,volume='{}*{}':eval=frame,adelay={}:all=1[a{index}]",number(first.rate),frames(clip.duration()),number(clip.sound.gain),envelope(&clip,true,"t*1000"),number((clip.start_ms-from).max(0.))));
+        filters.push_str(&format!(",atempo@speed{index}={},aresample=48000,apad,atrim=end_sample={},asetpts=N/SR/TB,volume='{}*{}':eval=frame",number(first.rate),frames(clip.duration()),number(clip.sound.gain),envelope(&clip,true,"t*1000")));
+        // Two milliseconds at genuine discontinuities remove DC clicks without overlapping,
+        // moving, or shortening clips. A split with continuous source mapping has no new fade.
+        let siblings=&p.layers.iter().find(|l|l.clips.iter().any(|other|other.id==c.id)).unwrap().clips;
+        let continuous = continuous_audio;
+        let samples=frames(clip.duration());let fade=96u64.min(samples/2).max(1);
+        if (clip.start_ms-c.start_ms).abs()<0.01 && !siblings.iter().any(|prev|continuous(prev,c)) {
+            filters.push_str(&format!(",afade=t=in:ss=0:ns={fade}"));
+        }
+        if (clip.start_ms+clip.duration()-c.start_ms-c.duration()).abs()<0.01 && !siblings.iter().any(|next|continuous(c,next)) {
+            filters.push_str(&format!(",afade=t=out:ss={}:ns={fade}",samples.saturating_sub(fade)));
+        }
+        filters.push_str(&format!(",adelay={}:all=1[a{index}]",number((clip.start_ms-from).max(0.))));
         graph.push(filters);
         inputs.push(format!("[a{index}]"));
         index += 1;
@@ -339,8 +438,13 @@ impl Workshop {
         if hi <= lo {
             return Ok(vec![]);
         }
-        let mut audible = p.clone();
+        let mut audio = p.clone();
+        for layer in &mut audio.layers {
+            layer.clips = audio_runs(&layer.clips);
+        }
+        let mut audible = audio.clone();
         audible.layers.iter_mut().for_each(|l| {
+            l.grid = None; // Grid corrections do not change PCM.
             l.clips.retain(|c| {
                 !c.sound.muted
                     && c.start_ms < hi + 100.
@@ -348,12 +452,13 @@ impl Workshop {
             });
             for c in &mut l.clips {
                 c.picture = Picture::default();
+                c.video_transition = None;
                 c.fades.video_in_ms = 0.;
                 c.fades.video_out_ms = 0.;
             }
         });
         // Geometry, names and revisions do not invalidate already prepared sound.
-        let key = key(&("audio-v1", &audible.sources, &audible.layers, lo, hi))?;
+        let key = key(&("audio-v3-continuous-runs", &audible.sources, &audible.layers, lo, hi))?;
         let path = self.cache.join(format!("{key}.pcm"));
         let lock = self.cache_lock(&key).await;
         let _lock = lock.lock().await;
@@ -374,7 +479,7 @@ impl Workshop {
             return Ok(tokio::fs::read(&path).await?);
         }
         let _permit = tokio::select! {_=cancel.cancelled()=>bail!("预览已取消"),p=self.preview_slots.acquire()=>p?};
-        let args = audio_args(p, lo, hi, cancel).await?;
+        let args = audio_args(&audio, lo, hi, cancel).await?;
         let expected = (frames(hi) - frames(lo)) * 4;
         let bytes = media::capture(
             &kdj_providers::ffmpeg::binary()?,
@@ -395,7 +500,8 @@ impl Workshop {
         Ok(bytes)
     }
     pub async fn proxy(&self, preview: &Preview, cid: &str, part: u64) -> Result<PathBuf> {
-        let c = preview.project.clip(cid).context("片段不存在")?;
+        let visual = preview.project.video_project();
+        let c = visual.clip(cid).context("片段不存在")?;
         let lo = part as f64 * CHUNK_MS;
         let hi = (lo + CHUNK_MS).min(c.duration());
         if hi <= lo {
@@ -495,8 +601,12 @@ impl Workshop {
         }
         file.flush().await?;
         drop(file);
+        let extension = p.output.format.as_str();
+        let output = stage.join(format!("render.{extension}"));
+        if extension == "mp4" {
+        let visual = p.video_project();
         let mut clips = vec![];
-        for layer in p.layers.iter().rev() {
+        for layer in visual.layers.iter().rev() {
             for c in &layer.clips {
                 let s = p.source(&c.source_id).context("素材不存在")?;
                 if !s.visual() || c.start_ms >= hi || c.start_ms + c.duration() <= lo {
@@ -579,7 +689,7 @@ impl Workshop {
         args.extend(["-i".into(), audio.to_string_lossy().into_owned()]);
         let graphfile = stage.join("render.ffgraph");
         tokio::fs::write(&graphfile, graph.join(";")).await?;
-        let output = stage.join("render.mp4");
+
         args.extend([
             "-filter_complex_script".into(),
             graphfile.to_string_lossy().into_owned(),
@@ -637,6 +747,28 @@ impl Workshop {
         {
             bail!("成品尺寸、音轨或时长校验失败")
         }
+        } else {
+            self.job(jid, |j| { j.detail = "编码音频".into(); j.progress = 0.5; })?;
+            if extension == "wav" {
+                tokio::fs::rename(&audio, &output).await?;
+            } else {
+                let mut args = strings(&["-v", "error", "-nostdin", "-y", "-i"]);
+                args.push(audio.to_string_lossy().into_owned());
+                args.extend(strings(&["-vn", "-c:a"]));
+                args.push(if extension == "flac" { "flac" } else { "libmp3lame" }.into());
+                if extension == "mp3" { args.extend(strings(&["-b:a", "320k"])); }
+                args.push(output.to_string_lossy().into_owned());
+                media::capture(&kdj_providers::ffmpeg::binary()?, &args, 4096, Duration::from_secs(3600), cancel).await?;
+            }
+            self.job(jid, |j| { j.phase = "validating".into(); j.progress = 0.96; })?;
+            let probe = media::probe(&output, cancel).await?;
+            let stream = probe.audio().context("成品没有音轨")?;
+            if probe.video().is_some() || (probe.duration(stream) as f64 - duration).abs() > 100. {
+                bail!("音频成品时长或格式校验失败");
+            }
+            let args = vec!["-v".into(), "error".into(), "-xerror".into(), "-i".into(), output.to_string_lossy().into_owned(), "-f".into(), "null".into(), "-".into()];
+            media::capture(&kdj_providers::ffmpeg::binary()?, &args, 4096, Duration::from_secs(3600), cancel).await?;
+        }
         for source in p.sources.iter().filter(|s| {
             p.layers
                 .iter()
@@ -653,14 +785,14 @@ impl Workshop {
         if name.is_empty() || name.contains(['/', '\\', '\0']) || name == "." || name == ".." {
             bail!("导出文件名无效")
         }
-        let stem = name.strip_suffix(".mp4").unwrap_or(name);
+        let stem = [".mp4", ".wav", ".flac", ".mp3"].iter().find_map(|ext| name.strip_suffix(ext)).unwrap_or(name);
         let mut destination = None;
         for n in 0..10_000 {
             check(cancel)?;
             let path = directory.join(if n == 0 {
-                format!("{stem}.mp4")
+                format!("{stem}.{extension}")
             } else {
-                format!("{stem} ({n}).mp4")
+                format!("{stem} ({n}).{extension}")
             });
             if path.exists() {
                 continue;
@@ -799,6 +931,7 @@ pub(super) async fn alignment_pcm(
     c.fades.audio_in_ms = 0.;
     c.fades.audio_out_ms = 0.;
     p.layers = vec![Layer {
+        grid: None,
         id: id(),
         source_id: c.source_id.clone(),
         clips: vec![c.clone()],

@@ -28,7 +28,6 @@ export function WorkshopPictureTools() {
   };
   const commit = () => useWorkshopStore.getState().commit();
   return <div className="vj-picture-tools" role="group" aria-label="画面设置">
-    <span className="vj-picture-scope">{visual ? "画面" : "新素材"}</span>
     <fieldset disabled={!visual && !follows}>
       {([
         ["scale", "大小", 10, 200],

@@ -1,4 +1,7 @@
 import { isVisualSource } from "../../lib/workshop";
+import { workshopMarkerColor } from "../../lib/workshopMarkers";
+import { workshopFadeCurvePath } from "../../lib/workshopFadeCurve";
+import { videoTransitionSpan } from "../../lib/workshopTransitions";
 import {
   useRef,
   useState,
@@ -6,18 +9,24 @@ import {
   useEffect,
   useLayoutEffect,
   useId,
+  type ReactNode,
 } from "react";
 import { WorkshopAnalysisControl, WorkshopLayerAnalysis } from "./WorkshopLayerAnalysis";
 import { WorkshopClipMedia } from "./WorkshopClipMedia";
+import { WorkshopVideoTransition } from "./WorkshopVideoTransition";
+import { WorkshopLayerAudio } from "./WorkshopLayerAudio";
 import { WorkshopTimelineOverview } from "./WorkshopTimelineOverview";
-import { GripVertical, Music2, Eye, EyeOff, X } from "lucide-react";
+import { WorkshopRhythmSource, WorkshopRhythmControls, WorkshopRhythmRuler } from "./WorkshopRhythm";
+import { useWorkshopRhythmStore } from "../../stores/workshopRhythmStore";
+import { clipBeatTimes, nearestBeat, rhythmKey, workshopGrid } from "../../lib/workshopRhythm";
+import { GripVertical, Eye, EyeOff, X } from "lucide-react";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import {
   adjustClip,
   cloneProject,
   clipDuration,
+  clipQuantum,
   formatTime,
-  fadeAlpha,
   visibleFade,
   moveLayer,
   projectDuration,
@@ -30,14 +39,14 @@ import {
   readTrackDragIds,
   finishTrackDrop,
 } from "../../lib/trackDrag";
-export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
+export function WorkshopTimeline({ playback, tools }: { playback: WorkshopPlayback; tools?: ReactNode }) {
   const scrollId = useId();
   const p = useWorkshopStore((s) => s.draft),
     selected = useWorkshopStore((s) => s.selectedId),
     position = useWorkshopStore((s) => s.position),
     snap = useWorkshopStore((s) => s.snap),
-    hiddenVideoLayers = useWorkshopStore(s => s.hiddenVideoLayers),
-    auditionAfterLayer = useWorkshopStore(s => s.auditionAfterLayer);
+    barSnap = useWorkshopStore((s) => s.barSnap),
+    hiddenVideoLayers = useWorkshopStore(s => s.hiddenVideoLayers);
   const analyzing = useWorkshopStore(s => s.positions[s.draft?.id ?? ""]?.items.some(a => a.phase === "analyzing" || a.phase === "waiting"));
   const [zoom, setZoom] = useState(1),
     [width, setWidth] = useState(800),
@@ -89,10 +98,33 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
     x: number;
     start: number;
     duration: number;
+    snapOrigin: number;
     scale: number;
     project: CompositionProject;
+    quantum: number;
+    beats: number[];
   } | null>(null);
   const layerDrag = useRef<string | null>(null);
+  const [layerDrop, setLayerDrop] = useState<{ id: string; edge: "before" | "after"; to: number } | null>(null);
+  const layerDropAt = (x: number, y: number) => {
+    if (!p || !layerDrag.current) return null;
+    const row = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-layer-id]");
+    if (!row || !scroller.current?.contains(row)) return null;
+    const from = p.layers.findIndex(l => l.id === layerDrag.current);
+    const target = p.layers.findIndex(l => l.id === row.dataset.layerId);
+    if (from < 0 || target < 0) return null;
+    const rect = row.getBoundingClientRect();
+    const edge = y < rect.top + rect.height / 2 ? "before" : "after";
+    const boundary = target + (edge === "after" ? 1 : 0);
+    const to = boundary - (from < boundary ? 1 : 0);
+    return to === from ? null : { id: p.layers[target].id, edge, to } as const;
+  };
+  const endLayerDrag = () => { layerDrag.current = null; setLayerDrop(null); };
+  useEffect(() => {
+    const cancel = (event: KeyboardEvent) => { if (event.key === "Escape") endLayerDrag(); };
+    window.addEventListener("keydown", cancel, true);
+    return () => window.removeEventListener("keydown", cancel, true);
+  }, []);
   const labelWidth = Math.min(208, Math.max(144, Math.round(width * .32)));
   const duration = Math.max(
       1000,
@@ -124,12 +156,12 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
     const dy = e.deltaY * (e.deltaMode === 1 ? 20 : e.deltaMode === 2 ? node.clientHeight || 200 : 1);
     // WebView2/Chromium reports precision-touchpad pinch as Ctrl+wheel.
     // Shift+wheel may arrive on deltaX after the OS remaps its axis.
-    if (e.shiftKey || e.ctrlKey) {
+    if (e.altKey || e.ctrlKey) {
       const delta = dy || dx;
       zoomAt(pendingZoom.current * Math.exp(-delta * (e.ctrlKey ? 0.012 : 0.003)), e.clientX);
       return;
     }
-    if (e.altKey) node.scrollLeft += dx || e.deltaY * (e.deltaMode === 1 ? 20 : e.deltaMode === 2 ? pageWidth : 1);
+    if (e.shiftKey) node.scrollLeft += dx || e.deltaY * (e.deltaMode === 1 ? 20 : e.deltaMode === 2 ? pageWidth : 1);
     else {
       node.scrollLeft += dx;
       node.scrollTop += dy;
@@ -168,6 +200,13 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
     }
   }, [zoom, scale, railWidth, width]);
   if (!p) return null;
+  const audioLayers = p.layers.filter(l => l.clips.length && p.sources.some(s => s.id === l.source_id && s.audio));
+  const audioLayer = audioLayers.find(l => l.clips.some(c => c.id === selected)) ?? audioLayers[0];
+  const audioSource = p.sources.find(s => s.id === audioLayer?.source_id);
+  const audioSources = [...new Map(audioLayers.map(l => {
+    const source = p.sources.find(s => s.id === l.source_id)!;
+    return [rhythmKey(source), source] as const;
+  })).values()];
   const tickStep =
     [
       100, 250, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000,
@@ -188,14 +227,35 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
     state.begin();
     const base = state.draft!,
       c = base.layers.flatMap((l) => l.clips).find((c) => c.id === id)!;
+    const results = useWorkshopRhythmStore.getState().results;
+    const beats = base.layers.flatMap(layer => {
+      const source = base.sources.find(s => s.id === layer.source_id);
+      if (!source?.audio) return [];
+      const grid = workshopGrid(layer, source, results);
+      if (!grid) return [];
+      return layer.clips.filter(clip => handle === "move" ? clip.id !== id : clip.id === id)
+        .flatMap(clip => clipBeatTimes(clip, grid, handle === "in" || handle === "out"));
+    }).sort((a, b) => a - b);
+    if (handle.includes("fade_")) {
+      // A fade can always return to zero even when the clip edge is between beats.
+      beats.push(c.start_ms, c.start_ms + clipDuration(c));
+      beats.sort((a, b) => a - b);
+    }
+    const end = handle === "out" || handle.endsWith("_out");
+    // Fade handles move their visible envelope endpoint, not the clip boundary.
+    const fade = handle.includes("fade_") ? visibleFade(c, end, handle.startsWith("audio_")) : 0;
+    const snapOrigin = c.start_ms + (end ? clipDuration(c) - fade : fade);
     drag.current = {
       id,
       handle,
       x: event.clientX,
       start: c.start_ms,
       duration: clipDuration(c),
+      snapOrigin,
       scale,
       project: base,
+      quantum: clipQuantum(base, c),
+      beats,
     };
     if (
       (handle === "in" || handle === "out") &&
@@ -207,9 +267,21 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
   const move = (event: React.PointerEvent<HTMLElement>) => {
     const d = drag.current;
     if (!d) return;
-    let delta = Math.round((event.clientX - d.x) / d.scale / frame) * frame;
-    if (snap && !event.altKey && !d.handle.includes("fade_")) {
-      const origin = d.handle === "out" ? d.start + d.duration : d.start;
+    let delta = Math.round((event.clientX - d.x) / d.scale / d.quantum) * d.quantum;
+    let barCorrection: number | null = null;
+    if (barSnap && !event.altKey) {
+      const origin = d.snapOrigin;
+      const first = nearestBeat(d.beats, origin + delta, 10 / d.scale);
+      if (first !== null) barCorrection = first - origin - delta;
+      if (d.handle === "move") {
+        const last = nearestBeat(d.beats, d.start + d.duration + delta, 10 / d.scale);
+        const correction = last === null ? null : last - d.start - d.duration - delta;
+        if (correction !== null && (barCorrection === null || Math.abs(correction) < Math.abs(barCorrection))) barCorrection = correction;
+      }
+    }
+    if (barCorrection !== null) delta += barCorrection;
+    else if (snap && !event.altKey) {
+      const origin = d.snapOrigin;
       const a = snapTime(
         d.project,
         origin + delta,
@@ -251,9 +323,13 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
     if (!scrub.current) return;
     e.preventDefault();
     e.stopPropagation();
-    latestPlayback.current.seek(
-      Math.round(at(e.clientX, scrub.current) / frame) * frame,
-    );
+    const targetLayer = p.layers.find(l => l.id === scrub.current?.closest<HTMLElement>("[data-layer-id]")?.dataset.layerId) ?? audioLayer;
+    const source = p.sources.find(s => s.id === targetLayer?.source_id);
+    const raw = at(e.clientX, scrub.current);
+    const grid = source?.audio && targetLayer ? workshopGrid(targetLayer, source, useWorkshopRhythmStore.getState().results) : null;
+    const beats = grid && targetLayer ? targetLayer.clips.flatMap(c => clipBeatTimes(c, grid)).sort((a, b) => a - b) : [];
+    const target = barSnap && !e.altKey ? nearestBeat(beats, raw, 10 / scale) : null;
+    latestPlayback.current.seek(target ?? (source?.audio && !isVisualSource(source) ? raw : Math.round(raw / frame) * frame));
   };
   const scrubStart = (e: React.PointerEvent<HTMLElement>) => {
     if (e.button !== 0) return;
@@ -278,29 +354,18 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
   };
   return (
     <section className="vj-timeline" aria-label="剪辑时间轴" style={{"--vj-label-width": `${labelWidth}px`} as React.CSSProperties}>
+      {audioSources.map(source => <WorkshopRhythmSource key={rhythmKey(source)} source={source} />)}
       <div className="vj-timeline-scale">
+        {audioLayer && audioSource && <WorkshopRhythmControls source={audioSource} layer={audioLayer} position={position} />}
         {analyzing && <WorkshopAnalysisControl projectId={p.id} />}
-        <span>
-          {formatTime(position)} / {formatTime(projectDuration(p))}
-        </span>
-      {p.layers.length > 0 && <WorkshopTimelineOverview
-        project={p} viewport={Math.max(1,width-labelWidth)} content={railWidth} offset={scrollLeft} controls={scrollId} position={position}
-        onSeek={ms => {
-          latestPlayback.current.seek(ms);
-          const node=scroller.current, visible=Math.max(1,width-labelWidth);
-          if(node) { const next=Math.max(0,Math.min(railWidth-visible,ms*scale-visible/2)); node.scrollLeft=next; setScrollLeft(next); }
-        }}
-        onSeekStart={() => {useWorkshopStore.setState({scrubbing:true}); latestPlayback.current.beginScrub();}}
-        onSeekEnd={() => {useWorkshopStore.setState({scrubbing:false}); latestPlayback.current.endScrub();}}
-        onScroll={offset => {
-          const node = scroller.current;
-          if (!node) return;
-          node.scrollLeft = offset;
-          setScrollLeft(offset);
-        }} />}
+        <div className="vj-timeline-time">
+          <span>{formatTime(position)} / {formatTime(projectDuration(p))}</span>
+        </div>
       </div>
+      {tools}
       <div
         className="vj-timeline-scroll"
+        title="Shift + 滚轮：左右滚动；Alt/Option + 滚轮：缩放"
         id={scrollId}
         ref={observe}
         onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
@@ -317,27 +382,49 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
           >
             {Array.from(
               { length: Math.floor(duration / tickStep) + 1 },
-              (_, i) => (
+              (_, i) => (p.markers ?? []).some(m => {
+                const distance = (m.position_ms - i * tickStep) * scale;
+                return distance > -14 && distance < 66;
+              }) ? null : (
                 <span key={i} style={{ left: i * tickStep * scale }}>
                   {formatTime(i * tickStep).replace(/\.000$/, "")}
                 </span>
               ),
             )}
+            {(p.markers ?? []).filter(m => m.position_ms <= duration).map(marker => <button
+              key={marker.id} type="button" className="vj-marker" data-marker-id={marker.id}
+              aria-label={`标记 ${marker.number} · ${formatTime(marker.position_ms)}`}
+              title={`标记 ${marker.number} · ${formatTime(marker.position_ms)}`}
+              style={{left: marker.position_ms * scale, "--vj-marker-color": workshopMarkerColor(marker.number)} as React.CSSProperties}
+              onPointerDown={e => e.stopPropagation()}
+              onClick={e => { e.stopPropagation(); playback.seek(marker.position_ms); }}
+            ><i aria-hidden="true" /><small>{marker.number}</small></button>)}
             <i className="vj-playhead" style={{ left: position * scale }} />
           </div>
         </div>
         {p.layers.map((layer, index) => {
           const source = p.sources.find((s) => s.id === layer.source_id)!;
           const hidden = hiddenVideoLayers[p.id]?.includes(layer.id) ?? false;
-          const audioOff = auditionAfterLayer[p.id] === layer.id;
-          const nextAudioLayer = p.layers.slice(index + 1).find(l => l.clips.length > 0 && p.sources.some(s => s.id === l.source_id && s.audio));
-          const nextAudioSource = p.sources.find(s => s.id === nextAudioLayer?.source_id);
+          const ordered = [...layer.clips].sort((a,b) => a.start_ms-b.start_ms);
+          const joints = source.video ? ordered.flatMap((right,i) => {
+            const left=ordered[i-1];
+            return left && Math.abs(left.start_ms+clipDuration(left)-right.start_ms)<.01 ? [{left,right}] : [];
+          }) : [];
+          const spans = joints.flatMap(j => {
+            const span = videoTransitionSpan(j.left, j.right);
+            return span ? [{...j, span}] : [];
+          });
+          const joinedIn = new Map(spans.map(j => [j.right.id, j.span]));
+          const joinedOut = new Map(spans.map(j => [j.left.id, j.span]));
           return (
             <div
               className="vj-track-row"
               key={layer.id}
               data-layer-id={layer.id}
+              data-layer-drop={layerDrop?.id === layer.id ? layerDrop.edge : undefined}
               data-video-hidden={hidden || undefined}
+              data-rhythm={source.audio || undefined}
+              data-audio-waveform={source.audio && !isVisualSource(source) || undefined}
               style={{ width: railWidth + labelWidth }}
             >
               <div
@@ -352,35 +439,29 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
                   aria-label={`拖动层级：${source.title}`}
                   className="vj-grip"
                   onPointerDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
                     layerDrag.current = layer.id;
+                    setLayerDrop(null);
                     e.currentTarget.setPointerCapture(e.pointerId);
                   }}
-                  onPointerUp={(e) => {
-                    const target = document
-                      .elementFromPoint(e.clientX, e.clientY)
-                      ?.closest<HTMLElement>("[data-layer-id]")
-                      ?.dataset.layerId;
-                    if (layerDrag.current && target) {
-                      const to = p.layers.findIndex((l) => l.id === target);
-                      if (to >= 0)
-                        useWorkshopStore
-                          .getState()
-                          .edit((p) => moveLayer(p, layerDrag.current!, to));
-                    }
-                    layerDrag.current = null;
+                  onPointerMove={(e) => {
+                    if (!layerDrag.current) return;
+                    const next = layerDropAt(e.clientX, e.clientY);
+                    setLayerDrop(old => old?.id === next?.id && old?.edge === next?.edge && old?.to === next?.to ? old : next);
                   }}
+                  onPointerUp={(e) => {
+                    const drop = layerDropAt(e.clientX, e.clientY);
+                    const id = layerDrag.current;
+                    endLayerDrag();
+                    if (id && drop) useWorkshopStore.getState().edit(p => moveLayer(p, id, drop.to));
+                    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+                  }}
+                  onPointerCancel={endLayerDrag}
+                  onLostPointerCapture={endLayerDrag}
                 >
                   <GripVertical size={13} />
                 </button>
-                {isVisualSource(source) ? <button type="button" className="vj-layer-visibility" aria-pressed={hidden}
-                  aria-label={`${hidden ? "显示" : "隐藏"}轨道画面：${source.title}`} title="临时隐藏画面（仅预览，声音不变）"
-                  onClick={() => useWorkshopStore.getState().toggleVideoLayer(layer.id)}>{hidden ? <EyeOff size={13}/> : <Eye size={13}/>}</button> : <button
-                    type="button" className="vj-layer-audio" aria-pressed={!audioOff}
-                    aria-label={`${audioOff ? "恢复" : "关闭"}音乐试听：${source.title}`}
-                    title={audioOff ? "恢复原混音（仅预览）" : nextAudioSource ? `临时关闭音乐，试听：${nextAudioSource.title}（仅预览）` : "临时静音（仅预览）"}
-                    onClick={() => useWorkshopStore.getState().toggleAudioLayer(layer.id)}>
-                    <Music2 size={13}>{audioOff && <path d="m3 3 18 18"/>}</Music2>
-                  </button>}
                 <button
                   type="button"
                   className="vj-layer-name"
@@ -393,8 +474,7 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
                 >
                   {source.title}
                 </button>
-                <small>{index + 1}</small>
-                <button type="button" className="vj-source-remove" aria-label={`移除素材 ${source.title}`}
+                <button type="button" className="vj-source-remove" aria-label={`移除素材 ${source.title}`} title="移除素材"
                   onClick={() => {
                     const state = useWorkshopStore.getState();
                     state.edit(p => {
@@ -405,7 +485,14 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
                     if (layer.clips.some(c => c.id === selected)) state.select(null);
                   }}><X size={12} /></button>
                 </div>
-                <WorkshopLayerAnalysis projectId={p.id} layerId={layer.id} sourceTitle={source.title} />
+                <div className="vj-layer-details">
+                  <small className="vj-layer-number">{index + 1}</small>
+                  {source.audio && <WorkshopLayerAudio projectId={p.id} layer={layer} title={source.title} />}
+                  {isVisualSource(source) && <button type="button" className="vj-layer-visibility" aria-pressed={hidden}
+                    aria-label={`${hidden ? "显示" : "隐藏"}轨道画面：${source.title}`} title="临时隐藏画面（仅预览，声音不变）"
+                    onClick={() => useWorkshopStore.getState().toggleVideoLayer(layer.id)}>{hidden ? <EyeOff size={13}/> : <Eye size={13}/>}</button>}
+                  {source.video && source.audio && <WorkshopLayerAnalysis projectId={p.id} layerId={layer.id} sourceTitle={source.title} />}
+                </div>
               </div>
               <div
                 data-vj-time-scale={scale} className="vj-track-rail"
@@ -469,18 +556,17 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
                         viewport={{ left: scrollLeft, width }}
                       />
                       {(isVisualSource(source) ? [false, ...(!c.sound.muted && source.audio ? [true] : [])] : [true]).map(audio => (
-                        <svg key={String(audio)} className={`vj-fade-curve ${audio ? "vj-fade-audio" : ""}`} viewBox="0 0 100 30" preserveAspectRatio="none" aria-label={audio ? "声音淡化曲线" : "画面淡化曲线"}>
-                          <path d={Array.from({length:81}, (_,i) => `${i ? "L" : "M"}${i * 1.25},${27 - fadeAlpha(c, d * i / 80, audio) * 23}`).join(" ")} vectorEffect="non-scaling-stroke" />
+                        <svg key={String(audio)} className={`vj-fade-curve ${audio ? "vj-fade-audio" : ""}`} viewBox="0 0 100 30" preserveAspectRatio="none" aria-label={audio ? "声音淡化曲线" : "画面淡化曲线"}
+                          style={!audio ? {clipPath: `inset(0 ${(joinedOut.get(c.id)?.before ?? 0) / d * 100}% 0 ${(joinedIn.get(c.id)?.after ?? 0) / d * 100}%)`} : undefined}>
+                          <path d={workshopFadeCurvePath(audio ? c : {...c, fades:{...c.fades,
+                            video_in_ms:joinedIn.has(c.id) ? 0 : c.fades.video_in_ms,
+                            video_out_ms:joinedOut.has(c.id) ? 0 : c.fades.video_out_ms}}, audio, true)} vectorEffect="non-scaling-stroke" />
                         </svg>
                       ))}
-                      <span className="vj-clip-title">
-                        {source.title}
-                        {c.speed.preset !== "constant"
-                          ? " · ∿"
-                          : c.speed.start !== 1
-                            ? ` · ${c.speed.start}×`
-                            : ""}
-                      </span>
+                      {(c.speed.preset !== "constant" || c.speed.start !== 1) && <span className="vj-clip-rate"
+                        title={c.speed.preset !== "constant" ? "曲线变速" : `播放速度 ${c.speed.start}×`}>
+                        {c.speed.preset !== "constant" ? "∿" : `${Number(c.speed.start.toFixed(4))}×`}
+                      </span>}
                       {(["in", "out"] as const).map((h) => (
                         <button
                           type="button"
@@ -497,6 +583,7 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
                       ))}
                       {(isVisualSource(source) ? [false, ...(!c.sound.muted && source.audio ? [true] : [])] : [true]).flatMap(audio =>
                         ([false, true] as const).map(end => {
+                          if (!audio && (end ? joinedOut : joinedIn).has(c.id)) return null;
                           const h: ClipHandle = audio ? (end ? "audio_fade_out" : "audio_fade_in") : (end ? "fade_out" : "fade_in");
                           const px = Math.max(9, Math.min(d * scale / 2, visibleFade(c, end, audio) * scale));
                           return <button type="button" key={h} className={`vj-fade-handle ${audio && isVisualSource(source) ? "vj-fade-audio-handle" : ""}`}
@@ -509,6 +596,9 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
                     </div>
                   );
                 })}
+                {joints.map(({left,right}) => <WorkshopVideoTransition key={`join:${right.id}`} project={p} left={left} right={right} scale={scale}/>)}
+                {source.audio && <WorkshopRhythmRuler source={source} layer={layer} scale={scale}
+                  left={scrollLeft} width={Math.max(1, width - labelWidth)} />}
                 <i
                   className="vj-playhead"
                   style={{ left: position * scale }}
@@ -522,6 +612,14 @@ export function WorkshopTimeline({ playback }: { playback: WorkshopPlayback }) {
           );
         })}
       </div>
+      {p.layers.length > 0 && <WorkshopTimelineOverview
+        viewport={Math.max(1,width-labelWidth)} content={railWidth} offset={scrollLeft} controls={scrollId}
+        onScroll={offset => {
+          const node = scroller.current;
+          if (!node) return;
+          node.scrollLeft = offset;
+          setScrollLeft(offset);
+        }} />}
     </section>
   );
 }

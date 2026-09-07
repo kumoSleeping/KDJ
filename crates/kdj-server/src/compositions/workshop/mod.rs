@@ -256,6 +256,7 @@ impl Workshop {
         })
     }
     pub fn patch(self: &Arc<Self>, pid: &str, revision: u64, update: Edit) -> Result<Snapshot> {
+        let mut media_changed = false;
         let result = self.change(|j| {
             let p = j
                 .projects
@@ -266,18 +267,24 @@ impl Workshop {
                 bail!("作品已更新，请重试当前操作")
             }
             let previous = p.clone();
+            media_changed = p.name != update.name || p.layers != update.layers
+                || p.canvas != update.canvas || p.output != update.output;
+            if let Some(markers) = update.markers { p.markers = markers; }
             p.name = update.name;
             p.layers = update.layers;
             p.canvas = update.canvas;
             p.output = update.output;
+            p.sync_output_format(&previous);
             naming::sync_music_names(p, &previous);
             p.validate().map_err(anyhow::Error::msg)?;
             positions::retain_pending_after_edit(&mut j.pending_positions, &previous, p)?;
             p.revision += 1;
             Ok(())
         })?;
-        self.cancel_previews(pid);
-        let _ = self.prepare_positions(pid);
+        if media_changed {
+            self.cancel_previews(pid, revision);
+            let _ = self.prepare_positions(pid);
+        }
         Ok(result)
     }
     pub fn delete(&self, pid: &str, revision: u64) -> Result<Snapshot> {
@@ -288,7 +295,7 @@ impl Workshop {
             j.stopped_positions.retain(|key| !key.starts_with(&format!("{pid}:")));
             Ok(())
         })?;
-        self.cancel_previews(pid);
+        self.cancel_previews(pid, u64::MAX);
         self.cancel_positions(pid);
         Ok(s)
     }
@@ -380,14 +387,18 @@ impl Workshop {
             }
             clip.sound.muted = !source.audio || (video && (has_video || has_audio));
             clip.fades = Fades::new(clip.duration(), source.visual() && p.layers.iter().any(|l| p.source(&l.source_id).is_some_and(Source::visual)));
-            p.layers.insert(
-                0,
+            p.layers.push(
                 Layer {
+                    grid: None,
                     id: id(),
                     source_id: source.id.clone(),
                     clips: vec![clip],
                 },
             );
+        }
+        p.sync_output_format(&previous);
+        if previous.layers.is_empty() && !p.has_picture() {
+            p.output.format = "wav".into();
         }
         naming::sync_music_names(&mut p, &previous);
         p.validate().map_err(anyhow::Error::msg)?;
@@ -414,14 +425,16 @@ impl Workshop {
             *old = p;
             Ok(())
         })?;
-        self.cancel_previews(pid);
+        self.cancel_previews(pid, revision);
         let _ = self.prepare_positions(pid);
         Ok(result)
     }
-    fn cancel_previews(&self, pid: &str) {
+    fn cancel_previews(&self, pid: &str, through_revision: u64) {
         let mut previews = self.previews.lock().unwrap();
         previews.retain(|_, p| {
-            if p.project.id == pid {
+            // Publication can race the next preview request. Invalidate only
+            // the edited snapshot, never a lease created for the new revision.
+            if p.project.id == pid && p.project.revision <= through_revision {
                 p.cancel.cancel();
                 false
             } else {
@@ -455,11 +468,9 @@ impl Workshop {
         // A sound-only audition keeps the original picture lease and audio
         // producer alive until the native replacement is ready. Each editor
         // releases its leases when its project/revision changes or it unmounts.
-        previews.retain(|_, preview| {
-            let keep = preview.project.id == p.id && preview.project.revision == p.revision;
-            if !keep { preview.cancel.cancel(); }
-            keep
-        });
+        // Do not collect leases here: a marker-only save advances the revision
+        // without changing media. A later audition must not revoke the still
+        // playing original mix or picture. Edits and explicit release own expiry.
         let ticket = id();
         previews.insert(
             ticket.clone(),
@@ -521,8 +532,8 @@ impl Workshop {
     pub fn export(self: &Arc<Self>, pid: &str, revision: u64) -> Result<Snapshot> {
         let p = self.project(pid, revision)?;
         p.validate().map_err(anyhow::Error::msg)?;
-        if p.duration() <= 0. || !p.sources.iter().any(Source::visual) {
-            bail!("请先加入视频片段")
+        if p.duration() <= 0. {
+            bail!("没有可导出的片段")
         }
         let job_id = id();
         let token = CancellationToken::new();
@@ -655,6 +666,8 @@ impl Workshop {
 }
 #[derive(Deserialize)]
 pub struct Edit {
+    #[serde(default)]
+    pub markers: Option<Vec<Marker>>,
     pub name: String,
     pub layers: Vec<Layer>,
     pub canvas: Canvas,
@@ -698,6 +711,7 @@ fn audition_next_layer(p: &mut CompositionProject, after: &str) {
 }
 fn empty_project(name: &str, directory: &str) -> CompositionProject {
     CompositionProject {
+        markers: vec![],
         id: id(),
         revision: 0,
         name: name.into(),
@@ -705,6 +719,7 @@ fn empty_project(name: &str, directory: &str) -> CompositionProject {
         layers: vec![],
         canvas: Canvas::default(),
         output: Output {
+            format: "mp4".into(),
             name: name.into(),
             directory: directory.into(),
             in_ms: 0.,
@@ -717,6 +732,7 @@ fn empty_project(name: &str, directory: &str) -> CompositionProject {
 }
 fn new_clip(s: &Source, start_ms: f64) -> Clip {
     Clip {
+        video_transition: None,
         display_duration_ms: s.image().then_some(5000.), animation_offset_ms: 0.,
         id: id(),
         source_id: s.id.clone(),
@@ -773,6 +789,7 @@ fn migrate(
     let Some(v) = t.video.as_ref() else {
         if let Some(s) = p.sources.first() {
             p.layers.push(Layer {
+                grid: None,
                 id: id(),
                 source_id: s.id.clone(),
                 clips: vec![new_clip(s, 0.)],
@@ -826,6 +843,7 @@ fn migrate(
             .collect();
     }
     p.layers.push(Layer {
+        grid: None,
         id: id(),
         source_id: s.id.clone(),
         clips,
@@ -890,9 +908,9 @@ fn migrate(
             }
         }
         if c.source_out_ms > c.source_in_ms {
-            p.layers.insert(
-                0,
+            p.layers.push(
                 Layer {
+                    grid: None,
                     id: id(),
                     source_id: a.id.clone(),
                     clips: vec![c],

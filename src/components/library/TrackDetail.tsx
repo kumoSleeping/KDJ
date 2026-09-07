@@ -879,10 +879,10 @@ export function TrackDetail({ track }: { track: Track }) {
               <span className="kd-analysis-metric-label">BPM</span>
               <span
                 className="kd-analysis-metric-value"
-                data-with-version={track.bpm_v3 || track.bpm_v2 || undefined}
+                data-with-version={track.beat_grid_revision?.includes("v4") || track.bpm_v3 || track.bpm_v2 || undefined}
               >
                 {formatBpm(track.bpm)}
-                {track.bpm_v3 ? (
+                {track.beat_grid_revision?.includes("v4") ? <small className="kd-analysis-version">V4</small> : track.bpm_v3 ? (
                   <small className="kd-analysis-version">V3</small>
                 ) : track.bpm_v2 ? (
                   <small className="kd-analysis-version">V2</small>

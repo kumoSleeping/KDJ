@@ -2,7 +2,7 @@ import { memo, useEffect, useState } from "react";
 import type { WorkshopClip, WorkshopSource } from "../../types/workshop";
 import type { Waveform } from "../../types";
 import { api } from "../../lib/api";
-import { loadWaveform } from "../../lib/waveformCache";
+import { loadReleaseOverviewById, isPlaybackDeferredWaveformError, isSupersededWaveformError, deferredOverviewRetryDelay } from "../../lib/waveformCache";
 import { clipDuration, sourceAt, isVisualSource } from "../../lib/workshop";
 import { acquireCoverThumbnail } from "../../lib/coverThumbnailQueue";
 
@@ -36,17 +36,25 @@ export const WorkshopClipMedia = memo(function WorkshopClipMedia({
   viewport: { left: number; width: number };
 }) {
   const [wave, setWave] = useState<Waveform | null>(null);
+  const [error, setError] = useState("");
   useEffect(() => {
+    setWave(null); setError("");
     if (source.video || !source.audio) return;
-    let live = true;
-    void loadWaveform(source.track_id, 2048, true)
-      .then((w) => {
-        if (live) setWave(w);
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
+    let live = true, attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const value = await loadReleaseOverviewById(source.track_id);
+        if (live) setWave(value);
+      } catch (error) {
+        if (!live) return;
+        if (isPlaybackDeferredWaveformError(error) || isSupersededWaveformError(error))
+          timer = setTimeout(() => void load(), deferredOverviewRetryDelay(attempts++));
+        else setError(String(error));
+      }
     };
+    void load();
+    return () => { live = false; clearTimeout(timer); };
   }, [source.track_id, source.signature, source.video, source.audio]);
   const pixels = clipDuration(clip) * scale;
   const lo = Math.max(0, viewport.left - clip.start_ms * scale - 164),
@@ -81,27 +89,31 @@ export const WorkshopClipMedia = memo(function WorkshopClipMedia({
       </div>
     );
   }
+  if (error) return <span className="vj-wave-error" role="status">{error}</span>;
   if (!wave?.amp.length) return null;
   const width = Math.max(1, hi - lo),
     count = Math.min(1200, Math.ceil(width / 2));
   const rangeStart = (wave.source_start ?? 0) * 1000,
     rangeEnd = (wave.source_end ?? wave.duration) * 1000;
   const bars = Array.from({ length: count }, (_, i) => {
-    const t = sourceAt(clip, (lo + ((i + 0.5) * width) / count) / scale),
-      index = Math.max(
-        0,
-        Math.min(
-          wave.amp.length - 1,
-          Math.floor(
-            ((t - rangeStart) / Math.max(1, rangeEnd - rangeStart)) *
-              wave.amp.length,
-          ),
-        ),
-      );
+    const fromTime = sourceAt(clip, (lo + i * width / count) / scale),
+      toTime = sourceAt(clip, (lo + (i + 1) * width / count) / scale);
+    const indexAt = (time: number) => Math.max(0, Math.min(wave.amp.length - 1,
+      Math.floor((time - rangeStart) / Math.max(1, rangeEnd - rangeStart) * wave.amp.length)));
+    const from = indexAt(fromTime), to = Math.max(from + 1, Math.ceil((toTime - rangeStart) / Math.max(1, rangeEnd - rangeStart) * wave.amp.length));
+    const values: number[] = [];
+    let red = 0, green = 0, blue = 0, weight = 0;
+    for (let j = from; j < Math.min(wave.amp.length, to); j++) {
+      const value = wave.amp[j], w = value + .001;
+      values.push(value); red += wave.r[j] * w; green += wave.g[j] * w; blue += wave.b[j] * w; weight += w;
+    }
+    values.sort((a, b) => a - b);
+    const middle = Math.floor(values.length / 2);
+    const amplitude = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
     return {
       x: (i * width) / count,
-      h: Math.max(1, wave.amp[index] * 28),
-      color: `rgb(${wave.r[index] ?? 110},${wave.g[index] ?? 150},${wave.b[index] ?? 190})`,
+      h: Math.max(1, Math.min(1, amplitude) * 44),
+      color: `rgb(${Math.round(red / weight)},${Math.round(green / weight)},${Math.round(blue / weight)})`,
     };
   });
   return (
@@ -109,14 +121,14 @@ export const WorkshopClipMedia = memo(function WorkshopClipMedia({
       className="vj-wave-strip"
       aria-hidden="true"
       style={{ left: lo, width }}
-      viewBox={`0 0 ${width} 36`}
+      viewBox={`0 0 ${width} 60`}
       preserveAspectRatio="none"
     >
       {bars.map((b, i) => (
         <rect
           key={i}
           x={b.x}
-          y={18 - b.h / 2}
+          y={60 - b.h}
           width={Math.max(1, width / count - 1)}
           height={b.h}
           fill={b.color}

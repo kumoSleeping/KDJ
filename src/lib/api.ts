@@ -908,6 +908,8 @@ export const api = {
   intakeWorkshop: (input: import("../types/workshop").WorkshopIntake) => input.paths.length && bridge().importWorkshopFiles
     ? bridge().importWorkshopFiles!(input)
     : post<import("../types/workshop").WorkshopIntakeResult>("/workshop/intake", input),
+  rhythm: (id: number) => request<import("../types/workshop").RhythmResponse>(`/library/rhythm/${id}`),
+  analyzeRhythm: (id: number, precise = false, force = false) => post<{job_id: string | null; queued: number}>(`/library/rhythm/${id}`, {precise, force}),
   workshop: () => request<WorkshopSnapshot>("/workshop"),
   createWorkshop: () => post<WorkshopSnapshot>("/workshop", {}),
   editWorkshop: (id: string, revision: number, edit: WorkshopEdit) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ revision, ...edit }) }),
@@ -1094,7 +1096,7 @@ export const api = {
     trackIds: number[] | null,
     force = false,
     priority = false,
-    version: "v1" | "v2" | "v3" = "v1",
+    version: "v1" | "v2" | "v3" | "v4" = "v1",
     limit?: number,
     folder = "",
   ) =>

@@ -346,7 +346,7 @@ export interface LibraryStore {
     trackIds: number[] | null,
     force?: boolean,
     priority?: boolean,
-    version?: "v1" | "v2" | "v3",
+    version?: "v1" | "v2" | "v3" | "v4",
     limit?: number,
     folder?: string,
   ): Promise<AnalyzeResponseLike>;

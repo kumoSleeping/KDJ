@@ -5,6 +5,7 @@ pub mod db;
 pub mod folders;
 pub mod scan;
 pub mod service;
+pub mod rhythm;
 
 pub use db::Database;
 pub use service::LibraryService;

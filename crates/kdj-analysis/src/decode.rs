@@ -636,6 +636,28 @@ mod tests {
     }
 
     #[test]
+    fn streaming_decode_preserves_packet_phase_and_cancels_before_io() {
+        assert!(stream_mono(Path::new("/must-not-open.wav"),22050,&||true,|_|panic!("canceled callback")).unwrap().is_none());
+        let path=std::env::temp_dir().join(format!("kdj-stream-phase-{}.wav",std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {fn drop(&mut self){let _=std::fs::remove_file(&self.0);}}
+        let _cleanup=Cleanup(path.clone());
+        write_silence_wav(&path,44100,44100);
+        let mut wav=std::fs::read(&path).unwrap();
+        for (i,pair) in wav[44..].chunks_mut(2).enumerate(){
+            let value=((i as f64*0.067).sin()*28000.) as i16;pair.copy_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(&path,wav).unwrap();
+        let expected=decode_audio(&path,22050,None).unwrap();
+        let mut actual=vec![];let mut largest=0;
+        let duration=stream_mono(&path,22050,&||false,|packet|{largest=largest.max(packet.len());actual.extend_from_slice(packet);}).unwrap().unwrap();
+        assert!((duration-1.).abs()<1./22050.);assert!(largest<22050/4);
+        assert_eq!(actual.len(),expected.samples.len());
+        let error=actual.iter().zip(&expected.samples).map(|(a,b)|(a-b).abs()).fold(0.,f32::max);
+        assert!(error<1e-5,"{error}");
+    }
+
+    #[test]
     fn probe_duration_reads_the_header_without_decoding_pcm() {
         let path =
             std::env::temp_dir().join(format!("kdj-probe-duration-{}.wav", std::process::id()));
@@ -647,4 +669,75 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+/// Bounded, gapless mono decode. The sinc phase and its left/right context survive packets.
+/// Only a codec packet and the resampling kernel's overlap remain resident.
+pub fn stream_mono(
+    path: &Path,
+    target_sr: u32,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    mut consume: impl FnMut(&[f32]),
+) -> Result<Option<f64>> {
+    use std::collections::VecDeque;
+    use symphonia::core::errors::Error;
+    if cancelled() { return Ok(None); }
+    anyhow::ensure!(target_sr>0,"采样率无效");
+    let input = MediaSourceStream::new(Box::new(File::open(path)?), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|s| s.to_str()) { hint.with_extension(ext); }
+    let probe = symphonia::default::get_probe().format(&hint, input,
+        &FormatOptions { enable_gapless: true, ..Default::default() }, &MetadataOptions::default())?;
+    let mut format = probe.format;
+    let track = format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).context("没有音轨")?;
+    let id = track.id;
+    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
+    let mut source_sr = 0;
+    let mut mono = VecDeque::<f32>::new();
+    let (mut origin, mut total, mut base, mut phase, mut emitted) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut kernel: Option<Arc<SincKernel>> = None;
+    loop {
+        if cancelled() { return Ok(None); }
+        let packet = match format.next_packet() {
+            Ok(p) => Some(p),
+            Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => None,
+            Err(e) => return Err(e.into()),
+        };
+        let eof = packet.is_none();
+        if let Some(packet) = packet {
+            if packet.track_id() != id { continue; }
+            let audio = decoder.decode(&packet)?;
+            let spec = *audio.spec();
+            if source_sr == 0 { source_sr = spec.rate; kernel = Some(sinc_kernel(source_sr, target_sr)); }
+            if source_sr != spec.rate { bail!("音轨中途改变采样率"); }
+            let mut samples = SampleBuffer::<f32>::new(audio.capacity() as u64, spec);
+            samples.copy_interleaved_ref(audio);
+            let channels = spec.channels.count().max(1);
+            for frame in samples.samples().chunks(channels) {
+                let v = frame.iter().copied().sum::<f32>() / (channels as f32).sqrt();
+                mono.push_back(if v.is_finite() { v } else { 0. }); total += 1;
+            }
+        }
+        let Some(k) = &kernel else { bail!("解码结果为空"); };
+        let limit = (total as u128 * target_sr as u128 / source_sr as u128) as usize;
+        let mut output = Vec::new();
+        while emitted < limit && (eof || base + (RESAMPLE_TAPS as usize) < total) {
+            if emitted % 2048 == 0 && cancelled() { return Ok(None); }
+            let first = base as i64 - RESAMPLE_TAPS + 1;
+            let weights = &k.weights[phase * RESAMPLE_KERNEL_WIDTH..(phase + 1) * RESAMPLE_KERNEL_WIDTH];
+            let mut value = 0.;
+            for (offset, weight) in weights.iter().enumerate() {
+                let index = (first + offset as i64).clamp(0, total as i64 - 1) as usize;
+                value += mono[index - origin] as f64 * weight;
+            }
+            output.push(value as f32); emitted += 1;
+            base += k.base_step; phase += k.phase_step;
+            if phase >= k.phase_count { phase -= k.phase_count; base += 1; }
+        }
+        consume(&output);
+        let discard = base.saturating_sub(RESAMPLE_TAPS as usize).saturating_sub(origin).min(mono.len());
+        mono.drain(..discard); origin += discard;
+        if eof { break; }
+    }
+    Ok(Some(emitted as f64 / target_sr as f64))
 }

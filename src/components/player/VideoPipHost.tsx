@@ -34,11 +34,11 @@ import {
 import { previewGain, useCrossfade } from "../../lib/crossfade";
 import { useMasterVolume } from "../../lib/masterVolume";
 import {
-  LocalVideoSynchronizer,
+  VideoPlaybackEngine,
   applyLocalVideoClock,
   VideoSeekEchoGuard,
   VideoTransportEchoGuard,
-} from "../../lib/localVideoSync";
+} from "../../lib/videoPlaybackEngine";
 import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
 import {
   YoutubeEmbedController,
@@ -310,11 +310,11 @@ export function VideoPipHost() {
   const networkVideoWatchdogRef = useRef(0);
   const networkRetryRef = useRef({ key: "", count: 0 });
   const focusedPreviewKeyRef = useRef<string | null>(null);
-  const localSynchronizerRef = useRef<LocalVideoSynchronizer | null>(null);
+  const localSynchronizerRef = useRef<VideoPlaybackEngine | null>(null);
   const videoSeekEchoGuardRef = useRef<VideoSeekEchoGuard | null>(null);
   const videoTransportEchoGuardRef = useRef<VideoTransportEchoGuard | null>(null);
   if (!localSynchronizerRef.current) {
-    localSynchronizerRef.current = new LocalVideoSynchronizer();
+    localSynchronizerRef.current = new VideoPlaybackEngine();
   }
   if (!videoSeekEchoGuardRef.current) {
     videoSeekEchoGuardRef.current = new VideoSeekEchoGuard();
@@ -1246,8 +1246,12 @@ export function VideoPipHost() {
         );
         return;
       }
-      video.currentTime = Math.max(0, at as number);
-      useVideoPip.getState().setPosition(video.currentTime);
+      void localSynchronizerRef.current!.seek(video, Math.max(0, at as number)).catch((reason: unknown) => {
+        if (useVideoPip.getState().session !== current) return;
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        useVideoPip.getState().setError(reason instanceof Error ? reason.message : String(reason));
+      });
+      useVideoPip.getState().setPosition(localSynchronizerRef.current!.position(video));
     };
     const onToggle = () => {
       const current = useVideoPip.getState().session;
@@ -1751,7 +1755,11 @@ export function VideoPipHost() {
       );
       return;
     } else {
-      video.currentTime = next;
+      void localSynchronizerRef.current!.seek(video, next).catch((reason: unknown) => {
+        if (useVideoPip.getState().session !== current) return;
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        useVideoPip.getState().setError(reason instanceof Error ? reason.message : String(reason));
+      });
     }
     useVideoPip.getState().setPosition(next);
   };

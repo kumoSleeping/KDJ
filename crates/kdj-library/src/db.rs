@@ -117,6 +117,15 @@ CREATE TABLE IF NOT EXISTS track_bpm_key_analysis_v3 (
   analyzed_at TEXT NOT NULL,
   analysis_error TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS track_rhythm_v4 (
+ track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+ revision TEXT NOT NULL, signature TEXT NOT NULL, precise INTEGER NOT NULL,
+ bpm REAL, confidence REAL NOT NULL, file_mtime REAL,
+ result_json TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS cleanup_track_rhythm_v4 AFTER DELETE ON tracks BEGIN
+ DELETE FROM track_rhythm_v4 WHERE track_id = OLD.id;
+END;
 CREATE TABLE IF NOT EXISTS kdj_schema_migrations (
   name TEXT PRIMARY KEY,
   applied_at TEXT NOT NULL

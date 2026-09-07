@@ -45,7 +45,12 @@ export interface ClipFades {
   audio_out_ms: number;
   linear: boolean;
 }
+export interface VideoTransition {
+  duration_ms: number;
+  alignment: -1 | 0 | 1;
+}
 export interface WorkshopClip {
+  video_transition?: VideoTransition | null;
   display_duration_ms?: number | null;
   animation_offset_ms?: number;
   id: string;
@@ -59,6 +64,7 @@ export interface WorkshopClip {
   fades: ClipFades;
 }
 export interface WorkshopLayer {
+  grid?: WorkshopBeatGrid | null;
   id: string;
   source_id: string;
   clips: WorkshopClip[];
@@ -71,6 +77,7 @@ export interface WorkshopCanvas {
   initialized: boolean;
 }
 export interface WorkshopOutput {
+  format?: "mp4" | "wav" | "flac" | "mp3";
   name: string;
   directory: string;
   in_ms: number;
@@ -79,7 +86,13 @@ export interface WorkshopOutput {
   acceleration:
     "auto" | "software" | "video_toolbox" | "nvidia" | "intel" | "amd";
 }
+export interface WorkshopMarker {
+  id: string;
+  position_ms: number;
+  number: number;
+}
 export interface CompositionProject {
+  markers?: WorkshopMarker[];
   id: string;
   revision: number;
   name: string;
@@ -108,7 +121,7 @@ export interface WorkshopSnapshot {
 }
 export type WorkshopEdit = Pick<
   CompositionProject,
-  "name" | "layers" | "canvas" | "output"
+  "name" | "layers" | "canvas" | "output" | "markers"
 >;
 export type ClipHandle = "move" | "in" | "out" | "fade_in" | "fade_out" | "audio_fade_in" | "audio_fade_out";
 
@@ -146,3 +159,8 @@ export interface WorkshopPositionResults {
 export interface WorkshopIntake { project_id: string | null; revision?: number; track_ids: number[]; paths: string[]; at_ms: number; }
 export interface WorkshopIntakeResult { snapshot: WorkshopSnapshot; before: CompositionProject | null; project_id: string | null; errors: string[]; }
 export interface WorkshopNativeDrop { id: number; phase: "enter" | "over" | "drop" | "leave"; x: number; y: number; paths: string[]; folders?: string[]; error?: string | null; }
+
+export interface TempoSegment { start_seconds: number; end_seconds: number; bpm: number; confidence: number; }
+export interface RhythmAnalysis { audio_offset_seconds?: number; revision: string; precise: boolean; duration: number; bpm: number | null; confidence: number; beats: number[]; downbeats: number[]; downbeat_confidence: number; segments: TempoSegment[]; coverage: [number, number][]; }
+export interface RhythmResponse { analysis: RhythmAnalysis | null; status: {job_id: string; phase: string; error: string} | null; }
+export interface WorkshopBeatGrid { analysis_revision: string; source_signature: string; beats: number[]; downbeats: number[]; segments: TempoSegment[]; beats_per_bar: number; downbeat_confidence: number; locked: boolean; }

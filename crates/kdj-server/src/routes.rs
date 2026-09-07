@@ -250,6 +250,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/scan", post(library_scan))
         .route("/api/library/scan/cancel", post(library_scan_cancel))
         .route("/api/library/analyze", post(library_analyze))
+        .route("/api/library/rhythm/{id}", get(crate::rhythm::read).post(crate::rhythm::start))
         .route("/api/library/analyze/cancel", post(library_analyze_cancel))
         .route("/api/library/audio/{id}", get(library_audio))
         .route("/api/library/video/{id}", get(library_video))
@@ -7021,6 +7022,7 @@ async fn library_analyze(
     Json(payload): Json<AnalyzeRequest>,
 ) -> ApiResult<Json<AnalyzeResponse>> {
     let pending = match payload.version {
+        kdj_core::models::AnalysisVersion::V4 => state.library.pending_rhythm_ids(payload.track_ids.as_deref(), payload.force, payload.limit, &payload.folder)?,
         kdj_core::models::AnalysisVersion::V1 => state
             .library
             .pending_analysis_ids(payload.track_ids.as_deref(), payload.force)?,
@@ -7041,6 +7043,7 @@ async fn library_analyze(
     // `priority` 必须透传：前端「放到一首还没分析的歌」就是靠它插队的，
     // 吞掉这个字段的话，那一首会跟着「停止分析」一起被掐掉（见 jobs.rs）
     let job_id = match payload.version {
+        kdj_core::models::AnalysisVersion::V4 => crate::rhythm::spawn(state.clone(), pending, payload.priority, payload.precise),
         kdj_core::models::AnalysisVersion::V1 => {
             crate::jobs::spawn_analysis(state.clone(), pending, payload.priority)
         }

@@ -5,13 +5,13 @@ import { formatDuration } from "../../lib/format";
 /** Shared by local playback and the workshop. Chrome stays inside the picture. */
 export function FloatingVideoControls({ title, playing, position, duration, fullscreen, onClose, onToggle, onFullscreen, extra, error, closeLabel = "关闭预览" }: {
   title: string; playing: boolean; position: number; duration: number; fullscreen: boolean;
-  onClose(): void; onToggle(): void; onFullscreen(): void; extra?: ReactNode; error?: string; closeLabel?: string;
+  onClose?(): void; onToggle(): void; onFullscreen(): void; extra?: ReactNode; error?: string; closeLabel?: string;
 }) {
   return <div className="kd-pip-float-chrome" title={title}>
     <div className="kd-pip-float-top">
       <span className="kd-truncate">{title}</span>
-      <button type="button" className="kd-pip-float-x" aria-label={closeLabel}
-        onClick={e => { e.stopPropagation(); onClose(); }}><X size={13} /></button>
+      {onClose && <button type="button" className="kd-pip-float-x" aria-label={closeLabel}
+        onClick={e => { e.stopPropagation(); onClose(); }}><X size={13} /></button>}
     </div>
     <div className="kd-pip-float-bottom">
       <button type="button" aria-label={playing ? "暂停" : "播放"}

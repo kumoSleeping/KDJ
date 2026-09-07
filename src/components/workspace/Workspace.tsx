@@ -1858,19 +1858,24 @@ export function Workspace() {
     </button>
   ) : null;
 
+  const [workshopToolbarTarget, setWorkshopToolbarTarget] = useState<HTMLDivElement | null>(null);
+  const [workshopBackTarget, setWorkshopBackTarget] = useState<HTMLSpanElement | null>(null);
   const compositionPinButton = showComposition && !showSearchTips ? (
+    <>
+    <div className="vj-toolbar-slot" ref={setWorkshopToolbarTarget} />
     <button
       type="button"
       className="kd-aside-head-close"
       data-pinned={compositionPinned ? "true" : undefined}
       aria-pressed={compositionPinned}
-      aria-label={compositionPinned ? "取消固定 VJ 工坊" : "固定 VJ 工坊"}
-      title={compositionPinned ? "VJ 工坊已固定；点击恢复随内容切换自动收起" : "固定 VJ 工坊，不被选歌和切换列表顶掉"}
+      aria-label={compositionPinned ? "取消固定 工作站" : "固定 工作站"}
+      title={compositionPinned ? "工作站已固定；点击恢复随内容切换自动收起" : "固定 工作站，不被选歌和切换列表顶掉"}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={() => setCompositionPinned(!compositionPinned)}
     >
       <Pin size={13} fill={compositionPinned ? "currentColor" : "none"} />
     </button>
+    </>
   ) : null;
 
   const togglePlayingDetailPin = useCallback(() => {
@@ -1975,7 +1980,7 @@ export function Workspace() {
           : queueAside
             ? "下载队列"
             : showComposition
-              ? "VJ 工坊"
+              ? "工作站"
             : showTrackFaceSwitch
               ? trackAsideFace === "lyrics"
                 ? "歌词"
@@ -1985,6 +1990,8 @@ export function Workspace() {
                 : detailAside
                   ? "曲目详情"
                   : "";
+  const workshopBackSlot = asideLabel === "工作站"
+    ? <span className="vj-workshop-back-slot" ref={setWorkshopBackTarget} /> : null;
   const asidePanel = showSearchTips ? (
     <SearchTipsPanel />
   ) : showFolders ? (
@@ -2020,7 +2027,7 @@ export function Workspace() {
   ) : queueAside ? (
     <QueuePanel />
   ) : showComposition ? (
-    <CompositionWorkshop />
+    <CompositionWorkshop toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />
   ) : lyricsAside ? (
     <LyricsView track={lyricsTrack} />
   ) : detailAside ? trackDetailPanel : null;
@@ -2958,6 +2965,7 @@ export function Workspace() {
                   <aside className="kd-split-aside kd-pop-panel" ref={localAsideRef}>
                     <AsideHead
                       title={asideLabel}
+                      leading={workshopBackSlot}
                       face={showTrackFaceSwitch ? trackAsideFace : undefined}
                       onFaceChange={showTrackFaceSwitch ? onTrackAsideFace : undefined}
                       tools={asideTools}
@@ -2982,7 +2990,7 @@ export function Workspace() {
             heading={
               showTrackFaceSwitch ? (
                 <AsideFaceSwitch face={trackAsideFace} onFaceChange={onTrackAsideFace} />
-              ) : undefined
+              ) : workshopBackSlot ? <span className="vj-editor-navigation">{workshopBackSlot}<span>{asideLabel}</span></span> : undefined
             }
             tools={asideTools}
             onClose={closeAsideForUser}
