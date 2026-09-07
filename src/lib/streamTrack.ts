@@ -45,6 +45,7 @@ const trackById = new Map<number, Track>();
 const metaListeners = new Map<number, Set<() => void>>();
 let nextId = -1;
 let publishedStreamTrackId: number | null = null;
+let streamQueueConstructionDepth = 0;
 
 /**
  * 纯浏览器 preview 没有 Rust coordinator 时钟。旧 Android 在线链路曾把这条浏览器
@@ -540,6 +541,33 @@ export function makeSongStreamTrack(
   return track;
 }
 
+/**
+ * Build and publish a new playback queue atomically. Until the links and new root are installed,
+ * the previous queue is still protected and LRU eviction could delete the new head or successors.
+ * Publication belongs to this explicit play intent, not a later React passive effect.
+ */
+export function publishSongStreamQueue(
+  source: SongSource,
+  following: readonly SongSource[],
+  bypassCache = false,
+): Track {
+  streamQueueConstructionDepth++;
+  try {
+    const track = makeSongStreamTrack(source, "", bypassCache);
+    let tail = track;
+    for (const source of following) {
+      const next = makePendingSongStreamTrack(source);
+      setStreamNextTrack(tail, next);
+      tail = next;
+    }
+    publishStreamTrack(track);
+    return track;
+  } finally {
+    streamQueueConstructionDepth--;
+    pruneStreamTracks();
+  }
+}
+
 /** 波形等后台任务只拿到负 id 时，取回仍存活的在线试听快照。 */
 export function streamTrackById(id: number): Track | null {
   return id < 0 ? touchStreamTrack(id)?.track ?? null : null;
@@ -644,7 +672,7 @@ function protectedStreamTrackIds(): Set<number> {
 }
 
 function pruneStreamTracks(): void {
-  if (metaById.size <= STREAM_TRACK_CACHE_LIMIT) return;
+  if (streamQueueConstructionDepth > 0 || metaById.size <= STREAM_TRACK_CACHE_LIMIT) return;
   const protectedIds = protectedStreamTrackIds();
   for (const id of [...metaById.keys()]) {
     if (metaById.size <= STREAM_TRACK_CACHE_LIMIT) break;

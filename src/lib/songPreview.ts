@@ -7,10 +7,8 @@
 import { playTrack } from "./playTrack";
 import { getPlayerSession, subscribePlayerSession } from "./playerSession";
 import {
-  makePendingSongStreamTrack,
-  makeSongStreamTrack,
   preloadStreamTrack,
-  setStreamNextTrack,
+  publishSongStreamQueue,
 } from "./streamTrack";
 import type { SongSource } from "../types";
 
@@ -197,18 +195,11 @@ export async function playSongPreview(request: SongPreviewRequest): Promise<void
       ? item.artist.split(",").map((part) => part.trim()).filter(Boolean)
       : item.source.artists,
   });
-  const track = makeSongStreamTrack(
+  const track = publishSongStreamQueue(
     normalize(request),
-    "",
+    (request.queue ?? []).map(normalize),
     request.bypassCache === true,
   );
-  const following = (request.queue ?? []).map((item) =>
-    makePendingSongStreamTrack(normalize(item)),
-  );
-  for (let index = 0; index < following.length - 1; index += 1) {
-    setStreamNextTrack(following[index], following[index + 1]);
-  }
-  setStreamNextTrack(track, following[0] ?? null);
   publishSongPreviewState({
     phase: "resolving",
     requestId: mySeq,

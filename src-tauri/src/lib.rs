@@ -23,6 +23,8 @@ mod data_recovery;
 #[cfg(desktop)]
 mod desktop_media;
 #[cfg(desktop)]
+mod diagnostics;
+#[cfg(desktop)]
 mod folder_drop;
 /// 桌面 + Android 共用 playback_* 命令；iOS 仍走 native-audio 插件。
 #[cfg(any(desktop, target_os = "android"))]
@@ -2773,20 +2775,24 @@ fn media_permission_granted() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     kdj_core::ensure_rustls_ring();
+    #[cfg(desktop)]
+    if cli::maybe_handoff_gui() {
+        return;
+    }
+
+    #[cfg(desktop)]
+    let (diagnostic_writer, diagnostic_path) = diagnostics::initialize();
     let debug_build = cfg!(debug_assertions);
-    tracing_subscriber::fmt()
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))
         .with_target(true)
         .with_thread_ids(debug_build)
         .with_thread_names(debug_build)
         .with_file(debug_build)
-        .with_line_number(debug_build)
-        .init();
-
+        .with_line_number(debug_build);
     #[cfg(desktop)]
-    if cli::maybe_handoff_gui() {
-        return;
-    }
+    let subscriber = subscriber.with_ansi(false).with_writer(move || diagnostic_writer.clone());
+    subscriber.init();
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -3012,9 +3018,17 @@ pub fn run() {
 
     #[cfg(desktop)]
     {
-        let app = builder
-            .build(tauri::generate_context!())
-            .expect("KDJ 启动失败");
+        let app = match builder.build(tauri::generate_context!()) {
+            Ok(app) => app,
+            Err(error) => {
+                diagnostics::startup_failed(
+                    &error,
+                    diagnostic_path.as_deref(),
+                    !NO_GUI.load(std::sync::atomic::Ordering::SeqCst),
+                );
+                std::process::exit(1);
+            }
+        };
         app.run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = &event {
                 capture_main_window_state(app_handle);

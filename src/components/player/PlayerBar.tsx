@@ -145,6 +145,7 @@ import {
 } from "../../lib/playbackTrackSource";
 import {
   PLAYER_COMMAND_EVENT,
+  playerSessionFailed,
   publishPlayerSession,
   type PlayerCommand,
   type PlayerSessionStatus,
@@ -420,6 +421,7 @@ function PlayerDeck({
   dropActive,
   detailEnabled,
   resolving = false,
+  failed = false,
   onOpen,
   onDragOver,
   onDragLeave,
@@ -435,6 +437,7 @@ function PlayerDeck({
   detailEnabled: boolean;
   /** 在线直链解析中：封面标题已就位，媒体尚未可播。 */
   resolving?: boolean;
+  failed?: boolean;
   onOpen(): void;
   onDragOver(event: React.DragEvent<HTMLElement>): void;
   onDragLeave(event: React.DragEvent<HTMLElement>): void;
@@ -443,7 +446,7 @@ function PlayerDeck({
   const [coverFailed, setCoverFailed] = useState(false);
   useEffect(() => setCoverFailed(false), [view?.key]);
   // 接歌途中也只保留这两个身份；真正交接完成后，父组件才交换 active。
-  const stateLabel = resolving ? "加载中" : active ? "正在播放" : "下一首";
+  const stateLabel = failed ? "播放失败" : resolving ? "加载中" : active ? "正在播放" : "下一首";
   return (
     <div
       className="kd-player-deck"
@@ -810,6 +813,8 @@ export function PlayerBar() {
     else useToastStore.getState().dismiss();
   }, []);
   const [browserMediaStatus, setBrowserMediaStatus] = useState<PlayerSessionStatus>("idle");
+  const [failedLoadTrackId, setFailedLoadTrackId] = useState<number | null>(null);
+  const playbackFailed = playerSessionFailed(track?.id ?? null, failedLoadTrackId, browserMediaStatus, notice);
   /** 已恢复的在线曲目首次解析失败后，登录/联网再按播放可原地重走装源。 */
   const [sourceLoadEpoch, setSourceLoadEpoch] = useState(0);
   const [deckDropSide, setDeckDropSide] = useState<"left" | "right" | null>(null);
@@ -914,10 +919,9 @@ export function PlayerBar() {
   }, [track?.id]);
 
   useEffect(() => {
-    const fatal = /播放失败|放不了|解析失败|无法播放/.test(notice);
     const status: PlayerSessionStatus = !track
       ? "idle"
-      : fatal
+      : playbackFailed
         ? "error"
         : isStreamTrack(track) && browserMediaStatus !== "idle"
           ? browserMediaStatus
@@ -930,9 +934,9 @@ export function PlayerBar() {
       playing,
       position,
       duration,
-      error: fatal ? notice : "",
+      error: playbackFailed ? notice : "",
     });
-  }, [track?.id, playing, position, duration, notice, browserMediaStatus]);
+  }, [track?.id, playing, position, duration, notice, browserMediaStatus, playbackFailed]);
   // 独立歌词窗可能在主窗发布快照之后才创建；让它主动请求一次当前曲目/时钟，
   // 不依赖跨 WKWebView 的 localStorage 是否可见，也不依赖事件是否错过。
   useEffect(() => {
@@ -1855,6 +1859,9 @@ export function PlayerBar() {
       (applyAutomaticCue && track.cue_ms != null ? Math.max(0, track.cue_ms / 1000) : 0);
     autoInOutCueRef.current = null;
     const loadGeneration = ++nativeLoadGenerationRef.current;
+    setNotice("");
+    setFailedLoadTrackId(null);
+    setBrowserMediaStatus(isUnresolvedStreamTrack(track) ? "resolving" : "loading");
     const sourceIntentId = trackPlayIntentRef.current?.trackId === track.id
       ? trackPlayIntentRef.current.intentId
       : 0;
@@ -1870,6 +1877,8 @@ export function PlayerBar() {
       // online source fails, explicitly stop that retained Deck; updating React state alone
       // would show the online title while a stale local song kept sounding underneath.
       commitPlaying(false);
+      setFailedLoadTrackId(track.id);
+      setBrowserMediaStatus("error");
       if (player) void player.pause().catch(() => {});
       else djEngine.hardPause(djEngine.frontElement());
     };
@@ -2658,6 +2667,7 @@ export function PlayerBar() {
         state.status !== "loading"
       ) {
         performance.mark(`kdj-play-handoff-${latestPlayIntentRef.current}`);
+        if (state.status !== "error") setFailedLoadTrackId(null);
         nativeLoadTargetRef.current = null;
         nativeLoadInFlightRef.current = false;
         if (replacementFallbackRef.current?.targetId === loadTarget.trackId) {
@@ -3759,6 +3769,7 @@ export function PlayerBar() {
   const transportLoading = Boolean(
     !pipDriving &&
       streaming &&
+      !playbackFailed &&
       !playing &&
       (isUnresolvedStreamTrack(displayTrack) ||
         nativeLoadInFlightRef.current ||
@@ -4600,8 +4611,9 @@ export function PlayerBar() {
           resolving={Boolean(
             leftDeckView?.track &&
               (performancePendingDecks[0]?.id === leftDeckView.track.id ||
-                (visualActiveIndex === 0 && isUnresolvedStreamTrack(leftDeckView.track))),
+                (visualActiveIndex === 0 && !playbackFailed && isUnresolvedStreamTrack(leftDeckView.track))),
           )}
+          failed={visualActiveIndex === 0 && playbackFailed}
           dropActive={deckDropSide === "left"}
           detailEnabled={!portrait || visualActiveIndex === 0}
           onOpen={() => openDeck(leftDeckView, visualActiveIndex === 0)}
@@ -4868,8 +4880,9 @@ export function PlayerBar() {
           resolving={Boolean(
             rightDeckView?.track &&
               (performancePendingDecks[1]?.id === rightDeckView.track.id ||
-                (visualActiveIndex === 1 && isUnresolvedStreamTrack(rightDeckView.track))),
+                (visualActiveIndex === 1 && !playbackFailed && isUnresolvedStreamTrack(rightDeckView.track))),
           )}
+          failed={visualActiveIndex === 1 && playbackFailed}
           dropActive={deckDropSide === "right"}
           detailEnabled={!portrait || visualActiveIndex === 1}
           onOpen={() => openDeck(rightDeckView, visualActiveIndex === 1)}

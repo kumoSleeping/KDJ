@@ -14,6 +14,19 @@ export type PlayerSessionStatus =
   | "ended"
   | "error";
 
+/** A load failure belongs to the track, not the lifetime of its dismissible toast. */
+export function playerSessionFailed(
+  trackId: number | null,
+  failedLoadTrackId: number | null,
+  mediaStatus: PlayerSessionStatus,
+  notice: string,
+): boolean {
+  return trackId !== null && (
+    failedLoadTrackId === trackId || mediaStatus === "error"
+    || /播放失败|放不了|解析失败|无法播放/.test(notice)
+  );
+}
+
 export interface PlayerSessionSnapshot {
   trackId: number | null;
   status: PlayerSessionStatus;

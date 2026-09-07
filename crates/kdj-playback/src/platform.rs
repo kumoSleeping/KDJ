@@ -77,9 +77,41 @@ impl PlaybackOutputFactory for CpalOutputFactory {
         &self,
         mut on_error: Box<dyn FnMut(String) + Send>,
     ) -> Result<Box<dyn PlaybackOutput>, String> {
-        open_dynamic_default(256, move |error| on_error(error.to_string()))
-            .map(|player| Box::new(player) as Box<dyn PlaybackOutput>)
-            .map_err(|error| error.to_string())
+        guard_output_open(|| {
+            open_dynamic_default(256, move |error| on_error(error.to_string()))
+                .map(|player| Box::new(player) as Box<dyn PlaybackOutput>)
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+// Some WASAPI initialization failures in CPAL still panic instead of returning an Error.
+// Recover only the unopened output boundary: no installed Deck/source ownership is resumed after
+// a panic. Callback faults, access violations and destructor failures are not hidden here.
+fn guard_output_open<T>(open: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(open)).unwrap_or_else(|panic| {
+        let detail = panic.downcast_ref::<String>().map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown audio backend panic");
+        Err(format!("打开音频输出失败：{detail}"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guard_output_open;
+
+    #[test]
+    fn output_initialization_panic_does_not_prevent_a_retry() {
+        let result = guard_output_open::<()>(|| panic!("cpal: could not create output stream event"));
+        assert!(result.unwrap_err().contains("could not create output stream event"));
+        assert_eq!(guard_output_open(|| Ok(48_000)), Ok(48_000));
+    }
+
+    #[test]
+    fn output_initialization_preserves_normal_errors() {
+        assert_eq!(guard_output_open::<()>(|| Err("no default audio device".into())),
+            Err("no default audio device".into()));
     }
 }
 

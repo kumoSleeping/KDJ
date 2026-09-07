@@ -21,7 +21,7 @@ glib = { path = "vendor/glib-0.18.5" }
 hls-transmux = { path = "vendor/hls-transmux" }
 
 [workspace.package]
-version = "1.0.0-rc4"
+version = "1.0.0-rc5"
 edition = "2021"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -33,7 +33,9 @@ license = "GPL-3.0-or-later"
 opt-level = "s"
 lto = true
 codegen-units = 1
-panic = "abort"
+# Decoder workers use catch_unwind to report failures and keep the next track playable.
+# Aborting here bypasses that boundary in shipped builds (including Windows GUI builds).
+panic = "unwind"
 strip = true
 
 # Latency-sensitive workspace crates. These own decode, waveform, realtime playback and STEM DSP.

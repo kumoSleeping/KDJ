@@ -59,6 +59,9 @@ jobs:
       - name: 曲库加载与滚动回归
         run: npm run test:library
 
+      - name: 播放队列与失败恢复回归
+        run: node --test scripts/test-playback-recovery.mjs
+
       - name: 前端生产构建
         run: npm run tauri:web:build && npm run size:frontend:check
 
@@ -177,6 +180,15 @@ jobs:
 
       - name: 安装前端依赖
         run: npm ci
+
+      - name: Windows 播放异常与日志回归
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p kdj-player --lib pipeline_reports_decoder_panic_and_allows_the_next_stream
+          cargo test -p kdj-playback --lib platform::tests
+          cargo test -p kdj-app --lib diagnostics::tests
 
       # M7（Tauri 壳）落地之前 src-tauri/ 还不完整。这里探测一下而不是硬跑，
       # 让这条流水线在壳做好之前仍然能当"三平台 Rust 测试"用，红叉只留给真问题。
