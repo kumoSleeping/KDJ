@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { WorkshopSeekGate } from "../src/lib/workshopPreviewPolicy";
+import { previewVideoTiming, WorkshopSeekGate } from "../src/lib/workshopPreviewPolicy";
 import {
   adjustClip,
   clipDuration,
@@ -325,6 +325,51 @@ test("preview seek coalesces rapid drags and never interrupts an in-flight decod
   assert.equal(gate.request(video, 16, false, 30, 1680), 16);
   assert.equal(gate.request(video, 17, true, 30, 1800), null);
   assert.equal(gate.request(video, 17, true, 30, 2200), 17);
+});
+
+test("incoming 1.5x picture runs invisibly before the cut without restarting its source clock", () => {
+  const c = clip();
+  c.start_ms = 78915.779935;
+  c.source_in_ms = 8273.316446;
+  c.source_out_ms = 10000;
+  c.speed = {...c.speed, preset: "constant", start: 1.5};
+  for (let ms = -2500; ms <= 500; ms += 25) {
+    const t = previewVideoTiming(c, c.start_ms + ms, false);
+    assert.equal(t.running, true);
+    assert.equal(t.visible, ms >= 0);
+    assert.equal(t.preparing, ms < -1000, "finish corrective seeks before exposure");
+    assert.ok(Math.abs(t.target - (c.source_in_ms + ms * 1.5) / 1000) < 1e-8);
+  }
+  const stopped = previewVideoTiming(c, c.start_ms - 500, false, 0, false);
+  assert.equal(stopped.running, false, "pause/scrub retains the actual in-point");
+  assert.equal(stopped.target, c.source_in_ms / 1000);
+  assert.equal(previewVideoTiming(c, c.start_ms - 2501, false).running, false);
+  assert.equal(previewVideoTiming(c, c.start_ms + clipDuration(c), false).running, false);
+});
+
+test("preroll respects source headroom, proxy chunks, curves and projected transitions", () => {
+  const p = project(), c = p.layers[0].clips[0];
+  c.speed = {...c.speed, preset: "constant", start: 1.5};
+  c.start_ms = 2000; c.source_in_ms = 300;
+  assert.equal(previewVideoTiming(c, 1799, false).running, false, "no negative source time");
+  assert.equal(previewVideoTiming(c, 1800, false).target, 0);
+  assert.equal(previewVideoTiming(c, 1800, false).running, true);
+  assert.equal(previewVideoTiming(c, 1900, true).running, false, "proxy has no source handles");
+  assert.equal(previewVideoTiming(c, 2000, true, 1).running, false, "future proxy part stays paused");
+  c.speed.preset = "ramp";
+  assert.equal(previewVideoTiming(c, 1900, false).running, false);
+  c.speed.preset = "constant";
+  const right = structuredClone(c);
+  right.id = "right"; right.source_in_ms = 3000; right.source_out_ms = 6000;
+  c.source_out_ms = 1800;
+  right.start_ms = c.start_ms + clipDuration(c);
+  right.video_transition = {duration_ms: 130, alignment: 0};
+  p.layers[0].clips.push(right);
+  const projected = videoProject(p).layers[0].clips[1];
+  assert.ok(projected.start_ms < right.start_ms);
+  const atCut = previewVideoTiming(projected, right.start_ms, false);
+  assert.ok(Math.abs(atCut.target - right.source_in_ms / 1000) < 1e-8);
+  assert.equal(previewVideoTiming(projected, projected.start_ms - 100, false).visible, false);
 });
 
 test("editing a sliced fade does not resurrect a fade at the opposite cut", async () => {

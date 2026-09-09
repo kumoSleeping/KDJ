@@ -281,7 +281,6 @@ function WorkshopEditor() {
             </div>
           )}
         </div>
-        <div className="vj-edit-tools">
         <button
           type="button"
           aria-label={playback.playing ? "暂停作品" : "播放作品"}
@@ -295,9 +294,6 @@ function WorkshopEditor() {
           {playback.loading ? "准备预览" : ""}
         </span>
         <button type="button" aria-label="添加标记" title="Mark · M" disabled={!p} onClick={mark}>Mark</button>
-        <details className="vj-tools-menu">
-          <summary aria-label="剪辑工具" title="剪辑工具"><Scissors size={16} /></summary>
-          <div className="vj-menu">
         <button
           type="button"
           aria-label="向前微调"
@@ -341,19 +337,19 @@ function WorkshopEditor() {
           <Trash2 size={15} />删除
         </button>
 
-            <button type="button" disabled={!c} onClick={() => remove(true)}>
-              删除并闭合本行空隙
-            </button>
-            <button
-              type="button"
-              disabled={!c || p!.layers.length < 2}
-              onClick={() => {
-                setReference("");
-                setAlign(true);
-              }}
-            >
-              自动对齐
-            </button>
+        <button type="button" disabled={!c} onClick={() => remove(true)}>
+          删除并闭合本行空隙
+        </button>
+        <button
+          type="button"
+          disabled={!c || p!.layers.length < 2}
+          onClick={() => {
+            setReference("");
+            setAlign(true);
+          }}
+        >
+          自动对齐
+        </button>
         <button
           type="button"
           aria-label="上移图层"
@@ -370,12 +366,9 @@ function WorkshopEditor() {
         >
           <ArrowDown size={15} />下移图层
         </button>
-          </div>
-        </details>
         <button type="button" aria-label="时间轴吸附" aria-pressed={snap || barSnap}
           title="吸附片段边界与节拍线；Alt/Option 拖动临时关闭"
           onClick={() => useWorkshopStore.setState({snap: !(snap || barSnap), barSnap: !(snap || barSnap)})}><Magnet size={15} /></button>
-        </div>
         <WorkshopPictureTools />
         <button type="button" className="vj-preview-toggle" aria-label="打开作品预览小窗" title="预览小窗"
           aria-pressed={previewOpen && hasVideo} disabled={!hasVideo}

@@ -148,6 +148,27 @@ test('WebKit learns decode landing delay then plays three minutes without recurr
   assert.equal(video.seeks.length, 3, 'a real user seek still overrides the correction cooldown');
 });
 
+test('WebKit preroll learns its restart delay while hidden and crosses the cut already aligned', () => {
+  const e = environment(), video = new Video();
+  e.live.audibleRate = 1.5;
+  const engine = new e.sync.VideoPlaybackEngine('webkit');
+  let stalledUntil = 0;
+  const seeks = [];
+  for (let ms = -2500; ms <= 1000; ms += 50) {
+    e.setNow(ms + 3500); e.live.clientPresentationTimeMs = ms + 3500;
+    e.live.currentTime = 8 + ms / 1000 * 1.5;
+    if (ms >= stalledUntil) video.time += video.playbackRate * .05;
+    video.paused = false;
+    engine.followClock(video, e.media.getLocalVideoClock(10), (v, target) => {
+      seeks.push(ms); v.currentTime = target; stalledUntil = ms + 550;
+    }, () => assert.fail('hidden preparation does not need another decoder'), ms < -1000);
+    if (ms >= 0) assert.ok(Math.abs(video.time - e.live.currentTime) < .08,
+      `cut at ${ms}ms exposed a late source handle: ${video.time} / ${e.live.currentTime}`);
+  }
+  assert.equal(seeks.length, 2, 'initial decode and one learned-latency alignment');
+  assert.ok(seeks.every(ms => ms < -1000), 'no seek when the picture becomes visible');
+});
+
 test('WebKit backs off an uncorrectable decoder instead of repeatedly interrupting playback', () => {
   const e = environment(), video = new Video();
   e.native.duration = video.duration = 600; e.live.audibleRate = 1;

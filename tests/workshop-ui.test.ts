@@ -180,6 +180,13 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(editorToolbar.previousElementSibling, document.querySelector('.vj-timeline-scale'));
   assert.ok(editorToolbar.querySelector('.vj-picture-tools'), 'picture settings share the magnet toolbar');
   assert.ok(editorToolbar.querySelector('[aria-label="时间轴吸附"]'));
+  assert.equal(editorToolbar.querySelector('[aria-label="剪辑工具"]'), null, 'editing actions are not hidden behind a popup');
+  for (const label of ['向前微调', '向后微调', '剪断选中片段', '复制片段', '删除片段', '上移图层', '下移图层']) {
+    assert.ok(editorToolbar.querySelector(`:scope > button[aria-label="${label}"]`), `${label} wraps directly with the toolbar`);
+  }
+  for (const text of ['删除并闭合本行空隙', '自动对齐']) {
+    assert.ok([...editorToolbar.querySelectorAll(':scope > button')].some(button => button.textContent?.trim() === text), `${text} is directly available`);
+  }
   assert.equal(document.querySelector('[aria-label="画面工具"]'), null, 'there is no separate picture-settings band');
   assert.equal(editorToolbar.lastElementChild?.getAttribute('aria-label'), '打开作品预览小窗', 'picture-in-picture stays at the far right');
   assert.ok(editorToolbar.querySelector('[aria-label="作品菜单"]'), 'project menu belongs to the editor, not the shared card');

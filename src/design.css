@@ -10441,12 +10441,9 @@ button.kd-stream-status {
 .vj-speed-presets { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .2rem; }
 .vj-speed-presets > button { background: var(--kd-panel-inset); padding: .25rem; }
 .vj-tools { display: flex; align-items: center; gap: .2rem; padding: .3rem .65rem; border-top: 1px solid var(--kd-line-soft); border-bottom: 1px solid var(--kd-line-soft); flex: none; }
-.vj-tools-menu, .vj-menu-anchor { position: relative; }
-.vj-tools-menu > summary { display: flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; border-radius: 4px; list-style: none; }
-.vj-tools-menu > summary::-webkit-details-marker { display: none; }
+.vj-menu-anchor { position: relative; }
 .vj-menu { display: flex; flex-direction: column; position: absolute; z-index: 5; min-width: 180px; padding: .35rem; border: 1px solid var(--kd-line); border-radius: 6px; background: var(--kd-panel); box-shadow: 0 6px 22px #0003; }
 .vj-menu-anchor .vj-menu { top: 100%; right: 0; }
-.vj-tools-menu .vj-menu { bottom: 100%; left: 0; }
 .vj-menu > button { justify-content: flex-start; }
 .vj-menu > label { display: flex; flex-direction: column; padding: .4rem; gap: .4rem; }
 .vj-workshop .vj-properties-toggle { display: none; }
@@ -10675,7 +10672,6 @@ button.kd-stream-status {
 .vj-toolbar-slot { display: flex; min-width: 0; -webkit-app-region: no-drag; }
 .vj-toolbar-slot .vj-workshop-toolbar { min-height: 0; padding: 0; border: 0; }
 .vj-workshop-toolbar { gap: 1px; color: var(--kd-text); font-size: var(--kd-size-xs); }
-.vj-workshop-toolbar .vj-edit-tools { flex-wrap: nowrap; }
 .vj-workshop-toolbar button { padding: 3px 4px; min-height: 24px; background: transparent; }
 .vj-workshop-toolbar button:hover:not(:disabled), .vj-workshop-toolbar summary:hover { color: var(--kd-theme); background: transparent; }
 .vj-workshop-toolbar .vj-menu { top: 100%; bottom: auto; right: 0; left: auto; z-index: 50; }
@@ -10688,8 +10684,6 @@ button.kd-stream-status {
 .vj-timeline-time { display: flex; align-items: center; gap: 8px; flex: none; margin-left: auto; white-space: nowrap; color: var(--kd-muted); font-size: var(--kd-size-xs); font-variant-numeric: tabular-nums; }
 .vj-workshop .vj-tools { min-height: 36px; padding: 3px 6px; gap: 1px; flex-wrap: wrap; border-top: 0; }
 .vj-workshop .vj-tools > button { padding: 4px 6px; }
-.vj-edit-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 1px; }
-.vj-workshop .vj-edit-tools > button { padding: 4px 6px; }
 .vj-tools-trailing { display: flex; flex: 1 1 520px; min-width: 0; align-items: center; gap: 6px; }
 .vj-tools-trailing > button { margin-left: auto; flex: none; }
 .vj-picture-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 2px 6px; min-width: 0; font-size: var(--kd-size-xs); }
@@ -10746,7 +10740,6 @@ button.kd-stream-status {
 .vj-workshop .vj-task-heading { padding: 5px 8px; font-weight: 550; }
 .vj-task-export-meta { padding: 0 8px 4px 28px; font-size: 10px; }
 .vj-workshop .vj-export-settings > summary { padding-block: 5px; }
-.vj-workshop .vj-tools-menu .vj-menu { top: 100%; bottom: auto; }
 .vj-workshop .vj-menu { border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px #0002; }
 .vj-workshop .vj-menu > button { min-height: 27px; padding: 4px 7px; }
 .vj-workshop .vj-dialog { padding: 12px; gap: 10px; border-radius: 10px; box-shadow: 0 8px 28px #0003; }

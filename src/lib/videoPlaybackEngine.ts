@@ -298,7 +298,7 @@ export class VideoPlaybackEngine {
     this.seekTargets.delete(video);
   }
 
-  followClock(video: HTMLVideoElement, clock: LocalVideoClock, seek: ProgrammaticSeek, align?: BackgroundAlignment): void {
+  followClock(video: HTMLVideoElement, clock: LocalVideoClock, seek: ProgrammaticSeek, align?: BackgroundAlignment, preparing = false): void {
     this.observations.set(video, { clock, at: performance.now() });
     // Keep the decoder running through a bounded IPC gap, but never align or chase stale data.
     if (clock.fresh === false) { this.setBaseRate(video, clock.rate > 0 ? clock.rate : 1); return; }
@@ -307,13 +307,13 @@ export class VideoPlaybackEngine {
     const changed = this.deviceOwners.get(video) !== owner;
     this.deviceOwners.set(video, owner);
     if (this.timing === "webkit") {
-      this.followStableClock(video, clock, changed, seek, align);
+      this.followStableClock(video, clock, changed, seek, align, preparing);
       return;
     }
     this.sync(video, clock.position, changed || !clock.playing || clock.rate <= 0 ? "explicit" : "clock", clock.rate, seek);
   }
 
-  private followStableClock(video: HTMLVideoElement, clock: LocalVideoClock, changed: boolean, seek: ProgrammaticSeek, align?: BackgroundAlignment): void {
+  private followStableClock(video: HTMLVideoElement, clock: LocalVideoClock, changed: boolean, seek: ProgrammaticSeek, align?: BackgroundAlignment, preparing = false): void {
     // WKWebView retimes its decoding pipeline on rate changes: even a 500ms PLL can cause a
     // catch-up -> ratechange stall -> catch-up cycle. Keep the actual audio tempo unchanged.
     this.setBaseRate(video, clock.rate > 0 ? clock.rate : 1);
@@ -354,8 +354,12 @@ export class VideoPlaybackEngine {
     state.driftSince ??= now;
     // One small phase discrepancy is not a seek. Outside transport edges only persistent drift
     // may align, with a cooldown so decoding never becomes a continuous correction loop.
-    if (!changed && (now - state.driftSince < 1000 || now - state.lastSeekAt < state.retryMs)) return;
-    if (!changed && align) {
+    // An upcoming, still invisible clip has a bounded preparation runway. Let
+    // it use its measured landing delay now, instead of exposing a moving but
+    // late source handle and waiting five seconds to correct it. Callers must
+    // end preparation before exposure, leaving a full decoder restart window.
+    if (!changed && !preparing && (now - state.driftSince < 1000 || now - state.lastSeekAt < state.retryMs)) return;
+    if (!changed && !preparing && align) {
       state.lastSeekAt = now;
       state.driftSince = null;
       align(video);

@@ -21,7 +21,7 @@ glib = { path = "vendor/glib-0.18.5" }
 hls-transmux = { path = "vendor/hls-transmux" }
 
 [workspace.package]
-version = "1.0.0-rc6"
+version = "1.0.0-rc7"
 edition = "2021"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"

@@ -10,12 +10,11 @@ import {
   clipDuration,
   fadeAlpha,
   findClip,
-  sourceAt,
   updateClip,
 } from "../../lib/workshop";
 import { VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
 import { getLocalVideoClock } from "../../lib/mediaSync";
-import { prepareVideoClips, WorkshopSeekGate } from "../../lib/workshopPreviewPolicy";
+import { prepareVideoClips, previewVideoTiming, WorkshopSeekGate } from "../../lib/workshopPreviewPolicy";
 import type { WorkshopPlayback } from "../../lib/workshopPlayback";
 import type {
   CompositionProject,
@@ -166,15 +165,16 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
         const c = findClip(p, video.dataset.clip ?? null);
         const s = c && p.sources.find(s => s.id === c.source_id);
         if (!c || !s?.video) continue;
-        const inRange = inspecting ? c.id === inspecting.clipId : time >= c.start_ms && time < c.start_ms + clipDuration(c);
-
         const local = inspecting ? 0 : Math.max(0, time - c.start_ms);
         const proxy = video.dataset.proxy === "true", part = Number(video.dataset.part ?? 0);
+        const timing = previewVideoTiming(c, time, proxy, part, playing);
+        const visible = inspecting ? c.id === inspecting.clipId : timing.visible;
         const target = inspecting
           ? (inspecting.edge === "in" ? c.source_in_ms : Math.max(c.source_in_ms, c.source_out_ms - 1000 / s.fps)) / 1000
-          : proxy ? Math.max(0, local / 1000 - part * 8) : sourceAt(c, local) / 1000;
-        const currentPart = !proxy || Math.floor(local / 8000) === part;
-        const shouldPlay = playing && inRange && currentPart;
+          : timing.target;
+        // Pre-roll stays muted and transparent, but uses the same shared clock
+        // as visible playback. Crossing the edit must not pause/reseek the node.
+        const shouldPlay = playing && timing.running;
         // A scrub/seek takes ownership from background drift correction immediately.
         // Otherwise a standby decoder can still adopt a frame from the old clock.
         if (!shouldPlay && wanted.current.get(video)) sync.current.releaseClock(video);
@@ -183,7 +183,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
         if (align && video.readyState >= 1) {
           const authority = pb.trackId !== null ? getLocalVideoClock(pb.trackId) : null;
           const sourceRate = proxy || c.speed.preset !== "constant" ? 1 : c.speed.start;
-          if (shouldPlay && authority) sync.current.followClock(video, {...authority, position: Math.max(0, target), rate: authority.rate * sourceRate}, (v, t) => { void sync.current.seek(v, t).catch(() => undefined); }, corrections.current.get(video));
+          if (shouldPlay && authority) sync.current.followClock(video, {...authority, position: Math.max(0, target), rate: authority.rate * sourceRate}, (v, t) => { void sync.current.seek(v, t).catch(() => undefined); }, corrections.current.get(video), timing.preparing);
           else {
             sync.current.setBaseRate(video, sourceRate);
             const seek = seekGate.current.request(video, target, shouldPlay, s.fps, now);
@@ -199,7 +199,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
         const b = inspecting ? box(p, {...c, picture: {x: .5, y: .5, scale: 1, opacity: 1}}, s) : box(p, c, s);
         video.style.left = `${b.x * 100}%`; video.style.top = `${b.y * 100}%`;
         video.style.width = `${b.width * 100}%`; video.style.height = `${b.height * 100}%`;
-        video.style.opacity = String(!inRange || !currentPart ? 0 : inspecting ? 1 : c.picture.opacity * fadeAlpha(c, local));
+        video.style.opacity = String(!visible ? 0 : inspecting ? 1 : c.picture.opacity * fadeAlpha(c, local));
         if (video.readyState >= 2) decoded.current.add(video);
         // WebKit can temporarily drop readyState during a corrective seek.
         // Keep its last decoded frame visible while ordinary playback catches up.
