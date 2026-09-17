@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3057,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "anyhow",
  "directories",
@@ -3112,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-playback"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "anyhow",
  "kdj-analysis",
@@ -3149,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-player"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "anyhow",
  "cc",
@@ -3165,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "aes",
  "anyhow",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-server"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "anyhow",
  "axum",
@@ -3231,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-stems"
-version = "1.0.0-rc8"
+version = "1.0.0-rc9"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -5047,9 +5047,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.42"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -5109,9 +5109,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
