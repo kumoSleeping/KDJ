@@ -94,8 +94,8 @@ const queued = new Set<number>();
 /** 已经插过队的 id。正在播的那一首最多插一次，避免来回切歌时反复插。 */
 const jumped = new Set<number>();
 
-/** 队头那批全是排过还没落库的（被取消、或文件已消失），再排也没用。 */
-let stalled = false;
+/** Skip already submitted rows without letting an unfinished head page stop the entire session. */
+const backfillOffsets = new Map<string, number>();
 
 let selectionTimer: ReturnType<typeof setTimeout> | null = null;
 let viewportTimer: ReturnType<typeof setTimeout> | null = null;
@@ -377,7 +377,7 @@ function idle(): boolean {
 
 /** 排上一批就返回 true。返回 false = 这一轮没什么可补的。 */
 async function backfill(): Promise<boolean> {
-  if (backfillInFlight || stalled) return false;
+  if (backfillInFlight) return false;
   if (!autoEnabled() || !idle()) return false;
   const mode = autoAnalysisMode();
   if (mode === "light" && Date.now() - lastLightBackfillAt < LIGHT_BACKFILL_COOLDOWN_MS) {
@@ -396,37 +396,32 @@ async function backfill(): Promise<boolean> {
   if (pendingV1 <= 0 && pendingV3 <= 0) return false;
 
   backfillInFlight = true;
+  let submittedIds: number[] = [];
   try {
     if (pendingV1 > 0) {
-      // 从最近加进来的开始补：新下的歌最可能是用户下一步要用的
-      let page = await api.tracks({
-        analyzed: false,
-        folder: activeFolder || undefined,
-        folder_deep: activeFolder ? true : undefined,
-        sort: "added_at",
-        order: "desc",
-        limit: batchLimit,
-        offset: 0,
-      });
-      // 当前文件夹的 v1 已补完后，继续全曲库，不让空文件夹把后台回填卡住。
-      if (page.items.length === 0 && activeFolder) {
-        page = await api.tracks({
+      // Read at most one bounded page per scope per tick. Cancelled/missing rows may remain
+      // unanalyzed indefinitely; skip them, wrap at the end, and keep discovering new imports.
+      const candidates = async (folder: string): Promise<number[]> => {
+        const offset = backfillOffsets.get(folder) ?? 0;
+        const page = await api.tracks({
           analyzed: false,
+          folder: folder || undefined,
+          folder_deep: folder ? true : undefined,
           sort: "added_at",
           order: "desc",
-          limit: batchLimit,
-          offset: 0,
+          limit: Math.max(BACKFILL_BATCH, batchLimit),
+          offset,
         });
-      }
-      const ids = page.items.map((track) => track.id).filter((id) => !queued.has(id));
-      if (ids.length === 0) {
-        // 队头这批全排过却还是没分析上（取消掉了，或者文件没了）。
-        // 再排一遍还是同一批，这一会话就不补了，等用户手动点「分析」。
-        stalled = page.items.length > 0;
-        return false;
-      }
+        const ids = page.items.map((track) => track.id).filter((id) => !queued.has(id)).slice(0, batchLimit);
+        backfillOffsets.set(folder, ids.length > 0 || page.items.length === 0 ? 0 : offset + page.items.length);
+        return ids;
+      };
+      let ids = await candidates(activeFolder);
+      if (ids.length === 0 && activeFolder) ids = await candidates("");
+      if (ids.length === 0) return false;
       // 这中间隔了一次网络往返，用户可能刚好点了播放或开始下载，再确认一次
       if (!autoEnabled() || !idle()) return false;
+      submittedIds = ids;
       for (const id of ids) queued.add(id);
       if (mode === "light") lastLightBackfillAt = Date.now();
       const response = await library.startAnalyze(ids, false, false);
@@ -450,6 +445,7 @@ async function backfill(): Promise<boolean> {
     return global.queued > 0;
   } catch {
     // 后端没起来之类：下一轮再试，不打扰用户
+    for (const id of submittedIds) queued.delete(id);
     return false;
   } finally {
     backfillInFlight = false;
@@ -477,13 +473,15 @@ async function tick(): Promise<void> {
  */
 export function forgetQueuedAnalysis(): void {
   queued.clear();
-  stalled = false;
+  jumped.clear();
+  backfillOffsets.clear();
   lastLightBackfillAt = 0;
 }
 
 /** 挂上选中订阅和空闲探测，返回停掉它们的函数。连不上后端时不该跑，所以由 App 控制。 */
 export function startAutoAnalyze(): () => void {
   const unsubscribe = useLibraryStore.subscribe((state, previous) => {
+    if (state.stats?.total !== previous.stats?.total) backfillOffsets.clear();
     if (state.selectedIds !== previous.selectedIds) scheduleSelection();
     // 列表换了内容也要重看一眼视口：首屏（用户一次都没滚过）、切文件夹、
     // 改筛选、翻下一页，这些时候"眼前是什么"全变了，但一个 scroll 事件都不会有。

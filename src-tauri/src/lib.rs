@@ -23,6 +23,8 @@ mod data_recovery;
 #[cfg(desktop)]
 mod desktop_media;
 #[cfg(desktop)]
+mod desktop_lyrics_hit_test;
+#[cfg(desktop)]
 mod diagnostics;
 #[cfg(desktop)]
 mod folder_drop;
@@ -102,6 +104,8 @@ use kdj_core::AppConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Emitter, Manager};
+#[cfg(target_os = "macos")]
+mod macos_edit_menu;
 #[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
@@ -2368,6 +2372,7 @@ fn set_desktop_lyrics(
                         );
                     }
                 });
+                desktop_lyrics_hit_test::install(app.clone());
                 window
             }
         };
@@ -2379,8 +2384,9 @@ fn set_desktop_lyrics(
             .set_always_on_top(true)
             .map_err(|err| err.to_string())?;
         window
-            .set_ignore_cursor_events(locked)
+            .set_ignore_cursor_events(true)
             .map_err(|err| err.to_string())?;
+        desktop_lyrics_hit_test::set_locked(locked);
         if reposition {
             if let (Some(x), Some(y)) = (x, y) {
                 restore_desktop_lyrics_position(&window, x, y)?;
@@ -2825,6 +2831,8 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     let builder = builder.setup(|app| {
+        #[cfg(target_os = "macos")]
+        macos_edit_menu::install(app)?;
         #[cfg(all(desktop, debug_assertions))]
         let youtube_playback_e2e = std::env::var_os("VITE_KDJ_YOUTUBE_E2E")
             .is_some_and(|value| value.as_os_str() == std::ffi::OsStr::new("1"));
@@ -2921,6 +2929,7 @@ pub fn run() {
         open_path,
         reveal_path,
         share_clipboard::write_share_clipboard,
+        desktop_lyrics_hit_test::set_desktop_lyrics_drag_regions,
         start_native_file_drag,
         workshop_import_files,
         start_native_link_drag,

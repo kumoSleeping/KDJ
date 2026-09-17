@@ -8,6 +8,7 @@ import {
   type RefObject,
 } from "react";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { api } from "../../lib/api";
 import { activeLrcIndex, lineFillProgress, projectLoopedPlaybackTime } from "../../lib/lrc";
 import { effectiveLyricExtra } from "../../lib/lyricsOverlay";
@@ -298,6 +299,8 @@ export function DesktopLyricsOverlay() {
   const lyricExtra = prefs.lyricExtra;
   const prefsEpoch = prefs.prefsEpoch;
   const locked = prefs.desktopLocked;
+  const rootRef = useRef<HTMLElement>(null);
+  const dragRegionsRef = useRef("");
   const fontScale = prefs.desktopFontScale;
   const opacity = prefs.desktopOpacity;
   const smoothTime = useSmoothPlaybackTime(activePlayback);
@@ -452,6 +455,38 @@ export function DesktopLyricsOverlay() {
     };
   }, [playback.trackId, streamPlayback?.trackId, track?.id, prefsEpoch]);
 
+  // CSS pointer-events cannot pass clicks through a native transparent window. Publish only
+  // the visible text inside the drag handle; Rust handles passthrough even outside this WebView.
+  useLayoutEffect(() => {
+    const publish = () => {
+      const root = rootRef.current;
+      const handle = root?.querySelector(".kd-desktop-lyrics-drag")?.getBoundingClientRect();
+      const regions: { x: number; y: number; width: number; height: number }[] = [];
+      if (!locked && root && handle) {
+        for (const line of root.querySelectorAll(".kd-desktop-lyrics-dim")) {
+          if (!line.textContent?.trim()) continue;
+          const rect = line.getBoundingClientRect();
+          const x = Math.max(handle.left, rect.left);
+          const y = Math.max(handle.top, rect.top);
+          const right = Math.min(handle.right, rect.right);
+          const bottom = Math.min(handle.bottom, rect.bottom);
+          if (right > x && bottom > y) regions.push({ x, y, width: right - x, height: bottom - y });
+        }
+      }
+      const signature = JSON.stringify(regions);
+      if (signature === dragRegionsRef.current) return;
+      dragRegionsRef.current = signature;
+      void invoke("set_desktop_lyrics_drag_regions", { regions }).catch(() => {
+        if (dragRegionsRef.current === signature) dragRegionsRef.current = "";
+      });
+    };
+    publish();
+    if (locked || activePlayback.trackId == null) return;
+    // Include paused-window resizes and the child line's squeeze/scroll layout changes.
+    const timer = window.setInterval(publish, 80);
+    return () => window.clearInterval(timer);
+  }, [locked, activePlayback.trackId]);
+
   // 窗口通常会由主界面同步隐藏；这里再兜底，避免启动竞态闪出占位文案。
   if (activePlayback.trackId == null) return null;
 
@@ -503,6 +538,7 @@ export function DesktopLyricsOverlay() {
 
   return (
     <main
+      ref={rootRef}
       className="kd-desktop-lyrics"
       data-locked={locked ? "true" : undefined}
       style={

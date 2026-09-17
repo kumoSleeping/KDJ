@@ -729,8 +729,8 @@ fn spawn_analysis_target(
         };
 
         // 手工分块而不是拉 rayon：只有这一处需要并行，一个依赖不值得
-        // "Full" is deliberately capped by the process scheduler (two owners while idle, none
-        // while a Deck is audible). Light mode starts only one background-QoS owner and leaves a
+        // "Full" is capped by the process scheduler (two owners while idle, one while a Deck
+        // is audible). Light mode starts only one background-QoS owner and leaves a
         // quiet gap between tracks. It may keep running at normal playback pressure, but the
         // scheduler stops admitting the next track as soon as ring/model/tempo pressure appears.
         let analysis_workers = if lightweight {

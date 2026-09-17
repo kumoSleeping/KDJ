@@ -429,7 +429,7 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
         return false;
     }
     match class {
-        WorkClass::LibraryAnalysisLight | WorkClass::MediaComposition => {
+        WorkClass::LibraryAnalysisLight | WorkClass::LibraryAnalysis | WorkClass::MediaComposition => {
             state.live_stem_decks == 0
                 && !active(WorkClass::TempoStretch)
                 && !immediate_model_pressure
@@ -440,7 +440,7 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
                 && !active(WorkClass::NowPlayingAnalysis)
                 && !queued(WorkClass::NowPlayingAnalysis)
         }
-        WorkClass::LibraryAnalysis | WorkClass::Maintenance => {
+        WorkClass::Maintenance => {
             state.live_audio_decks == 0
                 && state.live_stem_decks == 0
                 && !active(WorkClass::TempoStretch)
@@ -473,9 +473,11 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
                 && !active(WorkClass::InteractiveWaveform)
                 && !queued(WorkClass::InteractiveWaveform)
         }
-        // Explicit streaming V4 editing work may run during healthy playback. Keep the old
-        // idle-only analysis policy separate, and do not let an editor waiter block waveforms.
-        WorkClass::WorkstationAnalysis => {
+        // Current-song analysis and explicit editing work may run during healthy playback.
+        // The shared heavy limit admits only one owner while audio is live; waveform, tempo,
+        // STEM and buffer pressure still take precedence. Waiting for silence here would also
+        // strand library analysis behind the queued current-song request for an entire playlist.
+        WorkClass::WorkstationAnalysis | WorkClass::NowPlayingAnalysis => {
             state.live_stem_decks == 0
                 && !active(WorkClass::TempoStretch)
                 && !queued(WorkClass::TempoStretch)
@@ -484,11 +486,6 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
                 && !queued(WorkClass::InteractiveWaveform)
                 && !active(WorkClass::VisibleWaveform)
                 && !queued(WorkClass::VisibleWaveform)
-        }
-        WorkClass::NowPlayingAnalysis => {
-            state.live_audio_decks == 0
-                && !active(WorkClass::TempoStretch)
-                && !immediate_model_pressure
         }
         _ => true,
     }
@@ -722,15 +719,15 @@ mod tests {
     }
 
     #[test]
-    fn audible_playback_defers_optional_work_but_keeps_bounded_waveform_available() {
+    fn audible_playback_allows_analysis_but_defers_maintenance() {
         let scheduler = WorkScheduler::new(2);
         scheduler.set_live_audio_decks(1);
         assert_eq!(scheduler.snapshot().live_audio_decks, 1);
 
         assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
-        assert!(!scheduler.allows(WorkClass::LibraryAnalysis));
+        assert!(scheduler.allows(WorkClass::LibraryAnalysis));
         assert!(!scheduler.allows(WorkClass::Maintenance));
-        assert!(!scheduler.allows(WorkClass::NowPlayingAnalysis));
+        assert!(scheduler.allows(WorkClass::NowPlayingAnalysis));
         assert!(scheduler.allows(WorkClass::InteractiveWaveform));
         assert!(scheduler.allows(WorkClass::WaveformRenewal));
         assert!(scheduler.allows(WorkClass::VisibleWaveform));
@@ -753,6 +750,55 @@ mod tests {
         assert!(scheduler
             .acquire(WorkRequest::new(WorkClass::Maintenance), || false)
             .is_ok());
+    }
+
+    #[test]
+    fn playback_analysis_is_serial_and_yields_to_audio_and_waveforms() {
+        let scheduler = WorkScheduler::new(2);
+        scheduler.set_live_audio_decks(1);
+        for class in [WorkClass::NowPlayingAnalysis, WorkClass::LibraryAnalysis] {
+            let permit = scheduler.acquire(WorkRequest::new(class), || false).unwrap();
+            let second = scheduler.acquire(
+                WorkRequest::new(class).with_timeout(Duration::from_millis(5)),
+                || false,
+            );
+            assert!(matches!(second, Err(WorkAcquireError::DeadlineExceeded)));
+            assert_eq!(scheduler.snapshot().heavy_in_use, 1);
+            drop(permit);
+
+            for urgent in [WorkClass::InteractiveWaveform, WorkClass::VisibleWaveform, WorkClass::StemAudible] {
+                let waiter = scheduler.queued(urgent);
+                assert!(!scheduler.allows(class));
+                drop(waiter);
+            }
+            scheduler.set_live_stem_decks(1);
+            assert!(!scheduler.allows(class));
+            scheduler.set_live_stem_decks(0);
+            for pressure in [AudioPressure::Low, AudioPressure::Critical] {
+                scheduler.set_audio_pressure(pressure);
+                assert!(!scheduler.allows(class));
+            }
+            scheduler.set_audio_pressure(AudioPressure::Normal);
+            assert!(scheduler.allows(class));
+        }
+    }
+
+    #[test]
+    fn current_song_waiter_can_run_during_playback_and_release_library_analysis() {
+        let scheduler = WorkScheduler::new(2);
+        scheduler.set_live_audio_decks(1);
+        let waiter = scheduler.queued(WorkClass::NowPlayingAnalysis);
+        assert!(scheduler.allows(WorkClass::NowPlayingAnalysis));
+        assert!(!scheduler.allows(WorkClass::LibraryAnalysisLight));
+        assert!(!scheduler.allows(WorkClass::LibraryAnalysis));
+        let current = scheduler.acquire(
+            WorkRequest::new(WorkClass::NowPlayingAnalysis).with_timeout(Duration::from_millis(20)),
+            || false,
+        ).unwrap();
+        drop(waiter);
+        drop(current);
+        assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
+        assert!(scheduler.allows(WorkClass::LibraryAnalysis));
     }
 
     #[test]
@@ -864,26 +910,26 @@ mod tests {
     }
 
     #[test]
-    fn policy_blocked_bulk_waiter_does_not_block_safe_light_analysis() {
+    fn policy_blocked_maintenance_waiter_does_not_block_safe_light_analysis() {
         let scheduler = WorkScheduler::new(2);
         scheduler.set_live_audio_decks(1);
 
         let bulk_scheduler = Arc::clone(&scheduler);
         let bulk = std::thread::spawn(move || {
             bulk_scheduler.acquire(
-                WorkRequest::new(WorkClass::LibraryAnalysis)
+                WorkRequest::new(WorkClass::Maintenance)
                     .with_timeout(Duration::from_millis(100)),
                 || false,
             )
         });
         let queued_deadline = Instant::now() + Duration::from_millis(50);
-        while scheduler.snapshot().classes[WorkClass::LibraryAnalysis.index()].queued == 0
+        while scheduler.snapshot().classes[WorkClass::Maintenance.index()].queued == 0
             && Instant::now() < queued_deadline
         {
             std::thread::yield_now();
         }
         assert_eq!(
-            scheduler.snapshot().classes[WorkClass::LibraryAnalysis.index()].queued,
+            scheduler.snapshot().classes[WorkClass::Maintenance.index()].queued,
             1
         );
 
@@ -919,7 +965,7 @@ mod tests {
         let waiting=scheduler.queued(WorkClass::WorkstationAnalysis);
         assert!(scheduler.allows(WorkClass::WorkstationAnalysis));
         assert!(scheduler.allows(WorkClass::LibraryAnalysisLight));
-        assert!(!scheduler.allows(WorkClass::NowPlayingAnalysis));
+        assert!(scheduler.allows(WorkClass::NowPlayingAnalysis));
         drop(waiting);
         let permit=scheduler.acquire(WorkRequest::new(WorkClass::WorkstationAnalysis).with_timeout(Duration::from_millis(20)),||false).unwrap();
         assert_eq!(scheduler.snapshot().heavy_in_use,1);
