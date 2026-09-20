@@ -10823,3 +10823,14 @@ button.kd-stream-status {
 .vj-rhythm-ruler > i[data-bar] { border-left-color: color-mix(in srgb, var(--kd-muted) 50%, transparent); }
 .vj-rhythm-ruler > span { position: absolute; font-size: 10px; line-height: 14px; white-space: nowrap; padding-left: 3px; color: var(--kd-muted); font-variant-numeric: tabular-nums; }
 .vj-bar-number, .vj-tempo-label { top: 0; }
+
+
+.kd-media-tools-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  color: var(--kd-text);
+}
+.kd-media-tools-dialog::backdrop { background: rgb(0 0 0 / 25%); }
+.kd-media-tools-dialog:not([open]) { display: none; }
+.kd-ffmpeg-actions progress { width: 120px; height: 4px; accent-color: var(--kd-theme); }

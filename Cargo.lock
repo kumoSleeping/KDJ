@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3057,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "anyhow",
  "directories",
@@ -3112,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-playback"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "anyhow",
  "kdj-analysis",
@@ -3149,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-player"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "anyhow",
  "cc",
@@ -3165,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "aes",
  "anyhow",
@@ -3193,17 +3193,19 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "url",
+ "zip",
 ]
 
 [[package]]
 name = "kdj-server"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3231,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-stems"
-version = "1.0.0-rc9"
+version = "1.0.1-rc1"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -8422,6 +8424,7 @@ checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
 dependencies = [
  "arbitrary",
  "crc32fast",
+ "flate2",
  "indexmap 2.14.0",
  "memchr",
 ]

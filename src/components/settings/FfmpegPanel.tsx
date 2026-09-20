@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Copy, Download, ExternalLink, RefreshCw } from "lucide-react";
-import { api } from "../../lib/api";
+import { useEffect, useState } from "react";
+import { Copy, Download, ExternalLink, FolderOpen, RefreshCw, FileArchive } from "lucide-react";
+import { mediaToolsInstalling, useFfmpegStore } from "../../stores/ffmpegStore";
 import { getBridge } from "../../lib/bridge";
 import { copyText } from "../../lib/copyText";
-import type { FfmpegInstallationStatus, FfmpegToolStatus } from "../../types";
+import type { FfmpegToolStatus } from "../../types";
 import { Button, InlineNotice, Panel } from "../common";
 
 const DOWNLOAD_PAGE = "https://ffmpeg.org/download.html";
@@ -20,29 +20,12 @@ function ToolRow({ name, tool }: { name: string; tool: FfmpegToolStatus }) {
 }
 
 export function FfmpegPanel() {
-  const [status, setStatus] = useState<FfmpegInstallationStatus | null>(null);
-  const [busy, setBusy] = useState(true);
-  const [error, setError] = useState("");
+  const { status, progress, checking, choosing, error, refresh, install, setError } = useFfmpegStore();
   const [copied, setCopied] = useState(false);
   const [distro, setDistro] = useState("debian");
-  const requestId = useRef(0);
-  const refresh = useCallback(async () => {
-    const id = ++requestId.current;
-    setBusy(true);
-    setError("");
-    try {
-      const next = await api.ffmpegInstallationStatus();
-      if (id === requestId.current) setStatus(next);
-    } catch (cause) {
-      if (id === requestId.current) setError(String(cause));
-    } finally {
-      if (id === requestId.current) setBusy(false);
-    }
-  }, []);
-  useEffect(() => {
-    void refresh();
-    return () => { requestId.current++; };
-  }, [refresh]);
+  const installing = mediaToolsInstalling(progress);
+  const busy = checking || choosing || installing;
+  useEffect(() => { void refresh(); }, [refresh]);
 
   const open = (url: string) => {
     const openExternal = getBridge().openExternal;
@@ -63,28 +46,46 @@ export function FfmpegPanel() {
       <div className="kd-ffmpeg-actions">
         <span className="kd-ai-prompt-copy">FFmpeg / ffprobe</span>
         <Button variant="ghost" size="sm" disabled={busy} onClick={() => void refresh()}>
-          <RefreshCw size={12} aria-hidden="true" />{busy ? "检测中…" : "重新检测"}
+          <RefreshCw size={12} aria-hidden="true" />{checking ? "检测中…" : "重新检测"}
         </Button>
       </div>
       {status && <>
         <ToolRow name="FFmpeg" tool={status.ffmpeg} />
         <ToolRow name="ffprobe" tool={status.ffprobe} />
       </>}
+      {["windows", "macos"].includes(platform ?? "") && getBridge().installMediaTools && <div className="kd-ffmpeg-guide">
+        <div className="kd-ffmpeg-actions">
+          {(status?.arch === "x86_64" || (platform === "macos" && status?.arch === "aarch64")) && <Button variant="ghost" size="sm" disabled={busy} onClick={() => void install("download")}>
+            <Download size={12} aria-hidden="true" />{needsInstall ? "一键安装" : "重新安装"}
+          </Button>}
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => void install("zip")}>
+            <FileArchive size={12} aria-hidden="true" />导入 ZIP
+          </Button>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => void install("folder")}>
+            <FolderOpen size={12} aria-hidden="true" />选择文件夹
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => open(platform === "macos" ? "https://ffmpeg.martin-riedl.de/" : "https://www.gyan.dev/ffmpeg/builds/")}>
+            <ExternalLink size={12} aria-hidden="true" />下载来源与许可
+          </Button>
+        </div>
+        {needsInstall && <p className="kd-ai-prompt-copy">KDJ 会保存并启用媒体工具，无需移动文件或修改系统设置。已下载的 ZIP 可直接导入，已解压的文件夹也可直接选择。</p>}
+        {platform === "windows" && status?.arch !== "x86_64" && <p className="kd-ai-prompt-copy">当前设备：{status?.arch}。请选择兼容此设备的 Windows 工具包。</p>}
+        {platform === "macos" && needsInstall && <p className="kd-ai-prompt-copy">{status?.arch === "aarch64" ? "Apple Silicon" : "Intel"} · 自动选择对应版本。FFmpeg 与 ffprobe 分开的 ZIP 可同时选择导入。</p>}
+        {installing && <div className="kd-ffmpeg-actions" role="status" aria-live="polite">
+          <span className="kd-ai-prompt-copy">{progress?.phase === "preparing" ? "准备安装…"
+            : progress?.phase === "extracting" ? "正在导入媒体工具…"
+            : progress?.phase === "validating" ? "正在验证媒体工具…"
+            : `正在下载 ${progress?.component ?? ""} · ${((progress?.downloaded ?? 0) / 1048576).toFixed(1)} MB${progress?.total ? ` / ${(progress.total / 1048576).toFixed(1)} MB` : ""}`}</span>
+          <progress aria-label="媒体工具安装进度" max={progress?.total || undefined}
+            value={progress?.phase === "downloading" && progress.total ? progress.downloaded : undefined} />
+        </div>}
+        {progress?.phase === "done" && !needsInstall && <p className="kd-ai-prompt-copy" role="status">媒体工具已就绪</p>}
+      </div>}
       {needsInstall && <div className="kd-ffmpeg-guide">
-        <p className="kd-ai-prompt-copy">VJ 导出、变速和媒体信息读取需要这两个工具。</p>
+        <p className="kd-ai-prompt-copy">混音编辑器的媒体读取、变速和导出需要 FFmpeg 与 ffprobe。</p>
         {platform === "windows" ? <>
-          <div className="kd-ffmpeg-actions">
-            <Button variant="ghost" size="sm" onClick={() => open(status.arch === "x86_64"
-              ? "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-              : "https://github.com/BtbN/FFmpeg-Builds/releases")}>
-              <Download size={12} aria-hidden="true" />{status.arch === "x86_64" ? "下载 Windows ZIP" : "Windows 下载页"}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => open(DOWNLOAD_PAGE)}>
-              <ExternalLink size={12} aria-hidden="true" />下载来源
-            </Button>
-          </div>
-          <p className="kd-ai-prompt-copy">{status.arch === "x86_64" ? "Gyan Essentials · Windows x64。" : `选择适合 ${status.arch} 的构建。`}解压后，将含 ffmpeg.exe 和 ffprobe.exe 的 bin 文件夹加入用户 Path，重启 KDJ 后重新检测。</p>
-        </> : platform === "macos" ? <>
+          {!getBridge().installMediaTools && <p className="kd-ai-prompt-copy">请在 Windows 版 KDJ 的媒体工具中安装或导入 FFmpeg。</p>}
+        </> : platform === "macos" && !getBridge().installMediaTools ? <>
           <p className="kd-ai-prompt-copy">通过 Homebrew 安装，适用于 Apple Silicon 和 Intel。在终端执行下方命令，完成后重新检测。</p>
           <div className="kd-ffmpeg-actions">
             <Button variant="ghost" size="sm" onClick={() => open("https://brew.sh/")}>
@@ -107,7 +108,7 @@ export function FfmpegPanel() {
             <Download size={12} aria-hidden="true" />Linux 软件包与下载
           </Button>
         </> : null}
-        {(platform === "macos" || platform === "linux") && command && <div className="kd-ffmpeg-command">
+        {((platform === "macos" && !getBridge().installMediaTools) || platform === "linux") && command && <div className="kd-ffmpeg-command">
           <code>{command}</code>
           <Button variant="ghost" size="sm" onClick={copy}>
             <Copy size={12} aria-hidden="true" />{copied ? "已复制" : "复制命令"}

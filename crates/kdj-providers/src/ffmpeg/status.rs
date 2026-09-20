@@ -5,10 +5,10 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct ToolStatus {
-    state: &'static str,
+    pub(super) state: &'static str,
     path: Option<PathBuf>,
-    version: Option<String>,
-    error: Option<String>,
+    pub(super) version: Option<String>,
+    pub(super) error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,7 +29,7 @@ fn version_from_output(name: &str, output: &std::process::Output) -> Option<Stri
         .find_map(|line| line.strip_prefix(&prefix)?.split_whitespace().next().map(str::to_owned))
 }
 
-async fn inspect(name: &str, path: Option<PathBuf>) -> ToolStatus {
+pub(super) async fn inspect(name: &str, path: Option<PathBuf>) -> ToolStatus {
     let mut result = ToolStatus { state: "missing", path, version: None, error: None };
     let Some(path) = &result.path else { return result; };
     result.state = "broken";

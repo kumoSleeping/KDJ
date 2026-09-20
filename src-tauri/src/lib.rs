@@ -34,6 +34,8 @@ mod desktop_player;
 #[cfg(desktop)]
 mod midi;
 #[cfg(desktop)]
+mod media_tools;
+#[cfg(desktop)]
 mod share_clipboard;
 #[cfg(desktop)]
 mod youtube_embed;
@@ -2598,6 +2600,8 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     // 端口传 0 让内核直接选择并占用，避免探测后释放再绑定的竞态窗口。
     let config = Arc::new(AppConfig::create(data_dir, download_dir, 0));
     #[cfg(desktop)]
+    kdj_providers::ffmpeg::managed::initialize(&config.data_dir);
+    #[cfg(desktop)]
     match data_recovery::repair_library_roots(&config) {
         Ok(restored) if restored > 0 => {
             eprintln!("KDJ: 已从现有曲库记录补回 {restored} 个曲库文件夹");
@@ -2942,6 +2946,8 @@ pub fn run() {
         check_desktop_update,
         get_update_progress,
         apply_update,
+        media_tools::install_media_tools,
+        media_tools::media_tools_progress,
         pick_folder,
         pick_folders,
         window_control,

@@ -43,6 +43,7 @@ import { addWorkshopMarker } from "../../lib/workshopMarkers";
 import { WorkshopPictureTools } from "./WorkshopPictureTools";
 import { WorkshopToolbar, WorkshopToolbarTarget } from "./WorkshopToolbar";
 import { WorkshopExportSettings } from "./WorkshopExport";
+import { WorkshopMediaTools } from "./WorkshopMediaTools";
 import { canCancelExport } from "./WorkshopCancelButton";
 import { QueueStateMark } from "../queue/QueuePrimitives";
 import { api } from "../../lib/api";
@@ -229,6 +230,7 @@ function WorkshopEditor() {
           {saving ? "保存中" : ""}
         </span>
         <WorkshopExportSettings />
+        <WorkshopMediaTools />
         <div className="vj-menu-anchor">
           <button
             type="button"
