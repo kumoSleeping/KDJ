@@ -195,6 +195,7 @@ jobs:
           cargo test -p kdj-player --lib pipeline_reports_decoder
           cargo test -p kdj-playback --lib platform::tests
           cargo test -p kdj-app --lib diagnostics::tests
+          cargo test -p kdj-app --lib release_version::tests --locked
 
       # M7（Tauri 壳）落地之前 src-tauri/ 还不完整。这里探测一下而不是硬跑，
       # 让这条流水线在壳做好之前仍然能当"三平台 Rust 测试"用，红叉只留给真问题。

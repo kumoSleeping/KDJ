@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3057,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3078,6 +3078,7 @@ dependencies = [
  "objc2-web-kit",
  "rand 0.10.2",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "souvlaki",
@@ -3097,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "anyhow",
  "directories",
@@ -3112,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3134,7 +3135,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-playback"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "anyhow",
  "kdj-analysis",
@@ -3149,7 +3150,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-player"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "anyhow",
  "cc",
@@ -3165,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "aes",
  "anyhow",
@@ -3189,6 +3190,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rookie",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha1",
@@ -3205,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-server"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "anyhow",
  "axum",
@@ -3233,7 +3235,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-stems"
-version = "1.0.1-rc1"
+version = "1.0.0-rc10"
 dependencies = [
  "anyhow",
  "kdj-core",
