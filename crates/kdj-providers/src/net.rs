@@ -4,7 +4,7 @@
 //! 1. [`host_is`]：判断"是不是本平台链接"必须比对 host，不能用子串。
 //! 2. [`resolves_to_public_ip`] + [`expand_short_link`]：短链逐跳展开，
 //!    每一跳都独立校验域名和目标 IP。
-//! 3. [`AtomicDownload`]：先写 `.partial` 再原子改名。
+//! 3. [`AtomicDownload`]：独占临时文件，再原子且不覆盖地提交。
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -386,7 +386,7 @@ pub async fn ensure_media_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// 落盘守卫：先写 `<name>.partial`，校验通过才 rename 到最终路径。
+/// 落盘守卫：先写独占 `.partial`，校验通过才原子提交到未占用的最终路径。
 ///
 /// 直接写目标文件的话，下载/转码中途失败会把上一次的成品截断成坏文件，
 /// 而且半成品会被曲库扫描当成正常曲目收进去。
@@ -397,14 +397,31 @@ pub struct AtomicDownload {
 }
 
 impl AtomicDownload {
-    pub fn new(final_path: impl Into<PathBuf>) -> Self {
+    pub fn new(final_path: impl Into<PathBuf>) -> Result<Self> {
         let final_path = final_path.into();
-        let partial_path = with_partial_suffix(&final_path);
-        AtomicDownload {
-            final_path,
-            partial_path,
-            committed: false,
+        anyhow::ensure!(final_path.file_name().is_some(), "下载文件缺少文件名");
+        for _ in 0..32 {
+            let partial_path = final_path.with_file_name(format!(
+                ".kdj-download-{:032x}.partial",
+                rand::random::<u128>()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&partial_path)
+            {
+                Ok(_) => {
+                    return Ok(Self {
+                        final_path,
+                        partial_path,
+                        committed: false,
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
+        bail!("无法创建独占下载临时文件")
     }
 
     /// 正在写的临时路径。
@@ -416,7 +433,7 @@ impl AtomicDownload {
         &self.final_path
     }
 
-    /// 校验通过后原子替换。
+    /// 校验通过后原子提交；同名成品保留，新下载顺延名称。
     pub fn commit(mut self) -> Result<PathBuf> {
         let size = std::fs::metadata(&self.partial_path)
             .with_context(|| format!("临时文件不存在：{}", self.partial_path.display()))?
@@ -424,10 +441,9 @@ impl AtomicDownload {
         if size == 0 {
             bail!("下载得到的是空文件");
         }
-        std::fs::rename(&self.partial_path, &self.final_path)
-            .with_context(|| format!("重命名到 {} 失败", self.final_path.display()))?;
+        let path = commit_download(&self.partial_path, &self.final_path)?;
         self.committed = true;
-        Ok(self.final_path.clone())
+        Ok(path)
     }
 }
 
@@ -440,15 +456,121 @@ impl Drop for AtomicDownload {
     }
 }
 
-fn with_partial_suffix(path: &Path) -> PathBuf {
-    let mut name = path
+/// Publish a complete file atomically, choosing another name if any process won the name.
+/// Staging must be on the destination volume; no copy fallback exposes incomplete media.
+pub fn commit_download(staged: &Path, requested: &Path) -> Result<PathBuf> {
+    let parent = requested.parent().context("下载目标没有父目录")?;
+    let filename = requested
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "download".to_string());
-    name.push_str(".partial");
-    path.with_file_name(name)
+        .context("下载目标没有文件名")?
+        .to_string_lossy();
+    for _ in 0..10_000 {
+        let target = crate::provider::unique_download_path(parent, &filename);
+        match rename_download_noclobber(staged, &target) {
+            Ok(()) => return Ok(target),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).context("提交下载文件失败"),
+        }
+    }
+    bail!("无法分配未占用的下载文件名")
 }
 
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android"
+))]
+pub fn rename_download_noclobber(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+    // Both strings remain alive for the synchronous OS call. EXCL/NOREPLACE never replaces a target.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+pub fn rename_download_noclobber(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileW(source: *const u16, target: *const u16) -> i32;
+    }
+    fn wide(path: &Path) -> std::io::Result<Vec<u16>> {
+        // MoveFileW needs verbatim absolute paths to support the long paths std::fs accepts.
+        let absolute = std::path::absolute(path)?;
+        let mut value: Vec<u16> = absolute
+            .as_os_str()
+            .encode_wide()
+            .map(|unit| {
+                if unit == b'/' as u16 {
+                    b'\\' as u16
+                } else {
+                    unit
+                }
+            })
+            .collect();
+        if value.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains NUL",
+            ));
+        }
+        let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+        if !value.starts_with(&prefix) {
+            let mut prefixed = prefix;
+            if value.starts_with(&[b'\\' as u16, b'\\' as u16]) {
+                prefixed.extend("UNC\\".encode_utf16());
+                prefixed.extend_from_slice(&value[2..]);
+            } else {
+                prefixed.extend(value);
+            }
+            value = prefixed;
+        }
+        value.push(0);
+        Ok(value)
+    }
+    let source = wide(source)?;
+    let target = wide(target)?;
+    let result = unsafe { MoveFileW(source.as_ptr(), target.as_ptr()) };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android",
+    windows
+)))]
+pub fn rename_download_noclobber(source: &Path, target: &Path) -> std::io::Result<()> {
+    let _ = (source, target);
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename unavailable",
+    ))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,12 +677,60 @@ mod tests {
     }
 
     #[test]
+    fn strict_publication_keeps_source_and_destination_on_collision() {
+        let dir = std::env::temp_dir().join(format!(
+            "kdj-publish-collision-{:016x}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("staged.partial");
+        let target = dir.join("finished.mp4");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&target, b"existing").unwrap();
+        assert_eq!(
+            rename_download_noclobber(&source, &target)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_downloads_keep_independent_bytes_and_existing_files() {
+        let dir =
+            std::env::temp_dir().join(format!("kdj-atomic-race-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("song.mp3");
+        let first = AtomicDownload::new(&target).unwrap();
+        let second = AtomicDownload::new(&target).unwrap();
+        let canceled = AtomicDownload::new(&target).unwrap();
+        assert_ne!(first.partial(), second.partial());
+        std::fs::write(first.partial(), b"first").unwrap();
+        std::fs::write(second.partial(), b"second").unwrap();
+        drop(canceled);
+        std::fs::write(&target, b"existing").unwrap();
+        let a = std::thread::spawn(move || first.commit().unwrap());
+        let b = std::thread::spawn(move || second.commit().unwrap());
+        let a = a.join().unwrap();
+        let b = b.join().unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing");
+        assert_eq!(std::fs::read(a).unwrap(), b"first");
+        assert_eq!(std::fs::read(b).unwrap(), b"second");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn partial_file_is_cleaned_up_when_not_committed() {
         let dir = std::env::temp_dir().join("kdj-atomic-test");
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("song.mp3");
         {
-            let guard = AtomicDownload::new(&target);
+            let guard = AtomicDownload::new(&target).unwrap();
             std::fs::write(guard.partial(), b"half").unwrap();
             assert!(guard.partial().exists());
             // guard 在这里被 drop：模拟下载失败
@@ -575,13 +745,13 @@ mod tests {
         let dir = std::env::temp_dir().join("kdj-atomic-commit");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let guard = AtomicDownload::new(dir.join("ok.mp3"));
+        let guard = AtomicDownload::new(dir.join("ok.mp3")).unwrap();
         std::fs::write(guard.partial(), b"data").unwrap();
         let path = guard.commit().unwrap();
         assert!(path.exists());
         assert!(!dir.join("ok.mp3.partial").exists());
 
-        let empty = AtomicDownload::new(dir.join("empty.mp3"));
+        let empty = AtomicDownload::new(dir.join("empty.mp3")).unwrap();
         std::fs::write(empty.partial(), b"").unwrap();
         assert!(empty.commit().is_err(), "空文件必须当作失败");
         assert!(!dir.join("empty.mp3").exists());

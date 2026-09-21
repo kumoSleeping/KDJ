@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1536" width="1024" height="1536">
+<title>Manual portrait corrections, blue irises and tailored fabric shadows</title>
+<defs>
+ <linearGradient id="iris-blue" x1="0" y1="0" x2=".2" y2="1"><stop stop-color="#14253f"/><stop offset=".48" stop-color="#315777"/><stop offset=".82" stop-color="#689bb9"/><stop offset="1" stop-color="#a0c4d3"/></linearGradient>
+ <radialGradient id="cheek"><stop stop-color="#edada7" stop-opacity=".36"/><stop offset=".58" stop-color="#efb9af" stop-opacity=".17"/><stop offset="1" stop-color="#efb9af" stop-opacity="0"/></radialGradient>
+ <clipPath id="right-iris"><path d="M476 303Q486 297 496 303C503 313 502 328 494 335Q483 341 478 331Q473 316 476 303Z"/></clipPath>
+ <clipPath id="left-iris"><path d="M369 329Q376 324 383 331Q391 343 386 354Q379 360 373 351Q367 340 369 329Z"/></clipPath>
+</defs>
+<!-- Replace the unfilled W-shaped marks with a single continuous hairline. -->
+<path d="M407 211L430 208L438 235L404 235Z" fill="#fff0e5"/>
+<path d="M401 171L435 171L437 220Q432 217 429 212Q424 216 418 219Q412 218 406 215L402 235L400 211Z" fill="#779cc8"/>
+<path d="M402 235L406 215Q412 218 418 219Q424 216 429 212Q432 217 437 220" fill="none" stroke="#292e37" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M406 218Q413 222 419 223Q425 219 430 216L434 221L419 227L405 222Z" fill="#e8c9bc" opacity=".4"/>
+<!-- Restrained warm cheek colour; no glow or global blur. -->
+<ellipse cx="485" cy="371" rx="39" ry="24" fill="url(#cheek)" transform="rotate(-16 485 371)"/>
+<ellipse cx="375" cy="379" rx="21" ry="17" fill="url(#cheek)" transform="rotate(17 375 379)"/>
+<path d="M477 374l3-4m3 5 3-4m-114 9 2-3m4 3 2-3" stroke="#d79590" opacity=".35" stroke-width=".8" stroke-linecap="round"/>
+<!-- Iris shapes retain the original head perspective and deep-blue identity. -->
+<g clip-path="url(#right-iris)">
+ <path d="M472 296H505V343H472Z" fill="url(#iris-blue)"/>
+ <ellipse cx="486" cy="314" rx="5.1" ry="11.5" fill="#14243b"/>
+ <path d="M477 323Q482 337 495 326" fill="none" stroke="#a5cedd" stroke-width="2.1"/>
+ <path d="M480 326l-2 3m6 0-1 4m6-4 1 3m3-5 2 2" stroke="#d1e4e9" stroke-width=".8"/>
+ <ellipse cx="482" cy="307" rx="3.3" ry="4.8" fill="#fffdf5" transform="rotate(-21 482 307)"/>
+ <circle cx="495" cy="325" r="1.55" fill="#dcedf3"/><circle cx="492" cy="329" r=".7" fill="#fffdf5"/>
+</g>
+<path d="M476 303Q486 297 496 303C503 313 502 328 494 335Q483 341 478 331Q473 316 476 303Z" fill="none" stroke="#202c3b" stroke-width="1.4"/>
+<g clip-path="url(#left-iris)">
+ <path d="M363 323H393V361H363Z" fill="url(#iris-blue)"/>
+ <ellipse cx="378" cy="339" rx="3.1" ry="8.7" fill="#16273e" transform="rotate(-15 378 339)"/>
+ <path d="M374 347Q380 358 385 349" fill="none" stroke="#9ac7db" stroke-width="1.7"/>
+ <ellipse cx="373.7" cy="332.5" rx="2.3" ry="3.7" fill="#fffdf5" transform="rotate(-20 373.7 332.5)"/>
+ <circle cx="384" cy="349" r="1.15" fill="#e1f0f2"/>
+</g>
+<path d="M369 329Q376 324 383 331Q391 343 386 354Q379 360 373 351Q367 340 369 329Z" fill="none" stroke="#202c3b" stroke-width="1.15"/>
+<path d="M452 316Q471 293 497 296Q510 297 518 300L512 306Q493 292 470 303Z" fill="#151b24"/>
+<path d="M507 299l12-5-7 9M342 329Q360 311 380 322L387 328Q364 316 350 334Z" fill="#151b24"/>
+<!-- A slight smile, keeping the existing slender jaw. -->
+<path d="M417 404Q435 400 454 404L454 415L417 417Z" fill="#fff0e5"/>
+<path d="M420 409Q434 414 450 406" fill="none" stroke="#5a4243" stroke-width="1.25" stroke-linecap="round"/>
+<path d="M433 416Q440 417 445 414" fill="none" stroke="#e1aaa0" stroke-width="1" opacity=".6"/>
+<!-- Fingertip and cuff: close pale holes without cutting across either outline. -->
+<path d="M348 579Q351 575 358 573L356 587L350 594Q345 596 346 589Z" fill="#fff0e5" stroke="#31343a" stroke-width="1.2"/>
+<path d="M358 573Q364 570 366 575L363 587L359 592L356 588Z" fill="#f8e5db" stroke="#31343a" stroke-width="1.1"/>
+<path d="M239 656Q262 676 298 663L297 674Q266 689 238 666Z" fill="#eceee8"/>
+<path d="M239 656Q265 675 298 663M238 674Q266 691 298 677" fill="none" stroke="#303b47" stroke-width="1.3"/>
+<!-- Thin folds follow tension points; no floating polygon beside the tie. -->
+<path d="M297 742Q289 791 304 839L298 825Q291 790 297 742Z" fill="#aebcc2"/>
+<path d="M296 747Q289 795 300 831" fill="none" stroke="#424d54" stroke-width="1.05" stroke-linecap="round"/>
+<path d="M542 651Q539 686 551 712Q548 757 514 832L527 805Q557 752 555 711Z" fill="#aebbc1"/>
+<path d="M542 651Q540 685 554 714M554 714Q553 768 514 833" fill="none" stroke="#303840" stroke-width="1.25" stroke-linecap="round"/>
+<path d="M389 691Q402 741 398 794L398 839L391 850L390 801Q395 741 389 691Z" fill="#b8b9b2" opacity=".55"/>
+<!-- Reconnect the outer thin hair strand, along its actual curved contour. -->
+<path d="M907 714C925 753 930 802 908 835C920 806 921 771 907 741Z" fill="#7396ba"/>
+<path d="M907 714C925 753 930 802 908 835M907 741C920 779 918 812 908 835" fill="none" stroke="#2a3541" stroke-width="1.35" stroke-linecap="round"/>
+</svg>

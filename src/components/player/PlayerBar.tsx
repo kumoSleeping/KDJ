@@ -56,7 +56,7 @@ import {
   msUntilNextBoundary,
 } from "../../lib/beatGridSync";
 import { useAppStore } from "../../stores/appStore";
-import { useCrossfade, deckGain } from "../../lib/crossfade";
+import { useCrossfade } from "../../lib/crossfade";
 import { useHarmonicScope } from "../../lib/harmonicScope";
 import { useLyricsPrefs } from "../../lib/lyricsPrefs";
 import { ensureOverlayPermission } from "../../lib/lyricsOverlay";
@@ -86,7 +86,7 @@ import {
 } from "../../lib/localVideoSeekBridge";
 import { coordinateLocalVideoSeek } from "../../lib/localVideoSeekTiming";
 import {
-  claimStreamCacheRetry,
+  prepareStreamTrackRecovery,
   isStreamTrack,
   isUnresolvedStreamTrack,
   mediaUrlForTrack,
@@ -100,7 +100,6 @@ import {
   streamWaveformTokenById,
   subscribeStreamMeta,
 } from "../../lib/streamTrack";
-import { playSongPreview } from "../../lib/songPreview";
 import { enqueueMediaDownloads } from "../../lib/mediaActions";
 import {
   networkVideoOwnsTransport,
@@ -190,7 +189,7 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
 import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
-import { useMasterVolume } from "../../lib/masterVolume";
+import { getDeckOutputGain, useMasterVolume } from "../../lib/masterVolume";
 import {
   playerVolumeMeterClipping,
   playerVolumeMeterLevel,
@@ -534,7 +533,6 @@ export function PlayerBar() {
   const librarySort = useLibraryStore((state) => state.filter.sort);
   const libraryOrder = useLibraryStore((state) => state.filter.order);
   const coplay = useCrossfade((state) => state.coplay);
-  const fadeX = useCrossfade((state) => state.x);
   // “自动切歌”是一条完整链路：同一个开关既决定曲末是否续播，也决定播放中的
   // 双击/下一首是否由双 Deck 接手。此前这里只把续播 UI 点亮、却把混音硬编码关闭，
   // 所以所有显式换歌都必然退化为普通换源。
@@ -716,10 +714,7 @@ export function PlayerBar() {
     const volume = Number.isFinite(rawVolume) ? Math.min(1, Math.max(0, rawVolume)) : 0;
     playerVolumeRef.current = volume;
     setSharedMasterVolume(volume);
-    const effective = volume * deckGain(useCrossfade.getState().coplay, useCrossfade.getState().x);
-    if (nativePlayer) void nativePlayer.setVolume(effective);
-    else djEngine.setVolume(effective);
-  }, [nativePlayer, setSharedMasterVolume]);
+  }, [setSharedMasterVolume]);
   const [position, setPosition] = useState(() =>
     track &&
     track.id < 0 &&
@@ -1600,7 +1595,7 @@ export function PlayerBar() {
       // 只有纯浏览器调试 adapter 使用 Web Audio；Tauri 桌面与 Android 的在线流
       // 和本地文件一样留在 Rust 输出，不再为一次点播切换音频 owner。
       if (webPreview && !useCrossfade.getState().coplay) {
-        djEngine.setVolume(playerVolumeRef.current);
+        djEngine.setVolume(getDeckOutputGain());
       }
       const isLocalVideo = isVideoTrack(next.format);
       const current = trackRef.current;
@@ -1906,6 +1901,7 @@ export function PlayerBar() {
         });
         if (!stillCurrent()) return;
         if (wasUnresolved) setBrowserMediaStatus("loading");
+        const latestAutoplay = deferredStreamAutoplayRef.current === track.id || playingRef.current;
         const source = prepared.src;
         if (player) {
           if (desktopNative) {
@@ -1914,9 +1910,9 @@ export function PlayerBar() {
           }
           // Desktop Load carries the latest master gain atomically. Mobile keeps its existing
           // explicit volume command because it owns a different native media contract.
-          if (!desktopNative) void player.setVolume(playerVolumeRef.current).catch(() => {});
+          if (!desktopNative) void player.setVolume(getDeckOutputGain()).catch(() => {});
           void player
-            .load({ ...prepared, intentId: sourceIntentId })
+            .load({ ...prepared, autoplay: latestAutoplay, intentId: sourceIntentId })
             .then((state) => {
               if (!stillCurrent()) return;
               if (state.status === "error") {
@@ -1987,7 +1983,7 @@ export function PlayerBar() {
           prefetchWaveform(track);
         }
         setNotice("");
-        if (autoplayAfterResolve) {
+        if (latestAutoplay) {
           deferredStreamAutoplayRef.current = null;
           commitPlaying(true);
         }
@@ -2142,7 +2138,7 @@ export function PlayerBar() {
     if (playing) {
       // 除了首播，也接住系统休眠、切换音频设备后 context 再次被挂起的情况。
       djEngine.resume();
-      if (!useCrossfade.getState().coplay) djEngine.setVolume(playerVolumeRef.current);
+      if (!useCrossfade.getState().coplay) djEngine.setVolume(getDeckOutputGain());
       setNotice("");
       // DJ begin 已经在按「seek cue → 缓冲 → 设 BPM → 起播」准备新 deck。
       // 这里若因为 frontEl/track 切换再 play 一次，新歌会先按默认位置暗中运行，
@@ -2243,15 +2239,20 @@ export function PlayerBar() {
     }
   }, [playing, track?.id, frontEl, nativePlayer]);
 
-  // 底栏推子是持久化 MASTER 音量；协同播放时再与等功率交叉推子相乘。
+  // All playback purposes share this output: decks, workshop mixes and visualizers.
+  // Subscribe synchronously so mute/load in the same turn cannot use yesterday's gain.
   useEffect(() => {
-    playerVolumeRef.current = playerVolume;
-    // 用户音量与协同交叉推子相乘；移动端直接落到系统 player，桌面两台 deck
-    // 一起设，接歌中途也保持一致。
-    const effective = playerVolume * deckGain(coplay, fadeX);
-    if (nativePlayer) void nativePlayer.setVolume(effective);
-    else djEngine.setVolume(effective);
-  }, [playerVolume, coplay, fadeX, nativePlayer]);
+    const apply = () => {
+      playerVolumeRef.current = useMasterVolume.getState().volume;
+      const effective = getDeckOutputGain();
+      if (nativePlayer) void nativePlayer.setVolume(effective).catch(() => {});
+      else djEngine.setVolume(effective);
+    };
+    const unlistenVolume = useMasterVolume.subscribe(apply);
+    const unlistenCrossfade = useCrossfade.subscribe(apply);
+    apply();
+    return () => { unlistenVolume(); unlistenCrossfade(); };
+  }, [nativePlayer]);
 
   useEffect(() => {
     let frame = 0;
@@ -2269,7 +2270,7 @@ export function PlayerBar() {
         if (!deck.playing && !deck.desiredPlaying) return;
         peak = Math.max(peak, getLiveDeckPeak(side) ?? deck.peakLevel ?? 0);
       });
-      const volume = playerVolumeRef.current;
+      const volume = getDeckOutputGain();
       const target = playerVolumeMeterLevel(peak, volume);
       if (playerVolumeMeterClipping(peak, volume)) clipHoldUntil = at + 1_000;
       currentShown = smoothPlayerVolumeMeter(currentShown, target, dt);
@@ -2877,6 +2878,8 @@ export function PlayerBar() {
         }
       }
       if (state.status === "error") {
+        // Repeated snapshots from one failed native load must not cancel its in-flight recovery.
+        if (nativeErrorEpisodeRef.current) return;
         if (!nativeErrorEpisodeRef.current) nativeErrorRecoveryAvailableRef.current = true;
         nativeErrorEpisodeRef.current = true;
         const wantedStreamPlayback = Boolean(
@@ -2884,10 +2887,10 @@ export function PlayerBar() {
             isStreamTrack(current) &&
             (playingRef.current || deferredStreamAutoplayRef.current === current.id),
         );
-        const retrySource =
-          current && wantedStreamPlayback
-            ? claimStreamCacheRetry(current)
-            : null;
+        const retryPrepared = current && wantedStreamPlayback
+          ? prepareStreamTrackRecovery(current, state.error || "online audio read failed")
+          : false;
+        const resumeAt = Math.max(0, state.currentTime || previous.currentTime || positionRef.current);
         commitPlaying(false);
         pendingTrackSwitchRef.current = null;
         nativeLoadTargetRef.current = null;
@@ -2895,23 +2898,15 @@ export function PlayerBar() {
         if (current && deferredStreamAutoplayRef.current === current.id) {
           deferredStreamAutoplayRef.current = null;
         }
-        if (retrySource && current) {
+        if (retryPrepared && current) {
+          // No playSongPreview: it would allocate a new id, replace the queue and create a new intent.
+          nativeLoadGenerationRef.current += 1;
+          nativeLoadInFlightRef.current = true;
+          restoredPositionRef.current = { trackId: current.id, position: resumeAt };
+          deferredStreamAutoplayRef.current = current.id;
           setBrowserMediaStatus("loading");
-          setNotice("本地缓存或在线地址异常，正在重新连接…");
-          void playSongPreview({
-            source: retrySource,
-            title: current.title,
-            artist: current.artist,
-            autoPlay: true,
-            bypassCache: true,
-          }).catch((reason: unknown) => {
-            if (trackRef.current?.id === current.id) {
-              setBrowserMediaStatus("error");
-              setNotice(
-                `在线试听重试失败：${reason instanceof Error ? reason.message : String(reason)}`,
-              );
-            }
-          });
+          setNotice("正在重新连接在线音频…");
+          setSourceLoadEpoch((epoch) => epoch + 1);
         } else {
           setNotice(state.error || "原生播放器无法播放这个文件");
         }
@@ -3183,16 +3178,19 @@ export function PlayerBar() {
       return;
     }
     const current = trackRef.current;
-    // 解析/装载尚未落地时，播放键不是“暂停后可再播放”的状态。键盘快捷键和
-    // 系统媒体键也必须与禁用中的前端按钮一致，不能重复启动同一条解析链。
-    if (
-      !playingRef.current &&
-      current &&
-      (nativeLoadInFlightRef.current ||
-        (isUnresolvedStreamTrack(current) &&
-          deferredStreamAutoplayRef.current === current.id))
-    ) {
-      return;
+    // During a pending source load, change only desired autoplay. In particular a pause while
+    // recovery is resolving must not be ignored and later resurrected by its completion.
+    if (!playingRef.current && current && (nativeLoadInFlightRef.current || isUnresolvedStreamTrack(current))) {
+      if (nativeLoadInFlightRef.current || deferredStreamAutoplayRef.current === current.id) {
+        const wasDesired = deferredStreamAutoplayRef.current === current.id;
+        deferredStreamAutoplayRef.current = wasDesired ? null : current.id;
+        if (wasDesired) {
+          commitPlaying(false);
+          if (nativePlayer) void nativePlayer.pause().catch(() => undefined);
+          else djEngine.hardPause(djEngine.frontElement());
+        }
+        return;
+      }
     }
     // 暂停/恢复也是用户意图：暂停期间完成的异步接播不能把声音擅自拉回来。
     manualNextGateRef.current?.cancel();
@@ -3278,7 +3276,9 @@ export function PlayerBar() {
         pip.failed,
       )
         ? pip.playing
-        : playingRef.current;
+        : playingRef.current || Boolean(trackRef.current
+            && deferredStreamAutoplayRef.current === trackRef.current.id
+            && nativeLoadInFlightRef.current);
       const requestedPlaying =
         action === "play" ? true : action === "pause" ? false : !currentlyPlaying;
       // Windows SMTC 会按当前状态发出明确的 Play/Pause。重复的同态命令不是 toggle，
@@ -3536,24 +3536,15 @@ export function PlayerBar() {
         const wasPlaying = playingRef.current;
         commitPlaying(false);
         if (isStreamTrack(track)) {
-          const retrySource = wasPlaying ? claimStreamCacheRetry(track) : null;
-          if (retrySource) {
+          const failure = audio.error?.code === 3 ? "decode failed"
+            : audio.error?.code === 2 ? "network failed" : "unsupported source";
+          if (wasPlaying && prepareStreamTrackRecovery(track, failure)) {
+            nativeLoadGenerationRef.current += 1;
+            restoredPositionRef.current = { trackId: track.id, position: Math.max(0, audio.currentTime || positionRef.current) };
+            deferredStreamAutoplayRef.current = track.id;
             setBrowserMediaStatus("loading");
-            setNotice("本地缓存或在线地址异常，正在重新连接…");
-            void playSongPreview({
-              source: retrySource,
-              title: track.title,
-              artist: track.artist,
-              autoPlay: true,
-              bypassCache: true,
-            }).catch((reason: unknown) => {
-              if (trackRef.current?.id === track.id) {
-                setBrowserMediaStatus("error");
-                setNotice(
-                  `在线试听重试失败：${reason instanceof Error ? reason.message : String(reason)}`,
-                );
-              }
-            });
+            setNotice("正在重新连接在线音频…");
+            setSourceLoadEpoch((epoch) => epoch + 1);
             return;
           }
           setBrowserMediaStatus("error");

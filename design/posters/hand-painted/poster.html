@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KDJ · 让音乐自由流动</title><link rel="icon" href="data:,"><link rel="stylesheet" href="poster.css"></head>
+<body>
+<main id="poster" aria-label="KDJ 让音乐自由流动">
+  <div class="layer paper" data-name="01 Paper"></div>
+  <svg class="layer blue-wash" data-name="02 Painted blue wash" viewBox="0 0 1200 1800">
+    <defs>
+      <radialGradient id="wash" cx=".62" cy=".32" r=".73"><stop stop-color="#e6f4f7"/><stop offset=".46" stop-color="#c5dce8"/><stop offset="1" stop-color="#a8c8dd" stop-opacity=".16"/></radialGradient>
+      <filter id="paint-edge" x="-8%" y="-8%" width="116%" height="116%"><feTurbulence type="fractalNoise" baseFrequency=".018" numOctaves="3" seed="7" result="noise"/><feDisplacementMap in="SourceGraphic" in2="noise" scale="7" xChannelSelector="R" yChannelSelector="G"/></filter>
+    </defs>
+    <path d="M1140 433C826 360 469 494 371 728C281 942 336 1186 535 1361C732 1524 1038 1542 1254 1400L1272 559Z" fill="url(#wash)" filter="url(#paint-edge)"/>
+  </svg>
+  <svg class="layer pencil-arc" data-name="03 Pencil contour" viewBox="0 0 1200 1800">
+    <path d="M1206 484C904 359 532 480 385 716C226 975 375 1283 558 1419" stroke="#7f9aa8" stroke-width="1.7" opacity=".35" fill="none"/>
+    <path d="M1180 474C879 369 520 497 381 742C267 946 330 1199 477 1348" stroke="#7f9aa8" stroke-width=".8" opacity=".3" fill="none"/>
+  </svg>
+  <svg class="layer masthead" data-name="04 Hand painted KDJ" viewBox="0 0 1200 1800" aria-label="KDJ">
+    <defs>
+      <linearGradient id="letter-ink" x1="0" y1="0" x2=".9" y2="1"><stop stop-color="#57789d"/><stop offset=".52" stop-color="#638ab1"/><stop offset="1" stop-color="#96b6cc"/></linearGradient>
+      <filter id="brush-edge" x="-5%" y="-5%" width="110%" height="110%"><feTurbulence type="fractalNoise" baseFrequency=".032 .085" numOctaves="3" seed="11" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="3.5" xChannelSelector="R" yChannelSelector="G"/></filter>
+      <clipPath id="letters">
+        <path d="M83 95L183 91L186 196L292 90L408 97L282 228L414 369L293 373L186 267L188 368L81 372Z"/>
+        <path fill-rule="evenodd" d="M447 94L588 90C732 90 798 140 796 226C797 317 730 371 590 370L443 374ZM548 170L548 292L589 293C657 293 689 268 690 226C690 188 657 168 587 169Z"/>
+        <path d="M1001 94L1117 90L1115 249C1116 335 1059 378 962 378C897 378 850 361 823 324L904 262C917 281 934 293 959 294C988 295 1004 277 1003 246Z"/>
+      </clipPath>
+    </defs>
+    <g clip-path="url(#letters)" filter="url(#brush-edge)"><rect x="65" y="78" width="1070" height="316" fill="url(#letter-ink)"/><g id="dry-brush"></g></g>
+  </svg>
+  <div class="layer brand-caption" data-name="05 Brand caption">Kumo’s Download &amp; Jockey</div>
+  <div class="layer character" data-name="06 Character manual painting"><img src="assets/chihaya-porcelain.png" alt="蓝色长发与白皙肤色的水手服角色"></div>
+  <div class="layer editorial" data-name="07 Main headline"><h1><span>让音乐</span><span>自由流动</span></h1></div>
+  <div class="layer foreground-light" data-name="08 Soft foreground wash"></div>
+  <div class="layer product-copy" data-name="09 Product description"><h2>你的音乐工作区</h2><p>发现 · 整理 · 分析 · 播放</p></div>
+  <div class="layer footer" data-name="10 Project link"><a href="https://github.com/kumoSleeping/KDJ">github.com/kumoSleeping/KDJ</a></div>
+  <svg class="layer paper-grain" data-name="11 Paper grain" viewBox="0 0 1200 1800">
+    <defs><filter id="grain" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".82" numOctaves="3" seed="32"/><feColorMatrix type="matrix" values="0 0 0 0 .27  0 0 0 0 .25  0 0 0 0 .19  0 0 0 .11 0"/></filter></defs>
+    <rect width="1200" height="1800" filter="url(#grain)" opacity=".42"/>
+  </svg>
+</main>
+<aside id="layers-panel"><strong>KDJ · 手绘版</strong><p>独立图层</p><div id="layer-list"></div><button id="restore">显示全部</button></aside>
+<script src="poster.js"></script></body></html>

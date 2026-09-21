@@ -3612,7 +3612,7 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-table tbody tr[data-tree="parent"]:hover td {
   --kd-result-package-bg: var(--kd-hover);
 }
-/* 在线结果行首与本地曲库一致只显示序号。下载仍保留在右键菜单、详情和批量动作中。 */
+/* 在线结果序号在整行悬停时原位切换为下载按钮。 */
 .kd-table tbody td.kd-result-lead {
   padding: 0 0.35rem;
   overflow: visible;
@@ -3626,6 +3626,51 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 .kd-result-index {
   font-variant-numeric: tabular-nums;
+}
+.kd-result-download-index {
+  position: relative;
+  display: inline-grid;
+  min-width: 1.4rem;
+  min-height: 1.4rem;
+  align-items: center;
+  justify-items: end;
+}
+.kd-result-download-btn {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--kd-text);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+.kd-table tr:hover .kd-result-download-btn,
+.kd-result-download-index:focus-within .kd-result-download-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+.kd-table tr:hover .kd-result-download-index:has(button) > .kd-result-index,
+.kd-result-download-index:focus-within > .kd-result-index {
+  opacity: 0;
+}
+.kd-result-download-btn:hover {
+  color: var(--kd-theme);
+}
+.kd-result-download-btn:focus-visible {
+  outline: 1px solid var(--kd-theme);
+  outline-offset: 1px;
+}
+.kd-result-download-btn:disabled {
+  cursor: wait;
+  color: var(--kd-muted);
+}
+.kd-table[data-kind="results"] tbody tr:has(.kd-result-download-btn):hover > td {
+  background: color-mix(in srgb, var(--kd-hover), #000 7%);
 }
 /* 多来源展开属于歌曲标题，不再占用（或伪装成）独立下载列。 */
 .kd-result-source-toggle {
@@ -9480,6 +9525,29 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   text-transform: uppercase;
   color: var(--kd-lyrics-faint);
 }
+.kd-lyrics-source-picker,
+.kd-viz-panel .kd-lyrics-source-picker {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 0.25rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.kd-lyrics-source-picker:hover:not(:disabled) { color: var(--kd-text); }
+.kd-lyrics-source-picker:disabled { opacity: .6; cursor: default; }
+.kd-lyrics-source-picker:focus-visible,
+.kd-lyrics-source-menu > button:focus-visible { outline: 2px solid var(--kd-muted); outline-offset: 2px; }
+.kd-lyrics-source-menu { border-radius: .35rem; }
+.kd-lyrics-source-menu > button[aria-checked="true"],
+.kd-lyrics-source-menu > button[aria-checked="true"]:hover:not(:disabled) {
+  color: var(--kd-theme);
+  background: none;
+}
 /* 右上角一字状态：原 / 意 / 音，无边框无底，点一下循环。 */
 .kd-lyrics-layer {
   align-self: start;
@@ -10414,7 +10482,7 @@ button.kd-stream-status {
 .vj-workshop .vj-source-remove { padding: 0; min-height: 22px; width: 18px; opacity: 0; }
 .vj-source:hover .vj-source-remove, .vj-source:focus-within .vj-source-remove { opacity: 1; }
 .vj-preview { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 0; background: transparent; overflow: hidden; }
-.vj-preview-surface { position: relative; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; width: 100%; background: transparent; overflow: hidden; }
+.vj-preview-surface { position: relative; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; width: 100%; background: #000; overflow: hidden; }
 .vj-preview-surface > canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
 .vj-preview-surface > video { position: absolute; object-fit: fill; pointer-events: none; transform: translateZ(0); }
 .vj-picture-hit { position: absolute; cursor: pointer; }
@@ -10531,6 +10599,9 @@ button.kd-stream-status {
 .vj-position-presets button { min-width: 0; min-height: 23px; font-size: var(--kd-size-xs); padding: .15rem .4rem; border-color: var(--kd-line-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vj-task-stack { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; }
 .vj-task-entry { flex: none; min-width: 0; border-bottom: 1px solid var(--kd-line-soft); }
+.vj-visualizer-tasks { flex: none; min-width: 0; }
+.vj-task-section-title { margin: 0; padding: 8px; font-size: var(--kd-size-xs); font-weight: 550; color: var(--kd-muted); }
+.vj-task-section-title small { margin-left: 4px; font: inherit; }
 .vj-task-card { flex: none; min-width: 0; }
 .vj-task-card:not([data-editing]) { cursor: pointer; }
 .vj-task-entry[data-expanded="true"] { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
@@ -10803,11 +10874,7 @@ button.kd-stream-status {
 [data-vj-drop-over] { outline: 1px dashed var(--kd-accent); outline-offset: -2px; }
 
 .vj-image-picture { position:absolute; pointer-events:none; transform-origin:center; }
-.vj-crop-edge { position:absolute; touch-action:none; background:var(--kd-muted); }
-.vj-crop-edge.crop_l,.vj-crop-edge.crop_r { width:4px; height:24px; top:calc(50% - 12px); cursor:ew-resize; }
-.vj-crop-edge.crop_l { left:0; } .vj-crop-edge.crop_r { right:0; }
-.vj-crop-edge.crop_t,.vj-crop-edge.crop_b { height:4px; width:24px; left:calc(50% - 12px); cursor:ns-resize; }
-.vj-crop-edge.crop_t { top:0; } .vj-crop-edge.crop_b { bottom:0; }
+.vj-timeline > .vj-workshop-toolbar .vj-crop-tools { order:2; flex-basis:100%; }
 
 /* Audio is edited in the existing clip rail, using only the half-height preview envelope. */
 .vj-rhythm-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; font-size: 11px; color: var(--kd-muted); }
@@ -10823,3 +10890,41 @@ button.kd-stream-status {
 .vj-rhythm-ruler > i[data-bar] { border-left-color: color-mix(in srgb, var(--kd-muted) 50%, transparent); }
 .vj-rhythm-ruler > span { position: absolute; font-size: 10px; line-height: 14px; white-space: nowrap; padding-left: 3px; color: var(--kd-muted); font-variant-numeric: tabular-nums; }
 .vj-bar-number, .vj-tempo-label { top: 0; }
+
+/* Clip properties stay beside the timeline; compact windows stack the same panel below it. */
+.vj-editing-body { display:flex; flex:1; min-width:0; min-height:0; overflow:hidden; }
+.vj-task-editor .vj-editing-body > .vj-timeline { flex:1 1 0; min-width:0; max-height:none; }
+.vj-clip-properties { display:flex; flex-direction:column; flex:0 0 264px; min-width:0; min-height:0; border-left:1px solid var(--kd-line-soft); background:var(--kd-panel); }
+.vj-clip-properties > header { display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid var(--kd-line-soft); }
+.vj-clip-properties > header strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--kd-size-xs); font-weight:600; }
+.vj-clip-properties-scroll { min-height:0; overflow:auto; overscroll-behavior:contain; padding:0 10px 10px; }
+.vj-clip-properties section { padding:9px 0; border-bottom:1px solid var(--kd-line-soft); }
+.vj-clip-properties section:last-child { border-bottom:0; }
+.vj-clip-properties h3 { margin:0 0 7px; font-size:var(--kd-size-xs); font-weight:600; }
+.vj-clip-properties .vj-number { display:flex; flex-wrap:nowrap; gap:6px; margin:5px 0; width:100%; }
+.vj-clip-properties .vj-number > span { flex:1; min-width:0; color:var(--kd-muted); }
+.vj-clip-properties .vj-number > input[type="number"] { flex:0 1 88px; width:88px; padding:4px 6px; text-align:right; }
+.vj-workshop .vj-clip-properties .vj-picture-tools .vj-number > input[type="number"] { width:88px; padding:4px 6px; background:var(--kd-panel-inset); border-color:var(--kd-line-soft); }
+.vj-clip-properties .vj-number > small { flex:0 0 18px; color:var(--kd-muted); }
+.vj-clip-properties .vj-picture-tools { display:flex; flex-wrap:wrap; padding:0; gap:4px; width:100%; }
+.vj-clip-properties .vj-picture-tools > fieldset { display:flex; flex-direction:column; align-items:stretch; width:100%; min-width:0; padding:0; border:0; gap:0; }
+.vj-clip-properties .vj-picture-tools > fieldset > button { align-self:flex-end; }
+.vj-property-actions { display:flex; flex-wrap:wrap; align-items:center; gap:2px 4px; margin-top:5px; }
+.vj-clip-properties .vj-property-actions button { font-size:var(--kd-size-xs); }
+.vj-property-state { display:block; color:var(--kd-muted); font-size:var(--kd-size-xs); margin-top:4px; }
+@container (max-width: 780px) {
+  .vj-editing-body { flex-direction:column; }
+  .vj-clip-properties { flex:0 1 auto; width:100%; max-height:44%; border-left:0; border-top:1px solid var(--kd-line-soft); }
+  .vj-clip-properties-scroll { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); column-gap:20px; }
+  .vj-clip-properties section { min-width:0; }
+}
+
+.kd-media-tools-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  color: var(--kd-text);
+}
+.kd-media-tools-dialog::backdrop { background: rgb(0 0 0 / 25%); }
+.kd-media-tools-dialog:not([open]) { display: none; }
+.kd-ffmpeg-actions progress { width: 120px; height: 4px; accent-color: var(--kd-theme); }

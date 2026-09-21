@@ -18,8 +18,9 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
   const project = useWorkshopStore(s => s.draft);
   const position = useWorkshopStore(s => s.position);
   const cropId = useWorkshopStore(s => s.cropId);
+  const selectedId = useWorkshopStore(s => s.selectedId);
   const [pictureEditing, setPictureEditing] = useState(false);
-  const editing = pictureEditing || cropId !== null;
+  const editing = pictureEditing || (cropId !== null && cropId === selectedId);
   const ratio = project ? project.canvas.width / project.canvas.height : 16 / 9;
   const fit = (box: Box): Box => {
     const maximum = Math.max(1, Math.min(window.innerWidth - 24, (window.innerHeight - 24) * ratio));

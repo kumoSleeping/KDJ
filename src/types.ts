@@ -40,6 +40,14 @@ export interface FfmpegInstallationStatus {
   ffprobe: FfmpegToolStatus;
 }
 
+export interface FfmpegInstallProgress {
+  component: string | null;
+  phase: "idle" | "preparing" | "downloading" | "extracting" | "validating" | "done" | "failed";
+  downloaded: number;
+  total: number | null;
+  error: string | null;
+}
+
 export interface Health {
   ok: boolean;
   version: string;
@@ -935,6 +943,11 @@ export interface MaintenanceProgress {
  */
 export type WsEvent =
   | { type: "connection.open"; payload: Record<string, never> }
+  | { type: "library.progress.snapshot"; payload: { events: Array<
+      { type: "scan.progress"; payload: ScanProgress } |
+      { type: "analyze.progress"; payload: AnalyzeProgress } |
+      { type: "maintenance.progress"; payload: MaintenanceProgress }
+    > } }
   | { type: "workshop.positions"; payload: import("./types/workshop").WorkshopPositionResults }
   | { type: "workshop.updated"; payload: import("./types/workshop").WorkshopSnapshot }
   | { type: "composition.list" | "composition.updated"; payload: import("./types/composition").CompositionSnapshot }
@@ -1103,6 +1116,8 @@ export interface KdjBridge {
     image: string;
   }) => Promise<SavedLoginQr>;
   pickFolder: () => Promise<string | null>;
+  installMediaTools?: (action: "download" | "zip" | "folder") => Promise<boolean>;
+  mediaToolsProgress?: () => Promise<FfmpegInstallProgress>;
   pickFolders: () => Promise<string[]>;
   /** 桌面主窗口接收系统文件夹；原生端验证目录并授予与选择器相同的访问范围。 */
   importWorkshopFiles?: (input: import("./types/workshop").WorkshopIntake) => Promise<import("./types/workshop").WorkshopIntakeResult>;

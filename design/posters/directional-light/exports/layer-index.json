@@ -1,0 +1,38 @@
+[
+  {
+    "name": "01 Paper",
+    "file": "layers/01.png"
+  },
+  {
+    "name": "02 Hand painted KDJ",
+    "file": "layers/02.png"
+  },
+  {
+    "name": "03 Brand caption",
+    "file": "layers/03.png"
+  },
+  {
+    "name": "04 Hand inked character and directional lighting",
+    "file": "layers/04.png"
+  },
+  {
+    "name": "05 Hand drawn directional form shadows",
+    "file": "layers/05.png"
+  },
+  {
+    "name": "06 Main headline",
+    "file": "layers/06.png"
+  },
+  {
+    "name": "07 Product description",
+    "file": "layers/07.png"
+  },
+  {
+    "name": "08 Side project link",
+    "file": "layers/08.png"
+  },
+  {
+    "name": "09 Paper grain",
+    "file": "layers/09.png"
+  }
+]

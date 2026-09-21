@@ -881,20 +881,25 @@ export const api = {
    * 歌曲试听代理（使用设置中的试听音质，不下载）。整个 SongSource 发过去：
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
    */
-  songPreview: async (source: SongSource, bypassCache = false) => {
+  songPreview: async (source: SongSource, bypassCache = false, recovery = false): Promise<{
+    url: string; cached?: boolean; waveform_token?: string; attempt_id?: string;
+    actual_quality?: string; requested_quality?: string; mime?: string;
+  }> => {
     if (source.platform === "ytm") {
       const bootstrap = await resolveYtmSabrPlayback(source, bypassCache);
       const { createYoutubeSabrPreview } = await import("./youtubeSabr");
       return createYoutubeSabrPreview(source, bootstrap, bypassCache);
     }
-    const result = await post<{ url: string; cached?: boolean; waveform_token?: string }>("/song/preview", {
+    const result = await post<{ url: string; cached?: boolean; waveform_token?: string; attempt_id?: string; actual_quality?: string; requested_quality?: string; mime?: string }>("/song/preview", {
       source,
       bypass_cache: bypassCache,
+      recovery,
     });
     if (!result.url.startsWith("/")) return result;
     return { ...result, url: authenticatedGetUrl(bridge().baseUrl + result.url) };
   },
   /** token 只由 songPreview 返回；服务端据此查当前会话，绝不让前端传缓存路径/key。 */
+  exportPlaybackDiagnostics: () => post<{ path: string }>("/activity/diagnostics/export", {}),
   songPreviewWaveform: (token: string) =>
     request<StreamWaveformProgress>(`/song/preview/${encodeURIComponent(token)}/waveform`, {
       cache: "no-store",
@@ -915,7 +920,9 @@ export const api = {
   editWorkshop: (id: string, revision: number, edit: WorkshopEdit) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ revision, ...edit }) }),
   deleteWorkshop: (id: string, revision: number) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ revision }) }),
   addWorkshopSources: (id: string, revision: number, track_ids: number[], at_ms: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/sources`, { revision, track_ids, at_ms }),
-  alignWorkshop: (id: string, revision: number, clip_id: string, reference_id: string) => post<{start_ms: number; revision: number}>(`/workshop/${encodeURIComponent(id)}/align`, {revision, clip_id, reference_id}),
+  alignWorkshop: (id: string, revision: number, clip_id: string, reference_id: string, request_id?: string, signal?: AbortSignal) => request<{start_ms: number; revision: number}>(`/workshop/${encodeURIComponent(id)}/align`, {method: "POST", body: JSON.stringify({revision, clip_id, reference_id, request_id}), signal}),
+  cancelWorkshopAlignment: (request: string) => post(`/workshop/align/${encodeURIComponent(request)}/cancel`, {}),
+  acknowledgeWorkshopRecovery: () => post<WorkshopSnapshot>("/workshop/recovery/ack", {}),
   previewWorkshop: (id: string, revision: number, auditionAfterLayer?: string) => post<{ticket: string; revision: number}>(`/workshop/${encodeURIComponent(id)}/preview`, {revision, audition_after_layer: auditionAfterLayer}),
   releaseWorkshop: (ticket: string) => request(`/workshop/preview/${encodeURIComponent(ticket)}`, {method: "DELETE"}),
   workshopPositions: (id:string) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions`,{}),
@@ -927,6 +934,7 @@ export const api = {
   exportWorkshop: (id: string, revision: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/export`, {revision}),
   cancelWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/cancel`, {}),
   importWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/import`, {}),
+  discardWorkshopReceipt: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/discard`, {}),
   compositions: () => request<CompositionSnapshot>("/compositions"),
   enqueueCompositions: async (trackIds: number[]) => {
     await waitForSettingsWrites();
@@ -1235,6 +1243,26 @@ export const api = {
   },
 };
 
+export interface VisualizerJobStatus {
+  id: string; phase: "queued" | "encoding" | "validating" | "done" | "failed" | "canceled";
+  status: string; progress: number; demand: { token: number; index: number } | null; output_path: string; error: string;
+}
+/** All visualizer traffic stays behind the same authenticated local API boundary. */
+export const visualizerApi = {
+  analyze: (trackId: number, spectrum: import("../types/audioVisualizer").AudioVisualizerScene["spectrum"], signal?: AbortSignal) =>
+    request<{ timeline: import("../types/audioVisualizer").VisualizerFeatureTimeline; signature: string }>("/visualizer/analyze", { method: "POST", body: JSON.stringify({ track_id: trackId, spectrum }), signal }),
+  cover: async (trackId: number, signal?: AbortSignal): Promise<Blob | null> => {
+    const response = await fetch(api.coverUrl(trackId), { signal });
+    if (response.status === 204 || response.status === 404) return null;
+    if (!response.ok) throw new ApiError("读取封面失败", response.status);
+    const blob = await response.blob(); return blob.size ? blob : null;
+  },
+  start: (body: { track_id: number; signature: string; duration: number; output_path: string; width: number; height: number; fps: number; acceleration: string }) => request<VisualizerJobStatus>("/visualizer/export", { method: "POST", body: JSON.stringify(body) }),
+  poll: (id: string, since: number, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}?since=${since}`, { signal, headers: { "X-KDJ-Activity-Recorded": "1" } }),
+  frame: (id: string, token: number, index: number, pixels: ArrayBuffer, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/frames/${token}/${index}`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-KDJ-Activity-Recorded": "1" }, body: pixels, signal }),
+  cancel: (id: string, keepalive = false) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST", keepalive }),
+};
+
 /* ---------------------------------------------------------------- WebSocket */
 
 type Listener = (event: WsEvent) => void;
@@ -1267,7 +1295,10 @@ class EventStream {
     socket.onmessage = (message) => {
       let event: WsEvent;
       try {
-        event = JSON.parse(message.data as string) as WsEvent;
+        const parsed = JSON.parse(message.data as string);
+        event = parsed.type === "connection.resync"
+          ? { type: "connection.open", payload: {} }
+          : parsed as WsEvent;
       } catch {
         return;
       }

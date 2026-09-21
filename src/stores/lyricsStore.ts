@@ -5,7 +5,7 @@
 
 import { create } from "zustand";
 import { api, ApiError } from "../lib/api";
-import { useLyricsPrefs } from "../lib/lyricsPrefs";
+import { useLyricsPrefs, type LyricsEngine } from "../lib/lyricsPrefs";
 import { parseLrc, parseNeteaseWordLrc, type LrcLine } from "../lib/lrc";
 import { localLibraryDataTrackId } from "../lib/playbackTrackSource";
 import type { LyricsResponse, Platform, Track } from "../types";
@@ -85,10 +85,10 @@ function platformOf(track: Track): Platform | null {
   return null;
 }
 
-function requestOf(track: Track) {
+function requestOf(track: Track, selected?: LyricsEngine) {
   const prefs = useLyricsPrefs.getState();
-  const engines = prefs.engines;
-  const prefer = prefs.displaySource;
+  const prefer = selected ?? prefs.displaySource;
+  const engines = prefer === "follow" ? prefs.engines : [prefer];
   let platform = platformOf(track);
   let key = track.source_key || "";
 
@@ -124,7 +124,7 @@ function requestOf(track: Track) {
 
 interface LyricsStore {
   byId: Record<number, LyricsEntry>;
-  ensure(track: Track | null | undefined): Promise<void>;
+  ensure(track: Track | null | undefined, options?: { matchMissing?: boolean; platform?: LyricsEngine }): Promise<void>;
   get(trackId: number | null | undefined): LyricsEntry;
   /** 引擎 / 显示来源变更后清掉，避免旧偏好结果粘着。 */
   clear(): void;
@@ -143,33 +143,38 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
     set({ byId: {} });
   },
 
-  async ensure(track) {
+  async ensure(track, options = {}) {
     // 曲库 id > 0；在线试听用负数 id，同样要按 source_platform/key 直取歌词。
     if (!track || track.id === 0) return;
     const fingerprint = prefsFingerprint();
     const existing = get().byId[track.id];
     if (
-      existing &&
+      !options.platform && existing &&
       existing.fingerprint === fingerprint &&
       (
-        existing.status === "empty"
+        (existing.status === "empty" && !options.matchMissing)
         || (existing.status === "ready" && (track.id < 0 || existing.persisted === true))
       )
     ) {
       return;
     }
-    if (existing?.inflight && existing.fingerprint === fingerprint) {
+    if (existing?.inflight && (options.platform || existing.fingerprint === fingerprint)) {
       await existing.inflight;
+      if (options.platform || (options.matchMissing && get().byId[track.id]?.status !== "ready")) return get().ensure(track, options);
       return;
     }
 
-    const run = (async () => {
+    const isCurrent = () => get().byId[track.id]?.inflight === run;
+    const run: Promise<void> = (async () => {
+      // Register ownership before even an offline/empty lookup can complete.
+      await Promise.resolve();
+      if (!isCurrent()) return;
       set((state) => ({
         byId: {
           ...state.byId,
           [track.id]: {
             ...(state.byId[track.id] ?? emptyEntry()),
-            status: "loading",
+            status: options.platform && existing?.lines.length ? "ready" : "loading",
             fingerprint,
             error: "",
             persisted: false,
@@ -183,7 +188,8 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         let cacheDirty = false;
 
         // 下载时已经落盘的歌词优先。
-        const localLyricsTrackId = localLibraryDataTrackId(track);
+        // Explicit rematching must bypass the old platform's disk cache.
+        const localLyricsTrackId = options.platform ? null : localLibraryDataTrackId(track);
         if (localLyricsTrackId) {
           try {
             const local = await api.libraryLyrics(localLyricsTrackId);
@@ -221,14 +227,14 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         // 本地缓存补取一次附加层；主歌词仍保留本地版本（包括用户手调的时间轴）。
         if (
           meta &&
-          platformOf(track) === "qqm" &&
+          meta.platform === "qqm" &&
           prefs.tryOnlineWhenMissing &&
           prefs.displaySource !== "wyy" &&
           prefs.engines.includes("qqm") &&
           !parseLrc(meta.translated_lrc || "", { honorOffset: true }).length
         ) {
           try {
-            const online = await api.lyrics(requestOf(track));
+            const online = await api.lyrics({ ...requestOf(track, "qqm"), key: meta.key });
             if (online?.platform === "qqm") {
               meta = {
                 ...meta,
@@ -243,10 +249,11 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         }
 
         // 本地没有歌词时，在线匹配是显式偏好；在线试听仍按来源 key 直取。
-        if (!meta && (track.id < 0 || prefs.tryOnlineWhenMissing)) {
-          meta = await api.lyrics(requestOf(track));
+        if (!meta && (track.id < 0 || prefs.tryOnlineWhenMissing || options.matchMissing || options.platform)) {
+          meta = await api.lyrics(requestOf(track, options.platform));
           cacheDirty = track.id > 0;
         }
+        if (!isCurrent()) return;
         if (!meta) {
           set((state) => ({
             byId: {
@@ -266,6 +273,14 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
           }));
           return;
         }
+        const lrcOptions = { honorOffset: meta.platform === "qqm" };
+        const lineLyrics = parseLrc(meta.lrc, lrcOptions);
+        const wordLyrics = meta.platform === "wyy" ? parseNeteaseWordLrc(meta.word_lrc || "") : [];
+        const lines = wordLyrics.length ? wordLyrics : lineLyrics;
+        if (options.platform && (meta.platform !== options.platform || !lines.length)) {
+          throw new Error("所选平台没有匹配到可用歌词");
+        }
+        let saveError = "";
         if (track.id > 0 && cacheDirty) {
           try {
             await api.cacheLibraryLyrics(track.id, meta);
@@ -274,13 +289,10 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
             // 已经匹配到的歌词仍可用于当前播放；落盘失败单独反映在顶部缓存状态，
             // 不应该把可用歌词降级成整块不可用。
             console.warn("缓存匹配歌词失败", error);
+            saveError = "歌词已匹配，但本地保存失败";
           }
         }
-        const lrcOptions = { honorOffset: meta.platform === "qqm" };
-        const lineLyrics = parseLrc(meta.lrc, lrcOptions);
-        const wordLyrics =
-          meta.platform === "wyy" ? parseNeteaseWordLrc(meta.word_lrc || "") : [];
-        const lines = wordLyrics.length ? wordLyrics : lineLyrics;
+        if (!isCurrent()) return;
         const translated = parseLrc(meta.translated_lrc || "", lrcOptions);
         const romaji = parseLrc(meta.romaji_lrc || "", lrcOptions);
         set((state) => ({
@@ -292,7 +304,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
               translated,
               romaji,
               meta,
-              error: "",
+              error: saveError,
               persisted,
               fingerprint,
               inflight: null,
@@ -300,6 +312,17 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
           },
         }));
       } catch (error) {
+        if (!isCurrent()) return;
+        // A failed explicit switch must not erase the current usable lyrics.
+        if (options.platform) {
+          set((state) => ({ byId: { ...state.byId, [track.id]: {
+            ...(existing ?? emptyEntry("error")),
+            status: existing?.lines.length ? "ready" : "error",
+            fingerprint, inflight: null,
+            error: error instanceof Error ? error.message : String(error),
+          } } }));
+          return;
+        }
         // 404 = 没有匹配到歌词；其它错误是暂时不可用。两者都不打断播放，
         // 但要让右栏和悬浮歌词给用户一个明确状态，而不是渲染空白。
         const status: LyricsStatus =
@@ -328,7 +351,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         ...state.byId,
         [track.id]: {
           ...(state.byId[track.id] ?? emptyEntry("loading")),
-          status: "loading",
+          status: options.platform && existing?.lines.length ? "ready" : "loading",
           fingerprint,
           persisted: false,
           inflight: run,

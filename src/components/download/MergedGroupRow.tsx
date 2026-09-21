@@ -28,6 +28,7 @@ import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
 import { PlatformMark } from "./PlatformMark";
+import { ResultDownloadIndex } from "./ResultDownloadIndex";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
 export const PLATFORM_LABEL: Record<Platform, string> = {
@@ -71,6 +72,7 @@ export interface MergedGroupRowProps {
   onInspect(index: number): void;
   /** 把当前选中来源直接丢进下载队列，省掉先勾选再找顶栏。 */
   onDownload(): void;
+  onDownloadSingle(): void;
   /** 仅远端账号收藏/本人歌单提供；调用后由上层等待平台服务器确认。 */
   onRemoveFromStreamPlaylist?(): void;
   removeFromStreamPlaylistLabel?: string;
@@ -113,6 +115,7 @@ export function MergedGroupRow({
   onPickSource,
   onInspect,
   onDownload,
+  onDownloadSingle,
   onRemoveFromStreamPlaylist,
   removeFromStreamPlaylistLabel,
   removingFromStreamPlaylist = false,
@@ -501,7 +504,11 @@ export function MergedGroupRow({
           className="kd-result-lead"
           data-col="index"
         >
-          <span className="kd-result-index">{rowNumber}</span>
+          <ResultDownloadIndex
+            rowNumber={rowNumber}
+            title={group.title}
+            onDownload={selectable ? onDownloadSingle : undefined}
+          />
         </td>
         {columns.map((column) => dataCell(column.key))}
         <td className="kd-table-fill" aria-hidden="true" />

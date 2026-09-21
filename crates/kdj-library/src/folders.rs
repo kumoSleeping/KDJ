@@ -1088,10 +1088,38 @@ pub fn rename_folder(path: &Path, name: &str, roots: &[PathBuf]) -> Result<PathB
     anyhow::ensure!(source.is_dir(), "文件夹不存在");
     let target = source.parent().context("没有上级目录")?.join(&clean);
     anyhow::ensure!(!target.exists(), "同名文件夹已存在");
+    let parent = source.parent().context("没有上级目录")?;
+    let previous = read_manifest(parent);
+    let mut order = manifest_order(&previous);
+    let old_name = source.file_name().context("没有目录名")?.to_string_lossy();
+    let ordered = order.iter().any(|name| name == old_name.as_ref());
     std::fs::rename(&source, &target).context("改名失败")?;
+    if ordered {
+        order = order
+            .into_iter()
+            .filter_map(|name| {
+                if name == old_name.as_ref() {
+                    Some(clean.clone())
+                } else if name == clean {
+                    None
+                } else {
+                    Some(name)
+                }
+            })
+            .collect();
+        let mut updated = previous.clone();
+        updated.insert("version".into(), serde_json::json!(MANIFEST_VERSION));
+        updated.insert("order".into(), serde_json::json!(order));
+        let result = serde_json::to_vec_pretty(&updated)
+            .map_err(anyhow::Error::from)
+            .and_then(|body| atomic_write(&manifest_path(parent), &body));
+        if let Err(error) = result {
+            std::fs::rename(&target, &source).context("保存目录顺序失败，磁盘改名也无法回滚")?;
+            return Err(error.context("保存目录顺序失败，已撤回改名"));
+        }
+    }
     Ok(target)
 }
-
 /// 把一整个文件夹搬进另一个文件夹，返回 `(旧路径, 新路径)`。
 ///
 /// 三条必须挡住：根目录不能被搬；不能搬进自己或自己的子目录里（会把整棵子树搬没）；
@@ -1293,6 +1321,31 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // canonicalize 一次，免得 macOS 上 /var 与 /private/var 的差异干扰包含性判断
         std::fs::canonicalize(&dir).unwrap()
+    }
+
+    #[test]
+    fn renaming_keeps_the_parent_manifest_position_and_unknown_fields() {
+        let root = scratch("rename-order");
+        for name in ["A", "B", "C"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        write_manifest(&root, &["B".into(), "A".into(), "C".into()]).unwrap();
+        let mut manifest = read_manifest(&root);
+        manifest.insert("custom".into(), serde_json::json!({"keep": true}));
+        atomic_write(
+            &manifest_path(&root),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        rename_folder(&root.join("B"), "Z", &[root.clone()]).unwrap();
+        assert_eq!(read_manifest_order(&root), vec!["Z", "A", "C"]);
+        assert_eq!(
+            read_manifest(&root)["custom"],
+            serde_json::json!({"keep": true})
+        );
+        rename_folder(&root.join("Z"), "B", &[root.clone()]).unwrap();
+        assert_eq!(read_manifest_order(&root), vec!["B", "A", "C"]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

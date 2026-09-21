@@ -273,6 +273,15 @@ pub struct ProtectedPreviewIdentity {
     pub gvs_binding: ProtectedPoTokenBinding,
 }
 
+/// Resolved media facts remain distinct from the user's requested quality. URLs stay server-side.
+#[derive(Debug, Clone)]
+pub struct PreviewMedia {
+    pub url: String,
+    pub actual_quality: Option<Quality>,
+    pub mime: Option<String>,
+    pub alternatives: Vec<String>,
+}
+
 #[async_trait]
 pub trait MusicProvider: Send + Sync {
     fn platform(&self) -> Platform;
@@ -367,6 +376,22 @@ pub trait MusicProvider: Send + Sync {
     ) -> Result<Option<String>> {
         self.preview_url(source).await
     }
+
+    async fn preview_media_at_quality(&self, source: &SongSource, quality: Quality) -> Result<Option<PreviewMedia>> {
+        Ok(self.preview_url_at_quality(source, quality).await?.map(|url| PreviewMedia {
+            url, actual_quality: None, mime: None, alternatives: Vec::new(),
+        }))
+    }
+
+    /// Optional provider-owned, target-bound request context. Never expose cookies in a ticket.
+    async fn open_preview_media(&self, _url: &str, _range: Option<&str>) -> Result<Option<reqwest::Response>> {
+        Ok(None)
+    }
+
+    /// Account/token changes must not reuse a cache that was populated under different permissions.
+    fn preview_cache_scope(&self) -> String { String::new() }
+
+    fn preview_account_epoch(&self) -> u64 { 0 }
 
     /// 需要 WebView 执行当前网页签名器的平台，先返回受保护的 cipher 与脚本地址。
     async fn protected_preview_cipher(

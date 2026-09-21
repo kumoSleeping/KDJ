@@ -178,14 +178,17 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   const editorToolbar = document.querySelector('.vj-task-editor [data-workshop-toolbar]')!;
   assert.equal(editorToolbar.nextElementSibling, document.querySelector('.vj-timeline-scroll'), 'tools sit directly against the track ruler, below the information row');
   assert.equal(editorToolbar.previousElementSibling, document.querySelector('.vj-timeline-scale'));
-  assert.ok(editorToolbar.querySelector('.vj-picture-tools'), 'picture settings share the magnet toolbar');
+  assert.equal(editorToolbar.querySelector('.vj-picture-tools'), null, 'numeric properties no longer crowd the timeline toolbar');
+  await act(async () => useWorkshopStore.getState().select('c'));
+  const properties = document.querySelector('.vj-clip-properties')!;
+  assert.ok(properties.querySelector('.vj-picture-tools'), 'selected clip exposes picture settings in its properties panel');
   assert.ok(editorToolbar.querySelector('[aria-label="时间轴吸附"]'));
   assert.equal(editorToolbar.querySelector('[aria-label="剪辑工具"]'), null, 'editing actions are not hidden behind a popup');
-  for (const label of ['向前微调', '向后微调', '剪断选中片段', '复制片段', '删除片段', '上移图层', '下移图层']) {
+  for (const label of ['向前微调', '向后微调', '剪断选中片段', '复制片段', '删除片段']) {
     assert.ok(editorToolbar.querySelector(`:scope > button[aria-label="${label}"]`), `${label} wraps directly with the toolbar`);
   }
-  for (const text of ['删除并闭合本行空隙', '自动对齐']) {
-    assert.ok([...editorToolbar.querySelectorAll(':scope > button')].some(button => button.textContent?.trim() === text), `${text} is directly available`);
+  for (const text of ['删除并闭合空隙', '自动对齐', '上移图层', '下移图层']) {
+    assert.ok([...properties.querySelectorAll('button')].some(button => button.textContent?.trim() === text), `${text} is available beside clip properties`);
   }
   assert.equal(document.querySelector('[aria-label="画面工具"]'), null, 'there is no separate picture-settings band');
   assert.equal(editorToolbar.lastElementChild?.getAttribute('aria-label'), '打开作品预览小窗', 'picture-in-picture stays at the far right');
@@ -249,6 +252,39 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   await act(async () => useWorkshopStore.setState({jobs: []}));
   await act(async () => useWorkshopStore.getState().select("c"));
   const pictureValue = (label: string) => document.querySelector<HTMLInputElement>(`.vj-picture-tools input[aria-label="${label}"]`)!;
+  const propertyValue = async (label: string, value: string) => {
+    await act(async () => {
+      const input = document.querySelector<HTMLInputElement>(`.vj-clip-properties input[aria-label="${label}"]`)!;
+      input.focus();
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new dom.window.Event("input", {bubbles:true}));
+    });
+    await act(async () => {
+      (document.activeElement as HTMLElement).blur();
+      await useWorkshopStore.getState().flush();
+    });
+  };
+  const beforeProperties = structuredClone(server.layers[0].clips[0]);
+  await propertyValue("开始位置", "2");
+  assert.equal(server.layers[0].clips[0].start_ms, 2000);
+  await propertyValue("片段时长", "6");
+  assert.equal(server.layers[0].clips[0].source_out_ms, 6000);
+  await click("速度 2 倍");
+  assert.equal(server.layers[0].clips[0].speed.start, 2);
+  assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="片段时长"]')!.value, "3");
+  await click("撤销"); await click("撤销"); await click("撤销");
+  assert.deepEqual(server.layers[0].clips[0], beforeProperties, "numeric changes remain separate reversible edits");
+  const beforeInvalid = saves;
+  await propertyValue("开始位置", "-1");
+  assert.equal(saves, beforeInvalid, "invalid property input never reaches the server");
+  assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="开始位置"]')!.value, "0");
+  await click("收起片段属性");
+  assert.equal(document.querySelector('.vj-clip-properties'), null);
+  await click("片段属性");
+  assert.ok(document.querySelector('.vj-clip-properties'));
+  await act(async () => useWorkshopStore.getState().select(null));
+  assert.equal(document.querySelector('.vj-clip-properties'), null, "no selection leaves no empty panel or filler");
+  await act(async () => useWorkshopStore.getState().select("c"));
   const setPictureValue = async (label: string, value: string) => {
     await act(async () => {
       const input = pictureValue(label);
@@ -1018,11 +1054,16 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   function AuditionTimeline() { return createElement(WorkshopTimeline, {playback:useWorkshopPlayback()}); }
   const savesBeforeAudio = saves;
   await act(async () => {
-    useWorkshopStore.setState({activeId:"p", draft:summary, position:4321});
+    // Audition edits start from an imported server snapshot, not a draft whose
+    // layers and sources do not exist in the revision being edited.
+    server = {...structuredClone(summary), revision: server.revision + 1}; revision++;
+    useWorkshopStore.getState().accept(await api.workshop());
+    useWorkshopStore.setState({activeId:"p", position:4321});
     root.render(createElement(AuditionTimeline));
   });
   await click("关闭轨道音频：配乐");
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
+  assert.equal(useWorkshopStore.getState().error, "");
   assert.equal(document.querySelector('.vj-layer-audio')?.getAttribute('aria-pressed'), 'false');
   assert.equal(useWorkshopStore.getState().position, 4321, "sound edit keeps the alignment playhead");
   assert.ok(useWorkshopStore.getState().draft!.layers[0].clips.every(c => c.sound.muted && c.sound.manual));
@@ -1190,6 +1231,29 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(previewStarts.length, startsBeforeFailure + 1, "retry requests a fresh preview instead of playing an expired URL");
   await act(async () => { state = {...state, error:"", playing:true, status:"playing"}; notify(); });
   assert.equal(transport.error, "", "recovered playback clears the stale failure");
+  const readBeforeRecovery = api.workshop;
+  let acknowledged = false, discarded = false;
+  const recoveryActions: string[] = [];
+  api.workshop = async () => ({...await readBeforeRecovery(),
+    recovery_error: acknowledged ? "" : "工程记录无法读取，已保留在 /backup/vj-projects.corrupt-test",
+    jobs: discarded ? [] : [{id:"failed-receipt",project_id:"p",revision:server.revision,phase:"import_failed",progress:1,error:"成品已丢失",path:"/missing.wav",track_id:null}]});
+  api.acknowledgeWorkshopRecovery = async () => { acknowledged = true; return api.workshop(); };
+  api.discardWorkshopReceipt = async id => { assert.equal(id,"failed-receipt"); discarded = true; recoveryActions.push("discard"); return api.workshop(); };
+  api.exportWorkshop = async id => { assert.equal(id,"p"); recoveryActions.push("export"); return api.workshop(); };
+  await act(async () => {
+    useWorkshopStore.setState({expandedId:null,error:""});
+    root.render(createElement(CompositionWorkshop));
+  });
+  assert.match(document.querySelector('.vj-operation-notice')!.textContent!, /已保留在/);
+  await click("关闭提示");
+  assert.equal(useWorkshopStore.getState().recovery_error, "");
+  await act(async () => {
+    const regenerate = [...document.querySelectorAll("button")].find(button => button.textContent === "重新导出");
+    assert.ok(regenerate); regenerate.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await useWorkshopStore.getState().flush();
+  });
+  assert.deepEqual(recoveryActions,["discard","export"],"recovery frees the old receipt before submitting a new export");
   await act(async () => root.unmount());
   window.removeEventListener("kd:play", played);
   Object.assign(player, originals);

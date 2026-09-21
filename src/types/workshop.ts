@@ -26,6 +26,7 @@ export interface ClipPicture {
   flip_x?: boolean;
   flip_y?: boolean;
   crop?: [number, number, number, number];
+  crop_keep_position?: boolean;
   x: number;
   y: number;
   scale: number;
@@ -118,6 +119,7 @@ export interface WorkshopSnapshot {
   revision: number;
   projects: CompositionProject[];
   jobs: WorkshopJob[];
+  recovery_error?: string;
 }
 export type WorkshopEdit = Pick<
   CompositionProject,

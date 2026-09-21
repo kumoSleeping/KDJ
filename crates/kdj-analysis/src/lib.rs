@@ -13,5 +13,6 @@ pub mod key;
 pub mod loudness;
 pub mod tempo;
 pub mod waveform;
+pub mod visualizer;
 
 pub mod rhythm;

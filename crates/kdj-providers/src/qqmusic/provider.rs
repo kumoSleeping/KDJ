@@ -24,6 +24,9 @@ use tokio::io::AsyncWriteExt as _;
 
 use super::client::{new_search_id, Credential, QqClient, QqPlatform};
 use super::login;
+use super::error::QqError;
+use super::media::{is_qq_audio_url, media_headers, audio_content_type, validate_audio};
+use crate::provider::PreviewMedia;
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
     effective_limit, first_truthy, full_listing, is_truthy, loose_int, qr_data_url_from_png,
@@ -51,17 +54,6 @@ fn qq_value_id(value: &Value) -> String {
         .or_else(|| value.as_i64().map(|number| number.to_string()))
         .or_else(|| value.as_u64().map(|number| number.to_string()))
         .unwrap_or_default()
-}
-
-fn is_qq_audio_url(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    parsed.scheme() == "https"
-        && (host == "stream.qqmusic.qq.com" || host.ends_with(".stream.qqmusic.qq.com"))
 }
 
 /// 按 QQ 返回的顺序选择动态 CDN。vkey 和 cdnDispatch 都可能带 `sip`；顺序
@@ -669,8 +661,9 @@ impl QqMusicProvider {
         &self,
         song_mid: &str,
         media_mid: &str,
+        song_type: i64,
         quality: Quality,
-    ) -> Result<Option<(String, &'static str)>> {
+    ) -> Result<Option<PreviewMedia>> {
         for step in quality.gradient() {
             let (prefix, ext) = file_type(*step);
             // media_mid 空的时候要用 mid 拼两遍，这是 QQ 的文件名约定
@@ -680,7 +673,7 @@ impl QqMusicProvider {
                 format!("{prefix}{media_mid}.{ext}")
             };
             let credential = self.client.credential();
-            let data = match self
+            let data = self
                 .client
                 .call(
                     "music.vkey.GetVkey",
@@ -690,49 +683,86 @@ impl QqMusicProvider {
                         "filename": [filename],
                         "guid": self.client.guid(),
                         "songmid": [song_mid],
-                        "songtype": [0],
+                        "songtype": [song_type],
                         "ctx": 0
                     }),
                     QqPlatform::Desktop,
                 )
-                .await
-            {
-                Ok(data) => data,
-                Err(err) => {
-                    tracing::debug!("QQ 音乐 vkey 失败 {song_mid} {ext}：{err}");
-                    continue;
-                }
-            };
-            let Some(purl) = data
-                .get("midurlinfo")
-                .and_then(Value::as_array)
-                .and_then(|list| list.first())
-                .and_then(|item| item.get("purl"))
-                .and_then(Value::as_str)
-                .filter(|purl| !purl.is_empty())
-            else {
-                continue;
-            };
-            let url = if purl.starts_with("http://") || purl.starts_with("https://") {
-                purl.to_string()
+                .await?;
+            let items = data.get("midurlinfo").and_then(Value::as_array).ok_or(QqError::InvalidResponse)?;
+            let Some(item) = items.first() else { continue; };
+            let purl = item.get("purl").and_then(Value::as_str).ok_or(QqError::InvalidResponse)?.trim();
+            if purl.is_empty() { continue; }
+            let mut candidates = Vec::new();
+            if purl.starts_with("http://") || purl.starts_with("https://") {
+                if !is_qq_audio_url(purl) { return Err(QqError::InvalidResponse.into()); }
+                candidates.push(purl.to_string());
             } else {
-                // vkey 回包里的 sip 与这张 vkey 同源，优先级高于另打一遍 dispatch。
-                let base = match pick_cdn_base(&data) {
-                    Some(base) => base,
-                    None => self.cdn_base().await,
-                };
-                format!("{base}{purl}")
-            };
-            return Ok(Some((url, ext)));
+                let bases = data.get("sip").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str).filter(|base| is_qq_audio_url(base));
+                for base in bases {
+                    if let Ok(url) = url::Url::parse(base).and_then(|base| base.join(purl)) {
+                        if is_qq_audio_url(url.as_str()) && !candidates.iter().any(|s| s == url.as_str()) {
+                            candidates.push(url.to_string());
+                        }
+                    }
+                    if candidates.len() == 3 { break; }
+                }
+                if candidates.is_empty() {
+                    let base = self.cdn_base().await?;
+                    let url = url::Url::parse(&base)?.join(purl)?;
+                    if !is_qq_audio_url(url.as_str()) { return Err(QqError::InvalidResponse.into()); }
+                    candidates.push(url.to_string());
+                }
+            }
+            let url = candidates.remove(0);
+            tracing::debug!(stage = "vkey", requested = quality.as_str(), actual = step.as_str(), "QQ media resolved");
+            return Ok(Some(PreviewMedia { url, actual_quality: Some(*step),
+                mime: Some(if ext == "flac" { "audio/flac" } else { "audio/mpeg" }.into()), alternatives: candidates }));
         }
         Ok(None)
     }
 
+    async fn resolve_source_media(&self, source: &SongSource, quality: Quality) -> Result<PreviewMedia> {
+        self.client.ensure_valid_credential().await?;
+        let raw = Value::Object(source.payload.clone());
+        let mut identity = song_identity(&raw, &source.key);
+        let numeric = identity.0.is_empty() || identity.0.bytes().all(|b| b.is_ascii_digit());
+        if numeric {
+            let detail = self.query_song(&source.key).await?;
+            identity = song_identity(&detail, "");
+            if identity.0.is_empty() || identity.0.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(QqError::InvalidResponse.into());
+            }
+        }
+        if let Some(media) = self.resolve_url(&identity.0, &identity.1, identity.2, quality).await? { return Ok(media); }
+        if !numeric {
+            let detail = self.query_song(&source.key).await?;
+            let repaired = song_identity(&detail, &source.key);
+            // Do not repeat exactly the same vkey ladder after an empty detail response.
+            if repaired != identity {
+                if let Some(media) = self.resolve_url(&repaired.0, &repaired.1, repaired.2, quality).await? { return Ok(media); }
+            }
+        }
+        Err(QqError::Unavailable.into())
+    }
+
+    async fn media_get(&self, url: &str, range: Option<&str>) -> Result<reqwest::Response> {
+        if !is_qq_audio_url(url) { return Err(QqError::InvalidResponse.into()); }
+        let headers = media_headers(&self.client.cookie_header(), range)?;
+        crate::net::guarded_media_get_with_host(url, &headers,
+            crate::net::GuardedMediaPolicy { connect_timeout: Duration::from_secs(10), ..Default::default() },
+            &|url| is_qq_audio_url(url.as_str())).await
+            .map_err(|error| error.downcast_ref::<reqwest::Error>()
+                .map(|e| if e.is_timeout() { QqError::Timeout } else { QqError::Transport })
+                .unwrap_or(QqError::InvalidResponse).into())
+    }
+
     /// CDN 域名缓存：dispatch 给的 refresh_time 可能很大，硬压到 30 分钟以内。
-    async fn cdn_base(&self) -> String {
+    async fn cdn_base(&self) -> Result<String> {
         if let Some((base, expires)) = self.cdn.lock().unwrap().as_ref() {
             if Instant::now() < *expires {
-                return base.clone();
+                return Ok(base.clone());
             }
         }
         let (base, ttl) = match self
@@ -757,10 +787,10 @@ impl QqMusicProvider {
                     Duration::from_secs(refresh),
                 )
             }
-            Err(_) => (CDN_FALLBACK.to_string(), Duration::from_secs(60)),
+            Err(error) => return Err(error),
         };
         *self.cdn.lock().unwrap() = Some((base.clone(), Instant::now() + ttl));
-        base
+        Ok(base)
     }
 
     /// 昵称/头像，带 5 分钟缓存——account() 会被前端轮询，不能每次都打网络。
@@ -886,21 +916,11 @@ impl MusicProvider for QqMusicProvider {
             );
         }
         if credential.is_expired() {
-            // 本地判断过期先静默刷一次，刷不动才算真掉线
-            match self.client.refresh_credential().await {
-                Ok(refreshed) => {
-                    *self.profile.lock().unwrap() = None;
-                    credential = refreshed;
-                }
-                Err(err) => {
-                    tracing::warn!("刷新 QQ 音乐凭证失败：{err:#}");
-                    return Account::new(
-                        Platform::Qqm,
-                        LABEL,
-                        AccountState::Expired,
-                        "登录凭证已过期，请重新扫码",
-                    );
-                }
+            match self.client.ensure_valid_credential().await {
+                Ok(refreshed) => { *self.profile.lock().unwrap() = None; credential = refreshed; }
+                Err(error) => return Account::new(Platform::Qqm, LABEL,
+                    if self.client.credential_invalid() { AccountState::Expired } else { AccountState::Unknown },
+                    &error.to_string()),
             }
         }
         let (nickname, avatar) = self.fetch_profile().await;
@@ -1330,22 +1350,24 @@ impl MusicProvider for QqMusicProvider {
         source: &SongSource,
         quality: Quality,
     ) -> Result<Option<String>> {
-        let raw = Value::Object(source.payload.clone());
-        let mut media_mid = media_mid_of(&raw, &source.key);
-        let mut resolved = self.resolve_url(&source.key, &media_mid, quality).await?;
-        if resolved.is_none() {
-            let detail = self.query_song(&source.key).await?;
-            if !detail.is_null() {
-                media_mid = media_mid_of(&detail, &source.key);
-                resolved = self
-                    .resolve_url(&source.key, &media_mid, Quality::Q128)
-                    .await?;
-            }
-        }
-        let Some((url, _ext)) = resolved else {
-            bail!("QQ 音乐没有返回可用试听地址（可能是版权受限或需要绿钻）");
-        };
-        Ok(Some(url))
+        Ok(Some(self.resolve_source_media(source, quality).await?.url))
+    }
+
+    async fn preview_media_at_quality(&self, source: &SongSource, quality: Quality) -> Result<Option<PreviewMedia>> {
+        Ok(Some(self.resolve_source_media(source, quality).await?))
+    }
+
+    async fn open_preview_media(&self, url: &str, range: Option<&str>) -> Result<Option<reqwest::Response>> {
+        self.media_get(url, range).await.map(Some)
+    }
+
+    fn preview_account_epoch(&self) -> u64 { self.client.account_epoch() }
+
+    fn preview_cache_scope(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let credential = self.client.credential();
+        // Hash is only used in the local cache key. Do not serialize it or the token into logs.
+        format!("qq-media-v2-{:x}", Sha256::digest(format!("{}:{}", credential.musicid, credential.musickey)))
     }
 
     async fn lyric(&self, key: &str) -> Result<Option<LyricText>> {
@@ -1374,30 +1396,10 @@ impl MusicProvider for QqMusicProvider {
         let source = job.source;
         let output_dir = self.ctx.platform_dir(Platform::Qqm)?;
 
-        let mut raw = Value::Object(source.payload.clone());
-        let mut media_mid = media_mid_of(&raw, &source.key);
-        let mut album_mid = album_mid_of(&raw);
-        let mut resolved = self
-            .resolve_url(&source.key, &media_mid, job.quality)
-            .await?;
-        if resolved.is_none() {
-            // 搜索结果里的 media_mid 偶尔是空的，回查一次详情再试
-            let detail = self.query_song(&source.key).await?;
-            if !detail.is_null() {
-                media_mid = media_mid_of(&detail, &source.key);
-                if album_mid.is_empty() {
-                    album_mid = album_mid_of(&detail);
-                }
-                raw = detail;
-                resolved = self
-                    .resolve_url(&source.key, &media_mid, job.quality)
-                    .await?;
-            }
-        }
-        let _ = &raw;
-        let Some((url, ext)) = resolved else {
-            bail!("QQ 音乐没有返回可用下载地址（可能是版权受限或需要绿钻）");
-        };
+        let raw = Value::Object(source.payload.clone());
+        let album_mid = album_mid_of(&raw);
+        let media = self.resolve_source_media(source, job.quality).await?;
+        let ext = if media.actual_quality == Some(Quality::Flac) { "flac" } else { "mp3" };
         job.check_canceled()?;
 
         let filename = render_filename(
@@ -1410,25 +1412,17 @@ impl MusicProvider for QqMusicProvider {
         );
         let final_path = unique_download_path(&output_dir, &filename);
 
-        let guard = AtomicDownload::new(&final_path);
-        // QQ 网页端下载会带来源页；部分 CDN 对裸 GET 的缓存/防盗链策略不同。
-        // 登录态只传给腾讯自己的音频域名，使最终 GET 与取得 vkey 的账号一致。
-        let mut request = self
-            .client
-            .http()
-            .get(&url)
-            .header(reqwest::header::REFERER, "http://y.qq.com");
-        let cookie = self.client.cookie_header();
-        if !cookie.is_empty() && is_qq_audio_url(&url) {
-            request = request.header(reqwest::header::COOKIE, cookie);
+        let guard = AtomicDownload::new(&final_path)?;
+        let response = self.media_get(&media.url, None).await?;
+        match response.status().as_u16() {
+            200 => {}, 429 => return Err(QqError::RateLimited.into()),
+            status => return Err(QqError::Upstream(i64::from(status)).into()),
         }
-        let response = request
-            .send()
-            .await
-            .context("QQ 音乐音频下载失败")?
-            .error_for_status()
-            .context("QQ 音乐音频下载失败")?;
-        let total = response.content_length().unwrap_or(0);
+        let mime = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+        anyhow::ensure!(audio_content_type(mime), "QQ 音乐返回的不是音频内容，未提交下载文件");
+        let expected = response.content_length();
+        let total = expected.unwrap_or(0);
+        let mut prefix = Vec::new();
         job.report(0, total);
 
         let mut file = create_download_writer(guard.partial())
@@ -1438,13 +1432,20 @@ impl MusicProvider for QqMusicProvider {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             job.check_canceled()?;
-            let chunk = chunk.context("QQ 音乐音频流中断")?;
+            let chunk = chunk.map_err(super::error::network_error)?;
+            let take = chunk.len().min(8192_usize.saturating_sub(prefix.len()));
+            prefix.extend_from_slice(&chunk[..take]);
+            if prefix.len() >= 10 && !super::media::valid_audio_prefix(&prefix, ext) {
+                anyhow::bail!("QQ 音乐首包不是有效音频，未提交下载文件");
+            }
             file.write_all(&chunk).await.context("写入下载文件失败")?;
             downloaded += chunk.len() as u64;
             job.report(downloaded, total.max(downloaded));
         }
+        validate_audio(&prefix, ext, downloaded, expected)?;
         file.flush().await.context("提交下载缓冲失败")?;
         drop(file);
+        job.check_canceled()?;
         let path = guard.commit()?;
 
         let cover_key = if album_mid.is_empty() {
@@ -2049,13 +2050,16 @@ fn has_song_key(song: &Value) -> bool {
 }
 
 fn media_mid_of(raw: &Value, fallback: &str) -> String {
-    raw.get("file")
-        .and_then(|file| file.get("media_mid"))
-        .or_else(|| raw.get("media_mid"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(fallback)
-        .to_string()
+    [raw.get("file").and_then(|file| file.get("media_mid")), raw.get("media_mid")]
+        .into_iter().find_map(|value| value.and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or(fallback).to_string()
+}
+
+fn song_identity(raw: &Value, fallback: &str) -> (String, String, i64) {
+    let mid = ["mid", "songmid"].into_iter().find_map(|key|
+        raw.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or(fallback).to_string();
+    (mid, media_mid_of(raw, ""), loose_int(raw.get("type").or_else(|| raw.get("songtype"))))
 }
 
 fn album_mid_of(raw: &Value) -> String {
@@ -2164,6 +2168,14 @@ const _: fn() -> Credential = Credential::default;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_mid_empty_null_and_wrong_type_do_not_shadow_valid_top_level() {
+        for value in [json!(""), Value::Null, json!(123), json!("   ")] {
+            assert_eq!(media_mid_of(&json!({"file":{"media_mid":value},"media_mid":"VALID"}), "fallback"), "VALID");
+        }
+        assert_eq!(song_identity(&json!({"mid":"MID", "id":123, "type":1}), "123"), ("MID".into(), "".into(), 1));
+    }
 
     #[test]
     fn cdn_picker_keeps_dispatch_order_without_locking_to_one_pop() {
@@ -2544,6 +2556,75 @@ mod tests {
         let source = to_source(&song);
         assert_eq!(source.max_quality, Some(Quality::Flac));
         assert!(source.vip);
+    }
+
+    use super::super::test_support::{MockHttp, Reply, TempRoot};
+    fn fault_provider(root: &TempRoot, mock: &MockHttp) -> QqMusicProvider {
+        let ctx=ProviderContext::new(root.0.clone(),crate::provider::ProviderLiveSettings {
+            download_dir: root.0.join("downloads"), filename_template:"{title}".into(), default_quality:Quality::Flac,
+            netease_use_download_api:false,soundcloud_enabled:false,soundcloud_client_id:String::new(),soundcloud_client_secret:String::new(),
+            ytm_enabled:false,youtube_enabled:false,video_dir:None,video_format:"mp4".into(),
+        });
+        let mut provider=QqMusicProvider::new(ctx).unwrap(); provider.client.set_test_endpoint(mock.url.clone()); provider
+    }
+    fn fault_source(key: &str, payload: Value) -> SongSource {
+        SongSource { platform:Platform::Qqm,key:key.into(),title:"fixture".into(),artists:vec![],album:String::new(),duration:Some(180.0),
+            cover:String::new(),max_quality:Some(Quality::Flac),vip:false,payload:payload.as_object().unwrap().clone() }
+    }
+    #[tokio::test]
+    async fn rate_limits_never_enter_another_quality_or_detail_request() {
+        for envelope in [0,1,2] {
+            let root=TempRoot::new(); let mock=MockHttp::new(move |_,_|match envelope {
+                0=>Reply::raw(429,json!({})), 1=>Reply::raw(200,json!({"code":2001})),
+                _=>Reply::raw(200,json!({"code":0,"req_0":{"code":2001}})),
+            });
+            let provider=fault_provider(&root,&mock);
+            let error=provider.preview_media_at_quality(&fault_source("MID",json!({"mid":"MID","file":{"media_mid":"FILE"}})),Quality::Flac).await.unwrap_err();
+            assert!(matches!(error.downcast_ref::<QqError>(),Some(QqError::RateLimited)));
+            assert_eq!(mock.requests.lock().unwrap().len(),1);
+        }
+    }
+    #[tokio::test]
+    async fn empty_high_quality_purl_downgrades_with_truthful_metadata_and_candidates() {
+        let root=TempRoot::new(); let mock=MockHttp::new(|request,index| {
+            assert_eq!(request.body["req_0"]["method"],"UrlGetVkey");
+            if index==0 { Reply::data(json!({"midurlinfo":[{"purl":""}]})) }
+            else { Reply::data(json!({"midurlinfo":[{"purl":"M800FILE.mp3?vkey=fixture"}],"sip":["https://a.stream.qqmusic.qq.com/","https://b.stream.qqmusic.qq.com/"]})) }
+        });
+        let provider=fault_provider(&root,&mock);
+        let media=provider.preview_media_at_quality(&fault_source("MID",json!({"mid":"MID","media_mid":"FILE"})),Quality::Flac).await.unwrap().unwrap();
+        assert_eq!(media.actual_quality,Some(Quality::Q320)); assert_eq!(media.mime.as_deref(),Some("audio/mpeg"));
+        assert_eq!(media.alternatives.len(),1); assert_eq!(mock.requests.lock().unwrap().len(),2);
+    }
+    #[tokio::test]
+    async fn numeric_identity_is_replaced_as_a_whole_before_vkey() {
+        let root=TempRoot::new(); let mock=MockHttp::new(|request,index| {
+            if index==0 { assert_eq!(request.body["req_0"]["method"],"CgiGetTrackInfo");
+                Reply::data(json!({"tracks":[{"mid":"CANONICAL","file":{"media_mid":"MEDIA"},"type":1}]}))
+            } else { assert_eq!(request.body["req_0"]["param"]["songmid"],json!(["CANONICAL"]), "fixture request={}",request.body);
+                assert_eq!(request.body["req_0"]["param"]["songtype"],json!([1]));
+                assert_eq!(request.body["req_0"]["param"]["filename"],json!(["M500MEDIA.mp3"]));
+                Reply::data(json!({"midurlinfo":[{"purl":"M500MEDIA.mp3"}],"sip":["https://a.stream.qqmusic.qq.com/"]})) }
+        });
+        let provider=fault_provider(&root,&mock);
+        provider.preview_media_at_quality(&fault_source("12345",json!({"mid":"12345","type":0})),Quality::Q128).await.unwrap();
+        assert_eq!(mock.requests.lock().unwrap().len(),2);
+    }
+    #[tokio::test]
+    async fn malformed_vkey_response_is_not_treated_as_an_unavailable_quality() {
+        let root=TempRoot::new(); let mock=MockHttp::new(|_,_|Reply::data(json!({"unrecognized":"shape"})));
+        let provider=fault_provider(&root,&mock);
+        let error=provider.preview_media_at_quality(&fault_source("MID",json!({"mid":"MID","media_mid":"FILE"})),Quality::Flac).await.unwrap_err();
+        assert!(matches!(error.downcast_ref::<QqError>(),Some(QqError::InvalidResponse)));
+        assert_eq!(mock.requests.lock().unwrap().len(),1);
+    }
+
+    #[tokio::test]
+    async fn absolute_untrusted_purl_is_rejected_without_followup_requests() {
+        let root=TempRoot::new(); let mock=MockHttp::new(|_,_|Reply::data(json!({"midurlinfo":[{"purl":"http://127.0.0.1/private"}]})));
+        let provider=fault_provider(&root,&mock);
+        assert!(provider.preview_media_at_quality(&fault_source("MID",json!({"mid":"MID","media_mid":"FILE"})),Quality::Flac).await.is_err());
+        assert_eq!(mock.requests.lock().unwrap().len(),1);
     }
 
     #[test]

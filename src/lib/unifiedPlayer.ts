@@ -20,6 +20,7 @@ import { clampPlatterVelocity, type UnifiedPlatterEvent } from "./platter";
 import { LoopToggleParity } from "./loopToggleLane";
 import { MIDI_JOG_NUDGE_HOLD_MS } from "./midiJog";
 import { djEngine } from "./djMix";
+import { getDeckOutputGain, normalizeMasterVolume } from "./masterVolume";
 import { EQ_GRAPH_BAND_COUNT } from "./eqGraph";
 import { usesRemotePlaybackSource } from "./playbackTrackSource";
 import {
@@ -861,7 +862,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private volumeRevision = 0;
   private loadRevision = 0;
   /** Latest user intent, included atomically in every manager Load. */
-  private intendedVolume = 1;
+  private intendedVolume = getDeckOutputGain();
   /** TEMPO 走独立控制通道，不占用 load/seek 的 commandId 队列。 */
   private rateTails: [Promise<void>, Promise<void>] = [Promise.resolve(), Promise.resolve()];
   /** Jog 边缘缓动同样走最新值控制通道；旧 tick 不得积压到下一次表演。 */
@@ -943,7 +944,8 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private accept(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState {
     if (raw.sequence < this.sequence) return this.snapshot;
     this.sequence = raw.sequence;
-    if (Number.isFinite(raw.volume)) this.intendedVolume = Math.min(1, Math.max(0, raw.volume));
+    // A snapshot is output acknowledgement, not user intent. In particular an old
+    // initialize/load ACK must never overwrite a newer mute or slider change.
     this.nextCommandId = Math.max(this.nextCommandId, raw.lastCommandId + 1);
     return this.publish(normalizedDesktop(raw));
   }
@@ -1002,7 +1004,9 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       const commandId = reservedCommandId ?? this.nextCommandId++;
       const ack = await invoke<DesktopCommandAckRaw>("playback_command", {
         commandId,
-        command,
+        // This lane can wait for decoding/initialization. Read the latest output
+        // gain at dispatch, not the value captured when the preview was requested.
+        command: { ...command, masterVolume: this.intendedVolume },
       });
       return isCurrent() ? this.accept(ack.snapshot) : this.snapshot;
     };
@@ -1514,7 +1518,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   setVolume(volume: number): Promise<UnifiedPlayerState> {
-    const bounded = Math.min(1, Math.max(0, volume));
+    const bounded = normalizeMasterVolume(volume);
     this.intendedVolume = bounded;
     const revision = ++this.volumeRevision;
     return this.command(

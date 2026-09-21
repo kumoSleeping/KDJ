@@ -19,6 +19,14 @@ for (const path of ["package.json", "src-tauri/tauri.conf.json"]) {
   writeFileSync(path, source.replace(versionField, `$1${version}$2`));
 }
 
+// The npm lock has both a document version and a root-package version. Dependency
+// versions are independent and must not be rewritten with the application version.
+const npmLockPath = "package-lock.json";
+const npmLock = JSON.parse(readFileSync(npmLockPath, "utf8"));
+npmLock.version = version;
+if (npmLock.packages?.[""]) npmLock.packages[""].version = version;
+writeFileSync(npmLockPath, `${JSON.stringify(npmLock, null, 2)}\n`);
+
 const cargoPath = "Cargo.toml";
 const cargo = readFileSync(cargoPath, "utf8");
 const workspaceVersion = /(\[workspace\.package\][\s\S]*?\nversion\s*=\s*")[^"]+("\s*\n)/;

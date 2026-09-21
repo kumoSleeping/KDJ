@@ -779,7 +779,7 @@ impl BilibiliProvider {
             };
             if is_single && !ffmpeg::available() {
                 // 安卓路径：单流本身就是完整文件，直接落盘，不经过 ffmpeg
-                let direct = AtomicDownload::new(&output_path);
+                let direct = AtomicDownload::new(&output_path)?;
                 self.fetch_streams(
                     &[(video.candidate_urls(), direct.partial().to_path_buf())],
                     &cookies,
@@ -787,6 +787,7 @@ impl BilibiliProvider {
                     progress,
                 )
                 .await?;
+                anyhow::ensure!(!cancel.is_cancelled(), "下载已取消");
                 return direct.commit();
             }
             let mut plan = Vec::new();
@@ -819,7 +820,8 @@ impl BilibiliProvider {
         if size == 0 {
             bail!("FFmpeg 没有生成有效的输出文件");
         }
-        std::fs::rename(&staged, &output_path).context("移动输出文件失败")?;
+        anyhow::ensure!(!cancel.is_cancelled(), "下载已取消");
+        let output_path = crate::net::commit_download(&staged, &output_path)?;
         drop(guard);
         Ok(output_path)
     }

@@ -84,7 +84,6 @@ function PreviewVideoPair({ synchronizer, register, ...props }: React.VideoHTMLA
   }} />)}</>;
 }
 export function WorkshopPreview({ playback, editable = true }: { playback: WorkshopPlayback; editable?: boolean }) {
-  const cropId = useWorkshopStore(s => s.cropId);
   const project = useWorkshopStore((s) => s.draft),
     selected = useWorkshopStore((s) => s.selectedId),
     position = useWorkshopStore((s) => s.position),
@@ -113,7 +112,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
   const gesture = useRef<{
     x: number;
     y: number;
-    mode: "move" | "scale" | "crop_l" | "crop_t" | "crop_r" | "crop_b";
+    mode: "move" | "scale";
     id: string;
     project: CompositionProject;
   } | null>(null);
@@ -197,8 +196,9 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
           void video.play().then(() => { if (!wanted.current.get(video)) video.pause(); }).catch(() => {}).finally(() => pending.current.delete(video));
         }
         const b = inspecting ? box(p, {...c, picture: {x: .5, y: .5, scale: 1, opacity: 1}}, s) : box(p, c, s);
-        video.style.left = `${b.x * 100}%`; video.style.top = `${b.y * 100}%`;
-        video.style.width = `${b.width * 100}%`; video.style.height = `${b.height * 100}%`;
+        video.style.left = `${(b.x + b.mediaX * b.width) * 100}%`; video.style.top = `${(b.y + b.mediaY * b.height) * 100}%`;
+        video.style.width = `${b.width * b.mediaWidth * 100}%`; video.style.height = `${b.height * b.mediaHeight * 100}%`;
+        video.style.clipPath = b.clipPath;
         video.style.opacity = String(!visible ? 0 : inspecting ? 1 : c.picture.opacity * fadeAlpha(c, local));
         if (video.readyState >= 2) decoded.current.add(video);
         // WebKit can temporarily drop readyState during a corrective seek.
@@ -257,7 +257,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
     : null;
   const down = (
     e: React.PointerEvent<HTMLDivElement>,
-    mode: "move" | "scale" | "crop_l" | "crop_t" | "crop_r" | "crop_b",
+    mode: "move" | "scale",
   ) => {
     if (e.button !== 0 || !selectedClip) return;
     e.stopPropagation();
@@ -289,18 +289,6 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
             0,
             1,
           );
-        } else if (g.mode.startsWith("crop_")) {
-          const source = g.project.sources.find(s => s.id === c.source_id)!;
-          const b = box(g.project,c,source), theta = -(c.picture.rotation ?? 0)*Math.PI/180;
-          const dx=e.clientX-g.x, dy=e.clientY-g.y;
-          const sx=(dx*Math.cos(theta)-dy*Math.sin(theta))/(b.width*rect.width)*b.sw/source.width;
-          const sy=(dx*Math.sin(theta)+dy*Math.cos(theta))/(b.height*rect.height)*b.sh/source.height;
-          const crop = [...(c.picture.crop ?? [0,0,0,0])] as [number,number,number,number];
-          let index = ({crop_l:0,crop_t:1,crop_r:2,crop_b:3} as Record<string,number>)[g.mode];
-          const flip = index%2===0 ? c.picture.flip_x : c.picture.flip_y;
-          if(flip) index=(index+2)%4;
-          const delta=(index%2===0?sx:sy)*(flip?-1:1)*(index<2?1:-1);
-          crop[index]=clamp(crop[index]+delta,0,.98-crop[(index+2)%4]); c.picture.crop=crop;
         } else
           c.picture.scale = clamp(
             c.picture.scale + ((e.clientX - g.x) / rect.width) * 2,
@@ -333,7 +321,11 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
         }}
         onPointerDown={() => { if (editable) useWorkshopStore.getState().select(null); }}
       >
-        {prepared.flatMap((c) => {
+        {/* Keep decoder DOM order independent of layer order. Moving an active
+            video node can stall WKWebView; z-index alone owns layer stacking.
+            Within a source, incoming transition clips still follow outgoing ones. */}
+        {[...prepared].sort((a, b) => a.source_id.localeCompare(b.source_id)
+          || a.start_ms - b.start_ms || a.id.localeCompare(b.id)).flatMap((c) => {
           const s = project.sources.find((s) => s.id === c.source_id)!,
             proxy = Boolean(
               !trimPreview &&
@@ -430,7 +422,6 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
               useWorkshopStore.getState().abort();
             }}
           >
-            {cropId === selectedClip?.id && (["crop_l","crop_t","crop_r","crop_b"] as const).map((mode,index) => <div key={mode} role="button" aria-label={["裁剪左边","裁剪上边","裁剪右边","裁剪下边"][index]} className={`vj-crop-edge ${mode}`} onPointerDown={e => down(e,mode)} onPointerMove={move} onPointerUp={up} />)}
             <div
               role="button"
               aria-label="缩放选中画面"

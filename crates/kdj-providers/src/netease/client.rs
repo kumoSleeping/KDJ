@@ -39,6 +39,9 @@ fn eapi_config() -> BTreeMap<String, String> {
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionState {
+    /// Explicit user logout; startup recovery must not replace it with legacy credentials.
+    #[serde(default)]
+    pub logged_out: bool,
     /// 登录相关 cookie：MUSIC_U / __csrf / NMTID ...
     #[serde(default)]
     pub cookies: BTreeMap<String, String>,
@@ -140,8 +143,14 @@ impl NeteaseClient {
 
     pub fn clear_session(&self) -> Result<()> {
         let mut current = self.state.write().unwrap();
-        crate::session_fs::remove_private_file(&self.session_path)?;
-        *current = SessionState::default();
+        // Keep an explicit logged-out snapshot so retained legacy imports can never resurrect.
+        // Replacing atomically also leaves the existing login intact if persistence fails.
+        let logged_out = SessionState {
+            logged_out: true,
+            ..SessionState::default()
+        };
+        self.persist_state(&logged_out)?;
+        *current = logged_out;
         Ok(())
     }
 
@@ -198,6 +207,10 @@ impl NeteaseClient {
                     changed = true;
                 }
             }
+        }
+        if state.logged_in() && state.logged_out {
+            state.logged_out = false;
+            changed = true;
         }
         if changed {
             self.persist_state(&state)?;
@@ -347,6 +360,7 @@ fn parse_pyncm_dump(dump: &str) -> Result<SessionState> {
         "PYNCM 会话里没有 MUSIC_U，视为未登录"
     );
     Ok(SessionState {
+        logged_out: false,
         cookies,
         csrf_token,
         profile,
@@ -425,6 +439,25 @@ mod tests {
     }
 
     #[test]
+    fn logging_out_migrated_session_never_reimports_legacy_credentials() {
+        let dir = scratch("migration-logout");
+        std::fs::write(
+            dir.join("netease.pyncm"),
+            make_pyncm_dump(&[("MUSIC_U", "old-login")], ""),
+        )
+        .unwrap();
+        let client = NeteaseClient::new(&dir).unwrap();
+        assert!(client.logged_in());
+        client.clear_session().unwrap();
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("netease.json")).unwrap()).unwrap();
+        assert_eq!(saved["logged_out"], true);
+        assert!(dir.join("netease.pyncm").exists());
+        assert!(!NeteaseClient::new(&dir).unwrap().logged_in());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn pyncm_session_without_music_u_is_not_treated_as_logged_in() {
         let dir = scratch("nomusicu");
         std::fs::write(
@@ -453,7 +486,8 @@ mod tests {
         assert!(reopened.logged_in());
         reopened.clear_session().unwrap();
         assert!(!reopened.logged_in());
-        assert!(!dir.join("netease.json").exists());
+        assert!(!NeteaseClient::new(&dir).unwrap().logged_in());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

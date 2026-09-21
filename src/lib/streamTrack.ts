@@ -5,6 +5,7 @@
  */
 
 import { api } from "./api";
+import { streamRecoveryPolicy } from "./streamRecovery";
 import { thumbUrl } from "./format";
 import {
   usesRemotePlaybackSource,
@@ -31,6 +32,12 @@ interface StreamMeta {
   nextTrack: Track | null;
   /** 媒体元素失败时只允许一次强制回源，防止坏网络形成自动重试环。 */
   cacheRetryUsed: boolean;
+  bypassCache?: boolean;
+  recovery?: boolean;
+  cached?: boolean;
+  attemptId?: string;
+  actualQuality?: string;
+  requestedQuality?: string;
   /** 同一首占位曲目被播放、预热和切歌同时命中时，共享一次 provider 解析。 */
   preload: Promise<void> | null;
 }
@@ -493,6 +500,7 @@ export function makeSongStreamTrack(
     source,
     nextTrack: null,
     cacheRetryUsed,
+    bypassCache: cacheRetryUsed,
     preload: null,
   });
   const now = new Date().toISOString();
@@ -600,6 +608,19 @@ export function claimStreamCacheRetry(track: Track): SongSource | null {
   return meta.source;
 }
 
+/** Replace only the media resource of the same play intent. Preserve id, successor links and retry budget. */
+export function prepareStreamTrackRecovery(track: Track, error: string): boolean {
+  const policy = streamRecoveryPolicy(error);
+  const meta = streamMeta(track);
+  if (!policy.retry || !meta || meta.preload || !claimStreamCacheRetry(track)) return false;
+  meta.bypassCache = policy.invalidateCache && meta.cached === true;
+  meta.recovery = true;
+  meta.url = "";
+  meta.waveformToken = "";
+  notifyStreamMeta(track.id);
+  return true;
+}
+
 /** 将搜索结果占位曲目解析成可播放流，保留 id 和已经串好的后继链。 */
 export function preloadStreamTrack(track: Track): Promise<void> {
   const meta = streamMeta(track);
@@ -611,8 +632,9 @@ export function preloadStreamTrack(track: Track): Promise<void> {
   const source = meta.source;
   let request: Promise<void>;
   request = api
-    .songPreview(source, meta.cacheRetryUsed)
-    .then(({ url, waveform_token: waveformToken }) => {
+    .songPreview(source, meta.bypassCache === true, meta.recovery === true)
+    .then((result) => {
+      const { url, waveform_token: waveformToken } = result;
       // 解析期间条目受 prune 保护；这里仍核对身份，避免将迟到结果写进复用上下文。
       if (metaById.get(track.id) !== meta) {
         throw new Error("在线试听上下文已经失效");
@@ -620,6 +642,10 @@ export function preloadStreamTrack(track: Track): Promise<void> {
       if (!url) throw new Error("平台没有返回可播放地址");
       meta.url = url;
       meta.waveformToken = waveformToken || "";
+      meta.cached = result.cached === true;
+      meta.attemptId = result.attempt_id;
+      meta.actualQuality = result.actual_quality;
+      meta.requestedQuality = result.requested_quality;
       notifyStreamMeta(track.id);
     })
     .finally(() => {

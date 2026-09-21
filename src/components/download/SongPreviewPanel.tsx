@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { LoaderCircle, Music2, Pause, Play } from "lucide-react";
 import { api } from "../../lib/api";
 import { announceAudioFocus } from "../../lib/audioFocus";
+import { bindMediaMasterVolume } from "../../lib/masterVolume";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import type { SongPreviewRequest } from "../../lib/songPreview";
 import { InlineNotice } from "../common";
@@ -77,6 +78,11 @@ export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
       audioRef.current?.pause();
     };
   }, [request]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (audio) return bindMediaMasterVolume(audio);
+  }, [url]);
 
   // 仅双击 / 「播放」入口带 autoPlay。单击只开右栏时不自动出声，和视频预览一致。
   // URL 异步回来后等 <audio> 挂进 DOM 再显式 play；部分 WebView 单靠属性不会重触发。

@@ -56,7 +56,7 @@ export function WorkshopImage({ project, clip, source, playback, inspect, zIndex
   useEffect(() => {wake.current();}, [project,clip,position,inspect,playback.playing]);
   return <div ref={root} className="vj-image-picture" style={{zIndex,left:`${b.x*100}%`,top:`${b.y*100}%`,width:`${b.width*100}%`,height:`${b.height*100}%`,transform:`rotate(${b.rotation}deg)`}}>
     <div style={{position:"absolute",inset:0,overflow:"hidden",transform:`scale(${c.picture.flip_x ? -1:1},${c.picture.flip_y ? -1:1})`}}>
-      <img ref={image} draggable={false} alt="" style={{position:"absolute",maxWidth:"none",width:`${source.width/b.sw*100}%`,height:`${source.height/b.sh*100}%`,left:`${-b.left/b.sw*100}%`,top:`${-b.top/b.sh*100}%`}} />
+      <img ref={image} draggable={false} alt="" style={{position:"absolute",maxWidth:"none",width:`${b.mediaWidth*100}%`,height:`${b.mediaHeight*100}%`,left:`${b.mediaX*100}%`,top:`${b.mediaY*100}%`,clipPath:b.clipPath}} />
     </div>
   </div>;
 }

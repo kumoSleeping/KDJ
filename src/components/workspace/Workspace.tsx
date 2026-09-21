@@ -2,8 +2,8 @@ import { useStore } from "zustand";
 import { createTemporaryLibrary, type TemporaryLibrary, type LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
 import { useTemporaryFolderDrop } from "../../lib/temporaryFolderDrag";
 import { TemporaryFolderPane } from "../library/TemporaryFolderPane";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { PanelTopClose, Pin, SlidersHorizontal } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { ArrowLeft, PanelTopClose, Pin, SlidersHorizontal } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
 import { clearTextSelection } from "../../lib/textSelection";
 import {
@@ -42,6 +42,8 @@ import {
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
+import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
+import { useWorkshopStore } from "../../stores/workshopStore";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { enqueueMediaDownloads } from "../../lib/mediaActions";
@@ -252,6 +254,8 @@ function loadWorkspacePanes(): WorkspacePaneState {
   return { ...restored, active };
 }
 
+const VisualizerStudioPanel = lazy(() => import("../composition/VisualizerStudioPanel"));
+
 /**
  * 唯一的工作台。没有"下载板块"和"曲库板块"之分。
  *
@@ -264,6 +268,7 @@ function loadWorkspacePanes(): WorkspacePaneState {
  * 搜的时候本地还在眼前，也不被队列面板打断。
  */
 export function Workspace() {
+  const visualizerOpen = useVisualizerStudioStore(state => state.track !== null);
   const settings = useAppStore((state) => state.settings);
   const searchCapabilities = useAppStore((state) => state.searchCapabilities);
   const listMode = useAppStore((state) => state.listMode);
@@ -1782,9 +1787,19 @@ export function Workspace() {
   }, [showSearchTips]);
 
   const closeAsideForUser = useCallback(() => {
-    // 提示只是在当前内容上临时盖一层；关提示不应把原详情也锁住。
-    if (!showSearchTips) setAsideLocked(true);
-    closeAside();
+    const finish = () => {
+      // 提示只是在当前内容上临时盖一层；关提示不应把原详情也锁住。
+      if (!showSearchTips) setAsideLocked(true);
+      closeAside();
+    };
+    const editor = useVisualizerStudioStore.getState();
+    if (!showSearchTips && useAppStore.getState().showComposition && editor.track && editor.beforeClose) {
+      const epoch = useAppStore.getState().compositionPanelEpoch;
+      void editor.beforeClose().then(accepted => {
+        const current = useAppStore.getState();
+        if (accepted && current.showComposition && current.compositionPanelEpoch === epoch) finish();
+      });
+    } else finish();
   }, [closeAside, showSearchTips]);
 
   /** 窄屏：点左侧文件夹后只收右侧详情抽屉；左侧展开宽度由用户拖动手势决定并持久化。 */
@@ -1883,8 +1898,8 @@ export function Workspace() {
       className="kd-aside-head-close"
       data-pinned={compositionPinned ? "true" : undefined}
       aria-pressed={compositionPinned}
-      aria-label={compositionPinned ? "取消固定 工作站" : "固定 工作站"}
-      title={compositionPinned ? "工作站已固定；点击恢复随内容切换自动收起" : "固定 工作站，不被选歌和切换列表顶掉"}
+      aria-label={`${compositionPinned ? "取消固定" : "固定"} ${visualizerOpen ? "音频可视化" : "工作站"}`}
+      title={compositionPinned ? "已固定；点击恢复随内容切换自动收起" : "固定右侧面板，不被选歌和切换列表顶掉"}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={() => setCompositionPinned(!compositionPinned)}
     >
@@ -1995,7 +2010,7 @@ export function Workspace() {
           : queueAside
             ? "下载队列"
             : showComposition
-              ? "工作站"
+              ? visualizerOpen ? "音频可视化" : "工作站"
             : showTrackFaceSwitch
               ? trackAsideFace === "lyrics"
                 ? "歌词"
@@ -2005,8 +2020,10 @@ export function Workspace() {
                 : detailAside
                   ? "曲目详情"
                   : "";
-  const workshopBackSlot = asideLabel === "工作站"
-    ? <span className="vj-workshop-back-slot" ref={setWorkshopBackTarget} /> : null;
+  const workshopBackSlot = asideLabel === "音频可视化"
+    ? <button type="button" className="kd-aside-head-close" aria-label="返回工作站" title="返回工作站"
+        onClick={() => { const editor = useVisualizerStudioStore.getState(); if (editor.beforeClose) void editor.beforeClose(); else editor.close(); }}><ArrowLeft size={14} /></button>
+    : asideLabel === "工作站" ? <span className="vj-workshop-back-slot" ref={setWorkshopBackTarget} /> : null;
   const asidePanel = showSearchTips ? (
     <SearchTipsPanel />
   ) : showFolders ? (
@@ -2042,10 +2059,24 @@ export function Workspace() {
   ) : queueAside ? (
     <QueuePanel />
   ) : showComposition ? (
-    <CompositionWorkshop toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />
+    visualizerOpen
+      ? <Suspense fallback={null}><VisualizerStudioPanel onClose={closeAsideForUser} /></Suspense>
+      : <CompositionWorkshop toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />
   ) : lyricsAside ? (
     <LyricsView track={lyricsTrack} />
   ) : detailAside ? trackDetailPanel : null;
+  const lastVisualizerPlaybackId = useRef(playingTrack?.id ?? null);
+  useEffect(() => {
+    if (!playingTrack) return; // Keep the last identity through transient empty snapshots.
+    if (!visualizerOpen || !showComposition || showSearchTips) {
+      lastVisualizerPlaybackId.current = playingTrack.id;
+      return;
+    }
+    if (lastVisualizerPlaybackId.current === playingTrack.id) return;
+    lastVisualizerPlaybackId.current = playingTrack.id;
+    // This updates only the editor, never the right-panel route or the transport.
+    useVisualizerStudioStore.getState().follow(playingTrack);
+  }, [playingTrack, visualizerOpen, showComposition, showSearchTips]);
   const queueOpen =
     showQueue &&
     !showSearchTips &&
@@ -2606,7 +2637,16 @@ export function Workspace() {
               compositionOpen={showComposition && !showSearchTips}
               onComposition={() => {
                 const app = useAppStore.getState();
-                if (showSearchTips && app.showComposition) { setShowSearchTips(false); app.openCompositionPanel(); }
+                const editor = useVisualizerStudioStore.getState();
+                if (editor.track) {
+                  void (async () => {
+                    if (editor.beforeClose) { if (!await editor.beforeClose()) return; }
+                    else editor.close();
+                    await useWorkshopStore.getState().flush();
+                    useWorkshopStore.setState({ expandedId: null });
+                    setShowSearchTips(false); useAppStore.getState().openCompositionPanel();
+                  })().catch(error => useWorkshopStore.setState({ error: String(error) }));
+                } else if (showSearchTips && app.showComposition) { setShowSearchTips(false); app.openCompositionPanel(); }
                 else app.toggleCompositionPanel();
               }}
               onOpenUpdate={openUpdateFromChrome}

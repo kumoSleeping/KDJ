@@ -104,6 +104,7 @@ import {
   type TableColumnPrefsSchema,
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, InlineNotice } from "../common";
+import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { dragPreviewFromBlob, vinylDragPreview } from "../../lib/dragPreview";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { useSharePrefs } from "../../lib/sharePrefs";
@@ -2155,6 +2156,10 @@ export const TrackTable = memo(function TrackTable({
             <Copy size={12} />
             复制曲目{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
+          <button type="button" disabled={menuIds.length !== 1 || isImageTrack(rowMenu.track.format)} onClick={() => {
+            useVisualizerStudioStore.getState().open(rowMenu.track);
+            setRowMenu(null);
+          }}><BarChart3 size={12} />生成可视化视频</button>
           <WorkshopAddMenu ids={() => {
             const chosen = new Set(menuIds);
             return orderedIds.filter(id => chosen.has(id));

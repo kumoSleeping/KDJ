@@ -7,6 +7,7 @@
 export interface SettingsWriteBarrier {
   enqueue<T>(write: () => Promise<T>): Promise<T>;
   wait(): Promise<void>;
+  acknowledgeRollback(): void;
 }
 
 export function createSettingsWriteBarrier(): SettingsWriteBarrier {
@@ -31,6 +32,12 @@ export function createSettingsWriteBarrier(): SettingsWriteBarrier {
       // 只等待调用这一刻之前已经排进来的设置意图；之后的新改动不应倒插到下载前面。
       return latestWrite;
     },
+
+    acknowledgeRollback(): void {
+      // Existing waiters still own the rejected intent. New actions may use the
+      // configuration the UI has explicitly restored after that write failed.
+      latestWrite = Promise.resolve();
+    },
   };
 }
 
@@ -40,3 +47,5 @@ export const enqueueSettingsWrite = <T>(write: () => Promise<T>): Promise<T> =>
   settingsWrites.enqueue(write);
 
 export const waitForSettingsWrites = (): Promise<void> => settingsWrites.wait();
+
+export const acknowledgeSettingsRollback = (): void => settingsWrites.acknowledgeRollback();

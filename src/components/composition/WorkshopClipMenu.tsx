@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { MapPin, RotateCcw, Trash2 } from "lucide-react";
 import { useWorkshopStore } from "../../stores/workshopStore";
-import { deleteClip, findClip, updateClip, resetFadeSpan, isVisualSource, isImageSource } from "../../lib/workshop";
+import { deleteClip, findClip, updateClip, resetFadeSpan, setClipSpeed, isVisualSource, isImageSource } from "../../lib/workshop";
 import type { WorkshopClip } from "../../types/workshop";
 import { addWorkshopMarker, removeWorkshopMarker } from "../../lib/workshopMarkers";
-export function WorkshopClipMenu({ id, markerId, markMs, x, y, close }: { id?: string; markerId?: string; markMs?: number; x: number; y: number; close(restoreFocus?: boolean): void }) {
+export function WorkshopClipMenu({ id, markerId, markMs, x, y, close, onCrop }: { id?: string; markerId?: string; markMs?: number; x: number; y: number; close(restoreFocus?: boolean): void; onCrop(id: string): void }) {
   const p = useWorkshopStore(s => s.draft), ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(close);
   closeRef.current = close;
@@ -53,7 +53,7 @@ export function WorkshopClipMenu({ id, markerId, markMs, x, y, close }: { id?: s
     state.select(null);
     close();
   };
-  const speed = (n: number) => { if (n >= .5 && n <= 2) edit(c => { c.speed = {...c.speed, preset:"constant", start:n, middle:n, end:n}; resetFadeSpan(c); }); };
+  const speed = (n: number) => edit(c => setClipSpeed(c, n));
   const number = (label: string, value: number, min: number, max: number, fn: (n: number) => void, suffix = "%") =>
     <label className="vj-context-number">{label}<input key={`${id}:${label}:${value}`} type="number" aria-label={label} defaultValue={value} min={min} max={max} step={suffix === "×" ? .05 : suffix === "秒" ? .001 : 1}
       onBlur={e => { const n = Number(e.currentTarget.value); if (e.currentTarget.value && Number.isFinite(n) && n >= min && n <= max && n !== value) fn(n); }}
@@ -83,16 +83,14 @@ export function WorkshopClipMenu({ id, markerId, markMs, x, y, close }: { id?: s
       {number("横向", Math.round(c.picture.x * 100), 0, 100, n => edit(c => {c.picture.x = n / 100;}))}
       {number("纵向", Math.round(c.picture.y * 100), 0, 100, n => edit(c => {c.picture.y = n / 100;}))}
     </div></details>}
+    {isVisualSource(source) && <button type="button" onClick={() => {close(); onCrop(c.id);}}>裁剪画面</button>}
     {isImageSource(source) && <>
       {number("显示时长", (c.display_duration_ms ?? 5000)/1000, 1/p!.canvas.fps, (21_600_000-c.start_ms)/1000, n => edit(c => {c.display_duration_ms=n*1000;resetFadeSpan(c);}), "秒")}
-      <details><summary>变换与裁剪</summary><div className="vj-menu-options">
+      <details><summary>变换</summary><div className="vj-menu-options">
         {number("旋转", c.picture.rotation ?? 0, -360, 360, n => edit(c => {c.picture.rotation=n;}), "°")}
         <button aria-pressed={Boolean(c.picture.flip_x)} onClick={() => edit(c => {c.picture.flip_x=!c.picture.flip_x;})}>水平翻转</button>
         <button aria-pressed={Boolean(c.picture.flip_y)} onClick={() => edit(c => {c.picture.flip_y=!c.picture.flip_y;})}>垂直翻转</button>
-        <button onClick={() => {useWorkshopStore.setState({cropId:id});close();}}>裁剪画面</button>
-        {(["左侧裁剪","上侧裁剪","右侧裁剪","下侧裁剪"] as const).map((label,i) => <div key={label}>{number(label, Math.round((c.picture.crop?.[i]??0)*100), 0, 98-(c.picture.crop?.[(i+2)%4]??0)*100, n => edit(c => {const crop=[...(c.picture.crop??[0,0,0,0])] as [number,number,number,number];crop[i]=n/100;c.picture.crop=crop;}))}</div>)}
-        <button onClick={() => {edit(c => {c.picture.crop=[0,0,0,0];});useWorkshopStore.setState({cropId:null});}}>重置裁剪</button>
-        <button onClick={() => {edit(c => {c.picture={...c.picture,x:.5,y:.5,scale:1,rotation:0,flip_x:false,flip_y:false,crop:[0,0,0,0]};});useWorkshopStore.setState({cropId:null});}}>重置画面</button>
+        <button onClick={() => {edit(c => {c.picture={...c.picture,x:.5,y:.5,scale:1,rotation:0,flip_x:false,flip_y:false,crop:[0,0,0,0],crop_keep_position:true};});useWorkshopStore.setState({cropId:null});}}>重置画面</button>
       </div></details>
     </>}
     {source.audio && <details><summary>声音</summary><div className="vj-menu-options">

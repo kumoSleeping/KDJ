@@ -23,6 +23,7 @@ import { useDownloadStore } from "../../stores/downloadStore";
 import type { MergedGroup, VideoDownloadRequest, VideoInfo, VideoPage } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "./PlatformMark";
+import { ResultDownloadIndex } from "./ResultDownloadIndex";
 import { requestVideoPreview } from "./VideoPreview";
 import { useTrackClickPrefs, playClickForLayout } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
@@ -502,7 +503,12 @@ export function VideoResultRow({
           ) : null}
         </td>
         <td className="kd-result-lead" data-col="index" {...cellDrag}>
-          <span className="kd-result-index">{rowNumber}</span>
+          <ResultDownloadIndex
+            rowNumber={rowNumber}
+            title={title}
+            onDownload={bvid ? () => { void download(0); } : undefined}
+            disabled={sending}
+          />
         </td>
         {columns.map((column) => {
           switch (column.key) {

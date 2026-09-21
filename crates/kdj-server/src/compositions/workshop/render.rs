@@ -572,10 +572,14 @@ impl Workshop {
         if !directory.is_dir() {
             bail!("导出目录不存在")
         }
-        let stage = directory.join(format!(".kdj-composition-vj-{}", id()));
+        let stage = directory.join(format!(".kdj-composition-vj-{jid}"));
         std::fs::create_dir(&stage)?;
         let _scratch = Scratch(stage.clone());
+        let mut owner = std::fs::OpenOptions::new().write(true).create_new(true).open(stage.join(".owner"))?;
+        std::io::Write::write_all(&mut owner, jid.as_bytes())?;
+        owner.sync_all()?;
         self.job(jid, |j| {
+            j.staging = Some(stage.to_string_lossy().into_owned());
             j.phase = "rendering".into();
             j.error.clear();
             j.detail = "混合声音".into();
@@ -655,26 +659,45 @@ impl Workshop {
             // used to encode every video twice and delay all visible progress.
             args.extend(["-threads".into(), "1".into(), "-ss".into(), secs(c.source_in_ms),
                 "-i".into(), s.path.clone()]);
+            let (fit_width, fit_height) = if c.picture.crop_keep_position {
+                (width as f64, height as f64)
+            } else { cropped_size(width as f64, height as f64, c.picture.crop) };
             let w = ((p.canvas.width as f64 * c.picture.scale).min(
-                p.canvas.height as f64 * width as f64 / height as f64 * c.picture.scale,
+                p.canvas.height as f64 * fit_width / fit_height * c.picture.scale,
             ) / 2.)
                 .round()
                 .max(1.)
                 * 2.;
-            let h = (w * height as f64 / width as f64 / 2.).round().max(1.) * 2.;
+            let h = (w * fit_height / fit_width / 2.).round().max(1.) * 2.;
             let fades = &c.fades;
             let dynamic = fades.video_in_ms > fades.offset_ms
                 || (fades.video_out_ms > 0. && fades.offset_ms + c.duration() > fades.span_ms - fades.video_out_ms);
-            let pixels = format!("[{n}:{}]trim=duration={},setpts=PTS-STARTPTS,setpts='({})/TB',fps={}:eof_action=pass,scale={}:{},setsar=1",
+            let cropped = c.picture.crop.iter().any(|v| *v > 0.);
+            // Normalize display pixels before masking, including anamorphic sources.
+            // Transparent padding preserves the original frame's size and position.
+            let mask = if cropped {
+                format!(",scale={width}:{height},setsar=1,format=rgba{}", crop_mask(width as f64, height as f64, c.picture.crop, c.picture.crop_keep_position))
+            } else { String::new() };
+            let pixels = format!("[{n}:{}]trim=duration={},setpts=PTS-STARTPTS,setpts='({})/TB',fps={}:eof_action=pass{mask},scale={}:{},setsar=1",
                 stream.index, secs(c.source_out_ms-c.source_in_ms), retime(c), number(p.canvas.fps), number(w), number(h));
             let shift = format!("setpts=PTS+{}/TB[clip{n}]", secs(c.start_ms-lo));
             if dynamic || c.picture.opacity < 1. {
                 // The envelope is spatially uniform. Evaluate it on four pixels
                 // per frame, then enlarge the alpha plane; never evaluate an
                 // expression for every RGB pixel of a full-resolution frame.
-                graph.push(format!("{pixels},format=yuv420p[pixels{n}]"));
-                graph.push(format!("color=white:s=2x2:r={}:d={},format=gray,geq=lum='255*{}*{}',scale={}:{}:flags=neighbor[alpha{n}]", number(p.canvas.fps), secs(c.duration()), number(c.picture.opacity), envelope(c,false,"T*1000"), number(w), number(h)));
-                graph.push(format!("[pixels{n}][alpha{n}]alphamerge=shortest=1,{shift}"));
+                if cropped {
+                    graph.push(format!("{pixels},format=rgba,split[pixels{n}][sourcealpha{n}]"));
+                    graph.push(format!("[sourcealpha{n}]alphaextract[originalalpha{n}]"));
+                } else {
+                    graph.push(format!("{pixels},format=yuv420p[pixels{n}]"));
+                }
+                graph.push(format!("color=white:s=2x2:r={}:d={},format=gray,geq=lum='255*{}*{}',scale={}:{}:flags=neighbor[fadealpha{n}]", number(p.canvas.fps), secs(c.duration()), number(c.picture.opacity), envelope(c,false,"T*1000"), number(w), number(h)));
+                if cropped {
+                    graph.push(format!("[originalalpha{n}][fadealpha{n}]blend=all_mode=multiply:shortest=1[alpha{n}]"));
+                    graph.push(format!("[pixels{n}][alpha{n}]alphamerge=shortest=1,{shift}"));
+                } else {
+                    graph.push(format!("[pixels{n}][fadealpha{n}]alphamerge=shortest=1,{shift}"));
+                }
             } else {
                 graph.push(format!("{pixels},{shift}"));
             }
@@ -781,6 +804,7 @@ impl Workshop {
             }
         }
         let sig = media::signature(&output)?;
+        std::fs::File::open(&output)?.sync_all()?;
         let name = p.output.name.trim();
         if name.is_empty() || name.contains(['/', '\\', '\0']) || name == "." || name == ".." {
             bail!("导出文件名无效")
@@ -802,7 +826,7 @@ impl Workshop {
                 j.path = path.to_string_lossy().into_owned();
                 j.signature = Some(sig.clone());
             })?;
-            match std::fs::hard_link(&output, &path) {
+            match kdj_providers::net::rename_download_noclobber(&output, &path) {
                 Ok(()) => {
                     destination = Some(path);
                     break;
@@ -987,15 +1011,31 @@ impl Workshop {
         Ok(())
     }
 }
+fn cropped_size(width: f64, height: f64, crop: [f64; 4]) -> (f64, f64) {
+    ((width * (1. - crop[0] - crop[2])).floor().max(1.),
+     (height * (1. - crop[1] - crop[3])).floor().max(1.))
+}
+/// Shared source-space crop. Optional transparent padding preserves the original
+/// footprint; without it the caller fits the retained rectangle instead.
+fn crop_mask(width: f64, height: f64, crop: [f64; 4], keep_position: bool) -> String {
+    if crop.iter().all(|v| *v == 0.) { return String::new(); }
+    let (sw, sh) = cropped_size(width, height, crop);
+    let x = (width * crop[0]).floor();
+    let y = (height * crop[1]).floor();
+    let mut filters = format!(",crop={}:{}:{}:{}:exact=1", number(sw), number(sh), number(x), number(y));
+    if keep_position {
+        filters.push_str(&format!(",pad={}:{}:{}:{}:color=black@0", number(width), number(height), number(x), number(y)));
+    }
+    filters
+}
 fn image_graph(graph: &mut Vec<String>, n: usize, s: &Source, c: &Clip, p: &CompositionProject, lo: f64) {
-    let [left,top,right,bottom]=c.picture.crop;
-    let sw=(s.width as f64*(1.-left-right)).floor().max(1.);
-    let sh=(s.height as f64*(1.-top-bottom)).floor().max(1.);
-    let w=(p.canvas.width as f64).min(p.canvas.height as f64*sw/sh)*c.picture.scale;
-    let w=w.round().max(1.); let h=(w*sh/sw).round().max(1.);
+    let (fw, fh) = if c.picture.crop_keep_position { (s.width as f64, s.height as f64) }
+        else { cropped_size(s.width as f64, s.height as f64, c.picture.crop) };
+    let w=(p.canvas.width as f64).min(p.canvas.height as f64*fw/fh)*c.picture.scale;
+    let w=w.round().max(1.); let h=(w*fh/fw).round().max(1.);
     let angle=c.picture.rotation*std::f64::consts::PI/180.;
-    // Identical integer crop and fitted size to pictureBox; RGBA throughout.
-    let mut pixels=format!("[{n}:v]setpts=PTS-STARTPTS,format=rgba,crop={}:{}:{}:{}:exact=1",number(sw),number(sh),number((s.width as f64*left).floor()),number((s.height as f64*top).floor()));
+    // Same crop mode and fitted geometry as pictureBox; RGBA throughout.
+    let mut pixels=format!("[{n}:v]setpts=PTS-STARTPTS,format=rgba{}",crop_mask(s.width as f64,s.height as f64,c.picture.crop,c.picture.crop_keep_position));
     if c.picture.flip_x {pixels.push_str(",hflip");}
     if c.picture.flip_y {pixels.push_str(",vflip");}
     pixels.push_str(&format!(",scale={}:{}",number(w),number(h)));

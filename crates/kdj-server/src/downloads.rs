@@ -181,6 +181,9 @@ struct Entry {
     /// 每次真正获得并发槽、开始外部准备时递增。所有回传都必须带同一代号，防止
     /// 暂停/重试边界上的旧异步响应污染新一轮任务。
     preparation_attempt: u64,
+    /// One generation per spawned worker, including retries that need no external preparation.
+    /// Unlike task state, this identity never becomes writable again for an old worker.
+    worker_generation: u64,
     /// 测速滑窗：(单调秒, 已下字节)
     samples: VecDeque<(f64, u64)>,
     /// 上一次真正广播出去的时刻 / 进度。`-1.0` = 还没广播过，第一次一定放行。
@@ -197,6 +200,7 @@ impl Entry {
             video_retry: None,
             prepared_source_url: None,
             preparation_attempt: 0,
+            worker_generation: 1,
             samples: VecDeque::new(),
             last_emit: -1.0,
             last_progress: -1.0,
@@ -529,6 +533,114 @@ pub struct DownloadManager {
     start_generation: watch::Sender<u64>,
 }
 
+/// A worker never receives an unscoped task mutation API. Its identity is frozen before spawn;
+/// every write and one-shot source consumption checks it under the manager's entries lock.
+#[derive(Clone)]
+struct DownloadAttempt {
+    manager: Arc<DownloadManager>,
+    id: String,
+    generation: u64,
+}
+
+impl DownloadAttempt {
+    /// Linearize local publication with pause/retry. The operation must be synchronous
+    /// and must not call back into DownloadManager while its entries lock is held.
+    fn commit<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
+        let entries = self.manager.entries.lock().unwrap();
+        let entry = entries.get(&self.id)?;
+        if entry.worker_generation != self.generation
+            || entry.cancel.is_cancelled()
+            || stops_worker_updates(entry.task.state)
+        {
+            return None;
+        }
+        Some(operation())
+    }
+
+    fn current(&self) -> bool {
+        self.manager
+            .entries
+            .lock()
+            .unwrap()
+            .get(&self.id)
+            .is_some_and(|entry| {
+                entry.worker_generation == self.generation
+                    && !entry.cancel.is_cancelled()
+                    && !stops_worker_updates(entry.task.state)
+            })
+    }
+
+    fn phase(&self, phase: TaskPhase) {
+        self.manager
+            .update_active(&self.id, Some(self.generation), |task| task.phase = phase);
+    }
+
+    fn progress(&self, downloaded: u64, total: u64) {
+        self.manager
+            .progress_inner(&self.id, Some(self.generation), None, downloaded, total);
+    }
+
+    fn settle(&self, state: TaskState, error: &str) {
+        self.manager
+            .settle_for(&self.id, Some(self.generation), state, error);
+    }
+
+    fn finish(&self, path: &Path, track_id: Option<i64>) -> bool {
+        self.manager.finish_file(
+            &self.id,
+            Some(self.generation),
+            path,
+            TaskState::Done,
+            "",
+            track_id,
+        )
+    }
+
+    fn fail_after_download(&self, path: &Path, error: &str) {
+        self.manager.finish_file(
+            &self.id,
+            Some(self.generation),
+            path,
+            TaskState::Failed,
+            error,
+            None,
+        );
+    }
+
+    fn apply_video_resolution(&self, info: &VideoInfo) {
+        self.manager
+            .apply_video_resolution_for(&self.id, Some(self.generation), info);
+    }
+
+    fn peek_prepared_source_url(&self) -> Option<String> {
+        self.manager
+            .entries
+            .lock()
+            .unwrap()
+            .get(&self.id)
+            .filter(|entry| {
+                entry.worker_generation == self.generation
+                    && !entry.cancel.is_cancelled()
+                    && !stops_worker_updates(entry.task.state)
+            })
+            .and_then(|entry| entry.prepared_source_url.clone())
+    }
+
+    fn take_prepared_source_url(&self) -> Option<String> {
+        self.manager
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&self.id)
+            .filter(|entry| {
+                entry.worker_generation == self.generation
+                    && !entry.cancel.is_cancelled()
+                    && !stops_worker_updates(entry.task.state)
+            })
+            .and_then(|entry| entry.prepared_source_url.take())
+    }
+}
+
 impl DownloadManager {
     pub fn new(hub: EventHub, concurrency: u32, auto_start: bool) -> Self {
         Self::from_entries(hub, concurrency, auto_start, BTreeMap::new(), None)
@@ -815,7 +927,7 @@ impl DownloadManager {
 
     /// 外部挑战失败必须立即落在原任务上，不能只写前端控制台后让任务等满超时。
     pub fn fail_preparation(&self, id: &str, attempt: u64, error: &str) -> Result<DownloadTask> {
-        let (task, changed) = {
+        let (task, _changed) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id).context("任务不存在")?;
             anyhow::ensure!(
@@ -845,23 +957,14 @@ impl DownloadManager {
                 entry.last_progress = entry.task.progress;
                 let task = entry.task.clone();
                 self.persist_locked_or_warn(&entries);
+                self.hub.publish("download.updated", &task);
                 (task, true)
             }
         };
-        if changed {
-            self.hub.publish("download.updated", &task);
-        }
         Ok(task)
     }
 
-    fn peek_prepared_source_url(&self, id: &str) -> Option<String> {
-        self.entries
-            .lock()
-            .unwrap()
-            .get(id)
-            .and_then(|entry| entry.prepared_source_url.clone())
-    }
-
+    #[cfg(test)]
     fn take_prepared_source_url(&self, id: &str) -> Option<String> {
         self.entries
             .lock()
@@ -920,8 +1023,8 @@ impl DownloadManager {
     fn prepare_audio_retry(
         &self,
         id: &str,
-    ) -> Result<(DownloadTask, AudioRetry, CancellationToken)> {
-        let (task, retry, cancel) = {
+    ) -> Result<(DownloadTask, AudioRetry, CancellationToken, u64)> {
+        let (task, retry, cancel, generation) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id).context("任务不存在")?;
             anyhow::ensure!(entry.task.kind == TaskKind::Audio, "只有歌曲下载支持重试");
@@ -934,7 +1037,9 @@ impl DownloadManager {
                 .clone()
                 .context("这条旧任务没有可用的重试参数")?;
             let cancel = CancellationToken::new();
+            entry.cancel.cancel();
             entry.cancel = cancel.clone();
+            entry.worker_generation = entry.worker_generation.wrapping_add(1).max(1);
             entry.samples.clear();
             entry.last_emit = monotonic();
             entry.last_progress = 0.0;
@@ -949,12 +1054,12 @@ impl DownloadManager {
             entry.task.error.clear();
             entry.task.track_id = None;
             entry.task.updated_at = now_secs();
-            let prepared = (entry.task.clone(), retry, cancel);
+            let prepared = (entry.task.clone(), retry, cancel, entry.worker_generation);
             self.persist_locked(&entries)?;
+            self.hub.publish("download.updated", &prepared.0);
             prepared
         };
-        self.hub.publish("download.updated", &task);
-        Ok((task, retry, cancel))
+        Ok((task, retry, cancel, generation))
     }
 
     /// 排队期间改单曲音质：任务 worker 真正开跑时才从这里读取冻结参数，
@@ -989,11 +1094,18 @@ impl DownloadManager {
 
     /// 取最新的单曲参数并把 queued → running 放在同一把锁里。
     /// 这样“改单曲音质”和 worker 启动不会互相穿透。
+    #[cfg(test)]
     fn start_audio(&self, id: &str) -> Option<AudioRetry> {
-        let (task, retry) = {
+        self.start_audio_for(id, None)
+    }
+
+    fn start_audio_for(&self, id: &str, generation: Option<u64>) -> Option<AudioRetry> {
+        let (_task, retry) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id)?;
-            if entry.task.state != TaskState::Queued {
+            if entry.task.state != TaskState::Queued
+                || generation.is_some_and(|generation| generation != entry.worker_generation)
+            {
                 return None;
             }
             let retry = entry.audio_retry.clone()?;
@@ -1012,17 +1124,17 @@ impl DownloadManager {
             entry.last_progress = entry.task.progress;
             let started = (entry.task.clone(), retry);
             self.persist_locked_or_warn(&entries);
+            self.hub.publish("download.updated", &started.0);
             started
         };
-        self.hub.publish("download.updated", &task);
         Some(retry)
     }
 
     fn prepare_video_retry(
         &self,
         id: &str,
-    ) -> Result<(DownloadTask, VideoRetry, CancellationToken)> {
-        let (task, retry, cancel) = {
+    ) -> Result<(DownloadTask, VideoRetry, CancellationToken, u64)> {
+        let (task, retry, cancel, generation) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id).context("任务不存在")?;
             anyhow::ensure!(entry.task.kind == TaskKind::Video, "这条任务不是视频下载");
@@ -1035,7 +1147,9 @@ impl DownloadManager {
                 .clone()
                 .context("这条旧任务没有可用的重试参数")?;
             let cancel = CancellationToken::new();
+            entry.cancel.cancel();
             entry.cancel = cancel.clone();
+            entry.worker_generation = entry.worker_generation.wrapping_add(1).max(1);
             entry.samples.clear();
             entry.last_emit = monotonic();
             entry.last_progress = 0.0;
@@ -1050,12 +1164,12 @@ impl DownloadManager {
             entry.task.error.clear();
             entry.task.track_id = None;
             entry.task.updated_at = now_secs();
-            let prepared = (entry.task.clone(), retry, cancel);
+            let prepared = (entry.task.clone(), retry, cancel, entry.worker_generation);
             self.persist_locked(&entries)?;
+            self.hub.publish("download.updated", &prepared.0);
             prepared
         };
-        self.hub.publish("download.updated", &task);
-        Ok((task, retry, cancel))
+        Ok((task, retry, cancel, generation))
     }
 
     pub fn set_pending_video_height(&self, id: &str, max_height: i64) -> Result<DownloadTask> {
@@ -1088,11 +1202,18 @@ impl DownloadManager {
         Ok(task)
     }
 
+    #[cfg(test)]
     fn start_video(&self, id: &str) -> Option<VideoRetry> {
-        let (task, retry) = {
+        self.start_video_for(id, None)
+    }
+
+    fn start_video_for(&self, id: &str, generation: Option<u64>) -> Option<VideoRetry> {
+        let (_task, retry) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id)?;
-            if entry.task.state != TaskState::Queued {
+            if entry.task.state != TaskState::Queued
+                || generation.is_some_and(|generation| generation != entry.worker_generation)
+            {
                 return None;
             }
             let retry = entry.video_retry.clone()?;
@@ -1109,20 +1230,30 @@ impl DownloadManager {
             entry.last_progress = entry.task.progress;
             let started = (entry.task.clone(), retry);
             self.persist_locked_or_warn(&entries);
+            self.hub.publish("download.updated", &started.0);
             started
         };
-        self.hub.publish("download.updated", &task);
         Some(retry)
     }
 
     /// 把解析得到的视频身份、展示字段和可重试请求一次性写回。外部准备随后读取
     /// `video_retry.request`，因此 URL-only 入队也能获得与任务绑定的 YouTube HLS 票据。
+    #[cfg(test)]
     fn apply_video_resolution(&self, id: &str, info: &VideoInfo) {
-        let updated = {
+        self.apply_video_resolution_for(id, None, info);
+    }
+
+    fn apply_video_resolution_for(&self, id: &str, generation: Option<u64>, info: &VideoInfo) {
+        {
             let mut entries = self.entries.lock().unwrap();
             let Some(entry) = entries.get_mut(id) else {
                 return;
             };
+            if generation.is_some_and(|generation| generation != entry.worker_generation)
+                || stops_worker_updates(entry.task.state)
+            {
+                return;
+            }
             let placeholder = entry
                 .video_retry
                 .as_ref()
@@ -1175,9 +1306,8 @@ impl DownloadManager {
             entry.last_progress = entry.task.progress;
             let task = entry.task.clone();
             self.persist_locked_or_warn(&entries);
-            task
+            self.hub.publish("download.updated", &task);
         };
-        self.hub.publish("download.updated", &updated);
     }
 
     /// 「开始」除了放行 queued，也要把暂停和能重试的失败媒体一并带上。
@@ -1201,12 +1331,15 @@ impl DownloadManager {
     fn update_active(
         &self,
         id: &str,
+        generation: Option<u64>,
         mutate: impl FnOnce(&mut DownloadTask),
     ) -> Option<DownloadTask> {
         let updated = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id)?;
-            if stops_worker_updates(entry.task.state) {
+            if stops_worker_updates(entry.task.state)
+                || generation.is_some_and(|generation| generation != entry.worker_generation)
+            {
                 return None;
             }
             mutate(&mut entry.task);
@@ -1215,16 +1348,27 @@ impl DownloadManager {
             entry.last_progress = entry.task.progress;
             let task = entry.task.clone();
             self.persist_locked_or_warn(&entries);
+            self.hub.publish("download.updated", &task);
             task
         };
-        self.hub.publish("download.updated", &updated);
         Some(updated)
     }
 
     /// 落到终态。已经是终态的不再改——否则下载完成的那一瞬间收到取消
     /// 会把"完成"覆盖成"已取消"。
+    #[cfg(test)]
     fn settle(&self, id: &str, state: TaskState, error: &str) -> Option<DownloadTask> {
-        let updated = self.update_active(id, |task| {
+        self.settle_for(id, None, state, error)
+    }
+
+    fn settle_for(
+        &self,
+        id: &str,
+        generation: Option<u64>,
+        state: TaskState,
+        error: &str,
+    ) -> Option<DownloadTask> {
+        let updated = self.update_active(id, generation, |task| {
             task.state = state;
             if state == TaskState::Done {
                 task.phase = TaskPhase::Completed;
@@ -1264,27 +1408,39 @@ impl DownloadManager {
         self.hub.publish("download.updated", &updated);
     }
 
+    #[cfg(test)]
     fn phase(&self, id: &str, phase: TaskPhase) {
-        self.update_active(id, |task| task.phase = phase);
+        self.update_active(id, None, |task| task.phase = phase);
     }
 
     /// provider 的下载循环每收到一块就调一次：更新字节数和速度，广播则要过节流。
-    pub(crate) fn progress(&self, id: &str, downloaded: u64, total: u64) {
-        self.progress_inner(id, None, downloaded, total);
+    #[cfg(test)]
+    fn progress(&self, id: &str, downloaded: u64, total: u64) {
+        self.progress_inner(id, None, None, downloaded, total);
     }
 
     /// 外部准备的进度还要绑定尝试代号；旧请求即使在暂停/重试后迟到，也不能把
     /// 新任务的字节数和阶段改回去。
     pub(crate) fn preparation_progress(&self, id: &str, attempt: u64, downloaded: u64, total: u64) {
-        self.progress_inner(id, Some(attempt), downloaded, total);
+        self.progress_inner(id, None, Some(attempt), downloaded, total);
     }
 
-    fn progress_inner(&self, id: &str, attempt: Option<u64>, downloaded: u64, total: u64) {
-        let payload = {
+    fn progress_inner(
+        &self,
+        id: &str,
+        generation: Option<u64>,
+        attempt: Option<u64>,
+        downloaded: u64,
+        total: u64,
+    ) {
+        {
             let mut entries = self.entries.lock().unwrap();
             let Some(entry) = entries.get_mut(id) else {
                 return;
             };
+            if generation.is_some_and(|generation| generation != entry.worker_generation) {
+                return;
+            }
             if attempt.is_some_and(|attempt| attempt == 0 || entry.preparation_attempt != attempt) {
                 return;
             }
@@ -1335,17 +1491,18 @@ impl DownloadManager {
             }
             entry.last_emit = now;
             entry.last_progress = entry.task.progress;
-            entry.task.clone()
+            let payload = entry.task.clone();
+            self.hub.publish("download.updated", &payload);
         };
-        self.hub.publish("download.updated", &payload);
     }
 
     /// 下载完成的收尾：进度顶到 1、速度归零，并用最终文件纠正体积与音质显示。
     ///
     /// 已经落到终态的不再改：取消是在下载循环的**下一次**回调才生效的，
     /// 「点了取消 → 最后一块正好下完」这条时序会把「已取消」翻回「已完成」。
+    #[cfg(test)]
     fn finish(&self, id: &str, path: &std::path::Path, track_id: Option<i64>) {
-        self.finish_file(id, path, TaskState::Done, "", track_id);
+        self.finish_file(id, None, path, TaskState::Done, "", track_id);
     }
 
     /// 文件已经落盘，但写进曲库失败：必须保留成品路径并明确标失败。
@@ -1353,25 +1510,27 @@ impl DownloadManager {
     /// 旧逻辑仍调用 `finish(..., None)`，右栏因此显示「完成」，左表却永远没有对应
     /// 曲目——正是最像“视频消失了”的状态。下载成功和入库成功是两段结果，目标
     /// 文件夹下载只有两段都成功才能标 Done。
+    #[cfg(test)]
     fn fail_after_download(&self, id: &str, path: &std::path::Path, error: &str) {
-        self.finish_file(id, path, TaskState::Failed, error, None);
+        self.finish_file(id, None, path, TaskState::Failed, error, None);
     }
 
     fn finish_file(
         &self,
         id: &str,
+        generation: Option<u64>,
         path: &std::path::Path,
         state: TaskState,
         error: &str,
         track_id: Option<i64>,
-    ) {
+    ) -> bool {
         let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         let suffix = path
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let updated = self.update_active(id, |task| {
+        let updated = self.update_active(id, generation, |task| {
             task.state = state;
             if state == TaskState::Done {
                 task.phase = TaskPhase::Completed;
@@ -1409,6 +1568,7 @@ impl DownloadManager {
         if let Some(task) = &updated {
             self.record_terminal(task);
         }
+        updated.is_some()
     }
 
     pub fn cancel(&self, id: &str) -> Option<DownloadTask> {
@@ -1433,17 +1593,24 @@ impl DownloadManager {
             return Some(task);
         }
 
-        {
-            let entries = self.entries.lock().unwrap();
-            let entry = entries.get(id)?;
-            // 已经结束的任务不再改状态，否则"完成"会被点成"已取消"
+        let task = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id)?;
             if is_terminal(entry.task.state) {
                 return Some(entry.task.clone());
             }
             entry.cancel.cancel();
-        }
-        self.settle(id, TaskState::Canceled, "已取消")
-            .or_else(|| self.get(id))
+            entry.task.state = TaskState::Canceled;
+            entry.task.error = "已取消".into();
+            entry.task.speed_bps = 0.0;
+            entry.task.updated_at = now_secs();
+            let task = entry.task.clone();
+            self.persist_locked_or_warn(&entries);
+            self.hub.publish("download.updated", &task);
+            task
+        };
+        self.record_terminal(&task);
+        Some(task)
     }
 
     /// 一次性取消整份活动队列。
@@ -1516,11 +1683,11 @@ impl DownloadManager {
                 updated.push(entry.task.clone());
             }
             self.persist_locked_or_warn(&entries);
+            for task in &updated {
+                self.hub.publish("download.updated", task);
+            }
             updated
         };
-        for task in &updated {
-            self.hub.publish("download.updated", task);
-        }
         if !updated.is_empty() {
             self.broadcast_list();
         }
@@ -1636,24 +1803,20 @@ async fn acquire_download_permit(
 
 /// 需要外部挑战的 Provider 必须等适配器提交一次性媒体源；任务已经可见并处于
 /// authorizing，相同等待/取消/超时语义不再散落在平台分支里。
-async fn wait_for_prepared_source(
-    manager: &DownloadManager,
-    id: &str,
-    cancel: &CancellationToken,
-) -> bool {
+async fn wait_for_prepared_source(worker: &DownloadAttempt, cancel: &CancellationToken) -> bool {
     // A protected YTM source is now materialized by one uninterrupted GVS transfer before the
     // provider consumes its local file. Long mixes must not time out while progress is advancing.
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
     let mut last_activity = tokio::time::Instant::now();
     let mut last_downloaded = 0_u64;
     loop {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || !worker.current() {
             return false;
         }
-        if manager.peek_prepared_source_url(id).is_some() {
+        if worker.peek_prepared_source_url().is_some() {
             return true;
         }
-        if let Some(task) = manager.get(id) {
+        if let Some(task) = worker.manager.get(&worker.id) {
             if task.downloaded_bytes > last_downloaded {
                 last_downloaded = task.downloaded_bytes;
                 last_activity = tokio::time::Instant::now();
@@ -1797,7 +1960,17 @@ pub fn enqueue_audio(
 
     let id = task.id.clone();
     tokio::spawn(async move {
-        run_audio(state, manager, id, cancel, queued_generation, !hold, false).await;
+        run_audio(
+            state,
+            manager,
+            id,
+            cancel,
+            1,
+            queued_generation,
+            !hold,
+            false,
+        )
+        .await;
     });
     task
 }
@@ -1810,7 +1983,7 @@ pub fn retry_audio(
     manager: Arc<DownloadManager>,
     id: &str,
 ) -> Result<DownloadTask> {
-    let (task, _retry, cancel) = manager.prepare_audio_retry(id)?;
+    let (task, _retry, cancel, worker_generation) = manager.prepare_audio_retry(id)?;
     let task_id = task.id.clone();
     let queued_generation = manager.start_generation();
     tokio::spawn(async move {
@@ -1819,6 +1992,7 @@ pub fn retry_audio(
             manager,
             task_id,
             cancel,
+            worker_generation,
             queued_generation,
             true,
             true,
@@ -1834,7 +2008,7 @@ pub fn retry_video(
     manager: Arc<DownloadManager>,
     id: &str,
 ) -> Result<DownloadTask> {
-    let (task, _retry, cancel) = manager.prepare_video_retry(id)?;
+    let (task, _retry, cancel, worker_generation) = manager.prepare_video_retry(id)?;
     let task_id = task.id.clone();
     let queued_generation = manager.start_generation();
     tokio::spawn(async move {
@@ -1843,6 +2017,7 @@ pub fn retry_video(
             manager,
             task_id,
             cancel,
+            worker_generation,
             queued_generation,
             true,
             true,
@@ -1880,6 +2055,7 @@ async fn run_audio(
     manager: Arc<DownloadManager>,
     id: String,
     cancel: CancellationToken,
+    worker_generation: u64,
     queued_generation: u64,
     allow_auto_start: bool,
     start_immediately: bool,
@@ -1895,8 +2071,13 @@ async fn run_audio(
     if cancel.is_cancelled() {
         return;
     }
-    let Some(retry) = manager.start_audio(&id) else {
+    let Some(retry) = manager.start_audio_for(&id, Some(worker_generation)) else {
         return;
+    };
+    let worker = DownloadAttempt {
+        manager: Arc::clone(&manager),
+        id: id.clone(),
+        generation: worker_generation,
     };
     let AudioRetry {
         source,
@@ -1906,30 +2087,26 @@ async fn run_audio(
         external_preparation,
     } = retry;
     if let Err(message) = validate_download_target(Path::new(&dest_dir)) {
-        manager.settle(&id, TaskState::Failed, &message);
+        worker.settle(TaskState::Failed, &message);
         return;
     }
-    if external_preparation && !wait_for_prepared_source(&manager, &id, &cancel).await {
-        if cancel.is_cancelled() {
-            manager.settle(&id, TaskState::Canceled, "已取消");
+    if external_preparation && !wait_for_prepared_source(&worker, &cancel).await {
+        if cancel.is_cancelled() || !worker.current() {
+            worker.settle(TaskState::Canceled, "已取消");
         } else {
-            manager.settle(&id, TaskState::Failed, "下载来源未及时就绪，请重试");
+            worker.settle(TaskState::Failed, "下载来源未及时就绪，请重试");
         }
         return;
     }
-    manager.phase(
-        &id,
-        if external_preparation {
-            // YTM 的受保护来源在准备路由里已经按真实网络字节完整落盘；provider
-            // 接下来只做容器整理/搬运，不能让 UI 从 100% 又退回“解析中”。
-            TaskPhase::PostProcessing
-        } else {
-            TaskPhase::Resolving
-        },
-    );
+    worker.phase(if external_preparation {
+        // YTM 的受保护来源在准备路由里已经按真实网络字节完整落盘；provider
+        // 接下来只做容器整理/搬运，不能让 UI 从 100% 又退回“解析中”。
+        TaskPhase::PostProcessing
+    } else {
+        TaskPhase::Resolving
+    });
     let Some(provider) = state.provider(source.platform).cloned() else {
-        manager.settle(
-            &id,
+        worker.settle(
             TaskState::Failed,
             &format!("平台 {} 不可用（provider 未加载）", source.platform),
         );
@@ -1937,13 +2114,12 @@ async fn run_audio(
     };
 
     // 进度回调跨线程：闭包捕获 Arc 后在 provider 的下载循环里被调用
-    let progress_manager = manager.clone();
-    let progress_id = id.clone();
+    let progress_worker = worker.clone();
     let progress = Arc::new(move |downloaded: u64, total: u64| {
-        progress_manager.progress(&progress_id, downloaded, total);
+        progress_worker.progress(downloaded, total);
     });
 
-    let prepared_source_url = manager.take_prepared_source_url(&id);
+    let prepared_source_url = worker.take_prepared_source_url();
     let job = DownloadJob::new(&source, quality)
         .with_cancel(cancel.clone())
         .with_progress(progress)
@@ -1953,7 +2129,7 @@ async fn run_audio(
     let result = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
-            manager.settle(&id, TaskState::Canceled, "已取消");
+            worker.settle(TaskState::Canceled, "已取消");
             return;
         }
         result = provider.download(job) => result,
@@ -1963,24 +2139,24 @@ async fn run_audio(
         // 取消是协作式的，provider 有可能在收到取消之前就把最后一块下完了。
         // 这时候不能当成成功：那样队列里会从「已取消」跳回「已完成」，
         // 而且这首歌还会被入库——用户点的明明是取消。
-        Ok(_) if cancel.is_cancelled() => {
-            manager.settle(&id, TaskState::Canceled, "已取消");
+        Ok(_) if cancel.is_cancelled() || !worker.current() => {
+            worker.settle(TaskState::Canceled, "已取消");
         }
         Ok(path) => {
-            manager.phase(&id, TaskPhase::Relocating);
-            let path = match relocate_download(&path, &dest_dir) {
-                Ok(path) => path,
-                Err(message) => {
-                    manager.settle(
-                        &id,
+            worker.phase(TaskPhase::Relocating);
+            let path = match worker.commit(|| relocate_download(&path, &dest_dir)) {
+                None => return,
+                Some(Ok(path)) => path,
+                Some(Err(message)) => {
+                    worker.settle(
                         TaskState::Failed,
                         &format!("已下载但移入目标文件夹失败：{message}"),
                     );
                     return;
                 }
             };
-            if cancel.is_cancelled() {
-                manager.settle(&id, TaskState::Canceled, "已取消");
+            if cancel.is_cancelled() || !worker.current() {
+                worker.settle(TaskState::Canceled, "已取消");
                 return;
             }
             // 音频已经完整落到目标目录，先释放下载并发槽。歌词接口可能很慢，
@@ -1989,11 +2165,11 @@ async fn run_audio(
 
             // 歌词很小，下载完成后一律按精确平台 key 缓存，不再受设置开关控制。
             // 歌曲本体已经完成后，歌词失败只记日志，不影响下载任务成功。
-            manager.phase(&id, TaskPhase::PostProcessing);
+            worker.phase(TaskPhase::PostProcessing);
             let lyric = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    manager.settle(&id, TaskState::Canceled, "已取消");
+                    worker.settle(TaskState::Canceled, "已取消");
                     return;
                 }
                 lyric = provider.lyric(&source.key) => lyric,
@@ -2023,12 +2199,17 @@ async fn run_audio(
                             artist: source.artist_text(),
                             score: 1.0,
                         };
-                        if let Err(err) = kdj_library::folders::write_lyrics_cache(
-                            &path,
-                            source.platform.as_str(),
-                            &source.key,
-                            &cached,
-                        ) {
+                        let Some(result) = worker.commit(|| {
+                            kdj_library::folders::write_lyrics_cache(
+                                &path,
+                                source.platform.as_str(),
+                                &source.key,
+                                &cached,
+                            )
+                        }) else {
+                            return;
+                        };
+                        if let Err(err) = result {
                             tracing::warn!(
                                 task_id = %id,
                                 platform = source.platform.as_str(),
@@ -2046,25 +2227,28 @@ async fn run_audio(
                     "下载后取歌词失败"
                 ),
             }
-            if cancel.is_cancelled() {
-                manager.settle(&id, TaskState::Canceled, "已取消");
+            if cancel.is_cancelled() || !worker.current() {
+                worker.settle(TaskState::Canceled, "已取消");
                 return;
             }
             // 下载完立刻入库，并把来源信息带上，这样曲库里能看出这首是从哪来的
-            manager.phase(&id, TaskPhase::Importing);
-            let track_id =
-                match state
+            worker.phase(TaskPhase::Importing);
+            let track_id = match worker.commit(|| {
+                state
                     .library
                     .upsert_file(&path, source.platform.as_str(), &source.key)
-                {
-                    Ok(id) => id,
-                    Err(err) => {
-                        let message = format!("文件已下载，但加入曲库失败：{err:#}");
-                        manager.fail_after_download(&id, &path, &message);
-                        return;
-                    }
-                };
-            manager.finish(&id, &path, Some(track_id));
+            }) {
+                None => return,
+                Some(Ok(id)) => id,
+                Some(Err(err)) => {
+                    let message = format!("文件已下载，但加入曲库失败：{err:#}");
+                    worker.fail_after_download(&path, &message);
+                    return;
+                }
+            };
+            if !worker.finish(&path, Some(track_id)) {
+                return;
+            }
             state.hub.publish_library_updated(&[track_id]);
             if analyze {
                 match state.library.pending_analysis_ids(Some(&[track_id]), false) {
@@ -2087,13 +2271,13 @@ async fn run_audio(
                 failure_kind = safe_failure_kind(&format!("{err:#}")),
                 "下载已取消"
             );
-            manager.settle(&id, TaskState::Canceled, "已取消");
+            worker.settle(TaskState::Canceled, "已取消");
         }
         Err(err) => {
             let message = format!("{err:#}");
             // 失败原因走 settle → download.updated，队列面板就地显示；
             // 没有任何浮层通知，这里不再另发事件
-            manager.settle(&id, TaskState::Failed, &message);
+            worker.settle(TaskState::Failed, &message);
         }
     }
 }
@@ -2190,6 +2374,7 @@ pub fn enqueue_video(
         manager,
         id,
         cancel,
+        1,
         queued_generation,
         !hold,
         false,
@@ -2203,6 +2388,7 @@ async fn run_video(
     manager: Arc<DownloadManager>,
     id: String,
     cancel: CancellationToken,
+    worker_generation: u64,
     queued_generation: u64,
     allow_auto_start: bool,
     start_immediately: bool,
@@ -2218,8 +2404,13 @@ async fn run_video(
     if cancel.is_cancelled() {
         return;
     }
-    let Some(retry) = manager.start_video(&id) else {
+    let Some(retry) = manager.start_video_for(&id, Some(worker_generation)) else {
         return;
+    };
+    let worker = DownloadAttempt {
+        manager: Arc::clone(&manager),
+        id: id.clone(),
+        generation: worker_generation,
     };
     let VideoRetry {
         request: req,
@@ -2229,11 +2420,11 @@ async fn run_video(
     let platform = req.platform;
     let explicit_dest = !req.dest_dir.trim().is_empty();
     if let Err(message) = validate_download_target(Path::new(&dest_dir)) {
-        manager.settle(&id, TaskState::Failed, &message);
+        worker.settle(TaskState::Failed, &message);
         return;
     }
     let Some(video_provider) = state.video_provider(platform).cloned() else {
-        manager.settle(&id, TaskState::Failed, "视频 Provider 不可用");
+        worker.settle(TaskState::Failed, "视频 Provider 不可用");
         return;
     };
 
@@ -2249,7 +2440,7 @@ async fn run_video(
     let resolved = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
-            manager.settle(&id, TaskState::Canceled, "已取消");
+            worker.settle(TaskState::Canceled, "已取消");
             return;
         }
         resolved = video_provider.resolve_video(&probe) => resolved,
@@ -2260,7 +2451,7 @@ async fn run_video(
             if !info.bvid.trim().is_empty() {
                 resolved_source_key = info.bvid.trim().to_string();
             }
-            manager.apply_video_resolution(&id, &info);
+            worker.apply_video_resolution(&info);
         }
         Err(err) => tracing::debug!(
             task_id = %id,
@@ -2270,23 +2461,22 @@ async fn run_video(
         ),
     }
     if external_preparation {
-        manager.phase(&id, TaskPhase::Authorizing);
-        if !wait_for_prepared_source(&manager, &id, &cancel).await {
-            if cancel.is_cancelled() {
-                manager.settle(&id, TaskState::Canceled, "已取消");
+        worker.phase(TaskPhase::Authorizing);
+        if !wait_for_prepared_source(&worker, &cancel).await {
+            if cancel.is_cancelled() || !worker.current() {
+                worker.settle(TaskState::Canceled, "已取消");
             } else {
-                manager.settle(&id, TaskState::Failed, "下载来源未及时就绪，请重试");
+                worker.settle(TaskState::Failed, "下载来源未及时就绪，请重试");
             }
             return;
         }
     }
-    let progress_manager = manager.clone();
-    let progress_id = id.clone();
+    let progress_worker = worker.clone();
     let progress: kdj_providers::ProgressSink = Arc::new(move |downloaded: u64, total: u64| {
-        progress_manager.progress(&progress_id, downloaded, total);
+        progress_worker.progress(downloaded, total);
     });
 
-    let prepared_source_url = manager.take_prepared_source_url(&id);
+    let prepared_source_url = worker.take_prepared_source_url();
     let prepared_hls_ticket = prepared_source_url
         .as_deref()
         .and_then(local_youtube_hls_ticket);
@@ -2296,7 +2486,7 @@ async fn run_video(
             if let Some(ticket) = prepared_hls_ticket.as_deref() {
                 state.cancel_youtube_hls_resource(ticket);
             }
-            manager.settle(&id, TaskState::Canceled, "已取消");
+            worker.settle(TaskState::Canceled, "已取消");
             return;
         }
         downloaded = video_provider.download_video_prepared(
@@ -2311,46 +2501,50 @@ async fn run_video(
     }
     match downloaded {
         // 和音频一路同理：取消撞上"最后一块刚好下完"不能算成功
-        Ok(_) if cancel.is_cancelled() => {
-            manager.settle(&id, TaskState::Canceled, "已取消");
+        Ok(_) if cancel.is_cancelled() || !worker.current() => {
+            worker.settle(TaskState::Canceled, "已取消");
         }
         Ok(path) => {
-            manager.phase(&id, TaskPhase::Relocating);
-            let path = match relocate_download(&path, &dest_dir) {
-                Ok(path) => path,
-                Err(message) => {
-                    manager.settle(
-                        &id,
+            worker.phase(TaskPhase::Relocating);
+            let path = match worker.commit(|| relocate_download(&path, &dest_dir)) {
+                None => return,
+                Some(Ok(path)) => path,
+                Some(Err(message)) => {
+                    worker.settle(
                         TaskState::Failed,
                         &format!("已下载但移入目标文件夹失败：{message}"),
                     );
                     return;
                 }
             };
-            if cancel.is_cancelled() {
-                manager.settle(&id, TaskState::Canceled, "已取消");
+            if cancel.is_cancelled() || !worker.current() {
+                worker.settle(TaskState::Canceled, "已取消");
                 return;
             }
             // 只要音轨：进曲库。完整视频默认不进（免得搅乱曲库），
             // 但拖进某个文件夹时用户就是要它出现在那里——dest_dir 非空也入库。
             let should_import = req.audio_only || explicit_dest;
             let track_id = if should_import {
-                manager.phase(&id, TaskPhase::Importing);
-                match state
-                    .library
-                    .upsert_file(&path, platform.as_str(), &resolved_source_key)
-                {
-                    Ok(id) => Some(id),
-                    Err(err) => {
+                worker.phase(TaskPhase::Importing);
+                match worker.commit(|| {
+                    state
+                        .library
+                        .upsert_file(&path, platform.as_str(), &resolved_source_key)
+                }) {
+                    None => return,
+                    Some(Ok(id)) => Some(id),
+                    Some(Err(err)) => {
                         let message = format!("视频已下载，但加入曲库失败：{err:#}");
-                        manager.fail_after_download(&id, &path, &message);
+                        worker.fail_after_download(&path, &message);
                         return;
                     }
                 }
             } else {
                 None
             };
-            manager.finish(&id, &path, track_id);
+            if !worker.finish(&path, track_id) {
+                return;
+            }
             if let Some(track_id) = track_id {
                 state.hub.publish_library_updated(&[track_id]);
             }
@@ -2361,12 +2555,12 @@ async fn run_video(
                 failure_kind = safe_failure_kind(&format!("{err:#}")),
                 "视频下载已取消"
             );
-            manager.settle(&id, TaskState::Canceled, "已取消");
+            worker.settle(TaskState::Canceled, "已取消");
         }
         Err(err) => {
             let message = format!("{err:#}");
             // 同上：settle 已把原因带给队列面板，不再另发浮层事件
-            manager.settle(&id, TaskState::Failed, &message);
+            worker.settle(TaskState::Failed, &message);
         }
     }
 }
@@ -2377,6 +2571,173 @@ mod tests {
 
     fn manager() -> DownloadManager {
         DownloadManager::new(EventHub::default(), 3, true)
+    }
+
+    #[test]
+    fn worker_generation_blocks_every_old_mutation_after_audio_retry() {
+        let manager = Arc::new(manager());
+        manager.insert_with_retry(
+            sample_task("generation", TaskState::Queued, 1.0),
+            CancellationToken::new(),
+            Some(sample_audio_retry(false)),
+            None,
+        );
+        let old = DownloadAttempt {
+            manager: manager.clone(),
+            id: "generation".into(),
+            generation: 1,
+        };
+        manager
+            .start_audio_for(&old.id, Some(old.generation))
+            .unwrap();
+        old.progress(50, 100);
+        manager.pause_all();
+        let (_, _, _, generation) = manager.prepare_audio_retry(&old.id).unwrap();
+        assert_ne!(generation, old.generation);
+        // A stale queued future must not steal the retry's Queued -> Running transition.
+        assert!(manager
+            .start_audio_for(&old.id, Some(old.generation))
+            .is_none());
+        manager.start_audio_for(&old.id, Some(generation)).unwrap();
+        let fresh = DownloadAttempt {
+            manager: manager.clone(),
+            id: old.id.clone(),
+            generation,
+        };
+        fresh.progress(10, 200);
+        let before = serde_json::to_value(manager.get(&old.id)).unwrap();
+        let mut events = manager.hub.subscribe();
+
+        old.phase(TaskPhase::Importing);
+        old.progress(100, 100);
+        old.settle(TaskState::Canceled, "old cancellation");
+        old.settle(TaskState::Failed, "old failure");
+        old.fail_after_download(Path::new("/nonexistent/old.mp3"), "old import");
+        assert!(!old.finish(Path::new("/nonexistent/old.mp3"), Some(99)));
+        assert!(old
+            .commit(|| panic!("stale worker must not publish files or import tracks"))
+            .is_none());
+        let committed = std::cell::Cell::new(false);
+        assert_eq!(fresh.commit(|| committed.set(true)), Some(()));
+        assert!(committed.get());
+
+        assert_eq!(serde_json::to_value(manager.get(&old.id)).unwrap(), before);
+        assert!(
+            events.try_recv().is_err(),
+            "old generation must publish no stale UI events"
+        );
+        assert!(fresh.finish(Path::new("/nonexistent/new.flac"), Some(7)));
+        assert_eq!(manager.get(&old.id).unwrap().track_id, Some(7));
+    }
+
+    #[test]
+    fn worker_generation_cannot_take_a_retrys_one_shot_source() {
+        let manager = Arc::new(manager());
+        manager.insert_with_retry(
+            sample_task("prepared-generation", TaskState::Queued, 1.0),
+            CancellationToken::new(),
+            Some(sample_audio_retry(true)),
+            None,
+        );
+        let old = DownloadAttempt {
+            manager: manager.clone(),
+            id: "prepared-generation".into(),
+            generation: 1,
+        };
+        manager.start_audio_for(&old.id, Some(1)).unwrap();
+        let old_preparation = manager
+            .entries
+            .lock()
+            .unwrap()
+            .get(&old.id)
+            .unwrap()
+            .preparation_attempt;
+        manager.pause_all();
+        let (_, _, _, generation) = manager.prepare_audio_retry(&old.id).unwrap();
+        manager.start_audio_for(&old.id, Some(generation)).unwrap();
+        let fresh = DownloadAttempt {
+            manager: manager.clone(),
+            id: old.id.clone(),
+            generation,
+        };
+        let preparation = manager
+            .entries
+            .lock()
+            .unwrap()
+            .get(&old.id)
+            .unwrap()
+            .preparation_attempt;
+        assert!(preparation > old_preparation);
+        manager
+            .attach_prepared_source(&old.id, preparation, "fresh-source".into())
+            .unwrap();
+
+        assert!(old.peek_prepared_source_url().is_none());
+        assert!(old.take_prepared_source_url().is_none());
+        assert_eq!(
+            fresh.take_prepared_source_url().as_deref(),
+            Some("fresh-source")
+        );
+        assert!(fresh.take_prepared_source_url().is_none());
+    }
+
+    #[test]
+    fn worker_generation_blocks_stale_video_resolution_and_publication() {
+        let manager = Arc::new(manager());
+        let mut task = sample_task("video-generation", TaskState::Queued, 1.0);
+        task.kind = TaskKind::Video;
+        task.platform = Platform::Youtube;
+        manager.insert_with_retry(
+            task,
+            CancellationToken::new(),
+            None,
+            Some(VideoRetry {
+                request: VideoDownloadRequest {
+                    platform: Platform::Youtube,
+                    ..Default::default()
+                },
+                output_dir: "/video".into(),
+                external_preparation: true,
+            }),
+        );
+        let old = DownloadAttempt {
+            manager: manager.clone(),
+            id: "video-generation".into(),
+            generation: 1,
+        };
+        manager.start_video_for(&old.id, Some(1)).unwrap();
+        manager.pause_all();
+        let (_, _, _, generation) = manager.prepare_video_retry(&old.id).unwrap();
+        assert!(manager.start_video_for(&old.id, Some(1)).is_none());
+        manager.start_video_for(&old.id, Some(generation)).unwrap();
+        let before = serde_json::to_value(manager.get(&old.id)).unwrap();
+        old.apply_video_resolution(&VideoInfo {
+            platform: Platform::Youtube,
+            bvid: "old-source".into(),
+            title: "old title".into(),
+            author: "old author".into(),
+            cover: "old cover".into(),
+            duration: 180,
+            pages: Vec::new(),
+            options: Vec::new(),
+            logged_in: true,
+        });
+        assert_eq!(serde_json::to_value(manager.get(&old.id)).unwrap(), before);
+        let fresh = DownloadAttempt {
+            manager: manager.clone(),
+            id: old.id.clone(),
+            generation,
+        };
+        fresh
+            .commit(|| {
+                // Pause/retry must not acknowledge a new generation while local publication runs.
+                assert!(manager.entries.try_lock().is_err());
+            })
+            .unwrap();
+        manager.pause_all();
+        assert!(fresh
+            .commit(|| panic!("paused worker must not publish"))
+            .is_none());
     }
 
     fn sample_task(id: &str, state: TaskState, created_at: f64) -> DownloadTask {
@@ -2697,7 +3058,8 @@ mod tests {
         );
 
         assert_eq!(manager.restartable_ids(), vec!["retry"]);
-        let (task, retry, fresh_cancel) = manager.prepare_audio_retry("retry").unwrap();
+        let (task, retry, fresh_cancel, _generation) =
+            manager.prepare_audio_retry("retry").unwrap();
         assert_eq!(task.state, TaskState::Queued);
         assert_eq!(task.progress, 0.0);
         assert_eq!(task.downloaded_bytes, 0);
@@ -2777,7 +3139,8 @@ mod tests {
             .set_pending_video_height("video-retry", 720)
             .unwrap();
         assert_eq!(updated.quality, "720p");
-        let (task, retry, cancel) = manager.prepare_video_retry("video-retry").unwrap();
+        let (task, retry, cancel, _generation) =
+            manager.prepare_video_retry("video-retry").unwrap();
         assert_eq!(task.state, TaskState::Queued);
         assert!(task.error.is_empty());
         assert_eq!(retry.request.max_height, 720);
@@ -3181,7 +3544,8 @@ mod tests {
         assert_eq!(manager.get("running").unwrap().state, TaskState::Paused);
 
         assert_eq!(manager.restartable_ids(), vec!["running"]);
-        let (task, retry, fresh_cancel) = manager.prepare_audio_retry("running").unwrap();
+        let (task, retry, fresh_cancel, _generation) =
+            manager.prepare_audio_retry("running").unwrap();
         assert_eq!(task.state, TaskState::Queued);
         assert_eq!(retry.source.key, "123");
         assert!(!fresh_cancel.is_cancelled());

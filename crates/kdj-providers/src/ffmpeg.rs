@@ -1,6 +1,6 @@
 //! ffmpeg 调用封装：DASH 混流、抽音轨、可选转码。
 //!
-//! v0.1.x 就没有打包 ffmpeg，要求用户机器上自己装（`shutil.which`）——这里保持一致。
+//! 桌面优先使用用户在 KDJ 中安装并验证过的工具，未配置时查找系统安装。
 //! 安卓上没有 ffmpeg，走的是"向 B 站要 durl 单流"那条路，不经过本模块。
 //!
 //! 两个必须保留的行为：
@@ -16,6 +16,8 @@ use anyhow::{bail, Context, Result};
 use tokio_util::sync::CancellationToken;
 
 mod status;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod managed;
 pub use status::{installation_status, FfmpegInstallationStatus};
 
 pub const FFMPEG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -28,6 +30,11 @@ pub fn available() -> bool {
 }
 
 pub fn binary() -> Result<PathBuf> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if let Some(path) = managed::selected_binary() {
+        anyhow::ensure!(path.is_file(), "KDJ 的媒体工具文件已丢失，请在媒体工具中重新安装");
+        return Ok(path);
+    }
     which("ffmpeg").context("没有找到 ffmpeg，请先安装 FFmpeg")
 }
 
@@ -35,6 +42,10 @@ pub fn probe_binary() -> Result<PathBuf> {
     let ffmpeg = binary()?;
     let adjacent = ffmpeg.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" });
     if adjacent.is_file() { return Ok(adjacent); }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if managed::selected_binary().is_some() {
+        bail!("KDJ 的 ffprobe 文件已丢失，请在媒体工具中重新安装");
+    }
     which("ffprobe").context("没有找到 ffprobe，请安装完整的 FFmpeg")
 }
 

@@ -10,7 +10,7 @@ import {
 import { deckGain, previewGain, useCrossfade } from "../../lib/crossfade";
 import { djEngine } from "../../lib/djMix";
 import { formatDuration } from "../../lib/format";
-import { useMasterVolume } from "../../lib/masterVolume";
+import { bindMediaMasterVolume, getDeckOutputGain } from "../../lib/masterVolume";
 import { attachYoutubeVideoPreview } from "../../lib/youtubeVideoPreview";
 import {
   MEDIA_SYNC_EVENT,
@@ -95,6 +95,11 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    const video = videoRef.current;
+    if (video) return bindMediaMasterVolume(video, "preview");
+  }, []);
+
+  useEffect(() => {
     if (req.platform !== "youtube") return;
     const video = videoRef.current;
     if (!video) return;
@@ -119,7 +124,6 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
 
   const coplay = useCrossfade((state) => state.coplay);
   const fadeX = useCrossfade((state) => state.x);
-  const masterVolume = useMasterVolume((state) => state.volume);
   const setCoplay = useCrossfade((state) => state.setCoplay);
   const setX = useCrossfade((state) => state.setX);
 
@@ -173,7 +177,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
       useCrossfade.getState().setCoplay(false);
       // store 的 React effect 要到下一帧才恢复 deck；这里同步兜底，避免推子在
       // 最右时退出后立刻点播放，进度在走但 element.volume 仍近似 0。
-      djEngine.setVolume(useMasterVolume.getState().volume);
+      djEngine.setVolume(getDeckOutputGain());
     },
     [clearDelay],
   );
@@ -261,13 +265,6 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onMediaSync);
   }, [offsetMs, clearDelay]);
-
-  // MASTER 与推子分给预览这一侧的增益相乘。volume 挂在 <video> 上，AnalyserNode 采到的
-  // 是衰减后的信号——波形跟着推子一起矮下去，正好和耳朵听到的一致。
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video) video.volume = masterVolume * previewGain(coplay, fadeX);
-  }, [masterVolume, coplay, fadeX]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -390,7 +387,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     clearDelay();
     if (useCrossfade.getState().coplay) {
       setCoplay(false);
-      djEngine.setVolume(useMasterVolume.getState().volume);
+      djEngine.setVolume(getDeckOutputGain());
       video?.pause();
       return;
     }

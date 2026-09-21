@@ -1,9 +1,12 @@
+import { useEffect } from "react";
 import { Scissors, Download, Moon, Settings, Sun, Upload } from "lucide-react";
 import { formatPercent } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { useWorkshopStore } from "../../stores/workshopStore";
+import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
+import { visualizerExportActive } from "../../lib/visualizerExportQueue";
 
 /** 多项显示正在执行 / 待完成总数；单项才显示具体进度。 */
 function taskProgressLabel(tasks: { progress: number }[], running: number): string | null {
@@ -36,9 +39,13 @@ export function ChromeActions({
   onOpenUpdate,
 }: ChromeActionsProps) {
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
-  const compositionCount = useWorkshopStore((s) => s.projects.length);
+  const workshopCount = useWorkshopStore((s) => s.projects.length);
+  const visualizerTasks = useVisualizerExportStore(s => s.tasks);
+  useEffect(() => { void useVisualizerExportStore.getState().initialize().catch(() => undefined); }, []);
+  const compositionCount = workshopCount + visualizerTasks.length;
   const workshopJobs = useWorkshopStore(s => s.jobs);
-  const exporting = workshopJobs.filter(j => ["queued", "rendering", "validating", "committing", "importing"].includes(j.phase));
+  const exporting = [...workshopJobs.filter(j => ["queued", "rendering", "validating", "committing", "importing"].includes(j.phase)),
+    ...visualizerTasks.filter(visualizerExportActive)];
   const runningExports = exporting.filter(j => j.phase !== "queued").length;
   const exportProgress = taskProgressLabel(exporting, runningExports);
   const workshopLabel = exporting.length > 1

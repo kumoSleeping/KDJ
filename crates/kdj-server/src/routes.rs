@@ -51,6 +51,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             get(activity_logs).delete(clear_activity_logs),
         )
         .route("/api/activity/logs/batch", post(append_activity_logs))
+        .route("/api/activity/diagnostics/export", post(export_playback_diagnostics))
         .route(
             "/api/activity/settings",
             get(activity_log_settings).put(update_activity_log_settings),
@@ -528,6 +529,11 @@ async fn activity_logs(
     Query(query): Query<ActivityLogQuery>,
 ) -> Json<crate::activity_log::ActivityLogOverview> {
     Json(state.activity_log.overview(query.category, query.limit))
+}
+
+async fn export_playback_diagnostics(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    let path = crate::playback_diagnostics::export(&state).await?;
+    Ok(Json(json!({"path":path.to_string_lossy()})))
 }
 
 async fn append_activity_logs(
@@ -1097,6 +1103,8 @@ struct SongPreviewBody {
     /// 播放器解码失败后的重试会主动绕过并清掉旧缓存，再从平台刷新。
     #[serde(default)]
     bypass_cache: bool,
+    #[serde(default)]
+    recovery: bool,
 }
 
 #[derive(Serialize)]
@@ -1380,6 +1388,7 @@ async fn ytm_sabr_spool_create(
                 return Ok(insert_song_preview_ticket(
                     &state,
                     SongPreviewTicket {
+                        context: Default::default(),
                         source: body.source,
                         quality,
                         cache_key: Some(cache_key),
@@ -1415,6 +1424,7 @@ async fn ytm_sabr_spool_create(
     Ok(insert_song_preview_ticket(
         &state,
         SongPreviewTicket {
+                        context: Default::default(),
             source: body.source,
             quality,
             cache_key: Some(cache_key),
@@ -1557,18 +1567,31 @@ fn insert_song_preview_ticket(
         rand::random::<u64>()
     );
     let cached = ticket.cached;
+    let requested_quality = ticket.quality.as_str();
+    let actual_quality = ticket.context.actual_quality.map(Quality::as_str);
+    let mime = ticket.context.mime.clone();
+    let attempt_id = ticket.context.attempt_id.clone();
+    state.activity_log.record_level(crate::activity_log::ActivityCategory::Network,
+        crate::activity_log::ActivityLevel::Info, "试听地址已申请",
+        &format!("stage=resolve attempt={attempt_id} requested={requested_quality} actual={}", actual_quality.unwrap_or("unknown")));
+
     state
         .song_previews
         .lock()
         .unwrap()
         .insert(token.clone(), ticket);
-    Json(json!({
+    let mut response = json!({
         "url": format!("/api/song/preview/{token}"),
         "cached": cached,
         // 前端只拿到随机 ticket，波形端点在服务端据此查缓存键；绝不把磁盘
         // 路径或可推断来源的缓存键暴露给 WebView。
         "waveform_token": token,
-    }))
+        "requested_quality": requested_quality,
+        "attempt_id": attempt_id,
+    });
+    if let Some(actual) = actual_quality { response["actual_quality"] = json!(actual); }
+    if let Some(mime) = mime { response["mime"] = json!(mime); }
+    Json(response)
 }
 
 #[derive(Serialize)]
@@ -1651,6 +1674,15 @@ async fn song_preview(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SongPreviewBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let context = crate::preview_policy::PreviewContext::default();
+    if body.recovery { context.disable_retries(); }
+    let attempt = context.attempt_id.clone();
+    prepare_song_preview(&state, body, context).await.map_err(|error| error.media_context("resolve", &attempt))
+}
+
+async fn prepare_song_preview(
+    state: &Arc<AppState>, body: SongPreviewBody, mut context: crate::preview_policy::PreviewContext,
+) -> ApiResult<Json<serde_json::Value>> {
     ensure_generic_song_preview_platform(body.source.platform)?;
     let Some(provider) = state.provider(body.source.platform) else {
         return Err(ApiError::bad_request("不认识的平台"));
@@ -1658,7 +1690,8 @@ async fn song_preview(
     let quality = body
         .quality
         .unwrap_or_else(|| state.config.to_settings().stream_quality);
-    let cache_key = crate::stream_cache::StreamCache::key(&body.source, quality);
+    context.account_epoch = provider.preview_account_epoch();
+    let cache_key = crate::stream_cache::StreamCache::scoped_key(&body.source, quality, &provider.preview_cache_scope());
     let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
     if body.bypass_cache {
         state.stream_cache.invalidate(&cache_root, &cache_key).await;
@@ -1690,9 +1723,12 @@ async fn song_preview(
                     cache_root,
                     cache_key.clone(),
                 );
+                context.actual_quality = Some(quality);
+                context.mime = Some(cached.mime.clone());
                 return Ok(insert_song_preview_ticket(
                     &state,
                     SongPreviewTicket {
+                        context: context.clone(),
                         source: body.source,
                         quality,
                         cache_key: Some(cache_key),
@@ -1706,28 +1742,23 @@ async fn song_preview(
             }
         }
     }
-    let preview = provider
-        .preview_url_at_quality(&body.source, quality)
-        .await?;
+    let preview = provider.preview_media_at_quality(&body.source, quality).await?;
+    if context.account_epoch != provider.preview_account_epoch() {
+        return Err(ApiError::from(anyhow::Error::new(kdj_providers::qqmusic::error::QqError::AccountChanged)));
+    }
     match preview {
-        Some(url) => Ok(insert_song_preview_ticket(
-            &state,
-            SongPreviewTicket {
-                source: body.source,
-                quality,
-                cache_key: Some(cache_key),
-                cached: false,
-                url,
-                browser_resolved: false,
-                protected_spool: None,
+        Some(media) => {
+            context.set_media(&media);
+            // A refresh may have rotated the credential while resolving. Key the new ticket using
+            // the post-refresh scope, never publish it under a previous permission generation.
+            let cache_key = crate::stream_cache::StreamCache::scoped_key(&body.source, quality, &provider.preview_cache_scope());
+            Ok(insert_song_preview_ticket(state, SongPreviewTicket {
+                context, source: body.source, quality, cache_key: Some(cache_key), cached: false,
+                url: media.url, browser_resolved: false, protected_spool: None,
                 last_used_at: std::time::Instant::now(),
-            },
-        )),
-        // B 站等没有"歌曲试听"形状的平台：它们的预览走各自的路
-        None => Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "这个平台不支持歌曲试听",
-        )),
+            }))
+        }
+        None => Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "这个平台不支持歌曲试听")),
     }
 }
 
@@ -1833,12 +1864,21 @@ async fn song_preview_stream(
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let mut ticket = {
+    let ticket = {
         let mut previews = state.song_previews.lock().unwrap();
         previews
             .get_and_touch(&token)
             .ok_or_else(|| ApiError::not_found("试听地址已过期，请重新双击歌曲"))?
     };
+    let attempt = ticket.context.attempt_id.clone();
+    song_preview_stream_inner(state, token, headers, ticket).await
+        .map_err(|error| error.media_context("media", &attempt))
+}
+
+async fn song_preview_stream_inner(
+    state: Arc<AppState>, token: String, headers: HeaderMap, mut ticket: SongPreviewTicket,
+) -> ApiResult<Response> {
+    ensure_preview_account(&state, &ticket)?;
     let range = headers
         .get(header::RANGE)
         .and_then(|value| value.to_str().ok())
@@ -1867,7 +1907,10 @@ async fn song_preview_stream(
                 cache_key.clone(),
             );
             match audio_response(&cached.path, cached.bytes, cached.mime, range.as_deref()).await {
-                Ok(response) => return Ok(response),
+                Ok(mut response) => {
+                    if let Ok(attempt) = ticket.context.attempt_id.parse() { response.headers_mut().insert("x-kdj-attempt-id", attempt); }
+                    return Ok(response);
+                },
                 Err(_) => {
                     // 清理缓存可能恰好发生在 lookup 和 open 之间；这次直接回源。
                     state.stream_cache.invalidate(&cache_root, &cache_key).await;
@@ -1906,142 +1949,49 @@ async fn song_preview_stream(
             .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()));
     }
 
-    let mut upstream = request_song_preview_upstream(
-        &state.preview_http,
-        ticket.source.platform,
-        &ticket.url,
-        range.as_deref(),
-    )
-    .await?;
-    let mut status = preview_upstream_status(&upstream);
-    if ticket.browser_resolved {
-        tracing::warn!(
-            range = range.as_deref().unwrap_or("none"),
-            status = %status,
-            "YTM GVS 代理请求"
-        );
-    }
-
-    // 网易云 vkey、QQ sip 等短链可能在票据有效期内先过期。只在明确的鉴权/失效
-    // 状态下按原 source + quality 刷新一次，并原样重放 Range；单次请求绝不死循环。
-    if song_preview_url_needs_refresh(status) {
-        refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
-        upstream = request_song_preview_upstream(
-            &state.preview_http,
-            ticket.source.platform,
-            &ticket.url,
-            range.as_deref(),
-        )
-        .await?;
-        status = preview_upstream_status(&upstream);
-    }
-
-    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
-        return Err(ApiError::new(status, format!("试听源返回 HTTP {status}")));
-    }
-    let mut upstream_headers = upstream.headers().clone();
-    let mut content_type = preview_audio_mime_for_url(&upstream_headers, &ticket.url);
-    if content_type.is_none() {
-        // 某些过期短链用 200 + HTML/JSON 错误页伪装成功；刷新一次再判，绝不把
-        // 错误页送进 audio 或缓存成一首“歌曲”。
-        refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
-        upstream = request_song_preview_upstream(
-            &state.preview_http,
-            ticket.source.platform,
-            &ticket.url,
-            range.as_deref(),
-        )
-        .await?;
-        status = preview_upstream_status(&upstream);
-        if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
-            return Err(ApiError::new(status, format!("试听源返回 HTTP {status}")));
-        }
-        upstream_headers = upstream.headers().clone();
-        content_type = preview_audio_mime_for_url(&upstream_headers, &ticket.url);
-    }
-    let content_type = content_type
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_GATEWAY, "试听源返回的不是音频内容"))?;
-    let persistent_cache_enabled = state.config.to_settings().stream_cache_enabled;
+    let foreground = crate::preview_policy::begin_foreground(&cache_key);
+    state.stream_waveforms.media_started(&cache_key);
+    let (upstream, content_type, prefix) = tokio::time::timeout(std::time::Duration::from_secs(20),
+        open_song_preview_checked(&state, &token, &mut ticket, range.as_deref())).await
+        .map_err(|_| ApiError::new(StatusCode::GATEWAY_TIMEOUT, "试听源连接超时，当前尝试已停止").coded("UPSTREAM_TIMEOUT"))??;
+    let status = preview_upstream_status(&upstream);
+    let upstream_headers = upstream.headers().clone();
+    let persistent_cache_enabled = state.config.to_settings().stream_cache_enabled
+        && ticket.context.cacheable_as(ticket.quality);
     let response_segment = preview_response_segment(status, &upstream_headers);
     state.stream_waveforms.media_started(&cache_key);
     if persistent_cache_enabled {
-        if ticket.browser_resolved {
-            // WEB_REMIX 的同一张 GVS 票据还要承受 MP4 probe/seek。播放期间绝不能再
-            // 开一个整轨缓存请求与它并发；等会话空闲后再补缓存。
-            schedule_song_preview_cache_when_session_idle(
-                state.clone(),
-                token.clone(),
-                ticket.clone(),
-                cache_key.clone(),
-                content_type.clone(),
-            );
-        } else {
-            // Android 的播放器和后台整轨 CDN 下载共用一条移动网络与同一块闪存，首播
-            // 400ms 后再拉第二份整曲会直接表现成卡顿/爆音。移动端改为等会话空闲。
-            #[cfg(not(target_os = "android"))]
-            schedule_song_preview_cache(
-                state.clone(),
-                token,
-                ticket.clone(),
-                cache_key.clone(),
-                content_type.clone(),
-            );
-            #[cfg(target_os = "android")]
-            schedule_song_preview_cache_when_session_idle(
-                state.clone(),
-                token.clone(),
-                ticket.clone(),
-                cache_key.clone(),
-                content_type.clone(),
-            );
-        }
+        // All platforms share the foreground-first policy. Never start a second full GET merely
+        // because 400 ms have elapsed since playback began.
+        schedule_song_preview_cache_when_session_idle(state.clone(), token.clone(), ticket.clone(),
+            cache_key.clone(), content_type.clone());
     }
-    let capture_plan = if persistent_cache_enabled {
-        #[cfg(target_os = "android")]
-        {
-            let inline = match response_segment {
-                Some(segment)
-                    if segment.start == 0 && segment.end.saturating_add(1) == segment.total =>
-                {
-                    inline_preview_cache_plan(
-                        &state,
-                        &cache_root,
-                        &cache_key,
-                        &ticket,
-                        &content_type,
-                        segment.total,
-                    )
+    let inline = if persistent_cache_enabled && !ticket.browser_resolved {
+        match response_segment {
+            Some(segment) if segment.start == 0 && segment.end.saturating_add(1) == segment.total => {
+                inline_preview_cache_plan(&state, &cache_root, &cache_key, &ticket, &content_type, segment.total)
                     .map(PreviewBodyCapturePlan::Persistent)
-                }
-                _ => None,
-            };
-            if inline.is_some() {
-                inline
-            } else {
-                session_preview_capture_plan(&state, &cache_key, response_segment)
-                    .map(PreviewBodyCapturePlan::Session)
             }
+            _ => None,
         }
-        #[cfg(not(target_os = "android"))]
-        {
-            None
-        }
-    } else {
-        session_preview_capture_plan(&state, &cache_key, response_segment)
-            .map(PreviewBodyCapturePlan::Session)
-    };
+    } else { None };
+    let capture_plan = inline.or_else(|| session_preview_capture_plan(&state, &cache_key, response_segment)
+        .map(PreviewBodyCapturePlan::Session));
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CACHE_CONTROL, "no-store");
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-kdj-attempt-id", ticket.context.attempt_id.clone());
+    if let Some(actual) = ticket.context.actual_quality { builder = builder.header("x-kdj-actual-quality", actual.as_str()); }
+    builder = builder.header("x-kdj-requested-quality", ticket.quality.as_str());
     for name in [header::CONTENT_LENGTH, header::CONTENT_RANGE] {
         if let Some(value) = upstream_headers.get(name.as_str()) {
             builder = builder.header(name, value);
         }
     }
     builder
-        .body(captured_preview_body(upstream, capture_plan))
+        .body(captured_preview_body(upstream, capture_plan, prefix, state.clone(), ticket.context.attempt_id.clone(), foreground))
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
@@ -2113,10 +2063,8 @@ fn session_preview_capture_plan(
     )
 }
 
-#[cfg(target_os = "android")]
 const INLINE_CACHE_WAVEFORM_PUBLISH_BYTES: u64 = 512 * 1024;
 
-#[cfg(target_os = "android")]
 struct InlinePreviewCachePlan {
     cache: crate::stream_cache::StreamCache,
     source: SongSource,
@@ -2128,7 +2076,6 @@ struct InlinePreviewCachePlan {
     total: u64,
 }
 
-#[cfg(target_os = "android")]
 struct InlinePreviewCacheCapture {
     writer: crate::stream_cache::StreamCacheWriter,
     waveforms: crate::stream_waveform::StreamWaveformCoordinator,
@@ -2139,7 +2086,6 @@ struct InlinePreviewCacheCapture {
     response_bytes: u64,
 }
 
-#[cfg(target_os = "android")]
 fn inline_preview_cache_plan(
     state: &AppState,
     cache_root: &Path,
@@ -2160,7 +2106,6 @@ fn inline_preview_cache_plan(
     })
 }
 
-#[cfg(target_os = "android")]
 impl InlinePreviewCachePlan {
     async fn begin(self) -> Option<InlinePreviewCacheCapture> {
         let mut reservation = self.cache.reserve(self.cache_key.clone())?;
@@ -2191,7 +2136,6 @@ impl InlinePreviewCachePlan {
     }
 }
 
-#[cfg(target_os = "android")]
 impl InlinePreviewCacheCapture {
     async fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
         if self.writer.written_bytes() == 0 && looks_like_text_error_payload(chunk) {
@@ -2263,7 +2207,6 @@ impl InlinePreviewCacheCapture {
 
 enum PreviewBodyCapturePlan {
     Session(crate::stream_waveform::StreamWaveformCapturePlan),
-    #[cfg(target_os = "android")]
     Persistent(InlinePreviewCachePlan),
 }
 
@@ -2276,15 +2219,13 @@ impl PreviewBodyCapturePlan {
                 .ok()
                 .flatten()
                 .map(PreviewBodyCapture::Session),
-            #[cfg(target_os = "android")]
-            Self::Persistent(plan) => plan.begin().await.map(PreviewBodyCapture::Persistent),
+                    Self::Persistent(plan) => plan.begin().await.map(PreviewBodyCapture::Persistent),
         }
     }
 }
 
 enum PreviewBodyCapture {
     Session(crate::stream_waveform::StreamWaveformCapture),
-    #[cfg(target_os = "android")]
     Persistent(InlinePreviewCacheCapture),
 }
 
@@ -2292,16 +2233,14 @@ impl PreviewBodyCapture {
     async fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
         match self {
             Self::Session(capture) => capture.write_chunk(chunk).await,
-            #[cfg(target_os = "android")]
-            Self::Persistent(capture) => capture.write_chunk(chunk).await,
+                    Self::Persistent(capture) => capture.write_chunk(chunk).await,
         }
     }
 
     async fn finish(self, reached_eof: bool) -> std::io::Result<()> {
         match self {
             Self::Session(capture) => capture.finish(reached_eof).await,
-            #[cfg(target_os = "android")]
-            Self::Persistent(capture) => capture.finish(reached_eof).await,
+                    Self::Persistent(capture) => capture.finish(reached_eof).await,
         }
     }
 }
@@ -2356,15 +2295,21 @@ fn enqueue_preview_capture(
 fn captured_preview_body(
     upstream: reqwest::Response,
     capture: Option<PreviewBodyCapturePlan>,
+    prefix: Vec<Bytes>,
+    state: Arc<AppState>,
+    attempt: String,
+    foreground: crate::preview_policy::ForegroundTransfer,
 ) -> axum::body::Body {
-    let source = Box::pin(upstream.bytes_stream());
+    let source = Box::pin(futures_util::stream::iter(prefix.into_iter().map(Ok::<_, reqwest::Error>)).chain(upstream.bytes_stream()));
     let (sender, reached_eof) = capture
         .map(start_preview_capture_worker)
         .map(|(sender, reached_eof)| (Some(sender), Some(reached_eof)))
         .unwrap_or((None, None));
     let stream = futures_util::stream::unfold(
         (source, sender, reached_eof, false),
-        |(mut source, mut sender, reached_eof, done)| async move {
+        move |(mut source, mut sender, reached_eof, done)| {
+            let state = state.clone(); let attempt = attempt.clone();
+            async move {
             if done {
                 return None;
             }
@@ -2374,9 +2319,12 @@ fn captured_preview_body(
                     Some((Ok(chunk), (source, sender, reached_eof, false)))
                 }
                 Some(Err(error)) => {
+                    state.activity_log.record_level(crate::activity_log::ActivityCategory::Network,
+                        crate::activity_log::ActivityLevel::Warn, "在线音频读取中断",
+                        &format!("stage=media_read attempt={attempt} code=UPSTREAM_TRANSPORT"));
                     sender.take();
                     Some((
-                        Err(std::io::Error::other(format!("试听流读取失败：{error}"))),
+                        Err(std::io::Error::other(format!("试听流读取失败：{}", error.without_url()))),
                         (source, None, reached_eof, true),
                     ))
                 }
@@ -2390,44 +2338,158 @@ fn captured_preview_body(
                     None
                 }
             }
-        },
+        }},
     );
-    axum::body::Body::from_stream(stream)
+    // The stream owns the guard even before its first poll and releases it when dropped.
+    axum::body::Body::from_stream(stream.inspect(move |_| { let _ = &foreground; }))
 }
 
-async fn refresh_song_preview_ticket(
-    state: &AppState,
-    token: &str,
-    ticket: &mut SongPreviewTicket,
-) -> ApiResult<()> {
-    let provider = state
-        .provider(ticket.source.platform)
-        .ok_or_else(|| ApiError::bad_request("不认识的平台"))?;
-    let refreshed = if ticket.source.platform == Platform::Ytm && ticket.browser_resolved {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "YouTube Music WebPO 地址已失效，请重新播放",
-        ));
-    } else {
-        provider
-            .preview_url_at_quality(&ticket.source, ticket.quality)
-            .await?
-    };
-    ticket.url = refreshed.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "这个平台暂时无法刷新试听地址",
-        )
-    })?;
-    ticket.cached = false;
-    ticket.last_used_at = std::time::Instant::now();
-    // token 也是刷新状态的一部分，整张覆盖比只更新 URL 更安全。
-    state
-        .song_previews
-        .lock()
-        .unwrap()
-        .insert(token.to_string(), ticket.clone());
+fn ensure_preview_account(state: &AppState, ticket: &SongPreviewTicket) -> ApiResult<()> {
+    let provider = state.provider(ticket.source.platform).ok_or_else(|| ApiError::bad_request("不认识的平台"))?;
+    if provider.preview_account_epoch() != ticket.context.account_epoch {
+        return Err(ApiError::from(anyhow::Error::new(kdj_providers::qqmusic::error::QqError::AccountChanged)));
+    }
     Ok(())
+}
+
+async fn resolve_ticket_media(state: &AppState, ticket: &mut SongPreviewTicket, quality: Quality) -> ApiResult<()> {
+    ensure_preview_account(state, ticket)?;
+    if ticket.source.platform == Platform::Ytm && ticket.browser_resolved {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "YouTube Music WebPO 地址已失效，请重新播放"));
+    }
+    let provider = state.provider(ticket.source.platform).ok_or_else(|| ApiError::bad_request("不认识的平台"))?;
+    let media = provider.preview_media_at_quality(&ticket.source, quality).await?
+        .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "这个平台暂时无法刷新试听地址"))?;
+    ensure_preview_account(state, ticket)?;
+    ticket.context.set_media(&media);
+    ticket.url = media.url; ticket.cached = false; ticket.last_used_at = std::time::Instant::now();
+    Ok(())
+}
+
+async fn refresh_song_preview_ticket(state: &AppState, token: &str, ticket: &mut SongPreviewTicket) -> ApiResult<()> {
+    let gate = ticket.context.refresh_gate.clone(); let _guard = gate.lock().await;
+    if let Some(current) = state.song_previews.lock().unwrap().get_and_touch(token) {
+        if current.url != ticket.url || current.cached != ticket.cached { *ticket = current; return Ok(()); }
+    }
+    resolve_ticket_media(state, ticket, ticket.context.actual_quality.unwrap_or(ticket.quality)).await?;
+    state.song_previews.lock().unwrap().insert(token.to_string(), ticket.clone());
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum PreviewRetryReason { ExpiredUrl, Transient, InvalidMedia }
+
+async fn retry_song_preview_ticket(state: &AppState, token: &str, ticket: &mut SongPreviewTicket, reason: PreviewRetryReason) -> ApiResult<bool> {
+    let gate = ticket.context.refresh_gate.clone(); let _guard = gate.lock().await;
+    ensure_preview_account(state, ticket)?;
+    if let Some(current) = state.song_previews.lock().unwrap().get_and_touch(token) {
+        if current.url != ticket.url { *ticket = current; return Ok(true); }
+    }
+    if !ticket.context.claim_retry() { return Ok(false); }
+    match reason {
+        PreviewRetryReason::ExpiredUrl => {
+            // Preserve the current representation: a late Range must not be upgraded to a different file.
+            resolve_ticket_media(state, ticket, ticket.context.actual_quality.unwrap_or(ticket.quality)).await?;
+        }
+        _ if !ticket.context.alternatives.is_empty() => {
+            ticket.url = ticket.context.alternatives.remove(0);
+        }
+        _ => {
+            let published = ticket.context.entity.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+            let quality = if !published { ticket.context.lower_quality().unwrap_or(ticket.quality) }
+                else { ticket.context.actual_quality.unwrap_or(ticket.quality) };
+            resolve_ticket_media(state, ticket, quality).await?;
+        }
+    }
+    ticket.last_used_at = std::time::Instant::now();
+    state.song_previews.lock().unwrap().insert(token.to_string(), ticket.clone());
+    Ok(true)
+}
+
+async fn open_song_preview_checked(state: &Arc<AppState>, token: &str, ticket: &mut SongPreviewTicket, range: Option<&str>)
+    -> ApiResult<(reqwest::Response, String, Vec<Bytes>)> {
+    'attempt: loop {
+        if ticket.context.is_rate_limited() {
+            return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, "本次试听已被限流，自动请求已停止").coded("RATE_LIMITED"));
+        }
+        ensure_preview_account(state, ticket)?;
+        let result = request_song_preview_upstream(state, &state.preview_http, ticket.source.platform, &ticket.url, range).await;
+        let mut upstream = match result {
+            Ok(response) => response,
+            Err(error) => {
+                if error.code == Some("RATE_LIMITED") { ticket.context.mark_rate_limited(); }
+                if matches!(error.code, Some("AUTH_EXPIRED" | "RATE_LIMITED" | "ACCOUNT_CHANGED" | "INVALID_RESPONSE")) { return Err(error); }
+                if retry_song_preview_ticket(state, token, ticket, PreviewRetryReason::Transient).await? { continue; }
+                return Err(error);
+            }
+        };
+        let status = preview_upstream_status(&upstream);
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            ticket.context.mark_rate_limited();
+            return Err(ApiError::new(status, "试听源请求过于频繁；当前操作已停止且不会自动重试").coded("RATE_LIMITED"));
+        }
+        let reason = if song_preview_url_needs_refresh(status) { Some(PreviewRetryReason::ExpiredUrl) }
+            else if status.is_server_error() { Some(PreviewRetryReason::Transient) } else { None };
+        if let Some(reason) = reason {
+            if retry_song_preview_ticket(state, token, ticket, reason).await? { continue; }
+        }
+        if !matches!(status, StatusCode::OK | StatusCode::PARTIAL_CONTENT) {
+            return Err(ApiError::new(status, format!("试听源返回 HTTP {status}")).coded("UPSTREAM_HTTP"));
+        }
+        let mime = ticket.context.mime.as_deref().map(|mime| preview_audio_mime(upstream.headers(), mime).map(|_| mime.to_string()))
+            .unwrap_or_else(|| preview_audio_mime_for_url(upstream.headers(), &ticket.url));
+        let Some(mime) = mime else {
+            if retry_song_preview_ticket(state, token, ticket, PreviewRetryReason::InvalidMedia).await? { continue; }
+            return Err(ApiError::new(StatusCode::BAD_GATEWAY, "试听源返回的不是音频内容").coded("INVALID_MEDIA"));
+        };
+        let segment = preview_response_segment(status, upstream.headers());
+        if ticket.source.platform == Platform::Qqm {
+            let segment = segment.ok_or_else(|| ApiError::new(StatusCode::BAD_GATEWAY, "试听音频缺少有效长度或范围").coded("INVALID_RANGE"))?;
+            if let Some(range) = range {
+                let (start, end) = parse_range(range, segment.total).ok_or_else(|| ApiError::new(StatusCode::RANGE_NOT_SATISFIABLE, "试听范围无效"))?;
+                if segment.start != start || segment.end > end {
+                    return Err(ApiError::new(StatusCode::BAD_GATEWAY, "试听源没有遵守请求的 Range").coded("INVALID_RANGE"));
+                }
+            }
+        }
+        let mut prefix = Vec::new();
+        if segment.is_some_and(|s| s.start == 0) || (segment.is_none() && range.is_none()) {
+            let mut probe = Vec::new();
+            while probe.len() < 16 {
+                let chunk = match upstream.chunk().await {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        if retry_song_preview_ticket(state, token, ticket, PreviewRetryReason::Transient).await? { continue 'attempt; }
+                        return Err(ApiError::new(if error.is_timeout() { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY }, "试听首批音频读取失败").coded("UPSTREAM_TRANSPORT"));
+                    }
+                };
+                let Some(chunk) = chunk else { break; };
+                probe.extend(chunk.iter().copied().take(64_usize.saturating_sub(probe.len())));
+                prefix.push(chunk);
+                if prefix.len() >= 16 { break; }
+            }
+            let invalid_signature = ticket.source.platform == Platform::Qqm && probe.len() >= 10
+                && !kdj_providers::qqmusic::valid_audio_prefix(&probe, if ticket.context.actual_quality == Some(Quality::Flac) { "flac" } else { "mp3" });
+            if probe.is_empty() || looks_like_text_error_payload(&probe) || invalid_signature {
+                if retry_song_preview_ticket(state, token, ticket, PreviewRetryReason::InvalidMedia).await? { continue; }
+                return Err(ApiError::new(StatusCode::BAD_GATEWAY, "试听源返回空文件或 HTML/JSON 错误内容").coded("INVALID_MEDIA"));
+            }
+        }
+        if let Some(segment) = segment.filter(|_| ticket.source.platform == Platform::Qqm) {
+            let entity = crate::preview_policy::MediaEntity {
+                path: reqwest::Url::parse(&ticket.url).map(|u| u.path().to_string()).unwrap_or_default(),
+                mime: mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase(), total: segment.total,
+                validator: upstream.headers().get(header::ETAG).or_else(|| upstream.headers().get(header::LAST_MODIFIED))
+                    .and_then(|v| v.to_str().ok()).map(str::to_string),
+            };
+            if !ticket.context.observe_entity(entity) {
+                return Err(ApiError::new(StatusCode::CONFLICT, "在线音频版本已变化，需要重新打开媒体并恢复进度").coded("MEDIA_ENTITY_CHANGED"));
+            }
+        }
+        tracing::debug!(stage = "media_headers", attempt_id = %ticket.context.attempt_id, status = status.as_u16(),
+            actual_quality = ?ticket.context.actual_quality, "在线音频响应已验证（不代表设备已经发声）");
+        return Ok((upstream, mime, prefix));
+    }
 }
 
 fn schedule_song_preview_cache(
@@ -2446,8 +2508,7 @@ fn schedule_song_preview_cache(
     tokio::spawn(async move {
         // 先让 WebView 的首批缓冲独占链路；缓存是后台完整拉取，不参与首包延迟。
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        #[cfg(target_os = "android")]
-        if !state.stream_waveforms.is_session_idle(&cache_key) {
+        if crate::preview_policy::foreground_active(&cache_key) || !state.stream_waveforms.is_session_idle(&cache_key) {
             // 延迟任务醒来后用户可能已经重新播放同一首；此时宁可本轮不缓存，也
             // 不能让第二 GET 再次和 WebView 抢网络/闪存。
             state
@@ -2511,7 +2572,8 @@ async fn run_song_preview_cache_sequence(
     initial_reservation: crate::stream_cache::StreamCacheReservation,
 ) {
     let mut reservation = Some(initial_reservation);
-    for attempt in 0..SONG_PREVIEW_CACHE_ATTEMPTS {
+    let attempts = if ticket.source.platform == Platform::Qqm { 1 } else { SONG_PREVIEW_CACHE_ATTEMPTS };
+    for attempt in 0..attempts {
         if attempt > 0 {
             tokio::time::sleep(SONG_PREVIEW_CACHE_RETRY_DELAYS[attempt - 1]).await;
             if !state.config.to_settings().stream_cache_enabled {
@@ -2523,7 +2585,7 @@ async fn run_song_preview_cache_sequence(
             match refresh_background_preview_url(&state, &token, &ticket).await {
                 Ok(url) => ticket.url = url,
                 Err(error) => {
-                    let retrying = song_preview_cache_retry_delay_after(attempt).is_some();
+                    let retrying = attempt + 1 < attempts;
                     if !state.stream_waveforms.cache_attempt_failed(
                         &cache_key,
                         cache_sequence,
@@ -2574,7 +2636,7 @@ async fn run_song_preview_cache_sequence(
                 return;
             }
             Err(error) => {
-                let retrying = song_preview_cache_retry_delay_after(attempt).is_some();
+                let retrying = attempt + 1 < attempts;
                 if !state.stream_waveforms.cache_attempt_failed(
                     &cache_key,
                     cache_sequence,
@@ -2623,7 +2685,7 @@ fn schedule_song_preview_cache_when_session_idle(
             if !deferred.is_valid() {
                 return;
             }
-            if state.stream_waveforms.is_session_idle(&cache_key) {
+            if !crate::preview_policy::foreground_active(&cache_key) && state.stream_waveforms.is_session_idle(&cache_key) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -2701,28 +2763,26 @@ fn preview_response_segment(
 }
 
 async fn refresh_background_preview_url(
-    state: &AppState,
-    token: &str,
-    ticket: &SongPreviewTicket,
+    state: &AppState, _token: &str, ticket: &SongPreviewTicket,
 ) -> Result<String, String> {
-    let provider = state
-        .provider(ticket.source.platform)
-        .ok_or_else(|| "缓存来源平台不可用".to_string())?;
-    let refreshed = if ticket.source.platform == Platform::Ytm && ticket.browser_resolved {
-        return (!ticket.url.is_empty())
-            .then(|| ticket.url.clone())
-            .ok_or_else(|| "缓存来源地址无法刷新".to_string());
-    } else {
-        provider
-            .preview_url_at_quality(&ticket.source, ticket.quality)
-            .await
-    };
-    let url = refreshed
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "缓存来源地址无法刷新".to_string())?;
-    let mut previews = state.song_previews.lock().unwrap();
-    let _ = previews.update_url(token, url.clone());
-    Ok(url)
+    ensure_preview_account(state, ticket).map_err(|error| error.detail)?;
+    if ticket.source.platform == Platform::Ytm && ticket.browser_resolved {
+        return (!ticket.url.is_empty()).then(|| ticket.url.clone()).ok_or_else(|| "缓存来源地址无法刷新".to_string());
+    }
+    let provider = state.provider(ticket.source.platform).ok_or_else(|| "缓存来源平台不可用".to_string())?;
+    let media = provider.preview_media_at_quality(&ticket.source, ticket.quality).await
+        .map_err(|error| {
+            if matches!(error.downcast_ref::<kdj_providers::qqmusic::error::QqError>(),Some(kdj_providers::qqmusic::error::QqError::RateLimited)) {
+                ticket.context.mark_rate_limited();
+            }
+            error.to_string()
+        })?.ok_or_else(|| "缓存来源地址无法刷新".to_string())?;
+    ensure_preview_account(state, ticket).map_err(|error| error.detail)?;
+    if !ticket.context.cache_refresh_matches(ticket.quality, &media) {
+        return Err("后台续取的实际音质或媒体实体已变化，本次缓存不提交".into());
+    }
+    // Background work cannot rewrite a live foreground ticket's URL without its entity fence.
+    Ok(media.url)
 }
 
 async fn cache_song_preview_background(
@@ -2732,11 +2792,15 @@ async fn cache_song_preview_background(
     content_type_hint: String,
     reservation: crate::stream_cache::StreamCacheReservation,
 ) -> Result<PreviewCacheOutcome, String> {
+    if crate::preview_policy::foreground_active(&cache_key) { return Ok(PreviewCacheOutcome::Cancelled); }
+    ensure_preview_account(&state, &ticket).map_err(|error| error.detail)?;
+    if !ticket.context.cacheable_as(ticket.quality) || ticket.context.is_rate_limited() { return Ok(PreviewCacheOutcome::Cancelled); }
     kdj_core::ensure_rustls_ring();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
         .referer(false)
         .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|error| error.to_string())?;
     let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
@@ -2750,7 +2814,8 @@ async fn cache_song_preview_background(
 
     // 绝大多数 CDN 对 bytes=0- 一次返回整首；循环同时兼容主动限制单段大小的源。
     for _ in 0..2048 {
-        if !state.config.to_settings().stream_cache_enabled
+        if crate::preview_policy::foreground_active(&cache_key)
+            || !state.config.to_settings().stream_cache_enabled
             || reservation.as_ref().is_some_and(|item| !item.is_valid())
             || writer.as_ref().is_some_and(|item| !item.is_valid())
         {
@@ -2760,6 +2825,7 @@ async fn cache_song_preview_background(
         let mut response = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             send_song_preview_upstream(
+                &state,
                 &client,
                 ticket.source.platform,
                 &ticket.url,
@@ -2767,8 +2833,13 @@ async fn cache_song_preview_background(
             ),
         )
         .await
-        .map_err(|_| "缓存源连接超时".to_string())??;
+        .map_err(|_| "缓存源连接超时".to_string())?
+        .map_err(|error| error.to_string())?;
         let status = preview_upstream_status(&response);
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            ticket.context.mark_rate_limited();
+            return Err("RATE_LIMITED：缓存源请求过于频繁，当前尝试已停止".into());
+        }
         if song_preview_url_needs_refresh(status) {
             // URL 或上游边界一旦失效，不能把刷新后的响应拼到旧 partial。外层会
             // 重新解析 URL、创建新 writer，并严格从 bytes=0- 开始下一次尝试。
@@ -2804,10 +2875,11 @@ async fn cache_song_preview_background(
 
         let mut received = 0_u64;
         loop {
+            if crate::preview_policy::foreground_active(&cache_key) { return Ok(PreviewCacheOutcome::Cancelled); }
             let chunk = tokio::time::timeout(std::time::Duration::from_secs(30), response.chunk())
                 .await
                 .map_err(|_| "缓存源连续 30 秒没有返回数据".to_string())?
-                .map_err(|error| format!("读取缓存源失败：{error}"))?;
+                .map_err(|error| if error.is_timeout() { "缓存源读取超时".to_string() } else { "缓存源读取失败".to_string() })?;
             let Some(chunk) = chunk else {
                 break;
             };
@@ -2967,17 +3039,23 @@ fn gvs_upstream_range(url: &str, range: &str) -> String {
 }
 
 async fn send_song_preview_upstream(
+    state: &AppState,
     client: &reqwest::Client,
     platform: Platform,
     url: &str,
     range: Option<&str>,
-) -> Result<reqwest::Response, String> {
+) -> anyhow::Result<reqwest::Response> {
+    if platform == Platform::Qqm {
+        let provider = state.provider(platform).ok_or_else(|| anyhow::anyhow!("试听平台不可用"))?;
+        return provider.open_preview_media(url, range).await?
+            .ok_or_else(|| anyhow::anyhow!("平台没有提供安全的媒体请求"));
+    }
     if platform == Platform::Soundcloud {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(range) = range {
             let value = range
                 .parse::<reqwest::header::HeaderValue>()
-                .map_err(|_| "试听范围无效".to_string())?;
+                .map_err(|_| anyhow::anyhow!("试听范围无效"))?;
             headers.insert(reqwest::header::RANGE, value);
         }
         return kdj_providers::net::guarded_media_get(
@@ -2990,7 +3068,7 @@ async fn send_song_preview_upstream(
             },
         )
         .await
-        .map_err(|error| format!("试听源连接失败：{error}"));
+        .map_err(|_| anyhow::anyhow!("试听源连接失败"));
     }
 
     let mut request = if is_googlevideo_url(url) {
@@ -3007,18 +3085,22 @@ async fn send_song_preview_upstream(
     request
         .send()
         .await
-        .map_err(|error| format!("试听源连接失败：{error}"))
+        .map_err(|error| anyhow::anyhow!("试听源连接失败：{}", error.without_url()))
 }
 
 async fn request_song_preview_upstream(
+    state: &AppState,
     client: &reqwest::Client,
     platform: Platform,
     url: &str,
     range: Option<&str>,
 ) -> ApiResult<reqwest::Response> {
-    send_song_preview_upstream(client, platform, url, range)
+    send_song_preview_upstream(state, client, platform, url, range)
         .await
-        .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error))
+        .map_err(|error| {
+            if error.downcast_ref::<kdj_providers::qqmusic::error::QqError>().is_some() { ApiError::from(error) }
+            else { ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()).coded("UPSTREAM_TRANSPORT") }
+        })
 }
 
 /// 逐个平台试解析。返回 `(结果, 最后一次错误)`，结果为 None 表示没人认得这个链接。

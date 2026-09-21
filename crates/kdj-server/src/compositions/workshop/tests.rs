@@ -406,7 +406,7 @@ async fn multilayer_export_preview_range_and_pitch_preserving_ramp() {
             error: String::new(),
             path: String::new(),
             signature: None,
-            track_id: None,
+            track_id: None, staging: None,
         });
         Ok(())
     })
@@ -909,7 +909,7 @@ async fn video_joint_exports_a_bright_dissolve_without_changing_audio() {
     m.change(|j| {
         j.jobs.push(Job { id:jid.clone(), project_id:p.id.clone(), revision:p.revision,
             phase:"queued".into(), progress:0., detail:String::new(), error:String::new(),
-            path:String::new(), signature:None, track_id:None }); Ok(())
+            path:String::new(), signature:None, track_id:None, staging:None }); Ok(())
     }).unwrap();
     m.render_export(&p, &jid, &cancel).await.unwrap();
     let job = m.snapshot().jobs.into_iter().find(|j| j.id == jid).unwrap();
@@ -967,7 +967,7 @@ async fn adjacent_cuts_and_smooth_fades_export_without_black_frames() {
             error: String::new(),
             path: String::new(),
             signature: None,
-            track_id: None,
+            track_id: None, staging: None,
         });
         Ok(())
     })
@@ -1055,7 +1055,7 @@ async fn fractional_speed_cuts_preserve_picture_and_intentional_gaps() {
     m.change(|j| {
         j.jobs.push(Job { id: jid.clone(), project_id: p.id.clone(), revision: p.revision,
             phase: "queued".into(), progress: 0., detail: String::new(), error: String::new(),
-            path: String::new(), signature: None, track_id: None });
+            path: String::new(), signature: None, track_id: None, staging: None });
         Ok(())
     }).unwrap();
     m.render_export(&p, &jid, &CancellationToken::new()).await.unwrap();
@@ -1104,7 +1104,7 @@ async fn local_cut_export_check() {
     m.change(|j| {
         j.jobs.push(Job { id: jid.clone(), project_id: p.id.clone(), revision: p.revision,
             phase: "queued".into(), progress: 0., detail: String::new(), error: String::new(),
-            path: String::new(), signature: None, track_id: None });
+            path: String::new(), signature: None, track_id: None, staging: None });
         Ok(())
     }).unwrap();
     m.render_export(&p, &jid, &CancellationToken::new()).await.unwrap();
@@ -1520,4 +1520,112 @@ async fn audio_discontinuities_declick_without_changing_sample_count() {
     assert_eq!(pcm.len(),24000*4);
     let sample=i16::from_le_bytes([pcm[12000*4],pcm[12000*4+1]]);
     assert!(sample>10000,"continuous split must not add an audible dip");
+}
+
+#[test]
+fn corrupt_workshop_is_quarantined_and_warning_survives_restart() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let state = m.state.clone();
+    let path = m.path.clone();
+    drop(m);
+    let damaged = b"{\"projects\": [truncated";
+    std::fs::write(&path, damaged).unwrap();
+    let old = CompositionManager::open(state.clone()).unwrap();
+    let restored = Workshop::open(state.clone(), &old).unwrap();
+    assert!(restored.snapshot().projects.is_empty());
+    assert!(restored.snapshot().recovery_error.contains("已保留"));
+    let backups: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("vj-projects.corrupt-")).collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(backups[0].path()).unwrap(), damaged);
+    let created = restored.create().unwrap();
+    let reopened = Workshop::open(state, &old).unwrap();
+    assert_eq!(reopened.snapshot().projects.len(), created.projects.len());
+    assert!(!reopened.snapshot().recovery_error.is_empty());
+    assert!(reopened.acknowledge_recovery().unwrap().recovery_error.is_empty());
+}
+
+fn interrupted_job(id: &str, project_id: &str) -> Job {
+    Job { id: id.into(), project_id: project_id.into(), revision: 0, phase: "rendering".into(),
+        progress: 0.4, detail: String::new(), error: String::new(), path: String::new(),
+        signature: None, track_id: None, staging: None }
+}
+
+#[test]
+fn restart_cleans_registered_staging_but_preserves_unowned_directories_and_outputs() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let owned = f.path("outputs/.kdj-composition-vj-owned");
+    let unowned = f.path("outputs/.kdj-composition-vj-unowned");
+    for path in [&owned, &unowned] { std::fs::create_dir(path).unwrap(); std::fs::write(path.join("mix.wav"), b"partial").unwrap(); }
+    std::fs::write(owned.join(".owner"), "owned").unwrap();
+    std::fs::write(unowned.join(".owner"), "someone-else").unwrap();
+    let output = f.path("outputs/published.mp4");
+    std::fs::write(&output, b"published").unwrap();
+    m.change(|j| {
+        for (id, path) in [("owned", &owned), ("unowned", &unowned)] {
+            let mut job = interrupted_job(id, "p"); job.staging = Some(path.to_string_lossy().into_owned());
+            j.jobs.push(job);
+        }
+        Ok(())
+    }).unwrap();
+    let old = CompositionManager::open(m.state.clone()).unwrap();
+    let restored = Workshop::open(m.state.clone(), &old).unwrap();
+    assert!(!owned.exists());
+    assert!(unowned.join("mix.wav").exists());
+    assert_eq!(std::fs::read(output).unwrap(), b"published");
+    assert!(restored.snapshot().jobs[0].staging.is_none());
+    assert!(restored.snapshot().jobs[1].error.contains("归属无法确认"));
+}
+
+#[tokio::test]
+async fn missing_failed_receipt_can_be_discarded_without_deleting_project_or_files() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let mut p = m.create().unwrap().projects[0].clone();
+    let source = Source { id: "source".into(), track_id: 1, path: "/unused.wav".into(), title: "music".into(),
+        kind: "audio".into(), frame_ends_ms: vec![], duration_ms: 1000., video: false, audio: true,
+        width: 0, height: 0, fps: 30., signature: String::new() };
+    p.layers.push(Layer { id: "layer".into(), source_id: source.id.clone(), clips: vec![new_clip(&source, 0.)], grid: None });
+    p.sources.push(source); p.output.format = "wav".into();
+    m.change(|j| { j.projects[0] = p.clone(); Ok(()) }).unwrap();
+    let path = f.path("outputs/export.wav"); std::fs::write(&path, b"old export").unwrap();
+    let mut job = interrupted_job("receipt", &p.id);
+    job.phase = "import_failed".into(); job.signature = Some(media::signature(&path).unwrap());
+    job.path = path.to_string_lossy().into_owned();
+    m.change(|j| { j.jobs.push(job); Ok(()) }).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(m.retry_import("receipt").await.is_err());
+    assert!(m.export(&p.id, p.revision).is_err());
+    let snapshot = m.discard_receipt("receipt").unwrap();
+    assert_eq!(serde_json::to_value(&snapshot.projects[0]).unwrap(), serde_json::to_value(&p).unwrap());
+    assert_eq!(snapshot.jobs[0].phase, "canceled");
+    assert!(snapshot.jobs[0].signature.is_none());
+    let slot = m.export_slots.acquire().await.unwrap();
+    let queued = m.export(&p.id, p.revision).unwrap();
+    let next = queued.jobs.last().unwrap().id.clone();
+    m.cancel(&next).await.unwrap();
+    drop(slot);
+    assert_eq!(m.snapshot().jobs.last().unwrap().phase, "canceled");
+    std::fs::write(&path, b"replacement owned by user").unwrap();
+    assert!(m.discard_receipt("receipt").is_err());
+    assert_eq!(std::fs::read(path).unwrap(), b"replacement owned by user");
+}
+
+#[test]
+fn alignment_cancellation_reaches_registry_and_handles_early_cancellation() {
+    let f = Fixture::new(); let m = manager(&f);
+    let lease = m.begin_alignment("workshop-align-running").unwrap();
+    m.state.analysis.cancel("workshop-align-running");
+    assert!(lease.cancel.is_cancelled());
+    drop(lease);
+    assert!(!m.alignments.lock().unwrap().contains_key("workshop-align-running"));
+    m.cancel_alignment("workshop-align-before-start").unwrap();
+    let lease = m.begin_alignment("workshop-align-before-start").unwrap();
+    assert!(lease.cancel.is_cancelled());
+    drop(lease);
+    let lease = m.begin_alignment("workshop-align-drop").unwrap();
+    let cancel = lease.cancel.clone(); drop(lease);
+    assert!(cancel.is_cancelled());
 }

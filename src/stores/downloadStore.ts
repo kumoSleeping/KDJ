@@ -35,6 +35,8 @@ const MAX_COMPLETED_TOMBSTONES = 512;
 /** 挡住取消/清记录之后才抵达的旧事件，避免刚删掉的行又闪回来。 */
 const removedTaskIds = new Set<string>();
 const MAX_REMOVED_TOMBSTONES = 512;
+let downloadRefreshSequence = 0;
+let downloadListRevision = 0;
 
 function rememberCompletedTask(taskId: string): void {
   completedTaskIds.delete(taskId);
@@ -171,14 +173,26 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
   error: "",
 
   async refresh() {
+    const sequence = ++downloadRefreshSequence;
+    const listRevision = downloadListRevision;
+    const before = get().tasks;
     set({ loading: true });
     try {
       const tasks = await api.downloads();
-      const map = applyServerList(get().tasks, tasks);
+      if (sequence !== downloadRefreshSequence) return;
+      if (listRevision !== downloadListRevision) { set({ loading: false }); return; }
+      const current = get().tasks;
+      const map = applyServerList(current, tasks);
+      // A newer WS event or enqueue response can land during this HTTP snapshot.
+      // Preserve those changes; terminal/removed tombstones are already applied above.
+      for (const [id, task] of current) {
+        if (before.get(id) !== task && !removedTaskIds.has(id) && !completedTaskIds.has(id)) map.set(id, task);
+      }
       commitTasks(map);
       set({ tasks: map, ...derive(map), loading: false, error: "" });
       map.forEach(prepareAuthorizingTask);
     } catch (error) {
+      if (sequence !== downloadRefreshSequence) return;
       set({ loading: false, error: errorText(error) });
     }
   },
@@ -326,12 +340,17 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
   },
 
   handleEvent(event) {
+    if (event.type === "connection.open") {
+      void get().refresh();
+      return;
+    }
     if (event.type === "download.updated") {
       if (removedTaskIds.has(event.payload.id)) return;
       get().mergeTasks([event.payload]);
       return;
     }
     if (event.type === "download.list") {
+      downloadListRevision += 1;
       const map = applyServerList(get().tasks, event.payload);
       commitTasks(map);
       set({ tasks: map, ...derive(map), error: "" });

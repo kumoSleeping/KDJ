@@ -196,8 +196,27 @@ fn valid_session(path: &Path) -> bool {
     valid_session_as(path, &logical_session_name(path))
 }
 
+/// A deliberate logout is authoritative only at the destination. It must never
+/// qualify as a recoverable credential or be confused with an old empty session.
+fn explicit_session_logout(path: &Path) -> bool {
+    if !logical_session_name(path).eq_ignore_ascii_case("netease.json") {
+        return false;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_JSON_BYTES {
+        return false;
+    }
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value["logged_out"] == true)
+}
+
 fn copy_file_new(source: &Path, target: &Path) -> Result<bool> {
     if target.exists() {
+        ensure_same_recovery_file(source, target)?;
         return Ok(false);
     }
     let metadata = std::fs::symlink_metadata(source)?;
@@ -212,7 +231,10 @@ fn copy_file_new(source: &Path, target: &Path) -> Result<bool> {
         .open(target)
     {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            ensure_same_recovery_file(source, target)?;
+            return Ok(false);
+        }
         Err(error) => return Err(error.into()),
     };
     let result = (|| -> Result<()> {
@@ -226,6 +248,45 @@ fn copy_file_new(source: &Path, target: &Path) -> Result<bool> {
         let _ = std::fs::remove_file(target);
     }
     result.map(|_| true)
+}
+
+/// A matching name is not proof of a completed migration. In particular, two project
+/// journals may contain entirely different works. Keep the source until every copied
+/// file is byte-identical; never trade an unresolved conflict for an automatic cleanup.
+fn ensure_same_recovery_file(source: &Path, target: &Path) -> Result<()> {
+    use std::io::Read as _;
+    let source_meta = std::fs::symlink_metadata(source)?;
+    let target_meta = std::fs::symlink_metadata(target)?;
+    let conflict = || {
+        format!(
+            "历史文件尚未合并，原件已保留：{} → {}",
+            source.display(),
+            target.display()
+        )
+    };
+    anyhow::ensure!(
+        source_meta.is_file() && target_meta.is_file(),
+        "{}",
+        conflict()
+    );
+    anyhow::ensure!(source_meta.len() == target_meta.len(), "{}", conflict());
+    let mut source_file = std::fs::File::open(source)?;
+    let mut target_file = std::fs::File::open(target)?;
+    let mut source_bytes = [0; 64 * 1024];
+    let mut target_bytes = [0; 64 * 1024];
+    let mut remaining = source_meta.len();
+    while remaining > 0 {
+        let count = remaining.min(source_bytes.len() as u64) as usize;
+        source_file.read_exact(&mut source_bytes[..count])?;
+        target_file.read_exact(&mut target_bytes[..count])?;
+        anyhow::ensure!(
+            source_bytes[..count] == target_bytes[..count],
+            "{}",
+            conflict()
+        );
+        remaining -= count as u64;
+    }
+    Ok(())
 }
 
 fn backup_invalid_file(path: &Path) -> Result<()> {
@@ -267,7 +328,9 @@ fn promote_current_session_temps(current: &Path) -> Result<usize> {
             continue;
         }
         let target = sessions.join(&logical_name);
-        if valid_session(&target) && modified_key(&target) >= modified_key(&source) {
+        if explicit_session_logout(&target)
+            || (valid_session(&target) && modified_key(&target) >= modified_key(&source))
+        {
             std::fs::remove_file(&source)?;
             continue;
         }
@@ -305,7 +368,7 @@ fn merge_sessions(current: &Path, source: &Path) -> Result<usize> {
             continue;
         }
         let target = target_dir.join(&logical_name);
-        if valid_session(&target) {
+        if valid_session(&target) || explicit_session_logout(&target) {
             continue; // 用户已经在新版本重新登录：当前凭证永远优先。
         }
         let body = std::fs::read(entry.path())?;
@@ -474,7 +537,10 @@ fn copy_other_missing(source: &Path, target: &Path) -> Result<usize> {
         }
         let kind = entry.file_type()?;
         if kind.is_symlink() {
-            continue;
+            anyhow::bail!(
+                "历史目录含未迁移的符号链接，原件已保留：{}",
+                entry.path().display()
+            );
         }
         let destination = target.join(entry.file_name());
         if kind.is_dir() {
@@ -633,9 +699,16 @@ pub(crate) fn recover_desktop_data(current: &Path, candidates: &[PathBuf]) -> Re
                     journal.pending.push(pending_source(current, source));
                 }
             }
-            Err(error) => report
-                .errors
-                .push(format!("恢复 {} 失败：{error:#}", source.display())),
+            Err(error) => {
+                // A previously eligible source may have changed before its next launch.
+                journal.pending.retain(|entry| {
+                    entry.quarantined
+                        || !kdj_core::paths::paths_equivalent(Path::new(&entry.source), source)
+                });
+                report
+                    .errors
+                    .push(format!("恢复 {} 失败：{error:#}", source.display()));
+            }
         }
     }
     if let Err(error) = persist_journal(current, &journal) {
@@ -652,6 +725,23 @@ pub(crate) fn finalize_recovery_cleanup(current: &Path) {
     for mut entry in journal.pending {
         let source = PathBuf::from(&entry.source);
         let backup = PathBuf::from(&entry.backup);
+        // Revalidate journals written by older releases too. A successful service start
+        // proves neither that conflicting files were merged nor that the source is unchanged.
+        let retained = if source.exists() && !entry.quarantined {
+            &source
+        } else {
+            &backup
+        };
+        if retained.exists() {
+            if let Err(error) = copy_other_missing(retained, current) {
+                tracing::warn!(
+                    "历史数据清理已停止，保留原件 {}：{error:#}",
+                    retained.display()
+                );
+                keep.push(entry);
+                continue;
+            }
+        }
         if !entry.quarantined {
             if !source.exists() && backup.exists() {
                 entry.quarantined = true;
@@ -891,6 +981,86 @@ pub(crate) fn repair_library_roots(config: &AppConfig) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflicting_projects_are_not_scheduled_for_cleanup() {
+        let root = scratch("project-conflict");
+        let current = root.join("current");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(current.join("vj-projects.json"), br#"{"projects":["new"]}"#).unwrap();
+        std::fs::write(legacy.join("vj-projects.json"), br#"{"projects":["old"]}"#).unwrap();
+        let report = recover_desktop_data(&current, std::slice::from_ref(&legacy));
+        assert!(!report.errors.is_empty());
+        assert!(read_journal(&current).pending.is_empty());
+        finalize_recovery_cleanup(&current);
+        finalize_recovery_cleanup(&current);
+        assert!(legacy.join("vj-projects.json").is_file());
+        assert_eq!(
+            std::fs::read(current.join("vj-projects.json")).unwrap(),
+            br#"{"projects":["new"]}"#
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_logout_blocks_temp_and_legacy_recovery_but_empty_sessions_do_not() {
+        let root = scratch("explicit-logout");
+        let current = root.join("current");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(current.join("sessions")).unwrap();
+        std::fs::create_dir_all(legacy.join("sessions")).unwrap();
+        let target = current.join("sessions/netease.json");
+        let temp = current.join("sessions/netease.json.tmp");
+        let credentials = br#"{"cookies":{"MUSIC_U":"old-account"}}"#;
+        let logged_out = br#"{"logged_out":true,"cookies":{},"csrf_token":"","profile":null}"#;
+        std::fs::write(&target, logged_out).unwrap();
+        std::fs::write(&temp, credentials).unwrap();
+        std::fs::write(legacy.join("sessions/netease.json"), credentials).unwrap();
+
+        assert!(!valid_session(&target));
+        assert_eq!(promote_current_session_temps(&current).unwrap(), 0);
+        assert!(!temp.exists());
+        assert_eq!(merge_sessions(&current, &legacy).unwrap(), 0);
+        assert_eq!(std::fs::read(&target).unwrap(), logged_out);
+
+        // The historical empty-file repair remains valid without an explicit intent marker.
+        for broken in ["{}", "{broken", r#"{"logged_out":false,"cookies":{}}"#] {
+            std::fs::write(&target, broken).unwrap();
+            assert_eq!(merge_sessions(&current, &legacy).unwrap(), 1);
+            assert_eq!(std::fs::read(&target).unwrap(), credentials);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_cleanup_journal_cannot_delete_conflicting_backup() {
+        let root = scratch("old-cleanup-conflict");
+        let current = root.join("current");
+        let source = root.join("legacy");
+        std::fs::create_dir_all(&current).unwrap();
+        let mut entry = pending_source(&current, &source);
+        entry.quarantined = true;
+        entry.verified_launches = 1;
+        std::fs::create_dir_all(&entry.backup).unwrap();
+        std::fs::write(current.join("vj-projects.json"), b"new").unwrap();
+        std::fs::write(Path::new(&entry.backup).join("vj-projects.json"), b"old").unwrap();
+        persist_journal(
+            &current,
+            &RecoveryJournal {
+                pending: vec![entry.clone()],
+            },
+        )
+        .unwrap();
+        finalize_recovery_cleanup(&current);
+        assert_eq!(
+            std::fs::read(Path::new(&entry.backup).join("vj-projects.json")).unwrap(),
+            b"old"
+        );
+        assert_eq!(read_journal(&current).pending.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(

@@ -4,7 +4,7 @@
 .layer{position:absolute;inset:0;width:1200px;height:1800px;pointer-events:none}
 .paper{background:#fbfdff}
 .atmosphere{background:radial-gradient(ellipse at 100% 41%,#80c7ff73 0%,#c4e8ff42 29%,transparent 59%),radial-gradient(ellipse at 75% 76%,#bffcec6e 0%,transparent 38%),linear-gradient(108deg,transparent 44%,#e5f3ff77 100%)}
-.character{left:269px;top:359px;width:1030px;height:1545px;mask-image:linear-gradient(to bottom,#000 0%,#000 72%,transparent 91%)}
+.character{left:240px;top:345px;width:1060px;height:1590px;mask-image:linear-gradient(to bottom,#000 0%,#000 66%,transparent 84%)}
 .character img{display:block;width:100%;height:100%;object-fit:contain}
 .eyebrow{position:absolute;left:61px;top:648px;font-size:13px;letter-spacing:3.5px;font-weight:500}
 h1{margin:0;font-family:"Songti SC","Noto Serif CJK SC","STSong",serif;font-weight:900;color:var(--blue)}

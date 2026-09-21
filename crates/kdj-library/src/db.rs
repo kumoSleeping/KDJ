@@ -805,6 +805,11 @@ fn repair_case_insensitive_path_duplicates(
                     rusqlite::params![target, source],
                 )?;
             }
+            tx.execute(
+                "INSERT OR IGNORE INTO track_rhythm_v4 (track_id, revision, signature, precise, bpm, confidence, file_mtime, result_json)
+                 SELECT ?1, revision, signature, precise, bpm, confidence, file_mtime, result_json FROM track_rhythm_v4 WHERE track_id = ?2",
+                rusqlite::params![target, source],
+            )?;
             tx.execute("DELETE FROM tags WHERE track_id = ?", [source])?;
             tx.execute("DELETE FROM playlist_items WHERE track_id = ?", [source])?;
             tx.execute("DELETE FROM waveform_assets WHERE track_id = ?", [source])?;
@@ -957,6 +962,7 @@ pub struct DatabaseMergeReport {
     pub waveform_assets: usize,
     pub analysis_v2: usize,
     pub analysis_v3: usize,
+    pub rhythm_v4: usize,
 }
 
 pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<DatabaseMergeReport> {
@@ -1203,6 +1209,7 @@ pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<Database
         report.waveform_assets = merge_track_asset("waveform_assets")?;
         report.analysis_v2 = merge_track_asset("track_bpm_key_analysis_v2")?;
         report.analysis_v3 = merge_track_asset("track_bpm_key_analysis_v3")?;
+        report.rhythm_v4 = merge_track_asset("track_rhythm_v4")?;
 
         if legacy_has("playlists")? && legacy_has("playlist_items")? {
             let source_playlists: Vec<(i64, String, String, String)> = {
@@ -1642,7 +1649,17 @@ mod tests {
             .unwrap();
         }
 
+        {
+            let db = Database::open(&legacy).unwrap();
+            db.conn().unwrap().execute("INSERT INTO track_rhythm_v4 (track_id,revision,signature,precise,bpm,confidence,file_mtime,result_json) VALUES (1,'v4','legacy-signature',1,130,0.9,3,'{\"keep\":1}')", []).unwrap();
+        }
         let report = merge_legacy_database(&current, &legacy).unwrap();
+        assert_eq!(report.rhythm_v4, 1);
+        {
+            let db = Database::open(&current).unwrap();
+            let restored: (String,String) = db.conn().unwrap().query_row("SELECT t.path,r.result_json FROM track_rhythm_v4 r JOIN tracks t ON t.id=r.track_id", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(restored, ("/legacy-only.mp3".into(), "{\"keep\":1}".into()));
+        }
         assert_eq!(report.tracks, 1, "id 撞了也必须把旧库独有路径补进来");
         assert_eq!(report.tags, 2);
         assert_eq!(report.playlists, 1);
@@ -1776,7 +1793,10 @@ mod tests {
         )
         .unwrap();
 
+        conn.execute("INSERT INTO track_rhythm_v4 (track_id,revision,signature,precise,bpm,confidence,file_mtime,result_json) VALUES (2,'v4','signature',1,130,0.9,3,'{\"keep\":1}')", []).unwrap();
         let report = repair_case_insensitive_path_duplicates(&mut conn, true).unwrap();
+        let rhythm: (i64,String) = conn.query_row("SELECT track_id,result_json FROM track_rhythm_v4", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(rhythm, (1, "{\"keep\":1}".into()));
         assert_eq!(
             report,
             PathDuplicateRepairReport {

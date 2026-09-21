@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
+import { rebaseWorkshopEdit } from "../lib/workshopEdits";
 import {
   cloneProject,
   findClip,
@@ -64,6 +65,8 @@ interface WorkshopStore extends WorkshopSnapshot {
   seek(ms: number): void;
   flush(): Promise<void>;
   align(reference: string): Promise<void>;
+  aligning: { projectId: string; requestId: string } | null;
+  cancelAlign(): Promise<void>;
   export(id?: string): Promise<void>;
   exportAll(directory?: string): Promise<void>;
   batchSubmitting: boolean;
@@ -73,6 +76,8 @@ interface WorkshopStore extends WorkshopSnapshot {
 }
 let batchGeneration = 0;
 let tail: Promise<void> = Promise.resolve();
+let alignmentAbort: AbortController | null = null;
+let historyNavigation = 0;
 const same = (a: CompositionProject, b: CompositionProject) =>
   JSON.stringify([a.name, a.layers, a.canvas, a.output, a.markers ?? []]) ===
   JSON.stringify([b.name, b.layers, b.canvas, b.output, b.markers ?? []]);
@@ -113,12 +118,15 @@ function queue(action: () => Promise<void>): Promise<void> {
   tail = task;
   return task;
 }
-function save(p: CompositionProject) {
+function save(p: CompositionProject, before: CompositionProject) {
   void queue(async () => {
     const state = useWorkshopStore.getState(),
       base = state.projects.find((v) => v.id === p.id);
     if (!base) throw new Error("作品不存在");
-    const result = await api.editWorkshop(p.id, base.revision, {...p, markers: p.markers ?? []});
+    const rebased = rebaseWorkshopEdit(before, p, base);
+    const error = validateProject(rebased);
+    if (error) throw new Error(error);
+    const result = await api.editWorkshop(p.id, base.revision, rebased);
     useWorkshopStore.getState().accept(result);
     const updated = result.projects.find((v) => v.id === p.id);
     useWorkshopStore.setState((s) => ({
@@ -131,6 +139,7 @@ function save(p: CompositionProject) {
 }
 export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
   batchSubmitting: false,
+  aligning: null,
   positions: {},
   expandedId: null,
   session: "",
@@ -257,6 +266,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     }
   },
   async selectProject(id) {
+    if (get().aligning?.projectId !== id) void get().cancelAlign();
     get().commit();
     await tail;
     const p = get().projects.find((p) => p.id === id);
@@ -329,14 +339,31 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     await queue(async () => {
       const p = get().projects.find(p => p.id === pid);
       if (pid && !p) throw new Error("目标任务不存在");
+      const historyAnchor = get().past.at(-1);
+      const navigationBeforeImport = historyNavigation;
       const result = await api.intakeWorkshop({project_id: pid, revision: p?.revision, track_ids: ids, paths, at_ms: position});
       get().accept(result.snapshot);
       const updated = result.snapshot.projects.find(p => p.id === result.project_id);
       if (updated && result.before && (get().activeId === pid || (!pid && !get().expandedId))) {
-        set(state => ({activeId: updated.id, expandedId: updated.id, draft: updated,
-          selectedId: updated.layers.find(l => !result.before?.layers.some(old => old.id === l.id))?.clips[0]?.id ?? null,
-          past: [...state.past, result.before!].slice(-100), future: [],
-        }));
+        set(state => {
+          const local = p && state.draft?.id === p.id ? state.draft : null;
+          const navigated = navigationBeforeImport !== historyNavigation;
+          const boundary = historyAnchor ? state.past.indexOf(historyAnchor) + 1 : 0;
+          // Undo/redo during the request navigates the existing history. Complete
+          // the import on that chosen state, never resurrect its discarded anchor.
+          const past = !p ? [result.before!]
+            : navigated ? [...state.past, cloneProject(state.gesture ?? local ?? p)]
+            : [...state.past.slice(0, boundary), result.before!,
+              ...state.past.slice(boundary).map(before => rebaseWorkshopEdit(p, before, updated))];
+          return {activeId: updated.id, expandedId: updated.id,
+            // Committed edits can still be queued behind this import. Preserve
+            // that optimistic state too, so an immediate undo sees the real edit.
+            draft: local && p ? rebaseWorkshopEdit(p, local, updated) : updated,
+            gesture: state.gesture && p ? rebaseWorkshopEdit(p, state.gesture, updated) : null,
+            selectedId: updated.layers.find(l => !result.before?.layers.some(old => old.id === l.id))?.clips[0]?.id ?? null,
+            past: past.slice(-100), future: [],
+          };
+        });
       }
       set({error: result.errors.join("；")});
     });
@@ -346,6 +373,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     set({ selectedId: id, cropId: get().cropId === id ? id : null, handle, error: "" });
   },
   begin() {
+    if (get().aligning) void get().cancelAlign();
     const s = get();
     if (!s.gesture && s.draft)
       set({ gesture: cloneProject(s.draft), error: "" });
@@ -386,7 +414,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     set({ gesture: null, trimPreview: null });
     if (same(before, after)) return;
     set({ past: [...s.past, before].slice(-100), future: [] });
-    save(after);
+    save(after, before);
   },
   abort() {
     const p = get().gesture;
@@ -404,6 +432,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     const s = get(),
       p = s.past.at(-1);
     if (!p || !s.draft) return;
+    historyNavigation++;
     const next = {
       ...cloneProject(p),
       revision: s.draft.revision,
@@ -416,12 +445,14 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
       selectedId: findClip(next, s.selectedId) ? s.selectedId : null,
       error: "",
     });
-    save(next);
+    save(next, s.draft);
   },
   redo() {
+    get().commit();
     const s = get(),
       p = s.future.at(-1);
     if (!p || !s.draft) return;
+    historyNavigation++;
     const next = {
       ...cloneProject(p),
       revision: s.draft.revision,
@@ -434,7 +465,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
       selectedId: findClip(next, s.selectedId) ? s.selectedId : null,
       error: "",
     });
-    save(next);
+    save(next, s.draft);
   },
   seek(ms) {
     const p = get().draft;
@@ -445,31 +476,46 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     await tail;
   },
   async align(reference) {
-    get().commit();
+    await get().cancelAlign();
+    await get().flush();
     const pid = get().activeId,
       cid = get().selectedId;
     if (!pid || !cid) return;
-    await queue(async () => {
-      const p = get().projects.find((p) => p.id === pid);
-      if (!p) return;
-      const result = await api.alignWorkshop(pid, p.revision, cid, reference);
-      if (get().activeId !== pid || get().draft?.revision !== result.revision)
-        return;
-      const before = cloneProject(get().draft!),
-        next = cloneProject(before),
-        c = findClip(next, cid);
-      if (!c) return;
-      c.start_ms = result.start_ms;
-      const error = validateProject(next);
-      if (error) throw new Error(error);
-      const snapshot = await api.editWorkshop(pid, p.revision, next);
-      get().accept(snapshot);
-      set((s) => ({
-        draft: snapshot.projects.find((p) => p.id === pid)!,
-        past: [...s.past, before].slice(-100),
-        future: [],
-      }));
-    });
+    const p = get().projects.find(p => p.id === pid);
+    if (!p) return;
+    const requestId = `workshop-align-${crypto.randomUUID()}`, controller = new AbortController();
+    alignmentAbort = controller;
+    set({aligning: {projectId: pid, requestId}, error: ""});
+    const current = () => get().aligning?.requestId === requestId && get().activeId === pid;
+    try {
+      const result = await api.alignWorkshop(pid, p.revision, cid, reference, requestId, controller.signal);
+      if (!current()) return;
+      await queue(async () => {
+        if (!current()) return;
+        if (get().projects.find(p => p.id === pid)?.revision !== result.revision || get().gesture)
+          throw new Error("作品已更新，请重新对齐");
+        const before = cloneProject(p), next = cloneProject(before), c = findClip(next, cid);
+        if (!c) return;
+        c.start_ms = result.start_ms;
+        const error = validateProject(next);
+        if (error) throw new Error(error);
+        const snapshot = await api.editWorkshop(pid, p.revision, next);
+        get().accept(snapshot);
+        if (get().activeId === pid) set(s => ({draft: snapshot.projects.find(p => p.id === pid)!, past: [...s.past, before].slice(-100), future: []}));
+      });
+    } catch (error) {
+      if (current() && !controller.signal.aborted) set({error: String(error)});
+    } finally {
+      if (get().aligning?.requestId === requestId) { alignmentAbort = null; set({aligning: null}); }
+    }
+  },
+  async cancelAlign() {
+    const active = get().aligning;
+    if (!active) return;
+    set({aligning: null});
+    alignmentAbort?.abort(); alignmentAbort = null;
+    try { await api.cancelWorkshopAlignment(active.requestId); }
+    catch (error) { set({error: `取消对齐失败：${String(error)}`}); }
   },
   async export(projectId) {
     const id = projectId ?? get().activeId;

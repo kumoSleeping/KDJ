@@ -1,0 +1,42 @@
+[
+  {
+    "name": "01 Paper",
+    "file": "layers/01.png"
+  },
+  {
+    "name": "02 Painted blue wash",
+    "file": "layers/02.png"
+  },
+  {
+    "name": "03 Pencil contour",
+    "file": "layers/03.png"
+  },
+  {
+    "name": "04 Hand painted KDJ",
+    "file": "layers/04.png"
+  },
+  {
+    "name": "05 Brand caption",
+    "file": "layers/05.png"
+  },
+  {
+    "name": "06 Hand inked character and cel lighting",
+    "file": "layers/06.png"
+  },
+  {
+    "name": "07 Main headline",
+    "file": "layers/07.png"
+  },
+  {
+    "name": "08 Product description",
+    "file": "layers/08.png"
+  },
+  {
+    "name": "09 Side project link",
+    "file": "layers/09.png"
+  },
+  {
+    "name": "10 Paper grain",
+    "file": "layers/10.png"
+  }
+]

@@ -1149,7 +1149,7 @@ impl MusicProvider for NeteaseProvider {
         );
         let final_path = unique_download_path(&output_dir, &filename);
 
-        let guard = AtomicDownload::new(&final_path);
+        let guard = AtomicDownload::new(&final_path)?;
         let response = self
             .client
             .http()
@@ -1182,6 +1182,7 @@ impl MusicProvider for NeteaseProvider {
         if looks_like_preview_clip(guard.partial(), source) {
             bail!("网易云只返回了试听片段（需要会员或版权受限）");
         }
+        job.check_canceled()?;
         let path = guard.commit()?;
 
         // Python 在下载前会做一次 `if not song_info.get("al"): 回查详情`——那次回查

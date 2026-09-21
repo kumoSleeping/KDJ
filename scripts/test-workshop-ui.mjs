@@ -2,7 +2,7 @@ import { buildSync } from "esbuild";
 import { createRequire, Module } from "node:module";
 const require = createRequire(import.meta.url);
 const requested = process.argv.slice(2);
-for (const name of requested.length ? requested : ["workshop-ui", "workstation-ui", "workshop-transitions-ui", "marquee-ui"]) {
+for (const name of requested.length ? requested : ["workshop-ui", "workshop-recovery-ui", "workstation-ui", "workshop-transitions-ui", "marquee-ui"]) {
 const entry = new Module(`${process.cwd()}/tests/${name}.test.cjs`);
 entry.filename = entry.id;
 entry.paths = require.resolve.paths("react");

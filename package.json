@@ -1,6 +1,6 @@
 {
   "name": "kdj",
-  "version": "1.0.0-rc9",
+  "version": "1.0.2-rc1",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "KDJ — 本地曲库与多平台音乐/视频工作台",
@@ -24,7 +24,7 @@
     "release": "bash scripts/release.sh",
     "size:report": "bash scripts/report-bundle-size.sh",
     "size:frontend:check": "node scripts/check-frontend-bundle-size.mjs",
-    "test:workshop": "node --import tsx --test tests/workshop.test.ts && node --conditions=import scripts/test-workshop-ui.mjs && node scripts/test-workshop-audition.mjs"
+    "test:workshop": "node --import tsx --test tests/workshop.test.ts tests/workshop-trim.test.ts && node --conditions=import scripts/test-workshop-ui.mjs && node scripts/test-workshop-audition.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.0",

@@ -10,6 +10,9 @@ use axum::Json;
 pub struct ApiError {
     pub status: StatusCode,
     pub detail: String,
+    pub code: Option<&'static str>,
+    pub stage: Option<&'static str>,
+    pub attempt_id: Option<String>,
 }
 
 impl ApiError {
@@ -17,7 +20,16 @@ impl ApiError {
         ApiError {
             status,
             detail: detail.into(),
+            code: None, stage: None, attempt_id: None,
         }
+    }
+
+    pub fn coded(mut self, code: &'static str) -> Self { self.code = Some(code); self }
+
+    pub fn media_context(mut self, stage: &'static str, attempt: &str) -> Self {
+        self.stage = Some(stage);
+        self.attempt_id = Some(attempt.chars().filter(char::is_ascii_hexdigit).take(32).collect());
+        self
     }
 
     pub fn not_found(detail: impl Into<String>) -> Self {
@@ -34,11 +46,16 @@ impl IntoResponse for ApiError {
         if self.status.is_server_error() {
             tracing::error!("{} -> {}", self.status, self.detail);
         }
-        (
-            self.status,
-            Json(serde_json::json!({ "detail": self.detail })),
-        )
-            .into_response()
+        let mut response = (self.status, Json(serde_json::json!({
+            "detail": self.detail, "code": self.code, "stage": self.stage, "attempt_id": self.attempt_id,
+        }))).into_response();
+        if let Some(attempt) = self.attempt_id.and_then(|s| s.parse().ok()) {
+            response.headers_mut().insert("x-kdj-attempt-id", attempt);
+        }
+        if let Some(code) = self.code {
+            response.headers_mut().insert("x-kdj-error-code", axum::http::HeaderValue::from_static(code));
+        }
+        response
     }
 }
 
@@ -48,6 +65,9 @@ impl IntoResponse for ApiError {
 /// 平台不支持），当成 500 会让前端把它显示成"内部错误"，不利于排查。
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
+        if let Some(error) = err.downcast_ref::<kdj_providers::qqmusic::error::QqError>() {
+            return ApiError::new(StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_GATEWAY), error.to_string()).coded(error.code());
+        }
         ApiError::new(StatusCode::BAD_REQUEST, format!("{err:#}"))
     }
 }
@@ -58,6 +78,17 @@ pub type ApiResult<T> = std::result::Result<T, ApiError>;
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn qq_failures_preserve_status_stage_and_safe_correlation_id() {
+        let error = anyhow::Error::new(kdj_providers::qqmusic::error::QqError::RateLimited);
+        let response = ApiError::from(error).media_context("resolve", "0123456789abcdef").into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["code"], "RATE_LIMITED"); assert_eq!(value["stage"], "resolve");
+        assert_eq!(value["attempt_id"], "0123456789abcdef");
+    }
 
     #[tokio::test]
     async fn error_body_uses_the_detail_field() {

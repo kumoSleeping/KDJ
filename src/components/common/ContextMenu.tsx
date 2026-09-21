@@ -13,6 +13,8 @@ export interface ContextMenuProps {
   /** 视口坐标（通常来自 contextmenu 的 clientX/Y）。 */
   x: number;
   y: number;
+  /** 点击控件展开时的上边缘；下方空间不足则优先在控件上方展开。 */
+  anchorTop?: number;
   onClose(): void;
   children: ReactNode;
   className?: string;
@@ -22,7 +24,7 @@ export interface ContextMenuProps {
  * 全局右键/弹出菜单：挂到 document.body，fixed 定位，量完尺寸后夹进视口。
  * 点菜单外或 Esc 关闭。内容过高时靠 CSS max-height 内部滚动。
  */
-export function ContextMenu({ x, y, onClose, children, className }: ContextMenuProps) {
+export function ContextMenu({ x, y, anchorTop, onClose, children, className }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState({ x, y });
 
@@ -38,10 +40,13 @@ export function ContextMenu({ x, y, onClose, children, className }: ContextMenuP
       const rect = el.getBoundingClientRect();
       const vw = window.innerWidth;
       const vh = window.innerHeight;
-      let nextX = pos.x;
-      let nextY = pos.y;
+      let nextX = x;
+      let nextY = y;
       if (nextX + rect.width > vw - PAD) nextX = vw - PAD - rect.width;
-      if (nextY + rect.height > vh - PAD) nextY = vh - PAD - rect.height;
+      if (nextY + rect.height > vh - PAD) {
+        nextY = anchorTop !== undefined && anchorTop - rect.height - 4 >= PAD
+          ? anchorTop - rect.height - 4 : vh - PAD - rect.height;
+      }
       if (nextX < PAD) nextX = PAD;
       if (nextY < PAD) nextY = PAD;
       if (Math.abs(nextX - pos.x) > 0.5 || Math.abs(nextY - pos.y) > 0.5) {
@@ -57,7 +62,7 @@ export function ContextMenu({ x, y, onClose, children, className }: ContextMenuP
       observer.disconnect();
       window.removeEventListener("resize", clamp);
     };
-  }, [pos.x, pos.y, children]);
+  }, [x, y, anchorTop, pos.x, pos.y, children]);
 
   useEffect(() => {
     const close = (event: MouseEvent) => {

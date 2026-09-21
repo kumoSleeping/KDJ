@@ -391,7 +391,8 @@ impl YoutubeProvider {
                 > 0,
             "YouTube 下载没有生成有效文件"
         );
-        std::fs::rename(&staged, &output).context("提交 YouTube 下载文件失败")?;
+        anyhow::ensure!(!cancel.is_cancelled(), "下载已取消");
+        let output = crate::net::commit_download(&staged, &output)?;
         Ok(output)
     }
 

@@ -11,12 +11,19 @@ import {
   type EqGraphValues,
 } from "../../lib/eqGraph";
 import { getLiveDeckSpectrum } from "../../lib/unifiedPlayer";
-import { knobBias, snapKnobToCenter } from "../../lib/stemDeckLog";
+import { knobBias, knobCenterDeadzone, snapKnobToCenter } from "../../lib/stemDeckLog";
 
 export type { ManagerMixerValues } from "../../lib/managerMixer";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+}
+
+function knobValue(value: number, min: number, max: number, snap: boolean, center?: number): number {
+  if (!snap) return clamp(value, min, max);
+  if (center === undefined) return snapKnobToCenter(value, min, max);
+  const neutral = clamp(center, min, max);
+  return Math.abs(value - neutral) <= knobCenterDeadzone(min, max) ? neutral : clamp(value, min, max);
 }
 
 export function ArcKnob({
@@ -30,6 +37,9 @@ export function ArcKnob({
   size = "md",
   disabled = false,
   format,
+  snapToCenter = true,
+  center,
+  resetLabel = "双击回中",
 }: {
   label: string;
   value: number;
@@ -41,16 +51,23 @@ export function ArcKnob({
   size?: "xs" | "sm" | "md" | "lg" | "xl";
   disabled?: boolean;
   format?: (value: number) => string;
+  snapToCenter?: boolean;
+  /** Optional neutral value drawn at twelve o'clock, even with asymmetric limits. */
+  center?: number;
+  resetLabel?: string;
 }) {
-  const shown = snapKnobToCenter(value, min, max);
-  const ratio = clamp((shown - min) / (max - min), 0, 1);
-  const bipolar = min < 0 && max > 0;
+  const shown = knobValue(value, min, max, snapToCenter, center);
+  const neutral = center === undefined ? 0 : clamp(center, min, max);
+  const ratio = center === undefined ? clamp((shown - min) / (max - min), 0, 1)
+    : shown >= neutral ? .5 + .5 * (shown - neutral) / (max - neutral || 1)
+      : .5 - .5 * (neutral - shown) / (neutral - min || 1);
+  const bipolar = center !== undefined || (min < 0 && max > 0);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ pointerId: number; y: number; value: number } | null>(null);
   const shownRef = useRef(shown);
   shownRef.current = shown;
-  const latestRef = useRef({ min, max, step, disabled, onChange });
-  latestRef.current = { min, max, step, disabled, onChange };
+  const latestRef = useRef({ min, max, step, disabled, onChange, snapToCenter, center });
+  latestRef.current = { min, max, step, disabled, onChange, snapToCenter, center };
   const [showValue, setShowValue] = useState(false);
   const revertRef = useRef(0);
   const previousRef = useRef(value);
@@ -73,13 +90,13 @@ export function ArcKnob({
   const onMove = (event: PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     const element = rootRef.current;
-    if (!drag || drag.pointerId !== event.pointerId || !element) return;
+    if (!drag || drag.pointerId !== event.pointerId || !element || latestRef.current.disabled) return;
     event.preventDefault();
     const { min: low, max: high, step: stride, onChange: commit } = latestRef.current;
     const travel = (drag.y - event.clientY) / (element.getBoundingClientRect().height * 1.35);
     const raw = drag.value + travel * (high - low);
     const stepped = Math.round((raw - low) / stride) * stride + low;
-    commit(snapKnobToCenter(clamp(Number(stepped.toFixed(6)), low, high), low, high));
+    commit(knobValue(clamp(Number(stepped.toFixed(6)), low, high), low, high, latestRef.current.snapToCenter, latestRef.current.center));
   };
   const onUp = (event: PointerEvent<HTMLDivElement>) => {
     if (dragRef.current?.pointerId !== event.pointerId) return;
@@ -102,7 +119,7 @@ export function ArcKnob({
         : 0;
     if (delta === 0) return;
     event.preventDefault();
-    commit(snapKnobToCenter(clamp(shownRef.current + delta, low, high), low, high));
+    commit(knobValue(clamp(shownRef.current + delta, low, high), low, high, latestRef.current.snapToCenter, latestRef.current.center));
   };
 
   useEffect(() => {
@@ -114,13 +131,13 @@ export function ArcKnob({
       event.preventDefault();
       const raw = event.deltaY !== 0 ? event.deltaY : event.deltaX;
       const direction = (raw < 0 ? 1 : -1) * (event.shiftKey ? 5 : 1);
-      commit(snapKnobToCenter(clamp(shownRef.current + direction * stride, low, high), low, high));
+      commit(knobValue(clamp(shownRef.current + direction * stride, low, high), low, high, latestRef.current.snapToCenter, latestRef.current.center));
     };
     element.addEventListener("wheel", onWheel, { passive: false });
     return () => element.removeEventListener("wheel", onWheel);
   }, []);
 
-  const bias = bipolar ? knobBias(shown, min, max) : null;
+  const bias = center !== undefined ? shown > neutral ? "boost" : shown < neutral ? "cut" : null : bipolar ? knobBias(shown, min, max) : null;
   const text = format
     ? format(shown)
     : bipolar
@@ -132,10 +149,10 @@ export function ArcKnob({
   let arcLength = 0;
   let arcRotate = 135;
   if (bipolar) {
-    const halfRange = shown >= 0 ? max : Math.abs(min);
-    const span = halfRange > 0 ? Math.abs(shown) / halfRange * 135 : 0;
+    const halfRange = shown >= neutral ? max - neutral : neutral - min;
+    const span = halfRange > 0 ? Math.abs(shown - neutral) / halfRange * 135 : 0;
     arcLength = span / 360 * circumference;
-    arcRotate = shown >= 0 ? 270 : 270 - span;
+    arcRotate = shown >= neutral ? 270 : 270 - span;
   } else {
     arcLength = ratio * track;
   }
@@ -157,7 +174,7 @@ export function ArcKnob({
       aria-valuemax={max}
       aria-valuenow={shown}
       aria-valuetext={text}
-      title={`${label} ${text}：竖拖调整，双击回中`}
+      title={`${label} ${text}：竖拖调整，${resetLabel}`}
       onPointerDown={onDown}
       onPointerMove={onMove}
       onPointerUp={onUp}

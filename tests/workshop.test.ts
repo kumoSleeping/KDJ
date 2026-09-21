@@ -425,7 +425,7 @@ test("GIF display duration, split phase and extension are independent of one ani
 test("image geometry crops before fitting and GIF frame lookup honors unequal delays", async () => {
   const {pictureBox,gifFrame}=await import("../src/lib/workshopPicture");
   const p=project(),c=p.layers[0].clips[0];p.sources[0].kind="image";p.sources[0].video=false;
-  c.picture={x:.5,y:.5,scale:1,opacity:.5,crop:[.25,0,.25,0],rotation:90,flip_x:true};
+  c.picture={x:.5,y:.5,scale:1,opacity:.5,crop:[.25,0,.25,0],crop_keep_position:false,rotation:90,flip_x:true};
   const box=pictureBox(p,c,p.sources[0]);
   assert.equal(box.sw,80);assert.equal(box.sh,90);assert.equal(box.width,.5);assert.equal(box.rotation,90);
   assert.deepEqual([0,99,100,299,300,450].map(t=>gifFrame([100,300],t).index),[0,0,1,1,0,1]);
@@ -482,4 +482,39 @@ test("edited waveform leaves real gaps and reads the retained source interval",(
   const p=project(),c=p.layers[0].clips[0];c.speed={...c.speed,preset:"constant",start:1};c.start_ms=2000;c.source_in_ms=2000;c.source_out_ms=4000;
   const w={track_id:1,duration:10,amp:[.1,.2,.3,.4,.5,.6,.7,.8,.9,1],r:Array(10).fill(255),g:Array(10).fill(0),b:Array(10).fill(0)};
   const result=layerWaveform(w,p.layers[0],0,4000,4);assert.equal(result.amp[0],0);assert.equal(result.amp[1],0);assert.ok(Math.abs(result.amp[2]-.3)<1e-6);
+});
+
+test("workshop edits preserve concurrent imports and reject real field conflicts", async () => {
+  const { rebaseWorkshopEdit } = await import("../src/lib/workshopEdits");
+  const base = project(), edited = structuredClone(base), latest = structuredClone(base);
+  edited.layers[0].clips[0].picture.x = .3;
+  const extra = structuredClone(base.layers[0]); extra.id = "imported"; extra.clips[0].id = "imported-clip";
+  latest.layers.push(extra); latest.revision = 1;
+  const merged = rebaseWorkshopEdit(base, edited, latest);
+  assert.equal(merged.layers.length, 2);
+  assert.equal(merged.layers[0].clips[0].picture.x, .3);
+  assert.equal(merged.layers[1].id, "imported");
+  assert.equal(merged.revision, 1);
+  const conflicting = structuredClone(latest); conflicting.layers[0].clips[0].picture.x = .7;
+  assert.throws(() => rebaseWorkshopEdit(base, edited, conflicting), /轨道发生冲突/);
+  const removed = structuredClone(base); removed.layers = [];
+  assert.deepEqual(rebaseWorkshopEdit(base, removed, latest).layers.map(l => l.id), ["imported"]);
+  assert.throws(() => rebaseWorkshopEdit(base, removed, conflicting), /冲突/);
+});
+
+test("workshop marker additions and layer reorders keep independent new items", async () => {
+  const { rebaseWorkshopEdit } = await import("../src/lib/workshopEdits");
+  const base = project();
+  const second = structuredClone(base.layers[0]); second.id = "second"; second.clips[0].id = "second-clip";
+  base.layers.push(second);
+  const edited = structuredClone(base), latest = structuredClone(base);
+  edited.layers.reverse();
+  edited.markers = [{id: "local-mark", position_ms: 100, number: 1}];
+  latest.markers = [{id: "server-mark", position_ms: 200, number: 2}];
+  const added = structuredClone(second); added.id = "imported"; added.clips[0].id = "imported-clip";
+  latest.layers.push(added);
+  const merged = rebaseWorkshopEdit(base, edited, latest);
+  assert.deepEqual(merged.layers.map(l => l.id), ["second", "layer", "imported"]);
+  assert.deepEqual(new Set(merged.markers?.map(m => m.id)), new Set(["local-mark", "server-mark"]));
+  assert.equal(validateProject(merged), "");
 });

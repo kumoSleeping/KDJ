@@ -75,11 +75,30 @@ import {
   type StreamBrowsePlatform,
   type StreamPlaylistSectionId,
 } from "../../stores/streamBrowseStore";
-import type { AccountState, FolderNode, StreamPlaylist } from "../../types";
+import type { AccountState, FolderNode, FolderTree as FolderTreeData, StreamPlaylist } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
 import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
+
+/** Use the server's actual paths for both Windows and Unix, including selected descendants. */
+function relocatedFolderPath(tree: FolderTreeData, current: string, source: string, parent: string, name: string): string | undefined {
+  const windows = /^[a-z]:[\\/]|^\\\\/i.test(source);
+  const key = (path: string) => {
+    const normalized = (windows ? path.replaceAll("\\", "/") : path).replace(/\/$/, "");
+    return windows ? normalized.toLowerCase() : normalized;
+  };
+  const sourceKey = key(source);
+  const currentKey = key(current);
+  if (currentKey !== sourceKey && !currentKey.startsWith(`${sourceKey}/`)) return undefined;
+  const all: FolderNode[] = [];
+  const visit = (nodes: FolderNode[]) => { for (const node of nodes) { all.push(node); visit(node.children); } };
+  visit(tree.roots);
+  const destination = all.find((node) => key(node.parent) === key(parent) && node.name === name.trim());
+  if (!destination) return undefined;
+  const expected = key(destination.path) + currentKey.slice(sourceKey.length);
+  return all.find((node) => key(node.path) === expected)?.path;
+}
 
 /** @deprecated 请从 `lib/trackDrag` 引用；保留 re-export 以免旧 import 断掉。 */
 export { TRACK_DND_TYPE };
@@ -1646,10 +1665,9 @@ export function FolderTree({
                   // 落在行中间 = 放进这个文件夹里（真实的目录移动）
                   void api
                     .moveFolder(from, node.path)
-                    .then(() => {
-                      // 树上文件夹换了位置就是回执本身，不再弹窗
-                      // 当前筛选指向的旧路径没了，跟着走到新位置
-                      if (filter.folder === from) setFilter({ folder: `${node.path}/${info.name}` });
+                    .then((tree) => {
+                      const folder = relocatedFolderPath(tree, useLibraryStore.getState().filter.folder, from, node.path, info.name);
+                      if (folder) setFilter({ folder });
                       return refreshFolders();
                     })
                     .catch((error: unknown) => setNotice((error as Error).message));
@@ -1661,8 +1679,9 @@ export function FolderTree({
                   // 在同层里拖一次就行——不为一个少见操作把接口做复杂。
                   void api
                     .moveFolder(from, node.parent)
-                    .then(() => {
-                      if (filter.folder === from) setFilter({ folder: `${node.parent}/${info.name}` });
+                    .then((tree) => {
+                      const folder = relocatedFolderPath(tree, useLibraryStore.getState().filter.folder, from, node.parent, info.name);
+                      if (folder) setFilter({ folder });
                       return refreshFolders();
                     })
                     .catch((error: unknown) => setNotice((error as Error).message));
@@ -1989,12 +2008,9 @@ export function FolderTree({
               if (!name || name === menu.node.name) return;
               void api
                 .renameFolder(menu.node.path, name)
-                .then(() => {
-                  // 改名后当前筛选指向的旧路径已经不存在了，跟着切到新路径
-                  if (filter.folder === menu.node.path) {
-                    const parent = menu.node.path.slice(0, menu.node.path.lastIndexOf("/"));
-                    setFilter({ folder: `${parent}/${name}` });
-                  }
+                .then((tree) => {
+                  const folder = relocatedFolderPath(tree, useLibraryStore.getState().filter.folder, menu.node.path, menu.node.parent, name);
+                  if (folder) setFilter({ folder });
                   return refreshFolders();
                 })
                 .catch((error: unknown) => setNotice((error as Error).message));

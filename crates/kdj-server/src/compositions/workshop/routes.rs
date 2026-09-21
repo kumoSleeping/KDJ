@@ -14,6 +14,8 @@ use serde::Deserialize;
 pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/workshop", get(list).post(create))
+        .route("/api/workshop/recovery/ack", post(acknowledge_recovery))
+        .route("/api/workshop/align/{request}/cancel", post(cancel_alignment))
         .route("/api/workshop/intake", post(intake))
         .route(
             "/api/workshop/{id}",
@@ -32,6 +34,7 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
         .route("/api/workshop/{id}/export", post(export))
         .route("/api/workshop/jobs/{id}/cancel", post(cancel))
         .route("/api/workshop/jobs/{id}/import", post(retry_import))
+        .route("/api/workshop/jobs/{id}/discard", post(discard_receipt))
         .route("/api/workshop/media/{ticket}/audio.wav", get(audio))
         .route(
             "/api/workshop/media/{ticket}/video/{clip}/{part}",
@@ -91,14 +94,17 @@ struct Align {
     revision: u64,
     clip_id: String,
     reference_id: String,
+    #[serde(default = "alignment_request_id")]
+    request_id: String,
 }
+fn alignment_request_id() -> String { format!("workshop-align-{}", id()) }
 async fn align(
     Extension(m): Extension<Arc<Workshop>>,
     Path(id): Path<String>,
     Json(p): Json<Align>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(
-        serde_json::json!({"start_ms":m.align(&id,p.revision,&p.clip_id,&p.reference_id).await?,"revision":p.revision}),
+        serde_json::json!({"start_ms":m.align(&id,p.revision,&p.clip_id,&p.reference_id,&p.request_id).await?,"revision":p.revision}),
     ))
 }
 #[derive(Deserialize)]
@@ -134,6 +140,16 @@ async fn retry_import(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Snapshot>> {
     Ok(Json(m.retry_import(&id).await?))
+}
+async fn discard_receipt(Extension(m): Extension<Arc<Workshop>>, Path(id): Path<String>) -> ApiResult<Json<Snapshot>> {
+    Ok(Json(m.discard_receipt(&id)?))
+}
+async fn acknowledge_recovery(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapshot>> {
+    Ok(Json(m.acknowledge_recovery()?))
+}
+async fn cancel_alignment(Extension(m): Extension<Arc<Workshop>>, Path(request): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    m.cancel_alignment(&request)?;
+    Ok(Json(serde_json::json!({})))
 }
 async fn release(
     Extension(m): Extension<Arc<Workshop>>,

@@ -245,6 +245,8 @@ fn shared_http_client() -> io::Result<Client> {
     CLIENT
         .get_or_init(|| {
             Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(25))
                 .connect_timeout(Duration::from_secs(5))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -269,6 +271,7 @@ pub(crate) struct HttpRangeSource {
     response: Mutex<Option<Response>>,
     revision_fence: Arc<AtomicU64>,
     revision: u64,
+    reconnect_remaining: u8,
 }
 
 pub(crate) struct OpenedHttpRangeSource {
@@ -294,6 +297,7 @@ impl HttpRangeSource {
         } else {
             None
         };
+        if revision_fence.load(Ordering::Acquire) != revision { return Err(cancelled_error()); }
         let total = opened
             .as_ref()
             .map(|opened| opened.total)
@@ -320,6 +324,7 @@ impl HttpRangeSource {
                 response: Mutex::new(opened.map(|opened| opened.response)),
                 revision_fence,
                 revision,
+                reconnect_remaining: 1,
             },
             hint_extension,
         })
@@ -340,6 +345,10 @@ impl HttpRangeSource {
             .is_none()
         {
             let opened = open_range(&self.client, &self.url, self.position, Some(self.length))?;
+            if self.cancelled() { return Err(cancelled_error()); }
+            if matches!((&self.hint_extension, &opened.hint_extension), (Some(a), Some(b)) if a != b) {
+                return Err(invalid_response("MEDIA_ENTITY_CHANGED: online audio format changed between Range requests"));
+            }
             shared_range_cache()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -369,6 +378,7 @@ impl HttpRangeSource {
 
 impl Read for HttpRangeSource {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.cancelled() { return Err(cancelled_error()); }
         if buffer.is_empty() || self.position >= self.length {
             return Ok(0);
         }
@@ -379,6 +389,7 @@ impl Read for HttpRangeSource {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .read(&self.cache_key, self.position, &mut buffer[..limit]);
         if cached > 0 {
+            if self.cancelled() { return Err(cancelled_error()); }
             // A response body has its own cursor. It cannot remain attached after the logical
             // cursor advances through shared cache bytes or the next miss would return old data.
             self.discard_response();
@@ -387,6 +398,8 @@ impl Read for HttpRangeSource {
         }
         let mut first_error = None;
         for attempt in 0..2 {
+            // Header failures with a structured proxy response are terminal here. Only a body
+            // interruption may use the single reconnect token owned by this reader.
             self.ensure_response()?;
             if self.cancelled() {
                 return Err(cancelled_error());
@@ -398,6 +411,7 @@ impl Read for HttpRangeSource {
                 .as_mut()
                 .expect("response ensured")
                 .read(&mut buffer[..limit]);
+            if self.cancelled() { self.discard_response(); return Err(cancelled_error()); }
             match result {
                 Ok(read) => {
                     if read > 0 {
@@ -429,9 +443,11 @@ impl Read for HttpRangeSource {
                 }
             }
             self.discard_response();
-            if attempt == 0 && !self.cancelled() {
+            if attempt == 0 && self.reconnect_remaining > 0 && !self.cancelled() {
+                self.reconnect_remaining -= 1;
                 continue;
             }
+            break;
         }
         Err(first_error.unwrap_or_else(|| io::Error::other("online audio read failed")))
     }
@@ -488,7 +504,10 @@ fn open_range(
         .get(url.clone())
         .header(RANGE, format!("bytes={start}-"))
         .send()
-        .map_err(io_other)?;
+        .map_err(|error| io::Error::new(
+            if error.is_timeout() { io::ErrorKind::TimedOut } else { io::ErrorKind::ConnectionAborted },
+            if error.is_timeout() { "online audio proxy connection timed out" } else { "online audio proxy connection failed" },
+        ))?;
     let status = response.status();
     let hint_extension = response
         .headers()
@@ -503,15 +522,18 @@ fn open_range(
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| invalid_response("206 response omitted Content-Range"))?;
-        let (actual_start, _end, total) = parse_content_range(value)
+        let (actual_start, end, total) = parse_content_range(value)
             .ok_or_else(|| invalid_response("invalid Content-Range from preview proxy"))?;
         if actual_start != start {
             return Err(invalid_response(
                 "preview proxy returned the wrong byte range",
             ));
         }
+        if response.content_length().is_some_and(|length| length != end - actual_start + 1) {
+            return Err(invalid_response("preview proxy Content-Length disagrees with Content-Range"));
+        }
         total
-    } else if status.is_success() && start == 0 {
+    } else if status == StatusCode::OK && start == 0 {
         response
             .content_length()
             .ok_or_else(|| invalid_response("online audio response omitted Content-Length"))?
@@ -520,9 +542,7 @@ fn open_range(
             "preview source ignored a non-zero Range request",
         ));
     } else {
-        return Err(io::Error::other(format!(
-            "online audio proxy returned HTTP {status}"
-        )));
+        return Err(proxy_response_error(response));
     };
     if total == 0 {
         return Err(invalid_response("online audio response is empty"));
@@ -537,6 +557,35 @@ fn open_range(
         total,
         hint_extension,
     })
+}
+
+fn proxy_response_error(mut response: Response) -> io::Error {
+    let status = response.status();
+    let mut message = format!("online audio proxy returned HTTP {status}");
+    let mut bytes = Vec::new();
+    // The endpoint is local, but malformed/error bodies are still untrusted and bounded.
+    if response.by_ref().take(8192).read_to_end(&mut bytes).is_ok() {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            for key in ["code", "stage", "attempt_id", "detail"] {
+                if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
+                    let text = safe_proxy_detail(text);
+                    if !text.is_empty() { message.push_str(&format!("; {key}={text}")); }
+                }
+            }
+        }
+    }
+    // Do not issue another automatic GET after an explicit proxy error (especially 401/429).
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn safe_proxy_detail(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    if ["cookie", "authorization", "musickey", "access_token", "refresh_token", "vkey="]
+        .iter().any(|marker| lower.contains(marker)) { return "[redacted sensitive upstream detail]".into(); }
+    text.split_whitespace().map(|word| {
+        if word.contains("://") || ["vkey=", "musickey=", "Cookie:", "Authorization:"]
+            .iter().any(|marker| word.contains(marker)) { "[redacted]" } else { word }
+    }).collect::<Vec<_>>().join(" ").chars().filter(|c| !c.is_control()).take(512).collect()
 }
 
 pub(crate) fn is_loopback_http_url(value: &str) -> bool {
@@ -561,6 +610,9 @@ fn parse_loopback_url(value: &str) -> io::Result<Url> {
         || address
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback());
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err(invalid_response("online audio loopback URL contains forbidden user info or fragment"));
+    }
     if !loopback {
         return Err(invalid_response(
             "online audio URL must target the app's loopback proxy",
@@ -617,6 +669,105 @@ fn io_other(error: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct FaultServer {
+        url: String, count: Arc<std::sync::atomic::AtomicUsize>, stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl FaultServer {
+        fn new(reply: impl Fn(&str, usize, &mut std::net::TcpStream) + Send + 'static) -> Self {
+            let listener=std::net::TcpListener::bind(("127.0.0.1",0)).unwrap(); listener.set_nonblocking(true).unwrap();
+            static NEXT:AtomicU64=AtomicU64::new(0);
+            let url=format!("http://{}/qq-audit-{}-{}",listener.local_addr().unwrap(),std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed));
+            let count=Arc::new(std::sync::atomic::AtomicUsize::new(0)); let hits=count.clone();
+            let stop=Arc::new(std::sync::atomic::AtomicBool::new(false)); let stopped=stop.clone();
+            let thread=std::thread::spawn(move|| {
+                while !stopped.load(Ordering::Acquire) {
+                    let (mut socket,_)=match listener.accept() {
+                        Ok(value)=>value, Err(error) if error.kind()==io::ErrorKind::WouldBlock=>{std::thread::sleep(Duration::from_millis(2));continue;},Err(_)=>break,
+                    };
+                    socket.set_nonblocking(false).unwrap();
+                    socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    socket.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut request=Vec::new(); let mut byte=[0];
+                    while request.len()<16*1024 && !request.ends_with(b"\r\n\r\n") {
+                        if socket.read_exact(&mut byte).is_err(){break;} request.push(byte[0]);
+                    }
+                    if !request.ends_with(b"\r\n\r\n") { continue; }
+                    let index=hits.fetch_add(1,Ordering::AcqRel); reply(&String::from_utf8_lossy(&request),index,&mut socket);
+                }
+            });
+            Self{url,count,stop,thread:Some(thread)}
+        }
+    }
+    impl Drop for FaultServer { fn drop(&mut self){self.stop.store(true,Ordering::Release);if let Some(thread)=self.thread.take(){let result=thread.join();if !std::thread::panicking(){result.unwrap();}}} }
+    fn fault_client(timeout:Duration)->Client { Client::builder().no_proxy().timeout(timeout).redirect(reqwest::redirect::Policy::none()).build().unwrap() }
+
+    #[test]
+    fn qq_proxy_error_keeps_machine_code_and_correlation_without_secrets_or_retry() {
+        let server=FaultServer::new(|_,_,socket| {
+            use std::io::Write;
+            let body=serde_json::json!({"code":"RATE_LIMITED","stage":"media","attempt_id":"0123456789abcdef", "detail":"rate limited https://cdn.test/a?vkey=SECRET Cookie: HIDDEN"}).to_string();
+            write!(socket,"HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        });
+        let error=HttpRangeSource::open(&server.url,Arc::new(AtomicU64::new(1)),1).err().unwrap();
+        assert_eq!(error.kind(),io::ErrorKind::InvalidData);
+        let message=error.to_string(); assert!(message.contains("RATE_LIMITED")); assert!(message.contains("0123456789abcdef"));
+        assert!(!message.contains("SECRET")); assert!(!message.contains("HIDDEN"));
+        assert_eq!(server.count.load(Ordering::Acquire),1);
+    }
+    #[test]
+    fn qq_proxy_range_rejects_inconsistent_content_length_and_ignored_offset() {
+        for offset in [0,2] {
+            let server=FaultServer::new(move|_,_,socket| {
+                use std::io::Write;
+                let raw=if offset==0 {"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4\r\nContent-Length: 8\r\nConnection: close\r\n\r\nDATA"}
+                    else {"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDATA"};
+                socket.write_all(raw.as_bytes()).unwrap();
+            });
+            let error=open_range(&fault_client(Duration::from_secs(1)),&Url::parse(&server.url).unwrap(),offset,None).err().unwrap();
+            assert_eq!(error.kind(),io::ErrorKind::InvalidData);
+        }
+    }
+    #[test]
+    fn qq_proxy_cancellation_is_checked_before_serving_cached_bytes() {
+        let server=FaultServer::new(|_,_,socket| { use std::io::Write; socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Type: audio/mpeg\r\nConnection: close\r\n\r\nDATA").unwrap(); });
+        let fence=Arc::new(AtomicU64::new(1)); let mut source=HttpRangeSource::open(&server.url,fence.clone(),1).unwrap().source;
+        source.read_exact(&mut [0;2]).unwrap(); source.seek(SeekFrom::Start(0)).unwrap(); fence.store(2,Ordering::Release);
+        let error=source.read(&mut [0;2]).unwrap_err(); assert_eq!(error.kind(),io::ErrorKind::Interrupted); assert_eq!(source.position,0);
+    }
+    #[test]
+    fn qq_proxy_body_reconnect_budget_is_shared_across_read_calls() {
+        let server=FaultServer::new(|request,_,socket| {
+            use std::io::Write;
+            let start=request.lines().find_map(|line|line.split_once(':').filter(|(name,_)|name.eq_ignore_ascii_case("range"))
+                .and_then(|(_,value)|value.trim().strip_prefix("bytes="))
+                .and_then(|value|value.split('-').next()).and_then(|value|value.parse::<usize>().ok())).unwrap();
+            write!(socket,"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-15/16\r\nContent-Length: {}\r\nContent-Type: audio/mpeg\r\nConnection: close\r\n\r\nx",start,16-start).unwrap();
+        });
+        let mut source=HttpRangeSource::open(&server.url,Arc::new(AtomicU64::new(1)),1).unwrap().source;
+        assert!(source.read_exact(&mut [0;8]).is_err());
+        assert_eq!(server.count.load(Ordering::Acquire),2,"one initial GET plus one body reconnect, not two on every read");
+    }
+    #[test]
+    fn qq_proxy_header_timeout_is_bounded_without_a_whole_song_deadline() {
+        let stalled=FaultServer::new(|_,_,socket| { use std::io::Write; std::thread::sleep(Duration::from_millis(150)); let _=socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx"); });
+        let before=std::time::Instant::now();
+        let error=open_range(&fault_client(Duration::from_millis(30)),&Url::parse(&stalled.url).unwrap(),0,None).err().unwrap();
+        assert_eq!(error.kind(),io::ErrorKind::TimedOut); assert!(before.elapsed()<Duration::from_secs(2));
+        let flowing=FaultServer::new(|_,_,socket| {
+            use std::io::Write; socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 200\r\nContent-Type: audio/mpeg\r\nConnection: close\r\n\r\n").unwrap();
+            for _ in 0..20 { std::thread::sleep(Duration::from_millis(10)); if socket.write_all(b"0123456789").is_err(){break;} }
+        });
+        let mut opened=open_range(&fault_client(Duration::from_millis(100)),&Url::parse(&flowing.url).unwrap(),0,None).unwrap();
+        let before=std::time::Instant::now(); let mut bytes=Vec::new(); opened.response.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.len(),200); assert!(before.elapsed()>Duration::from_millis(100));
+    }
+    #[test]
+    fn qq_loopback_parser_rejects_userinfo_and_fragments() {
+        assert!(!is_loopback_http_url("http://user@127.0.0.1/a")); assert!(!is_loopback_http_url("http://127.0.0.1/a#secret"));
+        assert!(is_loopback_http_url("http://127.0.0.1:1234/api/song/preview/test?token=fixture"));
+    }
+
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;

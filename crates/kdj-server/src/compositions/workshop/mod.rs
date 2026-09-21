@@ -1,8 +1,10 @@
 //! Revisioned, persistent projects. Export receipts remain separate from editable drafts.
 mod frames;
+mod alignment_control;
 mod intake;
 mod naming;
 mod positions;
+mod recovery;
 mod render;
 pub mod routes;
 #[cfg(test)]
@@ -39,6 +41,8 @@ pub struct Job {
     pub path: String,
     pub signature: Option<media::Signature>,
     pub track_id: Option<i64>,
+    #[serde(default)]
+    pub staging: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Journal {
@@ -56,6 +60,8 @@ struct Journal {
     pending_positions: HashMap<String, String>,
     #[serde(default)]
     stopped_positions: HashSet<String>,
+    #[serde(default)]
+    recovery_error: String,
 }
 #[derive(Clone, Serialize)]
 pub struct Snapshot {
@@ -63,6 +69,7 @@ pub struct Snapshot {
     revision: u64,
     projects: Vec<CompositionProject>,
     jobs: Vec<Job>,
+    recovery_error: String,
 }
 #[derive(Clone)]
 pub struct Preview {
@@ -89,28 +96,13 @@ pub struct Workshop {
     analysis_slots: tokio::sync::Semaphore,
     positions: Mutex<HashMap<String, positions::PositionTask>>,
     export_slots: tokio::sync::Semaphore,
+    writable: bool,
+    alignments: Mutex<HashMap<String, CancellationToken>>,
 }
 impl Workshop {
     pub fn open(state: Arc<AppState>, legacy: &Arc<CompositionManager>) -> Result<Arc<Self>> {
         let path = state.config.data_dir.join("vj-projects.json");
-        let mut journal = if path.exists() {
-            serde_json::from_slice::<Journal>(&std::fs::read(&path)?)
-                .context("剪辑工程记录无法读取，原文件已保留")?
-        } else {
-            Journal {
-                version: 1,
-                revision: 0,
-                projects: vec![],
-                jobs: vec![],
-                migrated: vec![],
-                position_bases: HashMap::new(),
-                pending_positions: HashMap::new(),
-                stopped_positions: HashSet::new(),
-            }
-        };
-        if journal.version != 1 {
-            bail!("剪辑工程版本不支持")
-        }
+        let (mut journal, writable) = recovery::read_journal(&path);
         for p in &mut journal.projects {
             for source in &mut p.sources { if source.kind.is_empty() { source.kind = if source.video { "video" } else { "audio" }.into(); } }
         }
@@ -127,6 +119,9 @@ impl Workshop {
                 }
                 .into();
                 job.error = "上次处理已中断".into();
+            }
+            if let Err(error) = recovery::clean_staging(job) {
+                job.error = format!("{}；暂存清理失败：{error:#}", job.error);
             }
         }
         let cache = state.config.data_dir.join("cache").join("vj-workshop");
@@ -185,11 +180,14 @@ impl Workshop {
             analysis_slots: tokio::sync::Semaphore::new(1),
             positions: Mutex::new(HashMap::new()),
             export_slots: tokio::sync::Semaphore::new(1),
+            writable,
+            alignments: Mutex::new(HashMap::new()),
         });
-        manager.save(&manager.journal.lock().unwrap())?;
+        if writable { manager.save(&manager.journal.lock().unwrap())?; }
         Ok(manager)
     }
     fn save(&self, j: &Journal) -> Result<()> {
+        if !self.writable { bail!("工程记录无法安全保存，请检查数据目录权限后重启；原文件已保留") }
         let temp = self.path.with_extension("json.tmp");
         let mut f = std::fs::File::create(&temp)?;
         f.write_all(&serde_json::to_vec(j)?)?;
@@ -207,6 +205,7 @@ impl Workshop {
             revision: j.revision,
             projects: j.projects.clone(),
             jobs: j.jobs.clone(),
+            recovery_error: j.recovery_error.clone(),
         }
     }
     fn change(&self, edit: impl FnOnce(&mut Journal) -> Result<()>) -> Result<Snapshot> {
@@ -495,11 +494,12 @@ impl Workshop {
         }
     }
     pub async fn align(
-        &self,
+        self: &Arc<Self>,
         pid: &str,
         revision: u64,
         clip_id: &str,
         reference: &str,
+        request_id: &str,
     ) -> Result<f64> {
         let p = self.project(pid, revision)?;
         let clip = p.clip(clip_id).context("片段不存在")?;
@@ -512,13 +512,35 @@ impl Workshop {
                 bail!("请以音乐为参考，对视频进行适配")
             }
         }
-        let cancel = CancellationToken::new();
+        let lease = self.begin_alignment(request_id)?;
+        let cancel = lease.cancel.clone();
+        let work_cancel = cancel.clone();
+        let permit = tokio::task::spawn_blocking(move || {
+            kdj_core::work_scheduler::work_scheduler().acquire(
+                kdj_core::work_scheduler::WorkRequest::new(kdj_core::work_scheduler::WorkClass::WorkstationAnalysis),
+                || work_cancel.is_cancelled()).map_err(|_| anyhow::anyhow!("对齐已取消"))
+        }).await??;
         let a = render::alignment_pcm(&p, clip, &cancel).await?;
         let b = render::alignment_pcm(&p, reference, &cancel).await?;
+        let worker_cancel = cancel.clone();
         let result = tokio::task::spawn_blocking(move || {
-            kdj_analysis::alignment::align_segment(&a, &b, || false)
+            use kdj_core::work_scheduler::{work_scheduler, WorkClass, WorkRequest};
+            let permit = Mutex::new(Some(permit));
+            let checkpoint = || {
+                if worker_cancel.is_cancelled() { return true }
+                if !work_scheduler().allows(WorkClass::WorkstationAnalysis) {
+                    let mut slot = permit.lock().unwrap();
+                    drop(slot.take());
+                    match work_scheduler().acquire(WorkRequest::new(WorkClass::WorkstationAnalysis), || worker_cancel.is_cancelled()) {
+                        Ok(next) => *slot = Some(next), Err(_) => return true,
+                    }
+                }
+                worker_cancel.is_cancelled()
+            };
+            kdj_analysis::alignment::align_segment(&a, &b, checkpoint)
         })
         .await??;
+        if cancel.is_cancelled() { bail!("对齐已取消") }
         self.project(pid, revision)?;
         if !result.matched {
             bail!("{}", result.reason)
@@ -573,6 +595,7 @@ impl Workshop {
                 path: String::new(),
                 signature: None,
                 track_id: None,
+                staging: None,
             });
             Ok(())
         });
@@ -630,7 +653,7 @@ impl Workshop {
             Ok(())
         })
     }
-    pub async fn retry_import(&self, jid: &str) -> Result<Snapshot> {
+    pub async fn retry_import(self: &Arc<Self>, jid: &str) -> Result<Snapshot> {
         let job = self
             .journal
             .lock()
@@ -640,17 +663,32 @@ impl Workshop {
             .find(|j| j.id == jid)
             .cloned()
             .context("导出记录不存在")?;
+        if job.phase != "import_failed" { bail!("只有入库失败的成品可以重试") }
         let sig = job.signature.as_ref().context("成品尚未提交")?;
         if &media::signature(Path::new(&job.path))? != sig {
             bail!("成品已变化，请检查输出文件")
         }
-        let tid = self.import(Path::new(&job.path)).await?;
-        self.job(jid, |j| {
-            j.phase = "complete".into();
-            j.progress = 1.;
-            j.error.clear();
-            j.track_id = Some(tid);
-        })
+        self.change(|journal| {
+            let current = journal.jobs.iter_mut().find(|j| j.id == jid).context("导出记录不存在")?;
+            if current.phase != "import_failed" || current.signature != job.signature { bail!("成品回执已更新，请刷新后重试") }
+            current.phase = "importing".into();
+            current.error.clear();
+            Ok(())
+        })?;
+        // Once admitted, finish the receipt even if the HTTP client disconnects.
+        let manager = self.clone();
+        let jid = jid.to_owned();
+        tokio::spawn(async move {
+            match manager.import(Path::new(&job.path)).await {
+                Ok(tid) => manager.job(&jid, |j| {
+                    j.phase = "complete".into(); j.progress = 1.; j.error.clear(); j.track_id = Some(tid);
+                }),
+                Err(error) => {
+                    manager.job(&jid, |j| { j.phase = "import_failed".into(); j.error = format!("{error:#}"); })?;
+                    Err(error)
+                }
+            }
+        }).await?
     }
     async fn import(&self, path: &Path) -> Result<i64> {
         let state = self.state.clone();
@@ -873,7 +911,7 @@ fn migrate(
         c.fades.audio_out_ms = (opt.audio.fade_out_ms as f64).min(c.duration() / 2.);
         if overlay {
             c.picture = Picture {
-                rotation: 0., flip_x: false, flip_y: false, crop: [0.; 4],
+                rotation: 0., flip_x: false, flip_y: false, crop: [0.; 4], crop_keep_position: true,
                 x: opt.overlay.x,
                 y: opt.overlay.y,
                 scale: opt.overlay.scale,

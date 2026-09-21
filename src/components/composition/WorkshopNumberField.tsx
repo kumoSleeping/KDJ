@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 export function NumberField({
   label,
+  ariaLabel = label,
   value,
   min,
   max,
@@ -10,6 +11,7 @@ export function NumberField({
   suffix = "",
 }: {
   label: string;
+  ariaLabel?: string;
   value: number;
   min?: number;
   max?: number;
@@ -28,7 +30,7 @@ export function NumberField({
       <span>{label}</span>
       <input
         type="number"
-        aria-label={label}
+        aria-label={ariaLabel}
         value={text}
         min={min}
         max={max}

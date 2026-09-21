@@ -152,6 +152,36 @@ export function resetFadeSpan(c: WorkshopClip): void {
   ] as const)
     c.fades[k] = Math.min(c.fades[k], d / 2);
 }
+function visibleClipFades(c: WorkshopClip) {
+  return {
+    video_in_ms: visibleFade(c, false),
+    video_out_ms: visibleFade(c, true),
+    audio_in_ms: visibleFade(c, false, true),
+    audio_out_ms: visibleFade(c, true, true),
+  };
+}
+function resetVisibleFadeSpan(c: WorkshopClip, fades: ReturnType<typeof visibleClipFades>): void {
+  c.fades = { ...c.fades, ...fades };
+  resetFadeSpan(c);
+}
+/** Preserve the source-domain curve and the fades visible on this cut. Capture the
+ * old envelope before changing duration: split clips still refer to a parent span. */
+export function setClipSpeed(
+  c: WorkshopClip,
+  speed: number | Pick<ClipSpeed, "preset" | "start" | "middle" | "end">,
+): void {
+  if (c.display_duration_ms != null) return;
+  const next = typeof speed === "number"
+    ? { preset: "constant" as const, start: speed, middle: speed, end: speed }
+    : speed;
+  if (!["constant", "ramp", "pulse"].includes(next.preset)
+    || ![next.start, next.middle, next.end].every(n => Number.isFinite(n) && n >= .5 && n <= 2)) return;
+  if (c.speed.preset === next.preset && c.speed.start === next.start
+    && c.speed.middle === next.middle && c.speed.end === next.end) return;
+  const fades = visibleClipFades(c);
+  c.speed = { ...c.speed, preset: next.preset, start: next.start, middle: next.middle, end: next.end };
+  resetVisibleFadeSpan(c, fades);
+}
 export function validateProject(p: CompositionProject): string {
   const markers = p.markers ?? [];
   if (markers.length > 5000 || new Set(markers.map(m => m.id)).size !== markers.length
@@ -184,7 +214,7 @@ export function validateProject(p: CompositionProject): string {
       )
         return "速度必须在 0.5×–2× 之间";
       const crop = c.picture.crop ?? [0,0,0,0];
-      if (!crop.every(n => Number.isFinite(n) && n >= 0 && n <= .99) || crop[0] + crop[2] >= .99 || crop[1] + crop[3] >= .99) return "裁剪范围无效";
+      if (!crop.every(n => Number.isFinite(n) && n >= 0 && n <= .99) || crop[0] + crop[2] >= 1 || crop[1] + crop[3] >= 1) return "裁剪范围无效";
       if (![c.picture.x, c.picture.y, c.picture.scale, c.picture.opacity, c.picture.rotation ?? 0].every(Number.isFinite)) return "画面参数无效";
       if (isImageSource(s) !== (c.display_duration_ms != null)) return "图片显示时长无效";
       if (c.video_transition && (!s.video || !Number.isFinite(c.video_transition.duration_ms)
@@ -337,6 +367,8 @@ export function adjustClip(
       source_in_ms: c.speed.domain_start_ms,
       source_out_ms: c.speed.domain_end_ms,
     };
+    const fades = visibleClipFades(c);
+    const oldIn = c.source_in_ms, oldOut = c.source_out_ms;
     if (handle === "in") {
       const old = outputAt(full, c.source_in_ms),
         max = outputAt(full, c.source_out_ms) - frame;
@@ -351,7 +383,9 @@ export function adjustClip(
         clamp(old + delta, min, clipDuration(full)),
       );
     }
-    resetFadeSpan(c);
+    // A clamped/no-op trim must not change an inherited envelope either.
+    if (c.source_in_ms !== oldIn || c.source_out_ms !== oldOut)
+      resetVisibleFadeSpan(c, fades);
   });
 }
 export const SPEED_PRESETS = [

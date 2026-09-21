@@ -43,6 +43,12 @@ object NativeAudioBridge {
 
     fun previous() = dispatch("previous", 0.0)
 
+    fun focusGranted() = dispatch("focusGranted", 0.0)
+
+    fun focusWaiting() = dispatch("focusWaiting", 0.0)
+
+    fun focusDenied(sequence: Long) = dispatch("focusDenied", sequence.toDouble())
+
     private fun dispatch(action: String, position: Double) {
         ensureLoaded()
         runCatching { submitRemote(action, position) }

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "01 Paper",
+    "file": "layers/01.png"
+  },
+  {
+    "name": "02 Atmosphere",
+    "file": "layers/02.png"
+  },
+  {
+    "name": "03 Grid details",
+    "file": "layers/03.png"
+  },
+  {
+    "name": "04 Sound orbit",
+    "file": "layers/04.png"
+  },
+  {
+    "name": "05 KDJ custom lettering",
+    "file": "layers/05.png"
+  },
+  {
+    "name": "06 Back ribbons",
+    "file": "layers/06.png"
+  },
+  {
+    "name": "07 Character - manual color",
+    "file": "layers/07.png"
+  },
+  {
+    "name": "08 KDJ foreground outline",
+    "file": "layers/08.png"
+  },
+  {
+    "name": "09 Chinese headline",
+    "file": "layers/09.png"
+  },
+  {
+    "name": "10 Front ribbons",
+    "file": "layers/10.png"
+  },
+  {
+    "name": "11 Foreground light",
+    "file": "layers/11.png"
+  },
+  {
+    "name": "12 Flow typography",
+    "file": "layers/12.png"
+  },
+  {
+    "name": "13 Product copy",
+    "file": "layers/13.png"
+  },
+  {
+    "name": "14 Waveform",
+    "file": "layers/14.png"
+  },
+  {
+    "name": "15 Header and footer",
+    "file": "layers/15.png"
+  }
+]

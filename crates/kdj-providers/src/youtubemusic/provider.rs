@@ -742,7 +742,7 @@ impl MusicProvider for YoutubeMusicProvider {
         );
         let final_path = unique_download_path(&output_dir, &filename);
 
-        let guard = AtomicDownload::new(&final_path);
+        let guard = AtomicDownload::new(&final_path)?;
         match stream {
             StreamSource::Direct { url, .. } => {
                 let parsed = url::Url::parse(&url).context("YouTube Music 播放流 URL 无效")?;
@@ -821,6 +821,7 @@ impl MusicProvider for YoutubeMusicProvider {
         if remux_webm {
             self.remux_webm_opus(guard.partial(), &job).await?;
         }
+        job.check_canceled()?;
         let path = guard.commit()?;
 
         let cover = self.fetch_cover(&source.cover).await;

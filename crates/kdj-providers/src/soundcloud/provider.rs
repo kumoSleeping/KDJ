@@ -1269,7 +1269,7 @@ impl MusicProvider for SoundCloudProvider {
         );
         let final_path = unique_download_path(&output_dir, &filename);
 
-        let guard = AtomicDownload::new(&final_path);
+        let guard = AtomicDownload::new(&final_path)?;
         let response =
             guarded_media_get(&url, &soundcloud_media_headers(), soundcloud_media_policy())
                 .await
@@ -1293,6 +1293,7 @@ impl MusicProvider for SoundCloudProvider {
         }
         file.flush().await.context("提交下载缓冲失败")?;
         drop(file);
+        job.check_canceled()?;
         let path = guard.commit()?;
 
         let cover = self.fetch_cover(&source.cover).await;

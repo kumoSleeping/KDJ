@@ -99,6 +99,14 @@ impl StreamCache {
         CachePaths::new(root, key).media
     }
 
+    /// An opaque scope invalidates prior permission/token generations without exposing them in paths.
+    pub fn scoped_key(source: &SongSource, quality: Quality, scope: &str) -> String {
+        if scope.is_empty() { return Self::key(source, quality); }
+        let mut scoped = source.clone();
+        scoped.key = format!("{}\0{scope}", source.key);
+        Self::key(&scoped, quality)
+    }
+
     pub fn key(source: &SongSource, quality: Quality) -> String {
         // FNV-1a 足够做本机文件名；manifest 还会核对平台/来源/音质，极端碰撞只会
         // 被判为 miss，不会把另一首歌当成当前歌曲播放。

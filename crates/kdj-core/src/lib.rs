@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod composition;
+pub mod audio_visualizer;
 pub mod workshop;
 pub mod events;
 pub mod models;

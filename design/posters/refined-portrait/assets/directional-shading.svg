@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1536" viewBox="0 0 1024 1536">
+  <title>Hand-drawn form shadows — upper-left directional light</title>
+  <desc>Manually authored shadow contours following hair masses, facial planes, fabric tension and pleat faces. No horizontal or full-figure diagonal mask.</desc>
+  <defs><mask id="silhouette" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1536" style="mask-type:alpha"><image href="chihaya-directional-light.png" width="1024" height="1536"/></mask></defs>
+  <g mask="url(#silhouette)">
+    <g id="hair-form" fill="#9baccc">
+      <path d="M501 99C542 125 564 170 578 231C591 291 598 344 622 389C650 443 698 482 752 528C817 584 872 624 901 686C866 644 815 609 768 574C711 533 668 493 637 448C596 389 584 338 573 283C563 216 548 147 501 99Z"/>
+      <path d="M591 384C608 443 631 502 668 569C705 636 728 714 738 786C746 858 733 923 692 971C719 909 719 852 710 798C696 718 670 658 647 596C623 529 608 458 591 384Z"/>
+      <path d="M692 533C741 581 786 632 814 700C847 781 836 870 788 917C810 855 806 803 786 750C765 694 726 609 692 533Z"/>
+    </g>
+  </g>
+</svg>

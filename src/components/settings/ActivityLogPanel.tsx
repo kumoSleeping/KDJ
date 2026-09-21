@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, Download } from "lucide-react";
+import { getBridge } from "../../lib/bridge";
 
 import { api } from "../../lib/api";
 import type {
@@ -119,6 +120,8 @@ export function ActivityLogPanel() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportPath, setExportPath] = useState("");
   const terminalRef = useRef<HTMLDivElement>(null);
   const followingTailRef = useRef(true);
 
@@ -155,7 +158,7 @@ export function ActivityLogPanel() {
     };
   }, [category]);
 
-  const networkStatus = overview?.excessive ? "请求偏多" : "频率正常";
+  const networkStatus = overview?.excessive ? "应用记录偏多" : "应用请求记录";
   const selectedEntry = overview?.entries.find((entry) => entry.id === selectedId) ?? null;
   // 接口按“最新优先”返回，才能先截取最近 N 条；终端显示则应当从旧到新，
   // 让新日志自然追加在底部。
@@ -188,6 +191,16 @@ export function ActivityLogPanel() {
               </button>
             ))}
           </div>
+          <Button variant="ghost" size="sm" disabled={exporting}
+            title="导出最近播放诊断（不含凭证和音频地址）" aria-label="导出播放诊断"
+            onClick={() => {
+              setExporting(true); setExportPath("");
+              void api.exportPlaybackDiagnostics().then(async ({ path }) => {
+                setExportPath(path);
+                try { await getBridge().revealPath(path); } catch { /* The path remains visible for browser/unsupported shells. */ }
+              }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))
+                .finally(() => setExporting(false));
+            }}><Download size={12} />导出诊断</Button>
           <Button
             variant="ghost"
             size="sm"
@@ -205,8 +218,8 @@ export function ActivityLogPanel() {
           <div className="kd-activity-log-rate" data-excessive={overview.excessive || undefined}>
             {overview.excessive ? <AlertTriangle size={12} aria-hidden="true" /> : null}
             <span>{networkStatus}</span>
-            <span>近 1 分钟 {overview.network_last_minute} 次</span>
-            <span>近 1 小时 {overview.network_last_hour} 次</span>
+            <span>近 1 分钟 {overview.network_last_minute} 条</span>
+            <span>近 1 小时 {overview.network_last_hour} 条</span>
             {overview.dropped > 0 ? <span>高负载时略过写盘 {overview.dropped} 条</span> : null}
           </div>
         ) : null}
@@ -233,6 +246,7 @@ export function ActivityLogPanel() {
           ))}
         </div>
         {selectedEntry ? <LogDetail entry={selectedEntry} /> : null}
+        {exportPath ? <p role="status">诊断已保存：{exportPath}</p> : null}
         <InlineNotice text={error} block onDismiss={() => setError("")} />
       </div>
     </Panel>

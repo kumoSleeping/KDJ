@@ -6,9 +6,12 @@
 //! 只要 `ct/cv/uin/g_tk/guid`，签名只用 SHA-1 + base64，纯 Rust 十几行就够。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use super::error::{business_code, network_error, QqError};
+use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -16,7 +19,7 @@ use sha1::{Digest, Sha1};
 
 const MUSICU: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const MUSICS: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
-const DESKTOP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+pub(super) const DESKTOP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                           (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 /// 请求平台。Desktop 是默认；Mobile 用于作者/专辑搜索和集合详情。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +79,7 @@ impl Credential {
     pub fn is_expired(&self) -> bool {
         let now = now_secs();
         if self.musickey_create_time > 0 && self.key_expires_in > 0 {
-            return now >= self.musickey_create_time + self.key_expires_in;
+            return now >= self.musickey_create_time.saturating_add(self.key_expires_in);
         }
         if self.expired_at > 1_000_000_000 {
             return now >= self.expired_at;
@@ -178,6 +181,11 @@ pub struct QqClient {
     http: reqwest::Client,
     session_path: PathBuf,
     credential: RwLock<Credential>,
+    credential_generation: AtomicU64,
+    login_epoch: AtomicU64,
+    refresh_gate: tokio::sync::Mutex<Option<(u64, Instant, QqError)>>,
+    #[cfg(test)]
+    test_endpoint: Option<String>,
     /// 接口已经明确拒绝过这份凭证。Python 版是 `_credential_invalid`：
     /// 置位之后 account() 报 expired，而不是继续显示"已登录"却每次操作都失败。
     credential_invalid: RwLock<bool>,
@@ -196,6 +204,11 @@ impl QqClient {
             http,
             session_path,
             credential: RwLock::new(Credential::default()),
+            credential_generation: AtomicU64::new(0),
+            login_epoch: AtomicU64::new(0),
+            refresh_gate: tokio::sync::Mutex::new(None),
+            #[cfg(test)]
+            test_endpoint: None,
             credential_invalid: RwLock::new(false),
             guid: new_guid(),
         };
@@ -206,6 +219,14 @@ impl QqClient {
     pub fn http(&self) -> &reqwest::Client {
         &self.http
     }
+
+    #[cfg(test)]
+    pub(super) fn set_test_endpoint(&mut self, endpoint: String) {
+        self.test_endpoint = Some(endpoint);
+        self.http = crate::net::http_timeouts(reqwest::Client::builder().no_proxy()).build().unwrap();
+    }
+
+    pub fn account_epoch(&self) -> u64 { self.login_epoch.load(Ordering::Acquire) }
 
     pub fn guid(&self) -> &str {
         &self.guid
@@ -227,14 +248,23 @@ impl QqClient {
     ///
     /// 只在错误文案命中 [`EXPIRED_MARKERS`] 时动手——网络抖动、限流都不算，
     /// 否则一次断网就把用户踢下线了。
-    pub fn note_error(&self, message: &str) {
-        if !looks_like_expired_credential(message) {
+    #[cfg(test)]
+    fn note_error(&self, message: &str) {
+        self.note_error_for(self.credential_generation.load(Ordering::Acquire), message);
+    }
+
+    fn note_error_for(&self, generation: u64, message: &str) {
+        let _current = self.credential.write().unwrap();
+        if generation != self.credential_generation.load(Ordering::Acquire)
+            || !looks_like_expired_credential(message)
+        {
             return;
         }
         if *self.credential_invalid.read().unwrap() {
             return;
         }
         *self.credential_invalid.write().unwrap() = true;
+        self.credential_generation.fetch_add(1, Ordering::AcqRel);
         if let Err(error) = crate::session_fs::remove_private_file(&self.session_path) {
             tracing::warn!("QQ 音乐凭证已作废，但会话文件删除失败：{error:#}");
         }
@@ -252,11 +282,23 @@ impl QqClient {
     }
 
     pub fn store_credential(&self, credential: Credential) -> Result<()> {
+        self.store_credential_for(credential, None)
+    }
+
+    fn store_credential_for(&self, credential: Credential, generation: Option<u64>) -> Result<()> {
         let mut current = self.credential.write().unwrap();
+        anyhow::ensure!(
+            generation.is_none_or(
+                |expected| expected == self.credential_generation.load(Ordering::Acquire)
+            ),
+            "QQ 音乐账号已变化，忽略旧凭证刷新"
+        );
         let body = serde_json::to_string_pretty(&credential).context("序列化 QQ 音乐凭证失败")?;
         crate::session_fs::write_private_atomic(&self.session_path, body.as_bytes())
             .context("写入 QQ 音乐凭证失败")?;
         *current = credential;
+        if generation.is_none() { self.login_epoch.fetch_add(1, Ordering::AcqRel); }
+        self.credential_generation.fetch_add(1, Ordering::AcqRel);
         *self.credential_invalid.write().unwrap() = false;
         Ok(())
     }
@@ -265,13 +307,14 @@ impl QqClient {
         let mut current = self.credential.write().unwrap();
         crate::session_fs::remove_private_file(&self.session_path)?;
         *current = Credential::default();
+        self.login_epoch.fetch_add(1, Ordering::AcqRel);
+        self.credential_generation.fetch_add(1, Ordering::AcqRel);
         *self.credential_invalid.write().unwrap() = false;
         Ok(())
     }
 
     /// 组 comm。Desktop/Web 都不需要 QIMEI。
-    fn build_comm(&self, platform: QqPlatform) -> Map<String, Value> {
-        let credential = self.credential.read().unwrap();
+    fn build_comm_for(&self, platform: QqPlatform, credential: &Credential) -> Map<String, Value> {
         let g_tk = if credential.musickey.is_empty() {
             5381
         } else {
@@ -335,7 +378,10 @@ impl QqClient {
     }
 
     pub(crate) fn cookie_header(&self) -> String {
-        let credential = self.credential.read().unwrap();
+        Self::cookie_header_for(&self.credential())
+    }
+
+    fn cookie_header_for(credential: &Credential) -> String {
         if !credential.is_present() {
             return String::new();
         }
@@ -367,43 +413,91 @@ impl QqClient {
         platform: QqPlatform,
         sign: bool,
     ) -> Result<Value> {
-        let outcome = self
-            .call_inner(module, method, param, platform, sign, None)
-            .await;
-        // 接口明说凭证死了就作废本地登录态，别让账号面板继续显示"已登录"
-        if let Err(err) = &outcome {
-            self.note_error(&format!("{err:#}"));
+        let epoch = self.login_epoch.load(Ordering::Acquire);
+        self.ensure_valid_credential().await?;
+        self.check_epoch(epoch)?;
+        let (credential, generation) = self.snapshot();
+        let mut outcome = self.call_inner(module, method, param.clone(), platform, sign, None, &credential).await;
+        self.check_epoch(epoch)?;
+        if outcome.as_ref().err().is_some_and(|e| matches!(e.downcast_ref::<QqError>(), Some(QqError::AuthExpired)))
+            && credential.is_present()
+        {
+            self.refresh_for(generation, epoch).await?;
+            self.check_epoch(epoch)?;
+            // The retried token and the generation it may invalidate must be the same snapshot.
+            let (refreshed, refreshed_generation) = self.snapshot();
+            outcome = self.call_inner(module, method, param, platform, sign, None, &refreshed).await;
+            self.check_epoch(epoch)?;
+            if outcome.as_ref().err().is_some_and(|e| matches!(e.downcast_ref::<QqError>(), Some(QqError::AuthExpired))) {
+                self.note_error_for(refreshed_generation, "登录凭证已过期");
+            }
         }
         outcome
     }
 
-    /// 刷新 musickey。
-    ///
-    /// 对应 Python 的 `client.login.refresh_credential`：QQ 的 musickey 有寿命，
-    /// 到点了先静默换一张新的，换不动才算真掉线——少了这一步用户每隔一段时间
-    /// 就得重新扫码一次。参数分支照抄 `qqmusic_api._build_refresh_param`。
-    pub async fn refresh_credential(&self) -> Result<Credential> {
-        let target = self.credential();
-        anyhow::ensure!(target.is_present(), "没有可刷新的 QQ 音乐凭证");
-        let param = refresh_param(&target);
-        let mut comm = self.build_comm(QqPlatform::Desktop);
-        comm.insert("tmeLoginType".into(), json!(target.login_type));
+    fn snapshot(&self) -> (Credential, u64) {
+        let credential = self.credential.read().unwrap();
+        (credential.clone(), self.credential_generation.load(Ordering::Acquire))
+    }
 
-        let data = self
-            .call_inner(
-                "music.login.LoginServer",
-                "Login",
-                param,
-                QqPlatform::Desktop,
-                false,
-                Some(comm),
-            )
-            .await
-            .inspect_err(|err| self.note_error(&format!("{err:#}")))?;
-        let refreshed: Credential =
-            serde_json::from_value(data).context("刷新回来的凭证字段不完整")?;
-        anyhow::ensure!(!refreshed.musickey.is_empty(), "刷新没有拿到新的 musickey");
-        self.store_credential(refreshed.clone())?;
+    fn check_epoch(&self, epoch: u64) -> Result<()> {
+        if self.login_epoch.load(Ordering::Acquire) != epoch { return Err(QqError::AccountChanged.into()); }
+        Ok(())
+    }
+
+    /// Used by playback as well as account inspection. Anonymous requests remain supported.
+    pub async fn ensure_valid_credential(&self) -> Result<Credential> {
+        let epoch = self.login_epoch.load(Ordering::Acquire);
+        let (credential, generation) = self.snapshot();
+        if self.credential_invalid() { return Err(QqError::AuthExpired.into()); }
+        if credential.is_present() && credential.is_expired() {
+            self.refresh_for(generation, epoch).await
+        } else { Ok(credential) }
+    }
+
+    pub async fn refresh_credential(&self) -> Result<Credential> {
+        let epoch = self.login_epoch.load(Ordering::Acquire);
+        let (_, generation) = self.snapshot();
+        self.refresh_for(generation, epoch).await
+    }
+
+    /// Singleflight for the entire credential generation, including failures. A transient failure
+    /// is shared briefly, never persisted as logout. Explicit server rejection alone invalidates.
+    async fn refresh_for(&self, generation: u64, epoch: u64) -> Result<Credential> {
+        let mut gate = self.refresh_gate.lock().await;
+        self.check_epoch(epoch)?;
+        let (target, current_generation) = self.snapshot();
+        if self.credential_invalid() || !target.is_present() { return Err(QqError::AuthExpired.into()); }
+        if current_generation != generation { return Ok(target); }
+        if let Some((failed_generation, at, error)) = gate.as_ref() {
+            if *failed_generation == generation && at.elapsed() < Duration::from_secs(5) {
+                return Err(error.clone().into());
+            }
+        }
+        let param = refresh_param(&target);
+        let mut comm = self.build_comm_for(QqPlatform::Desktop, &target);
+        comm.insert("tmeLoginType".into(), json!(target.login_type));
+        let result = self.call_inner("music.login.LoginServer", "Login", param,
+            QqPlatform::Desktop, false, Some(comm), &target).await;
+        self.check_epoch(epoch)?;
+        let data = match result {
+            Ok(data) => data,
+            Err(error) => {
+                let typed = error.downcast_ref::<QqError>().cloned().unwrap_or(QqError::InvalidResponse);
+                if matches!(typed, QqError::AuthExpired) { self.note_error_for(generation, "登录凭证已过期"); }
+                *gate = Some((generation, Instant::now(), typed.clone()));
+                return Err(typed.into());
+            }
+        };
+        let refreshed = match merge_refreshed_credential(&target, data) {
+            Ok(credential) => credential,
+            Err(error) => {
+                *gate = Some((generation, Instant::now(), error.clone()));
+                return Err(error.into());
+            }
+        };
+        self.store_credential_for(refreshed.clone(), Some(generation))?;
+        *gate = None;
         Ok(refreshed)
     }
 
@@ -415,11 +509,16 @@ impl QqClient {
         platform: QqPlatform,
         sign: bool,
         comm_override: Option<Map<String, Value>>,
+        credential: &Credential,
     ) -> Result<Value> {
+        let mut param = param;
+        if module == "music.vkey.GetVkey" {
+            param["uin"] = json!(credential.str_musicid());
+        }
         let mut payload = Map::new();
         payload.insert(
             "comm".into(),
-            Value::Object(comm_override.unwrap_or_else(|| self.build_comm(platform))),
+            Value::Object(comm_override.unwrap_or_else(|| self.build_comm_for(platform, credential))),
         );
         payload.insert(
             "req_0".into(),
@@ -427,48 +526,66 @@ impl QqClient {
         );
         let body = serde_json::to_string(&Value::Object(payload))?;
 
+        #[cfg(test)]
+        let (musicu, musics) = (self.test_endpoint.as_deref().unwrap_or(MUSICU), self.test_endpoint.as_deref().unwrap_or(MUSICS));
+        #[cfg(not(test))]
+        let (musicu, musics) = (MUSICU, MUSICS);
+        tracing::debug!(stage = "qq_api", module, method, "QQ upstream request");
         let mut request = if sign {
             self.http
-                .post(MUSICS)
+                .post(musics)
                 .query(&[("_", now_secs().to_string()), ("sign", zzc_sign(&body))])
         } else {
-            self.http.post(MUSICU)
+            self.http.post(musicu)
         };
-        let cookie = self.cookie_header();
+        let cookie = Self::cookie_header_for(credential);
         if !cookie.is_empty() {
             request = request.header(reqwest::header::COOKIE, cookie);
         }
         let response = request
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .with_context(|| format!("QQ 音乐请求失败：{module}.{method}"))?;
+            .timeout(Duration::from_secs(15))
+            .body(body).send().await.map_err(network_error)?;
         let status = response.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            bail!("QQ 音乐请求过于频繁；当前操作已停止且不会自动重试");
-        }
-        anyhow::ensure!(status.is_success(), "QQ 音乐 HTTP 状态异常：{status}");
-        let value: Value = response.json().await.context("QQ 音乐响应不是合法 JSON")?;
-
-        let outer_code = value.get("code").and_then(Value::as_i64).unwrap_or(0);
-        anyhow::ensure!(outer_code == 0, "QQ 音乐请求失败：code={outer_code}");
-        let item = value
-            .get("req_0")
-            .with_context(|| format!("QQ 音乐响应缺少 req_0：{module}.{method}"))?;
-        let code = item.get("code").and_then(Value::as_i64).unwrap_or(0);
-        match code {
-            0 => Ok(item.get("data").cloned().unwrap_or(Value::Null)),
-            // 这三个码是接口在明说"凭证没了"，上层据此作废本地登录态
-            1000 | 104401 | 104400 => bail!("登录凭证已过期"),
-            2001 => bail!("QQ 音乐请求过于频繁；当前操作已停止且不会自动重试"),
-            other => bail!("QQ 音乐接口返回 code={other}"),
-        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS { return Err(QqError::RateLimited.into()); }
+        if status == reqwest::StatusCode::UNAUTHORIZED { return Err(QqError::AuthExpired.into()); }
+        if !status.is_success() { return Err(QqError::Upstream(i64::from(status.as_u16())).into()); }
+        let bytes = crate::net::response_bytes_limited(response, 2 * 1024 * 1024).await
+            .map_err(|error| error.downcast_ref::<reqwest::Error>()
+                .map(|e| if e.is_timeout() { QqError::Timeout } else { QqError::Transport })
+                .unwrap_or(QqError::InvalidResponse))?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| QqError::InvalidResponse)?;
+        business_code(value.get("code").and_then(Value::as_i64).ok_or(QqError::InvalidResponse)?)?;
+        let item = value.get("req_0").ok_or(QqError::InvalidResponse)?;
+        business_code(item.get("code").and_then(Value::as_i64).ok_or(QqError::InvalidResponse)?)?;
+        item.get("data").cloned().ok_or_else(|| QqError::InvalidResponse.into())
     }
 }
 
 /// 刷新凭证的请求参数。三条分支和 `qqmusic_api._build_refresh_param` 一一对应：
 /// login_type=1 是微信、2 是 QQ，其余（手机号等）走通用参数。
+fn merge_refreshed_credential(target: &Credential, data: Value) -> std::result::Result<Credential, QqError> {
+    let mut update = data.as_object().cloned().ok_or(QqError::InvalidResponse)?;
+    if update.get("musickey").and_then(Value::as_str).is_none_or(str::is_empty) { return Err(QqError::InvalidResponse); }
+    // Canonicalize aliases before merging, or serde sees both old snake_case and new camelCase
+    // fields as a duplicate. Omitted OAuth refresh material remains available for the next rotation.
+    for (alias, canonical) in [("musickeyCreateTime", "musickey_create_time"), ("keyExpiresIn", "key_expires_in"),
+        ("loginType", "login_type"), ("encryptUin", "encrypt_uin"), ("refreshToken", "refresh_token"),
+        ("accessToken", "access_token"), ("expiredAt", "expired_at")] {
+        if let Some(value) = update.remove(alias) { update.entry(canonical.to_string()).or_insert(value); }
+    }
+    // A fresh token must not inherit the expired absolute deadline of the token it replaced.
+    // Where no new lifetime is supplied, retain the documented previous TTL and reset its origin;
+    // an unknown lifetime stays unknown and is handled by the server-rejection refresh path.
+    update.entry("musickey_create_time".to_string()).or_insert_with(|| json!(now_secs()));
+    update.entry("expired_at".to_string()).or_insert(json!(0));
+    let mut merged = serde_json::to_value(target).map_err(|_| QqError::InvalidResponse)?;
+    merged.as_object_mut().ok_or(QqError::InvalidResponse)?.extend(update);
+    let credential: Credential = serde_json::from_value(merged).map_err(|_| QqError::InvalidResponse)?;
+    if !credential.is_present() || credential.musicid != target.musicid { return Err(QqError::InvalidResponse); }
+    Ok(credential)
+}
+
 fn refresh_param(target: &Credential) -> Value {
     match target.login_type {
         1 => json!({
@@ -520,6 +637,90 @@ fn bool_to_int(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use super::super::test_support::{MockHttp, Reply, TempRoot};
+    use std::sync::Arc;
+
+    fn test_credential(expired: bool) -> Credential {
+        Credential { musicid: 1, musickey: "test-old".into(), refresh_token: "test-refresh".into(),
+            musickey_create_time: now_secs() - if expired { 100 } else { 0 }, key_expires_in: 50,
+            ..Default::default() }
+    }
+    fn setup_mock(root: &TempRoot, mock: &MockHttp, expired: bool) -> QqClient {
+        let mut client = QqClient::new(&root.0).unwrap(); client.set_test_endpoint(mock.url.clone());
+        client.store_credential(test_credential(expired)).unwrap(); client
+    }
+    fn rotated() -> Value { json!({"musicid":1,"musickey":"test-fresh","musickeyCreateTime":now_secs(),"keyExpiresIn":3600}) }
+    async fn vkey(client: &QqClient) -> Result<Value> {
+        client.call("music.vkey.GetVkey", "UrlGetVkey", json!({"uin":"stale-uin"}), QqPlatform::Desktop).await
+    }
+    #[tokio::test]
+    async fn concurrent_expired_playback_refreshes_once_and_binds_body_and_cookie() {
+        let root=TempRoot::new();
+        let mock=MockHttp::new(|request,_| {
+            if request.body["req_0"]["method"] == "Login" { return Reply::data(rotated()).delayed(25); }
+            assert_eq!(request.body["comm"]["authst"], "test-fresh");
+            assert_eq!(request.body["req_0"]["param"]["uin"], "1");
+            assert!(request.cookie.contains("test-fresh")); assert!(!request.cookie.contains("test-old"));
+            Reply::data(json!({"ok":true}))
+        });
+        let client=Arc::new(setup_mock(&root,&mock,true)); let mut tasks=Vec::new();
+        for _ in 0..8 { let client=client.clone(); tasks.push(tokio::spawn(async move { vkey(&client).await })); }
+        for task in tasks { assert_eq!(task.await.unwrap().unwrap()["ok"],true); }
+        let saved=mock.requests.lock().unwrap();
+        assert_eq!(saved.len(),9); assert_eq!(saved.iter().filter(|r|r.body["req_0"]["method"]=="Login").count(),1);
+        assert!(!client.credential_invalid()); assert_eq!(client.credential().refresh_token,"test-refresh");
+    }
+    #[tokio::test]
+    async fn early_server_rejection_refreshes_and_replays_exactly_once() {
+        let root=TempRoot::new();
+        let mock=MockHttp::new(|request,_| {
+            if request.body["req_0"]["method"] == "Login" { Reply::data(rotated()) }
+            else if request.body["comm"]["authst"] == "test-old" { Reply::raw(200,json!({"code":0,"req_0":{"code":104401}})) }
+            else { Reply::data(json!({"ok":true})) }
+        });
+        let client=setup_mock(&root,&mock,false); assert_eq!(vkey(&client).await.unwrap()["ok"],true);
+        assert_eq!(mock.requests.lock().unwrap().len(),3); assert!(!client.credential_invalid());
+        assert!(root.0.join("qqmusic.json").exists());
+    }
+    #[tokio::test]
+    async fn refresh_timeout_preserves_session_and_is_shared_briefly() {
+        let root=TempRoot::new(); let mock=MockHttp::new(|_,_|Reply::data(rotated()).delayed(100));
+        let mut client=setup_mock(&root,&mock,true);
+        client.http=reqwest::Client::builder().no_proxy().read_timeout(Duration::from_millis(20)).build().unwrap();
+        for _ in 0..2 { let error=client.ensure_valid_credential().await.unwrap_err(); assert!(matches!(error.downcast_ref::<QqError>(),Some(QqError::Timeout))); }
+        assert!(!client.credential_invalid()); assert_eq!(client.credential().musickey,"test-old");
+        assert!(root.0.join("qqmusic.json").exists()); assert_eq!(mock.requests.lock().unwrap().len(),1);
+    }
+    #[tokio::test]
+    async fn logout_and_new_login_during_refresh_are_never_overwritten() {
+        for relogin in [false,true] {
+            let root=TempRoot::new(); let mock=MockHttp::new(|_,_|Reply::data(rotated()).delayed(60));
+            let client=Arc::new(setup_mock(&root,&mock,true)); let task_client=client.clone();
+            let task=tokio::spawn(async move { task_client.ensure_valid_credential().await });
+            mock.wait_for_request().await; client.clear_credential().unwrap();
+            if relogin { client.store_credential(Credential { musicid:2,musickey:"new-account".into(),..Default::default() }).unwrap(); }
+            let error=task.await.unwrap().unwrap_err(); assert!(matches!(error.downcast_ref::<QqError>(),Some(QqError::AccountChanged)));
+            assert_eq!(client.credential().musicid,if relogin {2}else{0}); assert!(!client.credential_invalid());
+            assert_eq!(root.0.join("qqmusic.json").exists(),relogin);
+        }
+    }
+    #[tokio::test]
+    async fn explicit_refresh_rejection_invalidates_once_without_further_requests() {
+        let root=TempRoot::new(); let mock=MockHttp::new(|_,_|Reply::raw(200,json!({"code":104401})));
+        let client=setup_mock(&root,&mock,true);
+        for _ in 0..2 { assert!(client.ensure_valid_credential().await.is_err()); }
+        assert!(client.credential_invalid()); assert!(!root.0.join("qqmusic.json").exists());
+        assert_eq!(mock.requests.lock().unwrap().len(),1);
+    }
+    #[test]
+    fn rotation_merges_aliases_without_inheriting_an_expired_deadline() {
+        let mut old=test_credential(true); old.expired_at=now_secs()-10;
+        let fresh=merge_refreshed_credential(&old,rotated()).unwrap();
+        assert!(!fresh.is_expired()); assert_eq!(fresh.refresh_token,"test-refresh");
+        assert!(merge_refreshed_credential(&old,json!({"musicid":1})).is_err());
+        assert!(merge_refreshed_credential(&old,json!({"musickey":"x","musicid":2})).is_err());
+    }
 
     #[test]
     fn zzc_sign_matches_the_python_implementation() {
@@ -606,6 +807,38 @@ mod tests {
         assert!(client.credential_invalid());
         assert!(!dir.join("qqmusic.json").exists(), "失效的凭证要从磁盘删掉");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_refresh_and_expiry_never_replace_or_invalidate_a_new_login() {
+        let dir =
+            std::env::temp_dir().join(format!("kdj-qq-generation-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = QqClient::new(&dir).unwrap();
+        let old = Credential {
+            musicid: 1,
+            musickey: "old".into(),
+            ..Default::default()
+        };
+        client.store_credential(old.clone()).unwrap();
+        let generation = client.credential_generation.load(Ordering::Acquire);
+        client.clear_credential().unwrap();
+        assert!(client
+            .store_credential_for(old.clone(), Some(generation))
+            .is_err());
+        assert!(!client.has_credential());
+        client
+            .store_credential(Credential {
+                musicid: 2,
+                musickey: "new".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        client.note_error_for(generation, "登录凭证已过期");
+        assert!(client.store_credential_for(old, Some(generation)).is_err());
+        assert!(!client.credential_invalid());
+        assert_eq!(QqClient::new(&dir).unwrap().credential().musicid, 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -712,6 +712,7 @@ export function ResultTable({
                         if (resultRowActionUsesSelection(selected, groupKey)) onDownloadSelected();
                         else onDownloadGroup(group);
                       }}
+                      onDownloadSingle={() => onDownloadGroup(group)}
                       onRemoveFromStreamPlaylist={
                         onRemoveStreamGroup
                           ? () => onRemoveStreamGroup(

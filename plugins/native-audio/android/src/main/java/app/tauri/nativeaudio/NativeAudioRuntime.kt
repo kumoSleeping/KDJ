@@ -43,10 +43,12 @@ object NativeAudioRuntime {
     private var sessionPlayer: CoordinatorSessionPlayer? = null
     private var audioManager: AudioManager? = null
     private var focusRequest: AudioFocusRequest? = null
-    private var holdsAudioFocus = false
+    private val focusPolicy = AudioFocusPolicy()
+    private var focusRejectedSequence: Long? = null
     private var noisyRegistered = false
 
     private var mirrorTrackId: Long? = null
+    private var mirrorSequence = -1L
     private var mirrorTitle: String = ""
     private var mirrorArtist: String = ""
     private var mirrorAlbum: String = ""
@@ -64,19 +66,6 @@ object NativeAudioRuntime {
     private var lastProgressPersistedAtMs = 0L
     private var lastProgressPersistedStoryId: Long? = null
     private var lastProgressPersistedTimeSec: Double? = null
-
-    private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { change ->
-        when (change) {
-            AudioManager.AUDIOFOCUS_LOSS,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
-            -> NativeAudioBridge.pause()
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // CPAL 侧音量由 coordinator 管；焦点短暂丢失时直接暂停更稳妥。
-                NativeAudioBridge.pause()
-            }
-            else -> Unit
-        }
-    }
 
     private val becomingNoisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -102,6 +91,9 @@ object NativeAudioRuntime {
         var shouldStartService = false
         var shouldStopService = false
         synchronized(lock) {
+            val sequence = args.sequence ?: return
+            if (sequence <= mirrorSequence) return
+            mirrorSequence = sequence
             ensureLocked(ctx)
             mirrorTrackId = args.trackId?.takeIf { it > 0 }
             mirrorTitle = args.title?.trim().orEmpty()
@@ -119,8 +111,13 @@ object NativeAudioRuntime {
             mirrorPhase = args.phase?.trim()?.ifEmpty { null } ?: "idle"
             mirrorStampedElapsedMs = SystemClock.elapsedRealtime()
 
-            if (mirrorDesiredPlaying || mirrorIsPlaying) {
-                requestAudioFocusLocked(ctx)
+            if (mirrorDesiredPlaying) {
+                // Rust may have rejected an old focus denial because a newer Play/Load owns the
+                // transport. Its next desired snapshot is then a fresh request, not a dead wait.
+                if (focusRejectedSequence?.let { sequence > it } == true) {
+                    abandonAudioFocusLocked()
+                }
+                requestAudioFocusLocked()
                 registerNoisyReceiverLocked(ctx)
                 shouldStartService = true
             } else {
@@ -279,6 +276,7 @@ object NativeAudioRuntime {
             mainHandler.post { player?.release() }
 
             mirrorTrackId = null
+            mirrorSequence = -1L
             mirrorTitle = ""
             mirrorArtist = ""
             mirrorAlbum = ""
@@ -432,43 +430,72 @@ object NativeAudioRuntime {
         lastProgressPersistedTimeSec = snapshot.currentTime
     }
 
-    private fun requestAudioFocusLocked(context: Context) {
-        if (holdsAudioFocus) return
-        val manager = audioManager ?: return
-        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(
-                    FrameworkAudioAttributes.Builder()
-                        .setUsage(FrameworkAudioAttributes.USAGE_MEDIA)
-                        .setContentType(FrameworkAudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build(),
-                )
-                .setOnAudioFocusChangeListener(focusChangeListener, mainHandler)
-                .setAcceptsDelayedFocusGain(true)
-                .build()
-            focusRequest = request
-            manager.requestAudioFocus(request)
-        } else {
-            @Suppress("DEPRECATION")
-            manager.requestAudioFocus(
-                focusChangeListener,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN,
-            )
+    private fun applyFocusResultLocked(token: Long, result: AudioFocusPolicy.Result) {
+        when (focusPolicy.accept(token, result)) {
+            AudioFocusPolicy.Result.GRANTED -> NativeAudioBridge.focusGranted()
+            AudioFocusPolicy.Result.WAITING -> NativeAudioBridge.focusWaiting()
+            AudioFocusPolicy.Result.DENIED -> {
+                focusRejectedSequence = mirrorSequence
+                NativeAudioBridge.focusDenied(mirrorSequence)
+            }
+            null -> Unit
         }
-        holdsAudioFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    }
+
+    private fun requestAudioFocusLocked() {
+        if (focusPolicy.updateIntent(true) != AudioFocusPolicy.IntentAction.REQUEST) return
+        val token = focusPolicy.generation
+        val manager = audioManager
+        if (manager == null) {
+            applyFocusResultLocked(token, AudioFocusPolicy.Result.DENIED)
+            return
+        }
+        // minSdk is 26. Each request has its own listener token, including delayed grants: a
+        // callback retained by Android after Pause/Dispose must never reopen native output.
+        val listener = AudioManager.OnAudioFocusChangeListener { change ->
+            synchronized(lock) {
+                val result = when (change) {
+                    AudioManager.AUDIOFOCUS_GAIN -> AudioFocusPolicy.Result.GRANTED
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> AudioFocusPolicy.Result.WAITING
+                    AudioManager.AUDIOFOCUS_LOSS -> AudioFocusPolicy.Result.DENIED
+                    else -> null
+                }
+                if (result != null) applyFocusResultLocked(token, result)
+            }
+        }
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(
+                FrameworkAudioAttributes.Builder()
+                    .setUsage(FrameworkAudioAttributes.USAGE_MEDIA)
+                    .setContentType(FrameworkAudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build(),
+            )
+            .setOnAudioFocusChangeListener(listener, mainHandler)
+            .setAcceptsDelayedFocusGain(true)
+            .build()
+        focusRequest = request
+        val result = runCatching { manager.requestAudioFocus(request) }
+            .onFailure { Log.w(TAG, "requestAudioFocus failed", it) }
+            .getOrDefault(AudioManager.AUDIOFOCUS_REQUEST_FAILED)
+        applyFocusResultLocked(token, when (result) {
+            AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> AudioFocusPolicy.Result.GRANTED
+            AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> AudioFocusPolicy.Result.WAITING
+            else -> AudioFocusPolicy.Result.DENIED
+        })
     }
 
     private fun abandonAudioFocusLocked() {
-        if (!holdsAudioFocus) return
-        val manager = audioManager ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            focusRequest?.let { manager.abandonAudioFocusRequest(it) }
-        } else {
-            @Suppress("DEPRECATION")
-            manager.abandonAudioFocus(focusChangeListener)
+        if (focusPolicy.updateIntent(false) != AudioFocusPolicy.IntentAction.RELEASE) return
+        focusRejectedSequence = null
+        NativeAudioBridge.focusWaiting()
+        // A delayed request must be abandoned too, even though it never held focus.
+        val request = focusRequest
+        focusRequest = null
+        if (request != null) {
+            runCatching { audioManager?.abandonAudioFocusRequest(request) }
+                .onFailure { Log.w(TAG, "abandonAudioFocus failed", it) }
         }
-        holdsAudioFocus = false
     }
 
     private fun registerNoisyReceiverLocked(context: Context) {

@@ -191,6 +191,24 @@ fn submit_remote(
     action: &str,
     position: f64,
 ) -> Result<(), String> {
+    // Focus callbacks run on Android's main thread. Never wait for an actor acknowledgement:
+    // that actor may be publishing the snapshot that caused this focus request.
+    match action {
+        "focusGranted" => {
+            coordinator.set_output_permission(true, None);
+            return Ok(());
+        }
+        "focusWaiting" => {
+            coordinator.set_output_permission(false, None);
+            return Ok(());
+        }
+        "focusDenied" => {
+            let sequence = position.is_finite().then_some(position.max(0.0) as u64);
+            coordinator.set_output_permission(false, sequence);
+            return Ok(());
+        }
+        _ => {}
+    }
     let command = match action {
         "play" => PlaybackCommand::Play,
         "pause" => PlaybackCommand::Pause,

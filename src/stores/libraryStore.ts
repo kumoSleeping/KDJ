@@ -970,6 +970,26 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   handleEvent(event) {
     switch (event.type) {
+      case "connection.open": {
+        const ids = [...new Set([...get().orderedIds, ...get().selectedIds])];
+        api.invalidateTrackDetail(ids);
+        libraryWindow.invalidate(ids);
+        void Promise.all([get().refresh(), get().refreshStats(), get().refreshFolders(), get().refreshUndo()]);
+        return;
+      }
+      case "library.progress.snapshot": {
+        const events = event.payload.events;
+        const scans = events.filter(e => e.type === "scan.progress").map(e => e.payload).reverse();
+        const analyses = events.filter(e => e.type === "analyze.progress").map(e => e.payload).reverse();
+        const maintenance = new Map<string, MaintenanceProgress>();
+        for (const e of events) if (e.type === "maintenance.progress") maintenance.set(e.payload.kind, e.payload);
+        set({
+          scan: scans.find(p => p.phase !== "done") ?? scans[0] ?? null,
+          analyze: analyses.find(p => !p.cancelled && (p.total === 0 || p.done < p.total) && !quietJobs.has(p.job_id)) ?? null,
+          maintenance: [...maintenance.values()].filter(p => p.phase !== "done" || p.error),
+        });
+        return;
+      }
       case "download.updated": {
         // 下载写进曲库后，曲目表会由紧随其后的 library.updated 回刷；
         // 文件夹树还要单独重算计数，否则磁盘和表里都已有成品，树上仍少一首。

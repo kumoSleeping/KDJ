@@ -84,6 +84,14 @@ pub struct DeletedTrack {
     pub track: Track,
     pub playlist_items: Vec<(i64, i64)>,
     pub trash: Option<TrashHandle>,
+    rows: Vec<DeletedRows>,
+}
+
+#[derive(Debug, Clone)]
+struct DeletedRows {
+    table: &'static str,
+    columns: Vec<String>,
+    rows: Vec<Vec<SqlValue>>,
 }
 
 /// Last complete, root-matched folder hierarchy stored in SQLite.
@@ -2020,20 +2028,23 @@ impl LibraryService {
         } else {
             None
         };
-        if let Err(error) = self.delete_rows(&track, disposal) {
-            if let Some(handle) = trash.as_ref() {
-                if let Err(rollback) = restore_from_trash(handle, Path::new(&track.path)) {
+        let rows = match self.delete_rows_with_snapshot(&track, disposal, true) {
+            Ok((_, rows)) => rows,
+            Err(error) => {
+                if let Some(handle) = trash.as_ref() {
+                    if let Err(rollback) = restore_from_trash(handle, Path::new(&track.path)) {
+                        anyhow::bail!(
+                            "删除曲库记录失败：{error:#}；文件也无法从回收站恢复：{rollback:#}"
+                        );
+                    }
+                } else if disposal == FileDisposal::Trash && !Path::new(&track.path).exists() {
                     anyhow::bail!(
-                        "删除曲库记录失败：{error:#}；文件也无法从回收站恢复：{rollback:#}"
-                    );
-                }
-            } else if disposal == FileDisposal::Trash && !Path::new(&track.path).exists() {
-                anyhow::bail!(
                     "删除曲库记录失败：{error:#}；文件已进入系统回收站，但系统没有返回可恢复句柄"
                 );
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
 
         let undo = if disposal != FileDisposal::Remove
             && (trash.is_some() || Path::new(&track.path).is_file())
@@ -2042,6 +2053,7 @@ impl LibraryService {
                 track,
                 playlist_items,
                 trash,
+                rows,
             })
         } else {
             None
@@ -2060,26 +2072,68 @@ impl LibraryService {
     }
 
     fn delete_rows(&self, track: &Track, disposal: FileDisposal) -> Result<bool> {
+        self.delete_rows_with_snapshot(track, disposal, false)
+            .map(|(removed, _)| removed)
+    }
+
+    fn delete_rows_with_snapshot(
+        &self,
+        track: &Track,
+        disposal: FileDisposal,
+        snapshot: bool,
+    ) -> Result<(bool, Vec<DeletedRows>)> {
         let mut conn = self.db.conn()?;
         let tx = conn.transaction().context("开始删除曲目事务失败")?;
+        let mut rows = Vec::new();
+        if snapshot {
+            // Capture raw rows under the deletion transaction, including mtime and analysis revisions.
+            // The public Track is an effective projection and cannot reconstruct these tables.
+            for table in [
+                "tracks",
+                "tags",
+                "playlist_items",
+                "waveform_assets",
+                "composition_reservations",
+                "track_bpm_key_analysis_v2",
+                "track_bpm_key_analysis_v3",
+                "track_rhythm_v4",
+            ] {
+                let key = if table == "tracks" { "id" } else { "track_id" };
+                let mut stmt = tx.prepare(&format!("SELECT * FROM {table} WHERE {key} = ?"))?;
+                let columns = stmt
+                    .column_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let count = columns.len();
+                let values = stmt
+                    .query_map([track.id], |row| {
+                        (0..count)
+                            .map(|index| row.get::<_, SqlValue>(index))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows.push(DeletedRows {
+                    table,
+                    columns,
+                    rows: values,
+                });
+            }
+        }
         tx.execute("DELETE FROM tracks WHERE id = ?", [track.id])?;
         tx.execute("DELETE FROM tags WHERE track_id = ?", [track.id])?;
         tx.execute("DELETE FROM playlist_items WHERE track_id = ?", [track.id])?;
         tx.commit().context("提交删除曲目事务失败")?;
         if disposal == FileDisposal::Remove {
-            // 直接删除维持宽容语义：文件删不掉（权限/已被移走）不该让接口失败，
-            // 记录已从库里移除即可
             let _ = std::fs::remove_file(&track.path);
         }
-        Ok(true)
+        Ok((true, rows))
     }
 
     /// 把删除快照和文件一起恢复。数据库里的 id、分析结果、人工标记、标签及歌单位置
     /// 都按删除前写回，不走重新扫描，避免一次撤回变成一首"新导入"的歌。
     pub fn restore_deleted(&self, deleted: &DeletedTrack) -> Result<Track> {
         let track = &deleted.track;
-        let cue_points_json =
-            serde_json::to_string(&track.cue_points).context("序列化待恢复的 Cue 点失败")?;
         let original = Path::new(&track.path);
         anyhow::ensure!(
             self.get(track.id)?.is_none(),
@@ -2110,71 +2164,21 @@ impl LibraryService {
         let insert_result = (|| -> Result<()> {
             let mut conn = self.db.conn()?;
             let tx = conn.transaction()?;
-            tx.execute(
-                "INSERT INTO tracks (
-                    id, path, filename, title, artist, album, genre, year, duration,
-                    bitrate, samplerate, channels, format, size, bpm, bpm_confidence,
-                    first_beat, music_key, camelot, open_key, key_confidence, energy,
-                    rms_db, peak_db, rating, color, comment, cue_ms, end_ms,
-                    cue_points_json, cue_points_managed,
-                    source_platform, source_key, analyzed_at, added_at, modified_at,
-                    file_created_at, analysis_error
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )",
-                rusqlite::params![
-                    track.id,
-                    key_path,
-                    track.filename,
-                    track.title,
-                    track.artist,
-                    track.album,
-                    track.genre,
-                    track.year,
-                    track.duration,
-                    track.bitrate,
-                    track.samplerate,
-                    track.channels,
-                    track.format,
-                    track.size,
-                    track.bpm,
-                    track.bpm_confidence,
-                    track.first_beat,
-                    track.music_key,
-                    track.camelot,
-                    track.open_key,
-                    track.key_confidence,
-                    track.energy,
-                    track.rms_db,
-                    track.peak_db,
-                    track.rating,
-                    track.color,
-                    track.comment,
-                    track.cue_ms,
-                    track.end_ms,
-                    cue_points_json,
-                    track.cue_points_managed,
-                    track.source_platform,
-                    track.source_key,
-                    track.analyzed_at,
-                    track.added_at,
-                    track.modified_at,
-                    track.file_created_at,
-                    track.analysis_error,
-                ],
-            )?;
-            for tag in &track.tags {
-                tx.execute(
-                    "INSERT OR IGNORE INTO tags (track_id, tag) VALUES (?, ?)",
-                    rusqlite::params![track.id, tag],
-                )?;
-            }
-            for (playlist_id, position) in &deleted.playlist_items {
-                tx.execute(
-                    "INSERT OR IGNORE INTO playlist_items (playlist_id, track_id, position) VALUES (?, ?, ?)",
-                    rusqlite::params![playlist_id, track.id, position],
-                )?;
+            for snapshot in &deleted.rows {
+                let columns = snapshot
+                    .columns
+                    .iter()
+                    .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let placeholders = vec!["?"; snapshot.columns.len()].join(",");
+                let sql = format!(
+                    "INSERT INTO {} ({columns}) VALUES ({placeholders})",
+                    snapshot.table
+                );
+                for row in &snapshot.rows {
+                    tx.execute(&sql, rusqlite::params_from_iter(row))?;
+                }
             }
             tx.commit()?;
             Ok(())
@@ -4092,6 +4096,55 @@ mod tests {
         assert_eq!(playlist.name, "Main Set");
         let error = service.create_playlist("main set", "").unwrap_err();
         assert!(error.to_string().contains("同名"));
+    }
+
+    #[test]
+    fn delete_undo_preserves_raw_analysis_tables_and_file_mtime() {
+        let (service, id, path) = scratch_track("undo-all-analysis");
+        let mtime = stored_mtime(&service, &path);
+        {
+            let conn = service.db().conn().unwrap();
+            for table in ["track_bpm_key_analysis_v2", "track_bpm_key_analysis_v3"] {
+                conn.execute(&format!("INSERT INTO {table} (track_id, analyzer_revision, bpm, beat_times_json, downbeats_json, chroma_json, analyzed_at) VALUES (?, 'old-revision', 129, '[0.2,0.7]', '[0.2]', '[0.8]', 'then')"), [id]).unwrap();
+            }
+            conn.execute("INSERT INTO track_rhythm_v4 (track_id,revision,signature,precise,bpm,confidence,file_mtime,result_json) VALUES (?1,'old-rhythm','signature',1,131,0.9,?2,'{\"saved\":true}')", rusqlite::params![id, mtime]).unwrap();
+            conn.execute(
+                "INSERT INTO waveform_assets VALUES (?, 'overview', 4, 123, 'then', NULL)",
+                [id],
+            )
+            .unwrap();
+        }
+        let (_, deleted) = service.delete_for_undo(id, FileDisposal::Keep).unwrap();
+        service.restore_deleted(&deleted.unwrap()).unwrap();
+        assert_eq!(stored_mtime(&service, &path), mtime);
+        let conn = service.db().conn().unwrap();
+        for table in ["track_bpm_key_analysis_v2", "track_bpm_key_analysis_v3"] {
+            let row: (String, String, String) = conn.query_row(&format!("SELECT analyzer_revision, beat_times_json, chroma_json FROM {table} WHERE track_id=?"), [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+            assert_eq!(
+                row,
+                ("old-revision".into(), "[0.2,0.7]".into(), "[0.8]".into())
+            );
+        }
+        let rhythm: (String, f64) = conn
+            .query_row(
+                "SELECT result_json,file_mtime FROM track_rhythm_v4 WHERE track_id=?",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rhythm, ("{\"saved\":true}".into(), mtime));
+        assert_eq!(
+            conn.query_row(
+                "SELECT revision FROM waveform_assets WHERE track_id=?",
+                [id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            4
+        );
+        drop(conn);
+        drop(service);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

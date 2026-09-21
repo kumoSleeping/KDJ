@@ -1,6 +1,8 @@
 //! Persistent local composition queue. The journal is the authority; workers own immutable
 //! (id, generation) leases, and a durable commit receipt prevents duplicate overwrites.
 mod acceleration;
+mod frame_pipe;
+pub mod audio_visualizer;
 pub mod workshop;
 #[cfg(test)]
 mod lifecycle_tests;
@@ -1195,9 +1197,9 @@ impl CompositionManager {
                 )?;
                 media::replace_file(&temporary, &output)?;
             } else {
-                // Same-directory link is an atomic no-clobber publication. A collision after
+                // Same-directory rename is an atomic no-clobber publication. A collision after
                 // name selection is an error, never permission to replace somebody else's file.
-                std::fs::hard_link(&temporary, &output)
+                kdj_providers::net::rename_download_noclobber(&temporary, &output)
                     .context("提交成品失败（目标已存在或文件系统不支持安全提交）")?;
             }
             cleanup_receipt.committed = true;

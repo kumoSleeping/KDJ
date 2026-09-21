@@ -78,6 +78,7 @@ pub struct YoutubeHlsPreparation {
 /// GET 遇到鉴权/过期状态时需要按同一请求重新解析一次，而不是让用户重新点歌。
 #[derive(Debug, Clone)]
 pub struct SongPreviewTicket {
+    pub context: crate::preview_policy::PreviewContext,
     pub source: SongSource,
     pub quality: Quality,
     /// 稳定缓存键；即使当前命中本地，也保留来源信息供损坏时回源。
@@ -302,6 +303,7 @@ impl AppState {
             // CDN 签名参数不能作为自动 Referer 泄露给跨主机重定向目标。
             .referer(false)
             .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(30))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
             .context("构建在线媒体代理 HTTP 客户端失败")?;
@@ -636,6 +638,7 @@ mod tests {
 
     fn ticket(key: &str, at: Instant) -> SongPreviewTicket {
         SongPreviewTicket {
+            context: Default::default(),
             source: source(key),
             quality: Quality::Q320,
             cache_key: None,

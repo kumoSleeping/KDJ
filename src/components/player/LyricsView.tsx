@@ -5,7 +5,9 @@ import {
   lyricExtraTitle,
   useLyricsPrefs,
   type LyricsExtra,
+  type LyricsEngine,
 } from "../../lib/lyricsPrefs";
+import { LyricsSourcePicker } from "./LyricsSourcePicker";
 import { activeLrcIndex, startedLrcIndex } from "../../lib/lrc";
 import {
   getLatestPlayerSync,
@@ -37,13 +39,6 @@ function usePlayerPosition(trackId: number | null): number {
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
   }, [trackId]);
   return position;
-}
-
-function sourceLabel(platform: string | undefined): string {
-  if (platform === "wyy") return "网易云";
-  if (platform === "qqm") return "QQ 音乐";
-  if (platform === "ytm") return "YouTube Music";
-  return "";
 }
 
 function seekToLyric(trackId: number, position: number): void {
@@ -113,53 +108,14 @@ export function LyricsView({ track }: { track: Track | null }) {
     return <div className="kd-lyrics" />;
   }
 
-  if (
-    entry.status === "loading" ||
-    entry.status === "idle" ||
-    entry.status === "empty"
-  ) {
-    return (
-      <div className="kd-lyrics">
-        <LyricsHead
-          track={track}
-          source=""
-          coverFailed={coverFailed}
-          onCoverFail={() => setCoverFailed(true)}
-          layer="off"
-          canCycle={false}
-          onCycle={() => undefined}
-        />
-        <div className="kd-lyrics-stage" />
-      </div>
-    );
-  }
-
-  if (entry.status === "error") {
-    return (
-      <div className="kd-lyrics">
-        <LyricsHead
-          track={track}
-          source=""
-          coverFailed={coverFailed}
-          onCoverFail={() => setCoverFailed(true)}
-          layer="off"
-          canCycle={false}
-          onCycle={() => undefined}
-        />
-        <div className="kd-lyrics-stage">
-          <p className="kd-lyrics-empty">歌词暂时不可用</p>
-        </div>
-      </div>
-    );
-  }
-
-  const source = sourceLabel(entry.meta?.platform);
-
   return (
     <div className="kd-lyrics">
       <LyricsHead
+        key={track.id}
         track={track}
-        source={source}
+        platform={entry.meta?.platform}
+        matching={!!entry.inflight}
+        onSource={platform => void useLyricsStore.getState().ensure(track, { platform })}
         coverFailed={coverFailed}
         onCoverFail={() => setCoverFailed(true)}
         layer={layer}
@@ -167,6 +123,7 @@ export function LyricsView({ track }: { track: Track | null }) {
         onCycle={() => cycleLyricExtra(hasMeaning, hasRomaji)}
       />
       <div className="kd-lyrics-stage">
+        {entry.error || entry.status === "error" ? <p className="kd-lyrics-empty" role="alert">{entry.error || "歌词暂时不可用"}</p> : null}
         <div ref={listRef} className="kd-lyrics-scroll" aria-live="polite">
           {lines.map((line, index) => {
             const context = active >= 0 ? active : started;
@@ -212,7 +169,9 @@ function formatStamp(seconds: number): string {
 
 function LyricsHead({
   track,
-  source,
+  platform,
+  matching,
+  onSource,
   coverFailed,
   onCoverFail,
   layer,
@@ -220,7 +179,9 @@ function LyricsHead({
   onCycle,
 }: {
   track: Track;
-  source: string;
+  platform?: string;
+  matching: boolean;
+  onSource(platform: LyricsEngine): void;
   coverFailed: boolean;
   onCoverFail(): void;
   layer: LyricsExtra;
@@ -244,7 +205,7 @@ function LyricsHead({
       <div className="kd-lyrics-head-copy">
         <div className="kd-lyrics-head-title">{track.title || track.filename}</div>
         <div className="kd-lyrics-head-artist">{track.artist || "未知艺人"}</div>
-        {source ? <div className="kd-lyrics-head-source">歌词来自 {source}</div> : null}
+        <div className="kd-lyrics-head-source"><LyricsSourcePicker platform={platform} matching={matching} onSelect={onSource} /></div>
       </div>
       {canCycle ? (
         <button

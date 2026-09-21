@@ -18,6 +18,8 @@ pub mod protected_media;
 pub mod routes;
 pub mod rhythm;
 pub mod state;
+pub mod preview_policy;
+mod playback_diagnostics;
 pub mod stream_cache;
 pub mod stream_waveform;
 pub mod waveform;
@@ -226,7 +228,8 @@ fn http_activity(
         (&Method::POST, "/video/download") => network("视频下载 API", "视频平台"),
         (&Method::POST, "/video/resolve") => network("视频解析 API", "视频平台"),
         (&Method::POST, "/video/calibrate") => network("视频校准 API", "bilibili.com"),
-        (&Method::POST, "/song/preview") => network("在线预览 API", "音乐平台"),
+        (&Method::POST, "/song/preview") => network("试听地址申请", "音乐平台"),
+        _ if method == Method::GET && route.starts_with("/song/preview/") && !route.ends_with("/waveform") => network("在线音频响应", "音乐平台"),
         (&Method::POST, "/song/preview/ytm/sabr/spools") => {
             network("在线预览 API", "music.youtube.com")
         }
@@ -336,11 +339,21 @@ async fn record_activity_requests(
         return response;
     }
     let level = activity_level(status);
+    let mut diagnostics = Vec::new();
+    if let Some(attempt) = response.headers().get("x-kdj-attempt-id").and_then(|v|v.to_str().ok()) {
+        diagnostics.push(format!("attempt={attempt}"));
+    }
+    if let Some(code) = response.headers().get("x-kdj-error-code").and_then(|v|v.to_str().ok()) {
+        diagnostics.push(format!("code={code}"));
+    }
+    for (header, field) in [("x-kdj-requested-quality", "requested"), ("x-kdj-actual-quality", "actual")] {
+        if let Some(value) = response.headers().get(header).and_then(|v|v.to_str().ok()) { diagnostics.push(format!("{field}={value}")); }
+    }
     state.activity_log.record(activity_log::ActivityLogDraft {
         category,
         level,
         action: action.into(),
-        detail: String::new(),
+        detail: diagnostics.join(" "),
         target: target.into(),
         status: Some(status.as_u16()),
         duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
@@ -376,6 +389,7 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
     let workshop = compositions::workshop::Workshop::open(state.clone(), &compositions)?;
     let router = routes::router(ctx)
         .merge(compositions::workshop::routes::router(workshop))
+        .merge(compositions::audio_visualizer::studio::router())
         .merge(compositions::routes::router(compositions))
         .route("/ws", axum::routing::get(ws::handler))
         .layer(Extension(control))

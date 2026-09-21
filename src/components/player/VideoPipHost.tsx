@@ -31,8 +31,8 @@ import {
   announceAudioFocus,
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
-import { previewGain, useCrossfade } from "../../lib/crossfade";
-import { useMasterVolume } from "../../lib/masterVolume";
+import { useCrossfade } from "../../lib/crossfade";
+import { getPreviewOutputGain, useMasterVolume } from "../../lib/masterVolume";
 import {
   VideoPlaybackEngine,
   applyLocalVideoClock,
@@ -91,8 +91,7 @@ const NETWORK_VIDEO_START_TIMEOUT_MS = 15_000;
 const NETWORK_VIDEO_STALL_TIMEOUT_MS = 12_000;
 
 function currentNetworkVolume(): number {
-  const { coplay, x } = useCrossfade.getState();
-  return useMasterVolume.getState().volume * previewGain(coplay, x);
+  return getPreviewOutputGain();
 }
 
 type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
@@ -350,10 +349,6 @@ export function VideoPipHost() {
   const duration = useVideoPip((state) => state.duration);
   const error = useVideoPip((state) => state.error);
   const session = useVideoPip((state) => state.session);
-  const masterVolume = useMasterVolume((state) => state.volume);
-  const coplay = useCrossfade((state) => state.coplay);
-  const fadeX = useCrossfade((state) => state.x);
-  const networkVolume = masterVolume * previewGain(coplay, fadeX);
   const onlinePlayerPreference = useAppStore((state) => {
     if (session?.source !== "network") return "kdj";
     return session.platform === "youtube"
@@ -456,11 +451,18 @@ export function VideoPipHost() {
 
   useEffect(() => {
     if (session?.source !== "network") return;
-    for (const video of localSwap.videoRefs.current) {
-      if (video) video.volume = networkVolume;
-    }
-    void youtubeEmbedRef.current?.setVolume(networkVolume).catch(() => undefined);
-  }, [networkVolume, session?.source, localSwap.videoRefs]);
+    const apply = () => {
+      const gain = getPreviewOutputGain();
+      for (const video of localSwap.videoRefs.current) {
+        if (video) video.volume = gain;
+      }
+      void youtubeEmbedRef.current?.setVolume(gain).catch(() => undefined);
+    };
+    const unlistenVolume = useMasterVolume.subscribe(apply);
+    const unlistenCrossfade = useCrossfade.subscribe(apply);
+    apply();
+    return () => { unlistenVolume(); unlistenCrossfade(); };
+  }, [session?.source, localSwap.videoRefs]);
 
   const systemPipTarget = useCallback(() => {
     const source = activeVideo();

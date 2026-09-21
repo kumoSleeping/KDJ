@@ -45,19 +45,45 @@ pub async fn handler(
 }
 
 async fn pump(mut socket: WebSocket, state: Arc<AppState>) {
-    let mut events = state.hub.subscribe();
+    let (mut events, snapshot) = state.hub.subscribe_with_progress();
+    if socket.send(Message::Text(snapshot.into())).await.is_err() {
+        return;
+    }
     loop {
-        match events.recv().await {
+        let event = tokio::select! {
+            event = events.recv() => event,
+            incoming = socket.recv() => {
+                match incoming {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                    _ => continue,
+                }
+            }
+        };
+        match event {
             Ok(message) => {
                 if socket.send(Message::Text(message.into())).await.is_err() {
                     // 对端断开，收工
                     break;
                 }
             }
-            // 慢客户端落后了：跳到最新继续，不要断线。
-            // 进度类事件天然是后一条覆盖前一条，丢旧的是对的。
+            // A gap can include a final task event, so restore authoritative progress
+            // and ask the client to refresh its durable lists instead of silently skipping.
             Err(RecvError::Lagged(dropped)) => {
                 tracing::debug!("WS 落后 {dropped} 条事件");
+                let (fresh, snapshot) = state.hub.subscribe_with_progress();
+                events = fresh;
+                if socket.send(Message::Text(snapshot.into())).await.is_err() {
+                    break;
+                }
+                if socket
+                    .send(Message::Text(
+                        r#"{"type":"connection.resync","payload":{}}"#.into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
             Err(RecvError::Closed) => break,
         }

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -329,6 +329,8 @@ fn layout(args: &[String]) -> Option<Layout> {
                 | "-threads"
                 | "-ss"
                 | "-framerate"
+                | "-video_size"
+                | "-pixel_format"
                 | "-safe"
                 | "-itsoffset"
                 | "-i"
@@ -425,6 +427,10 @@ struct Staging {
 
 impl Staging {
     fn prepare(args: &[String], layout: &Layout) -> Result<Option<Self>> {
+        Self::prepare_input(args, layout, false)
+    }
+
+    fn prepare_input(args: &[String], layout: &Layout, replayable_frames: bool) -> Result<Option<Self>> {
         let output = PathBuf::from(args.last().unwrap());
         let Some(directory) = output.parent() else {
             return Ok(None);
@@ -447,6 +453,9 @@ impl Staging {
         for &i in &layout.inputs {
             // Resolve source aliases before comparing with the absent output.
             // Chapters metadata may be an input here and is never deleted.
+            if args[i + 1] == "pipe:0" && replayable_frames {
+                continue; // Only the explicitly replayable renderer owns this input.
+            }
             let input = Path::new(&args[i + 1]).canonicalize()?;
             if input == canonical.join(output.file_name().unwrap()) {
                 bail!("合成临时输出与源文件相同");
@@ -571,6 +580,34 @@ pub async fn render_with_status(
     args: &[String], duration: i64, cancel: &CancellationToken,
     preference: EncodingAcceleration, progress: impl FnMut(f64), status: impl Fn(&str),
 ) -> Result<()> {
+    render_inner(args, duration, cancel, preference, progress, status, None, None).await
+}
+
+/// Explicit opt-in for a frame source that can regenerate every frame on retry.
+pub(super) async fn render_frames(
+    args: &[String], duration: i64, cancel: &CancellationToken,
+    preference: EncodingAcceleration, progress: impl FnMut(f64), status: impl Fn(&str),
+    source: Arc<dyn super::frame_pipe::FrameSource>, canvas: (u32, u32, f64),
+) -> Result<()> {
+    render_inner(args, duration, cancel, preference, progress, status, Some(&source), Some(canvas)).await
+}
+
+async fn attempt(
+    args: &[String], duration: i64, cancel: &CancellationToken, progress: impl Fn(f64),
+    frames: Option<&Arc<dyn super::frame_pipe::FrameSource>>,
+) -> Result<()> {
+    if let Some(source) = frames {
+        super::frame_pipe::render(&kdj_providers::ffmpeg::binary()?, args, duration, cancel, Arc::clone(source), progress).await
+    } else {
+        media::render(args, duration, cancel, progress).await
+    }
+}
+
+async fn render_inner(
+    args: &[String], duration: i64, cancel: &CancellationToken,
+    preference: EncodingAcceleration, progress: impl FnMut(f64), status: impl Fn(&str),
+    frames: Option<&Arc<dyn super::frame_pipe::FrameSource>>, canvas: Option<(u32, u32, f64)>,
+) -> Result<()> {
     check_cancel(cancel)?;
     status("CPU 编码");
     // media::render currently accepts Fn. Mutex adapts FnMut while preserving
@@ -586,22 +623,26 @@ pub async fn render_with_status(
     };
     let candidates = candidates(preference);
     let Some(layout) = layout(args).filter(|_| !candidates.is_empty()) else {
-        return media::render(args, duration, cancel, report).await;
+        return attempt(args, duration, cancel, report, frames).await;
     };
-    let Some(staging) = Staging::prepare(args, &layout)? else {
-        return media::render(args, duration, cancel, report).await;
+    let prepare = || if frames.is_some() { Staging::prepare_input(args, &layout, true) } else { Staging::prepare(args, &layout) };
+    let Some(staging) = prepare()? else {
+        return attempt(args, duration, cancel, report, frames).await;
     };
     let binary = kdj_providers::ffmpeg::binary()?;
     let Ok(identity) = BinaryIdentity::read(&binary) else {
-        return media::render(args, duration, cancel, report).await;
+        return attempt(args, duration, cancel, report, frames).await;
     };
     let Some(encoder) = working_encoder(&identity, &candidates, cancel).await? else {
-        return media::render(args, duration, cancel, report).await;
+        return attempt(args, duration, cancel, report, frames).await;
     };
-    let bitrate = source_bitrate(args, &layout, cancel).await?;
+    let bitrate = match canvas {
+        Some((width, height, fps)) => bitrate(width, height, fps),
+        None => source_bitrate(args, &layout, cancel).await?,
+    };
     // Discovery may have taken seconds. Recheck both the output and executable
     // immediately before starting; media::render resolves the executable itself.
-    let current = Staging::prepare(args, &layout)?.context("合成临时目录已变化")?;
+    let current = prepare()?.context("合成临时目录已变化")?;
     if current.directory != staging.directory || !same_file(&current.metadata, &staging.metadata) {
         bail!("合成临时目录已变化");
     }
@@ -611,11 +652,11 @@ pub async fn render_with_status(
         .as_ref()
         != Some(&identity)
     {
-        return media::render(args, duration, cancel, report).await;
+        return attempt(args, duration, cancel, report, frames).await;
     }
     let hardware_args = accelerated_args(args, &layout, encoder, bitrate);
     status(encoder.name());
-    match media::render(&hardware_args, duration, cancel, &report).await {
+    match attempt(&hardware_args, duration, cancel, &report, frames).await {
         Ok(()) => check_cancel(cancel),
         Err(error) => {
             // The caller owns cleanup on cancellation. In particular, a cancelled
@@ -641,7 +682,7 @@ pub async fn render_with_status(
                 }
             }
             status("CPU 编码（硬件失败后回退）");
-            media::render(args, duration, cancel, report)
+            attempt(args, duration, cancel, report, frames)
                 .await
                 .with_context(|| {
                     format!(
@@ -781,6 +822,34 @@ mod tests {
             assert!(updated.windows(2).any(|w| w == pair));
         }
         assert_eq!(updated.last(), args.last());
+    }
+
+    #[test]
+    fn visualizer_pipe_requires_replayable_opt_in_and_preserves_input_options() {
+        let scratch = Scratch::new();
+        let (mut args, output, _) = scratch.setup();
+        let graph = args.iter().position(|s| s == "-filter_complex").unwrap();
+        args.splice(graph..graph, strings(&[
+            "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", "64x180",
+            "-framerate", "30", "-i", "pipe:0",
+        ]));
+        let parsed = layout(&args).expect("RGBA inputs must reach hardware selection");
+        assert!(Staging::prepare(&args, &parsed).is_err());
+        let stage = Staging::prepare_input(&args, &parsed, true).unwrap().unwrap();
+        for encoder in [Encoder::VideoToolbox, Encoder::Nvidia, Encoder::Intel, Encoder::Amd] {
+            let updated = accelerated_args(&args, &parsed, encoder, DEFAULT_BITRATE);
+            for pair in [["-pixel_format", "rgba"], ["-video_size", "64x180"], ["-framerate", "30"], ["-i", "pipe:0"]] {
+                assert!(updated.windows(2).any(|window| window == pair));
+            }
+            assert!(updated.windows(2).any(|window| window == ["-c:v:0", encoder.name()]));
+            assert_eq!(updated.last(), args.last());
+        }
+        std::fs::write(&output, b"owned partial").unwrap();
+        stage.remove_partial().unwrap();
+        assert!(!output.exists());
+        let index = args.iter().position(|s| s == "pipe:0").unwrap();
+        args[index] = "pipe:3".into();
+        assert!(Staging::prepare_input(&args, &parsed, true).is_err());
     }
 
     #[test]

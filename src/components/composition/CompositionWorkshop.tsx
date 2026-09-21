@@ -14,6 +14,7 @@ import {
   Play,
   Redo2,
   Scissors,
+  SlidersHorizontal,
   Trash2,
   Undo2,
   PictureInPicture2,
@@ -25,6 +26,7 @@ import {
   isVisualSource,
   adjustClip,
   cloneProject,
+  clipDuration,
   deleteClip,
   duplicateClip,
   findClip,
@@ -40,11 +42,16 @@ import { useWorkshopRhythmStore } from "../../stores/workshopRhythmStore";
 import { WorkshopTimeline } from "./WorkshopTimeline";
 import { WorkshopClipMenu } from "./WorkshopClipMenu";
 import { addWorkshopMarker } from "../../lib/workshopMarkers";
-import { WorkshopPictureTools } from "./WorkshopPictureTools";
+import { WorkshopClipProperties } from "./WorkshopClipProperties";
 import { WorkshopToolbar, WorkshopToolbarTarget } from "./WorkshopToolbar";
 import { WorkshopExportSettings } from "./WorkshopExport";
+import { WorkshopMediaTools } from "./WorkshopMediaTools";
+import { WorkshopVisualizerAction } from "./WorkshopVisualizerAction";
 import { canCancelExport } from "./WorkshopCancelButton";
 import { QueueStateMark } from "../queue/QueuePrimitives";
+import { VisualizerExportTasks } from "./VisualizerExportTasks";
+import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
+import { visualizerExportActive, visualizerExportStartable } from "../../lib/visualizerExportQueue";
 import { api } from "../../lib/api";
 import { useWorkshopUndoShortcuts } from "../../lib/useWorkshopUndoShortcuts";
 import { WorkshopCancelButton } from "./WorkshopCancelButton";
@@ -59,6 +66,7 @@ function WorkshopEditor() {
   const p = useWorkshopStore((s) => s.draft),
     selected = useWorkshopStore((s) => s.selectedId),
     saving = useWorkshopStore((s) => s.saving),
+    aligning = useWorkshopStore((s) => s.aligning),
     past = useWorkshopStore((s) => s.past.length),
     future = useWorkshopStore((s) => s.future.length),
     snap = useWorkshopStore((s) => s.snap),
@@ -74,6 +82,7 @@ function WorkshopEditor() {
   const playback = useWorkshopPlayback(),
     root = useRef<HTMLDivElement>(null);
   const [previewOpen, setPreviewOpen] = useState(true);
+  const [propertiesOpen, setPropertiesOpen] = useState(true);
   const hasVideo = Boolean(p?.layers.some(l => l.clips.length > 0 && isVisualSource(p.sources.find(s => s.id === l.source_id))));
   const togglePlayback = () => playback.toggle();
   useEffect(() => { setPreviewOpen(hasVideo); }, [hasVideo]);
@@ -82,6 +91,7 @@ function WorkshopEditor() {
     void useWorkshopStore.getState().refresh();
     root.current?.focus({ preventScroll: true });
     return () => {
+      void useWorkshopStore.getState().cancelAlign();
       void useWorkshopStore.getState().flush();
     };
   }, []);
@@ -101,7 +111,7 @@ function WorkshopEditor() {
   const cut = () => {
     const s = useWorkshopStore.getState();
     if (s.selectedId) edit((p) => splitClip(p, s.selectedId!, workshopCutTime(
-      p, s.selectedId!, s.position, useWorkshopRhythmStore.getState().results, s.barSnap,
+      p, s.selectedId!, playback.time(), useWorkshopRhythmStore.getState().results, s.barSnap,
     )));
   };
   const remove = (ripple?: boolean) => {
@@ -119,6 +129,16 @@ function WorkshopEditor() {
       edit((p) => adjustClip(p, s.selectedId!, s.handle, delta));
     else playback.seek(s.position + delta);
   };
+  const crop = (id: string) => {
+    const state = useWorkshopStore.getState();
+    const clip = state.draft && findClip(state.draft, id);
+    if (!clip) return;
+    state.select(id);
+    useWorkshopStore.setState({cropId: id});
+    setPreviewOpen(true);
+    setPropertiesOpen(true);
+    if (state.position < clip.start_ms || state.position >= clip.start_ms + clipDuration(clip)) playback.seek(clip.start_ms);
+  };
   return (
     <div
       className="vj-workshop"
@@ -134,7 +154,7 @@ function WorkshopEditor() {
       onKeyDownCapture={(e) => {
         if (
           (e.target as HTMLElement).closest(
-            "input,select,textarea,[contenteditable=true],.vj-floating-preview,.vj-export-settings,.vj-dialog,.vj-clip-menu,[role=scrollbar],[role=separator],[role=slider]",
+            "input,select,textarea,[contenteditable=true],.vj-floating-preview,.vj-export-settings,.vj-dialog,.vj-clip-menu,.vj-clip-properties,[role=scrollbar],[role=separator],[role=slider]",
           )
         )
           return;
@@ -203,8 +223,10 @@ function WorkshopEditor() {
       <InlineNotice className="vj-operation-notice" text={playback.error} />
       {hasVideo && previewOpen && <WorkshopFloatingPreview playback={playback}
         onClose={() => { setPreviewOpen(false); root.current?.focus({preventScroll: true}); }} />}
+      <div className="vj-editing-body">
       <WorkshopTimeline playback={playback} tools={
       <header className="vj-header vj-workshop-toolbar" data-workshop-toolbar="" aria-label="工作站操作">
+        {aligning && <><span role="status">对齐中</span><button onClick={() => void useWorkshopStore.getState().cancelAlign()}>取消对齐</button></>}
         <button type="button" aria-label="新建任务" title="新建任务" disabled={saving > 0}
           onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={16} /></button>
         <button
@@ -229,6 +251,8 @@ function WorkshopEditor() {
           {saving ? "保存中" : ""}
         </span>
         <WorkshopExportSettings />
+        <WorkshopMediaTools />
+        <WorkshopVisualizerAction editing />
         <div className="vj-menu-anchor">
           <button
             type="button"
@@ -293,7 +317,7 @@ function WorkshopEditor() {
         <span className="vj-preparing">
           {playback.loading ? "准备预览" : ""}
         </span>
-        <button type="button" aria-label="添加标记" title="Mark · M" disabled={!p} onClick={mark}>Mark</button>
+        <button type="button" aria-label="添加标记" title="添加标记 · M" disabled={!p} onClick={mark}>标记</button>
         <button
           type="button"
           aria-label="向前微调"
@@ -337,44 +361,27 @@ function WorkshopEditor() {
           <Trash2 size={15} />删除
         </button>
 
-        <button type="button" disabled={!c} onClick={() => remove(true)}>
-          删除并闭合本行空隙
-        </button>
-        <button
-          type="button"
-          disabled={!c || p!.layers.length < 2}
-          onClick={() => {
-            setReference("");
-            setAlign(true);
-          }}
-        >
-          自动对齐
-        </button>
-        <button
-          type="button"
-          aria-label="上移图层"
-          disabled={layerIndex <= 0}
-          onClick={() => edit((p) => moveLayer(p, layer!.id, layerIndex - 1))}
-        >
-          <ArrowUp size={15} />上移图层
-        </button>
-        <button
-          type="button"
-          aria-label="下移图层"
-          disabled={layerIndex < 0 || layerIndex === p!.layers.length - 1}
-          onClick={() => edit((p) => moveLayer(p, layer!.id, layerIndex + 1))}
-        >
-          <ArrowDown size={15} />下移图层
-        </button>
         <button type="button" aria-label="时间轴吸附" aria-pressed={snap || barSnap}
           title="吸附片段边界与节拍线；Alt/Option 拖动临时关闭"
           onClick={() => useWorkshopStore.setState({snap: !(snap || barSnap), barSnap: !(snap || barSnap)})}><Magnet size={15} /></button>
-        <WorkshopPictureTools />
+        <button type="button" aria-label="片段属性" title="片段属性" aria-expanded={propertiesOpen && !!c}
+          aria-pressed={propertiesOpen && !!c} disabled={!c} onClick={() => setPropertiesOpen(v => !v)}><SlidersHorizontal size={15} />属性</button>
         <button type="button" className="vj-preview-toggle" aria-label="打开作品预览小窗" title="预览小窗"
           aria-pressed={previewOpen && hasVideo} disabled={!hasVideo}
           onClick={() => setPreviewOpen(v => !v)}><PictureInPicture2 size={16} /></button>
       </header>} />
-      {clipMenu && <WorkshopClipMenu {...clipMenu} close={(restoreFocus = true) => { setClipMenu(null); if (restoreFocus) root.current?.focus({preventScroll: true}); }} />}
+      {propertiesOpen && <WorkshopClipProperties close={() => {setPropertiesOpen(false); root.current?.focus({preventScroll:true});}}
+        seek={playback.seek} crop={crop} actions={<>
+          <button type="button" onClick={() => remove(true)}>删除并闭合空隙</button>
+          <button type="button" disabled={!c || !p?.layers.some(l => l.clips.some(clip => clip.id !== selected && p.sources.find(s => s.id === clip.source_id)?.audio))}
+            onClick={() => {setReference(""); setAlign(true);}}>自动对齐</button>
+          <button type="button" aria-label="上移图层" disabled={layerIndex <= 0}
+            onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex - 1))}><ArrowUp size={15} />上移图层</button>
+          <button type="button" aria-label="下移图层" disabled={layerIndex < 0 || layerIndex === p!.layers.length - 1}
+            onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex + 1))}><ArrowDown size={15} />下移图层</button>
+        </>} />}
+      </div>
+      {clipMenu && <WorkshopClipMenu {...clipMenu} close={(restoreFocus = true) => { setClipMenu(null); if (restoreFocus) root.current?.focus({preventScroll: true}); }} onCrop={crop} />}
 
 
       {legacyOpen && (
@@ -485,10 +492,16 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
     expanded = useWorkshopStore(s => s.expandedId),
     jobs = useWorkshopStore(s => s.jobs),
     saving = useWorkshopStore(s => s.saving),
+    recoveryError = useWorkshopStore(s => s.recovery_error),
     error = useWorkshopStore(s => s.error);
   const submitting = useWorkshopStore(s => s.batchSubmitting);
+  const visualizerTasks = useVisualizerExportStore(s => s.tasks);
+  const visualizerError = useVisualizerExportStore(s => s.error);
   const [canceling, setCanceling] = useState(false);
-  useEffect(() => { void useWorkshopStore.getState().refresh(); }, []);
+  useEffect(() => {
+    void useWorkshopStore.getState().refresh();
+    void useVisualizerExportStore.getState().initialize().catch(() => undefined);
+  }, []);
   const openProject = async (id: string) => {
     await useWorkshopStore.getState().flush();
     await useWorkshopStore.getState().selectProject(id);
@@ -510,15 +523,25 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
       : <div className="vj-editor-navigation">{backButton}<span>工作站</span></div>)}
     {expanded === null && <WorkshopToolbar>
       <button aria-label="新建任务" disabled={saving > 0} onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={16} /></button>
+      <WorkshopVisualizerAction />
       <span className="vj-spacer" />
-      <button disabled={saving > 0 || submitting || !projects.some(p => projectDuration(p) > 0 && !jobs.some(j => j.project_id === p.id && ["queued","rendering","validating","committing","importing"].includes(j.phase)))} onClick={() => void useWorkshopStore.getState().exportAll()}><Download size={14} />全部导出</button>
-      {(submitting || jobs.some(canCancelExport)) && <button disabled={canceling} onClick={() => {
-        setCanceling(true); void useWorkshopStore.getState().cancelAllExports().catch(e => useWorkshopStore.setState({error:String(e)})).finally(() => setCanceling(false));
+      <button disabled={saving > 0 || submitting || (!visualizerTasks.some(visualizerExportStartable) && !projects.some(p => projectDuration(p) > 0 && !jobs.some(j => j.project_id === p.id && ["queued","rendering","validating","committing","importing"].includes(j.phase))))} onClick={() => {
+        useVisualizerExportStore.getState().start();
+        void useWorkshopStore.getState().exportAll();
+      }}><Download size={14} />全部导出</button>
+      {(submitting || jobs.some(canCancelExport) || visualizerTasks.some(visualizerExportActive)) && <button disabled={canceling} onClick={() => {
+        setCanceling(true); void Promise.all([useWorkshopStore.getState().cancelAllExports(), useVisualizerExportStore.getState().cancel()]).catch(e => useWorkshopStore.setState({error:String(e)})).finally(() => setCanceling(false));
       }}>{canceling ? "正在取消" : "全部取消"}</button>}
     </WorkshopToolbar>}
     <InlineNotice className="vj-operation-notice" text={error}
       onDismiss={() => useWorkshopStore.setState({error: ""})} />
+    <InlineNotice className="vj-operation-notice" text={visualizerError}
+      onDismiss={() => useVisualizerExportStore.setState({error: ""})} />
+    <InlineNotice className="vj-operation-notice" text={recoveryError ?? ""}
+      onDismiss={() => void api.acknowledgeWorkshopRecovery().then(s => useWorkshopStore.getState().accept(s)).catch(e => useWorkshopStore.setState({error: String(e)}))} />
     <div className="vj-task-stack" data-editing={expanded !== null || undefined}>
+      {expanded === null && <VisualizerExportTasks />}
+      {expanded === null && visualizerTasks.length > 0 && projects.length > 0 && <h3 className="vj-task-section-title">混接 <small>{projects.length}</small></h3>}
       {projects.filter(p => expanded === null || p.id === expanded).map(p => {
         const open = expanded === p.id && active === p.id;
         const job = [...jobs].reverse().find(j => j.project_id === p.id
@@ -541,7 +564,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
             onClick={() => { if (!open) void openProject(p.id); }}>
             <span>{p.name}</span><small>{formatTime(projectDuration(p))}</small>
           </button>
-          {(!job || !canCancelExport(job)) && <button type="button" aria-label={`导出任务 ${p.name}`}
+          {(!job || !["queued", "rendering", "validating", "committing", "importing", "import_failed"].includes(job.phase)) && <button type="button" aria-label={`导出任务 ${p.name}`}
             disabled={saving > 0 || submitting || projectDuration(p) <= 0}
             onClick={() => void useWorkshopStore.getState().export(p.id)}><Download size={14} />导出</button>}
           {job && job.phase !== "canceled" && <span className="vj-task-progress vj-task-heading-progress" role="status" title={job.path || job.detail}>
@@ -564,6 +587,10 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
             </>}
             {job.phase !== "complete" && job.detail && <span>{job.detail}</span>}
             {job?.phase === "import_failed" && <button onClick={() => void api.importWorkshopExport(job.id).then(s => useWorkshopStore.getState().accept(s)).catch(e => useWorkshopStore.setState({error:String(e)}))}>重试入库</button>}
+            {job?.phase === "import_failed" && <button title="保留现有成品，重新生成文件" onClick={() => void api.discardWorkshopReceipt(job.id).then(async s => {
+              useWorkshopStore.getState().accept(s);
+              await useWorkshopStore.getState().export(p.id);
+            }).catch(e => useWorkshopStore.setState({error:String(e)}))}>重新导出</button>}
             {job?.error && job.phase !== "canceled" && <span className="vj-error" role="status">{job.error}</span>}
           </div>}
           {open && <div className="vj-task-editor"><WorkshopEditor key={p.id} /></div>}

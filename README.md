@@ -46,7 +46,7 @@ KDJ 是一款面向音乐收集、整理、分析和播放的跨平台应用。�
 当软件所在环境可以联通 GitHub 时，KDJ 会在启动时自动检查更新。也可以在“设置”中手动检查。
 
 > [!NOTE]
-> 常规曲库管理、音乐分析和音频播放不依赖 FFmpeg；视频音画合并、视频音轨提取及部分格式处理需要系统已安装 [FFmpeg](https://ffmpeg.org/download.html)。
+> 常规曲库管理、音乐分析和音频播放不依赖 FFmpeg；混音编辑器的媒体读取、变速、导出，以及视频音画合并和音轨提取需要 FFmpeg。Mac（Apple Silicon / Intel）和 Windows x64 用户可在“设置 → 媒体工具”一键安装，也可直接导入 ZIP / 选择解压后的文件夹，无需终端、Homebrew 或配置 Path，安装后立即生效。Linux 可在同一面板查看 [FFmpeg 安装方式](https://ffmpeg.org/download.html)。
 
 ## 核心功能
 

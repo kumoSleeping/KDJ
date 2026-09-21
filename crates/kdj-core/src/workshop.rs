@@ -78,15 +78,19 @@ pub struct Picture {
     /// Removed fractions of the oriented source: left, top, right, bottom.
     #[serde(default)]
     pub crop: [f64; 4],
+    /// Preserve the original frame footprint instead of fitting the retained area.
+    #[serde(default = "default_crop_keep_position")]
+    pub crop_keep_position: bool,
     pub x: f64,
     pub y: f64,
     pub scale: f64,
     pub opacity: f64,
 }
+fn default_crop_keep_position() -> bool { true }
 impl Default for Picture {
     fn default() -> Self {
         Self {
-            rotation: 0., flip_x: false, flip_y: false, crop: [0.; 4],
+            rotation: 0., flip_x: false, flip_y: false, crop: [0.; 4], crop_keep_position: true,
             x: 0.5,
             y: 0.5,
             scale: 1.,
@@ -496,7 +500,7 @@ impl CompositionProject {
                     || !finite_range(p.opacity, 0., 1.)
                     || !finite_range(p.rotation, -360., 360.)
                     || !p.crop.iter().all(|v| finite_range(*v, 0., 0.99))
-                    || p.crop[0] + p.crop[2] >= 0.99 || p.crop[1] + p.crop[3] >= 0.99
+                    || p.crop[0] + p.crop[2] >= 1. || p.crop[1] + p.crop[3] >= 1.
                     || !finite_range(c.sound.gain, 0., 2.)
                 {
                     return fail("画面或声音参数无效");

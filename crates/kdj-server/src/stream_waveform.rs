@@ -398,7 +398,6 @@ impl StreamWaveformCoordinator {
 
     /// 播放响应内联缓存被主动截断时，writer 会正常删除 partial。这不是网络失败；
     /// 仅当协调器仍指向同一路径且没有后台 retry 接管时清掉幽灵字节。
-    #[cfg(target_os = "android")]
     pub(crate) fn discard_cache_path(&self, key: &str, path: &Path) {
         let mut inner = self.inner.lock().expect("stream waveform state");
         if !inner.entries.get(key).is_some_and(|entry| {

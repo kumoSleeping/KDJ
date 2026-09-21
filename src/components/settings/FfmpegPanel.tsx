@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Copy, Download, ExternalLink, RefreshCw } from "lucide-react";
-import { api } from "../../lib/api";
+import { mediaToolsInstalling, useFfmpegStore } from "../../stores/ffmpegStore";
 import { getBridge } from "../../lib/bridge";
 import { copyText } from "../../lib/copyText";
-import type { FfmpegInstallationStatus, FfmpegToolStatus } from "../../types";
+import type { FfmpegToolStatus } from "../../types";
 import { Button, InlineNotice, Panel } from "../common";
 
 const DOWNLOAD_PAGE = "https://ffmpeg.org/download.html";
@@ -20,29 +20,12 @@ function ToolRow({ name, tool }: { name: string; tool: FfmpegToolStatus }) {
 }
 
 export function FfmpegPanel() {
-  const [status, setStatus] = useState<FfmpegInstallationStatus | null>(null);
-  const [busy, setBusy] = useState(true);
-  const [error, setError] = useState("");
+  const { status, progress, checking, choosing, error, refresh, install, setError } = useFfmpegStore();
   const [copied, setCopied] = useState(false);
   const [distro, setDistro] = useState("debian");
-  const requestId = useRef(0);
-  const refresh = useCallback(async () => {
-    const id = ++requestId.current;
-    setBusy(true);
-    setError("");
-    try {
-      const next = await api.ffmpegInstallationStatus();
-      if (id === requestId.current) setStatus(next);
-    } catch (cause) {
-      if (id === requestId.current) setError(String(cause));
-    } finally {
-      if (id === requestId.current) setBusy(false);
-    }
-  }, []);
-  useEffect(() => {
-    void refresh();
-    return () => { requestId.current++; };
-  }, [refresh]);
+  const installing = mediaToolsInstalling(progress);
+  const busy = checking || choosing || installing;
+  useEffect(() => { void refresh(); }, [refresh]);
 
   const open = (url: string) => {
     const openExternal = getBridge().openExternal;
@@ -58,33 +41,37 @@ export function FfmpegPanel() {
   };
   const needsInstall = status && (status.ffmpeg.state !== "ready" || status.ffprobe.state !== "ready");
   const platform = status?.platform;
+  const managedInstall = ["windows", "macos"].includes(platform ?? "") && !!getBridge().installMediaTools;
+  const supported = status?.arch === "x86_64" || (platform === "macos" && status?.arch === "aarch64");
   return <Panel heading="媒体工具" dense>
     <div className="kd-ai-prompt kd-ffmpeg-settings">
       <div className="kd-ffmpeg-actions">
         <span className="kd-ai-prompt-copy">FFmpeg / ffprobe</span>
+        {managedInstall && <Button variant="ghost" size="sm" disabled={busy || !supported || !needsInstall} onClick={() => void install("download")}>
+          <Download size={12} aria-hidden="true" />{installing ? "安装中…" : "一键安装"}
+        </Button>}
         <Button variant="ghost" size="sm" disabled={busy} onClick={() => void refresh()}>
-          <RefreshCw size={12} aria-hidden="true" />{busy ? "检测中…" : "重新检测"}
+          <RefreshCw size={12} aria-hidden="true" />{checking ? "检测中…" : "重新检测"}
         </Button>
       </div>
       {status && <>
         <ToolRow name="FFmpeg" tool={status.ffmpeg} />
         <ToolRow name="ffprobe" tool={status.ffprobe} />
       </>}
-      {needsInstall && <div className="kd-ffmpeg-guide">
-        <p className="kd-ai-prompt-copy">VJ 导出、变速和媒体信息读取需要这两个工具。</p>
-        {platform === "windows" ? <>
-          <div className="kd-ffmpeg-actions">
-            <Button variant="ghost" size="sm" onClick={() => open(status.arch === "x86_64"
-              ? "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-              : "https://github.com/BtbN/FFmpeg-Builds/releases")}>
-              <Download size={12} aria-hidden="true" />{status.arch === "x86_64" ? "下载 Windows ZIP" : "Windows 下载页"}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => open(DOWNLOAD_PAGE)}>
-              <ExternalLink size={12} aria-hidden="true" />下载来源
-            </Button>
-          </div>
-          <p className="kd-ai-prompt-copy">{status.arch === "x86_64" ? "Gyan Essentials · Windows x64。" : `选择适合 ${status.arch} 的构建。`}解压后，将含 ffmpeg.exe 和 ffprobe.exe 的 bin 文件夹加入用户 Path，重启 KDJ 后重新检测。</p>
-        </> : platform === "macos" ? <>
+      {managedInstall && <div className="kd-ffmpeg-guide">
+        {!supported && needsInstall && <p className="kd-ai-prompt-copy">当前架构 {status?.arch} 暂不支持一键安装。</p>}
+        {installing && <div className="kd-ffmpeg-actions" role="status" aria-live="polite">
+          <span className="kd-ai-prompt-copy">{progress?.phase === "preparing" ? "准备安装…"
+            : progress?.phase === "extracting" ? "正在解压媒体工具…"
+            : progress?.phase === "validating" ? "正在验证媒体工具…"
+            : `正在下载 ${progress?.component ?? ""} · ${((progress?.downloaded ?? 0) / 1048576).toFixed(1)} MB${progress?.total ? ` / ${(progress.total / 1048576).toFixed(1)} MB` : ""}`}</span>
+          <progress aria-label="媒体工具安装进度" max={progress?.total || undefined}
+            value={progress?.phase === "downloading" && progress.total ? progress.downloaded : undefined} />
+        </div>}
+        {progress?.phase === "done" && !needsInstall && <p className="kd-ai-prompt-copy" role="status">媒体工具已就绪</p>}
+      </div>}
+      {needsInstall && !managedInstall && <div className="kd-ffmpeg-guide">
+        {platform === "macos" ? <>
           <p className="kd-ai-prompt-copy">通过 Homebrew 安装，适用于 Apple Silicon 和 Intel。在终端执行下方命令，完成后重新检测。</p>
           <div className="kd-ffmpeg-actions">
             <Button variant="ghost" size="sm" onClick={() => open("https://brew.sh/")}>
@@ -107,7 +94,7 @@ export function FfmpegPanel() {
             <Download size={12} aria-hidden="true" />Linux 软件包与下载
           </Button>
         </> : null}
-        {(platform === "macos" || platform === "linux") && command && <div className="kd-ffmpeg-command">
+        {((platform === "macos" && !getBridge().installMediaTools) || platform === "linux") && command && <div className="kd-ffmpeg-command">
           <code>{command}</code>
           <Button variant="ghost" size="sm" onClick={copy}>
             <Copy size={12} aria-hidden="true" />{copied ? "已复制" : "复制命令"}

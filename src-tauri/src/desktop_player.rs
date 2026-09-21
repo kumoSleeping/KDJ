@@ -153,14 +153,17 @@ impl DesktopPlayerHandle {
                 };
             let event_app = app.clone();
             let event_media = media_session.clone();
-            let coordinator = Arc::new(PlaybackCoordinator::spawn(move |snapshot| {
-                if let Some(media) = &event_media {
-                    media.update(&snapshot);
-                }
-                if let Err(error) = event_app.emit(STATE_EVENT, snapshot) {
-                    tracing::warn!("发送播放器状态失败：{error}");
-                }
-            })?);
+            let coordinator = Arc::new(PlaybackCoordinator::spawn_with_output_permission(
+                move |snapshot| {
+                    if let Some(media) = &event_media {
+                        media.update(&snapshot);
+                    }
+                    if let Err(error) = event_app.emit(STATE_EVENT, snapshot) {
+                        tracing::warn!("发送播放器状态失败：{error}");
+                    }
+                },
+                false,
+            )?);
             coordinator_slot
                 .set(Arc::downgrade(&coordinator))
                 .map_err(|_| "Android 媒体控制重复绑定播放器".to_string())?;

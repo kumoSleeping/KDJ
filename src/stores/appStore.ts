@@ -6,7 +6,7 @@
 
 import { create } from "zustand";
 import { api, events } from "../lib/api";
-import { enqueueSettingsWrite } from "../lib/settingsWriteBarrier";
+import { acknowledgeSettingsRollback, enqueueSettingsWrite } from "../lib/settingsWriteBarrier";
 import { isPlatformEnabled, normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
 import { readWorkspaceSession } from "../lib/workspaceSession";
 import type { Account, Health, SearchCapabilities, Settings, WsEvent } from "../types";
@@ -223,6 +223,27 @@ let bootAllInFlight: Promise<void> | null = null;
 let folderLiveRefreshScheduled = false;
 /** 设置重复挂载与登录回调可能撞在一起；全平台账号核验只保留一趟。 */
 let accountsRefreshInFlight: Promise<void> | null = null;
+const accountVersions = new Map<string, number>();
+const acceptedAccountSnapshots = new Map<string, number>();
+let accountSnapshotSequence = 0;
+function bumpAccountVersion(platform: string): void {
+  accountVersions.set(platform, (accountVersions.get(platform) ?? 0) + 1);
+}
+function accountSnapshot() {
+  return { versions: new Map(accountVersions), sequence: ++accountSnapshotSequence };
+}
+function acceptCurrentAccounts(current: Account[], incoming: Account[], snapshot: ReturnType<typeof accountSnapshot>): Account[] {
+  const accepted = mergeVerifiedAccounts(current, incoming).map(account => {
+    if ((accountVersions.get(account.platform) ?? 0) === (snapshot.versions.get(account.platform) ?? 0)
+      && (acceptedAccountSnapshots.get(account.platform) ?? 0) <= snapshot.sequence) {
+      acceptedAccountSnapshots.set(account.platform, snapshot.sequence);
+      return account;
+    }
+    return current.find(item => item.platform === account.platform);
+  }).filter((account): account is Account => Boolean(account));
+  // A login event may add a platform after this snapshot request began.
+  return [...accepted, ...current.filter(account => !incoming.some(item => item.platform === account.platform))];
+}
 /** 自动核验失败也进入冷却，避免用户反复开关设置时持续请求第三方平台。 */
 let accountsLastVerificationAttemptAt: number | null = null;
 const ACCOUNT_VERIFICATION_COOLDOWN_MS = 30 * 60 * 1000;
@@ -442,6 +463,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   bootstrap() {
     if (bootInFlight) return bootInFlight;
     const run = (async () => {
+      const versions = accountSnapshot();
       const [health, settings, accounts, searchCapabilities] = await Promise.allSettled([
         api.health(),
         api.getSettings(),
@@ -460,11 +482,12 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       }
       // 账号拉不到不挡启动，但要把原因留下：登录面板不然只会一直写着"稍等一下"
       if (accounts.status === "fulfilled") {
+        const currentAccounts = acceptCurrentAccounts(get().accounts, accounts.value, versions);
         const startupForeground = useStreamBrowseStore
           .getState()
-          .hydrateForStartup(accounts.value, readWorkspaceSession());
+          .hydrateForStartup(currentAccounts, readWorkspaceSession());
         set({
-          accounts: accounts.value,
+          accounts: currentAccounts,
           accountsError: "",
           // 在线前台的目标、侧栏高亮与工作区可见性必须在第一次挂载前一起就绪。
           ...(startupForeground ? { listMode: "search" as const, hasResults: true } : {}),
@@ -504,11 +527,12 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (accountsRefreshInFlight) return accountsRefreshInFlight;
     accountsLastVerificationAttemptAt = Date.now();
     set({ accountsRefreshing: true, accountsError: "" });
+    const versions = accountSnapshot();
     const run = (async () => {
       try {
         const verified = await api.accounts();
         set((state) => ({
-          accounts: mergeVerifiedAccounts(state.accounts, verified),
+          accounts: acceptCurrentAccounts(state.accounts, verified, versions),
           accountsError: "",
         }));
       } catch (error) {
@@ -525,6 +549,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   setAccount(account) {
+    bumpAccountVersion(account.platform);
     set({ accounts: mergeAccount(get().accounts, account) });
   },
 
@@ -565,9 +590,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
           // 立即重读本地快照，避免开关已经显示“开”，账号行还残留“未启用”。
           if (accountContextChanged) {
             try {
+              for (const account of get().accounts) bumpAccountVersion(account.platform);
+              const versions = accountSnapshot();
               const accounts = await api.cachedAccounts();
               if (intent === settingsIntent) {
-                set({ accounts, accountsError: "" });
+                set(state => ({ accounts: acceptCurrentAccounts(state.accounts, accounts, versions), accountsError: "" }));
               }
             } catch (error) {
               if (intent === settingsIntent) {
@@ -583,6 +610,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
             settingsError: `设置没有保存：${errorText(error)}`,
           });
           applyTheme(persistedSettings.theme);
+          acknowledgeSettingsRollback();
         }
         throw error;
       } finally {
@@ -594,8 +622,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   handleEvent(event) {
+    if (event.type === "connection.open") {
+      const versions = accountSnapshot();
+      void api.cachedAccounts().then(accounts => {
+        set(state => ({ accounts: acceptCurrentAccounts(state.accounts, accounts, versions), accountsError: "" }));
+      }).catch(error => set({ accountsError: `账号状态刷新失败：${errorText(error)}` }));
+    }
     if (event.type === "account.changed") {
-      set({ accounts: mergeAccount(get().accounts, event.payload) });
+      get().setAccount(event.payload);
     }
   },
 }));
