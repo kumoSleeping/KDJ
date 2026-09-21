@@ -45,6 +45,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: 校验 RC 版本排序
+        run: python3 scripts/test-release-version.py
+
       - name: 校验三处版本号一致
         run: |
           set -euo pipefail
@@ -141,6 +144,10 @@ jobs:
             echo
             echo "请根据系统选择安装包："
             echo
+            if [ "$VERSION" = "1.0.0-rc10" ]; then
+              echo "> rc9 用户请手动下载本页安装包更新一次。旧版按字符串比较 RC 编号，无法识别 rc10；本版已修复后续 RC 的更新判断。"
+              echo
+            fi
             echo "### Windows"
             echo "- **Windows 10/11 64 位（推荐）**：[下载 EXE 安装程序]($base_url/KDJ_${VERSION}_x64-setup.exe)"
             echo "- **Windows 10/11 64 位（企业或批量部署）**：[下载 MSI 安装程序]($base_url/KDJ_${VERSION}_x64_en-US.msi)"

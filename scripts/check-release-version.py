@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that a release candidate is newer than every semantic-version tag on stdin."""
+"""Verify release ordering, treating KDJ's legacy rcN suffix as numeric rc.N."""
 
 from __future__ import annotations
 
@@ -24,6 +24,10 @@ def semver_key(version: str) -> tuple[object, ...]:
     if prerelease is None:
         prerelease_key: tuple[object, ...] = (1,)
     else:
+        # KDJ 已发布 rc1…rc9；沿用 rcN 时必须按序号比较，避免 rc10 < rc9。
+        compact = re.fullmatch(r"(alpha|beta|rc)(0|[1-9][0-9]*)", prerelease)
+        if compact:
+            prerelease = f"{compact[1]}.{compact[2]}"
         identifiers = tuple(
             (0, int(item)) if item.isdigit() else (1, item)
             for item in prerelease.split(".")

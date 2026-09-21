@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { CompositionProject } from "../src/types/workshop";
 import type { WorkshopPositionAnalysis } from "../src/types/workshop";
-test("workshop selection, split, deletion, undo, layer order and autosave share one project", async () => {
+test("workshop selection, split, deletion, undo, layer order and autosave share one project", async (t) => {
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM("<!doctype html><body><div id='workshop-back'></div><div id='workshop-tools'></div><div id='root'></div></body>", {
     url: "http://localhost",
@@ -41,6 +41,9 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
       await import("../src/components/composition/CompositionWorkshop"),
     { useWorkshopStore } = await import("../src/stores/workshopStore"),
     { api } = await import("../src/lib/api");
+  const { useVisualizerExportStore } = await import("../src/stores/visualizerExportStore");
+  // This workshop fixture has no persisted visualizer jobs or IndexedDB.
+  t.mock.method(useVisualizerExportStore.getState(), "initialize", async () => {});
   const { initBridge } = await import("../src/lib/bridge");
   await initBridge();
   const p: CompositionProject = {

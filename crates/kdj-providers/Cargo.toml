@@ -47,3 +47,8 @@ url = "2.5.8"
 rookie = { version = "0.5.6", path = "../../vendor/rookie" }
 tempfile = "3.27"
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2"] }
+
+[target.'cfg(windows)'.dependencies]
+# rookie 读取浏览器 SQLite。单独测试 providers 时也要自带 SQLite，
+# 不能依赖应用的 kdj-library 恰好启用 bundled 或 runner 安装 sqlite3.lib。
+rusqlite = { version = "0.35", features = ["bundled"] }

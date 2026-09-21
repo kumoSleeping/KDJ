@@ -193,6 +193,9 @@ jobs:
       - name: 安装前端依赖
         run: npm ci
 
+      - name: 媒体工具包导入与恢复回归
+        run: cargo test -p kdj-providers --lib ffmpeg::managed --locked
+
       - name: Windows 播放与文件恢复回归
         if: runner.os == 'Windows'
         shell: bash
@@ -203,6 +206,7 @@ jobs:
           cargo test -p kdj-playback --lib device_ -- --test-threads=1
           cargo test -p kdj-playback --lib output_permission -- --test-threads=1
           cargo test -p kdj-app --lib diagnostics::tests
+          cargo test -p kdj-app --lib release_version::tests --locked
           cargo test -p kdj-app --lib data_recovery::tests
           cargo test -p kdj-providers --lib net::tests::strict_publication_keeps_source_and_destination_on_collision
           cargo test -p kdj-providers --lib net::tests::concurrent_downloads_keep_independent_bytes_and_existing_files

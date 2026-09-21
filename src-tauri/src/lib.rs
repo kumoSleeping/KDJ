@@ -36,6 +36,8 @@ mod midi;
 #[cfg(desktop)]
 mod media_tools;
 #[cfg(desktop)]
+mod release_version;
+#[cfg(desktop)]
 mod share_clipboard;
 #[cfg(desktop)]
 mod youtube_embed;
@@ -2832,7 +2834,13 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_native_audio::init());
     // updater 只在桌面注册：安卓的更新走 Release 页下 APK；重启使用 Tauri 核心能力。
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = builder.plugin(
+        tauri_plugin_updater::Builder::new()
+            .default_version_comparator(|current, update| {
+                release_version::is_newer(&current, &update.version)
+            })
+            .build(),
+    );
 
     let builder = builder.setup(|app| {
         #[cfg(target_os = "macos")]

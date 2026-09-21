@@ -8,10 +8,10 @@ const track = { id: 42, path: "/music/pinned.wav", title: "JAPANIZED BLUE", arti
 function project() { const p = createVisualizerProject(track); syncVisualizerImages(p, 1); return p; }
 function timeline(): VisualizerFeatureTimeline { return { version: 1, sample_rate: 22050, sample_count: 22050 * 3, fps: 30, frames: Array.from({ length: 90 }, (_, i) => ({ bands: Array(64).fill(i === 30 ? .8 : 0), bass: i === 30 ? .8 : 0, rms: i === 30 ? .2 : 0, onset: i === 30 ? .7 : 0 })) }; }
 
-test("reference defaults: required cover, wide canvas, small top disc, transparent mixed spectrum", () => {
+test("reference defaults: required cover, 1080p canvas, small top disc, transparent mixed spectrum", () => {
   const empty = createVisualizerProject(track); assert.throws(() => validateVisualizerProject(empty), /图片/);
   const p = project(); validateVisualizerProject(p);
-  assert.equal(p.scene.canvas.width, 1920); assert.equal(p.scene.canvas.height, 840);
+  assert.equal(p.scene.canvas.width, 1920); assert.equal(p.scene.canvas.height, 1080);
   assert.equal(p.scene.left.rotation_deg, 180); assert.equal(p.scene.disc.mode, "cover"); assert.ok(p.scene.disc.size < .3);
   assert.equal(p.look.smallSpectrum, "mixed"); assert.equal(p.lyrics.mode, "off"); assert.equal(p.track.id, 42);
 });
