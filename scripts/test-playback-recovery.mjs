@@ -13,6 +13,8 @@ const streamCode = compile('streamTrack');
 const previewCode = compile('songPreview');
 const playerSession = {};
 vm.runInNewContext(compile('playerSession'), { exports: playerSession });
+const streamRecovery = {};
+vm.runInNewContext(compile('streamRecovery'), { exports: streamRecovery });
 const source = key => ({ platform: 'wyy', key: String(key), title: `Song ${key}`, artists: ['Artist'],
   album: '', duration: 180, cover: '', max_quality: null, vip: false, payload: {} });
 const item = key => ({ source: source(key), title: `Song ${key}`, artist: 'Artist' });
@@ -36,6 +38,7 @@ function session(resolve) {
     '@tauri-apps/api/event': { emitTo: async () => {} },
     './playTrack': { playTrack: (track, autoPlay) => played.push({ track, autoPlay }) },
     './playerSession': {},
+    './streamRecovery': streamRecovery,
     './streamTrack': stream,
   };
   const globals = { window: { dispatchEvent() {} }, CustomEvent: class {},

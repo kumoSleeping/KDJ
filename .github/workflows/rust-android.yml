@@ -114,6 +114,8 @@ jobs:
           npm audit signatures
 
       - name: 前端生产构建门禁
+        env:
+          TAURI_ENV_PLATFORM: androideabi
         run: npm run tauri:web:build && npm run size:frontend:check
 
       - name: Cargo 依赖漏洞门禁

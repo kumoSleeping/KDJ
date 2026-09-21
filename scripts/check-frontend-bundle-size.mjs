@@ -3,7 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dist = path.join(root, "dist-tauri");
+// An explicit output directory lets release validation use disposable builds.
+const dist = path.resolve(root, process.argv[2] || "dist-tauri");
 const platform = process.env.TAURI_ENV_PLATFORM || process.platform;
 
 function report(level, message) {
@@ -62,7 +63,9 @@ async function main() {
   // Every desktop target now ships the same proof/player and SABR runtime. Mobile alone
   // uses unsupported stubs. Never let a successful Windows build silently omit the worker.
   const desktop = ["darwin", "windows", "win32", "linux"].includes(platform);
-  const maxTotal = desktop ? 1_800_000 : 1_550_000;
+  // This RC includes the visualizer studio/export queue and playback recovery.
+  // Minified baselines: desktop 1.807 MB, mobile 1.553 MB; retain small growth margins.
+  const maxTotal = desktop ? 1_820_000 : 1_560_000;
   const maxCss = 245_000;
 
   console.log(

@@ -130,7 +130,9 @@ export default defineConfig({
     // 目标 WebView 版本由平台决定：Windows 是 WebView2（Chromium），
     // macOS/Linux 是 WKWebView/WebKitGTK，后者的下限低不少。
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
-    minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
+    // Keep release assets within the shared desktop/mobile size budgets.
+    minify: process.env.TAURI_ENV_DEBUG ? false : "terser",
+    terserOptions: { compress: { passes: 3 } },
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
 });

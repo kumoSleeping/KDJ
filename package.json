@@ -1,6 +1,6 @@
 {
   "name": "kdj",
-  "version": "1.0.2-rc1",
+  "version": "1.0.2-rc2",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "KDJ — 本地曲库与多平台音乐/视频工作台",
@@ -45,6 +45,7 @@
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^25.0.1",
+    "terser": "5.51.2",
     "tsx": "^4.20.6",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
