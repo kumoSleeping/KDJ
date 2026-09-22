@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Download, ExternalLink, RefreshCw } from "lucide-react";
+import { Copy, Download, ExternalLink, FolderOpen, RefreshCw } from "lucide-react";
 import { mediaToolsInstalling, useFfmpegStore } from "../../stores/ffmpegStore";
 import { getBridge } from "../../lib/bridge";
 import { copyText } from "../../lib/copyText";
@@ -23,6 +23,9 @@ export function FfmpegPanel() {
   const { status, progress, checking, choosing, error, refresh, install, setError } = useFfmpegStore();
   const [copied, setCopied] = useState(false);
   const [distro, setDistro] = useState("debian");
+  const [copiedError, setCopiedError] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  useEffect(() => { setCopiedError(false); setCopyError(""); }, [error]);
   const installing = mediaToolsInstalling(progress);
   const busy = checking || choosing || installing;
   useEffect(() => { void refresh(); }, [refresh]);
@@ -47,8 +50,8 @@ export function FfmpegPanel() {
     <div className="kd-ai-prompt kd-ffmpeg-settings">
       <div className="kd-ffmpeg-actions">
         <span className="kd-ai-prompt-copy">FFmpeg / ffprobe</span>
-        {managedInstall && <Button variant="ghost" size="sm" disabled={busy || !supported || !needsInstall} onClick={() => void install("download")}>
-          <Download size={12} aria-hidden="true" />{installing ? "安装中…" : "一键安装"}
+        {managedInstall && <Button variant="ghost" size="sm" disabled={busy || !supported} onClick={() => void install("download")}>
+          <Download size={12} aria-hidden="true" />{installing ? "安装中…" : needsInstall ? "一键安装" : "重新安装"}
         </Button>}
         <Button variant="ghost" size="sm" disabled={busy} onClick={() => void refresh()}>
           <RefreshCw size={12} aria-hidden="true" />{checking ? "检测中…" : "重新检测"}
@@ -59,10 +62,21 @@ export function FfmpegPanel() {
         <ToolRow name="ffprobe" tool={status.ffprobe} />
       </>}
       {managedInstall && <div className="kd-ffmpeg-guide">
+        <div className="kd-ffmpeg-actions">
+          <Button variant="ghost" size="sm" onClick={() => open(platform === "windows" ? "https://www.gyan.dev/ffmpeg/builds/" : "https://ffmpeg.martin-riedl.de/")}>
+            <ExternalLink size={12} aria-hidden="true" />下载来源
+          </Button>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => void install("archive")}>
+            <Download size={12} aria-hidden="true" />导入 ZIP / 7Z
+          </Button>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => void install("folder")}>
+            <FolderOpen size={12} aria-hidden="true" />导入文件夹
+          </Button>
+        </div>
         {!supported && needsInstall && <p className="kd-ai-prompt-copy">当前架构 {status?.arch} 暂不支持一键安装。</p>}
         {installing && <div className="kd-ffmpeg-actions" role="status" aria-live="polite">
           <span className="kd-ai-prompt-copy">{progress?.phase === "preparing" ? "准备安装…"
-            : progress?.phase === "extracting" ? "正在解压媒体工具…"
+            : progress?.phase === "extracting" ? "正在导入媒体工具…"
             : progress?.phase === "validating" ? "正在验证媒体工具…"
             : `正在下载 ${progress?.component ?? ""} · ${((progress?.downloaded ?? 0) / 1048576).toFixed(1)} MB${progress?.total ? ` / ${(progress.total / 1048576).toFixed(1)} MB` : ""}`}</span>
           <progress aria-label="媒体工具安装进度" max={progress?.total || undefined}
@@ -101,7 +115,15 @@ export function FfmpegPanel() {
           </Button>
         </div>}
       </div>}
-      <InlineNotice text={error} block onDismiss={() => setError("")} />
+      <InlineNotice text={error} block className="kd-ffmpeg-error" onDismiss={() => setError("")} />
+      {error && <Button variant="ghost" size="sm" onClick={() => {
+        setCopiedError(false);
+        setCopyError("");
+        void copyText(error).then(() => setCopiedError(true)).catch(cause => setCopyError(`复制失败：${String(cause)}`));
+      }}>
+        <Copy size={12} aria-hidden="true" />{copiedError ? "已复制" : "复制错误详情"}
+      </Button>}
+      <InlineNotice text={copyError} block className="kd-ffmpeg-error" />
     </div>
   </Panel>;
 }

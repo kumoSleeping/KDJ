@@ -44,7 +44,7 @@ You may need to allow apps from unidentified developers. On macOS, allow the app
 When GitHub is reachable, KDJ checks for updates on launch. You can also check manually in Settings.
 
 > [!NOTE]
-> Everyday library management and music analysis do not require FFmpeg. Video remuxing, extracting audio from video, and VJ export need [FFmpeg](https://ffmpeg.org/download.html) installed on the system.
+> Everyday library management and music analysis do not require FFmpeg. Video remuxing, extracting audio from video, and VJ export need [FFmpeg](https://ffmpeg.org/download.html). On macOS and Windows, Settings → Media tools can install it or import existing ZIP / 7Z archives and extracted folders.
 
 KDJ packs cross-platform search, download, local library management, and music analysis into one desktop app. Instead of jumping between websites, downloaders, and tagging tools, preparing music can stay one continuous workflow.
 
@@ -84,7 +84,7 @@ KDJ packs cross-platform search, download, local library management, and music a
 
 ## Build for development
 
-Requires Node.js 20+, Rust 1.88+, and the matching [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requires Node.js 20+, Rust 1.93+ (the repository pins 1.93.0), and the matching [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 git clone https://github.com/kumoSleeping/KDJ.git

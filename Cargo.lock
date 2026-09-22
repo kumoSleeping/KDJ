@@ -709,6 +709,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
+
+[[package]]
 name = "cairo-rs"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1856,6 +1865,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -2573,9 +2583,11 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2 0.6.5",
+ "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
+ "windows-registry",
 ]
 
 [[package]]
@@ -3041,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3057,7 +3069,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3098,7 +3110,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "anyhow",
  "directories",
@@ -3113,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3135,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-playback"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "anyhow",
  "kdj-analysis",
@@ -3150,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-player"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "anyhow",
  "cc",
@@ -3166,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "aes",
  "anyhow",
@@ -3194,6 +3206,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sevenz-rust2",
  "sha1",
  "sha2",
  "tempfile",
@@ -3208,7 +3221,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-server"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "anyhow",
  "axum",
@@ -3236,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-stems"
-version = "1.0.2-rc2"
+version = "1.0.2-rc3"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -3309,6 +3322,12 @@ dependencies = [
  "libloading",
  "once_cell",
 ]
+
+[[package]]
+name = "libbz2-rs-sys"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
 
 [[package]]
 name = "libc"
@@ -3434,6 +3453,12 @@ checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 dependencies = [
  "twox-hash",
 ]
+
+[[package]]
+name = "lzma-rust2"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e2a88783b84d2d67ef2791778a9e76bfb68b8017aaf6c9d7d5f2626a478b16c"
 
 [[package]]
 name = "mach2"
@@ -4452,6 +4477,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
+name = "ppmd-rust"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "196a7c80b9a7652aba7cc070827516c2abe4ccdf53d128e1944003cf5726cff1"
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5454,6 +5485,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sevenz-rust2"
+version = "0.22.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb967eb8b29410e61e8c9005058fcfd5889d0b827856beb25529c73dfc86a98a"
+dependencies = [
+ "bzip2",
+ "crc32fast",
+ "flate2",
+ "js-sys",
+ "lzma-rust2",
+ "ppmd-rust",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5942,6 +5988,27 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows 0.61.3",
+]
+
+[[package]]
+name = "system-configuration"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
+dependencies = [
+ "bitflags 2.13.1",
+ "core-foundation 0.9.4",
+ "system-configuration-sys",
+]
+
+[[package]]
+name = "system-configuration-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
 ]
 
 [[package]]
@@ -8431,6 +8498,12 @@ dependencies = [
  "indexmap 2.14.0",
  "memchr",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

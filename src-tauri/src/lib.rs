@@ -219,6 +219,17 @@ impl Bridge {
     }
 }
 
+// Requests to the embedded server carry control credentials and local file paths.
+// Never send them through an OS/environment proxy or follow redirects.
+fn local_api_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("无法创建本机服务连接：{error}"))
+}
+
 #[tauri::command]
 async fn workshop_import_files(app: tauri::AppHandle, mut input: Value) -> Result<Value, String> {
     let (base, token) = {
@@ -239,7 +250,7 @@ async fn workshop_import_files(app: tauri::AppHandle, mut input: Value) -> Resul
         input["native_errors"] = serde_json::json!(errors);
         (bridge.base_url.clone(), bridge.auth_token.clone())
     };
-    let response = reqwest::Client::new().post(format!("{base}/api/workshop/intake")).bearer_auth(token).json(&input).send().await.map_err(|e| e.to_string())?;
+    let response = local_api_client()?.post(format!("{base}/api/workshop/intake")).bearer_auth(token).json(&input).send().await.map_err(|e| format!("无法连接本机混音编辑器：{e:#}"))?;
     let status = response.status();
     let mut result: Value = response.json().await.map_err(|e| e.to_string())?;
     if !status.is_success() { return Err(result.get("detail").or_else(|| result.get("error")).and_then(Value::as_str).unwrap_or("导入失败").to_owned()); }
@@ -877,6 +888,7 @@ fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<()
     let completed = Arc::new(AtomicBool::new(false));
     let completed_on_navigation = completed.clone();
     let app_on_navigation = app.clone();
+    let local_client = local_api_client()?;
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         "soundcloud-oauth",
@@ -914,6 +926,7 @@ fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<()
         let app = app_on_navigation.clone();
         let endpoint = format!("{base_url}/api/accounts/soundcloud/login/oauth/callback");
         let auth_token = auth_token.clone();
+        let client = local_client.clone();
 
         tauri::async_runtime::spawn(async move {
             let result = if !oauth_error.is_empty() {
@@ -921,7 +934,6 @@ fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<()
             } else if state.is_empty() || code.is_empty() {
                 Err("SoundCloud 授权回调不完整".into())
             } else {
-                let client = reqwest::Client::new();
                 match soundcloud_oauth_callback_request(
                     &client,
                     &endpoint,
@@ -1146,6 +1158,7 @@ fn open_soundcloud_web_login_window(app: tauri::AppHandle) -> Result<(), String>
         let bridge = app.state::<Bridge>();
         (bridge.base_url.clone(), bridge.auth_token.clone())
     };
+    let client = local_api_client()?;
     let completed = Arc::new(AtomicBool::new(false));
     let window = tauri::WebviewWindowBuilder::new(
         &app,
@@ -1183,7 +1196,6 @@ fn open_soundcloud_web_login_window(app: tauri::AppHandle) -> Result<(), String>
     let completed_on_poll = Arc::clone(&completed);
     tauri::async_runtime::spawn(async move {
         let endpoint = format!("{base_url}/api/accounts/soundcloud/login/webview");
-        let client = reqwest::Client::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
         loop {
             tokio::time::sleep(Duration::from_millis(600)).await;
@@ -1317,6 +1329,7 @@ fn ytm_web_login_request(
     client
         .post(endpoint)
         .bearer_auth(auth_token)
+        .timeout(std::time::Duration::from_secs(30))
         .json(&serde_json::json!({ "cookie": cookie }))
 }
 
@@ -1403,6 +1416,7 @@ fn open_youtube_login_window(app: tauri::AppHandle, source: YoutubeLoginSource) 
         let bridge = app.state::<Bridge>();
         (bridge.base_url.clone(), bridge.auth_token.clone())
     };
+    let client = local_api_client()?;
     let completed = Arc::new(AtomicBool::new(false));
     let window = tauri::WebviewWindowBuilder::new(
         &app,
@@ -1440,9 +1454,6 @@ fn open_youtube_login_window(app: tauri::AppHandle, source: YoutubeLoginSource) 
     let completed_on_poll = Arc::clone(&completed);
     tauri::async_runtime::spawn(async move {
         let endpoint = format!("{base_url}/api/accounts/{}/login/webview", source.platform());
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none()).build()
-            .expect("fixed local login client configuration");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
         let mut validation_failures = 0u8;
         loop {

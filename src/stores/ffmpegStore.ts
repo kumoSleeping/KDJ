@@ -13,7 +13,7 @@ interface FfmpegState {
   choosing: boolean;
   error: string;
   refresh: () => Promise<void>;
-  install: (action: "download" | "zip" | "folder") => Promise<void>;
+  install: (action: "download" | "archive" | "folder") => Promise<void>;
   setError: (error: string) => void;
 }
 

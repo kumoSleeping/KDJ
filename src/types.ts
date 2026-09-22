@@ -1116,7 +1116,7 @@ export interface KdjBridge {
     image: string;
   }) => Promise<SavedLoginQr>;
   pickFolder: () => Promise<string | null>;
-  installMediaTools?: (action: "download" | "zip" | "folder") => Promise<boolean>;
+  installMediaTools?: (action: "download" | "archive" | "folder") => Promise<boolean>;
   mediaToolsProgress?: () => Promise<FfmpegInstallProgress>;
   pickFolders: () => Promise<string[]>;
   /** 桌面主窗口接收系统文件夹；原生端验证目录并授予与选择器相同的访问范围。 */

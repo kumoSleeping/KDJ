@@ -7,7 +7,8 @@ use tauri_plugin_dialog::DialogExt;
 #[serde(rename_all = "snake_case")]
 pub enum InstallAction {
     Download,
-    Zip,
+    #[serde(alias = "zip")]
+    Archive,
     Folder,
 }
 
@@ -26,12 +27,12 @@ pub async fn install_media_tools(
     }
     let source = match action {
         InstallAction::Download => InstallSource::Download,
-        InstallAction::Zip => {
+        InstallAction::Archive => {
             let (tx, rx) = tokio::sync::oneshot::channel();
             app.dialog()
                 .file()
                 .set_title("选择 FFmpeg 工具包（可多选）")
-                .add_filter("FFmpeg ZIP", &["zip"])
+                .add_filter("FFmpeg 压缩包", &["zip", "7z"])
                 .pick_files(move |picked| {
                     let _ = tx.send(picked);
                 });
@@ -46,7 +47,7 @@ pub async fn install_media_tools(
                 .into_iter()
                 .map(|file| file.into_path().map_err(|error| error.to_string()))
                 .collect::<Result<Vec<_>, _>>()?;
-            InstallSource::Zip(paths)
+            InstallSource::Archive(paths)
         }
         InstallAction::Folder => {
             let (tx, rx) = tokio::sync::oneshot::channel();

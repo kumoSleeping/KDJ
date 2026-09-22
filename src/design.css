@@ -10928,3 +10928,13 @@ button.kd-stream-status {
 .kd-media-tools-dialog::backdrop { background: rgb(0 0 0 / 25%); }
 .kd-media-tools-dialog:not([open]) { display: none; }
 .kd-ffmpeg-actions progress { width: 120px; height: 4px; accent-color: var(--kd-theme); }
+.kd-ffmpeg-settings,
+.kd-ffmpeg-guide { grid-template-columns: minmax(0, 1fr); }
+.kd-ffmpeg-error { align-items: flex-start; }
+.kd-ffmpeg-error .kd-notice-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+  user-select: text;
+}

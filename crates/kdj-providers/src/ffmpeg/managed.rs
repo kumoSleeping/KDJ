@@ -27,6 +27,9 @@ const FFPROBE_NAME: &str = if cfg!(windows) {
 
 #[path = "managed_packages.rs"]
 mod packages;
+#[path = "managed_archives.rs"]
+mod archives;
+use archives::extract_archive;
 use packages::{download_specs, import_folder, prepare_binary, unpack_archives};
 const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 1536 * 1024 * 1024;
@@ -65,7 +68,7 @@ struct Manager {
 
 pub enum InstallSource {
     Download,
-    Zip(Vec<PathBuf>),
+    Archive(Vec<PathBuf>),
     Folder(PathBuf),
 }
 
@@ -180,10 +183,10 @@ impl Manager {
                     let archive = stage.path().join(format!("download-{index}.zip"));
                     self.download(&archive, spec)
                         .await
-                        .context("下载失败，可重试或导入已下载的 ZIP")?;
+                        .with_context(|| format!("{} 安装失败（下载来源：{}）", spec.component, spec.publisher))?;
                     downloaded_archives.push(archive);
                 }
-                InstallSource::Zip(downloaded_archives.clone())
+                InstallSource::Archive(downloaded_archives.clone())
             }
             other => other,
         };
@@ -191,7 +194,7 @@ impl Manager {
         let package_clone = package.clone();
         let bin = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
             match source {
-                InstallSource::Zip(paths) => unpack_archives(&paths, &package_clone)?,
+                InstallSource::Archive(paths) => unpack_archives(&paths, &package_clone)?,
                 InstallSource::Folder(path) => import_folder(&path, &package_clone)?,
                 InstallSource::Download => unreachable!(),
             }
@@ -246,22 +249,21 @@ impl Manager {
             .read_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(15 * 60))
             .referer(false)
-            .build()?;
+            .build()
+            .context("无法初始化媒体工具下载客户端")?;
         // Some publishers redirect only ZIP endpoints, not checksum endpoints.
         // Resolve the concrete build with a headers-only GET (their route has no
         // HEAD handler), then use that exact version for both package and checksum.
         let download_url = if spec.resolve_redirect {
-            client.get(&spec.url).send().await?.error_for_status()?.url().to_string()
+            download_request(&client, &spec.url, "解析安装包下载地址").await?.url().to_string()
         } else { spec.url.clone() };
-        let response = client
-            .get(format!("{download_url}.sha256"))
-            .send()
-            .await?
-            .error_for_status()?;
+        let checksum_url = format!("{download_url}.sha256");
+        let response = download_request(&client, &checksum_url, "获取 SHA-256 校验文件").await?;
+        let resolved_checksum_url = response.url().to_string();
         let mut checksum = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(|error| download_error("读取 SHA-256 校验文件", &resolved_checksum_url, error))?;
             ensure!(checksum.len() + chunk.len() <= 4096, "下载校验信息过大");
             checksum.extend_from_slice(&chunk);
         }
@@ -274,7 +276,7 @@ impl Manager {
             expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit()),
             "下载校验信息无效"
         );
-        let response = client.get(&download_url).send().await?.error_for_status()?;
+        let response = download_request(&client, &download_url, "下载 ZIP 安装包").await?;
         let resolved_url = response.url().to_string();
         let total = response.content_length();
         ensure!(
@@ -287,7 +289,7 @@ impl Manager {
         let mut downloaded = 0;
         self.phase("downloading");
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(|error| download_error("接收 ZIP 安装包", &resolved_url, error))?;
             downloaded += chunk.len() as u64;
             ensure!(downloaded <= MAX_DOWNLOAD, "下载包超过大小限制");
             hash.update(&chunk);
@@ -317,6 +319,30 @@ impl Manager {
         )?;
         Ok(())
     }
+}
+
+async fn download_request(client: &reqwest::Client, url: &str, step: &str) -> Result<reqwest::Response> {
+    client.get(url).send().await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| download_error(step, url, error))
+}
+
+fn download_error(step: &str, url: &str, error: reqwest::Error) -> anyhow::Error {
+    let reason = if error.is_timeout() {
+        "请求超时，请检查网络或代理后重试".to_owned()
+    } else if let Some(status) = error.status() {
+        format!("下载服务器返回 HTTP {status}")
+    } else if error.is_redirect() {
+        "下载地址重定向失败".to_owned()
+    } else if error.is_connect() {
+        "无法建立下载连接，请检查网络、代理及下方 DNS / TLS 错误详情".to_owned()
+    } else if error.is_body() || error.is_decode() {
+        "接收下载数据失败，可重试或手动下载后导入压缩包".to_owned()
+    } else {
+        "下载请求失败，请查看下方错误详情；也可手动下载后导入压缩包".to_owned()
+    };
+    let request_url = error.url().map(|value| value.as_str()).unwrap_or(url).to_owned();
+    anyhow::Error::new(error).context(format!("\n{step}失败：{reason}\n请求地址：{request_url}\n错误详情"))
 }
 
 fn safe_relative(path: &Path) -> bool {
@@ -354,7 +380,7 @@ fn find_bin(root: &Path) -> Result<PathBuf> {
     find_package_bins(root, 0, &mut 0, &mut found)?;
     found
         .pop()
-        .context("缺少 FFmpeg 或 ffprobe，请选择完整的工具文件夹；分开的 ZIP 请同时选择")
+        .context("缺少 FFmpeg 或 ffprobe，请选择完整的工具文件夹；分开的压缩包请同时选择")
 }
 
 fn find_package_bins(root: &Path, depth: usize, count: &mut usize, found: &mut Vec<PathBuf>) -> Result<()> {

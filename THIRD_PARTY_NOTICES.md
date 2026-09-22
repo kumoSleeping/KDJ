@@ -102,6 +102,33 @@ downloader share one media session. The dependency is loaded only for YTM audio;
 the production chunk is 84,509 bytes before compression (20,112 bytes gzip),
 and ordinary YouTube video uses the system HLS stack instead.
 
+## 7Z archive decoding
+
+KDJ decodes user-selected FFmpeg archives using the following Rust crates;
+no 7-Zip executable or FFmpeg binary is bundled by this integration.
+
+| Crate | Version | License | Source |
+| --- | --- | --- | --- |
+| sevenz-rust2 | 0.22.2 | Apache-2.0 | <https://github.com/hasenbanck/sevenz-rust2> |
+| lzma-rust2 | 0.20.1 | Apache-2.0 | <https://github.com/hasenbanck/lzma-rust2> |
+| ppmd-rust | 1.5.0 | CC0-1.0 OR MIT-0 | <https://github.com/hasenbanck/ppmd-rust> |
+| bzip2 | 0.6.1 | MIT OR Apache-2.0 | <https://github.com/trifectatechfoundation/bzip2-rs> |
+| libbz2-rs-sys | 0.2.5 | bzip2-1.0.6 | <https://github.com/trifectatechfoundation/libbzip2-rs> |
+| zlib-rs | 0.6.8 | Zlib | <https://github.com/trifectatechfoundation/zlib-rs> |
+
+Published crate sources retain their upstream copyright and license files.
+The archive library's compression and encryption features are disabled.
+FFmpeg builds imported by the user retain their own, separate license terms.
+
+## macOS system proxy configuration
+
+- Project: <https://github.com/mullvad/system-configuration-rs>
+- Crates: `system-configuration` 0.7.0; `system-configuration-sys` 0.6.0
+- License: MIT OR Apache-2.0
+
+Reqwest uses these bindings to read the system proxy settings for desktop
+network requests. Local authenticated KDJ API requests bypass proxies.
+
 ## hls-transmux 0.2.1
 
 - Project: <https://github.com/Logosww/hls-transmux>

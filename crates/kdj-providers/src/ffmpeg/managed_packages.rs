@@ -24,31 +24,31 @@ pub(super) fn download_specs(platform: &str, arch: &str) -> Result<Vec<DownloadS
                 publisher: "Martin Riedl", source_page: "https://ffmpeg.martin-riedl.de/", component: name, resolve_redirect: true,
             }).into())
         }
-        _ => bail!("此设备请导入适合系统架构的 FFmpeg ZIP 或文件夹"),
+        _ => bail!("此设备请导入适合系统架构的 FFmpeg 压缩包或文件夹"),
     }
 }
 
 pub(super) fn unpack_archives(paths: &[PathBuf], target: &Path) -> Result<()> {
     ensure!(
         !paths.is_empty() && paths.len() <= 2,
-        "请选择一套工具包，最多两个 ZIP"
+        "请选择一套工具包，最多两个 ZIP / 7Z"
     );
     if paths.len() == 1 {
-        extract_zip(&paths[0], target)?;
+        extract_archive(&paths[0], target)?;
         return Ok(());
     }
     // Separate package roots avoid overwriting identically named licenses/README.
     let bin = target.join("bin");
     fs::create_dir_all(&bin)?;
     for (index, path) in paths.iter().enumerate() {
-        extract_zip(path, &target.join(format!("archive-{index}")))?;
+        extract_archive(path, &target.join(format!("archive-{index}")))?;
     }
     for name in [FFMPEG_NAME, FFPROBE_NAME] {
         let mut found = Vec::new();
         find_tool(target, name, 0, &mut found)?;
         ensure!(
             found.len() == 1,
-            "ZIP 中缺少或包含多份 {name}，请同时选择一套 FFmpeg 和 ffprobe"
+            "压缩包中缺少或包含多份 {name}，请同时选择一套 FFmpeg 和 ffprobe"
         );
         fs::rename(&found[0], bin.join(name))?;
     }
@@ -187,14 +187,14 @@ pub(super) async fn prepare_binary(path: &Path, automatic: bool) -> Result<()> {
         use std::io::{Seek, SeekFrom};
         let mut file = File::open(path)?;
         let mut dos = [0u8; 64];
-        file.read_exact(&mut dos).context("工具文件不完整，请重新下载 ZIP")?;
+        file.read_exact(&mut dos).context("工具文件不完整，请重新下载工具包")?;
         ensure!(&dos[..2] == b"MZ", "请选择 Windows 版 FFmpeg 工具包，不是源码或其他系统的构建");
         let offset = u32::from_le_bytes(dos[60..64].try_into().unwrap()) as u64;
-        ensure!(offset >= 64 && offset + 24 <= file.metadata()?.len(), "Windows 工具文件头损坏，请重新下载 ZIP");
+        ensure!(offset >= 64 && offset + 24 <= file.metadata()?.len(), "Windows 工具文件头损坏，请重新下载工具包");
         file.seek(SeekFrom::Start(offset))?;
         let mut pe = [0u8; 24];
         file.read_exact(&mut pe)?;
-        ensure!(&pe[..4] == b"PE\0\0", "不是有效的 Windows 工具，请重新下载 ZIP");
+        ensure!(&pe[..4] == b"PE\0\0", "不是有效的 Windows 工具，请重新下载工具包");
         let machine = u16::from_le_bytes([pe[4], pe[5]]);
         let compatible = match std::env::consts::ARCH {
             "x86_64" => matches!(machine, 0x8664 | 0x014c),
