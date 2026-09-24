@@ -377,7 +377,7 @@ function WorkshopEditor() {
           aria-pressed={previewOpen && hasVideo} disabled={!hasVideo}
           onClick={() => setPreviewOpen(v => !v)}><PictureInPicture2 size={16} /></button>
       </header>
-      <div className="vj-clip-properties-bar">
+      {c && <div className="vj-clip-properties-bar">
       <WorkshopClipProperties close={() => root.current?.focus({preventScroll:true})}
         seek={playback.seek} crop={crop} actions={<>
           <button type="button" onClick={() => remove(true)}>删除并闭合空隙</button>
@@ -388,7 +388,7 @@ function WorkshopEditor() {
           <button type="button" aria-label="下移图层" disabled={layerIndex < 0 || layerIndex === p!.layers.length - 1}
             onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex + 1))}><ArrowDown size={15} />下移图层</button>
         </>} />
-      </div>
+      </div>}
       </>} />
       </div>
       {clipMenu && <WorkshopClipMenu {...clipMenu} close={(restoreFocus = true) => { setClipMenu(null); if (restoreFocus) root.current?.focus({preventScroll: true}); }} onCrop={crop} onMerged={() => setCheckedLayers([])} />}

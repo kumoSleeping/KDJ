@@ -13,7 +13,7 @@ test('audition swaps only audio at the live position, retains video lease, and p
   const listeners = new Set(), storeListeners = new Set();
   const state = { trackId: null, currentTime: 42, playing: false, buffering: false, status: 'paused' };
   const calls = { pause: 0, play: 0, replace: [], release: [], metadata: [] };
-  const p = { id: 'p', revision: 0, name: 'song', sources: [{id:'s',track_id:1}], layers:[{source_id:'s'}] };
+  const p = { id: 'p', revision: 0, name: 'song', sources: [{id:'s',track_id:1}], layers:[{source_id:'s',clips:[{source_id:'s'}]}] };
   const editor = { activeId: 'p', draft: p, saving: 0, gesture: null, scrubbing: false, position: 42000, auditionAfterLayer: {} };
   editor.seek = ms => { editor.position = ms; };
   const store = selector => React.useSyncExternalStore(fn => { storeListeners.add(fn); return () => storeListeners.delete(fn); }, () => selector(editor));

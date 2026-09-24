@@ -161,8 +161,8 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     await useWorkshopStore.getState().flush();
   });
   assert.ok(document.querySelector('.vj-task-editor'), "clicking summary content enters editing directly");
-  assert.equal(document.querySelector('.vj-task-card'), taskCard, 'editing reuses the same task card DOM');
-  assert.equal(document.querySelector('.vj-task-summary'), taskSummary, 'editing retains the original material summary');
+  assert.ok(document.querySelector('.vj-task-card') === taskCard, 'editing reuses the same task card DOM');
+  assert.ok(document.querySelector('.vj-task-summary') === taskSummary, 'editing retains the original material summary');
   assert.equal(taskCard.textContent, cardContents, 'opening the editor does not add or remove card controls');
   assert.ok(document.querySelector('#workshop-back [aria-label="返回任务列表"]'), 'back action is in the workspace title slot');
   assert.equal(document.querySelector('.vj-task-editor [aria-label="返回任务列表"]'), null, 'back action is removed from the editing toolbar');
@@ -179,12 +179,14 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(document.querySelectorAll(".vj-track-row").length, 1);
   assert.equal(document.querySelector('#workshop-tools [data-workshop-toolbar]'), null, 'editor actions leave the distant workspace title row');
   const editorToolbar = document.querySelector('.vj-task-editor [data-workshop-toolbar]')!;
-  assert.equal(editorToolbar.nextElementSibling, document.querySelector('.vj-timeline-scroll'), 'tools sit directly against the track ruler, below the information row');
-  assert.equal(editorToolbar.previousElementSibling, document.querySelector('.vj-timeline-scale'));
+  assert.equal(editorToolbar.nextElementSibling?.classList.contains('vj-timeline-scroll'), true, 'the track ruler follows the toolbar when no clip is selected');
+  assert.equal(document.querySelector('.vj-clip-properties-bar'), null, 'an empty selection leaves no property panel');
+  assert.equal(editorToolbar.previousElementSibling?.classList.contains('vj-timeline-scale'), true);
   assert.equal(editorToolbar.querySelector('.vj-picture-tools'), null, 'numeric properties no longer crowd the timeline toolbar');
   await act(async () => useWorkshopStore.getState().select('c'));
   const properties = document.querySelector('.vj-clip-properties')!;
   assert.ok(properties.querySelector('.vj-picture-tools'), 'selected clip exposes picture settings in its properties panel');
+  assert.equal(document.querySelector('.vj-clip-properties-bar')?.nextElementSibling?.classList.contains('vj-timeline-scroll'), true, 'clip properties stay above the track ruler');
   assert.ok(editorToolbar.querySelector('[aria-label="时间轴吸附"]'));
   assert.equal(editorToolbar.querySelector('[aria-label="剪辑工具"]'), null, 'editing actions are not hidden behind a popup');
   for (const label of ['向前微调', '向后微调', '剪断选中片段', '复制片段', '删除片段']) {
@@ -214,7 +216,9 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal([...document.querySelectorAll('button')].some(b => b.textContent === '全部导出'), false);
   assert.equal(document.querySelectorAll('[data-workshop-toolbar] button').length > 0, true);
   assert.equal(document.querySelectorAll('[aria-label="时间轴吸附"] svg').length, 1);
-  assert.equal(document.querySelector('.vj-picture-scope'), null);
+  const cropScope = document.querySelector('.vj-picture-scope');
+  assert.equal(document.querySelectorAll('.vj-picture-scope').length, 1, 'crop scope belongs to the crop controls');
+  assert.equal(cropScope?.closest('.vj-crop-tools')?.classList.contains('vj-crop-tools'), true);
   assert.equal(document.querySelector(".vj-inspector"), null);
   const beforeSpeedLabel = useWorkshopStore.getState().draft!;
   for (const [speed, label] of [[0.9998000399920016, "0.9998×"], [1.25, "1.25×"], [1, ""]] as const) {
@@ -281,12 +285,10 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   await propertyValue("开始位置", "-1");
   assert.equal(saves, beforeInvalid, "invalid property input never reaches the server");
   assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="开始位置"]')!.value, "0");
-  await click("收起片段属性");
-  assert.equal(document.querySelector('.vj-clip-properties'), null);
-  await click("片段属性");
   assert.ok(document.querySelector('.vj-clip-properties'));
   await act(async () => useWorkshopStore.getState().select(null));
   assert.equal(document.querySelector('.vj-clip-properties'), null, "no selection leaves no empty panel or filler");
+  assert.equal(document.querySelector('.vj-clip-properties-bar'), null, "no selection leaves no empty toolbar row");
   await act(async () => useWorkshopStore.getState().select("c"));
   const setPictureValue = async (label: string, value: string) => {
     await act(async () => {
@@ -424,7 +426,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   api.controlWorkshopPositions = controlApi;
   await act(async () => useWorkshopStore.setState({applyPositions, positions: {}}));
   const timeline = document.querySelector(".vj-timeline")!;
-  assert.equal(timeline.lastElementChild, document.querySelector(".vj-timeline-overview"), "scrollbar is at the editor bottom after the tracks");
+  assert.ok(timeline.lastElementChild === document.querySelector(".vj-timeline-overview"), "scrollbar is at the editor bottom after the tracks");
   assert.equal(document.querySelector('[aria-label="全局预览位置"]'), null, "duplicate playback navigator is removed");
   assert.equal(document.querySelector(".vj-sources"), null, "materials are not duplicated above the timeline");
   const defaultPreview = document.querySelector<HTMLElement>('.vj-floating-preview')!;
@@ -436,14 +438,14 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(document.querySelector('[aria-label="打开作品预览小窗"]')?.getAttribute('aria-pressed'), 'true');
   await click('全屏播放');
   const fullscreenPreview = document.querySelector('.vj-floating-preview[data-fullscreen]')!;
-  assert.equal(fullscreenPreview.parentElement, document.body, 'fullscreen escapes the editor clipping region');
+  assert.ok(fullscreenPreview.parentElement === document.body, 'fullscreen escapes the editor clipping region');
   await act(async () => fullscreenPreview.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'Escape', bubbles: true})));
-  assert.equal(document.querySelector('.vj-floating-preview'), defaultPreview, 'leaving fullscreen retains the floating surface');
+  assert.ok(document.querySelector('.vj-floating-preview') === defaultPreview, 'leaving fullscreen retains the floating surface');
   await click('打开作品预览小窗');
   assert.equal(document.querySelector('.vj-preview'), null, 'the toggle closes the only preview');
   await click('打开作品预览小窗');
   assert.equal(document.querySelectorAll('.vj-preview').length, 1, 'only one preview surface is mounted');
-  assert.equal(document.querySelector(".vj-floating-preview")?.parentElement, document.body, "preview escapes the clipping side panel");
+  assert.ok(document.querySelector(".vj-floating-preview")?.parentElement === document.body, "preview escapes the clipping side panel");
   assert.equal(document.querySelector('[aria-label="调整轨道和素材区高度"]'), null);
   assert.ok(
     document.querySelectorAll(".vj-filmstrip img").length > 1,
@@ -502,7 +504,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(useWorkshopStore.getState().position,playheadBeforeOverview,"navigator does not seek playback");
   assert.deepEqual(useWorkshopStore.getState().draft,draftBeforeOverview);
   await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent("wheel",{bubbles:true,cancelable:true,deltaY:100000,altKey:true,clientX:350})));
-  assert.equal(document.querySelector('[aria-label="时间轴全局位置"]'),null,"fitted content does not show an unnecessary scrollbar");
+  assert.ok(!document.querySelector('[aria-label="时间轴全局位置"]'),"fitted content does not show an unnecessary scrollbar");
   assert.equal(scroll.scrollLeft,0,"zooming to fit resets the old horizontal offset");
   await act(async () => scroll.dispatchEvent(new dom.window.WheelEvent("wheel",{bubbles:true,cancelable:true,deltaY:-200,altKey:true,clientX:350})));
   overview = document.querySelector<HTMLElement>('[aria-label="时间轴全局位置"]')!;
@@ -787,7 +789,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     await useWorkshopStore.getState().flush();
   });
   assert.deepEqual(server.markers?.map(m => [m.number, m.position_ms]), [[1,1234.567],[2,3600]], "context mark uses clicked time, not the playhead");
-  assert.equal(document.activeElement, editor, "menu actions restore shortcut focus");
+  assert.ok(document.activeElement === editor, "menu actions restore shortcut focus");
   assert.notEqual(document.querySelectorAll<HTMLElement>('.vj-marker')[1].style.getPropertyValue('--vj-marker-color'), markerColor);
   await act(async () => document.querySelector<HTMLButtonElement>('.vj-marker')!.click());
   assert.equal(useWorkshopStore.getState().position, 1234.567, "triangles seek through the shared transport");
@@ -1054,7 +1056,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(document.querySelector('.vj-task-summary')!.textContent, "", "empty tasks have no filler copy");
   const { useWorkshopPlayback } = await import("../src/lib/workshopPlayback");
   const { WorkshopTimeline } = await import("../src/components/composition/WorkshopTimeline");
-  function AuditionTimeline() { return createElement(WorkshopTimeline, {playback:useWorkshopPlayback()}); }
+  function AuditionTimeline() { return createElement(WorkshopTimeline, {playback:useWorkshopPlayback(), checked:[], onCheckedChange:() => {}}); }
   const savesBeforeAudio = saves;
   await act(async () => {
     // Audition edits start from an imported server snapshot, not a draft whose
@@ -1108,7 +1110,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(continuousVideo.playbackRate, 0.98);
   for (const position of [7990, 8010, 16010, 24010]) {
     await act(async () => { useWorkshopStore.setState({position}); });
-    assert.equal(document.querySelector('video'), continuousVideo,
+    assert.ok(document.querySelector('video') === continuousVideo,
       'constant speed keeps one decoder across every former 8-second chunk boundary');
   }
   await act(async () => {
@@ -1133,6 +1135,12 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.match(document.querySelector('.vj-error')!.textContent!, /无法预览/);
   await act(async () => { failingVideo.dispatchEvent(new dom.window.Event('loadeddata')); });
   assert.equal(document.querySelector('.vj-error'), null, "a recovered chunk clears its own error");
+  for (const delay of [420, 820]) {
+    await act(async () => {
+      failingVideo.dispatchEvent(new dom.window.Event('error'));
+      await new Promise(resolve => setTimeout(resolve, delay));
+    });
+  }
   await act(async () => { failingVideo.dispatchEvent(new dom.window.Event('error')); });
   await act(async () => { document.querySelector<HTMLButtonElement>('.vj-error button')!.click(); });
   assert.notEqual(document.querySelector('video'), failingVideo, "manual retry starts a fresh decoder");
@@ -1362,7 +1370,7 @@ test("BPM prerequisite precedes two explicit matching choices with independent a
     assert.equal(selected.at(-1), "fuzzy-speed-sections", "showing alternatives must not apply one");
     const reviewButtons = [...host.querySelectorAll("button")];
     assert.equal(reviewButtons.length, 4);
-    assert.ok(reviewButtons.every(b => b.title.includes("尚未通过严格录音匹配")));
+    assert.ok(reviewButtons.every(b => b.title.includes("包含待确认的对应关系，不自动应用")));
     await act(async () => reviewButtons[2].click());
     assert.equal(selected.at(-1), "review-melody-2-longest");
     await render(false, { ...analysis, applied: "review-melody-2-longest", presets: reviewPresets });

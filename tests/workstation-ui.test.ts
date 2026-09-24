@@ -70,7 +70,7 @@ test("preview clip rail owns precise BPM, sparse bars and sample-accurate trim s
   const scale = () => Number(document.querySelector<HTMLElement>('.vj-track-rail')!.dataset.vjTimeScale);
   const undo = async () => act(async () => {useWorkshopStore.getState().undo(); await useWorkshopStore.getState().flush();});
   try {
-    await act(async () => root.render(createElement(WorkshopTimeline, {playback})));
+    await act(async () => root.render(createElement(WorkshopTimeline, {playback, checked:[], onCheckedChange() {}})));
     assert.deepEqual(analysisRequests, [true], "coarse cached analysis is upgraded using full-track precise mode");
     assert.ok(document.querySelector('.vj-rhythm-ruler'), "bars are visible before preview loading");
     assert.equal(document.querySelector('.ws-detail,.ws-audio-editor,.ws-tempo-segments'), null, "no separate detail editor or BPM button list");

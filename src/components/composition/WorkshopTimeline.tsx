@@ -164,10 +164,25 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
     const node = scroller.current;
     if (!node || drag.current || !Number.isFinite(next)) return;
     const bounded = Math.max(1, Math.min(64, next));
-    if (bounded === pendingZoom.current) return;
-    const x = Math.max(0, Math.min(width - labelWidth, clientX - node.getBoundingClientRect().left - labelWidth));
-    // Keep the rendered anchor until React commits, but accumulate every input sample.
-    anchor.current ??= { time: (node.scrollLeft + x) / scale, x };
+    if (bounded === pendingZoom.current) {
+      if (bounded === 1 && extent !== contentDuration) {
+        anchor.current = null;
+        setExtent(contentDuration);
+        node.scrollLeft = 0;
+        setScrollLeft(0);
+      }
+      return;
+    }
+    if (bounded === 1) {
+      anchor.current = null;
+      setExtent(contentDuration);
+      node.scrollLeft = 0;
+      setScrollLeft(0);
+    } else {
+      const x = Math.max(0, Math.min(width - labelWidth, clientX - node.getBoundingClientRect().left - labelWidth));
+      // Keep the rendered anchor until React commits, but accumulate every input sample.
+      anchor.current ??= { time: (node.scrollLeft + x) / scale, x };
+    }
     if (bounded === zoom) anchor.current = null;
     pendingZoom.current = bounded;
     setZoom(bounded);
