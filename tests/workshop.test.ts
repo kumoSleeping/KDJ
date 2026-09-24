@@ -3,6 +3,7 @@ import test from "node:test";
 import { previewVideoTiming, WorkshopSeekGate } from "../src/lib/workshopPreviewPolicy";
 import {
   adjustClip,
+  clipLanes,
   clipDuration,
   deleteClip,
   duplicateClip,
@@ -268,14 +269,17 @@ test("deletion holds the musical placement; ripple affects only subsequent clips
 test("repeated occurrences and copied fragments are independent", () => {
   const p = project(), next = duplicateClip(p, "clip");
   assert.equal(next.layers.length, 2);
-  assert.notEqual(next.layers[1].clips[0].id, "clip");
-  next.layers[1].clips[0].picture.opacity = 0.2;
+  const original = next.layers.find(layer => layer.id === "layer")!;
+  const copy = next.layers.find(layer => layer.id !== "layer")!;
+  assert.notEqual(copy.clips[0].id, "clip");
+  copy.clips[0].picture.opacity = 0.2;
   assert.equal(p.layers[0].clips[0].picture.opacity, 1);
-  assert.equal(next.layers[0].clips[0].picture.opacity, 1);
-  const moved = moveLayer(next, next.layers[1].id, 0);
-  assert.equal(moved.layers[1].id, "layer");
+  assert.equal(original.clips[0].picture.opacity, 1);
+  const moved = moveLayer(next, copy.id, 1);
+  assert.equal(moved.layers[0].id, "layer");
+  assert.equal(moved.layers[1].id, copy.id);
 });
-test("speed changes detect overlap without moving other clips", () => {
+test("speed changes preserve other clip positions and place overlaps in separate visual lanes", () => {
   const p = project(),
     c = p.layers[0].clips[0];
   c.speed = { ...c.speed, preset: "constant", start: 2 };
@@ -284,8 +288,11 @@ test("speed changes detect overlap without moving other clips", () => {
   assert.equal(validateProject(p), "");
   c.speed.start = 1;
   resetFadeSpan(c);
-  assert.match(validateProject(p), /重叠/);
+  assert.equal(validateProject(p), "");
   assert.equal(p.layers[0].clips[1].start_ms, 5000);
+  const lanes = clipLanes(p.layers[0].clips);
+  assert.equal(lanes.get(c.id), 0);
+  assert.equal(lanes.get("tail"), 1);
 });
 test("frame nudge, source trims, zero clamp and snap boundaries", () => {
   const p = project(),
@@ -466,11 +473,13 @@ test("bar editing joins one occupied track and preserves multitrack positions",(
   next=editRanges(p,p.layers[0].id,[[2000,4000]],"delete");assert.equal(next.layers[0].clips[1].start_ms,4000);assert.deepEqual(next.layers[1],p.layers[1]);
   next=editRanges(p,p.layers[0].id,[[2000,4000],[6000,8000]],"keep");assert.deepEqual(next.layers[0].clips.map(c=>c.start_ms),[2000,6000]);
 });
-test("audio splits are sample precise and new copies append",()=>{
+test("audio splits are sample precise and copied fragments appear above their source layer",()=>{
   const p=project();p.sources[0].video=false;p.sources[0].kind="audio";
   const c=p.layers[0].clips[0];c.speed={...c.speed,preset:"constant",start:1};
   const next=splitClip(p,c.id,1);assert.equal(next.layers[0].clips.length,2);
-  assert.equal(duplicateClip(p,c.id).layers[0].id,p.layers[0].id);
+  const copied=duplicateClip(p,c.id);
+  assert.notEqual(copied.layers[0].id,p.layers[0].id);
+  assert.equal(copied.layers[1].id,p.layers[0].id);
 });
 test("bar grid maps source beats through trims and tempo without editing media",()=>{
   const p=project(),c=p.layers[0].clips[0];c.speed={...c.speed,preset:"constant",start:2};c.source_in_ms=2000;c.start_ms=1000;

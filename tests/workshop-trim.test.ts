@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  adjustClip, clipDuration, fadeAlpha, setClipSpeed, sourceAt, splitClip,
+  adjustClip, clipDuration, clipLanes, fadeAlpha, setClipSpeed, sourceAt, splitClip,
   validateProject, visibleFade,
 } from "../src/lib/workshop";
 import type { CompositionProject, WorkshopClip } from "../src/types/workshop";
@@ -97,9 +97,12 @@ test("no-op trims, repeated speed choices, invalid rates and images preserve the
   assert.deepEqual(clip, image);
 });
 
-test("slowing a cut leaves neighbours fixed so the store can reject overlaps", () => {
+test("slowing a cut keeps neighbours fixed and lays overlaps out in separate visual lanes", () => {
   const split = splitClip(project(), "clip", 5000), [left, right] = split.layers[0].clips;
   setClipSpeed(left, .5);
   assert.equal(right.start_ms, 5000);
-  assert.match(validateProject(split), /重叠/);
+  assert.equal(validateProject(split), "");
+  const lanes = clipLanes(split.layers[0].clips);
+  assert.equal(lanes.get(left.id), 0);
+  assert.equal(lanes.get(right.id), 1);
 });

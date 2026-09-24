@@ -63,10 +63,11 @@ async function main() {
   // Every desktop target now ships the same proof/player and SABR runtime. Mobile alone
   // uses unsupported stubs. Never let a successful Windows build silently omit the worker.
   const desktop = ["darwin", "windows", "win32", "linux"].includes(platform);
-  // This RC includes the visualizer studio/export queue and playback recovery.
-  // Minified baselines: desktop 1.807 MB, mobile 1.553 MB; retain small growth margins.
-  const maxTotal = desktop ? 1_820_000 : 1_560_000;
-  const maxCss = 245_000;
+  // This RC adds multi-source workshop layers, subtitle editing and source controls.
+  // Measured minified outputs: desktop 1.829 MB, mobile 1.574 MB, CSS 246.5 KB.
+  // Keep a small headroom for patch-level UI work without masking larger regressions.
+  const maxTotal = desktop ? 1_840_000 : 1_580_000;
+  const maxCss = 248_000;
 
   console.log(
     `Frontend bundle (${platform}): total=${total} B, `
