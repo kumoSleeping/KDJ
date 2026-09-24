@@ -34,8 +34,8 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
       if (["done", "failed", "canceled"].includes(job.phase)) return job;
       const demand = job.demand;
       if (demand && demand.token !== last) {
-        // Yield between frames so editing and playback remain interactive.
-        await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+        // Each upload awaits real network I/O and yields to the event loop.
+        // An extra per-frame timer adds latency and is throttled when hidden.
         const pixels = frames.read(demand.index);
         const upload = visualizerApi.frame(job.id, demand.token, demand.index, pixels, signal);
         try {

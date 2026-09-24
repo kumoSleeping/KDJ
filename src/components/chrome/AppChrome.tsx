@@ -36,7 +36,6 @@ export function AppChrome({
       className="kd-app-chrome"
       data-history-end={historyEnd ? "true" : undefined}
       data-window-controls={showWindowControls ? "true" : undefined}
-      data-tauri-drag-region
       onPointerDown={startWindowDrag}
       onDoubleClick={(event) => {
         // Windows 习惯：双击标题栏切换最大化。点在按钮上不算。
@@ -53,9 +52,7 @@ export function AppChrome({
       ) : null}
       <div
         className="kd-app-chrome-drag"
-        data-tauri-drag-region
         aria-hidden="true"
-        onPointerDown={startWindowDrag}
       />
       {historyEnd || actions || showWindowControls ? (
         <div className="kd-app-chrome-actions">

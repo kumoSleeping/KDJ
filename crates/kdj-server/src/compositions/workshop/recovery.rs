@@ -1,7 +1,7 @@
 use super::*;
 
 fn empty() -> Journal {
-    Journal { version: 1, revision: 0, projects: vec![], jobs: vec![], migrated: vec![],
+    Journal { version: 1, revision: 0, projects: vec![], jobs: vec![], migrated: vec![], checked_video_geometry: HashSet::new(),
         position_bases: HashMap::new(), pending_positions: HashMap::new(), stopped_positions: HashSet::new(), recovery_error: String::new() }
 }
 

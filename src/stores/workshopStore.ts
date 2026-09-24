@@ -1,8 +1,11 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import { rebaseWorkshopEdit } from "../lib/workshopEdits";
+import { subtitleError } from "../lib/workshopSubtitle";
 import {
   cloneProject,
+  clamp,
+  uid,
   findClip,
   isVisualSource,
   projectDuration,
@@ -15,6 +18,7 @@ import type {
   CompositionProject,
   WorkshopSnapshot,
   WorkshopPositionResults,
+  WorkshopSubtitle,
 } from "../types/workshop";
 import { readLocalStorage, writeLocalStorageNow } from "../lib/storageWrite";
 interface WorkshopStore extends WorkshopSnapshot {
@@ -53,6 +57,7 @@ interface WorkshopStore extends WorkshopSnapshot {
   createProject(): Promise<void>;
   deleteProject(id?: string): Promise<void>;
   add(ids: number[], at?: number, target?: string | null): Promise<void>;
+  saveSubtitle(settings: WorkshopSubtitle, png: Blob, clipId?: string): Promise<boolean>;
   intake(ids: number[], paths: string[], at?: number, target?: string | null): Promise<void>;
   select(id: string | null, handle?: ClipHandle): void;
   begin(): void;
@@ -154,7 +159,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
   auditionAfterLayer: {},
   toggleAudioLayer(id) {
     const p = get().draft;
-    if (!p || !p.layers.some(l => l.id === id && p.sources.some(s => s.id === l.source_id && s.audio))) return;
+    if (!p || !p.layers.some(l => l.id === id && l.clips.some(c => p.sources.some(s => s.id === c.source_id && s.audio)))) return;
     set(s => ({ auditionAfterLayer: { ...s.auditionAfterLayer, [p.id]: s.auditionAfterLayer[p.id] === id ? undefined : id } }));
   },
   toggleVideoLayer(id) {
@@ -330,6 +335,57 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
       }));
       get().accept(s);
     }),
+  async saveSubtitle(settings, png, clipId) {
+    get().commit();
+    const pid = get().activeId, at = get().position;
+    if (!pid) return false;
+    const error = subtitleError(settings);
+    if (error) { set({error}); return false; }
+    let saved = false;
+    await queue(async () => {
+      const base = get().projects.find(p => p.id === pid);
+      if (!base) throw new Error("作品不存在");
+      const uploaded = await api.uploadWorkshopSubtitle(pid, base.revision, settings.text.trim().split("\n")[0].slice(0, 80), png);
+      get().accept(uploaded.snapshot);
+      const before = cloneProject(get().projects.find(p => p.id === pid)!);
+      const next = cloneProject(before), source = next.sources.find(s => s.id === uploaded.source_id)!;
+      const fittedWidth = (width: number, height: number) => Math.min(next.canvas.width, next.canvas.height * width / height);
+      let selectedId = clipId;
+      if (clipId) {
+        const clip = findClip(next, clipId);
+        if (!clip?.picture.subtitle) throw new Error("字幕片段已变化，请重新打开设置");
+        const old = next.sources.find(s => s.id === clip.source_id)!;
+        // Preserve the user's scaling relative to the raster's native font size.
+        clip.picture.scale = clamp(clip.picture.scale * fittedWidth(old.width, old.height) / old.width
+          * source.width / fittedWidth(source.width, source.height), .1, 2);
+        clip.source_id = source.id;
+        clip.picture.subtitle = structuredClone(settings);
+        const layer = next.layers.find(l => l.clips.some(c => c.id === clipId))!;
+        if (!layer.clips.some(c => c.source_id === layer.source_id)) layer.source_id = source.id;
+      } else {
+        selectedId = uid();
+        const duration = Math.min(5000, 21_600_000 - at);
+        if (duration < 1000 / next.canvas.fps) throw new Error("作品长度超过六小时");
+        next.layers.unshift({id: uid(), source_id: source.id, clips: [{
+          id: selectedId, source_id: source.id, start_ms: at, source_in_ms: 0, source_out_ms: source.duration_ms,
+          display_duration_ms: duration, animation_offset_ms: 0,
+          speed: {preset: "constant", start: 1, middle: 1, end: 1, domain_start_ms: 0, domain_end_ms: source.duration_ms},
+          picture: {x: .5, y: .85, scale: clamp(source.width / fittedWidth(source.width, source.height), .1, 2), opacity: 1, subtitle: structuredClone(settings)},
+          sound: {muted: true, gain: 1, manual: false},
+          fades: {offset_ms: 0, span_ms: duration, video_in_ms: Math.min(300, duration / 2), video_out_ms: Math.min(300, duration / 2), audio_in_ms: 0, audio_out_ms: 0, linear: false},
+        }]});
+      }
+      syncOutputFormat(next, before);
+      const error = validateProject(next);
+      if (error) throw new Error(error);
+      const snapshot = await api.editWorkshop(pid, before.revision, next);
+      get().accept(snapshot);
+      if (get().activeId === pid) set(s => ({draft: snapshot.projects.find(p => p.id === pid)!,
+        selectedId: selectedId!, cropId: null, past: [...s.past, before].slice(-100), future: [], error: ""}));
+      saved = true;
+    });
+    return saved;
+  },
   async add(ids, at, target) { return get().intake(ids, [], at, target); },
   async intake(ids, paths, at, target) {
     if (!ids.length && !paths.length) return;
@@ -360,7 +416,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
             // that optimistic state too, so an immediate undo sees the real edit.
             draft: local && p ? rebaseWorkshopEdit(p, local, updated) : updated,
             gesture: state.gesture && p ? rebaseWorkshopEdit(p, state.gesture, updated) : null,
-            selectedId: updated.layers.find(l => !result.before?.layers.some(old => old.id === l.id))?.clips[0]?.id ?? null,
+            selectedId: updated.layers.flatMap(l => l.clips).find(c => !result.before?.layers.some(old => old.clips.some(clip => clip.id === c.id)))?.id ?? null,
             past: past.slice(-100), future: [],
           };
         });
@@ -385,7 +441,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     const after = findClip(p, state.selectedId);
     // Keep right-click edits and preview drags in the same import workflow.
     // Rotation/crop remain specific to the source being edited.
-    if (p.canvas.import_picture !== null && before && after &&
+    if (p.canvas.import_picture !== null && before && after && !after.picture.subtitle &&
       isVisualSource(p.sources.find(s => s.id === after.source_id)) &&
       (["x", "y", "scale", "opacity"] as const).some(key => before.picture[key] !== after.picture[key])) {
       const { x, y, scale, opacity } = after.picture;

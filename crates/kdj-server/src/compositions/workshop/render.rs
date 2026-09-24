@@ -154,7 +154,7 @@ fn envelope(c: &Clip, audio: bool, time: &str) -> String {
     };
     parts.join("*")
 }
-fn slice(c: &Clip, lo: f64, hi: f64) -> Clip {
+pub(super) fn slice(c: &Clip, lo: f64, hi: f64) -> Clip {
     let mut next = c.clone();
     if c.display_duration_ms.is_some() {
         next.display_duration_ms = Some(hi - lo); next.animation_offset_ms = c.source_at(lo);
@@ -401,7 +401,7 @@ impl Workshop {
                 if !m.is_file()
                     || !matches!(
                         e.path().extension().and_then(|s| s.to_str()),
-                        Some("pcm" | "mp4" | "jpg" | "json")
+                        Some("pcm" | "mp4" | "jpg" | "json" | "afp")
                     )
                 {
                     return None;
@@ -438,7 +438,7 @@ impl Workshop {
         if hi <= lo {
             return Ok(vec![]);
         }
-        let mut audio = p.clone();
+        let mut audio = p.audio_project();
         for layer in &mut audio.layers {
             layer.clips = audio_runs(&layer.clips);
         }
@@ -458,7 +458,7 @@ impl Workshop {
             }
         });
         // Geometry, names and revisions do not invalidate already prepared sound.
-        let key = key(&("audio-v3-continuous-runs", &audible.sources, &audible.layers, lo, hi))?;
+        let key = key(&("audio-v4-crossfades", &audible.sources, &audible.layers, lo, hi))?;
         let path = self.cache.join(format!("{key}.pcm"));
         let lock = self.cache_lock(&key).await;
         let _lock = lock.lock().await;
@@ -659,16 +659,11 @@ impl Workshop {
             // used to encode every video twice and delay all visible progress.
             args.extend(["-threads".into(), "1".into(), "-ss".into(), secs(c.source_in_ms),
                 "-i".into(), s.path.clone()]);
-            let (fit_width, fit_height) = if c.picture.crop_keep_position {
+            let keep_position = c.picture.crop_keep_position && !c.picture.crop_auto_fit;
+            let (fit_width, fit_height) = if keep_position {
                 (width as f64, height as f64)
             } else { cropped_size(width as f64, height as f64, c.picture.crop) };
-            let w = ((p.canvas.width as f64 * c.picture.scale).min(
-                p.canvas.height as f64 * fit_width / fit_height * c.picture.scale,
-            ) / 2.)
-                .round()
-                .max(1.)
-                * 2.;
-            let h = (w * fit_height / fit_width / 2.).round().max(1.) * 2.;
+            let (w, h) = fitted_picture_size(p, c, fit_width, fit_height, 2.);
             let fades = &c.fades;
             let dynamic = fades.video_in_ms > fades.offset_ms
                 || (fades.video_out_ms > 0. && fades.offset_ms + c.duration() > fades.span_ms - fades.video_out_ms);
@@ -676,7 +671,7 @@ impl Workshop {
             // Normalize display pixels before masking, including anamorphic sources.
             // Transparent padding preserves the original frame's size and position.
             let mask = if cropped {
-                format!(",scale={width}:{height},setsar=1,format=rgba{}", crop_mask(width as f64, height as f64, c.picture.crop, c.picture.crop_keep_position))
+                format!(",scale={width}:{height},setsar=1,format=rgba{}", crop_mask(width as f64, height as f64, c.picture.crop, keep_position))
             } else { String::new() };
             let pixels = format!("[{n}:{}]trim=duration={},setpts=PTS-STARTPTS,setpts='({})/TB',fps={}:eof_action=pass{mask},scale={}:{},setsar=1",
                 stream.index, secs(c.source_out_ms-c.source_in_ms), retime(c), number(p.canvas.fps), number(w), number(h));
@@ -704,7 +699,7 @@ impl Workshop {
             // Retiming/frame-rate conversion can end one frame before the
             // declared clip boundary. Hold that frame inside the interval;
             // enable still removes it at the exact cut and preserves real gaps.
-            graph.push(format!("[base{n}][clip{n}]overlay=x='max(0,min(W-w,W*{}-w/2))':y='max(0,min(H-h,H*{}-h/2))':eof_action=repeat:repeatlast=1:enable='gte(t,{})*lt(t,{})'[base{}]",number(c.picture.x),number(c.picture.y),secs(c.start_ms-lo),secs(c.start_ms-lo+c.duration()),n+1));
+            graph.push(format!("[base{n}][clip{n}]overlay=x='{}':y='{}':eof_action=repeat:repeatlast=1:enable='gte(t,{})*lt(t,{})'[base{}]",picture_axis(c.picture.x, c.picture.crop_auto_fit, "W", "w"),picture_axis(c.picture.y, c.picture.crop_auto_fit, "H", "h"),secs(c.start_ms-lo),secs(c.start_ms-lo+c.duration()),n+1));
             self.job(jid, |j| {
                 j.progress = 0.2 + 0.3 * (n + 1) as f64 / clips.len() as f64
             })?;
@@ -795,7 +790,7 @@ impl Workshop {
         for source in p.sources.iter().filter(|s| {
             p.layers
                 .iter()
-                .any(|l| l.source_id == s.id && !l.clips.is_empty())
+                .any(|l| l.clips.iter().any(|c| c.source_id == s.id))
         }) {
             if !source.signature.is_empty()
                 && signature(Path::new(&source.path))? != source.signature
@@ -804,7 +799,10 @@ impl Workshop {
             }
         }
         let sig = media::signature(&output)?;
-        std::fs::File::open(&output)?.sync_all()?;
+        // Windows requires a writable handle for FlushFileBuffers.
+        std::fs::File::options().write(true).open(&output)
+            .context("无法打开导出成品进行落盘同步")?
+            .sync_all().context("导出成品落盘同步失败")?;
         let name = p.output.name.trim();
         if name.is_empty() || name.contains(['/', '\\', '\0']) || name == "." || name == ".." {
             bail!("导出文件名无效")
@@ -944,9 +942,11 @@ pub(super) async fn alignment_pcm(
     c: &Clip,
     cancel: &CancellationToken,
 ) -> Result<Vec<f32>> {
-    if c.duration() > 30. * 60. * 1000. {
-        bail!("超过 30 分钟的片段请手动定位")
-    }
+    // The caller schedules any number of blocks. This bound protects only one
+    // decoder invocation, including overlap and rounding of variable-rate cuts.
+    let max_seconds = kdj_analysis::alignment::FEATURE_BLOCK_SECONDS
+        + 2 * kdj_analysis::alignment::FEATURE_GUARD_SECONDS + 1;
+    anyhow::ensure!(c.duration() <= max_seconds as f64 * 1000., "音频分析块超出内存预算");
     let mut p = p.clone();
     let mut c = c.clone();
     c.start_ms = 0.;
@@ -971,8 +971,8 @@ pub(super) async fn alignment_pcm(
     let bytes = media::capture(
         &kdj_providers::ffmpeg::binary()?,
         &args,
-        32 * 1024 * 1024,
-        Duration::from_secs(120),
+        (max_seconds * kdj_analysis::alignment::SAMPLE_RATE * 2 + 4096) as u64,
+        Duration::from_secs(300),
         cancel,
     )
     .await?;
@@ -1028,14 +1028,32 @@ fn crop_mask(width: f64, height: f64, crop: [f64; 4], keep_position: bool) -> St
     }
     filters
 }
+/// Match pictureBox in the frontend, including outward rounding for cover.
+fn fitted_picture_size(p: &CompositionProject, c: &Clip, fw: f64, fh: f64, unit: f64) -> (f64, f64) {
+    let width = p.canvas.width as f64;
+    let from_height = p.canvas.height as f64 * fw / fh;
+    let auto_fit = c.picture.crop_auto_fit;
+    let fit = if auto_fit { width.max(from_height) } else { width.min(from_height) };
+    let round = |v: f64| (if auto_fit { v.ceil() } else { v.round() }).max(1.);
+    let w = round(fit * c.picture.scale / unit) * unit;
+    (w, round(w * fh / fw / unit) * unit)
+}
+fn picture_axis(center: f64, auto_fit: bool, canvas: &str, size: &str) -> String {
+    let at = format!("{canvas}*{}-{size}/2", number(center));
+    if auto_fit {
+        format!("max(min(0,{canvas}-{size}),min(max(0,{canvas}-{size}),{at}))")
+    } else {
+        format!("max(0,min({canvas}-{size},{at}))")
+    }
+}
 fn image_graph(graph: &mut Vec<String>, n: usize, s: &Source, c: &Clip, p: &CompositionProject, lo: f64) {
-    let (fw, fh) = if c.picture.crop_keep_position { (s.width as f64, s.height as f64) }
+    let keep_position = c.picture.crop_keep_position && !c.picture.crop_auto_fit;
+    let (fw, fh) = if keep_position { (s.width as f64, s.height as f64) }
         else { cropped_size(s.width as f64, s.height as f64, c.picture.crop) };
-    let w=(p.canvas.width as f64).min(p.canvas.height as f64*fw/fh)*c.picture.scale;
-    let w=w.round().max(1.); let h=(w*fh/fw).round().max(1.);
+    let (w, h) = fitted_picture_size(p, c, fw, fh, 1.);
     let angle=c.picture.rotation*std::f64::consts::PI/180.;
     // Same crop mode and fitted geometry as pictureBox; RGBA throughout.
-    let mut pixels=format!("[{n}:v]setpts=PTS-STARTPTS,format=rgba{}",crop_mask(s.width as f64,s.height as f64,c.picture.crop,c.picture.crop_keep_position));
+    let mut pixels=format!("[{n}:v]setpts=PTS-STARTPTS,format=rgba{}",crop_mask(s.width as f64,s.height as f64,c.picture.crop,keep_position));
     if c.picture.flip_x {pixels.push_str(",hflip");}
     if c.picture.flip_y {pixels.push_str(",vflip");}
     pixels.push_str(&format!(",scale={}:{}",number(w),number(h)));
@@ -1060,5 +1078,5 @@ fn image_graph(graph: &mut Vec<String>, n: usize, s: &Source, c: &Clip, p: &Comp
         graph.push(format!("[originalalpha{n}][fadealpha{n}]blend=all_mode=multiply:shortest=1[alpha{n}]"));
         graph.push(format!("[color{n}][alpha{n}]alphamerge=shortest=1,{shift}"));
     } else {graph.push(format!("{pixels},{shift}"));}
-    graph.push(format!("[base{n}][clip{n}]overlay=x='max(0,min(W-w,W*{}-w/2))':y='max(0,min(H-h,H*{}-h/2))':format=yuv420:eof_action=repeat:repeatlast=1:enable='gte(t,{})*lt(t,{})'[base{}]",number(c.picture.x),number(c.picture.y),secs(c.start_ms-lo),secs(c.start_ms-lo+c.duration()),n+1));
+    graph.push(format!("[base{n}][clip{n}]overlay=x='{}':y='{}':format=yuv420:eof_action=repeat:repeatlast=1:enable='gte(t,{})*lt(t,{})'[base{}]",picture_axis(c.picture.x,c.picture.crop_auto_fit,"W","w"),picture_axis(c.picture.y,c.picture.crop_auto_fit,"H","h"),secs(c.start_ms-lo),secs(c.start_ms-lo+c.duration()),n+1));
 }

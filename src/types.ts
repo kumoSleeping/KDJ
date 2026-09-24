@@ -454,6 +454,8 @@ export interface DownloadTask {
     count: number;
     title: string;
   } | null;
+  /** B站纯视频任务没有音轨。 */
+  video_only?: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -493,6 +495,7 @@ export interface VideoDownloadRequest {
   page_title?: string;
   max_height?: number;
   audio_only?: boolean;
+  video_only?: boolean;
   transcode?: boolean;
   /** 成品起点偏移（毫秒）：正=掐头，负=开头补黑场/静音。见 models.rs。 */
   offset_ms?: number;

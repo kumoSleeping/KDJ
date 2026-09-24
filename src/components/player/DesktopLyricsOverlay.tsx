@@ -563,7 +563,6 @@ export function DesktopLyricsOverlay() {
       <div className="kd-desktop-lyrics-stage">
         <div
           className="kd-desktop-lyrics-drag"
-          data-tauri-drag-region={locked ? undefined : ""}
           title={locked ? undefined : "按住歌词文字附近即可拖动"}
           onPointerDown={(event) => {
             if (locked || event.button !== 0) return;

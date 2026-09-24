@@ -695,6 +695,9 @@ pub struct DownloadTask {
     /// 下载队列里直接显示 P 序号；不能只藏在重试请求里，否则刷新后会丢。
     #[serde(default)]
     pub video_page: Option<DownloadVideoPage>,
+    /// B 站视频任务只下载画面，不带音轨。
+    #[serde(default)]
+    pub video_only: bool,
     pub created_at: f64,
     pub updated_at: f64,
 }
@@ -757,6 +760,9 @@ pub struct VideoDownloadRequest {
     pub max_height: i64,
     #[serde(default)]
     pub audio_only: bool,
+    /// 只保留视频流；目前仅支持 B 站下载。
+    #[serde(default)]
+    pub video_only: bool,
     #[serde(default)]
     pub transcode: bool,
     /// 成品相对原片的起点偏移（毫秒）。正数掐掉开头这么长，负数在开头
@@ -787,6 +793,7 @@ impl Default for VideoDownloadRequest {
             page_title: String::new(),
             max_height: default_video_height(),
             audio_only: false,
+            video_only: false,
             transcode: false,
             offset_ms: 0,
             dest_dir: String::new(),

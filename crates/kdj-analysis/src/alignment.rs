@@ -4,10 +4,16 @@
 //! to place the whole video once; ordinary full-length matching still rejects ambiguity.
 use anyhow::{bail, Result};
 use rustfft::{num_complex::Complex32, FftPlanner};
+mod features;
+pub use features::{AudioFeatures, AudioSummary, FEATURE_REVISION, FEATURE_BLOCK_SECONDS, FEATURE_GUARD_SECONDS, FEATURE_MEMORY_BUDGET};
+mod indexed;
+pub use indexed::{coarse_similarity, compare_blocks, unambiguous_spans, RecordingMatch};
+mod search;
+use search::EnvelopeSearch;
 mod sections;
-pub use sections::align_sections;
+pub use sections::{align_sections, align_sections_prepared};
 mod fuzzy;
-pub use fuzzy::{suggest_constant_speed, suggest_positions, FuzzyPlacement, PositionSuggestions};
+pub use fuzzy::{short_review_pair, suggest_constant_speed, suggest_positions, suggest_positions_prepared, FuzzyPlacement, PositionSuggestions};
 
 pub const SAMPLE_RATE: usize = 8000;
 const HOP: usize = 80;
@@ -119,7 +125,11 @@ fn spectral_score(a: &[[f32; BANDS]], b: &[[f32; BANDS]], x: usize, y: usize, co
 }
 
 pub fn align(audio: &[f32], video_audio: &[f32], canceled: impl Fn() -> bool) -> Result<Alignment> {
-    align_inner(audio, video_audio, canceled, false)
+    align_prepared(
+        &AudioFeatures::prepare(audio, &canceled)?,
+        &AudioFeatures::prepare(video_audio, &canceled)?,
+        canceled, false,
+    )
 }
 
 /// A dragged overlay may be a short chorus anywhere in the main video, not just its intro.
@@ -128,12 +138,24 @@ pub fn align_segment(
     video_audio: &[f32],
     canceled: impl Fn() -> bool,
 ) -> Result<Alignment> {
-    align_inner(audio, video_audio, canceled, true)
+    align_segment_prepared(
+        &AudioFeatures::prepare(audio, &canceled)?,
+        &AudioFeatures::prepare(video_audio, &canceled)?,
+        canceled,
+    )
 }
 
-fn align_inner(
-    audio: &[f32],
-    video_audio: &[f32],
+pub fn align_segment_prepared(
+    audio: &AudioFeatures,
+    video_audio: &AudioFeatures,
+    canceled: impl Fn() -> bool,
+) -> Result<Alignment> {
+    align_prepared(audio, video_audio, canceled, true)
+}
+
+fn align_prepared(
+    audio: &AudioFeatures,
+    video_audio: &AudioFeatures,
     canceled: impl Fn() -> bool,
     segment: bool,
 ) -> Result<Alignment> {
@@ -143,7 +165,8 @@ fn align_inner(
         reason: reason.into(),
     };
     let minimum = if segment { 6 } else { 30 };
-    if audio.len().min(video_audio.len()) < SAMPLE_RATE * minimum {
+    if canceled() { bail!("校准已取消") }
+    if audio.samples.min(video_audio.samples) < SAMPLE_RATE * minimum {
         return Ok(review(
             0,
             if segment {
@@ -154,39 +177,22 @@ fn align_inner(
         ));
     }
     let window = if segment {
-        (audio.len().min(video_audio.len()) / HOP / 3)
+        (audio.samples.min(video_audio.samples) / HOP / 3)
             .saturating_sub(20)
             .clamp(180, WINDOW)
     } else {
         WINDOW
     };
-    if audio.iter().chain(video_audio).any(|v| !v.is_finite()) {
-        bail!("音频解码包含无效采样");
-    }
     let short_version = !segment
-        && audio.len() >= video_audio.len().saturating_add(SAMPLE_RATE * 10)
-        && audio.len() as f64 >= video_audio.len() as f64 * 1.2;
-    let (ea, eb) = (envelope(audio), envelope(video_audio));
-    let mut coarse = Vec::new();
-    let range = if segment || short_version {
-        -(ea.len() as i32)..=eb.len() as i32
-    } else {
-        -3600..=3600
-    };
-    for lag in range {
-        if lag % 100 == 0 && canceled() {
-            bail!("校准已取消");
-        }
-        let (x, y, count) = overlap(ea.len(), eb.len(), lag);
-        if count < (window * 3 + 20) / 5 {
-            continue;
-        }
-        let count = count.min(2400);
-        let score = ncc(
-            ea[x..x + count].iter().copied(),
-            eb[y..y + count].iter().copied(),
-        );
-        coarse.push((lag, score));
+        && audio.samples >= video_audio.samples.saturating_add(SAMPLE_RATE * 10)
+        && audio.samples as f64 >= video_audio.samples as f64 * 1.2;
+    let (ea, eb) = (&audio.envelope, &video_audio.envelope);
+    // Evaluate all overlaps in O(n log n), rather than rescanning up to two
+    // minutes of PCM-derived envelope for every possible 50 ms offset.
+    let search = EnvelopeSearch::new(eb, ea.len());
+    let mut coarse = search.scores(ea, (window * 3 + 20) / 5, &canceled)?;
+    if !segment && !short_version {
+        coarse.retain(|(lag, _)| lag.abs() <= 3600);
     }
     coarse.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut candidates: Vec<(i32, f64)> = Vec::new();
@@ -206,22 +212,14 @@ fn align_inner(
         // Propose offsets from independent local windows too; the same long-run
         // spectral verification below still decides whether any candidate is safe.
         let width = 160; // eight seconds, envelope sampled at 20 Hz
+        let search = EnvelopeSearch::new(ea, width);
         for fraction in [1, 4, 7] {
             let y = eb.len().saturating_sub(width) * fraction / 10;
             if y + width > eb.len() || ea.len() < width {
                 continue;
             }
-            let mut local = (0..=ea.len() - width)
-                .map(|x| {
-                    (
-                        (y as i32 - x as i32),
-                        ncc(
-                            ea[x..x + width].iter().copied(),
-                            eb[y..y + width].iter().copied(),
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut local = search.scores(&eb[y..y + width], width, &canceled)?
+                .into_iter().map(|(x, score)| (y as i32 - x, score)).collect::<Vec<_>>();
             if canceled() {
                 bail!("校准已取消");
             }
@@ -241,7 +239,7 @@ fn align_inner(
             }
         }
     }
-    let (a, b) = (spectra(audio, &canceled)?, spectra(video_audio, &canceled)?);
+    let (a, b) = (&audio.spectra, &video_audio.spectra);
     let mut verified = Vec::new();
     for (coarse_lag, _) in candidates {
         let lag = coarse_lag * 5;

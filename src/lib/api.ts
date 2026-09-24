@@ -917,6 +917,9 @@ export const api = {
   analyzeRhythm: (id: number, precise = false, force = false) => post<{job_id: string | null; queued: number}>(`/library/rhythm/${id}`, {precise, force}),
   workshop: () => request<WorkshopSnapshot>("/workshop"),
   createWorkshop: () => post<WorkshopSnapshot>("/workshop", {}),
+  uploadWorkshopSubtitle: (id: string, revision: number, title: string, png: Blob) =>
+    request<{snapshot: WorkshopSnapshot; source_id: string}>(`/workshop/${encodeURIComponent(id)}/subtitle-source?${new URLSearchParams({revision: String(revision), title})}`,
+      {method: "POST", headers: {"Content-Type": "image/png"}, body: png}),
   editWorkshop: (id: string, revision: number, edit: WorkshopEdit) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ revision, ...edit }) }),
   deleteWorkshop: (id: string, revision: number) => request<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ revision }) }),
   addWorkshopSources: (id: string, revision: number, track_ids: number[], at_ms: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/sources`, { revision, track_ids, at_ms }),
@@ -974,6 +977,11 @@ export const api = {
     post<DownloadTask>(`/downloads/${id}/quality`, { quality }),
   updateDownloadHeight: (id: string, maxHeight: number) =>
     post<DownloadTask>(`/downloads/${id}/height`, { max_height: maxHeight }),
+  updateDownloadVideoMode: (id: string, audioOnly: boolean, videoOnly: boolean) =>
+    post<DownloadTask>(`/downloads/${id}/video-mode`, {
+      audio_only: audioOnly,
+      video_only: videoOnly,
+    }),
   /** 只移除一条已结束的队列记录，避免「清空」影响其他历史任务。 */
   removeDownload: (id: string) => request<{ removed: boolean }>(`/downloads/${id}`, { method: "DELETE" }),
   clearDownloads: () => post<{ removed: number }>("/downloads/clear"),
@@ -1259,7 +1267,7 @@ export const visualizerApi = {
   },
   start: (body: { track_id: number; signature: string; duration: number; output_path: string; width: number; height: number; fps: number; acceleration: string }) => request<VisualizerJobStatus>("/visualizer/export", { method: "POST", body: JSON.stringify(body) }),
   poll: (id: string, since: number, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}?since=${since}`, { signal, headers: { "X-KDJ-Activity-Recorded": "1" } }),
-  frame: (id: string, token: number, index: number, pixels: ArrayBuffer, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/frames/${token}/${index}`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-KDJ-Activity-Recorded": "1" }, body: pixels, signal }),
+  frame: (id: string, token: number, index: number, pixels: ArrayBuffer, signal?: AbortSignal) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/frames`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-KDJ-Activity-Recorded": "1", "X-KDJ-Video-Frame": `${token}:${index}` }, body: pixels, signal }),
   cancel: (id: string, keepalive = false) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST", keepalive }),
 };
 

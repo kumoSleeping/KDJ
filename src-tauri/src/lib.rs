@@ -35,6 +35,8 @@ mod desktop_player;
 mod midi;
 #[cfg(desktop)]
 mod media_tools;
+#[cfg(target_os = "macos")]
+mod macos_window_drag;
 #[cfg(desktop)]
 mod release_version;
 #[cfg(desktop)]
@@ -1847,7 +1849,12 @@ fn window_control(
                 _window.close()
             }
             // data-tauri-drag-region 在 macOS Overlay 下经常失灵；顶栏 mousedown 显式开拖。
-            "drag" => _window.start_dragging(),
+            "drag" => {
+                #[cfg(target_os = "macos")]
+                { macos_window_drag::start(_window.clone()) }
+                #[cfg(not(target_os = "macos"))]
+                { _window.start_dragging() }
+            }
             other => return Err(format!("未知的窗口动作：{other}")),
         };
         return result.map_err(|err| err.to_string());

@@ -78,7 +78,11 @@ drag = "=2.1.1"
 block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "NSApplication",
   "NSAttributedString",
+  "NSEvent",
+  "NSGraphicsContext",
+  "NSWindow",
   "NSPasteboard",
   "NSPasteboardItem",
   "NSTextAttachment",
@@ -88,6 +92,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSData",
   "NSError",
   "NSObject",
+  "NSProcessInfo",
   "NSString",
   "NSURL",
   "NSURLRequest",

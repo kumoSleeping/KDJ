@@ -1,5 +1,7 @@
 import { useState } from "react";
 import {
+  Check,
+  ChevronDown,
   CircleMinus,
   Copy,
   FolderOpen,
@@ -26,6 +28,7 @@ import {
 import { forgetQueueDraft, patchVideoDraft, setQueueDraft } from "../../lib/queueTaskDraft";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
+import { useFfmpegStore } from "../../stores/ffmpegStore";
 import type { DownloadTask, Quality, TaskPhase, TaskState } from "../../types";
 import { Button, ContextMenu, InlineNotice } from "../common";
 import { QueueChoice, QueueCover, QueueFrame, QueueList, QueueOverview, QueueStateMark } from "../queue/QueuePrimitives";
@@ -86,6 +89,105 @@ function QueueTaskCover({ task }: { task: DownloadTask }) {
 /**
  * 质量既是信息也是配置：直接在原来的元数据位置切换，行高和排序都不动。
  */
+type BilibiliDownloadMode = "audio_video" | "video" | "audio";
+
+function BilibiliVideoModeControl({
+  task,
+  onError,
+}: {
+  task: DownloadTask;
+  onError(message: string): void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number; anchorTop: number } | null>(null);
+  const systemFfmpegAvailable = useAppStore((state) => state.health?.ffmpeg ?? false);
+  const managedFfmpegAvailable = useFfmpegStore((state) => state.status?.ffmpeg.state === "ready");
+  const ffmpegAvailable = systemFfmpegAvailable || managedFfmpegAvailable;
+  const editable = task.state === "queued" || task.state === "paused" || task.state === "failed";
+  const current: BilibiliDownloadMode = task.quality.toLowerCase() === "audio"
+    ? "audio"
+    : task.video_only
+      ? "video"
+      : "audio_video";
+  const labels: Record<BilibiliDownloadMode, string> = {
+    audio_video: "音画",
+    video: "纯视频",
+    audio: "纯音频",
+  };
+
+  const choose = (mode: BilibiliDownloadMode) => {
+    setMenu(null);
+    if (!editable || busy || mode === current) return;
+    if (mode !== "audio_video" && !ffmpegAvailable) return;
+    setBusy(true);
+    onError("");
+    const audioOnly = mode === "audio";
+    const videoOnly = mode === "video";
+    void api
+      .updateDownloadVideoMode(task.id, audioOnly, videoOnly)
+      .then((updated) => {
+        useDownloadStore.getState().mergeTasks([updated]);
+        patchVideoDraft(task.id, { request: { audio_only: audioOnly, video_only: videoOnly } });
+      })
+      .catch((error: unknown) =>
+        onError(`更改下载内容失败：${(error as Error).message}`),
+      )
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <span className="kd-download-task-mode">
+      <button
+        type="button"
+        className="kd-download-task-mode-trigger kd-mono"
+        aria-label={`下载内容：${labels[current]}`}
+        aria-haspopup="menu"
+        aria-expanded={Boolean(menu)}
+        disabled={!editable || busy}
+        title={`下载内容：${labels[current]} · 点击切换`}
+        onClick={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          setMenu({ x: rect.left, y: rect.bottom, anchorTop: rect.top });
+        }}
+      >
+        {labels[current]}
+        <ChevronDown size={10} aria-hidden="true" />
+      </button>
+      {menu ? (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          anchorTop={menu.anchorTop}
+          onClose={() => setMenu(null)}
+        >
+          {(["audio_video", "video", "audio"] as const).map((mode) => {
+            const unavailable = mode !== "audio_video" && !ffmpegAvailable && mode !== current;
+            return (
+              <button
+                key={mode}
+                type="button"
+                role="menuitemradio"
+                className="kd-download-mode-option"
+                aria-checked={mode === current}
+                disabled={!editable || busy || unavailable}
+                title={unavailable ? "下载纯音频或纯视频需要 FFmpeg" : undefined}
+                onClick={() => choose(mode)}
+              >
+                {mode === current ? (
+                  <Check size={12} />
+                ) : (
+                  <span aria-hidden="true" style={{ width: 12 }} />
+                )}
+                {labels[mode]}
+              </button>
+            );
+          })}
+        </ContextMenu>
+      ) : null}
+    </span>
+  );
+}
+
 function QueueQualityControl({
   task,
   onError,
@@ -108,17 +210,11 @@ function QueueQualityControl({
       : Number.isFinite(videoHeight)
         ? `${videoHeight}p`
         : task.quality.toUpperCase();
-  const icon = task.kind === "video" ? <Video size={10} /> : <Music2 size={10} />;
-
-  if (!editable) {
-    return (
-      <span className="kd-download-task-quality kd-mono">
-        {icon}
-        {label}
-      </span>
-    );
-  }
-
+  const icon =
+    task.kind === "video" && normalizedQuality !== "audio"
+      ? <Video size={10} />
+      : <Music2 size={10} />;
+  const modeControl = task.kind === "video" && task.platform === "bilibili";
   const options =
     task.kind === "audio"
       ? AUDIO_QUALITIES.map((quality) => ({
@@ -132,36 +228,46 @@ function QueueQualityControl({
           ...VIDEO_HEIGHTS.map((height) => ({ value: String(height), label: `${height}p` })),
         ];
 
-  return (
+  const qualityControl = editable ? (
     <QueueChoice
       icon={icon}
       options={options}
       label={`本条${task.kind === "video" ? "视频画质" : "音质"}，当前 ${label}`}
-        value={task.kind === "audio" ? normalizedQuality : String(videoHeight)}
-        disabled={busy}
-        onChange={(nextValue) => {
-          setBusy(true);
-          onError("");
-          void (async () => {
-            if (task.kind === "audio") {
-              const next = nextValue as Quality;
-              const updated = await api.updateDownloadQuality(task.id, next);
-              useDownloadStore.getState().mergeTasks([updated]);
-              setQueueDraft(task.id, { kind: "audio", quality: next });
-              return;
-            }
-
-            const next = Number.parseInt(nextValue, 10);
-            const updated = await api.updateDownloadHeight(task.id, next);
+      value={task.kind === "audio" ? normalizedQuality : String(videoHeight)}
+      disabled={busy}
+      onChange={(nextValue) => {
+        setBusy(true);
+        onError("");
+        void (async () => {
+          if (task.kind === "audio") {
+            const next = nextValue as Quality;
+            const updated = await api.updateDownloadQuality(task.id, next);
             useDownloadStore.getState().mergeTasks([updated]);
-            patchVideoDraft(task.id, { request: { max_height: next } });
-          })()
-            .catch((error: unknown) =>
-              onError(`更改本条质量失败：${(error as Error).message}`),
-            )
-            .finally(() => setBusy(false));
-        }}
-      />
+            setQueueDraft(task.id, { kind: "audio", quality: next });
+            return;
+          }
+
+          const next = Number.parseInt(nextValue, 10);
+          const updated = await api.updateDownloadHeight(task.id, next);
+          useDownloadStore.getState().mergeTasks([updated]);
+          patchVideoDraft(task.id, { request: { max_height: next } });
+        })()
+          .catch((error: unknown) => onError(`更改本条质量失败：${(error as Error).message}`))
+          .finally(() => setBusy(false));
+      }}
+    />
+  ) : (
+    <span className="kd-download-task-quality kd-mono">
+      {icon}
+      {label}
+    </span>
+  );
+
+  return (
+    <>
+      {qualityControl}
+      {modeControl ? <BilibiliVideoModeControl task={task} onError={onError} /> : null}
+    </>
   );
 }
 

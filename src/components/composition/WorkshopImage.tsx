@@ -38,7 +38,7 @@ export function WorkshopImage({ project, clip, source, playback, inspect, zIndex
         for (let i=1;i<=2;i++) { const index=(frame.index+i)%s.frame_ends_ms.length; urls.push(api.workshopFrameUrl(p.id,s.id,index ? s.frame_ends_ms[index-1] : 0,960)); }
       }
       for (const url of urls) if (!leases.has(url)) {
-        const lease = acquireCoverThumbnail(`vj-image:${url}`, url, 0); const entry: {release():void;url?:string;error?:string} = {release:lease.release}; leases.set(url,entry);
+        const lease = acquireCoverThumbnail(`vj-image:${url}`, url, 0, {retainUnused: false}); const entry: {release():void;url?:string;error?:string} = {release:lease.release}; leases.set(url,entry);
         void lease.promise.then(src => { if (alive && leases.get(url) === entry) { entry.url=src; schedule(); } }).catch(() => { if (alive && leases.get(url) === entry) {entry.error=`${s.title} 无法预览`;schedule();} });
       }
       const failure=leases.get(wanted)?.error;

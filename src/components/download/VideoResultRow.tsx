@@ -290,6 +290,7 @@ export function VideoResultRow({
       page_title: page?.title?.trim() || undefined,
       max_height: effectiveHeight,
       audio_only: false,
+      video_only: false,
       // YouTube has one fixed, decode-free H.264/AAC → MP4 path. The global compatibility
       // re-encode setting remains available to Bilibili downloads only.
       transcode: platform === "youtube" ? false : (settings?.video_transcode ?? false),

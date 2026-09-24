@@ -115,11 +115,11 @@ export function useWorkshopPlayback(): WorkshopPlayback {
       activeAudition.current = audition;
       setTicket(result.ticket);
       if (wantPlay.current) {
-        const source = p.sources.find((s) =>
-          p.layers.some((l) => l.source_id === s.id),
+        const source = p.sources.find((s) => s.track_id > 0 &&
+          p.layers.some(l => l.clips.some(c => c.source_id === s.id)),
         );
-        if (!source) return;
-        const template = await api.track(source.track_id);
+        // Generated captions have no library row; silence still drives the shared clock.
+        const template = source ? await api.track(source.track_id) : null;
         if (epoch.current !== request) return;
         const previewTrack = makeCompositionPreviewTrack(
           template,

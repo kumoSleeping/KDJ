@@ -1,8 +1,7 @@
 //! 哔哩哔哩 provider：视频解析 + 下载 + 音乐管线入口。
 //!
 //! 默认「视频就是视频」——音乐下载管线里 B 站来源下完整视频，画面不在
-//! 下载环节丢掉。来源 payload 里带 `audio_only: true` 时（收藏夹批量下载的
-//! 「只要音频」开关）改下纯音轨 m4a。单视频的音/视频选择仍在视频面板。
+//! 下载环节丢掉。来源请求可选择只抽音轨，或只保留视频画面。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -29,7 +28,10 @@ use super::url::{
 };
 use super::{login, qn_for_height};
 use crate::ffmpeg;
-use crate::net::{create_download_writer, ensure_media_url, AtomicDownload};
+use crate::net::{
+    create_download_writer, ensure_media_url, guarded_media_get_with_host, response_bytes_limited,
+    AtomicDownload, GuardedMediaPolicy,
+};
 use crate::provider::{
     effective_limit, full_listing, loose_int, qr_data_url_from_text, str_field,
     unique_download_path, Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext,
@@ -37,6 +39,7 @@ use crate::provider::{
 };
 
 const LABEL: &str = "哔哩哔哩";
+const BILIBILI_COVER_MAX_BYTES: usize = 12 * 1024 * 1024;
 const CHUNK_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 const QR_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -666,6 +669,15 @@ impl BilibiliProvider {
         cancel: &CancellationToken,
         progress: &ProgressSink,
     ) -> Result<PathBuf> {
+        anyhow::ensure!(
+            !(req.audio_only && req.video_only),
+            "不能同时选择纯音频和纯视频"
+        );
+        // durl 单流自带音画，纯音频/纯视频都需要 ffmpeg 抽轨并重新封装。
+        // 安卓无 ffmpeg，不能把音画都有的原片冒充成单轨成品。
+        if (req.audio_only || req.video_only) && !ffmpeg::available() {
+            bail!("下载纯音频或纯视频需要 FFmpeg，这台设备上没有");
+        }
         // 掐头/留白全靠 ffmpeg（安卓走的是无 ffmpeg 的单流直存路径），
         // 早点把话说明白，别下完整段流才发现偏移根本没生效
         if req.offset_ms != 0 && !ffmpeg::available() {
@@ -773,6 +785,37 @@ impl BilibiliProvider {
             .await?;
             self.extract_audio(&source_path, &staged, &log_path, req.offset_ms, cancel)
                 .await?;
+
+            let api_cover =
+                normalize_pic(info.get("pic").and_then(Value::as_str).unwrap_or_default());
+            let request_cover = normalize_pic(&req.cover);
+            let mut cover = if api_cover.is_empty() {
+                None
+            } else {
+                self.fetch_cover(&api_cover).await
+            };
+            if cover.is_none() && !request_cover.is_empty() && request_cover != api_cover {
+                cover = self.fetch_cover(&request_cover).await;
+            }
+            let artist = if req.artist.trim().is_empty() {
+                info.pointer("/owner/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            } else {
+                req.artist.trim().to_string()
+            };
+            let artists = if artist.is_empty() {
+                Vec::new()
+            } else {
+                vec![artist]
+            };
+            // 封面是可选元数据，远程图片或标签写入失败不能让已抽出的音频下载失败。
+            if let Err(error) =
+                crate::tags::embed_metadata(&staged, &title, &artists, "", cover.as_deref())
+            {
+                tracing::warn!(bvid = %bvid, %error, "B站纯音频写入标签失败");
+            }
         } else {
             let Some(video) = video_stream.clone() else {
                 bail!("哔哩哔哩没有返回可下载的视频流（该视频可能没有可用的画质档位）");
@@ -799,16 +842,28 @@ impl BilibiliProvider {
                 let video_path = temp_dir.join("video.m4s");
                 plan.push((video.candidate_urls(), video_path.clone()));
                 let mut inputs = vec![video_path];
-                if let Some(audio) = &audio_stream {
-                    let audio_path = temp_dir.join("audio.m4s");
-                    plan.push((audio.candidate_urls(), audio_path.clone()));
-                    inputs.push(audio_path);
+                if !req.video_only {
+                    if let Some(audio) = &audio_stream {
+                        let audio_path = temp_dir.join("audio.m4s");
+                        plan.push((audio.candidate_urls(), audio_path.clone()));
+                        inputs.push(audio_path);
+                    }
                 }
                 inputs
             };
             self.fetch_streams(&plan, &cookies, cancel, progress)
                 .await?;
-            let args = ffmpeg::mux_args(&inputs, &staged, req.transcode, max_height, req.offset_ms);
+            let args = if req.video_only {
+                ffmpeg::mux_video_only_args(
+                    &inputs,
+                    &staged,
+                    req.transcode,
+                    max_height,
+                    req.offset_ms,
+                )
+            } else {
+                ffmpeg::mux_args(&inputs, &staged, req.transcode, max_height, req.offset_ms)
+            };
             ffmpeg::run(&args, &log_path, cancel).await?;
         }
 
@@ -824,6 +879,41 @@ impl BilibiliProvider {
         let output_path = crate::net::commit_download(&staged, &output_path)?;
         drop(guard);
         Ok(output_path)
+    }
+
+    async fn fetch_cover(&self, url: &str) -> Option<Vec<u8>> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            reqwest::header::HeaderValue::from_static(USER_AGENT),
+        );
+        headers.insert(
+            reqwest::header::REFERER,
+            reqwest::header::HeaderValue::from_static("https://www.bilibili.com/"),
+        );
+        let response = guarded_media_get_with_host(
+            url,
+            &headers,
+            GuardedMediaPolicy {
+                max_redirects: 2,
+                connect_timeout: Duration::from_secs(5),
+                read_timeout: Duration::from_secs(10),
+            },
+            &bilibili_cover_url_allowed,
+        )
+        .await
+        .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let bytes = response_bytes_limited(response, BILIBILI_COVER_MAX_BYTES)
+            .await
+            .ok()?;
+        matches!(
+            image::guess_format(&bytes),
+            Ok(image::ImageFormat::Jpeg | image::ImageFormat::Png)
+        )
+        .then_some(bytes)
     }
 
     async fn target_of(&self, req: &VideoDownloadRequest) -> Result<(String, usize)> {
@@ -1459,8 +1549,7 @@ impl MusicProvider for BilibiliProvider {
         }))
     }
 
-    /// 音乐下载管线的统一入口：默认下**完整视频**；来源 payload 带
-    /// `audio_only: true` 时改下纯音轨 m4a（收藏夹批量下载的「只要音频」）。
+    /// 音乐下载管线的统一入口：默认下**完整视频**；来源 payload 可要求只下音频或只下视频。
     ///
     /// `quality` 对 B 站没有意义，收下忽略，保持和网易云/QQ 同一个签名，
     /// 让 downloader 不用特判平台。
@@ -1487,6 +1576,12 @@ impl MusicProvider for BilibiliProvider {
                 .get("audio_only")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            video_only: job
+                .source
+                .payload
+                .get("video_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             transcode: job
                 .source
                 .payload
@@ -1503,6 +1598,14 @@ impl MusicProvider for BilibiliProvider {
 }
 
 // ---------------------------------------------------------------- 纯函数
+
+fn bilibili_cover_url_allowed(url: &url::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            host == "hdslb.com" || host.ends_with(".hdslb.com")
+        })
+}
 
 fn favorite_folder_title(info: &Value, media_id: &str) -> String {
     let title = str_field(info, "title").unwrap_or_default().trim();

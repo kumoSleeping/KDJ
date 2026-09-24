@@ -44,6 +44,9 @@ struct SourceRangeCache {
 #[derive(Default, Debug)]
 struct SharedRangeCache {
     sources: HashMap<String, SourceRangeCache>,
+    // Audible and seek-shadow readers share ownership. LRU eviction of bytes
+    // must not lose those leases or let an old reader trim a still-active source.
+    readers: HashMap<String, usize>,
     bytes: usize,
     clock: u64,
 }
@@ -188,13 +191,38 @@ impl SharedRangeCache {
         self.prune_sources();
     }
 
+    fn acquire(&mut self, key: &str, total: u64, hint_extension: Option<&str>) {
+        *self.readers.entry(key.to_owned()).or_default() += 1;
+        self.observe_metadata(key, total, hint_extension);
+    }
+
+    fn release(&mut self, key: &str) {
+        let Some(readers) = self.readers.get_mut(key) else { return; };
+        *readers -= 1;
+        if *readers != 0 { return; }
+        self.readers.remove(key);
+        let Some(source) = self.sources.get_mut(key) else { return; };
+        let previous = source.bytes;
+        // Keep only the bounded probe prefix when the last reader leaves.
+        // A later seek can reopen from metadata; historical media bodies do not
+        // compete with the currently audible stream for the 128 MiB budget.
+        source.ranges.retain(|start, range| {
+            if *start >= RANGE_CACHE_PROTECTED_PREFIX_BYTES { return false; }
+            let keep = (RANGE_CACHE_PROTECTED_PREFIX_BYTES - *start) as usize;
+            if range.bytes.len() > keep { range.bytes = range.bytes[..keep].into(); }
+            true
+        });
+        source.bytes = source.ranges.values().map(|range| range.bytes.len()).sum();
+        self.bytes = self.bytes.saturating_sub(previous - source.bytes);
+    }
+
     fn prune_sources(&mut self) {
         while self.sources.len() > RANGE_CACHE_SOURCE_LIMIT || self.bytes > RANGE_CACHE_TOTAL_BYTES
         {
             let Some(key) = self
                 .sources
                 .iter()
-                .min_by_key(|(_, source)| source.touched)
+                .min_by_key(|(key, source)| (self.readers.contains_key(*key), source.touched))
                 .map(|(key, _)| key.clone())
             else {
                 break;
@@ -307,12 +335,10 @@ impl HttpRangeSource {
             .as_ref()
             .and_then(|opened| opened.hint_extension.clone())
             .or_else(|| cached.and_then(|cached| cached.hint_extension));
-        if let Some(opened) = opened.as_ref() {
-            shared_range_cache()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .observe_metadata(&cache_key, opened.total, opened.hint_extension.as_deref());
-        }
+        shared_range_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .acquire(&cache_key, total, hint_extension.as_deref());
         Ok(OpenedHttpRangeSource {
             source: Self {
                 client,
@@ -373,6 +399,15 @@ impl HttpRangeSource {
             .response
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+impl Drop for HttpRangeSource {
+    fn drop(&mut self) {
+        shared_range_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .release(&self.cache_key);
     }
 }
 

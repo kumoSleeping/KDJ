@@ -40,7 +40,17 @@ impl ReferenceTimeline {
     }
 }
 
+/// Audible presentation used to guard pending automatic edits.
 pub(super) fn reference(p: &CompositionProject, layer: &Layer) -> Option<ReferenceTimeline> {
+    reference_inner(p, layer, false)
+}
+
+/// Stable recording timeline used for acoustic evidence, independent of audition.
+pub(super) fn matching_reference(p: &CompositionProject, layer: &Layer) -> Option<ReferenceTimeline> {
+    reference_inner(p, layer, true)
+}
+
+fn reference_inner(p: &CompositionProject, layer: &Layer, include_muted: bool) -> Option<ReferenceTimeline> {
     let has_music = p.music_reference().is_some();
     if has_music && !p.source(&layer.source_id).is_some_and(|s| s.video) {
         return None;
@@ -50,7 +60,10 @@ pub(super) fn reference(p: &CompositionProject, layer: &Layer) -> Option<Referen
         .iter()
         .filter(|l| l.id != layer.id)
         .flat_map(|l| &l.clips)
-        .filter(|c| !c.sound.muted && c.sound.gain > 0. && c.duration() > 0.)
+        // Audition/mix controls do not change a recording's timing identity.
+        // In particular, muting the music to hear a video must not switch the
+        // reference to another recording or invalidate all position analyses.
+        .filter(|c| c.duration() > 0. && (include_muted || (!c.sound.muted && c.sound.gain > 0.)))
         .filter(|c| {
             p.source(&c.source_id)
                 .is_some_and(|s| s.audio && (!has_music || !s.video))
@@ -104,8 +117,8 @@ pub(super) fn reference(p: &CompositionProject, layer: &Layer) -> Option<Referen
             }
         }
     }
-    // Keep fully overlapping parts in the fingerprint as well, so all audible
-    // material changes invalidate stale analysis even if it owns no interval.
+    // Keep fully overlapping parts in the fingerprint as well, so timing/source
+    // edits invalidate stale analysis even if a part owns no interval.
     Some(ReferenceTimeline { parts, composite })
 }
 
@@ -113,9 +126,7 @@ pub(super) fn reference(p: &CompositionProject, layer: &Layer) -> Option<Referen
 /// otherwise fit the same source independently, inventing rate changes and losing
 /// evidence near each edit. Placement still stays inside owned timeline ranges.
 pub(super) fn context_clip(clip: &Clip) -> Clip {
-    if clip.speed.preset == "constant"
-        && (clip.speed.domain_end_ms - clip.speed.domain_start_ms) / clip.speed.start <= 1_800_000.
-    {
+    if clip.speed.preset == "constant" {
         let mut full = clip.clone();
         full.source_in_ms = clip.speed.domain_start_ms;
         full.source_out_ms = clip.speed.domain_end_ms;

@@ -39,9 +39,10 @@ function PreviewVideo({ register, ...props }: React.VideoHTMLAttributes<HTMLVide
   return <video {...props} ref={node} onLoadedData={event => {
     if (retry.current !== null) clearTimeout(retry.current);
     retry.current = null;
+    attempts.current = 0;
     props.onLoadedData?.(event);
   }} onError={event => {
-    if (retry.current !== null) return;
+    if (!event.currentTarget.getAttribute("src") || retry.current !== null) return;
     if (attempts.current >= 2) { props.onError?.(event); return; }
     const video = event.currentTarget;
     retry.current = setTimeout(() => {
@@ -50,38 +51,83 @@ function PreviewVideo({ register, ...props }: React.VideoHTMLAttributes<HTMLVide
     }, ++attempts.current * 400);
   }} />;
 }
-function PreviewVideoPair({ synchronizer, register, ...props }: React.VideoHTMLAttributes<HTMLVideoElement> & {
+function waitForPreviewMetadata(video: HTMLVideoElement, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  if (video.readyState >= 1) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const finish = (ready: boolean) => {
+      clearTimeout(timer);
+      video.removeEventListener("loadedmetadata", loaded);
+      video.removeEventListener("error", failed);
+      signal.removeEventListener("abort", failed);
+      resolve(ready);
+    };
+    const loaded = () => finish(true), failed = () => finish(false);
+    const timer = setTimeout(failed, 4000);
+    video.addEventListener("loadedmetadata", loaded, {once: true});
+    video.addEventListener("error", failed, {once: true});
+    signal.addEventListener("abort", failed, {once: true});
+  });
+}
+function PreviewVideoPair({ synchronizer, alignmentOwner, register, ...props }: React.VideoHTMLAttributes<HTMLVideoElement> & {
   synchronizer: VideoPlaybackEngine;
+  alignmentOwner: React.MutableRefObject<AbortController | null>;
   register(node: HTMLVideoElement, correct: () => void): () => void;
 }) {
   const nodes = useRef<[HTMLVideoElement | null, HTMLVideoElement | null]>([null, null]);
   const active = useRef(0), generation = useRef(0);
+  const preparation = useRef<AbortController | null>(null);
   const unregister = useRef<(() => void) | null>(null);
+  const unload = (node: HTMLVideoElement) => {
+    synchronizer.releaseClock(node);
+    node.pause();
+    if (node.hasAttribute("src")) { node.removeAttribute("src"); node.load(); }
+  };
   const correct = () => {
     const old = nodes.current[active.current], next = nodes.current[1 - active.current];
     const owner = generation.current;
-    if (!old || !next) return;
-    const isCurrent = () => owner === generation.current && nodes.current[active.current] === old;
-    void synchronizer.alignStandby(old, next, isCurrent, () => {
-      if (!isCurrent()) return false;
-      next.style.cssText = old.style.cssText;
-      old.style.opacity = '0';
-      active.current = 1 - active.current;
-      unregister.current?.();
-      unregister.current = register(next, correct);
-      old.pause();
-      return true;
-    });
+    if (!old || !next || alignmentOwner.current) return;
+    const controller = new AbortController();
+    preparation.current = alignmentOwner.current = controller;
+    const isCurrent = () => !controller.signal.aborted && owner === generation.current && nodes.current[active.current] === old;
+    // The spare owns no source/decoder until correction is actually needed.
+    // Serialize temporary spares across layers; steady playback needs one decoder
+    // per prepared picture, not two full-resolution HEVC streams per clip.
+    next.src = props.src ?? old.currentSrc;
+    next.load();
+    void (async () => {
+      if (!await waitForPreviewMetadata(next, controller.signal) || !isCurrent()) return;
+      await synchronizer.alignStandby(old, next, isCurrent, () => {
+        if (!isCurrent()) return false;
+        next.style.cssText = old.style.cssText;
+        old.style.opacity = '0';
+        active.current = 1 - active.current;
+        unregister.current?.();
+        unregister.current = register(next, correct);
+        old.pause();
+        return true;
+      });
+    })().finally(() => {
+      for (const node of [old, next]) {
+        if (nodes.current.includes(node) && nodes.current[active.current] !== node) unload(node);
+      }
+      if (preparation.current === controller) preparation.current = null;
+      if (alignmentOwner.current === controller) alignmentOwner.current = null;
+    }).catch(() => {});
   };
-  return <>{([0, 1] as const).map(slot => <PreviewVideo {...props} key={slot} register={node => {
+  // URL changes remount the pair. After adoption the pair, not React, owns src;
+  // keeping the initial slot props stable avoids reloading the former decoder.
+  return <>{([0, 1] as const).map(slot => <PreviewVideo {...props} src={slot === 0 ? props.src : undefined} key={slot} register={node => {
     nodes.current[slot] = node;
     if (slot === active.current) unregister.current = register(node, correct);
     return () => {
+      preparation.current?.abort();
       generation.current++;
       nodes.current[slot] = null;
       if (slot === active.current) { unregister.current?.(); unregister.current = null; }
+      synchronizer.releaseClock(node);
     };
-  }} />)}</>;
+  }} onError={event => { if (slot === active.current) props.onError?.(event); }} />)}</>;
 }
 export function WorkshopPreview({ playback, editable = true }: { playback: WorkshopPlayback; editable?: boolean }) {
   const project = useWorkshopStore((s) => s.draft),
@@ -98,6 +144,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
     decoded = useRef(new WeakSet<HTMLVideoElement>()),
     pending = useRef(new WeakSet<HTMLVideoElement>());
   const corrections = useRef(new WeakMap<HTMLVideoElement, () => void>());
+  const alignmentOwner = useRef<AbortController | null>(null);
   const wake = useRef<() => void>(() => {}), seekGate = useRef(new WorkshopSeekGate());
   const [compat, setCompat] = useState<Set<string>>(() => new Set()),
     [errors, setErrors] = useState<Record<string, string>>({}),
@@ -121,7 +168,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
   const hiddenLayers = project ? hiddenVideoLayers[project.id] ?? [] : [];
   const active = trimClip
     ? [trimClip]
-    : (visual?.layers
+    : (visual?.layers.slice().reverse()
         .filter(l => !hiddenLayers.includes(l.id))
         .flatMap((l) =>
           l.clips.filter((c) => {
@@ -132,9 +179,8 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
               position < c.start_ms + clipDuration(c)
             );
           }),
-        )
-        .reverse() ?? []);
-  const prepared = trimClip ? [trimClip] : visual ? prepareVideoClips(visual, position, hiddenLayers) : [];
+        ) ?? []);
+  const prepared = trimClip ? [trimClip] : visual ? prepareVideoClips(visual, position, hiddenLayers, playback.playing) : [];
   const error = active.map(c => {
     const proxy = !trimPreview && playback.ticket && c.speed.preset !== "constant";
     const part = Math.max(0, Math.floor((position - c.start_ms) / 8000));
@@ -302,6 +348,8 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
     gesture.current = null;
     useWorkshopStore.getState().commit();
   };
+  const stack = [...project.layers].reverse().flatMap(l => [...l.clips].sort((a, b) => a.start_ms - b.start_ms));
+  const stackOrder = new Map(stack.map((c, i) => [c.id, i + 1]));
   return (
     <div className="vj-preview" ref={container}>
       <div
@@ -323,7 +371,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
       >
         {/* Keep decoder DOM order independent of layer order. Moving an active
             video node can stall WKWebView; z-index alone owns layer stacking.
-            Within a source, incoming transition clips still follow outgoing ones. */}
+            Within a track, incoming clips cover outgoing clips across sources too. */}
         {[...prepared].sort((a, b) => a.source_id.localeCompare(b.source_id)
           || a.start_ms - b.start_ms || a.id.localeCompare(b.id)).flatMap((c) => {
           const s = project.sources.find((s) => s.id === c.source_id)!,
@@ -335,7 +383,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
               c.speed.preset !== "constant",
             ),
             part = Math.max(0, Math.floor((position - c.start_ms) / 8000));
-          const zIndex = project.layers.length - project.layers.findIndex(l => l.source_id === c.source_id && l.clips.some(v => v.id === c.id));
+          const zIndex = stackOrder.get(c.id) ?? 0;
           if (isImageSource(s)) return <WorkshopImage key={`${c.id}:${retryVersion}`} onError={message => setErrors(old => ({...old,[`${c.id}:raw`]:message}))} onReady={() => clearError(`${c.id}:raw`)} project={project} clip={c} source={s} playback={playback} inspect={trimPreview?.edge} zIndex={zIndex} />;
           const parts = proxy && playback.playing && position - c.start_ms >= (part + 1) * 8000 - 1000 && (part + 1) * 8000 < clipDuration(c) ? [part, part + 1] : [part];
           return parts.map(part => {
@@ -345,6 +393,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
             <PreviewVideoPair
               key={`${slot}:${url}:${retryVersion}`}
               synchronizer={sync.current}
+              alignmentOwner={alignmentOwner}
               register={(node, correct) => {
                 corrections.current.set(node, correct);
                 videos.current.set(slot, node); wake.current();
@@ -383,7 +432,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
                 className="vj-picture-hit"
                 data-clip-id={c.id}
                 style={{
-                  zIndex: project.layers.length + 1,
+                  zIndex: stack.length + 1,
                   transform: `rotate(${b.rotation}deg)`,
                   left: `${b.x * 100}%`,
                   top: `${b.y * 100}%`,
@@ -407,7 +456,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
             className="vj-picture-selection"
             data-clip-id={selectedClip?.id}
             style={{
-              zIndex: project.layers.length + 2,
+              zIndex: stack.length + 2,
               transform: `rotate(${bounds.rotation}deg)`,
               left: `${bounds.x * 100}%`,
               top: `${bounds.y * 100}%`,

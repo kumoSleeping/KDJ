@@ -448,6 +448,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           page_index: req.page,
           max_height: settings?.video_max_height ?? 1080,
           audio_only: false,
+          video_only: false,
           // YouTube 的固定原生链路直接把 H.264/AAC 封装为 MP4，不做解码或重编码。
           // B站继续保留原来的兼容转码及 Offset 语义。
           transcode: req.platform !== "youtube",

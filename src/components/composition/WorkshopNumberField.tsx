@@ -12,7 +12,7 @@ export function NumberField({
 }: {
   label: string;
   ariaLabel?: string;
-  value: number;
+  value: number | undefined;
   min?: number;
   max?: number;
   step?: number;
@@ -20,11 +20,12 @@ export function NumberField({
   onCommit?(): void;
   suffix?: string;
 }) {
-  const [text, setText] = useState(String(Math.round(value * 1000) / 1000));
+  const display = value === undefined ? "" : String(Math.round(value * 1000) / 1000);
+  const [text, setText] = useState(display);
   const focused = useRef(false);
   useEffect(() => {
-    if (!focused.current) setText(String(Math.round(value * 1000) / 1000));
-  }, [value]);
+    if (!focused.current) setText(display);
+  }, [display]);
   return (
     <label className="vj-number">
       <span>{label}</span>
@@ -51,7 +52,7 @@ export function NumberField({
         }}
         onBlur={() => {
           focused.current = false;
-          setText(String(Math.round(value * 1000) / 1000));
+          setText(display);
           onCommit?.();
         }}
         onKeyDown={(e) => {

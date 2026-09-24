@@ -1600,6 +1600,37 @@ impl Actor {
                     }
                     self.pending_preroll[deck as usize] = None;
                     let activation = failed.as_ref().and_then(|pending| pending.activation);
+                    let failed_track_id = failed
+                        .as_ref()
+                        .map(|pending| pending.request.track_id)
+                        .or_else(|| {
+                            self.decks[deck as usize]
+                                .as_ref()
+                                .map(|runtime| runtime.request.track_id)
+                        });
+                    let background_preload = !self.manual_mode
+                        && deck != self.front
+                        && self.retire_after_transition != Some(deck)
+                        && activation.is_none()
+                        && failed_track_id.is_some()
+                        && self.state.prepared_track_id == failed_track_id;
+                    if background_preload {
+                        // A speculative next song owns no transport intent. Drop its workers,
+                        // buffered audio and prepared marker, not the current song's state.
+                        // This also covers a prepared decoder failing after installation; an
+                        // explicit Load/Handoff or physical Deck load still reports its error.
+                        self.retire_deck(deck);
+                        self.state.prepared_track_id = None;
+                        self.release_stem_pool_if_idle();
+                        tracing::debug!(
+                            track_id = ?failed_track_id,
+                            %error,
+                            "discarded failed background preload"
+                        );
+                        self.bump_sequence();
+                        self.publish(true);
+                        return;
+                    }
                     let failed_stem = failed
                         .as_ref()
                         .is_some_and(|pending| pending.request.stem_enabled);

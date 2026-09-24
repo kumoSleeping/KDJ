@@ -105,6 +105,28 @@ pub fn mux_args(
     max_height: i64,
     offset_ms: i64,
 ) -> Vec<String> {
+    mux_args_internal(inputs, output, transcode, max_height, offset_ms, false)
+}
+
+/// 混流时只映射视频流，避免 durl 单流里的声音被带进纯视频成品。
+pub fn mux_video_only_args(
+    inputs: &[PathBuf],
+    output: &Path,
+    transcode: bool,
+    max_height: i64,
+    offset_ms: i64,
+) -> Vec<String> {
+    mux_args_internal(inputs, output, transcode, max_height, offset_ms, true)
+}
+
+fn mux_args_internal(
+    inputs: &[PathBuf],
+    output: &Path,
+    transcode: bool,
+    max_height: i64,
+    offset_ms: i64,
+    video_only: bool,
+) -> Vec<String> {
     let transcode = transcode || offset_ms != 0;
     let mut args: Vec<String> = vec!["-y".into()];
     for input in inputs {
@@ -118,13 +140,15 @@ pub fn mux_args(
     }
     args.push("-map".into());
     args.push("0:v:0".into());
-    if inputs.len() > 1 {
-        args.push("-map".into());
-        args.push("1:a:0".into());
-    } else {
-        // 单流里音轨可能不存在，`?` 让它可选，否则整条命令会失败
-        args.push("-map".into());
-        args.push("0:a:0?".into());
+    if !video_only {
+        if inputs.len() > 1 {
+            args.push("-map".into());
+            args.push("1:a:0".into());
+        } else {
+            // 单流里音轨可能不存在，`?` 让它可选，否则整条命令会失败
+            args.push("-map".into());
+            args.push("0:a:0?".into());
+        }
     }
     if transcode {
         // 负偏移的黑场在缩放前面补：tpad 生成的帧跟着源一起缩，滤镜链只写一遍尺寸
@@ -145,14 +169,13 @@ pub fn mux_args(
                 &vf,
                 "-pix_fmt",
                 "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
             ]
             .map(str::to_string),
         );
-        if offset_ms < 0 {
+        if !video_only {
+            args.extend(["-c:a", "aac", "-b:a", "192k"].map(str::to_string));
+        }
+        if offset_ms < 0 && !video_only {
             // 画面补了黑场，声音就得补等长的静音，否则音画从头错到尾
             args.push("-af".into());
             args.push(format!("adelay={}:all=1", -offset_ms));

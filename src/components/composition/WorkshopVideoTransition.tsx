@@ -11,32 +11,37 @@ export function WorkshopVideoTransition({project, left, right, scale}: {
 }) {
   const [menu, setMenu] = useState<{x:number; y:number} | null>(null);
   const drag = useRef<{project:CompositionProject; x:number; duration:number; alignment:VideoTransition["alignment"]; factor:number} | null>(null);
+  const media = [left, right].map(c => project.sources.find(s => s.id === c.source_id));
+  const video = media.every(s => s?.video), audio = media.every(s => s?.audio);
+  const label = video ? "画面过渡" : "声音交叉淡化";
   const config = right.video_transition, span = videoTransitionSpan(left, right);
   const duration = span ? span.before + span.after : 0;
   const alignment = config?.alignment ?? 0;
   const quantum = clipQuantum(project, right);
   const change = (value:VideoTransition | null) => useWorkshopStore.getState().edit(p => setVideoTransition(p, right.id, value));
-  const curves = [false, true].map(incoming => Array.from({length:25}, (_,i) => {
+  const curves = (sound: boolean) => [false, true].map(incoming => Array.from({length:25}, (_,i) => {
     const weight = smooth(i/24);
     // Show alpha, just like the individual picture fade curves, not the
     // resulting mix weights. Source-over keeps the outgoing plane opaque;
     // incoming alpha alone reveals it. Two half-alpha planes would leak black.
     // Same coordinates as workshopFadeCurvePath: opaque=4, transparent=27.
-    return `${i ? "L" : "M"}${i/24*100},${27-(incoming ? weight : 1)*23}`;
+    return `${i ? "L" : "M"}${i/24*100},${27-(incoming ? weight : sound ? 1-weight : 1)*23}`;
   }).join(" "));
   const at = right.start_ms * scale;
   const resizeAt = span ? (alignment === -1 ? at-span.before*scale : at+span.after*scale) : at;
   return <>
-    {span && <svg className="vj-transition-curves" aria-label="画面过渡透明度曲线" viewBox="0 0 100 30" preserveAspectRatio="none"
+    {span && [video ? false : null, audio ? true : null].filter((sound): sound is boolean => sound !== null).map(sound => <svg key={String(sound)}
+      className={sound ? "vj-transition-sound-curves" : "vj-transition-curves"} aria-label={sound ? "声音交叉淡化曲线" : "画面过渡透明度曲线"}
+      viewBox="0 0 100 30" preserveAspectRatio="none"
       style={{left:at-span.before*scale, width:Math.max(1,duration*scale)}}>
-      {curves.map((d,i) => <path key={i} d={d} aria-label={i ? "后段透明度" : "前段透明度"} vectorEffect="non-scaling-stroke" />)}
-    </svg>}
-    <button type="button" className="vj-transition-trigger" style={{left:at}} aria-label="画面过渡" aria-haspopup="menu" aria-expanded={Boolean(menu)}
-      aria-pressed={Boolean(span)} title={`画面过渡${duration ? ` · ${(duration/1000).toFixed(2)} s` : ""}`}
+      {curves(sound).map((d,i) => <path key={i} d={d} aria-label={`${i ? "后段" : "前段"}${sound ? "音量" : "透明度"}`} vectorEffect="non-scaling-stroke" />)}
+    </svg>)}
+    <button type="button" className="vj-transition-trigger" style={{left:at}} aria-label={label} aria-haspopup="menu" aria-expanded={Boolean(menu)}
+      aria-pressed={Boolean(span)} title={`交叉渐变 · ${video && audio ? "画面 + 声音" : video ? "画面" : "声音"}${duration ? ` · ${(duration/1000).toFixed(2)} s` : ""}`}
       onPointerDown={e => e.stopPropagation()} onClick={e => {
         e.stopPropagation(); const r=e.currentTarget.getBoundingClientRect(); setMenu(menu ? null : {x:r.left, y:r.bottom});
       }} onContextMenu={e => {e.preventDefault(); e.stopPropagation(); setMenu({x:e.clientX,y:e.clientY});}}><Blend size={12}/></button>
-    {config && <button type="button" className="vj-transition-resize" style={{left:resizeAt}} role="slider" aria-label="联合调整画面过渡时长"
+    {config && <button type="button" className="vj-transition-resize" style={{left:resizeAt}} role="slider" aria-label={`联合调整${label}时长`}
       aria-valuemin={0} aria-valuemax={10000} aria-valuenow={duration} aria-valuetext={`${(duration/1000).toFixed(2)} 秒`}
       onPointerDown={e => {
         if(e.button !== 0) return; e.preventDefault(); e.stopPropagation();
@@ -54,16 +59,17 @@ export function WorkshopVideoTransition({project, left, right, scale}: {
         e.preventDefault();e.stopPropagation(); change({duration_ms:e.key === "Home" ? 0 : duration+(e.key === "ArrowRight" ? quantum : -quantum),alignment});
       }} />}
     {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} className="vj-transition-popup">
-      <div className="vj-transition-settings" role="group" aria-label="画面过渡设置" onPointerDown={e => e.stopPropagation()}>
-        <div className="vj-transition-heading"><span>画面过渡</span><button type="button" aria-label="移除画面过渡" disabled={!config} onClick={() => {change(null);setMenu(null);}}><X size={12}/></button></div>
-        {!duration && <button type="button" onClick={() => change({duration_ms:500,alignment})}>交叉淡化</button>}
-        <label>时长 <input aria-label="画面过渡时长（秒）" type="number" min={0} max={10} step={.05} value={Number((duration/1000).toFixed(3))}
+      <div className="vj-transition-settings" role="group" aria-label={`${label}设置`} onPointerDown={e => e.stopPropagation()}>
+        <div className="vj-transition-heading"><span>交叉渐变 · {video && audio ? "画面 + 声音" : video ? "画面" : "声音"}</span><button type="button" aria-label={`移除${label}`} disabled={!config} onClick={() => {change(null);setMenu(null);}}><X size={12}/></button></div>
+        {(!config || !config.duration_ms) && <button type="button" onClick={() => change({duration_ms:500,alignment})}>交叉淡化</button>}
+        <label>时长 <input aria-label={`${label}时长（秒）`} type="number" min={0} max={10} step={.05} value={Number(((config?.duration_ms ?? 0)/1000).toFixed(3))}
           onChange={e => {const n=e.currentTarget.valueAsNumber;if(Number.isFinite(n))change({duration_ms:n*1000,alignment});}}/> s</label>
         <div className="vj-transition-align" role="group" aria-label="过渡对齐">
           {([-1,0,1] as const).map((value,i) => <button type="button" key={value} aria-pressed={alignment===value}
-            onClick={() => change({duration_ms:duration || 500,alignment:value})}>{["靠前","居中","靠后"][i]}</button>)}
+            onClick={() => change({duration_ms:config?.duration_ms || 500,alignment:value})}>{["靠前","居中","靠后"][i]}</button>)}
         </div>
-        {config && config.duration_ms > 0 && !span && <span role="status">素材余量不足</span>}
+        {config && config.duration_ms > 0 && !span && <span role="status">素材余量不足，无法在保留位置的同时交叉渐变</span>}
+        {config && span && duration + .01 < config.duration_ms && <span role="status">受素材余量限制，实际 {(duration/1000).toFixed(3)} s</span>}
       </div>
     </ContextMenu>}
   </>;

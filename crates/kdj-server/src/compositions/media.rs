@@ -712,8 +712,30 @@ pub(super) fn ensure_safe_transcode(stream: &Stream) -> Result<()> {
     Ok(())
 }
 
-/// Workshop proxies use square pixels. Normalize SAR before reusing the stricter
-/// in-place composition checks; rotation and color metadata still need preservation.
+/// Accept only unit, right-angle display rotations that FFmpeg autorotation
+/// applies before our filters. Keep rejecting perspective, scaling and unknown
+/// side data rather than silently dropping their meaning.
+fn workshop_rotation_swaps_axes(data: &serde_json::Value) -> Result<bool> {
+    anyhow::ensure!(data["side_data_type"] == "Display Matrix", "素材包含不支持的附加画面信息");
+    let matrix = data["displaymatrix"].as_str().context("素材旋转矩阵缺失")?
+        .lines().filter(|line| !line.trim().is_empty())
+        .map(|line| line.split_once(':').context("素材旋转矩阵无效")
+            .and_then(|(_, values)| values.split_whitespace()
+                .map(|value| value.parse::<i64>().context("素材旋转矩阵无效"))
+                .collect::<Result<Vec<_>>>()))
+        .collect::<Result<Vec<_>>>()?.into_iter().flatten().collect::<Vec<_>>();
+    anyhow::ensure!(matrix.len() == 9 && matrix[2] == 0 && matrix[5] == 0
+        && matrix[6] == 0 && matrix[7] == 0 && matrix[8] == 1 << 30,
+        "素材包含不支持的画面变换");
+    match (matrix[0], matrix[1], matrix[3], matrix[4]) {
+        (65536, 0, 0, 65536) | (-65536, 0, 0, -65536) => Ok(false),
+        (0, -65536, 65536, 0) | (0, 65536, -65536, 0) => Ok(true),
+        _ => bail!("素材包含不支持的画面变换"),
+    }
+}
+
+/// Workshop proxies use square, display-oriented pixels. Normalize SAR and
+/// validated autorotation before reusing the stricter in-place/color checks.
 pub(super) fn workshop_video_size(stream: &Stream) -> Result<(u32, u32)> {
     let sar = match stream.sample_aspect_ratio.as_str() {
         "" | "N/A" | "0:1" => 1.,
@@ -729,8 +751,14 @@ pub(super) fn workshop_video_size(stream: &Stream) -> Result<(u32, u32)> {
     }
     let mut square = stream.clone();
     square.sample_aspect_ratio = "1:1".into();
+    let swap = match stream.side_data_list.as_slice() {
+        [] => false,
+        [data] => workshop_rotation_swaps_axes(data)?,
+        _ => bail!("素材包含不支持的附加画面信息"),
+    };
+    square.side_data_list.clear();
     ensure_safe_transcode(&square)?;
-    Ok((width as u32, height as u32))
+    Ok(if swap { (height as u32, width as u32) } else { (width as u32, height as u32) })
 }
 
 fn dispositions(stream: &Stream) -> String {

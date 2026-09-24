@@ -21,12 +21,25 @@ export interface ClipSpeed {
   domain_start_ms: number;
   domain_end_ms: number;
 }
+export interface WorkshopSubtitle {
+  text: string;
+  font: "system" | "sans" | "serif" | "mono";
+  font_size: number;
+  bold: boolean;
+  italic: boolean;
+  color: string;
+  outline_color: string;
+  outline_width: number;
+  align: "left" | "center" | "right";
+}
 export interface ClipPicture {
+  subtitle?: WorkshopSubtitle | null;
   rotation?: number;
   flip_x?: boolean;
   flip_y?: boolean;
   crop?: [number, number, number, number];
   crop_keep_position?: boolean;
+  crop_auto_fit?: boolean;
   x: number;
   y: number;
   scale: number;
@@ -51,6 +64,7 @@ export interface VideoTransition {
   alignment: -1 | 0 | 1;
 }
 export interface WorkshopClip {
+  /** Legacy field name: joint crossfade for each shared audio/video stream. */
   video_transition?: VideoTransition | null;
   display_duration_ms?: number | null;
   animation_offset_ms?: number;
@@ -67,6 +81,7 @@ export interface WorkshopClip {
 export interface WorkshopLayer {
   grid?: WorkshopBeatGrid | null;
   id: string;
+  /** Representative source for legacy labels/grid; each clip owns its media. */
   source_id: string;
   clips: WorkshopClip[];
 }

@@ -14,8 +14,8 @@ import {
   Play,
   Redo2,
   Scissors,
-  SlidersHorizontal,
   Trash2,
+  Type,
   Undo2,
   PictureInPicture2,
   X,
@@ -43,6 +43,7 @@ import { WorkshopTimeline } from "./WorkshopTimeline";
 import { WorkshopClipMenu } from "./WorkshopClipMenu";
 import { addWorkshopMarker } from "../../lib/workshopMarkers";
 import { WorkshopClipProperties } from "./WorkshopClipProperties";
+import { WorkshopSubtitleEditor } from "./WorkshopSubtitleEditor";
 import { WorkshopToolbar, WorkshopToolbarTarget } from "./WorkshopToolbar";
 import { WorkshopExportSettings } from "./WorkshopExport";
 import { WorkshopMediaTools } from "./WorkshopMediaTools";
@@ -75,15 +76,17 @@ function WorkshopEditor() {
     legacyError = useCompositionStore((s) => s.error);
   const legacy = legacyTasks.filter((t) => t.phase === "import_failed");
   const [legacyOpen, setLegacyOpen] = useState(false);
-  const [clipMenu, setClipMenu] = useState<{id?: string; markerId?: string; markMs?: number; x: number; y: number} | null>(null),
+  const [checkedLayers, setCheckedLayers] = useState<string[]>([]);
+  useEffect(() => { setCheckedLayers([]); setClipMenu(null); }, [p?.id]);
+  const [clipMenu, setClipMenu] = useState<{id?: string; layerIds?: string[]; markerId?: string; markMs?: number; x: number; y: number} | null>(null),
     [more, setMore] = useState(false),
     [align, setAlign] = useState(false),
     [reference, setReference] = useState("");
   const playback = useWorkshopPlayback(),
     root = useRef<HTMLDivElement>(null);
   const [previewOpen, setPreviewOpen] = useState(true);
-  const [propertiesOpen, setPropertiesOpen] = useState(true);
-  const hasVideo = Boolean(p?.layers.some(l => l.clips.length > 0 && isVisualSource(p.sources.find(s => s.id === l.source_id))));
+  const [subtitleEditor, setSubtitleEditor] = useState(false);
+  const hasVideo = Boolean(p?.layers.some(l => l.clips.some(c => isVisualSource(p.sources.find(s => s.id === c.source_id)))));
   const togglePlayback = () => playback.toggle();
   useEffect(() => { setPreviewOpen(hasVideo); }, [hasVideo]);
   useWorkshopUndoShortcuts(root);
@@ -136,7 +139,6 @@ function WorkshopEditor() {
     state.select(id);
     useWorkshopStore.setState({cropId: id});
     setPreviewOpen(true);
-    setPropertiesOpen(true);
     if (state.position < clip.start_ms || state.position >= clip.start_ms + clipDuration(clip)) playback.seek(clip.start_ms);
   };
   return (
@@ -196,14 +198,18 @@ function WorkshopEditor() {
         const id = target.closest<HTMLElement>("[data-clip-id]")?.dataset.clipId;
         const rail = target.closest<HTMLElement>(".vj-track-rail,.vj-ruler-rail");
         const markerId = target.closest<HTMLElement>("[data-marker-id]")?.dataset.markerId;
-        if (!id && !rail) return;
+        const rowId = target.closest<HTMLElement>("[data-layer-id]")?.dataset.layerId;
+        const selectedLayers = checkedLayers.filter(id => p?.layers.some(l => l.id === id));
+        const layerIds = rowId && selectedLayers.includes(rowId) && selectedLayers.length > 1 ? selectedLayers : undefined;
+        if (!id && !rail && !layerIds) return;
         e.preventDefault(); e.stopPropagation();
-        if (id) useWorkshopStore.getState().select(id);
+        if (id && !layerIds) useWorkshopStore.getState().select(id);
         const scale = Number(rail?.dataset.vjTimeScale);
         const markMs = markerId ? p?.markers?.find(m => m.id === markerId)?.position_ms
           : rail && scale > 0 ? (e.clientX - rail.getBoundingClientRect().left) / scale : undefined;
         const rect = root.current!.getBoundingClientRect();
-        setClipMenu({id, markerId, markMs, x: e.clientX - rect.left, y: e.clientY - rect.top});
+        setClipMenu({id: layerIds ? undefined : id, layerIds, markerId: layerIds ? undefined : markerId,
+          markMs: layerIds ? undefined : markMs, x: e.clientX - rect.left, y: e.clientY - rect.top});
       }}
       onDragOver={(e) => {
         if (isTrackDrag(e)) {
@@ -221,10 +227,11 @@ function WorkshopEditor() {
       }}
     >
       <InlineNotice className="vj-operation-notice" text={playback.error} />
+      {subtitleEditor && <WorkshopSubtitleEditor close={() => setSubtitleEditor(false)} />}
       {hasVideo && previewOpen && <WorkshopFloatingPreview playback={playback}
         onClose={() => { setPreviewOpen(false); root.current?.focus({preventScroll: true}); }} />}
       <div className="vj-editing-body">
-      <WorkshopTimeline playback={playback} tools={
+      <WorkshopTimeline playback={playback} checked={checkedLayers} onCheckedChange={setCheckedLayers} tools={<>
       <header className="vj-header vj-workshop-toolbar" data-workshop-toolbar="" aria-label="工作站操作">
         {aligning && <><span role="status">对齐中</span><button onClick={() => void useWorkshopStore.getState().cancelAlign()}>取消对齐</button></>}
         <button type="button" aria-label="新建任务" title="新建任务" disabled={saving > 0}
@@ -253,6 +260,8 @@ function WorkshopEditor() {
         <WorkshopExportSettings />
         <WorkshopMediaTools />
         <WorkshopVisualizerAction editing />
+        <button type="button" aria-label="添加字幕" disabled={!p || saving > 0}
+          onClick={() => { useWorkshopStore.getState().commit(); setSubtitleEditor(true); }}><Type size={15} />字幕</button>
         <div className="vj-menu-anchor">
           <button
             type="button"
@@ -364,13 +373,12 @@ function WorkshopEditor() {
         <button type="button" aria-label="时间轴吸附" aria-pressed={snap || barSnap}
           title="吸附片段边界与节拍线；Alt/Option 拖动临时关闭"
           onClick={() => useWorkshopStore.setState({snap: !(snap || barSnap), barSnap: !(snap || barSnap)})}><Magnet size={15} /></button>
-        <button type="button" aria-label="片段属性" title="片段属性" aria-expanded={propertiesOpen && !!c}
-          aria-pressed={propertiesOpen && !!c} disabled={!c} onClick={() => setPropertiesOpen(v => !v)}><SlidersHorizontal size={15} />属性</button>
         <button type="button" className="vj-preview-toggle" aria-label="打开作品预览小窗" title="预览小窗"
           aria-pressed={previewOpen && hasVideo} disabled={!hasVideo}
           onClick={() => setPreviewOpen(v => !v)}><PictureInPicture2 size={16} /></button>
-      </header>} />
-      {propertiesOpen && <WorkshopClipProperties close={() => {setPropertiesOpen(false); root.current?.focus({preventScroll:true});}}
+      </header>
+      <div className="vj-clip-properties-bar">
+      <WorkshopClipProperties close={() => root.current?.focus({preventScroll:true})}
         seek={playback.seek} crop={crop} actions={<>
           <button type="button" onClick={() => remove(true)}>删除并闭合空隙</button>
           <button type="button" disabled={!c || !p?.layers.some(l => l.clips.some(clip => clip.id !== selected && p.sources.find(s => s.id === clip.source_id)?.audio))}
@@ -379,9 +387,11 @@ function WorkshopEditor() {
             onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex - 1))}><ArrowUp size={15} />上移图层</button>
           <button type="button" aria-label="下移图层" disabled={layerIndex < 0 || layerIndex === p!.layers.length - 1}
             onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex + 1))}><ArrowDown size={15} />下移图层</button>
-        </>} />}
+        </>} />
       </div>
-      {clipMenu && <WorkshopClipMenu {...clipMenu} close={(restoreFocus = true) => { setClipMenu(null); if (restoreFocus) root.current?.focus({preventScroll: true}); }} onCrop={crop} />}
+      </>} />
+      </div>
+      {clipMenu && <WorkshopClipMenu {...clipMenu} close={(restoreFocus = true) => { setClipMenu(null); if (restoreFocus) root.current?.focus({preventScroll: true}); }} onCrop={crop} onMerged={() => setCheckedLayers([])} />}
 
 
       {legacyOpen && (

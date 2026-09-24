@@ -1,7 +1,7 @@
 use super::*;
 use kdj_core::work_scheduler::{work_scheduler, WorkClass, WorkRequest};
 mod timeline;
-use timeline::{context_clip, reference, restrict_placement, ReferenceTimeline};
+use timeline::{context_clip, matching_reference, reference, restrict_placement, ReferenceTimeline};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Placement {
     pub clip_id: String,
@@ -88,6 +88,9 @@ pub(super) fn retain_pending_after_edit(
     }
     Ok(())
 }
+// Permission to auto-place is stricter than analysis identity: an explicit
+// reference mix edit can revoke pending automatic placement without recomputing
+// acoustic evidence. Keep this edit guard separate from matching_reference_key.
 fn reference_key(
     p: &CompositionProject,
     layer: &Layer,
@@ -106,12 +109,30 @@ fn reference_key(
         )),
     ))
 }
+fn matching_reference_key(
+    p: &CompositionProject,
+    layer: &Layer,
+    reference: &Option<ReferenceTimeline>,
+) -> Result<String> {
+    render::key(&(
+        p.source(&layer.source_id).map(|s| (&s.path, &s.signature)),
+        reference.as_ref().map(|r| (
+            r.composite,
+            r.parts.iter().map(|part| {
+                let c = &part.clip;
+                (&c.id, &c.source_id, c.start_ms, c.source_in_ms, c.source_out_ms,
+                    &c.speed, &part.ranges,
+                    p.source(&c.source_id).map(|s| (&s.path, &s.signature)))
+            }).collect::<Vec<_>>(),
+        )),
+    ))
+}
 // Suggestions belong to the material slot, not to the latest cropped result.
 // Retain its source domain across moves, cuts, preset switches and restarts.
 fn source_basis(p: &CompositionProject, layer: &Layer) -> Layer {
     let mut base = layer.clone();
     if let Some(first) = layer.clips.first() {
-        if layer.clips.iter().all(|c| c.speed == first.speed) {
+        if layer.clips.iter().all(|c| c.source_id == layer.source_id && c.speed == first.speed) {
             let mut c = first.clone();
             let source = p.source(&layer.source_id).unwrap();
             let lo = c.speed.domain_start_ms.max(0.);
@@ -294,8 +315,17 @@ impl Workshop {
             });
             for layer in &p.layers {
                 let key = format!("{pid}:{}", layer.id);
-                let reference = reference(&p, layer);
-                let ref_key = reference_key(&p, layer, &reference)?;
+                // Matching assumes one source domain and disjoint cuts. Never
+                // reinterpret a manually assembled multi-file/overlapping track.
+                let mut ordered: Vec<_> = layer.clips.iter().collect();
+                ordered.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
+                if layer.clips.iter().any(|c| c.source_id != layer.source_id)
+                    || ordered.windows(2).any(|w| w[0].start_ms + w[0].duration() > w[1].start_ms + 0.001) {
+                    if let Some(old) = tasks.remove(&key) { old.cancel.cancel(); }
+                    continue;
+                }
+                let reference = matching_reference(&p, layer);
+                let ref_key = matching_reference_key(&p, layer, &reference)?;
                 let layout = layout_key(layer)?;
                 let stopped = journal.stopped_positions.contains(&key);
                 if tasks.get(&key).is_some_and(|t| {
@@ -396,7 +426,7 @@ impl Workshop {
                     return;
                 };
                 if layout_key(layer).ok().as_ref() != task.layouts.first()
-                    || reference_key(&current, layer, &reference(&current, layer))
+                    || matching_reference_key(&current, layer, &matching_reference(&current, layer))
                         .ok()
                         .as_ref()
                         != Some(&task.reference_key)
@@ -456,7 +486,7 @@ impl Workshop {
         .await??;
         let reference = task.reference.as_ref().context("缺少参考音频")?;
         let cache_key = render::key(&(
-            "positions-v10-melody-review",
+            "positions-v15-short-sequence-review",
             layout_key(&task.base)?,
             &task.reference_key,
         ))?;
@@ -493,6 +523,7 @@ impl Workshop {
         let mut placements = vec![];
         let mut remix_placements = vec![];
         let mut review_candidates = vec![];
+        let mut short_candidates = vec![];
         let mut reason = String::new();
         for (index, clip) in task.base.clips.iter().enumerate() {
             if task.cancel.is_cancelled() {
@@ -502,62 +533,41 @@ impl Workshop {
                 reason = "可用于匹配的片段不足 6 秒".into();
                 continue;
             }
-            let pcm = Arc::new(render::alignment_pcm(p, clip, &task.cancel).await?);
+            let recording = self.alignment_index(p, clip, &task.cancel).await?;
             // All edits of one recording reuse one correspondence, not one fit
-            // per cut. Cache only the small result, never multiple full PCMs.
-            type Correspondence = (
-                Option<f64>,
-                Vec<kdj_core::composition::CompositionVideoSection>,
-                kdj_analysis::alignment::PositionSuggestions,
-                String,
-            );
-            let mut correspondences: HashMap<String, Correspondence> = HashMap::new();
+            // per cut. Features are independently reusable across imported videos.
+            let mut correspondences: HashMap<String, kdj_analysis::alignment::RecordingMatch> = HashMap::new();
             for (reference_index, (part, reference_clip)) in references.iter().enumerate() {
                 let recording_key = render::key(&(&reference_clip.source_id,
                     reference_clip.source_in_ms, reference_clip.source_out_ms, &reference_clip.speed))?;
-                let (offset, sections, fuzzy, message) = if let Some(found) = correspondences.get(&recording_key) {
+                let kdj_analysis::alignment::RecordingMatch { offset_ms: offset, sections, fuzzy, short_review, reason: message } = if let Some(found) = correspondences.get(&recording_key) {
                     found.clone()
                 } else {
-                    let a = render::alignment_pcm(p, reference_clip, &task.cancel).await?;
-                    let pcm = pcm.clone();
-                    let cancel = task.cancel.clone();
+                    let reference_index = self.alignment_index(p, reference_clip, &task.cancel).await?;
                     let constant = clip.speed.preset == "constant"
                         && reference_clip.speed.preset == "constant";
-                    let found = tokio::task::spawn_blocking(move || -> Result<_> {
-                        kdj_core::thread_qos::prefer_background();
-                        let (result, sections) =
-                            kdj_analysis::alignment::align_sections(&a, &pcm, || {
-                                cancel.is_cancelled()
-                            })?;
-                        if result.matched {
-                            return Ok((
-                                Some(-result.offset_ms as f64),
-                                sections,
-                                kdj_analysis::alignment::PositionSuggestions::default(),
-                                String::new(),
-                            ));
-                        }
-                        let result = kdj_analysis::alignment::align_segment(&pcm, &a, || {
-                            cancel.is_cancelled()
-                        })?;
-                        let fuzzy = if !result.matched && constant {
-                            kdj_analysis::alignment::suggest_positions(&pcm, &a, || {
-                                cancel.is_cancelled()
-                            })?
-                        } else {
-                            kdj_analysis::alignment::PositionSuggestions::default()
-                        };
-                        Ok((
-                            result.matched.then_some(result.offset_ms as f64),
-                            vec![],
-                            fuzzy,
-                            result.reason,
-                        ))
-                    })
-                    .await??;
+                    let found = self.match_recordings(p, &recording, &reference_index, constant, false, &task.cancel, None).await?;
                     correspondences.insert(recording_key, found.clone());
                     found
                 };
+                for plan in short_review {
+                    let mut pieces = vec![];
+                    for candidate in plan {
+                        if !(0.5..=2.).contains(&(clip.speed.start * candidate.speed)) {
+                            pieces.clear();
+                            break;
+                        }
+                        let value = Placement {
+                            clip_id: clip.id.clone(),
+                            source_in_ms: clip.source_at(candidate.source_start_ms),
+                            source_out_ms: clip.source_at(candidate.source_end_ms),
+                            start_ms: reference_clip.start_ms + candidate.reference_start_ms,
+                            speed_multiplier: Some(candidate.speed),
+                        };
+                        pieces.extend(restrict_placement(clip, &value, &part.ranges));
+                    }
+                    if pieces.len() >= 2 { short_candidates.push(pieces); }
+                }
                 for candidate in &fuzzy.verified {
                     let speed = clip.speed.start * candidate.speed;
                     if !(0.5..=2.).contains(&speed) {
@@ -627,8 +637,32 @@ impl Workshop {
                 make_presets(&task.base, &placements)
             }
         } else {
-            make_remix_presets(&task.base, placements)
+            let mut choices = make_remix_presets(&task.base, placements.clone());
+            // The strongest acoustically verified span can anchor the whole
+            // video too. Previously only weak melody-review candidates exposed
+            // a full-video option, hiding the correct recording correspondence.
+            if let Some(mut full) = make_presets(&task.base, &placements).into_iter().next() {
+                full.id = "fuzzy-speed-longest".into();
+                full.prerequisite = Some("录音对应 · 按最长验证片段定位".into());
+                // A fuzzy recording match still requires explicit choice; the
+                // new preset intentionally does not opt into auto-placement.
+                choices.insert(0, full);
+            }
+            choices
         };
+        let mut short_presets = vec![];
+        for (index, pieces) in short_candidates.into_iter().take(3).enumerate() {
+            // The same non-overlap validation as ordinary cuts, but never turn
+            // weak tail evidence into an automatic or full-video placement.
+            if let Some(mut preset) = make_remix_presets(&task.base, pieces).into_iter().next() {
+                preset.id = format!("review-short-{}-sections", index + 1);
+                preset.label = "短版分段匹配".into();
+                preset.prerequisite = Some("前后段对应 · 中间留空 · 待试听".into());
+                short_presets.push(preset);
+            }
+        }
+        short_presets.append(&mut presets);
+        presets = short_presets;
         presets.extend(make_review_presets(&task.base, review_candidates));
         if !presets.is_empty() {
             reason.clear()
@@ -710,7 +744,7 @@ impl Workshop {
             return Ok(None);
         }
         if !task.layouts.contains(&layout_key(layer)?)
-            || task.reference_key != reference_key(&p, layer, &reference(&p, layer))?
+            || task.reference_key != matching_reference_key(&p, layer, &matching_reference(&p, layer))?
         {
             bail!("片段或参考位置已变化，请等待重新分析")
         }
@@ -737,8 +771,8 @@ impl Workshop {
         let shift = retain_leading_material(p);
         let layer = p.layers.iter().find(|l| l.id == layer_id).unwrap();
         let next_key = layout_key(layer)?;
-        let next_reference = reference(&p, layer);
-        let next_reference_key = reference_key(&p, layer, &next_reference)?;
+        let next_reference = matching_reference(&p, layer);
+        let next_reference_key = matching_reference_key(&p, layer, &next_reference)?;
         p.validate().map_err(anyhow::Error::msg)?;
         // Retain both alternatives after applying a preset; ordinary manual timing edits invalidate them.
         task.layouts.push(next_key);
@@ -861,6 +895,11 @@ fn make_review_presets(layer: &Layer, mut candidates: Vec<(f64, Vec<Placement>)>
             centiseconds / 6000, centiseconds / 100 % 60, centiseconds % 100,
             first.speed_multiplier.unwrap_or(1.));
         for choice in &mut choices {
+            choice.label = if choice.id == "longest" {
+                "旋律候选 · 保留完整"
+            } else {
+                "旋律候选 · 裁切片段"
+            }.into();
             choice.id = format!("review-melody-{number}-{}", choice.id);
             choice.prerequisite = Some(prerequisite.clone());
         }

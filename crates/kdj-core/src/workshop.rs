@@ -68,7 +68,33 @@ pub fn smooth(x: f64) -> f64 {
     x * x * (3. - 2. * x)
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Subtitle {
+    pub text: String,
+    pub font: String,
+    pub font_size: f64,
+    pub bold: bool,
+    pub italic: bool,
+    pub color: String,
+    pub outline_color: String,
+    pub outline_width: f64,
+    pub align: String,
+}
+impl Subtitle {
+    pub fn valid(&self) -> bool {
+        let color = |s: &str| s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit());
+        !self.text.trim().is_empty() && self.text.chars().count() <= 2000
+            && self.text.lines().count() <= 10
+            && ["system", "sans", "serif", "mono"].contains(&self.font.as_str())
+            && ["left", "center", "right"].contains(&self.align.as_str())
+            && finite_range(self.font_size, 12., 240.)
+            && finite_range(self.outline_width, 0., 12.)
+            && color(&self.color) && color(&self.outline_color)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Picture {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<Subtitle>,
     #[serde(default)]
     pub rotation: f64,
     #[serde(default)]
@@ -81,6 +107,9 @@ pub struct Picture {
     /// Preserve the original frame footprint instead of fitting the retained area.
     #[serde(default = "default_crop_keep_position")]
     pub crop_keep_position: bool,
+    /// Fit the retained area to cover the canvas; legacy crop modes stay unchanged.
+    #[serde(default)]
+    pub crop_auto_fit: bool,
     pub x: f64,
     pub y: f64,
     pub scale: f64,
@@ -90,7 +119,8 @@ fn default_crop_keep_position() -> bool { true }
 impl Default for Picture {
     fn default() -> Self {
         Self {
-            rotation: 0., flip_x: false, flip_y: false, crop: [0.; 4], crop_keep_position: true,
+            subtitle: None,
+            rotation: 0., flip_x: false, flip_y: false, crop: [0.; 4], crop_keep_position: true, crop_auto_fit: false,
             x: 0.5,
             y: 0.5,
             scale: 1.,
@@ -450,13 +480,9 @@ impl CompositionProject {
                     return fail("小节网格参数无效");
                 }
             }
-            let mut order: Vec<_> = l.clips.iter().collect();
-            order.sort_by(|a, b| a.start_ms.total_cmp(&b.start_ms));
-            let mut end = 0.;
-            for c in order {
+            for c in &l.clips {
                 let s = self.source(&c.source_id).ok_or("片段素材不存在")?;
-                if c.source_id != l.source_id
-                    || !clips.insert(&c.id)
+                if !clips.insert(&c.id)
                     || !finite_range(c.start_ms, 0., 21_600_000.)
                     || !finite_range(c.source_in_ms, 0., s.duration_ms)
                     || !finite_range(
@@ -483,16 +509,18 @@ impl CompositionProject {
                 {
                     return fail("速度参数无效");
                 }
-                if c.video_transition.as_ref().is_some_and(|t| !s.video
+                if c.video_transition.as_ref().is_some_and(|t| (!s.video && !s.audio)
                     || !finite_range(t.duration_ms, 0., 10000.) || !(-1..=1).contains(&t.alignment)) {
-                    return fail("画面过渡参数无效");
+                    return fail("交叉渐变参数无效");
                 }
                 let duration = c.duration();
-                if !finite_range(duration, 0.001, 21_600_000.) || c.start_ms + 0.001 < end {
-                    return fail("本行片段重叠，请先移动后续片段");
+                if !finite_range(duration, 0.001, 21_600_000.) {
+                    return fail("片段区间无效");
                 }
-                end = c.start_ms + duration;
                 let p = &c.picture;
+                if p.subtitle.as_ref().is_some_and(|text| !text.valid() || s.kind != "image") {
+                    return fail("字幕参数无效");
+                }
                 let f = &c.fades;
                 if !finite_range(p.x, 0., 1.)
                     || !finite_range(p.y, 0., 1.)

@@ -87,7 +87,6 @@ export function AsideHead({ title, leading, face, onFaceChange, asideToggle, too
   return (
     <div
       className="kd-aside-head"
-      data-tauri-drag-region
       onPointerDown={(event) => {
         if (event.button !== 0) return;
         if ((event.target as HTMLElement).closest("button, a, input, textarea, select")) return;
@@ -100,7 +99,7 @@ export function AsideHead({ title, leading, face, onFaceChange, asideToggle, too
       ) : title ? (
         <span className="kd-aside-head-title">{title}</span>
       ) : null}
-      <span className="kd-aside-head-drag" data-tauri-drag-region aria-hidden="true" />
+      <span className="kd-aside-head-drag" aria-hidden="true" />
       {tools || asideToggle ? (
         <span className="kd-aside-head-tools">
           {tools}

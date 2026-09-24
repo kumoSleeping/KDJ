@@ -21,7 +21,7 @@ export function WorkshopTimelineOverview({ viewport, content, offset, controls, 
   const width = measured || viewport, extent = Math.max(0, content-viewport);
   const length = Math.min(width, Math.max(28, width*viewport/Math.max(1,content)));
   const travel = Math.max(0,width-length), left = thumbPosition(offset,extent,travel);
-  return <div className="vj-timeline-overview" hidden={!scrollable}>
+  return <div className="vj-timeline-overview">
     {scrollable && <div ref={rail} className="vj-overview-viewport" role="scrollbar" tabIndex={0}
       aria-label="时间轴全局位置" aria-orientation="horizontal" aria-controls={controls}
       aria-valuemin={0} aria-valuemax={Math.round(extent)} aria-valuenow={Math.round(Math.max(0,Math.min(extent,offset)))}

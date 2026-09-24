@@ -14,30 +14,47 @@ export function videoTransitionSpan(left: WorkshopClip, right: WorkshopClip): {b
   return duration > .01 ? {before:duration * beforeFraction, after:duration * afterFraction} : null;
 }
 
-/** Derived picture clocks only. Never pass this projection to the audio engine
- * or save it as the project: the edit points and all sound remain unchanged. */
+/** Derived clocks only; the saved edit points and clip parameters stay unchanged.
+ * The legacy video_transition field now describes a joint for either media type. */
 export function videoProject(p: CompositionProject): CompositionProject {
+  return transitionProject(p, false);
+}
+export function audioProject(p: CompositionProject): CompositionProject {
+  return transitionProject(p, true);
+}
+function transitionProject(p: CompositionProject, audio: boolean): CompositionProject {
   const projected = cloneProject(p);
   for (const layer of projected.layers) {
-    if (!p.sources.find(s => s.id === layer.source_id)?.video) continue;
     layer.clips.sort((a, b) => a.start_ms - b.start_ms);
     const original = layer.clips.map(c => structuredClone(c));
-    const heads = new Map<number, {before:number; duration:number}>(), tails = new Map<number, number>();
+    const heads = new Map<number, {before:number; duration:number}>(), tails = new Map<number, {after:number; duration:number}>();
     for (let i = 1; i < original.length; i++) {
+      if (![original[i-1], original[i]].every(c => {
+        const source = p.sources.find(s => s.id === c.source_id);
+        return audio ? source?.audio : source?.video;
+      })) continue;
       const span = videoTransitionSpan(original[i-1], original[i]);
-      if (span) { heads.set(i, {before:span.before, duration:span.before + span.after}); tails.set(i-1, span.after); }
+      if (span) {
+        heads.set(i, {before:span.before, duration:span.before + span.after});
+        tails.set(i-1, {after:span.after, duration:span.before + span.after});
+      }
     }
     layer.clips.forEach((c, i) => {
       if (!heads.has(i) && !tails.has(i)) return;
       const old = original[i], full = {...old, source_in_ms:old.speed.domain_start_ms, source_out_ms:old.speed.domain_end_ms};
-      const before = heads.get(i)?.before ?? 0, after = tails.get(i) ?? 0;
+      const before = heads.get(i)?.before ?? 0, after = tails.get(i)?.after ?? 0;
       c.source_in_ms = sourceAt(full, outputAt(full, old.source_in_ms) - before);
       c.source_out_ms = sourceAt(full, outputAt(full, old.source_out_ms) + after);
       c.start_ms -= before;
       c.fades = {...c.fades, offset_ms:0, span_ms:clipDuration(c), linear:false,
-        video_in_ms:heads.get(i)?.duration ?? visibleFade(old, false),
-        // Source-over needs an opaque outgoing plane, not two dimmed planes.
-        video_out_ms:tails.has(i) ? 0 : visibleFade(old, true)};
+        ...(audio ? {
+          audio_in_ms:heads.get(i)?.duration ?? visibleFade(old, false, true),
+          audio_out_ms:tails.get(i)?.duration ?? visibleFade(old, true, true),
+        } : {
+          video_in_ms:heads.get(i)?.duration ?? visibleFade(old, false),
+          // Source-over needs an opaque outgoing plane, not two dimmed planes.
+          video_out_ms:tails.has(i) ? 0 : visibleFade(old, true),
+        })};
     });
   }
   return projected;

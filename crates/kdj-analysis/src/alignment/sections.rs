@@ -17,29 +17,37 @@ pub fn align_sections(
     video: &[f32],
     canceled: impl Fn() -> bool,
 ) -> Result<(Alignment, Vec<CompositionVideoSection>)> {
-    let alignment = align(audio, video, &canceled)?;
+    align_sections_prepared(
+        &AudioFeatures::prepare(audio, &canceled)?,
+        &AudioFeatures::prepare(video, &canceled)?,
+        canceled,
+    )
+}
+
+pub fn align_sections_prepared(
+    audio: &AudioFeatures,
+    video: &AudioFeatures,
+    canceled: impl Fn() -> bool,
+) -> Result<(Alignment, Vec<CompositionVideoSection>)> {
+    let alignment = align_prepared(audio, video, &canceled, false)?;
     if !alignment.matched
-        || audio.len() < video.len().saturating_add(SAMPLE_RATE * 10)
-        || (audio.len() as f64) < video.len() as f64 * 1.2
+        || audio.samples < video.samples.saturating_add(SAMPLE_RATE * 10)
+        || (audio.samples as f64) < video.samples as f64 * 1.2
     {
         return Ok((alignment, Vec::new()));
     }
-    let (a, b) = (spectra(audio, &canceled)?, spectra(video, &canceled)?);
-    let (ea, eb) = (envelope(audio), envelope(video));
+    let (a, b) = (&audio.spectra, &video.spectra);
+    let (ea, eb) = (&audio.envelope, &video.envelope);
+    let search = EnvelopeSearch::new(ea, WIDTH / 5);
     let mut rows = Vec::new();
     let mut offsets = vec![(-alignment.offset_ms / 10) as i32];
     for start in (0..=b.len().saturating_sub(WIDTH)).step_by(STEP) {
         if canceled() {
             bail!("校准已取消");
         }
-        let mut coarse = Vec::new();
-        for target in 0..ea.len().saturating_sub(WIDTH / 5) {
-            let score = ncc(
-                eb[start / 5..start / 5 + WIDTH / 5].iter().copied(),
-                ea[target..target + WIDTH / 5].iter().copied(),
-            );
-            coarse.push((target as i32 * 5 - start as i32, score));
-        }
+        let mut coarse = search.scores(
+            &eb[start / 5..start / 5 + WIDTH / 5], WIDTH / 5, &canceled,
+        )?.into_iter().map(|(target, score)| (target * 5 - start as i32, score)).collect::<Vec<_>>();
         coarse.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut candidates: Vec<i32> = Vec::new();
         for (lag, _) in coarse {
@@ -162,7 +170,7 @@ pub fn align_sections(
         let mut start = group[0].start;
         let last = group.last().unwrap().start;
         let end = if last + WIDTH + STEP >= b.len() {
-            video.len() / HOP
+            video.samples / HOP
         } else {
             last + WIDTH
         };
@@ -175,7 +183,7 @@ pub fn align_sections(
             }
         }
         let start = (start as i64).max(-(lag as i64));
-        let end = (end as i64).min(audio.len() as i64 / HOP as i64 - lag as i64);
+        let end = (end as i64).min(audio.samples as i64 / HOP as i64 - lag as i64);
         if end > start {
             sections.push(CompositionVideoSection {
                 video_start_ms: start * 10,

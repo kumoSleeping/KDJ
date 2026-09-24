@@ -3,12 +3,25 @@ import type {
   ClipSpeed,
   CompositionProject,
   WorkshopClip,
+  WorkshopLayer,
   WorkshopSource,
 } from "../types/workshop";
+import { subtitleError } from "./workshopSubtitle";
 export const cloneProject = (p: CompositionProject): CompositionProject =>
   structuredClone(p);
 export const isImageSource = (s: WorkshopSource | undefined) => s?.kind === "image" || s?.kind === "gif";
 export const isVisualSource = (s: WorkshopSource | undefined) => Boolean(s?.video || isImageSource(s));
+export function layerSources(p: CompositionProject, layer: WorkshopLayer): WorkshopSource[] {
+  const ids = new Set(layer.clips.length ? layer.clips.map(c => c.source_id) : [layer.source_id]);
+  return p.sources.filter(s => ids.has(s.id));
+}
+export const layerTitle = (p: CompositionProject, layer: WorkshopLayer) => layerSources(p, layer).map(s => s.title).join(" / ");
+function refreshLayerSource(layer: WorkshopLayer): void {
+  if (layer.clips.length && !layer.clips.some(c => c.source_id === layer.source_id)) {
+    layer.source_id = layer.clips[0].source_id;
+    layer.grid = null;
+  }
+}
 // Match CompositionProject::sync_output_format so drafts and persisted edits agree.
 export function syncOutputFormat(p: CompositionProject, previous: CompositionProject): void {
   if (p.output.format !== previous.output.format) return;
@@ -195,8 +208,7 @@ export function validateProject(p: CompositionProject): string {
   ].every(([value, min, max]) => Number.isFinite(value) && value >= min && value <= max)))
     return "新素材画面参数无效";
   for (const l of p.layers) {
-    let end = 0;
-    for (const c of [...l.clips].sort((a, b) => a.start_ms - b.start_ms)) {
+    for (const c of l.clips) {
       const s = p.sources.find((s) => s.id === c.source_id);
       if (
         !s ||
@@ -213,17 +225,17 @@ export function validateProject(p: CompositionProject): string {
         )
       )
         return "速度必须在 0.5×–2× 之间";
+      if (c.picture.subtitle && (s.kind !== "image" || subtitleError(c.picture.subtitle))) return "字幕参数无效";
       const crop = c.picture.crop ?? [0,0,0,0];
       if (!crop.every(n => Number.isFinite(n) && n >= 0 && n <= .99) || crop[0] + crop[2] >= 1 || crop[1] + crop[3] >= 1) return "裁剪范围无效";
       if (![c.picture.x, c.picture.y, c.picture.scale, c.picture.opacity, c.picture.rotation ?? 0].every(Number.isFinite)) return "画面参数无效";
       if (isImageSource(s) !== (c.display_duration_ms != null)) return "图片显示时长无效";
-      if (c.video_transition && (!s.video || !Number.isFinite(c.video_transition.duration_ms)
+      if (c.video_transition && ((!s.video && !s.audio) || !Number.isFinite(c.video_transition.duration_ms)
         || c.video_transition.duration_ms < 0 || c.video_transition.duration_ms > 10000
-        || ![-1, 0, 1].includes(c.video_transition.alignment))) return "画面过渡参数无效";
+        || ![-1, 0, 1].includes(c.video_transition.alignment))) return "交叉渐变参数无效";
       const duration = clipDuration(c);
       if (duration < 0.001 || !Number.isFinite(duration)) return "片段区间无效";
-      if (c.start_ms + 0.001 < end) return "本行片段重叠，请先移动后续片段";
-      end = c.start_ms + duration;
+
     }
   }
   return "";
@@ -281,6 +293,7 @@ export function deleteClip(
     .map((c) =>
       ripple && c.start_ms >= end ? { ...c, start_ms: c.start_ms - d } : c,
     );
+  refreshLayerSource(layer);
   return next;
 }
 export function duplicateClip(
@@ -290,7 +303,7 @@ export function duplicateClip(
   const c = findClip(p, id);
   if (!c) return p;
   const next = cloneProject(p);
-  next.layers.push({
+  next.layers.unshift({
     id: uid(),
     source_id: c.source_id,
     grid: structuredClone(p.layers.find(l => l.clips.some(clip => clip.id === id))?.grid),
@@ -298,6 +311,31 @@ export function duplicateClip(
   });
   return next;
 }
+/** Preserve every clip's clock and edits; later clips cover earlier clips at a tie. */
+export function mergeLayers(p: CompositionProject, ids: readonly string[]): CompositionProject {
+  const selected = p.layers.filter(l => ids.includes(l.id));
+  if (selected.length < 2) return p;
+  const next = cloneProject(p);
+  const target = next.layers.find(l => l.id === selected[0].id)!;
+  target.clips = [...next.layers].reverse().filter(l => ids.includes(l.id)).flatMap(l => l.clips)
+    .sort((a, b) => a.start_ms - b.start_ms);
+  refreshLayerSource(target);
+  next.layers = next.layers.filter(l => l.id === target.id || !ids.includes(l.id));
+  return next;
+}
+
+/** Separate overlapping clips visually, without adding tracks or changing time. */
+export function clipLanes(clips: WorkshopClip[]): Map<string, number> {
+  const ends: number[] = [], lanes = new Map<string, number>();
+  for (const clip of [...clips].sort((a, b) => a.start_ms - b.start_ms)) {
+    let lane = ends.findIndex(end => end <= clip.start_ms + .001);
+    if (lane < 0) lane = ends.length;
+    ends[lane] = clip.start_ms + clipDuration(clip);
+    lanes.set(clip.id, lane);
+  }
+  return lanes;
+}
+
 export function moveLayer(
   p: CompositionProject,
   id: string,
@@ -351,6 +389,7 @@ export function adjustClip(
       return;
     }
     if (c.display_duration_ms != null) {
+      const subtitleFades = c.picture.subtitle ? visibleClipFades(c) : null;
       if (handle === "in") {
         const d = clamp(delta, Math.max(-c.start_ms, -(c.animation_offset_ms ?? 0)), c.display_duration_ms - frame);
         c.start_ms += d; c.animation_offset_ms = (c.animation_offset_ms ?? 0) + d; c.display_duration_ms -= d;
@@ -359,6 +398,8 @@ export function adjustClip(
         c.fades.offset_ms = Math.max(0, offset);
       } else c.display_duration_ms = clamp(c.display_duration_ms + delta, frame, 21_600_000 - c.start_ms);
       c.fades.span_ms = Math.max(c.fades.span_ms, c.fades.offset_ms + c.display_duration_ms);
+      // A resized caption keeps its fade-out attached to its new end.
+      if (subtitleFades) resetVisibleFadeSpan(c, subtitleFades);
       return;
     }
     // Evaluate extension against the retained parent speed domain, not the trimmed clip.

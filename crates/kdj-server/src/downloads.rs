@@ -253,16 +253,16 @@ impl PersistedEntry {
         }
         // v1 队列没有把分 P 放在公开任务字段里，但重试请求一直保存着 page_index。
         // 恢复时补回，避免应用重启后把原本的 P3 显示/重试成看不出的普通视频。
-        if self.task.kind == TaskKind::Video
-            && self.task.platform == Platform::Bilibili
-            && self.task.video_page.is_none()
-        {
+        if self.task.kind == TaskKind::Video && self.task.platform == Platform::Bilibili {
             if let Some(request) = self.video_retry.as_ref().map(|retry| &retry.request) {
-                self.task.video_page = Some(DownloadVideoPage {
-                    index: request.page_index,
-                    count: request.page_count,
-                    title: request.page_title.clone(),
-                });
+                self.task.video_only = request.video_only;
+                if self.task.video_page.is_none() {
+                    self.task.video_page = Some(DownloadVideoPage {
+                        index: request.page_index,
+                        count: request.page_count,
+                        title: request.page_title.clone(),
+                    });
+                }
             }
         }
         // 旧 journal 没有视频外部准备字段。普通 YouTube 的直接 HLS/DASH 已失效，
@@ -1172,6 +1172,55 @@ impl DownloadManager {
         Ok((task, retry, cancel, generation))
     }
 
+    pub fn set_pending_video_mode(
+        &self,
+        id: &str,
+        audio_only: bool,
+        video_only: bool,
+    ) -> Result<DownloadTask> {
+        anyhow::ensure!(!(audio_only && video_only), "不能同时选择纯音频和纯视频");
+        let task = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id).context("任务不存在")?;
+            anyhow::ensure!(
+                entry.task.kind == TaskKind::Video && entry.task.platform == Platform::Bilibili,
+                "下载内容切换目前仅支持 B 站视频"
+            );
+            if audio_only || video_only {
+                anyhow::ensure!(
+                    kdj_providers::ffmpeg::available(),
+                    "下载纯音频或纯视频需要 FFmpeg，这台设备上没有"
+                );
+            }
+            anyhow::ensure!(
+                matches!(
+                    entry.task.state,
+                    TaskState::Queued | TaskState::Paused | TaskState::Failed
+                ),
+                "只有待开始、已暂停或上次失败的视频可以改下载内容"
+            );
+            let retry = entry
+                .video_retry
+                .as_mut()
+                .context("这条旧任务没有可用的下载参数")?;
+            retry.request.audio_only = audio_only;
+            retry.request.video_only = video_only;
+            entry.prepared_source_url = None;
+            entry.task.video_only = video_only;
+            entry.task.quality = if audio_only {
+                "audio".to_string()
+            } else {
+                format!("{}p", retry.request.max_height)
+            };
+            entry.task.updated_at = now_secs();
+            let task = entry.task.clone();
+            self.persist_locked(&entries)?;
+            task
+        };
+        self.hub.publish("download.updated", &task);
+        Ok(task)
+    }
+
     pub fn set_pending_video_height(&self, id: &str, max_height: i64) -> Result<DownloadTask> {
         anyhow::ensure!((144..=4320).contains(&max_height), "视频画质超出支持范围");
         let task = {
@@ -1871,6 +1920,7 @@ fn new_task(
         output_dir,
         cover,
         video_page: None,
+        video_only: false,
         created_at: now,
         updated_at: now,
     }
@@ -2348,6 +2398,7 @@ pub fn enqueue_video(
         dest_dir.clone(),
         req.cover.trim().to_string(),
     );
+    task.video_only = req.video_only;
     if platform == Platform::Bilibili {
         task.video_page = Some(DownloadVideoPage {
             index: req.page_index,
@@ -2766,6 +2817,7 @@ mod tests {
             output_dir: String::new(),
             cover: String::new(),
             video_page: None,
+            video_only: false,
             created_at,
             updated_at: created_at,
         }

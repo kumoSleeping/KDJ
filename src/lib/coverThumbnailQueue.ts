@@ -1,8 +1,11 @@
 const MAX_ACTIVE_COVER_REQUESTS = 2;
 const MAX_CACHED_COVERS = 128;
+const MAX_CACHED_COVER_BYTES = 16 * 1024 * 1024;
 
 interface CacheEntry {
   objectUrl: string;
+  bytes: number;
+  retainUnused: boolean;
   refs: number;
 }
 
@@ -10,6 +13,7 @@ interface Client {
   released: boolean;
   priority: number;
   cacheKey: string | null;
+  retainUnused: boolean;
   resolve(value: string): void;
   reject(reason: unknown): void;
 }
@@ -32,13 +36,19 @@ const cache = new Map<string, CacheEntry>();
 const tasks = new Map<string, CoverTask>();
 const queue: CoverTask[] = [];
 let active = 0;
+let cachedBytes = 0;
+
+function removeCached(key: string, entry: CacheEntry): void {
+  cache.delete(key);
+  cachedBytes -= entry.bytes;
+  URL.revokeObjectURL(entry.objectUrl);
+}
 
 function evictUnused(): void {
-  while (cache.size > MAX_CACHED_COVERS) {
+  while (cache.size > MAX_CACHED_COVERS || cachedBytes > MAX_CACHED_COVER_BYTES) {
     const victim = [...cache.entries()].find(([, entry]) => entry.refs === 0);
     if (!victim) return;
-    cache.delete(victim[0]);
-    URL.revokeObjectURL(victim[1].objectUrl);
+    removeCached(victim[0], victim[1]);
   }
 }
 
@@ -46,6 +56,7 @@ function releaseCache(key: string): void {
   const entry = cache.get(key);
   if (!entry) return;
   entry.refs = Math.max(0, entry.refs - 1);
+  if (entry.refs === 0 && !entry.retainUnused) removeCached(key, entry);
   evictUnused();
 }
 
@@ -98,8 +109,9 @@ function start(task: CoverTask): void {
       const clients = [...task.clients].filter((client) => !client.released);
       if (clients.length === 0) return;
       const objectUrl = URL.createObjectURL(blob);
-      const entry: CacheEntry = { objectUrl, refs: 0 };
+      const entry: CacheEntry = { objectUrl, bytes: blob.size, retainUnused: clients.some(c => c.retainUnused), refs: 0 };
       cache.set(task.key, entry);
+      cachedBytes += entry.bytes;
       for (const client of clients) {
         client.cacheKey = task.key;
         entry.refs += 1;
@@ -129,12 +141,13 @@ function pump(): void {
  * Low-priority table-artwork lane. Releasing before start removes off-screen work; releasing the
  * final active consumer aborts its fetch. Player/detail artwork deliberately does not use it.
  */
-export function acquireCoverThumbnail(key: string, url: string, priority = 1): CoverThumbnailLease {
+export function acquireCoverThumbnail(key: string, url: string, priority = 1, { retainUnused = true }: { retainUnused?: boolean } = {}): CoverThumbnailLease {
   const cached = cache.get(key);
   if (cached) {
     cache.delete(key);
     cache.set(key, cached);
     cached.refs += 1;
+    cached.retainUnused ||= retainUnused;
     let released = false;
     return {
       promise: Promise.resolve(cached.objectUrl),
@@ -157,6 +170,7 @@ export function acquireCoverThumbnail(key: string, url: string, priority = 1): C
     released: false,
     priority,
     cacheKey: null,
+    retainUnused,
     resolve: resolvePromise,
     reject: rejectPromise,
   };

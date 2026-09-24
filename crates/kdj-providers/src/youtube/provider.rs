@@ -290,6 +290,7 @@ impl YoutubeProvider {
         prepared_source_url: Option<&str>,
     ) -> Result<PathBuf> {
         self.ensure_enabled()?;
+        anyhow::ensure!(!req.video_only, "YouTube 暂不支持纯视频下载");
         anyhow::ensure!(
             req.offset_ms == 0,
             "原生 YouTube 下载暂不支持音画时间偏移；请关闭音画匹配后重试"

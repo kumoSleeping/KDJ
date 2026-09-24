@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="900" viewBox="0 0 1100 900" role="img" aria-labelledby="title desc">
+  <title id="title">泉此方骑猛犸象</title>
+  <desc id="desc">穿着红白水手服的泉此方，长蓝发迎风飘扬，悠闲地坐在一头棕色长毛猛犸象背上。背景是薄荷色天空、雪山和开满小花的草地。</desc>
+  <defs>
+    <linearGradient id="sky" x2="0" y2="1">
+      <stop stop-color="#c8e9e7"/><stop offset="1" stop-color="#f8f4db"/>
+    </linearGradient>
+    <linearGradient id="fur" x1="0" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#bd8255"/><stop offset="0.55" stop-color="#97613f"/><stop offset="1" stop-color="#704633"/>
+    </linearGradient>
+    <linearGradient id="head" x2="0.85" y2="1">
+      <stop stop-color="#c08a5a"/><stop offset="1" stop-color="#94603f"/>
+    </linearGradient>
+    <linearGradient id="hair" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#608adb"/><stop offset="0.55" stop-color="#456bbd"/><stop offset="1" stop-color="#334b99"/>
+    </linearGradient>
+    <linearGradient id="ivory" x2="0.4" y2="1">
+      <stop stop-color="#fffbea"/><stop offset="1" stop-color="#dbca9f"/>
+    </linearGradient>
+    <pattern id="grain" width="21" height="21" patternUnits="userSpaceOnUse">
+      <circle cx="3" cy="5" r="0.8" fill="#694f39" opacity="0.07"/>
+      <circle cx="15" cy="17" r="0.6" fill="#694f39" opacity="0.05"/>
+    </pattern>
+    <g id="grass" fill="none" stroke="#688b70" stroke-width="3" stroke-linecap="round">
+      <path d="M0 0l-5-12M0 0l5-17M0 0l12-7"/>
+    </g>
+    <g id="flower">
+      <path d="M0 0v-19" stroke="#668770" stroke-width="2.5"/>
+      <g fill="#fff8e8"><ellipse cy="-24" rx="3.5" ry="7"/><ellipse cy="-24" rx="3.5" ry="7" transform="rotate(60 0 -24)"/><ellipse cy="-24" rx="3.5" ry="7" transform="rotate(120 0 -24)"/></g>
+      <circle cy="-24" r="3.2" fill="#e7b75d"/>
+    </g>
+  </defs>
+
+  <!-- A soft, storybook landscape. -->
+  <rect width="1100" height="900" fill="#fbf5e7"/>
+  <rect x="30" y="30" width="1040" height="840" rx="36" fill="url(#sky)"/>
+  <circle cx="852" cy="175" r="85" fill="#fff4c8"/>
+  <circle cx="852" cy="175" r="103" fill="none" stroke="#fff4c8" stroke-width="2" opacity="0.5"/>
+  <g fill="#fffdf1" opacity="0.8">
+    <path d="M98 207c-8-15 8-30 26-26 3-29 47-32 57-7 21-11 48 5 45 23h38c10 0 10 15 0 15H108z"/>
+    <path d="M703 100c5-20 27-25 42-10 10-33 59-26 62 4 22-8 39 1 42 15H709z"/>
+    <path d="M839 310c8-14 26-16 37-6 5-26 42-27 51-3 21-9 38 1 39 14H839z"/>
+  </g>
+  <path d="M30 485l161-173 96 100 127-146 167 193 118-101 107 104 115-121 149 148v184H30z" fill="#a6cbc3"/>
+  <path d="M136 371l55-59 57 59-39-15-19 16-20-15zM359 329l55-63 71 82-41-19-25 13-26-28zM866 398l55-57 63 63-43-17-19 16-23-21z" fill="#eef4e6"/>
+  <path d="M30 541Q219 437 410 516T777 508t293 24v259H30z" fill="#91b8a0"/>
+  <path d="M30 615Q263 529 538 614t532-25v245q0 36-36 36H66q-36 0-36-36z" fill="#c2d3a9"/>
+  <path d="M30 735q273-78 535-12t505-14v125q0 36-36 36H66q-36 0-36-36z" fill="#dce0b9"/>
+  <path d="M86 805q174-44 387-19t406-3" fill="none" stroke="#ece8c9" stroke-width="24" stroke-linecap="round"/>
+  <ellipse cx="563" cy="734" rx="324" ry="42" fill="#658474" opacity="0.18"/>
+
+  <!-- Mammoth: far legs and a little swinging tail. -->
+  <g stroke="#573e35" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M797 439q106 51 93 143" fill="none" stroke="#74503b" stroke-width="13"/>
+    <path d="M890 563q-21 13-16 43l12-7 6 10q18-24 6-45" fill="#664635"/>
+    <path d="M458 548l-6 150q2 26 55 19l19-8 12-157M718 556l17 151q17 20 60 2l9-12-15-148" fill="#77503b"/>
+    <path d="M422 368q70-70 164-53 160-17 224 72 60 84 28 181l-18 32-4 103q-1 31-69 24l-12-12-16-91q-93 32-196-3l-9 101q-13 22-67 9l-13-15-9-126q-60-23-75-102z" fill="url(#fur)"/>
+    <path d="M526 343q127-44 225 20" fill="none" stroke="#d49b67" stroke-width="10" opacity="0.55"/>
+    <path d="M504 491l-6 37-12-12-4 50-14-13-5 46M555 510l-9 42-12-11-2 57M622 523l-3 39-13-10-4 48M690 504l11 44-16-8 5 47M749 485l18 47-17-8 14 55M793 480l13 32-11 7 8 42" fill="none" stroke="#794f38" stroke-width="3.5" opacity="0.65"/>
+    <path d="M460 665l4 27m17-35 2 41m275-39 7 33m18-38 5 35" fill="none" stroke="#b07a51" stroke-width="3"/>
+    <path d="M447 719q9-18 17 3m6 3q9-19 18 1m261-7q8-18 18 5m6 0q10-18 18-2" fill="#b39c7c" stroke-width="2.5"/>
+  </g>
+
+  <!-- The far tusk sits behind the trunk. -->
+  <path d="M356 491C306 558 239 551 222 486c-12 77 72 132 147 46" fill="url(#ivory)" stroke="#654b3d" stroke-width="4" stroke-linejoin="round"/>
+
+  <!-- Long blue hair streams over the mammoth's back. -->
+  <path d="M555 198q-30 36-19 104l-21 97 28-15-3 27 31-23q32 61 114 61l-17-23q52 29 99 7l-26-18q56 4 73-27-75 4-113-66-22-40-34-106z" fill="url(#hair)" stroke="#334677" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M645 255q0 100 91 155M619 270q-8 101 63 149M568 278l-11 100" fill="none" stroke="#7aa2e9" stroke-width="4" opacity="0.65" stroke-linecap="round"/>
+
+  <!-- A small woven riding blanket. -->
+  <g stroke="#573e35" stroke-width="3.5" stroke-linejoin="round">
+    <path d="M548 334q57-16 115 11l29 100q-68 23-142-12l-20-73z" fill="#c87363"/>
+    <path d="M550 348q48-7 97 9l24 76q-51 9-105-12z" fill="#e6ad7d"/>
+    <path d="M567 368l72 13m-67 5 72 13m-67 5 72 13" fill="none" stroke="#bc6a59"/>
+    <path d="M555 435l-2 12m18-7v13m18-8 1 13m18-9 2 12m17-10 4 12m16-12 5 11m15-13 6 10" fill="none" stroke="#eed0a0" stroke-width="4"/>
+  </g>
+
+  <!-- Konata's seated pose, socks and loafers. -->
+  <g stroke="#39405f" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M585 330q-4 21 20 27l38 10-2 40 19 4q20-46 1-61l-39-25z" fill="#ffe3ce"/>
+    <path d="M641 393l-2 30q9 10 21 2l2-29" fill="#fff9ec"/>
+    <path d="M639 422q-15 7-11 18 21 10 40-2l-6-15q-10 8-23-1z" fill="#694d48"/>
+    <path d="M562 336q-8 27 22 38l35 7 3 36 18-1q9-41-5-54l-31-22" fill="#ffe3ce"/>
+    <path d="M620 404l3 33q9 7 20-1l-2-34" fill="#fff9ec"/>
+    <path d="M623 433q-18 8-15 19 21 10 41-2l-7-17q-7 7-19 0z" fill="#77524d"/>
+    <path d="M551 312l-9 35q38 18 86 0l-18-33z" fill="#a94853"/>
+    <path d="M558 326l-4 17m23-14 2 18m17-19 8 16" fill="none" stroke="#e18b86" stroke-width="2.5"/>
+    <path d="M565 262q-14 9-20 35l9 25q27 13 58 0l-2-48-16-13" fill="#fffaf0"/>
+    <path d="M562 269l21 27 25-22-11-10-14 15-13-16z" fill="#c75862"/>
+    <path d="M566 270l17 19 19-17" fill="none" stroke="#fff0d9" stroke-width="2"/>
+    <path d="M580 293l-7 27 12-6 9 6-7-27" fill="#e5b252" stroke-width="2.5"/>
+    <path d="M550 280l-17 20 14 16 17-20" fill="#fffaf0"/>
+    <path d="M534 299l-6 8 16 15 7-9" fill="#c75862"/>
+    <path d="M531 309l-23 5q-11-2-13 5t13 11l35-12" fill="#ffe3ce"/>
+    <path d="M605 277q11 5 17 18l-16 12-10-17" fill="#fffaf0"/>
+    <path d="M608 298l-5 10 17 7 5-14z" fill="#c75862"/>
+    <path d="M608 310l-4 16-20-2q-10-7-15-1-5 8 8 12 27 11 37 0l8-22" fill="#ffe3ce"/>
+  </g>
+
+  <!-- Face, straight fringe, sleepy green eyes and signature ahoge. -->
+  <g stroke="#334677" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M548 196q-7-51 45-62 60-7 73 47l-5 68-20 35-5-47-74 17-23 34z" fill="url(#hair)"/>
+    <path d="M553 199q-9 39 5 55 16 22 48 17 31-5 41-36l-7-47z" fill="#ffe6d0"/>
+    <path d="M641 226q16-8 14 8-2 13-14 12" fill="#ffe6d0"/>
+    <path d="M546 207l13-39q14-25 50-19 42 7 45 50l-10 34-10-38-7 21-18-32 1 30-29-27 2 26-19-19-9 23z" fill="url(#hair)"/>
+    <path d="M551 203l-9 62 19-19-2-30" fill="#4d76c7"/>
+    <path d="M644 202l-6 64 12-13 7-41" fill="#4568b8"/>
+    <path d="M577 151q-1-45 35-50-21 17-17 44" fill="#5a80cf"/>
+    <path d="M560 173q16-24 44-18m11 3 14 9" fill="none" stroke="#91b3ed" stroke-width="5"/>
+    <path d="M563 220l20 2m18 1 22-2" fill="none" stroke="#303952" stroke-width="4"/>
+    <path d="M568 223v10q6 7 12-1v-9M605 224v10q7 6 12-2v-9" fill="#57976e" stroke-width="2"/>
+    <path d="M572 225v5m38-4v5" stroke="#213f48" stroke-width="2.5"/>
+    <path d="M569 224h2m36 1h2" stroke="#fffef4" stroke-width="2.5"/>
+    <path d="M564 211l17 1m24 1 15-3" fill="none" stroke-width="2"/>
+    <path d="M584 249q5 5 10-1 4 5 9 0" fill="none" stroke="#965f59" stroke-width="2"/>
+    <circle cx="623" cy="242" r="1.8" fill="#6a4a4a" stroke="none"/>
+    <path d="M560 240l9 2m44 0 8-2" stroke="#eeac9e" stroke-width="4" opacity="0.75"/>
+  </g>
+
+  <!-- Loose reins connect her hands to the mammoth's halter. -->
+  <path d="M502 323q-6 76-121 128M579 333q-44 94-184 127" fill="none" stroke="#624e43" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Domed forehead, floppy ear and the magnificent trunk. -->
+  <g stroke="#573e35" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M449 349q-17-67-83-59-64 5-75 82-27 34-20 87l7 79q4 58-28 79-29 18-43-2-8-13-4-33-28 25-12 55 16 36 65 17 66-25 65-97l6-45q45 21 94-23 36-45 28-140z" fill="url(#head)"/>
+    <path d="M296 358l9-29 10 11 9-34 12 13 18-32 9 23 22-22 6 22 25-7-2 23 21-3" fill="#ba8154"/>
+    <path d="M415 368q49-18 58 30 4 45-36 78l-10-18-18 4q-20-54 6-94z" fill="#a46b46"/>
+    <path d="M429 388q27-9 22 24-2 19-15 35" fill="none" stroke="#c18a5b" stroke-width="7"/>
+    <path d="M301 451q-4 22 1 38m-9 21 14 3m-13 22 12 3m-16 21 12 4m-18 19 11 6m-24 15 10 8m-25 10 5 10m-25-4v10" fill="none" stroke="#79533c" stroke-width="3"/>
+    <path d="M321 400q14-12 27 0" fill="none" stroke="#785039" stroke-width="6"/>
+    <path d="M324 418q12-8 23 1" fill="none" stroke="#3c3532" stroke-width="4"/>
+    <ellipse cx="337" cy="421" rx="5" ry="7" fill="#35312d" stroke="none"/>
+    <circle cx="339" cy="418" r="1.8" fill="#fff5dc" stroke="none"/>
+    <path d="M333 442l18 2" stroke="#d99874" stroke-width="7" opacity="0.55"/>
+    <path d="M363 464q16 12 29 0" fill="none" stroke-width="3"/>
+    <path d="M354 481C338 541 271 587 226 552c-19-15-30-41-31-67-19 53 7 105 54 113 61 13 135-43 146-98q-16-16-41-19z" fill="url(#ivory)"/>
+    <path d="M365 502q-50 94-116 72" fill="none" stroke="#fffbed" stroke-width="5" opacity="0.85"/>
+  </g>
+  <path d="M279 457q62 23 117-4" fill="none" stroke="#6a5545" stroke-width="6"/>
+  <path d="M279 456q62 23 117-4" fill="none" stroke="#d2ae74" stroke-width="2"/>
+  <circle cx="392" cy="454" r="7" fill="#e6c184" stroke="#624e43" stroke-width="3"/>
+
+  <!-- Foreground flowers and tiny drifting sparkles. -->
+  <g opacity="0.9">
+    <use href="#grass" x="139" y="716"/><use href="#grass" x="206" y="775"/>
+    <use href="#grass" x="898" y="729"/><use href="#grass" x="944" y="801"/>
+    <use href="#grass" x="385" y="804"/><use href="#grass" x="695" y="801"/>
+    <use href="#flower" x="165" y="753"/><use href="#flower" x="189" y="758"/>
+    <use href="#flower" x="851" y="785"/><use href="#flower" x="877" y="774"/>
+    <use href="#flower" x="967" y="691"/>
+  </g>
+  <g fill="#fff9df">
+    <path d="M461 176l4 11 11 4-11 4-4 11-4-11-11-4 11-4z"/>
+    <path d="M737 246l4 10 10 4-10 4-4 10-4-10-10-4 10-4z"/>
+    <circle cx="472" cy="237" r="3"/><circle cx="767" cy="281" r="4"/>
+  </g>
+  <g fill="none" stroke="#779a88" stroke-width="2.5" stroke-linecap="round">
+    <path d="M115 478q20-8 37 0m-26 13h38M899 464h32m-17 12h37"/>
+    <path d="M729 168q9-10 18 0 9-10 18 0"/>
+  </g>
+  <rect x="30" y="30" width="1040" height="840" rx="36" fill="url(#grain)" pointer-events="none"/>
+  <rect x="30" y="30" width="1040" height="840" rx="36" fill="none" stroke="#fffaf0" stroke-width="3"/>
+</svg>

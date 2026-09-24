@@ -710,9 +710,12 @@ function pruneStreamTracks(): void {
 }
 
 /** An ephemeral local composition uses the same native transport, without a provider or library row. */
-export function makeCompositionPreviewTrack(template: Track, title: string, url: string, duration: number): Track {
+export function makeCompositionPreviewTrack(template: Track | null, title: string, url: string, duration: number): Track {
   const id = nextId--;
-  const track: Track = { ...template, id, path: `composition:${id}`, filename: title, title,
+  const track: Track = { genre: "", year: "", bitrate: null, samplerate: 48000, channels: 2, size: 0,
+    bpm_confidence: null, key_confidence: null, energy: null, rms_db: null, peak_db: null,
+    rating: 0, color: "", analyzed_at: null, file_created_at: null, added_at: "", modified_at: "", analysis_error: "", folder: "",
+    ...template, id, path: `composition:${id}`, filename: title, title,
     artist: "", album: "", format: "wav", duration, bpm: null, first_beat: null, beat_times: [],
     downbeats: [], beat_origin: null, downbeat_origin: null, cue_ms: null, end_ms: null,
     cue_points: [], music_key: "", camelot: "", open_key: "", source_platform: "local",

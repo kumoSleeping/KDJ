@@ -1157,8 +1157,10 @@ impl CompositionManager {
                         .set_times(std::fs::FileTimes::new().set_modified(modified))?;
                 }
             }
-            let file = std::fs::File::open(&temporary)?;
-            file.sync_all()?;
+            // Windows requires a writable handle for FlushFileBuffers.
+            let file = std::fs::File::options().write(true).open(&temporary)
+                .context("无法打开合成成品进行落盘同步")?;
+            file.sync_all().context("合成成品落盘同步失败")?;
             drop(file);
             cleanup_receipt.signature = media::signature(&temporary)?;
             if cleanup_receipt.signature.size == 0 {

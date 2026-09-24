@@ -306,8 +306,10 @@ pub async fn export(
         probe.audio().is_some_and(|s| s.codec_name == "aac"),
         "成品缺少 AAC 音轨"
     );
-    let file = std::fs::File::open(&temporary)?;
-    file.sync_all()?;
+    // FlushFileBuffers on Windows cannot flush a read-only handle.
+    let file = std::fs::File::options().write(true).open(&temporary)
+        .context("无法打开可视化成品进行落盘同步")?;
+    file.sync_all().context("可视化成品落盘同步失败")?;
     let output_bytes = file.metadata()?.len();
     drop(file);
     ensure!(output_bytes > 0, "可视化成品为空");

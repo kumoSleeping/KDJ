@@ -4,7 +4,7 @@ use super::{check, destination, source, Stage};
 use crate::{error::{ApiError, ApiResult}, state::AppState};
 use crate::compositions::{acceleration, frame_pipe::{FrameSource, FramePixels}, media};
 use anyhow::{Context, Result, ensure, bail};
-use axum::{Router, Extension, Json, body::Bytes, extract::{State, Path, Query, DefaultBodyLimit}, routing::{get, post}};
+use axum::{Router, Extension, Json, body::Bytes, extract::{State, Path, Query, DefaultBodyLimit}, routing::{get, post}, http::HeaderMap};
 use kdj_core::{audio_visualizer::{Scene, Spectrum}, composition::EncodingAcceleration, work_scheduler::{work_scheduler, WorkClass, WorkRequest}};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -115,7 +115,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/visualizer/export", post(start))
         .route("/api/visualizer/jobs/{id}", get(poll))
         .route("/api/visualizer/jobs/{id}/cancel", post(cancel))
-        .route("/api/visualizer/jobs/{id}/frames/{token}/{index}", post(frame).layer(DefaultBodyLimit::max(MAX_FRAME)))
+        .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_FRAME)))
         .layer(Extension(Arc::new(Jobs::default())))
 }
 fn fingerprint(path: &std::path::Path) -> Result<String> {
@@ -201,7 +201,14 @@ async fn poll(Extension(jobs): Extension<Arc<Jobs>>, Path(id): Path<String>, Que
     let job = jobs.get(&id)?;
     Ok(Json(job.next_snapshot(p.since).await))
 }
-async fn frame(Extension(jobs): Extension<Arc<Jobs>>, Path((id, token, index)): Path<(String, u64, u64)>, pixels: Bytes) -> ApiResult<Json<Snapshot>> {
+async fn frame(Extension(jobs): Extension<Arc<Jobs>>, Path(id): Path<String>, headers: HeaderMap, pixels: Bytes) -> ApiResult<Json<Snapshot>> {
+    // Keep the upload URL stable: per-frame URLs defeat the WebView's CORS
+    // preflight cache. Generation/index still gate the single bounded slot.
+    let (token, index) = headers.get("x-kdj-video-frame")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_once(':'))
+        .and_then(|(token, index)| Some((token.parse::<u64>().ok()?, index.parse::<u64>().ok()?)))
+        .ok_or_else(|| ApiError::bad_request("视频帧代次或索引无效"))?;
     let job = jobs.get(&id)?;
     job.submit(token, index, pixels)?;
     // Return the next demand with the upload response: no separate poll round trip
@@ -239,7 +246,10 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
     media::validate(&expected, &actual, (p.duration * 1000.).round() as i64)?;
     ensure!(actual.video().is_some_and(|v| v.codec_name == "h264" && v.pix_fmt == "yuv420p") && actual.audio().is_some_and(|a| a.codec_name == "aac"), "成品缺少 H.264 画面或 AAC 音轨");
     ensure!(fingerprint(audio)? == p.signature, "导出期间音频已变化，未提交成品");
-    std::fs::File::open(&temporary)?.sync_all()?;
+    // Windows FlushFileBuffers requires GENERIC_WRITE, even after FFmpeg exits.
+    std::fs::File::options().write(true).open(&temporary)
+        .with_context(|| format!("无法打开成品进行落盘同步：{}", temporary.display()))?
+        .sync_all().context("成品落盘同步失败")?;
     // Cancellation and atomic no-clobber publication share this very short lock.
     let mut g = job.inner.lock().unwrap(); check(&job.cancel)?;
     kdj_providers::net::rename_download_noclobber(&temporary, output).context("目标已存在或无法安全提交，未覆盖")?;

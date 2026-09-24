@@ -175,6 +175,10 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/downloads/{id}/retry", post(retry_download))
         .route("/api/downloads/{id}/quality", post(update_download_quality))
         .route("/api/downloads/{id}/height", post(update_download_height))
+        .route(
+            "/api/downloads/{id}/video-mode",
+            post(update_download_video_mode),
+        )
         .route("/api/downloads/clear", post(clear_downloads))
         .route("/api/video/resolve", post(video_resolve))
         .route("/api/video/download", post(video_download))
@@ -3582,6 +3586,11 @@ async fn enqueue(
                         .get("audio_only")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
+                    video_only: source
+                        .payload
+                        .get("video_only")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                     transcode: platform != Platform::Youtube
                         && source
                             .payload
@@ -3658,6 +3667,24 @@ async fn update_download_quality(
 #[derive(Deserialize)]
 struct DownloadHeightBody {
     max_height: i64,
+}
+
+#[derive(Deserialize)]
+struct DownloadVideoModeBody {
+    audio_only: bool,
+    #[serde(default)]
+    video_only: bool,
+}
+
+async fn update_download_video_mode(
+    axum::Extension(ctx): axum::Extension<Ctx>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<DownloadVideoModeBody>,
+) -> ApiResult<Json<DownloadTask>> {
+    ctx.downloads
+        .set_pending_video_mode(&id, body.audio_only, body.video_only)
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 async fn update_download_height(

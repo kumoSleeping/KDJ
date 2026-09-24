@@ -7,6 +7,8 @@ const PHRASE: usize = 120;
 const STRIDE: usize = 100;
 
 mod review;
+mod short_review;
+pub use short_review::short_review_pair;
 
 /// Review candidates are alternative mappings, never additional cuts in `verified`.
 #[derive(Debug, Clone, Default)]
@@ -34,7 +36,7 @@ struct Anchor {
     score: f64,
 }
 
-fn chroma(pcm: &[f32], canceled: &impl Fn() -> bool) -> Result<Vec<[f32; 12]>> {
+pub(super) fn chroma(pcm: &[f32], canceled: &impl Fn() -> bool) -> Result<Vec<[f32; 12]>> {
     const SIZE: usize = 2048;
     let fft = FftPlanner::<f32>::new().plan_fft_forward(SIZE);
     let mut buffer = vec![Complex32::default(); SIZE];
@@ -119,19 +121,28 @@ pub fn suggest_positions(
     reference: &[f32],
     canceled: impl Fn() -> bool,
 ) -> Result<PositionSuggestions> {
+    suggest_positions_prepared(
+        &AudioFeatures::prepare(source, &canceled)?,
+        &AudioFeatures::prepare(reference, &canceled)?,
+        canceled,
+    )
+}
+
+pub fn suggest_positions_prepared(
+    source: &AudioFeatures,
+    reference: &AudioFeatures,
+    canceled: impl Fn() -> bool,
+) -> Result<PositionSuggestions> {
     if canceled() {
         bail!("匹配已取消")
     }
-    if source.iter().chain(reference).any(|v| !v.is_finite()) {
-        bail!("音频解码包含无效采样")
-    }
-    if source.len().min(reference.len()) < SAMPLE_RATE * 32 {
+    if source.samples.min(reference.samples) < SAMPLE_RATE * 32 {
         return Ok(PositionSuggestions::default());
     }
-    let a = chroma(source, &canceled)?;
-    let b = chroma(reference, &canceled)?;
-    let sa = spectra(source, &canceled)?;
-    let sb = spectra(reference, &canceled)?;
+    let a = &source.chroma;
+    let b = &reference.chroma;
+    let sa = &source.spectra;
+    let sb = &reference.spectra;
     let mut anchors = Vec::new();
     let mut review_anchors = Vec::new();
     // One phrase matrix at a time: memory remains bounded for long source files.
@@ -235,7 +246,7 @@ pub fn suggest_positions(
     }
     let continuous = continuous_spans(&verified);
     let mut result = assemble_spans(&continuous);
-    retain_edge_handles(&mut result, source.len() as f64 / 8., reference.len() as f64 / 8.);
+    retain_edge_handles(&mut result, source.samples as f64 / 8., reference.samples as f64 / 8.);
     let review = review::suggestions(&review_anchors, &result);
     Ok(PositionSuggestions { verified: result, review })
 }

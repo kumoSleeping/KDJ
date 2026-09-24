@@ -1,6 +1,9 @@
 //! Revisioned, persistent projects. Export receipts remain separate from editable drafts.
 mod frames;
+mod subtitles;
 mod alignment_control;
+mod alignment_cache;
+mod alignment_matching;
 mod intake;
 mod naming;
 mod positions;
@@ -53,6 +56,8 @@ struct Journal {
     #[serde(default)]
     migrated: Vec<String>,
     #[serde(default)]
+    checked_video_geometry: HashSet<String>,
+    #[serde(default)]
     position_bases: HashMap<String, Layer>,
     // Only newly imported, untouched video rows opt into automatic placement.
     // Persist this so reopening a project cannot reapply over manual edits.
@@ -94,6 +99,7 @@ pub struct Workshop {
     preview_slots: tokio::sync::Semaphore,
     frame_slots: tokio::sync::Semaphore,
     analysis_slots: tokio::sync::Semaphore,
+    alignment_features: Mutex<alignment_cache::FeatureCache>,
     positions: Mutex<HashMap<String, positions::PositionTask>>,
     export_slots: tokio::sync::Semaphore,
     writable: bool,
@@ -178,6 +184,7 @@ impl Workshop {
             preview_slots: tokio::sync::Semaphore::new(2),
             frame_slots: tokio::sync::Semaphore::new(2),
             analysis_slots: tokio::sync::Semaphore::new(1),
+            alignment_features: Mutex::new(Default::default()),
             positions: Mutex::new(HashMap::new()),
             export_slots: tokio::sync::Semaphore::new(1),
             writable,
@@ -185,6 +192,54 @@ impl Workshop {
         });
         if writable { manager.save(&manager.journal.lock().unwrap())?; }
         Ok(manager)
+    }
+    /// Repair encoded dimensions saved by older versions before serving drafts.
+    /// Cache successful probes by file identity; unavailable files remain retryable.
+    async fn refresh_video_geometry(&self) -> Result<()> {
+        if !self.writable { return Ok(()); }
+        let lock = self.cache_lock("source-display-geometry").await;
+        let _guard = lock.lock().await;
+        let geometry_key = |s: &Source| render::key(&("display-geometry-v1", &s.path, &s.signature));
+        let pending = {
+            let journal = self.journal.lock().unwrap();
+            let mut pending = HashMap::new();
+            for source in journal.projects.iter().flat_map(|p| &p.sources).filter(|s| s.video) {
+                let key = geometry_key(source)?;
+                if !journal.checked_video_geometry.contains(&key) {
+                    pending.entry(key).or_insert_with(|| source.clone());
+                }
+            }
+            pending
+        };
+        let cancel = CancellationToken::new();
+        let mut sizes = HashMap::new();
+        for (key, source) in pending {
+            let path = Path::new(&source.path);
+            if signature(path).ok().as_ref() != Some(&source.signature) { continue; }
+            let Ok(probe) = media::probe(path, &cancel).await else { continue; };
+            let size = probe.video().and_then(|s| media::workshop_video_size(s).ok());
+            sizes.insert(key, size);
+        }
+        if sizes.is_empty() { return Ok(()); }
+        self.change(|journal| {
+            for project in &mut journal.projects {
+                let mut changed = false;
+                for source in project.sources.iter_mut().filter(|s| s.video) {
+                    if let Some(Some((width, height))) = sizes.get(&geometry_key(source)?) {
+                        if (source.width, source.height) != (*width, *height) {
+                            source.width = *width;
+                            source.height = *height;
+                            changed = true;
+                        }
+                    }
+                }
+                // Keep the canvas and all user edits, including crop/placement.
+                if changed { project.revision += 1; }
+            }
+            journal.checked_video_geometry.extend(sizes.into_keys());
+            Ok(())
+        })?;
+        Ok(())
     }
     fn save(&self, j: &Journal) -> Result<()> {
         if !self.writable { bail!("工程记录无法安全保存，请检查数据目录权限后重启；原文件已保留") }
@@ -311,7 +366,7 @@ impl Workshop {
         let mut p = self.project(pid, revision)?;
         let cancel = CancellationToken::new();
         let previous = p.clone();
-        for tid in ids {
+        for (insertion, tid) in ids.iter().enumerate() {
             let track = self.state.library.get(*tid)?.context("本地曲目不存在")?;
             let path = std::fs::canonicalize(&track.path).context("素材文件已丢失")?;
             let image = if kdj_providers::workshop_images::is_image_path(&path) {
@@ -351,11 +406,11 @@ impl Workshop {
             let has_video = p
                 .layers
                 .iter()
-                .any(|l| p.source(&l.source_id).is_some_and(|s| s.video));
+                .any(|l| l.clips.iter().any(|c| p.source(&c.source_id).is_some_and(|s| s.video)));
             let has_audio = p
                 .layers
                 .iter()
-                .any(|l| p.source(&l.source_id).is_some_and(|s| s.audio && !s.video));
+                .any(|l| l.clips.iter().any(|c| p.source(&c.source_id).is_some_and(|s| s.audio && !s.video)));
             if image.is_none() && !video && !has_audio {
                 let video_ids: Vec<_> = p
                     .sources
@@ -385,15 +440,10 @@ impl Workshop {
                 }
             }
             clip.sound.muted = !source.audio || (video && (has_video || has_audio));
-            clip.fades = Fades::new(clip.duration(), source.visual() && p.layers.iter().any(|l| p.source(&l.source_id).is_some_and(Source::visual)));
-            p.layers.push(
-                Layer {
-                    grid: None,
-                    id: id(),
-                    source_id: source.id.clone(),
-                    clips: vec![clip],
-                },
-            );
+            clip.fades = Fades::new(clip.duration(), source.visual() && p.has_picture());
+            // Imports always create independent top layers. Preserve input order
+            // within a batch and leave all existing layers in their saved order.
+            p.layers.insert(insertion, Layer { grid: None, id: id(), source_id: source.id.clone(), clips: vec![clip] });
         }
         p.sync_output_format(&previous);
         if previous.layers.is_empty() && !p.has_picture() {
@@ -411,6 +461,8 @@ impl Workshop {
                 bail!("作品已更新，素材尚未添加，请重试")
             }
             p.revision += 1;
+            // A newly imported reference wakes waiting videos without revoking
+            // their initial automatic placement; no existing row is edited here.
             for layer in &p.layers {
                 if !previous.layers.iter().any(|old| old.id == layer.id)
                     && p.source(&layer.source_id).is_some_and(|s| s.video && s.audio)
@@ -453,7 +505,7 @@ impl Workshop {
         for source in p.sources.iter().filter(|s| {
             p.layers
                 .iter()
-                .any(|l| l.source_id == s.id && !l.clips.is_empty())
+                .any(|l| l.clips.iter().any(|c| c.source_id == s.id))
         }) {
             if !source.signature.is_empty()
                 && signature(Path::new(&source.path))? != source.signature
@@ -520,32 +572,27 @@ impl Workshop {
                 kdj_core::work_scheduler::WorkRequest::new(kdj_core::work_scheduler::WorkClass::WorkstationAnalysis),
                 || work_cancel.is_cancelled()).map_err(|_| anyhow::anyhow!("对齐已取消"))
         }).await??;
-        let a = render::alignment_pcm(&p, clip, &cancel).await?;
-        let b = render::alignment_pcm(&p, reference, &cancel).await?;
+        let a = self.alignment_index(&p, clip, &cancel).await?;
+        let b = self.alignment_index(&p, reference, &cancel).await?;
         let worker_cancel = cancel.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let permit = Mutex::new(Some(permit));
+        let checkpoint: alignment_matching::AlignmentCheckpoint = Arc::new(move || {
             use kdj_core::work_scheduler::{work_scheduler, WorkClass, WorkRequest};
-            let permit = Mutex::new(Some(permit));
-            let checkpoint = || {
-                if worker_cancel.is_cancelled() { return true }
-                if !work_scheduler().allows(WorkClass::WorkstationAnalysis) {
-                    let mut slot = permit.lock().unwrap();
-                    drop(slot.take());
-                    match work_scheduler().acquire(WorkRequest::new(WorkClass::WorkstationAnalysis), || worker_cancel.is_cancelled()) {
-                        Ok(next) => *slot = Some(next), Err(_) => return true,
-                    }
+            if worker_cancel.is_cancelled() { return true }
+            if !work_scheduler().allows(WorkClass::WorkstationAnalysis) {
+                let mut slot = permit.lock().unwrap();
+                drop(slot.take());
+                match work_scheduler().acquire(WorkRequest::new(WorkClass::WorkstationAnalysis), || worker_cancel.is_cancelled()) {
+                    Ok(next) => *slot = Some(next), Err(_) => return true,
                 }
-                worker_cancel.is_cancelled()
-            };
-            kdj_analysis::alignment::align_segment(&a, &b, checkpoint)
-        })
-        .await??;
+            }
+            worker_cancel.is_cancelled()
+        });
+        let result = self.match_recordings(&p, &a, &b, false, true, &cancel, Some(checkpoint)).await?;
         if cancel.is_cancelled() { bail!("对齐已取消") }
         self.project(pid, revision)?;
-        if !result.matched {
-            bail!("{}", result.reason)
-        }
-        let position = reference.start_ms + result.offset_ms as f64;
+        let Some(offset_ms) = result.offset_ms else { bail!("{}", result.reason) };
+        let position = reference.start_ms + offset_ms;
         if position < 0. {
             bail!("匹配位置在作品起点之前，请调整参考片段")
         }
@@ -739,7 +786,7 @@ fn shape(p: &media::Probe) -> (u32, u32, f64) {
 fn audition_next_layer(p: &mut CompositionProject, after: &str) {
     let Some(index) = p.layers.iter().position(|l| l.id == after) else { return };
     let next = p.layers.iter().skip(index + 1).find(|l| {
-        !l.clips.is_empty() && p.source(&l.source_id).is_some_and(|s| s.audio)
+        l.clips.iter().any(|c| p.source(&c.source_id).is_some_and(|s| s.audio))
     }).map(|l| l.id.clone());
     for layer in &mut p.layers {
         for clip in &mut layer.clips {
@@ -911,7 +958,8 @@ fn migrate(
         c.fades.audio_out_ms = (opt.audio.fade_out_ms as f64).min(c.duration() / 2.);
         if overlay {
             c.picture = Picture {
-                rotation: 0., flip_x: false, flip_y: false, crop: [0.; 4], crop_keep_position: true,
+                subtitle: None,
+                rotation: 0., flip_x: false, flip_y: false, crop: [0.; 4], crop_keep_position: true, crop_auto_fit: false,
                 x: opt.overlay.x,
                 y: opt.overlay.y,
                 scale: opt.overlay.scale,

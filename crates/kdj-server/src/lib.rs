@@ -424,6 +424,7 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
                     // The SABR worker never talks to Google directly. It identifies the already
                     // validated upstream endpoint to this loopback proxy with one opaque header.
                     axum::http::HeaderName::from_static("x-kdj-sabr-url"),
+                    axum::http::HeaderName::from_static("x-kdj-video-frame"),
                 ])
                 .expose_headers([
                     axum::http::header::CONTENT_RANGE,

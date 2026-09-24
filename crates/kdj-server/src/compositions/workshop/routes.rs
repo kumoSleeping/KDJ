@@ -22,6 +22,7 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
             axum::routing::patch(patch).delete(delete),
         )
         .route("/api/workshop/{id}/sources", post(add))
+        .route("/api/workshop/{id}/subtitle-source", post(subtitle_source))
         .route("/api/workshop/{id}/positions", post(positions))
         .route("/api/workshop/{id}/positions/apply", post(apply_positions))
         .route("/api/workshop/{id}/positions/control", post(control_positions))
@@ -46,8 +47,9 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
         )
         .layer(Extension(manager))
 }
-async fn list(Extension(m): Extension<Arc<Workshop>>) -> Json<Snapshot> {
-    Json(m.snapshot())
+async fn list(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapshot>> {
+    m.refresh_video_geometry().await?;
+    Ok(Json(m.snapshot()))
 }
 async fn create(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapshot>> {
     Ok(Json(m.create()?))
@@ -88,6 +90,19 @@ async fn add(
     Json(p): Json<Add>,
 ) -> ApiResult<Json<Snapshot>> {
     Ok(Json(m.add(&id, p.revision, &p.track_ids, p.at_ms).await?))
+}
+#[derive(Deserialize)]
+struct SubtitleUpload {
+    revision: u64,
+    title: String,
+}
+async fn subtitle_source(
+    Extension(m): Extension<Arc<Workshop>>,
+    Path(id): Path<String>,
+    Query(p): Query<SubtitleUpload>,
+    bytes: axum::body::Bytes,
+) -> ApiResult<Json<super::subtitles::SubtitleSource>> {
+    Ok(Json(m.subtitle_source(&id, p.revision, &p.title, bytes.to_vec()).await?))
 }
 #[derive(Deserialize)]
 struct Align {

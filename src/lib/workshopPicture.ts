@@ -7,14 +7,18 @@ export function pictureBox(p: CompositionProject, c: WorkshopClip, s: WorkshopSo
   const sw = Math.max(1, Math.floor(s.width * (1 - crop[0] - crop[2])));
   const sh = Math.max(1, Math.floor(s.height * (1 - crop[1] - crop[3])));
   const image = isImageSource(s);
-  const keepPosition = c.picture.crop_keep_position !== false;
+  const autoFit = Boolean(c.picture.crop_auto_fit);
+  const keepPosition = !autoFit && c.picture.crop_keep_position !== false;
   const frameWidth = keepPosition ? s.width : sw, frameHeight = keepPosition ? s.height : sh;
-  const w = Math.min(p.canvas.width, p.canvas.height * frameWidth / frameHeight) * c.picture.scale;
-  // Match the export's integer image dimensions and even video dimensions.
-  const fittedWidth = image ? Math.max(1, Math.round(w)) : Math.max(1, Math.round(w / 2)) * 2;
+  const fit = autoFit ? Math.max : Math.min;
+  const w = fit(p.canvas.width, p.canvas.height * frameWidth / frameHeight) * c.picture.scale;
+  // Cover rounds outward to avoid a one-pixel gap; match export dimensions.
+  const round = autoFit ? Math.ceil : Math.round;
+  const unit = image ? 1 : 2;
+  const fittedWidth = Math.max(1, round(w / unit)) * unit;
   const h = fittedWidth * frameHeight / frameWidth;
   const width = fittedWidth / p.canvas.width;
-  const height = (image ? Math.max(1, Math.round(h)) : Math.max(1, Math.round(h / 2)) * 2) / p.canvas.height;
+  const height = Math.max(1, round(h / unit)) * unit / p.canvas.height;
   const rotation = image ? c.picture.rotation ?? 0 : 0;
   const angle = rotation * Math.PI / 180;
   // Rust overlays the rotated image's integer bounding box. CSS rotates the
@@ -25,9 +29,14 @@ export function pictureBox(p: CompositionProject, c: WorkshopClip, s: WorkshopSo
   const rotatedHeight = image ? Math.max(1, Math.ceil(
     width * p.canvas.width * Math.abs(Math.sin(angle)) + height * p.canvas.height * Math.abs(Math.cos(angle)) - 1e-9,
   )) / p.canvas.height : height;
+  // Cover needs negative offsets for the oversized axis, rather than pinning
+  // its top/left edge to zero. Preserve legacy placement when not opted in.
+  const place = (center: number, size: number) => autoFit
+    ? Math.max(Math.min(0, 1-size), Math.min(Math.max(0, 1-size), center-size/2))
+    : Math.max(0, Math.min(1-size, center-size/2));
   return {width, height,
-    x: Math.max(0, Math.min(1-rotatedWidth, c.picture.x-rotatedWidth/2)) + (rotatedWidth-width)/2,
-    y: Math.max(0, Math.min(1-rotatedHeight, c.picture.y-rotatedHeight/2)) + (rotatedHeight-height)/2,
+    x: place(c.picture.x, rotatedWidth) + (rotatedWidth-width)/2,
+    y: place(c.picture.y, rotatedHeight) + (rotatedHeight-height)/2,
     left, top, sw, sh, rotation, keepPosition,
     mediaWidth: s.width / frameWidth, mediaHeight: s.height / frameHeight,
     mediaX: keepPosition ? 0 : -left / frameWidth, mediaY: keepPosition ? 0 : -top / frameHeight,

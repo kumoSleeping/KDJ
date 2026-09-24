@@ -107,6 +107,22 @@ pub fn inspect(path: &Path) -> Result<Info> {
         _ => bail!("不支持此图片格式"),
     }
 }
+/// Bound and normalize a WebView-rendered caption before retaining its PNG pixels.
+pub fn subtitle_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Png);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    let decoder = reader.into_decoder()?;
+    let (width, height) = decoder.dimensions();
+    if width as u64 * height as u64 > 8_388_608 { bail!("字幕画面过大") }
+    let image = DynamicImage::from_decoder(decoder)?;
+    let mut png = Cursor::new(Vec::new());
+    image.write_to(&mut png, ImageFormat::Png)?;
+    Ok((width, height, png.into_inner()))
+}
 pub fn frame_index(ends: &[f64], ms: f64) -> usize {
     let duration = ends.last().copied().unwrap_or(1.).max(1.);
     let time = ms.max(0.) % duration;

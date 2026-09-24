@@ -11,38 +11,38 @@ const layoutOf = ({ x, y, scale, opacity }: Layout): Layout => ({ x, y, scale, o
 export function WorkshopPictureTools() {
   const p = useWorkshopStore(s => s.draft);
   const selected = useWorkshopStore(s => s.selectedId);
-  if (!p) return null;
-  const clip = findClip(p, selected);
-  const visual = clip && isVisualSource(p.sources.find(s => s.id === clip.source_id)) ? clip : null;
-  const follows = p.canvas.import_picture !== null;
-  const picture = visual?.picture ?? p.canvas.import_picture ?? original;
+  const clip = p && findClip(p, selected);
+  const visual = clip && isVisualSource(p?.sources.find(s => s.id === clip.source_id)) ? clip : null;
+  const subtitle = Boolean(visual?.picture.subtitle);
+  const follows = Boolean(p && !subtitle && p.canvas.import_picture !== null);
+  const picture = visual?.picture ?? p?.canvas.import_picture ?? original;
   const change = (patch: Partial<Layout>) => {
     const state = useWorkshopStore.getState();
-    if (!state.draft || state.draft.id !== p.id) return;
+    if (!p || !visual || !state.draft || state.draft.id !== p.id || state.selectedId !== visual.id) return;
     const next = cloneProject(state.draft);
     const current = visual && findClip(next, visual.id);
     const layout = { ...layoutOf(current?.picture ?? next.canvas.import_picture ?? original), ...patch };
     if (current) Object.assign(current.picture, layout);
-    if (next.canvas.import_picture !== null) next.canvas.import_picture = layout;
+    if (!subtitle && next.canvas.import_picture !== null) next.canvas.import_picture = layout;
     state.transient(next);
   };
   const commit = () => useWorkshopStore.getState().commit();
   return <div className="vj-picture-tools" role="group" aria-label="画面设置">
-    <fieldset disabled={!visual && !follows}>
+    <fieldset disabled={!visual}>
       {([
         ["scale", "大小", 10, 200],
         ["opacity", "透明度", 0, 100],
         ["x", "横向", 0, 100],
         ["y", "纵向", 0, 100],
       ] as const).map(([key, label, min, max]) => <NumberField
-        key={`${p.id}:${visual?.id ?? "import"}:${key}`} label={label}
-        value={picture[key] * 100} min={min} max={max} step={1} suffix="%"
+        key={`${p?.id}:${visual?.id ?? "import"}:${key}`} label={subtitle && key === "scale" ? "驻留大小" : label}
+        value={visual ? picture[key] * 100 : undefined} min={min} max={max} step={1} suffix="%"
         onChange={value => change({ [key]: value / 100 })} onCommit={commit}
       />)}
       <button type="button" aria-label="重置画面布局" title="居中、原始比例、完全不透明"
         onClick={() => { change(original); commit(); }}><RotateCcw size={13} /></button>
     </fieldset>
-    <button type="button" className="vj-picture-follow" aria-label="沿用到新素材"
+    <button type="button" className="vj-picture-follow" aria-label="沿用到新素材" disabled={!visual || subtitle}
       aria-pressed={follows} title="后续导入的图片和视频沿用这组大小、透明度和位置"
       onClick={() => useWorkshopStore.getState().edit(project => {
         const next = cloneProject(project);

@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { MapPin, RotateCcw, Trash2 } from "lucide-react";
+import { Layers2, MapPin, RotateCcw, Trash2 } from "lucide-react";
 import { useWorkshopStore } from "../../stores/workshopStore";
-import { deleteClip, findClip, updateClip, resetFadeSpan, setClipSpeed, isVisualSource, isImageSource } from "../../lib/workshop";
+import { deleteClip, findClip, mergeLayers, updateClip, resetFadeSpan, setClipSpeed, isVisualSource, isImageSource } from "../../lib/workshop";
 import type { WorkshopClip } from "../../types/workshop";
 import { addWorkshopMarker, removeWorkshopMarker } from "../../lib/workshopMarkers";
-export function WorkshopClipMenu({ id, markerId, markMs, x, y, close, onCrop }: { id?: string; markerId?: string; markMs?: number; x: number; y: number; close(restoreFocus?: boolean): void; onCrop(id: string): void }) {
+export function WorkshopClipMenu({ id, layerIds, markerId, markMs, x, y, close, onCrop, onMerged }: { id?: string; layerIds?: string[]; markerId?: string; markMs?: number; x: number; y: number; close(restoreFocus?: boolean): void; onCrop(id: string): void; onMerged?(): void }) {
   const p = useWorkshopStore(s => s.draft), ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(close);
   closeRef.current = close;
@@ -58,8 +58,13 @@ export function WorkshopClipMenu({ id, markerId, markMs, x, y, close, onCrop }: 
     <label className="vj-context-number">{label}<input key={`${id}:${label}:${value}`} type="number" aria-label={label} defaultValue={value} min={min} max={max} step={suffix === "×" ? .05 : suffix === "秒" ? .001 : 1}
       onBlur={e => { const n = Number(e.currentTarget.value); if (e.currentTarget.value && Number.isFinite(n) && n >= min && n <= max && n !== value) fn(n); }}
       onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />{suffix}</label>;
-  return <div ref={ref} className="vj-clip-menu vj-menu" aria-label={id ? "片段操作菜单" : "标记操作菜单"} tabIndex={-1} style={{left:x, top:y}}
+  return <div ref={ref} className="vj-clip-menu vj-menu" aria-label={layerIds ? "轨道操作菜单" : id ? "片段操作菜单" : "标记操作菜单"} tabIndex={-1} style={{left:x, top:y}}
     onContextMenu={e => e.preventDefault()} onKeyDown={e => { e.stopPropagation(); if (e.key === "Escape") close(); }}>
+    {layerIds && layerIds.filter(id => p.layers.some(l => l.id === id)).length > 1 && <button type="button"
+      title="合并到最上方所选轨道，保留片段位置与参数" onClick={() => {
+        useWorkshopStore.getState().edit(p => mergeLayers(p, layerIds));
+        onMerged?.(); close();
+      }}><Layers2 size={13} />合并所选轨道</button>}
     {markMs !== undefined && !markerId && <button type="button" onClick={() => {
       useWorkshopStore.getState().edit(p => addWorkshopMarker(p, markMs));
       close();
@@ -90,7 +95,7 @@ export function WorkshopClipMenu({ id, markerId, markMs, x, y, close, onCrop }: 
         {number("旋转", c.picture.rotation ?? 0, -360, 360, n => edit(c => {c.picture.rotation=n;}), "°")}
         <button aria-pressed={Boolean(c.picture.flip_x)} onClick={() => edit(c => {c.picture.flip_x=!c.picture.flip_x;})}>水平翻转</button>
         <button aria-pressed={Boolean(c.picture.flip_y)} onClick={() => edit(c => {c.picture.flip_y=!c.picture.flip_y;})}>垂直翻转</button>
-        <button onClick={() => {edit(c => {c.picture={...c.picture,x:.5,y:.5,scale:1,rotation:0,flip_x:false,flip_y:false,crop:[0,0,0,0],crop_keep_position:true};});useWorkshopStore.setState({cropId:null});}}>重置画面</button>
+        <button onClick={() => {edit(c => {c.picture={...c.picture,x:.5,y:.5,scale:1,rotation:0,flip_x:false,flip_y:false,crop:[0,0,0,0],crop_keep_position:true,crop_auto_fit:false};});useWorkshopStore.setState({cropId:null});}}>重置画面</button>
       </div></details>
     </>}
     {source.audio && <details><summary>声音</summary><div className="vj-menu-options">
