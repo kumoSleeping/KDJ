@@ -39,6 +39,7 @@ import {
 import type { Track } from "../../types";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 import { drawWaveformCanvas } from "../library/WaveformCanvas";
+import { useThemePack } from "../../lib/themePack";
 import { usePlaybackWaveformWindow } from "./usePlaybackWaveformWindow";
 
 const VIEWPORT_SECONDS = managerWaveformViewportSeconds(1);
@@ -377,6 +378,7 @@ export function ManagerWaveform({
   // real detail asset arrives. Wait for the correctly owned native window instead.
   const waveform = playbackWaveform;
   const waveformReady = waveform !== null;
+  const themeEpoch = useThemePack((state) => state.epoch);
   useEffect(() => {
     onLoadingChange(!waveformReady);
   }, [onLoadingChange, waveformReady]);
@@ -542,6 +544,7 @@ export function ManagerWaveform({
     raster.backingWidth,
     raster.cssWidth,
     size.height,
+    themeEpoch,
     total,
     track.id,
     waveform,

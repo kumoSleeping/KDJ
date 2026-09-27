@@ -1,4 +1,7 @@
+import { themeRgb } from "./themePack";
+
 const DRAG_PREVIEW_SIZE = 128;
+const rgb = (value: readonly number[]) => `rgb(${value.join(",")})`;
 
 function canvasPngBase64(canvas: HTMLCanvasElement): string {
   return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
@@ -13,22 +16,23 @@ export function vinylDragPreview(): string {
   if (!context) return "";
   const center = DRAG_PREVIEW_SIZE / 2;
   context.clearRect(0, 0, DRAG_PREVIEW_SIZE, DRAG_PREVIEW_SIZE);
-  context.fillStyle = "#202124";
+  const body = rgb(themeRgb("--kd-vinyl-body", [32, 33, 36]));
+  context.fillStyle = body;
   context.beginPath();
   context.arc(center, center, center - 4, 0, Math.PI * 2);
   context.fill();
-  context.strokeStyle = "rgba(255, 255, 255, 0.16)";
+  context.strokeStyle = `rgba(${themeRgb("--kd-vinyl-groove", [255, 255, 255]).join(",")}, 0.16)`;
   context.lineWidth = 1;
   for (const radius of [24, 34, 44, 54]) {
     context.beginPath();
     context.arc(center, center, radius, 0, Math.PI * 2);
     context.stroke();
   }
-  context.fillStyle = "#d8d8d8";
+  context.fillStyle = rgb(themeRgb("--kd-vinyl-label", [216, 216, 216]));
   context.beginPath();
   context.arc(center, center, 17, 0, Math.PI * 2);
   context.fill();
-  context.fillStyle = "#202124";
+  context.fillStyle = body;
   context.beginPath();
   context.arc(center, center, 4, 0, Math.PI * 2);
   context.fill();

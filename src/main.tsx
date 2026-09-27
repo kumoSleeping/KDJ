@@ -19,10 +19,11 @@ function render(node: ReactNode): void {
 async function bootstrap(): Promise<void> {
   if (isLyricsWindow) document.documentElement.dataset.window = "lyrics";
   await import("./design.css");
-  const [bridgeModule, fontModule, appStoreModule] = await Promise.all([
+  const [bridgeModule, fontModule, appStoreModule, themeModule] = await Promise.all([
     import("./lib/bridge"),
     import("./lib/fontScale"),
     import("./stores/appStore"),
+    import("./lib/themePack"),
   ]);
 
   // 悬浮歌词已有独立字号；主界面在 React 挂载前恢复上次选择，避免刷新后跳变。
@@ -35,6 +36,7 @@ async function bootstrap(): Promise<void> {
     if (theme) appStoreModule.applyTheme(theme);
   };
   appStoreModule.useAppStore.subscribe(syncTheme);
+  themeModule.useThemePack.subscribe(syncTheme);
   darkQuery.addEventListener("change", syncTheme);
   syncTheme();
 
@@ -45,6 +47,8 @@ async function bootstrap(): Promise<void> {
     mount.textContent = `无法连接本地服务：${(error as Error).message}`;
     return;
   }
+  // 主题文件由本地服务提供，所以排在桥之后；没选主题包时立即返回。
+  await themeModule.bootThemePack();
 
   if (
     import.meta.env.DEV

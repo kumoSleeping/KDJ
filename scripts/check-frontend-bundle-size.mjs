@@ -63,10 +63,10 @@ async function main() {
   // Every desktop target now ships the same proof/player and SABR runtime. Mobile alone
   // uses unsupported stubs. Never let a successful Windows build silently omit the worker.
   const desktop = ["darwin", "windows", "win32", "linux"].includes(platform);
-  // This RC adds multi-source workshop layers, subtitle editing and source controls.
-  // Measured minified outputs: desktop 1.829 MB, mobile 1.582 MB, CSS 246.8 KB.
-  // Allow the added workshop controls while keeping patch-level headroom small.
-  const maxTotal = desktop ? 1_840_000 : 1_585_000;
+  // Theme packs add the pack loader, its settings rows and token readers for canvas drawing.
+  // Measured minified outputs: desktop 1.848 MB, mobile 1.594 MB, CSS 246.9 KB.
+  // Allow that growth while keeping patch-level headroom small.
+  const maxTotal = desktop ? 1_860_000 : 1_605_000;
   const maxCss = 248_000;
 
   console.log(

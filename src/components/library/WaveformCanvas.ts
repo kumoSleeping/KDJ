@@ -1,6 +1,7 @@
 import type { Waveform as WaveformData } from "../../types";
 import { waveformSourceRange } from "../../lib/waveformViewport";
 import { waveformEdgeScales } from "../../lib/waveformRenderPolicy";
+import { themeRgb, waveBandRgb } from "../../lib/themePack";
 import {
   PERFORMANCE_DETAIL_BACKGROUND,
   PERFORMANCE_DETAIL_CONTRAST,
@@ -197,7 +198,7 @@ function drawTargetDetailColumns(
     const display = profile === "performance-detail"
       ? waveformSurfaceContrastRgb(
         paletteDisplay,
-        PERFORMANCE_DETAIL_BACKGROUND,
+        themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND),
         PERFORMANCE_DETAIL_CONTRAST,
       )
       : paletteDisplay;
@@ -208,7 +209,7 @@ function drawTargetDetailColumns(
     const top = Math.max(0, Math.round(mid - half));
     const bottom = Math.min(height, Math.round(mid + half));
     ctx.globalAlpha = 1;
-    ctx.fillStyle = `rgb(${display[0]},${display[1]},${display[2]})`;
+    ctx.fillStyle = `rgb(${waveBandRgb(display).join(",")})`;
     ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
   }
 }
@@ -250,7 +251,7 @@ function drawReleaseOverviewColumns(
       background,
       RELEASE_OVERVIEW_CONTRAST,
     );
-    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillStyle = `rgb(${waveBandRgb([r, g, b]).join(",")})`;
     ctx.fillRect(index * columnWidth, mid - half, columnWidth + 0.01, half * 2);
   }
 }
@@ -457,10 +458,11 @@ export function drawWaveformCanvas(
     ? waveformEdgeScales(columnAmp, columnKnown, 4, 0.02, columns.edgeScale)
     : null;
   if (releaseOverview) {
-    const background = typeof document !== "undefined"
+    // 两个常量就是默认主题 --kd-panel-inset 的值；主题包改了面板底色，对比度跟着走
+    const background = themeRgb("--kd-panel-inset", typeof document !== "undefined"
       && document.documentElement?.dataset.theme === "light"
       ? RELEASE_OVERVIEW_LIGHT_BACKGROUND
-      : RELEASE_OVERVIEW_DARK_BACKGROUND;
+      : RELEASE_OVERVIEW_DARK_BACKGROUND);
     drawReleaseOverviewColumns(
       ctx,
       columns,
@@ -516,11 +518,11 @@ export function drawWaveformCanvas(
     const [displayR, displayG, displayB] = performanceDetail
       ? waveformSurfaceContrastRgb(
         paletteDisplay,
-        PERFORMANCE_DETAIL_BACKGROUND,
+        themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND),
         PERFORMANCE_DETAIL_CONTRAST,
       )
       : paletteDisplay;
-    ctx.fillStyle = `rgb(${displayR},${displayG},${displayB})`;
+    ctx.fillStyle = `rgb(${waveBandRgb([displayR, displayG, displayB]).join(",")})`;
     // 最小 1px：静音段也留一条中线，否则波形会断成几截看着像坏了
     const half = Math.max(
       0.5,

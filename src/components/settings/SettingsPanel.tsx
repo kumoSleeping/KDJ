@@ -4,7 +4,7 @@ import type {
   PointerEvent as ReactPointerEvent,
   RefObject,
 } from "react";
-import { ChevronDown, ChevronRight, Copy, Download, RefreshCw, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Download, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import {
   HUE_LINE_GRADIENT,
   hexToT,
@@ -43,6 +43,13 @@ import {
   type AppFontScale,
 } from "../../lib/fontScale";
 import { api } from "../../lib/api";
+import {
+  optionValues,
+  refreshThemePacks,
+  selectThemePack,
+  setThemeOption,
+  useThemePack,
+} from "../../lib/themePack";
 import { getBridge } from "../../lib/bridge";
 import { copyText } from "../../lib/copyText";
 import { formatBytes } from "../../lib/format";
@@ -312,6 +319,65 @@ function FontScaleStepper({
         </button>
       </span>
     </div>
+  );
+}
+
+/** 主题包：数据目录 themes/ 下的文件夹。打开面板时重扫一次，不常驻监听。 */
+function ThemePackRows() {
+  const { dir, packs, selection, active, error } = useThemePack();
+  useEffect(() => {
+    void refreshThemePacks();
+  }, []);
+  const selected = selection.id ?? "";
+  const values = active ? optionValues(active, selection.options[active.id]) : {};
+  return (
+    <>
+      <div className="kd-djp-font-stepper" role="group" aria-label="主题">
+        <span className="kd-djp-font-copy">
+          <span className="kd-djp-toggle-label">主题</span>
+        </span>
+        <span className="kd-djp-font-actions">
+          <select
+            className="kd-select"
+            aria-label="主题"
+            value={selected}
+            onChange={(event) => void selectThemePack(event.target.value || null)}
+          >
+            <option value="">默认</option>
+            {/* 选中的包不在了也留着这一项：把文件夹放回来就恢复，不悄悄改掉用户的选择 */}
+            {selected && !packs.some((pack) => pack.dir === selected) ? (
+              <option value={selected}>{selected}</option>
+            ) : null}
+            {packs.map((pack) => (
+              <option key={pack.dir} value={pack.dir}>{pack.manifest?.name ?? pack.dir}</option>
+            ))}
+          </select>
+          {dir ? (
+            <button
+              type="button"
+              aria-label="打开主题文件夹"
+              title="打开主题文件夹"
+              onClick={() => void window.kdj?.openPath(dir).catch(() => undefined)}
+            >
+              <FolderOpen size={14} />
+            </button>
+          ) : null}
+        </span>
+      </div>
+      {active && active.options.length > 0 ? (
+        <div className="kd-djp-switch-list" aria-label="主题选项">
+          {active.options.map((option) => (
+            <Switch
+              key={option.id}
+              checked={values[option.id]}
+              label={option.label}
+              onChange={() => void setThemeOption(option.id, !values[option.id])}
+            />
+          ))}
+        </div>
+      ) : null}
+      <InlineNotice text={error} block />
+    </>
   );
 }
 
@@ -1005,6 +1071,7 @@ export function SettingsPanel() {
                   setAppFontScale(next);
                 }}
               />
+              <ThemePackRows />
             </div>
             <div className="kd-djp-switch-list" aria-label="列表与播放">
               <CycleToggle<KeyNotation>

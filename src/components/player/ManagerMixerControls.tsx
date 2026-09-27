@@ -365,11 +365,11 @@ export function EqSpectrumChart({ side, values, filter, resonanceQ, playing, onA
       <svg className="kd-dj-eq-spectrum" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <linearGradient id={`kd-manager-eq-spectrum-${side}`} gradientUnits="userSpaceOnUse" x1="0" y1="1000" x2="0" y2="0">
-            <stop offset="0%" stopColor="#22d85b" />
-            <stop offset="52%" stopColor="#a8e53b" />
-            <stop offset="72%" stopColor="#e8e632" />
-            <stop offset="86%" stopColor="#ffb52f" />
-            <stop offset="100%" stopColor="#f04452" />
+            <stop offset="0%" style={{ stopColor: "var(--kd-eq-1, #22d85b)" }} />
+            <stop offset="52%" style={{ stopColor: "var(--kd-eq-2, #a8e53b)" }} />
+            <stop offset="72%" style={{ stopColor: "var(--kd-eq-3, #e8e632)" }} />
+            <stop offset="86%" style={{ stopColor: "var(--kd-eq-4, #ffb52f)" }} />
+            <stop offset="100%" style={{ stopColor: "var(--kd-eq-5, #f04452)" }} />
           </linearGradient>
         </defs>
         <path ref={spectrumPathRef} style={{ stroke: `url(#kd-manager-eq-spectrum-${side})` }} />

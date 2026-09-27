@@ -5,9 +5,12 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : TauriActivity() {
@@ -48,6 +51,23 @@ class MainActivity : TauriActivity() {
   }
 
   private external fun initNdkContext(activity: MainActivity): Boolean
+
+  /**
+   * edge-to-edge 下系统栏本身透明，底色就是页面底色；这里只让状态栏/导航栏图标的
+   * 深浅跟随 Web 主题（调用端在 src/stores/appStore.ts 的 applyTheme）。
+   */
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    webView.addJavascriptInterface(object {
+      @JavascriptInterface
+      fun setSystemBarsLight(light: Boolean) = runOnUiThread {
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+          isAppearanceLightStatusBars = light
+          isAppearanceLightNavigationBars = light
+        }
+      }
+    }, "kdjAndroid")
+  }
 
   /**
    * 曲库扫描公共目录需要媒体权限（Android 13+ READ_MEDIA_AUDIO/VIDEO，

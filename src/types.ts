@@ -1149,7 +1149,8 @@ export interface KdjBridge {
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
   /** 同步原生窗口底色，避免 macOS 拖窗时露出与页面主题不符的底层。 */
-  setWindowBackground: (theme: "dark" | "light") => void;
+  /** "dark" / "light"，或主题包给的 #rrggbb。 */
+  setWindowBackground: (theme: string) => void;
   /**
    * 悬浮歌词开关与样式。桌面是独立透明置顶窗口；Android 是原生
    * `TYPE_APPLICATION_OVERLAY` 浮层。浏览器与 iOS 没有该能力（iOS 沙盒不允许）。
