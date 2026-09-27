@@ -64,9 +64,9 @@ async function main() {
   // uses unsupported stubs. Never let a successful Windows build silently omit the worker.
   const desktop = ["darwin", "windows", "win32", "linux"].includes(platform);
   // This RC adds multi-source workshop layers, subtitle editing and source controls.
-  // Measured minified outputs: desktop 1.829 MB, mobile 1.574 MB, CSS 246.5 KB.
-  // Keep a small headroom for patch-level UI work without masking larger regressions.
-  const maxTotal = desktop ? 1_840_000 : 1_580_000;
+  // Measured minified outputs: desktop 1.829 MB, mobile 1.582 MB, CSS 246.8 KB.
+  // Allow the added workshop controls while keeping patch-level headroom small.
+  const maxTotal = desktop ? 1_840_000 : 1_585_000;
   const maxCss = 248_000;
 
   console.log(
