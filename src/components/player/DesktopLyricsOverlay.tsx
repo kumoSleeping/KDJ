@@ -552,11 +552,13 @@ export function DesktopLyricsOverlay() {
     "--kd-desktop-lyrics-stroke-width-secondary": stroke.widthSecondary,
   };
   if (themed) {
-    // 主题包生效时，仍停在出厂配色上的那几项不写内联变量，让主题 CSS 接手；用户改过的照旧优先。
+    // 主题包生效时，仍停在出厂配色上的那几项不写内联变量，让主题 CSS 接手；选了别的配色照旧优先。
     // ponytail: 分不清「没动过」和「主动选回出厂值」，要区分得给 lyricsPrefs 加 touched 标记
+    const accentUntouched = prefs.desktopAccentMode === "white";
     const untouched: Record<string, boolean> = {
-      accent: prefs.desktopAccentMode === "white",
-      secondary: prefs.desktopSecondaryMode === "follow",
+      accent: accentUntouched,
+      // 译文「跟随主色」：主色被用户改过，它就得跟着用户的颜色走
+      secondary: prefs.desktopSecondaryMode === "follow" && accentUntouched,
       dim: prefs.desktopDimMode === "gray",
       stroke: prefs.desktopStrokeMode === "black",
     };

@@ -162,12 +162,7 @@ fn theme_file_token(request: &Request<Body>) -> Option<&str> {
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return None;
     }
-    let mut segments = request.uri().path().trim_matches('/').split('/');
-    (segments.next() == Some("api")
-        && segments.next() == Some("themes")
-        && segments.next() == Some("files"))
-    .then(|| segments.next())
-    .flatten()
+    request.uri().path().strip_prefix("/api/themes/files/")?.split('/').next()
 }
 
 async fn require_auth(

@@ -70,6 +70,9 @@ jobs:
       - name: 媒体工具安装流程回归
         run: node --import tsx --test tests/ffmpeg-install.test.ts
 
+      - name: 主题包清单与令牌回归
+        run: node --import tsx --test tests/themePack.test.ts
+
       - name: 核心行为回归依赖
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 

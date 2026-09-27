@@ -6,16 +6,12 @@
     if (theme === "dark" || theme === "light") {
       document.documentElement.dataset.theme = theme;
     }
-    // 主题包的首帧快照，写入端在 src/lib/themePack.ts。样式表要等本地服务起来才拿得到，
-    // 这里先把底色和属性摆好；themePack.bootThemePack 在 CSS 到位后撤掉内联底色。
+    // 主题包的首帧底色，写入端在 src/lib/themePack.ts。样式表要等本地服务起来才拿得到，
+    // 这里只能先把底色摆好；themePack.bootThemePack 在 CSS 到位后撤掉内联底色。
     var pack = JSON.parse(localStorage.getItem("kd-theme-pack") || "null");
     if (pack && pack.id && pack.boot) {
       var html = document.documentElement;
-      html.dataset.themePack = pack.id;
-      (pack.boot.attrs || []).forEach(function (name) {
-        if (/^data-theme-opt-[a-z0-9-]+$/.test(name)) html.setAttribute(name, "");
-      });
-      var color = pack.boot.window && pack.boot.window[theme];
+      var color = pack.boot[theme];
       if (/^#[0-9a-f]{6}$/i.test(color)) {
         html.dataset.themeWindow = color;
         // 歌词窗必须保持透明

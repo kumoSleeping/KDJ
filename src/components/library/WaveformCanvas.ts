@@ -1,7 +1,7 @@
 import type { Waveform as WaveformData } from "../../types";
 import { waveformSourceRange } from "../../lib/waveformViewport";
 import { waveformEdgeScales } from "../../lib/waveformRenderPolicy";
-import { themeRgb, waveBandRgb } from "../../lib/themePack";
+import { themeRgb, waveBandMixer } from "../../lib/themePack";
 import {
   PERFORMANCE_DETAIL_BACKGROUND,
   PERFORMANCE_DETAIL_CONTRAST,
@@ -112,6 +112,8 @@ function drawTargetDetailColumns(
   const localSourceColumns = count * spanSec / sourceSpanSec;
   const magnifying = width >= localSourceColumns;
 
+  const detailBackground = themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND);
+  const mixBands = waveBandMixer();
   for (let x = 0; x < width; x += 1) {
     const t0 = startSec + (x / width) * spanSec;
     const t1 = startSec + ((x + 1) / width) * spanSec;
@@ -198,7 +200,7 @@ function drawTargetDetailColumns(
     const display = profile === "performance-detail"
       ? waveformSurfaceContrastRgb(
         paletteDisplay,
-        themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND),
+        detailBackground,
         PERFORMANCE_DETAIL_CONTRAST,
       )
       : paletteDisplay;
@@ -209,7 +211,7 @@ function drawTargetDetailColumns(
     const top = Math.max(0, Math.round(mid - half));
     const bottom = Math.min(height, Math.round(mid + half));
     ctx.globalAlpha = 1;
-    ctx.fillStyle = `rgb(${waveBandRgb(display).join(",")})`;
+    ctx.fillStyle = `rgb(${mixBands(display).join(",")})`;
     ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
   }
 }
@@ -230,6 +232,7 @@ function drawReleaseOverviewColumns(
   background: WaveformDisplayRgb,
 ) {
   const columnWidth = cssWidth / width;
+  const mixBands = waveBandMixer();
   for (let index = 0; index < width; index += 1) {
     if (!columns.known[index]) continue;
     // A known quiet interval still gets a one-CSS-pixel centre line. Without this floor, low
@@ -251,7 +254,7 @@ function drawReleaseOverviewColumns(
       background,
       RELEASE_OVERVIEW_CONTRAST,
     );
-    ctx.fillStyle = `rgb(${waveBandRgb([r, g, b]).join(",")})`;
+    ctx.fillStyle = `rgb(${mixBands([r, g, b]).join(",")})`;
     ctx.fillRect(index * columnWidth, mid - half, columnWidth + 0.01, half * 2);
   }
 }
@@ -476,6 +479,9 @@ export function drawWaveformCanvas(
     return;
   }
 
+  // 主题令牌每次绘制解析一次，不进逐列循环
+  const detailBackground = themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND);
+  const mixBands = waveBandMixer();
   for (let x = 0; x < width; x += 1) {
     if (!columnKnown[x]) continue;
     let displayAmp = columnAmp[x];
@@ -518,11 +524,11 @@ export function drawWaveformCanvas(
     const [displayR, displayG, displayB] = performanceDetail
       ? waveformSurfaceContrastRgb(
         paletteDisplay,
-        themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND),
+        detailBackground,
         PERFORMANCE_DETAIL_CONTRAST,
       )
       : paletteDisplay;
-    ctx.fillStyle = `rgb(${waveBandRgb([displayR, displayG, displayB]).join(",")})`;
+    ctx.fillStyle = `rgb(${mixBands([displayR, displayG, displayB]).join(",")})`;
     // 最小 1px：静音段也留一条中线，否则波形会断成几截看着像坏了
     const half = Math.max(
       0.5,

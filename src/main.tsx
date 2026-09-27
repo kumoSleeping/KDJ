@@ -36,7 +36,10 @@ async function bootstrap(): Promise<void> {
     if (theme) appStoreModule.applyTheme(theme);
   };
   appStoreModule.useAppStore.subscribe(syncTheme);
-  themeModule.useThemePack.subscribe(syncTheme);
+  // epoch 是 applyTheme 自己广播出来的重画信号，不能再回头触发它
+  themeModule.useThemePack.subscribe((state, previous) => {
+    if (state.active !== previous.active || state.selection !== previous.selection) syncTheme();
+  });
   darkQuery.addEventListener("change", syncTheme);
   syncTheme();
 

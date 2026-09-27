@@ -19,8 +19,6 @@ export interface ThemeOption {
 export interface ThemeManifest {
   id: string;
   name: string;
-  version: string;
-  author: string;
   modes: ThemeMode[];
   css: string;
   svg?: string;
@@ -42,9 +40,9 @@ export interface ThemeSelection {
   options: Record<string, Record<string, boolean>>;
 }
 
-/** theme-init.js 首帧要用的最小快照，读它的代码越简单越好。 */
+/** `boot` 是 theme-init.js 首帧要用的底色；样式表到位前别的都用不上。 */
 interface StoredSelection extends ThemeSelection {
-  boot?: { window: Partial<Record<ThemeMode, string>>; attrs: string[] };
+  boot?: Partial<Record<ThemeMode, string>>;
 }
 
 export const THEME_PACK_STORAGE_KEY = "kd-theme-pack";
@@ -95,8 +93,6 @@ export function parseThemeManifest(raw: unknown, dir: string): ThemeManifest | s
   return {
     id: data.id,
     name: data.name.trim(),
-    version: typeof data.version === "string" ? data.version : "",
-    author: typeof data.author === "string" ? data.author : "",
     modes: [...new Set(modes)],
     css: data.css,
     svg: data.svg as string | undefined,
@@ -146,12 +142,7 @@ function readStored(): StoredSelection {
 
 function writeStored(selection: ThemeSelection, active: ThemeManifest | null): void {
   const stored: StoredSelection = { id: selection.id, options: selection.options };
-  if (active) {
-    stored.boot = {
-      window: active.window,
-      attrs: optionAttributes(active, selection.options[active.id]),
-    };
-  }
+  if (active) stored.boot = active.window;
   try {
     localStorage.setItem(THEME_PACK_STORAGE_KEY, JSON.stringify(stored));
   } catch {
@@ -179,10 +170,6 @@ export const useThemePack = create<ThemePackState>(() => ({
   error: "",
   epoch: 0,
 }));
-
-export function activeThemePack(): ThemeManifest | null {
-  return useThemePack.getState().active;
-}
 
 /** applyTheme 用它判断「主题相关的东西变没变」，没变就不广播重绘。 */
 export function themePackSignature(): string {
@@ -252,8 +239,11 @@ async function load(manifest: ThemeManifest): Promise<void> {
   if (manifest.js) {
     // 脚本坏了不该连累样式：CSS 已经生效，这里只记日志
     try {
-      const url = (await fileUrl(manifest.id, manifest.js)) + stamp;
-      const module = await import(/* @vite-ignore */ url);
+      // 取回文本再从 blob: 导入：CSP 的 script-src 不必对本机任意端口放开
+      const response = await fetch((await fileUrl(manifest.id, manifest.js)) + stamp);
+      if (!response.ok) throw new Error(`无法加载 ${manifest.js}`);
+      const url = URL.createObjectURL(new Blob([await response.text()], { type: "text/javascript" }));
+      const module = await import(/* @vite-ignore */ url).finally(() => URL.revokeObjectURL(url));
       const entry = module.default as { mount?: (ctx: unknown) => void; unmount?: () => void } | undefined;
       entry?.mount?.({
         id: manifest.id,
@@ -275,7 +265,15 @@ function applyOptions(manifest: ThemeManifest, selection: ThemeSelection): void 
   }
 }
 
-async function apply(selection: ThemeSelection): Promise<void> {
+let applying: Promise<void> = Promise.resolve();
+
+/** 串行执行：load() 中途有 await，两次切换交叠会互相拆掉对方的样式表。 */
+function apply(selection: ThemeSelection): Promise<void> {
+  applying = applying.then(() => applyNow(selection));
+  return applying;
+}
+
+async function applyNow(selection: ThemeSelection): Promise<void> {
   const { packs } = useThemePack.getState();
   const entry = selection.id ? packs.find((pack) => pack.dir === selection.id) : undefined;
   let active = entry?.manifest ?? null;
@@ -311,7 +309,7 @@ export async function refreshThemePacks(): Promise<void> {
     const { api } = await import("./api");
     const listing = await api.themes.list();
     const packs = listing.themes.map((item): ThemeEntry => {
-      const parsed = item.manifest ? parseThemeManifest(item.manifest, item.dir) : item.error ?? "";
+      const parsed = item.error ?? parseThemeManifest(item.manifest, item.dir);
       return typeof parsed === "string"
         ? { dir: item.dir, manifest: null, error: parsed }
         : { dir: item.dir, manifest: parsed, error: "" };
@@ -389,12 +387,17 @@ export function themeRgb(name: string, fallback: ThemeRgb): ThemeRgb {
   const cached = rgbCache.get(key);
   if (cached) return cached;
   if (!probe?.isConnected) {
-    probe = document.createElement("span");
-    probe.hidden = true;
-    document.body.append(probe);
+    const host = document.createElement("span");
+    host.hidden = true;
+    probe = host.appendChild(document.createElement("span"));
+    document.body.append(host);
   }
-  probe.style.color = `var(${name}, rgb(${fallback.join(",")}))`;
-  const match = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(getComputedStyle(probe).color);
+  // 令牌写成了非颜色值时声明在计算阶段失效、改为继承；让它继承到的也是 fallback
+  const fallbackCss = `rgb(${fallback.join(",")})`;
+  (probe.parentElement as HTMLElement).style.color = fallbackCss;
+  probe.style.color = `var(${name}, ${fallbackCss})`;
+  // 只认不透明的 rgb()：canvas 这边没有可供透明色叠加的底
+  const match = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(getComputedStyle(probe).color);
   const value: ThemeRgb = match ? [Number(match[1]), Number(match[2]), Number(match[3])] : fallback;
   rgbCache.set(key, value);
   return value;
@@ -405,15 +408,16 @@ const BAND_IDENTITY: readonly ThemeRgb[] = [[255, 0, 0], [0, 255, 0], [0, 0, 255
 /**
  * 波形的显示色里 R/G/B 三个通道分别对应低/中/高频。主题用
  * `--kd-wave-low/mid/high` 给三个频段换颜料；没定义时原样返回。
+ * 每次绘制前取一次，逐列调用返回的函数：令牌解析不进绘制循环。
  */
-export function waveBandRgb(rgb: ThemeRgb): ThemeRgb {
+export function waveBandMixer(): (rgb: ThemeRgb) => ThemeRgb {
   const bands = [
     themeRgb("--kd-wave-low", BAND_IDENTITY[0]),
     themeRgb("--kd-wave-mid", BAND_IDENTITY[1]),
     themeRgb("--kd-wave-high", BAND_IDENTITY[2]),
   ];
-  if (bands.every((band, i) => band.join() === BAND_IDENTITY[i].join())) return rgb;
-  return [0, 1, 2].map((channel) => Math.min(255, Math.round(
+  if (bands.every((band, i) => band.join() === BAND_IDENTITY[i].join())) return (rgb) => rgb;
+  return (rgb) => [0, 1, 2].map((channel) => Math.min(255, Math.round(
     (rgb[0] * bands[0][channel] + rgb[1] * bands[1][channel] + rgb[2] * bands[2][channel]) / 255,
   ))) as unknown as ThemeRgb;
 }

@@ -2,7 +2,9 @@
 // 不碰正式数据目录；主题直接读仓库的 themes/，改完 CSS 重跑即可。
 //
 //   cargo build -p kdj-server --bin kdj-server
-//   KDJ_TEST_BROWSER=/path/to/chrome node scripts/theme-shot.mjs <输出目录> [主题 id ...]
+//   node scripts/theme-shot.mjs <输出目录> [主题 id ...]
+//
+// 浏览器用 KDJ_TEST_BROWSER 指定；不指定时 macOS 用系统 Chrome，其它平台用 PATH 里的 chromium。
 //
 // 不给主题 id 时截「默认」和 themes/ 下的全部主题。
 import fs from "node:fs/promises";
@@ -18,7 +20,7 @@ if (!process.argv[2]) throw new Error("用法：node scripts/theme-shot.mjs <输
 const out = path.resolve(process.argv[2]);
 await fs.mkdir(out, { recursive: true });
 const browser = process.env.KDJ_TEST_BROWSER
-  || path.join(os.homedir(), ".cache/ms-playwright/chromium-1243/chrome-linux64/chrome");
+  || (process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "chromium");
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "kdj-theme-shot-"));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const children = [];
@@ -101,9 +103,7 @@ try {
     const probe = net.createServer().once("error", () => resolve(false))
       .listen(5274, "localhost", () => probe.close(() => resolve(true)));
   }), 6000);
-  // KDJ_SHOT_WEB：换一份前端源码目录（例如 main 的 worktree）来截对照图
   run(process.execPath, [path.join(root, "node_modules/vite/bin/vite.js"), "--config", "vite.rust.config.ts"], {
-    cwd: process.env.KDJ_SHOT_WEB,
     VITE_KDJ_PORT: String(port), VITE_KDJ_AUTH_TOKEN: auth, VITE_KDJ_MEDIA_TOKEN: media,
   });
   await until("vite", async () => (await fetch("http://localhost:5274/")).ok);
@@ -140,7 +140,11 @@ try {
   await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 
   const available = (await api("GET", "/themes")).themes;
-  const wanted = process.argv.length > 3 ? process.argv.slice(3) : ["default", ...available.map((t) => t.dir)];
+  // 没点名时只截能用的主题：themes/ 里一个坏掉的文件夹不该让其余的都截不成
+  for (const broken of available.filter((t) => !t.manifest)) console.warn(`跳过 themes/${broken.dir}：${broken.error}`);
+  const wanted = process.argv.length > 3
+    ? process.argv.slice(3)
+    : ["default", ...available.filter((t) => t.manifest).map((t) => t.dir)];
   let boot = null;
   for (const pack of wanted) {
     const manifest = available.find((t) => t.dir === pack)?.manifest;

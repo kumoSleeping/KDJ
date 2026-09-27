@@ -820,7 +820,7 @@ export const api = {
     }>("/themes"),
     // token 在路径里而不是 query：主题 CSS 的相对 url() 要能解析到同一前缀下
     fileUrl: (id: string, path: string) =>
-      `${bridge().baseUrl}/api/themes/files/${bridge().mediaToken}/${id}/${path}`,
+      `${bridge().baseUrl}/api/themes/files/${bridge().mediaToken}/${id}/${path.split("/").map(encodeURIComponent).join("/")}`,
   },
   putSettings: (settings: Settings) =>
     request<Settings>("/settings", { method: "PUT", body: JSON.stringify(settings) }),

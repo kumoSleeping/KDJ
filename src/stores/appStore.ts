@@ -7,9 +7,9 @@
 import { create } from "zustand";
 import {
   THEME_CHANGE_EVENT,
-  activeThemePack,
   resolveThemeMode,
   themePackSignature,
+  useThemePack,
 } from "../lib/themePack";
 import { api, events } from "../lib/api";
 import { acknowledgeSettingsRollback, enqueueSettingsWrite } from "../lib/settingsWriteBarrier";
@@ -78,7 +78,7 @@ export function applyTheme(theme: Settings["theme"]): void {
         : "light"
       : theme;
   // 只有一种模式的主题包强制用它；settings.theme 不改写，换回默认主题时原选择还在。
-  const pack = activeThemePack();
+  const pack = useThemePack.getState().active;
   const resolved = resolveThemeMode(pack, base);
   if (document.documentElement.dataset.theme !== resolved) {
     document.documentElement.dataset.theme = resolved;
