@@ -1877,6 +1877,10 @@ fn window_theme_color(theme: &str) -> Result<tauri::window::Color, String> {
     match theme {
         "dark" => Ok(tauri::window::Color(0x11, 0x11, 0x13, 0xff)),
         "light" => Ok(tauri::window::Color(0xf2, 0xf2, 0xf2, 0xff)),
+        // 主题包在 theme.json 里给的 #rrggbb
+        hex if hex.len() == 7 && hex.starts_with('#') => u32::from_str_radix(&hex[1..], 16)
+            .map(|rgb| tauri::window::Color((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 0xff))
+            .map_err(|_| format!("未知的窗口主题：{hex}")),
         other => Err(format!("未知的窗口主题：{other}")),
     }
 }

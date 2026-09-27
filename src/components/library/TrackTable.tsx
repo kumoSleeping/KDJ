@@ -1,7 +1,8 @@
 import { dropWorkshopTracks, paintWorkshopDrop } from "../../lib/workshopDrop";
 import { useStore } from "zustand";
 import type { LibraryPaneStore, LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
-import { cloneElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import {
   Check,
   BarChart3,
@@ -1367,6 +1368,8 @@ export const TrackTable = memo(function TrackTable({
   }, []);
   // centerSelected 挂在 [] 上，靠 ref 拿最新值，不为它重挂全局事件
   const selectedIdRef = useRef(selectedId);
+  // 只取 id：播放进度之类的变化不该让整张表重渲染
+  const playingId = useSyncExternalStore(subscribePlayingTrack, () => getPlayingTrack()?.id ?? null, () => null);
   const pendingCountRef = useRef(0);
   useEffect(() => {
     const scrollTrackIntoCenter = (trackId: number | null | undefined, attemptsLeft = 40) => {
@@ -1876,6 +1879,7 @@ export const TrackTable = memo(function TrackTable({
               aria-selected={selected.has(track.id)}
               data-kd-track-id={track.id}
               data-focus={track.id === selectedId ? "true" : undefined}
+              data-playing={track.id === playingId ? "true" : undefined}
               data-selecting={selectionMode ? "true" : undefined}
               // macOS 与文件外拖走 pointer 状态机；Windows 分享链接用 WebView2 原生
               // text/uri-list，才能让浏览器、聊天等外部应用直接接住 URL。

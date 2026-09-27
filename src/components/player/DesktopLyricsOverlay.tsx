@@ -1,3 +1,4 @@
+import { useThemePack } from "../../lib/themePack";
 import {
   useEffect,
   useLayoutEffect,
@@ -535,6 +536,34 @@ export function DesktopLyricsOverlay() {
   const secondaryColor = paintCss(resolvedSecondaryPaint(prefs));
   const dimColor = paintCss(dimPaint(prefs));
   const stroke = strokeCss(strokePaint(prefs));
+  const themed = useThemePack((state) => state.active !== null);
+  const paintVars: Record<string, string | number> = {
+    "--kd-desktop-lyrics-accent": accent.color,
+    "--kd-desktop-lyrics-accent-fill": accent.backgroundImage ?? "none",
+    "--kd-desktop-lyrics-accent-clip": accent.clipText ? "text" : "border-box",
+    "--kd-desktop-lyrics-secondary": secondaryColor.color,
+    "--kd-desktop-lyrics-secondary-fill": secondaryColor.backgroundImage ?? "none",
+    "--kd-desktop-lyrics-secondary-clip": secondaryColor.clipText ? "text" : "border-box",
+    "--kd-desktop-lyrics-dim": dimColor.color,
+    "--kd-desktop-lyrics-dim-fill": dimColor.backgroundImage ?? "none",
+    "--kd-desktop-lyrics-dim-clip": dimColor.clipText ? "text" : "border-box",
+    "--kd-desktop-lyrics-stroke": stroke.color,
+    "--kd-desktop-lyrics-stroke-width": stroke.widthPrimary,
+    "--kd-desktop-lyrics-stroke-width-secondary": stroke.widthSecondary,
+  };
+  if (themed) {
+    // 主题包生效时，仍停在出厂配色上的那几项不写内联变量，让主题 CSS 接手；用户改过的照旧优先。
+    // ponytail: 分不清「没动过」和「主动选回出厂值」，要区分得给 lyricsPrefs 加 touched 标记
+    const untouched: Record<string, boolean> = {
+      accent: prefs.desktopAccentMode === "white",
+      secondary: prefs.desktopSecondaryMode === "follow",
+      dim: prefs.desktopDimMode === "gray",
+      stroke: prefs.desktopStrokeMode === "black",
+    };
+    for (const name of Object.keys(paintVars)) {
+      if (untouched[name.split("-")[5]]) delete paintVars[name];
+    }
+  }
 
   return (
     <main
@@ -545,18 +574,7 @@ export function DesktopLyricsOverlay() {
         {
           "--kd-desktop-lyrics-scale": fontScale,
           "--kd-desktop-lyrics-opacity": opacity,
-          "--kd-desktop-lyrics-accent": accent.color,
-          "--kd-desktop-lyrics-accent-fill": accent.backgroundImage ?? "none",
-          "--kd-desktop-lyrics-accent-clip": accent.clipText ? "text" : "border-box",
-          "--kd-desktop-lyrics-secondary": secondaryColor.color,
-          "--kd-desktop-lyrics-secondary-fill": secondaryColor.backgroundImage ?? "none",
-          "--kd-desktop-lyrics-secondary-clip": secondaryColor.clipText ? "text" : "border-box",
-          "--kd-desktop-lyrics-dim": dimColor.color,
-          "--kd-desktop-lyrics-dim-fill": dimColor.backgroundImage ?? "none",
-          "--kd-desktop-lyrics-dim-clip": dimColor.clipText ? "text" : "border-box",
-          "--kd-desktop-lyrics-stroke": stroke.color,
-          "--kd-desktop-lyrics-stroke-width": stroke.widthPrimary,
-          "--kd-desktop-lyrics-stroke-width-secondary": stroke.widthSecondary,
+          ...paintVars,
         } as CSSProperties
       }
     >

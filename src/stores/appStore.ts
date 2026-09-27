@@ -5,6 +5,12 @@
  */
 
 import { create } from "zustand";
+import {
+  THEME_CHANGE_EVENT,
+  activeThemePack,
+  resolveThemeMode,
+  themePackSignature,
+} from "../lib/themePack";
 import { api, events } from "../lib/api";
 import { acknowledgeSettingsRollback, enqueueSettingsWrite } from "../lib/settingsWriteBarrier";
 import { isPlatformEnabled, normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
@@ -58,23 +64,37 @@ function mergeVerifiedAccounts(cached: Account[], verified: Account[]): Account[
   });
 }
 
+let appliedThemeSignature = "";
+
 /**
  * 把主题写到 <html data-theme>，design.css 只认这个属性。
  * system 时读一次 prefers-color-scheme；系统切换的监听在 main.tsx（那里才有生命周期）。
  */
 export function applyTheme(theme: Settings["theme"]): void {
-  const resolved =
+  const base =
     theme === "system"
       ? window.matchMedia("(prefers-color-scheme: dark)").matches
         ? "dark"
         : "light"
       : theme;
+  // 只有一种模式的主题包强制用它；settings.theme 不改写，换回默认主题时原选择还在。
+  const pack = activeThemePack();
+  const resolved = resolveThemeMode(pack, base);
   if (document.documentElement.dataset.theme !== resolved) {
     document.documentElement.dataset.theme = resolved;
   }
   // macOS 快速拖窗时会直接合成原生窗口底层；它也要和页面同色，
   // 否则浅色主题的窗口右缘会短暂露出配置中的深色背景。
-  window.kdj?.setWindowBackground(resolved);
+  window.kdj?.setWindowBackground(pack?.window[resolved] ?? resolved);
+  // canvas 等非 CSS 绘制靠这个事件重画；本函数会被频繁调用，只在真变了时才广播。
+  const signature = `${resolved}|${themePackSignature()}`;
+  if (signature !== appliedThemeSignature) {
+    appliedThemeSignature = signature;
+    window.dispatchEvent(new Event(THEME_CHANGE_EVENT));
+    // Android：MainActivity 注入的接口，让系统栏图标深浅跟随页面
+    (window as { kdjAndroid?: { setSystemBarsLight(light: boolean): void } })
+      .kdjAndroid?.setSystemBarsLight(resolved === "light");
+  }
   // 存的是算好的 dark/light 而不是 system：读它的是 public/theme-init.js，
   // 跑在首帧前，越简单越好，不该在那边再算一遍系统偏好
   try {

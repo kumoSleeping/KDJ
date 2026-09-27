@@ -41,6 +41,7 @@ import {
 } from "../../lib/waveformMotion";
 import { ContextMenu } from "../common";
 import { drawWaveformCanvas } from "./WaveformCanvas";
+import { THEME_CHANGE_EVENT } from "../../lib/themePack";
 import { useWaveformData } from "./useWaveformData";
 import { markerRatio, WaveformCueMarkers, WaveformLoopFills } from "./WaveformMarkers";
 import {
@@ -1047,6 +1048,7 @@ export function Waveform({
     observer.observe(canvas);
     window.addEventListener("resize", scheduleRender);
     window.addEventListener("kd:pane-resize-end", finishPaneResize);
+    window.addEventListener(THEME_CHANGE_EVENT, scheduleRender);
     // Moving a Tauri window between Retina and non-Retina displays can change DPR without changing
     // the host's CSS box, so ResizeObserver alone leaves a stale backing-store resolution.
     let dprQuery: MediaQueryList | null = null;
@@ -1065,6 +1067,7 @@ export function Waveform({
       observer.disconnect();
       window.removeEventListener("resize", scheduleRender);
       window.removeEventListener("kd:pane-resize-end", finishPaneResize);
+      window.removeEventListener(THEME_CHANGE_EVENT, scheduleRender);
       dprQuery?.removeEventListener("change", handleDprChange);
     };
   }, [

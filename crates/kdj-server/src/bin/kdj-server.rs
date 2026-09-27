@@ -29,8 +29,12 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(8788);
 
     let config = Arc::new(AppConfig::create(data_dir, download_dir, port));
-    let (port, _auth_token, _media_token, _activity_log, handle, _control) =
+    let (port, auth_token, media_token, _activity_log, handle, _control) =
         kdj_server::serve(config.clone()).await?;
+    // 浏览器预览要靠这两个 token 才连得上；只在显式要求时打印（scripts/theme-shot.mjs 用）。
+    if std::env::var_os("KDJ_PRINT_TOKENS").is_some() {
+        println!("KDJ_TOKENS {} {}", auth_token.expose(), media_token.expose());
+    }
 
     println!("KDJ Rust 服务已启动");
     println!("  http://127.0.0.1:{port}");

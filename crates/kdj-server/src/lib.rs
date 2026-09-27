@@ -22,6 +22,7 @@ pub mod preview_policy;
 mod playback_diagnostics;
 pub mod stream_cache;
 pub mod stream_waveform;
+pub mod themes;
 pub mod waveform;
 pub mod ws;
 pub mod youtube_hls;
@@ -149,8 +150,24 @@ fn request_authorized(request: &Request<Body>, auth: &AuthState) -> bool {
     if bearer(request.headers()).is_some_and(|candidate| auth.control.matches(candidate)) {
         return true;
     }
+    if theme_file_token(request).is_some_and(|candidate| auth.media.matches(candidate)) {
+        return true;
+    }
     media_path_allowed(request.uri().path())
         && media_query_token(request).is_some_and(|candidate| auth.media.matches(candidate))
+}
+
+/// 主题文件的 media token 在路径段里（见 themes.rs），只放行只读方法。
+fn theme_file_token(request: &Request<Body>) -> Option<&str> {
+    if !matches!(*request.method(), Method::GET | Method::HEAD) {
+        return None;
+    }
+    let mut segments = request.uri().path().trim_matches('/').split('/');
+    (segments.next() == Some("api")
+        && segments.next() == Some("themes")
+        && segments.next() == Some("files"))
+    .then(|| segments.next())
+    .flatten()
 }
 
 async fn require_auth(
@@ -390,6 +407,7 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
     let router = routes::router(ctx)
         .merge(compositions::workshop::routes::router(workshop))
         .merge(compositions::audio_visualizer::studio::router())
+        .merge(themes::router())
         .merge(compositions::routes::router(compositions))
         .route("/ws", axum::routing::get(ws::handler))
         .layer(Extension(control))
@@ -513,6 +531,22 @@ mod auth_tests {
                 "/api/video/youtube/hls/opaque-ticket?kdj_media_token=media-token",
                 None
             ),
+            &auth
+        ));
+        assert!(request_authorized(
+            &request(Method::GET, "/api/themes/files/media-token/sketch/theme.css", None),
+            &auth
+        ));
+        assert!(!request_authorized(
+            &request(Method::GET, "/api/themes/files/wrong-token/sketch/theme.css", None),
+            &auth
+        ));
+        assert!(!request_authorized(
+            &request(Method::POST, "/api/themes/files/media-token/sketch/theme.css", None),
+            &auth
+        ));
+        assert!(!request_authorized(
+            &request(Method::GET, "/api/themes?kdj_media_token=media-token", None),
             &auth
         ));
         assert!(!request_authorized(

@@ -40,3 +40,6 @@ dev/
 output/
 div.kd-player-wave
 sidecar/kumodeck.egg-info/
+
+# 主题包不进仓库；放在 themes/ 下只是方便 scripts/theme-shot.mjs 本地截图
+themes/*/

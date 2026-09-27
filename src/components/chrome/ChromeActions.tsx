@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Scissors, Download, Moon, Settings, Sun, Upload } from "lucide-react";
 import { formatPercent } from "../../lib/format";
+import { useThemePack } from "../../lib/themePack";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useUpdateStore } from "../../stores/updateStore";
@@ -69,7 +70,10 @@ export function ChromeActions({
       ? document.documentElement.dataset.theme ??
         (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
       : theme;
-  const isDark = resolvedTheme !== "light";
+  // 只有一种模式的主题包：深浅由主题决定，按钮停用
+  const lockedMode = useThemePack((state) =>
+    state.active?.modes.length === 1 ? state.active.modes[0] : null);
+  const isDark = (lockedMode ?? resolvedTheme) !== "light";
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
       {updateReady ? (
@@ -110,6 +114,7 @@ export function ChromeActions({
         className="kd-chrome-btn"
         aria-label={isDark ? "切到日间模式" : "切到夜间模式"}
         title={isDark ? "日间模式" : "夜间模式"}
+        disabled={lockedMode !== null}
         onClick={() => void saveSettings({ theme: isDark ? "light" : "dark" }).catch(() => undefined)}
       >
         {isDark ? <Sun size={16} /> : <Moon size={16} />}

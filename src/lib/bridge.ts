@@ -433,7 +433,7 @@ export function initBridge(): Promise<KdjBridge> {
       // 不必等 settings 异步回来再 applyTheme，缩短 show 与主题同步之间的空隙。
       const theme = document.documentElement.dataset.theme;
       if (theme === "dark" || theme === "light") {
-        resolved.setWindowBackground(theme);
+        resolved.setWindowBackground(document.documentElement.dataset.themeWindow ?? theme);
       }
       return resolved;
     });
