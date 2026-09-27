@@ -929,6 +929,7 @@ export const api = {
   previewWorkshop: (id: string, revision: number, auditionAfterLayer?: string) => post<{ticket: string; revision: number}>(`/workshop/${encodeURIComponent(id)}/preview`, {revision, audition_after_layer: auditionAfterLayer}),
   releaseWorkshop: (ticket: string) => request(`/workshop/preview/${encodeURIComponent(ticket)}`, {method: "DELETE"}),
   workshopPositions: (id:string) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions`,{}),
+  analyzeWorkshopPositions: (id:string, layer_id?:string, restart = false) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions/analyze`,{layer_id:layer_id ?? null,restart}),
   controlWorkshopPositions: (id:string, stopped:boolean, layer_id?:string) => post<WorkshopPositionResults>(`/workshop/${encodeURIComponent(id)}/positions/control`,{stopped,layer_id}),
   applyWorkshopPositions: (id:string, revision:number, layer_id:string, analysis_id:string, preset_id:string) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/positions/apply`,{revision,layer_id,analysis_id,preset_id}),
   workshopFrameUrl: (project: string, source: string, ms: number, width: 160 | 320 | 960 = 160) => authenticatedGetUrl(`${bridge().baseUrl}/api/workshop/${encodeURIComponent(project)}/sources/${encodeURIComponent(source)}/frame?ms=${Math.max(0,ms).toFixed(3)}&width=${width}`),

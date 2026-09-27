@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { runtimePlayer } from "./unifiedPlayer";
 import { captureLocalVideoSeekFence, getLocalVideoClock, waitForLocalVideoSeekLanding } from "./mediaSync";
@@ -18,6 +18,7 @@ export interface WorkshopPlayback {
   beginScrub(): void;
   endScrub(): void;
   stop(): void;
+  retry(): void;
   time(): number;
   pendingSeek?(): boolean;
 }
@@ -28,8 +29,11 @@ export function useWorkshopPlayback(): WorkshopPlayback {
     saving = useWorkshopStore((s) => s.saving),
     gesture = useWorkshopStore((s) => s.gesture !== null);
   // Editorial markers do not invalidate the playing media or its preview lease.
-  const mediaKey = useWorkshopStore(s => s.draft
-    ? JSON.stringify([s.draft.id, s.draft.name, s.draft.sources, s.draft.layers, s.draft.canvas, s.draft.output]) : "");
+  // Store selectors run on every clock update, even without a React render.
+  // Serialize only when the draft changes, never for position/selection ticks.
+  const draft = useWorkshopStore(s => s.draft);
+  const mediaKey = useMemo(() => draft
+    ? JSON.stringify([draft.id, draft.name, draft.sources, draft.layers, draft.canvas, draft.output]) : "", [draft]);
   const preparedMediaKey = useRef<string | null>(null);
   const [ticket, setTicket] = useState<string | null>(null),
     [playing, setPlaying] = useState(false),
@@ -362,6 +366,7 @@ export function useWorkshopPlayback(): WorkshopPlayback {
     beginScrub,
     endScrub,
     stop,
+    retry: () => { void prepare(); },
     time,
     pendingSeek: () => seekTarget.current !== null,
   };

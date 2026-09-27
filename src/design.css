@@ -10810,6 +10810,9 @@ button.kd-stream-status {
 .vj-timeline-scale { padding: 3px 8px; }
 .vj-track-row > .vj-track-label { display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; padding: 5px 6px; }
 .vj-track-label-heading { justify-content: space-between; color: var(--kd-muted); font-size: var(--kd-size-xs); }
+.vj-track-heading-tail { display: flex; align-items: center; gap: 2px; }
+.vj-workshop .vj-layer-sort { display: flex; align-items: center; justify-content: center; width: 18px; min-height: 18px; padding: 0; color: var(--kd-muted); }
+.vj-workshop .vj-layer-sort[data-active] { color: var(--kd-theme); }
 .vj-workshop .vj-layer-check { min-height: 22px; padding: 0; color: var(--kd-muted); }
 .vj-workshop .vj-layer-check[aria-checked="true"] { color: var(--kd-theme); background: transparent; border-color: transparent; box-shadow: none; }
 .vj-layer-heading { display: grid; grid-template-columns: 16px 16px minmax(0, 1fr) 18px; align-items: center; gap: 3px; min-width: 0; height: 24px; }
@@ -10951,10 +10954,9 @@ button.kd-stream-status {
 .vj-crop-tools { margin:0; border:0; min-width:0; }
 .vj-crop-tools:disabled, .vj-property-group:disabled { opacity:.45; }
 .vj-property-group:disabled .vj-crop-tools:disabled { opacity:1; }
-.vj-clip-properties-bar { flex:0 0 auto; max-height:45vh; min-width:0; overflow:auto; overscroll-behavior:contain; border-bottom:1px solid var(--kd-line-soft); background:var(--kd-panel); }
+.vj-clip-properties-bar { flex:0 0 auto; height:260px; max-height:45vh; min-width:0; overflow:auto; overscroll-behavior:contain; border-bottom:1px solid var(--kd-line-soft); background:var(--kd-panel); }
 .vj-clip-properties { display:flex; flex-direction:column; min-width:0; min-height:0; font-size:var(--kd-size-xs); }
-.vj-clip-properties > header { display:flex; flex:0 0 auto; align-items:center; padding:2px 10px; }
-.vj-clip-properties > header:has(strong:empty) { display:none; }
+.vj-clip-properties > header { display:flex; flex:0 0 auto; align-items:center; min-height:calc(1.4em + 4px); padding:2px 10px; }
 .vj-clip-properties button { min-height:24px; padding:3px 4px; }
 .vj-clip-properties > header strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--kd-size-xs); font-weight:600; }
 .vj-clip-properties-scroll { display:flex; flex-wrap:wrap; align-items:flex-start; gap:6px 20px; min-height:0; padding:2px 10px 8px; }

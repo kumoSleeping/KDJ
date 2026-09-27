@@ -1673,11 +1673,16 @@ async fn apply_update() -> Result<(), String> {
 /// 用回调版而不是 `blocking_pick_folder`：命令有可能落在事件循环所在的线程上，
 /// 阻塞式对话框在那里会和事件循环互等死锁。oneshot 把回调转回 async。
 #[tauri::command]
-async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
+async fn pick_folder(app: tauri::AppHandle, default_path: Option<String>, title: Option<String>) -> Option<String> {
+    #[cfg(not(desktop))]
+    let _ = (&default_path, &title);
     #[cfg(desktop)]
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        app.dialog().file().pick_folder(move |picked| {
+        let mut dialog = app.dialog().file();
+        if let Some(path) = default_path { dialog = dialog.set_directory(path); }
+        if let Some(title) = title { dialog = dialog.set_title(title); }
+        dialog.pick_folder(move |picked| {
             // 接收端只有在整个命令被取消时才会没了，忽略即可
             let _ = tx.send(picked);
         });
@@ -2621,14 +2626,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     let config = Arc::new(AppConfig::create(data_dir, download_dir, 0));
     #[cfg(desktop)]
     kdj_providers::ffmpeg::managed::initialize(&config.data_dir);
-    #[cfg(desktop)]
-    match data_recovery::repair_library_roots(&config) {
-        Ok(restored) if restored > 0 => {
-            eprintln!("KDJ: 已从现有曲库记录补回 {restored} 个曲库文件夹");
-        }
-        Ok(_) => {}
-        Err(error) => eprintln!("KDJ: 曲库文件夹自愈失败，将在下次启动重试：{error:#}"),
-    }
+    // 单文件素材可驻留曲库，但不能在启动时将其父目录登记为扫描根。
     // show() 前要用这份主题垫原生底色，否则浅色用户会先看到配置默认底闪一下。
     let theme = config.to_settings().theme;
     let data_dir_for_runtime = config.data_dir.clone();

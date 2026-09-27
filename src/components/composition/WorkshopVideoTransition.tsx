@@ -58,7 +58,7 @@ export function WorkshopVideoTransition({project, left, right, scale}: {
         if(!["ArrowLeft","ArrowRight","Home"].includes(e.key))return;
         e.preventDefault();e.stopPropagation(); change({duration_ms:e.key === "Home" ? 0 : duration+(e.key === "ArrowRight" ? quantum : -quantum),alignment});
       }} />}
-    {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} className="vj-transition-popup">
+    {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} keepOpen=".vj-transition-trigger,.vj-transition-resize" className="vj-transition-popup">
       <div className="vj-transition-settings" role="group" aria-label={`${label}设置`} onPointerDown={e => e.stopPropagation()}>
         <div className="vj-transition-heading"><span>交叉渐变 · {video && audio ? "画面 + 声音" : video ? "画面" : "声音"}</span><button type="button" aria-label={`移除${label}`} disabled={!config} onClick={() => {change(null);setMenu(null);}}><X size={12}/></button></div>
         {(!config || !config.duration_ms) && <button type="button" onClick={() => change({duration_ms:500,alignment})}>交叉淡化</button>}

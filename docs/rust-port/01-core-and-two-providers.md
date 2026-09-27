@@ -88,6 +88,9 @@ v0.1.x 的登录态是 `netease.pyncm`（`"PYNCM" + base64(zlib(json))`）和 `q
 
 `resolves_to_public_ip` 比 Python 版覆盖更全：额外挡了 CGNAT 100.64/10、
 IETF 保留段、IPv4-mapped IPv6，测试里含 `169.254.169.254`（云元数据服务）。
+媒体路径不用这个严格判定，而是 `net::media_target`：命中代理 fake-ip 段时放行并
+交给系统代理 / TUN（否则 Clash fake-ip 机器上所有下载和试听都会被误杀），
+只有真内网地址才拒绝。
 
 ## 下一步
 

@@ -61,12 +61,18 @@ export interface TimePart {
   rate: number;
 }
 // Keep the source-domain quadrature in sync with kdj_core::workshop::Clip::parts.
-const maps = new WeakMap<WorkshopClip, { key: string; parts: TimePart[] }>();
+const maps = new WeakMap<WorkshopClip, { sourceIn: number; sourceOut: number; speed: ClipSpeed; parts: TimePart[] }>();
 export function timeParts(c: WorkshopClip): TimePart[] {
   if (c.display_duration_ms != null) return [{sourceStart: c.animation_offset_ms ?? 0, sourceEnd: (c.animation_offset_ms ?? 0) + c.display_duration_ms, outputStart: 0, outputEnd: c.display_duration_ms, rate: 1}];
-  const signature = JSON.stringify([c.source_in_ms, c.source_out_ms, c.speed]);
-  const cached = maps.get(c);
-  if (cached?.key === signature) return cached.parts;
+  const cached = maps.get(c), speed = c.speed;
+  // These helpers run for every waveform bar, fade and video clock sample.
+  // Compare scalar inputs without serializing/allocating on a cache hit. Keep a
+  // value snapshot: edit operations also call us while mutating a cloned clip.
+  if (cached && cached.sourceIn === c.source_in_ms && cached.sourceOut === c.source_out_ms
+    && cached.speed.preset === speed.preset && cached.speed.start === speed.start
+    && cached.speed.middle === speed.middle && cached.speed.end === speed.end
+    && cached.speed.domain_start_ms === speed.domain_start_ms
+    && cached.speed.domain_end_ms === speed.domain_end_ms) return cached.parts;
   const count = c.speed.preset === "constant" ? 1 : 256,
     step = (c.speed.domain_end_ms - c.speed.domain_start_ms) / count;
   let output = 0;
@@ -88,15 +94,21 @@ export function timeParts(c: WorkshopClip): TimePart[] {
     });
     output = end;
   }
-  maps.set(c, { key: signature, parts });
+  maps.set(c, { sourceIn: c.source_in_ms, sourceOut: c.source_out_ms, speed: {...speed}, parts });
   return parts;
 }
 export const clipDuration = (c: WorkshopClip) =>
   timeParts(c).at(-1)?.outputEnd ?? 0;
 export function sourceAt(c: WorkshopClip, local: number): number {
   if (c.display_duration_ms != null) return imageTime(c, local);
-  const parts = timeParts(c),
-    p = parts.find((p) => local < p.outputEnd) ?? parts.at(-1);
+  const parts = timeParts(c);
+  let lo = 0, hi = parts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (local < parts[mid].outputEnd) hi = mid;
+    else lo = mid + 1;
+  }
+  const p = parts[lo] ?? parts.at(-1);
   return p
     ? clamp(
         p.sourceStart + (local - p.outputStart) * p.rate,
@@ -107,8 +119,14 @@ export function sourceAt(c: WorkshopClip, local: number): number {
 }
 export function outputAt(c: WorkshopClip, source: number): number {
   if (c.display_duration_ms != null) return clamp(source - (c.animation_offset_ms ?? 0), 0, c.display_duration_ms);
-  const parts = timeParts(c),
-    p = parts.find((p) => source < p.sourceEnd) ?? parts.at(-1);
+  const parts = timeParts(c);
+  let lo = 0, hi = parts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (source < parts[mid].sourceEnd) hi = mid;
+    else lo = mid + 1;
+  }
+  const p = parts[lo] ?? parts.at(-1);
   return p
     ? p.outputStart +
         (clamp(source, c.source_in_ms, c.source_out_ms) - p.sourceStart) /
@@ -122,8 +140,14 @@ export const projectDuration = (p: CompositionProject) =>
       l.clips.map((c) => c.start_ms + clipDuration(c)),
     ),
   );
-export const findClip = (p: CompositionProject, id: string | null) =>
-  p.layers.flatMap((l) => l.clips).find((c) => c.id === id);
+export function findClip(p: CompositionProject, id: string | null): WorkshopClip | undefined {
+  if (id === null) return undefined;
+  for (const layer of p.layers) {
+    const clip = layer.clips.find(c => c.id === id);
+    if (clip) return clip;
+  }
+  return undefined;
+}
 export function fadeAlpha(
   c: WorkshopClip,
   local: number,
@@ -336,6 +360,39 @@ export function clipLanes(clips: WorkshopClip[]): Map<string, number> {
   return lanes;
 }
 
+/** Where a track's content sits in the song: its earliest clip, so a track that
+ * spans from the start reads as the background. Empty tracks have no position
+ * and sink below every positioned track. */
+function layerPosition(layer: WorkshopLayer): number {
+  return layer.clips.length
+    ? Math.min(...layer.clips.map((c) => c.start_ms))
+    : Number.NEGATIVE_INFINITY;
+}
+const descending = (a: number, b: number) => (a === b ? 0 : a > b ? -1 : 1);
+/** Order tracks by their content's place in the song. Upper tracks cover lower
+ * ones, so later content stacks on top of earlier content; audio-only tracks
+ * carry no picture and always stay at the bottom of the list. Passing ids
+ * reorders only those tracks, inside the rows they already occupy. */
+export function sortLayers(
+  p: CompositionProject,
+  ids?: readonly string[],
+): CompositionProject {
+  const audioOnly = (layer: WorkshopLayer) =>
+    !layerSources(p, layer).some(isVisualSource);
+  // Latest content first: the list reads top-to-bottom as front-to-back, and
+  // every audio-only track follows the picture tracks regardless of position.
+  const order = (a: WorkshopLayer, b: WorkshopLayer) =>
+    Number(audioOnly(a)) - Number(audioOnly(b)) ||
+    descending(layerPosition(a), layerPosition(b));
+  const next = cloneProject(p);
+  if (!ids?.length)
+    return { ...next, layers: [...next.layers].sort(order) };
+  const slots = next.layers.flatMap((l, i) => (ids.includes(l.id) ? [i] : []));
+  if (slots.length < 2) return p;
+  const picked = slots.map((i) => next.layers[i]).sort(order);
+  slots.forEach((slot, n) => { next.layers[slot] = picked[n]; });
+  return next;
+}
 export function moveLayer(
   p: CompositionProject,
   id: string,

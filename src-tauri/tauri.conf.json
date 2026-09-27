@@ -74,7 +74,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "infoPlist": "Info.macos.plist"
     },
     "android": {
       "minSdkVersion": 26

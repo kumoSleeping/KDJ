@@ -712,11 +712,29 @@ pub(super) fn ensure_safe_transcode(stream: &Stream) -> Result<()> {
     Ok(())
 }
 
+/// Side data that only describes how to interpret the picture we already
+/// convert ourselves: HDR metadata, Dolby Vision configuration, ambient light
+/// and the ICC profile the canvas ignores anyway. These entries cannot move a
+/// pixel, so the workshop path may ignore them; anything unknown still fails
+/// closed.
+fn harmless_side_data(kind: &str) -> bool {
+    matches!(
+        kind,
+        "Ambient viewing environment"
+            | "Mastering display metadata"
+            | "Content light level metadata"
+            | "DOVI configuration record"
+            | "DOVI metadata"
+            | "HDR Dynamic Metadata SMPTE2094-40 (HDR10+)"
+            | "SMPTE 2094-40 dynamic metadata"
+            | "ICC Profile"
+    )
+}
+
 /// Accept only unit, right-angle display rotations that FFmpeg autorotation
 /// applies before our filters. Keep rejecting perspective, scaling and unknown
 /// side data rather than silently dropping their meaning.
-fn workshop_rotation_swaps_axes(data: &serde_json::Value) -> Result<bool> {
-    anyhow::ensure!(data["side_data_type"] == "Display Matrix", "素材包含不支持的附加画面信息");
+fn display_matrix_swaps_axes(data: &serde_json::Value) -> Result<bool> {
     let matrix = data["displaymatrix"].as_str().context("素材旋转矩阵缺失")?
         .lines().filter(|line| !line.trim().is_empty())
         .map(|line| line.split_once(':').context("素材旋转矩阵无效")
@@ -734,8 +752,64 @@ fn workshop_rotation_swaps_axes(data: &serde_json::Value) -> Result<bool> {
     }
 }
 
+fn workshop_rotation_swaps_axes(list: &[serde_json::Value]) -> Result<bool> {
+    let mut swap = None;
+    for data in list {
+        let kind = data["side_data_type"].as_str().unwrap_or_default();
+        if harmless_side_data(kind) {
+            continue;
+        }
+        anyhow::ensure!(kind == "Display Matrix", "素材包含不支持的附加画面信息");
+        anyhow::ensure!(swap.is_none(), "素材包含不支持的附加画面信息");
+        swap = Some(display_matrix_swaps_axes(data)?);
+    }
+    Ok(swap.unwrap_or(false))
+}
+
+/// HDR pictures must reach the canvas as SDR, otherwise HLG/PQ code values
+/// would be composited as if they were BT.709. `npl=190` reproduces the system
+/// tone mapping these iPhone recordings were validated against.
+pub(super) const HDR_TO_SDR: &str =
+    "zscale=t=linear:npl=190,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
+
+pub(super) fn workshop_hdr(stream: &Stream) -> bool {
+    ["smpte2084", "arib-std-b67"].contains(&stream.color_transfer.as_str())
+}
+
+/// `zscale` and `tonemap` come from libzimg, which stripped FFmpeg builds
+/// omit; report that with an actionable message instead of failing when the
+/// render is already running. The successful probe is remembered because the
+/// preview path asks once per eight-second chunk.
+pub(super) async fn ensure_tone_mapping(cancel: &CancellationToken) -> Result<()> {
+    static READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if READY.get().is_some() {
+        return Ok(());
+    }
+    let binary = kdj_providers::ffmpeg::binary()?;
+    let args = ["-hide_banner", "-filters"].map(str::to_owned);
+    let output = capture(&binary, &args, 512 * 1024, Duration::from_secs(10), cancel).await?;
+    let text = String::from_utf8_lossy(&output);
+    let available: std::collections::HashSet<_> = text
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .collect();
+    let missing: Vec<_> = ["zscale", "tonemap"]
+        .into_iter()
+        .filter(|filter| !available.contains(filter))
+        .collect();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "FFmpeg 缺少 HDR 转换滤镜：{}；请在媒体工具中重新安装",
+        missing.join("、")
+    );
+    let _ = READY.set(());
+    Ok(())
+}
+
 /// Workshop proxies use square, display-oriented pixels. Normalize SAR and
-/// validated autorotation before reusing the stricter in-place/color checks.
+/// validated autorotation. HDR and high bit depth are converted by the caller
+/// with [`HDR_TO_SDR`]/[`ensure_tone_mapping`]; only transforms we cannot
+/// reproduce are refused.
 pub(super) fn workshop_video_size(stream: &Stream) -> Result<(u32, u32)> {
     let sar = match stream.sample_aspect_ratio.as_str() {
         "" | "N/A" | "0:1" => 1.,
@@ -749,15 +823,10 @@ pub(super) fn workshop_video_size(stream: &Stream) -> Result<(u32, u32)> {
     if !(2. ..=32768.).contains(&width) || !(2. ..=32768.).contains(&height) {
         bail!("素材显示尺寸超出支持范围");
     }
-    let mut square = stream.clone();
-    square.sample_aspect_ratio = "1:1".into();
-    let swap = match stream.side_data_list.as_slice() {
-        [] => false,
-        [data] => workshop_rotation_swaps_axes(data)?,
-        _ => bail!("素材包含不支持的附加画面信息"),
-    };
-    square.side_data_list.clear();
-    ensure_safe_transcode(&square)?;
+    if stream.tags.get("rotate").is_some_and(|v| v != "0") {
+        bail!("此视频包含旧式旋转标记，当前无法安全重编码；未修改原文件");
+    }
+    let swap = workshop_rotation_swaps_axes(&stream.side_data_list)?;
     Ok(if swap { (height as u32, width as u32) } else { (width as u32, height as u32) })
 }
 

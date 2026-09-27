@@ -25,6 +25,7 @@ interface WorkshopStore extends WorkshopSnapshot {
   positions: Record<string, WorkshopPositionResults>;
   acceptPositions(result: WorkshopPositionResults): void;
   refreshPositions(): Promise<void>;
+  analyzePositions(layerId?: string, restart?: boolean): Promise<void>;
   controlPositions(projectId: string, stopped: boolean, layerId?: string): Promise<void>;
   applyPositions(
     layer: string,
@@ -234,6 +235,16 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
       get().acceptPositions(await api.controlWorkshopPositions(projectId, stopped, layerId));
     } catch (e) {
       set({ error: `位置分析操作失败：${String(e)}` });
+    }
+  },
+  /** The locate control is the only way matching starts: no import or edit runs it. */
+  async analyzePositions(layerId, restart = false) {
+    const pid = get().activeId;
+    if (!pid) return;
+    try {
+      get().acceptPositions(await api.analyzeWorkshopPositions(pid, layerId, restart));
+    } catch (e) {
+      set({ error: `位置分析启动失败：${String(e)}` });
     }
   },
   async applyPositions(layer, analysis, preset) {

@@ -137,6 +137,39 @@ impl std::fmt::Debug for ProtectedHlsSource {
 }
 
 impl ProtectedHlsSource {
+    async fn response_failure(response: reqwest::Response, range: bool) -> TransmuxError {
+        let status = response.status().as_u16();
+        let kind = if range {
+            "字节范围"
+        } else {
+            "本地资源"
+        };
+        // The loopback service returns a bounded JSON error with the actual upstream failure.
+        // Preserve that explanation so a rejected manifest is not reported as an opaque 502.
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(Ok(chunk)) = stream.next().await {
+            if bytes.len().saturating_add(chunk.len()) > 4096 {
+                bytes.clear();
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let detail = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|body| body.get("detail")?.as_str().map(str::to_owned))
+            .filter(|detail| {
+                !detail.is_empty()
+                    && detail.len() <= 512
+                    && !detail.chars().any(char::is_control)
+                    && !detail.contains("://")
+            });
+        TransmuxError::Http(match detail {
+            Some(detail) => format!("YouTube HLS {kind}返回 HTTP {status}：{detail}"),
+            None => format!("YouTube HLS {kind}返回 HTTP {status}"),
+        })
+    }
+
     fn url<'a>(&self, location: &'a SourceLocation) -> std::result::Result<&'a Url, TransmuxError> {
         let SourceLocation::Url(url) = location else {
             return Err(TransmuxError::InvalidInput(
@@ -173,16 +206,10 @@ impl ProtectedHlsSource {
             .map_err(|error| TransmuxError::Http(error.to_string()))?;
         if range.is_some() {
             if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-                return Err(TransmuxError::Http(format!(
-                    "YouTube HLS 字节范围返回 HTTP {}",
-                    response.status().as_u16()
-                )));
+                return Err(Self::response_failure(response, true).await);
             }
         } else if !response.status().is_success() {
-            return Err(TransmuxError::Http(format!(
-                "YouTube HLS 本地资源返回 HTTP {}",
-                response.status().as_u16()
-            )));
+            return Err(Self::response_failure(response, false).await);
         }
         Ok(response)
     }
@@ -311,6 +338,7 @@ pub async fn download_muxed_h264_aac(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt as _;
 
     fn ticket(character: char) -> String {
         std::iter::repeat_n(character, 64).collect()
@@ -356,5 +384,38 @@ mod tests {
         let normalized = normalize_youtube_playlist(playlist.into());
         assert!(!normalized.contains("INDEPENDENT-SEGMENTS"));
         assert!(normalized.contains("#EXT-X-KEY:"));
+    }
+
+    #[tokio::test]
+    async fn local_gateway_failure_keeps_the_upstream_reason() {
+        kdj_core::ensure_rustls_ring();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let body = r#"{"detail":"YouTube HLS 播放清单上游返回 HTTP 503（唯一请求）"}"#;
+            let response = format!(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let url = format!(
+            "http://127.0.0.1:{port}/api/video/youtube/hls/{}?kdj_media_token=secret",
+            ticket('a')
+        );
+        let (scope, root) = ProtectedHlsScope::from_root(&url).unwrap();
+        let source = ProtectedHlsSource {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            scope,
+        };
+        let error = source
+            .response(&SourceLocation::Url(root), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP 502"), "{error}");
+        assert!(error.contains("播放清单上游返回 HTTP 503"), "{error}");
+        server.await.unwrap();
     }
 }

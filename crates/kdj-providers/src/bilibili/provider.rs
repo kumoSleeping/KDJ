@@ -422,16 +422,24 @@ impl BilibiliProvider {
             bail!("哔哩哔哩没有返回可直接播放的预览流");
         };
         let mut urls = Vec::with_capacity(1 + backup_urls.len());
+        let mut refused: Option<anyhow::Error> = None;
         for candidate in std::iter::once(url).chain(backup_urls) {
             if urls.iter().any(|existing| existing == &candidate) {
                 continue;
             }
             match ensure_media_url(&candidate).await {
                 Ok(()) => urls.push(candidate),
-                Err(error) => tracing::warn!(%error, "忽略不安全的 B站预览备用地址"),
+                Err(error) => {
+                    tracing::warn!(%error, "忽略不安全的 B站预览备用地址");
+                    refused = Some(error);
+                }
             }
         }
-        anyhow::ensure!(!urls.is_empty(), "哔哩哔哩没有返回可用的预览直链");
+        // 全部被拒时要把原因带出去：否则只剩「没有可用直链」，用户和日志都看不出是被挡了
+        if urls.is_empty() {
+            return Err(refused
+                .unwrap_or_else(|| anyhow::anyhow!("哔哩哔哩没有返回可直接播放的预览流")));
+        }
         let entry = PreviewUrlCacheEntry {
             urls,
             active: 0,

@@ -16,6 +16,8 @@ export interface ContextMenuProps {
   /** 点击控件展开时的上边缘；下方空间不足则优先在控件上方展开。 */
   anchorTop?: number;
   onClose(): void;
+  /** 这些元素上的按下属于菜单本身（开关按钮、联动滑杆），不触发关闭。 */
+  keepOpen?: string;
   children: ReactNode;
   className?: string;
 }
@@ -24,7 +26,7 @@ export interface ContextMenuProps {
  * 全局右键/弹出菜单：挂到 document.body，fixed 定位，量完尺寸后夹进视口。
  * 点菜单外或 Esc 关闭。内容过高时靠 CSS max-height 内部滚动。
  */
-export function ContextMenu({ x, y, anchorTop, onClose, children, className }: ContextMenuProps) {
+export function ContextMenu({ x, y, anchorTop, onClose, keepOpen, children, className }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState({ x, y });
 
@@ -65,19 +67,25 @@ export function ContextMenu({ x, y, anchorTop, onClose, children, className }: C
   }, [x, y, anchorTop, pos.x, pos.y, children]);
 
   useEffect(() => {
-    const close = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) onClose();
+    const close = (event: Event) => {
+      const target = event.target as Element | null;
+      if (ref.current?.contains(target as Node)) return;
+      if (keepOpen && target?.closest?.(keepOpen)) return;
+      onClose();
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    window.addEventListener("mousedown", close);
+    // Capture phase: clip and trim gestures stop propagation on pointerdown and
+    // suppress the compatibility mousedown, so a bubbling listener would leave
+    // the menu open after a click elsewhere.
+    window.addEventListener("pointerdown", close, true);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("mousedown", close);
+      window.removeEventListener("pointerdown", close, true);
       window.removeEventListener("keydown", onKey);
     };
-  }, [onClose]);
+  }, [onClose, keepOpen]);
 
   if (typeof document === "undefined") return null;
 

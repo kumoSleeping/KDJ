@@ -110,6 +110,12 @@ cargo run -p kdj-providers --example smoke_sc       -- lofi
 | 先写 `.partial` 再原子改名 | `providers/src/net.rs::AtomicDownload`（靠 `Drop` 保证清理） |
 | 媒体直链只挡协议和内网 | `providers/src/net.rs::ensure_media_url` |
 
+`ensure_media_url` 与 `guarded_media_get` 都走 `net::media_target`：它把「代理软件的
+fake-ip（`198.18.0.0/15`）」和真正的内网地址分开——前者放行，请求交给系统代理 / TUN
+（真实目的地由本机代理解析）；回环、私网、链路本地、CGNAT、保留段、IPv6 ULA 继续
+一律拒绝。Clash / Mihomo / Surge 的 fake-ip 模式会把**所有**域名解析到该段，
+按内网拒绝会让 B站 下载/试听、QQ音乐、SoundCloud、封面在这类机器上全部失败。
+
 另外 `streams::pick_best` 返回 `(Option<video>, Option<audio>)`，
 位置固定——Python 版在这里错位过一次，别改成返回 `Vec`。
 

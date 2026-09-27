@@ -244,12 +244,15 @@ async function createTauriBridge(): Promise<KdjBridge> {
       : null,
     installMediaTools: ["darwin", "win32"].includes(info.platform) ? action => tauriInvoke("install_media_tools", { action }) : undefined,
     mediaToolsProgress: ["darwin", "win32"].includes(info.platform) ? () => tauriInvoke("media_tools_progress") : undefined,
-    pickFolder: async () => {
+    pickFolder: async (options) => {
       // 安卓 dialog 没有 folder picker；走系统 ACTION_OPEN_DOCUMENT_TREE。
       if (android) {
         return pickLibraryFolder();
       }
-      const picked = await tauriInvoke<unknown>("pick_folder");
+      const picked = await tauriInvoke<unknown>("pick_folder", {
+        defaultPath: options?.defaultPath ?? null,
+        title: options?.title ?? null,
+      });
       // 用户取消时 Tauri 的对话框返回 null，契约要求的也是 null
       return typeof picked === "string" && picked ? picked : null;
     },

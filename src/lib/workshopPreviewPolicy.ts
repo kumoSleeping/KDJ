@@ -36,12 +36,22 @@ export class WorkshopSeekGate {
 /** Prewarm two upcoming clips so a subframe cut cannot hide the following clip.
  * Paused/scrubbing previews keep only the current picture, not future decoders. */
 export function prepareVideoClips(p: CompositionProject, ms: number, hiddenLayers: readonly string[] = [], prewarm = true): WorkshopClip[] {
+  const visualSources = new Set(p.sources.filter(isVisualSource).map(s => s.id));
+  const hidden = new Set(hiddenLayers);
   return [...p.layers].reverse().flatMap(layer => {
-    if (hiddenLayers.includes(layer.id)) return [];
-    const clips = layer.clips.filter(c => isVisualSource(p.sources.find(s => s.id === c.source_id)));
-    const current = clips.filter(c => ms >= c.start_ms && ms < c.start_ms + clipDuration(c));
-    const next = clips.filter(c => prewarm && c.start_ms > ms && c.start_ms <= ms + PREWARM_MS)
-      .sort((a,b) => a.start_ms - b.start_ms).slice(0, 2);
-    return [...current, ...next].sort((a, b) => a.start_ms - b.start_ms);
+    if (hidden.has(layer.id)) return [];
+    const current: WorkshopClip[] = [], next: WorkshopClip[] = [];
+    for (const c of layer.clips) {
+      if (!visualSources.has(c.source_id)) continue;
+      if (ms >= c.start_ms && ms < c.start_ms + clipDuration(c)) current.push(c);
+      else if (prewarm && c.start_ms > ms && c.start_ms <= ms + PREWARM_MS) {
+        // Keep only the two nearest successors instead of sorting every future
+        // clip. Stable ties preserve the layer's original stacking order.
+        const index = next.findIndex(n => n.start_ms > c.start_ms);
+        if (index < 0) next.push(c); else next.splice(index, 0, c);
+        if (next.length > 2) next.pop();
+      }
+    }
+    return current.concat(next).sort((a, b) => a.start_ms - b.start_ms);
   });
 }

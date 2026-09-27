@@ -17,6 +17,7 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSMinimumSystemVersion</key><string>10.15</string>
+<key>NSDownloadsFolderUsageDescription</key><string>KDJ 需要读取你选择的下载目录中的音乐和视频，以便播放和剪辑。</string>
 </dict></plist>
 PLIST
 if [[ "${VITE_KDJ_YOUTUBE_E2E:-}" == "1" ]]; then

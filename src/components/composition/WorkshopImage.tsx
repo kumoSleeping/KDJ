@@ -16,7 +16,7 @@ export function WorkshopImage({ project, clip, source, playback, inspect, zIndex
   const position = useWorkshopStore(s => s.position);
   const latest = useRef({project, clip, source, playback, inspect, onError, onReady}); latest.current = {project, clip, source, playback, inspect, onError, onReady};
   const wake = useRef<() => void>(() => {});
-  const c = inspect ? {...clip, picture: {x:.5,y:.5,scale:1,opacity:1}} : clip;
+  const c = inspect ? {...clip, picture: {...clip.picture,x:.5,y:.5,scale:1,opacity:1}} : clip;
   const b = pictureBox(project, c, source);
   useEffect(() => {
     let alive = true, raf = 0, wanted = "", displayed = "", lastError = "";

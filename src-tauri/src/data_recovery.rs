@@ -3,15 +3,14 @@
 //! 旧 Windows 正式版用 `rename(tmp, settings.json)` 覆盖文件；Unix 会原子替换，
 //! Windows 却返回 AlreadyExists。旧调用方又吞掉了错误，所以设置/登录在当次运行
 //! 看似正常，更新重启后才突然回到很早的磁盘副本。本模块不猜某一个发布渠道：
-//! 它合并所有确实存在的历史目录，并从仍在的曲库路径重建缺失根目录。
+//! 它合并所有确实存在的历史目录；曲库根只恢复明确保存的设置，不从单文件路径推断。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
-use kdj_core::AppConfig;
 use serde::{Deserialize, Serialize};
 
 const JOURNAL_NAME: &str = ".data-recovery-v2.json";
@@ -784,200 +783,6 @@ pub(crate) fn finalize_recovery_cleanup(current: &Path) {
     }
 }
 
-fn is_hard_forbidden_root(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    matches!(
-        name.as_str(),
-        "windows" | "program files" | "program files (x86)" | "programdata" | "appdata"
-    )
-}
-
-fn is_split_boundary(path: &Path) -> bool {
-    if path.parent().is_none() || path.components().count() <= 1 {
-        return true;
-    }
-    let home = kdj_core::config::home_dir();
-    if kdj_core::paths::paths_equivalent(path, &home)
-        || home
-            .parent()
-            .is_some_and(|parent| kdj_core::paths::paths_equivalent(path, parent))
-    {
-        return true;
-    }
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    matches!(
-        name.as_str(),
-        "users" | "documents and settings" | "volumes" | "mnt" | "media"
-    )
-}
-
-fn common_ancestor(paths: &[PathBuf]) -> Option<PathBuf> {
-    let mut common = paths.first()?.clone();
-    while !paths
-        .iter()
-        .all(|path| kdj_core::paths::is_within(&common, path))
-    {
-        if !common.pop() {
-            return None;
-        }
-    }
-    Some(common)
-}
-
-fn immediate_child(base: &Path, path: &Path) -> Option<PathBuf> {
-    let mut current = path.to_path_buf();
-    loop {
-        let parent = current.parent()?;
-        if kdj_core::paths::paths_equivalent(parent, base) {
-            return Some(current);
-        }
-        current = parent.to_path_buf();
-    }
-}
-
-fn safe_group_roots(paths: &[PathBuf], depth: usize) -> Vec<PathBuf> {
-    if paths.is_empty() || depth > 8 {
-        return Vec::new();
-    }
-    let Some(common) = common_ancestor(paths) else {
-        return Vec::new();
-    };
-    if is_hard_forbidden_root(&common) {
-        return Vec::new();
-    }
-    if !is_split_boundary(&common) {
-        return common.is_dir().then_some(common).into_iter().collect();
-    }
-    let mut groups: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    for path in paths {
-        let Some(child) = immediate_child(&common, path) else {
-            continue;
-        };
-        groups
-            .entry(kdj_core::paths::path_identity(&child))
-            .or_default()
-            .push(path.clone());
-    }
-    groups
-        .into_values()
-        .flat_map(|group| safe_group_roots(&group, depth + 1))
-        .collect()
-}
-
-fn highest_manifest_root(path: &Path) -> Option<PathBuf> {
-    let mut current = path.to_path_buf();
-    let mut found = None;
-    loop {
-        if is_hard_forbidden_root(&current) || is_split_boundary(&current) {
-            break;
-        }
-        if kdj_library::folders::has_manifest(&current) {
-            found = Some(current.clone());
-        }
-        if !current.pop() {
-            break;
-        }
-    }
-    found
-}
-
-fn inferred_roots(configured: &[String], track_paths: &[String]) -> Vec<PathBuf> {
-    let configured_paths: Vec<PathBuf> = configured
-        .iter()
-        .filter(|path| !path.trim().is_empty())
-        .map(|path| kdj_core::paths::normalize_path(&kdj_core::config::expand_user(path)))
-        .collect();
-    let mut parents = Vec::new();
-    let mut seen = HashSet::new();
-    for path in track_paths {
-        let Some(parent) = Path::new(path).parent() else {
-            continue;
-        };
-        let parent = kdj_core::paths::normalize_path(parent);
-        if !parent.is_dir()
-            || configured_paths
-                .iter()
-                .any(|root| kdj_core::paths::is_within(root, &parent))
-        {
-            continue;
-        }
-        if seen.insert(kdj_core::paths::path_identity(&parent)) {
-            parents.push(parent);
-        }
-    }
-    let mut roots: Vec<PathBuf> = Vec::new();
-    let mut unresolved = Vec::new();
-    for parent in parents {
-        if let Some(root) = highest_manifest_root(&parent) {
-            if !roots
-                .iter()
-                .any(|existing| kdj_core::paths::paths_equivalent(existing, &root))
-            {
-                roots.push(root);
-            }
-        } else {
-            unresolved.push(parent);
-        }
-    }
-    if !unresolved.is_empty() {
-        // 不同盘符/UNC 根分组，避免共同祖先退成空路径。
-        let mut anchors: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        for path in unresolved {
-            let anchor = path
-                .components()
-                .next()
-                .map(|component| component.as_os_str().to_string_lossy().into_owned())
-                .unwrap_or_default();
-            anchors.entry(anchor.to_lowercase()).or_default().push(path);
-        }
-        for group in anchors.into_values() {
-            roots.extend(safe_group_roots(&group, 0));
-        }
-    }
-    roots.truncate(64);
-    roots
-}
-
-/// 从仍在 SQLite 里的真实文件路径补回旧 Windows 版没有成功落盘的 `library_dirs`。
-/// 已由用户在新版本添加的根优先保留；只追加尚未覆盖的路径，随后走 AppConfig 的
-/// 原子提交，保证“当前运行看得到”和“下次启动仍存在”是同一件事。
-pub(crate) fn repair_library_roots(config: &AppConfig) -> Result<usize> {
-    if !config.db_path().is_file() {
-        return Ok(0);
-    }
-    let database = kdj_library::db::Database::open(&config.db_path())?;
-    let service = kdj_library::service::LibraryService::new(database);
-    let paths = service.all_paths()?;
-    if paths.is_empty() {
-        return Ok(0);
-    }
-    let mut settings = config.to_settings();
-    let additions = inferred_roots(&settings.library_dirs, &paths);
-    let mut added = 0;
-    for root in additions {
-        if settings.library_dirs.iter().any(|existing| {
-            let existing = kdj_core::config::expand_user(existing);
-            kdj_core::paths::is_within(&existing, &root)
-        }) {
-            continue;
-        }
-        settings
-            .library_dirs
-            .push(root.to_string_lossy().into_owned());
-        added += 1;
-    }
-    if added > 0 {
-        config.apply_settings(settings)?;
-    }
-    Ok(added)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1178,40 +983,24 @@ mod tests {
     }
 
     #[test]
-    fn roots_are_reconstructed_from_existing_database_paths() {
-        let root = scratch("roots");
-        let library = root.join("Music");
-        std::fs::create_dir_all(library.join("Artist/Album")).unwrap();
-        std::fs::create_dir_all(library.join("Another/Album")).unwrap();
-        let song = library.join("Artist/Album/a.mp3");
-        let second = library.join("Another/Album/b.mp3");
+    fn recovery_keeps_downloaded_workshop_files_outside_configured_roots() {
+        let root = scratch("single-file-roots");
+        let downloads = root.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let song = downloads.join("selected.mp3");
         std::fs::write(&song, b"audio").unwrap();
-        std::fs::write(&second, b"audio").unwrap();
         let data = root.join("data");
-        insert_track(
-            &data.join(kdj_core::config::DB_FILENAME),
-            &song.to_string_lossy(),
-            0,
-        );
-        insert_track(
-            &data.join(kdj_core::config::DB_FILENAME),
-            &second.to_string_lossy(),
-            0,
-        );
-        let config = AppConfig::create(data, root.join("downloads"), 0);
-
-        let added = repair_library_roots(&config).unwrap();
-
-        assert_eq!(added, 1);
-        assert_eq!(
-            config.to_settings().library_dirs,
-            vec![library.to_string_lossy().into_owned()]
-        );
-        let reopened = AppConfig::create(config.data_dir.clone(), root.join("fallback"), 0);
-        assert_eq!(
-            reopened.to_settings().library_dirs,
-            vec![library.to_string_lossy().into_owned()]
-        );
+        insert_track(&data.join(kdj_core::config::DB_FILENAME), &song.to_string_lossy(), 0);
+        let config = kdj_core::AppConfig::create(data.clone(), downloads.clone(), 0);
+        for configured in [vec![], vec![root.join("Music").to_string_lossy().into_owned()]] {
+            let mut settings = config.to_settings();
+            settings.library_dirs = configured.clone();
+            config.apply_settings(settings).unwrap();
+            let report = recover_desktop_data(&data, &[]);
+            assert!(report.errors.is_empty());
+            let reopened = kdj_core::AppConfig::create(data.clone(), downloads.clone(), 0);
+            assert_eq!(reopened.to_settings().library_dirs, configured);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

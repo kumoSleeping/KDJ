@@ -9,6 +9,8 @@ import {
   useEffect,
   useLayoutEffect,
   useId,
+  useMemo,
+  memo,
   type ReactNode,
 } from "react";
 import { WorkshopAnalysisControl, WorkshopLayerAnalysis } from "./WorkshopLayerAnalysis";
@@ -19,7 +21,7 @@ import { WorkshopTimelineOverview } from "./WorkshopTimelineOverview";
 import { WorkshopRhythmSource, WorkshopRhythmControls, WorkshopRhythmRuler } from "./WorkshopRhythm";
 import { useWorkshopRhythmStore } from "../../stores/workshopRhythmStore";
 import { clipBeatTimes, nearestBeat, rhythmKey, workshopGrid } from "../../lib/workshopRhythm";
-import { GripVertical, Eye, EyeOff, X, Square, SquareCheck, Maximize2 } from "lucide-react";
+import { GripVertical, Eye, EyeOff, X, Square, SquareCheck, Maximize2, ArrowDownUp } from "lucide-react";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import {
   adjustClip,
@@ -29,26 +31,58 @@ import {
   formatTime,
   visibleFade,
   moveLayer,
+  sortLayers,
   clipLanes,
   layerSources,
-  layerTitle,
   projectDuration,
   snapTime,
 } from "../../lib/workshop";
-import type { ClipHandle, CompositionProject } from "../../types/workshop";
+import type { ClipHandle, CompositionProject, WorkshopClip } from "../../types/workshop";
 import type { WorkshopPlayback } from "../../lib/workshopPlayback";
 import {
   isTrackDrag,
   readTrackDragIds,
   finishTrackDrop,
 } from "../../lib/trackDrag";
+const TimelineFadeCurve = memo(function TimelineFadeCurve({ clip, audio, incoming, outgoing }: {
+  clip: WorkshopClip; audio: boolean;
+  incoming?: NonNullable<ReturnType<typeof videoTransitionSpan>>;
+  outgoing?: NonNullable<ReturnType<typeof videoTransitionSpan>>;
+}) {
+  const duration = clipDuration(clip);
+  const curve = {...clip, fades: {...clip.fades,
+    ...(audio ? {
+      audio_in_ms: incoming ? 0 : clip.fades.audio_in_ms,
+      audio_out_ms: outgoing ? 0 : clip.fades.audio_out_ms,
+    } : {
+      video_in_ms: incoming ? 0 : clip.fades.video_in_ms,
+      video_out_ms: outgoing ? 0 : clip.fades.video_out_ms,
+    }),
+  }};
+  return <svg className={`vj-fade-curve ${audio ? "vj-fade-audio" : ""}`} viewBox="0 0 100 30" preserveAspectRatio="none"
+    aria-label={audio ? "声音淡化曲线" : "画面淡化曲线"}
+    style={{clipPath: `inset(0 ${(outgoing?.before ?? 0) / duration * 100}% 0 ${(incoming?.after ?? 0) / duration * 100}%)`}}>
+    <path d={workshopFadeCurvePath(curve, audio, true)} vectorEffect="non-scaling-stroke" />
+  </svg>;
+});
+function TimelinePlayhead({ scale, ...props }: React.HTMLAttributes<HTMLElement> & { scale: number }) {
+  const position = useWorkshopStore(s => s.position);
+  return <i {...props} className="vj-playhead" style={{left: 0, transform: `translateX(${position * scale}px)`}} />;
+}
+function TimelineTime({ duration }: { duration: number }) {
+  const position = useWorkshopStore(s => s.position);
+  return <span>{formatTime(position)} / {formatTime(duration)}</span>;
+}
+function TimelineRhythmControls({ source, layer }: Omit<Parameters<typeof WorkshopRhythmControls>[0], "position">) {
+  const position = useWorkshopStore(s => s.position);
+  return <WorkshopRhythmControls source={source} layer={layer} position={position} />;
+}
 export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: setChecked }: {
   playback: WorkshopPlayback; tools?: ReactNode; checked: string[]; onCheckedChange(ids: string[]): void;
 }) {
   const scrollId = useId();
   const p = useWorkshopStore((s) => s.draft),
     selected = useWorkshopStore((s) => s.selectedId),
-    position = useWorkshopStore((s) => s.position),
     snap = useWorkshopStore((s) => s.snap),
     barSnap = useWorkshopStore((s) => s.barSnap),
     hiddenVideoLayers = useWorkshopStore(s => s.hiddenVideoLayers);
@@ -56,8 +90,25 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
   const [zoom, setZoom] = useState(1),
     [width, setWidth] = useState(0),
     [scrollLeft, setScrollLeft] = useState(0),
+    [vertical, setVertical] = useState({ top: 0, height: 600 }),
     [baseScale, setBaseScale] = useState<number | null>(null),
     [extent, setExtent] = useState(0);
+  const scrollFrame = useRef(0), zoomFrame = useRef(0);
+  const publishScroll = useCallback(() => {
+    const node = scroller.current;
+    if (!node) return;
+    setScrollLeft(node.scrollLeft);
+    const top = Math.floor(node.scrollTop / 128) * 128;
+    const height = node.clientHeight || 600;
+    setVertical(old => old.top === top && old.height === height ? old : { top, height });
+  }, []);
+  const scheduleScroll = useCallback(() => {
+    if (scrollFrame.current) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = 0;
+      publishScroll();
+    });
+  }, [publishScroll]);
   const scroller = useRef<HTMLDivElement | null>(null),
     wheel = useRef<(e: WheelEvent) => void>(() => {}),
     pinch = useRef<(e: Event) => void>(() => {}),
@@ -74,20 +125,61 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
     cleanScroll.current();
     scroller.current = node;
     if (node) {
-      const onWheel = (e: WheelEvent) => wheel.current(e),
-        onGesture = (e: Event) => pinch.current(e);
-      node.addEventListener("wheel", onWheel, { passive: false });
+      const ua = window.navigator.userAgent;
+      // WKWebView exposes pinch separately. Its ordinary scroll listener can
+      // therefore be passive, so a busy JS thread cannot hold up native pan.
+      // WebView2 still needs cancelable Ctrl+wheel for precision-touchpad pinch.
+      const nativeGestures = /AppleWebKit/.test(ua) && !/Chrome|Chromium|Edg|OPR|jsdom/i.test(ua);
+      let modified = false, pointing = false, gesturing = false;
+      let passive = nativeGestures;
+      const onWheel = (e: WheelEvent) => wheel.current(e);
+      const updateWheel = () => {
+        const next = nativeGestures && !modified && !pointing && !gesturing;
+        if (next === passive) return;
+        node.removeEventListener("wheel", onWheel);
+        passive = next;
+        node.addEventListener("wheel", onWheel, { passive });
+      };
+      const modifiers = (e: KeyboardEvent | PointerEvent) => {
+        modified = e.altKey || e.ctrlKey || e.shiftKey;
+        updateWheel();
+      };
+      const pointerDown = () => { pointing = true; updateWheel(); };
+      const pointerUp = () => { pointing = false; updateWheel(); };
+      const blur = () => { modified = pointing = gesturing = false; pinchStart.current = null; updateWheel(); };
+      const onGesture = (e: Event) => {
+        gesturing = e.type !== "gestureend";
+        updateWheel();
+        pinch.current(e);
+      };
+      node.addEventListener("wheel", onWheel, { passive });
+      node.addEventListener("pointerover", modifiers);
+      node.addEventListener("pointerdown", pointerDown, true);
+      window.addEventListener("pointerup", pointerUp, true);
+      window.addEventListener("pointercancel", pointerUp, true);
+      window.addEventListener("keydown", modifiers, true);
+      window.addEventListener("keyup", modifiers, true);
+      window.addEventListener("blur", blur);
       for (const name of ["gesturestart", "gesturechange", "gestureend"])
         node.addEventListener(name, onGesture, { passive: false });
       cleanScroll.current = () => {
         node.removeEventListener("wheel", onWheel);
+        node.removeEventListener("pointerover", modifiers);
+        node.removeEventListener("pointerdown", pointerDown, true);
+        window.removeEventListener("pointerup", pointerUp, true);
+        window.removeEventListener("pointercancel", pointerUp, true);
+        window.removeEventListener("keydown", modifiers, true);
+        window.removeEventListener("keyup", modifiers, true);
+        window.removeEventListener("blur", blur);
         for (const name of ["gesturestart", "gesturechange", "gestureend"])
           node.removeEventListener(name, onGesture);
       };
       setWidth(node.clientWidth || 800);
-      observer.current = new ResizeObserver(([entry]) =>
-        setWidth(entry.contentRect.width),
-      );
+      publishScroll();
+      observer.current = new ResizeObserver(([entry]) => {
+        setWidth(entry.contentRect.width);
+        publishScroll();
+      });
       observer.current.observe(node);
     }
   }, []);
@@ -95,6 +187,9 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
     () => () => {
       observer.current?.disconnect();
       cleanScroll.current();
+      cancelAnimationFrame(scrollFrame.current);
+      cancelAnimationFrame(zoomFrame.current);
+      scrollFrame.current = zoomFrame.current = 0;
       useWorkshopStore.setState({ scrubbing: false, trimPreview: null });
     },
     [],
@@ -133,7 +228,40 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
     return () => window.removeEventListener("keydown", cancel, true);
   }, []);
   const labelWidth = Math.min(208, Math.max(144, Math.round(width * .32)));
-  const contentDuration = p ? projectDuration(p) : 0;
+  const contentDuration = useMemo(() => p ? projectDuration(p) : 0, [p]);
+  const sourceById = useMemo(() => new Map(p?.sources.map(s => [s.id, s])), [p?.sources]);
+  // Geometry depends on edits, not scroll events or playback clock samples.
+  const rows = useMemo(() => {
+    let top = 0;
+    return p?.layers.map(layer => {
+      const sources = layerSources(p, layer), title = sources.map(s => s.title).join(" / ");
+      const hasAudio = sources.some(s => s.audio), hasVisual = sources.some(isVisualSource);
+      const lanes = clipLanes(layer.clips), laneCount = Math.max(1, ...Array.from(lanes.values(), n => n + 1));
+      const trackHeight = laneCount * 62;
+      const ordered = [...layer.clips].sort((a, b) => a.start_ms - b.start_ms);
+      const joints = ordered.flatMap((right, i) => {
+        const left = ordered[i - 1];
+        if (!left || Math.abs(left.start_ms + clipDuration(left) - right.start_ms) >= .01) return [];
+        const media = [left, right].map(c => sourceById.get(c.source_id));
+        const video = media.every(s => s?.video), audio = media.every(s => s?.audio);
+        return video || audio ? [{left, right, video, audio}] : [];
+      });
+      const spans = joints.flatMap(j => {
+        const span = videoTransitionSpan(j.left, j.right);
+        return span ? [{...j, span}] : [];
+      });
+      const row = { layer, sources, title, hasAudio, hasVisual, lanes, laneCount, trackHeight, top, joints,
+        joinedIn: new Map(spans.filter(j => j.video).map(j => [j.right.id, j.span])),
+        joinedOut: new Map(spans.filter(j => j.video).map(j => [j.left.id, j.span])),
+        audioJoinedIn: new Map(spans.filter(j => j.audio).map(j => [j.right.id, j.span])),
+        audioJoinedOut: new Map(spans.filter(j => j.audio).map(j => [j.left.id, j.span])),
+        rhythmLayers: sources.filter(s => s.audio).map(source => ({ source,
+          layer: {...layer, clips: layer.clips.filter(c => c.source_id === source.id)} })),
+      };
+      top += trackHeight + 1;
+      return row;
+    }) ?? [];
+  }, [p, sourceById]);
   const viewportWidth = Math.max(80, width - labelWidth);
   // Fit once after measuring this editor. Content edits must never change pixels/ms,
   // including pointer-up, keyboard nudges, property edits, undo and async alignment.
@@ -154,13 +282,15 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
     setBaseScale(viewportWidth / Math.max(1000, contentDuration));
     setExtent(contentDuration);
     pendingZoom.current = 1;
+    cancelAnimationFrame(zoomFrame.current);
+    zoomFrame.current = 0;
     setZoom(1);
     anchor.current = null;
     if (scroller.current) scroller.current.scrollLeft = 0;
     setScrollLeft(0);
   };
   const frame = 1000 / (p?.canvas.fps ?? 30);
-  const zoomAt = (next: number, clientX: number) => {
+  const zoomAt = (next: number, clientX: number, synchronous = false) => {
     const node = scroller.current;
     if (!node || drag.current || !Number.isFinite(next)) return;
     const bounded = Math.max(1, Math.min(64, next));
@@ -185,14 +315,24 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
     }
     if (bounded === zoom) anchor.current = null;
     pendingZoom.current = bounded;
-    setZoom(bounded);
+    if (synchronous || !zoomFrame.current) setZoom(bounded);
+    if (!zoomFrame.current) zoomFrame.current = requestAnimationFrame(() => {
+      zoomFrame.current = 0;
+      setZoom(pendingZoom.current);
+    });
   };
   wheel.current = (e) => {
     const node = scroller.current;
     if (!node) return;
+    // Leave ordinary two-finger motion to the native scroll view, including
+    // momentum and diagonal scrolling. Never replay every delta through React.
+    const blocked = pinchStart.current !== null || drag.current || scrub.current || layerDrag.current;
+    // Programmatic wheel events have no browser default scroll to fall back to.
+    // Native user input stays on the compositor's fast scrolling path.
+    if (!blocked && !e.altKey && !e.ctrlKey && !e.shiftKey && e.isTrusted) return;
     e.preventDefault();
     e.stopPropagation();
-    if (pinchStart.current !== null || drag.current || scrub.current || layerDrag.current) return;
+    if (blocked) return;
     const pageWidth = Math.max(80, width - labelWidth);
     const dx = e.deltaX * (e.deltaMode === 1 ? 20 : e.deltaMode === 2 ? pageWidth : 1);
     const dy = e.deltaY * (e.deltaMode === 1 ? 20 : e.deltaMode === 2 ? node.clientHeight || 200 : 1);
@@ -200,15 +340,13 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
     // Shift+wheel may arrive on deltaX after the OS remaps its axis.
     if (e.altKey || e.ctrlKey) {
       const delta = dy || dx;
-      zoomAt(pendingZoom.current * Math.exp(-delta * (e.ctrlKey ? 0.012 : 0.003)), e.clientX);
+      zoomAt(pendingZoom.current * Math.exp(-delta * (e.ctrlKey ? 0.012 : 0.003)), e.clientX, !e.isTrusted);
       return;
     }
     if (e.shiftKey) node.scrollLeft += dx || e.deltaY * (e.deltaMode === 1 ? 20 : e.deltaMode === 2 ? pageWidth : 1);
-    else {
-      node.scrollLeft += dx;
-      node.scrollTop += dy;
-    }
-    setScrollLeft(node.scrollLeft);
+    else { node.scrollLeft += dx; node.scrollTop += dy; }
+    if (!e.isTrusted) setScrollLeft(node.scrollLeft);
+    else scheduleScroll();
   };
   pinch.current = (event) => {
     const e = event as Event & { scale: number; clientX?: number };
@@ -241,8 +379,17 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
       anchor.current = null;
     }
   }, [zoom, scale, railWidth, width]);
+  // Overscan in stable pixel tiles: scrolling inside a tile must not rebuild
+  // every waveform bar/filmstrip image. Rows outside the vertical window keep
+  // their layout and labels but own no thumbnails, waveforms or beat rulers.
+  const mediaLeft = Math.max(0, Math.floor(scrollLeft / 320) * 320 - 320);
+  const mediaWidth = width + 960;
   if (!p) return null;
   const checkedIds = checked.filter(id => p.layers.some(l => l.id === id));
+  // Checked tracks scope the automatic order to themselves; one track alone has
+  // nowhere to move, so the control waits for a second one.
+  const sortIds = checkedIds;
+  const sortDisabled = sortIds.length ? sortIds.length < 2 : p.layers.length < 2;
   const audioLayers = p.layers.filter(l => l.clips.some(c => p.sources.find(s => s.id === c.source_id)?.audio));
   const audioLayer = audioLayers.find(l => l.clips.some(c => c.id === selected)) ?? audioLayers[0];
   const audioSource = p.sources.find(s => s.audio && s.id === audioLayer?.clips.find(c => c.id === selected)?.source_id)
@@ -307,6 +454,7 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
   const move = (event: React.PointerEvent<HTMLElement>) => {
     const d = drag.current;
     if (!d) return;
+    const position = useWorkshopStore.getState().position;
     let delta = Math.round((event.clientX - d.x) / d.scale / d.quantum) * d.quantum;
     let barCorrection: number | null = null;
     if (barSnap && !event.altKey) {
@@ -399,12 +547,12 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
     <section className="vj-timeline" aria-label="剪辑时间轴" style={{"--vj-label-width": `${labelWidth}px`} as React.CSSProperties}>
       {audioSources.map(source => <WorkshopRhythmSource key={rhythmKey(source)} source={source} />)}
       <div className="vj-timeline-scale">
-        {audioLayer && audioSource && <WorkshopRhythmControls source={audioSource} layer={{...audioLayer, clips: audioLayer.clips.filter(c => c.source_id === audioSource.id)}} position={position} />}
+        {audioLayer && audioSource && <TimelineRhythmControls source={audioSource} layer={{...audioLayer, clips: audioLayer.clips.filter(c => c.source_id === audioSource.id)}} />}
         {analyzing && <WorkshopAnalysisControl projectId={p.id} />}
         <div className="vj-timeline-time">
           <button type="button" aria-label="时间轴适应全长" title="适应全长" disabled={contentDuration <= 0}
             onClick={fitTimeline}><Maximize2 size={14} /></button>
-          <span>{formatTime(position)} / {formatTime(contentDuration)}</span>
+          <TimelineTime duration={contentDuration} />
         </div>
       </div>
       {tools}
@@ -413,10 +561,19 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
         title="Shift + 滚轮：左右滚动；Alt/Option + 滚轮：缩放"
         id={scrollId}
         ref={observe}
-        onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
+        onScroll={scheduleScroll}
       >
         <div className="vj-time-ruler" style={{ width: railWidth + labelWidth }}>
-          <div className="vj-track-label vj-track-label-heading"><span>素材 / 轨道</span><small>{p.layers.length}</small></div>
+          <div className="vj-track-label vj-track-label-heading"><span>素材 / 轨道</span>
+            <span className="vj-track-heading-tail"><small>{p.layers.length}</small>
+              <button type="button" className="vj-layer-sort" data-active={sortIds.length > 1 || undefined}
+                aria-label="自动排序轨道" disabled={sortDisabled}
+                title={sortIds.length > 1 ? "重排所选轨道：按片段在歌曲中的位置，靠后的在上层，音频在最底部" : "按片段在歌曲中的位置重排轨道：靠后的在上层，音频在最底部；勾选轨道后只排所选"}
+                onClick={() => useWorkshopStore.getState().edit(project => sortLayers(project, sortIds.length > 1 ? sortIds : undefined))}>
+                <ArrowDownUp size={12} />
+              </button>
+            </span>
+          </div>
           <div
             data-vj-time-scale={scale} className="vj-ruler-rail"
             style={{ width: railWidth }}
@@ -426,15 +583,17 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
             onPointerCancel={scrubEnd}
           >
             {Array.from(
-              { length: Math.floor(duration / tickStep) + 1 },
-              (_, i) => (p.markers ?? []).some(m => {
+              { length: Math.max(0, Math.min(Math.floor(duration / tickStep), Math.ceil((mediaLeft + mediaWidth) / scale / tickStep)) - Math.floor(mediaLeft / scale / tickStep) + 1) },
+              (_, n) => {
+                const i = Math.floor(mediaLeft / scale / tickStep) + n;
+                return (p.markers ?? []).some(m => {
                 const distance = (m.position_ms - i * tickStep) * scale;
                 return distance > -14 && distance < 66;
               }) ? null : (
                 <span key={i} style={{ left: i * tickStep * scale }}>
                   {formatTime(i * tickStep).replace(/\.000$/, "")}
                 </span>
-              ),
+              ); },
             )}
             {(p.markers ?? []).filter(m => m.position_ms <= duration).map(marker => <button
               key={marker.id} type="button" className="vj-marker" data-marker-id={marker.id}
@@ -444,31 +603,13 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
               onPointerDown={e => e.stopPropagation()}
               onClick={e => { e.stopPropagation(); playback.seek(marker.position_ms); }}
             ><i aria-hidden="true" /><small>{marker.number}</small></button>)}
-            <i className="vj-playhead" style={{ left: position * scale }} />
+            <TimelinePlayhead scale={scale} />
           </div>
         </div>
-        {p.layers.map((layer, index) => {
-          const sources = layerSources(p, layer), title = layerTitle(p, layer);
-          const hasAudio = sources.some(s => s.audio), hasVisual = sources.some(isVisualSource);
-          const lanes = clipLanes(layer.clips), laneCount = Math.max(1, ...Array.from(lanes.values(), n => n + 1));
-          const trackHeight = laneCount * 62;
+        {rows.map(({layer, sources, title, hasAudio, hasVisual, lanes, laneCount, trackHeight, top, joints,
+          joinedIn, joinedOut, audioJoinedIn, audioJoinedOut, rhythmLayers}, index) => {
           const hidden = hiddenVideoLayers[p.id]?.includes(layer.id) ?? false;
-          const ordered = [...layer.clips].sort((a,b) => a.start_ms-b.start_ms);
-          const joints = ordered.flatMap((right,i) => {
-            const left=ordered[i-1];
-            if (!left || Math.abs(left.start_ms+clipDuration(left)-right.start_ms) >= .01) return [];
-            const media = [left,right].map(c => p.sources.find(s => s.id === c.source_id));
-            const video = media.every(s => s?.video), audio = media.every(s => s?.audio);
-            return video || audio ? [{left,right,video,audio}] : [];
-          });
-          const spans = joints.flatMap(j => {
-            const span = videoTransitionSpan(j.left, j.right);
-            return span ? [{...j, span}] : [];
-          });
-          const joinedIn = new Map(spans.filter(j => j.video).map(j => [j.right.id, j.span]));
-          const joinedOut = new Map(spans.filter(j => j.video).map(j => [j.left.id, j.span]));
-          const audioJoinedIn = new Map(spans.filter(j => j.audio).map(j => [j.right.id, j.span]));
-          const audioJoinedOut = new Map(spans.filter(j => j.audio).map(j => [j.left.id, j.span]));
+          const rowVisible = top + trackHeight >= vertical.top - 256 && top <= vertical.top + vertical.height + 256;
           return (
             <div
               className="vj-track-row"
@@ -581,8 +722,10 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
                 }}
               >
                 {layer.clips.map((c) => {
-                  const source = p.sources.find(s => s.id === c.source_id)!;
+                  const source = sourceById.get(c.source_id)!;
                   const d = clipDuration(c);
+                  const mediaVisible = rowVisible && (c.start_ms + d) * scale >= mediaLeft
+                    && c.start_ms * scale <= mediaLeft + mediaWidth;
                   return (
                     <div
                       key={c.id}
@@ -608,22 +751,17 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
                       onPointerUp={up}
                       onPointerCancel={cancel}
                     >
-                      <WorkshopClipMedia
+                      {mediaVisible && <WorkshopClipMedia
                         project={p.id}
                         source={source}
                         clip={c}
                         scale={scale}
-                        viewport={{ left: scrollLeft, width }}
-                      />
+                        viewport={{ left: mediaLeft, width: mediaWidth }}
+                      />}
                       {(isVisualSource(source) ? [false, ...(!c.sound.muted && source.audio ? [true] : [])] : [true]).map(audio => (
-                        <svg key={String(audio)} className={`vj-fade-curve ${audio ? "vj-fade-audio" : ""}`} viewBox="0 0 100 30" preserveAspectRatio="none" aria-label={audio ? "声音淡化曲线" : "画面淡化曲线"}
-                          style={{clipPath: `inset(0 ${((audio ? audioJoinedOut : joinedOut).get(c.id)?.before ?? 0) / d * 100}% 0 ${((audio ? audioJoinedIn : joinedIn).get(c.id)?.after ?? 0) / d * 100}%)`}}>
-                          <path d={workshopFadeCurvePath({...c, fades:{...c.fades,
-                            audio_in_ms:audioJoinedIn.has(c.id) ? 0 : c.fades.audio_in_ms,
-                            audio_out_ms:audioJoinedOut.has(c.id) ? 0 : c.fades.audio_out_ms,
-                            video_in_ms:joinedIn.has(c.id) ? 0 : c.fades.video_in_ms,
-                            video_out_ms:joinedOut.has(c.id) ? 0 : c.fades.video_out_ms}}, audio, true)} vectorEffect="non-scaling-stroke" />
-                        </svg>
+                        <TimelineFadeCurve key={String(audio)} clip={c} audio={audio}
+                          incoming={(audio ? audioJoinedIn : joinedIn).get(c.id)}
+                          outgoing={(audio ? audioJoinedOut : joinedOut).get(c.id)} />
                       ))}
                       {sources.length > 1 && <span className="vj-clip-source">{source.title}</span>}
                       {(c.speed.preset !== "constant" || c.speed.start !== 1) && <span className="vj-clip-rate"
@@ -662,12 +800,11 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
                 {joints.map(({left,right}) => <div key={`join:${right.id}`} className="vj-transition-lane" style={{top:(lanes.get(right.id) ?? 0) * 62}}>
                   <WorkshopVideoTransition project={p} left={left} right={right} scale={scale}/>
                 </div>)}
-                {sources.filter(s => s.audio).map(source => <WorkshopRhythmRuler key={source.id} source={source}
-                  layer={{...layer, clips: layer.clips.filter(c => c.source_id === source.id)}} scale={scale}
-                  left={scrollLeft} width={Math.max(1, width - labelWidth)} />)}
-                <i
-                  className="vj-playhead"
-                  style={{ left: position * scale }}
+                {rowVisible && rhythmLayers.map(({source, layer: rhythmLayer}) => <WorkshopRhythmRuler key={source.id} source={source}
+                  layer={rhythmLayer} scale={scale}
+                  left={mediaLeft} width={mediaWidth} />)}
+                <TimelinePlayhead
+                  scale={scale}
                   onPointerDown={scrubStart}
                   onPointerMove={scrubMove}
                   onPointerUp={scrubEnd}

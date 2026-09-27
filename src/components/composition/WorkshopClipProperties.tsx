@@ -18,8 +18,8 @@ type PropertiesActions = {
 export function WorkshopClipProperties(props: PropertiesActions) {
   const project = useWorkshopStore(s => s.draft);
   const selected = useWorkshopStore(s => s.selectedId);
-  const clip = project ? findClip(project, selected) ?? null : null;
-  if (!project || !clip || !project.sources.some(source => source.id === clip.source_id)) return null;
+  const candidate = project ? findClip(project, selected) : null;
+  const clip = candidate && project?.sources.some(source => source.id === candidate.source_id) ? candidate : null;
   return <ClipProperties key={`${project?.id}:${clip?.id}`} project={project} clip={clip} {...props} />;
 }
 

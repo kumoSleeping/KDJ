@@ -957,17 +957,19 @@ async fn search_cover(Json(payload): Json<SearchCoverRequest>) -> ApiResult<Resp
         let host = url
             .host_str()
             .ok_or_else(|| ApiError::bad_request("封面地址缺少主机名"))?;
-        let addrs = kdj_providers::net::pinned_public_addrs(&url)
+        let target = kdj_providers::net::media_target(&url)
             .await
-            .map_err(|_| ApiError::bad_request("封面地址解析到了非公网地址"))?;
-        let client = reqwest::Client::builder()
+            .map_err(|error| ApiError::bad_request(format!("封面地址被拒绝：{error}")))?;
+        let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            // 代理会绕过上面的 `resolve_to_addrs`，并替我们访问原本已拒绝的私网地址。
-            .no_proxy()
             .referer(false)
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("KDJ cover matcher")
-            .resolve_to_addrs(host, &addrs)
+            .user_agent("KDJ cover matcher");
+        if let kdj_providers::net::MediaTarget::Pinned(addrs) = &target {
+            // 代理会绕过 `resolve_to_addrs`，并替我们访问原本已拒绝的私网地址。
+            builder = builder.no_proxy().resolve_to_addrs(host, addrs);
+        }
+        let client = builder
             .build()
             .map_err(|error| ApiError::bad_request(format!("封面代理不可用：{error}")))?;
         let candidate = client
@@ -5849,46 +5851,12 @@ async fn library_harmonic_profile(
 
 // ---------------------------------------------------------------- 文件夹
 
-/// 定曲库根目录，并决定要不要把反推结果写回设置。
-///
-/// 返回 `(根目录, 要写回设置的目录列表)`；第二项是 `Some` 才动设置。
-///
-/// **反推只在设置里一个目录都没配的时候做**（和 v0.1.0 的 `if config.library_dirs: return`
-/// 一致）。判据不能换成"解析出来的根为空"：外置硬盘没插时配好的目录同样解析不出来，
-/// 那时反推会把用户配的目录直接顶掉，硬盘插回去也回不来了。
-fn pick_library_roots(
-    configured: &[String],
-    track_paths: impl FnOnce() -> Vec<String>,
-) -> (Vec<PathBuf>, Option<Vec<String>>) {
-    if !configured.is_empty() {
-        return (kdj_library::folders::resolve_roots(configured), None);
-    }
-    // 没配曲库目录时从已入库路径反推，否则文件夹树一片空白而歌明明都在。
-    //
-    // 反推出来的结果要**写回设置**：不写回的话设置页永远显示"还没有曲库目录"，
-    // 而文件夹树里歌都在，用户只能自己再加一遍同一个目录。
-    let inferred = kdj_library::folders::infer_roots(&track_paths());
-    if inferred.is_empty() {
-        return (inferred, None);
-    }
-    let dirs: Vec<String> = inferred
-        .iter()
-        .map(|root| root.to_string_lossy().into_owned())
-        .collect();
-    (inferred, Some(dirs))
-}
-
+/// 只有显式配置/添加的文件夹才是曲库根目录。
+/// 单文件入库（包括混音素材和下载）不能把父目录升级为扫描、监听范围。
 fn library_roots(state: &AppState) -> ApiResult<Vec<PathBuf>> {
-    let mut settings = state.config.to_settings();
-    let (roots, adopt) = pick_library_roots(&settings.library_dirs, || {
-        state.library.all_paths().unwrap_or_default()
-    });
-    if let Some(dirs) = adopt {
-        tracing::info!("从已入库路径反推曲库根目录：{dirs:?}");
-        settings.library_dirs = dirs;
-        state.config.apply_settings(settings)?;
-    }
-    Ok(roots)
+    Ok(kdj_library::folders::resolve_roots(
+        &state.config.to_settings().library_dirs,
+    ))
 }
 
 /// 会改动文件系统的文件夹操作都要先有根目录。
@@ -5918,7 +5886,6 @@ fn normalize_dest_dir(state: &AppState, raw: &str) -> ApiResult<String> {
 }
 
 async fn folder_tree(state: Arc<AppState>) -> ApiResult<FolderTree> {
-    let _ = library_roots(&state)?;
     // Two bulk jobs may run concurrently, but folder snapshots themselves must commit in request
     // order; otherwise an older walk can finish last and overwrite a newer mutation's tree.
     let _refresh = LIBRARY_FOLDER_REFRESH_SLOTS.acquire().await.map_err(|error| {
@@ -6266,9 +6233,7 @@ struct FolderSnapshotResponse {
 async fn library_folders_snapshot(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<FolderSnapshotResponse>> {
-    // Keep startup off the disk-walk path. `library_roots` may infer roots from SQLite on a first
-    // run, but it never enumerates configured directories here.
-    let _ = library_roots(&state)?;
+    // Read only the saved snapshot; never infer or register directories from track paths.
     let roots = state.config.to_settings().library_dirs;
     let library = Arc::clone(&state.library);
     let snapshot =
@@ -9172,46 +9137,33 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn an_unreachable_configured_root_is_never_replaced_by_an_inferred_one() {
-        // 外置硬盘没插时 resolve_roots 也返回空。这时候要是去反推，
-        // 用户配好的目录会被下载目录顶掉，硬盘插回去也回不来了
-        let base = scratch("unreachable");
-        let music = base.join("music");
-        std::fs::create_dir_all(&music).unwrap();
-        let configured = vec!["/Volumes/没插的移动硬盘/Music".to_string()];
+    #[tokio::test]
+    async fn single_file_folder_refresh_never_adopts_its_download_directory() {
+        let base = scratch("single-file-roots");
+        let state = undo_test_state(&base);
+        let downloads = base.join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let selected = downloads.join("selected.mp3");
+        std::fs::write(&selected, b"selected").unwrap();
+        std::fs::write(downloads.join("unselected.mp3"), b"sibling").unwrap();
+        insert_undo_track(&state, &selected);
 
-        let (roots, adopt) = pick_library_roots(&configured, || {
-            vec![music.join("a.mp3").to_string_lossy().into_owned()]
-        });
-        assert!(roots.is_empty(), "目录不可达就是没有根，不该悄悄换一个");
-        assert!(adopt.is_none(), "更不能把设置改掉");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn an_empty_configuration_adopts_the_inferred_roots() {
-        // 文件夹模式上线前扫过歌的库：library_dirs 是空的，但歌都在列表里摆着
-        let base = scratch("adopt");
-        let music = base.join("music");
-        std::fs::create_dir_all(&music).unwrap();
-        let (roots, adopt) = pick_library_roots(&[], || {
-            vec![music.join("a.mp3").to_string_lossy().into_owned()]
-        });
-        assert_eq!(roots.len(), 1);
-        assert_eq!(
-            adopt,
-            Some(vec![roots[0].to_string_lossy().into_owned()]),
-            "反推出来的要写回设置，否则设置页永远显示还没配目录"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn an_empty_library_infers_nothing_and_leaves_the_settings_alone() {
-        let (roots, adopt) = pick_library_roots(&[], Vec::new);
-        assert!(roots.is_empty());
-        assert!(adopt.is_none());
+        // Both an empty configuration and an offline configured drive must keep
+        // the imported track in Other, including after the startup snapshot read.
+        for configured in [vec![], vec![base.join("offline").to_string_lossy().into_owned()]] {
+            let mut settings = state.config.to_settings();
+            settings.library_dirs = configured.clone();
+            state.config.apply_settings(settings).unwrap();
+            let _ = library_folders_snapshot(State(state.clone())).await.unwrap();
+            let tree = folder_tree(state.clone()).await.unwrap();
+            assert!(tree.roots.is_empty());
+            assert_eq!(tree.outside, 1);
+            assert!(library_roots(&state).unwrap().is_empty());
+            assert_eq!(state.config.to_settings().library_dirs, configured);
+            assert_eq!(state.library.all_paths().unwrap(), vec![selected.to_string_lossy().into_owned()]);
+        }
+        drop(state);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

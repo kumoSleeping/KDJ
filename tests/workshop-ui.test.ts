@@ -398,10 +398,12 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
       ...useWorkshopStore.getState().positions.p,
       items: [{...useWorkshopStore.getState().positions.p.items[0], phase, presets: []}],
     }}}));
-    assert.equal(document.querySelector('.vj-layer-position-trigger'), null, `${phase} without results has no gratuitous locator`);
+    assert.equal(document.querySelector('.vj-layer-position-trigger')?.getAttribute('aria-label'), '位置分析：动画',
+      `${phase} keeps the locator that opens its own result`);
   }
-  const controlApi = api.controlWorkshopPositions;
+  const controlApi = api.controlWorkshopPositions, analyzeApi = api.analyzeWorkshopPositions;
   const controls: [string, boolean, string | undefined][] = [];
+  const analyses: [string | undefined, boolean | undefined][] = [];
   const currentRevision = useWorkshopStore.getState().projects[0].revision;
   const analysis = { ...useWorkshopStore.getState().positions.p.items[0], phase: "analyzing" as const, progress: .3, presets: [] };
   const result = {session: "ui", project_id: "p", revision: currentRevision, items: [analysis]};
@@ -409,21 +411,34 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
     controls.push([project, stopped, layer]);
     return {...result, items: [{...analysis, id: stopped ? analysis.id : "restarted", phase: stopped ? "stopped" : "analyzing", progress: stopped ? 1 : 0, reason: stopped ? "已停止" : ""}]};
   };
+  api.analyzeWorkshopPositions = async (project, layer, restart) => {
+    analyses.push([layer, restart]);
+    return {...result, items: [{...analysis, id: "manual", progress: 0}]};
+  };
+  // Nothing is analyzed on import or edit: the first press starts matching.
+  await act(async () => useWorkshopStore.setState({positions: {p: {...result, items: []}}}));
+  const manualTrigger = document.querySelector<HTMLButtonElement>('.vj-layer-position-trigger')!;
+  assert.equal(manualTrigger.getAttribute('aria-label'), '手动分析位置：动画');
+  await act(async () => manualTrigger.click());
+  assert.deepEqual(analyses, [["l", false]], "an unmatched row matches on demand instead of opening an empty popup");
+  await act(async () => useWorkshopStore.setState({positions: {p: {...result, items: [{...analysis, phase: "stopped", presets: []}]}}}));
+  await act(async () => document.querySelector<HTMLButtonElement>('.vj-layer-position-trigger')!.click());
+  assert.deepEqual(analyses.at(-1), ["l", true], "a stopped row matches again instead of restoring a menu");
   await act(async () => useWorkshopStore.setState({positions: {p: result}}));
   assert.equal(document.querySelector('.vj-analysis-progress'), null, "progress does not add height to the track");
-  assert.equal(document.querySelector('[aria-label="片段定位：动画"]'), null, 'analyzing without results is not presented as a locator');
   await click('位置分析：动画');
   assert.ok(document.querySelector('.vj-position-popup .vj-analysis-progress button'), "stop is next to the individual progress bar in the locator popup");
-  await click("停止 动画 的自动分析");
+  await click("停止 动画 的位置分析");
   assert.deepEqual(controls.pop(), ["p", true, "l"]);
   assert.equal(document.querySelector('.vj-analysis-progress progress'), null);
   await act(async () => useWorkshopStore.getState().acceptPositions(result));
   assert.equal(useWorkshopStore.getState().positions.p.items[0].phase, "stopped", "late progress cannot undo a stop");
   await click("重新分析 动画");
-  assert.deepEqual(controls.pop(), ["p", false, "l"]);
-  await click("停止全部素材的自动分析");
+  assert.deepEqual(analyses.at(-1), ["l", true], "the popup matches a stopped row again");
+  await click("停止全部位置分析");
   assert.deepEqual(controls.pop(), ["p", true, undefined]);
   api.controlWorkshopPositions = controlApi;
+  api.analyzeWorkshopPositions = analyzeApi;
   await act(async () => useWorkshopStore.setState({applyPositions, positions: {}}));
   const timeline = document.querySelector(".vj-timeline")!;
   assert.ok(timeline.lastElementChild === document.querySelector(".vj-timeline-overview"), "scrollbar is at the editor bottom after the tracks");

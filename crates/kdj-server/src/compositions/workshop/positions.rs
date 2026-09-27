@@ -261,12 +261,66 @@ impl Workshop {
         if stopped {
             self.publish_positions(pid);
         } else {
-            self.prepare_positions(pid)?;
+            self.analyze_positions(pid, layer_id, true)?;
         }
         Ok(())
     }
-    /// Imports start immediately; subsequent committed edits only restart affected matching contexts.
-    pub fn prepare_positions(self: &Arc<Self>, pid: &str) -> Result<Vec<PositionAnalysis>> {
+    /// Manual trigger behind the locate control. One row is matched on demand;
+    /// without one only the rows the user stopped are resumed, never the whole
+    /// project.
+    pub fn analyze_positions(
+        self: &Arc<Self>,
+        pid: &str,
+        layer_id: Option<&str>,
+        restart: bool,
+    ) -> Result<Vec<PositionAnalysis>> {
+        let scope = {
+            let mut journal = self.journal.lock().unwrap();
+            let layers: Vec<String> = journal
+                .projects
+                .iter()
+                .find(|p| p.id == pid)
+                .context("作品不存在")?
+                .layers
+                .iter()
+                .map(|l| l.id.clone())
+                .collect();
+            if layer_id.is_some_and(|id| !layers.iter().any(|l| l == id)) {
+                bail!("素材行不存在")
+            }
+            let scope: HashSet<String> = match layer_id {
+                Some(id) => HashSet::from([id.to_owned()]),
+                None => layers
+                    .into_iter()
+                    .filter(|id| journal.stopped_positions.contains(&format!("{pid}:{id}")))
+                    .collect(),
+            };
+            // Asking for a row is an explicit resume, never an automatic restart.
+            let mut next = journal.clone();
+            let cleared = scope
+                .iter()
+                .filter(|id| next.stopped_positions.remove(&format!("{pid}:{id}")))
+                .count();
+            if cleared > 0 {
+                self.save(&next)?;
+                *journal = next;
+            }
+            scope
+        };
+        if scope.is_empty() {
+            return Ok(self.position_views(pid));
+        }
+        self.prepare_positions(pid, Some(&scope), restart)
+    }
+    /// Matching never starts on its own. Imports, edits and reloads leave every
+    /// row alone; `only` narrows the work to the rows one user action asked for,
+    /// and `force` drops a previous result so a stopped or stale row runs again.
+    pub fn prepare_positions(
+        self: &Arc<Self>,
+        pid: &str,
+        only: Option<&HashSet<String>>,
+        force: bool,
+    ) -> Result<Vec<PositionAnalysis>> {
         let mut journal = self.journal.lock().unwrap();
         let (p, bases) = {
             let p = journal
@@ -314,6 +368,9 @@ impl Workshop {
                 }
             });
             for layer in &p.layers {
+                if only.is_some_and(|ids| !ids.contains(&layer.id)) {
+                    continue;
+                }
                 let key = format!("{pid}:{}", layer.id);
                 // Matching assumes one source domain and disjoint cuts. Never
                 // reinterpret a manually assembled multi-file/overlapping track.
@@ -328,11 +385,14 @@ impl Workshop {
                 let ref_key = matching_reference_key(&p, layer, &reference)?;
                 let layout = layout_key(layer)?;
                 let stopped = journal.stopped_positions.contains(&key);
-                if tasks.get(&key).is_some_and(|t| {
-                    (stopped && t.view.phase == "stopped") || (!stopped && t.reference_key == ref_key
-                        && t.layouts.contains(&layout)
-                        && t.view.phase != "failed")
-                }) {
+                if !force
+                    && tasks.get(&key).is_some_and(|t| {
+                        (stopped && t.view.phase == "stopped") || (!stopped && t.view.phase != "stopped"
+                            && t.reference_key == ref_key
+                            && t.layouts.contains(&layout)
+                            && t.view.phase != "failed")
+                    })
+                {
                     continue;
                 }
                 if let Some(old) = tasks.remove(&key) {
@@ -408,7 +468,7 @@ impl Workshop {
             let m = self.clone();
             let p = p.clone();
             tokio::spawn(async move {
-                let result = m.analyze_positions(&p, &key, &task).await;
+                let result = m.match_positions(&p, &key, &task).await;
                 if task.cancel.is_cancelled() {
                     return;
                 }
@@ -468,7 +528,7 @@ impl Workshop {
         }
         Ok(self.position_views(pid))
     }
-    async fn analyze_positions(
+    async fn match_positions(
         &self,
         p: &CompositionProject,
         key: &str,
@@ -807,7 +867,8 @@ impl Workshop {
         let snapshot = self.snapshot();
         self.state.hub.publish("workshop.updated", &snapshot);
         self.cancel_previews(pid, invalidated_revision);
-        let _ = self.prepare_positions(pid);
+        // Applying a choice keeps its own analysis; other rows re-run only when asked.
+        self.publish_positions(pid);
         Ok(Some(snapshot))
     }
 }
@@ -1184,7 +1245,8 @@ mod speed_tests {
             j.pending_positions.insert(key.clone(), layout_key(layer)?);
             Ok(())
         }).unwrap();
-        m.prepare_positions(&p.id).unwrap();
+        // Matching is manual: the row the test manipulates is the one it asks for.
+        m.analyze_positions(&p.id, Some(&layer.id), false).unwrap();
         let presets = make_review_presets(layer, [48850., 108850.].map(|start_ms| (0.54, vec![Placement {
             clip_id: layer.clips[0].id.clone(), source_in_ms: 0., source_out_ms: 38000.,
             start_ms, speed_multiplier: Some(1.),
@@ -1232,7 +1294,8 @@ mod speed_tests {
             }
             Ok(())
         }).unwrap();
-        m.prepare_positions(&p.id).unwrap();
+        m.analyze_positions(&p.id, Some(&p.layers[0].id.clone()), false).unwrap();
+        m.analyze_positions(&p.id, Some(&p.layers[2].id.clone()), false).unwrap();
         let key = format!("{}:v", p.id);
         let old = m.positions.lock().unwrap()[&key].clone();
         m.control_positions(&p.id, Some("v"), true).unwrap();
@@ -1255,12 +1318,14 @@ mod speed_tests {
         assert_eq!(m.positions.lock().unwrap()[&format!("{}:v2", p.id)].view.phase, "stopped");
         assert_eq!(m.snapshot().projects[0].layers[0].clips[0].start_ms, edited.layers[0].clips[0].start_ms);
         let restored = Workshop::open(state, &legacy).unwrap();
-        restored.prepare_positions(&p.id).unwrap();
-        assert_eq!(restored.positions.lock().unwrap()[&key].view.phase, "stopped");
+        // A reopen matches nothing on its own; only the stop is remembered per row.
+        assert!(restored.position_views(&p.id).is_empty());
+        assert!(restored.journal.lock().unwrap().stopped_positions.contains(&key));
         let _slots2 = restored.analysis_slots.acquire_many(restored.analysis_slots.available_permits() as u32).await.unwrap();
         restored.control_positions(&p.id, Some("v"), false).unwrap();
         assert_eq!(restored.positions.lock().unwrap()[&key].view.phase, "analyzing");
-        assert_eq!(restored.positions.lock().unwrap()[&format!("{}:v2", p.id)].view.phase, "stopped");
+        assert!(restored.journal.lock().unwrap().stopped_positions
+            .contains(&format!("{}:v2", p.id)), "resuming one row leaves the others stopped");
         assert!(!restored.journal.lock().unwrap().pending_positions.contains_key(&key));
         use tower::ServiceExt;
         let response = super::super::routes::router(restored.clone())

@@ -1118,7 +1118,7 @@ export interface KdjBridge {
     label: string;
     image: string;
   }) => Promise<SavedLoginQr>;
-  pickFolder: () => Promise<string | null>;
+  pickFolder: (options?: { defaultPath?: string; title?: string }) => Promise<string | null>;
   installMediaTools?: (action: "download" | "archive" | "folder") => Promise<boolean>;
   mediaToolsProgress?: () => Promise<FfmpegInstallProgress>;
   pickFolders: () => Promise<string[]>;

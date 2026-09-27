@@ -24,6 +24,10 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
         .route("/api/workshop/{id}/sources", post(add))
         .route("/api/workshop/{id}/subtitle-source", post(subtitle_source))
         .route("/api/workshop/{id}/positions", post(positions))
+        .route(
+            "/api/workshop/{id}/positions/analyze",
+            post(analyze_positions),
+        )
         .route("/api/workshop/{id}/positions/apply", post(apply_positions))
         .route("/api/workshop/{id}/positions/control", post(control_positions))
         .route("/api/workshop/{id}/align", post(align))
@@ -300,7 +304,21 @@ async fn positions(
     Extension(m): Extension<Arc<Workshop>>,
     Path(pid): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    m.prepare_positions(&pid)?;
+    // Matching is manual: reading the views never starts work.
+    position_results(&m, &pid)
+}
+#[derive(Deserialize)]
+struct PositionAnalyze {
+    layer_id: Option<String>,
+    #[serde(default)]
+    restart: bool,
+}
+async fn analyze_positions(
+    Extension(m): Extension<Arc<Workshop>>,
+    Path(pid): Path<String>,
+    Json(q): Json<PositionAnalyze>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.analyze_positions(&pid, q.layer_id.as_deref(), q.restart)?;
     position_results(&m, &pid)
 }
 fn position_results(m: &Workshop, pid: &str) -> ApiResult<Json<serde_json::Value>> {

@@ -410,57 +410,6 @@ pub fn resolve_roots(dirs: &[String]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// 没配曲库目录时，从已入库的路径反推根目录。
-///
-/// 做法是"每个存歌的目录各自往上退一层"，**不是**"取全体的最近公共祖先"：
-/// 实际的库常常横跨两棵树（下载目录 + 自己的 set 目录），
-/// 取公共祖先会一路退到 `~`，等于把整个家目录当曲库根——又慢又危险。
-pub fn infer_roots(track_paths: &[String]) -> Vec<PathBuf> {
-    let parents: std::collections::HashSet<PathBuf> = track_paths
-        .iter()
-        .filter(|path| !path.is_empty())
-        .filter_map(|path| Path::new(path).parent().map(norm))
-        .collect();
-    if parents.is_empty() {
-        return Vec::new();
-    }
-
-    let home = kdj_core::config::home_dir();
-    let blocked: Vec<PathBuf> = [
-        PathBuf::from("/"),
-        home.clone(),
-        home.parent().map(Path::to_path_buf).unwrap_or_default(),
-        PathBuf::from("/Volumes"),
-        PathBuf::from("/tmp"),
-    ]
-    .into_iter()
-    .collect();
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for parent in &parents {
-        let up = parent.parent().map(Path::to_path_buf);
-        let pick = match up {
-            // 退到家目录、/Users、/Volumes、/ 这些就不再往上
-            Some(up) if !blocked.contains(&up) && up.components().count() >= 4 => up,
-            _ => parent.clone(),
-        };
-        if !candidates.contains(&pick) {
-            candidates.push(pick);
-        }
-    }
-    candidates.sort();
-    candidates
-        .iter()
-        .filter(|node| {
-            !candidates
-                .iter()
-                .any(|other| other != *node && within(node, other))
-        })
-        .filter(|node| node.is_dir())
-        .cloned()
-        .collect()
-}
-
 // ------------------------------------------------------------------ 目录清单
 
 fn metadata_dir(directory: &Path) -> PathBuf {

@@ -642,6 +642,7 @@ impl Workshop {
             number(p.canvas.fps),
             secs(duration)
         )];
+        let mut hdr_ready = false;
         for (n, (s, c)) in clips.iter().enumerate() {
             check(cancel)?;
             if s.image() {
@@ -655,6 +656,14 @@ impl Workshop {
             let probe = verify_source(s, cancel).await?;
             let stream = probe.video().context("素材没有画面")?;
             let (width, height) = media::workshop_video_size(stream)?;
+            let hdr = if media::workshop_hdr(stream) {
+                if !hdr_ready {
+                    self.job(jid, |j| j.detail = "准备 HDR 转换".into())?;
+                    media::ensure_tone_mapping(cancel).await?;
+                    hdr_ready = true;
+                }
+                format!(",{}", media::HDR_TO_SDR)
+            } else { String::new() };
             // Decode directly into the final graph. A full-length intermediate
             // used to encode every video twice and delay all visible progress.
             args.extend(["-threads".into(), "1".into(), "-ss".into(), secs(c.source_in_ms),
@@ -673,7 +682,7 @@ impl Workshop {
             let mask = if cropped {
                 format!(",scale={width}:{height},setsar=1,format=rgba{}", crop_mask(width as f64, height as f64, c.picture.crop, keep_position))
             } else { String::new() };
-            let pixels = format!("[{n}:{}]trim=duration={},setpts=PTS-STARTPTS,setpts='({})/TB',fps={}:eof_action=pass{mask},scale={}:{},setsar=1",
+            let pixels = format!("[{n}:{}]trim=duration={},setpts=PTS-STARTPTS,setpts='({})/TB',fps={}:eof_action=pass{hdr}{mask},scale={}:{},setsar=1",
                 stream.index, secs(c.source_out_ms-c.source_in_ms), retime(c), number(p.canvas.fps), number(w), number(h));
             let shift = format!("setpts=PTS+{}/TB[clip{n}]", secs(c.start_ms-lo));
             if dynamic || c.picture.opacity < 1. {
@@ -901,6 +910,10 @@ async fn video(
         retime(c),
         number(fps)
     );
+    if media::workshop_hdr(stream) {
+        media::ensure_tone_mapping(cancel).await?;
+        filters.push_str(&format!(",{}", media::HDR_TO_SDR));
+    }
     filters.push_str(&format!(",scale={width}:{height},setsar=1"));
     if let Some(max) = max_width {
         filters.push_str(&format!(",scale=w='min({max},iw)':h='min({max},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"));

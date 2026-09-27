@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>KDJ 需要读取你选择的下载目录中的音乐和视频，以便播放和剪辑。</string>
+</dict></plist>

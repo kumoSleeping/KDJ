@@ -2,8 +2,8 @@
 //!
 //! 这里的三件事都是**修过的真实漏洞**，不是理论上的加固，改之前先读注释：
 //! 1. [`host_is`]：判断"是不是本平台链接"必须比对 host，不能用子串。
-//! 2. [`resolves_to_public_ip`] + [`expand_short_link`]：短链逐跳展开，
-//!    每一跳都独立校验域名和目标 IP。
+//! 2. [`media_target`] + [`expand_short_link`]：短链逐跳展开，每一跳都独立校验
+//!    域名和目标 IP；代理软件的 fake-ip 不算内网目标（真实目的地由本机代理解析）。
 //! 3. [`AtomicDownload`]：独占临时文件，再原子且不覆盖地提交。
 
 use std::net::{IpAddr, SocketAddr};
@@ -144,20 +144,20 @@ pub async fn guarded_media_get_with_host(
             bail!("远程媒体地址不属于允许的来源");
         }
         let host = current.host_str().context("远程媒体地址缺少主机名")?;
-        let addrs = pinned_public_addrs(&current)
+        let target = media_target(&current)
             .await
-            .context("远程媒体地址解析到了非公网地址")?;
-        let client = reqwest::Client::builder()
+            .context("远程媒体地址被拒绝")?;
+        let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
             .https_only(true)
-            // 系统代理会绕过 `resolve_to_addrs` 并让代理替我们访问私网目标。
-            .no_proxy()
             .connect_timeout(policy.connect_timeout)
-            .read_timeout(policy.read_timeout)
-            .resolve_to_addrs(host, &addrs)
-            .build()
-            .context("构建受控媒体客户端失败")?;
+            .read_timeout(policy.read_timeout);
+        if let MediaTarget::Pinned(addrs) = &target {
+            // 系统代理会绕过 `resolve_to_addrs` 并让代理替我们访问私网目标。
+            builder = builder.no_proxy().resolve_to_addrs(host, addrs);
+        }
+        let client = builder.build().context("构建受控媒体客户端失败")?;
         let response = client
             .get(current.clone())
             .headers(request_headers.clone())
@@ -248,6 +248,9 @@ pub async fn resolves_to_public_ip(host: &str) -> bool {
 
 /// 解析 URL 的全部目标地址，并拒绝任意非公网结果。调用方必须把返回地址固定到
 /// 随后的 HTTP client，避免“检查时一次 DNS、请求时另一次 DNS”的 rebinding 窗口。
+///
+/// 这是**严格版**：本机代理的 fake-ip 也一并拒绝。媒体路径请用 [`media_target`]，
+/// 它会区分 fake-ip 与真正的内网地址。
 pub async fn pinned_public_addrs(url: &Url) -> Result<Vec<SocketAddr>> {
     let host = url.host_str().context("URL 缺少主机名")?;
     let port = url.port_or_known_default().context("URL 缺少端口")?;
@@ -255,14 +258,23 @@ pub async fn pinned_public_addrs(url: &Url) -> Result<Vec<SocketAddr>> {
 }
 
 async fn resolve_public_host(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let addrs = lookup_addrs(host, port).await?;
+    if addrs.is_empty() {
+        bail!("{host} 没有解析到任何地址");
+    }
+    if let Some(ip) = addrs.iter().map(SocketAddr::ip).find(|ip| !is_public(ip)) {
+        bail!("{host} 解析到了非公网地址 {ip}{}", non_public_hint(&ip));
+    }
+    Ok(addrs)
+}
+
+/// 解析主机名（也接受 IP 字面量）的全部地址，不做任何公网判定。
+async fn lookup_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
     let host = host.trim();
     if host.is_empty() {
         bail!("目标缺少主机名");
     }
     if let Ok(addr) = host.parse::<IpAddr>() {
-        if !is_public(&addr) {
-            bail!("目标解析到了非公网地址");
-        }
         return Ok(vec![SocketAddr::new(addr, port)]);
     }
     let mut addrs = tokio::net::lookup_host((host, port))
@@ -271,10 +283,73 @@ async fn resolve_public_host(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
         .collect::<Vec<_>>();
     addrs.sort_unstable();
     addrs.dedup();
-    if addrs.is_empty() || addrs.iter().any(|addr| !is_public(&addr.ip())) {
-        bail!("目标解析到了非公网地址");
-    }
     Ok(addrs)
+}
+
+/// 媒体与短链跳转目标的判定结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaTarget {
+    /// 全部解析到公网地址。调用方必须把这些地址固定到本次连接上。
+    Pinned(Vec<SocketAddr>),
+    /// 本机 DNS 给出的是代理软件的 fake-ip：地址由本地代理伪造，固定它没有意义，
+    /// 这次请求交给系统代理 / TUN 重新解析真实目的地。
+    ProxyManaged,
+}
+
+/// 判定媒体直链的目标，并决定这次请求该用哪种 client。
+///
+/// 起因：Clash / Mihomo / Surge 的 fake-ip 模式会给**所有**域名返回
+/// `198.18.0.0/15` 里的占位地址，本机进程拿不到真实 IP。把 fake-ip 当成“内网地址”
+/// 拒绝会让 B站 下载/试听、QQ音乐、SoundCloud、封面在这类机器上全部失败，而真实
+/// 目的地其实由用户自己的代理负责解析——本机代理就是这台机器的信任边界。
+///
+/// 所以这里把 fake-ip 和真正的内网地址分开：fake-ip 放行并交给代理，
+/// 回环 / 私网 / 链路本地 / CGNAT / 保留段 / IPv6 ULA 仍然一律拒绝。
+pub async fn media_target(url: &Url) -> Result<MediaTarget> {
+    let host = url.host_str().context("媒体地址缺少主机名")?;
+    let port = url.port_or_known_default().context("媒体地址缺少端口")?;
+    let addrs = lookup_addrs(host, port).await?;
+    if addrs.is_empty() {
+        bail!("{host} 没有解析到任何地址");
+    }
+    if let Some(ip) = addrs
+        .iter()
+        .map(SocketAddr::ip)
+        .find(|ip| !is_public(ip) && !is_proxy_fake_ip(ip))
+    {
+        bail!("{host} 解析到了非公网地址 {ip}{}", non_public_hint(&ip));
+    }
+    if addrs.iter().any(|addr| is_proxy_fake_ip(&addr.ip())) {
+        tracing::warn!(
+            host,
+            "媒体地址命中了本机代理的 fake-ip，改由系统代理 / TUN 解析真实目的地"
+        );
+        return Ok(MediaTarget::ProxyManaged);
+    }
+    Ok(MediaTarget::Pinned(addrs))
+}
+
+/// 代理软件默认使用的 fake-ip 地址池：RFC 2544 基准测试段 `198.18.0.0/15`。
+///
+/// 命中它说明这次解析结果不是真实目的地，而是本地代理插进连接路径的占位地址。
+fn is_proxy_fake_ip(addr: &IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => v4.octets()[0] == 198 && matches!(v4.octets()[1], 18 | 19),
+        IpAddr::V6(_) => false,
+    }
+}
+
+/// 被拒绝地址的可操作提示。
+///
+/// 代理的 fake-ip 池可以自定义（有人会设成 `10.x`），DNS 拦截也会返回
+/// `0.0.0.0` / `127.0.0.1`。这些环境下用户只看“非公网地址”四个字无从下手。
+fn non_public_hint(addr: &IpAddr) -> &'static str {
+    match addr {
+        IpAddr::V4(v4) if v4.is_private() || v4.is_loopback() || v4.is_unspecified() => {
+            "；若本机代理启用了 fake-ip（默认池 198.18.0.0/15，可自定义）或 DNS 拦截，请关闭后重试"
+        }
+        _ => "",
+    }
 }
 
 fn is_public(addr: &IpAddr) -> bool {
@@ -324,18 +399,19 @@ pub async fn expand_short_link(
     kdj_core::ensure_rustls_ring();
     let mut current = Url::parse(url.trim()).context("分享链接不是合法 URL")?;
     for _ in 0..max_hops {
-        let addrs = ensure_hop_allowed(&current, allow_host).await?;
+        let target = ensure_hop_allowed(&current, allow_host).await?;
         let host = current.host_str().context("分享链接缺少主机名")?;
         // reqwest 的默认 client 会自动跟随重定向，逐跳校验就会失效。每一跳都使用
-        // 禁止重定向且固定 DNS 结果的 client，下一跳只在校验后才会发出。
-        let client = http_timeouts(
+        // 禁止重定向的 client，下一跳只在校验后才会发出；公网地址还会固定 DNS 结果。
+        let mut builder = http_timeouts(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent("KDJ link resolver")
-                .resolve_to_addrs(host, &addrs),
-        )
-        .build()
-        .context("构建短链解析客户端失败")?;
+                .user_agent("KDJ link resolver"),
+        );
+        if let MediaTarget::Pinned(addrs) = &target {
+            builder = builder.resolve_to_addrs(host, addrs);
+        }
+        let client = builder.build().context("构建短链解析客户端失败")?;
         let response = client
             .get(current.clone())
             .send()
@@ -360,7 +436,7 @@ pub async fn expand_short_link(
 async fn ensure_hop_allowed(
     url: &Url,
     allow_host: &(dyn Fn(&str) -> bool + Sync),
-) -> Result<Vec<SocketAddr>> {
+) -> Result<MediaTarget> {
     if url.scheme() != "https" {
         bail!("分享链接必须使用 HTTPS");
     }
@@ -368,9 +444,7 @@ async fn ensure_hop_allowed(
     if !allow_host(host) {
         bail!("分享链接跳转到了不允许的地址");
     }
-    pinned_public_addrs(url)
-        .await
-        .context("分享链接解析到了非公网地址")
+    media_target(url).await.context("分享链接被拒绝")
 }
 
 /// 媒体直链的校验。远程音视频携带账号相关签名参数，禁止明文 HTTP，避免内容和
@@ -378,11 +452,12 @@ async fn ensure_hop_allowed(
 ///
 /// 直链来自登录态 API 的响应（不是用户输入），CDN 域名也不固定，
 /// 所以这里不做域名白名单，只挡掉 `file://` 之类的协议和指向内网的主机。
+///
+/// 本机代理的 fake-ip 不算内网目标，判定见 [`media_target`]：真实目的地由用户的
+/// 代理 / TUN 解析，这里放行而不是让下载直接失败。
 pub async fn ensure_media_url(url: &str) -> Result<()> {
     let parsed = parse_guarded_media_url(url)?;
-    pinned_public_addrs(&parsed)
-        .await
-        .context("媒体直链解析到了非公网地址")?;
+    media_target(&parsed).await.context("媒体直链被拒绝")?;
     Ok(())
 }
 

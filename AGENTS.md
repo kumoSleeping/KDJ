@@ -21,10 +21,23 @@
 - Do not use `sidecar/` as evidence for the current architecture.
 - Do not add new Python compatibility code. Port any still-useful behavior to Rust instead.
 
+## Persisted User Data
+
+- `vj-projects.json`（以及其它版本间共用的 `settings.json`、队列文件、数据库）是用户的长期资产，必须按“任何一次写入都不得比读到的内容少”处理。
+- Never rewrite a persisted document on open unless normalization or migration actually changed it; an unconditional save-on-open lets an older build restructure the whole file. This already destroyed every `crop_auto_fit` flag once (installed `/Applications/KDJ.app` 1.0.2-rc3 shares the same data directory as the dev build).
+- When a build cannot round-trip a loaded document without dropping keys, it MUST open it read-only, report the dropped paths, and leave the file untouched — never silently strip fields.
+- Keep automatic snapshots (`workshop-backups/auto/` at a ten-minute gap, `workshop-backups/daily/`) before writes; recover from them rather than from memory.
+- Do not run two builds against one data directory at the same time; upgrading the installed app is the fix, not a compatibility shim.
+
 ## Release
 
 - A release push MUST update `package.json`, `package-lock.json`, `Cargo.toml`, `Cargo.lock`, and `src-tauri/tauri.conf.json` to the same intended version before committing.
 - Verify the intended version is newer than the latest `v*` tag; never push release changes under the previous version number.
+- When the user says “开始发布模式一”, treat it as authorization to start the RC release and its periodic monitoring without asking for another confirmation.
+- Inspect the local changes and remote `v*` tags first. Preserve and include the user's local changes in the release; commit code and test changes before invoking the release script, since it requires a clean worktree. Determine the next RC number automatically without asking: increment the highest remote RC suffix on the active `X.Y.Z` line (for example, `rc6` → `rc7`). If the newest remote tag is a higher RC, increment that RC; if it is a stable release, use the next patch prerelease (for example, `1.0.2` → `1.0.3-rc1`). Keep advancing until the chosen SemVer is newer than every remote tag. Never move or replace an existing tag.
+- Use `scripts/release.sh <version>` as the release path. Run narrow local checks for the changed scope first. Only set `SKIP_VALIDATION=1` when those checks have already passed and the release CI will run the broader gates; otherwise use the script's normal validation. Let the script watch the release workflows and verify the published update manifest.
+- Start or reuse one active heartbeat automation for the current task at a 10-minute interval. It must monitor the release and README size-sync workflows, inspect failure logs, fix genuine code or test regressions, run the narrow relevant checks, then publish a strictly newer RC if the existing tag cannot be reused. Retry the same job only for transient infrastructure or network failures. Do not queue duplicate builds while jobs are running.
+- Keep monitoring until desktop macOS arm64/x86_64, Windows, Linux, and Android jobs succeed; expected installers and signatures are attached; `latest.json` has the intended version, complete signed platform entries, and working asset URLs; GitHub Latest points to the release; and the README size-sync workflow succeeds or is confirmed inapplicable. Then pause the heartbeat automation and report the release. If an external credential or user action blocks completion, report the exact blocker and leave monitoring active.
 
 ## Validation
 

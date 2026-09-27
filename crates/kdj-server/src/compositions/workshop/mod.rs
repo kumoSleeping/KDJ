@@ -103,12 +103,16 @@ pub struct Workshop {
     positions: Mutex<HashMap<String, positions::PositionTask>>,
     export_slots: tokio::sync::Semaphore,
     writable: bool,
+    snapshot_at: Mutex<Option<std::time::Instant>>,
     alignments: Mutex<HashMap<String, CancellationToken>>,
 }
 impl Workshop {
     pub fn open(state: Arc<AppState>, legacy: &Arc<CompositionManager>) -> Result<Arc<Self>> {
         let path = state.config.data_dir.join("vj-projects.json");
         let (mut journal, writable) = recovery::read_journal(&path);
+        // 打开时先按内容留一份自动快照，供写环后恢复。
+        let _ = recovery::auto_snapshot(&path, std::time::Duration::from_secs(60), 48);
+        let as_read = serde_json::to_value(&journal).ok();
         for p in &mut journal.projects {
             for source in &mut p.sources { if source.kind.is_empty() { source.kind = if source.video { "video" } else { "audio" }.into(); } }
         }
@@ -188,9 +192,14 @@ impl Workshop {
             positions: Mutex::new(HashMap::new()),
             export_slots: tokio::sync::Semaphore::new(1),
             writable,
+            snapshot_at: Mutex::new(None),
             alignments: Mutex::new(HashMap::new()),
         });
-        if writable { manager.save(&manager.journal.lock().unwrap())?; }
+        // 只归一化或迁移真的改了内容才落盘：旧版本一打开就整份重写，
+        // 会把新版本写进去的字段按旧结构抹掉。
+        if writable && as_read.as_ref() != serde_json::to_value(&*manager.journal.lock().unwrap()).ok().as_ref() {
+            manager.save(&manager.journal.lock().unwrap())?;
+        }
         Ok(manager)
     }
     /// Repair encoded dimensions saved by older versions before serving drafts.
@@ -242,7 +251,8 @@ impl Workshop {
         Ok(())
     }
     fn save(&self, j: &Journal) -> Result<()> {
-        if !self.writable { bail!("工程记录无法安全保存，请检查数据目录权限后重启；原文件已保留") }
+        if !self.writable { bail!("剪辑工程记录目前只读，未写回（原因见恢复提示）；原文件已保留") }
+        self.preserve()?;
         let temp = self.path.with_extension("json.tmp");
         let mut f = std::fs::File::create(&temp)?;
         f.write_all(&serde_json::to_vec(j)?)?;
@@ -251,6 +261,16 @@ impl Workshop {
         media::replace_file(&temp, &self.path)?;
         #[cfg(unix)]
         std::fs::File::open(self.path.parent().unwrap())?.sync_all()?;
+        Ok(())
+    }
+    /// 覆盖记录前的自动快照，十分钟一份足够小且能在误写后回溯。
+    fn preserve(&self) -> Result<()> {
+        let gap = std::time::Duration::from_secs(600);
+        let mut last = self.snapshot_at.lock().unwrap();
+        if last.is_some_and(|taken| taken.elapsed() < gap) { return Ok(()) }
+        recovery::auto_snapshot(&self.path, gap, 48)
+            .context("自动快照失败，已取消本次写回；原记录未被改动")?;
+        *last = Some(std::time::Instant::now());
         Ok(())
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -337,7 +357,6 @@ impl Workshop {
         })?;
         if media_changed {
             self.cancel_previews(pid, revision);
-            let _ = self.prepare_positions(pid);
         }
         Ok(result)
     }
@@ -477,7 +496,6 @@ impl Workshop {
             Ok(())
         })?;
         self.cancel_previews(pid, revision);
-        let _ = self.prepare_positions(pid);
         Ok(result)
     }
     fn cancel_previews(&self, pid: &str, through_revision: u64) {
@@ -759,7 +777,19 @@ pub struct Edit {
     pub output: Output,
 }
 pub fn signature(path: &Path) -> Result<String> {
-    Ok(serde_json::to_string(&media::signature(path)?)?)
+    let signature = media::signature(path).map_err(|error| {
+        #[cfg(target_os = "macos")]
+        if error.chain().any(|cause| cause.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)) {
+            return anyhow::anyhow!(
+                "素材访问被系统拒绝：{}。请点击“授权文件夹”并选择 {}",
+                path.display(),
+                path.parent().unwrap_or(path).display()
+            );
+        }
+        error
+    })?;
+    Ok(serde_json::to_string(&signature)?)
 }
 fn shape(p: &media::Probe) -> (u32, u32, f64) {
     p.video().map_or((1920, 1080, 30.), |s| {

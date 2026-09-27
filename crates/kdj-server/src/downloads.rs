@@ -97,6 +97,8 @@ fn safe_failure_kind(error: &str) -> &'static str {
         "library_import"
     } else if lower.contains("429") || lower.contains("-509") || lower.contains("限流") {
         "rate_limited"
+    } else if lower.contains("非公网") || lower.contains("内网地址") || lower.contains("fake-ip") {
+        "address_rejected"
     } else if lower.contains("401")
         || lower.contains("403")
         || lower.contains("鉴权")

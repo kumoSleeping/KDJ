@@ -206,7 +206,28 @@ impl BiliClient {
 
     // ------------------------------------------------------------ API
 
+    /// 取接口的 `data`，只接受 `code == 0`。
     async fn get_json(&self, url: &str) -> Result<Value> {
+        let (status, body) = self.get_json_body(url).await?;
+        let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+        if code == 0 && status.is_success() {
+            return Ok(body.get("data").cloned().unwrap_or(Value::Null));
+        }
+        let message = body
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("未知错误");
+        anyhow::bail!(
+            "B 站接口 {} 返回 HTTP {status} code={code}：{message}",
+            request_label(url)
+        )
+    }
+
+    /// 发请求 + 风控判定 + JSON 解析，但**不断言 `code`**。
+    ///
+    /// 少数接口（nav）在未登录时会用 `code=-101` 配上完全可用的 `data`，
+    /// 所以“哪些 code 可以放行”必须由调用方决定。
+    async fn get_json_body(&self, url: &str) -> Result<(reqwest::StatusCode, Value)> {
         // guard 保留到响应解析结束，避免收藏夹分页和列表操作并发冲击账号接口。
         let _slot = self.api_slot().await?;
         let label = request_label(url);
@@ -261,15 +282,7 @@ impl BiliClient {
                 );
             }
         };
-        let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
-        if code == 0 && status.is_success() {
-            return Ok(body.get("data").cloned().unwrap_or(Value::Null));
-        }
-        let message = body
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("未知错误");
-        anyhow::bail!("B 站接口 {label} 返回 HTTP {status} code={code}：{message}")
+        Ok((status, body))
     }
 
     /// 已登录写接口。写操作不做自动重试：如果连接在服务端提交后断开，重复发送会
@@ -324,7 +337,29 @@ impl BiliClient {
     }
 
     async fn wbi_key(&self) -> Result<String> {
-        self.wbi.get(|| async { self.nav().await }).await
+        self.wbi.get(|| async { self.nav_for_wbi().await }).await
+    }
+
+    /// nav 的匿名例外版，只用来取 WBI key。
+    ///
+    /// 未登录时 nav 返回 `code=-101`，**但 `data.wbi_img` 照样下发**：B 站对匿名
+    /// 访客也签 WBI，匿名 playurl（360P/480P）就靠它。直接用 [`Self::nav`] 的
+    /// `code == 0` 断言会把“没登录”和“接口坏了”混成同一个错误，结果是登录态过期
+    /// 或压根没登录的用户连 playurl 都拿不到，表现成“所有视频都无法下载/试听”。
+    async fn nav_for_wbi(&self) -> Result<Value> {
+        let (_, body) = self
+            .get_json_body("https://api.bilibili.com/x/web-interface/nav")
+            .await?;
+        let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+        let data = body.get("data").cloned().unwrap_or(Value::Null);
+        if (code == 0 || code == -101) && data.pointer("/wbi_img/img_url").is_some() {
+            return Ok(data);
+        }
+        let message = body
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("未知错误");
+        anyhow::bail!("B 站接口 nav 返回 code={code}：{message}")
     }
 
     /// 视频详情（标题、分 P、cid、封面、UP 主）。

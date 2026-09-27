@@ -71,12 +71,21 @@ fn workshop_pixel_aspect_validation_preserves_other_guards() {
     }
     stream.sample_aspect_ratio = "2:1".into();
     stream.pix_fmt = "yuv420p10le".into();
-    assert!(media::workshop_video_size(&stream).is_err());
+    // High bit depth reaches the canvas through the tone mapping chain.
+    assert_eq!(media::workshop_video_size(&stream).unwrap(), (2560, 720));
+    assert!(!media::workshop_hdr(&stream), "plain high bit depth is not HDR");
+    stream.color_transfer = "arib-std-b67".into();
+    assert!(media::workshop_hdr(&stream));
+    stream.color_transfer.clear();
     stream.pix_fmt = "yuv420p".into();
     stream.tags.insert("rotate".into(), "90".into());
     assert!(media::workshop_video_size(&stream).is_err());
     stream.tags.clear();
-    stream.side_data_list.push(serde_json::json!({"side_data_type":"Display Matrix"}));
+    stream.side_data_list.push(serde_json::json!({"side_data_type":"Ambient viewing environment"}));
+    assert_eq!(media::workshop_video_size(&stream).unwrap(), (2560, 720));
+    stream.side_data_list.push(serde_json::json!({"side_data_type":"Unknown geometry"}));
+    assert!(media::workshop_video_size(&stream).is_err());
+    stream.side_data_list = vec![serde_json::json!({"side_data_type":"Display Matrix"})];
     assert!(media::workshop_video_size(&stream).is_err());
 }
 
@@ -755,7 +764,7 @@ async fn automatic_position_presets_split_shared_recording_without_changing_effe
     m.cancel_positions(&p.id);
     // Rebuild analysis after a manual move, then apply the shorter alternative.
     // Neither an edit nor a process restart may make the other alternative vanish.
-    m.prepare_positions(&p.id).unwrap();
+    m.analyze_positions(&p.id, Some(&layer.id), true).unwrap();
     let wait_ready = |manager: Arc<Workshop>, pid: String, lid: String| async move {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         loop {
@@ -794,7 +803,7 @@ async fn automatic_position_presets_split_shared_recording_without_changing_effe
         &CompositionManager::open(m.state.clone()).unwrap(),
     )
     .unwrap();
-    restarted.prepare_positions(&p.id).unwrap();
+    restarted.analyze_positions(&p.id, Some(&layer.id), true).unwrap();
     let restored = wait_ready(restarted.clone(), p.id.clone(), layer.id.clone()).await;
     assert!(restored.applied.is_none(), "reopening must not apply the first choice again");
     assert_eq!(restarted.snapshot().projects[0].revision, one.projects[0].revision);

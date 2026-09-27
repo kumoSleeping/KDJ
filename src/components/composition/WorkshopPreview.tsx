@@ -16,6 +16,7 @@ import { VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
 import { getLocalVideoClock } from "../../lib/mediaSync";
 import { prepareVideoClips, previewVideoTiming, WorkshopSeekGate } from "../../lib/workshopPreviewPolicy";
 import type { WorkshopPlayback } from "../../lib/workshopPlayback";
+import { requestWorkshopFolderAccess, workshopAccessDirectory } from "../../lib/workshopFolderAccess";
 import type {
   CompositionProject,
 } from "../../types/workshop";
@@ -154,8 +155,51 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
     const next = {...old}; delete next[slot]; return next;
   });
   const visual = useMemo(() => project ? videoProject(project) : null, [project]);
-  const latest = useRef({ project, visual, playback, trimPreview });
-  latest.current = { project, visual, playback, trimPreview };
+  const previewProject = trimPreview ? project : visual;
+  const pictures = useMemo(() => {
+    const sources = new Map(previewProject?.sources.map(s => [s.id, s]));
+    return new Map(previewProject?.layers.flatMap(l => l.clips.flatMap(c => {
+      const source = sources.get(c.source_id);
+      if (!source || !isVisualSource(source)) return [];
+      const geometry = box(previewProject!, trimPreview
+        ? {...c, picture: {...c.picture, x: .5, y: .5, scale: 1, opacity: 1}} : c, source);
+      return [[c.id, { clip: c, source, geometry }] as const];
+    })));
+  }, [previewProject, Boolean(trimPreview)]);
+  const stack = useMemo(() => [...(project?.layers ?? [])].reverse()
+    .flatMap(l => [...l.clips].sort((a, b) => a.start_ms - b.start_ms)), [project]);
+  const stackOrder = useMemo(() => new Map(stack.map((c, i) => [c.id, i + 1])), [stack]);
+  const latest = useRef({ project, visual, playback, trimPreview, pictures });
+  latest.current = { project, visual, playback, trimPreview, pictures };
+  const accessDirectory = workshopAccessDirectory(playback.error);
+  const [authorizing, setAuthorizing] = useState(false);
+  const [accessError, setAccessError] = useState("");
+  const accessRequest = useRef(0);
+  useEffect(() => () => { accessRequest.current++; }, []);
+  const authorize = async (manual = false) => {
+    const pickFolder = window.kdj?.pickFolder;
+    if (!accessDirectory || !pickFolder || !project) return;
+    const request = ++accessRequest.current;
+    const owner = project.id, revision = project.revision, failure = playback.error;
+    const isCurrent = () => accessRequest.current === request && latest.current.project?.id === owner
+      && latest.current.project.revision === revision && latest.current.playback.error === failure;
+    setAuthorizing(true);
+    setAccessError("");
+    try {
+      const folder = await requestWorkshopFolderAccess(accessDirectory, pickFolder, manual);
+      if (folder && isCurrent()) {
+        latest.current.playback.retry();
+        setRetryVersion(v => v + 1);
+      }
+    } catch (e) {
+      if (isCurrent()) setAccessError(String(e));
+    } finally {
+      if (accessRequest.current === request) setAuthorizing(false);
+    }
+  };
+  useEffect(() => {
+    void authorize();
+  }, [accessDirectory, project?.id, project?.revision]);
   const gesture = useRef<{
     x: number;
     y: number;
@@ -189,12 +233,13 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
   useEffect(() => {
     let frame = 0, timer: ReturnType<typeof setTimeout> | undefined;
     let lastSync = -Infinity, lastTick = -Infinity;
+    const layouts = new WeakMap<HTMLVideoElement, ReturnType<typeof box>>();
     const schedule = () => {
       if (!frame && !document.hidden) frame = requestAnimationFrame(tick);
     };
     const tick = (now: number) => {
       frame = 0;
-      const { project, visual, playback: pb, trimPreview: inspecting } = latest.current;
+      const { project, visual, playback: pb, trimPreview: inspecting, pictures } = latest.current;
       const p = inspecting ? project : visual;
       if (!p || document.hidden) return;
       const state = useWorkshopStore.getState();
@@ -204,12 +249,13 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
       const time = pb.time(), align = !playing || now - lastSync >= 100;
       if (align) lastSync = now;
       let retry = false;
+      const authority = align && pb.trackId !== null ? getLocalVideoClock(pb.trackId) : null;
       // Video layers are composed by WebKit. No per-frame pixel copies to a
       // canvas, and no full-resolution readback onto the JavaScript thread.
       for (const video of videos.current.values()) {
-        const c = findClip(p, video.dataset.clip ?? null);
-        const s = c && p.sources.find(s => s.id === c.source_id);
-        if (!c || !s?.video) continue;
+        const picture = pictures.get(video.dataset.clip ?? "");
+        if (!picture?.source.video) continue;
+        const { clip: c, source: s, geometry: b } = picture;
         const local = inspecting ? 0 : Math.max(0, time - c.start_ms);
         const proxy = video.dataset.proxy === "true", part = Number(video.dataset.part ?? 0);
         const timing = previewVideoTiming(c, time, proxy, part, playing);
@@ -226,7 +272,6 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
         wanted.current.set(video, shouldPlay);
         if (!shouldPlay && !video.paused) video.pause();
         if (align && video.readyState >= 1) {
-          const authority = pb.trackId !== null ? getLocalVideoClock(pb.trackId) : null;
           const sourceRate = proxy || c.speed.preset !== "constant" ? 1 : c.speed.start;
           if (shouldPlay && authority) sync.current.followClock(video, {...authority, position: Math.max(0, target), rate: authority.rate * sourceRate}, (v, t) => { void sync.current.seek(v, t).catch(() => undefined); }, corrections.current.get(video), timing.preparing);
           else {
@@ -241,16 +286,22 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
           pending.current.add(video);
           void video.play().then(() => { if (!wanted.current.get(video)) video.pause(); }).catch(() => {}).finally(() => pending.current.delete(video));
         }
-        const b = inspecting ? box(p, {...c, picture: {x: .5, y: .5, scale: 1, opacity: 1}}, s) : box(p, c, s);
-        video.style.left = `${(b.x + b.mediaX * b.width) * 100}%`; video.style.top = `${(b.y + b.mediaY * b.height) * 100}%`;
-        video.style.width = `${b.width * b.mediaWidth * 100}%`; video.style.height = `${b.height * b.mediaHeight * 100}%`;
-        video.style.clipPath = b.clipPath;
-        video.style.opacity = String(!visible ? 0 : inspecting ? 1 : c.picture.opacity * fadeAlpha(c, local));
+        // Geometry changes with edits, not with the audio clock. Do not dirty
+        // layout/clip-path on every frame of an otherwise unchanged video.
+        if (layouts.get(video) !== b) {
+          layouts.set(video, b);
+          video.style.left = `${(b.x + b.mediaX * b.width) * 100}%`; video.style.top = `${(b.y + b.mediaY * b.height) * 100}%`;
+          video.style.width = `${b.width * b.mediaWidth * 100}%`; video.style.height = `${b.height * b.mediaHeight * 100}%`;
+          video.style.clipPath = b.clipPath;
+        }
+        const opacity = String(!visible ? 0 : inspecting ? 1 : c.picture.opacity * fadeAlpha(c, local));
+        if (video.style.opacity !== opacity) video.style.opacity = opacity;
         if (video.readyState >= 2) decoded.current.add(video);
         // WebKit can temporarily drop readyState during a corrective seek.
         // Keep its last decoded frame visible while ordinary playback catches up.
         const retained = shouldPlay && video.seeking && decoded.current.has(video);
-        video.style.visibility = retained || (video.readyState >= 2 && (!video.seeking || shouldPlay)) ? "visible" : "hidden";
+        const visibility = retained || (video.readyState >= 2 && (!video.seeking || shouldPlay)) ? "visible" : "hidden";
+        if (video.style.visibility !== visibility) video.style.visibility = visibility;
       }
       if (playing) schedule();
       else if (retry) { clearTimeout(timer); timer = setTimeout(schedule, 80); }
@@ -348,8 +399,6 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
     gesture.current = null;
     useWorkshopStore.getState().commit();
   };
-  const stack = [...project.layers].reverse().flatMap(l => [...l.clips].sort((a, b) => a.start_ms - b.start_ms));
-  const stackOrder = new Map(stack.map((c, i) => [c.id, i + 1]));
   return (
     <div className="vj-preview" ref={container}>
       <div
@@ -484,7 +533,10 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
       </div>
       {(error || playback.error) && (
         <div className="vj-error" role="status">
-          {error || playback.error}
+          {accessError || playback.error || error}
+          {accessDirectory && typeof window.kdj?.pickFolder === "function" && (
+            <button type="button" disabled={authorizing} onClick={() => { void authorize(true); }}>授权文件夹</button>
+          )}
           {error && <button type="button" onClick={() => setRetryVersion(v => v + 1)}>重试</button>}
         </div>
       )}
