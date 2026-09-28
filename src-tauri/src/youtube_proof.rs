@@ -360,27 +360,62 @@ fn cancel_evaluation(window: &tauri::WebviewWindow, request_id_json: &str) {
     ));
 }
 
+/// `call` runs with the installed local bundle bound to `po`. Without a bundle the script only
+/// answers `{}`, which asks the host for the script that installs one.
+fn bundle_call_script(bundle: Option<&str>, call: &str) -> Result<String, String> {
+    let prelude = proof_document_prelude()?;
+    let install = match bundle {
+        Some(bundle) => format!(
+            "if (!globalThis.__KDJ_YOUTUBE_NATIVE_PO__) (0, eval)({});",
+            serde_json::to_string(bundle)
+                .map_err(|_| "YouTube proof 本地代码序列化失败".to_string())?
+        ),
+        None => r#"if (!globalThis.__KDJ_YOUTUBE_NATIVE_PO__) return "{}";"#.to_string(),
+    };
+    Ok(format!(
+        "{prelude}\n{install}\nconst po = globalThis.__KDJ_YOUTUBE_NATIVE_PO__;\n{call}"
+    ))
+}
+
+/// Evaluates `call(false)` against what the realm already holds; only a realm that answers `{}`
+/// is sent the bundle together with `call(true)`.
+///
+/// Chromium keeps the source of every evaluated script until a major GC, which this idle realm
+/// does not reach. Sending the 177 KiB bundle and the 2.6 MiB player script with each call grew
+/// the proof WebView by 5.7 MiB per song: 1.18 GiB after 200 songs, against 60 MiB this way.
+async fn evaluate_installed(
+    window: &tauri::WebviewWindow,
+    bundle: &str,
+    call: impl Fn(bool) -> String,
+    failure: &'static str,
+) -> Result<String, String> {
+    let raw = evaluate_javascript(window, bundle_call_script(None, &call(false))?, failure).await?;
+    if raw != "{}" {
+        return Ok(raw);
+    }
+    let install = bundle_call_script(Some(bundle), &call(true))?;
+    evaluate_javascript(window, install, failure).await
+}
+
 async fn evaluate_proof(
     window: &tauri::WebviewWindow,
     bundle: String,
     binding: String,
     force_fresh: bool,
 ) -> Result<String, String> {
-    let prelude = proof_document_prelude()?;
-    let bundle_json = serde_json::to_string(&bundle)
-        .map_err(|_| "YouTube proof 本地代码序列化失败".to_string())?;
     let binding_json =
         serde_json::to_string(&binding).map_err(|_| "YouTube GVS 绑定值序列化失败".to_string())?;
-    let javascript = format!(
-        r#"
-{prelude}
-const source = {bundle_json};
-if (!globalThis.__KDJ_YOUTUBE_NATIVE_PO__) (0, eval)(source);
-const token = await globalThis.__KDJ_YOUTUBE_NATIVE_PO__.mint({binding_json}, {force_fresh});
-return JSON.stringify({{ token }});
-"#
+    let mint = format!(
+        "const token = await po.mint({binding_json}, {force_fresh});\n\
+         return JSON.stringify({{ token }});"
     );
-    let raw = evaluate_javascript(window, javascript, "YouTube proof WebView 运算失败").await?;
+    let raw = evaluate_installed(
+        window,
+        &bundle,
+        |_| mint.clone(),
+        "YouTube proof WebView 运算失败",
+    )
+    .await?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|_| "YouTube proof 原生响应无效".to_string())?;
     let token = value
@@ -431,9 +466,6 @@ async fn evaluate_player(
     operation: String,
     input: String,
 ) -> Result<String, String> {
-    let prelude = proof_document_prelude()?;
-    let bundle_json = serde_json::to_string(&bundle)
-        .map_err(|_| "YouTube player 本地代码序列化失败".to_string())?;
     let player_url_json = serde_json::to_string(&player_url)
         .map_err(|_| "YouTube player 地址序列化失败".to_string())?;
     let player_javascript_json = serde_json::to_string(&javascript)
@@ -442,18 +474,21 @@ async fn evaluate_player(
         .map_err(|_| "YouTube player 操作序列化失败".to_string())?;
     let input_json =
         serde_json::to_string(&input).map_err(|_| "YouTube player 输入序列化失败".to_string())?;
-    let source = format!(
-        r#"
-{prelude}
-const source = {bundle_json};
-if (!globalThis.__KDJ_YOUTUBE_NATIVE_PO__) (0, eval)(source);
-const value = await globalThis.__KDJ_YOUTUBE_NATIVE_PO__.player(
-  {operation_json}, {player_url_json}, {player_javascript_json}, {input_json}
-);
-return JSON.stringify({{ value }});
-"#
-    );
-    let raw = evaluate_javascript(window, source, "YouTube player WebView 运算失败").await?;
+    // Without the script, a realm that has not analysed this player answers `{}` as well.
+    let player = |install: bool| {
+        let javascript = if install {
+            player_javascript_json.as_str()
+        } else {
+            "\"\""
+        };
+        format!(
+            "const value = await po.player(\
+             {operation_json}, {player_url_json}, {javascript}, {input_json});\n\
+             return JSON.stringify({{ value }});"
+        )
+    };
+    let raw =
+        evaluate_installed(window, &bundle, player, "YouTube player WebView 运算失败").await?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|_| "YouTube player 原生响应无效".to_string())?;
     value
@@ -551,6 +586,17 @@ mod tests {
         assert!(prelude.contains(PROOF_DOCUMENT_URL));
         assert!(prelude.contains(PROOF_CSP));
         assert!(!prelude.contains("__TAURI_INTERNALS__"));
+    }
+
+    #[test]
+    fn only_the_installing_script_carries_the_bundle() {
+        let bundle = "/* __KDJ_YOUTUBE_NATIVE_PO__ */";
+        let call = "return JSON.stringify({ value: await po.player() });";
+        let lean = bundle_call_script(None, call).expect("lean script");
+        assert!(!lean.contains(bundle) && !lean.contains("(0, eval)"));
+        assert!(lean.contains(r#"return "{}";"#) && lean.ends_with(call));
+        let install = bundle_call_script(Some(bundle), call).expect("install script");
+        assert!(install.contains(&format!("(0, eval)(\"{bundle}\")")) && install.ends_with(call));
     }
 
     #[test]

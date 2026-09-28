@@ -265,13 +265,15 @@ function trustedPlayerId(rawUrl: string): string {
 async function currentPlayer(
   playerUrl: string,
   javascript: string,
-): Promise<LightweightYoutubePlayer> {
+): Promise<LightweightYoutubePlayer | undefined> {
   trustedPlayerId(playerUrl);
-  if (!javascript || javascript.length > 8 * 1024 * 1024 || javascript.includes("\0")) {
-    throw new Error("YouTube 播放器脚本无效");
-  }
   let pending = players.get(playerUrl);
   if (!pending) {
+    // The host first calls without the script and sends it only to a realm that lacks the player.
+    if (!javascript) return undefined;
+    if (javascript.length > 8 * 1024 * 1024 || javascript.includes("\0")) {
+      throw new Error("YouTube 播放器脚本无效");
+    }
     pending = Promise.resolve().then(() => LightweightYoutubePlayer.create(javascript));
     players.set(playerUrl, pending);
     void pending.catch(() => players.delete(playerUrl));
@@ -284,9 +286,10 @@ async function player(
   playerUrl: string,
   javascript: string,
   value = "",
-): Promise<string> {
+): Promise<string | undefined> {
   if (!securityBoundaryIntact()) throw new Error("YouTube 原生 player 隔离检查失败");
   const runtime = await currentPlayer(playerUrl, javascript);
+  if (!runtime) return undefined;
   if (operation === "config") return String(runtime.signatureTimestamp);
   if (operation === "decipher") return runtime.decipher(value);
   if (operation === "transform_n") return runtime.transformN(value);

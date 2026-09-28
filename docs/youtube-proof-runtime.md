@@ -33,6 +33,9 @@ WebView2 和 WebKitGTK 上。proof 运行器只是按需新建一个不可见、
 5. 成功后保留该 incognito realm，以复用昂贵的 BotGuard minter；任何超时、脚本错误
    或返回值校验失败都会销毁整个 realm，下一次用户操作从同一路径干净重建，不尝试
    备用 client、binding、proof 服务或弱隔离实现。
+6. 每次调用的脚本只携带参数。worker 与 player 脚本只在 realm 回报缺失时随安装脚本
+   发送一次：realm 会保留每段已求值脚本的源码，逐次重发会让它按每首歌约 5.7 MiB
+   无上限增长。
 
 ## 为什么选择这一套
 
