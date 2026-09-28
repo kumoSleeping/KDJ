@@ -1707,6 +1707,7 @@ export function FolderTree({
             type="button"
             className="kd-folder-caret"
             aria-label={open ? "收起" : "展开"}
+            aria-expanded={node.children.length > 0 ? open : undefined}
             disabled={node.children.length === 0}
             onClick={(event) => {
               event.stopPropagation();

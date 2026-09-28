@@ -7,11 +7,7 @@ import {
   type CSSProperties,
 } from "react";
 import { AudioWaveform, LoaderCircle, PanelTopClose } from "lucide-react";
-import type { FilterResonance, KeyNotation, Track } from "../../types";
-import {
-  channelFilterResonanceQ,
-  type EqGraphValues,
-} from "../../lib/eqGraph";
+import type { KeyNotation, Track } from "../../types";
 import { camelotColor } from "../../lib/camelot";
 import { displayTransposedTrackKey, keyTextToCamelot } from "../../lib/keyDisplay";
 import {
@@ -28,10 +24,7 @@ import { channelFaderGain, eqBandDb } from "../../lib/performanceCues";
 import { runtimePlayer, type UnifiedPlayerState } from "../../lib/unifiedPlayer";
 import { performanceWaveformAmplitudeScale } from "../../lib/waveformRenderPolicy";
 import { Panel } from "../common";
-import {
-  ArcKnob,
-  EqSpectrumChart,
-} from "./ManagerMixerControls";
+import { ArcKnob } from "./ManagerMixerControls";
 import { ManagerWaveform } from "./ManagerWaveform";
 
 function clamp(value: number, min: number, max: number): number {
@@ -99,12 +92,10 @@ function HeaderTempoControl({
 export function NowPlayingControlPanel({
   track,
   keyNotation,
-  filterResonance,
   onError,
 }: {
   track: Track;
   keyNotation: KeyNotation;
-  filterResonance: FilterResonance;
   onError(message: string): void;
 }) {
   const player = useMemo(() => runtimePlayer(), []);
@@ -230,16 +221,6 @@ export function NowPlayingControlPanel({
     applyMixer({ ...mixerRef.current, ...patch });
   };
 
-  const adjustEq = (delta: EqGraphValues) => {
-    const current = mixerRef.current;
-    applyMixer({
-      ...current,
-      low: clamp(current.low + delta.low, -1, 1),
-      mid: clamp(current.mid + delta.mid, -1, 1),
-      high: clamp(current.high + delta.high, -1, 1),
-    });
-  };
-
   const setRate = (rate: number) => {
     const bounded = clamp(rate, 0.5, 2);
     pendingTempoRef.current = bounded;
@@ -347,29 +328,16 @@ export function NowPlayingControlPanel({
         </div>
 
         <div className="kd-manager-mixer-layout">
-          <div className="kd-manager-visual-stack">
-            {detailWaveformVisible ? (
-              <ManagerWaveform
-                track={track}
-                deck={side}
-                duration={duration}
-                amplitudeScale={performanceWaveformAmplitudeScale(mixer.gain)}
-                playing={deck.playing || deck.desiredPlaying}
-                onLoadingChange={handleDetailWaveformLoading}
-              />
-            ) : null}
-            <div className="kd-manager-mixer-eq">
-              <EqSpectrumChart
-                side={side}
-                values={mixer}
-                filter={mixer.filter}
-                resonanceQ={channelFilterResonanceQ(filterResonance)}
-                playing={deck.playing}
-                onAdjust={adjustEq}
-                onReset={() => setMixer({ low: 0, mid: 0, high: 0 })}
-              />
-            </div>
-          </div>
+          {detailWaveformVisible ? (
+            <ManagerWaveform
+              track={track}
+              deck={side}
+              duration={duration}
+              amplitudeScale={performanceWaveformAmplitudeScale(mixer.gain)}
+              playing={deck.playing || deck.desiredPlaying}
+              onLoadingChange={handleDetailWaveformLoading}
+            />
+          ) : null}
           <div className="kd-manager-knob-stack">
             <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })} />
             <ArcKnob size="xs" label="FILTER" value={mixer.filter} onChange={(filter) => setMixer({ filter })} onReset={() => setMixer({ filter: 0 })} />

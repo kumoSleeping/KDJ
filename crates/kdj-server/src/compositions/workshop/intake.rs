@@ -19,6 +19,7 @@ pub struct IntakeResult {
 }
 impl Workshop {
     pub async fn intake(self: &Arc<Self>, input: Intake) -> Result<IntakeResult> {
+        let started = std::time::Instant::now();
         if input.paths.len() + input.track_ids.len() > 500
             || !input.at_ms.is_finite()
             || input.at_ms < 0.
@@ -42,6 +43,7 @@ impl Workshop {
         }
         entries.extend(input.paths.into_iter().map(|p| (p, None)));
         for (raw, tid) in entries {
+            let entry_started = std::time::Instant::now();
             let prepared: Result<(PathBuf, i64)> = async {
                 let path = std::fs::canonicalize(&raw).context("文件不存在或无法读取")?;
                 if !path.is_file() {
@@ -86,6 +88,8 @@ impl Workshop {
                 Ok((path, id))
             }
             .await;
+            tracing::debug!(target: "kdj_alignment_timing", elapsed_ms = entry_started.elapsed().as_secs_f64() * 1000.,
+                success = prepared.is_ok(), "intake entry prepared");
             match prepared {
                 Ok((_, id)) if id >= 0 => ids.push(id),
                 Ok(_) => {}
@@ -108,7 +112,11 @@ impl Workshop {
             before = self.create()?.projects.last().cloned();
         }
         let p = before.as_ref().context("无法创建任务")?;
-        match self.add(&p.id, p.revision, &ids, input.at_ms).await {
+        let add_started = std::time::Instant::now();
+        let result = self.add(&p.id, p.revision, &ids, input.at_ms).await;
+        tracing::debug!(target: "kdj_alignment_timing", add_ms = add_started.elapsed().as_secs_f64() * 1000.,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000., success = result.is_ok(), "intake finished");
+        match result {
             Ok(snapshot) => Ok(IntakeResult {
                 snapshot,
                 project_id: Some(p.id.clone()),

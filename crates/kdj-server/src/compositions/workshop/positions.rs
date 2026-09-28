@@ -534,6 +534,7 @@ impl Workshop {
         key: &str,
         task: &PositionTask,
     ) -> Result<(Vec<PositionPreset>, String)> {
+        let task_started = std::time::Instant::now();
         let _slot = tokio::select! {_=task.cancel.cancelled()=>bail!("匹配已取消"),slot=self.analysis_slots.acquire()=>slot?};
         let cancel = task.cancel.clone();
         let _work = tokio::task::spawn_blocking(move || {
@@ -544,6 +545,8 @@ impl Workshop {
                 .map_err(|_| anyhow::anyhow!("匹配已取消"))
         })
         .await??;
+        tracing::debug!(target: "kdj_alignment_timing", layer = %task.base.id,
+            elapsed_ms = task_started.elapsed().as_secs_f64() * 1000., "position scheduler acquired");
         let reference = task.reference.as_ref().context("缺少参考音频")?;
         let cache_key = render::key(&(
             "positions-v15-short-sequence-review",
@@ -561,6 +564,8 @@ impl Workshop {
         }
         if let Ok(bytes) = tokio::fs::read(&cache).await {
             if let Ok(value) = serde_json::from_slice::<(Vec<PositionPreset>, String)>(&bytes) {
+                tracing::debug!(target: "kdj_alignment_timing", layer = %task.base.id, cache_hit = true,
+                    elapsed_ms = task_started.elapsed().as_secs_f64() * 1000., "position analysis finished");
                 return Ok(value);
             }
         }
@@ -736,6 +741,9 @@ impl Workshop {
             tokio::fs::rename(temp, cache).await?;
             self.trim_cache();
         }
+        tracing::debug!(target: "kdj_alignment_timing", layer = %task.base.id, cache_hit = false,
+            elapsed_ms = task_started.elapsed().as_secs_f64() * 1000., presets = result.0.len(),
+            "position analysis finished");
         Ok(result)
     }
     pub fn apply_positions(

@@ -3,7 +3,23 @@
 一个主题包就是一个文件夹。放进客户端数据目录的 `themes/` 下（设置 → General → 主题旁的文件夹按钮可直接打开），
 再到设置里选中即可。分享时把整个文件夹打包发给对方，对方解压到同一位置。
 
-主题包不随仓库和安装包分发。开发时把主题文件夹放在本目录下（子文件夹已被 git 忽略），截图脚本会直接读取。
+## 官方主题与发布
+
+- **Shiro**（默认浅色）和 **Dark**（默认深色）是内置基础外观，无需下载。顶栏原日夜按钮轮播 Shiro → Dark → 已安装的官方主题 → 其他已安装主题；不会自动下载。
+- **Sakura98** 为官方可选主题，在设置中点击下载；安装成功后自动切换。
+- 官方源文件位于本仓库 `themes/official/`，客户端只从
+  `https://raw.githubusercontent.com/kumoSleeping/KDJ/main/themes/official/` 按需下载。
+  发布前需将该目录与应用代码一同推送到 GitHub；本地未推送的改动不会出现在下载源。
+- **发行安装包不包含可选主题、主题图片或字体**。不要把 `themes/` 加入 `public/`、Vite 导入或 Tauri `bundle.resources`。
+  客户端启动不自动下载，未安装时官方主题仅显示下载操作。
+- 安装使用有大小上限的临时目录、逐文件 SHA-256 校验和同磁盘重命名。失败保留现有主题；更新前将旧文件夹完整保留为
+  数据目录 `themes/.backup-<id>-<随机标识>/`，其中的自定义文件不会被删除。
+- Sakura98 沿用内部 ID `sakulaptop98`，改显示名称不迁移或重写用户设置。
+
+维护官方主题后运行 `node scripts/prepare-official-themes.mjs` 更新下载所需的文件摘要。
+将主题内容和 `theme.json` 同次提交。
+
+第三方本地主题仍可放在本目录直接子文件夹中（这些文件夹被 git 忽略），截图脚本会直接读取。
 
 ## 目录结构
 
@@ -23,18 +39,14 @@ themes/<id>/
 ```json
 {
   "kdj": 1,
-  "id": "sketch",
-  "name": "手绘",
-  "version": "1.0.0",
+  "id": "sakulaptop98",
+  "name": "Sakura98",
+  "version": "6.1.2",
   "author": "…",
-  "modes": ["light", "dark"],
+  "modes": ["light"],
   "css": "theme.css",
-  "svg": "filters.svg",
-  "js": "theme.js",
-  "window": { "light": "#f8f3e8", "dark": "#23302b" },
-  "options": [
-    { "id": "icon-filter", "type": "boolean", "label": "图标滤镜", "default": true }
-  ]
+  "window": { "light": "#efb3c4" },
+  "options": []
 }
 ```
 
@@ -42,27 +54,26 @@ themes/<id>/
 |---|---|
 | `kdj` | 格式版本，目前固定 `1` |
 | `id` | `^[a-z0-9][a-z0-9-]{0,31}$`，与文件夹同名 |
-| `modes` | 支持的模式。只写一个时，顶栏的深浅切换按钮停用，界面固定为该模式 |
+| `modes` | 支持的模式。只写一个时界面固定为该模式，但顶栏仍可轮播切到其他主题；支持两种时沿用最近的基础深浅选择 |
 | `window` | 每个支持的模式一个 `#rrggbb`：原生窗口底色，也是启动首帧的底色，应与该模式的 `--kd-bg` 一致 |
 | `options` | 用户可在设置里开关的选项，目前只支持 `boolean` |
-| `css` / `svg` / `js` | 包内相对路径，不能含 `..` |
+| `css` / `svg` / `js` | 包内相对路径，不能含 `..`；官方主题不使用 JS |
+| `camelot` | 可选 `grid`：将调性圆盘替换为可点击的调性表；默认保留圆盘 |
+| `files` | 官方下载清单：资源相对路径到 SHA-256 的映射，由维护脚本生成 |
 
 ## 生效后的页面状态
 
 ```html
-<html data-theme="dark" data-theme-pack="sketch" data-theme-opt-icon-filter>
+<html data-theme="light" data-theme-pack="sakulaptop98">
 ```
 
-- `data-theme` 仍是 `light` / `dark`，和默认主题共用。
+- `data-theme` 与默认主题共用 `light` / `dark`；Sakura98 只支持 `light`，选中后固定浅色。
 - 选项打开时才有对应的 `data-theme-opt-<id>` 属性。
 
 所有规则都用主题包属性限定作用域：
 
 ```css
-:root[data-theme-pack="sketch"] { --kd-font: "Kalam", "WenKai", cursive; }
-:root[data-theme-pack="sketch"][data-theme="light"] { --kd-bg: #f8f3e8; }
-:root[data-theme-pack="sketch"][data-theme="dark"]  { --kd-bg: #23302b; }
-:root[data-theme-pack="sketch"][data-theme-opt-icon-filter] svg.lucide { filter: url(#sketch-rough); }
+:root[data-theme-pack="sakulaptop98"] { --kd-bg: #efb3c4; }
 ```
 
 ## 怎么改外观
@@ -83,7 +94,8 @@ themes/<id>/
 |---|---|
 | `--kd-wave-low` `--kd-wave-mid` `--kd-wave-high` | 波形低 / 中 / 高频的颜料色。三者按各频段强度相加混合 |
 | `--kd-wave-detail-bg` | 调音台细节波形的底色 |
-| `--kd-panel-inset` | （已有令牌）总览波形据此计算对比度 |
+| `--kd-wave-overview-bg` | 总览波形的底色；与 CSS 底板设为同色，供原有对比度校准使用，不改变频段配色 |
+| `--kd-panel-inset` | （已有令牌）未设置总览波形底色时，对比度校准回退到此值 |
 | `--kd-vinyl-body` `--kd-vinyl-groove` `--kd-vinyl-label` | 拖拽曲目时的唱片预览图 |
 | `--kd-eq-1` … `--kd-eq-5` | EQ 频谱渐变，从低电平到高电平 |
 | `--kd-font-code` | 代码类文本（AI 提示词文本框、重复曲目质量报告）的字体。把 `--kd-font-mono` 换成数字字形时，用它让这两处保持等宽字体 |
@@ -125,7 +137,8 @@ export default {
 
 ## 字体
 
-字体放在主题自己的 `fonts/` 里，用相对路径引用。分发时记得附上字体的许可证说明。
+第三方主题可将字体放在自己的 `fonts/` 里，用相对路径引用，并附字体许可证。
+主题如需外部字体，应随主题提供相应的字体许可证。网络失败时应回退到系统字体；官方主题不放行远程脚本。
 
 ## 预览与自查
 

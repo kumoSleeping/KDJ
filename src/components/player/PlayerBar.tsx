@@ -187,6 +187,7 @@ import {
   shouldRequestLocalVideoSessionForTrack,
 } from "../../lib/playerTransitionPolicy";
 import { LyricsHost } from "./LyricsHost";
+import { LyricsButtonMenu } from "./LyricsButtonMenu";
 import { nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
 import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
 import { getDeckOutputGain, useMasterVolume } from "../../lib/masterVolume";
@@ -549,6 +550,7 @@ export function PlayerBar() {
   const filterResonance = useAppStore((state) => state.settings?.filter_resonance ?? "high");
   const [enqueueBusy, setEnqueueBusy] = useState(false);
   const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
+  const [lyricsMenu, setLyricsMenu] = useState<{ x: number; y: number; top: number; trackId: number | null } | null>(null);
   const setDesktopLyricsOn = useLyricsPrefs((state) => state.setDesktopEnabled);
   const canDesktopLyrics = Boolean(window.kdj?.desktopLyrics);
   const pipMode = useVideoPip((state) => state.mode);
@@ -4657,6 +4659,8 @@ export function PlayerBar() {
                         : "打开悬浮歌词"
                 }
                 aria-pressed={sharedFloatOn}
+                aria-haspopup={!video ? "menu" : undefined}
+                aria-expanded={!video ? lyricsMenu !== null && lyricsMenu.trackId === (displayTrack?.id ?? null) : undefined}
                 data-on={sharedFloatOn ? "true" : undefined}
                 disabled={networkPreview}
                 title={
@@ -4667,9 +4671,20 @@ export function PlayerBar() {
                         ? "本地视频：浮动小窗。点一下改为详情播放"
                         : "本地视频：详情播放。点一下改为浮动小窗"
                       : sharedFloatOn
-                        ? "悬浮歌词：开。点一下关闭"
-                        : "打开悬浮歌词"
+                        ? "悬浮歌词：开。点一下关闭；右键设置歌词"
+                        : "打开悬浮歌词；右键设置歌词"
                 }
+                onContextMenu={(event) => {
+                  if (video || networkPreview) return;
+                  event.preventDefault();
+                  setLyricsMenu({ x: event.clientX, y: event.clientY, top: event.currentTarget.getBoundingClientRect().top, trackId: displayTrack?.id ?? null });
+                }}
+                onKeyDown={(event) => {
+                  if (video || networkPreview || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setLyricsMenu({ x: rect.left, y: rect.bottom + 4, top: rect.top, trackId: displayTrack?.id ?? null });
+                }}
                 onClick={() => {
                   if (networkPreview) return;
                   if (video) cyclePipMode();
@@ -4678,6 +4693,9 @@ export function PlayerBar() {
               >
                 <PictureInPicture2 size={13} />
               </button>
+            ) : null}
+            {lyricsMenu && !video && lyricsMenu.trackId === (displayTrack?.id ?? null) ? (
+              <LyricsButtonMenu {...lyricsMenu} track={displayTrack ?? null} onClose={() => setLyricsMenu(null)} />
             ) : null}
           </div>
           <label

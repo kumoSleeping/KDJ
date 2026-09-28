@@ -6,7 +6,9 @@ import {
   CheckSquare,
   Copy,
   Download,
+  Film,
   LocateFixed,
+  ListFilter,
   Music2,
   Pause,
   Play,
@@ -214,6 +216,24 @@ export function LibraryWorkRail({
     </button>
   );
 
+  const mediaLabels = { all: "默认", audio: "仅音频", video: "仅视频" } as const;
+  const nextMedia = filter.media === "all" ? "audio" : filter.media === "audio" ? "video" : "all";
+  const mediaFilterToggle = (
+    <button
+      type="button"
+      className="kd-activity-search-toggle"
+      data-action="media-filter"
+      data-active={filter.media !== "all" ? "true" : undefined}
+      aria-label={`媒体筛选：${mediaLabels[filter.media]}，点击切换为${mediaLabels[nextMedia]}`}
+      title={`媒体筛选：${mediaLabels[filter.media]} → ${mediaLabels[nextMedia]}`}
+      onClick={() => setFilter({ media: nextMedia })}
+    >
+      {filter.media === "audio" ? <Music2 size={14} strokeWidth={2.25} aria-hidden="true" />
+        : filter.media === "video" ? <Film size={14} strokeWidth={2.25} aria-hidden="true" />
+          : <ListFilter size={14} strokeWidth={2.25} aria-hidden="true" />}
+    </button>
+  );
+
   const localPanePinToggle = onLocalPanePinnedChange ? (
     <WorkRailPin pinned={localPanePinned} onChange={onLocalPanePinnedChange} label="本地曲库"
       title={localPanePinned ? "本地曲库已固定；在线内容会并排打开" : "当前为覆盖打开；点击固定本地曲库"} />
@@ -236,6 +256,7 @@ export function LibraryWorkRail({
     <LibrarySearchTools value={filter.q} folder={filter.folder} selecting={selecting}
       onChange={(value) => setFilter({ q: value })}>
       {locatePlayingToggle}
+      {mediaFilterToggle}
       {localPanePinToggle}
       {aggregateSearchToggle}
       {asideToggle}

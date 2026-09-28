@@ -1,6 +1,11 @@
 import { StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { RootErrorBoundary } from "./components/RootErrorBoundary";
+import { installDiagnostics, captureDiagnostic } from "./lib/diagnostics";
+
+// A diagnostic hook must never prevent the application itself from booting.
+try { installDiagnostics(); }
+catch (error) { captureDiagnostic("runtime", "diagnostics.install", error); }
 
 const root = document.getElementById("root");
 if (!root) throw new Error("找不到 #root，index.html 被改坏了");
@@ -34,6 +39,11 @@ async function bootstrap(): Promise<void> {
     // settings 是异步拉回来的，没到之前不动主题；首帧由 theme-init.js 恢复。
     const theme = appStoreModule.useAppStore.getState().settings?.theme;
     if (theme) appStoreModule.applyTheme(theme);
+    else if (windowKind) {
+      // Auxiliary windows do not bootstrap the library/settings store. Keep the
+      // main window's snapshot mode, including single-mode theme overrides.
+      appStoreModule.applyTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
+    }
   };
   appStoreModule.useAppStore.subscribe(syncTheme);
   themeModule.useThemePack.subscribe(syncTheme);
@@ -44,6 +54,7 @@ async function bootstrap(): Promise<void> {
   try {
     await bridgeModule.initBridge();
   } catch (error) {
+    captureDiagnostic("runtime", "bridge.bootstrap", error);
     mount.textContent = `无法连接本地服务：${(error as Error).message}`;
     return;
   }
@@ -64,7 +75,10 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  if (isLyricsWindow) {
+  if (windowKind === "live-vj") {
+    const { LiveVjOutput } = await import("./components/composition/LiveVjOutput");
+    render(<LiveVjOutput />);
+  } else if (isLyricsWindow) {
     const { DesktopLyricsOverlay } = await import("./components/player/DesktopLyricsOverlay");
     render(<DesktopLyricsOverlay />);
   } else {
@@ -73,4 +87,7 @@ async function bootstrap(): Promise<void> {
   }
 }
 
-void bootstrap();
+void bootstrap().catch(error => {
+  captureDiagnostic("runtime", "bootstrap", error);
+  root.textContent = `启动失败：${error instanceof Error ? error.message : String(error)}`;
+});

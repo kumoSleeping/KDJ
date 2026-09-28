@@ -458,11 +458,12 @@ export function drawWaveformCanvas(
     ? waveformEdgeScales(columnAmp, columnKnown, 4, 0.02, columns.edgeScale)
     : null;
   if (releaseOverview) {
-    // 两个常量就是默认主题 --kd-panel-inset 的值；主题包改了面板底色，对比度跟着走
-    const background = themeRgb("--kd-panel-inset", typeof document !== "undefined"
+    // Overview wells may differ from input/list wells. Keep contrast calibrated
+    // to the actual backdrop without remapping the signal's frequency colours.
+    const background = themeRgb("--kd-wave-overview-bg", themeRgb("--kd-panel-inset", typeof document !== "undefined"
       && document.documentElement?.dataset.theme === "light"
       ? RELEASE_OVERVIEW_LIGHT_BACKGROUND
-      : RELEASE_OVERVIEW_DARK_BACKGROUND);
+      : RELEASE_OVERVIEW_DARK_BACKGROUND));
     drawReleaseOverviewColumns(
       ctx,
       columns,

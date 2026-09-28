@@ -43,6 +43,7 @@ import {
 } from "../../lib/songPreview";
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
+import { LiveVjPanel } from "../composition/LiveVjPanel";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -268,7 +269,9 @@ const VisualizerStudioPanel = lazy(() => import("../composition/VisualizerStudio
  * 搜的时候本地还在眼前，也不被队列面板打断。
  */
 export function Workspace() {
-  const visualizerOpen = useVisualizerStudioStore(state => state.track !== null);
+  const compositionMode = useAppStore(state => state.compositionMode);
+  const visualizerTrackOpen = useVisualizerStudioStore(state => state.track !== null);
+  const liveVjOpen = compositionMode === "live-vj";
   const settings = useAppStore((state) => state.settings);
   const searchCapabilities = useAppStore((state) => state.searchCapabilities);
   const listMode = useAppStore((state) => state.listMode);
@@ -1649,7 +1652,7 @@ export function Workspace() {
       const detail = (event as CustomEvent<{ source?: string; trackId?: number }>).detail;
       const source = detail?.source;
       const isLocatePlaying = source === "locate-playing";
-      const explicitLocate = source === "player-deck" || isLocatePlaying;
+      const explicitLocate = source === "player-deck" || source === "visualizer" || isLocatePlaying;
       // 竖屏只有显式定位（唱盘 / 「定位正在播」）可以拉开详情；被动事件不弹抽屉。
       if (portrait && !explicitLocate) return;
       // 横屏锁定只拦歌曲/视频的自动事件；显式定位必须强制打开。
@@ -1769,7 +1772,7 @@ export function Workspace() {
     !realOverlayAside &&
     detailPinned &&
     trackAsideFace === "detail" &&
-    Boolean(detailTrack);
+    Boolean(detailTrack || visualizerTrackOpen);
   const trackAside = lyricsAside || detailAside;
   const hasAsideContent = realOverlayAside || trackAside;
   const showAside = layout === "wide" && hasAsideContent;
@@ -1793,11 +1796,10 @@ export function Workspace() {
       closeAside();
     };
     const editor = useVisualizerStudioStore.getState();
-    if (!showSearchTips && useAppStore.getState().showComposition && editor.track && editor.beforeClose) {
-      const epoch = useAppStore.getState().compositionPanelEpoch;
+    if (!showSearchTips && editor.track && editor.beforeClose) {
+      const trackId = editor.track?.id;
       void editor.beforeClose().then(accepted => {
-        const current = useAppStore.getState();
-        if (accepted && current.showComposition && current.compositionPanelEpoch === epoch) finish();
+        if (accepted && useVisualizerStudioStore.getState().track === null && trackId !== undefined) finish();
       });
     } else finish();
   }, [closeAside, showSearchTips]);
@@ -1898,7 +1900,7 @@ export function Workspace() {
       className="kd-aside-head-close"
       data-pinned={compositionPinned ? "true" : undefined}
       aria-pressed={compositionPinned}
-      aria-label={`${compositionPinned ? "取消固定" : "固定"} ${visualizerOpen ? "音频可视化" : "工作站"}`}
+      aria-label={`${compositionPinned ? "取消固定" : "固定"} ${liveVjOpen ? "自动 VJ" : "视频项目与导出"}`}
       title={compositionPinned ? "已固定；点击恢复随内容切换自动收起" : "固定右侧面板，不被选歌和切换列表顶掉"}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={() => setCompositionPinned(!compositionPinned)}
@@ -2010,20 +2012,34 @@ export function Workspace() {
           : queueAside
             ? "下载队列"
             : showComposition
-              ? visualizerOpen ? "音频可视化" : "工作站"
+              ? liveVjOpen ? "自动 VJ" : "视频项目与导出"
             : showTrackFaceSwitch
               ? trackAsideFace === "lyrics"
                 ? "歌词"
-                : "曲目详情"
+                : visualizerTrackOpen ? "可视化详细调整" : "曲目详情"
               : lyricsAside
                 ? "歌词"
                 : detailAside
                   ? "曲目详情"
                   : "";
-  const workshopBackSlot = asideLabel === "音频可视化"
-    ? <button type="button" className="kd-aside-head-close" aria-label="返回工作站" title="返回工作站"
+  const workshopBackSlot = asideLabel === "可视化详细调整"
+    ? <button type="button" className="kd-aside-head-close" aria-label="返回曲目详情" title="返回曲目详情"
         onClick={() => { const editor = useVisualizerStudioStore.getState(); if (editor.beforeClose) void editor.beforeClose(); else editor.close(); }}><ArrowLeft size={14} /></button>
-    : asideLabel === "工作站" ? <span className="vj-workshop-back-slot" ref={setWorkshopBackTarget} /> : null;
+    : asideLabel === "视频项目与导出" || asideLabel === "自动 VJ" ? <span className="vj-workshop-back-slot" ref={setWorkshopBackTarget} /> : null;
+  const selectVideoMode = (mode: "workshop" | "live-vj") => {
+    void (async () => {
+      const editor = useVisualizerStudioStore.getState();
+      if (editor.track) {
+        if (editor.beforeClose) { if (!await editor.beforeClose()) return; }
+        else editor.close();
+      }
+      await useWorkshopStore.getState().flush();
+      setShowSearchTips(false);
+      const app = useAppStore.getState();
+      if (mode === "live-vj") app.openLiveVjPanel();
+      else app.openCompositionPanel();
+    })().catch(error => useWorkshopStore.setState({error: String(error)}));
+  };
   const asidePanel = showSearchTips ? (
     <SearchTipsPanel />
   ) : showFolders ? (
@@ -2059,24 +2075,29 @@ export function Workspace() {
   ) : queueAside ? (
     <QueuePanel />
   ) : showComposition ? (
-    visualizerOpen
-      ? <Suspense fallback={null}><VisualizerStudioPanel onClose={closeAsideForUser} /></Suspense>
-      : <CompositionWorkshop toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />
+    <div className="kd-video-workspace">
+      {liveVjOpen ? <LiveVjPanel toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />
+        : <CompositionWorkshop toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />}
+    </div>
   ) : lyricsAside ? (
     <LyricsView track={lyricsTrack} />
-  ) : detailAside ? trackDetailPanel : null;
+  ) : detailAside ? visualizerTrackOpen
+    ? <Suspense fallback={null}><VisualizerStudioPanel onClose={() => {
+        const editor = useVisualizerStudioStore.getState();
+        if (editor.beforeClose) void editor.beforeClose(); else editor.close();
+      }} /></Suspense>
+    : trackDetailPanel : null;
   const lastVisualizerPlaybackId = useRef(playingTrack?.id ?? null);
   useEffect(() => {
-    if (!playingTrack) return; // Keep the last identity through transient empty snapshots.
-    if (!visualizerOpen || !showComposition || showSearchTips) {
+    if (!playingTrack) return;
+    if (!visualizerTrackOpen || showSearchTips) {
       lastVisualizerPlaybackId.current = playingTrack.id;
       return;
     }
     if (lastVisualizerPlaybackId.current === playingTrack.id) return;
     lastVisualizerPlaybackId.current = playingTrack.id;
-    // This updates only the editor, never the right-panel route or the transport.
     useVisualizerStudioStore.getState().follow(playingTrack);
-  }, [playingTrack, visualizerOpen, showComposition, showSearchTips]);
+  }, [playingTrack, visualizerTrackOpen, showSearchTips]);
   const queueOpen =
     showQueue &&
     !showSearchTips &&
@@ -2635,20 +2656,7 @@ export function Workspace() {
               queueCount={activeDownloads}
               onQueue={toggleQueueDrawer}
               compositionOpen={showComposition && !showSearchTips}
-              onComposition={() => {
-                const app = useAppStore.getState();
-                const editor = useVisualizerStudioStore.getState();
-                if (editor.track) {
-                  void (async () => {
-                    if (editor.beforeClose) { if (!await editor.beforeClose()) return; }
-                    else editor.close();
-                    await useWorkshopStore.getState().flush();
-                    useWorkshopStore.setState({ expandedId: null });
-                    setShowSearchTips(false); useAppStore.getState().openCompositionPanel();
-                  })().catch(error => useWorkshopStore.setState({ error: String(error) }));
-                } else if (showSearchTips && app.showComposition) { setShowSearchTips(false); app.openCompositionPanel(); }
-                else app.toggleCompositionPanel();
-              }}
+              onComposition={selectVideoMode}
               onOpenUpdate={openUpdateFromChrome}
             />
           }

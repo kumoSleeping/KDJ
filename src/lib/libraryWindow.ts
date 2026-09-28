@@ -8,6 +8,7 @@ export interface LibraryQuery {
   bpm_max?: number;
   energy_min?: number;
   analyzed?: boolean;
+  media?: "audio" | "video";
   folder?: string;
   folder_deep?: boolean;
   sort?: string;

@@ -16,7 +16,8 @@ export const useVisualizerStudioStore = create<State>((set, get) => ({
   setBeforeClose: beforeClose => set({ beforeClose }),
   open: track => {
     set({ track: { ...track }, fromPlayback: false });
-    useAppStore.getState().openCompositionPanel();
+    useAppStore.getState().dismissOverlay();
+    window.dispatchEvent(new CustomEvent("kd:show-detail", { detail: { source: "visualizer", trackId: track.id } }));
   },
   follow: track => {
     if (track.id <= 0 || get().track?.id === track.id) return;

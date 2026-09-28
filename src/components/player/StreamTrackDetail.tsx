@@ -313,7 +313,6 @@ export function StreamTrackDetail({ track }: { track: Track }) {
             key="now-playing-control"
             track={analyzedTrack}
             keyNotation={settings?.key_notation ?? "camelot"}
-            filterResonance={settings?.filter_resonance ?? "high"}
             onError={setActionError}
           />
         ) : null}

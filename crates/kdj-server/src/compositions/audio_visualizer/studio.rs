@@ -186,6 +186,7 @@ async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Ar
         let result = render(&p, &audio, &output, job.clone()).await;
         let mut g = job.inner.lock().unwrap(); g.pixels = None; g.snapshot.demand = None;
         if let Err(error) = result {
+            if !job.cancel.is_cancelled() { tracing::error!(error = %format!("{error:#}"), phase = %g.snapshot.phase, "可视化合成导出失败"); }
             if g.snapshot.phase != "done" {
                 g.snapshot.phase = if job.cancel.is_cancelled() { "canceled" } else { "failed" }.into();
                 g.snapshot.error = format!("{error:#}"); g.snapshot.status = if job.cancel.is_cancelled() { "已取消并清理临时文件" } else { "导出失败" }.into();

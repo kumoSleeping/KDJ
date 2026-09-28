@@ -3,7 +3,7 @@ import { ChevronDown } from "lucide-react";
 import { ContextMenu } from "../common/ContextMenu";
 import type { LyricsEngine } from "../../lib/lyricsPrefs";
 
-const sources: { value: LyricsEngine; label: string }[] = [
+export const lyricSources: { value: LyricsEngine; label: string }[] = [
   { value: "wyy", label: "网易云" },
   { value: "qqm", label: "QQ 音乐" },
   { value: "ytm", label: "YouTube Music" },
@@ -18,7 +18,7 @@ export function LyricsSourcePicker({ platform, disabled = false, matching = fals
 }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const [anchor, setAnchor] = useState<{ x: number; y: number; top: number } | null>(null);
-  const label = sources.find(source => source.value === platform)?.label ?? "歌词来源";
+  const label = lyricSources.find(source => source.value === platform)?.label ?? "歌词来源";
   useEffect(() => {
     if (disabled || matching) setAnchor(null);
   }, [disabled, matching]);
@@ -58,9 +58,9 @@ export function LyricsSourcePicker({ platform, disabled = false, matching = fals
       {matching ? "匹配中…" : label}<ChevronDown size={12} aria-hidden="true" />
     </button>
     {anchor && <ContextMenu x={anchor.x} y={anchor.y} anchorTop={anchor.top} onClose={() => setAnchor(null)} className="kd-lyrics-source-menu">
-      {sources.map((source, index) => <button key={source.value} type="button" role="menuitemradio"
+      {lyricSources.map((source, index) => <button key={source.value} type="button" role="menuitemradio"
         aria-checked={platform === source.value}
-        ref={node => { if (node && (platform === source.value || (!sources.some(item => item.value === platform) && index === 0))) node.focus(); }}
+        ref={node => { if (node && (platform === source.value || (!lyricSources.some(item => item.value === platform) && index === 0))) node.focus(); }}
         onKeyDown={navigate} onClick={() => { closeAndFocus(); onSelect(source.value); }}>
         {source.label}
       </button>)}

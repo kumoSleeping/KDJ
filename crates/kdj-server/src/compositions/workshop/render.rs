@@ -973,7 +973,9 @@ pub(super) async fn alignment_pcm(
         source_id: c.source_id.clone(),
         clips: vec![c.clone()],
     }];
+    let started = std::time::Instant::now();
     let mut args = audio_args(&p, 0., c.duration(), cancel).await?;
+    let prepare_ms = started.elapsed().as_secs_f64() * 1000.;
     let index = args
         .iter()
         .rposition(|s| s == "48000")
@@ -981,6 +983,7 @@ pub(super) async fn alignment_pcm(
     args[index] = "8000".into();
     let index = args.iter().rposition(|s| s == "2").context("缺少通道")?;
     args[index] = "1".into();
+    let decode_started = std::time::Instant::now();
     let bytes = media::capture(
         &kdj_providers::ffmpeg::binary()?,
         &args,
@@ -989,10 +992,16 @@ pub(super) async fn alignment_pcm(
         cancel,
     )
     .await?;
-    Ok(bytes
-        .chunks_exact(2)
+    let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.;
+    let convert_started = std::time::Instant::now();
+    let pcm = bytes.chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.)
-        .collect())
+        .collect();
+    tracing::debug!(target: "kdj_alignment_timing", source = %c.source_id,
+        source_in_ms = c.source_in_ms, duration_ms = c.duration(), bytes = bytes.len(),
+        prepare_ms, decode_ms, convert_ms = convert_started.elapsed().as_secs_f64() * 1000.,
+        "alignment PCM ready");
+    Ok(pcm)
 }
 
 impl Workshop {

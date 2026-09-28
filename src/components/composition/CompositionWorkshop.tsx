@@ -22,6 +22,9 @@ import {
 } from "lucide-react";
 import { useCompositionStore } from "../../stores/compositionStore";
 import { useWorkshopStore } from "../../stores/workshopStore";
+import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
+import { visualizerExportActive, visualizerExportStartable } from "../../lib/visualizerExportQueue";
+import { VisualizerExportTasks } from "./VisualizerExportTasks";
 import {
   isVisualSource,
   adjustClip,
@@ -47,12 +50,8 @@ import { WorkshopSubtitleEditor } from "./WorkshopSubtitleEditor";
 import { WorkshopToolbar, WorkshopToolbarTarget } from "./WorkshopToolbar";
 import { WorkshopExportSettings } from "./WorkshopExport";
 import { WorkshopMediaTools } from "./WorkshopMediaTools";
-import { WorkshopVisualizerAction } from "./WorkshopVisualizerAction";
 import { canCancelExport } from "./WorkshopCancelButton";
 import { QueueStateMark } from "../queue/QueuePrimitives";
-import { VisualizerExportTasks } from "./VisualizerExportTasks";
-import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
-import { visualizerExportActive, visualizerExportStartable } from "../../lib/visualizerExportQueue";
 import { api } from "../../lib/api";
 import { useWorkshopUndoShortcuts } from "../../lib/useWorkshopUndoShortcuts";
 import { WorkshopCancelButton } from "./WorkshopCancelButton";
@@ -259,7 +258,6 @@ function WorkshopEditor() {
         </span>
         <WorkshopExportSettings />
         <WorkshopMediaTools />
-        <WorkshopVisualizerAction editing />
         <button type="button" aria-label="添加字幕" disabled={!p || saving > 0}
           onClick={() => { useWorkshopStore.getState().commit(); setSubtitleEditor(true); }}><Type size={15} />字幕</button>
         <div className="vj-menu-anchor">
@@ -510,7 +508,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
   const [canceling, setCanceling] = useState(false);
   useEffect(() => {
     void useWorkshopStore.getState().refresh();
-    void useVisualizerExportStore.getState().initialize().catch(() => undefined);
+    void useVisualizerExportStore.getState().initialize().catch(e => useVisualizerExportStore.setState({ error: String(e) }));
   }, []);
   const openProject = async (id: string) => {
     await useWorkshopStore.getState().flush();
@@ -522,7 +520,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
   };
   const backButton = <button type="button" className="kd-aside-head-close" aria-label="返回任务列表" title="返回任务列表"
     onPointerDown={e => e.stopPropagation()} onClick={() => void returnToTasks()}><ChevronLeft size={14} /></button>;
-  return <WorkshopToolbarTarget.Provider value={toolbarTarget}><div data-vj-drop="" className="vj-workshop vj-task-list" aria-label="工作站任务列表"
+  return <WorkshopToolbarTarget.Provider value={toolbarTarget}><div data-vj-drop="" className="vj-workshop vj-task-list" aria-label="视频项目任务列表"
     onDragOver={e => { if (isTrackDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } }}
     onDrop={e => {
       if (e.defaultPrevented) return;
@@ -530,17 +528,20 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
       if (ids.length) { e.preventDefault(); finishTrackDrop(); void useWorkshopStore.getState().add(ids); }
     }}>
     {expanded !== null && (backTarget ? createPortal(backButton, backTarget)
-      : <div className="vj-editor-navigation">{backButton}<span>工作站</span></div>)}
+      : <div className="vj-editor-navigation">{backButton}<span>视频项目</span></div>)}
     {expanded === null && <WorkshopToolbar>
       <button aria-label="新建任务" disabled={saving > 0} onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={16} /></button>
-      <WorkshopVisualizerAction />
       <span className="vj-spacer" />
-      <button disabled={saving > 0 || submitting || (!visualizerTasks.some(visualizerExportStartable) && !projects.some(p => projectDuration(p) > 0 && !jobs.some(j => j.project_id === p.id && ["queued","rendering","validating","committing","importing"].includes(j.phase))))} onClick={() => {
-        useVisualizerExportStore.getState().start();
-        void useWorkshopStore.getState().exportAll();
+      <button disabled={saving > 0 || submitting || !(projects.some(p => projectDuration(p) > 0 && !jobs.some(j => j.project_id === p.id && ["queued","rendering","validating","committing","importing"].includes(j.phase))) || visualizerTasks.some(visualizerExportStartable))} onClick={() => {
+        if (projects.some(p => projectDuration(p) > 0 && !jobs.some(j => j.project_id === p.id && ["queued","rendering","validating","committing","importing"].includes(j.phase)))) void useWorkshopStore.getState().exportAll();
+        if (visualizerTasks.some(visualizerExportStartable)) void useVisualizerExportStore.getState().start();
       }}><Download size={14} />全部导出</button>
       {(submitting || jobs.some(canCancelExport) || visualizerTasks.some(visualizerExportActive)) && <button disabled={canceling} onClick={() => {
-        setCanceling(true); void Promise.all([useWorkshopStore.getState().cancelAllExports(), useVisualizerExportStore.getState().cancel()]).catch(e => useWorkshopStore.setState({error:String(e)})).finally(() => setCanceling(false));
+        setCanceling(true);
+        void Promise.all([
+          useWorkshopStore.getState().cancelAllExports().catch(e => useWorkshopStore.setState({error:String(e)})),
+          useVisualizerExportStore.getState().cancel().catch(e => useVisualizerExportStore.setState({error:String(e)})),
+        ]).finally(() => setCanceling(false));
       }}>{canceling ? "正在取消" : "全部取消"}</button>}
     </WorkshopToolbar>}
     <InlineNotice className="vj-operation-notice" text={error}
@@ -550,8 +551,6 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
     <InlineNotice className="vj-operation-notice" text={recoveryError ?? ""}
       onDismiss={() => void api.acknowledgeWorkshopRecovery().then(s => useWorkshopStore.getState().accept(s)).catch(e => useWorkshopStore.setState({error: String(e)}))} />
     <div className="vj-task-stack" data-editing={expanded !== null || undefined}>
-      {expanded === null && <VisualizerExportTasks />}
-      {expanded === null && visualizerTasks.length > 0 && projects.length > 0 && <h3 className="vj-task-section-title">混接 <small>{projects.length}</small></h3>}
       {projects.filter(p => expanded === null || p.id === expanded).map(p => {
         const open = expanded === p.id && active === p.id;
         const job = [...jobs].reverse().find(j => j.project_id === p.id
@@ -606,6 +605,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
           {open && <div className="vj-task-editor"><WorkshopEditor key={p.id} /></div>}
         </section>;
       })}
+      {expanded === null && <VisualizerExportTasks />}
     </div>
 
   </div></WorkshopToolbarTarget.Provider>;

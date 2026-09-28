@@ -221,6 +221,9 @@ impl ActivityLog {
         let now = Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let mut batch = Vec::with_capacity(drafts.len().min(INGEST_BATCH_MAX));
         for draft in drafts.into_iter().take(INGEST_BATCH_MAX) {
+            if draft.level != ActivityLevel::Info {
+                crate::diagnostics::record(if draft.level == ActivityLevel::Error { "error" } else { "warn" }, if draft.category == ActivityCategory::Network { "platform" } else { "local" }, &draft.action, &format!("{} target={} status={:?} duration_ms={:?}", draft.detail, draft.target, draft.status, draft.duration_ms));
+            }
             // 双层保险：即使未来某个前端钩子误把逐曲成功事件送来，后端也拒绝
             // 保存分析 info，避免大曲库把日志写成另一份分析数据库。
             if draft.category == ActivityCategory::Analysis && draft.level == ActivityLevel::Info {

@@ -3,12 +3,13 @@ import { Maximize2, Minimize2, Pause, Play, X } from "lucide-react";
 import { formatDuration } from "../../lib/format";
 
 /** Shared by local playback and the workshop. Chrome stays inside the picture. */
-export function FloatingVideoControls({ title, playing, position, duration, fullscreen, onClose, onToggle, onFullscreen, extra, error, closeLabel = "关闭预览" }: {
+export function FloatingVideoControls({ title, playing, position, duration, fullscreen, onClose, onToggle, onFullscreen, onTitlePointerDown, extra, error, closeLabel = "关闭预览" }: {
   title: string; playing: boolean; position: number; duration: number; fullscreen: boolean;
   onClose?(): void; onToggle(): void; onFullscreen(): void; extra?: ReactNode; error?: string; closeLabel?: string;
+  onTitlePointerDown?: HTMLAttributes<HTMLDivElement>["onPointerDown"];
 }) {
   return <div className="kd-pip-float-chrome" title={title}>
-    <div className="kd-pip-float-top">
+    <div className="kd-pip-float-top" onPointerDown={onTitlePointerDown} data-window-drag={Boolean(onTitlePointerDown) || undefined}>
       <span className="kd-truncate">{title}</span>
       {onClose && <button type="button" className="kd-pip-float-x" aria-label={closeLabel}
         onClick={e => { e.stopPropagation(); onClose(); }}><X size={13} /></button>}

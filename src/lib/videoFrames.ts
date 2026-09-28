@@ -1,3 +1,32 @@
+import { observeMediaDiagnostics } from "./diagnostics";
+
+export interface PresentedVideoFrame {
+  mediaTime: number;
+  displayTime: number;
+  interval: number;
+  gapMs: number;
+}
+
+/** Continuous presentation feedback; currentTime alone can advance during a stall. */
+export function observeVideoFrames(video: HTMLVideoElement, observe: (frame: PresentedVideoFrame) => void): () => void {
+  observeMediaDiagnostics(video);
+  if (typeof video.requestVideoFrameCallback !== "function") return () => undefined;
+  let callback: number | undefined;
+  let previous: PresentedVideoFrame | undefined;
+  let stopped = false;
+  const frame: VideoFrameRequestCallback = (_now, metadata) => {
+    if (stopped) return;
+    const delta = previous ? metadata.mediaTime - previous.mediaTime : 0;
+    const next: PresentedVideoFrame = {mediaTime: metadata.mediaTime, displayTime: metadata.expectedDisplayTime,
+      interval: delta > 0.005 && delta < 0.1 ? delta : previous?.interval ?? 1 / 30,
+      gapMs: previous ? Math.max(0, metadata.expectedDisplayTime - previous.displayTime) : 0};
+    previous = next; observe(next);
+    callback = video.requestVideoFrameCallback(frame);
+  };
+  callback = video.requestVideoFrameCallback(frame);
+  return () => { stopped = true; if (callback !== undefined) video.cancelVideoFrameCallback(callback); };
+}
+
 /** Observe compositor frames, not the media cursor (which jumps before decoding finishes). */
 export function waitForVideoFrames(
   video: HTMLVideoElement,
@@ -6,6 +35,7 @@ export function waitForVideoFrames(
   signal: AbortSignal,
   timeoutMs = 900,
 ): Promise<boolean> {
+  observeMediaDiagnostics(video);
   return new Promise(resolve => {
     if (signal.aborted) { resolve(false); return; }
     let callback: number | undefined;

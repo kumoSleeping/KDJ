@@ -14,6 +14,11 @@
   outline: none;
   container-type: inline-size;
 }
+.kd-viz-panel[data-inline="true"] { height: auto; overflow: visible; }
+.kd-viz-panel[data-inline="true"] .kd-viz-content { display: block; overflow: visible; }
+.kd-viz-panel[data-inline="true"] .kd-viz-settings { display: block; overflow: visible; }
+.kd-viz-panel[data-inline="true"] .kd-viz-settings-column { width: 100%; }
+.kd-viz-panel[data-inline="true"] .kd-viz-preview .kd-pip-float-stage { max-height: none; }
 .kd-viz-panel * { box-sizing: border-box; }
 .kd-viz-panel button,
 .kd-viz-panel input,

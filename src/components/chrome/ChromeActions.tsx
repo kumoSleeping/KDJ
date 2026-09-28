@@ -1,7 +1,7 @@
 import { useEffect } from "react";
-import { Scissors, Download, Moon, Settings, Sun, Upload } from "lucide-react";
+import { Download, Moon, Settings, Sun, Upload, Radio, Palette } from "lucide-react";
 import { formatPercent } from "../../lib/format";
-import { useThemePack } from "../../lib/themePack";
+import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePack";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useUpdateStore } from "../../stores/updateStore";
@@ -23,7 +23,7 @@ export interface ChromeActionsProps {
   queueCount: number;
   onQueue(): void;
   compositionOpen?: boolean;
-  onComposition?(): void;
+  onComposition?(mode: "workshop" | "live-vj"): void;
   /** 打开设置并定位到软件更新区；默认走 updateStore。 */
   onOpenUpdate?(): void;
 }
@@ -39,20 +39,21 @@ export function ChromeActions({
   onComposition,
   onOpenUpdate,
 }: ChromeActionsProps) {
+  const compositionMode = useAppStore(s => s.compositionMode);
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
-  const workshopCount = useWorkshopStore((s) => s.projects.length);
   const visualizerTasks = useVisualizerExportStore(s => s.tasks);
   useEffect(() => { void useVisualizerExportStore.getState().initialize().catch(() => undefined); }, []);
-  const compositionCount = workshopCount + visualizerTasks.length;
   const workshopJobs = useWorkshopStore(s => s.jobs);
+  const projectCount = useWorkshopStore(s => s.projects.length);
+  const compositionCount = projectCount + visualizerTasks.length;
   const exporting = [...workshopJobs.filter(j => ["queued", "rendering", "validating", "committing", "importing"].includes(j.phase)),
     ...visualizerTasks.filter(visualizerExportActive)];
   const runningExports = exporting.filter(j => j.phase !== "queued").length;
   const exportProgress = taskProgressLabel(exporting, runningExports);
-  const workshopLabel = exporting.length > 1
-    ? `工作站，${runningExports} 个正在导出，共 ${exporting.length} 个待完成`
-    : exportProgress !== null ? `工作站，导出 ${exportProgress}`
-    : compositionCount > 0 ? `工作站，${compositionCount} 个任务` : "工作站";
+  const exportTasksLabel = exporting.length > 1
+    ? `视频项目与导出，${runningExports} 个正在导出，共 ${exporting.length} 个待完成`
+    : exportProgress !== null ? `视频项目与导出，导出 ${exportProgress}`
+    : compositionCount > 0 ? `视频项目与导出，${compositionCount} 个任务` : "视频项目与导出";
   const downloadTasks = useDownloadStore(s => s.list);
   const downloading = downloadTasks.filter(t => ["queued", "running", "processing"].includes(t.state));
   const runningDownloads = downloading.filter(t => t.state !== "queued").length;
@@ -64,16 +65,17 @@ export function ChromeActions({
   const openUpdateSection = useUpdateStore((s) => s.openUpdateSection);
   const openUpdate = onOpenUpdate ?? openUpdateSection;
   const theme = useAppStore((state) => state.settings?.theme ?? "system");
-  const saveSettings = useAppStore((state) => state.saveSettings);
   const resolvedTheme =
     theme === "system"
       ? document.documentElement.dataset.theme ??
         (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
       : theme;
-  // 只有一种模式的主题包：深浅由主题决定，按钮停用
-  const lockedMode = useThemePack((state) =>
-    state.active?.modes.length === 1 ? state.active.modes[0] : null);
-  const isDark = (lockedMode ?? resolvedTheme) !== "light";
+  const activeTheme = useThemePack(state => state.active);
+  const installingTheme = useThemePack(state => state.installing);
+  const isDark = (activeTheme?.modes.length === 1 ? activeTheme.modes[0] : resolvedTheme) !== "light";
+  const themeName = activeTheme
+    ? OFFICIAL_THEMES.find(item => item.id === activeTheme.id)?.name ?? activeTheme.name
+    : isDark ? "Dark" : "Shiro";
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
       {updateReady ? (
@@ -102,22 +104,27 @@ export function ChromeActions({
       >
         <Settings size={16} />
       </button>
-        <button type="button" className="kd-chrome-btn" data-composition-hint={compositionCount > 0 ? "true" : undefined}
-          aria-label={workshopLabel} title={workshopLabel}
-          aria-pressed={compositionOpen} data-open={compositionOpen || undefined}
-          onClick={onComposition ?? (() => useAppStore.getState().toggleCompositionPanel())}>
-          <Scissors size={16} />
-          {exportProgress !== null ? <span className="kd-chrome-export-progress">{exportProgress}</span> : compositionCount > 0 && <span className="kd-chrome-dot" aria-hidden="true" />}
-        </button>
+      <button type="button" className="kd-chrome-btn" data-composition-hint={compositionCount > 0 ? "true" : undefined}
+        aria-label="视频项目与导出" title={exportTasksLabel} aria-pressed={compositionOpen && compositionMode === "workshop"}
+        data-open={compositionOpen && compositionMode === "workshop" || undefined}
+        onClick={() => onComposition ? onComposition("workshop") : useAppStore.getState().openCompositionPanel()}>
+        <span style={{fontSize: 11, fontWeight: 700}}>VJ</span>
+        {exportProgress !== null ? <span className="kd-chrome-export-progress">{exportProgress}</span> : compositionCount > 0 && <span className="kd-chrome-dot" aria-hidden="true" />}
+      </button>
+      <button type="button" className="kd-chrome-btn" aria-label="自动 VJ" title="自动 VJ"
+        disabled={!['darwin', 'win32', 'linux'].includes(window.kdj?.platform ?? '')}
+        aria-pressed={compositionOpen && compositionMode === "live-vj"}
+        data-open={compositionOpen && compositionMode === "live-vj" || undefined}
+        onClick={() => onComposition ? onComposition("live-vj") : useAppStore.getState().openLiveVjPanel()}><Radio size={16} /></button>
       <button
         type="button"
         className="kd-chrome-btn"
-        aria-label={isDark ? "切到日间模式" : "切到夜间模式"}
-        title={isDark ? "日间模式" : "夜间模式"}
-        disabled={lockedMode !== null}
-        onClick={() => void saveSettings({ theme: isDark ? "light" : "dark" }).catch(() => undefined)}
+        aria-label={`切换主题，当前 ${themeName}`}
+        title={`切换主题 · ${themeName}`}
+        disabled={installingTheme !== null}
+        onClick={() => void cycleThemePack()}
       >
-        {isDark ? <Sun size={16} /> : <Moon size={16} />}
+        {activeTheme ? <Palette size={16} /> : isDark ? <Moon size={16} /> : <Sun size={16} />}
       </button>
       <button
         type="button"

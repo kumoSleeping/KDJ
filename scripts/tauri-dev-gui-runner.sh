@@ -18,6 +18,8 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 <key>LSMinimumSystemVersion</key><string>10.15</string>
 <key>NSDownloadsFolderUsageDescription</key><string>KDJ 需要读取你选择的下载目录中的音乐和视频，以便播放和剪辑。</string>
+<key>NSMicrophoneUsageDescription</key><string>KDJ 实时 VJ 需要读取你选择的麦克风或声卡输入，以便匹配素材并同步画面；不会保存录音。</string>
+<key>NSAudioCaptureUsageDescription</key><string>KDJ 实时 VJ 需要捕获系统音频以匹配素材并同步画面；不会保存录音。</string>
 </dict></plist>
 PLIST
 if [[ "${VITE_KDJ_YOUTUBE_E2E:-}" == "1" ]]; then

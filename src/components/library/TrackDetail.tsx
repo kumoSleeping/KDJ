@@ -32,6 +32,7 @@ import { useVideoPip } from "../../lib/videoPip";
 import { DETAIL_PANELS_DEFAULT_FIRST_IDS, DETAIL_PANELS_STORAGE_KEY } from "../../lib/detailPanelPrefs";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { VjSearchPanel } from "./VjSearchPanel";
+import { DetailVisualizerPanel } from "./DetailVisualizerPanel";
 import { pointPatch, Waveform } from "./Waveform";
 import { EnergyMeter } from "./TrackTable";
 import { NowPlayingControlPanel } from "../player/NowPlayingControlPanel";
@@ -618,12 +619,12 @@ export function TrackDetail({ track }: { track: Track }) {
             <LocalVideoPlayer track={track} />
           </Panel>
         )}
+        {!isVideoTrack(track.format) && !isImageTrack(track.format) && <DetailVisualizerPanel key="visualizer" track={track} />}
         {detailControlVisible ? (
           <NowPlayingControlPanel
             key="now-playing-control"
             track={track}
             keyNotation={settings?.key_notation ?? "camelot"}
-            filterResonance={settings?.filter_resonance ?? "high"}
             onError={setNotice}
           />
         ) : null}

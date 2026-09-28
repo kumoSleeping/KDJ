@@ -7,6 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -37,8 +38,11 @@ struct SessionState {
     cached_cover_url: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct DesktopMediaSession {
-    state: Arc<Mutex<SessionState>>,
+    // This mailbox never shares a lock with OS media calls or artwork loading.
+    pending: Arc<Mutex<Option<PlaybackSnapshot>>>,
+    wake: SyncSender<()>,
 }
 
 impl DesktopMediaSession {
@@ -54,18 +58,44 @@ impl DesktopMediaSession {
                 handle_remote_event(&event_app, coordinator.get().and_then(Weak::upgrade), event);
             })
             .map_err(|error| format!("注册系统媒体控制失败：{error}"))?;
-        Ok(Self {
-            state: Arc::new(Mutex::new(SessionState {
-                controls,
-                metadata: MetadataKey::default(),
-                cached_cover_url: None,
-            })),
-        })
+        let state = Arc::new(Mutex::new(SessionState {
+            controls,
+            metadata: MetadataKey::default(),
+            cached_cover_url: None,
+        }));
+        let pending = Arc::new(Mutex::new(None));
+        let worker_pending = Arc::clone(&pending);
+        let (wake, receiver) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("kdj-desktop-media".into())
+            .spawn(move || {
+                while receiver.recv().is_ok() {
+                    let snapshot = worker_pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take();
+                    if let Some(snapshot) = snapshot {
+                        Self::push_snapshot(&state, &snapshot);
+                    }
+                }
+            })
+            .map_err(|error| format!("启动系统媒体镜像线程失败：{error}"))?;
+        Ok(Self { pending, wake })
     }
 
+    /// Publication is part of the coordinator's command-ACK path. SMTC/MPNowPlaying/MPRIS
+    /// and cached-cover loading must never run there, including waiting on their state lock.
+    /// Keep only the newest snapshot and one wakeup if the OS media service stalls.
     pub fn update(&self, snapshot: &PlaybackSnapshot) {
-        let mut state = self
-            .state
+        *self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot.clone());
+        let _ = self.wake.try_send(());
+    }
+
+    fn push_snapshot(session: &Arc<Mutex<SessionState>>, snapshot: &PlaybackSnapshot) {
+        let mut state = session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let metadata = metadata_key(snapshot);
@@ -121,15 +151,7 @@ impl DesktopMediaSession {
         drop(state);
 
         if let Some(metadata) = cache_metadata {
-            cache_artwork(Arc::clone(&self.state), metadata);
-        }
-    }
-}
-
-impl Clone for DesktopMediaSession {
-    fn clone(&self) -> Self {
-        Self {
-            state: Arc::clone(&self.state),
+            cache_artwork(Arc::clone(session), metadata);
         }
     }
 }

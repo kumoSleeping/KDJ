@@ -41,11 +41,16 @@ impl Workshop {
                 let b = self.alignment_summary(p, target, cancel).await?;
                 let summary = summary.clone();
                 let checkpoint = checkpoint.clone();
+                let coarse_started = std::time::Instant::now();
                 let score = tokio::task::spawn_blocking(move || {
                     kdj_core::thread_qos::prefer_background();
                     alignment::coarse_similarity(&summary, &b, allow_fuzzy, &|| checkpoint())
                 })
                 .await??;
+                tracing::debug!(target: "kdj_alignment_timing", source = %block.clip.source_id,
+                    reference = %target.clip.source_id, source_start_ms = block.start_ms,
+                    reference_start_ms = target.start_ms, score,
+                    elapsed_ms = coarse_started.elapsed().as_secs_f64() * 1000., "coarse candidate finished");
                 ranked.push((index, score));
                 ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
                 ranked.truncate(CANDIDATE_BLOCKS + 1);
@@ -84,6 +89,10 @@ impl Workshop {
                         && (fuzzy_pass
                             || (source.blocks.len() == 1 && reference.blocks.len() == 1));
                     let comparison_started = std::time::Instant::now();
+                    tracing::debug!(target: "kdj_alignment_timing", source = %block.clip.source_id,
+                        reference = %target.clip.source_id, source_start_ms = block.start_ms,
+                        reference_start_ms = target.start_ms, source_length, target_length,
+                        fuzzy_pass, pair_fuzzy, "block comparison started");
                     let single_pair = source.blocks.len() == 1 && reference.blocks.len() == 1;
                     let found = tokio::task::spawn_blocking(move || -> Result<RecordingMatch> {
                         kdj_core::thread_qos::prefer_background();
@@ -100,7 +109,7 @@ impl Workshop {
                     .await??;
                     tracing::debug!(source = %block.clip.source_id, reference = %target.clip.source_id,
                         source_start_ms = block.start_ms, reference_start_ms = target.start_ms,
-                        fuzzy = pair_fuzzy, elapsed_ms = comparison_started.elapsed().as_millis() as u64,
+                        fuzzy_pass, fuzzy = pair_fuzzy, elapsed_ms = comparison_started.elapsed().as_secs_f64() * 1000.,
                         matched = found.offset_ms.is_some() || !found.sections.is_empty() || !found.fuzzy.verified.is_empty(),
                         "workshop alignment block comparison finished");
                     // Preserve the established short-recording behavior and preset

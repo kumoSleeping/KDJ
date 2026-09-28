@@ -15,6 +15,7 @@ import { api, events } from "../lib/api";
 import { acknowledgeSettingsRollback, enqueueSettingsWrite } from "../lib/settingsWriteBarrier";
 import { isPlatformEnabled, normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
 import { readWorkspaceSession } from "../lib/workspaceSession";
+import { readLocalStorage, writeLocalStorageNow } from "../lib/storageWrite";
 import type { Account, Health, SearchCapabilities, Settings, WsEvent } from "../types";
 import { useDownloadStore } from "./downloadStore";
 import { useWorkshopStore } from "./workshopStore";
@@ -120,6 +121,7 @@ export interface AppStore {
   /** 手动固定后，被动选歌/切换中间列表不能顶掉下载队列。 */
   queuePinned: boolean;
   showComposition: boolean;
+  compositionMode: "workshop" | "live-vj";
   compositionPanelEpoch: number;
   compositionPinned: boolean;
   /** 右栏/抽屉显示搜索结果预览（音频试听或视频预览），与下载队列互斥。 */
@@ -170,6 +172,7 @@ export interface AppStore {
   setQueuePinned(value: boolean): void;
   toggleCompositionPanel(): void;
   openCompositionPanel(): void;
+  openLiveVjPanel(): void;
   setCompositionPinned(value: boolean): void;
   /** 打开预览旁路（点搜索结果音频/视频时走这条，不跟下载队列挤一栏）。 */
   openPreviewPanel(): void;
@@ -235,6 +238,24 @@ function clearPassiveOverlays(
   return clearOverlays();
 }
 
+// 右侧三种可固定面板互斥。只保存当前仍打开且固定的面板；取消固定、关闭或
+// 显式切走后清空，重启时不把已经取消的固定状态偷偷恢复回来。
+const PINNED_OVERLAY_KEY = "kd-pinned-overlay-v1";
+type PinnedOverlay = "settings" | "queue" | "workshop" | "live-vj" | null;
+function readPinnedOverlay(): PinnedOverlay {
+  const value = readLocalStorage(PINNED_OVERLAY_KEY);
+  return value === "settings" || value === "queue" || value === "workshop" || value === "live-vj"
+    ? value
+    : null;
+}
+function pinnedOverlay(state: AppStore): PinnedOverlay {
+  if (state.showSettings && state.settingsPinned) return "settings";
+  if (state.showQueue && state.queuePinned) return "queue";
+  if (state.showComposition && state.compositionPinned) return state.compositionMode;
+  return null;
+}
+const restoredPinnedOverlay = readPinnedOverlay();
+
 /** StrictMode 下 effect 会跑两次，用同一个 promise 挡掉重复的启动请求。 */
 let bootInFlight: Promise<void> | null = null;
 /** 工作台启动闸门也要单飞；否则 StrictMode 会重复恢复缓存与目录快照。 */
@@ -275,15 +296,16 @@ let persistedSettings: Settings | null = null;
 export const useAppStore = create<AppStore>()((set, get) => ({
   listMode: "library",
   hasResults: false,
-  showSettings: false,
+  showSettings: restoredPinnedOverlay === "settings",
   settingsPanelEpoch: 0,
-  settingsPinned: false,
-  showQueue: false,
+  settingsPinned: restoredPinnedOverlay === "settings",
+  showQueue: restoredPinnedOverlay === "queue",
   queuePanelEpoch: 0,
-  queuePinned: false,
-  showComposition: false,
+  queuePinned: restoredPinnedOverlay === "queue",
+  showComposition: restoredPinnedOverlay === "workshop" || restoredPinnedOverlay === "live-vj",
+  compositionMode: restoredPinnedOverlay === "live-vj" ? "live-vj" : "workshop",
   compositionPanelEpoch: 0,
-  compositionPinned: false,
+  compositionPinned: restoredPinnedOverlay === "workshop" || restoredPinnedOverlay === "live-vj",
   showPreview: false,
   previewPanelEpoch: 0,
   showFolders: false,
@@ -392,12 +414,16 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   toggleCompositionPanel() {
-    const open = !get().showComposition;
-    set({ ...clearOverlays(), showComposition: open, compositionPinned: open,
+    const open = !get().showComposition || get().compositionMode !== "workshop";
+    set({ ...clearOverlays(), showComposition: open, compositionMode: "workshop", compositionPinned: open,
       compositionPanelEpoch: get().compositionPanelEpoch + (open ? 1 : 0) });
   },
   openCompositionPanel() {
-    set({ ...clearOverlays(), showComposition: true, compositionPinned: true,
+    set({ ...clearOverlays(), showComposition: true, compositionMode: "workshop", compositionPinned: true,
+      compositionPanelEpoch: get().compositionPanelEpoch + 1 });
+  },
+  openLiveVjPanel() {
+    set({ ...clearOverlays(), showComposition: true, compositionMode: "live-vj", compositionPinned: true,
       compositionPanelEpoch: get().compositionPanelEpoch + 1 });
   },
   setCompositionPinned(value) { set({ compositionPinned: get().showComposition ? value : false }); },
@@ -653,6 +679,12 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     }
   },
 }));
+
+// 只在固定目标真的改变时同步落盘；启动读取和其它 store 更新不重写旧偏好。
+useAppStore.subscribe((state, previous) => {
+  const next = pinnedOverlay(state);
+  if (next !== pinnedOverlay(previous)) writeLocalStorageNow(PINNED_OVERLAY_KEY, next ?? "");
+});
 
 /** sidecar 是否可用：health 拿到过且没有连接错误。 */
 export function selectConnected(state: AppStore): boolean {

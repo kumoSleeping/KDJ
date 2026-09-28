@@ -527,73 +527,6 @@ body {
   background-clip: var(--kd-desktop-lyrics-secondary-clip, border-box);
 }
 
-/* 悬浮歌词取色：模式开关 + 一根色相线（不用系统 color input）。 */
-.kd-lyrics-color-block {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  margin-top: 0.05rem;
-  padding: 0.15rem 0 0.35rem;
-  -webkit-app-region: no-drag;
-}
-.kd-lyrics-hue-line {
-  position: relative;
-  width: 100%;
-  height: 3px;
-  /* 上沿留给尖朝下的三角标，勿与上方模式行贴死。 */
-  margin: 0.75rem 0 0.45rem;
-  border-radius: 999px;
-  cursor: pointer;
-  touch-action: none;
-  box-shadow: 0 0 0 1px rgba(127, 127, 127, 0.35);
-}
-.kd-lyrics-hue-line:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--kd-muted) 70%, transparent);
-  outline-offset: 4px;
-}
-/* 色相标：尖朝下指色相线。不用 border-radius——全局会被打成方块。 */
-.kd-lyrics-hue-knob {
-  position: absolute;
-  top: 50%;
-  width: 0.72rem;
-  height: 0.56rem;
-  border: none;
-  clip-path: polygon(0% 0%, 100% 0%, 50% 100%);
-  transform: translate(-50%, calc(-100% - 1px));
-  filter:
-    drop-shadow(0 0 0.45px #fff)
-    drop-shadow(0 0 0.8px rgba(0, 0, 0, 0.7));
-  pointer-events: none;
-}
-.kd-lyrics-hue-knob[data-active="true"] {
-  width: 0.84rem;
-  height: 0.64rem;
-  filter:
-    drop-shadow(0 0 0.45px #fff)
-    drop-shadow(0 0 0.9px rgba(0, 0, 0, 0.75))
-    drop-shadow(0 0 2.5px color-mix(in srgb, var(--kd-muted) 55%, transparent));
-}
-
-/* 悬浮歌词连续字号：与接歌小节同一套 2px 红/灰线（.kd-djp-slider）。 */
-.kd-lyrics-size-row {
-  display: grid;
-  grid-template-columns: auto minmax(5rem, 1fr);
-  align-items: center;
-  gap: 0.75rem;
-  min-height: 1.85rem;
-  margin-top: 0.05rem;
-  padding: 0.2rem 0;
-  -webkit-app-region: no-drag;
-}
-.kd-lyrics-size-row[data-disabled="true"] {
-  opacity: 0.45;
-  pointer-events: none;
-}
-.kd-lyrics-size-row .kd-djp-slider {
-  width: 100%;
-  min-width: 0;
-}
-
 ::selection {
   background: var(--kd-theme-soft);
 }
@@ -1370,6 +1303,9 @@ textarea {
 .kd-panel-dense .kd-field {
   gap: 0.15rem;
 }
+.kd-detail-viz-play { display: inline-flex; align-items: center; justify-content: center; width: 1.6rem; height: 1.6rem; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--kd-text); cursor: pointer; }
+.kd-detail-viz-play:hover, .kd-detail-viz-play[aria-pressed="true"] { color: var(--kd-theme); }
+.kd-detail-viz-play:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: 2px; }
 .kd-panel-dense .kd-panel-body > * + * {
   margin-top: 0.5rem;
 }
@@ -4352,9 +4288,28 @@ body[data-kd-search-pointer-dragging="true"] * {
   opacity: 0.68;
   transition: opacity 0.15s;
 }
-/* 桌面：唱盘跨过波形行，文案和波形之间留一点气口，避免高柱子蹭到艺人名。 */
+/* 桌面宽唱盘：状态和曲名同一行，艺人留在第二行；窄屏布局在下方覆盖。 */
 .kd-app:not([data-portrait="true"]) .kd-player-deck-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.4rem;
   padding-bottom: 0.25rem;
+}
+.kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] .kd-player-deck-copy {
+  justify-content: flex-end;
+}
+.kd-app:not([data-portrait="true"]) .kd-player-deck-state {
+  flex: none;
+  margin-bottom: 0;
+}
+.kd-app:not([data-portrait="true"]) .kd-player-deck-copy .kd-player-title {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: max-content;
+}
+.kd-app:not([data-portrait="true"]) .kd-player-deck-copy .kd-player-artist {
+  flex: 1 0 100%;
 }
 .kd-player-deck[data-active="true"] .kd-player-deck-copy,
 .kd-player-deck[data-transitioning="true"] .kd-player-deck-copy {
@@ -5969,6 +5924,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-activity-search-toggle:disabled {
   opacity: 0.4;
   cursor: default;
+}
+.kd-activity-search-toggle[data-action="media-filter"][data-active="true"] {
+  color: var(--kd-accent);
 }
 /* 右侧详情 / 顶栏搜索带：只靠图标形态表达开合，不再画主题色竖边或包裹轮廓。 */
 .kd-activity-search-toggle[data-action="toggle-aside"],
@@ -8440,12 +8398,13 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
     flex: 1 0 100%;
     margin-bottom: 0;
   }
-  .kd-app:not([data-portrait="true"]) .kd-player-title {
+  .kd-app:not([data-portrait="true"]) .kd-player-deck-copy .kd-player-title {
     flex: 1 1 auto;
     min-width: 0;
+    max-width: none;
     display: block;
   }
-  .kd-app:not([data-portrait="true"]) .kd-player-artist {
+  .kd-app:not([data-portrait="true"]) .kd-player-deck-copy .kd-player-artist {
     flex: 0 1 auto;
     max-width: 42%;
     display: block;
@@ -9410,42 +9369,46 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   opacity: 0.45;
   cursor: default;
 }
+.kd-theme-row .kd-djp-font-actions { min-width: 0; max-width: 80%; gap: 0.35rem; }
+.kd-theme-select { position: relative; display: inline-flex; min-width: 0; }
+.kd-theme-select > .kd-select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  min-width: 0;
+  max-width: 15rem;
+  height: 1.85rem;
+  padding: 0.15rem 1.6rem 0.15rem 0.55rem;
+  font: inherit;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+}
+.kd-theme-select > svg { position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--kd-text); }
+.kd-theme-official { display: grid; gap: 0.25rem; }
+.kd-theme-official-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.kd-theme-official-row > span { display: flex; align-items: baseline; gap: 0.5rem; }
+.kd-theme-official-row small { color: var(--kd-muted); font-size: var(--kd-size-xs); }
+
+.kd-camelot-grid { flex: none; min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 0.4rem; padding: 0.5rem; color: var(--kd-text); }
+.kd-camelot-grid-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.3rem; font-size: var(--kd-size-xs); }
+.kd-camelot-grid-head strong { font-size: 1.15rem; color: var(--kd-theme); }
+.kd-camelot-grid-keys { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px 0.35rem; min-height: 0; }
+.kd-camelot-grid-key { display: flex; align-items: center; justify-content: space-between; min-width: 0; padding: 0 0.35rem; border: 0; border-radius: 0; background: transparent; color: var(--kd-muted); font: 500 0.65rem/1.1 var(--kd-font); text-align: left; }
+button.kd-camelot-grid-key { cursor: pointer; }
+.kd-camelot-grid-key small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.55rem; }
+.kd-camelot-grid[data-compact="true"] .kd-camelot-grid-key { justify-content: center; padding: 0; }
+.kd-camelot-grid[data-compact="true"] .kd-camelot-grid-key small { display: none; }
+.kd-camelot-grid[data-compact="true"] .kd-camelot-grid-head { flex-wrap: wrap; gap: 0 0.25rem; }
+.kd-camelot-grid-key[data-neighbour="true"] { color: var(--kd-text); }
+.kd-camelot-grid-key[data-current="true"] { color: var(--kd-theme); font-weight: 800; }
+.kd-camelot-grid-key:focus-visible { outline: 1px dashed var(--kd-text); outline-offset: -1px; }
+
 .kd-djp-font-value {
   color: var(--kd-text);
   font-size: var(--kd-size-xs);
   font-weight: 400;
   line-height: 1;
   text-align: left;
-}
-/* 与播放条音量一致：一根 2px 红/灰线，无可见滑块。 */
-.kd-djp-slider {
-  --kd-djp-fill: 0%;
-  position: relative;
-  width: 100%;
-  height: 14px;
-  outline: none;
-  cursor: pointer;
-  touch-action: none;
-  user-select: none;
-  -webkit-app-region: no-drag;
-}
-.kd-djp-slider-track {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  height: 2px;
-  margin-top: -1px;
-  border-radius: 0 !important;
-  background: linear-gradient(
-    to right,
-    var(--kd-theme) 0 var(--kd-djp-fill),
-    var(--kd-line) var(--kd-djp-fill) 100%
-  );
-  pointer-events: none;
-}
-.kd-djp-slider:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--kd-theme-soft);
 }
 .kd-djp-number {
   display: flex;
@@ -9585,6 +9548,16 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   color: var(--kd-theme);
   background: none;
 }
+.kd-lyrics-button-menu { border-radius: .35rem; }
+.kd-lyrics-menu-heading {
+  padding: .4rem .5rem .15rem;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-sm);
+}
+.kd-lyrics-menu-heading:not(:first-child) { border-top: 1px solid var(--kd-line); margin-top: .2rem; }
+.kd-lyrics-button-menu > button[aria-checked="true"],
+.kd-lyrics-button-menu > button[aria-checked="true"]:hover:not(:disabled) { color: var(--kd-theme); background: none; }
+.kd-lyrics-button-menu > button:focus-visible { outline: 2px solid var(--kd-muted); outline-offset: -2px; }
 /* 右上角一字状态：原 / 意 / 音，无边框无底，点一下循环。 */
 .kd-lyrics-layer {
   align-self: start;
@@ -9904,10 +9877,9 @@ button.kd-stream-status {
 }
 .kd-dj-eq-spectrum > path {
   fill: none;
-  stroke-width: 1.7;
+  stroke-width: 5;
   vector-effect: non-scaling-stroke;
   stroke-linecap: round;
-  stroke-linejoin: round;
   opacity: 0;
   transition: opacity 120ms linear;
 }
@@ -10624,7 +10596,17 @@ button.kd-stream-status {
 }
 
 /* Workshop shares the existing right-hand panel and its resize boundary. */
-.kd-split-aside-body:has(> .vj-workshop) { overflow: hidden; }
+.kd-split-aside-body:has(> .vj-workshop),
+.kd-split-aside-body:has(> .kd-video-workspace) { overflow: hidden; }
+.kd-video-workspace { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; min-width: 0; background: var(--kd-panel); }
+.kd-video-workspace > :not(.kd-video-modes) { flex: 1 1 auto; min-height: 0; }
+.kd-video-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); flex: none; gap: 0; padding: 7px 8px; border-bottom: 1px solid var(--kd-line-soft); }
+.kd-video-modes button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-width: 0; min-height: 56px; padding: 5px 2px; border: 0; border-radius: 6px; background: transparent; color: var(--kd-text); font: 600 var(--kd-size-sm)/1.2 var(--kd-font); cursor: pointer; }
+.kd-video-modes button:hover:not(:disabled) { color: var(--kd-theme); }
+.kd-video-modes button[aria-current="page"] { color: var(--kd-theme); }
+.kd-video-modes button:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: -2px; }
+.kd-video-modes button:disabled { color: var(--kd-muted); opacity: .45; cursor: default; }
+.kd-video-modes button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 .vj-filmstrip { position: absolute; inset: 0; pointer-events: none; background: var(--kd-panel); }
 .vj-filmstrip > img { position: absolute; top: 0; height: 100%; object-fit: cover; }

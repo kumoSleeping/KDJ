@@ -457,6 +457,8 @@ pub struct TrackQuery {
     pub bpm_max: Option<f64>,
     pub energy_min: Option<i64>,
     pub analyzed: Option<bool>,
+    /// "audio" / "video"；空 = 所有媒体。
+    pub media: String,
     pub folder: String,
     pub folder_deep: bool,
     /// 非空时只返回路径不在这些根目录之下的曲目（侧栏「其他」）。
@@ -879,8 +881,23 @@ impl LibraryService {
             Some(false) => where_parts.push("tracks.analyzed_at IS NULL".into()),
             None => {}
         }
+        if matches!(query.media.as_str(), "audio" | "video") {
+            // 与导入时的视频后缀表同源；音频是已入库媒体中非视频的补集。
+            let video_exts = kdj_providers::tags::VIDEO_EXTENSIONS;
+            let video_clause = video_exts
+                .iter()
+                .map(|_| "LOWER(tracks.filename) GLOB ?")
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            where_parts.push(if query.media == "video" {
+                format!("({video_clause})")
+            } else {
+                format!("NOT ({video_clause})")
+            });
+            params.extend(video_exts.iter().map(|ext| SqlValue::Text(format!("*.{ext}"))));
+        }
 
-        // 默认列表的后续页走键集续页：数据库从上一页最后一条的复合索引位置继续，
+        // 默认列表的后续页走键集续页:数据库从上一页最后一条的复合索引位置继续，
         // 不再随着页数增大而跳过成千上万行。id 始终 DESC，保证创建时间相同也稳定。
         if let (Some(created_at), Some(id)) = (query.after_file_created_at, query.after_track_id) {
             if order_direction(&query.order) == "ASC" {

@@ -51,12 +51,13 @@ function ImageChoice({ blob, label, disabled, onClick }: { blob?: Blob; label: s
   return <button type="button" className="kd-viz-image-choice" disabled={disabled} onClick={onClick}>{url ? <img src={url} alt="" /> : <ImagePlus size={16} aria-hidden="true" />}<span>{label}</span></button>;
 }
 
-export default function VisualizerStudioPanel({ onClose }: { onClose?: () => void }) {
-  const track = useVisualizerStudioStore(s => s.track);
+export default function VisualizerStudioPanel({ onClose, inlineTrack }: { onClose?: () => void; inlineTrack?: TrackSummary }) {
+  const selectedTrack = useVisualizerStudioStore(s => s.track);
   const fromPlayback = useVisualizerStudioStore(s => s.fromPlayback);
-  return track ? <Studio key={track.id} track={track} fromPlayback={fromPlayback} onClose={onClose} /> : null;
+  const track = inlineTrack ?? selectedTrack;
+  return track ? <Studio key={track.id} track={track} fromPlayback={inlineTrack ? true : fromPlayback} inline={!!inlineTrack} onClose={onClose} /> : null;
 }
-function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPlayback: boolean; onClose?: () => void }) {
+function Studio({ track, fromPlayback, inline, onClose }: { track: TrackSummary; fromPlayback: boolean; inline: boolean; onClose?: () => void }) {
   const [draft, setDraft] = useState<VisualizerDraft | null>(null);
   const latestDraft = useRef(draft); latestDraft.current = draft;
   const [images, setImages] = useState<HTMLImageElement[]>([]);
@@ -120,10 +121,11 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
   }, [track.id, fromPlayback]);
 
   useEffect(() => {
+    if (inline) return;
     const previous = document.activeElement;
     panel.current?.focus();
     return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
-  }, []);
+  }, [inline]);
 
   useEffect(() => {
     let active = true; const controller = new AbortController();
@@ -226,10 +228,11 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     };
   }, []);
   useEffect(() => {
+    if (inline) return;
     const handler = () => close();
     useVisualizerStudioStore.getState().setBeforeClose(handler);
     return () => { if (useVisualizerStudioStore.getState().beforeClose === handler) useVisualizerStudioStore.getState().setBeforeClose(null); };
-  }, [draft, busy]);
+  }, [draft, busy, inline]);
 
   function checkpoint(current: VisualizerDraft, force = false) {
     const now = performance.now();
@@ -284,9 +287,10 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     closing.current = true;
     try {
       try { await saveNow(); } catch (e) { if (!window.confirm(`无法记住当前调整：${message(e)}。仍要关闭？`)) return false; }
-      if (useVisualizerStudioStore.getState().track?.id !== track.id) return false;
+      if (!inline && useVisualizerStudioStore.getState().track?.id !== track.id) return false;
       if (!await applyFullscreen(false)) return false;
-      useVisualizerStudioStore.getState().close();
+      if (inline) onClose?.();
+      else useVisualizerStudioStore.getState().close();
       return true;
     } finally { closing.current = false; }
   }
@@ -295,7 +299,7 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     setBusy(true); setNotice("");
     try {
       await useVisualizerExportStore.getState().enqueue(draft);
-      useToastStore.getState().show("已加入工作站的可视化导出队列");
+      useToastStore.getState().show("已加入可视化导出队列");
     } catch (error) { setNotice(`加入导出队列失败：${message(error)}`); }
     finally { setBusy(false); }
   }
@@ -348,9 +352,9 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     else current.setVolume(previousVolume.current);
   }
 
-  return <section ref={panel} tabIndex={-1} className="kd-viz-panel" aria-label="音频可视化编辑器" onKeyDown={e => {
+  return <section ref={panel} tabIndex={-1} className="kd-viz-panel" data-inline={inline || undefined} aria-label="音频可视化编辑器" onKeyDown={e => {
       e.stopPropagation();
-      if (e.key === "Escape") { e.preventDefault(); if (expanded) void applyFullscreen(false); else requestClose(); return; }
+      if (e.key === "Escape" && (expanded || !inline)) { e.preventDefault(); if (expanded) void applyFullscreen(false); else requestClose(); return; }
       const target = e.target as HTMLElement;
       if (target.closest("input, textarea, select, [contenteditable=true]")) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(e.shiftKey); }
