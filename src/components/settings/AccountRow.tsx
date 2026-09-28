@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FolderOpen, LoaderCircle, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
@@ -10,6 +11,7 @@ import type {
   BrowserCatalog,
   Platform,
   QrStateValue,
+  QrVariant,
 } from "../../types";
 import { Button, InlineNotice } from "../common";
 import { PLATFORM_BRAND, PlatformMark } from "../download/PlatformMark";
@@ -23,7 +25,7 @@ interface SoundCloudOAuthWindowResult {
 
 const SCAN_WITH: Partial<Record<Platform, string>> = {
   wyy: "用网易云音乐 App 扫码",
-  qqm: "用 QQ 扫码",
+  qqm: "用对应 App 扫码",
   bilibili: "用哔哩哔哩 App 扫码",
 };
 
@@ -197,6 +199,8 @@ export function AccountRow({
   const [savedDisplayPath, setSavedDisplayPath] = useState("");
   const [savedHint, setSavedHint] = useState("");
   const [qrState, setQrState] = useState<QrStateValue | null>(null);
+  const [qrVariants, setQrVariants] = useState<QrVariant[]>([]);
+  const [qrOpen, setQrOpen] = useState(false);
   const qrGenerationRef = useRef(0);
   const oauthUnlistenRef = useRef<UnlistenFn | null>(null);
   const webLoginUnlistenRef = useRef<UnlistenFn | null>(null);
@@ -210,6 +214,7 @@ export function AccountRow({
     (account.platform === "youtube" || account.platform === "ytm") && browserAccount;
   const soundcloudAccount = account.platform === "soundcloud";
   const browserMobile = ["android", "ios"].includes(String(getBridge().platform));
+  const qrInApp = !browserMobile && getBridge().platform !== "browser";
   const soundcloudWebLoginAvailable =
     soundcloudAccount && Boolean(getBridge().openSoundcloudWebLogin);
   const youtubeWebLogin = account.platform === "ytm"
@@ -253,6 +258,7 @@ export function AccountRow({
     setSavedDisplayPath("");
     setSavedHint("");
     setQrState(null);
+    setQrVariants([]);
     setNotice("");
     try {
       const session = await api.loginQr(account.platform);
@@ -263,36 +269,36 @@ export function AccountRow({
         session.variants && session.variants.length > 0
           ? session.variants
           : [{ id: "default", label: account.label, image: session.image }];
-      const savedList = [];
-      for (const variant of variants) {
-        const label =
-          variants.length > 1 ? `${account.label}-${variant.label}` : account.label;
-        savedList.push(
-          await bridge.saveLoginQr({
-            platform: account.platform,
-            label,
-            image: variant.image,
-          }),
+      if (qrInApp) {
+        setQrVariants(variants);
+        setQrOpen(true);
+        setQrState("waiting");
+        setQrBusy(false);
+      } else {
+        const savedList = [];
+        for (const variant of variants) {
+          const label =
+            variants.length > 1 ? `${account.label}-${variant.label}` : account.label;
+          savedList.push(
+            await bridge.saveLoginQr({
+              platform: account.platform,
+              label,
+              image: variant.image,
+            }),
+          );
+        }
+        if (generation !== qrGenerationRef.current) return;
+        const saved = savedList[0];
+        setSavedPath(saved.path);
+        setSavedDisplayPath(saved.displayPath || saved.path);
+        const where = saved.location === "pictures" ? "已保存到相册/图片" : "已保存到下载文件夹";
+        setSavedHint(
+          variants.length > 1
+            ? `${where}（${variants.map((item) => item.label).join(" + ")} 两张）`
+            : where,
         );
-      }
-      if (generation !== qrGenerationRef.current) return;
-      const saved = savedList[0];
-      setSavedPath(saved.path);
-      setSavedDisplayPath(saved.displayPath || saved.path);
-      const where = saved.location === "pictures" ? "已保存到相册/图片" : "已保存到下载文件夹";
-      setSavedHint(
-        variants.length > 1
-          ? `${where}（${variants.map((item) => item.label).join(" + ")} 两张）`
-          : where,
-      );
-      setQrState("waiting");
-      setQrBusy(false);
-      // 保存完成就直接在文件管理器中定位；账号行本身继续留在设置里等待扫码。
-      if (!["android", "ios", "browser"].includes(String(bridge.platform))) {
-        void bridge
-          .revealPath(saved.path)
-          .catch(() => bridge.openPath(saved.path))
-          .finally(() => openSettingsPanel());
+        setQrState("waiting");
+        setQrBusy(false);
       }
 
       const poll = async () => {
@@ -303,12 +309,14 @@ export function AccountRow({
           setQrState(state.state);
           if (state.state === "done") {
             if (state.account) setAccount(state.account);
+            setQrOpen(false);
             return;
           }
           if (QR_FINAL_STATES.has(state.state)) return;
           window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
         } catch (error) {
           if (generation === qrGenerationRef.current) {
+            setQrState("error");
             setNotice(`登录状态检查失败：${error instanceof Error ? error.message : String(error)}`);
           }
         }
@@ -317,7 +325,8 @@ export function AccountRow({
     } catch (error) {
       if (generation !== qrGenerationRef.current) return;
       setQrBusy(false);
-      setNotice(`保存登录二维码失败：${error instanceof Error ? error.message : String(error)}`);
+      setQrOpen(false);
+      setNotice(`获取登录二维码失败：${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -642,7 +651,20 @@ export function AccountRow({
     }
   };
 
+  useEffect(() => {
+    if (!qrOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopImmediatePropagation();
+        setQrOpen(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    return () => window.removeEventListener("keydown", closeOnEscape, true);
+  }, [qrOpen]);
+
   return (
+    <>
     <div style={settingRow.row}>
       <div style={settingRow.text}>
         <span
@@ -761,6 +783,14 @@ export function AccountRow({
           >
             {(youtubeBusy || webLoginBusy) && <LoaderCircle size={13} className="kd-spin" />}
             {webLoginBusy ? "等待登录" : youtubeLoginOpen ? "取消" : "连接"}
+          </Button>
+        ) : qrInApp ? (
+          <Button size="sm" variant="ghost" disabled={qrBusy} onClick={() => {
+            if (qrVariants.length > 0 && !QR_FINAL_STATES.has(qrState ?? "waiting")) setQrOpen(true);
+            else void saveLoginQr();
+          }}>
+            {qrBusy && <LoaderCircle size={13} className="kd-spin" />}
+            {qrBusy ? "正在获取" : qrVariants.length > 0 && !QR_FINAL_STATES.has(qrState ?? "waiting") ? "查看二维码" : "扫码登录"}
           </Button>
         ) : savedPath ? (
           <Button
@@ -953,5 +983,28 @@ export function AccountRow({
         </div>
       )}
     </div>
+    {qrInApp && qrOpen && createPortal(
+      <div className="kd-login-qr-backdrop" onClick={() => setQrOpen(false)}>
+        <div className="kd-login-qr-dialog" role="dialog" aria-modal="true" aria-label={`${account.label}扫码登录`}
+          onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+          <header>
+            <strong>{account.label}扫码登录</strong>
+            <Button size="sm" variant="ghost" autoFocus aria-label="关闭二维码" onClick={() => setQrOpen(false)}>关闭</Button>
+          </header>
+          <div className="kd-login-qr-images">
+            {qrVariants.map((variant) => (
+              <div key={variant.id}>
+                <img src={variant.image} alt={`${variant.label}登录二维码`} />
+                <span>{variant.label}</span>
+              </div>
+            ))}
+          </div>
+          <p>{qrState === "waiting" ? (SCAN_WITH[account.platform] ?? "请用对应 App 扫码") : (qrState && QR_STATE_TEXT[qrState]) || "等待扫码"}</p>
+          {qrState && QR_FINAL_STATES.has(qrState) && qrState !== "done" &&
+            <Button size="sm" variant="ghost" disabled={qrBusy} onClick={() => void saveLoginQr()}>重新获取</Button>}
+        </div>
+      </div>, document.body,
+    )}
+    </>
   );
 }
