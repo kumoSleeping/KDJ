@@ -10997,3 +10997,58 @@ button.kd-stream-status {
   text-overflow: clip;
   user-select: text;
 }
+.kd-login-qr-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / 65%);
+}
+
+.kd-login-qr-dialog {
+  width: min(100%, 36rem);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  padding: 1rem;
+  color: var(--kd-text);
+  background: var(--kd-panel-raised);
+  border: 1px solid var(--kd-line);
+  border-radius: 0.5rem;
+  box-shadow: 0 1rem 3rem rgb(0 0 0 / 30%);
+  text-align: center;
+}
+
+.kd-login-qr-dialog header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.kd-login-qr-images {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.kd-login-qr-images > div {
+  display: grid;
+  gap: 0.4rem;
+  justify-items: center;
+}
+
+.kd-login-qr-images img {
+  display: block;
+  width: min(12rem, 70vw);
+  height: auto;
+  background: white;
+  image-rendering: pixelated;
+}
+
+.kd-login-qr-dialog p {
+  margin: 1rem 0 0;
+  color: var(--kd-muted);
+}
