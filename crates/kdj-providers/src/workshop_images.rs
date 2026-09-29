@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 use std::{
+    collections::BTreeSet,
     fs::File,
     io::{BufReader, Cursor},
     path::Path,
@@ -139,6 +140,27 @@ pub fn frame_png(path: &Path, animated: bool, index: usize, width: u32) -> Resul
     } else {
         still(path)?
     };
+    encode(image, width)
+}
+/// Export needs many frames of one GIF: decode it once in order, holding one frame
+/// at a time, instead of replaying from frame 0 for every index as `frame_png` does.
+pub fn frame_pngs(
+    path: &Path,
+    wanted: &BTreeSet<usize>,
+    width: u32,
+    mut sink: impl FnMut(usize, Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    let Some(&last) = wanted.last() else { return Ok(()) };
+    let mut frames = gif(path)?.into_frames();
+    for index in 0..=last {
+        let frame = frames.next().context("GIF 帧不存在")??;
+        if wanted.contains(&index) {
+            sink(index, encode(DynamicImage::ImageRgba8(frame.into_buffer()), width)?)?;
+        }
+    }
+    Ok(())
+}
+fn encode(image: DynamicImage, width: u32) -> Result<Vec<u8>> {
     let image = if width > 0 {
         image.thumbnail(width, width)
     } else {
@@ -180,6 +202,59 @@ mod tests {
         let png = frame_png(&file.0, false, 0, 0).unwrap();
         let decoded = image::load_from_memory(&png).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (20, 40));
+    }
+    struct TempGif(std::path::PathBuf);
+    impl Drop for TempGif {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    fn temp_gif(count: u32, width: u32, height: u32) -> TempGif {
+        use image::{codecs::gif::GifEncoder, Delay, Frame, Rgba, RgbaImage};
+        let file = TempGif(std::env::temp_dir().join(format!("kdj-frames-{}.gif", rand::random::<u64>())));
+        // Offset partial frames composite over earlier ones, like real GIF deltas.
+        let frames = (0..count).map(|i| {
+            let (w, h, x, y) = if i % 3 == 0 { (width, height, 0, 0) } else { (width / 2, height / 3, i % (width / 2), i % (height / 2)) };
+            let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x + i) as u8, (y * 2 + i) as u8, (i * 3) as u8, if (x + y + i) % 9 == 0 { 0 } else { 255 }]));
+            Frame::from_parts(img, x, y, Delay::from_numer_denom_ms(40, 1))
+        });
+        GifEncoder::new(File::create(&file.0).unwrap()).encode_frames(frames).unwrap();
+        file
+    }
+    #[test]
+    fn one_pass_gif_frames_match_single_frame_decoding() {
+        let file = temp_gif(24, 64, 48);
+        for width in [0, 160, 32] {
+            let wanted = BTreeSet::from([0, 1, 5, 6, 17, 23]);
+            let mut seen = vec![];
+            frame_pngs(&file.0, &wanted, width, |index, png| {
+                assert_eq!(png, frame_png(&file.0, true, index, width).unwrap(), "frame {index} width {width}");
+                seen.push(index);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(seen, wanted.into_iter().collect::<Vec<_>>());
+        }
+        let error = frame_pngs(&file.0, &BTreeSet::from([3, 24]), 0, |_, _| Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), frame_png(&file.0, true, 24, 0).unwrap_err().to_string());
+    }
+    #[test]
+    #[ignore = "benchmark: cargo test -p kdj-providers --release --lib gif_frame_cost -- --ignored --nocapture"]
+    fn gif_frame_cost() {
+        let file = temp_gif(200, 480, 270);
+        let t = std::time::Instant::now();
+        let n = gif(&file.0).unwrap().into_frames().map(|f| f.unwrap()).count();
+        let decode_only = t.elapsed();
+        let t = std::time::Instant::now();
+        let mut one_pass = vec![];
+        frame_pngs(&file.0, &(0..200).collect(), 0, |_, png| Ok(one_pass.push(png))).unwrap();
+        let one_pass_time = t.elapsed();
+        let t = std::time::Instant::now();
+        let per_frame = (0..200).map(|i| frame_png(&file.0, true, i, 0).unwrap()).collect::<Vec<_>>();
+        let per_frame_time = t.elapsed();
+        assert_eq!(one_pass, per_frame);
+        eprintln!("frames={n} decode_only={decode_only:?} frame_pngs={one_pass_time:?} frame_png_each={per_frame_time:?} each/decode={:.1} each/frame_pngs={:.1}",
+            per_frame_time.as_secs_f64() / decode_only.as_secs_f64(), per_frame_time.as_secs_f64() / one_pass_time.as_secs_f64());
     }
     #[test]
     fn unequal_gif_frame_delays_repeat_on_the_same_boundary() {

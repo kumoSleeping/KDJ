@@ -22,7 +22,7 @@ pub(super) fn key(value: &impl Serialize) -> Result<String> {
     serde_json::to_vec(value)?.hash(&mut h);
     Ok(format!("{:016x}", h.finish()))
 }
-fn check(cancel: &CancellationToken) -> Result<()> {
+pub(super) fn check(cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
         bail!("处理已取消")
     }
@@ -401,7 +401,7 @@ impl Workshop {
                 if !m.is_file()
                     || !matches!(
                         e.path().extension().and_then(|s| s.to_str()),
-                        Some("pcm" | "mp4" | "jpg" | "json" | "afp")
+                        Some("pcm" | "mp4" | "jpg" | "png" | "json" | "afp")
                     )
                 {
                     return None;
@@ -996,17 +996,19 @@ pub(super) async fn alignment_pcm(
 }
 
 impl Workshop {
-    async fn image_input(&self, s: &Source, c: &Clip, fps: f64, stage: &Path, n: usize, args: &mut Vec<String>, cancel: &CancellationToken) -> Result<()> {
-        let mut copied = std::collections::HashSet::new();
+    pub(super) async fn image_input(&self, s: &Source, c: &Clip, fps: f64, stage: &Path, n: usize, args: &mut Vec<String>, cancel: &CancellationToken) -> Result<()> {
         let count = if s.kind == "gif" { (c.duration()*fps/1000.).ceil() as usize } else { 1 };
         let mut list = String::from("ffconcat version 1.0\n");
-        for frame in 0..count {
+        let indices: Vec<usize> = (0..count).map(|frame| kdj_providers::workshop_images::frame_index(&s.frame_ends_ms, c.animation_offset_ms + frame as f64*1000./fps)).collect();
+        if s.kind == "gif" {
             check(cancel)?;
-            let index = kdj_providers::workshop_images::frame_index(&s.frame_ends_ms, c.animation_offset_ms + frame as f64*1000./fps);
+            self.gif_frames(s, &indices.iter().copied().collect(), stage, n, cancel).await?;
+        }
+        for index in indices {
+            check(cancel)?;
             let name = format!("image-{n}-{index}.png");
-            if copied.insert(index) {
-                let path = self.image_frame(s, index, 0).await?;
-                tokio::fs::copy(path, stage.join(&name)).await?;
+            if s.kind != "gif" {
+                tokio::fs::write(stage.join(&name), self.image_frame(s, index, 0).await?).await?;
             }
             if s.kind == "gif" {
                 list.push_str(&format!("file '{name}'\noption framerate {}\nduration {}\n",number(fps),number(1./fps)));
