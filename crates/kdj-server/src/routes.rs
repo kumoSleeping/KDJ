@@ -583,15 +583,10 @@ fn parse_platform(name: &str) -> ApiResult<Platform> {
 }
 
 async fn list_accounts(State(state): State<Arc<AppState>>) -> Json<Vec<Account>> {
-    let mut accounts = Vec::new();
-    for platform in PLATFORMS {
-        let Some(provider) = state.provider(platform) else {
-            continue;
-        };
-        // 一个平台挂了不能让整页空白——`account()` 契约上就不返回 Err
-        accounts.push(provider.account().await);
-    }
-    Json(accounts)
+    // 各平台核验互不依赖，一起等：总耗时是最慢的一家而不是总和；join_all 按 PLATFORMS 顺序返回。
+    // 一个平台挂了不能让整页空白——`account()` 契约上就不返回 Err
+    let providers = PLATFORMS.into_iter().filter_map(|platform| state.provider(platform));
+    Json(futures_util::future::join_all(providers.map(|provider| provider.account())).await)
 }
 
 /// 启动页只恢复本地账号快照，不访问任何第三方平台。联网核验仍保留在
