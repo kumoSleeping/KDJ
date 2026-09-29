@@ -147,17 +147,7 @@ pub async fn guarded_media_get_with_host(
         let target = media_target(&current)
             .await
             .context("远程媒体地址被拒绝")?;
-        let mut builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .referer(false)
-            .https_only(true)
-            .connect_timeout(policy.connect_timeout)
-            .read_timeout(policy.read_timeout);
-        if let MediaTarget::Pinned(addrs) = &target {
-            // 系统代理会绕过 `resolve_to_addrs` 并让代理替我们访问私网目标。
-            builder = builder.no_proxy().resolve_to_addrs(host, addrs);
-        }
-        let client = builder.build().context("构建受控媒体客户端失败")?;
+        let client = guarded_media_client(host, &target, &policy)?;
         let response = client
             .get(current.clone())
             .headers(request_headers.clone())
@@ -183,6 +173,63 @@ pub async fn guarded_media_get_with_host(
         current = next;
     }
     unreachable!("有限重定向循环一定会返回")
+}
+
+/// 已固定地址的受控 client 缓存。键是“主机 + 本跳校验通过的全部地址 + 超时”，
+/// 只有本跳重新解析、重新校验后得到完全相同的地址集合才会复用，复用的连接池因此
+/// 只可能连到这组已校验地址；地址集合一变就是另一个键。逐请求新建 client 会让
+/// 每次 Range seek 都重复 TCP/TLS 建链。
+const GUARDED_MEDIA_CLIENTS: usize = 8;
+type GuardedMediaClientKey = (String, Vec<SocketAddr>, Duration, Duration);
+static GUARDED_MEDIA_CLIENT_CACHE: std::sync::Mutex<Vec<(GuardedMediaClientKey, reqwest::Client)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn guarded_media_client(
+    host: &str,
+    target: &MediaTarget,
+    policy: &GuardedMediaPolicy,
+) -> Result<reqwest::Client> {
+    let builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false)
+        .https_only(true)
+        .connect_timeout(policy.connect_timeout)
+        .read_timeout(policy.read_timeout);
+    // fake-ip 交给系统代理：代理配置在 build 时读取，缓存会把它冻结，所以每跳新建。
+    let MediaTarget::Pinned(addrs) = target else {
+        return builder.build().context("构建受控媒体客户端失败");
+    };
+    // `lookup_addrs` 已排序去重，同一组地址换了返回顺序仍是同一个键。
+    let key = (host.to_owned(), addrs.clone(), policy.connect_timeout, policy.read_timeout);
+    let cached = || {
+        GUARDED_MEDIA_CLIENT_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    {
+        let mut cache = cached();
+        if let Some(index) = cache.iter().position(|(cached, _)| *cached == key) {
+            let entry = cache.remove(index);
+            let client = entry.1.clone();
+            cache.push(entry);
+            return Ok(client);
+        }
+    }
+    // 建 client 要装载根证书，不占着锁做。系统代理会绕过 `resolve_to_addrs` 并让代理替我们
+    // 访问私网目标。
+    let client = builder
+        .no_proxy()
+        .resolve_to_addrs(host, addrs)
+        .build()
+        .context("构建受控媒体客户端失败")?;
+    let mut cache = cached();
+    // 并发的同键请求可能都建了一个：后到的覆盖先到的，不留重复项。
+    cache.retain(|(cached, _)| *cached != key);
+    if cache.len() >= GUARDED_MEDIA_CLIENTS {
+        cache.remove(0);
+    }
+    cache.push((key, client.clone()));
+    Ok(client)
 }
 
 fn extend_limited(buffer: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<()> {
@@ -741,6 +788,29 @@ mod tests {
         let next =
             guarded_redirect_url(&current, "https://169.254.169.254/latest/meta-data").unwrap();
         assert!(pinned_public_addrs(&next).await.is_err());
+    }
+
+    #[test]
+    fn guarded_media_reuses_a_client_only_for_the_same_validated_addresses() {
+        kdj_core::ensure_rustls_ring();
+        let policy = GuardedMediaPolicy::default();
+        let pinned = |ip: [u8; 4]| MediaTarget::Pinned(vec![SocketAddr::from((ip, 443))]);
+        let entries = |host: &str| {
+            let cache = GUARDED_MEDIA_CLIENT_CACHE.lock().unwrap();
+            cache.iter().filter(|(key, _)| key.0 == host).count()
+        };
+        guarded_media_client("reuse.test", &pinned([1, 1, 1, 1]), &policy).unwrap();
+        guarded_media_client("reuse.test", &pinned([1, 1, 1, 1]), &policy).unwrap();
+        assert_eq!(entries("reuse.test"), 1, "同一组已校验地址必须复用同一个 client");
+        guarded_media_client("reuse.test", &pinned([1, 0, 0, 1]), &policy).unwrap();
+        assert_eq!(entries("reuse.test"), 2, "地址集合变化不得复用旧 client");
+        guarded_media_client("reuse.test", &MediaTarget::ProxyManaged, &policy).unwrap();
+        assert_eq!(entries("reuse.test"), 2, "fake-ip 代理模式不进缓存");
+        for index in 0..=GUARDED_MEDIA_CLIENTS {
+            guarded_media_client(&format!("evict{index}.test"), &pinned([1, 1, 1, 1]), &policy)
+                .unwrap();
+        }
+        assert!(GUARDED_MEDIA_CLIENT_CACHE.lock().unwrap().len() <= GUARDED_MEDIA_CLIENTS);
     }
 
     #[test]
