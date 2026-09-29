@@ -5977,7 +5977,7 @@ fn path_under_root(path: &Path, root: &Path) -> bool {
 }
 
 fn unavailable_library_tracks(
-    tracks: &[Track],
+    tracks: Vec<Track>,
     configured_roots: &[PathBuf],
 ) -> (Vec<Track>, Vec<String>, Vec<Track>) {
     let offline_root_paths: Vec<&PathBuf> = configured_roots
@@ -6001,9 +6001,9 @@ fn unavailable_library_tracks(
             continue;
         }
         if path.is_file() {
-            available_tracks.push(track.clone());
+            available_tracks.push(track);
         } else {
-            missing_tracks.push(track.clone());
+            missing_tracks.push(track);
         }
     }
     (missing_tracks, offline_roots, available_tracks)
@@ -6042,25 +6042,34 @@ fn duplicate_quality(track: &Track) -> (i64, String) {
     (score, details.join(" · "))
 }
 
-fn duplicate_groups(mut tracks: Vec<Track>) -> Vec<DuplicateGroup> {
+fn duplicate_key(track: &Track) -> Option<(String, String)> {
+    let title = if track.title.trim().is_empty() {
+        Path::new(&track.filename)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&track.filename)
+    } else {
+        &track.title
+    };
+    let title = duplicate_text(title);
+    (title.len() >= 2).then(|| (title, duplicate_text(&track.artist)))
+}
+
+fn duplicate_groups(tracks: Vec<Track>) -> Vec<DuplicateGroup> {
+    // 先数键再装桶：整库绝大多数曲目没有重复，给每首都开一个 Vec<Track> 桶
+    // （最小容量 4 个 Track）会让全库分析的峰值内存翻几倍。
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for key in tracks.iter().filter_map(duplicate_key) {
+        *counts.entry(key).or_default() += 1;
+    }
     let mut buckets: BTreeMap<(String, String), Vec<Track>> = BTreeMap::new();
-    for track in tracks.drain(..) {
-        let title = if track.title.trim().is_empty() {
-            Path::new(&track.filename)
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or(&track.filename)
-        } else {
-            &track.title
-        };
-        let title = duplicate_text(title);
-        if title.len() < 2 {
+    for track in tracks {
+        let Some(key) = duplicate_key(&track) else {
             continue;
+        };
+        if counts[&key] > 1 {
+            buckets.entry(key).or_default().push(track);
         }
-        buckets
-            .entry((title, duplicate_text(&track.artist)))
-            .or_default()
-            .push(track);
     }
 
     let mut groups = Vec::new();
@@ -6178,7 +6187,8 @@ async fn analyze_duplicate_tracks(
     for folder in query_roots {
         let mut offset = 0;
         loop {
-            let page = state.library.list_tracks(&TrackQuery {
+            // 分组和缺失判断只看 tracks 表自身的列；拍点等完整字段只给最终返回的曲目补
+            let page = state.library.list_track_rows(&TrackQuery {
                 folder: folder.cloned().unwrap_or_default(),
                 folder_deep: payload.include_subfolders,
                 sort: "id".into(),
@@ -6210,8 +6220,21 @@ async fn analyze_duplicate_tracks(
         .filter(|root| !root.trim().is_empty())
         .map(|root| kdj_core::config::expand_user(root))
         .collect();
-    let (missing_tracks, offline_roots, available_tracks) =
-        unavailable_library_tracks(&tracks, &configured_roots);
+    let (mut missing_tracks, offline_roots, available_tracks) =
+        unavailable_library_tracks(tracks, &configured_roots);
+    let mut groups = duplicate_groups(available_tracks);
+    // 扫描只读了 tracks 表自身的列；只给真正返回的曲目补上拍点、调号覆盖和标签
+    let mut returned: Vec<&mut Track> = missing_tracks.iter_mut().collect();
+    for group in &mut groups {
+        returned.extend(group.candidates.iter_mut().map(|item| &mut item.track));
+    }
+    let ids: Vec<i64> = returned.iter().map(|track| track.id).collect();
+    let mut full = state.library.tracks_by_ids(&ids)?;
+    for track in returned {
+        if let Some(full) = full.remove(&track.id) {
+            *track = full;
+        }
+    }
     Ok(Json(DuplicateAnalysisResult {
         all: payload.all,
         folders: roots,
@@ -6219,7 +6242,7 @@ async fn analyze_duplicate_tracks(
         scanned,
         missing_tracks,
         offline_roots,
-        groups: duplicate_groups(available_tracks),
+        groups,
     }))
 }
 
@@ -7960,6 +7983,149 @@ async fn library_waveform(
 mod tests {
     use super::*;
 
+    use crate::peak_alloc::peak_allocated;
+
+    /// 合成曲库：每首都带真实长度的 V3 拍点（768 拍、192 小节拍），每 25 首里有一对
+    /// 重复、每 50 首缺一个文件，其余文件真实存在。返回曲库根目录。
+    fn beat_grid_duplicate_library(state: &AppState, name: &str, count: i64) -> PathBuf {
+        let base = scratch(name);
+        let beats: Vec<f64> = (0..768).map(|i| 0.123_456 + i as f64 * 0.468_75).collect();
+        let downbeats: Vec<f64> = beats.iter().step_by(4).copied().collect();
+        let beats = serde_json::to_string(&beats).unwrap();
+        let downbeats = serde_json::to_string(&downbeats).unwrap();
+        for folder in 0..8 {
+            std::fs::create_dir_all(base.join(format!("f{folder}"))).unwrap();
+        }
+        let mut conn = state.library.db().conn().unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert_track = tx
+                .prepare(
+                    "INSERT INTO tracks (path, filename, title, artist, duration, format, size, \
+                     samplerate, bitrate, file_created_at, added_at, modified_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 44100, ?, ?, 'now', 'now')",
+                )
+                .unwrap();
+            let mut insert_v3 = tx
+                .prepare(
+                    "INSERT INTO track_bpm_key_analysis_v3 (track_id, analyzer_revision, bpm, \
+                     beat_times_json, downbeats_json, music_key, camelot, open_key, analyzed_at) \
+                     VALUES (?, ?, 128.0, ?, ?, 'Am', '8A', '', 'now')",
+                )
+                .unwrap();
+            for index in 0..count {
+                let song = index - i64::from(index % 25 == 1);
+                let lossless = index % 2 == 0;
+                let extension = if lossless { "flac" } else { "mp3" };
+                let filename = format!("track-{index:05}.{extension}");
+                let path = base.join(format!("f{}", index % 8)).join(&filename);
+                if index % 50 != 7 {
+                    std::fs::write(&path, b"").unwrap();
+                }
+                insert_track
+                    .execute((
+                        path.to_string_lossy(),
+                        filename,
+                        format!("Title {song:05}"),
+                        format!("Artist {:03}", song % 250),
+                        300.0 + (song % 120) as f64,
+                        extension,
+                        if lossless { 30_000_000 } else { 8_000_000 },
+                        if lossless { 900 } else { 320 },
+                        1_700_000_000.0 + index as f64,
+                    ))
+                    .unwrap();
+                insert_v3
+                    .execute((
+                        tx.last_insert_rowid(),
+                        kdj_library::service::BPM_KEY_V3_REVISION,
+                        &beats,
+                        &downbeats,
+                    ))
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        base
+    }
+
+    fn analyze_all_duplicates(state: &Arc<AppState>) -> DuplicateAnalysisResult {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let request = DuplicateAnalyzeRequest {
+            all: true,
+            folders: Vec::new(),
+            include_subfolders: true,
+        };
+        runtime
+            .block_on(analyze_duplicate_tracks(
+                State(Arc::clone(state)),
+                Json(request),
+            ))
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn duplicate_analysis_only_materializes_the_returned_beat_grids() {
+        let data = scratch("duplicate-memory-data");
+        let state = undo_test_state(&data);
+        let base = beat_grid_duplicate_library(&state, "duplicate-memory", 2_000);
+        let (result, peak) = peak_allocated(|| analyze_all_duplicates(&state));
+        assert_eq!(result.scanned, 2_000);
+        assert_eq!((result.groups.len(), result.missing_tracks.len()), (80, 40));
+        // 分组、保留项和顺序在只读标量行之前的实现上固定
+        let groups: Vec<(i64, Vec<i64>)> = result
+            .groups
+            .iter()
+            .map(|group| (group.keep_id, group.candidates.iter().map(|c| c.track.id).collect()))
+            .collect();
+        let missing: Vec<i64> = result.missing_tracks.iter().map(|track| track.id).collect();
+        assert_eq!(groups[..3], [(1, vec![1, 2]), (27, vec![27, 26]), (51, vec![51, 52])]);
+        assert_eq!(groups.last(), Some(&(1977, vec![1977, 1976])));
+        assert_eq!((&missing[..3], missing.last()), (&[8, 58, 108][..], Some(&1958)));
+        let returned = result
+            .groups
+            .iter()
+            .flat_map(|group| group.candidates.iter().map(|c| &c.track))
+            .chain(&result.missing_tracks);
+        for track in returned {
+            // 返回的仍是完整曲目：拍点和详情接口一致
+            let full = state.library.get(track.id).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(track).unwrap(),
+                serde_json::to_value(&full).unwrap()
+            );
+            assert_eq!(track.beat_times.len(), 768);
+        }
+        drop(state);
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(data);
+        assert!(peak < 16 << 20, "峰值分配 {peak} B");
+    }
+
+    #[test]
+    #[ignore = "50k-row memory acceptance; run explicitly"]
+    fn fifty_thousand_track_duplicate_analysis_peak_allocation() {
+        let data = scratch("duplicate-memory-50k-data");
+        let state = undo_test_state(&data);
+        let base = beat_grid_duplicate_library(&state, "duplicate-memory-50k", 50_000);
+        let started = std::time::Instant::now();
+        let (result, peak) = peak_allocated(|| analyze_all_duplicates(&state));
+        eprintln!(
+            "50k duplicate analysis: peak={peak} B ({:.1} MiB), {} groups, {} missing, {:?}",
+            peak as f64 / 1048576.0,
+            result.groups.len(),
+            result.missing_tracks.len(),
+            started.elapsed()
+        );
+        drop(state);
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(data);
+        assert!(peak < 200 << 20, "峰值分配 {peak} B");
+    }
+
     #[test]
     fn youtube_hls_proof_is_inserted_only_into_trusted_manifest_paths() {
         let proof = "abcdEFGH0123_-.+/=abcd";
@@ -9277,7 +9443,7 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
             ..Track::default()
         };
         let (missing_tracks, offline_roots, available_tracks) = unavailable_library_tracks(
-            &[missing.clone(), offline],
+            vec![missing.clone(), offline],
             &[online, offline_root.clone()],
         );
         assert_eq!(missing_tracks.len(), 1);

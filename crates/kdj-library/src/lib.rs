@@ -6,6 +6,9 @@ pub mod folders;
 pub mod scan;
 pub mod service;
 pub mod rhythm;
+#[cfg(test)]
+#[path = "../../test-support/peak_alloc.rs"]
+mod peak_alloc;
 
 pub use db::Database;
 pub use service::LibraryService;
