@@ -49,23 +49,13 @@ async function localJson<T>(path: string, init: RequestInit): Promise<T> {
   return value as T;
 }
 
-function concatenate(
-  left: Uint8Array<ArrayBufferLike>,
-  right: Uint8Array<ArrayBufferLike>,
-): Uint8Array<ArrayBuffer> {
-  const value = new Uint8Array(left.length + right.length);
-  value.set(left, 0);
-  value.set(right, left.length);
-  return value;
-}
-
-async function appendSpool(token: string, bytes: Uint8Array): Promise<void> {
+async function appendSpool(token: string, bytes: Blob): Promise<void> {
   const response = await localFetch(
     "/song/preview/ytm/sabr/spools/" + encodeURIComponent(token),
     {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
-      body: bytes as BodyInit,
+      body: bytes,
     },
   );
   if (!response.ok) throw new Error((await response.text()) || "写入 SABR 媒体失败");
@@ -87,24 +77,28 @@ async function pumpAudio(
   stream: ReadableStream<Uint8Array>,
 ): Promise<void> {
   const reader = stream.getReader();
-  let pending = new Uint8Array();
+  // 攒够一个发布窗口才整体交给 Blob 拷贝一次，不逐块重拷已缓冲的前缀。
+  let pending: Uint8Array[] = [];
+  let pendingBytes = 0;
   let firstSegmentPublished = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      pending = concatenate(pending, value);
+      pending.push(value);
+      pendingBytes += value.length;
       const ready = firstSegmentPublished
-        ? pending.length >= YOUTUBE_SABR_NEXT_PUBLISH_BYTES
-        : pending.length >= YOUTUBE_SABR_FIRST_PUBLISH_BYTES;
+        ? pendingBytes >= YOUTUBE_SABR_NEXT_PUBLISH_BYTES
+        : pendingBytes >= YOUTUBE_SABR_FIRST_PUBLISH_BYTES;
       if (ready) {
-        await appendSpool(token, pending);
-        pending = new Uint8Array();
+        await appendSpool(token, new Blob(pending as BlobPart[]));
+        pending = [];
+        pendingBytes = 0;
         firstSegmentPublished = true;
       }
     }
-    if (pending.length > 0) {
-      await appendSpool(token, pending);
+    if (pendingBytes > 0) {
+      await appendSpool(token, new Blob(pending as BlobPart[]));
     }
     const complete = await localFetch(
       "/song/preview/ytm/sabr/spools/" + encodeURIComponent(token) + "/complete",
