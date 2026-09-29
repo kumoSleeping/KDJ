@@ -33,8 +33,9 @@ use symphonia::core::units::{Time, TimeBase};
 use crate::time_stretch::{PitchPreservingStretcher, SourceTiming, TempoControl, TimeStretchFrame};
 use crate::DecodedScratchWindow;
 
-/// Default read-ahead owned by one streaming Deck. The queue stores stereo output frames, so its
-/// memory is fixed regardless of track length (four seconds at 48 kHz is about 1.5 MiB).
+/// Default read-ahead owned by one streaming Deck. The raw decode queue stores 24 B stereo
+/// packets, so its memory is fixed regardless of track length (four seconds at 48 kHz is about
+/// 4.4 MiB).
 pub const DEFAULT_STREAM_BUFFER_SECONDS: usize = 4;
 /// How many successor tiles stay in flight besides the tile currently being pushed into the ring.
 const LIVE_STEM_LOOKAHEAD_TILES: usize = 2;
@@ -79,6 +80,26 @@ struct StreamPacket<F: Copy> {
     media_advance: f32,
     tempo_revision: u64,
     source_timing: SourceTiming,
+}
+
+/// Raw decode-ring packet. Decoders only write media_advance 1.0, tempo_revision 0 and untagged
+/// linear timing, so the six-second raw ring stores the frame, source time and generation and
+/// restores the constants on pop (24 B instead of 56 B per stereo frame).
+#[derive(Clone, Copy)]
+struct RawPacket<F: Copy> {
+    frame: F,
+    media_time: f64,
+    generation: u64,
+}
+
+enum PacketProducer<F: Copy> {
+    Timed(Producer<StreamPacket<F>>),
+    Raw(Producer<RawPacket<F>>),
+}
+
+enum PacketConsumer<F: Copy> {
+    Timed(Consumer<StreamPacket<F>>),
+    Raw(Consumer<RawPacket<F>>),
 }
 
 /// Number of stems one STEM ring frame carries, in `StemKind::index` order.
@@ -323,7 +344,7 @@ impl TimeStretchFrame for StemFrame {
 /// raw ring to one stretch worker and installs its separate post-stretch ring in the callback.
 /// There is always exactly one consumer; decode workers own the matching producer.
 pub struct StreamSource<F: Copy = [f32; 2]> {
-    consumer: UnsafeCell<Consumer<StreamPacket<F>>>,
+    consumer: UnsafeCell<PacketConsumer<F>>,
     counters: Arc<StreamCounters>,
 }
 
@@ -351,6 +372,23 @@ impl<F: Copy> StreamSource<F> {
             "stream capacity must contain multiple frames"
         );
         let (producer, consumer) = RingBuffer::new(capacity_frames);
+        Self::with_ring(PacketProducer::Timed(producer), PacketConsumer::Timed(consumer))
+    }
+
+    /// Decoder-to-stretch ring: see [`RawPacket`] for which fields it keeps.
+    fn bounded_raw(capacity_frames: usize) -> (Arc<Self>, StreamWriter<F>) {
+        assert!(
+            capacity_frames > 1,
+            "stream capacity must contain multiple frames"
+        );
+        let (producer, consumer) = RingBuffer::new(capacity_frames);
+        Self::with_ring(PacketProducer::Raw(producer), PacketConsumer::Raw(consumer))
+    }
+
+    fn with_ring(
+        producer: PacketProducer<F>,
+        consumer: PacketConsumer<F>,
+    ) -> (Arc<Self>, StreamWriter<F>) {
         let counters = Arc::new(StreamCounters {
             produced: AtomicU64::new(0),
             consumed: AtomicU64::new(0),
@@ -424,7 +462,19 @@ impl<F: Copy> StreamSource<F> {
         // unbounded stale ring on the realtime callback; later frames continue from the same SPSC
         // cursor. Scratch handoff performs its own bounded burst on top of this small budget.
         for _ in 0..32 {
-            let packet = consumer.pop().ok()?;
+            let packet = match consumer {
+                PacketConsumer::Timed(consumer) => consumer.pop().ok()?,
+                PacketConsumer::Raw(consumer) => {
+                    let raw = consumer.pop().ok()?;
+                    StreamPacket {
+                        frame: raw.frame,
+                        generation: raw.generation,
+                        media_advance: 1.0,
+                        tempo_revision: 0,
+                        source_timing: SourceTiming::linear(raw.media_time),
+                    }
+                }
+            };
             self.counters.consumed.fetch_add(1, Ordering::Release);
             if packet.generation == self.counters.generation.load(Ordering::Acquire) {
                 return Some(packet);
@@ -472,7 +522,7 @@ const MP3_SEEK_PREROLL_SECONDS: f64 = 1.0;
 
 /// Decode-thread half. It blocks only on its worker thread when read-ahead is full.
 pub struct StreamWriter<F: Copy = [f32; 2]> {
-    producer: Producer<StreamPacket<F>>,
+    producer: PacketProducer<F>,
     counters: Arc<StreamCounters>,
     generation: u64,
 }
@@ -642,25 +692,51 @@ impl<F: Copy> StreamWriter<F> {
             1.0
         };
         loop {
-            if cancelled() || self.producer.is_abandoned() {
+            let abandoned = match &self.producer {
+                PacketProducer::Timed(producer) => producer.is_abandoned(),
+                PacketProducer::Raw(producer) => producer.is_abandoned(),
+            };
+            if cancelled() || abandoned {
                 bail!("stream preparation cancelled");
             }
             if interrupted() {
                 return Ok(false);
             }
-            match self.producer.push(StreamPacket {
-                frame,
-                generation: self.generation,
-                media_advance,
-                tempo_revision,
-                source_timing,
-            }) {
+            let pushed = match &mut self.producer {
+                PacketProducer::Timed(producer) => producer
+                    .push(StreamPacket {
+                        frame,
+                        generation: self.generation,
+                        media_advance,
+                        tempo_revision,
+                        source_timing,
+                    })
+                    .map_err(|PushError::Full(returned)| returned.frame),
+                PacketProducer::Raw(producer) => {
+                    anyhow::ensure!(
+                        media_advance == 1.0
+                            && tempo_revision == 0
+                            && source_timing.loop_generation == 0
+                            && !source_timing.loop_active
+                            && !source_timing.loop_wrapped,
+                        "raw decode ring only carries linear 1x timing"
+                    );
+                    producer
+                        .push(RawPacket {
+                            frame,
+                            media_time: source_timing.media_time,
+                            generation: self.generation,
+                        })
+                        .map_err(|PushError::Full(returned)| returned.frame)
+                }
+            };
+            match pushed {
                 Ok(()) => {
                     self.counters.produced.fetch_add(1, Ordering::Release);
                     return Ok(true);
                 }
-                Err(PushError::Full(returned)) => {
-                    frame = returned.frame;
+                Err(returned) => {
+                    frame = returned;
                     thread::sleep(Duration::from_millis(1));
                 }
             }
@@ -878,7 +954,9 @@ struct PcmLoop<T: Copy> {
 struct PcmLoopReader<T: Copy> {
     sample_rate: f64,
     history_limit: usize,
-    history: std::collections::VecDeque<TimedPcm<T>>,
+    /// Frame and media time only: capture reads nothing else, and linear history carries no loop
+    /// tags worth keeping (16 B instead of 32 B per stereo frame).
+    history: std::collections::VecDeque<(T, f64)>,
     linear_pending: std::collections::VecDeque<TimedPcm<T>>,
     seen_generation: Option<u64>,
     active: Option<PcmLoop<T>>,
@@ -962,8 +1040,12 @@ impl<T: Copy + FrameLerp> PcmLoopReader<T> {
             exit_after_cycle: false,
             wrap_pending: false,
         };
-        for packet in &self.history {
-            Self::capture_packet(self.sample_rate, &mut active, *packet);
+        for &(frame, media_time) in &self.history {
+            let packet = TimedPcm {
+                frame,
+                source_timing: SourceTiming::linear(media_time),
+            };
+            Self::capture_packet(self.sample_rate, &mut active, packet);
             if active.frames.len() >= active.target_frames {
                 break;
             }
@@ -1008,11 +1090,11 @@ impl<T: Copy + FrameLerp> PcmLoopReader<T> {
         if self
             .history
             .back()
-            .is_some_and(|last| packet.media_time() + 1.0 / self.sample_rate < last.media_time())
+            .is_some_and(|last| packet.media_time() + 1.0 / self.sample_rate < last.1)
         {
             self.history.clear();
         }
-        self.history.push_back(packet);
+        self.history.push_back((packet.frame, packet.media_time()));
         while self.history.len() > self.history_limit {
             self.history.pop_front();
         }
@@ -1173,7 +1255,7 @@ where
     if cancelled() {
         bail!("stream preparation cancelled before buffer allocation");
     }
-    let (raw, raw_writer) = StreamSource::bounded(raw_capacity_frames);
+    let (raw, raw_writer) = StreamSource::bounded_raw(raw_capacity_frames);
     if cancelled() {
         bail!("stream preparation cancelled before decoder start");
     }
@@ -3423,6 +3505,46 @@ mod tests {
         assert!(window.generation() > armed);
     }
 
+    #[test]
+    fn raw_decode_ring_keeps_only_frame_time_and_generation() {
+        assert_eq!(std::mem::size_of::<RawPacket<[f32; 2]>>(), 24);
+        assert_eq!(std::mem::size_of::<RawPacket<StemFrame>>(), 64);
+        // The stretch worker must read exactly the packets a full timed ring would carry.
+        let (timed, mut timed_writer) = StreamSource::<[f32; 2]>::bounded(8);
+        let (raw, mut raw_writer) = StreamSource::<[f32; 2]>::bounded_raw(8);
+        for writer in [&mut timed_writer, &mut raw_writer] {
+            writer.push_at([0.25, -0.25], 1.5, || false).unwrap();
+            writer.begin_discontinuity();
+            writer.push_at([0.5, -0.5], 2.0, || false).unwrap();
+            writer.push([0.75, -0.75], || false).unwrap();
+        }
+        let fields = |packet: StreamPacket<[f32; 2]>| {
+            let timing = packet.source_timing;
+            (
+                packet.frame,
+                packet.generation,
+                packet.media_advance,
+                packet.tempo_revision,
+                timing.media_time.to_bits(),
+                timing.loop_generation,
+                timing.loop_active,
+                timing.loop_wrapped,
+            )
+        };
+        for _ in 0..2 {
+            let expected = timed.pop_consumer_packet().map(fields);
+            assert!(expected.is_some());
+            assert_eq!(raw.pop_consumer_packet().map(fields), expected);
+        }
+        assert!(timed.pop_consumer_packet().is_none());
+        assert!(raw.pop_consumer_packet().is_none());
+        // What the raw ring cannot carry is refused, not dropped.
+        assert!(raw_writer
+            .push_with_media_advance([0.0, 0.0], 0.5, || false)
+            .is_err());
+        assert!(raw.pop_consumer_packet().is_none());
+    }
+
     fn timed_value(value: usize, sample_rate: u32) -> TimedPcm<[f32; 2]> {
         TimedPcm {
             frame: [value as f32, value as f32],
@@ -3434,7 +3556,7 @@ mod tests {
         frames: usize,
         sample_rate: u32,
     ) -> (Arc<StreamSource<[f32; 2]>>, StreamWriter<[f32; 2]>) {
-        let (source, mut writer) = StreamSource::bounded(frames + 2);
+        let (source, mut writer) = StreamSource::bounded_raw(frames + 2);
         for value in 0..frames {
             let packet = timed_value(value, sample_rate);
             writer
@@ -3442,6 +3564,16 @@ mod tests {
                 .unwrap();
         }
         (source, writer)
+    }
+
+    #[test]
+    fn pcm_loop_history_keeps_two_seconds_of_frame_and_time_only() {
+        let sample_rate = 48_000;
+        let (raw, _writer) = raw_ramp(200_000, sample_rate);
+        let mut reader = PcmLoopReader::new(sample_rate);
+        while reader.next(&raw).is_some() {}
+        assert_eq!(reader.history.len(), 96_000);
+        assert_eq!(std::mem::size_of_val(reader.history.front().unwrap()), 16);
     }
 
     #[test]
