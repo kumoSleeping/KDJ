@@ -362,7 +362,10 @@ function systemDragPreview(track: TrackSummary): Promise<string> {
   const cacheKey = `${track.id}:${track.modified_at}`;
   const cached = systemDragPreviewCache.get(cacheKey);
   if (cached) return cached;
-  const pending = api.coverBlob(track.id)
+  // 走后端缩略图磁盘缓存，不在每次按下时抽取、传输、解码整张原图。缩略图按长边 256 缩放，
+  // 2:1 以内的封面裁成方形后短边仍不小于 128，不会被放大。
+  const pending = fetch(api.coverUrl(track.id, track.modified_at, 256))
+    .then((response) => response.ok ? response.blob() : Promise.reject(new Error(`HTTP ${response.status}`)))
     .then(dragPreviewFromBlob)
     .catch(() => vinylDragPreview());
   systemDragPreviewCache.set(cacheKey, pending);
