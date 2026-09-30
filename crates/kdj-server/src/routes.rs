@@ -9516,20 +9516,24 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
             }
         });
 
-        let root = std::env::temp_dir().join(format!(
-            "kdj-preview-cache-pool-{}-{:016x}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let config = Arc::new(kdj_core::AppConfig::create(root.join("data"), root.join("downloads"), 0));
+        let root = tempfile::Builder::new().prefix("kdj-preview-cache-pool-").tempdir().unwrap();
+        let config = Arc::new(kdj_core::AppConfig::create(root.path().join("data"), root.path().join("downloads"), 0));
         let mut settings = config.to_settings();
         settings.stream_cache_enabled = true;
         config.apply_settings(settings).unwrap();
-        let state = AppState::new(config).unwrap();
+        let mut state = AppState::new(config).unwrap();
+        // Count connections made by our pool, not by a machine's system proxy.
+        Arc::get_mut(&mut state).unwrap().preview_http = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
 
         // 前台试听先用共享 client 拉过同一上游，连接回到池里。
         let foreground = state.preview_http.get(&url).send().await.unwrap();
         assert_eq!(foreground.bytes().await.unwrap().len(), 1024);
+        // Hyper returns an HTTP/1 connection to the pool in a separate task after
+        // its body is drained. Let that task run on this single-threaded runtime.
+        tokio::task::yield_now().await;
 
         let source = SongSource {
             platform: Platform::Wyy,
@@ -9563,6 +9567,5 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         assert!(matches!(outcome, PreviewCacheOutcome::Complete));
         assert_eq!(connections.load(Ordering::SeqCst), 1, "后台缓存应复用前台试听的连接池");
         drop(state);
-        let _ = std::fs::remove_dir_all(root);
     }
 }
