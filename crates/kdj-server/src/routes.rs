@@ -2801,14 +2801,6 @@ async fn cache_song_preview_background(
     if crate::preview_policy::foreground_active(&cache_key) { return Ok(PreviewCacheOutcome::Cancelled); }
     ensure_preview_account(&state, &ticket).map_err(|error| error.detail)?;
     if !ticket.context.cacheable_as(ticket.quality) || ticket.context.is_rate_limited() { return Ok(PreviewCacheOutcome::Cancelled); }
-    kdj_core::ensure_rustls_ring();
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .referer(false)
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .read_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|error| error.to_string())?;
     let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
     let mut offset = 0_u64;
     let mut expected_total = None;
@@ -2830,9 +2822,10 @@ async fn cache_song_preview_background(
         let requested_range = format!("bytes={offset}-");
         let mut response = tokio::time::timeout(
             std::time::Duration::from_secs(30),
+            // 与前台试听共用连接池；配置等价（重定向 5 跳、无 Referer、10 s 建连、30 s 读）。
             send_song_preview_upstream(
                 &state,
-                &client,
+                &state.preview_http,
                 ticket.source.platform,
                 &ticket.url,
                 Some(&requested_range),
@@ -9333,5 +9326,82 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
             other => panic!("旧 offset 游标兼容失败：{other:?}"),
         }
         assert!(decode_library_cursor("kdj2-d-nan-1-2").is_none());
+    }
+
+    #[tokio::test]
+    async fn background_preview_cache_reuses_the_foreground_connection_pool() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // 计数 TCP 建连的 keep-alive 上游：每个请求都回完整的 1 KiB 206 分段。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/song.mp3", listener.local_addr().unwrap());
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = connections.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                accepted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+                    while let Ok(read @ 1..) = socket.read(&mut buffer).await {
+                        request.extend_from_slice(&buffer[..read]);
+                        while let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            request.drain(..end + 4);
+                            let head = "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mpeg\r\nContent-Range: bytes 0-1023/1024\r\nContent-Length: 1024\r\n\r\n";
+                            socket.write_all(head.as_bytes()).await.unwrap();
+                            socket.write_all(&[0xff_u8; 1024]).await.unwrap();
+                        }
+                    }
+                });
+            }
+        });
+
+        let root = std::env::temp_dir().join(format!(
+            "kdj-preview-cache-pool-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let config = Arc::new(kdj_core::AppConfig::create(root.join("data"), root.join("downloads"), 0));
+        let mut settings = config.to_settings();
+        settings.stream_cache_enabled = true;
+        config.apply_settings(settings).unwrap();
+        let state = AppState::new(config).unwrap();
+
+        // 前台试听先用共享 client 拉过同一上游，连接回到池里。
+        let foreground = state.preview_http.get(&url).send().await.unwrap();
+        assert_eq!(foreground.bytes().await.unwrap().len(), 1024);
+
+        let source = SongSource {
+            platform: Platform::Wyy,
+            key: "pool".into(),
+            title: "pool".into(),
+            artists: vec!["artist".into()],
+            album: String::new(),
+            duration: Some(1.0),
+            cover: String::new(),
+            max_quality: Some(Quality::Q320),
+            vip: false,
+            payload: Default::default(),
+        };
+        let cache_key = crate::stream_cache::StreamCache::key(&source, Quality::Q320);
+        let mut reservation = state.stream_cache.reserve(cache_key.clone()).unwrap();
+        assert!(reservation.acquire_slot().await);
+        let ticket = SongPreviewTicket {
+            context: Default::default(),
+            source,
+            quality: Quality::Q320,
+            cache_key: Some(cache_key.clone()),
+            cached: false,
+            url,
+            browser_resolved: false,
+            protected_spool: None,
+            last_used_at: std::time::Instant::now(),
+        };
+        let outcome = cache_song_preview_background(state.clone(), ticket, cache_key, "audio/mpeg".into(), reservation)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PreviewCacheOutcome::Complete));
+        assert_eq!(connections.load(Ordering::SeqCst), 1, "后台缓存应复用前台试听的连接池");
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
