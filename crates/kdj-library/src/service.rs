@@ -228,6 +228,24 @@ fn effective_bpm_key_column(column: &str) -> String {
     if column == "bpm" { format!("COALESCE((SELECT bpm FROM track_rhythm_v4 WHERE track_id=tracks.id AND revision='{RHYTHM_REVISION}' AND file_mtime IS (SELECT rhythm_source.file_mtime FROM tracks AS rhythm_source WHERE rhythm_source.id=tracks.id)), {old})") } else {old}
 }
 
+/// `apply_bpm_key_analysis` 的调性覆盖规则写成 SQL：哪一代分析写了 music_key，camelot 就取
+/// 那一代的，哪怕是空的。它和上面按字段各自回退的 effective 列只在“有 camelot 没 key”
+/// 这类残缺行上不同；和声推荐用它给候选定关系，才和返回的完整曲目显示的调性一致。
+fn overlaid_camelot_column() -> String {
+    let v3 = format!(
+        "FROM track_bpm_key_analysis_v3 v3 WHERE v3.track_id = tracks.id \
+         AND v3.analyzer_revision = '{BPM_KEY_V3_REVISION}'"
+    );
+    let v2 = "FROM track_bpm_key_analysis_v2 v2 WHERE v2.track_id = tracks.id";
+    format!(
+        "CASE WHEN COALESCE((SELECT v3.music_key {v3}), '') <> '' \
+           THEN COALESCE((SELECT v3.camelot {v3}), '') \
+         WHEN COALESCE((SELECT v2.music_key {v2}), '') <> '' \
+           THEN COALESCE((SELECT v2.camelot {v2}), '') \
+         ELSE tracks.camelot END"
+    )
+}
+
 fn sort_column(key: &str) -> String {
     match key {
         "file_created_at" => "tracks.file_created_at".into(),
@@ -1119,6 +1137,16 @@ impl LibraryService {
     }
 
     pub fn list_tracks(&self, query: &TrackQuery) -> Result<TrackPage> {
+        let mut page = self.list_track_rows(query)?;
+        let conn = self.db.conn()?;
+        page.items = self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, page.items)?)?;
+        Ok(page)
+    }
+
+    /// 与 [`Self::list_tracks`] 同一套筛选、排序和分页，但只含 tracks 表自身的列：
+    /// 不叠加 V2/V3/V4 的 BPM、调号和拍点数组，也不带标签。整库扫描用它，
+    /// 免得每一行都解析一遍拍点 JSON。
+    pub fn list_track_rows(&self, query: &TrackQuery) -> Result<TrackPage> {
         let conn = self.db.conn()?;
         let (clause, params) = self.build_where(query);
         // limit=0 当"没传"，退回默认 200（v0.1.0 是 `limit or 200`）。
@@ -1170,7 +1198,7 @@ impl LibraryService {
                 .take(limit as usize)
                 .collect();
             return Ok(TrackPage {
-                items: self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, page)?)?,
+                items: page,
                 total,
                 offset,
                 limit,
@@ -1212,7 +1240,7 @@ impl LibraryService {
             .collect::<std::result::Result<_, _>>()?;
 
         Ok(TrackPage {
-            items: self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, rows)?)?,
+            items: rows,
             total,
             offset,
             limit,
@@ -1230,6 +1258,27 @@ impl LibraryService {
             .attach_tags(&conn, self.apply_bpm_key_analysis(&conn, vec![track])?)?
             .into_iter()
             .next())
+    }
+
+    /// 按 id 批量取完整曲目（拍点、标签都带上），不存在的 id 不出现在结果里。
+    pub fn tracks_by_ids(&self, ids: &[i64]) -> Result<HashMap<i64, Track>> {
+        let conn = self.db.conn()?;
+        let mut tracks = HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(900) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT * FROM tracks WHERE id IN ({placeholders})"
+            ))?;
+            let rows: Vec<Track> = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok(row_to_track(row))
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            for track in self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, rows)?)? {
+                tracks.insert(track.id, track);
+            }
+        }
+        Ok(tracks)
     }
 
     pub fn media_source(&self, track_id: i64) -> Result<Option<TrackMediaSource>> {
@@ -3081,18 +3130,28 @@ impl LibraryService {
             params.push(SqlValue::Text(path_key_range_end(&prefix)));
         }
 
+        // 先只读打分、排序、去重要用的标量；拍点数组和标签留到截到 limit 之后再取，
+        // 否则每点一首歌都要把几千个兼容候选的拍点 JSON 全解析一遍。
         let effective_camelot = effective_bpm_key_column("camelot");
+        let effective_bpm = effective_bpm_key_column("bpm");
+        let overlaid_camelot = overlaid_camelot_column();
         let mut stmt = conn.prepare(&format!(
-            "SELECT * FROM tracks WHERE UPPER(COALESCE(({effective_camelot}), '')) IN ({placeholders}) \
+            "SELECT id, title, artist, filename, ({overlaid_camelot}) AS camelot, \
+             ({effective_bpm}) AS bpm FROM tracks \
+             WHERE UPPER(COALESCE(({effective_camelot}), '')) IN ({placeholders}) \
              {exclude_clause}{bpm_clause}{folder_clause}"
         ))?;
-        let candidates: Vec<Track> = stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                Ok(row_to_track(row))
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        let candidates =
-            self.attach_tags(&conn, self.apply_bpm_key_analysis(&conn, candidates)?)?;
+        let candidates = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok(Track {
+                id: row.get("id")?,
+                title: text(row, "title"),
+                artist: text(row, "artist"),
+                filename: text(row, "filename"),
+                camelot: text(row, "camelot").to_uppercase(),
+                bpm: row.get("bpm").ok().flatten(),
+                ..Track::default()
+            })
+        })?;
 
         let relation_of: HashMap<&str, HarmonicRelation> = relations
             .iter()
@@ -3101,6 +3160,7 @@ impl LibraryService {
 
         let mut matches: Vec<HarmonicMatch> = Vec::new();
         for track in candidates {
+            let track = track?;
             let candidate_camelot = track.camelot.trim().to_ascii_uppercase();
             let Some(relation) = relation_of.get(candidate_camelot.as_str()).copied() else {
                 continue;
@@ -3129,6 +3189,8 @@ impl LibraryService {
                 track,
             });
         }
+        drop(stmt);
+        drop(conn);
 
         matches.sort_by(|a, b| {
             b.score
@@ -3164,7 +3226,16 @@ impl LibraryService {
                 break;
             }
         }
-        Ok(unique)
+        let ids: Vec<i64> = unique.iter().map(|item| item.track.id).collect();
+        let mut full = self.tracks_by_ids(&ids)?;
+        // 两次读取之间被删掉的曲目直接跳过
+        Ok(unique
+            .into_iter()
+            .filter_map(|mut item| {
+                item.track = full.remove(&item.track.id)?;
+                Some(item)
+            })
+            .collect())
     }
 
     // ------------------------------------------------------------ 统计
@@ -6735,5 +6806,152 @@ mod tests {
             service.get(second).unwrap().unwrap().path,
             conflicting_source
         );
+    }
+
+    use crate::peak_alloc::peak_allocated;
+
+    /// 合成曲库：每首都带真实长度的 V3 拍点（6 分钟 × 128 BPM ≈ 768 拍、192 小节拍）。
+    /// 每首歌两份复制文件（去重和同分并列都走得到），Camelot 均匀铺满 24 个码，
+    /// BPM 落在 118–134，每十首带一个标签。返回第一首的 id 当推荐来源。
+    fn insert_beat_grid_library(service: &LibraryService, count: i64) -> i64 {
+        let beats: Vec<f64> = (0..768).map(|i| 0.123_456 + i as f64 * 0.468_75).collect();
+        let downbeats: Vec<f64> = beats.iter().step_by(4).copied().collect();
+        let beats = serde_json::to_string(&beats).unwrap();
+        let downbeats = serde_json::to_string(&downbeats).unwrap();
+        let mut conn = service.db().conn().unwrap();
+        let tx = conn.transaction().unwrap();
+        let mut first = 0;
+        {
+            let mut insert_track = tx
+                .prepare(
+                    "INSERT INTO tracks (path, filename, title, artist, duration, format, size, \
+                     file_created_at, added_at, modified_at) \
+                     VALUES (?, ?, ?, ?, ?, 'flac', 30000000, ?, 'now', 'now')",
+                )
+                .unwrap();
+            let mut insert_v3 = tx
+                .prepare(
+                    "INSERT INTO track_bpm_key_analysis_v3 (track_id, analyzer_revision, bpm, \
+                     beat_times_json, downbeats_json, music_key, camelot, open_key, analyzed_at) \
+                     VALUES (?, ?, ?, ?, ?, 'Am', ?, '', 'now')",
+                )
+                .unwrap();
+            let mut insert_tag = tx
+                .prepare("INSERT INTO tags (track_id, tag) VALUES (?, 'peak')")
+                .unwrap();
+            for index in 0..count {
+                let song = index / 2;
+                let filename = format!("track-{index:05}.flac");
+                insert_track
+                    .execute(rusqlite::params![
+                        format!("/library/folder-{:02}/{filename}", index % 64),
+                        filename,
+                        format!("Title {song:05}"),
+                        format!("Artist {:03}", song % 250),
+                        300.0 + (song % 120) as f64,
+                        1_700_000_000.0 + index as f64,
+                    ])
+                    .unwrap();
+                let id = tx.last_insert_rowid();
+                if index == 0 {
+                    first = id;
+                }
+                insert_v3
+                    .execute(rusqlite::params![
+                        id,
+                        BPM_KEY_V3_REVISION,
+                        118.0 + ((song * 7) % 17) as f64,
+                        beats,
+                        downbeats,
+                        format!("{}{}", song % 12 + 1, ["A", "B"][(song / 12 % 2) as usize]),
+                    ])
+                    .unwrap();
+                if index % 10 == 0 {
+                    insert_tag.execute([id]).unwrap();
+                }
+            }
+        }
+        tx.commit().unwrap();
+        first
+    }
+
+    #[test]
+    fn harmonic_matches_only_materialize_the_returned_beat_grids() {
+        let service = service();
+        let source = insert_beat_grid_library(&service, 2_000);
+        let (matches, peak) = peak_allocated(|| {
+            service
+                .harmonic_matches(source, 12.0, 60, true, "")
+                .unwrap()
+        });
+        // 条目和顺序在两阶段查询之前的实现上固定
+        let ids: Vec<i64> = matches.iter().map(|item| item.track.id).collect();
+        assert_eq!(
+            ids,
+            [
+                2, 817, 1633, 385, 1201, 769, 1585, 337, 1153, 1969, 721, 1537, 289, 1105, 1921,
+                579, 647, 1395, 1463, 673, 1489, 147, 215, 963, 1031, 1779, 1847, 241, 1057, 1873,
+                409, 1225, 531, 599, 1347, 1415, 625, 1441, 793, 1609, 99, 167, 915, 983, 1731,
+                1799, 193, 1009, 1825, 361, 1177, 1993, 483, 551, 1299, 1367, 577, 1393, 745, 1561
+            ]
+        );
+        for item in &matches {
+            // 返回的仍是完整曲目：拍点、标签都和详情接口一致
+            let full = service.get(item.track.id).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(&item.track).unwrap(),
+                serde_json::to_value(&full).unwrap()
+            );
+            assert_eq!(item.track.beat_times.len(), 768);
+        }
+        assert!(peak < 3 << 20, "峰值分配 {peak} B");
+    }
+
+    #[test]
+    fn harmonic_candidates_are_judged_by_the_camelot_the_track_shows() {
+        let service = service();
+        let conn = service.db().conn().unwrap();
+        for (title, camelot) in [("source", "8A"), ("shown as 3B", "3B"), ("shown as 8A", "8A")] {
+            conn.execute(
+                "INSERT INTO tracks (path, filename, title, bpm, camelot, music_key, format, size, \
+                 file_created_at, added_at, modified_at) \
+                 VALUES (?1, ?1, ?1, 124.0, ?2, 'x', 'flac', 1, 0, 'now', 'now')",
+                (title, camelot),
+            )
+            .unwrap();
+        }
+        // 残缺的分析行：写了 camelot 却没有 music_key，覆盖规则不采用它，曲目仍显示 3B
+        conn.execute(
+            "INSERT INTO track_bpm_key_analysis_v3 (track_id, analyzer_revision, bpm, \
+             beat_times_json, downbeats_json, music_key, camelot, open_key, analyzed_at) \
+             VALUES (2, ?, 124.0, '[]', '[]', '', '8A', '', 'now')",
+            [BPM_KEY_V3_REVISION],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(service.get(2).unwrap().unwrap().camelot, "3B");
+        let matches = service.harmonic_matches(1, 12.0, 60, false, "").unwrap();
+        let titles: Vec<_> = matches.iter().map(|item| item.track.title.as_str()).collect();
+        assert_eq!(titles, ["shown as 8A"]);
+    }
+
+    #[test]
+    #[ignore = "50k-row memory acceptance; run explicitly"]
+    fn fifty_thousand_track_harmonic_matches_peak_allocation() {
+        let service = service();
+        let source = insert_beat_grid_library(&service, 50_000);
+        let started = Instant::now();
+        let (matches, peak) = peak_allocated(|| {
+            service
+                .harmonic_matches(source, 12.0, 60, true, "")
+                .unwrap()
+        });
+        eprintln!(
+            "50k harmonic_matches: peak={peak} B ({:.1} MiB), {} matches, {:?}",
+            peak as f64 / 1048576.0,
+            matches.len(),
+            started.elapsed()
+        );
+        assert!(peak < 50 << 20, "峰值分配 {peak} B");
     }
 }

@@ -26,6 +26,9 @@ pub mod themes;
 pub mod waveform;
 pub mod ws;
 pub mod youtube_hls;
+#[cfg(test)]
+#[path = "../../test-support/peak_alloc.rs"]
+mod peak_alloc;
 
 use std::sync::Arc;
 
