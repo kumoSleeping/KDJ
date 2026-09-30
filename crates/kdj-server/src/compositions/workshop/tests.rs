@@ -1638,3 +1638,50 @@ fn alignment_cancellation_reaches_registry_and_handles_early_cancellation() {
     let cancel = lease.cancel.clone(); drop(lease);
     assert!(cancel.is_cancelled());
 }
+
+#[tokio::test]
+async fn gif_export_frames_match_single_frame_decoding() {
+    use image::{Rgba, RgbaImage, Frame, Delay, codecs::gif::GifEncoder};
+    let f=Fixture::new(); let m=manager(&f);
+    let gif=f.path("frames.gif");
+    let mut encoder=GifEncoder::new(std::fs::File::create(&gif).unwrap());
+    // Offset partial frames exercise compositing over earlier frames.
+    encoder.encode_frames((0..60u32).map(|i| {
+        let (w,h)=if i%3==0 {(160,90)} else {(40+i,30)};
+        let img=RgbaImage::from_fn(w,h,|x,y|Rgba([(x*7+i) as u8,(y*5+i*3) as u8,(i*11) as u8,if (x+y+i)%9==0 {0} else {255}]));
+        Frame::from_parts(img,if i%3==0 {0} else {i%50},if i%3==0 {0} else {i%40},Delay::from_numer_denom_ms(40,1))
+    })).unwrap();drop(encoder);
+    let info=kdj_providers::workshop_images::inspect(&gif).unwrap();
+    let s=Source {id:"gif".into(),track_id:0,path:gif.to_string_lossy().into_owned(),title:"gif".into(),kind:"gif".into(),
+        frame_ends_ms:info.frame_ends_ms,duration_ms:5000.,video:false,audio:false,width:info.width,height:info.height,fps:30.,
+        signature:signature(&gif).unwrap()};
+    let c=new_clip(&s,0.);
+    // A cache already over budget with a newer entry: the trim after decoding evicts every frame.
+    let full=m.cache.join("newer.mp4"); let file=std::fs::File::create(&full).unwrap();
+    file.set_len(3<<30).unwrap(); file.set_modified(std::time::SystemTime::now()+std::time::Duration::from_secs(3600)).unwrap();
+    // kdj-providers proves the one-pass bytes equal frame_png's; replaying from frame 0 here costs seconds.
+    let mut frames=vec![];
+    kdj_providers::workshop_images::frame_pngs(&gif,&(0..60).collect(),0,|_,png|Ok(frames.push(png))).unwrap();
+    assert_eq!(frames[59],kdj_providers::workshop_images::frame_png(&gif,true,59,0).unwrap());
+    // The later passes decode into the emptied cache, then copy from it.
+    for pass in ["evicted","decoded","cached"] {
+        let stage=f.path(pass);std::fs::create_dir(&stage).unwrap();
+        m.image_input(&s,&c,30.,&stage,0,&mut vec![],&CancellationToken::new()).await.unwrap();
+        for (index,frame) in frames.iter().enumerate() {
+            assert_eq!(&std::fs::read(stage.join(format!("image-0-{index}.png"))).unwrap(),frame,"{pass} frame {index}");
+        }
+        assert!(!full.exists(),"the trim ran and went through the older frames first");
+    }
+}
+
+#[tokio::test]
+async fn cache_trim_counts_and_evicts_picture_frames() {
+    let f=Fixture::new(); let m=manager(&f);
+    // Sparse: counts 3 GiB against the budget without using the disk.
+    let old=m.cache.join("old.png"); let file=std::fs::File::create(&old).unwrap();
+    file.set_len(3<<30).unwrap(); file.set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(3600)).unwrap();
+    let newer=m.cache.join("newer.jpg"); std::fs::write(&newer,b"jpg").unwrap();
+    m.trim_cache();
+    assert!(!old.exists(),"oldest picture frame is evicted once the cache exceeds its budget");
+    assert!(newer.exists());
+}
