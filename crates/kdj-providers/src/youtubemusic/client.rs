@@ -21,6 +21,8 @@ use crate::net::http_timeouts;
 use crate::provider::{ProtectedPoTokenBinding, ProtectedPreviewIdentity};
 
 pub const BASE: &str = "https://music.youtube.com/youtubei/v1";
+// 测试经本地明文代理拦截首页，不连 YouTube。
+const HOMEPAGE: &str = if cfg!(test) { "http://music.youtube.com/" } else { "https://music.youtube.com/" };
 /// music.youtube.com 网页端的公开 InnerTube key（ytmusicapi 同款）。
 const DEFAULT_INNERTUBE_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
 
@@ -97,11 +99,32 @@ enum ScriptState {
 
 type ScriptCache = RwLock<ScriptState>;
 
+const HOMEPAGE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// 已登录音乐首页里受保护播放要用的两样东西，各自从读到它的那次拉取起算 5 分钟。
+#[derive(Default)]
+struct HomepageCache {
+    identity: Option<(std::time::Instant, ProtectedPreviewIdentity)>,
+    player_url: Option<(std::time::Instant, String)>,
+    /// 最近一次拉取成功、失败的时刻；只用来把结果交给当时正在排队的调用方。
+    fetched_at: Option<std::time::Instant>,
+    failed: Option<(std::time::Instant, String)>,
+}
+
+fn fresh<T: Clone>(slot: &Option<(std::time::Instant, T)>) -> Option<T> {
+    slot.as_ref()
+        .filter(|(at, _)| at.elapsed() < HOMEPAGE_TTL)
+        .map(|(_, value)| value.clone())
+}
+
 pub struct YtmClient {
     http: reqwest::Client,
     innertube_key: String,
     script: ScriptCache,
-    protected_identity: RwLock<Option<(std::time::Instant, ProtectedPreviewIdentity)>>,
+    /// identity 与 player URL 共用一次首页请求。
+    homepage: RwLock<HomepageCache>,
+    /// 同一时刻只拉一次首页；读缓存不经过它，不会排在别人的拉取后面。
+    homepage_fetch: tokio::sync::Mutex<()>,
     /// YouTube Music provider 独占的浏览器 Cookie 会话。
     auth: Arc<YoutubeAuth>,
 }
@@ -118,7 +141,8 @@ impl YtmClient {
             http,
             innertube_key: env_or("KDJ_YTM_INNERTUBE_KEY", DEFAULT_INNERTUBE_KEY),
             script: RwLock::new(ScriptState::None),
-            protected_identity: RwLock::new(None),
+            homepage: Default::default(),
+            homepage_fetch: Default::default(),
             auth,
         })
     }
@@ -205,6 +229,11 @@ impl YtmClient {
             .into());
         }
         Ok(payload)
+    }
+
+    #[cfg(test)]
+    fn set_test_http(&mut self, http: reqwest::Client) {
+        self.http = http;
     }
 
     /// provider 下载流 / 拉封面要用同一个 client（共享连接池与超时配置）。
@@ -368,48 +397,73 @@ impl YtmClient {
     }
 
     pub async fn protected_web_identity(&self) -> Result<ProtectedPreviewIdentity> {
-        if let Some((created_at, identity)) = self.protected_identity.read().unwrap().as_ref() {
-            if created_at.elapsed() < std::time::Duration::from_secs(5 * 60) {
-                return Ok(identity.clone());
-            }
-        }
-        let mut request = self.http.get("https://music.youtube.com/");
-        for (name, value) in self.auth.request_headers("https://music.youtube.com") {
-            request = request.header(name, value);
-        }
-        let html = request
-            .send()
-            .await
-            .context("打开 YouTube Music 首页失败")?
-            .error_for_status()
-            .context("YouTube Music 首页返回错误")?
-            .text()
-            .await
-            .context("读取 YouTube Music 首页失败")?;
-        let visitor_data = extract_ytcfg_value(&html, "VISITOR_DATA")
-            .context("YouTube Music 首页没有返回 Visitor Data")?;
-        let data_sync_id = extract_ytcfg_value(&html, "DATASYNC_ID").unwrap_or_default();
-        // yt-dlp detects this page experiment before selecting the WebPO content binding. Outside
-        // that experiment an authenticated web session binds GVS to DATASYNC_ID; logged-out web
-        // sessions bind it to Visitor Data.
-        let gvs_binding = select_gvs_binding(&html, &data_sync_id);
-        let identity = ProtectedPreviewIdentity {
-            visitor_data,
-            data_sync_id,
-            gvs_binding,
-        };
-        *self.protected_identity.write().unwrap() =
-            Some((std::time::Instant::now(), identity.clone()));
-        Ok(identity)
+        self.homepage(|page| fresh(&page.identity))
+            .await?
+            .context("YouTube Music 首页没有返回 Visitor Data")
     }
 
     /// player 响应偶尔省略 assets.js；此时从已登录音乐首页读取当前脚本版本。
+    /// 只要 URL，不下载 base.js；前端按 URL 取脚本，player 响应的 assets.js 仍优先。
     pub async fn protected_player_url(&self, preferred: Option<&str>) -> Result<String> {
         if let Some(value) = preferred.filter(|value| !value.is_empty()) {
             return trusted_player_url(value);
         }
-        let (url, _) = self.script_url_from_homepage().await?;
+        let url = self
+            .homepage(|page| fresh(&page.player_url))
+            .await?
+            .context("从首页找不到播放器脚本地址")?;
         trusted_player_url(&url)
+    }
+
+    /// 缓存里没有 `pick` 要的字段时拉一次首页。页面里没有的字段不动，旧值按自己的时限过期。
+    async fn homepage<T>(&self, pick: impl Fn(&HomepageCache) -> Option<T>) -> Result<Option<T>> {
+        if let Some(value) = pick(&self.homepage.read().unwrap()) {
+            return Ok(Some(value));
+        }
+        let asked = std::time::Instant::now();
+        let _fetching = self.homepage_fetch.lock().await;
+        {
+            let cached = self.homepage.read().unwrap();
+            if let Some(value) = pick(&cached) {
+                return Ok(Some(value));
+            }
+            // 排队期间已有一次拉取结束：共用它的结果（失败，或页面里没有这个字段），
+            // 不让每个等待者各自再等一轮。
+            if let Some((_, error)) = cached.failed.as_ref().filter(|(at, _)| *at >= asked) {
+                anyhow::bail!("{error}");
+            }
+            if cached.fetched_at.is_some_and(|at| at >= asked) {
+                return Ok(None);
+            }
+        }
+        let html = match self.fetch_homepage().await {
+            Ok(html) => html,
+            Err(error) => {
+                self.homepage.write().unwrap().failed =
+                    Some((std::time::Instant::now(), format!("{error:#}")));
+                return Err(error);
+            }
+        };
+        let now = std::time::Instant::now();
+        let mut cached = self.homepage.write().unwrap();
+        cached.fetched_at = Some(now);
+        if let Some(visitor_data) = extract_ytcfg_value(&html, "VISITOR_DATA") {
+            let data_sync_id = extract_ytcfg_value(&html, "DATASYNC_ID").unwrap_or_default();
+            // yt-dlp detects this page experiment before selecting the WebPO content binding.
+            // Outside that experiment an authenticated web session binds GVS to DATASYNC_ID;
+            // logged-out web sessions bind it to Visitor Data.
+            let gvs_binding = select_gvs_binding(&html, &data_sync_id);
+            let identity = ProtectedPreviewIdentity {
+                visitor_data,
+                data_sync_id,
+                gvs_binding,
+            };
+            cached.identity = Some((now, identity));
+        }
+        if let Some(url) = extract_player_url(&html) {
+            cached.player_url = Some((now, url));
+        }
+        Ok(pick(&cached))
     }
 
     /// 只代理 player 响应或官方首页明确给出的 base.js；不接受任意远程 URL。
@@ -590,24 +644,26 @@ impl YtmClient {
 
     /// 首页 ytcfg 里的 jsUrl；读不到时把整段首页 HTML 扫一遍。
     async fn script_url_from_homepage(&self) -> Result<(String, String)> {
-        let mut request = self.http.get("https://music.youtube.com/");
-        for (name, value) in self.auth.request_headers("https://music.youtube.com") {
-            request = request.header(name, value);
-        }
-        let html = {
-            request
-                .send()
-                .await
-                .context("打开 YouTube Music 首页失败")?
-                .error_for_status()
-                .context("YouTube Music 首页返回错误")?
-                .text()
-                .await
-                .context("读取 YouTube Music 首页失败")?
-        };
+        let html = self.fetch_homepage().await?;
         let url = extract_player_url(&html).context("从首页找不到播放器脚本地址")?;
         let js = self.fetch_text(&url).await?;
         Ok((url, js))
+    }
+
+    async fn fetch_homepage(&self) -> Result<String> {
+        let mut request = self.http.get(HOMEPAGE);
+        for (name, value) in self.auth.request_headers("https://music.youtube.com") {
+            request = request.header(name, value);
+        }
+        request
+            .send()
+            .await
+            .context("打开 YouTube Music 首页失败")?
+            .error_for_status()
+            .context("YouTube Music 首页返回错误")?
+            .text()
+            .await
+            .context("读取 YouTube Music 首页失败")
     }
 
     async fn fetch_text(&self, url: &str) -> Result<String> {
@@ -865,5 +921,140 @@ mod tests {
         assert_eq!(civil_from_days(19_723), (2024, 1, 1));
         assert_eq!(civil_from_days(19_723 + 365), (2024, 12, 31), "2024 是闰年");
         assert_eq!(civil_from_days(-1), (1969, 12, 31), "纪元前一天");
+    }
+
+    /// 首页请求都落到本地明文代理；第 n 次请求回 `pages[n]`（用完后重复最后一项），`None` 回 502。
+    /// base.js 是 https，代理只会看到 CONNECT。返回 client 与（首页次数，base.js 次数）。
+    async fn homepage_client(
+        pages: Vec<Option<&'static str>>,
+    ) -> (YtmClient, Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)>) {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let root = std::env::temp_dir().join(format!(
+            "kdj-ytm-player-url-test-{:016x}",
+            rand::random::<u64>()
+        ));
+        let ctx = crate::provider::ProviderContext::new(
+            root.clone(),
+            crate::provider::ProviderLiveSettings {
+                download_dir: root.join("downloads"),
+                filename_template: "{title}".into(),
+                default_quality: kdj_core::models::Quality::Q128,
+                netease_use_download_api: false,
+                soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
+                ytm_enabled: true,
+                youtube_enabled: false,
+                video_dir: None,
+                video_format: "mp4".into(),
+            },
+        );
+        let auth = Arc::new(YoutubeAuth::new(&ctx, kdj_core::models::Platform::Ytm).unwrap());
+        let _ = std::fs::remove_dir_all(root);
+        let mut client = YtmClient::new(auth).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        client.set_test_http(
+            reqwest::Client::builder()
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(&origin).unwrap())
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap(),
+        );
+        let hits = Arc::new(Default::default());
+        let counted: Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)> =
+            Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = [0; 8192];
+                let length = stream.read(&mut request).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&request[..length]).into_owned();
+                let mut page = None;
+                if head.starts_with("GET http://music.youtube.com/ ") {
+                    let index = counted.0.fetch_add(1, Ordering::SeqCst);
+                    // 返回前先让出，便于并发请求在冷缓存上真正重叠。
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    page = pages[index.min(pages.len() - 1)];
+                } else if head.starts_with("CONNECT www.youtube.com:443") {
+                    counted.1.fetch_add(1, Ordering::SeqCst);
+                }
+                let response = match page {
+                    Some(html) => format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}", html.len()),
+                    None => "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        (client, hits)
+    }
+
+    const PLAYER_URL: &str = "https://www.youtube.com/s/player/abc123/player_ias.vflset/en_US/base.js";
+    const IDENTITY_PAGE: &str = r#"<script>ytcfg.set({"VISITOR_DATA":"visitor"})</script>"#;
+    const PLAYER_PAGE: &str = r#"<script>ytcfg.set({"jsUrl":"\/s\/player\/abc123\/player_ias.vflset\/en_US\/base.js"})</script>"#;
+    const FULL_PAGE: &str = r#"<script>ytcfg.set({"VISITOR_DATA":"visitor","jsUrl":"\/s\/player\/abc123\/player_ias.vflset\/en_US\/base.js"})</script>"#;
+
+    #[tokio::test]
+    async fn protected_player_url_shares_one_cached_homepage_and_skips_base_js() {
+        use std::sync::atomic::Ordering;
+        let (client, hits) = homepage_client(vec![Some(FULL_PAGE)]).await;
+        let (identity, first) = tokio::join!(
+            client.protected_web_identity(),
+            client.protected_player_url(None)
+        );
+        let mut urls = vec![first.ok()];
+        for _ in 0..4 {
+            urls.push(client.protected_player_url(None).await.ok());
+        }
+        assert_eq!(identity.unwrap().visitor_data, "visitor");
+        assert!(urls.iter().all(|url| url.as_deref() == Some(PLAYER_URL)), "{urls:?}");
+        assert_eq!(hits.1.load(Ordering::SeqCst), 0, "player URL 不需要下载 base.js");
+        assert_eq!(hits.0.load(Ordering::SeqCst), 1, "identity 与 player URL 共用一次首页请求");
+    }
+
+    #[tokio::test]
+    async fn queued_homepage_callers_share_one_failure() {
+        use std::sync::atomic::Ordering;
+        let (client, hits) = homepage_client(vec![None]).await;
+        let results = tokio::join!(
+            client.protected_player_url(None),
+            client.protected_web_identity(),
+            client.protected_player_url(None),
+            client.protected_web_identity(),
+        );
+        assert!(results.0.is_err() && results.1.is_err() && results.2.is_err() && results.3.is_err());
+        assert_eq!(hits.0.load(Ordering::SeqCst), 1, "排队的调用方不该各自再等一轮失败");
+        // 失败不缓存：之后的调用照常重试
+        assert!(client.protected_player_url(None).await.is_err());
+        assert_eq!(hits.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn homepage_fields_are_cached_independently() {
+        use std::sync::atomic::Ordering;
+        let (client, hits) = homepage_client(vec![Some(IDENTITY_PAGE), Some(PLAYER_PAGE)]).await;
+        assert_eq!(client.protected_web_identity().await.unwrap().visitor_data, "visitor");
+        assert_eq!(client.protected_player_url(None).await.unwrap(), PLAYER_URL);
+        assert_eq!(hits.0.load(Ordering::SeqCst), 2);
+        assert_eq!(client.protected_web_identity().await.unwrap().visitor_data, "visitor");
+        assert_eq!(client.protected_player_url(None).await.unwrap(), PLAYER_URL);
+        assert_eq!(hits.0.load(Ordering::SeqCst), 2, "两页各带一个字段，合起来就不用再拉");
+    }
+
+    #[tokio::test]
+    async fn queued_callers_share_a_page_that_lacks_their_field() {
+        use std::sync::atomic::Ordering;
+        let (client, hits) = homepage_client(vec![Some(IDENTITY_PAGE)]).await;
+        let results = tokio::join!(
+            client.protected_player_url(None),
+            client.protected_player_url(None),
+            client.protected_player_url(None),
+            client.protected_web_identity(),
+        );
+        assert!(results.0.is_err() && results.1.is_err() && results.2.is_err());
+        assert_eq!(results.3.unwrap().visitor_data, "visitor");
+        assert_eq!(hits.0.load(Ordering::SeqCst), 1);
     }
 }
