@@ -305,13 +305,34 @@ fn local_artwork_url(source_url: &str, track_id: Option<i64>) -> Result<String, 
     }
 
     let mut hasher = DefaultHasher::new();
-    source_url
+    let resource = source_url
         .split_once("/api/")
         .map(|(_, resource)| resource)
-        .unwrap_or(source_url)
-        .hash(&mut hasher);
+        .unwrap_or(source_url);
+    let (resource_path, query) = resource.split_once('?').unwrap_or((resource, ""));
+    resource_path.hash(&mut hasher);
+    // kdj_media_token 每次启动都会换，只用于请求鉴权，不能进缓存键；否则同一张封面每次启动都另存一份。
+    query
+        .split('&')
+        .filter(|pair| !pair.starts_with("kdj_media_token="))
+        .for_each(|pair| pair.hash(&mut hasher));
+    let key = hasher.finish();
     let cache_dir = std::env::temp_dir().join("kdj-media-artwork");
     fs::create_dir_all(&cache_dir).map_err(|error| format!("创建封面缓存目录失败：{error}"))?;
+    let cached_path = |extension: &str| {
+        cache_dir.join(format!(
+            "{}-{key:016x}.{extension}",
+            track_id.unwrap_or_default()
+        ))
+    };
+    // 命中缓存就不再发请求；扩展名来自上次响应的 Content-Type。
+    if let Some(path) = ["jpg", "png", "webp", "gif"]
+        .into_iter()
+        .map(cached_path)
+        .find(|path| path.is_file())
+    {
+        return Ok(file_url(&path));
+    }
 
     kdj_core::ensure_rustls_ring();
     let response = reqwest::blocking::Client::builder()
@@ -339,11 +360,7 @@ fn local_artwork_url(source_url: &str, track_id: Option<i64>) -> Result<String, 
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
     );
-    let path = cache_dir.join(format!(
-        "{}-{:016x}.{extension}",
-        track_id.unwrap_or_default(),
-        hasher.finish()
-    ));
+    let path = cached_path(extension);
     if !path.is_file() {
         let bytes = response
             .bytes()
@@ -470,6 +487,58 @@ mod tests {
         let path = PathBuf::from(url.trim_start_matches("file://"));
         assert_eq!(fs::read(&path).expect("读取封面缓存"), b"jpeg");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn artwork_cache_ignores_the_media_token_and_skips_the_request_on_a_hit() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("监听测试端口");
+        let address = listener.local_addr().expect("测试地址");
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 4\r\n\r\njpeg",
+                );
+            }
+        });
+        let cached_files = || -> Vec<PathBuf> {
+            fs::read_dir(std::env::temp_dir().join("kdj-media-artwork"))
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.file_name()
+                                .is_some_and(|name| name.to_string_lossy().starts_with("987655-"))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        cached_files().into_iter().for_each(|path| {
+            let _ = fs::remove_file(path);
+        });
+
+        // 同一首歌：本次启动播两次，再换一次启动（新的 media token）。
+        for token in ["first-launch", "first-launch", "second-launch"] {
+            local_artwork_url(
+                &format!(
+                    "http://{address}/api/library/cover/987655?v=test&kdj_media_token={token}"
+                ),
+                Some(987655),
+            )
+            .expect("缓存封面");
+        }
+        let files = cached_files();
+        files.iter().for_each(|path| {
+            let _ = fs::remove_file(path);
+        });
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

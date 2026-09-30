@@ -15,6 +15,9 @@ pub mod workshop_images;
 pub mod update;
 pub mod youtube;
 pub mod youtubemusic;
+#[cfg(test)]
+#[path = "../../test-support/peak_alloc.rs"]
+mod peak_alloc;
 
 pub use provider::{
     Capabilities, DownloadJob, MusicProvider, ProgressSink, ProtectedPreviewIdentity,

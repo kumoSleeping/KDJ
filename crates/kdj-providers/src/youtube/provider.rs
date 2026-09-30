@@ -407,7 +407,7 @@ impl YoutubeProvider {
         anyhow::ensure!(!format.url.is_empty(), "YouTube 流缺少下载地址");
         let mut downloaded = 0u64;
         let mut expected_total = format.content_length.unwrap_or(0);
-        let mut file = tokio::fs::File::create(output)
+        let mut file = crate::net::create_download_writer(output)
             .await
             .context("创建 YouTube 暂存文件失败")?;
         for _ in 0..2048 {
@@ -1408,6 +1408,69 @@ mod tests {
         assert_eq!(account.detail, "测试浏览器");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn direct_download_batches_small_network_chunks() {
+        use crate::provider::ProviderLiveSettings;
+        use tokio::io::AsyncReadExt as _;
+        const CHUNK: usize = 16 * 1024;
+        const CHUNKS: usize = 256; // 4 MiB
+
+        let root = std::env::temp_dir().join(format!(
+            "kdj-youtube-direct-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let _cleanup = TempDirGuard(root.clone());
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = ProviderContext::new(
+            root.clone(),
+            ProviderLiveSettings {
+                download_dir: root.join("downloads"),
+                filename_template: "{title}".into(),
+                default_quality: kdj_core::models::Quality::Q128,
+                netease_use_download_api: false,
+                soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
+                ytm_enabled: false,
+                youtube_enabled: true,
+                video_dir: None,
+                video_format: "mp4".into(),
+            },
+        );
+        let auth = Arc::new(YoutubeAuth::new(&ctx, Platform::Youtube).unwrap());
+        let mut provider = YoutubeProvider::new(ctx, auth).unwrap();
+        provider.client.set_test_http(reqwest::Client::builder().no_proxy().build().unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/videoplayback", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
+            // Chunked framing keeps every body frame the client sees at <= 16 KiB.
+            let mut frame = format!("{CHUNK:x}\r\n").into_bytes();
+            frame.extend(std::iter::repeat_n(7u8, CHUNK));
+            frame.extend_from_slice(b"\r\n");
+            for _ in 0..CHUNKS { stream.write_all(&frame).await.unwrap(); }
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
+        });
+        let output = root.join("direct.part");
+        // Unbuffered, the file trails the network by at most one 16 KiB chunk (one write per chunk,
+        // ~3700 write(2) for 50 MiB under strace); the 512 KiB download buffer lets it trail far more.
+        let lag = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (seen, path) = (lag.clone(), output.clone());
+        let progress: ProgressSink = Arc::new(move |done, _| {
+            let on_disk = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            seen.fetch_max(done.saturating_sub(on_disk), std::sync::atomic::Ordering::Relaxed);
+        });
+        let format = VideoFormat { url, ..Default::default() };
+        provider.fetch_format(&format, &output, &CancellationToken::new(), &progress).await.unwrap();
+        assert_eq!(std::fs::metadata(&output).unwrap().len(), (CHUNK * CHUNKS) as u64);
+        let lag = lag.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(lag >= 256 * 1024, "writes are not batched: file trailed the stream by only {lag} B");
     }
 
     #[tokio::test]

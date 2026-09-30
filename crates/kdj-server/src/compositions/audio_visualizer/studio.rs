@@ -7,7 +7,6 @@ use anyhow::{Context, Result, ensure, bail};
 use axum::{Router, Extension, Json, body::Bytes, extract::{State, Path, Query, DefaultBodyLimit}, routing::{get, post}, http::HeaderMap};
 use kdj_core::{audio_visualizer::{Scene, Spectrum}, composition::EncodingAcceleration, work_scheduler::{work_scheduler, WorkClass, WorkRequest}};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex, Condvar}, time::{Duration, Instant}};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -129,7 +128,10 @@ fn track_audio(state: &AppState, id: i64) -> Result<PathBuf> {
 }
 #[derive(Deserialize)]
 struct Analyze { track_id: i64, spectrum: Spectrum }
-async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> ApiResult<Json<Value>> {
+// Typed body: a json! Value tree of an 18k-frame timeline peaks ~6x higher and widens every f32 to 17 digits.
+#[derive(Serialize)]
+struct Analyzed { timeline: kdj_analysis::visualizer::FeatureTimeline, signature: String }
+async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> ApiResult<Json<Analyzed>> {
     let scene = Scene { spectrum: p.spectrum.clone(), ..Scene::with_image(std::env::temp_dir().join("kdj-studio-validation.png").to_string_lossy().into_owned()) };
     scene.validate().map_err(ApiError::bad_request)?;
     let audio = track_audio(&state, p.track_id)?;
@@ -144,7 +146,7 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     let timeline = tokio::task::spawn_blocking(move || kdj_analysis::visualizer::analyze_at_fps(&path, &p.spectrum, 60, &|| token.is_cancelled())).await.map_err(anyhow::Error::from)??;
     api_check(fingerprint(&audio)? == signature, "分析期间歌曲已变化，请重新打开工程")?;
     api_check((timeline.duration_seconds() * 1000. - duration as f64).abs() <= 250., "音轨解码不完整，不能导出")?;
-    Ok(Json(json!({ "timeline": timeline, "signature": signature })))
+    Ok(Json(Analyzed { timeline, signature }))
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -261,6 +263,17 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn studio_analysis_body_keeps_f32_features_typed() {
+        // A json! Value tree widened each f32 to f64 (0.5341235399246216) and peaked ~6x the typed body.
+        use kdj_analysis::visualizer::{FeatureFrame, FeatureTimeline};
+        let frame = FeatureFrame { bands: vec![0.53412354; 3], bass: 0.1, rms: 0.2, onset: 0.3 };
+        let timeline = FeatureTimeline { version: 1, sample_rate: 22050, sample_count: 22050, fps: 60, frames: vec![frame; 2] };
+        let body = serde_json::to_string(&Analyzed { timeline, signature: "1:2:3".into() }).unwrap();
+        assert!(body.contains("[0.53412354,0.53412354,0.53412354]") && !body.contains("0.5341235399"), "{body}");
+        let back: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(back["signature"], "1:2:3"); assert_eq!(back["timeline"]["frames"][1]["onset"].as_f64().unwrap() as f32, 0.3);
+    }
     #[test]
     fn studio_editor_heartbeat_and_terminal_cancel() {
         let job = Job::new("heartbeat".into(), 1, 4);

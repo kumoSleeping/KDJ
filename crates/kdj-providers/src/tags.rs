@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use lofty::config::WriteOptions;
+use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
@@ -266,7 +266,8 @@ pub fn write_cover(path: &Path, data: &[u8]) -> Result<()> {
 /// 扩展名是 `partial`，猜不出格式，`read()` 直接报 UnknownFormat，
 /// 于是时长永远读不到、检测退化成只看文件大小，30 秒的 VIP 试听片段就混进曲库了。
 pub fn read_duration_secs(path: &Path) -> Option<f64> {
-    let probe = Probe::open(path).ok()?;
+    // 只要时长：跳过内嵌封面，否则一张几 MB 的原图会被整块读进内存
+    let probe = Probe::open(path).ok()?.options(ParseOptions::new().read_cover_art(false));
     // guess_file_type 失败时会保留从路径猜出来的类型，所以这一步只会更准
     let probe = probe.guess_file_type().ok()?;
     let tagged = probe.read().ok()?;
@@ -307,7 +308,9 @@ pub fn read_tags(path: &Path) -> TrackTags {
         ..Default::default()
     };
     if crate::workshop_images::is_image_path(path) { return out; }
-    let Ok(tagged) = Probe::open(path).and_then(|probe| probe.read()) else {
+    // 扫描只要文字标签和技术参数，封面走 read_cover；不跳过的话每个文件都整块读一遍原图
+    let options = ParseOptions::new().read_cover_art(false);
+    let Ok(tagged) = Probe::open(path).and_then(|probe| probe.options(options).read()) else {
         return out;
     };
 
@@ -769,6 +772,48 @@ pub(crate) mod tests {
         let after = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert_eq!(before, after, "相同封面不应再次写文件");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    use crate::peak_alloc::peak_allocated;
+
+    /// 最小 FLAC：STREAMINFO（44.1k / 16bit / 双声道 / 3 秒）+ 一段假帧数据。
+    fn minimal_flac() -> Vec<u8> {
+        let mut out = b"fLaC".to_vec();
+        out.extend_from_slice(&[0x80, 0, 0, 34]); // last=1, STREAMINFO, 34 字节
+        out.extend_from_slice(&[0x10, 0, 0x10, 0, 0, 0, 0, 0, 0, 0]);
+        let info: u32 = (44_100 << 12) | (1 << 9) | (15 << 4);
+        out.extend_from_slice(&info.to_be_bytes());
+        out.extend_from_slice(&(44_100u32 * 3).to_be_bytes());
+        out.extend_from_slice(&[0; 16]);
+        out.resize(out.len() + 64 * 1024, 0);
+        out
+    }
+
+    #[test]
+    fn read_tags_does_not_load_embedded_cover_art() {
+        let dir = std::env::temp_dir().join(format!("kdj-tags-{}-bigcover", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.flac");
+        std::fs::write(&path, minimal_flac()).unwrap();
+        write_metadata(&path, &MetadataEdit { title: Some("标题"), artist: Some("艺人"), album: Some("专辑"), genre: Some("House"), year: Some("2024") }).unwrap();
+        let mut cover = tiny_png();
+        cover.resize(2 * 1024 * 1024, 0);
+        write_cover(&path, &cover).unwrap();
+
+        // 修复前两者都把 2 MiB 封面读进来再复制一份（约 4.2 MB），修复后约 10 KB
+        let (tags, bytes) = peak_allocated(|| read_tags(&path));
+        assert!(bytes < 256 * 1024, "read_tags 分配了 {bytes} B，封面被读进来了");
+        let (secs, bytes) = peak_allocated(|| read_duration_secs(&path));
+        assert!(bytes < 256 * 1024, "read_duration_secs 分配了 {bytes} B，封面被读进来了");
+        assert_eq!(secs, Some(3.0));
+        assert_eq!(tags, TrackTags {
+            title: "标题".into(), artist: "艺人".into(), album: "专辑".into(), genre: "House".into(),
+            year: "2024".into(), duration: Some(3.0), bitrate: Some(174), samplerate: Some(44100),
+            channels: Some(2), format: "flac".into(),
+        });
+        assert_eq!(read_cover(&path).unwrap().0, cover, "读封面的路径不受影响");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

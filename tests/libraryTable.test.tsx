@@ -45,6 +45,7 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
   const requests: number[][] = [];
   const indexQueries: URLSearchParams[] = [];
   const summaryQueries: Record<string, unknown>[] = [];
+  const coverQueries: URL[] = [];
   const originalFetch = globalThis.fetch;
   // Keep the real API client so URL and JSON serialization are both exercised.
   globalThis.fetch = (async (input, init) => {
@@ -69,6 +70,7 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     const detail = url.pathname.match(/^\/api\/library\/tracks\/(\d+)$/);
     if (detail) return Response.json({ ...makeRow(Number(detail[1])), tags: [] });
     if (url.pathname === "/api/library/stats") return Response.json(null);
+    if (url.pathname.startsWith("/api/library/cover/")) coverQueries.push(url);
     return new Response(null, { status: 404 });
   }) as typeof fetch;
   const { createRoot } = await import("react-dom/client");
@@ -193,6 +195,17 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     const restored = document.querySelector<HTMLDivElement>(".kd-scroll")!;
     assert.equal(restored.scrollTop, 9499 * 36 + 7);
     assert.ok(document.querySelector('tr[data-kd-track-id="9500"]'));
+    // Pressing a row prepares the system drag preview from the thumbnail route, not the original cover.
+    await act(async () => {
+      const down = pointer("pointerdown", 200);
+      Object.defineProperty(down, "pointerType", { value: "mouse" });
+      document.querySelector('tr[data-kd-track-id="9500"] td')!.dispatchEvent(down);
+      window.dispatchEvent(pointer("pointercancel", 200));
+    });
+    await flush();
+    const dragCovers = coverQueries.filter(url => url.pathname === "/api/library/cover/9500" && url.searchParams.get("size") !== "64");
+    assert.ok(dragCovers.length > 0);
+    assert.ok(dragCovers.every(url => url.searchParams.get("size") === "256"), dragCovers.join(" "));
 
     // Mount a second real table, with its own query and keyboard/clipboard owner.
     const { createTemporaryLibrary } = await import("../src/stores/temporaryLibraryStore");
