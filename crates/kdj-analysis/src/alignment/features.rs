@@ -98,12 +98,17 @@ impl AudioFeatures {
         if canceled() {
             bail!("匹配已取消")
         }
-        Ok(Self {
-            samples: pcm.len(),
-            envelope: envelope(pcm),
-            spectra: spectra(pcm, &canceled)?,
-            chroma: fuzzy::chroma(pcm, &canceled)?,
-        })
+        let started = std::time::Instant::now();
+        let envelope = envelope(pcm);
+        let envelope_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = std::time::Instant::now();
+        let spectra = spectra(pcm, &canceled)?;
+        let spectra_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = std::time::Instant::now();
+        let chroma = fuzzy::chroma(pcm, &canceled)?;
+        tracing::debug!(target: "kdj_alignment_timing", samples = pcm.len(), envelope_ms, spectra_ms,
+            chroma_ms = started.elapsed().as_secs_f64() * 1000., "features prepared");
+        Ok(Self { samples: pcm.len(), envelope, spectra, chroma })
     }
 
     /// Fixed-size, little-endian floats; dimensions are derived from the sample

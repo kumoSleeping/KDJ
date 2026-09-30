@@ -448,6 +448,7 @@ export function VideoResultRow({
           setRowMenu({ x: event.clientX, y: event.clientY, pageIndex: 0, part: false });
         }}
         onDoubleClick={(event) => {
+          if (event.metaKey || event.ctrlKey) return;
           if (suppressClickRef.current) {
             suppressClickRef.current = false;
             return;

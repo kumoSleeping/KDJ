@@ -18,7 +18,7 @@ import {
   type LiveDeckClock,
 } from "../../lib/unifiedPlayer";
 import {
-  correctedLiveWaveformRate,
+  smoothlyCorrectedWaveformRate,
   liveWaveformAnimationTimeMs,
   liveWaveformLoopAnimationTimeMs,
   liveWaveformPhaseError,
@@ -364,13 +364,24 @@ export function ManagerWaveform({
     scratchHeld: false,
   });
   const [size, setSize] = useState({ width: 0, height: 0, dpr: 1 });
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    let intersects = true;
+    const update = () => setVisible(intersects && !document.hidden);
+    const observer = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
+      intersects = entries[0]?.isIntersecting ?? true; update();
+    }) : null;
+    if (hostRef.current) observer?.observe(hostRef.current);
+    document.addEventListener("visibilitychange", update); update();
+    return () => { observer?.disconnect(); document.removeEventListener("visibilitychange", update); };
+  }, []);
   const total = Math.max(0, duration || track.duration || 0);
   const playbackWaveform = usePlaybackWaveformWindow({
     trackId: track.id,
     deck,
     duration: total,
     viewportSeconds: VIEWPORT_SECONDS,
-    enabled: true,
+    enabled: visible,
   });
   // This rail is a time-bounded detail view. A whole-track overview (including the progressive
   // online preview) has different geometry and colour normalisation, so stretching it into this
@@ -643,11 +654,7 @@ export function ManagerWaveform({
                 visualPosition,
                 owner.loopLength,
               );
-              if (Math.abs(phaseError) > 0.08) {
-                landed = landManagerAnimation(owner, authority, rate, running);
-              } else {
-                visualRate = correctedLiveWaveformRate(visualRate, phaseError);
-              }
+              visualRate = smoothlyCorrectedWaveformRate(visualRate, phaseError);
             }
           }
           if (!landed && Math.abs(owner.animation.playbackRate - visualRate) > 1.0e-6) {

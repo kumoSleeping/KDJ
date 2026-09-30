@@ -118,6 +118,11 @@ pub fn initialize() -> (DiagnosticWriter, Option<PathBuf>) {
         .and_then(|directory| open_directory(&directory).ok())
         .or_else(|| open_directory(&std::env::temp_dir().join("kdj-logs")).ok());
     let path = log.as_ref().map(|log| log.path.clone());
+    if let Some(directory) = path.as_ref().and_then(|p| p.parent()) {
+        if let Err(error) = kdj_server::diagnostics::initialize(directory.to_path_buf()) {
+            eprintln!("诊断日志初始化失败：{error}");
+        }
+    }
     let log = log.map(|log| Arc::new(Mutex::new(log)));
     let panic_log = log.clone();
     let previous = std::panic::take_hook();

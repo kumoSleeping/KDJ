@@ -965,8 +965,9 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
     }
     let mut collections = Vec::new();
     for handle in handles {
-        let Ok((platform, result)) = handle.await else {
-            continue;
+        let (platform, result) = match handle.await {
+            Ok(value) => value,
+            Err(error) => { tracing::error!(%error, "平台搜索任务异常退出"); continue; }
         };
         match result {
             Ok(Ok(ProviderSearchRows::Songs(items))) => {
@@ -1007,6 +1008,9 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
             .unwrap_or(usize::MAX)
     });
 
+    for (platform, error) in &errors {
+        crate::diagnostics::record("error", "platform", "search", &format!("platform={platform} elapsed_ms={} error={error}", started.elapsed().as_millis()));
+    }
     SearchResponse {
         query: payload.query.clone(),
         groups,

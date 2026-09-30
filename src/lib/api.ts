@@ -4,6 +4,7 @@ import type { WorkshopSnapshot, WorkshopEdit, WorkshopPositionResults } from "..
  */
 
 import { getBridge } from "./bridge";
+import { captureDiagnostic } from "./diagnostics";
 import type { LibraryQuery, TrackIndex } from "./libraryWindow";
 import type { CompositionLane, CompositionOptions, CompositionPatch, CompositionSnapshot } from "../types/composition";
 import {
@@ -152,6 +153,13 @@ async function request<T>(
     durationMs: performance.now() - activityStarted,
     ok: true,
   });
+  // Batch operations may return HTTP 200 with per-item failures. Record only error
+  // values, never identifiers, titles, query bodies or the successful result data.
+  if (data && typeof data === "object" && "errors" in data && data.errors && typeof data.errors === "object") {
+    for (const error of Object.values(data.errors).slice(0, 20)) {
+      if (typeof error === "string" && error) captureDiagnostic("local", `api.${path.split("/")[1] || "batch"}`, error);
+    }
+  }
   return data as T;
 }
 
@@ -808,6 +816,11 @@ function requestTrackDetail(
 }
 
 export const api = {
+  diagnostics: {
+    directory: () => request<{ path: string }>("/diagnostics/directory"),
+    prepare: (note: string) => post<{ id: string; body: string; bytes: number; destination: string }>("/diagnostics/prepare", { note }),
+    submit: (id: string) => post<{ id: string }>("/diagnostics/submit", { id }),
+  },
   health: () => request<Health>("/health"),
   ffmpegInstallationStatus: () => request<FfmpegInstallationStatus>("/tools/ffmpeg"),
   prewarmYtmPlayback,
@@ -817,7 +830,9 @@ export const api = {
     list: () => request<{
       dir: string;
       themes: { dir: string; manifest: unknown; error: string | null }[];
+      official: { id: string; name: string }[];
     }>("/themes"),
+    install: (id: string) => request<{ id: string }>(`/themes/official/${encodeURIComponent(id)}`, { method: "POST" }),
     // token 在路径里而不是 query：主题 CSS 的相对 url() 要能解析到同一前缀下
     fileUrl: (id: string, path: string) =>
       `${bridge().baseUrl}/api/themes/files/${bridge().mediaToken}/${id}/${path}`,

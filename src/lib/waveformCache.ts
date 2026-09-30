@@ -138,7 +138,7 @@ interface StreamWaveformEntry {
     coveredSeconds: number;
     revision: number;
   } | null;
-  /** Whether the server-side cached prefix has reached the end of an online media stream. */
+  /** Whether the server has published the final analyzed waveform, not just finished caching. */
   complete: boolean;
   /** Raw evidence keeps accumulating; immutable presentation snapshots publish at most 5 Hz. */
   lastSnapshotAtMs: number;
@@ -611,16 +611,11 @@ function mergeProgressiveOverviewWaveform(
     revision: sourceRevision,
   };
   entry.complete ||= complete;
-  entry.snapshot = preservePublishedStreamColumns(
-    previous,
-    buildStreamSnapshot(
-      entry,
-      trackId,
-      total,
-      nextRanges,
-      previous.revision + 1,
-    ),
-  );
+  const next = buildStreamSnapshot(entry, trackId, total, nextRanges, previous.revision + 1);
+  // Prefixes stay visually stable while growing, but the completed analysis is authoritative.
+  // Freezing it too would permanently keep early analyser silence/partial-bucket amplitudes
+  // even after the server supplied the actual full waveform.
+  entry.snapshot = entry.complete ? next : preservePublishedStreamColumns(previous, next);
   entry.lastSnapshotAtMs = performance.now();
   touchStreamEntry(trackId, entry);
   trimStreamCache();

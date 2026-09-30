@@ -46,9 +46,11 @@ impl IntoResponse for ApiError {
         if self.status.is_server_error() {
             tracing::error!("{} -> {}", self.status, self.detail);
         }
+        let diagnostic = format!("code={} stage={} attempt={} detail={}", self.code.unwrap_or(""), self.stage.unwrap_or(""), self.attempt_id.as_deref().unwrap_or(""), self.detail);
         let mut response = (self.status, Json(serde_json::json!({
             "detail": self.detail, "code": self.code, "stage": self.stage, "attempt_id": self.attempt_id,
         }))).into_response();
+        response.extensions_mut().insert(crate::diagnostics::DiagnosticDetail(diagnostic));
         if let Some(attempt) = self.attempt_id.and_then(|s| s.parse().ok()) {
             response.headers_mut().insert("x-kdj-attempt-id", attempt);
         }

@@ -549,6 +549,14 @@ export function makeSongStreamTrack(
   return track;
 }
 
+/** Display/lyrics identity only. Network video keeps its existing VideoPip transport. */
+export function makeVideoPreviewTrack(source: SongSource): Track {
+  const track = makeSongStreamTrack(source, "");
+  metaById.get(track.id)!.kind = "video";
+  track.comment = "";
+  return track;
+}
+
 /**
  * Build and publish a new playback queue atomically. Until the links and new root are installed,
  * the previous queue is still protected and LRU eviction could delete the new head or successors.

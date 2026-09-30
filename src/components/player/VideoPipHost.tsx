@@ -4,7 +4,7 @@
  * - network：自带声音，抢 preview 焦点
  * - local：静音小窗，画面跟主播放条音轨时钟走（和 LocalVideoPlayer 同一套）
  *
- * panel：网络→右栏 VideoPreview；本地→曲库详情（浮窗宿主暂停保源）
+ * panel：网络→同一宿主贴合右栏；本地→曲库详情（浮窗宿主暂停保源）
  * float：本组件出画；系统画中画由此处手动打开，或切走应用时自动打开
  *
  * 呈现由 session/active/有效模式的 effect 驱动，而不是只在事件回调里 play 一次——
@@ -15,6 +15,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -22,6 +23,7 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PictureInPicture2 } from "lucide-react";
 import { FloatingVideoControls, FloatingVideoScrub } from "./FloatingVideoControls";
+import { usePlaybackPanelPrefs, setPlaybackPanelVisible } from "../../lib/playbackPanelPrefs";
 import { api } from "../../lib/api";
 import { observeVideoPreview } from "../../lib/videoPreviewDiagnostics";
 import { BilibiliEmbedController } from "../../lib/bilibiliEmbed";
@@ -275,15 +277,16 @@ function mediaUrl(session: VideoPipSession): string {
 
 /** panel 档的旁路 UI（右栏 / 曲库详情），与宿主 <video> 启停分开。 */
 function applyPanelChrome(session: VideoPipSession, mode: VideoPreviewMode): void {
-  // 在线搜索结果的双击预览固定走浮动小窗；底栏模式只属于本地视频。
   if (session.source === "network") {
-    if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
+    if (mode === "panel") useAppStore.getState().openPreviewPanel();
+    else if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
     return;
   }
   if (mode === "panel") {
     if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
-    // 钉住曲目详情右栏（见 Workspace DETAIL_EVENT），别只清 overlay 却不展开
-    window.dispatchEvent(new Event("kd:show-detail"));
+    // Local playback uses the compact media panel, never the selected-track sidebar.
+    setPlaybackPanelVisible("visualizer", true);
+    usePlaybackPanelPrefs.getState().setOpen(true);
     return;
   }
   if (useAppStore.getState().showPreview) {
@@ -342,6 +345,8 @@ export function VideoPipHost() {
   } | null>(null);
 
   const mode = useVideoPip((state) => state.mode);
+  const panelTarget = useVideoPip((state) => state.panelTarget);
+  const [panelBounds, setPanelBounds] = useState<YoutubeEmbedBounds | null>(null);
   const active = useVideoPip((state) => state.active);
   const systemPip = useVideoPip((state) => state.systemPip);
   const playing = useVideoPip((state) => state.playing);
@@ -388,11 +393,36 @@ export function VideoPipHost() {
     }
   }, []);
 
-  // 网络搜索结果始终浮动预览；保存的 panel/float 偏好只决定本地视频呈现。
   const hostLifecycle = videoPipHostLifecycle(session, active, mode);
   const hostActive = hostLifecycle === "present";
-  // 进了系统画中画就藏自研小窗，避免底下还留一块空壳
-  const showFloating = Boolean(hostActive && !systemPip);
+  const docked = session?.source === "network" && mode === "panel";
+  // 只移动宿主的显示矩形，不换 video 节点、不重装来源，保留解码器和共享 seek 队列。
+  useLayoutEffect(() => {
+    if (!docked || !panelTarget) { setPanelBounds(null); return; }
+    const measure = () => {
+      const rect = panelTarget.getBoundingClientRect();
+      const next = rect.width > 0 && rect.height > 0
+        ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
+        : null;
+      setPanelBounds(previous => previous?.x === next?.x && previous?.y === next?.y &&
+        previous?.width === next?.width && previous?.height === next?.height ? previous : next);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    // 栏宽、顶栏高度和抽屉尺寸变化都会移动这个落点。
+    for (let node: HTMLElement | null = panelTarget; node; node = node.parentElement) observer.observe(node);
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [docked, panelTarget]);
+  const panelReady = !docked || Boolean(panelTarget && panelBounds);
+  // 进了系统画中画就藏应用内画面，避免底下还留一块空壳。
+  const showSurface = Boolean(hostActive && !systemPip && panelReady);
+  const showFloating = showSurface && !docked;
   const isLocal = session?.source === "local";
   const shouldUsePlatformPlayer = (candidate: VideoPipSession | null | undefined): boolean =>
     usesPlatformPlayer(candidate) &&
@@ -752,7 +782,9 @@ export function VideoPipHost() {
       next.source === "local" ? getLatestPlayerSync(next.trackId) : null;
     const shouldPlay = latestLocalSync
       ? latestLocalSync.action === "play"
-      : desiredPlayingRef.current || next.source === "network" || next.autoPlay;
+      : loadedKeyRef.current === nextKey
+        ? desiredPlayingRef.current
+        : desiredPlayingRef.current || next.source === "network" || next.autoPlay;
     desiredPlayingRef.current = shouldPlay;
     useVideoPip.getState().setError("");
     if (next.source === "network" && shouldUsePlatformPlayer(next)) {
@@ -1108,8 +1140,7 @@ export function VideoPipHost() {
         }
         return;
       }
-      // 网络预览不响应本地视频模式切换，避免点一下底栏按钮把正在看的 B 站小窗关掉。
-      if (pip.session.source === "network") return;
+      if (detail.mode === "panel") void exitSystemPip(systemPipTarget());
       applyPanelChrome(pip.session, detail.mode);
       // host 启停由 session/active/mode 生命周期 effect 接手
     };
@@ -1131,6 +1162,7 @@ export function VideoPipHost() {
       suspendLocalHost(session);
       return;
     }
+    if (!panelReady) return;
     // 窗口尺寸可能在首次挂载后变了，出小窗时把尺寸和位置一起夹回可视区。
     setFloatBox((previous) =>
       clampHostFloatBox(previous, window.innerWidth, window.innerHeight, session),
@@ -1145,13 +1177,13 @@ export function VideoPipHost() {
       cancelAnimationFrame(frame);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, hostLifecycle]);
+  }, [key, hostLifecycle, panelReady]);
 
   // The official player is a sibling native WKWebView, not a remote iframe inside the privileged
   // React renderer. Keep its one allowed rectangle aligned with the black slot while the KDJ
   // window is dragged, resized, or switched between videos.
   useEffect(() => {
-    if (!isPlatformPlayer || !showFloating) return;
+    if (!isPlatformPlayer || !showSurface) return;
     const controller = youtubeEmbedRef.current;
     if (!controller) return;
     let cancelled = false;
@@ -1170,7 +1202,7 @@ export function VideoPipHost() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [floatBox.w, floatBox.x, floatBox.y, isPlatformPlayer, showFloating, videoFullscreen]);
+  }, [floatBox.w, floatBox.x, floatBox.y, isPlatformPlayer, showSurface, videoFullscreen, panelBounds]);
 
   // 切走应用（窗口失焦 / 页面隐藏）时，默认把正在播的浮动预览送进系统画中画
   useEffect(() => {
@@ -1178,7 +1210,7 @@ export function VideoPipHost() {
     const maybeAutoPip = () => {
       const pip = useVideoPip.getState();
       if (shouldUsePlatformPlayer(pip.session)) return;
-      const floats = pip.session?.source === "network" || pip.mode === "float";
+      const floats = pip.mode === "float";
       if (
         !pip.active ||
         !floats ||
@@ -1536,6 +1568,7 @@ export function VideoPipHost() {
       // WKWebView 在应用失焦时偶尔主动 pause。走带意图仍是播放时立即转系统
       // 小窗并恢复；backgroundThrottling=disabled 负责不支持 PiP 平台的时钟降级。
       if (desiredPlayingRef.current &&
+          pip.mode === "float" &&
           !fullscreenRef.current &&
           (document.visibilityState === "hidden" || !document.hasFocus())) {
         void enterSystemPip(video).then(() => {
@@ -1717,7 +1750,7 @@ export function VideoPipHost() {
   const close = () => {
     if (fullscreenRef.current) void applyVideoFullscreen(false);
     stopHost();
-    useVideoPip.getState().clear();
+    useVideoPip.getState().close();
     if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
   };
 
@@ -1895,11 +1928,14 @@ export function VideoPipHost() {
     >
       <div
         ref={showFloating ? floatRef : undefined}
-        className={showFloating ? "kd-pip-float" : "kd-pip-shell"}
-        data-fullscreen={showFloating && videoFullscreen ? "true" : undefined}
-        data-platform-player={showFloating && isPlatformPlayer ? "true" : undefined}
+        className={showSurface ? "kd-pip-float" : "kd-pip-shell"}
+        data-docked={docked ? "true" : undefined}
+        data-fullscreen={showSurface && videoFullscreen ? "true" : undefined}
+        data-platform-player={showSurface && isPlatformPlayer ? "true" : undefined}
         style={
-          showFloating
+          showSurface && docked && panelBounds
+            ? { left: panelBounds.x, top: panelBounds.y, width: panelBounds.width, height: panelBounds.height }
+            : showFloating
             ? {
                 left: floatBox.x,
                 top: floatBox.y,
@@ -1952,11 +1988,11 @@ export function VideoPipHost() {
             playsInline
             aria-hidden="true"
           />
-          {showFloating && (
+          {showSurface && (
             <FloatingVideoControls title={title} playing={playing} position={position} duration={duration}
               fullscreen={videoFullscreen} onClose={close} onToggle={toggle}
               onFullscreen={() => void applyVideoFullscreen(!videoFullscreen)} error={error}
-              extra={!isPlatformPlayer && canSystemPip() ? <button type="button" aria-label="系统画中画"
+              extra={showFloating && !isPlatformPlayer && canSystemPip() ? <button type="button" aria-label="系统画中画"
                 title="系统画中画（切走应用时也会自动打开）" onClick={event => {
                   event.stopPropagation();
                   const video = systemPipTarget();
@@ -1968,7 +2004,7 @@ export function VideoPipHost() {
                 }}><PictureInPicture2 size={13} /></button> : null} />
           )}
           {/* 进度条独立于 chrome：不悬停也看得见、可拖；本地会同步拽主条音轨 */}
-          {showFloating && !isPlatformPlayer && (
+          {showSurface && !isPlatformPlayer && (
             <FloatingVideoScrub position={position} duration={duration}
               onKeyDown={event => {
                 if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Select } from "../common/Select";
 import { X } from "lucide-react";
 import type { WorkshopSubtitle } from "../../types/workshop";
 import { defaultSubtitle, rasterizeSubtitle, subtitleFonts } from "../../lib/workshopSubtitle";
@@ -52,15 +53,15 @@ export function WorkshopSubtitleEditor({ initial, clipId, close }: {
       <label className="vj-subtitle-text">文字<textarea autoFocus aria-label="字幕文字" maxLength={2000} rows={4}
         value={settings.text} onChange={e => patch({text: e.target.value})} /></label>
       <div className="vj-subtitle-options">
-        <label>字体<select aria-label="字幕字体" value={settings.font} onChange={e => patch({font: e.target.value as WorkshopSubtitle["font"]})}>
+        <label>字体<Select aria-label="字幕字体" value={settings.font} onChange={e => patch({font: e.target.value as WorkshopSubtitle["font"]})}>
           {Object.entries(subtitleFonts).map(([id, font]) => <option key={id} value={id}>{font.label}</option>)}
-        </select></label>
+        </Select></label>
         <NumberField label="字号" value={settings.font_size} min={12} max={240} step={1} suffix="px" onChange={font_size => patch({font_size})} />
         <button type="button" aria-pressed={settings.bold} onClick={() => patch({bold: !settings.bold})}>粗体</button>
         <button type="button" aria-pressed={settings.italic} onClick={() => patch({italic: !settings.italic})}>斜体</button>
-        <label>对齐<select aria-label="字幕对齐" value={settings.align} onChange={e => patch({align: e.target.value as WorkshopSubtitle["align"]})}>
+        <label>对齐<Select aria-label="字幕对齐" value={settings.align} onChange={e => patch({align: e.target.value as WorkshopSubtitle["align"]})}>
           <option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option>
-        </select></label>
+        </Select></label>
         <label>文字颜色<input type="color" aria-label="字幕颜色" value={settings.color} onChange={e => patch({color: e.target.value})} /></label>
         <label>描边颜色<input type="color" aria-label="字幕描边颜色" value={settings.outline_color} onChange={e => patch({outline_color: e.target.value})} /></label>
         <NumberField label="描边" value={settings.outline_width} min={0} max={12} step={.5} suffix="px" onChange={outline_width => patch({outline_width})} />

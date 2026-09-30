@@ -42,6 +42,15 @@ export function correctedLiveWaveformRate(rate: number, phaseErrorSeconds: numbe
   return nominal + correction;
 }
 
+/** Ordinary bridge jitter changes velocity, never position. Even a delayed clock sample
+ * cannot reverse a forward-moving rail; real seeks/loop edges are landed by the caller. */
+export function smoothlyCorrectedWaveformRate(rate: number, phaseErrorSeconds: number): number {
+  if (!Number.isFinite(rate) || !Number.isFinite(phaseErrorSeconds)) return Number.isFinite(rate) ? rate : 0;
+  if (Math.abs(rate) <= 0.02) return rate;
+  const maximum = Math.abs(rate) * (Math.abs(phaseErrorSeconds) > 0.08 ? 0.05 : 0.005);
+  return rate + Math.max(-maximum, Math.min(maximum, phaseErrorSeconds / 2));
+}
+
 /** Platter phase is landed once at grab (or a real source discontinuity), never every clock tick. */
 export function shouldLandPlatterWaveform(
   wasActive: boolean,

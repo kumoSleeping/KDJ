@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { Platform, SearchKind } from "../../types";
+import type { Platform, SearchKind, TrackSummary } from "../../types";
+import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import {
   DEFAULT_PRIORITY,
@@ -37,6 +38,7 @@ export interface SearchPlatformProps {
 
 export interface SearchBarProps extends SearchPlatformProps {
   query: string;
+  presetTrack?: TrackSummary | null;
   searchKind: SearchKind;
   searchKinds: readonly SearchKind[];
   onSearchKindChange(kind: SearchKind): void;
@@ -97,7 +99,6 @@ export const SEARCH_TIPS = [
   "可通过系统媒体控制快捷键、Android 控制中心或灵动岛操控播放哟~",
   "不喜欢视频小窗？播放视频时，点击与歌词共用的按钮关闭小窗!",
   "视频支持系统级小窗! 详情界面也有视频播放哟~",
-  "拖动详情面板左上角的把手，可以自由调整板块顺序。",
   "为了无缝跳转, 我们实现了一个播放器引擎!",
   "复制粘贴多选快捷键都可用哦, 也可以右键选择。",
   "按 Shift + Enter 可以在搜索框里换行哦～",
@@ -197,6 +198,7 @@ function SearchTipCarousel({
 
 export function SearchBar({
   query,
+  presetTrack,
   searchKind,
   searchKinds,
   onSearchKindChange,
@@ -212,6 +214,7 @@ export function SearchBar({
   ...platformProps
 }: SearchBarProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const presets = useSearchPresets({ query, onQueryChange, track: presetTrack, inputRef });
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
@@ -336,10 +339,13 @@ export function SearchBar({
             rows={1}
             value={query}
             placeholder=""
-            aria-label="关键词、单曲链接或歌单链接，支持多行"
-            title="搜索（Enter；Shift + Enter 换行）"
+            aria-label="关键词、单曲链接或歌单链接，支持多行，@ 选择预制词"
+            role="combobox"
+            {...presets.aria}
+            title="搜索（Enter；Shift + Enter 换行；@ 预制词）"
             onFocus={() => setInputFocused(true)}
-            onBlur={() => setInputFocused(false)}
+            onBlur={event => { setInputFocused(false); presets.onBlur(event.relatedTarget); }}
+            onSelect={presets.syncCaret}
             onCompositionStart={() => {
               composingRef.current = true;
             }}
@@ -349,15 +355,17 @@ export function SearchBar({
             onKeyDown={(event) => {
               const nativeEvent = event.nativeEvent;
               const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
+              if (!composing && presets.onKeyDown(event)) return;
               if (event.key === "Enter" && !event.shiftKey && !composing && canSubmit) {
                 event.preventDefault();
                 fireSubmit();
               }
             }}
-            onChange={(event) => onQueryChange(event.target.value)}
+            onChange={(event) => { onQueryChange(event.target.value); presets.syncCaret(); }}
           />
         </div>
       </div>
+      {presets.menu}
     </form>
   );
 }

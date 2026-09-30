@@ -133,6 +133,12 @@ export function playbackWaveformRequestCenter(
   return Math.max(halfRequest, Math.min(duration - halfRequest, desired));
 }
 
+/** First paint fits the live decoder runway at the song head. Elsewhere add a small
+ * forward margin so playback cannot outrun a cold request before its response arrives. */
+export function playbackWaveformFirstPaintSeconds(position: number, viewportSeconds: number): number {
+  return viewportSeconds + (position < viewportSeconds / 2 ? 0 : 1);
+}
+
 function atlasChunk(
   atlas: PlaybackWaveformAtlas,
   absoluteColumn: number,

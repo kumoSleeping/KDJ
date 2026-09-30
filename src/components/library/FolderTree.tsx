@@ -371,6 +371,22 @@ export function NarrowFolderRail({
   const { accounts, accountsError } = useStreamBrowseLifecycle(!expanded);
   const [error, setError] = useState("");
   const [narrowDrop, setNarrowDrop] = useState("");
+  const sourceListRef = useRef<HTMLDivElement | null>(null);
+  const [sourceHeight, setSourceHeight] = useState<number | null>(() => {
+    const saved = Number(readLocalStorage("kd-narrow-rail-source-height"));
+    return Number.isFinite(saved) && saved >= 40 ? saved : null;
+  });
+  const sourceHeightRef = useRef(sourceHeight);
+  const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
+  const setRailSourceHeight = (height: number) => {
+    const list = sourceListRef.current;
+    const rail = list?.parentElement;
+    if (!list || !rail) return;
+    const max = rail.getBoundingClientRect().bottom - list.getBoundingClientRect().top - 60;
+    const next = Math.round(Math.max(40, Math.min(max, height)));
+    sourceHeightRef.current = next;
+    setSourceHeight(next);
+  };
   const cachedNarrowActiveStreamPlaylist =
     cachedActiveStreamPlaylist &&
     STREAM_BROWSE_PLATFORMS.includes(cachedActiveStreamPlaylist.platform)
@@ -747,7 +763,7 @@ export function NarrowFolderRail({
       </button>
       </div>
       <span className="kd-narrow-rail-sep" />
-      <div className="kd-narrow-source-roots kd-scroll" aria-label="媒体来源">
+      <div ref={sourceListRef} className="kd-narrow-source-roots kd-scroll" aria-label="媒体来源" style={sourceHeight === null ? undefined : { flexBasis: sourceHeight }}>
         {roots.map((root) => renderLocalFolderButton(root, true))}
         {enabledStreamRoots.map((streamRoot) => (
           <button
@@ -777,7 +793,42 @@ export function NarrowFolderRail({
           </button>
         ))}
       </div>
-      <span className="kd-narrow-rail-sep" />
+      <div
+        className="kd-narrow-rail-resize"
+        role="separator"
+        tabIndex={0}
+        aria-orientation="horizontal"
+        aria-label="调整媒体来源与文件夹目录的高度"
+        aria-valuenow={Math.round(sourceHeight ?? sourceListRef.current?.clientHeight ?? 0)}
+        title="拖动调整来源高度；双击恢复自动"
+        onPointerDown={(event) => {
+          if (event.button !== 0 || !sourceListRef.current) return;
+          event.preventDefault();
+          resizeStartRef.current = { y: event.clientY, height: sourceListRef.current.clientHeight };
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          if (resizeStartRef.current) setRailSourceHeight(resizeStartRef.current.height + event.clientY - resizeStartRef.current.y);
+        }}
+        onPointerUp={(event) => {
+          if (!resizeStartRef.current) return;
+          event.currentTarget.releasePointerCapture(event.pointerId);
+          resizeStartRef.current = null;
+          if (sourceHeightRef.current !== null) writeLocalStorageNow("kd-narrow-rail-source-height", String(sourceHeightRef.current));
+        }}
+        onPointerCancel={() => { resizeStartRef.current = null; }}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+          event.preventDefault();
+          setRailSourceHeight((sourceHeightRef.current ?? sourceListRef.current?.clientHeight ?? 0) + (event.key === "ArrowDown" ? 24 : -24));
+          if (sourceHeightRef.current !== null) writeLocalStorageNow("kd-narrow-rail-source-height", String(sourceHeightRef.current));
+        }}
+        onDoubleClick={() => {
+          sourceHeightRef.current = null;
+          setSourceHeight(null);
+          writeLocalStorageNow("kd-narrow-rail-source-height", "");
+        }}
+      />
       <div
         className="kd-narrow-source-children kd-scroll"
         aria-label={
@@ -1707,6 +1758,7 @@ export function FolderTree({
             type="button"
             className="kd-folder-caret"
             aria-label={open ? "收起" : "展开"}
+            aria-expanded={node.children.length > 0 ? open : undefined}
             disabled={node.children.length === 0}
             onClick={(event) => {
               event.stopPropagation();

@@ -12,10 +12,17 @@
     if (pack && pack.id && pack.boot) {
       var html = document.documentElement;
       html.dataset.themePack = pack.id;
+      var colors = pack.boot.window || {};
+      // A single-mode pack must already use its supported mode on the first frame.
+      if (!colors[theme]) {
+        if (colors.light && !colors.dark) theme = "light";
+        else if (colors.dark && !colors.light) theme = "dark";
+        html.dataset.theme = theme;
+      }
       (pack.boot.attrs || []).forEach(function (name) {
         if (/^data-theme-opt-[a-z0-9-]+$/.test(name)) html.setAttribute(name, "");
       });
-      var color = pack.boot.window && pack.boot.window[theme];
+      var color = colors[theme];
       if (/^#[0-9a-f]{6}$/i.test(color)) {
         html.dataset.themeWindow = color;
         // 歌词窗必须保持透明

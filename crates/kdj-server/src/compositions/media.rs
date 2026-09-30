@@ -208,7 +208,7 @@ fn command(binary: &Path) -> Command {
     command
 }
 
-async fn stderr_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> Vec<u8> {
+pub(super) async fn stderr_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> Vec<u8> {
     let mut tail = Vec::new();
     let mut buf = [0; 8192];
     while let Ok(count) = reader.read(&mut buf).await {
@@ -266,6 +266,7 @@ pub(super) async fn capture(
 }
 
 pub async fn probe(path: &Path, cancel: &CancellationToken) -> Result<Probe> {
+    let started = std::time::Instant::now();
     let args = vec![
         "-v".into(),
         "error".into(),
@@ -284,7 +285,12 @@ pub async fn probe(path: &Path, cancel: &CancellationToken) -> Result<Probe> {
         cancel,
     )
     .await?;
-    serde_json::from_slice(&data).context("读取媒体信息失败")
+    let capture_ms = started.elapsed().as_secs_f64() * 1000.;
+    let parse_started = std::time::Instant::now();
+    let result = serde_json::from_slice(&data).context("读取媒体信息失败");
+    tracing::debug!(target: "kdj_alignment_timing", capture_ms,
+        parse_ms = parse_started.elapsed().as_secs_f64() * 1000., "media probe finished");
+    result
 }
 
 pub async fn pcm(path: &Path, stream: usize, cancel: &CancellationToken) -> Result<Vec<f32>> {

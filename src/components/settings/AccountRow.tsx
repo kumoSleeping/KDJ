@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Select } from "../common/Select";
 import { FolderOpen, LoaderCircle, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
@@ -840,7 +841,7 @@ export function AccountRow({
                   maxWidth: "18rem",
                 }}
               >
-                <select
+                <Select
                   className="kd-account-browser-select"
                   aria-label="浏览器"
                   title="浏览器"
@@ -859,8 +860,8 @@ export function AccountRow({
                       {browser.label}
                     </option>
                   ))}
-                </select>
-                <select
+                </Select>
+                <Select
                   className="kd-account-browser-select"
                   aria-label="浏览器 Profile"
                   title="Profile"
@@ -873,7 +874,7 @@ export function AccountRow({
                       {profile.label}
                     </option>
                   ))}
-                </select>
+                </Select>
                 <Button
                   size="sm"
                   variant="ghost"

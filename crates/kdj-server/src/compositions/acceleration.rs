@@ -261,11 +261,13 @@ async fn encode_probe(
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let Ok(mut child) = command.spawn() else {
-        return Ok(false);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => { crate::diagnostics::record("error", "hardware", "encoder.probe.spawn", &error.to_string()); return Ok(false); }
     };
+    let stderr = child.stderr.take().context("缺少编码探测错误管道")?;
     let mut stdout = child
         .stdout
         .take()
@@ -273,11 +275,13 @@ async fn encode_probe(
         .take(PROBE_BYTES + 1);
     let work = async {
         let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).await?;
-        if bytes.is_empty() || bytes.len() as u64 > PROBE_BYTES {
-            return Ok::<_, std::io::Error>(false);
+        let (read, stderr) = tokio::join!(stdout.read_to_end(&mut bytes), super::media::stderr_tail(stderr));
+        read?;
+        let status = child.wait().await?;
+        if !status.success() {
+            crate::diagnostics::record("warn", "hardware", "encoder.probe", &format!("status={status} {}", String::from_utf8_lossy(&stderr)));
         }
-        Ok(child.wait().await?.success())
+        Ok::<_, std::io::Error>(status.success() && !bytes.is_empty() && bytes.len() as u64 <= PROBE_BYTES)
     };
     let result = tokio::select! {
         biased;
@@ -288,6 +292,7 @@ async fn encode_probe(
     // child via kill_on_drop. No probe files or detached drain tasks are created.
     let available = matches!(result, Some(Ok(Ok(true))));
     if !available {
+        if matches!(result, Some(Err(_))) { crate::diagnostics::record("warn", "hardware", "encoder.probe.timeout", "硬件编码探测超时"); }
         let _ = child.kill().await;
         let _ = child.wait().await;
     }
@@ -634,6 +639,7 @@ async fn render_inner(
         return attempt(args, duration, cancel, report, frames).await;
     };
     let Some(encoder) = working_encoder(&identity, &candidates, cancel).await? else {
+        crate::diagnostics::record("warn", "hardware", "encoder.probe", &format!("没有可用硬件编码器，使用 CPU；preference={preference:?}"));
         return attempt(args, duration, cancel, report, frames).await;
     };
     let bitrate = match canvas {
@@ -669,6 +675,7 @@ async fn render_inner(
             {
                 return Err(error);
             }
+            crate::diagnostics::record("error", "hardware", encoder.name(), &format!("硬件编码失败，准备回退 CPU：{error:#}"));
             staging
                 .remove_partial()
                 .with_context(|| format!("硬件编码失败：{error}"))?;

@@ -291,6 +291,9 @@ impl AppState {
         config: Arc<AppConfig>,
     ) -> Result<(Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<UiControl>)> {
         kdj_core::ensure_rustls_ring();
+        if let Err(error) = crate::diagnostics::initialize(config.data_dir.join("logs")) {
+            tracing::error!(%error, "诊断日志初始化失败");
+        }
         crate::cache_overview::cleanup_retired_data(&config.data_dir);
         crate::protected_media::cleanup_stale(&config.data_dir);
         let database = Database::open(&config.db_path())?;

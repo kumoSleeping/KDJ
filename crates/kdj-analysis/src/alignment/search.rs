@@ -26,7 +26,7 @@ fn centered(values: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
 }
 
 impl EnvelopeSearch {
-    /// A reference transform is reused for every equal-length video window.
+    /// A reference transform is reused for windows up to `query_len` frames.
     pub(super) fn new(reference: &[f32], query_len: usize) -> Self {
         let size = (reference.len() + query_len).max(1).next_power_of_two();
         let mut planner = FftPlanner::<f64>::new();
@@ -57,7 +57,7 @@ impl EnvelopeSearch {
         minimum_overlap: usize,
         canceled: &impl Fn() -> bool,
     ) -> Result<Vec<(i32, f64)>> {
-        anyhow::ensure!(query.len() == self.query_len, "粗匹配窗口长度错误");
+        anyhow::ensure!(query.len() <= self.query_len, "粗匹配窗口超过预备长度");
         if canceled() {
             bail!("匹配已取消")
         }

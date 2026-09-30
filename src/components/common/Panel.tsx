@@ -1,4 +1,7 @@
-import type { ReactNode } from "react";
+import { useContext, type ReactNode } from "react";
+import { PanelTopClose } from "lucide-react";
+import { PanelReorderContext } from "./panelReorder";
+import { PanelCollapseContext } from "./panelCollapse";
 import { CornerBadge, type BadgeTone } from "./CornerBadge";
 
 export interface PanelProps {
@@ -28,6 +31,8 @@ export function Panel({
   className,
   children,
 }: PanelProps) {
+  const collapse = useContext(PanelCollapseContext);
+  const reorder = useContext(PanelReorderContext);
   const classes = [
     "kd-panel",
     raised ? "kd-panel-raised" : "",
@@ -36,18 +41,28 @@ export function Panel({
   ]
     .filter(Boolean)
     .join(" ");
-  const hasHead = heading !== undefined || actions !== undefined;
+  const hasHead = heading !== undefined || actions !== undefined || collapse !== null;
   return (
     // data-badged 让 CSS 给首行留出角标的纵向压占，见 design.css
     <section className={classes} data-badged={title !== undefined ? "true" : undefined}>
       {title !== undefined && <CornerBadge tone={tone}>{title}</CornerBadge>}
       {hasHead && (
         <div className="kd-panel-head">
+          {reorder}
           <span className="kd-grow kd-truncate">{heading}</span>
-          {actions !== undefined && <span className="kd-row">{actions}</span>}
+          {(actions !== undefined || collapse) && <span className="kd-row">
+            {actions}
+            {collapse && <button type="button" className="kd-manager-panel-action"
+              aria-label={`收起 ${collapse.label} 面板`} title={`收起 ${collapse.label} 面板`}
+              onClick={collapse.collapse}>
+              <PanelTopClose size={13} strokeWidth={2.25} aria-hidden="true" />
+            </button>}
+          </span>}
         </div>
       )}
-      {padded ? <div className="kd-panel-body">{children}</div> : children}
+      <PanelReorderContext.Provider value={null}><PanelCollapseContext.Provider value={null}>
+          {padded ? <div className="kd-panel-body">{children}</div> : children}
+      </PanelCollapseContext.Provider></PanelReorderContext.Provider>
     </section>
   );
 }

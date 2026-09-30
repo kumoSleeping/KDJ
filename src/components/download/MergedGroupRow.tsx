@@ -413,7 +413,7 @@ export function MergedGroupRow({
         // table-row 在 macOS WKWebView 里不是可靠的原生拖动源；选中后由每个 td 起拖。
         draggable={false}
         onClick={(event) => {
-          if (hasTextSelectionWithin(event.currentTarget)) return;
+          if (!event.metaKey && !event.ctrlKey && hasTextSelectionWithin(event.currentTarget)) return;
           if (suppressClickRef.current) {
             suppressClickRef.current = false;
             return;
@@ -421,7 +421,7 @@ export function MergedGroupRow({
           // 控件自己消费点击（展开、勾选），和视频行同一条 closest 规则
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
           // touch 双点会发两次 click；竖屏首下已经直接播放，第二下不能再重启。
-          if (layout === "narrow" && event.detail > 1) return;
+          if (layout === "narrow" && event.detail > 1 && !event.metaKey && !event.ctrlKey) return;
           if (selectable && (selectionMode || event.metaKey || event.ctrlKey)) {
             toggleSelection();
             return;
@@ -432,7 +432,8 @@ export function MergedGroupRow({
           if (layout === "narrow") playGroup();
           else onInspect(sourceIndex);
         }}
-        onDoubleClick={() => {
+        onDoubleClick={(event) => {
+          if (event.metaKey || event.ctrlKey) return;
           if (!selectionMode && layout !== "narrow") playGroup();
         }}
         tabIndex={0}
@@ -454,9 +455,15 @@ export function MergedGroupRow({
           event.preventDefault();
           setRowMenu({ x: event.clientX, y: event.clientY });
         }}
+        onMouseDown={(event) => {
+          if (selectable && (event.metaKey || event.ctrlKey) && !(event.target as HTMLElement).closest("button, select, label, input, a")) {
+            event.preventDefault();
+            clearTextSelection();
+          }
+        }}
         onPointerDown={(event) => {
           if (event.pointerType === "mouse") {
-            if (!selectable || selectionMode) return;
+            if (!selectable || selectionMode || event.metaKey || event.ctrlKey) return;
             pointerDragCleanupRef.current?.();
             pointerDragCleanupRef.current = onPointerDragStart?.(event, () => {
               suppressClickRef.current = true;
@@ -527,7 +534,7 @@ export function MergedGroupRow({
             }
             data-local={source.platform === "local" ? "true" : undefined}
             onClick={(event) => {
-              if (layout === "narrow" && event.detail > 1) return;
+              if (layout === "narrow" && event.detail > 1 && !event.metaKey && !event.ctrlKey) return;
               if (source.platform === "local") {
                 if (layout === "narrow") playSource(source);
                 return;

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { Select } from "../common/Select";
 import { ChevronDown, FolderOpen } from "lucide-react";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { cloneProject, projectDuration } from "../../lib/workshop";
@@ -46,9 +47,9 @@ export function WorkshopExportSettings() {
     <details className="vj-export-settings" ref={settings}>
       <summary aria-label="输出设置" title={summary}><span>{summary}</span><ChevronDown size={12} /></summary>
       <fieldset disabled={Boolean(busy)}>
-        <label className="vj-text-field">格式<select aria-label="输出格式" value={p.output.format ?? "mp4"} onChange={e => { change(p => { p.output.format = e.target.value as typeof p.output.format; }); commit(); }}>
+        <label className="vj-text-field">格式<Select aria-label="输出格式" value={p.output.format ?? "mp4"} onChange={e => { change(p => { p.output.format = e.target.value as typeof p.output.format; }); commit(); }}>
           <option value="mp4">MP4 · 视频</option><option value="wav">WAV · 仅音频</option><option value="flac">FLAC · 仅音频</option><option value="mp3">MP3 · 仅音频 · 320 kbps</option>
-        </select></label>
+        </Select></label>
         <label className="vj-text-field">
           名称
           <input
@@ -172,7 +173,7 @@ export function WorkshopExportSettings() {
           />
           <label className="vj-text-field">
             质量
-            <select
+            <Select
               aria-label="导出质量"
               value={p.output.quality}
               onChange={(e) => {
@@ -185,11 +186,11 @@ export function WorkshopExportSettings() {
               <option value={16}>高</option>
               <option value={20}>标准</option>
               <option value={26}>紧凑</option>
-            </select>
+            </Select>
           </label>
           <label className="vj-text-field">
             编码
-            <select
+            <Select
               aria-label="编码加速"
               value={p.output.acceleration}
               onChange={(e) => {
@@ -212,7 +213,7 @@ export function WorkshopExportSettings() {
                   {label}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
         </details>}
       </fieldset>

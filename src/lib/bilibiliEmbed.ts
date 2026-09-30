@@ -1,4 +1,5 @@
 import { VideoSeekQueue } from "./videoSeekQueue";
+import { captureDiagnostic } from "./diagnostics";
 import { getBridge } from "./bridge";
 import { finishApiActivity } from "./activityLog";
 
@@ -145,6 +146,7 @@ export class BilibiliEmbedController {
       this.scheduleStatusPoll();
     } catch (reason) {
       if (this.disposed) return;
+      captureDiagnostic("playback", "bilibili.embed", reason);
       this.options.onError(messageError(reason));
     }
   }

@@ -2,14 +2,12 @@ import { useState } from "react";
 import { Plus, Search, Trash2 } from "lucide-react";
 import { buildVjQuery } from "../../lib/vjKeywords";
 import { useExploreKeywords } from "../../lib/exploreKeywords";
-import {
-  orderedExplorePlatforms,
-  useExplorePlatforms,
-} from "../../lib/explorePlatforms";
+import { useAppStore } from "../../stores/appStore";
+import { isPlatformEnabled } from "../../lib/enabledPlatforms";
+import { normalizePriority, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
 import { requestExploreSearch } from "../../lib/vjSearch";
 import type { Track } from "../../types";
 import { Button } from "../common";
-import { SearchPlatforms } from "../download/SearchBar";
 
 function compactTag(value: string, max = 7): string {
   const chars = Array.from(value);
@@ -17,8 +15,7 @@ function compactTag(value: string, max = 7): string {
 }
 
 /**
- * Explore：顶上独立可拖的提供商条 + 预设词 + 一次提交。
- * 提供商勾选/排序与顶栏搜索互不同步。
+ * Explore 只组合关键词；平台选择和优先级共享顶部搜索栏。
  */
 export function VjSearchPanel({ track }: { track: Track }) {
   const keywords = useExploreKeywords((state) => state.keywords);
@@ -29,10 +26,11 @@ export function VjSearchPanel({ track }: { track: Track }) {
   const remove = useExploreKeywords((state) => state.remove);
   const setWithArtist = useExploreKeywords((state) => state.setWithArtist);
 
-  const platforms = useExplorePlatforms((state) => state.platforms);
-  const priority = useExplorePlatforms((state) => state.priority);
-  const togglePlatform = useExplorePlatforms((state) => state.toggle);
-  const reorderPlatforms = useExplorePlatforms((state) => state.reorder);
+  const settings = useAppStore(state => state.settings);
+  const selectedPlatforms = normalizeSearchPlatforms(settings?.search_platforms)
+    .filter(platform => isPlatformEnabled(settings, platform));
+  const platforms = normalizePriority(settings?.platform_priority ?? [])
+    .filter(platform => selectedPlatforms.includes(platform));
 
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
@@ -53,21 +51,12 @@ export function VjSearchPanel({ track }: { track: Track }) {
   };
 
   const runSearch = () => {
-    const ordered = orderedExplorePlatforms(platforms, priority);
-    requestExploreSearch(query, ordered);
+    requestExploreSearch(query, platforms);
   };
 
   return (
     <div className="kd-explore">
       <div className="kd-explore-block">
-        <div className="kd-explore-plats">
-          <SearchPlatforms
-            platforms={platforms}
-            onTogglePlatform={togglePlatform}
-            priority={priority}
-            onReorder={reorderPlatforms}
-          />
-        </div>
         <div className="kd-opts kd-vj-words">
           {artist && (
             <button
@@ -152,7 +141,7 @@ export function VjSearchPanel({ track }: { track: Track }) {
           )}
         </div>
         <div className="kd-vj-actions">
-          <Button variant="ghost" size="sm" onClick={runSearch}>
+          <Button variant="ghost" size="sm" disabled={platforms.length === 0 || !query.trim()} onClick={runSearch}>
             <Search size={12} />
             搜索{taggedCount > 0 && `（${taggedCount}）`}
           </Button>
