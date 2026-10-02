@@ -1,3 +1,4 @@
+// Modified by KDJ (see ../../../KDJ-PATCH.md): WASAPI capture packet flags.
 use std::{
     mem,
     ops::ControlFlow,
@@ -621,6 +622,13 @@ fn run_input(
         emit_error(error_callback, err);
     }
 
+    // KDJ patch: equilibrium samples handed out for AUDCLNT_BUFFERFLAGS_SILENT packets.
+    // A packet never exceeds the endpoint buffer; u64 keeps every sample type aligned.
+    let silence_bytes =
+        run_ctxt.stream.max_frames_in_buffer as usize * run_ctxt.stream.bytes_per_frame as usize;
+    let mut silence = vec![0u64; silence_bytes.div_ceil(mem::size_of::<u64>())];
+    fill_silence(&mut silence, run_ctxt.stream.sample_format);
+
     loop {
         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
             ControlFlow::Break(()) => break,
@@ -631,7 +639,13 @@ fn run_input(
             AudioClientFlow::Capture { ref capture_client } => capture_client.clone(),
             _ => unreachable!(),
         };
-        if let Err(err) = process_input(&run_ctxt.stream, capture_client, data_callback) {
+        if let Err(err) = process_input(
+            &run_ctxt.stream,
+            capture_client,
+            data_callback,
+            error_callback,
+            &mut silence,
+        ) {
             emit_error(error_callback, err);
             break;
         }
@@ -735,11 +749,14 @@ fn process_input(
     stream: &StreamInner,
     capture_client: Audio::IAudioCaptureClient,
     data_callback: &mut dyn FnMut(&Data, &InputCallbackInfo),
+    error_callback: &ErrorCallbackArc,
+    silence: &mut Vec<u64>,
 ) -> Result<(), Error> {
     unsafe {
         // Get the available data in the shared buffer.
         let mut buffer: *mut u8 = ptr::null_mut();
-        let mut flags = mem::MaybeUninit::uninit();
+        // KDJ patch: an initialised u32 instead of MaybeUninit, since the flags are now read.
+        let mut flags: u32 = 0;
         loop {
             let mut frames_available = match capture_client.GetNextPacketSize() {
                 Ok(0) => return Ok(()),
@@ -747,11 +764,12 @@ fn process_input(
                 Err(err) => return Err(Error::from(err)),
             };
             let mut qpc_position: u64 = 0;
+            let mut device_position: u64 = 0;
             let result = capture_client.GetBuffer(
                 &mut buffer,
                 &mut frames_available,
-                flags.as_mut_ptr(),
-                None,
+                &mut flags,
+                Some(&mut device_position),
                 Some(&mut qpc_position),
             );
 
@@ -764,9 +782,36 @@ fn process_input(
 
             debug_assert!(!buffer.is_null());
 
-            let data = buffer as *mut ();
-            let len = frames_available as usize * stream.bytes_per_frame as usize
-                / stream.sample_format.sample_size();
+            // KDJ patch: consume the packet flags. Notices go out before this packet's data
+            // callback, on this thread, and never stop the stream. The discontinuity flag is
+            // undefined on the first GetBuffer after Start, where device_position is still 0.
+            if device_position != 0
+                && flags & Audio::AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0
+            {
+                emit_error(
+                    error_callback,
+                    Error::with_message(ErrorKind::Xrun, CAPTURE_DATA_DISCONTINUITY),
+                );
+            }
+            if flags & Audio::AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0 {
+                emit_error(
+                    error_callback,
+                    Error::with_message(ErrorKind::Xrun, CAPTURE_TIMESTAMP_ERROR),
+                );
+            }
+
+            let byte_count = frames_available as usize * stream.bytes_per_frame as usize;
+            let data = if flags & Audio::AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                // The engine buffer content is undefined for silent packets.
+                if silence.len() * mem::size_of::<u64>() < byte_count {
+                    silence.resize(byte_count.div_ceil(mem::size_of::<u64>()), 0);
+                    fill_silence(silence, stream.sample_format);
+                }
+                silence.as_mut_ptr() as *mut ()
+            } else {
+                buffer as *mut ()
+            };
+            let len = byte_count / stream.sample_format.sample_size();
             let data = Data::from_parts(data, len, stream.sample_format);
 
             // The `qpc_position` is in 100 nanosecond units. Convert it to nanoseconds.
@@ -780,6 +825,25 @@ fn process_input(
                 .context("Failed to release capture buffer")?;
         }
     }
+}
+
+/// KDJ patch: message of the [`ErrorKind::Xrun`] reported for a capture packet flagged
+/// `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`. The stream keeps running.
+const CAPTURE_DATA_DISCONTINUITY: &str =
+    "WASAPI capture: AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY (captured audio is not continuous)";
+/// KDJ patch: message of the [`ErrorKind::Xrun`] reported for a capture packet flagged
+/// `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR`. The stream keeps running.
+const CAPTURE_TIMESTAMP_ERROR: &str =
+    "WASAPI capture: AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR (packet timestamp is unreliable)";
+
+/// KDJ patch: fill the silent-packet buffer with the sample format's equilibrium value.
+fn fill_silence(silence: &mut [u64], sample_format: SampleFormat) {
+    // SAFETY: a u64 slice is valid to view as bytes for its whole length.
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(silence.as_mut_ptr().cast::<u8>(), mem::size_of_val(silence))
+    };
+    let usable = bytes.len() - bytes.len() % sample_format.sample_size();
+    fill_equilibrium(&mut bytes[..usable], sample_format);
 }
 
 // The loop for writing output data.

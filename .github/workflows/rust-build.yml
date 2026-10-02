@@ -85,6 +85,7 @@ jobs:
           cargo install cargo-audit --locked --version 0.22.2
           # RUSTSEC-2024-0429 已在 vendor/glib-0.18.5 逐行回补上游 0.20 修复；
           # path source 会被 cargo-audit 正确排除，不设置 ignore，任何普通漏洞仍硬失败。
+          # vendor/cpal-0.18.1 同样被排除：发布前需人工检查 cpal 0.18.x 的 RustSec 公告。
           cargo audit
 
   desktop:
@@ -211,6 +212,7 @@ jobs:
           cargo test -p kdj-app --lib diagnostics::tests
           cargo test -p kdj-app --lib release_version::tests --locked
           cargo test -p kdj-app --lib data_recovery::tests
+          cargo test -p kdj-app --lib live_vj::audio_input::tests
           cargo test -p kdj-providers --lib net::tests::strict_publication_keeps_source_and_destination_on_collision
           cargo test -p kdj-providers --lib net::tests::concurrent_downloads_keep_independent_bytes_and_existing_files
 

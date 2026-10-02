@@ -11,7 +11,7 @@ members = [
     "crates/kdj-server",
     "src-tauri",
 ]
-exclude = ["vendor/rookie", "vendor/glib-0.18.5", "vendor/hls-transmux"]
+exclude = ["vendor/rookie", "vendor/glib-0.18.5", "vendor/hls-transmux", "vendor/cpal-0.18.1"]
 
 [patch.crates-io]
 # Tauri's GTK3 stack still requires glib 0.18. Backport the upstream 0.20 pointer
@@ -19,6 +19,9 @@ exclude = ["vendor/rookie", "vendor/glib-0.18.5", "vendor/hls-transmux"]
 glib = { path = "vendor/glib-0.18.5" }
 # Keep valid single-track TS tail fragments after the initial A/V codec setup.
 hls-transmux = { path = "vendor/hls-transmux" }
+# cpal 0.18.1 hands WASAPI silent capture packets over as audio and drops discontinuity /
+# timestamp-error flags; 0.18.2 needs windows 0.62, which Tauri 2.11 cannot share yet.
+cpal = { path = "vendor/cpal-0.18.1" }
 
 [workspace.package]
 version = "1.0.2-rc8"

@@ -53,6 +53,20 @@ chain and backports upstream's mutable output-pointer fix for
 the implementation in upstream glib 0.20 and later; all other vendored source
 retains the published 0.18.5 code and MIT terms.
 
+## cpal 0.18.1 WASAPI capture patch
+
+- Project: <https://github.com/RustAudio/cpal>
+- Crate: `cpal`
+- License: Apache-2.0
+- Vendored source: `vendor/cpal-0.18.1/`
+- Local patch note: `vendor/cpal-0.18.1/KDJ-PATCH.md`
+
+KDJ vendors the crates.io 0.18.1 source because 0.18.2 requires the `windows`
+0.62 line that Tauri 2.11 cannot share. The only modified file is
+`src/host/wasapi/stream.rs`, whose changed lines are marked `KDJ patch`: silent
+capture packets are delivered as silence, and discontinuity / timestamp-error
+packet flags are reported through the error callback without stopping the stream.
+
 ## drag-rs 2.1.1
 
 - Project: <https://github.com/crabnebula-dev/drag-rs>

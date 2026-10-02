@@ -320,6 +320,7 @@ fn run_inner(app: &AppHandle, session: &str, set: &PreparedSet, cancel: &AtomicB
         let mut tracking_status = ListenerStatus::default();
         let mut source_checked = Instant::now();
         let mut last_rejection: Option<Instant> = None;
+        let (mut last_notice, mut notices): (Option<Instant>, u32) = (None, 0);
         while !cancel.load(Ordering::Relaxed) {
             let tick = Instant::now();
             let polled = source.poll(cancel)?;
@@ -327,6 +328,16 @@ fn run_inner(app: &AppHandle, session: &str, set: &PreparedSet, cancel: &AtomicB
             if input_epoch != epoch {
                 input_epoch = epoch; current = None; estimate = None; lost = false;
                 generation = 0; search_cursor = 0; last_rejection = None;
+            }
+            if let Some(notice) = polled.notice {
+                // At most one warning every 5 s so a flaky driver cannot flush the bounded
+                // log; the gap counter keeps the exact total.
+                notices += 1;
+                if last_notice.is_none_or(|at| at.elapsed() >= Duration::from_secs(5)) {
+                    let message = if notices > 1 { format!("{notice}（自上条记录起共 {notices} 次）") } else { notice };
+                    log(app, session, Level::Warn, Stage::Input, message);
+                    (last_notice, notices) = (Some(Instant::now()), 0);
+                }
             }
             let feature_ms = polled.feature_ms;
             let packet = polled.observation;
