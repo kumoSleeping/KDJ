@@ -1010,6 +1010,8 @@ export const api = {
   /** 只移除一条已结束的队列记录，避免「清空」影响其他历史任务。 */
   removeDownload: (id: string) => request<{ removed: boolean }>(`/downloads/${id}`, { method: "DELETE" }),
   clearDownloads: () => post<{ removed: number }>("/downloads/clear"),
+  /** 已完成但文件已不在原位置的任务 id。只在显式调用时 stat，不进进度热路径。 */
+  missingDownloadFiles: () => request<string[]>("/downloads/missing"),
 
   videoResolve: (url: string, platform?: "bilibili" | "youtube") =>
     post<VideoInfo>("/video/resolve", { url, platform }),

@@ -83,6 +83,13 @@ function derive(tasks: Map<string, DownloadTask>): Derived {
   return { list, activeCount };
 }
 
+/** 已完成任务只进历史视图；不放进 list，曲库左表等消费者仍把 list 当待办。 */
+function historyFrom(tasks: Iterable<DownloadTask>): DownloadTask[] {
+  return sortDownloadTasks(
+    [...tasks].filter((task) => task.state === "done" && !removedTaskIds.has(task.id)),
+  );
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -142,8 +149,13 @@ export interface DownloadStore {
   activeCount: number;
   loading: boolean;
   error: string;
+  /** 已完成的下载记录，按入队顺序。 */
+  history: DownloadTask[];
+  /** 已完成但文件已不在原位置的任务 id；只由 checkMissingFiles 显式刷新。 */
+  missingIds: ReadonlySet<string>;
 
   refresh(): Promise<void>;
+  checkMissingFiles(): Promise<void>;
   enqueue(
     sources: SongSource[],
     options?: {
@@ -171,6 +183,8 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
   activeCount: 0,
   loading: false,
   error: "",
+  history: [],
+  missingIds: new Set(),
 
   async refresh() {
     const sequence = ++downloadRefreshSequence;
@@ -189,11 +203,20 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
         if (before.get(id) !== task && !removedTaskIds.has(id) && !completedTaskIds.has(id)) map.set(id, task);
       }
       commitTasks(map);
-      set({ tasks: map, ...derive(map), loading: false, error: "" });
+      set({ tasks: map, ...derive(map), history: historyFrom(tasks), loading: false, error: "" });
       map.forEach(prepareAuthorizingTask);
     } catch (error) {
       if (sequence !== downloadRefreshSequence) return;
       set({ loading: false, error: errorText(error) });
+    }
+  },
+
+  async checkMissingFiles() {
+    try {
+      set({ missingIds: new Set(await api.missingDownloadFiles()) });
+    } catch (error) {
+      // 旧后端没有这条路由时保持“不标记”，不能把所有记录误判成丢失。
+      console.warn("检查下载文件失败", error);
     }
   },
 
@@ -294,7 +317,11 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     const map = new Map(get().tasks);
     map.delete(taskId);
     pruneDownloadDisplayCache(map.keys());
-    set({ tasks: map, ...derive(map) });
+    set({
+      tasks: map,
+      ...derive(map),
+      history: get().history.filter((task) => task.id !== taskId),
+    });
   },
 
   async clear() {
@@ -307,8 +334,10 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     if (tasks.length === 0) return;
     const map = new Map(get().tasks);
     let sawCompletedTask = false;
+    const finished = new Map(get().history.map((task) => [task.id, task]));
     for (const task of tasks) {
       if (!belongsInQueue(task)) {
+        finished.set(task.id, task);
         sawCompletedTask = true;
         rememberCompletedTask(task.id);
         forgetQueueDraft(task.id);
@@ -319,7 +348,10 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       const merged = mergeTask(map.get(task.id), task);
       map.set(task.id, merged);
     }
-    if (sawCompletedTask) pruneDownloadDisplayCache(map.keys());
+    if (sawCompletedTask) {
+      pruneDownloadDisplayCache(map.keys());
+      set({ history: historyFrom(finished.values()) });
+    }
     rememberDownloadDisplays(
       tasks
         .map((task) => map.get(task.id))
@@ -353,7 +385,7 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       downloadListRevision += 1;
       const map = applyServerList(get().tasks, event.payload);
       commitTasks(map);
-      set({ tasks: map, ...derive(map), error: "" });
+      set({ tasks: map, ...derive(map), history: historyFrom(event.payload), error: "" });
       map.forEach(prepareAuthorizingTask);
     }
   },

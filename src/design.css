@@ -5567,6 +5567,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-download-task-target {
   max-width: 7.5rem;
 }
+.kd-download-task-time {
+  flex: none;
+}
 .kd-download-task-meta svg {
   flex: none;
 }
@@ -5644,6 +5647,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font-size: var(--kd-size-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.kd-download-task-error-previous {
+  display: block;
+  color: var(--kd-faint);
 }
 .kd-download-task-notice,
 .kd-download-task-config {

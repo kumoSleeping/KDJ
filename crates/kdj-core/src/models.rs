@@ -681,6 +681,9 @@ pub struct DownloadTask {
     pub path: String,
     #[serde(default)]
     pub error: String,
+    /// 重试前最后一次的失败原因；重试会清空 `error`，这里留底以便追溯。
+    #[serde(default)]
+    pub previous_error: String,
     #[serde(default)]
     pub track_id: Option<i64>,
     /// 入队时指定的目标曲库文件夹；前端用来在对应文件夹列表里画「待下载」行。

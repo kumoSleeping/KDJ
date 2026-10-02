@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Check,
   ArrowLeft,
@@ -19,7 +19,7 @@ import { copyText } from "../../lib/copyText";
 import { copyShareContent, remoteArtwork } from "../../lib/shareClipboard";
 import { formatShareText, platformShareLink } from "../../lib/shareLink";
 import { useSharePrefs } from "../../lib/sharePrefs";
-import { folderName, formatPercent, thumbUrl } from "../../lib/format";
+import { folderName, formatDate, formatPercent, thumbUrl } from "../../lib/format";
 import { SEARCH_QUEUE_DROP_ATTR } from "../../lib/folderDrop";
 import {
   enqueueSearchQueuePayload,
@@ -27,6 +27,7 @@ import {
   isSearchDownloadDrag,
   readSearchDrop,
 } from "../../lib/searchDrag";
+import { sortDownloadTasks } from "../../lib/downloadOrder";
 import { forgetQueueDraft, patchVideoDraft, setQueueDraft } from "../../lib/queueTaskDraft";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -285,6 +286,7 @@ function QueueRow({
   const cancel = useDownloadStore((store) => store.cancel);
   const retry = useDownloadStore((store) => store.retry);
   const remove = useDownloadStore((store) => store.remove);
+  const missing = useDownloadStore((store) => store.missingIds.has(task.id));
   const shareContentMode = useSharePrefs((state) => state.contentMode);
   /** 行内操作失败的原因，和任务自己的 error 共用行尾那一行。 */
   const [cancelError, setCancelError] = useState("");
@@ -312,6 +314,13 @@ function QueueRow({
       ? { page_index: videoPage.index, page_count: videoPage.count }
       : undefined,
   );
+  const state = missing ? "文件已不在原位置" : stateLabel(task);
+  const finished =
+    task.state === "done" || task.state === "failed" || task.state === "canceled"
+      ? formatDate(task.updated_at)
+      : "";
+  const previous = task.previous_error?.trim() ?? "";
+  const previousError = task.state === "failed" && previous !== task.error.trim() ? previous : "";
   const recordedTarget = task.path.trim()
     ? task.path.replace(/[\\/][^\\/]*$/, "") || task.path
     : task.output_dir || task.dest_dir || "";
@@ -356,6 +365,13 @@ function QueueRow({
               {task.quality ? (
                 <QueueQualityControl task={task} onError={setCancelError} />
               ) : null}
+              {finished ? (
+                <span className="kd-download-task-time kd-mono" title={`${stateLabel(task)}：${finished}`}>
+                  {finished.startsWith(`${new Date().getFullYear()}-`)
+                    ? finished.slice(5)
+                    : finished.slice(0, 10)}
+                </span>
+              ) : null}
               {recordedTarget.trim() ? (
                 <span
                   className="kd-download-task-target kd-mono"
@@ -370,7 +386,7 @@ function QueueRow({
           <span className="kd-download-task-state">
             <span className="kd-download-task-state-label">
               <TaskStateMark task={task} />
-              <span className="kd-download-task-state-text">{stateLabel(task)}</span>
+              <span className="kd-download-task-state-text">{state}</span>
             </span>
             <span
               className="kd-download-task-percent kd-mono"
@@ -428,7 +444,8 @@ function QueueRow({
               size="sm"
               iconOnly
               aria-label="在文件管理器中显示下载文件"
-              title={`在文件管理器中显示：${task.path}`}
+              title={missing ? `文件已不在原位置：${task.path}` : `在文件管理器中显示：${task.path}`}
+              disabled={missing}
               onClick={() => onOpenTask(task)}
             >
               <FolderOpen size={12} />
@@ -456,8 +473,14 @@ function QueueRow({
       </div>
 
       {task.error && task.error.trim() !== stateLabel(task) ? (
-        <div className="kd-download-task-error" title={task.error}>
+        <div
+          className="kd-download-task-error"
+          title={previousError ? `${task.error}\n上次：${previousError}` : task.error}
+        >
           {task.error}
+          {previousError ? (
+            <span className="kd-download-task-error-previous">上次：{previousError}</span>
+          ) : null}
         </div>
       ) : null}
       {/* 取消失败是"我按了但没反应"，必须留在这一条上：任务还在跑，
@@ -676,8 +699,19 @@ function QueuePrefsBar({
 export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
+  const done = useDownloadStore((store) => store.history);
+  const checkMissingFiles = useDownloadStore((store) => store.checkMissingFiles);
   const [history, setHistory] = useState(false);
-  const visibleTasks = list.filter(task => history === (task.state === "done" || task.state === "canceled"));
+  const visibleTasks = history
+    ? sortDownloadTasks([...done, ...list.filter((task) => task.state === "canceled")])
+    : list.filter((task) => task.state !== "canceled");
+  // 只在挂载和窗口重新聚焦时 stat 一次；文件多半是用户切到文件管理器里挪走的。
+  useEffect(() => {
+    void checkMissingFiles();
+    const onFocus = () => void checkMissingFiles();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [checkMissingFiles]);
   const pauseAll = useDownloadStore((store) => store.pauseAll);
   const [dropActive, setDropActive] = useState(false);
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);

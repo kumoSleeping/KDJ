@@ -180,6 +180,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             post(update_download_video_mode),
         )
         .route("/api/downloads/clear", post(clear_downloads))
+        .route("/api/downloads/missing", get(missing_download_files))
         .route("/api/video/resolve", post(video_resolve))
         .route("/api/video/download", post(video_download))
         .route(
@@ -3280,6 +3281,17 @@ async fn intake_one(state: &Arc<AppState>, entry: &str, payload: &IntakeRequest)
 
 async fn list_downloads(axum::Extension(ctx): axum::Extension<Ctx>) -> Json<Vec<DownloadTask>> {
     Json(ctx.downloads.list())
+}
+
+/// 前端在队列面板挂载和窗口重新聚焦时调用，返回落盘文件已不在原位置的完成任务。
+async fn missing_download_files(
+    axum::Extension(ctx): axum::Extension<Ctx>,
+) -> ApiResult<Json<Vec<String>>> {
+    let downloads = ctx.downloads.clone();
+    tokio::task::spawn_blocking(move || downloads.missing_files())
+        .await
+        .map(Json)
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "检查下载文件任务失败"))
 }
 
 async fn pending_download_preparations(

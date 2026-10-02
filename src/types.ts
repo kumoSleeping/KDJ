@@ -439,6 +439,8 @@ export interface DownloadTask {
   speed_bps: number;
   path: string;
   error: string;
+  /** 重试前最后一次的失败原因；旧后端可能缺失。 */
+  previous_error?: string;
   track_id: number | null;
   /** 入队时指定的目标文件夹；前端用来在对应列表画「待下载」行。 */
   dest_dir?: string;

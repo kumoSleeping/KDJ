@@ -46,6 +46,13 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// 重试前把上次失败原因挪到 previous_error；暂停后重开没有新错误，不覆盖旧底。
+fn keep_previous_error(task: &mut DownloadTask) {
+    if !task.error.is_empty() {
+        task.previous_error = std::mem::take(&mut task.error);
+    }
+}
+
 /// 单调秒。节流和测速只关心"过了多久"，用挂钟的话改系统时间会把速度算成天文数字。
 fn monotonic() -> f64 {
     static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -820,6 +827,24 @@ impl DownloadManager {
         tasks
     }
 
+    /// 已完成但落盘文件已不在原位置的任务 id。只在前端显式询问时 stat，
+    /// 不进广播/进度热路径；锁外 stat，慢盘不会卡住队列。
+    pub fn missing_files(&self) -> Vec<String> {
+        let done: Vec<(String, String)> = self
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| entry.task.state == TaskState::Done && !entry.task.path.is_empty())
+            .map(|entry| (entry.task.id.clone(), entry.task.path.clone()))
+            .collect();
+        done.into_iter()
+            // 只认确定的 NotFound；权限等错误不算丢失。
+            .filter(|(_, path)| matches!(Path::new(path).try_exists(), Ok(false)))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     pub fn get(&self, id: &str) -> Option<DownloadTask> {
         self.entries
             .lock()
@@ -1056,7 +1081,7 @@ impl DownloadManager {
             entry.task.total_bytes = 0;
             entry.task.speed_bps = 0.0;
             entry.task.path.clear();
-            entry.task.error.clear();
+            keep_previous_error(&mut entry.task);
             entry.task.track_id = None;
             entry.task.updated_at = now_secs();
             let prepared = (entry.task.clone(), retry, cancel, entry.worker_generation);
@@ -1166,7 +1191,7 @@ impl DownloadManager {
             entry.task.total_bytes = 0;
             entry.task.speed_bps = 0.0;
             entry.task.path.clear();
-            entry.task.error.clear();
+            keep_previous_error(&mut entry.task);
             entry.task.track_id = None;
             entry.task.updated_at = now_secs();
             let prepared = (entry.task.clone(), retry, cancel, entry.worker_generation);
@@ -1920,6 +1945,7 @@ fn new_task(
         speed_bps: 0.0,
         path: String::new(),
         error: String::new(),
+        previous_error: String::new(),
         track_id: None,
         dest_dir,
         output_dir,
@@ -2817,6 +2843,7 @@ mod tests {
             speed_bps: 0.0,
             path: String::new(),
             error: String::new(),
+            previous_error: String::new(),
             track_id: None,
             dest_dir: String::new(),
             output_dir: String::new(),
@@ -3122,11 +3149,60 @@ mod tests {
         assert_eq!(task.downloaded_bytes, 0);
         assert_eq!(task.total_bytes, 0);
         assert!(task.error.is_empty());
+        assert_eq!(task.previous_error, "网络失败");
         assert_eq!(retry.source.key, "123");
         assert_eq!(retry.dest_dir, "/music");
         assert!(!fresh_cancel.is_cancelled());
         assert!(manager.restartable_ids().is_empty());
         assert!(manager.prepare_audio_retry("retry").is_err());
+    }
+
+    #[test]
+    fn previous_error_survives_a_paused_retry_and_the_journal() {
+        let (path, root) = journal_path("previous-error");
+        {
+            let manager =
+                DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+            let mut task = sample_task("again", TaskState::Failed, 1.0);
+            task.error = "第一次失败".into();
+            manager.insert_with_retry(
+                task,
+                CancellationToken::new(),
+                Some(sample_audio_retry(false)),
+                None,
+            );
+            manager.prepare_audio_retry("again").unwrap();
+            manager.pause_all();
+            // 暂停后重开没有新错误，不能把上次失败原因冲掉。
+            let task = manager.prepare_audio_retry("again").unwrap().0;
+            assert!(task.error.is_empty());
+            assert_eq!(task.previous_error, "第一次失败");
+        }
+        let reopened = DownloadManager::open(EventHub::default(), 2, false, path).unwrap();
+        assert_eq!(reopened.get("again").unwrap().previous_error, "第一次失败");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_files_lists_only_done_tasks_whose_file_is_gone() {
+        let (_journal, root) = journal_path("missing-files");
+        fs::create_dir_all(&root).unwrap();
+        let present = root.join("present.flac");
+        fs::write(&present, b"x").unwrap();
+        let gone = root.join("gone.flac").to_string_lossy().into_owned();
+        let manager = manager();
+        for (id, state, path) in [
+            ("present", TaskState::Done, present.to_string_lossy().into_owned()),
+            ("gone", TaskState::Done, gone.clone()),
+            ("no-path", TaskState::Done, String::new()),
+            ("failed", TaskState::Failed, gone.clone()),
+        ] {
+            let mut task = sample_task(id, state, 1.0);
+            task.path = path;
+            manager.insert(task, CancellationToken::new());
+        }
+        assert_eq!(manager.missing_files(), vec!["gone"]);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
