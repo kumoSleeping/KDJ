@@ -1,4 +1,5 @@
 //! Transparent lyric padding must not intercept controls in windows below it.
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -56,11 +57,18 @@ pub fn set_desktop_lyrics_drag_regions(
     Ok(())
 }
 
+/// Bumped per install so a poller from a destroyed window cannot outlive it into a quick re-open.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
 pub fn install(app: tauri::AppHandle) {
     HIT_TEST.lock().unwrap().regions.clear();
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     tauri::async_runtime::spawn(async move {
         let mut applied = None;
         loop {
+            if GENERATION.load(Ordering::Relaxed) != generation {
+                break;
+            }
             let Some(window) = app.get_webview_window("lyrics-overlay") else {
                 break;
             };
