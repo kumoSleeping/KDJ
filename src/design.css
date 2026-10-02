@@ -5340,6 +5340,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-download-task[data-state="done"] { --kd-download-task-tone: var(--kd-ok); }
 .kd-download-task[data-state="failed"] { --kd-download-task-tone: var(--kd-danger); }
 .kd-download-task[data-state="canceled"] { --kd-download-task-tone: var(--kd-faint); }
+.kd-download-task[data-missing] { --kd-download-task-tone: var(--kd-warn); }
 .kd-download-task:hover,
 .kd-download-task:focus-within {
   background: color-mix(in srgb, var(--kd-hover) 54%, var(--kd-panel));
@@ -5567,6 +5568,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-download-task-target {
   max-width: 7.5rem;
 }
+.kd-download-task-time {
+  flex: none;
+}
 .kd-download-task-meta svg {
   flex: none;
 }
@@ -5644,6 +5648,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font-size: var(--kd-size-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.kd-download-task-error-previous {
+  display: block;
+  color: var(--kd-faint);
 }
 .kd-download-task-notice,
 .kd-download-task-config {
