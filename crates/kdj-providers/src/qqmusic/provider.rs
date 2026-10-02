@@ -25,7 +25,7 @@ use tokio::io::AsyncWriteExt as _;
 use super::client::{new_search_id, Credential, QqClient, QqPlatform};
 use super::login;
 use super::error::QqError;
-use super::media::{is_qq_audio_url, media_headers, audio_content_type, validate_audio};
+use super::media::{is_qq_audio_url, media_headers, open_audio_download, validate_audio};
 use crate::provider::PreviewMedia;
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
@@ -1413,13 +1413,14 @@ impl MusicProvider for QqMusicProvider {
         let final_path = unique_download_path(&output_dir, &filename);
 
         let guard = AtomicDownload::new(&final_path)?;
-        let response = self.media_get(&media.url, None).await?;
-        match response.status().as_u16() {
-            200 => {}, 429 => return Err(QqError::RateLimited.into()),
-            status => return Err(QqError::Upstream(i64::from(status)).into()),
-        }
-        let mime = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
-        anyhow::ensure!(audio_content_type(mime), "QQ 音乐返回的不是音频内容，未提交下载文件");
+        // 试听链路遇到非音频响应会换下一个 CDN 候选；下载也一样，不能只认第一个。
+        let candidates = std::iter::once(media.url).chain(media.alternatives);
+        let cancel_check = &job;
+        let (response, head) = open_audio_download(candidates, ext, |url| async move {
+            cancel_check.check_canceled()?;
+            self.media_get(&url, None).await
+        })
+        .await?;
         let expected = response.content_length();
         let total = expected.unwrap_or(0);
         let mut prefix = Vec::new();
@@ -1429,7 +1430,8 @@ impl MusicProvider for QqMusicProvider {
             .await
             .context("创建下载临时文件失败")?;
         let mut downloaded = 0u64;
-        let mut stream = response.bytes_stream();
+        let mut stream = futures_util::stream::once(futures_util::future::ready(Ok(head)))
+            .chain(response.bytes_stream());
         while let Some(chunk) = stream.next().await {
             job.check_canceled()?;
             let chunk = chunk.map_err(super::error::network_error)?;
