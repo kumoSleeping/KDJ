@@ -112,6 +112,7 @@ export function LyricsHost({
       reposition,
       x: desktopPositionX,
       y: desktopPositionY,
+      destroy: !desktopEnabled,
       accent: accent.start,
       accentEnd: accent.end,
       accentMode: accent.mode === "none" || accent.mode === "follow" ? "solid" : accent.mode,
@@ -140,6 +141,7 @@ export function LyricsHost({
     });
   }, [
     overlayOn,
+    desktopEnabled,
     desktopPosition,
     desktopLocked,
     desktopFontScale,

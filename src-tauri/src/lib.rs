@@ -2361,12 +2361,19 @@ fn set_desktop_lyrics(
     reposition: bool,
     x: Option<i32>,
     y: Option<i32>,
+    destroy: Option<bool>,
 ) -> Result<(), String> {
     #[cfg(desktop)]
     {
         if !visible {
             if let Some(window) = app.get_webview_window("lyrics-overlay") {
-                window.hide().map_err(|err| err.to_string())?;
+                // Turning the overlay off releases its WebView process; automatic hides (no track,
+                // video mode) keep it so it re-shows instantly.
+                if destroy.unwrap_or(false) {
+                    window.destroy().map_err(|err| err.to_string())?;
+                } else {
+                    window.hide().map_err(|err| err.to_string())?;
+                }
             }
             return Ok(());
         }
@@ -2437,7 +2444,7 @@ fn set_desktop_lyrics(
     }
     #[cfg(not(desktop))]
     {
-        let _ = (app, visible, position, locked, font_scale, reposition, x, y);
+        let _ = (app, visible, position, locked, font_scale, reposition, x, y, destroy);
         Ok(())
     }
 }
