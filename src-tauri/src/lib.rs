@@ -2420,9 +2420,6 @@ fn set_desktop_lyrics(
         window
             .set_always_on_top(true)
             .map_err(|err| err.to_string())?;
-        window
-            .set_ignore_cursor_events(true)
-            .map_err(|err| err.to_string())?;
         desktop_lyrics_hit_test::set_locked(locked);
         if reposition {
             if let (Some(x), Some(y)) = (x, y) {
@@ -2432,6 +2429,10 @@ fn set_desktop_lyrics(
             }
         }
         window.show().map_err(|err| err.to_string())?;
+        // After show: on Linux tao unwraps the GdkWindow, which a never-shown window lacks.
+        window
+            .set_ignore_cursor_events(true)
+            .map_err(|err| err.to_string())?;
         return Ok(());
     }
     #[cfg(not(desktop))]
