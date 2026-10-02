@@ -1,12 +1,17 @@
 import { useToastStore } from "../../stores/toastStore";
-import { LibrarySearchTools, WorkRailPin } from "./WorkRailControls";
-import { useState, useSyncExternalStore } from "react";
+import { PlaybackPanelToggle } from "../player/PlaybackPanelToggle";
+import { LibrarySearchTools } from "./WorkRailControls";
+import { useContext, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
+import { LibraryWorkRailToolsTargetContext } from "./libraryWorkRailTools";
 import {
   BarChart3,
   CheckSquare,
   Copy,
   Download,
+  Film,
   LocateFixed,
+  ListFilter,
   Music2,
   Pause,
   Play,
@@ -56,18 +61,15 @@ export function LibraryWorkRail({
   asideToggle,
   aggregateSearchOpen = true,
   onOpenAggregateSearch,
-  localPanePinned = false,
-  onLocalPanePinnedChange,
+  mode = "rail",
 }: {
+  mode?: "rail" | "tools" | "tasks";
   showDownloads?: boolean;
   /** 宽屏右栏开合键，始终位于本栏工具组最右侧。 */
   asideToggle?: ReactNode;
   /** 顶栏混合搜索是否展开；收起时在定位右侧显示重新打开。 */
   aggregateSearchOpen?: boolean;
   onOpenAggregateSearch?(): void;
-  /** 固定本地曲库后，在线内容在右侧并排打开。 */
-  localPanePinned?: boolean;
-  onLocalPanePinnedChange?(pinned: boolean): void;
 }) {
   const scan = useLibraryStore((state) => state.scan);
   const cancelScan = useLibraryStore((state) => state.cancelScan);
@@ -89,6 +91,7 @@ export function LibraryWorkRail({
   const savingSettings = useAppStore((state) => state.savingSettings);
   const saveSettings = useAppStore((state) => state.saveSettings);
 
+  const toolsTarget = useContext(LibraryWorkRailToolsTargetContext);
   const selecting = selectionMode || selectedIds.length > 1;
   const playingTrack = useSyncExternalStore(
     subscribePlayingTrack,
@@ -214,10 +217,23 @@ export function LibraryWorkRail({
     </button>
   );
 
-  const localPanePinToggle = onLocalPanePinnedChange ? (
-    <WorkRailPin pinned={localPanePinned} onChange={onLocalPanePinnedChange} label="本地曲库"
-      title={localPanePinned ? "本地曲库已固定；在线内容会并排打开" : "当前为覆盖打开；点击固定本地曲库"} />
-  ) : null;
+  const mediaLabels = { all: "默认", audio: "仅音频", video: "仅视频" } as const;
+  const nextMedia = filter.media === "all" ? "audio" : filter.media === "audio" ? "video" : "all";
+  const mediaFilterToggle = (
+    <button
+      type="button"
+      className="kd-activity-search-toggle"
+      data-action="media-filter"
+      data-active={filter.media !== "all" ? "true" : undefined}
+      aria-label={`媒体筛选：${mediaLabels[filter.media]}，点击切换为${mediaLabels[nextMedia]}`}
+      title={`媒体筛选：${mediaLabels[filter.media]} → ${mediaLabels[nextMedia]}`}
+      onClick={() => setFilter({ media: nextMedia })}
+    >
+      {filter.media === "audio" ? <Music2 size={14} strokeWidth={2.25} aria-hidden="true" />
+        : filter.media === "video" ? <Film size={14} strokeWidth={2.25} aria-hidden="true" />
+          : <ListFilter size={14} strokeWidth={2.25} aria-hidden="true" />}
+    </button>
+  );
 
   const aggregateSearchToggle =
     !aggregateSearchOpen && onOpenAggregateSearch ? (
@@ -236,11 +252,16 @@ export function LibraryWorkRail({
     <LibrarySearchTools value={filter.q} folder={filter.folder} selecting={selecting}
       onChange={(value) => setFilter({ q: value })}>
       {locatePlayingToggle}
-      {localPanePinToggle}
+      {mediaFilterToggle}
       {aggregateSearchToggle}
       {asideToggle}
+      <PlaybackPanelToggle />
     </LibrarySearchTools>
   );
+
+  const trailing = mode === "tasks" ? null : toolsTarget ? createPortal(trailingTools, toolsTarget) : trailingTools;
+
+  if (mode === "tools") return <div className="kd-library-preview-tools" role="toolbar" aria-label="曲库操作">{trailing}</div>;
 
   if (selecting) {
     return (
@@ -283,7 +304,7 @@ export function LibraryWorkRail({
             }
           />,
         ]}
-        trailing={trailingTools}
+        trailing={trailing}
         label="曲库多选"
       />
     );
@@ -415,7 +436,7 @@ export function LibraryWorkRail({
       idle={idle}
       glyphs={glyphs}
       texts={texts}
-      trailing={trailingTools}
+      trailing={trailing}
       label={idle ? "曲库概况" : "曲库任务"}
     />
   );

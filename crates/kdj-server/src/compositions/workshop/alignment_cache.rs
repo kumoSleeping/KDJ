@@ -166,6 +166,7 @@ impl Workshop {
                 return Ok(features);
             }
         }
+        let read_started = std::time::Instant::now();
         let path = block.path.clone();
         let cached = tokio::task::spawn_blocking(move || {
             read_cached(&path, |file| AudioFeatures::read_from(BufReader::new(file)))
@@ -174,11 +175,15 @@ impl Workshop {
         if cancel.is_cancelled() {
             bail!("匹配已取消")
         }
+        tracing::debug!(target: "kdj_alignment_timing", source = %block.clip.source_id,
+            start_ms = block.start_ms, cache_hit = cached.is_some(),
+            elapsed_ms = read_started.elapsed().as_secs_f64() * 1000., "feature cache read");
         let features = if let Some(features) = cached {
             Arc::new(features)
         } else {
             let pcm = render::alignment_pcm(p, &block.clip, cancel).await?;
             let worker_cancel = cancel.clone();
+            let feature_started = std::time::Instant::now();
             let features = Arc::new(
                 tokio::task::spawn_blocking(move || {
                     kdj_core::thread_qos::prefer_background();
@@ -186,6 +191,10 @@ impl Workshop {
                 })
                 .await??,
             );
+            tracing::debug!(target: "kdj_alignment_timing", source = %block.clip.source_id,
+                start_ms = block.start_ms, elapsed_ms = feature_started.elapsed().as_secs_f64() * 1000.,
+                "feature worker finished");
+            let write_started = std::time::Instant::now();
             let temp = self.cache.join(format!("{}.part", block.key));
             let write_path = temp.clone();
             let output = features.clone();
@@ -214,6 +223,9 @@ impl Workshop {
             }
             result?;
             self.trim_cache();
+            tracing::debug!(target: "kdj_alignment_timing", source = %block.clip.source_id,
+                start_ms = block.start_ms, elapsed_ms = write_started.elapsed().as_secs_f64() * 1000.,
+                "feature cache written");
             features
         };
         if cancel.is_cancelled() {

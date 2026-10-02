@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, type CSSProperties } from "react";
 import { camelotColor, camelotNeighbours, camelotToLabel, parseCamelot } from "../../lib/camelot";
+import { useThemePack } from "../../lib/themePack";
 
 export interface CamelotWheelProps {
   /** 当前曲目的 Camelot 码，如 "8A"；空 = 未分析，整轮变灰。 */
@@ -47,6 +48,7 @@ function sectorPath(
 }
 
 export function CamelotWheel({ code, size = 220, onPick }: CamelotWheelProps) {
+  const layout = useThemePack(state => state.active?.camelot);
   const current = parseCamelot(code);
   const neighbours = useMemo(() => new Set(camelotNeighbours(code)), [code]);
 
@@ -75,8 +77,42 @@ export function CamelotWheel({ code, size = 220, onPick }: CamelotWheelProps) {
     return result;
   }, [size]);
 
+  if (layout === "grid") {
+    const Cell = onPick ? "button" : "span";
+    return (
+      <div className="kd-camelot-grid" data-compact={size < 200 || undefined}
+        style={{ width: size, height: size, "--kd-key-color": camelotColor(code) } as CSSProperties}
+        role="group" aria-label={current ? `调性表，当前 ${code}` : "调性表"}>
+        <div className="kd-camelot-grid-head">
+          <span>Camelot</span>
+          {current && <><strong>{code}</strong><span>{camelotToLabel(code)}</span></>}
+        </div>
+        <div className="kd-camelot-grid-keys">
+          {Array.from({ length: 6 }, (_, row) => [row + 1, row + 7].flatMap(n => ["A", "B"].map(letter => {
+            const key = `${n}${letter}`;
+            const label = camelotToLabel(key);
+            return (
+              <Cell key={key} className="kd-camelot-grid-key"
+                style={{ "--kd-key-color": camelotColor(key) } as CSSProperties}
+                type={onPick ? "button" : undefined}
+                data-current={key === code || undefined}
+                data-neighbour={neighbours.has(key) || undefined}
+                aria-pressed={onPick ? key === code : undefined}
+                title={`${key} · ${label}`}
+                onClick={onPick ? () => onPick(key) : undefined}>
+                <span>{key}</span><small>{label}</small>
+              </Cell>
+            );
+          })))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <svg
+      className="kd-camelot-wheel"
+      data-empty={!current || undefined}
       width={size}
       height={size}
       viewBox={`0 0 ${size} ${size}`}
@@ -95,8 +131,10 @@ export function CamelotWheel({ code, size = 220, onPick }: CamelotWheelProps) {
         return (
           <g
             key={segment.code}
+            data-key={segment.code}
+            data-current={isCurrent || undefined}
             onClick={onPick ? () => onPick(segment.code) : undefined}
-            style={onPick ? { cursor: "pointer" } : undefined}
+            style={{ "--kd-key-color": accent, cursor: onPick ? "pointer" : undefined } as CSSProperties}
           >
             <title>{`${segment.code} · ${camelotToLabel(segment.code)}`}</title>
             <path

@@ -1,0 +1,4 @@
+.kd-static-wave-rail { position: absolute; top: 0; bottom: 0; left: 50%; width: 300%; display: flex; will-change: transform; pointer-events: none; }
+.kd-static-wave-tile { position: relative; flex: 0 0 33.3333333333%; height: 100%; overflow: hidden; }
+.kd-static-wave-pixels { position: absolute; inset: 0; transform-origin: center; }
+.kd-static-wave-pixels canvas { display: block; width: 100%; height: 100%; }

@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { api } from "../../lib/api";
 import {
   lyricExtraLabel,
   lyricExtraTitle,
   useLyricsPrefs,
   type LyricsExtra,
-  type LyricsEngine,
 } from "../../lib/lyricsPrefs";
 import { LyricsSourcePicker } from "./LyricsSourcePicker";
 import { activeLrcIndex, startedLrcIndex } from "../../lib/lrc";
@@ -14,9 +12,13 @@ import {
   MEDIA_SYNC_EVENT,
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
-import { isStreamTrack, streamCoverUrl } from "../../lib/streamTrack";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 import { useLyricsStore } from "../../stores/lyricsStore";
+import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
+import { isVideoTrack } from "../../lib/format";
+import { streamMeta } from "../../lib/streamTrack";
+import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
+import { Panel } from "../common";
 import type { Track } from "../../types";
 
 function usePlayerPosition(trackId: number | null): number {
@@ -67,21 +69,45 @@ function effectiveExtra(
   return "off";
 }
 
-export function LyricsView({ track }: { track: Track | null }) {
-  const trackId = track?.id ?? null;
+interface LyricsDetailProps {
+  track: Track;
+  /** Playback docks retain their configured rectangle while lyrics load or are unavailable. */
+  reserveEmpty?: boolean;
+  /** An existing non-audio transport can supply its own clock and seek route. */
+  transport?: { position: number; seek(position: number): void };
+}
+export function LyricsDetailPanel({ track, transport, reserveEmpty = false }: LyricsDetailProps) {
+  const entry = useLyricsStore(state => state.get(track.id));
+  const prefsEpoch = useLyricsPrefs(state => state.prefsEpoch);
+  useEffect(() => { void useLyricsStore.getState().ensure(track, {cacheOnly:true}); }, [track.id, prefsEpoch]);
+  if (isVideoTrack(track.format) || streamMeta(track)?.kind === "video" || !hasVisibleLyrics(entry.lines)) {
+    return reserveEmpty ? <Panel heading="歌词" padded={false} dense className="kd-detail-lyrics-panel" /> : null;
+  }
+  return (
+    <Panel heading="歌词" padded={false} dense className="kd-detail-lyrics-panel">
+      <LyricsView track={track} transport={transport} />
+    </Panel>
+  );
+}
+
+function LyricsView({ track, transport }: LyricsDetailProps) {
+  const trackId = track.id;
+  const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  const activeTrack = playingTrack?.id === trackId;
   const entry = useSyncExternalStore(
     useLyricsStore.subscribe,
     () => useLyricsStore.getState().get(trackId),
     () => useLyricsStore.getState().get(trackId),
   );
   const lyricExtra = useLyricsPrefs((state) => state.lyricExtra);
+  const prefsEpoch = useLyricsPrefs((state) => state.prefsEpoch);
   const cycleLyricExtra = useLyricsPrefs((state) => state.cycleLyricExtra);
-  const position = usePlayerPosition(trackId);
+  const playerPosition = usePlayerPosition(transport ? null : trackId);
+  const position = transport?.position ?? playerPosition;
   const active = activeLrcIndex(entry.lines ?? [], position);
   const started = startedLrcIndex(entry.lines ?? [], position);
   const listRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLButtonElement>(null);
-  const [coverFailed, setCoverFailed] = useState(false);
   /** 用户刚点过某句：短暂关掉自动跟滚，避免立刻又滚回当前句。 */
   const userSeekUntilRef = useRef(0);
 
@@ -93,7 +119,9 @@ export function LyricsView({ track }: { track: Track | null }) {
   const layer = effectiveExtra(lyricExtra, hasMeaning, hasRomaji);
   const canCycle = hasMeaning || hasRomaji;
 
-  useEffect(() => setCoverFailed(false), [trackId]);
+  useEffect(() => {
+    void useLyricsStore.getState().ensure(track, { cacheOnly: true });
+  }, [trackId, prefsEpoch]);
 
   useEffect(() => {
     if (performance.now() < userSeekUntilRef.current) return;
@@ -104,24 +132,12 @@ export function LyricsView({ track }: { track: Track | null }) {
     list.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   }, [active, trackId]);
 
-  if (!track) {
-    return <div className="kd-lyrics" />;
-  }
-
   return (
-    <div className="kd-lyrics">
-      <LyricsHead
-        key={track.id}
-        track={track}
-        platform={entry.meta?.platform}
-        matching={!!entry.inflight}
-        onSource={platform => void useLyricsStore.getState().ensure(track, { platform })}
-        coverFailed={coverFailed}
-        onCoverFail={() => setCoverFailed(true)}
-        layer={layer}
-        canCycle={canCycle}
-        onCycle={() => cycleLyricExtra(hasMeaning, hasRomaji)}
-      />
+    <div className="kd-lyrics" data-has-content={lines.length > 0 || !!entry.error || entry.status === "error" ? "true" : undefined}>
+      <div className="kd-lyrics-embedded-tools">
+        <LyricsSourcePicker platform={entry.meta?.platform} disabled={!activeTrack && !transport} matching={!!entry.inflight} onSelect={platform => void useLyricsStore.getState().ensure(track, { platform })} />
+        {canCycle ? <button type="button" className="kd-lyrics-layer" title={lyricExtraTitle(layer)} aria-label={lyricExtraTitle(layer)} onClick={() => cycleLyricExtra(hasMeaning, hasRomaji)}>{lyricExtraLabel(layer)}</button> : null}
+      </div>
       <div className="kd-lyrics-stage">
         {entry.error || entry.status === "error" ? <p className="kd-lyrics-empty" role="alert">{entry.error || "歌词暂时不可用"}</p> : null}
         <div ref={listRef} className="kd-lyrics-scroll" aria-live="polite">
@@ -142,10 +158,13 @@ export function LyricsView({ track }: { track: Track | null }) {
                 data-active={index === active ? "true" : undefined}
                 data-past={past ? "true" : undefined}
                 data-dist={String(Math.min(distance, 4))}
-                title={`跳到 ${formatStamp(line.time)}`}
+                title={activeTrack || transport ? `跳到 ${formatStamp(line.time)}` : undefined}
+                disabled={!activeTrack && !transport}
                 onClick={() => {
+                  if (!activeTrack && !transport) return;
                   userSeekUntilRef.current = performance.now() + 900;
-                  seekToLyric(track.id, line.time);
+                  if (transport) transport.seek(line.time);
+                  else seekToLyric(track.id, line.time);
                 }}
               >
                 <span className="kd-lyrics-line-text">{line.text}</span>
@@ -165,59 +184,4 @@ function formatStamp(seconds: number): string {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-function LyricsHead({
-  track,
-  platform,
-  matching,
-  onSource,
-  coverFailed,
-  onCoverFail,
-  layer,
-  canCycle,
-  onCycle,
-}: {
-  track: Track;
-  platform?: string;
-  matching: boolean;
-  onSource(platform: LyricsEngine): void;
-  coverFailed: boolean;
-  onCoverFail(): void;
-  layer: LyricsExtra;
-  canCycle: boolean;
-  onCycle(): void;
-}) {
-  // 在线试听使用负 id，并不在曲库 cover 路由里。继续请求 `/library/cover/-1`
-  // 只会得到一轮必然失败的 HTTP；封面应直接复用试听来源的旁路元数据。
-  const cover = isStreamTrack(track)
-    ? streamCoverUrl(track)
-    : api.coverUrl(track.id, track.modified_at);
-  return (
-    <header className="kd-lyrics-head" data-toggles={canCycle ? "true" : undefined}>
-      <div className="kd-lyrics-cover" aria-hidden="true">
-        {cover && !coverFailed ? (
-          <img src={cover} alt="" onError={onCoverFail} />
-        ) : (
-          <span className="kd-lyrics-cover-fallback" />
-        )}
-      </div>
-      <div className="kd-lyrics-head-copy">
-        <div className="kd-lyrics-head-title">{track.title || track.filename}</div>
-        <div className="kd-lyrics-head-artist">{track.artist || "未知艺人"}</div>
-        <div className="kd-lyrics-head-source"><LyricsSourcePicker platform={platform} matching={matching} onSelect={onSource} /></div>
-      </div>
-      {canCycle ? (
-        <button
-          type="button"
-          className="kd-lyrics-layer"
-          title={lyricExtraTitle(layer)}
-          aria-label={lyricExtraTitle(layer)}
-          onClick={onCycle}
-        >
-          {lyricExtraLabel(layer)}
-        </button>
-      ) : null}
-    </header>
-  );
 }

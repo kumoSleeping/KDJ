@@ -196,18 +196,6 @@ impl DesktopPlayerHandle {
         }
     }
 
-    fn submit(&self, command_id: u64, command: PlaybackCommand) -> Result<CommandAck, String> {
-        self.coordinator.submit_with_id(command_id, command)
-    }
-
-    fn submit_control(&self, command: PlaybackCommand) -> Result<ControlAck, String> {
-        self.coordinator.submit_control(command)
-    }
-
-    fn snapshot(&self) -> Result<PlaybackSnapshot, String> {
-        self.coordinator.snapshot()
-    }
-
     pub fn shutdown(&self) {
         self.coordinator.shutdown();
     }
@@ -216,38 +204,48 @@ impl DesktopPlayerHandle {
 /// Installs the event listener before requesting this snapshot on the frontend. The snapshot and
 /// every later event carry one monotonic sequence, so crossing Tauri channels cannot rewind UI.
 #[tauri::command]
-pub fn playback_initialize(
+pub async fn playback_initialize(
     player: tauri::State<'_, DesktopPlayerHandle>,
 ) -> Result<PlaybackSnapshot, String> {
-    player.snapshot()
+    playback_state(player).await
 }
 
 /// Returns as soon as the coordinator accepts and publishes the command. Decode, pre-read, seek
 /// preparation and DJ handoff continue as owned worker/actor continuations and never hold invoke.
+/// ACK waits run on the blocking pool, never on the WebView/UI thread or an async executor worker.
 #[tauri::command]
-pub fn playback_command(
+pub async fn playback_command(
     player: tauri::State<'_, DesktopPlayerHandle>,
     command_id: u64,
     command: PlaybackCommand,
 ) -> Result<CommandAck, String> {
-    player.submit(command_id, command)
+    let coordinator = Arc::clone(&player.coordinator);
+    tauri::async_runtime::spawn_blocking(move || coordinator.submit_with_id(command_id, command))
+        .await
+        .map_err(|error| format!("等待播放命令失败：{error}"))?
 }
 
 /// Continuous TEMPO/mixer controls. They share the actor thread but must not consume frontend
 /// command IDs or wait behind load/seek acknowledgements.
 #[tauri::command]
-pub fn playback_control(
+pub async fn playback_control(
     player: tauri::State<'_, DesktopPlayerHandle>,
     command: PlaybackCommand,
 ) -> Result<ControlAck, String> {
-    player.submit_control(command)
+    let coordinator = Arc::clone(&player.coordinator);
+    tauri::async_runtime::spawn_blocking(move || coordinator.submit_control(command))
+        .await
+        .map_err(|error| format!("等待播放实时控制失败：{error}"))?
 }
 
 #[tauri::command]
-pub fn playback_state(
+pub async fn playback_state(
     player: tauri::State<'_, DesktopPlayerHandle>,
 ) -> Result<PlaybackSnapshot, String> {
-    player.snapshot()
+    let coordinator = Arc::clone(&player.coordinator);
+    tauri::async_runtime::spawn_blocking(move || coordinator.snapshot())
+        .await
+        .map_err(|error| format!("等待播放状态失败：{error}"))?
 }
 
 /// Return only the detailed source-time window needed by the six-second Manager rail.

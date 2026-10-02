@@ -22,6 +22,7 @@ import type {
   UpdateProgress,
 } from "../types";
 import { djEngine } from "./djMix";
+import { captureDiagnostic } from "./diagnostics";
 
 declare global {
   interface Window {
@@ -31,7 +32,7 @@ declare global {
      * `@tauri-apps/api/core` 的 invoke 本身也就是转发到这里。
      */
     __TAURI_INTERNALS__?: {
-      invoke: <T>(cmd: string, args?: Record<string, unknown>, options?: unknown) => Promise<T>;
+      readonly invoke: <T>(cmd: string, args?: Record<string, unknown>, options?: unknown) => Promise<T>;
     };
   }
 }
@@ -67,10 +68,11 @@ interface BridgeInfo {
   platform: string;
 }
 
-function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const internals = window.__TAURI_INTERNALS__;
-  if (!internals) return Promise.reject(new Error(`不在 Tauri 环境里，无法调用 ${cmd}`));
-  return internals.invoke<T>(cmd, args ?? {});
+  if (!internals) throw new Error(`不在 Tauri 环境里，无法调用 ${cmd}`);
+  try { return await internals.invoke<T>(cmd, args ?? {}); }
+  catch (error) { captureDiagnostic("native", cmd, error); throw error; }
 }
 
 /**

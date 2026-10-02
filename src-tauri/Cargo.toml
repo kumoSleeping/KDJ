@@ -14,12 +14,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }
+# Already locked through the native stack; compile only our macOS RFCOMM bridge.
+cc = "=1.4.0"
 
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.22"
 kdj-core = { version = "1.0.2-rc8", path = "../crates/kdj-core", features = ["rustls-ring"] }
 kdj-library = { version = "1.0.2-rc8", path = "../crates/kdj-library" }
+kdj-analysis = { version = "1.0.2-rc8", path = "../crates/kdj-analysis" }
 kdj-providers = { version = "1.0.2-rc8", path = "../crates/kdj-providers" }
 kdj-server = { version = "1.0.2-rc8", path = "../crates/kdj-server", default-features = false }
 rand = "0.10.2"
@@ -38,7 +41,7 @@ serde_json = "1.0"
 # The mobile native-audio plugin must not re-enable Tauri defaults through feature unification.
 tauri = { version = "2.11", default-features = false, features = [
   "wry", "compression", "common-controls-v6", "x11", "dbus",
-  "macos-private-api", "unstable",
+  "macos-private-api", "unstable", "protocol-asset",
 ] }
 tauri-plugin-opener = "2.5"
 tokio = { version = "1.53.1", features = ["sync", "time"] }
@@ -54,6 +57,8 @@ semver = "1"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["blocking"] }
 midir = "0.11"
+# Reuse the player's native audio backend for explicitly selected VJ inputs.
+cpal = "=0.18.1"
 clap = { version = "4.5", features = ["derive"] }
 tauri-plugin-dialog = "2.7"
 
@@ -64,7 +69,13 @@ tauri-plugin-deep-link = "2.4.9"
 winreg = "0.55"
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_Devices_Display",
+  "Win32_Devices_Bluetooth",
+  "Win32_Networking_WinSock",
+  "Win32_System_Com",
+  "Win32_Graphics_Gdi",
   "Win32_System_Console",
+  "Win32_Storage_FileSystem",
   "Win32_UI_WindowsAndMessaging",
 ] }
 
@@ -76,6 +87,14 @@ drag = "=2.1.1"
 # YouTube WebPO 在一个无 Tauri IPC、非持久的系统 WKWebView 中运行。复用 Tauri 已经
 # 链入的 WebKit/Objective-C 绑定，不引入 JS 引擎或 Node sidecar。
 block2 = "0.6.2"
+dispatch2 = "0.3.0"
+libc = "0.2"
+objc2-core-audio = { version = "=0.3.2", default-features = false, features = ["std", "AudioHardware", "HostTime", "objc2-core-audio-types"] }
+objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = ["std", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-media"] }
+objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "CMBase", "CMSampleBuffer", "CMBlockBuffer", "CMFormatDescription", "CMTime", "CMSync", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["std", "libc", "CGDirectDisplay", "CGDisplayConfiguration", "CGError"] }
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSApplication",
@@ -90,6 +109,9 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSArray",
   "NSData",
+  "NSDictionary",
+  "NSValue",
+  "NSUUID",
   "NSError",
   "NSObject",
   "NSProcessInfo",

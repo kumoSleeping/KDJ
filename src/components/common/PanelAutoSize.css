@@ -1,0 +1,63 @@
+/* Portable cards own their content height. Dock cells and saved window bounds do not stretch them. */
+.kd-panel-slot[data-auto-height] {
+  box-sizing: border-box;
+  /* Inline-size query containers have no intrinsic width. Keep a usable
+     baseline before the dock solver mounts, and when a card changes docks. */
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  aspect-ratio: auto !important;
+}
+.kd-panel-slot[data-auto-height] > :is(.kd-panel, .kd-track-preview-eq, .kd-track-preview-waveform),
+.kd-panel-slot[data-auto-height] > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  box-sizing: border-box;
+  height: auto !important;
+  min-height: 0 !important;
+  margin: 0;
+}
+.kd-panel-slot[data-auto-height] .kd-panel-head { flex: none; }
+.kd-panel-slot[data-auto-height][data-optimized-panel] {
+  height: var(--kd-auto-panel-height, auto) !important;
+  max-height: var(--kd-auto-panel-limit, none) !important;
+  overflow: auto;
+}
+.kd-panel-slot[data-auto-height][data-optimized-panel] > :is(.kd-panel, .kd-track-preview-eq, .kd-track-preview-waveform),
+.kd-panel-slot[data-auto-height][data-optimized-panel] > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
+  height: var(--kd-auto-panel-height, auto) !important;
+}
+.kd-panel-slot[data-auto-height][data-panel-id="control"] .kd-manager-mixer-layout,
+.kd-panel-slot[data-auto-height][data-panel-id="control"] .kd-manager-knob-stack {
+  flex: none;
+  height: auto !important;
+}
+.kd-panel-slot[data-auto-height][data-panel-id="control"] .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+  min-width: 0;
+}
+.kd-panel-slot[data-auto-height][data-panel-id="waveform"] { container-type: inline-size; }
+.kd-panel-slot[data-auto-height][data-panel-id="waveform"] .kd-manager-scroll-wave {
+  flex: none;
+  height: var(--kd-auto-content-height, clamp(5rem, 22cqi, 8rem)) !important;
+  min-height: 0;
+}
+.kd-panel-slot[data-auto-height][data-panel-id="lyrics"] .kd-lyrics[data-has-content] {
+  flex: none;
+  height: var(--kd-auto-content-height, min(20rem, 34dvh)) !important;
+  min-height: 0;
+}
+/* Only the picture has an aspect ratio; its surrounding card hugs the picture and heading. */
+.kd-panel-slot[data-auto-height] :is(.kd-viz-preview, .kd-preview-frame:not([data-fullscreen="true"])) {
+  --kd-layout-ratio: var(--kd-preview-ratio, 1.777777778);
+}
+.kd-panel-slot[data-auto-height] .kd-preview-frame:not([data-fullscreen="true"]),
+.kd-panel-slot[data-auto-height] .kd-viz-preview .kd-pip-float-stage {
+  aspect-ratio: var(--kd-preview-ratio, 1.777777778) !important;
+}

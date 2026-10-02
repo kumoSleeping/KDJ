@@ -1,7 +1,7 @@
 import type { Waveform as WaveformData } from "../../types";
 import { waveformSourceRange } from "../../lib/waveformViewport";
 import { waveformEdgeScales } from "../../lib/waveformRenderPolicy";
-import { themeRgb, waveBandRgb } from "../../lib/themePack";
+import { createWaveBandMapper, themeRgb } from "../../lib/themePack";
 import {
   PERFORMANCE_DETAIL_BACKGROUND,
   PERFORMANCE_DETAIL_CONTRAST,
@@ -111,6 +111,10 @@ function drawTargetDetailColumns(
   ctx.clearRect(0, 0, width, height);
   const localSourceColumns = count * spanSec / sourceSpanSec;
   const magnifying = width >= localSourceColumns;
+  const waveBandRgb = createWaveBandMapper();
+  const background = profile === "performance-detail"
+    ? themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND)
+    : PERFORMANCE_DETAIL_BACKGROUND;
 
   for (let x = 0; x < width; x += 1) {
     const t0 = startSec + (x / width) * spanSec;
@@ -197,11 +201,11 @@ function drawTargetDetailColumns(
       : waveformDisplayRgb(sourceR, sourceG, sourceB, displayAmp);
     const display = profile === "performance-detail"
       ? waveformSurfaceContrastRgb(
-        paletteDisplay,
-        themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND),
+        waveBandRgb(paletteDisplay, [sourceR, sourceG, sourceB]),
+        background,
         PERFORMANCE_DETAIL_CONTRAST,
       )
-      : paletteDisplay;
+      : waveBandRgb(paletteDisplay, [sourceR, sourceG, sourceB]);
     const half = Math.max(
       0.5,
       displayAmp * amplitudeScale * availableHalfHeight,
@@ -209,7 +213,7 @@ function drawTargetDetailColumns(
     const top = Math.max(0, Math.round(mid - half));
     const bottom = Math.min(height, Math.round(mid + half));
     ctx.globalAlpha = 1;
-    ctx.fillStyle = `rgb(${waveBandRgb(display).join(",")})`;
+    ctx.fillStyle = `rgb(${display.join(",")})`;
     ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
   }
 }
@@ -230,6 +234,7 @@ function drawReleaseOverviewColumns(
   background: WaveformDisplayRgb,
 ) {
   const columnWidth = cssWidth / width;
+  const waveBandRgb = createWaveBandMapper();
   for (let index = 0; index < width; index += 1) {
     if (!columns.known[index]) continue;
     // A known quiet interval still gets a one-CSS-pixel centre line. Without this floor, low
@@ -247,11 +252,11 @@ function drawReleaseOverviewColumns(
       columns.b[index],
     );
     const [r, g, b] = waveformSurfaceContrastRgb(
-      colour,
+      waveBandRgb(colour, [columns.r[index], columns.g[index], columns.b[index]]),
       background,
       RELEASE_OVERVIEW_CONTRAST,
     );
-    ctx.fillStyle = `rgb(${waveBandRgb([r, g, b]).join(",")})`;
+    ctx.fillStyle = `rgb(${[r, g, b].join(",")})`;
     ctx.fillRect(index * columnWidth, mid - half, columnWidth + 0.01, half * 2);
   }
 }
@@ -458,11 +463,12 @@ export function drawWaveformCanvas(
     ? waveformEdgeScales(columnAmp, columnKnown, 4, 0.02, columns.edgeScale)
     : null;
   if (releaseOverview) {
-    // 两个常量就是默认主题 --kd-panel-inset 的值；主题包改了面板底色，对比度跟着走
-    const background = themeRgb("--kd-panel-inset", typeof document !== "undefined"
+    // Overview wells may differ from input/list wells. Keep contrast calibrated
+    // to the actual backdrop without remapping the signal's frequency colours.
+    const background = themeRgb("--kd-wave-overview-bg", themeRgb("--kd-panel-inset", typeof document !== "undefined"
       && document.documentElement?.dataset.theme === "light"
       ? RELEASE_OVERVIEW_LIGHT_BACKGROUND
-      : RELEASE_OVERVIEW_DARK_BACKGROUND);
+      : RELEASE_OVERVIEW_DARK_BACKGROUND));
     drawReleaseOverviewColumns(
       ctx,
       columns,
@@ -476,6 +482,10 @@ export function drawWaveformCanvas(
     return;
   }
 
+  const waveBandRgb = createWaveBandMapper();
+  const background = performanceDetail
+    ? themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND)
+    : PERFORMANCE_DETAIL_BACKGROUND;
   for (let x = 0; x < width; x += 1) {
     if (!columnKnown[x]) continue;
     let displayAmp = columnAmp[x];
@@ -517,12 +527,12 @@ export function drawWaveformCanvas(
     );
     const [displayR, displayG, displayB] = performanceDetail
       ? waveformSurfaceContrastRgb(
-        paletteDisplay,
-        themeRgb("--kd-wave-detail-bg", PERFORMANCE_DETAIL_BACKGROUND),
+        waveBandRgb(paletteDisplay, [sourceR, sourceG, sourceB]),
+        background,
         PERFORMANCE_DETAIL_CONTRAST,
       )
-      : paletteDisplay;
-    ctx.fillStyle = `rgb(${waveBandRgb([displayR, displayG, displayB]).join(",")})`;
+      : waveBandRgb(paletteDisplay, [sourceR, sourceG, sourceB]);
+    ctx.fillStyle = `rgb(${[displayR, displayG, displayB].join(",")})`;
     // 最小 1px：静音段也留一条中线，否则波形会断成几截看着像坏了
     const half = Math.max(
       0.5,

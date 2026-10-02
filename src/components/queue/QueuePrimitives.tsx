@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
-import { AlertTriangle, Ban, Check, ChevronDown, Clock3, Loader2, Pause, Play, Trash2, Video } from "lucide-react";
+import { AlertTriangle, Ban, Check, Clock3, History, Loader2, Pause, Play, Trash2, Video } from "lucide-react";
 import { Button } from "../common";
+import { Select } from "../common/Select";
 import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
 
 /** Shared queue geometry deliberately retains the established download design tokens. */
@@ -12,9 +13,10 @@ export function QueueList({ children }: { children: ReactNode }) {
 }
 export interface QueueFact { count: number; label: string; tone: string }
 export function QueueOverview({ facts, total, canStart, canSecondary, secondaryLabel, secondaryKind,
-  startTitle, secondaryTitle, onStart, onSecondary }: {
+  startTitle, secondaryTitle, onStart, onSecondary, extraActions }: {
   facts: QueueFact[]; total: number; canStart: boolean; canSecondary: boolean;
-  secondaryLabel: string; secondaryKind: "pause" | "cancel" | "clear";
+  secondaryLabel: string; secondaryKind: "pause" | "cancel" | "clear" | "history";
+  extraActions?: ReactNode;
   startTitle?: string; secondaryTitle?: string; onStart(): void; onSecondary(): void;
 }) {
   return <div className="kd-download-overview">
@@ -26,8 +28,9 @@ export function QueueOverview({ facts, total, canStart, canSecondary, secondaryL
     <div className="kd-download-overview-actions">
       <Button variant="primary" size="sm" disabled={!canStart} title={startTitle} onClick={onStart}><Play size={11} />开始</Button>
       <Button variant="ghost" size="sm" disabled={!canSecondary} title={secondaryTitle} onClick={onSecondary}>
-        {secondaryKind === "pause" ? <Pause size={11} /> : secondaryKind === "cancel" ? <Ban size={11} /> : <Trash2 size={11} />}{secondaryLabel}
+        {secondaryKind === "pause" ? <Pause size={11} /> : secondaryKind === "cancel" ? <Ban size={11} /> : secondaryKind === "history" ? <History size={11} /> : <Trash2 size={11} />}{secondaryLabel}
       </Button>
+      {extraActions}
     </div>
   </div>;
 }
@@ -60,8 +63,8 @@ export function QueueChoice({ value, options, icon, label, disabled, onChange }:
   icon?: ReactNode; label: string; disabled?: boolean; onChange(value: string): void;
 }) {
   return <label className="kd-download-task-quality kd-download-task-quality-control kd-mono" title={label}>
-    {icon}<select value={value} disabled={disabled} aria-label={label} onChange={(event) => onChange(event.currentTarget.value)}>
+    {icon}<Select value={value} disabled={disabled} aria-label={label} onChange={(event) => onChange(event.currentTarget.value)}>
       {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-    </select><ChevronDown size={9} aria-hidden="true" />
+    </Select>
   </label>;
 }

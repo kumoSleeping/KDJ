@@ -1,0 +1,130 @@
+/* The panel reorder grip is a real, reachable caption control in the pink theme. */
+html:root[data-theme-pack="sakulaptop98"] .kd-panel-grip {
+  color: var(--kd-text-body);
+  opacity: .8;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-panel-grip:hover,
+html:root[data-theme-pack="sakulaptop98"] .kd-panel-grip:focus-visible {
+  color: var(--kd-theme);
+  background: var(--s98-face);
+  box-shadow: var(--s98-raised);
+  opacity: 1;
+}
+
+/* Inline preview already has the panel title; don't draw a second title strip over the picture. */
+html:root[data-theme-pack="sakulaptop98"] .kd-viz-panel[data-inline="true"] .kd-viz-preview .kd-pip-float-top {
+  display: none;
+}
+
+/* Visualizer settings sit on the pink panel, with recessed but pink-tinted fields. */
+html:root[data-theme-pack="sakulaptop98"] .kd-viz-panel {
+  --kd-viz-field-bg: color-mix(in srgb, var(--kd-panel) 68%, var(--kd-panel-inset));
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-viz-panel :is(input:not([type=range]):not([type=checkbox]), .kd-select-control) {
+  background: var(--kd-viz-field-bg);
+  border-color: var(--s98-shadow);
+  color: var(--kd-text);
+}
+
+/* Selects share the context-menu window; their triggers retain the Win98 inset field. */
+html:root[data-theme-pack="sakulaptop98"] .kd-select-control {
+  background: var(--kd-panel-inset);
+  border-color: var(--s98-shadow);
+  border-radius: 2px;
+  box-shadow: var(--s98-sunken);
+  color: var(--kd-text);
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-theme-select > .kd-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: var(--s98-sunken);
+  background: var(--kd-panel-inset);
+  color: var(--kd-text);
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-theme-select .kd-select-control {
+  position: relative;
+  padding-right: 1.8rem;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-theme-select .kd-select-control::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  right: 3px;
+  width: 1.25rem;
+  background: var(--s98-face);
+  box-shadow: var(--s98-raised);
+  pointer-events: none;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-theme-select .kd-select-control > svg {
+  position: absolute;
+  z-index: 1;
+  right: 0.4rem;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid {
+  padding: 0.5rem;
+  background: var(--s98-face);
+  box-shadow: var(--s98-raised);
+  font-variant-numeric: tabular-nums;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid[data-compact="true"] {
+  gap: 0.2rem;
+  padding: 0.3rem;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid[data-compact="true"] .kd-camelot-grid-head {
+  min-height: 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  font-size: 0.6rem;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid[data-compact="true"] .kd-camelot-grid-head > span:nth-child(3) {
+  display: none;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid-head strong {
+  color: color-mix(in srgb, var(--kd-key-color) 55%, var(--kd-text));
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid-head {
+  min-height: 1.5rem;
+  padding: 0 0.3rem;
+  border-bottom: 1px solid var(--s98-shadow);
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid-keys {
+  grid-template-rows: repeat(6, minmax(0, 1fr));
+  overflow: hidden;
+  padding: 3px;
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid-key {
+  min-height: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--kd-line-soft);
+  background: color-mix(in srgb, var(--kd-key-color) 40%, var(--kd-panel-inset));
+  box-shadow: none;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid[data-compact="true"] .kd-camelot-grid-key {
+  font-size: 0.6rem;
+  line-height: 1;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-camelot-grid-key[data-current="true"] {
+  color: var(--kd-theme-strong) !important;
+  font-weight: 800;
+}
+/* Focus/current selection includes the title cell itself, not just its descendants. */
+html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr:is([aria-selected="true"], [data-focus="true"]) > td {
+  color: var(--kd-theme-strong);
+  background: transparent;
+  box-shadow: none;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr:is([aria-selected="true"], [data-focus="true"]) :is(.kd-td-strong, .kd-muted, .kd-faint, [data-col="index"], button, a) {
+  color: var(--kd-theme-strong);
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr:is([aria-selected="true"], [data-focus="true"]) .kd-td-strong {
+  font-weight: 800;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr[data-playing="true"] :is(.kd-td-strong, [data-col="index"]) {
+  color: var(--kd-theme);
+  font-weight: 800;
+}

@@ -45,6 +45,7 @@ export type SortOrder = "asc" | "desc";
 const DEFAULT_SORT: TrackSort = "file_created_at";
 /** 「已分析」三态筛选：全部 / 只看已分析 / 只看未分析。 */
 export type AnalyzedFilter = "all" | "yes" | "no";
+export type MediaFilter = "all" | "audio" | "video";
 
 /** 多选点击语义，和访达/资源管理器一致。 */
 export type SelectMode = "replace" | "toggle" | "range";
@@ -56,6 +57,7 @@ export interface LibraryFilter {
   bpmMax: number | null;
   energyMin: number | null;
   analyzed: AnalyzedFilter;
+  media: MediaFilter;
   /** 绝对目录路径；空串 = 不限目录（看全库）。 */
   folder: string;
   /** true = 连子文件夹一起看。 */
@@ -79,6 +81,7 @@ export const DEFAULT_FILTER: LibraryFilter = {
   bpmMax: null,
   energyMin: null,
   analyzed: "all",
+  media: "all",
   folder: "",
   // 「含子级」的开关已从界面删掉：选中一个歌单文件夹时想看的本来就是
   // 它整棵子树里的曲目，做成开关只是把一个没人会关的选项摆在最显眼的位置。
@@ -151,6 +154,11 @@ function errorText(error: unknown): string {
 
 function toTrackSummary(track: Track): TrackSummary {
   return {
+    genre: track.genre,
+    year: track.year,
+    bitrate: track.bitrate,
+    samplerate: track.samplerate,
+    channels: track.channels,
     id: track.id,
     path: track.path,
     filename: track.filename,
@@ -233,6 +241,7 @@ function toQuery(
     bpm_max: filter.bpmMax ?? undefined,
     energy_min: filter.energyMin ?? undefined,
     analyzed: filter.analyzed === "all" ? undefined : filter.analyzed === "yes",
+    media: filter.media === "all" ? undefined : filter.media,
     folder: filter.folder,
     folder_deep:
       filter.folder && !isOutsideFolder(filter.folder) && filter.folderDeep ? true : undefined,

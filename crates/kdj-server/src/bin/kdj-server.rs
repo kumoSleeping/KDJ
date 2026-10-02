@@ -8,8 +8,10 @@ use kdj_core::AppConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))))
+        .with(kdj_server::diagnostics::DiagnosticLayer)
         .init();
 
     let data_dir = std::env::var("KUMODECK_DATA_DIR")

@@ -1,0 +1,25 @@
+{
+  "kdj": 1,
+  "id": "sakulaptop98",
+  "name": "Sakura98",
+  "version": "6.1.9",
+  "camelot": "grid",
+  "author": "Kumo / OpenAI",
+  "modes": [
+    "light"
+  ],
+  "css": "theme.css",
+  "window": {
+    "light": "#efb3c4"
+  },
+  "options": [],
+  "files": {
+    "README.md": "099fbcaf811b97180b5761beccb0fa2b3c1a79917da8bf12baf3bd4c0def525c",
+    "adaptations.css": "72954de3fdeee982f82a02434fe1e0eecea8502ffe79aef0bac878569fc761c4",
+    "licenses/98.css-MIT.txt": "8933005629892c51d896f7591b5e79c39a17617ce678231e4c3aa7d412d2682f",
+    "player.css": "bf3c79374073fbf7edf2716d8e10120037e4de62719d1314c98f7b075bb04761",
+    "surfaces.css": "5e1079262e81eaa76ab10a8dd6be0e292d67882fc10452d57c780962aece5589",
+    "theme.css": "5a936974abdb9e71a70639d267081ae17758105c18b024b58258897820407200",
+    "video.css": "274a5d405470ddcf7934e2c75ab84fd1b165a969100afcf72a5516ac4b527f44"
+  }
+}

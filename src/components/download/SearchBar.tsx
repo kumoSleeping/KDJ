@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { Platform, SearchKind } from "../../types";
+import type { Platform, SearchKind, TrackSummary } from "../../types";
+import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import {
   DEFAULT_PRIORITY,
@@ -37,6 +38,8 @@ export interface SearchPlatformProps {
 
 export interface SearchBarProps extends SearchPlatformProps {
   query: string;
+  presetTrack?: TrackSummary | null;
+  playingTrack?: TrackSummary | null;
   searchKind: SearchKind;
   searchKinds: readonly SearchKind[];
   onSearchKindChange(kind: SearchKind): void;
@@ -49,6 +52,7 @@ export interface SearchBarProps extends SearchPlatformProps {
   onTips(): void;
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
+  presentation?: "bar" | "detail";
   /**
    * 外部触发扫光（如 Explore 代填提交）。数值变化即重放；
    * burstTone：单平台品牌色 / 多平台彩虹（与手动提交同一规则）。
@@ -97,7 +101,6 @@ export const SEARCH_TIPS = [
   "可通过系统媒体控制快捷键、Android 控制中心或灵动岛操控播放哟~",
   "不喜欢视频小窗？播放视频时，点击与歌词共用的按钮关闭小窗!",
   "视频支持系统级小窗! 详情界面也有视频播放哟~",
-  "拖动详情面板左上角的把手，可以自由调整板块顺序。",
   "为了无缝跳转, 我们实现了一个播放器引擎!",
   "复制粘贴多选快捷键都可用哦, 也可以右键选择。",
   "按 Shift + Enter 可以在搜索框里换行哦～",
@@ -197,6 +200,8 @@ function SearchTipCarousel({
 
 export function SearchBar({
   query,
+  presetTrack,
+  playingTrack,
   searchKind,
   searchKinds,
   onSearchKindChange,
@@ -207,11 +212,14 @@ export function SearchBar({
   tipsOpen,
   onTips,
   stacked = false,
+  presentation = "bar",
   burstNonce = 0,
   burstTone = "rainbow",
   ...platformProps
 }: SearchBarProps) {
+  const detail = presentation === "detail";
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const presets = useSearchPresets({ query, onQueryChange, track: presetTrack, playingTrack, inputRef });
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
@@ -271,12 +279,14 @@ export function SearchBar({
   return (
     <form
       className="kd-search-command"
+      data-presentation={presentation}
       data-stacked={stacked || undefined}
       onSubmit={(event) => {
         event.preventDefault();
         fireSubmit();
       }}
     >
+      {detail && <label className="kd-detail-search-label" htmlFor={presets.aria.id}>搜索内容</label>}
       <div
         className="kd-searchbar kd-grow"
         data-batch={batch || undefined}
@@ -310,7 +320,7 @@ export function SearchBar({
           )}
           <SearchPlatforms
             {...platformProps}
-            collapsed={stacked && !platformsExpanded}
+            collapsed={!detail && stacked && !platformsExpanded}
             onExpand={() => setPlatformsExpanded(true)}
           />
         </div>
@@ -336,10 +346,13 @@ export function SearchBar({
             rows={1}
             value={query}
             placeholder=""
-            aria-label="关键词、单曲链接或歌单链接，支持多行"
-            title="搜索（Enter；Shift + Enter 换行）"
+            aria-label="关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"
+            role="combobox"
+            {...presets.aria}
+            title="搜索（Enter；Shift + Enter 换行；@ 歌曲名）"
             onFocus={() => setInputFocused(true)}
-            onBlur={() => setInputFocused(false)}
+            onBlur={event => { setInputFocused(false); presets.onBlur(event.relatedTarget); }}
+            onSelect={presets.syncCaret}
             onCompositionStart={() => {
               composingRef.current = true;
             }}
@@ -349,15 +362,17 @@ export function SearchBar({
             onKeyDown={(event) => {
               const nativeEvent = event.nativeEvent;
               const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
+              if (!composing && presets.onKeyDown(event)) return;
               if (event.key === "Enter" && !event.shiftKey && !composing && canSubmit) {
                 event.preventDefault();
                 fireSubmit();
               }
             }}
-            onChange={(event) => onQueryChange(event.target.value)}
+            onChange={(event) => { onQueryChange(event.target.value); presets.syncCaret(); }}
           />
         </div>
       </div>
+      {presets.menu}
     </form>
   );
 }
@@ -565,6 +580,7 @@ export function SearchPlatforms({
               // 真正的点击在 pointerup 里处理；这里挡住 form 提交式 click。
               event.preventDefault();
               if (collapsed) onExpand?.();
+              else if (event.detail === 0) onTogglePlatform(item.id);
             }}
           >
             <PlatformMark id={item.id} />

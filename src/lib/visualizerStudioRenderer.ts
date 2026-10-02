@@ -6,6 +6,7 @@ import { clamp, lyricIndex, parseVisualizerLyrics, prepareStudioMotion, sampleSt
 
 const LYRIC_ACTIVE_SCALE = 1.2;
 const LYRIC_PREVIEW_SCALE = .88;
+const PREVIEW_SHADOW_STEPS = [[2, .046], [1, .17], [.5, .34]] as const;
 
 interface RollingLyric extends LyricLine { start: number; end: number }
 interface LyricCard { canvas: HTMLCanvasElement }
@@ -14,6 +15,7 @@ interface ClockLayer { canvas: HTMLCanvasElement; context: CanvasRenderingContex
 interface LyricViewport {
   canvas: HTMLCanvasElement; context: CanvasRenderingContext2D; mask: CanvasGradient;
   top: number; padding: number; leadY: number; gap: number; size: number; cardHeight: number;
+  settledKey?: string;
 }
 export interface PreparedStudio {
   project: VisualizerProject; timeline: VisualizerFeatureTimeline; motion: StudioMotion[]; lyrics: LyricLine[];
@@ -25,6 +27,8 @@ export interface PreparedStudio {
   arcBarWidth: number; arcLengths: Float64Array; discLayers: DiscLayers | null; clockLayer: ClockLayer | null;
   lyricCards: Map<number, LyricCard>; lyricFlow: RollingLyric[]; lyricViewport: LyricViewport | null;
   contentScale: number; watermark: HTMLCanvasElement | null;
+  features: VisualizerFeatureFrame; smallValues: Float64Array; smallSmooth: Float64Array;
+  preview: boolean;
 }
 const imageLayers = new WeakMap<VisualizerImage, Map<string, HTMLCanvasElement>>();
 function cachedLayer(image: VisualizerImage, key: unknown[], render: () => HTMLCanvasElement): HTMLCanvasElement {
@@ -175,7 +179,10 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
   });
   const arcBarWidth = arc.radius * arc.angle * 2 * 1.24 / arcBars.length;
   const discLayers = p.scene.disc.mode === "hidden" ? null : prepareDiscLayers(p, discSource, cover, size);
-  return { project: p, timeline, ...prepareTimeline(timeline), lyrics, lyricCards: new Map(), lyricFlow, lyricViewport, contentScale, left, reflection, leftWidth, right, rightX, disc, cover, ...lightSprites, palette, leftShade, rail, railX, information, arcBars, arcBarWidth, arcLengths: new Float64Array(arcBars.length), discLayers, clockLayer: null, watermark };
+  const smallCount = Math.max(20, Math.round(48 * Math.min(1, contentScale)));
+  return { project: p, timeline, ...prepareTimeline(timeline), lyrics, lyricCards: new Map(), lyricFlow, lyricViewport, contentScale, left, reflection, leftWidth, right, rightX, disc, cover, ...lightSprites, palette, leftShade, rail, railX, information, arcBars, arcBarWidth, arcLengths: new Float64Array(arcBars.length), discLayers, clockLayer: null, watermark,
+    features: { bands: [], bass: 0, rms: 0, onset: 0 }, smallValues: new Float64Array(smallCount), smallSmooth: new Float64Array(smallCount),
+    preview: previewWidth !== undefined };
 }
 
 /** Circular segment of the large right-hand disc; all rails and bars share it.
@@ -344,6 +351,17 @@ function paintArcRail(c: CanvasRenderingContext2D, p: VisualizerProject): void {
   }
   c.restore();
 }
+/** Three faint expanded strokes approximate the soft preview shadow without a
+ * per-frame blur surface. Export retains the original native shadow raster. */
+function paintPreviewSpectrumShadow(c: CanvasRenderingContext2D, path: Path2D, width: number, blur: number, rgb: string, opacity: number): void {
+  c.save(); c.shadowColor = "transparent"; c.lineCap = c.lineJoin = "round";
+  // Native shadow blur is in device pixels, even when content is scaled.
+  const transform = c.getTransform(), zoom = Math.hypot(transform.a, transform.b) || 1;
+  for (const [spread, alpha] of PREVIEW_SHADOW_STEPS) {
+    c.strokeStyle = `rgba(${rgb},${alpha * opacity})`; c.lineWidth = width + blur * spread / zoom; c.stroke(path);
+  }
+  c.restore();
+}
 function paintArc(c: CanvasRenderingContext2D, s: PreparedStudio, f: VisualizerFeatureFrame): void {
   const p = s.project, { width: w, height: h } = p.scene.canvas;
   c.drawImage(s.rail, s.railX, 0); c.save();
@@ -357,16 +375,18 @@ function paintArc(c: CanvasRenderingContext2D, s: PreparedStudio, f: VisualizerF
     // Low/mid bands occupy the middle of the arc, with treble toward both ends.
     // Gentle edge attenuation balances the composition without inventing beats.
     for (const cyan of [false, true]) {
-      c.beginPath();
+      const path = new Path2D();
       for (let i = 0; i < count; i++) {
         const [x, y, nx, ny] = s.arcBars[i].point, length = s.arcLengths[i];
-        if (!cyan) { c.moveTo(x - nx * h * .026, y - ny * h * .026); c.lineTo(x - nx * (h * .026 + length * .34), y - ny * (h * .026 + length * .34)); }
-        c.moveTo(x + nx * h * .012, y + ny * h * .012);
-        c.lineTo(x + nx * (length * (cyan ? .68 : 1) + h * .012), y + ny * (length * (cyan ? .68 : 1) + h * .012));
+        if (!cyan) { path.moveTo(x - nx * h * .026, y - ny * h * .026); path.lineTo(x - nx * (h * .026 + length * .34), y - ny * (h * .026 + length * .34)); }
+        path.moveTo(x + nx * h * .012, y + ny * h * .012);
+        path.lineTo(x + nx * (length * (cyan ? .68 : 1) + h * .012), y + ny * (length * (cyan ? .68 : 1) + h * .012));
       }
       c.strokeStyle = cyan ? p.look.accent : "rgba(255,255,255,.97)";
-      c.shadowColor = "rgba(6,26,40,.5)"; c.shadowBlur = cyan ? 0 : h * .004;
-      c.lineWidth = Math.max(1, s.arcBarWidth * (cyan ? .34 : .70)); c.stroke();
+      c.lineWidth = Math.max(1, s.arcBarWidth * (cyan ? .34 : .70));
+      if (!cyan && s.preview) paintPreviewSpectrumShadow(c, path, c.lineWidth, h * .004, "6,26,40", .5);
+      c.shadowColor = s.preview ? "transparent" : "rgba(6,26,40,.5)"; c.shadowBlur = cyan || s.preview ? 0 : h * .004;
+      c.stroke(path);
     }
   }
   c.restore();
@@ -376,7 +396,8 @@ function paintSmallSpectrum(c: CanvasRenderingContext2D, s: PreparedStudio, f: V
   const gain = p.look.spectrumGain * s.spectrumScale;
   const lyricLayout = p.lyrics.mode !== "off" && s.lyricFlow.length > 0;
   const { width: w, height: h } = p.scene.canvas, x = w * .066 * s.contentScale, width = w * .376 * s.contentScale, base = h * (lyricLayout ? .935 : .925), amp = h * (lyricLayout ? .105 : .145), count = Math.max(20, Math.round(48 * Math.min(1, s.contentScale)));
-  const values = Array.from({ length: count }, (_, i) => spectrumValue(f, i / (count - 1), gain));
+  const values = s.smallValues;
+  for (let i = 0; i < count; i++) values[i] = spectrumValue(f, i / (count - 1), gain);
   c.save(); c.lineJoin = "round"; c.lineCap = "round";
   // A thin, unfilled history with a diffused echo, never a filled volume meter.
   if (p.look.energyLine) {
@@ -394,21 +415,26 @@ function paintSmallSpectrum(c: CanvasRenderingContext2D, s: PreparedStudio, f: V
     c.strokeStyle = "#f9fcff"; c.lineWidth = Math.max(1.3, h * .004); c.stroke();
   }
   if (mode !== "line") {
-    c.beginPath();
+    const path = new Path2D();
     for (let i = 0; i < count; i++) {
       const height = Math.max(h * .002, values[i] * amp);
-      c.rect(x + i * width / count, base - height, width / count * .68, height);
+      path.rect(x + i * width / count, base - height, width / count * .68, height);
     }
-    // One shadow rasterization for the entire spectrum, not one blur per bar.
-    c.fillStyle = "rgba(255,255,255,.97)"; c.shadowColor = "rgba(15,31,38,.65)"; c.shadowBlur = h * .002; c.shadowOffsetY = h * .002; c.fill();
+    if (s.preview) {
+      c.save(); const transform = c.getTransform(), zoom = Math.hypot(transform.a, transform.b) || 1;
+      c.translate(0, h * .002 / zoom); paintPreviewSpectrumShadow(c, path, 0, h * .002, "15,31,38", .65); c.restore();
+    }
+    // Full-resolution sharp bars, with native shadows retained for export.
+    c.fillStyle = "rgba(255,255,255,.97)"; c.shadowColor = s.preview ? "transparent" : "rgba(15,31,38,.65)"; c.shadowBlur = s.preview ? 0 : h * .002; c.shadowOffsetY = s.preview ? 0 : h * .002; c.fill(path);
     c.shadowBlur = 0; c.shadowOffsetY = 0;
   }
   if (mode !== "bars") {
-    const smooth = values.map((_, i) => {
+    const smooth = s.smallSmooth;
+    for (let i = 0; i < count; i++) {
       let sum = 0;
       for (let n = -2; n <= 2; n++) sum += values[clamp(i + n, 0, count - 1)] * (3 - Math.abs(n));
-      return base - amp * sum / 9 * .72 - h * .001;
-    });
+      smooth[i] = base - amp * sum / 9 * .72 - h * .001;
+    }
     c.beginPath(); c.moveTo(x, smooth[0]);
     for (let i = 1; i < count; i++) {
       const px = x + (i - 1) / (count - 1) * width, next = x + i / (count - 1) * width;
@@ -451,6 +477,7 @@ function paintLights(c: CanvasRenderingContext2D, s: PreparedStudio, t: number, 
   }
   c.restore();
 }
+
 function prepareLyricViewport(p: VisualizerProject, contentScale: number, flow: RollingLyric[]): LyricViewport {
   const { width: w, height: h } = p.scene.canvas;
   // Keep the resting layout unchanged; extend only the exit area above it so
@@ -577,6 +604,13 @@ function paintRollingLyrics(c: CanvasRenderingContext2D, s: PreparedStudio, time
   const previewAlpha = .78;
   const currentScale = LYRIC_PREVIEW_SCALE + (LYRIC_ACTIVE_SCALE - LYRIC_PREVIEW_SCALE) * enter;
   const lastFade = next ? 0 : smooth((time - Math.max(cue.start, Math.min(cue.end, studioDuration(s.timeline) - .65))) / .65);
+  // The viewport is immutable between cue transitions. Reuse its masked bitmap,
+  // including the dimmed pre-cue state, but invalidate on seeks and final fade.
+  const settledKey = progress === 1 && (lastFade === 0 || lastFade === 1) ? `${index}:${time >= cue.start}:${lastFade}` : undefined;
+  if (settledKey !== undefined && viewport.settledKey === settledKey) {
+    c.drawImage(viewport.canvas, w * .04 * s.contentScale, viewport.top); return;
+  }
+  viewport.settledKey = settledKey;
   const layer = viewport.context, x = Math.round(w * .004 * s.contentScale), y = viewport.leadY;
   const oldStep = (previous?.canvas.height ?? current.canvas.height) * LYRIC_ACTIVE_SCALE + viewport.gap;
   const step = current.canvas.height * currentScale + viewport.gap;
@@ -657,7 +691,7 @@ function paintClocks(c: CanvasRenderingContext2D, s: PreparedStudio, t: number):
 export function drawStudioFrame(c: CanvasRenderingContext2D, s: PreparedStudio, seconds: number): void {
   const p = s.project, { width: w, height: h } = p.scene.canvas;
   const t = clamp(Number.isFinite(seconds) ? seconds : 0, 0, studioDuration(s.timeline));
-  const m = sampleStudioMotion(s.motion, t, s.timeline.fps), f = sampleStudioFeatures(s.timeline, t);
+  const m = sampleStudioMotion(s.motion, t, s.timeline.fps), f = sampleStudioFeatures(s.timeline, t, s.features);
   const shift = 0;
   c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = "source-over"; c.shadowBlur = 0;
   c.fillStyle = "#ecf1eb"; c.fillRect(0, 0, w, h);

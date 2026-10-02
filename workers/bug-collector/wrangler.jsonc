@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kdj-bug-collector",
+  "account_id": "50f4c50f5cf3266c891dd98277ac3d72",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-28",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "bug.kdj.kumo.ltd", "custom_domain": true }],
+  "d1_databases": [{ "binding": "DB", "database_name": "kdj-bug-reports", "database_id": "582c4af7-93b1-4879-8996-50fd8f8b62ed", "migrations_dir": "migrations" }],
+  "ratelimits": [
+    { "name": "UPLOAD_LIMIT", "namespace_id": "1849202601", "simple": { "limit": 5, "period": 60 } },
+    { "name": "GLOBAL_LIMIT", "namespace_id": "1849202602", "simple": { "limit": 100, "period": 60 } }
+  ],
+  "triggers": { "crons": ["17 3 * * *"] },
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false }, "traces": { "enabled": true, "head_sampling_rate": 0.01 } },
+  "rules": [{ "type": "Text", "globs": ["**/*.html", "**/*.browser.js"], "fallthrough": false }]
+}

@@ -844,6 +844,7 @@ impl CompositionManager {
             tokio::spawn(async move {
                 let result = manager.work(&id, generation, &cancel).await;
                 if let Err(error) = result {
+                    if !cancel.is_cancelled() { tracing::error!(job = %id, error = %format!("{error:#}"), "合成导出失败"); }
                     let reported = manager.update(&id, generation, |r| {
                         r.task.released = false;
                         r.task.busy = false;

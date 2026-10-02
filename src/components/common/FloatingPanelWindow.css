@@ -1,0 +1,38 @@
+.kd-panel.kd-internal-window {
+  position: fixed;
+  z-index: 110;
+  top: 80px;
+  left: max(8px, calc(100vw - 648px));
+  display: flex;
+  flex-direction: column;
+  width: 620px;
+  max-width: calc(100vw - 16px);
+  max-height:calc(100vh - 16px);
+  min-height: 0;
+  box-sizing: border-box;
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  box-shadow:var(--kd-shadow-float, 0 10px 36px #0005);
+  font-size: var(--kd-size-xs);
+}
+.kd-panel.kd-internal-window > .kd-internal-window-head { flex:none; gap:8px; height:32px; min-height:32px; box-sizing:border-box; padding:4px 8px; background:var(--kd-panel-inset); color:var(--kd-text); border-bottom:1px solid var(--kd-line); text-transform:none; letter-spacing:normal; font-size:var(--kd-size-xs); line-height:1.2; cursor:move; touch-action:none; user-select:none; }
+.kd-internal-window-head > strong { flex:0 0 auto; max-width:60%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kd-internal-window-head > span { flex:1 1 0; color:var(--kd-muted); font-weight:400; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kd-panel.kd-internal-window > .kd-internal-window-head > button { flex:none; margin-left:auto; display:flex; align-items:center; justify-content:center; width:20px; min-width:20px; height:20px; min-height:20px; padding:0; }
+.kd-internal-window > .kd-internal-window-body { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; padding:6px; }
+.kd-internal-window button { color:var(--kd-text); font:inherit; cursor:pointer; }
+.kd-internal-window button[aria-pressed="true"] { color:var(--kd-theme); background:transparent; border-color:transparent; box-shadow:none; }
+.kd-internal-window button:disabled { cursor:default; opacity:.45; }
+.kd-internal-window input, .kd-internal-window textarea { color:var(--kd-text); background:var(--kd-panel-inset); border:1px solid var(--kd-line-soft); border-radius:4px; padding:3px 5px; font:inherit; }
+.kd-internal-window.vj-subtitle-window { z-index:111; top:100px; left:max(8px, calc(50vw - 280px)); width:560px; }
+.vj-subtitle-window .kd-internal-window-body { display:flex; flex-direction:column; gap:12px; }
+.vj-subtitle-window .kd-internal-window-body > fieldset { min-width:0; margin:0; padding:0; border:0; }
+.vj-subtitle-window footer { display:flex; justify-content:flex-end; gap:8px; }
+
+.kd-panel.kd-internal-window.vj-properties-window {
+  width: 360px;
+  height: min(900px, calc(100vh - 96px));
+  left: max(8px, calc(100vw - 376px));
+}
+
+.kd-internal-window .kd-pip-resize { z-index:10; touch-action:none; }

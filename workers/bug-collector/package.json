@@ -1,0 +1,11 @@
+{
+  "name": "kdj-bug-collector",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "check": "node --check src/index.js && node --check src/dashboard.browser.js && wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": { "wrangler": "4.140.0" }
+}

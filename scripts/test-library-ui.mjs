@@ -9,6 +9,7 @@ entry._compile((await build({
   entryPoints: ["tests/libraryTable.test.tsx"], bundle: true,
   external: ["jsdom", "react", "react-dom", "react-dom/*"],
   platform: "node", format: "cjs", define: { "import.meta.env": "{}" },
+  loader: { ".css": "empty" },
   logOverride: { "empty-import-meta": "silent" }, write: false,
   plugins: [{ name: "library-test-bridge", setup(build) {
     build.onResolve({ filter: /(^|\/)bridge$/ }, () => ({ path: "bridge", namespace: "library-test" }));

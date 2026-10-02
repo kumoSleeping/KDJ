@@ -4,6 +4,8 @@
  */
 
 import { create } from "zustand";
+import { isVideoTrack } from "../lib/format";
+import { streamMeta } from "../lib/streamTrack";
 import { api, ApiError } from "../lib/api";
 import { useLyricsPrefs, type LyricsEngine } from "../lib/lyricsPrefs";
 import { parseLrc, parseNeteaseWordLrc, type LrcLine } from "../lib/lrc";
@@ -124,7 +126,7 @@ function requestOf(track: Track, selected?: LyricsEngine) {
 
 interface LyricsStore {
   byId: Record<number, LyricsEntry>;
-  ensure(track: Track | null | undefined, options?: { matchMissing?: boolean; platform?: LyricsEngine }): Promise<void>;
+  ensure(track: Track | null | undefined, options?: { matchMissing?: boolean; platform?: LyricsEngine; cacheOnly?: boolean }): Promise<void>;
   get(trackId: number | null | undefined): LyricsEntry;
   /** 引擎 / 显示来源变更后清掉，避免旧偏好结果粘着。 */
   clear(): void;
@@ -145,9 +147,16 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
 
   async ensure(track, options = {}) {
     // 曲库 id > 0；在线试听用负数 id，同样要按 source_platform/key 直取歌词。
-    if (!track || track.id === 0) return;
-    const fingerprint = prefsFingerprint();
+    if (!track || track.id === 0 || isVideoTrack(track.format) || streamMeta(track)?.kind === "video") return;
+    const baseFingerprint = prefsFingerprint();
+    // A cache miss while browsing is not an online miss: playback must still be able to match.
+    const fingerprint = options.cacheOnly ? `${baseFingerprint}|cache` : baseFingerprint;
     const existing = get().byId[track.id];
+    if (options.cacheOnly && existing?.fingerprint === baseFingerprint
+      && (existing.inflight || existing.status === "ready" || existing.status === "empty")) {
+      await existing.inflight;
+      return;
+    }
     if (
       !options.platform && existing &&
       existing.fingerprint === fingerprint &&
@@ -226,6 +235,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         // 一直命中这个本地文件，从而永远没有翻译。在线补词开启时，给这种 QQ
         // 本地缓存补取一次附加层；主歌词仍保留本地版本（包括用户手调的时间轴）。
         if (
+          !options.cacheOnly &&
           meta &&
           meta.platform === "qqm" &&
           prefs.tryOnlineWhenMissing &&
@@ -249,7 +259,7 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         }
 
         // 本地没有歌词时，在线匹配是显式偏好；在线试听仍按来源 key 直取。
-        if (!meta && (track.id < 0 || prefs.tryOnlineWhenMissing || options.matchMissing || options.platform)) {
+        if (!options.cacheOnly && !meta && (track.id < 0 || prefs.tryOnlineWhenMissing || options.matchMissing || options.platform)) {
           meta = await api.lyrics(requestOf(track, options.platform));
           cacheDirty = track.id > 0;
         }

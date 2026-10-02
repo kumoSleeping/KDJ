@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { captureDiagnostic } from "../lib/diagnostics";
 import { validateVisualizerProject, type VisualizerDraft } from "../lib/visualizerStudio";
 import { deleteVisualizerExport, loadVisualizerExports, loadVisualizerExportSnapshot, saveVisualizerExport,
   visualizerExportActive, visualizerExportStartable, type VisualizerExportTask } from "../lib/visualizerExportQueue";
@@ -33,7 +34,7 @@ function update(id: string, patch: Partial<VisualizerExportTask>): VisualizerExp
   }) }));
   return result;
 }
-function report(error: unknown) { useVisualizerExportStore.setState({ error: message(error) }); }
+function report(error: unknown) { captureDiagnostic("visualizer-export", "queue.persistence", error); useVisualizerExportStore.setState({ error: message(error) }); }
 
 /** One frame producer at a time, independent of editor/component lifetimes.
  * The backend still arbitrates encoder resources with mixing exports. */
@@ -59,10 +60,12 @@ async function pump(): Promise<void> {
             update(task.id, { phase: status.phase, progress: status.progress, status: status.status });
           }
         });
+        if (final.phase === "failed") captureDiagnostic("visualizer-export", "encoder", final.error, `width=${task.width} height=${task.height} fps=${task.fps}`);
         update(task.id, { phase: final.phase, progress: final.progress, status: final.status,
           error: final.error, outputPath: final.output_path || task.outputPath });
       } catch (error) {
         const canceled = error instanceof DOMException && error.name === "AbortError";
+        if (!canceled) captureDiagnostic("visualizer-export", "frame-producer", error, `width=${task.width} height=${task.height} fps=${task.fps}`);
         update(task.id, { phase: canceled ? "canceled" : "failed", status: canceled ? "已取消" : "导出失败", error: canceled ? "" : message(error) });
       } finally {
         window.removeEventListener("pagehide", leaving);

@@ -1,8 +1,16 @@
 import type { LocalVideoClock } from "./mediaSync";
-import { waitForVideoFrames } from "./videoFrames";
+import { captureDiagnostic, mediaDiagnostic } from "./diagnostics";
+import { observeVideoFrames, waitForVideoFrames, type PresentedVideoFrame } from "./videoFrames";
 import { VideoSeekQueue } from "./videoSeekQueue";
 
 export const VIDEO_SYNC_EXPLICIT_TOLERANCE_SEC = 0.05;
+// Large discontinuities use a spare; rate correction requires sustained phase evidence.
+export const VIDEO_LIVE_RATE_ALIGNMENT_LIMIT_SEC = 2.5;
+const VIDEO_LIVE_RATE_ALIGNMENT_MAX_MS = 7500;
+const VIDEO_LIVE_RATE_ALIGNMENT_MIN_SEC = 2;
+const VIDEO_LIVE_RATE_ALIGNMENT_MAX_DELTA = 0.08;
+const VIDEO_LIVE_PHASE_OBSERVATION_MS = 2500;
+const VIDEO_LIVE_PHASE_SETTLE_MS = 2000;
 
 const VIDEO_SYNC_RATE_EPSILON = 0.001;
 const VIDEO_SYNC_CORRECTION_INTERVAL_MS = 500;
@@ -93,6 +101,32 @@ export function planVideoSync(
 
 type ProgrammaticSeek = (video: HTMLVideoElement, target: number) => void;
 type BackgroundAlignment = (video: HTMLVideoElement) => void;
+
+interface LiveVideoFeedback {
+  stop(): void;
+  frame?: PresentedVideoFrame;
+  baseRate: number;
+  rateAt: number;
+  stallAt: number | null;
+  alignmentAt: number;
+  alignmentRetryMs: number;
+  seekLead: number;
+  phaseSamples: { at: number; error: number }[];
+  phaseBlockedUntil: number;
+  phaseFailedUntil: number;
+  // One finite phase task followed by restoration to the latest base rate.
+  // Higher-priority work cancels it; residual phase is remeasured, not queued stale.
+  correction?: { endsAt: number; rate: number; baseRate: number; target: number; at: number };
+  preparing: boolean;
+  preparationMs: number;
+  seekMs: number;
+  attempts: number;
+  errors: number[];
+  errorFrame?: number;
+  seeks: number;
+  rates: number;
+  gaps: { at: number; ms: number }[];
+}
 
 interface StableVideoClockState {
   baseRate: number;
@@ -242,6 +276,7 @@ export class VideoPlaybackEngine {
   private stableClocks = new WeakMap<HTMLVideoElement, StableVideoClockState>();
   private observations = new WeakMap<HTMLVideoElement, { clock: LocalVideoClock; at: number }>();
   private aligning = new WeakSet<HTMLVideoElement>();
+  private liveFeedback = new Map<HTMLVideoElement, LiveVideoFeedback>();
 
   constructor(private readonly timing: "rate" | "webkit" =
     typeof HTMLVideoElement !== "undefined" && "webkitSetPresentationMode" in HTMLVideoElement.prototype
@@ -250,6 +285,11 @@ export class VideoPlaybackEngine {
   /** Coalesce rapid gestures instead of repeatedly flushing an in-flight decoder seek. */
   seek(video: HTMLVideoElement, position: number, onDispatch?: ProgrammaticSeek): Promise<boolean> {
     if (!Number.isFinite(position)) return Promise.resolve(false);
+    const feedback = this.liveFeedback.get(video);
+    if (feedback) {
+      this.setBaseRate(video, feedback.baseRate);
+      feedback.frame = undefined;
+    }
     let queue = this.seekQueues.get(video);
     if (!queue) { queue = new VideoSeekQueue(); this.seekQueues.set(video, queue); }
     const source = video.src;
@@ -266,7 +306,8 @@ export class VideoPlaybackEngine {
         video.removeEventListener("error", failed);
         video.removeEventListener("emptied", changed);
         signal.removeEventListener("abort", changed);
-        error ? reject(error) : resolve();
+        if (error) { captureDiagnostic("playback", "video.seek", error, mediaDiagnostic(video)); reject(error); }
+        else resolve();
       };
       const ready = () => finish();
       const changed = () => finish(new DOMException("Video seek canceled", "AbortError"));
@@ -277,6 +318,8 @@ export class VideoPlaybackEngine {
       video.addEventListener("emptied", changed, { once: true });
       signal.addEventListener("abort", changed, { once: true });
       try {
+        const feedback = this.liveFeedback.get(video);
+        if (feedback) feedback.seeks++;
         if (onDispatch) onDispatch(video, target);
         else video.currentTime = target;
         if (!video.seeking) finish();
@@ -373,6 +416,210 @@ export class VideoPlaybackEngine {
     seek(video, Math.max(0, Number.isFinite(video.duration) ? Math.min(video.duration, target) : target));
   }
 
+  private liveState(video: HTMLVideoElement): LiveVideoFeedback {
+    let state = this.liveFeedback.get(video);
+    if (!state) {
+      state = {stop: () => undefined, baseRate: video.playbackRate, rateAt: -Infinity,
+        stallAt: null, alignmentAt: -Infinity, alignmentRetryMs: 5000, seekLead: 0.3,
+        phaseSamples: [], phaseBlockedUntil: 0, phaseFailedUntil: 0,
+        preparing: false, preparationMs: 0, seekMs: 0, attempts: 0, errors: [], seeks: 0, rates: 0, gaps: []};
+      const feedback = state;
+      feedback.stop = observeVideoFrames(video, frame => {
+        feedback.frame = frame;
+        const now = performance.now();
+        while (feedback.gaps[0] && now - feedback.gaps[0].at > 5000) feedback.gaps.shift();
+        if (!feedback.preparing && !video.seeking && !video.paused && frame.gapMs > 80)
+          feedback.gaps.push({at: now, ms: frame.gapMs});
+      });
+      this.liveFeedback.set(video, feedback);
+    }
+    return state;
+  }
+
+  liveFrameError(video: HTMLVideoElement, clock: LocalVideoClock): number | null {
+    const state = this.liveState(video), frame = state.frame;
+    if (video.seeking || video.readyState < 2) return null;
+    if (!frame) return typeof video.requestVideoFrameCallback === "function" ? null : clock.position - video.currentTime;
+    if (performance.now() - frame.displayTime > 250) return null;
+    // Compare the acoustic clock and frame at the SAME presentation instant.
+    return clock.position + (frame.displayTime - performance.now()) / 1000 * clock.rate - frame.mediaTime;
+  }
+
+  liveMetrics(video: HTMLVideoElement, clock: LocalVideoClock) {
+    const state = this.liveState(video);
+    const error = clock.fresh === false ? null : this.liveFrameError(video, clock);
+    const now = performance.now();
+    return {error_ms: error === null ? null : error * 1000,
+      frame_gap_ms: Math.max(state.frame ? now - state.frame.displayTime : 0,
+        state.frame?.gapMs ?? 0, ...state.gaps.filter(g => now - g.at <= 5000).map(g => g.ms)),
+      seeks: state.seeks, rate_changes: state.rates, playback_rate: video.playbackRate, base_rate: state.baseRate,
+      preparation_ms: state.preparationMs, seek_ms: state.seekMs, attempts: state.attempts};
+  }
+
+  /** Reuse the caller's clock tick and the shared rate writer; no second servo.
+   * Priority: preparation/transport > acoustic tempo > task completion > phase.
+   * A phase task adds a bounded offset to the tempo, then restores it before
+   * another task can start. Preempted work is recalculated from fresh frames. */
+  followLiveClock(video: HTMLVideoElement, clock: LocalVideoClock, realign: () => void): void {
+    const state = this.liveState(video), now = performance.now();
+    const base = normalizedRate(clock.rate);
+    const baseChanged = Math.abs(base - (state.correction?.baseRate ?? video.playbackRate)) >= 0.003;
+    state.baseRate = base;
+    const restore = () => {
+      state.correction = undefined; state.errors = []; state.phaseSamples = [];
+      state.phaseBlockedUntil = now + VIDEO_LIVE_PHASE_SETTLE_MS;
+      this.setBaseRate(video, base); state.rateAt = now;
+    };
+    if (state.preparing) return;
+    if (!clock.playing || video.paused || video.seeking || video.readyState < 2) {
+      restore(); state.stallAt = null;
+      if (video.seeking) state.frame = undefined;
+      return;
+    }
+    const owner = `${clock.trackId}:${clock.sourceId}:${clock.discontinuityRevision}:${clock.loopGeneration}:${clock.loopWrapCount}`;
+    const previousOwner = this.deviceOwners.get(video);
+    if (clock.fresh !== false && previousOwner !== undefined && previousOwner !== owner) {
+      restore(); this.deviceOwners.set(video, owner); realign(); return;
+    }
+    if (clock.fresh !== false) this.deviceOwners.set(video, owner);
+    // Tempo commands preempt phase work, rather than inheriting its old offset
+    // or deadline. The next ticks collect fresh evidence for any residual phase.
+    if (baseChanged) { restore(); return; }
+    // Completion must run even without fresh acoustic/frame feedback. Never
+    // silently extend acceleration by replacing an expired task in this tick.
+    if (state.correction && now >= state.correction.endsAt) { restore(); return; }
+    if (clock.fresh === false) {
+      if (state.correction) restore();
+      state.phaseSamples = []; state.stallAt = null; return;
+    }
+    if (state.correction && (state.gaps.some(g => g.at >= state.correction!.at && g.ms > 120)
+      || state.frame && now - state.frame.displayTime > 250)) {
+      // Retiming can stall WebKit. Stop the task, then use the spare rather than
+      // repeatedly issuing the same acceleration into an unhealthy decoder.
+      restore(); state.phaseFailedUntil = now + 30_000;
+      return;
+    }
+    const error = this.liveFrameError(video, clock);
+    // Hidden WebKit layers may suppress callbacks; that is not a seek request.
+    if (error === null) { state.phaseSamples = []; state.stallAt = null; return; }
+    const stamp = state.frame?.displayTime ?? now;
+    if (stamp !== state.errorFrame) {
+      state.errorFrame = stamp; state.errors.push(error);
+      if (state.errors.length > 3) state.errors.shift();
+      state.phaseSamples.push({at: now, error});
+      while (state.phaseSamples.length > 1 && now - state.phaseSamples[1].at >= VIDEO_LIVE_PHASE_OBSERVATION_MS)
+        state.phaseSamples.shift();
+    }
+    const ordered = [...state.errors].sort((a, b) => a - b);
+    const phaseError = ordered[Math.floor(ordered.length / 2)] ?? error;
+    const tolerance = Math.max(0.015, Math.min(0.05, state.frame?.interval ?? 1 / 30));
+    const distance = Math.abs(phaseError);
+    if (distance <= tolerance) { restore(); return; }
+    if (distance >= VIDEO_LIVE_RATE_ALIGNMENT_LIMIT_SEC) {
+      if (state.correction) restore();
+      if (ordered.length >= 2) realign();
+      return;
+    }
+    const plan = state.correction;
+    if (plan) {
+      const expectedTarget = plan.target + plan.baseRate * (now - plan.at) / 1000;
+      // A new audio target supersedes the old task. Decoder delay alone does
+      // not: hold its rate, unless we have already crossed the rendezvous.
+      const targetChanged = Math.abs(clock.position - expectedTarget) > Math.max(0.06, tolerance * 2);
+      if (targetChanged || (plan.rate - base) * error <= 0) restore();
+      return;
+    }
+    if (state.gaps.some(g => now - g.at <= VIDEO_LIVE_PHASE_OBSERVATION_MS && g.ms > 120)) {
+      state.phaseSamples = [];
+      return;
+    }
+    // A short delay, a newly exposed decoder, or a moving acoustic target is
+    // not stable phase drift. Require 2.5s of distinct fresh frames, one sign,
+    // and <=60ms spread before touching playbackRate.
+    const samples = state.phaseSamples;
+    if (now < state.phaseBlockedUntil || distance < 0.12 || samples.length < 12
+      || now - samples[0].at < VIDEO_LIVE_PHASE_OBSERVATION_MS) return;
+    const low = Math.min(...samples.map(s => s.error)), high = Math.max(...samples.map(s => s.error));
+    if (low * high <= 0 || high - low > 0.06) return;
+    if (now < state.phaseFailedUntil) {
+      if (now - state.alignmentAt >= state.alignmentRetryMs) {
+        state.alignmentAt = now;
+        state.alignmentRetryMs = Math.min(60_000, state.alignmentRetryMs * 2);
+        realign();
+      }
+      return;
+    }
+    // One small, finite correction, held without per-frame retuning. Restore
+    // base tempo at completion, then collect a new stable observation window.
+    const seconds = Math.min(VIDEO_LIVE_RATE_ALIGNMENT_MAX_MS / 1000,
+      Math.max(VIDEO_LIVE_RATE_ALIGNMENT_MIN_SEC, distance / (base * VIDEO_LIVE_RATE_ALIGNMENT_MAX_DELTA)));
+    const delta = Math.max(-base * VIDEO_LIVE_RATE_ALIGNMENT_MAX_DELTA,
+      Math.min(base * VIDEO_LIVE_RATE_ALIGNMENT_MAX_DELTA, phaseError / seconds));
+    const rate = normalizedRate(base + delta);
+    if (Math.abs(rate - base) <= VIDEO_SYNC_RATE_EPSILON) return;
+    state.correction = {endsAt: now + seconds * 1000, rate, baseRate: base, target: clock.position, at: now};
+    this.applyRate(video, rate); state.rateAt = now;
+  }
+
+  /** All seeks use the shared queue. WebKit prepares at stable tempo and learns
+   * the decode lead from presented frames, never by accelerating the front.
+   * Preparation is bounded; a failed spare must not replace the current picture. */
+  async prepareLiveClock(video: HTMLVideoElement, clock: () => LocalVideoClock | null, signal: AbortSignal): Promise<boolean> {
+    const latest = clock();
+    if (!latest || latest.fresh === false || signal.aborted) return false;
+    const state = this.liveState(video), started = performance.now();
+    state.preparing = true; state.seekMs = 0; state.attempts = 1;
+    if (video.muted) video.preservesPitch = false;
+    this.setBaseRate(video, latest.rate); state.baseRate = latest.rate;
+    const abort = () => this.cancelSeek(video);
+    signal.addEventListener("abort", abort, {once: true});
+    try {
+      let playError: unknown;
+      if (latest.playing) void video.play().catch(error => { playError = error; captureDiagnostic("playback", "video.play", error, mediaDiagnostic(video)); });
+      const stable = this.timing === "webkit";
+      const currentClock = () => {
+        const current = clock();
+        return !signal.aborted && current && current.fresh !== false
+          && current.trackId === latest.trackId && current.sourceId === latest.sourceId
+          && current.discontinuityRevision === latest.discontinuityRevision
+          && current.playing === latest.playing && Math.abs(current.rate - latest.rate) < 0.003
+          ? current : null;
+      };
+      for (let attempt = 0; attempt < (stable ? 3 : 1); attempt++) {
+        const current = currentClock();
+        if (!current) return false;
+        const target = Math.max(0, current.position + (stable && current.playing ? state.seekLead * current.rate : 0));
+        if (Number.isFinite(video.duration) && target >= video.duration - 0.1) return false;
+        state.attempts = attempt + 1;
+        const seekStarted = performance.now();
+        const landed = await this.seek(video, target);
+        state.seekMs += performance.now() - seekStarted;
+        if (!landed || !currentClock()) return false;
+        if (playError) throw playError;
+        if (video.readyState < 2 || video.seeking) return false;
+        if (!await waitForVideoFrames(video, target, stable && current.playing, signal, 1200)) return false;
+        const presented = currentClock();
+        if (!presented) return false;
+        if (stable && presented.playing) {
+          const error = this.liveFrameError(video, presented);
+          if (error === null) return false;
+          state.seekLead = Math.max(0, Math.min(1.5, state.seekLead + error / presented.rate));
+          if (Math.abs(error) > 0.08) continue;
+        }
+        this.adoptClock(video, presented);
+        state.errors = []; state.errorFrame = undefined; state.gaps = [];
+        state.correction = undefined; state.stallAt = null; state.rateAt = -Infinity;
+        state.alignmentAt = performance.now(); state.alignmentRetryMs = 5000;
+        state.phaseSamples = []; state.phaseBlockedUntil = performance.now() + VIDEO_LIVE_PHASE_SETTLE_MS;
+        return true;
+      }
+      return false;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      state.preparing = false; state.preparationMs = performance.now() - started;
+    }
+  }
+
   /** Correct only the spare decoder. WebKit can hold its first post-seek frame for hundreds
    * of milliseconds even after seeked; require sustained advancement before making it visible. */
   async alignStandby(
@@ -450,6 +697,8 @@ export class VideoPlaybackEngine {
   }
 
   releaseClock(video: HTMLVideoElement): void {
+    this.liveFeedback.get(video)?.stop();
+    this.liveFeedback.delete(video);
     this.cancelSeek(video);
     this.observations.delete(video);
     this.deviceOwners.delete(video);
@@ -488,10 +737,20 @@ export class VideoPlaybackEngine {
 
   setBaseRate(video: HTMLVideoElement, baseRate = 1): void {
     this.policies.delete(video);
-    this.applyRate(video, normalizedRate(baseRate));
+    const rate = normalizedRate(baseRate), feedback = this.liveFeedback.get(video);
+    if (feedback) {
+      // Explicit rate/prepare/adopt commands own this lane. An obsolete phase
+      // task must never restore its old tempo over a newer command.
+      feedback.correction = undefined; feedback.errors = []; feedback.phaseSamples = [];
+      feedback.errorFrame = feedback.frame?.displayTime;
+      feedback.baseRate = rate;
+    }
+    this.applyRate(video, rate);
   }
 
   reset(video?: HTMLVideoElement | null): void {
+    for (const state of this.liveFeedback.values()) state.stop();
+    this.liveFeedback.clear();
     for (const video of this.seekQueues.keys()) this.cancelSeek(video);
     this.observations = new WeakMap();
     this.policies = new WeakMap();
@@ -501,6 +760,8 @@ export class VideoPlaybackEngine {
   }
 
   dispose(): void {
+    for (const state of this.liveFeedback.values()) state.stop();
+    this.liveFeedback.clear();
     for (const video of this.seekQueues.keys()) this.cancelSeek(video);
     this.observations = new WeakMap();
     this.policies = new WeakMap();
@@ -511,6 +772,8 @@ export class VideoPlaybackEngine {
   private applyRate(video: HTMLVideoElement, rate: number): void {
     if (Math.abs(video.playbackRate - rate) <= VIDEO_SYNC_RATE_EPSILON) return;
     video.playbackRate = rate;
+    const feedback = this.liveFeedback.get(video);
+    if (feedback) feedback.rates++;
   }
 }
 

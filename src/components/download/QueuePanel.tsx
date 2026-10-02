@@ -1,6 +1,8 @@
 import { useState } from "react";
 import {
   Check,
+  ArrowLeft,
+  History,
   ChevronDown,
   CircleMinus,
   Copy,
@@ -535,34 +537,37 @@ function QueueRow({
 function QueuePrefsBar({
   canStart,
   canPause,
-  canClear,
+  history,
   queuedCount,
   pausedCount,
   failedCount,
   activeCount,
-  clearableCount,
   totalCount,
   onStart,
   onPause,
-  onClear,
+  onToggleHistory,
   onError,
 }: {
   canStart: boolean;
   canPause: boolean;
-  canClear: boolean;
+  history: boolean;
   queuedCount: number;
   pausedCount: number;
   failedCount: number;
   activeCount: number;
-  clearableCount: number;
   totalCount: number;
   onStart(): void;
   onPause(): void;
-  onClear(): void;
+  onToggleHistory(): void;
   onError(message: string): void;
 }) {
   const settings = useAppStore((store) => store.settings);
   const saveSettings = useAppStore((store) => store.saveSettings);
+  if (history) return <section className="kd-download-history-head" aria-label="历史记录">
+    <History size={15} /><strong>历史记录</strong>
+    <span>{totalCount > 0 ? `${totalCount} 项` : ""}</span>
+    <Button variant="ghost" size="sm" onClick={onToggleHistory}><ArrowLeft size={14} />返回当前任务</Button>
+  </section>;
   if (!settings) return null;
 
   const qualities: Quality[] = ["flac", "320", "128"];
@@ -592,14 +597,14 @@ function QueuePrefsBar({
   }
   return (
     <section className="kd-download-prefs" aria-label="下载队列概览">
-      <QueueOverview facts={summaryFacts} total={totalCount} canStart={canStart} canSecondary={canPause || canClear}
+      <QueueOverview facts={summaryFacts} total={totalCount} canStart={!history && canStart} canSecondary
         startTitle={canStart ? `${startActions}（下载 / 导出）` : "没有待开始的任务"}
-        secondaryTitle={canPause ? "暂停当前整批下载" : `只清除 ${clearableCount} 条队列记录，不删除下载文件`}
-        secondaryKind={canPause ? "pause" : "clear"} secondaryLabel={canPause ? "暂停" : "清记录"}
-        onStart={onStart} onSecondary={canPause ? onPause : onClear} />
+        secondaryTitle={history ? "查看当前任务" : "查看历史记录"}
+        secondaryKind="history" secondaryLabel={history ? "当前任务" : "历史记录"}
+        onStart={onStart} onSecondary={onToggleHistory}
+        extraActions={!history && canPause ? <Button variant="ghost" size="sm" onClick={onPause}>暂停</Button> : undefined} />
 
       <div className="kd-download-defaults" aria-label="默认下载参数">
-        <span className="kd-download-defaults-label">默认</span>
         <button
           type="button"
           className="kd-download-default"
@@ -671,7 +676,8 @@ function QueuePrefsBar({
 export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
-  const clear = useDownloadStore((store) => store.clear);
+  const [history, setHistory] = useState(false);
+  const visibleTasks = list.filter(task => history === (task.state === "done" || task.state === "canceled"));
   const pauseAll = useDownloadStore((store) => store.pauseAll);
   const [dropActive, setDropActive] = useState(false);
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
@@ -680,12 +686,6 @@ export function QueuePanel() {
     (sum, task) => sum + (task.state === "failed" ? 1 : 0),
     0,
   );
-  const clearableCount = list.reduce(
-    (sum, task) =>
-      sum + (task.state === "running" || task.state === "processing" ? 0 : 1),
-    0,
-  );
-  const canClear = clearableCount > 0;
   const canPause = list.some(
     (task) => task.state === "running" || task.state === "processing",
   );
@@ -709,6 +709,7 @@ export function QueuePanel() {
   return (
     <QueueFrame
       className="kd-col kd-download-dropzone"
+      data-history={history || undefined}
       data-drop-active={dropActive ? "true" : undefined}
       {...{ [SEARCH_QUEUE_DROP_ATTR]: "true" }}
       style={{ height: "100%", minHeight: 0 }}
@@ -723,6 +724,7 @@ export function QueuePanel() {
       }}
       onDrop={(event) => {
         setDropActive(false);
+        setHistory(false);
         const payload = readSearchDrop(event.dataTransfer);
         finishSearchDrop();
         if (!payload) return;
@@ -735,13 +737,12 @@ export function QueuePanel() {
       <QueuePrefsBar
         canStart={canStart}
         canPause={canPause}
-        canClear={canClear}
-        queuedCount={queuedCount}
-        pausedCount={pausedCount}
-        failedCount={failedCount}
-        activeCount={activeCount}
-        clearableCount={clearableCount}
-        totalCount={list.length}
+        history={history}
+        queuedCount={history ? 0 : queuedCount}
+        pausedCount={history ? 0 : pausedCount}
+        failedCount={history ? 0 : failedCount}
+        activeCount={history ? 0 : activeCount}
+        totalCount={visibleTasks.length}
         onStart={() => {
           setActionError("");
           void (async () => {
@@ -758,19 +759,14 @@ export function QueuePanel() {
             setActionError(`暂停下载失败：${(error as Error).message}`),
           );
         }}
-        onClear={() => {
-          setActionError("");
-          void clear().catch((error: unknown) =>
-            setActionError(`清除记录失败：${(error as Error).message}`),
-          );
-        }}
+        onToggleHistory={() => setHistory(value => !value)}
         onError={setActionError}
       />
 
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
       <QueueList>
-        {list.map((task, index) => (
+        {visibleTasks.map((task, index) => (
           <QueueRow
             key={task.id}
             task={task}

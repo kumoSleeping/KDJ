@@ -213,6 +213,15 @@ const COLUMNS: Column[] = [
   { id: null, label: "大小", width: "4.6rem", align: "num", key: "size" },
   { id: "file_created_at", label: "文件创建", width: "8.5rem", key: "file_created_at" },
   { id: "rating", label: "评分", width: "4.2rem", key: "rating" },
+  { id: null, label: "采样率", width: "5.5rem", key: "samplerate" },
+  { id: null, label: "声道", width: "3.4rem", key: "channels" },
+  { id: null, label: "码率", width: "5.5rem", key: "bitrate" },
+  { id: null, label: "流派", width: "6rem", key: "genre" },
+  { id: null, label: "年份", width: "4rem", key: "year" },
+  { id: null, label: "来源", width: "6rem", key: "source_platform" },
+  { id: "added_at", label: "入库", width: "8.5rem", key: "added_at" },
+  { id: null, label: "文件名", width: "14rem", key: "filename" },
+  { id: null, label: "路径", width: "20rem", key: "path" },
 ];
 
 /* ------------------------------------------------------------ 列的自由组合 */
@@ -241,6 +250,15 @@ const COLUMN_MIN_WIDTH: Record<string, string> = {
   size: "3.4rem",
   file_created_at: "6.5rem",
   rating: "3rem",
+  samplerate: "4.5rem",
+  channels: "3rem",
+  bitrate: "4.5rem",
+  genre: "3rem",
+  year: "3rem",
+  source_platform: "4rem",
+  added_at: "6.5rem",
+  filename: "4rem",
+  path: "5rem",
 };
 
 const COLUMN_MAX_WIDTH = "80rem";
@@ -285,8 +303,7 @@ export interface TrackTableProps {
   order2: SortOrder;
   /**
    * clickCount 透传 MouseEvent.detail：双击播放会先送来一下 detail=1 的单击，
-   * 再补一下 detail=2。Workspace 靠它区分「单击=查看详情」和「双击=播放」——
-   * 后者不该把详情面板弹出来挤压列表。
+   * 再补一下 detail=2。选中始终只改变列表；周围面板跟随正在播放的曲目。
    */
   onSelect(id: number, mode: SelectMode, clickCount?: number): void;
   onSort(sort: TrackSort): void;
@@ -507,6 +524,26 @@ function trackCell(
           {formatDate(track.file_created_at)}
         </td>
       );
+    case "samplerate":
+    case "channels":
+    case "bitrate": {
+      const value = key === "samplerate"
+        ? track.samplerate ? `${track.samplerate / 1000} kHz` : DASH
+        : key === "channels"
+          ? track.channels ? `${track.channels}ch` : DASH
+          : track.bitrate ? `${track.bitrate} kbps` : DASH;
+      return <td key={key} data-col={key} className="kd-mono kd-muted" title={value}>{value}</td>;
+    }
+    case "genre":
+    case "year":
+    case "source_platform":
+    case "filename":
+    case "path": {
+      const value = track[key] || (key === "source_platform" ? "local" : "");
+      return <td key={key} data-col={key} title={value}>{value || DASH}</td>;
+    }
+    case "added_at":
+      return <td key={key} data-col={key} className="kd-mono kd-muted">{formatDate(track.added_at)}</td>;
     case "rating":
       return (
         <td key={key} data-col="rating">

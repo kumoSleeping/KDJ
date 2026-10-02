@@ -1,0 +1,915 @@
+@import url("./player.css?v=6.1.7");
+@import url("./surfaces.css?v=6.1.6");
+@import url("./video.css");
+@import url("./adaptations.css");
+
+/*
+ * Sakura98 / 6.1.9 — pink desktop chrome, not decorative illustrations.
+ * Raised/sunken edge construction adapted from Jordan Scales' 98.css (MIT).
+ * See licenses/98.css-MIT.txt.
+ * Native KDJ typography is preserved, including user font scaling.
+ * No scripts, image overlays, remote resources, filters or layout reparenting.
+ */
+
+/* Palette: red-led pinks, not mauve. White is reserved for bevel highlights.
+   All depth comes from finite one-pixel edges, never a blurred card shadow. */
+:root[data-theme-pack="sakulaptop98"] {
+  color-scheme: light;
+  --kd-bg: #efb3c4;
+  --kd-panel: #f3c5d1;
+  --kd-panel-raised: #efb3c4;
+  --s98-property-paper: #fbdfe3;
+  --s98-content-paper: #fbe3eb;
+  --kd-panel-inset: var(--s98-property-paper);
+  --kd-text: #34262d;
+  --kd-text-body: #49313b;
+  --kd-muted: #704452;
+  --kd-faint: #805261;
+  --kd-settings-muted: #633747;
+  --kd-settings-faint: #704452;
+  --kd-theme: #921c40;
+  --kd-theme-strong: #751431;
+  --kd-theme-ink: #fff8f5;
+  --kd-selected: transparent;
+  --kd-theme-soft: transparent;
+  --kd-line: #ad6f83;
+  --kd-line-soft: #d998ad;
+  --kd-hover: #fbd7e1;
+  --kd-ok: #307155;
+  --kd-warn: #895c1d;
+  --kd-danger: #b42738;
+  --kd-info: #346778;
+  --kd-accent: var(--kd-theme);
+  --kd-surface: var(--kd-panel);
+  --kd-layout-guide: #704452;
+  /* Rose lows, blush mids and cool highs keep frequency structure visible. */
+  --kd-wave-low: #d84b88;
+  --kd-wave-mid: #f1a4c4;
+  --kd-wave-high: #83bacf;
+  --kd-wave-overview-bg: #f8d5dd;
+  --kd-wave-detail-bg: var(--s98-content-paper);
+  --kd-vinyl-body: #34262d;
+  --kd-vinyl-groove: #765e64;
+  --kd-vinyl-label: #ffb7c5;
+  --kd-eq-1: #307155;
+  --kd-eq-2: #658546;
+  --kd-eq-3: #ac762d;
+  --kd-eq-4: #c95d41;
+  --kd-eq-5: #c94665;
+
+  --s98-face: #efb3c4;
+  --s98-face-hi: #fbd7e1;
+  --s98-white: #ffffff;
+  --s98-shadow: #ad6f83;
+  --s98-frame: #69424e;
+  --s98-caption: linear-gradient(90deg, #df87a1, #efabc0);
+  --s98-active-caption: linear-gradient(90deg, #8d2447, #ad4163);
+  --s98-caption-ink: #fff8f5;
+  --s98-raised: inset -1px -1px var(--s98-frame), inset 1px 1px var(--s98-white),
+    inset -2px -2px var(--s98-shadow), inset 2px 2px var(--s98-face-hi);
+  --s98-sunken: inset -1px -1px var(--s98-white), inset 1px 1px var(--s98-shadow),
+    inset -2px -2px var(--s98-face-hi), inset 2px 2px var(--s98-frame);
+  --s98-window: inset -1px -1px var(--s98-frame), inset 1px 1px var(--s98-face-hi),
+    inset -2px -2px var(--s98-shadow), inset 2px 2px var(--s98-white);
+  --s98-groove: inset 0 1px var(--s98-shadow), inset 0 2px var(--s98-white);
+  --kd-shadow: var(--s98-raised);
+  --kd-shadow-float: var(--s98-window), 4px 4px 0 #69424e70;
+  --kd-shadow-badge: 1px 1px 0 var(--s98-shadow);
+}
+
+/* Leave font families, sizes, line boxes and smoothing to the application.
+   Fixed-height controls must not inherit a different font's metrics. */
+:root[data-theme-pack="sakulaptop98"] ::selection {
+  color: #34262d;
+  background: #ffb7c5;
+}
+/* Text inputs can match :focus-visible even after a mouse click. Never draw
+   the old dotted rectangle through the search text; focus belongs to its well. */
+:root[data-theme-pack="sakulaptop98"] :is(button, a, summary, [tabindex]):focus-visible {
+  outline: 1px solid var(--s98-frame);
+  outline-offset: -3px;
+}
+:root[data-theme-pack="sakulaptop98"] :is(input, textarea, select):focus-visible {
+  outline: none;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-input, .kd-select, .kd-textarea,
+  .kd-folder-search > input, .kd-folder-new > input, .kd-folder-query > input):focus {
+  outline: 1px solid var(--s98-frame);
+  outline-offset: 0;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-search-band .kd-searchbar:focus-within {
+  box-shadow: var(--s98-sunken), 0 0 0 1px var(--s98-frame);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-player-volume, .kd-player-scrub, .kd-manager-header-tempo):has(input:focus-visible) {
+  outline: 1px solid var(--s98-frame);
+  outline-offset: 2px;
+}
+
+/* DESKTOP / TOOL RAILS — large areas carry the colour, not small stickers. */
+:root[data-theme-pack="sakulaptop98"] .kd-app-chrome {
+  background: var(--s98-active-caption);
+  color: var(--s98-caption-ink);
+  border-bottom-color: var(--s98-frame);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 -1px var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-window-btn, .kd-aside-head-close, .kd-sheet-close) {
+  background-color: var(--s98-face);
+  color: var(--kd-text);
+  border-radius: 2px;
+  box-shadow: var(--s98-raised);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-window-btn, .kd-aside-head-close, .kd-sheet-close):active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-tree-slot, .kd-narrow-folder-rail, .kd-narrow-folder-panel) {
+  background: var(--s98-face);
+  box-shadow: inset 1px 0 var(--s98-white), inset -1px 0 var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-main-slot, .kd-local-list-slot, .kd-workspace-pane) {
+  background-color: var(--kd-panel-inset);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-list-head, .kd-toolbar, .kd-search-band, .kd-folder-head, .kd-folder-search, .kd-library-commandbar) {
+  background-color: var(--s98-face);
+  border-bottom-color: var(--s98-shadow);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 -1px var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-aside-head, .kd-sheet-head, .kd-panel-head, .vj-header) {
+  background: var(--s98-caption);
+  color: var(--kd-text);
+  border-bottom-color: var(--s98-frame);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 -1px var(--s98-shadow);
+  text-transform: none;
+  letter-spacing: normal;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-dialog-head {
+  background: var(--s98-active-caption);
+  color: var(--s98-caption-ink);
+  box-shadow: inset 0 1px var(--s98-face-hi), inset 0 -1px var(--s98-frame);
+}
+/* Actual commands sit on pink button faces, including on the dark caption.
+   Never turn the whole draggable title bar into a click target. */
+:root[data-theme-pack="sakulaptop98"] :is(.kd-chrome-btn, .kd-chrome-nav-btn,
+  .kd-djp-font-actions > button, .kd-djp-section-toggle,
+  .kd-searchbar-go, .vj-header > button, .vj-workshop-toolbar > button) {
+  background: var(--s98-face);
+  color: var(--kd-text);
+  border-radius: 2px;
+  box-shadow: var(--s98-raised);
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-chrome-btn, .kd-chrome-nav-btn,
+  .kd-djp-font-actions > button, .kd-djp-section-toggle,
+  .kd-searchbar-go, .vj-header > button, .vj-workshop-toolbar > button):hover:not(:disabled) {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-chrome-btn, .kd-chrome-nav-btn,
+  .kd-djp-font-actions > button, .kd-djp-section-toggle,
+  .kd-searchbar-go, .vj-header > button, .vj-workshop-toolbar > button):active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+}
+/* Keep toggle surfaces constant: selection changes ink, not geometry. */
+:root[data-theme-pack="sakulaptop98"] .kd-chrome-btn[data-open="true"] {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-chrome-actions > .kd-chrome-btn[data-update="true"] {
+  color: var(--kd-text);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-chrome-btn, .kd-chrome-nav-btn,
+  .kd-djp-font-actions > button, .kd-djp-section-toggle):disabled {
+  color: var(--kd-muted);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-window-btn[data-close="true"]:hover {
+  background: var(--s98-face-hi);
+  color: var(--kd-danger);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-activity-search-toggle, .kd-activity-search-toggle[data-action][data-open]) {
+  background: var(--s98-face);
+  color: var(--kd-text-body);
+  border-radius: 2px !important;
+  box-shadow: var(--s98-raised);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-search-toggle:hover:not(:disabled) {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-search-toggle:active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-search-toggle:is([data-open="true"], [data-pinned="true"]) {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-search-band-sep, .kd-searchbar-sep, .kd-narrow-rail-sep) {
+  background: var(--s98-shadow);
+  box-shadow: 1px 0 var(--s98-white);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-narrow-rail-resize {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-narrow-rail-resize::after {
+  background: var(--s98-shadow);
+  box-shadow: 0 1px var(--s98-white);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-split-handle, .kd-workspace-divider)::after {
+  background: var(--s98-face);
+  width: 3px;
+  left: -1px;
+  box-shadow: inset 1px 0 var(--s98-white), inset -1px 0 var(--s98-shadow);
+  opacity: 1;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-split-handle, .kd-workspace-divider):hover::after {
+  background: var(--kd-line);
+}
+
+/* WINDOWS — bevels are structural, so a selected state never adds a frame. */
+:root[data-theme-pack="sakulaptop98"] .kd-panel {
+  background: var(--kd-panel);
+  border-color: transparent;
+  border-radius: 2px;
+  box-shadow: var(--s98-window);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-sheet, .kd-split-aside) {
+  background-color: var(--kd-panel);
+  border-color: var(--s98-shadow);
+  box-shadow: inset 1px 0 var(--s98-white);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-dialog, .kd-context-menu, .kd-toast, .kd-lyrics-source-menu,
+  .kd-media-tools-dialog, .vj-subtitle-dialog, .vj-dialog, .vj-menu) {
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  border: 1px solid transparent;
+  border-radius: 2px;
+  box-shadow: var(--kd-shadow-float);
+}
+/* Notifications must not sit over the seek surface or transport controls. */
+:root[data-theme-pack="sakulaptop98"] .kd-toast {
+  top: calc(var(--kd-chrome-top) + var(--kd-safe-top, 0px) + 0.5rem);
+  bottom: auto;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-dialog-foot {
+  background: var(--s98-face);
+  border-top-color: var(--s98-shadow);
+  box-shadow: inset 0 1px var(--s98-white);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-context-menu, .vj-menu) {
+  padding: 4px;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-context-menu, .vj-menu) hr {
+  border: 0;
+  height: 2px;
+  background: var(--s98-shadow);
+  box-shadow: inset 0 -1px var(--s98-white);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-overlay, .kd-sheet-scrim) {
+  background: #30272a30;
+  backdrop-filter: none;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-media-tools-dialog, .vj-subtitle-dialog)::backdrop {
+  background: #30272a30;
+  backdrop-filter: none;
+}
+
+/* FORMS — actual recessed edit fields, raised compact commands, keyboard focus.
+   Do not style every button as a box: tree rows and table actions stay flat. */
+:root[data-theme-pack="sakulaptop98"] :is(.kd-input, .kd-select, .kd-textarea,
+  .kd-folder-search > input, .kd-folder-new > input, .kd-folder-query > input),
+:root[data-theme-pack="sakulaptop98"] .vj-workshop :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), select, textarea) {
+  color: var(--kd-text);
+  background-color: var(--kd-panel-inset);
+  border-color: transparent;
+  border-radius: 2px;
+  box-shadow: var(--s98-sunken);
+}
+/* Inline folder fields have no native inset padding. Keep the bevel away from
+   their first/last glyph without shrinking the font or changing row height. */
+:root[data-theme-pack="sakulaptop98"] :is(.kd-folder-search > input, .kd-folder-query > input) {
+  padding-inline: 4px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-search > input {
+  padding-block: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-input, .kd-select, .kd-textarea):focus {
+  border-color: transparent;
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] select option {
+  color: var(--kd-text);
+  background: var(--kd-panel-inset);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-search-band .kd-searchbar {
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar-input {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-btn, .kd-dialog-foot > button) {
+  background: var(--s98-face);
+  border-color: transparent;
+  border-radius: 2px;
+  box-shadow: var(--s98-raised);
+  color: var(--kd-text);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-btn, .kd-dialog-foot > button):hover:not(:disabled) {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-btn, .kd-dialog-foot > button):active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-btn, .kd-window-btn):disabled {
+  color: var(--kd-muted);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-btn[data-variant="primary"] {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-btn[data-variant="danger"] {
+  color: var(--kd-danger);
+}
+/* Tab-shaped neutral faces share one property-sheet rail. The same edges are
+   present on every tab; selected tabs add red ink only, never a raised highlight. */
+:root[data-theme-pack="sakulaptop98"] :is(.kd-segment, .kd-activity-log-tabs) {
+  background: var(--s98-face);
+  border-color: transparent;
+  border-radius: 2px;
+  box-shadow: inset 0 -1px var(--s98-frame), inset 0 -2px var(--s98-white);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-segment, .kd-activity-log-tabs, .kd-aside-face) > :is(button, button[aria-pressed], button[aria-selected], button[aria-checked]) {
+  background: var(--s98-face);
+  color: var(--kd-text-body);
+  border-color: transparent;
+  border-radius: 3px 3px 0 0;
+  box-shadow: var(--s98-raised);
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-segment, .kd-activity-log-tabs, .kd-aside-face) > button:hover:not(:disabled) {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-aside-face > button {
+  padding: 4px 6px;
+}
+:root[data-theme-pack="sakulaptop98"] :is(input[type="checkbox"], input[type="radio"], .kd-selection-cell input[type="checkbox"]) {
+  background: var(--kd-panel-inset);
+  border: 1px solid transparent;
+  box-shadow: var(--s98-sunken);
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] input[type="checkbox"] {
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] input[type="radio"] {
+  border-radius: 50%;
+}
+:root[data-theme-pack="sakulaptop98"] :is(input[type="checkbox"], .kd-selection-cell input[type="checkbox"]):checked::after {
+  border-color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] input[type="radio"]:checked::after {
+  background: var(--kd-theme);
+  border-radius: 50%;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-field-label, .kd-stat-label, .kd-analysis-metric-label, .kd-djp-label) {
+  color: var(--kd-muted);
+}
+/* Settings are property sheets, not default-theme text on a tinted page. */
+:root[data-theme-pack="sakulaptop98"] .kd-djp {
+  background: var(--s98-face);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-djp .kd-panel-body {
+  background: var(--kd-panel);
+  box-shadow: inset 1px 0 var(--s98-white), inset -1px -1px var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-djp-toggle-label {
+  color: var(--kd-text-body);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-djp-toggle-state {
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+  border-radius: 2px;
+  padding: 2px 4px;
+  text-align: center;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-djp-toggle-state[data-onoff="on"] {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-djp-toggle:hover:not(:disabled) .kd-djp-toggle-label {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-djp-toggle:active:not(:disabled) .kd-djp-toggle-state {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-djp-groups > * + * {
+  border-top: 1px solid var(--s98-shadow);
+  box-shadow: inset 0 1px var(--s98-white);
+}
+/* Explorer: a pink cabinet with inset branches and raised source headers,
+   not an unstructured white column. Existing drag/reorder geometry is retained. */
+:root[data-theme-pack="sakulaptop98"] .kd-folder-pane {
+  background: var(--s98-face);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-list {
+  margin: 6px;
+  padding: 3px;
+  background: var(--kd-panel);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-sidebar-root-slot {
+  background: var(--kd-panel-inset);
+  margin-block: 3px;
+  box-shadow: inset 1px 0 var(--s98-shadow), inset -1px -1px var(--s98-white);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder[data-sidebar-root-row],
+:root[data-theme-pack="sakulaptop98"] .kd-folder-list > .kd-folder-action {
+  background: var(--s98-face);
+  box-shadow: var(--s98-raised);
+  border-radius: 2px;
+  min-height: 1.95rem;
+  color: var(--kd-text-body);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder[data-sidebar-root-row]:hover,
+:root[data-theme-pack="sakulaptop98"] .kd-folder-list > .kd-folder-action:hover:not(:disabled) {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-list > .kd-folder-action:active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder:is([data-active="true"], [data-selected="true"]) {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder:is([data-active="true"], [data-selected="true"]) :is(.kd-folder-count, .kd-folder-drag) {
+  color: inherit;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-count {
+  padding: 1px 4px;
+  color: var(--kd-text-body);
+  background: var(--kd-panel-inset);
+  box-shadow: inset 1px 1px var(--s98-shadow), 1px 1px var(--s98-white);
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-caret:has(svg) {
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+  color: var(--kd-text);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-caret:disabled {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-more {
+  display: none;
+  justify-content: center;
+  width: 1.25rem;
+  min-height: 1.25rem;
+  color: var(--kd-text-body);
+  background: var(--s98-face);
+  box-shadow: var(--s98-raised);
+  border-radius: 2px;
+}
+/* Keep counts at the right edge until the action actually appears. */
+:root[data-theme-pack="sakulaptop98"] .kd-folder:is(:hover, :focus-within) .kd-folder-more {
+  display: inline-flex;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-narrow-global-actions, .kd-narrow-source-roots, .kd-narrow-source-children) {
+  background: var(--kd-panel);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-narrow-folder-rail button {
+  border-radius: 2px;
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-narrow-folder-rail button[data-active="true"] {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-djp-slider-track {
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 2px;
+  box-shadow: inset 0 1px var(--s98-frame), 0 1px var(--s98-white);
+}
+
+/* EXPLORER / TABLE — inset pink listing, pink column faces, compact typesetting.
+   Preserve the original virtual row height and column widths. */
+:root[data-theme-pack="sakulaptop98"] :is(.kd-table-wrap, .kd-workspace-pane > .kd-scroll, .kd-overlay-scroll-host) {
+  background-color: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-table {
+  background: var(--kd-panel-inset);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-table thead th {
+  background: #eaa0b6;
+  color: var(--kd-text);
+  box-shadow: var(--s98-raised);
+  border-bottom-color: transparent;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-table tbody td {
+  border-bottom-color: #efd7de;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-td-strong {
+  color: var(--kd-text);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder {
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-count {
+  color: var(--kd-muted);
+  font-variant-numeric: tabular-nums;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder:not([data-selected="true"]):hover {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-thumb, .kd-cover, .kd-cover-edit, .kd-stream-detail-cover, .kd-song-preview-cover, .kd-lyrics-cover) {
+  border-radius: 2px;
+  box-shadow: 1px 1px 0 var(--s98-shadow), -1px -1px 0 var(--s98-white);
+}
+/* Readouts retain Camelot's meaningful hue, but get a legible instrument face
+   instead of the default loose coloured text. No change to virtual row heights. */
+:root[data-theme-pack="sakulaptop98"] .kd-camelot:not([data-empty="true"]) {
+  min-width: 2.15rem;
+  padding: 2px 5px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kd-key-color, var(--kd-muted)) 14%, var(--kd-panel-inset));
+  color: color-mix(in srgb, var(--kd-key-color, var(--kd-text)) 55%, #34262d);
+  box-shadow: inset 1px 1px var(--s98-shadow), 1px 1px var(--s98-white);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-loudness-number[data-tone="warm"] { color: #846013; }
+:root[data-theme-pack="sakulaptop98"] .kd-loudness-number[data-tone="hot"] { color: #a24520; }
+:root[data-theme-pack="sakulaptop98"] .kd-table-rating > button:has(svg[fill="currentColor"]),
+:root[data-theme-pack="sakulaptop98"] .kd-table-rating > button:hover,
+:root[data-theme-pack="sakulaptop98"] .kd-table-rating > button:has(~ button:hover) { color: #96611c; }
+:root[data-theme-pack="sakulaptop98"] .kd-table thead th {
+  letter-spacing: normal;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-thumb-glass {
+  background: color-mix(in srgb, var(--kd-panel-inset) 86%, transparent);
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-cover-candidate, .kd-song-preview-head) {
+  background: var(--kd-panel-inset);
+  border-color: var(--s98-shadow);
+  border-radius: 2px;
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-stat-label, .kd-analysis-metric-label, .kd-field-label) {
+  letter-spacing: normal;
+  text-transform: none;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-context-menu > button, .kd-context-menu .vj-add-menu button, .vj-menu > button) {
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-context-menu > button:hover:not(:disabled) {
+  color: var(--kd-theme);
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-wave-playhead {
+  background: #751431;
+  box-shadow: 1px 0 #fff8f5;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-wave-fallback::before { background: var(--kd-line-soft); }
+:root[data-theme-pack="sakulaptop98"] .kd-wave-fallback-fill { background: var(--kd-theme); }
+
+/* READOUTS / MIXER — number plates and control wells, not more floating cards. */
+:root[data-theme-pack="sakulaptop98"] :is(.kd-stat-grid, .kd-analysis-deck, .kd-stream-analysis-status) {
+  background: var(--kd-panel-inset);
+  border-color: transparent;
+  border-radius: 2px;
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-stat {
+  background: transparent;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-stat-value, .kd-analysis-metric-value) {
+  color: var(--kd-text);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-control {
+  background: var(--s98-face);
+  box-shadow: var(--s98-window);
+  --kd-fader-thumb: #fbd7e1;
+  --kd-fader-thumb-border: #69424e;
+  --kd-knob-boost: #921c40;
+  --kd-knob-cut: #307155;
+  --kd-knob-needle: #34262d;
+  --kd-eq-zero: #ad6f83;
+  --kd-eq-guide: #d998ad;
+  --kd-eq-guide-major: #d9a5b1;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-control-head {
+  background: var(--s98-face);
+  box-shadow: none;
+  gap: 0.4rem;
+  padding: 3px;
+  overflow: visible;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-control-readout {
+  width: 100%;
+  padding: 0.15rem 0.35rem;
+  background: var(--kd-wave-detail-bg);
+  box-shadow: var(--s98-sunken);
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-control-readout[data-kind="key"] {
+  width: 100%;
+  padding-left: 1.55rem;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-control-readout > strong {
+  color: var(--kd-text);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-control-readout[data-kind="key"] > strong {
+  color: color-mix(in srgb, var(--kd-key-color, var(--kd-text)) 55%, #34262d);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-key-nudge { left: 3px; }
+:root[data-theme-pack="sakulaptop98"] :is(.kd-manager-key-nudge > button, .kd-manager-panel-action) {
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+  border-radius: 2px !important;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-manager-key-nudge > button, .kd-manager-panel-action):active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-header-tempo {
+  background: var(--kd-panel);
+  box-shadow: var(--s98-sunken);
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-dj-arcknob-body {
+  fill: var(--s98-face-hi);
+  stroke: var(--s98-frame);
+  stroke-width: 1.3;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-dj-arcknob-track {
+  stroke: var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-dj-arcknob-needle {
+  stroke: var(--s98-frame);
+  stroke-width: 2;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-manager-mixer-eq, .kd-manager-mixer-eq > .kd-dj-eq-chart,
+  .kd-manager-scroll-wave, .kd-manager-focus-wave, .kd-dj-eq-chart) {
+  background: var(--kd-wave-detail-bg) !important;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-manager-mixer-eq, .kd-manager-scroll-wave) {
+  border-color: var(--s98-shadow);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-focus-wave {
+  --kd-manager-beat-minor: #d998ad;
+  --kd-manager-beat-major: #ad6f83;
+  --kd-manager-beat-label: #704452;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-dj-eq-curve, .kd-manager-mixer-eq .kd-dj-eq-curve) > path {
+  stroke: #921c40;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-dj-eq-filter, .kd-manager-mixer-eq .kd-dj-eq-filter) > path {
+  stroke: #307155;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-header-tempo {
+  --kd-manager-tempo-track: #ad6f83;
+  --kd-manager-tempo-tick: #ad6f83;
+  --kd-manager-tempo-center: #69424e;
+  --kd-manager-tempo-thumb: #69424e;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-manager-header-tempo > input[type="range"]::-webkit-slider-thumb {
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+  border-radius: 2px;
+}
+
+/* MIXING EDITOR — same title rails and inset work areas. No tinting the video. */
+:root[data-theme-pack="sakulaptop98"] :is(.vj-workshop, .vj-inspector, .vj-clip-properties-bar) {
+  background: var(--kd-panel);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.vj-workshop-toolbar, .vj-timeline-scale,
+  .vj-track-label, .vj-time-ruler, .vj-timeline-overview, .vj-clip-properties > header) {
+  background: var(--s98-face);
+  border-color: var(--s98-shadow);
+  box-shadow: var(--s98-raised);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.vj-track-label-heading, .vj-ruler-rail > span, .vj-timeline-time) {
+  color: var(--kd-muted);
+}
+:root[data-theme-pack="sakulaptop98"] .vj-inspector-heading {
+  background: var(--kd-panel);
+}
+:root[data-theme-pack="sakulaptop98"] :is(.vj-timeline, .vj-track-row) {
+  background-color: var(--kd-panel-inset);
+}
+:root[data-theme-pack="sakulaptop98"] .vj-clip {
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.vj-property-group > legend, .vj-inspector h3) {
+  color: var(--kd-text);
+}
+:root[data-theme-pack="sakulaptop98"] .vj-task-heading {
+  background: var(--s98-caption);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 -1px var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-live-vj .kd-live-vj-set-delete {
+  background: var(--s98-face);
+  color: var(--kd-danger);
+  border-radius: 2px;
+  box-shadow: var(--s98-raised);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-live-vj .kd-live-vj-set-delete:hover:not(:disabled) {
+  background: var(--s98-face-hi);
+  color: var(--kd-danger);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-live-vj .kd-live-vj-set-delete:active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+}
+
+:root[data-theme-pack="sakulaptop98"] .kd-lyrics {
+  --kd-lyrics-ink: var(--kd-text);
+  --kd-lyrics-soft: #704452;
+  --kd-lyrics-faint: #805261;
+  background: var(--s98-content-paper);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-detail-lyrics-panel .kd-panel-body {
+  background: var(--s98-content-paper);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-lyrics-head {
+  background: var(--s98-caption);
+  border-bottom-color: var(--s98-frame);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 -1px var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-lyrics-line[data-active="true"] {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-lyrics-line:not([data-active="true"]) {
+  opacity: 0.65;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-lyrics-line[data-dist="1"] {
+  opacity: 0.82;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-desktop-lyrics {
+  --kd-desktop-lyrics-accent: #ffb7c5;
+  --kd-desktop-lyrics-dim: #fff8f5;
+  --kd-desktop-lyrics-secondary: #efb3c4;
+  --kd-desktop-lyrics-stroke: #34262d;
+}
+
+/* ACTIVITY — an actual dark terminal well, not the old blue-grey light branch. */
+:root[data-theme-pack="sakulaptop98"] :is(.kd-activity-terminal, .kd-activity-log-detail) {
+  --kd-theme: #ffb7c5;
+  background: #34262d;
+  color: #f3c5d1;
+  border-color: transparent;
+  border-radius: 2px;
+  box-shadow: var(--s98-sunken);
+  scrollbar-color: #ad6f83 #34262d;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-log-line + .kd-activity-log-line {
+  border-top-color: #4e3a41;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-log-line:hover {
+  background: #4e3a41;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-activity-log-line > time, .kd-activity-log-message > span,
+  .kd-activity-log-detail dt, .kd-activity-log-detail-head > span, .kd-activity-log-detail > p) {
+  color: #d2a4b0;
+}
+:root[data-theme-pack="sakulaptop98"] :is(.kd-activity-log-detail-head, .kd-activity-log-detail > p) {
+  border-color: #4e3a41;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-log-level {
+  color: #b5caca;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-log-line[data-level="warn"] .kd-activity-log-level {
+  color: #eac68b;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-log-line[data-level="error"] .kd-activity-log-level {
+  color: #ff9fb5;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-terminal :focus-visible {
+  outline-color: #f3c5d1;
+}
+
+/* SCROLLBARS — works for both native overflow and KDJ's overlay handles. */
+:root[data-theme-pack="sakulaptop98"] ::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+:root[data-theme-pack="sakulaptop98"] ::-webkit-scrollbar-track {
+  background: repeating-conic-gradient(var(--s98-face-hi) 0 25%, var(--s98-white) 0 50%) 0 0 / 2px 2px;
+  box-shadow: inset 1px 1px var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] ::-webkit-scrollbar-thumb {
+  background: var(--s98-face);
+  border: 0;
+  border-radius: 2px;
+  box-shadow: var(--s98-raised);
+}
+:root[data-theme-pack="sakulaptop98"] ::-webkit-scrollbar-corner {
+  background: var(--s98-face);
+}
+/* KDJ uses overlay handles rather than native scrollbars in the main panes.
+   Paint inside their existing 14px hit area; do not move content or fake arrows. */
+/* OverlayScrollbars hides unused handles with inline display:none. Do not
+   paint a track for an axis which has no scrollable overflow. */
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars:has(.kd-scroll-handle[data-axis="vertical"]:not([style*="display: none"]))::before,
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars:has(.kd-scroll-handle[data-axis="horizontal"]:not([style*="display: none"]))::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  background: repeating-conic-gradient(var(--s98-face-hi) 0 25%, var(--s98-white) 0 50%) 0 0 / 2px 2px;
+  box-shadow: inset 1px 1px var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars::before {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 12px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars::after {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 12px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle {
+  z-index: 1;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="vertical"]::after {
+  width: 12px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="horizontal"]::after {
+  height: 12px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle::after,
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scroll-host:hover .kd-scroll-handle::after,
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-active="true"] .kd-scroll-handle::after,
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-dragging] .kd-scroll-handle::after {
+  background: var(--s98-face);
+  border-radius: 2px;
+  box-shadow: var(--s98-raised);
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle:hover::after {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle:focus-visible::after {
+  outline: 1px solid var(--s98-frame);
+  outline-offset: -3px;
+}
+@media (pointer: coarse) {
+  :root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars::before {
+    width: 8px;
+  }
+  :root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars::after {
+    height: 8px;
+  }
+  :root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="vertical"]::after {
+    width: 8px;
+  }
+  :root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="horizontal"]::after {
+    height: 8px;
+  }
+}
+
+/* STATES — selection changes ink only. Physical commands and tabs keep their
+   existing neutral faces in both states; list/text actions remain unboxed. */
+:root[data-theme-pack="sakulaptop98"] :is(button[aria-pressed="true"], button[aria-checked="true"],
+  button[aria-selected="true"], [role="tab"][aria-selected="true"],
+  .kd-folder[data-selected="true"], .vj-source[data-selected="true"], .kd-activity-log-line[data-selected="true"]) {
+  color: var(--kd-theme) !important;
+}
+:root[data-theme-pack="sakulaptop98"] :is(button[aria-pressed="true"], button[aria-checked="true"],
+  button[aria-selected="true"], [role="tab"][aria-selected="true"],
+  .kd-folder[data-selected="true"], .vj-source[data-selected="true"], .kd-activity-log-line[data-selected="true"]):not(:where(
+    .kd-btn, .kd-chrome-btn, .kd-player-btn, .kd-player-step, .kd-activity-search-toggle,
+    .kd-folder[data-sidebar-root-row], .kd-narrow-folder-rail button, .kd-pip-float-chrome button,
+    .kd-segment > button, .kd-activity-log-tabs > button, .kd-camelot-grid-key,
+    .kd-aside-face > button, .vj-header > button, .vj-workshop-toolbar > button)) {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr:is([aria-selected="true"], [data-focus="true"]) td {
+  background: transparent;
+  color: var(--kd-theme);
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr:is([aria-selected="true"], [data-playing="true"]) .kd-td-strong {
+  color: var(--kd-theme);
+}
+
+@media (forced-colors: active) {
+  :root[data-theme-pack="sakulaptop98"] :is(.kd-panel, .kd-dialog, .kd-context-menu, .kd-input, .kd-select,
+    .kd-textarea, .kd-btn, .kd-table thead th, .kd-activity-terminal) {
+    border-color: CanvasText;
+    box-shadow: none;
+  }
+  :root[data-theme-pack="sakulaptop98"] :is(.kd-app-chrome, .kd-panel-head, .kd-sheet-head, .kd-dialog-head, .vj-header) {
+    background: Canvas;
+    color: CanvasText;
+    text-shadow: none;
+  }
+  :root[data-theme-pack="sakulaptop98"] :focus-visible {
+    outline: 1px solid Highlight;
+  }
+}

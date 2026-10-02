@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KDJ 错误收集</title>
+<style>
+:root { color-scheme: light dark; font: 14px system-ui,sans-serif; } body { margin: 28px auto; padding: 0 20px; max-width: 1100px; } header, .actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; } h1 { font-size: 20px; flex: 1; } button,input,select { font: inherit; padding: 6px 9px; border: 1px solid GrayText; border-radius: 5px; background: transparent; color: inherit; } button { cursor: pointer; } button:focus-visible { outline: 2px solid #e64754; } #status { min-height: 1.5em; } table { border-collapse: collapse; width: 100%; font-size: 12px; } td,th { border-bottom: 1px solid GrayText; padding: 9px 4px; text-align: left; overflow-wrap: anywhere; } dialog { width: min(950px,90vw); max-height: 85vh; padding: 18px; border: 1px solid GrayText; border-radius: 8px; } dialog::backdrop { background: #0007; } pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; user-select: text; } #delete { color: #e64754; } [hidden] { display: none !important; }
+</style><script src="/dashboard.js" defer></script></head><body>
+<header><h1>KDJ 错误收集</h1><button id="logout" hidden>退出</button></header>
+<section id="login"><label>管理员密钥 <input id="token" type="password" autocomplete="off" spellcheck="false"></label> <button id="connect">登录</button></section>
+<p id="status" role="status"></p>
+<section id="panel" hidden><div class="actions"><label>分类 <select id="category"><option value="">全部</option><option>playback</option><option>platform</option><option>local</option><option>workshop-export</option><option>visualizer-export</option><option>render</option><option>theme</option><option>hardware</option><option>runtime</option><option>native</option><option>console</option></select></label><button id="refresh">刷新</button></div>
+<table><thead><tr><th>接收时间</th><th>版本 / 系统</th><th>分类</th><th>错误条数</th><th>报告</th></tr></thead><tbody id="reports"></tbody></table><button id="more" hidden>下一页</button></section>
+<dialog id="detail"><div class="actions"><button id="download">下载 JSON</button><button id="delete">删除报告</button><button id="close">关闭</button></div><pre id="body" tabindex="0"></pre></dialog>
+</body></html>

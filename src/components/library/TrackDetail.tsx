@@ -4,7 +4,9 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { Pencil, Plus, RotateCcw, Search, Star, Upload } from "lucide-react";
 import { api } from "../../lib/api";
@@ -24,31 +26,22 @@ import {
   type TrackCoverDropDetail,
 } from "../../lib/trackDrag";
 import type { Platform, SongSource, Track, TrackPatch } from "../../types";
-import { Button, Field, InlineNotice, Panel, PanelStack } from "../common";
+import { Button, Field, InlineNotice, Panel } from "../common";
+import { DetailPanelStack } from "./DetailPanelStack";
 import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
 import { CamelotWheel } from "./CamelotWheel";
-import { HarmonicList } from "./HarmonicList";
 import { useVideoPip } from "../../lib/videoPip";
-import { DETAIL_PANELS_DEFAULT_FIRST_IDS, DETAIL_PANELS_STORAGE_KEY } from "../../lib/detailPanelPrefs";
+import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
+import { DETAIL_PANELS_STORAGE_KEY, useDetailPanelPrefs } from "../../lib/detailPanelPrefs";
+import { LyricsDetailPanel } from "../player/LyricsView";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
-import { VjSearchPanel } from "./VjSearchPanel";
-import { pointPatch, Waveform } from "./Waveform";
 import { EnergyMeter } from "./TrackTable";
-import { NowPlayingControlPanel } from "../player/NowPlayingControlPanel";
-import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
 import {
   LocalTrackCacheFacts,
   localDownloadPlatform,
 } from "../player/LocalTrackCacheFacts";
-
-/** PlayerBar 播放时广播的位置，用来在节拍网格上画播放头。 */
-export const POSITION_EVENT = "kd:position";
-export interface PositionDetail {
-  trackId: number;
-  position: number;
-}
 
 /** 后端只收这两种：转码要一整个图像库，而截图是 PNG、网上扒的图是 JPEG，够用了。 */
 const COVER_MIME = ["image/jpeg", "image/png"];
@@ -96,7 +89,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-/** 采样率 / 来源 / 文件创建 / 入库 / 路径——只读事实，挂在 Metadata 面板底部。 */
+/** 编辑时保留只读文件事实；日常浏览在曲目表对应列中显示。 */
 function FileRows({ track }: { track: Track }) {
   return (
     <>
@@ -180,28 +173,33 @@ function buildPatch(track: Track, draft: Draft): TrackPatch {
   return patch;
 }
 
-export function TrackDetail({ track }: { track: Track }) {
+export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEdit, onUpdated, renderPanels }: {
+  track: Track;
+  restoreTarget?: HTMLElement | null;
+  renderPanels?(information: ReactNode, metadata: ReactNode, analysis?: ReactNode): ReactNode;
+  mode?: "detail" | "preview" | "metadata" | "summary";
+  onEdit?(): void;
+  onUpdated?(track: Track): void;
+}) {
+  const preview = mode === "preview";
   const settings = useAppStore((state) => state.settings);
-  const detailWaveformVisible = usePlaybackPrefs((state) => state.detailWaveformVisible);
-  const detailControlVisible = usePlaybackPrefs((state) => state.detailControlVisible);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
   const setCover = useLibraryStore((state) => state.setCover);
   const rereadTags = useLibraryStore((state) => state.rereadTags);
-  const selectTrack = useLibraryStore((state) => state.selectTrack);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const keyFilter = useLibraryStore((state) => state.filter.key);
-  // 小窗/系统 PiP 已接管这支本地视频时，详情里不再挂第二路解码
+  const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  // Playback belongs to the activity panel/float; selection must not mount another decoder.
+  const playbackOwnsVideo = playingTrack?.id === track.id;
   const pipOwnsVideo = useVideoPip(
     (state) =>
       state.active &&
-      state.mode !== "panel" &&
       state.session?.source === "local" &&
       state.session.trackId === track.id,
   );
 
-  const [position, setPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(mode === "metadata");
   const [draft, setDraft] = useState<Draft>(() => toDraft(track));
   /** 没封面时后端 404。记下来换成一个可以点的占位块，而不是留一个破图标。 */
   const [hasCover, setHasCover] = useState(true);
@@ -236,9 +234,8 @@ export function TrackDetail({ track }: { track: Track }) {
   // 后台分析、WS 推来的 library.updated 都会换掉这个对象，
   // 跟着重置的话用户正在输入的半句话会被一次后台刷新抹掉。
   useEffect(() => {
-    setEditing(false);
+    setEditing(mode === "metadata");
     setDraft(toDraft(track));
-    setPosition(null);
     setNotice("");
     setHasCover(true);
     setCoverLoading(true);
@@ -246,16 +243,7 @@ export function TrackDetail({ track }: { track: Track }) {
     setCoverCandidates([]);
     coverSearchEpochRef.current += 1;
     // eslint 的 exhaustive-deps 会想要整个 track，那正是上面说的不能要的东西
-  }, [track.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const onPosition = (event: Event) => {
-      const detail = (event as CustomEvent<PositionDetail>).detail;
-      setPosition(detail.trackId === track.id ? detail.position : null);
-    };
-    window.addEventListener(POSITION_EVENT, onPosition);
-    return () => window.removeEventListener(POSITION_EVENT, onPosition);
-  }, [track.id]);
+  }, [track.id, mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * 成功不报喜：
@@ -284,6 +272,7 @@ export function TrackDetail({ track }: { track: Track }) {
       return;
     }
     const result = await updateTrack(track.id, patch);
+    onUpdated?.(result);
     closeMetadataEditor();
     // 数据库存住了、文件没写进去（只读 / 被 DJ 软件占着）时必须说出来，
     // 否则用户会以为拖进 Rekordbox 的那份也是新的
@@ -302,7 +291,8 @@ export function TrackDetail({ track }: { track: Track }) {
       setNotice("");
       try {
         const file = await load();
-        await setCover(track.id, file);
+        const updated = await setCover(track.id, file);
+        onUpdated?.(updated);
         setHasCover(true);
         setCoverLoading(true);
         return true;
@@ -314,7 +304,7 @@ export function TrackDetail({ track }: { track: Track }) {
         setBusy(false);
       }
     },
-    [busy, setCover, track.id],
+    [busy, setCover, track.id, onUpdated],
   );
 
   const reuseCover = useCallback(
@@ -330,6 +320,7 @@ export function TrackDetail({ track }: { track: Track }) {
   );
 
   useEffect(() => {
+    if (preview) return;
     const onTrackCoverDrop = (event: Event) => {
       const detail = (event as CustomEvent<TrackCoverDropDetail>).detail;
       if (detail?.targetTrackId !== track.id) return;
@@ -340,7 +331,7 @@ export function TrackDetail({ track }: { track: Track }) {
     };
     window.addEventListener(TRACK_COVER_DROP_EVENT, onTrackCoverDrop);
     return () => window.removeEventListener(TRACK_COVER_DROP_EVENT, onTrackCoverDrop);
-  }, [reuseCover, track.id]);
+  }, [reuseCover, track.id, preview]);
 
   const pickCover = (file: File | null | undefined) => {
     if (!file) return;
@@ -435,9 +426,11 @@ export function TrackDetail({ track }: { track: Track }) {
 
   const openCoverEditor = () => {
     if (consumeSuppressedCoverClick() || busy) return;
+    if (preview) { onEdit?.(); return; }
     if (!editing) setDraft(toDraft(track));
     setEditing(true);
-    // [+] 是入口，不让用户还要在右侧往下找 Metadata；面板顺序仍尊重用户自己的排列。
+    useDetailPanelPrefs.getState().setVisible("metadata", true);
+    // 点击封面展开编辑器；面板顺序仍尊重用户自己的排列。
     requestAnimationFrame(() => {
       document
         .querySelector<HTMLElement>(
@@ -503,8 +496,7 @@ export function TrackDetail({ track }: { track: Track }) {
   const bpmConfPct =
     track.bpm_confidence !== null ? Math.round(track.bpm_confidence * 100) : null;
 
-  return (
-    <div className="kd-col kd-track-detail" style={{ gap: "0.6rem", padding: "0.7rem" }}>
+  const information = (
       <div
         className="kd-row kd-track-detail-hero"
         style={{ gap: "0.6rem", alignItems: "flex-start" }}
@@ -515,11 +507,11 @@ export function TrackDetail({ track }: { track: Track }) {
           role="button"
           tabIndex={0}
           aria-label="编辑封面"
-          title={hasCover ? "点击进入 Metadata 编辑" : "点击 [+] 进入 Metadata 编辑"}
+          title={hasCover ? "点击编辑曲目信息" : "点击 [+] 编辑曲目信息"}
           data-cover-empty={!hasCover ? "true" : undefined}
           data-dropping={dropping ? "true" : undefined}
           data-kd-track-id={track.id}
-          {...{ [TRACK_COVER_DROP_TARGET_ATTR]: "true" }}
+          {...{ [TRACK_COVER_DROP_TARGET_ATTR]: preview ? undefined : "true" }}
           style={{
             width: 88,
             height: 88,
@@ -538,9 +530,9 @@ export function TrackDetail({ track }: { track: Track }) {
           }}
           // stopPropagation 是必须的：外层有接收音频文件的拖放区，
           // 不拦住的话拖进来的图片会被当成"要入库的曲目"
-          onDragOver={coverDragOver}
-          onDragLeave={coverDragLeave}
-          onDrop={coverDrop}
+          onDragOver={preview ? undefined : coverDragOver}
+          onDragLeave={preview ? undefined : coverDragLeave}
+          onDrop={preview ? undefined : coverDrop}
         >
           {hasCover ? (
             <>
@@ -573,17 +565,6 @@ export function TrackDetail({ track }: { track: Track }) {
           )}
           </div>
         </div>
-        <input
-          ref={coverInput}
-          type="file"
-          accept="image/jpeg,image/png"
-          style={{ display: "none" }}
-          onChange={(event) => {
-            pickCover(event.target.files?.[0]);
-            // 清空 value：连着挑同一个文件两次时 change 不会再触发
-            event.target.value = "";
-          }}
-        />
         <div className="kd-track-detail-summary" style={{ minWidth: 0 }}>
           <div className="kd-truncate" style={{ fontWeight: 700, fontSize: "var(--kd-size-lg)" }}>
             {track.title || track.filename}
@@ -601,35 +582,19 @@ export function TrackDetail({ track }: { track: Track }) {
               <span className="kd-track-detail-file-facts-copy">{fileFactsText}</span>
             </div>
             <LocalTrackCacheFacts track={track} />
+            {track.tags.length > 0 && <div className="kd-row" style={{ gap: "0.25rem", flexWrap: "wrap" }}>
+              {track.tags.map(tag => <span key={tag} className="kd-chip" style={{ textTransform: "none" }}>{tag}</span>)}
+            </div>}
+            {track.comment && <p className="kd-muted" style={{ whiteSpace: "pre-wrap" }}>{track.comment}</p>}
           </div>
         </div>
       </div>
+  );
 
-      <InlineNotice text={notice} onDismiss={() => setNotice("")} />
-
-      {/* 这几块的顺序用户可以拖着调，长期记住——整理曲库时想先看元数据，
-          排 set 时想先看接下一首，与其替他选一个，不如让他拖一次然后不用再想。 */}
-      <PanelStack
-        storageKey={DETAIL_PANELS_STORAGE_KEY}
-        defaultFirstIds={DETAIL_PANELS_DEFAULT_FIRST_IDS}
-      >
-        {isVideoTrack(track.format) && !pipOwnsVideo && (
-          <Panel key="video" heading="Video" padded={false} dense>
-            <LocalVideoPlayer track={track} />
-          </Panel>
-        )}
-        {detailControlVisible ? (
-          <NowPlayingControlPanel
-            key="now-playing-control"
-            track={track}
-            keyNotation={settings?.key_notation ?? "camelot"}
-            filterResonance={settings?.filter_resonance ?? "high"}
-            onError={setNotice}
-          />
-        ) : null}
+  const metadata = (
         <Panel
         key="metadata"
-        heading="Metadata"
+        heading={editing ? "曲目信息编辑" : "Meta"}
         padded
         dense
         actions={
@@ -652,7 +617,10 @@ export function TrackDetail({ track }: { track: Track }) {
                 aria-label="从文件重读标签"
                 title="从文件重读标签：库里空着、文件里其实有的时候用"
                 disabled={busy}
-                onClick={run("重读标签", () => rereadTags(track.id))}
+                onClick={run("重读标签", async () => {
+                  const updated = await rereadTags(track.id);
+                  onUpdated?.(updated);
+                })}
               >
                 <RotateCcw size={12} />
               </Button>
@@ -663,6 +631,7 @@ export function TrackDetail({ track }: { track: Track }) {
                 onClick={() => {
                   // 进编辑态才取一次现值：草稿不跟着后台刷新走，
                   // 所以这里是它唯一和真实数据对齐的时机
+                  if (preview) { onEdit?.(); return; }
                   setDraft(toDraft(track));
                   setEditing(true);
                 }}
@@ -828,9 +797,7 @@ export function TrackDetail({ track }: { track: Track }) {
                     {tag}
                   </span>
                 ))
-              ) : (
-                <span className="kd-faint">没有标签</span>
-              )}
+              ) : null}
             </div>
             {track.comment && (
               <p className="kd-muted" style={{ marginTop: "0.3rem", whiteSpace: "pre-wrap" }}>
@@ -847,8 +814,36 @@ export function TrackDetail({ track }: { track: Track }) {
             <FileRows track={track} />
           </div>
         )}
+        <div className="kd-row" style={{ gap: "0.75rem", alignItems: "center" }}>
+          <span className="kd-muted kd-nowrap">Rating</span>
+          <div className="kd-row" style={{ gap: "0.15rem" }}>
+            {[1, 2, 3, 4, 5].map((value) => (
+              <button
+                key={value}
+                type="button"
+                className="kd-btn kd-btn-icon"
+                data-variant="ghost"
+                data-size="sm"
+                aria-label={`${value} 星`}
+                onClick={() =>
+                  void updateTrack(track.id, { rating: track.rating === value ? 0 : value }).then(updated => onUpdated?.(updated)).catch(
+                    (error: unknown) => setNotice(`评分失败：${(error as Error).message}`),
+                  )
+                }
+              >
+                <Star
+                  size={13}
+                  fill={value <= track.rating ? "var(--kd-theme)" : "none"}
+                  color={value <= track.rating ? "var(--kd-theme)" : "currentColor"}
+                />
+              </button>
+            ))}
+          </div>
+        </div>
       </Panel>
+  );
 
+  const analysis = (
       <Panel key="analysis" heading="Analysis" padded dense>
         {/* 调号轮 + 读数同处一面：像一套仪表，而不是圆旁边再挂一个框。 */}
         <div className="kd-analysis-deck">
@@ -920,80 +915,31 @@ export function TrackDetail({ track }: { track: Track }) {
           </div>
         </div>
 
-        {/* 波形独占底行。KEY 已由左侧圆图表达，不再重复。 */}
-        {detailWaveformVisible ? (
-          <Waveform
-            trackId={track.id}
-            track={track}
-            renderProfile="release-overview"
-            position={position}
-            duration={track.duration ?? 0}
-            cueMs={track.cue_ms}
-            endMs={track.end_ms}
-            height={56}
-            onSetPoint={async (kind, at) => {
-              const patch = pointPatch(kind, at, track.cue_ms, track.end_ms);
-              if (typeof patch === "string") return patch;
-              await updateTrack(track.id, patch);
-            }}
-          />
-        ) : null}
-        <div className="kd-row kd-faint kd-analysis-meta">
-          开始{" "}
-          {track.cue_ms !== null ? `${(track.cue_ms / 1000).toFixed(2)}s` : DASH}
-          <span className="kd-toolbar-gap" />
-          结束{" "}
-          {track.end_ms !== null ? `${(track.end_ms / 1000).toFixed(2)}s` : DASH}
-          <span className="kd-toolbar-gap" />
-          首拍 {track.first_beat !== null ? `${track.first_beat.toFixed(3)}s` : DASH}
-          <span className="kd-toolbar-gap" />
-          {track.analyzed_at ? `分析于 ${formatDate(track.analyzed_at)}` : "未分析"}
-        </div>
         {track.analysis_error && (
           <p style={{ color: "var(--kd-warn)" }}>{track.analysis_error}</p>
         )}
       </Panel>
+  );
 
-      <Panel key="harmonic" heading="Next" padded dense>
-        {/* 推荐可能有几十首：留在详情栏内滚动，不把后面的面板挤出视野。 */}
-        <div className="kd-scroll" style={{ maxHeight: "13rem" }}>
-          <HarmonicList track={track} onSelect={selectTrack} />
-        </div>
-      </Panel>
+  return (
+    <div className={`kd-col kd-track-detail${preview ? " kd-track-preview" : ""}`}
+      style={preview || renderPanels ? undefined : { gap: "0.6rem", padding: "0.7rem" }}>
+      <input ref={coverInput} type="file" accept="image/jpeg,image/png" style={{ display: "none" }}
+        onChange={event => {
+          pickCover(event.target.files?.[0]);
+          event.target.value = "";
+        }} />
+      {!renderPanels && !preview && mode !== "metadata" && information}
+      <InlineNotice text={notice} onDismiss={() => setNotice("")} />
+      {renderPanels ? renderPanels(information, metadata, analysis) : mode === "summary" ? metadata : <DetailPanelStack restoreTarget={restoreTarget} preview={preview}>
 
-      <Panel key="vj" heading="Explore" padded dense>
-        <VjSearchPanel track={track} />
-      </Panel>
-
-      <Panel key="rating" heading="Rating" padded dense>
-        {/* 评分不进编辑表单：点一下就是一个完整的意思，没有"改一半反悔"这回事 */}
-        <div className="kd-row" style={{ gap: "0.15rem" }}>
-          {[1, 2, 3, 4, 5].map((value) => (
-            <button
-              key={value}
-              type="button"
-              className="kd-btn kd-btn-icon"
-              data-variant="ghost"
-              data-size="sm"
-              aria-label={`${value} 星`}
-              // 再点当前星级 = 清零，不然打错了没法撤
-              onClick={() =>
-                void updateTrack(track.id, { rating: track.rating === value ? 0 : value }).catch(
-                  (error: unknown) => setNotice(`评分失败：${(error as Error).message}`),
-                )
-              }
-            >
-              <Star
-                size={13}
-                fill={value <= track.rating ? "var(--kd-theme)" : "none"}
-                color={value <= track.rating ? "var(--kd-theme)" : "currentColor"}
-              />
-            </button>
-          ))}
-        </div>
-      </Panel>
-
-      </PanelStack>
+        {mode === "detail" && <LyricsDetailPanel key="lyrics" track={track} />}
+        {mode === "detail" && isVideoTrack(track.format) && !playbackOwnsVideo && !pipOwnsVideo && (
+          <Panel key="video" heading="视频" padded={false} dense><LocalVideoPlayer track={track} /></Panel>
+        )}
+        {(mode === "metadata" || editing) && metadata}
+        {mode !== "metadata" && analysis}
+      </DetailPanelStack>}
     </div>
   );
 }

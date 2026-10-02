@@ -131,22 +131,64 @@ struct Analyze { track_id: i64, spectrum: Spectrum }
 // Typed body: a json! Value tree of an 18k-frame timeline peaks ~6x higher and widens every f32 to 17 digits.
 #[derive(Serialize)]
 struct Analyzed { timeline: kdj_analysis::visualizer::FeatureTimeline, signature: String }
-async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> ApiResult<Json<Analyzed>> {
+
+// Cache the serialized response: a warm reopen needs neither decode/FFT nor a second
+// allocation of thousands of JSON feature objects. File signatures invalidate replacements.
+#[derive(Default)]
+struct AnalysisCache(std::collections::VecDeque<(String, Bytes)>);
+impl AnalysisCache {
+    fn get(&mut self, key: &str) -> Option<Bytes> {
+        let index = self.0.iter().position(|(cached, _)| cached == key)?;
+        let entry = self.0.remove(index)?;
+        let bytes = entry.1.clone();
+        self.0.push_back(entry);
+        Some(bytes)
+    }
+    fn insert(&mut self, key: String, bytes: Bytes) {
+        const LIMIT: usize = 32 * 1024 * 1024;
+        if bytes.len() > LIMIT { return; }
+        self.0.retain(|(cached, _)| cached != &key);
+        self.0.push_back((key, bytes));
+        while self.0.len() > 4 || self.0.iter().map(|(_, value)| value.len()).sum::<usize>() > LIMIT {
+            self.0.pop_front();
+        }
+    }
+}
+fn analysis_response(bytes: Bytes) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], bytes).into_response()
+}
+async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> ApiResult<axum::response::Response> {
     let scene = Scene { spectrum: p.spectrum.clone(), ..Scene::with_image(std::env::temp_dir().join("kdj-studio-validation.png").to_string_lossy().into_owned()) };
     scene.validate().map_err(ApiError::bad_request)?;
     let audio = track_audio(&state, p.track_id)?;
+    let signature = fingerprint(&audio)?;
+    let key = serde_json::to_string(&("studio-60-v1", &audio, &signature, p.spectrum.bands, p.spectrum.sensitivity, p.spectrum.smoothing)).map_err(anyhow::Error::from)?;
+    static CACHE: std::sync::OnceLock<Mutex<AnalysisCache>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(AnalysisCache::default()));
+    if let Some(bytes) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Ok(analysis_response(bytes));
+    }
     let cancel = CancellationToken::new(); let _guard = cancel.clone().drop_guard();
+    static ANALYSIS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _slot = ANALYSIS.get_or_init(|| tokio::sync::Semaphore::new(1)).acquire().await.map_err(anyhow::Error::from)?;
+    // Concurrent previews share the completed result instead of queuing the same whole song.
+    if let Some(bytes) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Ok(analysis_response(bytes));
+    }
     let probe = media::probe(&audio, &cancel).await?;
     let duration = probe.check(false)?;
     api_check((1..=MAX_DURATION_MS).contains(&duration), "初版支持最长 30 分钟的完整音频")?;
-    let signature = fingerprint(&audio)?;
-    static ANALYSIS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    let _slot = ANALYSIS.get_or_init(|| tokio::sync::Semaphore::new(1)).acquire().await.map_err(anyhow::Error::from)?;
     let path = audio.clone(); let token = cancel.clone();
-    let timeline = tokio::task::spawn_blocking(move || kdj_analysis::visualizer::analyze_at_fps(&path, &p.spectrum, 60, &|| token.is_cancelled())).await.map_err(anyhow::Error::from)??;
+    let timeline = tokio::task::spawn_blocking(move || {
+        kdj_core::thread_qos::prefer_background();
+        kdj_analysis::visualizer::analyze_at_fps(&path, &p.spectrum, 60, &|| token.is_cancelled())
+    }).await.map_err(anyhow::Error::from)??;
     api_check(fingerprint(&audio)? == signature, "分析期间歌曲已变化，请重新打开工程")?;
     api_check((timeline.duration_seconds() * 1000. - duration as f64).abs() <= 250., "音轨解码不完整，不能导出")?;
-    Ok(Json(Analyzed { timeline, signature }))
+    let bytes = Bytes::from(serde_json::to_vec(&Analyzed { timeline, signature }).map_err(anyhow::Error::from)?);
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, bytes.clone());
+    Ok(analysis_response(bytes))
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,6 +230,7 @@ async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Ar
         let result = render(&p, &audio, &output, job.clone()).await;
         let mut g = job.inner.lock().unwrap(); g.pixels = None; g.snapshot.demand = None;
         if let Err(error) = result {
+            if !job.cancel.is_cancelled() { tracing::error!(error = %format!("{error:#}"), phase = %g.snapshot.phase, "可视化合成导出失败"); }
             if g.snapshot.phase != "done" {
                 g.snapshot.phase = if job.cancel.is_cancelled() { "canceled" } else { "failed" }.into();
                 g.snapshot.error = format!("{error:#}"); g.snapshot.status = if job.cancel.is_cancelled() { "已取消并清理临时文件" } else { "导出失败" }.into();
@@ -274,6 +317,22 @@ mod tests {
         let back: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(back["signature"], "1:2:3"); assert_eq!(back["timeline"]["frames"][1]["onset"].as_f64().unwrap() as f32, 0.3);
     }
+    #[test]
+    fn studio_analysis_cache_is_bounded_and_promotes_hits() {
+        let mut cache = AnalysisCache::default();
+        for key in ["a", "b", "c", "d"] { cache.insert(key.into(), Bytes::from_static(b"{}")); }
+        assert!(cache.get("a").is_some());
+        cache.insert("e".into(), Bytes::from_static(b"{}"));
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("a-changed-file").is_none());
+        cache.insert("a".into(), Bytes::from_static(b"new"));
+        assert_eq!(cache.get("a").unwrap(), Bytes::from_static(b"new"));
+        cache.insert("large".into(), Bytes::from(vec![0; 33 * 1024 * 1024]));
+        assert!(cache.get("large").is_none());
+        assert!(cache.0.len() <= 4);
+    }
+
     #[test]
     fn studio_editor_heartbeat_and_terminal_cancel() {
         let job = Job::new("heartbeat".into(), 1, 4);

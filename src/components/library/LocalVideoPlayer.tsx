@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { FloatingVideoControls, FloatingVideoScrub } from "../player/FloatingVideoControls";
 import { api } from "../../lib/api";
 import {
   AUDIO_FOCUS_EVENT,
@@ -43,12 +45,60 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     videoTransportEchoGuardRef.current = new VideoTransportEchoGuard();
   }
   const [error, setError] = useState("");
+  const [playing, setPlaying] = useState(false);
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(track.duration ?? 0);
+  const [fullscreen, setFullscreen] = useState(false);
+  const fullscreenRef = useRef(false);
+  const fullscreenPending = useRef(false);
+  const scrubPosition = useRef<number | null>(null);
+  const setVideoFullscreen = async (next: boolean) => {
+    if (fullscreenPending.current) return;
+    fullscreenPending.current = true;
+    try {
+      await getCurrentWindow().setFullscreen(next);
+      fullscreenRef.current = next;
+      setFullscreen(next);
+    } catch (reason) { setError(String(reason)); }
+    finally { fullscreenPending.current = false; }
+  };
+  useEffect(() => {
+    let alive = true;
+    let unlistenResize: (() => void) | undefined;
+    void getCurrentWindow().onResized(() => {
+      if (!fullscreenRef.current || fullscreenPending.current) return;
+      void getCurrentWindow().isFullscreen().then(value => {
+        if (alive && !value) { fullscreenRef.current = false; setFullscreen(false); }
+      }).catch(() => {});
+    }).then(stop => { if (alive) unlistenResize = stop; else stop(); }).catch(() => {});
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !fullscreenRef.current || event.defaultPrevented) return;
+      event.preventDefault();
+      void setVideoFullscreen(false);
+    };
+    window.addEventListener("keydown", escape);
+    return () => {
+      alive = false;
+      unlistenResize?.();
+      window.removeEventListener("keydown", escape);
+      if (fullscreenRef.current) void getCurrentWindow().setFullscreen(false).catch(() => {});
+    };
+  }, []);
+  useEffect(() => {
+    setPlaying(false);
+    setPosition(0);
+    setDuration(track.duration ?? 0);
+    scrubPosition.current = null;
+  }, [track.id]);
   const localSwap = useLocalVideoSwap({
     enabled: !hidden,
     trackId: hidden ? null : track.id,
     desiredPlayingRef,
     getRate: () => getLocalVideoClock(track.id)?.rate ?? getLatestPlayerSync(track.id)?.rate ?? 1,
     onActivate: (video) => {
+      setPlaying(!video.paused);
+      if (scrubPosition.current === null) setPosition(video.currentTime);
+      if (Number.isFinite(video.duration)) setDuration(video.duration);
       const clock = getLocalVideoClock(track.id);
       if (clock) synchronizerRef.current?.adoptClock(video, clock);
       else synchronizerRef.current?.reset();
@@ -233,6 +283,23 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     }
   }, [track.id]);
 
+  const seek = (at: number) => {
+    const position = Math.max(0, Math.min(duration, at));
+    setPosition(position);
+    broadcastMediaSync({ owner: "local-video", action: "seek", trackId: track.id, position });
+  };
+  const scrub = (event: PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    scrubPosition.current = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * duration;
+    setPosition(scrubPosition.current);
+  };
+  const finishScrub = () => {
+    const at = scrubPosition.current;
+    scrubPosition.current = null;
+    if (at !== null) seek(at);
+  };
+
   return (
     <div
       className="kd-local-video"
@@ -250,20 +317,29 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
           : undefined
       }
     >
-      <div className="kd-preview-frame">
+      <div className="kd-preview-frame kd-pip-float" data-fullscreen={fullscreen || undefined}
+        // Keep the viewport stable while switching sources; native frames are contain-fitted.
+        style={{ "--kd-preview-ratio": 16 / 9, aspectRatio: fullscreen ? "auto" : "16 / 9" } as CSSProperties}>
         {VIDEO_SWAP_SLOTS.map((slot) => (
           <video
             key={slot}
             ref={localSwap.bindVideo(slot)}
             className="kd-local-video-swap"
             data-active={localSwap.activeSlot === slot ? "true" : undefined}
-            controls={!hidden && localSwap.activeSlot === slot}
+            controls={false}
             crossOrigin="anonymous"
             muted
             playsInline
             preload={hidden ? "none" : "auto"}
             poster={api.coverUrl(track.id, track.modified_at)}
+            onTimeUpdate={event => {
+              if (localSwap.isActiveVideo(event.currentTarget) && scrubPosition.current === null) setPosition(event.currentTarget.currentTime);
+            }}
+            onDurationChange={event => {
+              if (localSwap.isActiveVideo(event.currentTarget) && Number.isFinite(event.currentTarget.duration)) setDuration(event.currentTarget.duration);
+            }}
             onPlay={(event) => {
+              if (localSwap.isActiveVideo(event.currentTarget)) setPlaying(true);
               if (videoTransportEchoGuardRef.current?.consume(event.currentTarget, "play")) return;
               if (!localSwap.isActiveVideo(event.currentTarget)) return;
               setError("");
@@ -276,6 +352,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
               broadcastMediaSync({ owner: "local-video", action: "play", trackId: track.id });
             }}
             onPause={(event) => {
+              if (localSwap.isActiveVideo(event.currentTarget)) setPlaying(false);
               if (videoTransportEchoGuardRef.current?.consume(event.currentTarget, "pause")) return;
               if (!localSwap.isActiveVideo(event.currentTarget)) return;
               if (hidden || suppressSyncRef.current) return;
@@ -306,6 +383,34 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
             }}
           />
         ))}
+        {!hidden && <>
+          <FloatingVideoControls title={track.title || track.filename} showTitle={false} playing={playing}
+            position={position} duration={duration} fullscreen={fullscreen}
+            onToggle={() => {
+              if (playing) broadcastMediaSync({ owner: "local-video", action: "pause", trackId: track.id });
+              else {
+                playTrack(track);
+                broadcastMediaSync({ owner: "local-video", action: "play", trackId: track.id });
+              }
+            }} onFullscreen={() => void setVideoFullscreen(!fullscreen)} />
+          <FloatingVideoScrub position={position} duration={duration}
+            onPointerDown={event => {
+              if (event.button !== 0) return;
+              event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); scrub(event);
+            }}
+            onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) scrub(event); }}
+            onPointerUp={event => {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              scrub(event); finishScrub(); event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
+            onPointerCancel={() => { scrubPosition.current = null; }}
+            onLostPointerCapture={() => { scrubPosition.current = null; }}
+            onKeyDown={event => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault(); event.stopPropagation();
+              seek(event.key === "Home" ? 0 : event.key === "End" ? duration : position + (event.key === "ArrowRight" ? 5 : -5));
+            }} />
+        </>}
       </div>
       {error && !hidden && <p className="kd-djp-note">{error}</p>}
     </div>

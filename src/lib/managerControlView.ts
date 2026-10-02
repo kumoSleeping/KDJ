@@ -51,6 +51,8 @@ export function managerControlView(
  * The song-level owner remains authoritative throughout, but one intermediate snapshot may have
  * retired the old Deck before the new Deck metadata is visible. Keep the last valid binding for
  * that one-song handoff instead of unmounting and remounting the whole Control panel.
+ * Native snapshots can publish the deck gap before the buffering/transition flags, so the
+ * live song owner, rather than those flags alone, determines whether to retain the view.
  */
 export function reconcileManagerControlView(
   current: ManagerControlView,
@@ -59,7 +61,8 @@ export function reconcileManagerControlView(
 ): ManagerControlView {
   const selected = managerControlView(state, trackId);
   if (selected.deck) return selected;
-  const transientHandoff = state.status === "loading" || state.buffering || state.transitioning;
+  const transientHandoff = state.status === "loading"
+    || state.status === "playing" || state.status === "paused";
   if (
     transientHandoff &&
     state.trackId === trackId &&

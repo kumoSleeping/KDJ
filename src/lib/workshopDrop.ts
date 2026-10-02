@@ -4,6 +4,10 @@ import { importFolders } from "./importFolders";
 import { useToastStore } from "../stores/toastStore";
 import { getBridge } from "./bridge";
 import { useWorkshopStore } from "../stores/workshopStore";
+import { useLiveVjStore } from "../stores/liveVjStore";
+function liveVjTarget(x: number, y: number): HTMLElement | null {
+  return document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-live-vj-set]") ?? null;
+}
 import { claimActiveTrackDragIds, finishTrackDrop, isTrackDrag, readTrackDragIds } from "./trackDrag";
 
 export interface WorkshopDropTarget { project: string | null; at: number; element: HTMLElement; }
@@ -22,6 +26,8 @@ export function workshopDropTargetAt(x: number, y: number): WorkshopDropTarget |
 }
 export function paintWorkshopDrop(x?: number, y?: number): boolean {
   document.querySelectorAll("[data-vj-drop-over]").forEach(n => n.removeAttribute("data-vj-drop-over"));
+  const live = x === undefined || y === undefined ? null : liveVjTarget(x, y);
+  if (live) { live.setAttribute("data-vj-drop-over", "true"); return true; }
   const target = x === undefined || y === undefined ? null : workshopDropTargetAt(x, y);
   target?.element.setAttribute("data-vj-drop-over", "true");
   return Boolean(target);
@@ -31,6 +37,13 @@ function traceDrop(detail: string): void {
 }
 let internalClaimedAt = -Infinity;
 export function dropWorkshopTracks(x: number, y: number, ids?: number[]): boolean {
+  const live = liveVjTarget(x, y)?.dataset.liveVjSet;
+  if (live) {
+    const claimed = ids ?? claimActiveTrackDragIds(); paintWorkshopDrop();
+    finishTrackDrop(); internalClaimedAt = performance.now();
+    if (claimed.length) void useLiveVjStore.getState().import(live, [...claimed], []);
+    return true;
+  }
   const target = workshopDropTargetAt(x, y);
   if (!target) return false;
   const claimed = ids ?? claimActiveTrackDragIds();
@@ -51,7 +64,7 @@ export function useWorkshopDrop(enabled = true): void {
       if (paintWorkshopDrop(e.clientX, e.clientY)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }
     };
     const drop = (e: DragEvent) => {
-      if (!workshopDropTargetAt(e.clientX, e.clientY) || !e.dataTransfer) return;
+      if ((!liveVjTarget(e.clientX, e.clientY) && !workshopDropTargetAt(e.clientX, e.clientY)) || !e.dataTransfer) return;
       const ids = readTrackDragIds(e.dataTransfer);
       if (!ids.length && !Array.from(e.dataTransfer.types).includes("Files")) return;
       e.preventDefault(); e.stopImmediatePropagation(); paintWorkshopDrop();
@@ -78,6 +91,12 @@ export function useWorkshopDrop(enabled = true): void {
       hovered=null;
       if (performance.now() - internalClaimedAt < 300) return;
       if (event.error) useToastStore.getState().show(event.error);
+      const live = liveVjTarget(event.x, event.y)?.dataset.liveVjSet;
+      if (live) {
+        const ids = claimActiveTrackDragIds();
+        void useLiveVjStore.getState().import(live, ids, ids.length ? [] : [...event.paths, ...(event.folders ?? [])]);
+        return;
+      }
       if (!target) {
         // A file-only selection must never expand to its parent or scan all roots.
         void importFolders(event.folders ?? []).catch(error => useToastStore.getState().show(`导入失败：${String(error)}`));

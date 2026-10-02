@@ -39,6 +39,17 @@ test("feature interpolation supports half frames for 60 fps", () => {
   assert.ok(Math.abs(sampleStudioFeatures(t, 1 - 1 / 60).bands[0] - .4) < 1e-10);
   assert.equal(sampleStudioFeatures(t, -3).bass, 0); assert.equal(sampleStudioFeatures(t, 999).bass, 0);
 });
+test("reusable feature output matches independent sampling across backward seeks without mutating the timeline", () => {
+  const t = timeline(), before = structuredClone(t), output = { bands: [123], bass: 0, rms: 0, onset: 0 }, bands = output.bands;
+  for (const time of [1.01, 2.5, -.1, .98333, 999, .25]) {
+    assert.equal(sampleStudioFeatures(t, time, output), output);
+    assert.equal(output.bands, bands);
+    assert.deepEqual(output, sampleStudioFeatures(t, time));
+  }
+  assert.deepEqual(t, before);
+  sampleStudioFeatures({ ...t, frames: [] }, 1, output);
+  assert.deepEqual(output, { bands: Array(64).fill(0), bass: 0, rms: 0, onset: 0 });
+});
 test("spring motion is bounded, decays after sound and is independent of seek order", () => {
   const t = timeline(), frames = prepareStudioMotion(t), once = sampleStudioMotion(frames, 1.1);
   for (const time of [2.8, .1, 2, 0, 1.5]) sampleStudioMotion(frames, time);

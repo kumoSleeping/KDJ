@@ -1,0 +1,8 @@
+.kd-context-menu.kd-search-suggestions {
+  width: min(26rem, calc(100vw - 16px));
+}
+.kd-context-menu.kd-search-suggestions > button[aria-selected="true"],
+.kd-context-menu.kd-search-suggestions > button[aria-selected="true"]:hover {
+  color: var(--kd-theme);
+  background: none;
+}

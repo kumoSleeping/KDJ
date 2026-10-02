@@ -1,5 +1,5 @@
-import { useCallback, useState, useSyncExternalStore, type CSSProperties } from "react";
-import { DASH, formatBpm, formatDate, formatDuration } from "../../lib/format";
+import { useCallback, useState, useSyncExternalStore, type ReactNode, type CSSProperties } from "react";
+import { DASH, formatBpm, formatDuration } from "../../lib/format";
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
 import {
   getSongPreviewState,
@@ -17,24 +17,18 @@ import {
   streamCueSnapshot,
   subscribeStreamCue,
   trackWithStreamCue,
-  updateStreamCue,
 } from "../../lib/streamCue";
-import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track } from "../../types";
-import { InlineNotice, Panel, PanelStack } from "../common";
+import { InlineNotice, Panel } from "../common";
+import { DetailPanelStack } from "../library/DetailPanelStack";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
 import { CamelotWheel } from "../library/CamelotWheel";
-import { HarmonicList } from "../library/HarmonicList";
-import { pointPatch, Waveform } from "../library/Waveform";
 import { EnergyMeter } from "../library/TrackTable";
-import { VjSearchPanel } from "../library/VjSearchPanel";
-import { NowPlayingControlPanel } from "./NowPlayingControlPanel";
 import { OnlineTrackCacheFacts } from "./OnlineTrackCacheFacts";
-import { usePlaybackPrefs } from "../../lib/playbackPrefs";
-import { DETAIL_PANELS_DEFAULT_FIRST_IDS, DETAIL_PANELS_STORAGE_KEY } from "../../lib/detailPanelPrefs";
+import { LyricsDetailPanel } from "./LyricsView";
 
 const STATUS_LABEL = {
   idle: "等待播放",
@@ -55,28 +49,20 @@ function qualityLabel(value: string | null | undefined): string {
 function StreamAnalysisPanel({
   snapshot,
   track,
-  position,
-  duration,
-  showWaveform,
 }: {
   snapshot: StreamAnalysisSnapshot;
   track: Track;
-  position: number;
-  duration: number;
-  showWaveform: boolean;
 }) {
   const keyFilter = useLibraryStore((state) => state.filter.key);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const result = snapshot.result;
   const ready = snapshot.phase === "ready" && result;
 
-  // 未分析、分析中和失败都不占一个空面板；真正有结果时才出现 Analysis。
-  if (!ready) return null;
+  // 播放面板保留加载中的槽位；独立详情是否显示仍由调用方决定。
+  if (!ready) return <Panel heading="Analysis" className="kd-panel-placeholder" padded dense />;
 
   const bpmConfidence =
     result.bpm_confidence !== null ? Math.round(result.bpm_confidence * 100) : null;
-  const keyConfidence =
-    result.key_confidence !== null ? Math.round(result.key_confidence * 100) : null;
   const warning = snapshot.error || result.errors.join("；");
 
   return (
@@ -143,45 +129,21 @@ function StreamAnalysisPanel({
         </div>
       </div>
 
-      {showWaveform ? (
-        <Waveform
-          trackId={track.id}
-          track={track}
-          renderProfile="release-overview"
-          position={position}
-          duration={duration}
-          cueMs={track.cue_ms}
-          endMs={track.end_ms}
-          height={56}
-          onSetPoint={(kind, at) => {
-            const patch = pointPatch(kind, at, track.cue_ms, track.end_ms);
-            if (typeof patch === "string") return patch;
-            updateStreamCue(track, patch);
-          }}
-        />
-      ) : null}
-      <div className="kd-row kd-faint kd-analysis-meta">
-        开始 {track.cue_ms !== null ? `${(track.cue_ms / 1000).toFixed(2)}s` : DASH}
-        <span className="kd-toolbar-gap" />
-        结束 {track.end_ms !== null ? `${(track.end_ms / 1000).toFixed(2)}s` : DASH}
-        <span className="kd-toolbar-gap" />
-        首拍 {track.first_beat !== null ? `${track.first_beat.toFixed(3)}s` : DASH}
-        <span className="kd-toolbar-gap" />
-        调性置信度 {keyConfidence !== null ? `${keyConfidence}%` : DASH}
-        <span className="kd-toolbar-gap" />
-        {snapshot.completedAt ? `分析于 ${formatDate(snapshot.completedAt)}` : null}
-      </div>
       {warning ? <p className="kd-stream-analysis-warning">部分分析提示：{warning}</p> : null}
     </Panel>
   );
 }
 
 /**
- * 在线曲目沿用本地详情的“封面 + 标题事实 + Explore”骨架。
+ * 在线曲目沿用本地详情的封面与曲目信息布局。
  * 它没有曲库记录，但代理收到完整媒体后会复用会话文件做一次临时分析；
  * 真正的媒体元素与列表动作都留在播放器 / 结果列表，这里只展示共享快照。
  */
-export function StreamTrackDetail({ track }: { track: Track }) {
+export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail", renderPanels }: {
+  track: Track; restoreTarget?: HTMLElement | null; mode?: "detail" | "preview";
+  renderPanels?(information: ReactNode, metadata?: ReactNode, analysis?: ReactNode): ReactNode;
+}) {
+  const isPreview = mode === "preview";
   const session = useSyncExternalStore(
     subscribePlayerSession,
     getPlayerSession,
@@ -192,10 +154,6 @@ export function StreamTrackDetail({ track }: { track: Track }) {
     getSongPreviewState,
     getSongPreviewState,
   );
-  const settings = useAppStore((state) => state.settings);
-  const detailWaveformVisible = usePlaybackPrefs((state) => state.detailWaveformVisible);
-  const detailControlVisible = usePlaybackPrefs((state) => state.detailControlVisible);
-  const selectTrack = useLibraryStore((state) => state.selectTrack);
   const [actionError, setActionError] = useState("");
   const meta = streamMeta(track);
   const source = meta?.source ?? null;
@@ -236,8 +194,7 @@ export function StreamTrackDetail({ track }: { track: Track }) {
     actionError || matchingPreview?.error || (active ? session.error : "");
   const cover = streamCoverUrl(track);
 
-  return (
-    <div className="kd-col kd-track-detail" style={{ gap: "0.6rem", padding: "0.7rem" }}>
+  const information = (
       <div
         className="kd-row kd-track-detail-hero"
         style={{ gap: "0.6rem", alignItems: "flex-start" }}
@@ -283,64 +240,51 @@ export function StreamTrackDetail({ track }: { track: Track }) {
             {source ? <PlatformMark id={source.platform} size={13} branded /> : null}
             <span>{source ? PLATFORM_LABEL[source.platform] : "在线来源"}</span>
             <span>{qualityLabel(source?.max_quality)}</span>
-            <span>{formatDuration(duration)}</span>
+            <span>{formatDuration(isPreview ? track.duration : duration)}</span>
             {source?.vip ? (
               <span className="kd-chip" data-tone="warn">
                 VIP
               </span>
             ) : null}
-            <span>{STATUS_LABEL[status]}</span>
+            {!isPreview && <span>{STATUS_LABEL[status]}</span>}
             <OnlineTrackCacheFacts
               source={source}
               preview={matchingPreview}
               trackId={detailTrackId}
+              video={streamMeta(track)?.kind === "video"}
             />
+            {track.genre && <span>{track.genre}</span>}
+            {track.year && <span>{track.year}</span>}
+            {track.tags.map(tag => <span key={tag}>{tag}</span>)}
+            {track.comment && <span>{track.comment}</span>}
           </div>
         </div>
       </div>
+  );
 
+  return (
+    <div className={`kd-col kd-track-detail${isPreview ? " kd-track-preview" : ""}`}
+      style={isPreview || renderPanels ? undefined : { gap: "0.6rem", padding: "0.7rem" }}>
+      {!isPreview && !renderPanels && information}
       <InlineNotice
-        text={errorText}
+        text={isPreview ? actionError : errorText}
         onDismiss={actionError ? () => setActionError("") : undefined}
       />
 
-      <PanelStack
-        storageKey={DETAIL_PANELS_STORAGE_KEY}
-        defaultFirstIds={DETAIL_PANELS_DEFAULT_FIRST_IDS}
-      >
-        {detailControlVisible ? (
-          <NowPlayingControlPanel
-            key="now-playing-control"
-            track={analyzedTrack}
-            keyNotation={settings?.key_notation ?? "camelot"}
-            filterResonance={settings?.filter_resonance ?? "high"}
-            onError={setActionError}
-          />
-        ) : null}
+      {renderPanels ? renderPanels(information, undefined,
+        <StreamAnalysisPanel snapshot={analysis} track={analyzedTrack} />)
+        : <DetailPanelStack restoreTarget={restoreTarget} preview={isPreview}>
+        {!isPreview && <LyricsDetailPanel key="lyrics" track={detailTrack} />}
 
-        {analysisReady && (
+        {(isPreview || analysisReady) && (
           <StreamAnalysisPanel
             key="analysis"
             snapshot={analysis}
             track={analyzedTrack}
-            position={active ? session.position : 0}
-            duration={duration}
-            showWaveform={detailWaveformVisible}
           />
         )}
 
-        {analysisReady && analyzedTrack.bpm && analyzedTrack.camelot ? (
-          <Panel key="harmonic" heading="Next" padded dense>
-            <div className="kd-scroll" style={{ maxHeight: "13rem" }}>
-              <HarmonicList track={analyzedTrack} onSelect={selectTrack} />
-            </div>
-          </Panel>
-        ) : null}
-
-        <Panel key="vj" heading="Explore" padded dense>
-          <VjSearchPanel track={analyzedTrack} />
-        </Panel>
-      </PanelStack>
+      </DetailPanelStack>}
     </div>
   );
 }

@@ -22,7 +22,7 @@ use kdj_stems::{
 };
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_MP3, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_AAC, CODEC_TYPE_MP3, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
@@ -519,6 +519,10 @@ const SEEK_RETRY_STEP_SECONDS: f64 = 1.0;
 /// compressed packets disappear audibly. Decode a bounded lead-in, then discard it below before
 /// publishing the exact requested media time.
 const MP3_SEEK_PREROLL_SECONDS: f64 = 1.0;
+/// AAC's first frame after reset has no previous IMDCT overlap (short windows even emit zeros).
+/// Prime three 1024-sample frames before the target, then discard them via the same exact-time
+/// landing path as MP3. This covers window-shape changes without adding silence to the output.
+const AAC_SEEK_PREROLL_SAMPLES: f64 = 3.0 * 1024.0;
 
 /// Decode-thread half. It blocks only on its worker thread when read-ahead is full.
 pub struct StreamWriter<F: Copy = [f32; 2]> {
@@ -1763,10 +1767,11 @@ where
         position = position.min(limit - SEEK_END_MARGIN_SECONDS);
     }
     let mut source_sample_rate = params.sample_rate.filter(|rate| *rate > 0).unwrap_or(0);
-    let seek_preroll_seconds = if params.codec == CODEC_TYPE_MP3 {
-        MP3_SEEK_PREROLL_SECONDS
-    } else {
-        0.0
+    let seek_preroll_seconds = match params.codec {
+        CODEC_TYPE_MP3 => MP3_SEEK_PREROLL_SECONDS,
+        CODEC_TYPE_AAC => AAC_SEEK_PREROLL_SAMPLES
+            / f64::from(params.sample_rate.filter(|rate| *rate > 0).unwrap_or(48_000)),
+        _ => 0.0,
     };
     let initial_landing = if position > 0.0 {
         let landing = seek_format_time(

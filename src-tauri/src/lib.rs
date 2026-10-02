@@ -34,6 +34,8 @@ mod desktop_player;
 #[cfg(desktop)]
 mod midi;
 #[cfg(desktop)]
+mod live_vj;
+#[cfg(desktop)]
 mod media_tools;
 #[cfg(target_os = "macos")]
 mod macos_window_drag;
@@ -1795,6 +1797,7 @@ fn mobile_library_roots(app: &tauri::AppHandle) -> Vec<String> {
 /// 自绘标题栏的窗口动作。`maximize` 是切换；`drag` 用于 Overlay 顶栏拖动。
 #[cfg(desktop)]
 fn shutdown_desktop_runtime(app: &tauri::AppHandle) {
+    if let Some(live) = app.try_state::<live_vj::LiveVj>() { live.cancel(); live.shutdown_connections(); }
     if let Some(player) = app.try_state::<desktop_player::DesktopPlayerHandle>() {
         player.shutdown();
     }
@@ -1810,8 +1813,11 @@ fn shutdown_desktop_runtime(app: &tauri::AppHandle) {
 /// WebView2 偶尔会在媒体管线异常后拖住正常析构；原生看门狗保证这次退出不会再次
 /// 变成“窗口点不掉”。正常退出会在看门狗触发前结束进程。
 #[cfg(desktop)]
+#[track_caller]
 pub(crate) fn request_desktop_exit(app: &tauri::AppHandle) {
     use std::sync::atomic::Ordering;
+
+    tracing::info!(caller = %std::panic::Location::caller(), "desktop exit requested");
 
     if EXIT_STARTED.swap(true, Ordering::SeqCst) {
         app.exit(0);
@@ -2815,8 +2821,8 @@ pub fn run() {
     #[cfg(desktop)]
     let (diagnostic_writer, diagnostic_path) = diagnostics::initialize();
     let debug_build = cfg!(debug_assertions);
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))
+    use tracing_subscriber::prelude::*;
+    let subscriber = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_thread_ids(debug_build)
         .with_thread_names(debug_build)
@@ -2824,7 +2830,10 @@ pub fn run() {
         .with_line_number(debug_build);
     #[cfg(desktop)]
     let subscriber = subscriber.with_ansi(false).with_writer(move || diagnostic_writer.clone());
-    subscriber.init();
+    tracing_subscriber::registry()
+        .with(subscriber.with_filter(tracing_subscriber::EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))))
+        .with(kdj_server::diagnostics::DiagnosticLayer)
+        .init();
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -2883,6 +2892,8 @@ pub fn run() {
         app.manage(bilibili_embed::BilibiliEmbedState::default());
         #[cfg(desktop)]
         app.manage(midi::MidiHub::spawn(app.handle().clone()));
+        #[cfg(desktop)]
+        app.manage(live_vj::LiveVj::default());
         #[cfg(any(desktop, target_os = "android"))]
         app.manage(
             desktop_player::DesktopPlayerHandle::spawn(app.handle().clone())
@@ -2956,6 +2967,27 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_bridge_info,
+        live_vj::live_vj_document,
+        live_vj::live_vj_edit,
+        live_vj::live_vj_import,
+        live_vj::live_vj_pick_files,
+        live_vj::live_vj_inputs,
+        live_vj::live_vj_outputs,
+        live_vj::live_vj_start,
+        live_vj::live_vj_send_start,
+        live_vj::bluetooth::live_vj_bluetooth_scan,
+        live_vj::bluetooth::live_vj_bluetooth_connect,
+        live_vj::bluetooth::live_vj_bluetooth_disconnect,
+        live_vj::bluetooth::live_vj_bluetooth_select,
+        live_vj::bluetooth::live_vj_bluetooth_pair,
+        live_vj::projection::live_vj_standby,
+        live_vj::projection::live_vj_projection_open,
+        live_vj::projection::live_vj_projection_close,
+        live_vj::projection::live_vj_projection_error,
+        live_vj::live_vj_prepare,
+        live_vj::live_vj_stop,
+        live_vj::live_vj_status,
+        live_vj::live_vj_output_status,
         cli_install_status,
         install_cli,
         open_path,
@@ -3045,6 +3077,9 @@ pub fn run() {
     // 即使桌面歌词等辅助窗口仍存在，也不能让播放或后台任务继续驻留。
     #[cfg(desktop)]
     let builder = builder.on_window_event(|window, event| {
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+            tracing::info!(window = window.label(), "native window close requested");
+        }
         if window.label() != "main" {
             return;
         }
@@ -3073,7 +3108,8 @@ pub fn run() {
             }
         };
         app.run(|app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = &event {
+            if let tauri::RunEvent::ExitRequested { code, .. } = &event {
+                tracing::info!(?code, "desktop runtime exit requested");
                 capture_main_window_state(app_handle);
                 persist_main_window_state(app_handle);
                 shutdown_desktop_runtime(app_handle);

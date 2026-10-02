@@ -1,0 +1,82 @@
+.kd-panel-dock[data-free-split] {
+  position: relative;
+  display: block;
+  height: var(--kd-split-height, 320px);
+  flex: none;
+  min-height: 0;
+  overflow-anchor: none;
+}
+.kd-panel-dock[data-free-split][data-dragging] { min-height: 48px; }
+.kd-panel-dock[data-free-split] > [data-split-cell] {
+  position: absolute;
+  display: block;
+  left: var(--kd-cell-left);
+  top: var(--kd-cell-top);
+  width: var(--kd-cell-width);
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+}
+.kd-panel-dock[data-free-split] > [data-split-cell] > .kd-panel-slot[data-panel-id] {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  aspect-ratio: auto;
+  overflow: auto;
+}
+.kd-panel-dock[data-free-split] > [data-split-cell] > .kd-panel-slot[data-panel-id] > :is(.kd-panel, .kd-track-preview-eq, .kd-track-preview-waveform),
+.kd-panel-dock[data-free-split] > [data-split-cell] > .kd-panel-slot[data-panel-id] > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  height: auto;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+}
+.kd-panel-dock[data-free-split] > [data-split-cell] .kd-panel-slot > .kd-panel-resize { display: none; }
+.kd-panel-dock[data-free-split] > [data-split-cell] .kd-panel-head { flex: none; }
+.kd-panel-dock[data-free-split] > [data-split-cell] > .kd-internal-window[data-docked] { height: auto; }
+/* The top is a fitted dashboard, not a scroll surface. The sidebar is a normal vertical stack. */
+.kd-panel-dock-top[data-free-split] { overflow: hidden; }
+/* Sidebar cards stay in normal flow so asynchronous content and theme metrics
+   update their height without stale absolute positions or nested card scrollbars. */
+.kd-panel-dock-right[data-free-split] {
+  display: flex;
+  flex-direction: column;
+  height: auto;
+  gap: 6px;
+  padding: 4px;
+  overflow: visible;
+}
+.kd-panel-dock-right[data-free-split] > .kd-panel-docked-host {
+  flex: none;
+  padding: 0;
+}
+.kd-panel-dock-right[data-free-split] > .kd-panel-docked-host > .kd-panel-slot {
+  width: 100%;
+  overflow: visible;
+}
+.kd-panel-dock-right[data-free-split] > .kd-panel-docked-host > .kd-panel-slot > :is(.kd-panel, .kd-track-preview-eq, .kd-track-preview-waveform),
+.kd-panel-dock-right[data-free-split] > .kd-panel-docked-host > .kd-panel-slot > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
+  overflow: visible;
+}
+:root .kd-panel-dock-top[data-free-split],
+:root .kd-panel-dock-top[data-free-split] > .kd-panel-live-host * {
+  scrollbar-width: none;
+  scrollbar-gutter: auto;
+}
+:root .kd-panel-dock-top[data-free-split]::-webkit-scrollbar,
+:root .kd-panel-dock-top[data-free-split] > .kd-panel-live-host *::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+.kd-panel-slot[data-auto-height][data-optimized-panel] { overflow-x: hidden; }

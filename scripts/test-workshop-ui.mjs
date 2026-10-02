@@ -10,6 +10,7 @@ entry._compile(
   buildSync({
     entryPoints: [`tests/${name}.test.ts`],
     bundle: true,
+    loader: { ".css": "empty" },
     packages: "external",
     platform: "node",
     format: "cjs",

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { clampVideoFloatBox, type VideoFloatBox } from "../../lib/videoFloatBox";
 
@@ -7,8 +7,8 @@ type Edge = typeof edges[number];
 const edgeLabels: Record<Edge, string> = { n: "上边", s: "下边", e: "右边", w: "左边", ne: "右上角", nw: "左上角", se: "右下角", sw: "左下角" };
 
 /** Floating geometry only; the caller owns rendering, transport and picture editing. */
-export function FloatingPreviewFrame({ floating, fullscreen, editing, ratio, children, onEscape }: {
-  floating: boolean; fullscreen: boolean; editing: boolean; ratio: number;
+export function FloatingPreviewFrame({ floating, fullscreen, editing, compact, ratio, children, onEscape }: {
+  floating: boolean; fullscreen: boolean; editing: boolean; compact: boolean; ratio: number;
   children: ReactNode; onEscape(): void;
 }) {
   const fit = (box: VideoFloatBox) => clampVideoFloatBox(box, window.innerWidth, window.innerHeight, ratio);
@@ -48,8 +48,9 @@ export function FloatingPreviewFrame({ floating, fullscreen, editing, ratio, chi
   const preview = <div className={`kd-pip-float ${detached ? "kd-viz-floating-preview" : "kd-viz-preview"}`}
     role={detached ? "dialog" : undefined} aria-label={fullscreen ? "可视化全屏预览" : floating ? "可视化预览小窗" : undefined}
     data-fullscreen={fullscreen || undefined}
+    data-empty-media={(!detached && compact) || undefined}
     data-picture-editing={editing || undefined}
-    style={floating ? { left: box.x, top: box.y, width: box.w } : undefined}
+    style={{ "--kd-preview-ratio": ratio, ...(floating ? { left: box.x, top: box.y, width: box.w } : {}) } as CSSProperties}
     onPointerDown={down} onPointerMove={move} onPointerUp={end} onLostPointerCapture={() => { drag.current = null; }}
     onPointerCancel={e => { if (drag.current) setBox(drag.current.box); end(e); }}
     onKeyDown={e => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onEscape(); } }}>

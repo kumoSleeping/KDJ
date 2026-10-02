@@ -1,0 +1,236 @@
+/* Keep the application's shared desktop/portrait row layout, but retain Sakura's
+   compact cover + copy controls. Decks must not span the waveform like vinyls. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player {
+  background: var(--s98-face);
+  border-top-color: var(--s98-frame);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 3px var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-player::before { content: none; }
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-leading, .kd-player-trailing) {
+  position: relative;
+  inset: auto;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-leading { grid-area: now; }
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-trailing { grid-area: next; }
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 0;
+  padding: 3px;
+  border-radius: 3px;
+  background: var(--kd-wave-overview-bg);
+  box-shadow: var(--s98-sunken);
+  text-align: left;
+  overflow: hidden;
+  transition: none;
+}
+/* A real button owns its cover, copy, hover and keyboard focus area. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck-main {
+  display: grid;
+  grid-template-columns: 2.75rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 3.5rem;
+  padding: 0.3rem 0.4rem;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--kd-text);
+  text-align: left;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck-main:hover:not(:disabled) {
+  background: var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck-main:active:not(:disabled) {
+  background: var(--kd-panel);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck[data-empty="true"] {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck[data-empty="true"] .kd-player-deck-main {
+  visibility: hidden;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck .kd-player-disc {
+  grid-column: 1;
+  grid-row: 1;
+  width: 2.75rem;
+  height: 2.75rem;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck[data-drop-active="true"] {
+  outline: 2px solid var(--kd-layout-guide);
+  outline-offset: -2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-disc-record {
+  width: 2.65rem;
+  height: 2.65rem;
+  border: 1px solid var(--s98-shadow);
+  border-radius: 3px !important;
+  background: #69424e;
+  color: #fff8f5;
+  box-shadow: 1px 1px 0 var(--s98-white);
+  animation: none;
+  transform: none;
+  overflow: hidden;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-disc-record > img {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 2px !important;
+  object-fit: cover;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck .kd-player-deck-copy {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0;
+  opacity: 1;
+  text-align: left;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck-state {
+  flex: none;
+  margin: 0;
+  color: var(--kd-muted);
+  line-height: 1.25;
+  letter-spacing: normal;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck[data-active="true"] .kd-player-deck-state {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck-copy :is(.kd-player-title, .kd-player-artist) {
+  flex: none;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  line-height: 1.3;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-title { color: var(--kd-text); }
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-step, .kd-player-btn, .kd-player-go) {
+  flex: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px !important;
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+  color: var(--kd-text-body);
+  transform: none;
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-go {
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-step, .kd-player-btn, .kd-player-go):hover:not(:disabled) {
+  background: var(--kd-panel-inset);
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-step, .kd-player-btn, .kd-player-go):active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+  transform: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-step, .kd-player-btn, .kd-player-go):disabled {
+  color: var(--kd-muted);
+  opacity: 0.5;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-go[data-loading="true"]:disabled { opacity: 1; }
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-go > svg { transform: none; }
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-time-header {
+  margin: 0;
+  padding: 0.28rem 0.45rem;
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+  border-radius: 2px;
+  color: var(--kd-text);
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-volume {
+  --kd-player-meter-bed: #372c31;
+  --kd-player-meter-off: #65535c;
+  --kd-player-meter-green: #74c293;
+  --kd-player-meter-yellow: #e7c569;
+  --kd-player-meter-orange: #f4a069;
+  --kd-player-meter-red: #ff849e;
+  --kd-player-meter-bed-edge: #69424e;
+  --kd-player-meter-thumb: #fff8f5;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-volume-leds { border-radius: 2px !important; }
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-volume-thumb {
+  width: 5px;
+  box-shadow: 0 0 0 1px var(--s98-frame);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-scrub {
+  grid-area: wave;
+  min-width: 0;
+  margin: 0;
+  padding: 4px;
+  grid-template-columns: minmax(0, 1fr);
+  border-radius: 2px;
+  background: var(--kd-wave-overview-bg);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-scrub:has(.kd-player-wave-idle) {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-wave-stage {
+  margin: 0;
+  min-width: 0;
+  min-height: 42px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-wave {
+  min-width: 0;
+  height: 42px;
+  border: 0;
+  box-shadow: none;
+  background: var(--kd-wave-overview-bg) !important;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-wave-stream {
+  min-width: 0;
+  height: 8px;
+  background: var(--kd-line-soft);
+  box-shadow: inset 0 1px var(--s98-shadow);
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-wave-stream-fill {
+  background: var(--kd-theme);
+  box-shadow: none;
+}
+@media (max-width: 400px) {
+  :root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck-main {
+    grid-template-columns: 2rem minmax(0, 1fr);
+    gap: 0.35rem;
+  }
+  :root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-deck .kd-player-disc,
+  :root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-disc-record {
+    width: 2rem;
+    height: 2rem;
+  }
+}
+@media (forced-colors: active) {
+  :root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-deck, .kd-player-scrub,
+    .kd-player-step, .kd-player-go, .kd-player-time-header) {
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+    box-shadow: none;
+  }
+}

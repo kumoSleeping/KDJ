@@ -1,0 +1,80 @@
+/* A floating window gets its own caption above the picture. Inline previews
+   already have a panel heading and must never cover the image with a title. */
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float-chrome {
+  background: none;
+  pointer-events: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) {
+  padding-top: 1.45rem;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) .kd-pip-float-stage {
+  overflow: visible;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) .kd-pip-float-top {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not(.kd-viz-preview) .kd-pip-float-chrome {
+  opacity: 1;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-viz-preview .kd-pip-float-top {
+  display: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float-top {
+  min-height: 1.45rem;
+  padding: 2px 3px 2px 5px;
+  gap: 5px;
+  background: var(--s98-caption);
+  color: var(--kd-text);
+  font-size: 0.72rem;
+  box-shadow: inset 1px 1px var(--s98-face-hi), inset -1px -1px var(--s98-frame);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float-top > .kd-truncate {
+  font-weight: 600;
+  text-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float-x {
+  width: 1.15rem;
+  height: 1.1rem;
+  border: 0;
+  border-radius: 2px;
+  background: var(--s98-face);
+  box-shadow: var(--s98-raised);
+  color: var(--kd-text);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float-x:hover:not(:disabled) {
+  background: var(--s98-face-hi);
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float-x:active:not(:disabled) {
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float-bottom {
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.5), transparent);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float .kd-pip-resize,
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float:hover .kd-pip-resize {
+  background: transparent;
+}
+/* Keyboard focus reveals the same controls as hovering, without removing them
+   from the tab order. Touch-only devices retain the ordinary compact controls. */
+@media (hover: hover) {
+  :root[data-theme-pack="sakulaptop98"] .kd-pip-float:not(:hover):not(:focus-within) :is(.kd-pip-float-bottom, .kd-pip-float-scrub) {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+@media (hover: none) {
+  :root[data-theme-pack="sakulaptop98"] .kd-pip-float-chrome { opacity: 1; }
+}
+/* Platform players own their transport. Preserve the native aperture's 28px
+   title contract instead of adding a second set of controls. */
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float[data-platform-player="true"] .kd-pip-float-chrome {
+  background: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float[data-platform-player="true"] .kd-pip-float-top {
+  height: 28px;
+  min-height: 0;
+}

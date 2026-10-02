@@ -692,6 +692,9 @@ impl DownloadManager {
         let lifetime_ms = task_lifetime_ms(task);
         let failure_kind = safe_failure_kind(&task.error);
         let phase = task_phase_name(task.phase);
+        if task.state == TaskState::Failed {
+            crate::diagnostics::record("error", "platform", "download.terminal", &format!("platform={} phase={phase} elapsed_ms={lifetime_ms} error={}", task.platform.as_str(), task.error));
+        }
         let kind = match task.kind {
             TaskKind::Audio => "音频",
             TaskKind::Video => "视频",

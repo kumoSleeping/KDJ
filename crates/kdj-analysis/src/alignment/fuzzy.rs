@@ -150,6 +150,7 @@ pub fn suggest_positions_prepared(
         if canceled() {
             bail!("匹配已取消")
         }
+        let phrase_started = std::time::Instant::now();
         let mut similarity = vec![0f32; PHRASE * b.len()];
         for i in 0..PHRASE {
             for (j, frame) in b.iter().enumerate() {
@@ -157,6 +158,8 @@ pub fn suggest_positions_prepared(
                     a[start + i].iter().zip(frame).map(|(x, y)| x * y).sum();
             }
         }
+        let matrix_ms = phrase_started.elapsed().as_secs_f64() * 1000.;
+        let proposal_started = std::time::Instant::now();
         let mut candidates: Vec<(f64, usize, f64)> = Vec::new();
         for step in 0..=90 {
             if canceled() {
@@ -187,6 +190,9 @@ pub fn suggest_positions_prepared(
             }
         }
         candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let proposal_ms = proposal_started.elapsed().as_secs_f64() * 1000.;
+        let candidate_count = candidates.len();
+        let refine_started = std::time::Instant::now();
         for (chroma_score, target, slope) in candidates.into_iter().take(3) {
             if canceled() {
                 bail!("匹配已取消")
@@ -197,6 +203,10 @@ pub fn suggest_positions_prepared(
             }
             review::collect_anchor(&mut review_anchors, anchor, chroma_score, &sa, &sb);
         }
+        tracing::debug!(target: "kdj_alignment_timing", source_start_ms = start * 100,
+            matrix_ms, proposal_ms, refine_ms = refine_started.elapsed().as_secs_f64() * 1000.,
+            elapsed_ms = phrase_started.elapsed().as_secs_f64() * 1000., candidates = candidate_count,
+            anchors = anchors.len(), "fuzzy phrase finished");
     }
     let groups = fit_groups(&anchors);
     let mut mappings = groups.clone();

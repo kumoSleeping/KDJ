@@ -123,6 +123,20 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
       assert.equal(summaryQueries.at(-1)!.folder_deep, undefined);
       assert.equal(summaryQueries.at(-1)!.bpm_min, undefined);
     }
+    // Layout determines activation; legacy preferences cannot change it or pin details.
+    const { playClickForLayout, shouldPinDetailOnClick } = await import("../src/lib/trackClickPrefs");
+    for (const layout of ["wide", "narrow"] as const) {
+      for (const legacyClick of ["single", "double"] as const) {
+        const prefs = { widePlay: legacyClick, narrowPlay: legacyClick };
+        assert.equal(playClickForLayout(prefs, layout), layout === "narrow" ? "single" : "double");
+        assert.equal(shouldPinDetailOnClick(prefs, layout), false);
+      }
+    }
+    const row = document.querySelector<HTMLElement>("tr[data-kd-track-id]")!;
+    await act(async () => {
+      row.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, detail: 1 }));
+    });
+    assert.equal(useLibraryStore.getState().selectedId, Number(row.dataset.kdTrackId));
     assert.equal(useLibraryStore.getState().total, 10000);
     assert.ok(document.querySelectorAll("tr[data-kd-track-id]").length <= 102);
     const box = document.querySelector<HTMLDivElement>(".kd-scroll")!;

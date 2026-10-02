@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { JSDOM } from "jsdom";
 import {
   optionAttributes,
   parseThemeManifest,
@@ -69,4 +70,44 @@ test("a single-mode pack forces its mode; no pack leaves the base alone", () => 
 test("token readers fall back to the default look without a DOM", () => {
   assert.deepEqual(themeRgb("--kd-wave-detail-bg", [8, 10, 13]), [8, 10, 13]);
   assert.deepEqual(waveBandRgb([200, 120, 40]), [200, 120, 40]);
+});
+
+test("Sakura wave pigments preserve band hues without clipping mixed columns to white", () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>");
+  const previousDocument = globalThis.document;
+  const previousComputedStyle = globalThis.getComputedStyle;
+  const pigments: Record<string, string> = {
+    "--kd-wave-low": "rgb(230, 107, 148)",
+    "--kd-wave-mid": "rgb(174, 139, 222)",
+    "--kd-wave-high": "rgb(101, 190, 200)",
+  };
+  globalThis.document = dom.window.document;
+  // jsdom does not resolve CSS variables; supply the theme's resolved token colours.
+  globalThis.getComputedStyle = ((element: HTMLElement) => ({
+    color: pigments[element.style.color.match(/var\(([^,]+)/)?.[1] ?? ""],
+  })) as typeof getComputedStyle;
+  try {
+    assert.deepEqual(waveBandRgb([255, 0, 0]), [230, 107, 148]);
+    assert.deepEqual(waveBandRgb([0, 255, 0]), [174, 139, 222]);
+    assert.deepEqual(waveBandRgb([0, 0, 255]), [101, 190, 200]);
+    assert.deepEqual(waveBandRgb([255, 255, 255]), [168, 145, 190]);
+    assert.deepEqual(waveBandRgb([220, 220, 220]), [168, 145, 190]);
+    assert.deepEqual(waveBandRgb([0, 0, 0]), [0, 0, 0]);
+    assert.deepEqual(waveBandRgb([128, 0, 0]), [115, 54, 74]);
+    const neutralDisplay = [200, 200, 200] as const;
+    const unchanged = waveBandRgb(neutralDisplay);
+    assert.deepEqual(waveBandRgb(neutralDisplay, [255, 0, 0]), unchanged);
+    document.documentElement.dataset.themePack = "sakulaptop98";
+    // Identical softened display colours must still expose distinct measured bands.
+    assert.deepEqual(waveBandRgb(neutralDisplay, [255, 0, 0]), [230, 107, 148]);
+    assert.deepEqual(waveBandRgb(neutralDisplay, [0, 255, 0]), [174, 139, 222]);
+    assert.deepEqual(waveBandRgb(neutralDisplay, [0, 0, 255]), [101, 190, 200]);
+    assert.deepEqual(waveBandRgb(neutralDisplay, [0, 0, 0]), [0, 0, 0]);
+    delete document.documentElement.dataset.themePack;
+    assert.deepEqual(waveBandRgb(neutralDisplay, [255, 0, 0]), unchanged);
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.getComputedStyle = previousComputedStyle;
+    dom.window.close();
+  }
 });

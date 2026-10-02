@@ -1,9 +1,7 @@
 /**
- * 本地视频呈现模式（底栏按钮两态切换）：
- * - panel：曲库详情里的 LocalVideoPlayer
- * - float：自研浮动小窗
- *
- * 网络搜索/下载结果的双击预览固定使用浮动小窗，不读取也不修改这项本地偏好。
+ * 本地与网络视频共用呈现模式（底栏按钮两态切换）：
+ * - panel：内嵌面板（本地在顶部使用 LocalVideoPlayer，网络在侧栏使用共享预览宿主）
+ * - float：自研浮动小窗；关闭小窗后回到 panel 偏好。
  * 系统画中画不是底栏模式：在浮动小窗里手动开，或切走应用时自动开。
  */
 
@@ -15,7 +13,7 @@ import {
   writeLocalStorageNow,
 } from "./storageWrite";
 
-// Compact layout starts with a floating preview; subsequent user choices persist.
+// Videos open in an embedded panel by default; explicit presentation choices persist.
 const STORAGE_KEY = "kdj.videoPreviewModeV3";
 const LOCAL_PRESENTATION_KEY = "kdj.localVideoPresentationV1";
 
@@ -48,15 +46,15 @@ export function networkVideoOwnsTransport(
   return active && !failed && session?.source === "network";
 }
 
-/** 默认浮动小窗；底栏按钮只在这两态之间切换。 */
-export const VIDEO_PREVIEW_MODES: VideoPreviewMode[] = ["float", "panel"];
+/** 默认内嵌面板；底栏按钮只在这两态之间切换。 */
+export const VIDEO_PREVIEW_MODES: VideoPreviewMode[] = ["panel", "float"];
 
 export const VIDEO_PREVIEW_MODE_UI: Record<
   VideoPreviewMode,
   { label: string; hint: string }
 > = {
-  float: { label: "浮动小窗", hint: "本地视频用自研小窗播放" },
-  panel: { label: "详情面板", hint: "本地视频在曲目详情中播放" },
+  float: { label: "浮动小窗", hint: "视频用自研小窗播放" },
+  panel: { label: "内嵌面板", hint: "视频在工作区面板中播放" },
 };
 
 export const APPLY_VIDEO_MODE_EVENT = "kd:apply-video-mode";
@@ -99,7 +97,7 @@ function isMode(value: string | null): value is VideoPreviewMode {
 
 function readMode(): VideoPreviewMode {
   const raw = readLocalStorage(STORAGE_KEY);
-  return isMode(raw) ? raw : "float";
+  return isMode(raw) ? raw : "panel";
 }
 
 /** 只记录“本地视频画面是否仍打开”；网络预览不跨启动保存短效会话。 */
@@ -144,7 +142,10 @@ interface VideoPipState {
   duration: number;
   error: string;
   session: VideoPipSession | null;
+  panelTarget: HTMLDivElement | null;
+  setPanelTarget(target: HTMLDivElement | null): void;
   setMode(mode: VideoPreviewMode): void;
+  close(): void;
   cycleMode(): VideoPreviewMode;
   setSession(session: VideoPipSession | null): void;
   setFailed(on: boolean): void;
@@ -193,6 +194,13 @@ export const useVideoPip = create<VideoPipState>((set, get) => ({
   duration: 0,
   error: "",
   session: null,
+  panelTarget: null,
+  setPanelTarget(panelTarget) { set({ panelTarget }); },
+  close() {
+    // 用户叉掉小窗是退出浮动模式；普通换源的 clear() 不应更改这项偏好。
+    get().setMode("panel");
+    get().clear();
+  },
   setMode(mode) {
     writeLocalStorageNow(STORAGE_KEY, mode);
     set({ mode });
@@ -220,7 +228,13 @@ export const useVideoPip = create<VideoPipState>((set, get) => ({
     set({ failed: on });
   },
   setSystemPip(on) {
+    const returningToPanel = !on && get().systemPip && get().active && get().mode === "float";
     set({ systemPip: on });
+    // 系统小窗关闭/返回应用也退出浮动模式；程序主动退 PiP 时已切 panel 或清掉会话。
+    if (returningToPanel) {
+      get().setMode("panel");
+      broadcastApply("panel");
+    }
   },
   setPlaying(on) {
     set({ playing: on });

@@ -119,11 +119,15 @@ export function lyricIndex(lines: LyricLine[], time: number): number {
   return lo - 1;
 }
 export function studioDuration(timeline: VisualizerFeatureTimeline): number { return timeline.sample_count / timeline.sample_rate; }
-export function sampleStudioFeatures(timeline: VisualizerFeatureTimeline, time: number): VisualizerFeatureFrame {
-  if (!timeline.frames.length) return { bands: Array(64).fill(0), bass: 0, rms: 0, onset: 0 };
+export function sampleStudioFeatures(timeline: VisualizerFeatureTimeline, time: number, output?: VisualizerFeatureFrame): VisualizerFeatureFrame {
+  const result = output ?? { bands: [], bass: 0, rms: 0, onset: 0 };
+  if (!timeline.frames.length) { result.bands.length = 64; result.bands.fill(0); result.bass = result.rms = result.onset = 0; return result; }
   const at = clamp(time * timeline.fps, 0, timeline.frames.length - 1), i = Math.floor(at), a = timeline.frames[i], b = timeline.frames[Math.min(i + 1, timeline.frames.length - 1)], k = at - i;
   const mix = (x: number, y: number) => x + (y - x) * k;
-  return { bands: a.bands.map((v, n) => mix(v, b.bands[n] || 0)), bass: mix(a.bass, b.bass), rms: mix(a.rms, b.rms), onset: mix(a.onset, b.onset) };
+  result.bands.length = a.bands.length;
+  for (let n = 0; n < a.bands.length; n++) result.bands[n] = mix(a.bands[n], b.bands[n] || 0);
+  result.bass = mix(a.bass, b.bass); result.rms = mix(a.rms, b.rms); result.onset = mix(a.onset, b.onset);
+  return result;
 }
 export function studioPercentile(values: number[], fraction: number): number {
   values.sort((a, b) => a - b);

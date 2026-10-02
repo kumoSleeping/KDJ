@@ -71,10 +71,12 @@ export function OnlineTrackCacheFacts({
   source,
   preview,
   trackId,
+  video = false,
 }: {
   source: SongSource | null;
   preview: SongPreviewState | null;
   trackId: number | null;
+  video?: boolean;
 }) {
   const tasks = useDownloadStore((state) => state.list);
   const now = useTerminalExpiryClock(tasks);
@@ -184,7 +186,7 @@ export function OnlineTrackCacheFacts({
   }
 
   // 歌词固定跟在波形后面；两种轻量缓存在详情顶部并排展示。
-  if (lyrics.status !== "idle") {
+  if (!video && lyrics.status !== "idle") {
     facts.push({
       key: "lyrics-cache",
       text: lyrics.status === "ready"

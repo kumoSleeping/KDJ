@@ -23,7 +23,11 @@ pub fn compare_blocks(
     canceled: &dyn Fn() -> bool,
 ) -> Result<RecordingMatch> {
     if !segment_only {
+        let started = std::time::Instant::now();
         let (result, sections) = align_sections_prepared(reference, source, &canceled)?;
+        tracing::debug!(target: "kdj_alignment_timing", stage = "strict_sections",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000., matched = result.matched,
+            sections = sections.len(), "comparison stage finished");
         if result.matched {
             return Ok(RecordingMatch {
                 offset_ms: Some(-result.offset_ms as f64),
@@ -32,9 +36,18 @@ pub fn compare_blocks(
             });
         }
     }
+    let started = std::time::Instant::now();
     let result = align_segment_prepared(source, reference, &canceled)?;
+    tracing::debug!(target: "kdj_alignment_timing", stage = "strict_segment",
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000., matched = result.matched,
+        "comparison stage finished");
     let fuzzy = if !result.matched && allow_fuzzy {
-        suggest_positions_prepared(source, reference, &canceled)?
+        let started = std::time::Instant::now();
+        let suggestions = suggest_positions_prepared(source, reference, &canceled)?;
+        tracing::debug!(target: "kdj_alignment_timing", stage = "fuzzy",
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000., verified = suggestions.verified.len(),
+            review = suggestions.review.len(), "comparison stage finished");
+        suggestions
     } else {
         PositionSuggestions::default()
     };

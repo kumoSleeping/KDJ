@@ -1006,7 +1006,9 @@ export function Waveform({
     const rail = railRef.current;
     const canvas = canvasRef.current;
     if (!host || !rail || !canvas || !displayWave) return;
-    let resizeFrame = 0;
+    let resizeTimer = 0;
+    let paintedSize = "";
+    const sizeKey = () => `${canvas.clientWidth}:${canvas.clientHeight || height}:${window.devicePixelRatio || 1}`;
     let deferredForPaneResize = false;
     const renderNow = () => {
       // clientWidth/clientHeight are the canvas's untransformed CSS box. Painting that exact box
@@ -1014,6 +1016,8 @@ export function Waveform({
       const width = canvas.clientWidth;
       const renderedHeight = canvas.clientHeight || height;
       if (width <= 0 || renderedHeight <= 0) return;
+      const size = sizeKey();
+      if (size === paintedSize) return;
       drawWaveformCanvas(
         canvas,
         displayWave,
@@ -1025,30 +1029,36 @@ export function Waveform({
         canvasProfile,
         renderedAmplitudeScale,
       );
+      paintedSize = size;
     };
     const scheduleRender = () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = 0;
+      if (sizeKey() === paintedSize) return;
       if (document.body.dataset.kdPaneResizing === "right") {
         deferredForPaneResize = true;
         return;
       }
-      if (resizeFrame) return;
-      resizeFrame = window.requestAnimationFrame(() => {
-        resizeFrame = 0;
+      // CSS stretches the previous bitmap during a resize; rebuild only after
+      // dimensions settle, not once per animation frame (including left/floating panes).
+      resizeTimer = window.setTimeout(() => {
+        resizeTimer = 0;
         renderNow();
-      });
+      }, 120);
     };
     const finishPaneResize = () => {
       if (!deferredForPaneResize) return;
       deferredForPaneResize = false;
       scheduleRender();
     };
+    const refreshTheme = () => { paintedSize = ""; scheduleRender(); };
     renderNow();
     const observer = new ResizeObserver(scheduleRender);
     observer.observe(host);
     observer.observe(canvas);
     window.addEventListener("resize", scheduleRender);
     window.addEventListener("kd:pane-resize-end", finishPaneResize);
-    window.addEventListener(THEME_CHANGE_EVENT, scheduleRender);
+    window.addEventListener(THEME_CHANGE_EVENT, refreshTheme);
     // Moving a Tauri window between Retina and non-Retina displays can change DPR without changing
     // the host's CSS box, so ResizeObserver alone leaves a stale backing-store resolution.
     let dprQuery: MediaQueryList | null = null;
@@ -1063,11 +1073,11 @@ export function Waveform({
     };
     watchDpr();
     return () => {
-      if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
+      window.clearTimeout(resizeTimer);
       observer.disconnect();
       window.removeEventListener("resize", scheduleRender);
       window.removeEventListener("kd:pane-resize-end", finishPaneResize);
-      window.removeEventListener(THEME_CHANGE_EVENT, scheduleRender);
+      window.removeEventListener(THEME_CHANGE_EVENT, refreshTheme);
       dprQuery?.removeEventListener("change", handleDprChange);
     };
   }, [

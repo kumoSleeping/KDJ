@@ -527,73 +527,6 @@ body {
   background-clip: var(--kd-desktop-lyrics-secondary-clip, border-box);
 }
 
-/* 悬浮歌词取色：模式开关 + 一根色相线（不用系统 color input）。 */
-.kd-lyrics-color-block {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  margin-top: 0.05rem;
-  padding: 0.15rem 0 0.35rem;
-  -webkit-app-region: no-drag;
-}
-.kd-lyrics-hue-line {
-  position: relative;
-  width: 100%;
-  height: 3px;
-  /* 上沿留给尖朝下的三角标，勿与上方模式行贴死。 */
-  margin: 0.75rem 0 0.45rem;
-  border-radius: 999px;
-  cursor: pointer;
-  touch-action: none;
-  box-shadow: 0 0 0 1px rgba(127, 127, 127, 0.35);
-}
-.kd-lyrics-hue-line:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--kd-muted) 70%, transparent);
-  outline-offset: 4px;
-}
-/* 色相标：尖朝下指色相线。不用 border-radius——全局会被打成方块。 */
-.kd-lyrics-hue-knob {
-  position: absolute;
-  top: 50%;
-  width: 0.72rem;
-  height: 0.56rem;
-  border: none;
-  clip-path: polygon(0% 0%, 100% 0%, 50% 100%);
-  transform: translate(-50%, calc(-100% - 1px));
-  filter:
-    drop-shadow(0 0 0.45px #fff)
-    drop-shadow(0 0 0.8px rgba(0, 0, 0, 0.7));
-  pointer-events: none;
-}
-.kd-lyrics-hue-knob[data-active="true"] {
-  width: 0.84rem;
-  height: 0.64rem;
-  filter:
-    drop-shadow(0 0 0.45px #fff)
-    drop-shadow(0 0 0.9px rgba(0, 0, 0, 0.75))
-    drop-shadow(0 0 2.5px color-mix(in srgb, var(--kd-muted) 55%, transparent));
-}
-
-/* 悬浮歌词连续字号：与接歌小节同一套 2px 红/灰线（.kd-djp-slider）。 */
-.kd-lyrics-size-row {
-  display: grid;
-  grid-template-columns: auto minmax(5rem, 1fr);
-  align-items: center;
-  gap: 0.75rem;
-  min-height: 1.85rem;
-  margin-top: 0.05rem;
-  padding: 0.2rem 0;
-  -webkit-app-region: no-drag;
-}
-.kd-lyrics-size-row[data-disabled="true"] {
-  opacity: 0.45;
-  pointer-events: none;
-}
-.kd-lyrics-size-row .kd-djp-slider {
-  width: 100%;
-  min-width: 0;
-}
-
 ::selection {
   background: var(--kd-theme-soft);
 }
@@ -618,6 +551,27 @@ textarea {
 }
 .kd-scroll {
   overflow: auto;
+}
+
+/* Sakura98 supplies its own raised scrollbar skin. Native overflow in task
+   cards and the bottom workspace must not inherit the global hidden state. */
+:root[data-theme-pack="sakulaptop98"] * {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+:root[data-theme-pack="sakulaptop98"] *::-webkit-scrollbar {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+/* The library has themed overlay handles already; keep a single scrollbar. */
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scroll-host > .kd-scroll {
+  scrollbar-width: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scroll-host > .kd-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 /* ============================================================
@@ -870,8 +824,9 @@ textarea {
 .kd-narrow-source-roots {
   /* 来源开关不能被下方超长目录挤扁：否则 NetEase / Q Music 只会露出
      一截彩色图标，看起来像一条莫名其妙的线。来源多时在自己区域滚动。 */
-  flex: 0 0 auto;
-  max-height: 34%;
+  flex: 0 1 auto;
+  /* Show all sources when space permits; leave room for at least one folder row. */
+  max-height: calc(100% - 9rem);
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -879,6 +834,7 @@ textarea {
   /* 目录吃掉来源区以外的剩余高度；0 basis 避免它按完整列表高度参与
      flex 收缩，把上面的固定来源按钮重新压扁。 */
   flex: 1 1 0;
+  min-height: 2.55rem;
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -914,6 +870,28 @@ textarea {
   margin: 0.15rem 0;
   background: var(--kd-line);
 }
+.kd-narrow-rail-resize {
+  flex: none;
+  align-self: stretch;
+  width: auto;
+  height: 9px;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: row-resize;
+  touch-action: none;
+}
+.kd-narrow-rail-resize::after {
+  content: "";
+  display: block;
+  width: 1.8rem;
+  height: 1px;
+  margin: 4px auto;
+  background: var(--kd-line);
+}
+.kd-narrow-rail-resize:hover::after { background: var(--kd-theme); }
+.kd-narrow-rail-resize:focus-visible { outline: 1px solid var(--kd-theme); outline-offset: -1px; }
 .kd-narrow-folder-panel {
   flex: 0 0 clamp(11rem, 38vw, 15rem);
   min-width: 0;
@@ -997,8 +975,7 @@ textarea {
   overflow: hidden;
 }
 /*
- * 旁路面板叠在主内容区右侧，而不是成为工作台的第三整列、也不挤中间列表。
- * 搜索框保持完整宽度；开合右栏时曲目表列宽与空白不变。
+ * 右栏与搜索、分析/EQ、列表共享内容网格，打开时一起分配宽度。
  * 右栏与底下的主列表是独立滚动面，指针停在右栏时不能带动主列表。
  */
 .kd-local-list-slot {
@@ -1016,29 +993,25 @@ textarea {
   min-height: 0;
   flex: 1 1 auto;
 }
-.kd-local-list-slot[data-aside="open"] > .kd-split-handle {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  right: var(--kd-visible-right);
-  width: 1px;
-  z-index: 6;
+/* Search spans the content width; the sidebar starts below it. */
+.kd-main-slot > .kd-table-wrap[data-aside="open"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 1px min(var(--kd-right, 25rem), 45%);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
-.kd-local-list-slot[data-aside="open"] > .kd-split-aside {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: var(--kd-visible-right);
-  z-index: 5;
-  box-shadow: -10px 0 28px rgba(15, 18, 28, 0.08);
+.kd-table-wrap[data-aside="open"] > .kd-search-band-host { grid-column: 1 / -1; grid-row: 1; }
+.kd-table-wrap[data-aside="open"] > .kd-track-preview-row { grid-column: 1; grid-row: 2; }
+.kd-table-wrap[data-aside="open"] > .kd-local-list-slot { grid-column: 1; grid-row: 3; }
+.kd-table-wrap[data-aside="open"] > .kd-split-handle {
+  grid-column: 2;
+  grid-row: 2 / -1;
 }
-/*
- * 右旁路面板打开时，中间分割整体右缩给右栏让位；
- * 否则绝对定位的详情/队列面板会盖住本地曲库和搜索结果右侧的工具按钮。
- */
-.kd-local-list-slot[data-aside="open"] > .kd-workspace-panes {
-  margin-right: calc(var(--kd-visible-right) + 1px);
+.kd-table-wrap[data-aside="open"] > .kd-split-aside {
+  grid-column: 3;
+  grid-row: 2 / -1;
+  min-width: 0;
+  border-left: 1px solid var(--kd-line);
+  box-shadow: none;
 }
 
 /* ============================================================
@@ -1370,6 +1343,10 @@ textarea {
 .kd-panel-dense .kd-field {
   gap: 0.15rem;
 }
+.kd-detail-viz-actions { display: inline-flex; align-items: center; gap: 0.15rem; }
+/* Keep the preview inside the theme's two-pixel inset window frame. Opaque
+   preview/loading surfaces otherwise paint over the parent's bevel. */
+:root[data-theme-pack="sakulaptop98"] .kd-detail-viz-panel { padding: 2px; }
 .kd-panel-dense .kd-panel-body > * + * {
   margin-top: 0.5rem;
 }
@@ -1384,7 +1361,7 @@ textarea {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-/* Analysis：圆图 + 读数共处一面（仪表盘），波形另占底行。 */
+/* Analysis：圆图 + 读数共处一面（仪表盘）。 */
 .kd-track-detail {
   /* 详情栏宽度可拖，响应式仪表盘必须看这一栏本身，不能看整个窗口。 */
   container-type: inline-size;
@@ -1487,13 +1464,6 @@ textarea {
   height: 1px;
   background: var(--kd-line-soft);
 }
-.kd-analysis-meta {
-  margin-top: 0;
-  font-size: var(--kd-size-xs);
-  flex-wrap: wrap;
-  row-gap: 0.15rem;
-}
-
 /* 右栏稍窄时，128px 调号轮会刚好把读数挤到下一行，留下半行空白。
    先把圆图收小并保持并排；只有真正窄到放不下时才改成居中的上下布局。 */
 @container (max-width: 20rem) {
@@ -1614,13 +1584,17 @@ textarea {
 /* 容器查询的锚点：列表面板夹在文件夹树和详情栏中间，真实可用宽度远小于窗口宽度，
    所以要按**这个面板**的宽度决定砍哪列，而不是按视口。 */
 .kd-table-wrap {
+  --kd-visible-right: min(var(--kd-right, 25rem), calc(100% - 1px));
+  position: relative;
+  isolation: isolate;
   container-type: inline-size;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
-.kd-table-wrap > .kd-scroll,
+/* 只有列表滚动区填满剩余高度；顶部停靠区随内容收缩，不保留关闭板块的空位。 */
+.kd-table-wrap > .kd-scroll:not(.kd-panel-dock),
 .kd-workspace-pane-local > .kd-scroll,
 .kd-workspace-pane-remote > .kd-scroll {
   flex: 1;
@@ -1862,7 +1836,7 @@ textarea {
   width: 3.65rem;
   padding-left: min(var(--kd-traffic-pad, 0px), max(0px, calc(3.65rem - 5rem)));
 }
-/* 窄侧栏时 3.65rem 装不下红绿灯垫，历史键会被压到圆钮下面——改成先让出红绿灯再排键。 */
+/* 窄侧栏装不下红绿灯垫，历史键会被压到圆钮下面——改成先让出红绿灯再排键。 */
 .kd-app[data-mac="true"] .kd-section-body[data-compact-tree="closed"] .kd-app-chrome-tree {
   width: calc(var(--kd-traffic-pad, 0px) + 5.4rem);
   padding-left: var(--kd-traffic-pad, 0px);
@@ -2182,35 +2156,6 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 详情 / 歌词双极：与眉目标题同级的字重切换，不再套一层 segmented 边框。 */
-.kd-aside-face {
-  flex: none;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.55rem;
-  -webkit-app-region: no-drag;
-}
-.kd-aside-face > button {
-  margin: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-sm);
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-}
-.kd-aside-face > button[aria-pressed="true"],
-.kd-aside-face > button[aria-selected="true"] {
-  color: var(--kd-text);
-}
-.kd-aside-face > button:hover {
-  color: var(--kd-text);
-}
-.kd-sheet-head .kd-aside-face {
-  margin-right: auto;
-}
 .kd-aside-head-drag {
   flex: 1 1 auto;
   align-self: stretch;
@@ -2218,13 +2163,23 @@ textarea {
   -webkit-app-region: drag;
 }
 .kd-aside-head-tools {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 0.1rem;
   margin-right: -0.35rem;
   -webkit-app-region: no-drag;
 }
+.kd-detail-restore-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.kd-detail-restore-tools::-webkit-scrollbar { display: none; }
 .kd-aside-head-close,
 .kd-sheet-close {
   flex: none;
@@ -3157,7 +3112,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   cursor: auto;
 }
 .kd-video-row .kd-video-controls button,
-.kd-video-row .kd-video-controls select,
+.kd-video-row .kd-video-controls :is(select, .kd-select-control),
 .kd-video-row .kd-video-controls label {
   cursor: pointer;
 }
@@ -3201,7 +3156,7 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-composition-panel { container-type: inline-size; }
 .kd-composition-panel .kd-download-defaults { flex-wrap: wrap; gap: 0.35rem 0.6rem; }
 .kd-composition-panel .kd-download-task-quality-control { width: auto; flex: 0 0 auto; white-space: nowrap; }
-.kd-composition-panel .kd-download-task-quality-control > select { min-width: 0; }
+.kd-composition-panel .kd-download-task-quality-control > .kd-select-control { min-width: 0; }
 .kd-composition-panel .kd-download-summary { flex-wrap: wrap; gap: 0.35rem 0.6rem; }
 .kd-composition-columns, .kd-composition-slots { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.6rem; }
 .kd-composition-columns { flex: none; padding: 0.55rem 0.7rem 0.35rem; font-size: var(--kd-size-xs); color: var(--kd-muted); border-bottom: 1px solid var(--kd-line-soft); }
@@ -4208,11 +4163,13 @@ body[data-kd-search-pointer-dragging="true"] * {
   z-index: 60;
   isolation: isolate;
   display: grid;
-  /* 控制组按整条底栏居中；唱盘绝对定位在两端，不再拿两块宽列挤短波形。 */
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  /* 行列结构由应用统一控制，主题只负责外观，不能用独立断点把桌面底栏拆成三行。
+     中间控制组按内容取宽，两侧歌曲均分余量；只有统一的竖屏布局在下方改成三行。 */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) !important;
+  grid-template-rows: auto auto !important;
   grid-template-areas:
     "now controls next"
-    "wave wave wave";
+    "wave wave wave" !important;
   align-items: center;
   column-gap: 0.75rem;
   row-gap: 0.4rem;
@@ -4352,9 +4309,28 @@ body[data-kd-search-pointer-dragging="true"] * {
   opacity: 0.68;
   transition: opacity 0.15s;
 }
-/* 桌面：唱盘跨过波形行，文案和波形之间留一点气口，避免高柱子蹭到艺人名。 */
+/* 桌面宽唱盘：状态和曲名同一行，艺人留在第二行；窄屏布局在下方覆盖。 */
 .kd-app:not([data-portrait="true"]) .kd-player-deck-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.4rem;
   padding-bottom: 0.25rem;
+}
+.kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] .kd-player-deck-copy {
+  justify-content: flex-end;
+}
+.kd-app:not([data-portrait="true"]) .kd-player-deck-state {
+  flex: none;
+  margin-bottom: 0;
+}
+.kd-app:not([data-portrait="true"]) .kd-player-deck-copy .kd-player-title {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: max-content;
+}
+.kd-app:not([data-portrait="true"]) .kd-player-deck-copy .kd-player-artist {
+  flex: 1 0 100%;
 }
 .kd-player-deck[data-active="true"] .kd-player-deck-copy,
 .kd-player-deck[data-transitioning="true"] .kd-player-deck-copy {
@@ -4653,6 +4629,16 @@ body[data-kd-search-pointer-dragging="true"] * {
   pointer-events: none;
   overflow: hidden;
 }
+/* 网络侧栏只提供落点；共享宿主保持同一组 video 节点，切模式不重建解码器。 */
+.kd-network-video-panel { width: 100%; aspect-ratio: 16 / 9; flex: none; }
+.kd-pip-float[data-docked="true"]:not([data-fullscreen="true"]) {
+  z-index: 55;
+  max-width: none;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: default;
+}
+.kd-pip-float[data-docked="true"] .kd-pip-float-stage { height: 100%; aspect-ratio: auto; }
 /* 自研小窗：无外框，画面即窗口；控件叠在视频里，悬停才显；可拖。 */
 .kd-pip-float {
   position: fixed;
@@ -4789,6 +4775,10 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-weight: 600;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
 }
+/* Stay at the bottom even when a theme positions the caption outside the picture. */
+.kd-pip-float-chrome .kd-pip-float-bottom {
+  margin-top: auto;
+}
 .kd-pip-float-bottom > .kd-mono {
   flex: 1 1 auto;
   opacity: 0.9;
@@ -4841,6 +4831,41 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-pip-float-bottom > button:hover {
   background: rgba(255, 255, 255, 0.18);
 }
+.kd-pip-volume { position: relative; flex: none; }
+.kd-pip-volume button {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.55rem;
+  height: 1.55rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.kd-pip-volume-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.9rem);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem;
+  border-radius: 0.4rem;
+  background: rgba(20, 20, 20, 0.94);
+  color: #fff;
+}
+.kd-pip-volume-panel > input[type="range"] { width: 5rem; min-width: 0; padding: 0; }
+.kd-pip-volume-panel > input[type="range"]::-webkit-slider-runnable-track { height: 3px; background: #aaa; border-radius: 999px; }
+.kd-pip-volume-panel > input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; margin-top: -4px; border: 0; border-radius: 50%; background: #fff; }
+.kd-pip-volume-panel > input[type="range"]::-moz-range-track { height: 3px; background: #aaa; border-radius: 999px; }
+.kd-pip-volume-panel > input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 0; border-radius: 50%; background: #fff; }
+.kd-pip-volume-panel > .kd-mono { min-width: 4ch; text-align: right; }
+.kd-pip-volume button:focus-visible,
+.kd-pip-volume input:focus-visible { outline: 1px solid #fff; outline-offset: 2px; }
 .kd-pip-float-error {
   position: absolute;
   left: 0.45rem;
@@ -5125,8 +5150,25 @@ body[data-kd-search-pointer-dragging="true"] * {
   padding: 0.65rem 0;
 }
 .kd-local-video .kd-preview-frame {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  width: auto;
   margin-inline: 0.65rem;
+  border: 1px solid var(--kd-line);
+  box-shadow: none;
+  cursor: default;
 }
+.kd-local-video .kd-preview-frame[data-fullscreen="true"] {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  aspect-ratio: auto;
+}
+.kd-local-video .kd-preview-frame > video { object-fit: contain; }
 .kd-local-video .kd-djp-note {
   margin: 0.5rem 0.65rem 0;
 }
@@ -5500,7 +5542,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   cursor: wait;
   opacity: 0.62;
 }
-.kd-download-task-quality-control > select {
+.kd-download-task-quality-control > .kd-select-control {
   appearance: none;
   height: 100%;
   min-width: 2.85rem;
@@ -5514,7 +5556,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font-weight: 680;
   cursor: pointer;
 }
-.kd-download-task-quality-control > select:disabled {
+.kd-download-task-quality-control > .kd-select-control:disabled {
   cursor: wait;
 }
 .kd-download-task-quality-control > svg:last-child {
@@ -5828,6 +5870,16 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-activity[data-idle="true"] {
   background: var(--kd-panel);
 }
+/* The library rail is the containing list's header, not a passive status strip. */
+.kd-workspace-pane-local > .kd-activity {
+  background: var(--s98-caption, color-mix(in srgb, var(--kd-panel) 88%, var(--kd-text) 12%));
+  border-top: 1px solid var(--kd-line);
+  border-bottom: 1px solid color-mix(in srgb, var(--kd-text) 32%, var(--kd-panel));
+  color: var(--kd-text);
+}
+.kd-workspace-pane-local > .kd-activity .kd-activity-text { color: var(--kd-text); font-weight: 600; }
+.kd-workspace-pane-local > .kd-activity .kd-activity-control { color: var(--kd-text); }
+.kd-workspace-pane-local > .kd-activity .kd-activity-glyphs { color: var(--kd-text); }
 .kd-activity-idle {
   color: var(--kd-faint);
   font-size: var(--kd-size-xs);
@@ -5969,6 +6021,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-activity-search-toggle:disabled {
   opacity: 0.4;
   cursor: default;
+}
+.kd-activity-search-toggle[data-action="media-filter"][data-active="true"] {
+  color: var(--kd-accent);
 }
 /* 右侧详情 / 顶栏搜索带：只靠图标形态表达开合，不再画主题色竖边或包裹轮廓。 */
 .kd-activity-search-toggle[data-action="toggle-aside"],
@@ -6834,7 +6889,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-account-avatar > img {
   border-radius: 50% !important;
 }
-/* 浏览器登录只保留系统原生 pop-up button 的外观；不套通用表单的大输入框皮肤。 */
+/* 浏览器登录使用紧凑选择控件，不套通用表单的大输入框尺寸。 */
 .kd-account-browser-select {
   appearance: auto;
   width: 100%;
@@ -7164,16 +7219,64 @@ body[data-kd-sidebar-root-dragging="true"] * {
 
 .kd-context-menu {
   position: fixed;
+  inset: auto;
+  margin: 0;
   z-index: 60;
-  min-width: 10rem;
-  max-height: calc(100vh - 16px);
+  min-width: min(10rem, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 0.2rem;
+  overscroll-behavior: contain;
+  padding: 0.25rem;
   border: 1px solid var(--kd-line);
+  border-radius: 6px;
   background: var(--kd-panel-raised);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+  color: var(--kd-text-body);
+  font-family: var(--kd-font);
+  box-shadow: var(--kd-shadow-float);
 }
+.kd-context-menu::backdrop { background: transparent; }
+.kd-context-menu > button:focus-visible {
+  outline: 1px solid var(--kd-muted);
+  outline-offset: -2px;
+}
+.kd-context-menu > button[aria-checked="true"],
+.kd-context-menu > button[aria-checked="true"]:hover:not(:disabled) {
+  color: var(--kd-theme);
+  background: none;
+}
+.kd-menu-heading, .kd-lyrics-menu-heading {
+  padding: 0.4rem 0.5rem 0.2rem;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+}
+.kd-menu-heading:not(:first-child), .kd-lyrics-menu-heading:not(:first-child) { border-top: 1px solid var(--kd-line-soft); margin-top: 0.25rem; }
+.kd-menu-check { display: flex; width: 13px; flex: 0 0 13px; }
+.kd-menu-label { min-width: 0; overflow-wrap: anywhere; }
+.kd-select-menu > button { min-height: 1.85rem; }
+
+/* The trigger keeps its context's field sizing; popup rows always use the shared menu. */
+.kd-select-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--kd-line);
+  border-radius: 4px;
+  background: var(--kd-panel-inset);
+  color: var(--kd-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kd-select-control:disabled { opacity: .45; cursor: default; }
+.kd-select-control:focus-visible { outline: 1px solid var(--kd-muted); outline-offset: 2px; }
+.kd-select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-select-control > svg { flex: none; color: var(--kd-muted); }
 .kd-context-menu > button, .kd-context-menu .vj-add-menu button, .kd-context-menu .vj-add-menu > summary {
   display: flex;
   align-items: center;
@@ -7181,6 +7284,7 @@ body[data-kd-sidebar-root-dragging="true"] * {
   width: 100%;
   padding: 0.35rem 0.5rem;
   border: none;
+  border-radius: 3px;
   background: none;
   color: var(--kd-text-body);
   font: inherit;
@@ -7189,7 +7293,7 @@ body[data-kd-sidebar-root-dragging="true"] * {
   cursor: pointer;
 }
 .kd-context-menu > button:hover:not(:disabled), .kd-context-menu .vj-add-menu button:hover, .kd-context-menu .vj-add-menu > summary:hover {
-  background: var(--kd-hover);
+  background: color-mix(in srgb, var(--kd-panel-raised), var(--kd-text) 7%);
   color: var(--kd-text);
 }
 .kd-context-menu > button:disabled {
@@ -7200,8 +7304,7 @@ body[data-kd-sidebar-root-dragging="true"] * {
   color: var(--kd-theme);
 }
 .kd-context-menu > button[data-danger="true"]:hover:not(:disabled) {
-  background: var(--kd-danger);
-  color: #fff;
+  color: var(--kd-danger);
 }
 
 /* ============================================================
@@ -7230,42 +7333,13 @@ body[data-kd-sidebar-root-dragging="true"] * {
  * 这一段全是右侧详情栏里新加的东西。
  * ========================================================== */
 
-/* 面板槽位：把手绝对定位在右上角，平时半透明，鼠标进这块才亮起来。
-   常亮的话六块面板右上角就是六个灰点，比面板标题还抢眼。 */
+/* 面板槽位：标题用于拖动，操作按钮保留各自的点击行为。 */
 .kd-panel-slot {
   position: relative;
 }
-/* Control 只在这首确实装进播放器时才渲染面板。保留槽位 id 才能继续尊重用户
-   保存的排序，但没有面板内容时不能留下一个孤零零的拖动把手。 */
-.kd-panel-slot:not(:has(> .kd-panel)) {
+/* 仅隐藏真正为空的槽位；播放控制、波形等面板可能带有布局包装层。 */
+.kd-panel-slot:empty {
   display: none;
-}
-/* 把手在**左**上角，不在右上角：右上角是面板自己的操作位
-   （元数据面板那儿有「重读标签」和「编辑」两颗按钮），
-   两者叠在一起的结果是想点编辑却抓起了整块面板。 */
-.kd-panel-grip {
-  position: absolute;
-  top: 0.3rem;
-  left: 0.25rem;
-  z-index: 2;
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: var(--kd-faint);
-  padding: 2px;
-  line-height: 0;
-  cursor: grab;
-  touch-action: none;
-  user-select: none;
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-.kd-panel-slot:hover .kd-panel-grip,
-.kd-panel-grip:focus-visible {
-  opacity: 1;
-}
-.kd-panel-grip:active {
-  cursor: grabbing;
 }
 .kd-panel-slot[data-dragging="true"] {
   opacity: 0.4;
@@ -8115,6 +8189,18 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-plat[aria-pressed="true"][data-platform="local"] {
   color: #3b82f6;
 }
+/* Sakura98 的 faint 也是暗粉色，不能用来表示平台关闭。
+   放在应用层以覆盖已安装的主题；选中规则需压过主题包的通用 !important。
+   悬停仍保持灰 / 红区分，不增加选中底色或边框。 */
+:root[data-theme-pack="sakulaptop98"] .kd-plats > .kd-plat[aria-pressed="false"] {
+  color: #8a8587;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-plats > .kd-plat[aria-pressed="false"]:hover {
+  color: #706b6d;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-plats > .kd-plat[aria-pressed="true"] {
+  color: var(--kd-theme-strong) !important;
+}
 /* 本地图标与其它平台同尺寸对齐，不再单独缩小/上移。 */
 .kd-plat[data-platform="local"] > svg {
   display: block;
@@ -8214,11 +8300,12 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 
 /* —— 竖屏播放条固定三行：控制 / 双唱盘信息 / 波形 —— */
 .kd-app[data-portrait="true"] .kd-player {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+  grid-template-rows: auto auto auto !important;
   grid-template-areas:
     "controls controls"
     "now next"
-    "wave wave";
+    "wave wave" !important;
   align-items: center;
   gap: 0.35rem 0.7rem;
   min-height: 0;
@@ -8337,133 +8424,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-app[data-portrait="true"] .kd-player-scrub > .kd-player-time {
   display: block;
-}
-
-/* 接近方形的窗口仍保留桌面工作区：三栏和表格在这里比抽屉更有用。但播放器
-   的“左右唱盘跨波形行”只适合真正宽的底栏；在平板横竖切换、中等宽桌面窗里，
-   文案会被压进波形行，看起来像底部没有歌名。播放器单独收成三行，信息层级与
-   竖屏一致，不把整个工作区误切成手机布局。 */
-@media (max-width: 940px), (max-aspect-ratio: 1 / 1) {
-  .kd-app:not([data-portrait="true"]) .kd-player {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-areas:
-      "controls controls"
-      "now next"
-      "wave wave";
-    align-items: center;
-    gap: 0.35rem 0.7rem;
-    min-height: 0;
-    height: auto;
-    padding: 0.45rem 0.7rem calc(0.45rem + 4px);
-  }
-  .kd-app[data-mobile="true"]:not([data-portrait="true"]) .kd-player {
-    padding-bottom: calc(0.45rem + var(--kd-safe-bottom));
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-transport {
-    grid-area: controls;
-    box-sizing: border-box;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-    align-items: center;
-    justify-self: stretch;
-    gap: 0.45rem;
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    min-height: 2.3rem;
-    overflow: visible;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-transport-side {
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-transport-side[data-side="left"] {
-    justify-content: flex-start;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-transport-side[data-side="right"] {
-    justify-content: flex-end;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-transport-side::-webkit-scrollbar {
-    display: none;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-transport-core {
-    position: static;
-    transform: none;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-transport::-webkit-scrollbar {
-    display: none;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-leading,
-  .kd-app:not([data-portrait="true"]) .kd-player-trailing {
-    position: relative;
-    inset: auto;
-    width: auto;
-    height: auto;
-    min-height: 2.85rem;
-    min-width: 0;
-    align-self: auto;
-    grid-row: auto;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-leading {
-    grid-area: now;
-    grid-column: auto;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-trailing {
-    grid-area: next;
-    grid-column: auto;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-deck {
-    grid-template-columns: 3.15rem minmax(0, 1fr);
-    grid-template-rows: 1fr;
-    column-gap: 0.45rem;
-    align-items: center;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] {
-    grid-template-columns: minmax(0, 1fr) 3.15rem;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="left"] .kd-player-disc,
-  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] .kd-player-disc,
-  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="left"] .kd-player-deck-copy,
-  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] .kd-player-deck-copy {
-    grid-row: 1;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-deck-copy {
-    align-self: center;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    column-gap: 0.4rem;
-    row-gap: 0.08rem;
-    padding-bottom: 0;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-deck-state {
-    flex: 1 0 100%;
-    margin-bottom: 0;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-title {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: block;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-artist {
-    flex: 0 1 auto;
-    max-width: 42%;
-    display: block;
-    min-height: 0;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-disc {
-    width: 3.05rem;
-    height: 3.05rem;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-disc-record {
-    width: 2.75rem;
-    height: 2.75rem;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player-scrub {
-    grid-area: wave;
-    margin-left: 0;
-    margin-right: 0;
-  }
 }
 
 /* 「正在播」那一块的三层都必须是块级。
@@ -8593,12 +8553,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   color: var(--kd-muted);
   font: inherit;
   font-size: 1em;
-}
-
-/* 标题给左上角那个把手让出位置。只在可拖的槽位里让——
-   PanelStack 之外的 .kd-panel 不该平白多一截缩进。 */
-.kd-panel-slot > .kd-panel > .kd-panel-head {
-  padding-left: 1.35rem;
 }
 
 /* 圆形播放键。 */
@@ -8826,6 +8780,14 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-player-lyricsbtn[data-on="true"]:hover:not(:disabled) {
   color: var(--kd-theme-strong);
+}
+/* Sakura latches switches while enabled and the mode button while its menu is
+   open. Transport/download/reroll actions retain only the theme's :active feedback.
+   Apply here so already-installed theme packs receive the fix through HMR too. */
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn)[aria-pressed="true"],
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-mode[aria-expanded="true"] {
+  color: var(--kd-theme);
+  box-shadow: var(--s98-sunken);
 }
 
 /* ------------------------------------------------------------ 设置面板（接播 + 账号）
@@ -9410,42 +9372,46 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   opacity: 0.45;
   cursor: default;
 }
+.kd-theme-row .kd-djp-font-actions { min-width: 0; max-width: 80%; gap: 0.35rem; }
+.kd-theme-select { position: relative; display: inline-flex; min-width: 0; }
+.kd-theme-select > .kd-select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  min-width: 0;
+  max-width: 15rem;
+  height: 1.85rem;
+  padding: 0.15rem 0.55rem;
+  font: inherit;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+}
+.kd-theme-select .kd-select-control > svg { color: var(--kd-text); }
+.kd-theme-official { display: grid; gap: 0.25rem; }
+.kd-theme-official-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.kd-theme-official-row > span { display: flex; align-items: baseline; gap: 0.5rem; }
+.kd-theme-official-row small { color: var(--kd-muted); font-size: var(--kd-size-xs); }
+
+.kd-camelot-grid { flex: none; min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 0.4rem; padding: 0.5rem; color: var(--kd-text); }
+.kd-camelot-grid-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.3rem; font-size: var(--kd-size-xs); }
+.kd-camelot-grid-head strong { font-size: 1.15rem; color: var(--kd-theme); }
+.kd-camelot-grid-keys { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px 0.35rem; min-height: 0; }
+.kd-camelot-grid-key { display: flex; align-items: center; justify-content: space-between; min-width: 0; padding: 0 0.35rem; border: 0; border-radius: 0; background: transparent; color: var(--kd-muted); font: 500 0.65rem/1.1 var(--kd-font); text-align: left; }
+button.kd-camelot-grid-key { cursor: pointer; }
+.kd-camelot-grid-key small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.55rem; }
+.kd-camelot-grid[data-compact="true"] .kd-camelot-grid-key { justify-content: center; padding: 0; }
+.kd-camelot-grid[data-compact="true"] .kd-camelot-grid-key small { display: none; }
+.kd-camelot-grid[data-compact="true"] .kd-camelot-grid-head { flex-wrap: wrap; gap: 0 0.25rem; }
+.kd-camelot-grid-key[data-neighbour="true"] { color: var(--kd-text); }
+.kd-camelot-grid-key[data-current="true"] { color: var(--kd-theme); font-weight: 800; }
+.kd-camelot-grid-key:focus-visible { outline: 1px dashed var(--kd-text); outline-offset: -1px; }
+
 .kd-djp-font-value {
   color: var(--kd-text);
   font-size: var(--kd-size-xs);
   font-weight: 400;
   line-height: 1;
   text-align: left;
-}
-/* 与播放条音量一致：一根 2px 红/灰线，无可见滑块。 */
-.kd-djp-slider {
-  --kd-djp-fill: 0%;
-  position: relative;
-  width: 100%;
-  height: 14px;
-  outline: none;
-  cursor: pointer;
-  touch-action: none;
-  user-select: none;
-  -webkit-app-region: no-drag;
-}
-.kd-djp-slider-track {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  height: 2px;
-  margin-top: -1px;
-  border-radius: 0 !important;
-  background: linear-gradient(
-    to right,
-    var(--kd-theme) 0 var(--kd-djp-fill),
-    var(--kd-line) var(--kd-djp-fill) 100%
-  );
-  pointer-events: none;
-}
-.kd-djp-slider:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--kd-theme-soft);
 }
 .kd-djp-number {
   display: flex;
@@ -9484,7 +9450,7 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   opacity: 0.5;
 }
 
-/* ------------------------------------------------------------ 歌词（右栏 + 悬浮窗）
+/* ------------------------------------------------------------ 歌词（曲目详情）
    色阶只用灰 / 墨：未播灰色，正在播用正文色（浅色主题≈黑，深色≈白）。
    刻意不用 --kd-theme，避免红字抢戏。 */
 .kd-lyrics {
@@ -9493,75 +9459,27 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   --kd-lyrics-faint: color-mix(in srgb, var(--kd-muted) 55%, transparent);
   display: flex;
   flex-direction: column;
-  height: 100%;
   min-height: 0;
   gap: 0;
-  background:
-    radial-gradient(120% 70% at 50% -10%, color-mix(in srgb, var(--kd-text) 5%, transparent), transparent 62%),
-    var(--kd-panel);
 }
-.kd-lyrics-head {
-  display: grid;
-  grid-template-columns: 3.4rem minmax(0, 1fr);
-  gap: 0.75rem;
-  align-items: center;
-  padding: 0.85rem 0.95rem 0.7rem;
-  border-bottom: 1px solid color-mix(in srgb, var(--kd-line) 80%, transparent);
+.kd-detail-lyrics-panel .kd-lyrics[data-has-content="true"] { height: min(20rem, 34vh); }
+/* Installed Sakura packs predating the pink lyric surface still set .kd-lyrics
+   to the white inset colour. Keep the detail panel and its empty state consistent. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-detail-lyrics-panel .kd-panel-body,
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-detail-lyrics-panel .kd-lyrics {
+  background: var(--s98-content-paper, #fbe3eb);
 }
-.kd-lyrics-head[data-toggles="true"] {
-  grid-template-columns: 3.4rem minmax(0, 1fr) auto;
-}
-.kd-lyrics-cover {
-  width: 3.4rem;
-  height: 3.4rem;
-  border-radius: 0.55rem;
-  overflow: hidden;
-  background: var(--kd-panel-inset);
-  box-shadow: 0 6px 18px color-mix(in srgb, #000 16%, transparent);
-}
-.kd-lyrics-cover img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.kd-lyrics-cover-fallback {
-  display: block;
-  width: 100%;
-  height: 100%;
-  background:
-    linear-gradient(145deg, color-mix(in srgb, var(--kd-muted) 22%, transparent), transparent 60%),
-    var(--kd-panel-inset);
-}
-.kd-lyrics-head-copy {
-  min-width: 0;
+.kd-detail-lyrics-panel .kd-lyrics:not([data-has-content]) .kd-lyrics-stage { display: none; }
+.kd-lyrics-embedded-tools {
   display: flex;
-  flex-direction: column;
-  gap: 0.12rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
 }
-.kd-lyrics-head-title {
-  font-size: 1rem;
-  font-weight: 650;
-  letter-spacing: 0.01em;
-  color: var(--kd-lyrics-ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-lyrics-head-artist {
-  font-size: 0.82rem;
-  color: var(--kd-lyrics-soft);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-lyrics-head-source {
-  margin-top: 0.12rem;
-  font-size: 0.68rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--kd-lyrics-faint);
-}
+.kd-lyrics-embedded-tools .kd-lyrics-layer { align-self: center; margin: 0; }
+.kd-detail-lyrics-panel .kd-lyrics-stage { min-height: 0; }
+.kd-detail-lyrics-panel .kd-lyrics-scroll { padding: 1.2rem 0.7rem 1.8rem; }
 .kd-lyrics-source-picker,
 .kd-viz-panel .kd-lyrics-source-picker {
   display: inline-flex;
@@ -9577,14 +9495,7 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-lyrics-source-picker:hover:not(:disabled) { color: var(--kd-text); }
 .kd-lyrics-source-picker:disabled { opacity: .6; cursor: default; }
-.kd-lyrics-source-picker:focus-visible,
-.kd-lyrics-source-menu > button:focus-visible { outline: 2px solid var(--kd-muted); outline-offset: 2px; }
-.kd-lyrics-source-menu { border-radius: .35rem; }
-.kd-lyrics-source-menu > button[aria-checked="true"],
-.kd-lyrics-source-menu > button[aria-checked="true"]:hover:not(:disabled) {
-  color: var(--kd-theme);
-  background: none;
-}
+.kd-lyrics-source-picker:focus-visible { outline: 2px solid var(--kd-muted); outline-offset: 2px; }
 /* 右上角一字状态：原 / 意 / 音，无边框无底，点一下循环。 */
 .kd-lyrics-layer {
   align-self: start;
@@ -9904,10 +9815,9 @@ button.kd-stream-status {
 }
 .kd-dj-eq-spectrum > path {
   fill: none;
-  stroke-width: 1.7;
+  stroke-width: 5;
   vector-effect: non-scaling-stroke;
   stroke-linecap: round;
-  stroke-linejoin: round;
   opacity: 0;
   transition: opacity 120ms linear;
 }
@@ -10497,14 +10407,14 @@ button.kd-stream-status {
 :is(.vj-workshop, .vj-workshop-toolbar) :is(button, input, select, summary):focus-visible, .vj-clip:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: -2px; }
 :is(.vj-workshop, .vj-workshop-toolbar) button:disabled { opacity: .3; cursor: default; }
 :is(.vj-workshop, .vj-workshop-toolbar) button[aria-pressed="true"] { color: var(--kd-theme); background: transparent; border-color: transparent; box-shadow: none; }
-.vj-workshop input:not([type="checkbox"]):not([type="range"]), .vj-workshop select { min-width: 0; max-width: 100%; border: 1px solid var(--kd-line-soft); border-radius: 4px; padding: .35rem; background: var(--kd-panel-inset); }
+.vj-workshop input:not([type="checkbox"]):not([type="range"]), .vj-workshop .kd-select-control { min-width: 0; max-width: 100%; border: 1px solid var(--kd-line-soft); border-radius: 4px; padding: .35rem; background: var(--kd-panel-inset); }
 .vj-workshop input[type="range"] { min-width: 30px; accent-color: var(--kd-theme); }
 .vj-workshop input[type="checkbox"] { accent-color: var(--kd-theme); }
 .vj-workshop .vj-primary { background: transparent; color: var(--kd-theme); font-weight: 600; padding-inline: .6rem; }
 .vj-workshop .vj-primary:hover:not(:disabled) { background: transparent; color: var(--kd-theme-strong); }
 .vj-header { display: flex; align-items: center; flex: none; gap: .3rem; padding: .45rem .7rem; border-bottom: 1px solid var(--kd-line-soft); }
 .vj-header > strong { font-weight: 600; margin-right: .6rem; white-space: nowrap; }
-.vj-header > select { width: 160px; }
+.vj-header > .kd-select-control { width: 160px; }
 .vj-toolbar-divider { flex: none; width: 1px; height: 18px; margin-inline: .25rem; background: var(--kd-line-soft); }
 .vj-spacer { flex: 1; }
 .vj-save-state, .vj-preparing { color: var(--kd-muted); font-size: var(--kd-size-xs); white-space: nowrap; }
@@ -10598,7 +10508,7 @@ button.kd-stream-status {
 .vj-dialog > header { display: flex; align-items: center; justify-content: space-between; }
 .vj-dialog > footer { display: flex; gap: .3rem; justify-content: flex-end; margin-top: .3rem; }
 .vj-text-field { display: flex; align-items: center; gap: .7rem; }
-.vj-text-field > input, .vj-text-field > select { min-width: 0; flex: 1; }
+.vj-text-field > input, .vj-text-field > .kd-select-control { min-width: 0; flex: 1; }
 .vj-directory { justify-content: flex-start !important; background: var(--kd-panel-inset) !important; }
 .vj-directory > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .vj-export-status { display: flex; flex-direction: column; gap: .4rem; font-size: var(--kd-size-xs); }
@@ -10609,7 +10519,7 @@ button.kd-stream-status {
   .vj-inspector { display: none; }
   .vj-workshop[data-properties="true"] .vj-inspector { display: block; position: absolute; right: 0; top: 47px; bottom: 40%; width: 245px; z-index: 8; background: var(--kd-panel); box-shadow: -8px 0 24px #0002; }
   .vj-workshop .vj-properties-toggle { display: inline-flex; }
-  .vj-header > select { width: 115px; }
+  .vj-header > .kd-select-control { width: 115px; }
   .vj-save-state { display: none; }
 }
 @container (max-width: 570px) {
@@ -10624,7 +10534,17 @@ button.kd-stream-status {
 }
 
 /* Workshop shares the existing right-hand panel and its resize boundary. */
-.kd-split-aside-body:has(> .vj-workshop) { overflow: hidden; }
+.kd-split-aside-body:has(> .vj-workshop),
+.kd-split-aside-body:has(> .kd-video-workspace) { overflow: hidden; }
+.kd-video-workspace { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; min-width: 0; background: var(--kd-panel); }
+.kd-video-workspace > :not(.kd-video-modes) { flex: 1 1 auto; min-height: 0; }
+.kd-video-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); flex: none; gap: 0; padding: 7px 8px; border-bottom: 1px solid var(--kd-line-soft); }
+.kd-video-modes button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-width: 0; min-height: 56px; padding: 5px 2px; border: 0; border-radius: 6px; background: transparent; color: var(--kd-text); font: 600 var(--kd-size-sm)/1.2 var(--kd-font); cursor: pointer; }
+.kd-video-modes button:hover:not(:disabled) { color: var(--kd-theme); }
+.kd-video-modes button[aria-current="page"] { color: var(--kd-theme); }
+.kd-video-modes button:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: -2px; }
+.kd-video-modes button:disabled { color: var(--kd-muted); opacity: .45; cursor: default; }
+.kd-video-modes button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 .vj-filmstrip { position: absolute; inset: 0; pointer-events: none; background: var(--kd-panel); }
 .vj-filmstrip > img { position: absolute; top: 0; height: 100%; object-fit: cover; }
@@ -10939,7 +10859,7 @@ button.kd-stream-status {
 .vj-rhythm-ruler > span { position: absolute; font-size: 10px; line-height: 14px; white-space: nowrap; padding-left: 3px; color: var(--kd-muted); font-variant-numeric: tabular-nums; }
 .vj-bar-number, .vj-tempo-label { top: 0; }
 
-/* Reserve the property bar even without a selection: editing must not resize the timeline. */
+/* Keep clip settings compact so the material tracks retain the editing space. */
 .vj-editing-body { display:flex; flex:1; min-width:0; min-height:0; overflow:hidden; }
 .vj-task-editor .vj-editing-body > .vj-timeline { flex:1 1 0; min-width:0; max-height:none; }
 .vj-subtitle-dialog { width:560px; max-width:calc(100vw - 32px); max-height:calc(100vh - 32px); color:var(--kd-text); }
@@ -10958,24 +10878,20 @@ button.kd-stream-status {
 .vj-crop-tools { margin:0; border:0; min-width:0; }
 .vj-crop-tools:disabled, .vj-property-group:disabled { opacity:.45; }
 .vj-property-group:disabled .vj-crop-tools:disabled { opacity:1; }
-.vj-clip-properties-bar { flex:0 0 auto; height:260px; max-height:45vh; min-width:0; overflow:auto; overscroll-behavior:contain; border-bottom:1px solid var(--kd-line-soft); background:var(--kd-panel); }
-.vj-clip-properties { display:flex; flex-direction:column; min-width:0; min-height:0; font-size:var(--kd-size-xs); }
-.vj-clip-properties > header { display:flex; flex:0 0 auto; align-items:center; min-height:calc(1.4em + 4px); padding:2px 10px; }
-.vj-clip-properties button { min-height:24px; padding:3px 4px; }
-.vj-clip-properties > header strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--kd-size-xs); font-weight:600; }
-.vj-clip-properties-scroll { display:flex; flex-wrap:wrap; align-items:flex-start; gap:6px 20px; min-height:0; padding:2px 10px 8px; }
-.vj-property-group { display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; min-width:0; margin:0; padding:0; border:0; }
-.vj-property-group > legend { padding:0; margin-bottom:4px; color:var(--kd-muted); font-size:var(--kd-size-xs); }
-.vj-property-group[aria-label="片段时间"], .vj-property-group[aria-label="片段画面"] { flex-basis:100%; }
-.vj-clip-properties .vj-number { display:flex; flex-wrap:nowrap; align-items:center; gap:6px; margin:0; width:auto; }
+.vj-clip-properties { min-width:0; font-size:var(--kd-size-xs); }
+.vj-clip-properties-scroll { display:flex; flex-direction:column; gap:14px; min-width:0; }
+.vj-property-group { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; min-width:0; margin:0; padding:8px 0 0; border:0; border-top:1px solid var(--kd-line-soft); }
+.vj-property-group[hidden] { display:none; }
+.vj-property-group > legend { padding:0 8px 0 0; color:var(--kd-text); font-weight:600; }
+.vj-clip-properties button { min-height:26px; padding:3px 5px; }
+.vj-clip-properties .vj-number { display:flex; flex-wrap:nowrap; align-items:center; gap:5px; margin:0; width:auto; }
 .vj-clip-properties .vj-number > span { color:var(--kd-muted); white-space:nowrap; }
-.vj-clip-properties .vj-number > input[type="number"] { flex:0 0 82px; width:82px; padding:3px 5px; text-align:right; }
-.vj-workshop .vj-clip-properties .vj-picture-tools .vj-number > input[type="number"] { flex:0 0 48px; width:48px; padding:3px 5px; background:var(--kd-panel-inset); border-color:var(--kd-line-soft); }
+.vj-clip-properties .vj-number > input[type="number"] { flex:0 0 72px; width:72px; min-width:0; padding:3px 5px; text-align:right; }
+.vj-clip-properties .vj-picture-tools .vj-number > input[type="number"] { flex-basis:48px; width:48px; }
 .vj-clip-properties .vj-number > small { color:var(--kd-muted); }
-.vj-clip-properties .vj-picture-tools { display:flex; flex-wrap:wrap; align-items:center; padding:0; gap:6px 12px; }
-.vj-clip-properties .vj-picture-tools > fieldset { display:flex; flex-wrap:wrap; align-items:center; min-width:0; padding:0; border:0; gap:6px 12px; }
-.vj-property-actions { display:flex; flex-wrap:wrap; align-items:center; gap:2px 4px; }
-.vj-clip-properties .vj-property-actions button { font-size:var(--kd-size-xs); }
+.vj-clip-properties .vj-picture-tools { display:flex; flex-wrap:wrap; align-items:center; padding:0; gap:8px 12px; }
+.vj-clip-properties .vj-picture-tools > fieldset { display:flex; flex-wrap:wrap; align-items:center; min-width:0; padding:0; border:0; gap:8px 12px; }
+.vj-property-actions { display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
 .vj-property-state { color:var(--kd-muted); font-size:var(--kd-size-xs); }
 
 .kd-media-tools-dialog {
@@ -10996,4 +10912,93 @@ button.kd-stream-status {
   overflow: visible;
   text-overflow: clip;
   user-select: text;
+}
+
+/* Sticky headers sit above the overlay scrollbar, including Sakura's rail. */
+.kd-overlay-scroll-host .kd-table thead th { z-index: 6; }
+.kd-overlay-scroll-host .kd-selection-bar { z-index: 7; }
+
+/* Selected library rows need a continuous, high-contrast surface. */
+html:root .kd-table tbody tr[aria-selected="true"] > td {
+  background:var(--kd-selected) !important;
+  color:var(--kd-text) !important;
+}
+html:root .kd-table tbody tr[aria-selected="true"] > td :is(.kd-td-strong, .kd-muted, .kd-faint, button, a, small) { color:var(--kd-text) !important; }
+/* Also refresh already-installed Sakura packs without requiring a reinstall. */
+html:root[data-theme-pack="sakulaptop98"] {
+  --kd-wave-low:#d84b88;
+  --kd-wave-mid:#f1a4c4;
+  --kd-wave-high:#83bacf;
+}
+
+html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr[aria-selected="true"] > td { background:#edb4ce !important; }
+
+.kd-download-history-head { display:flex; flex:none; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--kd-line); background:var(--kd-panel-raised); }
+.kd-download-history-head > span { flex:1; color:var(--kd-muted); }
+
+/* 竖屏方块导航保留滚动能力，但不显示或预留原生滚动条。 */
+:root .kd-app[data-portrait="true"] .kd-narrow-folder-rail .kd-scroll {
+  scrollbar-width: none;
+  scrollbar-gutter: auto;
+}
+:root .kd-app[data-portrait="true"] .kd-narrow-folder-rail .kd-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.kd-app[data-portrait="true"] .kd-narrow-folder-rail button[data-active="true"],
+.kd-folder-picker button[data-active="true"] {
+  color: var(--kd-theme);
+  background: transparent;
+  box-shadow: none;
+}
+.kd-section-body .kd-sheet-scrim[data-placement="bottom"] {
+  left: 0;
+  align-items: flex-end;
+}
+.kd-sheet-scrim[data-placement="bottom"] > .kd-sheet {
+  width: 100%;
+  height: min(70%, 32rem);
+  border-left: none;
+  border-top: 1px solid var(--kd-line);
+  animation: kd-sheet-rise var(--kd-pop-duration, 160ms) ease-out;
+}
+@keyframes kd-sheet-rise {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.kd-folder-picker {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 0.35rem 0.5rem;
+}
+.kd-folder-picker .kd-narrow-source-children,
+.kd-folder-picker .kd-narrow-stream-section {
+  align-items: stretch;
+}
+.kd-folder-picker button {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 2.6rem;
+  padding: 0.4rem 0.6rem;
+  border: none;
+  background: transparent;
+  color: var(--kd-text);
+  text-align: left;
+  cursor: pointer;
+}
+.kd-folder-picker button:hover { background: var(--kd-hover); }
+.kd-folder-picker button > svg { flex: none; }
+.kd-folder-picker button small {
+  min-width: 0;
+  font-size: var(--kd-size);
+  overflow-wrap: anywhere;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-sheet-scrim[data-placement="bottom"] > .kd-sheet { animation: none; }
 }

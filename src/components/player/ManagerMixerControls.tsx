@@ -259,16 +259,21 @@ export function EqSpectrumChart({ side, values, filter, resonanceQ, playing, onA
         }
       }
       if (changed && spectrumPathRef.current) {
-        const points = painted.map((level, index) => ({
-          x: (index + 0.5) / EQ_GRAPH_BAND_COUNT * 1_000,
-          y: (1 - Math.max(0, level)) * 1_000,
-        }));
-        spectrumPathRef.current.setAttribute("d", smoothPath([
-          { x: 0, y: points[0].y },
-          ...points,
-          { x: 1_000, y: points[points.length - 1].y },
-        ]));
-        spectrumPathRef.current.style.opacity = String(clamp(Math.max(...painted) * 4, 0, 1));
+        // Interpolate the 15 analyser bands into a restrained set of slim vertical bars.
+        const barCount = 9;
+        const cellWidth = 1_000 / barCount;
+        spectrumPathRef.current.setAttribute("d", Array.from({ length: barCount }, (_, index) => {
+          const position = (index + 0.5) / barCount * EQ_GRAPH_BAND_COUNT - 0.5;
+          const left = Math.max(0, Math.min(EQ_GRAPH_BAND_COUNT - 1, Math.floor(position)));
+          const right = Math.min(EQ_GRAPH_BAND_COUNT - 1, left + 1);
+          const blend = clamp(position - left, 0, 1);
+          const level = painted[left] * (1 - blend) + painted[right] * blend;
+          if (level <= 0) return "";
+          const x = (index + 0.5) * cellWidth;
+          const y = (1 - level * 0.3) * 1_000;
+          return `M ${x.toFixed(2)} 1000 V ${y.toFixed(2)}`;
+        }).join(" "));
+        spectrumPathRef.current.style.opacity = String(clamp(Math.max(...painted) * 2, 0, 0.72));
       }
       frame = requestAnimationFrame(tick);
     };

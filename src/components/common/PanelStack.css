@@ -1,0 +1,87 @@
+.kd-panel-stack, .kd-panel-mount { display: contents; }
+.kd-panel-slot[hidden] { display: none !important; }
+.kd-sheet .kd-panel-mount + .kd-panel-mount .kd-panel-slot { margin-top: 8px; }
+.kd-panel-index-item > span { flex: 1; }
+.kd-panel-index-item[aria-checked="true"] { color: var(--kd-theme); }
+.kd-panel-index-sections { min-width: 190px; }
+.kd-panel-index-section { min-height: 50px; padding: 4px 0 10px; }
+.kd-panel-index-section + .kd-panel-index-section { border-top: 1px solid var(--kd-line-soft); }
+.kd-panel-index-section-title { padding: 3px 8px 5px; color: var(--kd-muted); font-size: var(--kd-size-xs); }
+.kd-panel-index-row { display: flex; align-items: stretch; min-width: 0; }
+.kd-panel-index-row > .kd-panel-reorder-handle { padding: 0 5px; }
+.kd-panel-index-row > .kd-panel-index-item {
+  display: flex; align-items: center; flex: 1; gap: 6px; min-width: 0;
+  padding: 6px 8px 6px 2px; border: 0; border-radius: 3px;
+  background: transparent; color: var(--kd-text-body); font: inherit; font-size: var(--kd-size-sm); text-align: left; cursor: pointer;
+}
+.kd-panel-index-row > .kd-panel-index-item[aria-checked="true"] { color: var(--kd-theme); }
+.kd-panel-index-row > button:focus-visible { outline: 1px solid var(--kd-muted); outline-offset: -2px; }
+.kd-panel-index-row[data-dragged] { opacity: .5; }
+.kd-panel-index-row[data-drop-before] { box-shadow: 0 -2px var(--kd-theme); }
+.kd-panel-index-section[data-drop-end] { box-shadow: inset 0 -2px var(--kd-theme); }
+
+.kd-panel-reorder-handle { display: inline-flex; align-items: center; flex: none; padding: 0 2px; border: 0; background: transparent; color: var(--kd-muted); cursor: grab; }
+.kd-panel-reorder-handle:active { cursor: grabbing; }
+.kd-panel-reorder-handle { touch-action: none; user-select: none; }
+
+.kd-panel-anchor, .kd-panel-live-host { display:contents; }
+.kd-panel-anchor[hidden] { display:none; }
+
+.kd-panel-slot:empty { display:none; }
+
+.kd-panel-slot[data-drop-target] { outline:2px dashed var(--kd-theme); outline-offset:2px; }
+
+/* Dock zones keep their own scroll range so a tall panel cannot consume the list. */
+.kd-panel-dock { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.kd-panel-dock-top { flex: 0 1 auto; max-height: var(--kd-panel-budget, 66.666dvh); }
+/* Media keeps its own aspect and compact card width; unused space is not a panel background. */
+.kd-panel-dock-top > .kd-panel-docked-host[data-media-fit] > .kd-panel-slot {
+  width: var(--kd-dock-media-width);
+  max-width: 100%;
+}
+.kd-panel-dock-right { min-height: 100%; }
+.kd-panel-dock[data-dragging] { min-height: 48px; }
+.kd-panel-dock-right[data-dragging] { min-height: 100%; }
+.kd-panel-dock[data-drop-target] { outline: 2px dashed var(--kd-theme); outline-offset: -2px; }
+.kd-panel-docked-host { display: block; min-width: 0; padding: 4px; }
+.kd-panel-docked-host > .kd-panel-slot { min-width: 0; margin: 0; height: auto; }
+.kd-panel-docked-host > .kd-panel-slot > .kd-panel { height: auto; min-width: 0; }
+.kd-panel-docked-host:has(> .kd-panel-slot[hidden]),
+.kd-panel-docked-host:has(> .kd-panel-slot:empty) { display: none; }
+.kd-panel-docked-host .kd-track-preview-eq,
+.kd-panel-docked-host .kd-track-preview-waveform { width: 100%; height: auto; min-height: 112px; }
+.kd-panel-docked-host .kd-track-preview-waveform { height: 160px; }
+.kd-panel-dock-top > .kd-panel-docked-host .kd-panel { margin: 0; }
+.kd-panel-docked-host .kd-panel-head { display: flex; }
+.kd-track-preview-content .kd-panel-slot { flex: 1 1 45%; min-width: 0; }
+.kd-track-preview-content .kd-panel-slot > div { height: 140px; }
+.kd-track-preview-content .kd-panel-slot > div > .kd-panel > .kd-panel-head { display: flex; }
+.kd-track-preview-content > .kd-panel-index-toggle { display: none; }
+.kd-table-wrap[data-aside="open"] > .kd-top-wide-search { grid-column: 1 / -1; grid-row: 1; }
+.kd-table-wrap[data-aside="open"] > .kd-panel-dock-top { grid-column: 1; grid-row: 2; }
+.kd-table-wrap[data-aside="open"] > .kd-split-aside,
+.kd-table-wrap[data-aside="open"] > .kd-split-handle { grid-row: 2 / -1; }
+.kd-top-wide-search { flex: none; min-width: 0; }
+/* Inline-size containment has no intrinsic width. Outside the split dock,
+   the spanning search must stretch explicitly instead of shrinking to a line. */
+.kd-top-wide-search > .kd-panel-docked-host {
+  box-sizing: border-box;
+  width: 100%;
+}
+.kd-top-wide-search > .kd-panel-docked-host > .kd-panel-slot[data-panel-id="search"] {
+  width: 100%;
+  align-self: stretch;
+}
+.kd-top-wide-search:not(:has(.kd-panel-slot:not([hidden]))) { display: none; }
+.kd-track-preview-row:not(:has(.kd-panel-slot:not([hidden]))) { display: none; }
+.kd-panel-dock-top > .kd-panel-mount:has(.kd-panel-anchor[hidden]) { display: none; }
+.kd-panel.kd-internal-window[data-docked] {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  width: 100%;
+  max-width: none;
+  height: auto;
+  max-height: 60vh;
+}
+.kd-internal-window[data-docked] > .kd-pip-resize { display: none; }

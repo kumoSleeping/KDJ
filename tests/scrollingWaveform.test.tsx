@@ -1,0 +1,93 @@
+import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { ManagerWaveform } from '../src/components/player/ManagerWaveform';
+const dom = new JSDOM('<div id="root"></div>', {url:'http://localhost'});
+Object.assign(globalThis, {window:dom.window,document:dom.window.document,CustomEvent:dom.window.CustomEvent,
+  IS_REACT_ACT_ENVIRONMENT:true,ResizeObserver:class {observe(){} disconnect(){}}});
+Object.defineProperty(document,'hidden',{configurable:true,value:false});
+Object.defineProperty(dom.window.HTMLElement.prototype,'clientWidth',{get:()=>600});
+Object.defineProperty(dom.window.HTMLElement.prototype,'clientHeight',{get:()=>120});
+dom.window.HTMLElement.prototype.getBoundingClientRect=()=>({left:0,top:0,width:600,height:120,right:600,bottom:120,x:0,y:0,toJSON(){}});
+Object.assign(dom.window.HTMLElement.prototype,{setPointerCapture(){},releasePointerCapture(){},hasPointerCapture(){return false;}});
+dom.window.matchMedia=()=>({addEventListener(){},removeEventListener(){}} as any);
+const idleWork = new Map<number, IdleRequestCallback>();
+let idleId = 0;
+dom.window.requestIdleCallback = callback => { idleWork.set(++idleId, callback); return idleId; };
+dom.window.cancelIdleCallback = id => { idleWork.delete(id); };
+const idleStep = () => {
+  const pending = [...idleWork.values()]; idleWork.clear();
+  pending.forEach(callback => callback({ didTimeout: false, timeRemaining: () => 10 }));
+};
+Object.defineProperty(dom.window.HTMLCanvasElement.prototype,'getContext',{value:()=>({clearRect(){},drawImage(){}})});
+let next=0;
+const frames=new Map<number,FrameRequestCallback>();
+Object.assign(globalThis,{requestAnimationFrame:(f:FrameRequestCallback)=>{frames.set(++next,f);return next;},cancelAnimationFrame:(id:number)=>frames.delete(id)});
+const fixture={clock:{trackId:42,currentTime:30,playing:false,scratchHeld:false,audibleRate:0,clientPresentationTimeMs:performance.now(),loopStart:null,loopLength:null,discontinuityRevision:0},
+  gap:false,wave:null as any,draws:[] as {start:number;end:number}[],listeners:new Set<()=>void>()};
+Object.assign(globalThis,{waveTest:fixture});
+const track={id:42,duration:180,bpm:120,first_beat:0} as any;
+const root=createRoot(document.getElementById('root')!);
+const render=(deck:0|1=0)=>root.render(<ManagerWaveform track={track} deck={deck} duration={180} amplitudeScale={1} playing={false} onLoadingChange={()=>{}}/>);
+const wait=()=>new Promise(resolve=>setTimeout(resolve,10));
+const step=()=>{const pending=[...frames.values()];frames.clear();pending.forEach(f=>f(performance.now()));};
+const clock=async(position:number)=>{await act(async()=>{fixture.clock.currentTime=position;fixture.listeners.forEach(f=>f());step();await wait();});await act(async()=>{await wait();});};
+const seeks:any[]=[];
+window.addEventListener('kd:seek',event=>seeks.push((event as CustomEvent).detail));
+const pointer=(node:Element,type:string,x:number)=>{
+  const event=new dom.window.MouseEvent(type,{bubbles:true,button:0,clientX:x});
+  Object.defineProperty(event,'pointerId',{value:1});node.dispatchEvent(event);
+};
+(async()=>{
+ try {
+  await act(async()=>{render();await wait();});
+  assert.equal(document.querySelectorAll('button').length,0,'only the scrolling waveform, no controls');
+  const slider=document.querySelector('[role="slider"]')!;
+  assert.ok(slider,'interaction exists before waveform data');
+  await clock(30);
+  await act(async()=>{pointer(slider,'pointerdown',300);pointer(slider,'pointermove',200);step();pointer(slider,'pointerup',200);});
+  assert.equal(seeks.filter(s=>!s.preview).length,1);
+  assert.equal(seeks.at(-1).position,31,'leftward drag advances transport once');
+  fixture.clock.discontinuityRevision++;
+  fixture.wave={track_id:42,duration:180};
+  await act(async()=>{render();await wait();});await act(async()=>{await wait();});
+  await clock(31);
+  const firstPaintDraws=fixture.draws.length;
+  assert.equal(firstPaintDraws,3,'first paint prepares only visible tiles');
+  idleStep();
+  assert.equal(fixture.draws.length,firstPaintDraws+1,'each idle turn bakes one future tile');
+  idleStep();
+  assert.equal(fixture.draws.length,firstPaintDraws+2,'runway is bounded to two future tiles');
+  idleStep();
+  const draws=fixture.draws.length;
+  for(let i=0;i<120;i++) await clock(31+i/120);
+  assert.equal(fixture.draws.length,draws,'120 clock updates must not rasterize the waveform again');
+  await clock(36.1);
+  assert.equal(fixture.draws.length,draws,'crossing a tile boundary reuses its pre-generated neighbor');
+  await clock(29);
+  assert.equal(document.querySelectorAll('canvas').length,3,'reverse seek retains bounded visible tiles');
+  const retained=[...document.querySelectorAll('canvas')], retainedDraws=fixture.draws.length;
+  await act(async()=>{render(1);await wait();});
+  assert.deepEqual([...document.querySelectorAll('canvas')],retained,'same-song physical deck swap must retain canvas nodes');
+  assert.equal(fixture.draws.length,retainedDraws,'deck swap must retain the tile cache');
+  const rail=document.querySelector<HTMLElement>('.kd-static-wave-rail')!,beforeGap=rail.style.transform;
+  fixture.gap=true;await clock(29);
+  assert.equal(rail.style.transform,beforeGap,'temporary deck gap must not jump the waveform to zero');
+  fixture.gap=false;
+  await act(async()=>{
+    fixture.clock.currentTime=120;fixture.listeners.forEach(f=>f());step();
+    assert.equal(rail.style.transform,beforeGap,'far seek must keep old pixels in view until destination tiles commit');
+  });
+  assert.equal(fixture.draws.length,retainedDraws+3,'destination tiles must be painted during commit, without waiting for timers');
+  assert.equal(document.querySelectorAll('button').length,0);
+  const committed=seeks.filter(s=>!s.preview).length;
+  await act(async()=>{pointer(slider,'pointerdown',300);pointer(slider,'pointermove',450);step();pointer(slider,'pointercancel',450);});
+  assert.equal(seeks.filter(s=>!s.preview).length,committed,'cancel must not seek');
+  assert.equal(seeks.at(-1).scrubbing,false);
+  Object.defineProperty(document,'hidden',{configurable:true,value:true});
+  document.dispatchEvent(new dom.window.Event('visibilitychange'));
+  assert.equal(frames.size,0,'hidden waveform stops scheduling frames');
+  console.log('PASS scrolling waveform: no controls, early interaction, single seek, stable raster, bounded tiles, reverse seek, cancellation, hidden suspension');
+ } finally {await act(async()=>root.unmount());assert.equal(idleWork.size,0,'unmount cancels speculative baking');dom.window.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

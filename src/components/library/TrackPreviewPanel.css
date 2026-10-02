@@ -1,0 +1,144 @@
+.kd-track-preview-row {
+  display: flex;
+  gap: 4px;
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 4px;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-track-preview-row[hidden] { display: none; }
+.kd-preview-index { position: absolute; top: 5px; right: 8px; z-index: 1; }
+.kd-track-preview.kd-col, .kd-track-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  min-width: 0;
+  height: 112px;
+}
+.kd-track-preview > .kd-notice { grid-column: 1 / -1; }
+.kd-track-preview .kd-panel-slot {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  container: track-preview-card / inline-size;
+}
+.kd-track-preview .kd-panel-slot[data-panel-id="information"] { order: 0; }
+.kd-track-preview .kd-panel-slot[data-panel-id="analysis"] { order: 1; }
+.kd-track-preview .kd-panel-slot > .kd-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.kd-track-preview .kd-panel-head { flex: none; min-height: 24px; padding: 2px 6px; font-size: var(--kd-size-xs); }
+.kd-track-preview .kd-panel-slot[data-panel-id="analysis"] .kd-panel-head { padding-right: 28px; }
+.kd-track-preview .kd-panel-body { flex: 1; min-height: 0; padding: 6px; overflow: auto; overscroll-behavior: contain; }
+.kd-track-preview .kd-track-detail-hero { flex-direction: column; }
+.kd-track-preview .kd-track-detail-hero .kd-cover { width: 52px !important; height: 52px !important; }
+.kd-track-preview .kd-track-detail-summary { width: 100%; }
+.kd-track-preview .kd-track-detail-summary > div:first-child { font-size: var(--kd-size-sm) !important; }
+.kd-track-preview .kd-track-detail-local-facts { display: flex; flex-direction: column; }
+.kd-track-preview .kd-analysis-deck { gap: 6px; padding: 4px; }
+.kd-track-preview .kd-analysis-wheel { flex: 0 1 88px; min-width: 0; }
+.kd-track-preview .kd-analysis-wheel > svg { width: 100%; height: auto; }
+.kd-track-preview .kd-analysis-readout { min-width: 0; }
+.kd-track-preview .kd-analysis-metric-value { font-size: 24px; }
+.kd-track-preview .kd-analysis-metric-hint { font-size: 10px; }
+.kd-track-preview .kd-analysis-metric-label { font-size: 10px; }
+.kd-library-preview-tools { display: flex; align-items: center; min-height: 28px; padding: 0 8px; border-bottom: 1px solid var(--kd-line); }
+.kd-library-preview-tools .kd-activity-trailing-tools { margin-left: auto; }
+@container track-preview-card (min-width: 260px) {
+  .kd-track-preview .kd-track-detail-hero { flex-direction: row; }
+}
+@container track-preview-card (max-width: 210px) {
+  .kd-track-preview .kd-analysis-deck { flex-direction: column; align-items: stretch; }
+  .kd-track-preview .kd-analysis-wheel { flex: none; width: 80px; }
+}
+@media (max-width: 720px) {
+  .kd-track-preview { grid-template-columns: minmax(0, 1fr); }
+}
+
+.kd-track-preview-facts { flex: 1 1 45%; min-width: 0; }
+.kd-track-preview-eq { flex: 1 1 55%; min-width: 0; height: 112px; overflow: auto; }
+.kd-track-preview-eq .kd-panel { margin: 0; height: 100%; }
+.kd-track-preview-eq .kd-panel-head { min-height: 24px; padding: 2px 6px; font-size: var(--kd-size-xs); }
+.kd-track-preview-eq .kd-manager-control { padding: 3px 6px; }
+.kd-track-preview-eq .kd-manager-control-head { margin-bottom: 2px; }
+.kd-track-preview-eq .kd-manager-control-readout > strong { font-size: 20px; }
+.kd-track-preview .kd-analysis-wheel { flex-basis: 64px; }
+.kd-track-preview .kd-analysis-metric-value { font-size: 20px; }
+.kd-track-preview .kd-analysis-deck { height: 100%; gap: 4px; padding: 0; }
+.kd-track-preview .kd-analysis-metric { padding: 0; }
+@container (max-width: 760px) {
+  .kd-track-preview-row { overflow-x: auto; }
+  .kd-track-preview-facts { flex: 1 0 300px; }
+  .kd-track-preview-eq { flex: 1 0 280px; }
+}
+
+.kd-track-preview .kd-analysis-deck { flex-wrap: nowrap; }
+.kd-track-preview .kd-analysis-readout { flex-direction: row; align-items: center; justify-content: space-around; gap: 8px; }
+.kd-track-preview .kd-analysis-metric-sep { width: 1px; height: 40px; }
+
+/* EQ occupies the former analysis slot; waveform occupies the former EQ slot. */
+.kd-track-preview-row > .kd-track-preview-eq { flex: 1 1 45%; }
+.kd-track-preview-waveform { flex: 1 1 55%; min-width: 0; height: 112px; }
+.kd-track-preview-waveform > .kd-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
+.kd-track-preview-waveform .kd-panel-head { flex: none; min-height: 24px; padding: 2px 6px; font-size: var(--kd-size-xs); }
+.kd-track-preview-waveform .kd-manager-scroll-wave { flex: 1; height: auto; min-height: 0; border: 0; }
+@container (max-width: 760px) {
+  .kd-track-preview-row > .kd-track-preview-eq { flex: 1 0 280px; }
+  .kd-track-preview-waveform { flex: 1 0 300px; }
+}
+
+/* Reserve both surfaces even while a new track has no deck or waveform yet. */
+.kd-track-preview-row { overflow: visible; }
+.kd-track-preview-combined { flex: 1; min-width: 0; margin: 0; }
+.kd-track-preview-content { display: flex; align-items: stretch; min-width: 0; }
+.kd-track-preview-content > .kd-track-preview-eq { flex: 1 1 45%; height: 112px; overflow: auto; }
+.kd-track-preview-content > .kd-track-preview-waveform { flex: 1 1 55%; height: 112px; min-height: 0; }
+.kd-track-preview-content > div > .kd-panel { border: 0; box-shadow: none; margin: 0; border-radius: 0; }
+.kd-track-preview-content > div > .kd-panel > .kd-panel-head { display: none; }
+.kd-track-preview-content > .kd-track-preview-waveform { border-left: 1px solid var(--kd-line); }
+.kd-track-preview-combined > .kd-panel-head { min-height: 24px; padding: 2px 6px; }
+@media (max-width: 720px) {
+  .kd-track-preview-content { flex-wrap: wrap; }
+  .kd-track-preview-content > .kd-track-preview-eq,
+  .kd-track-preview-content > .kd-track-preview-waveform { flex-basis: 100%; }
+}
+
+/* Labels have their own full-width row, independent of the knob diameter. */
+.kd-track-preview-eq .kd-manager-knob-stack {
+  gap: 8px;
+  padding: 7px 2px 4px;
+  background: transparent;
+}
+.kd-track-preview-eq .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] {
+  width: 100%;
+  min-width: 0;
+  gap: 4px;
+}
+.kd-track-preview-eq .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg {
+  width: 27px;
+  min-width: 27px;
+  height: 27px;
+}
+.kd-track-preview-eq .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > b {
+  display: block;
+  width: 100%;
+  max-width: none;
+  overflow: visible;
+  white-space: nowrap;
+  text-overflow: clip;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 14px;
+  letter-spacing: .03em;
+  text-align: center;
+  color: var(--kd-muted);
+}
+
+.kd-track-preview-content > .kd-track-preview-waveform:first-child { border-left: 0; }

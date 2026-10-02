@@ -1,11 +1,13 @@
 import { Crop, RotateCcw, Volume2, VolumeX } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { FloatingPanelWindow } from "../common/FloatingPanelWindow";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import {
   adjustClip, clipDuration, clipQuantum, findClip, isImageSource, isVisualSource,
   setClipSpeed, setClipFade, updateClip, visibleFade,
 } from "../../lib/workshop";
 import type { CompositionProject, WorkshopClip } from "../../types/workshop";
+import { Select } from "../common/Select";
 import { NumberField } from "./WorkshopNumberField";
 import { WorkshopPictureTools } from "./WorkshopPictureTools";
 import { WorkshopCropTools } from "./WorkshopCropTools";
@@ -51,13 +53,11 @@ function ClipProperties({ project, clip, close, seek, crop, actions }: Propertie
     value={clip && (sound ? audio : visual) ? visibleFade(clip, end, sound) / 1000 : undefined}
     min={0} max={duration / 2000} step={.01} suffix="秒"
     onChange={n => change(c => setClipFade(c, end, sound, n * 1000))} onCommit={commit} />;
-  return <aside className="vj-clip-properties" aria-label="片段属性" onKeyDown={e => {
-    if (e.key === "Escape") { e.stopPropagation(); commit(); close(); }
-  }}>
+  return <FloatingPanelWindow className="vj-properties-window" storageKey="kd-window-workshop-properties" title="轨道属性" subtitle={source?.title} close={() => { commit(); close(); }} closeLabel="关闭轨道属性">
+    <aside className="vj-clip-properties" aria-label="片段属性">
     {subtitleEditor && subtitle && clip && <WorkshopSubtitleEditor clipId={clip.id} initial={subtitle} close={() => setSubtitleEditor(false)} />}
-    <header><strong title={source?.title}>{source?.title}</strong></header>
     <div className="vj-clip-properties-scroll">
-      <fieldset className="vj-property-group" aria-label="片段时间" disabled={!available}>
+      <fieldset className="vj-property-group" aria-label="片段时间" hidden={!available} disabled={!available}>
         <legend>时间</legend>
         <NumberField label="开始位置" value={clip ? clip.start_ms / 1000 : undefined} min={0} max={(21_600_000-duration)/1000} step={quantum/1000} suffix="秒"
           onChange={n => { if (clip) transient(p => adjustClip(p, clip.id, "move", n*1000 - findClip(p, clip.id)!.start_ms)); }} onCommit={commit} />
@@ -69,7 +69,7 @@ function ClipProperties({ project, clip, close, seek, crop, actions }: Propertie
           {actions}
         </div>
       </fieldset>
-      <fieldset className="vj-property-group" aria-label="片段画面" disabled={!visual || !clip}>
+      <fieldset className="vj-property-group" aria-label="片段画面" hidden={!visual} disabled={!visual || !clip}>
         <legend>画面</legend>
         <WorkshopPictureTools />
         <button type="button" onClick={() => { if (clip) {commit(); crop(clip.id);} }}><Crop size={14} />定位画面</button>
@@ -77,7 +77,7 @@ function ClipProperties({ project, clip, close, seek, crop, actions }: Propertie
         {fade(false, false)}{fade(false, true)}
         <button type="button" aria-pressed={clip?.fades.linear ?? false} onClick={() => action(c => {c.fades.linear = !c.fades.linear;})}>线性淡化</button>
       </fieldset>
-      <fieldset className="vj-property-group" aria-label="旋转与翻转" disabled={!image || !clip}>
+      <fieldset className="vj-property-group" aria-label="旋转与翻转" hidden={!image} disabled={!image || !clip}>
         <legend>旋转与翻转</legend>
         <NumberField label="旋转" value={image && clip ? clip.picture.rotation ?? 0 : undefined} min={-360} max={360} step={1} suffix="°"
           onChange={n => change(c => {c.picture.rotation = n;})} onCommit={commit} />
@@ -87,7 +87,7 @@ function ClipProperties({ project, clip, close, seek, crop, actions }: Propertie
           <button type="button" aria-label="重置旋转与翻转" title="重置旋转与翻转" onClick={() => action(c => {c.picture.rotation = 0; c.picture.flip_x = false; c.picture.flip_y = false;})}><RotateCcw size={14} /></button>
         </div>
       </fieldset>
-      <fieldset className="vj-property-group" aria-label="片段声音" disabled={!audio}>
+      <fieldset className="vj-property-group" aria-label="片段声音" hidden={!audio} disabled={!audio}>
         <legend>声音</legend>
         <NumberField label="音量" value={audio && clip ? clip.sound.gain * 100 : undefined} min={0} max={200} step={1} suffix="%"
           onChange={n => change(c => {c.sound.gain = n/100; c.sound.manual = true;})} onCommit={commit} />
@@ -97,15 +97,17 @@ function ClipProperties({ project, clip, close, seek, crop, actions }: Propertie
         </button>
         {fade(true, false)}{fade(true, true)}
       </fieldset>
-      <fieldset className="vj-property-group" aria-label="片段变速" disabled={!available || image}>
+      <fieldset className="vj-property-group" aria-label="片段变速" hidden={!available || image} disabled={!available || image}>
         <legend>变速</legend>
-        <div className="vj-property-actions">{[.5,.75,1,1.25,1.5,2].map(n => <button type="button" key={n}
-          aria-label={`速度 ${n} 倍`} aria-pressed={clip?.speed.preset === "constant" && clip.speed.start === n}
-          onClick={() => {speed(n); commit();}}>{n}×</button>)}</div>
+        <Select aria-label="倍速预设" value={clip?.speed.preset === "constant" && [.5,.75,1,1.25,1.5,2].includes(clip.speed.start) ? String(clip.speed.start) : "custom"}
+          onChange={event => { speed(Number(event.target.value)); commit(); }}>
+          <option value="custom" disabled>自定义</option>
+          {[.5,.75,1,1.25,1.5,2].map(value => <option key={value} value={value}>{value}×</option>)}
+        </Select>
         <NumberField label="固定速度" value={available && !image ? clip?.speed.start : undefined} min={.5} max={2} step={.05} suffix="×" onChange={speed} onCommit={commit} />
         {available && !image && clip?.speed.preset !== "constant" && <span className="vj-property-state">{clip?.speed.preset === "ramp" ? "渐变速度" : "脉冲速度"}</span>}
       </fieldset>
-      <fieldset className="vj-property-group" aria-label="字幕设置" disabled={!subtitle}>
+      <fieldset className="vj-property-group" aria-label="字幕设置" hidden={!subtitle} disabled={!subtitle}>
         <legend>字幕</legend>
         <button type="button" onClick={() => {commit(); setSubtitleEditor(true);}}>文字与字体</button>
         <NumberField label="驻留时长" value={subtitle ? Math.max(0, duration - fadeIn - fadeOut) / 1000 : undefined}
@@ -117,5 +119,5 @@ function ClipProperties({ project, clip, close, seek, crop, actions }: Propertie
           })} onCommit={commit} />
       </fieldset>
     </div>
-  </aside>;
+  </aside></FloatingPanelWindow>;
 }

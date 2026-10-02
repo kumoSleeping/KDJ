@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   createPlaybackWaveformAtlas,
+  playbackWaveformFirstPaintSeconds,
   playbackWaveformContiguousAtlasWindow,
   playbackWaveformRequestCenter,
   playbackWaveformRequestIsUrgent,
@@ -280,7 +281,10 @@ export function usePlaybackWaveformWindow({
         // A small seek/loop can remain completely inside the current immutable window. In that
         // case the landing is already painted and must not turn a later routine renewal urgent.
         completePendingUrgency();
-        schedule(COVERAGE_CHECK_MS);
+        const live = getLiveDeckClock(deck);
+        if (!live || live.trackId !== trackId || live.playing || live.scratchHeld || Math.abs(live.audibleRate) > 0.02) {
+          schedule(COVERAGE_CHECK_MS);
+        }
         return;
       }
       const cachedWindow = cachedWindowAt(position);
@@ -337,10 +341,11 @@ export function usePlaybackWaveformWindow({
             live?.trackId === trackId && live.playing ? live.audibleRate : 0,
         };
       }
-      const activeRequestSeconds =
-        urgent && trackId >= 0
-          ? Math.max(requestSeconds, FULL_DETAIL_WINDOW_SECONDS)
-          : requestSeconds;
+      // Cold first paint needs only the visible interval. Asking for twelve seconds here
+      // unnecessarily wakes random-access decode beyond the live transport's six-second runway.
+      const activeRequestSeconds = initialPaintPending
+        ? playbackWaveformFirstPaintSeconds(position, viewportSeconds)
+        : requestSeconds;
       const requestPosition =
         urgent && trackId >= 0 && urgentAnchor
           ? playbackWaveformRequestCenter(
@@ -384,6 +389,10 @@ export function usePlaybackWaveformWindow({
               viewportSeconds,
             )
           ) {
+            // Keep completed evidence for the next request, but never display a window that
+            // missed the moving viewport. Retarget only after completion, not mid-decode.
+            stabilizePlaybackWaveformWindow(atlasForTrack(), next);
+            urgentAnchor = null;
             schedule(CACHE_RETRY_MS);
             return;
           }
@@ -426,8 +435,12 @@ export function usePlaybackWaveformWindow({
         });
     };
 
+    let lastClockKey = "";
     const unsubscribe = subscribeLivePlaybackClock(() => {
       const live = getLiveDeckClock(deck);
+      const clockKey = live ? `${live.trackId}:${live.currentTime}:${live.playing}:${live.scratchHeld}:${live.audibleRate}:${live.discontinuityRevision}` : "";
+      if (clockKey === lastClockKey) return;
+      lastClockKey = clockKey;
       const discontinuityRevision =
         live?.trackId === trackId ? live.discontinuityRevision : null;
       if (

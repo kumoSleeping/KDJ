@@ -1247,6 +1247,7 @@ fn snapshot(entry: &StreamWaveformEntry) -> StreamWaveformProgress {
                 entry.cache_status,
                 StreamCacheStatus::Caching | StreamCacheStatus::Retrying
             )
+            || needs_closed_prefix_pass(entry)
             || (entry.complete && (!entry.complete_analyzed || !entry.analysis_complete)),
         cache_status: entry.cache_status,
         cache_error: entry.cache_error.clone(),
@@ -1270,6 +1271,18 @@ fn next_analysis_bytes(previous: u64) -> u64 {
     }
 }
 
+/// A range response may close before the next doubling threshold. Analyze its remaining
+/// flushed bytes once, even if the player never requests another contiguous range. Keep the
+/// polling lease alive through the ordinary throttle window; this does not mark media complete.
+fn needs_closed_prefix_pass(entry: &StreamWaveformEntry) -> bool {
+    !entry.complete
+        && !entry.capture_open
+        && entry.cache_status == StreamCacheStatus::Waiting
+        && entry.path.is_some()
+        && entry.bytes >= FIRST_ANALYSIS_BYTES
+        && entry.bytes > entry.last_requested_bytes
+}
+
 fn plan_job(key: &str, entry: &mut StreamWaveformEntry) -> Option<AnalyzeJob> {
     if !entry
         .requested_until
@@ -1286,7 +1299,7 @@ fn plan_job(key: &str, entry: &mut StreamWaveformEntry) -> Option<AnalyzeJob> {
     let needs_complete_pass =
         entry.complete && (!entry.complete_analyzed || !entry.analysis_complete);
     let enough_growth = entry.bytes >= next_analysis_bytes(entry.last_requested_bytes);
-    if !path_changed && !needs_complete_pass && !enough_growth {
+    if !path_changed && !needs_complete_pass && !enough_growth && !needs_closed_prefix_pass(entry) {
         return None;
     }
     // 小到连一个稳妥 probe 都不值得的前缀等下一个 chunk；完整文件例外。

@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { formatBytes } from "../../lib/format";
+import { formatBytes, isVideoTrack } from "../../lib/format";
 import { lyricsCacheBytes, waveformCacheBytes } from "../../lib/onlineCacheUsage";
 import {
   cachedReleaseOverviewWaveform,
   loadReleaseOverviewById,
   subscribeReleaseOverviewWaveform,
 } from "../../lib/waveformCache";
-import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
+import { useLyricsStore } from "../../stores/lyricsStore";
 import type { Platform, Track, Waveform } from "../../types";
 import { TrackAssetCacheFacts, type TrackCacheFact } from "./TrackCacheFacts";
 
@@ -71,9 +71,9 @@ export function LocalTrackCacheFacts({ track }: { track: Track }) {
   }, [track.analyzed_at, track.id, track.modified_at]);
 
   useEffect(() => {
-    void ensureLyrics(track);
-    // 标题与来源变化时允许歌词仓库按自己的指纹/命中规则重新判断。
-  }, [track.artist, track.filename, track.id, track.source_key, track.source_platform, track.title]);
+    // Inspecting a row may read its disk cache, but must never search/download lyrics.
+    if (!isVideoTrack(track.format)) void useLyricsStore.getState().ensure(track, { cacheOnly: true });
+  }, [track.format, track.artist, track.filename, track.id, track.source_key, track.source_platform, track.title]);
 
   const facts = useMemo<TrackCacheFact[]>(() => {
     const waveformBytes = waveformCacheBytes(waveform);
@@ -114,5 +114,5 @@ export function LocalTrackCacheFacts({ track }: { track: Track }) {
     ];
   }, [lyrics.meta, lyrics.persisted, lyrics.status, waveform, waveformState]);
 
-  return <TrackAssetCacheFacts facts={facts} />;
+  return <TrackAssetCacheFacts facts={isVideoTrack(track.format) ? facts.filter(fact => fact.key !== "lyrics-cache") : facts} />;
 }

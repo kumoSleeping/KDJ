@@ -1,0 +1,8 @@
+.kd-diagnostic-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.kd-diagnostic-dialog { color: var(--kd-text, inherit); background: var(--kd-bg, Canvas); border: 1px solid var(--kd-border, GrayText); border-radius: 8px; padding: 18px; width: min(760px, 90vw); max-height: 85vh; overflow: auto; }
+.kd-diagnostic-dialog::backdrop { background: #0007; }
+.kd-diagnostic-dialog header { display: flex; align-items: center; justify-content: space-between; }
+.kd-diagnostic-dialog p { font-size: 12px; line-height: 1.6; }
+.kd-diagnostic-dialog textarea { display: block; width: 100%; min-height: 72px; resize: vertical; margin: 8px 0; color: inherit; background: transparent; border: 1px solid var(--kd-border, GrayText); border-radius: 4px; }
+.kd-diagnostic-dialog pre { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; padding: 10px; border: 1px solid var(--kd-border, GrayText); user-select: text; }
+.kd-diagnostic-consent { display: flex; align-items: center; gap: 6px; margin: 12px 0; font-size: 12px; }

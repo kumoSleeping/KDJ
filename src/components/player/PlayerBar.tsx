@@ -1,5 +1,6 @@
 import { isCompositionPreview } from "../../lib/streamTrack";
 import { MarqueeText } from "../common/MarqueeText";
+import { PlaybackModeButton, MODE_UI } from "./PlaybackModeButton";
 import {
   useCallback,
   useEffect,
@@ -14,20 +15,14 @@ import {
   Clapperboard,
   Disc3,
   Download,
-  FolderOpen,
-  Library,
   LoaderCircle,
   Music2,
   Pause,
   Play,
-  Repeat,
-  Repeat1,
   RefreshCw,
-  Shuffle,
   PictureInPicture2,
   SkipBack,
   SkipForward,
-  Waypoints,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { MIDI_LOAD_DECK_EVENT } from "../../lib/midiLibraryNav";
@@ -62,7 +57,7 @@ import { useLyricsPrefs } from "../../lib/lyricsPrefs";
 import { ensureOverlayPermission } from "../../lib/lyricsOverlay";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
-import { usePlayMode, type PlayMode } from "../../lib/playMode";
+import { usePlayMode } from "../../lib/playMode";
 import {
   AUDIO_FOCUS_EVENT,
   announceAudioFocus,
@@ -112,7 +107,6 @@ import {
 import type { SongSource, Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useToastStore } from "../../stores/toastStore";
-import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
 import {
   PLAY_EVENT,
   isCompleteTrack,
@@ -187,6 +181,7 @@ import {
   shouldRequestLocalVideoSessionForTrack,
 } from "../../lib/playerTransitionPolicy";
 import { LyricsHost } from "./LyricsHost";
+import { LyricsButtonMenu } from "./LyricsButtonMenu";
 import { nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
 import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
 import { getDeckOutputGain, useMasterVolume } from "../../lib/masterVolume";
@@ -197,8 +192,6 @@ import {
   smoothPlayerVolumeMeter,
 } from "../../lib/playerVolumeMeter";
 
-/** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
-const POSITION_BROADCAST_MS = 200;
 /** 在线波形前台约 15fps；窗口后台只保留 4fps 的真实 analyser 采样。 */
 const STREAM_WAVEFORM_FOREGROUND_MS = 66;
 const STREAM_WAVEFORM_BACKGROUND_MS = 250;
@@ -282,7 +275,9 @@ function subscribeStreamAnalysisPoll(
     const observed = [...session!.subscribers]
       .map((item) => item.duration())
       .filter((value) => Number.isFinite(value) && value > 0);
-    return Math.max(track.duration ?? 0, ...observed, 0);
+    // Provider metadata can describe a different edit or a full track rather than its preview.
+    // Once the owning transport knows its duration, do not stretch the grid to catalog metadata.
+    return observed.length > 0 ? Math.max(...observed) : Math.max(session!.track.duration ?? 0, 0);
   };
   const schedule = (delay: number) => {
     if (session!.disposed || session!.subscribers.size === 0) return;
@@ -308,7 +303,8 @@ function subscribeStreamAnalysisPoll(
             progress.waveform,
             progress.revision,
             covered > 0 ? [{ start: 0, end: covered }] : [],
-            progress.complete,
+            progress.waveform_status === "ready"
+              || (progress.waveform_status === undefined && progress.complete && !progress.active),
           );
           session!.lastRevision = progress.revision;
         }
@@ -342,18 +338,6 @@ function subscribeStreamAnalysisPoll(
 }
 
 type SystemMediaAction = "play" | "pause" | "toggle" | "next" | "previous";
-
-/**
- * 播放模式按钮的脸。一颗按钮循环切换，图标就是当前模式——
- * 图标选的都是播放器世界的通用语（循环/单曲循环/随机），只有调性接歌
- * 没有现成符号，用「路径点」表达"沿着和声关系往下走"。
- */
-const MODE_UI: Record<PlayMode, { icon: typeof Repeat; label: string; hint: string }> = {
-  harmonic: { icon: Waypoints, label: "调性接歌", hint: "放完自动接调性 / BPM 合拍的下一首" },
-  order: { icon: Repeat, label: "顺序播放", hint: "按列表顺序放，到头绕回第一首" },
-  shuffle: { icon: Shuffle, label: "随机播放", hint: "在范围内随机挑，优先没放过的" },
-  one: { icon: Repeat1, label: "单曲循环", hint: "一直放这一首；手动按下一首仍会换歌" },
-};
 
 interface PlayerDeckView {
   key: string;
@@ -408,11 +392,11 @@ function viewForTrack(track: Track): PlayerDeckView {
 }
 
 /**
- * 一台真正的 deck：黑胶外圈 + 圆形封面标签。左右两台结构完全相同，
- * 正主只由 djEngine 的 frontIndex 决定，接歌后不会把唱片瞬移回左边。
+ * 播放条的角色卡片：左边当前曲目，右边下一首；拖入操作映射到实际通道。
  */
 function PlayerDeck({
   side,
+  physicalSide,
   view,
   active,
   spinning,
@@ -427,6 +411,7 @@ function PlayerDeck({
   onDrop,
 }: {
   side: "left" | "right";
+  physicalSide: 0 | 1;
   view: PlayerDeckView | null;
   active: boolean;
   spinning: boolean;
@@ -444,7 +429,7 @@ function PlayerDeck({
 }) {
   const [coverFailed, setCoverFailed] = useState(false);
   useEffect(() => setCoverFailed(false), [view?.key]);
-  // 接歌途中也只保留这两个身份；真正交接完成后，父组件才交换 active。
+  // 接歌途中保留当前/下一首的身份，交接完成后更新曲目。
   const stateLabel = failed ? "播放失败" : resolving ? "加载中" : active ? "正在播放" : "下一首";
   return (
     <div
@@ -455,7 +440,7 @@ function PlayerDeck({
       data-resolving={resolving ? "true" : undefined}
       data-empty={!view ? "true" : undefined}
       data-drop-active={dropActive ? "true" : undefined}
-      {...{ [TRACK_DECK_DROP_TARGET_ATTR]: side === "left" ? "0" : "1" }}
+      {...{ [TRACK_DECK_DROP_TARGET_ATTR]: String(physicalSide) }}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
@@ -526,9 +511,7 @@ export function PlayerBar() {
   const selectTrack = useLibraryStore((state) => state.selectTrack);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
   const mode = usePlayMode((state) => state.mode);
-  const cycleMode = usePlayMode((state) => state.cycleMode);
   const scope = useHarmonicScope((state) => state.scope);
-  const setScope = useHarmonicScope((state) => state.setScope);
   const libraryFolder = useLibraryStore((state) => state.filter.folder);
   const librarySort = useLibraryStore((state) => state.filter.sort);
   const libraryOrder = useLibraryStore((state) => state.filter.order);
@@ -549,6 +532,7 @@ export function PlayerBar() {
   const filterResonance = useAppStore((state) => state.settings?.filter_resonance ?? "high");
   const [enqueueBusy, setEnqueueBusy] = useState(false);
   const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
+  const [lyricsMenu, setLyricsMenu] = useState<{ x: number; y: number; top: number; trackId: number | null } | null>(null);
   const setDesktopLyricsOn = useLyricsPrefs((state) => state.setDesktopEnabled);
   const canDesktopLyrics = Boolean(window.kdj?.desktopLyrics);
   const pipMode = useVideoPip((state) => state.mode);
@@ -567,7 +551,6 @@ export function PlayerBar() {
    */
   const [frontEl, setFrontEl] = useState<HTMLAudioElement>(() => djEngine.frontElement());
   const frontElRef = useRef(frontEl);
-  const lastBroadcast = useRef(0);
   /** DJ 接歌换上来的曲目 id：换 src 的 effect 见到它就跳过（引擎已装好）。 */
   const djViaRef = useRef<number | null>(null);
   /** 正在挑歌/起手。曲末的自动触发一秒能来四次，不挡会叠出一摞过渡。 */
@@ -1641,13 +1624,8 @@ export function PlayerBar() {
         deferredStreamAutoplayRef.current = null;
         pendingTrackSwitchRef.current = null;
       }
-      // 本地视频的 LOCAL_VIDEO 已在 playTrack 发出；这里只补面板档的详情栏。
-      // 音频：playTrack 已 clear 预览会话；非流媒体仍进曲库详情。
-      if (isLocalVideo && parsed.purpose !== "composition") {
-        if (useVideoPip.getState().mode === "panel" && !isStreamTrack(next)) {
-          window.dispatchEvent(new Event(DETAIL_EVENT));
-        }
-      } else if (!isStreamTrack(next) && parsed.purpose !== "composition") {
+      // LOCAL_VIDEO opens the top playback panel; it must not retarget the selected-track sidebar.
+      if (!isLocalVideo && !isStreamTrack(next) && parsed.purpose !== "composition") {
         // 音频起播只清设置/队列等旁路，不自动钉详情；歌词内容面要保留，
         // 否则双击刚钉住的歌词栏会被 showTrackDetail 的 clearOverlays 拆掉。
         focusLibrary();
@@ -1708,12 +1686,9 @@ export function PlayerBar() {
       );
       visualActiveIndexRef.current = incomingIndex;
       setVisualActiveIndex(incomingIndex);
-      // Native local playback must enter the command lane before React commits the selected row,
-      // TrackDetail and the manager Control canvases. Unsupported sources keep the effect path.
+      // Native local playback must enter the command lane before React commits the selected row
+      // and manager Control canvases. Unsupported sources keep the effect path.
       eagerManagerLoadRef.current(next, autoPlay, parsed.intentId, current);
-      // The first authoritative snapshot for a new song must update detail immediately; only
-      // steady-state position traffic is allowed to use the 200ms broadcast throttle.
-      lastBroadcast.current = Number.NEGATIVE_INFINITY;
       // 同一用户手势里的后续 transport/seek 读 ref；不能等下一轮 effect 才同步，
       // 否则启动恢复请求恰好在这两帧间返回时会把旧唱盘抢回来。
       trackRef.current = next;
@@ -2511,21 +2486,6 @@ export function PlayerBar() {
     return () => window.removeEventListener(AUDIO_FOCUS_EVENT, onFocus);
   }, [invalidateNativeSeek, nativePlayer, commitPlaying, transportFade]);
 
-  const broadcast = useCallback(
-    (seconds: number) => {
-      if (!track) return;
-      const now = performance.now();
-      if (now - lastBroadcast.current < POSITION_BROADCAST_MS) return;
-      lastBroadcast.current = now;
-      window.dispatchEvent(
-        new CustomEvent<PositionDetail>(POSITION_EVENT, {
-          detail: { trackId: track.id, position: seconds },
-        }),
-      );
-    },
-    [track],
-  );
-
   const continueAfterEnded = useCallback(
     (finished: Track | null) => {
       if (dualDeck) {
@@ -2750,7 +2710,6 @@ export function PlayerBar() {
 
       const current = trackRef.current;
       if (current) {
-        broadcast(shownTime);
         broadcastMediaSync({
           owner: "player",
           action: "position",
@@ -2940,7 +2899,6 @@ export function PlayerBar() {
     djEnabled,
     djBars,
     applyInOutPoints,
-    broadcast,
     commitPlaying,
     selectTrack,
     continueAfterEnded,
@@ -3453,7 +3411,6 @@ export function PlayerBar() {
       if (!scrubbingRef.current) {
         setPosition(seconds);
       }
-      broadcast(seconds);
       broadcastMediaSync({
         owner: "player",
         action: "position",
@@ -3576,7 +3533,7 @@ export function PlayerBar() {
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
     };
-  }, [frontEl, track, playing, djEnabled, djBars, applyInOutPoints, broadcast, djNext, nativePlayer, commitPlaying, continueAfterEnded, dualDeck]);
+  }, [frontEl, track, playing, djEnabled, djBars, applyInOutPoints, djNext, nativePlayer, commitPlaying, continueAfterEnded, dualDeck]);
 
   // 在线底栏波形随真实播放逐步长出来：AnalyserNode 只读取当前已经解码的声音，
   // media.buffered 只负责标记缓存占位，二者都不发第二份整轨网络请求。
@@ -3726,9 +3683,12 @@ export function PlayerBar() {
     const audio = frontEl;
     return subscribeStreamAnalysisPoll(track, activeStreamWaveformToken, {
       duration: () => {
+        if (nativePlayer) {
+          const state = nativePlayer.state();
+          return state.trackId === track.id ? state.duration : 0;
+        }
         const mediaDuration = audio.duration;
-        if (Number.isFinite(mediaDuration) && mediaDuration > 0) return mediaDuration;
-        return durationRef.current || track.duration || 0;
+        return Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : 0;
       },
       ended: () => nativePlayer ? nativePlayer.state().status === "ended" : audio.ended,
     });
@@ -3784,9 +3744,8 @@ export function PlayerBar() {
     (pipDriving && pipSession) || (displayTrack && isVideoTrack(displayTrack.format)),
   );
   const networkPreview = Boolean(pipDriving && pipSession?.source === "network");
-  // 同一颗按钮按当前媒体解释：音频控制悬浮歌词，本地视频控制详情/小窗。
-  // B 站搜索结果固定浮动预览，不读取也不改这项本地视频偏好。
-  const sharedFloatOn = networkPreview ? true : video ? pipMode === "float" : desktopLyricsOn;
+  // 同一颗按钮按当前媒体解释：音频控制悬浮歌词，本地和网络视频共用详情/小窗模式。
+  const sharedFloatOn = video ? pipMode === "float" : desktopLyricsOn;
   /**
    * Android 的悬浮歌词要「显示在其他应用上层」权限，必须先拿到再翻开关，
    * 否则开关亮着而屏幕上什么都没有。桌面不需要该权限，直接翻。
@@ -3837,11 +3796,9 @@ export function PlayerBar() {
           ? pipDriving
             ? pipSystem
               ? "系统画中画"
-              : networkPreview
-                ? "浮动预览"
-                : pipMode === "panel"
-                  ? "详情预览"
-                  : "浮动预览"
+              : pipMode === "panel"
+                ? "详情预览"
+                : "浮动预览"
             : "视频"
           : artistText,
         cover: coverSrc,
@@ -4103,6 +4060,11 @@ export function PlayerBar() {
         ? viewForTrack(physicalTracks[1])
         : null;
   }
+  // The bar presents roles; physical deck ownership can alternate underneath it.
+  const barCurrentIndex: 0 | 1 = transitionShowing ? transitionVisual.outgoingIndex : visualActiveIndex;
+  const barNextIndex: 0 | 1 = barCurrentIndex === 0 ? 1 : 0;
+  const currentBarView = barCurrentIndex === 0 ? leftDeckView : rightDeckView;
+  const nextBarView = barNextIndex === 0 ? leftDeckView : rightDeckView;
   const deckPlaying = pipDriving && pipSession?.source === "network" ? pipPlaying : playing;
   const playbackVisualRate = pipDriving
     ? 1
@@ -4230,8 +4192,8 @@ export function PlayerBar() {
       setNotice("拖入的歌曲来源已经失效");
       return;
     }
-    const sideIndex: 0 | 1 = side === "left" ? 0 : 1;
-    const droppingOnCurrent = sideIndex === visualActiveIndex;
+    const sideIndex: 0 | 1 = side === "left" ? barCurrentIndex : barNextIndex;
+    const droppingOnCurrent = side === "left";
     if (dualDeck && playerRuntime.supportsRealtimeDj) {
       await loadPerformanceTrackRef.current(sideIndex, first, droppingOnCurrent);
       return;
@@ -4391,9 +4353,7 @@ export function PlayerBar() {
       return [subscribeStreamAnalysisPoll(deckTrack, token, {
         duration: () => {
           const physical = playerRuntime.state().decks[side];
-          return physical.trackId === deckTrack.id
-            ? physical.duration || deckTrack.duration || 0
-            : deckTrack.duration || 0;
+          return physical.trackId === deckTrack.id ? physical.duration : 0;
         },
         // A mounted but paused Deck still needs its background proxy capture and full analysis.
         ended: () => false,
@@ -4588,26 +4548,27 @@ export function PlayerBar() {
     >
       {/* 这里不再渲染 <audio>：播放元素归 djEngine 所有（两台 deck 互换正主），
           事件监听在上面的 effect 里挂到 frontEl 上 */}
-      {/* 不再挂隐藏视频实例：详情面板已有可见播放器，双实例会同时解码并
+      {/* 不再挂隐藏视频实例：播放面板已有可见播放器，双实例会同时解码并
           互相回传 seek，画面就一卡一卡。音频是主时钟，打开详情时再对齐即可。 */}
-      <LyricsHost current={track} allowDesktop={!video} />
+      <LyricsHost current={track} playing={playing} allowDesktop={!video} />
 
       <div className="kd-player-leading">
         <PlayerDeck
           side="left"
-          view={leftDeckView}
-          active={visualActiveIndex === 0}
-          spinning={Boolean(leftDeckView) && (transitionShowing || performanceDecks[0].playing)}
+          physicalSide={barCurrentIndex}
+          view={currentBarView}
+          active
+          spinning={Boolean(currentBarView) && (transitionShowing || performanceDecks[barCurrentIndex].playing)}
           transitioning={transitionShowing}
           resolving={Boolean(
-            leftDeckView?.track &&
-              (performancePendingDecks[0]?.id === leftDeckView.track.id ||
-                (visualActiveIndex === 0 && !playbackFailed && isUnresolvedStreamTrack(leftDeckView.track))),
+            currentBarView?.track &&
+              (performancePendingDecks[barCurrentIndex]?.id === currentBarView.track.id ||
+                (!playbackFailed && isUnresolvedStreamTrack(currentBarView.track))),
           )}
-          failed={visualActiveIndex === 0 && playbackFailed}
+          failed={playbackFailed}
           dropActive={deckDropSide === "left"}
-          detailEnabled={!portrait || visualActiveIndex === 0}
-          onOpen={() => openDeck(leftDeckView, visualActiveIndex === 0)}
+          detailEnabled
+          onOpen={() => openDeck(currentBarView, true)}
           onDragOver={(event) => deckDragOver(event, "left")}
           onDragLeave={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDeckDropSide(null);
@@ -4646,38 +4607,53 @@ export function PlayerBar() {
                 type="button"
                 className="kd-player-step kd-player-lyricsbtn"
                 aria-label={
-                  networkPreview
-                    ? "B站预览使用浮动小窗"
-                    : video
+                  video
                       ? sharedFloatOn
-                        ? "本地视频改用详情播放"
-                        : "本地视频改用悬浮小窗播放"
+                        ? "视频改用内嵌面板播放"
+                        : "视频改用悬浮小窗播放"
                       : sharedFloatOn
                         ? "关闭悬浮歌词"
                         : "打开悬浮歌词"
                 }
                 aria-pressed={sharedFloatOn}
+                aria-haspopup={!video ? "menu" : undefined}
+                aria-expanded={!video ? lyricsMenu !== null && lyricsMenu.trackId === (displayTrack?.id ?? null) : undefined}
                 data-on={sharedFloatOn ? "true" : undefined}
-                disabled={networkPreview}
                 title={
-                  networkPreview
-                    ? "B站搜索结果固定使用浮动小窗；此设置只影响本地视频"
-                    : video
+                  video
                       ? sharedFloatOn
-                        ? "本地视频：浮动小窗。点一下改为详情播放"
-                        : "本地视频：详情播放。点一下改为浮动小窗"
+                        ? "视频：浮动小窗。点一下改为内嵌面板播放"
+                        : "视频：内嵌面板播放。点一下改为浮动小窗"
                       : sharedFloatOn
-                        ? "悬浮歌词：开。点一下关闭"
-                        : "打开悬浮歌词"
+                        ? "悬浮歌词：开。点一下关闭；右键设置歌词"
+                        : "打开悬浮歌词；右键设置歌词"
                 }
+                onContextMenu={(event) => {
+                  if (video || networkPreview) return;
+                  event.preventDefault();
+                  setLyricsMenu({ x: event.clientX, y: event.clientY, top: event.currentTarget.getBoundingClientRect().top, trackId: displayTrack?.id ?? null });
+                }}
+                onKeyDown={(event) => {
+                  if (video || networkPreview || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setLyricsMenu({ x: rect.left, y: rect.bottom + 4, top: rect.top, trackId: displayTrack?.id ?? null });
+                }}
                 onClick={() => {
-                  if (networkPreview) return;
-                  if (video) cyclePipMode();
-                  else void toggleLyricsOverlay();
+                  if (video) {
+                    cyclePipMode();
+                    // 叉掉小窗会清掉会话；再次主动开启时，恢复当前本地视频而不是等下一次换曲。
+                    if (!useVideoPip.getState().active && displayTrack && isVideoTrack(displayTrack.format)) {
+                      requestLocalVideo(displayTrack, playing);
+                    }
+                  } else void toggleLyricsOverlay();
                 }}
               >
                 <PictureInPicture2 size={13} />
               </button>
+            ) : null}
+            {lyricsMenu && !video && lyricsMenu.trackId === (displayTrack?.id ?? null) ? (
+              <LyricsButtonMenu {...lyricsMenu} track={displayTrack ?? null} onClose={() => setLyricsMenu(null)} />
             ) : null}
           </div>
           <label
@@ -4784,22 +4760,7 @@ export function PlayerBar() {
 
         <div className="kd-player-transport-side" data-side="right">
 
-        {/* 播放模式 + 范围，紧挨走带键：它们改的就是"下一首是谁"。
-            各一颗按钮循环切换，图标即状态——模式是四选一（调性/顺序/随机/单曲循环），
-            范围是二选一（全库/当前文件夹）。范围复用详情栏「接歌范围」那个开关，
-            两处拨的是同一个值（见 harmonicScope.ts 为什么必须如此）。 */}
-        <button
-          type="button"
-          className="kd-player-step kd-player-mode"
-          aria-label={`播放模式：${MODE_UI[mode].label}`}
-          title={`${MODE_UI[mode].label}：${MODE_UI[mode].hint}。点一下换下一种`}
-          onClick={cycleMode}
-        >
-          {(() => {
-            const Icon = MODE_UI[mode].icon;
-            return <Icon size={14} />;
-          })()}
-        </button>
+        <PlaybackModeButton />
         {downloadSource ? (
           <button
             type="button"
@@ -4811,29 +4772,7 @@ export function PlayerBar() {
           >
             <Download size={14} aria-hidden="true" />
           </button>
-        ) : (
-          <button
-            type="button"
-            className="kd-player-step"
-            aria-label={
-              scope === "folder"
-                ? "范围：当前文件夹"
-                : "范围：全部曲库"
-            }
-            title={
-              scope === "folder"
-                ? "只在当前文件夹里挑下一首。点一下改成全部曲库"
-                : "在全部曲库里挑下一首。点一下改成只在当前文件夹里挑"
-            }
-            onClick={() => setScope(scope === "all" ? "folder" : "all")}
-          >
-            {scope === "folder" ? (
-              <FolderOpen size={14} />
-            ) : (
-              <Library size={14} />
-            )}
-          </button>
-        )}
+        ) : null}
         {canRefreshPrediction && (
           <button
             type="button"
@@ -4846,7 +4785,7 @@ export function PlayerBar() {
             <RefreshCw size={13} aria-hidden="true" />
           </button>
         )}
-        {/* 时间属于走带状态，不属于波形本身：放在模式 / 范围两键后，读起来也不必
+        {/* 时间属于走带状态，不属于波形本身：放在模式按钮后，读起来也不必
             从右下角追到波形末端。 */}
         <span
           className="kd-player-time kd-player-time-header"
@@ -4864,19 +4803,20 @@ export function PlayerBar() {
       <div className="kd-player-trailing">
         <PlayerDeck
           side="right"
-          view={rightDeckView}
-          active={visualActiveIndex === 1}
-          spinning={Boolean(rightDeckView) && (transitionShowing || performanceDecks[1].playing)}
+          physicalSide={barNextIndex}
+          view={nextBarView}
+          active={false}
+          spinning={Boolean(nextBarView) && (transitionShowing || performanceDecks[barNextIndex].playing)}
           transitioning={transitionShowing}
           resolving={Boolean(
-            rightDeckView?.track &&
-              (performancePendingDecks[1]?.id === rightDeckView.track.id ||
-                (visualActiveIndex === 1 && !playbackFailed && isUnresolvedStreamTrack(rightDeckView.track))),
+            nextBarView?.track &&
+              (performancePendingDecks[barNextIndex]?.id === nextBarView.track.id ||
+                isUnresolvedStreamTrack(nextBarView.track)),
           )}
-          failed={visualActiveIndex === 1 && playbackFailed}
+          failed={false}
           dropActive={deckDropSide === "right"}
-          detailEnabled={!portrait || visualActiveIndex === 1}
-          onOpen={() => openDeck(rightDeckView, visualActiveIndex === 1)}
+          detailEnabled={!portrait}
+          onOpen={() => openDeck(nextBarView, false)}
           onDragOver={(event) => deckDragOver(event, "right")}
           onDragLeave={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDeckDropSide(null);

@@ -1,5 +1,5 @@
 /**
- * 歌词后台调度：不挡播放。只有用户打开歌词界面时才读取当前曲，不预取下一首。
+ * 歌词后台调度：不挡播放。实际开始播放后才匹配当前曲，不预取选中曲或下一首。
  * 右栏与悬浮歌词各自由自己的按钮控制，不再由设置项自动弹出。
  *
  * 悬浮歌词有两种实现，这里都由同一份偏好驱动：桌面是独立透明置顶窗口，
@@ -22,14 +22,15 @@ import {
   publishedLyricsEntry,
   useLyricsStore,
 } from "../../stores/lyricsStore";
-import { useAppStore } from "../../stores/appStore";
 import type { Track } from "../../types";
 
 export function LyricsHost({
   current,
+  playing,
   allowDesktop,
 }: {
   current: Track | null;
+  playing: boolean;
   /** 视频/VJ 模式只使用视频小窗，绝不同时拉起桌面歌词。 */
   allowDesktop: boolean;
 }) {
@@ -45,7 +46,6 @@ export function LyricsHost({
   const lyricExtra = useLyricsPrefs((state) => state.lyricExtra);
   const setDesktopCoordinates = useLyricsPrefs((state) => state.setDesktopCoordinates);
   const setDesktopVerticalOffset = useLyricsPrefs((state) => state.setDesktopVerticalOffset);
-  const showLyrics = useAppStore((state) => state.showLyrics);
   const entry = useLyricsStore((state) => state.get(current?.id));
   const prevDesktopWindow = useRef({ enabled: false });
 
@@ -62,12 +62,12 @@ export function LyricsHost({
     return () => setNativeStreamLyricsClockEnabled(false);
   }, [overlayOn]);
 
-  // 只有用户打开右栏或悬浮歌词时才取当前曲；下一首不提前跨平台搜索。
-  // ensure 自带同歌并发去重，不会阻塞播放或产生重复请求。
+  // Selection and opening a panel are not playback intents. Only an active transport may
+  // start automatic online matching; the store deduplicates requests without blocking audio.
   useEffect(() => {
-    if (!showLyrics && !overlayOn) return;
+    if (!playing) return;
     void ensureLyrics(current);
-  }, [showLyrics, overlayOn, prefsEpoch, current?.id]);
+  }, [playing, prefsEpoch, current?.id]);
 
   // 桌面歌词是另一张 WebView。在线请求只由主窗口拥有，结果通过 Tauri 事件推送；
   // 这样悬浮窗挂载、StrictMode 重挂载都不会再补打一条 /lyrics。

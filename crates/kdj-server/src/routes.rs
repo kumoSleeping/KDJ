@@ -5049,6 +5049,7 @@ struct TrackQueryParams {
     bpm_max: Option<f64>,
     energy_min: Option<i64>,
     analyzed: Option<bool>,
+    media: Option<String>,
     #[serde(default)]
     folder: String,
     #[serde(default)]
@@ -5350,6 +5351,7 @@ fn library_track_query(state: &AppState, params: TrackQueryParams) -> ApiResult<
         bpm_max: params.bpm_max,
         energy_min: params.energy_min,
         analyzed: params.analyzed,
+        media: params.media.unwrap_or_default(),
         folder: if outside {
             String::new()
         } else {

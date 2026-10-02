@@ -1,0 +1,90 @@
+/* Keep the existing composition and one uniform list surface, without
+   column striping, cell borders or changes to column preferences. */
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-workspace-pane-local, .kd-workspace-pane-remote, .kd-table-wrap) {
+  background: var(--s98-face);
+  box-shadow: none;
+}
+/* Margin belongs to the scroll host, not the virtual rows or their spacers.
+   Overlay scrollbar measurements therefore continue to use the real viewport. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-workspace-pane-local > .kd-overlay-scroll-host,
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-workspace-pane-remote > .kd-scroll {
+  margin: 4px 5px 7px;
+  min-width: 0;
+  background: var(--s98-property-paper);
+  box-shadow: var(--s98-sunken);
+}
+/* One continuous warm-pink well, including index/title, virtual spacers and
+   unused viewport space. Column order and visibility do not affect its colour. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-workspace-pane-local > .kd-overlay-scroll-host > .kd-scroll,
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-table[data-kind="library"],
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-table[data-kind="library"] col,
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-table[data-kind="results"],
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-table[data-kind="results"] col {
+  background: var(--s98-property-paper);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-table:is([data-kind="library"], [data-kind="results"]) tbody td {
+  border: 0;
+}
+/* Keep multi-digit row numbers readable inside the existing narrow index column. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-table[data-kind="library"] :is(th, td)[data-col="index"] {
+  padding-inline: 1px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-table[data-kind="library"] td[data-col="index"] {
+  font-size: 0.7rem;
+}
+/* V4's raised root/source buttons and original folder hierarchy stay intact.
+   All expanded children share one lighter well, rather than individual tiles. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-sidebar-root-slot {
+  background: var(--s98-content-paper);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-list {
+  background: var(--kd-panel);
+}
+/* Darker caption, lighter body. Do not turn each property group into a solid
+   pink rectangle; retain V4's existing dimensions, borders and typography. */
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-panel-head, .kd-aside-head, .kd-sheet-head) {
+  background: var(--s98-caption);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-panel-body, .kd-manager-control, .kd-analysis-deck, .kd-stat-grid, .kd-stream-analysis-status) {
+  background: var(--s98-content-paper);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-manager-control-head {
+  background: transparent;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-search-band .kd-searchbar {
+  background: var(--s98-content-paper);
+}
+/* Explore uses a compact action beside the word chips, not a full raised toolbar key. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-vj-actions .kd-btn {
+  padding: 0.2rem 0.35rem;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-vj-actions .kd-btn:hover:not(:disabled) {
+  background: var(--s98-face-hi);
+  box-shadow: none;
+}
+/* Semantic colours are the application's actual Camelot palette, not a second
+   pink-tinted approximation. Chips, pitch readouts and wheel sectors agree. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-camelot:not([data-empty="true"]),
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-manager-control-readout[data-kind="key"] > strong {
+  background: var(--kd-key-color, var(--kd-panel-inset));
+  color: #34262d;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-manager-control-readout[data-kind="key"] > strong {
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-camelot-wheel:not([data-empty="true"]) > g > path {
+  fill: var(--kd-key-color);
+  opacity: 1;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-camelot-wheel:not([data-empty="true"]) > g > text {
+  fill: #34262d;
+}
+@media (forced-colors: active) {
+  :root[data-theme-pack="sakulaptop98"] .kd-app .kd-camelot-wheel > g > path { fill: Canvas; stroke: CanvasText; }
+  :root[data-theme-pack="sakulaptop98"] .kd-app .kd-camelot-wheel > g > text { fill: CanvasText; }
+}

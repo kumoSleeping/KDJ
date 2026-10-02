@@ -153,17 +153,13 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(document.querySelector('.vj-task-editor'), null, "default overview does not mount the editor");
   assert.equal(document.querySelector('.vj-task-edit-toggle,[aria-label^="展开详情"]'), null, "cards have no separate expand or edit controls");
   assert.ok(document.querySelector('[aria-label="打开任务 测试作品"]'), "the task title remains a native keyboard-accessible entry");
-  const taskCard = document.querySelector('.vj-task-card')!;
-  const taskSummary = taskCard.querySelector('.vj-task-summary')!;
-  const cardContents = taskCard.textContent;
   await act(async () => {
     document.querySelector<HTMLElement>('.vj-task-media-title')!.click();
     await useWorkshopStore.getState().flush();
   });
   assert.ok(document.querySelector('.vj-task-editor'), "clicking summary content enters editing directly");
-  assert.ok(document.querySelector('.vj-task-card') === taskCard, 'editing reuses the same task card DOM');
-  assert.ok(document.querySelector('.vj-task-summary') === taskSummary, 'editing retains the original material summary');
-  assert.equal(taskCard.textContent, cardContents, 'opening the editor does not add or remove card controls');
+  assert.equal(document.querySelector('.vj-task-card'), null, 'editing hides the project title and card');
+  assert.equal(document.querySelector('.vj-task-summary'), null, 'editing hides the material summary');
   assert.ok(document.querySelector('#workshop-back [aria-label="返回任务列表"]'), 'back action is in the workspace title slot');
   assert.equal(document.querySelector('.vj-task-editor [aria-label="返回任务列表"]'), null, 'back action is removed from the editing toolbar');
   assert.equal(
@@ -186,7 +182,12 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   await act(async () => useWorkshopStore.getState().select('c'));
   const properties = document.querySelector('.vj-clip-properties')!;
   assert.ok(properties.querySelector('.vj-picture-tools'), 'selected clip exposes picture settings in its properties panel');
-  assert.equal(document.querySelector('.vj-clip-properties-bar')?.nextElementSibling?.classList.contains('vj-timeline-scroll'), true, 'clip properties stay above the track ruler');
+  assert.ok(editorToolbar.querySelector('[aria-label="轨道属性"]'), 'toolbar exposes the selected track properties window');
+  assert.ok(document.querySelector('[role="dialog"][aria-label="轨道属性"]'), 'selecting a clip opens its internal properties window');
+  assert.equal(properties.querySelector('[aria-label="片段属性分类"]'), null, 'property content has no internal category row');
+  assert.equal(document.querySelector('.vj-clip-properties-bar'), null, 'properties do not occupy timeline space');
+  assert.equal(properties.querySelector('[aria-label="片段画面"]')?.hasAttribute('hidden'), false, 'picture settings are directly visible');
+  assert.equal(properties.querySelector('[aria-label="片段变速"]')?.hasAttribute('hidden'), false, 'speed settings are directly visible');
   assert.ok(editorToolbar.querySelector('[aria-label="时间轴吸附"]'));
   assert.equal(editorToolbar.querySelector('[aria-label="剪辑工具"]'), null, 'editing actions are not hidden behind a popup');
   for (const label of ['向前微调', '向后微调', '剪断选中片段', '复制片段', '删除片段']) {
@@ -198,10 +199,10 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(document.querySelector('[aria-label="画面工具"]'), null, 'there is no separate picture-settings band');
   assert.equal(editorToolbar.lastElementChild?.getAttribute('aria-label'), '打开作品预览小窗', 'picture-in-picture stays at the far right');
   assert.ok(editorToolbar.querySelector('[aria-label="作品菜单"]'), 'project menu belongs to the editor, not the shared card');
-  assert.ok(taskCard.querySelector('[aria-label="导出任务 测试作品"]'), 'export stays in the shared task card');
+  assert.ok(editorToolbar.querySelector('[aria-label="导出任务 测试作品"]'), 'export remains available in the editor toolbar');
+  assert.equal(properties.querySelector('header'), null, 'clip title does not occupy a separate properties row');
   const outputSettings = editorToolbar.querySelector<HTMLDetailsElement>('.vj-export-settings')!;
   assert.ok(outputSettings, 'output settings share the existing editing toolbar');
-  assert.equal(taskCard.querySelector('.vj-export-settings'), null, 'opening the editor does not change the card layout');
   await act(async () => {
     outputSettings.open = true;
     outputSettings.querySelector('summary')!.focus();
@@ -240,6 +241,19 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
       button.click();
       await useWorkshopStore.getState().flush();
     });
+  await click("关闭轨道属性");
+  assert.equal(document.querySelector('.vj-clip-properties'), null, 'closing properties keeps the timeline available');
+  assert.equal(useWorkshopStore.getState().selectedId, 'c', 'closing the window retains the selected clip');
+  await click("轨道属性");
+  assert.ok(document.querySelector('.vj-clip-properties'), 'toolbar reopens properties for the same selection');
+  await click("添加字幕");
+  const subtitleWindow = document.querySelector('[role="dialog"][aria-label="添加字幕"]')!;
+  assert.ok(subtitleWindow.classList.contains('kd-internal-window'), 'subtitle editing uses an app-owned window');
+  assert.equal(subtitleWindow.tagName, 'SECTION', 'subtitle editor does not enter the native modal top layer');
+  assert.equal(document.activeElement?.getAttribute('aria-label'), '字幕文字', 'subtitle input receives focus');
+  await click("关闭字幕设置");
+  assert.equal(document.querySelector('[role="dialog"][aria-label="添加字幕"]'), null);
+  assert.ok(document.querySelector('.vj-clip-properties'), 'closing subtitles preserves the properties window');
   assert.equal(document.querySelector(".vj-task-export-meta"), null, "no export receipt before exporting");
   const exportDraft = useWorkshopStore.getState().draft!;
   await act(async () => useWorkshopStore.setState({draft: {...exportDraft, output: {...exportDraft.output, format: "wav"}}}));
@@ -276,7 +290,10 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   assert.equal(server.layers[0].clips[0].start_ms, 2000);
   await propertyValue("片段时长", "6");
   assert.equal(server.layers[0].clips[0].source_out_ms, 6000);
-  await click("速度 2 倍");
+  await click("倍速预设");
+  await act(async () => {
+    [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')].find(button => button.textContent === "2×")!.click();
+  });
   assert.equal(server.layers[0].clips[0].speed.start, 2);
   assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="片段时长"]')!.value, "3");
   await click("撤销"); await click("撤销"); await click("撤销");
@@ -650,7 +667,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   await click("关闭作品预览小窗");
   assert.equal(document.querySelector('.vj-floating-preview'), null);
   assert.equal(document.querySelectorAll('.vj-preview').length, 0, 'closing PiP releases the preview instead of creating an inline surface');
-  assert.ok(document.querySelector('.vj-task-card .vj-task-summary'), 'closing PiP leaves the original task summary intact');
+  assert.equal(document.querySelector('.vj-task-summary'), null, 'closing PiP keeps the task summary hidden while editing');
   assert.deepEqual(useWorkshopStore.getState().draft, beforePreviewClose, "closing the preview does not edit the composition");
   await act(async () => useWorkshopStore.setState({draft: {
     ...beforePreviewClose!, sources: beforePreviewClose!.sources.map(source => ({...source, video: false})),
@@ -884,7 +901,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   revision++;
   await act(async () => useWorkshopStore.getState().accept(await api.workshop()));
   assert.equal(document.querySelectorAll('.vj-task-entry').length, 1, "expanded editing hides other task cards");
-  assert.equal(document.querySelectorAll('.vj-task-summary').length, 1, 'expanded task keeps its original summary above the editor');
+  assert.equal(document.querySelectorAll('.vj-task-summary').length, 0, 'expanded task hides its summary');
   await click("返回任务列表");
   assert.equal(document.querySelectorAll('.vj-task-entry').length, 2);
   assert.ok(document.querySelector('[data-vj-project="second"] .vj-task-summary'), "newly received tasks also show details by default");
@@ -904,7 +921,7 @@ test("workshop selection, split, deletion, undo, layer order and autosave share 
   };
   await click("打开任务 任务 2");
   await act(async () => {
-    document.querySelector<HTMLButtonElement>('.vj-task-card [aria-label^="导出任务 "]')!.click();
+    document.querySelector<HTMLButtonElement>('.vj-task-editor [aria-label^="导出任务 "]')!.click();
     await useWorkshopStore.getState().flush();
   });
   await click("返回任务列表");

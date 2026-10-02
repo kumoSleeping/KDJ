@@ -12,7 +12,7 @@ import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "../../lib/api";
 import { activeLrcIndex, lineFillProgress, projectLoopedPlaybackTime } from "../../lib/lrc";
-import { effectiveLyricExtra } from "../../lib/lyricsOverlay";
+import { alignedLyricText, effectiveLyricExtra } from "../../lib/lyricsOverlay";
 import { paintCss, strokeCss } from "../../lib/lyricsColor";
 import {
   accentPaint,
@@ -42,13 +42,6 @@ import {
 import type { Track } from "../../types";
 
 const MIN_SQUEEZE = 0.62;
-
-function alignedText(
-  lines: { time: number; text: string }[],
-  time: number,
-): string | undefined {
-  return lines.find((line) => Math.abs(line.time - time) <= 0.12)?.text;
-}
 
 function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
   const live = useSyncExternalStore(
@@ -199,6 +192,7 @@ function useKaraokeLayout(
   measureRef: RefObject<HTMLSpanElement | null>,
 ) {
   const [layout, setLayout] = useState({ squeeze: 1, shift: 0 });
+  const themeEpoch = useThemePack(state => state.epoch);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -224,8 +218,9 @@ function useKaraokeLayout(
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(recompute);
     observer.observe(viewport);
+    observer.observe(measure);
     return () => observer.disconnect();
-  }, [text, fill, fontScale, viewportRef, measureRef]);
+  }, [text, fill, fontScale, viewportRef, measureRef, themeEpoch]);
 
   return layout;
 }
@@ -276,6 +271,8 @@ function DesktopLyricsLine({
 }
 
 export function DesktopLyricsOverlay() {
+  // Subscribe even while idle: playback arriving must not change the hook order.
+  const themed = useThemePack((state) => state.active !== null);
   const player = runtimePlayer();
   const [playback, setPlayback] = useState<UnifiedPlayerState>(() => player.state());
   const [streamPlayback, setStreamPlayback] = useState<PublishedStreamPlayback | null>(() =>
@@ -502,9 +499,9 @@ export function DesktopLyricsOverlay() {
   const layer = effectiveLyricExtra(lyricExtra, hasMeaning, hasRomaji);
   const extra = current
     ? layer === "meaning"
-      ? alignedText(entry.translated, current.time)
+      ? alignedLyricText(entry.translated, current.time)
       : layer === "romaji"
-        ? alignedText(entry.romaji, current.time)
+        ? alignedLyricText(entry.romaji, current.time)
         : undefined
     : undefined;
 
@@ -517,8 +514,10 @@ export function DesktopLyricsOverlay() {
   else if (current) {
     primary = current.text;
     const synchronizedSecondary = extra?.trim() || "";
-    secondary = synchronizedSecondary || next?.text || "";
-    secondaryFollowsPrimary = Boolean(synchronizedSecondary);
+    // An enabled extra layer is always the current sentence, never a next-line
+    // preview disguised as a translation when one timestamp has no match.
+    secondary = layer === "off" ? next?.text || "" : synchronizedSecondary;
+    secondaryFollowsPrimary = layer !== "off" && Boolean(synchronizedSecondary);
     karaoke = entry.status === "ready";
   }
 
@@ -536,7 +535,6 @@ export function DesktopLyricsOverlay() {
   const secondaryColor = paintCss(resolvedSecondaryPaint(prefs));
   const dimColor = paintCss(dimPaint(prefs));
   const stroke = strokeCss(strokePaint(prefs));
-  const themed = useThemePack((state) => state.active !== null);
   const paintVars: Record<string, string | number> = {
     "--kd-desktop-lyrics-accent": accent.color,
     "--kd-desktop-lyrics-accent-fill": accent.backgroundImage ?? "none",
@@ -552,17 +550,15 @@ export function DesktopLyricsOverlay() {
     "--kd-desktop-lyrics-stroke-width-secondary": stroke.widthSecondary,
   };
   if (themed) {
-    // 主题包生效时，仍停在出厂配色上的那几项不写内联变量，让主题 CSS 接手；用户改过的照旧优先。
-    // ponytail: 分不清「没动过」和「主动选回出厂值」，要区分得给 lyricsPrefs 加 touched 标记
-    const untouched: Record<string, boolean> = {
-      accent: prefs.desktopAccentMode === "white",
-      secondary: prefs.desktopSecondaryMode === "follow",
-      dim: prefs.desktopDimMode === "gray",
-      stroke: prefs.desktopStrokeMode === "black",
-    };
-    for (const name of Object.keys(paintVars)) {
-      if (untouched[name.split("-")[5]]) delete paintVars[name];
-    }
+    // 歌词配色已由主题管理；保留旧偏好数据，但不让旧内联色覆盖主题。
+    for (const name of Object.keys(paintVars)) delete paintVars[name];
+  }
+
+  // 无主题时，副行继续沿用旧偏好的主行颜色。
+  if (!themed && prefs.desktopSecondaryMode === "follow") {
+    paintVars["--kd-desktop-lyrics-secondary"] = "var(--kd-desktop-lyrics-accent, #fff)";
+    paintVars["--kd-desktop-lyrics-secondary-fill"] = "var(--kd-desktop-lyrics-accent-fill, none)";
+    paintVars["--kd-desktop-lyrics-secondary-clip"] = "var(--kd-desktop-lyrics-accent-clip, border-box)";
   }
 
   return (

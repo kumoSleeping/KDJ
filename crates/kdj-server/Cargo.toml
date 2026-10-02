@@ -14,9 +14,12 @@ kdj-core = { version = "1.0.2-rc8", path = "../kdj-core", features = ["rustls-ri
 kdj-library = { version = "1.0.2-rc8", path = "../kdj-library" }
 kdj-providers = { version = "1.0.2-rc8", path = "../kdj-providers" }
 rand = "0.10.2"
+regex = "1.13.1"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10.9"
+tempfile = "3.27.0"
 subtle = "2.6.1"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "io-util", "signal"] }
 # "io" = ReaderStream，音频端点要靠它边读边发，不能整份读进内存

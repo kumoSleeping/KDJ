@@ -1,759 +1,189 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type PointerEvent as ReactPointerEvent,
-} from "react";
-import {
-  beatGridMarkers,
-  waveformBeatGridOrigin,
-} from "../../lib/performanceCues";
-import {
-  getLiveDeckClock,
-  runtimePlayer,
-  subscribeLivePlaybackClock,
-  type LiveDeckClock,
-} from "../../lib/unifiedPlayer";
-import {
-  correctedLiveWaveformRate,
-  liveWaveformAnimationTimeMs,
-  liveWaveformLoopAnimationTimeMs,
-  liveWaveformPhaseError,
-  liveWaveformPlaybackRate,
-  projectedNativeWaveformPosition,
-  shouldPauseLiveWaveformClock,
-  updateWaveformMotionClock,
-  waveformMotionClockPosition,
-  type WaveformMotionClock,
-} from "../../lib/waveformMotion";
-import {
-  beatMarkerRangePercent,
-  managerWaveformRasterGeometry,
-  managerWaveformViewportSeconds,
-  shouldWriteWaveformTransform,
-  waveformSourceRange,
-} from "../../lib/waveformViewport";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent } from "react";
 import type { Track } from "../../types";
+import { beatGridMarkers, waveformBeatGridOrigin } from "../../lib/performanceCues";
+import { getLiveDeckClock, runtimePlayer, subscribeLivePlaybackClock } from "../../lib/unifiedPlayer";
+import { projectedNativeWaveformPosition } from "../../lib/waveformMotion";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
-import { drawWaveformCanvas } from "../library/WaveformCanvas";
-import { useThemePack } from "../../lib/themePack";
-import { usePlaybackWaveformWindow } from "./usePlaybackWaveformWindow";
+import { StaticWaveformCanvas } from "./StaticWaveformCanvas";
+import { useStaticPlaybackWaveform } from "./useStaticPlaybackWaveform";
+import "./ManagerWaveform.css";
 
-const VIEWPORT_SECONDS = managerWaveformViewportSeconds(1);
+import { WaveformTileCache } from "../../lib/waveformTileCache";
+import { WaveformRailMotion } from "../../lib/waveformRailMotion";
 
-interface ManagerMotionState {
-  clock: WaveformMotionClock | null;
-  sourceId: number | null;
-  loopGeneration: number | null;
-  scratchHeld: boolean;
-}
-
-interface ManagerWaveformGeometry {
-  deck: 0 | 1;
-  trackId: number;
-  duration: number;
-  start: number;
-  end: number;
-  span: number;
-  sourceStart: number;
-  sourceEnd: number;
-}
-
-interface ManagerCompositorAnimation {
-  animation: Animation;
-  trackId: number;
-  start: number;
-  end: number;
-  span: number;
-  loopStart: number | null;
-  loopLength: number | null;
-  sourceId: number | null;
-  loopGeneration: number | null;
-  loopWrapCount: number | null;
-  discontinuityRevision: number | null;
-  scratchHeld: boolean;
-}
-
-interface ManagerCompositorLoop {
-  start: number;
-  length: number;
-}
-
-interface ManagerRetainedLanding {
-  trackId: number;
-  position: number;
-  sourceId: number | null;
-  loopGeneration: number | null;
-  discontinuityRevision: number | null;
-}
-
-function managerCompositorLoop(
-  live: LiveDeckClock | null,
-  geometry: ManagerWaveformGeometry,
-  position: number,
-): ManagerCompositorLoop | null {
-  if (
-    !live
-    || live.trackId !== geometry.trackId
-    || typeof live.loopStart !== "number"
-    || typeof live.loopLength !== "number"
-    || !Number.isFinite(live.loopStart)
-    || !Number.isFinite(live.loopLength)
-    || live.loopLength <= 0
-  ) return null;
-  const start = Math.max(0, Math.min(geometry.duration, live.loopStart));
-  const end = Math.min(geometry.duration, start + live.loopLength);
-  if (end <= start || position < start || position >= end) return null;
-  const viewportHalf = VIEWPORT_SECONDS * 0.5;
-  const requiredStart = Math.max(0, start - viewportHalf);
-  const requiredEnd = Math.min(geometry.duration, end + viewportHalf);
-  // Infinite compositor motion is valid only when one immutable bitmap contains the visible
-  // interval at both sides of the wrap. Larger loops retain a one-shot effect and land once on the
-  // native wrap publication while the rolling PCM window renews around loop-in.
-  if (
-    geometry.sourceStart > requiredStart + 1.0e-6
-    || geometry.sourceEnd + 1.0e-6 < requiredEnd
-  ) return null;
-  return { start, length: end - start };
-}
-
-function managerAnimationTimeMs(
-  owner: ManagerCompositorAnimation,
-  position: number,
-): number | null {
-  return owner.loopStart !== null && owner.loopLength !== null
-    ? liveWaveformLoopAnimationTimeMs(position, owner.loopStart, owner.loopLength)
-    : liveWaveformAnimationTimeMs(position - owner.start, owner.span);
-}
-
-function managerAnimationVisualPosition(owner: ManagerCompositorAnimation): number | null {
-  const currentTime = owner.animation.currentTime;
-  if (typeof currentTime !== "number" || !Number.isFinite(currentTime)) return null;
-  const seconds = Math.max(0, currentTime) / 1_000;
-  return owner.loopStart !== null && owner.loopLength !== null
-    ? owner.loopStart + (seconds % owner.loopLength)
-    : owner.start + seconds;
-}
-
-function managerVisualRate(rate: number): number {
-  if (!Number.isFinite(rate)) return 1;
-  if (Math.abs(rate) >= 0.001) return rate;
-  return rate < 0 ? -0.001 : 0.001;
-}
-
-function landManagerAnimation(
-  owner: ManagerCompositorAnimation,
-  position: number,
-  rate: number,
-  running: boolean,
-): boolean {
-  const sourceTimeMs = managerAnimationTimeMs(owner, position);
-  if (sourceTimeMs === null) return false;
-  const visualRate = managerVisualRate(rate);
-  owner.animation.pause();
-  owner.animation.playbackRate = visualRate;
-  owner.animation.currentTime = sourceTimeMs;
-  if (running && Math.abs(rate) > 0.02) {
-    owner.animation.play();
-    const rawTimelineTime = document.timeline?.currentTime;
-    if (typeof rawTimelineTime === "number") {
-      // Align local source milliseconds with this compositor timeline immediately. Without this
-      // startTime assignment WebKit can defer play() to its next main-thread sampling turn.
-      owner.animation.startTime = rawTimelineTime - sourceTimeMs / visualRate;
-    }
-  }
-  return true;
-}
-
-function createManagerCompositorAnimation(
-  rail: HTMLDivElement,
-  geometry: ManagerWaveformGeometry,
-  position: number,
-  rate: number,
-  running: boolean,
-  live: LiveDeckClock | null,
-): ManagerCompositorAnimation | null {
-  if (typeof rail.animate !== "function" || geometry.span <= 0) return null;
-  const loop = managerCompositorLoop(live, geometry, position);
-  const effectStart = loop?.start ?? geometry.start;
-  const effectEnd = loop ? loop.start + loop.length : geometry.end;
-  const effectSpan = effectEnd - effectStart;
-  if (!(effectSpan > 0)) return null;
-  const fromPercent = ((effectStart - geometry.start) / geometry.span) * 100;
-  const toPercent = ((effectEnd - geometry.start) / geometry.span) * 100;
-  const animation = rail.animate(
-    [
-      { transform: `translate3d(${-fromPercent}%, 0, 0)` },
-      { transform: `translate3d(${-toPercent}%, 0, 0)` },
-    ],
-    {
-      duration: effectSpan * 1_000,
-      easing: "linear",
-      fill: "both",
-      iterations: loop ? Infinity : 1,
-    },
-  );
-  const owner: ManagerCompositorAnimation = {
-    animation,
-    trackId: geometry.trackId,
-    start: geometry.start,
-    end: geometry.end,
-    span: geometry.span,
-    loopStart: loop?.start ?? null,
-    loopLength: loop?.length ?? null,
-    sourceId: live?.sourceId ?? null,
-    loopGeneration: live?.loopGeneration ?? null,
-    loopWrapCount: live?.loopWrapCount ?? null,
-    discontinuityRevision: live?.discontinuityRevision ?? null,
-    scratchHeld: live?.scratchHeld ?? false,
-  };
-  if (!landManagerAnimation(owner, position, rate, running)) {
-    animation.cancel();
-    return null;
-  }
-  return owner;
-}
-
-function sourcePosition(
-  deck: 0 | 1,
-  trackId: number,
-  duration: number,
-  now: number,
-  motion?: ManagerMotionState,
-): number {
+const SECONDS = 6;
+function clockPosition(deck: 0 | 1, trackId: number, total: number, fallback = 0) {
   const live = getLiveDeckClock(deck);
-  if (live?.trackId === trackId) {
-    const rate = liveWaveformPlaybackRate(
-      live.targetRate,
-      live.audibleRate,
-      live.scratchHeld,
-    );
-    const authority = projectedNativeWaveformPosition(
-      live.currentTime,
-      live.clientPresentationTimeMs,
-      now,
-      rate,
-      duration,
-      live.loopStart,
-      live.loopLength,
-    );
-    if (!motion) return authority;
-
-    const sourceChanged = motion.sourceId !== live.sourceId
-      || motion.loopGeneration !== live.loopGeneration;
-    const scratchEdge = !sourceChanged && motion.scratchHeld !== live.scratchHeld;
-    if (sourceChanged) motion.clock = null;
-    motion.sourceId = live.sourceId;
-    motion.loopGeneration = live.loopGeneration;
-    motion.scratchHeld = live.scratchHeld;
-    motion.clock = updateWaveformMotionClock(
-      motion.clock,
-      {
-        trackId,
-        position: authority,
-        duration,
-        rate,
-        // During a seek handoff `playing` can briefly be false while callback-tagged PCM is still
-        // moving. Audible rate remains the visual authority across that edge.
-        playing: live.playing || live.scratchHeld || Math.abs(rate) > 0.02,
-        // Grab/release lands exactly once. Later platter samples update velocity without writing
-        // every small decoder-clock correction back into the visible rail.
-        discrete: scratchEdge,
-        motionRevision: live.discontinuityRevision,
-        loopStart: live.loopStart,
-        loopLength: live.loopLength,
-      },
-      now,
-    );
-    return waveformMotionClockPosition(motion.clock, now);
-  }
-  if (motion) {
-    motion.clock = null;
-    motion.sourceId = null;
-    motion.loopGeneration = null;
-    motion.scratchHeld = false;
-  }
-  const fallback = runtimePlayer().state().decks[deck];
-  return fallback.trackId === trackId && Number.isFinite(fallback.currentTime)
-    ? fallback.currentTime
-    : 0;
+  if (live?.trackId === trackId) return projectedNativeWaveformPosition(live.currentTime,
+    live.clientPresentationTimeMs, performance.now(), live.playing || live.scratchHeld ? live.audibleRate : 0,
+    total, live.loopStart, live.loopLength);
+  const state = runtimePlayer().state().decks[deck];
+  return state.trackId === trackId ? Math.max(0, Math.min(total, state.currentTime)) : fallback;
 }
+const TileBeats = memo(function TileBeats({ track, start, end, total }:
+  { track: Track; start: number; end: number; total: number }) {
+  const markers = useMemo(() => beatGridMarkers(total, track.bpm,
+    waveformBeatGridOrigin(track, true), Math.max(0, start), Math.min(total, end), null), [track, start, end, total]);
+  return <span className="kd-wave-beat-grid" aria-hidden="true">{markers.map(marker =>
+    <i key={marker.positionSec} data-bar={marker.beat === 1 || undefined}
+      style={{ left: `${(marker.positionSec - start) / SECONDS * 100}%` }}>
+      {marker.beat === 1 ? <span>{marker.bar}</span> : null}
+    </i>)}</span>;
+});
 
-function ManagerBeatGrid({
-  track,
-  duration,
-  start,
-  end,
-}: {
-  track: Track;
-  duration: number;
-  start: number;
-  end: number;
-}) {
-  const markers = useMemo(
-    () => beatGridMarkers(
-      duration,
-      track.bpm,
-      waveformBeatGridOrigin(track, true),
-      start,
-      end,
-      null,
-    ),
-    [duration, end, start, track],
-  );
-  if (markers.length === 0) return null;
-  return (
-    <span className="kd-wave-beat-grid" aria-hidden="true">
-      {markers.map((marker) => (
-        <i
-          key={`${marker.positionSec}:${marker.beat}`}
-          data-beat={marker.beat}
-          data-bar={marker.beat === 1 ? "true" : undefined}
-          style={{
-            left: `${beatMarkerRangePercent(marker.positionSec, start, end)}%`,
-          } as CSSProperties}
-        >
-          {marker.beat === 1 ? <span>{marker.bar}</span> : null}
-        </i>
-      ))}
-    </span>
-  );
+/** Three immutable six-second tiles, one clock and one transform. No rolling PCM requests. */
+export function ManagerWaveform(props: { track: Track; deck: 0 | 1; duration: number;
+  amplitudeScale: number; playing: boolean; onLoadingChange(loading: boolean): void }) {
+  // A seamless seek swaps physical decks, not the song or its waveform assets.
+  return <ScrollingWaveform key={props.track.id} {...props} />;
 }
-
-/**
- * Six-second Manager rail with three deliberately separate owners:
- *
- * - React owns the rare source-window/resize commits.
- * - Canvas owns immutable waveform pixels and is never redrawn for playback time.
- * - Web Animations owns steady display-synchronised motion on the compositor thread.
- * - The native DAC clock subscriber changes phase only for real transport edges or bounded drift.
- *
- * Keeping those lanes separate is what prevents a waveform from stalling the surrounding detail
- * panel, and prevents a late 10 Hz player snapshot from making the rail appear to stop and jump.
- */
-export function ManagerWaveform({
-  track,
-  deck,
-  duration,
-  amplitudeScale,
-  playing,
-  onLoadingChange,
-}: {
-  track: Track;
-  deck: 0 | 1;
-  duration: number;
-  amplitudeScale: number;
-  playing: boolean;
-  onLoadingChange(loading: boolean): void;
-}) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const railRef = useRef<HTMLDivElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const pointerStartRef = useRef<{ id: number; x: number; y: number } | null>(null);
-  const lastTransformRef = useRef(Number.NaN);
-  const geometryRef = useRef<ManagerWaveformGeometry | null>(null);
-  const compositorAnimationRef = useRef<ManagerCompositorAnimation | null>(null);
-  const retainedLandingRef = useRef<ManagerRetainedLanding | null>(null);
-  const motionRef = useRef<ManagerMotionState>({
-    clock: null,
-    sourceId: null,
-    loopGeneration: null,
-    scratchHeld: false,
-  });
-  const [size, setSize] = useState({ width: 0, height: 0, dpr: 1 });
+function ScrollingWaveform({ track, deck, duration, amplitudeScale, playing, onLoadingChange }:
+  Parameters<typeof ManagerWaveform>[0]) {
   const total = Math.max(0, duration || track.duration || 0);
-  const playbackWaveform = usePlaybackWaveformWindow({
-    trackId: track.id,
-    deck,
-    duration: total,
-    viewportSeconds: VIEWPORT_SECONDS,
-    enabled: true,
-  });
-  // This rail is a time-bounded detail view. A whole-track overview (including the progressive
-  // online preview) has different geometry and colour normalisation, so stretching it into this
-  // six-second window is never a valid fallback: it visibly changes shape and colour when the
-  // real detail asset arrives. Wait for the correctly owned native window instead.
-  const waveform = playbackWaveform;
-  const waveformReady = waveform !== null;
-  const themeEpoch = useThemePack((state) => state.epoch);
-  useEffect(() => {
-    onLoadingChange(!waveformReady);
-  }, [onLoadingChange, waveformReady]);
-  const initialPosition = sourcePosition(deck, track.id, total, performance.now());
-  const [boundedStart, boundedEnd] = waveform ? waveformSourceRange(waveform) : [0, 0];
-  const raster = managerWaveformRasterGeometry(
-    boundedStart,
-    boundedEnd,
-    size.width,
-    size.dpr,
-    VIEWPORT_SECONDS,
-  );
-  const bakeStart = raster.backingWidth > 0 ? raster.startSec : boundedStart;
-  const bakeEnd = raster.backingWidth > 0 ? raster.endSec : boundedEnd;
-  const bakeSpan = Math.max(1e-6, bakeEnd - bakeStart);
-  const widthScale = bakeSpan / VIEWPORT_SECONDS;
-
-  useLayoutEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const sync = () => {
-      const rect = host.getBoundingClientRect();
-      const next = {
-        width: Math.max(0, rect.width),
-        height: Math.max(0, rect.height),
-        dpr: Math.max(1, window.devicePixelRatio || 1),
-      };
-      setSize((current) =>
-        Math.abs(current.width - next.width) < 0.25
-          && Math.abs(current.height - next.height) < 0.25
-          && Math.abs(current.dpr - next.dpr) < 1.0e-6
-          ? current
-          : next,
-      );
-    };
-    sync();
-    const observer = new ResizeObserver(sync);
-    observer.observe(host);
-    // WebKit fires window resize when a Tauri window crosses displays with a different DPR. The
-    // host CSS box can remain unchanged, so ResizeObserver alone would retain the old raster.
-    window.addEventListener("resize", sync);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", sync);
-    };
-  }, [waveformReady]);
-
-  useLayoutEffect(() => {
-    const canvas = canvasRef.current;
-    const rail = railRef.current;
-    // Publish geometry only at the DOM commit boundary. A concurrent React render may be
-    // restarted; letting the native-clock subscriber observe its uncommitted source range would
-    // move the old bitmap with the new origin and recreate a one-frame flash.
-    compositorAnimationRef.current?.animation.cancel();
-    compositorAnimationRef.current = null;
-    geometryRef.current = null;
-    if (
-      !canvas
-      || !rail
-      || !waveform
-      || size.width <= 0
-      || size.height <= 0
-      || raster.backingWidth <= 0
-      || bakeSpan <= 0
-    ) {
-      lastTransformRef.current = Number.NaN;
-      return;
-    }
-    rail.style.visibility = "visible";
-    drawWaveformCanvas(
-      canvas,
-      waveform,
-      raster.cssWidth,
-      Math.max(1, size.height),
-      waveform.known,
-      bakeStart,
-      bakeEnd,
-      "performance-detail",
-      amplitudeScale,
-    );
-    const geometry: ManagerWaveformGeometry = {
-      deck,
-      trackId: track.id,
-      duration: total,
-      start: bakeStart,
-      end: bakeEnd,
-      span: bakeSpan,
-      sourceStart: boundedStart,
-      sourceEnd: boundedEnd,
-    };
-    geometryRef.current = geometry;
-    // A replacement window changes both pixels and their source-time origin. Land its transform
-    // in the same layout phase as the canvas redraw. Its destination lattice is anchored to
-    // absolute track time, so overlapping pixels retain identical aggregation at every renewal.
-    const authority = sourcePosition(
-      deck,
-      track.id,
-      total,
-      performance.now(),
-      motionRef.current,
-    );
-    const live = getLiveDeckClock(deck);
-    const retained = retainedLandingRef.current;
-    retainedLandingRef.current = null;
-    const position = retained
-      && retained.trackId === track.id
-      && retained.sourceId === (live?.sourceId ?? null)
-      && retained.loopGeneration === (live?.loopGeneration ?? null)
-      && retained.discontinuityRevision === (live?.discontinuityRevision ?? null)
-      && retained.position >= bakeStart
-      && retained.position <= bakeEnd
-        ? retained.position
-        : authority;
-    const rate = live?.trackId === track.id
-      ? liveWaveformPlaybackRate(live.targetRate, live.audibleRate, live.scratchHeld)
-      : playing ? 1 : 0;
-    const running = live?.trackId === track.id
-      ? live.playing || live.scratchHeld || Math.abs(rate) > 0.02
-      : playing;
-    const owner = createManagerCompositorAnimation(
-      rail,
-      geometry,
-      position,
-      rate,
-      running,
-      live?.trackId === track.id ? live : null,
-    );
-    if (owner) {
-      compositorAnimationRef.current = owner;
-      lastTransformRef.current = Number.NaN;
-    } else {
-      const percent = ((position - bakeStart) / bakeSpan) * 100;
-      if (Number.isFinite(percent)) {
-        rail.style.transform = `translate3d(${-percent}%, 0, 0)`;
-        lastTransformRef.current = percent;
-      }
-    }
-    return () => {
-      if (owner && compositorAnimationRef.current === owner) {
-        const position = managerAnimationVisualPosition(owner);
-        if (position !== null) {
-          retainedLandingRef.current = {
-            trackId: owner.trackId,
-            position,
-            sourceId: owner.sourceId,
-            loopGeneration: owner.loopGeneration,
-            discontinuityRevision: owner.discontinuityRevision,
-          };
-        }
-        owner.animation.cancel();
-        compositorAnimationRef.current = null;
-      }
-    };
-  }, [
-    amplitudeScale,
-    bakeEnd,
-    bakeSpan,
-    bakeStart,
-    boundedEnd,
-    boundedStart,
-    deck,
-    playing,
-    raster.backingWidth,
-    raster.cssWidth,
-    size.height,
-    themeEpoch,
-    total,
-    track.id,
-    waveform,
-  ]);
-
-  useEffect(() => {
-    if (typeof Element !== "undefined" && typeof Element.prototype.animate === "function") {
-      return subscribeLivePlaybackClock(() => {
-        const rail = railRef.current;
-        const geometry = geometryRef.current;
-        const live = getLiveDeckClock(deck);
-        if (!rail || !geometry || !live || live.trackId !== track.id) return;
-        const now = performance.now();
-        const rate = liveWaveformPlaybackRate(
-          live.targetRate,
-          live.audibleRate,
-          live.scratchHeld,
-        );
-        const authority = projectedNativeWaveformPosition(
-          live.currentTime,
-          live.clientPresentationTimeMs,
-          now,
-          rate,
-          geometry.duration,
-          live.loopStart,
-          live.loopLength,
-        );
-        const desiredLoop = managerCompositorLoop(live, geometry, authority);
-        let owner = compositorAnimationRef.current;
-        const loopChanged = !owner
-          || owner.loopStart !== (desiredLoop?.start ?? null)
-          || owner.loopLength !== (desiredLoop?.length ?? null)
-          || owner.loopGeneration !== live.loopGeneration;
-        if (loopChanged) {
-          owner?.animation.cancel();
-          owner = createManagerCompositorAnimation(
-            rail,
-            geometry,
-            authority,
-            rate,
-            live.playing || live.scratchHeld || Math.abs(rate) > 0.02,
-            live,
-          );
-          compositorAnimationRef.current = owner;
-          if (!owner) {
-            rail.style.visibility = "hidden";
-            return;
-          }
-        }
-        if (!owner) return;
-
-        const sourceChanged = owner.sourceId !== live.sourceId;
-        const discontinuity = owner.discontinuityRevision !== live.discontinuityRevision;
-        const scratchEdge = owner.scratchHeld !== live.scratchHeld;
-        const uncoveredLoopWrap = owner.loopStart === null
-          && owner.loopWrapCount !== live.loopWrapCount;
-        const running = live.playing || live.scratchHeld || Math.abs(rate) > 0.02;
-        let landed = false;
-        if (
-          sourceChanged
-          || discontinuity
-          || scratchEdge
-          || uncoveredLoopWrap
-          || owner.animation.playState === "finished"
-        ) {
-          landed = landManagerAnimation(owner, authority, rate, running);
-        }
-        if (managerAnimationTimeMs(owner, authority) === null) {
-          owner.animation.pause();
-          rail.style.visibility = "hidden";
-          owner.sourceId = live.sourceId;
-          owner.loopWrapCount = live.loopWrapCount;
-          owner.discontinuityRevision = live.discontinuityRevision;
-          owner.scratchHeld = live.scratchHeld;
-          return;
-        }
-        rail.style.visibility = "visible";
-
-        if (shouldPauseLiveWaveformClock(
-          live.playing,
-          live.scratchHeld,
-          true,
-          discontinuity,
-          rate,
-        )) {
-          if (owner.animation.playState !== "paused" || discontinuity) {
-            landManagerAnimation(owner, authority, rate, false);
-          }
-        } else {
-          let visualRate = managerVisualRate(rate);
-          if (!landed && !live.scratchHeld) {
-            const visualPosition = managerAnimationVisualPosition(owner);
-            if (visualPosition !== null) {
-              const phaseError = liveWaveformPhaseError(
-                authority,
-                visualPosition,
-                owner.loopLength,
-              );
-              if (Math.abs(phaseError) > 0.08) {
-                landed = landManagerAnimation(owner, authority, rate, running);
-              } else {
-                visualRate = correctedLiveWaveformRate(visualRate, phaseError);
-              }
-            }
-          }
-          if (!landed && Math.abs(owner.animation.playbackRate - visualRate) > 1.0e-6) {
-            owner.animation.updatePlaybackRate(visualRate);
-          }
-          if (owner.animation.playState === "paused") owner.animation.play();
-        }
-        owner.sourceId = live.sourceId;
-        owner.loopGeneration = live.loopGeneration;
-        owner.loopWrapCount = live.loopWrapCount;
-        owner.discontinuityRevision = live.discontinuityRevision;
-        owner.scratchHeld = live.scratchHeld;
-      });
-    }
-
-    // Compatibility path for older WebViews. Supported Tauri WebKit/WebView2 builds never enter
-    // it, so the normal detail rail has no JavaScript work scheduled at display refresh rate.
-    let frame = 0;
-    const animate = (now: number) => {
-      const rail = railRef.current;
-      const geometry = geometryRef.current;
-      if (rail && geometry) {
-        const position = sourcePosition(
-          geometry.deck,
-          geometry.trackId,
-          geometry.duration,
-          now,
-          motionRef.current,
-        );
-        const percent = ((position - geometry.start) / geometry.span) * 100;
-        if (shouldWriteWaveformTransform(lastTransformRef.current, percent)) {
-          rail.style.transform = `translate3d(${-percent}%, 0, 0)`;
-          lastTransformRef.current = percent;
-        }
-      }
-      frame = window.requestAnimationFrame(animate);
-    };
-    frame = window.requestAnimationFrame(animate);
-    return () => window.cancelAnimationFrame(frame);
-  }, [deck, track.id]);
-
-  const pointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    pointerStartRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
-  };
-  const pointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const start = pointerStartRef.current;
-    pointerStartRef.current = null;
-    if (
-      !start
-      || start.id !== event.pointerId
-      || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5
-      || total <= 0
-    ) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-    const current = sourcePosition(deck, track.id, total, performance.now());
-    const position = Math.max(0, Math.min(total, current + (ratio - 0.5) * VIEWPORT_SECONDS));
+  const { detail, loading, error } = useStaticPlaybackWaveform(track, total);
+  const tileCache = useMemo(() => new WaveformTileCache<HTMLCanvasElement>(8), [detail]);
+  const [tile, setTile] = useState(() => Math.floor(clockPosition(deck, track.id, total) / SECONDS));
+  const hostRef = useRef<HTMLDivElement>(null);
+  const railRef = useRef<HTMLDivElement>(null);
+  const motion = useRef(new WaveformRailMotion());
+  const wakeRef = useRef<() => void>(() => {});
+  const committedStart = useRef((tile - 1) * SECONDS);
+  const requestedTile = useRef(tile);
+  const positionRef = useRef(clockPosition(deck, track.id, total));
+  const gesture = useRef<{ id: number; x: number; left: number; width: number; position: number; moved: boolean } | null>(null);
+  const preview = useRef<number | null>(null);
+  const pendingSeek = useRef<{ position: number; expires: number; revision: number | undefined } | null>(null);
+  const clamp = (position: number) => Math.max(0, Math.min(total, position));
+  useEffect(() => onLoadingChange(loading), [loading, onLoadingChange]);
+  const seek = (position: number, isPreview = false, scrubbing = false) => {
+    if (!isPreview) pendingSeek.current = { position, expires: performance.now() + 1500,
+      revision: getLiveDeckClock(deck)?.discontinuityRevision };
     window.dispatchEvent(new CustomEvent<SeekDetail>(SEEK_EVENT, {
-      detail: { trackId: track.id, position, forceCommit: true },
+      detail: { trackId: track.id, position, preview: isPreview, scrubbing, forceCommit: !isPreview },
     }));
   };
-
-  // Keep the native request alive while the toggle itself communicates loading. The complete
-  // rail mounts only after the first correctly owned detail window is available.
-  if (!waveform) return null;
-
-  return (
-    <div
-      className="kd-manager-scroll-wave"
-      data-playing={playing || undefined}
-      aria-label="当前歌曲滚动波形"
-    >
-      <div
-        ref={hostRef}
-        className="kd-manager-focus-wave kd-manager-wave-window"
-        role="slider"
-        aria-label="当前歌曲六秒滚动波形"
-        aria-valuemin={0}
-        aria-valuemax={total}
-        aria-valuenow={Math.max(0, Math.min(total, initialPosition))}
-        tabIndex={0}
-        onPointerDown={pointerDown}
-        onPointerUp={pointerUp}
-        onPointerCancel={() => { pointerStartRef.current = null; }}
-      >
-        <div
-          ref={railRef}
-          className="kd-manager-wave-rail"
-          style={{
-            width: raster.cssWidth > 0
-              ? `${raster.cssWidth}px`
-              : `${widthScale * 100}%`,
-          }}
-        >
-          <canvas ref={canvasRef} aria-hidden="true" />
-          <ManagerBeatGrid
-            track={track}
-            duration={total}
-            start={bakeStart}
-            end={bakeEnd}
-          />
-        </div>
+  useLayoutEffect(() => {
+    motion.current.stop();
+    committedStart.current = (tile - 1) * SECONDS;
+    if (railRef.current) railRef.current.style.transform =
+      `translate3d(${-(positionRef.current - committedStart.current) / (SECONDS * 3) * 100}%,0,0)`;
+    wakeRef.current();
+  }, [tile]);
+  useEffect(() => {
+    let frame = 0, timer = 0, intersects = true;
+    let lastClockKey = "";
+    const railMotion = motion.current;
+    const update = () => {
+      frame = 0;
+      if (document.hidden || !intersects) return;
+      const live = getLiveDeckClock(deck);
+      const clockKey = live ? `${live.trackId}:${live.currentTime}:${live.clientPresentationTimeMs}:${live.audibleRate}:${live.playing}:${live.scratchHeld}:${live.discontinuityRevision}:${live.loopStart}:${live.loopLength}` : "";
+      const projected = clockPosition(deck, track.id, total, positionRef.current);
+      // A maintenance timer is not a fresh DAC sample. In a bridge stall keep the baked
+      // rail moving instead of repeatedly snapping to the projection's 250 ms safety cap.
+      const authority = clockKey && clockKey === lastClockKey && typeof railRef.current?.animate === "function"
+        ? railMotion.position(positionRef.current) : projected;
+      lastClockKey = clockKey;
+      const pending = pendingSeek.current;
+      if (pending && (performance.now() >= pending.expires ||
+        (live?.trackId === track.id && live.discontinuityRevision !== pending.revision) || Math.abs(authority - pending.position) < .1)) pendingSeek.current = null;
+      const position = preview.current ?? pendingSeek.current?.position ?? authority;
+      positionRef.current = position;
+      const nextTile = Math.floor(position / SECONDS);
+      if (nextTile !== requestedTile.current) { requestedTile.current = nextTile; setTile(nextTile); }
+      // A far seek must not move the old tiles offscreen before React installs
+      // the destination tiles. The layout effect publishes their pixels + position together.
+      if (railRef.current && nextTile === Math.round(committedStart.current / SECONDS) + 1) {
+        const owned = live?.trackId === track.id;
+        railMotion.sync(railRef.current, position, committedStart.current, SECONDS, total,
+          !gesture.current && !pendingSeek.current && owned && (live.playing || live.scratchHeld) ? live.audibleRate : 0,
+          owned ? live.discontinuityRevision : 0, owned ? live.loopStart : null, owned ? live.loopLength : null);
+      }
+      hostRef.current?.setAttribute("aria-valuenow", position.toFixed(3));
+      if (gesture.current || pendingSeek.current || (live?.trackId === track.id ? live.playing || live.scratchHeld : playing)) {
+        if (gesture.current || live?.scratchHeld || typeof railRef.current?.animate !== "function") {
+          frame = requestAnimationFrame(update);
+        } else {
+          // Only maintain tile coverage/clock alignment here. The compositor owns every frame.
+          timer = window.setTimeout(() => { timer = 0; wake(); }, 100);
+        }
+      }
+    };
+    const wake = () => {
+      window.clearTimeout(timer); timer = 0;
+      if (!frame) frame = requestAnimationFrame(update);
+    };
+    wakeRef.current = wake;
+    const visibility = () => {
+      cancelAnimationFrame(frame); frame = 0; window.clearTimeout(timer); timer = 0;
+      railMotion.stop();
+      if (!document.hidden && intersects) wake();
+    };
+    const observer = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
+      intersects = entries[0]?.isIntersecting ?? true; visibility();
+    }) : null;
+    if (hostRef.current) observer?.observe(hostRef.current);
+    const unsubscribe = subscribeLivePlaybackClock(wake);
+    window.addEventListener(SEEK_EVENT, wake);
+    document.addEventListener("visibilitychange", visibility);
+    wake();
+    return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); railMotion.stop(); wakeRef.current = () => {};
+      unsubscribe(); observer?.disconnect();
+      window.removeEventListener(SEEK_EVENT, wake); document.removeEventListener("visibilitychange", visibility); };
+  }, [deck, track.id, total, playing]);
+  useEffect(() => () => {
+    if (gesture.current) window.dispatchEvent(new CustomEvent<SeekDetail>(SEEK_EVENT, {
+      detail: { trackId: track.id, position: gesture.current.position, preview: true, scrubbing: false },
+    }));
+  }, [track.id]);
+  const finish = (event: ReactPointerEvent<HTMLDivElement>, cancelled = false) => {
+    const drag = gesture.current;
+    if (!drag || drag.id !== event.pointerId) return;
+    const position = cancelled ? drag.position : drag.moved
+      ? clamp(drag.position - (event.clientX - drag.x) / drag.width * SECONDS)
+      : clamp(drag.position + ((event.clientX - drag.left) / drag.width - .5) * SECONDS);
+    gesture.current = null; preview.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    seek(position, cancelled, false);
+  };
+  const keySeek = (event: KeyboardEvent<HTMLDivElement>) => {
+    const offsets: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, PageUp: -SECONDS, PageDown: SECONDS };
+    const next = event.key === "Home" ? 0 : event.key === "End" ? total :
+      event.key in offsets ? positionRef.current + offsets[event.key] * (event.shiftKey ? .1 : 1) : null;
+    if (next === null || total <= 0) return;
+    event.preventDefault(); event.stopPropagation(); seek(clamp(next));
+  };
+  return <div className="kd-manager-scroll-wave" title={error || undefined}>
+    <div ref={hostRef} className="kd-manager-focus-wave kd-manager-wave-window" role="slider" tabIndex={0}
+      aria-label="当前歌曲六秒滚动波形" aria-valuemin={0} aria-valuemax={total}
+      onPointerDown={event => {
+        if (event.button !== 0 || total <= 0 || gesture.current) return;
+        event.preventDefault(); event.stopPropagation(); event.currentTarget.focus({ preventScroll: true });
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (!rect.width) return;
+        const position = motion.current.position(positionRef.current);
+        gesture.current = { id: event.pointerId, x: event.clientX, left: rect.left, width: rect.width, position, moved: false };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        preview.current = position; seek(position, true, true);
+      }}
+      onPointerMove={event => {
+        const drag = gesture.current;
+        if (!drag || drag.id !== event.pointerId) return;
+        if (Math.abs(event.clientX - drag.x) > 3) drag.moved = true;
+        if (drag.moved) preview.current = clamp(drag.position - (event.clientX - drag.x) / drag.width * SECONDS);
+      }}
+      onPointerUp={event => finish(event)} onPointerCancel={event => finish(event, true)}
+      onLostPointerCapture={event => finish(event, true)} onKeyDown={keySeek}>
+      <div ref={railRef} className="kd-static-wave-rail">
+        {[tile - 1, tile, tile + 1].map(index => <div key={index} className="kd-static-wave-tile">
+          <div className="kd-static-wave-pixels" style={{ transform: `scaleY(${Math.max(0, Math.min(1, amplitudeScale))})` }}>
+            <StaticWaveformCanvas cache={tileCache} wave={detail} start={index * SECONDS} end={(index + 1) * SECONDS}
+              warmAhead={index === tile + 1} />
+          </div>
+          <TileBeats track={track} start={index * SECONDS} end={(index + 1) * SECONDS} total={total} />
+        </div>)}
       </div>
-      <i className="kd-manager-wave-needle" aria-hidden="true" />
     </div>
-  );
+    <i className="kd-manager-wave-needle" aria-hidden="true" />
+  </div>;
 }

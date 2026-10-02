@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Select } from "../common/Select";
 import { Copy, Download, ExternalLink, FolderOpen, RefreshCw } from "lucide-react";
 import { mediaToolsInstalling, useFfmpegStore } from "../../stores/ffmpegStore";
 import { getBridge } from "../../lib/bridge";
@@ -97,11 +98,11 @@ export function FfmpegPanel() {
           </div>
         </> : platform === "linux" ? <>
           <label className="kd-ffmpeg-actions"><span className="kd-ai-prompt-copy">发行版</span>
-            <select className="kd-select" value={distro} onChange={event => { setDistro(event.target.value); setCopied(false); }}>
+            <Select className="kd-select" value={distro} onChange={event => { setDistro(event.target.value); setCopied(false); }}>
               <option value="debian">Ubuntu / Debian</option>
               <option value="arch">Arch Linux</option>
               <option value="other">其他发行版</option>
-            </select>
+            </Select>
           </label>
           <p className="kd-ai-prompt-copy">按发行版安装包含 ffmpeg 和 ffprobe 的软件包，完成后重新检测。</p>
           <Button variant="ghost" size="sm" onClick={() => open(DOWNLOAD_PAGE)}>

@@ -5,6 +5,7 @@
 //! 播放器也要靠 Range 请求才能拖进度条。
 
 pub mod activity_log;
+pub mod diagnostics;
 pub mod aggregate;
 pub mod cache_overview;
 pub mod compositions;
@@ -16,6 +17,7 @@ pub mod library_watch;
 pub mod lyrics;
 pub mod protected_media;
 pub mod routes;
+mod live_vj;
 pub mod rhythm;
 pub mod state;
 pub mod preview_policy;
@@ -411,6 +413,8 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
         .merge(compositions::workshop::routes::router(workshop))
         .merge(compositions::audio_visualizer::studio::router())
         .merge(themes::router())
+        .merge(diagnostics::router())
+        .merge(live_vj::router())
         .merge(compositions::routes::router(compositions))
         .route("/ws", axum::routing::get(ws::handler))
         .layer(Extension(control))
@@ -419,6 +423,7 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
             state.clone(),
             record_activity_requests,
         ))
+        .layer(middleware::from_fn(diagnostics::capture_requests))
         .layer(middleware::from_fn_with_state(auth, require_auth))
         // 只允许 Tauri 资产 origin 和仓库固定的 Vite 开发 origin。loopback 不是认证边界，
         // 所有实际请求仍必须通过上面的 bearer/capability 校验。

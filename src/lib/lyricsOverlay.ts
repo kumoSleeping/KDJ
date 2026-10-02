@@ -91,7 +91,7 @@ export function effectiveLyricExtra(
 }
 
 /** 附加层与主词各有一套时间戳，靠最近时间对齐而不是靠下标——两边行数常常不等。 */
-function alignedText(lines: LrcLine[], time: number): string | undefined {
+export function alignedLyricText(lines: LrcLine[], time: number): string | undefined {
   let best: LrcLine | undefined;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const line of lines) {
@@ -162,7 +162,7 @@ export function buildOverlayTimeline(options: {
       time: line.time,
       endTime: line.endTime,
       text: line.text,
-      secondary: secondaryLines ? alignedText(secondaryLines, line.time) : undefined,
+      secondary: secondaryLines ? alignedLyricText(secondaryLines, line.time) : undefined,
       words: line.words,
     })),
   };

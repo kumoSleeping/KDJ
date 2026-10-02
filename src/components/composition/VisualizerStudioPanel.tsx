@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode } from "react";
-import { X, PictureInPicture2, Film, Undo2, Redo2, ImagePlus, Volume2, VolumeX, RotateCcw, Captions } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
+import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal } from "lucide-react";
+import { createPortal } from "react-dom";
 import type { TrackSummary } from "../../types";
+import { Select } from "../common/Select";
 import type { VisualizerFeatureTimeline } from "../../types/audioVisualizer";
 import { api, visualizerApi } from "../../lib/api";
 import { createVisualizerProject, loadVisualizerDraft, saveVisualizerDraft, studioDuration, studioLyricText, hasStudioLyrics, syncVisualizerImages, validateVisualizerProject, STUDIO_IMAGE_LIMIT, clamp, type VisualizerDraft, type VisualizerProject } from "../../lib/visualizerStudio";
@@ -14,7 +16,6 @@ import { useToastStore } from "../../stores/toastStore";
 import { getCompositionClock } from "../../lib/compositionPlayback";
 import { getPlayerSession, requestPlayerCommand, subscribePlayerSession } from "../../lib/playerSession";
 import { playTrack } from "../../lib/playTrack";
-import { useMasterVolume } from "../../lib/masterVolume";
 import { useLyricsStore } from "../../stores/lyricsStore";
 import { LyricsSourcePicker } from "../player/LyricsSourcePicker";
 import type { LyricsEngine } from "../../lib/lyricsPrefs";
@@ -51,32 +52,61 @@ function ImageChoice({ blob, label, disabled, onClick }: { blob?: Blob; label: s
   return <button type="button" className="kd-viz-image-choice" disabled={disabled} onClick={onClick}>{url ? <img src={url} alt="" /> : <ImagePlus size={16} aria-hidden="true" />}<span>{label}</span></button>;
 }
 
-export default function VisualizerStudioPanel({ onClose }: { onClose?: () => void }) {
-  const track = useVisualizerStudioStore(s => s.track);
-  const fromPlayback = useVisualizerStudioStore(s => s.fromPlayback);
-  return track ? <Studio key={track.id} track={track} fromPlayback={fromPlayback} onClose={onClose} /> : null;
+function StudioSettings({ target, inline, children }: { target: HTMLElement | null; inline: boolean; children: ReactNode }) {
+  return target ? createPortal(children, target) : inline ? null : children;
 }
-function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPlayback: boolean; onClose?: () => void }) {
+
+/** Playback ticks update just the overlay, not every settings control in Studio. */
+function StudioPosition({ position, scrub, refresh, children }: {
+  position: RefObject<number>; scrub: RefObject<number | null>; refresh: RefObject<(() => void) | null>;
+  children(position: number): ReactNode;
+}) {
+  const [cursor, setCursor] = useState(() => scrub.current ?? position.current);
+  useEffect(() => {
+    const update = () => setCursor(scrub.current ?? position.current);
+    refresh.current = update; update();
+    const timer = window.setInterval(update, 125);
+    return () => { window.clearInterval(timer); refresh.current = null; };
+  }, [position, scrub, refresh]);
+  return children(cursor);
+}
+
+export default function VisualizerStudioPanel({ onClose, inlineTrack, showDetails = true }: { onClose?: () => void; inlineTrack?: TrackSummary; showDetails?: boolean }) {
+  const selectedTrack = useVisualizerStudioStore(s => s.track);
+  const fromPlayback = useVisualizerStudioStore(s => s.fromPlayback);
+  const track = inlineTrack ?? selectedTrack;
+  return track ? <Studio key={track.id} track={track} fromPlayback={inlineTrack ? true : fromPlayback} inline={!!inlineTrack} showDetails={showDetails} onClose={onClose} /> : null;
+}
+function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: TrackSummary; fromPlayback: boolean; inline: boolean; showDetails: boolean; onClose?: () => void }) {
+  const settingsOpen = useVisualizerStudioStore(state => inline && state.inlineSettings && state.track?.id === track.id);
+  const settingsTarget = useVisualizerStudioStore(state => settingsOpen ? state.settingsTarget : null);
+  const previewRequest = useVisualizerStudioStore(state => !inline && state.track?.id === track.id ? state.previewRequest : 0);
   const [draft, setDraft] = useState<VisualizerDraft | null>(null);
   const latestDraft = useRef(draft); latestDraft.current = draft;
   const [images, setImages] = useState<HTMLImageElement[]>([]);
+  const [coverAvailable, setCoverAvailable] = useState<boolean | null>(null);
   const [analysis, setAnalysis] = useState<{ timeline: VisualizerFeatureTimeline; signature: string } | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const analyzedSpectrum = useRef<string | null>(null);
+  // Inline selection is not a request to decode another song while playback continues.
+  const [loadAllowed, setLoadAllowed] = useState(() => !inline);
+  const [previewVisible, setPreviewVisible] = useState(() => !inline);
   const [loadingLyrics, setLoadingLyrics] = useState(false);
   const lyricSource = useLyricsStore(s => s.byId[track.id]?.meta?.platform);
   const lyricMatching = useLyricsStore(s => !!s.byId[track.id]?.inflight);
   const [notice, setNotice] = useState("");
   const { fullscreen: expanded, applyFullscreen } = usePreviewFullscreen();
-  const [floating, setFloating] = useState(false);
+  const [floating, setFloating] = useState(() => previewRequest > 0);
+  useEffect(() => { if (previewRequest > 0) setFloating(true); }, [previewRequest]);
   const panel = useRef<HTMLElement>(null);
   const closing = useRef(false);
   const [playing, setPlaying] = useState(false);
-  const volume = useMasterVolume(s => s.volume), muted = volume === 0;
-  const previousVolume = useRef(volume || 1);
+  const playingRef = useRef(false);
   const scrubTime = useRef<number | null>(null);
-  const [cursor, setCursor] = useState(0);
+  const refreshCursor = useRef<(() => void) | null>(null);
   const cursorRef = useRef(0), drawPreview = useRef<(() => void) | null>(null);
-  const [previewWidth, setPreviewWidth] = useState(960);
+  const [previewWidth, setPreviewWidth] = useState(640);
+  const lastPrepared = useRef<ReturnType<typeof prepareStudio> | null>(null);
   const [busy, setBusy] = useState(false);
   const canvas = useRef<HTMLCanvasElement>(null);
   const imageInput = useRef<HTMLInputElement>(null), lyricInput = useRef<HTMLInputElement>(null);
@@ -97,19 +127,38 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
   const duration = analysis ? studioDuration(analysis.timeline) : track.duration || 0;
 
   useEffect(() => {
+    if (!inline) return;
+    const target = panel.current;
+    if (!target) return;
+    if (typeof IntersectionObserver !== "function") { setPreviewVisible(true); return; }
+    const observer = new IntersectionObserver(entries => {
+      setPreviewVisible(entries[0]?.isIntersecting ?? false);
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [inline]);
+  const previewRequested = !inline || previewVisible || floating || expanded || settingsOpen;
+  useEffect(() => {
+    if (!inline || !previewRequested) return;
+    // Hidden dock slots stay mounted to preserve editors, but are not requests to
+    // decode a song. Once admitted, keep assets through same-song seek handoffs.
+    const update = () => { if (getPlayerSession().trackId === track.id) setLoadAllowed(true); };
+    update();
+    return subscribePlayerSession(update);
+  }, [inline, track.id, previewRequested]);
+
+  useEffect(() => {
     // Following a switch must not reissue play while the new transport is loading.
     if (!fromPlayback) {
       const pip = useVideoPip.getState(); if (pip.active) pip.clear();
       if (getCompositionClock().trackId !== track.id) playTrack(track, false, "composition", 0);
     }
-    let lastUi = -Infinity;
     const update = () => {
       const clock = getCompositionClock(), active = clock.trackId === track.id && clock.ready;
-      setPlaying(active && clock.playing);
+      playingRef.current = active && clock.playing;
+      setPlaying(playingRef.current);
       if (active && clock.fresh !== false && scrubTime.current === null) {
         cursorRef.current = Math.max(0, clock.currentTime);
-        const now = performance.now();
-        if (now - lastUi >= 125 || !clock.playing) { lastUi = now; setCursor(cursorRef.current); }
       }
       const session = getPlayerSession();
       if (session.trackId === track.id && session.error) setNotice(session.error);
@@ -120,12 +169,14 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
   }, [track.id, fromPlayback]);
 
   useEffect(() => {
+    if (inline) return;
     const previous = document.activeElement;
     panel.current?.focus();
     return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
-  }, []);
+  }, [inline]);
 
   useEffect(() => {
+    if (!loadAllowed) return;
     let active = true; const controller = new AbortController();
     void (async () => {
       let restored: VisualizerDraft | undefined;
@@ -151,15 +202,27 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
       const project = createVisualizerProject(track);
       project.output.directory = useAppStore.getState().settings?.download_dir || "";
       const blobs: Blob[] = [];
-      const [cover, lyrics] = await Promise.allSettled([visualizerApi.cover(track.id, controller.signal), api.libraryLyrics(track.id)]);
+      // Artwork is first paint. Optional metadata must not hold it behind a network lookup.
+      const lyricsPromise = api.libraryLyrics(track.id).catch(() => null);
+      const cover = await visualizerApi.cover(track.id, controller.signal).catch(() => null);
       if (!active) return;
-      if (cover.status === "fulfilled" && cover.value && cover.value.size <= STUDIO_IMAGE_LIMIT) blobs.push(cover.value);
-      if (lyrics.status === "fulfilled") { project.lyrics.lrc = studioLyricText(lyrics.value.lrc || "", lyrics.value.word_lrc); project.lyrics.translation = lyrics.value.translated_lrc || ""; }
-      project.lyrics.mode = hasStudioLyrics(project.lyrics.lrc) ? "scroll" : "off";
+      if (cover && cover.size <= STUDIO_IMAGE_LIMIT) blobs.push(cover);
       syncVisualizerImages(project, blobs.length); install({ project, images: blobs });
+      const initialLyrics = JSON.stringify(project.lyrics);
+      const lyrics = await lyricsPromise;
+      if (!active || !lyrics) return;
+      setDraft(current => {
+        // A late response cannot overwrite lyrics the user has already edited.
+        if (!current || JSON.stringify(current.project.lyrics) !== initialLyrics) return current;
+        const next = structuredClone(current.project);
+        next.lyrics.lrc = studioLyricText(lyrics.lrc || "", lyrics.word_lrc);
+        next.lyrics.translation = lyrics.translated_lrc || "";
+        next.lyrics.mode = hasStudioLyrics(next.lyrics.lrc) ? "scroll" : "off";
+        return { ...current, project: next };
+      });
     })().catch(e => { if (active) setNotice(message(e)); });
     return () => { active = false; controller.abort(); };
-  }, [track.id]);
+  }, [track.id, loadAllowed]);
 
   useEffect(() => {
     if (!draft) return;
@@ -171,23 +234,32 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     return () => window.clearTimeout(timer);
   }, [draft]);
   useEffect(() => {
-    let active = true; setImages([]);
+    let active = true;
     if (draft?.images.length) void loadStudioImages(draft.images).then(v => { if (active) setImages(v); }, e => { if (active) setNotice(message(e)); });
     return () => { active = false; };
   }, [draft?.images]);
   useEffect(() => {
-    if (!p) return;
+    if (!p || !loadAllowed || !previewRequested || analyzedSpectrum.current === spectrumKey) { setAnalyzing(false); return; }
     const controller = new AbortController(); setAnalyzing(true);
     const timer = window.setTimeout(() => {
-      void visualizerApi.analyze(track.id, p.scene.spectrum, controller.signal).then(result => { if (!controller.signal.aborted) setAnalysis(result); }).catch(e => { if (!controller.signal.aborted) { setAnalysis(null); setNotice(message(e)); } }).finally(() => { if (!controller.signal.aborted) setAnalyzing(false); });
+      void visualizerApi.analyze(track.id, p.scene.spectrum, controller.signal).then(result => {
+        if (!controller.signal.aborted) { analyzedSpectrum.current = spectrumKey; setAnalysis(result); }
+      }).catch(e => { if (!controller.signal.aborted) { setNotice(message(e)); } }).finally(() => { if (!controller.signal.aborted) setAnalyzing(false); });
     }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [track.id, spectrumKey]);
+  }, [track.id, spectrumKey, loadAllowed, previewRequested]);
 
+  // A tiny neutral timeline lets artwork render before global audio analysis. It does not
+  // fabricate spectral activity or allocate one silent frame per second of a long track.
+  const firstPaintTimeline = useMemo<VisualizerFeatureTimeline>(() => ({
+    version: 1, sample_rate: 22050, sample_count: Math.max(1, Math.round((track.duration || 1) * 22050)),
+    fps: 30, frames: [{ bands: Array(64).fill(0), bass: 0, rms: 0, onset: 0 }],
+  }), [track.duration]);
   const prepared = useMemo(() => {
-    if (!p || !analysis || !images.length || images.length !== p.scene.images.length) return null;
-    try { return prepareStudio(p, images, analysis.timeline, previewWidth); } catch { return null; }
-  }, [p, images, analysis, previewWidth]);
+    if (!loadAllowed || !p || !images.length || images.length !== p.scene.images.length) return null;
+    try { return prepareStudio(p, images, analysis?.timeline ?? firstPaintTimeline, previewWidth); } catch { return null; }
+  }, [p, images, analysis, firstPaintTimeline, previewWidth, loadAllowed]);
+  const emptyMedia = inline && !prepared && (draft ? draft.images.length === 0 : coverAvailable === false);
   useEffect(() => {
     const target = canvas.current; if (!target || !p) return;
     let timer = 0;
@@ -195,29 +267,73 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         const width = target.getBoundingClientRect().width; if (!width) return;
-        const pixels = Math.ceil(width * Math.min(window.devicePixelRatio || 1, 2) / 64) * 64;
-        setPreviewWidth(Math.min(p.scene.canvas.width, Math.max(320, Math.min(1440, pixels))));
+        const pixels = Math.ceil(width * Math.min(window.devicePixelRatio || 1, inline && !expanded && !floating ? 1.25 : 2) / 64) * 64;
+        setPreviewWidth(Math.min(p.scene.canvas.width, Math.max(320, Math.min(inline && !expanded && !floating ? 960 : 1440, pixels))));
       }, 120);
     };
     const observer = new ResizeObserver(resize); observer.observe(target); window.addEventListener("resize", resize); resize();
     return () => { observer.disconnect(); window.removeEventListener("resize", resize); window.clearTimeout(timer); };
   }, [!!prepared, p?.scene.canvas.width, p?.scene.canvas.height, floating, expanded]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!prepared || !canvas.current) return;
-    // Preview never reads pixels. Don't force the export's CPU readback backend here.
-    const c = canvas.current.getContext("2d", { alpha: false }); if (!c) return;
-    let frame = 0;
-    const draw = () => {
+    const target = canvas.current;
+    const c = target.getContext("2d", { alpha: false }); if (!c) return;
+    // Capture before resizing: analysis/metadata arrivals keep the same canvas and fade from
+    // its last complete picture. Never briefly unmount it or expose a cleared backing store.
+    let previous: HTMLCanvasElement | null = null;
+    if (lastPrepared.current && lastPrepared.current !== prepared) {
+      previous = document.createElement("canvas"); previous.width = target.width; previous.height = target.height;
+      previous.getContext("2d")?.drawImage(target, 0, 0);
+    }
+    lastPrepared.current = prepared;
+    const { width, height } = prepared.project.scene.canvas;
+    if (target.width !== width) target.width = width;
+    if (target.height !== height) target.height = height;
+    let frame = 0, nextDraw = -Infinity, lastTime = NaN, visible = true;
+    const transitionStart = performance.now();
+    // A detached small window has the same frame budget as the inline preview.
+    // Fullscreen retains 60 fps; export uses its own explicit output frame rate.
+    const interval = 1000 / (expanded ? 60 : 30);
+    const draw = (now: number, force = false) => {
       const clock = getCompositionClock();
       if (scrubTime.current === null && clock.ready && clock.fresh !== false && clock.trackId === track.id) cursorRef.current = clock.currentTime;
-      drawStudioFrame(c, prepared, scrubTime.current ?? cursorRef.current);
+      const time = scrubTime.current ?? cursorRef.current;
+      if (!force && !previous && time === lastTime) return;
+      if (!force && now < nextDraw - 1) return;
+      // Keep cadence across small rAF jitter, but never catch up a hidden/stalled window.
+      nextDraw = force || now - nextDraw > interval ? now + interval : nextDraw + interval;
+      lastTime = time;
+      drawStudioFrame(c, prepared, time);
+      if (previous) {
+        const amount = Math.min(1, (now - transitionStart) / 240);
+        if (amount < 1) {
+          c.save(); c.globalAlpha = 1 - amount; c.drawImage(previous, 0, 0, width, height); c.restore();
+        } else previous = null;
+      }
     };
-    const tick = () => { draw(); if (playing) frame = requestAnimationFrame(tick); };
-    const resume = () => { cancelAnimationFrame(frame); if (!document.hidden) tick(); };
-    drawPreview.current = () => { if ((!playing || scrubTime.current !== null) && !document.hidden) draw(); };
+    const tick = (now: number) => {
+      frame = 0;
+      if (document.hidden || !visible) return;
+      draw(now);
+      if (playingRef.current || previous) frame = requestAnimationFrame(tick);
+    };
+    const resume = () => {
+      cancelAnimationFrame(frame); frame = 0;
+      if (!document.hidden && visible) { draw(performance.now(), true); if (playingRef.current || previous) frame = requestAnimationFrame(tick); }
+    };
+    drawPreview.current = () => {
+      if (document.hidden || !visible) return;
+      if (!playingRef.current || scrubTime.current !== null) draw(performance.now());
+      if ((playingRef.current || previous) && !frame) frame = requestAnimationFrame(tick);
+      else if (!playingRef.current && !previous && frame) { cancelAnimationFrame(frame); frame = 0; }
+    };
+    const observer = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
+      visible = entries[0]?.isIntersecting ?? true; resume();
+    }) : null;
+    observer?.observe(target);
     document.addEventListener("visibilitychange", resume); resume();
-    return () => { cancelAnimationFrame(frame); drawPreview.current = null; document.removeEventListener("visibilitychange", resume); };
-  }, [prepared, playing, floating, expanded]);
+    return () => { cancelAnimationFrame(frame); observer?.disconnect(); drawPreview.current = null; document.removeEventListener("visibilitychange", resume); };
+  }, [prepared, floating, expanded]);
   useEffect(() => {
     return () => {
       const snapshot = latestDraft.current;
@@ -226,10 +342,11 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     };
   }, []);
   useEffect(() => {
+    if (inline && !settingsOpen) return;
     const handler = () => close();
     useVisualizerStudioStore.getState().setBeforeClose(handler);
     return () => { if (useVisualizerStudioStore.getState().beforeClose === handler) useVisualizerStudioStore.getState().setBeforeClose(null); };
-  }, [draft, busy]);
+  }, [draft, busy, inline, settingsOpen]);
 
   function checkpoint(current: VisualizerDraft, force = false) {
     const now = performance.now();
@@ -284,9 +401,10 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     closing.current = true;
     try {
       try { await saveNow(); } catch (e) { if (!window.confirm(`无法记住当前调整：${message(e)}。仍要关闭？`)) return false; }
-      if (useVisualizerStudioStore.getState().track?.id !== track.id) return false;
+      if ((!inline || settingsOpen) && useVisualizerStudioStore.getState().track?.id !== track.id) return false;
       if (!await applyFullscreen(false)) return false;
-      useVisualizerStudioStore.getState().close();
+      if (inline) onClose?.();
+      else useVisualizerStudioStore.getState().close();
       return true;
     } finally { closing.current = false; }
   }
@@ -295,24 +413,26 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     setBusy(true); setNotice("");
     try {
       await useVisualizerExportStore.getState().enqueue(draft);
-      useToastStore.getState().show("已加入工作站的可视化导出队列");
+      useToastStore.getState().show("已加入可视化导出队列");
     } catch (error) { setNotice(`加入导出队列失败：${message(error)}`); }
     finally { setBusy(false); }
   }
   function seek(time: number) {
-    if (!analysis || busy) return;
+    if (!prepared || busy) return;
     const next = clamp(time, 0, duration);
     scrubTime.current = null;
     const clock = getCompositionClock();
-    if (clock.trackId === track.id && clock.ready) requestPlayerCommand({ type: "seek", position: next });
+    // Readiness can briefly drop while an earlier seek is landing. Keep issuing
+    // seeks to the loaded track; playTrack would restart its entire load pipeline.
+    if (clock.trackId === track.id || getPlayerSession().trackId === track.id) requestPlayerCommand({ type: "seek", position: next });
     else playTrack(track, false, "composition", next);
-    cursorRef.current = next; setCursor(next); drawPreview.current?.();
+    cursorRef.current = next; refreshCursor.current?.(); drawPreview.current?.();
   }
   function scrub(event: PointerEvent<HTMLDivElement>, commit = false) {
     const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width) return;
     const next = clamp((event.clientX - rect.left) / rect.width * duration, 0, duration);
     if (commit) seek(next);
-    else { scrubTime.current = next; setCursor(next); drawPreview.current?.(); }
+    else { scrubTime.current = next; refreshCursor.current?.(); drawPreview.current?.(); }
   }
   function togglePlayback() {
     if (busy || !prepared) return;
@@ -330,7 +450,7 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
       const entry = useLyricsStore.getState().byId[track.id];
       if (entry?.error || entry?.status === "error") throw new Error(entry.error || "歌词匹配失败，请稍后重试。");
       const lrc = entry?.meta ? studioLyricText(entry.meta.lrc, entry.meta.word_lrc) : "";
-      if (!hasStudioLyrics(lrc)) { setNotice("未匹配到可用的原文歌词。"); return; }
+      if (!hasStudioLyrics(lrc)) return;
       setDraft(current => {
         // Never replace text edited while a slower lyric lookup was pending.
         if (!current || current.project.lyrics.lrc !== before.lrc || current.project.lyrics.translation !== before.translation) return current;
@@ -342,30 +462,38 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
     } catch (error) { setNotice(message(error)); }
     finally { setLoadingLyrics(false); }
   }
-  function toggleMute() {
-    const current = useMasterVolume.getState();
-    if (current.volume > 0) { previousVolume.current = current.volume; current.setVolume(0); }
-    else current.setVolume(previousVolume.current);
-  }
 
-  return <section ref={panel} tabIndex={-1} className="kd-viz-panel" aria-label="音频可视化编辑器" onKeyDown={e => {
+  const lyricsVisible = hasLyrics && p?.lyrics.mode !== "off";
+  const togglePreviewLyrics = () => {
+    if (!hasLyrics) void loadSongLyrics();
+    else edit(project => { project.lyrics.mode = project.lyrics.mode === "off" ? "scroll" : "off"; });
+  };
+
+  return <section ref={panel} tabIndex={-1} className="kd-viz-panel" data-inline={inline || undefined} data-floating={floating || undefined} aria-label="音频可视化编辑器" onKeyDown={e => {
       e.stopPropagation();
-      if (e.key === "Escape") { e.preventDefault(); if (expanded) void applyFullscreen(false); else requestClose(); return; }
+      if (e.key === "Escape" && (expanded || !inline)) { e.preventDefault(); if (expanded) void applyFullscreen(false); else requestClose(); return; }
       const target = e.target as HTMLElement;
       if (target.closest("input, textarea, select, [contenteditable=true]")) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(e.shiftKey); }
       if (e.key === " " && !target.closest("button, summary, [role=slider]")) { e.preventDefault(); togglePlayback(); }
     }}>
-    <div className="kd-viz-export-bar">
-      <button type="button" className="kd-viz-export" disabled={!prepared || analyzing || busy} onClick={() => void enqueueExport()}><Film size={17} />{busy ? "正在加入…" : "加入导出队列"}</button>
-      <div className="kd-viz-job" aria-live="polite">{analyzing ? "正在分析频谱…" : ""}</div>
-    </div>
     <div className="kd-viz-content kd-scroll">
     <div className="kd-viz-preview-column">
-    <FloatingPreviewFrame floating={floating} fullscreen={expanded} editing={!floating && !expanded}
-      ratio={p ? p.scene.canvas.width / p.scene.canvas.height : 16 / 9}
+    <FloatingPreviewFrame floating={floating} fullscreen={expanded} editing={!floating && !expanded} compact={emptyMedia}
+      ratio={inline ? 16 / 9 : p ? p.scene.canvas.width / p.scene.canvas.height : 16 / 9}
       onEscape={() => { if (expanded) void applyFullscreen(false); else if (floating) setFloating(false); else requestClose(); }}>
-      {prepared && p ? <canvas ref={canvas} width={prepared.project.scene.canvas.width} height={prepared.project.scene.canvas.height} aria-label="音频可视化预览，可拖动左右图片调整位置" onPointerDown={e => {
+      {inline && !expanded && <button type="button" className="kd-viz-settings-entry"
+        aria-label="打开可视化操作与设置" title="可视化操作与设置" aria-pressed={settingsOpen}
+        onPointerDown={event => event.stopPropagation()}
+        onClick={() => useVisualizerStudioStore.getState().openInlineSettings(track)}><SlidersHorizontal size={15} /></button>}
+      {inline && !expanded && <button type="button" className="kd-viz-settings-entry kd-viz-lyrics-entry"
+        title={loadingLyrics ? "正在匹配歌词…" : lyricsVisible ? "关闭歌词" : "开启歌词"}
+        aria-label={lyricsVisible ? "关闭可视化歌词" : "开启可视化歌词"} aria-pressed={lyricsVisible}
+        aria-busy={loadingLyrics} disabled={!p || busy || loadingLyrics || lyricMatching}
+        onPointerDown={event => event.stopPropagation()} onClick={togglePreviewLyrics}>
+        {loadingLyrics ? <LoaderCircle size={15} className="kd-spin" /> : <Captions size={15} />}
+      </button>}
+      {prepared && p ? <canvas ref={canvas} aria-label="音频可视化预览，可拖动左右图片调整位置" onPointerDown={e => {
         if (busy || floating || expanded || e.button !== 0 || !e.isPrimary || !draft) return;
         const rect = e.currentTarget.getBoundingClientRect(), scene = prepared.project.scene;
         const scale = Math.min(rect.width / scene.canvas.width, rect.height / scene.canvas.height);
@@ -401,15 +529,20 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
           return { ...current, project };
         });
       }} onPointerUp={() => { pictureDrag.current = null; }} onPointerCancel={() => { pictureDrag.current = null; }} onLostPointerCapture={() => { pictureDrag.current = null; }} /> : <div className="kd-viz-empty">
-        {!draft || analyzing ? <span role="status">{!draft ? "正在加载…" : "正在分析音频…"}</span> : !draft.images.length ? <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }}><ImagePlus size={20} /></button> : null}
+        <img src={api.coverUrl(track.id, track.modified_at)} alt="" aria-hidden="true"
+          onLoad={() => setCoverAvailable(true)} onError={() => setCoverAvailable(false)} />
+        {loadAllowed && <div className="kd-viz-empty-action">
+          {!draft || analyzing || draft.images.length ? <LoaderCircle className="kd-spin" size={20} role="status" aria-label={!draft ? "正在加载可视化" : "正在分析音频"} />
+            : <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }}><ImagePlus size={20} /></button>}
+        </div>}
       </div>}
-      {prepared && <>
-        <FloatingVideoControls title={track.title || track.filename} playing={playing} position={cursor} duration={duration} fullscreen={expanded}
+      {inline && !settingsTarget && notice && <div className="kd-viz-notice kd-viz-inline-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}
+      {prepared && <StudioPosition position={cursorRef} scrub={scrubTime} refresh={refreshCursor}>{cursor => <>
+        <FloatingVideoControls title={track.title || track.filename} playing={playing} position={cursor} duration={duration} fullscreen={expanded} showTitle={floating && !expanded}
           onToggle={togglePlayback} onFullscreen={() => void applyFullscreen(!expanded)}
           onClose={floating ? () => { void applyFullscreen(false).then(ok => { if (ok) setFloating(false); }); } : undefined} closeLabel="收回预览小窗"
           extra={<>
             {!floating && <button type="button" aria-label="打开预览小窗" title="打开预览小窗" onClick={() => { void applyFullscreen(false).then(ok => { if (ok) setFloating(true); }); }}><PictureInPicture2 size={13} /></button>}
-            <button type="button" aria-label={muted ? "取消静音" : "静音"} title={muted ? "取消静音" : "静音"} aria-pressed={muted} onClick={toggleMute}>{muted ? <VolumeX size={13} /> : <Volume2 size={13} />}</button>
           </>} />
         <FloatingVideoScrub position={cursor} duration={duration} aria-label="预览时间" aria-disabled={busy}
           onPointerDown={e => { if (busy || e.button !== 0) return; e.currentTarget.setPointerCapture(e.pointerId); scrub(e); }}
@@ -417,19 +550,29 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
           onPointerUp={e => { if (e.currentTarget.hasPointerCapture(e.pointerId)) { scrub(e, true); e.currentTarget.releasePointerCapture(e.pointerId); } }}
           onPointerCancel={() => { scrubTime.current = null; drawPreview.current?.(); }} onLostPointerCapture={() => { scrubTime.current = null; drawPreview.current?.(); }}
           onKeyDown={e => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return; e.preventDefault(); seek(e.key === "Home" ? 0 : e.key === "End" ? duration : cursor + (e.key === "ArrowRight" ? 5 : -5)); }} />
-      </>}
+      </>}</StudioPosition>}
     </FloatingPreviewFrame>
+    <StudioSettings target={settingsTarget} inline={inline}>
+    <div className="kd-viz-preview-actions">
     <div className="kd-viz-song"><strong title={track.title || track.filename}>{track.title || track.filename}</strong>{track.artist && <small title={track.artist}>{track.artist}</small>}</div>
     <div className="kd-viz-toolbar">
       <button type="button" disabled={!history.current.past.length || busy} onClick={() => undo()} title="撤销" aria-label="撤销"><Undo2 size={14} /></button>
       <button type="button" disabled={!history.current.future.length || busy} onClick={() => undo(true)} title="重做" aria-label="重做"><Redo2 size={14} /></button>
-      <button type="button" disabled={!p || busy} onClick={refreshAutomaticConfiguration} title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={13} />刷新自动配置</button>
+      <button type="button" disabled={!p || busy || loadingLyrics} title={hasLyrics && p?.lyrics.mode !== "off" ? "隐藏歌词" : "显示歌词"} aria-label={hasLyrics && p?.lyrics.mode !== "off" ? "隐藏歌词" : "显示歌词"} aria-pressed={hasLyrics ? p?.lyrics.mode !== "off" : undefined} onClick={() => {
+        if (!hasLyrics) void loadSongLyrics();
+        else edit(n => { n.lyrics.mode = n.lyrics.mode === "off" ? "scroll" : "off"; });
+      }}><Captions size={13} /><span>{loadingLyrics ? "正在匹配歌词…" : hasLyrics && p?.lyrics.mode !== "off" ? "隐藏歌词" : "显示歌词"}</span></button>
+      <span className="kd-viz-job" aria-live="polite">{analyzing ? "正在分析频谱…" : ""}</span>
+      <button type="button" className="kd-viz-export" title="加入导出队列" aria-label="加入导出队列" disabled={!prepared || analyzing || busy} onClick={() => void enqueueExport()}><ListPlus size={14} /><span>{busy ? "加入中…" : "加入队列"}</span></button>
     </div>
     {notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}
     </div>
-    <fieldset className="kd-viz-settings" disabled={busy}>{p && draft && <>
+    </StudioSettings>
+    </div>
+    {(!inline || showDetails || settingsTarget) && <StudioSettings target={settingsTarget} inline={inline}><fieldset className="kd-viz-settings" disabled={busy}>{p && draft && <>
       <div className="kd-viz-settings-column">
       <div className="kd-viz-fields">
+        <button type="button" className="kd-viz-wide" onClick={refreshAutomaticConfiguration} title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={13} />刷新自动配置</button>
         {hasLyrics ? <Toggle label="显示歌词" checked={p.lyrics.mode !== "off"} onChange={v => edit(n => { n.lyrics.mode = v ? "scroll" : "off"; })} /> : <button type="button" disabled={loadingLyrics} aria-busy={loadingLyrics} onClick={() => void loadSongLyrics()}><Captions size={15} aria-hidden="true" />{loadingLyrics ? "正在匹配歌词…" : "尝试匹配歌词"}</button>}
         {hasLyrics && <Toggle label="显示翻译" checked={p.lyrics.showTranslation !== false} onChange={v => edit(n => { n.lyrics.showTranslation = v; })} />}
         <Range label="整体字号" value={p.text.scale} resetValue={defaults.text.scale} min={.5} max={1.5} onChange={v => edit(n => { n.text.scale = v; })} />
@@ -478,14 +621,14 @@ function Studio({ track, fromPlayback, onClose }: { track: TrackSummary; fromPla
         <Toggle label="显示水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
       </Group>
       <Group title="导出">
-        <label>分辨率<select value={`${p.scene.canvas.width}x${p.scene.canvas.height}`} onChange={e => { const [width, height] = e.target.value.split("x").map(Number); edit(n => { n.scene.canvas = { width, height, fps: 30 }; }); }}>
+        <label>分辨率<Select value={`${p.scene.canvas.width}x${p.scene.canvas.height}`} onChange={e => { const [width, height] = e.target.value.split("x").map(Number); edit(n => { n.scene.canvas = { width, height, fps: 30 }; }); }}>
           <option value="1920x1080">1080p · 16:9</option><option value="1280x720">720p · 16:9</option><option value="1920x840">1920 × 840 · 超宽</option><option value="2560x1080">2560 × 1080 · 超宽</option>
-        </select></label>
-        <label>帧率<select value={p.output.fps} onChange={e => edit(n => { n.output.fps = Number(e.target.value) as 30 | 60; })}><option value={30}>30 fps</option><option value={60}>60 fps</option></select></label>
+        </Select></label>
+        <label>帧率<Select value={p.output.fps} onChange={e => edit(n => { n.output.fps = Number(e.target.value) as 30 | 60; })}><option value={30}>30 fps</option><option value={60}>60 fps</option></Select></label>
         <label className="kd-viz-wide">文件名<input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></label>
       </Group>
       </div>
-    </>}</fieldset>
+    </>}</fieldset></StudioSettings>}
     </div>
     <input hidden ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/bmp" onChange={e => void onImage(e)} />
     <input hidden ref={lyricInput} type="file" accept=".lrc,.txt" onChange={e => { const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; if (file.size > 250000) { setNotice("歌词文件过大"); return; } void file.text().then(text => edit(n => { n.lyrics.lrc = text; })).catch(error => setNotice(message(error))); }} />

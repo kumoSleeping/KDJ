@@ -1,254 +1,73 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AlertTriangle, RefreshCw, Download } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { FolderOpen, Send, X } from "lucide-react";
 import { getBridge } from "../../lib/bridge";
-
 import { api } from "../../lib/api";
-import type {
-  ActivityLogCategory,
-  ActivityLogEntry,
-  ActivityLogOverview,
-} from "../../types";
+import { flushDiagnostics } from "../../lib/diagnostics";
 import { Button, InlineNotice, Panel } from "../common";
+import "./DiagnosticsPanel.css";
 
-const CATEGORIES: ReadonlyArray<{ id: ActivityLogCategory; label: string }> = [
-  { id: "network", label: "网络" },
-  { id: "analysis", label: "分析异常" },
-  { id: "user", label: "本地操作" },
-];
+type Preview = Awaited<ReturnType<typeof api.diagnostics.prepare>>;
 
-function timeLabel(timestamp: string): string {
-  const value = new Date(timestamp);
-  if (Number.isNaN(value.getTime())) return "--:--:--";
-  return value.toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-}
-
-function durationLabel(duration: number | undefined): string {
-  if (duration === undefined) return "";
-  return duration < 1_000 ? `${duration}ms` : `${(duration / 1_000).toFixed(1)}s`;
-}
-
-function fullTimeLabel(timestamp: string): string {
-  const value = new Date(timestamp);
-  if (Number.isNaN(value.getTime())) return timestamp;
-  return value.toLocaleString([], { hour12: false });
-}
-
-function levelLabel(level: ActivityLogEntry["level"]): string {
-  return level === "error" ? "错误" : level === "warn" ? "警告" : "信息";
-}
-
-function categoryLabel(category: ActivityLogCategory): string {
-  return CATEGORIES.find((item) => item.id === category)?.label ?? category;
-}
-
-function LogLine({
-  entry,
-  selected,
-  onSelect,
-}: {
-  entry: ActivityLogEntry;
-  selected: boolean;
-  onSelect(): void;
-}) {
-  const facts = [
-    entry.target,
-    entry.status ? `HTTP ${entry.status}` : "",
-    durationLabel(entry.duration_ms),
-    entry.count > 1 ? `×${entry.count}` : "",
-  ].filter(Boolean);
-  const summary = [entry.action, ...facts].join(" · ");
-  return (
-    <button
-      type="button"
-      className="kd-activity-log-line"
-      data-level={entry.level}
-      data-selected={selected || undefined}
-      aria-pressed={selected}
-      title={summary}
-      onClick={onSelect}
-    >
-      <time dateTime={entry.timestamp}>{timeLabel(entry.timestamp)}</time>
-      <span className="kd-activity-log-level" aria-label={entry.level}>
-        {entry.level === "error" ? "ERR" : entry.level === "warn" ? "WRN" : "INF"}
-      </span>
-      <span className="kd-activity-log-message">
-        <strong>{entry.action}</strong>
-        {facts.length > 0 ? <span>{facts.join(" · ")}</span> : null}
-      </span>
-    </button>
-  );
-}
-
-function LogDetail({ entry }: { entry: ActivityLogEntry }) {
-  const fields: Array<[string, string]> = [
-    ["时间", fullTimeLabel(entry.timestamp)],
-    ["分类", categoryLabel(entry.category)],
-    ["级别", levelLabel(entry.level)],
-    ["目标", entry.target ?? ""],
-    ["状态", entry.status ? `HTTP ${entry.status}` : ""],
-    ["耗时", durationLabel(entry.duration_ms)],
-    ["次数", entry.count > 1 ? `${entry.count} 次` : ""],
-  ];
-  const visibleFields = fields.filter(([, value]) => Boolean(value));
-  return (
-    <section className="kd-activity-log-detail" aria-label="日志详情">
-      <div className="kd-activity-log-detail-head">
-        <span>详情</span>
-        <strong>{entry.action}</strong>
-      </div>
-      <dl>
-        {visibleFields.map(([label, value]) => (
-          <div key={label}>
-            <dt>{label}</dt>
-            <dd>{value}</dd>
-          </div>
-        ))}
-      </dl>
-      {entry.detail ? <p>{entry.detail}</p> : null}
-    </section>
-  );
-}
-
-export function ActivityLogPanel() {
-  const [category, setCategory] = useState<ActivityLogCategory>("network");
-  const [overview, setOverview] = useState<ActivityLogOverview | null>(null);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+function ReportDialog({ onClose }: { onClose(): void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [note, setNote] = useState("");
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [refreshing, setRefreshing] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [exportPath, setExportPath] = useState("");
-  const terminalRef = useRef<HTMLDivElement>(null);
-  const followingTailRef = useRef(true);
+  const [receipt, setReceipt] = useState("");
+  useEffect(() => { dialog.current?.showModal(); }, []);
+  async function prepare() {
+    setBusy(true); setError(""); setConfirmed(false);
+    try { await flushDiagnostics(); setPreview(await api.diagnostics.prepare(note)); }
+    catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
+  }
+  async function upload() {
+    if (!preview || !confirmed || busy) return;
+    setBusy(true); setError("");
+    try { setReceipt((await api.diagnostics.submit(preview.id)).id); }
+    catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
+  }
+  return createPortal(<dialog ref={dialog} className="kd-diagnostic-dialog" aria-labelledby="kd-report-title"
+    onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
+    <header><strong id="kd-report-title">将错误上报至开发者</strong>
+      <Button variant="ghost" size="sm" aria-label="关闭" disabled={busy} onClick={onClose}><X size={16}/></Button></header>
+    <p>仅在确认上传时发送到 bug.kdj.kumo.ltd，保存 30 天。包含近期错误、堆栈、软件版本、系统与 CPU 线程数，不附带媒体、曲库、账号或设置文件。</p>
+    <p>已自动隐藏常见凭证、路径、网址、邮箱和 IP；自动脱敏无法保证识别所有私人内容，请核对下方完整报告。Cloudflare 处理连接时仍会接触来源 IP，本收集器不将其存入报告。</p>
+    {!receipt && <>
+      <label>问题描述<textarea value={note} maxLength={2000} disabled={busy} onChange={event => { setNote(event.target.value); setPreview(null); setConfirmed(false); }}/></label>
+      <Button variant="ghost" size="sm" disabled={busy} onClick={() => void prepare()}>生成脱敏预览</Button>
+      {preview && <>
+        <pre tabIndex={0} aria-label="将上传的完整报告">{preview.body}</pre>
+        <label className="kd-diagnostic-consent"><input type="checkbox" checked={confirmed} disabled={busy}
+          onChange={event => setConfirmed(event.target.checked)}/>已核对内容，同意仅上传本次报告（{Math.ceil(preview.bytes / 1024)} KB）</label>
+        <Button variant="ghost" size="sm" disabled={busy || !confirmed} onClick={() => void upload()}><Send size={14}/>{busy ? "处理中" : "确认上传"}</Button>
+      </>}
+    </>}
+    {receipt && <p role="status">上报成功 · {receipt}</p>}
+    <InlineNotice text={error} block onDismiss={() => setError("")}/>
+  </dialog>, document.body);
+}
 
-  const refresh = useCallback(async (manual = false) => {
-    if (manual) setRefreshing(true);
-    try {
-      setOverview(await api.activityLogs(category));
-      setError("");
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
-    } finally {
-      if (manual) setRefreshing(false);
-    }
-  }, [category]);
-
-  useEffect(() => {
-    let disposed = false;
-    const run = async () => {
-      try {
-        const next = await api.activityLogs(category);
-        if (!disposed) {
-          setOverview(next);
-          setError("");
-        }
-      } catch (nextError) {
-        if (!disposed) setError(nextError instanceof Error ? nextError.message : String(nextError));
-      }
-    };
-    void run();
-    const timer = window.setInterval(() => void run(), 5_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [category]);
-
-  const networkStatus = overview?.excessive ? "应用记录偏多" : "应用请求记录";
-  const selectedEntry = overview?.entries.find((entry) => entry.id === selectedId) ?? null;
-  // 接口按“最新优先”返回，才能先截取最近 N 条；终端显示则应当从旧到新，
-  // 让新日志自然追加在底部。
-  const entries = overview ? [...overview.entries].reverse() : [];
-
-  useLayoutEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal || !followingTailRef.current) return;
-    terminal.scrollTop = terminal.scrollHeight;
-  }, [category, entries.at(-1)?.id]);
-
-  return (
-    <Panel heading="日志" dense>
-      <div className="kd-activity-log">
-        <div className="kd-activity-log-toolbar">
-          <div className="kd-activity-log-tabs" role="tablist" aria-label="日志分类">
-            {CATEGORIES.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="tab"
-                aria-selected={category === item.id}
-                onClick={() => {
-                  followingTailRef.current = true;
-                  setCategory(item.id);
-                  setSelectedId(null);
-                }}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-          <Button variant="ghost" size="sm" disabled={exporting}
-            title="导出最近播放诊断（不含凭证和音频地址）" aria-label="导出播放诊断"
-            onClick={() => {
-              setExporting(true); setExportPath("");
-              void api.exportPlaybackDiagnostics().then(async ({ path }) => {
-                setExportPath(path);
-                try { await getBridge().revealPath(path); } catch { /* The path remains visible for browser/unsupported shells. */ }
-              }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))
-                .finally(() => setExporting(false));
-            }}><Download size={12} />导出诊断</Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="kd-activity-log-refresh"
-            aria-label="刷新日志"
-            title="刷新日志"
-            disabled={refreshing}
-            onClick={() => void refresh(true)}
-          >
-            <RefreshCw size={12} className={refreshing ? "kd-spin" : undefined} />
-          </Button>
-        </div>
-
-        {category === "network" && overview ? (
-          <div className="kd-activity-log-rate" data-excessive={overview.excessive || undefined}>
-            {overview.excessive ? <AlertTriangle size={12} aria-hidden="true" /> : null}
-            <span>{networkStatus}</span>
-            <span>近 1 分钟 {overview.network_last_minute} 条</span>
-            <span>近 1 小时 {overview.network_last_hour} 条</span>
-            {overview.dropped > 0 ? <span>高负载时略过写盘 {overview.dropped} 条</span> : null}
-          </div>
-        ) : null}
-
-        <div
-          ref={terminalRef}
-          className="kd-activity-terminal"
-          role="log"
-          aria-live="polite"
-          aria-label={`${CATEGORIES.find((item) => item.id === category)?.label ?? ""}日志`}
-          onScroll={(event) => {
-            const terminal = event.currentTarget;
-            followingTailRef.current =
-              terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= 12;
-          }}
-        >
-          {entries.map((entry) => (
-            <LogLine
-              key={entry.id}
-              entry={entry}
-              selected={selectedId === entry.id}
-              onSelect={() => setSelectedId(entry.id)}
-            />
-          ))}
-        </div>
-        {selectedEntry ? <LogDetail entry={selectedEntry} /> : null}
-        {exportPath ? <p role="status">诊断已保存：{exportPath}</p> : null}
-        <InlineNotice text={error} block onDismiss={() => setError("")} />
-      </div>
-    </Panel>
-  );
+/** No polling, rolling log feed, or network activity when this panel is merely opened. */
+export function ActivityLogPanel() {
+  const [reporting, setReporting] = useState(false);
+  const [error, setError] = useState("");
+  const [opening, setOpening] = useState(false);
+  return <Panel heading="日志" dense>
+    <div className="kd-diagnostic-actions">
+      <Button variant="ghost" size="sm" disabled={opening} onClick={() => {
+        setOpening(true); setError("");
+        void api.diagnostics.directory().then(({ path }) => getBridge().openPath(path))
+          .catch(error => setError(error instanceof Error ? error.message : String(error)))
+          .finally(() => setOpening(false));
+      }}><FolderOpen size={14}/>打开日志文件夹</Button>
+      <Button variant="ghost" size="sm" onClick={() => setReporting(true)}><Send size={14}/>将错误上报至开发者</Button>
+    </div>
+    <InlineNotice text={error} block onDismiss={() => setError("")}/>
+    {reporting && <ReportDialog onClose={() => setReporting(false)}/>}
+  </Panel>;
 }

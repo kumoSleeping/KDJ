@@ -920,6 +920,16 @@ pub struct Track {
 /// 列表只拿这里的标量字段，真正选中或播放时再通过单曲接口读取完整 [`Track`]。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TrackSummary {
+    #[serde(default)]
+    pub genre: String,
+    #[serde(default)]
+    pub year: String,
+    #[serde(default)]
+    pub bitrate: Option<i64>,
+    #[serde(default)]
+    pub samplerate: Option<i64>,
+    #[serde(default)]
+    pub channels: Option<i64>,
     pub id: i64,
     pub path: String,
     pub filename: String,

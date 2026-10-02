@@ -311,6 +311,8 @@ fn track_summary_select() -> String {
         "tracks.id AS id, tracks.path AS path, tracks.filename AS filename, \
          tracks.title AS title, tracks.artist AS artist, tracks.album AS album, \
          tracks.duration AS duration, tracks.format AS format, tracks.size AS size, \
+         summary_file.genre AS genre, summary_file.year AS year, \
+         summary_file.bitrate AS bitrate, summary_file.samplerate AS samplerate, summary_file.channels AS channels, \
          COALESCE(summary_v4.bpm, summary_v3.bpm, summary_v2.bpm, tracks.bpm) AS effective_bpm, \
          summary_v4.track_id IS NULL AND summary_v3.bpm IS NOT NULL AS bpm_v3, \
          summary_v4.track_id IS NULL AND summary_v3.bpm IS NULL AND summary_v2.bpm IS NOT NULL AS bpm_v2, \
@@ -345,7 +347,8 @@ fn track_summary_select() -> String {
 /// V2/V3 索引十余次。详情仍保留数组解析，列表只读这里的标量。
 fn track_summary_joins() -> String {
     format!(
-        " LEFT JOIN track_rhythm_v4 summary_v4 ON summary_v4.track_id = tracks.id AND summary_v4.revision = '{RHYTHM_REVISION}' AND summary_v4.file_mtime IS (SELECT rhythm_source.file_mtime FROM tracks AS rhythm_source WHERE rhythm_source.id=tracks.id) LEFT JOIN track_bpm_key_analysis_v3 summary_v3 \
+        " LEFT JOIN tracks summary_file ON summary_file.id = tracks.id \
+         LEFT JOIN track_rhythm_v4 summary_v4 ON summary_v4.track_id = tracks.id AND summary_v4.revision = '{RHYTHM_REVISION}' AND summary_v4.file_mtime IS (SELECT rhythm_source.file_mtime FROM tracks AS rhythm_source WHERE rhythm_source.id=tracks.id) LEFT JOIN track_bpm_key_analysis_v3 summary_v3 \
            ON summary_v3.track_id = tracks.id \
           AND summary_v3.analyzer_revision = '{BPM_KEY_V3_REVISION}' \
          LEFT JOIN track_bpm_key_analysis_v2 summary_v2 \
@@ -475,6 +478,8 @@ pub struct TrackQuery {
     pub bpm_max: Option<f64>,
     pub energy_min: Option<i64>,
     pub analyzed: Option<bool>,
+    /// "audio" / "video"；空 = 所有媒体。
+    pub media: String,
     pub folder: String,
     pub folder_deep: bool,
     /// 非空时只返回路径不在这些根目录之下的曲目（侧栏「其他」）。
@@ -897,8 +902,23 @@ impl LibraryService {
             Some(false) => where_parts.push("tracks.analyzed_at IS NULL".into()),
             None => {}
         }
+        if matches!(query.media.as_str(), "audio" | "video") {
+            // 与导入时的视频后缀表同源；音频是已入库媒体中非视频的补集。
+            let video_exts = kdj_providers::tags::VIDEO_EXTENSIONS;
+            let video_clause = video_exts
+                .iter()
+                .map(|_| "LOWER(tracks.filename) GLOB ?")
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            where_parts.push(if query.media == "video" {
+                format!("({video_clause})")
+            } else {
+                format!("NOT ({video_clause})")
+            });
+            params.extend(video_exts.iter().map(|ext| SqlValue::Text(format!("*.{ext}"))));
+        }
 
-        // 默认列表的后续页走键集续页：数据库从上一页最后一条的复合索引位置继续，
+        // 默认列表的后续页走键集续页:数据库从上一页最后一条的复合索引位置继续，
         // 不再随着页数增大而跳过成千上万行。id 始终 DESC，保证创建时间相同也稳定。
         if let (Some(created_at), Some(id)) = (query.after_file_created_at, query.after_track_id) {
             if order_direction(&query.order) == "ASC" {
@@ -3749,6 +3769,11 @@ fn text(row: &Row, name: &str) -> String {
 fn row_to_track_summary(row: &Row) -> TrackSummary {
     let path = text(row, "path");
     TrackSummary {
+        genre: text(row, "genre"),
+        year: text(row, "year"),
+        bitrate: row.get("bitrate").ok().flatten(),
+        samplerate: row.get("samplerate").ok().flatten(),
+        channels: row.get("channels").ok().flatten(),
         id: row.get("id").unwrap_or(0),
         folder: Path::new(&path)
             .parent()

@@ -534,6 +534,11 @@ export interface StreamPlaylistTrackRemoveResponse {
 
 /** 曲目表长期持有的轻量标量投影；完整拍点、Cue、标签和备注按需读取 Track。 */
 export interface TrackSummary {
+  genre?: string;
+  year?: string;
+  bitrate?: number | null;
+  samplerate?: number | null;
+  channels?: number | null;
   id: number;
   path: string;
   filename: string;

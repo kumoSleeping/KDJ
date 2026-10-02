@@ -1,28 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type {
-  CSSProperties,
-  PointerEvent as ReactPointerEvent,
-  RefObject,
-} from "react";
+import { Select } from "../common/Select";
 import { ChevronDown, ChevronRight, Copy, Download, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import {
-  HUE_LINE_GRADIENT,
-  hexToT,
-  needsHueLine,
-  tToHex,
-  type LyricsColorMode,
-  type LyricsColorPaint,
-} from "../../lib/lyricsColor";
-import {
-  accentPaint,
-  DESKTOP_FONT_SCALE_MAX,
-  DESKTOP_FONT_SCALE_MIN,
-  DESKTOP_OPACITY_MIN,
-  dimPaint,
   enginesFromMode,
   enginesMode,
-  secondaryPaint,
-  strokePaint,
   useLyricsPrefs,
   type LyricsEngineMode,
 } from "../../lib/lyricsPrefs";
@@ -33,7 +14,6 @@ import {
   type TempoRange,
   type TimeDisplayMode,
 } from "../../lib/playbackPrefs";
-import { useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import { useArrowKeyControl } from "../../lib/arrowKeyControl";
 import {
   APP_FONT_SCALE_MAX,
@@ -44,6 +24,7 @@ import {
 } from "../../lib/fontScale";
 import { api } from "../../lib/api";
 import {
+  installOfficialTheme,
   optionValues,
   refreshThemePacks,
   selectThemePack,
@@ -241,38 +222,6 @@ const ENGINE_MODE_OPTIONS = [
   brand: "both" | "wyy" | "qqm";
 }>;
 
-/** 指针拖动滑条：避开原生 range 在 Tauri 里拖不动的问题。 */
-function usePointerSlider(
-  trackRef: RefObject<HTMLDivElement | null>,
-  pick: (t: number) => void,
-  disabled = false,
-) {
-  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (disabled || event.button !== 0) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const el = trackRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    pick(Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)));
-  };
-  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (disabled || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    const el = trackRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    pick(Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)));
-  };
-  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  };
-  return { onPointerDown, onPointerMove, onPointerUp };
-}
-
 /** 主界面字号：不再使用连续滑条，每次明确增减 5%。 */
 function FontScaleStepper({
   value,
@@ -290,7 +239,7 @@ function FontScaleStepper({
       className="kd-djp-font-stepper"
       role="group"
       aria-label="界面字号"
-      title="调整主界面的文字大小；悬浮歌词可在歌词设置中单独调整。"
+      title="调整主界面的文字大小。"
     >
       <span className="kd-djp-font-copy">
         <span className="kd-djp-toggle-label">界面字号</span>
@@ -324,34 +273,52 @@ function FontScaleStepper({
 
 /** 主题包：数据目录 themes/ 下的文件夹。打开面板时重扫一次，不常驻监听。 */
 function ThemePackRows() {
-  const { dir, packs, selection, active, error } = useThemePack();
+  const { dir, packs, official, installing, selection, active, error } = useThemePack();
   useEffect(() => {
-    void refreshThemePacks();
+    // Opening settings only rescans the list; reloading would briefly remove the active CSS.
+    void refreshThemePacks(false);
   }, []);
-  const selected = selection.id ?? "";
+  const mode = useAppStore(state => state.settings?.theme ?? "system");
+  const saveSettings = useAppStore(state => state.saveSettings);
+  const selected = selection.id ?? (mode === "system"
+    ? `builtin-${document.documentElement.dataset.theme ?? "light"}` : `builtin-${mode}`);
+  const choose = async (value: string) => {
+    try {
+      if (value === "builtin-light" || value === "builtin-dark") {
+        await selectThemePack(null);
+        await saveSettings({ theme: value === "builtin-light" ? "light" : "dark" });
+      } else await selectThemePack(value);
+    } catch (cause) {
+      useThemePack.setState({ error: (cause as Error).message });
+    }
+  };
   const values = active ? optionValues(active, selection.options[active.id]) : {};
   return (
     <>
-      <div className="kd-djp-font-stepper" role="group" aria-label="主题">
+      <div className="kd-djp-font-stepper kd-theme-row" role="group" aria-label="主题">
         <span className="kd-djp-font-copy">
           <span className="kd-djp-toggle-label">主题</span>
         </span>
         <span className="kd-djp-font-actions">
-          <select
+          <span className="kd-theme-select">
+          <Select
             className="kd-select"
+            disabled={installing !== null}
             aria-label="主题"
             value={selected}
-            onChange={(event) => void selectThemePack(event.target.value || null)}
+            onChange={(event) => void choose(event.target.value)}
           >
-            <option value="">默认</option>
+            <option value="builtin-light">Shiro</option>
+            <option value="builtin-dark">Dark</option>
             {/* 选中的包不在了也留着这一项：把文件夹放回来就恢复，不悄悄改掉用户的选择 */}
-            {selected && !packs.some((pack) => pack.dir === selected) ? (
+            {selection.id && !packs.some((pack) => pack.dir === selected) ? (
               <option value={selected}>{selected}</option>
             ) : null}
             {packs.map((pack) => (
-              <option key={pack.dir} value={pack.dir}>{pack.manifest?.name ?? pack.dir}</option>
+              <option key={pack.dir} value={pack.dir}>{official.find(item => item.id === pack.dir)?.name ?? pack.manifest?.name ?? pack.dir}</option>
             ))}
-          </select>
+          </Select>
+          </span>
           {dir ? (
             <button
               type="button"
@@ -363,6 +330,23 @@ function ThemePackRows() {
             </button>
           ) : null}
         </span>
+      </div>
+      <div className="kd-theme-official">
+        {official.map(theme => {
+          const installed = packs.some(pack => pack.dir === theme.id && pack.manifest);
+          return (
+            <div className="kd-theme-official-row" key={theme.id}>
+              <span>{theme.name}<small>官方</small></span>
+              <button type="button" className="kd-btn" data-variant="ghost"
+                disabled={installing !== null}
+                aria-label={`${installed ? "更新" : "下载"}${theme.name}`}
+                onClick={() => void installOfficialTheme(theme.id)}>
+                <Download size={13} aria-hidden="true" />
+                {installing === theme.id ? "下载中…" : installed ? "更新" : "下载"}
+              </button>
+            </div>
+          );
+        })}
       </div>
       {active && active.options.length > 0 ? (
         <div className="kd-djp-switch-list" aria-label="主题选项">
@@ -378,244 +362,6 @@ function ThemePackRows() {
       ) : null}
       <InlineNotice text={error} block />
     </>
-  );
-}
-
-/** 连续百分比滑条：视觉与接歌小节同一套 2px 红/灰线。 */
-function RatioSlider({
-  label,
-  ariaLabel,
-  min,
-  max,
-  value,
-  onChange,
-  disabled,
-}: {
-  label: string;
-  ariaLabel: string;
-  min: number;
-  max: number;
-  value: number;
-  onChange(next: number): void;
-  disabled?: boolean;
-}) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const span = max - min;
-  const fill = span <= 0 ? 0 : (value - min) / span;
-  const pct = Math.round(value * 100);
-  const handlers = usePointerSlider(trackRef, (t) => onChange(min + t * span), disabled);
-
-  return (
-    <div className="kd-lyrics-size-row" data-disabled={disabled || undefined}>
-      <span className="kd-djp-toggle-label">{label}</span>
-      <div
-        ref={trackRef}
-        className="kd-djp-slider"
-        role="slider"
-        tabIndex={disabled ? -1 : 0}
-        aria-label={ariaLabel}
-        aria-valuemin={Math.round(min * 100)}
-        aria-valuemax={Math.round(max * 100)}
-        aria-valuenow={pct}
-        aria-valuetext={`${pct}%`}
-        aria-disabled={disabled || undefined}
-        style={{ "--kd-djp-fill": `${fill * 100}%` } as CSSProperties}
-        {...handlers}
-        onKeyDown={(event) => {
-          if (disabled) return;
-          const step = 0.05;
-          if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
-            event.preventDefault();
-            onChange(value - step);
-          } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
-            event.preventDefault();
-            onChange(value + step);
-          } else if (event.key === "Home") {
-            event.preventDefault();
-            onChange(min);
-          } else if (event.key === "End") {
-            event.preventDefault();
-            onChange(max);
-          }
-        }}
-      >
-        <span className="kd-djp-slider-track" aria-hidden="true" />
-      </div>
-    </div>
-  );
-}
-
-const FILL_MODE_OPTIONS = [
-  { id: "black" as const, text: "黑" },
-  { id: "white" as const, text: "白" },
-  { id: "solid" as const, text: "单色" },
-  { id: "gradient" as const, text: "渐变" },
-] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
-
-const DIM_MODE_OPTIONS = [
-  { id: "black" as const, text: "黑" },
-  { id: "white" as const, text: "白" },
-  { id: "gray" as const, text: "灰" },
-  { id: "solid" as const, text: "单色" },
-  { id: "gradient" as const, text: "渐变" },
-] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
-
-const SECONDARY_MODE_OPTIONS = [
-  { id: "follow" as const, text: "跟随" },
-  ...FILL_MODE_OPTIONS,
-] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
-
-const STROKE_MODE_OPTIONS = [
-  { id: "black" as const, text: "黑" },
-  { id: "white" as const, text: "白" },
-  { id: "solid" as const, text: "单色" },
-  { id: "gradient" as const, text: "渐变" },
-  { id: "none" as const, text: "无" },
-] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
-
-/**
- * 悬浮歌词取色行：右侧在「黑 / 白 / 单色 / 渐变」（边框多「无」、副行多「跟随」、未唱多「灰」）间切换；
- * 单色 / 渐变时下面一根纯彩色相线——单色一个尖朝下三角标，渐变左右两个。
- */
-function LyricsColorRow({
-  label,
-  title,
-  value,
-  onChange,
-  allowNone = false,
-  allowFollow = false,
-  allowGray = false,
-}: {
-  label: string;
-  title?: string;
-  value: LyricsColorPaint;
-  onChange(next: LyricsColorPaint): void;
-  allowNone?: boolean;
-  allowFollow?: boolean;
-  allowGray?: boolean;
-}) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const activeRef = useRef<"start" | "end">("start");
-  const [active, setActive] = useState<"start" | "end">("start");
-  const startT = hexToT(value.start);
-  const endT = hexToT(value.end);
-  const gradient = value.mode === "gradient";
-  const showHue = needsHueLine(value.mode);
-  const options = allowNone
-    ? STROKE_MODE_OPTIONS
-    : allowFollow
-      ? SECONDARY_MODE_OPTIONS
-      : allowGray
-        ? DIM_MODE_OPTIONS
-        : FILL_MODE_OPTIONS;
-
-  const applyT = (t: number, which: "start" | "end") => {
-    const hex = tToHex(t);
-    if (!gradient || which === "start") {
-      onChange({ ...value, start: hex });
-      return;
-    }
-    onChange({ ...value, end: hex });
-  };
-
-  const pickHandle = (t: number): "start" | "end" => {
-    if (!gradient) return "start";
-    return Math.abs(t - startT) <= Math.abs(t - endT) ? "start" : "end";
-  };
-
-  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const el = trackRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const t = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    const which = pickHandle(t);
-    activeRef.current = which;
-    setActive(which);
-    applyT(t, which);
-  };
-  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    const el = trackRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const t = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    applyT(t, activeRef.current);
-  };
-  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  };
-
-  return (
-    <div className="kd-lyrics-color-block" title={title}>
-      <CycleToggle
-        label={label}
-        value={value.mode}
-        options={options}
-        title={title}
-        onChange={(mode) => onChange({ ...value, mode })}
-      />
-      {showHue ? (
-        <div
-          ref={trackRef}
-          className="kd-lyrics-hue-line"
-          role="slider"
-          tabIndex={0}
-          aria-label={`${label}色相`}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round((gradient && active === "end" ? endT : startT) * 100)}
-          style={{ background: HUE_LINE_GRADIENT }}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onKeyDown={(event) => {
-            const which = gradient ? active : "start";
-            const current = which === "end" ? endT : startT;
-            const step = 0.02;
-            if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
-              event.preventDefault();
-              applyT(current - step, which);
-            } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
-              event.preventDefault();
-              applyT(current + step, which);
-            } else if (event.key === "Home") {
-              event.preventDefault();
-              applyT(0, which);
-            } else if (event.key === "End") {
-              event.preventDefault();
-              applyT(1, which);
-            } else if (gradient && (event.key === "[" || event.key === "]")) {
-              event.preventDefault();
-              const next = event.key === "[" ? "start" : "end";
-              activeRef.current = next;
-              setActive(next);
-            }
-          }}
-        >
-          <span
-            className="kd-lyrics-hue-knob"
-            data-active={!gradient || active === "start" ? "true" : undefined}
-            style={{ left: `${startT * 100}%`, background: value.start }}
-            aria-hidden="true"
-          />
-          {gradient ? (
-            <span
-              className="kd-lyrics-hue-knob"
-              data-active={active === "end" ? "true" : undefined}
-              style={{ left: `${endT * 100}%`, background: value.end }}
-              aria-hidden="true"
-            />
-          ) : null}
-        </div>
-      ) : null}
-    </div>
   );
 }
 
@@ -811,8 +557,6 @@ export function SettingsPanel() {
   const [activityLogSettingsError, setActivityLogSettingsError] = useState("");
   const [lyricsExpanded, setLyricsExpanded] = useState(false);
 
-  const widePlay = useTrackClickPrefs((state) => state.widePlay);
-  const setWidePlay = useTrackClickPrefs((state) => state.setWidePlay);
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
   const tempoRange = usePlaybackPrefs((state) => state.tempoRange);
@@ -833,52 +577,6 @@ export function SettingsPanel() {
   const setLyricsEngines = useLyricsPrefs((state) => state.setEngines);
   const tryOnlineWhenMissing = useLyricsPrefs((state) => state.tryOnlineWhenMissing);
   const setTryOnlineWhenMissing = useLyricsPrefs((state) => state.setTryOnlineWhenMissing);
-  const desktopLyricsLocked = useLyricsPrefs((state) => state.desktopLocked);
-  const desktopLyricsFontScale = useLyricsPrefs((state) => state.desktopFontScale);
-  const desktopLyricsOpacity = useLyricsPrefs((state) => state.desktopOpacity);
-  const desktopAccentMode = useLyricsPrefs((state) => state.desktopAccentMode);
-  const desktopAccentStart = useLyricsPrefs((state) => state.desktopAccent);
-  const desktopAccentEnd = useLyricsPrefs((state) => state.desktopAccentEnd);
-  const desktopSecondaryMode = useLyricsPrefs((state) => state.desktopSecondaryMode);
-  const desktopSecondaryStart = useLyricsPrefs((state) => state.desktopSecondaryAccent);
-  const desktopSecondaryEnd = useLyricsPrefs((state) => state.desktopSecondaryAccentEnd);
-  const desktopDimMode = useLyricsPrefs((state) => state.desktopDimMode);
-  const desktopDimStart = useLyricsPrefs((state) => state.desktopDim);
-  const desktopDimEnd = useLyricsPrefs((state) => state.desktopDimEnd);
-  const desktopStrokeMode = useLyricsPrefs((state) => state.desktopStrokeMode);
-  const desktopStrokeStart = useLyricsPrefs((state) => state.desktopStroke);
-  const desktopStrokeEnd = useLyricsPrefs((state) => state.desktopStrokeEnd);
-  const setDesktopLyricsLocked = useLyricsPrefs((state) => state.setDesktopLocked);
-  const setDesktopLyricsFontScale = useLyricsPrefs((state) => state.setDesktopFontScale);
-  const setDesktopAccentPaint = useLyricsPrefs((state) => state.setDesktopAccentPaint);
-  const setDesktopSecondaryPaint = useLyricsPrefs((state) => state.setDesktopSecondaryPaint);
-  const setDesktopDimPaint = useLyricsPrefs((state) => state.setDesktopDimPaint);
-  const setDesktopStrokePaint = useLyricsPrefs((state) => state.setDesktopStrokePaint);
-  const setDesktopLyricsOpacity = useLyricsPrefs((state) => state.setDesktopOpacity);
-  const desktopAccent = accentPaint({
-    desktopAccentMode,
-    desktopAccent: desktopAccentStart,
-    desktopAccentEnd,
-  });
-  const desktopSecondary = secondaryPaint({
-    desktopSecondaryMode,
-    desktopSecondaryAccent: desktopSecondaryStart,
-    desktopSecondaryAccentEnd: desktopSecondaryEnd,
-  });
-  const desktopDim = dimPaint({
-    desktopDimMode,
-    desktopDim: desktopDimStart,
-    desktopDimEnd,
-  });
-  const desktopStroke = strokePaint({
-    desktopStrokeMode,
-    desktopStroke: desktopStrokeStart,
-    desktopStrokeEnd,
-  });
-  // 桌面是独立置顶窗口，Android 是原生浮层；两边都由这组设置驱动。
-  // 浏览器预览和 iOS 没有悬浮歌词，桥接层那边就是 null。
-  const canOverlayLyrics = Boolean(window.kdj?.desktopLyrics);
-  const overlayIsNative = Boolean(window.kdj?.overlayPermission);
 
   const accounts = useAppStore((state) => state.accounts);
   const accountsError = useAppStore((state) => state.accountsError);
@@ -1085,23 +783,6 @@ export function SettingsPanel() {
                 onChange={(next) => void saveSettings({ key_notation: next }).catch(() => undefined)}
               />
               <Switch
-                checked={widePlay === "double"}
-                label="横屏播放"
-                onState="双击"
-                offState="单击"
-                title="横屏下列表点播放的手势：双击播放（单击选中），或改成单击即播。"
-                onChange={() => setWidePlay(widePlay === "double" ? "single" : "double")}
-              />
-              <Switch
-                checked
-                disabled
-                label="竖屏播放"
-                onState="单击"
-                offState="单击"
-                title="移动端歌曲列表固定单击播放；详情请点底部正在播放的歌曲。"
-                onChange={() => undefined}
-              />
-              <Switch
                 checked={transportFade}
                 label="播放 / 暂停渐入渐出"
                 title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
@@ -1276,67 +957,6 @@ export function SettingsPanel() {
                   title="点击切换：全部 / 仅网易云 / 仅 QQ / 仅 YouTube Music。至少保留一家。"
                   onChange={(mode) => setLyricsEngines(enginesFromMode(mode))}
                 />
-                {canOverlayLyrics ? (
-                  <>
-                    <Switch
-                      checked={desktopLyricsLocked}
-                      label={
-                        overlayIsNative
-                          ? "触摸穿透（开启后不能拖动）"
-                          : "鼠标穿透（开启后不能拖动）"
-                      }
-                      title={
-                        overlayIsNative
-                          ? "关闭时按住歌词即可上下拖动；开启后触摸会穿过歌词浮层落到下面的应用，需要回这里关闭才能再次拖动。"
-                          : "关闭时按住歌词即可自由拖动；开启后点击会穿过歌词窗口，需要回这里关闭才能再次拖动。"
-                      }
-                      onChange={() => setDesktopLyricsLocked(!desktopLyricsLocked)}
-                    />
-                    <RatioSlider
-                      label="悬浮字号"
-                      ariaLabel="悬浮歌词字号"
-                      min={DESKTOP_FONT_SCALE_MIN}
-                      max={DESKTOP_FONT_SCALE_MAX}
-                      value={desktopLyricsFontScale}
-                      onChange={setDesktopLyricsFontScale}
-                    />
-                    <RatioSlider
-                      label="不透明度"
-                      ariaLabel="悬浮歌词不透明度"
-                      min={DESKTOP_OPACITY_MIN}
-                      max={1}
-                      value={desktopLyricsOpacity}
-                      onChange={setDesktopLyricsOpacity}
-                    />
-                    <LyricsColorRow
-                      label={overlayIsNative ? "高亮色" : "主行颜色"}
-                      title="主行已唱部分：黑 / 白 / 单色（色相线）/ 渐变。超长句跟着进度滚动。"
-                      value={desktopAccent}
-                      onChange={setDesktopAccentPaint}
-                    />
-                    <LyricsColorRow
-                      label="副行颜色"
-                      title="翻译或罗马音已唱部分：跟随主行 / 黑 / 白 / 单色 / 渐变。下一句保持未唱色。"
-                      value={desktopSecondary}
-                      onChange={setDesktopSecondaryPaint}
-                      allowFollow
-                    />
-                    <LyricsColorRow
-                      label="未唱颜色"
-                      title="还没唱到的字：黑 / 白 / 灰 / 单色 / 渐变。主行与副行共用。"
-                      value={desktopDim}
-                      onChange={setDesktopDimPaint}
-                      allowGray
-                    />
-                    <LyricsColorRow
-                      label="边框颜色"
-                      title="描边（整行始终绘制）：黑 / 白 / 单色 / 渐变 / 无。"
-                      value={desktopStroke}
-                      onChange={setDesktopStrokePaint}
-                      allowNone
-                    />
-                  </>
-                ) : null}
                 </div>
               ) : null}
             </div>

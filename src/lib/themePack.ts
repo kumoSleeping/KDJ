@@ -6,6 +6,7 @@
  * 选择是本机显示偏好，和字号一样只存 localStorage，不进 settings.json。
  */
 import { create } from "zustand";
+import { captureDiagnostic } from "./diagnostics";
 
 export type ThemeMode = "light" | "dark";
 export type ThemeRgb = readonly [number, number, number];
@@ -28,6 +29,8 @@ export interface ThemeManifest {
   /** 原生窗口底色与首帧底色，每个支持的模式一个 #rrggbb。 */
   window: Partial<Record<ThemeMode, string>>;
   options: ThemeOption[];
+  /** 调性分析的展示形式；不改变调性数据及筛选行为。 */
+  camelot?: "wheel" | "grid";
 }
 
 export interface ThemeEntry {
@@ -47,6 +50,10 @@ interface StoredSelection extends ThemeSelection {
   boot?: { window: Partial<Record<ThemeMode, string>>; attrs: string[] };
 }
 
+export const OFFICIAL_THEMES = [
+  { id: "sakulaptop98", name: "Sakura98" },
+];
+
 export const THEME_PACK_STORAGE_KEY = "kd-theme-pack";
 export const THEME_CHANGE_EVENT = "kd-theme-change";
 const THEME_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -55,6 +62,7 @@ const CSS_LINK_ID = "kd-theme-pack-css";
 const SVG_HOST_ID = "kd-theme-pack-svg";
 const OPTION_ATTR_PREFIX = "data-theme-opt-";
 const BOOT_TIMEOUT_MS = 1500;
+const INSTANCE_ID = crypto.randomUUID();
 
 function relativePath(value: unknown): value is string {
   return typeof value === "string"
@@ -103,6 +111,7 @@ export function parseThemeManifest(raw: unknown, dir: string): ThemeManifest | s
     js: data.js as string | undefined,
     window,
     options,
+    ...(data.camelot === "grid" ? { camelot: "grid" as const } : {}),
   };
 }
 
@@ -163,6 +172,8 @@ interface ThemePackState {
   /** 主题文件夹的绝对路径，给「打开文件夹」用。 */
   dir: string;
   packs: ThemeEntry[];
+  official: { id: string; name: string }[];
+  installing: string | null;
   selection: ThemeSelection;
   /** 真正生效的主题；选中的包缺失或损坏时为 null，selection 仍保留。 */
   active: ThemeManifest | null;
@@ -174,6 +185,8 @@ interface ThemePackState {
 export const useThemePack = create<ThemePackState>(() => ({
   dir: "",
   packs: [],
+  official: OFFICIAL_THEMES,
+  installing: null,
   selection: { id: null, options: {} },
   active: null,
   error: "",
@@ -187,7 +200,7 @@ export function activeThemePack(): ThemeManifest | null {
 /** applyTheme 用它判断「主题相关的东西变没变」，没变就不广播重绘。 */
 export function themePackSignature(): string {
   const { active, selection } = useThemePack.getState();
-  return active ? `${active.id}:${optionAttributes(active, selection.options[active.id]).join(",")}` : "";
+  return active ? `${active.id}:${active.version}:${optionAttributes(active, selection.options[active.id]).join(",")}` : "";
 }
 
 let mounted: { unmount?: () => void } | null = null;
@@ -203,6 +216,7 @@ function unload(): void {
   try {
     mounted?.unmount?.();
   } catch (error) {
+    captureDiagnostic("theme", "script.unmount", error);
     console.warn("主题脚本 unmount 失败", error);
   }
   mounted = null;
@@ -227,8 +241,9 @@ async function load(manifest: ThemeManifest): Promise<void> {
   link.rel = "stylesheet";
   link.href = (await fileUrl(manifest.id, manifest.css)) + stamp;
   const ready = new Promise<void>((resolve, reject) => {
-    link.onload = () => resolve();
-    link.onerror = () => reject(new Error(`无法加载 ${manifest.css}`));
+    const timeout = setTimeout(() => reject(new Error(`加载主题超时：${manifest.css}`)), 15_000);
+    link.onload = () => { clearTimeout(timeout); resolve(); };
+    link.onerror = () => { clearTimeout(timeout); reject(new Error(`无法加载 ${manifest.css}`)); };
   });
   // 排在 <head> 末尾：同特异性时压过 design.css
   document.head.append(link);
@@ -262,6 +277,7 @@ async function load(manifest: ThemeManifest): Promise<void> {
       });
       mounted = entry ?? null;
     } catch (error) {
+      captureDiagnostic("theme", "script.mount", error);
       console.warn("主题脚本加载失败", error);
     }
   }
@@ -275,7 +291,14 @@ function applyOptions(manifest: ThemeManifest, selection: ThemeSelection): void 
   }
 }
 
-async function apply(selection: ThemeSelection): Promise<void> {
+// Serialize loads: fast switching must not leave CSS/SVG from an older request mounted.
+let application = Promise.resolve();
+function apply(selection: ThemeSelection, reload = false): Promise<void> {
+  application = application.catch(() => undefined).then(() => applyNow(selection, reload));
+  return application;
+}
+
+async function applyNow(selection: ThemeSelection, reload: boolean): Promise<void> {
   const { packs } = useThemePack.getState();
   const entry = selection.id ? packs.find((pack) => pack.dir === selection.id) : undefined;
   let active = entry?.manifest ?? null;
@@ -283,30 +306,32 @@ async function apply(selection: ThemeSelection): Promise<void> {
   if (selection.id && !active) error = entry ? `${selection.id}：${entry.error}` : `主题包缺失：${selection.id}`;
   try {
     if (!active) unload();
-    else if (loadedId !== active.id) await load(active);
+    else if (reload || loadedId !== active.id) await load(active);
     if (active) applyOptions(active, selection);
   } catch (cause) {
     unload();
+    captureDiagnostic("theme", "theme.apply", cause);
     error = `${selection.id}：${(cause as Error).message}`;
     active = null;
   }
   // 包缺失时只清首帧缓存，selection 原样保留：把文件夹放回来就恢复
   writeStored(selection, active);
   useThemePack.setState({ selection, active, error });
+  if (reload) window.dispatchEvent(new Event(THEME_CHANGE_EVENT));
 }
 
-async function broadcast(selection: ThemeSelection): Promise<void> {
+async function broadcast(selection: ThemeSelection, reload = false): Promise<void> {
   // 桌面歌词是独立 WebView，storage 事件不可靠；与 lyricsPrefs 一样直接带快照广播
   try {
     const { emit } = await import("@tauri-apps/api/event");
-    await emit("theme-pack-changed", selection);
+    await emit("theme-pack-changed", { ...selection, reload, source: INSTANCE_ID });
   } catch {
     /* 浏览器预览没有 Tauri 事件 */
   }
 }
 
 /** 重新扫描主题文件夹，并把当前选择重新套一遍。 */
-export async function refreshThemePacks(): Promise<void> {
+export async function refreshThemePacks(reload = true): Promise<void> {
   try {
     const { api } = await import("./api");
     const listing = await api.themes.list();
@@ -316,18 +341,63 @@ export async function refreshThemePacks(): Promise<void> {
         ? { dir: item.dir, manifest: null, error: parsed }
         : { dir: item.dir, manifest: parsed, error: "" };
     });
-    useThemePack.setState({ dir: listing.dir, packs });
+    useThemePack.setState({ dir: listing.dir, packs, official: Array.isArray(listing.official) ? listing.official : OFFICIAL_THEMES });
   } catch (error) {
     useThemePack.setState({ error: (error as Error).message });
     return;
   }
-  await apply(useThemePack.getState().selection);
+  await apply(useThemePack.getState().selection, reload);
+}
+
+/** 下载到临时目录、校验并安装成功后才切换，失败保留当前主题。 */
+export async function installOfficialTheme(id: string): Promise<void> {
+  if (useThemePack.getState().installing) return;
+  useThemePack.setState({ installing: id, error: "" });
+  try {
+    const { api } = await import("./api");
+    await api.themes.install(id);
+    await refreshThemePacks();
+    await selectThemePack(id);
+    await broadcast(useThemePack.getState().selection, true);
+  } catch (error) {
+    useThemePack.setState({ error: (error as Error).message });
+  } finally {
+    useThemePack.setState({ installing: null });
+  }
 }
 
 export async function selectThemePack(id: string | null): Promise<void> {
   const selection = { ...useThemePack.getState().selection, id };
   await apply(selection);
   void broadcast(selection);
+}
+
+let cycling = false;
+/** Shiro / Dark are built-in themes. Only installed, valid optional packs enter the cycle. */
+export async function cycleThemePack(): Promise<void> {
+  if (cycling || useThemePack.getState().installing) return;
+  cycling = true;
+  try {
+    await refreshThemePacks(false);
+    const { packs, selection } = useThemePack.getState();
+    const installed = packs.filter(pack => pack.manifest);
+    const ids = [
+      ...OFFICIAL_THEMES.map(theme => theme.id).filter(id => installed.some(pack => pack.dir === id)),
+      ...installed.filter(pack => !OFFICIAL_THEMES.some(theme => theme.id === pack.dir)).map(pack => pack.dir),
+    ];
+    const choices = ["builtin-light", "builtin-dark", ...ids];
+    const current = selection.id ?? `builtin-${document.documentElement.dataset.theme === "dark" ? "dark" : "light"}`;
+    const next = choices[(choices.indexOf(current) + 1) % choices.length];
+    if (next === "builtin-light" || next === "builtin-dark") {
+      const { useAppStore } = await import("../stores/appStore");
+      await selectThemePack(null);
+      await useAppStore.getState().saveSettings({ theme: next === "builtin-light" ? "light" : "dark" });
+    } else await selectThemePack(next);
+  } catch (error) {
+    useThemePack.setState({ error: (error as Error).message });
+  } finally {
+    cycling = false;
+  }
 }
 
 export async function setThemeOption(optionId: string, value: boolean): Promise<void> {
@@ -355,19 +425,54 @@ export async function bootThemePack(): Promise<void> {
     rgbCache.clear();
     useThemePack.setState((state) => ({ epoch: state.epoch + 1 }));
   });
-  void import("@tauri-apps/api/event")
-    .then(({ listen }) => listen<ThemeSelection>("theme-pack-changed", ({ payload }) => {
-      const current = useThemePack.getState().selection;
-      if (JSON.stringify(current) === JSON.stringify(payload)) return; // 自己发的
-      void (payload.id && !useThemePack.getState().packs.some((p) => p.dir === payload.id)
-        ? refreshThemePacks().then(() => apply(payload))
-        : apply(payload));
-    }))
-    .catch(() => {});
-  if (!stored.id) return;
+  // Fonts arrive after CSS; canvases and lyric measurement must also repaint.
+  document.fonts?.addEventListener("loadingdone", () => {
+    if (useThemePack.getState().active) window.dispatchEvent(new Event(THEME_CHANGE_EVENT));
+  });
+  const receive = async ({ reload, source, ...selection }: ThemeSelection & { reload?: boolean; source?: string }) => {
+    if (source === INSTANCE_ID) return;
+    const current = useThemePack.getState().selection;
+    if (!reload && JSON.stringify(current) === JSON.stringify(selection)) return;
+    useThemePack.setState({ selection });
+    if (reload || (selection.id && !useThemePack.getState().packs.some(p => p.dir === selection.id)))
+      await refreshThemePacks();
+    else await apply(selection);
+  };
+  if (window.__TAURI_INTERNALS__) {
+    try {
+      const [{listen, emitTo}, {getCurrentWindow}] = await Promise.all([
+        import("@tauri-apps/api/event"), import("@tauri-apps/api/window"),
+      ]);
+      await listen<ThemeSelection & { reload?: boolean; source?: string }>("theme-pack-changed", ({payload}) => { void receive(payload); });
+      const label = getCurrentWindow().label;
+      if (label === "main") {
+        await listen<string>("theme-pack-request", ({payload: target}) => {
+          if (!["lyrics-overlay", "live-vj-output"].includes(target)) return;
+          void emitTo(target, "theme-pack-snapshot", {
+            selection: useThemePack.getState().selection,
+            mode: document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+          });
+        });
+      } else if (["lyrics-overlay", "live-vj-output"].includes(label)) {
+        // A newly created WebView can see an old localStorage snapshot and has
+        // missed the last broadcast. Ask the main window after listeners exist.
+        let done!: () => void;
+        const received = new Promise<void>(resolve => { done = resolve; });
+        const stop = await listen<{selection: ThemeSelection; mode: ThemeMode}>("theme-pack-snapshot", ({payload}) => {
+          document.documentElement.dataset.theme = payload.mode;
+          void receive(payload.selection).finally(done);
+        });
+        try {
+          await emitTo("main", "theme-pack-request", label);
+          await Promise.race([received, new Promise(resolve => setTimeout(resolve, BOOT_TIMEOUT_MS))]);
+        } finally { stop(); }
+      }
+    } catch (error) { console.warn("窗口主题同步失败，沿用本地主题", error); }
+  }
+  if (!useThemePack.getState().selection.id) return;
   try {
     await Promise.race([
-      refreshThemePacks(),
+      useThemePack.getState().active ? Promise.resolve() : refreshThemePacks(),
       new Promise((resolve) => setTimeout(resolve, BOOT_TIMEOUT_MS)),
     ]);
   } finally {
@@ -406,14 +511,37 @@ const BAND_IDENTITY: readonly ThemeRgb[] = [[255, 0, 0], [0, 255, 0], [0, 0, 255
  * 波形的显示色里 R/G/B 三个通道分别对应低/中/高频。主题用
  * `--kd-wave-low/mid/high` 给三个频段换颜料；没定义时原样返回。
  */
-export function waveBandRgb(rgb: ThemeRgb): ThemeRgb {
+export function waveBandRgb(rgb: ThemeRgb, frequency?: ThemeRgb): ThemeRgb {
+  return createWaveBandMapper()(rgb, frequency);
+}
+
+/** Resolve theme tokens once per bitmap, not once per physical-pixel column. */
+export function createWaveBandMapper(): (rgb: ThemeRgb, frequency?: ThemeRgb) => ThemeRgb {
   const bands = [
     themeRgb("--kd-wave-low", BAND_IDENTITY[0]),
     themeRgb("--kd-wave-mid", BAND_IDENTITY[1]),
     themeRgb("--kd-wave-high", BAND_IDENTITY[2]),
   ];
-  if (bands.every((band, i) => band.join() === BAND_IDENTITY[i].join())) return rgb;
-  return [0, 1, 2].map((channel) => Math.min(255, Math.round(
-    (rgb[0] * bands[0][channel] + rgb[1] * bands[1][channel] + rgb[2] * bands[2][channel]) / 255,
-  ))) as unknown as ThemeRgb;
+  if (bands.every((band, i) => band.every((value, channel) => value === BAND_IDENTITY[i][channel]))) {
+    return rgb => rgb;
+  }
+  const frequencyPalette = typeof document !== "undefined"
+    && document.documentElement.dataset.themePack === "sakulaptop98";
+  return (rgb, frequency) => {
+    // Sakura mixes measured strengths, not the default palette's neutral lift.
+    if (frequency && frequencyPalette) {
+      const peak = Math.max(...frequency);
+      if (peak <= 0) return [0, 0, 0];
+      const weights = frequency.map(value => Math.pow(Math.max(0, value) / peak, 2));
+      const total = weights.reduce((sum, value) => sum + value, 0);
+      return [0, 1, 2].map(channel => Math.round(
+        bands.reduce((sum, band, index) => sum + band[channel] * weights[index], 0) / total,
+      )) as unknown as ThemeRgb;
+    }
+    // Normalize shared pigment channels instead of clipping broad-band columns to white.
+    const weight = Math.max(255, rgb[0] + rgb[1] + rgb[2]);
+    return [0, 1, 2].map((channel) => Math.min(255, Math.round(
+      (rgb[0] * bands[0][channel] + rgb[1] * bands[1][channel] + rgb[2] * bands[2][channel]) / weight,
+    ))) as unknown as ThemeRgb;
+  };
 }

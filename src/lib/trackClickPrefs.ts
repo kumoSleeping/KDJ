@@ -5,8 +5,7 @@ import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 /**
  * 曲目列表的点击手势偏好。
  *
- * - 横屏默认双击播放（单击留给选中 / 详情）
- * - 竖屏固定单击播放：全屏详情会盖住列表，不能再把单击留给详情
+ * 旧偏好仅保留存档兼容。实际手势由布局决定：竖屏单击播放，桌面双击播放。
  */
 export type TrackPlayClick = "single" | "double";
 
@@ -58,19 +57,16 @@ interface TrackClickPrefsState extends TrackClickPrefs {
 }
 
 export function playClickForLayout(
-  prefs: Pick<TrackClickPrefs, "widePlay" | "narrowPlay">,
+  _prefs: Pick<TrackClickPrefs, "widePlay" | "narrowPlay">,
   layout: LayoutMode,
 ): TrackPlayClick {
-  // 竖屏抽屉会整屏盖住列表，歌曲行不能再承担“打开详情”的职责；不读取
-  // 旧的 narrowPlay 存档，所有本地/在线/视频列表统一单击播放。
-  return layout === "narrow" ? "single" : prefs.widePlay;
+  // 竖屏直接单击触发；旧偏好不改变桌面的双击行为。
+  return layout === "narrow" ? "single" : "double";
 }
 
 /** 横屏单击是否还要延迟钉详情：单击播放时不抢。 */
-export function shouldPinDetailOnClick(prefs: TrackClickPrefs, layout: LayoutMode): boolean {
-  if (layout === "narrow") return false;
-  if (playClickForLayout(prefs, layout) === "single") return false;
-  return true;
+export function shouldPinDetailOnClick(_prefs: TrackClickPrefs, _layout: LayoutMode): boolean {
+  return false;
 }
 
 export const useTrackClickPrefs = create<TrackClickPrefsState>((set, get) => ({

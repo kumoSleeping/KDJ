@@ -677,6 +677,7 @@ impl Workshop {
             let _finished = finished.drop_guard();
             let result = m.render_export(&p, &job_id, &token).await;
             if let Err(e) = result {
+                if !token.is_cancelled() { tracing::error!(job = %job_id, error = %format!("{e:#}"), "混剪导出失败"); }
                 let _ = m.job(&job_id, |j| {
                     j.phase = if j.signature.is_some() {
                         "import_failed"
