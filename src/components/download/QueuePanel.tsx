@@ -77,10 +77,6 @@ function stateLabel(task: DownloadTask): string {
 const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
 const AUDIO_QUALITIES: Quality[] = ["flac", "320", "128"];
 
-function TaskStateMark({ task }: { task: DownloadTask }) {
-  return <QueueStateMark state={task.state} />;
-}
-
 /**
  * 队列可能一次塞进几百首，只让滚动视口内的封面进入 DOM。
  * 固定尺寸外框始终保留，因此图片挂载/卸载不会推动文字或滚动位置。
@@ -207,9 +203,10 @@ function QueueQualityControl({
   const videoHeight = Number.parseInt(task.quality, 10);
   const label =
     task.kind === "audio"
-      ? normalizedQuality === "flac"
-        ? "FLAC"
-        : `${normalizedQuality}K`
+      ? /^\d+$/.test(normalizedQuality)
+        ? `${normalizedQuality}K`
+        // 完成后 quality 会被改写成实际后缀（mp3/m4a/opus…），不是码率。
+        : normalizedQuality.toUpperCase()
       : Number.isFinite(videoHeight)
         ? `${videoHeight}p`
         : task.quality.toUpperCase();
@@ -314,13 +311,19 @@ function QueueRow({
       ? { page_index: videoPage.index, page_count: videoPage.count }
       : undefined,
   );
-  const state = missing ? "文件已不在原位置" : stateLabel(task);
+  const state = missing ? "文件缺失" : stateLabel(task);
   const finished =
     task.state === "done" || task.state === "failed" || task.state === "canceled"
       ? formatDate(task.updated_at)
       : "";
   const previous = task.previous_error?.trim() ?? "";
   const previousError = task.state === "failed" && previous !== task.error.trim() ? previous : "";
+  // 重试成功或取消后错误行不再显示，前一次失败原因放进状态的 title 里留底。
+  const stateTitle = missing
+    ? `文件已不在原位置：${task.path}`
+    : previous && (task.state === "done" || task.state === "canceled")
+      ? `前一次失败：${previous}`
+      : undefined;
   const recordedTarget = task.path.trim()
     ? task.path.replace(/[\\/][^\\/]*$/, "") || task.path
     : task.output_dir || task.dest_dir || "";
@@ -329,6 +332,7 @@ function QueueRow({
     <article
       className="kd-download-task"
       data-state={task.state}
+      data-missing={missing || undefined}
       onContextMenu={(event) => {
         event.preventDefault();
         setMenu({ x: event.clientX, y: event.clientY });
@@ -385,8 +389,8 @@ function QueueRow({
           </span>
           <span className="kd-download-task-state">
             <span className="kd-download-task-state-label">
-              <TaskStateMark task={task} />
-              <span className="kd-download-task-state-text">{state}</span>
+              <QueueStateMark state={missing ? "failed" : task.state} />
+              <span className="kd-download-task-state-text" title={stateTitle}>{state}</span>
             </span>
             <span
               className="kd-download-task-percent kd-mono"
@@ -475,11 +479,11 @@ function QueueRow({
       {task.error && task.error.trim() !== stateLabel(task) ? (
         <div
           className="kd-download-task-error"
-          title={previousError ? `${task.error}\n上次：${previousError}` : task.error}
+          title={previousError ? `${task.error}\n前一次：${previousError}` : task.error}
         >
           {task.error}
           {previousError ? (
-            <span className="kd-download-task-error-previous">上次：{previousError}</span>
+            <span className="kd-download-task-error-previous">前一次：{previousError}</span>
           ) : null}
         </div>
       ) : null}
@@ -705,13 +709,13 @@ export function QueuePanel() {
   const visibleTasks = history
     ? sortDownloadTasks([...done, ...list.filter((task) => task.state === "canceled")])
     : list.filter((task) => task.state !== "canceled");
-  // 只在挂载和窗口重新聚焦时 stat 一次；文件多半是用户切到文件管理器里挪走的。
+  // 挂载、切到历史视图和窗口重新聚焦时 stat；文件多半是用户切到文件管理器里挪走的。
   useEffect(() => {
     void checkMissingFiles();
     const onFocus = () => void checkMissingFiles();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [checkMissingFiles]);
+  }, [checkMissingFiles, history]);
   const pauseAll = useDownloadStore((store) => store.pauseAll);
   const [dropActive, setDropActive] = useState(false);
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
@@ -735,9 +739,11 @@ export function QueuePanel() {
     const path = task.path;
     // 入库失败等异常任务会保留最终落盘路径；直接让文件管理器选中成品，
     // 比切到一个可能尚未入库的目录筛选更可靠。
-    void window.kdj?.revealPath(path).catch((error: unknown) =>
-      setActionError(`定位下载文件失败：${(error as Error).message}`),
-    );
+    void window.kdj?.revealPath(path).catch((error: unknown) => {
+      setActionError(`定位下载文件失败：${(error as Error).message}`);
+      // 曲库内删除/移动不触发聚焦，失败一次就重查，让这一行立刻标成缺失。
+      void checkMissingFiles();
+    });
   };
 
   return (

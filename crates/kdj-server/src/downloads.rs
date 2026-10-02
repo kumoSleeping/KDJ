@@ -827,7 +827,7 @@ impl DownloadManager {
         tasks
     }
 
-    /// 已完成但落盘文件已不在原位置的任务 id。只在前端显式询问时 stat，
+    /// 已完成（或入库失败但留有路径）而落盘文件已不在原位置的任务 id。只在前端显式询问时 stat，
     /// 不进广播/进度热路径；锁外 stat，慢盘不会卡住队列。
     pub fn missing_files(&self) -> Vec<String> {
         let done: Vec<(String, String)> = self
@@ -835,7 +835,10 @@ impl DownloadManager {
             .lock()
             .unwrap()
             .values()
-            .filter(|entry| entry.task.state == TaskState::Done && !entry.task.path.is_empty())
+            .filter(|entry| {
+                matches!(entry.task.state, TaskState::Done | TaskState::Failed)
+                    && !entry.task.path.is_empty()
+            })
             .map(|entry| (entry.task.id.clone(), entry.task.path.clone()))
             .collect();
         done.into_iter()
@@ -3184,7 +3187,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_files_lists_only_done_tasks_whose_file_is_gone() {
+    fn missing_files_lists_finished_tasks_whose_file_is_gone() {
         let (_journal, root) = journal_path("missing-files");
         fs::create_dir_all(&root).unwrap();
         let present = root.join("present.flac");
@@ -3196,12 +3199,13 @@ mod tests {
             ("gone", TaskState::Done, gone.clone()),
             ("no-path", TaskState::Done, String::new()),
             ("failed", TaskState::Failed, gone.clone()),
+            ("queued", TaskState::Queued, gone.clone()),
         ] {
             let mut task = sample_task(id, state, 1.0);
             task.path = path;
             manager.insert(task, CancellationToken::new());
         }
-        assert_eq!(manager.missing_files(), vec!["gone"]);
+        assert_eq!(manager.missing_files(), vec!["failed", "gone"]);
         let _ = fs::remove_dir_all(root);
     }
 

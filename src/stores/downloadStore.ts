@@ -36,6 +36,7 @@ const MAX_COMPLETED_TOMBSTONES = 512;
 const removedTaskIds = new Set<string>();
 const MAX_REMOVED_TOMBSTONES = 512;
 let downloadRefreshSequence = 0;
+let missingFilesSequence = 0;
 let downloadListRevision = 0;
 
 function rememberCompletedTask(taskId: string): void {
@@ -190,6 +191,7 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     const sequence = ++downloadRefreshSequence;
     const listRevision = downloadListRevision;
     const before = get().tasks;
+    const beforeHistory = get().history;
     set({ loading: true });
     try {
       const tasks = await api.downloads();
@@ -202,8 +204,11 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       for (const [id, task] of current) {
         if (before.get(id) !== task && !removedTaskIds.has(id) && !completedTaskIds.has(id)) map.set(id, task);
       }
+      // 同理：快照在途时完成的任务只经 download.updated 进了 history，快照里还是旧状态。
+      const history = new Map(historyFrom(tasks).map((task) => [task.id, task]));
+      for (const task of get().history) if (!beforeHistory.includes(task)) history.set(task.id, task);
       commitTasks(map);
-      set({ tasks: map, ...derive(map), history: historyFrom(tasks), loading: false, error: "" });
+      set({ tasks: map, ...derive(map), history: historyFrom(history.values()), loading: false, error: "" });
       map.forEach(prepareAuthorizingTask);
     } catch (error) {
       if (sequence !== downloadRefreshSequence) return;
@@ -212,8 +217,11 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
   },
 
   async checkMissingFiles() {
+    const sequence = ++missingFilesSequence;
     try {
-      set({ missingIds: new Set(await api.missingDownloadFiles()) });
+      const ids = await api.missingDownloadFiles();
+      // 连续聚焦会叠出多次扫描；只认最后一次发起的结果。
+      if (sequence === missingFilesSequence) set({ missingIds: new Set(ids) });
     } catch (error) {
       // 旧后端没有这条路由时保持“不标记”，不能把所有记录误判成丢失。
       console.warn("检查下载文件失败", error);
