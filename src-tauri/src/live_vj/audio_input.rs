@@ -10,6 +10,10 @@ pub struct Ring {
     pub end: Instant,
     pub sequence: u64,
     pub error: Option<String>,
+    /// Last backend continuity break since the previous poll, for the diagnostics log.
+    pub notice: Option<String>,
+    /// The next packet's capture time is unreliable (WASAPI TIMESTAMP_ERROR).
+    untimed: bool,
     source: String,
     sample_rate: u32,
     generation: u64,
@@ -40,7 +44,7 @@ impl Ring {
         }
         let sum: f32 = filter.iter().sum();
         for value in &mut filter { *value /= sum; }
-        Self { samples: VecDeque::with_capacity(48000), end: Instant::now(), sequence: 0, error: None,
+        Self { samples: VecDeque::with_capacity(48000), end: Instant::now(), sequence: 0, error: None, notice: None, untimed: false,
             source, sample_rate, generation: 0, received_at: Instant::now(), expected: None,
             buffered: 0, channels: vec![], rms_dbfs: None, peak_dbfs: None, gaps: 0,
             history: vec![0.; taps + 1], filter, cursor: 0, phase: 0 }
@@ -59,15 +63,47 @@ impl Ring {
         (!self.samples.is_empty() && self.end.elapsed() < Duration::from_secs(1))
             .then(|| (self.samples.drain(..).collect(), self.end, self.generation))
     }
+    fn restart(&mut self) {
+        self.gaps += 1; self.generation += 1; self.buffered = 0;
+        self.samples.clear(); self.history.fill(0.); self.phase = 0; self.cursor = 0;
+    }
+    /// The backend reported that audio is no longer continuous (for example WASAPI
+    /// DATA_DISCONTINUITY). Drop the evidence window and start a new
+    /// generation; the next packet starts it without being compared to the old timeline.
+    /// Several notices before that packet count as one gap.
+    pub fn interrupt(&mut self, reason: String) {
+        if self.expected.take().is_some() { self.restart(); }
+        self.notice = Some(reason);
+    }
+    /// Route a backend stream error. The vendored CPAL WASAPI patch
+    /// (vendor/cpal-0.18.1/KDJ-PATCH.md) reports flagged packets as Xrun on the capture
+    /// thread right before their data callback. A timestamp error only makes that packet's
+    /// capture time unreliable, so the packet continues the current timeline; every other
+    /// Xrun breaks continuity. Neither stops capture or switches devices.
+    pub fn backend_error(&mut self, error: &cpal::Error) {
+        if error.kind() != cpal::ErrorKind::Xrun {
+            self.error = Some(format!("声音输入失败：{error}"));
+        } else if error.to_string().contains("AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR") {
+            self.untimed = true;
+        } else {
+            self.interrupt(format!("声音输入不连续，已丢弃当前识别窗口：{error}"));
+        }
+    }
     pub fn push(&mut self, values: &[f32], channels: Vec<InputChannel>, first: Instant, received: Instant) -> Result<()> {
+        // An untimed packet is placed right after the previous one; with no timeline to
+        // continue it is dropped.
+        let first = match (std::mem::take(&mut self.untimed), self.expected) {
+            (false, _) => first,
+            (true, Some(expected)) => expected,
+            (true, None) => return Ok(()),
+        };
         if values.is_empty() { return Ok(()); }
         anyhow::ensure!(values.len() <= self.sample_rate as usize && values.iter().all(|v| v.is_finite()), "捕获音频包无效");
         let rate = self.sample_rate as f64;
         if self.expected.is_some_and(|expected| {
             first.saturating_duration_since(expected).max(expected.saturating_duration_since(first)) > Duration::from_millis(5)
         }) || self.samples.len() + (self.phase as usize + values.len() * 8000) / self.sample_rate as usize > 48000 {
-            self.gaps += 1; self.generation += 1; self.buffered = 0;
-            self.samples.clear(); self.history.fill(0.); self.phase = 0; self.cursor = 0;
+            self.restart();
         }
         self.expected = Some(first + Duration::from_secs_f64(values.len() as f64 / rate));
         self.channels = channels;
@@ -330,5 +366,64 @@ where T: cpal::SizedSample, f32: cpal::FromSample<T> {
             ring.lock().unwrap().push(&mono, levels, received - latency, received)
         })();
         if let Err(error) = result { ring.lock().unwrap().error = Some(error.to_string()); }
-    }, move |error| { errors.lock().unwrap().error = Some(format!("声音输入失败：{error}")); }, Some(Duration::from_secs(5)))?)
+    }, move |error| errors.lock().unwrap().backend_error(&error), Some(Duration::from_secs(5)))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupt_starts_a_new_generation_once() {
+        let mut ring = Ring::new("test".into(), 48000);
+        let packet = vec![0.25f32; 480];
+        let start = Instant::now();
+        ring.push(&packet, vec![], start, start).unwrap();
+        ring.push(&packet, vec![], start + Duration::from_millis(10), start).unwrap();
+        assert_eq!((ring.generation, ring.gaps), (0, 0));
+        assert!(!ring.samples.is_empty());
+
+        ring.interrupt("timestamp".into());
+        ring.interrupt("discontinuity".into());
+        assert_eq!((ring.generation, ring.gaps), (1, 1));
+        assert!(ring.samples.is_empty());
+        assert_eq!(ring.notice.take().as_deref(), Some("discontinuity"));
+
+        // The first packet after the break is far from the old timeline; it must not
+        // count as a second gap.
+        ring.push(&packet, vec![], start + Duration::from_secs(3), start).unwrap();
+        assert_eq!((ring.generation, ring.gaps), (1, 1));
+        assert_eq!(ring.take().map(|(_, _, generation)| generation), Some(1));
+    }
+
+    #[test]
+    fn backend_errors_are_routed_by_kind_and_message() {
+        // The literal KDJ matches must stay in the vendored CPAL patch that emits it.
+        assert!(include_str!("../../../vendor/cpal-0.18.1/src/host/wasapi/stream.rs")
+            .contains("\"WASAPI capture: AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR "));
+        let mut ring = Ring::new("test".into(), 48000);
+        let packet = vec![0.25f32; 480];
+        let start = Instant::now();
+        ring.push(&packet, vec![], start, start).unwrap();
+
+        // Timestamp error: the packet's own (wrong) time is ignored and the window keeps growing.
+        ring.backend_error(&cpal::Error::with_message(cpal::ErrorKind::Xrun,
+            "WASAPI capture: AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR (packet timestamp is unreliable)"));
+        ring.push(&packet, vec![], start + Duration::from_secs(3), start).unwrap();
+        ring.push(&packet, vec![], start + Duration::from_millis(20), start).unwrap();
+        assert_eq!((ring.generation, ring.gaps, ring.notice.is_none()), (0, 0, true));
+
+        ring.backend_error(&cpal::Error::with_message(cpal::ErrorKind::Xrun,
+            "WASAPI capture: AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY (captured audio is not continuous)"));
+        assert_eq!((ring.generation, ring.gaps, ring.notice.is_some()), (1, 1, true));
+        // Untimed with no timeline to continue: dropped.
+        ring.backend_error(&cpal::Error::with_message(cpal::ErrorKind::Xrun,
+            "WASAPI capture: AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR (packet timestamp is unreliable)"));
+        ring.push(&packet, vec![], start, start).unwrap();
+        assert!(ring.samples.is_empty() && ring.expected.is_none());
+
+        assert!(ring.error.is_none());
+        ring.backend_error(&cpal::Error::with_message(cpal::ErrorKind::DeviceNotAvailable, "gone"));
+        assert!(ring.error.is_some());
+    }
 }
