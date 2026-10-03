@@ -50,7 +50,8 @@ fn read_manifest(dir: &FsPath) -> Result<Value, String> {
         return Err("theme.json 过大".into());
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("无法读取 theme.json：{e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("theme.json 不是有效的 JSON：{e}"))
+    // Windows 的记事本等编辑器会存成带 BOM 的 UTF-8，serde_json 不认
+    serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format!("theme.json 不是有效的 JSON：{e}"))
 }
 
 fn scan(root: &FsPath) -> std::io::Result<Vec<Value>> {
@@ -184,9 +185,17 @@ async fn install_official(root: &FsPath, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 主题目录内的文件路径；任何越出 `themes/<id>/` 的写法都拒绝。
+/// 主题目录内的普通文件；任何越出 `themes/<id>/` 的写法都拒绝。
+/// 先按字面校验，再解析符号链接后确认仍在主题目录里：别人分享的主题包里
+/// 可以带一个指向 `~/.ssh` 的链接，字面上它是合法的相对路径。
 fn resolve(root: &FsPath, dir: &str, path: &str) -> Option<PathBuf> {
-    (valid_id(dir) && safe_relative(FsPath::new(path))).then(|| root.join(dir).join(path))
+    if !valid_id(dir) || !safe_relative(FsPath::new(path)) {
+        return None;
+    }
+    // 以真实的 themes 根目录为准，再拼上 dir：主题目录本身若是指向外部的链接，也不能借它读到外面。
+    let pack = root.canonicalize().ok()?.join(dir);
+    let target = pack.join(path).canonicalize().ok()?;
+    (target.starts_with(&pack) && target.is_file()).then_some(target)
 }
 
 async fn file(
@@ -195,7 +204,7 @@ async fn file(
     request: Request,
 ) -> ApiResult<Response> {
     let target = resolve(&themes_dir(&state), &dir, &path)
-        .ok_or_else(|| ApiError::bad_request("无效的主题文件路径"))?;
+        .ok_or_else(|| ApiError::not_found("主题文件不存在"))?;
     let response = ServeFile::new(target)
         .try_call(request)
         .await
@@ -207,13 +216,43 @@ async fn file(
 mod tests {
     use super::*;
 
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("kdj-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
     #[test]
     fn ids_and_paths_cannot_escape_the_theme_folder() {
-        let root = FsPath::new("/data/themes");
+        let base = scratch("theme-paths");
+        let root = &base.join("themes");
+        std::fs::create_dir_all(root.join("sketch/fonts")).unwrap();
+        std::fs::create_dir_all(root.join("pixel")).unwrap();
+        std::fs::write(root.join("sketch/fonts/a.ttf"), b"font").unwrap();
+        std::fs::write(root.join("sketch/theme.css"), b"css").unwrap();
+        std::fs::write(root.join("pixel/theme.css"), b"css").unwrap();
+        std::fs::write(base.join("secret"), b"secret").unwrap();
         assert_eq!(
             resolve(root, "sketch", "fonts/a.ttf"),
-            Some(PathBuf::from("/data/themes/sketch/fonts/a.ttf"))
+            Some(root.join("sketch/fonts/a.ttf"))
         );
+        // 目录、不存在的文件都不是可发的文件
+        assert_eq!(resolve(root, "sketch", "fonts"), None);
+        assert_eq!(resolve(root, "sketch", "missing.css"), None);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("secret"), root.join("sketch/link.txt")).unwrap();
+            std::os::unix::fs::symlink(&base, root.join("sketch/up")).unwrap();
+            std::os::unix::fs::symlink(root.join("sketch/theme.css"), root.join("sketch/alias.css")).unwrap();
+            assert_eq!(resolve(root, "sketch", "link.txt"), None);
+            assert_eq!(resolve(root, "sketch", "up/secret"), None);
+            // 包内的链接仍然可用
+            assert_eq!(resolve(root, "sketch", "alias.css"), Some(root.join("sketch/theme.css")));
+            // 主题目录本身是指向外部的链接
+            std::os::unix::fs::symlink(&base, root.join("escape")).unwrap();
+            assert_eq!(resolve(root, "escape", "secret"), None);
+        }
         for (dir, path) in [
             ("..", "theme.css"),
             ("sketch", "../pixel/theme.css"),
@@ -227,13 +266,14 @@ mod tests {
         ] {
             assert_eq!(resolve(root, dir, path), None, "{dir} / {path}");
         }
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
     fn scan_lists_folders_and_reports_broken_manifests() {
         let root = std::env::temp_dir().join(format!("kdj-themes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for (dir, manifest) in [("ok", Some(r#"{"id":"ok"}"#)), ("broken", Some("{")), ("empty", None)] {
+        for (dir, manifest) in [("ok", Some("\u{feff}{\"id\":\"ok\"}")), ("broken", Some("{")), ("empty", None)] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
             if let Some(text) = manifest {
                 std::fs::write(root.join(dir).join("theme.json"), text).unwrap();
