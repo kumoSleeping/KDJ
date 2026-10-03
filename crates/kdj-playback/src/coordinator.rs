@@ -8223,6 +8223,13 @@ mod tests {
         assert!((actor.state.current_time - 30.0).abs() < 0.001);
         assert_eq!(actor.state.phase, PlaybackPhase::Loading);
         assert!(actor.state.buffering);
+
+        // 前端在装载期不再等落地：连点时后到的目标继续改写同一条待激活换曲流。
+        actor.seek(75.0).expect("再次跳转仍折进换曲");
+        let pending = actor.pending[DeckId::B as usize].as_ref().expect("待激活流仍在");
+        assert!(matches!(pending.activation, Some(Activation::Hard)));
+        assert!((pending.request.position - 75.0).abs() < 0.001);
+        assert!((actor.state.current_time - 75.0).abs() < 0.001);
     }
 
     /// 接歌承诺未 activate 时点进度条：同样折进 Transition，避免乐观 UI 弹回 cue。
