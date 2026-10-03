@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::downloads::{
-    enqueue_audio, enqueue_video, restart_inactive_tasks, retry_task, DownloadManager,
+    enqueue_audio, enqueue_video, restart_inactive_tasks, retry_task, start_tasks, DownloadManager,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::state::{
@@ -3501,10 +3501,24 @@ async fn fail_download_preparation(
     Ok(Json(task))
 }
 
+#[derive(Deserialize)]
+struct StartDownloadsRequest {
+    #[serde(default)]
+    ids: Vec<String>,
+}
+
 async fn start_downloads(
     State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<Ctx>,
+    body: Option<Json<StartDownloadsRequest>>,
 ) -> Json<serde_json::Value> {
+    // 带 ids 时只开始点名的任务（CLI 用它放行自己刚入队的那几条），不动别人排着的
+    // 队列，也不顺手重试别人的失败任务。
+    let ids = body.map(|Json(body)| body.ids).unwrap_or_default();
+    if !ids.is_empty() {
+        let started = start_tasks(state, ctx.downloads.clone(), &ids);
+        return Json(json!({ "started": true, "retried": started }));
+    }
     // 「开始」是队列的统一执行入口：新排队任务和之前失败、可重试的歌曲
     // 应该在同一次点击里一起跑，不能逼用户再逐行点一遍「重试」。
     let retried = restart_inactive_tasks(state, ctx.downloads.clone());

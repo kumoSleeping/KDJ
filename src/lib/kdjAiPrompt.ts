@@ -19,16 +19,14 @@ KDJ 是一款把跨平台搜歌、下载、本地曲库和音乐分析整合在�
 - 下载位置与队列：kdj download destinations；kdj download list
 - 本地曲库：kdj library list；kdj library stats；kdj folder tree
 
-search、collection、resolve 和 account playlist 都可以加 --download，并共用 --to、--quality <flac|320|128>、--no-analyze、--start、--wait 和 --timeout。默认只创建排队任务；--start 放行当前队列，--wait 放行并等待本次任务完成。二维码结果通常包含可展示的二维码地址或图片及会话标识，下载结果通常包含任务状态和完成后的本地路径。
+search、collection、resolve 和 account playlist 都可以加 --download，并共用 --to、--quality <flac|320|128>、--no-analyze、--start、--wait 和 --timeout。默认只创建排队任务；--start 只开始本次创建的任务，--wait 开始并等待它们完成，不会动用户自己排着的队列。kdj download start <ID...> 同样只开始点名任务；不带 id 会放行整个队列并重试失败和暂停的任务，只在用户明确要求时使用。二维码结果通常包含可展示的二维码地址或图片及会话标识，下载结果通常包含任务状态和完成后的本地路径。
 
 组合案例：
 
 1. 搜索确认后，下载到指定文件夹
    kdj search "Around the World" --platform wyy --limit 5
    kdj download destinations
-   kdj search "Around the World" --platform wyy --download --pick 1 --to "House" --quality 320
-   kdj download list
-   kdj download start --wait
+   kdj search "Around the World" --platform wyy --download --pick 1 --to "House" --quality 320 --wait
 
 2. 扫码登录后下载账号歌单
    kdj account login --platform wyy
