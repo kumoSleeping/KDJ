@@ -55,6 +55,7 @@ test("reconnect downloads reconcile missed completions without regressing newer 
   pending.resolve([task("live", 80)]);
   await refresh;
   assert.equal(store.getState().tasks.size, 0);
+  assert.deepEqual(store.getState().history.map((task: { id: string }) => task.id), ["live"]);
   pending = deferred();
   const refresh2 = store.getState().refresh();
   store.getState().handleEvent({ type: "download.list", payload: [task("new", 90)] });

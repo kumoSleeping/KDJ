@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Check,
   ArrowLeft,
@@ -19,7 +19,7 @@ import { copyText } from "../../lib/copyText";
 import { copyShareContent, remoteArtwork } from "../../lib/shareClipboard";
 import { formatShareText, platformShareLink } from "../../lib/shareLink";
 import { useSharePrefs } from "../../lib/sharePrefs";
-import { folderName, formatPercent, thumbUrl } from "../../lib/format";
+import { folderName, formatDate, formatPercent, thumbUrl } from "../../lib/format";
 import { SEARCH_QUEUE_DROP_ATTR } from "../../lib/folderDrop";
 import {
   enqueueSearchQueuePayload,
@@ -27,6 +27,7 @@ import {
   isSearchDownloadDrag,
   readSearchDrop,
 } from "../../lib/searchDrag";
+import { sortDownloadTasks } from "../../lib/downloadOrder";
 import { forgetQueueDraft, patchVideoDraft, setQueueDraft } from "../../lib/queueTaskDraft";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -75,10 +76,6 @@ function stateLabel(task: DownloadTask): string {
 /** 和视频结果行同一套高度阶梯：点一下切一档。 */
 const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
 const AUDIO_QUALITIES: Quality[] = ["flac", "320", "128"];
-
-function TaskStateMark({ task }: { task: DownloadTask }) {
-  return <QueueStateMark state={task.state} />;
-}
 
 /**
  * 队列可能一次塞进几百首，只让滚动视口内的封面进入 DOM。
@@ -206,9 +203,10 @@ function QueueQualityControl({
   const videoHeight = Number.parseInt(task.quality, 10);
   const label =
     task.kind === "audio"
-      ? normalizedQuality === "flac"
-        ? "FLAC"
-        : `${normalizedQuality}K`
+      ? /^\d+$/.test(normalizedQuality)
+        ? `${normalizedQuality}K`
+        // 完成后 quality 会被改写成实际后缀（mp3/m4a/opus…），不是码率。
+        : normalizedQuality.toUpperCase()
       : Number.isFinite(videoHeight)
         ? `${videoHeight}p`
         : task.quality.toUpperCase();
@@ -285,6 +283,7 @@ function QueueRow({
   const cancel = useDownloadStore((store) => store.cancel);
   const retry = useDownloadStore((store) => store.retry);
   const remove = useDownloadStore((store) => store.remove);
+  const missing = useDownloadStore((store) => store.missingIds.has(task.id));
   const shareContentMode = useSharePrefs((state) => state.contentMode);
   /** 行内操作失败的原因，和任务自己的 error 共用行尾那一行。 */
   const [cancelError, setCancelError] = useState("");
@@ -312,6 +311,19 @@ function QueueRow({
       ? { page_index: videoPage.index, page_count: videoPage.count }
       : undefined,
   );
+  const state = missing ? "文件缺失" : stateLabel(task);
+  const finished =
+    task.state === "done" || task.state === "failed" || task.state === "canceled"
+      ? formatDate(task.updated_at)
+      : "";
+  const previous = task.previous_error?.trim() ?? "";
+  const previousError = task.state === "failed" && previous !== task.error.trim() ? previous : "";
+  // 重试成功或取消后错误行不再显示，前一次失败原因放进状态的 title 里留底。
+  const stateTitle = missing
+    ? `文件已不在原位置：${task.path}`
+    : previous && (task.state === "done" || task.state === "canceled")
+      ? `前一次失败：${previous}`
+      : undefined;
   // 失败或取消而且没有落盘的任务不再标目标文件夹：那里根本没有文件可找。
   const recordedTarget = task.path.trim()
     ? task.path.replace(/[\\/][^\\/]*$/, "") || task.path
@@ -323,6 +335,7 @@ function QueueRow({
     <article
       className="kd-download-task"
       data-state={task.state}
+      data-missing={missing || undefined}
       onContextMenu={(event) => {
         event.preventDefault();
         setMenu({ x: event.clientX, y: event.clientY });
@@ -359,6 +372,13 @@ function QueueRow({
               {task.quality ? (
                 <QueueQualityControl task={task} onError={setCancelError} />
               ) : null}
+              {finished ? (
+                <span className="kd-download-task-time kd-mono" title={`${stateLabel(task)}：${finished}`}>
+                  {finished.startsWith(`${new Date().getFullYear()}-`)
+                    ? finished.slice(5)
+                    : finished.slice(0, 10)}
+                </span>
+              ) : null}
               {recordedTarget.trim() ? (
                 <span
                   className="kd-download-task-target kd-mono"
@@ -372,8 +392,8 @@ function QueueRow({
           </span>
           <span className="kd-download-task-state">
             <span className="kd-download-task-state-label">
-              <TaskStateMark task={task} />
-              <span className="kd-download-task-state-text">{stateLabel(task)}</span>
+              <QueueStateMark state={missing ? "failed" : task.state} />
+              <span className="kd-download-task-state-text" title={stateTitle}>{state}</span>
             </span>
             <span
               className="kd-download-task-percent kd-mono"
@@ -431,7 +451,8 @@ function QueueRow({
               size="sm"
               iconOnly
               aria-label="在文件管理器中显示下载文件"
-              title={`在文件管理器中显示：${task.path}`}
+              title={missing ? `文件已不在原位置：${task.path}` : `在文件管理器中显示：${task.path}`}
+              disabled={missing}
               onClick={() => onOpenTask(task)}
             >
               <FolderOpen size={12} />
@@ -459,8 +480,14 @@ function QueueRow({
       </div>
 
       {task.error && task.error.trim() !== stateLabel(task) ? (
-        <div className="kd-download-task-error" title={task.error}>
+        <div
+          className="kd-download-task-error"
+          title={previousError ? `${task.error}\n前一次：${previousError}` : task.error}
+        >
           {task.error}
+          {previousError ? (
+            <span className="kd-download-task-error-previous">前一次：{previousError}</span>
+          ) : null}
         </div>
       ) : null}
       {/* 取消失败是"我按了但没反应"，必须留在这一条上：任务还在跑，
@@ -679,8 +706,19 @@ function QueuePrefsBar({
 export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
+  const done = useDownloadStore((store) => store.history);
+  const checkMissingFiles = useDownloadStore((store) => store.checkMissingFiles);
   const [history, setHistory] = useState(false);
-  const visibleTasks = list.filter(task => history === (task.state === "done" || task.state === "canceled"));
+  const visibleTasks = history
+    ? sortDownloadTasks([...done, ...list.filter((task) => task.state === "canceled")])
+    : list.filter((task) => task.state !== "canceled");
+  // 挂载、切到历史视图和窗口重新聚焦时 stat；文件多半是用户切到文件管理器里挪走的。
+  useEffect(() => {
+    void checkMissingFiles();
+    const onFocus = () => void checkMissingFiles();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [checkMissingFiles, history]);
   const pauseAll = useDownloadStore((store) => store.pauseAll);
   const [dropActive, setDropActive] = useState(false);
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
@@ -704,9 +742,11 @@ export function QueuePanel() {
     const path = task.path;
     // 入库失败等异常任务会保留最终落盘路径；直接让文件管理器选中成品，
     // 比切到一个可能尚未入库的目录筛选更可靠。
-    void window.kdj?.revealPath(path).catch((error: unknown) =>
-      setActionError(`定位下载文件失败：${(error as Error).message}`),
-    );
+    void window.kdj?.revealPath(path).catch((error: unknown) => {
+      setActionError(`定位下载文件失败：${(error as Error).message}`);
+      // 曲库内删除/移动不触发聚焦，失败一次就重查，让这一行立刻标成缺失。
+      void checkMissingFiles();
+    });
   };
 
   return (
