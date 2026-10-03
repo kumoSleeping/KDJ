@@ -267,8 +267,11 @@ async function load(manifest: ThemeManifest): Promise<void> {
   if (manifest.js) {
     // 脚本坏了不该连累样式：CSS 已经生效，这里只记日志
     try {
-      const url = (await fileUrl(manifest.id, manifest.js)) + stamp;
-      const module = await import(/* @vite-ignore */ url);
+      // 取回文本再从 blob: 导入：CSP 的 script-src 不必对本机任意端口放开
+      const response = await fetch((await fileUrl(manifest.id, manifest.js)) + stamp);
+      if (!response.ok) throw new Error(`无法加载 ${manifest.js}`);
+      const url = URL.createObjectURL(new Blob([await response.text()], { type: "text/javascript" }));
+      const module = await import(/* @vite-ignore */ url).finally(() => URL.revokeObjectURL(url));
       const entry = module.default as { mount?: (ctx: unknown) => void; unmount?: () => void } | undefined;
       entry?.mount?.({
         id: manifest.id,
@@ -494,12 +497,17 @@ export function themeRgb(name: string, fallback: ThemeRgb): ThemeRgb {
   const cached = rgbCache.get(key);
   if (cached) return cached;
   if (!probe?.isConnected) {
-    probe = document.createElement("span");
-    probe.hidden = true;
-    document.body.append(probe);
+    const host = document.createElement("span");
+    host.hidden = true;
+    probe = host.appendChild(document.createElement("span"));
+    document.body.append(host);
   }
-  probe.style.color = `var(${name}, rgb(${fallback.join(",")}))`;
-  const match = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(getComputedStyle(probe).color);
+  // 令牌写成了非颜色值时声明在计算阶段失效、改为继承；让它继承到的也是 fallback
+  const fallbackCss = `rgb(${fallback.join(",")})`;
+  (probe.parentElement as HTMLElement).style.color = fallbackCss;
+  probe.style.color = `var(${name}, ${fallbackCss})`;
+  // 只认不透明的 rgb()：canvas 这边没有可供透明色叠加的底
+  const match = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(getComputedStyle(probe).color);
   const value: ThemeRgb = match ? [Number(match[1]), Number(match[2]), Number(match[3])] : fallback;
   rgbCache.set(key, value);
   return value;

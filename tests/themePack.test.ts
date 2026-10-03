@@ -31,6 +31,10 @@ test("a valid manifest parses and unknown option types are ignored", () => {
 });
 
 test("broken manifests are rejected with a reason", () => {
+  // 合法但不是对象的 JSON：服务端会原样转发，这里必须给出原因
+  for (const raw of [null, 0, false, "", []]) {
+    assert.equal(parseThemeManifest(raw, "sketch"), "theme.json 必须是对象");
+  }
   for (const [patch, dir] of [
     [{ kdj: 2 }, "sketch"],
     [{}, "other-folder"],
