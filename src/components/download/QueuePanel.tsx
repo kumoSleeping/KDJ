@@ -312,9 +312,12 @@ function QueueRow({
       ? { page_index: videoPage.index, page_count: videoPage.count }
       : undefined,
   );
+  // 失败或取消而且没有落盘的任务不再标目标文件夹：那里根本没有文件可找。
   const recordedTarget = task.path.trim()
     ? task.path.replace(/[\\/][^\\/]*$/, "") || task.path
-    : task.output_dir || task.dest_dir || "";
+    : active || task.state === "paused"
+      ? task.output_dir || task.dest_dir || ""
+      : "";
 
   return (
     <article
