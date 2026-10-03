@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   addStateListener,
   dispose,
@@ -897,7 +898,9 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
         "playback-state",
         (event: TauriEvent<DesktopPlaybackSnapshotRaw>) => this.accept(event.payload),
       );
-      this.unlistenLevels = await listen<DesktopLevelsRaw | [number, number]>(
+      // Window-scoped so the desktop's emit_to("main") skips other windows (e.g. the lyrics
+      // overlay); a global listen() has target Any and would still receive every event.
+      this.unlistenLevels = await getCurrentWebviewWindow().listen<DesktopLevelsRaw | [number, number]>(
         "playback-levels",
         (event: TauriEvent<DesktopLevelsRaw | [number, number]>) => {
           const payload = event.payload;

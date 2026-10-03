@@ -297,6 +297,7 @@ async function createTauriBridge(): Promise<KdjBridge> {
             reposition: options.reposition,
             x: options.x,
             y: options.y,
+            destroy: options.destroy,
           })
       : android
         ? async (options) => {

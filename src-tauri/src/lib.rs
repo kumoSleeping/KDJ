@@ -2361,12 +2361,19 @@ fn set_desktop_lyrics(
     reposition: bool,
     x: Option<i32>,
     y: Option<i32>,
+    destroy: Option<bool>,
 ) -> Result<(), String> {
     #[cfg(desktop)]
     {
         if !visible {
             if let Some(window) = app.get_webview_window("lyrics-overlay") {
-                window.hide().map_err(|err| err.to_string())?;
+                // Turning the overlay off releases its WebView process; automatic hides (no track,
+                // video mode) keep it so it re-shows instantly.
+                if destroy.unwrap_or(false) {
+                    window.destroy().map_err(|err| err.to_string())?;
+                } else {
+                    window.hide().map_err(|err| err.to_string())?;
+                }
             }
             return Ok(());
         }
@@ -2420,9 +2427,6 @@ fn set_desktop_lyrics(
         window
             .set_always_on_top(true)
             .map_err(|err| err.to_string())?;
-        window
-            .set_ignore_cursor_events(true)
-            .map_err(|err| err.to_string())?;
         desktop_lyrics_hit_test::set_locked(locked);
         if reposition {
             if let (Some(x), Some(y)) = (x, y) {
@@ -2432,11 +2436,15 @@ fn set_desktop_lyrics(
             }
         }
         window.show().map_err(|err| err.to_string())?;
+        // After show: on Linux tao unwraps the GdkWindow, which a never-shown window lacks.
+        window
+            .set_ignore_cursor_events(true)
+            .map_err(|err| err.to_string())?;
         return Ok(());
     }
     #[cfg(not(desktop))]
     {
-        let _ = (app, visible, position, locked, font_scale, reposition, x, y);
+        let _ = (app, visible, position, locked, font_scale, reposition, x, y, destroy);
         Ok(())
     }
 }

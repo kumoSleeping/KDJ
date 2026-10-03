@@ -120,8 +120,9 @@ impl DesktopPlayerHandle {
                 .map_err(|_| "系统媒体控制重复绑定播放器".to_string())?;
             {
                 let level_app = app.clone();
+                // Only the main window draws meters/spectrum; the lyrics overlay never reads them.
                 coordinator.subscribe_levels(move |levels| {
-                    if let Err(error) = level_app.emit(LEVEL_EVENT, levels) {
+                    if let Err(error) = level_app.emit_to("main", LEVEL_EVENT, levels) {
                         tracing::warn!("发送电平失败：{error}");
                     }
                 });

@@ -1172,6 +1172,8 @@ export interface KdjBridge {
     reposition: boolean;
     x?: number | null;
     y?: number | null;
+    /** 桌面：用户关掉开关时为 true，销毁窗口释放 WebView；无曲目、视频模式等自动隐藏只 hide，便于快速重显。 */
+    destroy?: boolean;
     /** 主行已唱部分颜色 `#RRGGBB`；桌面 / Android 悬浮歌词逐字高亮共用。 */
     accent?: string;
     accentEnd?: string;
