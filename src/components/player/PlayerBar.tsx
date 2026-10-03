@@ -174,7 +174,7 @@ import {
   trackIdRequest,
   type PlaybackTrackRequest,
 } from "../../lib/playbackTrack";
-import { decideNativeLatestIntent, LatestIntentGate } from "../../lib/latestIntentGate";
+import { canDispatchNativeSeek, decideNativeLatestIntent, LatestIntentGate } from "../../lib/latestIntentGate";
 import {
   shouldBeginManagerTransition,
   shouldClearLocalVideoSessionForTrack,
@@ -1011,6 +1011,8 @@ export function PlayerBar() {
   /** 原生 seek 单飞：请求槽只保留最后一个目标，避免 Android commandTail 被连续点击填满。 */
   const nativeSeekRequestRef = useRef<{ trackId: number; position: number; onDispatch?(): void; onCancel?(): void } | null>(null);
   const nativeSeekInFlightRef = useRef(false);
+  /** 上一次派出、权威状态尚未回到非 busy（未落地）的 seek 所属曲目。 */
+  const nativeSeekLandingRef = useRef<number | null>(null);
   const nativeSeekDrainRef = useRef<() => void>(() => {});
   /**
    * 波形 scrub 拖动中（pointerdown→up/cancel，由波形显式发边界事件）。
@@ -1059,14 +1061,21 @@ export function PlayerBar() {
   const lastNativeHealRef = useRef<{ trackId: number; at: number } | null>(null);
 
   /**
-   * 原生播放器只允许一个 seek 命令在途。协调器进入 Seeking/Loading 后，后续点击
-   * 先停在槽里，等权威状态回到当前曲目且不再 buffering 时再发最后一个目标。
-   * 这样既保留第一下的即时响应，也不会把一串过时位置排进 Tauri/Rust 队列。
+   * 原生播放器只允许一个 seek 命令在途，请求槽只保留最后一个目标。权威状态必须已属于
+   * 目标曲目；换曲/接歌装载期不再等装载完成——共享 Rust 协调器会把 seek 折进待激活流。
+   * 同曲 busy 期间（装载、Seeking、在线卡顿）只放行一次：上一次派出的 seek 落地
+   * （状态回到非 busy）前，后续点击停在槽里，连点/长按方向键因此每次落地最多重启
+   * 一次解码，而不是每个 ACK 一次。iOS AVPlayer 仍等就绪。
    */
   const drainNativeSeek = useCallback(() => {
     const player = nativePlayer;
+    if (!player || nativeSeekInFlightRef.current) return;
+    const state = player.state();
+    const busy = state.buffering || state.status === "loading";
+    // 上一次 seek 已落地，或协调器已换到别的歌：后续点击不再等它。
+    if (!busy || state.trackId !== nativeSeekLandingRef.current) nativeSeekLandingRef.current = null;
     const request = nativeSeekRequestRef.current;
-    if (!player || !request || nativeSeekInFlightRef.current) return;
+    if (!request) return;
 
     const current = trackRef.current;
     if (!current || current.id !== request.trackId) {
@@ -1074,17 +1083,18 @@ export function PlayerBar() {
       nativeSeekRequestRef.current = null;
       return;
     }
-    const state = player.state();
-    if (
-      state.trackId !== request.trackId ||
-      state.buffering ||
-      state.status === "loading"
-    ) {
+    if (!canDispatchNativeSeek(request.trackId, {
+      stateTrackId: state.trackId,
+      busy,
+      landingTrackId: nativeSeekLandingRef.current,
+      foldsIntoPendingLoad: player.kind !== "mobile-native",
+    })) {
       return;
     }
 
     nativeSeekRequestRef.current = null;
     nativeSeekInFlightRef.current = true;
+    nativeSeekLandingRef.current = request.trackId;
     const target = request.position;
     // 旧曲目的状态边沿可能已清掉 pendingSeek；在真正发命令前重新 pin 一次。
     pendingSeekRef.current = { trackId: request.trackId, position: target, at: performance.now() };
@@ -1093,6 +1103,8 @@ export function PlayerBar() {
       .seek(target)
       .catch(() => {
         request.onCancel?.();
+        // 被拒绝的 seek 没有在途流可等。
+        nativeSeekLandingRef.current = null;
         // 失败时只清理仍指向这次目标的槽位；更晚的点击不能被旧错误抹掉。
         const latest = nativeSeekRequestRef.current;
         if (
@@ -1140,6 +1152,7 @@ export function PlayerBar() {
     scrubbingRef.current = false;
     nativeSeekRequestRef.current?.onCancel?.();
     nativeSeekRequestRef.current = null;
+    nativeSeekLandingRef.current = null;
     pendingSeekRef.current = null;
   }, []);
   useEffect(() => () => invalidateNativeSeek(), [invalidateNativeSeek]);
