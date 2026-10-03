@@ -122,10 +122,10 @@ pub struct DownloadFlowArgs {
     /// 下载完成后不自动分析
     #[arg(long)]
     pub no_analyze: bool,
-    /// 入队后立即放行当前下载队列
+    /// 入队后立即开始本次创建的任务
     #[arg(long)]
     pub start: bool,
-    /// 自动开始并等待本次任务全部结束；结果包含最终文件路径
+    /// 开始本次创建的任务并等待全部结束；结果包含最终文件路径
     #[arg(long)]
     pub wait: bool,
     /// 等待下载的最长秒数（默认 3600）
@@ -233,8 +233,10 @@ pub enum DownloadCmd {
     /// 列出下载任务
     #[command(visible_alias = "ls")]
     List,
-    /// 开始当前队列，可选择等待并返回最终路径
+    /// 开始指定任务；不传 id 时放行整个队列并重试失败和暂停的任务
     Start {
+        #[arg(value_name = "ID")]
+        id: Vec<String>,
         #[arg(long)]
         wait: bool,
         #[arg(long, default_value_t = 3600, value_name = "SECONDS")]

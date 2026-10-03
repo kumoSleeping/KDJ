@@ -1182,8 +1182,11 @@ impl DownloadManager {
             let entry = entries.get_mut(id).context("任务不存在")?;
             anyhow::ensure!(entry.task.kind == TaskKind::Audio, "只有歌曲下载支持重试");
             anyhow::ensure!(
-                matches!(entry.task.state, TaskState::Paused | TaskState::Failed),
-                "只有暂停或失败的任务可以重新开始"
+                matches!(
+                    entry.task.state,
+                    TaskState::Queued | TaskState::Paused | TaskState::Failed
+                ),
+                "只有排队、暂停或失败的任务可以重新开始"
             );
             let retry = entry
                 .audio_retry
@@ -1292,8 +1295,11 @@ impl DownloadManager {
             let entry = entries.get_mut(id).context("任务不存在")?;
             anyhow::ensure!(entry.task.kind == TaskKind::Video, "这条任务不是视频下载");
             anyhow::ensure!(
-                matches!(entry.task.state, TaskState::Paused | TaskState::Failed),
-                "只有暂停或失败的任务可以重新开始"
+                matches!(
+                    entry.task.state,
+                    TaskState::Queued | TaskState::Paused | TaskState::Failed
+                ),
+                "只有排队、暂停或失败的任务可以重新开始"
             );
             let retry = entry
                 .video_retry
@@ -2246,9 +2252,14 @@ pub fn retry_task(
 /// 重新开始当前快照里所有暂停或可重试的失败媒体。单条可能被另一个点击抢先，
 /// 这种竞态直接跳过即可，其余任务仍照常启动。
 pub fn restart_inactive_tasks(state: Arc<AppState>, manager: Arc<DownloadManager>) -> usize {
-    manager
-        .restartable_ids()
-        .into_iter()
+    let ids = manager.restartable_ids();
+    start_tasks(state, manager, &ids)
+}
+
+/// 只开始点名的任务：排队中的交给立即开始的新 worker，暂停/失败的按重试处理。
+/// 不碰全局放行计数，别人排着的任务和失败记录保持原样。已在跑或已结束的直接跳过。
+pub fn start_tasks(state: Arc<AppState>, manager: Arc<DownloadManager>, ids: &[String]) -> usize {
+    ids.iter()
         .filter(|id| retry_task(state.clone(), manager.clone(), id).is_ok())
         .count()
 }
@@ -3277,7 +3288,9 @@ mod tests {
         assert_eq!(retry.dest_dir, "/music");
         assert!(!fresh_cancel.is_cancelled());
         assert!(manager.restartable_ids().is_empty());
-        assert!(manager.prepare_audio_retry("retry").is_err());
+        // 排队中的任务也能被点名开始，但同一时刻只能有一个 worker 持有它
+        assert!(manager.prepare_audio_retry("retry").is_ok());
+        assert!(fresh_cancel.is_cancelled());
     }
 
     #[test]
@@ -4276,5 +4289,50 @@ mod tests {
         assert!(!waiter.is_finished(), "点击后新加入的任务必须继续排队");
         cancel.cancel();
         assert!(!waiter.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn starting_by_id_leaves_other_queued_and_failed_tasks_alone() {
+        let base = std::env::temp_dir().join(format!("kdj-start-by-id-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let state = AppState::new(Arc::new(kdj_core::AppConfig::create(
+            base.join("data"),
+            base.join("downloads"),
+            0,
+        )))
+        .unwrap();
+        let manager = Arc::new(DownloadManager::new(EventHub::default(), 3, false));
+        let mine = CancellationToken::new();
+        let theirs = CancellationToken::new();
+        let broken = CancellationToken::new();
+        manager.insert(sample_task("mine", TaskState::Queued, 1.0), mine.clone());
+        manager.insert(
+            sample_task("theirs", TaskState::Queued, 2.0),
+            theirs.clone(),
+        );
+        let mut failed = sample_task("broken", TaskState::Failed, 3.0);
+        failed.error = "网络失败".into();
+        manager.insert(failed, broken.clone());
+        for id in ["mine", "theirs", "broken"] {
+            manager.attach_audio_retry(id, sample_audio_retry(false));
+        }
+        let generation = manager.start_generation();
+
+        // 测试体之后不再 yield，被点名任务的新 worker 随运行时一起丢弃，不会碰 provider。
+        assert_eq!(start_tasks(state, manager.clone(), &["mine".into()]), 1);
+
+        assert!(mine.is_cancelled(), "被点名的任务应交给立即开始的新 worker");
+        assert_eq!(
+            manager.start_generation(),
+            generation,
+            "按 id 开始不得放行整个队列"
+        );
+        assert!(!theirs.is_cancelled());
+        assert_eq!(manager.get("theirs").unwrap().state, TaskState::Queued);
+        assert!(!broken.is_cancelled(), "别人的失败任务不该被顺手重试");
+        let failed = manager.get("broken").unwrap();
+        assert_eq!(failed.state, TaskState::Failed);
+        assert_eq!(failed.error, "网络失败");
+        let _ = fs::remove_dir_all(base);
     }
 }

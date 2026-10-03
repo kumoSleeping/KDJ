@@ -331,10 +331,19 @@ fn download_cmd(http: &HttpClient, command: DownloadCmd) -> Result<i32> {
     match command {
         DownloadCmd::Destinations => Ok(emit_ok(download_dests(http)?)),
         DownloadCmd::List => Ok(emit_ok(http.get_value("/api/downloads")?)),
-        DownloadCmd::Start { wait, timeout } => {
-            let current = http.get_value("/api/downloads")?;
-            let ids = start_download_ids(&current);
-            http.post_json("/api/downloads/start", &json!({}))?;
+        DownloadCmd::Start { id, wait, timeout } => {
+            // 不带 id 沿用整队放行：排队任务全部开始，可重试的失败任务一并重试。
+            let body = if id.is_empty() {
+                json!({})
+            } else {
+                json!({ "ids": &id })
+            };
+            let ids = if id.is_empty() {
+                start_download_ids(&http.get_value("/api/downloads")?)
+            } else {
+                id
+            };
+            http.post_json("/api/downloads/start", &body)?;
             let tasks = if wait {
                 wait_for_downloads(http, &ids, timeout)?
             } else {
@@ -520,7 +529,8 @@ fn spec_doc() -> Value {
             "关窗不等于退出；kdj show 唤回主窗，kdj quit 真退出",
             "二维码登录：account login 返回 URL / PNG data URL；account login-status 可等待结果",
             "所有下载入口共享 --to / --quality / --no-analyze / --start / --wait / --timeout",
-            "不加 --start/--wait 只返回待下载清单；--wait 自动开始并返回最终 paths",
+            "不加 --start/--wait 只返回待下载清单；--start/--wait 只开始本次创建的任务，--wait 等待并返回最终 paths",
+            "download start [ID...] 只开始点名任务；不带 id 放行整个队列并重试失败和暂停的任务",
             "下载 --to = 侧栏文件夹；先 download destinations 再下",
             "曲库写操作只有 move / forget / delete --yes；forget 不删磁盘",
             "搜索 --kind song|playlist|album|artist|radio；集合用同一条 collection，加 --download 才下载",
@@ -535,13 +545,13 @@ fn spec_doc() -> Value {
             "producers": ["search --download", "collection --download", "resolve --download", "account playlist --download"],
             "shared_options": ["--to", "--quality", "--no-analyze", "--start", "--wait", "--timeout"],
             "planned": "默认只入队；data.tasks 包含 title/platform/output_dir",
-            "completed": "--wait 自动开始；data.paths 是最终本地绝对路径"
+            "completed": "--wait 只开始本次任务并等待；data.paths 是最终本地绝对路径"
         },
         "commands": [
             "status", "show", "quit", "spec",
             "library list|get|stats|move|forget|delete|undo|scan|analyze",
             "search [--download --pick N]", "collection [--download]", "resolve [--download]",
-            "download destinations|list|start|wait|cancel|cancel-all|retry|remove|clear",
+            "download destinations|list|start [ID...]|wait [ID...]|cancel|cancel-all|retry|remove|clear",
             "mix next", "folder tree|create|rename|move|remove",
             "settings get|set",
             "account list|login|login-status|logout|playlists|playlist [--download]"
@@ -735,7 +745,8 @@ fn run_download_flow(http: &HttpClient, tasks: Value, options: &DownloadFlowArgs
     }
     let started = options.start || options.wait;
     if started {
-        http.post_json("/api/downloads/start", &json!({}))?;
+        // 只放行本次入队的任务；用户自己排着的队列和失败记录留给 UI 的「开始」。
+        http.post_json("/api/downloads/start", &json!({ "ids": &ids }))?;
     }
     let latest = if options.wait {
         wait_for_downloads(http, &ids, options.timeout.unwrap_or(3600))?
@@ -1147,5 +1158,98 @@ mod tests {
             json!([{"platform": "wyy", "key": "w2"}])
         );
         assert!(pick_search_sources(&search, &[1, 1]).is_err());
+    }
+
+    /// 逐个连接应答；每次都 `Connection: close`，reqwest 才不会复用连接把第二个请求粘到第一个上。
+    fn stub_server(
+        listener: std::net::TcpListener,
+        responses: Vec<Value>,
+    ) -> std::thread::JoinHandle<Vec<(String, String)>> {
+        use std::io::{Read, Write};
+        std::thread::spawn(move || {
+            responses
+                .into_iter()
+                .map(|response| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut head = Vec::new();
+                    let mut byte = [0];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        head.push(byte[0]);
+                    }
+                    let head = String::from_utf8(head).unwrap();
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    let payload = response.to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    )
+                    .unwrap();
+                    (head, String::from_utf8(body).unwrap())
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn download_flow_starts_only_the_tasks_it_enqueued() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = stub_server(
+            listener,
+            vec![
+                json!({"started": true, "retried": 0}),
+                json!([
+                    {"id": "a", "state": "running"},
+                    {"id": "b", "state": "queued"},
+                    {"id": "theirs", "state": "queued"}
+                ]),
+            ],
+        );
+        let http = HttpClient::new(&format!("http://{address}"), "test-token").unwrap();
+        let options = DownloadFlowArgs {
+            to: None,
+            quality: None,
+            no_analyze: false,
+            start: true,
+            wait: false,
+            timeout: None,
+        };
+        let result = run_download_flow(
+            &http,
+            json!([{"id": "a", "state": "queued"}, {"id": "b", "state": "queued"}]),
+            &options,
+        )
+        .unwrap();
+
+        let requests = server.join().unwrap();
+        assert!(
+            requests[0].0.starts_with("POST /api/downloads/start "),
+            "{}",
+            requests[0].0
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&requests[0].1).unwrap(),
+            json!({"ids": ["a", "b"]})
+        );
+        assert!(
+            requests[1].0.starts_with("GET /api/downloads "),
+            "{}",
+            requests[1].0
+        );
+        assert_eq!(result["tasks"].as_array().unwrap().len(), 2);
     }
 }
