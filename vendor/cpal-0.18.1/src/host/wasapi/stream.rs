@@ -780,7 +780,10 @@ fn process_input(
                 Ok(_) => (),
             }
 
-            debug_assert!(!buffer.is_null());
+            // KDJ patch: silent packets do not require a usable engine buffer.
+            debug_assert!(
+                flags & Audio::AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || !buffer.is_null()
+            );
 
             // KDJ patch: consume the packet flags. Notices go out before this packet's data
             // callback, on this thread, and never stop the stream. The discontinuity flag is

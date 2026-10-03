@@ -2352,7 +2352,7 @@ fn desktop_lyrics_inner_size(font_scale: f64) -> (f64, f64) {
 
 /// 创建/更新桌面歌词窗口。窗口由 Rust 持有原生层级和鼠标穿透，页面只负责绘字。
 #[tauri::command]
-fn set_desktop_lyrics(
+async fn set_desktop_lyrics(
     app: tauri::AppHandle,
     visible: bool,
     position: DesktopLyricsPosition,
@@ -2365,12 +2365,23 @@ fn set_desktop_lyrics(
 ) -> Result<(), String> {
     #[cfg(desktop)]
     {
+        // destroy() only queues native destruction. Keep later show/update commands out
+        // until Tauri has removed the old window label, without blocking its event loop.
+        static LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _lifecycle = LIFECYCLE.lock().await;
         if !visible {
             if let Some(window) = app.get_webview_window("lyrics-overlay") {
                 // Turning the overlay off releases its WebView process; automatic hides (no track,
                 // video mode) keep it so it re-shows instantly.
                 if destroy.unwrap_or(false) {
                     window.destroy().map_err(|err| err.to_string())?;
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while app.get_webview_window("lyrics-overlay").is_some() {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .map_err(|_| "等待桌面歌词窗口释放超时".to_string())?;
                 } else {
                     window.hide().map_err(|err| err.to_string())?;
                 }

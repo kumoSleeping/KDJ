@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use kdj_core::models::{
@@ -353,7 +354,44 @@ fn quarantine_invalid_journal(path: &Path, error: &anyhow::Error) -> Result<()> 
     Ok(())
 }
 
-fn load_journal(path: &Path) -> Result<BTreeMap<String, Entry>> {
+struct LoadedJournal {
+    entries: BTreeMap<String, Entry>,
+    changed: bool,
+    read_only: Option<String>,
+}
+
+impl Default for LoadedJournal {
+    fn default() -> Self {
+        Self { entries: BTreeMap::new(), changed: true, read_only: None }
+    }
+}
+
+fn dropped_journal_paths(raw: &serde_json::Value, written: &serde_json::Value, path: &str, lost: &mut Vec<String>) {
+    match (raw, written) {
+        (serde_json::Value::Object(raw), serde_json::Value::Object(written)) => {
+            for (key, value) in raw {
+                let child = format!("{path}.{key}");
+                match written.get(key) {
+                    Some(other) => dropped_journal_paths(value, other, &child, lost),
+                    None => lost.push(child),
+                }
+            }
+        }
+        (serde_json::Value::Array(raw), serde_json::Value::Array(written)) => {
+            for (index, value) in raw.iter().enumerate() {
+                let child = format!("{path}[{index}]");
+                match written.get(index) {
+                    Some(other) => dropped_journal_paths(value, other, &child, lost),
+                    None => lost.push(child),
+                }
+            }
+        }
+        (serde_json::Value::Object(_) | serde_json::Value::Array(_), _) => lost.push(path.to_string()),
+        _ => {}
+    }
+}
+
+fn load_journal(path: &Path) -> Result<LoadedJournal> {
     match fs::symlink_metadata(path) {
         Ok(metadata)
             if !metadata.file_type().is_file()
@@ -362,42 +400,63 @@ fn load_journal(path: &Path) -> Result<BTreeMap<String, Entry>> {
         {
             let error = anyhow::anyhow!("下载队列文件类型或大小无效");
             quarantine_invalid_journal(path, &error)?;
-            return Ok(BTreeMap::new());
+            return Ok(LoadedJournal::default());
         }
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(LoadedJournal::default()),
         Err(error) => {
             return Err(error).with_context(|| format!("检查下载队列失败：{}", path.display()))
         }
     }
     let body = match fs::read(path) {
         Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(LoadedJournal::default()),
         Err(error) => {
             return Err(error).with_context(|| format!("读取下载队列失败：{}", path.display()))
         }
     };
-    let journal = match serde_json::from_slice::<DownloadJournal>(&body) {
-        Ok(journal) if journal.version == DOWNLOAD_JOURNAL_VERSION => journal,
-        Ok(journal) => {
-            let error = anyhow::anyhow!("不支持的下载队列版本：{}", journal.version);
-            quarantine_invalid_journal(path, &error)?;
-            return Ok(BTreeMap::new());
-        }
+    let raw: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(raw) => raw,
         Err(parse_error) => {
             let error = anyhow::Error::new(parse_error).context("解析下载队列失败");
             quarantine_invalid_journal(path, &error)?;
-            return Ok(BTreeMap::new());
+            return Ok(LoadedJournal::default());
         }
     };
+    let journal: DownloadJournal = match serde_json::from_value(raw.clone()) {
+        Ok(journal) => journal,
+        Err(error) => return Ok(LoadedJournal {
+            entries: BTreeMap::new(), changed: false,
+            read_only: Some(format!("下载记录只读，当前版本无法读取，原文件未修改：{error}")),
+        }),
+    };
+    let mut lost = Vec::new();
+    dropped_journal_paths(&raw, &serde_json::to_value(&journal)?, "$", &mut lost);
+    let mut read_only = if journal.version != DOWNLOAD_JOURNAL_VERSION {
+        Some(format!("下载记录只读，不支持版本 {}，原文件未修改", journal.version))
+    } else if !lost.is_empty() {
+        Some(format!("下载记录只读，当前版本无法保留字段：{}；原文件未修改", lost.join("、")))
+    } else { None };
     let mut entries = BTreeMap::new();
-    for persisted in journal.entries {
+    let mut changed = false;
+    for (index, persisted) in journal.entries.into_iter().enumerate() {
+        let before = serde_json::to_value(&persisted)?;
         if let Some((id, entry)) = persisted.restore() {
-            entries.insert(id, entry);
+            let after = serde_json::to_value(PersistedEntry::snapshot(&entry))?;
+            let mut lost = Vec::new();
+            dropped_journal_paths(&before, &after, &format!("$.entries[{index}]"), &mut lost);
+            if !lost.is_empty() {
+                read_only = Some(format!("下载记录只读，恢复时会丢失字段：{}；原文件未修改", lost.join("、")));
+            }
+            changed |= before != after;
+            if entries.insert(id, entry).is_some() {
+                read_only = Some(format!("下载记录只读，重复任务标识：$.entries[{index}].task.id；原文件未修改"));
+            }
+        } else {
+            read_only = Some(format!("下载记录只读，无效任务标识：$.entries[{index}].task.id；原文件未修改"));
         }
     }
-    trim_locked(&mut entries);
-    Ok(entries)
+    Ok(LoadedJournal { entries, changed, read_only })
 }
 
 #[cfg(not(windows))]
@@ -437,6 +496,47 @@ fn commit_journal_temp(tmp: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Snapshot the bytes being replaced, independently of workshop/project snapshots.
+fn snapshot_download_journal(path: &Path, bytes: &[u8]) -> Result<()> {
+    let root = path.parent().context("下载队列文件缺少父目录")?.join("workshop-backups");
+    let now = SystemTime::now();
+    let seconds = now.duration_since(UNIX_EPOCH)?.as_secs();
+    for (kind, name) in [
+        ("auto", format!("download-queue-{seconds:020}.json")),
+        ("daily", format!("download-queue-{:010}.json", seconds / 86400)),
+    ] {
+        let dir = root.join(kind);
+        fs::create_dir_all(&dir)?;
+        let target = dir.join(name);
+        if kind == "auto" {
+            let recent = fs::read_dir(&dir)?.filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("download-queue-"))
+                .filter_map(|entry| entry.metadata().ok()?.modified().ok()).max();
+            if recent.is_some_and(|time| now.duration_since(time).map_or(true, |age| age.as_secs() < 600)) {
+                continue;
+            }
+        }
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&target) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&target);
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
 fn write_journal(path: &Path, entries: &BTreeMap<String, Entry>) -> Result<()> {
     let parent = path.parent().context("下载队列文件缺少父目录")?;
     fs::create_dir_all(parent)
@@ -447,6 +547,14 @@ fn write_journal(path: &Path, entries: &BTreeMap<String, Entry>) -> Result<()> {
     };
     let mut body = serde_json::to_vec_pretty(&journal).context("序列化下载队列失败")?;
     body.push(b'\n');
+    match fs::read(path) {
+        Ok(previous) => {
+            if previous == body { return Ok(()); }
+            snapshot_download_journal(path, &previous)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("读取下载队列备份源失败"),
+    }
     let name = path
         .file_name()
         .context("下载队列文件缺少文件名")?
@@ -527,6 +635,7 @@ pub struct DownloadManager {
     entries: Mutex<BTreeMap<String, Entry>>,
     /// None 只用于这一模块的纯内存单元测试；桌面服务始终传正式 journal 路径。
     journal_path: Option<PathBuf>,
+    read_only: Option<String>,
     /// 并发闸门 + 它当前的额度。设置里的 `concurrent_downloads` 变了才重建。
     ///
     /// 额度要一起存着：换掉 `Semaphore` 意味着**正在下的那几条还攥着旧闸门的令牌**，
@@ -655,17 +764,22 @@ impl DownloadManager {
         Self::from_entries(hub, concurrency, auto_start, BTreeMap::new(), None)
     }
 
-    /// 打开持久下载队列。启动时会把上次未完成的 worker 状态规范成 Paused 并立即
-    /// 回写，因此即使下一次又异常退出，journal 也不会长期停留在假的 Running。
+    /// 仅在恢复状态发生变化时回写；无法无损往返的记录保持只读，原文件不动。
     pub fn open(
         hub: EventHub,
         concurrency: u32,
         auto_start: bool,
         journal_path: PathBuf,
     ) -> Result<Self> {
-        let entries = load_journal(&journal_path)?;
-        let manager = Self::from_entries(hub, concurrency, auto_start, entries, Some(journal_path));
-        manager.persist_now()?;
+        let loaded = load_journal(&journal_path)?;
+        let mut manager = Self::from_entries(hub, concurrency, auto_start, loaded.entries, Some(journal_path));
+        manager.read_only = loaded.read_only;
+        if let Some(error) = manager.read_only_error() {
+            tracing::error!("{error}");
+            crate::diagnostics::record("error", "storage", "downloads.read_only", error);
+        } else if loaded.changed {
+            manager.persist_now()?;
+        }
         Ok(manager)
     }
 
@@ -682,6 +796,7 @@ impl DownloadManager {
             activity_log: None,
             entries: Mutex::new(entries),
             journal_path,
+            read_only: None,
             permits: Mutex::new((concurrency, Arc::new(Semaphore::new(concurrency as usize)))),
             auto_start: watch::channel(auto_start).0,
             start_generation: watch::channel(0).0,
@@ -766,7 +881,12 @@ impl DownloadManager {
         }
     }
 
+    pub fn read_only_error(&self) -> Option<&str> {
+        self.read_only.as_deref()
+    }
+
     fn persist_locked(&self, entries: &BTreeMap<String, Entry>) -> Result<()> {
+        if let Some(error) = self.read_only_error() { anyhow::bail!("{error}"); }
         let Some(path) = self.journal_path.as_deref() else {
             return Ok(());
         };

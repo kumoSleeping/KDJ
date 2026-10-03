@@ -283,7 +283,9 @@ function QueueRow({
   const cancel = useDownloadStore((store) => store.cancel);
   const retry = useDownloadStore((store) => store.retry);
   const remove = useDownloadStore((store) => store.remove);
-  const missing = useDownloadStore((store) => store.missingIds.has(task.id));
+  const missing = useDownloadStore((store) =>
+    (task.state === "done" || task.state === "failed") && Boolean(task.path.trim()) && store.missingIds.has(task.id),
+  );
   const shareContentMode = useSharePrefs((state) => state.contentMode);
   /** 行内操作失败的原因，和任务自己的 error 共用行尾那一行。 */
   const [cancelError, setCancelError] = useState("");

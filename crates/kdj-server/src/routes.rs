@@ -276,7 +276,25 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         "/api/dev/youtube-playback-e2e-report",
         post(write_youtube_playback_e2e_report),
     );
-    router.layer(axum::Extension(ctx))
+    router
+        .layer(axum::middleware::from_fn_with_state(ctx.downloads.clone(), guard_download_writes))
+        .layer(axum::Extension(ctx))
+}
+
+async fn guard_download_writes(
+    State(downloads): State<Arc<DownloadManager>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path();
+    if !request.method().is_safe()
+        && (path == "/api/downloads" || path.starts_with("/api/downloads/") || path == "/api/video/download")
+    {
+        if let Some(error) = downloads.read_only_error() {
+            return ApiError::new(StatusCode::CONFLICT, error).into_response();
+        }
+    }
+    next.run(request).await
 }
 
 // ---------------------------------------------------------------- 基础

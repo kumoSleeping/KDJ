@@ -1421,7 +1421,9 @@ impl MusicProvider for QqMusicProvider {
             self.media_get(&url, None).await
         })
         .await?;
-        let expected = response.content_length();
+        // reqwest reports the remaining body length after read_head consumed chunks.
+        // The download loop prepends those bytes, so validation needs the original total.
+        let expected = response.content_length().and_then(|remaining| remaining.checked_add(head.len() as u64));
         let total = expected.unwrap_or(0);
         let mut prefix = Vec::new();
         job.report(0, total);

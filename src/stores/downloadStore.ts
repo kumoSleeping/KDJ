@@ -316,6 +316,11 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
 
   async retry(taskId) {
     const task = await api.retryDownload(taskId);
+    // A new attempt no longer refers to the old missing file, including in-flight scans.
+    missingFilesSequence += 1;
+    const missingIds = new Set(get().missingIds);
+    missingIds.delete(taskId);
+    set({ missingIds });
     get().mergeTasks([task]);
   },
 

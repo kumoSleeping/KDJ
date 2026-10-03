@@ -343,7 +343,6 @@ where T: cpal::SizedSample, f32: cpal::FromSample<T> {
         let timestamp = info.timestamp();
         let latency = timestamp.callback.duration_since(timestamp.capture);
         let result = (|| -> Result<()> {
-            anyhow::ensure!(latency <= Duration::from_secs(5), "声音输入时钟无效");
             let frames = data.len() / channels;
             if frames == 0 { return Ok(()); }
             let mut mono = Vec::with_capacity(frames);
@@ -363,7 +362,14 @@ where T: cpal::SizedSample, f32: cpal::FromSample<T> {
             }
             let levels = (0..selected_count).map(|i| InputChannel { name: format!("CH {}", selected.start + i + 1),
                 rms_dbfs: 10. * (power[i] / frames as f64).max(1e-12).log10(), peak_dbfs: 20. * peak[i].max(1e-6).log10() }).collect();
-            ring.lock().unwrap().push(&mono, levels, received - latency, received)
+            let mut ring = ring.lock().unwrap();
+            // A flagged WASAPI timestamp is not usable for latency validation either.
+            // push() continues the previous timeline, or drops the packet if none exists.
+            let first = if ring.untimed { received } else {
+                anyhow::ensure!(latency <= Duration::from_secs(5), "声音输入时钟无效");
+                received.checked_sub(latency).context("声音输入时钟无效")?
+            };
+            ring.push(&mono, levels, first, received)
         })();
         if let Err(error) = result { ring.lock().unwrap().error = Some(error.to_string()); }
     }, move |error| errors.lock().unwrap().backend_error(&error), Some(Duration::from_secs(5)))?)
