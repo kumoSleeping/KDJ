@@ -150,3 +150,28 @@ export function decideNativeLatestIntent({
     consumeErrorRecovery: false,
   };
 }
+
+export interface NativeSeekGateState {
+  stateTrackId: number | null;
+  /** Authoritative state is loading, seeking or buffering. */
+  busy: boolean;
+  /** Song of our previous seek while the state has stayed busy since it was sent. */
+  landingTrackId: number | null;
+  /** The shared Rust coordinator retargets a pending Load/handoff; iOS AVPlayer cannot. */
+  foldsIntoPendingLoad: boolean;
+}
+
+/**
+ * Decide whether the latest seek may enter the native command queue.
+ *
+ * The authoritative state must already belong to the requested song. Busy alone is no reason to
+ * wait on the shared coordinator: right after a track switch it is the pending Load/handoff,
+ * which Rust retargets to the seek position, and waiting held the click for the whole
+ * decode/network open. One same-song seek is let through per busy stretch (load, Seeking or a
+ * stalled live stream): our own unlanded seek holds the next one, so a click or key-repeat burst
+ * restarts the decoder at most once per landing instead of once per ACK.
+ */
+export function canDispatchNativeSeek(trackId: number, state: NativeSeekGateState): boolean {
+  if (state.stateTrackId !== trackId) return false;
+  return !state.busy || (state.foldsIntoPendingLoad && state.landingTrackId !== trackId);
+}
