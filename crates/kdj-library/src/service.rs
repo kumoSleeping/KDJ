@@ -857,10 +857,10 @@ impl LibraryService {
         if !q.is_empty() {
             let needle = like_contains(q);
             where_parts.push(
-                "(LOWER(COALESCE(title, '')) LIKE ? ESCAPE '\\'\
-                 OR LOWER(COALESCE(artist, '')) LIKE ? ESCAPE '\\'\
-                 OR LOWER(COALESCE(album, '')) LIKE ? ESCAPE '\\'\
-                 OR LOWER(COALESCE(filename, '')) LIKE ? ESCAPE '\\')"
+                "(LOWER(COALESCE(tracks.title, '')) LIKE ? ESCAPE '\\'\
+                 OR LOWER(COALESCE(tracks.artist, '')) LIKE ? ESCAPE '\\'\
+                 OR LOWER(COALESCE(tracks.album, '')) LIKE ? ESCAPE '\\'\
+                 OR LOWER(COALESCE(tracks.filename, '')) LIKE ? ESCAPE '\\')"
                     .into(),
             );
             for _ in 0..4 {
@@ -894,7 +894,7 @@ impl LibraryService {
             params.push(SqlValue::Real(bpm_max));
         }
         if let Some(energy_min) = query.energy_min {
-            where_parts.push("energy IS NOT NULL AND energy >= ?".into());
+            where_parts.push("tracks.energy IS NOT NULL AND tracks.energy >= ?".into());
             params.push(SqlValue::Integer(energy_min));
         }
         match query.analyzed {
@@ -4588,6 +4588,37 @@ mod tests {
             })
             .unwrap();
         assert_eq!(added_page.items[0].id, recovered_old, "旧排序仍可显式使用");
+    }
+
+    #[test]
+    fn summary_query_accepts_text_and_energy_filters() {
+        // 概要查询把 tracks 自连接成 summary_file 之后，筛选列必须带表名，否则 ambiguous column。
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: "/lib/filter.mp3",
+                title: "Filter Me",
+                ..Default::default()
+            },
+        );
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute("UPDATE tracks SET energy = 7 WHERE id = ?", [id])
+            .unwrap();
+
+        let page = service
+            .list_track_summaries(&TrackQuery {
+                q: "filter".into(),
+                energy_min: Some(5),
+                limit: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, id);
     }
 
     #[test]
