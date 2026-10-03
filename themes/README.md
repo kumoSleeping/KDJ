@@ -121,6 +121,8 @@ themes/<id>/
 
 ## theme.js
 
+脚本以 `blob:` URL 导入（CSP 的 `script-src` 不对本机端口放开），所以 `import.meta.url` 和相对路径的 `import` 不可用；引用包内文件一律用 `ctx.baseUrl` 拼接。
+
 ```js
 export default {
   mount(ctx) { /* ctx = { id, baseUrl, root } ；baseUrl 是本主题文件夹的 URL 前缀 */ },
