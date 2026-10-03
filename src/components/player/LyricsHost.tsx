@@ -49,6 +49,23 @@ export function LyricsHost({
   const entry = useLyricsStore((state) => state.get(current?.id));
   const prevDesktopWindow = useRef({ enabled: false });
 
+  // 主窗口持有偏好与原生窗口生命周期，悬浮窗只发送关闭意图。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen("desktop-lyrics-close-request", () => {
+      const prefs = useLyricsPrefs.getState();
+      if (!prefs.desktopLocked) prefs.setDesktopEnabled(false);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }).catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const overlayOn = desktopEnabled && allowDesktop;
   const accent = accentPaint(prefs);
   const secondary = resolvedSecondaryPaint(prefs);

@@ -240,6 +240,34 @@
   --kd-shadow-badge: 0 2px 4px 0 rgba(0, 0, 0, 0.15);
 }
 
+/* 默认浅色主题保持白色画布；主题包与深色模式保留各自的层次。 */
+:root[data-theme="light"]:not([data-theme-pack]) {
+  --kd-bg: #ffffff;
+  --kd-panel-inset: #ffffff;
+  --kd-line: #e9e9ed;
+  --kd-line-soft: #f2f2f5;
+  --kd-hover: #fafafb;
+  --kd-selected: transparent;
+  --kd-shadow: none;
+}
+:root[data-theme="light"]:not([data-theme-pack]) .kd-playback-panels .kd-panel-slot > .kd-panel {
+  border-color: var(--kd-line);
+  box-shadow: none;
+}
+:root[data-theme="light"]:not([data-theme-pack]) .kd-workspace-pane-local > .kd-activity {
+  background: var(--kd-panel);
+  border-color: var(--kd-line);
+}
+:root[data-theme="light"]:not([data-theme-pack]) :is(
+  .kd-folder[data-selected="true"],
+  .kd-folder[data-active="true"],
+  .kd-narrow-folder-rail button[data-active="true"],
+  .kd-filter-control[data-active="true"]
+) {
+  color: var(--kd-theme);
+  background: transparent;
+}
+
 *,
 *::before,
 *::after {
@@ -414,6 +442,28 @@ body {
 }
 .kd-desktop-lyrics[data-locked="true"] .kd-desktop-lyrics-drag {
   cursor: default;
+}
+.kd-desktop-lyrics-close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  text-shadow: 0 1px 3px #000;
+  cursor: pointer;
+}
+.kd-desktop-lyrics-close:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
 }
 .kd-desktop-lyrics-content {
   z-index: 1;
@@ -1361,134 +1411,9 @@ textarea {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-/* Analysis：圆图 + 读数共处一面（仪表盘）。 */
 .kd-track-detail {
   /* 详情栏宽度可拖，响应式仪表盘必须看这一栏本身，不能看整个窗口。 */
   container-type: inline-size;
-}
-
-.kd-analysis-deck {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: stretch;
-  gap: 0.75rem 0.85rem;
-  min-width: 0;
-  padding: 0.55rem 0.65rem;
-  background: var(--kd-panel-inset);
-  border: 1px solid var(--kd-line-soft);
-}
-.kd-analysis-wheel {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.3rem;
-}
-.kd-analysis-readout {
-  flex: 1 1 7.5rem;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 0.55rem;
-  padding: 0.15rem 0.1rem 0.15rem 0;
-}
-.kd-analysis-metric {
-  display: flex;
-  flex-direction: column;
-  gap: 0.12rem;
-  min-width: 0;
-}
-.kd-analysis-metric-label {
-  color: var(--kd-muted);
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  line-height: 1;
-}
-.kd-analysis-metric-value {
-  color: var(--kd-text);
-  font-size: 1.55rem;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.03em;
-  line-height: 1.05;
-}
-.kd-analysis-metric-value[data-with-version="true"] {
-  display: flex;
-  align-items: baseline;
-  gap: 0.3rem;
-}
-.kd-analysis-version {
-  color: var(--kd-faint);
-  font-size: 0.58rem;
-  font-weight: 650;
-  letter-spacing: 0.06em;
-}
-.kd-analysis-metric-value .kd-loudness-number {
-  min-width: 0;
-  font-size: inherit;
-  font-weight: inherit;
-  letter-spacing: inherit;
-  line-height: inherit;
-}
-.kd-analysis-metric-hint {
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.2;
-}
-.kd-analysis-meter {
-  --kd-meter: 0%;
-  position: relative;
-  width: clamp(3.25rem, 38%, 5.5rem);
-  height: 3px;
-  margin-top: 0.2rem;
-  background: color-mix(in oklab, var(--kd-line) 70%, transparent);
-  overflow: hidden;
-}
-.kd-analysis-meter > i {
-  display: block;
-  height: 100%;
-  width: var(--kd-meter);
-  background: var(--kd-theme);
-  transition: width 180ms var(--kd-pop-ease);
-}
-.kd-analysis-meter[data-empty="true"] > i {
-  width: 0;
-  opacity: 0;
-}
-.kd-analysis-metric-sep {
-  height: 1px;
-  background: var(--kd-line-soft);
-}
-/* 右栏稍窄时，128px 调号轮会刚好把读数挤到下一行，留下半行空白。
-   先把圆图收小并保持并排；只有真正窄到放不下时才改成居中的上下布局。 */
-@container (max-width: 20rem) {
-  .kd-analysis-deck {
-    flex-wrap: nowrap;
-    gap: 0.55rem;
-  }
-  .kd-analysis-wheel > svg {
-    width: 6.5rem;
-    height: 6.5rem;
-  }
-  .kd-analysis-readout {
-    flex: 1 1 0;
-    padding-right: 0;
-  }
-}
-
-@container (max-width: 15rem) {
-  .kd-analysis-deck {
-    flex-wrap: wrap;
-  }
-  .kd-analysis-wheel,
-  .kd-analysis-readout {
-    flex-basis: 100%;
-  }
 }
 
 .kd-field {
@@ -6051,29 +5976,34 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   color: var(--kd-text);
   background: transparent;
 }
-/* 展开态沿用工作条底色，不再另套加深色块或描边。 */
+/* 输入区独立描边，不改变外层工作条与右侧操作的位置。 */
 .kd-activity-search {
   flex: 1 1 auto;
   max-width: none;
   min-width: 0;
-  height: 100%;
+  height: calc(100% - 4px);
+  min-height: 1.4rem;
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0 0.15rem 0 0;
-  border: none;
-  background: transparent;
+  padding: 0 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--kd-muted) 24%, var(--kd-panel));
+  border-radius: 5px;
+  background: var(--kd-panel);
   box-shadow: none;
   color: var(--kd-muted);
+  transition: border-color 140ms ease;
 }
 .kd-activity-search-expanded {
   width: 100%;
   margin-left: 0;
-  margin-right: -0.35rem;
+  margin-right: 0;
 }
-.kd-activity-search:hover,
+.kd-activity-search:hover {
+  border-color: color-mix(in srgb, var(--kd-muted) 40%, var(--kd-panel));
+}
 .kd-activity-search:focus-within {
-  background: transparent;
+  border-color: var(--kd-muted);
   color: var(--kd-text);
 }
 .kd-activity-search > svg {
@@ -6094,11 +6024,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-activity-search > input::placeholder {
   color: var(--kd-faint);
   transition: color 0.1s, opacity 0.1s;
-}
-.kd-activity-search:hover > input::placeholder,
-.kd-activity-search:focus-within > input::placeholder {
-  color: transparent;
-  opacity: 0;
 }
 .kd-activity-search > input::-webkit-search-cancel-button {
   display: none;
@@ -6580,6 +6505,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   color: var(--kd-text);
   transform: scale(1.12);
 }
+/* 下载统一使用常驻侧栏，暂时隐藏播放条右下角的下载快捷入口。 */
+.kd-player-step.kd-player-stream-download { display: none; }
+
 .kd-queue-title {
   font-weight: 600;
   overflow: hidden;
@@ -10294,13 +10222,6 @@ button.kd-stream-status {
   stroke: #18191c;
   stroke-width: 2.25;
 }
-:root[data-theme="light"] .kd-dj-arcknob[data-control="filter"] .kd-dj-arcknob-track {
-  stroke: #d3d5d8;
-  stroke-width: 4.4;
-}
-:root[data-theme="light"] .kd-dj-arcknob[data-control="filter"] .kd-dj-arcknob-body {
-  r: 14.6px;
-}
 :root[data-theme="light"] .kd-manager-mixer-eq,
 :root[data-theme="light"] .kd-manager-mixer-eq > .kd-dj-eq-chart,
 :root[data-theme="light"] .kd-manager-scroll-wave,
@@ -10932,6 +10853,10 @@ html:root .kd-table tbody tr[aria-selected="true"] > td {
   color:var(--kd-text) !important;
 }
 html:root .kd-table tbody tr[aria-selected="true"] > td :is(.kd-td-strong, .kd-muted, .kd-faint, button, a, small) { color:var(--kd-text) !important; }
+html:root[data-theme="light"]:not([data-theme-pack]) .kd-table tbody tr[aria-selected="true"] > td,
+html:root[data-theme="light"]:not([data-theme-pack]) .kd-table tbody tr[aria-selected="true"] > td :is(.kd-td-strong, .kd-muted, .kd-faint, button, a, small) {
+  color: var(--kd-theme) !important;
+}
 /* Also refresh already-installed Sakura packs without requiring a reinstall. */
 html:root[data-theme-pack="sakulaptop98"] {
   --kd-wave-low:#d84b88;

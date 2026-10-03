@@ -139,7 +139,6 @@ import {
   type ExploreSearchDetail,
 } from "../../lib/vjSearch";
 import { burstToneForPlatforms, type SearchBurstTone } from "../download/SearchBurstFX";
-import { QueuePanel } from "../download/QueuePanel";
 import { ChromeActions } from "../chrome/ChromeActions";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
@@ -1842,7 +1841,7 @@ export function Workspace() {
           session={videoPipSession} restoreTarget={detailRestoreTarget} />
       </div>
     </div>
-  ) : showQueue ? <QueuePanel /> : detailAside ? trackDetailPanel : null;
+  ) : detailAside ? trackDetailPanel : null;
   const activityAside = detailAside && detailAction === "playback";
   const asideBody = <PanelDockZone side="right">
     <div className="kd-activity-panel-host" hidden={!activityAside}>{playbackPanel}</div>
@@ -1922,12 +1921,13 @@ export function Workspace() {
 
 
   useEffect(() => {
-    if (!showQueue) return;
-    setDetailPinned(true);
-    setDetailAction("playback");
-    setAsideLocked(false);
-    if (layout === "narrow") setSheet("aside");
-  }, [showQueue, queuePanelEpoch, layout]);
+    if (!queuePanelEpoch) return;
+    // Only reveal the existing card; never switch the sidebar to a queue overlay.
+    const viewport = usePanelViewport.getState();
+    if (viewport.compact) {
+      if (!viewport.activeIds.includes("kd-activity-panels:downloads")) toggleResponsivePanel("kd-activity-panels:downloads");
+    } else if (layout === "narrow") setSheet("aside");
+  }, [queuePanelEpoch, layout]);
 
   const openSettingsFromChrome = useCallback(() => {
     const revealingCoveredSettings = showSearchTips && useAppStore.getState().showSettings;

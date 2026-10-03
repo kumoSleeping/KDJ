@@ -1059,9 +1059,10 @@ export function PlayerBar() {
   const lastNativeHealRef = useRef<{ trackId: number; at: number } | null>(null);
 
   /**
-   * 原生播放器只允许一个 seek 命令在途。协调器进入 Seeking/Loading 后，后续点击
-   * 先停在槽里，等权威状态回到当前曲目且不再 buffering 时再发最后一个目标。
-   * 这样既保留第一下的即时响应，也不会把一串过时位置排进 Tauri/Rust 队列。
+   * 原生播放器只允许一个 seek 命令在途，未派发的点击只保留最新目标。
+   * Rust 接单即返回 ACK，Loading/Seeking 期间也能重定向待激活流；不能等缓冲
+   * 完成才派发，否则切歌后的跳转会被旧装载位置的磁盘/网络等待拖住。
+   * 仍须等权威状态认领目标曲目，避免把新歌的跳转发给上一首；iOS 保留就绪门槛。
    */
   const drainNativeSeek = useCallback(() => {
     const player = nativePlayer;
@@ -1077,8 +1078,7 @@ export function PlayerBar() {
     const state = player.state();
     if (
       state.trackId !== request.trackId ||
-      state.buffering ||
-      state.status === "loading"
+      (player.kind !== "desktop-native" && (state.buffering || state.status === "loading"))
     ) {
       return;
     }
@@ -1114,8 +1114,8 @@ export function PlayerBar() {
       })
       .finally(() => {
         nativeSeekInFlightRef.current = false;
-        // 若点击发生在本次命令确认前，沿用最新槽位；若状态仍在 Seeking，
-        // drain 会自然等下一次 playback-state 边沿。
+        // ACK 后立即派发最新槽位，不等上一次解码落地；Rust 会作废旧 seek。
+        // 曲目尚未认领时，drain 仍会等下一次 playback-state 边沿。
         nativeSeekDrainRef.current();
       });
   }, [nativePlayer]);
@@ -2878,8 +2878,8 @@ export function PlayerBar() {
       // loading→transitioning 和 transition→stable 都可能让 latest next 获得一个
       // 安全 Deck 槽；每个权威状态边沿都尝试一次，gate 自己负责单飞。
       manualNextGateRef.current?.wake();
-      // seek 也只在同一条权威状态边沿上尝试一次，避免在 Loading/Transitioning
-      // 期间把最后一个目标继续排到原生 commandTail 后面。
+      // 新曲目一被权威状态认领就尝试派发 seek，不等 Loading/Seeking 完成。
+      // drain 的在途标记和最新值槽仍保证不会堆积过时命令。
       nativeSeekDrainRef.current();
     });
     const syncAfterResume = () => {

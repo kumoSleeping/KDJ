@@ -1,8 +1,11 @@
+import { usesKvjWindow } from "./windowRole";
+import { openKvj } from "./kvjWindow";
 import { useAppStore } from "../stores/appStore";
 import { useWorkshopStore } from "../stores/workshopStore";
 
 /** Only local context menus call this. Reopening an existing panel does not enqueue anything. */
 export async function enqueueLocalComposition(ids: number[], target?: string | "new"): Promise<void> {
+  if (usesKvjWindow()) return openKvj({ tab: "workshop", ids, target });
   useAppStore.getState().openCompositionPanel();
   await useWorkshopStore.getState().flush();
   if (target === "new") {

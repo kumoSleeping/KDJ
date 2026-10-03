@@ -1,8 +1,9 @@
 import type { RefCallback } from "react";
-import { Download, Radio, Moon, Settings, Sun, Upload, Palette } from "lucide-react";
+import { usesKvjWindow } from "../../lib/windowRole";
+import { showKvj } from "../../lib/kvjWindow";
+import { Radio, Moon, Settings, Sun, Upload, Palette } from "lucide-react";
 import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePack";
 import { useAppStore } from "../../stores/appStore";
-import { useDownloadStore } from "../../stores/downloadStore";
 import { useUpdateStore } from "../../stores/updateStore";
 
 export interface ChromeActionsProps {
@@ -23,9 +24,6 @@ export function ChromeActions({
   onOpenUpdate,
   panelIndexTarget,
 }: ChromeActionsProps) {
-  const queueOpen = useAppStore(state => state.showQueue);
-  const downloads = useDownloadStore(state => state.list);
-  const activeDownloads = downloads.filter(task => ["queued", "running", "processing"].includes(task.state)).length;
   const compositionMode = useAppStore(state => state.compositionMode);
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
   const latest = useUpdateStore((s) => s.info?.latest ?? "");
@@ -72,11 +70,8 @@ export function ChromeActions({
       >
         <Settings size={16} />
       </button>
-      <button type="button" className="kd-chrome-btn" title="下载" aria-label="下载"
-        aria-pressed={queueOpen} data-open={queueOpen || undefined}
-        onClick={() => useAppStore.getState().toggleQueuePanel()}><Download size={16} />
-        {activeDownloads > 0 && <span className="kd-chrome-badge">{activeDownloads}</span>}
-      </button>
+      {usesKvjWindow() ? <button type="button" className="kd-chrome-btn" title="打开 KVJ" aria-label="打开 KVJ"
+        onClick={() => showKvj()}><span style={{ fontSize: 11, fontWeight: 700 }}>KVJ</span></button> : <>
       <button type="button" className="kd-chrome-btn" title="VJ 剪辑" aria-label="VJ 剪辑"
         aria-pressed={compositionOpen && compositionMode === "workshop"} data-open={compositionOpen && compositionMode === "workshop" || undefined}
         onClick={() => onComposition("workshop")}><span style={{ fontSize: 11, fontWeight: 700 }}>VJ</span></button>
@@ -84,6 +79,7 @@ export function ChromeActions({
         aria-pressed={compositionOpen && compositionMode === "live-vj"} data-open={compositionOpen && compositionMode === "live-vj" || undefined}
         disabled={!['darwin', 'win32', 'linux'].includes(window.kdj?.platform ?? '')}
         onClick={() => onComposition("live-vj")}><Radio size={16} /></button>
+      </>}
 
       <button
         type="button"

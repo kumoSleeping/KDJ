@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
 import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal } from "lucide-react";
 import { createPortal } from "react-dom";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { isKvjWindow, usesKvjWindow } from "../../lib/windowRole";
 import type { TrackSummary } from "../../types";
 import { Select } from "../common/Select";
 import type { VisualizerFeatureTimeline } from "../../types/audioVisualizer";
@@ -71,13 +73,27 @@ function StudioPosition({ position, scrub, refresh, children }: {
   return children(cursor);
 }
 
-export default function VisualizerStudioPanel({ onClose, inlineTrack, showDetails = true }: { onClose?: () => void; inlineTrack?: TrackSummary; showDetails?: boolean }) {
+type ContentState = "loading" | "ready" | "empty";
+
+export default function VisualizerStudioPanel({ onClose, inlineTrack, showDetails = true, onContentStateChange }: { onClose?: () => void; inlineTrack?: TrackSummary; showDetails?: boolean; onContentStateChange?: (state: ContentState) => void }) {
   const selectedTrack = useVisualizerStudioStore(s => s.track);
   const fromPlayback = useVisualizerStudioStore(s => s.fromPlayback);
   const track = inlineTrack ?? selectedTrack;
-  return track ? <Studio key={track.id} track={track} fromPlayback={inlineTrack ? true : fromPlayback} inline={!!inlineTrack} showDetails={showDetails} onClose={onClose} /> : null;
+  return track ? <Studio key={track.id} track={track} fromPlayback={inlineTrack ? true : fromPlayback} inline={!!inlineTrack} showDetails={showDetails} onClose={onClose} onContentStateChange={onContentStateChange} /> : null;
 }
-function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: TrackSummary; fromPlayback: boolean; inline: boolean; showDetails: boolean; onClose?: () => void }) {
+function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentStateChange }: { track: TrackSummary; fromPlayback: boolean; inline: boolean; showDetails: boolean; onClose?: () => void; onContentStateChange?: (state: ContentState) => void }) {
+  const readOnlyPreview = inline && usesKvjWindow();
+  const [savedRevision, setSavedRevision] = useState(0);
+  const dirty = useRef(false);
+  useEffect(() => {
+    if (!readOnlyPreview) return;
+    let active = true;
+    const stop = getCurrentWebviewWindow().listen<number>("kdj:visualizer-saved", event => {
+      if (active && event.payload === track.id) setSavedRevision(value => value + 1);
+    });
+    void stop.catch(error => useToastStore.getState().show(`无法同步可视化：${message(error)}`));
+    return () => { active = false; void stop.then(unlisten => unlisten()).catch(() => undefined); };
+  }, [readOnlyPreview, track.id]);
   const settingsOpen = useVisualizerStudioStore(state => inline && state.inlineSettings && state.track?.id === track.id);
   const settingsTarget = useVisualizerStudioStore(state => settingsOpen ? state.settingsTarget : null);
   const previewRequest = useVisualizerStudioStore(state => !inline && state.track?.id === track.id ? state.previewRequest : 0);
@@ -85,6 +101,7 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
   const latestDraft = useRef(draft); latestDraft.current = draft;
   const [images, setImages] = useState<HTMLImageElement[]>([]);
   const [coverAvailable, setCoverAvailable] = useState<boolean | null>(null);
+  const [mediaFailed, setMediaFailed] = useState(false);
   const [analysis, setAnalysis] = useState<{ timeline: VisualizerFeatureTimeline; signature: string } | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const analyzedSpectrum = useRef<string | null>(null);
@@ -149,7 +166,8 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
 
   useEffect(() => {
     // Following a switch must not reissue play while the new transport is loading.
-    if (!fromPlayback) {
+    // Opening KVJ settings is not a DJ transport command; only explicit play/seek loads a source.
+    if (!fromPlayback && !isKvjWindow) {
       const pip = useVideoPip.getState(); if (pip.active) pip.clear();
       if (getCompositionClock().trackId !== track.id) playTrack(track, false, "composition", 0);
     }
@@ -182,13 +200,15 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
       let restored: VisualizerDraft | undefined;
       try {
         const current = latestDraft.current;
-        restored = current ? { project: structuredClone(current.project), images: current.images } : await loadVisualizerDraft(track.id);
+        restored = current && !readOnlyPreview ? { project: structuredClone(current.project), images: current.images } : await loadVisualizerDraft(track.id);
         if (restored?.images.length) validateVisualizerProject(restored.project);
       } catch { restored = undefined; }
       const install = (next: VisualizerDraft) => {
-        const preferences = loadVisualizerPreferences(next.project);
-        if (preferences) applyVisualizerPreferences(next.project, preferences);
-        else rememberCommon(next.project);
+        if (!(readOnlyPreview && restored)) {
+          const preferences = loadVisualizerPreferences(next.project);
+          if (preferences) applyVisualizerPreferences(next.project, preferences);
+          else rememberCommon(next.project);
+        }
         next.project.output.directoryMode = "download";
         next.project.output.directory = useAppStore.getState().settings?.download_dir || "";
         setDraft(next);
@@ -220,26 +240,28 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
         next.lyrics.mode = hasStudioLyrics(next.lyrics.lrc) ? "scroll" : "off";
         return { ...current, project: next };
       });
-    })().catch(e => { if (active) setNotice(message(e)); });
+    })().catch(e => { if (active) { setMediaFailed(true); setNotice(message(e)); } });
     return () => { active = false; controller.abort(); };
-  }, [track.id, loadAllowed]);
+  }, [track.id, loadAllowed, savedRevision, readOnlyPreview]);
 
   useEffect(() => {
-    if (!draft) return;
+    if (!draft || readOnlyPreview || !dirty.current) return;
     const snapshot = draft;
     const timer = window.setTimeout(() => {
       saveChain.current = saveChain.current.catch(() => undefined).then(() => saveVisualizerDraft(snapshot));
       void saveChain.current.then(() => setNotice(current => current.startsWith("无法记住当前调整：") ? "" : current), e => { setNotice(`无法记住当前调整：${message(e)}`); });
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [draft]);
+  }, [draft, readOnlyPreview]);
   useEffect(() => {
     let active = true;
-    if (draft?.images.length) void loadStudioImages(draft.images).then(v => { if (active) setImages(v); }, e => { if (active) setNotice(message(e)); });
+    setMediaFailed(false);
+    if (draft?.images.length) void loadStudioImages(draft.images).then(v => { if (active) setImages(v); }, e => { if (active) { setMediaFailed(true); setNotice(message(e)); } });
+    else setImages([]);
     return () => { active = false; };
   }, [draft?.images]);
   useEffect(() => {
-    if (!p || !loadAllowed || !previewRequested || analyzedSpectrum.current === spectrumKey) { setAnalyzing(false); return; }
+    if (!p || !images.length || !loadAllowed || !previewRequested || analyzedSpectrum.current === spectrumKey) { setAnalyzing(false); return; }
     const controller = new AbortController(); setAnalyzing(true);
     const timer = window.setTimeout(() => {
       void visualizerApi.analyze(track.id, p.scene.spectrum, controller.signal).then(result => {
@@ -247,7 +269,7 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
       }).catch(e => { if (!controller.signal.aborted) { setNotice(message(e)); } }).finally(() => { if (!controller.signal.aborted) setAnalyzing(false); });
     }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [track.id, spectrumKey, loadAllowed, previewRequested]);
+  }, [track.id, spectrumKey, loadAllowed, previewRequested, images.length]);
 
   // A tiny neutral timeline lets artwork render before global audio analysis. It does not
   // fabricate spectral activity or allocate one silent frame per second of a long track.
@@ -260,6 +282,9 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
     try { return prepareStudio(p, images, analysis?.timeline ?? firstPaintTimeline, previewWidth); } catch { return null; }
   }, [p, images, analysis, firstPaintTimeline, previewWidth, loadAllowed]);
   const emptyMedia = inline && !prepared && (draft ? draft.images.length === 0 : coverAvailable === false);
+  const contentState: ContentState = prepared ? "ready" : emptyMedia || mediaFailed || (images.length > 0 && !!p && images.length === p.scene.images.length) ? "empty" : "loading";
+  // Effects run after the canvas layout effect has painted the first complete frame.
+  useEffect(() => { onContentStateChange?.(contentState); }, [contentState, onContentStateChange]);
   useEffect(() => {
     const target = canvas.current; if (!target || !p) return;
     let timer = 0;
@@ -337,7 +362,7 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
   useEffect(() => {
     return () => {
       const snapshot = latestDraft.current;
-      if (snapshot) void saveChain.current.catch(() => undefined).then(() => saveVisualizerDraft(snapshot))
+      if (snapshot && !readOnlyPreview && dirty.current) void saveChain.current.catch(() => undefined).then(() => saveVisualizerDraft(snapshot))
         .catch(error => useToastStore.getState().show(`无法记住可视化调整：${message(error)}`));
     };
   }, []);
@@ -349,16 +374,18 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
   }, [draft, busy, inline, settingsOpen]);
 
   function checkpoint(current: VisualizerDraft, force = false) {
+    dirty.current = true;
     const now = performance.now();
     if (force || now - history.current.last > 300) { history.current.past.push(current); if (history.current.past.length > 30) history.current.past.shift(); }
     history.current.future = []; history.current.last = now;
   }
   function rememberCommon(project: VisualizerProject) {
+    if (readOnlyPreview) return;
     try { saveVisualizerPreferences(project); }
     catch (error) { setNotice(`无法记住通用设置：${message(error)}`); }
   }
   function edit(fn: (project: VisualizerProject) => void) {
-    if (!draft || busy) return;
+    if (!draft || busy || readOnlyPreview) return;
     checkpoint(draft); const project = structuredClone(draft.project); fn(project);
     switchVisualizerContentLayout(project, draft.project); rememberCommon(project);
     setDraft({ ...draft, project });
@@ -375,7 +402,8 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
     rememberCommon(project); replaceDraft({ project, images: draft.images });
   }
   function undo(redo = false) {
-    if (!draft || busy) return;
+    if (!draft || busy || readOnlyPreview) return;
+    dirty.current = true;
     const from = redo ? history.current.future : history.current.past, to = redo ? history.current.past : history.current.future;
     const next = from.pop(); if (next) { to.push(draft); rememberCommon(next.project); setDraft(next); history.current.last = 0; }
   }
@@ -394,7 +422,7 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
     const file = e.target.files?.[0]; e.target.value = ""; if (!file) return;
     try { if (!/\.(png|jpe?g|webp|bmp)$/i.test(file.name)) throw new Error("请选择 PNG / JPEG / WebP / BMP 图片"); await installImage(file, imageSlot.current); } catch (error) { setNotice(message(error)); }
   }
-  async function saveNow() { if (!draft) return; await saveChain.current.catch(() => undefined); await saveVisualizerDraft(draft); }
+  async function saveNow() { if (!draft || readOnlyPreview || !dirty.current) return; await saveChain.current.catch(() => undefined); await saveVisualizerDraft(draft); }
   function requestClose() { if (onClose) onClose(); else void close(); }
   async function close(): Promise<boolean> {
     if (closing.current) return false;
@@ -486,15 +514,15 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
         aria-label="打开可视化操作与设置" title="可视化操作与设置" aria-pressed={settingsOpen}
         onPointerDown={event => event.stopPropagation()}
         onClick={() => useVisualizerStudioStore.getState().openInlineSettings(track)}><SlidersHorizontal size={15} /></button>}
-      {inline && !expanded && <button type="button" className="kd-viz-settings-entry kd-viz-lyrics-entry"
+      {inline && !expanded && !readOnlyPreview && <button type="button" className="kd-viz-settings-entry kd-viz-lyrics-entry"
         title={loadingLyrics ? "正在匹配歌词…" : lyricsVisible ? "关闭歌词" : "开启歌词"}
         aria-label={lyricsVisible ? "关闭可视化歌词" : "开启可视化歌词"} aria-pressed={lyricsVisible}
         aria-busy={loadingLyrics} disabled={!p || busy || loadingLyrics || lyricMatching}
         onPointerDown={event => event.stopPropagation()} onClick={togglePreviewLyrics}>
         {loadingLyrics ? <LoaderCircle size={15} className="kd-spin" /> : <Captions size={15} />}
       </button>}
-      {prepared && p ? <canvas ref={canvas} aria-label="音频可视化预览，可拖动左右图片调整位置" onPointerDown={e => {
-        if (busy || floating || expanded || e.button !== 0 || !e.isPrimary || !draft) return;
+      {prepared && p ? <canvas ref={canvas} aria-label={readOnlyPreview ? "音频可视化预览" : "音频可视化预览，可拖动左右图片调整位置"} onPointerDown={e => {
+        if (readOnlyPreview || busy || floating || expanded || e.button !== 0 || !e.isPrimary || !draft) return;
         const rect = e.currentTarget.getBoundingClientRect(), scene = prepared.project.scene;
         const scale = Math.min(rect.width / scene.canvas.width, rect.height / scene.canvas.height);
         if (!scale) return;
@@ -529,11 +557,11 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose }: { track: 
           return { ...current, project };
         });
       }} onPointerUp={() => { pictureDrag.current = null; }} onPointerCancel={() => { pictureDrag.current = null; }} onLostPointerCapture={() => { pictureDrag.current = null; }} /> : <div className="kd-viz-empty">
-        <img src={api.coverUrl(track.id, track.modified_at)} alt="" aria-hidden="true"
-          onLoad={() => setCoverAvailable(true)} onError={() => setCoverAvailable(false)} />
+        {!inline && <img src={api.coverUrl(track.id, track.modified_at)} alt="" aria-hidden="true"
+          onLoad={() => setCoverAvailable(true)} onError={() => setCoverAvailable(false)} />}
         {loadAllowed && <div className="kd-viz-empty-action">
           {!draft || analyzing || draft.images.length ? <LoaderCircle className="kd-spin" size={20} role="status" aria-label={!draft ? "正在加载可视化" : "正在分析音频"} />
-            : <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }}><ImagePlus size={20} /></button>}
+            : <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => { if (readOnlyPreview) useVisualizerStudioStore.getState().open(track); else { imageSlot.current = 0; imageInput.current?.click(); } }}><ImagePlus size={20} /></button>}
         </div>}
       </div>}
       {inline && !settingsTarget && notice && <div className="kd-viz-notice kd-viz-inline-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}

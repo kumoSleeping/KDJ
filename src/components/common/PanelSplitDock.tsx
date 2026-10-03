@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, type RefObject } from "react";
-import { dockSplitModel, clearSplitPreview, setRenderedPanelTree } from "./panelSplitDom";
+import { dockSplitModel, splitHosts, clearSplitPreview, setRenderedPanelTree } from "./panelSplitDom";
 import { splitIds, usePanelSplits, type SplitSide, type SplitTree } from "../../lib/panelSplitLayout";
 import { usePanelDock } from "./panelDock";
 import { autoPanelLayout, clearAutoPanelLayout, panelFormAtWidth, panelLayoutBudget } from "./autoPanelLayoutDom";
@@ -18,12 +18,24 @@ export function PanelSplitDock({ root, side }: { root: RefObject<HTMLDivElement 
     previous.current = undefined;
     let frame = 0;
     let locked: { key: string; plan: AutoPanelLayout } | null = null;
+    let rightWidth = -1;
+    let rightHosts: ReturnType<typeof splitHosts> = [];
     const styled = new Set<HTMLElement>(), observed = new Set<HTMLElement>();
     zone.dataset.freeSplit = "true";
     if (side === "top") zone.scrollTop = 0;
     const fit = () => {
       frame = 0;
       if (!zone.clientWidth || zone.closest("[hidden]")) return;
+      if (side === "right") {
+        // Content loading and collapse animations do not change sidebar order or
+        // widths. Skip geometry probes and style writes unless its structure changed.
+        const width = zone.clientWidth;
+        const hosts = splitHosts(zone, false);
+        if (width === rightWidth && hosts.length === rightHosts.length && hosts.every((item, index) =>
+          item.id === rightHosts[index].id && item.host === rightHosts[index].host && item.slot === rightHosts[index].slot)) return;
+        rightWidth = width;
+        rightHosts = hosts;
+      }
       zone.dataset.freeSplit = "true";
       const model = dockSplitModel(zone, side);
       if (side === "right") {

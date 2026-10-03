@@ -75,7 +75,17 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  if (windowKind === "live-vj") {
+  if (!windowKind || windowKind === "kvj") {
+    if (window.__TAURI_INTERNALS__ && ["darwin", "win32", "linux"].includes(window.kdj?.platform ?? "")) {
+      if (!windowKind) appStoreModule.useAppStore.setState({ showComposition: false, compositionPinned: false });
+      await (await import("./lib/kvjWindow")).startWindowLink();
+    }
+  }
+
+  if (windowKind === "kvj") {
+    const { KvjApp } = await import("./components/workspace/KvjApp");
+    render(<KvjApp />);
+  } else if (windowKind === "live-vj") {
     const { LiveVjOutput } = await import("./components/composition/LiveVjOutput");
     render(<LiveVjOutput />);
   } else if (isLyricsWindow) {

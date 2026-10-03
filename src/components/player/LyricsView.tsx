@@ -19,6 +19,7 @@ import { isVideoTrack } from "../../lib/format";
 import { streamMeta } from "../../lib/streamTrack";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
 import { Panel } from "../common";
+import { AsyncPanelBody } from "../common/AsyncPanelBody";
 import type { Track } from "../../types";
 
 function usePlayerPosition(trackId: number | null): number {
@@ -71,7 +72,7 @@ function effectiveExtra(
 
 interface LyricsDetailProps {
   track: Track;
-  /** Playback docks retain their configured rectangle while lyrics load or are unavailable. */
+  /** Playback docks reserve a loading rectangle and collapse unavailable content. */
   reserveEmpty?: boolean;
   /** An existing non-audio transport can supply its own clock and seek route. */
   transport?: { position: number; seek(position: number): void };
@@ -80,12 +81,15 @@ export function LyricsDetailPanel({ track, transport, reserveEmpty = false }: Ly
   const entry = useLyricsStore(state => state.get(track.id));
   const prefsEpoch = useLyricsPrefs(state => state.prefsEpoch);
   useEffect(() => { void useLyricsStore.getState().ensure(track, {cacheOnly:true}); }, [track.id, prefsEpoch]);
-  if (isVideoTrack(track.format) || streamMeta(track)?.kind === "video" || !hasVisibleLyrics(entry.lines)) {
-    return reserveEmpty ? <Panel heading="歌词" padded={false} dense className="kd-detail-lyrics-panel" /> : null;
-  }
+  const video = isVideoTrack(track.format) || streamMeta(track)?.kind === "video";
+  const ready = !video && hasVisibleLyrics(entry.lines);
+  const state = ready ? "ready" : !video && (entry.status === "idle" || entry.status === "loading") ? "loading" : "empty";
+  if (!reserveEmpty && !ready) return null;
   return (
     <Panel heading="歌词" padded={false} dense className="kd-detail-lyrics-panel">
-      <LyricsView track={track} transport={transport} />
+      <AsyncPanelBody key={track.id} kind="lyrics" state={state}>
+        {ready && <LyricsView track={track} transport={transport} />}
+      </AsyncPanelBody>
     </Panel>
   );
 }

@@ -3538,7 +3538,6 @@ async fn start_downloads(
     // 「开始」是队列的统一执行入口：新排队任务和之前失败、可重试的歌曲
     // 应该在同一次点击里一起跑，不能逼用户再逐行点一遍「重试」。
     let retried = restart_inactive_tasks(state, ctx.downloads.clone());
-    ctx.downloads.release_queued();
     Json(json!({ "started": true, "retried": retried }))
 }
 

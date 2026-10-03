@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { usesKvjWindow, isKvjWindow } from "../lib/windowRole";
+import { showKvj } from "../lib/kvjWindow";
 import type { TrackSummary } from "../types";
 import { getPlayingTrack } from "../lib/playingTrack";
 import { useAppStore } from "./appStore";
@@ -21,14 +23,17 @@ export const useVisualizerStudioStore = create<State>((set, get) => ({
   track: null, fromPlayback: false, inlineSettings: false, previewRequest: 0, settingsTarget: null, beforeClose: null,
   setSettingsTarget: settingsTarget => set({ settingsTarget }),
   openInlineSettings: track => {
+    if (usesKvjWindow()) { showKvj({ tab: "visualizer", track }); return; }
     set({ track: { ...track }, fromPlayback: true, inlineSettings: true });
     useAppStore.setState({ showComposition: false });
   },
   setBeforeClose: beforeClose => set({ beforeClose }),
   open: track => {
+    if (usesKvjWindow()) { showKvj({ tab: "visualizer", track }); return; }
+    if (isKvjWindow) void import("./kvjStore").then(({ useKvjStore }) => useKvjStore.setState({ tab: "visualizer" }));
     // Explicit editing must expose a preview even when the playback sidebar is hidden.
     set({ track: { ...track }, fromPlayback: getPlayingTrack()?.id === track.id,
-      inlineSettings: false, previewRequest: get().previewRequest + 1 });
+      inlineSettings: false, previewRequest: isKvjWindow ? 0 : get().previewRequest + 1 });
     useAppStore.setState({ showComposition: false });
   },
   follow: track => {

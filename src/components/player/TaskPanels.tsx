@@ -1,6 +1,5 @@
 import { useEffect } from "react";
 import { Download, ExternalLink, Radio, Square, X } from "lucide-react";
-import { useDownloadStore } from "../../stores/downloadStore";
 import { projectDuration } from "../../lib/workshop";
 import { useAppStore } from "../../stores/appStore";
 import { useWorkshopStore } from "../../stores/workshopStore";
@@ -73,9 +72,8 @@ export function ExportTaskPanel() {
 }
 
 export function DownloadTaskPanel() {
-  const hasDownloads = useDownloadStore(state => state.list.length > 0);
   return <Panel heading="下载" padded={false} dense className="kd-task-window kd-download-window">
-    <div className="kd-task-window-body" data-empty={!hasDownloads}><QueuePanel /></div>
+    <div className="kd-task-window-body"><QueuePanel /></div>
   </Panel>;
 }
 
