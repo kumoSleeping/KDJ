@@ -30,7 +30,7 @@ Windows 回环不是 ASIO 或 WASAPI 独占输出捕获，也不能监听另一�
 
 素材导入仍需现有媒体工具中的 `ffprobe`；缺失时由原有媒体工具安装入口补齐。视频由系统 WebView 解码，Windows 使用 WebView2；并不保证所有 MKV、MOV 或 HEVC 素材都能直接播放。上述 Windows 路径尚需真机验收，macOS 的编译检查不代表 Windows 采集及解码已通过。Core Audio Tap 的实际 Master／Cue 隔离也必须按具体 DJ 软件和声卡路由验证：先确认主输出能被采集，再令软件 Master 静音、只开耳机 Cue，检查运行中的实时采集电平是否保持静音；不要用停止后残留的电平判断。
 
-已知待解决风险：当前 CPAL 0.18.1 的 WASAPI `process_input` 读取了 `GetBuffer` 标志，却未按 `AUDCLNT_BUFFERFLAGS_SILENT` 对静音包补零，也未处理原生的断流 / 时间戳错误标志。KDJ 自身的音频包检查不能替代这些底层处理。因此回环仅作为显式选项接入，不把它替换为 Windows 默认输入，也不能视为已经通过演出稳定性验收；需先解决依赖处理，再验证静音恢复、默认设备切换和热拔插。
+WASAPI 捕获标志：KDJ 使用打补丁的 CPAL 0.18.1（`vendor/cpal-0.18.1`，说明见其中 `KDJ-PATCH.md`）。`AUDCLNT_BUFFERFLAGS_SILENT` 包按同长度静音交给回调，不读取引擎缓冲区中的旧内容；两种标志都不停止采集：`DATA_DISCONTINUITY` 作为不连续事件丢弃当前识别窗口、开始新的采集代次、计入诊断中的「断流」次数，并在诊断日志中记警告（最多每 5 秒一条，附带累计次数）；`TIMESTAMP_ERROR` 只表示该包的采集时间不可靠，音频本身仍连续，因此该包接在上一包之后继续使用，不清空识别窗口，只有在尚无可续接的时间线时才丢弃。不会因此切换设备或声道。回环仍仅作为显式选项接入，不替换 Windows 默认输入；补丁尚需真机验证静音恢复、默认设备切换和热拔插后，才能视为通过演出稳定性验收。
 
 ## Windows：VDJ / Inpulse 500 的第二路 Master
 
@@ -44,7 +44,7 @@ Windows 回环不是 ASIO 或 WASAPI 独占输出捕获，也不能监听另一�
 
 配置表可从「VDJ / Inpulse 500 设置」展开查看。两种接入方式分别记住本面板中的设备选择；返回「常规采集 · 回环 / 输入」仍可使用之前的控制器回环、系统混音或录音输入。设备消失、声道不可用或尚未选择第二路设备时，不允许直接开始，不自动换成麦克风。所有设置只影响 KDJ 的捕获选择，不改 VDJ 配置、Windows 默认设备，也不安装驱动。
 
-第二路输出可能让电脑扬声器实际发声；不要把 Windows 静音作为保证既不出声又能采集的方案。同一播放设备上的通知、浏览器和 KDJ 自身声音也可能进入回环，需避免它们使用该端点。额外输出延迟、Cue 隔离和 ASIO 原主输出不受影响均需真机验证；此入口仍受上文 WASAPI 底层已知风险约束。
+第二路输出可能让电脑扬声器实际发声；不要把 Windows 静音作为保证既不出声又能采集的方案。同一播放设备上的通知、浏览器和 KDJ 自身声音也可能进入回环，需避免它们使用该端点。额外输出延迟、Cue 隔离和 ASIO 原主输出不受影响均需真机验证；此入口同样需要按上文完成 WASAPI 捕获标志的真机验收。
 
 参考：[VDJ 的 Master／耳机配置](https://virtualdj.com/manuals/virtualdj/settings/audiosetup/masterheadphones.html)、[Inpulse 500 官方预设](https://virtualdj.com/manuals/hardware/hercules/inpulse500/setup.html)、[VDJ 第二路 Master 讨论](https://virtualdj.com/forums/240138/VirtualDJ_Technical_Support/How_to_output_VirtualDJ_audio_signal_into_OBS__.html)。
 
