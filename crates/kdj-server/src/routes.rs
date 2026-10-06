@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
@@ -1989,8 +1989,13 @@ async fn song_preview_stream_inner(
     let inline = if persistent_cache_enabled && !ticket.browser_resolved {
         match response_segment {
             Some(segment) if segment.start == 0 && segment.end.saturating_add(1) == segment.total => {
+                // 持久缓存只有一个写入槽；被上一首/预热占着时退回会话前缀，
+                // 否则这首歌整段播放期间都没有波形。
                 inline_preview_cache_plan(&state, &cache_root, &cache_key, &ticket, &content_type, segment.total)
-                    .map(PreviewBodyCapturePlan::Persistent)
+                    .map(|plan| PreviewBodyCapturePlan::Persistent(
+                        plan,
+                        session_preview_capture_plan(&state, &cache_key, response_segment),
+                    ))
             }
             _ => None,
         }
@@ -2227,7 +2232,10 @@ impl InlinePreviewCacheCapture {
 
 enum PreviewBodyCapturePlan {
     Session(crate::stream_waveform::StreamWaveformCapturePlan),
-    Persistent(InlinePreviewCachePlan),
+    Persistent(
+        InlinePreviewCachePlan,
+        Option<crate::stream_waveform::StreamWaveformCapturePlan>,
+    ),
 }
 
 impl PreviewBodyCapturePlan {
@@ -2239,7 +2247,15 @@ impl PreviewBodyCapturePlan {
                 .ok()
                 .flatten()
                 .map(PreviewBodyCapture::Session),
-                    Self::Persistent(plan) => plan.begin().await.map(PreviewBodyCapture::Persistent),
+            Self::Persistent(plan, fallback) => match plan.begin().await {
+                Some(capture) => Some(PreviewBodyCapture::Persistent(capture)),
+                None => fallback?
+                    .begin()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(PreviewBodyCapture::Session),
+            },
         }
     }
 }
@@ -2265,26 +2281,61 @@ impl PreviewBodyCapture {
     }
 }
 
-const PREVIEW_CAPTURE_QUEUE_CHUNKS: usize = 8;
+/// 旁路队列按字节而不是按 chunk 计数。上游首包常是几十个 8 KiB 小块在同一轮
+/// poll 里涌出，而 worker 此时还在 mkdir/open；按 8 个 chunk 封顶会在第一秒就
+/// 关掉捕获，整首歌播放期间都拿不到前缀波形。Bytes 只是引用计数，积压上限即
+/// 额外常驻内存上限。
+const PREVIEW_CAPTURE_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+
+struct PreviewCaptureSender {
+    sender: tokio::sync::mpsc::UnboundedSender<axum::body::Bytes>,
+    queued_bytes: Arc<AtomicUsize>,
+    limit: usize,
+    /// worker 确认这是写入持久缓存的完整响应后置位；会话前缀不值得断开后补完。
+    persistent: Arc<AtomicBool>,
+}
+
+fn preview_capture_queue(
+    limit: usize,
+) -> (
+    PreviewCaptureSender,
+    tokio::sync::mpsc::UnboundedReceiver<axum::body::Bytes>,
+    Arc<AtomicUsize>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<axum::body::Bytes>();
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    (
+        PreviewCaptureSender {
+            sender,
+            queued_bytes: Arc::clone(&queued_bytes),
+            limit,
+            persistent: Arc::new(AtomicBool::new(false)),
+        },
+        receiver,
+        queued_bytes,
+    )
+}
 
 fn start_preview_capture_worker(
     plan: PreviewBodyCapturePlan,
-) -> (
-    tokio::sync::mpsc::Sender<axum::body::Bytes>,
-    Arc<AtomicBool>,
-) {
-    let (sender, mut receiver) =
-        tokio::sync::mpsc::channel::<axum::body::Bytes>(PREVIEW_CAPTURE_QUEUE_CHUNKS);
+) -> (PreviewCaptureSender, Arc<AtomicBool>) {
+    let (sender, mut receiver, queued_bytes) = preview_capture_queue(PREVIEW_CAPTURE_QUEUE_BYTES);
     let reached_eof = Arc::new(AtomicBool::new(false));
     let worker_eof = Arc::clone(&reached_eof);
+    let persistent = Arc::clone(&sender.persistent);
     tokio::spawn(async move {
         // mkdir/open/StreamCacheWriter::begin_write 全在这里；媒体响应构造和 chunk
         // 转发只面对有界 sender，不会等待初始化。
         let Some(mut capture) = plan.begin().await else {
             return;
         };
+        persistent.store(
+            matches!(capture, PreviewBodyCapture::Persistent(_)),
+            Ordering::Release,
+        );
         let mut healthy = true;
         while let Some(chunk) = receiver.recv().await {
+            queued_bytes.fetch_sub(chunk.len(), Ordering::AcqRel);
             if capture.write_chunk(&chunk).await.is_err() {
                 healthy = false;
                 break;
@@ -2296,17 +2347,97 @@ fn start_preview_capture_worker(
     (sender, reached_eof)
 }
 
-fn enqueue_preview_capture(
-    sender: &mut Option<tokio::sync::mpsc::Sender<axum::body::Bytes>>,
-    chunk: &axum::body::Bytes,
-) {
+fn enqueue_preview_capture(sender: &mut Option<PreviewCaptureSender>, chunk: &axum::body::Bytes) {
     let Some(active) = sender.as_ref() else {
         return;
     };
-    // Bytes::clone 只增引用计数。队列满/后台失败就关闭本次旁路并保留连续前缀，
-    // 绝不能 await 写盘或 flush，让可选波形对媒体流施加 backpressure。
-    if active.try_send(chunk.clone()).is_err() {
+    // Bytes::clone 只增引用计数。积压超过字节上限/后台失败就关闭本次旁路并保留
+    // 连续前缀，绝不能 await 写盘或 flush，让可选波形对媒体流施加 backpressure。
+    let queued = active.queued_bytes.fetch_add(chunk.len(), Ordering::AcqRel);
+    if queued.saturating_add(chunk.len()) > active.limit || active.sender.send(chunk.clone()).is_err()
+    {
         sender.take();
+    }
+}
+
+/// 上游读取在单个 chunk 上停滞超过这个时间就放弃后台补完。
+const PREVIEW_DRAIN_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+type PreviewUpstream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>>;
+
+/// 媒体响应体的全部状态。客户端提前断开（seek/切歌）时由 Drop 接管：持久捕获
+/// 仍健康就把同一份上游读到 EOF，而不是丢掉已写的前缀再等空闲后重新整轨下载。
+/// seek 会丢弃这条连接；读完后缓存落盘，后续 Range 全部走本地文件。
+struct PreviewBodyPump {
+    source: Option<PreviewUpstream>,
+    sender: Option<PreviewCaptureSender>,
+    reached_eof: Option<Arc<AtomicBool>>,
+    done: bool,
+}
+
+impl PreviewBodyPump {
+    fn finish_capture(&mut self) {
+        if self.sender.is_some() {
+            if let Some(reached_eof) = self.reached_eof.as_ref() {
+                reached_eof.store(true, Ordering::Release);
+            }
+            self.sender.take();
+        }
+    }
+
+    /// 上游正常读到 EOF：提交捕获，并让 Drop 知道没有剩余字节可补。
+    fn complete(&mut self) {
+        self.finish_capture();
+        self.done = true;
+    }
+
+    async fn drain(mut self) {
+        let Some(mut source) = self.source.take() else {
+            return;
+        };
+        // 从这里起 source 已取走，Drop 不会再派生第二个补完任务。
+        while let Some(active) = self.sender.as_ref() {
+            // 没有播放器在等这些字节：磁盘慢时等队列回落，而不是溢出后放弃缓存。
+            if active.queued_bytes.load(Ordering::Acquire) > active.limit / 2 {
+                if active.sender.is_closed() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            }
+            match tokio::time::timeout(PREVIEW_DRAIN_STALL_TIMEOUT, source.next()).await {
+                Ok(Some(Ok(chunk))) => enqueue_preview_capture(&mut self.sender, &chunk),
+                Ok(None) => {
+                    self.finish_capture();
+                    break;
+                }
+                Ok(Some(Err(_))) | Err(_) => break,
+            }
+        }
+        self.done = true;
+    }
+}
+
+impl Drop for PreviewBodyPump {
+    fn drop(&mut self) {
+        let persistent = self
+            .sender
+            .as_ref()
+            .is_some_and(|sender| sender.persistent.load(Ordering::Acquire));
+        if self.done || !persistent || self.source.is_none() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let orphan = PreviewBodyPump {
+            source: self.source.take(),
+            sender: self.sender.take(),
+            reached_eof: self.reached_eof.take(),
+            done: false,
+        };
+        runtime.spawn(orphan.drain());
     }
 }
 
@@ -2320,41 +2451,39 @@ fn captured_preview_body(
     attempt: String,
     foreground: crate::preview_policy::ForegroundTransfer,
 ) -> axum::body::Body {
-    let source = Box::pin(futures_util::stream::iter(prefix.into_iter().map(Ok::<_, reqwest::Error>)).chain(upstream.bytes_stream()));
+    let source: PreviewUpstream = Box::pin(futures_util::stream::iter(prefix.into_iter().map(Ok::<_, reqwest::Error>)).chain(upstream.bytes_stream()));
     let (sender, reached_eof) = capture
         .map(start_preview_capture_worker)
         .map(|(sender, reached_eof)| (Some(sender), Some(reached_eof)))
         .unwrap_or((None, None));
+    let pump = PreviewBodyPump { source: Some(source), sender, reached_eof, done: false };
     let stream = futures_util::stream::unfold(
-        (source, sender, reached_eof, false),
-        move |(mut source, mut sender, reached_eof, done)| {
+        pump,
+        move |mut pump| {
             let state = state.clone(); let attempt = attempt.clone();
             async move {
-            if done {
+            if pump.done {
                 return None;
             }
-            match source.next().await {
+            let next = pump.source.as_mut()?.next().await;
+            match next {
                 Some(Ok(chunk)) => {
-                    enqueue_preview_capture(&mut sender, &chunk);
-                    Some((Ok(chunk), (source, sender, reached_eof, false)))
+                    enqueue_preview_capture(&mut pump.sender, &chunk);
+                    Some((Ok(chunk), pump))
                 }
                 Some(Err(error)) => {
                     state.activity_log.record_level(crate::activity_log::ActivityCategory::Network,
                         crate::activity_log::ActivityLevel::Warn, "在线音频读取中断",
                         &format!("stage=media_read attempt={attempt} code=UPSTREAM_TRANSPORT"));
-                    sender.take();
+                    pump.sender.take();
+                    pump.done = true;
                     Some((
                         Err(std::io::Error::other(format!("试听流读取失败：{}", error.without_url()))),
-                        (source, None, reached_eof, true),
+                        pump,
                     ))
                 }
                 None => {
-                    if sender.is_some() {
-                        if let Some(reached_eof) = reached_eof.as_ref() {
-                            reached_eof.store(true, Ordering::Release);
-                        }
-                        sender.take();
-                    }
+                    pump.complete();
                     None
                 }
             }
@@ -8648,17 +8777,18 @@ https://rr1---sn.example.googlevideo.com/api/manifest/hls_playlist/id/high/playl
 
     #[tokio::test]
     async fn a_slow_or_failed_capture_never_backpressures_audio_chunks() {
-        let (sender, receiver) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
+        let (sender, mut receiver, _queued) = preview_capture_queue(5);
         let mut sender = Some(sender);
-        // 不启动接收者，模拟闪存写入永久卡住。第一次填满有界队列，第二次必须
+        // 不消费队列，模拟闪存写入永久卡住。第一次填满字节上限，第二次必须
         // 同步放弃捕获；enqueue 没有 await，媒体 chunk 可立即继续下发。
         enqueue_preview_capture(&mut sender, &axum::body::Bytes::from_static(b"first"));
         assert!(sender.is_some());
         enqueue_preview_capture(&mut sender, &axum::body::Bytes::from_static(b"second"));
         assert!(sender.is_none());
-        drop(receiver);
+        assert_eq!(receiver.recv().await.as_deref(), Some(&b"first"[..]));
+        assert!(receiver.recv().await.is_none(), "溢出的 chunk 不能留下缺口后的数据");
 
-        let (closed_sender, closed_receiver) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
+        let (closed_sender, closed_receiver, _queued) = preview_capture_queue(1024);
         drop(closed_receiver);
         let mut closed_sender = Some(closed_sender);
         enqueue_preview_capture(
@@ -8669,6 +8799,25 @@ https://rr1---sn.example.googlevideo.com/api/manifest/hls_playlist/id/high/playl
             closed_sender.is_none(),
             "failed worker only disables the tee"
         );
+    }
+
+    #[tokio::test]
+    async fn a_startup_burst_of_small_chunks_keeps_the_capture_alive() {
+        // 首包突发：worker 还没开始消费时一次涌入远多于 8 个小 chunk。
+        let (sender, mut receiver, queued) = preview_capture_queue(PREVIEW_CAPTURE_QUEUE_BYTES);
+        let mut sender = Some(sender);
+        let chunk = axum::body::Bytes::from(vec![0_u8; 8 * 1024]);
+        for _ in 0..64 {
+            enqueue_preview_capture(&mut sender, &chunk);
+        }
+        assert!(sender.is_some());
+        assert_eq!(queued.load(Ordering::Acquire), 64 * 8 * 1024);
+        drop(sender);
+        let mut received = 0;
+        while let Some(chunk) = receiver.recv().await {
+            received += chunk.len();
+        }
+        assert_eq!(received, 64 * 8 * 1024);
     }
 
     #[test]

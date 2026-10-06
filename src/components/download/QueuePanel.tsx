@@ -25,7 +25,7 @@ import {
   isSearchDownloadDrag,
   readSearchDrop,
 } from "../../lib/searchDrag";
-import { sortDownloadTasks } from "../../lib/downloadOrder";
+import { sortDownloadHistory } from "../../lib/downloadOrder";
 import { forgetQueueDraft, patchVideoDraft, setQueueDraft } from "../../lib/queueTaskDraft";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -680,7 +680,7 @@ export function QueuePanel({ history = false }: { history?: boolean }) {
     if (node) node.scrollTop = scrollPositions.current[view];
   }, [history]);
   const visibleTasks = history
-    ? sortDownloadTasks([...done, ...list.filter((task) => task.state === "canceled")])
+    ? sortDownloadHistory([...done, ...list.filter((task) => task.state === "canceled")])
     : list.filter((task) => task.state !== "canceled");
   // 挂载、切到历史视图和窗口重新聚焦时 stat；文件多半是用户切到文件管理器里挪走的。
   useEffect(() => {

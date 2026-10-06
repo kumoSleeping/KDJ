@@ -6525,9 +6525,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   color: var(--kd-text);
   transform: scale(1.12);
 }
-/* 下载统一使用常驻侧栏，暂时隐藏播放条右下角的下载快捷入口。 */
-.kd-player-step.kd-player-stream-download { display: none; }
-
 .kd-queue-title {
   font-weight: 600;
   overflow: hidden;

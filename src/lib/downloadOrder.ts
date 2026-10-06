@@ -10,3 +10,16 @@ export function sortDownloadTasks(tasks: Iterable<DownloadTask>): DownloadTask[]
       left.created_at - right.created_at || left.id.localeCompare(right.id),
   );
 }
+
+/**
+ * 历史视图的显示顺序：最近结束的在最上面。
+ * 结束态任务的 updated_at 不再变化，所以行不会跳动。
+ */
+export function sortDownloadHistory(tasks: Iterable<DownloadTask>): DownloadTask[] {
+  return [...tasks].sort(
+    (left, right) =>
+      right.updated_at - left.updated_at ||
+      right.created_at - left.created_at ||
+      right.id.localeCompare(left.id),
+  );
+}
