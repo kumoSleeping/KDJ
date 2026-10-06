@@ -1,7 +1,10 @@
+import { liveWaveformPhaseError, smoothlyCorrectedWaveformRate } from "./waveformMotion";
+
 /** Scroll baked pixels on the compositor, independently of React/analysis/main-thread stalls. */
 export class WaveformRailMotion {
   private animation: Animation | null = null;
   private key = "";
+  private transportKey = "";
   private origin = 0;
   private loopLength = 0;
   private rate = 0;
@@ -17,15 +20,27 @@ export class WaveformRailMotion {
     this.animation?.cancel();
     this.animation = null;
     this.key = "";
+    this.transportKey = "";
   }
 
   sync(rail: HTMLElement, position: number, start: number, seconds: number,
-    total: number, rate: number, revision: number, loopStart: number | null, loopLength: number | null) {
+    total: number, rate: number, revision: number, loopStart: number | null, loopLength: number | null, discrete = false) {
     const transform = (time: number) => `translate3d(${-(time - start) / (seconds * 3) * 100}%,0,0)`;
     if (!Number.isFinite(rate) || Math.abs(rate) < .001 || typeof rail.animate !== "function") {
       this.stop();
       rail.style.transform = transform(position);
       return;
+    }
+    const transportKey = `${Math.sign(rate)}:${revision}:${loopStart}:${loopLength}`;
+    // A tile rebase or a late clock packet is not a transport discontinuity. Preserve
+    // the phase already on screen and converge by velocity, including across tile commits.
+    if (!discrete && this.animation && this.transportKey === transportKey && this.animation.playState !== "finished") {
+      const predicted = this.position(position);
+      const error = liveWaveformPhaseError(position, predicted, this.loopLength || null);
+      if (Math.abs(error) < 1.25) {
+        position = predicted;
+        rate = smoothlyCorrectedWaveformRate(rate, error);
+      }
     }
     // A loop fully covered by these tiles can repeat without waking JavaScript at loop-out.
     const repeating = loopStart !== null && loopLength !== null && loopLength > 0
@@ -40,7 +55,7 @@ export class WaveformRailMotion {
     // Rate estimates may vary on every post-seek clock sample. They change velocity,
     // not the animation's origin; restarting each time loses compositor frames.
     const key = `${start}:${Math.sign(rate)}:${revision}:${loopStart}:${loopLength}:${repeating}:${total}`;
-    if (this.animation && this.key === key) {
+    if (!discrete && this.animation && this.key === key) {
       const predicted = this.position(position);
       let error = position - predicted;
       if (this.loopLength) error -= Math.round(error / this.loopLength) * this.loopLength;
@@ -59,6 +74,7 @@ export class WaveformRailMotion {
     this.rate = rate;
     this.loopLength = repeating ? loopLength! : 0;
     this.key = key;
+    this.transportKey = transportKey;
     const span = repeating ? loopLength! : Math.abs(end - origin);
     this.animation = rail.animate([
       { transform: transform(origin) }, { transform: transform(end) },

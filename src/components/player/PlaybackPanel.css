@@ -16,9 +16,7 @@
 .kd-panel-slot[data-panel-id="control"][data-auto-panel-form="slim"] .kd-panel-placeholder > .kd-panel-body { min-height: 3rem; }
 .kd-panel-slot[data-panel-id="information"] .kd-panel-placeholder > .kd-panel-body { min-height: 6rem; }
 .kd-panel-slot[data-panel-id="metadata"] .kd-panel-placeholder > .kd-panel-body { min-height: 10rem; }
-.kd-panel-slot[data-panel-id="analysis"] .kd-panel-placeholder > .kd-panel-body { min-height: 8rem; }
 .kd-playback-panels .kd-panel-slot[data-panel-id="control"] { height: 154px; }
-.kd-playback-panels .kd-panel-slot[data-panel-id="analysis"] { min-height: 160px; }
 .kd-playback-panels .kd-panel-slot[data-panel-id="visualizer"] { min-height: 0; }
 .kd-playback-panels .kd-panel-slot[data-panel-id="visualizer"] > .kd-panel { height:auto; }
 .kd-playback-panels .kd-panel-slot[data-panel-id="visualizer"]:empty { display:none; }
@@ -46,70 +44,95 @@
 }
 .kd-playback-panels .kd-panel-head .kd-row { gap: 0; }
 .kd-playback-panels .kd-manager-panel-action { width: 16px; height: 18px; }
+/* The card width alone owns EQ geometry; dock form presets must not override it. */
 .kd-panel.kd-playing-control-panel { container: playback-control / inline-size; }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-control {
-  display: flex;
-  flex-direction: column;
+.kd-panel.kd-playing-control-panel .kd-manager-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: center;
+  align-items: center;
   flex: 1;
   min-height: 0;
-  gap: 6px;
-  padding: 6px;
+  gap: 10px 16px;
+  padding: 8px;
   overflow: auto;
 }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-control .kd-manager-control-head {
-  flex: none;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 4px;
+.kd-panel.kd-playing-control-panel .kd-manager-control .kd-manager-control-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 8px;
   margin: 0;
   padding: 0;
 }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-control-readout {
-  width: 100%; height: 34px; min-width: 0;
+.kd-panel.kd-playing-control-panel .kd-manager-control-readout {
+  width: 100%; height: 36px; min-width: 0;
+  justify-self: stretch;
   grid-template-columns: minmax(0, 1fr);
   padding: 2px 6px;
   overflow: hidden;
 }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-control-readout[data-kind="key"] { padding-left: 26px; }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-control-readout > strong { font-size: 18px; line-height: 1.05; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-control-label { gap: 4px; min-width: 0; }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-control-label > span { font-size: 9px; }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-control-label > small { font-size: 8px; }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-header-tempo {
-  --kd-tempo-label-width: 82px;
-  grid-column: 1 / -1;
-  grid-template-columns: minmax(0, 1fr) var(--kd-tempo-label-width);
-  grid-template-rows: 20px;
-  gap: 4px;
-  height: 20px;
-  padding: 0 4px;
+.kd-panel.kd-playing-control-panel .kd-manager-control-readout[data-kind="key"] {
+  grid-template-columns: minmax(0, 1fr) 20px;
+  column-gap: 6px;
 }
-.kd-playing-control-panel .kd-manager-tempo-axis { top: 0; left: 6px; right: calc(var(--kd-tempo-label-width) + 8px); height: 20px; }
+.kd-panel.kd-playing-control-panel .kd-manager-key-nudge > button { height: 16px; }
+.kd-panel.kd-playing-control-panel .kd-manager-control-readout > strong { font-size: 18px; line-height: 1.1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.kd-panel.kd-playing-control-panel .kd-manager-control-label { gap: 4px; min-width: 0; }
+.kd-panel.kd-playing-control-panel .kd-manager-control-label > span { font-size: 9px; }
+.kd-panel.kd-playing-control-panel .kd-manager-control-label > small { font-size: 8px; }
+.kd-panel.kd-playing-control-panel .kd-manager-header-tempo {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 20px 16px;
+  gap: 0;
+  height: 36px;
+  padding: 0 6px;
+}
+.kd-playing-control-panel .kd-manager-tempo-axis { top: 0; left: 6px; right: 6px; height: 20px; }
 .kd-playing-control-panel .kd-manager-header-tempo > input[type="range"] { height: 20px; }
 .kd-playing-control-panel .kd-manager-header-tempo > button { font-size: 9px; letter-spacing: 0; }
-.kd-playing-control-panel .kd-manager-mixer-layout { flex: 1; min-width: 0; min-height: 36px; }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-knob-stack {
-  flex: 1;
-  grid-template-rows: minmax(0, 1fr);
-  align-items: stretch;
-  gap: 4px;
+.kd-panel.kd-playing-control-panel .kd-manager-mixer-layout { min-width: 0; min-height: 0; }
+.kd-panel.kd-playing-control-panel .kd-manager-knob-stack {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-rows: auto;
+  align-items: center;
+  gap: 6px;
   min-height: 0;
-  padding: 4px 4px 5px;
+  padding: 0;
+  background: transparent;
 }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] {
+.kd-panel.kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   width: 100%; min-width: 0; min-height: 0;
-  /* The knob's viewBox already leaves space below its open arc. */
   gap: 0;
 }
-.kd-panel-slot > .kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg {
-  flex: 1;
-  width: 100%; max-width: 40px; min-width: 0;
-  height: 0; max-height: 40px; min-height: 0; aspect-ratio: auto;
+.kd-panel.kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg {
+  flex: none;
+  width: 32px; max-width: 100%; min-width: 0;
+  height: 32px; min-height: 0;
 }
-.kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob > b { font-size: clamp(8px, 2.5cqi, 10px); letter-spacing: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.kd-panel.kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob > b {
+  display: flex;
+  flex: 0 0 14px;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  justify-content: center;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 14px;
+  letter-spacing: 0;
+  white-space: nowrap;
+  text-align: center;
+}
+.kd-manager-gain-loudness { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kd-manager-gain-loudness .kd-loudness-number { font-size: inherit; line-height: inherit; }
+
 .kd-playback-panels .kd-manager-scroll-wave { flex: 1; height: auto; min-height: 0; border: 0; }
 .kd-activity-search-toggle.kd-playback-panel-toggle[aria-pressed="true"] {
   color: var(--kd-theme);
@@ -200,44 +223,31 @@
   margin-right: 2px;
 }
 .kd-playback-library-panel .kd-activity-selection { flex-wrap: wrap; white-space: normal; gap: 4px; }
-/* A wider EQ uses a single readout row; narrow cards retain two rows. */
-@container playback-control (min-width: 280px) {
-  .kd-panel-slot > .kd-playing-control-panel .kd-manager-control .kd-manager-control-head { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(100px, 1.4fr); }
-  .kd-panel-slot > .kd-playing-control-panel .kd-manager-header-tempo { grid-column: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: 18px 16px; height: 34px; gap: 0; }
-  .kd-playing-control-panel .kd-manager-tempo-axis { right: 6px; height: 18px; }
-  .kd-playing-control-panel .kd-manager-header-tempo > input[type="range"] { height: 18px; }
+/* Compact cards use two rows; medium cards group pitch/tempo beside the EQ.
+   Wide cards fit both groups on one line, in either dock. */
+@container playback-control (min-width: 320px) {
+  .kd-panel.kd-playing-control-panel .kd-manager-control .kd-manager-control-head {
+    grid-template-columns: minmax(100px, .8fr) minmax(64px, .7fr) minmax(100px, 1.5fr);
+  }
+  .kd-panel.kd-playing-control-panel .kd-manager-header-tempo { grid-column: auto; }
 }
-/* A full-width top control strip puts readouts and mixer on the same row.
-   Query the card, not the window: sidebar cards and split previews stay stacked. */
-@container playback-control (min-width: 520px) {
-  .kd-panel-dock-top .kd-playing-control-panel .kd-manager-control {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
+@container playback-control (min-width: 440px) {
+  .kd-panel.kd-playing-control-panel .kd-manager-control {
+    grid-template-columns: minmax(160px, .8fr) minmax(220px, 1.2fr);
   }
-  .kd-panel-dock-top .kd-playing-control-panel .kd-manager-control .kd-manager-control-head {
-    flex: 1 1 auto;
-    min-width: 270px;
-    grid-template-columns: minmax(70px, 1fr) minmax(70px, 1fr) minmax(110px, 1.4fr);
-    margin: 0;
+  .kd-panel.kd-playing-control-panel .kd-manager-control .kd-manager-control-head {
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   }
-  .kd-panel-dock-top .kd-playing-control-panel .kd-manager-mixer-layout {
-    flex: 0 1 220px;
-    min-width: 200px;
-    height: 44px;
+  .kd-panel.kd-playing-control-panel .kd-manager-header-tempo { grid-column: 1 / -1; }
+}
+@container playback-control (min-width: 640px) {
+  .kd-panel.kd-playing-control-panel .kd-manager-control {
+    grid-template-columns: minmax(280px, 1fr) minmax(240px, 1fr);
   }
-  .kd-panel-dock-top .kd-playing-control-panel .kd-manager-knob-stack {
-    height: 44px;
-    gap: 2px;
-    padding: 0;
+  .kd-panel.kd-playing-control-panel .kd-manager-control .kd-manager-control-head {
+    grid-template-columns: minmax(100px, .8fr) minmax(64px, .7fr) minmax(100px, 1.5fr);
   }
-  .kd-panel-dock-top .kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg {
-    flex: none;
-    width: 28px;
-    height: 28px;
-    min-width: 0;
-  }
+  .kd-panel.kd-playing-control-panel .kd-manager-header-tempo { grid-column: auto; }
 }
 /* The inline preview wrapper must not reserve its old two-row height. */
 .kd-panel-dock-top .kd-panel-slot[data-panel-id="control"] > .kd-track-preview-eq {
@@ -249,26 +259,8 @@
 .kd-split-aside[hidden],
 .kd-split-handle[hidden] { display: none !important; }
 
-/* Independent task windows stay compact and scroll within the shared right column. */
-.kd-task-window-body { min-height: 0; max-height: 240px; overflow: auto; overscroll-behavior: contain; }
-.kd-download-window .kd-task-window-body { height:auto; max-height: min(60vh, 560px); }
-.kd-task-window-entry { padding: 5px 6px; border-bottom: 1px solid var(--kd-line-soft); font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
-.kd-task-window-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.kd-task-window-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
-.kd-task-window button { border: 0; background: transparent; color: var(--kd-text); cursor: pointer; padding: 2px; }
-.kd-task-window button:disabled { opacity: .45; cursor: default; }
-.kd-task-window button:hover:not(:disabled) { color: var(--kd-theme); }
-.kd-task-window progress { width: 100%; height: 4px; accent-color: var(--kd-theme); }
-.kd-task-window-error { color: var(--kd-warn); }
-.kd-task-window .vj-visualizer-tasks { padding: 4px 6px; }
 
-.kd-download-window .kd-task-window-body[data-empty="true"] { height:auto; min-height:0; }
 
-.kd-playing-analysis .kd-track-preview { height: auto; min-height: 160px; }
-.kd-playing-analysis .kd-analysis-deck { height: auto; min-height: 110px; }
-.kd-playing-analysis .kd-analysis-wheel { flex-basis: 88px; }
-.kd-playing-analysis .kd-analysis-readout { flex-direction: column; align-items: stretch; gap: 6px; }
-.kd-playing-analysis .kd-analysis-metric-sep { width: auto; height: 1px; }
 .kd-playback-panels .kd-panel-slot[data-panel-id="lyrics"] { max-height: 360px; overflow: auto; overscroll-behavior: contain; }
 
 
@@ -297,9 +289,7 @@
 .kd-detail-search .kd-searchbar[data-stacked] .kd-searchbar-sep { display: none; }
 .kd-detail-search .kd-searchbar[data-stacked] .kd-searchbar-copy {
   grid-column: 1; grid-row: 1;
-  border: 1px solid var(--kd-line); border-radius: 4px; padding: 2px 6px; background: var(--kd-panel); box-shadow: none;
 }
-.kd-detail-search .kd-searchbar-copy:focus-within { outline: 2px solid var(--kd-theme); outline-offset: -2px; }
 .kd-detail-search textarea.kd-searchbar-input {
   border: 0; background: transparent; box-shadow: none;
   white-space: pre-wrap; overflow-wrap: anywhere;

@@ -297,6 +297,12 @@ export function DesktopLyricsOverlay() {
   const lyricExtra = prefs.lyricExtra;
   const prefsEpoch = prefs.prefsEpoch;
   const locked = prefs.desktopLocked;
+  const [hovered, setHovered] = useState(false);
+  const showClose = hovered && !locked;
+
+  useEffect(() => {
+    if (locked) setHovered(false);
+  }, [locked]);
   const rootRef = useRef<HTMLElement>(null);
   const dragRegionsRef = useRef("");
   const fontScale = prefs.desktopFontScale;
@@ -454,14 +460,19 @@ export function DesktopLyricsOverlay() {
   }, [playback.trackId, streamPlayback?.trackId, track?.id, prefsEpoch]);
 
   // CSS pointer-events cannot pass clicks through a native transparent window. Publish only
-  // the visible text inside the drag handle; Rust handles passthrough even outside this WebView.
+  // the visible text inside the drag handle; while hovered, keep the handle interactive so
+  // the pointer can reach its close button. Rust handles passthrough outside this WebView.
   useLayoutEffect(() => {
     const publish = () => {
       const root = rootRef.current;
       const handle = root?.querySelector(".kd-desktop-lyrics-drag")?.getBoundingClientRect();
       const regions: { x: number; y: number; width: number; height: number }[] = [];
       if (!locked && root && handle) {
+        if (showClose) {
+          regions.push({ x: handle.left, y: handle.top, width: handle.width, height: handle.height });
+        }
         for (const line of root.querySelectorAll(".kd-desktop-lyrics-dim")) {
+          if (showClose) break;
           if (!line.textContent?.trim()) continue;
           const rect = line.getBoundingClientRect();
           const x = Math.max(handle.left, rect.left);
@@ -483,7 +494,7 @@ export function DesktopLyricsOverlay() {
     // Include paused-window resizes and the child line's squeeze/scroll layout changes.
     const timer = window.setInterval(publish, 80);
     return () => window.clearInterval(timer);
-  }, [locked, activePlayback.trackId]);
+  }, [locked, showClose, activePlayback.trackId]);
 
   // 窗口通常会由主界面同步隐藏；这里再兜底，避免启动竞态闪出占位文案。
   if (activePlayback.trackId == null) return null;
@@ -578,11 +589,29 @@ export function DesktopLyricsOverlay() {
         <div
           className="kd-desktop-lyrics-drag"
           title={locked ? undefined : "按住歌词文字附近即可拖动"}
+          onPointerEnter={() => { if (!locked) setHovered(true); }}
+          onPointerLeave={() => setHovered(false)}
           onPointerDown={(event) => {
             if (locked || event.button !== 0) return;
             window.kdj.windowControl("drag");
           }}
-        />
+        >
+          {showClose && (
+            <button
+              type="button"
+              className="kd-desktop-lyrics-close"
+              aria-label="关闭桌面歌词"
+              title="关闭桌面歌词"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => {
+                setHovered(false);
+                void emitTo("main", "desktop-lyrics-close-request").catch(console.error);
+              }}
+            >
+              ×
+            </button>
+          )}
+        </div>
         <div className="kd-desktop-lyrics-content" aria-live="polite">
           <DesktopLyricsLine
             text={primary}

@@ -1,5 +1,5 @@
-import { useRef, useState, type ReactNode } from "react";
-import { Check, GripVertical, PanelRightClose, PanelRightOpen } from "lucide-react";
+import { Fragment, useId, useRef, useState, type ReactNode } from "react";
+import { Check, ChevronDown, ChevronRight, GripVertical } from "lucide-react";
 import { canPlacePanel, usePanelDock, type PanelDockSide } from "./panelDock";
 import { usePanelViewport } from "../../lib/panelViewport";
 
@@ -11,25 +11,29 @@ export interface PanelIndexEntry {
   label: string;
   icon: ReactNode;
   visible: boolean;
+  options?: ReactNode;
 }
 
 /** Moving the index moves the existing portal host, not a second panel instance. */
-export function PanelIndexSections({ items, onToggle, sidebar }: {
+export function PanelIndexSections({ items, onToggle, onAction }: {
   items: PanelIndexEntry[];
   onToggle(id: string): void;
-  sidebar?: { open: boolean; toggle(): void };
+  onAction?(): void;
 }) {
   const placements = usePanelDock(state => state.placements);
   const viewport = usePanelViewport();
-  const topOnly = viewport.narrow || viewport.compact;
   const arrange = usePanelDock(state => state.arrange);
   const root = useRef<HTMLDivElement>(null);
   const gesture = useRef<{ id: string; x: number; y: number; active: boolean } | null>(null);
   const [dragged, setDragged] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const optionsId = useId();
+  const hasOptions = items.some(item => Boolean(item.options));
   const [target, setTarget] = useState<{ side: PanelDockSide; before?: string } | null>(null);
   const placement = (item: PanelIndexEntry) => placements[item.dockId] ?? placements[item.legacyDockId ?? ""];
   const keys = Object.keys(placements);
-  const group = (side: PanelDockSide) => items.filter(item => (topOnly ? "top" : placement(item)?.side ?? item.side) === side)
+  // The index shows configured destinations, not temporary responsive placement.
+  const group = (side: PanelDockSide) => items.filter(item => (placement(item)?.side ?? item.side) === side)
     .sort((a, b) => {
       const rank = (item: PanelIndexEntry) => placement(item)
         ? keys.indexOf(placements[item.dockId] ? item.dockId : item.legacyDockId!) : -1;
@@ -54,16 +58,13 @@ export function PanelIndexSections({ items, onToggle, sidebar }: {
     return null;
   };
   const cancel = () => { gesture.current = null; setDragged(null); setTarget(null); };
-  return <div ref={root} className="kd-panel-index-sections">
-    {(topOnly ? ["top"] as const : ["top", "right"] as const).map(side => <div key={side} role="group"
+  return <div ref={root} className="kd-panel-index-sections" data-has-options={hasOptions || undefined}>
+    {(["top", "right"] as const).map(side => <div key={side} role="group"
       aria-label={side === "top" ? "顶部分区" : "侧边分区"} data-index-section={side}
       className="kd-panel-index-section" data-drop-end={target?.side === side && !target.before || undefined}>
       <div className="kd-panel-index-section-title"><span>{side === "top" ? "顶部分区" : "侧边分区"}</span>
-        {side === "right" && sidebar && <button type="button" className="kd-panel-sidebar-toggle"
-          aria-label={sidebar.open ? "一键收起侧栏" : "展开侧栏"} title={sidebar.open ? "一键收起侧栏" : "展开侧栏"}
-          onClick={sidebar.toggle}>{sidebar.open ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}</button>}
       </div>
-      {group(side).map(item => <div key={item.id} className="kd-panel-index-row" data-index-item={item.id}
+      {group(side).map(item => <Fragment key={item.id}><div className="kd-panel-index-row" data-index-item={item.id}
         data-dragged={dragged === item.id || undefined}
         data-drop-before={target?.side === side && target.before === item.id && dragged !== item.id || undefined}>
         <button type="button" className="kd-panel-reorder-handle" aria-label={`移动${item.label}板块`}
@@ -103,9 +104,27 @@ export function PanelIndexSections({ items, onToggle, sidebar }: {
             }
             requestAnimationFrame(() => root.current?.querySelector<HTMLButtonElement>(`[data-index-item="${item.id}"] > button`)?.focus({ preventScroll: true }));
           }}><GripVertical size={12} /></button>
+        {hasOptions && <span className="kd-panel-index-disclosure">
+          {item.visible && item.options && <button type="button" className="kd-folder-caret kd-panel-index-expand"
+            aria-label={`${expanded === item.id ? "收起" : "展开"}${item.label}选项`}
+            aria-expanded={expanded === item.id} aria-controls={`${optionsId}-${item.id}`}
+            onClick={() => setExpanded(expanded === item.id ? null : item.id)}>
+            {expanded === item.id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>}
+        </span>}
         <button type="button" role="menuitemcheckbox" aria-checked={item.visible} className="kd-panel-index-item"
-          onClick={() => onToggle(item.id)}>{item.icon}<span>{item.label}</span>{item.visible && <Check size={13} />}</button>
-      </div>)}
+          onClick={() => {
+            if (item.visible && expanded === item.id) setExpanded(null);
+            onToggle(item.id);
+          }}>{item.icon}<span>{item.label}</span>{item.visible && <Check size={13} />}</button>
+      </div>
+      {item.visible && item.options && expanded === item.id && <div
+        id={`${optionsId}-${item.id}`} role="group" aria-label={`${item.label}选项`}
+        className="kd-panel-index-row kd-panel-index-options"
+        onClick={event => {
+          if (event.target instanceof Element && event.target.closest('button[role="menuitem"]:not(:disabled)')) onAction?.();
+        }}>{item.options}</div>}
+      </Fragment>)}
     </div>)}
   </div>;
 }

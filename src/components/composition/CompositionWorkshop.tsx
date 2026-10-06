@@ -25,6 +25,7 @@ import {
 import { useCompositionStore } from "../../stores/compositionStore";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
+import { usesVisualizerWindow } from "../../lib/windowRole";
 import { visualizerExportActive, visualizerExportStartable } from "../../lib/visualizerExportQueue";
 import { VisualizerExportTasks } from "./VisualizerExportTasks";
 import {
@@ -42,12 +43,14 @@ import {
 } from "../../lib/workshop";
 import { useWorkshopPlayback } from "../../lib/workshopPlayback";
 import { WorkshopFloatingPreview } from "./WorkshopFloatingPreview";
+import { KvjEditorLayout } from "../workspace/KvjEditorLayout";
 import { workshopCutTime } from "../../lib/workshopRhythm";
 import { useWorkshopRhythmStore } from "../../stores/workshopRhythmStore";
 import { WorkshopTimeline } from "./WorkshopTimeline";
 import { WorkshopClipMenu } from "./WorkshopClipMenu";
 import { addWorkshopMarker } from "../../lib/workshopMarkers";
 import { WorkshopClipProperties } from "./WorkshopClipProperties";
+import { WorkshopPictureLayoutActions } from "./WorkshopPictureLayoutActions";
 import { WorkshopSubtitleEditor } from "./WorkshopSubtitleEditor";
 import { WorkshopToolbar, WorkshopToolbarTarget } from "./WorkshopToolbar";
 import { WorkshopExportSettings } from "./WorkshopExport";
@@ -64,7 +67,10 @@ import {
   readTrackDragIds,
   finishTrackDrop,
 } from "../../lib/trackDrag";
-function WorkshopEditor({ projectActions, projectDelete }: { projectActions: ReactNode; projectDelete: ReactNode }) {
+function LegacyEditorLayout({ preview, inspector, children }: { preview: ReactNode; inspector: ReactNode; children: ReactNode; actions: ReactNode }) {
+  return <>{preview}<div className="vj-editing-body">{children}</div>{inspector}</>;
+}
+function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { projectActions: ReactNode; projectDelete: ReactNode; workspace?: boolean }) {
   const p = useWorkshopStore((s) => s.draft),
     selected = useWorkshopStore((s) => s.selectedId),
     saving = useWorkshopStore((s) => s.saving),
@@ -144,27 +150,57 @@ function WorkshopEditor({ projectActions, projectDelete }: { projectActions: Rea
     setPreviewOpen(true);
     if (state.position < clip.start_ms || state.position >= clip.start_ms + clipDuration(clip)) playback.seek(clip.start_ms);
   };
+  const properties = c && (workspace || propertiesOpen) && <WorkshopClipProperties docked={workspace} close={() => { setPropertiesOpen(false); root.current?.focus({preventScroll:true}); }}
+        seek={playback.seek} crop={crop} actions={<>
+          <button type="button" onClick={() => remove(true)}>删除并闭合空隙</button>
+          <button type="button" disabled={!c || !p?.layers.some(l => l.clips.some(clip => clip.id !== selected && p.sources.find(s => s.id === clip.source_id)?.audio))}
+            onClick={() => {useWorkshopStore.getState().commit(); setPropertiesOpen(false); setReference(""); setAlign(true);}}>自动对齐</button>
+          <button type="button" aria-label="上移图层" disabled={layerIndex <= 0}
+            onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex - 1))}><ArrowUp size={15} />上移图层</button>
+          <button type="button" aria-label="下移图层" disabled={layerIndex < 0 || layerIndex === p!.layers.length - 1}
+            onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex + 1))}><ArrowDown size={15} />下移图层</button>
+        </>} />;
+  const Frame = workspace ? KvjEditorLayout : LegacyEditorLayout;
   return (
     <div
-      className="vj-workshop"
+      className={workspace ? "vj-workshop kd-kvj-editor" : "vj-workshop"}
       ref={root}
       tabIndex={-1}
       aria-label="工作站"
       onPointerDownCapture={e => {
         // WKWebView does not focus buttons on click; leave text-undo ownership
         // as soon as the user returns to timeline or toolbar controls.
-        if (!(e.target as HTMLElement).closest("input,select,textarea,[contenteditable]:not([contenteditable=false]),.vj-clip-menu,.vj-dialog,.vj-floating-preview"))
+        if (!(e.target as HTMLElement).closest("input,select,textarea,[contenteditable]:not([contenteditable=false]),.vj-clip-menu,.vj-dialog,.vj-floating-preview,[data-kvj-region=browser],[data-kvj-region=inspector]"))
           root.current?.focus({ preventScroll: true });
       }}
       onKeyDownCapture={(e) => {
         if (
           (e.target as HTMLElement).closest(
-            "input,select,textarea,[contenteditable=true],.vj-floating-preview,.vj-export-settings,.vj-dialog,.vj-clip-menu,.vj-clip-properties,[role=scrollbar],[role=separator],[role=slider]",
+            "input,select,textarea,[contenteditable=true],.vj-floating-preview,.vj-export-settings,.vj-dialog,.vj-clip-menu,.vj-clip-properties,[role=scrollbar],[role=separator],[role=slider],[data-kvj-region=browser],[data-kvj-region=inspector]",
           )
         )
           return;
         const key = e.key.toLowerCase();
-        if (key === "m" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !e.nativeEvent.isComposing) {
+        if (workspace && !e.ctrlKey && !e.metaKey && !e.altKey && !e.nativeEvent.isComposing && ["n", "i", "o", "arrowup", "arrowdown"].includes(key)) {
+          e.preventDefault(); e.stopPropagation();
+          const state = useWorkshopStore.getState(), project = state.draft;
+          if (!project) return;
+          if (key === "n") useWorkshopStore.setState({snap: !(state.snap || state.barSnap), barSnap: !(state.snap || state.barSnap)});
+          else if (key === "i" || key === "o") {
+            const duration = projectDuration(project), at = Math.min(duration, Math.max(0, playback.time()));
+            if (key === "i" && at < (project.output.out_ms ?? duration)) edit(p => {
+              const next = cloneProject(p); next.output.in_ms = at; next.output.out_ms ??= duration; return next;
+            });
+            if (key === "o" && at > project.output.in_ms) edit(p => {
+              const next = cloneProject(p); next.output.out_ms = at; return next;
+            });
+          } else {
+            const points = [0, projectDuration(project), ...(project.markers ?? []).map(m => m.position_ms), ...project.layers.flatMap(l => l.clips.flatMap(c => [c.start_ms, c.start_ms + clipDuration(c)]))].sort((a, b) => a - b);
+            const at = playback.time();
+            const target = key === "arrowup" ? points.filter(t => t < at - .5).at(-1) : points.find(t => t > at + .5);
+            if (target !== undefined) playback.seek(target);
+          }
+        } else if (key === "m" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !e.nativeEvent.isComposing) {
           e.preventDefault();
           e.stopPropagation();
           if (!e.repeat) mark();
@@ -222,7 +258,7 @@ function WorkshopEditor({ projectActions, projectDelete }: { projectActions: Rea
       }}
       onDrop={(e) => {
         const ids = readTrackDragIds(e.dataTransfer);
-        if (ids.length) {
+        if (ids.length && !e.defaultPrevented) {
           e.preventDefault();
           finishTrackDrop();
           void useWorkshopStore.getState().add(ids);
@@ -231,13 +267,12 @@ function WorkshopEditor({ projectActions, projectDelete }: { projectActions: Rea
     >
       <InlineNotice className="vj-operation-notice" text={playback.error} />
       {subtitleEditor && <WorkshopSubtitleEditor close={() => setSubtitleEditor(false)} />}
-      {hasVideo && previewOpen && <WorkshopFloatingPreview playback={playback}
-        onClose={() => { setPreviewOpen(false); root.current?.focus({preventScroll: true}); }} />}
-      <div className="vj-editing-body">
+      <Frame actions={projectActions} inspector={properties} preview={p && (workspace || (hasVideo && previewOpen)) && <WorkshopFloatingPreview playback={playback} docked={workspace}
+        onClose={() => { setPreviewOpen(false); root.current?.focus({preventScroll: true}); }} />}>
       <WorkshopTimeline playback={playback} checked={checkedLayers} onCheckedChange={setCheckedLayers} tools={<>
       <header className="vj-header vj-workshop-toolbar" data-workshop-toolbar="" aria-label="工作站操作">
         {aligning && <><span role="status">对齐中</span><button onClick={() => void useWorkshopStore.getState().cancelAlign()}>取消对齐</button></>}
-        <button type="button" aria-label="新建任务" title="新建任务" disabled={saving > 0}
+        {!workspace && <><button type="button" aria-label="新建任务" title="新建任务" disabled={saving > 0}
           onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={16} /></button>
         <button
           type="button"
@@ -261,6 +296,7 @@ function WorkshopEditor({ projectActions, projectDelete }: { projectActions: Rea
           {saving ? "保存中" : ""}
         </span>
         <WorkshopExportSettings />
+        <WorkshopPictureLayoutActions /></>}
         <WorkshopMediaTools />
         <button type="button" aria-label="添加字幕" disabled={!p || saving > 0}
           onClick={() => { useWorkshopStore.getState().commit(); setSubtitleEditor(true); }}><Type size={15} />字幕</button>
@@ -376,25 +412,16 @@ function WorkshopEditor({ projectActions, projectDelete }: { projectActions: Rea
         <button type="button" aria-label="时间轴吸附" aria-pressed={snap || barSnap}
           title="吸附片段边界与节拍线；Alt/Option 拖动临时关闭"
           onClick={() => useWorkshopStore.setState({snap: !(snap || barSnap), barSnap: !(snap || barSnap)})}><Magnet size={15} /></button>
-        <button type="button" aria-label="轨道属性" aria-pressed={propertiesOpen && !!c} disabled={!c}
+        {!workspace && <><button type="button" aria-label="轨道属性" aria-pressed={propertiesOpen && !!c} disabled={!c}
           onClick={() => { useWorkshopStore.getState().commit(); setPropertiesOpen(value => !value); }}><SlidersHorizontal size={15} />属性</button>
         {projectActions}
         <button type="button" className="vj-preview-toggle" aria-label="打开作品预览小窗" title="预览小窗"
           aria-pressed={previewOpen && hasVideo} disabled={!hasVideo}
-          onClick={() => setPreviewOpen(v => !v)}><PictureInPicture2 size={16} /></button>
+          onClick={() => setPreviewOpen(v => !v)}><PictureInPicture2 size={16} /></button></>}
       </header>
-      {c && propertiesOpen && <WorkshopClipProperties close={() => { setPropertiesOpen(false); root.current?.focus({preventScroll:true}); }}
-        seek={playback.seek} crop={crop} actions={<>
-          <button type="button" onClick={() => remove(true)}>删除并闭合空隙</button>
-          <button type="button" disabled={!c || !p?.layers.some(l => l.clips.some(clip => clip.id !== selected && p.sources.find(s => s.id === clip.source_id)?.audio))}
-            onClick={() => {useWorkshopStore.getState().commit(); setPropertiesOpen(false); setReference(""); setAlign(true);}}>自动对齐</button>
-          <button type="button" aria-label="上移图层" disabled={layerIndex <= 0}
-            onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex - 1))}><ArrowUp size={15} />上移图层</button>
-          <button type="button" aria-label="下移图层" disabled={layerIndex < 0 || layerIndex === p!.layers.length - 1}
-            onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex + 1))}><ArrowDown size={15} />下移图层</button>
-        </>} />}
+
       </>} />
-      </div>
+      </Frame>
       {clipMenu && <WorkshopClipMenu {...clipMenu} close={(restoreFocus = true) => { setClipMenu(null); if (restoreFocus) root.current?.focus({preventScroll: true}); }} onCrop={crop} onMerged={() => setCheckedLayers([])} />}
 
 
@@ -499,7 +526,7 @@ function WorkshopEditor({ projectActions, projectDelete }: { projectActions: Rea
 }
 
 
-export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }: { toolbarTarget?: HTMLElement | null; backTarget?: HTMLElement | null }) {
+export function CompositionWorkshop({ toolbarTarget = null, backTarget = null, workspace = false }: { toolbarTarget?: HTMLElement | null; backTarget?: HTMLElement | null; workspace?: boolean }) {
   const projects = useWorkshopStore(s => s.projects),
     draft = useWorkshopStore(s => s.draft),
     active = useWorkshopStore(s => s.activeId),
@@ -509,13 +536,15 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
     recoveryError = useWorkshopStore(s => s.recovery_error),
     error = useWorkshopStore(s => s.error);
   const submitting = useWorkshopStore(s => s.batchSubmitting);
-  const visualizerTasks = useVisualizerExportStore(s => s.tasks);
-  const visualizerError = useVisualizerExportStore(s => s.error);
+  const localVisualizerQueue = !usesVisualizerWindow();
+  const storedVisualizerTasks = useVisualizerExportStore(s => s.tasks);
+  const visualizerTasks = localVisualizerQueue ? storedVisualizerTasks : [];
+  const visualizerError = useVisualizerExportStore(s => localVisualizerQueue ? s.error : "");
   const [canceling, setCanceling] = useState(false);
   useEffect(() => {
     void useWorkshopStore.getState().refresh();
-    void useVisualizerExportStore.getState().initialize().catch(e => useVisualizerExportStore.setState({ error: String(e) }));
-  }, []);
+    if (localVisualizerQueue) void useVisualizerExportStore.getState().initialize().catch(e => useVisualizerExportStore.setState({ error: String(e) }));
+  }, [localVisualizerQueue]);
   const openProject = async (id: string) => {
     await useWorkshopStore.getState().flush();
     await useWorkshopStore.getState().selectProject(id);
@@ -524,6 +553,25 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
     await useWorkshopStore.getState().flush();
     useWorkshopStore.setState({expandedId: null});
   };
+  if (workspace) {
+    const job = [...jobs].reverse().find(j => j.project_id === active);
+    const busy = Boolean(job && canCancelExport(job));
+    return <div className="kd-kvj-workshop-host" data-vj-drop="" data-vj-project={active ?? undefined}>
+      <InlineNotice text={error || recoveryError || ""} />
+      <WorkshopEditor workspace projectDelete={draft && <button type="button" disabled={saving > 0 || busy}
+        onClick={() => void useWorkshopStore.getState().deleteProject(draft.id)}><Trash2 size={14} />删除工程</button>} projectActions={<>
+        {job && job.phase !== "canceled" && <span className="kd-kvj-export-state" role="status" title={job.error || job.detail || job.path}>
+          <QueueStateMark state={job.phase === "rendering" ? "processing" : job.phase === "import_failed" ? "failed" : job.phase} />
+          {busy && <progress aria-label="导出进度" max={1} value={job.progress} />}
+          {job.error && <span>{job.error}</span>}
+        </span>}
+        {job && <WorkshopCancelButton job={job} />}
+        {job?.phase === "import_failed" && <button type="button" onClick={() => void api.importWorkshopExport(job.id).then(s => useWorkshopStore.getState().accept(s)).catch(e => useWorkshopStore.setState({error: String(e)}))}>重试入库</button>}
+        <button type="button" disabled={!draft || saving > 0 || busy || submitting || !!recoveryError || projectDuration(draft) <= 0}
+          onClick={() => void useWorkshopStore.getState().export()}><Download size={14} />导出</button>
+      </>} />
+    </div>;
+  }
   const backButton = <button type="button" className="kd-aside-head-close" aria-label="返回任务列表" title="返回任务列表"
     onPointerDown={e => e.stopPropagation()} onClick={() => void returnToTasks()}><ChevronLeft size={14} /></button>;
   return <WorkshopToolbarTarget.Provider value={toolbarTarget}><div data-vj-drop="" className="vj-workshop vj-task-list" aria-label="视频项目任务列表"
@@ -546,7 +594,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
         setCanceling(true);
         void Promise.all([
           useWorkshopStore.getState().cancelAllExports().catch(e => useWorkshopStore.setState({error:String(e)})),
-          useVisualizerExportStore.getState().cancel().catch(e => useVisualizerExportStore.setState({error:String(e)})),
+          ...(localVisualizerQueue ? [useVisualizerExportStore.getState().cancel().catch(e => useVisualizerExportStore.setState({error:String(e)}))] : []),
         ]).finally(() => setCanceling(false));
       }}>{canceling ? "正在取消" : "全部取消"}</button>}
     </WorkshopToolbar>}
@@ -615,7 +663,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null }:
           {open && <div className="vj-task-editor"><WorkshopEditor key={p.id} projectActions={projectActions} projectDelete={projectDelete} /></div>}
         </section>;
       })}
-      {expanded === null && <VisualizerExportTasks />}
+      {expanded === null && localVisualizerQueue && <VisualizerExportTasks />}
     </div>
 
   </div></WorkshopToolbarTarget.Provider>;

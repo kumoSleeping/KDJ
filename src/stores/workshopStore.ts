@@ -21,6 +21,8 @@ import type {
   WorkshopSubtitle,
 } from "../types/workshop";
 import { readLocalStorage, writeLocalStorageNow } from "../lib/storageWrite";
+import { isKvjWindow } from "../lib/windowRole";
+type WorkshopEditOptions = { followImportPicture?: boolean };
 interface WorkshopStore extends WorkshopSnapshot {
   positions: Record<string, WorkshopPositionResults>;
   acceptPositions(result: WorkshopPositionResults): void;
@@ -62,10 +64,10 @@ interface WorkshopStore extends WorkshopSnapshot {
   intake(ids: number[], paths: string[], at?: number, target?: string | null): Promise<void>;
   select(id: string | null, handle?: ClipHandle): void;
   begin(): void;
-  transient(p: CompositionProject): void;
+  transient(p: CompositionProject, options?: WorkshopEditOptions): void;
   commit(): void;
   abort(): void;
-  edit(transform: (p: CompositionProject) => CompositionProject): void;
+  edit(transform: (p: CompositionProject) => CompositionProject, options?: WorkshopEditOptions): void;
   undo(): void;
   redo(): void;
   seek(ms: number): void;
@@ -74,7 +76,7 @@ interface WorkshopStore extends WorkshopSnapshot {
   aligning: { projectId: string; requestId: string } | null;
   cancelAlign(): Promise<void>;
   export(id?: string): Promise<void>;
-  exportAll(directory?: string): Promise<void>;
+  exportAll(directory?: string, projectIds?: readonly string[]): Promise<void>;
   batchSubmitting: boolean;
   cancelExport(id: string): Promise<void>;
   cancelAllExports(): Promise<void>;
@@ -87,7 +89,8 @@ let historyNavigation = 0;
 const same = (a: CompositionProject, b: CompositionProject) =>
   JSON.stringify([a.name, a.layers, a.canvas, a.output, a.markers ?? []]) ===
   JSON.stringify([b.name, b.layers, b.canvas, b.output, b.markers ?? []]);
-const remembered = readLocalStorage("kdj-workshop-project");
+const projectMemoryKey = isKvjWindow ? "kdj-kvj-project" : "kdj-workshop-project";
+const remembered = readLocalStorage(projectMemoryKey);
 const retired = new Set<string>();
 function queue(action: () => Promise<void>): Promise<void> {
   useWorkshopStore.setState((s) => ({ saving: s.saving + 1 }));
@@ -287,7 +290,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     await tail;
     const p = get().projects.find((p) => p.id === id);
     if (!p) return;
-    writeLocalStorageNow("kdj-workshop-project", id);
+    writeLocalStorageNow(projectMemoryKey, id);
     set({
       activeId: id,
       expandedId: id,
@@ -307,7 +310,7 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
       const s = await api.createWorkshop();
       get().accept(s);
       const p = s.projects.at(-1)!;
-      writeLocalStorageNow("kdj-workshop-project", p.id);
+      writeLocalStorageNow(projectMemoryKey, p.id);
       set({
         activeId: p.id,
         expandedId: p.id,
@@ -445,14 +448,14 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     if (!s.gesture && s.draft)
       set({ gesture: cloneProject(s.draft), error: "" });
   },
-  transient(p) {
+  transient(p, options) {
     const state = get();
     if (state.draft) syncOutputFormat(p, state.draft);
     const before = state.draft && findClip(state.draft, state.selectedId);
     const after = findClip(p, state.selectedId);
     // Keep right-click edits and preview drags in the same import workflow.
     // Rotation/crop remain specific to the source being edited.
-    if (p.canvas.import_picture !== null && before && after && !after.picture.subtitle &&
+    if (options?.followImportPicture !== false && p.canvas.import_picture !== null && before && after && !after.picture.subtitle &&
       isVisualSource(p.sources.find(s => s.id === after.source_id)) &&
       (["x", "y", "scale", "opacity"] as const).some(key => before.picture[key] !== after.picture[key])) {
       const { x, y, scale, opacity } = after.picture;
@@ -487,11 +490,11 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     const p = get().gesture;
     if (p) set({ draft: p, gesture: null, trimPreview: null, error: "" });
   },
-  edit(transform) {
+  edit(transform, options) {
     const p = get().draft;
     if (!p) return;
     get().begin();
-    get().transient(transform(p));
+    get().transient(transform(p), options);
     get().commit();
   },
   undo() {
@@ -613,13 +616,13 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     const errors = results.filter(r => r.status === "rejected");
     if (errors.length) throw new Error(errors.map(r => String(r.reason)).join("；"));
   },
-  async exportAll(directory) {
+  async exportAll(directory, projectIds) {
     if (get().batchSubmitting) return;
     const generation = ++batchGeneration;
     set({batchSubmitting: true});
     try {
       await get().flush();
-      const ids = get().projects.filter(p => projectDuration(p) > 0).map(p => p.id);
+      const ids = get().projects.filter(p => projectDuration(p) > 0 && (!projectIds || projectIds.includes(p.id))).map(p => p.id);
       for (const id of ids) {
         if (generation !== batchGeneration) break;
         await queue(async () => {

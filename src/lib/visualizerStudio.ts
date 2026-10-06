@@ -1,4 +1,6 @@
 import type { TrackSummary } from "../types";
+import { emitTo } from "@tauri-apps/api/event";
+import { isEditorWindow } from "./windowRole";
 import type { AudioVisualizerScene, VisualizerFeatureFrame, VisualizerFeatureTimeline } from "../types/audioVisualizer";
 import { createAudioVisualizerScene, validateVisualizerScene } from "./audioVisualizerScene";
 import { parseNeteaseWordLrc } from "./lrc";
@@ -196,6 +198,8 @@ export async function saveVisualizerDraft(draft: VisualizerDraft): Promise<void>
       tx.oncomplete = () => resolve();
       tx.onabort = () => reject(failure || tx.error || new Error("本地设置写入被中断"));
     });
+    if (isEditorWindow) await emitTo("main", "kdj:visualizer-saved", draft.project.track.id)
+      .catch(error => console.warn("可视化预览同步失败", error));
   } finally { db.close(); }
 }
 export async function loadVisualizerDraft(id: number): Promise<VisualizerDraft | undefined> {

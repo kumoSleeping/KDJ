@@ -3,6 +3,14 @@ import { captureDiagnostic, mediaDiagnostic } from "./diagnostics";
 import { observeVideoFrames, waitForVideoFrames, type PresentedVideoFrame } from "./videoFrames";
 import { VideoSeekQueue } from "./videoSeekQueue";
 
+/** Set picture-only policy before assigning src; WebKit classifies it during load. */
+export function configurePictureVideo(video: HTMLVideoElement): void {
+  video.defaultMuted = true;
+  video.muted = true;
+  video.volume = 0;
+  video.playsInline = true;
+}
+
 export const VIDEO_SYNC_EXPLICIT_TOLERANCE_SEC = 0.05;
 // Large discontinuities use a spare; rate correction requires sustained phase evidence.
 export const VIDEO_LIVE_RATE_ALIGNMENT_LIMIT_SEC = 2.5;
@@ -625,6 +633,7 @@ export class VideoPlaybackEngine {
   async alignStandby(
     active: HTMLVideoElement, spare: HTMLVideoElement,
     isCurrent: () => boolean, activate: () => boolean,
+    onPlayError?: (error: unknown) => void,
   ): Promise<boolean> {
     if (this.aligning.has(active)) return false;
     const initial = this.observations.get(active)?.clock;
@@ -652,17 +661,26 @@ export class VideoPlaybackEngine {
         if (!clock || spare.readyState < 1) return false;
         const target = clock.position + lead * clock.rate;
         if (Number.isFinite(spare.duration) && target >= spare.duration - 0.1) return false;
-        spare.currentTime = target;
+        if (!await this.seek(spare, target) || !currentClock()) return false;
         frameWait?.abort();
         frameWait = new AbortController();
         const frames = waitForVideoFrames(spare, target, true, frameWait.signal, 1900);
-        // Do not await an unbounded play promise: all waits below check ownership and a deadline.
-        void spare.play().catch(() => undefined);
+        // A rejected play cannot produce moving frames. End that wait immediately
+        // instead of loading/seeking the same denied decoder for two seconds.
+        let playFailed = false;
+        const wait = frameWait;
+        void spare.play().catch(error => {
+          playFailed = true;
+          wait.abort();
+          if (!isCurrent()) return;
+          captureDiagnostic("playback", "video.play", error, mediaDiagnostic(spare));
+          onPlayError?.(error);
+        });
         const began = performance.now();
         let previous = spare.currentTime, advancing = 0;
         while (performance.now() - began < 2000) {
           await sleep();
-          if (!currentClock()) return false;
+          if (playFailed || !currentClock()) return false;
           const position = spare.currentTime;
           advancing = !spare.paused && !spare.seeking && spare.readyState >= 2
             && position > previous + 0.01 * clock.rate ? advancing + 1 : 0;

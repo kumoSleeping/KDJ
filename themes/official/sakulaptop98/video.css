@@ -1,18 +1,12 @@
-/* A floating window gets its own caption above the picture. Inline previews
-   already have a panel heading and must never cover the image with a title. */
+/* Captions and controls stay inside the picture. Inline previews already have
+   a panel heading and must not repeat it over the image. */
 :root[data-theme-pack="sakulaptop98"] .kd-pip-float-chrome {
   background: none;
   pointer-events: none;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) {
-  padding-top: 1.45rem;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) .kd-pip-float-stage {
-  overflow: visible;
-}
 :root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) .kd-pip-float-top {
   position: absolute;
-  bottom: 100%;
+  top: 0;
   left: 0;
   right: 0;
 }

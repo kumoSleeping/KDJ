@@ -1648,11 +1648,15 @@ export function FolderTree({
   const render = (node: FolderNode, depth: number) => {
     const open = expanded.has(node.path);
     const active = filter.folder === node.path;
+    const expandableRoot = depth === 0 && node.children.length > 0;
     return (
       <div key={node.path}>
         <div
           className="kd-folder"
           data-sidebar-root-row={depth === 0 ? "" : undefined}
+          role={expandableRoot ? "button" : undefined}
+          tabIndex={expandableRoot ? 0 : undefined}
+          aria-expanded={expandableRoot ? open : undefined}
           {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
           {...midiBrowseItemProps("local", `local:folder:${node.path}`)}
           data-active={active}
@@ -1682,6 +1686,12 @@ export function FolderTree({
           onClick={(event) => {
             if (hasTextSelectionWithin(event.currentTarget)) return;
             if (selectFolderRow(event, node)) return;
+            // 根目录整行与在线来源一致；MIDI 激活仍保留曲目导航语义。
+            if (expandableRoot && !isMidiBrowseActivate()) {
+              setAllMenu(null);
+              toggle(node.path);
+              return;
+            }
             // 进文件夹默认按手排顺序看（set 是按演出顺序排的）；
             // 回到全库时手排没有意义，还原成默认的文件创建顺序。
             setFilter(
@@ -1691,6 +1701,12 @@ export function FolderTree({
             );
             if (!active) importPending(node);
             onNavigate?.();
+          }}
+          onKeyDown={(event) => {
+            if (!expandableRoot || event.target !== event.currentTarget) return;
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            event.currentTarget.click();
           }}
           onContextMenu={(event) => {
             event.preventDefault();

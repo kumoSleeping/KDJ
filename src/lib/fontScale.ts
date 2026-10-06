@@ -11,6 +11,7 @@ export type AppFontScale = number;
 export const DEFAULT_APP_FONT_SCALE: AppFontScale = 106;
 
 const STORAGE_KEY = "kd-app-font-scale";
+export const APP_FONT_SCALE_EVENT = "kdj:font-scale";
 
 export function normalizeAppFontScale(value: unknown): AppFontScale {
   const scale = typeof value === "number" ? value : Number(value);
@@ -44,6 +45,7 @@ export function applyAppFontScale(scale: AppFontScale): void {
 export function setAppFontScale(scale: AppFontScale): void {
   const next = normalizeAppFontScale(scale);
   applyAppFontScale(next);
+  window.dispatchEvent(new CustomEvent(APP_FONT_SCALE_EVENT, { detail: next }));
   try {
     storage()?.setItem(STORAGE_KEY, String(next));
   } catch {

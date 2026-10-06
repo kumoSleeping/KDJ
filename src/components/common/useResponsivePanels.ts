@@ -50,7 +50,7 @@ export function useResponsivePanels(root: RefObject<HTMLDivElement | null>, narr
       if (!state.compact && (!plan || plan.height > budget + unit)) {
         entryHeight.current = height;
         state.setMode(narrow, true);
-      } else if (state.compact && plan && height > entryHeight.current + 2 * unit && plan.height <= budget - unit) {
+      } else if (!narrow && state.compact && plan && height > entryHeight.current + 2 * unit && plan.height <= budget - unit) {
         state.setMode(narrow, false);
       }
     };

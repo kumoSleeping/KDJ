@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { Move } from "lucide-react";
+import { Move, Volume2, VolumeX } from "lucide-react";
 import { FloatingVideoControls, FloatingVideoScrub } from "../player/FloatingVideoControls";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { projectDuration } from "../../lib/workshop";
@@ -12,15 +12,15 @@ const resizeEdges = ["n", "s", "e", "w", "ne", "nw", "se", "sw"] as const;
 type ResizeEdge = typeof resizeEdges[number];
 const edgeLabels: Record<ResizeEdge, string> = { n: "上边", s: "下边", e: "右边", w: "左边", ne: "右上角", nw: "左上角", se: "右下角", sw: "左下角" };
 
-export function WorkshopFloatingPreview({ playback, onClose }: {
-  playback: WorkshopPlayback; onClose(): void;
+export function WorkshopFloatingPreview({ playback, onClose, docked = false }: {
+  playback: WorkshopPlayback; onClose(): void; docked?: boolean;
 }) {
   const project = useWorkshopStore(s => s.draft);
   const position = useWorkshopStore(s => s.position);
   const cropId = useWorkshopStore(s => s.cropId);
   const selectedId = useWorkshopStore(s => s.selectedId);
   const [pictureEditing, setPictureEditing] = useState(false);
-  const editing = pictureEditing || (cropId !== null && cropId === selectedId);
+  const editing = docked || pictureEditing || (cropId !== null && cropId === selectedId);
   const ratio = project ? project.canvas.width / project.canvas.height : 16 / 9;
   const fit = (box: Box): Box => {
     const maximum = Math.max(1, Math.min(window.innerWidth - 24, (window.innerHeight - 24) * ratio));
@@ -35,6 +35,23 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
     return fit({width, x: window.innerWidth - width - 12, y: 12});
   });
   const [fullscreen, setFullscreen] = useState(false);
+  const previewNode = useRef<HTMLDivElement>(null);
+  const [dockedWidth, setDockedWidth] = useState(0);
+  useEffect(() => {
+    if (!docked || fullscreen) return;
+    const host = previewNode.current?.parentElement;
+    if (!host) return;
+    const fit = (width: number, height: number) => {
+      const next = Math.max(1, Math.min(width, height * ratio));
+      setDockedWidth(previous => Math.abs(previous - next) < .5 ? previous : next);
+    };
+    const style = getComputedStyle(host);
+    fit(host.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0),
+      host.clientHeight - (parseFloat(style.paddingTop) || 0) - (parseFloat(style.paddingBottom) || 0));
+    const observer = new ResizeObserver(([entry]) => fit(entry.contentRect.width, entry.contentRect.height));
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, [docked, fullscreen, ratio]);
   const drag = useRef<{ x: number; y: number; box: Box; edge?: ResizeEdge } | null>(null);
   useEffect(() => {
     const resize = () => setBox(b => fit(b));
@@ -43,7 +60,7 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
     return () => window.removeEventListener("resize", resize);
   }, [ratio]);
   const down = (e: PointerEvent<HTMLElement>, edge?: ResizeEdge) => {
-    if (e.button !== 0 || fullscreen || (!edge && (e.target as HTMLElement).closest("button,[role=button],[role=slider]"))) return;
+    if (docked || e.button !== 0 || fullscreen || (!edge && (e.target as HTMLElement).closest("button,[role=button],[role=slider]"))) return;
     e.preventDefault(); e.stopPropagation();
     drag.current = {x: e.clientX, y: e.clientY, box, edge};
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -81,28 +98,30 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
     if (rect.width > 0 && project) playback.seek(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * projectDuration(project));
   };
   if (!project) return null;
-  const preview = <div data-vj-drop="" data-vj-project={project.id} className="kd-pip-float vj-floating-preview" role="dialog" aria-label="作品预览小窗"
-    data-fullscreen={fullscreen || undefined} data-picture-editing={editing || undefined} style={{left: box.x, top: box.y, width: box.width}}
+  const preview = <div ref={previewNode} data-vj-drop="" data-vj-project={project.id} className="kd-pip-float vj-floating-preview" role={docked ? "region" : "dialog"} aria-label="作品预览"
+    data-docked={docked || undefined} data-fullscreen={fullscreen || undefined} data-picture-editing={editing || undefined} style={docked ? !fullscreen && dockedWidth ? {width: dockedWidth, height: dockedWidth / ratio} : undefined : {left: box.x, top: box.y, width: box.width}}
     onPointerDown={e => down(e)} onPointerMove={move} onPointerUp={end}
     onPointerCancel={() => { if (drag.current) setBox(drag.current.box); end(); }} onLostPointerCapture={end}
     onKeyDown={e => {
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (fullscreen) setFullscreen(false); else onClose(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); if (fullscreen) setFullscreen(false); else if (!docked) onClose(); }
       else if (e.key === " " && !(e.target as HTMLElement).closest("button,[role=slider]")) {
         e.preventDefault(); e.stopPropagation(); playback.toggle();
       }
     }}>
     <div className="kd-pip-float-stage" style={{aspectRatio: fullscreen ? "auto" : String(ratio)}}>
       <WorkshopPreview playback={playback} editable={editing} />
-      <FloatingVideoControls title={project.name} playing={playback.playing} position={position / 1000}
+      <FloatingVideoControls title={project.name} showTitle={!docked} playing={playback.playing} loading={playback.loading} position={position / 1000}
         duration={projectDuration(project) / 1000} fullscreen={fullscreen}
-        onClose={onClose} closeLabel="关闭作品预览小窗" onToggle={playback.toggle}
+        onClose={docked ? undefined : onClose} closeLabel="关闭作品预览小窗" onToggle={playback.toggle}
+        showVolume={!playback.toggleMuted}
         onFullscreen={() => setFullscreen(v => !v)}
-        extra={<button type="button" aria-label="调整画面" title="调整画面" aria-pressed={editing}
+        extra={<>{playback.toggleMuted && <button type="button" aria-label={playback.muted ? "开启预览声音" : "静音预览"} aria-pressed={!playback.muted} onClick={playback.toggleMuted}>
+          {playback.muted ? <VolumeX size={13} /> : <Volume2 size={13} />}</button>}{!docked && <button type="button" aria-label="调整画面" title="调整画面" aria-pressed={editing}
           onClick={e => {
             e.stopPropagation();
             setPictureEditing(!editing);
             if (editing) useWorkshopStore.setState({cropId: null});
-          }}><Move size={13} /></button>} />
+          }}><Move size={13} /></button>}</>} />
       <FloatingVideoScrub position={position / 1000} duration={projectDuration(project) / 1000}
         onPointerDown={e => { if (e.button !== 0) return; e.stopPropagation(); scrubbing.current = true; useWorkshopStore.setState({scrubbing: true}); playback.beginScrub(); e.currentTarget.setPointerCapture(e.pointerId); scrub(e); }}
         onPointerMove={e => { if (scrubbing.current) scrub(e); }}
@@ -113,7 +132,7 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
           e.preventDefault(); e.stopPropagation();
           playback.seek(e.key === "Home" ? 0 : e.key === "End" ? projectDuration(project) : position + (e.key === "ArrowRight" ? 5000 : -5000));
         }} />
-      {resizeEdges.map(edge => <span key={edge} role="button" tabIndex={edge === "se" ? 0 : -1} className="kd-pip-resize" data-edge={edge}
+      {!docked && resizeEdges.map(edge => <span key={edge} role="button" tabIndex={edge === "se" ? 0 : -1} className="kd-pip-resize" data-edge={edge}
         aria-label={edge === "se" ? "调整预览小窗大小" : `调整预览小窗大小：${edgeLabels[edge]}`} title="拖动缩放 · 方向键微调"
         onPointerDown={e => down(e, edge)}
         onKeyDown={e => {
@@ -123,5 +142,5 @@ export function WorkshopFloatingPreview({ playback, onClose }: {
         }} />)}
     </div>
   </div>;
-  return createPortal(preview, document.body);
+  return docked && !fullscreen ? preview : createPortal(preview, document.body);
 }

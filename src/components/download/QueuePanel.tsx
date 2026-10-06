@@ -1,8 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Check,
-  ArrowLeft,
-  History,
   ChevronDown,
   CircleMinus,
   Copy,
@@ -31,10 +29,11 @@ import { sortDownloadTasks } from "../../lib/downloadOrder";
 import { forgetQueueDraft, patchVideoDraft, setQueueDraft } from "../../lib/queueTaskDraft";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
+import { useTaskPanelStore } from "../../stores/taskPanelStore";
 import { useFfmpegStore } from "../../stores/ffmpegStore";
 import type { DownloadTask, Quality, TaskPhase, TaskState } from "../../types";
 import { Button, ContextMenu, InlineNotice } from "../common";
-import { QueueChoice, QueueCover, QueueFrame, QueueList, QueueOverview, QueueStateMark } from "../queue/QueuePrimitives";
+import { QueueChoice, QueueCover, QueueEntry, QueueFrame, QueueList, QueueOverview } from "../queue/QueuePrimitives";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 import { PlatformMark } from "./PlatformMark";
 
@@ -334,153 +333,128 @@ function QueueRow({
       : "";
 
   return (
-    <article
-      className="kd-download-task"
-      data-state={task.state}
-      data-missing={missing || undefined}
+    <QueueEntry
+      order={order}
+      title={task.title}
+      titleTooltip={`${task.title} — ${task.artist}`}
+      subtitle={task.artist}
+      state={task.state}
+      status={state}
+      stateTitle={stateTitle}
+      missing={missing}
+      percent={showPercent ? formatPercent(task.progress) : undefined}
+      cover={<QueueTaskCover task={task} />}
       onContextMenu={(event) => {
         event.preventDefault();
         setMenu({ x: event.clientX, y: event.clientY });
       }}
-    >
-      <div className="kd-download-task-head">
-        <span
-          className="kd-download-task-order kd-mono"
-          aria-label={`队列第 ${Number.parseInt(order, 10)} 项`}
-        >
-          {order}
+      metadata={<>
+        <span className="kd-download-task-source">
+          <PlatformMark id={task.platform} size={11} branded />
+          <span>{PLATFORM_LABEL[task.platform] ?? task.platform}</span>
         </span>
-        <div className="kd-download-task-summary">
-          <QueueTaskCover task={task} />
-          <span className="kd-download-task-copy">
-            <span className="kd-download-task-title" title={`${task.title} — ${task.artist}`}>
-              {task.title}
-            </span>
-            <span className="kd-download-task-artist kd-truncate">{task.artist}</span>
-            <span className="kd-download-task-meta">
-              <span className="kd-download-task-source">
-                <PlatformMark id={task.platform} size={11} branded />
-                <span>{PLATFORM_LABEL[task.platform] ?? task.platform}</span>
-              </span>
-              {videoPage ? (
-                <span
-                  className="kd-download-task-page kd-mono"
-                  title={videoPage.title ? `${pageLabel} · ${videoPage.title}` : pageLabel}
-                >
-                  <strong>{pageLabel}</strong>
-                  {videoPage.title ? <span>· {videoPage.title}</span> : null}
-                </span>
-              ) : null}
-              {task.quality ? (
-                <QueueQualityControl task={task} onError={setCancelError} />
-              ) : null}
-              {finished ? (
-                <span className="kd-download-task-time kd-mono" title={`${stateLabel(task)}：${finished}`}>
-                  {finished.startsWith(`${new Date().getFullYear()}-`)
-                    ? finished.slice(5)
-                    : finished.slice(0, 10)}
-                </span>
-              ) : null}
-              {recordedTarget.trim() ? (
-                <span
-                  className="kd-download-task-target kd-mono"
-                  title={recordedTarget}
-                >
-                  <FolderOpen size={10} />
-                  {folderName(recordedTarget)}
-                </span>
-              ) : null}
-            </span>
+        {videoPage ? (
+          <span
+            className="kd-download-task-page kd-mono"
+            title={videoPage.title ? `${pageLabel} · ${videoPage.title}` : pageLabel}
+          >
+            <strong>{pageLabel}</strong>
+            {videoPage.title ? <span>· {videoPage.title}</span> : null}
           </span>
-          <span className="kd-download-task-state">
-            <span className="kd-download-task-state-label">
-              <QueueStateMark state={missing ? "failed" : task.state} />
-              <span className="kd-download-task-state-text" title={stateTitle}>{state}</span>
-            </span>
-            <span
-              className="kd-download-task-percent kd-mono"
-              data-visible={showPercent ? "true" : "false"}
-              aria-hidden={!showPercent}
-            >
-              {showPercent ? formatPercent(task.progress) : "100%"}
-            </span>
+        ) : null}
+        {task.quality ? (
+          <QueueQualityControl task={task} onError={setCancelError} />
+        ) : null}
+        {finished ? (
+          <span className="kd-download-task-time kd-mono" title={`${stateLabel(task)}：${finished}`}>
+            {finished.startsWith(`${new Date().getFullYear()}-`)
+              ? finished.slice(5)
+              : finished.slice(0, 10)}
           </span>
-        </div>
-
-        <div className="kd-download-task-actions">
-          {task.state === "failed" ? (
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={retrying}
-              aria-label="重试下载"
-              title="重试下载"
-              onClick={() => {
-                setCancelError("");
-                setRetrying(true);
-                void retry(task.id)
-                  .catch((error: unknown) =>
-                    setCancelError(`重试失败：${(error as Error).message}`),
-                  )
-                  .finally(() => setRetrying(false));
-              }}
-            >
-              <RotateCcw size={11} />
-              {retrying ? "重试中" : "重试"}
-            </Button>
-          ) : null}
-          {active ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              iconOnly
-              aria-label="取消"
-              title="取消这项"
-              onClick={() => {
-                setCancelError("");
-                void cancel(task.id)
-                  .then(() => forgetQueueDraft(task.id))
-                  .catch((error: unknown) =>
-                    setCancelError(`取消失败：${(error as Error).message}`),
-                  );
-              }}
-            >
-              <CircleMinus size={12} />
-            </Button>
-          ) : !active && task.path ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              iconOnly
-              aria-label="在文件管理器中显示下载文件"
-              title={missing ? `文件已不在原位置：${task.path}` : `在文件管理器中显示：${task.path}`}
-              disabled={missing}
-              onClick={() => onOpenTask(task)}
-            >
-              <FolderOpen size={12} />
-            </Button>
-          ) : null}
-          {!active ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              iconOnly
-              aria-label="移除队列记录"
-              title="只移除队列记录，不删除下载文件"
-              onClick={() =>
-                void remove(task.id)
-                  .then(() => forgetQueueDraft(task.id))
-                  .catch((error: unknown) =>
-                    setCancelError(`移除失败：${(error as Error).message}`),
-                  )
-              }
-            >
-              <Trash2 size={12} />
-            </Button>
-          ) : null}
-        </div>
-      </div>
-
+        ) : null}
+        {recordedTarget.trim() ? (
+          <span
+            className="kd-download-task-target kd-mono"
+            title={recordedTarget}
+          >
+            <FolderOpen size={10} />
+            {folderName(recordedTarget)}
+          </span>
+        ) : null}
+      </>}
+      actions={<>
+        {task.state === "failed" ? (
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={retrying}
+            aria-label="重试下载"
+            title="重试下载"
+            onClick={() => {
+              setCancelError("");
+              setRetrying(true);
+              void retry(task.id)
+                .catch((error: unknown) =>
+                  setCancelError(`重试失败：${(error as Error).message}`),
+                )
+                .finally(() => setRetrying(false));
+            }}
+          >
+            <RotateCcw size={11} />
+            {retrying ? "重试中" : "重试"}
+          </Button>
+        ) : null}
+        {active ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            iconOnly
+            aria-label="取消"
+            title="取消这项"
+            onClick={() => {
+              setCancelError("");
+              void cancel(task.id)
+                .then(() => forgetQueueDraft(task.id))
+                .catch((error: unknown) =>
+                  setCancelError(`取消失败：${(error as Error).message}`),
+                );
+            }}
+          >
+            <CircleMinus size={12} />
+          </Button>
+        ) : !active && task.path ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            iconOnly
+            aria-label="在文件管理器中显示下载文件"
+            title={missing ? `文件已不在原位置：${task.path}` : `在文件管理器中显示：${task.path}`}
+            disabled={missing}
+            onClick={() => onOpenTask(task)}
+          >
+            <FolderOpen size={12} />
+          </Button>
+        ) : null}
+        {!active ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            iconOnly
+            aria-label="移除队列记录"
+            title="只移除队列记录，不删除下载文件"
+            onClick={() =>
+              void remove(task.id)
+                .then(() => forgetQueueDraft(task.id))
+                .catch((error: unknown) =>
+                  setCancelError(`移除失败：${(error as Error).message}`),
+                )
+            }
+          >
+            <Trash2 size={12} />
+          </Button>
+        ) : null}
+      </>}
+    >
       {task.error && task.error.trim() !== stateLabel(task) ? (
         <div
           className="kd-download-task-error"
@@ -558,18 +532,17 @@ function QueueRow({
           ) : null}
         </ContextMenu>
       )}
-    </article>
+    </QueueEntry>
   );
 }
 
 /**
  * 队列概览只保留两层：当前真正可执行的动作，以及一条紧凑的默认参数带。
- * 开始 / 清记录始终占住固定位置；空队列时置灰，避免按钮随状态左右跳动。
+ * 开始 / 暂停始终占住固定位置；空队列时置灰，避免按钮随状态左右跳动。
  */
 function QueuePrefsBar({
   canStart,
   canPause,
-  history,
   queuedCount,
   pausedCount,
   failedCount,
@@ -577,12 +550,10 @@ function QueuePrefsBar({
   totalCount,
   onStart,
   onPause,
-  onToggleHistory,
   onError,
 }: {
   canStart: boolean;
   canPause: boolean;
-  history: boolean;
   queuedCount: number;
   pausedCount: number;
   failedCount: number;
@@ -590,16 +561,10 @@ function QueuePrefsBar({
   totalCount: number;
   onStart(): void;
   onPause(): void;
-  onToggleHistory(): void;
   onError(message: string): void;
 }) {
   const settings = useAppStore((store) => store.settings);
   const saveSettings = useAppStore((store) => store.saveSettings);
-  if (history) return <section className="kd-download-history-head" aria-label="历史记录">
-    <History size={15} /><strong>历史记录</strong>
-    <span>{totalCount > 0 ? `${totalCount} 项` : ""}</span>
-    <Button variant="ghost" size="sm" onClick={onToggleHistory}><ArrowLeft size={14} />返回当前任务</Button>
-  </section>;
   if (!settings) return null;
 
   const qualities: Quality[] = ["flac", "320", "128"];
@@ -629,12 +594,9 @@ function QueuePrefsBar({
   }
   return (
     <section className="kd-download-prefs" aria-label="下载队列概览">
-      <QueueOverview facts={summaryFacts} total={totalCount} canStart={!history && canStart} canSecondary
-        startTitle={canStart ? `${startActions}（下载 / 导出）` : "没有待开始的任务"}
-        secondaryTitle={history ? "查看当前任务" : "查看历史记录"}
-        secondaryKind="history" secondaryLabel={history ? "当前任务" : "历史记录"}
-        onStart={onStart} onSecondary={onToggleHistory}
-        extraActions={!history && canPause ? <Button variant="ghost" size="sm" onClick={onPause}>暂停</Button> : undefined} />
+      <QueueOverview facts={summaryFacts} total={totalCount} canStart={canStart} canSecondary={canPause}
+        startTitle={startActions || undefined} secondaryTitle="暂停下载"
+        secondaryKind="pause" secondaryLabel="暂停" onStart={onStart} onSecondary={onPause} />
 
       <div className="kd-download-defaults" aria-label="默认下载参数">
         <button
@@ -705,12 +667,18 @@ function QueuePrefsBar({
   );
 }
 
-export function QueuePanel() {
+export function QueuePanel({ history = false }: { history?: boolean }) {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
   const done = useDownloadStore((store) => store.history);
   const checkMissingFiles = useDownloadStore((store) => store.checkMissingFiles);
-  const [history, setHistory] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollPositions = useRef({ downloads: 0, history: 0 });
+  useLayoutEffect(() => {
+    const node = scrollRef.current;
+    const view = history ? "history" : "downloads";
+    if (node) node.scrollTop = scrollPositions.current[view];
+  }, [history]);
   const visibleTasks = history
     ? sortDownloadTasks([...done, ...list.filter((task) => task.state === "canceled")])
     : list.filter((task) => task.state !== "canceled");
@@ -769,24 +737,23 @@ export function QueuePanel() {
       }}
       onDrop={(event) => {
         setDropActive(false);
-        setHistory(false);
         const payload = readSearchDrop(event.dataTransfer);
         finishSearchDrop();
         if (!payload) return;
         event.preventDefault();
+        useTaskPanelStore.getState().setView("downloads");
         void enqueueSearchQueuePayload(payload).catch((error: unknown) =>
           setActionError(`加入队列失败：${(error as Error).message}`),
         );
       }}
     >
-      <QueuePrefsBar
+      {!history && <QueuePrefsBar
         canStart={canStart}
         canPause={canPause}
-        history={history}
-        queuedCount={history ? 0 : queuedCount}
-        pausedCount={history ? 0 : pausedCount}
-        failedCount={history ? 0 : failedCount}
-        activeCount={history ? 0 : activeCount}
+        queuedCount={queuedCount}
+        pausedCount={pausedCount}
+        failedCount={failedCount}
+        activeCount={activeCount}
         totalCount={visibleTasks.length}
         onStart={() => {
           setActionError("");
@@ -804,13 +771,14 @@ export function QueuePanel() {
             setActionError(`暂停下载失败：${(error as Error).message}`),
           );
         }}
-        onToggleHistory={() => setHistory(value => !value)}
         onError={setActionError}
-      />
+      />}
 
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
-      <QueueList>
+      <QueueList ref={scrollRef} onScroll={event => {
+        scrollPositions.current[history ? "history" : "downloads"] = event.currentTarget.scrollTop;
+      }}>
         {visibleTasks.map((task, index) => (
           <QueueRow
             key={task.id}

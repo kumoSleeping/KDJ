@@ -1,5 +1,5 @@
-import { useCallback, useState, useSyncExternalStore, type ReactNode, type CSSProperties } from "react";
-import { DASH, formatBpm, formatDuration } from "../../lib/format";
+import { useState, useSyncExternalStore, type ReactNode } from "react";
+import { formatDuration } from "../../lib/format";
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
 import {
   getSongPreviewState,
@@ -7,26 +7,12 @@ import {
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
 import { streamCoverUrl, streamMeta, streamTrackById } from "../../lib/streamTrack";
-import {
-  streamAnalysisSnapshot,
-  subscribeStreamAnalysis,
-  trackWithStreamAnalysis,
-  type StreamAnalysisSnapshot,
-} from "../../lib/streamAnalysis";
-import {
-  streamCueSnapshot,
-  subscribeStreamCue,
-  trackWithStreamCue,
-} from "../../lib/streamCue";
-import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track } from "../../types";
-import { InlineNotice, Panel } from "../common";
+import { InlineNotice } from "../common";
 import { DetailPanelStack } from "../library/DetailPanelStack";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
-import { CamelotWheel } from "../library/CamelotWheel";
-import { EnergyMeter } from "../library/TrackTable";
 import { OnlineTrackCacheFacts } from "./OnlineTrackCacheFacts";
 import { LyricsDetailPanel } from "./LyricsView";
 
@@ -46,94 +32,6 @@ function qualityLabel(value: string | null | undefined): string {
   return value === "flac" ? "FLAC" : `${value}K`;
 }
 
-function StreamAnalysisPanel({
-  snapshot,
-  track,
-}: {
-  snapshot: StreamAnalysisSnapshot;
-  track: Track;
-}) {
-  const keyFilter = useLibraryStore((state) => state.filter.key);
-  const setFilter = useLibraryStore((state) => state.setFilter);
-  const result = snapshot.result;
-  const ready = snapshot.phase === "ready" && result;
-
-  // 播放面板保留加载中的槽位；独立详情是否显示仍由调用方决定。
-  if (!ready) return <Panel heading="Analysis" className="kd-panel-placeholder" padded dense />;
-
-  const bpmConfidence =
-    result.bpm_confidence !== null ? Math.round(result.bpm_confidence * 100) : null;
-  const warning = snapshot.error || result.errors.join("；");
-
-  return (
-    <Panel heading="Analysis" padded dense>
-      <div className="kd-analysis-deck">
-        <div
-          className="kd-analysis-wheel"
-          title="亮起的是能和它接上的调；点任意一格按调筛选曲库"
-        >
-          <CamelotWheel
-            code={track.camelot}
-            size={128}
-            onPick={(code) => setFilter({ key: keyFilter === code ? "" : code })}
-          />
-          {keyFilter && (
-            <button
-              type="button"
-              className="kd-wheel-filter"
-              title="清除调号筛选"
-              onClick={() => setFilter({ key: "" })}
-            >
-              正在筛选 {keyFilter}
-              <span aria-hidden="true">×</span>
-            </button>
-          )}
-        </div>
-
-        <div className="kd-analysis-readout" aria-label="在线歌曲节奏与响度">
-          <div className="kd-analysis-metric">
-            <span className="kd-analysis-metric-label">BPM</span>
-            <span className="kd-analysis-metric-value" data-with-version="true">
-              {formatBpm(track.bpm)}
-              <small className="kd-analysis-version">V3</small>
-            </span>
-            <div
-              className="kd-analysis-meter"
-              style={
-                bpmConfidence !== null
-                  ? ({ "--kd-meter": `${bpmConfidence}%` } as CSSProperties)
-                  : undefined
-              }
-              data-empty={bpmConfidence === null || undefined}
-              title={bpmConfidence !== null ? `置信度 ${bpmConfidence}%` : "未检出稳定节拍"}
-            >
-              <i aria-hidden="true" />
-            </div>
-            <span className="kd-analysis-metric-hint">
-              置信度 {bpmConfidence !== null ? `${bpmConfidence}%` : DASH}
-            </span>
-          </div>
-
-          <div className="kd-analysis-metric-sep" aria-hidden="true" />
-
-          <div className="kd-analysis-metric">
-            <span className="kd-analysis-metric-label">相对响度</span>
-            <span className="kd-analysis-metric-value">
-              <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
-            </span>
-            <span className="kd-analysis-metric-hint">
-              {track.rms_db !== null ? `${track.rms_db.toFixed(1)} dBFS` : DASH}
-              {track.peak_db !== null ? ` · peak ${track.peak_db.toFixed(1)}` : ""}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {warning ? <p className="kd-stream-analysis-warning">部分分析提示：{warning}</p> : null}
-    </Panel>
-  );
-}
-
 /**
  * 在线曲目沿用本地详情的封面与曲目信息布局。
  * 它没有曲库记录，但代理收到完整媒体后会复用会话文件做一次临时分析；
@@ -141,7 +39,7 @@ function StreamAnalysisPanel({
  */
 export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail", renderPanels }: {
   track: Track; restoreTarget?: HTMLElement | null; mode?: "detail" | "preview";
-  renderPanels?(information: ReactNode, metadata?: ReactNode, analysis?: ReactNode): ReactNode;
+  renderPanels?(information: ReactNode, metadata?: ReactNode): ReactNode;
 }) {
   const isPreview = mode === "preview";
   const session = useSyncExternalStore(
@@ -162,23 +60,6 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
   // 否则状态、波形和缓存会永远停在“未开始”。
   const detailTrackId = matchingPreview?.trackId ?? track.id;
   const detailTrack = streamTrackById(detailTrackId) ?? track;
-  const subscribeAnalysis = useCallback(
-    (listener: () => void) => subscribeStreamAnalysis(detailTrackId, listener),
-    [detailTrackId],
-  );
-  const readAnalysis = useCallback(
-    () => streamAnalysisSnapshot(detailTrackId),
-    [detailTrackId],
-  );
-  const analysis = useSyncExternalStore(subscribeAnalysis, readAnalysis, readAnalysis);
-  const subscribeCue = useCallback(
-    (listener: () => void) => subscribeStreamCue(detailTrackId, listener),
-    [detailTrackId],
-  );
-  const readCue = useCallback(() => streamCueSnapshot(detailTrackId), [detailTrackId]);
-  useSyncExternalStore(subscribeCue, readCue, readCue);
-  const analyzedTrack = trackWithStreamCue(trackWithStreamAnalysis(detailTrack, analysis));
-  const analysisReady = analysis.phase === "ready" && analysis.result !== null;
 
   const active = session.trackId === detailTrackId;
   const duration = active
@@ -271,19 +152,9 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
         onDismiss={actionError ? () => setActionError("") : undefined}
       />
 
-      {renderPanels ? renderPanels(information, undefined,
-        <StreamAnalysisPanel snapshot={analysis} track={analyzedTrack} />)
+      {renderPanels ? renderPanels(information)
         : <DetailPanelStack restoreTarget={restoreTarget} preview={isPreview}>
         {!isPreview && <LyricsDetailPanel key="lyrics" track={detailTrack} />}
-
-        {(isPreview || analysisReady) && (
-          <StreamAnalysisPanel
-            key="analysis"
-            snapshot={analysis}
-            track={analyzedTrack}
-          />
-        )}
-
       </DetailPanelStack>}
     </div>
   );

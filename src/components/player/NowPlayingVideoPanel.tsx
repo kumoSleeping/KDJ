@@ -7,7 +7,7 @@ import { LocalVideoPlayer } from "../library/LocalVideoPlayer";
 export function NowPlayingVideoPanel({ track }: { track: Track }) {
   const floating = useVideoPip(state => state.active && state.mode === "float"
     && state.session?.source === "local" && state.session.trackId === track.id);
-  return <Panel heading="视频" className="kd-playing-video-panel" padded={false} dense>
+  return <Panel heading="视频" floatingHeader className="kd-playing-video-panel" padded={false} dense>
     {!floating && <LocalVideoPlayer track={track} />}
   </Panel>;
 }

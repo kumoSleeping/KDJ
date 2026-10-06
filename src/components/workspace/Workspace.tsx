@@ -9,7 +9,7 @@ import { createTemporaryLibrary, type TemporaryLibrary, type LibraryPaneStoreApi
 import { useTemporaryFolderDrop } from "../../lib/temporaryFolderDrag";
 import { TemporaryFolderPane } from "../library/TemporaryFolderPane";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ArrowLeft, Pin } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
 import { clearTextSelection } from "../../lib/textSelection";
 import {
@@ -37,6 +37,8 @@ import {
   TRACK_COVER_DROP_TARGET_ATTR,
 } from "../../lib/trackDrag";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
+import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
+import { useLyricsStore } from "../../stores/lyricsStore";
 import {
   makePendingSongStreamTrack,
   streamTrackById,
@@ -139,7 +141,6 @@ import {
   type ExploreSearchDetail,
 } from "../../lib/vjSearch";
 import { burstToneForPlatforms, type SearchBurstTone } from "../download/SearchBurstFX";
-import { QueuePanel } from "../download/QueuePanel";
 import { ChromeActions } from "../chrome/ChromeActions";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
@@ -157,7 +158,7 @@ import { SearchTipsPanel } from "../download/SearchTipsPanel";
 import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
 import { DETAIL_EVENT } from "../library/TrackTable";
 import { NetworkVideoDetail } from "../player/NetworkVideoDetail";
-import { SettingsPanel } from "../settings/SettingsPanel";
+import { SettingsOverlay } from "../settings/SettingsOverlay";
 import { LibraryToolbar } from "../library/LibraryToolbar";
 import { TrackDetail } from "../library/TrackDetail";
 import { TrackPreviewPanel } from "../library/TrackPreviewPanel";
@@ -282,9 +283,8 @@ export function Workspace() {
   const setVideoPanelTarget = useVideoPip((state) => state.setPanelTarget);
   const showTrackDetail = useAppStore((state) => state.showTrackDetail);
   const showSettings = useAppStore((state) => state.showSettings);
+  const expandedPanelId = usePanelViewport((state) => state.expandedPanelId);
   const settingsPanelEpoch = useAppStore((state) => state.settingsPanelEpoch);
-  const settingsPinned = useAppStore((state) => state.settingsPinned);
-  const setSettingsPinned = useAppStore((state) => state.setSettingsPinned);
   const showQueue = useAppStore((state) => state.showQueue);
   const queuePanelEpoch = useAppStore((state) => state.queuePanelEpoch);
   const showComposition = useAppStore((state) => state.showComposition);
@@ -1370,7 +1370,6 @@ export function Workspace() {
   }, [asideLocked]);
   /** 右栏只承载显式打开的当前操作，不跟随普通选歌弹出。 */
   const [detailPinned, setDetailPinned] = useState(true);
-  const [sidebarRequested, setSidebarRequested] = useState(false);
   const [detailAction, setDetailAction] = useState<"playback" | "metadata">("playback");
   useEffect(() => {
     if (!Object.values(panelPlacements).some(item => item?.side === "right")) return;
@@ -1380,7 +1379,6 @@ export function Workspace() {
   useEffect(() => {
     if (rightRevealRevision === handledRightReveal.current) return;
     handledRightReveal.current = rightRevealRevision;
-    setSidebarRequested(true);
     setAsideLocked(false);
     setDetailPinned(true);
     setDetailAction("playback");
@@ -1587,7 +1585,8 @@ export function Workspace() {
         detail?.trackId ?? (source === "player-deck" ? getPlayingTrack()?.id : undefined),
       );
       const viewport = usePanelViewport.getState();
-      if (viewport.compact) toggleResponsivePanel(`kd-activity-panels:${source === "visualizer" ? "visualizer" : "information"}`);
+      if (viewport.narrow && source === "player-deck") viewport.toggleSongPanel();
+      else if (viewport.compact) toggleResponsivePanel(`kd-activity-panels:${source === "visualizer" ? "visualizer" : "information"}`);
       else if (layout === "narrow" && !viewport.narrow) setSheet("aside");
     };
     window.addEventListener(DETAIL_EVENT, onDetail);
@@ -1597,11 +1596,14 @@ export function Workspace() {
   // 歌词属于当前播放操作，不改变顶部的选择预览。
   useEffect(() => {
     if (!showLyrics) return;
+    const track = getPlayingTrack();
+    if (!track || !hasVisibleLyrics(useLyricsStore.getState().get(track.id).lines)) return;
     setAsideLocked(false);
     setDetailPinned(true);
     setDetailAction("playback");
     const viewport = usePanelViewport.getState();
-    if (viewport.compact) toggleResponsivePanel("kd-activity-panels:lyrics");
+    if (viewport.narrow) viewport.revealSongPanel();
+    else if (viewport.compact) toggleResponsivePanel("kd-activity-panels:lyrics");
     else if (layout === "narrow" && !viewport.narrow) setSheet("aside");
   }, [showLyrics, lyricsPanelEpoch]);
 
@@ -1623,7 +1625,6 @@ export function Workspace() {
     showQueue ||
     showSearchTips ||
     showFolders ||
-    showSettings ||
     showDuplicates ||
     previewAside;
   // Preview retains its selection snapshot while pages load; playback never becomes its fallback.
@@ -1668,23 +1669,24 @@ export function Workspace() {
       stacked={inDetail || chrome === "stacked"}
     />
   );
+  // Configured right-side panels stay visible even after a temporary overlay closes.
   const detailAside =
-    !realOverlayAside && detailPinned;
+    !realOverlayAside && (detailPinned || (!panelsAtTop && rightHasPanels));
   // Keep the aside shell mounted while the next selected track is loading. Only its content
   // changes; remounting the shell would replay the entrance animation on every selection.
   const editorAsideOpen = showComposition || visualizerTrackOpen;
-  const hasAsideContent = editorAsideOpen || realOverlayAside
-    || (detailAside && (detailAction !== "playback" || (!panelsAtTop && (sidebarRequested || rightHasPanels))));
+  const hasAsideContent = showSettings || expandedPanelId !== null || editorAsideOpen || realOverlayAside
+    || (detailAside && (detailAction !== "playback" || (!panelsAtTop && rightHasPanels)));
   const showAside = layout === "wide" && hasAsideContent;
 
   const closeAside = useCallback(() => {
-    setSidebarRequested(false);
     if (showSearchTips) {
       setShowSearchTips(false);
       setSheet(null);
       return;
     }
     setDetailPinned(false);
+    setDetailAction("playback");
     setSheet(null);
     useAppStore.getState().dismissOverlay();
   }, [showSearchTips]);
@@ -1698,13 +1700,6 @@ export function Workspace() {
     const activeEditor = useVisualizerStudioStore.getState();
     if (activeEditor.track) {
       if (activeEditor.beforeClose) void activeEditor.beforeClose(); else activeEditor.close();
-      return;
-    }
-    if (useAppStore.getState().showSettings && !showSearchTips) {
-      useAppStore.getState().toggleSettingsPanel();
-      setDetailPinned(true);
-      setDetailAction("playback");
-      setAsideLocked(false);
       return;
     }
     const finish = () => {
@@ -1728,47 +1723,8 @@ export function Workspace() {
     if (layout === "narrow") closeAside();
   }, [activateWorkspacePane, layout, closeAside]);
 
-  const toggleAside = useCallback(() => {
-    const viewport = usePanelViewport.getState();
-    if (viewport.compact) { toggleResponsivePanel("kd-activity-panels:information"); return; }
-    if (viewport.narrow) return;
-    if (showAside || (layout === "narrow" && sheet === "aside" && hasAsideContent)) {
-      closeAsideForUser();
-      return;
-    }
-    const track = temporarySelected ?? selected ?? requestedDetailTrack;
-    setSidebarRequested(true);
-    setAsideLocked(false);
-    pinTrackAside(track?.id);
-    if (layout === "narrow") setSheet("aside");
-  }, [
-    layout, sheet, hasAsideContent,
-    closeAsideForUser,
-    pinTrackAside,
-    temporarySelected,
-    requestedDetailTrack,
-    selected,
-    showAside,
-  ]);
-
   const playbackPanel = <PlaybackPanel indexTarget={panelIndexTarget}
-    sidebar={{ open: showAside || (layout === "narrow" && sheet === "aside" && hasAsideContent), toggle: toggleAside }}
     searchOpen={aggregateSearchOpen} renderSearch={() => aggregateSearch(true)} />;
-
-  const settingsPinButton = showSettings && !showSearchTips ? (
-    <button
-      type="button"
-      className="kd-aside-head-close"
-      data-pinned={settingsPinned ? "true" : undefined}
-      aria-pressed={settingsPinned}
-      aria-label={settingsPinned ? "取消固定设置" : "固定设置"}
-      title={settingsPinned ? "设置已固定；点击恢复随内容切换自动收起" : "固定设置，不被选歌和切换列表顶掉"}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={() => setSettingsPinned(!settingsPinned)}
-    >
-      <Pin size={13} fill={settingsPinned ? "currentColor" : "none"} />
-    </button>
-  ) : null;
 
   const [workshopToolbarTarget, setWorkshopToolbarTarget] = useState<HTMLDivElement | null>(null);
   const [workshopBackTarget, setWorkshopBackTarget] = useState<HTMLSpanElement | null>(null);
@@ -1777,7 +1733,7 @@ export function Workspace() {
       <span className="kd-detail-restore-tools" ref={setDetailRestoreTarget} />
     </>
   ) : null;
-  const asideTools = settingsPinButton ?? detailAsideTools;
+  const asideTools = detailAsideTools;
 
   const asideLabel = showSearchTips
     ? "使用提示"
@@ -1785,8 +1741,6 @@ export function Workspace() {
       ? "下载"
     : showFolders
       ? "文件夹"
-    : showSettings
-      ? "设置"
       : showDuplicates
           ? "曲库优化分析"
         : previewAside
@@ -1794,10 +1748,7 @@ export function Workspace() {
             : detailAside
               ? detailAction === "metadata" ? "曲目信息编辑" : "详情"
               : "";
-  const workshopBackSlot = showSettings && !showSearchTips
-    ? <button type="button" className="kd-aside-head-close" aria-label="返回详情" title="返回详情"
-        onClick={closeAsideForUser}><ArrowLeft size={14} /></button>
-    : asideLabel === "曲目信息编辑"
+  const workshopBackSlot = asideLabel === "曲目信息编辑"
     ? <button type="button" className="kd-aside-head-close" aria-label="返回详情" title="返回详情"
         onClick={() => setDetailAction("playback")}><ArrowLeft size={14} /></button>
     : null;
@@ -1826,8 +1777,6 @@ export function Workspace() {
       onOpenStreamPlaylist={openStreamPlaylistFromUser}
       activeStreamPlaylist={activeStreamPlaylist}
     />
-  ) : showSettings ? (
-    <SettingsPanel />
   ) : showDuplicates ? (
     <DuplicateAnalysisPanel
       all={duplicateAll}
@@ -1842,7 +1791,7 @@ export function Workspace() {
           session={videoPipSession} restoreTarget={detailRestoreTarget} />
       </div>
     </div>
-  ) : showQueue ? <QueuePanel /> : detailAside ? trackDetailPanel : null;
+  ) : detailAside ? trackDetailPanel : null;
   const activityAside = detailAside && detailAction === "playback";
   const asideBody = <PanelDockZone side="right">
     <div className="kd-activity-panel-host" hidden={!activityAside}>{playbackPanel}</div>
@@ -1876,20 +1825,18 @@ export function Workspace() {
     setSheet(null);
   }, [layout, listMode]);
 
-  // 显式旁路（设置 / 下载队列 / 文件夹…）打开时收起曲目详情，避免右栏叠两层内容。
+  // 右栏旁路打开时收起曲目详情；设置在舞台上方独立弹出，不改变右栏。
   // 歌词已并入曲目详情；这里不能 unpin，
   // 否则一点「歌词」就被拆掉，看起来像弹不出来。
   useEffect(() => {
-    if (!(showSettings || showFolders || showDuplicates || showPreview)) return;
-    if (!showSettings) setDetailPinned(false);
+    if (!(showFolders || showDuplicates || showPreview)) return;
+    setDetailPinned(false);
     setAsideLocked(false);
     if (layout === "narrow") setSheet("aside");
   }, [
     layout,
-    showSettings,
     showFolders,
     showDuplicates,
-    settingsPanelEpoch,
     foldersPanelEpoch,
     duplicatesPanelEpoch,
     showPreview,
@@ -1922,24 +1869,18 @@ export function Workspace() {
 
 
   useEffect(() => {
-    if (!showQueue) return;
-    setDetailPinned(true);
-    setDetailAction("playback");
-    setAsideLocked(false);
-    if (layout === "narrow") setSheet("aside");
-  }, [showQueue, queuePanelEpoch, layout]);
+    if (!queuePanelEpoch) return;
+    // Only reveal the existing card; never switch the sidebar to a queue overlay.
+    const viewport = usePanelViewport.getState();
+    if (viewport.compact) {
+      if (!viewport.activeIds.includes("kd-activity-panels:downloads")) toggleResponsivePanel("kd-activity-panels:downloads");
+    } else if (layout === "narrow") setSheet("aside");
+  }, [queuePanelEpoch, layout]);
 
   const openSettingsFromChrome = useCallback(() => {
-    const revealingCoveredSettings = showSearchTips && useAppStore.getState().showSettings;
     setShowSearchTips(false);
-    if (revealingCoveredSettings) return;
-    if (useAppStore.getState().showSettings) {
-      setDetailPinned(true);
-      setDetailAction("playback");
-      setAsideLocked(false);
-    }
     toggleSettingsPanel();
-  }, [showSearchTips, toggleSettingsPanel]);
+  }, [toggleSettingsPanel]);
 
   const openUpdateFromChrome = useCallback(() => {
     setShowSearchTips(false);
@@ -2401,7 +2342,7 @@ export function Workspace() {
               panelIndexTarget={setPanelIndexTarget}
               compositionOpen={showComposition}
               onComposition={selectVideoMode}
-              settingsOpen={showSettings && !showSearchTips}
+              settingsOpen={showSettings}
               onSettings={openSettingsFromChrome}
               onOpenUpdate={openUpdateFromChrome}
             />
@@ -2410,6 +2351,7 @@ export function Workspace() {
         <div className="kd-stage">
         <div
           className="kd-split"
+          inert={showSettings && layout === "narrow"}
           data-folders="true"
           data-layout={layout}
           data-tree={showTree ? "open" : undefined}
@@ -2750,7 +2692,7 @@ export function Workspace() {
                     onDoubleClick={() => resetColumn("right")}
                   />
                   <aside className="kd-split-aside" ref={localAsideRef} hidden={!showAside}>
-                    <div className="kd-aside-restorable" hidden={editorAsideOpen}>
+                    <div className="kd-aside-restorable" hidden={editorAsideOpen} inert={showSettings}>
                     {detailAside && detailAction === "playback" ? asideTools : <AsideHead
                       title={asideLabel}
                       leading={workshopBackSlot}
@@ -2759,6 +2701,7 @@ export function Workspace() {
                     <div className="kd-split-aside-body kd-scroll">{asideBody}</div>
                     </div>
                     {editorDock}
+                    {showSettings && <SettingsOverlay />}
                   </aside>
                 </>
               )}
@@ -2787,6 +2730,7 @@ export function Workspace() {
           </Sheet>
         )}
         </div>
+        {showSettings && layout === "narrow" && <SettingsOverlay />}
       </div>
     </section>
   );

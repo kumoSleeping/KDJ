@@ -190,8 +190,8 @@ impl LiveVj {
     }
 }
 fn main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("此操作仅允许主窗口调用".into());
+    if !["main", "live-vj-control"].contains(&window.label()) {
+        return Err("此操作仅允许 KDJ 或 KVJ 窗口调用".into());
     }
     Ok(())
 }
@@ -691,7 +691,7 @@ pub async fn live_vj_stop(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    if !["main", "live-vj-output"].contains(&window.label()) {
+    if !["main", "live-vj-control", "live-vj-output"].contains(&window.label()) {
         return Err("窗口无权控制实时 VJ".into());
     }
     tracing::info!(window = window.label(), "live VJ stop requested");
@@ -720,7 +720,7 @@ pub fn live_vj_status(
     live: State<LiveVj>,
     after_log_id: Option<u64>,
 ) -> Result<Status, String> {
-    if !["main", "live-vj-output"].contains(&window.label()) {
+    if !["main", "live-vj-control", "live-vj-output"].contains(&window.label()) {
         return Err("窗口无权读取实时 VJ".into());
     }
     let view = live.view.lock().unwrap();

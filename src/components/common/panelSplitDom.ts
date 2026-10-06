@@ -20,6 +20,9 @@ export function splitHosts(zone: HTMLElement, measure = true) {
     const slot = host.querySelector<HTMLElement>(":scope > .kd-panel-slot, :scope > .kd-internal-window[data-docked]");
     if (!id || !slot || !slot.children.length || slot.hidden
       || (slot.classList.contains("kd-panel-slot") && !slot.querySelector(".kd-panel"))) return [];
+    const panel = slot.querySelector(".kd-panel");
+    // A collapsed, headerless card has no visible surface or shared edge.
+    if (panel?.matches(".kd-panel-empty-media, .kd-panel:has(> .kd-panel-float-tools):has(> .kd-async-panel-body[data-expanded=\"false\"])")) return [];
     for (let parent: HTMLElement | null = slot; parent && parent !== zone; parent = parent.parentElement) {
       if (parent.hidden) return [];
     }

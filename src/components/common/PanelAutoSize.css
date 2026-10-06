@@ -1,4 +1,4 @@
-/* Portable cards own their content height. Dock cells and saved window bounds do not stretch them. */
+/* Measure portable cards at natural height; optimized top-dock cells supply aligned frame heights. */
 .kd-panel-slot[data-auto-height] {
   box-sizing: border-box;
   /* Inline-size query containers have no intrinsic width. Keep a usable
@@ -23,24 +23,13 @@
 }
 .kd-panel-slot[data-auto-height] .kd-panel-head { flex: none; }
 .kd-panel-slot[data-auto-height][data-optimized-panel] {
-  height: var(--kd-auto-panel-height, auto) !important;
+  height: var(--kd-cell-height, var(--kd-auto-panel-height, auto)) !important;
   max-height: var(--kd-auto-panel-limit, none) !important;
   overflow: auto;
 }
 .kd-panel-slot[data-auto-height][data-optimized-panel] > :is(.kd-panel, .kd-track-preview-eq, .kd-track-preview-waveform),
 .kd-panel-slot[data-auto-height][data-optimized-panel] > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
-  height: var(--kd-auto-panel-height, auto) !important;
-}
-.kd-panel-slot[data-auto-height][data-panel-id="control"] .kd-manager-mixer-layout,
-.kd-panel-slot[data-auto-height][data-panel-id="control"] .kd-manager-knob-stack {
-  flex: none;
-  height: auto !important;
-}
-.kd-panel-slot[data-auto-height][data-panel-id="control"] .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg {
-  flex: none;
-  width: 1.75rem;
-  height: 1.75rem;
-  min-width: 0;
+  height: 100% !important;
 }
 .kd-panel-slot[data-auto-height][data-panel-id="waveform"] { container-type: inline-size; }
 .kd-panel-slot[data-auto-height][data-panel-id="waveform"] .kd-manager-scroll-wave {
@@ -52,6 +41,12 @@
   flex: none;
   height: var(--kd-auto-content-height, min(20rem, 34dvh)) !important;
   min-height: 0;
+}
+/* In a solved row, fill the actual frame below its current theme caption.
+   Do not subtract a previously measured caption height a second time. */
+.kd-panel-slot[data-auto-height][data-optimized-panel][data-panel-id="waveform"] .kd-manager-scroll-wave {
+  flex: 1 1 0;
+  height: 0 !important;
 }
 /* Only the picture has an aspect ratio; its surrounding card hugs the picture and heading. */
 .kd-panel-slot[data-auto-height] :is(.kd-viz-preview, .kd-preview-frame:not([data-fullscreen="true"])) {

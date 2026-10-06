@@ -4,7 +4,8 @@ import {
   type PreparedLocalVideoSeek,
 } from "./localVideoSeekBridge";
 import { waitForVideoFrames } from "./videoFrames";
-import { VideoTransportEchoGuard, type VideoPlaybackEngine } from "./videoPlaybackEngine";
+import { SeekTransitionOverlay } from "./seekTransition";
+import { configurePictureVideo, VideoTransportEchoGuard, type VideoPlaybackEngine } from "./videoPlaybackEngine";
 import { captureLocalVideoSeekFence, getLocalVideoClock, localVideoSeekHasLanded, usesLocalVideoDeviceClock, type LocalVideoSeekFence } from "./mediaSync";
 
 const PREVIEW_DEBOUNCE_MS = 90;
@@ -131,6 +132,7 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
   const videoRefs = useRef<[HTMLVideoElement | null, HTMLVideoElement | null]>([null, null]);
   const activeSlotRef = useRef<Slot>(0);
   const [activeSlot, setActiveSlot] = useState<Slot>(0);
+  const transitionRef = useRef(new SeekTransitionOverlay());
   const sourceKeyRef = useRef("");
   const sourceUrlRef = useRef("");
   const generationRef = useRef(0);
@@ -156,10 +158,12 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     [activeVideo],
   );
   const bindVideo = useCallback((slot: Slot) => (video: HTMLVideoElement | null) => {
+    if (video) configurePictureVideo(video);
     videoRefs.current[slot] = video;
   }, []);
 
   const cancelPending = useCallback(() => {
+    transitionRef.current.clear();
     generationRef.current += 1;
     preparationAbortRef.current?.abort();
     preparationAbortRef.current = null;
@@ -208,6 +212,8 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
       }
       window.clearTimeout(previewTimerRef.current);
       previewTimerRef.current = 0;
+      // Release a previous outgoing slot before it becomes this seek's standby.
+      transitionRef.current.clear();
       const generation = ++generationRef.current;
       preparationAbortRef.current?.abort();
       const abort = new AbortController();
@@ -280,9 +286,11 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
               guard?.mark(video, "pause");
               video.pause();
             }
-            // Change ownership before pausing the old slot so its pause event cannot be mistaken
-            // for a user/system transport command.
-            old?.pause();
+            // Ownership changes first. Keep the muted outgoing decoder moving through
+            // the fade instead of holding a still screenshot over the new video.
+            if (old) transitionRef.current.videoHandoff(old, () => {
+              if (activeVideo() !== old) old.pause();
+            });
             optionsRef.current.onActivate?.(video, clock?.position ?? normalized);
             return true;
           },
@@ -316,11 +324,14 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     if (!old || !next || holdingPositionRef.current || pendingRef.current || !optionsRef.current.enabled) return;
     const isCurrent = () => generationRef.current === generation && optionsRef.current.enabled
       && activeVideo() === old && !holdingPositionRef.current && !pendingRef.current;
+    transitionRef.current.clear();
     void synchronizer.alignStandby(old, next, isCurrent, () => {
       if (!isCurrent()) return false;
       activeSlotRef.current = activeSlotRef.current === 0 ? 1 : 0;
       setActiveSlot(activeSlotRef.current);
-      old.pause();
+      transitionRef.current.videoHandoff(old, () => {
+        if (activeVideo() !== old) old.pause();
+      });
       optionsRef.current.onActivate?.(next, next.currentTime);
       return true;
     });
@@ -337,6 +348,39 @@ export function useLocalVideoSwap(options: LocalVideoSwapOptions) {
     window.clearTimeout(previewTimerRef.current);
     previewTimerRef.current = 0;
   }, [cancelPending]);
+
+  useEffect(() => {
+    if (!options.enabled) return;
+    // A failed spare can fall back to seeking the visible element. Begin its bounded
+    // fade at seeking, not after a frozen-picture wait for the target frame.
+    const cleanups = videoRefs.current.map(video => {
+      if (!video) return () => {};
+      const transition = new SeekTransitionOverlay();
+      let pending: AbortController | null = null;
+      const clear = () => { pending?.abort(); pending = null; transition.clear(); };
+      const seeking = () => {
+        clear();
+        if (activeVideo() !== video || holdingPositionRef.current) return;
+        const generation = generationRef.current;
+        const abort = new AbortController();
+        pending = abort;
+        transition.video(video);
+        void waitForVideoFrames(video, video.currentTime, false, abort.signal).then(ready => {
+          if (pending !== abort) return;
+          pending = null;
+          if (!ready || activeVideo() !== video || generationRef.current !== generation) transition.clear();
+        });
+      };
+      video.addEventListener("seeking", seeking);
+      video.addEventListener("emptied", clear);
+      video.addEventListener("error", clear);
+      return () => {
+        clear(); video.removeEventListener("seeking", seeking);
+        video.removeEventListener("emptied", clear); video.removeEventListener("error", clear);
+      };
+    });
+    return () => cleanups.forEach(cleanup => cleanup());
+  }, [activeVideo, options.enabled]);
 
   useEffect(() => {
     const { enabled, trackId } = optionsRef.current;

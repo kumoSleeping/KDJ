@@ -2203,7 +2203,7 @@ export const TrackTable = memo(function TrackTable({
           <button type="button" disabled={menuIds.length !== 1 || isImageTrack(rowMenu.track.format)} onClick={() => {
             useVisualizerStudioStore.getState().open(rowMenu.track);
             setRowMenu(null);
-          }}><BarChart3 size={12} />生成可视化视频</button>
+          }}><BarChart3 size={12} />新建可视化</button>
           <WorkshopAddMenu ids={() => {
             const chosen = new Set(menuIds);
             return orderedIds.filter(id => chosen.has(id));

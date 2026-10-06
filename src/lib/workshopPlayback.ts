@@ -6,7 +6,11 @@ import { makeCompositionPreviewTrack, updateCompositionPreviewAudio } from "./st
 import { playTrack, PLAY_EVENT, type PlayRequest } from "./playTrack";
 import { useWorkshopStore } from "../stores/workshopStore";
 import { projectDuration } from "./workshop";
+import { acquireWorkshopVideoPlayback } from "./workshopPreviewPolicy";
 import type { Track } from "../types";
+import type { LocalVideoClock } from "./mediaSync";
+import { isKvjWindow } from "./windowRole";
+import { useKvjPreviewPlayback } from "./kvjPreviewPlayback";
 export interface WorkshopPlayback {
   ticket: string | null;
   playing: boolean;
@@ -21,8 +25,13 @@ export interface WorkshopPlayback {
   retry(): void;
   time(): number;
   pendingSeek?(): boolean;
+  clock?(): LocalVideoClock | null;
+  muted?: boolean;
+  toggleMuted?(): void;
 }
-export function useWorkshopPlayback(): WorkshopPlayback {
+// Window role is fixed for the lifetime of this module; only one transport is mounted.
+export const useWorkshopPlayback = isKvjWindow ? useKvjPreviewPlayback : useNativeWorkshopPlayback;
+function useNativeWorkshopPlayback(): WorkshopPlayback {
   const projectId = useWorkshopStore((s) => s.activeId),
     revision = useWorkshopStore((s) => s.draft?.revision),
     auditionAfterLayer = useWorkshopStore((s) => s.activeId ? s.auditionAfterLayer[s.activeId] : undefined),
@@ -274,6 +283,7 @@ export function useWorkshopPlayback(): WorkshopPlayback {
       return;
     }
     wantPlay.current = true;
+    acquireWorkshopVideoPlayback();
     setError("");
     if (
       track.current &&

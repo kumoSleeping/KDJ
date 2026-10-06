@@ -450,13 +450,13 @@ export async function bootThemePack(): Promise<void> {
       const label = getCurrentWindow().label;
       if (label === "main") {
         await listen<string>("theme-pack-request", ({payload: target}) => {
-          if (!["lyrics-overlay", "live-vj-output"].includes(target)) return;
+          if (!["lyrics-overlay", "live-vj-output", "kvj", "visualizer-studio", "live-vj-control", "preferences"].includes(target)) return;
           void emitTo(target, "theme-pack-snapshot", {
             selection: useThemePack.getState().selection,
             mode: document.documentElement.dataset.theme === "dark" ? "dark" : "light",
           });
         });
-      } else if (["lyrics-overlay", "live-vj-output"].includes(label)) {
+      } else if (["lyrics-overlay", "live-vj-output", "kvj", "visualizer-studio", "live-vj-control", "preferences"].includes(label)) {
         // A newly created WebView can see an old localStorage snapshot and has
         // missed the last broadcast. Ask the main window after listeners exist.
         let done!: () => void;

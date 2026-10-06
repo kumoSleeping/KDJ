@@ -87,7 +87,7 @@ pub(super) fn handle_webview_event(webview: &Webview, event: &WebviewEvent) {
 }
 
 fn handle_drop(label: &str, app: &tauri::AppHandle, scale: f64, drop: &DragDropEvent) {
-    if label != "main" {
+    if !["main", "kvj", "live-vj-control"].contains(&label) {
         return;
     }
     static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -103,12 +103,13 @@ fn handle_drop(label: &str, app: &tauri::AppHandle, scale: f64, drop: &DragDropE
         _ => return,
     };
     let app = app.clone();
+    let label = label.to_owned();
     let (x, y) = position
         .map(|p| client_position(p.x as f64, p.y as f64, scale, cfg!(target_os = "windows")))
         .unwrap_or((0., 0.));
     if phase != "drop" {
         let _ = app.emit_to(
-            "main",
+            label.as_str(),
             "kdj:media-drop",
             serde_json::json!({"id":id,"phase":phase,"x":x,"y":y,"paths":paths}),
         );
@@ -141,7 +142,7 @@ fn handle_drop(label: &str, app: &tauri::AppHandle, scale: f64, drop: &DragDropE
             bridge.grant_picked_path(std::path::Path::new(path));
         }
         let _ = app.emit_to(
-            "main",
+            label.as_str(),
             "kdj:media-drop",
             serde_json::json!({
                 "id":id,"phase":phase,"x":x,"y":y,"paths":files,

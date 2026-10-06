@@ -8,16 +8,47 @@ import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
 export function QueueFrame({ className = "", style, ...props }: ComponentProps<"div">) {
   return <div {...props} className={`kd-col ${className}`} style={{ height: "100%", minHeight: 0, ...style }} />;
 }
-export function QueueList({ children }: { children: ReactNode }) {
-  return <div className="kd-scroll kd-grow kd-download-task-list" style={{ minHeight: 0 }}>{children}</div>;
+export function QueueList({ children, className = "", style, ...props }: ComponentProps<"div">) {
+  return <div {...props} className={`kd-scroll kd-grow kd-download-task-list ${className}`} style={{ minHeight: 0, ...style }}>{children}</div>;
+}
+export function QueueEntry({ order, title, titleTooltip = title, subtitle, state, status, stateTitle, missing,
+  percent, cover, metadata, actions, children, className = "", ...props }: Omit<ComponentProps<"article">, "title"> & {
+  order: string; title: string; titleTooltip?: string; subtitle?: string;
+  state: string; status: string; stateTitle?: string; missing?: boolean;
+  percent?: string; cover: ReactNode; metadata?: ReactNode; actions?: ReactNode;
+}) {
+  return <article {...props} className={`kd-download-task ${className}`} data-state={state} data-missing={missing || undefined}>
+    <div className="kd-download-task-head">
+      <span className="kd-download-task-order kd-mono" aria-label={`队列第 ${Number.parseInt(order, 10)} 项`}>{order}</span>
+      <div className="kd-download-task-summary">
+        {cover}
+        <span className="kd-download-task-copy">
+          <span className="kd-download-task-title" title={titleTooltip}>{title}</span>
+          <span className="kd-download-task-byline">
+            {subtitle && <span className="kd-download-task-artist kd-truncate" title={subtitle}>{subtitle}</span>}
+            <span className="kd-download-task-state">
+              <span className="kd-download-task-state-label">
+                <QueueStateMark state={missing ? "failed" : state} />
+                <span className="kd-download-task-state-text" title={stateTitle}>{status}</span>
+              </span>
+              {percent && <span className="kd-download-task-percent kd-mono">{percent}</span>}
+            </span>
+          </span>
+          {metadata && <span className="kd-download-task-meta">{metadata}</span>}
+        </span>
+      </div>
+      {actions && <div className="kd-download-task-actions">{actions}</div>}
+    </div>
+    {children}
+  </article>;
 }
 export interface QueueFact { count: number; label: string; tone: string }
 export function QueueOverview({ facts, total, canStart, canSecondary, secondaryLabel, secondaryKind,
   startTitle, secondaryTitle, onStart, onSecondary, extraActions }: {
-  facts: QueueFact[]; total: number; canStart: boolean; canSecondary: boolean;
-  secondaryLabel: string; secondaryKind: "pause" | "cancel" | "clear" | "history";
+  facts: QueueFact[]; total: number; canStart: boolean; canSecondary?: boolean;
+  secondaryLabel?: string; secondaryKind?: "pause" | "cancel" | "clear" | "history";
   extraActions?: ReactNode;
-  startTitle?: string; secondaryTitle?: string; onStart(): void; onSecondary(): void;
+  startTitle?: string; secondaryTitle?: string; onStart(): void; onSecondary?(): void;
 }) {
   return <div className="kd-download-overview">
     <div className="kd-download-summary" title={`队列共 ${total} 项`} aria-live="polite">
@@ -27,9 +58,9 @@ export function QueueOverview({ facts, total, canStart, canSecondary, secondaryL
     </div>
     <div className="kd-download-overview-actions">
       <Button variant="primary" size="sm" disabled={!canStart} title={startTitle} onClick={onStart}><Play size={11} />开始</Button>
-      <Button variant="ghost" size="sm" disabled={!canSecondary} title={secondaryTitle} onClick={onSecondary}>
+      {onSecondary && <Button variant="ghost" size="sm" disabled={!canSecondary} title={secondaryTitle} onClick={onSecondary}>
         {secondaryKind === "pause" ? <Pause size={11} /> : secondaryKind === "cancel" ? <Ban size={11} /> : secondaryKind === "history" ? <History size={11} /> : <Trash2 size={11} />}{secondaryLabel}
-      </Button>
+      </Button>}
       {extraActions}
     </div>
   </div>;

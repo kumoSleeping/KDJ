@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isEditorWindow } from "./windowRole";
+import { requestKvjTransport } from "./kvjWindow";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
@@ -1139,6 +1141,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   replaceAudio(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+    if (isEditorWindow) return requestKvjTransport("replaceAudio", this.snapshot.trackId, source);
     return this.command({ type: "replaceAudio", source: this.source(source) });
   }
 
@@ -1185,11 +1188,13 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   play(): Promise<UnifiedPlayerState> {
+    if (isEditorWindow) return requestKvjTransport("play", this.snapshot.trackId);
     const revision = ++this.transportRevision;
     return this.command({ type: "play" }, () => revision === this.transportRevision);
   }
 
   pause(): Promise<UnifiedPlayerState> {
+    if (isEditorWindow) return requestKvjTransport("pause", this.snapshot.trackId);
     const revision = ++this.transportRevision;
     return this.command({ type: "pause" }, () => revision === this.transportRevision);
   }
@@ -1504,6 +1509,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   seek(seconds: number): Promise<UnifiedPlayerState> {
+    if (isEditorWindow) return requestKvjTransport("seek", this.snapshot.trackId, seconds);
     return this.command({ type: "seek", position: Math.max(0, seconds) });
   }
 

@@ -5,12 +5,11 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type CSSProperties,
   type ReactNode,
 } from "react";
 import { Pencil, Plus, RotateCcw, Search, Star, Upload } from "lucide-react";
 import { api } from "../../lib/api";
-import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isVideoTrack } from "../../lib/format";
+import { DASH, formatBytes, formatDate, formatDuration, isImageTrack, isVideoTrack } from "../../lib/format";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import { normalizePriority, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
@@ -29,13 +28,11 @@ import type { Platform, SongSource, Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice, Panel } from "../common";
 import { DetailPanelStack } from "./DetailPanelStack";
 import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
-import { CamelotWheel } from "./CamelotWheel";
 import { useVideoPip } from "../../lib/videoPip";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { DETAIL_PANELS_STORAGE_KEY, useDetailPanelPrefs } from "../../lib/detailPanelPrefs";
 import { LyricsDetailPanel } from "../player/LyricsView";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
-import { EnergyMeter } from "./TrackTable";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
 import {
@@ -173,21 +170,20 @@ function buildPatch(track: Track, draft: Draft): TrackPatch {
   return patch;
 }
 
-export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEdit, onUpdated, renderPanels }: {
+export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEdit, onUpdated, onRevealMetadata, renderPanels }: {
   track: Track;
   restoreTarget?: HTMLElement | null;
-  renderPanels?(information: ReactNode, metadata: ReactNode, analysis?: ReactNode): ReactNode;
+  renderPanels?(information: ReactNode, metadata: ReactNode): ReactNode;
   mode?: "detail" | "preview" | "metadata" | "summary";
   onEdit?(): void;
   onUpdated?(track: Track): void;
+  onRevealMetadata?(): void;
 }) {
   const preview = mode === "preview";
   const settings = useAppStore((state) => state.settings);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
   const setCover = useLibraryStore((state) => state.setCover);
   const rereadTags = useLibraryStore((state) => state.rereadTags);
-  const setFilter = useLibraryStore((state) => state.setFilter);
-  const keyFilter = useLibraryStore((state) => state.filter.key);
   const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   // Playback belongs to the activity panel/float; selection must not mount another decoder.
   const playbackOwnsVideo = playingTrack?.id === track.id;
@@ -429,6 +425,9 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
     if (preview) { onEdit?.(); return; }
     if (!editing) setDraft(toDraft(track));
     setEditing(true);
+    // 播放工作区的 Meta 已搬到 activity stack；旧 detail stack 的偏好
+    // 无法显示它。由宿主面板负责展开真实的 Meta，保留上传 / 在线匹配 / 拖放入口。
+    if (onRevealMetadata) { onRevealMetadata(); return; }
     useDetailPanelPrefs.getState().setVisible("metadata", true);
     // 点击封面展开编辑器；面板顺序仍尊重用户自己的排列。
     requestAnimationFrame(() => {
@@ -493,8 +492,6 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
     formatDuration(track.duration),
     `文件 ${formatBytes(track.size)}`,
   ].filter(Boolean).join(" ");
-  const bpmConfPct =
-    track.bpm_confidence !== null ? Math.round(track.bpm_confidence * 100) : null;
 
   const information = (
       <div
@@ -843,83 +840,6 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
       </Panel>
   );
 
-  const analysis = (
-      <Panel key="analysis" heading="Analysis" padded dense>
-        {/* 调号轮 + 读数同处一面：像一套仪表，而不是圆旁边再挂一个框。 */}
-        <div className="kd-analysis-deck">
-          <div
-            className="kd-analysis-wheel"
-            title="亮起的是能和它接上的调；点任意一格按调筛选曲库"
-          >
-            <CamelotWheel
-              code={track.camelot}
-              size={128}
-              onPick={(code) => setFilter({ key: keyFilter === code ? "" : code })}
-            />
-            {keyFilter && (
-              <button
-                type="button"
-                className="kd-wheel-filter"
-                title="清除调号筛选"
-                onClick={() => setFilter({ key: "" })}
-              >
-                正在筛选 {keyFilter}
-                <span aria-hidden="true">×</span>
-              </button>
-            )}
-          </div>
-
-          <div className="kd-analysis-readout" aria-label="节奏与响度">
-            <div className="kd-analysis-metric">
-              <span className="kd-analysis-metric-label">BPM</span>
-              <span
-                className="kd-analysis-metric-value"
-                data-with-version={track.beat_grid_revision?.includes("v4") || track.bpm_v3 || track.bpm_v2 || undefined}
-              >
-                {formatBpm(track.bpm)}
-                {track.beat_grid_revision?.includes("v4") ? <small className="kd-analysis-version">V4</small> : track.bpm_v3 ? (
-                  <small className="kd-analysis-version">V3</small>
-                ) : track.bpm_v2 ? (
-                  <small className="kd-analysis-version">V2</small>
-                ) : null}
-              </span>
-              <div
-                className="kd-analysis-meter"
-                style={
-                  bpmConfPct !== null
-                    ? ({ "--kd-meter": `${bpmConfPct}%` } as CSSProperties)
-                    : undefined
-                }
-                data-empty={bpmConfPct === null || undefined}
-                title={bpmConfPct !== null ? `置信度 ${bpmConfPct}%` : "未分析"}
-              >
-                <i aria-hidden="true" />
-              </div>
-              <span className="kd-analysis-metric-hint">
-                置信度 {bpmConfPct !== null ? `${bpmConfPct}%` : DASH}
-              </span>
-            </div>
-
-            <div className="kd-analysis-metric-sep" aria-hidden="true" />
-
-            <div className="kd-analysis-metric">
-              <span className="kd-analysis-metric-label">相对响度</span>
-              <span className="kd-analysis-metric-value">
-                <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
-              </span>
-              <span className="kd-analysis-metric-hint">
-                {track.rms_db !== null ? `${track.rms_db.toFixed(1)} dBFS` : DASH}
-                {track.peak_db !== null ? ` · peak ${track.peak_db.toFixed(1)}` : ""}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {track.analysis_error && (
-          <p style={{ color: "var(--kd-warn)" }}>{track.analysis_error}</p>
-        )}
-      </Panel>
-  );
 
   return (
     <div className={`kd-col kd-track-detail${preview ? " kd-track-preview" : ""}`}
@@ -931,14 +851,13 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
         }} />
       {!renderPanels && !preview && mode !== "metadata" && information}
       <InlineNotice text={notice} onDismiss={() => setNotice("")} />
-      {renderPanels ? renderPanels(information, metadata, analysis) : mode === "summary" ? metadata : <DetailPanelStack restoreTarget={restoreTarget} preview={preview}>
+      {renderPanels ? renderPanels(information, metadata) : mode === "summary" ? metadata : <DetailPanelStack restoreTarget={restoreTarget} preview={preview}>
 
         {mode === "detail" && <LyricsDetailPanel key="lyrics" track={track} />}
         {mode === "detail" && isVideoTrack(track.format) && !playbackOwnsVideo && !pipOwnsVideo && (
           <Panel key="video" heading="视频" padded={false} dense><LocalVideoPlayer track={track} /></Panel>
         )}
         {(mode === "metadata" || editing) && metadata}
-        {mode !== "metadata" && analysis}
       </DetailPanelStack>}
     </div>
   );

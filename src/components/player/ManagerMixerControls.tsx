@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import {
   EQ_GRAPH_BAND_COUNT,
   EQ_GRAPH_FREQUENCIES,
@@ -40,8 +40,10 @@ export function ArcKnob({
   snapToCenter = true,
   center,
   resetLabel = "双击回中",
+  readout,
 }: {
   label: string;
+  readout?: ReactNode;
   value: number;
   min?: number;
   max?: number;
@@ -193,7 +195,7 @@ export function ArcKnob({
         <line className="kd-dj-arcknob-needle" x1="24" y1="24" x2="24" y2="14"
           transform={`rotate(${needle.toFixed(2)} 24 24)`} />
       </svg>
-      <b>{showValue ? text : label}</b>
+      <b>{readout !== undefined ? readout : showValue ? text : label}</b>
     </div>
   );
 }

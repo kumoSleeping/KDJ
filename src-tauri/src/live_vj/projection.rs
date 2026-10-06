@@ -149,7 +149,7 @@ pub async fn live_vj_projection_close(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    if !["main", "live-vj-output"].contains(&window.label()) {
+    if !["main", "live-vj-control", "live-vj-output"].contains(&window.label()) {
         return Err("窗口无权关闭投放".into());
     }
     let live = app.state::<LiveVj>();

@@ -232,6 +232,7 @@ export function SearchBar({
   const [burstActive, setBurstActive] = useState(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
+  const inputRows = batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
   const currentKindIndex = searchKinds.indexOf(searchKind);
   const nextSearchKind = searchKinds.length
     ? searchKinds[(Math.max(-1, currentKindIndex) + 1) % searchKinds.length]
@@ -343,7 +344,7 @@ export function SearchBar({
           <textarea
             ref={inputRef}
             className="kd-searchbar-input"
-            rows={1}
+            rows={inputRows}
             value={query}
             placeholder=""
             aria-label="关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"

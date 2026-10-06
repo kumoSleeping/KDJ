@@ -3544,15 +3544,14 @@ async fn start_downloads(
 ) -> Json<serde_json::Value> {
     // 带 ids 时只开始点名的任务（CLI 用它放行自己刚入队的那几条），不动别人排着的
     // 队列，也不顺手重试别人的失败任务。
-    let ids = body.map(|Json(body)| body.ids).unwrap_or_default();
-    if !ids.is_empty() {
-        let started = start_tasks(state, ctx.downloads.clone(), &ids);
+    if let Some(Json(body)) = body {
+        // An explicitly empty selection must never become a whole-queue command.
+        let started = start_tasks(state, ctx.downloads.clone(), &body.ids);
         return Json(json!({ "started": true, "retried": started }));
     }
     // 「开始」是队列的统一执行入口：新排队任务和之前失败、可重试的歌曲
     // 应该在同一次点击里一起跑，不能逼用户再逐行点一遍「重试」。
     let retried = restart_inactive_tasks(state, ctx.downloads.clone());
-    ctx.downloads.release_queued();
     Json(json!({ "started": true, "retried": retried }))
 }
 

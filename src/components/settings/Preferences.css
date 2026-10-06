@@ -1,0 +1,18 @@
+.kd-split-aside:has(> .kd-preferences-overlay) { position:relative; }
+.kd-preferences-overlay { position:absolute; inset:0; z-index:210; display:flex; flex-direction:column; min-width:0; min-height:0; background:var(--kd-panel); color:var(--kd-text); }
+.kd-preferences-overlay-head { display:flex; align-items:center; justify-content:space-between; flex:none; min-height:36px; padding:0 12px; border-bottom:1px solid var(--kd-line-soft); font-size:var(--kd-size-sm); }
+.kd-preferences-overlay-head button { display:grid; place-items:center; width:28px; height:28px; padding:0; border:0; border-radius:4px; background:transparent; color:var(--kd-muted); cursor:pointer; }
+.kd-preferences-overlay-head button:hover { color:var(--kd-theme); }
+.kd-preferences-overlay-head button:focus-visible { outline:2px solid var(--kd-theme); outline-offset:2px; }
+.kd-preferences-overlay > .kd-preferences { flex:1; min-height:0; }
+.kd-preferences-app { height:100%; min-height:0; display:flex; flex-direction:column; color:var(--kd-text); background:var(--kd-panel); }
+.kd-split-aside .kd-preferences > .kd-djp { padding:14px 16px; }
+.kd-preferences > .kd-djp { flex:1; gap:16px; padding:22px 28px; overscroll-behavior-y:contain; }
+.kd-preferences > .kd-djp > * { flex:none; min-width:0; width:100%; max-width:660px; margin:0 auto; }
+.kd-preferences .kd-djp-groups { gap:18px; }
+.kd-preferences .kd-djp-switch-list { gap:7px; }
+.kd-preferences .kd-djp-toggle { min-height:30px; }
+.kd-preferences .kd-panel { border:0; box-shadow:none; background:transparent; }
+@media (max-width:640px) {
+  .kd-preferences > .kd-djp { padding:16px; }
+}

@@ -1,0 +1,188 @@
+/* An unavailable media body must not leave a raised, zero-height frame. */
+:root .kd-app .kd-panel.kd-panel-empty-media,
+:root .kd-app .kd-panel:has(> .kd-panel-float-tools):has(> .kd-async-panel-body[data-expanded="false"]):not([data-maximized]) {
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+/* Expanded cards leave dock sizing temporarily without changing saved layout. */
+:root .kd-panel[data-maximized="true"] {
+  position: fixed;
+  z-index: 200;
+  margin: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  overflow: hidden;
+  background: var(--kd-panel);
+}
+:root .kd-panel[data-maximized] > .kd-panel-float-tools {
+  opacity: 1;
+  max-height: none;
+}
+:root .kd-panel[data-maximized] > .kd-panel-float-tools > :not(.kd-panel-head-label) { pointer-events: auto; }
+:root .kd-panel[data-maximized] > .kd-panel-head { flex: none; }
+:root .kd-app .kd-panel button.kd-panel-size-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  box-shadow: none;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+:root .kd-app .kd-panel button.kd-panel-size-action:is(:hover, :active, [aria-pressed="true"]) {
+  box-shadow: none;
+  background: transparent;
+  color: var(--kd-theme);
+}
+:root .kd-app .kd-panel button.kd-panel-size-action:focus-visible {
+  outline: 1px solid var(--kd-theme);
+  outline-offset: -2px;
+}
+:root .kd-panel[data-maximized] > :is(.kd-task-window-body, .kd-async-panel-body) {
+  flex: 1 1 0;
+  height: 0;
+  min-height: 0;
+  max-height: none;
+}
+:root .kd-panel[data-maximized] > .kd-task-window-body { overflow: auto; }
+:root .kd-panel[data-maximized] .kd-async-panel-clip { display: flex; flex-direction: column; }
+:root .kd-panel[data-maximized] .kd-async-panel-space { flex: 1; height: 0; min-height: 0; }
+:root .kd-panel[data-maximized] .kd-lyrics[data-has-content] { height: 100%; max-height: none; }
+
+/* One small corner button; no title row, full-height hit area, or content inset. */
+.kd-panel-float-drag {
+  position: absolute;
+  z-index: 12;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 20px;
+  max-height: max(0px, calc(100% - 4px));
+  overflow: hidden;
+}
+:root .kd-panel-float-drag > .kd-panel-reorder-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--kd-muted);
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+:root .kd-panel-float-drag:is(:hover, :focus-within, :has(button:active)) > .kd-panel-reorder-handle { opacity: 1; }
+:root .kd-panel-float-drag > .kd-panel-reorder-handle:focus-visible {
+  outline: 1px solid var(--kd-theme);
+  outline-offset: -2px;
+}
+:root .kd-panel-float-drag[data-over-media] > .kd-panel-reorder-handle { color: #fff; }
+
+/* Minimal panels keep actions at the right, separate from the left drag button.
+   Theme-pack captions keep their existing layout. Media controls overlay the picture. */
+.kd-panel-float-tools {
+  position: absolute;
+  z-index: 12;
+  top: 2px;
+  right: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  box-sizing: border-box;
+  min-width: 32px;
+  /* Empty cards have no title rail or hit area spilling into the next card. */
+  max-height: max(0px, calc(100% - 4px));
+  overflow: hidden;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--kd-panel) 94%, transparent);
+  color: var(--kd-muted);
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+/* Keep the panel name available to assistive technology, without a title row. */
+.kd-panel-float-tools > .kd-panel-head-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.kd-panel-float-tools > .kd-row { gap: 2px; }
+.kd-panel-float-tools:has(> .kd-panel-head-label:only-child) {
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  pointer-events: none;
+}
+.kd-panel-float-tools :is(.kd-panel-reorder-handle, .kd-manager-panel-action) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+/* The corner itself remains a hit area; invisible buttons cannot intercept clicks. */
+.kd-panel-float-tools > :not(.kd-panel-head-label) { pointer-events: none; }
+.kd-panel-float-tools:is(:hover, :focus-within, :has(button:active)) { opacity: 1; }
+.kd-panel-float-tools:is(:hover, :focus-within, :has(button:active)) > :not(.kd-panel-head-label) { pointer-events: auto; }
+/* The lyrics toolbar keeps expand/restore discoverable without a separate header. */
+.kd-panel-float-tools[data-inline] {
+  position: static;
+  min-width: 0;
+  max-height: none;
+  padding: 0;
+  background: transparent;
+  opacity: 1;
+}
+.kd-panel-float-tools[data-inline] > :not(.kd-panel-head-label) { pointer-events: auto; }
+.kd-lyrics-panel-actions { display: inline-flex; flex: none; }
+.kd-lyrics-panel-actions:empty { display: none; }
+.kd-lyrics-embedded-tools > .kd-lyrics-source-picker { margin-inline-end: auto; }
+.kd-panel-float-tools button:hover { color: var(--kd-theme); }
+.kd-panel-float-tools button:focus-visible {
+  outline: 2px solid var(--kd-theme);
+  outline-offset: -2px;
+}
+/* Hosted alongside FloatingVideoControls, inside the actual picture rather than
+   the outer card. Transport stays at the bottom, so the controls do not overlap. */
+.kd-pip-float-panel-tools { display: contents; }
+.kd-panel-float-tools[data-over-media] {
+  background: rgb(0 0 0 / 55%);
+  color: #fff;
+}
+@media (hover: none) {
+  :root .kd-panel-float-drag { width: 24px; height: 24px; }
+  :root .kd-panel-float-drag > .kd-panel-reorder-handle { opacity: 1; }
+  .kd-panel-float-tools { opacity: 1; }
+  .kd-panel-float-tools > :not(.kd-panel-head-label) { pointer-events: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-panel-float-tools, :root .kd-panel-float-drag > .kd-panel-reorder-handle { transition: none; }
+}

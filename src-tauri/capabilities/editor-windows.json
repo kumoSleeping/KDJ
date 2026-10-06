@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "editor-windows",
+  "description": "独立工具窗口可以收起自身，不退出主应用。",
+  "windows": ["kvj", "visualizer-studio", "live-vj-control", "preferences"],
+  "permissions": ["core:window:allow-hide"]
+}

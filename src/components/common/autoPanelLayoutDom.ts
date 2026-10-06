@@ -59,7 +59,7 @@ export function autoPanelLayout(zone: HTMLElement, model: ReturnType<typeof dock
     const kind = autoPanelKind(panelId ?? id, !!picture);
     const flexible = picture ?? slot.querySelector<HTMLElement>(kind === "waveform" ? ".kd-manager-scroll-wave" : ".kd-lyrics[data-has-content]");
     const chrome = flexible ? Math.max(0, slot.getBoundingClientRect().height - flexible.getBoundingClientRect().height)
-      : slot.querySelector(".kd-panel-head")?.getBoundingClientRect().height ?? 24;
+      : slot.querySelector(".kd-panel-head")?.getBoundingClientRect().height ?? (slot.querySelector(".kd-panel-float-tools") ? 0 : 24);
     const aspectRatio = picture ? Number.parseFloat(getComputedStyle(picture).getPropertyValue("--kd-preview-ratio")) || 16 / 9 : undefined;
     const cache = new Map<number, number>();
     snapshots.push({ id, samples: cache, fallback: slot.getBoundingClientRect().height });
@@ -108,6 +108,7 @@ export function autoPanelLayout(zone: HTMLElement, model: ReturnType<typeof dock
 }
 
 export function clearAutoPanelLayout(host: HTMLElement) {
+  delete host.dataset.dockDivider;
   const slot = host.querySelector<HTMLElement>(":scope > .kd-panel-slot, :scope > .kd-internal-window");
   if (!slot) return;
   delete slot.dataset.optimizedPanel;

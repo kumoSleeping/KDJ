@@ -1,0 +1,43 @@
+/* One resizable dock card and one list scroll surface for every task page. */
+.kd-task-window-body { min-height: 0; max-height: 240px; overflow: auto; overscroll-behavior: contain; }
+.kd-download-window .kd-task-window-body {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  height: 280px;
+  min-height: min(180px, 65dvh);
+  max-height: 65dvh;
+  overflow: hidden;
+  resize: vertical;
+}
+.kd-task-page { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.kd-task-page[hidden] { display: none; }
+.kd-download-window .kd-download-task-list { overflow-y: auto; overscroll-behavior: contain; }
+:root .kd-panel.kd-download-window[data-maximized] > .kd-task-window-body { overflow: hidden; resize: none; }
+.kd-task-tabs { display: inline-flex; align-items: center; gap: 8px; }
+.kd-task-window .kd-task-tabs > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-height: 28px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  cursor: pointer;
+}
+.kd-task-window .kd-task-tabs > button[aria-selected="true"] { color: var(--kd-theme); }
+.kd-task-window .kd-task-tabs > button:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text)); outline-offset: -1px; }
+.kd-task-window-entry { padding: 5px 6px; border-bottom: 1px solid var(--kd-line-soft); font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
+.kd-task-window-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.kd-task-window-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.kd-task-window-entry button { border: 0; background: transparent; color: var(--kd-text); cursor: pointer; padding: 2px; }
+.kd-task-window-entry button:hover:not(:disabled) { color: var(--kd-theme); }
+.kd-task-window-entry progress { width: 100%; height: 4px; accent-color: var(--kd-theme); }
+.kd-task-window button:disabled { opacity: .45; cursor: default; }
+.kd-task-window-error { color: var(--kd-warn); }

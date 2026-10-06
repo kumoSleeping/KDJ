@@ -17,6 +17,8 @@ export interface ContextMenuProps {
   anchorTop?: number;
   /** Only scrolling this anchor's ancestors invalidates its viewport position. */
   anchorElement?: HTMLElement;
+  /** Let the trigger click toggle the menu instead of closing on pointerdown first. */
+  toggleAnchor?: boolean;
   minWidth?: number;
   id?: string;
   label?: string;
@@ -30,7 +32,7 @@ export interface ContextMenuProps {
 }
 
 /** 右键与选择菜单共用浮层、主题、视口避让及键盘导航。 */
-export function ContextMenu({ x, y, anchorTop, anchorElement, minWidth, id, label, onClose, keepOpen, children, className, initialFocus = "selected", role = "menu" }: ContextMenuProps) {
+export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = false, minWidth, id, label, onClose, keepOpen, children, className, initialFocus = "selected", role = "menu" }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
   const search = useRef({ text: "", time: 0 });
@@ -88,6 +90,7 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, minWidth, id, labe
     const close = (event: Event) => {
       const target = event.target as Element | null;
       if (ref.current?.contains(target as Node)) return;
+      if (toggleAnchor && anchorElement?.contains(target as Node)) return;
       if (keepOpen && target?.closest?.(keepOpen)) return;
       onClose();
     };
@@ -116,7 +119,7 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, minWidth, id, labe
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", scroll, true);
     };
-  }, [onClose, keepOpen, anchorTop, anchorElement]);
+  }, [onClose, keepOpen, anchorTop, anchorElement, toggleAnchor]);
 
   if (!host) return null;
 

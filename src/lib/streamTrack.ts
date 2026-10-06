@@ -5,6 +5,7 @@
  */
 
 import { api } from "./api";
+import { isEditorWindow } from "./windowRole";
 import { streamRecoveryPolicy } from "./streamRecovery";
 import { thumbUrl } from "./format";
 import {
@@ -50,7 +51,7 @@ const STREAM_TRACK_CACHE_LIMIT = 1024;
 const metaById = new Map<number, StreamMeta>();
 const trackById = new Map<number, Track>();
 const metaListeners = new Map<number, Set<() => void>>();
-let nextId = -1;
+let nextId = isEditorWindow ? -1_000_000_000 : -1;
 let publishedStreamTrackId: number | null = null;
 let streamQueueConstructionDepth = 0;
 
@@ -733,6 +734,12 @@ export function makeCompositionPreviewTrack(template: Track | null, title: strin
   trackById.set(id, track);
   pruneStreamTracks();
   return track;
+}
+export function registerCompositionPreviewTrack(track: Track, url: string): void {
+  metaById.set(track.id, {url, waveformToken: "", cover: "", kind: "song", sourceKey: track.path,
+    source: null, nextTrack: null, cacheRetryUsed: true, preload: null});
+  trackById.set(track.id, track);
+  pruneStreamTracks();
 }
 export function isCompositionPreview(track: Track | null | undefined): boolean {
   return Boolean(track?.path.startsWith("composition:"));

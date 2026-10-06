@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ChartNoAxesCombined, FilePenLine, Music2, TextQuote, Video } from "lucide-react";
+import { FilePenLine, Music2, TextQuote, Video } from "lucide-react";
 import { DETAIL_PANELS_DEFAULT_FIRST_IDS, DETAIL_PANELS_STORAGE_KEY, useDetailPanelPrefs } from "../../lib/detailPanelPrefs";
 import { PanelStack } from "../common/PanelStack";
 
@@ -9,7 +9,6 @@ const panels = {
   lyrics: { label: "歌词", icon: <TextQuote {...iconProps} /> },
   video: { label: "视频", icon: <Video {...iconProps} /> },
   metadata: { label: "曲目信息编辑", icon: <FilePenLine {...iconProps} /> },
-  analysis: { label: "Analysis", icon: <ChartNoAxesCombined {...iconProps} /> },
 };
 
 export function DetailPanelStack({ children, restoreTarget, preview = false, video = false }: {

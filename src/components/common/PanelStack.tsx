@@ -26,6 +26,10 @@ export interface PanelStackProps {
   defaultLastIds?: readonly string[];
   /** Each direct child has a stable key identifying its fixed panel slot. */
   children: ReactNode;
+  /** Panels opened as a stage overlay in portrait, never as dock cards. */
+  portraitOverlayIds?: readonly string[];
+  /** Reveal a panel on demand without toggling it closed when already visible. */
+  reveal?: { id: string; revision: number };
   index?: {
     panels: Record<string, PanelInfo>;
     target?: HTMLElement | null;
@@ -39,7 +43,7 @@ export interface PanelStackProps {
     controls?: Record<string, { visible: boolean; setVisible(visible: boolean): void }>;
     sections?: {
       defaultSide: PanelDockSide;
-      sidebar?: { open: boolean; toggle(): void };
+      options?: Record<string, ReactNode>;
       panels?: Record<string, { side: PanelDockSide; legacyDockId?: string }>;
     };
   };
@@ -84,7 +88,7 @@ function PortablePanel({ children, dockId, legacyDockId, defaultSide }: {
 }
 
 /** Fixed panel slots: collapsing never creates or moves a window or media host. */
-export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds = [], initialFirstIds = [], defaultLastIds = [], children, collapse, index, reorderable = false }: PanelStackProps) {
+export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds = [], initialFirstIds = [], defaultLastIds = [], children, collapse, index, reveal, reorderable = false, portraitOverlayIds = [] }: PanelStackProps) {
   const docks = usePanelDock();
   const parentReorder = useContext(PanelReorderContext);
   const viewport = usePanelViewport();
@@ -99,6 +103,7 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
   });
   const [hiddenIds, setHiddenIds] = useState(() => load(`${storageKey}-hidden`));
   const stackRoot = useRef<HTMLDivElement>(null);
+  const lastRevealRevision = useRef(0);
   const pointerStart = useRef<{ x: number; y: number } | null>(null);
   const [dragged, setDragged] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; top: number; anchor: HTMLElement } | null>(null);
@@ -123,8 +128,9 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
   };
   const configuredHidden = (id: string) => index?.controls?.[id] ? !index.controls[id].visible : (collapse?.hiddenIds ?? index?.hiddenIds ?? hiddenIds).includes(id)
     || (!!index?.collapsed && index.compactId !== id);
-  const hidden = (id: string) => viewport.compact ? !viewport.activeIds.includes(`${dockKey}:${id}`) : configuredHidden(id);
-  const menuIds = [...new Set([...sorted.map(idOf), ...Object.keys(index?.controls ?? {})])];
+  const overlayOnly = (id: string) => viewport.narrow && portraitOverlayIds.includes(id);
+  const hidden = (id: string) => overlayOnly(id) || (viewport.compact ? !viewport.activeIds.includes(`${dockKey}:${id}`) : configuredHidden(id));
+  const menuIds = [...new Set([...sorted.map(idOf), ...Object.keys(index?.controls ?? {})])].filter(id => !overlayOnly(id));
   const toggleVisible = (id: string) => {
     if (viewport.compact) { toggleResponsivePanel(`${dockKey}:${id}`); return; }
     if (hidden(id)) {
@@ -143,6 +149,18 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
       writeLocalStorageNow(`${storageKey}-hidden`, JSON.stringify(next));
     }
   };
+  useLayoutEffect(() => {
+    if (!reveal || reveal.revision === lastRevealRevision.current) return;
+    lastRevealRevision.current = reveal.revision;
+    if (hidden(reveal.id)) toggleVisible(reveal.id);
+    // Visibility and portable dock hosts settle after this render; scroll the actual panel,
+    // not the hidden placeholder in the original stack.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(
+        `.kd-panel-slot[data-panel-stack="${storageKey}"][data-panel-id="${reveal.id}"]:not([hidden])`,
+      )?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }));
+  });
   const toggle = index && !index.hideTrigger && <button type="button" className={`${index.triggerClassName ?? "kd-aside-head-close"} kd-panel-index-toggle`}
     title="板块索引" aria-label="板块索引" aria-haspopup="menu" aria-expanded={!!menu}
     onClick={event => {
@@ -151,12 +169,13 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
     }}><List size={index.triggerClassName === "kd-chrome-btn" ? 16 : 14} /></button>;
   return <div ref={stackRoot} className="kd-panel-stack" data-single-visible={sorted.filter(child => !hidden(idOf(child))).length === 1 || undefined}>
     {index?.target ? createPortal(toggle, index.target) : toggle}
-    {menu && index && <ContextMenu x={menu.x} y={menu.y} anchorTop={menu.top} anchorElement={menu.anchor} label="板块索引" onClose={() => setMenu(null)}>
+    {menu && index && <ContextMenu x={menu.x} y={menu.y} anchorTop={menu.top} anchorElement={menu.anchor} toggleAnchor label="板块索引" onClose={() => setMenu(null)}>
       {index.sections ? <PanelIndexSections items={menuIds.filter(id => index.panels[id]).map(id => ({
         id, dockId: `${dockKey}:${id}`, ...index.panels[id], visible: !hidden(id),
         side: index.sections!.panels?.[id]?.side ?? index.sections!.defaultSide,
         legacyDockId: index.sections!.panels?.[id]?.legacyDockId,
-      }))} sidebar={index.sections.sidebar} onToggle={toggleVisible} /> : menuIds.map(id => {
+        options: index.sections!.options?.[id],
+      }))} onToggle={toggleVisible} onAction={() => setMenu(null)} /> : menuIds.map(id => {
         const panel = index.panels[id];
         if (!panel) return null;
         return <button key={id} type="button" role="menuitemcheckbox" aria-checked={!hidden(id)} className="kd-panel-index-item"
@@ -183,7 +202,7 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
           onDragOver={event => { if (reorderable && dragged) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
           onDrop={event => { if (reorderable && dragged) { event.preventDefault(); event.stopPropagation(); move(dragged, id); setDragged(null); } }}
           data-panel-form={form} data-dock-side={viewport.narrow || viewport.compact ? "top" : side}
-          data-panel-enabled={!configuredHidden(id)} data-home-dock={side}
+          data-panel-enabled={!configuredHidden(id) && !overlayOnly(id)} data-home-dock={side}
           data-auto-height={reorderable || undefined}
           data-compact={index?.collapsed && index.compactId === id || undefined}>
           <PanelCollapseContext.Provider value={viewport.compact ? { label: panel?.label ?? id, collapse: () => viewport.closePanel(dockId) }

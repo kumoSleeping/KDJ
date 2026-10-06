@@ -1,0 +1,33 @@
+.kd-async-panel-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  flex: none;
+  min-height: 0;
+  background: var(--kd-panel);
+  transition: grid-template-rows 200ms ease;
+}
+.kd-async-panel-body[data-expanded="false"] { grid-template-rows: 0fr; }
+.kd-async-panel-clip { min-height: 0; overflow: hidden; }
+.kd-async-panel-space { position: relative; }
+.kd-async-panel-body[data-kind="lyrics"] .kd-async-panel-space {
+  height: var(--kd-auto-content-height, min(20rem, 34dvh));
+}
+.kd-async-panel-body[data-kind="visualizer"] .kd-async-panel-space { aspect-ratio: 16 / 9; }
+.kd-async-panel-content {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+.kd-async-panel-body[data-state="ready"] .kd-async-panel-content {
+  opacity: 1;
+  pointer-events: auto;
+  animation: kd-async-panel-reveal 160ms ease;
+}
+@keyframes kd-async-panel-reveal { from { opacity: 0; } to { opacity: 1; } }
+.kd-async-panel-content > .kd-lyrics { height: 100%; min-height: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .kd-async-panel-body, .kd-async-panel-content { transition: none; animation: none !important; }
+}

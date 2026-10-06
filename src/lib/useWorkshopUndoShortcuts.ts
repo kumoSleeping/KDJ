@@ -7,7 +7,7 @@ export function useWorkshopUndoShortcuts(root: RefObject<HTMLElement | null>) {
     let owned = Boolean(root.current?.contains(document.activeElement));
     const inside = (target: EventTarget | null) => Boolean(root.current && (root.current.contains(target as Node) || (target as Element)?.closest?.(".vj-floating-preview,[data-workshop-toolbar]")));
     const track = (event: Event) => { owned = inside(event.target); };
-    const editingText = (event: Event) => (event.target as Element)?.closest?.("input,select,textarea,[contenteditable]:not([contenteditable=false]),.vj-dialog");
+    const editingText = (event: Event) => (event.target as Element)?.closest?.("input,select,textarea,[contenteditable]:not([contenteditable=false]),.vj-dialog,[data-kvj-region=browser]");
     const keydown = (event: KeyboardEvent) => {
       if ((!owned && !inside(event.target)) || event.defaultPrevented || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return;
       if (editingText(event)) return;

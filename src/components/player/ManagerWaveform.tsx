@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent } from "react";
 import type { Track } from "../../types";
 import { beatGridMarkers, waveformBeatGridOrigin } from "../../lib/performanceCues";
 import { getLiveDeckClock, runtimePlayer, subscribeLivePlaybackClock } from "../../lib/unifiedPlayer";
@@ -10,6 +10,7 @@ import "./ManagerWaveform.css";
 
 import { WaveformTileCache } from "../../lib/waveformTileCache";
 import { WaveformRailMotion } from "../../lib/waveformRailMotion";
+import { SeekTransitionOverlay } from "../../lib/seekTransition";
 
 const SECONDS = 6;
 function clockPosition(deck: 0 | 1, trackId: number, total: number, fallback = 0) {
@@ -46,6 +47,8 @@ function ScrollingWaveform({ track, deck, duration, amplitudeScale, playing, onL
   const hostRef = useRef<HTMLDivElement>(null);
   const railRef = useRef<HTMLDivElement>(null);
   const motion = useRef(new WaveformRailMotion());
+  const transition = useRef(new SeekTransitionOverlay());
+  useEffect(() => () => transition.current.clear(), []);
   const wakeRef = useRef<() => void>(() => {});
   const committedStart = useRef((tile - 1) * SECONDS);
   const requestedTile = useRef(tile);
@@ -53,22 +56,31 @@ function ScrollingWaveform({ track, deck, duration, amplitudeScale, playing, onL
   const gesture = useRef<{ id: number; x: number; left: number; width: number; position: number; moved: boolean } | null>(null);
   const preview = useRef<number | null>(null);
   const pendingSeek = useRef<{ position: number; expires: number; revision: number | undefined } | null>(null);
+  const lastRevision = useRef<number | null>(null);
+  const syncRail = useCallback((position: number) => {
+    const rail = railRef.current;
+    if (!rail) return;
+    const live = getLiveDeckClock(deck);
+    const owned = live?.trackId === track.id;
+    motion.current.sync(rail, position, committedStart.current, SECONDS, total,
+      !gesture.current && preview.current === null && !pendingSeek.current && owned && (live.playing || live.scratchHeld) ? live.audibleRate : 0,
+      owned ? live.discontinuityRevision : 0, owned ? live.loopStart : null, owned ? live.loopLength : null,
+      owned && live.scratchHeld);
+  }, [deck, track.id, total]);
   const clamp = (position: number) => Math.max(0, Math.min(total, position));
   useEffect(() => onLoadingChange(loading), [loading, onLoadingChange]);
   const seek = (position: number, isPreview = false, scrubbing = false) => {
-    if (!isPreview) pendingSeek.current = { position, expires: performance.now() + 1500,
-      revision: getLiveDeckClock(deck)?.discontinuityRevision };
     window.dispatchEvent(new CustomEvent<SeekDetail>(SEEK_EVENT, {
       detail: { trackId: track.id, position, preview: isPreview, scrubbing, forceCommit: !isPreview },
     }));
   };
   useLayoutEffect(() => {
-    motion.current.stop();
     committedStart.current = (tile - 1) * SECONDS;
-    if (railRef.current) railRef.current.style.transform =
-      `translate3d(${-(positionRef.current - committedStart.current) / (SECONDS * 3) * 100}%,0,0)`;
+    // Publish new tiles and rebase their running animation in the same layout commit.
+    // Stopping here and restarting in the next rAF exposed a stationary frame every six seconds.
+    syncRail(positionRef.current);
     wakeRef.current();
-  }, [tile]);
+  }, [tile, syncRail]);
   useEffect(() => {
     let frame = 0, timer = 0, intersects = true;
     let lastClockKey = "";
@@ -88,16 +100,22 @@ function ScrollingWaveform({ track, deck, duration, amplitudeScale, playing, onL
       if (pending && (performance.now() >= pending.expires ||
         (live?.trackId === track.id && live.discontinuityRevision !== pending.revision) || Math.abs(authority - pending.position) < .1)) pendingSeek.current = null;
       const position = preview.current ?? pendingSeek.current?.position ?? authority;
+      const distance = position - railMotion.position(positionRef.current);
+      const revision = live?.trackId === track.id ? live.discontinuityRevision : null;
+      const landed = revision !== null && lastRevision.current !== null && revision !== lastRevision.current;
+      if (revision !== null) lastRevision.current = revision;
+      // Transition only real seek requests/landings, never delayed ordinary clock packets.
+      if ((pending || landed) && !gesture.current && preview.current === null && !live?.scratchHeld && Math.abs(distance) > .25
+        && (pending || !live?.loopLength) && hostRef.current && railRef.current) {
+        transition.current.waveform(hostRef.current, railRef.current, distance);
+      }
       positionRef.current = position;
       const nextTile = Math.floor(position / SECONDS);
       if (nextTile !== requestedTile.current) { requestedTile.current = nextTile; setTile(nextTile); }
       // A far seek must not move the old tiles offscreen before React installs
       // the destination tiles. The layout effect publishes their pixels + position together.
       if (railRef.current && nextTile === Math.round(committedStart.current / SECONDS) + 1) {
-        const owned = live?.trackId === track.id;
-        railMotion.sync(railRef.current, position, committedStart.current, SECONDS, total,
-          !gesture.current && !pendingSeek.current && owned && (live.playing || live.scratchHeld) ? live.audibleRate : 0,
-          owned ? live.discontinuityRevision : 0, owned ? live.loopStart : null, owned ? live.loopLength : null);
+        syncRail(position);
       }
       hostRef.current?.setAttribute("aria-valuenow", position.toFixed(3));
       if (gesture.current || pendingSeek.current || (live?.trackId === track.id ? live.playing || live.scratchHeld : playing)) {
@@ -123,14 +141,32 @@ function ScrollingWaveform({ track, deck, duration, amplitudeScale, playing, onL
       intersects = entries[0]?.isIntersecting ?? true; visibility();
     }) : null;
     if (hostRef.current) observer?.observe(hostRef.current);
+    const onSeek = (event: Event) => {
+      const detail = (event as CustomEvent<SeekDetail>).detail;
+      if (detail.trackId !== track.id || !Number.isFinite(detail.position)) return;
+      const position = Math.max(0, Math.min(total, detail.position));
+      // Every seek surface uses this request, not just gestures on this rail.
+      // Start the visual handoff now instead of waiting for the audio landing.
+      // This is only a presentation target; the device clock still owns playback.
+      if (detail.preview) {
+        pendingSeek.current = null;
+        preview.current = detail.scrubbing === false ? null : position;
+        transition.current.clear();
+      } else {
+        preview.current = null;
+        pendingSeek.current = { position, expires: performance.now() + 1500,
+          revision: getLiveDeckClock(deck)?.discontinuityRevision };
+      }
+      wake();
+    };
     const unsubscribe = subscribeLivePlaybackClock(wake);
-    window.addEventListener(SEEK_EVENT, wake);
+    window.addEventListener(SEEK_EVENT, onSeek, true);
     document.addEventListener("visibilitychange", visibility);
     wake();
     return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); railMotion.stop(); wakeRef.current = () => {};
       unsubscribe(); observer?.disconnect();
-      window.removeEventListener(SEEK_EVENT, wake); document.removeEventListener("visibilitychange", visibility); };
-  }, [deck, track.id, total, playing]);
+      window.removeEventListener(SEEK_EVENT, onSeek, true); document.removeEventListener("visibilitychange", visibility); };
+  }, [deck, track.id, total, playing, syncRail]);
   useEffect(() => () => {
     if (gesture.current) window.dispatchEvent(new CustomEvent<SeekDetail>(SEEK_EVENT, {
       detail: { trackId: track.id, position: gesture.current.position, preview: true, scrubbing: false },

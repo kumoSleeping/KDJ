@@ -14,7 +14,7 @@ import { WorkshopCropTools } from "./WorkshopCropTools";
 import { WorkshopSubtitleEditor } from "./WorkshopSubtitleEditor";
 
 type PropertiesActions = {
-  close(): void; seek(ms: number): void; crop(id: string): void; actions?: ReactNode;
+  close(): void; seek(ms: number): void; crop(id: string): void; actions?: ReactNode; docked?: boolean;
 };
 
 export function WorkshopClipProperties(props: PropertiesActions) {
@@ -25,7 +25,7 @@ export function WorkshopClipProperties(props: PropertiesActions) {
   return <ClipProperties key={`${project?.id}:${clip?.id}`} project={project} clip={clip} {...props} />;
 }
 
-function ClipProperties({ project, clip, close, seek, crop, actions }: PropertiesActions & {
+function ClipProperties({ project, clip, close, seek, crop, actions, docked }:  PropertiesActions & {
   project: CompositionProject | null; clip: WorkshopClip | null;
 }) {
   const source = project?.sources.find(s => s.id === clip?.source_id);
@@ -53,8 +53,7 @@ function ClipProperties({ project, clip, close, seek, crop, actions }: Propertie
     value={clip && (sound ? audio : visual) ? visibleFade(clip, end, sound) / 1000 : undefined}
     min={0} max={duration / 2000} step={.01} suffix="秒"
     onChange={n => change(c => setClipFade(c, end, sound, n * 1000))} onCommit={commit} />;
-  return <FloatingPanelWindow className="vj-properties-window" storageKey="kd-window-workshop-properties" title="轨道属性" subtitle={source?.title} close={() => { commit(); close(); }} closeLabel="关闭轨道属性">
-    <aside className="vj-clip-properties" aria-label="片段属性">
+  const content = <aside className="vj-clip-properties" aria-label="片段属性">
     {subtitleEditor && subtitle && clip && <WorkshopSubtitleEditor clipId={clip.id} initial={subtitle} close={() => setSubtitleEditor(false)} />}
     <div className="vj-clip-properties-scroll">
       <fieldset className="vj-property-group" aria-label="片段时间" hidden={!available} disabled={!available}>
@@ -119,5 +118,6 @@ function ClipProperties({ project, clip, close, seek, crop, actions }: Propertie
           })} onCommit={commit} />
       </fieldset>
     </div>
-  </aside></FloatingPanelWindow>;
+  </aside>;
+  return docked ? content : <FloatingPanelWindow className="vj-properties-window" storageKey="kd-window-workshop-properties" title="轨道属性" subtitle={source?.title} close={() => { commit(); close(); }} closeLabel="关闭轨道属性">{content}</FloatingPanelWindow>;
 }

@@ -19,6 +19,7 @@ import { isVideoTrack } from "../../lib/format";
 import { streamMeta } from "../../lib/streamTrack";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
 import { Panel } from "../common";
+import { AsyncPanelBody } from "../common/AsyncPanelBody";
 import type { Track } from "../../types";
 
 function usePlayerPosition(trackId: number | null): number {
@@ -71,26 +72,31 @@ function effectiveExtra(
 
 interface LyricsDetailProps {
   track: Track;
-  /** Playback docks retain their configured rectangle while lyrics load or are unavailable. */
+  /** Playback docks reserve a loading rectangle and collapse unavailable content. */
   reserveEmpty?: boolean;
+  expandKey?: string;
   /** An existing non-audio transport can supply its own clock and seek route. */
   transport?: { position: number; seek(position: number): void };
 }
-export function LyricsDetailPanel({ track, transport, reserveEmpty = false }: LyricsDetailProps) {
+export function LyricsDetailPanel({ track, transport, reserveEmpty = false, expandKey }: LyricsDetailProps) {
+  const [actionsHost, setActionsHost] = useState<HTMLSpanElement | null>(null);
   const entry = useLyricsStore(state => state.get(track.id));
   const prefsEpoch = useLyricsPrefs(state => state.prefsEpoch);
   useEffect(() => { void useLyricsStore.getState().ensure(track, {cacheOnly:true}); }, [track.id, prefsEpoch]);
-  if (isVideoTrack(track.format) || streamMeta(track)?.kind === "video" || !hasVisibleLyrics(entry.lines)) {
-    return reserveEmpty ? <Panel heading="歌词" padded={false} dense className="kd-detail-lyrics-panel" /> : null;
-  }
+  const video = isVideoTrack(track.format) || streamMeta(track)?.kind === "video";
+  const ready = !video && hasVisibleLyrics(entry.lines);
+  const state = ready ? "ready" : !video && (entry.status === "idle" || entry.status === "loading") ? "loading" : "empty";
+  if (!reserveEmpty && !ready) return null;
   return (
-    <Panel heading="歌词" padded={false} dense className="kd-detail-lyrics-panel">
-      <LyricsView track={track} transport={transport} />
+    <Panel heading="歌词" maximizable={ready} expandKey={ready ? expandKey : undefined} actionsHost={actionsHost} padded={false} dense className="kd-detail-lyrics-panel">
+      <AsyncPanelBody kind="lyrics" state={state}>
+        {ready && <LyricsView track={track} transport={transport} actionsRef={setActionsHost} />}
+      </AsyncPanelBody>
     </Panel>
   );
 }
 
-function LyricsView({ track, transport }: LyricsDetailProps) {
+function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { actionsRef(node: HTMLSpanElement | null): void }) {
   const trackId = track.id;
   const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const activeTrack = playingTrack?.id === trackId;
@@ -137,6 +143,7 @@ function LyricsView({ track, transport }: LyricsDetailProps) {
       <div className="kd-lyrics-embedded-tools">
         <LyricsSourcePicker platform={entry.meta?.platform} disabled={!activeTrack && !transport} matching={!!entry.inflight} onSelect={platform => void useLyricsStore.getState().ensure(track, { platform })} />
         {canCycle ? <button type="button" className="kd-lyrics-layer" title={lyricExtraTitle(layer)} aria-label={lyricExtraTitle(layer)} onClick={() => cycleLyricExtra(hasMeaning, hasRomaji)}>{lyricExtraLabel(layer)}</button> : null}
+        <span className="kd-lyrics-panel-actions" ref={actionsRef} />
       </div>
       <div className="kd-lyrics-stage">
         {entry.error || entry.status === "error" ? <p className="kd-lyrics-empty" role="alert">{entry.error || "歌词暂时不可用"}</p> : null}

@@ -5,6 +5,8 @@ import { deleteVisualizerExport, loadVisualizerExports, loadVisualizerExportSnap
   visualizerExportActive, visualizerExportStartable, type VisualizerExportTask } from "../lib/visualizerExportQueue";
 import { waitForSettingsWrites } from "../lib/settingsWriteBarrier";
 import { useAppStore } from "./appStore";
+import { usesVisualizerWindow } from "../lib/windowRole";
+import { requestVisualizerExports, type VisualizerExportCommand } from "../lib/kvjWindow";
 
 interface State {
   tasks: VisualizerExportTask[];
@@ -33,6 +35,10 @@ function update(id: string, patch: Partial<VisualizerExportTask>): VisualizerExp
     result = { ...task, ...patch }; return result;
   }) }));
   return result;
+}
+async function fromOwner(command: VisualizerExportCommand): Promise<void> {
+  const snapshot = await requestVisualizerExports(command);
+  useVisualizerExportStore.setState(snapshot);
 }
 function report(error: unknown) { captureDiagnostic("visualizer-export", "queue.persistence", error); useVisualizerExportStore.setState({ error: message(error) }); }
 
@@ -80,14 +86,15 @@ async function pump(): Promise<void> {
 export const useVisualizerExportStore = create<State>((set, get) => ({
   tasks: [], error: "",
   initialize() {
-    if (!initializing) initializing = loadVisualizerExports().then(tasks => {
+    if (!initializing) initializing = (usesVisualizerWindow() ? fromOwner({ action: "initialize" }) : loadVisualizerExports().then(tasks => {
       // Never silently resume frame production after a WebView/app restart.
       set({ tasks: tasks.sort((a, b) => a.createdAt - b.createdAt).map(task => visualizerExportActive(task)
         ? { ...task, phase: "ready", progress: 0, status: "上次导出已中断", error: "" } : task) });
-    }).catch(error => { initializing = undefined; report(error); throw error; });
+    })).catch(error => { initializing = undefined; report(error); throw error; });
     return initializing;
   },
   async enqueue(draft) {
+    if (usesVisualizerWindow()) throw new Error("请在可视化编辑器中加入导出任务");
     // Freeze before the first await: the editor can immediately continue editing.
     const snapshot = { project: structuredClone(draft.project), images: [...draft.images] };
     validateVisualizerProject(snapshot.project);
@@ -118,11 +125,13 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     } finally { reservedPaths.delete(task.outputPath.toLowerCase()); }
   },
   start(id) {
+    if (usesVisualizerWindow()) { void fromOwner({ action: "start", id }).catch(report); return; }
     set(state => ({ tasks: state.tasks.map(task => (!id || task.id === id) && visualizerExportStartable(task)
       ? { ...task, phase: "queued", progress: 0, status: "等待导出", error: "" } : task) }));
     void pump().catch(report);
   },
   async cancel(id) {
+    if (usesVisualizerWindow()) { await fromOwner({ action: "cancel", id }); return; }
     const tasks = get().tasks.filter(task => (!id || task.id === id) && visualizerExportActive(task));
     // Remove all waiting work before aborting the producer; it must not start
     // another task while a batch cancellation is awaiting persistence.
@@ -136,6 +145,7 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     })).catch(report);
   },
   async remove(id) {
+    if (usesVisualizerWindow()) { await fromOwner({ action: "remove", id }); return; }
     const task = get().tasks.find(t => t.id === id);
     if (!task || visualizerExportActive(task) || worker?.id === id) return;
     // Remove from the runnable list before awaiting IO; export/delete clicks

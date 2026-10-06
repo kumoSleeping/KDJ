@@ -2,6 +2,15 @@ import { isVisualSource } from "./workshop";
 import type { CompositionProject, WorkshopClip } from "../types/workshop";
 import { clipDuration, sourceAt } from "./workshop";
 
+const playbackAcquirers = new Set<() => void>();
+export function registerWorkshopPlaybackAcquirer(acquire: () => void): () => void {
+  playbackAcquirers.add(acquire);
+  return () => { playbackAcquirers.delete(acquire); };
+}
+/** Direct calls retain the real click/key gesture; synthetic DOM events may not. */
+export function acquireWorkshopVideoPlayback(): void {
+  for (const acquire of playbackAcquirers) acquire();
+}
 const PREWARM_MS = 2500;
 
 /** Run incoming constant-rate media through its source handles before exposing it.

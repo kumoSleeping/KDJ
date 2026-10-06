@@ -5,11 +5,12 @@ import { useWorkshopStore } from "../../stores/workshopStore";
 import { cloneProject, projectDuration } from "../../lib/workshop";
 import { NumberField } from "./WorkshopNumberField";
 import type { CompositionProject } from "../../types/workshop";
-export function WorkshopExportSettings() {
+export function WorkshopExportSettings({ docked = false }: { docked?: boolean }) {
   const p = useWorkshopStore((s) => s.draft),
     jobs = useWorkshopStore((s) => s.jobs);
   const settings = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
+    if (docked) return;
     const closeOutside = (event: PointerEvent) => {
       if (settings.current && !settings.current.contains(event.target as Node)) settings.current.open = false;
     };
@@ -25,7 +26,7 @@ export function WorkshopExportSettings() {
       window.removeEventListener("pointerdown", closeOutside);
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, []);
+  }, [docked]);
   if (!p) return null;
   const change = (f: (p: CompositionProject) => void) => {
     const state = useWorkshopStore.getState();
@@ -44,7 +45,7 @@ export function WorkshopExportSettings() {
   const video = (p.output.format ?? "mp4") === "mp4";
   const summary = `输出设置 · ${video ? `${p.canvas.width} × ${p.canvas.height} · ${p.canvas.fps.toFixed(2)} fps` : `${p.output.format?.toUpperCase()} · 仅音频 · 48 kHz`}`;
   return (
-    <details className="vj-export-settings" ref={settings}>
+    <details className="vj-export-settings" data-docked={docked || undefined} open={docked || undefined} ref={settings}>
       <summary aria-label="输出设置" title={summary}><span>{summary}</span><ChevronDown size={12} /></summary>
       <fieldset disabled={Boolean(busy)}>
         <label className="vj-text-field">格式<Select aria-label="输出格式" value={p.output.format ?? "mp4"} onChange={e => { change(p => { p.output.format = e.target.value as typeof p.output.format; }); commit(); }}>

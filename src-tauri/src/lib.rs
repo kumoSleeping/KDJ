@@ -36,6 +36,8 @@ mod midi;
 #[cfg(desktop)]
 mod live_vj;
 #[cfg(desktop)]
+mod kvj_window;
+#[cfg(desktop)]
 mod media_tools;
 #[cfg(target_os = "macos")]
 mod macos_window_drag;
@@ -2986,6 +2988,7 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_bridge_info,
+        kvj_window::open_kvj_window,
         live_vj::live_vj_document,
         live_vj::live_vj_edit,
         live_vj::live_vj_import,

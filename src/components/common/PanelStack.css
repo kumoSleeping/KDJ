@@ -9,6 +9,20 @@
 .kd-panel-index-section-title { padding: 3px 8px 5px; color: var(--kd-muted); font-size: var(--kd-size-xs); }
 .kd-panel-index-row { display: flex; align-items: stretch; min-width: 0; }
 .kd-panel-index-row > .kd-panel-reorder-handle { padding: 0 5px; }
+.kd-panel-index-disclosure {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; width: calc(.9rem + 8px);
+}
+.kd-panel-index-expand:focus-visible { outline: 1px solid var(--kd-muted); outline-offset: 2px; }
+/* Reuse the sidebar's raised disclosure key; expanded options stay pressed in,
+   including menus portaled outside .kd-app. This is independent of selection. */
+:root[data-theme-pack="sakulaptop98"] .kd-panel-index-expand:is([aria-expanded="true"], :active) {
+  box-shadow: var(--s98-sunken);
+}
+.kd-panel-index-options { padding-left: 42px; }
+.kd-panel-index-option { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; }
+.kd-panel-index-option:has(input:checked) { color: var(--kd-theme); }
+.kd-panel-index-sections[data-has-options] .kd-panel-index-options { padding-left: calc(50px + .9rem); }
 .kd-panel-index-row > .kd-panel-index-item {
   display: flex; align-items: center; flex: 1; gap: 6px; min-width: 0;
   padding: 6px 8px 6px 2px; border: 0; border-radius: 3px;
@@ -47,12 +61,30 @@
 .kd-panel-docked-host > .kd-panel-slot { min-width: 0; margin: 0; height: auto; }
 .kd-panel-docked-host > .kd-panel-slot > .kd-panel { height: auto; min-width: 0; }
 .kd-panel-docked-host:has(> .kd-panel-slot[hidden]),
-.kd-panel-docked-host:has(> .kd-panel-slot:empty) { display: none; }
+.kd-panel-docked-host:has(> .kd-panel-slot:empty),
+.kd-panel-docked-host:has(> .kd-panel-slot):not(:has(> .kd-panel-slot .kd-panel)),
+.kd-panel-docked-host:has(> .kd-panel-slot > .kd-panel-empty-media),
+.kd-panel-docked-host:has(> .kd-panel-slot > .kd-panel > .kd-panel-float-tools):has(> .kd-panel-slot > .kd-panel > .kd-async-panel-body[data-expanded="false"]) { display: none; }
 .kd-panel-docked-host .kd-track-preview-eq,
 .kd-panel-docked-host .kd-track-preview-waveform { width: 100%; height: auto; min-height: 112px; }
 .kd-panel-docked-host .kd-track-preview-waveform { height: 160px; }
 .kd-panel-dock-top > .kd-panel-docked-host .kd-panel { margin: 0; }
 .kd-panel-docked-host .kd-panel-head { display: flex; }
+/* Built-in light/dark docks use spacing instead of nested boxes. Keep border
+   widths intact so card measurements and aligned rows do not change. Theme
+   packs (including Sakura's bevels) and detached windows retain their chrome. */
+:root:not([data-theme-pack]) .kd-panel-docked-host > .kd-panel-slot[data-panel-id] > .kd-panel,
+:root:not([data-theme-pack]) .kd-panel-docked-host > .kd-panel-slot[data-panel-id] > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
+  border-color: transparent;
+  box-shadow: none;
+}
+:root:not([data-theme-pack]) .kd-panel-docked-host > .kd-panel-slot > .kd-panel > .kd-panel-head,
+:root:not([data-theme-pack]) .kd-panel-docked-host > .kd-panel-slot > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel > .kd-panel-head {
+  border-bottom-color: transparent;
+}
+:root:not([data-theme-pack]) .kd-panel-docked-host .kd-search-band-host {
+  border-bottom-color: transparent;
+}
 .kd-track-preview-content .kd-panel-slot { flex: 1 1 45%; min-width: 0; }
 .kd-track-preview-content .kd-panel-slot > div { height: 140px; }
 .kd-track-preview-content .kd-panel-slot > div > .kd-panel > .kd-panel-head { display: flex; }
@@ -62,6 +94,8 @@
 .kd-table-wrap[data-aside="open"] > .kd-split-aside,
 .kd-table-wrap[data-aside="open"] > .kd-split-handle { grid-row: 2 / -1; }
 .kd-top-wide-search { flex: none; min-width: 0; }
+/* The spanning search owns its lower edge; its child card has no second frame. */
+:root:not([data-theme-pack]) .kd-top-wide-search { border-bottom: 1px solid var(--kd-line); }
 /* Inline-size containment has no intrinsic width. Outside the split dock,
    the spanning search must stretch explicitly instead of shrinking to a line. */
 .kd-top-wide-search > .kd-panel-docked-host {

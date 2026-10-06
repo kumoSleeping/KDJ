@@ -1,3 +1,4 @@
+import { isEditorWindow } from "./lib/windowRole";
 import { StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { RootErrorBoundary } from "./components/RootErrorBoundary";
@@ -78,7 +79,20 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  if (windowKind === "live-vj") {
+  if (!windowKind || isEditorWindow) {
+    if (window.__TAURI_INTERNALS__ && ["darwin", "win32", "linux"].includes(window.kdj?.platform ?? "")) {
+      if (!windowKind) appStoreModule.useAppStore.setState({ showComposition: false, compositionPinned: false, showSettings: false, settingsPinned: false });
+      await Promise.all([
+        (await import("./lib/kvjWindow")).startWindowLink(),
+        (await import("./lib/preferenceWindowSync")).startPreferenceWindowSync(),
+      ]);
+    }
+  }
+
+  if (isEditorWindow) {
+    const { KvjApp } = await import("./components/workspace/KvjApp");
+    render(<KvjApp tab={windowKind === "visualizer-studio" ? "visualizer" : windowKind === "live-vj-control" ? "live-vj" : windowKind === "preferences" ? "preferences" : "workshop"} />);
+  } else if (windowKind === "live-vj") {
     const { LiveVjOutput } = await import("./components/composition/LiveVjOutput");
     render(<LiveVjOutput />);
   } else if (isLyricsWindow) {

@@ -258,10 +258,13 @@ export function optimizePanelLayout(items: AutoPanelItem[], bounds: SplitRect, b
     const cells = new Map<string, SplitRect>(), ranges = new Map<string, PanelSizeRange>();
     const dividers: SplitDivider[] = [];
     let occupied = 0, regret = 0, displacement = 0;
-    const visit = (node: LayoutNode, left: number, top: number, path: string) => {
+    // Align top-dock frames within the already allocated row, without changing
+    // natural content sizes, candidate scores, or the dock's total height.
+    // The scrolling sidebar keeps its independent, content-sized cards.
+    const visit = (node: LayoutNode, left: number, top: number, path: string, frameHeight = node.height) => {
       if (node.item && node.range) {
         const { item, range } = node;
-        const box = { left, top, width: node.width, height: node.height };
+        const box = { left, top, width: node.width, height: scrollable ? node.height : frameHeight };
         cells.set(item.id, box); ranges.set(item.id, range);
         const body = Math.max(0, node.height - item.chrome);
         occupied += item.kind === "media" ? node.width * item.chrome + Math.min(node.width, body * (item.aspectRatio || 16 / 9)) * body : node.width * node.height;
@@ -272,12 +275,12 @@ export function optimizePanelLayout(items: AutoPanelItem[], bounds: SplitRect, b
         return;
       }
       if (!node.a || !node.b || "id" in node.tree) return;
-      visit(node.a, left, top, `${path}a`);
+      visit(node.a, left, top, `${path}a`, node.tree.axis === "x" ? frameHeight : node.a.height);
       if (node.tree.axis === "x") {
-        dividers.push({ left: left + node.a.width, top, width: GAP, height: Math.min(node.a.height, node.b.height),
-          bounds: { left, top, width: node.width, height: node.height }, path, axis: "x", ratio: node.tree.ratio });
-        visit(node.b, left + node.a.width + GAP, top, `${path}b`);
-      } else visit(node.b, left, top + node.a.height + GAP, `${path}b`);
+        dividers.push({ left: left + node.a.width, top, width: GAP, height: scrollable ? Math.min(node.a.height, node.b.height) : frameHeight,
+          bounds: { left, top, width: node.width, height: scrollable ? node.height : frameHeight }, path, axis: "x", ratio: node.tree.ratio });
+        visit(node.b, left + node.a.width + GAP, top, `${path}b`, frameHeight);
+      } else visit(node.b, left, top + node.a.height + GAP, `${path}b`, frameHeight - node.a.height - GAP);
     };
     visit(root, bounds.left, bounds.top, "");
     if (dropOrder) {

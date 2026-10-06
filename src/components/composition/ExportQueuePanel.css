@@ -1,0 +1,20 @@
+.kd-export-page > .kd-download-overview { flex: none; flex-wrap: wrap; }
+.kd-export-page .kd-download-summary { flex-wrap: wrap; }
+.kd-visualizer-export-list { min-width: 0; }
+.kd-download-task > .kd-export-task-progress {
+  display: block;
+  width: calc(100% - 5.38rem);
+  height: 3px;
+  margin: 6px 0 0 5.38rem;
+  accent-color: var(--kd-theme);
+}
+.kd-export-task-detail {
+  margin: 5px 0 0 5.38rem;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  overflow-wrap: anywhere;
+}
+@container (max-width: 320px) {
+  .kd-download-task > .kd-export-task-progress { width: calc(100% - 3.55rem); margin-left: 3.55rem; }
+  .kd-export-task-detail { margin-left: 3.55rem; }
+}

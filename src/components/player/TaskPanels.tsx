@@ -1,81 +1,53 @@
-import { useEffect } from "react";
-import { Download, ExternalLink, Radio, Square, X } from "lucide-react";
-import { useDownloadStore } from "../../stores/downloadStore";
-import { projectDuration } from "../../lib/workshop";
+import { useEffect, useId, useRef, useState } from "react";
+import { Download, ExternalLink, Radio, Square } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
-import { useWorkshopStore } from "../../stores/workshopStore";
-import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
+import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useLiveVjStore } from "../../stores/liveVjStore";
 import { liveVjRunning, liveVjSupported } from "../../lib/liveVj";
 import { useLiveVjStatus } from "../../lib/useLiveVjStatus";
-import { getBridge } from "../../lib/bridge";
-import { api } from "../../lib/api";
 import { InlineNotice, Panel } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
-import { VisualizerExportTasks } from "../composition/VisualizerExportTasks";
+import { ExportQueuePanel } from "../composition/ExportQueuePanel";
+import "./TaskPanels.css";
 
-const exportPhases: Record<string, string> = {
-  queued: "等待导出", rendering: "导出中", validating: "校验中", committing: "保存中",
-  importing: "入库中", complete: "已完成", failed: "导出失败", import_failed: "入库失败", canceled: "已取消",
-};
-const activeExport = (phase: string) => ["queued", "rendering", "validating", "committing", "importing"].includes(phase);
-
-function ExportTaskContents() {
-  const projects = useWorkshopStore(state => state.projects);
-  const jobs = useWorkshopStore(state => state.jobs);
-  const error = useWorkshopStore(state => state.error);
-  const visualizerError = useVisualizerExportStore(state => state.error);
-  useEffect(() => {
-    void useWorkshopStore.getState().refresh();
-    void useVisualizerExportStore.getState().initialize().catch(error => useVisualizerExportStore.setState({ error: String(error) }));
-  }, []);
-  const fail = (error: unknown) => useWorkshopStore.setState({ error: String(error) });
-  return (
-    <div className="kd-task-window-body">
-      <InlineNotice text={error} onDismiss={() => useWorkshopStore.setState({ error: "" })} />
-      <InlineNotice text={visualizerError} onDismiss={() => useVisualizerExportStore.setState({ error: "" })} />
-      {projects.filter(project => !jobs.some(job => job.project_id === project.id)).map(project =>
-        <div className="kd-task-window-entry kd-task-window-line" key={project.id}>
-          <span className="kd-task-window-name">{project.name}</span>
-          <button type="button" disabled={projectDuration(project) <= 0} onClick={() => void useWorkshopStore.getState().export(project.id).catch(fail)}>
-            <Download size={13} />导出
-          </button>
-        </div>)}
-      {jobs.map(job => <div className="kd-task-window-entry" key={job.id}>
-        <div className="kd-task-window-line">
-          <span className="kd-task-window-name" title={job.path}>{projects.find(p => p.id === job.project_id)?.name ?? job.path}</span>
-          <span>{exportPhases[job.phase] ?? job.phase}</span>
-          {activeExport(job.phase) && <button type="button" title="取消导出" aria-label="取消导出"
-            disabled={["committing", "importing"].includes(job.phase)}
-            onClick={() => void useWorkshopStore.getState().cancelExport(job.id).catch(fail)}><X size={13} /></button>}
-          {["failed", "canceled"].includes(job.phase) && projects.some(project => project.id === job.project_id)
-            && !jobs.some(other => other.project_id === job.project_id && activeExport(other.phase))
-            && <button type="button" onClick={() => void useWorkshopStore.getState().export(job.project_id).catch(fail)}>重试</button>}
-          {job.phase === "complete" && job.path && <button type="button" title="打开所在文件夹" aria-label="打开所在文件夹"
-            onClick={() => void getBridge().revealPath(job.path).catch(fail)}><ExternalLink size={13} /></button>}
-          {job.phase === "import_failed" && <button type="button" onClick={() => void api.importWorkshopExport(job.id)
-            .then(snapshot => useWorkshopStore.getState().accept(snapshot)).catch(fail)}>重试入库</button>}
-        </div>
-        {activeExport(job.phase) && <progress max={1} value={job.progress} aria-label="VJ 导出进度" />}
-        {job.detail && <div>{job.detail}</div>}
-        {job.error && <div role="status" className="kd-task-window-error">{job.error}</div>}
-      </div>)}
-      <VisualizerExportTasks />
-    </div>
-  );
-}
-
-export function ExportTaskPanel() {
-  return <Panel heading="导出" padded={false} dense className="kd-task-window" actions={
-    <button type="button" className="kd-manager-panel-action" title="打开视频项目与导出" aria-label="打开视频项目与导出"
-      onClick={() => useAppStore.getState().openCompositionPanel()}><ExternalLink size={13} /></button>
-  }><ExportTaskContents /></Panel>;
-}
+const taskViews: { id: TaskPanelView; label: string; title?: string }[] = [
+  { id: "downloads", label: "下载" },
+  { id: "history", label: "历史", title: "下载历史" },
+  { id: "exports", label: "导出" },
+  { id: "export-history", label: "成品", title: "导出历史" },
+];
 
 export function DownloadTaskPanel() {
-  const hasDownloads = useDownloadStore(state => state.list.length > 0);
-  return <Panel heading="下载" padded={false} dense className="kd-task-window kd-download-window">
-    <div className="kd-task-window-body" data-empty={!hasDownloads}><QueuePanel /></div>
+  const view = useTaskPanelStore(state => state.view);
+  const setView = useTaskPanelStore(state => state.setView);
+  const exportView = view === "exports" || view === "export-history";
+  const [visitedExports, setVisitedExports] = useState(exportView);
+  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  const id = useId();
+  useEffect(() => { if (exportView) setVisitedExports(true); }, [exportView]);
+  return <Panel heading={<span className="kd-task-tabs" role="tablist" aria-label="任务页面"
+    onKeyDown={event => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      const index = taskViews.findIndex(item => item.id === view);
+      const next = event.key === "ArrowRight" ? (index + 1) % taskViews.length
+        : event.key === "ArrowLeft" ? (index + taskViews.length - 1) % taskViews.length
+        : event.key === "Home" ? 0 : event.key === "End" ? taskViews.length - 1 : -1;
+      if (next < 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setView(taskViews[next].id);
+      tabs.current[next]?.focus({ preventScroll: true });
+    }}>
+    {taskViews.map((item, index) => <button key={item.id} ref={node => { tabs.current[index] = node; }}
+      type="button" role="tab" id={`${id}-${item.id}`} aria-controls={`${id}-page`} title={item.title} aria-label={item.title}
+      aria-selected={view === item.id} tabIndex={view === item.id ? 0 : -1} onClick={() => setView(item.id)}>
+      {item.label}
+    </button>)}
+  </span>} maximizable visibleHeader expandKey="kd-activity-panels:downloads" padded={false} dense className="kd-task-window kd-download-window">
+    <div className="kd-task-window-body" id={`${id}-page`} role="tabpanel" aria-labelledby={`${id}-${view}`}>
+      <div className="kd-task-page" hidden={exportView}><QueuePanel history={view === "history"} /></div>
+      {(visitedExports || exportView) && <div className="kd-task-page" hidden={!exportView}><ExportQueuePanel history={view === "export-history"} /></div>}
+    </div>
   </Panel>;
 }
 

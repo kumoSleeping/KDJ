@@ -1,5 +1,7 @@
 import {
+  useCallback,
   useEffect,
+  useSyncExternalStore,
   useRef,
   useState,
   type CSSProperties,
@@ -14,7 +16,9 @@ import {
 import { usePlaybackPrefs, type TempoRange } from "../../lib/playbackPrefs";
 import { channelFaderGain, eqBandDb } from "../../lib/performanceCues";
 import { usePlayingDeck } from "./usePlayingDeck";
-import { Panel } from "../common";
+import { InlineNotice, Panel } from "../common";
+import { EnergyMeter } from "../library/TrackTable";
+import { streamAnalysisSnapshot, subscribeStreamAnalysis, trackWithStreamAnalysis } from "../../lib/streamAnalysis";
 import { ArcKnob } from "./ManagerMixerControls";
 
 function clamp(value: number, min: number, max: number): number {
@@ -91,6 +95,10 @@ export function NowPlayingControlPanel({
   keyNotation: KeyNotation;
   onError(message: string): void;
 }) {
+  const subscribeAnalysis = useCallback((listener: () => void) => subscribeStreamAnalysis(track.id, listener), [track.id]);
+  const readAnalysis = useCallback(() => streamAnalysisSnapshot(track.id), [track.id]);
+  const analysis = useSyncExternalStore(subscribeAnalysis, readAnalysis, readAnalysis);
+  const analyzedTrack = trackWithStreamAnalysis(track, analysis);
   const { player, control } = usePlayingDeck(track.id);
   const mixer = useManagerMixer((state) => state.values);
   const setMixerState = useManagerMixer((state) => state.setValues);
@@ -195,9 +203,12 @@ export function NowPlayingControlPanel({
     });
   };
 
-  const currentKey = displayTransposedTrackKey(track, keyNotation, pitchDraft);
+  const currentKey = displayTransposedTrackKey(analyzedTrack, keyNotation, pitchDraft);
   const currentCamelot = keyTextToCamelot(currentKey);
-  const baseBpm = track.bpm && Number.isFinite(track.bpm) ? track.bpm : null;
+  const baseBpm = analyzedTrack.bpm && Number.isFinite(analyzedTrack.bpm) ? analyzedTrack.bpm : null;
+  const confidence = analyzedTrack.bpm_confidence;
+  const hasLoudness = analyzedTrack.rms_db != null || analyzedTrack.energy != null;
+  const analysisWarning = analyzedTrack.analysis_error || analysis.error || analysis.result?.errors.join("；") || "";
   const effectiveBpm = baseBpm ? baseBpm * tempoDraft : null;
 
   return (
@@ -210,7 +221,16 @@ export function NowPlayingControlPanel({
       <div className="kd-manager-control" data-side={side === null ? undefined : side === 0 ? "a" : "b"} aria-busy={!ready}>
         <div className="kd-manager-control-head">
           <div className="kd-manager-control-readout" data-kind="key">
-            <span className="kd-manager-key-nudge" aria-label="音调半音调整">
+            <span className="kd-manager-control-label">
+              <span>KEY</span>
+              <small>{pitchDraft === 0 ? "ORG" : `${pitchDraft > 0 ? "+" : ""}${pitchDraft} st`}</small>
+            </span>
+            <strong
+              style={currentCamelot
+                ? ({ "--kd-key-color": camelotColor(currentCamelot) } as CSSProperties)
+                : undefined}
+            >{currentKey || "—"}</strong>
+            <span className="kd-manager-key-nudge" role="group" aria-label="音调半音调整">
               <button
                 type="button"
                 aria-label="升高一个半音"
@@ -224,17 +244,8 @@ export function NowPlayingControlPanel({
                 onClick={() => setPitch(pitchDraft - 1)}
               >−</button>
             </span>
-            <span className="kd-manager-control-label">
-              <span>KEY</span>
-              <small>{pitchDraft === 0 ? "ORG" : `${pitchDraft > 0 ? "+" : ""}${pitchDraft} st`}</small>
-            </span>
-            <strong
-              style={currentCamelot
-                ? ({ "--kd-key-color": camelotColor(currentCamelot) } as CSSProperties)
-                : undefined}
-            >{currentKey || "—"}</strong>
           </div>
-          <div className="kd-manager-control-readout" data-kind="bpm">
+          <div className="kd-manager-control-readout" data-kind="bpm" title={confidence != null ? `节拍置信度 ${Math.round(confidence * 100)}%` : undefined}>
             <span className="kd-manager-control-label">
               <span>BPM</span>
             </span>
@@ -245,7 +256,11 @@ export function NowPlayingControlPanel({
 
         <div className="kd-manager-mixer-layout">
           <div className="kd-manager-knob-stack">
-            <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })} />
+            <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
+              format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }}
+              readout={hasLoudness ? <span className="kd-manager-gain-loudness" aria-label="原曲相对响度" title="原曲相对响度（不含增益、EQ 与音量调整）">
+                <EnergyMeter value={analyzedTrack.energy} rmsDb={analyzedTrack.rms_db} peakDb={analyzedTrack.peak_db} />
+              </span> : null} />
             <ArcKnob size="xs" label="FILTER" value={mixer.filter} onChange={(filter) => setMixer({ filter })} onReset={() => setMixer({ filter: 0 })} />
             <ArcKnob size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
             <ArcKnob size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
@@ -253,6 +268,7 @@ export function NowPlayingControlPanel({
           </div>
         </div>
       </div>
+      <InlineNotice text={analysisWarning} />
     </Panel>
   );
 }

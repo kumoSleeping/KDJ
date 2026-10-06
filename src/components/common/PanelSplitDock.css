@@ -13,7 +13,7 @@
   left: var(--kd-cell-left);
   top: var(--kd-cell-top);
   width: var(--kd-cell-width);
-  height: auto;
+  height: var(--kd-cell-height);
   min-width: 0;
   min-height: 0;
   padding: 0;
@@ -46,20 +46,54 @@
 .kd-panel-dock[data-free-split] > [data-split-cell] > .kd-internal-window[data-docked] { height: auto; }
 /* The top is a fitted dashboard, not a scroll surface. The sidebar is a normal vertical stack. */
 .kd-panel-dock-top[data-free-split] { overflow: hidden; }
+/* Only the outer title rails align; nested panels and the sidebar keep their own chrome. */
+.kd-panel-dock-top[data-free-split] > [data-split-cell] > .kd-panel-slot > .kd-panel > .kd-panel-head,
+.kd-panel-dock-top[data-free-split] > [data-split-cell] > .kd-panel-slot > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel > .kd-panel-head {
+  height: 24px;
+  min-height: 24px;
+  padding: 2px 6px;
+  font-size: var(--kd-size-xs);
+}
 /* Sidebar cards stay in normal flow so asynchronous content and theme metrics
    update their height without stale absolute positions or nested card scrollbars. */
 .kd-panel-dock-right[data-free-split] {
   display: flex;
   flex-direction: column;
-  height: auto;
+  height: 100%;
   gap: 6px;
   padding: 4px;
   overflow: visible;
 }
+/* Reparented cards leave their source shell mounted; an empty shell must not
+   contribute playback padding or an extra flex gap above the first card. */
+.kd-panel-dock-right[data-free-split] > .kd-activity-panel-host:not(:has(.kd-panel-slot:not([hidden]), .kd-notice)) {
+  display: none;
+}
 .kd-panel-dock-right[data-free-split] > .kd-panel-docked-host {
+  position: relative;
   flex: none;
   padding: 0;
 }
+/* Draw each shared edge once, in the dock gap, instead of two card borders. */
+:root:not([data-theme-pack]) .kd-panel-dock[data-free-split] > .kd-panel-docked-host[data-dock-divider]::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 0 solid var(--kd-line);
+  pointer-events: none;
+}
+:root:not([data-theme-pack]) .kd-panel-dock[data-free-split] > .kd-panel-docked-host[data-dock-divider~="left"]::before { border-left-width: 1px; }
+:root:not([data-theme-pack]) .kd-panel-dock[data-free-split] > .kd-panel-docked-host[data-dock-divider~="top"]::before { border-top-width: 1px; }
+/* Give the sidebar clip an explicit width-derived height. Its absolutely
+   positioned async contents must not keep the grid's pre-resize block size. */
+.kd-panel-dock-right .kd-detail-viz-panel > .kd-async-panel-body[data-kind="visualizer"] {
+  container: sidebar-visualizer / inline-size;
+}
+.kd-panel-dock-right .kd-async-panel-body[data-kind="visualizer"] .kd-async-panel-space {
+  width: 100%;
+  height: calc(100cqi * 9 / 16);
+}
+
 .kd-panel-dock-right[data-free-split] > .kd-panel-docked-host > .kd-panel-slot {
   width: 100%;
   overflow: visible;
@@ -67,6 +101,38 @@
 .kd-panel-dock-right[data-free-split] > .kd-panel-docked-host > .kd-panel-slot > :is(.kd-panel, .kd-track-preview-eq, .kd-track-preview-waveform),
 .kd-panel-dock-right[data-free-split] > .kd-panel-docked-host > .kd-panel-slot > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
   overflow: visible;
+}
+/* Keep every card's natural height as its basis; only the chosen list grows.
+   With no spare room, cards overflow into the existing sidebar scroll surface. */
+.kd-panel-dock-right[data-free-split] > .kd-panel-docked-host[data-sidebar-fill],
+.kd-panel-dock-right[data-free-split] > [data-sidebar-fill] > .kd-panel-slot,
+.kd-panel-dock-right[data-free-split] > [data-sidebar-fill] > .kd-panel-slot > .kd-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+  height: auto;
+  max-height: none;
+}
+.kd-panel-dock-right[data-free-split] > [data-sidebar-fill] .kd-panel-head {
+  flex: none;
+}
+.kd-panel-dock-right[data-free-split] > [data-sidebar-fill] .kd-download-window > .kd-task-window-body {
+  flex: 1 0 auto;
+  height: min(280px, 65dvh);
+  max-height: none;
+}
+.kd-panel-dock-right[data-free-split] > [data-sidebar-fill] .kd-async-panel-body[data-kind="lyrics"][data-state="ready"] {
+  flex: 1 0 auto;
+}
+.kd-panel-dock-right[data-free-split] > [data-sidebar-fill] .kd-async-panel-clip {
+  display: flex;
+  flex-direction: column;
+}
+.kd-panel-dock-right[data-free-split] > [data-sidebar-fill] .kd-async-panel-space {
+  flex: 1 0 auto;
+}
+.kd-panel-dock-right[data-free-split] > [data-sidebar-fill] .kd-async-panel-content > .kd-lyrics[data-has-content="true"] {
+  height: 100%;
 }
 :root .kd-panel-dock-top[data-free-split],
 :root .kd-panel-dock-top[data-free-split] > .kd-panel-live-host * {

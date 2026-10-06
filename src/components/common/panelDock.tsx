@@ -5,7 +5,7 @@ import { splitHosts, panelCompositionPlan, dockSplitPlan, showSplitPreview, clea
 import { usePanelPresentation } from "../../lib/panelPresentation";
 import { optimizePanelLayout } from "../../lib/panelAutoLayout";
 import { panelItemsForIds, panelLayoutBudget } from "./autoPanelLayoutDom";
-import { usePanelViewport } from "../../lib/panelViewport";
+import { responsivePanelSelection, usePanelViewport } from "../../lib/panelViewport";
 import { useToastStore } from "../../stores/toastStore";
 import { create } from "zustand";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
@@ -150,7 +150,7 @@ export function canPlacePanel(id: string, side: PanelDockSide) {
   const viewport = usePanelViewport.getState();
   const ids = viewport.compact ? viewport.activeIds : zone ? splitHosts(zone).map(item => item.id) : [];
   if (ids.includes(id)) return true;
-  if (zone && panelCompositionPlan(zone, "top", [...ids, id])) return true;
+  if (zone && panelCompositionPlan(zone, "top", responsivePanelSelection(ids, id, viewport.narrow))) return true;
   useToastStore.getState().show("空间不足");
   return false;
 }
@@ -223,7 +223,7 @@ export function PanelDockZone({ side, children }: { side: PanelDockSide; childre
     // That lets a newly opened panel bring the column back without a visibility loop.
     const sync = () => usePanelDock.getState().setRightHasPanels(splitHosts(zone, false).length > 0);
     const observer = new MutationObserver(sync);
-    observer.observe(zone, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+    observer.observe(zone, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "data-state", "data-expanded"] });
     sync();
     return () => observer.disconnect();
   }, [side]);

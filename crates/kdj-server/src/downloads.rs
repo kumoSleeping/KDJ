@@ -194,6 +194,8 @@ struct Entry {
     /// One generation per spawned worker, including retries that need no external preparation.
     /// Unlike task state, this identity never becomes writable again for an old worker.
     worker_generation: u64,
+    /// Registered before spawning, so executor wake order cannot become queue order.
+    admission: Option<(u64, u64, bool, bool)>,
     /// 测速滑窗：(单调秒, 已下字节)
     samples: VecDeque<(f64, u64)>,
     /// 上一次真正广播出去的时刻 / 进度。`-1.0` = 还没广播过，第一次一定放行。
@@ -211,6 +213,7 @@ impl Entry {
             prepared_source_url: None,
             preparation_attempt: 0,
             worker_generation: 1,
+            admission: None,
             samples: VecDeque::new(),
             last_emit: -1.0,
             last_progress: -1.0,
@@ -649,6 +652,13 @@ pub struct DownloadManager {
     /// 一次性放行信号。每条任务记住入队时的序号，点击「开始下载」只放行
     /// 点击前已经在队列里的任务，之后新加入的任务不会偷偷跟着开始。
     start_generation: watch::Sender<u64>,
+    admission_changed: watch::Sender<u64>,
+    admission_batch: Mutex<()>,
+}
+
+struct AdmissionWake(Arc<DownloadManager>);
+impl Drop for AdmissionWake {
+    fn drop(&mut self) { self.0.wake_admission(); }
 }
 
 /// A worker never receives an unscoped task mutation API. Its identity is frozen before spawn;
@@ -800,6 +810,8 @@ impl DownloadManager {
             permits: Mutex::new((concurrency, Arc::new(Semaphore::new(concurrency as usize)))),
             auto_start: watch::channel(auto_start).0,
             start_generation: watch::channel(0).0,
+            admission_changed: watch::channel(0).0,
+            admission_batch: Mutex::new(()),
         }
     }
 
@@ -923,6 +935,7 @@ impl DownloadManager {
     pub fn set_auto_start(&self, enabled: bool) {
         // send_replace 而不是 send：没有接收者（队列是空的）时 send 会报错
         self.auto_start.send_replace(enabled);
+        self.wake_admission();
     }
 
     pub fn auto_start_enabled(&self) -> bool {
@@ -936,6 +949,37 @@ impl DownloadManager {
     pub fn release_queued(&self) {
         self.start_generation
             .send_modify(|generation| *generation += 1);
+        self.wake_admission();
+    }
+
+    fn wake_admission(&self) {
+        self.admission_changed.send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    fn register_admission(&self, id: &str, generation: u64, queued: u64, auto: bool, immediate: bool) {
+        if let Some(entry) = self.entries.lock().unwrap().get_mut(id) {
+            if entry.worker_generation == generation {
+                entry.admission = Some((generation, queued, auto, immediate));
+            }
+        }
+        self.wake_admission();
+    }
+
+    fn first_admitted(&self, id: &str, generation: u64) -> bool {
+        // Lock contention is not a queue decision: returning false here can put
+        // even the first worker to sleep without any later admission wake.
+        // This guard only spans synchronous registration/checks, never an await.
+        let _batch = self.admission_batch.lock().unwrap();
+        let started = self.start_generation();
+        let auto_start = self.auto_start_enabled();
+        let entries = self.entries.lock().unwrap();
+        entries.values().filter(|entry| {
+            entry.task.state == TaskState::Queued && !entry.cancel.is_cancelled()
+                && entry.admission.is_some_and(|(worker, queued, auto, immediate)| {
+                    worker == entry.worker_generation && (immediate || started > queued || (auto && auto_start))
+                })
+        }).min_by(|a, b| a.task.created_at.total_cmp(&b.task.created_at).then_with(|| a.task.id.cmp(&b.task.id)))
+            .is_some_and(|entry| entry.task.id == id && entry.worker_generation == generation)
     }
 
     /// 按创建时间升序列出，前端队列面板要的就是这个顺序。
@@ -2009,6 +2053,29 @@ async fn acquire_download_permit(
     }
 }
 
+async fn acquire_ordered_download_permit(
+    manager: &DownloadManager,
+    id: &str,
+    generation: u64,
+    cancel: &CancellationToken,
+) -> Option<OwnedSemaphorePermit> {
+    let mut changed = manager.admission_changed.subscribe();
+    loop {
+        if cancel.is_cancelled() { return None; }
+        if manager.first_admitted(id, generation) {
+            let permit = acquire_download_permit(manager, cancel).await?;
+            // An earlier retry may have joined while all concurrent slots were occupied.
+            if manager.first_admitted(id, generation) { return Some(permit); }
+            drop(permit);
+            continue;
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return None,
+            result = changed.changed() => { if result.is_err() { return None; } }
+        }
+    }
+}
+
 /// 需要外部挑战的 Provider 必须等适配器提交一次性媒体源；任务已经可见并处于
 /// authorizing，相同等待/取消/超时语义不再散落在平台分支里。
 async fn wait_for_prepared_source(worker: &DownloadAttempt, cancel: &CancellationToken) -> bool {
@@ -2169,6 +2236,7 @@ pub fn enqueue_audio(
     let queued_generation = manager.start_generation();
 
     let id = task.id.clone();
+    manager.register_admission(&task.id, 1, queued_generation, !hold, false);
     tokio::spawn(async move {
         run_audio(
             state,
@@ -2196,6 +2264,7 @@ pub fn retry_audio(
     let (task, _retry, cancel, worker_generation) = manager.prepare_audio_retry(id)?;
     let task_id = task.id.clone();
     let queued_generation = manager.start_generation();
+    manager.register_admission(&task.id, worker_generation, queued_generation, true, true);
     tokio::spawn(async move {
         run_audio(
             state,
@@ -2221,6 +2290,7 @@ pub fn retry_video(
     let (task, _retry, cancel, worker_generation) = manager.prepare_video_retry(id)?;
     let task_id = task.id.clone();
     let queued_generation = manager.start_generation();
+    manager.register_admission(&task.id, worker_generation, queued_generation, true, true);
     tokio::spawn(async move {
         run_video(
             state,
@@ -2252,16 +2322,28 @@ pub fn retry_task(
 /// 重新开始当前快照里所有暂停或可重试的失败媒体。单条可能被另一个点击抢先，
 /// 这种竞态直接跳过即可，其余任务仍照常启动。
 pub fn restart_inactive_tasks(state: Arc<AppState>, manager: Arc<DownloadManager>) -> usize {
-    let ids = manager.restartable_ids();
-    start_tasks(state, manager, &ids)
+    // Register the complete start snapshot before any retry can claim a slot.
+    let batch = manager.admission_batch.lock().unwrap();
+    let retried = manager
+        .restartable_ids()
+        .into_iter()
+        .filter(|id| retry_task(state.clone(), manager.clone(), id).is_ok())
+        .count();
+    manager.release_queued();
+    drop(batch);
+    manager.wake_admission();
+    retried
 }
 
-/// 只开始点名的任务：排队中的交给立即开始的新 worker，暂停/失败的按重试处理。
-/// 不碰全局放行计数，别人排着的任务和失败记录保持原样。已在跑或已结束的直接跳过。
+/// Start only the named tasks, preserving the user's held queue and admission order.
 pub fn start_tasks(state: Arc<AppState>, manager: Arc<DownloadManager>, ids: &[String]) -> usize {
-    ids.iter()
+    let batch = manager.admission_batch.lock().unwrap();
+    let started = ids.iter()
         .filter(|id| retry_task(state.clone(), manager.clone(), id).is_ok())
-        .count()
+        .count();
+    drop(batch);
+    manager.wake_admission();
+    started
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2275,12 +2357,13 @@ async fn run_audio(
     allow_auto_start: bool,
     start_immediately: bool,
 ) {
+    let _admission_wake = AdmissionWake(manager.clone());
     if !start_immediately
         && !wait_until_started(&manager, &cancel, queued_generation, allow_auto_start).await
     {
         return;
     }
-    let Some(_permit) = acquire_download_permit(&manager, &cancel).await else {
+    let Some(_permit) = acquire_ordered_download_permit(&manager, &id, worker_generation, &cancel).await else {
         return;
     };
     if cancel.is_cancelled() {
@@ -2289,6 +2372,7 @@ async fn run_audio(
     let Some(retry) = manager.start_audio_for(&id, Some(worker_generation)) else {
         return;
     };
+    manager.wake_admission();
     let worker = DownloadAttempt {
         manager: Arc::clone(&manager),
         id: id.clone(),
@@ -2585,6 +2669,7 @@ pub fn enqueue_video(
     let queued_generation = manager.start_generation();
 
     let id = task.id.clone();
+    manager.register_admission(&task.id, 1, queued_generation, !hold, false);
     tokio::spawn(run_video(
         state,
         manager,
@@ -2609,12 +2694,13 @@ async fn run_video(
     allow_auto_start: bool,
     start_immediately: bool,
 ) {
+    let _admission_wake = AdmissionWake(manager.clone());
     if !start_immediately
         && !wait_until_started(&manager, &cancel, queued_generation, allow_auto_start).await
     {
         return;
     }
-    let Some(_permit) = acquire_download_permit(&manager, &cancel).await else {
+    let Some(_permit) = acquire_ordered_download_permit(&manager, &id, worker_generation, &cancel).await else {
         return;
     };
     if cancel.is_cancelled() {
@@ -2623,6 +2709,7 @@ async fn run_video(
     let Some(retry) = manager.start_video_for(&id, Some(worker_generation)) else {
         return;
     };
+    manager.wake_admission();
     let worker = DownloadAttempt {
         manager: Arc::clone(&manager),
         id: id.clone(),

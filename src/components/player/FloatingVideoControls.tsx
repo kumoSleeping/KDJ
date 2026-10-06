@@ -1,7 +1,8 @@
-import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
-import { Maximize2, Minimize2, Pause, Play, Volume2, VolumeX, X } from "lucide-react";
+import { useContext, useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
+import { LoaderCircle, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX, X } from "lucide-react";
 import { formatDuration } from "../../lib/format";
 import { useMasterVolume } from "../../lib/masterVolume";
+import { PanelMediaControlsContext } from "../common/panelMediaControls";
 
 /** Control the audible output owner, never unmute a picture-only video element. */
 function FloatingVideoVolume() {
@@ -48,33 +49,37 @@ function FloatingVideoVolume() {
 }
 
 /** Shared by local playback and the workshop. Chrome stays inside the picture. */
-export function FloatingVideoControls({ title, playing, position, duration, fullscreen, showTitle = true, showVolume = true, onClose, onToggle, onFullscreen, onTitlePointerDown, extra, error, closeLabel = "关闭预览" }: {
-  title: string; playing: boolean; position: number; duration: number; fullscreen: boolean; showTitle?: boolean; showVolume?: boolean;
+export function FloatingVideoControls({ title, playing, loading = false, position, duration, fullscreen, showTitle = true, showVolume = true, onClose, onToggle, onFullscreen, onTitlePointerDown, extra, error, closeLabel = "关闭预览" }: {
+  title: string; playing: boolean; loading?: boolean; position: number; duration: number; fullscreen: boolean; showTitle?: boolean; showVolume?: boolean;
   onClose?(): void; onToggle(): void; onFullscreen(): void; extra?: ReactNode; error?: string; closeLabel?: string;
   onTitlePointerDown?: HTMLAttributes<HTMLDivElement>["onPointerDown"];
 }) {
-  return <div className="kd-pip-float-chrome" data-no-title={!showTitle || undefined} title={showTitle ? title : undefined}>
-    {showTitle && <div className="kd-pip-float-top" onPointerDown={onTitlePointerDown} data-window-drag={Boolean(onTitlePointerDown) || undefined}>
-      <span className="kd-truncate">{title}</span>
-      {onClose && <button type="button" className="kd-pip-float-x" aria-label={closeLabel}
-        onClick={e => { e.stopPropagation(); onClose(); }}><X size={13} /></button>}
-    </div>}
-    <div className="kd-pip-float-bottom">
-      <button type="button" aria-label={playing ? "暂停" : "播放"}
-        onClick={e => { e.stopPropagation(); onToggle(); }}>
-        {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
-      </button>
-      <span className="kd-mono">{formatDuration(position)} / {formatDuration(duration)}</span>
-      <button type="button" aria-label={fullscreen ? "退出全屏" : "全屏播放"} aria-pressed={fullscreen}
-        title={fullscreen ? "退出全屏（Esc）" : "全屏播放"}
-        onClick={e => { e.stopPropagation(); onFullscreen(); }}>
-        {fullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-      </button>
-      {showVolume && <FloatingVideoVolume />}
-      {extra}
+  const panelToolsHost = useContext(PanelMediaControlsContext);
+  return <>
+    {panelToolsHost && !fullscreen && !showTitle && <div ref={panelToolsHost} className="kd-pip-float-panel-tools" />}
+    <div className="kd-pip-float-chrome" data-no-title={!showTitle || undefined}>
+      {showTitle && <div className="kd-pip-float-top" onPointerDown={onTitlePointerDown} data-window-drag={Boolean(onTitlePointerDown) || undefined}>
+        <span className="kd-truncate">{title}</span>
+        {onClose && <button type="button" className="kd-pip-float-x" aria-label={closeLabel}
+          onClick={e => { e.stopPropagation(); onClose(); }}><X size={13} /></button>}
+      </div>}
+      <div className="kd-pip-float-bottom">
+        <button type="button" aria-label={playing ? "暂停" : "播放"} aria-busy={loading}
+          onClick={e => { e.stopPropagation(); onToggle(); }}>
+          {loading ? <LoaderCircle size={13} className="kd-spin" /> : playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
+        </button>
+        <span className="kd-mono">{formatDuration(position)} / {formatDuration(duration)}</span>
+        <button type="button" aria-label={fullscreen ? "退出全屏" : "全屏播放"} aria-pressed={fullscreen}
+          title={fullscreen ? "退出全屏（Esc）" : "全屏播放"}
+          onClick={e => { e.stopPropagation(); onFullscreen(); }}>
+          {fullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+        </button>
+        {showVolume && <FloatingVideoVolume />}
+        {extra}
+      </div>
+      {error && <div className="kd-pip-float-error">{error}</div>}
     </div>
-    {error && <div className="kd-pip-float-error">{error}</div>}
-  </div>;
+  </>;
 }
 
 export function FloatingVideoScrub({ position, duration, ...props }: HTMLAttributes<HTMLDivElement> & {position: number; duration: number}) {

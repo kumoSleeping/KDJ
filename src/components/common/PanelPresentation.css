@@ -1,6 +1,5 @@
 /* Presentation controls are configuration, separate from visibility and docking. */
 .kd-panel-index-section-title { display: flex; align-items: center; justify-content: space-between; }
-.kd-panel-sidebar-toggle { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 2px; border: 0; background: transparent; color: var(--kd-muted); cursor: pointer; }
 .kd-panel-slot:has(> .kd-panel-resize) { position: relative; }
 .kd-panel-resize { position: absolute; z-index: 12; padding: 0; border: 0; background: transparent; color: var(--kd-muted); opacity: 0; touch-action: none; }
 .kd-panel-resize[data-edge="right"] { top: 3px; right: 0; bottom: 3px; width: 8px; cursor: ew-resize; }
@@ -60,41 +59,18 @@
 .kd-panel-slot[data-panel-form]:is([data-panel-form="landscape"], [data-panel-form="auto"][data-auto-panel-form="landscape"]) > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
   display: flex; flex-direction: column; height: 100%; min-height: 0; margin: 0;
 }
-.kd-panel-slot:is([data-panel-form="landscape"], [data-panel-form="auto"][data-auto-panel-form="landscape"]) .kd-playing-control-panel .kd-manager-control {
-  display: flex; flex-direction: column; flex: 1; gap: 6px; min-height: 0; overflow: auto;
-}
+
 .kd-panel-slot:is([data-panel-form="landscape"], [data-panel-form="auto"][data-auto-panel-form="landscape"]) .kd-manager-scroll-wave { flex: 1; height: auto; min-height: 0; }
 .kd-panel-slot:is([data-panel-form="landscape"], [data-panel-form="auto"][data-auto-panel-form="landscape"]) .kd-detail-lyrics-panel .kd-lyrics[data-has-content] { flex: 1; height: 0; min-height: 0; }
 
-.kd-panel-slot:is([data-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="slim"]) .kd-playing-control-panel .kd-manager-control {
-  display: flex; flex-direction: row; align-items: center; gap: 8px; overflow: auto;
-}
-.kd-panel-slot:is([data-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="slim"]) .kd-playing-control-panel .kd-manager-control-head {
-  flex: 1 0 270px; grid-template-columns: minmax(70px, 1fr) minmax(70px, 1fr) minmax(110px, 1.4fr); margin: 0;
-}
-.kd-panel-slot:is([data-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="slim"]) .kd-playing-control-panel .kd-manager-mixer-layout { flex: 0 0 210px; height: 44px; }
-.kd-panel-slot:is([data-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="slim"]) .kd-playing-control-panel .kd-manager-knob-stack { height: 44px; padding: 0; gap: 2px; }
-.kd-panel-slot:is([data-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="slim"]) .kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg { flex: none; width: 28px; height: 28px; min-width: 0; }
 .kd-panel-slot[data-panel-id="waveform"][data-panel-form]:is([data-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="slim"]) .kd-manager-scroll-wave { height: 56px; flex: none; }
 .kd-panel-slot:is([data-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="slim"]) .kd-detail-lyrics-panel .kd-lyrics[data-has-content] { height: 80px; }
-.kd-panel-slot:is([data-panel-form="strip"], [data-panel-form="auto"][data-auto-panel-form="strip"]) .kd-playing-control-panel .kd-manager-control { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
-.kd-panel-slot:is([data-panel-form="strip"], [data-panel-form="auto"][data-auto-panel-form="strip"]) .kd-playing-control-panel .kd-manager-control-head { flex: none; min-width: 0; }
-.kd-panel-slot:is([data-panel-form="strip"], [data-panel-form="auto"][data-auto-panel-form="strip"]) .kd-playing-control-panel .kd-manager-mixer-layout { flex: none; min-width: 0; height: 60px; }
-.kd-panel-slot:is([data-panel-form="strip"], [data-panel-form="auto"][data-auto-panel-form="strip"]) .kd-playing-control-panel .kd-manager-knob-stack { height: 60px; }
+
 .kd-panel-slot[data-panel-id="waveform"][data-panel-form]:is([data-panel-form="strip"], [data-panel-form="auto"][data-auto-panel-form="strip"]) .kd-manager-scroll-wave { height: 130px; flex: none; }
 .kd-panel-slot:is([data-panel-form="strip"], [data-panel-form="auto"][data-auto-panel-form="strip"]) .kd-detail-lyrics-panel .kd-lyrics[data-has-content] { height: 120px; }
 
-.kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"])[data-panel-id="control"] { width: min(100%, var(--kd-panel-form-width, 220px)); }
 .kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"])[data-panel-id="lyrics"] { width: min(100%, 320px); max-height: none; }
-.kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) .kd-playing-control-panel .kd-manager-control {
-  display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 6px; overflow: auto;
-}
-.kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) .kd-playing-control-panel .kd-manager-control-head { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; min-width: 0; flex: none; }
-.kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) .kd-playing-control-panel .kd-manager-header-tempo { grid-column: 1 / -1; }
-.kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) .kd-playing-control-panel .kd-manager-mixer-layout { flex: none; min-width: 0; height: auto; }
-.kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) .kd-playing-control-panel .kd-manager-knob-stack { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(5, 30px); height: auto; padding: 0; gap: 2px; }
-.kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) .kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] { flex-direction: row; justify-content: flex-start; width: 100%; gap: 10px; }
-.kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) .kd-playing-control-panel .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg { flex: none; width: 28px; height: 28px; min-width: 0; }
+
 .kd-panel-slot:is([data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) .kd-detail-lyrics-panel .kd-lyrics[data-has-content] { height: min(48dvh, 480px); }
 
 .kd-panel-slot[data-panel-id="waveform"][data-panel-form]:is([data-panel-form="slim"], [data-panel-form="strip"], [data-panel-form="auto"][data-auto-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="strip"]) > .kd-track-preview-waveform,
@@ -110,3 +86,29 @@
 .kd-panel-dock-right .kd-panel-slot[data-panel-id="search"] .kd-plats { flex-wrap: wrap; min-width: 0; }
 .kd-panel-dock-right .kd-panel-slot[data-panel-id="search"] .kd-searchbar-sep { display: none; }
 .kd-panel-dock-right .kd-panel-slot[data-panel-id="search"] .kd-searchbar-copy { grid-column: 1; grid-row: 2; width: 100%; min-width: 0; }
+/* Give the actual editor a visible boundary, not the platform selector row. */
+.kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy {
+  min-height: 2.25rem;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--kd-text) 18%, var(--kd-panel));
+  border-radius: 4px;
+  background: var(--kd-panel);
+  box-shadow: none;
+}
+.kd-panel-slot[data-panel-id="search"] .kd-searchbar-copy .kd-search-placeholder {
+  left: 8px;
+  right: 8px;
+  color: var(--kd-muted);
+}
+.kd-panel-slot[data-panel-id="search"] .kd-searchbar-copy[data-empty][data-input-focused="true"]::after { left: 8px; }
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-search-band .kd-searchbar {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy {
+  border-color: transparent;
+  border-radius: 2px;
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar-input:focus-visible { outline: none; }

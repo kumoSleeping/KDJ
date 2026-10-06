@@ -5,6 +5,9 @@
  */
 
 import { create } from "zustand";
+import { useTaskPanelStore } from "./taskPanelStore";
+import { usesKvjWindow, isEditorWindow } from "../lib/windowRole";
+import { showKvj, requestSettingsSave } from "../lib/kvjWindow";
 import {
   THEME_CHANGE_EVENT,
   activeThemePack,
@@ -304,12 +307,12 @@ let persistedSettings: Settings | null = null;
 export const useAppStore = create<AppStore>()((set, get) => ({
   listMode: "library",
   hasResults: false,
-  showSettings: restoredPinnedOverlay === "settings",
+  showSettings: false,
   settingsPanelEpoch: 0,
-  settingsPinned: restoredPinnedOverlay === "settings",
-  showQueue: restoredPinnedOverlay === "queue",
+  settingsPinned: false,
+  showQueue: false,
   queuePanelEpoch: 0,
-  queuePinned: restoredPinnedOverlay === "queue",
+  queuePinned: false,
   showComposition: restoredPinnedOverlay === "workshop" || restoredPinnedOverlay === "live-vj",
   compositionMode: restoredPinnedOverlay === "live-vj" ? "live-vj" : "workshop",
   compositionPanelEpoch: 0,
@@ -375,7 +378,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     set({
       ...clearOverlays(),
       showSettings: open,
-      settingsPinned: open && panelPinPreference("settings", false),
+      settingsPinned: false,
       settingsPanelEpoch: open ? get().settingsPanelEpoch + 1 : get().settingsPanelEpoch,
     });
   },
@@ -384,7 +387,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     set({
       ...clearOverlays(),
       showSettings: true,
-      settingsPinned: panelPinPreference("settings", false),
+      settingsPinned: false,
       settingsPanelEpoch: get().settingsPanelEpoch + 1,
     });
   },
@@ -396,25 +399,13 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   toggleQueuePanel() {
-    const open = !get().showQueue;
-    set({
-      ...clearOverlays(),
-      showQueue: open,
-      // 手动打开沿用用户选择；从未设置过时才默认固定。
-      queuePinned: open && panelPinPreference("queue", true),
-      queuePanelEpoch: open ? get().queuePanelEpoch + 1 : get().queuePanelEpoch,
-    });
+    get().openQueuePanel();
   },
 
   openQueuePanel() {
-    const pinned = get().showQueue && get().queuePinned;
-    set({
-      ...clearOverlays(),
-      showQueue: true,
-      // 入队自动弹出不强制固定；已经由用户固定的则保持。
-      queuePinned: pinned,
-      queuePanelEpoch: get().queuePanelEpoch + 1,
-    });
+    // New downloads select their page without replacing settings or playback.
+    useTaskPanelStore.getState().setView("downloads");
+    set(state => ({ queuePanelEpoch: state.queuePanelEpoch + 1 }));
   },
 
   setQueuePinned(value) {
@@ -424,15 +415,18 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   toggleCompositionPanel() {
+    if (usesKvjWindow()) { showKvj({ tab: "workshop" }); return; }
     const open = !get().showComposition || get().compositionMode !== "workshop";
     set({ showComposition: open, compositionMode: "workshop", compositionPinned: open && panelPinPreference("workshop", true),
       compositionPanelEpoch: get().compositionPanelEpoch + (open ? 1 : 0) });
   },
   openCompositionPanel() {
+    if (usesKvjWindow()) { showKvj({ tab: "workshop" }); return; }
     set({ showComposition: true, compositionMode: "workshop", compositionPinned: panelPinPreference("workshop", true),
       compositionPanelEpoch: get().compositionPanelEpoch + 1 });
   },
   openLiveVjPanel() {
+    if (usesKvjWindow()) { showKvj({ tab: "live-vj" }); return; }
     set({ showComposition: true, compositionMode: "live-vj", compositionPinned: panelPinPreference("live-vj", true),
       compositionPanelEpoch: get().compositionPanelEpoch + 1 });
   },
@@ -614,6 +608,12 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   saveSettings(patch) {
+    if (isEditorWindow) return requestSettingsSave(patch).then(() => {
+      set({ settingsError: "" });
+    }).catch(error => {
+      set({ settingsError: `设置没有保存：${errorText(error)}` });
+      throw error;
+    });
     const current = get().settings;
     if (!current) return Promise.resolve();
     persistedSettings ??= current;

@@ -10,7 +10,12 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
     let menu = Menu::default(app.handle())?;
     for item in menu.items()? {
         let Some(edit) = item.as_submenu() else { continue; };
-        if edit.text()? != "Edit" { continue; }
+        if edit.text()? != "Edit" {
+            if edit.items()?.iter().any(|item| item.as_predefined_menuitem().is_some_and(|item| item.text().is_ok_and(|text| text.starts_with("About ")))) {
+                edit.insert(&MenuItem::with_id(app, "kdj-preferences", "偏好设置…", true, Some("Cmd+,"))?, 1)?;
+            }
+            continue;
+        }
         edit.remove_at(0)?;
         edit.remove_at(0)?;
         edit.insert(&MenuItem::with_id(app, "kdj-undo", "Undo", true, Some("Cmd+Z"))?, 0)?;
@@ -27,14 +32,22 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
     }
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| {
+        if event.id().as_ref() == "kdj-preferences" {
+            if let Err(error) = crate::kvj_window::show_editor_window(app, "preferences") {
+                tracing::warn!(%error, "无法打开偏好设置");
+            }
+            return;
+        }
         let (key, code, shift, command) = match event.id().as_ref() {
             "kdj-undo" => ("z", "KeyZ", false, "undo"),
             "kdj-redo" => ("z", "KeyZ", true, "redo"),
             "kdj-select-all" => ("a", "KeyA", false, "selectAll"),
             _ => return,
         };
-        let Some(window) = app.get_webview_window("main") else { return; };
-        if !window.is_focused().unwrap_or(false) { return; }
+        let Some(window) = app.webview_windows().into_values().find(|window| {
+            ["main", "kvj", "visualizer-studio", "live-vj-control", "preferences"].contains(&window.label())
+                && window.is_focused().unwrap_or(false)
+        }) else { return; };
         let script = format!(r#"(() => {{
             const target = document.activeElement || document.body;
             const event = new KeyboardEvent('keydown', {{

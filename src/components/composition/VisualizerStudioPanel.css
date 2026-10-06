@@ -165,6 +165,72 @@
 .kd-viz-job span { overflow-wrap: anywhere; }
 .kd-viz-job progress { height: 4px; width: 100%; accent-color: var(--kd-theme); }
 .kd-viz-panel .kd-viz-export { flex: none; color: var(--kd-muted); font-size: inherit; font-weight: 400; }
+
+/* In its own window the picture is the stage; controls stay beside it instead
+   of stacking a small player over two compressed settings columns. */
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(310px, 36%, 390px);
+  background: var(--kd-bg);
+}
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-column {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: clamp(16px, 3vw, 36px);
+  background: var(--kd-panel-inset);
+}
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview {
+  flex: none;
+  max-width: 820px;
+  margin: auto auto 0;
+  border-color: var(--kd-line);
+  border-radius: 8px;
+}
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview .kd-pip-float-stage {
+  max-height: min(58vh, 540px);
+}
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-actions {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto auto;
+  padding: 14px 2px 0;
+}
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-song {
+  gap: 2px 10px;
+  padding: 0 0 8px;
+  font-size: var(--kd-size-sm);
+}
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-song > strong { font-weight: 600; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-toolbar { gap: 4px 8px; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-settings {
+  display: block;
+  min-width: 0;
+  padding: 4px 20px 24px;
+  border-left: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-group { padding-top: 8px; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-group > h3 { padding: 8px 0 10px; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-fields { grid-template-columns: minmax(0, 1fr); gap: 10px; padding-bottom: 18px; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-picture-positions { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-picture-position { gap: 6px; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-image-choice { min-height: 38px; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-image-choice img { width: 36px; height: 36px; }
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-dial { grid-template-columns: minmax(0, 1fr) 28px 5ch; min-height: 32px; }
+@container (max-width: 820px) {
+  .kd-viz-panel:not([data-inline="true"]) .kd-viz-content { display: flex; overflow-y: auto; }
+  .kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-column { flex: none; overflow: visible; padding: 16px 20px 18px; }
+  .kd-viz-panel:not([data-inline="true"]) .kd-viz-preview { margin: 0 auto; }
+  .kd-viz-panel:not([data-inline="true"]) .kd-viz-preview .kd-pip-float-stage { max-height: 35vh; }
+  .kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-actions { margin: 0 auto; }
+  .kd-viz-panel:not([data-inline="true"]) .kd-viz-settings { flex: none; overflow: visible; padding: 8px 20px 24px; border-left: 0; border-top: 1px solid var(--kd-line); }
+}
 @container (max-width: 620px) {
   .kd-viz-settings { grid-template-columns: minmax(0, 1fr); }
 }

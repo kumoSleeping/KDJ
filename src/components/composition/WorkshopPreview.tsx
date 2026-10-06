@@ -1,9 +1,10 @@
 import { WorkshopImage } from "./WorkshopImage";
-import { pictureBox as box } from "../../lib/workshopPicture";
+import { pictureBox as box, pictureResizeEdges, resizePictureLayout, type PictureResizeEdge } from "../../lib/workshopPicture";
 import { isVisualSource, isImageSource } from "../../lib/workshop";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { videoProject } from "../../lib/workshopTransitions";
 import { api } from "../../lib/api";
+import { captureDiagnostic, mediaDiagnostic } from "../../lib/diagnostics";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import {
   clamp,
@@ -12,15 +13,17 @@ import {
   findClip,
   updateClip,
 } from "../../lib/workshop";
-import { VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
+import { configurePictureVideo, VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
 import { getLocalVideoClock } from "../../lib/mediaSync";
-import { prepareVideoClips, previewVideoTiming, WorkshopSeekGate } from "../../lib/workshopPreviewPolicy";
+import { prepareVideoClips, previewVideoTiming, WorkshopSeekGate, registerWorkshopPlaybackAcquirer } from "../../lib/workshopPreviewPolicy";
 import type { WorkshopPlayback } from "../../lib/workshopPlayback";
 import { requestWorkshopFolderAccess, workshopAccessDirectory } from "../../lib/workshopFolderAccess";
 import type {
   CompositionProject,
 } from "../../types/workshop";
-function PreviewVideo({ register, ...props }: React.VideoHTMLAttributes<HTMLVideoElement> & { register(node: HTMLVideoElement): () => void }) {
+const pictureEdgeLabels: Record<PictureResizeEdge, string> = { nw: "左上角", n: "上边", ne: "右上角", e: "右边", se: "右下角", s: "下边", sw: "左下角", w: "左边" };
+
+function PreviewVideo({ register, src, ...props }: React.VideoHTMLAttributes<HTMLVideoElement> & { register(node: HTMLVideoElement): () => void }) {
   const node = useRef<HTMLVideoElement>(null);
   const retry = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attempts = useRef(0);
@@ -29,7 +32,8 @@ function PreviewVideo({ register, ...props }: React.VideoHTMLAttributes<HTMLVide
     if (!video) return;
     // React StrictMode replays effects after cleanup without replacing the DOM.
     // Restore the source that cleanup unloaded, or the second mount stays black.
-    if (props.src && video.getAttribute("src") !== props.src) video.src = props.src;
+    configurePictureVideo(video);
+    if (src && video.getAttribute("src") !== src) { video.src = src; video.load(); }
     const unregister = register(video);
     return () => {
       if (retry.current !== null) clearTimeout(retry.current);
@@ -79,26 +83,54 @@ function PreviewVideoPair({ synchronizer, alignmentOwner, register, ...props }: 
   const active = useRef(0), generation = useRef(0);
   const preparation = useRef<AbortController | null>(null);
   const unregister = useRef<(() => void) | null>(null);
+  const denied = useRef(new WeakSet<HTMLVideoElement>());
+  const priming = useRef(new WeakSet<HTMLVideoElement>());
+  const retryAt = useRef(0), retryDelay = useRef(5000);
   const unload = (node: HTMLVideoElement) => {
     synchronizer.releaseClock(node);
     node.pause();
     if (node.hasAttribute("src")) { node.removeAttribute("src"); node.load(); }
   };
+  useEffect(() => registerWorkshopPlaybackAcquirer(() => {
+    const spare = nodes.current[1 - active.current];
+    const source = props.src ?? nodes.current[active.current]?.currentSrc;
+    if (!spare || !source || priming.current.has(spare) || preparation.current) return;
+    denied.current.delete(spare);
+    retryAt.current = 0; retryDelay.current = 5000;
+    // WebKit grants permission per element. Authorize the parked spare in the
+    // real click too, then release its decoder; do not keep two streams running.
+    configurePictureVideo(spare);
+    priming.current.add(spare);
+    spare.src = source;
+    spare.load();
+    void spare.play().then(() => {
+      captureDiagnostic("playback", "workshop.video.spare-gesture", "Spare playback acquired during a user gesture", mediaDiagnostic(spare), "info");
+    }).catch(error => {
+      if (!nodes.current.includes(spare) || error?.name === "AbortError") return;
+      if (error?.name === "NotAllowedError") denied.current.add(spare);
+      captureDiagnostic("playback", "workshop.video.spare-gesture", error, mediaDiagnostic(spare));
+    }).finally(() => {
+      priming.current.delete(spare);
+      if (nodes.current.includes(spare) && nodes.current[active.current] !== spare && !preparation.current) unload(spare);
+    });
+  }), []);
   const correct = () => {
     const old = nodes.current[active.current], next = nodes.current[1 - active.current];
     const owner = generation.current;
-    if (!old || !next || alignmentOwner.current) return;
+    if (!old || !next || alignmentOwner.current || denied.current.has(next) || priming.current.has(next) || performance.now() < retryAt.current) return;
     const controller = new AbortController();
     preparation.current = alignmentOwner.current = controller;
     const isCurrent = () => !controller.signal.aborted && owner === generation.current && nodes.current[active.current] === old;
     // The spare owns no source/decoder until correction is actually needed.
     // Serialize temporary spares across layers; steady playback needs one decoder
     // per prepared picture, not two full-resolution HEVC streams per clip.
+    configurePictureVideo(next);
     next.src = props.src ?? old.currentSrc;
     next.load();
+    let adopted = false;
     void (async () => {
       if (!await waitForPreviewMetadata(next, controller.signal) || !isCurrent()) return;
-      await synchronizer.alignStandby(old, next, isCurrent, () => {
+      adopted = await synchronizer.alignStandby(old, next, isCurrent, () => {
         if (!isCurrent()) return false;
         next.style.cssText = old.style.cssText;
         old.style.opacity = '0';
@@ -107,8 +139,15 @@ function PreviewVideoPair({ synchronizer, alignmentOwner, register, ...props }: 
         unregister.current = register(next, correct);
         old.pause();
         return true;
+      }, error => {
+        if (isCurrent() && typeof error === "object" && error !== null && "name" in error && error.name === "NotAllowedError") denied.current.add(next);
       });
     })().finally(() => {
+      if (adopted) { retryAt.current = 0; retryDelay.current = 5000; }
+      else if (isCurrent()) {
+        retryAt.current = performance.now() + retryDelay.current;
+        retryDelay.current = Math.min(60_000, retryDelay.current * 2);
+      }
       for (const node of [old, next]) {
         if (nodes.current.includes(node) && nodes.current[active.current] !== node) unload(node);
       }
@@ -203,10 +242,17 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
   const gesture = useRef<{
     x: number;
     y: number;
-    mode: "move" | "scale";
+    edge?: PictureResizeEdge;
     id: string;
+    rect: DOMRect;
+    started: boolean;
     project: CompositionProject;
   } | null>(null);
+  useEffect(() => () => {
+    const g = gesture.current;
+    gesture.current = null;
+    if (g?.started && useWorkshopStore.getState().draft?.id === g.project.id) useWorkshopStore.getState().abort();
+  }, [project?.id, editable]);
   const trimClip =
     project && trimPreview ? findClip(project, trimPreview.clipId) : null;
   const hiddenLayers = project ? hiddenVideoLayers[project.id] ?? [] : [];
@@ -249,7 +295,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
       const time = pb.time(), align = !playing || now - lastSync >= 100;
       if (align) lastSync = now;
       let retry = false;
-      const authority = align && pb.trackId !== null ? getLocalVideoClock(pb.trackId) : null;
+      const authority = align ? (pb.clock ? pb.clock() : pb.trackId !== null ? getLocalVideoClock(pb.trackId) : null) : null;
       // Video layers are composed by WebKit. No per-frame pixel copies to a
       // canvas, and no full-resolution readback onto the JavaScript thread.
       for (const video of videos.current.values()) {
@@ -284,7 +330,15 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
         }
         if (shouldPlay && video.paused && !video.seeking && video.readyState >= 2 && !pending.current.has(video)) {
           pending.current.add(video);
-          void video.play().then(() => { if (!wanted.current.get(video)) video.pause(); }).catch(() => {}).finally(() => pending.current.delete(video));
+          void video.play().then(() => { if (!wanted.current.get(video)) video.pause(); }).catch(error => {
+            if (!wanted.current.get(video) || error?.name === "AbortError") return;
+            captureDiagnostic("playback", "workshop.video.play", error, mediaDiagnostic(video));
+            const slot = [...videos.current].find(([, node]) => node === video)?.[0];
+            if (slot) {
+              const message = `${s.title} 无法播放`;
+              setErrors(old => old[slot] === message ? old : {...old, [slot]: message});
+            }
+          }).finally(() => pending.current.delete(video));
         }
         // Geometry changes with edits, not with the audio clock. Do not dirty
         // layout/clip-path on every frame of an otherwise unchanged video.
@@ -307,6 +361,22 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
       else if (retry) { clearTimeout(timer); timer = setTimeout(schedule, 80); }
     };
     wake.current = schedule;
+    const acquirePlayback = () => {
+      // Low-power/media policies can require a real user gesture even for muted
+      // pictures. Acquire it synchronously, not after async audio preparation.
+      for (const video of videos.current.values()) {
+        if (!video.hasAttribute("src")) continue;
+        configurePictureVideo(video);
+        pending.current.add(video);
+        void video.play().then(() => {
+          captureDiagnostic("playback", "workshop.video.gesture", "Picture playback acquired during a user gesture", mediaDiagnostic(video), "info");
+          if (!wanted.current.get(video)) video.pause();
+        }).catch(error => {
+          captureDiagnostic("playback", "workshop.video.gesture", error, mediaDiagnostic(video));
+        }).finally(() => { pending.current.delete(video); schedule(); });
+      }
+    };
+    const releasePlaybackAcquirer = registerWorkshopPlaybackAcquirer(acquirePlayback);
     const visibility = () => {
       if (document.hidden) {
         cancelAnimationFrame(frame); frame = 0; clearTimeout(timer);
@@ -319,6 +389,7 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
       wake.current = () => {};
       cancelAnimationFrame(frame); clearTimeout(timer);
       document.removeEventListener("visibilitychange", visibility);
+      releasePlaybackAcquirer();
       for (const v of videos.current.values()) { wanted.current.set(v, false); v.pause(); }
       sync.current.dispose();
     };
@@ -352,59 +423,75 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
   const bounds = selectionVisible
     ? box(project, selectedClip, selectedSource)
     : null;
-  const down = (
-    e: React.PointerEvent<HTMLDivElement>,
-    mode: "move" | "scale",
-  ) => {
-    if (e.button !== 0 || !selectedClip) return;
+  const down = (e: React.PointerEvent<HTMLDivElement>, id: string, edge?: PictureResizeEdge) => {
+    const rect = surface.current?.getBoundingClientRect();
+    if (!editable || e.button !== 0 || !rect?.width || !rect.height) return;
     e.stopPropagation();
     e.preventDefault();
-    useWorkshopStore.getState().begin();
-    gesture.current = {
-      x: e.clientX,
-      y: e.clientY,
-      mode,
-      id: selectedClip.id,
-      project,
-    };
+    const store = useWorkshopStore.getState();
+    if (store.selectedId !== id) store.select(id);
+    gesture.current = { x: e.clientX, y: e.clientY, edge, id, rect, started: false, project };
+    e.currentTarget.focus({ preventScroll: true });
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const move = (e: React.PointerEvent<HTMLDivElement>) => {
-    const g = gesture.current,
-      rect = surface.current?.getBoundingClientRect();
-    if (!g || !rect) return;
-    useWorkshopStore.getState().transient(
-      updateClip(g.project, g.id, (c) => {
-        if (g.mode === "move") {
-          c.picture.x = clamp(
-            c.picture.x + (e.clientX - g.x) / rect.width,
-            0,
-            1,
-          );
-          c.picture.y = clamp(
-            c.picture.y + (e.clientY - g.y) / rect.height,
-            0,
-            1,
-          );
-        } else
-          c.picture.scale = clamp(
-            c.picture.scale + ((e.clientX - g.x) / rect.width) * 2,
-            0.1,
-            2,
-          );
-      }),
-    );
+    const g = gesture.current;
+    if (!g || useWorkshopStore.getState().draft?.id !== g.project.id) return;
+    if (!g.started) {
+      if (Math.hypot(e.clientX - g.x, e.clientY - g.y) < 2) return;
+      g.started = true;
+      useWorkshopStore.getState().begin();
+    }
+    const dx = (e.clientX - g.x) / g.rect.width, dy = (e.clientY - g.y) / g.rect.height;
+    useWorkshopStore.getState().transient(updateClip(g.project, g.id, c => {
+      const source = g.project.sources.find(s => s.id === c.source_id)!;
+      if (g.edge) Object.assign(c.picture, resizePictureLayout(g.project, c, source, g.edge,
+        dx * g.project.canvas.width, dy * g.project.canvas.height, e.altKey));
+      else {
+        const b = box(g.project, c, source);
+        c.picture.x = clamp(b.x + b.width / 2 + dx, 0, 1);
+        c.picture.y = clamp(b.y + b.height / 2 + dy, 0, 1);
+      }
+    }));
   };
-  const up = () => {
+  const up = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = gesture.current;
+    if (!g) return;
     gesture.current = null;
-    useWorkshopStore.getState().commit();
+    if (g.started) useWorkshopStore.getState().commit();
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  const cancel = () => {
+    const g = gesture.current;
+    if (!g) return;
+    gesture.current = null;
+    if (g.started) useWorkshopStore.getState().abort();
+  };
+  const keyPicture = (e: React.KeyboardEvent<HTMLDivElement>, id: string, edge?: PictureResizeEdge) => {
+    if (e.key === "Escape" && gesture.current) { e.preventDefault(); e.stopPropagation(); cancel(); return; }
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key) || gesture.current) return;
+    e.preventDefault(); e.stopPropagation();
+    const store = useWorkshopStore.getState();
+    if (store.selectedId !== id) store.select(id);
+    const step = e.shiftKey ? 10 : 1;
+    const dx = e.key === "ArrowRight" ? step : e.key === "ArrowLeft" ? -step : 0;
+    const dy = e.key === "ArrowDown" ? step : e.key === "ArrowUp" ? -step : 0;
+    useWorkshopStore.getState().edit(p => updateClip(p, id, c => {
+      const source = p.sources.find(s => s.id === c.source_id)!;
+      if (edge) Object.assign(c.picture, resizePictureLayout(p, c, source, edge, dx, dy, e.altKey));
+      else {
+        const b = box(p, c, source);
+        c.picture.x = clamp(b.x + b.width / 2 + dx / p.canvas.width, 0, 1);
+        c.picture.y = clamp(b.y + b.height / 2 + dy / p.canvas.height, 0, 1);
+      }
+    }));
   };
   return (
     <div className="vj-preview" ref={container}>
       <div
         ref={surface}
         className="vj-preview-surface"
-        role="img"
+        role="group"
         aria-label="作品合成预览"
         style={{
           width: Math.max(
@@ -454,6 +541,8 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
                 wake.current();
               }}
               onSeeked={() => { wake.current(); }}
+              onCanPlay={() => { wake.current(); }}
+              onPlaying={() => { clearError(slot); wake.current(); }}
               data-clip={c.id}
               data-proxy={proxy}
               data-part={part}
@@ -492,11 +581,15 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
                       ? "auto"
                       : "none",
                 }}
-                onPointerDown={(e) => {
-                  if (!editable) return;
-                  e.stopPropagation();
-                  useWorkshopStore.getState().select(c.id);
-                }}
+                tabIndex={editable ? 0 : undefined}
+                role={editable ? "button" : undefined}
+                aria-label={editable ? `移动画面：${s.title}` : undefined}
+                onPointerDown={e => down(e, c.id)}
+                onPointerMove={move}
+                onPointerUp={up}
+                onPointerCancel={cancel}
+                onLostPointerCapture={cancel}
+                onKeyDown={e => keyPicture(e, c.id)}
               />
             );
           })}
@@ -512,22 +605,20 @@ export function WorkshopPreview({ playback, editable = true }: { playback: Works
               width: `${bounds.width * 100}%`,
               height: `${bounds.height * 100}%`,
             }}
-            onPointerDown={(e) => down(e, "move")}
+            role="group"
+            tabIndex={0}
+            aria-label="画面布局"
+            onPointerDown={e => down(e, selectedClip!.id)}
             onPointerMove={move}
             onPointerUp={up}
-            onPointerCancel={() => {
-              gesture.current = null;
-              useWorkshopStore.getState().abort();
-            }}
+            onPointerCancel={cancel}
+            onLostPointerCapture={cancel}
+            onKeyDown={e => keyPicture(e, selectedClip!.id)}
           >
-            <div
-              role="button"
-              aria-label="缩放选中画面"
-              className="vj-resize"
-              onPointerDown={(e) => down(e, "scale")}
-              onPointerMove={move}
-              onPointerUp={up}
-            />
+            {pictureResizeEdges.map(edge => <div key={edge} role="button" tabIndex={0}
+              aria-label={`缩放画面：${pictureEdgeLabels[edge]}`} className="vj-resize" data-edge={edge}
+              onPointerDown={e => down(e, selectedClip!.id, edge)}
+              onKeyDown={e => keyPicture(e, selectedClip!.id, edge)} />)}
           </div>
         )}
       </div>

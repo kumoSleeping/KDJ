@@ -16,6 +16,7 @@ import {
 } from "../../lib/playbackPrefs";
 import { useArrowKeyControl } from "../../lib/arrowKeyControl";
 import {
+  APP_FONT_SCALE_EVENT,
   APP_FONT_SCALE_MAX,
   APP_FONT_SCALE_MIN,
   readAppFontScale,
@@ -61,11 +62,7 @@ import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
 import { FfmpegPanel } from "./FfmpegPanel";
 
-/**
- * 「设置」住在右侧详情栏，由顶栏那颗小齿轮呼出。
- *
- * General 含外观（无小标题）、列表手势与接播（小标题）。流媒体与歌词同板，歌词保留小标题。
- */
+import "./Preferences.css";
 
 function Switch({
   checked,
@@ -540,11 +537,16 @@ function KdjAiPromptPanel() {
   );
 }
 
-export function SettingsPanel() {
+export function SettingsPanel({ preferences = false }: { preferences?: boolean }) {
   const showKdjAiPrompt = ["darwin", "win32"].includes(getBridge().platform);
   const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
-  const [appFontScale, setFontScale] = useState(readAppFontScale);
+  const [appFontScale, setFontScale] = useState(() => Number.parseFloat(document.documentElement.style.fontSize) || readAppFontScale());
+  useEffect(() => {
+    const receive = (event: Event) => setFontScale((event as CustomEvent<number>).detail);
+    window.addEventListener(APP_FONT_SCALE_EVENT, receive);
+    return () => window.removeEventListener(APP_FONT_SCALE_EVENT, receive);
+  }, []);
   const [streamCacheStats, setStreamCacheStats] = useState<StreamCacheStats | null>(null);
   const [streamCacheBusy, setStreamCacheBusy] = useState(false);
   const [streamCacheError, setStreamCacheError] = useState("");
@@ -742,25 +744,11 @@ export function SettingsPanel() {
   }, [focusEpoch]);
 
   return (
-    <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
+    <div className={preferences ? "kd-col kd-preferences" : "kd-col"} style={{ height: "100%", minHeight: 0 }}>
       <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}>
         <InlineNotice text={settingsError} block />
-        <div ref={updateSectionRef} id="kd-settings-update">
-          <Panel heading="软件更新" dense>
-            <UpdateRow />
-            <div className="kd-djp-switch-list" style={{ marginTop: "0.35rem" }}>
-              <Switch
-                checked={autoCheck}
-                label="自动检测更新"
-                title="启动时检查一次，之后每 5 分钟静默检查；关掉后只保留手动检查。"
-                onChange={() => setAutoCheck(!autoCheck)}
-              />
-            </div>
-          </Panel>
-        </div>
-
-        <Panel heading="General" dense>
-          <div className="kd-djp-groups" aria-label="General">
+        <Panel heading="通用" dense>
+          <div className="kd-djp-groups" aria-label="通用">
             <div>
               <FontScaleStepper
                 value={appFontScale}
@@ -827,39 +815,6 @@ export function SettingsPanel() {
                 onChange={setShareContentMode}
               />
             </div>
-          </div>
-        </Panel>
-
-        <Panel heading="快捷键方向键控制" dense>
-          <div className="kd-djp-switch-list" aria-label="快捷键方向键控制">
-            <Switch
-              checked={arrowKeyControlEnabled}
-              label="启用"
-              title="开启后由 KDJ 接管四个方向键；关闭后方向键保留给当前界面。"
-              onChange={() => setArrowKeyControlEnabled(!arrowKeyControlEnabled)}
-            />
-            <Switch
-              checked={horizontalArrowKeyMode === "seek"}
-              disabled={!arrowKeyControlEnabled}
-              label="左右键"
-              onState="歌曲内跳转"
-              offState="切换歌曲"
-              title="左右键在当前歌曲内快退 / 快进，或切换上一首 / 下一首。"
-              onChange={() =>
-                setHorizontalArrowKeyMode(horizontalArrowKeyMode === "seek" ? "track" : "seek")
-              }
-            />
-            <Switch
-              checked={verticalArrowKeyMode === "volume"}
-              disabled={!arrowKeyControlEnabled}
-              label="上下键"
-              onState="音量"
-              offState="列表位置"
-              title="上下键调整音量，或在当前歌曲列表中向上 / 向下移动。"
-              onChange={() =>
-                setVerticalArrowKeyMode(verticalArrowKeyMode === "volume" ? "list" : "volume")
-              }
-            />
           </div>
         </Panel>
 
@@ -963,6 +918,39 @@ export function SettingsPanel() {
           </div>
         </Panel>
 
+        <Panel heading="快捷键方向键控制" dense>
+          <div className="kd-djp-switch-list" aria-label="快捷键方向键控制">
+            <Switch
+              checked={arrowKeyControlEnabled}
+              label="启用"
+              title="开启后由 KDJ 接管四个方向键；关闭后方向键保留给当前界面。"
+              onChange={() => setArrowKeyControlEnabled(!arrowKeyControlEnabled)}
+            />
+            <Switch
+              checked={horizontalArrowKeyMode === "seek"}
+              disabled={!arrowKeyControlEnabled}
+              label="左右键"
+              onState="歌曲内跳转"
+              offState="切换歌曲"
+              title="左右键在当前歌曲内快退 / 快进，或切换上一首 / 下一首。"
+              onChange={() =>
+                setHorizontalArrowKeyMode(horizontalArrowKeyMode === "seek" ? "track" : "seek")
+              }
+            />
+            <Switch
+              checked={verticalArrowKeyMode === "volume"}
+              disabled={!arrowKeyControlEnabled}
+              label="上下键"
+              onState="音量"
+              offState="列表位置"
+              title="上下键调整音量，或在当前歌曲列表中向上 / 向下移动。"
+              onChange={() =>
+                setVerticalArrowKeyMode(verticalArrowKeyMode === "volume" ? "list" : "volume")
+              }
+            />
+          </div>
+        </Panel>
+
         <Panel heading="下载源与账号" dense>
           <InlineNotice text={accountsError} block />
           <div className="kd-djp-switch-list" aria-label="下载源与账号">
@@ -1039,6 +1027,20 @@ export function SettingsPanel() {
 
         {["darwin", "win32", "linux"].includes(getBridge().platform) ? <FfmpegPanel /> : null}
         {showKdjAiPrompt ? <KdjAiPromptPanel /> : null}
+
+        <div ref={updateSectionRef} id="kd-settings-update">
+          <Panel heading="软件更新" dense>
+            <UpdateRow />
+            <div className="kd-djp-switch-list" style={{ marginTop: "0.35rem" }}>
+              <Switch
+                checked={autoCheck}
+                label="自动检测更新"
+                title="启动时检查一次，之后每 5 分钟静默检查；关掉后只保留手动检查。"
+                onChange={() => setAutoCheck(!autoCheck)}
+              />
+            </div>
+          </Panel>
+        </div>
       </div>
     </div>
   );
