@@ -2,8 +2,15 @@ import type { VisualizerImageTransform } from "../types/audioVisualizer";
 import { visualizerCropExtent } from "./audioVisualizerScene";
 
 export type VisualizerImage = HTMLImageElement | ImageBitmap | HTMLCanvasElement;
-export function visualizerSurface(width: number, height: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
+/** Export workers have no document. OffscreenCanvas supports every 2D call the
+ * renderer makes, so worker layers keep the DOM canvas type the renderer uses. */
+export function visualizerCanvas(width = 300, height = 150): HTMLCanvasElement {
+  if (typeof document === "undefined") return new OffscreenCanvas(width, height) as unknown as HTMLCanvasElement;
   const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+  return canvas;
+}
+export function visualizerSurface(width: number, height: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
+  const canvas = visualizerCanvas(width, height);
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas 2D 不可用");
   return [canvas, context];

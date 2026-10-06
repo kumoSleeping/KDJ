@@ -1,4 +1,4 @@
-import type { VisualizerImage } from "./audioVisualizerImage";
+import { visualizerCanvas, type VisualizerImage } from "./audioVisualizerImage";
 import { clamp } from "./visualizerStudio";
 
 export interface StudioPalette { accent: string; colors: { color: string; share: number }[]; shade: { color: string; alphaScale: number } }
@@ -57,7 +57,7 @@ function themeShade(colors: ColorBin[]): StudioPalette["shade"] {
  * neighboring hues: opposing colors must not average into muddy gray. */
 export function extractStudioPalette(image: VisualizerImage): StudioPalette {
   const cached = palettes.get(image); if (cached) return cached;
-  const canvas = document.createElement("canvas"); canvas.width = 96; canvas.height = 96;
+  const canvas = visualizerCanvas(96, 96);
   const c = canvas.getContext("2d", { willReadFrequently: true })!;
   c.drawImage(image, 0, 0, 96, 96);
   const pixels = c.getImageData(0, 0, 96, 96).data, histogram = new Map<number, ColorBin>();
