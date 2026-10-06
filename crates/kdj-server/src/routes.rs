@@ -7851,7 +7851,9 @@ static COVER_THUMBNAIL_LOCKS: std::sync::LazyLock<Vec<tokio::sync::Mutex<()>>> =
     std::sync::LazyLock::new(|| (0..16).map(|_| tokio::sync::Mutex::new(())).collect());
 
 /// 音频内嵌图和视频抽帧统一生成固定尺寸 JPEG。缓存键带文件 mtime 与尺寸；空的
-/// `.none` 是负缓存，避免无封面曲目每次滚回屏幕都重新打开整个媒体容器。
+/// `.none2` 是负缓存，避免无封面曲目每次滚回屏幕都重新打开整个媒体容器。
+/// 后缀里的数字是读封面逻辑的版本：修了"有封面却读不出"的 bug 就加一，
+/// 否则旧版本留下的标记会让那些文件继续显示成没有封面。
 async fn cover_thumbnail(
     source: &TrackMediaSource,
     cache_dir: &Path,
@@ -7865,7 +7867,7 @@ async fn cover_thumbnail(
     };
     let thumb_dir = cache_dir.join("thumbs");
     let target = thumb_dir.join(format!("{}-{mtime}-{size}.jpg", source.id));
-    let negative = thumb_dir.join(format!("{}-{mtime}-{size}.none", source.id));
+    let negative = thumb_dir.join(format!("{}-{mtime}-{size}.none2", source.id));
     if let Ok(data) = tokio::fs::read(&target).await {
         if !data.is_empty() {
             return Some(data);

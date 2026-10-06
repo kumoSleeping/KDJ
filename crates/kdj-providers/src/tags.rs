@@ -11,11 +11,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use lofty::config::{ParseOptions, WriteOptions};
+use lofty::config::{ParseOptions, ParsingMode, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
-use lofty::tag::{Accessor, ItemKey, TagExt};
+use lofty::tag::{Accessor, ItemKey, Tag, TagExt, TagType};
 
 /// 支持的音频扩展名。曲库扫描也用这一份，两边必须一致。
 ///
@@ -66,7 +66,7 @@ fn cover_mime(data: &[u8]) -> MimeType {
 }
 
 /// 把封面塞进 tag，替换掉原有的所有图片。
-fn replace_pictures(tag: &mut lofty::tag::Tag, data: &[u8], mime: MimeType) {
+fn replace_pictures(tag: &mut Tag, data: &[u8], mime: MimeType) {
     let picture = Picture::unchecked(data.to_vec())
         .pic_type(PictureType::CoverFront)
         .mime_type(mime)
@@ -87,7 +87,7 @@ fn open_for_write(path: &Path) -> Result<lofty::file::TaggedFile> {
         .with_context(|| format!("解析音频文件失败：{}", path.display()))?;
     let tag_type = tagged.primary_tag_type();
     if tagged.primary_tag_mut().is_none() {
-        tagged.insert_tag(lofty::tag::Tag::new(tag_type));
+        tagged.insert_tag(Tag::new(tag_type));
     }
     Ok(tagged)
 }
@@ -259,6 +259,25 @@ pub fn write_cover(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// 只读路径一律宽松解析：一个不合规的帧只丢它自己，不能连累整份标签。
+///
+/// 默认模式下 lofty 遇到 `TYER = "5/23/25"` 这种日期（FL Studio、dBpoweramp 导出的
+/// 同人碟很常见）会让整个 `read()` 报错，于是封面、标题、时长一起读不到，
+/// 曲库里就成了"文件明明带封面却显示没有"。写路径不用它——宽松读进来再存回去
+/// 会把那些读不懂的帧从用户文件里删掉。
+fn lenient() -> ParseOptions {
+    ParseOptions::new().parsing_mode(ParsingMode::Relaxed)
+}
+
+/// 取文字标签用的 tag。WAV 常同时带 RIFF INFO 和 `id3 ` 两份，INFO 没有编码声明，
+/// 非 ASCII 标题在里面多半已经是一串 `?`，所以有 ID3v2 就读 ID3v2。
+fn text_tag(tagged: &lofty::file::TaggedFile) -> Option<&Tag> {
+    tagged
+        .tag(TagType::Id3v2)
+        .or_else(|| tagged.primary_tag())
+        .or_else(|| tagged.first_tag())
+}
+
 /// 读时长（秒）。用于"试听片段"检测和曲库扫描。
 ///
 /// **必须按内容嗅探格式，不能只信扩展名。** `Probe::open` 是从路径猜 `FileType` 的，
@@ -267,7 +286,7 @@ pub fn write_cover(path: &Path, data: &[u8]) -> Result<()> {
 /// 于是时长永远读不到、检测退化成只看文件大小，30 秒的 VIP 试听片段就混进曲库了。
 pub fn read_duration_secs(path: &Path) -> Option<f64> {
     // 只要时长：跳过内嵌封面，否则一张几 MB 的原图会被整块读进内存
-    let probe = Probe::open(path).ok()?.options(ParseOptions::new().read_cover_art(false));
+    let probe = Probe::open(path).ok()?.options(lenient().read_cover_art(false));
     // guess_file_type 失败时会保留从路径猜出来的类型，所以这一步只会更准
     let probe = probe.guess_file_type().ok()?;
     let tagged = probe.read().ok()?;
@@ -309,7 +328,7 @@ pub fn read_tags(path: &Path) -> TrackTags {
     };
     if crate::workshop_images::is_image_path(path) { return out; }
     // 扫描只要文字标签和技术参数，封面走 read_cover；不跳过的话每个文件都整块读一遍原图
-    let options = ParseOptions::new().read_cover_art(false);
+    let options = lenient().read_cover_art(false);
     let Ok(tagged) = Probe::open(path).and_then(|probe| probe.options(options).read()) else {
         return out;
     };
@@ -323,7 +342,7 @@ pub fn read_tags(path: &Path) -> TrackTags {
     out.samplerate = properties.sample_rate().map(|value| value as i64);
     out.channels = properties.channels().map(|value| value as i64);
 
-    if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
+    if let Some(tag) = text_tag(&tagged) {
         out.title = tag.title().unwrap_or_default().trim().to_string();
         out.artist = tag.artist().unwrap_or_default().trim().to_string();
         out.album = tag.album().unwrap_or_default().trim().to_string();
@@ -429,7 +448,7 @@ pub fn write_analysis_tags(
         .with_context(|| format!("解析音频文件失败：{}", path.display()))?;
     let tag_type = tagged.primary_tag_type();
     if tagged.primary_tag_mut().is_none() {
-        tagged.insert_tag(lofty::tag::Tag::new(tag_type));
+        tagged.insert_tag(Tag::new(tag_type));
     }
     let tag = tagged.primary_tag_mut().expect("刚插入过一定存在");
 
@@ -460,14 +479,13 @@ pub fn write_analysis_tags(
 /// 读内嵌封面，返回 `(字节, mime)`。详情、分享和写标签仍需要原图；曲目表应调用
 /// [`read_cover_thumbnail`]，避免为几十像素的格子解码数百万像素的原图。
 pub fn read_cover(path: &Path) -> Option<(Vec<u8>, String)> {
-    let tagged = Probe::open(path).ok()?.read().ok()?;
-    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let tagged = Probe::open(path).ok()?.options(lenient()).read().ok()?;
+    // 每个 tag 都要翻：WAV 的主 tag 是 RIFF INFO，它存不了图，封面在旁边的 `id3 ` 块里。
     // 优先正封面，没有就拿第一张（有些文件只存了 Other 类型）
-    let picture = tag
-        .pictures()
-        .iter()
+    let pictures = || tagged.tags().iter().flat_map(|tag| tag.pictures());
+    let picture = pictures()
         .find(|pic| pic.pic_type() == PictureType::CoverFront)
-        .or_else(|| tag.pictures().first())?;
+        .or_else(|| pictures().next())?;
     let mime = picture
         .mime_type()
         .map(|mime| mime.to_string())
@@ -813,6 +831,73 @@ pub(crate) mod tests {
             channels: Some(2), format: "flac".into(),
         });
         assert_eq!(read_cover(&path).unwrap().0, cover, "读封面的路径不受影响");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 一个 ID3v2.3 帧：ID + 大端长度 + 两字节 flags + 内容。
+    fn id3_frame(id: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = id.as_bytes().to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// 照着真实文件拼的 ID3v2.3：`TYER` 里是 "5/23/25"，后面跟标题和 PNG 封面。
+    fn id3_with_slash_date(title: &str, cover: &[u8]) -> Vec<u8> {
+        let mut frames = id3_frame("TYER", b"\x005/23/25\x00");
+        let mut text = vec![1, 0xff, 0xfe];
+        text.extend(title.encode_utf16().flat_map(u16::to_le_bytes));
+        frames.extend(id3_frame("TIT2", &text));
+        let mut apic = b"\x00image/png\x00\x03\x00".to_vec();
+        apic.extend_from_slice(cover);
+        frames.extend(id3_frame("APIC", &apic));
+        let size = frames.len() as u32;
+        let mut out = b"ID3\x03\x00\x00".to_vec();
+        out.extend((0..4).rev().map(|i| ((size >> (7 * i)) & 0x7f) as u8));
+        out.extend(frames);
+        out
+    }
+
+    fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = id.to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    #[test]
+    fn a_malformed_date_frame_does_not_hide_the_cover_or_the_title() {
+        let dir = std::env::temp_dir().join(format!("kdj-tags-{}-slashdate", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let id3 = id3_with_slash_date("愛♡スクリ～ム!", &tiny_png());
+
+        // WAV：FL Studio 的写法，INFO 里的标题已经烂成问号，真标题和封面都在 `id3 ` 块
+        let mut wav = silent_wav(2);
+        wav.extend(riff_chunk(b"LIST", b"INFOINAM\x08\x00\x00\x00???????\x00"));
+        wav.extend(riff_chunk(b"id3 ", &id3));
+        let riff_size = (wav.len() - 8) as u32;
+        wav[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        // MP3：标签后面跟一帧 MPEG1 Layer III 128k/44.1k 的静音
+        let mut mp3 = id3;
+        let mut frame = vec![0xff, 0xfb, 0x90, 0x00];
+        frame.resize(417, 0);
+        for _ in 0..4 {
+            mp3.extend_from_slice(&frame);
+        }
+
+        for (name, bytes) in [("song.wav", wav), ("song.mp3", mp3)] {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let (data, mime) = read_cover(&path).unwrap_or_else(|| panic!("{name} 的封面没读出来"));
+            assert_eq!(mime, "image/png", "{name}");
+            assert_eq!(data, tiny_png(), "{name}");
+            assert_eq!(read_tags(&path).title, "愛♡スクリ～ム!", "{name}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
