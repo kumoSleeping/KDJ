@@ -62,18 +62,20 @@ async fn create(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapsh
 struct Revision {
     revision: u64,
 }
-#[derive(Deserialize)]
-struct Patch {
-    revision: u64,
-    #[serde(flatten)]
-    edit: Edit,
-}
+/// 请求体先收成 `Value`：缺键或未知键会让整体替换静默丢数据，检查通过后才类型化（见 `patch_guard`）。
+/// 被拒绝时返回 422，`paths` 列出出问题的键路径。
 async fn patch(
     Extension(m): Extension<Arc<Workshop>>,
     Path(id): Path<String>,
-    Json(p): Json<Patch>,
-) -> ApiResult<Json<Snapshot>> {
-    Ok(Json(m.patch(&id, p.revision, p.edit)?))
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<Snapshot>, Response> {
+    m.patch_json(&id, &body).map(Json).map_err(|error| match error.downcast_ref::<super::patch_guard::FieldLoss>() {
+        Some(loss) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"detail": loss.to_string(), "code": "WORKSHOP_PATCH_FIELDS", "paths": loss.0})),
+        ).into_response(),
+        None => ApiError::from(error).into_response(),
+    })
 }
 async fn delete(
     Extension(m): Extension<Arc<Workshop>>,

@@ -213,6 +213,48 @@ async fn drafts_are_revisioned_duplicates_independent_and_restartable() {
         s.projects[0].revision
     );
 }
+async fn send_patch(m: &Arc<Workshop>, id: &str, body: serde_json::Value) -> (axum::http::StatusCode, serde_json::Value) {
+    let response = routes::router(m.clone()).with_state(m.state.clone())
+        .oneshot(Request::builder().method("PATCH").uri(format!("/api/workshop/{id}"))
+            .header("content-type", "application/json").body(Body::from(body.to_string())).unwrap())
+        .await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+#[tokio::test]
+async fn patch_route_rejects_partial_clips_and_accepts_the_full_project_shape() {
+    let f = Fixture::new();
+    let m = manager(&f);
+    let p = m.create().unwrap().projects[0].clone();
+    // The frontend sends the whole project plus revision.
+    let mut body = serde_json::to_value(&p).unwrap();
+    body["name"] = "作品名".into();
+    let (status, saved) = send_patch(&m, &p.id, body).await;
+    assert_eq!(status, 200, "{saved}");
+    let p = m.snapshot().projects[0].clone();
+    assert_eq!((p.name.as_str(), p.revision), ("作品名", 1));
+    m.change(|j| {
+        let mut clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": "c1", "source_id": "s", "start_ms": 0.0, "source_in_ms": 0.0, "source_out_ms": 1000.0,
+            "speed": Speed::normal(1000.), "picture": {"x": 0.5, "y": 0.5, "scale": 1.0, "opacity": 1.0},
+            "sound": {"muted": false, "gain": 1.0, "manual": false}, "fades": Fades::new(1000., false),
+        })).unwrap();
+        clip.picture.crop_auto_fit = true;
+        j.projects[0].layers.push(Layer { grid: None, id: "l1".into(), source_id: "s".into(), clips: vec![clip] });
+        Ok(())
+    }).unwrap();
+    let mut partial = serde_json::to_value(&p).unwrap();
+    partial["layers"] = serde_json::to_value(&m.snapshot().projects[0].layers).unwrap();
+    partial["layers"][0]["clips"][0]["picture"].as_object_mut().unwrap().remove("crop_auto_fit");
+    let (status, error) = send_patch(&m, &p.id, partial).await;
+    assert_eq!(status, 422);
+    assert_eq!(error["paths"], serde_json::json!([".layers[0].clips[0].picture.crop_auto_fit"]));
+    assert!(error["detail"].as_str().unwrap().contains("crop_auto_fit"));
+    let kept = m.snapshot().projects[0].clone();
+    assert_eq!(kept.revision, 1, "rejected request does not write");
+    assert!(kept.layers[0].clips[0].picture.crop_auto_fit);
+}
 #[tokio::test]
 async fn deleting_last_picture_updates_output_format_and_survives_reload() {
     let f = Fixture::new();

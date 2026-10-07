@@ -88,7 +88,7 @@ test("video joint controls share undo and positioning menus never expand a track
     assert.equal(current().duration_ms,640);
     await pointer('pointercancel',90);assert.equal(current().duration_ms,540);
     await change(()=>document.querySelector<HTMLButtonElement>('[aria-label="移除画面过渡"]')!.click());
-    assert.equal(server.layers[0].clips[1].video_transition,undefined);
+    assert.equal(server.layers[0].clips[1].video_transition,null);
     assert.equal(document.querySelector('.track')!.getAttribute('style'),style);
   } finally {
     await act(async()=>root.unmount());Object.assign(api,oldApi);dom.window.close();

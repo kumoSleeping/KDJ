@@ -6,6 +6,7 @@ mod alignment_cache;
 mod alignment_matching;
 mod intake;
 mod naming;
+mod patch_guard;
 mod positions;
 mod recovery;
 mod render;
@@ -328,6 +329,14 @@ impl Workshop {
                 .push(empty_project(&format!("任务 {number}"), &directory));
             Ok(())
         })
+    }
+    /// HTTP 入口：请求体先按 id 与当前作品的序列化结果对齐，缺键或带未知键都拒绝（见 `patch_guard`），
+    /// 通过后才转成类型化的 `Edit`。`patch` 会在锁内再核对一次 revision，所以检查与写入之间不会换了作品。
+    pub fn patch_json(self: &Arc<Self>, pid: &str, body: &serde_json::Value) -> Result<Snapshot> {
+        let revision = body.get("revision").and_then(serde_json::Value::as_u64).context("修改请求缺少 revision")?;
+        let current = self.project(pid, revision)?;
+        let update = patch_guard::checked_edit(&current, body)?;
+        self.patch(pid, revision, update)
     }
     pub fn patch(self: &Arc<Self>, pid: &str, revision: u64, update: Edit) -> Result<Snapshot> {
         let mut media_changed = false;
@@ -768,7 +777,7 @@ impl Workshop {
         Ok(tid)
     }
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Edit {
     #[serde(default)]
     pub markers: Option<Vec<Marker>>,

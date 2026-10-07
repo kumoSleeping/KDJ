@@ -51,7 +51,10 @@ test("video joints borrow handles without moving cuts or changing audio", () => 
   p = setVideoTransition(original,"right",{duration_ms:1000,alignment:0});
   const visual = videoProject(p);
   assert.deepEqual(prepareVideoClips(visual,3000).map(c=>c.id), [left.id,"right"], "incoming picture is above outgoing and both are decoded");
-  assert.deepEqual(setVideoTransition(p,"right",null),original);
+  const removed = setVideoTransition(p,"right",null);
+  assert.equal(removed.layers[0].clips[1].video_transition, null, "removal stays explicit for the PATCH field guard");
+  delete removed.layers[0].clips[1].video_transition;
+  assert.deepEqual(removed,original);
   const split = splitClip(p, "right", 4000);
   assert.equal(split.layers[0].clips[2].video_transition, undefined, "splitting does not duplicate an incoming transition");
   p.layers[0].clips[0].speed.domain_end_ms=3100;

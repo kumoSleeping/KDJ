@@ -65,7 +65,8 @@ export function setVideoTransition(p: CompositionProject, rightId: string, value
   const clip = next.layers.flatMap(l => l.clips).find(c => c.id === rightId);
   if (clip) {
     if (value) clip.video_transition = {...value, duration_ms:Math.max(0, Math.min(10000, value.duration_ms))};
-    else delete clip.video_transition;
+    // Explicit null: the server rejects PATCH bodies that omit a key the saved clip still has.
+    else clip.video_transition = null;
   }
   return next;
 }
