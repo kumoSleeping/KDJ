@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kdj_playback::{PlaybackCommand, PlaybackCoordinator, PlaybackPhase, PlaybackSnapshot};
 use souvlaki::{
@@ -20,6 +20,16 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const REMOTE_EVENT: &str = "desktop-media-control";
 const DEFAULT_SEEK_SECONDS: f64 = 10.0;
+/// Snapshots arrive every ~100 ms. MPNowPlaying and SMTC extrapolate elapsed time themselves,
+/// so progress is only re-published on state/rate changes, seeks, and a low periodic refresh.
+/// souvlaki's MPRIS answers `Position` polls with the last pushed value, so Linux keeps
+/// publishing every snapshot.
+const THROTTLE_PROGRESS: bool = !cfg!(target_os = "linux");
+const PROGRESS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// A playing position this far from wall-clock extrapolation counts as a seek or stall.
+const SEEK_TOLERANCE_SECONDS: f64 = 1.5;
+const PAUSED_POSITION_TOLERANCE_SECONDS: f64 = 0.25;
+const RATE_TOLERANCE: f64 = 0.001;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct MetadataKey {
@@ -36,6 +46,119 @@ struct SessionState {
     metadata: MetadataKey,
     /// Local `file://` cover already published for `metadata.artwork_url`.
     cached_cover_url: Option<String>,
+    /// Last playback state handed to the OS; `None` forces the next snapshot to publish.
+    playback: Option<PublishedPlayback>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaybackState {
+    Stopped,
+    Paused,
+    Playing,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PublishedPlayback {
+    state: PlaybackState,
+    position: f64,
+    rate: f64,
+    at: Instant,
+}
+
+impl PublishedPlayback {
+    fn from_snapshot(snapshot: &PlaybackSnapshot, at: Instant) -> Self {
+        let state = if snapshot.track_id.is_none()
+            || matches!(
+                snapshot.phase,
+                PlaybackPhase::Idle | PlaybackPhase::Ended | PlaybackPhase::Error
+            ) {
+            PlaybackState::Stopped
+        } else if snapshot.is_playing {
+            PlaybackState::Playing
+        } else {
+            PlaybackState::Paused
+        };
+        let rate = f64::from(snapshot.rate);
+        Self {
+            state,
+            position: finite_nonnegative(snapshot.current_time),
+            rate: if rate.is_finite() && rate > 0.0 {
+                rate
+            } else {
+                1.0
+            },
+            at,
+        }
+    }
+
+    /// Where the OS believes playback is at `now`, extrapolated from this publication.
+    fn extrapolated(self, now: Instant) -> Self {
+        let mut next = self;
+        if self.state == PlaybackState::Playing {
+            next.position += now.saturating_duration_since(self.at).as_secs_f64() * self.rate;
+        }
+        next.at = now;
+        next
+    }
+
+    fn media_playback(&self) -> MediaPlayback {
+        let progress = Some(MediaPosition(Duration::from_secs_f64(self.position)));
+        match self.state {
+            PlaybackState::Stopped => MediaPlayback::Stopped,
+            PlaybackState::Playing => MediaPlayback::Playing { progress },
+            PlaybackState::Paused => MediaPlayback::Paused { progress },
+        }
+    }
+}
+
+/// souvlaki's macOS `set_playback` copies the whole nowPlayingInfo (artwork included) into a
+/// new dictionary, so the steady 100 ms snapshot stream must not become one OS call per tick.
+fn needs_playback_publish(last: Option<&PublishedPlayback>, next: &PublishedPlayback) -> bool {
+    let Some(last) = last else {
+        return true;
+    };
+    if last.state != next.state {
+        return true;
+    }
+    match next.state {
+        PlaybackState::Stopped => false,
+        PlaybackState::Paused => {
+            (next.position - last.position).abs() > PAUSED_POSITION_TOLERANCE_SECONDS
+        }
+        PlaybackState::Playing => {
+            if (next.rate - last.rate).abs() > RATE_TOLERANCE {
+                return true;
+            }
+            let elapsed = next.at.saturating_duration_since(last.at);
+            if elapsed >= PROGRESS_REFRESH_INTERVAL {
+                return true;
+            }
+            let expected = last.position + elapsed.as_secs_f64() * last.rate;
+            (next.position - expected).abs() > SEEK_TOLERANCE_SECONDS
+        }
+    }
+}
+
+fn publish_playback(state: &mut SessionState, next: PublishedPlayback) {
+    if let Err(error) = state.controls.set_playback(next.media_playback()) {
+        tracing::warn!("更新系统媒体播放状态失败：{error}");
+        // Retry on the next snapshot.
+        state.playback = None;
+    } else {
+        state.playback = Some(next);
+    }
+}
+
+/// souvlaki's macOS backend creates autoreleased Foundation objects on the calling thread. The
+/// media worker never exits, so without a pool they would only be released at process exit.
+#[cfg(target_os = "macos")]
+fn with_autorelease_pool<R>(body: impl FnOnce() -> R) -> R {
+    objc2::rc::autoreleasepool(|_| body())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_autorelease_pool<R>(body: impl FnOnce() -> R) -> R {
+    body()
 }
 
 #[derive(Clone)]
@@ -62,6 +185,7 @@ impl DesktopMediaSession {
             controls,
             metadata: MetadataKey::default(),
             cached_cover_url: None,
+            playback: None,
         }));
         let pending = Arc::new(Mutex::new(None));
         let worker_pending = Arc::clone(&pending);
@@ -75,7 +199,7 @@ impl DesktopMediaSession {
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .take();
                     if let Some(snapshot) = snapshot {
-                        Self::push_snapshot(&state, &snapshot);
+                        with_autorelease_pool(|| Self::push_snapshot(&state, &snapshot));
                     }
                 }
             })
@@ -113,32 +237,17 @@ impl DesktopMediaSession {
                 tracing::warn!("更新系统媒体元数据失败：{error}");
             } else {
                 state.metadata = metadata.clone();
+                // souvlaki's macOS set_metadata replaces nowPlayingInfo without elapsed time.
+                state.playback = None;
                 if needs_cache {
                     cache_metadata = Some(metadata);
                 }
             }
         }
 
-        let progress = MediaPosition(Duration::from_secs_f64(finite_nonnegative(
-            snapshot.current_time,
-        )));
-        let playback = if snapshot.track_id.is_none()
-            || matches!(
-                snapshot.phase,
-                PlaybackPhase::Idle | PlaybackPhase::Ended | PlaybackPhase::Error
-            ) {
-            MediaPlayback::Stopped
-        } else if snapshot.is_playing {
-            MediaPlayback::Playing {
-                progress: Some(progress),
-            }
-        } else {
-            MediaPlayback::Paused {
-                progress: Some(progress),
-            }
-        };
-        if let Err(error) = state.controls.set_playback(playback) {
-            tracing::warn!("更新系统媒体播放状态失败：{error}");
+        let next = PublishedPlayback::from_snapshot(snapshot, Instant::now());
+        if !THROTTLE_PROGRESS || needs_playback_publish(state.playback.as_ref(), &next) {
+            publish_playback(&mut state, next);
         }
 
         #[cfg(target_os = "linux")]
@@ -297,14 +406,21 @@ fn cache_artwork(state: Arc<Mutex<SessionState>>, metadata: MetadataKey) {
                         return;
                     }
                     let current = state.metadata.clone();
-                    if let Err(error) =
-                        set_metadata(&mut state.controls, &current, Some(local_url.as_str()))
-                    {
-                        tracing::warn!("更新系统媒体封面失败：{error}");
-                    } else {
-                        state.cached_cover_url = Some(local_url.clone());
-                        tracing::debug!("系统媒体封面已更新：{local_url}");
-                    }
+                    with_autorelease_pool(|| {
+                        if let Err(error) =
+                            set_metadata(&mut state.controls, &current, Some(local_url.as_str()))
+                        {
+                            tracing::warn!("更新系统媒体封面失败：{error}");
+                        } else {
+                            state.cached_cover_url = Some(local_url.clone());
+                            tracing::debug!("系统媒体封面已更新：{local_url}");
+                            // set_metadata dropped the elapsed time on macOS; restore it now
+                            // instead of waiting for the next throttled progress refresh.
+                            if let Some(last) = state.playback {
+                                publish_playback(&mut state, last.extrapolated(Instant::now()));
+                            }
+                        }
+                    });
                 }
                 Err(error) => tracing::warn!("缓存系统媒体封面失败：{error}"),
             },
@@ -561,6 +677,99 @@ mod tests {
         });
         assert_eq!(files.len(), 1, "{files:?}");
         assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn media_progress_publishes_only_on_state_rate_seek_or_refresh() {
+        let start = Instant::now();
+        let at = |seconds: f64| start + Duration::from_secs_f64(seconds);
+        let playback = |state, position, rate, seconds| PublishedPlayback {
+            state,
+            position,
+            rate,
+            at: at(seconds),
+        };
+        use PlaybackState::{Paused, Playing, Stopped};
+
+        let last = playback(Playing, 10.0, 1.0, 0.0);
+        assert!(needs_playback_publish(None, &last));
+        // Steady 100 ms ticks that track wall-clock stay quiet until the periodic refresh.
+        for tick in 1..50 {
+            let seconds = f64::from(tick) * 0.1;
+            let next = playback(Playing, 10.0 + seconds, 1.0, seconds);
+            assert!(!needs_playback_publish(Some(&last), &next), "tick {tick}");
+        }
+        assert!(needs_playback_publish(
+            Some(&last),
+            &playback(Playing, 15.0, 1.0, 5.0)
+        ));
+        // Seeks either way, and a stall the OS would keep extrapolating past.
+        assert!(needs_playback_publish(
+            Some(&last),
+            &playback(Playing, 40.0, 1.0, 0.2)
+        ));
+        assert!(needs_playback_publish(
+            Some(&last),
+            &playback(Playing, 2.0, 1.0, 0.2)
+        ));
+        assert!(needs_playback_publish(
+            Some(&last),
+            &playback(Playing, 10.0, 1.0, 2.0)
+        ));
+        // Rate changes publish; steady playback at that rate is extrapolated with it.
+        assert!(needs_playback_publish(
+            Some(&last),
+            &playback(Playing, 10.1, 1.25, 0.1)
+        ));
+        let fast = playback(Playing, 10.0, 2.0, 0.0);
+        assert!(!needs_playback_publish(
+            Some(&fast),
+            &playback(Playing, 16.0, 2.0, 3.0)
+        ));
+        // State changes always publish.
+        assert!(needs_playback_publish(
+            Some(&last),
+            &playback(Paused, 10.1, 1.0, 0.1)
+        ));
+        assert!(needs_playback_publish(
+            Some(&last),
+            &playback(Stopped, 0.0, 1.0, 0.1)
+        ));
+        // Paused only republishes when the position moved.
+        let paused = playback(Paused, 30.0, 1.0, 0.0);
+        assert!(!needs_playback_publish(
+            Some(&paused),
+            &playback(Paused, 30.0, 1.0, 60.0)
+        ));
+        assert!(needs_playback_publish(
+            Some(&paused),
+            &playback(Paused, 31.0, 1.0, 0.1)
+        ));
+        let stopped = playback(Stopped, 0.0, 1.0, 0.0);
+        assert!(!needs_playback_publish(
+            Some(&stopped),
+            &playback(Stopped, 0.0, 1.0, 60.0)
+        ));
+    }
+
+    #[test]
+    fn media_progress_extrapolates_only_while_playing() {
+        let start = Instant::now();
+        let later = start + Duration::from_secs(4);
+        let playing = PublishedPlayback {
+            state: PlaybackState::Playing,
+            position: 10.0,
+            rate: 1.5,
+            at: start,
+        };
+        let moved = playing.extrapolated(later);
+        assert!((moved.position - 16.0).abs() < 1e-9);
+        assert_eq!(moved.at, later);
+        let paused = PublishedPlayback {
+            state: PlaybackState::Paused,
+            ..playing
+        };
+        assert!((paused.extrapolated(later).position - 10.0).abs() < 1e-9);
     }
 
     #[test]
