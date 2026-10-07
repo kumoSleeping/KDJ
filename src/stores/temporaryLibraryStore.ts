@@ -83,8 +83,9 @@ export function createTemporaryLibrary(folder: string) {
       void readDetail(selectedId);
     },
     setSelectionMode: (on) => set({ selectionMode: on }),
-    copyToClipboard(op) {
-      if (get().selectedIds.length) useLibraryStore.setState({ clipboard: { ids: [...get().selectedIds], op } });
+    copyToClipboard(op, explicitIds) {
+      const ids = explicitIds ?? get().selectedIds;
+      if (ids.length) useLibraryStore.setState({ clipboard: { ids: [...ids], op } });
     },
     async paste(dest, op) {
       const clip = useLibraryStore.getState().clipboard;

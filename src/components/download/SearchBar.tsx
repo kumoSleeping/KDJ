@@ -364,7 +364,8 @@ export function SearchBar({
               const nativeEvent = event.nativeEvent;
               const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
               if (!composing && presets.onKeyDown(event)) return;
-              if (event.key === "Enter" && !event.shiftKey && !composing && canSubmit) {
+              // 普通 Enter 永远不换行：搜索中或空框时也不能把 "\n" 写进去，否则会被当成批量搜索。
+              if (event.key === "Enter" && !event.shiftKey && !composing) {
                 event.preventDefault();
                 fireSubmit();
               }

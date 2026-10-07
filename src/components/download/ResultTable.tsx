@@ -66,6 +66,7 @@ import {
   selectionKey,
 } from "../../lib/resultSelection";
 import { removeLocalStorage } from "../../lib/storageWrite";
+import { isEditable } from "../../lib/useLibraryClipboard";
 
 export {
   resultRowActionUsesSelection,
@@ -312,6 +313,8 @@ export function ResultTable({
     if (!selectionMode && selected.size === 0) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // Esc already consumed by a menu/search field, or cancelling IME input, keeps the picks.
+      if (event.defaultPrevented || event.isComposing || isEditable(event.target)) return;
       event.preventDefault();
       for (const key of selectedRef.current) toggleSelectRef.current(key);
       onSelectionModeChange(false);

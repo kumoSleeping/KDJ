@@ -4,7 +4,11 @@ import { liveVjAge, liveVjClockNow, liveVjPosition, type LiveVjLog, type LiveVjM
 
 const inputNames = {waiting: "等待音频", buffering: "积累证据", receiving: "监听中", quiet: "输入静音", stalled: "输入中断"};
 const signed = (n: number) => `${n > 0 ? "+" : ""}${n.toFixed(0)}`;
-const time = (seconds: number) => `${Math.floor(Math.max(0, seconds) / 60)}:${(Math.max(0, seconds) % 60).toFixed(2).padStart(5, "0")}`;
+// Round to centiseconds before splitting: 239.996 s must read 4:00.00, not 3:60.00.
+const time = (seconds: number) => {
+  const cs = Number.isFinite(seconds) ? Math.round(Math.max(0, seconds) * 100) : 0;
+  return `${Math.floor(cs / 6000)}:${((cs % 6000) / 100).toFixed(2).padStart(5, "0")}`;
+};
 
 /** Read-only snapshot display. No frame loop, recognition work or transport commands. */
 function LocationStrip({match, current, windowSeconds, stopped}: {

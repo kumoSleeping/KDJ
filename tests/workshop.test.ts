@@ -9,6 +9,7 @@ import {
   duplicateClip,
   fadeAlpha,
   findClip,
+  formatTime,
   moveLayer,
   outputAt,
   projectDuration,
@@ -529,4 +530,11 @@ test("workshop marker additions and layer reorders keep independent new items", 
   assert.deepEqual(merged.layers.map(l => l.id), ["second", "layer", "imported"]);
   assert.deepEqual(new Set(merged.markers?.map(m => m.id)), new Set(["local-mark", "server-mark"]));
   assert.equal(validateProject(merged), "");
+});
+
+test("workshop time labels carry rounded seconds into the minute", () => {
+  assert.equal(formatTime(59_999.6), "1:00.000");
+  assert.equal(formatTime(61_234.4), "1:01.234");
+  assert.equal(formatTime(-5), "0:00.000");
+  assert.equal(formatTime(Number.NaN), "0:00.000");
 });

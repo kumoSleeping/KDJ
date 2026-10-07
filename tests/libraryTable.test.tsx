@@ -176,6 +176,15 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.equal(useLibraryStore.getState().selectedIds.length, 10000);
     await act(async () => useLibraryStore.getState().selectAll());
     assert.equal(useLibraryStore.getState().selectedIds.length, 10000);
+    // Esc that clears a text field must not also drop the multi-selection.
+    const field = document.body.appendChild(document.createElement("input"));
+    await act(async () => field.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    field.remove();
+    assert.equal(useLibraryStore.getState().selectedIds.length, 10000);
+    // A row menu copies the rows it acts on; right-click never changes the selection.
+    useLibraryStore.getState().copyToClipboard("copy", [42]);
+    assert.deepEqual(useLibraryStore.getState().clipboard, { ids: [42], op: "copy" });
+    useLibraryStore.setState({ clipboard: null });
     ids = ids.slice(0, 200);
     await act(async () => { await useLibraryStore.getState().refresh(); });
     await flush();

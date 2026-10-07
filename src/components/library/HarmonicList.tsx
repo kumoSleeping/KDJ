@@ -14,6 +14,7 @@ import { normalizeEnabledPlatforms, normalizeSearchPlatforms } from "../../lib/s
 import { isStreamTrack } from "../../lib/streamTrack";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { endTrackDrag, writeTrackDragData } from "../../lib/trackDrag";
+import { isEditable } from "../../lib/useLibraryClipboard";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { useAppStore } from "../../stores/appStore";
 import type { HarmonicMatch, Track } from "../../types";
@@ -67,7 +68,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   useEffect(() => {
     if (!selectionMode) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || isEditable(event.target)) return;
       event.preventDefault();
       setSelectionMode(false);
       setSelectedIds([]);

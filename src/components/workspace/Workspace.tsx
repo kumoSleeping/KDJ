@@ -1327,18 +1327,24 @@ export function Workspace() {
           [right]: pairWeight - nextLeftWeight,
         };
       };
+      let lastX = startX;
       const onMove = (move: PointerEvent) => {
+        lastX = move.clientX;
         setWorkspacePaneWeights(weightsAt(move.clientX));
       };
+      // A canceled touch/pen drag never sends pointerup; without this the panes keep
+      // following later pointer moves until another click.
       const onUp = (up: PointerEvent) => {
-        const final = weightsAt(up.clientX);
+        const final = weightsAt(up.type === "pointercancel" ? lastX : up.clientX);
         setWorkspacePaneWeights(final);
         persistWorkspacePaneWeights(final);
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
     };
   const resetWorkspacePaneSizes = () => {
     setWorkspacePaneWeights(defaultWorkspacePaneWeights);

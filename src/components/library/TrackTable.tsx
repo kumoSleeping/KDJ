@@ -794,6 +794,8 @@ export const TrackTable = memo(function TrackTable({
     if (!shortcutActive || (!selectionMode && selectedIds.length <= 1)) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // 搜索框用 Esc 清空关键词、输入法用 Esc 取消候选：都不该连带清掉批选。
+      if (event.defaultPrevented || event.isComposing || isEditable(event.target)) return;
       event.preventDefault();
       setSelectionMode(false);
       libraryStore.getState().select(null);
@@ -2193,7 +2195,8 @@ export const TrackTable = memo(function TrackTable({
           <button
             type="button"
             onClick={() => {
-              copyToClipboard("copy");
+              // 右键不改选区；落在选区外的行只复制它自己。
+              copyToClipboard("copy", menuIds);
               setRowMenu(null);
             }}
           >

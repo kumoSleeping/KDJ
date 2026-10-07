@@ -15,6 +15,8 @@ export function SettingsOverlay() {
     closeRef.current?.focus({ preventScroll: true });
     const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
+      // A modal <dialog> (e.g. the diagnostics report) owns its own Esc/cancel guard.
+      if (event.target instanceof Element && event.target.closest("dialog[open]")) return;
       event.preventDefault();
       close();
     };

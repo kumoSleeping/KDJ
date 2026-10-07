@@ -97,20 +97,30 @@ export function LyricsHost({
     ).catch(() => undefined);
   }, [current?.id, entry]);
 
+  // 只注册一次并读最新值：随 entry 重订阅时，cleanup 可能早于 listen() resolve，
+  // 旧监听就会泄漏，并在下一次请求时把上一首的歌词推给悬浮窗。
+  const lyricsRequestRef = useRef({ id: current?.id, entry });
+  lyricsRequestRef.current = { id: current?.id, entry };
   useEffect(() => {
+    let disposed = false;
     let unlisten: UnlistenFn | null = null;
     void listen("lyrics-state-request", () => {
-      if (!current?.id) return;
+      const { id, entry: latest } = lyricsRequestRef.current;
+      if (!id) return;
       void emitTo(
         "lyrics-overlay",
         "lyrics-entry-changed",
-        publishedLyricsEntry(current.id, entry),
+        publishedLyricsEntry(id, latest),
       ).catch(() => undefined);
     }).then((dispose) => {
-      unlisten = dispose;
-    });
-    return () => unlisten?.();
-  }, [current?.id, entry]);
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // 悬浮窗由播放条自己的按钮独立控制；无曲目时隐藏。
   useEffect(() => {
@@ -201,6 +211,7 @@ export function LyricsHost({
   // 桌面歌词是另一张 WebView；坐标必须回传主窗落盘，不能只写歌词窗自己的 storage。
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return;
+    let disposed = false;
     let unlisten: UnlistenFn | null = null;
     let timer: number | null = null;
     let latest: { x: number; y: number } | null = null;
@@ -211,9 +222,11 @@ export function LyricsHost({
         if (latest) setDesktopCoordinates(latest.x, latest.y);
       }, 220);
     }).then((dispose) => {
-      unlisten = dispose;
-    });
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }).catch(console.error);
     return () => {
+      disposed = true;
       if (timer !== null) window.clearTimeout(timer);
       unlisten?.();
     };

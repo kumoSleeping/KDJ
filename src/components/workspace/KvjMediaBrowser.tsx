@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, FileVideo, Music2, Plus, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { formatDuration } from "../../lib/format";
@@ -20,10 +20,15 @@ export function KvjMediaBrowser() {
   const [offset, setOffset] = useState(0), [refresh, setRefresh] = useState(0);
   const [page, setPage] = useState<TrackPage | null>(null), [error, setError] = useState("");
   const [loading, setLoading] = useState(false), [selected, setSelected] = useState<number | null>(null);
+  const pageKey = useRef("");
   useEffect(() => {
     if (tab !== "library") return;
     let canceled = false;
-    setLoading(true); setPage(null); setError("");
+    // Focus/stat refreshes keep the visible page (and its scroll) until the reply lands;
+    // only a different query, filter or page offset clears the list.
+    const key = JSON.stringify([query, media, offset]);
+    if (pageKey.current !== key) { pageKey.current = key; setPage(null); }
+    setLoading(true); setError("");
     const timer = window.setTimeout(() => {
       void api.tracks({ q: query, media: media || undefined, offset, limit: 60, sort: "title", order: "asc" })
         .then(result => { if (!canceled) setPage(result); })

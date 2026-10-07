@@ -337,7 +337,8 @@ export interface LibraryStore {
   selectTrack(track: Track): void;
   selectAll(): void;
   setSelectionMode(on: boolean): void;
-  copyToClipboard(op: FileOp): void;
+  /** `ids` defaults to the selection; a row menu passes the rows it acts on. */
+  copyToClipboard(op: FileOp, ids?: number[]): void;
   /** `op` 覆盖剪贴板里记的操作：Cmd+Option+V 强制按移动粘贴。 */
   paste(dest: string, op?: FileOp): Promise<FolderOpResult | null>;
   applyFolderOp(ids: number[], dest: string, op: FileOp): Promise<FolderOpResult>;
@@ -707,8 +708,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     set({ selectionMode: on });
   },
 
-  copyToClipboard(op) {
-    const ids = get().selectedIds;
+  copyToClipboard(op, explicitIds) {
+    const ids = explicitIds ?? get().selectedIds;
     if (ids.length > 0) set({ clipboard: { ids: [...ids], op } });
   },
 

@@ -427,12 +427,14 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
     if (!draft || busy) return;
     if (blob.size > STUDIO_IMAGE_LIMIT) throw new Error("每张图片最多 16 MiB");
     await loadStudioImages([blob]);
-    const next: VisualizerDraft = { project: structuredClone(draft.project), images: [...draft.images] };
+    // Decoding can take a while; build on the draft as it is now, not as it was at the click.
+    const current = latestDraft.current ?? draft;
+    const next: VisualizerDraft = { project: structuredClone(current.project), images: [...current.images] };
     next.images[Math.min(slot, next.images.length)] = blob;
     syncVisualizerImages(next.project, next.images.length);
     if (slot === 1) next.project.scene.right.image = 1;
     else { next.project.scene.left.image = 0; next.project.scene.disc.image = 0; }
-    replaceDraft(next);
+    checkpoint(current, true); setDraft(next); setNotice("");
   }
   async function onImage(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]; e.target.value = ""; if (!file) return;

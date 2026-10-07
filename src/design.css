@@ -9803,7 +9803,7 @@ button.kd-stream-status {
   right: 0;
   left: 0;
   height: 1px;
-  background: var(--kd-eq-zero);
+  background: var(--kd-eq-zero, color-mix(in srgb, var(--kd-text) 30%, transparent));
   pointer-events: none;
 }
 .kd-dj-eq-guides { position: absolute; z-index: 2; inset: 0; pointer-events: none; }
@@ -9812,10 +9812,10 @@ button.kd-stream-status {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: var(--kd-eq-guide);
+  background: var(--kd-eq-guide, color-mix(in srgb, var(--kd-text) 12%, transparent));
 }
 .kd-dj-eq-guides > i[data-kind="major"] {
-  background: var(--kd-eq-guide-major);
+  background: var(--kd-eq-guide-major, color-mix(in srgb, var(--kd-text) 24%, transparent));
 }
 .kd-dj-eq-curve {
   position: absolute;

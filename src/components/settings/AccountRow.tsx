@@ -680,6 +680,7 @@ export function AccountRow({
         >
           {avatarSrc && (
             <img
+              key={avatarSrc}
               src={avatarSrc}
               alt=""
               style={AVATAR_IMG}

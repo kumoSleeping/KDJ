@@ -499,8 +499,9 @@ export const SPEED_PRESETS = [
   { label: "快慢快", preset: "pulse", start: 2, middle: 0.5, end: 2 },
 ] as const;
 export function formatTime(ms: number): string {
-  const total = Math.max(0, ms) / 1000;
-  return `${Math.floor(total / 60)}:${(total % 60).toFixed(3).padStart(6, "0")}`;
+  // Round to whole milliseconds before splitting so 59999.6 ms reads 1:00.000, not 0:60.000.
+  const total = Number.isFinite(ms) ? Math.round(Math.max(0, ms)) : 0;
+  return `${Math.floor(total / 60_000)}:${((total % 60_000) / 1000).toFixed(3).padStart(6, "0")}`;
 }
 
 export const activeLayerCount = (p: CompositionProject) => p.layers.filter(l => l.clips.length > 0).length;

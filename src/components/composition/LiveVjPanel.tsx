@@ -112,7 +112,7 @@ function LiveVjWorkspace({backTarget, toolbarTarget}: PanelProps) {
     {back && (backTarget ? createPortal(back, backTarget) : back)}
     <WorkshopToolbar>
       {active ? <input className="kd-live-vj-name" key={active.id} aria-label="演出名称" defaultValue={active.name} disabled={busy || locked}
-        onBlur={e => { if (e.currentTarget.value.trim() && e.currentTarget.value !== active.name) void edit({kind: "rename", set_id: active.id, name: e.currentTarget.value}); else e.currentTarget.value = active.name; }}
+        onBlur={e => { const name = e.currentTarget.value.trim(); if (name && name !== active.name) void edit({kind: "rename", set_id: active.id, name}); else e.currentTarget.value = active.name; }}
         onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}/>
         : <button aria-label="新建演出" title="新建演出" disabled={busy || !document} onClick={() => { setCreating(v => !v); setName(""); }}><Plus size={16}/></button>}
       {active && <button aria-label="添加素材" title="添加素材" disabled={busy || running} onClick={() => void liveVjApi.pickFiles().then(paths => paths.length ? useLiveVjStore.getState().import(active.id, [], paths) : undefined).catch(e => setNotice(String(e)))}><Plus size={15}/></button>}

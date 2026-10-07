@@ -120,13 +120,13 @@ export function QueueRowConfig({
       page_title: task.video_page?.title || undefined,
       max_height: Number.isFinite(height) && height > 0 ? height : (settings?.video_max_height ?? 1080),
       audio_only: task.quality === "audio",
-      transcode: videoPlatform !== "youtube",
+      transcode: videoPlatform === "youtube" ? false : (settings?.video_transcode ?? false),
       title: task.title,
       artist: task.artist,
       cover: task.cover,
       dest_dir: task.dest_dir,
     });
-  }, [open, task, draft, settings?.video_max_height, videoPlatform]);
+  }, [open, task, draft, settings?.video_max_height, settings?.video_transcode, videoPlatform]);
 
   useEffect(() => {
     if (!open || task.kind !== "video" || !bvid) return;
@@ -151,7 +151,9 @@ export function QueueRowConfig({
     if (!open || task.kind !== "video") return;
     const q = trackQuery.trim();
     if (q.length < 1) {
+      // 上一次请求的 cleanup 已把 alive 置 false，它的 finally 不会再收起"搜索中"。
       setTrackHits([]);
+      setSearching(false);
       return;
     }
     let alive = true;
