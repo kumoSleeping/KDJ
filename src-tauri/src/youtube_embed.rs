@@ -543,6 +543,18 @@ return "ok";
     }
 }
 
+/// Unloads the remote player document (JS heap, buffered media, timers) while keeping the
+/// pre-warmed, already isolated WebView. The next open always performs a full `loadRequest` from
+/// whatever document is current, and Tauri dispatches this navigation and that request in order.
+fn release_remote_page(webview: &tauri::Webview) {
+    let result = tauri::Url::parse(BLANK_DOCUMENT_URL)
+        .map_err(|error| error.to_string())
+        .and_then(|blank| webview.navigate(blank).map_err(|error| error.to_string()));
+    if let Err(error) = result {
+        tracing::warn!("无法释放 YouTube 播放器页面：{error}");
+    }
+}
+
 #[tauri::command]
 pub async fn youtube_embed_close(
     app: tauri::AppHandle,
@@ -567,6 +579,7 @@ pub async fn youtube_embed_close(
         webview
             .hide()
             .map_err(|error| format!("无法隐藏 YouTube 播放器：{error}"))?;
+        release_remote_page(&webview);
     }
     let mut current = state
         .current
@@ -594,6 +607,15 @@ mod tests {
         assert!(!valid_embed_url(
             &tauri::Url::parse("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap()
         ));
+    }
+
+    #[test]
+    fn close_release_target_passes_the_navigation_allowlist() {
+        // `release_remote_page` navigates here; the exact-string allowlist must keep accepting it.
+        assert!(valid_embed_url(
+            &tauri::Url::parse(BLANK_DOCUMENT_URL).unwrap()
+        ));
+        assert!(blank_protocol_response("/blank").status().is_success());
     }
 
     #[test]
