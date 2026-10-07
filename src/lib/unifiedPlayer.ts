@@ -847,6 +847,8 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private unlisten: UnlistenFn | null = null;
   private unlistenLevels: UnlistenFn | null = null;
   private unlistenClock: UnlistenFn | null = null;
+  private eventsPaused = false;
+  private eventsTail: Promise<void> = Promise.resolve();
   private sequence = 0;
   private nextCommandId = 1;
   /** Tauri invoke 可以并发越序到达；播放命令必须和 commandId 保持同一顺序。 */
@@ -893,13 +895,53 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private deckMixerRevisions: [number, number] = [0, 0];
   private deckFxRevisions: [number, number] = [0, 0];
 
+  private listenState(): Promise<UnlistenFn> {
+    return listen<DesktopPlaybackSnapshotRaw>(
+      "playback-state",
+      (event: TauriEvent<DesktopPlaybackSnapshotRaw>) => this.accept(event.payload),
+    );
+  }
+
+  private listenClock(): Promise<UnlistenFn> {
+    return listen<DesktopPlaybackClockRaw>(
+      "playback-clock",
+      (event: TauriEvent<DesktopPlaybackClockRaw>) => acceptPlaybackClock(event.payload),
+    );
+  }
+
+  /**
+   * A hidden secondary window detaches its per-tick listeners; Tauri then stops delivering
+   * those events to this WebView at all. Resuming reattaches them and resyncs from a fresh
+   * snapshot, since paused playback emits no further state ticks.
+   */
+  setEventsPaused(paused: boolean): Promise<void> {
+    this.eventsPaused = paused;
+    const run = this.eventsTail.then(async () => {
+      if (!this.initPromise) return;
+      await this.initPromise.catch(() => undefined);
+      if (!this.initialized) return;
+      if (this.eventsPaused) {
+        this.unlisten?.();
+        this.unlisten = null;
+        this.unlistenClock?.();
+        this.unlistenClock = null;
+        // A stale clock anchor must not be projected forward after resume.
+        livePlaybackClock = [null, null];
+        return;
+      }
+      if (this.unlisten && this.unlistenClock) return;
+      if (!this.unlisten) this.unlisten = await this.listenState();
+      if (!this.unlistenClock) this.unlistenClock = await this.listenClock();
+      this.accept(await invoke<DesktopPlaybackSnapshotRaw>("playback_state"));
+    });
+    this.eventsTail = run.catch(() => undefined);
+    return run;
+  }
+
   initialize(): Promise<UnifiedPlayerState> {
     if (this.initPromise) return this.initPromise;
     this.initPromise = (async () => {
-      this.unlisten = await listen<DesktopPlaybackSnapshotRaw>(
-        "playback-state",
-        (event: TauriEvent<DesktopPlaybackSnapshotRaw>) => this.accept(event.payload),
-      );
+      this.unlisten = await this.listenState();
       // Window-scoped so the desktop's emit_to("main") skips other windows (e.g. the lyrics
       // overlay); a global listen() has target Any and would still receive every event.
       this.unlistenLevels = await getCurrentWebviewWindow().listen<DesktopLevelsRaw | [number, number]>(
@@ -924,10 +966,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
           liveDeckLevelsActive = true;
         },
       );
-      this.unlistenClock = await listen<DesktopPlaybackClockRaw>(
-        "playback-clock",
-        (event: TauriEvent<DesktopPlaybackClockRaw>) => acceptPlaybackClock(event.payload),
-      );
+      this.unlistenClock = await this.listenClock();
       const snapshot = await invoke<DesktopPlaybackSnapshotRaw>("playback_initialize");
       const accepted = this.accept(snapshot);
       this.initialized = true;
@@ -2036,6 +2075,11 @@ export function nativeDesktopPlayer(): UnifiedPlayer {
   }
   desktopPlayer ??= new DesktopNativePlayer();
   return desktopPlayer;
+}
+
+/** Pauses (or resumes) native playback-state/clock delivery to this window while it is hidden. */
+export function setDesktopPlaybackEventsPaused(paused: boolean): Promise<void> {
+  return desktopPlayer?.setEventsPaused(paused) ?? Promise.resolve();
 }
 
 export function runtimePlayer(): UnifiedPlayer {

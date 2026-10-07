@@ -60,9 +60,22 @@ pub fn set_desktop_lyrics_drag_regions(
 /// Bumped per install so a poller from a destroyed window cannot outlive it into a quick re-open.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Wakes a poller parked while the overlay is hidden.
+static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// While hidden the poller only rechecks this often; showing or destroying the window wakes it.
+const HIDDEN_RECHECK: Duration = Duration::from_secs(1);
+
+/// Call after showing or destroying the overlay so a parked poller resumes (or exits) at once.
+pub fn wake() {
+    WAKE.notify_waiters();
+}
+
 pub fn install(app: tauri::AppHandle) {
     HIT_TEST.lock().unwrap().regions.clear();
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    // A poller of the previous window may still be parked; let it observe the new generation.
+    wake();
     tauri::async_runtime::spawn(async move {
         let mut applied = None;
         loop {
@@ -72,6 +85,8 @@ pub fn install(app: tauri::AppHandle) {
             let Some(window) = app.get_webview_window("lyrics-overlay") else {
                 break;
             };
+            // Created before the visibility check: notify_waiters reaches it even before polling.
+            let woken = WAKE.notified();
             let (locked, regions, revision) = {
                 let state = HIT_TEST.lock().unwrap();
                 (state.locked, state.regions.clone(), state.revision)
@@ -95,7 +110,12 @@ pub fn install(app: tauri::AppHandle) {
                     applied = Some((ignore, revision));
                 }
             } else {
+                // Auto-hidden (no track, video mode): no 5-30 Hz native polling while unseen.
+                // The bounded wait still catches a window re-shown by the OS (e.g. app unhide).
                 applied = None;
+                drop(window);
+                let _ = tokio::time::timeout(HIDDEN_RECHECK, woken).await;
+                continue;
             }
             tokio::time::sleep(Duration::from_millis(if locked { 200 } else { 32 })).await;
         }

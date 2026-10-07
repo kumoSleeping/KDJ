@@ -2352,6 +2352,10 @@ fn desktop_lyrics_inner_size(font_scale: f64) -> (f64, f64) {
     (width, height)
 }
 
+/// Sent only to the lyrics window when it is automatically hidden (`false`) or shown (`true`).
+#[cfg(desktop)]
+const DESKTOP_LYRICS_VISIBILITY_EVENT: &str = "desktop-lyrics-visibility";
+
 /// 创建/更新桌面歌词窗口。窗口由 Rust 持有原生层级和鼠标穿透，页面只负责绘字。
 #[tauri::command]
 async fn set_desktop_lyrics(
@@ -2384,8 +2388,12 @@ async fn set_desktop_lyrics(
                     })
                     .await
                     .map_err(|_| "等待桌面歌词窗口释放超时".to_string())?;
+                    desktop_lyrics_hit_test::wake();
                 } else {
                     window.hide().map_err(|err| err.to_string())?;
+                    // The hidden page detaches its playback-state/clock listeners on this event,
+                    // so the backend stops delivering 10-30 Hz ticks to an unseen WebView.
+                    let _ = app.emit_to("lyrics-overlay", DESKTOP_LYRICS_VISIBILITY_EVENT, false);
                 }
             }
             return Ok(());
@@ -2453,6 +2461,10 @@ async fn set_desktop_lyrics(
         window
             .set_ignore_cursor_events(true)
             .map_err(|err| err.to_string())?;
+        desktop_lyrics_hit_test::wake();
+        // Also sent on style-only updates; the page treats a repeated `true` as a no-op and
+        // resyncs from a fresh playback snapshot only after an automatic hide.
+        let _ = app.emit_to("lyrics-overlay", DESKTOP_LYRICS_VISIBILITY_EVENT, true);
         return Ok(());
     }
     #[cfg(not(desktop))]

@@ -31,6 +31,7 @@ import {
   getLiveDeckClock,
   getLiveForegroundDeck,
   runtimePlayer,
+  setDesktopPlaybackEventsPaused,
   subscribeLivePlaybackClock,
   type UnifiedPlayerState,
 } from "../../lib/unifiedPlayer";
@@ -43,7 +44,7 @@ import type { Track } from "../../types";
 
 const MIN_SQUEEZE = 0.62;
 
-function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
+function useSmoothPlaybackTime(playback: UnifiedPlayerState, hidden: boolean): number {
   const live = useSyncExternalStore(
     subscribeLivePlaybackClock,
     () => {
@@ -111,7 +112,7 @@ function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
   ]);
 
   useEffect(() => {
-    if (!advancing || Math.abs(rate) < 1.0e-6) return;
+    if (hidden || !advancing || Math.abs(rate) < 1.0e-6) return;
     let frame = 0;
     const tick = () => {
       const anchor = anchorRef.current;
@@ -126,7 +127,7 @@ function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
     };
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [advancing, playback.trackId, rate]);
+  }, [hidden, advancing, playback.trackId, rate]);
 
   return time;
 }
@@ -280,6 +281,9 @@ export function DesktopLyricsOverlay() {
   );
   const [track, setTrack] = useState<Track | null>(() => readPublishedStreamTrack());
   const [trackError, setTrackError] = useState("");
+  // Automatic hides (no track, video mode) keep this WebView alive; while hidden it renders
+  // nothing and receives no playback ticks. Cleared on show only after a fresh resync.
+  const [hidden, setHidden] = useState(false);
   // Tauri 桌面上的在线试听由主窗 BrowserPreviewPlayer 持有，不能读 Rust 播放器的旧时钟。
   // 没有来得及收到播放状态时也先按曲目快照显示歌词；下一条时钟事件到达后再接上精确进度。
   const activeStreamPlayback =
@@ -307,67 +311,57 @@ export function DesktopLyricsOverlay() {
   const dragRegionsRef = useRef("");
   const fontScale = prefs.desktopFontScale;
   const opacity = prefs.desktopOpacity;
-  const smoothTime = useSmoothPlaybackTime(activePlayback);
+  const smoothTime = useSmoothPlaybackTime(activePlayback, hidden);
   const entry = useSyncExternalStore(
     useLyricsStore.subscribe,
     () => useLyricsStore.getState().get(activePlayback.trackId),
     () => useLyricsStore.getState().get(activePlayback.trackId),
   );
 
-  useEffect(() => {
-    const requestStreamSnapshot = () => {
-      void import("@tauri-apps/api/event")
-        .then(({ emitTo }) => emitTo("main", "stream-state-request"))
-        .catch(() => {});
-    };
-    requestStreamSnapshot();
-    const retry = window.setTimeout(requestStreamSnapshot, 120);
-    return () => window.clearTimeout(retry);
-  }, []);
+  // Only touches state setters, so effects registered once may keep the first instance.
+  const applyPublishedStream = (
+    published: Track | null,
+    streamState: PublishedStreamPlayback | null,
+  ) => {
+    const nextTrack = published && published.id < 0 ? published : null;
+    if (nextTrack) {
+      setTrack(nextTrack);
+    } else {
+      setTrack((current) => (current?.id != null && current.id < 0 ? null : current));
+    }
+    setStreamPlayback(
+      nextTrack && streamState && streamState.trackId === nextTrack.id ? streamState : null,
+    );
+  };
 
   useEffect(() => {
-    const applyPublishedStream = (
-      published: Track | null,
-      streamState: PublishedStreamPlayback | null,
-    ) => {
-      const nextTrack = published && published.id < 0 ? published : null;
-      if (nextTrack) {
-        setTrack(nextTrack);
-      } else {
-        setTrack((current) => (current?.id != null && current.id < 0 ? null : current));
-      }
-      setStreamPlayback(
-        nextTrack && streamState && streamState.trackId === nextTrack.id ? streamState : null,
-      );
+    let alive = true;
+    let seq = 0;
+    let unlistenVisibility: UnlistenFn | null = null;
+    void listen<boolean>("desktop-lyrics-visibility", (event) => {
+      const visible = event.payload !== false;
+      const id = ++seq;
+      if (!visible) setHidden(true);
+      void setDesktopPlaybackEventsPaused(!visible)
+        .catch(() => undefined)
+        .then(() => {
+          if (alive && visible && id === seq) setHidden(false);
+        });
+    }).then((dispose) => {
+      if (alive) unlistenVisibility = dispose;
+      else dispose();
+    });
+    return () => {
+      alive = false;
+      unlistenVisibility?.();
     };
-    const syncPublishedStream = () => {
-      applyPublishedStream(readPublishedStreamTrack(), readPublishedStreamPlayback());
-    };
-    const sync = () => {
-      useLyricsPrefs.getState().syncFromStorage();
-      // 主窗可能在悬浮窗挂载前已经发布过曲目；storage 事件也是流状态的恢复通道。
-      syncPublishedStream();
-    };
-    window.addEventListener("storage", sync);
-    let unlistenPrefs: UnlistenFn | null = null;
-    let unlistenStreamTrack: UnlistenFn | null = null;
+  }, []);
+
+  // The main window's online preview clock (4-10 Hz) follows the same visibility gate.
+  useEffect(() => {
+    if (hidden) return;
     let unlistenStreamPlayback: UnlistenFn | null = null;
-    let unlistenLyrics: UnlistenFn | null = null;
-    let lyricsSnapshotRetry: number | null = null;
-    void listen<unknown>("lyrics-prefs-changed", (event) => {
-      if (event.payload === undefined || event.payload === null) sync();
-      else useLyricsPrefs.getState().syncFromSnapshot(event.payload);
-    }).then((dispose) => {
-      unlistenPrefs = dispose;
-    });
-    void listen<Track | null>("stream-track-changed", (event) => {
-      // The event carries the snapshot so a separate WKWebView does not depend on
-      // cross-window localStorage sharing. The storage read remains the startup fallback.
-      const published = event.payload === undefined ? readPublishedStreamTrack() : event.payload;
-      applyPublishedStream(published, readPublishedStreamPlayback());
-    }).then((dispose) => {
-      unlistenStreamTrack = dispose;
-    });
+    let alive = true;
     void listen<PublishedStreamPlaybackEvent | PublishedStreamPlayback>(
       "stream-playback-state",
       (event) => {
@@ -383,7 +377,48 @@ export function DesktopLyricsOverlay() {
         );
       },
     ).then((dispose) => {
-      unlistenStreamPlayback = dispose;
+      if (alive) unlistenStreamPlayback = dispose;
+      else dispose();
+    });
+    const requestStreamSnapshot = () => {
+      void emitTo("main", "stream-state-request").catch(() => {});
+    };
+    requestStreamSnapshot();
+    const retry = window.setTimeout(requestStreamSnapshot, 120);
+    return () => {
+      alive = false;
+      window.clearTimeout(retry);
+      unlistenStreamPlayback?.();
+    };
+  }, [hidden]);
+
+  useEffect(() => {
+    const syncPublishedStream = () => {
+      applyPublishedStream(readPublishedStreamTrack(), readPublishedStreamPlayback());
+    };
+    const sync = () => {
+      useLyricsPrefs.getState().syncFromStorage();
+      // 主窗可能在悬浮窗挂载前已经发布过曲目；storage 事件也是流状态的恢复通道。
+      syncPublishedStream();
+    };
+    window.addEventListener("storage", sync);
+    let unlistenPrefs: UnlistenFn | null = null;
+    let unlistenStreamTrack: UnlistenFn | null = null;
+    let unlistenLyrics: UnlistenFn | null = null;
+    let lyricsSnapshotRetry: number | null = null;
+    void listen<unknown>("lyrics-prefs-changed", (event) => {
+      if (event.payload === undefined || event.payload === null) sync();
+      else useLyricsPrefs.getState().syncFromSnapshot(event.payload);
+    }).then((dispose) => {
+      unlistenPrefs = dispose;
+    });
+    void listen<Track | null>("stream-track-changed", (event) => {
+      // The event carries the snapshot so a separate WKWebView does not depend on
+      // cross-window localStorage sharing. The storage read remains the startup fallback.
+      const published = event.payload === undefined ? readPublishedStreamTrack() : event.payload;
+      applyPublishedStream(published, readPublishedStreamPlayback());
+    }).then((dispose) => {
+      unlistenStreamTrack = dispose;
     });
     void listen<PublishedLyricsEntry>("lyrics-entry-changed", (event) => {
       acceptPublishedLyricsEntry(event.payload);
@@ -403,7 +438,6 @@ export function DesktopLyricsOverlay() {
       window.removeEventListener("storage", sync);
       unlistenPrefs?.();
       unlistenStreamTrack?.();
-      unlistenStreamPlayback?.();
       unlistenLyrics?.();
       if (lyricsSnapshotRetry !== null) window.clearTimeout(lyricsSnapshotRetry);
     };
@@ -490,14 +524,14 @@ export function DesktopLyricsOverlay() {
       });
     };
     publish();
-    if (locked || activePlayback.trackId == null) return;
+    if (hidden || locked || activePlayback.trackId == null) return;
     // Include paused-window resizes and the child line's squeeze/scroll layout changes.
     const timer = window.setInterval(publish, 80);
     return () => window.clearInterval(timer);
-  }, [locked, showClose, activePlayback.trackId]);
+  }, [hidden, locked, showClose, activePlayback.trackId]);
 
   // 窗口通常会由主界面同步隐藏；这里再兜底，避免启动竞态闪出占位文案。
-  if (activePlayback.trackId == null) return null;
+  if (hidden || activePlayback.trackId == null) return null;
 
   const active = activeLrcIndex(entry.lines, smoothTime);
   const beforeFirst = Boolean(entry.lines[0] && smoothTime < entry.lines[0].time);
