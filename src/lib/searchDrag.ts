@@ -546,7 +546,7 @@ export async function enqueueSearchDrop(
   event: { dataTransfer: DataTransfer },
   destDir: string,
 ): Promise<void> {
-  const dest = resolveSearchDestDir(destDir);
+  resolveSearchDestDir(destDir);
 
   const payload = readSearchDrop(event.dataTransfer);
   const alreadyClaimed = dropClaimed;
@@ -557,7 +557,7 @@ export async function enqueueSearchDrop(
     throw new Error("拖动的数据读不出来，请再拖一次");
   }
 
-  await enqueueSearchPayload(payload, dest);
+  await enqueueSearchPayload(payload, destDir);
 }
 
 /** 搜索载荷直接加入普通下载队列（不指定目标文件夹）。 */
@@ -596,6 +596,8 @@ export async function enqueueSearchPayload(
   destDir: string,
 ): Promise<void> {
   const dest = resolveSearchDestDir(destDir);
+  // 「全部曲目」只是当前默认下载文件夹：开跑前改了设置，任务要跟着新文件夹走。
+  const followDefault = destDir.trim() === SEARCH_DEFAULT_DOWNLOAD_SENTINEL || undefined;
   if (payload.kind === "audio" && payload.sources.length === 0) {
     throw new Error("没有可下载的在线来源");
   }
@@ -652,6 +654,7 @@ export async function enqueueSearchPayload(
       const request = {
         ...payload.request,
         dest_dir: dest,
+        follow_default_dir: followDefault,
         title,
         artist,
         cover: cover || undefined,
@@ -699,6 +702,7 @@ export async function enqueueSearchPayload(
     const tasks = await enqueueMediaDownloads(payload.sources, {
       quality,
       dest_dir: dest,
+      follow_default_dir: followDefault,
       revealQueue: false,
     });
     for (const task of optimistic) downloads.removeLocal(task.id);

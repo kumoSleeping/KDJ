@@ -630,6 +630,10 @@ pub struct DownloadRequest {
     /// 下载完成后挪进这个曲库文件夹（绝对路径）。空 = 留在默认下载目录。
     #[serde(default)]
     pub dest_dir: String,
+    /// `dest_dir` 只是“当前默认下载文件夹”的展开结果（拖进「全部曲目」）：
+    /// 任务开跑前用户改了默认文件夹，就跟着新设置走，而不是钉在旧目录。
+    #[serde(default)]
+    pub follow_default_dir: bool,
     /// 任务级暂停：true 时忽略全局“自动下载”，等待显式 start。
     #[serde(default)]
     pub hold: bool,
@@ -690,7 +694,8 @@ pub struct DownloadTask {
     /// 入队时指定的目标曲库文件夹；前端用来在对应文件夹列表里画「待下载」行。
     #[serde(default)]
     pub dest_dir: String,
-    /// 入队时冻结的实际成品目录。默认下载目录不等于“显式拖入曲库”。
+    /// 实际成品目录。显式拖入的文件夹入队即冻结；跟随默认下载文件夹的任务在
+    /// 开跑前随设置更新，开跑后不再变。默认下载目录不等于“显式拖入曲库”。
     #[serde(default)]
     pub output_dir: String,
     /// 搜索结果带来的封面 URL；刷新页面后左表待下载行还要能画出缩略图。
@@ -777,6 +782,9 @@ pub struct VideoDownloadRequest {
     /// 下载完成后挪进这个曲库文件夹。空 = 留在默认视频目录。
     #[serde(default)]
     pub dest_dir: String,
+    /// 与 `DownloadRequest::follow_default_dir` 同义。false 时不写键，旧日志原样往返。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follow_default_dir: bool,
     /// 搜索结果里的标题/UP 主/封面。有则入队立刻用，别等 B 站二次解析，刷新也不丢。
     #[serde(default)]
     pub title: String,
@@ -801,6 +809,7 @@ impl Default for VideoDownloadRequest {
             transcode: false,
             offset_ms: 0,
             dest_dir: String::new(),
+            follow_default_dir: false,
             title: String::new(),
             artist: String::new(),
             cover: String::new(),

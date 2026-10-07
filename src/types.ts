@@ -415,6 +415,8 @@ export interface DownloadRequest {
   analyze?: boolean | null;
   /** 下载完成后挪进这个曲库文件夹；空 = 默认下载目录。 */
   dest_dir?: string;
+  /** dest_dir 只是当前默认下载文件夹的展开结果；开跑前随设置更新。 */
+  follow_default_dir?: boolean;
   /** 忽略全局自动下载，留在队列中等待显式开始。 */
   hold?: boolean;
 }
@@ -444,7 +446,7 @@ export interface DownloadTask {
   track_id: number | null;
   /** 入队时指定的目标文件夹；前端用来在对应列表画「待下载」行。 */
   dest_dir?: string;
-  /** 入队时冻结的实际成品目录；默认下载也必须明确展示。 */
+  /** 实际成品目录；跟随默认下载文件夹的任务在开跑前随设置更新。 */
   output_dir?: string;
   /** 仅前端：搜索结果带来的封面 URL，占位行用来避免只剩 BV 号。 */
   cover?: string;
@@ -503,6 +505,7 @@ export interface VideoDownloadRequest {
   offset_ms?: number;
   /** 下载完成后挪进这个曲库文件夹；空 = 默认视频目录。 */
   dest_dir?: string;
+  follow_default_dir?: boolean;
   /** 搜索结果展示信息：入队立刻用，刷新后仍能从任务列表还原。 */
   title?: string;
   artist?: string;

@@ -163,6 +163,7 @@ export interface DownloadStore {
       quality?: Quality | null;
       analyze?: boolean | null;
       dest_dir?: string;
+      follow_default_dir?: boolean;
     },
   ): Promise<DownloadTask[]>;
   cancel(taskId: string): Promise<void>;
@@ -236,6 +237,7 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       quality: options?.quality ?? null,
       analyze: options?.analyze ?? null,
       dest_dir: destDir || undefined,
+      follow_default_dir: (destDir && options?.follow_default_dir) || undefined,
     };
     const tasks = await api.enqueue(body);
     tasks.forEach((task, index) => {

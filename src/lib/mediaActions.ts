@@ -11,6 +11,7 @@ export interface EnqueueMediaOptions {
   quality?: Quality | null;
   analyze?: boolean | null;
   dest_dir?: string;
+  follow_default_dir?: boolean;
   /** 默认 true。显式 false 只给恢复/后台维护用。 */
   revealQueue?: boolean;
   video?: {

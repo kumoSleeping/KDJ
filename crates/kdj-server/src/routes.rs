@@ -501,6 +501,9 @@ async fn put_settings(
         state.stream_waveforms.clear();
     }
     state.sync_provider_context();
+    if download_dir_changed {
+        ctx.downloads.follow_default_dir(&settings.download_dir);
+    }
     ctx.downloads.set_concurrency(settings.concurrent_downloads);
     // auto_start_downloads 保留在配置契约中兼容旧 settings.json，但下载队列现在
     // 使用一次性 generation 放行，避免点击「开始下载」后把未来新任务也自动启动。
@@ -3699,6 +3702,7 @@ async fn enqueue(
         return Err(ApiError::bad_request("没有要下载的曲目"));
     }
     let dest_dir = normalize_dest_dir(&state, &payload.dest_dir)?;
+    let follow_default_dir = payload.follow_default_dir;
     let settings = state.config.to_settings();
     let quality = payload.quality.unwrap_or(settings.default_quality);
     let analyze = payload.analyze.unwrap_or(settings.auto_analyze);
@@ -3760,6 +3764,7 @@ async fn enqueue(
                             .and_then(serde_json::Value::as_bool)
                             .unwrap_or(settings.video_transcode),
                     dest_dir: dest_dir.clone(),
+                    follow_default_dir,
                     title: source.title.clone(),
                     artist: source.artist_text(),
                     cover: source.cover.clone(),
@@ -3774,6 +3779,7 @@ async fn enqueue(
                     quality,
                     analyze,
                     dest_dir.clone(),
+                    follow_default_dir,
                     hold,
                 )
             }

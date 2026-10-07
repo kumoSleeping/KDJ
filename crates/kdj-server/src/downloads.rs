@@ -167,13 +167,16 @@ struct AudioRetry {
     quality: Quality,
     analyze: bool,
     dest_dir: String,
+    /// `dest_dir` 来自默认下载文件夹（未指定目标，或拖进「全部曲目」）：开跑前随设置更新。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    follow_default_dir: bool,
     external_preparation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VideoRetry {
     request: VideoDownloadRequest,
-    /// 入队时冻结的实际成品目录；request.dest_dir 为空时它仍可能是默认下载目录。
+    /// 实际成品目录；request.dest_dir 为空时它是默认下载目录，开跑前随设置更新。
     output_dir: String,
     /// 与音频任务相同：只声明“需要一次性来源”，平台挑战仍由外部适配器完成。
     #[serde(default)]
@@ -204,6 +207,46 @@ struct Entry {
 }
 
 impl Entry {
+    /// 跟随默认下载文件夹的任务改用 `dir`；显式指定了文件夹的任务不动。
+    /// provider 永远写进当前设置的目录，成品目录若还钉在入队时的旧值，
+    /// 文件就会先下到新文件夹、处理完又被挪回旧文件夹。
+    fn follow_default_dir(&mut self, dir: &str) -> bool {
+        if dir.trim().is_empty() {
+            return false;
+        }
+        match self.task.kind {
+            TaskKind::Audio => {
+                let Some(retry) = self.audio_retry.as_mut() else {
+                    return false;
+                };
+                if !(retry.follow_default_dir || self.task.dest_dir.trim().is_empty())
+                    || retry.dest_dir == dir
+                {
+                    return false;
+                }
+                retry.dest_dir = dir.to_string();
+            }
+            TaskKind::Video => {
+                let Some(retry) = self.video_retry.as_mut() else {
+                    return false;
+                };
+                let explicit = !retry.request.dest_dir.trim().is_empty();
+                if (explicit && !retry.request.follow_default_dir) || retry.output_dir == dir {
+                    return false;
+                }
+                retry.output_dir = dir.to_string();
+                if explicit {
+                    retry.request.dest_dir = dir.to_string();
+                }
+            }
+        }
+        if !self.task.dest_dir.trim().is_empty() {
+            self.task.dest_dir = dir.to_string();
+        }
+        self.task.output_dir = dir.to_string();
+        true
+    }
+
     fn new(task: DownloadTask, cancel: CancellationToken) -> Self {
         Entry {
             task,
@@ -927,6 +970,29 @@ impl DownloadManager {
     }
 
     /// 当前的闸门。取出来就放锁，别在 `.await` 期间攥着 `Mutex`。
+    /// 默认下载文件夹改了：还没开跑的任务立刻改指新目录，队列里显示的落点才是真的。
+    /// 失败项留到重试那一刻再跟随；正在跑的任务保持开跑时的目录。
+    pub fn follow_default_dir(&self, dir: &str) {
+        let mut entries = self.entries.lock().unwrap();
+        let mut changed = Vec::new();
+        for entry in entries.values_mut() {
+            if matches!(entry.task.state, TaskState::Queued | TaskState::Paused)
+                && entry.follow_default_dir(dir)
+            {
+                entry.task.updated_at = now_secs();
+                changed.push(entry.task.clone());
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        self.persist_locked_or_warn(&entries);
+        drop(entries);
+        for task in &changed {
+            self.hub.publish("download.updated", task);
+        }
+    }
+
     fn permits(&self) -> Arc<Semaphore> {
         self.permits.lock().unwrap().1.clone()
     }
@@ -1296,10 +1362,15 @@ impl DownloadManager {
     /// 这样“改单曲音质”和 worker 启动不会互相穿透。
     #[cfg(test)]
     fn start_audio(&self, id: &str) -> Option<AudioRetry> {
-        self.start_audio_for(id, None)
+        self.start_audio_for(id, None, "")
     }
 
-    fn start_audio_for(&self, id: &str, generation: Option<u64>) -> Option<AudioRetry> {
+    fn start_audio_for(
+        &self,
+        id: &str,
+        generation: Option<u64>,
+        default_dir: &str,
+    ) -> Option<AudioRetry> {
         let (_task, retry) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id)?;
@@ -1308,6 +1379,7 @@ impl DownloadManager {
             {
                 return None;
             }
+            entry.follow_default_dir(default_dir);
             let retry = entry.audio_retry.clone()?;
             if retry.external_preparation {
                 entry.preparation_attempt = entry.preparation_attempt.saturating_add(1).max(1);
@@ -1456,10 +1528,15 @@ impl DownloadManager {
 
     #[cfg(test)]
     fn start_video(&self, id: &str) -> Option<VideoRetry> {
-        self.start_video_for(id, None)
+        self.start_video_for(id, None, "")
     }
 
-    fn start_video_for(&self, id: &str, generation: Option<u64>) -> Option<VideoRetry> {
+    fn start_video_for(
+        &self,
+        id: &str,
+        generation: Option<u64>,
+        default_dir: &str,
+    ) -> Option<VideoRetry> {
         let (_task, retry) = {
             let mut entries = self.entries.lock().unwrap();
             let entry = entries.get_mut(id)?;
@@ -1468,6 +1545,7 @@ impl DownloadManager {
             {
                 return None;
             }
+            entry.follow_default_dir(default_dir);
             let retry = entry.video_retry.clone()?;
             if retry.external_preparation {
                 entry.preparation_attempt = entry.preparation_attempt.saturating_add(1).max(1);
@@ -2179,8 +2257,8 @@ pub fn validate_download_target(dest: &Path) -> Result<(), String> {
     result.map_err(|err| format!("下载文件夹不可写：{}（{err}）", dest.display()))
 }
 
-/// provider 通常直接写进目标目录；若用户在排队后改了全局设置，则把成品移回
-/// 任务入队时冻结的目录。目标路径在 HTTP 边界或配置读取时已经校验过来源。
+/// provider 写进当前默认下载目录；任务指定了别的文件夹，或开跑后默认目录又变了，
+/// 就把成品移到任务开跑时确定的目录。目标路径在 HTTP 边界或配置读取时已经校验过来源。
 fn relocate_download(path: &Path, dest_dir: &str) -> Result<PathBuf, String> {
     let dest = PathBuf::from(dest_dir.trim());
     validate_download_target(&dest)?;
@@ -2198,6 +2276,7 @@ pub fn enqueue_audio(
     quality: Quality,
     analyze: bool,
     dest_dir: String,
+    follow_default_dir: bool,
     hold: bool,
 ) -> DownloadTask {
     let external_preparation = state
@@ -2229,6 +2308,7 @@ pub fn enqueue_audio(
             quality,
             analyze,
             dest_dir: output_dir.clone(),
+            follow_default_dir,
             external_preparation,
         }),
         None,
@@ -2369,7 +2449,8 @@ async fn run_audio(
     if cancel.is_cancelled() {
         return;
     }
-    let Some(retry) = manager.start_audio_for(&id, Some(worker_generation)) else {
+    let default_dir = state.config.download_dir().to_string_lossy().into_owned();
+    let Some(retry) = manager.start_audio_for(&id, Some(worker_generation), &default_dir) else {
         return;
     };
     manager.wake_admission();
@@ -2384,6 +2465,7 @@ async fn run_audio(
         analyze,
         dest_dir,
         external_preparation,
+        ..
     } = retry;
     if let Err(message) = validate_download_target(Path::new(&dest_dir)) {
         worker.settle(TaskState::Failed, &message);
@@ -2706,7 +2788,8 @@ async fn run_video(
     if cancel.is_cancelled() {
         return;
     }
-    let Some(retry) = manager.start_video_for(&id, Some(worker_generation)) else {
+    let default_dir = state.config.download_dir().to_string_lossy().into_owned();
+    let Some(retry) = manager.start_video_for(&id, Some(worker_generation), &default_dir) else {
         return;
     };
     manager.wake_admission();
@@ -2891,7 +2974,7 @@ mod tests {
             generation: 1,
         };
         manager
-            .start_audio_for(&old.id, Some(old.generation))
+            .start_audio_for(&old.id, Some(old.generation), "")
             .unwrap();
         old.progress(50, 100);
         manager.pause_all();
@@ -2899,9 +2982,9 @@ mod tests {
         assert_ne!(generation, old.generation);
         // A stale queued future must not steal the retry's Queued -> Running transition.
         assert!(manager
-            .start_audio_for(&old.id, Some(old.generation))
+            .start_audio_for(&old.id, Some(old.generation), "")
             .is_none());
-        manager.start_audio_for(&old.id, Some(generation)).unwrap();
+        manager.start_audio_for(&old.id, Some(generation), "").unwrap();
         let fresh = DownloadAttempt {
             manager: manager.clone(),
             id: old.id.clone(),
@@ -2947,7 +3030,7 @@ mod tests {
             id: "prepared-generation".into(),
             generation: 1,
         };
-        manager.start_audio_for(&old.id, Some(1)).unwrap();
+        manager.start_audio_for(&old.id, Some(1), "").unwrap();
         let old_preparation = manager
             .entries
             .lock()
@@ -2957,7 +3040,7 @@ mod tests {
             .preparation_attempt;
         manager.pause_all();
         let (_, _, _, generation) = manager.prepare_audio_retry(&old.id).unwrap();
-        manager.start_audio_for(&old.id, Some(generation)).unwrap();
+        manager.start_audio_for(&old.id, Some(generation), "").unwrap();
         let fresh = DownloadAttempt {
             manager: manager.clone(),
             id: old.id.clone(),
@@ -3008,11 +3091,11 @@ mod tests {
             id: "video-generation".into(),
             generation: 1,
         };
-        manager.start_video_for(&old.id, Some(1)).unwrap();
+        manager.start_video_for(&old.id, Some(1), "").unwrap();
         manager.pause_all();
         let (_, _, _, generation) = manager.prepare_video_retry(&old.id).unwrap();
-        assert!(manager.start_video_for(&old.id, Some(1)).is_none());
-        manager.start_video_for(&old.id, Some(generation)).unwrap();
+        assert!(manager.start_video_for(&old.id, Some(1), "").is_none());
+        manager.start_video_for(&old.id, Some(generation), "").unwrap();
         let before = serde_json::to_value(manager.get(&old.id)).unwrap();
         old.apply_video_resolution(&VideoInfo {
             platform: Platform::Youtube,
@@ -3093,6 +3176,7 @@ mod tests {
             quality: Quality::Flac,
             analyze: true,
             dest_dir: "/tmp/music".into(),
+            follow_default_dir: false,
             external_preparation,
         }
     }
@@ -3358,6 +3442,7 @@ mod tests {
                 quality: Quality::Flac,
                 analyze: true,
                 dest_dir: "/music".into(),
+                follow_default_dir: false,
                 external_preparation: false,
             },
         );
@@ -3454,6 +3539,7 @@ mod tests {
                 quality: Quality::Flac,
                 analyze: true,
                 dest_dir: "/music".into(),
+                follow_default_dir: false,
                 external_preparation: false,
             },
         );
@@ -3467,6 +3553,58 @@ mod tests {
         assert!(manager
             .set_queued_audio_quality("quality", Quality::Q320)
             .is_err());
+    }
+
+    #[test]
+    fn default_folder_tasks_follow_a_changed_download_folder_until_they_start() {
+        let manager = manager();
+        // 未指定目标：成品目录入队时是 /tmp/music，但它只是当时的默认下载文件夹。
+        let mut follows = sample_task("follows", TaskState::Queued, 1.0);
+        follows.output_dir = "/tmp/music".into();
+        manager.insert(follows, CancellationToken::new());
+        manager.attach_audio_retry("follows", sample_audio_retry(false));
+        // 显式拖进某个文件夹：改默认下载文件夹不能把它带走。
+        let mut pinned = sample_task("pinned", TaskState::Queued, 2.0);
+        pinned.dest_dir = "/tmp/music".into();
+        pinned.output_dir = "/tmp/music".into();
+        manager.insert(pinned, CancellationToken::new());
+        manager.attach_audio_retry("pinned", sample_audio_retry(false));
+        // 拖进「全部曲目」：带着展开后的路径，但仍然跟随默认下载文件夹。
+        let mut video = sample_task("video", TaskState::Paused, 3.0);
+        video.kind = TaskKind::Video;
+        video.dest_dir = "/tmp/music".into();
+        video.output_dir = "/tmp/music".into();
+        manager.insert(video, CancellationToken::new());
+        manager.attach_video_retry(
+            "video",
+            VideoRetry {
+                request: VideoDownloadRequest {
+                    bvid: "BV1example".into(),
+                    dest_dir: "/tmp/music".into(),
+                    follow_default_dir: true,
+                    ..Default::default()
+                },
+                output_dir: "/tmp/music".into(),
+                external_preparation: false,
+            },
+        );
+
+        manager.follow_default_dir("/tmp/new");
+        assert_eq!(manager.get("follows").unwrap().output_dir, "/tmp/new");
+        assert_eq!(manager.get("follows").unwrap().dest_dir, "");
+        assert_eq!(manager.get("pinned").unwrap().output_dir, "/tmp/music");
+        let video = manager.get("video").unwrap();
+        assert_eq!((video.dest_dir.as_str(), video.output_dir.as_str()), ("/tmp/new", "/tmp/new"));
+
+        // 设置在别处改过（没经过 follow_default_dir）时，开跑那一刻仍以当前默认目录为准。
+        let retry = manager.start_audio_for("follows", None, "/tmp/newer").unwrap();
+        assert_eq!(retry.dest_dir, "/tmp/newer");
+        assert_eq!(manager.get("follows").unwrap().output_dir, "/tmp/newer");
+        let retry = manager.start_audio_for("pinned", None, "/tmp/newer").unwrap();
+        assert_eq!(retry.dest_dir, "/tmp/music");
+        // 已经开跑的任务不再跟着后续的设置变化跑。
+        manager.follow_default_dir("/tmp/late");
+        assert_eq!(manager.get("follows").unwrap().output_dir, "/tmp/newer");
     }
 
     #[test]
@@ -3628,6 +3766,7 @@ mod tests {
                     quality: Quality::Q320,
                     analyze: false,
                     dest_dir: String::new(),
+                    follow_default_dir: false,
                     external_preparation: true,
                 },
             );
@@ -3678,6 +3817,7 @@ mod tests {
                 quality: Quality::Q128,
                 analyze: false,
                 dest_dir: String::new(),
+                follow_default_dir: false,
                 external_preparation: true,
             },
         );
@@ -3884,6 +4024,7 @@ mod tests {
                 quality: Quality::Flac,
                 analyze: true,
                 dest_dir: "/music".into(),
+                follow_default_dir: false,
                 external_preparation: false,
             },
         );
