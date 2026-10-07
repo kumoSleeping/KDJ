@@ -41,7 +41,6 @@
   margin: 0;
   overflow: auto;
 }
-.kd-panel-dock[data-free-split] > [data-split-cell] .kd-panel-slot > .kd-panel-resize { display: none; }
 .kd-panel-dock[data-free-split] > [data-split-cell] .kd-panel-head { flex: none; }
 .kd-panel-dock[data-free-split] > [data-split-cell] > .kd-internal-window[data-docked] { height: auto; }
 /* The top is a fitted dashboard, not a scroll surface. The sidebar is a normal vertical stack. */

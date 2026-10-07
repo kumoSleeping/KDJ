@@ -169,60 +169,6 @@
   margin: 0 auto;
   border: 0;
 }
-.kd-playback-video-detached { display: grid; flex: 1; place-items: center; }
-.kd-playback-video-detached > button {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px;
-  border: 0;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-/* Task controls remain independent of the selected track's preview. */
-.kd-playback-library-panel > .kd-activity {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  align-items: stretch;
-  height: auto;
-  min-height: 0;
-  gap: 4px;
-  padding: 4px 5px;
-  border: 0;
-  overflow: auto;
-  overscroll-behavior: contain;
-}
-.kd-playback-library-panel .kd-activity-glyphs { display: none; }
-.kd-playback-library-panel .kd-activity-texts {
-  flex: 1 0 auto;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  overflow: visible;
-  font-size: var(--kd-size-xs);
-}
-.kd-playback-library-panel .kd-activity-text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.kd-playback-library-panel .kd-activity-control { margin: 0; }
-.kd-panel-slot > .kd-playback-library-panel :is(.kd-activity-text, .kd-activity-control) {
-  font-size: var(--kd-size-xs);
-  line-height: 1.4;
-}
-.kd-panel-slot:not([data-compact="true"]) > .kd-playback-library-panel .kd-activity-control {
-  display: block;
-  min-width: 0;
-  max-width: 100%;
-  padding: 1px 0;
-  text-align: left;
-  white-space: normal;
-}
-.kd-panel-slot:not([data-compact="true"]) > .kd-playback-library-panel .kd-activity-control > svg {
-  display: inline-block;
-  vertical-align: -1px;
-  margin-right: 2px;
-}
-.kd-playback-library-panel .kd-activity-selection { flex-wrap: wrap; white-space: normal; gap: 4px; }
 /* Compact cards use two rows; medium cards group pitch/tempo beside the EQ.
    Wide cards fit both groups on one line, in either dock. */
 @container playback-control (min-width: 320px) {
@@ -259,10 +205,7 @@
 .kd-split-aside[hidden],
 .kd-split-handle[hidden] { display: none !important; }
 
-
-
 .kd-playback-panels .kd-panel-slot[data-panel-id="lyrics"] { max-height: 360px; overflow: auto; overscroll-behavior: contain; }
-
 
 /* Keep card boundaries legible, including the low-contrast Sakura palette. */
 .kd-playback-panels > .kd-panel-stack { min-width: 0; }
@@ -274,7 +217,6 @@
   border-color: #fff0f5 #986273 #986273 #fff0f5;
   box-shadow: 1px 1px 0 #bb8295, inset 1px 1px 0 #fff0f5;
 }
-
 
 .kd-playback-panels .kd-panel-stack[data-single-visible] .kd-panel-mount:not([data-detached]) .kd-panel-slot > .kd-panel { border:0; box-shadow:none; height:auto; }
 

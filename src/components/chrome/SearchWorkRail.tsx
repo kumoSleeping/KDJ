@@ -124,7 +124,7 @@ export function SearchWorkRail({
           <>
             <InlineNotice text={queueError} onDismiss={onDismissQueueError} />
             {showVideoAudioOnly ? (
-              <label className="kd-muted" style={{ cursor: "pointer", fontSize: 11 }}>
+              <label className="kd-muted" style={{ cursor: "pointer", fontSize: "var(--kd-size-xs)" }}>
                 <input
                   type="checkbox"
                   checked={videoAudioOnly}

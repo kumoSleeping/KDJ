@@ -48,8 +48,8 @@ export function KvjMediaBrowser() {
       {([["projects", "工程"], ["library", "曲库"], ["exports", "已导出"]] as const).map(([id, label]) =>
         <button key={id} type="button" aria-pressed={tab === id} onClick={() => setTab(id)}>{label}</button>)}
       <span />
-      {tab === "projects" ? <button type="button" aria-label="新建工程" disabled={saving > 0} onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={15} /></button>
-        : <button type="button" aria-label="刷新素材" onClick={() => { setRefresh(value => value + 1); void useWorkshopStore.getState().refresh(); }}><RefreshCw size={14} /></button>}
+      {tab === "projects" ? <button type="button" aria-label="新建工程" title="新建工程" disabled={saving > 0} onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={14} /></button>
+        : <button type="button" aria-label="刷新素材" title="刷新素材" onClick={() => { setRefresh(value => value + 1); void useWorkshopStore.getState().refresh(); }}><RefreshCw size={14} /></button>}
     </nav>
     {tab === "library" && <div className="kd-kvj-browser-filter">
       <input type="search" aria-label="搜索曲库素材" value={query} onChange={e => { setQuery(e.target.value); setOffset(0); }} />
@@ -69,19 +69,19 @@ export function KvjMediaBrowser() {
           onDoubleClick={() => add(track.id)} title={track.path}>
           {["mp4", "mkv", "webm", "mov", "avi", "m4v"].includes(track.format.toLowerCase()) ? <FileVideo size={16} /> : <Music2 size={16} />}<span><strong>{track.title || track.filename}</strong><small>{[track.artist, formatDuration(track.duration ?? 0)].filter(Boolean).join(" · ")}</small></span>
         </button>
-        <button type="button" aria-label={`加入时间线：${track.title || track.filename}`} disabled={saving > 0} onClick={() => add(track.id)}><Plus size={14} /></button>
+        <button type="button" aria-label={`加入时间线：${track.title || track.filename}`} title="加入时间线" disabled={saving > 0} onClick={() => add(track.id)}><Plus size={14} /></button>
       </div>)}
       {tab === "exports" && jobs.filter(job => job.phase === "complete" && job.path).map(job => <div className="kd-kvj-source" key={job.id}>
         <button type="button" className="kd-kvj-source-main" title={job.path} onClick={() => void window.kdj?.revealPath(job.path).catch(e => setError(String(e)))}>
           <FileVideo size={16} /><span><strong>{job.path.split(/[\\/]/).pop()}</strong><small>{projects.find(p => p.id === job.project_id)?.name}</small></span>
         </button>
-        {job.track_id !== null && <button type="button" aria-label="将成品加入时间线" disabled={saving > 0} onClick={() => add(job.track_id!)}><Plus size={14} /></button>}
+        {job.track_id !== null && <button type="button" aria-label="将成品加入时间线" title="将成品加入时间线" disabled={saving > 0} onClick={() => add(job.track_id!)}><Plus size={14} /></button>}
       </div>)}
     </div>
     {tab === "library" && page && page.total > 60 && <footer className="kd-kvj-browser-pages">
-      <button type="button" aria-label="上一页素材" disabled={offset === 0 || loading} onClick={() => setOffset(value => Math.max(0, value - 60))}><ChevronLeft size={14} /></button>
+      <button type="button" aria-label="上一页素材" title="上一页" disabled={offset === 0 || loading} onClick={() => setOffset(value => Math.max(0, value - 60))}><ChevronLeft size={14} /></button>
       <span>{offset + 1}–{Math.min(offset + page.items.length, page.total)} / {page.total}</span>
-      <button type="button" aria-label="下一页素材" disabled={offset + 60 >= page.total || loading} onClick={() => setOffset(value => value + 60)}><ChevronRight size={14} /></button>
+      <button type="button" aria-label="下一页素材" title="下一页" disabled={offset + 60 >= page.total || loading} onClick={() => setOffset(value => value + 60)}><ChevronRight size={14} /></button>
     </footer>}
   </div>;
 }

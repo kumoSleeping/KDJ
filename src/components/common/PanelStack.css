@@ -85,10 +85,6 @@
 :root:not([data-theme-pack]) .kd-panel-docked-host .kd-search-band-host {
   border-bottom-color: transparent;
 }
-.kd-track-preview-content .kd-panel-slot { flex: 1 1 45%; min-width: 0; }
-.kd-track-preview-content .kd-panel-slot > div { height: 140px; }
-.kd-track-preview-content .kd-panel-slot > div > .kd-panel > .kd-panel-head { display: flex; }
-.kd-track-preview-content > .kd-panel-index-toggle { display: none; }
 .kd-table-wrap[data-aside="open"] > .kd-top-wide-search { grid-column: 1 / -1; grid-row: 1; }
 .kd-table-wrap[data-aside="open"] > .kd-panel-dock-top { grid-column: 1; grid-row: 2; }
 .kd-table-wrap[data-aside="open"] > .kd-split-aside,

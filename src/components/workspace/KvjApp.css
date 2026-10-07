@@ -70,7 +70,7 @@
 @media (max-width:960px) {
   .kd-kvj-editor-grid, .kd-kvj-editor-grid[data-browser][data-inspector] { grid-template-columns:0 0 minmax(0,1fr) 0 0; }
   .kd-kvj-divider-left, .kd-kvj-divider-right { display:none; }
-  .kd-kvj-browser-pane, .kd-kvj-inspector { position:absolute; top:0; bottom:calc(var(--kvj-timeline) + 5px); width:min(42%,280px); z-index:5; background:var(--kd-panel); box-shadow:0 2px 8px #0002; }
+  .kd-kvj-browser-pane, .kd-kvj-inspector { position:absolute; top:0; bottom:calc(var(--kvj-timeline) + 5px); width:min(42%,280px); z-index:5; background:var(--kd-panel); box-shadow:var(--kd-shadow-float); }
   .kd-kvj-browser-pane { left:0; }
   .kd-kvj-inspector { right:0; }
   .kd-kvj-editor-header { gap:4px; padding:4px 10px; }

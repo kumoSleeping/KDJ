@@ -9,7 +9,6 @@
   background: var(--kd-panel);
 }
 .kd-track-preview-row[hidden] { display: none; }
-.kd-preview-index { position: absolute; top: 5px; right: 8px; z-index: 1; }
 .kd-track-preview.kd-col, .kd-track-preview {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -48,16 +47,13 @@
   .kd-track-preview { grid-template-columns: minmax(0, 1fr); }
 }
 
-.kd-track-preview-facts { flex: 1 1 45%; min-width: 0; }
 .kd-track-preview-eq { flex: 1 1 55%; min-width: 0; height: 112px; overflow: auto; }
 .kd-track-preview-eq .kd-panel { margin: 0; height: 100%; }
 .kd-track-preview-eq .kd-panel-head { min-height: 24px; padding: 2px 6px; font-size: var(--kd-size-xs); }
 @container (max-width: 760px) {
   .kd-track-preview-row { overflow-x: auto; }
-  .kd-track-preview-facts { flex: 1 0 300px; }
   .kd-track-preview-eq { flex: 1 0 280px; }
 }
-
 
 /* EQ occupies the former analysis slot; waveform occupies the former EQ slot. */
 .kd-track-preview-row > .kd-track-preview-eq { flex: 1 1 45%; }
@@ -72,18 +68,3 @@
 
 /* Reserve both surfaces even while a new track has no deck or waveform yet. */
 .kd-track-preview-row { overflow: visible; }
-.kd-track-preview-combined { flex: 1; min-width: 0; margin: 0; }
-.kd-track-preview-content { display: flex; align-items: stretch; min-width: 0; }
-.kd-track-preview-content > .kd-track-preview-eq { flex: 1 1 45%; height: 112px; overflow: auto; }
-.kd-track-preview-content > .kd-track-preview-waveform { flex: 1 1 55%; height: 112px; min-height: 0; }
-.kd-track-preview-content > div > .kd-panel { border: 0; box-shadow: none; margin: 0; border-radius: 0; }
-.kd-track-preview-content > div > .kd-panel > .kd-panel-head { display: none; }
-.kd-track-preview-content > .kd-track-preview-waveform { border-left: 1px solid var(--kd-line); }
-.kd-track-preview-combined > .kd-panel-head { min-height: 24px; padding: 2px 6px; }
-@media (max-width: 720px) {
-  .kd-track-preview-content { flex-wrap: wrap; }
-  .kd-track-preview-content > .kd-track-preview-eq,
-  .kd-track-preview-content > .kd-track-preview-waveform { flex-basis: 100%; }
-}
-
-.kd-track-preview-content > .kd-track-preview-waveform:first-child { border-left: 0; }

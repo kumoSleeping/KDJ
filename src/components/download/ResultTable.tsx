@@ -4,7 +4,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Disc3,
   ListMusic,
   LoaderCircle,
   RotateCcw,
@@ -339,17 +338,9 @@ export function ResultTable({
 
   if (items.length === 0 && !video) {
     return searched ? (
-      <EmptyState
-        icon={<SearchX size={22} />}
-        title="没有结果"
-        hint="换个关键词试试；如果某个平台报错，看上方的错误提示——多半是没登录或该平台限制了。"
-      />
+      <EmptyState icon={<SearchX size={22} />} title="没有结果" />
     ) : (
-      <EmptyState
-        icon={<Disc3 size={22} />}
-        title="搜点什么"
-        hint="支持关键词、分享链接、歌单链接；直接粘贴多行文本会自动按行拆开批量处理。"
-      />
+      <div className="kd-empty" />
     );
   }
 

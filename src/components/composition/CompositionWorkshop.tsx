@@ -273,7 +273,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
       <header className="vj-header vj-workshop-toolbar" data-workshop-toolbar="" aria-label="工作站操作">
         {aligning && <><span role="status">对齐中</span><button onClick={() => void useWorkshopStore.getState().cancelAlign()}>取消对齐</button></>}
         {!workspace && <><button type="button" aria-label="新建任务" title="新建任务" disabled={saving > 0}
-          onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={16} /></button>
+          onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={15} /></button>
         <button
           type="button"
           aria-label="撤销"
@@ -281,7 +281,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           disabled={!past}
           onClick={() => useWorkshopStore.getState().undo()}
         >
-          <Undo2 size={16} />
+          <Undo2 size={15} />
         </button>
         <button
           type="button"
@@ -290,7 +290,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           disabled={!future}
           onClick={() => useWorkshopStore.getState().redo()}
         >
-          <Redo2 size={16} />
+          <Redo2 size={15} />
         </button>
         <span className="vj-save-state" role="status">
           {saving ? "保存中" : ""}
@@ -304,10 +304,11 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           <button
             type="button"
             aria-label="作品菜单"
+            title="作品菜单"
             aria-expanded={more}
             onClick={() => setMore((v) => !v)}
           >
-            <MoreHorizontal size={17} />
+            <MoreHorizontal size={15} />
           </button>
           {more && (
             <div className="vj-menu">
@@ -356,11 +357,12 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
         <button
           type="button"
           aria-label={playback.playing ? "暂停作品" : "播放作品"}
+          title={playback.playing ? "暂停" : "播放"}
           aria-busy={playback.loading}
           disabled={!p || projectDuration(p) <= 0}
           onClick={togglePlayback}
         >
-          {playback.playing ? <Pause size={17} /> : <Play size={17} />}
+          {playback.playing ? <Pause size={15} /> : <Play size={15} />}
         </button>
         <span className="vj-preparing">
           {playback.loading ? "准备预览" : ""}
@@ -372,7 +374,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           title="前一帧；Shift 十帧"
           onClick={(e) => nudge(-1, e.shiftKey)}
         >
-          <ChevronLeft size={16} />前一帧
+          <ChevronLeft size={15} />前一帧
         </button>
         <button
           type="button"
@@ -380,7 +382,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           title="后一帧；Shift 十帧"
           onClick={(e) => nudge(1, e.shiftKey)}
         >
-          <ChevronRight size={16} />后一帧
+          <ChevronRight size={15} />后一帧
         </button>
         <button
           type="button"
@@ -389,7 +391,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           disabled={!c}
           onClick={cut}
         >
-          <Scissors size={16} />剪断
+          <Scissors size={15} />剪断
         </button>
         <button
           type="button"
@@ -417,7 +419,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
         {projectActions}
         <button type="button" className="vj-preview-toggle" aria-label="打开作品预览小窗" title="预览小窗"
           aria-pressed={previewOpen && hasVideo} disabled={!hasVideo}
-          onClick={() => setPreviewOpen(v => !v)}><PictureInPicture2 size={16} /></button></>}
+          onClick={() => setPreviewOpen(v => !v)}><PictureInPicture2 size={15} /></button></>}
       </header>
 
       </>} />
@@ -438,6 +440,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
               <button
                 type="button"
                 aria-label="关闭旧导出"
+                title="关闭"
                 onClick={() => setLegacyOpen(false)}
               >
                 <X size={15} />
@@ -477,6 +480,7 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
               <button
                 type="button"
                 aria-label="关闭自动对齐"
+                title="关闭"
                 onClick={() => setAlign(false)}
               >
                 <X size={15} />
@@ -584,7 +588,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null, w
     {expanded !== null && (backTarget ? createPortal(backButton, backTarget)
       : <div className="vj-editor-navigation">{backButton}<span>视频项目</span></div>)}
     {expanded === null && <WorkshopToolbar>
-      <button aria-label="新建任务" disabled={saving > 0} onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={16} /></button>
+      <button type="button" aria-label="新建任务" title="新建任务" disabled={saving > 0} onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={14} /></button>
       <span className="vj-spacer" />
       <button disabled={saving > 0 || submitting || !(projects.some(p => projectDuration(p) > 0 && !jobs.some(j => j.project_id === p.id && ["queued","rendering","validating","committing","importing"].includes(j.phase))) || visualizerTasks.some(visualizerExportStartable))} onClick={() => {
         if (projects.some(p => projectDuration(p) > 0 && !jobs.some(j => j.project_id === p.id && ["queued","rendering","validating","committing","importing"].includes(j.phase)))) void useWorkshopStore.getState().exportAll();

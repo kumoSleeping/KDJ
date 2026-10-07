@@ -40,4 +40,3 @@
 .kd-task-window-entry button:hover:not(:disabled) { color: var(--kd-theme); }
 .kd-task-window-entry progress { width: 100%; height: 4px; accent-color: var(--kd-theme); }
 .kd-task-window button:disabled { opacity: .45; cursor: default; }
-.kd-task-window-error { color: var(--kd-warn); }

@@ -182,19 +182,13 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   );
 
   const body = !track.camelot || !track.bpm ? (
-    <p className="kd-muted">这首还没分析出调号和 BPM，先跑一次分析。</p>
+    <p className="kd-muted">缺少调号或 BPM</p>
   ) : loading ? (
     <p className="kd-muted kd-row">
       <LoaderCircle className="kd-spin" size={13} /> 正在匹配
     </p>
   ) : error ? (
     <p style={{ color: "var(--kd-danger)" }}>{error}</p>
-  ) : matches.length === 0 ? (
-    <p className="kd-muted">
-      {activeFolder ? "这个文件夹里" : "曲库里"}
-      还没有能接上的。判断标准是调性相容且 BPM 在 ±12 以内（半速、倍速也算）。
-      {activeFolder && "换成「全部」再看看。"}
-    </p>
   ) : null;
 
   if (body) {

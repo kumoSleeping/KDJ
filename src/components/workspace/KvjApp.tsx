@@ -62,7 +62,7 @@ export function KvjApp({ tab }: { tab: KvjTab }) {
       showWindowControls={platform === "win32" || platform === "linux"} />}
     {ready ? <EditorPanel tab={tab} />
       : <div className="kd-kvj-loading" role="status">{booting ? <LoaderCircle className="kd-spin" size={20} />
-        : <><span>{error}</span><button type="button" aria-label="重试连接" onClick={() => void bootEditor()}><RefreshCw size={16} /></button></>}</div>}
+        : <><span>{error}</span><button type="button" aria-label="重试连接" title="重试连接" onClick={() => void bootEditor()}><RefreshCw size={16} /></button></>}</div>}
     <ToastHost />
   </div>;
 }

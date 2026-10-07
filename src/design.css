@@ -176,44 +176,6 @@
 .kd-track-cache-fact[data-state="running"] {
   color: var(--kd-text-body);
 }
-.kd-stream-analysis-status {
-  min-height: 3.1rem;
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.65rem;
-  border: 1px solid var(--kd-line-soft);
-  background: var(--kd-panel-inset);
-}
-.kd-stream-analysis-status > svg {
-  flex: none;
-  margin-top: 0.1rem;
-  color: var(--kd-theme);
-}
-.kd-stream-analysis-status strong,
-.kd-stream-analysis-status span {
-  display: block;
-}
-.kd-stream-analysis-status strong {
-  color: var(--kd-text-body);
-  font-size: var(--kd-size-sm);
-  line-height: 1.35;
-}
-.kd-stream-analysis-status span {
-  margin-top: 0.18rem;
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  line-height: 1.4;
-}
-.kd-stream-analysis-warning,
-.kd-stream-analysis-note {
-  margin: 0.35rem 0 0;
-  font-size: var(--kd-size-xs);
-  line-height: 1.4;
-}
-.kd-stream-analysis-warning {
-  color: var(--kd-warn);
-}
 
 :root[data-theme="light"] {
   color-scheme: light;
@@ -258,14 +220,8 @@
   background: var(--kd-panel);
   border-color: var(--kd-line);
 }
-:root[data-theme="light"]:not([data-theme-pack]) :is(
-  .kd-folder[data-selected="true"],
-  .kd-folder[data-active="true"],
-  .kd-narrow-folder-rail button[data-active="true"],
-  .kd-filter-control[data-active="true"]
-) {
+:root[data-theme="light"]:not([data-theme-pack]) .kd-folder[data-selected="true"] {
   color: var(--kd-theme);
-  background: transparent;
 }
 
 *,
@@ -678,8 +634,7 @@ textarea {
 }
 .kd-app input,
 .kd-app textarea,
-.kd-app [contenteditable="true"],
-.kd-app .kd-selectable {
+.kd-app [contenteditable="true"] {
   user-select: text;
   -webkit-user-select: text;
 }
@@ -717,12 +672,6 @@ textarea {
   height: calc(var(--kd-sheet-head-h) + var(--kd-safe-top));
   min-height: calc(var(--kd-sheet-head-h) + var(--kd-safe-top));
 }
-.kd-app[data-mobile="true"] .kd-dialog-head {
-  padding-top: calc(0.9rem + var(--kd-safe-top));
-}
-.kd-app[data-mobile="true"] .kd-fabs {
-  bottom: calc(var(--kd-player-h) + 1.1rem + var(--kd-safe-bottom));
-}
 .kd-app[data-mobile="true"] .kd-player {
   padding-bottom: var(--kd-safe-bottom);
 }
@@ -730,20 +679,6 @@ textarea {
 .kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-app-chrome-actions {
   gap: 0.15rem;
   margin-bottom: 0.05rem;
-}
-.kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-chrome-history {
-  gap: 0.05rem;
-  margin-right: 0.1rem;
-  padding-right: 0.15rem;
-  border-right: 1px solid var(--kd-line);
-}
-.kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-chrome-nav-btn {
-  width: 2rem;
-  height: 2rem;
-}
-.kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-chrome-nav-btn svg {
-  width: 1rem;
-  height: 1rem;
 }
 
 .kd-body {
@@ -754,15 +689,6 @@ textarea {
 .kd-body > .kd-section {
   flex: 1 1 auto;
   min-height: 0;
-}
-
-/* 旧版用一条横跨整页的空白层避让红绿灯，三栏因此全部被无意义地压低。
-   结构现已顶到窗口上沿；这个兼容类保持不占空间，避免旧节点意外撑高。 */
-.kd-window-spacer {
-  display: none;
-}
-.kd-app[data-mac="true"] .kd-window-spacer {
-  display: none;
 }
 
 /* —— 主区 —— */
@@ -795,9 +721,6 @@ textarea {
 .kd-stage > .kd-split {
   flex: 1;
   min-height: 0;
-}
-.kd-pad {
-  padding: 1.25rem;
 }
 /* 三档布局的网格。把手和两侧栏由 JS 按档位摘掉，这里只负责列的构成。
    档位定义见 src/lib/useLayoutMode.ts。 */
@@ -853,9 +776,8 @@ textarea {
   background: var(--kd-hover);
 }
 .kd-narrow-folder-rail button[data-active="true"] {
-  color: var(--kd-text);
-  background: var(--kd-selected);
-  box-shadow: none;
+  color: var(--kd-theme);
+  background: transparent;
 }
 .kd-narrow-global-actions,
 .kd-narrow-source-roots,
@@ -1105,37 +1027,6 @@ textarea {
 .kd-panel-body {
   padding: 0.85rem;
 }
-/* 统计块 */
-.kd-stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 1px;
-  background: var(--kd-line);
-  border: 1px solid var(--kd-line);
-}
-.kd-stat {
-  background: var(--kd-panel);
-  padding: 0.75rem 0.9rem;
-}
-.kd-stat-label {
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-.kd-stat-value {
-  margin-top: 0.25rem;
-  font-size: 1.35rem;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-}
-.kd-stat-hint {
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  font-variant-numeric: tabular-nums;
-}
 
 /* ============================================================
  * 按钮：简洁文字与图标，主题色标识主动作。
@@ -1194,10 +1085,6 @@ textarea {
   background: transparent;
   color: color-mix(in srgb, var(--kd-danger) 80%, #000);
 }
-.kd-detail-delete:hover:not(:disabled) {
-  background: transparent !important;
-  color: var(--kd-danger) !important;
-}
 .kd-btn[data-size="sm"] {
   height: 1.5rem;
   padding: 0 0.5rem;
@@ -1253,8 +1140,7 @@ textarea {
   cursor: not-allowed;
 }
 /* B 站系的选项染平台粉（同 kd-plat：品牌色唯一被允许上色的时刻） */
-.kd-opts[data-tone="bili"] .kd-opt[aria-pressed="true"],
-.kd-opt-bili[aria-pressed="true"] {
+.kd-opts[data-tone="bili"] .kd-opt[aria-pressed="true"] {
   color: #fb7299;
   box-shadow: none;
 }
@@ -1275,105 +1161,6 @@ textarea {
   margin-left: 0.22rem;
   vertical-align: -1px;
 }
-/* 选项行里的静态字（“小节”这种单位、提示）：和未选项同灰，不响应点击 */
-.kd-opts > .kd-opts-note {
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-}
-
-/* 分段控件 */
-.kd-segment {
-  display: inline-flex;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-raised);
-}
-.kd-segment > button {
-  height: 1.85rem;
-  padding: 0 0.7rem;
-  border: none;
-  border-right: 1px solid var(--kd-line);
-  background: transparent;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-.kd-segment > button:last-child {
-  border-right: none;
-}
-/* 激活态用中性底色而不是主题红：分段开关是"状态"，不是"动作"。
-   满屏的开关每个都亮一块红，真正要按的那颗红按钮反而没了分量。 */
-.kd-segment > button[aria-pressed="true"],
-.kd-segment > button[aria-checked="true"] {
-  background: var(--kd-selected);
-  color: var(--kd-text);
-}
-.kd-segment[data-wrap="true"] {
-  display: flex;
-  flex-wrap: wrap;
-  width: 100%;
-}
-.kd-segment[data-wrap="true"] > button {
-  height: auto;
-  min-height: 1.85rem;
-  flex: 1 1 auto;
-  padding: 0.4rem 0.7rem;
-  white-space: normal;
-  text-align: left;
-  line-height: 1.35;
-  font-weight: 600;
-}
-.kd-djp-seg-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.45rem;
-}
-.kd-djp-seg-row > .kd-opts-note {
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-}
-/* 例外：搜索平台按钮激活时上各家品牌色（和来源图标同一组色值），认色比认字快。
-   网易云红底配白字；QQ 绿和 SC 橙偏亮，配深字才够对比。 */
-.kd-segment > button[data-platform="wyy"][aria-pressed="true"] {
-  background: #e63329;
-  color: #fff;
-}
-.kd-segment > button[data-platform="qqm"][aria-pressed="true"] {
-  background: #31c27c;
-  color: #0c2018;
-}
-.kd-segment > button[data-platform="soundcloud"][aria-pressed="true"] {
-  background: #ff8800;
-  color: #2b1600;
-}
-.kd-segment > button[data-platform="ytm"][aria-pressed="true"],
-.kd-segment > button[data-platform="youtube"][aria-pressed="true"] {
-  background: #ff2b2b;
-  color: #fff;
-}
-.kd-segment > button[data-platform="bilibili"][aria-pressed="true"] {
-  background: #fb7299;
-  color: #fff;
-}
-/* 平台按钮可以拖动排优先级：拖动中的半透明 */
-.kd-segment > button[data-dragging] {
-  opacity: 0.4;
-}
-/* 白天模式：QQ 绿满饱和压在白底上太沉，提亮一档（其余两家本来就亮） */
-:root[data-theme="light"] .kd-segment > button[data-platform="qqm"][aria-pressed="true"] {
-  background: #43d693;
-  color: #093721;
-}
-/* 关着但可点：淡下去 + 虚线，和 disabled 的死灰区分开 */
-.kd-segment > button[data-off] {
-  color: var(--kd-faint);
-  border-style: dashed;
-}
-.kd-segment > button:hover:not([aria-pressed="true"]):not([aria-checked="true"]) {
-  background: var(--kd-hover);
-  color: var(--kd-text);
-}
 
 /* ============================================================
  * 表单
@@ -1393,22 +1180,11 @@ textarea {
 .kd-panel-dense .kd-field {
   gap: 0.15rem;
 }
-.kd-detail-viz-actions { display: inline-flex; align-items: center; gap: 0.15rem; }
 /* Keep the preview inside the theme's two-pixel inset window frame. Opaque
    preview/loading surfaces otherwise paint over the parent's bevel. */
 :root[data-theme-pack="sakulaptop98"] .kd-detail-viz-panel { padding: 2px; }
 .kd-panel-dense .kd-panel-body > * + * {
   margin-top: 0.5rem;
-}
-.kd-stat-grid[data-dense="true"] .kd-stat {
-  padding: 0.4rem 0.5rem;
-}
-.kd-stat-grid[data-dense="true"] .kd-stat-value {
-  margin-top: 0.1rem;
-  font-size: 1.05rem;
-}
-.kd-stat-grid[data-dense="true"] {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .kd-track-detail {
@@ -1767,40 +1543,6 @@ textarea {
   padding-left: var(--kd-traffic-pad, 0px);
   justify-content: flex-start;
 }
-.kd-chrome-history {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.02rem;
-}
-.kd-chrome-nav-btn {
-  appearance: none;
-  width: 1.55rem;
-  height: 1.55rem;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-.kd-chrome-nav-btn:hover:not(:disabled) {
-  color: var(--kd-text);
-  background: var(--kd-hover);
-}
-.kd-chrome-nav-btn:disabled {
-  color: var(--kd-faint);
-  opacity: 0.55;
-  cursor: default;
-}
-.kd-app-chrome-actions {
-  flex: none;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  -webkit-app-region: no-drag;
-}
 /* 主栏顶上的在线搜索：默认跟主题面板色；提交时彩带从左往右推，再淡回底色。 */
 .kd-search-band-host {
   flex: none;
@@ -1850,21 +1592,6 @@ textarea {
   min-width: 0;
   margin: 0;
   padding: 0;
-}
-.kd-search-band-trailing {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-  margin-left: auto;
-  margin-right: -0.35rem;
-}
-.kd-search-band-sep {
-  flex: none;
-  align-self: center;
-  width: 1px;
-  height: 1.15rem;
-  margin: 0 0.35rem 0 0.45rem;
-  background: color-mix(in srgb, var(--kd-text) 12%, transparent);
 }
 .kd-search-band .kd-searchbar {
   position: relative;
@@ -2008,11 +1735,6 @@ textarea {
   min-width: 2rem;
   -webkit-app-region: drag;
 }
-.kd-app-chrome-aside {
-  flex: none;
-  margin-left: 0.1rem;
-  -webkit-app-region: no-drag;
-}
 
 /* 左栏只负责文件夹内容；竖分割线由中间把手画，这里不再加边框以免变粗。 */
 .kd-tree-slot {
@@ -2052,28 +1774,6 @@ textarea {
   min-height: 0;
   display: flex;
   flex-direction: column;
-}
-
-/* 中间栏搜索命令区（拖拽已上移到主栏眉头）。 */
-.kd-list-head {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0;
-  min-height: 0;
-  padding: 0;
-  border-bottom: 1px solid var(--kd-line);
-  /* 搜索区是工具栏，不是内容占位块：与顶栏共用面色，用留白和细线分层，
-     避免浅色主题下横着铺出一整块灰底。 */
-  background: var(--kd-panel);
-  flex: none;
-}
-.kd-list-head button,
-.kd-list-head input,
-.kd-list-head textarea,
-.kd-list-head .kd-searchbar,
-.kd-list-head .kd-chrome-actions {
-  -webkit-app-region: no-drag;
 }
 
 /* 右栏眉目：与左侧分析/搜索工作条同高同线；开合键弹出时在本条右端。 */
@@ -2399,163 +2099,8 @@ textarea {
 .kd-split-aside-body .kd-text-action {
   -webkit-app-region: no-drag;
 }
-.kd-aside-foot {
-  flex: none;
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  padding: 0.15rem 0.3rem;
-  border-top: 1px solid var(--kd-line-soft);
-  background: var(--kd-panel);
-}
-.kd-aside-foot-btn {
-  appearance: none;
-  width: 1.7rem;
-  height: 1.7rem;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-.kd-aside-foot-btn:hover {
-  color: var(--kd-text);
-  background: var(--kd-hover);
-}
-.kd-list-title {
-  padding-left: 0.75rem;
-  font-size: var(--kd-size-sm);
-  font-weight: 700;
-}
-/* 统计是**次要**信息：它先缩、先出省略号，绝不占用主角的位置 */
-.kd-list-note {
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  flex: 0 1 9rem;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* 搜索失败时这行摘要就地变成错误文案：另起一行会把列表顶得跳一下 */
-.kd-list-note[data-error="true"] {
-  color: var(--kd-danger);
-}
-.kd-list-tabs {
-  display: flex;
-  align-self: stretch;
-  /* 标签是这一行的**主角**（切曲库/搜索是最常用的动作）。
-     不许缩、不许换行——上一版没写，结果统计那串次要文字把整行吃满，
-     主角反而被压成「曲 库」「搜 索」两行竖排。 */
-  flex: none;
-}
-.kd-list-tabs > button {
-  white-space: nowrap;
-}
-.kd-list-tabs > button {
-  height: 100%;
-  padding: 0 0.7rem;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: var(--kd-size-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-.kd-library-query {
-  flex: 1 1 auto;
-  min-width: 8rem;
-  height: 2.55rem;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0 0.7rem;
-  background: var(--kd-panel-inset);
-  color: var(--kd-muted);
-}
-.kd-library-query:focus-within {
-  background: var(--kd-panel-raised);
-  color: var(--kd-theme);
-}
-.kd-library-query > input {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--kd-text);
-  font: inherit;
-  font-size: var(--kd-size-lg);
-}
-.kd-library-query > input::placeholder {
-  color: var(--kd-muted);
-}
-.kd-library-query > button {
-  appearance: none;
-  width: 1.5rem;
-  height: 1.5rem;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-.kd-account-entry {
-  appearance: none;
-  flex: none;
-  align-self: stretch;
-  min-width: 3.5rem;
-  padding: 0 0.55rem;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.1rem;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: 0.58rem;
-  cursor: pointer;
-}
-.kd-account-entry:hover {
-  color: var(--kd-text);
-  background: var(--kd-hover);
-}
-.kd-account-entry[aria-pressed="true"] {
-  color: var(--kd-theme);
-  background: transparent;
-}
-/* 激活态只用亮字和字重，不铺底色或彩色短横杠。 */
-.kd-list-tabs > button[aria-pressed="true"] {
-  color: var(--kd-text);
-  background: transparent;
-  box-shadow: none;
-  font-weight: 700;
-}
-.kd-list-tabs > button:hover:not([aria-pressed="true"]) {
-  color: var(--kd-text);
-}
 
 /* 勾选后才浮出来的动作条：唯一的红色按钮只在"有东西可入队"这一刻出现 */
-.kd-picked-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.45rem 0.75rem;
-  border-top: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-  flex: none;
-}
-.kd-picked-bar-top {
-  border-top: 1px solid var(--kd-line-soft);
-  border-bottom: 1px solid var(--kd-line-soft);
-}
 .kd-selection-bar {
   position: sticky;
   top: 0;
@@ -2754,19 +2299,6 @@ body[data-kd-col-dragging="true"] * {
   cursor: grabbing !important;
   user-select: none !important;
   -webkit-user-select: none !important;
-}
-.kd-selection-tools {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--kd-text);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
 }
 .kd-table tbody td {
   height: var(--kd-row-h);
@@ -2992,26 +2524,6 @@ button.kd-thumb {
   padding: 0;
   cursor: pointer;
 }
-.kd-thumb-glass {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  background: color-mix(in srgb, #000 45%, transparent);
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-/* 悬停整行就露脸——图标才 22px，等着人精确悬到图上等于藏起来；
-   正在放/正在连的那行常亮，滚过一屏也知道声音是谁出的 */
-tr:hover .kd-thumb-glass,
-.kd-thumb[data-live="true"] .kd-thumb-glass {
-  opacity: 1;
-}
-.kd-thumb-glass[data-error="true"] {
-  opacity: 1;
-  color: var(--kd-danger);
-}
 
 /* ------------------------------------------------------------------
  * 结果表里的视频行
@@ -3027,16 +2539,6 @@ tr:hover .kd-thumb-glass,
 body[data-kd-search-pointer-dragging="true"] .kd-table tbody tr[data-video="true"] {
   cursor: grabbing;
 }
-.kd-video-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.65rem;
-  min-width: 0;
-  /* 视频在 WKWebView 里走指针拖动，不依赖不稳定的 HTML5 draggable。 */
-  cursor: grab;
-  user-select: none;
-  -webkit-user-select: none;
-}
 body[data-kd-search-pointer-dragging="true"],
 body[data-kd-search-pointer-dragging="true"] * {
   cursor: grabbing !important;
@@ -3049,15 +2551,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   outline: 1px dashed color-mix(in srgb, var(--kd-accent) 70%, transparent);
   outline-offset: -2px;
   background: color-mix(in srgb, var(--kd-accent) 9%, transparent);
-}
-.kd-video-row .kd-video-controls,
-.kd-video-row .kd-video-controls * {
-  cursor: auto;
-}
-.kd-video-row .kd-video-controls button,
-.kd-video-row .kd-video-controls :is(select, .kd-select-control),
-.kd-video-row .kd-video-controls label {
-  cursor: pointer;
 }
 .kd-cycle-field {
   display: inline-flex;
@@ -3298,60 +2791,6 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 .kd-text-action:hover:not(:disabled) {
   color: var(--kd-theme);
-}
-/* 16:9：视频封面本来就是宽的，裁成方块等于把画面切掉一半。
-   尺寸写死，图片加载完不会把整行顶一下。 */
-.kd-video-cover {
-  flex: none;
-  display: block;
-  width: 104px;
-  aspect-ratio: 16 / 9;
-  background: var(--kd-panel-inset);
-  border: 1px solid var(--kd-line-soft);
-  overflow: hidden;
-}
-.kd-video-cover > img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.kd-video-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  flex: 1;
-  min-width: 0;
-}
-.kd-video-title {
-  color: var(--kd-text);
-  font-weight: 700;
-  line-height: 1.3;
-}
-.kd-video-meta {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  line-height: 1.3;
-  white-space: nowrap;
-}
-/* 旋钮全在一行，窄了就换行——这一行是这一条视频的全部操作，不该被裁掉 */
-.kd-video-controls {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem 0.6rem;
-  flex-wrap: wrap;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-}
-/* 分 P 的标题可以很长（有的合集把整张歌单写进 P 名），下拉宽度是按最长那条
-   撑出来的——不封顶的话它会把同一行的其它旋钮挤到下一行，整行跟着变高 */
-.kd-video-controls select[data-pages="true"] {
-  max-width: 14rem;
 }
 
 /* 批量结果的包含关系：父行是一个"包"（歌单 / 专辑 / 一次关键词搜索），
@@ -3767,25 +3206,10 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-chip[data-tone="danger"] {
   color: var(--kd-danger);
 }
-.kd-chip-action {
-  font-family: inherit;
-  cursor: pointer;
-}
-.kd-chip-action:hover:not(:disabled) {
-  text-decoration: underline;
-}
-.kd-chip-action:disabled {
-  cursor: wait;
-  opacity: 0.65;
-}
 
 /* Camelot 原色只作 accent。深色模式不能直接铺浅色 HSL：会像荧光贴纸；
    在面板底上压低亮度，文字取同色的浅色版本，既能认色又不刺眼。 */
 .kd-camelot {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.7rem;
   height: auto;
   padding: 0;
   border: none;
@@ -3937,14 +3361,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-size: var(--kd-size-sm);
   line-height: 1.6;
 }
-.kd-aside-empty {
-  width: 100%;
-  height: 100%;
-  min-height: 18rem;
-}
-.kd-split-aside > .kd-aside-empty {
-  min-height: 100%;
-}
 
 .kd-spin {
   animation: kd-rotate 0.9s linear infinite;
@@ -4059,43 +3475,6 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 
 /* ============================================================
- * 对话框
- * ========================================================== */
-.kd-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 150;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
-}
-.kd-dialog {
-  position: relative;
-  width: min(28rem, calc(100vw - 3rem));
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-  box-shadow: var(--kd-shadow-float);
-}
-.kd-dialog-head {
-  display: flex;
-  align-items: center;
-  padding: 0.9rem 1rem 0.5rem;
-  font-weight: 800;
-  font-size: var(--kd-size-lg);
-}
-.kd-dialog-body {
-  padding: 0.5rem 1rem 1rem;
-}
-.kd-dialog-foot {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  border-top: 1px solid var(--kd-line-soft);
-}
-
-/* ============================================================
  * 播放条
  * ========================================================== */
 .kd-player {
@@ -4198,7 +3577,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   text-align: left;
   overflow: hidden;
   border-radius: 0.65rem;
-  transition: background 0.15s, box-shadow 0.15s;
+  transition: background 0.12s, box-shadow 0.12s;
 }
 /* 主点击区用 contents，碟片/文案继续落在唱盘 grid 格子里。 */
 .kd-player-deck-main {
@@ -4250,7 +3629,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   min-width: 0;
   overflow: hidden;
   opacity: 0.68;
-  transition: opacity 0.15s;
+  transition: opacity 0.12s;
 }
 /* 桌面宽唱盘：状态和曲名同一行，艺人留在第二行；窄屏布局在下方覆盖。 */
 .kd-app:not([data-portrait="true"]) .kd-player-deck-copy {
@@ -4302,40 +3681,6 @@ body[data-kd-search-pointer-dragging="true"] * {
    这里不需要品牌感——它是个预览工具，安静比抢眼重要。 */
 /* 「正在播」块：封面 + 两行字，整块可点（回到正在放的曲目）。
    按钮外衣要全部脱掉，让它看起来就是信息本身。 */
-.kd-player-now {
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.15rem 0.1rem;
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  cursor: pointer;
-}
-.kd-player-now:hover:not(:disabled) {
-  background: transparent;
-}
-.kd-player-now:hover:not(:disabled) .kd-player-title {
-  color: var(--kd-text);
-}
-.kd-player-now:disabled {
-  cursor: default;
-}
-.kd-player-empty {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  font-weight: 400;
-  white-space: nowrap;
-}
 .kd-player-artist {
   display: block;
   color: var(--kd-muted);
@@ -4345,11 +3690,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   white-space: nowrap;
   min-height: 1em; /* 没艺人时占位，换歌高度不跳 */
 }
-.kd-player-video-label {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-}
 /* 播放键不再是一整颗红色物体。轮廓跟随播放器，其中心图标才承担动作色；
    播放中改成中性实色，避免底栏长期悬着一个高饱和视觉洞。 */
 .kd-player-go {
@@ -4358,7 +3698,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   flex: none;
   width: 2.3rem;
   height: 2.3rem;
-  border-radius: 50%;
   background: transparent;
   color: var(--kd-theme);
   display: grid;
@@ -4387,8 +3726,7 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* 点按/触摸会把焦点留在按钮上，WebView 给圆钮画出来的默认焦点环仍是方的，
    看着像一块蓝色小方块盖在暂停键上。只清指针焦点，键盘 Tab 的 :focus-visible 保留。 */
 .kd-player-go:focus:not(:focus-visible),
-.kd-player-step:focus:not(:focus-visible),
-.kd-player-btn:focus:not(:focus-visible) {
+.kd-player-step:focus:not(:focus-visible) {
   outline: none;
 }
 .kd-player-go:disabled {
@@ -4402,38 +3740,9 @@ body[data-kd-search-pointer-dragging="true"] * {
   cursor: progress;
   opacity: 1;
 }
-.kd-player-btn {
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: var(--kd-text);
-  width: 1.9rem;
-  height: 1.9rem;
-  display: inline-grid;
-  place-content: center;
-  cursor: pointer;
-  flex: none;
-}
-.kd-player-btn:hover:not(:disabled) {
-  color: var(--kd-theme);
-}
-.kd-player-btn:disabled {
-  color: var(--kd-faint);
-  cursor: default;
-}
-.kd-player-meta {
-  min-width: 0;
-  flex: 1 1 auto;
-}
 /* 挂着"放不了"这条说明时才放宽：200px 里塞不下一句完整的话 */
-.kd-player-meta[data-notice="true"] {
-  flex: 1 1 160px;
-}
 .kd-player-title {
   font-weight: 700;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .kd-player-scrub {
   grid-area: wave;
@@ -4474,10 +3783,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-size: var(--kd-size-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-.kd-player-time-elapsed {
-  grid-area: elapsed;
-  text-align: left;
 }
 .kd-player-time-header {
   flex: none;
@@ -4673,7 +3978,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   flex-direction: column;
   justify-content: space-between;
   opacity: 0;
-  transition: opacity 0.14s ease;
+  transition: opacity 0.12s ease;
   background: linear-gradient(
     to bottom,
     rgba(0, 0, 0, 0.55) 0%,
@@ -4687,7 +3992,6 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-pip-float:hover .kd-pip-float-chrome,
 .kd-pip-float:focus-within .kd-pip-float-chrome {
   opacity: 1;
-  pointer-events: auto;
 }
 .kd-pip-float[data-platform-player="true"] .kd-pip-float-chrome {
   inset: 0 0 auto;
@@ -5604,15 +4908,11 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: block;
   color: var(--kd-faint);
 }
-.kd-download-task-notice,
-.kd-download-task-config {
+.kd-download-task-notice {
   margin-left: 5.38rem;
 }
 .kd-download-task-notice {
   margin-top: 0.45rem;
-}
-.kd-download-task-config:empty {
-  display: none;
 }
 
 @container (max-width: 320px) {
@@ -5620,8 +4920,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
     display: none;
   }
   .kd-download-task-error,
-  .kd-download-task-notice,
-  .kd-download-task-config {
+  .kd-download-task-notice {
     margin-left: 3.55rem;
   }
 }
@@ -5793,15 +5092,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   cursor: pointer;
 }
 
-.kd-panel-heading-icon {
-  display: inline-block;
-  width: 1rem;
-  height: 1rem;
-  color: var(--kd-text);
-  flex: none;
-  opacity: 1;
-  visibility: visible;
-}
 /* —— 活动区：常驻一条、占满中间栏宽；空闲也占位，忙时只换内容 ——
    与顶栏同面色连成一片；只在贴表头处留一条软线，避免和搜索小框叠线。 */
 .kd-activity {
@@ -5833,12 +5123,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-workspace-pane-local > .kd-activity .kd-activity-text { color: var(--kd-text); font-weight: 600; }
 .kd-workspace-pane-local > .kd-activity .kd-activity-control { color: var(--kd-text); }
 .kd-workspace-pane-local > .kd-activity .kd-activity-glyphs { color: var(--kd-text); }
-.kd-activity-idle {
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  letter-spacing: 0.04em;
-  user-select: none;
-}
 .kd-activity-glyphs {
   display: inline-flex;
   align-items: center;
@@ -6012,7 +5296,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-panel);
   box-shadow: none;
   color: var(--kd-muted);
-  transition: border-color 140ms ease;
+  transition: border-color 0.12s ease;
 }
 .kd-activity-search-expanded {
   width: 100%;
@@ -6043,7 +5327,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 }
 .kd-activity-search > input::placeholder {
   color: var(--kd-faint);
-  transition: color 0.1s, opacity 0.1s;
+  transition: color 0.12s, opacity 0.12s;
 }
 .kd-activity-search > input::-webkit-search-cancel-button {
   display: none;
@@ -6330,111 +5614,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 
 .kd-harmonic-select[aria-pressed="true"] {
   border-color: var(--kd-theme);
-  background: var(--kd-theme);
-  color: #fff;
-}
-.kd-wheel-filter {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.12rem 0.4rem;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-selected);
-  color: var(--kd-text-body);
-  font: inherit;
-  font-size: var(--kd-size-xs);
-  cursor: pointer;
-}
-.kd-wheel-filter > span {
-  color: var(--kd-muted);
-  font-size: var(--kd-size-sm);
-  line-height: 1;
-}
-.kd-wheel-filter:hover {
-  color: var(--kd-text);
-  border-color: var(--kd-line);
-}
-.kd-library-commandbar {
-  flex: none;
-  width: 100%;
-  height: 1.9rem;
-  display: flex;
-  align-items: center;
-  border-bottom: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  overflow: hidden;
-}
-.kd-library-command-actions {
-  min-width: 0;
-  flex: 1 1 auto;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0 0.65rem;
-  overflow-x: auto;
-  white-space: nowrap;
-  scrollbar-width: none;
-}
-.kd-library-command-actions::-webkit-scrollbar {
-  display: none;
-}
-.kd-library-command-actions > svg {
-  flex: none;
-}
-.kd-library-inline-search {
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  flex: 1 1 auto;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0 0.65rem;
-  color: var(--kd-muted);
-}
-.kd-library-inline-search:focus-within {
-  color: var(--kd-text);
-}
-.kd-library-inline-search > svg {
-  flex: none;
-}
-.kd-library-inline-search > input {
-  appearance: none;
-  min-width: 0;
-  flex: 1;
-  padding: 0;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--kd-text);
-  font: inherit;
-  font-size: var(--kd-size-sm);
-}
-.kd-library-inline-search > input::placeholder {
-  color: var(--kd-faint);
-}
-.kd-library-inline-search > input::-webkit-search-cancel-button {
-  display: none;
-}
-.kd-library-inline-search > button {
-  appearance: none;
-  flex: none;
-  width: 1.35rem;
-  height: 1.35rem;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-.kd-library-inline-search > button:hover {
-  color: var(--kd-text);
 }
 .kd-library-filterbar {
   display: flex;
@@ -6468,12 +5647,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font: inherit;
   cursor: pointer;
 }
-.kd-filter-control[data-active="true"] {
-  background: var(--kd-selected);
-  color: var(--kd-text);
-}
 .kd-filter-control:hover,
 .kd-filter-reset:hover { color: var(--kd-text); }
+.kd-filter-control[data-active="true"] { color: var(--kd-theme); }
 .kd-filter-range {
   display: inline-flex;
   align-items: center;
@@ -6817,26 +5993,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
    240px 一被右列吃掉，「网易云音乐」就被压成一列一个字。
    只删那一行 width 是不够的：留着这套类，下一个人还会照着用，
    然后在别的宽度里重演一遍。排版规则现在写在 AccountRow.tsx 的 settingRow 里。 */
-/* 头像位：是个常驻的占位块，有图才往里塞 <img>。
-   登录前后左边留白一样宽，几行平台名不会因为谁有头像而错开。
-   28px 比原来的 22px 大一点——两行文字（平台名 + 状态）的行高就是 28 上下，
-   小于它的头像看着像掉在角落里。 */
-.kd-set-avatar {
-  width: 28px;
-  height: 28px;
-  flex: none;
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--kd-panel-inset);
-  border: 1px solid var(--kd-line);
-}
-.kd-set-avatar > img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-  transition: opacity 0.15s;
-}
 /* 登录平台头像。 */
 .kd-account-avatar,
 .kd-account-avatar > img {
@@ -6850,13 +6006,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   height: 1.55rem;
   font: inherit;
   font-size: var(--kd-size-xs);
-}
-/* 同一个位子放图标而不是头像（更新那一行）：不描边，免得看着像个空头像框 */
-.kd-set-avatar-icon {
-  display: grid;
-  place-items: center;
-  border-color: transparent;
-  color: var(--kd-muted);
 }
 /* ============================================================
  * 文件夹树
@@ -6879,58 +6028,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 }
 .kd-split[data-layout="wide"][data-tree="closed"][data-aside="open"] {
   grid-template-columns: minmax(0, 1fr) 1px var(--kd-right, 22rem);
-}
-.kd-folder-search {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.3rem 0.4rem;
-  border-bottom: 1px solid var(--kd-line);
-}
-.kd-folder-search > input {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  background: none;
-  color: var(--kd-text);
-  font-size: var(--kd-size-sm);
-  outline: none;
-}
-.kd-folder-search > input::placeholder {
-  color: var(--kd-faint);
-}
-.kd-folder-search > button {
-  flex: none;
-  display: inline-flex;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-.kd-folder-head {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.5rem;
-  border-bottom: 1px solid var(--kd-line);
-}
-.kd-folder-title {
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.kd-folder-deep {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-  margin-left: auto;
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  white-space: nowrap;
-  cursor: pointer;
 }
 .kd-folder-list {
   flex: 1;
@@ -7036,63 +6133,17 @@ body[data-kd-sidebar-root-dragging="true"] * {
   color: var(--kd-faint);
   cursor: wait;
 }
-.kd-folder-query {
-  padding-left: 0.35rem;
-  color: var(--kd-muted);
-  cursor: text;
-}
-.kd-folder-query > input {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  padding: 0;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--kd-text-body);
-  font: inherit;
-  user-select: text;
-}
-.kd-folder-query > input::placeholder {
-  color: var(--kd-faint);
-}
-.kd-folder-query > button {
-  appearance: none;
-  flex: none;
-  width: 1.25rem;
-  height: 1.25rem;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-/* 当前文件夹只靠底色，不描红侧条 */
+/* 当前文件夹只用主题红字，不铺底色、不描红侧条 */
 .kd-folder[data-active="true"] {
-  background: var(--kd-selected);
-  color: var(--kd-text);
+  color: var(--kd-theme);
 }
 /* 拖到目标上：整块反白而不是只描边，因为行只有 26px 高，
    1px 的框在余光里根本看不见。 */
-.kd-folder[data-drop="true"] {
+.kd-folder:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) {
   background: var(--kd-theme);
-  color: #fff;
+  color: var(--kd-theme-ink);
 }
-.kd-folder[data-kd-pointer-track-over="folder"] {
-  background: var(--kd-theme);
-  color: #fff;
-}
-.kd-playlist-row[data-kd-pointer-track-over="playlist"] {
-  background: var(--kd-theme);
-  color: #fff;
-}
-.kd-narrow-folder-rail button[data-drop="true"] {
-  background: var(--kd-selected);
-  color: var(--kd-text);
-}
-.kd-narrow-folder-rail button[data-kd-pointer-track-over="folder"] {
+.kd-narrow-folder-rail button:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) {
   background: var(--kd-selected);
   color: var(--kd-text);
 }
@@ -7354,22 +6405,6 @@ body[data-kd-sidebar-root-dragging="true"] * {
   gap: 0.45rem;
   min-width: 0;
 }
-.kd-explore-block-label {
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-.kd-explore-plats {
-  min-width: 0;
-}
-.kd-explore-plats .kd-plats {
-  gap: 0.2rem;
-}
-.kd-explore-plats .kd-plat {
-  width: 1.55rem;
-  height: 1.55rem;
-}
 .kd-vj-words {
   min-height: 1.55rem;
 }
@@ -7416,24 +6451,6 @@ body[data-kd-sidebar-root-dragging="true"] * {
   line-height: 1;
   padding: 0 0.4rem;
 }
-/* 文字按钮：长得像链接，用在"管理关键词"这种低频开关上 */
-.kd-linklike {
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: inherit;
-  padding: 0;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
-}
-.kd-linklike:hover {
-  color: var(--kd-text);
-  text-decoration: underline;
-}
 
 /* ============================================================
  * 竖屏 / 窄屏（≤940px）
@@ -7446,67 +6463,14 @@ body[data-kd-sidebar-root-dragging="true"] * {
  * 阈值 940px 是量出来的：13rem + 22rem 两栏 = 560px，中间的表再留 380px
  * 才够放下标题+BPM+KEY+时长。这一档同时覆盖竖着的平板和横着的手机。
  * ========================================================== */
-.kd-app[data-portrait="true"] .kd-list-head > .kd-search-command {
-  min-width: 0;
-}
-.kd-app[data-portrait="true"] .kd-list-head > .kd-list-note {
-  display: none;
-}
 .kd-app[data-portrait="true"] .kd-toolbar {
   row-gap: 0.4rem;
-}
-.kd-app[data-portrait="true"] .kd-player {
-  padding: 0 0.6rem;
-  gap: 0.5rem;
 }
 .kd-app[data-portrait="true"] .kd-player-scrub > .kd-nowrap {
   display: none;
 }
-.kd-app[data-portrait="true"] .kd-player-now {
-  flex: 1 1 auto;
-  min-width: 0;
-}
 .kd-app[data-portrait="true"] .kd-player-leading {
   min-width: 0;
-}
-
-/* —— 右下角悬浮键 ——
-   贴在播放条上方。两颗，正好对应被收起来的那两栏，不做"展开更多"那一步：
-   多一次点击换来的只是少两个图标。 */
-.kd-fabs {
-  position: fixed;
-  right: 0.75rem;
-  bottom: calc(var(--kd-player-h) + 0.75rem);
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  z-index: 40;
-}
-.kd-fab {
-  position: relative;
-  appearance: none;
-  width: 2.6rem;
-  height: 2.6rem;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-raised);
-  color: var(--kd-text);
-  box-shadow: var(--kd-shadow-float);
-  cursor: pointer;
-}
-.kd-fab:active {
-  background: var(--kd-hover);
-}
-/* 小红点：告诉你"这里有东西可看"，替代自动弹出 */
-.kd-fab[data-dot="true"]::after {
-  content: "";
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 6px;
-  height: 6px;
-  background: var(--kd-theme);
 }
 
 /* —— 侧方抽屉（账号 / 队列 / 接播 / 详情 / 文件夹共用尺度） ——
@@ -7555,7 +6519,6 @@ body[data-kd-sidebar-root-dragging="true"] * {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  font-weight: 700;
   font-size: var(--kd-size-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -7598,11 +6561,6 @@ body[data-kd-sidebar-root-dragging="true"] * {
 .kd-sheet .kd-folder > svg {
   width: 15px;
   height: 15px;
-}
-/* 详情栏在宽屏是 <aside> 自带内边距，进抽屉后由 kd-sheet-body 负责，
-   这里只保证内部面板之间的间距不塌 */
-.kd-sheet .kd-panel-slot + .kd-panel-slot {
-  margin-top: 0.6rem;
 }
 
 /* ============================================================
@@ -7649,32 +6607,6 @@ body[data-kd-sidebar-root-dragging="true"] * {
 /* 内容是否多行只改变语义和图标，不再改变布局高度——编辑器从一开始就是三行。 */
 .kd-searchbar[data-batch] {
   align-items: center;
-}
-.kd-searchbar-lead {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  width: 1.35rem;
-  height: 1.35rem;
-  justify-content: center;
-  color: var(--kd-theme);
-  background: transparent;
-  transition: color 0.14s;
-}
-.kd-searchbar-lead[data-network="true"] {
-  color: var(--kd-theme);
-}
-.kd-searchbar:focus-within .kd-searchbar-lead {
-  color: var(--kd-theme-strong);
-}
-.kd-searchbar-lead > svg {
-  width: 16px;
-  height: 16px;
-  stroke-width: 2.25;
-}
-.kd-searchbar[data-batch] .kd-searchbar-lead {
-  height: 1.35rem;
-  padding-top: 0;
 }
 /* 标题 / 使用提示 / 三行编辑面形成清楚的信息层级。 */
 .kd-searchbar-copy {
@@ -7798,31 +6730,6 @@ body[data-kd-sidebar-root-dragging="true"] * {
     animation: none;
   }
 }
-.kd-searchbar-heading {
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.kd-searchbar-kicker {
-  flex: none;
-  color: var(--kd-theme);
-  font-size: var(--kd-size-xs);
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  line-height: 1;
-}
-.kd-searchbar-hint {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .kd-searchbar-input {
   position: relative;
   z-index: 1;
@@ -7913,9 +6820,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   grid-column: 2;
   grid-row: 1;
   align-self: center;
-  width: 1px;
-  height: 0.95rem;
-  background: color-mix(in srgb, var(--kd-line) 85%, var(--kd-text));
   opacity: 0.9;
 }
 .kd-searchbar[data-stacked] .kd-searchbar-copy {
@@ -8006,92 +6910,11 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   opacity: 0.45;
   cursor: default;
 }
-/* 数量贴在图标旁，不压在图标上；主题色只做字色。 */
-.kd-chrome-badge {
-  position: static;
-  min-width: 0;
-  height: auto;
-  padding: 0;
-  display: inline;
-  background: transparent;
-  color: var(--kd-theme);
-  font-size: 0.68rem;
-  font-weight: 700;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-}
 /* 分隔线：平台来源与输入提示之间的细竖线 */
 .kd-searchbar-sep {
   width: 1px;
   height: 0.95rem;
   background: color-mix(in srgb, var(--kd-line) 85%, var(--kd-text));
-}
-/* 音质是循环控件，不是下拉框。小标签说明它控制什么，大数字显示当前档位。 */
-.kd-searchbar-quality {
-  appearance: none;
-  -webkit-appearance: none;
-  min-width: auto;
-  height: 1.75rem;
-  border: none;
-  background: transparent;
-  padding: 0 0.25rem;
-  color: var(--kd-muted);
-  display: inline-flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 0.35rem;
-  font: inherit;
-  cursor: pointer;
-}
-.kd-searchbar-quality > span {
-  font-size: 0.56rem;
-  letter-spacing: 0.08em;
-}
-.kd-searchbar-quality > strong {
-  color: var(--kd-text-body);
-  font-size: var(--kd-size-xs);
-  font-weight: 800;
-}
-.kd-searchbar-quality:hover {
-  color: var(--kd-theme);
-  background: transparent;
-}
-.kd-searchbar-quality:hover > strong {
-  color: var(--kd-theme);
-}
-/* 提交键：整条搜索区唯一的实心红，也是唯一的块状子控件。 */
-.kd-searchbar-go {
-  flex: none;
-  appearance: none;
-  border: none;
-  width: 1.9rem;
-  height: 1.9rem;
-  min-width: 1.9rem;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.3rem;
-  background: transparent;
-  color: var(--kd-text);
-  font-size: var(--kd-size-sm);
-  font-weight: 750;
-  letter-spacing: 0.04em;
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s, opacity 0.12s;
-}
-.kd-searchbar-go[data-wide] {
-  padding: 0 0.7rem;
-}
-.kd-searchbar-go:hover:not(:disabled) {
-  background: transparent;
-  color: var(--kd-muted);
-}
-.kd-searchbar-go:disabled {
-  background: transparent;
-  color: var(--kd-faint);
-  opacity: 0.75;
-  cursor: default;
 }
 
 /* —— 平台标志键 ——
@@ -8202,12 +7025,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   flex-wrap: nowrap;
   gap: 0.35rem;
   padding: 0.5rem 0.6rem;
-}
-.kd-app[data-chrome="stacked"] .kd-searchbar-go {
-  min-width: 2rem;
-  width: 2rem;
-  height: 2rem;
-  padding: 0;
 }
 .kd-app[data-chrome="stacked"] .kd-plats {
   flex: none;
@@ -8349,7 +7166,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-app[data-portrait="true"] .kd-player-leading { grid-area: now; }
 .kd-app[data-portrait="true"] .kd-player-trailing { grid-area: next; }
-.kd-app[data-portrait="true"] .kd-player-scrub { grid-area: wave; }
 .kd-app[data-portrait="true"] .kd-player-scrub {
   grid-area: wave;
   /* 竖屏不保留双唱盘的绝对区，波形应重新吃满可用宽度。 */
@@ -8399,7 +7215,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
    长曲名不会被裁掉，而是直接铺出去、盖在右边那颗圆形播放键上面。
    用户截图里"播放键被字压住"就是这个。改 JSX 也行，但那份文件另有人在改，
    而这条 CSS 无论 JSX 用 span 还是 div 都成立，索性钉在这里。 */
-.kd-player-meta,
 .kd-player-title {
   display: block;
   min-width: 0;
@@ -8811,7 +7626,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   background: var(--kd-hover);
 }
 /* 设置面板里：外观用互斥分段；接播用「文字 + 开关」；长度用拖动条。 */
-.kd-djp-intro,
 .kd-djp-note {
   margin: 0.45rem 0 0;
   font-size: 0.72rem;
@@ -8822,25 +7636,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   display: flex;
   flex-direction: column;
   gap: 0.05rem;
-}
-.kd-stream-cache-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.65rem;
-  min-width: 0;
-  padding: 0.12rem 0 0.18rem;
-  font-size: var(--kd-size-xs);
-}
-.kd-stream-cache-row > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-stream-cache-row .kd-btn {
-  flex: none;
-  gap: 0.25rem;
 }
 .kd-cache-overview {
   display: flex;
@@ -8890,241 +7685,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-cache-overview-clear[data-confirming="true"],
 .kd-cache-overview-row[data-confirming="true"] .kd-cache-overview-label {
   color: var(--kd-theme-strong);
-}
-.kd-activity-log {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  min-width: 0;
-}
-.kd-activity-log-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.45rem;
-}
-.kd-activity-log-tabs {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-  padding: 0.12rem;
-  border: 1px solid var(--kd-line-soft);
-  border-radius: 0.38rem;
-  background: var(--kd-panel-inset);
-}
-.kd-activity-log-tabs > button {
-  appearance: none;
-  min-height: 1.45rem;
-  padding: 0.12rem 0.48rem;
-  border: 0;
-  border-radius: 0.28rem;
-  background: transparent;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: var(--kd-size-xs);
-  cursor: pointer;
-}
-.kd-activity-log-tabs > button[aria-selected="true"] {
-  background: var(--kd-hover);
-  color: var(--kd-text);
-  font-weight: 700;
-}
-.kd-activity-log-refresh {
-  flex: none;
-  width: 1.7rem;
-  padding-inline: 0;
-}
-.kd-activity-log-rate {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.28rem 0.55rem;
-  min-height: 1.2rem;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  font-variant-numeric: tabular-nums;
-}
-.kd-activity-log-rate > span:first-of-type {
-  color: var(--kd-text);
-  font-weight: 700;
-}
-.kd-activity-log-rate[data-excessive="true"],
-.kd-activity-log-rate[data-excessive="true"] > span:first-of-type {
-  color: var(--kd-warn);
-}
-.kd-activity-terminal {
-  min-height: 8.5rem;
-  max-height: 18rem;
-  overflow: auto;
-  padding: 0.38rem 0;
-  border: 1px solid #243041;
-  border-radius: 0.42rem;
-  background: #070b12;
-  color: #d7e1ec;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 3%);
-  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace;
-  font-size: 0.64rem;
-  line-height: 1.42;
-  scrollbar-color: #344154 transparent;
-}
-:root[data-theme="light"] .kd-activity-terminal {
-  border-color: #d8dee8;
-  background: #f7f9fc;
-  color: #202936;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 85%);
-  scrollbar-color: #bcc5d2 transparent;
-}
-.kd-activity-log-line {
-  appearance: none;
-  display: grid;
-  grid-template-columns: 4.6rem 2.1rem minmax(0, 1fr);
-  gap: 0.38rem;
-  align-items: baseline;
-  width: 100%;
-  margin: 0;
-  padding: 0.22rem 0.52rem;
-  overflow: hidden;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  line-height: inherit;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.kd-activity-log-line:hover,
-.kd-activity-log-line[data-selected="true"] {
-  background: rgb(255 255 255 / 5%);
-}
-:root[data-theme="light"] .kd-activity-log-line:hover,
-:root[data-theme="light"] .kd-activity-log-line[data-selected="true"] {
-  background: rgb(31 41 55 / 6%);
-}
-.kd-activity-log-line:focus-visible {
-  outline: 1px solid color-mix(in srgb, var(--kd-muted) 72%, transparent);
-  outline-offset: -1px;
-}
-.kd-activity-log-line + .kd-activity-log-line {
-  border-top: 1px solid rgb(255 255 255 / 4%);
-}
-:root[data-theme="light"] .kd-activity-log-line + .kd-activity-log-line {
-  border-top-color: rgb(31 41 55 / 7%);
-}
-.kd-activity-log-line > time {
-  color: #7f91a6;
-  font-variant-numeric: tabular-nums;
-}
-:root[data-theme="light"] .kd-activity-log-line > time {
-  color: #708096;
-}
-.kd-activity-log-level {
-  color: #6fa8dc;
-  font-size: 0.57rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-}
-.kd-activity-log-line[data-level="warn"] .kd-activity-log-level {
-  color: #e6ad45;
-}
-.kd-activity-log-line[data-level="error"] .kd-activity-log-level {
-  color: #ff6b72;
-}
-.kd-activity-log-message {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 0.42rem;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.kd-activity-log-message > strong {
-  flex: none;
-  max-width: 48%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: inherit;
-  font-weight: 700;
-}
-.kd-activity-log-message > span {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #93a4b8;
-  font: inherit;
-}
-:root[data-theme="light"] .kd-activity-log-message > span {
-  color: #637187;
-}
-.kd-activity-log-detail {
-  min-width: 0;
-  padding: 0.55rem 0.62rem;
-  border: 1px solid #243041;
-  border-radius: 0.42rem;
-  background: #0b111b;
-  color: #d7e1ec;
-  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace;
-  font-size: 0.64rem;
-}
-:root[data-theme="light"] .kd-activity-log-detail {
-  border-color: #d8dee8;
-  background: #f7f9fc;
-  color: #202936;
-}
-.kd-activity-log-detail-head {
-  display: flex;
-  align-items: baseline;
-  gap: 0.55rem;
-  min-width: 0;
-  padding-bottom: 0.45rem;
-  border-bottom: 1px solid rgb(255 255 255 / 7%);
-}
-:root[data-theme="light"] .kd-activity-log-detail-head {
-  border-bottom-color: rgb(31 41 55 / 8%);
-}
-.kd-activity-log-detail-head > span {
-  color: #7f91a6;
-}
-.kd-activity-log-detail-head > strong {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.kd-activity-log-detail > dl {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-  gap: 0.34rem 0.8rem;
-  margin: 0.5rem 0 0;
-}
-.kd-activity-log-detail > dl > div {
-  display: grid;
-  grid-template-columns: 2.4rem minmax(0, 1fr);
-  gap: 0.38rem;
-  min-width: 0;
-}
-.kd-activity-log-detail dt {
-  color: #7f91a6;
-}
-.kd-activity-log-detail dd {
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.kd-activity-log-detail > p {
-  margin: 0.5rem 0 0;
-  padding-top: 0.45rem;
-  border-top: 1px solid rgb(255 255 255 / 7%);
-  color: #93a4b8;
-  overflow-wrap: anywhere;
-}
-:root[data-theme="light"] .kd-activity-log-detail dt,
-:root[data-theme="light"] .kd-activity-log-detail-head > span,
-:root[data-theme="light"] .kd-activity-log-detail > p {
-  color: #637187;
-}
-:root[data-theme="light"] .kd-activity-log-detail > p {
-  border-top-color: rgb(31 41 55 / 8%);
 }
 /* 整行可点：左侧名称，右侧「开/关」字态，不走滑钮形态。 */
 .kd-djp-toggle {
@@ -9193,33 +7753,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   color: var(--kd-faint);
 }
 /* 黑白模式旧文字互斥（其它地方若还用）。 */
-.kd-djp-choice {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.65rem;
-  -webkit-app-region: no-drag;
-}
-.kd-djp-choice-btn {
-  appearance: none;
-  margin: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: var(--kd-size-xs);
-  line-height: 1.3;
-  cursor: pointer;
-}
-.kd-djp-choice-btn:hover {
-  color: var(--kd-text);
-}
-.kd-djp-choice-btn[aria-checked="true"],
-.kd-djp-choice-btn[aria-pressed="true"] {
-  color: var(--kd-text);
-  font-weight: 700;
-}
 .kd-ai-prompt {
   display: grid;
   gap: 0.55rem;
@@ -9380,17 +7913,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
   font-weight: 400;
   line-height: 1;
   text-align: left;
-}
-.kd-djp-number {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  font-size: var(--kd-size-sm);
-}
-.kd-djp-number .kd-input {
-  width: 5.5rem;
-  margin-left: auto;
-  text-align: right;
 }
 
 /* ============================================================
@@ -9851,16 +8373,6 @@ button.kd-stream-status {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.kd-dj-eq-knobs {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-  align-items: center;
-  justify-items: center;
-  gap: 0.02rem;
-  min-width: 0;
-  height: 100%;
-}
 
 /* ============================================================
  * 管理模式：正在播放歌曲的右栏控制板
@@ -10110,43 +8622,6 @@ button.kd-stream-status {
   gap: 0.38rem;
   min-width: 0;
 }
-.kd-manager-visual-stack {
-  display: grid;
-  gap: 0;
-  min-width: 0;
-  align-content: start;
-}
-.kd-manager-mixer-eq {
-  min-width: 0;
-  aspect-ratio: 58 / 9;
-  overflow: hidden;
-  border: 1px solid var(--kd-line);
-  background: #0b1015;
-}
-.kd-manager-scroll-wave + .kd-manager-mixer-eq {
-  border-top: 0;
-}
-.kd-manager-mixer-eq > .kd-dj-eq-chart {
-  min-height: 0;
-  width: 100%;
-  height: 100%;
-  background: #0b1015;
-}
-.kd-manager-mixer-eq .kd-dj-eq-curve > path {
-  stroke: #238df5;
-  stroke-width: 0.6;
-}
-.kd-manager-mixer-eq .kd-dj-eq-guides > i {
-  display: none;
-}
-.kd-manager-mixer-eq .kd-dj-eq-zero {
-  z-index: 5;
-  height: 1px;
-  transform: scaleY(0.35);
-  transform-origin: center;
-  background: #238df5 !important;
-}
-.kd-manager-mixer-eq .kd-dj-eq-filter > path { stroke: #2d96f5; }
 .kd-manager-scroll-wave {
   position: relative;
   isolation: isolate;
@@ -10175,25 +8650,6 @@ button.kd-stream-status {
 .kd-manager-wave-window:focus-visible {
   outline: 1px solid color-mix(in srgb, var(--kd-muted) 72%, transparent);
   outline-offset: -1px;
-}
-.kd-manager-wave-rail {
-  position: absolute;
-  z-index: 1;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  min-width: 1px;
-  transform: translate3d(-50%, 0, 0);
-  transform-origin: 0 50%;
-  will-change: transform;
-  pointer-events: none;
-}
-.kd-manager-wave-rail > canvas {
-  position: absolute;
-  inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
 }
 .kd-manager-focus-wave .kd-wave-beat-grid > i[data-beat="2"],
 .kd-manager-focus-wave .kd-wave-beat-grid > i[data-beat="4"] {
@@ -10267,8 +8723,6 @@ button.kd-stream-status {
   stroke: #18191c;
   stroke-width: 2.25;
 }
-:root[data-theme="light"] .kd-manager-mixer-eq,
-:root[data-theme="light"] .kd-manager-mixer-eq > .kd-dj-eq-chart,
 :root[data-theme="light"] .kd-manager-scroll-wave,
 :root[data-theme="light"] .kd-manager-focus-wave {
   background: #fff !important;
@@ -10277,10 +8731,6 @@ button.kd-stream-status {
   --kd-manager-beat-minor: rgba(56, 65, 78, 0.16);
   --kd-manager-beat-major: rgba(56, 65, 78, 0.28);
   --kd-manager-beat-label: rgba(56, 65, 78, 0.56);
-}
-:root[data-theme="light"] .kd-manager-mixer-eq .kd-dj-eq-curve > path {
-  stroke: #238df5;
-  stroke-width: 0.6;
 }
 @media (max-width: 430px) {
   .kd-manager-control-head {
@@ -10389,19 +8839,10 @@ button.kd-stream-status {
 .vj-header { display: flex; align-items: center; flex: none; gap: .3rem; padding: .45rem .7rem; border-bottom: 1px solid var(--kd-line-soft); }
 .vj-header > strong { font-weight: 600; margin-right: .6rem; white-space: nowrap; }
 .vj-header > .kd-select-control { width: 160px; }
-.vj-toolbar-divider { flex: none; width: 1px; height: 18px; margin-inline: .25rem; background: var(--kd-line-soft); }
 .vj-spacer { flex: 1; }
 .vj-save-state, .vj-preparing { color: var(--kd-muted); font-size: var(--kd-size-xs); white-space: nowrap; }
-.vj-main { display: grid; grid-template-columns: minmax(0,1fr) 245px; flex: 1 1 48%; min-height: 130px; overflow: hidden; }
-.vj-sources { min-width: 0; flex: 0 1 auto; max-height: 24%; overflow: auto; border-top: 1px solid var(--kd-line-soft); padding: .3rem .6rem; }
-.vj-source { display: flex; gap: .3rem; align-items: center; padding: .25rem .1rem; margin-bottom: 2px; border-radius: 4px; min-height: 34px; cursor: pointer; }
-.vj-source[data-selected="true"] { background: var(--kd-selected); color: var(--kd-text); }
-.vj-source > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
-.vj-source > svg { flex: none; color: var(--kd-muted); }
-.vj-source > small { font-size: 10px; color: var(--kd-muted); }
 .vj-workshop .vj-grip { flex: none; cursor: grab; touch-action: none; padding: 0; width: 16px; min-height: 26px; color: var(--kd-muted); }
 .vj-workshop .vj-source-remove { padding: 0; min-height: 22px; width: 18px; opacity: 0; }
-.vj-source:hover .vj-source-remove, .vj-source:focus-within .vj-source-remove { opacity: 1; }
 .vj-preview { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 0; background: transparent; overflow: hidden; }
 .vj-preview-surface { position: relative; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; width: 100%; background: #000; overflow: hidden; }
 .vj-preview-surface > canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
@@ -10420,15 +8861,6 @@ button.kd-stream-status {
 .vj-resize[data-edge="sw"] { bottom: 0; left: 0; cursor: nesw-resize; }
 .vj-resize[data-edge="w"] { top: 50%; left: 0; transform: translateY(-50%); cursor: ew-resize; }
 .vj-resize:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: -2px; }
-.vj-inspector { min-width: 0; border-left: 1px solid var(--kd-line-soft); padding: .7rem; overflow: auto; font-size: var(--kd-size-xs); }
-.vj-inspector-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: .7rem; font-weight: 600; color: var(--kd-theme); }
-.vj-inspector section { margin-bottom: .8rem; padding-bottom: .8rem; border-bottom: 1px solid var(--kd-line-soft); }
-.vj-inspector h3 { margin: 0 0 .6rem; font-size: inherit; font-weight: 600; }
-.vj-inline { display: flex; gap: .3rem; margin-bottom: .35rem; }
-.vj-slider { display: flex; align-items: center; gap: .45rem; min-width: 0; margin-block: .45rem; }
-.vj-slider > span { width: 3rem; flex: none; }
-.vj-slider > input { width: 100%; flex: 1; }
-.vj-slider > small { width: 3.1rem; flex: none; text-align: right; font-variant-numeric: tabular-nums; }
 .vj-duo { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: .6rem; }
 .vj-number { display: flex; align-items: center; gap: .3rem; margin-block: .4rem; min-width: 0; }
 .vj-number > span { flex: 1; white-space: nowrap; }
@@ -10438,17 +8870,13 @@ button.kd-stream-status {
 .vj-duo .vj-number > input { width: calc(100% - 16px); }
 .vj-workshop details > summary { cursor: pointer; color: var(--kd-muted); padding-block: .45rem; user-select: none; }
 .vj-check { display: flex; align-items: center; gap: .4rem; margin-block: .5rem; }
-.vj-speed-presets { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .2rem; }
-.vj-speed-presets > button { background: var(--kd-panel-inset); padding: .25rem; }
-.vj-tools { display: flex; align-items: center; gap: .2rem; padding: .3rem .65rem; border-top: 1px solid var(--kd-line-soft); border-bottom: 1px solid var(--kd-line-soft); flex: none; }
 .vj-menu-anchor { position: relative; }
-.vj-menu { display: flex; flex-direction: column; position: absolute; z-index: 5; min-width: 180px; padding: .35rem; border: 1px solid var(--kd-line); border-radius: 6px; background: var(--kd-panel); box-shadow: 0 6px 22px #0003; }
+.vj-menu { display: flex; flex-direction: column; position: absolute; z-index: 5; min-width: 180px; padding: .35rem; border: 1px solid var(--kd-line); border-radius: 6px; background: var(--kd-panel-raised); box-shadow: var(--kd-shadow-float); }
 .vj-menu-anchor .vj-menu { top: 100%; right: 0; }
 .vj-menu > button { justify-content: flex-start; }
 .vj-menu > label { display: flex; flex-direction: column; padding: .4rem; gap: .4rem; }
-.vj-workshop .vj-properties-toggle { display: none; }
 .vj-timeline { flex: 0 1 40%; display: flex; flex-direction: column; min-height: 110px; max-height: 50%; overflow: hidden; background: var(--kd-panel); }
-.vj-timeline-scale { display: flex; align-items: center; gap: .2rem; padding: .2rem .6rem; flex: none; }
+.vj-timeline-scale { align-items: center; flex: none; }
 .vj-timeline-scale > span { flex: 1; padding-left: .2rem; color: var(--kd-muted); font-variant-numeric: tabular-nums; font-size: var(--kd-size-xs); }
 .vj-timeline-scale > input { width: 90px; }
 .vj-timeline-scroll { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; overflow-anchor: none; }
@@ -10480,16 +8908,15 @@ button.kd-stream-status {
 .vj-clip[data-selected="true"] .vj-clip-rate { color: var(--kd-theme); }
 .vj-workshop .vj-trim { position: absolute; width: 8px; min-height: 0; height: 100%; top: 0; padding: 0; border: 0; border-radius: 0; opacity: .4; background: var(--kd-muted); cursor: ew-resize; touch-action: none; }
 .vj-trim-in { left: 0; }.vj-trim-out { right: 0; }
-.vj-workshop .vj-fade-handle { position: absolute; top: 1px; width: 8px; height: 8px; min-height: 0; border-radius: 2px; background: var(--kd-text); border: 1px solid var(--kd-panel); padding: 0; cursor: ew-resize; touch-action: none; }
-.vj-fade-ramp { position: absolute; inset-block: 0; background: color-mix(in srgb,var(--kd-text) 14%,transparent); pointer-events: none; }
-.vj-fade-left { left: 0; clip-path: polygon(0 100%,100% 0,100% 100%); }.vj-fade-right { right: 0; clip-path: polygon(0 0,100% 100%,0 100%); }
+.vj-workshop .vj-fade-handle { position: absolute; border-radius: 2px; padding: 0; }
+
 .vj-playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--kd-theme); z-index: 2; pointer-events: none; }
 .vj-ruler-rail > .vj-playhead::before { content: ""; position: absolute; top: 0; left: -4px; width: 9px; height: 8px; background: var(--kd-theme); clip-path: polygon(0 0,100% 0,100% 50%,50% 100%,0 50%); }
 .vj-error { color: var(--kd-danger); font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
-.vj-operation-notice { position: absolute; z-index: 35; left: 12px; bottom: 28px; max-width: calc(100% - 24px); padding: 6px 8px; background: var(--kd-panel); border: 1px solid var(--kd-line-soft); border-radius: 6px; box-shadow: 0 3px 12px #0002; }
+.vj-operation-notice { position: absolute; z-index: 35; left: 12px; bottom: 28px; max-width: calc(100% - 24px); padding: 6px 8px; background: var(--kd-panel); border: 1px solid var(--kd-line-soft); border-radius: 6px; box-shadow: var(--kd-shadow-float); }
 .vj-operation-notice .kd-notice-text { white-space: normal; overflow-wrap: anywhere; }
 .vj-dialog-backdrop { position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 1rem; background: #0005; }
-.vj-dialog { width: 410px; max-width: 100%; max-height: 100%; overflow: auto; border: 1px solid var(--kd-line); border-radius: 8px; background: var(--kd-panel); box-shadow: 0 12px 45px #0005; padding: 1rem; display: flex; flex-direction: column; gap: .65rem; }
+.vj-dialog { width: 410px; max-width: 100%; max-height: 100%; overflow: auto; border: 1px solid var(--kd-line); border-radius: 8px; background: var(--kd-panel); box-shadow: var(--kd-shadow-float); padding: 1rem; display: flex; flex-direction: column; gap: .65rem; }
 .vj-dialog > header { display: flex; align-items: center; justify-content: space-between; }
 .vj-dialog > footer { display: flex; gap: .3rem; justify-content: flex-end; margin-top: .3rem; }
 .vj-text-field { display: flex; align-items: center; gap: .7rem; }
@@ -10500,19 +8927,12 @@ button.kd-stream-status {
 .vj-export-status progress { width: 100%; height: 5px; accent-color: var(--kd-theme); }
 .vj-output-path { color: var(--kd-muted); overflow-wrap: anywhere; }
 @container (max-width: 850px) {
-  .vj-main { grid-template-columns: minmax(0,1fr); }
-  .vj-inspector { display: none; }
-  .vj-workshop[data-properties="true"] .vj-inspector { display: block; position: absolute; right: 0; top: 47px; bottom: 40%; width: 245px; z-index: 8; background: var(--kd-panel); box-shadow: -8px 0 24px #0002; }
-  .vj-workshop .vj-properties-toggle { display: inline-flex; }
   .vj-header > .kd-select-control { width: 115px; }
   .vj-save-state { display: none; }
 }
 @container (max-width: 570px) {
-  .vj-main { grid-template-columns: minmax(0,1fr); }
   .vj-header { padding-inline: .35rem; gap: .1rem; }
   .vj-header > strong { display: none; }
-  .vj-source > svg, .vj-source > small { display: none; }
-  .vj-tools { gap: 0; padding-inline: .2rem; }
   .vj-preparing { display: none; }
   .vj-preview { padding: .35rem; }
   .vj-timeline-scale > span { font-size: 10px; }
@@ -10522,14 +8942,7 @@ button.kd-stream-status {
 .kd-split-aside-body:has(> .vj-workshop),
 .kd-split-aside-body:has(> .kd-video-workspace) { overflow: hidden; }
 .kd-video-workspace { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; min-width: 0; background: var(--kd-panel); }
-.kd-video-workspace > :not(.kd-video-modes) { flex: 1 1 auto; min-height: 0; }
-.kd-video-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); flex: none; gap: 0; padding: 7px 8px; border-bottom: 1px solid var(--kd-line-soft); }
-.kd-video-modes button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-width: 0; min-height: 56px; padding: 5px 2px; border: 0; border-radius: 6px; background: transparent; color: var(--kd-text); font: 600 var(--kd-size-sm)/1.2 var(--kd-font); cursor: pointer; }
-.kd-video-modes button:hover:not(:disabled) { color: var(--kd-theme); }
-.kd-video-modes button[aria-current="page"] { color: var(--kd-theme); }
-.kd-video-modes button:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: -2px; }
-.kd-video-modes button:disabled { color: var(--kd-muted); opacity: .45; cursor: default; }
-.kd-video-modes button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.kd-video-workspace > * { flex: 1 1 auto; min-height: 0; }
 
 .vj-filmstrip { position: absolute; inset: 0; pointer-events: none; background: var(--kd-panel); }
 .vj-filmstrip > img { position: absolute; top: 0; height: 100%; object-fit: cover; }
@@ -10539,26 +8952,18 @@ button.kd-stream-status {
 .vj-track-rail > .vj-playhead { pointer-events: auto; cursor: ew-resize; touch-action: none; }
 .vj-track-rail > .vj-playhead::after { content:""; position:absolute; inset:0 -5px; }
 
-.vj-source { flex-wrap: nowrap; min-width: 0; }
-.vj-source > span { flex: 1 1 140px; }
-.vj-source > button { flex-shrink: 0; }
-.vj-position-presets { display: flex; flex: 0 1 auto; max-width: 58%; align-items: center; gap: .2rem; min-width: 0; overflow: hidden; }
-.vj-position-presets button { min-width: 0; min-height: 23px; font-size: var(--kd-size-xs); padding: .15rem .4rem; border-color: var(--kd-line-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vj-task-stack { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; }
 .vj-task-entry { flex: none; min-width: 0; border-bottom: 1px solid var(--kd-line-soft); }
-.vj-visualizer-tasks { flex: none; min-width: 0; }
 .vj-task-section-title { margin: 0; padding: 8px; font-size: var(--kd-size-xs); font-weight: 550; color: var(--kd-muted); }
 .vj-task-section-title small { margin-left: 4px; font: inherit; }
 .vj-task-card { flex: none; min-width: 0; }
 .vj-task-card:not([data-editing]) { cursor: pointer; }
 .vj-task-entry[data-expanded="true"] { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
-.vj-workshop .vj-task-heading { display: flex; width: 100%; padding: .65rem .5rem; border-radius: 0; text-align: left; flex: none; }
+.vj-workshop .vj-task-heading { display: flex; width: 100%; border-radius: 0; text-align: left; flex: none; }
 .vj-task-heading > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vj-task-heading > small { color: var(--kd-muted); font-size: var(--kd-size-xs); }
 .vj-task-editor { flex: 1; min-height: 0; }
 .vj-task-editor > .vj-workshop { min-height: 0; }
-.vj-batch-item { display: flex; flex-direction: column; gap: .2rem; padding-block: .3rem; }
-.vj-batch-item > small { color: var(--kd-muted); overflow-wrap: anywhere; }
 .vj-add-menu > summary { display: flex; align-items: center; gap: .4rem; padding: .45rem .65rem; cursor: pointer; list-style: none; }
 .vj-add-menu > summary::-webkit-details-marker { display: none; }
 .vj-add-menu > summary > svg:last-child { margin-left: auto; }
@@ -10567,7 +8972,6 @@ button.kd-stream-status {
 .vj-position-status { font-size: var(--kd-size-xs); color: var(--kd-muted); overflow: hidden; text-overflow: ellipsis; max-width: 220px; white-space: nowrap; }
 .vj-position-status progress { width: 45px; height: 3px; vertical-align: middle; accent-color: var(--kd-theme); }
 .vj-workshop button[aria-label="时间轴吸附"][aria-pressed="true"] { color: var(--kd-theme); }
-@container (max-width: 570px) { .vj-position-presets { max-width: 52%; } }
 
 /* Every task has the same single-row overview; extra layers stay in the editor. */
 .vj-task-summary { padding: 0 .5rem .3rem; flex: none; height: 4.9rem; box-sizing: border-box; overflow: hidden; }
@@ -10587,29 +8991,13 @@ button.kd-stream-status {
 .vj-task-mix-facts { display: flex; align-items: center; flex-wrap: nowrap; gap: .2rem .5rem; color: var(--kd-muted); font-size: var(--kd-size-xs); margin-top: .2rem; height: 1.1rem; white-space: nowrap; overflow: hidden; }
 .vj-task-mix-facts > * { flex: none; }
 .vj-task-stack[data-editing="true"] { overflow: hidden; }
-.vj-task-editor .vj-main { min-height: 60px; flex: 1 1 31%; }
-.vj-task-editor .vj-timeline { min-height: 90px; flex: 1 1 45%; max-height: none; }
-
-.vj-inspector-heading { display: flex; align-items: flex-start; gap: .4rem; position: sticky; top: -.7rem; background: var(--kd-panel); z-index: 1; padding-block: .35rem; }
-.vj-inspector-heading > .vj-inspector-title { flex: 1; min-width: 0; margin-bottom: .35rem; }
-.vj-workshop .vj-inspector-close { display: none; flex: none; padding: .15rem; }
-@container (max-width: 850px) {
-  .vj-workshop .vj-inspector-close { display: inline-flex; }
-}
 
 .vj-workshop { --vj-label-width: 164px; }
-.vj-main { grid-template-columns: var(--vj-label-width) minmax(0,1fr); }
-.vj-main > .vj-sources { min-height: 0; max-height: none; overflow: auto; border-top: 0; border-right: 1px solid var(--kd-line-soft); padding: .3rem .4rem; }
-.vj-main .vj-source { display: grid; grid-template-columns: 16px 14px minmax(0,1fr) auto 18px; gap: .2rem; }
-.vj-main .vj-position-presets { grid-column: 2 / -1; grid-row: 2; max-width: 100%; flex-wrap: wrap; }
-.vj-main .vj-position-presets:empty { display: none; }
-.vj-main .vj-position-presets { display: grid; gap: .45rem; overflow: visible; padding: .3rem 0; }
 .vj-position-choice-group { display: grid; min-width: 0; gap: .3rem; }
 .vj-position-choice-group + .vj-position-choice-group { border-top: 1px solid var(--kd-line-soft); padding-top: .45rem; }
 .vj-position-prerequisite { color: var(--kd-muted); font-size: var(--kd-size-xs); line-height: 1.4; font-variant-numeric: tabular-nums; }
 .vj-position-choice-actions { display: flex; flex-wrap: wrap; gap: .3rem; }
 .vj-position-choice-actions button { flex: 1 1 8rem; min-height: 28px; white-space: normal; text-align: left; line-height: 1.4; padding: .25rem .4rem; }
-.vj-main .vj-source-remove { grid-column: 5; grid-row: 1; }
 .vj-clip-menu.vj-menu { position: absolute; box-sizing: border-box; width: 220px; min-width: 0; max-width: calc(100% - 16px); max-height: min(360px, calc(100% - 16px)); overflow: auto; overscroll-behavior: contain; z-index: 15; padding: .4rem; }
 .vj-clip-menu > * { flex-shrink: 0; }
 .vj-clip-menu summary { padding: .35rem !important; color: var(--kd-text) !important; }
@@ -10631,23 +9019,16 @@ button.kd-stream-status {
 .vj-task-details { min-height: 0; flex: none; }
 .vj-task-heading-progress { flex:none; white-space:nowrap; font-size:var(--kd-size-xs); color:var(--kd-muted); }
 .vj-task-heading-progress progress { width:48px; height:3px; accent-color:var(--kd-muted); }
-.kd-chrome-export-progress { font-size:var(--kd-size-xs); font-variant-numeric:tabular-nums; }
 .vj-cancel-export { display:inline-flex; align-items:center; flex-shrink:0; padding-right:6px; }
 .vj-cancel-export button { display:inline-flex; padding:6px; color:var(--kd-muted); background:none; border:0; cursor:pointer; }
 .vj-cancel-export button:hover { color:var(--kd-accent); }
-.vj-batch-status { display:flex; align-items:center; gap:8px; }
 
-.vj-task-editor .vj-main { flex: var(--vj-preview-weight, 45) 1 0px; min-height: 60px; }
-.vj-task-editor .vj-timeline { flex: var(--vj-timeline-weight, 45) 1 0px; min-height: 100px; max-height: none; }
-.vj-height-handle { display:flex; align-items:center; justify-content:center; height:7px; flex:0 0 7px; cursor:row-resize; touch-action:none; background:var(--kd-panel); border-block:1px solid var(--kd-line-soft); }
-.vj-height-handle i { width:28px; height:2px; background:var(--kd-muted); opacity:.4; border-radius:2px; pointer-events:none; }
-.vj-height-handle:hover i, .vj-height-handle:focus i { opacity:1; background:var(--kd-theme); }
 .vj-workshop .vj-layer-visibility, .vj-workshop .vj-layer-audio { display:flex; align-items:center; justify-content:center; flex:none; width:22px; padding:2px; min-height:22px; }
 .vj-workshop .vj-layer-audio[aria-pressed="true"] { color:var(--kd-theme); background:transparent; border-color:transparent; box-shadow:none; }
 .vj-workshop .vj-layer-audio[aria-pressed="false"] { color:var(--kd-muted); }
 .vj-layer-visibility[aria-pressed="true"] { color:var(--kd-muted); }
 .vj-track-row[data-video-hidden] .vj-filmstrip { opacity:.3; }
-.vj-task-export-meta { display:flex; flex-wrap:wrap; align-items:center; gap:.2rem .6rem; padding:.1rem .6rem .35rem; font-size:var(--kd-size-xs); color:var(--kd-muted); flex:none; }
+.vj-task-export-meta { display:flex; flex-wrap:wrap; align-items:center; gap:.2rem .6rem; color:var(--kd-muted); flex:none; }
 .vj-task-export-meta > span { min-width:0; overflow-wrap:anywhere; }
 .vj-task-progress { display:inline-flex; align-items:center; gap:.25rem; }
 .vj-task-export-meta progress { width:80px; height:3px; accent-color:var(--kd-muted); }
@@ -10657,7 +9038,7 @@ button.kd-stream-status {
 .vj-export-settings > summary > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .vj-export-settings > summary > svg { flex:none; }
 .vj-workshop .vj-export-settings[open] > summary { color:var(--kd-theme); }
-.vj-export-settings > fieldset { position:absolute; top:100%; right:8px; z-index:20; width:min(320px, calc(100% - 16px)); max-height:min(360px, 50vh); overflow:auto; overscroll-behavior:contain; margin:0; padding:10px; border:1px solid var(--kd-line); border-radius:8px; background:var(--kd-panel); box-shadow:0 6px 20px #0002; min-width:0; }
+.vj-export-settings > fieldset { position:absolute; top:100%; right:8px; z-index:20; width:min(320px, calc(100% - 16px)); max-height:min(360px, 50vh); overflow:auto; overscroll-behavior:contain; margin:0; padding:10px; border:1px solid var(--kd-line); border-radius:6px; background:var(--kd-panel-raised); box-shadow:var(--kd-shadow-float); min-width:0; }
 .vj-workshop-toolbar .vj-export-settings { position:relative; }
 .vj-workshop-toolbar .vj-export-settings > fieldset { left:0; right:auto; width:min(320px, calc(100vw - 32px)); }
 .vj-export-settings .vj-duo { gap:1rem; }
@@ -10667,16 +9048,11 @@ button.kd-stream-status {
 .vj-timeline-overview { flex:0 0 20px; box-sizing:border-box; padding:4px 8px 4px var(--vj-label-width, 164px); border-top:1px solid var(--kd-line-soft); background:var(--kd-panel); }
 .vj-overview-thumb { position:absolute; top:0; bottom:0; display:flex; align-items:center; justify-content:center; border:1px solid var(--kd-muted); border-radius:3px; background:color-mix(in srgb,var(--kd-muted) 24%,transparent); cursor:grab; pointer-events:none; }
 .vj-overview-thumb i { width:15px; height:3px; border-inline:1px solid var(--kd-muted); border-block:1px solid var(--kd-muted); opacity:.7; }
-.vj-height-handle { height:11px; flex-basis:11px; }
-.vj-height-handle i { width:48px; height:3px; opacity:.65; }
-.vj-height-handle[data-dragging] { background:color-mix(in srgb,var(--kd-muted) 7%,var(--kd-panel)); }
-.vj-height-handle[data-dragging] i { opacity:1; background:var(--kd-theme); }
 
 .vj-overview-viewport { height:11px; position:relative; background:var(--kd-panel-inset); border-radius:3px; cursor:pointer; touch-action:none; overflow:hidden; }
 .vj-overview-viewport[data-dragging] { cursor:grabbing; }
 .vj-overview-viewport:focus-visible { outline:1px solid var(--kd-theme); outline-offset:-1px; }
 .vj-overview-viewport[data-dragging] .vj-overview-thumb { border-color:var(--kd-theme); }
-
 
 /* Compact workshop: source actions live beside their clips; preview floats on demand. */
 .vj-workshop .vj-header { min-height: 34px; padding: 3px 8px; gap: 2px; }
@@ -10699,10 +9075,6 @@ button.kd-stream-status {
 .vj-layer-audio > span { font-size: 10px; font-variant-numeric: tabular-nums; }
 .vj-workshop .vj-layer-audio:hover:not(:disabled), .vj-workshop .vj-timeline-time button:hover:not(:disabled) { background: transparent; color: var(--kd-theme); }
 .vj-timeline-time { display: flex; align-items: center; gap: 8px; flex: none; margin-left: auto; white-space: nowrap; color: var(--kd-muted); font-size: var(--kd-size-xs); font-variant-numeric: tabular-nums; }
-.vj-workshop .vj-tools { min-height: 36px; padding: 3px 6px; gap: 1px; flex-wrap: wrap; border-top: 0; }
-.vj-workshop .vj-tools > button { padding: 4px 6px; }
-.vj-tools-trailing { display: flex; flex: 1 1 520px; min-width: 0; align-items: center; gap: 6px; }
-.vj-tools-trailing > button { margin-left: auto; flex: none; }
 .vj-picture-layout-actions { display: inline-flex; flex: none; align-items: center; gap: 6px; }
 .vj-picture-layout-actions > button { white-space: nowrap; }
 .vj-picture-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 2px 6px; min-width: 0; font-size: var(--kd-size-xs); }
@@ -10715,10 +9087,7 @@ button.kd-stream-status {
 .vj-picture-tools input::-webkit-outer-spin-button { appearance: none; margin: 0; }
 .vj-picture-tools .vj-number > small { color: var(--kd-muted); font-size: inherit; }
 .vj-workshop .vj-picture-tools button { min-width: 24px; padding: 4px; gap: 3px; white-space: nowrap; }
-.vj-workshop .vj-tools button[aria-pressed="true"],
-.vj-workshop .vj-position-presets button[aria-pressed="true"] { background: transparent; border-color: transparent; box-shadow: none; color: var(--kd-theme); }
 .vj-task-editor .vj-timeline { flex: 1 1 0; min-height: 100px; max-height: none; }
-.vj-timeline-scale { padding: 3px 8px; }
 .vj-track-row > .vj-track-label { display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 2px; padding: 5px 6px; }
 .vj-track-label-heading { justify-content: space-between; color: var(--kd-muted); font-size: var(--kd-size-xs); }
 .vj-track-heading-tail { display: flex; align-items: center; gap: 2px; }
@@ -10766,9 +9135,9 @@ button.kd-stream-status {
 .vj-workshop .vj-task-heading { padding: 5px 8px; font-weight: 550; }
 .vj-task-export-meta { padding: 0 8px 4px 28px; font-size: 10px; }
 .vj-workshop .vj-export-settings > summary { padding-block: 5px; }
-.vj-workshop .vj-menu { border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px #0002; }
+.vj-workshop .vj-menu { padding: 4px; }
 .vj-workshop .vj-menu > button { min-height: 27px; padding: 4px 7px; }
-.vj-workshop .vj-dialog { padding: 12px; gap: 10px; border-radius: 10px; box-shadow: 0 8px 28px #0003; }
+.vj-workshop .vj-dialog { padding: 12px; gap: 10px; }
 .vj-workshop .vj-dialog > header { font-weight: 600; }
 .vj-workshop .vj-preparing:empty { display: none; }
 
@@ -10794,10 +9163,6 @@ button.kd-stream-status {
 .kd-pip-float-chrome button:hover { background: transparent; color: #ddd; }
 
 /* Shared popup surfaces keep the same restrained spacing and typography. */
-.kd-dialog { border-radius: 10px; }
-.kd-dialog-head { padding: 12px 14px 8px; font-weight: 600; font-size: var(--kd-size); }
-.kd-dialog-body { padding: 6px 14px 12px; }
-.kd-dialog-foot { padding: 8px 14px; gap: 6px; }
 .kd-sheet-title { font-weight: 600; }
 .kd-sheet .kd-panel-slot + .kd-panel-slot { margin-top: 8px; }
 
@@ -10826,7 +9191,6 @@ button.kd-stream-status {
   flex: 1;
 }
 
-
 [data-vj-drop-over] { outline: 1px dashed var(--kd-accent); outline-offset: -2px; }
 
 .vj-image-picture { position:absolute; pointer-events:none; transform-origin:center; }
@@ -10850,17 +9214,12 @@ button.kd-stream-status {
 /* Keep clip settings compact so the material tracks retain the editing space. */
 .vj-editing-body { display:flex; flex:1; min-width:0; min-height:0; overflow:hidden; }
 .vj-task-editor .vj-editing-body > .vj-timeline { flex:1 1 0; min-width:0; max-height:none; }
-.vj-subtitle-dialog { width:560px; max-width:calc(100vw - 32px); max-height:calc(100vh - 32px); color:var(--kd-text); }
-.vj-subtitle-dialog::backdrop { background:#0005; }
-.vj-subtitle-dialog > fieldset { min-width:0; margin:0; padding:0; border:0; }
 .vj-subtitle-text { display:flex; flex-direction:column; gap:6px; font-size:var(--kd-size-xs); }
 .vj-subtitle-text textarea { width:100%; resize:vertical; min-height:72px; }
 .vj-subtitle-options { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; margin-top:10px; font-size:var(--kd-size-xs); }
 .vj-subtitle-options label { display:flex; align-items:center; gap:6px; margin:0; }
 .vj-subtitle-options input[type="number"] { width:64px; }
 .vj-subtitle-options input[type="color"] { width:28px; height:24px; padding:0; border:0; background:transparent; }
-.vj-subtitle-dialog button { min-height:26px; padding:4px 6px; }
-.vj-subtitle-dialog button[aria-pressed="true"] { color:var(--kd-theme); background:transparent; border-color:transparent; box-shadow:none; }
 .vj-subtitle-sample { display:flex; align-items:center; justify-content:center; min-height:96px; max-height:220px; overflow:auto; background:#252525; border-radius:4px; }
 .vj-subtitle-sample img { max-width:100%; max-height:220px; object-fit:contain; }
 .vj-crop-tools { margin:0; border:0; min-width:0; }
@@ -10926,9 +9285,6 @@ html:root[data-theme-pack="sakulaptop98"] {
 
 html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr[aria-selected="true"] > td { background:#edb4ce !important; }
 
-.kd-download-history-head { display:flex; flex:none; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--kd-line); background:var(--kd-panel-raised); }
-.kd-download-history-head > span { flex:1; color:var(--kd-muted); }
-
 /* 竖屏方块导航保留滚动能力，但不显示或预留原生滚动条。 */
 :root .kd-app[data-portrait="true"] .kd-narrow-folder-rail .kd-scroll {
   scrollbar-width: none;
@@ -10939,7 +9295,6 @@ html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr[aria-selected="true
   width: 0;
   height: 0;
 }
-.kd-app[data-portrait="true"] .kd-narrow-folder-rail button[data-active="true"],
 .kd-folder-picker button[data-active="true"] {
   color: var(--kd-theme);
   background: transparent;

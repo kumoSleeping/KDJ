@@ -1,13 +1,5 @@
 /* Presentation controls are configuration, separate from visibility and docking. */
 .kd-panel-index-section-title { display: flex; align-items: center; justify-content: space-between; }
-.kd-panel-slot:has(> .kd-panel-resize) { position: relative; }
-.kd-panel-resize { position: absolute; z-index: 12; padding: 0; border: 0; background: transparent; color: var(--kd-muted); opacity: 0; touch-action: none; }
-.kd-panel-resize[data-edge="right"] { top: 3px; right: 0; bottom: 3px; width: 8px; cursor: ew-resize; }
-.kd-panel-resize[data-edge="bottom"] { left: 3px; right: 3px; bottom: 0; height: 8px; cursor: ns-resize; }
-.kd-panel-resize[data-edge="corner"] { right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; }
-.kd-panel-resize::after { content: ""; position: absolute; inset: 3px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; }
-.kd-panel-slot:hover > .kd-panel-resize, .kd-panel-resize:focus-visible, .kd-panel-resize:active { opacity: 1; }
-@media (pointer: coarse) { .kd-panel-resize { opacity: 1; min-width: 18px; min-height: 18px; } }
 .kd-panel-resize-preview { position: fixed; z-index: 100000; box-sizing: border-box; border: 2px dashed var(--kd-theme); background: color-mix(in srgb, var(--kd-theme) 8%, transparent); pointer-events: none; }
 
 /* Presets only rearrange existing portal hosts; their media/editors stay mounted. */
@@ -34,8 +26,7 @@
 .kd-panel-dock-top[data-playback-layout] [data-dock-preset-item="waveform"] { grid-column: 2; grid-row: 2; }
 .kd-panel-dock-top[data-playback-layout="media-details"] [data-dock-preset-item="media"] { grid-row: 1; }
 .kd-panel-dock-top[data-playback-layout="media-details"] [data-dock-preset-item="waveform"] { grid-column: 1 / -1; grid-row: 2; }
-.kd-panel-dock-top[data-playback-layout] :is(.kd-track-preview-row, .kd-track-preview-combined, .kd-track-preview-content) { display: contents; }
-.kd-panel-dock-top[data-playback-layout] .kd-track-preview-combined > .kd-panel-head { display: none; }
+.kd-panel-dock-top[data-playback-layout] .kd-track-preview-row { display: contents; }
 .kd-panel-dock-top[data-playback-layout] .kd-panel-slot[data-dock-preset-item] { margin: 4px; }
 
 .kd-panel-slot[data-panel-form]:is([data-panel-form="slim"], [data-panel-form="strip"], [data-panel-form="portrait"], [data-panel-form="auto"][data-auto-panel-form="slim"], [data-panel-form="auto"][data-auto-panel-form="strip"], [data-panel-form="auto"][data-auto-panel-form="portrait"]) { height: auto; min-height: 0; }
