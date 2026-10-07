@@ -338,6 +338,7 @@ fn http_activity(
         _ if method == Method::DELETE && route.starts_with("/downloads/") => user("移除下载记录"),
         (&Method::POST, "/downloads/cancel-all") => user("取消全部下载任务"),
         (&Method::POST, "/downloads/clear") => user("清理下载记录"),
+        (&Method::POST, "/downloads/clear-history") => user("清理下载历史记录"),
         _ => None,
     }
 }

@@ -2040,6 +2040,34 @@ impl DownloadManager {
         removed
     }
 
+    /// 「历史」视图的清记录：只移除已完成和已取消的记录，返回移除几条；不删除文件。
+    ///
+    /// 失败任务仍在下载队列里等重试，queued / paused / running / processing 更不能动。
+    /// 先写 journal 再生效：写不进去（包括只读 journal）就把记录放回去并报错，
+    /// 免得界面上清掉了、重启后又冒出来，也不会动只读的原文件。
+    pub fn clear_history(&self) -> Result<usize> {
+        let removed = {
+            let mut entries = self.entries.lock().unwrap();
+            let ids: Vec<String> = entries
+                .iter()
+                .filter(|(_, entry)| matches!(entry.task.state, TaskState::Done | TaskState::Canceled))
+                .map(|(id, _)| id.clone())
+                .collect();
+            if ids.is_empty() {
+                return Ok(0);
+            }
+            let removed: Vec<(String, Entry)> =
+                ids.iter().filter_map(|id| entries.remove_entry(id)).collect();
+            if let Err(error) = self.persist_locked(&entries) {
+                entries.extend(removed);
+                return Err(error);
+            }
+            removed.len()
+        };
+        self.broadcast_list();
+        Ok(removed)
+    }
+
     /// 清掉所有当前没有在执行的任务，返回清掉几条。
     ///
     /// 队列里的失败项仍是一首待下载的歌，只带着“上次下载失败”的状态；
@@ -4080,6 +4108,66 @@ mod tests {
         assert_eq!(manager.clear_inactive(), 5);
         let ids: Vec<String> = manager.list().into_iter().map(|task| task.id).collect();
         assert_eq!(ids, vec!["running"], "只有正在执行的任务不能被清掉");
+    }
+
+    #[test]
+    fn clear_history_removes_only_done_and_canceled_records_and_persists() {
+        let (path, root) = journal_path("clear-history");
+        {
+            let manager =
+                DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+            let mut failed = sample_task("failed", TaskState::Failed, 2.0);
+            failed.error = "网络错误".into();
+            failed.previous_error = "上一次失败".into();
+            for task in [
+                sample_task("done", TaskState::Done, 1.0),
+                failed,
+                sample_task("canceled", TaskState::Canceled, 3.0),
+                sample_task("running", TaskState::Running, 4.0),
+                sample_task("queued", TaskState::Queued, 5.0),
+                sample_task("paused", TaskState::Paused, 6.0),
+                sample_task("processing", TaskState::Processing, 7.0),
+            ] {
+                manager.insert(task, CancellationToken::new());
+            }
+
+            assert_eq!(manager.clear_history().unwrap(), 2);
+            assert_eq!(manager.clear_history().unwrap(), 0);
+            let mut ids: Vec<String> = manager.list().into_iter().map(|task| task.id).collect();
+            ids.sort();
+            assert_eq!(ids, vec!["failed", "paused", "processing", "queued", "running"]);
+        }
+        let reopened = DownloadManager::open(EventHub::default(), 2, false, path).unwrap();
+        assert!(reopened.get("done").is_none());
+        assert!(reopened.get("canceled").is_none());
+        let failed = reopened.get("failed").expect("失败任务留在队列里等重试");
+        assert_eq!(failed.error, "网络错误");
+        assert_eq!(failed.previous_error, "上一次失败");
+        for id in ["queued", "paused", "running", "processing"] {
+            assert!(reopened.get(id).is_some(), "{id} 不属于历史记录");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_history_leaves_a_read_only_journal_and_records_untouched() {
+        let (path, root) = journal_path("clear-history-read-only");
+        {
+            let manager =
+                DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+            manager.insert(sample_task("done", TaskState::Done, 1.0), CancellationToken::new());
+        }
+        let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        raw["entries"][0]["task"]["future_field"] = serde_json::json!(true);
+        let body = serde_json::to_vec_pretty(&raw).unwrap();
+        fs::write(&path, &body).unwrap();
+
+        let manager = DownloadManager::open(EventHub::default(), 2, false, path.clone()).unwrap();
+        assert!(manager.read_only_error().is_some());
+        assert!(manager.clear_history().is_err());
+        assert!(manager.get("done").is_some(), "写不进去时记录要放回去");
+        assert_eq!(fs::read(&path).unwrap(), body, "只读 journal 不能被改写");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

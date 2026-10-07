@@ -1009,7 +1009,8 @@ export const api = {
     }),
   /** 只移除一条已结束的队列记录，避免「清空」影响其他历史任务。 */
   removeDownload: (id: string) => request<{ removed: boolean }>(`/downloads/${id}`, { method: "DELETE" }),
-  clearDownloads: () => post<{ removed: number }>("/downloads/clear"),
+  /** 只移除已完成和已取消的历史记录，不删除下载文件；失败、排队、暂停和进行中的任务不动。 */
+  clearDownloadHistory: () => post<{ removed: number }>("/downloads/clear-history"),
   /** 已完成但文件已不在原位置的任务 id。只在显式调用时 stat，不进进度热路径。 */
   missingDownloadFiles: () => request<string[]>("/downloads/missing"),
 

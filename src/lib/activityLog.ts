@@ -254,6 +254,7 @@ export function describeApiActivity(
     return user("取消全部下载任务");
   }
   if (method === "POST" && path === "/downloads/clear") return user("清理下载记录");
+  if (method === "POST" && path === "/downloads/clear-history") return user("清理下载历史记录");
   return null;
 }
 

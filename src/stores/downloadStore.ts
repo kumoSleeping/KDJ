@@ -171,7 +171,8 @@ export interface DownloadStore {
   pauseAll(): Promise<void>;
   retry(taskId: string): Promise<void>;
   remove(taskId: string): Promise<void>;
-  clear(): Promise<void>;
+  /** 「历史」视图的清记录：只移除已完成和已取消的记录，不删除文件。 */
+  clearHistory(): Promise<void>;
   /** 视频下载等"接口直接返回任务"的场景，先本地插一条，等 WS 覆盖。 */
   mergeTasks(tasks: DownloadTask[]): void;
   /** 去掉本地乐观占位（`local:` 前缀那些），真任务进来后用。 */
@@ -339,9 +340,9 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     });
   },
 
-  async clear() {
-    await api.clearDownloads();
-    // 后端清掉未开始和已结束任务，进行中的留着，所以这里重新拉一次而不是本地清空。
+  async clearHistory() {
+    await api.clearDownloadHistory();
+    // 失败、排队、暂停和进行中的任务留在队列里，所以重新拉一次而不是本地清空。
     await get().refresh();
   },
 

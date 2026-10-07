@@ -180,6 +180,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             post(update_download_video_mode),
         )
         .route("/api/downloads/clear", post(clear_downloads))
+        .route("/api/downloads/clear-history", post(clear_download_history))
         .route("/api/downloads/missing", get(missing_download_files))
         .route("/api/video/resolve", post(video_resolve))
         .route("/api/video/download", post(video_download))
@@ -3868,6 +3869,14 @@ async fn update_download_height(
 
 async fn clear_downloads(axum::Extension(ctx): axum::Extension<Ctx>) -> Json<serde_json::Value> {
     Json(json!({ "removed": ctx.downloads.clear_inactive() }))
+}
+
+/// 「历史」视图的清记录：只移除已完成和已取消的记录，不删除下载文件。
+async fn clear_download_history(
+    axum::Extension(ctx): axum::Extension<Ctx>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let removed = ctx.downloads.clear_history()?;
+    Ok(Json(json!({ "removed": removed })))
 }
 
 /// 移除一条已经结束的任务记录。运行中的条目必须先取消，不能在它还持有进程时

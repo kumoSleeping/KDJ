@@ -690,6 +690,7 @@ export function QueuePanel({ history = false }: { history?: boolean }) {
     return () => window.removeEventListener("focus", onFocus);
   }, [checkMissingFiles, history]);
   const pauseAll = useDownloadStore((store) => store.pauseAll);
+  const clearHistory = useDownloadStore((store) => store.clearHistory);
   const [dropActive, setDropActive] = useState(false);
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
   const pausedCount = list.reduce((sum, task) => sum + (task.state === "paused" ? 1 : 0), 0);
@@ -773,6 +774,26 @@ export function QueuePanel({ history = false }: { history?: boolean }) {
         }}
         onError={setActionError}
       />}
+
+      {history && <section className="kd-download-prefs kd-download-overview" aria-label="下载历史概览">
+        <div className="kd-download-summary" aria-live="polite">
+          {visibleTasks.length > 0 && <span className="kd-download-summary-fact" data-tone="finished">
+            <strong>{visibleTasks.length}</strong><span>记录</span>
+          </span>}
+        </div>
+        <div className="kd-download-overview-actions">
+          <Button variant="ghost" size="sm" disabled={visibleTasks.length === 0}
+            title="只移除历史记录，不删除下载文件"
+            onClick={() => {
+              setActionError("");
+              void clearHistory().catch((error: unknown) =>
+                setActionError(`清记录失败：${(error as Error).message}`),
+              );
+            }}>
+            <Trash2 size={11} />清记录
+          </Button>
+        </div>
+      </section>}
 
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
