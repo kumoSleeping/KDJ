@@ -1325,6 +1325,9 @@ struct Actor {
     front: DeckId,
     retire_after_transition: Option<DeckId>,
     deferred_stream: Option<DeferredStream>,
+    /// Prepared incoming source that an outgoing-track seek had to evict from the other Deck.
+    /// Restored by the next prewarm, or committed directly by a `Handoff` naming it (#32).
+    seek_displaced_prepare: Option<PlaybackSource>,
     state: PlaybackSnapshot,
     last_emitted: PlaybackSnapshot,
     last_state_tick: Instant,
@@ -1392,6 +1395,7 @@ impl Actor {
             front: DeckId::A,
             retire_after_transition: None,
             deferred_stream: None,
+            seek_displaced_prepare: None,
             state: PlaybackSnapshot::default(),
             last_emitted: PlaybackSnapshot::default(),
             last_state_tick: Instant::now(),
@@ -1962,6 +1966,7 @@ impl Actor {
         self.manual_mode = false;
         self.manual_desired_playing = [false; 2];
         self.settle_transition()?;
+        self.seek_displaced_prepare = None;
         // `Load` is the manager/single-track boundary. Tempo, pitch, FX and source-scoped loop/STEM
         // state belong to the departing song, while GAIN/EQ/FILTER belong to the continuous Manager
         // session. Restore that mixer to both sides because either one may be the next decode target.
@@ -2068,6 +2073,8 @@ impl Actor {
                 return Ok(());
             }
             self.state.prepared_track_id = Some(source.track_id);
+            // A newer prewarm supersedes one an outgoing seek evicted.
+            self.seek_displaced_prepare = None;
             self.deferred_stream = Some(DeferredStream {
                 request: source,
                 activation: None,
@@ -2086,6 +2093,7 @@ impl Actor {
             return Ok(());
         }
         self.state.prepared_track_id = Some(source.track_id);
+        self.seek_displaced_prepare = None;
         self.start_stream(target, source, None)
     }
 
@@ -3487,6 +3495,7 @@ impl Actor {
             self.state.decks[index].desired_playing = self.manual_desired_playing[index];
         }
         self.manual_mode = true;
+        self.seek_displaced_prepare = None;
     }
 
     fn clear_jog_nudge(&mut self, deck: DeckId) {
@@ -3691,6 +3700,16 @@ impl Actor {
     }
 
     fn prewarm_queue(&mut self) -> Result<(), String> {
+        // An outgoing seek evicted an explicitly prepared incoming Deck (possibly the target of a
+        // DJ handoff the frontend is about to send). Put that exact source back first: the queue
+        // head is not guaranteed to be the track the handoff will name.
+        if let Some(source) = self
+            .seek_displaced_prepare
+            .take()
+            .filter(|source| Some(source.track_id) != self.state.track_id)
+        {
+            return self.prepare(source);
+        }
         let Some(source) = self
             .queue
             .iter()
@@ -3777,6 +3796,7 @@ impl Actor {
         self.pending = [None, None];
         self.pending_preroll = [None, None];
         self.deferred_stream = None;
+        self.seek_displaced_prepare = None;
         self.retire_after_transition = None;
         self.stem_recoveries = [None, None];
         self.queue.clear();
@@ -3911,11 +3931,41 @@ impl Actor {
         self.state.buffering = true;
         self.state.transitioning = false;
         let target = self.front.other();
+        // #32: the replacement stream needs the other Deck, which may hold the prepared incoming
+        // song of a DJ handoff that the frontend has not committed yet (it waits for a bar
+        // boundary or an online URL; until the Handoff ACK both the UI and `state.track_id` still
+        // name the outgoing song). `Seek` carries no track id, and the coordinator cannot tell
+        // that prepare from an ordinary queue prewarm, so the rule is: a seek always belongs to
+        // the song `state.track_id` names — here the outgoing one, which is what the user sees,
+        // hears and scrubbed against (its duration and playhead produced the position). Folding
+        // it into the incoming song would apply the old song's coordinates to a different track.
+        // What must not happen is losing the prepared incoming: remember it so the following
+        // Handoff still commits (instead of failing into a hard cut) and the prewarm is restored
+        // after the seek lands. Once the Handoff is accepted `state.track_id` names the incoming
+        // song and later seeks fold into its pending transition above.
+        let displaced = self.prepared_shadow_on(target);
         let result = self.start_stream(target, source, Some(Activation::Seek));
         if result.is_err() {
             self.state = checkpoint;
+        } else if let Some(displaced) = displaced {
+            self.seek_displaced_prepare = Some(displaced);
         }
         result
+    }
+
+    /// The not-yet-activated prepared source on `deck` (pending or installed) for a song other
+    /// than the current one; i.e. a prewarm a stream started on `deck` now would evict.
+    fn prepared_shadow_on(&self, deck: DeckId) -> Option<PlaybackSource> {
+        let current = self.state.track_id;
+        match self.pending[deck as usize].as_ref() {
+            Some(pending) => (pending.activation.is_none()
+                && Some(pending.request.track_id) != current)
+                .then(|| pending.request.clone()),
+            None => self.decks[deck as usize]
+                .as_ref()
+                .filter(|runtime| deck != self.front && Some(runtime.request.track_id) != current)
+                .map(|runtime| runtime.request.clone()),
+        }
     }
 
     fn handoff(&mut self, expected: i64, transition: PendingTransition) -> Result<(), String> {
@@ -3954,6 +4004,35 @@ impl Actor {
             self.state.prepared_track_id = Some(expected);
             self.adopt_pending_transition_state(&request, transition);
             return Ok(());
+        }
+        // #32: an outgoing-song seek between Prepare and Handoff evicted the incoming Deck. The
+        // handoff is the newer intent: restart the remembered source as the transition. If the
+        // seek has not landed yet its replacement stream is cancelled (the outgoing song simply
+        // mixes out from where it is); while the seek's short duck still occupies the old Deck,
+        // the transition waits in the deferred slot exactly like a chained second handoff.
+        if let Some(mut request) = self.seek_displaced_prepare.take() {
+            if request.track_id != expected {
+                self.seek_displaced_prepare = Some(request);
+            } else if self.retire_after_transition.is_none()
+                || self
+                    .deferred_stream
+                    .as_ref()
+                    .is_none_or(|d| d.activation.is_none())
+            {
+                request.position = transition.position.max(0.0);
+                let activation = Some(Activation::Transition(transition));
+                if self.retire_after_transition.is_some() {
+                    self.deferred_stream = Some(DeferredStream {
+                        request: request.clone(),
+                        activation,
+                    });
+                } else {
+                    self.start_stream(target, request.clone(), activation)?;
+                }
+                self.state.prepared_track_id = Some(expected);
+                self.adopt_pending_transition_state(&request, transition);
+                return Ok(());
+            }
         }
         Err("下一台 Deck 尚未开始准备".into())
     }
@@ -5568,6 +5647,7 @@ impl Actor {
         self.invalidate(DeckId::B);
         self.pending = [None, None];
         self.deferred_stream = None;
+        self.seek_displaced_prepare = None;
         self.decks = [None, None];
         self.pending_audio_handoffs = [None, None];
         self.stem_recoveries = [None, None];
@@ -8305,6 +8385,140 @@ mod tests {
         assert!(actor.retire_after_transition.is_some());
         assert!(actor.state.transitioning);
         assert!((actor.state.current_time - 22.0).abs() < 0.001);
+    }
+
+    fn prepared_handoff_actor(knobs: &Arc<FakeKnobs>, playing: bool) -> Actor {
+        let mut actor = test_actor(knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.state.desired_playing = playing;
+        actor.state.phase = if playing {
+            PlaybackPhase::Playing
+        } else {
+            PlaybackPhase::Paused
+        };
+        actor.prepare(source(2, 4.0)).expect("预热进场曲目");
+        actor
+    }
+
+    fn handoff_to_2(actor: &mut Actor) -> Result<(), String> {
+        actor.handoff(
+            2,
+            PendingTransition {
+                position: 4.0,
+                seconds: 8.0,
+                plan: PlaybackTransitionPlan::default(),
+            },
+        )
+    }
+
+    fn assert_transition_to_2(activation: &Option<Activation>, position: f64) {
+        assert!(matches!(
+            activation,
+            Some(Activation::Transition(transition))
+                if (transition.position - position).abs() < 0.001 && transition.seconds == 8.0
+        ));
+    }
+
+    /// #32：开启接歌时，点下一首到 handoff 提交之间界面与 state 都还是上一首。
+    /// 这时点进度条跳的是上一首，但不能顶掉已预热的进场 Deck——以前 handoff
+    /// 因此找不到目标、退化为硬切并丢掉这次跳转。提交后的跳转落在进场曲目。
+    #[test]
+    fn seek_during_a_prepared_handoff_keeps_the_transition() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = prepared_handoff_actor(&knobs, true);
+
+        actor.seek(30.0).expect("跳转仍在播放的上一首");
+        let pending = actor.pending[DeckId::B as usize].as_ref().expect("seek 流");
+        assert_eq!(pending.request.track_id, 1);
+        assert!(matches!(pending.activation, Some(Activation::Seek)));
+        assert!((pending.request.position - 30.0).abs() < 0.001);
+        assert_eq!(actor.state.track_id, Some(1));
+
+        handoff_to_2(&mut actor).expect("接歌不能因这次跳转退化为硬切");
+        let pending = actor.pending[DeckId::B as usize].as_ref().expect("进场流");
+        assert_eq!(pending.request.track_id, 2);
+        assert!((pending.request.position - 4.0).abs() < 0.001);
+        assert_transition_to_2(&pending.activation, 4.0);
+        assert_eq!(actor.state.track_id, Some(2));
+        assert_eq!(actor.state.prepared_track_id, Some(2));
+        assert_eq!(actor.state.phase, PlaybackPhase::Loading);
+        assert!(actor.seek_displaced_prepare.is_none());
+
+        actor.seek(45.0).expect("提交后的跳转折进接歌");
+        let pending = actor.pending[DeckId::B as usize]
+            .as_ref()
+            .expect("接歌流仍在");
+        assert_eq!(pending.request.track_id, 2);
+        assert!((pending.request.position - 45.0).abs() < 0.001);
+        assert_transition_to_2(&pending.activation, 45.0);
+        assert!((actor.state.current_time - 45.0).abs() < 0.001);
+    }
+
+    /// 跳转已落地、短暂的 seek 交叉淡化还占着旧 Deck：handoff 进 deferred，
+    /// 淡化收尾后在腾出的 Deck 上起播接歌。
+    #[test]
+    fn seek_during_a_prepared_handoff_defers_the_transition_behind_the_seek_duck() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = prepared_handoff_actor(&knobs, true);
+        actor.seek(30.0).expect("跳转上一首");
+        actor.pending[DeckId::B as usize] = None;
+        actor.decks[DeckId::B as usize] = Some(live_runtime(1, 30.0));
+        actor
+            .activate(DeckId::B, Activation::Seek, 30.0)
+            .expect("seek 落地");
+        assert_eq!(actor.retire_after_transition, Some(DeckId::A));
+
+        handoff_to_2(&mut actor).expect("接歌登记到 deferred");
+        let deferred = actor.deferred_stream.as_ref().expect("接歌等旧 Deck 腾出");
+        assert_eq!(deferred.request.track_id, 2);
+        assert_transition_to_2(&deferred.activation, 4.0);
+        assert_eq!(actor.state.track_id, Some(2));
+
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.active_deck = DeckId::B;
+            snapshot.transitioning = false;
+            snapshot.playing = true;
+            snapshot.deck_source_ids[DeckId::B as usize] = 101; // live_runtime(1)
+        }
+        actor.refresh_from_audio();
+
+        assert!(actor.deferred_stream.is_none());
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("接歌在腾出的 Deck 起播");
+        assert_eq!(pending.request.track_id, 2);
+        assert_transition_to_2(&pending.activation, 4.0);
+        assert_eq!(actor.state.track_id, Some(2));
+    }
+
+    /// 暂停时跳转没有淡化，落地即回收旧 Deck：被顶掉的预热必须原样恢复，
+    /// 而不是换成队列里的另一首。
+    #[test]
+    fn seek_during_a_prepared_handoff_restores_the_prewarm_after_landing() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = prepared_handoff_actor(&knobs, false);
+        actor.queue = vec![source(9, 0.0)];
+        actor.seek(30.0).expect("跳转上一首");
+        actor.pending[DeckId::B as usize] = None;
+        actor.decks[DeckId::B as usize] = Some(live_runtime(1, 30.0));
+        actor
+            .activate(DeckId::B, Activation::Seek, 30.0)
+            .expect("seek 落地");
+
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("预热已恢复");
+        assert_eq!(pending.request.track_id, 2);
+        assert!(pending.activation.is_none());
+        assert_eq!(actor.state.prepared_track_id, Some(2));
+        assert!(actor.seek_displaced_prepare.is_none());
+
+        handoff_to_2(&mut actor).expect("接歌命中恢复的预热");
+        let pending = actor.pending[DeckId::A as usize].as_ref().expect("进场流");
+        assert_transition_to_2(&pending.activation, 4.0);
     }
 
     /// 混音被 seek/load 强行收尾时，已承诺的第二场必须升到腾出的 Deck，不能丢。

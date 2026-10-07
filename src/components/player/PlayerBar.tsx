@@ -1066,6 +1066,8 @@ export function PlayerBar() {
    * 同曲 busy 期间（装载、Seeking、在线卡顿）只放行一次：上一次派出的 seek 落地
    * （状态回到非 busy）前，后续点击停在槽里，连点/长按方向键因此每次落地最多重启
    * 一次解码，而不是每个 ACK 一次。iOS AVPlayer 仍等就绪。
+   * 接歌 handoff 提交前 UI 与权威状态仍是上一首，此时的 seek 属于上一首；协调器保住
+   * 已预热的进场 Deck，handoff 照常提交（#32，见 coordinator `seek`）。
    */
   const drainNativeSeek = useCallback(() => {
     const player = nativePlayer;
