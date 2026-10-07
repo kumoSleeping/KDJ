@@ -13,6 +13,7 @@ export interface YoutubeSabrPreview {
   url: string;
   cached?: boolean;
   waveform_token?: string;
+  released?: Promise<void>;
 }
 
 export const YOUTUBE_SABR_MAX_RETRIES = 0;

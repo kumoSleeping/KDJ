@@ -192,7 +192,9 @@ impl SharedRangeCache {
     }
 
     fn acquire(&mut self, key: &str, total: u64, hint_extension: Option<&str>) {
-        *self.readers.entry(key.to_owned()).or_default() += 1;
+        let readers = self.readers.entry(key.to_owned()).or_default();
+        *readers += 1;
+        if *readers == 1 { notify_lease(key, true); }
         self.observe_metadata(key, total, hint_extension);
     }
 
@@ -201,6 +203,7 @@ impl SharedRangeCache {
         *readers -= 1;
         if *readers != 0 { return; }
         self.readers.remove(key);
+        notify_lease(key, false);
         let Some(source) = self.sources.get_mut(key) else { return; };
         let previous = source.bytes;
         // Keep only the bounded probe prefix when the last reader leaves.
@@ -253,6 +256,21 @@ fn prune_source_ranges(source: &mut SourceRangeCache) -> usize {
         }
     }
     removed
+}
+
+static LEASE_OBSERVER: OnceLock<fn(&str, bool)> = OnceLock::new();
+
+/// Registers the in-process observer told when a loopback media URL gains its first native
+/// reader (`true`) and loses its last one (`false`). Called under the shared cache lock, so the
+/// two transitions of one URL are always delivered in order; the observer must not call back here.
+pub fn set_remote_source_lease_observer(observer: fn(&str, bool)) {
+    let _ = LEASE_OBSERVER.set(observer);
+}
+
+fn notify_lease(key: &str, active: bool) {
+    if let Some(observer) = LEASE_OBSERVER.get() {
+        observer(key, active);
+    }
 }
 
 fn shared_range_cache() -> &'static Mutex<SharedRangeCache> {
@@ -866,6 +884,24 @@ mod tests {
         opened.source.read_exact(&mut tail).unwrap();
         assert_eq!(&tail, &data[data.len() - 4..]);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn lease_observer_sees_only_the_first_reader_opening_and_the_last_closing() {
+        static EVENTS: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+        fn record(key: &str, active: bool) {
+            EVENTS.lock().unwrap().push((key.to_string(), active));
+        }
+        set_remote_source_lease_observer(record);
+        let key = "http://127.0.0.1:9/api/song/preview/lease-observer";
+        let mut cache = SharedRangeCache::default();
+        // Audible reader plus a seek shadow, then the shadow is promoted and the old reader closes.
+        cache.acquire(key, 4_096, None);
+        cache.acquire(key, 4_096, None);
+        cache.release(key);
+        cache.release(key);
+        let events: Vec<_> = EVENTS.lock().unwrap().iter().filter(|(event, _)| event == key).cloned().collect();
+        assert_eq!(events, vec![(key.to_string(), true), (key.to_string(), false)]);
     }
 
     #[test]

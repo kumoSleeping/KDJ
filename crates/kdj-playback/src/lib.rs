@@ -17,3 +17,4 @@ pub use contract::{
 };
 pub use coordinator::PlaybackCoordinator;
 pub use platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory, PlaybackOutputSpec};
+pub use remote_source::set_remote_source_lease_observer;

@@ -656,6 +656,10 @@ export function preloadStreamTrack(track: Track): Promise<void> {
       meta.actualQuality = result.actual_quality;
       meta.requestedQuality = result.requested_quality;
       notifyStreamMeta(track.id);
+      // 后端确认该会话已从所有 Deck 卸载并停止下载：再次播放这首时重新解析。
+      void result.released?.then(() => {
+        if (meta.url === url) meta.url = "";
+      });
     })
     .finally(() => {
       if (meta.preload === request) meta.preload = null;

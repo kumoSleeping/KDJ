@@ -5,10 +5,11 @@
 //! a 10 MiB bounded GVS transfer policy, continuously spools those sequential chunks to a local
 //! file, and serves arbitrary decoder ranges from that growing local file.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
@@ -22,12 +23,27 @@ const RANGE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 pub const GVS_RANGE_CHUNK_BYTES: u64 = 10 * 1024 * 1024;
 pub const GVS_MAX_PROOFS: usize = 64;
 pub const LOCAL_RANGE_CHUNK_BYTES: u64 = 1024 * 1024;
+/// How long a browser-uploaded spool must have had no native Deck reader, after having had one,
+/// before further uploads are refused. Covers cancel-then-reopen decoder restarts (device rebuilds,
+/// non-shadow replacements) so a still-loaded Deck never loses its producer.
+pub const UPLOAD_RELEASE_GRACE: Duration = Duration::from_secs(10);
+const UPLOAD_RELEASED_MESSAGE: &str = "媒体会话已释放";
 
 #[derive(Debug, Clone)]
 struct TransferState {
     available: u64,
     complete: bool,
     error: Option<String>,
+}
+
+/// Native Deck readers of a browser-uploaded spool, reported by the playback layer. A spool that
+/// was never opened by a Deck (still resolving, preloaded, or played by a WebView element) stays
+/// `loaded == false` and is never released by this rule.
+#[derive(Debug, Default)]
+struct ConsumerLease {
+    readers: usize,
+    loaded: bool,
+    released_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -40,6 +56,8 @@ pub struct ProtectedMediaSpool {
     changed: Notify,
     persistent: AtomicBool,
     cancelled: AtomicBool,
+    consumer: Mutex<ConsumerLease>,
+    released: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -121,6 +139,8 @@ impl ProtectedMediaSpool {
             changed: Notify::new(),
             persistent: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
+            consumer: Mutex::new(ConsumerLease::default()),
+            released: AtomicBool::new(false),
         });
         tracing::info!(
             total,
@@ -200,6 +220,8 @@ impl ProtectedMediaSpool {
             changed: Notify::new(),
             persistent: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
+            consumer: Mutex::new(ConsumerLease::default()),
+            released: AtomicBool::new(false),
         }))
     }
 
@@ -359,6 +381,67 @@ impl ProtectedMediaSpool {
         self.cancelled.store(true, Ordering::Release);
         self.changed.notify_waiters();
     }
+
+    fn observe_consumer(&self, active: bool) {
+        let mut lease = self.consumer.lock().unwrap_or_else(|lock| lock.into_inner());
+        if active {
+            lease.readers += 1;
+            lease.loaded = true;
+            lease.released_at = None;
+        } else {
+            lease.readers = lease.readers.saturating_sub(1);
+            if lease.readers == 0 && lease.loaded {
+                lease.released_at = Some(Instant::now());
+            }
+        }
+    }
+
+    /// A media GET while no reader is registered is a Deck reopening this source; restart the
+    /// grace period so the reopen can register its lease before uploads are judged.
+    pub fn note_consumer_request(&self) {
+        let mut lease = self.consumer.lock().unwrap_or_else(|lock| lock.into_inner());
+        if lease.readers == 0 && lease.released_at.is_some() {
+            lease.released_at = Some(Instant::now());
+        }
+    }
+
+    pub fn is_upload_released(&self) -> bool {
+        self.released.load(Ordering::Acquire)
+    }
+
+    /// Ends an unfinished browser upload once every native Deck that opened it has closed it for
+    /// longer than `grace`. Returns whether the upload is (now) released. Never applies to a spool
+    /// that no Deck has opened, or to one that already completed or failed.
+    pub fn release_upload_if_unconsumed(&self, grace: Duration) -> bool {
+        if self.is_upload_released() {
+            return true;
+        }
+        let unconsumed = {
+            let lease = self.consumer.lock().unwrap_or_else(|lock| lock.into_inner());
+            lease.readers == 0
+                && lease
+                    .released_at
+                    .is_some_and(|released_at| released_at.elapsed() >= grace)
+        };
+        if !unconsumed {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.complete || state.error.is_some() {
+            return false;
+        }
+        state.error = Some(UPLOAD_RELEASED_MESSAGE.to_string());
+        self.released.store(true, Ordering::Release);
+        drop(state);
+        self.changed.notify_waiters();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backdate_consumer_release(&self, by: Duration) {
+        let mut lease = self.consumer.lock().unwrap();
+        lease.released_at = lease.released_at.map(|at| at - by);
+    }
 }
 
 impl Drop for ProtectedMediaSpool {
@@ -367,6 +450,43 @@ impl Drop for ProtectedMediaSpool {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+/// Browser-uploaded spools by preview ticket token. Weak: the ticket owns the spool.
+fn upload_consumers() -> &'static Mutex<HashMap<String, Weak<ProtectedMediaSpool>>> {
+    static CONSUMERS: OnceLock<Mutex<HashMap<String, Weak<ProtectedMediaSpool>>>> = OnceLock::new();
+    CONSUMERS.get_or_init(Default::default)
+}
+
+/// Lets native Deck reader leases on `/api/song/preview/{token}` reach this upload spool.
+pub fn track_upload_consumers(token: &str, spool: &Arc<ProtectedMediaSpool>) {
+    let mut consumers = upload_consumers()
+        .lock()
+        .unwrap_or_else(|lock| lock.into_inner());
+    consumers.retain(|_, spool| spool.strong_count() > 0);
+    consumers.insert(token.to_string(), Arc::downgrade(spool));
+}
+
+/// In-process hook for the native playback layer: called when the first reader of a loopback
+/// media URL opens (`active`) and when its last reader closes. Unrelated URLs are ignored.
+pub fn observe_native_media_lease(url: &str, active: bool) {
+    let Some(token) = preview_token_from_url(url) else {
+        return;
+    };
+    let spool = upload_consumers()
+        .lock()
+        .unwrap_or_else(|lock| lock.into_inner())
+        .get(token)
+        .and_then(Weak::upgrade);
+    if let Some(spool) = spool {
+        spool.observe_consumer(active);
+    }
+}
+
+fn preview_token_from_url(url: &str) -> Option<&str> {
+    let path = url.split(['?', '#']).next()?;
+    let token = path.split_once("/api/song/preview/")?.1;
+    (!token.is_empty() && !token.contains('/')).then_some(token)
 }
 
 fn content_length_hint(url: &str) -> Option<u64> {
@@ -628,6 +748,17 @@ mod tests {
     use axum::Router;
 
     use super::*;
+
+    #[test]
+    fn native_media_leases_match_only_the_preview_media_route() {
+        assert_eq!(
+            preview_token_from_url("http://127.0.0.1:9/api/song/preview/abc123?kdj_media_token=m"),
+            Some("abc123")
+        );
+        assert_eq!(preview_token_from_url("http://127.0.0.1:9/api/song/preview/abc123/waveform"), None);
+        assert_eq!(preview_token_from_url("http://127.0.0.1:9/api/library/audio/12"), None);
+        assert_eq!(preview_token_from_url("http://127.0.0.1:9/api/song/preview/"), None);
+    }
 
     #[tokio::test]
     async fn one_upstream_request_supports_playback_seeks_and_complete_download() {

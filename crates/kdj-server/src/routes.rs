@@ -1445,7 +1445,7 @@ async fn ytm_sabr_spool_create(
         quality,
         cache_key.clone(),
     );
-    Ok(insert_song_preview_ticket(
+    let response = insert_song_preview_ticket(
         &state,
         SongPreviewTicket {
                         context: Default::default(),
@@ -1455,10 +1455,19 @@ async fn ytm_sabr_spool_create(
             cached: false,
             url: String::new(),
             browser_resolved: true,
-            protected_spool: Some(spool),
+            protected_spool: Some(Arc::clone(&spool)),
             last_used_at: std::time::Instant::now(),
         },
-    ))
+    );
+    if let Some(token) = response.0.get("waveform_token").and_then(Value::as_str) {
+        crate::protected_media::track_upload_consumers(token, &spool);
+    }
+    Ok(response)
+}
+
+/// The browser stops its SABR session on this response instead of reporting a failure.
+fn ytm_upload_released() -> ApiError {
+    ApiError::new(StatusCode::GONE, "YouTube SABR 媒体会话已释放").coded("MEDIA_SESSION_RELEASED")
 }
 
 fn ytm_upload_spool(
@@ -1485,6 +1494,14 @@ async fn ytm_sabr_spool_append(
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
     let spool = ytm_upload_spool(&state, &token)?;
+    // Every native Deck that loaded this spool has unloaded it. With the online audio cache on,
+    // the full download is the cache write and must continue.
+    if spool.is_upload_released()
+        || (!state.config.to_settings().stream_cache_enabled
+            && spool.release_upload_if_unconsumed(crate::protected_media::UPLOAD_RELEASE_GRACE))
+    {
+        return Err(ytm_upload_released());
+    }
     let (available, total) = spool
         .append_upload(&body)
         .await
@@ -1949,6 +1966,10 @@ async fn song_preview_stream_inner(
         refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
     }
     if let Some(spool) = &ticket.protected_spool {
+        spool.note_consumer_request();
+        if spool.is_upload_released() {
+            return Err(ytm_upload_released());
+        }
         let (start, end) = match range.as_deref() {
             Some(raw) => parse_range(raw, spool.total())
                 .ok_or_else(|| ApiError::new(StatusCode::RANGE_NOT_SATISFIABLE, "试听范围无效"))?,
@@ -1958,7 +1979,11 @@ async fn song_preview_stream_inner(
         let slice = spool
             .read_range(start, requested_end)
             .await
-            .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
+            .map_err(|error| if spool.is_upload_released() {
+                ytm_upload_released()
+            } else {
+                ApiError::new(StatusCode::BAD_GATEWAY, error.to_string())
+            })?;
         return Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header(header::CONTENT_TYPE, slice.content_type)
@@ -9777,6 +9802,83 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
             .unwrap();
         assert!(matches!(outcome, PreviewCacheOutcome::Complete));
         assert_eq!(connections.load(Ordering::SeqCst), 1, "后台缓存应复用前台试听的连接池");
+        drop(state);
+    }
+
+    #[tokio::test]
+    async fn sabr_upload_is_released_only_after_every_deck_that_loaded_it_unloads_it() {
+        use crate::protected_media::{observe_native_media_lease, UPLOAD_RELEASE_GRACE};
+
+        async fn append(state: &Arc<AppState>, token: &str) -> Result<(), ApiError> {
+            ytm_sabr_spool_append(State(state.clone()), AxumPath(token.to_string()), Bytes::from_static(&[7; 512]))
+                .await
+                .map(|_| ())
+        }
+        async fn create(state: &Arc<AppState>, key: &str) -> (String, String, Arc<crate::protected_media::ProtectedMediaSpool>) {
+            let source = SongSource {
+                platform: Platform::Ytm,
+                key: key.into(),
+                title: key.into(),
+                artists: vec![],
+                album: String::new(),
+                duration: Some(1.0),
+                cover: String::new(),
+                max_quality: None,
+                vip: false,
+                payload: Default::default(),
+            };
+            let body = YtmSabrSpoolCreateBody { source, total: 4096, content_type: "audio/mp4".into(), quality: None, bypass_cache: false };
+            let token = ytm_sabr_spool_create(State(state.clone()), Json(body)).await.unwrap().0["waveform_token"]
+                .as_str().unwrap().to_string();
+            let spool = state.song_previews.lock().unwrap().get_and_touch(&token).unwrap().protected_spool.unwrap();
+            (format!("http://127.0.0.1:9/api/song/preview/{token}?kdj_media_token=m"), token, spool)
+        }
+
+        let root = tempfile::Builder::new().prefix("kdj-sabr-release-").tempdir().unwrap();
+        let config = Arc::new(kdj_core::AppConfig::create(root.path().join("data"), root.path().join("downloads"), 0));
+        let state = AppState::new(config).unwrap();
+        assert!(!state.config.to_settings().stream_cache_enabled);
+
+        // Resolved but never opened by a Deck (resolving, preloaded, WebView preview): keep downloading.
+        let (url, token, spool) = create(&state, "loaded").await;
+        spool.backdate_consumer_release(UPLOAD_RELEASE_GRACE);
+        append(&state, &token).await.unwrap();
+        observe_native_media_lease(&url, true);
+        append(&state, &token).await.unwrap();
+        // A decoder restart closes and reopens the reader; the grace period keeps the producer.
+        observe_native_media_lease(&url, false);
+        append(&state, &token).await.unwrap();
+        spool.backdate_consumer_release(UPLOAD_RELEASE_GRACE);
+        let released = append(&state, &token).await.unwrap_err();
+        assert_eq!(released.status, StatusCode::GONE);
+        assert_eq!(released.code, Some("MEDIA_SESSION_RELEASED"));
+        assert_eq!(append(&state, &token).await.unwrap_err().status, StatusCode::GONE);
+        // A stale reload of the released URL fails at once instead of stalling mid-song.
+        let reload = song_preview_stream(State(state.clone()), AxumPath(token.clone()), HeaderMap::new()).await;
+        assert_eq!(reload.err().expect("released spool must not serve").status, StatusCode::GONE);
+
+        // Reopened (second Deck, rollback, previous) before the grace period ends: still consumed.
+        let (url, token, spool) = create(&state, "reloaded").await;
+        observe_native_media_lease(&url, true);
+        observe_native_media_lease(&url, false);
+        observe_native_media_lease(&url, true);
+        spool.backdate_consumer_release(UPLOAD_RELEASE_GRACE);
+        append(&state, &token).await.unwrap();
+        observe_native_media_lease(&url, false);
+        spool.backdate_consumer_release(UPLOAD_RELEASE_GRACE);
+        // A media GET is a Deck reopening the source before its lease registers.
+        spool.note_consumer_request();
+        append(&state, &token).await.unwrap();
+
+        // With the online audio cache on, the full download is the cache write.
+        let mut settings = state.config.to_settings();
+        settings.stream_cache_enabled = true;
+        state.config.apply_settings(settings).unwrap();
+        let (url, token, spool) = create(&state, "cached").await;
+        observe_native_media_lease(&url, true);
+        observe_native_media_lease(&url, false);
+        spool.backdate_consumer_release(UPLOAD_RELEASE_GRACE);
+        append(&state, &token).await.unwrap();
         drop(state);
     }
 }

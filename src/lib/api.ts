@@ -908,6 +908,8 @@ export const api = {
   songPreview: async (source: SongSource, bypassCache = false, recovery = false): Promise<{
     url: string; cached?: boolean; waveform_token?: string; attempt_id?: string;
     actual_quality?: string; requested_quality?: string; mime?: string;
+    /** YouTube Music SABR: every Deck unloaded the session and its download stopped. */
+    released?: Promise<void>;
   }> => {
     if (source.platform === "ytm") {
       const bootstrap = await resolveYtmSabrPlayback(source, bypassCache);

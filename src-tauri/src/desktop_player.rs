@@ -94,6 +94,11 @@ pub struct DesktopPlayerHandle {
 
 impl DesktopPlayerHandle {
     pub fn spawn(app: AppHandle) -> Result<Self, String> {
+        // Deck reader leases tell the local server when a browser-uploaded SABR spool has been
+        // unloaded from every Deck, so the abandoned download can stop.
+        kdj_playback::set_remote_source_lease_observer(
+            kdj_server::protected_media::observe_native_media_lease,
+        );
         #[cfg(desktop)]
         {
             let coordinator_slot = Arc::new(OnceLock::new());

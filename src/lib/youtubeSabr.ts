@@ -20,6 +20,8 @@ export interface YoutubeSabrPreview {
   url: string;
   cached?: boolean;
   waveform_token?: string;
+  /** Resolves when every native Deck that loaded this session unloaded it and the download stopped. */
+  released?: Promise<void>;
 }
 
 /** Playback reliability is measured on the first request; failures are never hidden by retries. */
@@ -49,7 +51,8 @@ async function localJson<T>(path: string, init: RequestInit): Promise<T> {
   return value as T;
 }
 
-async function appendSpool(token: string, bytes: Blob): Promise<void> {
+/** false: the backend released this spool (no Deck plays it any more); stop without failing it. */
+async function appendSpool(token: string, bytes: Blob): Promise<boolean> {
   const response = await localFetch(
     "/song/preview/ytm/sabr/spools/" + encodeURIComponent(token),
     {
@@ -58,7 +61,9 @@ async function appendSpool(token: string, bytes: Blob): Promise<void> {
       body: bytes,
     },
   );
+  if (response.status === 410) return false;
   if (!response.ok) throw new Error((await response.text()) || "写入 SABR 媒体失败");
+  return true;
 }
 
 async function failSpool(token: string, reason: unknown): Promise<void> {
@@ -72,10 +77,11 @@ async function failSpool(token: string, reason: unknown): Promise<void> {
   ).catch(() => undefined);
 }
 
+/** Resolves true once the upload completed, false when the backend released the session. */
 async function pumpAudio(
   token: string,
   stream: ReadableStream<Uint8Array>,
-): Promise<void> {
+): Promise<boolean> {
   const reader = stream.getReader();
   // 攒够一个发布窗口才整体交给 Blob 拷贝一次，不逐块重拷已缓冲的前缀。
   let pending: Uint8Array[] = [];
@@ -91,20 +97,24 @@ async function pumpAudio(
         ? pendingBytes >= YOUTUBE_SABR_NEXT_PUBLISH_BYTES
         : pendingBytes >= YOUTUBE_SABR_FIRST_PUBLISH_BYTES;
       if (ready) {
-        await appendSpool(token, new Blob(pending as BlobPart[]));
+        if (!(await appendSpool(token, new Blob(pending as BlobPart[])))) {
+          await reader.cancel().catch(() => undefined);
+          return false;
+        }
         pending = [];
         pendingBytes = 0;
         firstSegmentPublished = true;
       }
     }
-    if (pendingBytes > 0) {
-      await appendSpool(token, new Blob(pending as BlobPart[]));
+    if (pendingBytes > 0 && !(await appendSpool(token, new Blob(pending as BlobPart[])))) {
+      return false;
     }
     const complete = await localFetch(
       "/song/preview/ytm/sabr/spools/" + encodeURIComponent(token) + "/complete",
       { method: "POST" },
     );
     if (!complete.ok) throw new Error((await complete.text()) || "提交 SABR 媒体失败");
+    return true;
   } catch (error) {
     await reader.cancel().catch(() => undefined);
     await failSpool(token, error);
@@ -209,9 +219,15 @@ export async function createYoutubeSabrPreview(
     await failSpool(token, error);
     throw new Error(sanitizeYoutubeSabrFailure(error));
   }
-  void pumpAudio(token, audioStream).catch(() => {
+  let markReleased = () => {};
+  const released = new Promise<void>((resolve) => { markReleased = resolve; });
+  void pumpAudio(token, audioStream).then((completed) => {
+    if (completed) return;
+    sabr.abort();
+    markReleased();
+  }, () => {
     sabr.abort();
     console.warn("YouTube SABR 媒体会话失败");
   });
-  return result;
+  return { ...result, released };
 }
