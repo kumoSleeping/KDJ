@@ -22,7 +22,7 @@ import {
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PictureInPicture2 } from "lucide-react";
-import { FloatingVideoControls, FloatingVideoScrub } from "./FloatingVideoControls";
+import { FloatingVideoControls, FloatingVideoScrub, PreviewVolume } from "./FloatingVideoControls";
 import { usePlaybackPanelPrefs, setPlaybackPanelVisible } from "../../lib/playbackPanelPrefs";
 import { api } from "../../lib/api";
 import { observeVideoPreview } from "../../lib/videoPreviewDiagnostics";
@@ -1992,6 +1992,8 @@ export function VideoPipHost() {
             <FloatingVideoControls title={title} playing={playing} position={position} duration={duration}
               fullscreen={videoFullscreen} onClose={close} onToggle={toggle}
               onFullscreen={() => void applyVideoFullscreen(!videoFullscreen)} error={error}
+              // The official player covers the bottom row; its level still follows the master.
+              titleExtra={isPlatformPlayer ? <PreviewVolume layout="inline" /> : undefined}
               extra={showFloating && !isPlatformPlayer && canSystemPip() ? <button type="button" aria-label="系统画中画"
                 title="系统画中画（切走应用时也会自动打开）" onClick={event => {
                   event.stopPropagation();

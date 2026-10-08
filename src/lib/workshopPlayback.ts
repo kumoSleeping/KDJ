@@ -26,8 +26,8 @@ export interface WorkshopPlayback {
   time(): number;
   pendingSeek?(): boolean;
   clock?(): LocalVideoClock | null;
-  muted?: boolean;
-  toggleMuted?(): void;
+  /** Level this transport's audio passes through; the Deck path uses the master. */
+  volumeChannel?: "master" | "monitor";
 }
 // Window role is fixed for the lifetime of this module; only one transport is mounted.
 export const useWorkshopPlayback = isKvjWindow ? useKvjPreviewPlayback : useNativeWorkshopPlayback;

@@ -1,57 +1,82 @@
 import { useContext, useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
 import { LoaderCircle, Maximize2, Minimize2, Pause, Play, Volume2, VolumeX, X } from "lucide-react";
 import { formatDuration } from "../../lib/format";
-import { useMasterVolume } from "../../lib/masterVolume";
+import { useMasterVolume, useMonitorVolume } from "../../lib/masterVolume";
 import { PanelMediaControlsContext } from "../common/panelMediaControls";
 
-/** Control the audible output owner, never unmute a picture-only video element. */
-function FloatingVideoVolume() {
-  const volume = useMasterVolume(state => state.volume);
-  const setVolume = useMasterVolume(state => state.setVolume);
+export type VolumeChannel = "master" | "monitor";
+
+function useVolumeChannel(channel: VolumeChannel) {
+  const master = useMasterVolume(), monitor = useMonitorVolume();
+  return channel === "monitor"
+    ? { name: "监听音量", volume: monitor.volume, muted: monitor.muted || monitor.volume === 0, setVolume: monitor.setVolume, toggleMute: monitor.toggleMute }
+    : { name: "音量", volume: master.volume, muted: master.volume === 0, setVolume: master.setVolume, toggleMute: master.toggleMute };
+}
+
+/** One volume control for every audible preview. It drives the output owner's
+ * level (the shared master, or the editor's monitoring trim) and never unmutes
+ * a picture-only video element. No backdrop or drag state outlives the popover.
+ */
+export function PreviewVolume({ channel = "master", layout = "popover" }: { channel?: VolumeChannel; layout?: "popover" | "inline" }) {
+  const { name, volume, muted, setVolume, toggleMute } = useVolumeChannel(channel);
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
-  const button = useRef<HTMLButtonElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   const slider = useRef<HTMLInputElement>(null);
-  const previousVolume = useRef(volume || 1);
   const panelId = useId();
   const percent = Math.round(volume * 100);
-  useEffect(() => { if (volume > 0) previousVolume.current = volume; }, [volume]);
+  const level = muted ? `${name} 已静音` : `${name} ${percent}%`;
   useEffect(() => {
     if (!open) return;
     slider.current?.focus({ preventScroll: true });
-    const dismiss = (event: PointerEvent) => {
-      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
+    const close = () => setOpen(false);
+    const outside = (event: Event) => {
+      if (!(event.target instanceof Node) || !root.current?.contains(event.target)) close();
     };
-    document.addEventListener("pointerdown", dismiss, true);
-    return () => document.removeEventListener("pointerdown", dismiss, true);
+    // WebKit does not focus buttons on click, so blur alone cannot tell an
+    // inside click from leaving. Outside presses and window blur close it.
+    document.addEventListener("pointerdown", outside, true);
+    window.addEventListener("blur", close);
+    return () => {
+      document.removeEventListener("pointerdown", outside, true);
+      window.removeEventListener("blur", close);
+    };
   }, [open]);
-  return <div ref={root} className="kd-pip-volume" onPointerDown={event => event.stopPropagation()}
-    onClick={event => event.stopPropagation()}
-    onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}
+  const icon = muted ? <VolumeX size={13} /> : <Volume2 size={13} />;
+  const mute = <button type="button" aria-label={muted ? "取消静音" : "静音"} title={muted ? "取消静音" : "静音"}
+    aria-pressed={muted} onClick={toggleMute}>{icon}</button>;
+  const range = <input ref={slider} type="range" min={0} max={100} step={1} value={percent} aria-label={name}
+    aria-valuetext={muted ? "静音" : `${percent}%`} title={level}
+    onChange={event => setVolume(Number(event.currentTarget.value) / 100)} />;
+  return <div ref={root} className="kd-pip-volume" data-layout={layout} data-open={open || undefined} data-muted={muted || undefined}
+    onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()}
+    onDoubleClick={event => event.stopPropagation()}
+    onBlur={event => {
+      const next = event.relatedTarget;
+      if (next instanceof Node && !event.currentTarget.contains(next)) setOpen(false);
+    }}
     onKeyDown={event => {
       event.stopPropagation();
-      if (event.key === "Escape" && open) { event.preventDefault(); setOpen(false); button.current?.focus(); }
+      if (event.key === "Escape" && open) { event.preventDefault(); setOpen(false); trigger.current?.focus({ preventScroll: true }); }
     }}>
-    <button ref={button} type="button" aria-label={`音量 ${percent}%`} title={`音量 ${percent}%（与主音量同步）`}
-      aria-expanded={open} aria-controls={open ? panelId : undefined} onClick={() => setOpen(value => !value)}>
-      {volume === 0 ? <VolumeX size={13} /> : <Volume2 size={13} />}
-    </button>
-    {open && <div id={panelId} className="kd-pip-volume-panel" role="group" aria-label="音量调节">
-      <button type="button" aria-label={volume === 0 ? "取消静音" : "静音"} title={volume === 0 ? "取消静音" : "静音"}
-        aria-pressed={volume === 0} onClick={() => setVolume(volume > 0 ? 0 : previousVolume.current)}>
-        {volume === 0 ? <VolumeX size={13} /> : <Volume2 size={13} />}
-      </button>
-      <input ref={slider} type="range" min={0} max={100} step={1} value={percent} aria-label="音量"
-        aria-valuetext={`${percent}%`} onChange={event => setVolume(Number(event.currentTarget.value) / 100)} />
-      <span className="kd-mono">{percent}%</span>
-    </div>}
+    {layout === "inline" ? <>{mute}{range}</> : <>
+      <button ref={trigger} type="button" aria-label={level} title={level}
+        aria-expanded={open} aria-controls={open ? panelId : undefined} onClick={() => setOpen(value => !value)}>{icon}</button>
+      {open && <div id={panelId} className="kd-pip-volume-panel" role="group" aria-label={name}>
+        {mute}{range}<span className="kd-mono">{muted ? "静音" : `${percent}%`}</span>
+      </div>}
+    </>}
   </div>;
 }
 
 /** Shared by local playback and the workshop. Chrome stays inside the picture. */
-export function FloatingVideoControls({ title, playing, loading = false, position, duration, fullscreen, showTitle = true, showVolume = true, onClose, onToggle, onFullscreen, onTitlePointerDown, extra, error, closeLabel = "关闭预览" }: {
+export function FloatingVideoControls({ title, playing, loading = false, position, duration, fullscreen, showTitle = true, showVolume = true, volumeChannel = "master", onClose, onToggle, onFullscreen, onTitlePointerDown, extra, titleExtra, error, closeLabel = "关闭预览" }: {
   title: string; playing: boolean; loading?: boolean; position: number; duration: number; fullscreen: boolean; showTitle?: boolean; showVolume?: boolean;
+  /** Which level this surface's sound actually passes through. */
+  volumeChannel?: VolumeChannel;
   onClose?(): void; onToggle(): void; onFullscreen(): void; extra?: ReactNode; error?: string; closeLabel?: string;
+  /** Controls for surfaces whose bottom row is owned by an embedded player. */
+  titleExtra?: ReactNode;
   onTitlePointerDown?: HTMLAttributes<HTMLDivElement>["onPointerDown"];
 }) {
   const panelToolsHost = useContext(PanelMediaControlsContext);
@@ -60,6 +85,7 @@ export function FloatingVideoControls({ title, playing, loading = false, positio
     <div className="kd-pip-float-chrome" data-no-title={!showTitle || undefined}>
       {showTitle && <div className="kd-pip-float-top" onPointerDown={onTitlePointerDown} data-window-drag={Boolean(onTitlePointerDown) || undefined}>
         <span className="kd-truncate">{title}</span>
+        {titleExtra}
         {onClose && <button type="button" className="kd-pip-float-x" aria-label={closeLabel}
           onClick={e => { e.stopPropagation(); onClose(); }}><X size={13} /></button>}
       </div>}
@@ -74,7 +100,7 @@ export function FloatingVideoControls({ title, playing, loading = false, positio
           onClick={e => { e.stopPropagation(); onFullscreen(); }}>
           {fullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
         </button>
-        {showVolume && <FloatingVideoVolume />}
+        {showVolume && <PreviewVolume channel={volumeChannel} />}
         {extra}
       </div>
       {error && <div className="kd-pip-float-error">{error}</div>}

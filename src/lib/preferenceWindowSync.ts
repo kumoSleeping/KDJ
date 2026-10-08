@@ -8,12 +8,16 @@ import { useLyricsPrefs } from "./lyricsPrefs";
 import { useUpdateStore } from "../stores/updateStore";
 import { applyAppFontScale, readAppFontScale, APP_FONT_SCALE_EVENT } from "./fontScale";
 import { editorWindowLabels } from "./windowRole";
+import { useMasterVolume } from "./masterVolume";
 
 const CHANGED = "kdj:preference-changed", REQUEST = "kdj:preference-request";
 type Message = { source: string; group: string; values: Record<string, unknown> };
 let started: Promise<void> | undefined;
 
-/** Sync only preference fields, never actions, playback state or editor documents. */
+/** Sync only preference fields, never actions, playback state or editor documents.
+ * The master volume belongs here: the main window owns the audible output, while
+ * every tool window shows and adjusts the same fader.
+ */
 export function startPreferenceWindowSync(): Promise<void> {
   return started ??= (async () => {
     const win = getCurrentWebviewWindow(), source = win.label;
@@ -44,6 +48,7 @@ export function startPreferenceWindowSync(): Promise<void> {
         useLyricsPrefs.getState().syncFromSnapshot({ ...useLyricsPrefs.getState(), ...patch });
       }),
       bind("updates", useUpdateStore, ["autoCheck"]),
+      bind("volume", useMasterVolume, ["volume", "restoreVolume"], patch => useMasterVolume.getState().adopt(patch)),
     ];
     let fontScale = readAppFontScale();
     window.addEventListener(APP_FONT_SCALE_EVENT, event => {

@@ -3989,8 +3989,10 @@ body[data-kd-search-pointer-dragging="true"] * {
   color: #fff;
   pointer-events: none;
 }
+/* Keyboard focus and an open popover hold the controls; a mouse click must not
+   pin the overlay over the picture after the pointer leaves. */
 .kd-pip-float:hover .kd-pip-float-chrome,
-.kd-pip-float:focus-within .kd-pip-float-chrome {
+.kd-pip-float:has(:focus-visible, .kd-pip-volume[data-open]) .kd-pip-float-chrome {
   opacity: 1;
 }
 .kd-pip-float[data-platform-player="true"] .kd-pip-float-chrome {
@@ -4049,7 +4051,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   overflow: hidden;
 }
 .kd-pip-float:hover .kd-pip-float-scrub,
-.kd-pip-float:focus-within .kd-pip-float-scrub {
+.kd-pip-float:has(:focus-visible, .kd-pip-volume[data-open]) .kd-pip-float-scrub {
   height: 0.38rem;
   bottom: 2.15rem; /* 让开底部播放/时间一行 */
 }
@@ -4105,14 +4107,19 @@ body[data-kd-search-pointer-dragging="true"] * {
   background: rgba(20, 20, 20, 0.94);
   color: #fff;
 }
-.kd-pip-volume-panel > input[type="range"] { width: 5rem; min-width: 0; padding: 0; }
-.kd-pip-volume-panel > input[type="range"]::-webkit-slider-runnable-track { height: 3px; background: #aaa; border-radius: 999px; }
-.kd-pip-volume-panel > input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; margin-top: -4px; border: 0; border-radius: 50%; background: #fff; }
-.kd-pip-volume-panel > input[type="range"]::-moz-range-track { height: 3px; background: #aaa; border-radius: 999px; }
-.kd-pip-volume-panel > input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 0; border-radius: 50%; background: #fff; }
+.kd-pip-volume input[type="range"] { flex: none; width: 5rem; min-width: 0; height: 1.1rem; margin: 0; padding: 0; background: transparent; cursor: pointer; touch-action: none; }
+.kd-pip-volume input[type="range"]::-webkit-slider-runnable-track { height: 3px; background: #aaa; border-radius: 999px; }
+.kd-pip-volume input[type="range"]::-webkit-slider-thumb { width: 11px; height: 11px; margin-top: -4px; border: 0; border-radius: 50%; background: #fff; box-shadow: none; }
+.kd-pip-volume input[type="range"]::-moz-range-track { height: 3px; background: #aaa; border-radius: 999px; }
+.kd-pip-volume input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border: 0; border-radius: 50%; background: #fff; }
+/* A muted monitor keeps its level; the dimmed slider shows where unmuting returns. */
+.kd-pip-volume[data-muted] input[type="range"] { opacity: .55; }
 .kd-pip-volume-panel > .kd-mono { min-width: 4ch; text-align: right; }
-.kd-pip-volume button:focus-visible,
-.kd-pip-volume input:focus-visible { outline: 1px solid #fff; outline-offset: 2px; }
+.kd-pip-volume[data-layout="inline"] { display: flex; align-items: center; gap: 0.2rem; color: #fff; }
+.kd-pip-volume[data-layout="inline"] input[type="range"] { width: clamp(2.75rem, 22%, 4.5rem); }
+/* Outranks editor-wide input focus rings: the popover sits on a dark surface. */
+.kd-pip-float .kd-pip-volume button:focus-visible,
+.kd-pip-float .kd-pip-volume input[type="range"]:focus-visible { outline: 1px solid #fff; outline-offset: 2px; }
 .kd-pip-float-error {
   position: absolute;
   left: 0.45rem;
@@ -8912,6 +8919,8 @@ button.kd-stream-status {
 
 .vj-playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--kd-theme); z-index: 2; pointer-events: none; }
 .vj-ruler-rail > .vj-playhead::before { content: ""; position: absolute; top: 0; left: -4px; width: 9px; height: 8px; background: var(--kd-theme); clip-path: polygon(0 0,100% 0,100% 50%,50% 100%,0 50%); }
+/* The export range from the output settings, drawn on the ruler it refers to. */
+.vj-export-range { position: absolute; top: 0; height: 3px; border-radius: 0 0 2px 2px; background: var(--kd-theme); opacity: .55; pointer-events: none; }
 .vj-error { color: var(--kd-danger); font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
 .vj-operation-notice { position: absolute; z-index: 35; left: 12px; bottom: 28px; max-width: calc(100% - 24px); padding: 6px 8px; background: var(--kd-panel); border: 1px solid var(--kd-line-soft); border-radius: 6px; box-shadow: var(--kd-shadow-float); }
 .vj-operation-notice .kd-notice-text { white-space: normal; overflow-wrap: anywhere; }
@@ -9154,7 +9163,7 @@ button.kd-stream-status {
 .vj-floating-preview .vj-preview > .vj-error { position: absolute; bottom: 44px; left: 8px; right: 8px; padding: 4px; background: #000b; }
 /* The full overlay is visual only; picture gestures still reach the editor. */
 .kd-pip-float:hover .kd-pip-float-chrome,
-.kd-pip-float:focus-within .kd-pip-float-chrome { pointer-events: none; }
+.kd-pip-float:has(:focus-visible, .kd-pip-volume[data-open]) .kd-pip-float-chrome { pointer-events: none; }
 .kd-pip-float-top, .kd-pip-float-bottom { pointer-events: auto; }
 .kd-pip-float .kd-pip-float-chrome button { color: #fff; }
 .kd-pip-float button[aria-pressed="true"] { color: var(--kd-theme); background: transparent; border: 0; box-shadow: none; }

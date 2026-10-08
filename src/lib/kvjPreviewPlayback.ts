@@ -7,8 +7,13 @@ import type { WorkshopPlayback } from "./workshopPlayback";
 import type { LocalVideoClock } from "./mediaSync";
 import { pauseMainForKvjPreview } from "./kvjWindow";
 import { captureDiagnostic, mediaDiagnostic, observeMediaDiagnostics } from "./diagnostics";
+import { bindMediaMasterVolume } from "./masterVolume";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
-/** KVJ owns system-decoded preview audio; the main window pauses DJ playback first. */
+/** KVJ owns system-decoded preview audio; the main window pauses DJ playback first.
+ * The element plays the rendered project mix through the monitoring trim and the
+ * shared master volume, the same final stage as the Decks.
+ */
 export function useKvjPreviewPlayback(): WorkshopPlayback {
   const draft = useWorkshopStore(s => s.draft);
   const saving = useWorkshopStore(s => s.saving);
@@ -17,11 +22,9 @@ export function useKvjPreviewPlayback(): WorkshopPlayback {
   const key = useMemo(() => draft ? JSON.stringify([draft.id, draft.sources, draft.layers, draft.canvas, draft.output]) : "", [draft]);
   const [ticket, setTicket] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false), [loading, setLoading] = useState(false);
-  const [error, setError] = useState(""), [muted, setMuted] = useState(false);
+  const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
   const audio = useRef<HTMLAudioElement | null>(null);
-  const mutedRef = useRef(muted);
-  mutedRef.current = muted;
   const wantsPlay = useRef(false), resumeScrub = useRef(false);
   const mainPaused = useRef(false), playEpoch = useRef(0);
   const sourceRevision = useRef(0), discontinuity = useRef(0);
@@ -79,7 +82,6 @@ export function useKvjPreviewPlayback(): WorkshopPlayback {
     setLoading(false);
   }, []);
   useEffect(() => { stop(); }, [draft?.id, stop]);
-  useEffect(() => { if (audio.current) audio.current.muted = muted; }, [muted]);
   // Saving/gestures invalidate the old lease, but preparation never writes the project.
   useEffect(() => {
     setTicket(null);
@@ -87,7 +89,7 @@ export function useKvjPreviewPlayback(): WorkshopPlayback {
     setLoading(false);
     if (!draft || saving || gesture || projectDuration(draft) <= 0) return;
     let disposed = false, lease: string | null = null, node: HTMLAudioElement | null = null;
-    let frame = 0, lastTick = 0;
+    let frame = 0, lastTick = 0, unbindVolume: (() => void) | undefined;
     const timer = window.setTimeout(() => {
       setLoading(true);
       setError("");
@@ -101,7 +103,8 @@ export function useKvjPreviewPlayback(): WorkshopPlayback {
         audio.current = node;
         seekTarget.current = useWorkshopStore.getState().position;
         node.preload = "auto";
-        node.muted = mutedRef.current;
+        // Bound before the source loads, so a new lease never starts at full level.
+        unbindVolume = bindMediaMasterVolume(node, "monitor");
         const current = node;
         const update = () => {
           if (disposed || audio.current !== current) return;
@@ -157,6 +160,7 @@ export function useKvjPreviewPlayback(): WorkshopPlayback {
     return () => {
       disposed = true;
       clearTimeout(timer); cancelAnimationFrame(frame);
+      unbindVolume?.();
       if (node) {
         if (audio.current === node) audio.current = null;
         if (playFlight.current?.node === node) playFlight.current = null;
@@ -165,12 +169,21 @@ export function useKvjPreviewPlayback(): WorkshopPlayback {
       }
       if (lease) void api.releaseWorkshop(lease).catch(() => {});
     };
-    // Muting and marker-only revisions do not regenerate the preview media.
+    // Monitoring level and marker-only revisions do not regenerate the preview media.
   }, [key, saving, gesture, audition, retry, play]);
   useEffect(() => {
     const hidden = () => { if (document.hidden) stop(); };
     document.addEventListener("visibilitychange", hidden);
-    return () => { document.removeEventListener("visibilitychange", hidden); stop(); };
+    // Closing a tool window only hides it. Stop here as well: an ordered-out
+    // window does not always report itself hidden before its audio keeps playing.
+    let closing: Promise<(() => void) | undefined> | undefined;
+    try { closing = getCurrentWebviewWindow().listen("tauri://close-requested", stop).catch(() => undefined); }
+    catch { /* Outside the desktop shell there is no window to close. */ }
+    return () => {
+      document.removeEventListener("visibilitychange", hidden);
+      void closing?.then(unlisten => unlisten?.());
+      stop();
+    };
   }, [stop]);
   const time = () => {
     const store = useWorkshopStore.getState(), node = audio.current;
@@ -179,8 +192,7 @@ export function useKvjPreviewPlayback(): WorkshopPlayback {
     return node && node.readyState >= 2 && !node.seeking ? node.currentTime * 1000 : store.position;
   };
   return {
-    ticket, playing, loading, error, trackId: null, muted,
-    toggleMuted: () => setMuted(value => !value),
+    ticket, playing, loading, error, trackId: null, volumeChannel: "monitor",
     toggle: () => {
       if (wantsPlay.current) { stop(); return; }
       if (!useWorkshopStore.getState().draft) return;

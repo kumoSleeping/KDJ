@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { Move, Volume2, VolumeX } from "lucide-react";
+import { Move } from "lucide-react";
 import { FloatingVideoControls, FloatingVideoScrub } from "../player/FloatingVideoControls";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { projectDuration } from "../../lib/workshop";
@@ -113,10 +113,9 @@ export function WorkshopFloatingPreview({ playback, onClose, docked = false }: {
       <FloatingVideoControls title={project.name} showTitle={!docked} playing={playback.playing} loading={playback.loading} position={position / 1000}
         duration={projectDuration(project) / 1000} fullscreen={fullscreen}
         onClose={docked ? undefined : onClose} closeLabel="关闭作品预览小窗" onToggle={playback.toggle}
-        showVolume={!playback.toggleMuted}
+        volumeChannel={playback.volumeChannel}
         onFullscreen={() => setFullscreen(v => !v)}
-        extra={<>{playback.toggleMuted && <button type="button" aria-label={playback.muted ? "开启预览声音" : "静音预览"} aria-pressed={!playback.muted} onClick={playback.toggleMuted}>
-          {playback.muted ? <VolumeX size={13} /> : <Volume2 size={13} />}</button>}{!docked && <button type="button" aria-label="调整画面" title="调整画面" aria-pressed={editing}
+        extra={<>{!docked && <button type="button" aria-label="调整画面" title="调整画面" aria-pressed={editing}
           onClick={e => {
             e.stopPropagation();
             setPictureEditing(!editing);
