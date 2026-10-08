@@ -80,3 +80,22 @@ npm run typecheck
 下一步接入单曲右键、独立面板、固定歌曲工程、素材恢复和撤销。其后再完成分层律动、歌词及正式任务生命周期。异常进程终止后的持久化恢复、磁盘空间不足、整曲多格式兼容、Windows 真机、Tauri 双平台壳和安装包体积门禁尚未验收。
 
 首批没有新增运行时依赖、字体或模型，没有修改包体预算，没有提交或推送既有工作区。临时测试素材均放在系统临时目录，不进入仓库；交付样片单独保留在 Movies 目录。
+
+## 导出并行化（2026-10-06）
+
+导出画面仍由 WebView 中与预览相同的 Canvas 渲染器绘制。原先编辑器线程逐帧绘制、读回、上传，服务端一次只收一帧：1080p30 约 22 fps，FFmpeg 大部分时间在等画面。
+
+- `visualizerStudioExport.worker.ts`：每个 Worker 用 OffscreenCanvas 独立准备图层，绘制分配到的帧号，转换为 I420 后直接上传本地服务，像素不经过编辑器线程。数量取核数减 2、最多 8，并按每个 Worker 的画布、像素缓冲、图片和特征时间线估算，总量限制在 768 MB 内（`visualizerStudioFrames.ts`）。readback 提示按整池吞吐校准，不按单个画布。
+- WebView 回环上传原始 RGBA 在 WebKit 与 Chromium 中都约 400 MB/s 封顶，即 1080p 约 48 fps；I420 只有 37.5% 字节。转换系数与 FFmpeg 的 `scale=in_range=full:out_range=tv:out_color_matrix=bt709` 一致（纯色逐值相同；真实画面亮度最大差 1、色度最大差 3，色度为 2×2 平均）。
+- `studio.rs`：单帧槽改为按字节限定的窗口（1080p 12 帧约 100 MB，1440p 8 帧），可乱序上传、按序编码；编码重试从第 0 帧重放时，旧一轮的帧和令牌全部作废。快照带 `version`，乱序响应不会覆盖较新状态。
+- 无 OffscreenCanvas 的 WebView（如 macOS 13.3 之前的 WKWebView）退回编辑器线程，仍上传 RGBA，服务端默认格式不变。
+- 软件编码的 x264 线程由 2 改为核数一半（2–8）；硬件编码器忽略此项。
+
+Linux 上无头 Chromium / Playwright WebKit、真实服务端与 FFmpeg（CPU 编码），30 秒、1080p30、900 帧：
+
+| 引擎 | 原实现 | 并行 + I420 |
+| --- | --- | --- |
+| Chromium | 37.7 s | 12.0 s |
+| WebKit | 45.6 s | 17.4 s |
+
+新旧成品对比 PSNR 47–48 dB。Chromium 现在接近 WebView 上传 I420 的上限（约 100 fps）；WebKit 受其自身绘制速度限制。macOS / Windows 真机和 VideoToolbox 尚未测量。

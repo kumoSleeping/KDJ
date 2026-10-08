@@ -1,6 +1,6 @@
 import type { VisualizerFeatureTimeline, VisualizerFeatureFrame } from "../types/audioVisualizer";
 import { defaultVisualizerTransform } from "./audioVisualizerScene";
-import { fitVisualizerImage, type VisualizerImage } from "./audioVisualizerImage";
+import { fitVisualizerImage, visualizerCanvas, type VisualizerImage } from "./audioVisualizerImage";
 import { extractStudioPalette, type StudioPalette } from "./visualizerStudioPalette";
 import { clamp, lyricIndex, parseVisualizerLyrics, prepareStudioMotion, sampleStudioFeatures, sampleStudioMotion, studioClock, studioDuration, studioPercentile, STUDIO_FONTS, validateVisualizerProject, type LyricLine, type StudioMotion, type VisualizerProject } from "./visualizerStudio";
 
@@ -71,7 +71,7 @@ function fitStudioPicture(image: VisualizerImage, transform: Parameters<typeof f
   const iw = "naturalWidth" in image ? image.naturalWidth : image.width;
   const ih = "naturalHeight" in image ? image.naturalHeight : image.height;
   if (fit === "cover" || (fit === "auto" && iw / ih >= .85)) return fitVisualizerImage(image, transform, width, height);
-  const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+  const canvas = visualizerCanvas(width, height);
   const c = canvas.getContext("2d")!;
   const angle = transform.rotation_deg * Math.PI / 180, co = Math.abs(Math.cos(angle)), si = Math.abs(Math.sin(angle));
   // A little safe margin keeps a complete portrait inside the independently
@@ -88,7 +88,7 @@ function fitStudioPicture(image: VisualizerImage, transform: Parameters<typeof f
 
 /** Small baked sprites keep diffusion soft without full-resolution per-frame filters. */
 function lightTexture(mist: boolean): HTMLCanvasElement {
-  const canvas = document.createElement("canvas"); canvas.width = 384; canvas.height = 384;
+  const canvas = visualizerCanvas(384, 384);
   const c = canvas.getContext("2d")!;
   const lobes = mist ? [[.37, .48, .34, .34], [.60, .42, .29, .30], [.51, .63, .30, .26], [.66, .59, .22, .20], [.29, .38, .21, .18]] : [[.5, .5, .49, 1]];
   for (const [x, y, radius, alpha] of lobes) {
@@ -146,7 +146,7 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
   });
   const railX = Math.floor(rightX - h * .06);
   const rail = cachedLayer(source, ["rail", w, h, p.scene.arc, p.look.accent], () => {
-    const layer = document.createElement("canvas"); layer.width = Math.ceil(leftWidth - railX + h * .06); layer.height = h;
+    const layer = visualizerCanvas(Math.ceil(leftWidth - railX + h * .06), h);
     const c = layer.getContext("2d")!; c.translate(-railX, 0); paintArcRail(c, p); return layer;
   });
   const lyrics = parseVisualizerLyrics(p.lyrics.lrc, p.lyrics.translation, p.lyrics.showTranslation !== false);
@@ -160,11 +160,11 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
   const lyricViewport = lyricFlow.length ? prepareLyricViewport(p, contentScale, lyricFlow) : null;
   const lyricLayout = p.lyrics.mode !== "off" && lyrics.length > 0;
   const information = cachedLayer(source, ["text", w, h, p.text, p.look.accent, lyricLayout, contentScale], () => {
-    const layer = document.createElement("canvas"); layer.width = Math.ceil(w * .51 * contentScale); layer.height = Math.ceil(h * .75);
+    const layer = visualizerCanvas(Math.ceil(w * .51 * contentScale), Math.ceil(h * .75));
     paintInformation(layer.getContext("2d")!, p, lyricLayout, contentScale); return layer;
   });
   const watermark = p.output.watermark === false ? null : cachedLayer(source, ["watermark", "@KDJ", w, h], () => {
-    const layer = document.createElement("canvas"); layer.width = Math.ceil(h * .14); layer.height = Math.ceil(h * .046);
+    const layer = visualizerCanvas(Math.ceil(h * .14), Math.ceil(h * .046));
     const c = layer.getContext("2d")!; c.textAlign = "right"; c.shadowColor = "rgba(9,24,30,.8)"; c.shadowBlur = h * .003;
     // Fade the entire mark, including its outline, rather than just the fill.
     c.globalAlpha = .55;
@@ -292,7 +292,7 @@ function prepareDiscLayers(p: VisualizerProject, image: VisualizerImage, cover: 
   const x = Math.floor(cx - size * (d.mode === "cover" ? .86 : .51) - pad), y = Math.floor(cy - size * .51 - pad);
   const width = Math.ceil(cx + size * .51 + pad) - x, height = Math.ceil(cy + size * .51 + pad) - y;
   const layer = (front: boolean) => cachedLayer(image, ["disc-static", front, w, h, d, size], () => {
-    const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+    const canvas = visualizerCanvas(width, height);
     const c = canvas.getContext("2d")!; c.translate(cx - x, cy - y);
     if (front) paintDiscFront(c, p, cover, size); else paintDiscBack(c, h, size);
     return canvas;
@@ -485,7 +485,7 @@ function prepareLyricViewport(p: VisualizerProject, contentScale: number, flow: 
   const originalOnly = flow.every(cue => cue.lines.length === 1);
   const restingTop = h * (p.text.subtitle ? .555 : .505), exitBand = h * .035;
   const top = restingTop - exitBand;
-  const canvas = document.createElement("canvas"); canvas.width = Math.ceil(w * .47 * contentScale); canvas.height = Math.ceil(h * .82 - top);
+  const canvas = visualizerCanvas(Math.ceil(w * .47 * contentScale), Math.ceil(h * .82 - top));
   const context = canvas.getContext("2d")!, padding = h * .009, gap = h * (originalOnly ? .024 : .014);
   const leadY = exitBand + padding;
   const extraLines = flow.reduce((max, cue) => Math.max(max, cue.lines.length - 1), 0);
@@ -525,7 +525,7 @@ function lyricCard(s: PreparedStudio, index: number): LyricCard | null {
   const line = s.lyricFlow[index], viewport = s.lyricViewport; if (!line?.lines.length || !viewport) return null;
   const cached = s.lyricCards.get(index); if (cached) return cached;
   const p = s.project, { width: w, height: h } = p.scene.canvas;
-  const card = document.createElement("canvas"); card.width = Math.ceil(w * .47 * s.contentScale / LYRIC_ACTIVE_SCALE);
+  const card = visualizerCanvas(Math.ceil(w * .47 * s.contentScale / LYRIC_ACTIVE_SCALE));
   const c = card.getContext("2d")!, font = STUDIO_FONTS[p.text.font];
   // Wrap at the enlarged active width so promotion never clips the right edge.
   const width = w * .455 * s.contentScale / LYRIC_ACTIVE_SCALE, texts = line.lines.map(lyricWrapPoints);
@@ -673,7 +673,7 @@ function paintClocks(c: CanvasRenderingContext2D, s: PreparedStudio, t: number):
   const left = studioClock(t), right = studioClock(studioDuration(s.timeline) - t), key = `${left}|${right}`;
   let layer = s.clockLayer;
   if (!layer) {
-    const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = Math.ceil(h * .12);
+    const canvas = visualizerCanvas(w, Math.ceil(h * .12));
     layer = s.clockLayer = { canvas, context: canvas.getContext("2d")!, key: "", top: Math.floor(h * .9) };
   }
   if (layer.key !== key) {
@@ -717,8 +717,7 @@ export function drawStudioFrame(c: CanvasRenderingContext2D, s: PreparedStudio, 
 }
 
 export function studioCanvas(s: PreparedStudio, willReadFrequently = true): [HTMLCanvasElement, CanvasRenderingContext2D] {
-  const canvas = document.createElement("canvas");
-  canvas.width = s.project.scene.canvas.width; canvas.height = s.project.scene.canvas.height;
+  const canvas = visualizerCanvas(s.project.scene.canvas.width, s.project.scene.canvas.height);
   // The exporter measures both hints, then keeps one context for the whole job.
   // This is a browser hint, not a guarantee of a CPU/GPU implementation.
   const context = canvas.getContext("2d", { alpha: false, willReadFrequently });
