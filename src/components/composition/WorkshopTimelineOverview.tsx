@@ -25,7 +25,7 @@ export function WorkshopTimelineOverview({ viewport, content, offset, controls, 
     {scrollable && <div ref={rail} className="vj-overview-viewport" role="scrollbar" tabIndex={0}
       aria-label="时间轴全局位置" aria-orientation="horizontal" aria-controls={controls}
       aria-valuemin={0} aria-valuemax={Math.round(extent)} aria-valuenow={Math.round(Math.max(0,Math.min(extent,offset)))}
-      data-dragging={dragging || undefined}
+      data-dragging={dragging ? "" : undefined}
       onPointerDown={e => {
         if(e.button !== 0) return; e.preventDefault(); e.stopPropagation();
         const x=e.clientX-e.currentTarget.getBoundingClientRect().left;

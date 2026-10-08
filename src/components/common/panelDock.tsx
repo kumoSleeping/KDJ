@@ -231,8 +231,9 @@ export function PanelDockZone({ side, children }: { side: PanelDockSide; childre
     root.current = node;
     register(side, node);
   }, [register, side]);
+  // A valueless flag: the zone opens drop space, it is not the item being dragged.
   return <div ref={ref} className={`kd-panel-dock kd-panel-dock-${side} kd-scroll`} data-panel-dock={side}
-    data-dragging={dragging || undefined} aria-label={side === "top" ? "上侧板块区" : "右侧板块区"}>
+    data-dragging={dragging ? "" : undefined} aria-label={side === "top" ? "上侧板块区" : "右侧板块区"}>
     {children}
     <PanelSplitDock root={root} side={side} />
   </div>;

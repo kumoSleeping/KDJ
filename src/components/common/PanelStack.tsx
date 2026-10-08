@@ -1,4 +1,4 @@
-import { Children, isValidElement, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Children, isValidElement, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Check, GripVertical, List } from "lucide-react";
 import { createPortal } from "react-dom";
 import { PanelCollapseContext } from "./panelCollapse";
@@ -13,6 +13,7 @@ import { PANEL_PRESENTATIONS, usePanelPresentation } from "../../lib/panelPresen
 import "./PanelPresentation.css";
 import "./PanelAutoSize.css";
 import { usePanelViewport } from "../../lib/panelViewport";
+import { DRAG_THRESHOLD_PX, trackPointerSession } from "../../lib/pointerSession";
 
 type PanelInfo = { label: string; icon: ReactNode };
 export interface PanelStackProps {
@@ -104,7 +105,8 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
   const [hiddenIds, setHiddenIds] = useState(() => load(`${storageKey}-hidden`));
   const stackRoot = useRef<HTMLDivElement>(null);
   const lastRevealRevision = useRef(0);
-  const pointerStart = useRef<{ x: number; y: number } | null>(null);
+  const endDrag = useRef<(() => void) | null>(null);
+  useEffect(() => () => endDrag.current?.(), []);
   const [dragged, setDragged] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; top: number; anchor: HTMLElement } | null>(null);
   const idOf = (child: { key: string | null }) => String(child.key ?? "").replace(/^\.\$/, "");
@@ -201,6 +203,7 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
         <div className="kd-panel-slot" data-panel-stack={storageKey} data-panel-id={id} hidden={hidden(id)}
           onDragOver={event => { if (reorderable && dragged) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
           onDrop={event => { if (reorderable && dragged) { event.preventDefault(); event.stopPropagation(); move(dragged, id); setDragged(null); } }}
+          data-dragging={dragged === id ? "true" : undefined}
           data-panel-form={form} data-dock-side={viewport.narrow || viewport.compact ? "top" : side}
           data-panel-enabled={!configuredHidden(id) && !overlayOnly(id)} data-home-dock={side}
           data-auto-height={reorderable || undefined}
@@ -212,27 +215,31 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
               onPointerDown={event => {
                 if (event.button !== 0) return;
                 event.preventDefault(); event.stopPropagation();
-                pointerStart.current = { x: event.clientX, y: event.clientY };
-                event.currentTarget.setPointerCapture(event.pointerId);
-                setDragged(id);
-                docks.setDragging(true);
+                const start = { x: event.clientX, y: event.clientY };
+                let moving = false;
+                endDrag.current?.();
+                // Pressing or holding the handle is not a drag: docks open their
+                // drop targets only once the pointer has actually travelled.
+                endDrag.current = trackPointerSession(event.pointerId, {
+                  move: moved => {
+                    if (!moving) {
+                      if (Math.hypot(moved.clientX - start.x, moved.clientY - start.y) < DRAG_THRESHOLD_PX) return;
+                      moving = true;
+                      setDragged(id);
+                      usePanelDock.getState().setDragging(true);
+                    }
+                    highlightPanelDock(moved.clientX, moved.clientY, dockId);
+                  },
+                  end: released => {
+                    endDrag.current = null;
+                    if (!moving) return;
+                    setDragged(null);
+                    usePanelDock.getState().setDragging(false); clearPanelDockHighlight();
+                    const dock = released && panelDockAt(released.clientX, released.clientY, dockId);
+                    if (dock) dockPanel(dockId, dock);
+                  },
+                });
               }}
-              onPointerMove={event => {
-                if (!pointerStart.current) return;
-                highlightPanelDock(event.clientX, event.clientY, dockId);
-              }}
-              onPointerUp={event => {
-                const start = pointerStart.current;
-                pointerStart.current = null;
-                setDragged(null);
-                docks.setDragging(false); clearPanelDockHighlight();
-                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-                if (!start || Math.hypot(event.clientX - start.x, event.clientY - start.y) < 4) return;
-                const dock = panelDockAt(event.clientX, event.clientY, `${dockKey}:${id}`);
-                if (dock) dockPanel(dockId, dock);
-              }}
-              onPointerCancel={() => { pointerStart.current = null; setDragged(null); docks.setDragging(false); clearPanelDockHighlight(); }}
-              onLostPointerCapture={() => { pointerStart.current = null; setDragged(null); docks.setDragging(false); clearPanelDockHighlight(); }}
               onKeyDown={event => {
                 if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
                 event.preventDefault();

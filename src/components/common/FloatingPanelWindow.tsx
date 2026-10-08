@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { usePanelDock, panelDockAt, highlightPanelDock, clearPanelDockHighlight, placePanelHost, dockPanel } from "./panelDock";
 import { X } from "lucide-react";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
+import { DRAG_THRESHOLD_PX } from "../../lib/pointerSession";
 import "./FloatingPanelWindow.css";
 
 type WindowBounds = { left: number; top: number; width: number; height: number };
@@ -42,7 +43,7 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
     onMoveCancel = () => { docks.setDragging(false); clearPanelDockHighlight(); };
   }
   const root = useRef<HTMLElement>(null);
-  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  const drag = useRef<{ x: number; y: number; left: number; top: number; moving: boolean } | null>(null);
   const resize = useRef<{x:number; y:number; left:number; top:number; width:number; height:number; edge:string} | null>(null);
   const [saved] = useState(() => loadBounds(storageKey));
   const rememberBounds = () => {
@@ -89,28 +90,34 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
       onPointerDown={event => {
         if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
         const box = root.current!.getBoundingClientRect();
-        drag.current = { x: event.clientX, y: event.clientY, left: box.left, top: box.top };
-        onMoveStart?.();
+        drag.current = { x: event.clientX, y: event.clientY, left: box.left, top: box.top, moving: false };
         event.currentTarget.setPointerCapture(event.pointerId);
         event.preventDefault();
       }}
       onPointerMove={event => {
-        if (!drag.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-        const box = root.current!.getBoundingClientRect(), start = drag.current;
+        const start = drag.current;
+        if (!start || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+        if (!start.moving) {
+          // Holding the title is not a move; docks stay untouched until it travels.
+          if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < DRAG_THRESHOLD_PX) return;
+          start.moving = true;
+          onMoveStart?.();
+        }
+        const box = root.current!.getBoundingClientRect();
         onMove?.(event.clientX, event.clientY);
         setPosition({ left: Math.max(8, Math.min(start.left + event.clientX - start.x, window.innerWidth - box.width - 8)),
           top: Math.max(8, Math.min(start.top + event.clientY - start.y, window.innerHeight - box.height - 8)) });
       }}
       onPointerUp={event => {
         const start = drag.current;
-        if (start) rememberBounds();
         drag.current = null;
         if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-        if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 4) onMoveEnd?.(event.clientX, event.clientY);
-        else onMoveCancel?.();
+        if (!start?.moving) return;
+        rememberBounds();
+        onMoveEnd?.(event.clientX, event.clientY);
       }}
-      onPointerCancel={() => { drag.current = null; onMoveCancel?.(); }}
-      onLostPointerCapture={() => { if (drag.current) { rememberBounds(); onMoveCancel?.(); } drag.current = null; }}>
+      onPointerCancel={() => { if (drag.current?.moving) onMoveCancel?.(); drag.current = null; }}
+      onLostPointerCapture={() => { if (drag.current?.moving) { rememberBounds(); onMoveCancel?.(); } drag.current = null; }}>
       <strong>{title}</strong>{subtitle && <span title={subtitle}>{subtitle}</span>}
       <button type="button" className="kd-aside-head-close" aria-label={closeLabel} title="关闭" disabled={busy} onClick={close}><X size={15} /></button>
     </header>
