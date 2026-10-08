@@ -5,7 +5,7 @@ import { cloneProject, findClip } from "../../lib/workshop";
 import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
 import { KvjMediaBrowser } from "./KvjMediaBrowser";
 import { WorkshopExportSettings } from "../composition/WorkshopExport";
-import { WorkshopPictureLayoutActions } from "../composition/WorkshopPictureLayoutActions";
+import { EditorSeparator } from "./EditorChrome";
 
 const defaults = { left: 260, right: 300, timeline: 36 };
 type Part = keyof typeof defaults;
@@ -67,8 +67,9 @@ export function KvjEditorLayout({ preview, inspector, children, actions }: {
       change(part, layout[part] + (positive ? 1 : -1) * (part === "timeline" ? 2 : e.shiftKey ? 40 : 10));
     }} />;
   return <div className="kd-kvj-editor-layout">
-    <header className="kd-kvj-editor-header">
+    <header className="kd-kvj-editor-header kd-editor-bar">
       <button type="button" aria-label="素材浏览器" title="素材浏览器" aria-pressed={browserOpen} onClick={() => setBrowserOpen(value => !value)}><PanelLeft size={16} /></button>
+      <EditorSeparator />
       {project && <input aria-label="工程名称" value={project.name} onChange={e => {
         const store = useWorkshopStore.getState();
         if (!store.draft) return;
@@ -76,9 +77,10 @@ export function KvjEditorLayout({ preview, inspector, children, actions }: {
       }} onBlur={() => useWorkshopStore.getState().commit()} />}
       <button type="button" aria-label="撤销" title="撤销 · ⌘/Ctrl Z" disabled={!past} onClick={() => useWorkshopStore.getState().undo()}><Undo2 size={15} /></button>
       <button type="button" aria-label="重做" title="重做 · ⌘/Ctrl Shift Z" disabled={!future} onClick={() => useWorkshopStore.getState().redo()}><Redo2 size={15} /></button>
-      <WorkshopPictureLayoutActions />
-      <span className="kd-kvj-save" role="status">{saving ? "保存中" : ""}</span>
+      <span className="kd-editor-status" role="status">{saving ? "保存中" : ""}</span>
+      <span className="kd-editor-spacer" />
       {actions}
+      <EditorSeparator />
       <button type="button" aria-label="属性检查器" title="属性检查器" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(value => !value)}><PanelRight size={16} /></button>
     </header>
     <div ref={grid} className="kd-kvj-editor-grid" data-browser={browserOpen} data-inspector={inspectorOpen}

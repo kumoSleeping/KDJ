@@ -14,11 +14,9 @@
 .kd-kvj-workshop-host { display:flex; flex-direction:column; min-height:0; }
 .kd-kvj-editor.vj-workshop { flex:1; min-height:0; container-type:normal; }
 .kd-kvj-editor-layout { flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; }
-.kd-kvj-editor-header { display:flex; align-items:center; gap:8px; flex:none; min-height:46px; padding:6px 16px; border-bottom:1px solid var(--kd-line); background:var(--kd-panel); }
+/* Document row: identity and history at the leading edge, delivery at the trailing edge. */
 .kd-kvj-editor.vj-workshop .kd-kvj-editor-header > input { width:240px; min-width:60px; max-width:32%; padding:4px 6px; border:1px solid transparent; background:transparent; color:var(--kd-text); font:inherit; font-weight:600; text-overflow:ellipsis; }
 .kd-kvj-editor-header > input:hover, .kd-kvj-editor-header > input:focus { border-color:var(--kd-line-soft); }
-.kd-kvj-save { flex:1; color:var(--kd-muted); font-size:var(--kd-size-xs); }
-.kd-kvj-editor-header > button { flex:none; min-width:28px; min-height:28px; }
 .kd-kvj-export-state { display:flex; align-items:center; gap:6px; max-width:30%; font-size:var(--kd-size-xs); }
 .kd-kvj-export-state > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .kd-kvj-export-state progress { width:70px; height:3px; accent-color:var(--kd-theme); }
@@ -31,30 +29,16 @@
 .kd-kvj-viewer { grid-column:3; grid-row:1; position:relative; min-width:0; min-height:0; padding:clamp(8px, 2vw, 20px); overflow:hidden; background:var(--kd-panel-inset); }
 .kd-kvj-viewer > .kd-pip-float[data-docked="true"] { position:absolute; left:50%; top:50%; transform:translate(-50%, -50%); width:calc(100% - 40px); height:auto; z-index:1; }
 .kd-kvj-viewer .kd-pip-float-stage { height:100%; }
-.kd-kvj-inspector { grid-column:5; grid-row:1; min-width:0; min-height:0; padding:16px; overflow:auto; overscroll-behavior:contain; background:var(--kd-panel); }
-.kd-kvj-inspector-heading { display:flex; align-items:center; gap:8px; margin-bottom:16px; font-size:var(--kd-size-sm); font-weight:600; }
 .kd-kvj-inspector-heading > span { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .kd-kvj-inspector .vj-clip-properties { width:100%; }
-.kd-kvj-inspector .vj-property-group { gap:9px; }
 .kd-kvj-inspector .vj-export-settings { display:block; width:100%; }
-.kd-kvj-inspector .vj-export-settings > summary { padding:0 0 12px; white-space:normal; }
 .kd-kvj-inspector .vj-export-settings > fieldset { position:static; width:100%; min-width:0; max-height:none; padding:0; border:0; box-shadow:none; background:transparent; }
 .kd-kvj-inspector .vj-duo { flex-wrap:wrap; }
 .kd-kvj-timeline-pane { grid-column:1 / -1; grid-row:3; min-height:0; min-width:0; display:flex; overflow:hidden; border-top:1px solid var(--kd-line); }
-.kd-kvj-timeline-pane > .vj-timeline { flex:1; min-width:0; min-height:0; max-height:none; }
-.kd-kvj-timeline-pane .vj-workshop-toolbar { gap:4px 10px; padding:7px 14px; flex-wrap:wrap; border-bottom:1px solid var(--kd-line-soft); }
-.kd-kvj-timeline-pane .vj-workshop-toolbar button { min-height:26px; }
-.kd-kvj-divider { z-index:3; touch-action:none; background:var(--kd-panel); }
-.kd-kvj-divider::after { content:""; display:block; width:1px; height:100%; margin:auto; background:var(--kd-line); }
-.kd-kvj-divider-timeline::after { width:100%; height:1px; margin:2px 0; }
-.kd-kvj-divider:hover::after, .kd-kvj-divider:focus-visible::after { background:var(--kd-muted); }
 .kd-kvj-divider-left { grid-column:2; grid-row:1; cursor:col-resize; }
 .kd-kvj-divider-right { grid-column:4; grid-row:1; cursor:col-resize; }
 .kd-kvj-divider-timeline { grid-column:1 / -1; grid-row:2; cursor:row-resize; }
 .kd-kvj-browser { height:100%; display:flex; flex-direction:column; min-height:0; }
-.kd-kvj-browser-tabs { display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--kd-line-soft); flex:none; }
-.kd-kvj-browser-tabs > span { flex:1; }
-.kd-kvj-browser-tabs button { white-space:nowrap; font-size:var(--kd-size-xs); }
 .kd-kvj-browser-filter { display:flex; flex-direction:column; gap:8px; padding:12px; flex:none; }
 .kd-kvj-browser-filter input { width:100%; min-width:0; padding:5px 7px; border:1px solid var(--kd-line-soft); border-radius:4px; background:transparent; color:var(--kd-text); font:inherit; }
 .kd-kvj-browser-list { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; padding:4px 12px; }
@@ -67,12 +51,57 @@
 .kd-kvj-source .kd-kvj-source-main { flex:1; min-width:0; justify-content:flex-start; padding:0; text-align:left; gap:8px; color:inherit; }
 .kd-kvj-source .kd-kvj-source-main[aria-pressed="true"] { color:var(--kd-theme); }
 .kd-kvj-browser-pages { display:flex; align-items:center; justify-content:space-between; padding:6px; color:var(--kd-muted); font-size:var(--kd-size-xs); font-variant-numeric:tabular-nums; }
+
+/* Three work areas over a full-width timeline. Each boundary is a real,
+   keyboard-operable separator with a wider hit area than its hairline. */
+.kd-kvj-divider { position:relative; z-index:3; touch-action:none; background:var(--kd-panel); }
+.kd-kvj-divider::after { content:""; position:absolute; inset:0 2px; background:var(--kd-line); }
+.kd-kvj-divider-timeline::after { inset:2px 0; }
+.kd-kvj-divider::before { content:""; position:absolute; inset:0 -3px; }
+.kd-kvj-divider-timeline::before { inset:-3px 0; }
+.kd-kvj-divider:is(:hover, :active)::after { background:var(--kd-muted); }
+.kd-kvj-divider:focus-visible::after { background:var(--kd-theme); }
+
+/* Inspector: one titled section per concern, fields aligned on a shared grid. */
+.kd-kvj-inspector { grid-column:5; grid-row:1; min-width:0; min-height:0; padding:0 14px 16px; overflow:auto; overscroll-behavior:contain; background:var(--kd-panel); }
+.kd-kvj-inspector-heading { position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:8px; min-height:36px; margin:0 -14px; padding:0 14px; border-bottom:1px solid var(--kd-line-soft); background:var(--kd-panel); font-size:var(--kd-size-sm); font-weight:600; }
+.kd-kvj-inspector .vj-clip-properties-scroll { gap:0; }
+.kd-kvj-inspector .vj-property-group { display:grid; grid-template-columns:repeat(auto-fit, minmax(132px, 1fr)); align-items:center; gap:8px 14px; padding:12px 0 14px; border-top:0; border-bottom:1px solid var(--kd-line-soft); }
+.kd-kvj-inspector .vj-property-group[hidden] { display:none; }
+.kd-kvj-inspector .vj-property-group:last-of-type { border-bottom:0; }
+.kd-kvj-inspector .vj-property-group > legend { padding:12px 0 0; font-size:var(--kd-size-xs); }
+.kd-kvj-inspector .vj-property-group > :is(.vj-property-actions, .vj-picture-tools, .vj-crop-tools, .kd-select-control, .vj-property-state) { grid-column:1 / -1; }
+.kd-kvj-inspector .vj-property-group > button { justify-self:start; }
+.kd-kvj-inspector .vj-clip-properties .vj-number { justify-content:space-between; }
+.kd-kvj-inspector .vj-clip-properties .vj-number > span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.kd-kvj-inspector .vj-clip-properties .vj-number > input[type="number"] { flex:0 0 64px; width:64px; }
+.kd-kvj-inspector .vj-export-settings > summary { min-height:36px; padding:0; color:var(--kd-text); font-size:var(--kd-size-sm); font-weight:600; white-space:normal; cursor:default; pointer-events:none; }
+.kd-kvj-inspector .vj-export-settings > summary > svg { display:none; }
+.kd-kvj-inspector .vj-export-settings > fieldset { margin-top:10px; }
+
+/* Timeline: transport and edit commands share one row with the grid and view
+   controls while the window is wide; the tracks keep every remaining pixel. */
+.kd-kvj-timeline-pane > .vj-timeline { flex:1; min-width:0; min-height:0; max-height:none; display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-rows:auto minmax(0,1fr) auto; }
+.kd-kvj-timeline-pane .vj-workshop-toolbar { grid-column:1; grid-row:1; flex-wrap:wrap; row-gap:2px; border-bottom:1px solid var(--kd-line-soft); }
+.kd-kvj-timeline-pane .vj-timeline-scale { grid-column:2; grid-row:1; gap:12px; min-height:40px; padding:5px 12px; border-bottom:1px solid var(--kd-line-soft); }
+.kd-kvj-timeline-pane .vj-timeline-time { gap:2px; }
+.kd-kvj-timeline-pane .vj-timeline-scroll { grid-column:1 / -1; grid-row:2; }
+.kd-kvj-timeline-pane .vj-timeline-overview { grid-column:1 / -1; grid-row:3; }
+.kd-kvj-timeline-pane .vj-picture-layout-actions { gap:2px; }
+@media (max-width:1180px) {
+  .kd-kvj-timeline-pane > .vj-timeline { grid-template-columns:minmax(0,1fr); grid-template-rows:auto auto minmax(0,1fr) auto; }
+  .kd-kvj-timeline-pane .vj-timeline-scale { grid-column:1; grid-row:2; min-height:32px; padding-block:3px; }
+  .kd-kvj-timeline-pane .vj-timeline-scroll { grid-row:3; }
+  .kd-kvj-timeline-pane .vj-timeline-overview { grid-row:4; }
+}
+/* Narrow windows: the picture keeps the full row; the browser and inspector open
+   over it, above the docked preview surface. Explicit grid lines make the work
+   row, not a collapsed column, their box. */
 @media (max-width:960px) {
   .kd-kvj-editor-grid, .kd-kvj-editor-grid[data-browser][data-inspector] { grid-template-columns:0 0 minmax(0,1fr) 0 0; }
   .kd-kvj-divider-left, .kd-kvj-divider-right { display:none; }
-  .kd-kvj-browser-pane, .kd-kvj-inspector { position:absolute; top:0; bottom:calc(var(--kvj-timeline) + 5px); width:min(42%,280px); z-index:5; background:var(--kd-panel); box-shadow:var(--kd-shadow-float); }
+  .kd-kvj-browser-pane, .kd-kvj-inspector { grid-area:1 / 1 / 2 / -1; position:absolute; top:0; bottom:0; width:min(46%,300px); z-index:60; background:var(--kd-panel); box-shadow:var(--kd-shadow-float); }
   .kd-kvj-browser-pane { left:0; }
   .kd-kvj-inspector { right:0; }
-  .kd-kvj-editor-header { gap:4px; padding:4px 10px; }
   .kd-kvj-viewer { padding:8px; }
 }

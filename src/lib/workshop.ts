@@ -504,5 +504,13 @@ export function formatTime(ms: number): string {
   return `${Math.floor(total / 60_000)}:${((total % 60_000) / 1000).toFixed(3).padStart(6, "0")}`;
 }
 
+/** Inverse of formatTime. Also accepts plain seconds and h:mm:ss. */
+export function parseTime(text: string): number | null {
+  const parts = text.trim().replace(/：/g, ":").split(":").map(part => part.trim());
+  if (parts.length > 3 || parts.some((part, index) => !(index === parts.length - 1 ? /^\d+(\.\d*)?$|^\.\d+$/ : /^\d+$/).test(part))) return null;
+  const ms = parts.reduce((total, part) => total * 60 + Number(part), 0) * 1000;
+  return Number.isFinite(ms) ? ms : null;
+}
+
 export const activeLayerCount = (p: CompositionProject) => p.layers.filter(l => l.clips.length > 0).length;
 export const clipQuantum = (p: CompositionProject, c: WorkshopClip) => isVisualSource(p.sources.find(s => s.id === c.source_id)) ? 1000 / p.canvas.fps : 1000 / 48000;

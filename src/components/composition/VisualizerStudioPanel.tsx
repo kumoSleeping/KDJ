@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
 import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal } from "lucide-react";
 import { createPortal } from "react-dom";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -27,6 +27,8 @@ import { useVideoPip } from "../../lib/videoPip";
 import { usePreviewFullscreen } from "../../lib/usePreviewFullscreen";
 import { ArcKnob } from "../player/ManagerMixerControls";
 import { applyVisualizerPreferences, loadVisualizerPreferences, saveVisualizerPreferences, switchVisualizerContentLayout } from "../../lib/visualizerStudioPreferences";
+import { EditorSeparator, EditorTabs } from "../workspace/EditorChrome";
+import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
 import "./VisualizerStudioPanel.css";
 
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
@@ -44,7 +46,7 @@ function Toggle({ label, checked, disabled = false, onChange }: { label: string;
     <span className="kd-djp-toggle-state" data-onoff={checked ? "on" : "off"} aria-hidden="true">{checked ? "开" : "关"}</span>
   </button>;
 }
-function Group({ title, children }: { title: string; children: ReactNode }) { return <section className="kd-viz-group" aria-label={title}><h3>{title}</h3><div className="kd-viz-fields">{children}</div></section>; }
+function Group({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) { return <section className="kd-viz-group" aria-label={title} title={hint}><h3>{title}</h3><div className="kd-viz-fields">{children}</div></section>; }
 function ImageChoice({ blob, label, disabled, onClick }: { blob?: Blob; label: string; disabled: boolean; onClick: () => void }) {
   const [url, setUrl] = useState("");
   useEffect(() => {
@@ -55,8 +57,12 @@ function ImageChoice({ blob, label, disabled, onClick }: { blob?: Blob; label: s
   return <button type="button" className="kd-viz-image-choice" disabled={disabled} onClick={onClick}>{url ? <img src={url} alt="" /> : <ImagePlus size={16} aria-hidden="true" />}<span>{label}</span></button>;
 }
 
-function StudioSettings({ target, inline, children }: { target: HTMLElement | null; inline: boolean; children: ReactNode }) {
-  return target ? createPortal(children, target) : inline ? null : children;
+const studioTabs = [{ id: "scene", label: "画面" }, { id: "pictures", label: "图片" }, { id: "text", label: "文字" }, { id: "output", label: "导出" }] as const;
+type StudioTab = typeof studioTabs[number]["id"];
+const STUDIO_TAB_KEY = "kd-visualizer-studio-tab";
+function savedStudioTab(): StudioTab {
+  const saved = readLocalStorage(STUDIO_TAB_KEY);
+  return studioTabs.find(tab => tab.id === saved)?.id ?? "scene";
 }
 
 /** Playback ticks update just the overlay, not every settings control in Studio. */
@@ -509,11 +515,97 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
     finally { setLoadingLyrics(false); }
   }
 
+  const [tab, setTab] = useState(savedStudioTab);
+  const tabPanelId = useId();
+  // A view preference only; it is never part of a visualizer project.
+  const selectTab = (next: StudioTab) => { setTab(next); writeLocalStorageSoon(STUDIO_TAB_KEY, next); };
   const lyricsVisible = hasLyrics && p?.lyrics.mode !== "off";
   const togglePreviewLyrics = () => {
     if (!hasLyrics) void loadSongLyrics();
     else edit(project => { project.lyrics.mode = project.lyrics.mode === "off" ? "scroll" : "off"; });
   };
+
+  // Standalone: in place. Inline: only when a settings host exists (the picture stays in its panel).
+  const settings = (node: ReactNode) => !inline ? node : settingsTarget ? createPortal(node, settingsTarget) : null;
+  const settingsVisible = !inline || showDetails || !!settingsTarget;
+  const toolbar = <div className="kd-viz-bar kd-editor-bar" role="toolbar" aria-label="可视化操作">
+    <div className="kd-viz-song"><strong title={track.title || track.filename}>{track.title || track.filename}</strong>{track.artist && <small title={track.artist}>{track.artist}</small>}</div>
+    <EditorSeparator />
+    <button type="button" disabled={!history.current.past.length || busy} onClick={() => undo()} title="撤销 · ⌘/Ctrl Z" aria-label="撤销"><Undo2 size={14} /></button>
+    <button type="button" disabled={!history.current.future.length || busy} onClick={() => undo(true)} title="重做 · ⌘/Ctrl Shift Z" aria-label="重做"><Redo2 size={14} /></button>
+    <EditorSeparator />
+    <button type="button" disabled={!p || busy || loadingLyrics} aria-busy={loadingLyrics} title={loadingLyrics ? "正在匹配歌词…" : lyricsVisible ? "隐藏歌词" : "显示歌词"}
+      aria-label={lyricsVisible ? "隐藏歌词" : "显示歌词"} aria-pressed={hasLyrics ? lyricsVisible : undefined} onClick={togglePreviewLyrics}>
+      {loadingLyrics ? <LoaderCircle size={14} className="kd-spin" /> : <Captions size={14} />}</button>
+    <button type="button" disabled={!p || busy} onClick={refreshAutomaticConfiguration} aria-label="刷新自动配置"
+      title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={14} /></button>
+    <span className="kd-editor-spacer" />
+    <span className="kd-editor-status" aria-live="polite">{analyzing ? "正在分析频谱…" : ""}</span>
+    <button type="button" className="kd-viz-export" title="加入导出队列" aria-label="加入导出队列" disabled={!prepared || analyzing || busy} onClick={() => void enqueueExport()}><ListPlus size={14} /><span>{busy ? "加入中…" : "加入队列"}</span></button>
+  </div>;
+  const noticeRow = notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>;
+  const pictureSide = (side: "left" | "right") => p && <Group title={side === "left" ? "左侧图片" : "右侧图片"}>
+    <Range label="水平位置" percentagePoints value={p.scene[side].focus_x * 100} resetValue={defaults.scene[side].focus_x * 100} max={100} step={1} onChange={v => edit(n => { n.scene[side].focus_x = v / 100; })} />
+    <Range label="垂直位置" percentagePoints value={p.scene[side].focus_y * 100} resetValue={defaults.scene[side].focus_y * 100} max={100} step={1} onChange={v => edit(n => { n.scene[side].focus_y = v / 100; })} />
+    <Range label="缩放" value={p.scene[side].zoom} resetValue={defaults.scene[side].zoom} min={1} max={4} onChange={v => edit(n => { n.scene[side].zoom = v; })} />
+    {side === "left" && <Range label="背景加深（%）" percentagePoints value={p.look.leftVeil * 100} resetValue={defaults.look.leftVeil * 100} max={100} step={1} onChange={v => edit(n => { n.look.leftVeil = v / 100; })} />}
+  </Group>;
+  const inspector = <aside className="kd-viz-inspector" aria-label="可视化设置">
+    <EditorTabs<StudioTab> label="可视化设置分区" tabs={studioTabs} value={tab} onChange={selectTab} panelId={tabPanelId} />
+    <fieldset id={tabPanelId} role="tabpanel" className="kd-viz-settings kd-scroll" disabled={busy}>{p && draft && <>
+      {tab === "scene" && <>
+        <Group title="画面">
+          <Range label="左右画面比例" percentagePoints value={p.scene.arc.position * 100} resetValue={defaults.scene.arc.position * 100} min={25} max={75} step={.5} onChange={v => edit(n => { n.scene.arc.position = v / 100; })} />
+          <Range label="背景动态" value={p.look.motion} resetValue={defaults.look.motion} onChange={v => edit(n => { n.look.motion = v; })} />
+          <Range label="频谱强度" value={p.look.spectrumGain} resetValue={defaults.look.spectrumGain} min={.1} max={3} onChange={v => edit(n => { n.look.spectrumGain = v; })} />
+        </Group>
+        <Group title="元素">
+          <Toggle label="显示唱片" checked={p.scene.disc.mode !== "hidden"} onChange={v => edit(n => { n.scene.disc.mode = v ? "cover" : "hidden"; })} />
+          <Toggle label="显示频谱" checked={p.look.mainSpectrum || p.look.smallSpectrum !== "off"} onChange={v => edit(n => { n.look.mainSpectrum = v; n.look.smallSpectrum = v ? "mixed" : "off"; })} />
+          <Toggle label="显示能量线" checked={p.look.energyLine} onChange={v => edit(n => { n.look.energyLine = v; })} />
+        </Group>
+        <Group title="左侧整体" hint="封面、文字、歌词及下方频谱一起移动，背景和分界圆弧不变">
+          <Range label="左右移动（%）" percentagePoints value={leftContent.x * 100} resetValue={defaults.leftContent!.x * 100} min={-40} max={40} step={.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), x: v / 100 }; })} />
+          <Range label="上下移动（%）" percentagePoints value={leftContent.y * 100} resetValue={defaults.leftContent!.y * 100} min={-40} max={40} step={.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), y: v / 100 }; })} />
+          <Range label="整体缩放" value={leftContent.scale} resetValue={defaults.leftContent!.scale} min={.5} max={1.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), scale: v }; })} />
+        </Group>
+      </>}
+      {tab === "pictures" && <>
+        <Group title="图片">
+          <ImageChoice blob={draft.images[0]} label={draft.images.length ? "更换主图" : "添加主图"} disabled={busy} onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }} />
+          <ImageChoice blob={draft.images[1]} label={draft.images.length > 1 ? "更换背景图" : "添加背景图"} disabled={busy || !draft.images.length} onClick={() => { imageSlot.current = 1; imageInput.current?.click(); }} />
+          {draft.images.length > 1 && <div className="kd-viz-wide kd-viz-buttons">
+            <button type="button" onClick={() => { const project = structuredClone(p); syncVisualizerImages(project, 1); replaceDraft({ project, images: draft.images.slice(0, 1) }); }}>移除背景图</button>
+          </div>}
+        </Group>
+        {pictureSide("left")}{pictureSide("right")}
+      </>}
+      {tab === "text" && <>
+        <Group title="歌曲信息">
+          {([["title", "歌曲标题"], ["artist", "艺人"], ["album", "专辑"]] as const).map(([key, label]) => <label key={key} className="kd-viz-wide">{label}<input value={p.text[key]} maxLength={500} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></label>)}
+          <Toggle label="显示专辑信息" checked={p.text.showAlbum === true} onChange={v => edit(n => { n.text.showAlbum = v; })} />
+          <Range label="整体字号" value={p.text.scale} resetValue={defaults.text.scale} min={.5} max={1.5} onChange={v => edit(n => { n.text.scale = v; })} />
+        </Group>
+        <Group title="歌词">
+          {hasLyrics ? <Toggle label="显示歌词" checked={p.lyrics.mode !== "off"} onChange={v => edit(n => { n.lyrics.mode = v ? "scroll" : "off"; })} /> : <button type="button" disabled={loadingLyrics} aria-busy={loadingLyrics} onClick={() => void loadSongLyrics()}><Captions size={15} aria-hidden="true" />{loadingLyrics ? "正在匹配歌词…" : "尝试匹配歌词"}</button>}
+          {hasLyrics && <Toggle label="显示翻译" checked={p.lyrics.showTranslation !== false} onChange={v => edit(n => { n.lyrics.showTranslation = v; })} />}
+          <div className="kd-viz-wide kd-viz-buttons">
+            <LyricsSourcePicker platform={lyricSource} disabled={busy || !draft} matching={loadingLyrics || lyricMatching} onSelect={platform => void loadSongLyrics(platform)} />
+            {hasLyrics && <button type="button" disabled={loadingLyrics || lyricMatching} aria-busy={loadingLyrics} onClick={() => void loadSongLyrics()}>{loadingLyrics ? "正在读取歌词…" : "重新读取歌词"}</button>}
+            <button type="button" onClick={() => lyricInput.current?.click()}>导入歌词</button>
+          </div>
+        </Group>
+      </>}
+      {tab === "output" && <Group title="导出">
+        <label>分辨率<Select value={`${p.scene.canvas.width}x${p.scene.canvas.height}`} onChange={e => { const [width, height] = e.target.value.split("x").map(Number); edit(n => { n.scene.canvas = { width, height, fps: 30 }; }); }}>
+          <option value="1920x1080">1080p · 16:9</option><option value="1280x720">720p · 16:9</option><option value="1920x840">1920 × 840 · 超宽</option><option value="2560x1080">2560 × 1080 · 超宽</option>
+        </Select></label>
+        <label>帧率<Select value={p.output.fps} onChange={e => edit(n => { n.output.fps = Number(e.target.value) as 30 | 60; })}><option value={30}>30 fps</option><option value={60}>60 fps</option></Select></label>
+        <label className="kd-viz-wide">文件名<input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></label>
+        <Toggle label="显示水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
+      </Group>}
+    </>}</fieldset>
+  </aside>;
 
   return <section ref={panel} tabIndex={-1} className="kd-viz-panel" data-inline={inline || undefined} data-floating={floating || undefined} aria-label="音频可视化编辑器" onKeyDown={e => {
       e.stopPropagation();
@@ -521,24 +613,14 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
       const target = e.target as HTMLElement;
       if (target.closest("input, textarea, select, [contenteditable=true]")) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(e.shiftKey); }
-      if (e.key === " " && !target.closest("button, summary, [role=slider]")) { e.preventDefault(); togglePlayback(); }
+      if (e.key === " " && !target.closest("button, summary, [role=slider], [role=tab]")) { e.preventDefault(); togglePlayback(); }
     }}>
-    <div className="kd-viz-content kd-scroll">
+    {settings(<>{toolbar}{noticeRow}</>)}
+    <div className="kd-viz-content">
     <div className="kd-viz-preview-column">
     <FloatingPreviewFrame floating={floating} fullscreen={expanded} editing={!floating && !expanded} compact={emptyMedia}
       ratio={inline ? 16 / 9 : p ? p.scene.canvas.width / p.scene.canvas.height : 16 / 9}
       onEscape={() => { if (expanded) void applyFullscreen(false); else if (floating) setFloating(false); else requestClose(); }}>
-      {inline && !expanded && <button type="button" className="kd-viz-settings-entry"
-        aria-label="打开可视化操作与设置" title="可视化操作与设置" aria-pressed={settingsOpen}
-        onPointerDown={event => event.stopPropagation()}
-        onClick={() => useVisualizerStudioStore.getState().openInlineSettings(track)}><SlidersHorizontal size={15} /></button>}
-      {inline && !expanded && !readOnlyPreview && <button type="button" className="kd-viz-settings-entry kd-viz-lyrics-entry"
-        title={loadingLyrics ? "正在匹配歌词…" : lyricsVisible ? "关闭歌词" : "开启歌词"}
-        aria-label={lyricsVisible ? "关闭可视化歌词" : "开启可视化歌词"} aria-pressed={lyricsVisible}
-        aria-busy={loadingLyrics} disabled={!p || busy || loadingLyrics || lyricMatching}
-        onPointerDown={event => event.stopPropagation()} onClick={togglePreviewLyrics}>
-        {loadingLyrics ? <LoaderCircle size={15} className="kd-spin" /> : <Captions size={15} />}
-      </button>}
       {prepared && p ? <canvas ref={canvas} aria-label={readOnlyPreview ? "音频可视化预览" : "音频可视化预览，可拖动左右图片调整位置"} onPointerDown={e => {
         if (readOnlyPreview || busy || floating || expanded || e.button !== 0 || !e.isPrimary || !draft) return;
         const rect = e.currentTarget.getBoundingClientRect(), scene = prepared.project.scene;
@@ -589,6 +671,17 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
           onClose={floating ? () => { void applyFullscreen(false).then(ok => { if (ok) setFloating(false); }); } : undefined} closeLabel="收回预览小窗"
           extra={<>
             {!floating && <button type="button" aria-label="打开预览小窗" title="打开预览小窗" onClick={() => { void applyFullscreen(false).then(ok => { if (ok) setFloating(true); }); }}><PictureInPicture2 size={13} /></button>}
+            {/* Entries live in the control row: the picture's corners belong to the hosting panel's own tools. */}
+            {inline && !expanded && !readOnlyPreview && <button type="button"
+              title={loadingLyrics ? "正在匹配歌词…" : lyricsVisible ? "关闭歌词" : "开启歌词"}
+              aria-label={lyricsVisible ? "关闭可视化歌词" : "开启可视化歌词"} aria-pressed={lyricsVisible}
+              aria-busy={loadingLyrics} disabled={!p || busy || loadingLyrics || lyricMatching}
+              onClick={event => { event.stopPropagation(); togglePreviewLyrics(); }}>
+              {loadingLyrics ? <LoaderCircle size={13} className="kd-spin" /> : <Captions size={13} />}
+            </button>}
+            {inline && !expanded && <button type="button"
+              aria-label="打开可视化操作与设置" title="可视化操作与设置" aria-pressed={readOnlyPreview ? undefined : settingsOpen}
+              onClick={event => { event.stopPropagation(); useVisualizerStudioStore.getState().openInlineSettings(track); }}><SlidersHorizontal size={13} /></button>}
           </>} />
         <FloatingVideoScrub position={cursor} duration={duration} aria-label="预览时间" aria-disabled={busy}
           onPointerDown={e => { if (busy || e.button !== 0) return; e.currentTarget.setPointerCapture(e.pointerId); scrub(e); }}
@@ -598,83 +691,8 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
           onKeyDown={e => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return; e.preventDefault(); seek(e.key === "Home" ? 0 : e.key === "End" ? duration : cursor + (e.key === "ArrowRight" ? 5 : -5)); }} />
       </>}</StudioPosition>}
     </FloatingPreviewFrame>
-    <StudioSettings target={settingsTarget} inline={inline}>
-    <div className="kd-viz-preview-actions">
-    <div className="kd-viz-song"><strong title={track.title || track.filename}>{track.title || track.filename}</strong>{track.artist && <small title={track.artist}>{track.artist}</small>}</div>
-    <div className="kd-viz-toolbar">
-      <button type="button" disabled={!history.current.past.length || busy} onClick={() => undo()} title="撤销" aria-label="撤销"><Undo2 size={14} /></button>
-      <button type="button" disabled={!history.current.future.length || busy} onClick={() => undo(true)} title="重做" aria-label="重做"><Redo2 size={14} /></button>
-      <button type="button" disabled={!p || busy || loadingLyrics} title={hasLyrics && p?.lyrics.mode !== "off" ? "隐藏歌词" : "显示歌词"} aria-label={hasLyrics && p?.lyrics.mode !== "off" ? "隐藏歌词" : "显示歌词"} aria-pressed={hasLyrics ? p?.lyrics.mode !== "off" : undefined} onClick={() => {
-        if (!hasLyrics) void loadSongLyrics();
-        else edit(n => { n.lyrics.mode = n.lyrics.mode === "off" ? "scroll" : "off"; });
-      }}><Captions size={13} /><span>{loadingLyrics ? "正在匹配歌词…" : hasLyrics && p?.lyrics.mode !== "off" ? "隐藏歌词" : "显示歌词"}</span></button>
-      <span className="kd-viz-job" aria-live="polite">{analyzing ? "正在分析频谱…" : ""}</span>
-      <button type="button" className="kd-viz-export" title="加入导出队列" aria-label="加入导出队列" disabled={!prepared || analyzing || busy} onClick={() => void enqueueExport()}><ListPlus size={14} /><span>{busy ? "加入中…" : "加入队列"}</span></button>
     </div>
-    {notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}
-    </div>
-    </StudioSettings>
-    </div>
-    {(!inline || showDetails || settingsTarget) && <StudioSettings target={settingsTarget} inline={inline}><fieldset className="kd-viz-settings" disabled={busy}>{p && draft && <>
-      <div className="kd-viz-settings-column">
-      <Group title="基础">
-        <button type="button" className="kd-viz-wide" onClick={refreshAutomaticConfiguration} title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={13} />刷新自动配置</button>
-        {hasLyrics ? <Toggle label="显示歌词" checked={p.lyrics.mode !== "off"} onChange={v => edit(n => { n.lyrics.mode = v ? "scroll" : "off"; })} /> : <button type="button" disabled={loadingLyrics} aria-busy={loadingLyrics} onClick={() => void loadSongLyrics()}><Captions size={15} aria-hidden="true" />{loadingLyrics ? "正在匹配歌词…" : "尝试匹配歌词"}</button>}
-        {hasLyrics && <Toggle label="显示翻译" checked={p.lyrics.showTranslation !== false} onChange={v => edit(n => { n.lyrics.showTranslation = v; })} />}
-        <Range label="整体字号" value={p.text.scale} resetValue={defaults.text.scale} min={.5} max={1.5} onChange={v => edit(n => { n.text.scale = v; })} />
-      </Group>
-      <Group title="图片">
-        <ImageChoice blob={draft.images[0]} label={draft.images.length ? "更换主图" : "添加主图"} disabled={busy} onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }} />
-        <ImageChoice blob={draft.images[1]} label={draft.images.length > 1 ? "更换背景图" : "添加背景图"} disabled={busy || !draft.images.length} onClick={() => { imageSlot.current = 1; imageInput.current?.click(); }} />
-        {draft.images.length > 1 && <div className="kd-viz-wide kd-viz-buttons">
-          <button type="button" onClick={() => { const project = structuredClone(p); syncVisualizerImages(project, 1); replaceDraft({ project, images: draft.images.slice(0, 1) }); }}>移除背景图</button>
-        </div>}
-        <div className="kd-viz-wide kd-viz-picture-positions">
-          {(["left", "right"] as const).map(side => <div key={side} className="kd-viz-picture-position" role="group" aria-label={side === "left" ? "左侧图片调整" : "右侧图片调整"}>
-            <h4>{side === "left" ? "左侧图片" : "右侧图片"}</h4>
-            <Range label="水平位置" percentagePoints value={p.scene[side].focus_x * 100} resetValue={defaults.scene[side].focus_x * 100} max={100} step={1} onChange={v => edit(n => { n.scene[side].focus_x = v / 100; })} />
-            <Range label="垂直位置" percentagePoints value={p.scene[side].focus_y * 100} resetValue={defaults.scene[side].focus_y * 100} max={100} step={1} onChange={v => edit(n => { n.scene[side].focus_y = v / 100; })} />
-            <Range label="缩放" value={p.scene[side].zoom} resetValue={defaults.scene[side].zoom} min={1} max={4} onChange={v => edit(n => { n.scene[side].zoom = v; })} />
-            {side === "left" && <Range label="背景加深（%）" percentagePoints value={p.look.leftVeil * 100} resetValue={defaults.look.leftVeil * 100} max={100} step={1} onChange={v => edit(n => { n.look.leftVeil = v / 100; })} />}
-          </div>)}
-        </div>
-      </Group>
-      <Group title="左侧整体">
-        <div className="kd-viz-wide kd-viz-picture-position" role="group" aria-label="左侧整体布局" title="封面、文字、歌词及下方频谱一起移动，背景和分界圆弧不变">
-          <Range label="左右移动（%）" percentagePoints value={leftContent.x * 100} resetValue={defaults.leftContent!.x * 100} min={-40} max={40} step={.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), x: v / 100 }; })} />
-          <Range label="上下移动（%）" percentagePoints value={leftContent.y * 100} resetValue={defaults.leftContent!.y * 100} min={-40} max={40} step={.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), y: v / 100 }; })} />
-          <Range label="整体缩放" value={leftContent.scale} resetValue={defaults.leftContent!.scale} min={.5} max={1.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), scale: v }; })} />
-        </div>
-      </Group>
-      </div>
-      <div className="kd-viz-settings-column">
-      <Group title="内容">
-        <Toggle label="显示专辑信息" checked={p.text.showAlbum === true} onChange={v => edit(n => { n.text.showAlbum = v; })} />
-        {([["title", "歌曲标题"], ["artist", "艺人"], ["album", "专辑"]] as const).map(([key, label]) => <label key={key} className={key === "album" ? "kd-viz-wide" : undefined}>{label}<input value={p.text[key]} maxLength={500} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></label>)}
-        <div className="kd-viz-wide kd-viz-buttons">
-          <LyricsSourcePicker platform={lyricSource} disabled={busy || !draft} matching={loadingLyrics || lyricMatching} onSelect={platform => void loadSongLyrics(platform)} />
-          {hasLyrics && <button type="button" disabled={loadingLyrics || lyricMatching} aria-busy={loadingLyrics} onClick={() => void loadSongLyrics()}>{loadingLyrics ? "正在读取歌词…" : "重新读取歌词"}</button>}
-          <button type="button" onClick={() => lyricInput.current?.click()}>导入歌词</button>
-        </div>
-      </Group>
-      <Group title="画面">
-        <Range label="左右画面比例" percentagePoints value={p.scene.arc.position * 100} resetValue={defaults.scene.arc.position * 100} min={25} max={75} step={.5} onChange={v => edit(n => { n.scene.arc.position = v / 100; })} />
-        <Range label="背景动态" value={p.look.motion} resetValue={defaults.look.motion} onChange={v => edit(n => { n.look.motion = v; })} />
-        <Range label="频谱强度" value={p.look.spectrumGain} resetValue={defaults.look.spectrumGain} min={.1} max={3} onChange={v => edit(n => { n.look.spectrumGain = v; })} />
-        <Toggle label="显示唱片" checked={p.scene.disc.mode !== "hidden"} onChange={v => edit(n => { n.scene.disc.mode = v ? "cover" : "hidden"; })} />
-        <Toggle label="显示频谱" checked={p.look.mainSpectrum || p.look.smallSpectrum !== "off"} onChange={v => edit(n => { n.look.mainSpectrum = v; n.look.smallSpectrum = v ? "mixed" : "off"; })} />
-        <Toggle label="显示能量线" checked={p.look.energyLine} onChange={v => edit(n => { n.look.energyLine = v; })} />
-        <Toggle label="显示水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
-      </Group>
-      <Group title="导出">
-        <label>分辨率<Select value={`${p.scene.canvas.width}x${p.scene.canvas.height}`} onChange={e => { const [width, height] = e.target.value.split("x").map(Number); edit(n => { n.scene.canvas = { width, height, fps: 30 }; }); }}>
-          <option value="1920x1080">1080p · 16:9</option><option value="1280x720">720p · 16:9</option><option value="1920x840">1920 × 840 · 超宽</option><option value="2560x1080">2560 × 1080 · 超宽</option>
-        </Select></label>
-        <label>帧率<Select value={p.output.fps} onChange={e => edit(n => { n.output.fps = Number(e.target.value) as 30 | 60; })}><option value={30}>30 fps</option><option value={60}>60 fps</option></Select></label>
-        <label className="kd-viz-wide">文件名<input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></label>
-      </Group>
-      </div>
-    </>}</fieldset></StudioSettings>}
+    {settingsVisible && settings(inspector)}
     </div>
     <input hidden ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/bmp" onChange={e => void onImage(e)} />
     <input hidden ref={lyricInput} type="file" accept=".lrc,.txt" onChange={e => { const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; if (file.size > 250000) { setNotice("歌词文件过大"); return; } void file.text().then(text => edit(n => { n.lyrics.lrc = text; })).catch(error => setNotice(message(error))); }} />

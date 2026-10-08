@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Select } from "../common/Select";
 import {
@@ -21,6 +21,14 @@ import {
   PictureInPicture2,
   SlidersHorizontal,
   X,
+  ArrowLeftToLine,
+  ArrowRightToLine,
+  ChevronsLeft,
+  ChevronsRight,
+  Flag,
+  SkipBack,
+  StepBack,
+  StepForward,
 } from "lucide-react";
 import { useCompositionStore } from "../../stores/compositionStore";
 import { useWorkshopStore } from "../../stores/workshopStore";
@@ -38,12 +46,14 @@ import {
   findClip,
   formatTime,
   moveLayer,
+  parseTime,
   projectDuration,
   splitClip,
 } from "../../lib/workshop";
 import { useWorkshopPlayback } from "../../lib/workshopPlayback";
 import { WorkshopFloatingPreview } from "./WorkshopFloatingPreview";
 import { KvjEditorLayout } from "../workspace/KvjEditorLayout";
+import { EditorSeparator, TimecodeField } from "../workspace/EditorChrome";
 import { workshopCutTime } from "../../lib/workshopRhythm";
 import { useWorkshopRhythmStore } from "../../stores/workshopRhythmStore";
 import { WorkshopTimeline } from "./WorkshopTimeline";
@@ -67,6 +77,13 @@ import {
   readTrackDragIds,
   finishTrackDrop,
 } from "../../lib/trackDrag";
+/** Typed positions seek; the readout itself follows the shared clock. */
+function WorkshopTimecode({ seek }: { seek(ms: number): void }) {
+  const position = useWorkshopStore(s => s.position), draft = useWorkshopStore(s => s.draft);
+  const duration = useMemo(() => draft ? projectDuration(draft) : 0, [draft]);
+  return <TimecodeField label="播放位置" value={position} format={formatTime} parse={parseTime}
+    onCommit={ms => seek(Math.min(duration, Math.max(0, ms)))} suffix={<span>/ {formatTime(duration)}</span>} />;
+}
 function LegacyEditorLayout({ preview, inspector, children }: { preview: ReactNode; inspector: ReactNode; children: ReactNode; actions: ReactNode }) {
   return <>{preview}<div className="vj-editing-body">{children}</div>{inspector}</>;
 }
@@ -141,6 +158,32 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
       edit((p) => adjustClip(p, s.selectedId!, s.handle, delta));
     else playback.seek(s.position + delta);
   };
+  /** Clip boundaries, markers and both ends of the project. */
+  const jumpEdit = (direction: -1 | 1) => {
+    const project = useWorkshopStore.getState().draft;
+    if (!project) return;
+    const points = [0, projectDuration(project), ...(project.markers ?? []).map(m => m.position_ms),
+      ...project.layers.flatMap(l => l.clips.flatMap(c => [c.start_ms, c.start_ms + clipDuration(c)]))].sort((a, b) => a - b);
+    const at = playback.time();
+    const target = direction < 0 ? points.filter(t => t < at - .5).at(-1) : points.find(t => t > at + .5);
+    if (target !== undefined) playback.seek(target);
+  };
+  /** Export range ends at the playhead; the range lives in the project's output settings. */
+  const setRange = (end: "in" | "out") => {
+    const project = useWorkshopStore.getState().draft;
+    if (!project) return;
+    const duration = projectDuration(project), at = Math.min(duration, Math.max(0, playback.time()));
+    if (end === "in" && at < (project.output.out_ms ?? duration)) edit(p => {
+      const next = cloneProject(p); next.output.in_ms = at; next.output.out_ms ??= duration; return next;
+    });
+    if (end === "out" && at > project.output.in_ms) edit(p => {
+      const next = cloneProject(p); next.output.out_ms = at; return next;
+    });
+  };
+  const toggleSnap = () => {
+    const state = useWorkshopStore.getState(), on = state.snap || state.barSnap;
+    useWorkshopStore.setState({snap: !on, barSnap: !on});
+  };
   const crop = (id: string) => {
     const state = useWorkshopStore.getState();
     const clip = state.draft && findClip(state.draft, id);
@@ -160,6 +203,50 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           <button type="button" aria-label="下移图层" disabled={layerIndex < 0 || layerIndex === p!.layers.length - 1}
             onClick={() => edit(p => moveLayer(p, layer!.id, layerIndex + 1))}><ArrowDown size={15} />下移图层</button>
         </>} />;
+  const playable = Boolean(p && projectDuration(p) > 0);
+  // One definition per command; the two layouts only order and label them differently.
+  const alignStatus = aligning && <><span role="status">对齐中</span><button onClick={() => void useWorkshopStore.getState().cancelAlign()}>取消对齐</button></>;
+  const subtitleButton = <button type="button" aria-label="添加字幕" title={workspace ? "添加字幕" : undefined} disabled={!p || saving > 0}
+    onClick={() => { useWorkshopStore.getState().commit(); setSubtitleEditor(true); }}><Type size={15} />{!workspace && "字幕"}</button>;
+  const markButton = <button type="button" aria-label="添加标记" title="添加标记 · M" disabled={!p} onClick={mark}>{workspace ? <Flag size={15} /> : "标记"}</button>;
+  const stepBack = <button type="button" aria-label="向前微调" title={workspace ? "前一帧 · ←；Shift 十帧" : "前一帧；Shift 十帧"}
+    onClick={(e) => nudge(-1, e.shiftKey)}>{workspace ? <StepBack size={15} /> : <><ChevronLeft size={15} />前一帧</>}</button>;
+  const stepForward = <button type="button" aria-label="向后微调" title={workspace ? "后一帧 · →；Shift 十帧" : "后一帧；Shift 十帧"}
+    onClick={(e) => nudge(1, e.shiftKey)}>{workspace ? <StepForward size={15} /> : <><ChevronRight size={15} />后一帧</>}</button>;
+  const projectMenu = <div className="vj-menu-anchor">
+    <button type="button" aria-label="作品菜单" title="作品菜单" aria-expanded={more} onClick={() => setMore((v) => !v)}>
+      <MoreHorizontal size={15} />
+    </button>
+    {more && (
+      <div className="vj-menu">
+        {projectDelete}
+        {legacy.length > 0 && (
+          <button type="button" onClick={() => { setLegacyOpen(true); setMore(false); }}>
+            恢复旧导出 · {legacy.length}
+          </button>
+        )}
+        <button type="button" onClick={() => { void useWorkshopStore.getState().createProject(); setMore(false); }}>
+          新建任务
+        </button>
+        {p && !workspace && (
+          <label>
+            任务名称
+            <input
+              aria-label="任务名称"
+              value={p.name}
+              onChange={(e) => {
+                const state = useWorkshopStore.getState(),
+                  next = cloneProject(state.draft!);
+                next.name = e.target.value;
+                state.transient(next);
+              }}
+              onBlur={() => useWorkshopStore.getState().commit()}
+            />
+          </label>
+        )}
+      </div>
+    )}
+  </div>;
   const Frame = workspace ? KvjEditorLayout : LegacyEditorLayout;
   return (
     <div
@@ -183,23 +270,10 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
         const key = e.key.toLowerCase();
         if (workspace && !e.ctrlKey && !e.metaKey && !e.altKey && !e.nativeEvent.isComposing && ["n", "i", "o", "arrowup", "arrowdown"].includes(key)) {
           e.preventDefault(); e.stopPropagation();
-          const state = useWorkshopStore.getState(), project = state.draft;
-          if (!project) return;
-          if (key === "n") useWorkshopStore.setState({snap: !(state.snap || state.barSnap), barSnap: !(state.snap || state.barSnap)});
-          else if (key === "i" || key === "o") {
-            const duration = projectDuration(project), at = Math.min(duration, Math.max(0, playback.time()));
-            if (key === "i" && at < (project.output.out_ms ?? duration)) edit(p => {
-              const next = cloneProject(p); next.output.in_ms = at; next.output.out_ms ??= duration; return next;
-            });
-            if (key === "o" && at > project.output.in_ms) edit(p => {
-              const next = cloneProject(p); next.output.out_ms = at; return next;
-            });
-          } else {
-            const points = [0, projectDuration(project), ...(project.markers ?? []).map(m => m.position_ms), ...project.layers.flatMap(l => l.clips.flatMap(c => [c.start_ms, c.start_ms + clipDuration(c)]))].sort((a, b) => a - b);
-            const at = playback.time();
-            const target = key === "arrowup" ? points.filter(t => t < at - .5).at(-1) : points.find(t => t > at + .5);
-            if (target !== undefined) playback.seek(target);
-          }
+          if (!useWorkshopStore.getState().draft) return;
+          if (key === "n") toggleSnap();
+          else if (key === "i" || key === "o") setRange(key === "i" ? "in" : "out");
+          else jumpEdit(key === "arrowup" ? -1 : 1);
         } else if (key === "m" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !e.nativeEvent.isComposing) {
           e.preventDefault();
           e.stopPropagation();
@@ -269,9 +343,9 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
       {subtitleEditor && <WorkshopSubtitleEditor close={() => setSubtitleEditor(false)} />}
       <Frame actions={projectActions} inspector={properties} preview={p && (workspace || (hasVideo && previewOpen)) && <WorkshopFloatingPreview playback={playback} docked={workspace}
         onClose={() => { setPreviewOpen(false); root.current?.focus({preventScroll: true}); }} />}>
-      <WorkshopTimeline playback={playback} checked={checkedLayers} onCheckedChange={setCheckedLayers} tools={<>
-      <header className="vj-header vj-workshop-toolbar" data-workshop-toolbar="" aria-label="工作站操作">
-        {aligning && <><span role="status">对齐中</span><button onClick={() => void useWorkshopStore.getState().cancelAlign()}>取消对齐</button></>}
+      <WorkshopTimeline playback={playback} workspace={workspace} checked={checkedLayers} onCheckedChange={setCheckedLayers} tools={
+      <header className={workspace ? "vj-header vj-workshop-toolbar kd-editor-bar" : "vj-header vj-workshop-toolbar"} data-workshop-toolbar="" aria-label="工作站操作">
+        {!workspace && alignStatus}
         {!workspace && <><button type="button" aria-label="新建任务" title="新建任务" disabled={saving > 0}
           onClick={() => void useWorkshopStore.getState().createProject()}><Plus size={15} /></button>
         <button
@@ -296,94 +370,36 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           {saving ? "保存中" : ""}
         </span>
         <WorkshopExportSettings />
-        <WorkshopPictureLayoutActions /></>}
+        <WorkshopPictureLayoutActions />
         <WorkshopMediaTools />
-        <button type="button" aria-label="添加字幕" disabled={!p || saving > 0}
-          onClick={() => { useWorkshopStore.getState().commit(); setSubtitleEditor(true); }}><Type size={15} />字幕</button>
-        <div className="vj-menu-anchor">
-          <button
-            type="button"
-            aria-label="作品菜单"
-            title="作品菜单"
-            aria-expanded={more}
-            onClick={() => setMore((v) => !v)}
-          >
-            <MoreHorizontal size={15} />
-          </button>
-          {more && (
-            <div className="vj-menu">
-              {projectDelete}
-              {legacy.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setLegacyOpen(true);
-                    setMore(false);
-                  }}
-                >
-                  恢复旧导出 · {legacy.length}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  void useWorkshopStore.getState().createProject();
-                  setMore(false);
-                }}
-              >
-                新建任务
-              </button>
-              {p && (
-                <>
-                  <label>
-                    任务名称
-                    <input
-                      aria-label="任务名称"
-                      value={p.name}
-                      onChange={(e) => {
-                        const state = useWorkshopStore.getState(),
-                          next = cloneProject(state.draft!);
-                        next.name = e.target.value;
-                        state.transient(next);
-                      }}
-                      onBlur={() => useWorkshopStore.getState().commit()}
-                    />
-                  </label>
-                </>
-              )}
-            </div>
-          )}
-        </div>
+        {subtitleButton}{projectMenu}</>}
+        {workspace && <>
+          <button type="button" aria-label="回到开头" title="回到开头" disabled={!playable} onClick={() => playback.seek(0)}><SkipBack size={15} /></button>
+          <button type="button" aria-label="上一个剪辑点" title="上一个剪辑点 · ↑" disabled={!playable} onClick={() => jumpEdit(-1)}><ChevronsLeft size={15} /></button>
+        </>}
+        {workspace && stepBack}
         <button
           type="button"
           aria-label={playback.playing ? "暂停作品" : "播放作品"}
-          title={playback.playing ? "暂停" : "播放"}
+          title={playback.playing ? "暂停 · 空格" : "播放 · 空格"}
           aria-busy={playback.loading}
-          disabled={!p || projectDuration(p) <= 0}
+          disabled={!playable}
           onClick={togglePlayback}
         >
           {playback.playing ? <Pause size={15} /> : <Play size={15} />}
         </button>
-        <span className="vj-preparing">
+        {workspace && <>
+          {stepForward}
+          <button type="button" aria-label="下一个剪辑点" title="下一个剪辑点 · ↓" disabled={!playable} onClick={() => jumpEdit(1)}><ChevronsRight size={15} /></button>
+          <WorkshopTimecode seek={playback.seek} />
+        </>}
+        <span className={workspace ? "kd-editor-status" : "vj-preparing"} role={workspace ? "status" : undefined}>
           {playback.loading ? "准备预览" : ""}
         </span>
-        <button type="button" aria-label="添加标记" title="添加标记 · M" disabled={!p} onClick={mark}>标记</button>
-        <button
-          type="button"
-          aria-label="向前微调"
-          title="前一帧；Shift 十帧"
-          onClick={(e) => nudge(-1, e.shiftKey)}
-        >
-          <ChevronLeft size={15} />前一帧
-        </button>
-        <button
-          type="button"
-          aria-label="向后微调"
-          title="后一帧；Shift 十帧"
-          onClick={(e) => nudge(1, e.shiftKey)}
-        >
-          <ChevronRight size={15} />后一帧
-        </button>
+        {workspace && <EditorSeparator />}
+        {!workspace && markButton}
+        {!workspace && stepBack}
+        {!workspace && stepForward}
         <button
           type="button"
           aria-label="剪断选中片段"
@@ -391,15 +407,16 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           disabled={!c}
           onClick={cut}
         >
-          <Scissors size={15} />剪断
+          <Scissors size={15} />{!workspace && "剪断"}
         </button>
         <button
           type="button"
           aria-label="复制片段"
+          title={workspace ? "复制片段" : undefined}
           disabled={!c}
           onClick={() => edit((p) => duplicateClip(p, selected!))}
         >
-          <Copy size={15} />复制
+          <Copy size={15} />{!workspace && "复制"}
         </button>
         <button
           type="button"
@@ -408,21 +425,33 @@ function WorkshopEditor({ projectActions, projectDelete, workspace = false }: { 
           disabled={!c}
           onClick={(e) => remove(e.shiftKey ? true : undefined)}
         >
-          <Trash2 size={15} />删除
+          <Trash2 size={15} />{!workspace && "删除"}
         </button>
-
+        {workspace && <>
+          <EditorSeparator />
+          {markButton}{subtitleButton}
+          <EditorSeparator />
+          <button type="button" aria-label="设为导出入点" title="设为导出入点 · I" disabled={!playable} onClick={() => setRange("in")}><ArrowLeftToLine size={15} /></button>
+          <button type="button" aria-label="设为导出出点" title="设为导出出点 · O" disabled={!playable} onClick={() => setRange("out")}><ArrowRightToLine size={15} /></button>
+          <EditorSeparator />
+        </>}
         <button type="button" aria-label="时间轴吸附" aria-pressed={snap || barSnap}
-          title="吸附片段边界与节拍线；Alt/Option 拖动临时关闭"
-          onClick={() => useWorkshopStore.setState({snap: !(snap || barSnap), barSnap: !(snap || barSnap)})}><Magnet size={15} /></button>
+          title={workspace ? "吸附片段边界与节拍线 · N；Alt/Option 拖动临时关闭" : "吸附片段边界与节拍线；Alt/Option 拖动临时关闭"}
+          onClick={toggleSnap}><Magnet size={15} /></button>
+        {workspace && <>
+          <span className="kd-editor-spacer" />
+          {alignStatus}
+          <WorkshopMediaTools />
+          <WorkshopPictureLayoutActions />
+          {projectMenu}
+        </>}
         {!workspace && <><button type="button" aria-label="轨道属性" aria-pressed={propertiesOpen && !!c} disabled={!c}
           onClick={() => { useWorkshopStore.getState().commit(); setPropertiesOpen(value => !value); }}><SlidersHorizontal size={15} />属性</button>
         {projectActions}
         <button type="button" className="vj-preview-toggle" aria-label="打开作品预览小窗" title="预览小窗"
           aria-pressed={previewOpen && hasVideo} disabled={!hasVideo}
           onClick={() => setPreviewOpen(v => !v)}><PictureInPicture2 size={15} /></button></>}
-      </header>
-
-      </>} />
+      </header>} />
       </Frame>
       {clipMenu && <WorkshopClipMenu {...clipMenu} close={(restoreFocus = true) => { setClipMenu(null); if (restoreFocus) root.current?.focus({preventScroll: true}); }} onCrop={crop} onMerged={() => setCheckedLayers([])} />}
 

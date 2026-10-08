@@ -21,7 +21,7 @@ import { WorkshopTimelineOverview } from "./WorkshopTimelineOverview";
 import { WorkshopRhythmSource, WorkshopRhythmControls, WorkshopRhythmRuler } from "./WorkshopRhythm";
 import { useWorkshopRhythmStore } from "../../stores/workshopRhythmStore";
 import { clipBeatTimes, nearestBeat, rhythmKey, workshopGrid } from "../../lib/workshopRhythm";
-import { GripVertical, Eye, EyeOff, X, Square, SquareCheck, Maximize2, ArrowDownUp } from "lucide-react";
+import { GripVertical, Eye, EyeOff, X, Square, SquareCheck, Maximize2, ArrowDownUp, ZoomIn, ZoomOut } from "lucide-react";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import {
   adjustClip,
@@ -77,8 +77,10 @@ function TimelineRhythmControls({ source, layer }: Omit<Parameters<typeof Worksh
   const position = useWorkshopStore(s => s.position);
   return <WorkshopRhythmControls source={source} layer={layer} position={position} />;
 }
-export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: setChecked }: {
+export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: setChecked, workspace = false }: {
   playback: WorkshopPlayback; tools?: ReactNode; checked: string[]; onCheckedChange(ids: string[]): void;
+  /** The editor window's toolbar owns the position readout; this row keeps the view controls. */
+  workspace?: boolean;
 }) {
   const scrollId = useId();
   const p = useWorkshopStore((s) => s.draft),
@@ -321,6 +323,14 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
       setZoom(pendingZoom.current);
     });
   };
+  /** Toolbar zoom keeps the playhead in place, or the view centre when it is off screen. */
+  const zoomStep = (factor: number) => {
+    const node = scroller.current;
+    if (!node) return;
+    const head = useWorkshopStore.getState().position * scale - node.scrollLeft;
+    zoomAt(pendingZoom.current * factor,
+      node.getBoundingClientRect().left + labelWidth + (head >= 0 && head <= viewportWidth ? head : viewportWidth / 2));
+  };
   wheel.current = (e) => {
     const node = scroller.current;
     if (!node) return;
@@ -550,9 +560,15 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
         {audioLayer && audioSource && <TimelineRhythmControls source={audioSource} layer={{...audioLayer, clips: audioLayer.clips.filter(c => c.source_id === audioSource.id)}} />}
         {analyzing && <WorkshopAnalysisControl projectId={p.id} />}
         <div className="vj-timeline-time">
+          {workspace && <>
+            <button type="button" aria-label="缩小时间轴" title="缩小 · Alt/Option + 滚轮" disabled={contentDuration <= 0 || zoom <= 1}
+              onClick={() => zoomStep(1 / 1.5)}><ZoomOut size={14} /></button>
+            <button type="button" aria-label="放大时间轴" title="放大 · Alt/Option + 滚轮" disabled={contentDuration <= 0 || zoom >= 64}
+              onClick={() => zoomStep(1.5)}><ZoomIn size={14} /></button>
+          </>}
           <button type="button" aria-label="时间轴适应全长" title="适应全长" disabled={contentDuration <= 0}
             onClick={fitTimeline}><Maximize2 size={14} /></button>
-          <TimelineTime duration={contentDuration} />
+          {!workspace && <TimelineTime duration={contentDuration} />}
         </div>
       </div>
       {tools}
@@ -603,6 +619,8 @@ export function WorkshopTimeline({ playback, tools, checked, onCheckedChange: se
               onPointerDown={e => e.stopPropagation()}
               onClick={e => { e.stopPropagation(); playback.seek(marker.position_ms); }}
             ><i aria-hidden="true" /><small>{marker.number}</small></button>)}
+            {p.output.out_ms !== null && <i className="vj-export-range" aria-hidden="true"
+              style={{left: p.output.in_ms * scale, width: Math.max(1, (p.output.out_ms - p.output.in_ms) * scale)}} />}
             <TimelinePlayhead scale={scale} />
           </div>
         </div>

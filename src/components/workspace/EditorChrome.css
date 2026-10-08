@@ -1,0 +1,98 @@
+/* Chrome shared by the mixing editor and the visualizer studio: one toolbar
+   rhythm, one section switch and one position field. Buttons stay direct
+   children of their bar so theme packs keep styling them as commands. */
+.kd-editor-bar {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 2px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  font-size: var(--kd-size-xs);
+}
+.kd-editor-bar > button { flex: none; min-width: 28px; min-height: 28px; }
+.kd-editor-spacer { flex: 1 1 0; min-width: 8px; }
+.kd-editor-sep {
+  flex: none;
+  align-self: center;
+  width: 1px;
+  height: 16px;
+  margin-inline: 6px;
+  background: var(--kd-line);
+}
+/* A separator never opens or closes a row, or doubles up around an empty group. */
+.kd-editor-sep:first-child,
+.kd-editor-sep:last-child,
+.kd-editor-sep + .kd-editor-sep,
+.kd-editor-spacer + .kd-editor-sep,
+.kd-editor-sep:has(+ .kd-editor-spacer) { display: none; }
+.kd-editor-status {
+  flex: none;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  white-space: nowrap;
+}
+.kd-editor-status:empty { display: none; }
+
+.kd-editor-tabs {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--kd-line-soft);
+}
+.kd-editor-tabs > [role="tablist"] { display: flex; flex: 1; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.kd-editor-tabs > [role="tablist"]::-webkit-scrollbar { display: none; }
+.kd-editor-tabs [role="tab"] {
+  flex: none;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.kd-editor-tabs [role="tab"]:hover { color: var(--kd-text); }
+.kd-editor-tabs [role="tab"][aria-selected="true"] { color: var(--kd-theme); background: transparent; box-shadow: none; }
+.kd-editor-tabs [role="tab"]:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: -2px; }
+
+.kd-editor-timecode {
+  display: inline-flex;
+  align-items: baseline;
+  flex: none;
+  gap: 6px;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+:root .kd-editor-timecode > input {
+  width: 9ch;
+  min-width: 0;
+  box-sizing: content-box;
+  padding: 3px 5px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--kd-text);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  cursor: text;
+}
+:root .kd-editor-timecode > input:hover { border-color: var(--kd-line-soft); }
+:root .kd-editor-timecode > input:focus { border-color: var(--kd-line); background: var(--kd-panel-inset); outline: none; }
+:root .kd-editor-timecode > input:focus-visible { outline: 2px solid var(--kd-theme); outline-offset: -2px; }
