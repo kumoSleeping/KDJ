@@ -226,7 +226,6 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
                       if (Math.hypot(moved.clientX - start.x, moved.clientY - start.y) < DRAG_THRESHOLD_PX) return;
                       moving = true;
                       setDragged(id);
-                      usePanelDock.getState().setDragging(true);
                     }
                     highlightPanelDock(moved.clientX, moved.clientY, dockId);
                   },
@@ -234,7 +233,7 @@ export function PanelStack({ storageKey, dockKey = storageKey, defaultFirstIds =
                     endDrag.current = null;
                     if (!moving) return;
                     setDragged(null);
-                    usePanelDock.getState().setDragging(false); clearPanelDockHighlight();
+                    clearPanelDockHighlight();
                     const dock = released && panelDockAt(released.clientX, released.clientY, dockId);
                     if (dock) dockPanel(dockId, dock);
                   },

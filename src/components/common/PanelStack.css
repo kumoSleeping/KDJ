@@ -54,8 +54,6 @@
   max-width: 100%;
 }
 .kd-panel-dock-right { min-height: 100%; }
-.kd-panel-dock[data-dragging] { min-height: 48px; }
-.kd-panel-dock-right[data-dragging] { min-height: 100%; }
 .kd-panel-dock[data-drop-target] { outline: 2px dashed var(--kd-theme); outline-offset: -2px; }
 .kd-panel-docked-host { display: block; min-width: 0; padding: 4px; }
 .kd-panel-docked-host > .kd-panel-slot { min-width: 0; margin: 0; height: auto; }

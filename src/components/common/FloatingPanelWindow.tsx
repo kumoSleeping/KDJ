@@ -32,15 +32,14 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
   }, [host, dockTarget, dockId, docks.placements]);
   useLayoutEffect(() => () => host.remove(), [host]);
   if (dockId) {
-    onMoveStart = () => docks.setDragging(true);
     onMove = (x, y) => highlightPanelDock(x, y, dockId);
     onMoveEnd = (x, y) => {
       const target = panelDockAt(x, y, dockId);
       if (target) dockPanel(dockId, target);
       else docks.move(dockId, null);
-      docks.setDragging(false); clearPanelDockHighlight();
+      clearPanelDockHighlight();
     };
-    onMoveCancel = () => { docks.setDragging(false); clearPanelDockHighlight(); };
+    onMoveCancel = () => clearPanelDockHighlight();
   }
   const root = useRef<HTMLElement>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number; moving: boolean } | null>(null);

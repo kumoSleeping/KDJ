@@ -22,7 +22,6 @@ function load(): Record<string, Placement> {
 export const usePanelDock = create<{
   placements: Record<string, Placement>;
   zones: Partial<Record<PanelDockSide, HTMLElement>>;
-  dragging: boolean;
   rightHasPanels: boolean;
   rightRevealRevision: number;
   revealRight(): void;
@@ -32,17 +31,15 @@ export const usePanelDock = create<{
   registerWideSearch(node: HTMLElement | null): void;
   setFirstTopPanel(id: string | null): void;
   register(side: PanelDockSide, node: HTMLElement | null): void;
-  setDragging(value: boolean): void;
   move(id: string, side: PanelDockSide | null, before?: string): void;
   arrange(ids: string[], side: PanelDockSide): void;
 }>((set) => ({
-  placements: load(), zones: {}, dragging: false, rightHasPanels: false, rightRevealRevision: 0, wideSearchZone: null, firstTopPanelId: null,
+  placements: load(), zones: {}, rightHasPanels: false, rightRevealRevision: 0, wideSearchZone: null, firstTopPanelId: null,
   revealRight: () => set(state => ({ rightRevealRevision: state.rightRevealRevision + 1 })),
   setRightHasPanels: rightHasPanels => set(state => state.rightHasPanels === rightHasPanels ? state : { rightHasPanels }),
   registerWideSearch: wideSearchZone => set({ wideSearchZone }),
   setFirstTopPanel: firstTopPanelId => set(state => state.firstTopPanelId === firstTopPanelId ? state : { firstTopPanelId }),
   register: (side, node) => set(state => ({ zones: { ...state.zones, [side]: node ?? undefined } })),
-  setDragging: dragging => set({ dragging }),
   arrange: (ids, side) => set(state => {
     const ordered = [...new Set(ids)];
     const placements = Object.fromEntries([
@@ -100,6 +97,7 @@ function wideSearchAt(x: number, y: number, id?: string): PanelDockTarget | null
   return { side: "top", wideSearch: true, edgePreview: { left: box.left + 4, top: box.top + 4,
     width: Math.max(0, box.width - 8), height } };
 }
+const EMPTY_DOCK_BAND_PX = 48;
 export function panelDockAt(x: number, y: number, excludeId?: string): PanelDockTarget | null {
   const spanning = wideSearchAt(x, y, excludeId);
   if (spanning) return spanning;
@@ -117,6 +115,12 @@ export function panelDockAt(x: number, y: number, excludeId?: string): PanelDock
     if (!zone || zone.closest("[hidden]")) continue;
     const box = zone.getBoundingClientRect();
     const edgeBand = side === "top" ? 12 : 0;
+    // An empty top dock stays collapsed during a drag: the drop band is drawn over
+    // the list instead of opening space that pushes the list down.
+    if (side === "top" && box.width > 0 && box.height <= 0) {
+      if (x < box.left || x > box.right || y < box.top - edgeBand || y > box.top + EMPTY_DOCK_BAND_PX) continue;
+      return { side, edgePreview: { left: box.left, top: box.top, width: box.width, height: EMPTY_DOCK_BAND_PX } };
+    }
     if (box.width <= 0 || box.height <= 0 || x < box.left || x > box.right || y < box.top - edgeBand || y > box.bottom + edgeBand) continue;
     // The outer edge inserts a full row, not a third cell under whichever column
     // happens to be under the pointer. This allows swapping EQ with the whole row below it.
@@ -214,7 +218,6 @@ export function highlightPanelDock(x: number, y: number, id?: string) {
 }
 export function PanelDockZone({ side, children }: { side: PanelDockSide; children?: ReactNode }) {
   const register = usePanelDock(state => state.register);
-  const dragging = usePanelDock(state => state.dragging);
   const root = useRef<HTMLDivElement | null>(null);
   useLayoutEffect(() => {
     const zone = root.current;
@@ -231,9 +234,8 @@ export function PanelDockZone({ side, children }: { side: PanelDockSide; childre
     root.current = node;
     register(side, node);
   }, [register, side]);
-  // A valueless flag: the zone opens drop space, it is not the item being dragged.
   return <div ref={ref} className={`kd-panel-dock kd-panel-dock-${side} kd-scroll`} data-panel-dock={side}
-    data-dragging={dragging ? "" : undefined} aria-label={side === "top" ? "上侧板块区" : "右侧板块区"}>
+    aria-label={side === "top" ? "上侧板块区" : "右侧板块区"}>
     {children}
     <PanelSplitDock root={root} side={side} />
   </div>;

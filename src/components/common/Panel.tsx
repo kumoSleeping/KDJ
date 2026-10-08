@@ -124,7 +124,10 @@ export function Panel({
   ]
     .filter(Boolean)
     .join(" ");
-  const dragButton = minimal && reorder && !maximized && <div className="kd-panel-float-drag"
+  // A floating header has no caption row in any theme, so its handle is the same
+  // top-left corner button; the right corner is left to the panel's actions.
+  const cornerDrag = minimal || floatingHead;
+  const dragButton = cornerDrag && reorder && !maximized && <div className="kd-panel-float-drag"
     data-over-media={headHost ? "true" : undefined}>
     {isValidElement<{ title?: string }>(reorder) ? cloneElement(reorder,
       { title: typeof heading === "string" ? `移动${heading}面板` : "移动面板" },
@@ -133,7 +136,7 @@ export function Panel({
   const hasHead = maximizable || heading !== undefined || actions !== undefined || collapse !== null || Boolean(reorder);
   const head = hasHead && <div className={floatingHead ? "kd-panel-float-tools" : "kd-panel-head"}
     data-over-media={headHost ? "true" : undefined} data-inline={inlineHeadHost ? "true" : undefined}>
-    {!minimal && !maximized && reorder}
+    {!cornerDrag && !maximized && reorder}
     <span id={headingId} className="kd-panel-head-label kd-grow kd-truncate">{heading}</span>
     {(actions !== undefined || (collapse && !maximized && !portrait) || maximizable) && <span className="kd-row">
       {actions}

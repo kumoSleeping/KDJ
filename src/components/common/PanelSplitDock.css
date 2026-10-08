@@ -6,7 +6,6 @@
   min-height: 0;
   overflow-anchor: none;
 }
-.kd-panel-dock[data-free-split][data-dragging] { min-height: 48px; }
 .kd-panel-dock[data-free-split] > [data-split-cell] {
   position: absolute;
   display: block;
