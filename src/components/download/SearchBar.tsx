@@ -167,32 +167,31 @@ function SearchTipCarousel({
     return () => window.clearInterval(timer);
   }, [actionFocused, inputFocused]);
 
-  const tip = inputFocused ? SEARCH_INPUT_TIP : SEARCH_TIPS[tipIndex];
-
   return (
     <span className="kd-search-placeholder">
       <span
-        key={tipIndex}
         className="kd-search-tip"
-        data-fixed={inputFocused || actionFocused ? "true" : undefined}
         data-input-focused={inputFocused ? "true" : undefined}
       >
-        {!inputFocused ? (
-          <button
-            type="button"
-            className="kd-search-tip-action"
-            data-open={tipsOpen ? "true" : undefined}
-            aria-label={tipsOpen ? "收起使用提示" : "查看全部使用提示"}
-            aria-pressed={tipsOpen}
-            title={tipsOpen ? "收起使用提示" : "查看全部使用提示"}
-            onFocus={() => setActionFocused(true)}
-            onBlur={() => setActionFocused(false)}
-            onClick={onTips}
-          >
-            <HintBulbIcon size={14} aria-hidden="true" />
-          </button>
-        ) : null}
-        <span className="kd-search-tip-copy" aria-hidden="true">{tip}</span>
+        <button
+          type="button"
+          className="kd-search-tip-action"
+          data-open={tipsOpen ? "true" : undefined}
+          tabIndex={inputFocused ? -1 : undefined}
+          aria-hidden={inputFocused || undefined}
+          aria-label={tipsOpen ? "收起使用提示" : "查看全部使用提示"}
+          aria-pressed={tipsOpen}
+          title={tipsOpen ? "收起使用提示" : "查看全部使用提示"}
+          onFocus={() => setActionFocused(true)}
+          onBlur={() => setActionFocused(false)}
+          onClick={onTips}
+        >
+          <HintBulbIcon size={14} aria-hidden="true" />
+        </button>
+        <span className="kd-search-tip-copy" aria-hidden="true">
+          <span key={tipIndex} className="kd-search-tip-text" data-mode="idle">{SEARCH_TIPS[tipIndex]}</span>
+          <span className="kd-search-tip-text" data-mode="input">{SEARCH_INPUT_TIP}</span>
+        </span>
       </span>
     </span>
   );
