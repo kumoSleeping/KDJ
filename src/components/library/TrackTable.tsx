@@ -2,6 +2,7 @@ import { dropWorkshopTracks, paintWorkshopDrop } from "../../lib/workshopDrop";
 import { useStore } from "zustand";
 import type { LibraryPaneStore, LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
 import { cloneElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { flushSync } from "react-dom";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import {
   Check,
@@ -873,8 +874,11 @@ export const TrackTable = memo(function TrackTable({
       pointerDragCleanupRef.current?.();
       htmlExternalDragScrollUnlockRef.current?.();
       resizeObserverRef.current?.disconnect();
+      // 两个 ref 都要归零：留着已取消的帧号，onScroll 会一直以为还有一帧在排队。
       if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = 0;
       if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
+      scrollIdleTimerRef.current = null;
     },
     [],
   );
@@ -1412,6 +1416,7 @@ export const TrackTable = memo(function TrackTable({
   const anchorRef = useRef({ id: null as number | null, index: 0, offset: 0 });
   const previousQueryRef = useRef(queryVersion);
   const scrollVelocityRef = useRef(0);
+  const scrollTravelRef = useRef(0);
   const [headerH, setHeaderH] = useState(28);
   const [rootFont, setRootFont] = useState(16);
   /** 虚拟滚动需要的滚动位置/视口高度；一帧最多重算一次（见 onScroll）。 */
@@ -1665,7 +1670,8 @@ export const TrackTable = memo(function TrackTable({
 
   const viewport = libraryViewport({ total, pending: pendingDownloads.length, top: view.top,
     height: view.height || 720, rowHeight: rowH, headerHeight: headerH,
-    velocity: fastScrolling ? scrollVelocityRef.current : 0, latency: requestLatency });
+    velocity: fastScrolling ? scrollVelocityRef.current : 0,
+    travel: fastScrolling ? scrollTravelRef.current : 0, latency: requestLatency });
   const { start: winStart, end: winEnd } = viewport;
   const windowedTracks = orderedIds.slice(viewport.trackStart, viewport.trackEnd)
     .map((id, offset) => ({ id, track: summaryById.get(id), index: viewport.trackStart + offset }));
@@ -1748,15 +1754,13 @@ export const TrackTable = memo(function TrackTable({
           const signedVelocity = previous.at > 0 ? (node.scrollTop - previous.top) / elapsed : 0;
           const velocity = Math.abs(signedVelocity);
           scrollVelocityRef.current = signedVelocity;
+          scrollTravelRef.current = previous.at > 0 ? Math.abs(node.scrollTop - previous.top) : 0;
           scrollSampleRef.current = { top: node.scrollTop, at: now };
-          if (velocity > 0.8 && !fastScrollingRef.current) {
-            fastScrollingRef.current = true;
-            setFastScrolling(true);
-          }
-          if (velocity > TEXT_ONLY_SCROLL_VELOCITY && !textOnlyRowsRef.current) {
-            textOnlyRowsRef.current = true;
-            setTextOnlyRows(true);
-          }
+          const enterFast = velocity > 0.8 && !fastScrollingRef.current;
+          const enterTextOnly = velocity > TEXT_ONLY_SCROLL_VELOCITY && !textOnlyRowsRef.current;
+          if (enterFast) fastScrollingRef.current = true;
+          if (enterTextOnly) textOnlyRowsRef.current = true;
+          const windowAt = () => ({ top: Math.floor(node.scrollTop / rowHRef.current) * rowHRef.current, height: node.clientHeight });
           if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
           scrollIdleTimerRef.current = window.setTimeout(() => {
             scrollIdleTimerRef.current = null;
@@ -1764,15 +1768,24 @@ export const TrackTable = memo(function TrackTable({
             setFastScrolling(false);
             textOnlyRowsRef.current = false;
             setTextOnlyRows(false);
+            // 停下后的窗口以滚动容器此刻的实际位置为准，不依赖最后一帧是否送达。
+            const rest = windowAt();
+            setView((current) => current.top === rest.top && current.height === rest.height ? current : rest);
             const anchor = anchorRef.current;
             if (persistentSession) updateLocalWorkspaceSession({ scrollTop: node.scrollTop, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
           }, 140);
           const index = Math.max(0, Math.floor(node.scrollTop / rowHRef.current) - pendingCountRef.current);
           anchorRef.current = { id: libraryStore.getState().orderedIds[index] ?? null, index, offset: node.scrollTop % rowHRef.current };
-          const next = { top: Math.floor(node.scrollTop / rowHRef.current) * rowHRef.current, height: node.clientHeight };
-          setView((current) =>
-            current.top === next.top && current.height === next.height ? current : next,
-          );
+          const next = windowAt();
+          // 这一帧就把新窗口提交进 DOM。普通 setState 会排到本帧绘制之后：滚动位置已经
+          // 画出来，对应的行却晚一帧以上才到；拖滑块时每帧都换一整屏，于是一直是空白。
+          flushSync(() => {
+            if (enterFast) setFastScrolling(true);
+            if (enterTextOnly) setTextOnlyRows(true);
+            setView((current) =>
+              current.top === next.top && current.height === next.height ? current : next,
+            );
+          });
         });
       }}
     >

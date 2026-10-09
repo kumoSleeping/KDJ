@@ -1,6 +1,8 @@
 export interface LibraryViewportInput {
   total: number; pending: number; top: number; height: number; rowHeight: number;
   headerHeight: number; velocity: number; latency: number;
+  /** Pixels scrolled since the previous frame of a fast scroll. */
+  travel?: number;
 }
 export function libraryViewport(input: LibraryViewportInput) {
   const rowHeight = Math.max(1, input.rowHeight);
@@ -12,9 +14,13 @@ export function libraryViewport(input: LibraryViewportInput) {
   const visibleStart = Math.min(count, Math.floor(top / rowHeight));
   const visibleEnd = Math.min(count, Math.ceil((top + height) / rowHeight));
   const fast = Math.abs(input.velocity) > 0.8;
+  // A frame that travels past the whole look-ahead (a dragged scrollbar handle) keeps none of the
+  // rows it rendered, so rendering six screens only delays the one under the pointer.
+  const jump = fast && (input.travel ?? 0) >= 4 * height;
   // Rows are rendered two screens around a resting viewport; a fast scroll trades the rows
   // behind it for up to four screens (a quarter second of travel) in the direction of motion.
-  const ahead = fast ? Math.min(4 * screen, Math.max(2 * screen, Math.ceil(Math.abs(input.velocity) * 250 / rowHeight))) : 2 * screen;
+  const ahead = jump ? screen
+    : fast ? Math.min(4 * screen, Math.max(2 * screen, Math.ceil(Math.abs(input.velocity) * 250 / rowHeight))) : 2 * screen;
   const behind = fast ? screen : 2 * screen;
   const start = Math.max(0, visibleStart - (input.velocity < 0 ? ahead : behind));
   const end = Math.min(count, visibleEnd + (input.velocity < 0 ? behind : ahead));
