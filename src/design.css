@@ -6420,33 +6420,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-marquee-viewport[data-marquee="true"] {
   text-overflow: clip;
 }
-.kd-marquee-viewport[data-marquee="true"] > span {
-  display: inline-block;
-  /* 时长和位移都用 MarqueeText 量出来的真实溢出量（--kd-marquee-*）：
-     固定 12s 的话，570px 的曲名和 260px 的曲名速度差好几倍。
-     **不能再加 padding-right**——量出来的溢出量不含它，留着会多滚一截空白。 */
-  animation: kd-marquee var(--kd-marquee-time, 12s) linear infinite;
-}
-.kd-marquee-viewport[data-marquee="true"]:hover > span {
-  animation-play-state: paused; /* 想看清全名时把鼠标停上去 */
-}
+/* The scroll itself is run by MarqueeText: constant speed over the measured overflow with short
+   fixed pauses at both ends, held while the pointer rests on the text. */
 @media (prefers-reduced-motion: reduce) {
   .kd-marquee-viewport[data-marquee="true"] { text-overflow: ellipsis; }
-  .kd-marquee-viewport[data-marquee="true"] > span { animation: none; transform: none; }
-}
-/* 两端各停一会儿再走——停顿是留给人读字的，一直匀速滑没法看清开头 */
-@keyframes kd-marquee {
-  0%,
-  15% {
-    transform: translateX(0);
-  }
-  50%,
-  65% {
-    transform: translateX(var(--kd-marquee-shift, 0));
-  }
-  100% {
-    transform: translateX(0);
-  }
 }
 
 /* ============================================================

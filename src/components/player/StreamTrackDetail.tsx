@@ -9,6 +9,7 @@ import {
 import { streamCoverUrl, streamMeta, streamTrackById } from "../../lib/streamTrack";
 import type { Track } from "../../types";
 import { InlineNotice } from "../common";
+import { MarqueeText } from "../common/MarqueeText";
 import { DetailPanelStack } from "../library/DetailPanelStack";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
@@ -95,19 +96,10 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
           </div>
         </div>
         <div className="kd-track-detail-summary" style={{ minWidth: 0 }}>
-          <div
-            className="kd-truncate"
-            style={{ fontWeight: 700, fontSize: "var(--kd-size-lg)" }}
-            title={track.title || track.filename}
-          >
-            {track.title || track.filename}
-          </div>
-          <div className="kd-truncate kd-muted" title={track.artist}>
-            {track.artist || "未知艺术家"}
-          </div>
-          <div className="kd-truncate kd-faint" title={track.album}>
-            {track.album || "—"}
-          </div>
+          {/* Like a library track: what does not fit scrolls instead of ending in an ellipsis. */}
+          <MarqueeText className="kd-track-detail-title" text={track.title || track.filename} />
+          <MarqueeText className="kd-muted" text={track.artist || "未知艺术家"} />
+          <MarqueeText className="kd-faint" text={track.album || "—"} />
           <div
             className="kd-row kd-faint kd-track-detail-facts"
             style={{
