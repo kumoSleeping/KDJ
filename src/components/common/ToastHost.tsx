@@ -37,6 +37,7 @@ export function ToastHost() {
         ×
       </button>
     </div>,
-    document.body,
+    // Inside the app root: its work-mode rules lift the toast clear of the player bar.
+    document.querySelector(".kd-app") ?? document.body,
   );
 }

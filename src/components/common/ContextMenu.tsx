@@ -16,7 +16,7 @@ export interface ContextMenuProps {
   /** 点击控件展开时的上边缘；下方空间不足则优先在控件上方展开。 */
   anchorTop?: number;
   /** Only scrolling this anchor's ancestors invalidates its viewport position. */
-  anchorElement?: HTMLElement;
+  anchorElement?: HTMLElement | null;
   /** Let the trigger click toggle the menu instead of closing on pointerdown first. */
   toggleAnchor?: boolean;
   minWidth?: number;
@@ -104,8 +104,11 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = fal
     };
     const scroll = (event: Event) => {
       // Lyrics and virtual lists scroll themselves during playback. Their scroll
-      // does not move a header's menu anchor and must not dismiss that menu.
-      if (anchorElement && event.target instanceof Node && !event.target.contains(anchorElement)) return;
+      // does not move a header's menu anchor and must not dismiss that menu. A caller that
+      // passes no anchor usually opened the menu from the focused element, its trigger; WebKit
+      // does not focus a clicked button, and then any scroll still closes the menu.
+      const anchor = anchorElement ?? (returnFocus.current === document.body ? null : returnFocus.current);
+      if (anchor && event.target instanceof Node && !event.target.contains(anchor)) return;
       if (anchorTop !== undefined && !ref.current?.contains(event.target as Node)) onClose();
     };
     const resize = () => { if (anchorTop !== undefined) onClose(); };

@@ -64,7 +64,12 @@ export function Sheet({ open, keepMounted = false, hideHeader = false, showClose
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") requestClose();
+      // Esc that a field inside the sheet uses (clear a search, cancel a rename or an IME
+      // composition) is not also a request to close the sheet.
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable)) return;
+      requestClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

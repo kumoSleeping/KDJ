@@ -34,7 +34,7 @@ export function LyricsSourcePicker({ platform, disabled = false, matching = fals
       }}>
       {matching ? "匹配中…" : label}<ChevronDown size={12} aria-hidden="true" />
     </button>
-    {anchor && <ContextMenu x={anchor.x} y={anchor.y} anchorTop={anchor.top} onClose={() => setAnchor(null)}
+    {anchor && <ContextMenu x={anchor.x} y={anchor.y} anchorTop={anchor.top} anchorElement={trigger.current} onClose={() => setAnchor(null)}
       keepOpen=".kd-lyrics-source-picker" className="kd-lyrics-source-menu">
       {lyricSources.map(source => <button key={source.value} type="button" role="menuitemradio"
         aria-checked={platform === source.value}

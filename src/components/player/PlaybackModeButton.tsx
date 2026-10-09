@@ -30,7 +30,7 @@ export function PlaybackModeButton() {
         const rect = event.currentTarget.getBoundingClientRect();
         setMenu({ x: rect.left, y: rect.bottom + 4, top: rect.top });
       }}><Icon size={14} /></button>
-    {menu && <ContextMenu id="kd-playback-mode-menu" label="播放模式与范围" x={menu.x} y={menu.y} anchorTop={menu.top}
+    {menu && <ContextMenu id="kd-playback-mode-menu" label="播放模式与范围" x={menu.x} y={menu.y} anchorTop={menu.top} anchorElement={button.current}
       minWidth={170} onClose={() => setMenu(null)} keepOpen=".kd-player-mode">
       <div className="kd-lyrics-menu-heading" role="presentation">播放模式</div>
       {(Object.keys(MODE_UI) as PlayMode[]).map(value => {

@@ -1269,6 +1269,11 @@ export function FolderTree({
       return stale ? current : "";
     });
   }, [folders]);
+  // 取消或失败的导入会回滚，文件夹仍是"未入库"，上面那条清不掉标记；扫描一结束就清，
+  // 否则徽标一直是「…」，之后点任何未入库文件夹都不再导入。
+  useEffect(() => {
+    if (scan?.phase === "done") setImporting("");
+  }, [scan?.phase]);
 
   // 换节点时清掉「移出」上膛态（关闭由 ContextMenu 自己处理）
   useEffect(() => {
@@ -2421,7 +2426,7 @@ export function FolderTree({
             disabled={scanning ? scan?.current === "正在取消…" : roots.length === 0}
             title={
               scanning
-                ? "停止扫描；已经完成入库的曲目会保留"
+                ? "取消导入并清除本次新增记录；保留原文件和原有曲库"
                 : rescanArmed
                   ? "再次点击后才会重新遍历全部曲库文件夹"
                   : "需要在当前右键面板中再次确认"

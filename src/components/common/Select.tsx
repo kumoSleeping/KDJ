@@ -76,7 +76,7 @@ export function Select({ children, value, defaultValue, onChange, disabled, clas
       {children}
     </select>
     {anchor && <ContextMenu id={`${uid}-menu`} label={accessibility["aria-label"]}
-      x={anchor.x} y={anchor.y} anchorTop={anchor.top} minWidth={anchor.width} initialFocus={anchor.focus}
+      x={anchor.x} y={anchor.y} anchorTop={anchor.top} anchorElement={trigger.current} minWidth={anchor.width} initialFocus={anchor.focus}
       keepOpen={`[id="${id ?? uid}"]`} onClose={() => setAnchor(null)} className="kd-select-menu">
       {options.map((option, index) => <Fragment key={`${option.value}-${index}`}>
         {option.groupIndex >= 0 && option.groupIndex !== options[index - 1]?.groupIndex &&
