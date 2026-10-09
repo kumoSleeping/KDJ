@@ -59,22 +59,22 @@ export interface SearchBarProps extends SearchPlatformProps {
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
   presentation?: "bar" | "detail";
-  /** A search started outside the field (Explore fills and submits); a new value starts the line. */
+  /** A search started outside the field (Explore fills and submits); a new value starts the sheen. */
   burstNonce?: number;
 }
 
-/** The line under the field: travelling while a search runs, then fading as the results land. */
-type SearchLinePhase = "run" | "done";
-/** A submit that never raised `busy` (rejected input, a page change) ends the line by itself. */
-const SEARCH_LINE_START_GRACE_MS = 700;
+/** The sheen in the field: travelling while a search runs, then fading as the results land. */
+type SearchSheenPhase = "run" | "done";
+/** A submit that never raised `busy` (rejected input, a page change) ends the sheen by itself. */
+const SEARCH_SHEEN_START_GRACE_MS = 700;
 /** Matches the fade in SearchBar.css. */
-const SEARCH_LINE_FADE_MS = 380;
+const SEARCH_SHEEN_FADE_MS = 380;
 
 /**
- * 在线搜索：页面顶部的一行，没有框。
+ * 在线搜索：左边是搜索类型与来源，右边是输入。
  *
- * 先是输入，行尾是搜索类型与来源；平台键只负责来源多选与顺序。
- * 提交靠 Enter（Shift+Enter 换行），不再单独放放大镜。
+ * 两部分之间不画线：输入区自己是一块浅色底，和来源靠间距分开。
+ * 平台键只负责来源多选与顺序；提交靠 Enter（Shift+Enter 换行），不再单独放放大镜。
  */
 const SEARCH_KIND_LABEL: Record<SearchKind, string> = {
   song: "单曲",
@@ -226,17 +226,17 @@ export function SearchBar({
 }: SearchBarProps) {
   const detail = presentation === "detail";
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const lineRef = useRef<HTMLSpanElement>(null);
+  const fieldRef = useRef<HTMLDivElement>(null);
   const presets = useSearchPresets({ query, onQueryChange, track: presetTrack, playingTrack, inputRef });
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [platformsExpanded, setPlatformsExpanded] = useState(false);
-  const [linePhase, setLinePhase] = useState<SearchLinePhase | null>(null);
-  /** 提交后在等结果：见过 busy=true 之后，busy 落回 false 才收线。 */
-  const linePendingRef = useRef(false);
-  const lineSawBusyRef = useRef(false);
+  const [sheenPhase, setSheenPhase] = useState<SearchSheenPhase | null>(null);
+  /** 提交后在等结果：见过 busy=true 之后，busy 落回 false 才收起流光。 */
+  const sheenPendingRef = useRef(false);
+  const sheenSawBusyRef = useRef(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
   const inputRows = batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
@@ -245,44 +245,44 @@ export function SearchBar({
     ? searchKinds[(Math.max(-1, currentKindIndex) + 1) % searchKinds.length]
     : searchKind;
 
-  const startLine = () => {
-    linePendingRef.current = true;
+  const startSheen = () => {
+    sheenPendingRef.current = true;
     // Explore 代搜时 submit 可能已经把 busy 拉高，这一帧就要算「见过 busy」。
-    lineSawBusyRef.current = busy;
-    setLinePhase("run");
+    sheenSawBusyRef.current = busy;
+    setSheenPhase("run");
   };
 
   useEffect(() => {
-    if (!linePendingRef.current) return;
+    if (!sheenPendingRef.current) return;
     if (busy) {
-      lineSawBusyRef.current = true;
+      sheenSawBusyRef.current = true;
       return;
     }
     // 提交瞬间 busy 还没拉高：先别收。等真正跑完一轮再淡出。
-    if (!lineSawBusyRef.current) return;
-    linePendingRef.current = false;
-    setLinePhase("done");
+    if (!sheenSawBusyRef.current) return;
+    sheenPendingRef.current = false;
+    setSheenPhase("done");
   }, [busy]);
 
   useEffect(() => {
-    if (linePhase === "run") {
+    if (sheenPhase === "run") {
       const timer = window.setTimeout(() => {
-        if (!linePendingRef.current || lineSawBusyRef.current) return;
-        linePendingRef.current = false;
-        setLinePhase("done");
-      }, SEARCH_LINE_START_GRACE_MS);
+        if (!sheenPendingRef.current || sheenSawBusyRef.current) return;
+        sheenPendingRef.current = false;
+        setSheenPhase("done");
+      }, SEARCH_SHEEN_START_GRACE_MS);
       return () => window.clearTimeout(timer);
     }
-    if (linePhase === "done") {
-      const timer = window.setTimeout(() => setLinePhase(null), SEARCH_LINE_FADE_MS);
+    if (sheenPhase === "done") {
+      const timer = window.setTimeout(() => setSheenPhase(null), SEARCH_SHEEN_FADE_MS);
       return () => window.clearTimeout(timer);
     }
-  }, [linePhase]);
+  }, [sheenPhase]);
 
   useEffect(() => {
     if (burstNonce === lastNonceRef.current) return;
     lastNonceRef.current = burstNonce;
-    if (burstNonce > 0) startLine();
+    if (burstNonce > 0) startSheen();
   }, [burstNonce]);
 
   useEffect(() => {
@@ -291,7 +291,7 @@ export function SearchBar({
 
   const fireSubmit = () => {
     if (!canSubmit) return;
-    startLine();
+    startSheen();
     onSubmit();
   };
 
@@ -300,7 +300,7 @@ export function SearchBar({
       className="kd-search-command"
       data-presentation={presentation}
       data-stacked={stacked || undefined}
-      aria-busy={linePhase === "run" || undefined}
+      aria-busy={sheenPhase === "run" || undefined}
       onSubmit={(event) => {
         event.preventDefault();
         fireSubmit();
@@ -312,22 +312,41 @@ export function SearchBar({
         data-batch={batch || undefined}
         data-stacked={stacked || undefined}
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
-        data-focused={inputFocused ? "true" : undefined}
-        data-searching={linePhase ?? undefined}
+        data-searching={sheenPhase ?? undefined}
         onPointerDownCapture={(event) => {
-          // The focus ink starts where the click lands. One read per click, none while typing.
-          const line = lineRef.current;
-          if (!line || inputFocused || (event.target as HTMLElement).closest("button")) return;
-          const rect = line.getBoundingClientRect();
+          // The field's focus tint spreads from where the click lands. One read per click, none while typing.
+          const field = fieldRef.current;
+          if (!field || inputFocused || (event.target as HTMLElement).closest("button")) return;
+          const rect = field.getBoundingClientRect();
           const x = Math.min(rect.width, Math.max(0, event.clientX - rect.left));
-          line.style.setProperty("--kd-search-origin", `${Math.round(x)}px`);
+          field.style.setProperty("--kd-search-origin", `${Math.round(x)}px`);
         }}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
           inputRef.current?.focus();
         }}
       >
+        <div className="kd-searchbar-tools">
+          {searchKinds.length > 1 && (
+            <button
+              type="button"
+              className="kd-search-kind"
+              data-kind={searchKind}
+              aria-label={`搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              onClick={() => onSearchKindChange(nextSearchKind)}
+            >
+              <span key={searchKind} className="kd-search-kind-text">{SEARCH_KIND_LABEL[searchKind]}</span>
+            </button>
+          )}
+          <SearchPlatforms
+            {...platformProps}
+            collapsed={!detail && stacked && !platformsExpanded}
+            onExpand={() => setPlatformsExpanded(true)}
+          />
+        </div>
         <div
+          ref={fieldRef}
           className="kd-searchbar-copy"
           data-empty={!query || undefined}
           data-input-focused={inputFocused ? "true" : undefined}
@@ -335,6 +354,7 @@ export function SearchBar({
             if (stacked && platformsExpanded) setPlatformsExpanded(false);
           }}
         >
+          {sheenPhase ? <span className="kd-search-sheen" aria-hidden="true" /> : null}
           {!query && (
             <SearchTipCarousel
               inputFocused={inputFocused}
@@ -356,7 +376,7 @@ export function SearchBar({
             onFocus={() => setInputFocused(true)}
             onBlur={event => {
               setInputFocused(false);
-              lineRef.current?.style.removeProperty("--kd-search-origin");
+              fieldRef.current?.style.removeProperty("--kd-search-origin");
               presets.onBlur(event.relatedTarget);
             }}
             onSelect={presets.syncCaret}
@@ -379,28 +399,6 @@ export function SearchBar({
             onChange={(event) => { onQueryChange(event.target.value); presets.syncCaret(); }}
           />
         </div>
-        <div className="kd-searchbar-tools">
-          {searchKinds.length > 1 && (
-            <button
-              type="button"
-              className="kd-search-kind"
-              data-kind={searchKind}
-              aria-label={`搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              onClick={() => onSearchKindChange(nextSearchKind)}
-            >
-              <span key={searchKind} className="kd-search-kind-text">{SEARCH_KIND_LABEL[searchKind]}</span>
-            </button>
-          )}
-          <SearchPlatforms
-            {...platformProps}
-            collapsed={!detail && stacked && !platformsExpanded}
-            onExpand={() => setPlatformsExpanded(true)}
-          />
-        </div>
-        <span ref={lineRef} className="kd-search-line" aria-hidden="true">
-          {linePhase ? <span className="kd-search-line-run" /> : null}
-        </span>
       </div>
       {presets.menu}
     </form>

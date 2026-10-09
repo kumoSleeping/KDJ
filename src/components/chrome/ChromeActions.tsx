@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { usesKvjWindow } from "../../lib/windowRole";
 import { showKvj } from "../../lib/kvjWindow";
-import { Radio, Moon, Settings, Sun, Upload, Palette, Clapperboard, Download } from "lucide-react";
+import { BriefcaseBusiness, Radio, Moon, Settings, Sun, Upload, Palette, Clapperboard, Download } from "lucide-react";
+import { ContextMenu } from "../common/ContextMenu";
 import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePack";
 import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
@@ -17,7 +19,7 @@ export interface ChromeActionsProps {
   onTasks(): void;
 }
 
-/** 顶栏提供设置及右侧编辑工作区入口。 */
+/** 顶栏提供设置及工具箱入口；工具箱弹出小菜单，从中进入 VJ 剪辑或 VJ 投放。 */
 export function ChromeActions({
   settingsOpen,
   onSettings,
@@ -31,6 +33,9 @@ export function ChromeActions({
   const latest = useUpdateStore((s) => s.info?.latest ?? "");
   const openUpdateSection = useUpdateStore((s) => s.openUpdateSection);
   const openUpdate = onOpenUpdate ?? openUpdateSection;
+  const [tools, setTools] = useState<{ x: number; y: number; top: number; anchor: HTMLElement } | null>(null);
+  const workshopOpen = compositionOpen && compositionMode === "workshop";
+  const liveVjOpen = compositionOpen && compositionMode === "live-vj";
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
       <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
@@ -61,13 +66,24 @@ export function ChromeActions({
       >
         <Settings size={16} />
       </button>
-      <button type="button" className="kd-chrome-btn" title="VJ 剪辑" aria-label="VJ 剪辑"
-        aria-pressed={compositionOpen && compositionMode === "workshop"} data-open={compositionOpen && compositionMode === "workshop" || undefined}
-        onClick={() => usesKvjWindow() ? showKvj() : onComposition("workshop")}><Clapperboard size={16} /></button>
-      <button type="button" className="kd-chrome-btn" title="VJ 投放" aria-label="VJ 投放"
-        aria-pressed={compositionOpen && compositionMode === "live-vj"} data-open={compositionOpen && compositionMode === "live-vj" || undefined}
-        disabled={!['darwin', 'win32', 'linux'].includes(window.kdj?.platform ?? '')}
-        onClick={() => usesKvjWindow() ? showKvj({ tab: "live-vj" }) : onComposition("live-vj")}><Radio size={16} /></button>
+      <button type="button" className="kd-chrome-btn" title="工具箱" aria-label="工具箱"
+        aria-haspopup="menu" aria-expanded={!!tools} data-open={compositionOpen || undefined}
+        onClick={event => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          setTools(tools ? null : { x: rect.left, y: rect.bottom + 4, top: rect.top, anchor: event.currentTarget });
+        }}><BriefcaseBusiness size={16} /></button>
+      {tools && <ContextMenu x={tools.x} y={tools.y} anchorTop={tools.top} anchorElement={tools.anchor} toggleAnchor
+        label="工具箱" className="kd-chrome-tools-menu" onClose={() => setTools(null)}>
+        <button type="button" role="menuitemcheckbox" aria-checked={workshopOpen}
+          onClick={() => { setTools(null); if (usesKvjWindow()) showKvj(); else onComposition("workshop"); }}>
+          <Clapperboard size={14} aria-hidden="true" /><span>VJ 剪辑</span>
+        </button>
+        <button type="button" role="menuitemcheckbox" aria-checked={liveVjOpen}
+          disabled={!['darwin', 'win32', 'linux'].includes(window.kdj?.platform ?? '')}
+          onClick={() => { setTools(null); if (usesKvjWindow()) showKvj({ tab: "live-vj" }); else onComposition("live-vj"); }}>
+          <Radio size={14} aria-hidden="true" /><span>VJ 投放</span>
+        </button>
+      </ContextMenu>}
 
       <ChromeThemeButton />
     </div>
