@@ -1,19 +1,18 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, ChevronsDown, LoaderCircle, Pin, TextQuote } from "lucide-react";
+import { ChevronsDown, LoaderCircle, Pencil, Pin, TextQuote } from "lucide-react";
 import { isVideoTrack } from "../../lib/format";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useSidePanels } from "../../lib/sidePanels";
-import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import { isStreamTrack, streamMeta } from "../../lib/streamTrack";
 import { NOW_PLAYING_PEEK_MS, nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
+import { trackMetaEditorAnchor, useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { useLyricsStore } from "../../stores/lyricsStore";
 import { Panel } from "../common";
-import { TrackDetail, type TrackMetadataParts } from "../library/TrackDetail";
+import { TrackDetail } from "../library/TrackDetail";
 import { StreamTrackDetail } from "./StreamTrackDetail";
 import "./NowPlayingInfo.css";
 
-const META_KEY = "kd-now-playing-meta-open";
 /** The retreat into the bar; the panel stays mounted this long after it is dismissed. */
 const LEAVE_MS = 380;
 
@@ -43,7 +42,7 @@ export function NowPlayingInfoHost({ trackId, playing }: { trackId: number | nul
   return mounted ? <NowPlayingInfo leaving={!visible} /> : null;
 }
 
-/** 曲目信息 and Meta of the loaded deck, risen from the player bar it belongs to. */
+/** 曲目信息 of the loaded deck, risen from the player bar it belongs to. */
 function NowPlayingInfo({ leaving }: { leaving: boolean }) {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const pinned = useNowPlayingInfo(state => state.pinned);
@@ -65,11 +64,8 @@ function NowPlayingInfo({ leaving }: { leaving: boolean }) {
   }, [timed, held, peek]);
   /** Dismiss unless the listener pinned it: used after an action that replaces the panel's job. */
   const onClose = () => { if (!useNowPlayingInfo.getState().pinned) useNowPlayingInfo.getState().close(); };
-  const [metaOpen, setMetaOpen] = useState(() => readLocalStorage(META_KEY) === "true");
-  const showMeta = (open: boolean) => {
-    setMetaOpen(open);
-    writeLocalStorageNow(META_KEY, String(open));
-  };
+  // Meta is edited in its own floating window; this panel only says whether that is open.
+  const editingMeta = useTrackMetaEditor(state => state.trackId !== null && state.trackId === track?.id);
   const lyricsEntry = useLyricsStore(state => state.get(track?.id));
   const video = !!track && (isVideoTrack(track.format) || streamMeta(track)?.kind === "video");
   const lyricsReady = !video && hasVisibleLyrics(lyricsEntry.lines);
@@ -96,8 +92,7 @@ function NowPlayingInfo({ leaving }: { leaving: boolean }) {
     return () => window.removeEventListener("keydown", dismiss);
   }, []);
   if (!track) return null;
-  const panel = (information: ReactNode, meta?: TrackMetadataParts) => {
-    const expanded = !!meta && (metaOpen || meta.editing);
+  const panel = (information: ReactNode) => {
     const matching = !lyricsReady && !!lyricsEntry.inflight;
     return <Panel heading={video ? "视频信息" : "曲目信息"} floatingHeader className="kd-info-panel" dense actions={<>
       {timed && <svg key={peek} className="kd-info-countdown" viewBox="0 0 16 16" role="img" aria-label="即将收起"
@@ -114,10 +109,10 @@ function NowPlayingInfo({ leaving }: { leaving: boolean }) {
         aria-busy={matching} onClick={openLyrics}>
         {matching ? <LoaderCircle size={14} className="kd-spin" aria-hidden="true" /> : <TextQuote size={14} aria-hidden="true" />}
       </button>}
-      {meta && <button type="button" className="kd-manager-panel-action" aria-expanded={expanded}
-        aria-label={expanded ? "收起 Meta" : "展开 Meta"} title={expanded ? "收起 Meta" : "展开 Meta"}
-        disabled={meta.editing} onClick={() => showMeta(!expanded)}>
-        {expanded ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+      {!isStreamTrack(track) && <button type="button" className="kd-manager-panel-action" aria-pressed={editingMeta}
+        aria-label="编辑 Meta" title="编辑 Meta"
+        onClick={event => useTrackMetaEditor.getState().toggle(track.id, trackMetaEditorAnchor(event.currentTarget))}>
+        <Pencil size={14} aria-hidden="true" />
       </button>}
       <button type="button" className="kd-manager-panel-action" aria-label="收起曲目信息" title="收起（Esc）"
         onClick={() => useNowPlayingInfo.getState().close()}>
@@ -125,10 +120,6 @@ function NowPlayingInfo({ leaving }: { leaving: boolean }) {
       </button>
     </>}>
       {information}
-      {meta && expanded && <div className="kd-info-meta" role="group" aria-label="Meta">
-        <div className="kd-info-meta-actions">{meta.actions}</div>
-        {meta.body}
-      </div>}
     </Panel>;
   };
   return <div className="kd-player-info-clip" data-leaving={leaving || undefined}>
@@ -138,7 +129,7 @@ function NowPlayingInfo({ leaving }: { leaving: boolean }) {
       onFocus={() => setHeld(true)}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setHeld(false); }}>
       {isStreamTrack(track) ? <StreamTrackDetail track={track} renderPanels={panel} />
-        : <TrackDetail track={track} mode="summary" renderPanels={panel} onRevealMetadata={() => showMeta(true)} />}
+        : <TrackDetail track={track} mode="summary" renderPanels={panel} />}
     </div>
   </div>;
 }

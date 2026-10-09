@@ -2,11 +2,13 @@
 import { build } from "esbuild";
 import { createRequire, Module } from "node:module";
 const require = createRequire(import.meta.url);
-const entry = new Module(`${process.cwd()}/tests/libraryTable.test.cjs`);
+// The library table by default; another JSDOM test of the library UI may be named instead.
+const source = process.argv[2] ?? "tests/libraryTable.test.tsx";
+const entry = new Module(`${process.cwd()}/${source.replace(/\.tsx?$/, ".cjs")}`);
 entry.filename = entry.id;
 entry.paths = require.resolve.paths("react");
 entry._compile((await build({
-  entryPoints: ["tests/libraryTable.test.tsx"], bundle: true,
+  entryPoints: [source], bundle: true,
   external: ["jsdom", "react", "react-dom", "react-dom/*"],
   platform: "node", format: "cjs", define: { "import.meta.env": "{}" },
   loader: { ".css": "empty" },
