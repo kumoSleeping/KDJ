@@ -415,9 +415,15 @@
   background: var(--kd-panel);
   box-shadow: var(--s98-sunken);
 }
+:root[data-theme-pack="sakulaptop98"] .kd-folder-pane {
+  --kd-tree-caret: 0.95rem;
+}
+/* Every root is its own raised tile here, so the default skin's group hairline
+   and its extra air are not needed. */
 :root[data-theme-pack="sakulaptop98"] .kd-sidebar-root-slot {
   background: var(--kd-panel-inset);
   margin-block: 3px;
+  padding-top: 0;
   box-shadow: inset 1px 0 var(--s98-shadow), inset -1px -1px var(--s98-white);
 }
 :root[data-theme-pack="sakulaptop98"] .kd-folder[data-sidebar-root-row],
@@ -441,12 +447,21 @@
 :root[data-theme-pack="sakulaptop98"] .kd-folder:is([data-active="true"], [data-selected="true"]) :is(.kd-folder-count, .kd-folder-drag) {
   color: inherit;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-folder-count {
+:root[data-theme-pack="sakulaptop98"] :is(.kd-folder-count, .kd-folder-login) {
   padding: 1px 4px;
   color: var(--kd-text-body);
   background: var(--kd-panel-inset);
   box-shadow: inset 1px 1px var(--s98-shadow), 1px 1px var(--s98-white);
   border-radius: 2px;
+}
+/* A sign-in is a command, so it is a raised key rather than a sunken read-out. */
+:root[data-theme-pack="sakulaptop98"] .kd-folder-login {
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-folder-caret {
+  height: var(--kd-tree-caret);
+  border-radius: 0;
 }
 :root[data-theme-pack="sakulaptop98"] .kd-folder-caret:has(svg) {
   background: var(--s98-face-hi);
@@ -457,19 +472,15 @@
   background: transparent;
   box-shadow: none;
 }
+/* The action shares the count's cell and replaces it on hover; the count never moves. */
 :root[data-theme-pack="sakulaptop98"] .kd-folder-more {
-  display: none;
-  justify-content: center;
   width: 1.25rem;
-  min-height: 1.25rem;
+  height: 1.25rem;
+  margin-right: 0;
   color: var(--kd-text-body);
   background: var(--s98-face);
   box-shadow: var(--s98-raised);
   border-radius: 2px;
-}
-/* Keep counts at the right edge until the action actually appears. */
-:root[data-theme-pack="sakulaptop98"] .kd-folder:is(:hover, :focus-within) .kd-folder-more {
-  display: inline-flex;
 }
 :root[data-theme-pack="sakulaptop98"] :is(.kd-narrow-global-actions, .kd-narrow-source-roots, .kd-narrow-source-children) {
   background: var(--kd-panel);
