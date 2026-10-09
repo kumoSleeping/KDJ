@@ -286,6 +286,3 @@
   --kd-eq-tempo-line: #ad6f83;
   --kd-eq-tempo-thumb: #69424e;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-eq .kd-dj-arcknob-dot { fill: var(--s98-frame); stroke: var(--s98-face-hi); stroke-width: 1.5; }
-:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-info-handle > i { background: var(--s98-shadow); border-radius: 0; }
-:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-info-handle[aria-expanded="true"] > i { background: var(--kd-theme); }

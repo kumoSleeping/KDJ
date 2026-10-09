@@ -48,7 +48,6 @@
   text-align: center;
   white-space: nowrap;
 }
-.kd-player-eq .kd-dj-arcknob-dot { fill: var(--kd-knob-needle, var(--kd-text-body)); }
 
 /* Readouts: a key stepper, the tempo-adjusted BPM, and the tempo that adjusts it. */
 .kd-eq-readouts {
@@ -152,34 +151,6 @@
 .kd-eq-tempo-offset:not([data-moved]) { visibility: hidden; }
 .kd-eq-tempo-offset[data-moved] { color: var(--kd-theme); }
 
-/* The handle on the block's top edge that 曲目信息 rises from. */
-.kd-player-info-handle {
-  position: absolute;
-  z-index: 2;
-  top: calc(-0.4rem - 7px);
-  left: 50%;
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 14px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  translate: -50% 0;
-  cursor: pointer;
-}
-.kd-player-info-handle > i {
-  width: 26px;
-  height: 3px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--kd-muted) 45%, transparent);
-  transition: width 0.18s ease, background 0.18s ease;
-}
-.kd-player-info-handle:hover > i,
-.kd-player-info-handle:focus-visible > i { width: 34px; background: var(--kd-text-body); }
-.kd-player-info-handle[aria-expanded="true"] > i { background: var(--kd-theme); }
-.kd-player-info-handle:focus-visible { outline: none; }
-
 /* Default themes: the strip is drawn with the bar's own line weight and colours rather than the
    mixer panel's raised white knobs, so it reads as part of the bar. Theme packs draw their own. */
 :root:not([data-theme-pack]) .kd-player-eq .kd-manager-control {
@@ -193,15 +164,14 @@
 }
 :root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-value { stroke-width: 2.6; }
 :root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-body { fill: transparent; stroke: none; }
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-dot {
-  fill: var(--kd-text-body);
-  stroke: var(--kd-panel);
-  stroke-width: 2;
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-needle {
+  stroke: var(--kd-text-body);
+  stroke-width: 2.6;
 }
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:hover .kd-dj-arcknob-dot,
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:focus-visible .kd-dj-arcknob-dot { fill: var(--kd-text); }
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-boost="true"] .kd-dj-arcknob-dot,
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-cut="true"] .kd-dj-arcknob-dot { fill: var(--kd-theme); }
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:hover .kd-dj-arcknob-needle,
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:focus-visible .kd-dj-arcknob-needle { stroke: var(--kd-text); }
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-boost="true"] .kd-dj-arcknob-needle,
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-cut="true"] .kd-dj-arcknob-needle { stroke: var(--kd-theme); }
 :root:not([data-theme-pack]) .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b {
   color: var(--kd-muted);
   font-family: var(--kd-font);

@@ -7,7 +7,7 @@ export interface DockApp {
   node: ReactNode;
 }
 
-/** The exit slide; a closed app stays mounted this long. */
+/** The drawer going back up; a closed app stays mounted this long. */
 const LEAVE_MS = 300;
 
 /**
@@ -29,7 +29,7 @@ export function useDockOrder(ids: readonly string[], raised: { id: string | null
 /**
  * The right column. Everything that occupies it (lyrics, downloads and exports, settings, a
  * preview) is an equal app: the one opened last covers the others, and closing it shows the one
- * beneath. Apps slide in from the window's edge and back out; covered apps stay mounted, so
+ * beneath. Apps are drawn down from the top like a drawer and pushed back up; covered apps stay mounted, so
  * their scroll position and state are there when they return.
  */
 export function RightDock({ apps, order, onOccupiedChange }: {

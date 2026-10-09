@@ -3,12 +3,12 @@
 .kd-player-info-clip {
   position: absolute;
   z-index: 5;
-  /* The bar's top edge, flush with its left side. The panel emerges from behind this box's
+  /* The bar's top edge, flush with its right side. The panel emerges from behind this box's
      bottom, so nothing of it is ever drawn over the bar itself. */
   bottom: 100%;
   right: 0;
-  /* As wide as the control block it stands on, out to the window's edge. */
-  width: min(calc(var(--kd-player-eq-w, 16rem) + 1.7rem), 100%);
+  /* As wide as the workspace's right column (see useRightColumnWidth), so the two share an edge. */
+  width: min(var(--kd-info-w, 25rem), 100%);
   /* Room for the soft edge the bar casts on the content above it. */
   padding-top: 0.65rem;
   overflow: hidden;
@@ -27,13 +27,15 @@
   pointer-events: auto;
   animation: kd-player-info-rise 460ms cubic-bezier(0.22, 0.9, 0.26, 1) both;
 }
+/* 460 ms up and 360 ms down are the song-change clock in src/lib/songSwapMotion.ts. */
 .kd-player-info-clip[data-leaving] > .kd-player-info {
   animation: kd-player-info-sink 360ms cubic-bezier(0.55, 0, 0.8, 0.35) both;
 }
 @keyframes kd-player-info-rise { from { transform: translateY(calc(100% + 0.65rem)); } }
 @keyframes kd-player-info-sink { to { transform: translateY(calc(100% + 0.65rem)); } }
 @media (prefers-reduced-motion: reduce) {
-  .kd-player-info, .kd-player-info-clip[data-leaving] > .kd-player-info { animation-duration: 1ms; }
+  .kd-player-info, /* 460 ms up and 360 ms down are the song-change clock in src/lib/songSwapMotion.ts. */
+.kd-player-info-clip[data-leaving] > .kd-player-info { animation-duration: 1ms; }
 }
 /* The countdown of a timed appearance: a ring that empties, paused while the panel is in use. */
 .kd-info-countdown {
@@ -70,52 +72,20 @@
   opacity: 1;
 }
 .kd-info-panel > .kd-panel-float-tools > :not(.kd-panel-head-label) { pointer-events: auto; }
-/* Keep the first summary line clear of the corner actions. */
-/* The column is narrow: the actions take a row of their own above the song instead of a corner. */
+/* The actions take a row of their own above the song, clear of its first line. */
 .kd-player-info .kd-info-panel > .kd-panel-float-tools {
   position: static;
   max-height: none;
   height: 24px;
   padding: 3px 4px 0;
 }
-.kd-player-info .kd-info-panel .kd-panel-body { padding: 2px 12px 12px; }
-.kd-player-info .kd-track-detail-hero { gap: 0.65rem; }
+.kd-player-info .kd-info-panel .kd-panel-body { padding: 2px 14px 14px; }
+.kd-player-info .kd-track-detail-hero { gap: 0.75rem; }
 .kd-player-info .kd-cover-edit-stack,
-.kd-player-info .kd-cover-edit { width: 68px !important; height: 68px !important; }
+.kd-player-info .kd-cover-edit { width: 76px !important; height: 76px !important; }
 .kd-player-info .kd-cover-edit-stack { height: auto !important; }
 /* The right column and the toast step out of the risen panel's way. */
 .kd-dock { margin-bottom: var(--kd-info-lift, 0px); transition: margin-bottom 420ms cubic-bezier(0.22, 0.9, 0.26, 1); }
 .kd-toast { translate: 0 calc(-1 * var(--kd-info-lift, 0px)); transition: translate 420ms cubic-bezier(0.22, 0.9, 0.26, 1); }
 @media (prefers-reduced-motion: reduce) { .kd-dock, .kd-toast { transition: none; } }
 .kd-track-detail-title { font-weight: 700; font-size: var(--kd-size-lg); }
-/* The column is narrow: the actions take a row of their own above the song instead of a corner. */
-.kd-player-info .kd-info-panel > .kd-panel-float-tools {
-  position: static;
-  max-height: none;
-  height: 24px;
-  padding: 3px 4px 0;
-}
-.kd-player-info .kd-info-panel .kd-panel-body { padding: 2px 12px 12px; }
-.kd-player-info .kd-track-detail-hero { gap: 0.65rem; }
-.kd-player-info .kd-cover-edit-stack,
-.kd-player-info .kd-cover-edit { width: 68px !important; height: 68px !important; }
-.kd-player-info .kd-cover-edit-stack { height: auto !important; }
-/* The right column and the toast step out of the risen panel's way. */
-.kd-dock { margin-bottom: var(--kd-info-lift, 0px); transition: margin-bottom 420ms cubic-bezier(0.22, 0.9, 0.26, 1); }
-.kd-toast { translate: 0 calc(-1 * var(--kd-info-lift, 0px)); transition: translate 420ms cubic-bezier(0.22, 0.9, 0.26, 1); }
-@media (prefers-reduced-motion: reduce) { .kd-dock, .kd-toast { transition: none; } }
-.kd-track-detail-title { font-weight: 700; font-size: var(--kd-size-lg); }
-.kd-info-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin-top: 0.6rem;
-  padding-top: 0.5rem;
-  border-top: 1px solid var(--kd-line-soft);
-}
-.kd-info-meta-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.25rem;
-}
