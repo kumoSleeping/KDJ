@@ -1,4 +1,3 @@
-import type { RefCallback } from "react";
 import { usesKvjWindow } from "../../lib/windowRole";
 import { showKvj } from "../../lib/kvjWindow";
 import { Radio, Moon, Settings, Sun, Upload, Palette, Clapperboard, Download } from "lucide-react";
@@ -13,7 +12,6 @@ export interface ChromeActionsProps {
   onComposition(mode: "workshop" | "live-vj"): void;
   /** 打开设置并定位到软件更新区；默认走 updateStore。 */
   onOpenUpdate?(): void;
-  panelIndexTarget?: RefCallback<HTMLSpanElement>;
   /** 下载与导出任务列表：固定在右栏，由这里开关。 */
   tasksOpen: boolean;
   onTasks(): void;
@@ -25,7 +23,6 @@ export function ChromeActions({
   onSettings,
   compositionOpen, onComposition,
   onOpenUpdate,
-  panelIndexTarget,
   tasksOpen,
   onTasks,
 }: ChromeActionsProps) {
@@ -36,7 +33,6 @@ export function ChromeActions({
   const openUpdate = onOpenUpdate ?? openUpdateSection;
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
-      {panelIndexTarget && <span ref={panelIndexTarget} style={{ display: "contents" }} />}
       <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
         aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
       {updateReady ? (

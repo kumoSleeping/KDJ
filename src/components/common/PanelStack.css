@@ -12,14 +12,13 @@
 .kd-panel-dock { min-width: 0; min-height: 0; }
 .kd-panel-dock-top { flex: 0 0 auto; }
 .kd-panel-dock-right { height: 100%; }
-/* With the right column open the dock's two strips are placed separately: the search keeps the
-   full content width, and the column starts below it, beside the waveform and the list. */
+/* With the right column open the search keeps the full content width, and the column starts
+   below it, beside the list. */
 .kd-table-wrap[data-aside="open"] > .kd-panel-dock-top { display: contents; }
 .kd-table-wrap[data-aside="open"] > .kd-panel-dock-top > .kd-panel-stack > .kd-panel-slot {
   grid-column: 1 / -1;
   grid-row: 1;
 }
-.kd-table-wrap[data-aside="open"] > .kd-panel-dock-top > .kd-track-preview-row { grid-column: 1; grid-row: 2; }
 .kd-table-wrap[data-aside="open"] > .kd-split-aside,
 .kd-table-wrap[data-aside="open"] > .kd-split-handle { grid-row: 2 / -1; }
 /* Built-in light/dark stacks use spacing instead of nested boxes; theme packs keep their chrome. */

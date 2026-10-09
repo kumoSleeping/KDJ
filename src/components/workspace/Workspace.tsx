@@ -1,5 +1,4 @@
 import { PanelStack } from "../common/PanelStack";
-import { useTopPanels } from "../../lib/playbackPanelPrefs";
 import { useSidePanels } from "../../lib/sidePanels";
 import { EditorDock } from "./EditorDock";
 import { useStore } from "zustand";
@@ -155,7 +154,6 @@ import { DETAIL_EVENT } from "../library/TrackTable";
 import { NetworkVideoDetail } from "../player/NetworkVideoDetail";
 import { SettingsOverlay } from "../settings/SettingsOverlay";
 import { LibraryToolbar } from "../library/LibraryToolbar";
-import { TrackPreviewPanel } from "../library/TrackPreviewPanel";
 import { TrackTable } from "../library/TrackTable";
 
 function errorText(error: unknown): string {
@@ -284,7 +282,6 @@ export function Workspace() {
   const queuePanelEpoch = useAppStore((state) => state.queuePanelEpoch);
   const showComposition = useAppStore((state) => state.showComposition);
   const [detailRestoreTarget, setDetailRestoreTarget] = useState<HTMLSpanElement | null>(null);
-  const [panelIndexTarget, setPanelIndexTarget] = useState<HTMLSpanElement | null>(null);
   const showPreview = useAppStore((state) => state.showPreview);
   const previewPanelEpoch = useAppStore((state) => state.previewPanelEpoch);
   const showFolders = useAppStore((state) => state.showFolders);
@@ -361,7 +358,6 @@ export function Workspace() {
   const saveSettings = useAppStore((state) => state.saveSettings);
   // 同曲跨平台聚合仍恒为开启；顶栏开关只负责给主列表腾出/还回搜索框高度。
   const merge = true;
-  const topPanelsEnabled = useTopPanels(state => state.enabled);
   const [aggregateSearchOpen, setAggregateSearchOpen] = useState(true);
   const [aggregateSearchRevealed, setAggregateSearchRevealed] = useState(true);
   const openAggregateSearch = useCallback(() => {
@@ -2206,7 +2202,6 @@ export function Workspace() {
           }
           actions={
             <ChromeActions
-              panelIndexTarget={setPanelIndexTarget}
               tasksOpen={downloadsOpen}
               onTasks={() => {
                 const panels = useSidePanels.getState();
@@ -2264,7 +2259,7 @@ export function Workspace() {
             <div className="kd-table-wrap" data-aside={showAside ? "open" : "closed"}>
             <div className="kd-panel-dock kd-panel-dock-top">
             {/* 搜索带可收起；查询文字、来源选择和已有结果都保留。 */}
-            {aggregateSearchOpen && topPanelsEnabled.search ? (
+            {aggregateSearchOpen ? (
               <PanelStack storageKey="kd-top-search-panels">
               <Panel key="search" heading="聚合搜索" dense padded={false}>
               <div
@@ -2278,7 +2273,6 @@ export function Workspace() {
               </Panel>
               </PanelStack>
             ) : null}
-            <TrackPreviewPanel track={detailTrack} indexTarget={panelIndexTarget} />
             </div>
             <div className="kd-local-list-slot" data-aside={showAside ? "open" : "closed"}>
               {temporaryFolderDrop.offered && <div className="kd-temporary-folder-drop"
@@ -2343,7 +2337,7 @@ export function Workspace() {
                   }}
                 >
                   <LibraryWorkRail mode="rail"
-                    aggregateSearchOpen={aggregateSearchOpen || !topPanelsEnabled.search}
+                    aggregateSearchOpen={aggregateSearchOpen}
                     onOpenAggregateSearch={openAggregateSearch}
                   />
                   <div className="kd-workspace-drop-overlay" aria-hidden="true">
