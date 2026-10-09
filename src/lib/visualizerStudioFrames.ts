@@ -28,6 +28,13 @@ export function studioVideoBitrate(width: number, height: number, fps: number): 
   return Math.max(3_000_000, Math.min(80_000_000, Math.round(12_000_000 * width * height / (1920 * 1080) * fps / 30)));
 }
 
+/** What a hardware-encoded export weighs: the encoder holds its target bitrate whatever
+ * the picture shows, beside 256 kbps of AAC. Without a hardware encoder x264 sizes the
+ * file by the picture instead, and it comes out smaller than this. */
+export function studioExportBytes(width: number, height: number, fps: number, seconds: number): number {
+  return Math.round(seconds * (studioVideoBitrate(width, height, fps) + 256_000) / 8);
+}
+
 /** SPS and PPS that open an Annex B GOP, as hex; null unless a key picture follows them.
  * GOPs of one video come from several encoder sessions and are stream-copied into one
  * track, which only holds when every session wrote the same parameter sets. */
