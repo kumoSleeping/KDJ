@@ -93,6 +93,12 @@ test("the floating editor edits one track, writes only changed fields and holds 
     target.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
   });
   const store = () => useTrackMetaEditor.getState();
+  const coverBox = () => editor()!.querySelector<HTMLElement>(".kd-cover-edit")!;
+  const coverImage = () => coverBox().querySelector<HTMLImageElement>("img");
+  const coverSize = () => new URL(coverImage()!.src).searchParams.get("size");
+  const coverReports = async (type: "load" | "error") => act(async () => {
+    coverImage()!.dispatchEvent(new dom.window.Event(type));
+  });
   try {
     await act(async () => root.render(createElement(TrackMetaEditorHost)));
     assert.equal(editor(), null, "nothing is mounted until a track is asked for");
@@ -108,6 +114,16 @@ test("the floating editor edits one track, writes only changed fields and holds 
     assert.deepEqual([editor()!.style.left, editor()!.style.top], ["208px", "160px"],
       "it opens off the pointer and is lifted clear of the player bar");
     assert.equal(store().dirty, false);
+
+    // The cover asks for the thumbnail first and falls back to the original before giving up.
+    assert.equal(coverSize(), "256");
+    assert.ok(coverBox().querySelector(".kd-cover-loading-placeholder"), "a cover on its way is not 'no cover'");
+    await coverReports("error");
+    assert.equal(coverSize(), null, "the thumbnail failed: the original is asked for");
+    assert.equal(coverBox().dataset.coverEmpty, undefined);
+    await coverReports("load");
+    assert.equal(coverImage()!.dataset.loading, undefined, "the loaded picture is shown");
+    assert.equal(coverBox().querySelector(".kd-cover-loading-placeholder"), null);
 
     await type(field(0), "Renamed");
     assert.equal(store().dirty, true);
@@ -145,6 +161,13 @@ test("the floating editor edits one track, writes only changed fields and holds 
     await settle();
     assert.equal(editor()!.querySelector(".kd-internal-window-head span")?.textContent, "Song 8");
     assert.equal(field(0).value, "Song 8");
+    // Another track in the same box starts from its own thumbnail, behind the placeholder.
+    assert.equal(coverSize(), "256");
+    assert.equal(coverImage()!.dataset.loading, "true");
+    await coverReports("error");
+    await coverReports("error");
+    assert.equal(coverBox().dataset.coverEmpty, "true", "neither source loads: the box is the [+] target");
+    assert.equal(coverImage(), null);
     await press(field(0), "Escape");
     assert.ok(editor(), "Escape inside a field belongs to the field, even with nothing to lose");
     await type(field(1), "Someone");
