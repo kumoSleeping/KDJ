@@ -195,13 +195,22 @@ function streamPlaylistItem(
   };
 }
 
-/** 视频链接识别：单视频直接进视频行；B 站收藏夹和 YouTube 播放列表
- * 走通用集合解析。music.youtube.com 则始终归 YouTube Music。 */
+/** B 站单视频直接进视频行；YouTube 链接走 intake，同时返回已确认的 Music 音频。 */
 const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
 const BILI_FAVLIST_RE = /\/favlist(?:[/?#]|$)[^\s]*[?&]fid=\d+|^\s*\d{6,}\s*$/i;
-const YOUTUBE_VIDEO_RE = /(?:^|\.)youtube\.com|youtu\.be/i;
-const YOUTUBE_MUSIC_RE = /music\.youtube\.com/i;
-const YOUTUBE_PLAYLIST_RE = /youtube\.com\/playlist\?/i;
+function youtubeLinkPlatform(text: string): "youtube" | "ytm" | null {
+  try {
+    const url = new URL(text.trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    const host = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (host === "music.youtube.com") return "ytm";
+    return host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com")
+      ? "youtube"
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 const LOCAL_PANE_PIN_KEY = "kd-workspace-local-pane-pinned-v1";
 const WORKSPACE_PANES_KEY = "kd-workspace-panes-v2";
@@ -836,16 +845,9 @@ export function Workspace() {
     setRestorableWorkspaceSource("local");
     setLoadingCollections(new Set());
 
-    // 单视频链接直接进入通用视频面板；B 站收藏夹与 YouTube 播放列表则交给
-    // provider 展开成批量结果。music.youtube.com 始终留给 YTM 音乐来源。
+    // YouTube 单视频也走 intake：视频和经过 Music 确认的音频独立成行。
     const directVideoPlatform =
-      BILI_RE.test(text) && !BILI_FAVLIST_RE.test(text)
-        ? "bilibili"
-        : YOUTUBE_VIDEO_RE.test(text) &&
-            !YOUTUBE_MUSIC_RE.test(text) &&
-            !YOUTUBE_PLAYLIST_RE.test(text)
-          ? "youtube"
-          : null;
+      BILI_RE.test(text) && !BILI_FAVLIST_RE.test(text) ? "bilibili" : null;
     if (directVideoPlatform) {
       setBusy(true);
       setSearchError("");
@@ -886,8 +888,7 @@ export function Workspace() {
     // 关键词搜索则剥掉不支持所选类型的平台，保留其余来源继续返回结果。
     // 集合链接按域名补上唯一归属平台，避免用户刚好没勾该源时被其它 provider 误判。
     const isFavlistInput = BILI_FAVLIST_RE.test(text);
-    const isYoutubePlaylist = YOUTUBE_VIDEO_RE.test(text) && !YOUTUBE_MUSIC_RE.test(text);
-    const isYtmLink = YOUTUBE_MUSIC_RE.test(text);
+    const youtubePlatform = youtubeLinkPlatform(text);
     const isLinkInput = /https?:\/\//i.test(text);
     const requestPlatforms = isLinkInput
       ? ([...orderedPlatforms] as Platform[])
@@ -895,8 +896,9 @@ export function Workspace() {
           (searchCapabilities[platform] ?? ["song"]).includes(requestedKind),
         );
     if (isFavlistInput && !requestPlatforms.includes("bilibili")) requestPlatforms.push("bilibili");
-    if (isYoutubePlaylist && !requestPlatforms.includes("youtube")) requestPlatforms.push("youtube");
-    if (isYtmLink && !requestPlatforms.includes("ytm")) requestPlatforms.push("ytm");
+    if (youtubePlatform && !requestPlatforms.includes(youtubePlatform)) {
+      requestPlatforms.push(youtubePlatform);
+    }
     if (requestPlatforms.length === 0) {
       setItems([]);
       revealSearchPane();
