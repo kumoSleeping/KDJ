@@ -42,6 +42,12 @@
 .kd-sidebar-root-slot:where([data-root-group="online"]) + .kd-sidebar-root-slot:where([data-root-group="library"]) {
   margin-top: 0.7rem;
 }
+/* Drag feedback is on the motion schema's small clock (motion.css): a lifted root dims, the
+   insertion mark fades in, a drop target takes its tint — each at once
+   enough to follow the pointer, none of them switched on like a light. */
+.kd-sidebar-root-slot {
+  transition: opacity var(--kd-motion-micro-out) var(--kd-ease-out);
+}
 .kd-sidebar-root-slot[data-root-dragging="true"] {
   opacity: 0.52;
 }
@@ -55,6 +61,7 @@
   height: 2px;
   background: var(--kd-theme);
   pointer-events: none;
+  animation: kd-motion-fade-in var(--kd-motion-micro-out) var(--kd-ease-out) backwards;
 }
 .kd-sidebar-root-slot[data-root-edge="before"]::before {
   top: 0;
@@ -264,6 +271,9 @@ button.kd-folder-caret:hover:not(:disabled) {
   background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-theme) 46%, transparent);
   color: var(--kd-theme);
+  /* Declared on the target only: the tint eases in and is gone the moment the pointer leaves. */
+  transition: background-color var(--kd-motion-micro-out) var(--kd-ease-out),
+    box-shadow var(--kd-motion-micro-out) var(--kd-ease-out);
 }
 .kd-folder:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) :is(.kd-folder-icon, .kd-folder-caret, .kd-folder-count) {
   color: inherit;
@@ -505,6 +515,8 @@ div.kd-stream-status:hover {
   background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-theme) 46%, transparent);
   color: var(--kd-theme);
+  transition: color 120ms ease, background-color var(--kd-motion-micro-out) var(--kd-ease-out),
+    box-shadow var(--kd-motion-micro-out) var(--kd-ease-out);
 }
 /* Brand colour belongs to the source itself, not to every playlist under it. */
 .kd-narrow-source-roots button[data-stream-platform="wyy"] > .kd-rail-icon {
@@ -612,6 +624,9 @@ div.kd-stream-status:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .kd-folder:is([data-drop="true"], [data-kd-pointer-track-over="folder"]),
+  .kd-narrow-folder-rail button:is([data-drop="true"], [data-kd-pointer-track-over="folder"]),
+  .kd-sidebar-root-slot,
   .kd-folder-chevron,
   .kd-folder-count,
   .kd-folder-more,
@@ -619,6 +634,10 @@ div.kd-stream-status:hover {
   .kd-narrow-folder-rail button,
   .kd-narrow-rail-resize::after {
     transition: none;
+  }
+  .kd-sidebar-root-slot[data-root-edge]::before,
+  .kd-sidebar-root-slot[data-root-edge]::after {
+    animation: none;
   }
 }
 
