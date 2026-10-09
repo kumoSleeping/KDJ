@@ -9,7 +9,7 @@
     "build": "npm run tauri:build",
     "preview": "vite preview --config vite.tauri.config.ts --outDir dist-tauri",
     "typecheck": "tsc --noEmit",
-    "test:library": "node --import tsx --test tests/libraryWindow.test.ts tests/coverThumbnailQueue.test.ts tests/scrollThumb.test.ts tests/scrollPills.test.ts tests/wheelScroll.test.ts && node scripts/test-library-ui.mjs && node scripts/test-library-ui.mjs tests/trackMetaEditor.test.tsx",
+    "test:library": "node --import tsx --test tests/libraryWindow.test.ts tests/libraryStandIns.test.ts tests/coverThumbnailQueue.test.ts tests/scrollThumb.test.ts tests/scrollPills.test.ts tests/wheelScroll.test.ts && node scripts/test-library-ui.mjs && node scripts/test-library-ui.mjs tests/trackMetaEditor.test.tsx",
     "dist": "npm run tauri:build",
     "rust:server": "cargo run --release -p kdj-server --bin kdj-server",
     "rust:web": "vite --config vite.rust.config.ts",

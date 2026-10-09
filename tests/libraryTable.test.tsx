@@ -200,41 +200,25 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.ok(document.querySelector('tr[data-kd-track-id="5001"]'), "rows are committed in the frame that reported the scroll");
     assert.equal(document.querySelector("tr[data-loading-track]"), null);
     assert.equal(requests.length, requestsBeforeJump);
-    // That frame landed far past the rendered rows: it mounts the screen under it, without the costly controls.
+    // No canvas here, so there are no stand-in rows: the table builds its own rows at any speed.
+    assert.equal(document.querySelectorAll(".kd-table-standins canvas").length, 0);
     const landed = rows();
-    assert.ok(landed >= 19 && landed <= 60, `a jump renders the screen under it, not five (${landed})`);
-    assert.equal(ratings(), 0, "rows mounted mid-flight are text only");
-    const coversAtLanding = coverQueries.length;
-    // Once the scroll rests the window widens to both sides and the rows are completed.
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
-    await flush();
-    const rested = rows();
-    assert.ok(rested >= 5 * 19, `the resting window is two screens either side (${rested})`);
-    assert.equal(ratings(), rested, "every row is complete at rest");
-    assert.ok(coverQueries.length > coversAtLanding, "covers are requested once the rows rest");
-    // A slow scroll keeps complete rows, and the rows that stay in the window keep their nodes.
+    assert.ok(landed >= 5 * 19, `two screens either side of the viewport (${landed})`);
+    assert.equal(ratings(), landed, "every row is complete");
+    // The rows that stay in the window while it moves keep their nodes: only entering rows are rendered.
     const kept = document.querySelector('tr[data-kd-track-id="5001"]')!;
     const keptRating = kept.querySelector(".kd-table-rating");
     for (let step = 1; step <= 24; step += 1) {
       box.scrollTop = 180_000 + step * 30;
       box.dispatchEvent(new Event("scroll"));
       frame(16);
-      assert.equal(ratings(), rows(), "rows entering during a slow scroll are complete");
     }
-    assert.ok(document.querySelector('tr[data-kd-track-id="5020"]'));
+    assert.ok(document.querySelector('tr[data-kd-track-id="5060"]'), "the window followed the scroll");
     assert.equal(document.querySelector('tr[data-kd-track-id="5001"]'), kept);
     assert.equal(kept.querySelector(".kd-table-rating"), keptRating);
-    // A flick mounts the rows ahead of it text only and completes them when it slows down.
-    for (let step = 1; step <= 12; step += 1) {
-      box.scrollTop = 180_720 + step * 110;
-      box.dispatchEvent(new Event("scroll"));
-      frame(16);
-    }
-    assert.ok(ratings() < rows(), "rows entering during a flick are text only");
-    assert.ok(document.querySelector('tr[data-kd-track-id="5140"]'), "three screens are rendered ahead of a flick");
+    assert.equal(ratings(), rows());
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
     await flush();
-    assert.equal(ratings(), rows());
     await act(async () => useLibraryStore.getState().select(1));
     await act(async () => useLibraryStore.getState().select(10000, "range"));
     assert.equal(useLibraryStore.getState().selectedIds.length, 10000);

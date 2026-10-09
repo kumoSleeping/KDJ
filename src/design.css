@@ -7862,6 +7862,23 @@ button.kd-camelot-grid-key { cursor: pointer; }
   z-index: 5;
   pointer-events: none;
 }
+/* Stand-in rows of the track table (src/lib/libraryStandIns.ts): canvases laid over the rows the
+   table has not built, scrolling with it. They never take the pointer. */
+.kd-overlay-scroll-host > .kd-scroll { position: relative; }
+.kd-table-standins {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.kd-table-standins > canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
 .kd-scroll-handle {
   position: absolute;
   box-sizing: border-box;
