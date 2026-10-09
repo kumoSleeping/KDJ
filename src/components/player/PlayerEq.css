@@ -1,5 +1,7 @@
-/* EQ / 播放控制 docked in the player bar: one readout row, one knob row. */
+/* EQ / 播放控制 docked in the player bar: knobs on the transport's row, readouts beneath. */
+.kd-app .kd-player { --kd-player-eq-w: clamp(236px, 19vw, 268px); }
 .kd-player-eq {
+  position: relative;
   width: var(--kd-player-eq-w, 100%);
   min-width: 0;
   align-self: center;
@@ -7,58 +9,15 @@
 .kd-player-eq .kd-manager-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
+  gap: 5px;
   padding: 0;
   background: transparent;
 }
-.kd-player-eq .kd-manager-control-head {
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, .7fr) minmax(0, 1.5fr);
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-}
-.kd-player-eq .kd-manager-control-readout {
-  width: 100%;
-  height: 34px;
-  min-width: 0;
-  justify-self: stretch;
-  grid-template-columns: minmax(0, 1fr);
-  padding: 2px 6px;
-  overflow: hidden;
-}
-.kd-player-eq .kd-manager-control-readout[data-kind="key"] {
-  grid-template-columns: minmax(0, 1fr) 20px;
-  column-gap: 6px;
-}
-.kd-player-eq .kd-manager-control-readout[data-warn="true"] > strong { color: var(--kd-warn); }
-.kd-player-eq .kd-manager-key-nudge > button { height: 15px; }
-.kd-player-eq .kd-manager-control-readout > strong {
-  max-width: 100%;
-  overflow: hidden;
-  font-size: 17px;
-  line-height: 1.1;
-  text-overflow: ellipsis;
-}
-.kd-player-eq .kd-manager-control-label { gap: 4px; min-width: 0; }
-.kd-player-eq .kd-manager-control-label > span { font-size: 9px; }
-.kd-player-eq .kd-manager-control-label > small { font-size: 8px; }
-.kd-player-eq .kd-manager-header-tempo {
-  grid-column: auto;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 18px 16px;
-  gap: 0;
-  height: 34px;
-  padding: 0 6px;
-}
-.kd-player-eq .kd-manager-tempo-axis { top: 0; left: 6px; right: 6px; height: 18px; }
-.kd-player-eq .kd-manager-header-tempo > input[type="range"] { height: 18px; }
-.kd-player-eq .kd-manager-header-tempo > button { font-size: 9px; letter-spacing: 0; }
-.kd-player-eq .kd-manager-mixer-layout { min-width: 0; min-height: 0; }
 .kd-player-eq .kd-manager-knob-stack {
+  display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  grid-template-rows: auto;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   min-height: 0;
   padding: 0;
   background: transparent;
@@ -71,34 +30,155 @@
   width: 100%;
   min-width: 0;
   min-height: 0;
-  gap: 0;
+  gap: 1px;
 }
 .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg {
   flex: none;
-  width: 30px;
+  width: 28px;
   max-width: 100%;
-  min-width: 0;
-  height: 30px;
-  min-height: 0;
+  height: 28px;
 }
 .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b {
-  display: flex;
-  flex: 0 0 13px;
-  flex-wrap: nowrap;
-  align-items: baseline;
-  justify-content: center;
+  display: block;
   width: 100%;
-  max-width: 100%;
-  min-width: 0;
   overflow: hidden;
   font-size: 9px;
-  line-height: 13px;
-  letter-spacing: 0;
-  white-space: nowrap;
+  line-height: 12px;
+  letter-spacing: 0.04em;
   text-align: center;
+  white-space: nowrap;
 }
-.kd-manager-gain-loudness { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.kd-manager-gain-loudness .kd-loudness-number { font-size: inherit; line-height: inherit; }
+.kd-player-eq .kd-dj-arcknob-dot { fill: var(--kd-knob-needle, var(--kd-text-body)); }
+
+/* Readouts: a key stepper, the tempo-adjusted BPM, and the tempo that adjusts it. */
+.kd-eq-readouts {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+  min-width: 0;
+  height: 34px;
+}
+.kd-eq-key {
+  display: inline-grid;
+  grid-template-columns: 22px auto 22px;
+  align-items: center;
+}
+.kd-eq-step {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kd-text-body);
+  font: 700 15px/1 var(--kd-font);
+  cursor: pointer;
+}
+.kd-eq-step:hover:not(:disabled) { color: var(--kd-text); background: var(--kd-hover); }
+.kd-eq-step:focus-visible { outline: 1px solid var(--kd-theme); outline-offset: -1px; }
+.kd-eq-step:disabled { color: var(--kd-faint); cursor: default; }
+.kd-eq-value {
+  display: grid;
+  grid-template-rows: 11px auto;
+  align-content: center;
+  justify-items: start;
+  min-width: 0;
+}
+.kd-eq-key > .kd-eq-value { justify-items: center; min-width: 2.5rem; }
+.kd-eq-value > small {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  color: var(--kd-muted);
+  font: 700 9px/11px var(--kd-font);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+.kd-eq-value > small > i { color: var(--kd-theme); font-style: normal; letter-spacing: 0; }
+.kd-eq-value > strong {
+  color: var(--kd-text);
+  font: 800 16px/1.15 var(--kd-font);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.kd-eq-key .kd-eq-value > strong { color: color-mix(in oklab, var(--kd-key-color, var(--kd-text)) 78%, #fff); }
+:root[data-theme="light"] .kd-eq-key .kd-eq-value > strong { color: color-mix(in oklab, var(--kd-key-color, var(--kd-text)) 88%, #111); }
+.kd-eq-value[data-warn="true"] > strong { color: var(--kd-warn); }
+.kd-eq-tempo {
+  --kd-eq-tempo-line: color-mix(in srgb, var(--kd-muted) 34%, transparent);
+  --kd-eq-tempo-thumb: color-mix(in srgb, var(--kd-text-body) 60%, var(--kd-panel));
+  display: grid;
+  grid-template-rows: 18px 11px;
+  align-content: center;
+  min-width: 0;
+}
+.kd-eq-tempo > input[type="range"] {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  height: 18px;
+  margin: 0;
+  /* One hairline with a notch at the original tempo. */
+  background:
+    linear-gradient(var(--kd-eq-tempo-line), var(--kd-eq-tempo-line)) center / 1px 9px no-repeat,
+    linear-gradient(var(--kd-eq-tempo-line), var(--kd-eq-tempo-line)) center / 100% 1px no-repeat;
+  cursor: ew-resize;
+}
+.kd-eq-tempo > input[type="range"]::-webkit-slider-runnable-track { height: 1px; background: transparent; }
+.kd-eq-tempo > input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 5px;
+  height: 14px;
+  margin-top: -6.5px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--kd-eq-tempo-thumb);
+}
+.kd-eq-tempo > input[type="range"]:disabled { cursor: default; opacity: 0.5; }
+.kd-eq-tempo-offset {
+  justify-self: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  font: 700 9px/11px var(--kd-font);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+/* At the original tempo the offset says nothing; it keeps its line so the strip does not shift. */
+.kd-eq-tempo-offset:not([data-moved]) { visibility: hidden; }
+.kd-eq-tempo-offset[data-moved] { color: var(--kd-theme); }
+
+/* The handle on the block's top edge that 曲目信息 rises from. */
+.kd-player-info-handle {
+  position: absolute;
+  z-index: 2;
+  top: calc(-0.4rem - 7px);
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  translate: -50% 0;
+  cursor: pointer;
+}
+.kd-player-info-handle > i {
+  width: 26px;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kd-muted) 45%, transparent);
+  transition: width 0.18s ease, background 0.18s ease;
+}
+.kd-player-info-handle:hover > i,
+.kd-player-info-handle:focus-visible > i { width: 34px; background: var(--kd-text-body); }
+.kd-player-info-handle[aria-expanded="true"] > i { background: var(--kd-theme); }
+.kd-player-info-handle:focus-visible { outline: none; }
 
 /* Default themes: the strip is drawn with the bar's own line weight and colours rather than the
    mixer panel's raised white knobs, so it reads as part of the bar. Theme packs draw their own. */
@@ -107,29 +187,25 @@
   --kd-knob-cut: var(--kd-theme);
 }
 :root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-track {
-  stroke: color-mix(in srgb, var(--kd-muted) 34%, transparent);
-  stroke-width: 2.4;
+  stroke: color-mix(in srgb, var(--kd-muted) 30%, transparent);
+  stroke-width: 2.6;
   stroke-linecap: round;
 }
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-value { stroke-width: 2.4; }
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-body {
-  r: 12.5px;
-  fill: transparent;
-  stroke: none;
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-value { stroke-width: 2.6; }
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-body { fill: transparent; stroke: none; }
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-dot {
+  fill: var(--kd-text-body);
+  stroke: var(--kd-panel);
+  stroke-width: 2;
 }
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-needle {
-  stroke: var(--kd-text-body);
-  stroke-width: 2.4;
-}
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:hover .kd-dj-arcknob-needle,
-:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:focus-visible .kd-dj-arcknob-needle { stroke: var(--kd-text); }
-:root:not([data-theme-pack]) .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b,
-:root:not([data-theme-pack]) .kd-player-eq .kd-manager-control-label > span,
-:root:not([data-theme-pack]) .kd-player-eq .kd-manager-control-label > small {
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:hover .kd-dj-arcknob-dot,
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:focus-visible .kd-dj-arcknob-dot { fill: var(--kd-text); }
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-boost="true"] .kd-dj-arcknob-dot,
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-cut="true"] .kd-dj-arcknob-dot { fill: var(--kd-theme); }
+:root:not([data-theme-pack]) .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b {
+  color: var(--kd-muted);
   font-family: var(--kd-font);
   font-weight: 700;
-  letter-spacing: 0.04em;
 }
-:root:not([data-theme-pack]) .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b { color: var(--kd-muted); }
 :root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-boost="true"] > b,
 :root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-cut="true"] > b { color: var(--kd-theme); }

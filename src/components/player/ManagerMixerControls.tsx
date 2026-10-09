@@ -41,6 +41,7 @@ export function ArcKnob({
   center,
   resetLabel = "双击回中",
   readout,
+  dial = false,
 }: {
   label: string;
   readout?: ReactNode;
@@ -57,6 +58,8 @@ export function ArcKnob({
   /** Optional neutral value drawn at twelve o'clock, even with asymmetric limits. */
   center?: number;
   resetLabel?: string;
+  /** Draw the pointer as a dot riding the ring instead of a needle from the centre. */
+  dial?: boolean;
 }) {
   const shown = knobValue(value, min, max, snapToCenter, center);
   const neutral = center === undefined ? 0 : clamp(center, min, max);
@@ -192,8 +195,10 @@ export function ArcKnob({
             strokeDasharray={`${arcLength.toFixed(2)} ${circumference.toFixed(2)}`} transform={`rotate(${arcRotate.toFixed(2)} 24 24)`} />
         ) : null}
         <circle className="kd-dj-arcknob-body" cx="24" cy="24" r="12.5" />
-        <line className="kd-dj-arcknob-needle" x1="24" y1="24" x2="24" y2="14"
-          transform={`rotate(${needle.toFixed(2)} 24 24)`} />
+        {dial
+          ? <circle className="kd-dj-arcknob-dot" cx="24" cy="5" r="3.4" transform={`rotate(${needle.toFixed(2)} 24 24)`} />
+          : <line className="kd-dj-arcknob-needle" x1="24" y1="24" x2="24" y2="14"
+            transform={`rotate(${needle.toFixed(2)} 24 24)`} />}
       </svg>
       <b>{readout !== undefined ? readout : showValue ? text : label}</b>
     </div>

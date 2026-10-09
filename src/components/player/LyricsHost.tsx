@@ -22,6 +22,7 @@ import {
   publishedLyricsEntry,
   useLyricsStore,
 } from "../../stores/lyricsStore";
+import { useSidePanels } from "../../lib/sidePanels";
 import type { Track } from "../../types";
 
 export function LyricsHost({
@@ -81,10 +82,17 @@ export function LyricsHost({
 
   // Selection and opening a panel are not playback intents. Only an active transport may
   // start automatic online matching; the store deduplicates requests without blocking audio.
+  const lyricsPanelOpen = useSidePanels((state) => state.lyrics);
+  // Only a surface that shows lyrics may search for them online: the lyrics panel or the
+  // desktop lyrics. Otherwise every song played cost a lookup on the lyric providers and a
+  // cache write for words nobody was reading; the disk cache alone still answers the
+  // "has lyrics" fact in 曲目信息.
+  const lyricsWanted = lyricsPanelOpen || (desktopEnabled && allowDesktop);
   useEffect(() => {
-    if (!playing) return;
-    void ensureLyrics(current);
-  }, [playing, prefsEpoch, current?.id]);
+    if (!playing || !current) return;
+    if (lyricsWanted) void ensureLyrics(current);
+    else void useLyricsStore.getState().ensure(current, { cacheOnly: true });
+  }, [playing, prefsEpoch, current?.id, lyricsWanted]);
 
   // 桌面歌词是另一张 WebView。在线请求只由主窗口拥有，结果通过 Tauri 事件推送；
   // 这样悬浮窗挂载、StrictMode 重挂载都不会再补打一条 /lyrics。

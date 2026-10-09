@@ -18,9 +18,9 @@ import { channelFaderGain, eqBandDb } from "../../lib/performanceCues";
 import { usePlayingDeck } from "./usePlayingDeck";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useAppStore } from "../../stores/appStore";
-import { EnergyMeter } from "../library/TrackTable";
 import { streamAnalysisSnapshot, subscribeStreamAnalysis, trackWithStreamAnalysis } from "../../lib/streamAnalysis";
 import { ArcKnob } from "./ManagerMixerControls";
+import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
 import "./PlayerEq.css";
 
 function clamp(value: number, min: number, max: number): number {
@@ -38,7 +38,8 @@ function runtimeMixer(values: ManagerMixerValues) {
   };
 }
 
-function HeaderTempoControl({
+/** Tempo as a short slider beside the BPM it changes; the offset is the reset control. */
+function TempoControl({
   rate,
   range,
   onRate,
@@ -51,19 +52,11 @@ function HeaderTempoControl({
 }) {
   const minRate = Math.max(0.5, 1 - range / 100);
   const maxRate = Math.min(2, 1 + range / 100);
-  const tempoPercentage = (rate - 1) * 100;
-
+  const percent = (rate - 1) * 100;
+  const moved = Math.abs(rate - 1) >= 0.0005;
+  const offset = `${percent >= 0 ? "+" : ""}${percent.toFixed(1)}%`;
   return (
-    <div className="kd-manager-header-tempo">
-      <span className="kd-manager-tempo-axis" aria-hidden="true">
-        {Array.from({ length: 11 }, (_, index) => (
-          <i
-            key={index}
-            data-center={index === 5 ? "true" : undefined}
-            style={{ left: `${index * 10}%` }}
-          />
-        ))}
-      </span>
+    <div className="kd-eq-tempo">
       <input
         type="range"
         min={minRate}
@@ -71,19 +64,21 @@ function HeaderTempoControl({
         step={0.001}
         value={clamp(rate, minRate, maxRate)}
         disabled={disabled}
-        aria-label={`Tempo ${tempoPercentage >= 0 ? "+" : ""}${tempoPercentage.toFixed(1)}%`}
+        aria-label={`Tempo ${offset}`}
+        title={`Tempo ${offset}`}
+        style={{ "--kd-eq-tempo-at": `${((clamp(rate, minRate, maxRate) - minRate) / (maxRate - minRate)) * 100}%` } as CSSProperties}
         onChange={(event) => onRate(Number(event.currentTarget.value))}
         onDoubleClick={() => onRate(1)}
       />
       <button
         type="button"
+        className="kd-eq-tempo-offset"
         aria-label="恢复原始 Tempo"
-        title="点击恢复原始 Tempo"
-        disabled={disabled || Math.abs(rate - 1) < 0.0005}
+        title="恢复原始 Tempo"
+        data-moved={moved || undefined}
+        disabled={disabled || !moved}
         onClick={() => onRate(1)}
-      >
-        TEMPO {tempoPercentage >= 0 ? "+" : ""}{tempoPercentage.toFixed(1)}%
-      </button>
+      >{offset}</button>
     </div>
   );
 }
@@ -209,61 +204,42 @@ function NowPlayingControls({
   const currentCamelot = keyTextToCamelot(currentKey);
   const baseBpm = analyzedTrack.bpm && Number.isFinite(analyzedTrack.bpm) ? analyzedTrack.bpm : null;
   const confidence = analyzedTrack.bpm_confidence;
-  const hasLoudness = analyzedTrack.rms_db != null || analyzedTrack.energy != null;
   const analysisWarning = analyzedTrack.analysis_error || analysis.error || analysis.result?.errors.join("；") || "";
   const effectiveBpm = baseBpm ? baseBpm * tempoDraft : null;
 
   return (
     <div className="kd-manager-control" data-side={side === null ? undefined : side === 0 ? "a" : "b"} aria-busy={!ready}>
       {/* Controls sit on the transport's row, readouts on the waveform's row below. */}
-      <div className="kd-manager-mixer-layout">
-        <div className="kd-manager-knob-stack">
-          <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
-            format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }}
-            readout={hasLoudness ? <span className="kd-manager-gain-loudness" aria-label="原曲相对响度" title="原曲相对响度（不含增益、EQ 与音量调整）">
-              <EnergyMeter value={analyzedTrack.energy} rmsDb={analyzedTrack.rms_db} peakDb={analyzedTrack.peak_db} />
-            </span> : null} />
-          <ArcKnob size="xs" label="FILTER" value={mixer.filter} onChange={(filter) => setMixer({ filter })} onReset={() => setMixer({ filter: 0 })} />
-          <ArcKnob size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
-          <ArcKnob size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
-          <ArcKnob size="xs" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
-        </div>
+      <div className="kd-manager-knob-stack">
+        <ArcKnob dial size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
+          format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }} />
+        <ArcKnob dial size="xs" label="FILTER" value={mixer.filter} onChange={(filter) => setMixer({ filter })} onReset={() => setMixer({ filter: 0 })} />
+        <ArcKnob dial size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
+        <ArcKnob dial size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
+        <ArcKnob dial size="xs" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
       </div>
 
-      <div className="kd-manager-control-head">
-        <div className="kd-manager-control-readout" data-kind="key">
-          <span className="kd-manager-control-label">
-            <span>KEY</span>
-            <small>{pitchDraft === 0 ? "ORG" : `${pitchDraft > 0 ? "+" : ""}${pitchDraft} st`}</small>
+      <div className="kd-eq-readouts">
+        <div className="kd-eq-key" role="group" aria-label="音调">
+          <button type="button" className="kd-eq-step" aria-label="降低一个半音" title="降低一个半音"
+            disabled={!ready || pitchDraft <= -12} onClick={() => setPitch(pitchDraft - 1)}>−</button>
+          <span className="kd-eq-value" title={pitchDraft === 0 ? undefined : `${pitchDraft > 0 ? "+" : ""}${pitchDraft} 个半音`}>
+            <small>KEY{pitchDraft === 0 ? null : <i>{pitchDraft > 0 ? "+" : ""}{pitchDraft}</i>}</small>
+            <strong
+              style={currentCamelot
+                ? ({ "--kd-key-color": camelotColor(currentCamelot) } as CSSProperties)
+                : undefined}
+            >{currentKey || "—"}</strong>
           </span>
-          <strong
-            style={currentCamelot
-              ? ({ "--kd-key-color": camelotColor(currentCamelot) } as CSSProperties)
-              : undefined}
-          >{currentKey || "—"}</strong>
-          <span className="kd-manager-key-nudge" role="group" aria-label="音调半音调整">
-            <button
-              type="button"
-              aria-label="升高一个半音"
-              disabled={!ready || pitchDraft >= 12}
-              onClick={() => setPitch(pitchDraft + 1)}
-            >+</button>
-            <button
-              type="button"
-              aria-label="降低一个半音"
-              disabled={!ready || pitchDraft <= -12}
-              onClick={() => setPitch(pitchDraft - 1)}
-            >−</button>
-          </span>
+          <button type="button" className="kd-eq-step" aria-label="升高一个半音" title="升高一个半音"
+            disabled={!ready || pitchDraft >= 12} onClick={() => setPitch(pitchDraft + 1)}>+</button>
         </div>
-        <div className="kd-manager-control-readout" data-kind="bpm" data-warn={analysisWarning ? "true" : undefined}
+        <span className="kd-eq-value" data-kind="bpm" data-warn={analysisWarning ? "true" : undefined}
           title={analysisWarning || (confidence != null ? `节拍置信度 ${Math.round(confidence * 100)}%` : undefined)}>
-          <span className="kd-manager-control-label">
-            <span>BPM</span>
-          </span>
+          <small>BPM</small>
           <strong>{effectiveBpm ? effectiveBpm.toFixed(1) : "—"}</strong>
-        </div>
-        <HeaderTempoControl rate={tempoDraft} range={tempoRange} onRate={setRate} disabled={!ready} />
+        </span>
+        <TempoControl rate={tempoDraft} range={tempoRange} onRate={setRate} disabled={!ready} />
       </div>
     </div>
   );
@@ -273,7 +249,12 @@ function NowPlayingControls({
 export function PlayerEq({ onError }: { onError(message: string): void }) {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const keyNotation = useAppStore(state => state.settings?.key_notation ?? "camelot");
+  const infoUp = useNowPlayingInfo(nowPlayingInfoVisible);
   return <div className="kd-player-eq" role="group" aria-label="EQ / 播放控制">
+    {/* 曲目信息 rises from this block's top edge; the handle on that edge raises and lowers it. */}
+    {track && <button type="button" className="kd-player-info-handle" aria-expanded={infoUp}
+      aria-label={infoUp ? "收起曲目信息" : "曲目信息"} title={infoUp ? "收起曲目信息" : "曲目信息"}
+      onClick={() => useNowPlayingInfo.getState().toggle()}><i aria-hidden="true" /></button>}
     {track && <NowPlayingControls track={track} keyNotation={keyNotation} onError={onError} />}
   </div>;
 }

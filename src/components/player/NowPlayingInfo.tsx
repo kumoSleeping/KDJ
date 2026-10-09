@@ -11,6 +11,7 @@ import { useLyricsStore } from "../../stores/lyricsStore";
 import { Panel } from "../common";
 import { TrackDetail, type TrackMetadataParts } from "../library/TrackDetail";
 import { StreamTrackDetail } from "./StreamTrackDetail";
+import type { Track } from "../../types";
 import "./NowPlayingInfo.css";
 
 const META_KEY = "kd-now-playing-meta-open";
@@ -40,12 +41,36 @@ export function NowPlayingInfoHost({ trackId, playing }: { trackId: number | nul
     const timer = window.setTimeout(() => setMounted(false), LEAVE_MS);
     return () => window.clearTimeout(timer);
   }, [visible]);
-  return mounted ? <NowPlayingInfo leaving={!visible} /> : null;
+  // The panel shows one song for as long as it is up. When another song starts it sinks
+  // with the old one and rises again with the new one, instead of changing under the eye.
+  const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  const [shown, setShown] = useState(playingTrack);
+  const swapping = mounted && visible && !!shown && !!playingTrack && shown.id !== playingTrack.id;
+  useEffect(() => {
+    if (!swapping) { setShown(playingTrack); return; }
+    const timer = window.setTimeout(() => setShown(playingTrack), LEAVE_MS);
+    return () => window.clearTimeout(timer);
+  }, [playingTrack, swapping]);
+  useEffect(() => {
+    // The right column and the toast make room for the panel (see --kd-info-lift).
+    if (!mounted || !visible) document.documentElement.style.removeProperty("--kd-info-lift");
+    return () => { document.documentElement.style.removeProperty("--kd-info-lift"); };
+  }, [mounted, visible]);
+  return mounted && shown ? <NowPlayingInfo key={shown.id} track={shown} leaving={!visible || swapping} /> : null;
 }
 
 /** 曲目信息 and Meta of the loaded deck, risen from the player bar it belongs to. */
-function NowPlayingInfo({ leaving }: { leaving: boolean }) {
-  const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+function NowPlayingInfo({ track, leaving }: { track: Track; leaving: boolean }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel || leaving) return;
+    const publish = () => document.documentElement.style.setProperty("--kd-info-lift", `${Math.round(panel.offsetHeight)}px`);
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, [leaving]);
   const pinned = useNowPlayingInfo(state => state.pinned);
   const peek = useNowPlayingInfo(state => state.peek);
   const timed = useNowPlayingInfo(state => state.peek > 0 && !state.open && !state.pinned);
@@ -95,7 +120,6 @@ function NowPlayingInfo({ leaving }: { leaving: boolean }) {
     window.addEventListener("keydown", dismiss);
     return () => window.removeEventListener("keydown", dismiss);
   }, []);
-  if (!track) return null;
   const panel = (information: ReactNode, meta?: TrackMetadataParts) => {
     const expanded = !!meta && (metaOpen || meta.editing);
     const matching = !lyricsReady && !!lyricsEntry.inflight;
@@ -132,7 +156,7 @@ function NowPlayingInfo({ leaving }: { leaving: boolean }) {
     </Panel>;
   };
   return <div className="kd-player-info-clip" data-leaving={leaving || undefined}>
-    <div className="kd-player-info kd-scroll" role="dialog" aria-label={video ? "视频信息" : "曲目信息"}
+    <div ref={panelRef} className="kd-player-info kd-scroll" role="dialog" aria-label={video ? "视频信息" : "曲目信息"}
       data-held={held || undefined}
       onPointerEnter={() => setHeld(true)} onPointerLeave={() => setHeld(false)}
       onFocus={() => setHeld(true)}
