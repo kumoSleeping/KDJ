@@ -46,7 +46,6 @@ export function RightDock({ apps, order, onOccupiedChange }: {
   const ids = apps.map(app => app.id).join("|");
   useLayoutEffect(() => {
     const before = last.current;
-    last.current = { apps: new Map(apps.map(app => [app.id, app])), frontId };
     // Only the app that was in front leaves visibly; a covered one is simply gone.
     const gone = before.frontId !== null && !apps.some(app => app.id === before.frontId)
       ? before.apps.get(before.frontId) : undefined;
@@ -64,18 +63,29 @@ export function RightDock({ apps, order, onOccupiedChange }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ids]);
   useEffect(() => () => { for (const timer of timers.current) window.clearTimeout(timer); }, []);
-  // An exiting entry keeps the last node it had; an open one always renders the current node.
-  last.current.apps = new Map(apps.map(app => [app.id, app]));
+  // What was on screen after each commit, read by the effect above on the commit an app goes:
+  // its last node, and which app was in front then (raising changes the front without changing
+  // the set). Recording it while rendering would already have dropped the app that just closed.
+  useLayoutEffect(() => { last.current = { apps: new Map(apps.map(app => [app.id, app])), frontId }; });
   const occupied = apps.length + exiting.length > 0;
   useEffect(() => onOccupiedChange?.(occupied), [occupied, onOccupiedChange]);
+  // One keyed list: an app that starts to leave stays the same instance, so it slides out as
+  // it was (its scroll position, its picture) instead of being mounted afresh for the exit.
+  // The effect above lists it one commit late; on the render that drops it, take it from the
+  // last commit directly, or it would be unmounted in between.
+  const closing = last.current.frontId !== null && !apps.some(app => app.id === last.current.frontId)
+    ? last.current.apps.get(last.current.frontId) : undefined;
+  const leaving = [...exiting, ...(closing && !exiting.some(app => app.id === closing.id) ? [closing] : [])]
+    .filter(app => !apps.some(open => open.id === app.id));
   return <div className="kd-dock">
-    {sorted.map(app => <section key={app.id} className="kd-dock-app" aria-label={app.label}
-      data-app={app.id} data-covered={app.id === frontId ? undefined : "true"} inert={app.id !== frontId}>
-      {app.node}
-    </section>)}
-    {exiting.map(app => <section key={app.id} className="kd-dock-app" aria-hidden="true" data-app={app.id}
-      data-leaving="true" inert>
-      {app.node}
-    </section>)}
+    {[...sorted, ...leaving].map(app => {
+      const open = sorted.includes(app);
+      return <section key={app.id} className="kd-dock-app" aria-label={open ? app.label : undefined}
+        aria-hidden={open ? undefined : "true"} data-app={app.id}
+        data-covered={open && app.id !== frontId ? "true" : undefined} data-leaving={open ? undefined : "true"}
+        inert={!open || app.id !== frontId}>
+        {app.node}
+      </section>;
+    })}
   </div>;
 }
