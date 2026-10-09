@@ -244,3 +244,18 @@
   background: transparent;
   padding: 0;
 }
+/* 曲目信息 rises out of the bar: the bar's own face and frame, squared like every window here. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-info {
+  border-color: var(--s98-frame);
+  border-radius: 0;
+  background: var(--s98-face);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 3px var(--s98-face-hi);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-info .kd-info-panel { background: transparent; }
+/* Its body shows the bar's face rather than content paper, and it reaches over the bar's
+   top highlight so the two meet without a seam. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-info :is(.kd-panel, .kd-panel-body) {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-info-clip { bottom: calc(100% - 3px); }

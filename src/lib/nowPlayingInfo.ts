@@ -1,0 +1,51 @@
+import { create } from "zustand";
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
+
+const PINNED_KEY = "kd-now-playing-pinned";
+/** How long the panel stays up after a song starts, unless it is held or pinned. */
+export const NOW_PLAYING_PEEK_MS = 5_000;
+
+/**
+ * The 曲目信息 panel that rises out of the player bar. It is up while any of three things holds
+ * it: the listener opened it from the now-playing card, pinned it, or a song has just started
+ * (a timed peek).
+ */
+export const useNowPlayingInfo = create<{
+  open: boolean;
+  pinned: boolean;
+  /** Counts peeks; a new value restarts the countdown. 0 = not peeking. */
+  peek: number;
+  /** The now-playing card: bring the panel up and keep it, or dismiss it whatever holds it. */
+  toggle(): void;
+  close(): void;
+  setPinned(pinned: boolean): void;
+  startPeek(): void;
+  endPeek(): void;
+}>((set, get) => ({
+  open: false,
+  pinned: readLocalStorage(PINNED_KEY) === "true",
+  peek: 0,
+  toggle() {
+    const { open, pinned } = get();
+    if (open || pinned) return get().close();
+    // During a peek the card keeps the panel instead of dismissing what was about to leave.
+    set({ open: true, peek: 0 });
+  },
+  close() {
+    if (get().pinned) writeLocalStorageNow(PINNED_KEY, "false");
+    set({ open: false, pinned: false, peek: 0 });
+  },
+  setPinned(pinned) {
+    writeLocalStorageNow(PINNED_KEY, String(pinned));
+    // Unpinning leaves the panel up; it is dismissed from the card or with Escape.
+    set(pinned ? { pinned, peek: 0 } : { pinned, open: true });
+  },
+  startPeek() {
+    const { open, pinned, peek } = get();
+    if (!open && !pinned) set({ peek: Math.abs(peek) + 1 });
+  },
+  endPeek: () => set({ peek: 0 }),
+}));
+
+export const nowPlayingInfoVisible = (state: { open: boolean; pinned: boolean; peek: number }) =>
+  state.open || state.pinned || state.peek > 0;

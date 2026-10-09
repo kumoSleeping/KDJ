@@ -1545,11 +1545,16 @@ export function Workspace() {
       setSheet(null);
       return;
     }
-    useSidePanels.getState().setLyrics(false);
-    useSidePanels.getState().setDownloads(false);
+    // Closing a temporary overlay (settings, a preview) returns to the lyrics and the task list
+    // underneath it. They close with the column itself, or with the drawer that is their only
+    // presentation on a phone.
+    if (layout === "narrow" || !(realOverlayAside || showSettings)) {
+      useSidePanels.getState().setLyrics(false);
+      useSidePanels.getState().setDownloads(false);
+    }
     setSheet(null);
     useAppStore.getState().dismissOverlay();
-  }, [showSearchTips]);
+  }, [showSearchTips, layout, realOverlayAside, showSettings]);
 
   const closeAsideForUser = useCallback(() => {
     if (useAppStore.getState().showComposition) {

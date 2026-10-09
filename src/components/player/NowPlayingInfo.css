@@ -1,19 +1,61 @@
-/* 曲目信息 opens upwards from the now-playing card instead of taking a column. */
-.kd-player-info {
+/* 曲目信息 rises out of the player bar's top edge and sinks back into it. It is the bar's own
+   face: same background and top line, no shadow, no gap and no seam where the two meet. */
+.kd-player-info-clip {
   position: absolute;
   z-index: 5;
-  bottom: calc(100% + 0.5rem);
+  /* The bar's top edge, flush with its left side. The panel emerges from behind this box's
+     bottom, so nothing of it is ever drawn over the bar itself. */
+  bottom: 100%;
   left: 0;
-  width: min(26rem, calc(100vw - 1.7rem));
+  width: min(27rem, 100%);
+  /* Room for the soft edge the bar casts on the content above it. */
+  padding-top: 0.65rem;
+  overflow: hidden;
+  pointer-events: none;
+}
+.kd-player-info {
+  position: relative;
   max-height: min(34rem, calc(100dvh - var(--kd-player-h) - 9rem));
   overflow: auto;
   overscroll-behavior: contain;
-  border: 1px solid var(--kd-line);
-  border-radius: 6px;
+  border: solid var(--kd-line);
+  border-width: 1px 1px 0 0;
+  border-top-right-radius: 10px;
   background: var(--kd-panel);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
   cursor: auto;
+  pointer-events: auto;
+  animation: kd-player-info-rise 460ms cubic-bezier(0.22, 0.9, 0.26, 1) both;
 }
+.kd-player-info-clip[data-leaving] > .kd-player-info {
+  animation: kd-player-info-sink 360ms cubic-bezier(0.55, 0, 0.8, 0.35) both;
+}
+@keyframes kd-player-info-rise { from { transform: translateY(calc(100% + 0.65rem)); } }
+@keyframes kd-player-info-sink { to { transform: translateY(calc(100% + 0.65rem)); } }
+@media (prefers-reduced-motion: reduce) {
+  .kd-player-info, .kd-player-info-clip[data-leaving] > .kd-player-info { animation-duration: 1ms; }
+}
+/* The countdown of a timed appearance: a ring that empties, paused while the panel is in use. */
+.kd-info-countdown {
+  width: 14px;
+  height: 14px;
+  margin-right: 2px;
+  transform: rotate(-90deg);
+  pointer-events: none;
+}
+.kd-info-countdown > circle {
+  fill: none;
+  stroke: color-mix(in srgb, var(--kd-muted) 30%, transparent);
+  stroke-width: 1.6;
+}
+.kd-info-countdown > circle + circle {
+  stroke: var(--kd-muted);
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  animation: kd-info-countdown var(--kd-info-peek, 5s) linear both;
+}
+.kd-player-info[data-held] .kd-info-countdown > circle + circle { animation-play-state: paused; }
+@keyframes kd-info-countdown { to { stroke-dashoffset: 1; } }
+.kd-info-panel .kd-manager-panel-action[aria-pressed="true"] { color: var(--kd-theme); }
 .kd-player-info > .kd-track-detail { gap: 0; }
 .kd-player-info .kd-info-panel {
   position: relative;
@@ -29,7 +71,7 @@
 .kd-info-panel > .kd-panel-float-tools > :not(.kd-panel-head-label) { pointer-events: auto; }
 .kd-info-panel .kd-manager-panel-action[aria-expanded="true"] { color: var(--kd-theme); }
 /* Keep the first summary line clear of the corner actions. */
-.kd-info-panel .kd-track-detail-summary > :first-child { padding-right: 3.25rem; }
+.kd-info-panel .kd-track-detail-summary > :first-child { padding-right: 5.75rem; }
 .kd-info-meta {
   display: flex;
   flex-direction: column;

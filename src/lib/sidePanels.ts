@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 const DOWNLOADS_KEY = "kd-side-downloads-open";
+const LYRICS_KEY = "kd-side-lyrics-open";
 
 /** The right column holds only what was asked for: the task list and the lyrics. */
 export const useSidePanels = create<{
@@ -11,10 +12,14 @@ export const useSidePanels = create<{
   setLyrics(open: boolean): void;
 }>((set) => ({
   downloads: readLocalStorage(DOWNLOADS_KEY) === "true",
-  lyrics: false,
+  // Once opened the lyrics stay until they are closed by hand, across songs and restarts.
+  lyrics: readLocalStorage(LYRICS_KEY) === "true",
   setDownloads(downloads) {
     writeLocalStorageNow(DOWNLOADS_KEY, String(downloads));
     set({ downloads });
   },
-  setLyrics: lyrics => set({ lyrics }),
+  setLyrics(lyrics) {
+    writeLocalStorageNow(LYRICS_KEY, String(lyrics));
+    set({ lyrics });
+  },
 }));

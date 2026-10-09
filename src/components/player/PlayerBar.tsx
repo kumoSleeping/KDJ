@@ -7,7 +7,6 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type CSSProperties,
 } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -182,7 +181,9 @@ import {
 } from "../../lib/playerTransitionPolicy";
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
-import { NowPlayingInfo } from "./NowPlayingInfo";
+import { NowPlayingInfoHost } from "./NowPlayingInfo";
+import { PlayerVolume } from "./PlayerVolume";
+import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { LyricsButtonMenu } from "./LyricsButtonMenu";
 import { nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
@@ -687,9 +688,9 @@ export function PlayerBar() {
   const [performanceDeckStates, setPerformanceDeckStates] = useState(
     () => playerRuntime.state().decks,
   );
-  const playerVolume = useMasterVolume((state) => state.volume);
+  // 音量值由 PlayerVolume 自己订阅；这里只留 ref，拖动音量不重渲染整条播放栏。
   const setSharedMasterVolume = useMasterVolume((state) => state.setVolume);
-  const playerVolumeRef = useRef(playerVolume);
+  const playerVolumeRef = useRef(useMasterVolume.getState().volume);
   const playerVolumeMeterRef = useRef<HTMLSpanElement | null>(null);
   /**
    * MASTER 是最终输出闸门，不能等 React effect 才同步到原生引擎。尤其是控制器把
@@ -4205,8 +4206,8 @@ export function PlayerBar() {
     writeLocalStorageSoon(PLAYER_DECK_MEMORY_KEY, JSON.stringify(memory), 1_000);
   }, [track?.id, position]);
 
-  /** 曲目信息就挂在“正在播放”卡片上方，不再占右栏。 */
-  const [infoOpen, setInfoOpen] = useState(false);
+  /** 曲目信息从播放条顶边升起（见 NowPlayingInfoHost）；这里只读它是否在场。 */
+  const infoOpen = useNowPlayingInfo(nowPlayingInfoVisible);
   const lastDeckOpenRef = useRef<{ trackId: number; at: number } | null>(null);
   const openDeck = (view: PlayerDeckView | null) => {
     const deckTrack = view?.track;
@@ -4217,7 +4218,7 @@ export function PlayerBar() {
     const last = lastDeckOpenRef.current;
     if (last && last.trackId === deckTrack.id && now - last.at < 400) return;
     lastDeckOpenRef.current = { trackId: deckTrack.id, at: now };
-    setInfoOpen((open) => !open);
+    useNowPlayingInfo.getState().toggle();
   };
 
   const dropOnDeck = async (
@@ -4627,8 +4628,8 @@ export function PlayerBar() {
           }}
           onDrop={(event) => void dropOnDeck(event, "left")}
         />
-        {infoOpen ? <NowPlayingInfo onClose={() => setInfoOpen(false)} /> : null}
       </div>
+      <NowPlayingInfoHost trackId={track?.id ?? null} playing={playing} />
 
       {/* 三颗走带键：上一首 / 播放停止 / 下一首。
           全是裸图标，没有按钮框——一条播放条上摆三个描边方块太吵，
@@ -4717,27 +4718,7 @@ export function PlayerBar() {
               <LyricsButtonMenu {...lyricsMenu} track={displayTrack ?? null} onClose={() => setLyricsMenu(null)} />
             ) : null}
           </div>
-          <label
-            className="kd-player-volume"
-            title={`音量 ${Math.round(playerVolume * 100)}%（↑↓）`}
-            data-muted={playerVolume === 0 ? "true" : undefined}
-            style={{ "--kd-volume-fill": `${playerVolume * 100}%` } as CSSProperties}
-          >
-            <span ref={playerVolumeMeterRef} className="kd-player-volume-leds" aria-hidden="true">
-              <span className="kd-player-volume-row" data-slice="previous"><i /></span>
-              <span className="kd-player-volume-row" data-slice="current"><i /></span>
-            </span>
-            <b className="kd-player-volume-thumb" aria-hidden="true" />
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={playerVolume}
-              aria-label="播放器音量"
-              onChange={(event) => setMasterVolume(Number(event.currentTarget.value))}
-            />
-          </label>
+          <PlayerVolume meterRef={playerVolumeMeterRef} />
         </div>
 
         <div className="kd-player-transport-core">
