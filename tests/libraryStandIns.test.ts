@@ -134,10 +134,16 @@ test("tiles are repainted in place when rows arrive, hidden only when the order 
   assert.deepEqual([...texts.values()].map((drawn) => drawn.length), paints);
   assert.deepEqual(shown(), before);
 
-  // A new order: what the tiles show is wrong, so those out of sight wait hidden for their turn.
-  standIns.update(frame({ data: "second batch", version: ["another order"] }));
-  assert.ok(shown().length < before.length && shown().length >= 1);
-  assert.equal(standInGap(standIns.update(frame({ data: "second batch", version: ["another order"] })), 100, 119), 0);
+  // A new order: what the tiles show is wrong. Each is painted again before it is shown, as text
+  // while the frame has time and as bars after that, so none is left blank or showing the old order.
+  loaded.delete(101);
+  standIns.takeStats();
+  covered = standIns.update(frame({ data: "second batch", version: ["another order"] }));
+  assert.equal(standInGap(covered, 100, 119 + 6 * 19), 0);
+  const repainted = standIns.takeStats();
+  assert.equal(repainted.text + repainted.bars >= before.length, true, "every tile was painted again in that frame");
+  assert.ok([...texts.values()].every((drawn) => !drawn.includes("title 101")), "nothing of the old order is left on show");
+  loaded.add(101);
   settle();
   assert.equal(shown().length, before.length);
 
