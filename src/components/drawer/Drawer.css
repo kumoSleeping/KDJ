@@ -1,7 +1,7 @@
 /* The drawer is a panel that floats over the right of the list. Its entries are icons at the
-   right end of the search row; the panel comes down from under that row and rests free of every
-   edge, the way a task bubble rises from the player bar. It is the list's own colour: its edge
-   and its shadow are what set it apart. */
+   right end of the search row; the panel slides in from the window's right edge and rests free
+   of every edge, below that row. It is the list's own colour: its edge and its shadow are what
+   set it apart. It takes no room from anything beneath it. */
 :root {
   --kd-drawer-head-h: 3.5rem;
   --kd-drawer-radius: 12px;
@@ -72,21 +72,18 @@
   line-height: 1;
 }
 
-/* —— The panel ——
-   The frame below the search row clips only what is above it, so a panel appears from behind
-   the row's lower edge and its shadow is free on the other three sides. */
+/* —— The panel —— */
 .kd-drawer-sheets {
   position: absolute;
   top: var(--kd-drawer-head-h);
   right: 0;
   bottom: 0;
   left: 0;
-  clip-path: inset(0 -1rem -4rem -4rem);
 }
 .kd-drawer {
-  --kd-drawer-room: calc(100% - 2 * var(--kd-drawer-gap));
+  --kd-drawer-room: calc(100% - var(--kd-drawer-gap));
   position: absolute;
-  top: var(--kd-drawer-gap);
+  top: 0;
   right: var(--kd-drawer-gap);
   left: var(--kd-drawer-gap);
   box-sizing: border-box;
@@ -102,8 +99,8 @@
   color: var(--kd-text);
   overflow: hidden;
   pointer-events: auto;
-  /* One move: fast out from under the row, slowing all the way, and it stops where it ends. */
-  animation: kd-drawer-down 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  /* One move: in from beyond the right edge, slowing all the way, and it stops where it ends. */
+  animation: kd-drawer-in 400ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 /* At rest the panel is an ordinary box again, not a layer kept for moving. Only then may its
    height follow what it holds (`content`); while it comes down nothing is laid out again. */
@@ -113,14 +110,25 @@
 }
 .kd-drawer[data-extent="two-thirds"] { --kd-drawer-extent: 0.66667; }
 .kd-drawer[data-extent="full"] { --kd-drawer-extent: 1; }
-.kd-drawer[data-leaving] { animation: kd-drawer-up 320ms cubic-bezier(0.55, 0, 0.8, 0.35) both; }
-@keyframes kd-drawer-down {
-  from { transform: translateY(calc(-100% - var(--kd-drawer-gap) - 8px)); }
-  to { transform: translateY(0); }
+/* `content`: two thirds while what it holds fits there, then exactly as tall as that needs
+   (--kd-drawer-fit, measured by DrawerHost), growing row by row up to the whole way down. */
+.kd-drawer[data-extent="content"] {
+  height: min(max(calc(var(--kd-drawer-room) * 0.66667), var(--kd-drawer-fit, 0px)), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
 }
-@keyframes kd-drawer-up {
-  from { transform: translateY(0); }
-  to { transform: translateY(calc(-100% - var(--kd-drawer-gap) - 8px)); }
+/* It leaves the way it came, and only then does the next one come in (see DrawerHost). */
+.kd-drawer[data-leaving] { animation: kd-drawer-out 260ms cubic-bezier(0.55, 0, 0.8, 0.35) both; }
+/* The distance covers the panel, its gap and its shadow, so nothing of it is left at the edge. */
+@keyframes kd-drawer-in {
+  from { transform: translateX(calc(100% + var(--kd-drawer-gap) + 3rem)); }
+  to { transform: translateX(0); }
+}
+@keyframes kd-drawer-out {
+  from { transform: translateX(0); }
+  to { transform: translateX(calc(100% + var(--kd-drawer-gap) + 3rem)); }
+}
+/* A height the user dragged replaces the app's own extent, within the room there is. */
+.kd-drawer-host[data-sized] .kd-drawer {
+  height: min(var(--kd-drawer-user-h), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
 }
 @keyframes kd-drawer-fade-in {
   from { opacity: 0; }
@@ -143,10 +151,17 @@
   top: 0;
   bottom: 0;
   left: 0;
-  width: 5px;
+  width: 6px;
   cursor: col-resize;
   pointer-events: auto;
   touch-action: none;
+}
+.kd-drawer-resize[data-edge="bottom"] {
+  top: auto;
+  right: 0;
+  width: auto;
+  height: 6px;
+  cursor: row-resize;
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-drawer, .kd-drawer[data-leaving] { animation-duration: 1ms; }

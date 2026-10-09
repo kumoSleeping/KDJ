@@ -1,10 +1,12 @@
 import type { ReactNode } from "react";
 
 /**
- * How far a drawer is pulled down over the list.
- * - `two-thirds`: always two thirds of the way.
- * - `content`: two thirds while everything fits there, all the way down once it does not.
- * - `full`: always all the way down.
+ * How tall the drawer's panel is over the list.
+ * - `two-thirds`: always two thirds of the way down.
+ * - `content`: two thirds while everything fits there; beyond that exactly as tall as what it
+ *   holds needs, growing with it, up to the whole way down.
+ * - `full`: always the whole way down.
+ * A height the user drags (the panel's bottom edge) replaces any of these until it is reset.
  */
 export type DrawerExtent = "two-thirds" | "content" | "full";
 

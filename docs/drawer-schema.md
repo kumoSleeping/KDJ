@@ -9,7 +9,7 @@ The drawer is a **floating panel** with two parts:
 - **The entries** are icons at the right end of the aggregate search's row and are always there
   and always usable (下载, 歌词, 设置 — `DrawerEntry`; icons only, no words). The open app's icon
   is written in full-strength text colour, the others muted.
-- **The panel** comes down from under that row over the right of the list and rests free of
+- **The panel** slides in from the right over the list, below that row, and rests free of
   every edge, with a gap all round, rounded corners, a hairline edge and a soft shadow — the same
   floating surface as a task bubble or a menu (`--kd-float-edge`, `--kd-float-shadow`). It is the
   list's own colour: never give it a tone of its own. It carries the app's title row (title or
@@ -38,8 +38,8 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   bottom of the list, less the gap (never lower than a task bubble that is kept up,
   `--kd-info-lift`):
   - `two-thirds` — always two thirds of the way (lyrics);
-  - `content` — two thirds while everything fits, all the way down once it does not (downloads,
-    the Meta editor, tips);
+  - `content` — two thirds while everything fits; beyond that exactly as tall as what it holds
+    needs, growing row by row up to the whole way down (downloads, the Meta editor, tips);
   - `full` — always all the way down (settings, the visualizer configuration).
   A body's scrolling element carries the class `kd-scroll` (or `data-drawer-scroll`); that is what
   `content` measures. A `content` body is built with its sheet and measured before the first
@@ -51,13 +51,14 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   `<SlidePages page={…} order={…}>`, which slides the old picture out and the new one in from the
   side its title lies on. Pages need not stay mounted.
 - **No divider lines** inside a drawer (see AGENTS.md): groups are separated by spacing and type.
-- **Motion.** The panel comes down from behind the search row's lower edge in one decelerating
-  move and stops; it goes back up accelerating. Only `transform` moves: what is on the panel rides
+- **Motion.** The panel slides in from beyond the window's right edge in one decelerating move
+  and stops; it leaves the same way, accelerating. A new app waits until the one before it has
+  left completely. Only `transform` moves: what is on the panel rides
   with it, and its height follows its content only once it is at rest. Keep it that way — no
   bounce, no second layer fading over a moving panel.
-- **Toolbars under the sheet.** The sheet passes over the right end of the list's toolbar.
-  `DrawerHost` gives each toolbar named by its `clear` selector the covered width as end padding
-  (`--kd-drawer-cover`) and slides the tools to their new place; the table is never laid out again.
+- **It takes no room.** The panel floats over the list and its toolbar; nothing beneath it is
+  moved or resized for it. It is resized by its left edge (width, up to most of the list's
+  column) and its bottom edge (height; a double click returns to the app's extent).
 - **Refusing to close.** `close()` may return `false` (an unsaved draft). The drawer then stays,
   and an app that was opened over it gives way.
 - **Held while something flies into it.** Motion aimed at an app (the download parcel,

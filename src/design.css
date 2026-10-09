@@ -14,10 +14,14 @@
 :root {
   color-scheme: dark;
 
-  /* —— 主色 —— */
-  --kd-theme: #ef4444;
-  --kd-theme-ink: #ffffff;
-  --kd-theme-strong: color-mix(in srgb, var(--kd-theme) 85%, #000);
+  /* —— 主色 ——
+     The interface has no colour of its own: what used to be the theme red is ink, the text
+     colour, and what sits on it takes the panel colour. Red (--kd-red) is kept for the few
+     keys that are allowed it (see AGENTS.md); a theme pack brings its own --kd-theme. */
+  --kd-red: #ef4444;
+  --kd-theme: var(--kd-text);
+  --kd-theme-ink: var(--kd-panel);
+  --kd-theme-strong: var(--kd-text);
   --kd-theme-soft: var(--kd-selected);
 
   /* —— 文本 —— */
@@ -50,7 +54,8 @@
   /* —— 语义 —— */
   --kd-ok: #22c55e;
   --kd-warn: #f59e0b;
-  --kd-danger: #ef4444;
+  /* Failed and destructive states are amber, not red. */
+  --kd-danger: #f59e0b;
   --kd-info: #60a5fa;
 
   /* —— 结构编辑 ——
@@ -174,6 +179,13 @@
   color: var(--kd-text-body);
 }
 
+/* A theme pack's accent is its own; it is also what its allowed red keys use. */
+:root:where([data-theme-pack]) {
+  --kd-theme-ink: #ffffff;
+  --kd-theme-strong: color-mix(in srgb, var(--kd-theme) 85%, #000);
+  --kd-red: var(--kd-theme);
+  --kd-vinyl-label: var(--kd-theme);
+}
 :root[data-theme="light"] {
   color-scheme: light;
   --kd-text: #1c1c1e;
@@ -806,7 +818,8 @@ textarea {
 /* The top row on a wide window: the aggregate search, and at its right end the drawer's entries
    (see Drawer.css), which take only the width of their icons. Nothing is drawn between them. */
 .kd-table-wrap[data-drawer-head] {
-  --kd-drawer-w: max(min(var(--kd-right, 25rem), 45%), min(17rem, 100%));
+  /* The dragged width, from a narrow panel up to most of the list's column. */
+  --kd-drawer-w: max(min(var(--kd-right, 25rem), 88%), min(16rem, 100%));
 }
 .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top {
   box-sizing: border-box;
@@ -2199,7 +2212,7 @@ body[data-kd-track-pointer-dragging="true"] {
   border-radius: 50% !important;
   background:
     radial-gradient(circle, var(--kd-panel) 0 12%, transparent 14%),
-    var(--kd-theme);
+    var(--kd-vinyl-label, #b4b7bf);
   box-shadow: 0 0 4px rgb(0 0 0 / 58%);
 }
 :root[data-theme="light"] .kd-vinyl-placeholder {
@@ -4756,9 +4769,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  /* While a drawer is down over this bar's right end, its tools stay beside the sheet
-     (--kd-drawer-cover is written by DrawerHost). */
-  padding: 0 calc(0.75rem + var(--kd-drawer-cover, 0px)) 0 0.75rem;
+  padding: 0 0.75rem;
   border-bottom: 1px solid var(--kd-line-soft);
   /* 分析 / 多选 / 下载时也不染主题粉红，保持面板本色 */
   background: var(--kd-panel);
@@ -6678,10 +6689,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   height: 1.7rem;
 }
 .kd-player-auto-advance[data-on="true"] {
-  color: var(--kd-theme);
+  color: var(--kd-red);
 }
 .kd-player-auto-advance[data-on="true"]:hover:not(:disabled) {
-  color: var(--kd-theme-strong);
+  color: color-mix(in srgb, var(--kd-red) 85%, #000);
 }
 .kd-player-lyricsbtn {
   position: relative;
@@ -6689,26 +6700,26 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   height: 1.7rem;
   margin-left: 0;
 }
-/* 与旁边自动切歌键同一套：灰=歌词关闭/视频侧栏，红=歌词开启/视频小窗。 */
+/* 与旁边自动切歌键同一套：灰=歌词关闭/视频侧栏，红=歌词开启/视频小窗。音量左侧这一组开关键是界面里唯一允许用红色的地方。 */
 .kd-player-lyricsbtn[data-on="true"] {
-  color: var(--kd-theme);
+  color: var(--kd-red);
 }
 .kd-player-lyricsbtn[data-on="true"]:hover:not(:disabled) {
-  color: var(--kd-theme-strong);
+  color: color-mix(in srgb, var(--kd-red) 85%, #000);
 }
 /* 画面小窗键（视频小窗 / 可视化小窗）与歌词键同一套：小窗开着就是主题红。 */
 .kd-player-popupbtn[data-on="true"] {
-  color: var(--kd-theme);
+  color: var(--kd-red);
 }
 .kd-player-popupbtn[data-on="true"]:hover:not(:disabled) {
-  color: var(--kd-theme-strong);
+  color: color-mix(in srgb, var(--kd-red) 85%, #000);
 }
 /* 歌词 and 编辑 Meta, the bar's entries of the song: the same quiet keys, red while what they
    open is open. They need a little more room beside the transport than the bar has on a
    narrow window, where they are left out; the song's task bubble still offers both. */
 .kd-player-songbtn { width: 1.45rem; }
-.kd-player-songbtn[data-on="true"] { color: var(--kd-theme); }
-.kd-player-songbtn[data-on="true"]:hover:not(:disabled) { color: var(--kd-theme-strong); }
+.kd-player-songbtn[data-on="true"] { color: var(--kd-red); }
+.kd-player-songbtn[data-on="true"]:hover:not(:disabled) { color: color-mix(in srgb, var(--kd-red) 85%, #000); }
 @media (min-width: 1200px) {
   .kd-app:not([data-tall="true"]) .kd-player-transport { width: min(31.5rem, 100%); }
 }

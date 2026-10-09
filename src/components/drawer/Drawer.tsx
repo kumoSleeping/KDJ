@@ -1,56 +1,62 @@
-import { createContext, startTransition, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent, type Ref, type RefObject } from "react";
+import { createContext, startTransition, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type Ref } from "react";
 import { ChevronsUp } from "lucide-react";
 import { TitleTabs } from "./TitleTabs";
+import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import type { DrawerEntry, DrawerSpec } from "./drawerSchema";
 import "./Drawer.css";
 
-/** The roll down; a sheet is at rest once it is over. */
-const ENTER_MS = 420;
-/** The roll back up; a drawer that was put away stays mounted this long. */
-const LEAVE_MS = 320;
-const ARRIVE = "cubic-bezier(0.22, 0.9, 0.26, 1)";
-const LEAVE = "cubic-bezier(0.55, 0, 0.8, 0.35)";
+/** The slide in; a panel is at rest once it is over. */
+const ENTER_MS = 400;
+/** The slide back out; a panel that was put away stays mounted this long. */
+const LEAVE_MS = 260;
+const HEIGHT_KEY = "kd-drawer-height";
+const MIN_HEIGHT = 180;
 
 const DrawerContext = createContext<string | null>(null);
 /** The id of the drawer a component is shown in, or null outside one. */
 export function useDrawer(): string | null { return useContext(DrawerContext); }
 
 /**
- * Whether what is in `body` needs more room than two thirds of the way down. A drawer that is
- * all the way down goes back only when everything would fit with room to spare, so a list
- * whose length hovers at the limit does not make it travel back and forth.
+ * The height at which everything in `body` fits without scrolling: the sheet's height now, plus
+ * what its tallest scrolling part lacks or minus what it has to spare. Null when nothing in the
+ * body scrolls, which says nothing about what it needs.
  */
-function needsFull(body: HTMLElement, full: boolean, spare: number): boolean {
+function fittingHeight(sheet: HTMLElement, body: HTMLElement): number | null {
   const scrollers = [body, ...body.querySelectorAll<HTMLElement>(".kd-scroll, [data-drawer-scroll]")]
     .filter(node => node.clientHeight > 0 && getComputedStyle(node).overflowY !== "visible"
       && getComputedStyle(node).overflowY !== "hidden");
-  if (!full) return scrollers.some(node => node.scrollHeight > node.clientHeight + 1);
-  if (!scrollers.length) return true;
+  if (!scrollers.length) return null;
   const range = document.createRange();
-  return scrollers.some(node => {
+  let lack = -Infinity;
+  for (const node of scrollers) {
     range.selectNodeContents(node);
-    const content = range.getBoundingClientRect().height;
-    // Content that stretches to fill its scroller says nothing about what it needs.
-    return content + 12 > node.clientHeight - spare;
-  });
+    const style = getComputedStyle(node);
+    const content = range.getBoundingClientRect().height + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    lack = Math.max(lack, Math.ceil(content) - node.clientHeight);
+  }
+  return Math.round(sheet.getBoundingClientRect().height + lack);
 }
 
-function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
+function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart, onHeightStart, onHeightReset }: {
   spec: DrawerSpec;
   leaving: boolean;
   /** Names the body for the page tabs in the title row. */
   panelId: string;
   onGone(): void;
   onResizeStart?(event: PointerEvent<HTMLDivElement>): void;
+  onHeightStart(event: PointerEvent<HTMLDivElement>): void;
+  onHeightReset(): void;
 }) {
   const layer = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
-  const [full, setFull] = useState(spec.extent === "full");
-  const fullRef = useRef(full);
-  fullRef.current = full;
+  // A `content` app is as tall as what it holds, between two thirds and the whole way down
+  // (the limits are the stylesheet's); `fit` is that height in px once it has been measured.
+  const [fit, setFit] = useState<number | null>(null);
+  const fitRef = useRef(fit);
+  fitRef.current = fit;
   // A body whose size decides how far the sheet comes down is built with the sheet and measured
   // before the first paint, so the sheet starts at the height it will keep. Any other body is
-  // built a frame later: the sheet's first frame, the one its roll-down starts from, is not
+  // built a frame later: the sheet's first frame, the one its entrance starts from, is not
   // held up by a heavy app (settings, the visualizer configuration).
   const [built, setBuilt] = useState(spec.extent === "content");
   useEffect(() => {
@@ -59,7 +65,7 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
     return () => cancelAnimationFrame(frame);
   }, [built]);
   useLayoutEffect(() => {
-    if (spec.extent === "content" && body.current && needsFull(body.current, false, 0)) setFull(true);
+    if (spec.extent === "content" && body.current && layer.current) setFit(fittingHeight(layer.current, body.current));
     // Only the first picture is decided here; later changes are followed below.
   }, []);
   // At rest the sheet is no longer a moving layer, and a change of height may be shown.
@@ -69,15 +75,15 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
     return () => window.clearTimeout(timer);
   }, []);
   useEffect(() => {
-    if (spec.extent !== "content") { setFull(spec.extent === "full"); return; }
+    if (spec.extent !== "content") return;
     const node = body.current, sheet = layer.current, host = sheet?.parentElement;
     if (!node || !sheet || !host || leaving) return;
     let frame = 0;
     const measure = () => {
       frame = 0;
-      const spare = fullRef.current ? host.clientHeight / 3 : 0;
-      const next = needsFull(node, fullRef.current, spare);
-      if (next !== fullRef.current) setFull(next);
+      const next = fittingHeight(sheet, node);
+      // A pixel either way is rounding, not a change of content.
+      if (next !== null && (fitRef.current === null || Math.abs(next - fitRef.current) > 1)) setFit(next);
     };
     const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
     schedule();
@@ -94,7 +100,8 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
     const timer = window.setTimeout(onGone, LEAVE_MS + 120);
     return () => window.clearTimeout(timer);
   }, [leaving, onGone]);
-  return <section ref={layer} className="kd-drawer" data-app={spec.id} data-extent={full ? "full" : "two-thirds"}
+  return <section ref={layer} className="kd-drawer" data-app={spec.id} data-extent={spec.extent}
+    style={fit === null ? undefined : { "--kd-drawer-fit": `${fit}px` } as CSSProperties}
     data-leaving={leaving || undefined} data-settled={settled && !leaving || undefined}
     role="region" aria-label={leaving ? undefined : spec.title}
     aria-hidden={leaving || undefined} inert={leaving}
@@ -117,6 +124,8 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
     </DrawerContext.Provider>
     {onResizeStart && !leaving && <div className="kd-drawer-resize" role="separator" aria-orientation="vertical"
       aria-label="调整抽屉宽度" onPointerDown={onResizeStart} />}
+    {!leaving && <div className="kd-drawer-resize" data-edge="bottom" role="separator" aria-orientation="horizontal"
+      aria-label="调整抽屉高度" title="拖动调整高度 · 双击恢复" onPointerDown={onHeightStart} onDoubleClick={onHeightReset} />}
   </section>;
 }
 
@@ -138,68 +147,19 @@ function DrawerEntries({ entries, front, onAsk }: {
 }
 
 /**
- * Toolbars the sheet passes over keep their right-hand tools beside it: each is given the
- * width that lies under the drawer as end padding, and what that moves slides to its new
- * place. Only those toolbars are laid out again; the list below them is not touched.
- */
-function useClearToolbars(host: RefObject<HTMLDivElement | null>, selector: string | undefined, open: boolean) {
-  const was = useRef(false);
-  const sync = useRef<(slide: boolean) => void>(() => undefined);
-  sync.current = slide => {
-    const node = host.current, scope = node?.parentElement;
-    if (!node || !scope || !selector) return;
-    const edge = node.getBoundingClientRect().left;
-    const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    for (const bar of scope.querySelectorAll<HTMLElement>(selector)) {
-      const box = bar.getBoundingClientRect();
-      const under = open ? Math.max(0, Math.round(box.right - edge)) : 0;
-      // A toolbar that is all but covered stays as it is: there is no room to move its tools to.
-      const cover = box.width - under >= 120 ? under : 0;
-      const value = cover ? `${cover}px` : "";
-      if (bar.style.getPropertyValue("--kd-drawer-cover") === value) continue;
-      const parts = slide && !still ? [...bar.children] : [];
-      const before = parts.map(part => part.getBoundingClientRect().left);
-      if (cover) bar.style.setProperty("--kd-drawer-cover", value);
-      else bar.style.removeProperty("--kd-drawer-cover");
-      parts.forEach((part, index) => {
-        const shift = before[index] - part.getBoundingClientRect().left;
-        if (Math.abs(shift) < 1 || typeof part.animate !== "function") return;
-        part.animate([{ transform: `translateX(${shift}px)` }, { transform: "translateX(0)" }],
-          { duration: open ? 460 : LEAVE_MS, easing: open ? ARRIVE : LEAVE });
-      });
-    }
-  };
-  // Every commit while open: the list's panes come and go without the drawer being told.
-  useLayoutEffect(() => {
-    const changed = was.current !== open;
-    was.current = open;
-    if (open || changed) sync.current(changed);
-  });
-  useEffect(() => {
-    const node = host.current;
-    if (!open || !selector || !node?.parentElement || typeof ResizeObserver === "undefined") return;
-    const resized = new ResizeObserver(() => sync.current(false));
-    resized.observe(node);
-    resized.observe(node.parentElement);
-    return () => resized.disconnect();
-  }, [host, open, selector]);
-}
-
-/**
  * The drawer: a floating panel over the right of the list, one app at a time. Its entries are
- * icons at the right end of the search row and are always there; the panel comes down from
- * under that row and floats free of every edge, like the task bubbles that rise from the
- * player bar. A new app comes down over the one that was there, which goes back up beneath it
- * and is gone; nothing waits underneath to come back. The panel covers the list instead of
- * taking a column from it, so the list never reflows while the drawer moves.
+ * icons at the right end of the search row and are always there; the panel slides in from the
+ * window's right edge and floats free of every edge, like a task bubble. A new app waits until
+ * the one that was there has left completely, then comes in; nothing stays underneath to come
+ * back. The panel covers the list and its toolbar instead of taking room from them, so nothing
+ * beneath it is laid out again. It is resized by its left edge (width) and its bottom edge
+ * (height; a double click gives the height back to the app's own extent).
  */
-export function DrawerHost({ spec, entries = [], clear, hostRef, onResizeStart }: {
+export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
   /** The app to show, described by its schema; null rolls the drawer up. */
   spec: DrawerSpec | null;
   /** The apps offered beside the search. */
   entries?: readonly DrawerEntry[];
-  /** Toolbars inside the host's parent that the sheet passes over (a selector). */
-  clear?: string;
   hostRef?: Ref<HTMLDivElement>;
   /** Dragging the left edge changes the width. */
   onResizeStart?(event: PointerEvent<HTMLDivElement>): void;
@@ -239,19 +199,57 @@ export function DrawerHost({ spec, entries = [], clear, hostRef, onResizeStart }
     if (typeof hostRef === "function") hostRef(node);
     else if (hostRef) hostRef.current = node;
   };
-  useClearToolbars(host, clear, !!spec);
   const panel = useId();
+  // The height the user dragged the panel to, in px; null leaves it to each app's extent.
+  const [userHeight, setUserHeight] = useState<number | null>(() => {
+    const saved = Number.parseFloat(readLocalStorage(HEIGHT_KEY) ?? "");
+    return Number.isFinite(saved) && saved > 0 ? saved : null;
+  });
+  const startHeightDrag = (event: PointerEvent<HTMLDivElement>) => {
+    const sheet = event.currentTarget.parentElement, node = host.current;
+    if (event.button !== 0 || !sheet || !node) return;
+    event.preventDefault();
+    const handle = event.currentTarget, from = event.clientY, start = sheet.getBoundingClientRect().height;
+    let height = start;
+    handle.setPointerCapture(event.pointerId);
+    const move = (moved: globalThis.PointerEvent) => {
+      height = Math.max(MIN_HEIGHT, start + moved.clientY - from);
+      node.style.setProperty("--kd-drawer-user-h", `${Math.round(height)}px`);
+      node.dataset.sized = "true";
+    };
+    const end = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", end);
+      if (Math.abs(height - start) < 2) return;
+      writeLocalStorageNow(HEIGHT_KEY, String(Math.round(height)));
+      setUserHeight(Math.round(height));
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  };
+  const resetHeight = () => {
+    removeLocalStorage(HEIGHT_KEY);
+    setUserHeight(null);
+  };
   // The open app's entry puts it away; any other asks for its own app.
   const ask = (entry: DrawerEntry) => { if (spec?.id === entry.id) spec.close(); else entry.open(); };
-  return <div ref={setHost} className="kd-drawer-host" data-open={spec ? "true" : undefined}>
+  // One panel on screen at a time: while one is leaving, the next waits its turn.
+  const waiting = layers.some(layer => layer.leaving);
+  return <div ref={setHost} className="kd-drawer-host" data-open={spec ? "true" : undefined}
+    data-sized={userHeight === null ? undefined : "true"}
+    style={userHeight === null ? undefined : { "--kd-drawer-user-h": `${userHeight}px` } as CSSProperties}>
     {entries.length ? <nav className="kd-drawer-launcher" aria-label="侧边应用">
       <DrawerEntries entries={entries} front={spec?.id ?? null} onAsk={ask} />
     </nav> : null}
     <div className="kd-drawer-sheets">
       {layers.map(layer => {
         const shown = layer.leaving ?? spec;
-        return shown ? <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} panelId={`${panel}-${layer.key}`}
-          onResizeStart={onResizeStart} onGone={() => setLayers(list => list.filter(item => item.key !== layer.key))} /> : null;
+        if (!shown || (waiting && !layer.leaving)) return null;
+        return <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} panelId={`${panel}-${layer.key}`}
+          onResizeStart={onResizeStart} onHeightStart={startHeightDrag} onHeightReset={resetHeight}
+          onGone={() => setLayers(list => list.filter(item => item.key !== layer.key))} />;
       })}
     </div>
   </div>;

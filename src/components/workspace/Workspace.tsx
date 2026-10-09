@@ -2275,8 +2275,8 @@ export function Workspace() {
 
           <div className="kd-main-slot">
             <div className="kd-table-wrap" data-aside={showAside ? "open" : "closed"} data-drawer-head={layout === "wide" || undefined}>
-            {/* The drawer's head shares the top row with the search; its sheet comes down over the list. */}
-            {layout === "wide" && <DrawerHost spec={drawerSpec} entries={drawerEntries} clear=".kd-workspace-pane > .kd-activity"
+            {/* The drawer's entries sit at the end of the search row; its panel floats over the list. */}
+            {layout === "wide" && <DrawerHost spec={drawerSpec} entries={drawerEntries}
               hostRef={drawerHostRef} onResizeStart={startColumnDrag("right")} />}
             <div className="kd-panel-dock kd-panel-dock-top">
             {/* 搜索带可收起；查询文字、来源选择和已有结果都保留。 */}
