@@ -1,8 +1,10 @@
-//! Authenticated editor transport. A bounded window of uploaded RGBA frames supplies
-//! the existing replayable FFmpeg pipe; no frame sequence is retained on disk.
+//! Authenticated editor transport. A bounded window of uploaded frames supplies the
+//! existing replayable FFmpeg pipe; no frame sequence is retained on disk. The editor
+//! uploads raw RGBA or I420 frames for FFmpeg to encode, or H.264 it encoded itself
+//! (closed GOPs in Annex B), which FFmpeg only muxes with the audio.
 use super::{check, destination, source, Stage};
 use crate::{error::{ApiError, ApiResult}, state::AppState};
-use crate::compositions::{acceleration, frame_pipe::{FrameSource, FramePixels}, media};
+use crate::compositions::{acceleration, frame_pipe::{self, FrameSource, FramePixels}, media};
 use anyhow::{Context, Result, ensure, bail};
 use axum::{Router, Extension, Json, body::Bytes, extract::{State, Path, Query, DefaultBodyLimit}, routing::{get, post}, http::HeaderMap};
 use kdj_core::{audio_visualizer::{Scene, Spectrum}, composition::EncodingAcceleration, work_scheduler::{work_scheduler, WorkClass, WorkRequest}};
@@ -19,6 +21,8 @@ const MAX_DURATION_MS: i64 = 30 * 60 * 1000;
 /// count, so one slow frame does not idle every other renderer.
 const WINDOW_BYTES: usize = 128 * 1024 * 1024;
 const MAX_WINDOW: u64 = 12;
+/// One editor-encoded GOP. A second of the largest canvas at 60 fps stays well below.
+const MAX_CHUNK: usize = 32 * 1024 * 1024;
 fn api_check(condition: bool, detail: &str) -> ApiResult<()> {
     if condition { Ok(()) } else { Err(ApiError::bad_request(detail)) }
 }
@@ -42,15 +46,72 @@ struct Exchange {
     attempt: u64, next: u64,
     pending: BTreeMap<u64, Bytes>,
 }
+/// Editor-encoded video: unit `index` is the closed GOP of frames `index * per ..`.
+/// Renderers encode GOPs in separate encoder sessions, so every one is checked before
+/// it is muxed: a wrong frame count would shift the picture against the audio, and
+/// differing parameter sets would not survive stream copy into one MP4 track.
+struct Chunks { frames: u64, per: u64, parameters: Mutex<Option<Vec<u8>>> }
+impl Chunks {
+    fn check(&self, index: u64, bytes: &[u8]) -> Result<()> {
+        let (pictures, parameters) = inspect_h264(bytes)?;
+        let expected = self.per.min(self.frames.saturating_sub(index * self.per));
+        ensure!(pictures == expected, "视频分段帧数不符：第 {index} 段应为 {expected} 帧，实际 {pictures} 帧");
+        let mut first = self.parameters.lock().unwrap();
+        ensure!(*first.get_or_insert_with(|| parameters.clone()) == parameters, "视频分段的编码参数不一致");
+        Ok(())
+    }
+}
+/// Pictures and leading parameter sets of one Annex B GOP. Emulation prevention keeps
+/// start codes out of NAL payloads, so a plain scan finds every unit.
+fn inspect_h264(bytes: &[u8]) -> Result<(u64, Vec<u8>)> {
+    let mut starts = Vec::new();
+    let mut i = 2;
+    while i < bytes.len() {
+        match bytes[i] {
+            0 => i += 1,
+            1 if bytes[i - 1] == 0 && bytes[i - 2] == 0 => { starts.push(i + 1); i += 3; }
+            _ => i += 3,
+        }
+    }
+    ensure!(starts.first().is_some_and(|&first| first <= 4), "视频分段不是 Annex B 码流");
+    let (mut pictures, mut parameters, mut sets) = (0_u64, Vec::new(), [false; 2]);
+    for (n, &start) in starts.iter().enumerate() {
+        let unit = &bytes[start..starts.get(n + 1).map_or(bytes.len(), |next| next - 3)];
+        let Some(&header) = unit.first() else { continue; };
+        ensure!(header & 0x80 == 0, "视频分段码流损坏");
+        match header & 0x1f {
+            kind @ (7 | 8) if pictures == 0 => {
+                // A four-byte start code leaves its first zero at the end of the previous unit.
+                let unit = &unit[..unit.iter().rposition(|&b| b != 0).map_or(0, |last| last + 1)];
+                parameters.extend_from_slice(&(unit.len() as u32).to_be_bytes()); parameters.extend_from_slice(unit);
+                sets[(kind - 7) as usize] = true;
+            }
+            // first_mb_in_slice == 0 (a leading 1 bit) opens a new picture.
+            kind @ (1 | 5) if unit.get(1).is_some_and(|b| b & 0x80 != 0) => {
+                ensure!(pictures > 0 || (kind == 5 && sets == [true; 2]), "视频分段必须以带参数集的关键帧开始");
+                pictures += 1;
+            }
+            _ => {}
+        }
+    }
+    Ok((pictures, parameters))
+}
 struct Job {
     inner: Mutex<Exchange>, changed: Notify, ready: Condvar,
     cancel: CancellationToken, count: u64, bytes: usize, window: u64, created: Instant,
     last_seen: Mutex<Instant>,
+    chunks: Option<Chunks>,
 }
 impl Job {
     fn new(id: String, count: u64, bytes: usize) -> Self {
-        Self { inner: Mutex::new(Exchange { snapshot: Snapshot { id, phase: "queued".into(), status: "等待编码资源".into(), progress: 0., demand: None, output_path: String::new(), error: String::new(), version: 0 }, token: 0, attempt: 0, next: 0, pending: BTreeMap::new() }), changed: Notify::new(), ready: Condvar::new(), cancel: CancellationToken::new(), count, bytes, window: (WINDOW_BYTES / bytes.max(1)).clamp(2, MAX_WINDOW as usize) as u64, created: Instant::now(), last_seen: Mutex::new(Instant::now()) }
+        Self { inner: Mutex::new(Exchange { snapshot: Snapshot { id, phase: "queued".into(), status: "等待编码资源".into(), progress: 0., demand: None, output_path: String::new(), error: String::new(), version: 0 }, token: 0, attempt: 0, next: 0, pending: BTreeMap::new() }), changed: Notify::new(), ready: Condvar::new(), cancel: CancellationToken::new(), count, bytes, window: (WINDOW_BYTES / bytes.max(1)).clamp(2, MAX_WINDOW as usize) as u64, created: Instant::now(), last_seen: Mutex::new(Instant::now()), chunks: None }
     }
+    /// `frames` in GOPs of `per`. Compressed GOPs are small: the window is as wide as it gets.
+    fn chunked(id: String, frames: u64, per: u64) -> Self {
+        Self { window: MAX_WINDOW, chunks: Some(Chunks { frames, per, parameters: Mutex::new(None) }), ..Self::new(id, frames.div_ceil(per), MAX_CHUNK) }
+    }
+    /// A GOP is a second of video drawn and encoded by one renderer, not one frame.
+    fn patience(&self) -> Duration { Duration::from_secs(if self.chunks.is_some() { 120 } else { 40 }) }
     fn touch(&self) { *self.last_seen.lock().unwrap() = Instant::now(); }
     fn editor_idle(&self) -> bool { self.last_seen.lock().unwrap().elapsed() > Duration::from_secs(45) }
     fn snapshot(&self) -> Snapshot { self.inner.lock().unwrap().snapshot.clone() }
@@ -71,7 +132,10 @@ impl Job {
         self.publish(g);
     }
     fn submit(&self, token: u64, index: u64, pixels: Bytes) -> Result<()> {
-        ensure!(pixels.len() == self.bytes, "RGBA 帧长度不匹配");
+        match &self.chunks {
+            Some(chunks) => { ensure!(index < self.count && (1..=self.bytes).contains(&pixels.len()), "视频分段长度或序号无效"); chunks.check(index, &pixels)?; }
+            None => ensure!(pixels.len() == self.bytes, "RGBA 帧长度不匹配"),
+        }
         let mut g = self.inner.lock().unwrap();
         ensure!(!self.cancel.is_cancelled() && !g.snapshot.terminal(), "导出任务已结束");
         let open = g.snapshot.demand.as_ref().is_some_and(|d| (d.attempt..=d.token).contains(&token) && (d.index..d.end).contains(&index));
@@ -101,10 +165,13 @@ impl Job {
             ensure!(!self.cancel.is_cancelled() && !attempt.is_cancelled() && !g.snapshot.terminal(), "可视化导出已取消");
             ensure!(g.attempt == pass, "本次编码尝试已被替代");
             if let Some(pixels) = g.pending.remove(&index) {
-                g.next = index + 1; self.advertise(&mut g);
+                g.next = index + 1;
+                // A stream copy reports no output time: the GOPs handed to the muxer are the progress.
+                if self.chunks.is_some() { g.snapshot.progress = g.snapshot.progress.max(g.next as f64 / self.count as f64 * 0.96); }
+                self.advertise(&mut g);
                 return Ok(pixels);
             }
-            if started.elapsed() > Duration::from_secs(40) { self.cancel.cancel(); bail!("编辑器超过 40 秒未提供画面，已终止导出"); }
+            if started.elapsed() > self.patience() { self.cancel.cancel(); bail!("编辑器超过 {} 秒未提供画面，已终止导出", self.patience().as_secs()); }
             g = self.ready.wait_timeout(g, Duration::from_millis(200)).unwrap().0;
         }
     }
@@ -112,6 +179,7 @@ impl Job {
 impl FrameSource for Job {
     fn frame_count(&self) -> u64 { self.count }
     fn frame_bytes(&self) -> usize { self.bytes }
+    fn variable(&self) -> bool { self.chunks.is_some() }
     fn draw(&self, index: u64, rgba: &mut [u8]) -> Result<()> {
         ensure!(rgba.len() == self.bytes, "RGBA 帧长度不匹配");
         rgba.copy_from_slice(&self.receive_frame(index, &self.cancel)?);
@@ -142,7 +210,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/visualizer/export", post(start))
         .route("/api/visualizer/jobs/{id}", get(poll))
         .route("/api/visualizer/jobs/{id}/cancel", post(cancel))
-        .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_FRAME)))
+        .route("/api/visualizer/jobs/{id}/frames", post(frame).layer(DefaultBodyLimit::max(MAX_FRAME.max(MAX_CHUNK))))
         .layer(Extension(Arc::new(Jobs::default())))
 }
 fn fingerprint(path: &std::path::Path) -> Result<String> {
@@ -220,9 +288,10 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
 }
 /// Editor renderers convert to I420 themselves when they can: the WebView's loopback
 /// upload, not drawing or encoding, caps raw RGBA at about 48 frames/s at 1080p.
+/// With a system hardware encoder in the WebView they encode as well and upload H.264.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum PixelFormat { #[default] Rgba, Yuv420p }
+enum PixelFormat { #[default] Rgba, Yuv420p, H264 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Export {
@@ -230,13 +299,24 @@ struct Export {
     width: u32, height: u32, fps: u32,
     #[serde(default)] acceleration: EncodingAcceleration,
     #[serde(default)] pixel_format: PixelFormat,
+    /// Frames in each uploaded GOP; H.264 only.
+    #[serde(default)] chunk_frames: u32,
 }
 impl Export {
+    fn frames(&self) -> u64 { (self.duration * self.fps as f64).ceil() as u64 }
     fn frame_bytes(&self) -> usize {
         let pixels = self.width as usize * self.height as usize;
-        match self.pixel_format { PixelFormat::Rgba => pixels * 4, PixelFormat::Yuv420p => pixels * 3 / 2 }
+        match self.pixel_format { PixelFormat::Rgba => pixels * 4, PixelFormat::Yuv420p => pixels * 3 / 2, PixelFormat::H264 => MAX_CHUNK }
+    }
+    fn job(&self, id: String) -> Job {
+        match self.pixel_format {
+            PixelFormat::H264 => Job::chunked(id, self.frames(), self.chunk_frames as u64),
+            _ => Job::new(id, self.frames(), self.frame_bytes()),
+        }
     }
     fn validate(&self) -> Result<()> {
+        let chunked = if self.pixel_format == PixelFormat::H264 { (1..=600).contains(&self.chunk_frames) } else { self.chunk_frames == 0 };
+        ensure!(chunked, "视频分段长度无效");
         ensure!(self.width >= 320 && self.width <= 2560 && self.height >= 180 && self.height <= 1440 && self.width % 2 == 0 && self.height % 2 == 0 && [30, 60].contains(&self.fps), "输出画布或帧率无效");
         ensure!(self.duration.is_finite() && self.duration > 0. && self.duration <= MAX_DURATION_MS as f64 / 1000., "输出时长无效");
         Ok(())
@@ -248,7 +328,7 @@ async fn start(State(state): State<Arc<AppState>>, Extension(jobs): Extension<Ar
     let audio = track_audio(&state, p.track_id)?;
     api_check(fingerprint(&audio)? == p.signature, "歌曲已变化，请重新分析后导出")?;
     let output = destination(&p.output_path)?;
-    let job = Arc::new(Job::new(format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>()), (p.duration * p.fps as f64).ceil() as u64, p.frame_bytes()));
+    let job = Arc::new(p.job(format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>())));
     jobs.insert(job.clone())?;
     // Cover editor disconnects even while queued for the shared encoder.
     let weak = Arc::downgrade(&job);
@@ -302,11 +382,23 @@ async fn cancel(Extension(jobs): Extension<Arc<Jobs>>, Path(id): Path<String>) -
     let job = jobs.get(&id)?; job.stop(); Ok(Json(job.snapshot()))
 }
 
+/// Stream copy of the editor's H.264. Its frames were converted to BT.709 limited range
+/// before encoding, whatever the encoder wrote into its own headers.
+fn mux_args(p: &Export, audio: &std::path::Path, stage: &std::path::Path) -> Vec<String> {
+    let mut args: Vec<String> = ["-v", "error", "-nostdin", "-n", "-progress", "pipe:1", "-f", "h264", "-framerate"].into_iter().map(str::to_string).collect();
+    args.extend([p.fps.to_string(), "-i".into(), "pipe:0".into(), "-i".into(), audio.to_string_lossy().into_owned(), "-filter_complex".into(), format!("[1:a:0]asetpts=PTS-STARTPTS,atrim=duration={:.9}[aout]", p.duration)]);
+    // The bare bitstream carries no timestamps and FFmpeg derives them in microseconds
+    // (30 fps becomes 1000000/33333): number the packets at the exact frame rate instead.
+    let stream = format!("h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0,setts=ts=N/({fps}*TB):duration=1/({fps}*TB)", fps = p.fps);
+    args.extend(["-map", "0:v:0", "-map", "[aout]", "-map_metadata", "-1", "-map_chapters", "-1", "-c:v:0", "copy", "-bsf:v:0", &stream, "-c:a", "aac", "-b:a", "256k", "-t"].into_iter().map(str::to_string));
+    args.extend([format!("{:.9}", p.duration), "-movflags".into(), "+faststart".into(), stage.join("render.mp4").to_string_lossy().into_owned()]); args
+}
 fn render_args(p: &Export, audio: &std::path::Path, stage: &std::path::Path) -> Vec<String> {
     // I420 frames arrive already in BT.709 limited range; only RGBA needs swscale.
+    // Editor-encoded H.264 never reaches this graph: see `mux_args`.
     let (format, convert) = match p.pixel_format {
         PixelFormat::Rgba => ("rgba", "scale=in_range=full:out_range=tv:out_color_matrix=bt709,format=yuv420p,"),
-        PixelFormat::Yuv420p => ("yuv420p", ""),
+        PixelFormat::Yuv420p | PixelFormat::H264 => ("yuv420p", ""),
     };
     let mut args: Vec<String> = ["-v", "error", "-nostdin", "-n", "-progress", "pipe:1", "-filter_complex_threads", "2", "-f", "rawvideo", "-pixel_format", format, "-video_size"].into_iter().map(str::to_string).collect();
     args.extend([format!("{}x{}", p.width, p.height), "-framerate".into(), p.fps.to_string(), "-i".into(), "pipe:0".into(), "-i".into(), audio.to_string_lossy().into_owned(), "-filter_complex".into(), format!("[0:v]setpts=PTS-STARTPTS,{convert}setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout];[1:a:0]asetpts=PTS-STARTPTS,atrim=duration={:.9}[aout]", p.duration)]);
@@ -326,9 +418,17 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
     ensure!(fingerprint(audio)? == p.signature, "音频已变化，未开始编码");
     let stage = Stage::new(output.parent().context("输出目录无效")?)?;
     job.update(|s| { s.phase = "encoding".into(); s.status = "绘制与编码".into(); });
-    acceleration::render_frames(&render_args(p, audio, &stage.0), (p.duration * 1000.).round() as i64, &job.cancel, p.acceleration,
-        |v| job.update(|s| s.progress = s.progress.max(v * 0.96)),
-        |message| job.update(|s| s.status = message.to_owned()), job.clone(), (p.width, p.height, p.fps as f64)).await?;
+    let duration = (p.duration * 1000.).round() as i64;
+    if p.pixel_format == PixelFormat::H264 {
+        // Nothing left to encode but the audio, and no other encoder to retry on.
+        job.update(|s| s.status = "系统硬件编码".into());
+        frame_pipe::render(&kdj_providers::ffmpeg::binary()?, &mux_args(p, audio, &stage.0), duration, &job.cancel, job.clone(),
+            |v| job.update(|s| s.progress = s.progress.max(v * 0.96))).await?;
+    } else {
+        acceleration::render_frames(&render_args(p, audio, &stage.0), duration, &job.cancel, p.acceleration,
+            |v| job.update(|s| s.progress = s.progress.max(v * 0.96)),
+            |message| job.update(|s| s.status = message.to_owned()), job.clone(), (p.width, p.height, p.fps as f64)).await?;
+    }
     check(&job.cancel)?;
     job.update(|s| { s.phase = "validating".into(); s.status = "校验画面、音轨和文件版本".into(); s.progress = 0.97; s.demand = None; });
     let temporary = stage.0.join("render.mp4");
@@ -389,7 +489,7 @@ mod tests {
     }
     #[test]
     fn studio_canvas_limits() {
-        let mut p = Export { track_id: 1, signature: String::new(), duration: 3., output_path: String::new(), width: 1920, height: 840, fps: 60, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default() };
+        let mut p = Export { track_id: 1, signature: String::new(), duration: 3., output_path: String::new(), width: 1920, height: 840, fps: 60, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0 };
         assert!(p.validate().is_ok()); p.width = 1921; assert!(p.validate().is_err()); p.width = 1920; p.duration = f64::NAN; assert!(p.validate().is_err());
     }
     #[test]
@@ -460,7 +560,7 @@ mod tests {
     }
     #[test]
     fn studio_graph_uses_only_argv_paths_and_no_overwrite() {
-        let p = Export { track_id: 1, signature: String::new(), duration: 2., output_path: String::new(), width: 320, height: 180, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default() };
+        let p = Export { track_id: 1, signature: String::new(), duration: 2., output_path: String::new(), width: 320, height: 180, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0 };
         let args = render_args(&p, std::path::Path::new("odd ' [audio].wav"), std::path::Path::new("stage"));
         assert!(!args.contains(&"-y".into())); assert_eq!(args.windows(2).filter(|a| a[0] == "-i" && a[1] == "pipe:0").count(), 1);
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1]; assert!(!graph.contains("odd"));
@@ -476,5 +576,62 @@ mod tests {
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
         assert!(!graph.contains("scale=") && graph.contains("setparams=range=tv:color_primaries=bt709"), "{graph}");
         assert!(serde_json::from_value::<Export>(serde_json::json!({ "track_id": 1, "signature": "s", "duration": 2.0, "output_path": "/o.mp4", "width": 1920, "height": 1080, "fps": 30, "pixel_format": "nv12" })).is_err());
+    }
+    /// Parameter sets, a key picture, then delta pictures of two slices each.
+    fn gop(frames: u64, sps: u8) -> Vec<u8> {
+        let mut bytes = vec![0, 0, 0, 1, 0x67, 0x64, sps, 0, 0, 0, 1, 0x68, 0xee, 0, 0, 1, 0x65, 0x88, 0x84];
+        for _ in 1..frames { bytes.extend([0, 0, 1, 0x41, 0x9a, 0x21, 0, 0, 1, 0x41, 0x05, 0x33]); }
+        bytes
+    }
+    fn h264(duration: f64, chunk_frames: u32) -> Export {
+        Export { track_id: 1, signature: String::new(), duration, output_path: String::new(), width: 1920, height: 1080, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::H264, chunk_frames }
+    }
+    #[test]
+    fn studio_h264_gops_are_counted_and_must_open_with_their_parameter_sets() {
+        let (pictures, parameters) = inspect_h264(&gop(30, 0x1f)).unwrap();
+        assert_eq!(pictures, 30, "a second slice is not a second picture");
+        assert_eq!(parameters, [0, 0, 0, 3, 0x67, 0x64, 0x1f, 0, 0, 0, 2, 0x68, 0xee]);
+        assert!(inspect_h264(&[0, 0, 0, 9, 0x67, 0x64, 0x1f]).is_err(), "length-prefixed units accepted");
+        assert!(inspect_h264(&gop(30, 0x1f)[13..]).is_err(), "key picture without parameter sets accepted");
+        assert!(inspect_h264(&[0, 0, 1, 0x41, 0x9a, 0x21]).is_err(), "GOP opening with a delta picture accepted");
+    }
+    #[test]
+    fn studio_h264_gops_must_have_their_frames_and_one_set_of_parameters() {
+        let chunks = Chunks { frames: 70, per: 30, parameters: Mutex::new(None) };
+        chunks.check(0, &gop(30, 0x1f)).unwrap();
+        chunks.check(2, &gop(10, 0x1f)).unwrap();
+        assert!(chunks.check(1, &gop(29, 0x1f)).is_err(), "a dropped frame would shift the picture against the audio");
+        assert!(chunks.check(2, &gop(30, 0x1f)).is_err(), "a full GOP accepted as the ten-frame tail");
+        assert!(chunks.check(1, &gop(30, 0x20)).is_err(), "another encoder's parameter sets accepted");
+        chunks.check(1, &gop(30, 0x1f)).unwrap();
+    }
+    #[test]
+    fn studio_h264_job_moves_whole_gops_of_any_length() {
+        let p = h264(2.5, 30);
+        p.validate().unwrap();
+        assert!(h264(2.5, 0).validate().is_err() && Export { pixel_format: PixelFormat::Yuv420p, ..h264(2.5, 30) }.validate().is_err());
+        let job = Arc::new(p.job("gops".into()));
+        assert_eq!((job.count, job.window, job.variable(), job.patience()), (3, MAX_WINDOW, true, Duration::from_secs(120)));
+        let source = job.clone();
+        let muxer = std::thread::spawn(move || (0..3).map(|i| match source.pixels(i, Vec::new(), &source.cancel).unwrap() { FramePixels::Uploaded(bytes) => bytes.len(), FramePixels::Raster(_) => 0 }).collect::<Vec<_>>());
+        let demand = loop { if let Some(d) = job.snapshot().demand { break d; } std::thread::sleep(Duration::from_millis(1)); };
+        assert_eq!((demand.index, demand.end), (0, 3));
+        assert!(job.submit(demand.token, 2, Bytes::from(gop(30, 0x1f))).is_err(), "a full GOP accepted as the 15-frame tail");
+        assert!(job.submit(demand.token, 3, Bytes::from(gop(30, 0x1f))).is_err() && job.submit(demand.token, 0, Bytes::new()).is_err());
+        for (index, frames) in [(2, 15), (0, 30), (1, 30)] { job.submit(demand.token, index, Bytes::from(gop(frames, 0x1f))).unwrap(); }
+        assert_eq!(muxer.join().unwrap(), [gop(30, 0x1f).len(), gop(30, 0x1f).len(), gop(15, 0x1f).len()]);
+        assert!((job.snapshot().progress - 0.96).abs() < 1e-9, "the GOPs handed to the muxer are the progress");
+    }
+    #[test]
+    fn studio_h264_is_copied_not_encoded_again() {
+        let request: Export = serde_json::from_value(serde_json::json!({ "track_id": 1, "signature": "s", "duration": 2.0, "output_path": "/o.mp4", "width": 1920, "height": 1080, "fps": 30, "pixel_format": "h264", "chunk_frames": 30 })).unwrap();
+        assert_eq!((request.pixel_format, request.chunk_frames, request.frames(), request.job("id".into()).count), (PixelFormat::H264, 30, 60, 2));
+        let args = mux_args(&request, std::path::Path::new("odd ' [audio].wav"), std::path::Path::new("stage"));
+        assert!(args.windows(2).any(|a| a[0] == "-c:v:0" && a[1] == "copy") && args.windows(2).any(|a| a[0] == "-framerate" && a[1] == "30"));
+        assert!(!args.contains(&"libx264".into()) && !args.contains(&"-y".into()) && args.contains(&"-n".into()));
+        assert_eq!(args.windows(2).filter(|a| a[0] == "-i" && a[1] == "pipe:0").count(), 1);
+        assert!(args.iter().any(|a| a.contains("matrix_coefficients=1") && a.contains("video_full_range_flag=0")), "the copied stream must be tagged BT.709 limited range");
+        assert!(args.iter().any(|a| a.ends_with("setts=ts=N/(30*TB):duration=1/(30*TB)")), "packets must be timed at exactly the frame rate");
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1]; assert!(!graph.contains("odd"));
     }
 }

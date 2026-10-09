@@ -12,6 +12,47 @@ export function studioWorkerCount(width: number, height: number, imagePixels: nu
   return Math.max(1, Math.min(MAX_WORKERS, cores - 2, Math.floor(WORKER_MEMORY / perWorker)));
 }
 
+/** Editor-encoded export: the video is cut into closed GOPs of one second. A renderer
+ * draws and encodes a whole GOP, so GOPs finish in any order and are muxed in sequence. */
+export const studioChunkFrames = (fps: number) => fps;
+
+/** H.264 High at the lowest level that holds the canvas at this frame rate (Table A-1). */
+export function studioAvcCodec(width: number, height: number, fps: number): string {
+  const blocks = Math.ceil(width / 16) * Math.ceil(height / 16), rate = blocks * fps;
+  const level = blocks <= 8192 && rate <= 245760 ? "28" : blocks <= 8704 && rate <= 522240 ? "2a" : rate <= 589824 ? "32" : "33";
+  return `avc1.6400${level}`;
+}
+
+/** The server's hardware-encoder target: 12 Mbps at 1080p30, proportional to pixels and rate. */
+export function studioVideoBitrate(width: number, height: number, fps: number): number {
+  return Math.max(3_000_000, Math.min(80_000_000, Math.round(12_000_000 * width * height / (1920 * 1080) * fps / 30)));
+}
+
+/** SPS and PPS that open an Annex B GOP, as hex; null unless a key picture follows them.
+ * GOPs of one video come from several encoder sessions and are stream-copied into one
+ * track, which only holds when every session wrote the same parameter sets. */
+export function h264ParameterSets(bytes: Uint8Array): string | null {
+  const starts: number[] = [];
+  for (let i = 2; i < bytes.length;) {
+    if (bytes[i] === 0) i++;
+    else if (bytes[i] === 1 && bytes[i - 1] === 0 && bytes[i - 2] === 0) { starts.push(i + 1); i += 3; }
+    else i += 3;
+  }
+  if (!starts.length || starts[0] > 4) return null;
+  const sets: string[] = [], kinds = new Set<number>();
+  for (let n = 0; n < starts.length; n++) {
+    const start = starts[n], kind = bytes[start] & 0x1f;
+    if (kind === 1 || kind === 5) return kind === 5 && kinds.has(7) && kinds.has(8) ? sets.join(" ") : null;
+    if (kind !== 7 && kind !== 8) continue;
+    // A four-byte start code leaves its first zero at the end of this unit.
+    let end = n + 1 < starts.length ? starts[n + 1] - 3 : bytes.length;
+    while (end > start && bytes[end - 1] === 0) end--;
+    kinds.add(kind);
+    sets.push(Array.from(bytes.subarray(start, end), byte => byte.toString(16).padStart(2, "0")).join(""));
+  }
+  return null;
+}
+
 /** Planar 4:2:0 frames are 37.5% of RGBA. Uploading raw RGBA saturates the WebView's
  * loopback transfer long before the renderers or the encoder: about 400 MB/s, i.e.
  * 48 frames/s at 1080p, in both WebKit and Chromium. */

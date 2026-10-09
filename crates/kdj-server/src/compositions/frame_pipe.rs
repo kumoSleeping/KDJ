@@ -24,6 +24,10 @@ impl FramePixels {
 pub(super) trait FrameSource: Send + Sync {
     fn frame_count(&self) -> u64;
     fn frame_bytes(&self) -> usize;
+    /// Already encoded units differ in length; `frame_bytes` is then their upper bound.
+    fn variable(&self) -> bool {
+        false
+    }
     /// Must be a pure function of index and immutable source parameters.
     fn draw(&self, index: u64, rgba: &mut [u8]) -> Result<()>;
     /// Upload sources can transfer ownership without copying a full RGBA frame.
@@ -96,6 +100,7 @@ pub(super) async fn render(
     let started = Instant::now();
     let count = source.frame_count();
     let bytes = source.frame_bytes();
+    let variable = source.variable();
     let (frames_tx, mut frames_rx) = tokio::sync::mpsc::channel(1);
     let (buffers_tx, mut buffers_rx) = tokio::sync::mpsc::channel(2);
     // A credit is held from production until write completion. At most two
@@ -126,7 +131,9 @@ pub(super) async fn render(
             for _ in 0..count {
                 let (frame, elapsed) = frames_rx.recv().await.context("视频帧供给提前结束")?;
                 let frame = frame?;
-                ensure!(frame.bytes().len() == bytes, "RGBA 帧长度不匹配");
+                let length = frame.bytes().len();
+                let sized = if variable { (1..=bytes).contains(&length) } else { length == bytes };
+                ensure!(sized, "RGBA 帧长度不匹配");
                 drawing += elapsed;
                 let write_started = Instant::now();
                 input.write_all(frame.bytes()).await.context("写入透明帧失败")?;
