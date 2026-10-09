@@ -940,10 +940,22 @@ export function NarrowFolderRail({
   );
 }
 
-interface MenuState {
-  node: FolderNode;
+/** Where a sidebar menu unfolds: at the pointer, or under the row's ⋯ button (`anchor`). */
+interface MenuPoint {
   x: number;
   y: number;
+  top?: number;
+  anchor?: HTMLElement;
+}
+
+interface MenuState extends MenuPoint {
+  node: FolderNode;
+}
+
+/** A menu opened from a button hangs under it, and above it when there is no room below. */
+function menuPointUnder(button: HTMLElement): MenuPoint {
+  const rect = button.getBoundingClientRect();
+  return { x: rect.left, y: rect.bottom + 4, top: rect.top, anchor: button };
 }
 
 /** 拖文件夹排序时的落点：插到某个兄弟的前面还是后面。 */
@@ -1097,12 +1109,16 @@ export function FolderTree({
   const rootPointerCleanupRef = useRef<(() => void) | null>(null);
   const suppressRootClickRef = useRef(false);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [allMenu, setAllMenu] = useState<{ x: number; y: number } | null>(null);
+  const [allMenu, setAllMenu] = useState<MenuPoint | null>(null);
   /** 整库重扫会遍历所有根：第一次点只在原右键面板里上膛，第二次才启动。 */
   const [rescanArmed, setRescanArmed] = useState(false);
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
   const folderSelectionAnchor = useRef("");
   const [newFolder, setNewFolder] = useState<{ parent: string; name: string; saving: boolean } | null>(null);
+  /** The folder whose name is being edited in its own row. */
+  const [renaming, setRenaming] = useState<{ node: FolderNode; name: string; saving: boolean } | null>(null);
+  const renamingRef = useRef(renaming);
+  renamingRef.current = renaming;
   /**
    * 文件夹操作失败就地贴在这一栏底下。原来走的是全局弹窗，
    * 但拖拽/改名这类操作的"哪里出错了"必须和被操作的那棵树待在一起，
@@ -1432,6 +1448,29 @@ export function FolderTree({
       });
   };
 
+  /** Enter or leaving the field keeps the new name; an empty or unchanged one changes nothing. */
+  const commitRename = () => {
+    const current = renamingRef.current;
+    if (!current || current.saving) return;
+    const { node } = current;
+    const name = current.name.trim();
+    if (!name || name === node.name) {
+      setRenaming(null);
+      return;
+    }
+    setRenaming({ ...current, saving: true });
+    setNotice("");
+    void api
+      .renameFolder(node.path, name)
+      .then((tree) => {
+        const folder = relocatedFolderPath(tree, useLibraryStore.getState().filter.folder, node.path, node.parent, name);
+        if (folder) setFilter({ folder });
+        return refreshFolders();
+      })
+      .catch((error: unknown) => setNotice((error as Error).message))
+      .finally(() => setRenaming((latest) => (latest?.node.path === node.path ? null : latest)));
+  };
+
   const toggleStreamRoot = (
     platform: StreamBrowsePlatform,
     accountState: AccountState | undefined,
@@ -1703,6 +1742,49 @@ export function FolderTree({
     const rowTitle = [node.path, pendingHint, depth === 0 ? "拖动调整侧栏顺序" : ""]
       .filter(Boolean)
       .join(" · ");
+    if (renaming?.node.path === node.path) {
+      // The row gives way to a field in the same place; it takes no click, drag or drop.
+      return (
+        <div key={node.path}>
+          <div className="kd-folder kd-folder-new" style={depthStyle(depth)}>
+            <span className="kd-folder-caret">
+              {node.children.length > 0 ? <Disclosure open={open} /> : null}
+            </span>
+            <span className="kd-folder-icon">
+              <FolderGlyph
+                path={node.path}
+                audioDir={settings?.download_dir}
+                videoDir={settings?.download_dir}
+                root={node.is_root}
+                open={open && node.children.length > 0}
+                icon={ROW_ICON}
+              />
+            </span>
+            <input
+              autoFocus
+              data-kd-motion="pop"
+              aria-label="文件夹名称"
+              value={renaming.name}
+              disabled={renaming.saving}
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) => setRenaming({ ...renaming, name: event.target.value })}
+              onBlur={commitRename}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                // Enter that confirms an input-method candidate is not the end of the name.
+                if (event.nativeEvent.isComposing) return;
+                if (event.key === "Enter") commitRename();
+                if (event.key === "Escape") {
+                  renamingRef.current = null;
+                  setRenaming(null);
+                }
+              }}
+            />
+          </div>
+          {open && node.children.map((child) => render(child, depth + 1))}
+        </div>
+      );
+    }
     return (
       <div key={node.path}>
         <div
@@ -1905,12 +1987,16 @@ export function FolderTree({
               onClick={(event) => {
                 event.stopPropagation();
                 setAllMenu(null);
+                // A second click on the button that opened the menu closes it.
+                if (menu?.anchor === event.currentTarget) {
+                  setMenu(null);
+                  return;
+                }
                 if (!selectedFolders.has(node.path)) {
                   setSelectedFolders(new Set([node.path]));
                   folderSelectionAnchor.current = node.path;
                 }
-                const rect = event.currentTarget.getBoundingClientRect();
-                setMenu({ node, x: rect.left, y: rect.bottom + 2 });
+                setMenu({ node, ...menuPointUnder(event.currentTarget) });
               }}
             >
               <MoreHorizontal {...ROW_ICON} />
@@ -1918,7 +2004,7 @@ export function FolderTree({
           </span>
         </div>
         {newFolder?.parent === node.path && (
-          <div className="kd-folder kd-folder-new" style={depthStyle(depth + 1)}>
+          <div className="kd-folder kd-folder-new" data-kd-motion="pop" style={depthStyle(depth + 1)}>
             <span className="kd-folder-caret" />
             <span className="kd-folder-icon">
               <Folder {...ROW_ICON} />
@@ -1932,6 +2018,8 @@ export function FolderTree({
               onChange={(event) => setNewFolder({ ...newFolder, name: event.target.value })}
               onKeyDown={(event) => {
                 event.stopPropagation();
+                // Enter that confirms an input-method candidate is not the end of the name.
+                if (event.nativeEvent.isComposing) return;
                 if (event.key === "Enter") commitNewFolder();
                 if (event.key === "Escape") setNewFolder(null);
               }}
@@ -2005,10 +2093,14 @@ export function FolderTree({
           onClick={(event) => {
             event.stopPropagation();
             setMenu(null);
-            setSelectedFolders(new Set());
             setRescanArmed(false);
-            const rect = event.currentTarget.getBoundingClientRect();
-            setAllMenu({ x: rect.left, y: rect.bottom + 2 });
+            // A second click on the button that opened the menu closes it.
+            if (allMenu?.anchor === event.currentTarget) {
+              setAllMenu(null);
+              return;
+            }
+            setSelectedFolders(new Set());
+            setAllMenu(menuPointUnder(event.currentTarget));
           }}
         >
           <MoreHorizontal {...ROW_ICON} />
@@ -2133,7 +2225,14 @@ export function FolderTree({
 
       {streamRootMenu}
       {menu && (
-        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          anchorTop={menu.top}
+          anchorElement={menu.anchor}
+          toggleAnchor={!!menu.anchor}
+          onClose={() => setMenu(null)}
+        >
           <button
             type="button"
             disabled={!undo.available}
@@ -2168,16 +2267,8 @@ export function FolderTree({
             title={menu.node.is_root ? "曲库根目录去设置里改" : undefined}
             onClick={() => {
               setMenu(null);
-              const name = prompt("重命名文件夹", menu.node.name);
-              if (!name || name === menu.node.name) return;
-              void api
-                .renameFolder(menu.node.path, name)
-                .then((tree) => {
-                  const folder = relocatedFolderPath(tree, useLibraryStore.getState().filter.folder, menu.node.path, menu.node.parent, name);
-                  if (folder) setFilter({ folder });
-                  return refreshFolders();
-                })
-                .catch((error: unknown) => setNotice((error as Error).message));
+              setNewFolder(null);
+              setRenaming({ node: menu.node, name: menu.node.name, saving: false });
             }}
           >
             <PencilLine size={12} />
@@ -2449,6 +2540,9 @@ export function FolderTree({
         <ContextMenu
           x={allMenu.x}
           y={allMenu.y}
+          anchorTop={allMenu.top}
+          anchorElement={allMenu.anchor}
+          toggleAnchor={!!allMenu.anchor}
           onClose={() => {
             setAllMenu(null);
             setRescanArmed(false);

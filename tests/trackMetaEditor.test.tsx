@@ -53,6 +53,11 @@ test("the floating editor edits one track, writes only changed fields and holds 
         : { left: 0, top: 0, width: 0, height: 0 };
     return { ...box, x: box.left, y: box.top, right: box.left + box.width, bottom: box.top + box.height, toJSON() {} };
   };
+  // The window places itself by its layout box (it is scaled while it pops in).
+  for (const [name, edge] of [["offsetLeft", "left"], ["offsetTop", "top"], ["offsetWidth", "width"], ["offsetHeight", "height"]] as const) {
+    Object.defineProperty(dom.window.HTMLElement.prototype, name, { configurable: true,
+      get(this: HTMLElement) { return this.getBoundingClientRect()[edge]; } });
+  }
   const records = new Map<number, Track>([[7, makeTrack(7)], [8, makeTrack(8)]]);
   const patches: { id: number; body: Record<string, unknown> }[] = [];
   let tagWriteError = "";

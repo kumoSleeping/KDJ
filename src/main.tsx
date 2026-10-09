@@ -25,6 +25,8 @@ function render(node: ReactNode): void {
 async function bootstrap(): Promise<void> {
   if (isLyricsWindow) document.documentElement.dataset.window = "lyrics";
   await import("./design.css");
+  // After design.css: the gestures of the motion schema outrank a component's resting rules.
+  await import("./motion.css");
   const [bridgeModule, fontModule, appStoreModule, themeModule] = await Promise.all([
     import("./lib/bridge"),
     import("./lib/fontScale"),

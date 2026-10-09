@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { leaveAfterUnmount, MOTION_STAGGER_TOTAL_MS } from "../../lib/motion";
 
 const PAD = 8;
 
@@ -24,6 +25,8 @@ export interface ContextMenuProps {
   label?: string;
   initialFocus?: "selected" | "first" | "last" | "none";
   role?: "menu" | "listbox";
+  /** A menu opened from an item of another menu unfolds out of that item's side. */
+  unfoldFrom?: "anchor" | "side";
   onClose(): void;
   /** 这些元素上的按下属于菜单本身（开关按钮、联动滑杆），不触发关闭。 */
   keepOpen?: string;
@@ -31,12 +34,21 @@ export interface ContextMenuProps {
   className?: string;
 }
 
-/** 右键与选择菜单共用浮层、主题、视口避让及键盘导航。 */
-export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = false, minWidth, id, label, onClose, keepOpen, children, className, initialFocus = "selected", role = "menu" }: ContextMenuProps) {
+/**
+ * 右键与选择菜单共用浮层、主题、视口避让及键盘导航。
+ *
+ * Motion (docs/motion-schema.md): the surface unfolds out of the point it was asked for — the
+ * pointer, or the anchor's corner — and its items follow. When its owner unmounts it, it folds
+ * back into that point as an inert picture; the owner's action never waits for it.
+ */
+export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = false, minWidth, id, label, onClose, keepOpen, children, className, initialFocus = "selected", role = "menu", unfoldFrom = "anchor" }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
   const search = useRef({ text: "", time: 0 });
-  const [pos, setPos] = useState({ x, y });
+  /** Where the menu is, and the point inside it that it unfolds from (`ox`, `oy`, in px). */
+  const [pos, setPos] = useState({ x, y, ox: 0, oy: 0, up: false });
+  /** True while the items follow the surface in; afterwards an added item simply appears. */
+  const [opening, setOpening] = useState(true);
   const [host] = useState(() => typeof document === "undefined" ? null
     : document.activeElement?.closest("dialog[open]") ?? document.body);
 
@@ -55,26 +67,40 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = fal
       target?.focus({ preventScroll: true });
       target?.scrollIntoView?.({ block: "nearest" });
     }
-    return () => { el.hidePopover?.(); };
+    const opened = window.setTimeout(() => setOpening(false), MOTION_STAGGER_TOTAL_MS);
+    return () => {
+      window.clearTimeout(opened);
+      // Before the popover closes: the fold needs the menu's scroll position.
+      leaveAfterUnmount(el);
+      el.hidePopover?.();
+    };
   }, []);
 
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     const clamp = () => {
-      const rect = el.getBoundingClientRect();
+      // The layout size: the unfolding surface is scaled, and its painted box is not its size.
+      const width = el.offsetWidth;
+      const height = el.offsetHeight;
       const vw = window.innerWidth;
       const vh = window.innerHeight;
-      let nextX = Math.min(x, vw - PAD - rect.width);
+      let nextX = Math.min(x, vw - PAD - width);
       let nextY = y;
-      if (nextY + rect.height > vh - PAD) {
-        nextY = anchorTop !== undefined && anchorTop - rect.height - 4 >= PAD
-          ? anchorTop - rect.height - 4 : vh - PAD - rect.height;
+      if (nextY + height > vh - PAD) {
+        nextY = anchorTop !== undefined && anchorTop - height - 4 >= PAD
+          ? anchorTop - height - 4 : vh - PAD - height;
       }
       nextX = Math.max(PAD, nextX);
       nextY = Math.max(PAD, nextY);
+      // The asked-for point, seen from the menu that had to move away from it: a menu pushed
+      // left or lifted above its anchor still grows out of the pointer or the anchor.
+      const ox = Math.max(0, Math.min(width, x - nextX));
+      const oy = Math.max(0, Math.min(height, y - nextY));
+      const up = height > 0 && oy > height / 2;
       setPos(previous => Math.abs(nextX - previous.x) > 0.5 || Math.abs(nextY - previous.y) > 0.5
-        ? { x: nextX, y: nextY } : previous);
+        || Math.abs(ox - previous.ox) > 0.5 || Math.abs(oy - previous.oy) > 0.5 || up !== previous.up
+        ? { x: nextX, y: nextY, ox, oy, up } : previous);
     };
     clamp();
     const observer = new ResizeObserver(clamp);
@@ -84,7 +110,8 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = fal
       observer.disconnect();
       window.removeEventListener("resize", clamp);
     };
-  }, [x, y, anchorTop, children]);
+    // The observer reports every change of the menu's own size; children need no second pass.
+  }, [x, y, anchorTop]);
 
   useEffect(() => {
     const close = (event: Event) => {
@@ -132,7 +159,11 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = fal
       id={id}
       popover="manual"
       className={["kd-context-menu", className].filter(Boolean).join(" ")}
-      style={{ left: pos.x, top: pos.y, minWidth: minWidth === undefined ? undefined : `min(${minWidth}px, calc(100vw - 16px))` }}
+      data-kd-motion="unfold"
+      data-kd-from={unfoldFrom === "side" ? "side" : undefined}
+      data-kd-stagger={opening ? (pos.up ? "up" : "down") : undefined}
+      style={{ left: pos.x, top: pos.y, transformOrigin: `${pos.ox}px ${pos.oy}px`,
+        minWidth: minWidth === undefined ? undefined : `min(${minWidth}px, calc(100vw - 16px))` }}
       role={role}
       aria-label={label}
       onPointerDown={event => event.stopPropagation()}
