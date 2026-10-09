@@ -22,9 +22,11 @@ export function libraryWindowTop(scrollTop: number, rowHeight: number): number {
 export interface LibraryScrollPace {
   /** Smoothed signed speed, px/ms. */
   speed: number;
+  /** Speed over the last frame alone: a flick is at full speed before the smoothed one says so. */
+  instant: number;
   fast: boolean;
 }
-export const LIBRARY_REST_PACE: LibraryScrollPace = { speed: 0, fast: false };
+export const LIBRARY_REST_PACE: LibraryScrollPace = { speed: 0, instant: 0, fast: false };
 /** One wheel notch is a burst of a single frame; the speed is averaged over about this long. */
 const SPEED_SMOOTHING_MS = 100;
 /** px/ms. Above the first a scroll is fast; it stays fast until it falls below the second. */
@@ -38,7 +40,7 @@ export function libraryScrollPace(previous: LibraryScrollPace, travel: number, e
   const keep = Math.exp(-elapsed / SPEED_SMOOTHING_MS);
   const speed = previous.speed * keep + (travel / elapsed) * (1 - keep);
   const jump = Math.abs(travel) >= JUMP_SCREENS * Math.max(1, viewHeight);
-  return { speed, fast: jump || Math.abs(speed) > (previous.fast ? FAST_EXIT_SPEED : FAST_ENTER_SPEED) };
+  return { speed, instant: travel / elapsed, fast: jump || Math.abs(speed) > (previous.fast ? FAST_EXIT_SPEED : FAST_ENTER_SPEED) };
 }
 
 export function libraryViewport(input: LibraryViewportInput) {
