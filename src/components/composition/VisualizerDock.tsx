@@ -14,7 +14,7 @@ export function VisualizerDock() {
   const openTrack = useVisualizerStudioStore(state => state.track);
   const openInline = useVisualizerStudioStore(state => state.inlineSettings);
   const requestClose = useVisualizerStudioStore(state => state.requestClose);
-  // The column keeps a closed app on screen while it slides out; keep showing what it showed.
+  // The column keeps a closed app on screen while it leaves; keep showing what it showed.
   const shown = useRef({ track: openTrack, inlineSettings: openInline });
   if (openTrack) shown.current = { track: openTrack, inlineSettings: openInline };
   const host = useRef<HTMLDivElement | null>(null);
@@ -26,7 +26,7 @@ export function VisualizerDock() {
     host.current = node;
   }, []);
   // The floating picture withdraws its controls the moment the app closes. Leave their last
-  // appearance behind for the slide out; this runs before React removes them.
+  // appearance behind for the way out; this runs before React removes them.
   const ghost = useRef<HTMLDivElement | null>(null);
   useEffect(() => useVisualizerStudioStore.subscribe((state, previous) => {
     const live = host.current, still = ghost.current;

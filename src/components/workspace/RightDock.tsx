@@ -69,7 +69,7 @@ export function RightDock({ apps, order, onOccupiedChange }: {
   useLayoutEffect(() => { last.current = { apps: new Map(apps.map(app => [app.id, app])), frontId }; });
   const occupied = apps.length + exiting.length > 0;
   useEffect(() => onOccupiedChange?.(occupied), [occupied, onOccupiedChange]);
-  // One keyed list: an app that starts to leave stays the same instance, so it slides out as
+  // One keyed list: an app that starts to leave stays the same instance, so it leaves as
   // it was (its scroll position, its picture) instead of being mounted afresh for the exit.
   // The effect above lists it one commit late; on the render that drops it, take it from the
   // last commit directly, or it would be unmounted in between.
