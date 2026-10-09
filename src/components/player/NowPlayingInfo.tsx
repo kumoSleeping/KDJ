@@ -63,12 +63,15 @@ export function NowPlayingInfoHost({ trackId, playing }: { trackId: number | nul
   const [shown, setShown] = useState(playingTrack);
   const swapping = mounted && visible && !!shown && !!playingTrack && shown.id !== playingTrack.id;
   useEffect(() => {
+    // A panel on its way down keeps the song it went down with: changing it there would start
+    // its retreat over from the top.
+    if (mounted && !visible) return;
     if (!swapping) { setShown(playingTrack); return; }
     const timer = window.setTimeout(() => setShown(playingTrack), SONG_SWAP_OUT_MS);
     return () => window.clearTimeout(timer);
-  }, [playingTrack, swapping]);
+  }, [playingTrack, swapping, mounted, visible]);
   useEffect(() => {
-    // The right column and the toast make room for the panel (see --kd-info-lift).
+    // The drawer and the toast make room for the panel (see --kd-info-lift).
     if (!mounted || !visible) document.documentElement.style.removeProperty("--kd-info-lift");
     return () => { document.documentElement.style.removeProperty("--kd-info-lift"); };
   }, [mounted, visible]);

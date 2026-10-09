@@ -106,3 +106,13 @@
 /* 可视化配置、编辑 Meta */
 .kd-drawer-body > .kd-viz-dock { background: transparent; }
 .kd-drawer-body > .kd-meta-editor { flex: 1 1 auto; min-height: 0; }
+
+/* Sakura98: the sheet is a 98 window face, square and bevelled, with the pack's hard shadow.
+   Kept here so it does not depend on the installed copy of the pack. */
+:root[data-theme-pack="sakulaptop98"] .kd-drawer {
+  border-radius: 0;
+  background: var(--s98-face-hi, var(--kd-panel));
+  box-shadow: var(--s98-raised), 4px 6px 0 -1px rgb(120 40 70 / 0.22);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drawer-host { clip-path: inset(0 0 -1rem -1rem); }
+:root[data-theme-pack="sakulaptop98"] .kd-title-tabs { padding: 0.8rem 0.7rem 0.5rem 1rem; }

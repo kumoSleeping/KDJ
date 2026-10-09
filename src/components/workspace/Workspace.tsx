@@ -43,7 +43,7 @@ import {
   retrySongPreview,
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
-import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
+import { getPlayerSessionState, subscribePlayerSession } from "../../lib/playerSession";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { VisualizerDock } from "../composition/VisualizerDock";
 import { LiveVjPanel } from "../composition/LiveVjPanel";
@@ -300,10 +300,11 @@ export function Workspace() {
     getSongPreviewState,
     getSongPreviewState,
   );
+  // The clockless view: the workspace must not re-render at the rate of the player clock.
   const playerSession = useSyncExternalStore(
     subscribePlayerSession,
-    getPlayerSession,
-    getPlayerSession,
+    getPlayerSessionState,
+    getPlayerSessionState,
   );
   const previewPendingStatus =
     songPreviewState.phase === "resolving"
