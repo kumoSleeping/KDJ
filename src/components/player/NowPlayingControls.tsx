@@ -20,7 +20,6 @@ import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useAppStore } from "../../stores/appStore";
 import { streamAnalysisSnapshot, subscribeStreamAnalysis, trackWithStreamAnalysis } from "../../lib/streamAnalysis";
 import { ArcKnob } from "./ManagerMixerControls";
-import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
 import "./PlayerEq.css";
 
 function clamp(value: number, min: number, max: number): number {
@@ -83,6 +82,47 @@ function TempoControl({
   );
 }
 
+/** How long after its acknowledgement a command may take to show up in the player's reports. */
+const CONTROL_SETTLE_MS = 400;
+
+/**
+ * A deck value while the user is setting it.
+ *
+ * The player's reports lag the commands, so during a drag they carry older values. Matching
+ * them against the value last sent let one of those take over whenever the drag passed the same
+ * value twice, and the thumb then followed the stale reports. The user's value is shown from the
+ * first command until the latest one has been acknowledged and reported; outside that window the
+ * player's own value is shown, with no copy of it kept here.
+ */
+function useCommandedValue(owner: number, reported: number): [number, (value: number, send: (() => Promise<unknown>) | null) => Promise<void>] {
+  const [draft, setDraft] = useState<{ owner: number; value: number } | null>(null);
+  const request = useRef(0);
+  const timer = useRef<number | null>(null);
+  const clearTimer = () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+  useEffect(() => () => { request.current += 1; clearTimer(); }, [owner]);
+  const commit = (value: number, send: (() => Promise<unknown>) | null) => {
+    const id = ++request.current;
+    clearTimer();
+    setDraft({ owner, value });
+    const release = (delay: number) => {
+      if (request.current !== id) return;
+      timer.current = window.setTimeout(() => {
+        if (request.current === id) setDraft(null);
+      }, delay);
+    };
+    // Nothing to send (the deck is between songs): keep the value until the deck reports again.
+    if (!send) return Promise.resolve();
+    return send().then(
+      () => release(CONTROL_SETTLE_MS),
+      (error: unknown) => { release(0); throw error; },
+    );
+  };
+  return [draft && draft.owner === owner ? draft.value : reported, commit];
+}
+
 function NowPlayingControls({
   track,
   keyNotation,
@@ -99,44 +139,21 @@ function NowPlayingControls({
   const { player, control } = usePlayingDeck(track.id);
   const mixer = useManagerMixer((state) => state.values);
   const setMixerState = useManagerMixer((state) => state.setValues);
-  const [tempoState, setTempoState] = useState(() => ({ owner: track.id, value: 1 }));
-  const [pitchState, setPitchState] = useState(() => ({ owner: track.id, value: 0 }));
   const tempoRange = usePlaybackPrefs((state) => state.tempoRange);
   const mixerRef = useRef(mixer);
-  const pendingTempoRef = useRef<number | null>(null);
-  const pendingPitchRef = useRef<number | null>(null);
 
   mixerRef.current = mixer;
 
   const side = control.side;
   const deck = control.deck;
-  const tempoDraft = tempoState.owner === track.id ? tempoState.value : deck?.rate ?? 1;
-  const pitchDraft = pitchState.owner === track.id ? pitchState.value : deck?.pitchSemitones ?? 0;
-  const setTempoDraft = (value: number) => setTempoState({ owner: track.id, value });
-  const setPitchDraft = (value: number) => setPitchState({ owner: track.id, value });
-
-  useEffect(() => {
-    if (!deck) return;
-    if (pendingTempoRef.current === null) {
-      setTempoDraft(deck.rate);
-    } else if (Math.abs(deck.rate - pendingTempoRef.current) < 0.0005) {
-      pendingTempoRef.current = null;
-      setTempoDraft(deck.rate);
-    }
-    if (pendingPitchRef.current === null) {
-      setPitchDraft(deck.pitchSemitones);
-    } else if (Math.abs(deck.pitchSemitones - pendingPitchRef.current) < 0.0005) {
-      pendingPitchRef.current = null;
-      setPitchDraft(deck.pitchSemitones);
-    }
-  }, [deck?.rate, deck?.pitchSemitones, deck?.trackId]);
+  const [tempoDraft, commitTempo] = useCommandedValue(track.id, deck?.rate ?? 1);
+  const [pitchDraft, commitPitch] = useCommandedValue(track.id, deck?.pitchSemitones ?? 0);
+  const loadedSide = () => side !== null && player.state().decks[side].trackId === track.id ? side : null;
 
   // Tempo and pitch are song-owned, but the Manager mixer is one continuous session strip.
   // Restore the retained mixer to the active native side on every song instead of painting
   // or sounding a neutral frame.
   useEffect(() => {
-    pendingTempoRef.current = null;
-    pendingPitchRef.current = null;
     if (side === null || player.state().decks[side].trackId !== track.id) return;
     void player.setDeckMixer(side, runtimeMixer(mixerRef.current)).catch((error: unknown) => {
       onError(`控制区恢复失败：${error instanceof Error ? error.message : String(error)}`);
@@ -151,11 +168,7 @@ function NowPlayingControls({
       Math.min(2, 1 + tempoRange / 100),
     );
     if (Math.abs(deck.rate - bounded) < 0.0005) return;
-    pendingTempoRef.current = bounded;
-    setTempoDraft(bounded);
-    void player.setDeckRate(side, bounded).catch((error: unknown) => {
-      pendingTempoRef.current = null;
-      setTempoDraft(player.state().decks[side].rate);
+    void commitTempo(bounded, () => player.setDeckRate(side, bounded)).catch((error: unknown) => {
       onError(`Tempo 范围应用失败：${error instanceof Error ? error.message : String(error)}`);
     });
   }, [tempoRange]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -178,24 +191,16 @@ function NowPlayingControls({
 
   const setRate = (rate: number) => {
     const bounded = clamp(rate, 0.5, 2);
-    pendingTempoRef.current = bounded;
-    setTempoDraft(bounded);
-    if (side === null || player.state().decks[side].trackId !== track.id) return;
-    void player.setDeckRate(side, bounded).catch((error: unknown) => {
-      pendingTempoRef.current = null;
-      setTempoDraft(player.state().decks[side].rate);
+    const target = loadedSide();
+    void commitTempo(bounded, target === null ? null : () => player.setDeckRate(target, bounded)).catch((error: unknown) => {
       onError(`Tempo 调整失败：${error instanceof Error ? error.message : String(error)}`);
     });
   };
 
   const setPitch = (semitones: number) => {
     const bounded = Math.round(clamp(semitones, -12, 12));
-    pendingPitchRef.current = bounded;
-    setPitchDraft(bounded);
-    if (side === null || player.state().decks[side].trackId !== track.id) return;
-    void player.setDeckPitch(side, bounded).catch((error: unknown) => {
-      pendingPitchRef.current = null;
-      setPitchDraft(player.state().decks[side].pitchSemitones);
+    const target = loadedSide();
+    void commitPitch(bounded, target === null ? null : () => player.setDeckPitch(target, bounded)).catch((error: unknown) => {
       onError(`Key 调整失败：${error instanceof Error ? error.message : String(error)}`);
     });
   };
@@ -211,12 +216,12 @@ function NowPlayingControls({
     <div className="kd-manager-control" data-side={side === null ? undefined : side === 0 ? "a" : "b"} aria-busy={!ready}>
       {/* Controls sit on the transport's row, readouts on the waveform's row below. */}
       <div className="kd-manager-knob-stack">
-        <ArcKnob dial size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
+        <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
           format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }} />
-        <ArcKnob dial size="xs" label="FILTER" value={mixer.filter} onChange={(filter) => setMixer({ filter })} onReset={() => setMixer({ filter: 0 })} />
-        <ArcKnob dial size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
-        <ArcKnob dial size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
-        <ArcKnob dial size="xs" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
+        <ArcKnob size="xs" label="FILTER" value={mixer.filter} onChange={(filter) => setMixer({ filter })} onReset={() => setMixer({ filter: 0 })} />
+        <ArcKnob size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
+        <ArcKnob size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
+        <ArcKnob size="xs" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
       </div>
 
       <div className="kd-eq-readouts">
@@ -249,12 +254,7 @@ function NowPlayingControls({
 export function PlayerEq({ onError }: { onError(message: string): void }) {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const keyNotation = useAppStore(state => state.settings?.key_notation ?? "camelot");
-  const infoUp = useNowPlayingInfo(nowPlayingInfoVisible);
   return <div className="kd-player-eq" role="group" aria-label="EQ / 播放控制">
-    {/* 曲目信息 rises from this block's top edge; the handle on that edge raises and lowers it. */}
-    {track && <button type="button" className="kd-player-info-handle" aria-expanded={infoUp}
-      aria-label={infoUp ? "收起曲目信息" : "曲目信息"} title={infoUp ? "收起曲目信息" : "曲目信息"}
-      onClick={() => useNowPlayingInfo.getState().toggle()}><i aria-hidden="true" /></button>}
     {track && <NowPlayingControls track={track} keyNotation={keyNotation} onError={onError} />}
   </div>;
 }
