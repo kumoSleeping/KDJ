@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { STAND_IN_TILE_ROWS, createLibraryStandIns, fitStandInText, standInGap, standInPlan, type StandInFrame, type StandInPlanInput } from "../src/lib/libraryStandIns";
+import { STAND_IN_TILE_ROWS, createLibraryStandIns, standInGap, standInPlan, type StandInFrame, type StandInPlanInput } from "../src/lib/libraryStandIns";
 
 const base: StandInPlanInput = { top: 0, height: 684, rowHeight: 36, count: 10_000, first: 0, windowStart: 0, windowEnd: 0, direction: 0 };
 const shown = (input: StandInPlanInput) => standInPlan(input).map((tile) => [tile.shownStart, tile.shownEnd] as const);
@@ -41,13 +41,21 @@ test("pending downloads keep their own rows; the last tile ends with the table",
   assert.equal(Math.max(...plan.map((tile) => tile.end)), 60);
 });
 
-test("a long text is cut with an ellipsis to the width of its cell", () => {
-  const measure = (text: string) => text.length * 10;
-  assert.equal(fitStandInText(measure, "Night Drive", 200), "Night Drive");
-  assert.equal(fitStandInText(measure, "Night Drive", 80), "Night D…");
-  assert.equal(fitStandInText(measure, "Night Drive", 50), "Nigh…");
-  assert.equal(fitStandInText(measure, "Night Drive", 15), "");
-  assert.equal(fitStandInText(measure, "Night Drive", 0), "");
+test("a faster scroll reaches further ahead, up to a limit, and only the near screens are worth their text", () => {
+  const at = (lead: number, direction: -1 | 1 = 1) => standInPlan({ ...base, top: 1000 * 36, direction, lead });
+  const reach = (plan: ReturnType<typeof standInPlan>, direction: -1 | 1) => direction > 0
+    ? Math.max(...plan.map((tile) => tile.end)) - 1019 : 1000 - Math.min(...plan.map((tile) => tile.start));
+  assert.ok(reach(at(0), 1) >= 6 * 19 && reach(at(0), 1) < 6 * 19 + STAND_IN_TILE_ROWS, "six screens whatever the speed");
+  // 60 px/ms for half a second: 30,000 px, 833 rows.
+  for (const direction of [-1, 1] as const) {
+    const far = at(30_000, direction);
+    assert.ok(reach(far, direction) >= 833 && reach(far, direction) < 833 + STAND_IN_TILE_ROWS);
+    assert.equal(standInGap(far.map((tile) => [tile.shownStart, tile.shownEnd] as const), direction > 0 ? 1000 : 1000 - 833, direction > 0 ? 1019 + 833 : 1019), 0);
+    assert.ok(far.filter((tile) => tile.near).length <= 9 && far.some((tile) => tile.near) && far.some((tile) => !tile.near));
+    assert.ok(far.every((tile) => !tile.urgent || tile.near));
+  }
+  assert.ok(reach(at(10_000_000), 1) <= 65 * STAND_IN_TILE_ROWS, "no more than the limit of tiles");
+  assert.equal(standInPlan({ ...base, top: 1000 * 36, direction: 0, lead: 30_000, windowStart: 900, windowEnd: 1100 }).length, 0);
   assert.equal(standInGap([[0, 5], [8, 12]], 3, 10), 3);
 });
 
@@ -83,13 +91,13 @@ test("tiles are repainted in place when rows arrive, hidden only when the order 
   dom.window.HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement) {
     const drawn: string[] = [];
     texts.set(this, drawn);
-    return { setTransform() {}, clearRect() { drawn.length = 0; }, fillText(text: string) { drawn.push(text); }, measureText: (text: string) => ({ width: text.length * 7 }),
-      beginPath() {}, rect() {}, fill() {}, roundRect() {} };
+    return { setTransform() {}, clearRect() { drawn.length = 0; }, fillText(text: string) { drawn.push(text); }, drawImage() { drawn.push("(bars)"); },
+      beginPath() {}, rect() {}, fill() {}, fillRect() {}, roundRect() {}, save() {}, restore() {}, clip() {} };
   } as unknown as typeof dom.window.HTMLCanvasElement.prototype.getContext;
 
   const loaded = new Set<number>();
   for (let row = 0; row < 150; row += 1) loaded.add(row);
-  const frame = (over: Partial<StandInFrame> = {}): StandInFrame => ({ rowHeight: 36, count: 2000, first: 0, windowStart: 0, windowEnd: 60, direction: 1,
+  const frame = (over: Partial<StandInFrame> = {}): StandInFrame => ({ rowHeight: 36, count: 2000, first: 0, windowStart: 0, windowEnd: 60, direction: 1, speed: 5,
     version: ["order"], data: "first batch", text: (row, column) => loaded.has(row) ? `${column} ${row}` : undefined, ...over });
   const canvases = () => [...layer.querySelectorAll("canvas")];
   const shown = () => canvases().filter((canvas) => canvas.style.display !== "none");
@@ -97,16 +105,16 @@ test("tiles are repainted in place when rows arrive, hidden only when the order 
   const standIns = createLibraryStandIns(scroller, layer);
   assert.equal(standIns.ready(), true);
 
-  // A fast scroll, a hundred rows down: the viewport's tiles at once, the ones ahead two a frame.
+  // A fast scroll, a hundred rows down: every tile of the plan shows something in the frame that asked.
   scrollTop = 100 * 36;
   let covered = standIns.update(frame());
-  assert.equal(standInGap(covered, 100, 119), 0, "the viewport is covered in the frame that asked");
+  assert.equal(standInGap(covered, 100, 119 + 6 * 19), 0, "the viewport and six screens ahead are covered at once");
   assert.equal(layer.style.height, `${28 + 2000 * 36}px`, "the layer is the table's box, so no canvas lengthens the scroll range");
-  const early = shown().length;
   settle();
-  assert.ok(shown().length > early && shown().length >= 6, "the tiles ahead follow within a few frames");
+  assert.ok(shown().length >= 6);
   assert.ok(shown().every((canvas) => canvas.style.transform.startsWith("translate(0px, ")));
-  assert.ok(texts.get(shown()[0])!.includes("title 100") || [...texts.values()].some((drawn) => drawn.includes("title 100")));
+  assert.ok([...texts.values()].some((drawn) => drawn.includes("title 100")));
+  assert.ok(shown().every((canvas) => !texts.get(canvas)!.includes("(bars)")), "at a readable speed the near screens are text");
   assert.ok([...texts.values()].every((drawn) => !drawn.includes("title 150")), "rows that have not loaded have no text yet");
 
   // The next batch of rows arrives: nothing on show is hidden, and the new text is painted.
@@ -126,17 +134,49 @@ test("tiles are repainted in place when rows arrive, hidden only when the order 
   assert.deepEqual([...texts.values()].map((drawn) => drawn.length), paints);
   assert.deepEqual(shown(), before);
 
-  // A new order: what the tiles show is wrong, so those out of sight wait hidden for their turn.
-  standIns.update(frame({ data: "second batch", version: ["another order"] }));
-  assert.ok(shown().length < before.length && shown().length >= 1);
-  assert.equal(standInGap(standIns.update(frame({ data: "second batch", version: ["another order"] })), 100, 119), 0);
+  // A new order: what the tiles show is wrong. Each is painted again before it is shown, as text
+  // while the frame has time and as bars after that, so none is left blank or showing the old order.
+  loaded.delete(101);
+  standIns.takeStats();
+  covered = standIns.update(frame({ data: "second batch", version: ["another order"] }));
+  assert.equal(standInGap(covered, 100, 119 + 6 * 19), 0);
+  const repainted = standIns.takeStats();
+  assert.equal(repainted.text + repainted.bars >= before.length, true, "every tile was painted again in that frame");
+  assert.ok([...texts.values()].every((drawn) => !drawn.includes("title 101")), "nothing of the old order is left on show");
+  loaded.add(101);
   settle();
   assert.equal(shown().length, before.length);
 
+  // A flick at 60 px/ms: half a second of travel ahead, as bars, all of it within two frames; no text is painted.
+  const order = { data: "second batch", version: ["another order"] };
+  const textTiles = shown().length;
+  covered = standIns.update(frame({ ...order, speed: 60 }));
+  if (frames.length) frames.shift()!();
+  covered = standIns.update(frame({ ...order, speed: 60 }));
+  assert.equal(standInGap(covered, 100, 119 + 833), 0, "thirty thousand pixels ahead are covered");
+  assert.ok(shown().length >= 30);
+  assert.equal(shown().filter((canvas) => texts.get(canvas)!.includes("(bars)")).length, shown().length - textTiles, "every new tile is bars");
+  assert.deepEqual(standIns.takeStats().bars, shown().length - textTiles);
+  // The next batch does not touch bars; slowing down turns the near screens into text again.
+  standIns.takeStats();
+  scrollTop = 600 * 36;
+  standIns.update(frame({ ...order, speed: 60 }));
+  settle();
+  assert.equal(standIns.takeStats().text, 0, "nothing is read at that speed");
+  for (let row = 400; row < 2000; row += 1) loaded.add(row);
+  standIns.update(frame({ ...order, data: "third batch", speed: 60 }));
+  settle();
+  assert.equal(standIns.takeStats().text, 0, "arriving rows repaint no bars");
+  covered = standIns.update(frame({ ...order, data: "third batch", speed: 5 }));
+  assert.equal(standInGap(covered, 600, 619 + 6 * 19), 0);
+  settle();
+  assert.ok([...texts.values()].some((drawn) => drawn.includes("title 600")), "the viewport reads as text again");
+  assert.ok(shown().every((canvas) => !texts.get(canvas)!.includes("(bars)")));
+
   // The scroll slowed down and the table built its rows here: no canvas stays on show.
-  covered = standIns.update(frame({ data: "second batch", version: ["another order"], direction: 0, windowStart: 60, windowEnd: 170 }));
+  covered = standIns.update(frame({ ...order, data: "third batch", direction: 0, windowStart: 560, windowEnd: 680 }));
   assert.equal(shown().length, 0);
-  assert.deepEqual(covered, [[60, 170]]);
+  assert.deepEqual(covered, [[560, 680]]);
   standIns.destroy();
   assert.equal(canvases().length, 0);
 });

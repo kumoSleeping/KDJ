@@ -858,7 +858,7 @@ const SCROLL_REST_MS = 140;
 /** 一次滚动走过这么多屏才写一条跟踪日志（开发版）。 */
 const TRACED_SCROLL_SCREENS = 3;
 /** 快滚途中每走过这么多行，把摘要的加载重心挪到眼前一次。 */
-const FLIGHT_DEMAND_ROWS = 120;
+const FLIGHT_DEMAND_ROWS = 300;
 
 export const TrackTable = memo(function TrackTable({
   libraryStore = useLibraryStore,
@@ -1785,8 +1785,11 @@ export const TrackTable = memo(function TrackTable({
     const { orderedIds: ids, summaryById: summaries } = libraryStore.getState();
     const pending = pendingCountRef.current;
     const notation = keyNotationRef.current;
+    const pace = paceRef.current;
     coveredRowsRef.current = standIns.update({
       rowHeight: rowHRef.current, count: ids.length + pending, first: pending, direction,
+      // 甩动在平滑后的速度跟上之前就已经是全速了：两者取大。
+      speed: Math.max(Math.abs(pace.speed), Math.abs(pace.instant)),
       windowStart: renderedRowsRef.current.start, windowEnd: renderedRowsRef.current.end,
       version: [ids, notation, pending],
       data: summaries,
@@ -1851,11 +1854,13 @@ export const TrackTable = memo(function TrackTable({
           if (sameLibraryView(viewRef.current, rest)) paintStandIns(0);
           else setView(rest);
           const done = scrollTraceRef.current;
+          const painting = standInsRef.current?.takeStats();
           if (import.meta.env.DEV && Math.abs(box.scrollTop - done.from) >= TRACED_SCROLL_SCREENS * box.clientHeight) {
             tracePlayback("library-scroll", { ms: Math.round(performance.now() - done.startedAt), px: Math.round(box.scrollTop - done.from),
               frames: done.frames, slow: done.slow, gapMax: Math.round(done.gapMax), travelMax: Math.round(done.travelMax),
               speedMax: Math.round(done.speedMax * 1000), held: done.held, bare: done.bare, bareMax: done.bareMax,
-              standIns: standInsRef.current?.ready() ? 1 : 0 });
+              standIns: standInsRef.current?.ready() ? 1 : 0, text: painting?.text ?? 0, bars: painting?.bars ?? 0,
+              paintMs: Math.round(painting?.ms ?? 0), paintMax: Math.round(painting?.worst ?? 0) });
           }
         }
         if (!persistentSession) return;
