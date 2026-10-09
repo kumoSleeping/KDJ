@@ -25,6 +25,9 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 import { LIBRARY_REST_PACE, libraryScrollPace, libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../../lib/libraryViewport";
+import { createLibraryStandIns, standInGap, type LibraryStandIns } from "../../lib/libraryStandIns";
+import { displayTrackKey } from "../../lib/keyDisplay";
+import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { acquireCoverThumbnail, peekCoverThumbnail, type CoverThumbnailLease } from "../../lib/coverThumbnailQueue";
@@ -331,7 +334,7 @@ function coverLanePriority(lane: CoverLane, index: number): number {
  * 这样 WKWebView 不会把开发时后端重启造成的图片加载失败永久黏在原节点上。普通
  * 音频没有内嵌图很常见，仍直接退回灰色占位，避免为每一首无图文件轮询。
  */
-function TrackCoverThumb({ track, index, lane, defer }: { track: TrackSummary; index: number; lane: CoverLane; defer: boolean }) {
+function TrackCoverThumb({ track, index, lane }: { track: TrackSummary; index: number; lane: CoverLane }) {
   const [attempt, setAttempt] = useState(0);
   const retryTimer = useRef<number | null>(null);
   const waitingRef = useRef<WaitingCover | null>(null);
@@ -347,8 +350,6 @@ function TrackCoverThumb({ track, index, lane, defer }: { track: TrackSummary; i
   }, [track.id, track.modified_at]);
 
   useEffect(() => {
-    // 快滚途中挂载的行不发请求：它多半在请求返回前就滚出去了。已经在缓存里的封面照常取用。
-    if (defer && !peekCoverThumbnail(key).src) return;
     let alive = true;
     const lease = acquireCoverThumbnail(key, api.coverUrl(track.id, revision, 64), coverLanePriority(lane, index));
     const waiting: WaitingCover = { index, lease };
@@ -380,7 +381,7 @@ function TrackCoverThumb({ track, index, lane, defer }: { track: TrackSummary; i
       if (waitingRef.current === waiting) waitingRef.current = null;
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
     };
-  }, [key, defer, lane]);
+  }, [key, lane]);
   // 排序变化会让同一行换位置；等待中的请求跟着换优先级。
   useEffect(() => {
     const waiting = waitingRef.current;
@@ -481,8 +482,6 @@ function trackCell(
   onRate: ((rating: number) => void) | undefined,
   index: number,
   coverLane: CoverLane,
-  /** false：快滚途中挂载的行，先只画文字和已缓存的封面（见 TrackRow）。 */
-  rich: boolean,
 ) {
   switch (key) {
     case "title":
@@ -491,7 +490,7 @@ function trackCell(
           {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          <TrackCoverThumb track={track} index={index} lane={coverLane} defer={!rich} />
+          <TrackCoverThumb track={track} index={index} lane={coverLane} />
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -531,7 +530,7 @@ function trackCell(
     case "energy":
       return (
         <td key={key} data-col="energy">
-          {rich ? <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} /> : null}
+          <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
         </td>
       );
     case "duration":
@@ -581,11 +580,40 @@ function trackCell(
     case "rating":
       return (
         <td key={key} data-col="rating">
-          {rich ? <TableRating value={track.rating} onChange={onRate} /> : null}
+          <TableRating value={track.rating} onChange={onRate} />
         </td>
       );
     default:
       return null;
+  }
+}
+
+/**
+ * 替身行里一个格子的文字（见 libraryStandIns）：和 trackCell 画出来的文字一致。没有文字的
+ * 格子（评分、能量条）返回 null。
+ */
+function standInCellText(track: TrackSummary, key: string, index: number, keyNotation: KeyNotation): string | null {
+  switch (key) {
+    case "index": return String(index + 1);
+    case "title": return track.title || track.filename;
+    case "artist": return track.artist || DASH;
+    case "album": return track.album || DASH;
+    case "bpm": return formatBpm(track.bpm);
+    case "camelot": return displayTrackKey(track, keyNotation) || DASH;
+    case "duration": return formatDuration(track.duration);
+    case "format": return track.format.toUpperCase() || DASH;
+    case "size": return formatBytes(track.size);
+    case "file_created_at": return formatDate(track.file_created_at);
+    case "added_at": return formatDate(track.added_at);
+    case "samplerate": return track.samplerate ? `${track.samplerate / 1000} kHz` : DASH;
+    case "channels": return track.channels ? `${track.channels}ch` : DASH;
+    case "bitrate": return track.bitrate ? `${track.bitrate} kbps` : DASH;
+    case "genre":
+    case "year":
+    case "filename":
+    case "path": return String(track[key] || DASH);
+    case "source_platform": return track.source_platform || "local";
+    default: return null;
   }
 }
 
@@ -594,7 +622,6 @@ interface TrackCellsProps {
   /** 在当前顺序里的位置（从 0 起）。 */
   index: number;
   coverLane: CoverLane;
-  rich: boolean;
   showIndex: boolean;
   columns: readonly Column[];
   keyNotation: KeyNotation;
@@ -612,7 +639,6 @@ const TrackCells = memo(function TrackCells({
   track,
   index,
   coverLane,
-  rich,
   showIndex,
   columns,
   keyNotation,
@@ -646,7 +672,6 @@ const TrackCells = memo(function TrackCells({
           column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
           index,
           coverLane,
-          rich,
         ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
         return cloneElement(
           cell,
@@ -699,11 +724,9 @@ interface TrackRowActions {
   linkDragEnd(): void;
 }
 
-interface TrackRowProps extends Omit<TrackCellsProps, "rich"> {
+interface TrackRowProps extends TrackCellsProps {
   focused: boolean;
   playing: boolean;
-  /** 表格正在快滚：此时挂载的行先不画封面请求、能量条和评分控件。 */
-  deferRich: boolean;
   /** Windows 分享链接走 WebView2 原生 HTML5 拖放。 */
   linkDrag: boolean;
   actions: TrackRowActions;
@@ -717,14 +740,10 @@ const TrackRow = memo(function TrackRow({
   track,
   focused,
   playing,
-  deferRich,
   linkDrag,
   actions,
   ...cells
 }: TrackRowProps) {
-  // 丰富程度在挂载时定下：快滚途中进来的行保持轻量，直到滚动慢下来；已经画全的行不退回去。
-  const [rich, setRich] = useState(!deferRich);
-  if (!deferRich && !rich) setRich(true);
   return (
     <tr
       aria-selected={cells.selected}
@@ -745,7 +764,7 @@ const TrackRow = memo(function TrackRow({
       onDoubleClick={() => actions.doubleClick(track)}
       onContextMenu={(event) => actions.contextMenu(event, track)}
     >
-      <TrackCells track={track} rich={rich || !deferRich} {...cells} />
+      <TrackCells track={track} {...cells} />
     </tr>
   );
 });
@@ -826,17 +845,16 @@ function isPendingForFolder(task: DownloadTask, filterFolder: string, indexById:
   return !indexById.has(task.track_id);
 }
 
-/** 渲染窗口由它决定；`fast` 另外决定新挂载的行画多全。 */
-interface LibraryView { top: number; height: number; direction: -1 | 0 | 1; jump: boolean; lead: number; fast: boolean }
-const REST_VIEW: LibraryView = { top: 0, height: 0, direction: 0, jump: false, lead: 0, fast: false };
+/** 渲染窗口的基准位置（按步长取整，见 libraryWindowTop）和视口高度。 */
+interface LibraryView { top: number; height: number }
+const REST_VIEW: LibraryView = { top: 0, height: 0 };
 function sameLibraryView(a: LibraryView, b: LibraryView): boolean {
-  return a.top === b.top && a.height === b.height && a.direction === b.direction && a.jump === b.jump
-    && a.lead === b.lead && a.fast === b.fast;
+  return a.top === b.top && a.height === b.height;
 }
 /** 这么久没有新的滚动帧就算停稳。 */
 const SCROLL_REST_MS = 140;
-/** 滚轮/触摸输入之后这么久以内的滚动，算作 WebView 滚动线程在执行（含触控板惯性）。 */
-const THREADED_SCROLL_INPUT_MS = 300;
+/** 一次滚动走过这么多屏才写一条跟踪日志（开发版）。 */
+const TRACED_SCROLL_SCREENS = 3;
 
 export const TrackTable = memo(function TrackTable({
   libraryStore = useLibraryStore,
@@ -972,8 +990,6 @@ export const TrackTable = memo(function TrackTable({
       pointerDragCleanupRef.current?.();
       htmlExternalDragScrollUnlockRef.current?.();
       resizeObserverRef.current?.disconnect();
-      threadedInputCleanupRef.current?.();
-      threadedInputCleanupRef.current = null;
       // 两个 ref 都要归零：留着已取消的帧号，onScroll 会一直以为还有一帧在排队。
       if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
       scrollRafRef.current = 0;
@@ -1518,19 +1534,21 @@ export const TrackTable = memo(function TrackTable({
   const [headerH, setHeaderH] = useState(28);
   const headerHRef = useRef(28);
   const [rootFont, setRootFont] = useState(16);
-  /**
-   * 渲染窗口的基准位置（按步长取整，见 libraryWindowTop）、视口高度，以及滚动节奏里影响
-   * 窗口的部分（见 libraryScrollPace）。
-   */
   const [view, setView] = useState<LibraryView>(REST_VIEW);
   const viewRef = useRef(view);
   viewRef.current = view;
   const paceRef = useRef(LIBRARY_REST_PACE);
   /** 上一次滚动采样的时刻；0 表示停着。 */
   const scrollSampleAtRef = useRef(0);
-  /** 最近一次滚轮/触摸输入的时刻：用来区分滚动线程执行的滚动和页面自己执行的滚动。 */
-  const threadedInputAtRef = useRef(-Infinity);
-  const threadedInputCleanupRef = useRef<(() => void) | null>(null);
+  /** 替身行：快滚时代替真实的行（见 libraryStandIns）。 */
+  const standInLayerRef = useRef<HTMLDivElement | null>(null);
+  const standInsRef = useRef<LibraryStandIns | null>(null);
+  /** 表格自己渲染出来的行范围，以及替身行上一帧盖住的范围。 */
+  const renderedRowsRef = useRef({ start: 0, end: 0 });
+  const coveredRowsRef = useRef<(readonly [number, number])[]>([]);
+  const keyNotationRef = useRef<KeyNotation>("camelot");
+  /** 这一次滚动的统计，停稳时写进原生日志。 */
+  const scrollTraceRef = useRef({ startedAt: 0, from: 0, frames: 0, slow: 0, gapMax: 0, travelMax: 0, speedMax: 0, bare: 0, bareMax: 0, held: 0 });
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
   const rowHRef = useRef(FALLBACK_ROW_H);
   /** 横向滚动不能进入虚拟列表更新链；否则拖底部横滚条时每帧重渲染整张可视表。 */
@@ -1547,25 +1565,16 @@ export const TrackTable = memo(function TrackTable({
     // 视口高度决定渲染窗口：面板拖宽拖窄、窗口缩放都要重算。
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
-    threadedInputCleanupRef.current?.();
-    threadedInputCleanupRef.current = null;
     if (el) {
-      // 只记时刻，不取消事件：滚动本身留给 WebView 的滚动线程。
-      const noteInput = (event: Event) => { threadedInputAtRef.current = event.timeStamp; };
-      el.addEventListener("wheel", noteInput, { passive: true });
-      el.addEventListener("touchmove", noteInput, { passive: true });
-      threadedInputCleanupRef.current = () => {
-        el.removeEventListener("wheel", noteInput);
-        el.removeEventListener("touchmove", noteInput);
-      };
       const updateView = () =>
         setView((current) => {
           const top = libraryWindowTop(el.scrollTop, rowHRef.current);
           const height = el.clientHeight;
-          return current.top === top && current.height === height ? current : { ...current, top, height };
+          return current.top === top && current.height === height ? current : { top, height };
         });
       updateView();
-      const observer = new ResizeObserver(updateView);
+      // 容器变宽变窄会改列宽：替身行要重新量一遍真实的行。
+      const observer = new ResizeObserver(() => { standInsRef.current?.invalidate(); updateView(); });
       observer.observe(el);
       resizeObserverRef.current = observer;
     }
@@ -1759,8 +1768,32 @@ export const TrackTable = memo(function TrackTable({
   pendingCountRef.current = pendingDownloads.length;
 
   /**
-   * 把渲染窗口对齐到滚动容器此刻的位置，并在当前帧内提交（flushSync）。滚动由 WebView 的
-   * 滚动线程执行，页面拿到位置时它已经在屏幕上了：这里每晚一帧，露出的就是空白。
+   * 给滚动容器此刻的位置画上替身行，并记下它们和真实的行一起盖住了哪些行。`direction` 是
+   * 快滚的去向，替身行的余量大部分放在前方；0 表示表格自己在造行，这时只补视口里缺的行
+   * （平时没有），不占画布。
+   */
+  const paintStandIns = useCallback((direction: -1 | 0 | 1) => {
+    const standIns = standInsRef.current;
+    if (!standIns) return;
+    const { orderedIds: ids, summaryById: summaries } = libraryStore.getState();
+    const pending = pendingCountRef.current;
+    const notation = keyNotationRef.current;
+    coveredRowsRef.current = standIns.update({
+      count: ids.length + pending, first: pending, direction,
+      windowStart: renderedRowsRef.current.start, windowEnd: renderedRowsRef.current.end,
+      version: [ids, summaries, notation, pending],
+      text(row, column) {
+        const track = summaries.get(ids[row - pending]);
+        return track ? standInCellText(track, column, row - pending, notation) : undefined;
+      },
+    });
+  }, [libraryStore]);
+
+  /**
+   * 把表格对齐到滚动容器此刻的位置。滚动由 WebView 的滚动线程执行，页面拿到位置时它已经在
+   * 屏幕上了，所以：
+   * - 阅读速度的滚动：在这一帧内提交对应的行（flushSync），每晚一帧露出的就是空白；
+   * - 快滚：一行也不造。造行以毫秒计，追不上；这期间只画替身行，慢下来再一次造好。
    * 只在 React 之外（动画帧）调用；`now` 是这一帧的时间戳。
    */
   const syncWindow = useCallback((now: number) => {
@@ -1774,24 +1807,44 @@ export const TrackTable = memo(function TrackTable({
     const top = node.scrollTop;
     const height = node.clientHeight;
     if (top !== scrollTopRef.current) {
+      const travel = top - scrollTopRef.current;
       // 停着之后的第一帧没有上一个时刻可比，按一帧算。
       const elapsed = scrollSampleAtRef.current ? now - scrollSampleAtRef.current : 16;
-      paceRef.current = libraryScrollPace(paceRef.current, top - scrollTopRef.current, elapsed, height,
-        now - threadedInputAtRef.current < THREADED_SCROLL_INPUT_MS);
+      paceRef.current = libraryScrollPace(paceRef.current, travel, elapsed, height);
+      const trace = scrollTraceRef.current;
+      if (!scrollSampleAtRef.current) Object.assign(trace, { startedAt: now, from: scrollTopRef.current, frames: 0, slow: 0, gapMax: 0, travelMax: 0, speedMax: 0, bare: 0, bareMax: 0, held: 0 });
+      // 这一帧开始时，新视口里有多少行既没有真实的行也没有替身行：滚动线程已经把它们露出来了。
+      const first = Math.floor(top / rowHeight);
+      const bare = standInGap(coveredRowsRef.current, Math.max(pending, first),
+        Math.min(ids.length + pending, Math.ceil((top + height - headerHRef.current) / rowHeight)));
+      trace.frames += 1;
+      if (elapsed > 50) trace.slow += 1;
+      trace.gapMax = Math.max(trace.gapMax, elapsed);
+      trace.travelMax = Math.max(trace.travelMax, Math.abs(travel));
+      trace.speedMax = Math.max(trace.speedMax, Math.abs(paceRef.current.speed));
+      if (bare) { trace.bare += 1; trace.bareMax = Math.max(trace.bareMax, bare); }
       scrollSampleAtRef.current = now;
       scrollTopRef.current = top;
-      const index = Math.max(0, Math.floor(top / rowHeight) - pending);
+      const index = Math.max(0, first - pending);
       anchorRef.current = { id: ids[index] ?? null, index, offset: top % rowHeight };
       if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
       scrollIdleTimerRef.current = window.setTimeout(() => {
         scrollIdleTimerRef.current = null;
-        // 停稳：窗口回到两侧对称，快滚途中的轻量行补全。
+        // 停稳：造出这里的行。
         paceRef.current = LIBRARY_REST_PACE;
         scrollSampleAtRef.current = 0;
         const box = scrollerRef.current;
         if (box) {
-          const rest: LibraryView = { ...REST_VIEW, top: libraryWindowTop(box.scrollTop, rowHRef.current), height: box.clientHeight };
-          setView((current) => sameLibraryView(current, rest) ? current : rest);
+          const rest: LibraryView = { top: libraryWindowTop(box.scrollTop, rowHRef.current), height: box.clientHeight };
+          if (sameLibraryView(viewRef.current, rest)) paintStandIns(0);
+          else setView(rest);
+          const done = scrollTraceRef.current;
+          if (import.meta.env.DEV && Math.abs(box.scrollTop - done.from) >= TRACED_SCROLL_SCREENS * box.clientHeight) {
+            tracePlayback("library-scroll", { ms: Math.round(performance.now() - done.startedAt), px: Math.round(box.scrollTop - done.from),
+              frames: done.frames, slow: done.slow, gapMax: Math.round(done.gapMax), travelMax: Math.round(done.travelMax),
+              speedMax: Math.round(done.speedMax * 1000), held: done.held, bare: done.bare, bareMax: done.bareMax,
+              standIns: standInsRef.current?.ready() ? 1 : 0 });
+          }
         }
         if (!persistentSession) return;
         const anchor = anchorRef.current;
@@ -1799,13 +1852,20 @@ export const TrackTable = memo(function TrackTable({
       }, SCROLL_REST_MS);
     }
     const pace = paceRef.current;
-    const next: LibraryView = { top: libraryWindowTop(top, rowHeight), height, direction: pace.direction, jump: pace.jump,
-      lead: pace.lead, fast: pace.fast };
-    // 一步之内的滚动帧窗口不变：不进 React。
-    if (sameLibraryView(viewRef.current, next)) return;
-    viewRef.current = next;
-    flushSync(() => setView(next));
-  }, [libraryStore, persistentSession]);
+    // 快滚且替身行可用：表格的行原地不动，不进 React。
+    if (pace.fast && standInsRef.current?.ready()) {
+      scrollTraceRef.current.held += 1;
+      paintStandIns(pace.speed < 0 ? -1 : 1);
+      return;
+    }
+    const next: LibraryView = { top: libraryWindowTop(top, rowHeight), height };
+    if (!sameLibraryView(viewRef.current, next)) {
+      viewRef.current = next;
+      flushSync(() => setView(next));
+    }
+    // 一步之内的滚动帧窗口不变，不进 React。
+    paintStandIns(0);
+  }, [libraryStore, persistentSession, paintStandIns]);
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
@@ -1819,6 +1879,8 @@ export const TrackTable = memo(function TrackTable({
         setRowH(height);
       }
       const header = box.querySelector("thead")?.getBoundingClientRect().height ?? 28;
+      // 行高、列或主题变了：替身行按新的样子重新量。
+      standInsRef.current?.invalidate();
       headerHRef.current = header;
       setHeaderH((old) => Math.abs(old - header) > 0.5 ? header : old);
     };
@@ -1833,11 +1895,29 @@ export const TrackTable = memo(function TrackTable({
   }, [total > 0, layout, colPrefs, pendingDownloads.length > 0]);
 
   const viewport = libraryViewport({ total, pending: pendingDownloads.length, top: view.top,
-    height: view.height || 720, rowHeight: rowH, headerHeight: headerH, direction: view.direction, jump: view.jump,
-    lead: view.lead });
+    height: view.height || 720, rowHeight: rowH, headerHeight: headerH });
   const { start: winStart, end: winEnd } = viewport;
   const windowedTracks = orderedIds.slice(viewport.trackStart, viewport.trackEnd)
     .map((id, offset) => ({ id, track: summaryById.get(id), index: viewport.trackStart + offset }));
+  renderedRowsRef.current = { start: winStart, end: winEnd };
+  keyNotationRef.current = keyNotation;
+
+  useLayoutEffect(() => {
+    const box = scrollerRef.current;
+    const layer = standInLayerRef.current;
+    if (!box || !layer) return;
+    const standIns = createLibraryStandIns(box, layer);
+    standInsRef.current = standIns;
+    return () => {
+      standIns.destroy();
+      if (standInsRef.current === standIns) standInsRef.current = null;
+    };
+  }, []);
+  // 行换了（窗口移动、数据到达、换序）之后，在同一帧里把替身行让给真实的行。
+  useLayoutEffect(() => {
+    const pace = paceRef.current;
+    paintStandIns(!pace.fast ? 0 : pace.speed < 0 ? -1 : 1);
+  }, [paintStandIns, winStart, winEnd, orderedIds, summaryById, keyNotation, pendingDownloads.length]);
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
@@ -1864,7 +1944,7 @@ export const TrackTable = memo(function TrackTable({
     if (Math.abs(box.scrollTop - desired) > 0.5) box.scrollTop = desired;
     scrollTopRef.current = box.scrollTop;
     const windowTop = libraryWindowTop(desired, rowH);
-    setView((old) => old.top === windowTop && old.height === box.clientHeight ? old : { ...old, top: windowTop, height: box.clientHeight });
+    setView((old) => old.top === windowTop && old.height === box.clientHeight ? old : { top: windowTop, height: box.clientHeight });
     const index = Math.max(0, Math.floor(desired / rowH) - pendingDownloads.length);
     anchorRef.current = { id: orderedIds[index] ?? null, index, offset: desired % rowH };
   }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop]);
@@ -2014,9 +2094,9 @@ export const TrackTable = memo(function TrackTable({
       // setView 走相等守卫：值没变就返回旧对象， ResizeObserver 的初次回调
       // 和滚动重算都不会再空转渲染。
       ref={trackScrollerRef}
-      onScroll={(event) => {
-        // 这一个容器同时横滚和竖滚；横滚不影响虚拟窗口，在进入 React 之前退出。
-        if (event.currentTarget.scrollTop === scrollTopRef.current) return;
+      onScroll={() => {
+        // 这一个容器同时横滚和竖滚；横滚不影响虚拟窗口，syncWindow 里窗口没变就不进 React，
+        // 只让替身行换到新露出的列。
         // 滚轮、触控板、触摸由 WebView 的滚动线程执行，拖滑块、键盘、定位由页面执行；
         // 都从这里进来，一帧合并一次，并在这一帧内提交对应的行。
         if (!scrollRafRef.current) {
@@ -2224,7 +2304,6 @@ export const TrackTable = memo(function TrackTable({
               focused={track.id === selectedId}
               playing={track.id === playingId}
               selectionMode={selectionMode}
-              deferRich={view.fast}
               linkDrag={htmlExternalLinkDrag}
               actions={rowActions}
               coverLane={coverLane}
@@ -2249,6 +2328,8 @@ export const TrackTable = memo(function TrackTable({
           )}
         </tbody>
       </table>
+      {/* 替身行的画布（见 libraryStandIns）。放在表格之后：OverlayScrollbars 观察的是容器的第一个子元素。 */}
+      <div className="kd-table-standins" aria-hidden="true" ref={standInLayerRef} />
       {/* 选列菜单。开着的时候点勾选不关闭——一次通常要调好几列，
           调一列关一次等于逼用户右键三回。点别处 / Esc / 恢复默认才关。 */}
       {colMenu && (
