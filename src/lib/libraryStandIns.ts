@@ -27,6 +27,8 @@ const FLIGHT_SCREENS: readonly [number, number] = [1, 6];
 const TILES_PER_FRAME = 2;
 /** Canvas pixels per CSS pixel, at most. Stand-ins are seen in motion; sharper costs memory. */
 const MAX_SCALE = 1.5;
+/** Canvases keep their pixels this long after the last stand-in was shown: the next flick reuses them. */
+const SPARE_PIXELS_MS = 4000;
 
 export interface StandInPlanInput {
   /** Offset of the viewport's first row pixel, in pixels from the first row. */
@@ -130,7 +132,6 @@ interface TemplateCell {
   color: string;
 }
 interface Template {
-  rowHeight: number;
   /** Content offsets of the first row inside the scroll container. */
   bodyTop: number;
   left: number;
@@ -140,6 +141,11 @@ interface Template {
 }
 
 export interface StandInFrame {
+  /**
+   * The row height the table lays its unbuilt rows out with. Stand-ins use the same one, so a
+   * stand-in sits exactly where the table will put the real row.
+   */
+  rowHeight: number;
   count: number;
   first: number;
   windowStart: number;
@@ -148,8 +154,16 @@ export interface StandInFrame {
   direction: -1 | 0 | 1;
   /** Text of a cell; null for a cell that shows none, undefined while the row has not loaded. */
   text(row: number, column: string): string | null | undefined;
-  /** What the texts depend on. A change in any item repaints every tile. */
+  /**
+   * What decides which row is where (the order, the rows before the tracks, the key notation). A
+   * change in any item hides every tile until it is painted again: what it shows is wrong.
+   */
   version: readonly unknown[];
+  /**
+   * What the texts are read from. A change repaints the tiles in place: rows that arrive or are
+   * edited replace their old text, and nothing is hidden meanwhile.
+   */
+  data: unknown;
 }
 
 export interface LibraryStandIns {
@@ -165,7 +179,17 @@ export interface LibraryStandIns {
   destroy(): void;
 }
 
-interface Tile { canvas: HTMLCanvasElement; index: number; painted: boolean; start: number; end: number; shown: string }
+interface Tile {
+  canvas: HTMLCanvasElement;
+  index: number;
+  /** Shows rows where they belong. An unpainted tile is hidden. */
+  painted: boolean;
+  /** Painted from the current data and for the current sideways offset. A stale tile stays on show until its turn. */
+  fresh: boolean;
+  start: number;
+  end: number;
+  shown: string;
+}
 
 function lastText(node: Node): Text | null {
   for (let child = node.lastChild; child; child = child.previousSibling) {
@@ -189,7 +213,11 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
   let template: Template | null = null;
   let stale = true;
   let version: readonly unknown[] = [];
+  let data: unknown;
   let painted = { left: -1, width: -1 };
+  /** What the layer's box was last taken for: it is the table's box, and clips the canvases to it. */
+  let boxed = { count: -1, rowHeight: -1, shape: null as Template | null };
+  let trim: ReturnType<typeof setTimeout> | null = null;
   let lastFrame: StandInFrame | null = null;
   let frameRequest = 0;
   let canDraw: boolean | null = null;
@@ -236,7 +264,7 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
     const thumbNode = row.querySelector<HTMLElement>(".kd-thumb");
     const thumbBox = thumbNode?.getBoundingClientRect();
     const thumbStyle = thumbNode ? getComputedStyle(thumbNode) : null;
-    return { rowHeight: rowBox.height, bodyTop: body.getBoundingClientRect().top - box.top + scroller.scrollTop - scroller.clientTop,
+    return { bodyTop: body.getBoundingClientRect().top - box.top + scroller.scrollTop - scroller.clientTop,
       left: rowBox.left - box.left + scroller.scrollLeft - scroller.clientLeft, cells,
       thumb: thumbBox && thumbStyle && thumbBox.width > 0 && opaque(thumbStyle.backgroundColor)
         ? { x: thumbBox.left - rowBox.left, y: thumbBox.top - rowBox.top, width: thumbBox.width, height: thumbBox.height,
@@ -247,15 +275,12 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
   const release = (tile: Tile) => {
     tile.canvas.style.display = "none";
     tile.shown = "none";
-    // Gives the pixels back; painting sizes the canvas again.
-    tile.canvas.width = 0;
-    tile.canvas.height = 0;
     spare.push(tile.canvas);
     tiles.delete(tile.index);
   };
   const obtain = (index: number): Tile => {
     const canvas = spare.pop() ?? layer.appendChild(document.createElement("canvas"));
-    const tile: Tile = { canvas, index, painted: false, start: 0, end: 0, shown: "" };
+    const tile: Tile = { canvas, index, painted: false, fresh: false, start: 0, end: 0, shown: "" };
     canvas.style.display = "none";
     canvas.style.clipPath = "";
     tiles.set(index, tile);
@@ -265,15 +290,23 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
   const paint = (tile: Tile, plan: StandInTile, frame: StandInFrame, shape: Template, left: number, width: number) => {
     const context = tile.canvas.getContext("2d");
     if (!context) return;
+    const rowHeight = frame.rowHeight;
     const scale = Math.min(MAX_SCALE, window.devicePixelRatio || 1);
     const base = tile.index * STAND_IN_TILE_ROWS;
-    // Not past the last row: a canvas reaching below the table would lengthen the scroll range.
-    const height = (plan.end - base) * shape.rowHeight;
-    tile.canvas.width = Math.max(1, Math.round(width * scale));
-    tile.canvas.height = Math.max(1, Math.round(height * scale));
+    const height = (plan.end - base) * rowHeight;
+    const pixelWidth = Math.max(1, Math.round(width * scale));
+    const pixelHeight = Math.max(1, Math.round(height * scale));
+    if (tile.canvas.width !== pixelWidth || tile.canvas.height !== pixelHeight) {
+      tile.canvas.width = pixelWidth;
+      tile.canvas.height = pixelHeight;
+    } else {
+      // Same pixels, wiped: sizing a canvas again would hand its layer a new, empty surface.
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.clearRect(0, 0, pixelWidth, pixelHeight);
+    }
     tile.canvas.style.width = `${width}px`;
     tile.canvas.style.height = `${height}px`;
-    tile.canvas.style.transform = `translate(${left}px, ${shape.bodyTop + base * shape.rowHeight}px)`;
+    tile.canvas.style.transform = `translate(${left}px, ${shape.bodyTop + base * rowHeight}px)`;
     context.setTransform(scale, 0, 0, scale, (shape.left - left) * scale, 0);
     context.textBaseline = "middle";
     const loaded: boolean[] = [];
@@ -287,7 +320,7 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
       for (let row = plan.start; row < plan.end; row += 1) {
         const text = frame.text(row, cell.key);
         loaded[row - plan.start] = text !== undefined;
-        if (text) context.fillText(fitStandInText(measureText, text, cell.width), cell.x, (row - base) * shape.rowHeight + cell.y);
+        if (text) context.fillText(fitStandInText(measureText, text, cell.width), cell.x, (row - base) * rowHeight + cell.y);
       }
     }
     const title = shape.cells.find((cell) => cell.key === "title");
@@ -295,7 +328,7 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
       context.fillStyle = shape.thumb?.color ?? title!.color;
       context.globalAlpha = shape.thumb ? 1 : 0.16;
       for (let row = plan.start; row < plan.end; row += 1) {
-        const top = (row - base) * shape.rowHeight;
+        const top = (row - base) * rowHeight;
         context.beginPath();
         if (shape.thumb) {
           const { x, y, width: boxWidth, height: boxHeight, radius } = shape.thumb;
@@ -309,6 +342,7 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
       context.globalAlpha = 1;
     }
     tile.painted = true;
+    tile.fresh = true;
     tile.start = plan.start;
     tile.end = plan.end;
   };
@@ -324,10 +358,13 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
       const measured = measure();
       // Keep the previous measurements while no real row is mounted to measure again.
       if (measured) {
-        template = measured;
         stale = false;
-        // Whatever is painted was laid out by the old measurements.
-        for (const tile of tiles.values()) tile.painted = false;
+        // Asked to measure again far more often than anything moved (any attribute written on the
+        // document element asks): only a real difference repaints, and in place, never by hiding.
+        if (!template || JSON.stringify(measured) !== JSON.stringify(template)) {
+          template = measured;
+          for (const tile of tiles.values()) tile.fresh = false;
+        }
       }
     }
     return template !== null;
@@ -341,16 +378,32 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
       return covered;
     }
     const shape = template;
+    const rowHeight = Math.max(1, frame.rowHeight);
     const left = scroller.scrollLeft;
     const width = scroller.clientWidth;
-    if (left !== painted.left || width !== painted.width || frame.version.length !== version.length || frame.version.some((item, index) => item !== version[index])) {
+    if (frame.count !== boxed.count || rowHeight !== boxed.rowHeight || shape !== boxed.shape) {
+      // A canvas reaching past the table, by a rounded pixel, would lengthen the scroll range while
+      // it is shown: the layer is the table's own box and cuts off whatever goes beyond it.
+      const table = scroller.querySelector<HTMLElement>("table.kd-table");
+      if (table) {
+        layer.style.width = `${table.offsetLeft + table.offsetWidth}px`;
+        layer.style.height = `${table.offsetTop + table.offsetHeight}px`;
+      }
+      if (rowHeight !== boxed.rowHeight) for (const tile of tiles.values()) tile.painted = false;
+      boxed = { count: frame.count, rowHeight, shape };
+    }
+    if (frame.version.length !== version.length || frame.version.some((item, index) => item !== version[index])) {
       for (const tile of tiles.values()) tile.painted = false;
       version = frame.version;
+    }
+    if (frame.data !== data || left !== painted.left || width !== painted.width) {
+      for (const tile of tiles.values()) tile.fresh = false;
+      data = frame.data;
       painted = { left, width };
     }
     // The header is stuck over the top of the container; the first row starts below it.
-    const plan = standInPlan({ top: scroller.scrollTop, rowHeight: shape.rowHeight,
-      height: Math.max(shape.rowHeight, scroller.clientHeight - Math.max(0, shape.bodyTop)),
+    const plan = standInPlan({ top: scroller.scrollTop, rowHeight,
+      height: Math.max(rowHeight, scroller.clientHeight - Math.max(0, shape.bodyTop)),
       count: frame.count, first: frame.first, windowStart: frame.windowStart, windowEnd: frame.windowEnd, direction: frame.direction });
     const wanted = new Set(plan.map((tile) => tile.index));
     for (const tile of [...tiles.values()]) if (!wanted.has(tile.index)) release(tile);
@@ -358,8 +411,8 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
     let waiting = false;
     for (const item of plan) {
       const tile = tiles.get(item.index) ?? obtain(item.index);
-      if (!tile.painted || tile.start !== item.start || tile.end !== item.end) {
-        tile.painted = false;
+      if (tile.start !== item.start || tile.end !== item.end) tile.painted = false;
+      if (!tile.painted || !tile.fresh) {
         if (item.urgent || budget > 0) {
           if (!item.urgent) budget -= 1;
           paint(tile, item, frame, shape, left, width);
@@ -369,8 +422,8 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
       }
       // An unpainted tile stays hidden: what it showed belongs to another order or another column layout.
       // The canvas runs from the tile's first row slot to its last painted row.
-      const clipTop = (item.shownStart - item.index * STAND_IN_TILE_ROWS) * shape.rowHeight;
-      const clipBottom = (item.end - item.shownEnd) * shape.rowHeight;
+      const clipTop = (item.shownStart - item.index * STAND_IN_TILE_ROWS) * rowHeight;
+      const clipBottom = (item.end - item.shownEnd) * rowHeight;
       const shown = !tile.painted ? "none" : clipTop || clipBottom ? `inset(${clipTop}px 0 ${clipBottom}px 0)` : "all";
       if (shown !== tile.shown) {
         tile.shown = shown;
@@ -385,6 +438,17 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
         if (lastFrame) update(lastFrame);
       });
     }
+    // Nothing on show: give the pixels back, but not before a next flick could have used them.
+    if (tiles.size) {
+      if (trim !== null) clearTimeout(trim);
+      trim = null;
+    } else if (trim === null && spare.some((canvas) => canvas.width > 0)) {
+      trim = setTimeout(() => {
+        trim = null;
+        if (tiles.size) return;
+        for (const canvas of spare) { canvas.width = 0; canvas.height = 0; }
+      }, SPARE_PIXELS_MS);
+    }
     return covered;
   };
 
@@ -395,6 +459,8 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
     destroy() {
       if (frameRequest) cancelAnimationFrame(frameRequest);
       frameRequest = 0;
+      if (trim !== null) clearTimeout(trim);
+      trim = null;
       lastFrame = null;
       tiles.clear();
       spare.length = 0;

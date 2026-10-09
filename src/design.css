@@ -7834,8 +7834,10 @@ button.kd-camelot-grid-key { cursor: pointer; }
   position: absolute;
   top: 0;
   left: 0;
+  /* Sized to the table by the script; nothing painted beyond it may extend the scroll range. */
   width: 0;
   height: 0;
+  overflow: hidden;
   pointer-events: none;
 }
 .kd-table-standins > canvas {

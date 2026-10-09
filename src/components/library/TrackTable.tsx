@@ -855,6 +855,8 @@ function sameLibraryView(a: LibraryView, b: LibraryView): boolean {
 const SCROLL_REST_MS = 140;
 /** 一次滚动走过这么多屏才写一条跟踪日志（开发版）。 */
 const TRACED_SCROLL_SCREENS = 3;
+/** 快滚途中每走过这么多行，把摘要的加载重心挪到眼前一次。 */
+const FLIGHT_DEMAND_ROWS = 120;
 
 export const TrackTable = memo(function TrackTable({
   libraryStore = useLibraryStore,
@@ -1547,6 +1549,8 @@ export const TrackTable = memo(function TrackTable({
   const renderedRowsRef = useRef({ start: 0, end: 0 });
   const coveredRowsRef = useRef<(readonly [number, number])[]>([]);
   const keyNotationRef = useRef<KeyNotation>("camelot");
+  /** 快滚途中上一次把加载重心挪到的行。 */
+  const flightDemandRowRef = useRef(-1);
   /** 这一次滚动的统计，停稳时写进原生日志。 */
   const scrollTraceRef = useRef({ startedAt: 0, from: 0, frames: 0, slow: 0, gapMax: 0, travelMax: 0, speedMax: 0, bare: 0, bareMax: 0, held: 0 });
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
@@ -1779,9 +1783,10 @@ export const TrackTable = memo(function TrackTable({
     const pending = pendingCountRef.current;
     const notation = keyNotationRef.current;
     coveredRowsRef.current = standIns.update({
-      count: ids.length + pending, first: pending, direction,
+      rowHeight: rowHRef.current, count: ids.length + pending, first: pending, direction,
       windowStart: renderedRowsRef.current.start, windowEnd: renderedRowsRef.current.end,
-      version: [ids, summaries, notation, pending],
+      version: [ids, notation, pending],
+      data: summaries,
       text(row, column) {
         const track = summaries.get(ids[row - pending]);
         return track ? standInCellText(track, column, row - pending, notation) : undefined;
@@ -1802,10 +1807,14 @@ export const TrackTable = memo(function TrackTable({
     const rowHeight = rowHRef.current;
     const pending = pendingCountRef.current;
     const ids = libraryStore.getState().orderedIds;
-    const maxTop = Math.max(0, (ids.length + pending) * rowHeight + headerHRef.current - node.clientHeight);
-    if (node.scrollTop > maxTop) node.scrollTop = maxTop;
-    const top = node.scrollTop;
     const height = node.clientHeight;
+    const listEnd = Math.max(0, (ids.length + pending) * rowHeight + headerHRef.current - height);
+    const reach = Math.max(0, node.scrollHeight - height);
+    // 列表变短而 DOM 还没跟上时，容器能滚到列表之外：拉回来。只在 DOM 确实更长时才写——到边后的
+    // 回弹同样会报出范围之外的位置，那是 WebView 自己的动画，写回去就是和它打架。
+    if (node.scrollTop > listEnd && reach > listEnd + 1) node.scrollTop = listEnd;
+    // 回弹不算滚动：位置按可滚范围取，到边之后不再变化，表格和替身行都不动。
+    const top = Math.min(Math.min(listEnd, reach), Math.max(0, node.scrollTop));
     if (top !== scrollTopRef.current) {
       const travel = top - scrollTopRef.current;
       // 停着之后的第一帧没有上一个时刻可比，按一帧算。
@@ -1855,9 +1864,20 @@ export const TrackTable = memo(function TrackTable({
     // 快滚且替身行可用：表格的行原地不动，不进 React。
     if (pace.fast && standInsRef.current?.ready()) {
       scrollTraceRef.current.held += 1;
+      // 表格不动，就没有人告诉数据层眼前是哪里：后台补齐还在围着起飞的位置转，替身行只能画
+      // 占位条。隔一段路挪一次加载重心。
+      const row = Math.max(0, Math.floor(top / rowHeight) - pending);
+      if (Math.abs(row - flightDemandRowRef.current) >= FLIGHT_DEMAND_ROWS) {
+        flightDemandRowRef.current = row;
+        const screen = Math.ceil(height / rowHeight);
+        const ahead = pace.speed < 0 ? [6, 1] : [1, 6];
+        void libraryStore.getState().ensureRange(Math.max(0, row - ahead[0] * screen), Math.min(ids.length, row + (1 + ahead[1]) * screen),
+          row, Math.min(ids.length, row + screen));
+      }
       paintStandIns(pace.speed < 0 ? -1 : 1);
       return;
     }
+    flightDemandRowRef.current = -1;
     const next: LibraryView = { top: libraryWindowTop(top, rowHeight), height };
     if (!sameLibraryView(viewRef.current, next)) {
       viewRef.current = next;

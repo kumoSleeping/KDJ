@@ -219,6 +219,41 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.equal(ratings(), rows());
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
     await flush();
+    // Past either end the WebView bounces and reports offsets outside the list. That is not a scroll:
+    // the page neither pulls the container back nor moves its rows.
+    const end = box.scrollHeight - box.clientHeight;
+    box.scrollTop = end;
+    box.dispatchEvent(new Event("scroll"));
+    frame(16);
+    assert.ok(document.querySelector('tr[data-kd-track-id="10000"]'));
+    const lastRow = document.querySelector('tr[data-kd-track-id="10000"]');
+    const atEnd = rows();
+    for (const overshoot of [40, 90, 30, 0]) {
+      box.scrollTop = end + overshoot;
+      box.dispatchEvent(new Event("scroll"));
+      frame(16);
+      assert.equal(box.scrollTop, end + overshoot, "the bounce at the bottom is left to the WebView");
+      assert.equal(document.querySelector('tr[data-kd-track-id="10000"]'), lastRow);
+      assert.equal(rows(), atEnd);
+    }
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
+    await flush();
+    box.scrollTop = 0;
+    box.dispatchEvent(new Event("scroll"));
+    frame(16);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
+    await flush();
+    const firstRow = document.querySelector('tr[data-kd-track-id="1"]');
+    assert.ok(firstRow);
+    for (const overshoot of [-50, -120, -20, 0]) {
+      box.scrollTop = overshoot;
+      box.dispatchEvent(new Event("scroll"));
+      frame(16);
+      assert.equal(box.scrollTop, overshoot, "the bounce at the top is left to the WebView");
+      assert.equal(document.querySelector('tr[data-kd-track-id="1"]'), firstRow);
+    }
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
+    await flush();
     await act(async () => useLibraryStore.getState().select(1));
     await act(async () => useLibraryStore.getState().select(10000, "range"));
     assert.equal(useLibraryStore.getState().selectedIds.length, 10000);
