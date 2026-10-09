@@ -82,7 +82,6 @@
 .kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-column {
   display: grid;
   justify-items: center;
-  border-bottom: 1px solid var(--kd-line-soft);
   background: var(--kd-panel-inset);
 }
 .kd-viz-panel:not([data-inline="true"]) .kd-viz-preview { width: min(100%, calc(38vh * var(--kd-preview-ratio, 1.7778))); }

@@ -37,13 +37,10 @@
   min-width: 0;
 }
 /* The library and the online sources are two groups. Wherever one meets the other
-   there is a little air and a hairline, whatever order the roots are in. */
+   there is air and nothing drawn, whatever order the roots are in. */
 .kd-sidebar-root-slot:where([data-root-group="library"]) + .kd-sidebar-root-slot:where([data-root-group="online"]),
 .kd-sidebar-root-slot:where([data-root-group="online"]) + .kd-sidebar-root-slot:where([data-root-group="library"]) {
-  margin-top: 0.4rem;
-  padding-top: 0.4rem;
-  background: linear-gradient(var(--kd-line), var(--kd-line)) no-repeat
-    var(--kd-tree-pad) 0 / calc(100% - 2 * var(--kd-tree-pad)) 1px;
+  margin-top: 0.7rem;
 }
 .kd-sidebar-root-slot[data-root-dragging="true"] {
   opacity: 0.52;
@@ -301,14 +298,13 @@ button.kd-folder-caret:hover:not(:disabled) {
   -webkit-user-select: text;
 }
 
-/* 文件夹栏里的 InlineNotice 只需要一条上边框把它和树分开；
-   竖线之类的装饰不加，这一栏本来就窄。 */
+/* 文件夹栏里的 InlineNotice 贴在树的下方，靠自己的内边距和芯片与树分开，不画线；
+   这一栏本来就窄。 */
 .kd-folder-notice {
   box-sizing: border-box;
   width: 100%;
   max-width: 100%;
   overflow: hidden;
-  border-top: 1px solid var(--kd-line);
 }
 
 /* ---------- Online sources: the same rows, one brand mark per source ---------- */
@@ -395,8 +391,8 @@ div.kd-stream-status:hover {
 
 /* ============================================================
  * Compact rail: the same sidebar at icon width.
- * [add · all tracks] — [sources] — [the open source's folders or playlists]
- * The split handle draws the line on its right, so the rail has no border.
+ * [add · all tracks]   [sources]   [the open source's folders or playlists]
+ * The three groups are set apart by air alone; the rail itself has no border.
  * ========================================================== */
 .kd-narrow-folder-rail {
   --kd-rail-focus: color-mix(in srgb, var(--kd-text) 58%, transparent);
@@ -422,6 +418,8 @@ div.kd-stream-status:hover {
 }
 .kd-narrow-global-actions {
   flex: none;
+  /* The same air as the resize handle leaves under the sources. */
+  margin-bottom: 0.85rem;
 }
 .kd-narrow-source-roots {
   /* 来源开关不能被下方超长目录挤扁：否则 NetEase / Q Music 只会露出
@@ -526,16 +524,8 @@ div.kd-stream-status:hover {
   color: #fb7299;
 }
 
-/* Two hairlines of the same weight and rhythm: a fixed one under the global
-   actions, and the one under the sources, which is also the resize handle. */
-.kd-narrow-rail-sep {
-  flex: none;
-  align-self: center;
-  width: 1.8rem;
-  height: 1px;
-  margin: calc((0.85rem - 1px) / 2) 0;
-  background: var(--kd-line);
-}
+/* The gap under the sources is also the resize handle. It is empty at rest; a short grip
+   appears under the pointer or with keyboard focus. */
 .kd-narrow-rail-resize {
   flex: none;
   align-self: stretch;
@@ -554,13 +544,15 @@ div.kd-stream-status:hover {
 }
 .kd-narrow-rail-resize::after {
   content: "";
-  width: 1.8rem;
-  height: 1px;
-  background: var(--kd-line);
-  transition: background-color 120ms ease;
-}
-.kd-narrow-rail-resize:hover::after {
+  width: 1.2rem;
+  height: 3px;
+  border-radius: 2px;
   background: var(--kd-muted);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.kd-narrow-rail-resize:is(:hover, :active, :focus-visible)::after {
+  opacity: 1;
 }
 
 /* 竖屏方块导航保留滚动能力，但不显示或预留原生滚动条。 */

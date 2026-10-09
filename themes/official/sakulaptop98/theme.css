@@ -198,15 +198,12 @@
 :root[data-theme-pack="sakulaptop98"] .kd-activity-search-toggle:is([data-open="true"], [data-pinned="true"]) {
   color: var(--kd-theme);
 }
-:root[data-theme-pack="sakulaptop98"] :is(.kd-search-band-sep, .kd-narrow-rail-sep) {
-  background: var(--s98-shadow);
-  box-shadow: 1px 0 var(--s98-white);
-}
 :root[data-theme-pack="sakulaptop98"] .kd-narrow-rail-resize {
   background: transparent;
   box-shadow: none;
 }
 :root[data-theme-pack="sakulaptop98"] .kd-narrow-rail-resize::after {
+  border-radius: 1px;
   background: var(--s98-shadow);
   box-shadow: 0 1px var(--s98-white);
 }
@@ -411,12 +408,11 @@
 :root[data-theme-pack="sakulaptop98"] .kd-folder-pane {
   --kd-tree-caret: 0.95rem;
 }
-/* Every root is its own raised tile here, so the default skin's group hairline
-   and its extra air are not needed. */
+/* Every root is its own raised tile here, so the default skin's extra air between
+   the groups is not needed. */
 :root[data-theme-pack="sakulaptop98"] .kd-sidebar-root-slot {
   background: var(--kd-panel-inset);
   margin-block: 3px;
-  padding-top: 0;
   box-shadow: inset 1px 0 var(--s98-shadow), inset -1px -1px var(--s98-white);
 }
 :root[data-theme-pack="sakulaptop98"] .kd-folder[data-sidebar-root-row],
