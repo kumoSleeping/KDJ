@@ -46,7 +46,8 @@ import {
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { LiveVjPanel } from "../composition/LiveVjPanel";
-import { SidePanels } from "../player/SidePanels";
+import { SideDownloads, SideLyrics, SidePanels } from "../player/SidePanels";
+import { RightDock, useDockOrder, type DockApp } from "./RightDock";
 import { VisualizerPopup } from "../player/VisualizerPopup";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { useAppStore } from "../../stores/appStore";
@@ -260,6 +261,9 @@ const VisualizerStudioPanel = lazy(() => import("../composition/VisualizerStudio
 export function Workspace() {
   const downloadsOpen = useSidePanels(state => state.downloads);
   const lyricsOpen = useSidePanels(state => state.lyrics);
+  const dockRaised = useSidePanels(state => state.raised);
+  /** A closed app is still sliding out of the right column. */
+  const [dockHeld, setDockHeld] = useState(false);
   const compositionMode = useAppStore(state => state.compositionMode);
   const visualizerTrackOpen = useVisualizerStudioStore(state => state.track !== null);
   const inlineVisualizerSettings = useVisualizerStudioStore(state => state.inlineSettings);
@@ -1537,7 +1541,7 @@ export function Workspace() {
   const activityAside = !realOverlayAside && (downloadsOpen || lyricsOpen);
   const editorAsideOpen = showComposition || visualizerTrackOpen;
   const hasAsideContent = showSettings || editorAsideOpen || realOverlayAside || activityAside;
-  const showAside = layout === "wide" && hasAsideContent;
+  const showAside = layout === "wide" && (hasAsideContent || dockHeld);
 
   const closeAside = useCallback(() => {
     if (showSearchTips) {
@@ -1640,7 +1644,24 @@ export function Workspace() {
       </div>
     </div>
   ) : null;
-  // 临时旁路盖在上面时侧栏内容只是隐藏：歌词的滚动位置和任务页签都留着。
+  // 宽屏右栏：歌词、下载与导出、设置和临时面板都是同一个容器里的平级应用，
+  // 后打开的盖住先打开的，关掉后露出下面那个（见 RightDock）。
+  const dockApps: DockApp[] = [];
+  if (lyricsOpen) dockApps.push({ id: "lyrics", label: "歌词", node: <SideLyrics /> });
+  if (downloadsOpen) dockApps.push({ id: "downloads", label: "下载与导出", node: <SideDownloads /> });
+  if (asidePanel) dockApps.push({
+    id: showSearchTips ? "tips" : showFolders ? "folders" : showDuplicates ? "duplicates" : "preview",
+    label: asideLabel || "面板",
+    node: <>
+      <AsideHead title={asideLabel} tools={asideTools} />
+      <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
+    </>,
+  });
+  if (showSettings) dockApps.push({ id: "settings", label: "设置", node: <SettingsOverlay /> });
+  const dockOrder = useDockOrder(dockApps.map(app => app.id), dockRaised);
+  const dockFrontRef = useRef<string | null>(null);
+  dockFrontRef.current = dockOrder.at(-1) ?? null;
+  // 窄屏抽屉里仍是一份叠放的内容。
   const asideBody = <div className="kd-panel-dock kd-panel-dock-right">
     <div className="kd-activity-panel-host" hidden={!activityAside}><SidePanels /></div>
     {asidePanel}
@@ -1720,8 +1741,13 @@ export function Workspace() {
 
   const openSettingsFromChrome = useCallback(() => {
     setShowSearchTips(false);
+    // Open but covered by another app: asking for it again brings it to the front.
+    if (useAppStore.getState().showSettings && layout === "wide" && dockFrontRef.current !== "settings") {
+      useSidePanels.getState().raise("settings");
+      return;
+    }
     toggleSettingsPanel();
-  }, [toggleSettingsPanel]);
+  }, [toggleSettingsPanel, layout]);
 
   const openUpdateFromChrome = useCallback(() => {
     setShowSearchTips(false);
@@ -2182,7 +2208,11 @@ export function Workspace() {
             <ChromeActions
               panelIndexTarget={setPanelIndexTarget}
               tasksOpen={downloadsOpen}
-              onTasks={() => useSidePanels.getState().setDownloads(!downloadsOpen)}
+              onTasks={() => {
+                const panels = useSidePanels.getState();
+                if (downloadsOpen && layout === "wide" && dockFrontRef.current !== "downloads") panels.raise("downloads");
+                else panels.setDownloads(!downloadsOpen);
+              }}
               compositionOpen={showComposition}
               onComposition={selectVideoMode}
               settingsOpen={showSettings}
@@ -2534,15 +2564,10 @@ export function Workspace() {
                     onDoubleClick={() => resetColumn("right")}
                   />
                   <aside className="kd-split-aside" ref={localAsideRef} hidden={!showAside}>
-                    <div className="kd-aside-restorable" hidden={editorAsideOpen} inert={showSettings}>
-                    {activityAside ? null : <AsideHead
-                      title={asideLabel}
-                      tools={asideTools}
-                    />}
-                    <div className="kd-split-aside-body kd-scroll">{asideBody}</div>
+                    <div className="kd-aside-restorable" hidden={editorAsideOpen}>
+                      <RightDock apps={dockApps} order={dockOrder} onOccupiedChange={setDockHeld} />
                     </div>
                     {editorDock}
-                    {showSettings && <SettingsOverlay />}
                   </aside>
                 </>
               )}
