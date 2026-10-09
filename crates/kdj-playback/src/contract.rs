@@ -391,6 +391,13 @@ pub enum PlaybackCommand {
     Seek {
         position: f64,
     },
+    /// A seek that names its song. It is ignored unless that song is still the current one,
+    /// so it needs no place in the ordered command queue to be kept off a newer Load.
+    SeekTrack {
+        #[serde(rename = "trackId")]
+        track_id: i64,
+        position: f64,
+    },
     Handoff {
         #[serde(rename = "trackId")]
         track_id: i64,

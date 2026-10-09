@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-test("desktop player lanes: volume never waits for a Load ACK, and a superseded seek is reported", async () => {
+test("desktop player lanes: volume never waits for a Load ACK, and a seek only waits for the Load", async () => {
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM("<!doctype html>", { url: "http://localhost/" });
-  type Call = { command: string; args: { commandId?: number; command?: { type: string; volume?: number } }; resolve(value: unknown): void };
+  type Call = { command: string; args: { commandId?: number; command?: { type: string; volume?: number; trackId?: number; position?: number } }; resolve(value: unknown): void };
   const calls: Call[] = [];
   let sequence = 0;
   const snapshot = (lastCommandId: number, trackId: number | null = null) => ({
@@ -58,23 +58,27 @@ test("desktop player lanes: volume never waits for a Load ACK, and a superseded 
   assert.deepEqual(calls[2].args.command, { type: "setVolume", volume: 0.3 });
   calls[2].resolve({ acceptedSequence: 2 });
 
-  // Ordered transport still waits for the Load, so it cannot overtake it.
-  const sought = player.seek(42);
-  await tick();
-  assert.equal(calls.length, 3, "a seek stays behind the pending Load");
   load.resolve({ commandId: load.args.commandId, acceptedSequence: 3, snapshot: snapshot(load.args.commandId!, 7) });
   assert.equal((await loaded).trackId, 7);
-  await tick();
-  const seek = calls[3];
-  assert.equal(seek.args.command?.type, "seek");
-  assert.ok(seek.args.commandId! > load.args.commandId!);
-  // Rust acknowledged it without applying it: a newer command had already been accepted.
-  seek.resolve({ commandId: seek.args.commandId, acceptedSequence: 4, snapshot: snapshot(seek.args.commandId! + 1, 7) });
-  await assert.rejects(sought, /取代/);
 
-  const applied = player.seek(43);
+  // A seek names its song and travels on the control lane: it follows a Load that is on its
+  // way, but not the queue, prewarm and beat-grid commands a track change leaves behind it.
+  const other = { id: 8, path: "/music/8.flac", title: "八", filename: "8.flac", duration: 200 } as never;
+  const reloaded = player.load({ src: "", track: other, intentId: 2, autoplay: true });
+  void player.setQueue([]).catch(() => undefined);
+  const sought = player.seek(42);
   await tick();
-  const second = calls[4];
-  second.resolve({ commandId: second.args.commandId, acceptedSequence: 5, snapshot: snapshot(second.args.commandId!, 7) });
-  assert.equal((await applied).trackId, 7);
+  const second = calls.at(-1)!;
+  assert.deepEqual([calls.length, second.args.command?.type], [4, "load"], "nothing overtakes the pending Load");
+  second.resolve({ commandId: second.args.commandId, acceptedSequence: 4, snapshot: snapshot(second.args.commandId!, 8) });
+  assert.equal((await reloaded).trackId, 8);
+  await tick();
+  const seek = calls.find((call) => call.args.command?.type === "seekTrack")!;
+  assert.ok(seek, "the seek went out without waiting for the queue command's acknowledgement");
+  assert.equal(seek.command, "playback_control");
+  // It still names the song it was aimed at; the coordinator ignores it now that song 8 is current.
+  assert.deepEqual(seek.args.command, { type: "seekTrack", trackId: 7, position: 42 });
+  assert.equal(seek.args.commandId, undefined, "it reserves no command id, so it cannot fence out the queue command");
+  seek.resolve({ acceptedSequence: 5 });
+  assert.equal((await sought).trackId, 8);
 });

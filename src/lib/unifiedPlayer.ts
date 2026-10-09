@@ -1000,7 +1000,6 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     command: Record<string, unknown>,
     isCurrent: () => boolean = () => true,
     acceptAcknowledgement = true,
-    rejectWhenSuperseded = false,
   ): Promise<UnifiedPlayerState> {
     // Reserve while still in the caller's stack. If a newer Load overtakes this queued command,
     // Rust can reject the older id instead of letting it acquire a new id after the replacement.
@@ -1015,12 +1014,6 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       if (!isCurrent()) return this.snapshot;
       const commandId = reservedCommandId ?? this.nextCommandId++;
       const ack = await invoke<DesktopCommandAckRaw>("playback_command", { commandId, command });
-      // Rust acknowledges a command that arrived after a newer one (a Load from the other lane)
-      // without applying it. A caller holding UI state for this command must hear about it.
-      if (rejectWhenSuperseded && ack.snapshot.lastCommandId > commandId) {
-        this.accept(ack.snapshot);
-        throw new Error("命令已被更新的播放请求取代");
-      }
       // A TEMPO fader acknowledgement contains a full Deck snapshot. Applying dozens of those
       // per second re-renders every waveform despite the compositor having nothing new to draw.
       // The coordinator emits the authoritative latest rate on its normal 100ms state cadence;
@@ -1558,7 +1551,15 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
 
   seek(seconds: number): Promise<UnifiedPlayerState> {
     if (isEditorWindow) return requestKvjTransport("seek", this.snapshot.trackId, seconds);
-    return this.command({ type: "seek", position: Math.max(0, seconds) }, undefined, true, true);
+    // A seek names its song and Rust ignores it once another song is current, so it needs no
+    // command id to be kept off a newer Load. On the ordered lane it waited for every queue,
+    // prewarm and beat-grid acknowledgement issued by the track change before it; the progress
+    // bar sat on the clicked position for that long. It still follows a Load that is on its way.
+    const trackId = this.snapshot.trackId;
+    if (trackId === null) return Promise.reject(new Error("当前没有可跳转曲目"));
+    return this.loadTail.then(() =>
+      this.control({ type: "seekTrack", trackId, position: Math.max(0, seconds) }),
+    );
   }
 
   setRate(rate: number): Promise<UnifiedPlayerState> {

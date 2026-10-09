@@ -512,7 +512,7 @@ fn run_transport_waveform_publisher(
     cache: Arc<ScratchPcmCache>,
     receiver: Receiver<TransportWaveformChunk>,
 ) {
-    kdj_core::thread_qos::prefer_background();
+    let _background = kdj_core::thread_qos::prefer_background();
     let capacity = cache.capacity_frames();
     let mut samples = VecDeque::with_capacity(capacity);
     let mut start_frame = 0i64;
@@ -958,7 +958,7 @@ impl PlaybackCoordinator {
         }
         // This Tauri blocking-pool task is optional presentation work. Lower its OS scheduling
         // class before entering FFT so the decoder/stretch workers keep their live-audio QoS.
-        kdj_core::thread_qos::prefer_background();
+        let _background = kdj_core::thread_qos::prefer_background();
         let visualization_must_yield = || {
             !work_scheduler().allows(work_class)
                 || work_scheduler().audio_pressure() != AudioPressure::Normal
@@ -1081,6 +1081,7 @@ fn publishes_control_snapshot(command: &PlaybackCommand) -> bool {
     !matches!(
         command,
         PlaybackCommand::SetDeckRate { .. }
+            | PlaybackCommand::SetVolume { .. }
             | PlaybackCommand::SetDeckRates { .. }
             | PlaybackCommand::NudgeDeck { .. }
             | PlaybackCommand::ControlDeckPlatter { .. }
@@ -1902,6 +1903,14 @@ impl Actor {
             } => self.toggle_deck_loop_with_quantize(deck, length, quantize),
             PlaybackCommand::ResizeDeckLoop { deck, length } => self.resize_deck_loop(deck, length),
             PlaybackCommand::Seek { position } => self.seek(position),
+            PlaybackCommand::SeekTrack { track_id, position } => {
+                if self.state.track_id == Some(track_id) {
+                    self.seek(position)
+                } else {
+                    // The listener has moved on; these coordinates belong to another song.
+                    Ok(())
+                }
+            }
             PlaybackCommand::Handoff {
                 track_id,
                 position,
@@ -6168,7 +6177,7 @@ fn schedule_scratch_cache_worker(
     let track_id = request.track_id;
     let job: LatestWorkerJob = Box::new(move || {
         let _worker_guard = ActiveScratchWorkerGuard::enter();
-        kdj_core::thread_qos::prefer_background();
+        let _background = kdj_core::thread_qos::prefer_background();
         let cancelled = || cancel.load(Ordering::Acquire) != revision;
         // Let the transport build its startup cushion first. A real touch marks the cache urgent
         // and cuts this delay to at most one 5ms poll.
@@ -9404,6 +9413,42 @@ mod tests {
         });
         assert!(actor.decks[0].is_some());
         assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+    }
+
+    #[test]
+    fn a_seek_naming_another_song_is_ignored() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Playing;
+
+        actor
+            .apply_command(
+                1,
+                PlaybackCommand::SeekTrack {
+                    track_id: 2,
+                    position: 30.0,
+                },
+            )
+            .expect("过期的跳转被安静地忽略");
+        assert!(actor.pending.iter().all(Option::is_none));
+        assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+
+        actor
+            .apply_command(
+                2,
+                PlaybackCommand::SeekTrack {
+                    track_id: 1,
+                    position: 30.0,
+                },
+            )
+            .expect("当前曲目的跳转");
+        let pending = actor.pending[1].as_ref().expect("跳转在另一台 Deck 备流");
+        assert!(matches!(pending.activation, Some(Activation::Seek)));
+        assert!((pending.request.position - 30.0).abs() < 0.001);
     }
 
     #[test]
