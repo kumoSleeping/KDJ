@@ -44,6 +44,9 @@ const BATCH = 500;
 const REQUESTS = 2;
 /** Whole libraries stay in memory; only larger ones fall back to least-recently-used eviction. */
 const CACHE_LIMIT = 50_000;
+/** Waits before the rows of a failed request are asked for again; after the last one they stay
+ * failed until the retry control, a new demand for them, or an event that names them. */
+const RETRY_DELAYS = [1000, 2000, 4000, 8000, 15000];
 
 /** A new identity over the live row map: subscribers see a change without the rows being copied. */
 class SummaryView implements ReadonlyMap<number, TrackSummary> {
@@ -78,7 +81,13 @@ export class LibraryWindow {
   private viewRevision = 0;
   private epochs = new Map<number, number>();
   private stale = new Set<number>();
+  /** Rows of a failed request. They are skipped until `retryTimer` puts them back in the queue. */
   private failed = new Set<number>();
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Automatic retries since the rows last loaded completely. */
+  private retries = 0;
+  /** The error on display came from a summaries request, so loading those rows clears it. */
+  private rowError = false;
   private desired: number[] = [];
   private center = 0;
   /** Rows outside the demanded range may still be missing or stale. */
@@ -117,12 +126,14 @@ export class LibraryWindow {
     this.epochs.clear();
     this.stale.clear();
     this.failed.clear();
+    this.cancelRetry();
     this.missingChecked.clear();
     this.desired = [];
     this.fillPending = false;
     this.fillHalted = false;
     this.loading = false;
     this.error = "";
+    this.rowError = false;
     this.demandVersion += 1;
     this.publish();
   }
@@ -136,10 +147,12 @@ export class LibraryWindow {
     this.auxiliary.clear();
     this.query = { ...query };
     this.failed.clear();
+    this.cancelRetry();
     this.missingChecked.clear();
     this.fillHalted = false;
     this.loading = true;
     this.error = "";
+    this.rowError = false;
     this.demandVersion += 1;
     this.publish();
   }
@@ -166,7 +179,7 @@ export class LibraryWindow {
       this.indexGeneration = generation;
       this.fillHalted = false;
       for (const id of this.failed) if (!this.positions.has(id)) this.failed.delete(id);
-      if (!this.failed.size) this.error = "";
+      if (!this.failed.size) { this.error = ""; this.rowError = false; }
     } catch (error) {
       if (controller !== this.indexRequest || generation !== this.generation) return;
       if (this.indexGeneration !== generation) {
@@ -179,6 +192,7 @@ export class LibraryWindow {
         this.demandVersion += 1;
       }
       this.error = message(error);
+      this.rowError = false;
     } finally {
       if (controller === this.indexRequest && generation === this.generation) {
         this.indexRequest = null;
@@ -200,6 +214,11 @@ export class LibraryWindow {
       this.demandVersion += 1;
       for (const id of desired) this.touch(id);
       this.evict();
+      // Looking at rows that gave up retrying is a new request for them.
+      if (this.retryTimer === null && desired.some((id) => this.failed.has(id))) {
+        this.retries = 0;
+        this.scheduleRetry();
+      }
     }
     this.pump();
     this.publish();
@@ -256,8 +275,10 @@ export class LibraryWindow {
 
   async retry(): Promise<void> {
     this.failed.clear();
+    this.cancelRetry();
     this.missingChecked.clear();
     this.error = "";
+    this.rowError = false;
     this.fillPending = true;
     this.fillHalted = false;
     await this.refreshIndex();
@@ -300,6 +321,7 @@ export class LibraryWindow {
       } catch (error) {
         if (generation !== this.generation || !this.auxiliary.has(controller)) return [];
         this.error = message(error);
+        this.rowError = false;
         throw error;
       } finally {
         this.auxiliary.delete(controller);
@@ -413,6 +435,7 @@ export class LibraryWindow {
         }
         if (checkIndex) {
           this.error = "部分曲目已变化，请重试";
+          this.rowError = true;
           void this.refreshIndex();
         }
         this.evict();
@@ -421,14 +444,45 @@ export class LibraryWindow {
         for (const id of ids) this.failed.add(id);
         this.fillHalted = true;
         this.error = message(error);
+        this.rowError = true;
       }).finally(() => {
         if (!this.jobs.delete(job)) return;
         // Rows this request did not deliver are open to the background fill again.
         this.fillPending = true;
         this.pump();
+        if (!this.failed.size && !this.jobs.size) {
+          // Nothing failed and nothing is left in flight: the retried rows have loaded.
+          this.retries = 0;
+          if (this.rowError) { this.error = ""; this.rowError = false; }
+        }
+        this.scheduleRetry();
         this.publish();
       });
     }
+  }
+  /**
+   * A failed request must not leave its rows as placeholders for good: nothing else asks for
+   * them again while the viewport rests on them. They rejoin the queue after a growing delay.
+   */
+  private scheduleRetry(): void {
+    if (this.retryTimer !== null || !this.failed.size || this.retries >= RETRY_DELAYS.length) return;
+    const timer = setTimeout(() => {
+      this.retryTimer = null;
+      this.failed.clear();
+      this.fillHalted = false;
+      this.fillPending = true;
+      this.pump();
+      this.publish();
+    }, RETRY_DELAYS[this.retries]);
+    this.retries += 1;
+    // Only Node returns a handle here; a waiting retry must not keep its process alive.
+    (timer as { unref?: () => void }).unref?.();
+    this.retryTimer = timer;
+  }
+  private cancelRetry(): void {
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.retries = 0;
   }
   private async request<T>(controller: AbortController, work: Promise<T>): Promise<T> {
     let cancel!: () => void;
