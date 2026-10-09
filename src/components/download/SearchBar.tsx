@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
 import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
@@ -12,7 +18,8 @@ import {
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
 import { HintBulbIcon } from "./HintBulbIcon";
-import { burstToneForPlatforms, SearchBurstFX, type SearchBurstTone } from "./SearchBurstFX";
+import type { SearchBurstTone } from "./SearchBurstFX";
+import "./SearchBar.css";
 
 export {
   DEFAULT_PRIORITY,
@@ -53,18 +60,23 @@ export interface SearchBarProps extends SearchPlatformProps {
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
   presentation?: "bar" | "detail";
-  /**
-   * 外部触发扫光（如 Explore 代填提交）。数值变化即重放；
-   * burstTone：单平台品牌色 / 多平台彩虹（与手动提交同一规则）。
-   */
+  /** A search started outside the field (Explore fills and submits); a new value starts the line. */
   burstNonce?: number;
+  /** @deprecated The search line has one colour. Still passed by Workspace; ignored here. */
   burstTone?: SearchBurstTone;
 }
 
+/** The line under the field: travelling while a search runs, then fading as the results land. */
+type SearchLinePhase = "run" | "done";
+/** A submit that never raised `busy` (rejected input, a page change) ends the line by itself. */
+const SEARCH_LINE_START_GRACE_MS = 700;
+/** Matches the fade in SearchBar.css. */
+const SEARCH_LINE_FADE_MS = 380;
+
 /**
- * 在线搜索：顶栏正中的圆角小框。
+ * 在线搜索：页面顶部的一行，没有框。
  *
- * 搜索来源在最前，细分割线后是输入；平台键只负责来源多选与顺序。
+ * 先是输入，行尾是搜索类型与来源；平台键只负责来源多选与顺序。
  * 提交靠 Enter（Shift+Enter 换行），不再单独放放大镜。
  */
 const SEARCH_KIND_LABEL: Record<SearchKind, string> = {
@@ -213,22 +225,22 @@ export function SearchBar({
   stacked = false,
   presentation = "bar",
   burstNonce = 0,
-  burstTone = "rainbow",
+  burstTone: _burstTone,
   ...platformProps
 }: SearchBarProps) {
   const detail = presentation === "detail";
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const lineRef = useRef<HTMLSpanElement>(null);
   const presets = useSearchPresets({ query, onQueryChange, track: presetTrack, playingTrack, inputRef });
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [platformsExpanded, setPlatformsExpanded] = useState(false);
-  const [burst, setBurst] = useState<SearchBurstTone | null>(null);
-  /** 扫光还在等结果：见过 busy=true 之后，busy 落回 false 才淡出关闭。 */
-  const burstPendingRef = useRef(false);
-  const burstSawBusyRef = useRef(false);
-  const [burstActive, setBurstActive] = useState(false);
+  const [linePhase, setLinePhase] = useState<SearchLinePhase | null>(null);
+  /** 提交后在等结果：见过 busy=true 之后，busy 落回 false 才收线。 */
+  const linePendingRef = useRef(false);
+  const lineSawBusyRef = useRef(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
   const inputRows = batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
@@ -237,33 +249,45 @@ export function SearchBar({
     ? searchKinds[(Math.max(-1, currentKindIndex) + 1) % searchKinds.length]
     : searchKind;
 
-  const playBurst = (tone: SearchBurstTone) => {
-    burstPendingRef.current = true;
+  const startLine = () => {
+    linePendingRef.current = true;
     // Explore 代搜时 submit 可能已经把 busy 拉高，这一帧就要算「见过 busy」。
-    burstSawBusyRef.current = busy;
-    setBurstActive(true);
-    // 先卸再挂，保证同色重搜也会重开动效。
-    setBurst(null);
-    requestAnimationFrame(() => setBurst(tone));
+    lineSawBusyRef.current = busy;
+    setLinePhase("run");
   };
 
   useEffect(() => {
-    if (!burstPendingRef.current) return;
+    if (!linePendingRef.current) return;
     if (busy) {
-      burstSawBusyRef.current = true;
+      lineSawBusyRef.current = true;
       return;
     }
-    // 提交瞬间 busy 还没拉高：先别关。等真正跑完一轮再淡出。
-    if (!burstSawBusyRef.current) return;
-    burstPendingRef.current = false;
-    setBurstActive(false);
+    // 提交瞬间 busy 还没拉高：先别收。等真正跑完一轮再淡出。
+    if (!lineSawBusyRef.current) return;
+    linePendingRef.current = false;
+    setLinePhase("done");
   }, [busy]);
+
+  useEffect(() => {
+    if (linePhase === "run") {
+      const timer = window.setTimeout(() => {
+        if (!linePendingRef.current || lineSawBusyRef.current) return;
+        linePendingRef.current = false;
+        setLinePhase("done");
+      }, SEARCH_LINE_START_GRACE_MS);
+      return () => window.clearTimeout(timer);
+    }
+    if (linePhase === "done") {
+      const timer = window.setTimeout(() => setLinePhase(null), SEARCH_LINE_FADE_MS);
+      return () => window.clearTimeout(timer);
+    }
+  }, [linePhase]);
 
   useEffect(() => {
     if (burstNonce === lastNonceRef.current) return;
     lastNonceRef.current = burstNonce;
-    if (burstNonce > 0) playBurst(burstTone);
-  }, [burstNonce, burstTone]);
+    if (burstNonce > 0) startLine();
+  }, [burstNonce]);
 
   useEffect(() => {
     if (!stacked) setPlatformsExpanded(false);
@@ -271,8 +295,7 @@ export function SearchBar({
 
   const fireSubmit = () => {
     if (!canSubmit) return;
-    // 与 Explore 同一规则：只开一家用品牌色，多家用彩色。
-    playBurst(burstToneForPlatforms(platformProps.platforms));
+    startLine();
     onSubmit();
   };
 
@@ -281,6 +304,7 @@ export function SearchBar({
       className="kd-search-command"
       data-presentation={presentation}
       data-stacked={stacked || undefined}
+      aria-busy={linePhase === "run" || undefined}
       onSubmit={(event) => {
         event.preventDefault();
         fireSubmit();
@@ -292,39 +316,21 @@ export function SearchBar({
         data-batch={batch || undefined}
         data-stacked={stacked || undefined}
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
-        data-burst={burst || undefined}
+        data-focused={inputFocused ? "true" : undefined}
+        data-searching={linePhase ?? undefined}
+        onPointerDownCapture={(event) => {
+          // The focus ink starts where the click lands. One read per click, none while typing.
+          const line = lineRef.current;
+          if (!line || inputFocused || (event.target as HTMLElement).closest("button")) return;
+          const rect = line.getBoundingClientRect();
+          const x = Math.min(rect.width, Math.max(0, event.clientX - rect.left));
+          line.style.setProperty("--kd-search-origin", `${Math.round(x)}px`);
+        }}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
           inputRef.current?.focus();
         }}
       >
-        {burst ? (
-          <SearchBurstFX
-            tone={burst}
-            active={burstActive}
-            onFinished={() => setBurst(null)}
-          />
-        ) : null}
-        <div className="kd-searchbar-tools">
-          {searchKinds.length > 1 && (
-            <button
-              type="button"
-              className="kd-search-kind"
-              data-kind={searchKind}
-              aria-label={`搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
-              onClick={() => onSearchKindChange(nextSearchKind)}
-            >
-              {SEARCH_KIND_LABEL[searchKind]}
-            </button>
-          )}
-          <SearchPlatforms
-            {...platformProps}
-            collapsed={!detail && stacked && !platformsExpanded}
-            onExpand={() => setPlatformsExpanded(true)}
-          />
-        </div>
-        <span className="kd-searchbar-sep" aria-hidden="true" />
         <div
           className="kd-searchbar-copy"
           data-empty={!query || undefined}
@@ -344,6 +350,7 @@ export function SearchBar({
             ref={inputRef}
             className="kd-searchbar-input"
             rows={inputRows}
+            style={{ "--kd-search-rows": inputRows } as CSSProperties}
             value={query}
             placeholder=""
             aria-label="关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"
@@ -351,7 +358,11 @@ export function SearchBar({
             {...presets.aria}
             title="搜索（Enter；Shift + Enter 换行；@ 歌曲名）"
             onFocus={() => setInputFocused(true)}
-            onBlur={event => { setInputFocused(false); presets.onBlur(event.relatedTarget); }}
+            onBlur={event => {
+              setInputFocused(false);
+              lineRef.current?.style.removeProperty("--kd-search-origin");
+              presets.onBlur(event.relatedTarget);
+            }}
             onSelect={presets.syncCaret}
             onCompositionStart={() => {
               composingRef.current = true;
@@ -372,6 +383,28 @@ export function SearchBar({
             onChange={(event) => { onQueryChange(event.target.value); presets.syncCaret(); }}
           />
         </div>
+        <div className="kd-searchbar-tools">
+          {searchKinds.length > 1 && (
+            <button
+              type="button"
+              className="kd-search-kind"
+              data-kind={searchKind}
+              aria-label={`搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              onClick={() => onSearchKindChange(nextSearchKind)}
+            >
+              <span key={searchKind} className="kd-search-kind-text">{SEARCH_KIND_LABEL[searchKind]}</span>
+            </button>
+          )}
+          <SearchPlatforms
+            {...platformProps}
+            collapsed={!detail && stacked && !platformsExpanded}
+            onExpand={() => setPlatformsExpanded(true)}
+          />
+        </div>
+        <span ref={lineRef} className="kd-search-line" aria-hidden="true">
+          {linePhase ? <span className="kd-search-line-run" /> : null}
+        </span>
       </div>
       {presets.menu}
     </form>
