@@ -1,0 +1,639 @@
+/* ============================================================
+ * Left sidebar: the expanded tree (.kd-folder-pane) and the compact rail
+ * (.kd-narrow-folder-rail).
+ *
+ * Folders are real directories on disk, so the tree reads as a file browser;
+ * online sources borrow the same rows. Red is spent on one thing only: the item
+ * that is open (and a drop that is about to land).
+ * ========================================================== */
+
+/* ---------- Expanded tree: one column grid for every row ---------- */
+.kd-folder-pane {
+  --kd-tree-pad: 0.5rem;
+  --kd-tree-gap: 0.3rem;
+  --kd-tree-caret: 0.8rem;
+  --kd-tree-icon: 1rem;
+  /* A child's disclosure sits under its parent's icon. */
+  --kd-tree-indent: calc(var(--kd-tree-caret) + var(--kd-tree-gap));
+  --kd-tree-focus: color-mix(in srgb, var(--kd-text) 58%, transparent);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: none;
+  background: var(--kd-panel);
+}
+.kd-split[data-layout="wide"] .kd-folder-pane {
+  padding-top: 0.15rem;
+}
+.kd-folder-list {
+  flex: 1;
+  min-height: 0;
+  padding: 0.25rem 0 0.75rem;
+}
+
+/* Root items keep the order the user dragged them into. */
+.kd-sidebar-root-slot {
+  position: relative;
+  min-width: 0;
+}
+/* The library and the online sources are two groups. Wherever one meets the other
+   there is a little air and a hairline, whatever order the roots are in. */
+.kd-sidebar-root-slot:where([data-root-group="library"]) + .kd-sidebar-root-slot:where([data-root-group="online"]),
+.kd-sidebar-root-slot:where([data-root-group="online"]) + .kd-sidebar-root-slot:where([data-root-group="library"]) {
+  margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  background: linear-gradient(var(--kd-line), var(--kd-line)) no-repeat
+    var(--kd-tree-pad) 0 / calc(100% - 2 * var(--kd-tree-pad)) 1px;
+}
+.kd-sidebar-root-slot[data-root-dragging="true"] {
+  opacity: 0.52;
+}
+.kd-sidebar-root-slot[data-root-edge="before"]::before,
+.kd-sidebar-root-slot[data-root-edge="after"]::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--kd-theme);
+  pointer-events: none;
+}
+.kd-sidebar-root-slot[data-root-edge="before"]::before {
+  top: 0;
+}
+.kd-sidebar-root-slot[data-root-edge="after"]::after {
+  bottom: 0;
+}
+body[data-kd-sidebar-root-dragging="true"],
+body[data-kd-sidebar-root-dragging="true"] * {
+  cursor: grabbing !important;
+}
+
+/* The row: [disclosure] [icon] [name ……] [count | action]. Depth only moves the left edge. */
+.kd-folder {
+  display: flex;
+  align-items: center;
+  gap: var(--kd-tree-gap);
+  height: 1.8rem;
+  padding: 0 0.6rem 0 calc(var(--kd-tree-pad) + var(--kd-depth, 0) * var(--kd-tree-indent));
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+  font-weight: 400;
+  cursor: default;
+  /* 文件夹行本身可拖；允许选字会在拖动时变成整行蓝选。 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+.kd-folder:hover,
+.kd-folder[data-menu="true"] {
+  background: var(--kd-hover);
+}
+/* Sources and library roots lead; what hangs under them is a step quieter. */
+.kd-folder[data-sidebar-root-row] {
+  color: var(--kd-text);
+  font-weight: 500;
+  cursor: grab;
+}
+.kd-folder[data-sidebar-root-row]:active {
+  cursor: grabbing;
+}
+.kd-folder-action {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.kd-folder-action:disabled {
+  background: transparent;
+  color: var(--kd-faint);
+  cursor: wait;
+}
+.kd-folder-add {
+  color: var(--kd-muted);
+}
+.kd-folder-add:hover:not(:disabled) {
+  color: var(--kd-text);
+}
+
+.kd-folder-caret {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--kd-tree-caret);
+  height: 1.1rem;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--kd-faint);
+  cursor: inherit;
+}
+button.kd-folder-caret:not(:disabled) {
+  cursor: pointer;
+}
+button.kd-folder-caret:hover:not(:disabled) {
+  color: var(--kd-text);
+}
+.kd-folder-chevron {
+  transition: transform 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.kd-folder-chevron[data-open] {
+  transform: rotate(90deg);
+}
+.kd-folder-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--kd-tree-icon);
+  color: var(--kd-muted);
+}
+.kd-folder-icon > svg {
+  flex: none;
+}
+.kd-folder-drag {
+  cursor: grab;
+}
+.kd-folder-drag:active {
+  cursor: grabbing;
+}
+.kd-folder-purpose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.kd-folder-name {
+  flex: 1 1 auto;
+}
+
+/* Trailing column. A count and the row's action share one cell and trade places on
+   hover, so nothing in the row moves when the pointer arrives. */
+.kd-folder-trail {
+  flex: none;
+  display: inline-grid;
+  align-items: center;
+  justify-items: end;
+  min-width: 1rem;
+}
+.kd-folder-trail:empty {
+  display: none;
+}
+.kd-folder-trail > * {
+  grid-area: 1 / 1;
+}
+.kd-folder-count {
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  transition: opacity 120ms ease;
+}
+/* 未入库的数量是"待办"而不是"已有"：加号和实墨就够，红色留给当前项。 */
+.kd-folder-count[data-pending="true"] {
+  color: var(--kd-text);
+  font-weight: 600;
+}
+.kd-folder-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-right: -0.2rem;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--kd-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.kd-folder-more:hover:not(:disabled) {
+  color: var(--kd-text);
+}
+.kd-folder:is(:hover, :focus-visible, [data-menu="true"]) > .kd-folder-trail[data-action] > .kd-folder-more,
+.kd-folder-trail[data-busy] > .kd-folder-more,
+.kd-folder-more:focus-visible {
+  opacity: 1;
+}
+.kd-folder:is(:hover, :focus-visible, [data-menu="true"]) > .kd-folder-trail[data-action] > .kd-folder-count,
+.kd-folder-trail[data-busy] > .kd-folder-count,
+.kd-folder-trail:has(> .kd-folder-more:focus-visible) > .kd-folder-count {
+  opacity: 0;
+}
+/* A signed-out source: the whole row opens the account settings, and says so. */
+.kd-folder-login {
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 400;
+  transition: color 120ms ease;
+}
+.kd-folder:is(:hover, :focus-visible) .kd-folder-login {
+  color: var(--kd-text);
+}
+
+/* 当前文件夹只用主题红字，不铺底色、不描红侧条；多选的文件夹同样只换墨色。 */
+.kd-folder:is([data-active="true"], [data-selected="true"]) {
+  color: var(--kd-theme);
+}
+.kd-folder:is([data-active="true"], [data-selected="true"]) > .kd-folder-icon {
+  color: inherit;
+}
+/* Keyboard focus is a neutral ring, so it never reads as the selection. */
+.kd-folder:focus-visible,
+.kd-folder-caret:focus-visible,
+.kd-folder-more:focus-visible,
+.kd-stream-inline-action:focus-visible {
+  outline: 1.5px solid var(--kd-tree-focus);
+  outline-offset: -1.5px;
+}
+.kd-folder:focus-visible {
+  border-radius: 4px;
+}
+/* A controller's browse cursor is a focus too: the same ring, visible in every theme. */
+.kd-folder[data-kd-browse-cursor] {
+  border-radius: 4px;
+  outline: 1.5px solid var(--kd-tree-focus);
+  outline-offset: -1.5px;
+}
+
+/* 拖到目标上：整行染色加一圈细线，在余光里也认得出，但不是一整块实心红。 */
+.kd-folder:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) {
+  background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-theme) 46%, transparent);
+  color: var(--kd-theme);
+}
+.kd-folder:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) :is(.kd-folder-icon, .kd-folder-caret, .kd-folder-count) {
+  color: inherit;
+}
+/* 拖文件夹换顺序：落点画成一条插入线，不染色——染色是"放进这个文件夹"的意思，
+   两种操作必须一眼分得开。 */
+.kd-folder[data-edge="before"] {
+  box-shadow: inset 0 2px 0 var(--kd-theme);
+  background: transparent;
+}
+.kd-folder[data-edge="after"] {
+  box-shadow: inset 0 -2px 0 var(--kd-theme);
+  background: transparent;
+}
+
+.kd-folder-new:hover {
+  background: transparent;
+}
+.kd-folder-new > input {
+  flex: 1;
+  min-width: 0;
+  height: 1.4rem;
+  padding: 0 0.3rem;
+  /* An edit field, not a selection: neutral ink. */
+  border: 1px solid var(--kd-tree-focus);
+  border-radius: 3px;
+  outline: none;
+  background: var(--kd-surface);
+  color: var(--kd-text);
+  font: inherit;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 文件夹栏里的 InlineNotice 只需要一条上边框把它和树分开；
+   竖线之类的装饰不加，这一栏本来就窄。 */
+.kd-folder-notice {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  border-top: 1px solid var(--kd-line);
+}
+
+/* ---------- Online sources: the same rows, one brand mark per source ---------- */
+.kd-stream-root,
+.kd-stream-section {
+  min-width: 0;
+}
+.kd-folder-stream-root[data-stream-platform="wyy"] > .kd-folder-icon {
+  color: #e02020;
+}
+.kd-folder-stream-root[data-stream-platform="qqm"] > .kd-folder-icon {
+  color: #31c27c;
+}
+.kd-folder-stream-root[data-stream-platform="soundcloud"] > .kd-folder-icon {
+  color: #ff5500;
+}
+.kd-folder-stream-root[data-stream-platform="ytm"] > .kd-folder-icon,
+.kd-folder-stream-root[data-stream-platform="youtube"] > .kd-folder-icon {
+  color: #ff0000;
+}
+.kd-folder-stream-root[data-stream-platform="bilibili"] > .kd-folder-icon {
+  color: #fb7299;
+}
+.kd-stream-refresh:disabled {
+  cursor: wait;
+}
+.kd-stream-status {
+  color: var(--kd-muted);
+}
+div.kd-stream-status:hover {
+  background: transparent;
+}
+.kd-stream-error {
+  color: var(--kd-warn);
+}
+.kd-stream-error > .kd-folder-icon {
+  color: inherit;
+}
+.kd-stream-inline-action {
+  padding: 0 0.15rem;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.kd-stream-inline-action:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.kd-stream-inline-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+/* ---------- The tree inside a sheet (phones) ---------- */
+/* `.kd-folder-pane` 原本是 grid 的一栏、高度由父容器给；进了抽屉之后
+   父容器高度是内容撑的，两边互相等对方 → 树被压成 0 高。 */
+.kd-sheet .kd-folder-pane {
+  height: 100%;
+  min-height: 0;
+  border-right: none;
+}
+/* 手机抽屉里的文件夹行比桌面树稍大一点，给手指留下更可靠的点击面积；
+   只放大抽屉版本，不牺牲桌面侧栏一屏能看到的目录数量。 */
+.kd-sheet .kd-folder {
+  height: 2rem;
+  font-size: var(--kd-size);
+}
+.kd-narrow-folder-panel {
+  flex: 0 0 clamp(11rem, 38vw, 15rem);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: none;
+  background: var(--kd-panel);
+}
+.kd-narrow-folder-panel > .kd-folder-pane {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ============================================================
+ * Compact rail: the same sidebar at icon width.
+ * [add · all tracks] — [sources] — [the open source's folders or playlists]
+ * The split handle draws the line on its right, so the rail has no border.
+ * ========================================================== */
+.kd-narrow-folder-rail {
+  --kd-rail-focus: color-mix(in srgb, var(--kd-text) 58%, transparent);
+  flex: none;
+  width: 3.65rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0.3rem 0 0;
+  background: var(--kd-panel);
+  overflow: hidden;
+}
+.kd-narrow-global-actions,
+.kd-narrow-source-roots,
+.kd-narrow-source-children,
+.kd-narrow-stream-section {
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.1rem;
+}
+.kd-narrow-global-actions {
+  flex: none;
+}
+.kd-narrow-source-roots {
+  /* 来源开关不能被下方超长目录挤扁：否则 NetEase / Q Music 只会露出
+     一截彩色图标，看起来像一条莫名其妙的线。来源多时在自己区域滚动。 */
+  flex: 0 1 auto;
+  /* Show all sources when space permits; leave room for at least one folder row. */
+  max-height: calc(100% - 9rem);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.kd-narrow-source-children {
+  /* 目录吃掉来源区以外的剩余高度；0 basis 避免它按完整列表高度参与
+     flex 收缩，把上面的固定来源按钮重新压扁。 */
+  flex: 1 1 0;
+  min-height: 2.7rem;
+  padding-bottom: 0.3rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.kd-narrow-stream-section {
+  flex: none;
+}
+
+/* A rail item: one glyph over one line of name, the same box for every kind. */
+.kd-narrow-folder-rail button {
+  appearance: none;
+  flex: none;
+  min-width: 0;
+  min-height: 2.7rem;
+  /* Names get nearly the whole rail: nine Latin letters or five CJK characters fit. */
+  margin: 0 0.15rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.22rem;
+  padding: 0.3rem 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.kd-narrow-folder-rail .kd-rail-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 1.05rem;
+}
+.kd-narrow-folder-rail .kd-rail-label {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 0.65rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-narrow-folder-rail button:hover:not(:disabled) {
+  color: var(--kd-text);
+  background: var(--kd-hover);
+}
+.kd-narrow-folder-rail button:disabled {
+  color: var(--kd-faint);
+  cursor: default;
+}
+.kd-narrow-folder-rail button[data-active="true"],
+.kd-narrow-folder-rail button[data-active="true"]:hover {
+  color: var(--kd-theme);
+}
+.kd-narrow-folder-rail button:focus-visible,
+.kd-narrow-rail-resize:focus-visible {
+  outline: 1.5px solid var(--kd-rail-focus);
+  outline-offset: -1.5px;
+}
+.kd-narrow-folder-rail button[data-kd-browse-cursor] {
+  outline: 1.5px solid var(--kd-rail-focus);
+  outline-offset: -1.5px;
+}
+.kd-narrow-folder-rail button:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) {
+  background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-theme) 46%, transparent);
+  color: var(--kd-theme);
+}
+/* Brand colour belongs to the source itself, not to every playlist under it. */
+.kd-narrow-source-roots button[data-stream-platform="wyy"] > .kd-rail-icon {
+  color: #e02020;
+}
+.kd-narrow-source-roots button[data-stream-platform="qqm"] > .kd-rail-icon {
+  color: #31c27c;
+}
+.kd-narrow-source-roots button[data-stream-platform="soundcloud"] > .kd-rail-icon {
+  color: #ff5500;
+}
+.kd-narrow-source-roots button[data-stream-platform="ytm"] > .kd-rail-icon,
+.kd-narrow-source-roots button[data-stream-platform="youtube"] > .kd-rail-icon {
+  color: #ff0000;
+}
+.kd-narrow-source-roots button[data-stream-platform="bilibili"] > .kd-rail-icon {
+  color: #fb7299;
+}
+
+/* Two hairlines of the same weight and rhythm: a fixed one under the global
+   actions, and the one under the sources, which is also the resize handle. */
+.kd-narrow-rail-sep {
+  flex: none;
+  align-self: center;
+  width: 1.8rem;
+  height: 1px;
+  margin: calc((0.85rem - 1px) / 2) 0;
+  background: var(--kd-line);
+}
+.kd-narrow-rail-resize {
+  flex: none;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  height: 0.85rem;
+  margin: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  box-shadow: none;
+  cursor: row-resize;
+  touch-action: none;
+}
+.kd-narrow-rail-resize::after {
+  content: "";
+  width: 1.8rem;
+  height: 1px;
+  background: var(--kd-line);
+  transition: background-color 120ms ease;
+}
+.kd-narrow-rail-resize:hover::after {
+  background: var(--kd-muted);
+}
+
+/* 竖屏方块导航保留滚动能力，但不显示或预留原生滚动条。 */
+:root .kd-app[data-portrait="true"] .kd-narrow-folder-rail .kd-scroll {
+  scrollbar-width: none;
+  scrollbar-gutter: auto;
+}
+:root .kd-app[data-portrait="true"] .kd-narrow-folder-rail .kd-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* ---------- Portrait picker: the open source's list in a bottom sheet ---------- */
+.kd-folder-picker {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 0.35rem 0.5rem;
+}
+.kd-folder-picker button {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 2.6rem;
+  padding: 0.4rem 0.6rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-text);
+  text-align: left;
+  cursor: pointer;
+}
+.kd-folder-picker button:hover {
+  background: var(--kd-hover);
+}
+.kd-folder-picker button[data-active="true"] {
+  color: var(--kd-theme);
+  background: transparent;
+  box-shadow: none;
+}
+.kd-folder-picker .kd-rail-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--kd-muted);
+}
+.kd-folder-picker button[data-active="true"] .kd-rail-icon {
+  color: inherit;
+}
+.kd-folder-picker .kd-rail-label {
+  min-width: 0;
+  font-size: var(--kd-size);
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kd-folder-chevron,
+  .kd-folder-count,
+  .kd-folder-more,
+  .kd-folder-login,
+  .kd-narrow-folder-rail button,
+  .kd-narrow-rail-resize::after {
+    transition: none;
+  }
+}
+
+/* Sakura98: expanded headers and disclosure keys stay pressed in.
+   Selection and hover keep their existing colours and focus indicators. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder[data-sidebar-root-row]:is([aria-expanded="true"], :has(> .kd-folder-caret[aria-expanded="true"])),
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder[aria-expanded="true"] > .kd-folder-caret:has(svg),
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-caret[aria-expanded="true"]:has(svg) {
+  box-shadow: var(--s98-sunken);
+}

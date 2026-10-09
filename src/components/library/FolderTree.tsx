@@ -1,7 +1,7 @@
 import { FOLDER_DND_TYPE, beginTemporaryFolderDrag, endTemporaryFolderDrag } from "../../lib/temporaryFolderDrag";
 import { createPortal } from "react-dom";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -82,6 +82,7 @@ import { ContextMenu, InlineNotice, Sheet } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
 import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
+import "./FolderTree.css";
 
 /** Use the server's actual paths for both Windows and Unix, including selected descendants. */
 function relocatedFolderPath(tree: FolderTreeData, current: string, source: string, parent: string, name: string): string | undefined {
@@ -298,6 +299,39 @@ function folderPurpose(path: string, audioDir?: string, videoDir?: string) {
 }
 
 /**
+ * Every sidebar icon is drawn about one pixel thick, whatever its size: the tree's
+ * row icons, its disclosure chevrons and the compact rail's larger glyphs.
+ */
+const ROW_ICON = { size: 15, strokeWidth: 1.6 } as const;
+const RAIL_ICON = { size: 17, strokeWidth: 1.45 } as const;
+const CHEVRON = { size: 12, strokeWidth: 2 } as const;
+
+/** Indent is a property of the row, so every row type shares one column grid. */
+const depthStyle = (depth: number) => ({ "--kd-depth": depth }) as CSSProperties;
+
+/** One chevron that turns, instead of two glyphs that swap. */
+function Disclosure({ open }: { open: boolean }) {
+  return (
+    <ChevronRight
+      {...CHEVRON}
+      className="kd-folder-chevron"
+      data-open={open || undefined}
+      aria-hidden="true"
+    />
+  );
+}
+
+/** A compact-rail button is always a glyph over a one-line name. */
+function RailContent({ icon, label }: { icon: ReactNode; label: string }) {
+  return (
+    <>
+      <span className="kd-rail-icon">{icon}</span>
+      <span className="kd-rail-label">{label}</span>
+    </>
+  );
+}
+
+/**
  * 文件夹类型与“默认下载落点”只占一个图标位。
  * 旧版在 Folder 后面再排媒体类型图标，看起来像多个独立操作；
  * 默认目录现在直接用 FolderDown，具体是音乐、视频还是两者仍由 title 说明。
@@ -308,25 +342,25 @@ function FolderGlyph({
   videoDir,
   root,
   open,
-  size,
+  icon,
 }: {
   path: string;
   audioDir?: string;
   videoDir?: string;
   root: boolean;
   open: boolean;
-  size: number;
+  icon: { size: number; strokeWidth: number };
 }) {
   const purpose = folderPurpose(path, audioDir, videoDir);
   if (purpose) {
     return (
       <span className="kd-folder-purpose" title={purpose.label} aria-label={purpose.label}>
-        <FolderDown size={size} />
+        <FolderDown {...icon} />
       </span>
     );
   }
   return (
-    root ? <HardDrive size={size} /> : open ? <FolderOpen size={size} /> : <Folder size={size} />
+    root ? <HardDrive {...icon} /> : open ? <FolderOpen {...icon} /> : <Folder {...icon} />
   );
 }
 
@@ -589,17 +623,19 @@ export function NarrowFolderRail({
           );
         }}
       >
-        <span className="kd-narrow-folder-icons">
-          <FolderGlyph
-            path={node.path}
-            audioDir={settings?.download_dir}
-            videoDir={settings?.download_dir}
-            root={node.is_root}
-            open={sourceRoot}
-            size={14}
-          />
-        </span>
-        <small>{node.name}</small>
+        <RailContent
+          icon={
+            <FolderGlyph
+              path={node.path}
+              audioDir={settings?.download_dir}
+              videoDir={settings?.download_dir}
+              root={node.is_root}
+              open={sourceRoot}
+              icon={RAIL_ICON}
+            />
+          }
+          label={node.name}
+        />
       </button>
     );
   };
@@ -629,12 +665,16 @@ export function NarrowFolderRail({
             disabled={!accountsError}
             onClick={() => void useAppStore.getState().refreshAccounts()}
           >
-            {accountsError ? (
-              <AlertTriangle size={14} />
-            ) : (
-              <LoaderCircle className="kd-spin" size={14} />
-            )}
-            <small>{accountsError ? "重试账号" : "读取账号"}</small>
+            <RailContent
+              icon={
+                accountsError ? (
+                  <AlertTriangle {...RAIL_ICON} />
+                ) : (
+                  <LoaderCircle className="kd-spin" {...RAIL_ICON} />
+                )
+              }
+              label={accountsError ? "重试账号" : "读取账号"}
+            />
           </button>
         )}
         {(accountState === "missing" || accountState === "expired") && (
@@ -643,14 +683,18 @@ export function NarrowFolderRail({
             title="打开设置登录账号"
             onClick={() => useAppStore.getState().openSettingsPanel()}
           >
-            <LogIn size={14} />
-            <small>{accountState === "expired" ? "重新登录" : "登录"}</small>
+            <RailContent
+              icon={<LogIn {...RAIL_ICON} />}
+              label={accountState === "expired" ? "重新登录" : "登录"}
+            />
           </button>
         )}
         {canBrowse && loading && playlists === null && (
           <button type="button" disabled aria-label="正在读取歌单">
-            <LoaderCircle className="kd-spin" size={14} />
-            <small>读取歌单</small>
+            <RailContent
+              icon={<LoaderCircle className="kd-spin" {...RAIL_ICON} />}
+              label="读取歌单"
+            />
           </button>
         )}
         {canBrowse && platformError && (
@@ -660,8 +704,7 @@ export function NarrowFolderRail({
             disabled={loading}
             onClick={() => void loadStreamPlaylists(platform, true)}
           >
-            <AlertTriangle size={14} />
-            <small>重试</small>
+            <RailContent icon={<AlertTriangle {...RAIL_ICON} />} label="重试" />
           </button>
         )}
         {canBrowse &&
@@ -679,8 +722,7 @@ export function NarrowFolderRail({
                 title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
                 onClick={() => openStreamPlaylist(platform, playlist)}
               >
-                <Heart size={14} />
-                <small>{playlist.title}</small>
+                <RailContent icon={<Heart {...RAIL_ICON} />} label={playlist.title} />
               </button>
             );
           })}
@@ -700,8 +742,10 @@ export function NarrowFolderRail({
                     setStreamSectionExpanded(platform, section.id, !sectionOpen)
                   }
                 >
-                  {sectionOpen ? <FolderOpen size={14} /> : <Folder size={14} />}
-                  <small>{section.label}</small>
+                  <RailContent
+                    icon={sectionOpen ? <FolderOpen {...RAIL_ICON} /> : <Folder {...RAIL_ICON} />}
+                    label={section.label}
+                  />
                 </button>
                 {sectionOpen &&
                   section.playlists.map((playlist) => {
@@ -718,8 +762,7 @@ export function NarrowFolderRail({
                         title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
                         onClick={() => openStreamPlaylist(platform, playlist)}
                       >
-                        <ListMusic size={14} />
-                        <small>{playlist.title}</small>
+                        <RailContent icon={<ListMusic {...RAIL_ICON} />} label={playlist.title} />
                       </button>
                     );
                   })}
@@ -751,7 +794,7 @@ export function NarrowFolderRail({
             title="不在曲库目录里的曲目"
             onClick={() => choose(OUTSIDE_FOLDER)}
           >
-            <Files size={15} /><small>其他</small>
+            <RailContent icon={<Files {...RAIL_ICON} />} label="其他" />
           </button>
         )}
         {narrowSource.kind === "stream" &&
@@ -774,7 +817,7 @@ export function NarrowFolderRail({
           void pickAndScanFolders().catch((reason: unknown) => setError((reason as Error).message));
         }}
       >
-        <FolderPlus size={15} /><small>添加音乐</small>
+        <RailContent icon={<FolderPlus {...RAIL_ICON} />} label="添加音乐" />
       </button>
       <button
         type="button"
@@ -802,7 +845,7 @@ export function NarrowFolderRail({
           );
         }}
       >
-        <Library size={15} /><small>全部曲目</small>
+        <RailContent icon={<Library {...RAIL_ICON} />} label="全部曲目" />
       </button>
       </div>
       <span className="kd-narrow-rail-sep" />
@@ -834,8 +877,10 @@ export function NarrowFolderRail({
               }
             }}
           >
-            <PlatformMark id={streamRoot.id} size={15} />
-            <small>{streamRoot.label}</small>
+            <RailContent
+              icon={<PlatformMark id={streamRoot.id} size={RAIL_ICON.size} />}
+              label={streamRoot.label}
+            />
           </button>
         ))}
       </div>
@@ -884,7 +929,7 @@ export function NarrowFolderRail({
         <div className="kd-folder-picker">
           {narrowSource.kind === "local" && selectedLocalRoot && (
             <button type="button" onClick={() => choose(selectedLocalRoot.path)}>
-              <FolderOpen size={16} /><small>{selectedLocalRoot.name}</small>
+              <RailContent icon={<FolderOpen {...RAIL_ICON} />} label={selectedLocalRoot.name} />
             </button>
           )}
           {renderChildren()}
@@ -1422,7 +1467,6 @@ export function FolderTree({
 
   const renderStreamRoot = (streamRoot: (typeof STREAM_ROOTS)[number]) => {
     const platform = streamRoot.id;
-    const open = streamExpanded[platform];
     const playlists = streamPlaylists[platform];
     const orderedPlaylists = orderStreamPlaylistsByRecent(
       withForegroundStreamPlaceholder(playlists ?? [], platform, startupForeground),
@@ -1432,19 +1476,14 @@ export function FolderTree({
     const error = streamErrors[platform];
     const accountState = accounts.find((account) => account.platform === platform)?.state;
     const canBrowse = accountCanBrowse(accountState);
-    // 平台的默认收藏直接作为可点击项展示；不再套一层只有一个子项的目录。
     const favoritePlaylists = orderedPlaylists.filter(
       (playlist) => playlist.is_favorite || playlist.origin === "favorite",
     );
     const sections = streamPlaylistSections(orderedPlaylists, platform);
     const count = playlists?.length;
-    const countLabel = loading && count === undefined
-      ? "…"
-      : count !== undefined && count > 0
-        ? count
-        : !canBrowse && accountState
-          ? "登录"
-          : null;
+    // A signed-out source has nothing to unfold: its row is the way in to the account settings.
+    const needsLogin = accountState === "missing" || accountState === "expired";
+    const open = streamExpanded[platform] && !needsLogin;
     const rootHint = !accountState
       ? accountsError || "正在读取账号状态"
       : accountState === "missing"
@@ -1452,6 +1491,43 @@ export function FolderTree({
         : accountState === "expired"
           ? `${streamRoot.label}登录已失效`
           : error || `${streamRoot.label}远程收藏和歌单`;
+    const activateRoot = () => {
+      if (needsLogin) {
+        // 旋钮只负责浏览，不替用户弹出设置面板。
+        if (!isMidiBrowseActivate()) useAppStore.getState().openSettingsPanel();
+        return;
+      }
+      if (isMidiBrowseActivate() && streamExpanded[platform]) return;
+      toggleStreamRoot(platform, accountState);
+    };
+    const playlistRow = (playlist: StreamPlaylist, depth: number) => {
+      const favorite = playlist.is_favorite || playlist.origin === "favorite";
+      const active =
+        effectiveActiveStreamPlaylist?.platform === platform &&
+        effectiveActiveStreamPlaylist.key === playlist.key;
+      return (
+        <button
+          key={`stream-playlist:${platform}:${playlist.key}`}
+          type="button"
+          className="kd-folder kd-folder-action kd-folder-stream-playlist"
+          data-active={active || undefined}
+          data-stream-platform={platform}
+          {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
+          style={depthStyle(depth)}
+          title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
+          onClick={() => openStreamPlaylist(platform, playlist)}
+        >
+          <span className="kd-folder-caret" />
+          <span className="kd-folder-icon">
+            {favorite ? <Heart {...ROW_ICON} /> : <ListMusic {...ROW_ICON} />}
+          </span>
+          <span className="kd-folder-name kd-truncate">{playlist.title}</span>
+          <span className="kd-folder-trail">
+            <span className="kd-folder-count">{playlist.count}</span>
+          </span>
+        </button>
+      );
+    };
 
     return (
       <div key={`stream-root:${platform}`} className="kd-stream-root">
@@ -1460,141 +1536,125 @@ export function FolderTree({
           data-sidebar-root-row=""
           data-stream-platform={platform}
           {...midiBrowseItemProps("search", `search:root:${platform}`)}
-          style={{ paddingLeft: "0.35rem" }}
+          style={depthStyle(0)}
           role="button"
           tabIndex={0}
-          aria-expanded={open}
+          aria-expanded={needsLogin ? undefined : open}
           title={`${rootHint} · 拖动调整侧栏顺序`}
           onContextMenu={(event) => openStreamRootMenu(event, platform)}
           onPointerDown={(event) =>
             beginRootPointerReorder(event, `stream:${platform}`)
           }
-          onClick={() => {
-            if (isMidiBrowseActivate() && streamExpanded[platform]) return;
-            toggleStreamRoot(platform, accountState);
-          }}
+          onClick={activateRoot}
           onKeyDown={(event) => {
+            if (event.target !== event.currentTarget) return;
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
-            toggleStreamRoot(platform, accountState);
+            activateRoot();
           }}
         >
           <span className="kd-folder-caret">
-            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            {!needsLogin && <Disclosure open={open} />}
           </span>
-          <PlatformMark id={platform} size={13} />
-          <span className="kd-truncate">{streamRoot.label}</span>
-          {countLabel !== null && (
-            <span className="kd-folder-count">{countLabel}</span>
-          )}
-          {canBrowse && (
-            <button
-              type="button"
-              className="kd-folder-more kd-stream-refresh"
-              disabled={loading}
-              aria-label={`刷新${streamRoot.label}歌单`}
-              title={`刷新${streamRoot.label}歌单`}
-              onClick={(event) => {
-                event.stopPropagation();
-                refreshStreamRoot(platform);
-              }}
-            >
-              {loading ? (
-                <LoaderCircle className="kd-spin" size={12} />
-              ) : (
-                <RefreshCw size={12} />
-              )}
-            </button>
-          )}
+          <span className="kd-folder-icon">
+            <PlatformMark id={platform} size={ROW_ICON.size} />
+          </span>
+          <span className="kd-folder-name kd-truncate">{streamRoot.label}</span>
+          <span
+            className="kd-folder-trail"
+            data-action={canBrowse || undefined}
+            data-busy={(canBrowse && loading) || undefined}
+          >
+            {needsLogin ? (
+              <span className="kd-folder-login">
+                {accountState === "expired" ? "重新登录" : "登录"}
+              </span>
+            ) : (
+              count !== undefined && count > 0 && (
+                <span className="kd-folder-count">{count}</span>
+              )
+            )}
+            {canBrowse && (
+              <button
+                type="button"
+                className="kd-folder-more kd-stream-refresh"
+                disabled={loading}
+                aria-label={`刷新${streamRoot.label}歌单`}
+                title={`刷新${streamRoot.label}歌单`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  refreshStreamRoot(platform);
+                }}
+              >
+                {loading ? (
+                  <LoaderCircle className="kd-spin" {...ROW_ICON} />
+                ) : (
+                  <RefreshCw {...ROW_ICON} />
+                )}
+              </button>
+            )}
+          </span>
         </div>
 
         {open && !accountState && (
           <button
             type="button"
             className="kd-folder kd-folder-action kd-stream-status"
+            style={depthStyle(1)}
             title={accountsError || "正在读取账号状态"}
             disabled={!accountsError}
             onClick={() => void useAppStore.getState().refreshAccounts()}
           >
             <span className="kd-folder-caret" />
-            {accountsError ? (
-              <AlertTriangle size={12} />
-            ) : (
-              <LoaderCircle className="kd-spin" size={12} />
-            )}
-            <span className="kd-truncate">
+            <span className="kd-folder-icon">
+              {accountsError ? (
+                <AlertTriangle {...ROW_ICON} />
+              ) : (
+                <LoaderCircle className="kd-spin" {...ROW_ICON} />
+              )}
+            </span>
+            <span className="kd-folder-name kd-truncate">
               {accountsError ? "账号状态读取失败，点此重试" : "正在读取账号状态"}
             </span>
           </button>
         )}
 
-        {open && (accountState === "missing" || accountState === "expired") && (
-          <button
-            type="button"
-            className="kd-folder kd-folder-action kd-stream-status"
-            title={
-              accountState === "expired"
-                ? "登录已失效，打开账号设置重新登录"
-                : `打开账号设置登录${streamRoot.label}`
-            }
-            onClick={() => useAppStore.getState().openSettingsPanel()}
-          >
-            <span className="kd-folder-caret" />
-            <LogIn size={12} />
-            <span className="kd-truncate">
-              {accountState === "expired" ? "登录已失效，重新登录" : "登录后查看歌单"}
-            </span>
-          </button>
-        )}
-
         {open && canBrowse && loading && playlists === null && (
-          <div className="kd-folder kd-stream-status" aria-live="polite">
+          <div className="kd-folder kd-stream-status" style={depthStyle(1)} aria-live="polite">
             <span className="kd-folder-caret" />
-            <LoaderCircle className="kd-spin" size={12} />
-            <span className="kd-truncate">正在读取歌单</span>
+            <span className="kd-folder-icon">
+              <LoaderCircle className="kd-spin" {...ROW_ICON} />
+            </span>
+            <span className="kd-folder-name kd-truncate">正在读取歌单</span>
           </div>
         )}
 
         {open && canBrowse && error && (
-          <div className="kd-folder kd-stream-status kd-stream-error" title={error}>
+          <div
+            className="kd-folder kd-stream-status kd-stream-error"
+            style={depthStyle(1)}
+            title={error}
+          >
             <span className="kd-folder-caret" />
-            <AlertTriangle size={12} />
-            <span className="kd-truncate">{error}</span>
-            <button
-              type="button"
-              className="kd-stream-inline-action"
-              disabled={loading}
-              onClick={() => refreshStreamRoot(platform)}
-            >
-              重试
-            </button>
+            <span className="kd-folder-icon">
+              <AlertTriangle {...ROW_ICON} />
+            </span>
+            <span className="kd-folder-name kd-truncate">{error}</span>
+            <span className="kd-folder-trail">
+              <button
+                type="button"
+                className="kd-stream-inline-action"
+                disabled={loading}
+                onClick={() => refreshStreamRoot(platform)}
+              >
+                重试
+              </button>
+            </span>
           </div>
         )}
 
-        {open &&
-          canBrowse &&
-          favoritePlaylists.map((playlist) => {
-            const active =
-              effectiveActiveStreamPlaylist?.platform === platform &&
-              effectiveActiveStreamPlaylist.key === playlist.key;
-            return (
-              <button
-                key={`stream-playlist:${platform}:${playlist.key}`}
-                type="button"
-                className="kd-folder kd-folder-action kd-folder-stream-playlist kd-folder-stream-playlist-direct"
-                data-active={active || undefined}
-                data-stream-platform={platform}
-                {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
-                title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
-                onClick={() => openStreamPlaylist(platform, playlist)}
-              >
-                <span className="kd-folder-caret" />
-                <Heart size={12} />
-                <span className="kd-truncate">{playlist.title}</span>
-                <span className="kd-folder-count">{playlist.count}</span>
-              </button>
-            );
-          })}
+        {/* 平台的默认收藏直接作为可点击项展示；不再套一层只有一个子项的目录。 */}
+        {open && canBrowse && favoritePlaylists.map((playlist) => playlistRow(playlist, 1))}
 
         {open &&
           canBrowse &&
@@ -1605,6 +1665,7 @@ export function FolderTree({
                 <button
                   type="button"
                   className="kd-folder kd-folder-action kd-stream-section-label"
+                  style={depthStyle(1)}
                   aria-expanded={sectionOpen}
                   title={`${sectionOpen ? "收起" : "展开"}${section.label}`}
                   onClick={() =>
@@ -1612,37 +1673,17 @@ export function FolderTree({
                   }
                 >
                   <span className="kd-folder-caret">
-                    {sectionOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                    <Disclosure open={sectionOpen} />
                   </span>
-                  {sectionOpen ? <FolderOpen size={12} /> : <Folder size={12} />}
-                  <span className="kd-truncate">{section.label}</span>
-                  <span className="kd-folder-count">{section.playlists.length}</span>
+                  <span className="kd-folder-icon">
+                    {sectionOpen ? <FolderOpen {...ROW_ICON} /> : <Folder {...ROW_ICON} />}
+                  </span>
+                  <span className="kd-folder-name kd-truncate">{section.label}</span>
+                  <span className="kd-folder-trail">
+                    <span className="kd-folder-count">{section.playlists.length}</span>
+                  </span>
                 </button>
-                {sectionOpen &&
-                  section.playlists.map((playlist) => {
-                    const favorite =
-                      playlist.is_favorite || playlist.origin === "favorite";
-                    const active =
-                      effectiveActiveStreamPlaylist?.platform === platform &&
-                      effectiveActiveStreamPlaylist.key === playlist.key;
-                    return (
-                      <button
-                        key={`stream-playlist:${platform}:${playlist.key}`}
-                        type="button"
-                        className="kd-folder kd-folder-action kd-folder-stream-playlist"
-                        data-active={active || undefined}
-                        data-stream-platform={platform}
-                        {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
-                        title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
-                        onClick={() => openStreamPlaylist(platform, playlist)}
-                      >
-                        <span className="kd-folder-caret" />
-                        {favorite ? <Heart size={12} /> : <ListMusic size={12} />}
-                        <span className="kd-truncate">{playlist.title}</span>
-                        <span className="kd-folder-count">{playlist.count}</span>
-                      </button>
-                    );
-                  })}
+                {sectionOpen && section.playlists.map((playlist) => playlistRow(playlist, 2))}
               </div>
             );
           })}
@@ -1654,6 +1695,13 @@ export function FolderTree({
     const open = expanded.has(node.path);
     const active = filter.folder === node.path;
     const expandableRoot = depth === 0 && node.children.length > 0;
+    const pendingHint =
+      node.pending_count > 0
+        ? `${node.pending_count} 个文件还没进曲库，点一下这个文件夹就导入`
+        : "";
+    const rowTitle = [node.path, pendingHint, depth === 0 ? "拖动调整侧栏顺序" : ""]
+      .filter(Boolean)
+      .join(" · ");
     return (
       <div key={node.path}>
         <div
@@ -1665,11 +1713,13 @@ export function FolderTree({
           {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
           {...midiBrowseItemProps("local", `local:folder:${node.path}`)}
           data-active={active}
-          data-selected={selectedFolders.has(node.path) || undefined}
+          // 单选由“当前文件夹”的红字表达；只有多选才需要另外标出来。
+          data-selected={(selectedFolders.size > 1 && selectedFolders.has(node.path)) || undefined}
+          data-menu={menu?.node.path === node.path || undefined}
           data-drop={dropTarget === node.path && dropEdge === ""}
           data-edge={dropTarget === node.path ? dropEdge || undefined : undefined}
-          style={{ paddingLeft: `${0.35 + depth * 0.85}rem` }}
-          title={depth === 0 ? `${node.path} · 拖动调整侧栏顺序` : node.path}
+          style={depthStyle(depth)}
+          title={rowTitle}
           draggable={!node.is_root}
           onDragStart={(event) => {
             if (node.is_root) return;
@@ -1821,16 +1871,10 @@ export function FolderTree({
               toggle(node.path);
             }}
           >
-            {node.children.length > 0 ? (
-              open ? (
-                <ChevronDown size={12} />
-              ) : (
-                <ChevronRight size={12} />
-              )
-            ) : null}
+            {node.children.length > 0 ? <Disclosure open={open} /> : null}
           </button>
           <span
-            className="kd-folder-drag"
+            className="kd-folder-icon kd-folder-drag"
             title={node.is_root ? "拖动调整侧栏顺序" : "拖到右侧临时打开，或拖到侧栏移动、排序"}
           >
             <FolderGlyph
@@ -1839,47 +1883,44 @@ export function FolderTree({
               videoDir={settings?.download_dir}
               root={node.is_root}
               open={open && node.children.length > 0}
-              size={13}
+              icon={ROW_ICON}
             />
           </span>
-          <span className="kd-truncate">{node.name}</span>
-          {/* 未入库的用不同的样子标出来，点一下就导入——空文件夹和"没扫过"是两回事 */}
-          {node.pending_count > 0 ? (
-            <span
-              className="kd-folder-count"
-              data-pending="true"
-              title={`${node.pending_count} 个文件还没进曲库，点一下这个文件夹就导入`}
+          <span className="kd-folder-name kd-truncate">{node.name}</span>
+          <span className="kd-folder-trail" data-action="true">
+            {/* 未入库的用不同的样子标出来，点一下就导入——空文件夹和"没扫过"是两回事 */}
+            {node.pending_count > 0 ? (
+              <span className="kd-folder-count" data-pending="true">
+                {importing === node.path ? "…" : `+${node.pending_count}`}
+              </span>
+            ) : (
+              node.total_count > 0 && <span className="kd-folder-count">{node.total_count}</span>
+            )}
+            <button
+              type="button"
+              className="kd-folder-more"
+              aria-label="文件夹操作"
+              onClick={(event) => {
+                event.stopPropagation();
+                setAllMenu(null);
+                if (!selectedFolders.has(node.path)) {
+                  setSelectedFolders(new Set([node.path]));
+                  folderSelectionAnchor.current = node.path;
+                }
+                const rect = event.currentTarget.getBoundingClientRect();
+                setMenu({ node, x: rect.left, y: rect.bottom + 2 });
+              }}
             >
-              {importing === node.path ? "…" : `+${node.pending_count}`}
-            </span>
-          ) : (
-            node.total_count > 0 && <span className="kd-folder-count">{node.total_count}</span>
-          )}
-          <button
-            type="button"
-            className="kd-folder-more"
-            aria-label="文件夹操作"
-            onClick={(event) => {
-              event.stopPropagation();
-              setAllMenu(null);
-              if (!selectedFolders.has(node.path)) {
-                setSelectedFolders(new Set([node.path]));
-                folderSelectionAnchor.current = node.path;
-              }
-              const rect = event.currentTarget.getBoundingClientRect();
-              setMenu({ node, x: rect.left, y: rect.bottom + 2 });
-            }}
-          >
-            <MoreHorizontal size={12} />
-          </button>
+              <MoreHorizontal {...ROW_ICON} />
+            </button>
+          </span>
         </div>
         {newFolder?.parent === node.path && (
-          <div
-            className="kd-folder kd-folder-new"
-            style={{ paddingLeft: `${0.35 + (depth + 1) * 0.85}rem` }}
-          >
+          <div className="kd-folder kd-folder-new" style={depthStyle(depth + 1)}>
             <span className="kd-folder-caret" />
-            <Folder size={13} />
+            <span className="kd-folder-icon">
+              <Folder {...ROW_ICON} />
+            </span>
             <input
               autoFocus
               aria-label="新文件夹名称"
@@ -1907,8 +1948,9 @@ export function FolderTree({
       {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
       {...midiBrowseItemProps("local", "local:all")}
       data-active={filter.folder === ""}
+      data-menu={allMenu !== null || undefined}
       data-drop={dropTarget === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
-      style={{ paddingLeft: "0.35rem" }}
+      style={depthStyle(0)}
       title="拖动调整侧栏顺序；拖入下载会落到默认下载文件夹"
       onPointerDown={(event) => beginRootPointerReorder(event, ALL_TRACKS_ROOT_ID)}
       onClick={() => {
@@ -1948,24 +1990,28 @@ export function FolderTree({
       }}
     >
       <span className="kd-folder-caret" />
-      <Library size={13} />
-      <span className="kd-truncate">全部曲目</span>
-      <span className="kd-folder-count">{allTrackCount}</span>
-      <button
-        type="button"
-        className="kd-folder-more"
-        aria-label="全部曲目操作"
-        onClick={(event) => {
-          event.stopPropagation();
-          setMenu(null);
-          setSelectedFolders(new Set());
-          setRescanArmed(false);
-          const rect = event.currentTarget.getBoundingClientRect();
-          setAllMenu({ x: rect.left, y: rect.bottom + 2 });
-        }}
-      >
-        <MoreHorizontal size={12} />
-      </button>
+      <span className="kd-folder-icon">
+        <Library {...ROW_ICON} />
+      </span>
+      <span className="kd-folder-name kd-truncate">全部曲目</span>
+      <span className="kd-folder-trail" data-action="true">
+        <span className="kd-folder-count">{allTrackCount}</span>
+        <button
+          type="button"
+          className="kd-folder-more"
+          aria-label="全部曲目操作"
+          onClick={(event) => {
+            event.stopPropagation();
+            setMenu(null);
+            setSelectedFolders(new Set());
+            setRescanArmed(false);
+            const rect = event.currentTarget.getBoundingClientRect();
+            setAllMenu({ x: rect.left, y: rect.bottom + 2 });
+          }}
+        >
+          <MoreHorizontal {...ROW_ICON} />
+        </button>
+      </span>
     </div>
   );
 
@@ -1975,7 +2021,7 @@ export function FolderTree({
       data-sidebar-root-row=""
       data-active={isOutsideFolder(filter.folder)}
       {...midiBrowseItemProps("local", "local:outside")}
-      style={{ paddingLeft: "0.35rem" }}
+      style={depthStyle(0)}
       title="不在曲库目录里的曲目 · 拖动调整侧栏顺序"
       onPointerDown={(event) => beginRootPointerReorder(event, OUTSIDE_ROOT_ID)}
       onClick={() => {
@@ -1989,9 +2035,13 @@ export function FolderTree({
       }}
     >
       <span className="kd-folder-caret" />
-      <Files size={13} />
-      <span className="kd-truncate">其他</span>
-      <span className="kd-folder-count">{folders!.outside}</span>
+      <span className="kd-folder-icon">
+        <Files {...ROW_ICON} />
+      </span>
+      <span className="kd-folder-name kd-truncate">其他</span>
+      <span className="kd-folder-trail">
+        <span className="kd-folder-count">{folders!.outside}</span>
+      </span>
     </div>
   );
 
@@ -2044,20 +2094,25 @@ export function FolderTree({
         {/* 添加是固定入口；其余根项都在下面按用户保存的顺序渲染。 */}
         <button
           type="button"
-          className="kd-folder kd-folder-action"
+          className="kd-folder kd-folder-action kd-folder-add"
+          style={depthStyle(0)}
           disabled={scanning}
           title="选磁盘上的文件夹加进曲库，导入和分析都在后台自动做完"
           onClick={() => void addFolders()}
         >
           <span className="kd-folder-caret" />
-          <FolderInput size={13} />
-          <span className="kd-truncate">添加</span>
+          <span className="kd-folder-icon">
+            <FolderInput {...ROW_ICON} />
+          </span>
+          <span className="kd-folder-name kd-truncate">添加</span>
         </button>
         {orderedRootItems.map((item) => (
           <div
             key={item.id}
             className="kd-sidebar-root-slot"
             data-sidebar-root-id={item.id}
+            // 在线来源与本地曲库各成一组；用户拖乱顺序后，分组线跟着走。
+            data-root-group={item.kind === "stream" ? "online" : "library"}
             data-root-dragging={rootDragging === item.id ? "true" : undefined}
             data-root-edge={rootDrop?.id === item.id ? rootDrop.edge : undefined}
           >
