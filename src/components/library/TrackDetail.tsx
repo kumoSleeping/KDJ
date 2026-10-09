@@ -32,6 +32,7 @@ import { useVideoPip } from "../../lib/videoPip";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { DETAIL_PANELS_STORAGE_KEY, useDetailPanelPrefs } from "../../lib/detailPanelPrefs";
 import { LyricsDetailPanel } from "../player/LyricsView";
+import { MarqueeText } from "../common/MarqueeText";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
@@ -582,11 +583,10 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
           </div>
         </div>
         <div className="kd-track-detail-summary" style={{ minWidth: 0 }}>
-          <div className="kd-truncate" style={{ fontWeight: 700, fontSize: "var(--kd-size-lg)" }}>
-            {track.title || track.filename}
-          </div>
-          <div className="kd-truncate kd-muted">{track.artist || DASH}</div>
-          <div className="kd-truncate kd-faint">{track.album || DASH}</div>
+          {/* 标题、艺人、专辑放不下时来回滚动，而不是只截断成省略号。 */}
+          <MarqueeText className="kd-track-detail-title" text={track.title || track.filename} />
+          <MarqueeText className="kd-muted" text={track.artist || DASH} />
+          <MarqueeText className="kd-faint" text={track.album || DASH} />
           <div
             className="kd-faint kd-track-detail-local-facts"
             style={{ fontSize: "var(--kd-size-xs)" }}

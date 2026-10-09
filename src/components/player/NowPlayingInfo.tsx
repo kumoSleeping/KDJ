@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, LoaderCircle, Pin, TextQuote } from "lucide-react";
+import { ChevronDown, ChevronUp, ChevronsDown, LoaderCircle, Pin, TextQuote } from "lucide-react";
 import { isVideoTrack } from "../../lib/format";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
@@ -19,16 +19,19 @@ const LEAVE_MS = 380;
 
 /**
  * Keeps the panel mounted while it is up and for the length of its retreat, and brings it up
- * for a moment whenever a song starts or resumes.
+ * for a moment when another song starts. Pausing and resuming the same song does not.
  */
 export function NowPlayingInfoHost({ trackId, playing }: { trackId: number | null; playing: boolean }) {
   const visible = useNowPlayingInfo(nowPlayingInfoVisible);
   const [mounted, setMounted] = useState(visible);
-  const previous = useRef({ trackId, playing });
+  const song = useRef({ trackId, announced: true });
   useEffect(() => {
-    const before = previous.current;
-    previous.current = { trackId, playing };
-    if (trackId !== null && playing && (!before.playing || before.trackId !== trackId)) {
+    if (song.current.trackId !== trackId) {
+      // The song restored at launch is not a change of song.
+      song.current = { trackId, announced: song.current.trackId === null || trackId === null };
+    }
+    if (!song.current.announced && playing) {
+      song.current.announced = true;
       useNowPlayingInfo.getState().startPeek();
     }
   }, [trackId, playing]);
@@ -116,6 +119,10 @@ function NowPlayingInfo({ leaving }: { leaving: boolean }) {
         disabled={meta.editing} onClick={() => showMeta(!expanded)}>
         {expanded ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
       </button>}
+      <button type="button" className="kd-manager-panel-action" aria-label="收起曲目信息" title="收起（Esc）"
+        onClick={() => useNowPlayingInfo.getState().close()}>
+        <ChevronsDown size={14} aria-hidden="true" />
+      </button>
     </>}>
       {information}
       {meta && expanded && <div className="kd-info-meta" role="group" aria-label="Meta">

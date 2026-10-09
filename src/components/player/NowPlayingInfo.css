@@ -71,7 +71,8 @@
 .kd-info-panel > .kd-panel-float-tools > :not(.kd-panel-head-label) { pointer-events: auto; }
 .kd-info-panel .kd-manager-panel-action[aria-expanded="true"] { color: var(--kd-theme); }
 /* Keep the first summary line clear of the corner actions. */
-.kd-info-panel .kd-track-detail-summary > :first-child { padding-right: 5.75rem; }
+.kd-info-panel .kd-track-detail-summary > :first-child { margin-right: 7.4rem; }
+.kd-track-detail-title { font-weight: 700; font-size: var(--kd-size-lg); }
 .kd-info-meta {
   display: flex;
   flex-direction: column;

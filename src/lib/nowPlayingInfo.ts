@@ -5,15 +5,17 @@ const PINNED_KEY = "kd-now-playing-pinned";
 /** How long the panel stays up after a song starts, unless it is held or pinned. */
 export const NOW_PLAYING_PEEK_MS = 5_000;
 
+let peeks = 0;
+
 /**
  * The 曲目信息 panel that rises out of the player bar. It is up while any of three things holds
- * it: the listener opened it from the now-playing card, pinned it, or a song has just started
- * (a timed peek).
+ * it: the listener opened it from the now-playing card, pinned it, or another song has just
+ * started (a timed peek).
  */
 export const useNowPlayingInfo = create<{
   open: boolean;
   pinned: boolean;
-  /** Counts peeks; a new value restarts the countdown. 0 = not peeking. */
+  /** Identifies the running peek; a new value restarts the countdown. 0 = not peeking. */
   peek: number;
   /** The now-playing card: bring the panel up and keep it, or dismiss it whatever holds it. */
   toggle(): void;
@@ -37,12 +39,12 @@ export const useNowPlayingInfo = create<{
   },
   setPinned(pinned) {
     writeLocalStorageNow(PINNED_KEY, String(pinned));
-    // Unpinning leaves the panel up; it is dismissed from the card or with Escape.
-    set(pinned ? { pinned, peek: 0 } : { pinned, open: true });
+    // Unpinned, the panel goes back to leaving by itself: a fresh countdown starts.
+    set(pinned ? { pinned, peek: 0 } : { pinned, open: false, peek: ++peeks });
   },
   startPeek() {
-    const { open, pinned, peek } = get();
-    if (!open && !pinned) set({ peek: Math.abs(peek) + 1 });
+    const { open, pinned } = get();
+    if (!open && !pinned) set({ peek: ++peeks });
   },
   endPeek: () => set({ peek: 0 }),
 }));
