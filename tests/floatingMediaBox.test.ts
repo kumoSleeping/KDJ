@@ -5,6 +5,8 @@ import {
   FLOAT_MOTION_PAD,
   defaultFloatRect,
   fitFloatRect,
+  floatTopLimit,
+  floatWidthLimits,
   nearestFloatEdge,
   parseStoredFloatRect,
   planFloatSlide,
@@ -124,4 +126,81 @@ test("the window slides in and out just beyond its nearest edge", () => {
   // A window caught halfway out keeps leaving by the edge of the place it rested in.
   assert.deepEqual(planFloatSlide({ ...box, x: 1300 }, viewport, box), { edge: "right", offset: { x: 1440 - 1300 + FLOAT_MOTION_PAD, y: 0 } });
   assert.deepEqual(planFloatSlide({ ...box, x: 1600 }, viewport, box).offset, { x: 0, y: 0 }, "already outside: nowhere left to go");
+});
+
+// The top chrome holds the window controls; on macOS it is 40 px tall.
+const chromed = { ...viewport, top: 40 };
+const limit = 40 + FLOAT_MEDIA_MARGIN;
+
+test("dragging stops below the top chrome", () => {
+  const start: FloatRect = { x: 400, y: 300, w: 400, h: 225 };
+  assert.equal(floatTopLimit(chromed), limit);
+  assert.equal(floatTopLimit(viewport), FLOAT_MEDIA_MARGIN, "no chrome: the plain margin");
+  assert.deepEqual(fitFloatRect({ ...start, y: -500 }, chromed, wide), { ...start, y: limit });
+  assert.deepEqual(fitFloatRect({ ...start, y: 20 }, chromed, wide), { ...start, y: limit }, "half under the chrome is under it");
+  assert.deepEqual(fitFloatRect({ ...start, y: limit + 0.5 }, chromed, wide), { ...start, y: limit + 0.5 });
+  // The other three edges keep their plain margin.
+  assert.deepEqual(fitFloatRect({ ...start, x: -50, y: 2000 }, chromed, wide), { x: 8, y: 900 - 225 - 8, w: 400, h: 225 });
+});
+
+test("resizing upwards stops at the chrome and the window cannot outgrow the area below it", () => {
+  const start: FloatRect = { x: 400, y: 100, w: 400, h: 225 };
+  // Pulling the top edge 400 px up would put it at y < 0; the box is pushed back down instead.
+  const north = resizeFloatRect(start, "n", 0, -400, chromed, wide);
+  assert.ok(north.y >= limit, `top edge ${north.y} stays below the chrome`);
+  assert.ok(north.y + north.h <= 900 - FLOAT_MEDIA_MARGIN);
+  const corner = resizeFloatRect(start, "ne", 2000, -2000, chromed, wide);
+  assert.ok(corner.y >= limit);
+  near(floatWidthLimits(chromed, wide).maximum, Math.min(1424, (900 - 40 - 16) * 16 / 9));
+  near(floatWidthLimits(chromed, tall).maximum, (900 - 40 - 16) * 9 / 16);
+  const tallest = resolveFloatRect({ x: 0, y: 0, w: 5000, h: 5000 * 16 / 9 }, chromed, tall);
+  near(tallest.y, limit);
+  near(tallest.y + tallest.h, 900 - FLOAT_MEDIA_MARGIN);
+  // The title strip of a platform player counts against the same height.
+  const embedded = resolveFloatRect({ x: 0, y: 0, w: 5000, h: 2848.5 }, chromed, platform);
+  assert.ok(embedded.y >= limit && embedded.y + embedded.h <= 900 - FLOAT_MEDIA_MARGIN + 1e-6);
+});
+
+test("a box remembered under the chrome is moved down when it opens, and its memory is kept", () => {
+  const remembered: FloatRect = { x: 500, y: 8, w: 352, h: 198 };
+  const frozen = { ...remembered };
+  assert.deepEqual(resolveFloatRect(remembered, chromed, wide), { ...remembered, y: limit });
+  assert.deepEqual(remembered, frozen);
+  // Another shape opened from the same memory starts below the chrome as well.
+  const portrait = resolveFloatRect(remembered, chromed, tall);
+  near(portrait.y, limit);
+  assert.deepEqual(resolveFloatRect(resolveFloatRect(remembered, chromed, wide), chromed, wide),
+    resolveFloatRect(remembered, chromed, wide), "idempotent at the limit");
+  // A box that was never under the chrome is not touched.
+  const low: FloatRect = { x: 1072, y: 618, w: 352, h: 198 };
+  assert.deepEqual(resolveFloatRect(low, chromed, wide), low);
+});
+
+test("the default box and a short viewport both keep the chrome clear", () => {
+  assert.deepEqual(defaultFloatRect(chromed), defaultFloatRect(viewport), "there is room: same place");
+  const short = { width: 700, height: 300, top: 40 };
+  assert.ok(defaultFloatRect(short).y >= 40 + 16);
+  const shown = resolveFloatRect(defaultFloatRect(short), short, wide);
+  assert.ok(shown.y >= limit);
+  assert.ok(shown.y + shown.h <= 300 - FLOAT_MEDIA_MARGIN + 1e-6);
+  // No room at all: the chrome wins and the bottom overflows.
+  const sliver = { width: 700, height: 120, top: 40 };
+  assert.equal(fitFloatRect({ x: 100, y: 0, w: 240, h: 135 }, sliver, wide).y, limit);
+});
+
+test("at the top limit the window still tucks away upwards, clear of the whole viewport", () => {
+  const size = { w: 352, h: 198 };
+  const parked: FloatRect = { x: 500, y: limit, ...size };
+  assert.equal(nearestFloatEdge(parked, chromed), "top");
+  assert.deepEqual(planFloatSlide(parked, chromed), { edge: "top", offset: { x: 0, y: -(limit + 198 + FLOAT_MOTION_PAD) } });
+  // In the top corners the gap to the chrome ties with the gap to the side, and the side wins.
+  assert.equal(nearestFloatEdge({ x: 1080, y: limit, ...size }, chromed), "right");
+  assert.equal(nearestFloatEdge({ x: 8, y: limit, ...size }, chromed), "left");
+  // The chrome counts as the top edge: 60 px below it is nearer than 110 px from the side.
+  assert.equal(nearestFloatEdge({ x: 110, y: 100, ...size }, chromed), "top");
+  assert.equal(nearestFloatEdge({ x: 110, y: 100, ...size }, viewport), "top");
+  assert.equal(nearestFloatEdge({ x: 90, y: 100, ...size }, viewport), "left");
+  assert.equal(nearestFloatEdge({ x: 90, y: 100, ...size }, chromed), "top");
+  // Caught on its way out, it keeps going the same way from wherever it is.
+  assert.deepEqual(planFloatSlide({ ...parked, y: -100 }, chromed, parked).offset, { x: 0, y: -(198 - 100 + FLOAT_MOTION_PAD) });
 });
