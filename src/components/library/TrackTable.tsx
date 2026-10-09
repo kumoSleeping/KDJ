@@ -15,6 +15,7 @@ import {
   ListX,
   LoaderCircle,
   Pause,
+  Pencil,
   Play,
   RotateCcw,
   Search,
@@ -108,6 +109,7 @@ import {
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, InlineNotice } from "../common";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
+import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { dragPreviewFromBlob, vinylDragPreview } from "../../lib/dragPreview";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { useSharePrefs } from "../../lib/sharePrefs";
@@ -2241,6 +2243,19 @@ export const TrackTable = memo(function TrackTable({
             <Copy size={12} />
             复制曲目{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
+          {menuIds.length === 1 && (
+            <button
+              type="button"
+              onClick={() => {
+                // 编辑器开在右键的位置旁边，不占用列表和侧栏。
+                useTrackMetaEditor.getState().open(rowMenu.track.id, { x: rowMenu.x, y: rowMenu.y });
+                setRowMenu(null);
+              }}
+            >
+              <Pencil size={12} />
+              编辑 Meta
+            </button>
+          )}
           <button type="button" disabled={menuIds.length !== 1 || isImageTrack(rowMenu.track.format)} onClick={() => {
             useVisualizerStudioStore.getState().open(rowMenu.track);
             setRowMenu(null);

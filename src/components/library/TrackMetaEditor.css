@@ -1,0 +1,86 @@
+/* Meta 编辑器：一扇停在触发它的面板旁边的小窗。压在列表、侧栏和抽屉之上，
+   但在播放条（z-index 60）之下——无论拖到哪里，底栏都照常可点。 */
+.kd-panel.kd-internal-window.kd-meta-editor-window {
+  z-index: 58;
+  width: 21rem;
+  /* 再高也留得出播放条：内容超出时滚动的是表单，标题栏和保存按钮不动。 */
+  max-height: min(40rem, calc(100dvh - var(--kd-player-h) - 4.5rem));
+  font-size: var(--kd-size-sm);
+}
+.kd-panel.kd-meta-editor-window > .kd-internal-window-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  overflow: hidden;
+  padding: 0;
+}
+.kd-meta-editor {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.kd-meta-editor-scroll {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-height: 0;
+  padding: 0.6rem 0.65rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.kd-meta-editor-scroll > * { flex: none; }
+.kd-meta-editor-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  min-width: 0;
+}
+/* 封面工具在这里和封面并排，不再是一整段带分隔线的区块。 */
+.kd-meta-editor-head > .kd-cover-tools {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.kd-meta-editor-head .kd-cover-tools-head { flex-wrap: wrap; }
+.kd-meta-editor-summary {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.kd-meta-editor-title {
+  color: var(--kd-text);
+  font-size: var(--kd-size);
+  font-weight: 700;
+}
+.kd-meta-editor-scroll .kd-cover-candidates { grid-template-columns: minmax(0, 1fr); }
+.kd-meta-editor-scroll .kd-input,
+.kd-meta-editor-scroll .kd-textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+.kd-meta-editor-foot {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.4rem 0.65rem;
+  border-top: 1px solid var(--kd-line-soft);
+}
+/* 回执贴在保存按钮上方，写不下就换行：这里没有地方再放一个悬停提示。 */
+.kd-meta-editor-foot > .kd-notice { align-items: flex-start; }
+.kd-meta-editor-foot > .kd-notice > .kd-notice-text {
+  flex: 1 1 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.kd-meta-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+}

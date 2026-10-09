@@ -70,8 +70,24 @@
   opacity: 1;
 }
 .kd-info-panel > .kd-panel-float-tools > :not(.kd-panel-head-label) { pointer-events: auto; }
-.kd-info-panel .kd-manager-panel-action[aria-expanded="true"] { color: var(--kd-theme); }
 /* Keep the first summary line clear of the corner actions. */
+/* The column is narrow: the actions take a row of their own above the song instead of a corner. */
+.kd-player-info .kd-info-panel > .kd-panel-float-tools {
+  position: static;
+  max-height: none;
+  height: 24px;
+  padding: 3px 4px 0;
+}
+.kd-player-info .kd-info-panel .kd-panel-body { padding: 2px 12px 12px; }
+.kd-player-info .kd-track-detail-hero { gap: 0.65rem; }
+.kd-player-info .kd-cover-edit-stack,
+.kd-player-info .kd-cover-edit { width: 68px !important; height: 68px !important; }
+.kd-player-info .kd-cover-edit-stack { height: auto !important; }
+/* The right column and the toast step out of the risen panel's way. */
+.kd-dock { margin-bottom: var(--kd-info-lift, 0px); transition: margin-bottom 420ms cubic-bezier(0.22, 0.9, 0.26, 1); }
+.kd-toast { translate: 0 calc(-1 * var(--kd-info-lift, 0px)); transition: translate 420ms cubic-bezier(0.22, 0.9, 0.26, 1); }
+@media (prefers-reduced-motion: reduce) { .kd-dock, .kd-toast { transition: none; } }
+.kd-track-detail-title { font-weight: 700; font-size: var(--kd-size-lg); }
 /* The column is narrow: the actions take a row of their own above the song instead of a corner. */
 .kd-player-info .kd-info-panel > .kd-panel-float-tools {
   position: static;

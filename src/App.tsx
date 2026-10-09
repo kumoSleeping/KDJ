@@ -4,6 +4,7 @@ import { Button, EmptyState, ToastHost } from "./components/common";
 import { Workspace } from "./components/workspace/Workspace";
 import { PlayerBar } from "./components/player/PlayerBar";
 import { VideoPipHost } from "./components/player/VideoPipHost";
+import { TrackMetaEditorHost } from "./components/library/TrackMetaEditor";
 import { startAutoAnalyze } from "./lib/autoAnalyze";
 import { startDataUpgrade } from "./lib/dataUpgrade";
 import { djEngine } from "./lib/djMix";
@@ -145,6 +146,7 @@ export default function App() {
         <>
           <PlayerBar />
           <VideoPipHost />
+          <TrackMetaEditorHost />
         </>
       )}
     </div>

@@ -16,9 +16,13 @@ function loadBounds(key?: string): WindowBounds | null {
 }
 
 /** An app-owned, non-modal window: the timeline remains usable behind it. */
-export function FloatingPanelWindow({ title, subtitle, children, close, closeLabel, busy = false, className = "", initialPosition, storageKey, onMoveStart, onMove, onMoveEnd, onMoveCancel }: {
+export function FloatingPanelWindow({ title, subtitle, children, close, closeLabel, busy = false, className = "", initialPosition, place, bottomInset, storageKey, onMoveStart, onMove, onMoveEnd, onMoveCancel }: {
   onMoveStart?(): void; onMove?(x: number, y: number): void; onMoveEnd?(x: number, y: number): void; onMoveCancel?(): void;
   title: string; subtitle?: string; children: ReactNode; close(): void; closeLabel: string; busy?: boolean; className?: string; storageKey?: string; initialPosition?: { left: number; top: number };
+  /** Where a window without a position first appears, once its size is known. */
+  place?(box: { width: number; height: number }): { left: number; top: number };
+  /** Height at the bottom of the viewport this window stays clear of, also as its content grows. */
+  bottomInset?(): number;
 }) {
   const root = useRef<HTMLElement>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number; moving: boolean } | null>(null);
@@ -40,20 +44,29 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
       if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true });
     };
   }, []);
+  const floor = () => window.innerHeight - Math.max(0, bottomInset?.() ?? 0);
   useLayoutEffect(() => {
+    let placed = !place || !!saved || !!initialPosition;
     const fit = () => {
       const box = root.current?.getBoundingClientRect();
       if (!box || box.width <= 0 || box.height <= 0) return;
       const width = Math.min(box.width, Math.max(1, window.innerWidth - 16));
-      const height = Math.min(box.height, Math.max(1, window.innerHeight - 16));
-      setPosition({ left: Math.max(8, Math.min(box.left, window.innerWidth - width - 8)),
-        top: Math.max(8, Math.min(box.top, window.innerHeight - height - 8)) });
+      const height = Math.min(box.height, Math.max(1, floor() - 16));
+      const at = placed ? box : place!({ width, height });
+      placed = true;
+      const left = Math.max(8, Math.min(at.left, window.innerWidth - width - 8));
+      const top = Math.max(8, Math.min(at.top, floor() - height - 8));
+      setPosition(current => current?.left === left && current.top === top ? current : { left, top });
       setSize(current => current ? { width, height } : current);
     };
     fit();
     window.addEventListener("resize", fit);
+    // A content-sized window that grows is brought back above the reserved strip.
+    const grown = bottomInset && typeof ResizeObserver !== "undefined" ? new ResizeObserver(fit) : null;
+    if (root.current) grown?.observe(root.current);
     return () => {
       window.removeEventListener("resize", fit);
+      grown?.disconnect();
     };
   }, []);
   return createPortal(<section ref={root} className={`kd-panel kd-internal-window ${className}`} style={{ ...position, ...size }}
@@ -83,7 +96,7 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
         const box = root.current!.getBoundingClientRect();
         onMove?.(event.clientX, event.clientY);
         setPosition({ left: Math.max(8, Math.min(start.left + event.clientX - start.x, window.innerWidth - box.width - 8)),
-          top: Math.max(8, Math.min(start.top + event.clientY - start.y, window.innerHeight - box.height - 8)) });
+          top: Math.max(8, Math.min(start.top + event.clientY - start.y, floor() - box.height - 8)) });
       }}
       onPointerUp={event => {
         const start = drag.current;
@@ -117,7 +130,7 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
         if (edge.includes("w")) left=Math.max(8,Math.min(right-minWidth,left+dx));
         if (edge.includes("e")) right=Math.min(window.innerWidth-8,Math.max(left+minWidth,right+dx));
         if (edge.includes("n")) top=Math.max(8,Math.min(bottom-minHeight,top+dy));
-        if (edge.includes("s")) bottom=Math.min(window.innerHeight-8,Math.max(top+minHeight,bottom+dy));
+        if (edge.includes("s")) bottom=Math.min(floor()-8,Math.max(top+minHeight,bottom+dy));
         setPosition({left,top}); setSize({width:right-left,height:bottom-top});
       }}
       onPointerUp={event => {if (resize.current) rememberBounds(); resize.current=null; if(event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);}}
@@ -129,7 +142,7 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
         event.preventDefault(); event.stopPropagation();
         const box=root.current!.getBoundingClientRect();
         setSize({width:Math.min(window.innerWidth-box.left-8,Math.max(Math.min(300,window.innerWidth-16),box.width+(event.key==="ArrowRight"?16:event.key==="ArrowLeft"?-16:0))),
-          height:Math.min(window.innerHeight-box.top-8,Math.max(Math.min(160,window.innerHeight-16),box.height+(event.key==="ArrowDown"?16:event.key==="ArrowUp"?-16:0)))});
+          height:Math.min(floor()-box.top-8,Math.max(Math.min(160,window.innerHeight-16),box.height+(event.key==="ArrowDown"?16:event.key==="ArrowUp"?-16:0)))});
       }} />)}
   </section>, document.body);
 }
