@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Blend, Clapperboard, Disc3, Download, LoaderCircle, Minus, Play, Plus, Scissors } from "lucide-react";
 import { VideoPlaybackEngine } from "../../lib/videoPlaybackEngine";
 import { api } from "../../lib/api";
+import { tossToDownloads } from "../../lib/downloadToss";
 import {
   AUDIO_FOCUS_EVENT,
   announceAudioFocus,
@@ -441,6 +442,9 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     async (withOffset: boolean) => {
       setSending(true);
       setSendError("");
+      // The preview is itself an app of the drawer, so the drawer is left as it is: the parcel
+      // goes to the 下载 entry instead of putting the preview away.
+      const toss = tossToDownloads({ title: req.title.trim(), open: false });
       try {
         const task = await api.videoDownload({
           platform: req.platform,
@@ -465,6 +469,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           },
         ]);
       } catch (err) {
+        toss.fail();
         setSendError(`下载失败：${err instanceof Error ? err.message : String(err)}`);
       } finally {
         setSending(false);

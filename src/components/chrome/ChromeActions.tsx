@@ -39,7 +39,7 @@ export function ChromeActions({
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
       <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
-        aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
+        data-kd-search-queue-drop="entry" aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
       {updateReady ? (
         <button
           type="button"

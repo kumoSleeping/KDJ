@@ -2061,23 +2061,6 @@ body[data-kd-track-pointer-dragging="true"] {
   overscroll-behavior: none;
   touch-action: none;
 }
-.kd-track-pointer-ghost {
-  position: fixed;
-  z-index: 10000;
-  top: 0;
-  left: 0;
-  max-width: 18rem;
-  padding: 0.35rem 0.55rem;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-raised);
-  color: var(--kd-text);
-  box-shadow: var(--kd-shadow);
-  font-size: var(--kd-size-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: none;
-}
 .kd-table tbody td.kd-td-num > .kd-track-drag-surface {
   justify-content: flex-start;
 }
