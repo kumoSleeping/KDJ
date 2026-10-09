@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
-import { usePanelViewport } from "../../lib/panelViewport";
 import { SettingsPanel } from "./SettingsPanel";
 import "./Preferences.css";
 
@@ -10,7 +9,6 @@ export function SettingsOverlay() {
   const close = useAppStore(state => state.toggleSettingsPanel);
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    usePanelViewport.getState().setExpandedPanel(null);
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     closeRef.current?.focus({ preventScroll: true });
     const escape = (event: KeyboardEvent) => {

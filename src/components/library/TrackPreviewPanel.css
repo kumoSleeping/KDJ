@@ -1,6 +1,5 @@
+/* The strip above the list holds the loaded deck's waveform at a fixed height. */
 .kd-track-preview-row {
-  display: flex;
-  gap: 4px;
   position: relative;
   flex: 0 0 auto;
   min-width: 0;
@@ -8,63 +7,20 @@
   border-bottom: 1px solid var(--kd-line);
   background: var(--kd-panel);
 }
-.kd-track-preview-row[hidden] { display: none; }
-.kd-track-preview.kd-col, .kd-track-preview {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
-  min-width: 0;
-  height: 112px;
-}
-.kd-track-preview > .kd-notice { grid-column: 1 / -1; }
-.kd-track-preview .kd-panel-slot {
-  min-width: 0;
-  min-height: 0;
-  margin: 0;
-  container: track-preview-card / inline-size;
-}
-.kd-track-preview .kd-panel-slot[data-panel-id="information"] { order: 0; }
-.kd-track-preview .kd-panel-slot > .kd-panel {
+.kd-track-preview-row:not(:has(.kd-panel-slot:not([hidden]))) { display: none; }
+.kd-track-preview-waveform { min-width: 0; height: clamp(5.5rem, 15dvh, 8.5rem); }
+.kd-track-preview-waveform > .kd-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  margin: 0;
   overflow: hidden;
 }
-.kd-track-preview .kd-panel-head { flex: none; min-height: 24px; padding: 2px 6px; font-size: var(--kd-size-xs); }
-.kd-track-preview .kd-panel-body { flex: 1; min-height: 0; padding: 6px; overflow: auto; overscroll-behavior: contain; }
-.kd-track-preview .kd-track-detail-hero { flex-direction: column; }
-.kd-track-preview .kd-track-detail-hero .kd-cover { width: 52px !important; height: 52px !important; }
-.kd-track-preview .kd-track-detail-summary { width: 100%; }
-.kd-track-preview .kd-track-detail-summary > div:first-child { font-size: var(--kd-size-sm) !important; }
-.kd-track-preview .kd-track-detail-local-facts { display: flex; flex-direction: column; }
-.kd-library-preview-tools { display: flex; align-items: center; min-height: 28px; padding: 0 8px; border-bottom: 1px solid var(--kd-line); }
-.kd-library-preview-tools .kd-activity-trailing-tools { margin-left: auto; }
-@container track-preview-card (min-width: 260px) {
-  .kd-track-preview .kd-track-detail-hero { flex-direction: row; }
-}
-@media (max-width: 720px) {
-  .kd-track-preview { grid-template-columns: minmax(0, 1fr); }
-}
-
-.kd-track-preview-eq { flex: 1 1 55%; min-width: 0; height: 112px; overflow: auto; }
-.kd-track-preview-eq .kd-panel { margin: 0; height: 100%; }
-.kd-track-preview-eq .kd-panel-head { min-height: 24px; padding: 2px 6px; font-size: var(--kd-size-xs); }
-@container (max-width: 760px) {
-  .kd-track-preview-row { overflow-x: auto; }
-  .kd-track-preview-eq { flex: 1 0 280px; }
-}
-
-/* EQ occupies the former analysis slot; waveform occupies the former EQ slot. */
-.kd-track-preview-row > .kd-track-preview-eq { flex: 1 1 45%; }
-.kd-track-preview-waveform { flex: 1 1 55%; min-width: 0; height: 112px; }
-.kd-track-preview-waveform > .kd-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 .kd-track-preview-waveform .kd-panel-head { flex: none; min-height: 24px; padding: 2px 6px; font-size: var(--kd-size-xs); }
 .kd-track-preview-waveform .kd-manager-scroll-wave { flex: 1; height: auto; min-height: 0; border: 0; }
-@container (max-width: 760px) {
-  .kd-track-preview-row > .kd-track-preview-eq { flex: 1 0 280px; }
-  .kd-track-preview-waveform { flex: 1 0 300px; }
+/* Built-in themes separate the strip with spacing, not a nested box. */
+:root:not([data-theme-pack]) .kd-track-preview-waveform > .kd-panel {
+  border-color: transparent;
+  box-shadow: none;
 }
-
-/* Reserve both surfaces even while a new track has no deck or waveform yet. */
-.kd-track-preview-row { overflow: visible; }

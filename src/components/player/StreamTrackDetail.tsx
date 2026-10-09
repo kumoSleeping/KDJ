@@ -39,7 +39,7 @@ function qualityLabel(value: string | null | undefined): string {
  */
 export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail", renderPanels }: {
   track: Track; restoreTarget?: HTMLElement | null; mode?: "detail" | "preview";
-  renderPanels?(information: ReactNode, metadata?: ReactNode): ReactNode;
+  renderPanels?(information: ReactNode): ReactNode;
 }) {
   const isPreview = mode === "preview";
   const session = useSyncExternalStore(

@@ -1,115 +1,55 @@
-.kd-panel-stack, .kd-panel-mount { display: contents; }
+.kd-panel-stack { display: contents; }
 .kd-panel-slot[hidden] { display: none !important; }
-.kd-sheet .kd-panel-mount + .kd-panel-mount .kd-panel-slot { margin-top: 8px; }
+.kd-panel-slot:empty { display: none; }
+.kd-sheet .kd-panel-slot + .kd-panel-slot { margin-top: 8px; }
 .kd-panel-index-item > span { flex: 1; }
 .kd-panel-index-item[aria-checked="true"] { color: var(--kd-theme); }
-.kd-panel-index-sections { min-width: 190px; }
-.kd-panel-index-section { min-height: 50px; padding: 4px 0 10px; }
-.kd-panel-index-section + .kd-panel-index-section { border-top: 1px solid var(--kd-line-soft); }
-.kd-panel-index-section-title { padding: 3px 8px 5px; color: var(--kd-muted); font-size: var(--kd-size-xs); }
-.kd-panel-index-row { display: flex; align-items: stretch; min-width: 0; }
-.kd-panel-index-row > .kd-panel-reorder-handle { padding: 0 5px; }
-.kd-panel-index-disclosure {
-  display: inline-flex; align-items: center; justify-content: center;
-  flex: none; width: calc(.9rem + 8px);
-}
-.kd-panel-index-expand:focus-visible { outline: 1px solid var(--kd-muted); outline-offset: 2px; }
-/* Reuse the sidebar's raised disclosure key; expanded options stay pressed in,
-   including menus portaled outside .kd-app. This is independent of selection. */
-:root[data-theme-pack="sakulaptop98"] .kd-panel-index-expand:is([aria-expanded="true"], :active) {
-  box-shadow: var(--s98-sunken);
-}
-.kd-panel-index-options { padding-left: 42px; }
+.kd-panel-index-options { padding-left: 28px; }
 .kd-panel-index-option { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; }
 .kd-panel-index-option:has(input:checked) { color: var(--kd-theme); }
-.kd-panel-index-sections[data-has-options] .kd-panel-index-options { padding-left: calc(50px + .9rem); }
-.kd-panel-index-row > .kd-panel-index-item {
-  display: flex; align-items: center; flex: 1; gap: 6px; min-width: 0;
-  padding: 6px 8px 6px 2px; border: 0; border-radius: 3px;
-  background: transparent; color: var(--kd-text-body); font: inherit; font-size: var(--kd-size-sm); text-align: left; cursor: pointer;
-}
-.kd-panel-index-row > .kd-panel-index-item[aria-checked="true"] { color: var(--kd-theme); }
-.kd-panel-index-row > button:focus-visible { outline: 1px solid var(--kd-muted); outline-offset: -2px; }
-.kd-panel-index-row[data-dragged] { opacity: .5; }
-.kd-panel-index-row[data-drop-before] { box-shadow: 0 -2px var(--kd-theme); }
-.kd-panel-index-section[data-drop-end] { box-shadow: inset 0 -2px var(--kd-theme); }
 
-.kd-panel-reorder-handle { display: inline-flex; align-items: center; flex: none; padding: 0 2px; border: 0; background: transparent; color: var(--kd-muted); cursor: grab; }
-.kd-panel-reorder-handle:active { cursor: grabbing; }
-.kd-panel-reorder-handle { touch-action: none; user-select: none; }
-
-.kd-panel-anchor, .kd-panel-live-host { display:contents; }
-.kd-panel-anchor[hidden] { display:none; }
-
-.kd-panel-slot:empty { display:none; }
-
-.kd-panel-slot[data-drop-target] { outline:2px dashed var(--kd-theme); outline-offset:2px; }
-
-/* Dock zones keep their own scroll range so a tall panel cannot consume the list. */
-.kd-panel-dock { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.kd-panel-dock-top { flex: 0 1 auto; max-height: var(--kd-panel-budget, 66.666dvh); }
-/* Media keeps its own aspect and compact card width; unused space is not a panel background. */
-.kd-panel-dock-top > .kd-panel-docked-host[data-media-fit] > .kd-panel-slot {
-  width: var(--kd-dock-media-width);
-  max-width: 100%;
-}
-.kd-panel-dock-right { min-height: 100%; }
-.kd-panel-dock[data-drop-target] { outline: 2px dashed var(--kd-theme); outline-offset: -2px; }
-.kd-panel-docked-host { display: block; min-width: 0; padding: 4px; }
-.kd-panel-docked-host > .kd-panel-slot { min-width: 0; margin: 0; height: auto; }
-.kd-panel-docked-host > .kd-panel-slot > .kd-panel { height: auto; min-width: 0; }
-.kd-panel-docked-host:has(> .kd-panel-slot[hidden]),
-.kd-panel-docked-host:has(> .kd-panel-slot:empty),
-.kd-panel-docked-host:has(> .kd-panel-slot):not(:has(> .kd-panel-slot .kd-panel)),
-.kd-panel-docked-host:has(> .kd-panel-slot > .kd-panel-empty-media),
-.kd-panel-docked-host:has(> .kd-panel-slot > .kd-panel > .kd-panel-float-tools):has(> .kd-panel-slot > .kd-panel > .kd-async-panel-body[data-expanded="false"]) { display: none; }
-.kd-panel-docked-host .kd-track-preview-eq,
-.kd-panel-docked-host .kd-track-preview-waveform { width: 100%; height: auto; min-height: 112px; }
-.kd-panel-docked-host .kd-track-preview-waveform { height: 160px; }
-.kd-panel-dock-top > .kd-panel-docked-host .kd-panel { margin: 0; }
-.kd-panel-docked-host .kd-panel-head { display: flex; }
-/* Built-in light/dark docks use spacing instead of nested boxes. Keep border
-   widths intact so card measurements and aligned rows do not change. Theme
-   packs (including Sakura's bevels) and detached windows retain their chrome. */
-:root:not([data-theme-pack]) .kd-panel-docked-host > .kd-panel-slot[data-panel-id] > .kd-panel,
-:root:not([data-theme-pack]) .kd-panel-docked-host > .kd-panel-slot[data-panel-id] > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel {
-  border-color: transparent;
-  box-shadow: none;
-}
-:root:not([data-theme-pack]) .kd-panel-docked-host > .kd-panel-slot > .kd-panel > .kd-panel-head,
-:root:not([data-theme-pack]) .kd-panel-docked-host > .kd-panel-slot > :is(.kd-track-preview-eq, .kd-track-preview-waveform) > .kd-panel > .kd-panel-head {
-  border-bottom-color: transparent;
-}
-:root:not([data-theme-pack]) .kd-panel-docked-host .kd-search-band-host {
-  border-bottom-color: transparent;
-}
-.kd-table-wrap[data-aside="open"] > .kd-top-wide-search { grid-column: 1 / -1; grid-row: 1; }
+/* The strip above the list sizes to its panels and never takes the list's scroll range. */
+.kd-panel-dock { min-width: 0; min-height: 0; }
+.kd-panel-dock-top { flex: 0 0 auto; }
+.kd-panel-dock-right { height: 100%; }
 .kd-table-wrap[data-aside="open"] > .kd-panel-dock-top { grid-column: 1; grid-row: 2; }
 .kd-table-wrap[data-aside="open"] > .kd-split-aside,
 .kd-table-wrap[data-aside="open"] > .kd-split-handle { grid-row: 2 / -1; }
-.kd-top-wide-search { flex: none; min-width: 0; }
-/* The spanning search owns its lower edge; its child card has no second frame. */
-:root:not([data-theme-pack]) .kd-top-wide-search { border-bottom: 1px solid var(--kd-line); }
-/* Inline-size containment has no intrinsic width. Outside the split dock,
-   the spanning search must stretch explicitly instead of shrinking to a line. */
-.kd-top-wide-search > .kd-panel-docked-host {
-  box-sizing: border-box;
-  width: 100%;
+/* Built-in light/dark stacks use spacing instead of nested boxes; theme packs keep their chrome. */
+:root:not([data-theme-pack]) .kd-panel-dock-top .kd-panel-slot[data-panel-id] > .kd-panel {
+  border-color: transparent;
+  box-shadow: none;
 }
-.kd-top-wide-search > .kd-panel-docked-host > .kd-panel-slot[data-panel-id="search"] {
-  width: 100%;
-  align-self: stretch;
+:root:not([data-theme-pack]) .kd-panel-dock-top .kd-panel-slot > .kd-panel > .kd-panel-head {
+  border-bottom-color: transparent;
 }
-.kd-top-wide-search:not(:has(.kd-panel-slot:not([hidden]))) { display: none; }
-.kd-track-preview-row:not(:has(.kd-panel-slot:not([hidden]))) { display: none; }
-.kd-panel-dock-top > .kd-panel-mount:has(.kd-panel-anchor[hidden]) { display: none; }
-.kd-panel.kd-internal-window[data-docked] {
-  position: relative;
-  inset: auto;
-  z-index: auto;
-  width: 100%;
-  max-width: none;
-  height: auto;
-  max-height: 60vh;
+:root:not([data-theme-pack]) .kd-panel-dock-top .kd-search-band-host {
+  border-bottom-color: transparent;
 }
-.kd-internal-window[data-docked] > .kd-pip-resize { display: none; }
+.kd-panel-dock-top .kd-panel-slot > .kd-panel { margin: 0; }
+/* Give the actual editor a visible boundary, not the platform selector row. */
+.kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy {
+  min-height: 2.25rem;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--kd-text) 18%, var(--kd-panel));
+  border-radius: 4px;
+  background: var(--kd-panel);
+  box-shadow: none;
+}
+.kd-panel-slot[data-panel-id="search"] .kd-searchbar-copy .kd-search-placeholder {
+  left: 8px;
+  right: 8px;
+  color: var(--kd-muted);
+}
+.kd-panel-slot[data-panel-id="search"] .kd-searchbar-copy[data-empty][data-input-focused="true"]::after { left: 8px; }
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-search-band .kd-searchbar {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy {
+  border-color: transparent;
+  border-radius: 2px;
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar-input:focus-visible { outline: none; }

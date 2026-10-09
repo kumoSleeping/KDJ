@@ -170,10 +170,17 @@ function buildPatch(track: Track, draft: Draft): TrackPatch {
   return patch;
 }
 
+export interface TrackMetadataParts {
+  actions: ReactNode;
+  body: ReactNode;
+  editing: boolean;
+}
+
 export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEdit, onUpdated, onRevealMetadata, renderPanels }: {
   track: Track;
   restoreTarget?: HTMLElement | null;
-  renderPanels?(information: ReactNode, metadata: ReactNode): ReactNode;
+  /** The host lays the summary and the Meta section out itself. */
+  renderPanels?(information: ReactNode, metadata: TrackMetadataParts): ReactNode;
   mode?: "detail" | "preview" | "metadata" | "summary";
   onEdit?(): void;
   onUpdated?(track: Track): void;
@@ -588,13 +595,7 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
       </div>
   );
 
-  const metadata = (
-        <Panel
-        key="metadata"
-        heading={editing ? "曲目信息编辑" : "Meta"}
-        padded
-        dense
-        actions={
+  const metadataActions = (
           editing ? (
             <>
               <Button size="sm" variant="ghost" disabled={busy} onClick={closeMetadataEditor}>
@@ -638,8 +639,9 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
               </Button>
             </>
           )
-        }
-      >
+  );
+  const metadataBody = (
+      <>
         {editing ? (
           <div className="kd-col" style={{ gap: "0.4rem" }}>
             {!isImageTrack(track.format) && <div className="kd-cover-tools">
@@ -837,9 +839,13 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
             ))}
           </div>
         </div>
-      </Panel>
+      </>
   );
-
+  const metadata = (
+    <Panel key="metadata" heading={editing ? "曲目信息编辑" : "Meta"} padded dense actions={metadataActions}>
+      {metadataBody}
+    </Panel>
+  );
 
   return (
     <div className={`kd-col kd-track-detail${preview ? " kd-track-preview" : ""}`}
@@ -851,7 +857,7 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
         }} />
       {!renderPanels && !preview && mode !== "metadata" && information}
       <InlineNotice text={notice} onDismiss={() => setNotice("")} />
-      {renderPanels ? renderPanels(information, metadata) : mode === "summary" ? metadata : <DetailPanelStack restoreTarget={restoreTarget} preview={preview}>
+      {renderPanels ? renderPanels(information, { actions: metadataActions, body: metadataBody, editing }) : mode === "summary" ? metadata : <DetailPanelStack restoreTarget={restoreTarget} preview={preview}>
 
         {mode === "detail" && <LyricsDetailPanel key="lyrics" track={track} />}
         {mode === "detail" && isVideoTrack(track.format) && !playbackOwnsVideo && !pipOwnsVideo && (

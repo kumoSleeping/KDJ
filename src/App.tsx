@@ -38,7 +38,7 @@ export default function App() {
   const bootError = useAppStore((state) => state.bootError);
   const connected = useAppStore(selectConnected);
   const ready = connected && !booting;
-  const { columns, chrome, portrait } = useLayoutSignals();
+  const { columns, chrome, portrait, tall } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
@@ -106,6 +106,7 @@ export default function App() {
       data-columns={columns}
       data-chrome={chrome}
       data-portrait={portrait ? "true" : undefined}
+      data-tall={tall ? "true" : undefined}
       data-work-mode="manager"
     >
       <div className="kd-body">

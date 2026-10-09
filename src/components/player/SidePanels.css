@@ -1,0 +1,57 @@
+/* The right column is a plain stack: lyrics take the spare height, the task list keeps its own. */
+.kd-side-panels {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 0;
+  height: 100%;
+  gap: 6px;
+  padding: 6px;
+}
+.kd-side-panels:empty { display: none; }
+.kd-side-panels > .kd-panel {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+.kd-side-panels > .kd-panel > .kd-panel-head {
+  flex: 0 0 24px;
+  min-height: 24px;
+  height: 24px;
+  padding: 2px 6px;
+  font-size: var(--kd-size-xs);
+}
+.kd-side-panels .kd-panel-head .kd-row { gap: 0; }
+.kd-side-panels .kd-manager-panel-action { width: 16px; height: 18px; }
+.kd-side-panels > .kd-detail-lyrics-panel { flex: 1 1 0; min-height: 12rem; }
+.kd-side-panels > .kd-detail-lyrics-panel > .kd-async-panel-body {
+  flex: 1 1 0;
+  height: 0;
+  min-height: 0;
+}
+.kd-side-panels > .kd-detail-lyrics-panel .kd-async-panel-clip { display: flex; flex-direction: column; }
+.kd-side-panels > .kd-detail-lyrics-panel .kd-async-panel-space { flex: 1; height: 0; min-height: 0; }
+.kd-side-panels > .kd-detail-lyrics-panel .kd-lyrics[data-has-content] { height: 100%; max-height: none; }
+/* Alone, the task list fills the column; beside the lyrics it keeps a fixed share. */
+.kd-side-panels > .kd-download-window:only-child { flex: 1 1 0; }
+.kd-side-panels > .kd-download-window:only-child > .kd-task-window-body {
+  flex: 1 1 0;
+  height: 0;
+  max-height: none;
+  resize: none;
+}
+.kd-activity-panel-host { height: 100%; min-height: 0; }
+.kd-activity-panel-host[hidden],
+.kd-split-aside[hidden],
+.kd-split-handle[hidden] { display: none !important; }
+/* The visualizer of the playing song lives in its floating window only. */
+.kd-viz-popup-host {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}

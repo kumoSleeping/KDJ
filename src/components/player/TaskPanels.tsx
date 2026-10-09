@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Download, ExternalLink, Radio, Square } from "lucide-react";
+import { ExternalLink, Radio, Square } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useLiveVjStore } from "../../stores/liveVjStore";
@@ -43,7 +43,7 @@ export function DownloadTaskPanel() {
       aria-selected={view === item.id} tabIndex={view === item.id ? 0 : -1} onClick={() => setView(item.id)}>
       {item.label}
     </button>)}
-  </span>} maximizable visibleHeader expandKey="kd-activity-panels:downloads" padded={false} dense className="kd-task-window kd-download-window">
+  </span>} visibleHeader padded={false} dense className="kd-task-window kd-download-window">
     <div className="kd-task-window-body" id={`${id}-page`} role="tabpanel" aria-labelledby={`${id}-${view}`}>
       <div className="kd-task-page" hidden={exportView}><QueuePanel history={view === "history"} /></div>
       {(visitedExports || exportView) && <div className="kd-task-page" hidden={!exportView}><ExportQueuePanel history={view === "export-history"} /></div>}
@@ -90,7 +90,3 @@ export function LiveVjTaskPanel() {
     </div>
   </Panel>;
 }
-
-export const taskPanelItems = {
-  downloads: { label: "下载", icon: <Download size={14} /> },
-};

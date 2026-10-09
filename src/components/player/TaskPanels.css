@@ -1,4 +1,4 @@
-/* One resizable dock card and one list scroll surface for every task page. */
+/* One card and one list scroll surface for every task page. */
 .kd-task-window-body { min-height: 0; max-height: 240px; overflow: auto; overscroll-behavior: contain; }
 .kd-download-window .kd-task-window-body {
   display: flex;
@@ -13,7 +13,6 @@
 .kd-task-page { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .kd-task-page[hidden] { display: none; }
 .kd-download-window .kd-download-task-list { overflow-y: auto; overscroll-behavior: contain; }
-:root .kd-panel.kd-download-window[data-maximized] > .kd-task-window-body { overflow: hidden; resize: none; }
 .kd-task-tabs { display: inline-flex; align-items: center; gap: 8px; }
 .kd-task-window .kd-task-tabs > button {
   display: inline-flex;

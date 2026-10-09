@@ -1,5 +1,4 @@
 import { useToastStore } from "../../stores/toastStore";
-import { PlaybackPanelToggle } from "../player/PlaybackPanelToggle";
 import { LibrarySearchTools } from "./WorkRailControls";
 import { useContext, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -255,7 +254,6 @@ export function LibraryWorkRail({
       {mediaFilterToggle}
       {aggregateSearchToggle}
       {asideToggle}
-      <PlaybackPanelToggle />
     </LibrarySearchTools>
   );
 

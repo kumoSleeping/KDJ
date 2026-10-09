@@ -72,13 +72,14 @@ function effectiveExtra(
 
 interface LyricsDetailProps {
   track: Track;
-  /** Playback docks reserve a loading rectangle and collapse unavailable content. */
+  /** The side column reserves a loading rectangle and collapses unavailable content. */
   reserveEmpty?: boolean;
-  expandKey?: string;
+  /** Keep the caption row, and with it the host's close action, while there are no lyrics. */
+  visibleHeader?: boolean;
   /** An existing non-audio transport can supply its own clock and seek route. */
   transport?: { position: number; seek(position: number): void };
 }
-export function LyricsDetailPanel({ track, transport, reserveEmpty = false, expandKey }: LyricsDetailProps) {
+export function LyricsDetailPanel({ track, transport, reserveEmpty = false, visibleHeader = false }: LyricsDetailProps) {
   const [actionsHost, setActionsHost] = useState<HTMLSpanElement | null>(null);
   const entry = useLyricsStore(state => state.get(track.id));
   const prefsEpoch = useLyricsPrefs(state => state.prefsEpoch);
@@ -88,7 +89,7 @@ export function LyricsDetailPanel({ track, transport, reserveEmpty = false, expa
   const state = ready ? "ready" : !video && (entry.status === "idle" || entry.status === "loading") ? "loading" : "empty";
   if (!reserveEmpty && !ready) return null;
   return (
-    <Panel heading="歌词" maximizable={ready} expandKey={ready ? expandKey : undefined} actionsHost={actionsHost} padded={false} dense className="kd-detail-lyrics-panel">
+    <Panel heading="歌词" visibleHeader={visibleHeader} actionsHost={actionsHost} padded={false} dense className="kd-detail-lyrics-panel">
       <AsyncPanelBody kind="lyrics" state={state}>
         {ready && <LyricsView track={track} transport={transport} actionsRef={setActionsHost} />}
       </AsyncPanelBody>

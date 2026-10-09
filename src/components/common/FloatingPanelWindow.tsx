@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { usePanelDock, panelDockAt, highlightPanelDock, clearPanelDockHighlight, placePanelHost, dockPanel } from "./panelDock";
 import { X } from "lucide-react";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import { DRAG_THRESHOLD_PX } from "../../lib/pointerSession";
@@ -21,33 +20,13 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
   onMoveStart?(): void; onMove?(x: number, y: number): void; onMoveEnd?(x: number, y: number): void; onMoveCancel?(): void;
   title: string; subtitle?: string; children: ReactNode; close(): void; closeLabel: string; busy?: boolean; className?: string; storageKey?: string; initialPosition?: { left: number; top: number };
 }) {
-  const docks = usePanelDock();
-  // Standalone editor windows share the same docking targets as stack panels.
-  const dockId = !onMoveEnd && storageKey ? `window:${storageKey}` : null;
-  const side = dockId ? docks.placements[dockId]?.side : null;
-  const dockTarget = side ? docks.zones[side] : undefined;
-  const [host] = useState(() => { const node = document.createElement("div"); node.className = "kd-panel-live-host"; return node; });
-  useLayoutEffect(() => {
-    placePanelHost(host, dockTarget ?? document.body, dockId ?? "", !!dockTarget, docks.placements);
-  }, [host, dockTarget, dockId, docks.placements]);
-  useLayoutEffect(() => () => host.remove(), [host]);
-  if (dockId) {
-    onMove = (x, y) => highlightPanelDock(x, y, dockId);
-    onMoveEnd = (x, y) => {
-      const target = panelDockAt(x, y, dockId);
-      if (target) dockPanel(dockId, target);
-      else docks.move(dockId, null);
-      clearPanelDockHighlight();
-    };
-    onMoveCancel = () => clearPanelDockHighlight();
-  }
   const root = useRef<HTMLElement>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number; moving: boolean } | null>(null);
   const resize = useRef<{x:number; y:number; left:number; top:number; width:number; height:number; edge:string} | null>(null);
   const [saved] = useState(() => loadBounds(storageKey));
   const rememberBounds = () => {
     const box = root.current?.getBoundingClientRect();
-    if (dockTarget || !storageKey || !box || box.width <= 0 || box.height <= 0) return;
+    if (!storageKey || !box || box.width <= 0 || box.height <= 0) return;
     // Merge future metadata; opening or fitting a window never rewrites the preference.
     const previous = loadBounds(storageKey);
     writeLocalStorageNow(storageKey, JSON.stringify({ ...previous, left: box.left, top: box.top, width: box.width, height: box.height }));
@@ -63,7 +42,6 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
   }, []);
   useLayoutEffect(() => {
     const fit = () => {
-      if (dockTarget) return;
       const box = root.current?.getBoundingClientRect();
       if (!box || box.width <= 0 || box.height <= 0) return;
       const width = Math.min(box.width, Math.max(1, window.innerWidth - 16));
@@ -77,8 +55,8 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
     return () => {
       window.removeEventListener("resize", fit);
     };
-  }, [dockTarget]);
-  return createPortal(<section ref={root} className={`kd-panel kd-internal-window ${className}`} data-docked={!!dockTarget || undefined} style={dockTarget ? undefined : { ...position, ...size }}
+  }, []);
+  return createPortal(<section ref={root} className={`kd-panel kd-internal-window ${className}`} style={{ ...position, ...size }}
     role="dialog" aria-label={title} tabIndex={-1}
     onPointerDown={event => event.stopPropagation()}
     onKeyDown={event => {
@@ -97,7 +75,7 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
         const start = drag.current;
         if (!start || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
         if (!start.moving) {
-          // Holding the title is not a move; docks stay untouched until it travels.
+          // Holding the title is not a move.
           if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < DRAG_THRESHOLD_PX) return;
           start.moving = true;
           onMoveStart?.();
@@ -153,5 +131,5 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
         setSize({width:Math.min(window.innerWidth-box.left-8,Math.max(Math.min(300,window.innerWidth-16),box.width+(event.key==="ArrowRight"?16:event.key==="ArrowLeft"?-16:0))),
           height:Math.min(window.innerHeight-box.top-8,Math.max(Math.min(160,window.innerHeight-16),box.height+(event.key==="ArrowDown"?16:event.key==="ArrowUp"?-16:0)))});
       }} />)}
-  </section>, host);
+  </section>, document.body);
 }

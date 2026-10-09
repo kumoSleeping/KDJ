@@ -1,15 +1,12 @@
-import { PanelDockZone, PanelWideSearchZone, usePanelDock, toggleResponsivePanel } from "../common/panelDock";
 import { PanelStack } from "../common/PanelStack";
-import { useEffectiveTopPanels } from "../../lib/playbackPanelPrefs";
-import { usePanelViewport } from "../../lib/panelViewport";
-import { useResponsivePanels } from "../common/useResponsivePanels";
+import { useTopPanels } from "../../lib/playbackPanelPrefs";
+import { useSidePanels } from "../../lib/sidePanels";
 import { EditorDock } from "./EditorDock";
 import { useStore } from "zustand";
 import { createTemporaryLibrary, type TemporaryLibrary, type LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
 import { useTemporaryFolderDrop } from "../../lib/temporaryFolderDrag";
 import { TemporaryFolderPane } from "../library/TemporaryFolderPane";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ArrowLeft } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
 import { clearTextSelection } from "../../lib/textSelection";
 import {
@@ -40,8 +37,6 @@ import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
 import { useLyricsStore } from "../../stores/lyricsStore";
 import {
-  makePendingSongStreamTrack,
-  streamTrackById,
 } from "../../lib/streamTrack";
 import {
   getSongPreviewState,
@@ -51,7 +46,8 @@ import {
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { LiveVjPanel } from "../composition/LiveVjPanel";
-import { PlaybackPanel } from "../player/PlaybackPanel";
+import { SidePanels } from "../player/SidePanels";
+import { VisualizerPopup } from "../player/VisualizerPopup";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { useAppStore } from "../../stores/appStore";
 import { enqueueMediaDownloads } from "../../lib/mediaActions";
@@ -84,7 +80,6 @@ import {
 import {
   moveWorkspacePane,
   normalizedWorkspacePaneFractions,
-  resolveWorkspaceRequestedTrack,
   restoreWorkspacePaneState,
   visibleWorkspacePanes,
   type WorkspacePaneKind,
@@ -130,7 +125,6 @@ import type {
   SongSource,
   StreamPlaylist,
   StreamPlaylistResponse,
-  Track,
   VideoInfo,
 } from "../../types";
 import { Button, InlineNotice, Panel, Sheet } from "../common";
@@ -160,7 +154,6 @@ import { DETAIL_EVENT } from "../library/TrackTable";
 import { NetworkVideoDetail } from "../player/NetworkVideoDetail";
 import { SettingsOverlay } from "../settings/SettingsOverlay";
 import { LibraryToolbar } from "../library/LibraryToolbar";
-import { TrackDetail } from "../library/TrackDetail";
 import { TrackPreviewPanel } from "../library/TrackPreviewPanel";
 import { TrackTable } from "../library/TrackTable";
 
@@ -265,9 +258,8 @@ const VisualizerStudioPanel = lazy(() => import("../composition/VisualizerStudio
  * 搜的时候本地还在眼前，也不被队列面板打断。
  */
 export function Workspace() {
-  const rightRevealRevision = usePanelDock(state => state.rightRevealRevision);
-  const rightHasPanels = usePanelDock(state => state.rightHasPanels);
-  const panelPlacements = usePanelDock(state => state.placements);
+  const downloadsOpen = useSidePanels(state => state.downloads);
+  const lyricsOpen = useSidePanels(state => state.lyrics);
   const compositionMode = useAppStore(state => state.compositionMode);
   const visualizerTrackOpen = useVisualizerStudioStore(state => state.track !== null);
   const inlineVisualizerSettings = useVisualizerStudioStore(state => state.inlineSettings);
@@ -283,7 +275,6 @@ export function Workspace() {
   const setVideoPanelTarget = useVideoPip((state) => state.setPanelTarget);
   const showTrackDetail = useAppStore((state) => state.showTrackDetail);
   const showSettings = useAppStore((state) => state.showSettings);
-  const expandedPanelId = usePanelViewport((state) => state.expandedPanelId);
   const settingsPanelEpoch = useAppStore((state) => state.settingsPanelEpoch);
   const showQueue = useAppStore((state) => state.showQueue);
   const queuePanelEpoch = useAppStore((state) => state.queuePanelEpoch);
@@ -326,10 +317,6 @@ export function Workspace() {
   const streamAccountKeys = useStreamBrowseStore((state) => state.accountKeys);
   const startupForeground = useStreamBrowseStore((state) => state.startupForeground);
   const { columns: layout, chrome, portrait } = useLayoutSignals();
-  const panelWorkspace = useRef<HTMLDivElement | null>(null);
-  const panelViewport = usePanelViewport();
-  const panelsAtTop = panelViewport.narrow || panelViewport.compact;
-  useResponsivePanels(panelWorkspace, layout === "narrow");
 
   const total = useLibraryStore((state) => state.total);
   const loading = useLibraryStore((state) => state.loading);
@@ -370,12 +357,10 @@ export function Workspace() {
   const saveSettings = useAppStore((state) => state.saveSettings);
   // 同曲跨平台聚合仍恒为开启；顶栏开关只负责给主列表腾出/还回搜索框高度。
   const merge = true;
-  const topPanelsEnabled = useEffectiveTopPanels();
+  const topPanelsEnabled = useTopPanels(state => state.enabled);
   const [aggregateSearchOpen, setAggregateSearchOpen] = useState(true);
   const [aggregateSearchRevealed, setAggregateSearchRevealed] = useState(true);
   const openAggregateSearch = useCallback(() => {
-    const viewport = usePanelViewport.getState();
-    if (viewport.compact) toggleResponsivePanel("kd-activity-panels:search");
     setAggregateSearchRevealed(false);
     setAggregateSearchOpen(true);
     requestAnimationFrame(() => {
@@ -1211,35 +1196,18 @@ export function Workspace() {
   // chrome：inline 一行搜索，stacked 竖屏两段式——见 useLayoutMode。
   // 文件夹导航在所有尺寸都常驻；竖屏只收成窄轨，避免手机状态下失去入口。
   const showTree = true;
-  // 竖屏侧栏展开状态要固化：用户拖宽/展开后点文件夹不该再弹回窄轨。
-  // 桌面（非竖屏）恒从展开起步（与旧版一致），持久化只服务竖屏；
-  // 否则桌面启动会先渲染一帧窄轨再被下面的 effect 撑开。
+  // 侧栏宽窄只是用户上一次的选择：窗口拖成什么形状都不替用户改，重启后原样恢复。
+  // 只有手机竖屏没存过时从窄轨起步，免得首屏被文件夹占满。
   const [compactTreeExpanded, setCompactTreeExpanded] = useState(() => {
-    if (!portrait) return true;
     const saved = readLocalStorage("kd-compact-tree-expanded");
-    if (saved !== null) return saved === "1";
-    return false;
+    return saved === null ? !portrait : saved === "1";
   });
-  const previousCompactTreePortraitRef = useRef(portrait);
+  const savedCompactTreeRef = useRef(compactTreeExpanded);
   useEffect(() => {
-    const previousPortrait = previousCompactTreePortraitRef.current;
-    previousCompactTreePortraitRef.current = portrait;
-
-    // 桌面与竖屏共用组件状态，但只有竖屏拥有持久偏好。布局刚切换时先恢复
-    // 目标布局的状态并跳过本轮写入，避免桌面的展开值覆盖手机保存值。
-    if (portrait !== previousPortrait) {
-      if (portrait) {
-        const saved = readLocalStorage("kd-compact-tree-expanded");
-        setCompactTreeExpanded(saved === null ? false : saved === "1");
-      } else {
-        setCompactTreeExpanded(true);
-      }
-      return;
-    }
-    if (portrait) {
-      writeLocalStorageNow("kd-compact-tree-expanded", compactTreeExpanded ? "1" : "0");
-    }
-  }, [compactTreeExpanded, portrait]);
+    if (savedCompactTreeRef.current === compactTreeExpanded) return;
+    savedCompactTreeRef.current = compactTreeExpanded;
+    writeLocalStorageNow("kd-compact-tree-expanded", compactTreeExpanded ? "1" : "0");
+  }, [compactTreeExpanded]);
   const workspacePaneSizeKey = portrait
     ? "kd-workspace-pane-sizes-portrait-v2"
     : "kd-workspace-pane-sizes-regular-v2";
@@ -1368,58 +1336,10 @@ export function Workspace() {
     window.addEventListener("pointerdown", dismissOnOtherPointer, true);
     return () => window.removeEventListener("pointerdown", dismissOnOtherPointer, true);
   }, [showSearchTips]);
-  /** 锁定只拦横屏里由歌曲/视频触发的自动展开；显式入口会解除锁定并强制打开。 */
-  const [asideLocked, setAsideLocked] = useState(false);
-  const asideLockedRef = useRef(false);
+  // 手机没有右栏：歌词或任务列表一打开就进抽屉。
   useEffect(() => {
-    asideLockedRef.current = asideLocked;
-  }, [asideLocked]);
-  /** 右栏只承载显式打开的当前操作，不跟随普通选歌弹出。 */
-  const [detailPinned, setDetailPinned] = useState(true);
-  const [detailAction, setDetailAction] = useState<"playback" | "metadata">("playback");
-  useEffect(() => {
-    if (!Object.values(panelPlacements).some(item => item?.side === "right")) return;
-    setDetailPinned(true);
-  }, [panelPlacements]);
-  const handledRightReveal = useRef(0);
-  useEffect(() => {
-    if (rightRevealRevision === handledRightReveal.current) return;
-    handledRightReveal.current = rightRevealRevision;
-    setAsideLocked(false);
-    setDetailPinned(true);
-    setDetailAction("playback");
-    const viewport = usePanelViewport.getState();
-    if (layout === "narrow" && !viewport.narrow && !viewport.compact) setSheet("aside");
-  }, [rightRevealRevision, layout]);
-  const [metadataTrack, setMetadataTrack] = useState<Track | null>(null);
-  const [asideTrackId, setAsideTrackId] = useState<number | null>(null);
-  /** 未固定详情的最后一个明确目标；列表换页时 selected 会短暂消失，目标对象不能跟着丢。 */
-  const asideTrackSnapshotRef = useRef<Track | null>(null);
-
-  const pinTrackAside = useCallback(
-    (trackId?: number) => {
-      setDetailPinned(true);
-      setDetailAction("playback");
-      const currentPlaying = getPlayingTrack();
-      const targetId =
-        trackId ?? selectSelectedTrack(useLibraryStore.getState())?.id ?? currentPlaying?.id ?? null;
-      const library = useLibraryStore.getState();
-      const selectedTarget = temporaryLibrary?.store.getState().selectedTrack?.id === targetId
-        ? temporaryLibrary.store.getState().selectedTrack
-        : selectSelectedTrack(library);
-      const target = resolveWorkspaceRequestedTrack(
-        targetId,
-        currentPlaying,
-        selectedTarget,
-        targetId !== null ? streamTrackById(targetId) : null,
-        asideTrackSnapshotRef.current,
-      );
-      asideTrackSnapshotRef.current = target;
-      setAsideTrackId(targetId);
-      showTrackDetail();
-    },
-    [showTrackDetail, temporaryLibrary],
-  );
+    if (layout === "narrow" && (downloadsOpen || lyricsOpen)) setSheet("aside");
+  }, [downloadsOpen, lyricsOpen, layout]);
 
   const selectTrack = useCallback(
     (id: number, mode: SelectMode, _clickCount = 1, libraryStore: LibraryPaneStoreApi = useLibraryStore) => {
@@ -1528,34 +1448,15 @@ export function Workspace() {
   }, [activateWorkspacePane, activeWorkspacePane, selectTrack, temporaryLibrary]);
 
   /**
-   * 在线结果单击只建立一个可供详情栏读取的元数据快照，不解析直链、也不换主唱盘。
+   * 在线结果单击只标记正在查看的那一行，不解析直链、也不换主唱盘。
    * 双击播放仍由结果行走 songPreview；这和本地表格“单击查看、双击播放”一致。
    */
   const inspectOnlineGroup = useCallback(
-    (group: MergedGroup, requestedSourceIndex: number, groupKey: string) => {
+    (_group: MergedGroup, _requestedSourceIndex: number, groupKey: string) => {
       setInspectedOnlineGroup(groupKey);
       if (activeStreamPlaylist) {
         updateStreamWorkspaceSession({ inspectedGroup: groupKey });
       }
-      const requested = group.sources[requestedSourceIndex] ?? group.sources[0];
-      const source =
-        requested?.platform !== "local" && requested?.platform !== "bilibili"
-          ? requested
-          : group.sources.find(
-              (candidate) =>
-                candidate.platform !== "local" && candidate.platform !== "bilibili",
-            );
-      if (!source) return;
-      const track = makePendingSongStreamTrack({
-        ...source,
-        title: group.title || source.title,
-        artists: group.artists.length > 0 ? group.artists : source.artists,
-        album: group.album || source.album,
-        duration: group.duration ?? source.duration,
-        cover: group.cover || source.cover,
-      });
-      asideTrackSnapshotRef.current = track;
-      setAsideTrackId(track.id);
     },
     [activeStreamPlaylist],
   );
@@ -1569,48 +1470,24 @@ export function Workspace() {
   useEffect(() => {
     const onDetail = (event: Event) => {
       const detail = (event as CustomEvent<{ source?: string; trackId?: number }>).detail;
-      const source = detail?.source;
-      const isLocatePlaying = source === "locate-playing";
-      const explicitLocate = source === "player-deck" || source === "visualizer" || isLocatePlaying;
-      // Browsing and automatic notifications only refresh selection facts.
-      if (!explicitLocate) {
-        if (detail?.trackId !== undefined) setAsideTrackId(detail.trackId);
-        return;
-      }
-      if (explicitLocate) setAsideLocked(false);
-      // 人在搜索页时先跳回曲库页：详情装在曲库页的右栏/抽屉里，
-      // 停在搜索页把抽屉拉开，底下的列表和这首歌对不上号
+      // 「定位正在播」只滚动列表到当前歌曲。人在搜索页时先跳回曲库页，
+      // 否则底下的列表和这首歌对不上号。浏览和自动通知不动版面。
+      if (detail?.source !== "locate-playing") return;
       if (useAppStore.getState().listMode !== "library") {
         detailJumpRef.current = true;
         showTrackDetail();
       }
-      // 「定位正在播」只滚动列表到当前歌曲，不展开右栏/抽屉
-      if (isLocatePlaying) return;
-      // 唱盘 / 其他显式查看：钉住内容面
-      pinTrackAside(
-        detail?.trackId ?? (source === "player-deck" ? getPlayingTrack()?.id : undefined),
-      );
-      const viewport = usePanelViewport.getState();
-      if (viewport.narrow && source === "player-deck") viewport.toggleSongPanel();
-      else if (viewport.compact) toggleResponsivePanel(`kd-activity-panels:${source === "visualizer" ? "visualizer" : "information"}`);
-      else if (layout === "narrow" && !viewport.narrow) setSheet("aside");
     };
     window.addEventListener(DETAIL_EVENT, onDetail);
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
-  }, [layout, pinTrackAside, portrait, showTrackDetail]);
+  }, [showTrackDetail]);
 
   // 歌词属于当前播放操作，不改变顶部的选择预览。
   useEffect(() => {
     if (!showLyrics) return;
     const track = getPlayingTrack();
     if (!track || !hasVisibleLyrics(useLyricsStore.getState().get(track.id).lines)) return;
-    setAsideLocked(false);
-    setDetailPinned(true);
-    setDetailAction("playback");
-    const viewport = usePanelViewport.getState();
-    if (viewport.narrow) viewport.revealSongPanel();
-    else if (viewport.compact) toggleResponsivePanel("kd-activity-panels:lyrics");
-    else if (layout === "narrow" && !viewport.narrow) setSheet("aside");
+    useSidePanels.getState().setLyrics(true);
   }, [showLyrics, lyricsPanelEpoch]);
 
   // 关闭侧栏或切到其他面板时结束网络预览，不能留下隐藏的原生播放器或音频。
@@ -1633,27 +1510,8 @@ export function Workspace() {
     showFolders ||
     showDuplicates ||
     previewAside;
-  // Preview retains its selection snapshot while pages load; playback never becomes its fallback.
-  const renderedAsideTrackId = asideTrackId;
-
-  const registeredAsideTrack =
-    renderedAsideTrackId !== null ? streamTrackById(renderedAsideTrackId) : null;
-  const requestedDetailTrack = resolveWorkspaceRequestedTrack(
-    renderedAsideTrackId,
-    null,
-    temporarySelected?.id === renderedAsideTrackId ? temporarySelected : selected,
-    registeredAsideTrack,
-    asideTrackSnapshotRef.current,
-  );
-  if (requestedDetailTrack !== null) asideTrackSnapshotRef.current = requestedDetailTrack;
-  // The library clears selectedTrack while fetching details. Keep the painted snapshot until
-  // the requested record arrives, instead of unmounting four cards for a blank intermediate frame.
   const detailTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
-  const trackDetailPanel = detailAction === "metadata" && metadataTrack
-    ? <TrackDetail track={metadataTrack.id === detailTrack?.id ? detailTrack : metadataTrack}
-        mode="metadata" onUpdated={setMetadataTrack} restoreTarget={detailRestoreTarget} />
-    : null;
-  const aggregateSearch = (inDetail: boolean) => (
+  const aggregateSearch = () => (
     <SearchBar
       query={query}
       presetTrack={temporaryLibrary ? temporarySelected : selected}
@@ -1671,18 +1529,14 @@ export function Workspace() {
       burstTone={searchBurstTone}
       platforms={platforms}
       onTogglePlatform={togglePlatform}
-      presentation={inDetail ? "detail" : "bar"}
-      stacked={inDetail || chrome === "stacked"}
+      presentation="bar"
+      stacked={chrome === "stacked"}
     />
   );
-  // Configured right-side panels stay visible even after a temporary overlay closes.
-  const detailAside =
-    !realOverlayAside && (detailPinned || (!panelsAtTop && rightHasPanels));
-  // Keep the aside shell mounted while the next selected track is loading. Only its content
-  // changes; remounting the shell would replay the entrance animation on every selection.
+  // 歌词和任务列表是右栏仅有的常驻内容；临时旁路关闭后它们原样回来。
+  const activityAside = !realOverlayAside && (downloadsOpen || lyricsOpen);
   const editorAsideOpen = showComposition || visualizerTrackOpen;
-  const hasAsideContent = showSettings || expandedPanelId !== null || editorAsideOpen || realOverlayAside
-    || (detailAside && (detailAction !== "playback" || (!panelsAtTop && rightHasPanels)));
+  const hasAsideContent = showSettings || editorAsideOpen || realOverlayAside || activityAside;
   const showAside = layout === "wide" && hasAsideContent;
 
   const closeAside = useCallback(() => {
@@ -1691,8 +1545,8 @@ export function Workspace() {
       setSheet(null);
       return;
     }
-    setDetailPinned(false);
-    setDetailAction("playback");
+    useSidePanels.getState().setLyrics(false);
+    useSidePanels.getState().setDownloads(false);
     setSheet(null);
     useAppStore.getState().dismissOverlay();
   }, [showSearchTips]);
@@ -1708,13 +1562,8 @@ export function Workspace() {
       if (activeEditor.beforeClose) void activeEditor.beforeClose(); else activeEditor.close();
       return;
     }
-    const finish = () => {
-      // 提示只是在当前内容上临时盖一层；关提示不应把原详情也锁住。
-      if (!showSearchTips) setAsideLocked(true);
-      closeAside();
-    };
-    finish();
-  }, [closeAside, showSearchTips]);
+    closeAside();
+  }, [closeAside]);
 
   /** 窄屏：点左侧文件夹后只收右侧详情抽屉；左侧展开宽度由用户拖动手势决定并持久化。 */
   const onFolderNavigate = useCallback(() => {
@@ -1729,17 +1578,11 @@ export function Workspace() {
     if (layout === "narrow") closeAside();
   }, [activateWorkspacePane, layout, closeAside]);
 
-  const playbackPanel = <PlaybackPanel indexTarget={panelIndexTarget}
-    searchOpen={aggregateSearchOpen} renderSearch={() => aggregateSearch(true)} />;
-
   const [workshopToolbarTarget, setWorkshopToolbarTarget] = useState<HTMLDivElement | null>(null);
   const [workshopBackTarget, setWorkshopBackTarget] = useState<HTMLSpanElement | null>(null);
-  const detailAsideTools = detailAside || previewAside ? (
-    <>
-      <span className="kd-detail-restore-tools" ref={setDetailRestoreTarget} />
-    </>
+  const asideTools = previewAside ? (
+    <span className="kd-detail-restore-tools" ref={setDetailRestoreTarget} />
   ) : null;
-  const asideTools = detailAsideTools;
 
   const asideLabel = showSearchTips
     ? "使用提示"
@@ -1751,13 +1594,7 @@ export function Workspace() {
           ? "曲库优化分析"
         : previewAside
           ? "预览"
-            : detailAside
-              ? detailAction === "metadata" ? "曲目信息编辑" : "详情"
-              : "";
-  const workshopBackSlot = asideLabel === "曲目信息编辑"
-    ? <button type="button" className="kd-aside-head-close" aria-label="返回详情" title="返回详情"
-        onClick={() => setDetailAction("playback")}><ArrowLeft size={14} /></button>
-    : null;
+          : "";
   const selectVideoMode = (mode: "workshop" | "live-vj") => {
     void (async () => {
       const editor = useVisualizerStudioStore.getState();
@@ -1797,12 +1634,12 @@ export function Workspace() {
           session={videoPipSession} restoreTarget={detailRestoreTarget} />
       </div>
     </div>
-  ) : detailAside ? trackDetailPanel : null;
-  const activityAside = detailAside && detailAction === "playback";
-  const asideBody = <PanelDockZone side="right">
-    <div className="kd-activity-panel-host" hidden={!activityAside}>{playbackPanel}</div>
+  ) : null;
+  // 临时旁路盖在上面时侧栏内容只是隐藏：歌词的滚动位置和任务页签都留着。
+  const asideBody = <div className="kd-panel-dock kd-panel-dock-right">
+    <div className="kd-activity-panel-host" hidden={!activityAside}><SidePanels /></div>
     {asidePanel}
-  </PanelDockZone>;
+  </div>;
   const closeEditorDock = closeAsideForUser;
   const editorDock = showComposition || visualizerTrackOpen ? <EditorDock
     title={showComposition ? liveVjOpen ? "实时 VJ" : "VJ 剪辑" : "可视化配置"}
@@ -1831,13 +1668,9 @@ export function Workspace() {
     setSheet(null);
   }, [layout, listMode]);
 
-  // 右栏旁路打开时收起曲目详情；设置在舞台上方独立弹出，不改变右栏。
-  // 歌词已并入曲目详情；这里不能 unpin，
-  // 否则一点「歌词」就被拆掉，看起来像弹不出来。
+  // 手机上旁路内容在抽屉里；设置在舞台上方独立弹出，不改变右栏。
   useEffect(() => {
     if (!(showFolders || showDuplicates || showPreview)) return;
-    setDetailPinned(false);
-    setAsideLocked(false);
     if (layout === "narrow") setSheet("aside");
   }, [
     layout,
@@ -1868,7 +1701,6 @@ export function Workspace() {
       if (layout === "narrow") setSheet(null);
       return;
     }
-    setAsideLocked(false);
     setShowSearchTips(true);
     if (layout === "narrow") setSheet("aside");
   }, [layout, showSearchTips]);
@@ -1876,11 +1708,9 @@ export function Workspace() {
 
   useEffect(() => {
     if (!queuePanelEpoch) return;
-    // Only reveal the existing card; never switch the sidebar to a queue overlay.
-    const viewport = usePanelViewport.getState();
-    if (viewport.compact) {
-      if (!viewport.activeIds.includes("kd-activity-panels:downloads")) toggleResponsivePanel("kd-activity-panels:downloads");
-    } else if (layout === "narrow") setSheet("aside");
+    // A new task brings the task list forward; it never replaces another side panel.
+    useSidePanels.getState().setDownloads(true);
+    if (layout === "narrow") setSheet("aside");
   }, [queuePanelEpoch, layout]);
 
   const openSettingsFromChrome = useCallback(() => {
@@ -2346,6 +2176,8 @@ export function Workspace() {
           actions={
             <ChromeActions
               panelIndexTarget={setPanelIndexTarget}
+              tasksOpen={downloadsOpen}
+              onTasks={() => useSidePanels.getState().setDownloads(!downloadsOpen)}
               compositionOpen={showComposition}
               onComposition={selectVideoMode}
               settingsOpen={showSettings}
@@ -2394,26 +2226,25 @@ export function Workspace() {
           )}
 
           <div className="kd-main-slot">
-            <div ref={panelWorkspace} className="kd-table-wrap" data-aside={showAside ? "open" : "closed"}>
-            <PanelWideSearchZone />
-            <PanelDockZone side="top">
+            <div className="kd-table-wrap" data-aside={showAside ? "open" : "closed"}>
+            <div className="kd-panel-dock kd-panel-dock-top">
             {/* 搜索带可收起；查询文字、来源选择和已有结果都保留。 */}
             {aggregateSearchOpen && topPanelsEnabled.search ? (
-              <PanelStack reorderable storageKey="kd-top-search-panels" dockKey="kd-activity-panels">
+              <PanelStack storageKey="kd-top-search-panels">
               <Panel key="search" heading="聚合搜索" dense padded={false}>
               <div
                 className="kd-search-band-host"
                 data-open={aggregateSearchRevealed || undefined}
               >
                 <div className="kd-search-band">
-                  {aggregateSearch(false)}
+                  {aggregateSearch()}
                 </div>
               </div>
               </Panel>
               </PanelStack>
             ) : null}
-            <TrackPreviewPanel track={detailTrack} />
-            </PanelDockZone>
+            <TrackPreviewPanel track={detailTrack} indexTarget={panelIndexTarget} />
+            </div>
             <div className="kd-local-list-slot" data-aside={showAside ? "open" : "closed"}>
               {temporaryFolderDrop.offered && <div className="kd-temporary-folder-drop"
                 data-kd-temporary-folder-drop="true" data-hovered={temporaryFolderDrop.hovered || undefined}>
@@ -2699,9 +2530,8 @@ export function Workspace() {
                   />
                   <aside className="kd-split-aside" ref={localAsideRef} hidden={!showAside}>
                     <div className="kd-aside-restorable" hidden={editorAsideOpen} inert={showSettings}>
-                    {detailAside && detailAction === "playback" ? asideTools : <AsideHead
+                    {activityAside ? null : <AsideHead
                       title={asideLabel}
-                      leading={workshopBackSlot}
                       tools={asideTools}
                     />}
                     <div className="kd-split-aside-body kd-scroll">{asideBody}</div>
@@ -2721,13 +2551,10 @@ export function Workspace() {
         {layout === "narrow" && (
           <Sheet
             keepMounted
-            hideHeader={editorAsideOpen || (detailAside && detailAction === "playback")}
+            hideHeader={editorAsideOpen || activityAside}
             showClose={false}
-            open={editorAsideOpen || (sheet === "aside" && hasAsideContent && !(panelsAtTop && activityAside))}
+            open={editorAsideOpen || (sheet === "aside" && hasAsideContent)}
             title={editorAsideOpen ? showComposition ? liveVjOpen ? "实时 VJ" : "VJ 剪辑" : "可视化配置" : asideLabel || "面板"}
-            heading={
-              workshopBackSlot ? <span className="vj-editor-navigation">{workshopBackSlot}<span>{asideLabel}</span></span> : undefined
-            }
             tools={editorAsideOpen ? undefined : asideTools}
             onClose={closeAsideForUser}
           >
@@ -2737,6 +2564,7 @@ export function Workspace() {
         )}
         </div>
         {showSettings && layout === "narrow" && <SettingsOverlay />}
+        <VisualizerPopup />
       </div>
     </section>
   );

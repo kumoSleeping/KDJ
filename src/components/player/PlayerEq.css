@@ -1,0 +1,101 @@
+/* EQ / 播放控制 docked in the player bar: one readout row, one knob row. */
+.kd-player-eq {
+  width: var(--kd-player-eq-w, 100%);
+  min-width: 0;
+  align-self: center;
+}
+.kd-player-eq .kd-manager-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  padding: 0;
+  background: transparent;
+}
+.kd-player-eq .kd-manager-control-head {
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, .7fr) minmax(0, 1.5fr);
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+.kd-player-eq .kd-manager-control-readout {
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  justify-self: stretch;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 2px 6px;
+  overflow: hidden;
+}
+.kd-player-eq .kd-manager-control-readout[data-kind="key"] {
+  grid-template-columns: minmax(0, 1fr) 20px;
+  column-gap: 6px;
+}
+.kd-player-eq .kd-manager-control-readout[data-warn="true"] > strong { color: var(--kd-warn); }
+.kd-player-eq .kd-manager-key-nudge > button { height: 15px; }
+.kd-player-eq .kd-manager-control-readout > strong {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 17px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+}
+.kd-player-eq .kd-manager-control-label { gap: 4px; min-width: 0; }
+.kd-player-eq .kd-manager-control-label > span { font-size: 9px; }
+.kd-player-eq .kd-manager-control-label > small { font-size: 8px; }
+.kd-player-eq .kd-manager-header-tempo {
+  grid-column: auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 18px 16px;
+  gap: 0;
+  height: 34px;
+  padding: 0 6px;
+}
+.kd-player-eq .kd-manager-tempo-axis { top: 0; left: 6px; right: 6px; height: 18px; }
+.kd-player-eq .kd-manager-header-tempo > input[type="range"] { height: 18px; }
+.kd-player-eq .kd-manager-header-tempo > button { font-size: 9px; letter-spacing: 0; }
+.kd-player-eq .kd-manager-mixer-layout { min-width: 0; min-height: 0; }
+.kd-player-eq .kd-manager-knob-stack {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-rows: auto;
+  align-items: center;
+  gap: 4px;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+}
+.kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  gap: 0;
+}
+.kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob[data-size="xs"] > svg {
+  flex: none;
+  width: 30px;
+  max-width: 100%;
+  min-width: 0;
+  height: 30px;
+  min-height: 0;
+}
+.kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b {
+  display: flex;
+  flex: 0 0 13px;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  justify-content: center;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 13px;
+  letter-spacing: 0;
+  white-space: nowrap;
+  text-align: center;
+}
+.kd-manager-gain-loudness { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kd-manager-gain-loudness .kd-loudness-number { font-size: inherit; line-height: inherit; }

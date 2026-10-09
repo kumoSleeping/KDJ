@@ -80,9 +80,6 @@
 .kd-viz-panel[data-inline="true"] .kd-viz-content { display: block; overflow: visible; }
 .kd-viz-panel[data-inline="true"] .kd-viz-preview-column { padding: 0 0 6px; }
 .kd-viz-panel[data-inline="true"] .kd-viz-preview { border: 0; border-radius: 0; box-shadow: none; }
-/* Portalled previews keep their controls; the original panel has no empty heading. */
-.kd-detail-viz-panel:has(.kd-viz-panel[data-floating="true"]),
-.kd-panel-live-host:has(> .kd-panel-slot > .kd-detail-viz-panel .kd-viz-panel[data-floating="true"]) { display: none; }
 
 /* ---- Document row: what is being edited, history, and the way out to the export queue. */
 .kd-viz-bar { flex-wrap: wrap; row-gap: 2px; }

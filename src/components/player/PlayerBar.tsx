@@ -21,6 +21,7 @@ import {
   Play,
   RefreshCw,
   PictureInPicture2,
+  TextQuote,
   SkipBack,
   SkipForward,
 } from "lucide-react";
@@ -55,7 +56,6 @@ import { useCrossfade } from "../../lib/crossfade";
 import { useHarmonicScope } from "../../lib/harmonicScope";
 import { useLyricsPrefs } from "../../lib/lyricsPrefs";
 import { ensureOverlayPermission } from "../../lib/lyricsOverlay";
-import { useLayoutSignals } from "../../lib/useLayoutMode";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { usePlayMode } from "../../lib/playMode";
 import {
@@ -143,7 +143,6 @@ import {
   type PlayerCommand,
   type PlayerSessionStatus,
 } from "../../lib/playerSession";
-import { DETAIL_EVENT } from "../library/TrackTable";
 import { pointPatch, SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
 import {
   finishTrackDrop,
@@ -181,6 +180,9 @@ import {
   shouldRequestLocalVideoSessionForTrack,
 } from "../../lib/playerTransitionPolicy";
 import { LyricsHost } from "./LyricsHost";
+import { PlayerEq } from "./NowPlayingControls";
+import { NowPlayingInfo } from "./NowPlayingInfo";
+import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { LyricsButtonMenu } from "./LyricsButtonMenu";
 import { nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
 import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
@@ -392,7 +394,8 @@ function viewForTrack(track: Track): PlayerDeckView {
 }
 
 /**
- * 播放条的角色卡片：左边当前曲目，右边下一首；拖入操作映射到实际通道。
+ * 播放条左侧的当前曲目卡片，点开曲目信息；拖入操作映射到实际通道。
+ * 右侧不再是下一首：那里是 EQ / 播放控制，拖入仍替换下一首。
  */
 function PlayerDeck({
   side,
@@ -403,6 +406,7 @@ function PlayerDeck({
   transitioning,
   dropActive,
   detailEnabled,
+  expanded,
   resolving = false,
   failed = false,
   onOpen,
@@ -417,8 +421,9 @@ function PlayerDeck({
   spinning: boolean;
   transitioning: boolean;
   dropActive: boolean;
-  /** 竖屏时“下一首”只是预告，不能打开会盖住列表的详情 Sheet。 */
   detailEnabled: boolean;
+  /** 曲目信息层是否已展开。 */
+  expanded?: boolean;
   /** 在线直链解析中：封面标题已就位，媒体尚未可播。 */
   resolving?: boolean;
   failed?: boolean;
@@ -457,6 +462,7 @@ function PlayerDeck({
               : "右唱盘空闲"
         }
         aria-disabled={!detailEnabled || !view}
+        aria-expanded={expanded}
         disabled={!detailEnabled || !view}
         title={
           view
@@ -502,7 +508,6 @@ function PlayerDeck({
 }
 
 export function PlayerBar() {
-  const { portrait } = useLayoutSignals();
   const mobileNative = usesNativeMobilePlayer();
   const playerRuntime = runtimePlayer();
   const desktopNative = playerRuntime.kind === "desktop-native";
@@ -3760,7 +3765,11 @@ export function PlayerBar() {
   );
   const networkPreview = Boolean(pipDriving && pipSession?.source === "network");
   // 同一颗按钮按当前媒体解释：音频控制悬浮歌词，本地和网络视频共用详情/小窗模式。
-  const sharedFloatOn = video ? pipMode === "float" : desktopLyricsOn;
+  const visualizerPopup = useVisualizerPopup((state) => state.open);
+  const setVisualizerPopup = useVisualizerPopup((state) => state.setOpen);
+  // 画面小窗：视频走共享视频小窗，歌曲走可视化小窗；没有可视化的来源不提供这个键。
+  const popupTrack = !video && canVisualizeTrack(displayTrack ?? null);
+  const popupOn = video ? pipMode === "float" : visualizerPopup;
   /**
    * Android 的悬浮歌词要「显示在其他应用上层」权限，必须先拿到再翻开关，
    * 否则开关亮着而屏幕上什么都没有。桌面不需要该权限，直接翻。
@@ -4163,25 +4172,19 @@ export function PlayerBar() {
     writeLocalStorageSoon(PLAYER_DECK_MEMORY_KEY, JSON.stringify(memory), 1_000);
   }, [track?.id, position]);
 
+  /** 曲目信息就挂在“正在播放”卡片上方，不再占右栏。 */
+  const [infoOpen, setInfoOpen] = useState(false);
   const lastDeckOpenRef = useRef<{ trackId: number; at: number } | null>(null);
-  const openDeck = (view: PlayerDeckView | null, active: boolean) => {
+  const openDeck = (view: PlayerDeckView | null) => {
     const deckTrack = view?.track;
     if (!deckTrack) return;
-    // 竖屏时右栏是整屏 Sheet。只有正在播放的那张唱盘才是详情入口；下一首
-    // 只能作为预告，点它不能把当前列表整个遮住。
-    if (portrait && !active) return;
     // Android WebView 可能把一次触摸补发成 pointer/click 两套事件；短窗口内
-    // 同一唱盘只发布一次定位事件，避免详情状态在同一帧反复切换。
+    // 同一唱盘只切换一次，避免信息层在同一帧开了又关。
     const now = performance.now();
     const last = lastDeckOpenRef.current;
     if (last && last.trackId === deckTrack.id && now - last.at < 400) return;
     lastDeckOpenRef.current = { trackId: deckTrack.id, at: now };
-    if (usesLocalLibraryRecord(deckTrack) && selected?.id !== deckTrack.id) selectTrack(deckTrack);
-    window.dispatchEvent(
-      new CustomEvent(DETAIL_EVENT, {
-        detail: { source: "player-deck", trackId: deckTrack.id },
-      }),
-    );
+    setInfoOpen((open) => !open);
   };
 
   const dropOnDeck = async (
@@ -4583,13 +4586,15 @@ export function PlayerBar() {
           failed={playbackFailed}
           dropActive={deckDropSide === "left"}
           detailEnabled
-          onOpen={() => openDeck(currentBarView, true)}
+          expanded={infoOpen}
+          onOpen={() => openDeck(currentBarView)}
           onDragOver={(event) => deckDragOver(event, "left")}
           onDragLeave={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDeckDropSide(null);
           }}
           onDrop={(event) => void dropOnDeck(event, "left")}
         />
+        {infoOpen ? <NowPlayingInfo onClose={() => setInfoOpen(false)} /> : null}
       </div>
 
       {/* 三颗走带键：上一首 / 播放停止 / 下一首。
@@ -4617,51 +4622,59 @@ export function PlayerBar() {
             >
               <Blend size={14} />
             </button>
-            {canDesktopLyrics ? (
+            {/* 歌词和弹窗各管各的：歌词键只开关悬浮歌词，弹窗键只开关画面小窗。 */}
+            {canDesktopLyrics && !video ? (
               <button
                 type="button"
                 className="kd-player-step kd-player-lyricsbtn"
-                aria-label={
-                  video
-                      ? sharedFloatOn
-                        ? "视频改用内嵌面板播放"
-                        : "视频改用悬浮小窗播放"
-                      : sharedFloatOn
-                        ? "关闭悬浮歌词"
-                        : "打开悬浮歌词"
-                }
-                aria-pressed={sharedFloatOn}
-                aria-haspopup={!video ? "menu" : undefined}
-                aria-expanded={!video ? lyricsMenu !== null && lyricsMenu.trackId === (displayTrack?.id ?? null) : undefined}
-                data-on={sharedFloatOn ? "true" : undefined}
-                title={
-                  video
-                      ? sharedFloatOn
-                        ? "视频：浮动小窗。点一下改为内嵌面板播放"
-                        : "视频：内嵌面板播放。点一下改为浮动小窗"
-                      : sharedFloatOn
-                        ? "悬浮歌词：开。点一下关闭；右键设置歌词"
-                        : "打开悬浮歌词；右键设置歌词"
-                }
+                aria-label={desktopLyricsOn ? "关闭悬浮歌词" : "打开悬浮歌词"}
+                aria-pressed={desktopLyricsOn}
+                aria-haspopup="menu"
+                aria-expanded={lyricsMenu !== null && lyricsMenu.trackId === (displayTrack?.id ?? null)}
+                data-on={desktopLyricsOn ? "true" : undefined}
+                title={desktopLyricsOn ? "悬浮歌词：开。点一下关闭；右键设置歌词" : "打开悬浮歌词；右键设置歌词"}
                 onContextMenu={(event) => {
-                  if (video || networkPreview) return;
+                  if (networkPreview) return;
                   event.preventDefault();
                   setLyricsMenu({ x: event.clientX, y: event.clientY, top: event.currentTarget.getBoundingClientRect().top, trackId: displayTrack?.id ?? null });
                 }}
                 onKeyDown={(event) => {
-                  if (video || networkPreview || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
+                  if (networkPreview || (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10"))) return;
                   event.preventDefault();
                   const rect = event.currentTarget.getBoundingClientRect();
                   setLyricsMenu({ x: rect.left, y: rect.bottom + 4, top: rect.top, trackId: displayTrack?.id ?? null });
                 }}
+                onClick={() => void toggleLyricsOverlay()}
+              >
+                <TextQuote size={13} />
+              </button>
+            ) : null}
+            {video || popupTrack ? (
+              <button
+                type="button"
+                className="kd-player-step kd-player-popupbtn"
+                aria-label={
+                  video
+                    ? popupOn ? "关闭视频小窗" : "打开视频小窗"
+                    : popupOn ? "关闭可视化小窗" : "打开可视化小窗"
+                }
+                aria-pressed={popupOn}
+                data-on={popupOn ? "true" : undefined}
+                title={
+                  video
+                    ? popupOn ? "视频小窗：开。点一下关闭" : "在小窗里播放视频"
+                    : popupOn ? "可视化小窗：开。点一下关闭" : "在小窗里显示可视化"
+                }
                 onClick={() => {
-                  if (video) {
-                    cyclePipMode();
-                    // 叉掉小窗会清掉会话；再次主动开启时，恢复当前本地视频而不是等下一次换曲。
-                    if (!useVideoPip.getState().active && displayTrack && isVideoTrack(displayTrack.format)) {
-                      requestLocalVideo(displayTrack, playing);
-                    }
-                  } else void toggleLyricsOverlay();
+                  if (!video) {
+                    setVisualizerPopup(!visualizerPopup);
+                    return;
+                  }
+                  cyclePipMode();
+                  // 叉掉小窗会清掉会话；再次主动开启时，恢复当前本地视频而不是等下一次换曲。
+                  if (!useVideoPip.getState().active && displayTrack && isVideoTrack(displayTrack.format)) {
+                    requestLocalVideo(displayTrack, playing);
+                  }
                 }}
               >
                 <PictureInPicture2 size={13} />
@@ -4765,7 +4778,9 @@ export function PlayerBar() {
           type="button"
           className="kd-player-step"
           aria-label="下一首"
-          title={mode === "harmonic" ? "下一首（按和声推荐接）" : `下一首（${MODE_UI[mode].label}）`}
+          title={`${mode === "harmonic" ? "下一首（按和声推荐接）" : `下一首（${MODE_UI[mode].label}）`}${
+            nextBarView ? `：${nextBarView.title}` : ""
+          }`}
           disabled={!currentAdvanceTrack()}
           onClick={() => void goNext()}
         >
@@ -4815,29 +4830,19 @@ export function PlayerBar() {
         </div>
       </div>
 
-      <div className="kd-player-trailing">
-        <PlayerDeck
-          side="right"
-          physicalSide={barNextIndex}
-          view={nextBarView}
-          active={false}
-          spinning={Boolean(nextBarView) && (transitionShowing || performanceDecks[barNextIndex].playing)}
-          transitioning={transitionShowing}
-          resolving={Boolean(
-            nextBarView?.track &&
-              (performancePendingDecks[barNextIndex]?.id === nextBarView.track.id ||
-                isUnresolvedStreamTrack(nextBarView.track)),
-          )}
-          failed={false}
-          dropActive={deckDropSide === "right"}
-          detailEnabled={!portrait}
-          onOpen={() => openDeck(nextBarView, false)}
-          onDragOver={(event) => deckDragOver(event, "right")}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDeckDropSide(null);
-          }}
-          onDrop={(event) => void dropOnDeck(event, "right")}
-        />
+      {/* 右侧是 EQ / 播放控制。整块仍接收拖入：拖到这里替换下一首。 */}
+      <div
+        className="kd-player-trailing"
+        data-drop-active={deckDropSide === "right" ? "true" : undefined}
+        {...{ [TRACK_DECK_DROP_TARGET_ATTR]: String(barNextIndex) }}
+        onDragOver={(event) => deckDragOver(event, "right")}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDeckDropSide(null);
+        }}
+        onDrop={(event) => void dropOnDeck(event, "right")}
+      >
+        {/* 旋钮失败只是一条提示，不能改写媒体会话的错误文案。 */}
+        <PlayerEq onError={(text) => useToastStore.getState().show(text)} />
       </div>
 
       <div className="kd-player-scrub">

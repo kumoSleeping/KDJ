@@ -23,7 +23,6 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PictureInPicture2 } from "lucide-react";
 import { FloatingVideoControls, FloatingVideoScrub, PreviewVolume } from "./FloatingVideoControls";
-import { usePlaybackPanelPrefs, setPlaybackPanelVisible } from "../../lib/playbackPanelPrefs";
 import { api } from "../../lib/api";
 import { observeVideoPreview } from "../../lib/videoPreviewDiagnostics";
 import { BilibiliEmbedController } from "../../lib/bilibiliEmbed";
@@ -282,13 +281,7 @@ function applyPanelChrome(session: VideoPipSession, mode: VideoPreviewMode): voi
     else if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
     return;
   }
-  if (mode === "panel") {
-    if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
-    // Local playback uses the compact media panel, never the selected-track sidebar.
-    setPlaybackPanelVisible("visualizer", true);
-    usePlaybackPanelPrefs.getState().setOpen(true);
-    return;
-  }
+  // A local video has no panel in the page: its picture is the floating window or nothing.
   if (useAppStore.getState().showPreview) {
     useAppStore.getState().dismissOverlay();
   }

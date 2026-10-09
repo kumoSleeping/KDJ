@@ -17,6 +17,7 @@ import { FloatingPreviewFrame } from "../player/FloatingPreviewFrame";
 import { useToastStore } from "../../stores/toastStore";
 import { getCompositionClock } from "../../lib/compositionPlayback";
 import { prefersReducedSeekMotion, SEEK_TRANSITION_MS } from "../../lib/seekTransition";
+import { useVisualizerPopup } from "../../lib/visualizerPopup";
 import { getPlayerSession, requestPlayerCommand, subscribePlayerSession } from "../../lib/playerSession";
 import { playTrack } from "../../lib/playTrack";
 import { useLyricsStore } from "../../stores/lyricsStore";
@@ -82,13 +83,14 @@ function StudioPosition({ position, scrub, refresh, children }: {
 
 type ContentState = "loading" | "ready" | "empty";
 
-export default function VisualizerStudioPanel({ onClose, inlineTrack, showDetails = true, onContentStateChange }: { onClose?: () => void; inlineTrack?: TrackSummary; showDetails?: boolean; onContentStateChange?: (state: ContentState) => void }) {
+/** `popup`: the picture exists only as the floating window; closing that window closes the popup. */
+export default function VisualizerStudioPanel({ onClose, inlineTrack, showDetails = true, popup = false, onContentStateChange }: { onClose?: () => void; inlineTrack?: TrackSummary; showDetails?: boolean; popup?: boolean; onContentStateChange?: (state: ContentState) => void }) {
   const selectedTrack = useVisualizerStudioStore(s => s.track);
   const fromPlayback = useVisualizerStudioStore(s => s.fromPlayback);
   const track = inlineTrack ?? selectedTrack;
-  return track ? <Studio key={track.id} track={track} fromPlayback={inlineTrack ? true : fromPlayback} inline={!!inlineTrack} showDetails={showDetails} onClose={onClose} onContentStateChange={onContentStateChange} /> : null;
+  return track ? <Studio key={track.id} track={track} fromPlayback={inlineTrack ? true : fromPlayback} inline={!!inlineTrack} showDetails={showDetails} popup={popup} onClose={onClose} onContentStateChange={onContentStateChange} /> : null;
 }
-function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentStateChange }: { track: TrackSummary; fromPlayback: boolean; inline: boolean; showDetails: boolean; onClose?: () => void; onContentStateChange?: (state: ContentState) => void }) {
+function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onContentStateChange }: { track: TrackSummary; fromPlayback: boolean; inline: boolean; showDetails: boolean; popup: boolean; onClose?: () => void; onContentStateChange?: (state: ContentState) => void }) {
   const readOnlyPreview = inline && usesKvjWindow();
   const [savedRevision, setSavedRevision] = useState(0);
   const dirty = useRef(false);
@@ -120,8 +122,13 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
   const lyricMatching = useLyricsStore(s => !!s.byId[track.id]?.inflight);
   const [notice, setNotice] = useState("");
   const { fullscreen: expanded, applyFullscreen } = usePreviewFullscreen();
-  const [floating, setFloating] = useState(() => previewRequest > 0);
-  useEffect(() => { if (previewRequest > 0) setFloating(true); }, [previewRequest]);
+  const [detached, setDetached] = useState(() => previewRequest > 0);
+  useEffect(() => { if (previewRequest > 0) setDetached(true); }, [previewRequest]);
+  const floating = popup || detached;
+  const setFloating = (value: boolean) => {
+    if (popup && !value) useVisualizerPopup.getState().setOpen(false);
+    else setDetached(value);
+  };
   const panel = useRef<HTMLElement>(null);
   const closing = useRef(false);
   const [playing, setPlaying] = useState(false);
@@ -131,6 +138,7 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
   const cursorRef = useRef(0), drawPreview = useRef<(() => void) | null>(null);
   const [previewWidth, setPreviewWidth] = useState(640);
   const lastPrepared = useRef<ReturnType<typeof prepareStudio> | null>(null);
+  const lastProject = useRef<VisualizerProject | null>(null);
   const [busy, setBusy] = useState(false);
   const canvas = useRef<HTMLCanvasElement>(null);
   const imageInput = useRef<HTMLInputElement>(null), lyricInput = useRef<HTMLInputElement>(null);
@@ -310,14 +318,17 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
     if (!prepared || !canvas.current) return;
     const target = canvas.current;
     const c = target.getContext("2d", { alpha: false }); if (!c) return;
-    // Capture before resizing: analysis/metadata arrivals keep the same canvas and fade from
-    // its last complete picture. Never briefly unmount it or expose a cleared backing store.
+    // Capture before resizing: analysis/metadata arrivals during playback keep the same canvas
+    // and fade from its last complete picture. An edit is applied on the very next frame: a
+    // dragged picture or slider must track the pointer, not dissolve towards it. Never briefly
+    // unmount the canvas or expose a cleared backing store.
     let previous: HTMLCanvasElement | null = null;
-    if (lastPrepared.current && lastPrepared.current !== prepared) {
+    const edited = lastProject.current !== p;
+    if (lastPrepared.current && lastPrepared.current !== prepared && !edited && playingRef.current) {
       previous = document.createElement("canvas"); previous.width = target.width; previous.height = target.height;
       previous.getContext("2d")?.drawImage(target, 0, 0);
     }
-    lastPrepared.current = prepared;
+    lastPrepared.current = prepared; lastProject.current = p ?? null;
     const { width, height } = prepared.project.scene.canvas;
     if (target.width !== width) target.width = width;
     if (target.height !== height) target.height = height;
@@ -340,7 +351,8 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
       const expected = lastTime + (now - lastDrawAt) / 1000 * lastRate;
       const jumped = Number.isFinite(lastTime) && (Math.abs(time - expected) > .25
         || (revision !== null && lastRevision !== null && revision !== lastRevision));
-      if (jumped && scrubTime.current === null && !prefersReducedSeekMotion()) {
+      // Only a playing picture dissolves across a jump; a paused one lands on its frame.
+      if (jumped && playingRef.current && scrubTime.current === null && !prefersReducedSeekMotion()) {
         previous = document.createElement("canvas"); previous.width = width; previous.height = height;
         previous.getContext("2d")?.drawImage(target, 0, 0);
         transitionStart = now;
@@ -668,7 +680,7 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
       {prepared && <StudioPosition position={cursorRef} scrub={scrubTime} refresh={refreshCursor}>{cursor => <>
         <FloatingVideoControls title={track.title || track.filename} playing={playing} position={cursor} duration={duration} fullscreen={expanded} showTitle={floating && !expanded}
           onToggle={togglePlayback} onFullscreen={() => void applyFullscreen(!expanded)}
-          onClose={floating ? () => { void applyFullscreen(false).then(ok => { if (ok) setFloating(false); }); } : undefined} closeLabel="收回预览小窗"
+          onClose={floating ? () => { void applyFullscreen(false).then(ok => { if (ok) setFloating(false); }); } : undefined} closeLabel={popup ? "关闭可视化小窗" : "收回预览小窗"}
           extra={<>
             {!floating && <button type="button" aria-label="打开预览小窗" title="打开预览小窗" onClick={() => { void applyFullscreen(false).then(ok => { if (ok) setFloating(true); }); }}><PictureInPicture2 size={13} /></button>}
             {/* Entries live in the control row: the picture's corners belong to the hosting panel's own tools. */}
@@ -678,6 +690,11 @@ function Studio({ track, fromPlayback, inline, showDetails, onClose, onContentSt
               aria-busy={loadingLyrics} disabled={!p || busy || loadingLyrics || lyricMatching}
               onClick={event => { event.stopPropagation(); togglePreviewLyrics(); }}>
               {loadingLyrics ? <LoaderCircle size={13} className="kd-spin" /> : <Captions size={13} />}
+            </button>}
+            {inline && !expanded && <button type="button" title={busy ? "正在加入导出队列…" : "加入导出队列"} aria-label="加入导出队列"
+              aria-busy={busy} disabled={!prepared || analyzing || busy}
+              onClick={event => { event.stopPropagation(); void enqueueExport(); }}>
+              {busy ? <LoaderCircle size={13} className="kd-spin" /> : <ListPlus size={13} />}
             </button>}
             {inline && !expanded && <button type="button"
               aria-label="打开可视化操作与设置" title="可视化操作与设置" aria-pressed={readOnlyPreview ? undefined : settingsOpen}

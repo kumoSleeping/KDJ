@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 
 /**
- * 所有响应式部件只认同一个移动端判据。
+ * 所有响应式部件只认同一组判据。
  *
- * 拖窄桌面窗口时，侧栏、顶栏和播放器必须一直保持桌面形态；跨过移动端
- * 临界点后再一起切换，不能各自在不同宽度先后跳变。
+ * 桌面窗口无论拖成什么形状，版面都不换：侧栏、顶栏、搜索和列表保持原位，
+ * 侧栏宽窄只取决于用户上一次的选择。窗口变成竖长时只有底栏播放条改成多层
+ * （tall）。单栏竖屏版面（portrait）只属于手机。
  */
 export type LayoutMode = "wide" | "narrow";
 export type ChromeMode = "inline" | "stacked";
@@ -12,18 +13,22 @@ export type ChromeMode = "inline" | "stacked";
 export interface LayoutSignals {
   columns: LayoutMode;
   chrome: ChromeMode;
-  /** 统一竖屏判据：宽:高不超过 3:4（宽是 3，高是 4）。 */
+  /** 手机竖屏版面：单栏、两段式顶栏，旁路内容进抽屉。 */
   portrait: boolean;
+  /** 竖长窗口：宽:高不超过 3:4（宽是 3，高是 4）。桌面只用它给播放条分层。 */
+  tall: boolean;
 }
 
-/** 只有明显的竖长屏才进入竖屏布局；接近方形的桌面窄窗仍按普通布局处理。 */
+/** 只有明显的竖长才算；接近方形的桌面窄窗仍是普通横向播放条。 */
 const PORTRAIT = "(max-aspect-ratio: 3/4)";
 
 function read(): LayoutSignals {
-  const portrait = window.matchMedia(PORTRAIT).matches;
+  const tall = window.matchMedia(PORTRAIT).matches;
+  const platform = window.kdj?.platform;
+  const portrait = tall && (platform === "android" || platform === "ios");
   const columns: LayoutMode = portrait ? "narrow" : "wide";
   const chrome: ChromeMode = portrait ? "stacked" : "inline";
-  return { columns, chrome, portrait };
+  return { columns, chrome, portrait, tall };
 }
 
 export function useLayoutSignals(): LayoutSignals {

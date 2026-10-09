@@ -1,7 +1,7 @@
 import type { RefCallback } from "react";
 import { usesKvjWindow } from "../../lib/windowRole";
 import { showKvj } from "../../lib/kvjWindow";
-import { Radio, Moon, Settings, Sun, Upload, Palette, Clapperboard } from "lucide-react";
+import { Radio, Moon, Settings, Sun, Upload, Palette, Clapperboard, Download } from "lucide-react";
 import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePack";
 import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
@@ -14,6 +14,9 @@ export interface ChromeActionsProps {
   /** 打开设置并定位到软件更新区；默认走 updateStore。 */
   onOpenUpdate?(): void;
   panelIndexTarget?: RefCallback<HTMLSpanElement>;
+  /** 下载与导出任务列表：固定在右栏，由这里开关。 */
+  tasksOpen: boolean;
+  onTasks(): void;
 }
 
 /** 顶栏提供设置及右侧编辑工作区入口。 */
@@ -23,6 +26,8 @@ export function ChromeActions({
   compositionOpen, onComposition,
   onOpenUpdate,
   panelIndexTarget,
+  tasksOpen,
+  onTasks,
 }: ChromeActionsProps) {
   const compositionMode = useAppStore(state => state.compositionMode);
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
@@ -32,6 +37,8 @@ export function ChromeActions({
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
       {panelIndexTarget && <span ref={panelIndexTarget} style={{ display: "contents" }} />}
+      <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
+        aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
       {updateReady ? (
         <button
           type="button"

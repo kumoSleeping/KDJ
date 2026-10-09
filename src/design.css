@@ -212,10 +212,6 @@
   --kd-selected: transparent;
   --kd-shadow: none;
 }
-:root[data-theme="light"]:not([data-theme-pack]) .kd-playback-panels .kd-panel-slot > .kd-panel {
-  border-color: var(--kd-line);
-  box-shadow: none;
-}
 :root[data-theme="light"]:not([data-theme-pack]) .kd-workspace-pane-local > .kd-activity {
   background: var(--kd-panel);
   border-color: var(--kd-line);
@@ -1182,7 +1178,6 @@ textarea {
 }
 /* Keep the preview inside the theme's two-pixel inset window frame. Opaque
    preview/loading surfaces otherwise paint over the parent's bevel. */
-:root[data-theme-pack="sakulaptop98"] .kd-detail-viz-panel { padding: 2px; }
 .kd-panel-dense .kd-panel-body > * + * {
   margin-top: 0.5rem;
 }
@@ -3430,6 +3425,18 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-toast[data-leaving="true"] {
   animation: kd-toast-out 180ms ease-in both;
 }
+/* 主窗口里停在播放条上方：右下角是 EQ，提示不能盖住正在拧的旋钮。 */
+.kd-app[data-work-mode="manager"] .kd-toast {
+  bottom: calc(var(--kd-player-h) + 3.3rem + env(safe-area-inset-bottom, 0px));
+}
+.kd-app[data-work-mode="manager"][data-tall="true"] .kd-toast {
+  bottom: calc(var(--kd-player-h) + 9rem + env(safe-area-inset-bottom, 0px));
+}
+@media (max-width: 560px) {
+  .kd-app[data-work-mode="manager"][data-tall="true"] .kd-toast {
+    bottom: calc(var(--kd-player-h) + 12.8rem + env(safe-area-inset-bottom, 0px));
+  }
+}
 .kd-toast > span {
   min-width: 0;
   overflow: hidden;
@@ -3485,9 +3492,11 @@ body[data-kd-search-pointer-dragging="true"] * {
   z-index: 60;
   isolation: isolate;
   display: grid;
+  /* 右侧 EQ 的固定宽度：右列至少留出这么多，波形也按它在右边收住。 */
+  --kd-player-eq-w: clamp(264px, 26vw, 336px);
   /* 行列结构由应用统一控制，主题只负责外观，不能用独立断点把桌面底栏拆成三行。
-     中间控制组按内容取宽，两侧歌曲均分余量；只有统一的竖屏布局在下方改成三行。 */
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) !important;
+     中间控制组按内容取宽，两侧均分余量，但右列不小于 EQ；只有统一的竖屏布局在下方改成三行。 */
+  grid-template-columns: minmax(0, 1fr) auto minmax(var(--kd-player-eq-w), 1fr) !important;
   grid-template-rows: auto auto !important;
   grid-template-areas:
     "now controls next"
@@ -3545,8 +3554,8 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* 桌面播放条的两台 deck 占用网格两侧真正剩下的宽度。中间工具组会因视频键、
    时间等内容变宽，不能再用「视口一半减固定值」估算安全边界；那会让左侧长标题
    钻到工具下面。跨两行仍保留大唱盘，同时网格列会自动扩展空闲空间并在工具前收住。 */
-.kd-app:not([data-portrait="true"]) .kd-player-leading,
-.kd-app:not([data-portrait="true"]) .kd-player-trailing {
+.kd-app:not([data-tall="true"]) .kd-player-leading,
+.kd-app:not([data-tall="true"]) .kd-player-trailing {
   position: relative;
   top: auto;
   right: auto;
@@ -3556,10 +3565,10 @@ body[data-kd-search-pointer-dragging="true"] * {
   align-self: stretch;
   grid-row: 1 / -1;
 }
-.kd-app:not([data-portrait="true"]) .kd-player-leading {
+.kd-app:not([data-tall="true"]) .kd-player-leading {
   grid-column: 1;
 }
-.kd-app:not([data-portrait="true"]) .kd-player-trailing {
+.kd-app:not([data-tall="true"]) .kd-player-trailing {
   grid-column: 3;
 }
 .kd-player-deck {
@@ -3590,9 +3599,14 @@ body[data-kd-search-pointer-dragging="true"] * {
   text-align: inherit;
   cursor: pointer;
 }
-.kd-player-trailing > .kd-player-deck {
-  flex: 1 1 auto;
-  width: auto;
+/* 右侧是 EQ / 播放控制：贴右、跨两行。整块仍是“下一首”通道的拖入目标。 */
+.kd-player-trailing {
+  border-radius: 0.65rem;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.kd-player-trailing[data-drop-active="true"] {
+  background: color-mix(in srgb, var(--kd-muted) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-muted) 55%, transparent);
 }
 .kd-player-deck[data-drop-active="true"] {
   background: color-mix(in srgb, var(--kd-muted) 12%, transparent);
@@ -3601,24 +3615,12 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-player-deck[data-drop-active="true"] .kd-player-deck-state {
   color: var(--kd-text-body);
 }
-.kd-player-deck[data-side="right"] {
-  grid-template-columns: minmax(0, 1fr) 4.75rem;
-  text-align: right;
-}
 .kd-player-deck[data-side="left"] .kd-player-disc {
   grid-column: 1;
   grid-row: 1 / 3;
 }
 .kd-player-deck[data-side="left"] .kd-player-deck-copy {
   grid-column: 2;
-  grid-row: 1;
-}
-.kd-player-deck[data-side="right"] .kd-player-disc {
-  grid-column: 2;
-  grid-row: 1 / 3;
-}
-.kd-player-deck[data-side="right"] .kd-player-deck-copy {
-  grid-column: 1;
   grid-row: 1;
 }
 .kd-player-deck[data-empty="true"] .kd-player-deck-main {
@@ -3632,26 +3634,23 @@ body[data-kd-search-pointer-dragging="true"] * {
   transition: opacity 0.12s;
 }
 /* 桌面宽唱盘：状态和曲名同一行，艺人留在第二行；窄屏布局在下方覆盖。 */
-.kd-app:not([data-portrait="true"]) .kd-player-deck-copy {
+.kd-app:not([data-tall="true"]) .kd-player-deck-copy {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   column-gap: 0.4rem;
   padding-bottom: 0.25rem;
 }
-.kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] .kd-player-deck-copy {
-  justify-content: flex-end;
-}
-.kd-app:not([data-portrait="true"]) .kd-player-deck-state {
+.kd-app:not([data-tall="true"]) .kd-player-deck-state {
   flex: none;
   margin-bottom: 0;
 }
-.kd-app:not([data-portrait="true"]) .kd-player-deck-copy .kd-player-title {
+.kd-app:not([data-tall="true"]) .kd-player-deck-copy .kd-player-title {
   flex: 1 1 0;
   min-width: 0;
   max-width: max-content;
 }
-.kd-app:not([data-portrait="true"]) .kd-player-deck-copy .kd-player-artist {
+.kd-app:not([data-tall="true"]) .kd-player-deck-copy .kd-player-artist {
   flex: 1 0 100%;
 }
 .kd-player-deck[data-active="true"] .kd-player-deck-copy,
@@ -3754,8 +3753,8 @@ body[data-kd-search-pointer-dragging="true"] * {
   /* 左唱盘是绝对定位，原先 wave 横跨整行只是被黑胶盖住；实际轨道仍从
      唱盘里面穿过去。这里把起点与左侧文字（唱盘之后）对齐。 */
   margin-left: calc(0.85rem + 4.25rem + 0.35rem);
-  /* 稍微伸进唱盘外圈下方，让波形横向更饱满但仍不挡唱盘点击。 */
-  margin-right: calc(0.85rem + 4.25rem + 0.35rem);
+  /* 右侧在 EQ 前收住：EQ 跨两行，波形不能从它下面穿过去。 */
+  margin-right: calc(var(--kd-player-eq-w) + 0.75rem);
   grid-template-columns: minmax(10rem, 1fr);
   grid-template-areas: "waveform";
   align-items: center;
@@ -6344,28 +6343,9 @@ body[data-kd-sidebar-root-dragging="true"] * {
  * 这一段全是右侧详情栏里新加的东西。
  * ========================================================== */
 
-/* 面板槽位：标题用于拖动，操作按钮保留各自的点击行为。 */
+/* 面板槽位：位置由版面固定，只有显示与否可选。 */
 .kd-panel-slot {
   position: relative;
-}
-/* 仅隐藏真正为空的槽位；播放控制、波形等面板可能带有布局包装层。 */
-.kd-panel-slot:empty {
-  display: none;
-}
-.kd-panel-slot[data-dragging="true"] {
-  opacity: 0.4;
-}
-/* 面板换序沿用同一根中性定位线。 */
-.kd-panel-slot[data-over="true"]::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: -2px;
-  height: 2px;
-  background: var(--kd-layout-guide);
-  z-index: 3;
-  pointer-events: none;
 }
 
 /* 接歌范围：三个纯图标按钮。文字放进 title/aria-label，不占详情栏宽度。 */
@@ -6473,10 +6453,10 @@ body[data-kd-sidebar-root-dragging="true"] * {
 .kd-app[data-portrait="true"] .kd-toolbar {
   row-gap: 0.4rem;
 }
-.kd-app[data-portrait="true"] .kd-player-scrub > .kd-nowrap {
+.kd-app[data-tall="true"] .kd-player-scrub > .kd-nowrap {
   display: none;
 }
-.kd-app[data-portrait="true"] .kd-player-leading {
+.kd-app[data-tall="true"] .kd-player-leading {
   min-width: 0;
 }
 
@@ -7090,8 +7070,9 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   transition: width 0.24s cubic-bezier(0.2, 0.9, 0.3, 1);
 }
 
-/* —— 竖屏播放条固定三行：控制 / 双唱盘信息 / 波形 —— */
-.kd-app[data-portrait="true"] .kd-player {
+/* —— 竖长窗口的播放条分层：控制 / 正在播放 + EQ / 波形。中间的走带组不变 —— */
+.kd-app[data-tall="true"] .kd-player {
+  --kd-player-eq-w: 100%;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
   grid-template-rows: auto auto auto !important;
   grid-template-areas:
@@ -7104,17 +7085,17 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   height: auto;
   padding: 0.45rem 0.7rem calc(0.45rem + 4px + env(safe-area-inset-bottom, 0));
 }
-.kd-app[data-mobile="true"][data-portrait="true"] .kd-player {
+.kd-app[data-mobile="true"][data-tall="true"] .kd-player {
   /* 与竖屏桌面同结构，底只加一点点手势条避让，不再叠 1rem+28px。 */
   padding: 0.45rem 0.7rem calc(0.45rem + var(--kd-safe-bottom));
 }
-.kd-app[data-portrait="true"] .kd-player-transport {
+.kd-app[data-tall="true"] .kd-player-transport {
   grid-area: controls;
   justify-self: stretch;
   width: 100%;
 }
-.kd-app[data-portrait="true"] .kd-player-leading,
-.kd-app[data-portrait="true"] .kd-player-trailing {
+.kd-app[data-tall="true"] .kd-player-leading,
+.kd-app[data-tall="true"] .kd-player-trailing {
   position: relative;
   inset: auto;
   width: auto;
@@ -7122,24 +7103,19 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   min-height: 2.85rem;
   min-width: 0;
 }
-.kd-app[data-portrait="true"] .kd-player-deck {
+.kd-app[data-tall="true"] .kd-player-deck {
   grid-template-columns: 3.15rem minmax(0, 1fr);
   grid-template-rows: 1fr;
   column-gap: 0.45rem;
   align-items: center;
 }
-.kd-app[data-portrait="true"] .kd-player-deck[data-side="right"] {
-  grid-template-columns: minmax(0, 1fr) 3.15rem;
-}
 /* 桌面唱盘 disc 跨两行给波形留空；竖屏只有一行，再写 1 / 3 会撑出隐式行，
    三行字（状态 / 标题 / 艺人）就被裁成一团。 */
-.kd-app[data-portrait="true"] .kd-player-deck[data-side="left"] .kd-player-disc,
-.kd-app[data-portrait="true"] .kd-player-deck[data-side="right"] .kd-player-disc,
-.kd-app[data-portrait="true"] .kd-player-deck[data-side="left"] .kd-player-deck-copy,
-.kd-app[data-portrait="true"] .kd-player-deck[data-side="right"] .kd-player-deck-copy {
+.kd-app[data-tall="true"] .kd-player-deck[data-side="left"] .kd-player-disc,
+.kd-app[data-tall="true"] .kd-player-deck[data-side="left"] .kd-player-deck-copy {
   grid-row: 1;
 }
-.kd-app[data-portrait="true"] .kd-player-deck-copy {
+.kd-app[data-tall="true"] .kd-player-deck-copy {
   align-self: center;
   display: flex;
   flex-wrap: wrap;
@@ -7148,41 +7124,41 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   row-gap: 0.08rem;
 }
 /* 竖屏：状态单独一行；曲名 + 艺人同一行，不再上下拆开。 */
-.kd-app[data-portrait="true"] .kd-player-deck-state {
+.kd-app[data-tall="true"] .kd-player-deck-state {
   flex: 1 0 100%;
   margin-bottom: 0;
 }
-.kd-app[data-portrait="true"] .kd-player-title {
+.kd-app[data-tall="true"] .kd-player-title {
   flex: 1 1 auto;
   min-width: 0;
   display: block;
 }
-.kd-app[data-portrait="true"] .kd-player-artist {
+.kd-app[data-tall="true"] .kd-player-artist {
   flex: 0 1 auto;
   max-width: 42%;
   display: block;
   min-height: 0;
 }
-.kd-app[data-portrait="true"] .kd-player-disc {
+.kd-app[data-tall="true"] .kd-player-disc {
   width: 3.05rem;
   height: 3.05rem;
 }
-.kd-app[data-portrait="true"] .kd-player-disc-record {
+.kd-app[data-tall="true"] .kd-player-disc-record {
   width: 2.75rem;
   height: 2.75rem;
 }
-.kd-app[data-portrait="true"] .kd-player-leading { grid-area: now; }
-.kd-app[data-portrait="true"] .kd-player-trailing { grid-area: next; }
-.kd-app[data-portrait="true"] .kd-player-scrub {
+.kd-app[data-tall="true"] .kd-player-leading { grid-area: now; }
+.kd-app[data-tall="true"] .kd-player-trailing { grid-area: next; }
+.kd-app[data-tall="true"] .kd-player-scrub {
   grid-area: wave;
   /* 竖屏不保留双唱盘的绝对区，波形应重新吃满可用宽度。 */
   margin-left: 0;
   margin-right: 0;
 }
-.kd-app[data-portrait="true"] .kd-player-go {
+.kd-app[data-tall="true"] .kd-player-go {
   grid-area: auto;
 }
-.kd-app[data-portrait="true"] .kd-player-transport {
+.kd-app[data-tall="true"] .kd-player-transport {
   box-sizing: border-box;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -7193,28 +7169,40 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   min-height: 2.3rem;
   overflow: visible;
 }
-.kd-app[data-portrait="true"] .kd-player-transport-side {
+.kd-app[data-tall="true"] .kd-player-transport-side {
   overflow-x: auto;
   scrollbar-width: none;
 }
-.kd-app[data-portrait="true"] .kd-player-transport-side[data-side="left"] {
+.kd-app[data-tall="true"] .kd-player-transport-side[data-side="left"] {
   justify-content: flex-start;
 }
-.kd-app[data-portrait="true"] .kd-player-transport-side[data-side="right"] {
+.kd-app[data-tall="true"] .kd-player-transport-side[data-side="right"] {
   justify-content: flex-end;
 }
-.kd-app[data-portrait="true"] .kd-player-transport-side::-webkit-scrollbar {
+.kd-app[data-tall="true"] .kd-player-transport-side::-webkit-scrollbar {
   display: none;
 }
-.kd-app[data-portrait="true"] .kd-player-transport-core {
+.kd-app[data-tall="true"] .kd-player-transport-core {
   position: static;
   transform: none;
 }
-.kd-app[data-portrait="true"] .kd-player-transport::-webkit-scrollbar {
+.kd-app[data-tall="true"] .kd-player-transport::-webkit-scrollbar {
   display: none;
 }
-.kd-app[data-portrait="true"] .kd-player-scrub > .kd-player-time {
+.kd-app[data-tall="true"] .kd-player-scrub > .kd-player-time {
   display: block;
+}
+/* 再窄就放不下并排的 EQ：正在播放和 EQ 各占一层。 */
+@media (max-width: 560px) {
+  .kd-app[data-tall="true"] .kd-player {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: auto auto auto auto !important;
+    grid-template-areas:
+      "controls"
+      "now"
+      "next"
+      "wave" !important;
+  }
 }
 
 /* 「正在播」那一块的三层都必须是块级。

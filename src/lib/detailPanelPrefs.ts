@@ -26,7 +26,5 @@ export const useDetailPanelPrefs = create<{
   },
 }));
 
-// 固定布局沿用已有排序偏好；没有历史偏好时视频优先。
-// 本地与在线曲目共用同一份排序，切换曲目类型时不移动板块。
+// 本地与在线曲目共用同一组板块，切换曲目类型时不移动板块。
 export const DETAIL_PANELS_STORAGE_KEY = "kd-detail-panels-v2";
-export const DETAIL_PANELS_DEFAULT_FIRST_IDS = ["video"] as const;
