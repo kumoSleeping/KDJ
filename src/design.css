@@ -3490,29 +3490,27 @@ body[data-kd-search-pointer-dragging="true"] * {
      把溢出区域的点击命中到底下的曲目表。 */
   overflow: hidden;
 }
-/* 波形未就绪：显示真实、可拖动的播放进度，不用加载动画阻塞跳转。 */
+/* 波形未就绪：只有一条细中线，已播部分略深；仍是真实、可拖动的播放进度，不用加载动画阻塞跳转。
+   线与柱子同宽同心：柱子就是从这条线上长出来的。 */
 .kd-wave-fallback {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
-  margin: 0 0.15rem;
 }
 .kd-wave-fallback::before {
   content: "";
   position: absolute;
   left: 0;
   right: 0;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--kd-line);
+  height: 1px;
+  background: color-mix(in srgb, var(--kd-muted) 36%, transparent);
 }
 .kd-wave-fallback-fill {
   position: relative;
   display: block;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--kd-theme);
+  height: 1px;
+  background: var(--kd-muted);
 }
 .kd-wave-fallback-fill[data-error="true"] {
   background: var(--kd-warn);
@@ -3520,6 +3518,43 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* Canvas 波形有自己的 z-index；已播遮罩必须明确压在 canvas 上，否则会被彩色柱子盖掉。 */
 .kd-wave-dim {
   z-index: 2;
+}
+/* Song change on the player waveform (phases in src/lib/waveformSongMotion.ts, timing passed in
+   from src/lib/songSwapMotion.ts). The bars, the loop bands and the dimmed played part are one
+   layer scaled about its middle: flat on the centre line while there is nothing to draw and
+   while the old song closes, full height once the song has grown. */
+[data-song-phase] .kd-wave-body {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  transform: scaleY(1);
+  transform-origin: 50% 50%;
+  transition: transform var(--kd-wave-swap-ms) var(--kd-wave-swap-ease);
+}
+[data-song-phase="line"] .kd-wave-body,
+[data-song-phase="out"] .kd-wave-body {
+  transform: scaleY(0);
+}
+/* A complete picture covers the line. A stream that is still arriving keeps it under the parts
+   that have no bars yet. */
+[data-song-phase] .kd-wave-fallback {
+  transition: opacity 180ms linear;
+}
+[data-song-phase="shown"]:not([data-wave-partial]) .kd-wave-fallback {
+  opacity: 0;
+}
+/* The playhead and the markers are not squeezed with the bars: those of the old song fade while
+   it closes, and the new song's are back on the line as soon as it has. */
+[data-song-phase] :is(.kd-wave-cue, .kd-wave-marker, .kd-wave-playhead) {
+  transition: opacity var(--kd-wave-swap-ms) var(--kd-wave-swap-ease);
+}
+[data-song-phase="out"] :is(.kd-wave-cue, .kd-wave-marker, .kd-wave-playhead) {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-song-phase] :is(.kd-wave-body, .kd-wave-fallback, .kd-wave-cue, .kd-wave-marker, .kd-wave-playhead) {
+    transition: none;
+  }
 }
 /* 在线试听没有分析波形：一条可点击进度条顶上。 */
 .kd-player-wave-stream {

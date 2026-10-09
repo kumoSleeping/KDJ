@@ -45,6 +45,18 @@ import { THEME_CHANGE_EVENT } from "../../lib/themePack";
 import { useWaveformData } from "./useWaveformData";
 import { markerRatio, WaveformCueMarkers, WaveformLoopFills } from "./WaveformMarkers";
 import {
+  SONG_SWAP_IN_EASE,
+  SONG_SWAP_IN_MS,
+  SONG_SWAP_OUT_EASE,
+  SONG_SWAP_OUT_MS,
+} from "../../lib/songSwapMotion";
+import {
+  advanceWaveformSongMotion,
+  mountedWaveformSongMotion,
+  startWaveformSongCollapse,
+  waveformSongMotionWakeAt,
+} from "../../lib/waveformSongMotion";
+import {
   getLiveDeckClock,
   subscribeLivePlaybackClock,
 } from "../../lib/unifiedPlayer";
@@ -64,6 +76,35 @@ export interface SeekDetail {
   scrubbing?: boolean;
   /** 同一次手势的最终落点不能被媒体同步回声去重吞掉。 */
   forceCommit?: boolean;
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () => typeof window !== "undefined"
+      && typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const sync = () => setReduced(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+  return reduced;
+}
+
+/** What sits on top of the bars: positions that belong to one song and leave with its picture. */
+interface WaveformOverlay {
+  total: number;
+  ratio: number | null;
+  motionRatio: number | null;
+  cueMs: number | null;
+  endMs: number | null;
+  cuePoints: readonly CuePoint[];
+  loopStart: number | null;
+  loopLength: number | null;
 }
 
 function WaveformBeatGrid({
@@ -184,6 +225,13 @@ export interface WaveformProps {
   releaseOverviewIntent?: "visible" | "player";
   /** Performance may upgrade a cached preview sooner without owning a second acquisition hook. */
   detailUpgradeDelayMs?: number;
+  /**
+   * Follow a change of song on the shared song-change clock: only a thin centre line while the
+   * song has nothing to draw, bars that grow out of that line once, and on the next song the old
+   * picture closing back into the line before the new one grows. Overview only; a moving
+   * viewport ignores it.
+   */
+  songSwapMotion?: boolean;
 }
 
 export function Waveform({
@@ -221,6 +269,7 @@ export function Waveform({
   renderProfile = "current",
   releaseOverviewIntent = "visible",
   detailUpgradeDelayMs,
+  songSwapMotion = false,
 }: WaveformProps) {
   const {
     displayReleaseOverview,
@@ -237,6 +286,28 @@ export function Waveform({
     releaseOverviewIntent,
     detailUpgradeDelayMs,
   });
+  const ready = displayWave !== null
+    && displayWave.amp.length > 0
+    && (displayWave.known === undefined || displayWave.known.some(Boolean));
+  const songMotion = songSwapMotion && !(viewportSeconds !== null && viewportSeconds > 0);
+  const reducedMotion = usePrefersReducedMotion();
+  const [songMotionState, setSongMotionState] = useState(() => mountedWaveformSongMotion(trackId));
+  const [songMotionWake, setSongMotionWake] = useState(0);
+  // The phase is settled while rendering, not in an effect: the render that receives the next
+  // song must already keep the old picture, or the canvas would be repainted before it closes.
+  const songMotionNow = songMotion
+    ? advanceWaveformSongMotion(songMotionState, {
+        trackId,
+        ready,
+        now: performance.now(),
+        reduced: reducedMotion,
+      })
+    : null;
+  if (songMotionNow && songMotionNow !== songMotionState) setSongMotionState(songMotionNow);
+  const songPhase = songMotionNow?.phase ?? null;
+  /** The old song's picture is closing: its bitmap and overlays stay, and it takes no seeks. */
+  const holdingPicture = songPhase === "out";
+  const songMotionWakeAt = songMotionNow ? waveformSongMotionWakeAt(songMotionNow, ready) : null;
   // 右键设点永远取当时正在播放的位置，不能让鼠标点到波形哪里就误落到哪里。
   const [menu, setMenu] = useState<{ x: number; y: number; position: number } | null>(null);
   const [menuError, setMenuError] = useState("");
@@ -244,6 +315,9 @@ export function Waveform({
   const railRef = useRef<HTMLDivElement | null>(null);
   const bakeRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const heldOverlayRef = useRef<WaveformOverlay | null>(null);
+  const heldLastCommitRef = useRef(false);
   const previousTrackRef = useRef(trackId);
   const previousPositionRef = useRef<number | null>(position);
   /**
@@ -384,6 +458,63 @@ export function Waveform({
     },
     [],
   );
+
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (songPhase !== "in" || !body) return;
+    // The bars always grow from the flat line over the whole entrance time. Left to the style
+    // system alone, a first commit has no flat state to start from, and a collapse that is a
+    // frame short of its end would be reversed from wherever it stands, on a shortened clock.
+    body.style.transition = "none";
+    body.style.transform = "scaleY(0)";
+    void getComputedStyle(body).transform;
+    body.style.transition = "";
+    body.style.transform = "";
+  }, [songPhase]);
+
+  useLayoutEffect(() => {
+    if (!holdingPicture) return;
+    // One frame callback per collapse, not a loop: it reports when the closing picture first
+    // reaches the screen, so the collapse lasts its whole time from there.
+    const frame = requestAnimationFrame(() => {
+      setSongMotionState((current) => startWaveformSongCollapse(current, performance.now()));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [holdingPicture]);
+
+  useEffect(() => {
+    if (songMotionWakeAt === null) return;
+    // No frame loop: one timer per step. A timer that fires a moment early changes nothing in
+    // the state, so the wake count re-arms it.
+    const timer = window.setTimeout(
+      () => setSongMotionWake((count) => count + 1),
+      Math.max(0, Math.ceil(songMotionWakeAt - performance.now())) + 1,
+    );
+    return () => window.clearTimeout(timer);
+  }, [songMotionWakeAt, songMotionWake]);
+
+  const songMotionTrackRef = useRef(trackId);
+  useLayoutEffect(() => {
+    const previousTrackId = songMotionTrackRef.current;
+    songMotionTrackRef.current = trackId;
+    if (!songMotion || previousTrackId === trackId || !draggingRef.current) return;
+    // A drag that began on the old song's picture must not land in the new song. End it the way
+    // a cancelled pointer does: no seek, only the release of PlayerBar's scrub flag.
+    draggingRef.current = false;
+    if (previewFrameRef.current !== null) {
+      cancelAnimationFrame(previewFrameRef.current);
+      previewFrameRef.current = null;
+    }
+    phaseAnchorRef.current = null;
+    const detail = { position: previewPositionRef.current, preview: true, scrubbing: false };
+    if (customSeekRef.current) {
+      customSeekRef.current(detail);
+    } else {
+      window.dispatchEvent(
+        new CustomEvent<SeekDetail>(SEEK_EVENT, { detail: { trackId: previousTrackId, ...detail } }),
+      );
+    }
+  }, [songMotion, trackId]);
 
   // 原生 range 在指针下自己移动；播放头预览最多每帧同步一次。整个指针手势只在
   // pointerup 提交最终落点，避免第一次 input 先启动原生 seek 后，受控 value 和
@@ -1005,7 +1136,9 @@ export function Waveform({
     const host = hostRef.current;
     const rail = railRef.current;
     const canvas = canvasRef.current;
-    if (!host || !rail || !canvas || !displayWave) return;
+    // While the old song's picture closes, the canvas keeps the bitmap it has. The effect runs
+    // again when the hold ends and paints the song that is shown then.
+    if (!host || !rail || !canvas || !displayWave || holdingPicture) return;
     let resizeTimer = 0;
     let paintedSize = "";
     const sizeKey = () => `${canvas.clientWidth}:${canvas.clientHeight || height}:${window.devicePixelRatio || 1}`;
@@ -1082,6 +1215,7 @@ export function Waveform({
     };
   }, [
     displayWave,
+    holdingPicture,
     height,
     canvasProfile,
     renderedAmplitudeScale,
@@ -1091,11 +1225,27 @@ export function Waveform({
     bake?.widthScale,
   ]);
 
-  const cueRatio = markerRatio(cueMs, total);
-  const endRatio = markerRatio(endMs, total);
-  const ready = displayWave !== null
-    && displayWave.amp.length > 0
-    && (displayWave.known === undefined || displayWave.known.some(Boolean));
+  const liveOverlay: WaveformOverlay = {
+    total,
+    ratio,
+    motionRatio,
+    cueMs,
+    endMs,
+    cuePoints,
+    loopStart,
+    loopLength,
+  };
+  // The closing picture keeps the positions it was last committed with; the new song's playhead,
+  // dimmed part and markers take over when it has closed.
+  const overlay = holdingPicture && heldOverlayRef.current ? heldOverlayRef.current : liveOverlay;
+  // That takeover is a cut. Interpolating it would sweep the playhead across the whole bar.
+  const animateOverlay = animateOverview && !holdingPicture && !heldLastCommitRef.current;
+  useLayoutEffect(() => {
+    heldLastCommitRef.current = holdingPicture;
+    if (!holdingPicture) heldOverlayRef.current = liveOverlay;
+  });
+  const cueRatio = markerRatio(overlay.cueMs, overlay.total);
+  const endRatio = markerRatio(overlay.endMs, overlay.total);
   const beatRangeMargin = viewport.active ? (viewportSeconds ?? 0) / 2 + 1 : 0;
   const beatRangeStart = viewport.active && bake
     ? bake.startSec
@@ -1143,6 +1293,8 @@ export function Waveform({
       className={className}
       data-viewport={viewport.active ? "true" : undefined}
       data-wave-seek={seekable ? undefined : "off"}
+      data-song-phase={songPhase ?? undefined}
+      data-wave-partial={songPhase && displayWave?.known ? "true" : undefined}
       style={{
         position: "relative",
         height,
@@ -1150,6 +1302,12 @@ export function Waveform({
         cursor: seekable && total > 0 ? "pointer" : "default",
         overflow: "hidden",
         pointerEvents: seekable ? undefined : "none",
+        ...(songPhase
+          ? {
+              "--kd-wave-swap-ms": `${holdingPicture ? SONG_SWAP_OUT_MS : SONG_SWAP_IN_MS}ms`,
+              "--kd-wave-swap-ease": holdingPicture ? SONG_SWAP_OUT_EASE : SONG_SWAP_IN_EASE,
+            } as CSSProperties
+          : null),
       }}
       // 只在冒泡阶段拦住可跳转波形，让滑轨先处理点击；捕获阶段拦截会让
       // React 19 的根监听在事件到达 range 之前就停掉，表现为点哪都不跳。
@@ -1261,11 +1419,21 @@ export function Waveform({
           willChange: viewport.active ? "transform" : undefined,
         }}
       >
+      {/* The picture that grows out of the centre line and closes back into it: the bars with
+          the loop bands and the dimmed played part that lie on them. With song motion this is one
+          layer scaled about its middle (see .kd-wave-body); otherwise it is no box at all. */}
+      <div
+        ref={bodyRef}
+        className="kd-wave-body"
+        style={songMotion ? undefined : { display: "contents" }}
+      >
       {!viewport.active ? (
       <canvas
         ref={canvasRef}
         style={{
-          display: ready ? "block" : "none",
+          // With song motion the layer's scale decides what shows, and the closing picture has
+          // to stay on screen although the next song may have nothing to draw yet.
+          display: songMotion || ready ? "block" : "none",
           position: "relative",
           zIndex: 1,
           width: "100%",
@@ -1275,9 +1443,42 @@ export function Waveform({
         aria-label="频谱波形"
       />
       ) : null}
+
+      <WaveformLoopFills
+        total={overlay.total}
+        cuePoints={overlay.cuePoints}
+        loopStart={overlay.loopStart}
+        loopLength={overlay.loopLength}
+      />
+
+      {/* 已播部分压暗：不换色，只盖一层半透明遮罩，颜色信息还在。
+          遮罩色跟主题走：深色主题盖黑、浅色主题盖白，白天才不会糊成一团黑 */}
+      {dimPlayed && overlay.motionRatio !== null && overlay.motionRatio > 0 && (
+        <span
+          className="kd-wave-dim"
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: "100%",
+            transform: `scaleX(${overlay.motionRatio})`,
+            transformOrigin: "0 50%",
+            transition: animateOverlay
+              ? `transform ${PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
+              : "none",
+            background: "var(--kd-wave-dim, rgba(0,0,0,0.55))",
+            pointerEvents: "none",
+          }}
+        />
+      )}
+      </div>
+
       {/* Acquisition kind does not change the DJ surface. A detail viewport stays empty until it
-          has real columns, while every compact overview uses the same seekable fallback. */}
-      {!ready && !viewport.active && (
+          has real columns, while every compact overview uses the same seekable fallback: a thin
+          centre line whose played part is stronger. With song motion the line is always there,
+          under the bars, because they grow out of it and close back into it. */}
+      {(songMotion || !ready) && !viewport.active && (
         <div
           className="kd-wave-fallback"
           aria-hidden="true"
@@ -1288,22 +1489,15 @@ export function Waveform({
             data-error={error ? "true" : undefined}
             style={{
               width: "100%",
-              transform: `scaleX(${motionRatio ?? 0})`,
+              transform: `scaleX(${overlay.motionRatio ?? 0})`,
               transformOrigin: "0 50%",
-              transition: animateOverview
+              transition: animateOverlay
                 ? `transform ${PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
                 : "none",
             }}
           />
         </div>
       )}
-
-      <WaveformLoopFills
-        total={total}
-        cuePoints={cuePoints}
-        loopStart={loopStart}
-        loopLength={loopLength}
-      />
 
       {beatMarkers.length > 0 && !viewport.active ? (
         <WaveformBeatGrid
@@ -1314,31 +1508,9 @@ export function Waveform({
         />
       ) : null}
 
-      {/* 已播部分压暗：不换色，只盖一层半透明遮罩，颜色信息还在。
-          遮罩色跟主题走：深色主题盖黑、浅色主题盖白，白天才不会糊成一团黑 */}
-      {dimPlayed && motionRatio !== null && motionRatio > 0 && (
-        <span
-          className="kd-wave-dim"
-          style={{
-            position: "absolute",
-            left: 0,
-            top: 0,
-            bottom: 0,
-            width: "100%",
-            transform: `scaleX(${motionRatio})`,
-            transformOrigin: "0 50%",
-            transition: animateOverview
-              ? `transform ${PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
-              : "none",
-            background: "var(--kd-wave-dim, rgba(0,0,0,0.55))",
-            pointerEvents: "none",
-          }}
-        />
-      )}
-
       <WaveformCueMarkers
-        total={total}
-        cuePoints={cuePoints}
+        total={overlay.total}
+        cuePoints={overlay.cuePoints}
       />
 
       {cueRatio !== null && (
@@ -1346,7 +1518,7 @@ export function Waveform({
           className="kd-wave-marker"
           data-kind="start"
           style={{ left: `${cueRatio * 100}%` }}
-          title={`开始 ${((cueMs ?? 0) / 1000).toFixed(2)}s`}
+          title={`开始 ${((overlay.cueMs ?? 0) / 1000).toFixed(2)}s`}
           aria-hidden="true"
         />
       )}
@@ -1355,19 +1527,19 @@ export function Waveform({
           className="kd-wave-marker"
           data-kind="end"
           style={{ left: `${endRatio * 100}%` }}
-          title={`结束 ${((endMs ?? 0) / 1000).toFixed(2)}s`}
+          title={`结束 ${((overlay.endMs ?? 0) / 1000).toFixed(2)}s`}
           aria-hidden="true"
         />
       )}
       </div>
       </div>
 
-      {ratio !== null && (
+      {overlay.ratio !== null && (
         <span
           className="kd-wave-playhead-motion"
           style={{
-            transform: `translate3d(${viewport.active ? viewport.playheadPercent : (motionRatio ?? ratio) * 100}%, 0, 0)`,
-            transition: animateOverview
+            transform: `translate3d(${viewport.active ? viewport.playheadPercent : (overlay.motionRatio ?? overlay.ratio) * 100}%, 0, 0)`,
+            transition: animateOverlay
               ? `transform ${PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
               : "none",
           }}
@@ -1388,6 +1560,12 @@ export function Waveform({
           onPointerDown={(event) => {
             event.stopPropagation();
             if (event.pointerType === "mouse" && event.button !== 0) return;
+            if (holdingPicture) {
+              // The picture under the pointer is still the old song's; a seek now would land in
+              // the new one at a place the listener never pointed at.
+              event.preventDefault();
+              return;
+            }
             // WKWebView 的透明原生 range 在受控 value 更新时可能丢掉系统拇指跟踪。
             // 手势改由 pointer 坐标驱动；阻止原生默认动作，避免两套跟踪互相覆盖。
             event.preventDefault();
@@ -1457,7 +1635,7 @@ export function Waveform({
           onClick={(event) => event.stopPropagation()}
           onInput={(event) => {
             event.stopPropagation();
-            if (menu || total <= 0) return;
+            if (menu || total <= 0 || holdingPicture) return;
             const nextPosition = Number(event.currentTarget.value);
             if (!draggingRef.current) {
               dispatchSeek(nextPosition);

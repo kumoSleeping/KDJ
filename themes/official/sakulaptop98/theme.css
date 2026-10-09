@@ -574,8 +574,9 @@
   background: #751431;
   box-shadow: 1px 0 #fff8f5;
 }
+/* The thin centre line of a waveform that has nothing to draw yet; its played part is stronger. */
 :root[data-theme-pack="sakulaptop98"] .kd-wave-fallback::before { background: var(--kd-line-soft); }
-:root[data-theme-pack="sakulaptop98"] .kd-wave-fallback-fill { background: var(--kd-theme); }
+:root[data-theme-pack="sakulaptop98"] .kd-wave-fallback-fill { background: var(--kd-muted); }
 
 /* READOUTS / MIXER — number plates and control wells, not more floating cards. */
 :root[data-theme-pack="sakulaptop98"] :is(.kd-stat-grid, .kd-analysis-deck, .kd-stream-analysis-status) {
