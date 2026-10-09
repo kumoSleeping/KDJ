@@ -4,8 +4,12 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import VisualizerStudioPanel from "../src/components/composition/VisualizerStudioPanel";
 import { useVisualizerStudioStore } from "../src/stores/visualizerStudioStore";
+import { VisualizerDock } from "../src/components/composition/VisualizerDock";
+import { useSidePanels } from "../src/lib/sidePanels";
+import { RightDock } from "../src/components/workspace/RightDock";
 
-const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
+const dom = new JSDOM('<div id="root"></div><div id="dock"></div>', { url: "http://localhost" });
+dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, localStorage: dom.window.localStorage,
   HTMLElement: dom.window.HTMLElement, HTMLCanvasElement: dom.window.HTMLCanvasElement, IS_REACT_ACT_ENVIRONMENT: true });
 let next = 0;
@@ -28,6 +32,7 @@ const fixture = {
   panelReads: 0,
   prepares: 0, imageLoads: 0, analyses: 0,
   session: { trackId: 42 as number | null }, commands: [] as any[], plays: [] as any[],
+  windows: [] as any[],
 };
 Object.assign(globalThis, { studioTest: fixture });
 const root = createRoot(document.getElementById("root")!);
@@ -80,22 +85,100 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     Object.defineProperty(document,"hidden",{configurable:true,value:true});
     document.dispatchEvent(new dom.window.Event("visibilitychange"));
     assert.equal(frames.size,0,"background preview must cancel animation callbacks");
+    // ---- The configuration is an app of the main window's right column, on the desktop too.
+    const editor = () => useVisualizerStudioStore.getState();
+    const dock = createRoot(document.getElementById("dock")!);
+    const host = document.getElementById("dock")!;
+    Object.assign(dom.window, { __TAURI_INTERNALS__: {}, kdj: { platform: "darwin" } });
+    const raisedBefore = useSidePanels.getState().raised.token;
     await act(async()=> {
-      useVisualizerStudioStore.getState().open(track);
-      root.render(<VisualizerStudioPanel showDetails={false}/>);
-      await wait(30);
+      root.render(null);
+      dock.render(<VisualizerDock/>);
+      editor().open(track);
+      await wait(60);
     });
-    assert.equal(useVisualizerStudioStore.getState().inlineSettings,false,'explicit editing must not depend on a visible sidebar');
-    assert.equal(useVisualizerStudioStore.getState().fromPlayback,true);
-    let preview=document.querySelector('[role="dialog"][aria-label="可视化预览小窗"]');
-    assert.ok(preview,'opening generation must also pop out its preview');
+    await act(async()=> { await wait(30); });
+    assert.equal(fixture.windows.length,0,'opening the configuration must not ask for a separate window');
+    assert.equal(editor().track?.id,42);
+    assert.equal(editor().inlineSettings,false);
+    assert.deepEqual([useSidePanels.getState().raised.id,useSidePanels.getState().raised.token],['visualizer',raisedBefore+1],'opening brings the column app forward');
+    assert.ok(host.querySelector('.kd-viz-dock .kd-aside-head-title')?.textContent?.includes('可视化配置'));
+    assert.ok(host.querySelector('.kd-viz-preview canvas'),`the picture sits in the column app: ${host.innerHTML.slice(0,400)}`);
+    assert.equal(document.querySelector('[role="dialog"][aria-label="可视化预览小窗"]'),null,'the picture must not pop out by itself');
     assert.equal(fixture.plays.length,0,'editing the playing song must preserve its transport');
-    await act(async()=> { preview!.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true})); });
-    assert.equal(document.querySelector('[role="dialog"][aria-label="可视化预览小窗"]'),null);
-    await act(async()=> { useVisualizerStudioStore.getState().open(track); });
-    preview=document.querySelector('[role="dialog"][aria-label="可视化预览小窗"]');
-    assert.ok(preview,'repeating the right-click action must reopen a collected preview');
-    console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension");
+    await act(async()=> { editor().open(track); });
+    assert.equal(useSidePanels.getState().raised.token,raisedBefore+2,'asking again raises the app');
+    // Every continuous parameter is a slider that shows its value and returns to its default.
+    const sliders=[...host.querySelectorAll<HTMLInputElement>('.kd-viz-settings .kd-slider input[type="range"]')];
+    assert.ok(sliders.length>=6,`sliders: ${sliders.length}`);
+    assert.equal(host.querySelector('.kd-dj-arcknob'),null);
+    const split=host.querySelector<HTMLInputElement>('.kd-slider input[type="range"]')!;
+    const readout=()=>split.closest('.kd-slider')!.querySelector('.kd-slider-value')!;
+    assert.equal(readout().textContent,'61.5%');
+    assert.equal((readout() as HTMLButtonElement).disabled,true,'nothing to reset at the default');
+    // react-dom is loaded before this file installs the DOM globals, so it does not listen for
+    // `input` here; hand the change to the slider's own handler.
+    const props=(split as any)[Object.keys(split).find(key=>key.startsWith('__reactProps$'))!];
+    await act(async()=> { props.onChange({ currentTarget:{ value:'30' } }); });
+    assert.equal(readout().textContent,'30%');
+    await act(async()=> { await wait(340); split.dispatchEvent(new dom.window.MouseEvent('dblclick',{bubbles:true})); });
+    assert.equal(readout().textContent,'61.5%','double-click returns to the default');
+    await act(async()=> { host.querySelector<HTMLElement>('[aria-label="撤销"]')!.click(); });
+    assert.equal(readout().textContent,'30%','slider edits join the undo history');
+    // Closing goes through the editor's own guard; the app keeps its content while sliding out.
+    // No IndexedDB here: the editor asks before discarding what it could not save.
+    (dom.window as any).confirm = () => true;
+    await act(async()=> { host.querySelector<HTMLElement>('[aria-label="关闭可视化配置"]')!.click(); await wait(60); });
+    assert.equal(editor().track,null,'the close control closes the app');
+    assert.ok(host.querySelector('.kd-viz-settings'),'a closed app keeps showing what it showed');
+    // A song that is not playing: opening its configuration leaves the transport alone.
+    await act(async()=> { editor().open({ ...track, id:43, title:'Other' }); await wait(60); });
+    assert.equal(fixture.plays.length,0,'opening the configuration must not load another song');
+    assert.equal(fixture.windows.length,0);
+    await act(async()=> { editor().close(); await wait(10); });
+    // The floating picture's gear: the picture stays the editor, its controls come up in the column.
+    await act(async()=> {
+      // As VisualizerPopup mounts it.
+      root.render(<VisualizerStudioPanel inlineTrack={track} showDetails={false} popup onClose={() => { if (editor().inlineSettings) editor().close(); }}/>);
+      await wait(60);
+    });
+    await act(async()=> { editor().openInlineSettings(track); await wait(30); });
+    assert.equal(fixture.windows.length,0,'the gear must not ask for a separate window');
+    assert.equal(editor().inlineSettings,true);
+    assert.equal(useSidePanels.getState().raised.id,'visualizer');
+    assert.ok(host.querySelector('.kd-viz-settings-host [role="tablist"]'),'the controls are hosted by the column app');
+    assert.equal(host.querySelector('canvas'),null,'the picture stays in its floating window');
+    assert.equal(typeof editor().beforeClose,'function','the unsaved-change guard is registered');
+    await act(async()=> { host.querySelector<HTMLElement>('[aria-label="关闭可视化配置"]')!.click(); await wait(60); });
+    assert.equal(editor().track,null,'closing the column app ends the hosted controls');
+    await act(async()=>dock.unmount());
+    // ---- The column itself: the front app that closes stays, as it was, while it leaves.
+    const column = createRoot(host);
+    const app = (id:string) => ({ id, label:id, node:<input data-probe={id} defaultValue=""/> });
+    const show = (ids:string[], order:string[]) => act(async()=> { column.render(<RightDock apps={ids.map(app)} order={order}/>); });
+    const section = (id:string) => host.querySelector<HTMLElement>(`.kd-dock-app[data-app="${id}"]`);
+    await show(['lyrics','visualizer'],['lyrics','visualizer']);
+        const probe = section('visualizer')!.querySelector('input')!;
+    probe.value = 'typed';
+    assert.equal(section('lyrics')!.dataset.covered,'true');
+    await show(['lyrics'],['lyrics']);
+    assert.equal(section('visualizer')?.dataset.leaving,'true','a closed front app slides out instead of vanishing');
+    assert.ok(section('visualizer')!.querySelector('input')===probe,'and it is the same instance, not a fresh mount');
+    assert.equal(section('lyrics')!.dataset.covered,undefined,'the app beneath is revealed at once');
+    await act(async()=> { await wait(340); });
+    assert.equal(section('visualizer'),null);
+    // Raising changes the front without changing the set: the app in front is the one that leaves.
+    await show(['lyrics','visualizer'],['lyrics','visualizer']);
+    await show(['lyrics','visualizer'],['visualizer','lyrics']);
+    await show(['visualizer'],['visualizer']);
+    assert.equal(section('lyrics')?.dataset.leaving,'true','the raised app leaves visibly');
+    await show(['lyrics','visualizer'],['visualizer','lyrics']);
+    assert.equal(section('lyrics')?.dataset.leaving,undefined,'reopened while leaving: it is simply open again');
+    assert.equal(host.querySelectorAll('.kd-dock-app[data-app="lyrics"]').length,1);
+    await show(['lyrics'],['lyrics']);
+    assert.equal(section('visualizer'),null,'a covered app that closes is simply gone');
+    await act(async()=>column.unmount());
+    console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension, column app, leaving apps");
   } finally {
     await act(async()=>root.unmount()); dom.window.close();
   }
