@@ -1,9 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { LoaderCircle, RefreshCw } from "lucide-react";
 import { connectEvents, selectConnected, useAppStore } from "../../stores/appStore";
 import type { KvjTab } from "../../stores/kvjStore";
-import { useToastStore } from "../../stores/toastStore";
 import { useWorkshopDrop } from "../../lib/workshopDrop";
 import { api } from "../../lib/api";
 import { ToastHost } from "../common";
@@ -13,7 +11,6 @@ import { CompositionWorkshop } from "../composition/CompositionWorkshop";
 import { LiveVjPanel } from "../composition/LiveVjPanel";
 import "./KvjApp.css";
 
-const VisualizerStudioPanel = lazy(() => import("../composition/VisualizerStudioPanel"));
 const SettingsPanel = lazy(() => import("../settings/SettingsPanel").then(module => ({ default: module.SettingsPanel })));
 const labels: Record<KvjTab, string> = { workshop: "VJ 剪辑", visualizer: "歌曲可视化", "live-vj": "VJ 投放", preferences: "偏好设置" };
 let bootingWindow: Promise<void> | null = null;
@@ -36,9 +33,9 @@ function EditorPanel({ tab }: { tab: KvjTab }) {
       {tab === "workshop" ? <CompositionWorkshop workspace />
         : tab === "live-vj" ? <LiveVjPanel toolbarTarget={toolbar} backTarget={back} />
         : tab === "preferences" ? <Suspense fallback={null}><SettingsPanel preferences /></Suspense>
-        : <Suspense fallback={null}><VisualizerStudioPanel onClose={() => {
-          void getCurrentWebviewWindow().hide().catch(error => useToastStore.getState().show(String(error)));
-        }} /></Suspense>}
+        // The visualizer window stays hidden and only runs the export queue (kvjWindow):
+        // the configuration itself is an app of the main window's right column.
+        : null}
     </div>
   </section>;
 }

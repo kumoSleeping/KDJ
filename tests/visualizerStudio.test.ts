@@ -73,6 +73,6 @@ test("main entry is lazy and the reference small spectrum never paints a black a
   const renderer = readFileSync(new URL("../src/lib/visualizerStudioRenderer.ts", import.meta.url), "utf8");
   const small = renderer.slice(renderer.indexOf("function paintSmallSpectrum"), renderer.indexOf("function paintLights"));
   assert.ok(!/fillStyle\s*=\s*["'](?:black|#000)/.test(small)); assert.ok(!small.includes('globalCompositeOperation = "multiply"'));
-  assert.ok(readFileSync(new URL("../src/components/workspace/Workspace.tsx", import.meta.url), "utf8").includes('lazy(() => import("../composition/VisualizerStudioPanel"))'));
-  assert.ok(readFileSync(new URL("../src/components/library/TrackTable.tsx", import.meta.url), "utf8").includes("生成可视化视频"));
+  assert.ok(readFileSync(new URL("../src/components/composition/VisualizerDock.tsx", import.meta.url), "utf8").includes('lazy(() => import("./VisualizerStudioPanel"))'));
+  assert.ok(readFileSync(new URL("../src/components/library/TrackTable.tsx", import.meta.url), "utf8").includes("新建可视化"));
 });

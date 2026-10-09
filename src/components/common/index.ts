@@ -21,3 +21,7 @@ export { ProgressBar } from "./ProgressBar";
 export type { ProgressBarProps, ProgressState } from "./ProgressBar";
 export { SelectionBar } from "./SelectionBar";
 export type { SelectionBarProps } from "./SelectionBar";
+export { Slider } from "./Slider";
+export type { SliderProps } from "./Slider";
+export { Segmented } from "./Segmented";
+export type { SegmentedOption } from "./Segmented";

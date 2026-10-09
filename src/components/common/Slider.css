@@ -1,0 +1,94 @@
+/* Labelled slider: name, track and value share one row and one grid, so a column of them lines
+   up. A host sets --kd-slider-label / --kd-slider-value to align other rows with it. */
+.kd-slider {
+  --kd-slider-thumb: 11px;
+  display: grid;
+  grid-template-columns: var(--kd-slider-label, minmax(3.5em, 30%)) minmax(0, 1fr) var(--kd-slider-value, 3.25rem);
+  align-items: center;
+  column-gap: 0.5rem;
+  min-width: 0;
+  min-height: 1.75rem;
+  font-size: var(--kd-size-xs);
+}
+.kd-slider-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-text-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-slider-rail {
+  /* Track positions are measured between the two extreme centres of the handle. */
+  --kd-slider-from: calc(var(--kd-slider-thumb) / 2 + (100% - var(--kd-slider-thumb)) * var(--kd-slider-lo, 0));
+  --kd-slider-to: calc(var(--kd-slider-thumb) / 2 + (100% - var(--kd-slider-thumb)) * var(--kd-slider-hi, 0));
+  --kd-slider-track: linear-gradient(to right,
+    var(--kd-line) 0 var(--kd-slider-from),
+    var(--kd-muted) var(--kd-slider-from) var(--kd-slider-to),
+    var(--kd-line) var(--kd-slider-to) 100%);
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.kd-slider-rail > input[type="range"] {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  height: 1.5rem;
+  margin: 0;
+  padding: 0;
+  touch-action: pan-y;
+}
+.kd-slider-rail > input[type="range"]::-webkit-slider-runnable-track { background: var(--kd-slider-track); }
+.kd-slider-rail > input[type="range"]::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--kd-slider-track);
+}
+.kd-slider-rail > input[type="range"]::-moz-range-thumb {
+  width: var(--kd-slider-thumb);
+  height: var(--kd-slider-thumb);
+  border: 0;
+  border-radius: 50%;
+  background: var(--kd-muted);
+}
+.kd-slider-rail > input[type="range"]:is(:hover, :active, :focus-visible):not(:disabled)::-webkit-slider-thumb { background: var(--kd-text); }
+.kd-slider-rail > input[type="range"]:is(:hover, :active, :focus-visible):not(:disabled)::-moz-range-thumb { background: var(--kd-text); }
+/* The handle carries the focus ring (design.css); the row needs no second outline. */
+.kd-slider .kd-slider-rail > input[type="range"]:focus-visible { outline: none; }
+.kd-slider-rail > input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 2px var(--kd-theme-soft); }
+.kd-slider-rail > input[type="range"]:disabled { opacity: 0.42; cursor: not-allowed; }
+/* The default position: a tick the handle passes over. */
+.kd-slider-mark {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--kd-slider-thumb) / 2 + (100% - var(--kd-slider-thumb)) * var(--kd-slider-default, 0));
+  width: 1px;
+  height: 9px;
+  background: var(--kd-faint, var(--kd-line));
+  transform: translate(-0.5px, -50%);
+  pointer-events: none;
+}
+/* The readout is the way back to the default; it is plain text while there is nothing to undo. */
+.kd-slider .kd-slider-value {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-slider button.kd-slider-value { cursor: pointer; }
+.kd-slider[data-changed] .kd-slider-value { color: var(--kd-text); }
+.kd-slider[data-changed] button.kd-slider-value:hover:not(:disabled) { color: var(--kd-theme); }
+.kd-slider button.kd-slider-value:disabled { opacity: 1; cursor: default; }
+.kd-slider button.kd-slider-value:focus-visible { outline: 1px solid var(--kd-muted); outline-offset: 2px; }

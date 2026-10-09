@@ -1,0 +1,30 @@
+/* A few exclusive choices in a row. Selection is ink only: no fill, frame or bar. */
+.kd-segmented {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 0.75rem;
+  min-width: 0;
+}
+.kd-segmented > button[role="radio"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 1.75rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.kd-segmented > button[role="radio"]:hover:not(:disabled) { color: var(--kd-text); }
+.kd-segmented > button[role="radio"][aria-checked="true"],
+.kd-segmented > button[role="radio"][aria-checked="true"]:hover:not(:disabled) { color: var(--kd-theme); }
+.kd-segmented > button[role="radio"]:disabled { opacity: 0.42; cursor: not-allowed; }
+.kd-segmented > button[role="radio"]:focus-visible { outline: 1px solid var(--kd-muted); outline-offset: 2px; }

@@ -7,16 +7,16 @@ const stubs = {
   compositionPlayback: `export const getCompositionClock=()=>globalThis.studioTest.clock;`,
   playerSession: `export const getPlayerSession=()=>globalThis.studioTest.session; export const subscribePlayerSession=f=>{globalThis.studioTest.listeners.add(f);return()=>globalThis.studioTest.listeners.delete(f)}; export const requestPlayerCommand=command=>globalThis.studioTest.commands.push(command);`,
   playTrack: `export const playTrack=(...args)=>globalThis.studioTest.plays.push(args);`,
-  playingTrack: `export const getPlayingTrack=()=>({id:globalThis.studioTest.session.trackId});`,
+  playingTrack: `export const getPlayingTrack=()=>globalThis.studioTest?{id:globalThis.studioTest.session.trackId}:null; export const subscribePlayingTrack=f=>{globalThis.studioTest?.listeners.add(f);return()=>globalThis.studioTest?.listeners.delete(f)};`,
   visualizerExportStore: `export const useVisualizerExportStore={getState:()=>({enqueue:async()=>{}})};`,
   toastStore: `export const useToastStore={getState:()=>({show(){}})};`,
   appStore: `const state={settings:{download_dir:""}}; export const useAppStore=Object.assign(f=>{globalThis.studioTest.panelReads++;return f(state)},{getState:()=>state,setState:patch=>Object.assign(state,patch)});`,
   lyricsStore: `export const useLyricsStore=f=>f({byId:{}});`,
   videoPip: `export const useVideoPip={getState:()=>({active:false})};`,
-  usePreviewFullscreen: `export const usePreviewFullscreen=()=>({fullscreen:false,applyFullscreen(){}});`,
+  usePreviewFullscreen: `export const usePreviewFullscreen=()=>({fullscreen:false,applyFullscreen:async()=>true});`,
+  kvjWindow: `export const showKvj=(...args)=>globalThis.studioTest.windows.push(args);`,
   FloatingVideoControls: `import React from 'react'; export const FloatingVideoControls=()=>null; export const FloatingVideoScrub=props=>React.createElement('div',{role:'slider',onKeyDown:props.onKeyDown});`,
   LyricsSourcePicker: `export const LyricsSourcePicker=()=>null;`,
-  ManagerMixerControls: `export const ArcKnob=()=>null;`,
 };
 const entry = new Module(`${process.cwd()}/tests/studioFirstPaint.test.cjs`);
 entry.filename = entry.id;

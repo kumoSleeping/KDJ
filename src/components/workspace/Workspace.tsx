@@ -5,7 +5,7 @@ import { useStore } from "zustand";
 import { createTemporaryLibrary, type TemporaryLibrary, type LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
 import { useTemporaryFolderDrop } from "../../lib/temporaryFolderDrag";
 import { TemporaryFolderPane } from "../library/TemporaryFolderPane";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, ApiError } from "../../lib/api";
 import { clearTextSelection } from "../../lib/textSelection";
 import {
@@ -43,7 +43,8 @@ import {
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
-import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
+import { useVisualizerStudioStore, VISUALIZER_DOCK_APP } from "../../stores/visualizerStudioStore";
+import { VisualizerDock } from "../composition/VisualizerDock";
 import { LiveVjPanel } from "../composition/LiveVjPanel";
 import { SideDownloads, SideLyrics, SidePanels } from "../player/SidePanels";
 import { RightDock, useDockOrder, type DockApp } from "./RightDock";
@@ -242,7 +243,6 @@ function loadWorkspacePanes(): WorkspacePaneState {
   return { ...restored, active };
 }
 
-const VisualizerStudioPanel = lazy(() => import("../composition/VisualizerStudioPanel"));
 
 /**
  * 唯一的工作台。没有"下载板块"和"曲库板块"之分。
@@ -263,8 +263,6 @@ export function Workspace() {
   const [dockHeld, setDockHeld] = useState(false);
   const compositionMode = useAppStore(state => state.compositionMode);
   const visualizerTrackOpen = useVisualizerStudioStore(state => state.track !== null);
-  const inlineVisualizerSettings = useVisualizerStudioStore(state => state.inlineSettings);
-  const setVisualizerSettingsTarget = useVisualizerStudioStore(state => state.setSettingsTarget);
   const liveVjOpen = compositionMode === "live-vj";
   const settings = useAppStore((state) => state.settings);
   const searchCapabilities = useAppStore((state) => state.searchCapabilities);
@@ -1533,8 +1531,9 @@ export function Workspace() {
   );
   // 歌词和任务列表是右栏仅有的常驻内容；临时旁路关闭后它们原样回来。
   const activityAside = !realOverlayAside && (downloadsOpen || lyricsOpen);
-  const editorAsideOpen = showComposition || visualizerTrackOpen;
-  const hasAsideContent = showSettings || editorAsideOpen || realOverlayAside || activityAside;
+  // The VJ editors take the whole column; the visualizer configuration is one of its apps.
+  const editorAsideOpen = showComposition;
+  const hasAsideContent = showSettings || editorAsideOpen || visualizerTrackOpen || realOverlayAside || activityAside;
   const showAside = layout === "wide" && (hasAsideContent || dockHeld);
 
   const closeAside = useCallback(() => {
@@ -1560,9 +1559,9 @@ export function Workspace() {
         .catch(error => useWorkshopStore.setState({ error: String(error) }));
       return;
     }
-    const activeEditor = useVisualizerStudioStore.getState();
-    if (activeEditor.track) {
-      if (activeEditor.beforeClose) void activeEditor.beforeClose(); else activeEditor.close();
+    // Phone drawer: the visualizer configuration is what it shows while open.
+    if (useVisualizerStudioStore.getState().track) {
+      useVisualizerStudioStore.getState().requestClose();
       return;
     }
     closeAside();
@@ -1652,6 +1651,7 @@ export function Workspace() {
     </>,
   });
   if (showSettings) dockApps.push({ id: "settings", label: "设置", node: <SettingsOverlay /> });
+  if (visualizerTrackOpen) dockApps.push({ id: VISUALIZER_DOCK_APP, label: "可视化配置", node: <VisualizerDock /> });
   const dockOrder = useDockOrder(dockApps.map(app => app.id), dockRaised);
   const dockFrontRef = useRef<string | null>(null);
   dockFrontRef.current = dockOrder.at(-1) ?? null;
@@ -1661,17 +1661,15 @@ export function Workspace() {
     {asidePanel}
   </div>;
   const closeEditorDock = closeAsideForUser;
-  const editorDock = showComposition || visualizerTrackOpen ? <EditorDock
-    title={showComposition ? liveVjOpen ? "实时 VJ" : "VJ 剪辑" : "可视化配置"}
+  const editorDock = showComposition ? <EditorDock
+    title={liveVjOpen ? "实时 VJ" : "VJ 剪辑"}
     onClose={closeEditorDock}
-    leading={showComposition ? <span className="vj-workshop-back-slot" ref={setWorkshopBackTarget} /> : undefined}
-    tools={showComposition ? <div className="vj-toolbar-slot" ref={setWorkshopToolbarTarget} /> : undefined}>
-    {showComposition ? <div className="kd-video-workspace">
+    leading={<span className="vj-workshop-back-slot" ref={setWorkshopBackTarget} />}
+    tools={<div className="vj-toolbar-slot" ref={setWorkshopToolbarTarget} />}>
+    <div className="kd-video-workspace">
       {liveVjOpen ? <LiveVjPanel toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />
         : <CompositionWorkshop toolbarTarget={workshopToolbarTarget} backTarget={workshopBackTarget} />}
-    </div> : inlineVisualizerSettings
-      ? <div className="kd-viz-panel kd-viz-settings-host" ref={setVisualizerSettingsTarget} />
-      : <Suspense fallback={null}><VisualizerStudioPanel onClose={closeEditorDock} /></Suspense>}
+    </div>
   </EditorDock> : null;
   // 窄屏下换了标签（曲库 ↔ 搜索）就把抽屉收起来：抽屉里装的内容会跟着变，
   // 留在屏幕上等于突然换了一块东西，比自己收起来更让人迷惑
@@ -2571,15 +2569,16 @@ export function Workspace() {
         {layout === "narrow" && (
           <Sheet
             keepMounted
-            hideHeader={editorAsideOpen || activityAside}
+            hideHeader={editorAsideOpen || visualizerTrackOpen || activityAside}
             showClose={false}
-            open={editorAsideOpen || (sheet === "aside" && hasAsideContent)}
-            title={editorAsideOpen ? showComposition ? liveVjOpen ? "实时 VJ" : "VJ 剪辑" : "可视化配置" : asideLabel || "面板"}
-            tools={editorAsideOpen ? undefined : asideTools}
+            open={editorAsideOpen || visualizerTrackOpen || (sheet === "aside" && hasAsideContent)}
+            title={editorAsideOpen ? liveVjOpen ? "实时 VJ" : "VJ 剪辑" : visualizerTrackOpen ? "可视化配置" : asideLabel || "面板"}
+            tools={editorAsideOpen || visualizerTrackOpen ? undefined : asideTools}
             onClose={closeAsideForUser}
           >
-            <div className="kd-aside-restorable" hidden={editorAsideOpen}>{asideBody}</div>
+            <div className="kd-aside-restorable" hidden={editorAsideOpen || visualizerTrackOpen}>{asideBody}</div>
             {editorDock}
+            {visualizerTrackOpen && !editorAsideOpen && <VisualizerDock />}
           </Sheet>
         )}
         </div>

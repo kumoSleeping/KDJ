@@ -1,14 +1,16 @@
 import { create } from "zustand";
-import { usesVisualizerWindow, isVisualizerWindow } from "../lib/windowRole";
+import { isEditorWindow } from "../lib/windowRole";
 import { showKvj } from "../lib/kvjWindow";
+import { useSidePanels } from "../lib/sidePanels";
 import type { TrackSummary } from "../types";
-import { getPlayingTrack } from "../lib/playingTrack";
 import { useAppStore } from "./appStore";
+
+/** The visualizer configuration's id among the right column's apps (see RightDock). */
+export const VISUALIZER_DOCK_APP = "visualizer";
+
 interface State {
   track: TrackSummary | null;
-  fromPlayback: boolean;
   inlineSettings: boolean;
-  previewRequest: number;
   settingsTarget: HTMLElement | null;
   setSettingsTarget: (target: HTMLElement | null) => void;
   openInlineSettings: (track: TrackSummary) => void;
@@ -16,29 +18,40 @@ interface State {
   setBeforeClose: (handler: (() => Promise<boolean>) | null) => void;
   open: (track: TrackSummary) => void;
   follow: (track: TrackSummary) => void;
+  /** What the app's own close control does: let the editor save first, then leave. */
+  requestClose: () => void;
   close: () => void;
 }
-/** The editor follows local playback; the export queue owns frozen snapshots. */
+/**
+ * The configuration is an app of the main window's right column. `track` set means it is open;
+ * asking for it again brings it to the front. The export queue owns frozen snapshots.
+ */
 export const useVisualizerStudioStore = create<State>((set, get) => ({
-  track: null, fromPlayback: false, inlineSettings: false, previewRequest: 0, settingsTarget: null, beforeClose: null,
+  track: null, inlineSettings: false, settingsTarget: null, beforeClose: null,
   setSettingsTarget: settingsTarget => set({ settingsTarget }),
+  // The floating picture keeps the picture; only its controls come up in the column.
   openInlineSettings: track => {
-    if (usesVisualizerWindow()) { showKvj({ tab: "visualizer", track }); return; }
-    set({ track: { ...track }, fromPlayback: true, inlineSettings: true });
+    set({ track: { ...track }, inlineSettings: true });
     useAppStore.setState({ showComposition: false });
+    useSidePanels.getState().raise(VISUALIZER_DOCK_APP);
   },
   setBeforeClose: beforeClose => set({ beforeClose }),
   open: track => {
-    if (usesVisualizerWindow()) { showKvj({ tab: "visualizer", track }); return; }
-    // Explicit editing must expose a preview even when the playback sidebar is hidden.
-    set({ track: { ...track }, fromPlayback: getPlayingTrack()?.id === track.id,
-      inlineSettings: false, previewRequest: isVisualizerWindow ? 0 : get().previewRequest + 1 });
+    // A tool window has no right column: the main window hosts the configuration.
+    if (isEditorWindow) { showKvj({ tab: "visualizer", track }); return; }
+    set({ track: { ...track }, inlineSettings: false });
     useAppStore.setState({ showComposition: false });
+    useSidePanels.getState().raise(VISUALIZER_DOCK_APP);
   },
   follow: track => {
     if (track.id <= 0 || get().track?.id === track.id) return;
     // The player already owns this switch; never reload or pause its new source.
-    set({ track: { ...track }, fromPlayback: true });
+    set({ track: { ...track } });
   },
-  close: () => set({ track: null, fromPlayback: false, inlineSettings: false }),
+  requestClose: () => {
+    const { track, beforeClose, close } = get();
+    if (!track) return;
+    if (beforeClose) void beforeClose(); else close();
+  },
+  close: () => set({ track: null, inlineSettings: false }),
 }));

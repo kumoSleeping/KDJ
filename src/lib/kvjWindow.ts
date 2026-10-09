@@ -64,9 +64,15 @@ export async function requestVisualizerExports(command: VisualizerExportCommand)
 
 export async function openKvj(requested: KvjOpenRequest = {}): Promise<void> {
   await startWindowLink();
-  const target: EditorWindowLabel = requested.tab === "visualizer" ? "visualizer-studio"
-    : requested.tab === "live-vj" ? "live-vj-control" : requested.tab === "preferences" ? "preferences" : "kvj";
-  if (target === "visualizer-studio" && !requested.track) throw new Error("请选择一首歌曲");
+  if (requested.tab === "visualizer") {
+    // The configuration is an app of the main window's right column. The visualizer-studio
+    // window is never shown for it: it only runs the export queue (requestVisualizerExports).
+    if (!requested.track) throw new Error("请选择一首歌曲");
+    if (isEditorWindow) await request("main", "open", requested);
+    else (await import("../stores/visualizerStudioStore")).useVisualizerStudioStore.getState().open(requested.track);
+    return;
+  }
+  const target: EditorWindowLabel = requested.tab === "live-vj" ? "live-vj-control" : requested.tab === "preferences" ? "preferences" : "kvj";
   if (getCurrentWebviewWindow().label === target) {
     await (await import("../stores/kvjStore")).acceptKvjRequest(requested);
     return;
@@ -151,6 +157,14 @@ export function startWindowLink(): Promise<void> {
         else if (message.action === "open" && isEditorWindow) {
           const { acceptKvjRequest } = await import("../stores/kvjStore");
           await acceptKvjRequest(message.payload as KvjOpenRequest);
+        } else if (message.action === "open") {
+          // A tool window asked for the visualizer configuration, which lives in this window.
+          const requested = message.payload as KvjOpenRequest;
+          if (requested.tab !== "visualizer" || !requested.track) throw new Error("不支持的窗口请求");
+          const { useVisualizerStudioStore } = await import("../stores/visualizerStudioStore");
+          useVisualizerStudioStore.getState().open(requested.track);
+          // The asking window is in front of this one; the column it opened in must be seen.
+          void import("./api").then(({ api }) => api.showMainWindow()).catch(() => undefined);
         } else if (message.action === "settings" && !isEditorWindow) {
           await useAppStore.getState().saveSettings(message.payload as Partial<import("../types").Settings>);
         } else if (message.action === "preview-pause" && !isEditorWindow && message.sender === "kvj") {
