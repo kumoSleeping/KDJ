@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import { DRAG_THRESHOLD_PX } from "../../lib/pointerSession";
+import { leaveAfterUnmount } from "../../lib/motion";
 import "./FloatingPanelWindow.css";
 
 type WindowBounds = { left: number; top: number; width: number; height: number };
@@ -15,7 +16,12 @@ function loadBounds(key?: string): WindowBounds | null {
   } catch { return null; }
 }
 
-/** An app-owned, non-modal window: the timeline remains usable behind it. */
+/**
+ * An app-owned, non-modal window: the timeline remains usable behind it.
+ *
+ * Motion (docs/motion-schema.md): it pops in about its centre and pops out as an inert picture
+ * once its owner has closed it.
+ */
 export function FloatingPanelWindow({ title, subtitle, children, close, closeLabel, busy = false, className = "", initialPosition, place, bottomInset, storageKey, onMoveStart, onMove, onMoveEnd, onMoveCancel }: {
   onMoveStart?(): void; onMove?(x: number, y: number): void; onMoveEnd?(x: number, y: number): void; onMoveCancel?(): void;
   title: string; subtitle?: string; children: ReactNode; close(): void; closeLabel: string; busy?: boolean; className?: string; storageKey?: string; initialPosition?: { left: number; top: number };
@@ -46,9 +52,15 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
   }, []);
   const floor = () => window.innerHeight - Math.max(0, bottomInset?.() ?? 0);
   useLayoutEffect(() => {
+    const el = root.current;
+    return () => { if (el) leaveAfterUnmount(el); };
+  }, []);
+  useLayoutEffect(() => {
     let placed = !place || !!saved || !!initialPosition;
     const fit = () => {
-      const box = root.current?.getBoundingClientRect();
+      // The layout box: while the window pops in it is scaled, and its painted box is smaller.
+      const el = root.current;
+      const box = el && { left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight };
       if (!box || box.width <= 0 || box.height <= 0) return;
       const width = Math.min(box.width, Math.max(1, window.innerWidth - 16));
       const height = Math.min(box.height, Math.max(1, floor() - 16));
@@ -69,7 +81,7 @@ export function FloatingPanelWindow({ title, subtitle, children, close, closeLab
       grown?.disconnect();
     };
   }, []);
-  return createPortal(<section ref={root} className={`kd-panel kd-internal-window ${className}`} style={{ ...position, ...size }}
+  return createPortal(<section ref={root} className={`kd-panel kd-internal-window ${className}`} data-kd-motion="pop" style={{ ...position, ...size }}
     role="dialog" aria-label={title} tabIndex={-1}
     onPointerDown={event => event.stopPropagation()}
     onKeyDown={event => {

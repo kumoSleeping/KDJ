@@ -22,7 +22,10 @@ export interface SheetProps {
  *
  * 只盖顶栏与底栏播放之间的中间区（不遮顶栏、不压播放条）。
  * 占约 70% 中间区宽，左侧用轻透明遮罩；点遮罩、按 Esc、或把面板往右拖即可关闭。
- * 入场动画刻意做得很短很轻，不拖泥带水。
+ *
+ * Motion (docs/motion-schema.md): the panel slides in from the edge it is attached to on the
+ * large-surface clock while the scrim fades in. Closing is immediate: the panel holds live
+ * content (lists, canvases, video) that a leaving picture could not show.
  */
 export function Sheet({ open, keepMounted = false, hideHeader = false, showClose = true, title, heading, tools, onClose, children, placement = "right" }: SheetProps) {
   /** 沿关闭方向的即时位移（px）。松手时归零或关闭。 */
@@ -78,9 +81,11 @@ export function Sheet({ open, keepMounted = false, hideHeader = false, showClose
   if (!open && !keepMounted) return null;
 
   return (
-    <div className="kd-sheet-scrim kd-pop-scrim" hidden={!open} style={!open ? { display: "none" } : undefined} data-placement={placement} onClick={requestClose}>
+    <div className="kd-sheet-scrim" data-kd-motion="fade" hidden={!open} style={!open ? { display: "none" } : undefined} data-placement={placement} onClick={requestClose}>
       <div
-        className="kd-sheet kd-pop-panel"
+        className="kd-sheet"
+        data-kd-motion="slide"
+        data-kd-edge={bottom ? "bottom" : "right"}
         role="dialog"
         aria-modal="true"
         aria-label={title}

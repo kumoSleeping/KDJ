@@ -22,6 +22,9 @@ export interface InlineNoticeProps {
  *
  * 用 warn 芯片而不是红字：红色在这个界面里只给"动作"，
  * 一个区域再多一块红，真正要被按的那个按钮就不显眼了。
+ *
+ * It arrives with the schema's `pop` (docs/motion-schema.md). It lies in the flow, so it has
+ * no leaving gesture: the space it held closes at once.
  */
 export function InlineNotice({
   text,
@@ -34,7 +37,7 @@ export function InlineNotice({
   if (!text) return null;
   const classes = ["kd-notice", className ?? ""].filter(Boolean).join(" ");
   return (
-    <div className={classes} data-block={block || undefined} role="status">
+    <div className={classes} data-block={block || undefined} data-kd-motion="pop" role="status">
       <span className="kd-chip" data-tone={tone}>
         {chip ?? (tone === "ok" ? "完成" : "出错")}
       </span>

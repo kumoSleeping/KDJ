@@ -87,9 +87,8 @@
   /* 曲库/搜索工作条与右栏眉目同高，并排时齐平 */
   --kd-work-rail-h: 1.9rem;
   --kd-sheet-head-h: var(--kd-work-rail-h);
-  /* 侧方弹出入场：移动端 Sheet / 桌面右栏 / 对话框共用，改这里全局生效 */
-  --kd-pop-dur: 110ms;
-  --kd-pop-scrim-dur: 90ms;
+  /* Durations and curves of everything that comes and goes live in motion.css.
+     This one curve is still the toast's own. */
   --kd-pop-ease: cubic-bezier(0.2, 0.9, 0.3, 1);
 }
 
@@ -211,6 +210,20 @@
   --kd-hover: #fafafb;
   --kd-selected: transparent;
   --kd-shadow: none;
+}
+/* The edge of a small surface that floats over the page — a menu, a popover: a soft
+   shadow and the faintest outline (docs/motion-schema.md). A theme pack keeps its own. */
+:root {
+  --kd-float-edge: var(--kd-line);
+  --kd-float-shadow: 0 14px 34px -10px rgba(0, 0, 0, 0.66), 0 3px 9px -3px rgba(0, 0, 0, 0.45);
+}
+:root[data-theme="light"] {
+  --kd-float-edge: rgba(0, 0, 0, 0.08);
+  --kd-float-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.2), 0 3px 8px -3px rgba(0, 0, 0, 0.1);
+}
+:root[data-theme-pack] {
+  --kd-float-edge: var(--kd-line);
+  --kd-float-shadow: var(--kd-shadow-float);
 }
 :root[data-theme="light"]:not([data-theme-pack]) .kd-workspace-pane-local > .kd-activity {
   background: var(--kd-panel);
@@ -3138,28 +3151,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   color: var(--kd-muted);
   cursor: pointer;
 }
-
-/* ============================================================
- * 侧方弹出动画（Sheet / 桌面右栏 / 对话框共用）
- * 只改 :root 的 --kd-pop-* 或下面两段 keyframes，全部弹出一起变。
- * ========================================================== */
-@keyframes kd-pop-in {
-  from { transform: translateX(100%); }
-  to { transform: translateX(0); }
-}
-@keyframes kd-pop-scrim-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-.kd-pop-panel {
-  animation: kd-pop-in var(--kd-pop-dur) var(--kd-pop-ease) both;
-}
-.kd-pop-scrim {
-  animation: kd-pop-scrim-in var(--kd-pop-scrim-dur) ease-out both;
-}
 @media (prefers-reduced-motion: reduce) {
-  .kd-pop-panel,
-  .kd-pop-scrim,
   .kd-toast,
   .kd-toast[data-leaving="true"] {
     animation: none;
@@ -5764,12 +5756,13 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0.25rem;
-  border: 1px solid var(--kd-line);
-  border-radius: 6px;
+  /* A floating surface: its edge is a soft shadow and the faintest outline, nothing ruled. */
+  border: 1px solid var(--kd-float-edge);
+  border-radius: 7px;
   background: var(--kd-panel-raised);
   color: var(--kd-text-body);
   font-family: var(--kd-font);
-  box-shadow: var(--kd-shadow-float);
+  box-shadow: var(--kd-float-shadow);
 }
 .kd-context-menu::backdrop { background: transparent; }
 .kd-context-menu > button:focus-visible {
@@ -5781,12 +5774,14 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   color: var(--kd-theme);
   background: none;
 }
+/* Groups of a menu are set apart by air and a quiet label; no rule is drawn between them. */
 .kd-menu-heading, .kd-lyrics-menu-heading {
   padding: 0.4rem 0.5rem 0.2rem;
-  color: var(--kd-muted);
+  color: var(--kd-faint);
   font-size: var(--kd-size-xs);
+  font-weight: 500;
 }
-.kd-menu-heading:not(:first-child), .kd-lyrics-menu-heading:not(:first-child) { border-top: 1px solid var(--kd-line-soft); margin-top: 0.25rem; }
+.kd-menu-heading:not(:first-child), .kd-lyrics-menu-heading:not(:first-child) { margin-top: 0.55rem; }
 .kd-menu-check { display: flex; width: 13px; flex: 0 0 13px; }
 .kd-menu-label { min-width: 0; overflow-wrap: anywhere; }
 .kd-select-menu > button { min-height: 1.85rem; }
@@ -6134,24 +6129,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   opacity: 0.45;
   cursor: default;
 }
-/* The toolbox's menu drops out of its button. */
-.kd-chrome-tools-menu {
-  transform-origin: 1rem 0;
-  animation: kd-chrome-tools-in 160ms cubic-bezier(0.22, 0.9, 0.26, 1) backwards;
-}
+/* The toolbox's menu unfolds out of its button like every other menu (motion.css). */
 .kd-chrome-tools-menu > button > svg {
   flex: none;
-}
-@keyframes kd-chrome-tools-in {
-  from {
-    opacity: 0;
-    transform: translateY(-4px) scale(0.97);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .kd-chrome-tools-menu {
-    animation: none;
-  }
 }
 /* —— 平台标志键 ——
    只有标志没有名字。四个中文/英文名横排要占掉半条工具栏，而这四家的
@@ -8190,7 +8170,7 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .vj-workshop .vj-layer-position-trigger[data-active], .vj-workshop .vj-layer-position-trigger[data-busy], .vj-workshop .vj-layer-position-trigger[aria-expanded="true"] { color: var(--kd-theme); }
 .vj-position-popup { width: 240px; max-width: calc(100vw - 16px); display: grid; gap: 6px; }
 .vj-position-popup > button { justify-self: start; }
-.vj-position-popup .vj-position-choice-group + .vj-position-choice-group { padding-top: 6px; border-top: 1px solid var(--kd-line-soft); }
+.vj-position-popup .vj-position-choice-group + .vj-position-choice-group { padding-top: 8px; }
 .vj-position-popup .vj-position-choice-actions { display: grid; gap: 2px; }
 .vj-position-popup .vj-position-choice-actions button { background: transparent; color: var(--kd-text); border: 0; border-radius: 4px; justify-content: flex-start; white-space: normal; text-align: left; padding: 5px 6px; line-height: 1.4; }
 .vj-position-popup .vj-position-choice-actions button[aria-pressed="true"] { color: var(--kd-theme); background: transparent; }
@@ -8375,14 +8355,6 @@ html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr[aria-selected="true
   height: min(70%, 32rem);
   border-left: none;
   border-top: 1px solid var(--kd-line);
-  animation: kd-sheet-rise var(--kd-pop-duration, 160ms) ease-out;
-}
-@keyframes kd-sheet-rise {
-  from { transform: translateY(100%); }
-  to { transform: translateY(0); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .kd-sheet-scrim[data-placement="bottom"] > .kd-sheet { animation: none; }
 }
 
 .kd-login-qr-backdrop {

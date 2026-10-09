@@ -1,0 +1,114 @@
+# The motion schema
+
+Everything that comes and goes — a menu, a popover, a sheet, a small window, a notice — moves by
+one description: the same clock, the same curves, the same handful of gestures. A surface does
+not write its own keyframes or pick its own milliseconds; it names a gesture.
+
+Code: `src/motion.css` (tokens, keyframes, the `data-kd-motion` rules, reduced motion) and
+`src/lib/motion.ts` (the same durations for scripts, and the leaving picture).
+The drawer has its own description on the same clock: `docs/drawer-schema.md`.
+
+## Tokens
+
+| Token | Value | For |
+| --- | --- | --- |
+| `--kd-motion-micro` | 160ms | a small surface arriving: menu, popover, tooltip, notice |
+| `--kd-motion-micro-out` | 110ms | the same surface leaving; drag feedback |
+| `--kd-motion-item` / `--kd-motion-stagger` | 112ms / 8ms | the items of a menu following its surface (all in by 208ms) |
+| `--kd-motion-in` | 460ms | a large surface arriving: sheet, drawer, panel |
+| `--kd-motion-out` | 360ms | a large surface leaving |
+| `--kd-motion-reduced` | 80ms | every gesture under reduced motion |
+| `--kd-ease-out` | `cubic-bezier(0.22, 0.9, 0.26, 1)` | arriving |
+| `--kd-ease-in` | `cubic-bezier(0.55, 0, 0.8, 0.35)` | leaving |
+| `--kd-ease-spring` | `cubic-bezier(0.25, 1.3, 0.45, 1)` | a small surface arriving: a little past its size, then settled |
+| `--kd-float-edge` / `--kd-float-shadow` | per theme (`design.css`) | the edge of a small floating surface |
+
+The large-surface pair and the two plain curves are the values of `src/lib/songSwapMotion.ts`
+(`SONG_SWAP_*`). `src/lib/motion.ts` exports all durations as `MOTION_*_MS`; the token names are
+stable, other surfaces are aligned to them.
+
+## Gestures
+
+| `data-kd-motion` | Arrives | Leaves | Use it for |
+| --- | --- | --- | --- |
+| `unfold` | grows out of its origin, from nothing to full size, with a soft overshoot (micro, spring) | folds back into the origin (micro-out) | whatever is opened *from a point*: a menu at the pointer, a popover under its button |
+| `pop` | scales up about its own centre (micro, spring) | scales down a little and fades (micro-out) | whatever appears *in place*: a small window, a notice, a field that replaces a label |
+| `slide` | slides in from the edge it is attached to (in, ease-out) | slides back out (out, ease-in) | a sheet or panel that belongs to an edge; `data-kd-edge="right|left|top|bottom"` |
+| `fade` | opacity only (micro) | opacity only (micro-out) | what lies behind a surface: a scrim |
+
+- The origin of `unfold` is the element's `transform-origin`: set it inline, or with `--kd-origin`
+  (default: top left). `ContextMenu` computes it: the pointer or the anchor's corner as seen from
+  the menu after it was kept inside the window, so a menu lifted above its button grows upwards
+  out of the button, and one pushed away from the right edge still grows out of the pointer.
+- `data-kd-from="side"` turns `unfold` sideways: a menu opened from an item of another menu
+  (`<ContextMenu unfoldFrom="side">`).
+- Items follow: while a surface carries `data-kd-stagger="down|up"`, its direct children fade in
+  one step apart, starting from the side the surface grows out of. The first ten are staggered,
+  the rest start with the tenth, so a long menu opens as fast as a short one. `ContextMenu` sets
+  the attribute for the opening only; an item added to an open menu simply appears.
+
+## Rules
+
+- Keyframes name **both** `from` and `to`. WebKit keeps an animation with an implied keyframe on
+  the main thread.
+- Only `transform` and `opacity` move (`clip-path` where a reveal needs it). No width, height,
+  top, left, margin or shadow animation.
+- Arriving uses `animation-fill-mode: backwards` only. Nothing of the animation stays on a
+  surface that has arrived, so it is not a stacking context or a containing block afterwards.
+- Measure before the gesture, never during it, and measure the layout box (`offsetWidth`,
+  `offsetHeight`): a surface that is unfolding is scaled, and `getBoundingClientRect()` reports
+  the scaled box.
+- No script drives a frame. The gestures are CSS animations; `motion.ts` only marks the element.
+- **Leaving never delays the action.** The owner unmounts the surface and runs its action at
+  once; what folds away is a picture (`inert`, `aria-hidden`, `pointer-events: none`, no ids)
+  that cannot take the next click.
+- Reduced motion (`prefers-reduced-motion: reduce`) is handled once, in `motion.css`: every
+  gesture becomes an 80ms fade and items do not stagger. A surface adds nothing for it.
+- A surface in the flow (a notice, an inline field) has no leaving gesture: the space it held
+  closes at once. Only a fixed or absolute surface leaves as a picture.
+- The look of a small floating surface is shared too: `border: 1px solid var(--kd-float-edge)`,
+  `box-shadow: var(--kd-float-shadow)`, a radius of 6–7px, `background: var(--kd-panel-raised)`.
+  Groups inside it are set apart by spacing and a quiet label (`.kd-menu-heading`), never by a
+  rule. A theme pack restyles the edge under its own selector.
+
+## Opting in
+
+A menu or popover: render `<ContextMenu>` (`src/components/common/ContextMenu.tsx`). It already
+unfolds from its pointer or anchor, staggers its items, folds away, keeps inside the window,
+handles focus, Esc and outside clicks. A button that opens one passes `anchorTop`,
+`anchorElement` and `toggleAnchor`, so the menu hangs under the button, goes above it when there
+is no room, and a second click closes it.
+
+Anything else that is rendered while it is open — one step:
+
+```tsx
+import { motion } from "../../lib/motion";
+
+{open && <div className="my-popover" {...motion("unfold")} />}
+{open && <aside className="my-sheet" {...motion("slide", { edge: "bottom" })} />}
+```
+
+`motion()` supplies the `data-kd-motion` attribute (the arrival) and a ref that plays the
+leaving gesture when React unmounts the element. Variants:
+
+- The element needs its own `ref`: write `data-kd-motion="…"` yourself and call
+  `leaveAfterUnmount(element)` in the cleanup of the layout effect that owns it
+  (`FloatingPanelWindow` does).
+- The element stays mounted while it leaves: write `data-kd-motion="…"` and set
+  `data-kd-leaving` yourself for `leaveDuration(gesture)` milliseconds.
+- Arrival only (in-flow content, or content too live to leave as a picture — video, canvases):
+  the attribute alone (`InlineNotice`, the inline rename field, `Sheet`).
+
+## What is on it
+
+| Surface | Gesture |
+| --- | --- |
+| Every `ContextMenu`: track and result row menus, column menus, sidebar menus, the panel index, the toolbox, playback mode, lyrics menus, search suggestions, `Select` dropdowns | `unfold` + items, fold |
+| `FloatingPanelWindow` | `pop`, both ways |
+| The QR sign-in dialog of an account (`AccountRow`) | backdrop `fade` both ways, dialog `pop` |
+| `Sheet` (phones; the portrait folder picker from the bottom) | `slide` in from its edge, scrim `fade`; closes at once |
+| `InlineNotice`; the sidebar's new-folder row and rename field | `pop` in |
+| Sidebar drag feedback (drop tint, insertion mark, lifted root) | micro-out clock, in `FolderTree.css` |
+
+Not on it by design: the drawer, 曲目信息, the floating media window and the search bar keep
+their own choreography on the same clock. Tooltips are the system's (`title`).

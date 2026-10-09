@@ -5,6 +5,7 @@ import { Select } from "../common/Select";
 import { FolderOpen, LoaderCircle, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
+import { motion } from "../../lib/motion";
 import { useAppStore } from "../../stores/appStore";
 import type {
   Account,
@@ -986,8 +987,8 @@ export function AccountRow({
       )}
     </div>
     {qrInApp && qrOpen && createPortal(
-      <div className="kd-login-qr-backdrop" onClick={() => setQrOpen(false)}>
-        <div className="kd-login-qr-dialog" role="dialog" aria-modal="true" aria-label={`${account.label}扫码登录`}
+      <div className="kd-login-qr-backdrop" {...motion("fade")} onClick={() => setQrOpen(false)}>
+        <div className="kd-login-qr-dialog" data-kd-motion="pop" role="dialog" aria-modal="true" aria-label={`${account.label}扫码登录`}
           onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
           <header>
             <strong>{account.label}扫码登录</strong>

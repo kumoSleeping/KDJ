@@ -1,0 +1,191 @@
+/* ============================================================
+ * The motion schema: one clock, three curves and five gestures for every surface that comes
+ * and goes (menus, popovers, toasts, sheets, small windows). Rules: docs/motion-schema.md.
+ *
+ * A surface opts in with `data-kd-motion="<gesture>"`; it leaves with `data-kd-leaving` on the
+ * same element (src/lib/motion.ts sets it on a surface React has let go of).
+ *
+ * Every keyframe block names both ends: WebKit keeps an animation with an implied keyframe on
+ * the main thread. Only transform and opacity move.
+ * ========================================================== */
+:root {
+  /* Small surfaces: a menu, a popover, a toast, a tooltip. */
+  --kd-motion-micro: 160ms;
+  --kd-motion-micro-out: 110ms;
+  /* Items of a menu follow its surface: each one this much later, the last by 208ms. */
+  --kd-motion-item: 112ms;
+  --kd-motion-stagger: 8ms;
+  /* Large surfaces: a sheet, a drawer, a panel. The same clock as src/lib/songSwapMotion.ts. */
+  --kd-motion-in: 460ms;
+  --kd-motion-out: 360ms;
+  /* Reduced motion: every gesture becomes this fade. */
+  --kd-motion-reduced: 80ms;
+
+  --kd-ease-out: cubic-bezier(0.22, 0.9, 0.26, 1);
+  --kd-ease-in: cubic-bezier(0.55, 0, 0.8, 0.35);
+  /* Arrives a little past its size and settles: about 3% of the distance travelled. */
+  --kd-ease-spring: cubic-bezier(0.25, 1.3, 0.45, 1);
+}
+
+/* ---------- Gestures ---------- */
+/* unfold: out of the point it belongs to (`--kd-origin`, the corner at the pointer or anchor). */
+@keyframes kd-motion-unfold {
+  from { opacity: 0; transform: scale(0.8, 0.45); }
+  to { opacity: 1; transform: scale(1, 1); }
+}
+/* The same out of a side: a menu opened from an item of another menu. */
+@keyframes kd-motion-unfold-side {
+  from { opacity: 0; transform: scale(0.45, 0.8); }
+  to { opacity: 1; transform: scale(1, 1); }
+}
+@keyframes kd-motion-fold {
+  from { opacity: 1; transform: scale(1, 1); }
+  to { opacity: 0; transform: scale(0.94, 0.78); }
+}
+@keyframes kd-motion-fold-side {
+  from { opacity: 1; transform: scale(1, 1); }
+  to { opacity: 0; transform: scale(0.78, 0.94); }
+}
+/* pop: in place, about its own centre. A window, a notice, a row that appears among others. */
+@keyframes kd-motion-pop {
+  from { opacity: 0; transform: scale(0.94, 0.94); }
+  to { opacity: 1; transform: scale(1, 1); }
+}
+@keyframes kd-motion-unpop {
+  from { opacity: 1; transform: scale(1, 1); }
+  to { opacity: 0; transform: scale(0.96, 0.96); }
+}
+/* slide: a sheet from the edge it is attached to. */
+@keyframes kd-motion-slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes kd-motion-slide-out-right {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+@keyframes kd-motion-slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@keyframes kd-motion-slide-out-left {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+@keyframes kd-motion-slide-in-bottom {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes kd-motion-slide-out-bottom {
+  from { transform: translateY(0); }
+  to { transform: translateY(100%); }
+}
+@keyframes kd-motion-slide-in-top {
+  from { transform: translateY(-100%); }
+  to { transform: translateY(0); }
+}
+@keyframes kd-motion-slide-out-top {
+  from { transform: translateY(0); }
+  to { transform: translateY(-100%); }
+}
+/* fade: what lies behind a surface (a scrim), and every gesture under reduced motion. */
+@keyframes kd-motion-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes kd-motion-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+/* The items of an unfolding menu, from the side the menu grows out of. */
+@keyframes kd-motion-item-down {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes kd-motion-item-up {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------- Arriving ---------- */
+/* `backwards` only: once a surface has arrived nothing of the animation stays on it, so it is
+   not a stacking context or a containing block for what it opens later. */
+[data-kd-motion="unfold"] {
+  transform-origin: var(--kd-origin, 0 0);
+  animation: kd-motion-unfold var(--kd-motion-micro) var(--kd-ease-spring) backwards;
+}
+[data-kd-motion="unfold"][data-kd-from="side"] {
+  animation-name: kd-motion-unfold-side;
+}
+[data-kd-motion="pop"] {
+  animation: kd-motion-pop var(--kd-motion-micro) var(--kd-ease-spring) backwards;
+}
+[data-kd-motion="slide"] {
+  animation: kd-motion-slide-in-right var(--kd-motion-in) var(--kd-ease-out) backwards;
+}
+[data-kd-motion="slide"][data-kd-edge="left"] { animation-name: kd-motion-slide-in-left; }
+[data-kd-motion="slide"][data-kd-edge="bottom"] { animation-name: kd-motion-slide-in-bottom; }
+[data-kd-motion="slide"][data-kd-edge="top"] { animation-name: kd-motion-slide-in-top; }
+[data-kd-motion="fade"] {
+  animation: kd-motion-fade-in var(--kd-motion-micro) var(--kd-ease-out) backwards;
+}
+
+/* ---------- Leaving ---------- */
+/* A leaving surface is a picture of itself: it takes no pointer and holds its last frame until
+   it is removed. */
+[data-kd-leaving] {
+  pointer-events: none !important;
+}
+[data-kd-motion="unfold"][data-kd-leaving] {
+  animation: kd-motion-fold var(--kd-motion-micro-out) var(--kd-ease-in) forwards;
+}
+[data-kd-motion="unfold"][data-kd-from="side"][data-kd-leaving] {
+  animation-name: kd-motion-fold-side;
+}
+[data-kd-motion="pop"][data-kd-leaving] {
+  animation: kd-motion-unpop var(--kd-motion-micro-out) var(--kd-ease-in) forwards;
+}
+[data-kd-motion="slide"][data-kd-leaving] {
+  animation: kd-motion-slide-out-right var(--kd-motion-out) var(--kd-ease-in) forwards;
+}
+[data-kd-motion="slide"][data-kd-edge="left"][data-kd-leaving] { animation-name: kd-motion-slide-out-left; }
+[data-kd-motion="slide"][data-kd-edge="bottom"][data-kd-leaving] { animation-name: kd-motion-slide-out-bottom; }
+[data-kd-motion="slide"][data-kd-edge="top"][data-kd-leaving] { animation-name: kd-motion-slide-out-top; }
+[data-kd-motion="fade"][data-kd-leaving] {
+  animation: kd-motion-fade-out var(--kd-motion-micro-out) var(--kd-ease-in) forwards;
+}
+
+/* ---------- Items following their menu ---------- */
+/* `data-kd-stagger` is on the surface only while it opens (src/lib/motion.ts takes it off), so
+   an item added to an open menu simply appears. The first ten items start one step apart;
+   every later one starts with the tenth: a long menu takes no longer than a short one. */
+[data-kd-stagger] > * {
+  --kd-motion-i: 10;
+  animation: kd-motion-item-down var(--kd-motion-item) var(--kd-ease-out) backwards;
+  animation-delay: calc(16ms + var(--kd-motion-i) * var(--kd-motion-stagger));
+}
+[data-kd-stagger="up"] > * { animation-name: kd-motion-item-up; }
+[data-kd-stagger="down"] > :nth-child(1), [data-kd-stagger="up"] > :nth-last-child(1) { --kd-motion-i: 0; }
+[data-kd-stagger="down"] > :nth-child(2), [data-kd-stagger="up"] > :nth-last-child(2) { --kd-motion-i: 1; }
+[data-kd-stagger="down"] > :nth-child(3), [data-kd-stagger="up"] > :nth-last-child(3) { --kd-motion-i: 2; }
+[data-kd-stagger="down"] > :nth-child(4), [data-kd-stagger="up"] > :nth-last-child(4) { --kd-motion-i: 3; }
+[data-kd-stagger="down"] > :nth-child(5), [data-kd-stagger="up"] > :nth-last-child(5) { --kd-motion-i: 4; }
+[data-kd-stagger="down"] > :nth-child(6), [data-kd-stagger="up"] > :nth-last-child(6) { --kd-motion-i: 5; }
+[data-kd-stagger="down"] > :nth-child(7), [data-kd-stagger="up"] > :nth-last-child(7) { --kd-motion-i: 6; }
+[data-kd-stagger="down"] > :nth-child(8), [data-kd-stagger="up"] > :nth-last-child(8) { --kd-motion-i: 7; }
+[data-kd-stagger="down"] > :nth-child(9), [data-kd-stagger="up"] > :nth-last-child(9) { --kd-motion-i: 8; }
+[data-kd-stagger="down"] > :nth-child(10), [data-kd-stagger="up"] > :nth-last-child(10) { --kd-motion-i: 9; }
+[data-kd-leaving][data-kd-stagger] > * { animation: none; }
+
+/* ---------- Reduced motion: nothing travels, everything is a short fade ---------- */
+@media (prefers-reduced-motion: reduce) {
+  [data-kd-motion] {
+    animation: kd-motion-fade-in var(--kd-motion-reduced) linear backwards !important;
+  }
+  [data-kd-motion][data-kd-leaving] {
+    animation: kd-motion-fade-out var(--kd-motion-reduced) linear forwards !important;
+  }
+  [data-kd-stagger] > * {
+    animation: none !important;
+  }
+}
