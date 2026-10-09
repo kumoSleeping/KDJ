@@ -43,7 +43,7 @@
 .kd-title-tabs-list > button > span { display: inline-block; }
 .kd-title-tabs-list > button:hover { color: var(--kd-text); }
 .kd-title-tabs-list > button[aria-selected="true"] {
-  color: var(--kd-theme);
+  color: var(--kd-text);
   font-size: 1.4rem;
   font-weight: 700;
 }
@@ -80,7 +80,7 @@
   cursor: pointer;
 }
 .kd-title-tabs-tools > button:hover:not(:disabled) { color: var(--kd-text); }
-.kd-title-tabs-tools > button[aria-pressed="true"] { color: var(--kd-theme); }
+.kd-title-tabs-tools > button[aria-pressed="true"] { color: var(--kd-text); }
 .kd-title-tabs-tools > button:disabled { opacity: 0.4; cursor: default; }
 @media (prefers-reduced-motion: reduce) {
   .kd-title-tabs-list > button { transition: none; }

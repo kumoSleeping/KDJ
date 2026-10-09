@@ -1,22 +1,19 @@
-/* The drawer is one surface in two parts. Its head hangs from the top chrome at the right of
-   the search and is always there; the sheet rolls down from the head's lower edge over the
-   right of the list. Both are as wide as --kd-drawer-w and share their left edge. */
+/* The drawer is a panel that floats over the right of the list. Its entries are icons at the
+   right end of the search row; the panel comes down from under that row and rests free of every
+   edge, the way a task bubble rises from the player bar. It is the list's own colour: its edge
+   and its shadow are what set it apart. */
 :root {
   --kd-drawer-head-h: 3.5rem;
   --kd-drawer-radius: 12px;
-  /* The rolled-up head: its icons and no more. */
+  --kd-drawer-gap: 10px;
+  /* The entries beside the search: its icons and no more. */
   --kd-drawer-lip-w: 7.5rem;
 }
-/* On whole pixels at any interface font size, so head and sheet meet without a blended row. */
+/* On whole pixels at any interface font size. */
 @supports (width: round(1px, 1px)) {
   :root { --kd-drawer-head-h: round(3.5rem, 1px); }
 }
 .kd-drawer-host {
-  /* The drawer's one mark against the list: a surface a shade off the panel's. */
-  --kd-drawer-face: color-mix(in srgb, var(--kd-text) 5%, var(--kd-panel));
-  /* How far the sheet reaches up behind the head: it fills the head's rounded corner, and a
-     pixel more so that the face always overlaps it. */
-  --kd-drawer-tuck: calc(var(--kd-drawer-radius) + 1px);
   position: absolute;
   z-index: 30;
   top: 0;
@@ -26,249 +23,120 @@
   pointer-events: none;
   container: kd-drawer / inline-size;
 }
-:root[data-theme="light"] .kd-drawer-host { --kd-drawer-face: color-mix(in srgb, var(--kd-text) 3.5%, var(--kd-panel)); }
 
-/* —— The head ——
-   Three layers: the lip is the head's flat block under the sheets, the sheets pass over it,
-   and the face on top holds what is written. The whole drawer is flat: it is told from the
-   list by its tone alone, with no shadow, and the block has one rounded free corner. */
-.kd-drawer-lip,
-.kd-drawer-head {
+/* —— The entries —— */
+.kd-drawer-launcher {
   position: absolute;
   top: 0;
   right: 0;
-  left: 0;
-  height: var(--kd-drawer-head-h);
-  border-bottom-left-radius: var(--kd-drawer-radius);
-  background: var(--kd-drawer-face);
-}
-.kd-drawer-lip { z-index: 0; }
-.kd-drawer-head {
-  z-index: 2;
-  display: flex;
-  align-items: stretch;
-  overflow: hidden;
-  color: var(--kd-text);
-  pointer-events: auto;
-}
-/* Rolled up, the head is only its icons: a small block at the right end of the row. It is cut
-   from the full-width head rather than resized, so opening widens it without laying anything
-   out, and what is cut away takes no clicks from the search beneath it. */
-.kd-drawer-lip,
-.kd-drawer-head {
-  --kd-drawer-cut: max(0px, 100% - var(--kd-drawer-lip-w));
-  clip-path: inset(0 0 0 var(--kd-drawer-cut) round 0 0 0 var(--kd-drawer-radius));
-  transition: clip-path 320ms cubic-bezier(0.22, 0.9, 0.26, 1);
-}
-.kd-drawer-host:has(.kd-drawer) :is(.kd-drawer-lip, .kd-drawer-head) { --kd-drawer-cut: 0px; }
-
-/* Rolled up: the apps that are opened by hand, written like the quiet words of a title. */
-.kd-drawer-launcher {
-  position: absolute;
-  inset: 0 0 0 auto;
   box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-evenly;
   width: var(--kd-drawer-lip-w);
   max-width: 100%;
+  height: var(--kd-drawer-head-h);
   padding: 0 0.5rem;
-  animation: kd-drawer-word-up 420ms cubic-bezier(0.22, 0.9, 0.26, 1) 120ms both;
+  pointer-events: auto;
 }
-.kd-drawer-host[data-open] .kd-drawer-launcher {
-  pointer-events: none;
-  animation: kd-drawer-word-sink 160ms cubic-bezier(0.55, 0, 0.8, 0.35) both;
-}
-/* Nothing has been opened or closed yet: the head is simply there, as the app starts. */
-.kd-drawer-host:not([data-moved]) .kd-drawer-launcher { animation: none; }
-.kd-drawer-host[data-open]:not([data-moved]) .kd-drawer-launcher { opacity: 0; }
 .kd-drawer-entry {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  flex: none;
-  margin: 0;
-  padding: 0.25rem 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: 1rem;
-  font-weight: 600;
-  line-height: 1.25;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color 160ms ease;
-}
-.kd-drawer-entry > svg { flex: none; }
-.kd-drawer-entry:hover { color: var(--kd-text); }
-.kd-drawer-entry[aria-pressed="true"] { color: var(--kd-theme); }
-.kd-drawer-entry:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text)); outline-offset: 2px; }
-/* How many tasks are running in an app that is put away: a small number, not a badge. */
-.kd-drawer-entry-count {
-  color: var(--kd-text);
-  font-size: var(--kd-size-xs, 0.6875rem);
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-}
-
-/* Open: the app's title row is the head. A replaced title slides on down as the new one comes
-   down after it; a closed one goes back up with the sheet. */
-.kd-drawer-titles {
-  position: relative;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.kd-drawer-title {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  /* It starts as the words it replaces are nearly gone, so the two are not read together. */
-  animation: kd-drawer-word-down 380ms cubic-bezier(0.22, 0.9, 0.26, 1) 140ms both;
-}
-.kd-drawer-title[data-leaving] {
-  pointer-events: none;
-  animation: kd-drawer-word-sink 160ms cubic-bezier(0.55, 0, 0.8, 0.35) both;
-}
-.kd-drawer-host:not([data-open]) .kd-drawer-title[data-leaving] { animation-name: kd-drawer-word-lift; }
-.kd-drawer-title > .kd-title-tabs {
-  flex: 1 1 auto;
-  align-items: center;
-  padding: 0 0 0 1.1rem;
-}
-.kd-drawer-title .kd-title-tabs-tools { min-height: 0; }
-.kd-drawer-tail {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-  padding: 0 0.6rem 0 0.35rem;
-  color: var(--kd-muted);
-  animation: kd-drawer-fade-in 300ms ease-out 140ms both;
-}
-.kd-drawer-tail[data-leaving] {
-  pointer-events: none;
-  animation: kd-drawer-fade-out 200ms ease-in both;
-}
-.kd-drawer-tail > button {
   display: inline-grid;
   position: relative;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin: 0;
   padding: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;
   box-shadow: none;
-  color: inherit;
+  color: var(--kd-muted);
   cursor: pointer;
   transition: color 160ms ease;
 }
-.kd-drawer-tail > button:hover { color: var(--kd-text); }
-.kd-drawer-tail > .kd-drawer-entry[aria-pressed="true"] { color: var(--kd-theme); }
-.kd-drawer-tail > .kd-drawer-entry > .kd-drawer-entry-count {
+.kd-drawer-entry > svg { flex: none; }
+.kd-drawer-entry:hover { color: var(--kd-text); }
+.kd-drawer-entry[aria-pressed="true"] { color: var(--kd-text); }
+.kd-drawer-entry:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text)); outline-offset: 2px; }
+/* How many tasks are running in an app that is put away: a small number, not a badge. */
+.kd-drawer-entry-count {
   position: absolute;
   top: 1px;
-  right: 0;
+  right: -1px;
+  color: var(--kd-text);
   font-size: 0.625rem;
-}
-.kd-drawer-tail > .kd-drawer-rollup { margin-left: 0.3rem; }
-/* A narrow drawer keeps its title and the roll-up; the other apps are a roll-up away. */
-@container kd-drawer (max-width: 21rem) {
-  .kd-drawer-tail > .kd-drawer-entry { display: none; }
-}
-@keyframes kd-drawer-word-down {
-  from { opacity: 0; transform: translateY(-0.7rem); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes kd-drawer-word-up {
-  from { opacity: 0; transform: translateY(0.6rem); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes kd-drawer-word-sink {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(0.7rem); }
-}
-@keyframes kd-drawer-word-lift {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(-0.7rem); }
-}
-@keyframes kd-drawer-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes kd-drawer-fade-out {
-  from { opacity: 1; }
-  to { opacity: 0; }
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
-/* —— The sheet ——
-   The sheets start behind the head's lower edge and are clipped above it, so a sheet appears
-   from the head. How far one comes down is measured from that edge to the bottom of the list. */
+/* —— The panel ——
+   The frame below the search row clips only what is above it, so a panel appears from behind
+   the row's lower edge and its shadow is free on the other three sides. */
 .kd-drawer-sheets {
   position: absolute;
-  z-index: 1;
-  top: calc(var(--kd-drawer-head-h) - var(--kd-drawer-tuck));
+  top: var(--kd-drawer-head-h);
   right: 0;
   bottom: 0;
   left: 0;
-  clip-path: inset(0 0 -4rem -4rem);
+  clip-path: inset(0 -1rem -4rem -4rem);
 }
 .kd-drawer {
+  --kd-drawer-room: calc(100% - 2 * var(--kd-drawer-gap));
   position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
+  top: var(--kd-drawer-gap);
+  right: var(--kd-drawer-gap);
+  left: var(--kd-drawer-gap);
   box-sizing: border-box;
-  /* Never lower than the top of 曲目信息 when that is up (see --kd-info-lift). */
-  height: min(calc(var(--kd-drawer-tuck) + (100% - var(--kd-drawer-tuck)) * var(--kd-drawer-extent)), calc(100% - var(--kd-info-lift, 0px)));
-  min-height: min(12rem, 100%);
-  padding-top: var(--kd-drawer-tuck);
-  border-bottom-left-radius: var(--kd-drawer-radius);
-  background: var(--kd-drawer-face);
+  display: flex;
+  flex-direction: column;
+  /* Never lower than the top of a task bubble that is kept up (see --kd-info-lift). */
+  height: min(calc(var(--kd-drawer-room) * var(--kd-drawer-extent)), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
+  min-height: min(12rem, var(--kd-drawer-room));
+  border: 1px solid var(--kd-float-edge, var(--kd-line));
+  border-radius: var(--kd-drawer-radius);
+  background: var(--kd-panel);
+  box-shadow: var(--kd-float-shadow);
   color: var(--kd-text);
   overflow: hidden;
   pointer-events: auto;
-  /* One move: fast out of the head, slowing all the way, and it stops where it ends. */
+  /* One move: fast out from under the row, slowing all the way, and it stops where it ends. */
   animation: kd-drawer-down 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-/* At rest the sheet is an ordinary box again, not a layer kept for moving. Only then may its
-   height follow what it holds (`content`); during the roll-down nothing is laid out again. */
+/* At rest the panel is an ordinary box again, not a layer kept for moving. Only then may its
+   height follow what it holds (`content`); while it comes down nothing is laid out again. */
 .kd-drawer[data-settled] {
   animation: none;
   transition: height 380ms cubic-bezier(0.22, 0.9, 0.26, 1);
 }
 .kd-drawer[data-extent="two-thirds"] { --kd-drawer-extent: 0.66667; }
-.kd-drawer[data-extent="full"] { --kd-drawer-extent: 1; border-bottom-left-radius: 0; }
+.kd-drawer[data-extent="full"] { --kd-drawer-extent: 1; }
 .kd-drawer[data-leaving] { animation: kd-drawer-up 320ms cubic-bezier(0.55, 0, 0.8, 0.35) both; }
-/* The top stays behind the head the whole time; only the bottom edge is seen to move. */
 @keyframes kd-drawer-down {
-  from { transform: translateY(-100%); }
+  from { transform: translateY(calc(-100% - var(--kd-drawer-gap) - 8px)); }
   to { transform: translateY(0); }
 }
 @keyframes kd-drawer-up {
   from { transform: translateY(0); }
-  to { transform: translateY(-100%); }
+  to { transform: translateY(calc(-100% - var(--kd-drawer-gap) - 8px)); }
 }
-/* What is on the sheet rides with it: no second layer moves or fades over the sheet. A body
-   that is built a frame after its sheet (see DrawerLayer) only fades in, briefly. */
+@keyframes kd-drawer-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.kd-drawer > .kd-title-tabs { align-items: center; padding: 0.8rem 0.6rem 0.5rem 1.1rem; }
 .kd-drawer-body {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  box-sizing: border-box;
-  height: 100%;
   min-width: 0;
   min-height: 0;
-  padding-top: 0.35rem;
   overflow: hidden;
 }
+/* A heavy body is built a frame after its panel and fades in, so it never holds up the move. */
 .kd-drawer-body[data-late]:not(:empty) { animation: kd-drawer-fade-in 180ms ease-out; }
-.kd-drawer[data-leaving] > .kd-drawer-body { animation: none; }
 .kd-drawer-resize {
   position: absolute;
   z-index: 1;
@@ -281,12 +149,20 @@
   touch-action: none;
 }
 @media (prefers-reduced-motion: reduce) {
-  .kd-drawer, .kd-drawer[data-leaving] { animation-duration: 1ms; transition: none; }
-  .kd-drawer-body[data-late]:not(:empty), .kd-drawer-launcher, .kd-drawer-title, .kd-drawer-tail { animation: none; }
-  .kd-drawer-host[data-open] .kd-drawer-launcher,
-  .kd-drawer-title[data-leaving],
-  .kd-drawer-tail[data-leaving] { animation: none; opacity: 0; }
+  .kd-drawer, .kd-drawer[data-leaving] { animation-duration: 1ms; }
+  .kd-drawer[data-settled] { transition: none; }
+  .kd-drawer-body[data-late]:not(:empty) { animation: none; }
 }
+
+/* Sakura98: the panel is a 98 window face, square and bevelled, with the pack's hard shadow.
+   Kept here so it does not depend on the installed copy of the pack. */
+:root[data-theme-pack="sakulaptop98"] .kd-drawer {
+  border: 0;
+  border-radius: 0;
+  background: var(--s98-face-hi, var(--kd-panel));
+  box-shadow: var(--s98-raised), 4px 6px 0 -1px rgb(120 40 70 / 0.22);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs { padding: 0.75rem 0.6rem 0.45rem 1rem; }
 
 /* ---- What the apps put on the sheet. The sheet is the only surface: a body brings no frame,
    no head and no background of its own. ---- */
@@ -312,33 +188,6 @@
 :root:not([data-theme-pack]) .kd-drawer-body .kd-viz-inspector { background: transparent; }
 .kd-drawer-body > .kd-meta-editor { flex: 1 1 auto; min-height: 0; }
 
-/* Sakura98: the drawer is a 98 window face, square and bevelled, with the pack's hard shadow.
-   Head and sheet share one frame: the head's bevel has no lower edge and the sheet's no upper
-   one, so nothing is drawn where they meet. Kept here so it does not depend on the installed
-   copy of the pack. */
-:root[data-theme-pack="sakulaptop98"] .kd-drawer-host {
-  --kd-drawer-face: var(--s98-face-hi, var(--kd-panel));
-  --kd-drawer-radius: 0px;
-  --kd-drawer-bevel: 2px;
-  --kd-drawer-tuck: calc(var(--kd-drawer-bevel) + 1px);
-}
-:root[data-theme-pack="sakulaptop98"] .kd-drawer-lip {
-  filter: none;
-  box-shadow: var(--s98-raised), 4px 6px 0 -1px rgb(120 40 70 / 0.22);
-}
-:root[data-theme-pack="sakulaptop98"] .kd-drawer-lip::before { content: none; }
-/* The lip's lower bevel shows under the face while rolled up; an open sheet covers it. */
-:root[data-theme-pack="sakulaptop98"] .kd-drawer-head {
-  height: calc(var(--kd-drawer-head-h) - var(--kd-drawer-bevel));
-  box-shadow: inset 1px 1px var(--s98-white), inset 2px 2px var(--s98-face-hi),
-    inset -1px 0 var(--s98-frame), inset -2px 0 var(--s98-shadow);
-}
-:root[data-theme-pack="sakulaptop98"] .kd-drawer {
-  box-shadow: inset 1px 0 var(--s98-white), inset 2px 0 var(--s98-face-hi),
-    inset -1px -1px var(--s98-frame), inset -2px -2px var(--s98-shadow), 4px 6px 0 -1px rgb(120 40 70 / 0.22);
-}
-:root[data-theme-pack="sakulaptop98"] .kd-drawer-sheets { clip-path: inset(0 0 -1rem -1rem); }
-
 /* No rules between the groups of a drawer: spacing and the group titles separate them. */
 .kd-drawer .kd-drawer-body :is(.kd-download-prefs, .kd-download-defaults, .kd-meta-editor-foot, .kd-viz-bar, .kd-viz-group) {
   border-top: 0;
@@ -346,10 +195,6 @@
 }
 .kd-drawer .kd-drawer-body .kd-viz-group + .kd-viz-group { margin-top: 0.4rem; }
 :root:not([data-theme-pack]) .kd-drawer .kd-drawer-body .kd-panel-head { border-bottom: 0; }
-
-@media (prefers-reduced-motion: reduce) {
-  .kd-drawer-lip, .kd-drawer-head { transition: none; }
-}
 
 /* The sheet is the only surface: a list or a row on it does not paint the panel tone over it.
    Kept as weak as the rules it replaces, so a row's own states (running, hovered, just added)

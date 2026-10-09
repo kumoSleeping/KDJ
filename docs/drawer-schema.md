@@ -4,17 +4,18 @@ On a wide window everything that used to take the right column — lyrics, downl
 settings, the visualizer configuration, the Meta editor, search tips, duplicate analysis, a
 network-video preview — is an **app of one drawer**.
 
-The drawer has two parts that are one surface:
+The drawer is a **floating panel** with two parts:
 
-- **The head** hangs from the top chrome at the right of the aggregate search and is always there.
-  The top row is `[search — the remaining width] [head — as wide as the drawer]`. Rolled up, the
-  head is a small lip that lists the apps opened by hand (下载, 歌词, 设置 — `DrawerEntry`); while an
-  app is open it carries that app's title row (title or page tabs, caption, tools), the entries as
-  small icons, and the roll-up button.
-- **The sheet** rolls down from the head's lower edge over the right of the list like a blind. It
-  covers the list; it never takes a column from it, so the list does not reflow while the drawer
-  moves. Head and sheet share one width (`--kd-drawer-w`, the dragged `--kd-right` up to 45 % of
-  the list's column) and one left edge; nothing is drawn where they meet.
+- **The entries** are icons at the right end of the aggregate search's row and are always there
+  and always usable (下载, 歌词, 设置 — `DrawerEntry`; icons only, no words). The open app's icon
+  is written in full-strength text colour, the others muted.
+- **The panel** comes down from under that row over the right of the list and rests free of
+  every edge, with a gap all round, rounded corners, a hairline edge and a soft shadow — the same
+  floating surface as a task bubble or a menu (`--kd-float-edge`, `--kd-float-shadow`). It is the
+  list's own colour: never give it a tone of its own. It carries the app's title row (title or
+  page tabs, caption, tools, the roll-up button) and its body. It covers the list; it never takes
+  a column from it, so the list does not reflow while the drawer moves. Its width is
+  `--kd-drawer-w` (the dragged `--kd-right` up to 45 % of the list's column).
 
 Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`,
 `SlidePages.tsx`, `useDrawerOrder.ts`) and `src/components/workspace/drawerApps.tsx`
@@ -28,14 +29,14 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   app that is wanted again is asked for again from its own entry.
 - **An app never draws its own shell.** No head, no close button, no frame, no background, no
   entrance or exit motion. It supplies a `DrawerSpec` and a body; `DrawerHost` draws the rest.
-- **Opened from the head or from elsewhere.** An app that people open by hand has an entry in the
-  head (`useDrawerEntries`): clicking it opens the app, clicking the open app's entry closes it
-  (as do the roll-up button and Esc), and the open app's entry is written in the theme colour. An
-  app that is only opened from elsewhere — a row's menu, a button on the picture — has no entry
-  and uses the head the same way while it is open. Do not add a second button for an app that has
+- **Opened from an entry or from elsewhere.** An app that people open by hand has an entry beside
+  the search (`useDrawerEntries`): clicking it opens the app, clicking the open app's entry closes
+  it (as do the roll-up button and Esc). An app that is only opened from elsewhere — a row's
+  menu, a button on the picture — has no entry and comes down as the same panel. Do not add a second button for an app that has
   an entry (the window chrome keeps 下载 and 设置 only where there is no drawer, on a phone).
-- **How far it comes down** is the spec's `extent`, measured from the head's lower edge to the
-  bottom of the list (never lower than a pinned panel above the player bar, `--kd-info-lift`):
+- **How far it comes down** is the spec's `extent`, measured from under the search row to the
+  bottom of the list, less the gap (never lower than a task bubble that is kept up,
+  `--kd-info-lift`):
   - `two-thirds` — always two thirds of the way (lyrics);
   - `content` — two thirds while everything fits, all the way down once it does not (downloads,
     the Meta editor, tips);
@@ -45,15 +46,15 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   paint; any other body is built one frame after its sheet, so a heavy app does not hold up the
   frame the roll-down starts from.
 - **Pages are the title.** An app with several pages lists them in `pages`; the drawer writes them
-  as its title in the head (`TitleTabs`: the page in view at title size in the theme colour, the others
+  as its title (`TitleTabs`: the page in view at title size in full-strength text colour, the others
   smaller and quiet beside it). The body wraps the part that changes in
   `<SlidePages page={…} order={…}>`, which slides the old picture out and the new one in from the
   side its title lies on. Pages need not stay mounted.
 - **No divider lines** inside a drawer (see AGENTS.md): groups are separated by spacing and type.
-- **Motion.** The sheet comes down in one decelerating move and stops; it rolls up accelerating.
-  Only `transform` and `opacity` move: what is on the sheet rides with it, the title in the head
-  slides out as the next one slides in, and the sheet's height follows its content only once it is
-  at rest. Keep it that way — no bounce, no second layer fading over a moving sheet.
+- **Motion.** The panel comes down from behind the search row's lower edge in one decelerating
+  move and stops; it goes back up accelerating. Only `transform` moves: what is on the panel rides
+  with it, and its height follows its content only once it is at rest. Keep it that way — no
+  bounce, no second layer fading over a moving panel.
 - **Toolbars under the sheet.** The sheet passes over the right end of the list's toolbar.
   `DrawerHost` gives each toolbar named by its `clear` selector the covered width as end padding
   (`--kd-drawer-cover`) and slides the tools to their new place; the table is never laid out again.
@@ -101,7 +102,7 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
    }
    ```
 
-   Keep the list short: the head is a lip, not a toolbar.
+   Keep the list short: the entries are a few icons, not a toolbar.
 
 ## Reusing the pieces elsewhere
 

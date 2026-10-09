@@ -26,20 +26,20 @@
 .kd-task {
   /* From its place down to below the bar's edge, shadow included. */
   --kd-task-drop: calc(100% + var(--kd-task-gap) + var(--kd-task-lift, 0px) + 20px);
-  --kd-task-surface: color-mix(in srgb, var(--kd-text) 6%, var(--kd-panel));
+  /* The list's own colour: a floating surface is set apart by its edge and shadow, the same
+     ones the drawer and the menus use, not by a tone of its own. */
+  --kd-task-surface: var(--kd-panel);
   position: relative;
+  box-sizing: border-box;
   overflow: hidden;
+  border: 1px solid var(--kd-float-edge, var(--kd-line));
   border-radius: 12px;
   background: var(--kd-task-surface);
-  box-shadow: 0 14px 34px -10px rgb(0 0 0 / 0.7), 0 2px 10px -2px rgb(0 0 0 / 0.5);
+  box-shadow: var(--kd-float-shadow);
   color: var(--kd-text);
   font: var(--kd-size-sm)/1.35 var(--kd-font);
   pointer-events: auto;
   will-change: transform;
-}
-:root[data-theme="light"] .kd-task {
-  --kd-task-surface: var(--kd-panel);
-  box-shadow: 0 12px 30px -12px rgb(30 34 44 / 0.3), 0 2px 8px -2px rgb(30 34 44 / 0.14);
 }
 /* 460 ms up and 360 ms down: the song-change clock (src/lib/songSwapMotion.ts), which the host
    passes in. Both ends of every keyframe are written out: WebKit keeps an animation with an

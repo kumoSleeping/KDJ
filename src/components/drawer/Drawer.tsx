@@ -38,7 +38,7 @@ function needsFull(body: HTMLElement, full: boolean, spare: number): boolean {
 function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
   spec: DrawerSpec;
   leaving: boolean;
-  /** Names the body for the page tabs in the head. */
+  /** Names the body for the page tabs in the title row. */
   panelId: string;
   onGone(): void;
   onResizeStart?(event: PointerEvent<HTMLDivElement>): void;
@@ -104,6 +104,14 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
       else setSettled(true);
     }}>
     <DrawerContext.Provider value={spec.id}>
+      <TitleTabs label={spec.title} title={spec.title} tabs={spec.pages} value={spec.page}
+        onChange={leaving ? undefined : spec.onPage} panelId={spec.pages ? panelId : undefined} caption={spec.caption}>
+        {spec.tools}
+        <button type="button" className="kd-drawer-rollup" aria-label={`收起${spec.title}`} title={`收起${spec.title} · Esc`}
+          onClick={() => { spec.close(); }}>
+          <ChevronsUp size={16} aria-hidden="true" />
+        </button>
+      </TitleTabs>
       <div ref={body} className="kd-drawer-body" id={panelId} role={spec.pages ? "tabpanel" : undefined}
         data-late={spec.extent === "content" ? undefined : "true"}>{built ? spec.body : null}</div>
     </DrawerContext.Provider>
@@ -112,17 +120,15 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
   </section>;
 }
 
-/** The entries of the head, as icons: the head's whole content while it is rolled up, beside the title while a sheet is out. */
-function DrawerEntries({ entries, front, live, onAsk }: {
+/** The apps that are opened by hand, as icons at the right end of the search row. */
+function DrawerEntries({ entries, front, onAsk }: {
   entries: readonly DrawerEntry[];
   front: string | null;
-  /** Only the set that can be used names its entries, so `data-drawer-entry` finds one control. */
-  live: boolean;
   onAsk(entry: DrawerEntry): void;
 }) {
   return <>{entries.map(entry => {
     const name = entry.title ?? entry.label;
-    return <button key={entry.id} type="button" className="kd-drawer-entry" data-drawer-entry={live ? entry.id : undefined}
+    return <button key={entry.id} type="button" className="kd-drawer-entry" data-drawer-entry={entry.id}
       aria-pressed={front === entry.id} aria-label={entry.count ? `${name}，${entry.count} 项进行中` : name}
       title={name} onClick={() => onAsk(entry)}>
       {entry.icon}
@@ -180,17 +186,17 @@ function useClearToolbars(host: RefObject<HTMLDivElement | null>, selector: stri
 }
 
 /**
- * The drawer over the right of the list. Its head hangs from the top chrome beside the search
- * and is always there: rolled up it lists the apps that are opened by hand, and while an app is
- * open it carries that app's title row. The sheet rolls down from the head's lower edge, one
- * app at a time: a new app comes down over the one that was there, which rolls up beneath it
- * and is gone; nothing waits underneath to come back. The sheet covers the list instead of
+ * The drawer: a floating panel over the right of the list, one app at a time. Its entries are
+ * icons at the right end of the search row and are always there; the panel comes down from
+ * under that row and floats free of every edge, like the task bubbles that rise from the
+ * player bar. A new app comes down over the one that was there, which goes back up beneath it
+ * and is gone; nothing waits underneath to come back. The panel covers the list instead of
  * taking a column from it, so the list never reflows while the drawer moves.
  */
 export function DrawerHost({ spec, entries = [], clear, hostRef, onResizeStart }: {
   /** The app to show, described by its schema; null rolls the drawer up. */
   spec: DrawerSpec | null;
-  /** What the rolled-up head offers. */
+  /** The apps offered beside the search. */
   entries?: readonly DrawerEntry[];
   /** Toolbars inside the host's parent that the sheet passes over (a selector). */
   clear?: string;
@@ -204,10 +210,7 @@ export function DrawerHost({ spec, entries = [], clear, hostRef, onResizeStart }
   // What was shown after the last commit: the picture a replaced app leaves with.
   const last = useRef<DrawerSpec | null>(spec);
   const front = layers.find(layer => !layer.leaving);
-  // Whether anything has been opened or closed since the head appeared (it plays no motion before).
-  const [moved, setMoved] = useState(false);
   if ((spec?.id ?? null) !== (front?.id ?? null)) {
-    if (!moved) setMoved(true);
     const gone = last.current;
     const next = [
       ...layers.map(layer => layer.leaving || !gone ? layer : { ...layer, leaving: gone }).filter(layer => layer.leaving),
@@ -240,44 +243,16 @@ export function DrawerHost({ spec, entries = [], clear, hostRef, onResizeStart }
   const panel = useId();
   // The open app's entry puts it away; any other asks for its own app.
   const ask = (entry: DrawerEntry) => { if (spec?.id === entry.id) spec.close(); else entry.open(); };
-  return <div ref={setHost} className="kd-drawer-host" data-open={spec ? "true" : undefined} data-moved={moved || undefined}>
-    <div className="kd-drawer-lip" aria-hidden="true" />
+  return <div ref={setHost} className="kd-drawer-host" data-open={spec ? "true" : undefined}>
+    {entries.length ? <nav className="kd-drawer-launcher" aria-label="侧边应用">
+      <DrawerEntries entries={entries} front={spec?.id ?? null} onAsk={ask} />
+    </nav> : null}
     <div className="kd-drawer-sheets">
       {layers.map(layer => {
         const shown = layer.leaving ?? spec;
         return shown ? <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} panelId={`${panel}-${layer.key}`}
           onResizeStart={onResizeStart} onGone={() => setLayers(list => list.filter(item => item.key !== layer.key))} /> : null;
       })}
-    </div>
-    <div className="kd-drawer-head">
-      {entries.length ? <nav className="kd-drawer-launcher" aria-label="侧边应用" aria-hidden={spec ? true : undefined} inert={!!spec}>
-        <DrawerEntries entries={entries} front={null} live={!spec} onAsk={ask} />
-      </nav> : null}
-      <div className="kd-drawer-titles">
-        {layers.map(layer => {
-          const shown = layer.leaving ?? spec;
-          if (!shown) return null;
-          const gone = !!layer.leaving;
-          // A title that is leaving is only its words: the tools belong to the app that took over.
-          return <div key={layer.key} className="kd-drawer-title" data-leaving={gone || undefined}
-            aria-hidden={gone || undefined} inert={gone}>
-            <DrawerContext.Provider value={shown.id}>
-              <TitleTabs label={shown.title} title={shown.title} tabs={shown.pages} value={shown.page}
-                onChange={gone ? undefined : shown.onPage} panelId={shown.pages ? `${panel}-${layer.key}` : undefined}
-                caption={shown.caption}>
-                {gone ? null : shown.tools}
-              </TitleTabs>
-            </DrawerContext.Provider>
-          </div>;
-        })}
-      </div>
-      {layers.length ? <div className="kd-drawer-tail" data-leaving={spec ? undefined : "true"} inert={!spec}>
-        <DrawerEntries entries={entries} front={spec?.id ?? null} live={!!spec} onAsk={ask} />
-        <button type="button" className="kd-drawer-rollup" aria-label={spec ? `收起${spec.title}` : "收起"}
-          title={spec ? `收起${spec.title} · Esc` : undefined} onClick={() => { spec?.close(); }}>
-          <ChevronsUp size={16} aria-hidden="true" />
-        </button>
-      </div> : null}
     </div>
   </div>;
 }

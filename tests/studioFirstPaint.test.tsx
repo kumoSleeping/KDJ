@@ -153,8 +153,8 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     await act(async()=> { host.querySelector<HTMLElement>('[aria-label="关闭可视化配置"]')!.click(); await wait(60); });
     assert.equal(editor().track,null,'closing the column app ends the hosted controls');
     await act(async()=>dock.unmount());
-    // ---- The drawer: a head that is always there, one app at a time; the one that is replaced or
-    // closed leaves as it was.
+    // ---- The drawer: entries that are always there, one floating panel at a time; the one that
+    // is replaced or closed leaves as it was.
     const column = createRoot(host);
     const asked: string[] = [];
     const entries = [{ id:"lyrics", label:"歌词", icon:<i/>, open(){ asked.push("open lyrics"); } }];
@@ -166,15 +166,14 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     };
     const sheet = (id:string) => host.querySelector<HTMLElement>(`.kd-drawer[data-app="${id}"]`);
     const entry = () => host.querySelectorAll<HTMLElement>('[data-drawer-entry="lyrics"]');
-    const title = () => host.querySelector('.kd-drawer-head .kd-drawer-title:not([data-leaving]) .kd-title-tabs-title')?.textContent;
+    const title = () => host.querySelector('.kd-drawer:not([data-leaving]) > .kd-title-tabs .kd-title-tabs-title')?.textContent;
     await show(null);
-    assert.ok(host.querySelector('.kd-drawer-head'),'the head is there with nothing open');
+    assert.ok(host.querySelector('.kd-drawer-launcher'),'the entries are there with nothing open');
     assert.equal(host.querySelectorAll('.kd-drawer').length,0);
-    assert.ok(entry().length===1 && entry()[0].closest('.kd-drawer-launcher'),'rolled up, the head lists the apps opened by hand');
+    assert.ok(entry().length===1 && entry()[0].closest('.kd-drawer-launcher'),'the apps opened by hand are listed beside the search');
     await show('visualizer');
-    assert.equal(title(),'visualizer','the open app is named in the head');
-    assert.equal(sheet('visualizer')!.querySelector('.kd-title-tabs'),null,'the sheet has no title row of its own');
-    assert.ok(entry().length===1 && entry()[0].closest('.kd-drawer-tail'),'one live entry per app, beside the title');
+    assert.equal(title(),'visualizer','the panel carries the open app\'s title row');
+    assert.ok(entry().length===1 && entry()[0].closest('.kd-drawer-launcher'),'the entries stay where they are while a panel is out');
     await act(async()=> { entry()[0].click(); });
     assert.deepEqual(asked,['open lyrics'],'another app\'s entry asks for it');
     const probe = sheet('visualizer')!.querySelector('input')!;
@@ -184,18 +183,16 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     assert.ok(sheet('visualizer')!.querySelector('input')===probe,'and it is the same instance, not a fresh mount');
     assert.equal(sheet('lyrics')?.dataset.leaving,undefined,'the new app comes down over it');
     assert.equal(title(),'lyrics');
-    assert.equal(host.querySelector('.kd-drawer-title[data-leaving] .kd-title-tabs-title')?.textContent,'visualizer','the old title slides out');
     assert.equal(entry()[0].getAttribute('aria-pressed'),'true');
     await act(async()=> { entry()[0].click(); });
     assert.equal(asked.at(-1),'close lyrics','the open app\'s entry puts it away');
-    await act(async()=> { host.querySelector<HTMLElement>('.kd-drawer-rollup')!.click(); });
+    await act(async()=> { host.querySelector<HTMLElement>('.kd-drawer:not([data-leaving]) .kd-drawer-rollup')!.click(); });
     assert.equal(asked.filter(item => item==='close lyrics').length,2,'and so does the roll-up button');
     await act(async()=> { await wait(480); });
     assert.equal(sheet('visualizer'),null,'nothing waits underneath to come back');
-    assert.equal(host.querySelector('.kd-drawer-title[data-leaving]'),null);
     await show(null);
     assert.equal(sheet('lyrics')?.dataset.leaving,'true','a closed app rolls up');
-    assert.ok(entry()[0].closest('.kd-drawer-launcher'),'and the head offers its apps again');
+    assert.equal(entry()[0].getAttribute('aria-pressed'),'false','and its entry is no longer marked');
     await show('lyrics');
     assert.equal(host.querySelectorAll('.kd-drawer[data-app="lyrics"]:not([data-leaving])').length,1,'asked for again while leaving: it comes down again');
     await act(async()=> { await wait(480); });
