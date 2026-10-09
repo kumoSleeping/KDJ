@@ -195,6 +195,9 @@ button.kd-folder-caret:hover:not(:disabled) {
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   transition: opacity 120ms ease;
+  /* Faded out it still lies over the action it traded places with (opacity makes it a layer
+     of its own): a press on the ⋯ button must reach the button, not the hidden number. */
+  pointer-events: none;
 }
 /* 未入库的数量是"待办"而不是"已有"：加号和实墨就够，红色留给当前项。 */
 .kd-folder-count[data-pending="true"] {
