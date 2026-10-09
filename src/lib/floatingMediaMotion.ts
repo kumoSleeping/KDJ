@@ -12,7 +12,13 @@
  * ghost and one entrance at any time; a newer song restarts the wait, it never stacks.
  */
 
-import { planFloatSlide, type FloatOffset, type FloatRect, type FloatViewport } from "./floatingMediaBox";
+import {
+  FLOAT_MEDIA_CHROME_FALLBACK,
+  planFloatSlide,
+  type FloatOffset,
+  type FloatRect,
+  type FloatViewport,
+} from "./floatingMediaBox";
 import { getPlayingTrack, subscribePlayingTrack } from "./playingTrack";
 import { copyPictureFrame, prefersReducedSeekMotion } from "./seekTransition";
 import {
@@ -77,8 +83,23 @@ const PRESERVED_FOR_MS = 250;
 /** A window that arrives with a new song is not something that song has to wait for. */
 const NEWCOMER_QUIET_MS = 80;
 
-function viewport(): FloatViewport {
-  return { width: window.innerWidth, height: window.innerHeight };
+/** The app's top chrome: window controls, history and the global actions live there. */
+export function floatChromeElement(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".kd-app-chrome");
+}
+
+/**
+ * The area a floating media window may occupy: the viewport below the top chrome. The chrome is
+ * measured where it is drawn, since its height differs between platforms and theme packs.
+ */
+export function measureFloatViewport(): FloatViewport {
+  const chrome = floatChromeElement();
+  const bottom = chrome?.getBoundingClientRect().bottom;
+  return {
+    width: window.innerWidth,
+    height: window.innerHeight,
+    top: Math.round(bottom && bottom > 0 ? bottom : FLOAT_MEDIA_CHROME_FALLBACK),
+  };
 }
 
 function translate(offset: FloatOffset): string {
@@ -403,7 +424,7 @@ class FloatingMediaMotion {
       animation = element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: FADE_MS, easing: "ease-out" });
       hold = 0;
     } else {
-      const start = translate(from ?? planFloatSlide(presenter.rect, viewport()).offset);
+      const start = translate(from ?? planFloatSlide(presenter.rect, measureFloatViewport()).offset);
       const rest = translate(NO_OFFSET);
       const duration = hold + SONG_SWAP_IN_MS;
       // While it waits the window stays in its place, unseen, so its video keeps a real
@@ -430,7 +451,7 @@ class FloatingMediaMotion {
       ghost.animation = ghost.node.animate([{ opacity: 1 }, { opacity: 0 }], { duration, easing: "ease-in", fill: "forwards" });
     } else {
       const at = ghost.node.getBoundingClientRect();
-      const slide = planFloatSlide({ x: at.left, y: at.top, w: at.width, h: at.height }, viewport(), ghost.home);
+      const slide = planFloatSlide({ x: at.left, y: at.top, w: at.width, h: at.height }, measureFloatViewport(), ghost.home);
       ghost.animation = ghost.node.animate(
         [{ transform: translate(NO_OFFSET) }, { transform: translate(slide.offset) }],
         { duration, easing: SONG_SWAP_OUT_EASE, fill: "forwards" },

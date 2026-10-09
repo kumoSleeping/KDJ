@@ -7,12 +7,18 @@
  * axis the new rectangle keeps the edge of the remembered one that lies nearer to its side of
  * the viewport (ties keep left and top), then is clamped into the viewport. Opening never
  * changes what is remembered, so alternating between pictures cannot drift.
+ *
+ * The app's top chrome (window controls, history, global actions) is not part of the area the
+ * window may occupy: `FloatViewport.top` is where that area begins, and every rectangle this
+ * module returns starts below it.
  */
 
 export const FLOAT_MEDIA_STORAGE_KEY = "kdj.floatingMediaBoxV1";
 export const FLOAT_MEDIA_MIN_WIDTH = 240;
 export const FLOAT_MEDIA_MARGIN = 8;
 export const FLOAT_MEDIA_DEFAULT_WIDTH = 352;
+/** Height assumed for the top chrome while it cannot be measured (the default of --kd-chrome-top). */
+export const FLOAT_MEDIA_CHROME_FALLBACK = 36;
 
 export interface FloatRect {
   x: number;
@@ -24,6 +30,8 @@ export interface FloatRect {
 export interface FloatViewport {
   width: number;
   height: number;
+  /** Bottom of the app's top chrome, in viewport pixels. The window never rises above it. */
+  top?: number;
 }
 
 /** What the window currently shows. */
@@ -46,12 +54,24 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
+function chromeBottom(viewport: FloatViewport): number {
+  return Number.isFinite(viewport.top) ? Math.max(0, viewport.top!) : 0;
+}
+
+/** The highest place the window's top edge may take. */
+export function floatTopLimit(viewport: FloatViewport): number {
+  return chromeBottom(viewport) + FLOAT_MEDIA_MARGIN;
+}
+
 export function floatWidthLimits(
   viewport: FloatViewport,
   content: FloatContent,
 ): { minimum: number; maximum: number } {
   const availableWidth = Math.max(1, viewport.width - FLOAT_MEDIA_MARGIN * 2);
-  const availableHeight = Math.max(1, viewport.height - FLOAT_MEDIA_MARGIN * 2 - (content.extraHeight ?? 0));
+  const availableHeight = Math.max(
+    1,
+    viewport.height - chromeBottom(viewport) - FLOAT_MEDIA_MARGIN * 2 - (content.extraHeight ?? 0),
+  );
   const maximum = Math.min(availableWidth, availableHeight * pictureRatio(content));
   return { minimum: Math.min(Math.max(FLOAT_MEDIA_MIN_WIDTH, content.minWidth ?? 0), maximum), maximum };
 }
@@ -63,9 +83,11 @@ function sized(width: number, viewport: FloatViewport, content: FloatContent): {
 }
 
 function placed(x: number, y: number, w: number, h: number, viewport: FloatViewport): FloatRect {
+  const top = floatTopLimit(viewport);
   return {
     x: clamp(x, FLOAT_MEDIA_MARGIN, Math.max(FLOAT_MEDIA_MARGIN, viewport.width - w - FLOAT_MEDIA_MARGIN)),
-    y: clamp(y, FLOAT_MEDIA_MARGIN, Math.max(FLOAT_MEDIA_MARGIN, viewport.height - h - FLOAT_MEDIA_MARGIN)),
+    // A viewport too short for the window keeps the chrome clear and lets the bottom overflow.
+    y: clamp(y, top, Math.max(top, viewport.height - h - FLOAT_MEDIA_MARGIN)),
     w,
     h,
   };
@@ -81,7 +103,7 @@ export function fitFloatRect(rect: FloatRect, viewport: FloatViewport, content: 
 export function resolveFloatRect(remembered: FloatRect, viewport: FloatViewport, content: FloatContent): FloatRect {
   const { w, h } = sized(remembered.w, viewport, content);
   const keepRight = viewport.width - (remembered.x + remembered.w) < remembered.x;
-  const keepBottom = viewport.height - (remembered.y + remembered.h) < remembered.y;
+  const keepBottom = viewport.height - (remembered.y + remembered.h) < remembered.y - chromeBottom(viewport);
   return placed(
     keepRight ? remembered.x + remembered.w - w : remembered.x,
     keepBottom ? remembered.y + remembered.h - h : remembered.y,
@@ -98,7 +120,7 @@ export function defaultFloatRect(viewport: FloatViewport, playerBar = 60): Float
   const h = (w * 9) / 16;
   return {
     x: Math.max(margin, viewport.width - w - margin),
-    y: Math.max(margin, viewport.height - playerBar - margin - h - 8),
+    y: Math.max(chromeBottom(viewport) + margin, viewport.height - playerBar - margin - h - 8),
     w,
     h,
   };
@@ -172,14 +194,15 @@ export interface FloatOffset {
 /** Clearance past the viewport edge, so the window's shadow leaves with it. */
 export const FLOAT_MOTION_PAD = 32;
 
+/** Free space between the window and one edge of the area it may occupy. */
 export function floatEdgeGap(rect: FloatRect, viewport: FloatViewport, edge: FloatEdge): number {
-  if (edge === "top") return rect.y;
+  if (edge === "top") return rect.y - chromeBottom(viewport);
   if (edge === "left") return rect.x;
   if (edge === "right") return viewport.width - (rect.x + rect.w);
   return viewport.height - (rect.y + rect.h);
 }
 
-/** The viewport edge the window is nearest to. Gaps are compared in whole pixels. */
+/** The edge the window is nearest to; at the top that edge is the chrome. Gaps are compared in whole pixels. */
 export function nearestFloatEdge(rect: FloatRect, viewport: FloatViewport): FloatEdge {
   return EDGE_TIE_ORDER.reduce((nearest, edge) =>
     Math.round(floatEdgeGap(rect, viewport, edge)) < Math.round(floatEdgeGap(rect, viewport, nearest)) ? edge : nearest);
@@ -198,7 +221,9 @@ export interface FloatSlide {
 export function planFloatSlide(rect: FloatRect, viewport: FloatViewport, home: FloatRect = rect): FloatSlide {
   const edge = nearestFloatEdge(home, viewport);
   const extent = edge === "top" || edge === "bottom" ? rect.h : rect.w;
-  const travel = Math.max(0, floatEdgeGap(rect, viewport, edge) + extent + FLOAT_MOTION_PAD);
+  // Upwards the window crosses the chrome as well: it leaves the viewport, not just its own area.
+  const beyond = edge === "top" ? chromeBottom(viewport) : 0;
+  const travel = Math.max(0, floatEdgeGap(rect, viewport, edge) + beyond + extent + FLOAT_MOTION_PAD);
   // `+ 0` keeps a zero component from becoming -0 in a keyframe.
   return { edge, offset: { x: EDGE_VECTOR[edge].x * travel + 0, y: EDGE_VECTOR[edge].y * travel + 0 } };
 }
