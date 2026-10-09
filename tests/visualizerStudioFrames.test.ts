@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { h264ParameterSets, rgbaToYuv420, studioAvcCodec, studioChunkFrames, studioVideoBitrate, studioWorkerCount, yuv420Bytes } from "../src/lib/visualizerStudioFrames";
+import { h264ParameterSets, rgbaToYuv420, studioAvcCodec, studioChunkFrames, studioExportBytes, studioVideoBitrate, studioWorkerCount, yuv420Bytes } from "../src/lib/visualizerStudioFrames";
 
 function solid(width: number, height: number, [r, g, b]: number[]) {
   const rgba = new Uint8ClampedArray(width * height * 4);
@@ -45,6 +45,12 @@ test("the editor's encoder gets the level and bitrate of its canvas", () => {
   assert.equal(studioVideoBitrate(2560, 1440, 60), 42_666_667);
   assert.equal(studioVideoBitrate(320, 180, 30), 3_000_000);
   assert.deepEqual([studioChunkFrames(30), studioChunkFrames(60)], [30, 60]);
+});
+test("the size shown before an export is the encoder's bitrate over the song", () => {
+  // A real 197.8 s 1080p30 VideoToolbox export measured 12.26 Mbps overall: 289 MiB.
+  assert.equal(studioExportBytes(1920, 1080, 30, 197.8), 303_029_600);
+  assert.equal(studioExportBytes(1920, 1080, 60, 240), 727_680_000, "60 fps doubles the video bitrate");
+  assert.equal(studioExportBytes(1920, 1080, 30, 0), 0);
 });
 test("a GOP is identified by the parameter sets ahead of its key picture", () => {
   const gop = [0, 0, 0, 1, 0x67, 0x64, 0x1f, 0, 0, 0, 1, 0x68, 0xee, 0, 0, 1, 0x65, 0x88, 0x84, 0, 0, 1, 0x41, 0x9a, 0x21];

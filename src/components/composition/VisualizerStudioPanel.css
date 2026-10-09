@@ -122,6 +122,7 @@
 }
 .kd-viz-row > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kd-viz-row > .kd-segmented { justify-self: start; }
+.kd-viz-row > output { font-variant-numeric: tabular-nums; }
 /* A select reads like the text fields around it: its value at the left, the arrow at the right. */
 .kd-viz-panel .kd-select-control { justify-content: space-between; }
 .kd-viz-panel input:not([type=range]):not([type=checkbox]),

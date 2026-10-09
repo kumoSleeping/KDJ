@@ -9,6 +9,8 @@ import type { VisualizerFeatureTimeline } from "../../types/audioVisualizer";
 import { api, visualizerApi } from "../../lib/api";
 import { createVisualizerProject, loadVisualizerDraft, saveVisualizerDraft, studioDuration, studioLyricText, hasStudioLyrics, syncVisualizerImages, validateVisualizerProject, STUDIO_IMAGE_LIMIT, clamp, type VisualizerDraft, type VisualizerProject } from "../../lib/visualizerStudio";
 import { drawStudioFrame, loadStudioImages, prepareStudio, studioPictureSideAt } from "../../lib/visualizerStudioRenderer";
+import { studioExportBytes } from "../../lib/visualizerStudioFrames";
+import { formatBytes } from "../../lib/format";
 import { visualizerCropExtent } from "../../lib/audioVisualizerScene";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
@@ -605,6 +607,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
           {resolutions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </Select></Row>
         <div className="kd-viz-row"><span>帧率</span><Segmented label="帧率" options={frameRates} value={p.output.fps} onChange={fps => edit(n => { n.output.fps = fps; })} /></div>
+        {duration > 0 && <div className="kd-viz-row"><span>预计大小</span><output>约 {formatBytes(studioExportBytes(p.scene.canvas.width, p.scene.canvas.height, p.output.fps, duration))}</output></div>}
         <Row label="文件名"><input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></Row>
         <Toggle label="水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
       </Group>}
