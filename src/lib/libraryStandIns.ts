@@ -323,14 +323,18 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
     if (stale || !template) {
       const measured = measure();
       // Keep the previous measurements while no real row is mounted to measure again.
-      if (measured) { template = measured; stale = false; }
+      if (measured) {
+        template = measured;
+        stale = false;
+        // Whatever is painted was laid out by the old measurements.
+        for (const tile of tiles.values()) tile.painted = false;
+      }
     }
     return template !== null;
   };
 
   const update = (frame: StandInFrame): (readonly [number, number])[] => {
     lastFrame = frame;
-    const wasStale = stale;
     const covered: (readonly [number, number])[] = [[frame.windowStart, frame.windowEnd]];
     if (!ready() || !template) {
       for (const tile of [...tiles.values()]) release(tile);
@@ -339,8 +343,7 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
     const shape = template;
     const left = scroller.scrollLeft;
     const width = scroller.clientWidth;
-    if ((wasStale && !stale) || left !== painted.left || width !== painted.width
-      || frame.version.length !== version.length || frame.version.some((item, index) => item !== version[index])) {
+    if (left !== painted.left || width !== painted.width || frame.version.length !== version.length || frame.version.some((item, index) => item !== version[index])) {
       for (const tile of tiles.values()) tile.painted = false;
       version = frame.version;
       painted = { left, width };
@@ -365,9 +368,9 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
         }
       }
       // An unpainted tile stays hidden: what it showed belongs to another order or another column layout.
-      const base = item.index * STAND_IN_TILE_ROWS;
-      const clipTop = (item.shownStart - base) * shape.rowHeight;
-      const clipBottom = (base + STAND_IN_TILE_ROWS - item.shownEnd) * shape.rowHeight;
+      // The canvas runs from the tile's first row slot to its last painted row.
+      const clipTop = (item.shownStart - item.index * STAND_IN_TILE_ROWS) * shape.rowHeight;
+      const clipBottom = (item.end - item.shownEnd) * shape.rowHeight;
       const shown = !tile.painted ? "none" : clipTop || clipBottom ? `inset(${clipTop}px 0 ${clipBottom}px 0)` : "all";
       if (shown !== tile.shown) {
         tile.shown = shown;
