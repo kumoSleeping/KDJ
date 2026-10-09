@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LibraryWindow, type LibraryWindowSnapshot } from "../src/lib/libraryWindow";
-import { libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../src/lib/libraryViewport";
+import { LIBRARY_REST_PACE, libraryScrollPace, libraryViewport, libraryWindowTop, restoreLibraryAnchor, type LibraryScrollPace } from "../src/lib/libraryViewport";
 import type { TrackSummary } from "../src/types";
 
 const ids = Array.from({ length: 10000 }, (_, i) => i + 1);
@@ -241,12 +241,75 @@ test("virtual ranges remain bounded and cover every offset of their step", () =>
         assert.ok(view.start <= first && last <= view.end, "the visible rows are rendered");
         assert.ok(first - view.start >= Math.min(first, screen) && view.end - last >= Math.min(count - last, screen),
           "at least a screen is rendered beyond each edge");
+        // A fast scroll moves rows from behind the motion to ahead of it; a jump renders the screen it landed on.
+        for (const direction of [-1, 1] as const) {
+          const top = libraryWindowTop(scrollTop, rowHeight);
+          const fast = libraryViewport({ total, pending, rowHeight, height, top, headerHeight: 28, direction });
+          assert.ok(fast.end - fast.start <= 5 * screen + 2 * 8 + 2, "a fast scroll renders no more rows than a resting table");
+          assert.ok(fast.start <= first && last <= fast.end);
+          const [behind, ahead] = direction > 0 ? [first - fast.start, fast.end - last] : [fast.end - last, first - fast.start];
+          const [roomBehind, roomAhead] = direction > 0 ? [first, count - last] : [count - last, first];
+          assert.ok(ahead >= Math.min(roomAhead, 3 * screen), "three screens ahead of the motion");
+          assert.ok(behind >= Math.min(roomBehind, screen) && behind <= screen + 8, "one screen behind it");
+          const jump = libraryViewport({ total, pending, rowHeight, height, top, headerHeight: 28, direction, jump: true });
+          assert.ok(jump.start <= first && last <= jump.end, "the screen a jump landed on is rendered");
+          assert.ok(jump.end - jump.start <= 2 * screen + 2 * 8 + 2);
+          assert.ok(jump.fetchStart <= jump.trackStart && jump.trackEnd <= jump.fetchEnd);
+          // A jump that keeps being outrun renders around where the viewport is going, not where it was.
+          const lead = direction * 4 * height;
+          const aimed = libraryViewport({ total, pending, rowHeight, height, top, headerHeight: 28, direction, jump: true, lead });
+          const aim = Math.min(aimed.maxTop, Math.max(0, aimed.top + lead));
+          assert.ok(aimed.start <= Math.min(count, Math.floor(aim / rowHeight)));
+          assert.ok(aimed.end >= Math.min(count, Math.ceil((aim + height - 28) / rowHeight)), "the aimed screen is rendered");
+          assert.ok(0 <= aimed.start && aimed.start <= aimed.end && aimed.end <= count);
+          assert.ok(aimed.end - aimed.start <= 2 * screen + 2 * 8 + 2);
+          assert.ok(aimed.fetchStart <= aimed.trackStart && aimed.trackEnd <= aimed.fetchEnd && aimed.fetchEnd <= total);
+        }
       }
     }
   assert.equal(restoreLibraryAnchor([1, 3, 4], 2, 1, 5, 36, 0), 41);
   assert.equal(restoreLibraryAnchor([1, 2, 3], 3, 0, 5, 36, 2), 149);
 });
 
+test("scroll pace: wheel notches stay calm, a flick turns fast with hysteresis, a jump is one long frame", () => {
+  const run = (pace: LibraryScrollPace, frames: number, travel: number, elapsed = 16) => {
+    for (let i = 0; i < frames; i += 1) pace = libraryScrollPace(pace, travel, elapsed, 700);
+    return pace;
+  };
+  // One notch moves a hundred pixels in a single frame; ten a second is still an ordinary scroll.
+  let pace = LIBRARY_REST_PACE;
+  for (let notch = 0; notch < 10; notch += 1) {
+    pace = libraryScrollPace(pace, 100, notch ? 100 : 16, 700);
+    assert.deepEqual([pace.fast, pace.direction, pace.jump, pace.lead], [false, 0, false, 0]);
+  }
+  // Reading speed: a screen and a half per second.
+  assert.equal(run(LIBRARY_REST_PACE, 60, 16).fast, false);
+  // A trackpad flick at 6000 px/s is fast within a few frames, in its own direction.
+  const flick = run(LIBRARY_REST_PACE, 6, 96);
+  assert.deepEqual([flick.fast, flick.direction, flick.jump], [true, 1, false]);
+  assert.deepEqual([run(LIBRARY_REST_PACE, 6, -96).direction, run(flick, 1, -96).direction], [-1, -1]);
+  // Momentum decays: still fast at 2000 px/s, calm again below 1200 px/s.
+  assert.equal(run(flick, 30, 32).fast, true);
+  const calm = run(flick, 40, 12);
+  assert.deepEqual([calm.fast, calm.direction], [false, 0]);
+  assert.equal(run(LIBRARY_REST_PACE, 40, 32).fast, false, "2000 px/s does not start a fast scroll");
+  // A dragged handle, or a page that stalled while the WebView kept scrolling: two screens in one frame.
+  const jump = libraryScrollPace(LIBRARY_REST_PACE, -1400, 16, 700);
+  assert.deepEqual([jump.fast, jump.direction, jump.jump], [true, -1, true]);
+  const stalled = libraryScrollPace(calm, 1500, 400, 700);
+  assert.deepEqual([stalled.fast, stalled.direction, stalled.jump], [true, 1, true]);
+  assert.equal(libraryScrollPace(jump, -200, 16, 700).jump, false, "a jump lasts one frame");
+  // A frame with no travel keeps the direction of the scroll it belongs to.
+  assert.equal(libraryScrollPace(flick, 0, 16, 700).direction, 1);
+  // Outrun twice in a row by the scrolling thread: aim a frame of travel ahead, within a limit.
+  const first = libraryScrollPace(flick, 2000, 60, 700, true);
+  assert.deepEqual([first.jump, first.lead], [true, 0], "one long frame may be a single stall");
+  assert.equal(libraryScrollPace(first, 2100, 60, 700, true).lead, 2100);
+  assert.equal(libraryScrollPace(first, 90_000, 60, 700, true).lead, 5600);
+  assert.equal(libraryScrollPace(first, -2100, 60, 700, true).lead, 0, "a reversal is not the same scroll");
+  assert.equal(libraryScrollPace(first, 2100, 60, 700).lead, 0, "a scroll the page performs is where it says");
+  assert.equal(libraryScrollPace(libraryScrollPace(first, 2100, 60, 700, true), 300, 16, 700, true).lead, 0);
+});
 
 test("late index response cannot replace the newer query order", async () => {
   let snapshot!: LibraryWindowSnapshot;

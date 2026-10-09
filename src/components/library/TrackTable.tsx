@@ -24,8 +24,7 @@ import {
   Video,
   Image as ImageIcon,
 } from "lucide-react";
-import { libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../../lib/libraryViewport";
-import { attachWheelScroll } from "../../lib/wheelScroll";
+import { LIBRARY_REST_PACE, libraryScrollPace, libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { acquireCoverThumbnail, peekCoverThumbnail, type CoverThumbnailLease } from "../../lib/coverThumbnailQueue";
@@ -314,6 +313,16 @@ export interface TrackTableProps {
 }
 
 /**
+ * 封面请求的先后由可视范围决定。行不为此重渲染：等待中的请求登记在这里，表格在窗口
+ * 移动后统一改它们的优先级（见 TrackTable 里的 coverLane）。
+ */
+interface WaitingCover { index: number; lease: CoverThumbnailLease }
+interface CoverLane { start: number; end: number; waiting: Set<WaitingCover> }
+function coverLanePriority(lane: CoverLane, index: number): number {
+  return index >= lane.start && index < lane.end ? 0 : 1;
+}
+
+/**
  * 曲库表的封面格。
  *
  * 后端重启、首次视频抽帧排队时会短暂断开/超时；旧版一收到一次 img error 就直接
@@ -322,10 +331,10 @@ export interface TrackTableProps {
  * 这样 WKWebView 不会把开发时后端重启造成的图片加载失败永久黏在原节点上。普通
  * 音频没有内嵌图很常见，仍直接退回灰色占位，避免为每一首无图文件轮询。
  */
-function TrackCoverThumb({ track, priority }: { track: TrackSummary; priority: number }) {
+function TrackCoverThumb({ track, index, lane, defer }: { track: TrackSummary; index: number; lane: CoverLane; defer: boolean }) {
   const [attempt, setAttempt] = useState(0);
   const retryTimer = useRef<number | null>(null);
-  const leaseRef = useRef<CoverThumbnailLease | null>(null);
+  const waitingRef = useRef<WaitingCover | null>(null);
   const isVideo = isVideoTrack(track.format);
   const revision = isVideo ? `${track.modified_at}-${attempt}` : track.modified_at;
   const key = `${track.id}:${revision}:64`;
@@ -338,14 +347,20 @@ function TrackCoverThumb({ track, priority }: { track: TrackSummary; priority: n
   }, [track.id, track.modified_at]);
 
   useEffect(() => {
+    // 快滚途中挂载的行不发请求：它多半在请求返回前就滚出去了。已经在缓存里的封面照常取用。
+    if (defer && !peekCoverThumbnail(key).src) return;
     let alive = true;
-    const lease = acquireCoverThumbnail(key, api.coverUrl(track.id, revision, 64), priority);
-    leaseRef.current = lease;
+    const lease = acquireCoverThumbnail(key, api.coverUrl(track.id, revision, 64), coverLanePriority(lane, index));
+    const waiting: WaitingCover = { index, lease };
+    waitingRef.current = waiting;
+    lane.waiting.add(waiting);
     void lease.promise
       .then((objectUrl) => {
+        lane.waiting.delete(waiting);
         if (alive && objectUrl) setShown((current) => current.src === objectUrl ? current : { src: objectUrl, missing: false });
       })
       .catch(() => {
+        lane.waiting.delete(waiting);
         if (!alive) return;
         if (!isVideo || attempt >= 12) {
           setShown({ src: "", missing: true });
@@ -361,11 +376,18 @@ function TrackCoverThumb({ track, priority }: { track: TrackSummary; priority: n
     return () => {
       alive = false;
       lease.release();
-      if (leaseRef.current === lease) leaseRef.current = null;
+      lane.waiting.delete(waiting);
+      if (waitingRef.current === waiting) waitingRef.current = null;
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
     };
-  }, [key]);
-  useEffect(() => { leaseRef.current?.setPriority(priority); }, [priority]);
+  }, [key, defer, lane]);
+  // 排序变化会让同一行换位置；等待中的请求跟着换优先级。
+  useEffect(() => {
+    const waiting = waitingRef.current;
+    if (!waiting || waiting.index === index) return;
+    waiting.index = index;
+    waiting.lease.setPriority(coverLanePriority(lane, index));
+  }, [index, lane]);
 
   return (
     <span className="kd-thumb" draggable={false}>
@@ -455,9 +477,12 @@ function trackCell(
   track: TrackSummary,
   key: string,
   keyNotation: KeyNotation,
-  selectionControl?: React.ReactNode,
-  onRate?: (rating: number) => void,
-  coverPriority = 1,
+  selectionControl: React.ReactNode,
+  onRate: ((rating: number) => void) | undefined,
+  index: number,
+  coverLane: CoverLane,
+  /** false：快滚途中挂载的行，先只画文字和已缓存的封面（见 TrackRow）。 */
+  rich: boolean,
 ) {
   switch (key) {
     case "title":
@@ -466,7 +491,7 @@ function trackCell(
           {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          <TrackCoverThumb track={track} priority={coverPriority} />
+          <TrackCoverThumb track={track} index={index} lane={coverLane} defer={!rich} />
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -506,7 +531,7 @@ function trackCell(
     case "energy":
       return (
         <td key={key} data-col="energy">
-          <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
+          {rich ? <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} /> : null}
         </td>
       );
     case "duration":
@@ -556,7 +581,7 @@ function trackCell(
     case "rating":
       return (
         <td key={key} data-col="rating">
-          <TableRating value={track.rating} onChange={onRate} />
+          {rich ? <TableRating value={track.rating} onChange={onRate} /> : null}
         </td>
       );
     default:
@@ -566,8 +591,10 @@ function trackCell(
 
 interface TrackCellsProps {
   track: TrackSummary;
-  displayIndex: number;
-  coverPriority: number;
+  /** 在当前顺序里的位置（从 0 起）。 */
+  index: number;
+  coverLane: CoverLane;
+  rich: boolean;
   showIndex: boolean;
   columns: readonly Column[];
   keyNotation: KeyNotation;
@@ -578,13 +605,14 @@ interface TrackCellsProps {
 }
 
 /**
- * 滚动时父表每帧只改变窗口位置；仍在窗口里的行内容完全相同。把单元格树单独
- * memo 后，封面、能量条和评分控件不会因为 scrollTop 变化而跟着重复执行。
+ * 行的选中、焦点和播放标记只改 <tr> 的属性；单元格树单独 memo 后，封面、能量条和
+ * 评分控件不会跟着重复执行。
  */
 const TrackCells = memo(function TrackCells({
   track,
-  displayIndex,
-  coverPriority,
+  index,
+  coverLane,
+  rich,
   showIndex,
   columns,
   keyNotation,
@@ -595,7 +623,7 @@ const TrackCells = memo(function TrackCells({
 }: TrackCellsProps) {
   return (
     <>
-      {showIndex ? <td data-col="index">{displayIndex}</td> : null}
+      {showIndex ? <td data-col="index">{index + 1}</td> : null}
       {columns.map((column) => {
         const cell = trackCell(
           track,
@@ -616,7 +644,9 @@ const TrackCells = memo(function TrackCells({
             </button>
           ) : undefined,
           column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
-          coverPriority,
+          index,
+          coverLane,
+          rich,
         ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
         return cloneElement(
           cell,
@@ -633,13 +663,13 @@ const TrackCells = memo(function TrackCells({
 
 /** 摘要还没到的行：列结构和真实行相同，数据到达时只换内容，不重新排版。 */
 const PlaceholderCells = memo(function PlaceholderCells({
-  displayIndex,
+  index,
   showIndex,
   columns,
-}: Pick<TrackCellsProps, "displayIndex" | "showIndex" | "columns">) {
+}: Pick<TrackCellsProps, "index" | "showIndex" | "columns">) {
   return (
     <>
-      {showIndex ? <td data-col="index">{displayIndex}</td> : null}
+      {showIndex ? <td data-col="index">{index + 1}</td> : null}
       {columns.map((column) => (
         <td key={column.key} data-col={column.key}>
           {column.key === "title" ? (
@@ -652,6 +682,71 @@ const PlaceholderCells = memo(function PlaceholderCells({
       ))}
       <td className="kd-table-fill" aria-hidden="true" />
     </>
+  );
+});
+
+/**
+ * 行上的交互。对象身份在表格的整个生命周期里不变（实现每次渲染换新，见 TrackTable 里的
+ * rowActions），所以窗口移动、选区变化都不会让没变的行重渲染。
+ */
+interface TrackRowActions {
+  click(event: React.MouseEvent<HTMLTableRowElement>, track: TrackSummary): void;
+  doubleClick(track: TrackSummary): void;
+  pointerDown(event: React.PointerEvent<HTMLTableRowElement>, track: TrackSummary): void;
+  cancelPress(): void;
+  contextMenu(event: React.MouseEvent<HTMLTableRowElement>, track: TrackSummary): void;
+  linkDragStart(event: React.DragEvent<HTMLTableRowElement>, track: TrackSummary): void;
+  linkDragEnd(): void;
+}
+
+interface TrackRowProps extends Omit<TrackCellsProps, "rich"> {
+  focused: boolean;
+  playing: boolean;
+  /** 表格正在快滚：此时挂载的行先不画封面请求、能量条和评分控件。 */
+  deferRich: boolean;
+  /** Windows 分享链接走 WebView2 原生 HTML5 拖放。 */
+  linkDrag: boolean;
+  actions: TrackRowActions;
+}
+
+/**
+ * 一行曲目。滚动只是把窗口挪几行：留在窗口里的行 props 不变，整行跳过；真正要渲染的
+ * 只有新进来的那几行。
+ */
+const TrackRow = memo(function TrackRow({
+  track,
+  focused,
+  playing,
+  deferRich,
+  linkDrag,
+  actions,
+  ...cells
+}: TrackRowProps) {
+  // 丰富程度在挂载时定下：快滚途中进来的行保持轻量，直到滚动慢下来；已经画全的行不退回去。
+  const [rich, setRich] = useState(!deferRich);
+  if (!deferRich && !rich) setRich(true);
+  return (
+    <tr
+      aria-selected={cells.selected}
+      data-kd-track-id={track.id}
+      data-focus={focused ? "true" : undefined}
+      data-playing={playing ? "true" : undefined}
+      data-selecting={cells.selectionMode ? "true" : undefined}
+      // macOS 与文件外拖走 pointer 状态机；Windows 分享链接用 WebView2 原生
+      // text/uri-list，才能让浏览器、聊天等外部应用直接接住 URL。
+      draggable={linkDrag}
+      onDragStart={linkDrag ? (event) => actions.linkDragStart(event, track) : undefined}
+      onDragEnd={linkDrag ? actions.linkDragEnd : undefined}
+      onClick={(event) => actions.click(event, track)}
+      onPointerDown={(event) => actions.pointerDown(event, track)}
+      onPointerUp={actions.cancelPress}
+      onPointerCancel={actions.cancelPress}
+      onPointerLeave={actions.cancelPress}
+      onDoubleClick={() => actions.doubleClick(track)}
+      onContextMenu={(event) => actions.contextMenu(event, track)}
+    >
+      <TrackCells track={track} rich={rich || !deferRich} {...cells} />
+    </tr>
   );
 });
 
@@ -730,6 +825,18 @@ function isPendingForFolder(task: DownloadTask, filterFolder: string, indexById:
   if (task.track_id == null) return true;
   return !indexById.has(task.track_id);
 }
+
+/** 渲染窗口由它决定；`fast` 另外决定新挂载的行画多全。 */
+interface LibraryView { top: number; height: number; direction: -1 | 0 | 1; jump: boolean; lead: number; fast: boolean }
+const REST_VIEW: LibraryView = { top: 0, height: 0, direction: 0, jump: false, lead: 0, fast: false };
+function sameLibraryView(a: LibraryView, b: LibraryView): boolean {
+  return a.top === b.top && a.height === b.height && a.direction === b.direction && a.jump === b.jump
+    && a.lead === b.lead && a.fast === b.fast;
+}
+/** 这么久没有新的滚动帧就算停稳。 */
+const SCROLL_REST_MS = 140;
+/** 滚轮/触摸输入之后这么久以内的滚动，算作 WebView 滚动线程在执行（含触控板惯性）。 */
+const THREADED_SCROLL_INPUT_MS = 300;
 
 export const TrackTable = memo(function TrackTable({
   libraryStore = useLibraryStore,
@@ -865,8 +972,8 @@ export const TrackTable = memo(function TrackTable({
       pointerDragCleanupRef.current?.();
       htmlExternalDragScrollUnlockRef.current?.();
       resizeObserverRef.current?.disconnect();
-      wheelScrollCleanupRef.current?.();
-      wheelScrollCleanupRef.current = null;
+      threadedInputCleanupRef.current?.();
+      threadedInputCleanupRef.current = null;
       // 两个 ref 都要归零：留着已取消的帧号，onScroll 会一直以为还有一帧在排队。
       if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
       scrollRafRef.current = 0;
@@ -1411,8 +1518,19 @@ export const TrackTable = memo(function TrackTable({
   const [headerH, setHeaderH] = useState(28);
   const headerHRef = useRef(28);
   const [rootFont, setRootFont] = useState(16);
-  /** 渲染窗口的基准位置（按步长取整，见 libraryWindowTop）和视口高度。 */
-  const [view, setView] = useState({ top: 0, height: 0 });
+  /**
+   * 渲染窗口的基准位置（按步长取整，见 libraryWindowTop）、视口高度，以及滚动节奏里影响
+   * 窗口的部分（见 libraryScrollPace）。
+   */
+  const [view, setView] = useState<LibraryView>(REST_VIEW);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const paceRef = useRef(LIBRARY_REST_PACE);
+  /** 上一次滚动采样的时刻；0 表示停着。 */
+  const scrollSampleAtRef = useRef(0);
+  /** 最近一次滚轮/触摸输入的时刻：用来区分滚动线程执行的滚动和页面自己执行的滚动。 */
+  const threadedInputAtRef = useRef(-Infinity);
+  const threadedInputCleanupRef = useRef<(() => void) | null>(null);
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
   const rowHRef = useRef(FALLBACK_ROW_H);
   /** 横向滚动不能进入虚拟列表更新链；否则拖底部横滚条时每帧重渲染整张可视表。 */
@@ -1420,8 +1538,6 @@ export const TrackTable = memo(function TrackTable({
   const scrollRafRef = useRef(0);
   const scrollIdleTimerRef = useRef<number | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const wheelScrollCleanupRef = useRef<(() => void) | null>(null);
-  const syncWindowRef = useRef<() => void>(() => {});
   /** 滚动容器 ref：身份必须稳定（见 JSX 处的注释）。值没变就不 setState，
       否则 ResizeObserver 的初次回调会和自己触发的重渲染互相喂食。 */
   const trackScrollerRef = useCallback((el: HTMLDivElement | null) => {
@@ -1431,15 +1547,22 @@ export const TrackTable = memo(function TrackTable({
     // 视口高度决定渲染窗口：面板拖宽拖窄、窗口缩放都要重算。
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
-    wheelScrollCleanupRef.current?.();
-    wheelScrollCleanupRef.current = null;
+    threadedInputCleanupRef.current?.();
+    threadedInputCleanupRef.current = null;
     if (el) {
-      wheelScrollCleanupRef.current = attachWheelScroll(el, () => rowHRef.current, () => syncWindowRef.current());
+      // 只记时刻，不取消事件：滚动本身留给 WebView 的滚动线程。
+      const noteInput = (event: Event) => { threadedInputAtRef.current = event.timeStamp; };
+      el.addEventListener("wheel", noteInput, { passive: true });
+      el.addEventListener("touchmove", noteInput, { passive: true });
+      threadedInputCleanupRef.current = () => {
+        el.removeEventListener("wheel", noteInput);
+        el.removeEventListener("touchmove", noteInput);
+      };
       const updateView = () =>
         setView((current) => {
           const top = libraryWindowTop(el.scrollTop, rowHRef.current);
           const height = el.clientHeight;
-          return current.top === top && current.height === height ? current : { top, height };
+          return current.top === top && current.height === height ? current : { ...current, top, height };
         });
       updateView();
       const observer = new ResizeObserver(updateView);
@@ -1636,10 +1759,11 @@ export const TrackTable = memo(function TrackTable({
   pendingCountRef.current = pendingDownloads.length;
 
   /**
-   * 把渲染窗口对齐到滚动容器此刻的位置，并在当前帧内提交（flushSync）：滚动位置和它
-   * 对应的行必须在同一帧画出来。只在 React 之外（动画帧）调用。
+   * 把渲染窗口对齐到滚动容器此刻的位置，并在当前帧内提交（flushSync）。滚动由 WebView 的
+   * 滚动线程执行，页面拿到位置时它已经在屏幕上了：这里每晚一帧，露出的就是空白。
+   * 只在 React 之外（动画帧）调用；`now` 是这一帧的时间戳。
    */
-  const syncWindow = useCallback(() => {
+  const syncWindow = useCallback((now: number) => {
     const node = scrollerRef.current;
     if (!node) return;
     const rowHeight = rowHRef.current;
@@ -1648,25 +1772,40 @@ export const TrackTable = memo(function TrackTable({
     const maxTop = Math.max(0, (ids.length + pending) * rowHeight + headerHRef.current - node.clientHeight);
     if (node.scrollTop > maxTop) node.scrollTop = maxTop;
     const top = node.scrollTop;
+    const height = node.clientHeight;
     if (top !== scrollTopRef.current) {
+      // 停着之后的第一帧没有上一个时刻可比，按一帧算。
+      const elapsed = scrollSampleAtRef.current ? now - scrollSampleAtRef.current : 16;
+      paceRef.current = libraryScrollPace(paceRef.current, top - scrollTopRef.current, elapsed, height,
+        now - threadedInputAtRef.current < THREADED_SCROLL_INPUT_MS);
+      scrollSampleAtRef.current = now;
       scrollTopRef.current = top;
       const index = Math.max(0, Math.floor(top / rowHeight) - pending);
       anchorRef.current = { id: ids[index] ?? null, index, offset: top % rowHeight };
-      if (persistentSession) {
-        if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
-        scrollIdleTimerRef.current = window.setTimeout(() => {
-          scrollIdleTimerRef.current = null;
-          const anchor = anchorRef.current;
-          updateLocalWorkspaceSession({ scrollTop: scrollTopRef.current, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
-        }, 140);
-      }
+      if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
+      scrollIdleTimerRef.current = window.setTimeout(() => {
+        scrollIdleTimerRef.current = null;
+        // 停稳：窗口回到两侧对称，快滚途中的轻量行补全。
+        paceRef.current = LIBRARY_REST_PACE;
+        scrollSampleAtRef.current = 0;
+        const box = scrollerRef.current;
+        if (box) {
+          const rest: LibraryView = { ...REST_VIEW, top: libraryWindowTop(box.scrollTop, rowHRef.current), height: box.clientHeight };
+          setView((current) => sameLibraryView(current, rest) ? current : rest);
+        }
+        if (!persistentSession) return;
+        const anchor = anchorRef.current;
+        updateLocalWorkspaceSession({ scrollTop: scrollTopRef.current, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
+      }, SCROLL_REST_MS);
     }
-    const next = { top: libraryWindowTop(top, rowHeight), height: node.clientHeight };
-    flushSync(() => {
-      setView((current) => current.top === next.top && current.height === next.height ? current : next);
-    });
+    const pace = paceRef.current;
+    const next: LibraryView = { top: libraryWindowTop(top, rowHeight), height, direction: pace.direction, jump: pace.jump,
+      lead: pace.lead, fast: pace.fast };
+    // 一步之内的滚动帧窗口不变：不进 React。
+    if (sameLibraryView(viewRef.current, next)) return;
+    viewRef.current = next;
+    flushSync(() => setView(next));
   }, [libraryStore, persistentSession]);
-  syncWindowRef.current = syncWindow;
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
@@ -1694,7 +1833,8 @@ export const TrackTable = memo(function TrackTable({
   }, [total > 0, layout, colPrefs, pendingDownloads.length > 0]);
 
   const viewport = libraryViewport({ total, pending: pendingDownloads.length, top: view.top,
-    height: view.height || 720, rowHeight: rowH, headerHeight: headerH });
+    height: view.height || 720, rowHeight: rowH, headerHeight: headerH, direction: view.direction, jump: view.jump,
+    lead: view.lead });
   const { start: winStart, end: winEnd } = viewport;
   const windowedTracks = orderedIds.slice(viewport.trackStart, viewport.trackEnd)
     .map((id, offset) => ({ id, track: summaryById.get(id), index: viewport.trackStart + offset }));
@@ -1724,7 +1864,7 @@ export const TrackTable = memo(function TrackTable({
     if (Math.abs(box.scrollTop - desired) > 0.5) box.scrollTop = desired;
     scrollTopRef.current = box.scrollTop;
     const windowTop = libraryWindowTop(desired, rowH);
-    setView((old) => old.top === windowTop && old.height === box.clientHeight ? old : { top: windowTop, height: box.clientHeight });
+    setView((old) => old.top === windowTop && old.height === box.clientHeight ? old : { ...old, top: windowTop, height: box.clientHeight });
     const index = Math.max(0, Math.floor(desired / rowH) - pendingDownloads.length);
     anchorRef.current = { id: orderedIds[index] ?? null, index, offset: desired % rowH };
   }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop]);
@@ -1732,6 +1872,126 @@ export const TrackTable = memo(function TrackTable({
   useEffect(() => {
     if (total > 0) void ensureRange(viewport.fetchStart, viewport.fetchEnd, viewport.visibleTrackStart, viewport.visibleTrackEnd);
   }, [ensureRange, total, orderedIds, queryVersion, viewport.fetchStart, viewport.fetchEnd, viewport.visibleTrackStart, viewport.visibleTrackEnd]);
+
+  // 行交互的实现每次渲染都换成最新的闭包；交给行的 rowActions 身份不变，行不会因此重渲染。
+  const rowActionsLatest = useRef<TrackRowActions>(null as unknown as TrackRowActions);
+  rowActionsLatest.current = {
+    linkDragStart(event, track) {
+      const sourceScroller = event.currentTarget.closest<HTMLElement>(".kd-scroll");
+      htmlExternalDragScrollUnlockRef.current?.();
+      htmlExternalDragScrollUnlockRef.current = lockTrackPointerDragScroll(
+        sourceScroller,
+        sourceScroller?.scrollTop ?? 0,
+        sourceScroller?.scrollLeft ?? 0,
+      );
+      const link = trackShareLink(track)
+        ?? resolvedLocalTrackShareLinks.get(localTrackShareCacheKey(track))
+        ?? null;
+      if (!link) {
+        event.preventDefault();
+        htmlExternalDragScrollUnlockRef.current?.();
+        htmlExternalDragScrollUnlockRef.current = null;
+        setNotice("正在查找分享链接，找到后请再拖一次");
+        void resolveLocalTrackShareLink(track).then((resolved) => {
+          setNotice(resolved ? "分享链接已找到，可以再次拖出" : "没有找到可确认的歌曲分享链接");
+        });
+        return;
+      }
+      const ids = selected.has(track.id) ? [...selectedIds] : [track.id];
+      writeTrackDragData(event.dataTransfer, ids);
+      writeShareLinkDrag(event.dataTransfer, link, event.currentTarget, {
+        plainText: formatTrackShareText(track, link),
+      });
+    },
+    linkDragEnd() {
+      endTrackDrag();
+      htmlExternalDragScrollUnlockRef.current?.(EXTERNAL_DRAG_SCROLL_SETTLE_MS);
+      htmlExternalDragScrollUnlockRef.current = null;
+    },
+    click(event, track) {
+      if (hasTextSelectionWithin(event.currentTarget)) return;
+      if (suppressClickRef.current === track.id) {
+        suppressClickRef.current = null;
+        return;
+      }
+      if (selectionMode) {
+        // 双点会依次送 detail=1 / 2 两次 click。竖屏的单击就是播放，
+        // 第二下既不该重复起播，也不该把选择状态又翻回去。
+        if (playClick === "single" && event.detail > 1) return;
+        onSelect(track.id, "toggle");
+        return;
+      }
+      // 同上：先让第一下立即播放，第二下只被吞掉；不要等双击超时，
+      // 否则移动端会感觉点歌迟钝。键盘触发的 detail=0 不受影响。
+      if (playClick === "single" && event.detail > 1) return;
+      const mode = selectMode(event);
+      if (playClick === "double" && event.detail === 2 && mode === "replace") {
+        // `click(detail=2)` precedes `dblclick`. Send the audio intent first so opening
+        // TrackDetail cannot occupy the main thread before the native Load is queued.
+        doubleClickPlaybackRef.current = { trackId: track.id, at: performance.now() };
+        playFromTable(track);
+      }
+      onSelect(track.id, mode, event.detail);
+      // 带修饰键的多选不算——那是在攒选区。
+      if (mode !== "replace") return;
+      // 单击播放按设置走；双击模式下单击只负责选择。
+      // 详情入口仍留给播放条唱盘（见 PlayerBar.DETAIL_EVENT）。
+      if (playClick === "single") {
+        playFromTable(track);
+      }
+    },
+    pointerDown(event, track) {
+      if (htmlExternalLinkDrag) {
+        void resolveLocalTrackShareLink(track);
+        return;
+      }
+      if (beginTrackSystemFileDrag(event, track)) return;
+      if (event.pointerType === "mouse") {
+        beginTrackPointerDrag(event, track);
+      } else {
+        beginLongPress(track, event.clientX, event.clientY);
+      }
+    },
+    cancelPress,
+    doubleClick(track) {
+      if (selectionMode || playClick !== "double") return;
+      const submitted = doubleClickPlaybackRef.current;
+      doubleClickPlaybackRef.current = null;
+      if (
+        submitted?.trackId === track.id &&
+        performance.now() - submitted.at < 1_000
+      ) {
+        return;
+      }
+      playFromTable(track);
+    },
+    contextMenu(event, track) {
+      event.preventDefault();
+      if (Date.now() < suppressContextMenuUntilRef.current) return;
+      cancelPress();
+      setPendingMenu(null);
+      // 右键只开菜单；用户明确点菜单里的「选择」后才显示复选框。
+      setRowMenu({ x: event.clientX, y: event.clientY, track });
+    },
+  };
+  const rowActions = useMemo<TrackRowActions>(() => ({
+    click: (event, track) => rowActionsLatest.current.click(event, track),
+    doubleClick: (track) => rowActionsLatest.current.doubleClick(track),
+    pointerDown: (event, track) => rowActionsLatest.current.pointerDown(event, track),
+    cancelPress: () => rowActionsLatest.current.cancelPress(),
+    contextMenu: (event, track) => rowActionsLatest.current.contextMenu(event, track),
+    linkDragStart: (event, track) => rowActionsLatest.current.linkDragStart(event, track),
+    linkDragEnd: () => rowActionsLatest.current.linkDragEnd(),
+  }), []);
+
+  // 等待中的封面请求按可视范围排先后。范围在渲染时写入，行挂载时的 effect 读到的就是它；
+  // 窗口移动后在这里给还在等的请求换优先级。
+  const coverLane = useRef<CoverLane>({ start: 0, end: 0, waiting: new Set() }).current;
+  coverLane.start = viewport.visibleTrackStart;
+  coverLane.end = viewport.visibleTrackEnd;
+  useEffect(() => {
+    for (const waiting of coverLane.waiting) waiting.lease.setPriority(coverLanePriority(coverLane, waiting.index));
+  }, [coverLane, viewport.visibleTrackStart, viewport.visibleTrackEnd]);
 
   const moveColumn = (from: string, to: string) => {
     if (from === to) return;
@@ -1757,12 +2017,12 @@ export const TrackTable = memo(function TrackTable({
       onScroll={(event) => {
         // 这一个容器同时横滚和竖滚；横滚不影响虚拟窗口，在进入 React 之前退出。
         if (event.currentTarget.scrollTop === scrollTopRef.current) return;
-        // 滚轮和触控板由 attachWheelScroll 在本帧内同步完成；这里处理其余来源
-        //（拖滑块、键盘、触摸、定位），一帧合并一次。
+        // 滚轮、触控板、触摸由 WebView 的滚动线程执行，拖滑块、键盘、定位由页面执行；
+        // 都从这里进来，一帧合并一次，并在这一帧内提交对应的行。
         if (!scrollRafRef.current) {
-          scrollRafRef.current = requestAnimationFrame(() => {
+          scrollRafRef.current = requestAnimationFrame((now) => {
             scrollRafRef.current = 0;
-            syncWindow();
+            syncWindow(now);
           });
         }
       }}
@@ -1956,132 +2216,27 @@ export const TrackTable = memo(function TrackTable({
             );
           })}
           {windowedTracks.map(({ id, track, index }) => track ? (
-            <tr
+            <TrackRow
               key={track.id}
-              aria-selected={selected.has(track.id)}
-              data-kd-track-id={track.id}
-              data-focus={track.id === selectedId ? "true" : undefined}
-              data-playing={track.id === playingId ? "true" : undefined}
-              data-selecting={selectionMode ? "true" : undefined}
-              // macOS 与文件外拖走 pointer 状态机；Windows 分享链接用 WebView2 原生
-              // text/uri-list，才能让浏览器、聊天等外部应用直接接住 URL。
-              draggable={htmlExternalLinkDrag}
-              onDragStart={htmlExternalLinkDrag ? (event) => {
-                const sourceScroller = event.currentTarget.closest<HTMLElement>(".kd-scroll");
-                htmlExternalDragScrollUnlockRef.current?.();
-                htmlExternalDragScrollUnlockRef.current = lockTrackPointerDragScroll(
-                  sourceScroller,
-                  sourceScroller?.scrollTop ?? 0,
-                  sourceScroller?.scrollLeft ?? 0,
-                );
-                const link = trackShareLink(track)
-                  ?? resolvedLocalTrackShareLinks.get(localTrackShareCacheKey(track))
-                  ?? null;
-                if (!link) {
-                  event.preventDefault();
-                  htmlExternalDragScrollUnlockRef.current?.();
-                  htmlExternalDragScrollUnlockRef.current = null;
-                  setNotice("正在查找分享链接，找到后请再拖一次");
-                  void resolveLocalTrackShareLink(track).then((resolved) => {
-                    setNotice(resolved ? "分享链接已找到，可以再次拖出" : "没有找到可确认的歌曲分享链接");
-                  });
-                  return;
-                }
-                const ids = selected.has(track.id) ? [...selectedIds] : [track.id];
-                writeTrackDragData(event.dataTransfer, ids);
-                writeShareLinkDrag(event.dataTransfer, link, event.currentTarget, {
-                  plainText: formatTrackShareText(track, link),
-                });
-              } : undefined}
-              onDragEnd={htmlExternalLinkDrag ? () => {
-                endTrackDrag();
-                htmlExternalDragScrollUnlockRef.current?.(EXTERNAL_DRAG_SCROLL_SETTLE_MS);
-                htmlExternalDragScrollUnlockRef.current = null;
-              } : undefined}
-              onClick={(event) => {
-                if (hasTextSelectionWithin(event.currentTarget)) return;
-                if (suppressClickRef.current === track.id) {
-                  suppressClickRef.current = null;
-                  return;
-                }
-                if (selectionMode) {
-                  // 双点会依次送 detail=1 / 2 两次 click。竖屏的单击就是播放，
-                  // 第二下既不该重复起播，也不该把选择状态又翻回去。
-                  if (playClick === "single" && event.detail > 1) return;
-                  onSelect(track.id, "toggle");
-                  return;
-                }
-                // 同上：先让第一下立即播放，第二下只被吞掉；不要等双击超时，
-                // 否则移动端会感觉点歌迟钝。键盘触发的 detail=0 不受影响。
-                if (playClick === "single" && event.detail > 1) return;
-                const mode = selectMode(event);
-                if (playClick === "double" && event.detail === 2 && mode === "replace") {
-                  // `click(detail=2)` precedes `dblclick`. Send the audio intent first so opening
-                  // TrackDetail cannot occupy the main thread before the native Load is queued.
-                  doubleClickPlaybackRef.current = { trackId: track.id, at: performance.now() };
-                  playFromTable(track);
-                }
-                onSelect(track.id, mode, event.detail);
-                // 带修饰键的多选不算——那是在攒选区。
-                if (mode !== "replace") return;
-                // 单击播放按设置走；双击模式下单击只负责选择。
-                // 详情入口仍留给播放条唱盘（见 PlayerBar.DETAIL_EVENT）。
-                if (playClick === "single") {
-                  playFromTable(track);
-                }
-              }}
-              onPointerDown={(event) => {
-                if (htmlExternalLinkDrag) {
-                  void resolveLocalTrackShareLink(track);
-                  return;
-                }
-                if (beginTrackSystemFileDrag(event, track)) return;
-                if (event.pointerType === "mouse") {
-                  beginTrackPointerDrag(event, track);
-                } else {
-                  beginLongPress(track, event.clientX, event.clientY);
-                }
-              }}
-              onPointerUp={cancelPress}
-              onPointerCancel={cancelPress}
-              onPointerLeave={cancelPress}
-              onDoubleClick={() => {
-                if (selectionMode || playClick !== "double") return;
-                const submitted = doubleClickPlaybackRef.current;
-                doubleClickPlaybackRef.current = null;
-                if (
-                  submitted?.trackId === track.id &&
-                  performance.now() - submitted.at < 1_000
-                ) {
-                  return;
-                }
-                playFromTable(track);
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                if (Date.now() < suppressContextMenuUntilRef.current) return;
-                cancelPress();
-                setPendingMenu(null);
-                // 右键只开菜单；用户明确点菜单里的「选择」后才显示复选框。
-                setRowMenu({ x: event.clientX, y: event.clientY, track });
-              }}
-            >
-              <TrackCells
-                track={track}
-                displayIndex={index + 1}
-                coverPriority={index >= viewport.visibleTrackStart && index < viewport.visibleTrackEnd ? 0 : 1}
-                showIndex={showIndexCol}
-                columns={visibleColumns}
-                keyNotation={keyNotation}
-                selectionMode={selectionMode}
-                selected={selected.has(track.id)}
-                onToggle={toggleTrackSelection}
-                onRate={rateTrack}
-              />
-            </tr>
+              track={track}
+              index={index}
+              selected={selected.has(track.id)}
+              focused={track.id === selectedId}
+              playing={track.id === playingId}
+              selectionMode={selectionMode}
+              deferRich={view.fast}
+              linkDrag={htmlExternalLinkDrag}
+              actions={rowActions}
+              coverLane={coverLane}
+              showIndex={showIndexCol}
+              columns={visibleColumns}
+              keyNotation={keyNotation}
+              onToggle={toggleTrackSelection}
+              onRate={rateTrack}
+            />
           ) : (
             <tr key={id} data-loading-track="true" aria-busy="true">
-              <PlaceholderCells displayIndex={index + 1} showIndex={showIndexCol} columns={visibleColumns} />
+              <PlaceholderCells index={index} showIndex={showIndexCol} columns={visibleColumns} />
             </tr>
           ))}
           {winEnd < viewport.count && (

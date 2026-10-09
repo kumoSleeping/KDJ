@@ -178,18 +178,63 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.ok(document.querySelector('tr[data-kd-track-id="10000"]'));
     assert.equal(document.querySelector("tr[data-loading-track]"), null, "no placeholder rows after a far jump");
     assert.equal(requests.length, requestsBeforeJump);
-    // Wheel scrolling is applied by the page: the frame that moves the container renders its rows.
+    // Wheel and trackpad scrolling belongs to the WebView's scrolling thread: the page must not cancel it.
     await act(async () => { box.scrollTop = 0; box.dispatchEvent(new Event("scroll")); });
     await flush();
     const wheel = new dom.window.WheelEvent("wheel", { deltaY: 180_000, bubbles: true, cancelable: true });
     box.dispatchEvent(wheel);
-    assert.equal(wheel.defaultPrevented, true, "the WebView does not scroll the list on its own thread");
+    assert.equal(wheel.defaultPrevented, false, "the list is scrolled by the WebView, not by the page");
     assert.equal(box.scrollTop, 0);
-    act(() => { const current = [...frames.values()]; frames.clear(); for (const callback of current) callback(performance.now()); });
-    assert.equal(box.scrollTop, 180_000);
-    assert.ok(document.querySelector('tr[data-kd-track-id="5001"]'), "rows are committed in the frame that scrolled");
+    // The scroll it performs reaches the page as a scroll event; that frame commits the rows.
+    let clock = performance.now();
+    const frame = (elapsed: number) => act(() => {
+      clock += elapsed;
+      const current = [...frames.values()]; frames.clear();
+      for (const callback of current) callback(clock);
+    });
+    const rows = () => document.querySelectorAll("tr[data-kd-track-id]").length;
+    const ratings = () => document.querySelectorAll("tr[data-kd-track-id] .kd-table-rating").length;
+    box.scrollTop = 180_000;
+    box.dispatchEvent(new Event("scroll"));
+    frame(16);
+    assert.ok(document.querySelector('tr[data-kd-track-id="5001"]'), "rows are committed in the frame that reported the scroll");
     assert.equal(document.querySelector("tr[data-loading-track]"), null);
     assert.equal(requests.length, requestsBeforeJump);
+    // That frame landed far past the rendered rows: it mounts the screen under it, without the costly controls.
+    const landed = rows();
+    assert.ok(landed >= 19 && landed <= 60, `a jump renders the screen under it, not five (${landed})`);
+    assert.equal(ratings(), 0, "rows mounted mid-flight are text only");
+    const coversAtLanding = coverQueries.length;
+    // Once the scroll rests the window widens to both sides and the rows are completed.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
+    await flush();
+    const rested = rows();
+    assert.ok(rested >= 5 * 19, `the resting window is two screens either side (${rested})`);
+    assert.equal(ratings(), rested, "every row is complete at rest");
+    assert.ok(coverQueries.length > coversAtLanding, "covers are requested once the rows rest");
+    // A slow scroll keeps complete rows, and the rows that stay in the window keep their nodes.
+    const kept = document.querySelector('tr[data-kd-track-id="5001"]')!;
+    const keptRating = kept.querySelector(".kd-table-rating");
+    for (let step = 1; step <= 24; step += 1) {
+      box.scrollTop = 180_000 + step * 30;
+      box.dispatchEvent(new Event("scroll"));
+      frame(16);
+      assert.equal(ratings(), rows(), "rows entering during a slow scroll are complete");
+    }
+    assert.ok(document.querySelector('tr[data-kd-track-id="5020"]'));
+    assert.equal(document.querySelector('tr[data-kd-track-id="5001"]'), kept);
+    assert.equal(kept.querySelector(".kd-table-rating"), keptRating);
+    // A flick mounts the rows ahead of it text only and completes them when it slows down.
+    for (let step = 1; step <= 12; step += 1) {
+      box.scrollTop = 180_720 + step * 110;
+      box.dispatchEvent(new Event("scroll"));
+      frame(16);
+    }
+    assert.ok(ratings() < rows(), "rows entering during a flick are text only");
+    assert.ok(document.querySelector('tr[data-kd-track-id="5140"]'), "three screens are rendered ahead of a flick");
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
+    await flush();
+    assert.equal(ratings(), rows());
     await act(async () => useLibraryStore.getState().select(1));
     await act(async () => useLibraryStore.getState().select(10000, "range"));
     assert.equal(useLibraryStore.getState().selectedIds.length, 10000);
