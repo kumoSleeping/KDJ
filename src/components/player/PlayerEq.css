@@ -99,3 +99,37 @@
 }
 .kd-manager-gain-loudness { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .kd-manager-gain-loudness .kd-loudness-number { font-size: inherit; line-height: inherit; }
+
+/* Default themes: the strip is drawn with the bar's own line weight and colours rather than the
+   mixer panel's raised white knobs, so it reads as part of the bar. Theme packs draw their own. */
+:root:not([data-theme-pack]) .kd-player-eq .kd-manager-control {
+  --kd-knob-boost: var(--kd-theme);
+  --kd-knob-cut: var(--kd-theme);
+}
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-track {
+  stroke: color-mix(in srgb, var(--kd-muted) 34%, transparent);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-value { stroke-width: 2.4; }
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-body {
+  r: 12.5px;
+  fill: transparent;
+  stroke: none;
+}
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob-needle {
+  stroke: var(--kd-text-body);
+  stroke-width: 2.4;
+}
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:hover .kd-dj-arcknob-needle,
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob:focus-visible .kd-dj-arcknob-needle { stroke: var(--kd-text); }
+:root:not([data-theme-pack]) .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b,
+:root:not([data-theme-pack]) .kd-player-eq .kd-manager-control-label > span,
+:root:not([data-theme-pack]) .kd-player-eq .kd-manager-control-label > small {
+  font-family: var(--kd-font);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+:root:not([data-theme-pack]) .kd-player-eq .kd-manager-knob-stack .kd-dj-arcknob > b { color: var(--kd-muted); }
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-boost="true"] > b,
+:root:not([data-theme-pack]) .kd-player-eq .kd-dj-arcknob[data-cut="true"] > b { color: var(--kd-theme); }

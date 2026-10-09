@@ -234,3 +234,13 @@
     box-shadow: none;
   }
 }
+/* EQ strip: the knobs sit on the bar's face like the transport keys and only the readouts are
+   fields. A window of its own made the strip read as a separate widget dropped onto the bar. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-eq .kd-manager-control {
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-eq .kd-manager-control-head {
+  background: transparent;
+  padding: 0;
+}

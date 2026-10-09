@@ -215,6 +215,21 @@ function NowPlayingControls({
 
   return (
     <div className="kd-manager-control" data-side={side === null ? undefined : side === 0 ? "a" : "b"} aria-busy={!ready}>
+      {/* Controls sit on the transport's row, readouts on the waveform's row below. */}
+      <div className="kd-manager-mixer-layout">
+        <div className="kd-manager-knob-stack">
+          <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
+            format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }}
+            readout={hasLoudness ? <span className="kd-manager-gain-loudness" aria-label="原曲相对响度" title="原曲相对响度（不含增益、EQ 与音量调整）">
+              <EnergyMeter value={analyzedTrack.energy} rmsDb={analyzedTrack.rms_db} peakDb={analyzedTrack.peak_db} />
+            </span> : null} />
+          <ArcKnob size="xs" label="FILTER" value={mixer.filter} onChange={(filter) => setMixer({ filter })} onReset={() => setMixer({ filter: 0 })} />
+          <ArcKnob size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
+          <ArcKnob size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
+          <ArcKnob size="xs" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
+        </div>
+      </div>
+
       <div className="kd-manager-control-head">
         <div className="kd-manager-control-readout" data-kind="key">
           <span className="kd-manager-control-label">
@@ -249,20 +264,6 @@ function NowPlayingControls({
           <strong>{effectiveBpm ? effectiveBpm.toFixed(1) : "—"}</strong>
         </div>
         <HeaderTempoControl rate={tempoDraft} range={tempoRange} onRate={setRate} disabled={!ready} />
-      </div>
-
-      <div className="kd-manager-mixer-layout">
-        <div className="kd-manager-knob-stack">
-          <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
-            format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }}
-            readout={hasLoudness ? <span className="kd-manager-gain-loudness" aria-label="原曲相对响度" title="原曲相对响度（不含增益、EQ 与音量调整）">
-              <EnergyMeter value={analyzedTrack.energy} rmsDb={analyzedTrack.rms_db} peakDb={analyzedTrack.peak_db} />
-            </span> : null} />
-          <ArcKnob size="xs" label="FILTER" value={mixer.filter} onChange={(filter) => setMixer({ filter })} onReset={() => setMixer({ filter: 0 })} />
-          <ArcKnob size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
-          <ArcKnob size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
-          <ArcKnob size="xs" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
-        </div>
       </div>
     </div>
   );
