@@ -20,9 +20,10 @@
   height: min(var(--kd-drawer-extent), calc(100% - var(--kd-info-lift, 0px)));
   min-height: min(12rem, 100%);
   border-bottom-left-radius: 14px;
-  background: var(--kd-panel);
+  /* On a dark list a shadow alone does not lift the sheet; it is also a shade lighter. */
+  background: color-mix(in srgb, var(--kd-text) 4%, var(--kd-panel));
   /* The edge of a surface that floats over the list: a soft drop, no drawn line. */
-  box-shadow: 0 18px 44px -14px rgb(0 0 0 / 0.34), 0 2px 10px -2px rgb(0 0 0 / 0.14);
+  box-shadow: 0 22px 50px -12px rgb(0 0 0 / 0.72), 0 2px 12px -2px rgb(0 0 0 / 0.5);
   color: var(--kd-text);
   overflow: hidden;
   pointer-events: auto;
@@ -33,6 +34,7 @@
 .kd-drawer[data-extent="two-thirds"] { --kd-drawer-extent: 66.667%; }
 .kd-drawer[data-extent="full"] { --kd-drawer-extent: 100%; border-bottom-left-radius: 0; }
 :root[data-theme="light"] .kd-drawer {
+  background: var(--kd-panel);
   box-shadow: 0 18px 44px -16px rgb(30 34 44 / 0.26), 0 2px 10px -2px rgb(30 34 44 / 0.1);
 }
 .kd-drawer[data-leaving] { animation: kd-drawer-up 300ms cubic-bezier(0.5, 0, 0.9, 0.4) both; }
@@ -116,3 +118,11 @@
 }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer-host { clip-path: inset(0 0 -1rem -1rem); }
 :root[data-theme-pack="sakulaptop98"] .kd-title-tabs { padding: 0.8rem 0.7rem 0.5rem 1rem; }
+
+/* No rules between the groups of a drawer: spacing and the group titles separate them. */
+.kd-drawer .kd-drawer-body :is(.kd-download-prefs, .kd-download-defaults, .kd-meta-editor-foot, .kd-viz-bar, .kd-viz-group) {
+  border-top: 0;
+  border-bottom: 0;
+}
+.kd-drawer .kd-drawer-body .kd-viz-group + .kd-viz-group { margin-top: 0.4rem; }
+:root:not([data-theme-pack]) .kd-drawer .kd-drawer-body .kd-panel-head { border-bottom: 0; }
