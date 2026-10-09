@@ -50,7 +50,7 @@ import { LiveVjPanel } from "../composition/LiveVjPanel";
 import { SidePanels } from "../player/SidePanels";
 import { useDrawerOrder } from "../drawer/useDrawerOrder";
 import { releaseDrawerHolds, useHeldDrawer } from "../../lib/drawerHold";
-import { useDrawerApps } from "./drawerApps";
+import { useDrawerApps, useDrawerEntries } from "./drawerApps";
 import { DrawerHost } from "../drawer/Drawer";
 import type { DrawerSpec } from "../drawer/drawerSchema";
 import { VisualizerPopup } from "../player/VisualizerPopup";
@@ -1657,6 +1657,7 @@ export function Workspace() {
       else useAppStore.getState().dismissOverlay();
     },
   });
+  const drawerEntries = useDrawerEntries();
   const dockOrder = useDrawerOrder(drawerApps.map(app => app.id), dockRaised);
   // download-toss: a parcel in flight holds the drawer on the app it is aimed at; what was asked
   // for meanwhile is shown, and the other apps closed, once it has landed (lib/drawerHold.ts).
@@ -2210,6 +2211,7 @@ export function Workspace() {
         data-compact-tree={compactTreeExpanded ? "open" : "closed"}
       >
         <AppChrome
+          drawerLip={layout === "wide"}
           // Mac 用 Overlay 红绿灯；Windows / Linux 关掉系统标题栏后自绘三键。
           showWindowControls={
             Boolean(window.kdj?.platform) &&
@@ -2219,6 +2221,7 @@ export function Workspace() {
           }
           actions={
             <ChromeActions
+              sideApps={layout !== "wide"}
               tasksOpen={downloadsOpen}
               onTasks={() => {
                 useSidePanels.getState().setDownloads(!downloadsOpen);
@@ -2271,7 +2274,10 @@ export function Workspace() {
           )}
 
           <div className="kd-main-slot">
-            <div className="kd-table-wrap" data-aside={showAside ? "open" : "closed"}>
+            <div className="kd-table-wrap" data-aside={showAside ? "open" : "closed"} data-drawer-head={layout === "wide" || undefined}>
+            {/* The drawer's head shares the top row with the search; its sheet comes down over the list. */}
+            {layout === "wide" && <DrawerHost spec={drawerSpec} entries={drawerEntries} clear=".kd-workspace-pane > .kd-activity"
+              hostRef={drawerHostRef} onResizeStart={startColumnDrag("right")} />}
             <div className="kd-panel-dock kd-panel-dock-top">
             {/* 搜索带可收起；查询文字、来源选择和已有结果都保留。 */}
             {aggregateSearchOpen ? (
@@ -2294,7 +2300,6 @@ export function Workspace() {
                 data-kd-temporary-folder-drop="true" data-hovered={temporaryFolderDrop.hovered || undefined}>
                 临时打开文件夹
               </div>}
-              {layout === "wide" && <DrawerHost spec={drawerSpec} hostRef={drawerHostRef} onResizeStart={startColumnDrag("right")} />}
               <div
                 ref={workspacePaneRef}
                 className="kd-workspace-panes"

@@ -2,12 +2,24 @@
 
 On a wide window everything that used to take the right column — lyrics, downloads and exports,
 settings, the visualizer configuration, the Meta editor, search tips, duplicate analysis, a
-network-video preview — is an **app of one drawer**. The drawer hangs from the bottom edge of the
-list's toolbar and is pulled down over the right of the list like a blind. It covers the list; it
-never takes a column from it, so the list does not reflow while the drawer moves.
+network-video preview — is an **app of one drawer**.
+
+The drawer has two parts that are one surface:
+
+- **The head** hangs from the top chrome at the right of the aggregate search and is always there.
+  The top row is `[search — the remaining width] [head — as wide as the drawer]`. Rolled up, the
+  head is a small lip that lists the apps opened by hand (下载, 歌词, 设置 — `DrawerEntry`); while an
+  app is open it carries that app's title row (title or page tabs, caption, tools), the entries as
+  small icons, and the roll-up button.
+- **The sheet** rolls down from the head's lower edge over the right of the list like a blind. It
+  covers the list; it never takes a column from it, so the list does not reflow while the drawer
+  moves. Head and sheet share one width (`--kd-drawer-w`, the dragged `--kd-right` up to 45 % of
+  the list's column) and one left edge; nothing is drawn where they meet.
 
 Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`,
-`SlidePages.tsx`, `useDrawerOrder.ts`) and `src/components/workspace/drawerApps.tsx`.
+`SlidePages.tsx`, `useDrawerOrder.ts`) and `src/components/workspace/drawerApps.tsx`
+(`useDrawerApps`, `useDrawerEntries`). `DrawerHost` is mounted in the list's column
+(`.kd-table-wrap`) by `Workspace.tsx`; the top row's layout is in `design.css`.
 
 ## Rules
 
@@ -16,19 +28,35 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   app that is wanted again is asked for again from its own entry.
 - **An app never draws its own shell.** No head, no close button, no frame, no background, no
   entrance or exit motion. It supplies a `DrawerSpec` and a body; `DrawerHost` draws the rest.
-- **How far it comes down** is the spec's `extent`:
+- **Opened from the head or from elsewhere.** An app that people open by hand has an entry in the
+  head (`useDrawerEntries`): clicking it opens the app, clicking the open app's entry closes it
+  (as do the roll-up button and Esc), and the open app's entry is written in the theme colour. An
+  app that is only opened from elsewhere — a row's menu, a button on the picture — has no entry
+  and uses the head the same way while it is open. Do not add a second button for an app that has
+  an entry (the window chrome keeps 下载 and 设置 only where there is no drawer, on a phone).
+- **How far it comes down** is the spec's `extent`, measured from the head's lower edge to the
+  bottom of the list (never lower than a pinned panel above the player bar, `--kd-info-lift`):
   - `two-thirds` — always two thirds of the way (lyrics);
   - `content` — two thirds while everything fits, all the way down once it does not (downloads,
     the Meta editor, tips);
   - `full` — always all the way down (settings, the visualizer configuration).
   A body's scrolling element carries the class `kd-scroll` (or `data-drawer-scroll`); that is what
-  `content` measures.
+  `content` measures. A `content` body is built with its sheet and measured before the first
+  paint; any other body is built one frame after its sheet, so a heavy app does not hold up the
+  frame the roll-down starts from.
 - **Pages are the title.** An app with several pages lists them in `pages`; the drawer writes them
-  as its title (`TitleTabs`: the page in view at title size in the theme colour, the others
+  as its title in the head (`TitleTabs`: the page in view at title size in the theme colour, the others
   smaller and quiet beside it). The body wraps the part that changes in
   `<SlidePages page={…} order={…}>`, which slides the old picture out and the new one in from the
   side its title lies on. Pages need not stay mounted.
 - **No divider lines** inside a drawer (see AGENTS.md): groups are separated by spacing and type.
+- **Motion.** The sheet comes down in one decelerating move and stops; it rolls up accelerating.
+  Only `transform` and `opacity` move: what is on the sheet rides with it, the title in the head
+  slides out as the next one slides in, and the sheet's height follows its content only once it is
+  at rest. Keep it that way — no bounce, no second layer fading over a moving sheet.
+- **Toolbars under the sheet.** The sheet passes over the right end of the list's toolbar.
+  `DrawerHost` gives each toolbar named by its `clear` selector the covered width as end padding
+  (`--kd-drawer-cover`) and slides the tools to their new place; the table is never laid out again.
 - **Refusing to close.** `close()` may return `false` (an unsaved draft). The drawer then stays,
   and an app that was opened over it gives way.
 - **Held while something flies into it.** Motion aimed at an app (the download parcel,
@@ -60,6 +88,20 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
 
 3. If it can be asked for again while open, call `useSidePanels.getState().raise(id)` from its
    entry so the drawer shows it.
+4. If people open it by hand, give it an entry in `useDrawerEntries()`:
+
+   ```tsx
+   {
+     id: "downloads",                 // the app's id; also data-drawer-entry on the control
+     label: "下载",                    // a word or two beside the icon while rolled up
+     title: "下载与导出",              // optional full name for the tooltip
+     icon: <Download size={15} aria-hidden="true" />,
+     count: running,                  // optional: a small number while the app is put away
+     open: () => useSidePanels.getState().setDownloads(true),
+   }
+   ```
+
+   Keep the list short: the head is a lip, not a toolbar.
 
 ## Reusing the pieces elsewhere
 
