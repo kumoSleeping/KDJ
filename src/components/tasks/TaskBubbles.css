@@ -272,11 +272,14 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 }
 
 /* Sakura98: a small window of its own — the pack's face, its bevel and hard drop, squared. */
-:root[data-theme-pack="sakulaptop98"] .kd-task {
+/* Square at every size: the size rules above round a large bubble, which a 98 window is not. */
+:root[data-theme-pack="sakulaptop98"] .kd-task-slot .kd-task {
   --kd-task-surface: var(--s98-face);
-  border-radius: 3px;
+  border: 0;
+  border-radius: 0;
   box-shadow: var(--kd-shadow-float);
 }
+:root[data-theme-pack="sakulaptop98"] .kd-task-slot .kd-task-cover { border-radius: 0; }
 :root[data-theme-pack="sakulaptop98"] .kd-task-main { padding: 9px 9px 9px 11px; }
 :root[data-theme-pack="sakulaptop98"] .kd-task-cover {
   border-radius: 2px;

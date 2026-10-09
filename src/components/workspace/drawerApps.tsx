@@ -18,6 +18,7 @@ import { SlidePages } from "../drawer/SlidePages";
 import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
+import { requestPlayingLyrics } from "../player/lyricsEntry";
 import { DownloadTaskPages, taskViews } from "../player/TaskPanels";
 import { SettingsPanel } from "../settings/SettingsPanel";
 
@@ -77,7 +78,7 @@ export function useDrawerApps(): DrawerSpec[] {
   if (settings) apps.push({
     id: "settings",
     title: "设置",
-    extent: "full",
+    extent: "fit",
     pages: settingsPages,
     page: settingsPage,
     onPage: id => useSettingsPage.getState().setPage(id as typeof settingsPage),
@@ -132,7 +133,8 @@ export function useDrawerEntries(): DrawerEntry[] {
       id: "lyrics",
       label: "歌词",
       icon: <TextQuote size={15} aria-hidden="true" />,
-      open: () => useSidePanels.getState().setLyrics(true),
+      // No lyrics: a small note says so; an empty panel does not come out.
+      open: () => requestPlayingLyrics(),
     },
     {
       id: "settings",

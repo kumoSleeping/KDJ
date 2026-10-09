@@ -5,10 +5,12 @@ import type { ReactNode } from "react";
  * - `two-thirds`: always two thirds of the way down.
  * - `content`: two thirds while everything fits there; beyond that exactly as tall as what it
  *   holds needs, growing with it, up to the whole way down.
+ * - `fit`: exactly as tall as what it holds needs — short for a short page, long for a long
+ *   one — up to the whole way down.
  * - `full`: always the whole way down.
  * A height the user drags (the panel's bottom edge) replaces any of these until it is reset.
  */
-export type DrawerExtent = "two-thirds" | "content" | "full";
+export type DrawerExtent = "two-thirds" | "content" | "fit" | "full";
 
 /** One page of a drawer. Its label is a word of the drawer's title. */
 export interface DrawerPage {

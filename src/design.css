@@ -3508,7 +3508,8 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* 自研小窗：无外框，画面即窗口；控件叠在视频里，悬停才显；可拖。 */
 .kd-pip-float {
   position: fixed;
-  z-index: 80;
+  /* Its place among the floating surfaces: the one touched last is in front (lib/surfaceOrder.ts). */
+  z-index: var(--kd-surface-z, 80);
   max-width: calc(100vw - 1rem);
   margin: 0;
   padding: 0;

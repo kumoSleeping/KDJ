@@ -1,3 +1,4 @@
+import { raiseSurface } from "../../lib/surfaceOrder";
 import {
   useEffect,
   useLayoutEffect,
@@ -167,6 +168,8 @@ export function useFloatingMediaWindow(options: FloatingMediaWindowOptions): Flo
     }
     if (now && !was.shown) {
       self.element = element.current;
+      // A window that has just come out is in front of the other floating surfaces.
+      raiseSurface(element.current);
       floatingMediaMotion.show(self, key);
     } else if (!now && was.shown) {
       floatingMediaMotion.hide(self);
@@ -193,6 +196,8 @@ export function useFloatingMediaWindow(options: FloatingMediaWindowOptions): Flo
     const { options: current, rect: at, remembered: before } = live.current;
     if (!current.shown || current.locked || event.button !== 0 || !event.isPrimary) return;
     const target = event.target as HTMLElement;
+    // Touching the window brings it in front of the drawer's panel.
+    raiseSurface(element.current);
     if (!edge && (target.closest(DRAG_EXEMPT) || current.dragExempt?.(target))) return;
     if (edge || current.swallowPress) { event.preventDefault(); event.stopPropagation(); }
     // The hand takes the window from wherever a motion had it.

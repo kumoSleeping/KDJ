@@ -1,7 +1,9 @@
 import { createContext, startTransition, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type Ref } from "react";
-import { ChevronsUp } from "lucide-react";
+import { ChevronsRight } from "lucide-react";
 import { TitleTabs } from "./TitleTabs";
+import { createPortal } from "react-dom";
 import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
+import { raiseSurface } from "../../lib/surfaceOrder";
 import type { DrawerEntry, DrawerSpec } from "./drawerSchema";
 import "./Drawer.css";
 
@@ -58,6 +60,7 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart, onHeightSt
   // before the first paint, so the sheet starts at the height it will keep. Any other body is
   // built a frame later: the sheet's first frame, the one its entrance starts from, is not
   // held up by a heavy app (settings, the visualizer configuration).
+  const sized = spec.extent === "content" || spec.extent === "fit";
   const [built, setBuilt] = useState(spec.extent === "content");
   useEffect(() => {
     if (built) return;
@@ -75,7 +78,7 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart, onHeightSt
     return () => window.clearTimeout(timer);
   }, []);
   useEffect(() => {
-    if (spec.extent !== "content") return;
+    if (!sized) return;
     const node = body.current, sheet = layer.current, host = sheet?.parentElement;
     if (!node || !sheet || !host || leaving) return;
     let frame = 0;
@@ -93,7 +96,7 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart, onHeightSt
     const changed = new MutationObserver(schedule);
     changed.observe(node, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "open", "aria-expanded"] });
     return () => { cancelAnimationFrame(frame); resized.disconnect(); changed.disconnect(); };
-  }, [spec.extent, spec.page, leaving]);
+  }, [sized, spec.page, leaving]);
   // The animation is the usual end of a leaving drawer; the timer covers a tab in the background.
   useEffect(() => {
     if (!leaving) return;
@@ -116,7 +119,7 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart, onHeightSt
         {spec.tools}
         <button type="button" className="kd-drawer-rollup" aria-label={`收起${spec.title}`} title={`收起${spec.title} · Esc`}
           onClick={() => { spec.close(); }}>
-          <ChevronsUp size={16} aria-hidden="true" />
+          <ChevronsRight size={16} aria-hidden="true" />
         </button>
       </TitleTabs>
       <div ref={body} className="kd-drawer-body" id={panelId} role={spec.pages ? "tabpanel" : undefined}
@@ -206,7 +209,7 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
     return Number.isFinite(saved) && saved > 0 ? saved : null;
   });
   const startHeightDrag = (event: PointerEvent<HTMLDivElement>) => {
-    const sheet = event.currentTarget.parentElement, node = host.current;
+    const sheet = event.currentTarget.parentElement, node = sheet?.parentElement;
     if (event.button !== 0 || !sheet || !node) return;
     event.preventDefault();
     const handle = event.currentTarget, from = event.clientY, start = sheet.getBoundingClientRect().height;
@@ -237,20 +240,53 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
   const ask = (entry: DrawerEntry) => { if (spec?.id === entry.id) spec.close(); else entry.open(); };
   // One panel on screen at a time: while one is leaving, the next waits its turn.
   const waiting = layers.some(layer => layer.leaving);
-  return <div ref={setHost} className="kd-drawer-host" data-open={spec ? "true" : undefined}
-    data-sized={userHeight === null ? undefined : "true"}
-    style={userHeight === null ? undefined : { "--kd-drawer-user-h": `${userHeight}px` } as CSSProperties}>
+  // The panels are drawn outside the list's own stacking order, beside the floating media
+  // window, so that the two can pass over each other. `area` is where they belong in the
+  // layout; the frame that holds them is kept on that rectangle.
+  const area = useRef<HTMLDivElement>(null);
+  const sheets = useRef<HTMLDivElement>(null);
+  const [outside, setOutside] = useState<HTMLElement | null>(null);
+  const out = layers.length > 0;
+  useLayoutEffect(() => {
+    const from = area.current, to = sheets.current;
+    if (!out || !from || !to) return;
+    const sync = () => {
+      const box = from.getBoundingClientRect();
+      to.style.left = `${box.left}px`;
+      to.style.top = `${box.top}px`;
+      to.style.width = `${box.width}px`;
+      to.style.height = `${box.height}px`;
+    };
+    sync();
+    window.addEventListener("resize", sync);
+    if (typeof ResizeObserver === "undefined") return () => window.removeEventListener("resize", sync);
+    const resized = new ResizeObserver(sync);
+    resized.observe(from);
+    // The list's column moving (the sidebar or an editor column resized) moves the area too.
+    const column = host.current?.parentElement;
+    if (column) resized.observe(column);
+    return () => { window.removeEventListener("resize", sync); resized.disconnect(); };
+  }, [out, outside]);
+  // A panel that comes out is in front of the other floating surfaces.
+  const frontKey = front?.key;
+  useLayoutEffect(() => { if (frontKey !== undefined && !waiting) raiseSurface(sheets.current); }, [frontKey, waiting]);
+  const panels = out ? <div ref={sheets} className="kd-drawer-sheets" data-sized={userHeight === null ? undefined : "true"}
+    style={userHeight === null ? undefined : { "--kd-drawer-user-h": `${userHeight}px` } as CSSProperties}
+    onPointerDownCapture={() => raiseSurface(sheets.current)}>
+    {layers.map(layer => {
+      const shown = layer.leaving ?? spec;
+      if (!shown || (waiting && !layer.leaving)) return null;
+      return <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} panelId={`${panel}-${layer.key}`}
+        onResizeStart={onResizeStart} onHeightStart={startHeightDrag} onHeightReset={resetHeight}
+        onGone={() => setLayers(list => list.filter(item => item.key !== layer.key))} />;
+    })}
+  </div> : null;
+  return <div ref={node => { setHost(node); setOutside(node ? node.closest<HTMLElement>(".kd-app") ?? node.parentElement : null); }}
+    className="kd-drawer-host" data-open={spec ? "true" : undefined}>
     {entries.length ? <nav className="kd-drawer-launcher" aria-label="侧边应用">
       <DrawerEntries entries={entries} front={spec?.id ?? null} onAsk={ask} />
     </nav> : null}
-    <div className="kd-drawer-sheets">
-      {layers.map(layer => {
-        const shown = layer.leaving ?? spec;
-        if (!shown || (waiting && !layer.leaving)) return null;
-        return <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} panelId={`${panel}-${layer.key}`}
-          onResizeStart={onResizeStart} onHeightStart={startHeightDrag} onHeightReset={resetHeight}
-          onGone={() => setLayers(list => list.filter(item => item.key !== layer.key))} />;
-      })}
-    </div>
+    <div ref={area} className="kd-drawer-area" aria-hidden="true" />
+    {panels && outside ? createPortal(panels, outside) : null}
   </div>;
 }

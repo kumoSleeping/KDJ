@@ -1,14 +1,27 @@
-/* Captions and controls stay inside the picture. Inline previews already have
-   a panel heading and must not repeat it over the image. */
+/* A floating window is a square 98 window: its caption bar has a strip of its own above the
+   picture, so it never covers what is shown. The controls stay inside the picture. Inline
+   previews already have a panel heading and must not repeat it over the image. */
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]) { border-radius: 0; }
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) {
+  --s98-pip-caption: 1.45rem;
+  padding-top: var(--s98-pip-caption);
+  background: var(--s98-caption);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) .kd-pip-float-stage { overflow: visible; }
 :root[data-theme-pack="sakulaptop98"] .kd-pip-float-chrome {
   background: none;
   pointer-events: none;
 }
 :root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not([data-platform-player="true"]):not(.kd-viz-preview) .kd-pip-float-top {
   position: absolute;
-  top: 0;
+  top: auto;
+  bottom: 100%;
   left: 0;
   right: 0;
+  box-sizing: border-box;
+  height: var(--s98-pip-caption);
+  min-height: 0;
+  pointer-events: auto;
 }
 :root[data-theme-pack="sakulaptop98"] .kd-pip-float:not([data-fullscreen="true"]):not(.kd-viz-preview) .kd-pip-float-chrome {
   opacity: 1;

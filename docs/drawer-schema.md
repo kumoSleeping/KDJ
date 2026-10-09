@@ -40,6 +40,8 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   - `two-thirds` — always two thirds of the way (lyrics);
   - `content` — two thirds while everything fits; beyond that exactly as tall as what it holds
     needs, growing row by row up to the whole way down (downloads, the Meta editor, tips);
+  - `fit` — exactly as tall as what it holds needs, short or long, up to the whole way down,
+    following the content as it changes (settings: each page is as tall as its own sections);
   - `full` — always all the way down (settings, the visualizer configuration).
   A body's scrolling element carries the class `kd-scroll` (or `data-drawer-scroll`); that is what
   `content` measures. A `content` body is built with its sheet and measured before the first
@@ -56,6 +58,8 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   left completely. Only `transform` moves: what is on the panel rides
   with it, and its height follows its content only once it is at rest. Keep it that way — no
   bounce, no second layer fading over a moving panel.
+- **Depth.** The panel and the floating media window share one order: whichever was opened or
+  touched last is in front (`src/lib/surfaceOrder.ts`).
 - **It takes no room.** The panel floats over the list and its toolbar; nothing beneath it is
   moved or resized for it. It is resized by its left edge (width, up to most of the list's
   column) and its bottom edge (height; a double click returns to the app's extent).

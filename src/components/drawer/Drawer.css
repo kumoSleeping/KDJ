@@ -72,13 +72,23 @@
   line-height: 1;
 }
 
-/* —— The panel —— */
-.kd-drawer-sheets {
+/* —— The panel ——
+   Where the panels belong in the layout: the list's column below the search row. The frame
+   that holds them is drawn outside the list, on this same rectangle (DrawerHost keeps it
+   there), so that a panel and the floating media window can pass over each other. */
+.kd-drawer-area {
   position: absolute;
   top: var(--kd-drawer-head-h);
   right: 0;
   bottom: 0;
   left: 0;
+  pointer-events: none;
+}
+.kd-drawer-sheets {
+  position: fixed;
+  /* Its place among the floating surfaces: the one touched last is in front (lib/surfaceOrder.ts). */
+  z-index: var(--kd-surface-z, 80);
+  pointer-events: none;
 }
 .kd-drawer {
   --kd-drawer-room: calc(100% - var(--kd-drawer-gap));
@@ -110,6 +120,10 @@
 }
 .kd-drawer[data-extent="two-thirds"] { --kd-drawer-extent: 0.66667; }
 .kd-drawer[data-extent="full"] { --kd-drawer-extent: 1; }
+/* `fit`: exactly as tall as what it holds needs, whatever that is, up to the whole way down. */
+.kd-drawer[data-extent="fit"] {
+  height: min(max(12rem, var(--kd-drawer-fit, calc(var(--kd-drawer-room) * 0.5))), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
+}
 /* `content`: two thirds while what it holds fits there, then exactly as tall as that needs
    (--kd-drawer-fit, measured by DrawerHost), growing row by row up to the whole way down. */
 .kd-drawer[data-extent="content"] {
@@ -127,7 +141,7 @@
   to { transform: translateX(calc(100% + var(--kd-drawer-gap) + 3rem)); }
 }
 /* A height the user dragged replaces the app's own extent, within the room there is. */
-.kd-drawer-host[data-sized] .kd-drawer {
+.kd-drawer-sheets[data-sized] .kd-drawer {
   height: min(var(--kd-drawer-user-h), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
 }
 @keyframes kd-drawer-fade-in {
@@ -169,15 +183,46 @@
   .kd-drawer-body[data-late]:not(:empty) { animation: none; }
 }
 
-/* Sakura98: the panel is a 98 window face, square and bevelled, with the pack's hard shadow.
-   Kept here so it does not depend on the installed copy of the pack. */
+/* Sakura98: the panel is a 98 window — a square bevelled face with the pack's hard shadow, and
+   its title row is the window's caption bar, in the same tone as every other caption of the
+   pack. Kept here so it does not depend on the installed copy of the pack. */
 :root[data-theme-pack="sakulaptop98"] .kd-drawer {
   border: 0;
   border-radius: 0;
+  padding: 3px;
   background: var(--s98-face-hi, var(--kd-panel));
   box-shadow: var(--s98-raised), 4px 6px 0 -1px rgb(120 40 70 / 0.22);
 }
-:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs { padding: 0.75rem 0.6rem 0.45rem 1rem; }
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs {
+  align-items: center;
+  min-height: 1.9rem;
+  padding: 2px 3px 2px 0.6rem;
+  background: var(--s98-caption);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 -1px var(--s98-shadow);
+  color: var(--kd-text);
+}
+/* A caption is small bold type: the page in view is told by weight and ink, not by size. */
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs :is(.kd-title-tabs-title, .kd-title-tabs-list > button) {
+  font-size: var(--kd-size);
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: normal;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list { gap: 0.9rem; }
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list > button { color: color-mix(in srgb, var(--kd-text) 58%, transparent); font-weight: 600; }
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list > button[aria-selected="true"] { color: var(--kd-text); font-weight: 800; }
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-caption { margin-top: 0; font-size: var(--kd-size-xs); color: color-mix(in srgb, var(--kd-text) 70%, transparent); }
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-tools { min-height: 0; gap: 3px; color: var(--kd-text); }
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-tools > button {
+  width: 1.35rem;
+  height: 1.25rem;
+  border-radius: 0;
+  background: var(--s98-face);
+  box-shadow: var(--s98-raised);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-tools > button:active:not(:disabled) { box-shadow: var(--s98-sunken); }
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-tools > button > svg { width: 13px; height: 13px; }
+:root[data-theme-pack="sakulaptop98"] .kd-drawer-entry[aria-pressed="true"] { color: var(--kd-theme); }
 
 /* ---- What the apps put on the sheet. The sheet is the only surface: a body brings no frame,
    no head and no background of its own. ---- */

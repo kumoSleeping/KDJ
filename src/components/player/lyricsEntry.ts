@@ -19,6 +19,29 @@ export interface LyricsEntry {
   toggle(): void;
 }
 
+const isVideo = (track: Track) => isVideoTrack(track.format) || streamMeta(track)?.kind === "video";
+
+/**
+ * Ask for the lyrics of the playing song, from any entry. They open in the drawer when there
+ * are some, after a match if none has been made yet; when there is nothing to show, a small
+ * note says so for a moment instead of an empty drawer coming out. `onOpened` runs when the
+ * lyrics do open.
+ */
+export function requestPlayingLyrics(onOpened?: () => void): void {
+  const track = getPlayingTrack();
+  const none = (detail?: string) => showTask({ id: "lyrics-entry", kind: "notice", title: "没有找到歌词", detail, size: "small", stay: 3_000 });
+  if (!track) { none(); return; }
+  if (isVideo(track)) { none(track.title || track.filename); return; }
+  const show = () => { useSidePanels.getState().setLyrics(true); onOpened?.(); };
+  if (hasVisibleLyrics(useLyricsStore.getState().get(track.id).lines)) { show(); return; }
+  const id = track.id;
+  void useLyricsStore.getState().ensure(track, { matchMissing: true }).then(() => {
+    if (getPlayingTrack()?.id !== id) return;
+    if (hasVisibleLyrics(useLyricsStore.getState().get(id).lines)) show();
+    else none(track.title || track.filename);
+  });
+}
+
 /**
  * The entry does not depend on an earlier match: opening it is an explicit request, so a
  * missing or failed match is tried again and the lyrics open once they have arrived.
@@ -27,7 +50,7 @@ export interface LyricsEntry {
 export function useLyricsEntry(track: Track | null, onOpened?: () => void): LyricsEntry {
   const open = useSidePanels(state => state.lyrics);
   const entry = useLyricsStore(state => state.get(track?.id));
-  const video = !!track && (isVideoTrack(track.format) || streamMeta(track)?.kind === "video");
+  const video = !!track && isVideo(track);
   const ready = !video && hasVisibleLyrics(entry.lines);
   return {
     available: !!track && !video,
@@ -36,15 +59,7 @@ export function useLyricsEntry(track: Track | null, onOpened?: () => void): Lyri
     toggle() {
       if (!track || video) return;
       if (useSidePanels.getState().lyrics) { useSidePanels.getState().setLyrics(false); return; }
-      const show = () => { useSidePanels.getState().setLyrics(true); onOpened?.(); };
-      if (ready) { show(); return; }
-      const id = track.id;
-      void useLyricsStore.getState().ensure(track, { matchMissing: true }).then(() => {
-        if (getPlayingTrack()?.id !== id) return;
-        if (hasVisibleLyrics(useLyricsStore.getState().get(id).lines)) show();
-        // Nothing to open: the request is answered instead of ending in silence.
-        else showTask({ id: "lyrics-entry", kind: "notice", title: "没有找到歌词", detail: track.title || track.filename, size: "small", stay: 3_000 });
-      });
+      requestPlayingLyrics(onOpened);
     },
   };
 }
