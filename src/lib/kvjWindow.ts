@@ -10,7 +10,9 @@ import { useToastStore } from "../stores/toastStore";
 const REQUEST = "kdj:window-request", REPLY = "kdj:window-reply", SNAPSHOT = "kdj:player-snapshot";
 type Request = { id: string; sender: string; action: "ping" | "open" | "transport" | "settings" | "preview-pause" | "visualizer-exports"; payload?: unknown };
 const EXPORTS = "kdj:visualizer-exports";
-export type VisualizerExportCommand = { action: "initialize" | "start" | "cancel" | "remove"; id?: string };
+export type VisualizerExportCommand = { action: "initialize" | "start" | "cancel" | "remove"; id?: string }
+  /** Queue the draft another window has just saved for this song. */
+  | { action: "enqueue"; trackId: number };
 export type VisualizerExportSnapshot = { tasks: VisualizerExportTask[]; error: string };
 type Reply = { id: string; value?: unknown; error?: string };
 type Transport = { method: "play" | "pause" | "seek" | "replaceAudio"; argument?: number | UnifiedPlayerSource; trackId: number | null };
@@ -133,7 +135,13 @@ export function startWindowLink(): Promise<void> {
           const exports = useVisualizerExportStore.getState();
           await exports.initialize();
           if (command.action !== "initialize") useVisualizerExportStore.setState({ error: "" });
-          if (command.action === "start") exports.start(command.id);
+          if (command.action === "enqueue") {
+            const { loadVisualizerDraft } = await import("./visualizerStudio");
+            const draft = await loadVisualizerDraft(command.trackId);
+            if (!draft) throw new Error("没有找到这首歌的可视化工程");
+            await exports.enqueue(draft);
+          }
+          else if (command.action === "start") exports.start(command.id);
           else if (command.action === "cancel") await exports.cancel(command.id);
           else if (command.action === "remove" && command.id) await exports.remove(command.id);
           else if (command.action !== "initialize") throw new Error("不支持的导出操作");

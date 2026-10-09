@@ -94,7 +94,16 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     return initializing;
   },
   async enqueue(draft) {
-    if (usesVisualizerWindow()) throw new Error("请在可视化编辑器中加入导出任务");
+    if (usesVisualizerWindow()) {
+      // The queue lives in the visualizer window. Hand it the picture exactly as it is on
+      // screen here: drafts are stored per song in a database both windows share.
+      const { saveVisualizerDraft } = await import("../lib/visualizerStudio");
+      await saveVisualizerDraft(draft);
+      await fromOwner({ action: "enqueue", trackId: draft.project.track.id });
+      const failure = get().error;
+      if (failure) throw new Error(failure);
+      return;
+    }
     // Freeze before the first await: the editor can immediately continue editing.
     const snapshot = { project: structuredClone(draft.project), images: [...draft.images] };
     validateVisualizerProject(snapshot.project);
