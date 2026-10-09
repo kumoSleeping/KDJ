@@ -237,6 +237,17 @@ impl YoutubeClient {
         self.post_web("search", &body).await
     }
 
+    /// Metadata must not depend on obtaining a playable stream or passing a player challenge.
+    pub async fn watch_metadata(&self, video_id: &str) -> Result<Value> {
+        let mut body = Self::web_context();
+        let map = body.as_object_mut().expect("WEB context is an object");
+        map.insert("videoId".into(), json!(video_id));
+        // The watch queue carries the current video's duration and thumbnail. Only the exact
+        // requested ID is consumed by the provider, never the generated Mix recommendations.
+        map.insert("playlistId".into(), json!(format!("RD{video_id}")));
+        self.post_web("next", &body).await
+    }
+
     pub async fn video_info(&self, video_id: &str) -> Result<VideoInfo> {
         if let Some(info) = self.cached_video(video_id) {
             return Ok(info);
@@ -367,7 +378,7 @@ impl YoutubeClient {
         })
     }
 
-    fn cached_video(&self, video_id: &str) -> Option<VideoInfo> {
+    pub(super) fn cached_video(&self, video_id: &str) -> Option<VideoInfo> {
         let mut videos = self.videos.write().unwrap_or_else(|lock| lock.into_inner());
         videos.retain(|_, (created, _)| created.elapsed() < VIDEO_CACHE_TTL);
         videos.get(video_id).map(|(_, info)| info.clone())

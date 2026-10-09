@@ -185,8 +185,27 @@ impl YoutubeMusicProvider {
         response.bytes().await.ok().map(|bytes| bytes.to_vec())
     }
 
+    /// Only return an audio entry confirmed by Music's watch queue or song/video counterpart.
+    /// Being present in search/catalogue does not promise that playback passes account/PO checks.
+    pub async fn linked_audio_source(&self, video_id: &str) -> Result<Option<SongSource>> {
+        if !self.ctx.ytm_enabled() {
+            return Ok(None);
+        }
+        anyhow::ensure!(looks_like_video_id(video_id), "YouTube 视频 ID 无效");
+        let next = self.client.next_watch(video_id).await?;
+        Ok(watch_track_renderer(&next, video_id, true).and_then(source_from_watch_track))
+    }
+
     async fn resolve_song(&self, video_id: &str) -> Result<SongSource> {
-        // 解析元数据与播放共用 iOS 响应：匿名也返回完整的 videoDetails。
+        // Browsing metadata must remain usable even when a player challenge rejects streaming.
+        if let Ok(next) = self.client.next_watch(video_id).await {
+            if let Some(source) =
+                watch_track_renderer(&next, video_id, false).and_then(source_from_watch_track)
+            {
+                return Ok(source);
+            }
+        }
+        // Restricted entries may expose metadata only through the authenticated player.
         let player = self.client.player(video_id, None).await?;
         ensure_playable(&player)?;
         let details = player
@@ -618,10 +637,20 @@ impl MusicProvider for YoutubeMusicProvider {
         let Some(format) = format else {
             bail!("YouTube Music 没有返回可签名的音频流");
         };
-        anyhow::ensure!(
-            !format.cipher.is_empty(),
-            "YouTube Music Web player 没有返回 signatureCipher"
-        );
+        // WEB_REMIX can return an already signed URL instead of signatureCipher. Keep it in
+        // the same URL-encoded envelope so the native player still transforms n when present;
+        // the frontend then adds the session's GVS proof and playback nonce as usual.
+        let signature_cipher = if !format.cipher.is_empty() {
+            format.cipher.clone()
+        } else {
+            let url = format
+                .url
+                .as_deref()
+                .context("YouTube Music 没有返回音频直链或签名参数")?;
+            url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("url", url)
+                .finish()
+        };
         // The response's assets.js is the authoritative decipher program for this exact Player
         // response. It normally matches the requested script; if YouTube rolls the player between
         // the homepage and this request, return the new trusted URL as part of the same path.
@@ -660,7 +689,7 @@ impl MusicProvider for YoutubeMusicProvider {
             })
             .unwrap_or_default();
         Ok(Some(ProtectedPreviewCipher {
-            signature_cipher: format.cipher.clone(),
+            signature_cipher,
             player_url,
             sabr_url,
             video_playback_ustreamer_config,
@@ -933,7 +962,9 @@ fn audio_formats(player: &Value) -> Vec<AudioFormat> {
                     mime: str_field(format, "mimeType")
                         .unwrap_or_default()
                         .to_string(),
-                    url: str_field(format, "url").map(str::to_string),
+                    url: str_field(format, "url")
+                        .filter(|url| !url.is_empty())
+                        .map(str::to_string),
                     cipher: str_field(format, "signatureCipher")
                         .or_else(|| str_field(format, "cipher"))
                         .unwrap_or_default()
@@ -1236,6 +1267,84 @@ fn search_sources(body: &Value) -> Vec<SongSource> {
         }
     }
     out
+}
+
+fn watch_track_renderer<'a>(
+    next: &'a Value,
+    video_id: &str,
+    prefer_audio: bool,
+) -> Option<&'a Value> {
+    let items = next
+        .pointer(
+            "/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/\
+             watchNextTabbedResultsRenderer/tabs/0/tabRenderer/content/\
+             musicQueueRenderer/content/playlistPanelRenderer/contents",
+        )?
+        .as_array()?;
+    for item in items {
+        let mut tracks = Vec::new();
+        if let Some(wrapper) = item.get("playlistPanelVideoWrapperRenderer") {
+            if let Some(primary) = wrapper.pointer("/primaryRenderer/playlistPanelVideoRenderer") {
+                tracks.push(primary);
+            }
+            if let Some(counterparts) = wrapper.get("counterpart").and_then(Value::as_array) {
+                tracks.extend(counterparts.iter().filter_map(|entry| {
+                    entry.pointer("/counterpartRenderer/playlistPanelVideoRenderer")
+                }));
+            }
+        } else if let Some(track) = item.get("playlistPanelVideoRenderer") {
+            tracks.push(track);
+        }
+        // Never choose the next recommendation, even if the requested entry is unavailable.
+        let Some(matched) = tracks
+            .iter()
+            .copied()
+            .find(|track| str_field(track, "videoId") == Some(video_id))
+        else {
+            continue;
+        };
+        if prefer_audio {
+            if let Some(audio) = tracks.iter().copied().find(|track| {
+                track.get("unplayableText").is_none()
+                    && track
+                        .pointer(
+                            "/navigationEndpoint/watchEndpoint/watchEndpointMusicSupportedConfigs/\
+                             watchEndpointMusicConfig/musicVideoType",
+                        )
+                        .and_then(Value::as_str)
+                        == Some("MUSIC_VIDEO_TYPE_ATV")
+            }) {
+                return Some(audio);
+            }
+        }
+        return matched.get("unplayableText").is_none().then_some(matched);
+    }
+    None
+}
+
+fn source_from_watch_track(track: &Value) -> Option<SongSource> {
+    let video_id = str_field(track, "videoId").filter(|id| looks_like_video_id(id))?;
+    let title = text_runs(track.get("title")?);
+    if title.is_empty() {
+        return None;
+    }
+    let artist = track
+        .get("shortBylineText")
+        .map(text_runs)
+        .unwrap_or_default();
+    let mut source = source_from_video_details(
+        &json!({
+            "title": title,
+            "author": artist,
+            "thumbnail": track.get("thumbnail"),
+        }),
+        video_id,
+    );
+    source.duration = track
+        .get("lengthText")
+        .map(text_runs)
+        .and_then(|text| parse_duration_text(&text));
+    Some(source)
 }
 
 fn source_from_video_details(details: &Value, video_id: &str) -> SongSource {
