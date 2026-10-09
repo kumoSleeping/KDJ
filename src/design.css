@@ -2474,14 +2474,12 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 
 /* 批量结果的包含关系：父行是一个"包"（歌单 / 专辑 / 一次关键词搜索），
-   子行缩进并挂一条肘形导引线。包头用中性分区面表达层级；红色留给真正的
+   子行缩进一档。包头用中性分区面表达层级，不画线；红色留给真正的
    选中、焦点和状态，不再拿一根红竖线冒充“这是集合”。 */
 .kd-table tbody tr[data-tree="parent"] td {
   --kd-result-package-bg: color-mix(in srgb, var(--kd-hover) 45%, var(--kd-panel));
   background: var(--kd-result-package-bg);
   color: var(--kd-text);
-  border-top: 1px solid var(--kd-line-soft);
-  border-bottom: 1px solid var(--kd-line-soft);
 }
 .kd-table tbody tr[data-collection-kind="playlist"] {
   --kd-result-collection-color: #38bdf8;
@@ -2693,14 +2691,15 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-table[data-kind="results"] tbody tr:has(.kd-result-download-btn):hover > td {
   background: color-mix(in srgb, var(--kd-hover), #000 7%);
 }
-/* 多来源展开属于歌曲标题，不再占用（或伪装成）独立下载列。 */
+/* 多来源展开属于歌曲标题，不再占用（或伪装成）独立下载列。
+   It trails the title, so the covers of every row share one column. */
 .kd-result-source-toggle {
   appearance: none;
   display: inline-grid;
   place-items: center;
   width: 1.35rem;
   height: 1.35rem;
-  margin: 0 0.2rem 0 -0.2rem;
+  margin: 0 -0.2rem 0 0.2rem;
   padding: 0;
   border: none;
   background: transparent;
@@ -2745,35 +2744,9 @@ body[data-kd-search-pointer-dragging="true"] * {
   width: 1.55rem;
   height: 1.55rem;
 }
+/* A package's children step in by one indent; the step alone says they belong to it. */
 .kd-tree-indent {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding-left: 1.5rem;
-  max-width: 100%;
-}
-.kd-tree-indent::before {
-  content: "";
-  position: absolute;
-  left: 0.5rem;
-  top: -0.75rem;
-  bottom: -0.75rem;
-  width: 1px;
-  background: var(--kd-line);
-}
-.kd-tree-indent::after {
-  content: "";
-  position: absolute;
-  left: 0.5rem;
-  top: 50%;
-  width: 0.5rem;
-  height: 1px;
-  background: var(--kd-line);
-}
-/* 每个包的最后一行不再向下延伸，竖线到肘部为止 */
-.kd-tree-indent[data-last="true"]::before {
-  bottom: 50%;
+  padding-left: 1.25rem;
 }
 /* 搜索/远程歌单的标题格固定为一条 flex 轴：缩略图和状态不收缩，
    只有标题文字吃剩余宽度并省略，长文本不会把右侧数据列挤乱。 */
@@ -2821,13 +2794,8 @@ body[data-kd-search-pointer-dragging="true"] * {
   color: var(--kd-muted);
 }
 .kd-video-part-title {
-  gap: 0.45rem;
-  /* 子行先跨过父行的展开控件，再多退一个层级间距；这样子项封面
-     会明确落在父项封面的右侧，而不是因为没有箭头反向跳到左边。 */
-  padding-left: calc(1.35rem + 0.45rem);
-}
-.kd-table tbody tr[data-video-part="true"][data-parent-indented="true"] .kd-video-part-title {
-  padding-left: calc(1.5rem + 1.35rem + 0.45rem);
+  /* 子行比父行多退一个层级间距，子项封面落在父项封面的右侧；缩进量见 ResultTable.css。 */
+  gap: 0;
 }
 .kd-video-part-index {
   flex: none;
@@ -2835,14 +2803,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   color: inherit;
   font-size: var(--kd-size-xs);
   font-weight: 600;
-}
-.kd-table tbody td.kd-result-source-child {
-  /* 展开的具体来源是歌曲的下一层：先跨过父行的展开控件，再右移一档。 */
-  padding-left: calc(1.35rem + 0.45rem);
-}
-.kd-table tbody td.kd-result-source-child[data-parent-indented="true"] {
-  /* 歌曲本身已经挂在集合父包下时，来源行再继承一层，不能向左回跳。 */
-  padding-left: calc(1.5rem + 1.35rem + 0.45rem);
 }
 
 .kd-td-strong {

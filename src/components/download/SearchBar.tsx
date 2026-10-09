@@ -2,6 +2,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -18,6 +19,15 @@ import {
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
 import { HintBulbIcon } from "./HintBulbIcon";
+import {
+  clearSearchOutcome,
+  estimateTextEm,
+  getSearchOutcome,
+  searchMarkState,
+  subscribeSearchOutcome,
+  type SearchOutcome,
+  type SearchPhase,
+} from "./searchMotion";
 import "./SearchBar.css";
 
 export {
@@ -40,6 +50,9 @@ export interface SearchPlatformProps {
   /** 手机顶栏的重叠预览；第一次点只展开，不误切来源。 */
   collapsed?: boolean;
   onExpand?: () => void;
+  /** A search in flight or just landed: the selected marks fire, wait, then settle on what came back. */
+  searchPhase?: SearchPhase | null;
+  searchOutcome?: SearchOutcome | null;
 }
 
 export interface SearchBarProps extends SearchPlatformProps {
@@ -59,22 +72,24 @@ export interface SearchBarProps extends SearchPlatformProps {
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
   presentation?: "bar" | "detail";
-  /** A search started outside the field (Explore fills and submits); a new value starts the sheen. */
+  /** A search started outside the field (Explore fills and submits); a new value launches the motion. */
   burstNonce?: number;
 }
 
-/** The sheen in the field: travelling while a search runs, then fading as the results land. */
-type SearchSheenPhase = "run" | "done";
-/** A submit that never raised `busy` (rejected input, a page change) ends the sheen by itself. */
+/** A submit that never raised `busy` (rejected input, a page change) ends the search motion by itself. */
 const SEARCH_SHEEN_START_GRACE_MS = 700;
-/** Matches the fade in SearchBar.css. */
-const SEARCH_SHEEN_FADE_MS = 380;
+/** The landing: the field's glow sinks and the marks settle one after another (SearchBar.css). */
+const SEARCH_LANDING_MS = 900;
 
 /**
  * 在线搜索：左边是搜索类型与来源，右边是输入。
  *
  * 两部分之间不画线：输入区自己是一块浅色底，和来源靠间距分开。
  * 平台键只负责来源多选与顺序；提交靠 Enter（Shift+Enter 换行），不再单独放放大镜。
+ *
+ * The field carries one piece of motion from click to results: its ink blooms from the click,
+ * follows the text, a comet launches on Enter while the selected marks fire, a stream runs
+ * while sources are pending, and the glow sinks toward the list when the results land.
  */
 const SEARCH_KIND_LABEL: Record<SearchKind, string> = {
   song: "单曲",
@@ -233,7 +248,12 @@ export function SearchBar({
   const composingRef = useRef(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [platformsExpanded, setPlatformsExpanded] = useState(false);
-  const [sheenPhase, setSheenPhase] = useState<SearchSheenPhase | null>(null);
+  const [sheenPhase, setSheenPhase] = useState<SearchPhase | null>(null);
+  /** Counts launches, so each search gets a fresh comet. */
+  const [launchSeq, setLaunchSeq] = useState(0);
+  const searchOutcome = useSyncExternalStore(subscribeSearchOutcome, getSearchOutcome, getSearchOutcome);
+  /** The pointer press that is about to focus the field; a keyboard focus has none. */
+  const pointerFocusRef = useRef(false);
   /** 提交后在等结果：见过 busy=true 之后，busy 落回 false 才收起流光。 */
   const sheenPendingRef = useRef(false);
   const sheenSawBusyRef = useRef(false);
@@ -249,6 +269,8 @@ export function SearchBar({
     sheenPendingRef.current = true;
     // Explore 代搜时 submit 可能已经把 busy 拉高，这一帧就要算「见过 busy」。
     sheenSawBusyRef.current = busy;
+    clearSearchOutcome();
+    setLaunchSeq((seq) => seq + 1);
     setSheenPhase("run");
   };
 
@@ -274,7 +296,7 @@ export function SearchBar({
       return () => window.clearTimeout(timer);
     }
     if (sheenPhase === "done") {
-      const timer = window.setTimeout(() => setSheenPhase(null), SEARCH_SHEEN_FADE_MS);
+      const timer = window.setTimeout(() => setSheenPhase(null), SEARCH_LANDING_MS);
       return () => window.clearTimeout(timer);
     }
   }, [sheenPhase]);
@@ -314,12 +336,13 @@ export function SearchBar({
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
         data-searching={sheenPhase ?? undefined}
         onPointerDownCapture={(event) => {
-          // The field's focus tint spreads from where the click lands. One read per click, none while typing.
+          // The field's ink blooms from where the click lands. One read per click, none while typing.
           const field = fieldRef.current;
           if (!field || inputFocused || (event.target as HTMLElement).closest("button")) return;
           const rect = field.getBoundingClientRect();
           const x = Math.min(rect.width, Math.max(0, event.clientX - rect.left));
           field.style.setProperty("--kd-search-origin", `${Math.round(x)}px`);
+          pointerFocusRef.current = true;
         }}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
@@ -343,6 +366,8 @@ export function SearchBar({
             {...platformProps}
             collapsed={!detail && stacked && !platformsExpanded}
             onExpand={() => setPlatformsExpanded(true)}
+            searchPhase={sheenPhase}
+            searchOutcome={searchOutcome}
           />
         </div>
         <div
@@ -350,11 +375,22 @@ export function SearchBar({
           className="kd-searchbar-copy"
           data-empty={!query || undefined}
           data-input-focused={inputFocused ? "true" : undefined}
+          // How far the last typed line reaches, in em: the ink under the text and the comet's start.
+          style={{ "--kd-search-ink": batch ? 0 : estimateTextEm(query) } as CSSProperties}
           onPointerDown={() => {
             if (stacked && platformsExpanded) setPlatformsExpanded(false);
           }}
         >
-          {sheenPhase ? <span className="kd-search-sheen" aria-hidden="true" /> : null}
+          <span className="kd-search-fx" aria-hidden="true">
+            <span className="kd-search-ink" />
+            <span className="kd-search-front" />
+            <span className="kd-search-splash" />
+            {sheenPhase ? <span className="kd-search-sheen" /> : null}
+            {/* Keyed by the launch, not the phase: an answer that comes back early lets the comet finish its flight. */}
+            {sheenPhase ? <span key={launchSeq} className="kd-search-comet" /> : null}
+            {sheenPhase === "done" ? <span className="kd-search-land" /> : null}
+          </span>
+          {sheenPhase ? <span key={launchSeq} className="kd-search-glint" aria-hidden="true" /> : null}
           {!query && (
             <SearchTipCarousel
               inputFocused={inputFocused}
@@ -373,10 +409,14 @@ export function SearchBar({
             role="combobox"
             {...presets.aria}
             title="搜索（Enter；Shift + Enter 换行；@ 歌曲名）"
-            onFocus={() => setInputFocused(true)}
+            onFocus={() => {
+              // A keyboard focus blooms from the leading edge. The origin stays through blur, so the ink recedes to where it came from.
+              if (!pointerFocusRef.current) fieldRef.current?.style.removeProperty("--kd-search-origin");
+              pointerFocusRef.current = false;
+              setInputFocused(true);
+            }}
             onBlur={event => {
               setInputFocused(false);
-              fieldRef.current?.style.removeProperty("--kd-search-origin");
               presets.onBlur(event.relatedTarget);
             }}
             onSelect={presets.syncCaret}
@@ -417,6 +457,8 @@ export function SearchPlatforms({
   onReorder,
   collapsed = false,
   onExpand,
+  searchPhase = null,
+  searchOutcome = null,
 }: SearchPlatformProps) {
   const saveSettings = useAppStore((state) => state.saveSettings);
   const settings = useAppStore((state) => state.settings);
@@ -448,6 +490,8 @@ export function SearchPlatforms({
   const collapsedOrdered = (selectedOrdered.length ? selectedOrdered : ordered.slice(0, 1)).slice(0, 2);
   const collapsedOverflow = Math.max(0, selectedOrdered.length - collapsedOrdered.length);
   const rendered = collapsed ? collapsedOrdered : ordered;
+  // The marks a search asks, in the order they fire.
+  const asked = searchPhase ? rendered.filter((item) => platforms.includes(item.id)) : [];
 
   const reorder = (from: Platform, to: Platform) => {
     if (from === to) return;
@@ -594,6 +638,16 @@ export function SearchPlatforms({
             data-platform={item.id}
             data-dragging={dragging === item.id || undefined}
             data-drop={over === item.id || undefined}
+            data-search={
+              searchPhase && asked.includes(item)
+                ? searchMarkState(searchPhase, item.id, searchOutcome)
+                : undefined
+            }
+            style={
+              searchPhase && asked.includes(item)
+                ? ({ "--kd-plat-i": asked.indexOf(item) } as CSSProperties)
+                : undefined
+            }
             draggable={false}
             title={
               item.video
