@@ -87,8 +87,7 @@
   /* 曲库/搜索工作条与右栏眉目同高，并排时齐平 */
   --kd-work-rail-h: 1.9rem;
   --kd-sheet-head-h: var(--kd-work-rail-h);
-  /* Durations and curves of everything that comes and goes live in motion.css.
-     This one curve is still the toast's own. */
+  /* Durations and curves of everything that comes and goes live in motion.css. */
 }
 
 /* 曲目详情顶部：封面与固定行数的摘要并排，下面板块紧随实际内容高度。 */
