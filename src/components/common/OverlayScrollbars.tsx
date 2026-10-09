@@ -1,4 +1,5 @@
 import { memo, useId, useLayoutEffect, useRef, type RefObject } from "react";
+import { edgeBump } from "../../lib/scrollPills";
 import { scrollFromThumb, scrollThumb, thumbPosition } from "../../lib/scrollThumb";
 
 type Axis = "vertical" | "horizontal";
@@ -20,6 +21,10 @@ export const OverlayScrollbars = memo(function OverlayScrollbars({ scroller }: {
     if (!node.id) node.id = `scroll-${generatedId}`;
     let frame = 0;
     let idle: ReturnType<typeof setTimeout> | null = null;
+    const bump = {
+      vertical: vertical.current ? edgeBump(vertical.current) : null,
+      horizontal: horizontal.current ? edgeBump(horizontal.current) : null,
+    };
     const paint = () => {
       frame = 0;
       for (const axis of ["vertical", "horizontal"] as const) {
@@ -34,6 +39,7 @@ export const OverlayScrollbars = memo(function OverlayScrollbars({ scroller }: {
         handle.setAttribute("aria-controls", node.id);
         handle.setAttribute("aria-valuemax", String(Math.round(metric.extent)));
         handle.setAttribute("aria-valuenow", String(Math.round(Math.max(0, offset))));
+        bump[axis]?.(offset, metric.extent);
       }
     };
     paintRef.current = paint;

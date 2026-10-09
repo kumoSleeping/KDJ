@@ -765,7 +765,6 @@
   border-color: transparent;
   border-radius: 2px;
   box-shadow: var(--s98-sunken);
-  scrollbar-color: #ad6f83 #34262d;
 }
 :root[data-theme-pack="sakulaptop98"] .kd-activity-log-line + .kd-activity-log-line {
   border-top-color: #4e3a41;
@@ -793,86 +792,43 @@
   outline-color: #f3c5d1;
 }
 
-/* SCROLLBARS — works for both native overflow and KDJ's overlay handles. */
-:root[data-theme-pack="sakulaptop98"] ::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
-}
-:root[data-theme-pack="sakulaptop98"] ::-webkit-scrollbar-track {
-  background: repeating-conic-gradient(var(--s98-face-hi) 0 25%, var(--s98-white) 0 50%) 0 0 / 2px 2px;
-  box-shadow: inset 1px 1px var(--s98-shadow);
-}
-:root[data-theme-pack="sakulaptop98"] ::-webkit-scrollbar-thumb {
-  background: var(--s98-face);
-  border: 0;
-  border-radius: 2px;
-  box-shadow: var(--s98-raised);
-}
-:root[data-theme-pack="sakulaptop98"] ::-webkit-scrollbar-corner {
-  background: var(--s98-face);
-}
-/* KDJ uses overlay handles rather than native scrollbars in the main panes.
-   Paint inside their existing 14px hit area; do not move content or fake arrows. */
-/* OverlayScrollbars hides unused handles with inline display:none. Do not
-   paint a track for an axis which has no scrollable overflow. */
-:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars:has(.kd-scroll-handle[data-axis="vertical"]:not([style*="display: none"]))::before,
-:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars:has(.kd-scroll-handle[data-axis="horizontal"]:not([style*="display: none"]))::after {
-  content: "";
-  position: absolute;
-  pointer-events: none;
-  background: repeating-conic-gradient(var(--s98-face-hi) 0 25%, var(--s98-white) 0 50%) 0 0 / 2px 2px;
-  box-shadow: inset 1px 1px var(--s98-shadow);
-}
-:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars::before {
-  top: 0;
-  bottom: 0;
-  right: 0;
-  width: 12px;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars::after {
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 12px;
-}
+/* SCROLLBARS — KDJ's floating handles, here and in every other container: a small raised key
+   with a pixel heart for a grip. No rail, no arrows, no native bar. */
 :root[data-theme-pack="sakulaptop98"] .kd-scroll-handle {
   z-index: 1;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="vertical"]::after {
-  width: 12px;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="horizontal"]::after {
-  height: 12px;
-}
 :root[data-theme-pack="sakulaptop98"] .kd-scroll-handle::after,
 :root[data-theme-pack="sakulaptop98"] .kd-overlay-scroll-host:hover .kd-scroll-handle::after,
-:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-active="true"] .kd-scroll-handle::after,
-:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-dragging] .kd-scroll-handle::after {
-  background: var(--s98-face);
-  border-radius: 2px;
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-active="true"] .kd-scroll-handle::after {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='7' height='6' shape-rendering='crispEdges'%3E%3Cpath fill='%23921c40' d='M1 0h2v1h1v-1h2v1h1v2h-1v1h-1v1h-1v1h-1v-1h-1v-1h-1v-1h-1v-2h1z'/%3E%3C/svg%3E") center / 7px 6px no-repeat, var(--s98-face);
+  border-radius: 3px;
   box-shadow: var(--s98-raised);
-  transition: none;
+  transition: opacity 180ms ease, scale 260ms var(--kd-scroll-spring);
 }
-:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle:hover::after {
-  background: var(--s98-face-hi);
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="vertical"]::after,
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="vertical"]:is(:hover, :focus-visible)::after,
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-dragging="vertical"] .kd-scroll-handle[data-axis="vertical"]::after {
+  inset: 0 1px 0 auto;
+  width: 11px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="horizontal"]::after,
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="horizontal"]:is(:hover, :focus-visible)::after,
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-dragging="horizontal"] .kd-scroll-handle[data-axis="horizontal"]::after {
+  inset: auto 0 1px;
+  height: 11px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-scroll-handle:is(:hover, :focus-visible)::after {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='7' height='6' shape-rendering='crispEdges'%3E%3Cpath fill='%23921c40' d='M1 0h2v1h1v-1h2v1h1v2h-1v1h-1v1h-1v1h-1v-1h-1v-1h-1v-1h-1v-2h1z'/%3E%3C/svg%3E") center / 7px 6px no-repeat, var(--s98-face-hi);
+}
+/* Held, the key is pressed in. */
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-dragging="vertical"] .kd-scroll-handle[data-axis="vertical"]::after,
+:root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars[data-dragging="horizontal"] .kd-scroll-handle[data-axis="horizontal"]::after {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='7' height='6' shape-rendering='crispEdges'%3E%3Cpath fill='%23921c40' d='M1 0h2v1h1v-1h2v1h1v2h-1v1h-1v1h-1v1h-1v-1h-1v-1h-1v-1h-1v-2h1z'/%3E%3C/svg%3E") calc(50% + 1px) calc(50% + 1px) / 7px 6px no-repeat, var(--s98-face);
+  box-shadow: var(--s98-sunken);
 }
 :root[data-theme-pack="sakulaptop98"] .kd-scroll-handle:focus-visible::after {
   outline: 1px solid var(--s98-frame);
   outline-offset: -3px;
-}
-@media (pointer: coarse) {
-  :root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars::before {
-    width: 8px;
-  }
-  :root[data-theme-pack="sakulaptop98"] .kd-overlay-scrollbars::after {
-    height: 8px;
-  }
-  :root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="vertical"]::after {
-    width: 8px;
-  }
-  :root[data-theme-pack="sakulaptop98"] .kd-scroll-handle[data-axis="horizontal"]::after {
-    height: 8px;
-  }
 }
 
 /* STATES — selection changes ink only. Physical commands and tabs keep their

@@ -32,6 +32,9 @@ async function bootstrap(): Promise<void> {
     import("./lib/themePack"),
   ]);
 
+  // 原生滚动条全局隐藏；除悬浮歌词外的每个窗口都用同一对浮动滑块。
+  if (!isLyricsWindow) (await import("./lib/scrollPills")).installScrollPills();
+
   // 悬浮歌词已有独立字号；主界面在 React 挂载前恢复上次选择，避免刷新后跳变。
   if (!isLyricsWindow) fontModule.applyAppFontScale(fontModule.readAppFontScale());
 

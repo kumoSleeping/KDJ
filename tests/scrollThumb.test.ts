@@ -15,3 +15,13 @@ test("floating thumb maps the entire ten-thousand-row range to a usable handle",
   assert.equal(scrollThumb(720, 720, 4, 4).extent, 0);
   assert.equal(scrollThumb(20, 10000, 32, 14).travel, 0);
 });
+
+test("the handle stays a short mark however little the content overflows", () => {
+  const barely = scrollThumb(720, 800, 2, 2);
+  assert.equal(barely.length, 72);
+  assert.equal(barely.travel, 720 - 4 - 72);
+  assert.equal(scrollThumb(720, 3000, 2, 2, 28).length, 72);
+  assert.equal(scrollThumb(720, 30000, 2, 2, 28).length, 28);
+  // A rail shorter than the smallest handle is filled, never overrun.
+  assert.equal(scrollThumb(20, 400, 2, 2, 28).length, 16);
+});

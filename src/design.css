@@ -539,7 +539,9 @@ textarea {
 }
 
 /* 所有区域仍可用滚轮、触控板、触屏和键盘滚动，只隐藏 Chromium/Firefox
-   自带的滚动条。原装轨道会在窄栏里抢宽度，也与界面视觉不一致。 */
+   自带的滚动条。原装轨道会在窄栏里抢宽度，也与界面视觉不一致。
+   取而代之的是浮动滑块 .kd-scroll-handle：曲目表自带一对，其余容器共用
+   src/lib/scrollPills.ts 的那一对；主题包只换它的皮肤。 */
 * {
   scrollbar-width: none;
 }
@@ -550,27 +552,6 @@ textarea {
 }
 .kd-scroll {
   overflow: auto;
-}
-
-/* Sakura98 supplies its own raised scrollbar skin. Native overflow in task
-   cards and the bottom workspace must not inherit the global hidden state. */
-:root[data-theme-pack="sakulaptop98"] * {
-  scrollbar-width: auto;
-  scrollbar-color: auto;
-}
-:root[data-theme-pack="sakulaptop98"] *::-webkit-scrollbar {
-  display: block;
-  width: 12px;
-  height: 12px;
-}
-/* The library has themed overlay handles already; keep a single scrollbar. */
-:root[data-theme-pack="sakulaptop98"] .kd-overlay-scroll-host > .kd-scroll {
-  scrollbar-width: none;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-overlay-scroll-host > .kd-scroll::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
 }
 
 /* ============================================================
@@ -7852,7 +7833,9 @@ button.kd-camelot-grid-key { cursor: pointer; }
   background: var(--kd-line);
 }
 
-/* Floating scroll handles. The transparent hit area is wider than the painted pill. */
+/* Floating scroll handles: a short pill with no rail and no gutter. The transparent hit strip is
+   wider than the painted pill. The track table hosts its own pair; every other container shares
+   the pair in .kd-scroll-float (src/lib/scrollPills.ts). */
 .kd-overlay-scroll-host {
   position: relative;
   flex: 1;
@@ -7889,37 +7872,68 @@ button.kd-camelot-grid-key { cursor: pointer; }
   outline: none;
   cursor: grab;
 }
-.kd-scroll-handle[data-axis="vertical"] { top: 0; right: 0; width: 14px; }
-.kd-scroll-handle[data-axis="horizontal"] { left: 0; bottom: 0; height: 14px; }
+.kd-scroll-handle[data-axis="vertical"] { top: 0; right: 0; width: 14px; --kd-scroll-squash: scale(1.5, 0.7); }
+.kd-scroll-handle[data-axis="horizontal"] { left: 0; bottom: 0; height: 14px; --kd-scroll-squash: scale(0.7, 1.5); }
 .kd-scroll-handle::after {
+  --kd-scroll-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   content: "";
   position: absolute;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--kd-text) 48%, var(--kd-panel));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--kd-panel) 65%, transparent);
-  opacity: 1;
-  transition: opacity 160ms ease, background-color 160ms ease, width 160ms ease, height 160ms ease;
+  background: color-mix(in srgb, var(--kd-text) 30%, transparent);
+  box-shadow: 0 0 0 0.5px color-mix(in srgb, var(--kd-panel) 55%, transparent);
+  transition: background-color 160ms ease, opacity 180ms ease, width 200ms var(--kd-scroll-spring),
+    height 200ms var(--kd-scroll-spring), scale 260ms var(--kd-scroll-spring);
 }
-.kd-scroll-handle[data-axis="vertical"]::after { inset: 0 0 0 auto; width: 6px; }
-.kd-scroll-handle[data-axis="horizontal"]::after { inset: auto 0 0; height: 6px; }
+.kd-scroll-handle[data-axis="vertical"]::after { inset: 0 3px 0 auto; width: 4px; transform-origin: 100% 50%; }
+.kd-scroll-handle[data-axis="horizontal"]::after { inset: auto 0 3px; height: 4px; transform-origin: 50% 100%; }
 .kd-overlay-scroll-host:hover .kd-scroll-handle::after,
-.kd-overlay-scrollbars[data-active="true"] .kd-scroll-handle::after { background: color-mix(in srgb, var(--kd-text) 58%, var(--kd-panel)); }
+.kd-overlay-scrollbars[data-active="true"] .kd-scroll-handle::after { background: color-mix(in srgb, var(--kd-text) 46%, transparent); }
+/* Under the pointer or in the hand it fattens and takes the theme colour. */
 .kd-scroll-handle:hover::after,
 .kd-scroll-handle:focus-visible::after,
-.kd-overlay-scrollbars[data-dragging] .kd-scroll-handle::after {
-  opacity: 1;
-  background: color-mix(in srgb, var(--kd-text) 72%, var(--kd-panel));
-}
+.kd-overlay-scrollbars[data-dragging="vertical"] .kd-scroll-handle[data-axis="vertical"]::after,
+.kd-overlay-scrollbars[data-dragging="horizontal"] .kd-scroll-handle[data-axis="horizontal"]::after { background: var(--kd-theme); }
 .kd-scroll-handle[data-axis="vertical"]:hover::after,
 .kd-scroll-handle[data-axis="vertical"]:focus-visible::after,
-.kd-overlay-scrollbars[data-dragging="vertical"] .kd-scroll-handle[data-axis="vertical"]::after { width: 8px; }
+.kd-overlay-scrollbars[data-dragging="vertical"] .kd-scroll-handle[data-axis="vertical"]::after { width: 7px; }
 .kd-scroll-handle[data-axis="horizontal"]:hover::after,
 .kd-scroll-handle[data-axis="horizontal"]:focus-visible::after,
-.kd-overlay-scrollbars[data-dragging="horizontal"] .kd-scroll-handle[data-axis="horizontal"]::after { height: 8px; }
+.kd-overlay-scrollbars[data-dragging="horizontal"] .kd-scroll-handle[data-axis="horizontal"]::after { height: 7px; }
 .kd-overlay-scrollbars[data-dragging] .kd-scroll-handle { cursor: grabbing; }
 .kd-scroll-handle:focus-visible::after { box-shadow: 0 0 0 2px var(--kd-panel), 0 0 0 3px var(--kd-muted); }
+/* Arriving at an end of the rail, the pill squashes against it and springs back. */
+.kd-scroll-handle[data-bump]::after { animation: kd-scroll-bump 340ms cubic-bezier(0.3, 1.4, 0.6, 1); }
+.kd-scroll-handle[data-axis="vertical"][data-bump="start"]::after { transform-origin: 100% 0; }
+.kd-scroll-handle[data-axis="vertical"][data-bump="end"]::after { transform-origin: 100% 100%; }
+.kd-scroll-handle[data-axis="horizontal"][data-bump="start"]::after { transform-origin: 0 100%; }
+.kd-scroll-handle[data-axis="horizontal"][data-bump="end"]::after { transform-origin: 100% 100%; }
+@keyframes kd-scroll-bump { 35% { transform: var(--kd-scroll-squash); } }
+/* The shared pair. It is a manual popover so it sits in the top layer; these reset the popover box.
+   Its handles are placed by transform and come out of the edge only while in use. */
+.kd-scroll-float {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: visible;
+  background: transparent;
+  color: inherit;
+}
+.kd-scroll-float > .kd-scroll-handle { top: 0; right: auto; bottom: auto; left: 0; pointer-events: none; }
+.kd-scroll-float > .kd-scroll-handle::after { opacity: 0; }
+.kd-scroll-float > .kd-scroll-handle[data-axis="vertical"]::after { scale: 0.3 1; }
+.kd-scroll-float > .kd-scroll-handle[data-axis="horizontal"]::after { scale: 1 0.3; }
+.kd-scroll-float[data-visible] > .kd-scroll-handle { pointer-events: auto; }
+.kd-scroll-float[data-visible] > .kd-scroll-handle::after { opacity: 1; scale: 1; }
 @media (prefers-reduced-motion: reduce) {
   .kd-scroll-handle::after { transition: none; }
+  .kd-scroll-handle[data-bump]::after { animation: none; }
 }
 
 /* VJ workshop: one source list, one canvas, and selection-owned controls. */
