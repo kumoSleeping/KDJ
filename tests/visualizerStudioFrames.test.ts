@@ -41,15 +41,18 @@ test("the editor's encoder gets the level and bitrate of its canvas", () => {
   assert.equal(studioAvcCodec(2560, 1080, 30), "avc1.640032");
   assert.equal(studioAvcCodec(2560, 1440, 30), "avc1.640032");
   assert.equal(studioAvcCodec(2560, 1440, 60), "avc1.640033");
-  assert.equal(studioVideoBitrate(1920, 1080, 30), 12_000_000);
-  assert.equal(studioVideoBitrate(2560, 1440, 60), 42_666_667);
-  assert.equal(studioVideoBitrate(320, 180, 30), 3_000_000);
+  assert.deepEqual((["high", "standard", "low"] as const).map(quality => studioVideoBitrate(1920, 1080, 30, quality)), [12_000_000, 8_000_000, 5_000_000]);
+  assert.equal(studioVideoBitrate(1920, 1080, 30), 8_000_000, "a project saved before the choice existed is standard");
+  assert.equal(studioVideoBitrate(1920, 1080, 60), 12_000_000, "60 fps is half as much again, not double");
+  assert.equal(studioVideoBitrate(2560, 1440, 60, "high"), 32_000_000);
+  assert.equal(studioVideoBitrate(320, 180, 30, "low"), 1_500_000);
   assert.deepEqual([studioChunkFrames(30), studioChunkFrames(60)], [30, 60]);
 });
 test("the size shown before an export is the encoder's bitrate over the song", () => {
-  // A real 197.8 s 1080p30 VideoToolbox export measured 12.26 Mbps overall: 289 MiB.
-  assert.equal(studioExportBytes(1920, 1080, 30, 197.8), 303_029_600);
-  assert.equal(studioExportBytes(1920, 1080, 60, 240), 727_680_000, "60 fps doubles the video bitrate");
+  // A real 197.8 s 1080p30 VideoToolbox export at 12 Mbps measured 12.26 Mbps overall: 289 MiB.
+  assert.equal(studioExportBytes(1920, 1080, 30, 197.8, "high"), 303_029_600);
+  assert.equal(studioExportBytes(1920, 1080, 30, 240), 247_680_000);
+  assert.equal(studioExportBytes(1920, 1080, 60, 240), 367_680_000);
   assert.equal(studioExportBytes(1920, 1080, 30, 0), 0);
 });
 test("a GOP is identified by the parameter sets ahead of its key picture", () => {

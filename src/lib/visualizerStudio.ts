@@ -2,13 +2,14 @@ import type { TrackSummary } from "../types";
 import type { AudioVisualizerScene, VisualizerFeatureFrame, VisualizerFeatureTimeline } from "../types/audioVisualizer";
 import { createAudioVisualizerScene, validateVisualizerScene } from "./audioVisualizerScene";
 import { parseNeteaseWordLrc } from "./lrc";
+import type { StudioQuality } from "./visualizerStudioFrames";
 
 export interface VisualizerProject {
   version: 1;
   track: Pick<TrackSummary, "id" | "path" | "title" | "artist" | "album" | "filename">;
   scene: AudioVisualizerScene;
   leftContent?: { x: number; y: number; scale: number };
-  output: { fps: 30 | 60; acceleration: "auto" | "software"; directory: string; directoryMode?: "download" | "custom"; filename: string; watermark?: boolean };
+  output: { fps: 30 | 60; quality?: StudioQuality; acceleration: "auto" | "software"; directory: string; directoryMode?: "download" | "custom"; filename: string; watermark?: boolean };
   text: { visible: boolean; showAlbum?: boolean; title: string; artist: string; album: string; subtitle: string; collaboration: string; credit: string; scale: number; font: "sans" | "serif"; progress: boolean };
   look: { leftFit?: "auto" | "cover" | "contain"; rightFit?: "auto" | "cover" | "contain"; leftRotationRpm?: number; leftReflection?: number; mist?: number; accentMode?: "image" | "manual"; traceSpeed?: number; accent: string; leftVeil: number; mainSpectrum: boolean; smallSpectrum: "off" | "bars" | "line" | "mixed"; energyLine: boolean; spectrumGain: number; motion: number; glow: number; particles: number };
   lyrics: { mode: "off" | "subtitle" | "scroll" | "ring"; lrc: string; translation: string; showTranslation?: boolean; offset: number; size: number };
@@ -50,6 +51,7 @@ export function validateVisualizerProject(p: VisualizerProject): void {
   if (![30, 60].includes(p.output.fps) || !["auto", "software"].includes(p.output.acceleration)) throw new Error("输出参数无效");
   if (p.output.directoryMode !== undefined && !["download", "custom"].includes(p.output.directoryMode)) throw new Error("导出目录模式无效");
   if (p.output.watermark !== undefined && typeof p.output.watermark !== "boolean") throw new Error("水印参数无效");
+  if (p.output.quality !== undefined && !["high", "standard", "low"].includes(p.output.quality)) throw new Error("画质参数无效");
   if (p.text.showAlbum !== undefined && typeof p.text.showAlbum !== "boolean") throw new Error("专辑信息开关无效");
   const finite = (v: number, lo: number, hi: number) => Number.isFinite(v) && v >= lo && v <= hi;
   if (p.leftContent !== undefined && (!p.leftContent || !finite(p.leftContent.x, -.4, .4) || !finite(p.leftContent.y, -.4, .4) || !finite(p.leftContent.scale, .5, 1.5))) throw new Error("左侧内容布局无效");

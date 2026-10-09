@@ -273,11 +273,7 @@ pub async fn export(
             status(message);
         },
         frames,
-        (
-            scene.canvas.width,
-            scene.canvas.height,
-            scene.canvas.fps as f64,
-        ),
+        acceleration::bitrate(scene.canvas.width, scene.canvas.height, scene.canvas.fps as f64),
     )
     .await?;
     let render_ms = started.elapsed().as_millis();

@@ -1,7 +1,7 @@
 import { studioDuration, validateVisualizerProject, type VisualizerDraft, type VisualizerProject } from "./visualizerStudio";
 import { drawStudioFrame, loadStudioImages, prepareStudio, studioCanvas, type PreparedStudio } from "./visualizerStudioRenderer";
 import { getBridge } from "./bridge";
-import { studioChunkFrames, studioWorkerCount } from "./visualizerStudioFrames";
+import { studioChunkFrames, studioVideoBitrate, studioWorkerCount } from "./visualizerStudioFrames";
 import { visualizerApi, type VisualizerJobStatus } from "./api";
 import { captureDiagnostic } from "./diagnostics";
 import type { StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult } from "./visualizerStudioExport.worker";
@@ -41,6 +41,7 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
     const prepared = prepareStudio(draft.project, images, analysis.timeline);
     // An export encoded by the editor's renderers can lose its encoder midway (a driver
     // reset, a session taken away). It is then redone once with FFmpeg encoding.
+    const { width, height } = draft.project.scene.canvas, { fps, quality } = draft.project.output;
     for (let encode = draft.project.output.acceleration !== "software"; ; encode = false) {
       producer = await createStudioFrameProducer(draft.project, prepared, images, signal, encode);
       signal.throwIfAborted();
@@ -48,8 +49,7 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
       let status: VisualizerJobStatus | undefined, failure: unknown;
       try {
         job = await visualizerApi.start({ track_id: draft.project.track.id, signature: analysis.signature,
-          duration: studioDuration(analysis.timeline), width: draft.project.scene.canvas.width,
-          height: draft.project.scene.canvas.height, fps: draft.project.output.fps,
+          duration: studioDuration(analysis.timeline), width, height, fps, video_bitrate: studioVideoBitrate(width, height, fps, quality),
           acceleration: draft.project.output.acceleration, output_path: outputPath, pixel_format: producer.format,
           ...(producer.chunkFrames ? { chunk_frames: producer.chunkFrames } : {}) });
         status = await pumpFrames(job, producer, signal, onStatus);
