@@ -8,23 +8,36 @@ import { useLiveVjStatus } from "../../lib/useLiveVjStatus";
 import { InlineNotice, Panel } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
 import { ExportQueuePanel } from "../composition/ExportQueuePanel";
+import { SlidePages } from "../drawer/SlidePages";
 import "./TaskPanels.css";
 
-const taskViews: { id: TaskPanelView; label: string; title?: string }[] = [
+/** The task pages in title order: what is running and what is done, for downloads and for exports. */
+export const taskViews: { id: TaskPanelView; label: string; title?: string }[] = [
   { id: "downloads", label: "下载" },
   { id: "history", label: "历史", title: "下载历史" },
   { id: "exports", label: "导出" },
   { id: "export-history", label: "成品", title: "导出历史" },
 ];
+const taskViewIds = taskViews.map(item => item.id);
 
+/** The page in view of the task list. Switching slides sideways in title order. */
+export function DownloadTaskPages() {
+  const view = useTaskPanelStore(state => state.view);
+  const exportView = view === "exports" || view === "export-history";
+  const [visitedExports, setVisitedExports] = useState(exportView);
+  useEffect(() => { if (exportView) setVisitedExports(true); }, [exportView]);
+  return <SlidePages page={view} order={taskViewIds}>
+    <div className="kd-task-page" hidden={exportView}><QueuePanel history={view === "history"} /></div>
+    {(visitedExports || exportView) && <div className="kd-task-page" hidden={!exportView}><ExportQueuePanel history={view === "export-history"} /></div>}
+  </SlidePages>;
+}
+
+/** The task list as a panel with its own tabs: the phone's sheet. On a wide window it is a drawer. */
 export function DownloadTaskPanel() {
   const view = useTaskPanelStore(state => state.view);
   const setView = useTaskPanelStore(state => state.setView);
-  const exportView = view === "exports" || view === "export-history";
-  const [visitedExports, setVisitedExports] = useState(exportView);
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const id = useId();
-  useEffect(() => { if (exportView) setVisitedExports(true); }, [exportView]);
   return <Panel heading={<span className="kd-task-tabs" role="tablist" aria-label="任务页面"
     onKeyDown={event => {
       if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -45,8 +58,7 @@ export function DownloadTaskPanel() {
     </button>)}
   </span>} visibleHeader padded={false} dense className="kd-task-window kd-download-window">
     <div className="kd-task-window-body" id={`${id}-page`} role="tabpanel" aria-labelledby={`${id}-${view}`}>
-      <div className="kd-task-page" hidden={exportView}><QueuePanel history={view === "history"} /></div>
-      {(visitedExports || exportView) && <div className="kd-task-page" hidden={!exportView}><ExportQueuePanel history={view === "export-history"} /></div>}
+      <DownloadTaskPages />
     </div>
   </Panel>;
 }

@@ -1,5 +1,6 @@
 import { PanelStack } from "../common/PanelStack";
 import { useSidePanels } from "../../lib/sidePanels";
+import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { EditorDock } from "./EditorDock";
 import { useStore } from "zustand";
 import { createTemporaryLibrary, type TemporaryLibrary, type LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
@@ -43,11 +44,14 @@ import {
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
-import { useVisualizerStudioStore, VISUALIZER_DOCK_APP } from "../../stores/visualizerStudioStore";
+import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { VisualizerDock } from "../composition/VisualizerDock";
 import { LiveVjPanel } from "../composition/LiveVjPanel";
-import { SideDownloads, SideLyrics, SidePanels } from "../player/SidePanels";
-import { RightDock, useDockOrder, type DockApp } from "./RightDock";
+import { SidePanels } from "../player/SidePanels";
+import { useDrawerOrder } from "../drawer/useDrawerOrder";
+import { useDrawerApps } from "./drawerApps";
+import { DrawerHost } from "../drawer/Drawer";
+import type { DrawerSpec } from "../drawer/drawerSchema";
 import { VisualizerPopup } from "../player/VisualizerPopup";
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { useAppStore } from "../../stores/appStore";
@@ -130,7 +134,6 @@ import type {
 } from "../../types";
 import { Button, InlineNotice, Panel, Sheet } from "../common";
 import { AppChrome } from "../chrome/AppChrome";
-import { AsideHead } from "../chrome/AsideHead";
 import {
   EXPLORE_SEARCH_EVENT,
   type ExploreSearchDetail,
@@ -260,7 +263,6 @@ export function Workspace() {
   const lyricsOpen = useSidePanels(state => state.lyrics);
   const dockRaised = useSidePanels(state => state.raised);
   /** A closed app is still sliding out of the right column. */
-  const [dockHeld, setDockHeld] = useState(false);
   const compositionMode = useAppStore(state => state.compositionMode);
   const visualizerTrackOpen = useVisualizerStudioStore(state => state.track !== null);
   const liveVjOpen = compositionMode === "live-vj";
@@ -1534,7 +1536,8 @@ export function Workspace() {
   // The VJ editors take the whole column; the visualizer configuration is one of its apps.
   const editorAsideOpen = showComposition;
   const hasAsideContent = showSettings || editorAsideOpen || visualizerTrackOpen || realOverlayAside || activityAside;
-  const showAside = layout === "wide" && (hasAsideContent || dockHeld);
+  // On a wide window only the editors take a column; everything else comes down as a drawer.
+  const showAside = layout === "wide" && editorAsideOpen;
 
   const closeAside = useCallback(() => {
     if (showSearchTips) {
@@ -1637,24 +1640,42 @@ export function Workspace() {
       </div>
     </div>
   ) : null;
-  // 宽屏右栏：歌词、下载与导出、设置和临时面板都是同一个容器里的平级应用，
-  // 后打开的盖住先打开的，关掉后露出下面那个（见 RightDock）。
-  const dockApps: DockApp[] = [];
-  if (lyricsOpen) dockApps.push({ id: "lyrics", label: "歌词", node: <SideLyrics /> });
-  if (downloadsOpen) dockApps.push({ id: "downloads", label: "下载与导出", node: <SideDownloads /> });
-  if (asidePanel) dockApps.push({
+  // 宽屏：歌词、下载与导出、设置、可视化配置、Meta 编辑和临时面板都是列表上方的同一个抽屉，
+  // 一次只有一个：新打开的盖住原来的，原来的随即收走，不会留在下面等着回来（见 DrawerHost）。
+  const storeDrawers = useDrawerApps();
+  const drawerApps: DrawerSpec[] = layout === "wide" ? [...storeDrawers] : [];
+  if (layout === "wide" && asidePanel) drawerApps.push({
     id: showSearchTips ? "tips" : showFolders ? "folders" : showDuplicates ? "duplicates" : "preview",
-    label: asideLabel || "面板",
-    node: <>
-      <AsideHead title={asideLabel} tools={asideTools} />
-      <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
-    </>,
+    title: asideLabel || "面板",
+    extent: previewAside ? "full" : "content",
+    tools: asideTools,
+    body: <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>,
+    close: () => {
+      if (showSearchTips) setShowSearchTips(false);
+      else useAppStore.getState().dismissOverlay();
+    },
   });
-  if (showSettings) dockApps.push({ id: "settings", label: "设置", node: <SettingsOverlay /> });
-  if (visualizerTrackOpen) dockApps.push({ id: VISUALIZER_DOCK_APP, label: "可视化配置", node: <VisualizerDock /> });
-  const dockOrder = useDockOrder(dockApps.map(app => app.id), dockRaised);
-  const dockFrontRef = useRef<string | null>(null);
-  dockFrontRef.current = dockOrder.at(-1) ?? null;
+  const dockOrder = useDrawerOrder(drawerApps.map(app => app.id), dockRaised);
+  const drawerFrontId = dockOrder.at(-1) ?? null;
+  const drawerSpec = drawerApps.find(app => app.id === drawerFrontId) ?? null;
+  const drawerAppsRef = useRef(drawerApps);
+  drawerAppsRef.current = drawerApps;
+  useEffect(() => {
+    if (!drawerFrontId) return;
+    for (const other of drawerAppsRef.current) {
+      if (other.id === drawerFrontId) continue;
+      if (other.close() !== false) continue;
+      // An app that refuses to go (an unsaved draft) keeps the drawer; the newcomer gives way.
+      drawerAppsRef.current.find(app => app.id === drawerFrontId)?.close();
+      useSidePanels.getState().raise(other.id);
+      break;
+    }
+  }, [drawerFrontId]);
+  useEffect(() => {
+    useTrackMetaEditor.getState().setDocked(layout === "wide");
+    return () => useTrackMetaEditor.getState().setDocked(false);
+  }, [layout]);
+  const drawerHostRef = useRef<HTMLDivElement | null>(null);
   // 窄屏抽屉里仍是一份叠放的内容。
   const asideBody = <div className="kd-panel-dock kd-panel-dock-right">
     <div className="kd-activity-panel-host" hidden={!activityAside}><SidePanels /></div>
@@ -1733,13 +1754,8 @@ export function Workspace() {
 
   const openSettingsFromChrome = useCallback(() => {
     setShowSearchTips(false);
-    // Open but covered by another app: asking for it again brings it to the front.
-    if (useAppStore.getState().showSettings && layout === "wide" && dockFrontRef.current !== "settings") {
-      useSidePanels.getState().raise("settings");
-      return;
-    }
     toggleSettingsPanel();
-  }, [toggleSettingsPanel, layout]);
+  }, [toggleSettingsPanel]);
 
   const openUpdateFromChrome = useCallback(() => {
     setShowSearchTips(false);
@@ -1772,7 +1788,9 @@ export function Workspace() {
     if (!shell || !el) return;
     event.preventDefault();
     const startX = event.clientX;
-    const target = side === "left" ? (el.firstElementChild as HTMLElement) : localAsideRef.current;
+    // The right handle is the editor column's edge, or the drawer's when no editor is open.
+    const target = side === "left" ? (el.firstElementChild as HTMLElement)
+      : useAppStore.getState().showComposition ? localAsideRef.current : drawerHostRef.current;
     if (!target) return;
     const startWidth = target.getBoundingClientRect().width;
     const rightHostWidth = Math.max(0, (target.parentElement?.getBoundingClientRect().width ?? 0) - 1);
@@ -2198,9 +2216,7 @@ export function Workspace() {
             <ChromeActions
               tasksOpen={downloadsOpen}
               onTasks={() => {
-                const panels = useSidePanels.getState();
-                if (downloadsOpen && layout === "wide" && dockFrontRef.current !== "downloads") panels.raise("downloads");
-                else panels.setDownloads(!downloadsOpen);
+                useSidePanels.getState().setDownloads(!downloadsOpen);
               }}
               compositionOpen={showComposition}
               onComposition={selectVideoMode}
@@ -2273,6 +2289,7 @@ export function Workspace() {
                 data-kd-temporary-folder-drop="true" data-hovered={temporaryFolderDrop.hovered || undefined}>
                 临时打开文件夹
               </div>}
+              {layout === "wide" && <DrawerHost spec={drawerSpec} hostRef={drawerHostRef} onResizeStart={startColumnDrag("right")} />}
               <div
                 ref={workspacePaneRef}
                 className="kd-workspace-panes"
@@ -2552,9 +2569,6 @@ export function Workspace() {
                     onDoubleClick={() => resetColumn("right")}
                   />
                   <aside className="kd-split-aside" ref={localAsideRef} hidden={!showAside}>
-                    <div className="kd-aside-restorable" hidden={editorAsideOpen}>
-                      <RightDock apps={dockApps} order={dockOrder} onOccupiedChange={setDockHeld} />
-                    </div>
                     {editorDock}
                   </aside>
                 </>

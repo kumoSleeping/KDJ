@@ -6,7 +6,7 @@ const LYRICS_KEY = "kd-side-lyrics-open";
 
 /**
  * The task list and the lyrics, two of the right column's apps. `raised` names an app asked for
- * again while it was already open, so the column brings it to the front (see RightDock).
+ * again while it was already open, so the drawer shows it again (see useDrawerOrder).
  */
 export const useSidePanels = create<{
   downloads: boolean;

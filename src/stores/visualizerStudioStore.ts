@@ -5,7 +5,7 @@ import { useSidePanels } from "../lib/sidePanels";
 import type { TrackSummary } from "../types";
 import { useAppStore } from "./appStore";
 
-/** The visualizer configuration's id among the right column's apps (see RightDock). */
+/** The visualizer configuration's id among the drawer's apps (see drawerApps). */
 export const VISUALIZER_DOCK_APP = "visualizer";
 
 interface State {
