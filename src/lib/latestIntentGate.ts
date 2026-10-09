@@ -151,27 +151,62 @@ export function decideNativeLatestIntent({
   };
 }
 
+/** While a seek has not landed, the next one restarts the decoder no sooner than this. */
+export const SEEK_RESTART_INTERVAL_MS = 250;
+/** A non-busy player that is still away from the target this long after the ACK will not get there. */
+export const SEEK_SETTLE_MS = 400;
+
 export interface NativeSeekGateState {
   stateTrackId: number | null;
   /** Authoritative state is loading, seeking or buffering. */
   busy: boolean;
-  /** Song of our previous seek while the state has stayed busy since it was sent. */
-  landingTrackId: number | null;
+  /** Time since our previous seek of this song was sent, while the state has stayed busy. */
+  sinceUnlandedSeekMs: number | null;
   /** The shared Rust coordinator retargets a pending Load/handoff; iOS AVPlayer cannot. */
   foldsIntoPendingLoad: boolean;
 }
 
 /**
- * Decide whether the latest seek may enter the native command queue.
+ * Milliseconds until the latest seek may enter the native command queue: 0 = now, null = not
+ * until the authoritative state changes.
  *
- * The authoritative state must already belong to the requested song. Busy alone is no reason to
- * wait on the shared coordinator: right after a track switch it is the pending Load/handoff,
- * which Rust retargets to the seek position, and waiting held the click for the whole
- * decode/network open. One same-song seek is let through per busy stretch (load, Seeking or a
- * stalled live stream): our own unlanded seek holds the next one, so a click or key-repeat burst
- * restarts the decoder at most once per landing instead of once per ACK.
+ * The state must already belong to the requested song. Busy alone is no reason to wait on the
+ * shared coordinator: right after a track switch it is the pending Load/handoff, which Rust
+ * retargets to the seek position. While our own previous seek has not landed, the next one is
+ * only spaced out, so a click or key-repeat burst restarts the decoder a few times a second.
+ * It is never held until that landing: a stream that stalls must stay seekable, because a new
+ * seek is what restarts it.
  */
-export function canDispatchNativeSeek(trackId: number, state: NativeSeekGateState): boolean {
-  if (state.stateTrackId !== trackId) return false;
-  return !state.busy || (state.foldsIntoPendingLoad && state.landingTrackId !== trackId);
+export function nativeSeekDispatchDelay(trackId: number, state: NativeSeekGateState): number | null {
+  if (state.stateTrackId !== trackId) return null;
+  if (!state.busy) return 0;
+  if (!state.foldsIntoPendingLoad) return null;
+  if (state.sinceUnlandedSeekMs === null) return 0;
+  return Math.max(0, SEEK_RESTART_INTERVAL_MS - state.sinceUnlandedSeekMs);
+}
+
+export interface SeekHoldState {
+  /** The seek is still in the request slot or waiting for its ACK. */
+  awaitingAck: boolean;
+  sameTrack: boolean;
+  busy: boolean;
+  errored: boolean;
+  /** Distance between the authoritative position and the held target, in seconds. */
+  distance: number;
+  /** How long the state has been acknowledged and not busy. */
+  settledMs: number;
+}
+
+/**
+ * Whether the progress bar keeps showing the clicked position instead of the player's clock.
+ *
+ * The hold exists so the old position reported while a seek loads cannot pull the playhead back.
+ * It must end on what the player reports, not on the landing the UI expected: a seek the
+ * coordinator dropped, clamped or replaced never arrives near the target, and holding for it
+ * froze the bar for good.
+ */
+export function holdsSeekPosition(state: SeekHoldState): boolean {
+  if (!state.sameTrack || state.errored) return false;
+  if (state.awaitingAck || state.busy) return true;
+  return state.distance >= 1.5 && state.settledMs < SEEK_SETTLE_MS;
 }

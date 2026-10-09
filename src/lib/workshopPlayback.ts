@@ -290,7 +290,7 @@ function useNativeWorkshopPlayback(): WorkshopPlayback {
       state.trackId === track.current.id &&
       ticketRef.current && !state.error && state.status !== "error"
     ) {
-      if (state.status === "ended") void runtimePlayer().seek(0);
+      if (state.status === "ended") void runtimePlayer().seek(0).catch(() => undefined);
       void runtimePlayer()
         .play()
         .catch((e) => setError(String(e)));

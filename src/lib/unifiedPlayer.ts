@@ -862,9 +862,11 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private queueRevision = 0;
   /** 预测预热同样只保留最后一个尚未进入 IPC 的候选。 */
   private prepareRevision = 0;
-  /** 播放/暂停和音量是可合并意图；快速触摸只保留尚未进入 IPC 的最后状态。 */
+  /** 播放/暂停是可合并意图；快速触摸只保留尚未进入 IPC 的最后状态。 */
   private transportRevision = 0;
+  /** 主音量走独立控制通道：最多一个在途，排队的只留最新值。 */
   private volumeRevision = 0;
+  private volumeTail: Promise<void> = Promise.resolve();
   private loadRevision = 0;
   /** Latest user intent, included atomically in every manager Load. */
   private intendedVolume = getDeckOutputGain();
@@ -998,6 +1000,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     command: Record<string, unknown>,
     isCurrent: () => boolean = () => true,
     acceptAcknowledgement = true,
+    rejectWhenSuperseded = false,
   ): Promise<UnifiedPlayerState> {
     // Reserve while still in the caller's stack. If a newer Load overtakes this queued command,
     // Rust can reject the older id instead of letting it acquire a new id after the replacement.
@@ -1012,6 +1015,12 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       if (!isCurrent()) return this.snapshot;
       const commandId = reservedCommandId ?? this.nextCommandId++;
       const ack = await invoke<DesktopCommandAckRaw>("playback_command", { commandId, command });
+      // Rust acknowledges a command that arrived after a newer one (a Load from the other lane)
+      // without applying it. A caller holding UI state for this command must hear about it.
+      if (rejectWhenSuperseded && ack.snapshot.lastCommandId > commandId) {
+        this.accept(ack.snapshot);
+        throw new Error("命令已被更新的播放请求取代");
+      }
       // A TEMPO fader acknowledgement contains a full Deck snapshot. Applying dozens of those
       // per second re-renders every waveform despite the compositor having nothing new to draw.
       // The coordinator emits the authoritative latest rate on its normal 100ms state cadence;
@@ -1549,7 +1558,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
 
   seek(seconds: number): Promise<UnifiedPlayerState> {
     if (isEditorWindow) return requestKvjTransport("seek", this.snapshot.trackId, seconds);
-    return this.command({ type: "seek", position: Math.max(0, seconds) });
+    return this.command({ type: "seek", position: Math.max(0, seconds) }, undefined, true, true);
   }
 
   setRate(rate: number): Promise<UnifiedPlayerState> {
@@ -1569,10 +1578,20 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     const bounded = normalizeMasterVolume(volume);
     this.intendedVolume = bounded;
     const revision = ++this.volumeRevision;
-    return this.command(
-      { type: "setVolume", volume: bounded },
-      () => revision === this.volumeRevision,
+    // Master gain is a continuous control like TEMPO and STEM gains. On `commandTail` it waited
+    // for every load, seek and prewarm acknowledgement queued ahead of it, so the slider looked
+    // dead right after a track change. A Load still carries `intendedVolume` atomically.
+    const operation = this.volumeTail.then(() =>
+      this.control(
+        { type: "setVolume", volume: bounded },
+        () => revision === this.volumeRevision,
+      ),
     );
+    this.volumeTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   setEq(lowDb: number, highDb: number): Promise<UnifiedPlayerState> {

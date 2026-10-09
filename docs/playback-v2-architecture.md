@@ -132,6 +132,42 @@ The remaining PlayerBar cleanup is policy migration: automatic recommendation se
 handling still originate in shared UI code. They should move behind coordinator queue commands once
 the Rust library-selection service is exposed directly to the application layer.
 
+### Command lanes and UI holds
+
+`DesktopNativePlayer` has three lanes. Ordered transport (`load`, `seek`, `play`, `pause`, queue and
+prewarm) carries a client command id and is serialized, because Rust acknowledges without applying
+any id that arrives after a newer one. `load` has its own latest-wins slot inside that order.
+Continuous controls (TEMPO, mixer, FX, STEM gains and the master volume) use `playback_control`:
+no id, one value in flight per control, only the latest value behind it. The master volume must
+stay there. On the ordered lane it waited for every Load, seek and prewarm acknowledgement ahead
+of it, which is what a dead volume slider right after a track change was.
+
+A command that Rust acknowledged without applying is recognizable: the snapshot's
+`lastCommandId` is greater than the command's own id. `seek` rejects in that case so the caller
+can release what it held for it.
+
+The UI may hold state for a command only until the player reports the outcome, never until the
+outcome it expected:
+
+- The progress bar shows the clicked position while the seek is unacknowledged or the state is
+  loading/seeking/buffering. Once the state is acknowledged and not busy it follows the player's
+  clock, after a 400 ms settle window if the clock is not near the target (`holdsSeekPosition`).
+  Waiting for a landing near the target froze the bar whenever a seek was dropped or replaced.
+- A new seek is never held until the previous one lands. While one is unlanded the next is spaced
+  250 ms apart (`nativeSeekDispatchDelay`); a stalled stream stays seekable.
+
+Coordinator rules that keep `Loading` finite:
+
+- A `Load` commits its intent only after it can no longer be rejected, and a failed one restores
+  the previous intent with the state. Promotion discards a pending Load whose intent is not the
+  latest, so an early commit orphaned the Load that was still valid.
+- A `Load` for the song whose stream is already decoding takes that stream over (request and
+  intent), instead of leaving it to be discarded at promotion.
+- An accepted `Load` drops Hard replacements still decoding for another song, and every discarded
+  stream gets a new Deck revision so its late `WorkerFinished` cannot be read as the installed
+  decoder dying.
+- The master gain is stored while the output is closed and applied when it opens.
+
 ### Track/source normalization
 
 Frontend surfaces must not implement local and provider-stream Decks as separate
