@@ -19,6 +19,8 @@ export interface AppChromeProps {
    * Mac 仍用 Overlay + 红绿灯，不传。
    */
   showWindowControls?: boolean;
+  /** The drawer's head hangs from this bar's lower edge (wide window): no edge is drawn there. */
+  drawerLip?: boolean;
 }
 
 /**
@@ -30,12 +32,14 @@ export function AppChrome({
   actions,
   historyEnd = false,
   showWindowControls = false,
+  drawerLip = false,
 }: AppChromeProps) {
   return (
     <header
       className="kd-app-chrome"
       data-history-end={historyEnd ? "true" : undefined}
       data-window-controls={showWindowControls ? "true" : undefined}
+      data-drawer-lip={drawerLip ? "true" : undefined}
       onPointerDown={startWindowDrag}
       onDoubleClick={(event) => {
         // Windows 习惯：双击标题栏切换最大化。点在按钮上不算。

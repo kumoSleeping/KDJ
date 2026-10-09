@@ -16,6 +16,7 @@ import { useSharePrefs } from "../../lib/sharePrefs";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { rememberVideoEnqueue } from "../../lib/queueTaskDraft";
 import { beginVideoPointerDrag } from "../../lib/searchDrag";
+import { tossToDownloads } from "../../lib/downloadToss";
 import { clearTextSelection } from "../../lib/textSelection";
 import { prewarmYoutubeEmbed } from "../../lib/youtubeEmbed";
 import { useAppStore } from "../../stores/appStore";
@@ -313,6 +314,8 @@ export function VideoResultRow({
   const download = useCallback(async (pageIndex = 0) => {
     setSending(true);
     setSendError("");
+    // The parcel leaves from the row or menu item that was clicked; the request does not wait for it.
+    const toss = tossToDownloads({ title: title.trim() });
     try {
       const request = buildRequest(pageIndex);
       const task = await api.videoDownload(request);
@@ -327,6 +330,7 @@ export function VideoResultRow({
       ]);
       openQueuePanel();
     } catch (error) {
+      toss.fail();
       setSendError(`下载失败：${errorText(error)}`);
     } finally {
       setSending(false);

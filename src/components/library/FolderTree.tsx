@@ -83,6 +83,8 @@ import { PlatformMark } from "../download/PlatformMark";
 import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import "./FolderTree.css";
+import { setDragGhost } from "../common/dragGhost";
+import "../common/DragGhost.css";
 
 /** Use the server's actual paths for both Windows and Unix, including selected descendants. */
 function relocatedFolderPath(tree: FolderTreeData, current: string, source: string, parent: string, name: string): string | undefined {
@@ -1729,6 +1731,7 @@ export function FolderTree({
               JSON.stringify({ parent: node.parent, name: node.name } satisfies DragInfo),
             );
             event.dataTransfer.effectAllowed = "copyMove";
+            setDragGhost(event.dataTransfer, { title: node.name, glyph: "folder" });
             beginTemporaryFolderDrag(node.path, () => importPending(node));
           }}
           onDragEnd={endTemporaryFolderDrag}

@@ -1,16 +1,21 @@
-import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { Download, Settings, TextQuote } from "lucide-react";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { settingsPages, useSettingsPage } from "../../lib/settingsPages";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
+import { visualizerExportActive } from "../../lib/visualizerExportQueue";
 import { studioTabs, useStudioTab } from "../../lib/visualizerStudioTabs";
 import { useAppStore } from "../../stores/appStore";
+import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
+import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerStudioStore, VISUALIZER_DOCK_APP } from "../../stores/visualizerStudioStore";
+import { useWorkshopStore } from "../../stores/workshopStore";
 import { VisualizerDock } from "../composition/VisualizerDock";
 import { SlidePages } from "../drawer/SlidePages";
-import type { DrawerSpec } from "../drawer/drawerSchema";
+import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
 import { DownloadTaskPages, taskViews } from "../player/TaskPanels";
@@ -99,4 +104,41 @@ export function useDrawerApps(): DrawerSpec[] {
     close: () => useTrackMetaEditor.getState().close(),
   });
   return apps;
+}
+
+/** An export that is waiting or being written. */
+const exportRunning = (phase: string) => ["queued", "rendering", "validating", "committing", "importing"].includes(phase);
+
+/**
+ * What the drawer's head offers while it is rolled up: the apps that are opened by hand. The
+ * ids are those of the apps in `useDrawerApps`. 下载 carries the number of downloads and
+ * exports that are under way.
+ */
+export function useDrawerEntries(): DrawerEntry[] {
+  const downloading = useDownloadStore(state => state.activeCount);
+  const exporting = useWorkshopStore(state => state.jobs.reduce((count, job) => count + (exportRunning(job.phase) ? 1 : 0), 0));
+  const rendering = useVisualizerExportStore(state => state.tasks.reduce((count, task) => count + (visualizerExportActive(task) ? 1 : 0), 0));
+  const running = downloading + exporting + rendering;
+  return useMemo(() => [
+    {
+      id: "downloads",
+      label: "下载",
+      title: "下载与导出",
+      icon: <Download size={15} aria-hidden="true" />,
+      count: running,
+      open: () => useSidePanels.getState().setDownloads(true),
+    },
+    {
+      id: "lyrics",
+      label: "歌词",
+      icon: <TextQuote size={15} aria-hidden="true" />,
+      open: () => useSidePanels.getState().setLyrics(true),
+    },
+    {
+      id: "settings",
+      label: "设置",
+      icon: <Settings size={15} aria-hidden="true" />,
+      open: () => useAppStore.getState().openSettingsPanel(),
+    },
+  ], [running]);
 }

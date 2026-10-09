@@ -10,7 +10,6 @@ export { Field } from "./Field";
 export type { FieldProps } from "./Field";
 export { InlineNotice } from "./InlineNotice";
 export type { InlineNoticeProps } from "./InlineNotice";
-export { ToastHost } from "./ToastHost";
 export { Panel } from "./Panel";
 export type { PanelProps } from "./Panel";
 export { PanelStack } from "./PanelStack";

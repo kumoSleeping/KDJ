@@ -36,6 +36,10 @@ import { Button, ContextMenu, InlineNotice } from "../common";
 import { QueueChoice, QueueCover, QueueEntry, QueueFrame, QueueList, QueueOverview } from "../queue/QueuePrimitives";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 import { PlatformMark } from "./PlatformMark";
+import { installDownloadEntryDrop } from "../../lib/downloadDropEntry";
+import "./DownloadToss.css";
+
+installDownloadEntryDrop();
 
 const STATE_LABEL: Record<TaskState, string> = {
   queued: "待开始",
@@ -334,6 +338,7 @@ function QueueRow({
 
   return (
     <QueueEntry
+      data-task-id={task.id}
       order={order}
       title={task.title}
       titleTooltip={`${task.title} — ${task.artist}`}

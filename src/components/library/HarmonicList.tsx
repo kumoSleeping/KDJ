@@ -21,6 +21,8 @@ import type { HarmonicMatch, Track } from "../../types";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { TrackKeyChip } from "../common/TrackKeyChip";
+import { setDragGhost } from "../common/dragGhost";
+import "../common/DragGhost.css";
 import { playTrack } from "./TrackTable";
 
 export interface HarmonicListProps {
@@ -217,6 +219,11 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
             const ids = selected.has(match.track.id) ? selectedIds : [match.track.id];
             if (!selected.has(match.track.id)) setSelectedIds([match.track.id]);
             writeTrackDragData(event.dataTransfer, ids);
+            setDragGhost(event.dataTransfer, {
+              title: match.track.title || match.track.filename,
+              count: ids.length,
+              coverFrom: event.currentTarget,
+            });
           }}
           onDragEnd={() => {
             setDrop(null);
@@ -292,6 +299,11 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
                 const ids = selected.has(match.track.id) ? selectedIds : [match.track.id];
                 if (!selected.has(match.track.id)) setSelectedIds([match.track.id]);
                 writeTrackDragData(event.dataTransfer, ids);
+                setDragGhost(event.dataTransfer, {
+                  title: match.track.title || match.track.filename,
+                  count: ids.length,
+                  coverFrom: event.currentTarget,
+                });
               }}
               onDragEnd={() => {
                 setDrop(null);

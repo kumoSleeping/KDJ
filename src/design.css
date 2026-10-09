@@ -792,22 +792,41 @@ textarea {
   min-height: 0;
   flex: 1 1 auto;
 }
-/* Search spans the content width; the sidebar starts below it. */
+/* The top row on a wide window: the aggregate search takes what the drawer's head leaves. The
+   head hangs at the right of this row (see Drawer.css) and is exactly as wide as the drawer,
+   so the row only keeps that width free; nothing is drawn between the two. */
+.kd-table-wrap[data-drawer-head] {
+  --kd-drawer-w: max(min(var(--kd-right, 25rem), 45%), min(17rem, 100%));
+}
+.kd-table-wrap[data-drawer-head] > .kd-panel-dock-top {
+  box-sizing: border-box;
+  min-height: var(--kd-drawer-head-h);
+  padding-right: var(--kd-drawer-w);
+  background: var(--s98-face, var(--kd-panel));
+}
+/* A small window has no room for both: the rolled-up head keeps only its icons and the search
+   takes the rest. An open drawer is as wide as ever and comes down over the search's end. */
+@container kd-table-wrap (max-width: 34rem) {
+  .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top { padding-right: var(--kd-drawer-lip-w); }
+}
+/* An editor column stands beside the whole of the list's column: the search row, its head and
+   the drawer keep to the left of it. */
 .kd-main-slot > .kd-table-wrap[data-aside="open"] {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 1px min(var(--kd-right, 25rem), 45%);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
 }
-.kd-table-wrap[data-aside="open"] > .kd-search-band-host { grid-column: 1 / -1; grid-row: 1; }
-.kd-table-wrap[data-aside="open"] > .kd-track-preview-row { grid-column: 1; grid-row: 2; }
-.kd-table-wrap[data-aside="open"] > .kd-local-list-slot { grid-column: 1; grid-row: 3; }
+.kd-table-wrap[data-aside="open"] > .kd-panel-dock-top { grid-column: 1; grid-row: 1; }
+.kd-table-wrap[data-aside="open"] > .kd-local-list-slot { grid-column: 1; grid-row: 2; }
+/* Both lines are named: an open end would be the wrap's own edge for a positioned box. */
+.kd-table-wrap[data-aside="open"] > .kd-drawer-host { grid-column: 1 / 2; grid-row: 1 / -1; }
 .kd-table-wrap[data-aside="open"] > .kd-split-handle {
   grid-column: 2;
-  grid-row: 2 / -1;
+  grid-row: 1 / -1;
 }
 .kd-table-wrap[data-aside="open"] > .kd-split-aside {
   grid-column: 3;
-  grid-row: 2 / -1;
+  grid-row: 1 / -1;
   min-width: 0;
   border-left: 1px solid var(--kd-line);
   box-shadow: none;
@@ -1114,7 +1133,7 @@ textarea {
   --kd-visible-right: min(var(--kd-right, 25rem), calc(100% - 1px));
   position: relative;
   isolation: isolate;
-  container-type: inline-size;
+  container: kd-table-wrap / inline-size;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1338,6 +1357,11 @@ textarea {
 }
 .kd-app[data-mac="true"] .kd-app-chrome {
   padding-left: var(--kd-traffic-pad);
+}
+/* The drawer's head is this bar's lower edge coming down, so no edge is drawn where it hangs;
+   the search row below has the bar's own tone. Theme packs keep their title bar. */
+:root:not([data-theme-pack]) .kd-app-chrome[data-drawer-lip="true"] {
+  border-bottom-color: transparent;
 }
 /* 与左栏同宽：从窗左缘起算，导航靠右贴侧栏右缘；Mac 红绿灯用 padding 躲开。 */
 .kd-app-chrome-tree {
@@ -2060,23 +2084,6 @@ body[data-kd-track-pointer-dragging="true"] {
   overflow: hidden !important;
   overscroll-behavior: none;
   touch-action: none;
-}
-.kd-track-pointer-ghost {
-  position: fixed;
-  z-index: 10000;
-  top: 0;
-  left: 0;
-  max-width: 18rem;
-  padding: 0.35rem 0.55rem;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-raised);
-  color: var(--kd-text);
-  box-shadow: var(--kd-shadow);
-  font-size: var(--kd-size-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: none;
 }
 .kd-table tbody td.kd-td-num > .kd-track-drag-surface {
   justify-content: flex-start;
@@ -3052,8 +3059,8 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* ============================================================
  * 就地提示（InlineNotice）
  * ------------------------------------------------------------
- * 面板里、按钮旁边的失败回执仍贴在出事的地方。瞬时消息（播放/STEM）
- * 走右下角 .kd-toast，10 秒后自己弹回，不再插进播放条。
+ * 面板里、按钮旁边的失败回执仍贴在出事的地方。瞬时消息（播放失败等）
+ * 是一条任务信息（docs/task-bubbles.md），不再插进播放条。
  *
  * 提示保持紧凑，错误与操作状态按实际语义呈现。
  * 也没有左侧竖条一类的装饰，就是一枚芯片加一行字。
@@ -3082,63 +3089,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   padding: 0.3rem 0.5rem;
 }
 
-@keyframes kd-toast-in {
-  from { transform: translateY(110%); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-@keyframes kd-toast-out {
-  from { transform: translateY(0); opacity: 1; }
-  to { transform: translateY(110%); opacity: 0; }
-}
-.kd-toast {
-  position: fixed;
-  right: 0.7rem;
-  bottom: calc(0.7rem + env(safe-area-inset-bottom, 0px));
-  z-index: 120;
-  display: flex;
-  align-items: center;
-  max-width: min(32rem, calc(100% - 1.1rem));
-  gap: 0.45rem;
-  padding: 0.38rem 0.48rem;
-  border: 1px solid var(--kd-line);
-  background: color-mix(in srgb, var(--kd-panel-raised) 94%, transparent);
-  box-shadow: 0 5px 18px rgba(0,0,0,0.28);
-  color: var(--kd-text);
-  font: 650 var(--kd-size)/1.35 var(--kd-font);
-  animation: kd-toast-in 180ms var(--kd-pop-ease) both;
-}
-.kd-toast[data-leaving="true"] {
-  animation: kd-toast-out 180ms ease-in both;
-}
-/* 主窗口里停在播放条上方：右下角是 EQ，提示不能盖住正在拧的旋钮。 */
-.kd-app[data-work-mode="manager"] .kd-toast {
-  bottom: calc(var(--kd-player-h) + 3.3rem + env(safe-area-inset-bottom, 0px));
-}
-.kd-app[data-work-mode="manager"][data-tall="true"] .kd-toast {
-  bottom: calc(var(--kd-player-h) + 9rem + env(safe-area-inset-bottom, 0px));
-}
-@media (max-width: 560px) {
-  .kd-app[data-work-mode="manager"][data-tall="true"] .kd-toast {
-    bottom: calc(var(--kd-player-h) + 12.8rem + env(safe-area-inset-bottom, 0px));
-  }
-}
-.kd-toast > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-toast > button {
-  flex: none;
-  width: 1.1rem;
-  height: 1.1rem;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-
 /* ============================================================
  * 侧方弹出动画（Sheet / 桌面右栏 / 对话框共用）
  * 只改 :root 的 --kd-pop-* 或下面两段 keyframes，全部弹出一起变。
@@ -3159,9 +3109,7 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-pop-panel,
-  .kd-pop-scrim,
-  .kd-toast,
-  .kd-toast[data-leaving="true"] {
+  .kd-pop-scrim {
     animation: none;
   }
 }
@@ -4830,7 +4778,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0 0.75rem;
+  /* While a drawer is down over this bar's right end, its tools stay beside the sheet
+     (--kd-drawer-cover is written by DrawerHost). */
+  padding: 0 calc(0.75rem + var(--kd-drawer-cover, 0px)) 0 0.75rem;
   border-bottom: 1px solid var(--kd-line-soft);
   /* 分析 / 多选 / 下载时也不染主题粉红，保持面板本色 */
   background: var(--kd-panel);
@@ -4842,7 +4792,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 /* The library rail is the containing list's header, not a passive status strip. */
 .kd-workspace-pane-local > .kd-activity {
   background: var(--s98-caption, color-mix(in srgb, var(--kd-panel) 88%, var(--kd-text) 12%));
-  border-top: 1px solid var(--kd-line);
   border-bottom: 1px solid color-mix(in srgb, var(--kd-text) 32%, var(--kd-panel));
   color: var(--kd-text);
 }
@@ -6788,10 +6737,25 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-player-popupbtn[data-on="true"]:hover:not(:disabled) {
   color: var(--kd-theme-strong);
 }
+/* 歌词 and 编辑 Meta, the bar's entries of the song: the same quiet keys, red while what they
+   open is open. They need a little more room beside the transport than the bar has on a
+   narrow window, where they are left out; the song's task bubble still offers both. */
+.kd-player-songbtn { width: 1.45rem; }
+.kd-player-songbtn[data-on="true"] { color: var(--kd-theme); }
+.kd-player-songbtn[data-on="true"]:hover:not(:disabled) { color: var(--kd-theme-strong); }
+@media (min-width: 1200px) {
+  .kd-app:not([data-tall="true"]) .kd-player-transport { width: min(31.5rem, 100%); }
+}
+@media (max-width: 1199px) {
+  .kd-app:not([data-tall="true"]) .kd-player-songbtn { display: none; }
+}
+@media (max-width: 479px) {
+  .kd-app[data-tall="true"] .kd-player-songbtn { display: none; }
+}
 /* Sakura latches switches while enabled and the mode button while its menu is
    open. Transport/download/reroll actions retain only the theme's :active feedback.
    Apply here so already-installed theme packs receive the fix through HMR too. */
-:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn)[aria-pressed="true"],
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn, .kd-player-songbtn)[aria-pressed="true"],
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-mode[aria-expanded="true"] {
   color: var(--kd-theme);
   box-shadow: var(--s98-sunken);

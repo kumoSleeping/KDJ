@@ -1,0 +1,251 @@
+/* The download parcel (lib/downloadToss.ts): the block that was clicked turns into a parcel, the
+   parcel is thrown into the downloads drawer. Everything here lives above the drawer and the
+   menus and never takes input. Only transform and opacity move. */
+.kd-toss,
+.kd-toss-ring {
+  position: fixed;
+  z-index: 10050;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.kd-toss-ring { z-index: 10049; }
+.kd-toss-body {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  will-change: transform, opacity;
+}
+
+/* The block at the source: the cover and the title of what is being downloaded. */
+.kd-toss-chip {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  box-sizing: border-box;
+  padding: 0 0.65rem 0 0.2rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--kd-text) 9%, var(--kd-panel-raised));
+  color: var(--kd-text);
+  box-shadow: 0 10px 22px -8px rgb(0 0 0 / 0.55), 0 2px 6px -2px rgb(0 0 0 / 0.35);
+  font-size: var(--kd-size-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+}
+:root[data-theme="light"] .kd-toss-chip {
+  background: var(--kd-panel-raised);
+  box-shadow: 0 10px 22px -10px rgb(30 34 44 / 0.34), 0 2px 6px -2px rgb(30 34 44 / 0.16);
+}
+.kd-toss-chip-cover {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--kd-theme) 14%, var(--kd-panel));
+  color: var(--kd-theme);
+}
+.kd-toss-chip-cover > canvas,
+.kd-toss-chip-cover > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.kd-toss-chip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* The parcel: a small box in the theme colour, a lighter lid, a down arrow on its face. */
+.kd-toss-parcel {
+  position: absolute;
+  top: -17px;
+  left: -17px;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--kd-theme);
+  color: var(--kd-theme-ink, #fff);
+  box-shadow: inset 0 -3px 0 rgb(0 0 0 / 0.14), 0 8px 16px -6px color-mix(in srgb, var(--kd-theme) 60%, #000),
+    0 2px 5px -1px rgb(0 0 0 / 0.3);
+  opacity: 0;
+}
+.kd-toss-parcel-lid {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 9px;
+  border-radius: 9px 9px 3px 3px;
+  background: color-mix(in srgb, #fff 26%, var(--kd-theme));
+}
+.kd-toss-arrow,
+.kd-toss-heart {
+  position: absolute;
+  top: 10px;
+  left: 7px;
+  stroke-width: 2.7;
+}
+.kd-toss-heart { display: none; }
+/* A single item carries its cover as the parcel's label. */
+.kd-toss-parcel-label {
+  position: absolute;
+  top: -6px;
+  left: -7px;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 0 0 1.5px var(--kd-theme-ink, #fff), 0 2px 5px rgb(0 0 0 / 0.35);
+  transform: rotate(-9deg);
+}
+.kd-toss-parcel-label > canvas { display: block; width: 100%; height: 100%; }
+/* Several items: one parcel, with how many on it. */
+.kd-toss-count {
+  position: absolute;
+  top: -8px;
+  right: -9px;
+  box-sizing: border-box;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--kd-text);
+  color: var(--kd-panel);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* Where it lands: one wave from the spot. */
+.kd-toss-ring-wave {
+  position: absolute;
+  top: -21px;
+  left: -21px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--kd-theme) 18%, transparent);
+  box-shadow: inset 0 0 0 2px var(--kd-theme);
+  opacity: 0;
+}
+
+/* The task row the parcel landed on: a tint that fades, and its cover takes the weight. */
+.kd-download-task[data-kd-toss-landed]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--kd-theme) 15%, transparent);
+  pointer-events: none;
+  animation: kd-toss-row 1100ms ease-out var(--kd-toss-at, 0ms) both;
+}
+.kd-download-task[data-kd-toss-landed] .kd-download-task-cover {
+  animation: kd-toss-cover 520ms cubic-bezier(0.2, 0.9, 0.3, 1.3) var(--kd-toss-at, 0ms) both;
+}
+@keyframes kd-toss-row {
+  0% { opacity: 0; }
+  14% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes kd-toss-cover {
+  0% { transform: scale(0.76); }
+  55% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+/* No row came (the list is on another page, the task has not arrived): the list's head answers. */
+.kd-download-summary[data-kd-toss-pulse] {
+  transform-origin: left center;
+  animation: kd-toss-pulse 620ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+@keyframes kd-toss-pulse {
+  0% { transform: scale(1); opacity: 1; }
+  35% { transform: scale(1.1); opacity: 0.7; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* A dragged result over the downloads: the sheet's tone lifts. No ring, no coloured block. */
+.kd-task-page .kd-download-dropzone[data-drop-active="true"],
+.kd-task-page .kd-download-dropzone[data-kd-pointer-search-over="queue"] {
+  outline: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.kd-task-page .kd-download-dropzone::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  background: color-mix(in srgb, var(--kd-text) 8%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease-out;
+}
+.kd-task-page .kd-download-dropzone[data-drop-active="true"]::after,
+.kd-task-page .kd-download-dropzone[data-kd-pointer-search-over="queue"]::after { opacity: 1; }
+/* The 下载 entry takes a drop too: it leans towards the item. */
+[data-kd-search-queue-drop="entry"],
+[data-drawer-entry="downloads"] { transition: transform 150ms cubic-bezier(0.2, 0.9, 0.3, 1.3); }
+[data-kd-search-queue-drop="entry"][data-kd-pointer-search-over],
+[data-drawer-entry="downloads"][data-kd-pointer-search-over] {
+  outline: 0;
+  background: transparent;
+  color: var(--kd-text);
+  transform: scale(1.22);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kd-toss, .kd-toss-ring { display: none; }
+  .kd-download-task[data-kd-toss-landed] .kd-download-task-cover,
+  .kd-download-summary[data-kd-toss-pulse] { animation: none; }
+  [data-kd-search-queue-drop="entry"],
+  [data-drawer-entry="downloads"] { transition: none; }
+}
+
+/* Sakura98: a pixel gift box with a heart on it; square blocks with the pack's bevel. */
+:root[data-theme-pack="sakulaptop98"] .kd-toss-chip {
+  border-radius: 0;
+  background: var(--s98-face-hi, var(--kd-panel));
+  box-shadow: var(--s98-raised), 3px 3px 0 rgb(120 40 70 / 0.3);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-toss-chip-cover {
+  border-radius: 0;
+  background: var(--s98-white, #fff);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-toss-parcel {
+  border-radius: 0;
+  background: var(--s98-face-hi, #fbd7e1);
+  color: var(--kd-theme);
+  box-shadow: inset 0 0 0 2px var(--s98-frame, #5a1830), inset -4px -4px 0 var(--s98-face, #efb3c4),
+    3px 3px 0 rgb(120 40 70 / 0.34);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-toss-parcel-lid {
+  top: 2px;
+  right: 2px;
+  left: 2px;
+  height: 6px;
+  border-radius: 0;
+  background: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-toss-arrow { display: none; }
+:root[data-theme-pack="sakulaptop98"] .kd-toss-heart { display: block; top: 10px; left: 7px; shape-rendering: crispEdges; }
+:root[data-theme-pack="sakulaptop98"] .kd-toss-parcel-label {
+  border-radius: 0;
+  box-shadow: 0 0 0 1px var(--s98-frame, #5a1830), 2px 2px 0 rgb(120 40 70 / 0.3);
+  transform: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-toss-count {
+  border-radius: 0;
+  background: var(--kd-theme);
+  color: #fff;
+  box-shadow: 0 0 0 1px var(--s98-frame, #5a1830), 2px 2px 0 rgb(120 40 70 / 0.3);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-toss-ring-wave {
+  border-radius: 0;
+  background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
+}
