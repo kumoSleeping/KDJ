@@ -631,6 +631,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
     <div className="kd-viz-content">
     <div className="kd-viz-preview-column">
     <FloatingPreviewFrame floating={floating} fullscreen={expanded} editing={!floating && !expanded} compact={emptyMedia}
+      shared={popup} title={track.title || track.filename}
       ratio={inline ? 16 / 9 : p ? p.scene.canvas.width / p.scene.canvas.height : 16 / 9}
       onEscape={() => { if (expanded) void applyFullscreen(false); else if (floating) setFloating(false); else requestClose(); }}>
       {prepared && p ? <canvas ref={canvas} aria-label={readOnlyPreview ? "音频可视化预览" : "音频可视化预览，可拖动左右图片调整位置"} onPointerDown={e => {

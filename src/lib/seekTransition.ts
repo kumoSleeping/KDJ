@@ -4,6 +4,23 @@ export function prefersReducedSeekMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+/** One bounded still of what a video or canvas is showing — not a second decoder, and not a
+ * permanent canvas-backed pipeline. Null when the source has no picture to copy. */
+export function copyPictureFrame(source: HTMLVideoElement | HTMLCanvasElement): HTMLCanvasElement | null {
+  const width = "videoWidth" in source ? source.videoWidth : source.width;
+  const height = "videoHeight" in source ? source.videoHeight : source.height;
+  if (!width || !height) return null;
+  const picture = document.createElement("canvas");
+  const scale = Math.min(1, 1280 / width, 1280 / height);
+  picture.width = Math.max(1, Math.round(width * scale));
+  picture.height = Math.max(1, Math.round(height * scale));
+  const context = picture.getContext("2d", { alpha: false });
+  if (!context) return null;
+  try { context.drawImage(source, 0, 0, picture.width, picture.height); }
+  catch { return null; }
+  return picture;
+}
+
 /** Presentation only: never delays transport or retains ownership of a decoder. */
 export class SeekTransitionOverlay {
   private overlay: HTMLElement | null = null;
@@ -71,16 +88,9 @@ export class SeekTransitionOverlay {
   video(video: HTMLVideoElement): void {
     this.clear();
     const host = video.parentElement;
-    if (!host || !video.videoWidth || !video.videoHeight || prefersReducedSeekMotion()) return;
-    // One bounded copy per handoff, not a permanent canvas-backed video pipeline.
-    const picture = document.createElement("canvas");
-    const scale = Math.min(1, 1280 / video.videoWidth, 1280 / video.videoHeight);
-    picture.width = Math.max(1, Math.round(video.videoWidth * scale));
-    picture.height = Math.max(1, Math.round(video.videoHeight * scale));
-    const context = picture.getContext("2d", { alpha: false });
-    if (!context) return;
-    try { context.drawImage(video, 0, 0, picture.width, picture.height); }
-    catch { return; }
+    if (!host || prefersReducedSeekMotion()) return;
+    const picture = copyPictureFrame(video);
+    if (!picture) return;
     picture.style.objectFit = getComputedStyle(video).objectFit;
     picture.style.objectPosition = getComputedStyle(video).objectPosition;
     picture.style.background = "#000";

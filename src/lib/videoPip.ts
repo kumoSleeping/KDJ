@@ -37,6 +37,20 @@ export function videoPipHostLifecycle(
   return "present";
 }
 
+/**
+ * The video is on screen as the floating media window: not docked in a panel, and not handed to
+ * the system's picture-in-picture. While it is, it owns the box it shares with the visualizer.
+ */
+export function videoPipFloats(state: {
+  session: VideoPipSession | null;
+  active: boolean;
+  mode: VideoPreviewMode;
+  systemPip: boolean;
+}): boolean {
+  return state.mode === "float" && !state.systemPip
+    && videoPipHostLifecycle(state.session, state.active, state.mode) === "present";
+}
+
 /** A terminally failed network preview must release the global transport back to audio. */
 export function networkVideoOwnsTransport(
   session: VideoPipSession | null,
