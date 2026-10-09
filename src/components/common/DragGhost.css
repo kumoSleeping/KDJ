@@ -1,0 +1,140 @@
+/* The card under the pointer while songs, results or folders are dragged (dragGhost.ts). It is
+   a surface that floats over everything: its edge is a soft drop, never a drawn line. */
+.kd-drag-ghost {
+  position: fixed;
+  z-index: 10000;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+/* The picture handed to the system for an HTML5 drag: laid out at the window's corner for the
+   moment it is taken (never painted there, see setDragGhost), with room for the tilt and the
+   shadow so neither is cut off. */
+.kd-drag-ghost-stage { padding: 16px 22px 26px 16px; }
+.kd-drag-ghost-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 9.5rem;
+  max-width: 13.5rem;
+  padding: 0.38rem 0.8rem 0.38rem 0.38rem;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--kd-text) 8%, var(--kd-panel-raised));
+  color: var(--kd-text);
+  box-shadow: 0 16px 30px -12px rgb(0 0 0 / 0.6), 0 3px 9px -2px rgb(0 0 0 / 0.38);
+  transform: rotate(-3deg);
+  transform-origin: 18px 18px;
+  animation: kd-drag-ghost-in 140ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+:root[data-theme="light"] .kd-drag-ghost-card {
+  background: var(--kd-panel-raised);
+  box-shadow: 0 14px 28px -12px rgb(30 34 44 / 0.34), 0 2px 8px -2px rgb(30 34 44 / 0.16);
+}
+/* The system takes its picture at once: no entrance there. */
+.kd-drag-ghost-stage > .kd-drag-ghost-card { animation: none; }
+@keyframes kd-drag-ghost-in {
+  from { opacity: 0; transform: rotate(0deg) scale(0.86); }
+  to { opacity: 1; transform: rotate(-3deg) scale(1); }
+}
+/* Several items: the edge of a second card shows behind the first. */
+.kd-drag-ghost-card[data-many]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: inherit;
+  background: inherit;
+  box-shadow: 0 2px 8px -2px rgb(0 0 0 / 0.3);
+  opacity: 0.72;
+  transform: translate(5px, 5px) rotate(4deg);
+}
+.kd-drag-ghost-cover {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--kd-theme) 14%, var(--kd-panel));
+  color: var(--kd-theme);
+}
+.kd-drag-ghost-cover > canvas { display: block; width: 100%; height: 100%; }
+.kd-drag-ghost-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.05rem;
+}
+.kd-drag-ghost-title {
+  overflow: hidden;
+  font-size: var(--kd-size-sm);
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-drag-ghost-hint {
+  overflow: hidden;
+  color: var(--kd-theme);
+  font-size: var(--kd-size-xs);
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-drag-ghost-hint::before { content: "→ "; }
+.kd-drag-ghost-count {
+  position: absolute;
+  top: -7px;
+  right: -8px;
+  box-sizing: border-box;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.34rem;
+  border-radius: 999px;
+  background: var(--kd-theme);
+  color: var(--kd-theme-ink, #fff);
+  box-shadow: var(--kd-shadow-badge);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35rem;
+  text-align: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-drag-ghost-card { animation: none; }
+}
+
+/* Sakura98: a small 98 window face, square and bevelled, with the pack's hard shadow. */
+:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost-card {
+  border-radius: 0;
+  background: var(--s98-face-hi, var(--kd-panel));
+  box-shadow: var(--s98-raised), 3px 4px 0 rgb(120 40 70 / 0.3);
+  transform: rotate(-2deg);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost-card[data-many]::before {
+  box-shadow: var(--s98-raised);
+  opacity: 1;
+  transform: translate(5px, 5px);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost-cover {
+  border-radius: 0;
+  background: var(--s98-white, #fff);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost-cover > canvas { box-sizing: border-box; padding: 2px; image-rendering: pixelated; }
+:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost-count {
+  top: -8px;
+  right: -9px;
+  border-radius: 0;
+  box-shadow: 0 0 0 1px var(--s98-frame, #5a1830), 2px 2px 0 rgb(120 40 70 / 0.3);
+}
+@keyframes kd-drag-ghost-in-98 {
+  from { opacity: 0; transform: rotate(-2deg) scale(0.86); }
+  to { opacity: 1; transform: rotate(-2deg) scale(1); }
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost:not(.kd-drag-ghost-stage) > .kd-drag-ghost-card { animation-name: kd-drag-ghost-in-98; }

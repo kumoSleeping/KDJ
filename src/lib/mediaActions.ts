@@ -6,6 +6,7 @@
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import type { DownloadTask, Quality, SongSource } from "../types";
+import { tossToDownloads } from "./downloadToss";
 
 export interface EnqueueMediaOptions {
   quality?: Quality | null;
@@ -49,8 +50,16 @@ export async function enqueueMediaDownloads(
   options: EnqueueMediaOptions = {},
 ): Promise<DownloadTask[]> {
   if (sources.length === 0) return [];
-  if (options.revealQueue !== false) useAppStore.getState().openQueuePanel();
-  return useDownloadStore.getState().enqueue(normalizedDownloadSources(sources, options), options);
+  if (options.revealQueue === false) {
+    return useDownloadStore.getState().enqueue(normalizedDownloadSources(sources, options), options);
+  }
+  useAppStore.getState().openQueuePanel();
+  // The parcel leaves from wherever the user started this (a row, a menu item, a drop point).
+  // It only decorates: the request below is already on its way.
+  const toss = tossToDownloads({ title: sources[0]?.title, cover: sources[0]?.cover, count: sources.length });
+  const queued = useDownloadStore.getState().enqueue(normalizedDownloadSources(sources, options), options);
+  queued.then(undefined, () => toss.fail());
+  return queued;
 }
 
 /** 设置切到自动下载时恢复所有需要外部准备的任务；调用者不识别具体平台。 */

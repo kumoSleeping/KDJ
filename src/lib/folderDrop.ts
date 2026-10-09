@@ -8,6 +8,14 @@ export const SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR = "data-kd-search-default-downloa
 export const SEARCH_DEFAULT_DOWNLOAD_SENTINEL = "__kd_default_download__";
 /** 下载队列的稳定落点标记，供 WKWebView 丢失原生 drop 时由 dragend 坐标兜底。 */
 export const SEARCH_QUEUE_DROP_ATTR = "data-kd-search-queue-drop";
+/**
+ * Everything a search result can be dropped on to queue it: the task list, and the 下载 entries
+ * (the chrome button marks itself with the attribute's value "entry", a drawer launcher with
+ * `data-drawer-entry="downloads"`).
+ */
+export const SEARCH_QUEUE_DROP_SELECTOR = `[${SEARCH_QUEUE_DROP_ATTR}], [data-drawer-entry="downloads"]`;
+/** The 下载 entries alone: they have no drop handlers of their own (see downloadDropEntry.ts). */
+export const SEARCH_QUEUE_ENTRY_SELECTOR = `[${SEARCH_QUEUE_DROP_ATTR}="entry"], [data-drawer-entry="downloads"]`;
 
 /**
  * 原生 drop 在 WKWebView 里偶尔不送达，但 dragend 仍带着松手坐标。
@@ -34,7 +42,7 @@ export function searchQueueDropElementAt(clientX: number, clientY: number): HTML
   if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
   return document
     .elementFromPoint(clientX, clientY)
-    ?.closest<HTMLElement>(`[${SEARCH_QUEUE_DROP_ATTR}]`) ?? null;
+    ?.closest<HTMLElement>(SEARCH_QUEUE_DROP_SELECTOR) ?? null;
 }
 
 export function searchQueueDropAt(clientX: number, clientY: number): boolean {

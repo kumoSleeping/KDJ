@@ -17,6 +17,7 @@ import { rememberVideoEnqueue } from "./queueTaskDraft";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import { enqueueMediaDownloads } from "./mediaActions";
+import { tossToDownloads } from "./downloadToss";
 import { useLibraryStore } from "../stores/libraryStore";
 import {
   dispatchStreamDeckDrop,
@@ -28,6 +29,7 @@ import type { SongSource, VideoDownloadRequest } from "../types";
 import { dragPreviewFromBlob, vinylDragPreview } from "./dragPreview";
 import { firstSourceShareLink, formatShareText, writeShareLinkDrag } from "./shareLink";
 import { useSharePrefs } from "./sharePrefs";
+import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../components/common/dragGhost";
 
 export { isSparseDownloadTitle, withDownloadDisplay } from "./downloadDisplay";
 
@@ -180,6 +182,11 @@ export function writeSearchSourcesDrag(
       ),
     });
   }
+  setDragGhost(dataTransfer, {
+    title: sources[0]?.title || "在线歌曲",
+    count: sources.length,
+    coverFrom: dragSource?.closest("tr") ?? dragSource,
+  });
 }
 
 export function writeVideoDownloadDrag(
@@ -203,6 +210,7 @@ export function writeVideoDownloadDrag(
   } catch {
     // text/plain + active 足以走完整条拖放链路。
   }
+  setDragGhost(dataTransfer, { title: wire.title || request.bvid || "视频", glyph: "video" });
 }
 
 /**
@@ -244,7 +252,7 @@ export function beginAudioPointerDrag(
     ? searchAudioDragPreview(sources)
     : Promise.resolve("");
   let dragging = false;
-  let ghost: HTMLDivElement | null = null;
+  let ghost: PointerDragGhost | null = null;
   const clearTargets = () => {
     document
       .querySelectorAll<HTMLElement>("[data-kd-pointer-search-over]")
@@ -274,18 +282,18 @@ export function beginAudioPointerDrag(
           ? String(deckSide)
           : "true",
       );
-      if (ghost) ghost.textContent = `${ghostTitle} → Deck ${deckSide === 0 ? "A" : "B"}`;
+      ghost?.hint(`Deck ${deckSide === 0 ? "A" : "B"}`);
       return;
     }
     const queue = searchQueueDropElementAt(x, y);
     if (queue) {
       queue.setAttribute("data-kd-pointer-search-over", "queue");
-      if (ghost) ghost.textContent = `${ghostTitle} → 下载队列`;
+      ghost?.hint("下载队列");
       return;
     }
     const folder = searchDropElementAt(x, y);
     folder?.setAttribute("data-kd-pointer-search-over", "folder");
-    if (ghost) ghost.textContent = folder ? `${ghostTitle} → 下载到文件夹` : ghostTitle;
+    ghost?.hint(folder ? "下载到文件夹" : null);
   };
   const cleanup = () => {
     window.removeEventListener("pointermove", onMove, true);
@@ -318,11 +326,7 @@ export function beginAudioPointerDrag(
     dragEpoch += 1;
     announceSearchDrag(payload);
     document.body.dataset.kdSearchPointerDragging = "true";
-    ghost = document.createElement("div");
-    ghost.className = "kd-track-pointer-ghost";
-    ghost.textContent = ghostTitle;
-    document.body.appendChild(ghost);
-    ghost.style.transform = `translate3d(${x + 12}px, ${y + 12}px, 0)`;
+    ghost = pointerDragGhost({ title: ghostTitle, count: sources.length, coverFrom: target?.closest("tr") }, x, y);
     paintTarget(x, y);
   };
   const onMove = (move: PointerEvent) => {
@@ -337,10 +341,7 @@ export function beginAudioPointerDrag(
       || move.clientX >= window.innerWidth - edgeThreshold
       || move.clientY >= window.innerHeight - edgeThreshold;
     if (outsideWindow && launchSystemLinkDrag()) return;
-    ghost?.style.setProperty(
-      "transform",
-      `translate3d(${move.clientX + 12}px, ${move.clientY + 12}px, 0)`,
-    );
+    ghost?.move(move.clientX, move.clientY);
     paintTarget(move.clientX, move.clientY);
   };
   const onUp = (up: PointerEvent) => {
@@ -391,7 +392,7 @@ export function beginVideoPointerDrag(
 
   const { pointerId, clientX: startX, clientY: startY } = down;
   let dragging = false;
-  let ghost: HTMLDivElement | null = null;
+  let ghost: PointerDragGhost | null = null;
   const payload: Extract<ActiveSearchDrag, { kind: "video" }> = {
     kind: "video",
     request,
@@ -409,9 +410,12 @@ export function beginVideoPointerDrag(
     const queue = searchQueueDropElementAt(x, y);
     if (queue) {
       queue.setAttribute("data-kd-pointer-search-over", "queue");
+      ghost?.hint("下载队列");
       return;
     }
-    searchDropElementAt(x, y)?.setAttribute("data-kd-pointer-search-over", "folder");
+    const folder = searchDropElementAt(x, y);
+    folder?.setAttribute("data-kd-pointer-search-over", "folder");
+    ghost?.hint(folder ? "下载到文件夹" : null);
   };
   const cleanup = () => {
     window.removeEventListener("pointermove", onMove, true);
@@ -429,11 +433,11 @@ export function beginVideoPointerDrag(
     dragEpoch += 1;
     announceSearchDrag(payload);
     document.body.dataset.kdSearchPointerDragging = "true";
-    ghost = document.createElement("div");
-    ghost.className = "kd-track-pointer-ghost";
-    ghost.textContent = display.title?.trim() || request.bvid || "下载视频";
-    document.body.appendChild(ghost);
-    ghost.style.transform = `translate3d(${x + 12}px, ${y + 12}px, 0)`;
+    ghost = pointerDragGhost({
+      title: display.title?.trim() || request.bvid || "下载视频",
+      coverFrom: target?.closest("tr"),
+      glyph: "video",
+    }, x, y);
     paintTarget(x, y);
   };
   const onMove = (move: PointerEvent) => {
@@ -441,7 +445,7 @@ export function beginVideoPointerDrag(
     if (!dragging && Math.hypot(move.clientX - startX, move.clientY - startY) < 5) return;
     move.preventDefault();
     if (!dragging) activate(move.clientX, move.clientY);
-    ghost?.style.setProperty("transform", `translate3d(${move.clientX + 12}px, ${move.clientY + 12}px, 0)`);
+    ghost?.move(move.clientX, move.clientY);
     paintTarget(move.clientX, move.clientY);
   };
   const onUp = (up: PointerEvent) => {
@@ -564,11 +568,17 @@ export async function enqueueSearchDrop(
 export async function enqueueSearchQueuePayload(payload: ActiveSearchDrag): Promise<void> {
   const downloads = useDownloadStore.getState();
   if (payload.kind === "video") {
+    // Dropped: the parcel hops from where the item was let go. Songs get theirs in
+    // enqueueMediaDownloads.
+    const toss = tossToDownloads({ title: payload.title });
     const task = await api.videoDownload({
       ...payload.request,
       title: payload.title,
       artist: payload.artist,
       cover: payload.cover,
+    }).catch((error: unknown) => {
+      toss.fail();
+      throw error;
     });
     rememberVideoEnqueue(task.id, {
       ...payload.request,
@@ -607,6 +617,11 @@ export async function enqueueSearchPayload(
   const lib = useLibraryStore.getState();
   lib.setFilter({ folder: dest, sort: "custom" });
   useAppStore.getState().openQueuePanel();
+  // A drop on a folder is a download too: the parcel goes from the drop point to the queue.
+  const toss = tossToDownloads({
+    title: payload.kind === "video" ? payload.title : payload.sources[0]?.title,
+    count: payload.kind === "video" ? 1 : payload.sources.length,
+  });
 
   const downloads = useDownloadStore.getState();
   if (payload.kind === "video") {
@@ -667,6 +682,7 @@ export async function enqueueSearchPayload(
       ]);
     } catch (error) {
       downloads.removeLocal(optimisticId);
+      toss.fail();
       throw error;
     }
     return;
@@ -719,6 +735,7 @@ export async function enqueueSearchPayload(
     );
   } catch (error) {
     for (const task of optimistic) downloads.removeLocal(task.id);
+    toss.fail();
     throw error;
   }
 }

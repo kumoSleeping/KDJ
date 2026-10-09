@@ -36,6 +36,8 @@ import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
 import { TableRating } from "../common/TableRating";
 import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
+import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../common/dragGhost";
+import "../common/DragGhost.css";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent } from "../../lib/shareClipboard";
 import {
@@ -1146,7 +1148,7 @@ export const TrackTable = memo(function TrackTable({
     const previousUserSelect = sourceRow.style.userSelect;
     sourceRow.style.userSelect = "none";
     let dragging = false;
-    let ghost: HTMLDivElement | null = null;
+    let ghost: PointerDragGhost | null = null;
     let unlockScroll: (settleMs?: number) => void = () => undefined;
 
     try {
@@ -1256,11 +1258,12 @@ export const TrackTable = memo(function TrackTable({
         sourceScrollLeft,
       );
       window.addEventListener("wheel", blockDragScroll, { capture: true, passive: false });
-      ghost = document.createElement("div");
-      ghost.className = "kd-track-pointer-ghost";
-      ghost.textContent = ids.length > 1 ? `移动 ${ids.length} 首曲目` : (track.title || track.filename);
-      document.body.appendChild(ghost);
-      ghost.style.transform = `translate3d(${x + 12}px, ${y + 12}px, 0)`;
+      ghost = pointerDragGhost({
+        title: track.title || track.filename,
+        count: ids.length,
+        coverFrom: sourceRow,
+        glyph: isVideoTrack(track.format) ? "video" : "song",
+      }, x, y);
       paintTarget(x, y);
     };
     const launchSystemExternalDrag = () => {
@@ -1321,7 +1324,7 @@ export const TrackTable = memo(function TrackTable({
         || move.clientX >= window.innerWidth - edgeThreshold
         || move.clientY >= window.innerHeight - edgeThreshold;
       if (outsideWindow && launchSystemExternalDrag()) return;
-      ghost?.style.setProperty("transform", `translate3d(${move.clientX + 12}px, ${move.clientY + 12}px, 0)`);
+      ghost?.move(move.clientX, move.clientY);
       paintTarget(move.clientX, move.clientY);
     };
     const onUp = (up: PointerEvent) => {
@@ -2001,6 +2004,11 @@ export const TrackTable = memo(function TrackTable({
       writeTrackDragData(event.dataTransfer, ids);
       writeShareLinkDrag(event.dataTransfer, link, event.currentTarget, {
         plainText: formatTrackShareText(track, link),
+      });
+      setDragGhost(event.dataTransfer, {
+        title: track.title || track.filename,
+        count: ids.length,
+        coverFrom: event.currentTarget,
       });
     },
     linkDragEnd() {

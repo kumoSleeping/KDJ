@@ -31,6 +31,11 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
 - **No divider lines** inside a drawer (see AGENTS.md): groups are separated by spacing and type.
 - **Refusing to close.** `close()` may return `false` (an unsaved draft). The drawer then stays,
   and an app that was opened over it gives way.
+- **Held while something flies into it.** Motion aimed at an app (the download parcel,
+  `src/lib/downloadToss.ts`) calls `holdDrawer(appId)` from `src/lib/drawerHold.ts` and releases it
+  on landing. Until then the drawer keeps showing that app; another app that is asked for, or a
+  close, is applied at the release, with its usual motion. A hold lets go by itself after 1.5 s,
+  and an app that refuses to close is never covered by a held one.
 
 ## Adding an app
 

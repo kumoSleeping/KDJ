@@ -9,6 +9,8 @@ import { useLibraryStore } from "../../stores/libraryStore";
 import type { TrackPage } from "../../types";
 import { Select } from "../common/Select";
 import { InlineNotice } from "../common/InlineNotice";
+import { setDragGhost } from "../common/dragGhost";
+import "../common/DragGhost.css";
 import { EditorTabs } from "./EditorChrome";
 
 const browserTabs = [{ id: "projects", label: "工程" }, { id: "library", label: "曲库" }, { id: "exports", label: "已导出" }] as const;
@@ -66,7 +68,13 @@ export function KvjMediaBrowser() {
         <FileVideo size={16} /><span><strong>{p.name}</strong><small>{formatTime(projectDuration(p))}</small></span>
       </button>)}
       {tab === "library" && page?.items.map(track => <div key={track.id} className="kd-kvj-source" data-selected={selected === track.id || undefined}
-        draggable onDragStart={e => writeTrackDragData(e.dataTransfer, [track.id])} onDragEnd={finishTrackDrop}>
+        draggable onDragStart={e => {
+          writeTrackDragData(e.dataTransfer, [track.id]);
+          setDragGhost(e.dataTransfer, {
+            title: track.title || track.filename,
+            glyph: ["mp4", "mkv", "webm", "mov", "avi", "m4v"].includes(track.format.toLowerCase()) ? "video" : "song",
+          });
+        }} onDragEnd={finishTrackDrop}>
         <button type="button" className="kd-kvj-source-main" aria-pressed={selected === track.id} onClick={() => setSelected(track.id)}
           onDoubleClick={() => add(track.id)} title={track.path}>
           {["mp4", "mkv", "webm", "mov", "avi", "m4v"].includes(track.format.toLowerCase()) ? <FileVideo size={16} /> : <Music2 size={16} />}<span><strong>{track.title || track.filename}</strong><small>{[track.artist, formatDuration(track.duration ?? 0)].filter(Boolean).join(" · ")}</small></span>

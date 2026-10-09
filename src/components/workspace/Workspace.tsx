@@ -49,6 +49,7 @@ import { VisualizerDock } from "../composition/VisualizerDock";
 import { LiveVjPanel } from "../composition/LiveVjPanel";
 import { SidePanels } from "../player/SidePanels";
 import { useDrawerOrder } from "../drawer/useDrawerOrder";
+import { releaseDrawerHolds, useHeldDrawer } from "../../lib/drawerHold";
 import { useDrawerApps } from "./drawerApps";
 import { DrawerHost } from "../drawer/Drawer";
 import type { DrawerSpec } from "../drawer/drawerSchema";
@@ -1657,8 +1658,10 @@ export function Workspace() {
     },
   });
   const dockOrder = useDrawerOrder(drawerApps.map(app => app.id), dockRaised);
-  const drawerFrontId = dockOrder.at(-1) ?? null;
-  const drawerSpec = drawerApps.find(app => app.id === drawerFrontId) ?? null;
+  // download-toss: a parcel in flight holds the drawer on the app it is aimed at; what was asked
+  // for meanwhile is shown, and the other apps closed, once it has landed (lib/drawerHold.ts).
+  const drawerSpec = useHeldDrawer(drawerApps, dockOrder.at(-1) ?? null);
+  const drawerFrontId = drawerSpec?.id ?? null;
   const drawerAppsRef = useRef(drawerApps);
   drawerAppsRef.current = drawerApps;
   useEffect(() => {
@@ -1669,6 +1672,7 @@ export function Workspace() {
       // An app that refuses to go (an unsaved draft) keeps the drawer; the newcomer gives way.
       drawerAppsRef.current.find(app => app.id === drawerFrontId)?.close();
       useSidePanels.getState().raise(other.id);
+      releaseDrawerHolds(); // download-toss: a refusing app is not covered for a parcel either
       break;
     }
   }, [drawerFrontId]);
