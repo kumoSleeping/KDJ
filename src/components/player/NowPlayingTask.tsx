@@ -109,6 +109,7 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
       ].filter(Boolean),
       covers: cover ? [cover] : [],
       song: track.id,
+      size: "large",
       stay: open || pinned ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,
       body: <NowPlayingDetail track={track} />,

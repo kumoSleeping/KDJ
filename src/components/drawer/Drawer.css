@@ -4,16 +4,16 @@
 :root {
   --kd-drawer-head-h: 3.5rem;
   --kd-drawer-radius: 12px;
-  /* The rolled-up head of a small window: its icons and no more. */
-  --kd-drawer-lip-w: 8rem;
+  /* The rolled-up head: its icons and no more. */
+  --kd-drawer-lip-w: 7.5rem;
 }
 /* On whole pixels at any interface font size, so head and sheet meet without a blended row. */
 @supports (width: round(1px, 1px)) {
   :root { --kd-drawer-head-h: round(3.5rem, 1px); }
 }
 .kd-drawer-host {
-  /* On a dark list a shadow alone does not lift the surface; it is also a shade lighter. */
-  --kd-drawer-face: color-mix(in srgb, var(--kd-text) 4%, var(--kd-panel));
+  /* The drawer's one mark against the list: a surface a shade off the panel's. */
+  --kd-drawer-face: color-mix(in srgb, var(--kd-text) 5%, var(--kd-panel));
   /* How far the sheet reaches up behind the head: it fills the head's rounded corner, and a
      pixel more so that the face always overlaps it. */
   --kd-drawer-tuck: calc(var(--kd-drawer-radius) + 1px);
@@ -26,13 +26,12 @@
   pointer-events: none;
   container: kd-drawer / inline-size;
 }
-:root[data-theme="light"] .kd-drawer-host { --kd-drawer-face: var(--kd-panel); }
+:root[data-theme="light"] .kd-drawer-host { --kd-drawer-face: color-mix(in srgb, var(--kd-text) 3.5%, var(--kd-panel)); }
 
 /* —— The head ——
-   Three layers, so that no shadow falls between the head and the sheet: the lip carries the
-   shape and its shadow under the sheets, the sheets pass over it, and the face on top holds
-   what is written. Rolled up, the lip is what is seen: the chrome's lower edge coming down,
-   with a concave fillet where its left side leaves the chrome and a rounded free corner. */
+   Three layers: the lip is the head's flat block under the sheets, the sheets pass over it,
+   and the face on top holds what is written. The whole drawer is flat: it is told from the
+   list by its tone alone, with no shadow, and the block has one rounded free corner. */
 .kd-drawer-lip,
 .kd-drawer-head {
   position: absolute;
@@ -43,23 +42,7 @@
   border-bottom-left-radius: var(--kd-drawer-radius);
   background: var(--kd-drawer-face);
 }
-.kd-drawer-lip {
-  z-index: 0;
-  /* The edge of a surface that floats over the search row and the list: a soft drop, no line. */
-  filter: drop-shadow(0 3px 7px rgb(0 0 0 / 0.5)) drop-shadow(0 12px 22px rgb(0 0 0 / 0.42));
-}
-.kd-drawer-lip::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: 100%;
-  width: var(--kd-drawer-radius);
-  height: var(--kd-drawer-radius);
-  background: radial-gradient(circle at 0 100%, transparent calc(var(--kd-drawer-radius) - 0.5px), var(--kd-drawer-face) var(--kd-drawer-radius));
-}
-:root[data-theme="light"] .kd-drawer-lip {
-  filter: drop-shadow(0 2px 5px rgb(30 34 44 / 0.1)) drop-shadow(0 10px 20px rgb(30 34 44 / 0.1));
-}
+.kd-drawer-lip { z-index: 0; }
 .kd-drawer-head {
   z-index: 2;
   display: flex;
@@ -68,16 +51,28 @@
   color: var(--kd-text);
   pointer-events: auto;
 }
+/* Rolled up, the head is only its icons: a small block at the right end of the row. It is cut
+   from the full-width head rather than resized, so opening widens it without laying anything
+   out, and what is cut away takes no clicks from the search beneath it. */
+.kd-drawer-lip,
+.kd-drawer-head {
+  --kd-drawer-cut: max(0px, 100% - var(--kd-drawer-lip-w));
+  clip-path: inset(0 0 0 var(--kd-drawer-cut) round 0 0 0 var(--kd-drawer-radius));
+  transition: clip-path 320ms cubic-bezier(0.22, 0.9, 0.26, 1);
+}
+.kd-drawer-host:has(.kd-drawer) :is(.kd-drawer-lip, .kd-drawer-head) { --kd-drawer-cut: 0px; }
 
 /* Rolled up: the apps that are opened by hand, written like the quiet words of a title. */
 .kd-drawer-launcher {
   position: absolute;
-  inset: 0 auto 0 0;
+  inset: 0 0 0 auto;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 1.15rem;
+  justify-content: space-evenly;
+  width: var(--kd-drawer-lip-w);
   max-width: 100%;
-  padding: 0 0.9rem 0 1.1rem;
+  padding: 0 0.5rem;
   animation: kd-drawer-word-up 420ms cubic-bezier(0.22, 0.9, 0.26, 1) 120ms both;
 }
 .kd-drawer-host[data-open] .kd-drawer-launcher {
@@ -183,13 +178,6 @@
   font-size: 0.625rem;
 }
 .kd-drawer-tail > .kd-drawer-rollup { margin-left: 0.3rem; }
-/* A small window (see the top row in design.css): rolled up, the head is only its icons. It is
-   the drawer's full width again for as long as a sheet is out. */
-@container kd-table-wrap (max-width: 34rem) {
-  .kd-drawer-host:not(:has(.kd-drawer)) { width: var(--kd-drawer-lip-w); }
-  .kd-drawer-host:not(:has(.kd-drawer)) .kd-drawer-launcher { gap: 0.9rem; }
-  .kd-drawer-host:not(:has(.kd-drawer)) .kd-drawer-launcher > .kd-drawer-entry > span:not(.kd-drawer-entry-count) { display: none; }
-}
 /* A narrow drawer keeps its title and the roll-up; the other apps are a roll-up away. */
 @container kd-drawer (max-width: 21rem) {
   .kd-drawer-tail > .kd-drawer-entry { display: none; }
@@ -243,8 +231,6 @@
   padding-top: var(--kd-drawer-tuck);
   border-bottom-left-radius: var(--kd-drawer-radius);
   background: var(--kd-drawer-face);
-  /* The edge of a surface that floats over the list: a soft drop, no drawn line. */
-  box-shadow: 0 22px 50px -12px rgb(0 0 0 / 0.72), 0 2px 12px -2px rgb(0 0 0 / 0.5);
   color: var(--kd-text);
   overflow: hidden;
   pointer-events: auto;
@@ -259,9 +245,6 @@
 }
 .kd-drawer[data-extent="two-thirds"] { --kd-drawer-extent: 0.66667; }
 .kd-drawer[data-extent="full"] { --kd-drawer-extent: 1; border-bottom-left-radius: 0; }
-:root[data-theme="light"] .kd-drawer {
-  box-shadow: 0 18px 44px -16px rgb(30 34 44 / 0.26), 0 2px 10px -2px rgb(30 34 44 / 0.1);
-}
 .kd-drawer[data-leaving] { animation: kd-drawer-up 320ms cubic-bezier(0.55, 0, 0.8, 0.35) both; }
 /* The top stays behind the head the whole time; only the bottom edge is seen to move. */
 @keyframes kd-drawer-down {
@@ -363,3 +346,12 @@
 }
 .kd-drawer .kd-drawer-body .kd-viz-group + .kd-viz-group { margin-top: 0.4rem; }
 :root:not([data-theme-pack]) .kd-drawer .kd-drawer-body .kd-panel-head { border-bottom: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .kd-drawer-lip, .kd-drawer-head { transition: none; }
+}
+
+/* The sheet is the only surface: a list or a row on it does not paint the panel tone over it.
+   Kept as weak as the rules it replaces, so a row's own states (running, hovered, just added)
+   still colour it. */
+:where(.kd-drawer .kd-drawer-body) :is(.kd-download-task-list, .kd-download-task) { background: transparent; }

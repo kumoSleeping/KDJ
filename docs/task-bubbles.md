@@ -23,7 +23,11 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
 - **The stack.** The newest bubble rests nearest the bar and lifts the older ones. More than
   `TASK_VISIBLE_LIMIT` (3) that leave by themselves, and the oldest of them leave now, an error
   last. A bubble that is kept up (`stay: 0`) is not counted and never pushed out.
-- **The stay.** `stay` in ms; left out, the tone decides (`TASK_STAY_MS`: 5 s, an error 10 s).
+- **The size.** `size` is `small` (a one-line note, as wide as its text), `regular` (default: a
+  cover and two lines) or `large` (a big cover and a title-size name: the playing song). A kind
+  of task picks the one that fits what it says; nothing sets a bubble's width or cover by hand.
+- **The stay.** Each kind chooses its own `stay`: the playing song 5 s, a short note such as
+  "没有找到歌词" 3 s. `stay` in ms; left out, the tone decides (`TASK_STAY_MS`: 5 s, an error 10 s).
   `stay: 0` keeps the bubble until it is dismissed — a pinned or opened bubble. The ring shows the
   time that is left and stops while the stack is hovered or focused. Every bubble can be rolled
   down by hand; `escape: true` also lets Esc do it (only for a bubble the user called up).

@@ -812,13 +812,20 @@ textarea {
 .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top {
   box-sizing: border-box;
   min-height: var(--kd-drawer-head-h);
-  padding-right: var(--kd-drawer-w);
+  /* Rolled up, the head is a small block of icons and the search takes the rest. */
+  padding-right: var(--kd-drawer-lip-w);
   background: var(--s98-face, var(--kd-panel));
+  transition: padding-right 320ms cubic-bezier(0.22, 0.9, 0.26, 1);
 }
-/* A small window has no room for both: the rolled-up head keeps only its icons and the search
-   takes the rest. An open drawer is as wide as ever and comes down over the search's end. */
+/* While a sheet is out the head is as wide as the drawer, and the search ends where it begins.
+   Only this one row is laid out again. A small window has no room for both: there the open
+   drawer comes down over the search's end. */
+.kd-table-wrap[data-drawer-head]:has(> .kd-drawer-host .kd-drawer) > .kd-panel-dock-top { padding-right: var(--kd-drawer-w); }
 @container kd-table-wrap (max-width: 34rem) {
-  .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top { padding-right: var(--kd-drawer-lip-w); }
+  .kd-table-wrap[data-drawer-head]:has(> .kd-drawer-host .kd-drawer) > .kd-panel-dock-top { padding-right: var(--kd-drawer-lip-w); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top { transition: none; }
 }
 /* An editor column stands beside the whole of the list's column: the search row, its head and
    the drawer keep to the left of it. */

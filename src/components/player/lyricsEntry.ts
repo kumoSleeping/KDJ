@@ -43,7 +43,7 @@ export function useLyricsEntry(track: Track | null, onOpened?: () => void): Lyri
         if (getPlayingTrack()?.id !== id) return;
         if (hasVisibleLyrics(useLyricsStore.getState().get(id).lines)) show();
         // Nothing to open: the request is answered instead of ending in silence.
-        else showTask({ id: "lyrics-entry", kind: "notice", title: "没有找到歌词", detail: track.title || track.filename });
+        else showTask({ id: "lyrics-entry", kind: "notice", title: "没有找到歌词", detail: track.title || track.filename, size: "small", stay: 3_000 });
       });
     },
   };

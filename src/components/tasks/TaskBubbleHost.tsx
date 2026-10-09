@@ -168,7 +168,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
     </span>}
   </>;
   const open = spec.onOpen;
-  return <div className="kd-task-slot" style={{ "--kd-task-lift": `${lift}px`, zIndex: front } as CSSProperties}>
+  return <div className="kd-task-slot" data-size={spec.size ?? "regular"} style={{ "--kd-task-lift": `${lift}px`, zIndex: front } as CSSProperties}>
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || undefined}

@@ -7,6 +7,8 @@ import type { ReactNode } from "react";
  */
 export type TaskTone = "info" | "success" | "error";
 
+export type TaskSize = "small" | "regular" | "large";
+
 /** Why a bubble left. `timeout`: its stay ran out. `user`: dismissed on the bubble or by Esc.
  *  `caller`: its owner took it away. `crowded`: newer bubbles pushed it out. */
 export type TaskDismissReason = "timeout" | "user" | "caller" | "crowded";
@@ -50,7 +52,14 @@ export interface TaskBubbleSpec {
   tone?: TaskTone;
   actions?: readonly TaskAction[];
   /**
-   * How long the bubble stays, in ms, before it rolls back down. 0 keeps it up until it is
+   * How much room the bubble takes. `small`: a one-line note as wide as its text. `regular`
+   * (the default): a task with a cover and two lines. `large`: the task the listener reads and
+   * acts on most, with a big cover and a title-size name (the playing song).
+   */
+  size?: TaskSize;
+  /**
+   * How long the bubble stays, in ms, before it rolls back down. Each kind of task chooses its
+   * own: a song 5 s, a short note 3 s. 0 keeps it up until it is
    * dismissed: a pinned or opened bubble. Left out, the tone decides (see TASK_STAY_MS).
    */
   stay?: number;

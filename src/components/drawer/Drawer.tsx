@@ -112,11 +112,10 @@ function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
   </section>;
 }
 
-/** The entries of the head: words beside their icons while it is rolled up, icons alone beside a title. */
-function DrawerEntries({ entries, front, compact, live, onAsk }: {
+/** The entries of the head, as icons: the head's whole content while it is rolled up, beside the title while a sheet is out. */
+function DrawerEntries({ entries, front, live, onAsk }: {
   entries: readonly DrawerEntry[];
   front: string | null;
-  compact: boolean;
   /** Only the set that can be used names its entries, so `data-drawer-entry` finds one control. */
   live: boolean;
   onAsk(entry: DrawerEntry): void;
@@ -127,7 +126,6 @@ function DrawerEntries({ entries, front, compact, live, onAsk }: {
       aria-pressed={front === entry.id} aria-label={entry.count ? `${name}，${entry.count} 项进行中` : name}
       title={name} onClick={() => onAsk(entry)}>
       {entry.icon}
-      {compact ? null : <span>{entry.label}</span>}
       {entry.count ? <span className="kd-drawer-entry-count" aria-hidden="true">{entry.count > 99 ? "99+" : entry.count}</span> : null}
     </button>;
   })}</>;
@@ -253,7 +251,7 @@ export function DrawerHost({ spec, entries = [], clear, hostRef, onResizeStart }
     </div>
     <div className="kd-drawer-head">
       {entries.length ? <nav className="kd-drawer-launcher" aria-label="侧边应用" aria-hidden={spec ? true : undefined} inert={!!spec}>
-        <DrawerEntries entries={entries} front={null} compact={false} live={!spec} onAsk={ask} />
+        <DrawerEntries entries={entries} front={null} live={!spec} onAsk={ask} />
       </nav> : null}
       <div className="kd-drawer-titles">
         {layers.map(layer => {
@@ -274,7 +272,7 @@ export function DrawerHost({ spec, entries = [], clear, hostRef, onResizeStart }
         })}
       </div>
       {layers.length ? <div className="kd-drawer-tail" data-leaving={spec ? undefined : "true"} inert={!spec}>
-        <DrawerEntries entries={entries} front={spec?.id ?? null} compact live={!!spec} onAsk={ask} />
+        <DrawerEntries entries={entries} front={spec?.id ?? null} live={!!spec} onAsk={ask} />
         <button type="button" className="kd-drawer-rollup" aria-label={spec ? `收起${spec.title}` : "收起"}
           title={spec ? `收起${spec.title} · Esc` : undefined} onClick={() => { spec?.close(); }}>
           <ChevronsUp size={16} aria-hidden="true" />
