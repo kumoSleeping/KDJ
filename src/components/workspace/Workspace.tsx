@@ -134,7 +134,6 @@ import {
   EXPLORE_SEARCH_EVENT,
   type ExploreSearchDetail,
 } from "../../lib/vjSearch";
-import { burstToneForPlatforms, type SearchBurstTone } from "../download/SearchBurstFX";
 import { ChromeActions } from "../chrome/ChromeActions";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
@@ -1526,7 +1525,6 @@ export function Workspace() {
       tipsOpen={showSearchTips}
       onTips={toggleSearchTipsPanel}
       burstNonce={searchBurstNonce}
-      burstTone={searchBurstTone}
       platforms={platforms}
       onTogglePlatform={togglePlatform}
       presentation="bar"
@@ -1859,7 +1857,6 @@ export function Workspace() {
     platforms: Platform[];
   } | null>(null);
   const [searchBurstNonce, setSearchBurstNonce] = useState(0);
-  const [searchBurstTone, setSearchBurstTone] = useState<SearchBurstTone>("rainbow");
   useEffect(() => {
     const onExplore = (event: Event) => {
       const detail = (event as CustomEvent<ExploreSearchDetail>).detail;
@@ -1877,7 +1874,6 @@ export function Workspace() {
     if (explorePending && query === explorePending.query) {
       const { platforms: plats } = explorePending;
       setExplorePending(null);
-      setSearchBurstTone(burstToneForPlatforms(plats));
       setSearchBurstNonce((n) => n + 1);
       // 目标源若还没在设置里开过，代搜时顺手启用（同平台条首次点击）。
       if (settings) {

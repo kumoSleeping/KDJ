@@ -1,0 +1,424 @@
+/* 聚合搜索: one line of the page's top area. No box: what you type leads, the search kind and its
+   sources close the line, and the hairline under it is the field's only edge. That same line
+   carries the motion: it inks in on focus and a segment travels along it while a search runs. */
+
+/* —— The band grows out of the title bar's lower edge —— */
+.kd-search-band-host {
+  flex: none;
+  display: grid;
+  grid-template-rows: 1fr;
+  overflow: hidden;
+  animation: kd-search-band-grow 420ms cubic-bezier(0.22, 0.9, 0.26, 1) backwards;
+  transition: grid-template-rows 300ms cubic-bezier(0.55, 0, 0.8, 0.35);
+}
+.kd-search-band-host:not([data-open="true"]) {
+  grid-template-rows: 0fr;
+}
+.kd-search-band {
+  min-height: 0;
+  padding: 0.2rem 0 0.4rem;
+  background: var(--kd-panel);
+  animation: kd-search-band-rise 420ms cubic-bezier(0.22, 0.9, 0.26, 1) backwards;
+}
+.kd-search-band-host:not([data-open="true"]) > .kd-search-band {
+  pointer-events: none;
+}
+@keyframes kd-search-band-grow { from { grid-template-rows: 0fr; } }
+@keyframes kd-search-band-rise { from { transform: translateY(-100%); } }
+
+/* —— The line —— */
+.kd-search-command {
+  position: relative;
+  display: block;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-app-region: no-drag;
+}
+.kd-searchbar {
+  --kd-search-h: 2.5rem;
+  --kd-search-leading: 1.55em;
+  --kd-search-inset-start: 0.85rem;
+  --kd-search-inset-end: 0.75rem;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  /* The kind and the sources stay on the first line while the editor grows under them. */
+  align-items: start;
+  column-gap: 0.9rem;
+  min-width: 0;
+  padding: 0 var(--kd-search-inset-end) 0 var(--kd-search-inset-start);
+  color: var(--kd-text);
+  cursor: text;
+}
+
+/* What you type. */
+.kd-searchbar-copy {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+}
+.kd-searchbar-input {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  /* One formula for one line and for a batch: whole lines plus the centring room of the row. */
+  height: calc(var(--kd-search-rows, 1) * var(--kd-search-leading) + var(--kd-search-h) - var(--kd-search-leading));
+  padding: calc((var(--kd-search-h) - var(--kd-search-leading)) / 2) 0.45rem;
+  padding-left: 0.15rem;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: calc(var(--kd-size) + 0.0625rem);
+  font-weight: 500;
+  line-height: var(--kd-search-leading);
+  caret-color: color-mix(in srgb, var(--kd-text) 78%, var(--kd-panel));
+  resize: none;
+  white-space: pre;
+  overflow: auto;
+  scrollbar-width: none;
+  /* Only a changed line count moves this; typing within a line costs no layout. */
+  transition: height 240ms cubic-bezier(0.22, 0.9, 0.26, 1);
+}
+.kd-searchbar-copy[data-empty] .kd-searchbar-input {
+  caret-color: transparent;
+}
+/* Keep selected query text visible even when a theme's generic selection blends into the editor. */
+:root .kd-searchbar .kd-searchbar-input::selection {
+  color: var(--kd-theme-ink);
+  background: var(--kd-theme);
+}
+.kd-searchbar-input::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.kd-searchbar[data-batch] .kd-searchbar-input {
+  scrollbar-width: thin;
+}
+.kd-searchbar[data-batch] .kd-searchbar-input::-webkit-scrollbar {
+  display: initial;
+  width: 6px;
+  height: 6px;
+}
+.kd-searchbar[data-batch] .kd-searchbar-input::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--kd-text) 26%, transparent);
+  border-radius: 3px;
+}
+
+/* The empty field: a caret of its own, and the tip line with the bulb in the caret's place. */
+.kd-searchbar-copy[data-empty][data-input-focused="true"]::after {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  left: 0.15rem;
+  top: 50%;
+  width: 1.5px;
+  height: 1.08em;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--kd-text) 72%, transparent);
+  transform: translateY(-50%);
+  animation: kd-search-caret-blink 1.15s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes kd-search-caret-blink {
+  0%, 42% { opacity: 0.92; }
+  68%, 100% { opacity: 0.12; }
+}
+.kd-search-placeholder {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: 0.4rem;
+  left: 0;
+  transform: translateY(-50%);
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: calc(var(--kd-size) + 0.0625rem);
+  font-weight: 400;
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  /* Returns when the field is cleared. */
+  animation: kd-search-fade-in 220ms ease-out backwards;
+}
+@keyframes kd-search-fade-in { from { opacity: 0; } }
+.kd-search-tip {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.18rem;
+  overflow: hidden;
+}
+.kd-search-tip-action {
+  appearance: none;
+  position: relative;
+  z-index: 1;
+  flex: none;
+  width: 1.25rem;
+  height: 1.4rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-faint);
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  transition: opacity 0.2s ease, visibility 0.2s, color 0.12s;
+}
+/* Keep the icon slot so focus never pulls the hint text toward the leading edge. */
+.kd-search-tip[data-input-focused="true"] .kd-search-tip-action {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.kd-search-tip-action:hover,
+.kd-search-tip-action:focus-visible {
+  color: var(--kd-text-body);
+  background: transparent;
+}
+.kd-search-tip-action[data-open="true"] {
+  color: var(--kd-theme);
+}
+.kd-search-tip-copy {
+  min-width: 0;
+  display: grid;
+  overflow: hidden;
+}
+.kd-search-tip-text {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.kd-search-tip-text[data-mode="idle"] {
+  animation: kd-search-tip-cycle 0.2s ease-out;
+}
+.kd-search-tip-text[data-mode="input"] {
+  opacity: 0;
+  transform: translateY(0.2em);
+}
+.kd-search-tip[data-input-focused="true"] .kd-search-tip-text[data-mode="idle"] {
+  opacity: 0;
+  transform: translateY(-0.2em);
+}
+.kd-search-tip[data-input-focused="true"] .kd-search-tip-text[data-mode="input"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+@keyframes kd-search-tip-cycle {
+  from {
+    opacity: 0;
+    transform: translateY(0.2em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* What kind, and where it searches. */
+.kd-searchbar-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  height: var(--kd-search-h);
+  cursor: default;
+}
+.kd-search-kind {
+  appearance: none;
+  flex: none;
+  height: 1.6rem;
+  padding: 0 0.25rem;
+  overflow: hidden;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kd-muted);
+  font-family: inherit;
+  font-size: var(--kd-size-xs);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.kd-search-kind:hover {
+  color: var(--kd-text);
+}
+.kd-search-kind:focus-visible {
+  outline: 1px solid var(--kd-theme);
+  outline-offset: -1px;
+}
+/* A changed kind settles into place instead of swapping. */
+.kd-search-kind-text {
+  display: inline-block;
+  animation: kd-search-kind-in 240ms cubic-bezier(0.22, 0.9, 0.26, 1) backwards;
+}
+@keyframes kd-search-kind-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.4em);
+  }
+}
+.kd-searchbar .kd-plat {
+  width: 1.6rem;
+  height: 1.6rem;
+}
+
+/* —— The line under the field ——
+   Resting: a hairline. Focused: ink runs along it and withdraws to the leading edge.
+   Searching: a segment travels it until the results land, then fades with their arrival. */
+.kd-search-line {
+  position: absolute;
+  right: var(--kd-search-inset-end);
+  bottom: 0;
+  left: var(--kd-search-inset-start);
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.kd-search-line::before,
+.kd-search-line::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+}
+.kd-search-line::before {
+  background: var(--kd-line);
+  transition: background-color 180ms ease;
+}
+.kd-searchbar:hover .kd-search-line::before {
+  background: color-mix(in srgb, var(--kd-text) 20%, var(--kd-panel));
+}
+.kd-search-line::after {
+  background: color-mix(in srgb, var(--kd-text) 46%, var(--kd-panel));
+  transform: scaleX(0);
+  /* A click inks the line from where it landed; the keyboard, and the way back, use the leading edge. */
+  transform-origin: var(--kd-search-origin, 0px) center;
+  transition: transform 300ms cubic-bezier(0.55, 0, 0.8, 0.35);
+}
+.kd-searchbar[data-focused] .kd-search-line::after {
+  transform: scaleX(1);
+  transition: transform 460ms cubic-bezier(0.22, 0.9, 0.26, 1);
+}
+.kd-search-line-run {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 28%;
+  height: 2px;
+  border-radius: 1px;
+  /* A head with a tail behind it, so the direction reads without any glow. */
+  background: linear-gradient(90deg, transparent, var(--kd-theme) 72%);
+  transform: translateX(-100%);
+  animation:
+    kd-search-line-travel 1.35s cubic-bezier(0.42, 0, 0.3, 1) infinite,
+    kd-search-fade-in 180ms ease-out backwards;
+  transition: opacity 360ms ease;
+}
+/* The pass keeps going while it fades, so the hand-off never shows a stopped segment. */
+.kd-searchbar[data-searching="done"] .kd-search-line-run {
+  opacity: 0;
+}
+@keyframes kd-search-line-travel {
+  /* 100% of the track is 100% / 28% of the segment's own width. */
+  to { transform: translateX(calc(100% / 0.28)); }
+}
+
+/* —— Hand-off to the results ——
+   The pane's own spinner only shows for a search slow enough to need it, and the rows fade in
+   under a header that is already in place. */
+.kd-search-loading {
+  animation: kd-search-fade-in 260ms ease-out 360ms backwards;
+}
+.kd-workspace-pane-remote .kd-table[data-kind="results"] > tbody {
+  animation: kd-search-fade-in 320ms ease-out backwards;
+}
+
+/* —— Sakura98 keeps its sunken editor; the line only reports a running search ——
+   The pack styles the band's face; the editor is styled here, in the application layer, so
+   installed copies of the pack follow the structure of this file. */
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-search-band {
+  padding: 0.35rem 0 0.45rem;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-search-band .kd-searchbar {
+  --kd-search-h: 2.25rem;
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy {
+  padding: 0 6px;
+  border-radius: 2px;
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy[data-input-focused="true"] {
+  box-shadow: var(--s98-sunken), 0 0 0 1px var(--s98-frame);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar-copy .kd-search-placeholder {
+  right: 8px;
+  left: 6px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar-copy[data-empty][data-input-focused="true"]::after {
+  left: calc(6px + 0.15rem);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar-input:focus-visible {
+  outline: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-search-line {
+  bottom: -4px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-search-line::before,
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-search-line::after {
+  content: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kd-search-band-host,
+  .kd-search-band,
+  .kd-search-placeholder,
+  .kd-search-kind-text,
+  .kd-search-tip-text[data-mode="idle"],
+  .kd-search-loading,
+  .kd-workspace-pane-remote .kd-table[data-kind="results"] > tbody {
+    animation: none;
+  }
+  .kd-search-band-host,
+  .kd-searchbar-input,
+  .kd-search-tip-action,
+  .kd-search-tip-text,
+  .kd-search-line::before,
+  .kd-search-line::after,
+  .kd-searchbar[data-focused] .kd-search-line::after,
+  .kd-search-line-run {
+    transition: none;
+  }
+  .kd-search-tip-text,
+  .kd-search-tip[data-input-focused="true"] .kd-search-tip-text {
+    transform: none;
+  }
+  /* A search still shows on the line: the whole of it, held, instead of a travelling segment. */
+  .kd-search-line-run {
+    width: 100%;
+    background: var(--kd-theme);
+    transform: none;
+    animation: none;
+  }
+}

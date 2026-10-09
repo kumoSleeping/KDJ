@@ -97,9 +97,6 @@
   outline: 1px solid var(--s98-frame);
   outline-offset: 0;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-search-band .kd-searchbar:focus-within {
-  box-shadow: var(--s98-sunken), 0 0 0 1px var(--s98-frame);
-}
 :root[data-theme-pack="sakulaptop98"] .kd-searchbar-input:focus-visible {
   outline: none;
   box-shadow: none;
@@ -201,7 +198,7 @@
 :root[data-theme-pack="sakulaptop98"] .kd-activity-search-toggle:is([data-open="true"], [data-pinned="true"]) {
   color: var(--kd-theme);
 }
-:root[data-theme-pack="sakulaptop98"] :is(.kd-search-band-sep, .kd-searchbar-sep, .kd-narrow-rail-sep) {
+:root[data-theme-pack="sakulaptop98"] :is(.kd-search-band-sep, .kd-narrow-rail-sep) {
   background: var(--s98-shadow);
   box-shadow: 1px 0 var(--s98-white);
 }
@@ -298,10 +295,6 @@
 :root[data-theme-pack="sakulaptop98"] select option {
   color: var(--kd-text);
   background: var(--kd-panel-inset);
-}
-:root[data-theme-pack="sakulaptop98"] .kd-search-band .kd-searchbar {
-  background: var(--kd-panel-inset);
-  box-shadow: var(--s98-sunken);
 }
 :root[data-theme-pack="sakulaptop98"] .kd-searchbar-input {
   background: transparent;
