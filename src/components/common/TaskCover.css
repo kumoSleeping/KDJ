@@ -1,0 +1,106 @@
+/* The cover box of a task row. Its size never depends on the picture, so a late picture moves
+   nothing; the tile behind it is what shows while a picture loads and when there is none.
+   `--kd-task-cover-size` on the box, on a stack or on anything around them sets another size. */
+.kd-task-cover {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: var(--kd-task-cover-size, 3rem);
+  height: var(--kd-task-cover-size, 3rem);
+  overflow: hidden;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--kd-theme) 5%, var(--kd-hover));
+  color: color-mix(in srgb, var(--kd-theme) 24%, var(--kd-faint));
+}
+/* The edge of the picture itself: keeps a pale cover from dissolving into a pale sheet. */
+.kd-task-cover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-text) 9%, transparent);
+  pointer-events: none;
+}
+.kd-task-cover > img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.16s;
+}
+.kd-task-cover[data-face="image"] > img { opacity: 1; }
+.kd-task-cover-glyph {
+  width: 40%;
+  height: 40%;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-task-cover > img { transition: none; }
+}
+
+/* A batch: up to three covers in the place of one, stepped along the diagonal, front first. */
+.kd-task-cover-stack {
+  --kd-task-cover-ring: var(--kd-panel);
+  position: relative;
+  flex: none;
+  display: block;
+  width: var(--kd-task-cover-size, 3rem);
+  height: var(--kd-task-cover-size, 3rem);
+}
+.kd-task-cover-stack > .kd-task-cover {
+  position: absolute;
+  /* Each cover is cut out of the one behind it by a ring in the sheet's own tone. */
+  box-shadow: 0 0 0 1.5px var(--kd-task-cover-ring);
+}
+.kd-task-cover-stack[data-layout="fan"] > .kd-task-cover { border-radius: 4px; }
+.kd-task-cover-stack[data-layout="fan"][data-count="1"] > .kd-task-cover { width: 82%; height: 82%; }
+.kd-task-cover-stack[data-layout="fan"][data-count="2"] > .kd-task-cover { width: 72%; height: 72%; }
+.kd-task-cover-stack[data-layout="fan"][data-count="3"] > .kd-task-cover { width: 62%; height: 62%; }
+.kd-task-cover-stack[data-layout="fan"] > .kd-task-cover:nth-child(1) { top: 0; left: 0; z-index: 3; }
+.kd-task-cover-stack[data-layout="fan"][data-count="2"] > .kd-task-cover:nth-child(2) { top: 28%; left: 28%; z-index: 2; }
+.kd-task-cover-stack[data-layout="fan"][data-count="3"] > .kd-task-cover:nth-child(2) { top: 19%; left: 19%; z-index: 2; }
+.kd-task-cover-stack[data-layout="fan"][data-count="3"] > .kd-task-cover:nth-child(3) { top: 38%; left: 38%; z-index: 1; }
+.kd-task-cover-more {
+  position: absolute;
+  z-index: 4;
+  color: var(--kd-muted);
+  font-size: 0.6rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+/* In the fan the count takes the corner the covers leave free. */
+.kd-task-cover-stack[data-layout="fan"] > .kd-task-cover-more { left: 0; bottom: 0; }
+.kd-task-cover-stack[data-layout="fan"][data-count="1"] > .kd-task-cover-more { left: auto; right: 0; }
+
+/* Side by side: full-size covers overlapped by half, and the count after them. */
+.kd-task-cover-stack[data-layout="row"] {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  height: auto;
+}
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover { position: relative; }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover + .kd-task-cover { margin-left: calc(var(--kd-task-cover-size, 3rem) * -0.45); }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover:nth-child(1) { z-index: 3; }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover:nth-child(2) { z-index: 2; }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover:nth-child(3) { z-index: 1; }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover-more { position: static; margin-left: 0.3rem; }
+
+/* Sakura98: covers are small bevelled plates like the pack's other thumbnails. */
+:root[data-theme-pack="sakulaptop98"] .kd-task-cover {
+  border-radius: 2px;
+  background: var(--kd-panel-inset);
+  color: var(--s98-shadow, var(--kd-faint));
+  box-shadow: 1px 1px 0 var(--s98-shadow), -1px -1px 0 var(--s98-white);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-cover::after { box-shadow: none; }
+:root[data-theme-pack="sakulaptop98"] .kd-task-cover-stack > .kd-task-cover {
+  border-radius: 2px;
+  box-shadow: 1px 1px 0 var(--s98-shadow), -1px -1px 0 var(--s98-white), 0 0 0 2px var(--kd-task-cover-ring);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-cover-stack { --kd-task-cover-ring: var(--s98-face-hi, var(--kd-panel)); }

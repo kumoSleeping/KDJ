@@ -32,7 +32,8 @@
 }
 .kd-task-window .kd-task-tabs > button[aria-selected="true"] { color: var(--kd-theme); }
 .kd-task-window .kd-task-tabs > button:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text)); outline-offset: -1px; }
-.kd-task-window-entry { padding: 5px 6px; border-bottom: 1px solid var(--kd-line-soft); font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
+.kd-task-window-entry { padding: 6px; font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
+.kd-task-window-entry :is(.kd-task-cover, .kd-task-cover-stack) { --kd-task-cover-size: 1.5rem; border-radius: 3px; }
 .kd-task-window-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .kd-task-window-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .kd-task-window-entry button { border: 0; background: transparent; color: var(--kd-text); cursor: pointer; padding: 2px; }

@@ -5,7 +5,9 @@ import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelSto
 import { useLiveVjStore } from "../../stores/liveVjStore";
 import { liveVjRunning, liveVjSupported } from "../../lib/liveVj";
 import { useLiveVjStatus } from "../../lib/useLiveVjStatus";
+import { useTrackCoverStack } from "../../lib/useTaskCovers";
 import { InlineNotice, Panel } from "../common";
+import { TaskCoverStack } from "../common/TaskCover";
 import { QueuePanel } from "../download/QueuePanel";
 import { ExportQueuePanel } from "../composition/ExportQueuePanel";
 import { SlidePages } from "../drawer/SlidePages";
@@ -63,6 +65,12 @@ export function DownloadTaskPanel() {
   </Panel>;
 }
 
+/** A set stands for its songs: the covers of the first few, overlapped. Its row states the count. */
+function LiveVjSetCovers({ id, trackIds }: { id: string; trackIds: readonly number[] }) {
+  const { covers } = useTrackCoverStack(trackIds);
+  return <TaskCoverStack covers={covers} owner={id} kind="set" layout="row" />;
+}
+
 const livePhases: Record<string, string> = {
   indexing: "分析素材", permission: "等待声音输入授权", listening: "监听中", matched: "已匹配",
   searching: "重新搜索", prepared: "特征索引已就绪", stopped: "已停止", failed: "运行失败",
@@ -95,7 +103,8 @@ export function LiveVjTaskPanel() {
         {view.phase === "indexing" && <progress max={Math.max(1, view.total)} value={view.indexed} aria-label="实时 VJ 素材分析进度" />}
         {view.matched && <div>{view.matched.entry.title}</div>}
       </div>}
-      {document?.sets.map(set => <div className="kd-task-window-entry kd-task-window-line" key={set.id}>
+      {document?.sets.map(set => <div className="kd-task-window-entry kd-task-window-line" key={set.id} data-task-id={set.id}>
+        <LiveVjSetCovers id={set.id} trackIds={set.entries.map(entry => entry.track_id)} />
         <button type="button" className="kd-task-window-name" onClick={() => open(set.id)}>{set.name}</button>
         <span>{set.entries.length} 首</span>
       </div>)}

@@ -24,3 +24,5 @@ export { Slider } from "./Slider";
 export type { SliderProps } from "./Slider";
 export { Segmented } from "./Segmented";
 export type { SegmentedOption } from "./Segmented";
+export { TaskCover, TaskCoverStack } from "./TaskCover";
+export type { TaskCoverProps, TaskCoverStackProps } from "./TaskCover";

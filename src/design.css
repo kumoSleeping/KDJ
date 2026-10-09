@@ -2282,7 +2282,6 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-download-prefs {
   flex: none;
   min-width: 0;
-  border-bottom: 1px solid var(--kd-line);
   background: var(--kd-panel);
 }
 
@@ -2377,8 +2376,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   line-height: 1;
 }
 .kd-download-summary-fact + .kd-download-summary-fact {
-  padding-left: 0.7rem;
-  border-left: 1px solid var(--kd-line-soft);
+  padding-left: 0.5rem;
 }
 .kd-download-summary-fact > strong {
   color: var(--kd-text);
@@ -2406,7 +2404,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   align-items: center;
   gap: 0.62rem;
   padding: 0.32rem 0.7rem;
-  border-top: 1px solid var(--kd-line-soft);
   background: var(--kd-panel);
 }
 .kd-download-defaults-label {
@@ -4233,11 +4230,15 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-panel);
   container-type: inline-size;
 }
+/* Rows are told apart by their own spacing and by the tone a hovered row takes; there is no rule
+   between them. */
 .kd-download-task {
   --kd-download-task-tone: var(--kd-muted);
+  /* Where the text column starts: the order number, the cover and their gaps. The lines a row
+     adds under its head (an error, a detail) start there too. */
+  --kd-download-task-inset: 5.45rem;
   position: relative;
-  padding: 0.62rem 0.65rem 0.58rem 0.55rem;
-  border-bottom: 1px solid var(--kd-line-soft);
+  padding: 0.6rem 0.65rem 0.6rem 0.55rem;
   background: var(--kd-panel);
   transition: background-color 0.12s;
 }
@@ -4253,14 +4254,25 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-download-task:focus-within {
   background: color-mix(in srgb, var(--kd-hover) 54%, var(--kd-panel));
 }
+/* One grid for every task row: the order number and the cover at the left, the title with the
+   row's actions on the first line, then the detail line with the state at its right end, the
+   facts and, while the task runs, its progress. The lines under the title run the full width,
+   so the state sits at the row's right edge however many actions the row has. */
 .kd-download-task-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.38rem;
+  display: grid;
+  grid-template-columns: 1.45rem 3rem minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto 1fr;
+  grid-template-areas:
+    "order cover title actions"
+    "order cover byline byline"
+    "order cover meta meta"
+    "order cover bar bar";
+  column-gap: 0.5rem;
+  align-items: start;
   min-width: 0;
 }
 .kd-download-task-order {
-  flex: 0 0 1.45rem;
+  grid-area: order;
   height: 3rem;
   display: flex;
   align-items: center;
@@ -4276,17 +4288,13 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-download-task[data-state="failed"] .kd-download-task-order {
   color: var(--kd-download-task-tone);
 }
-.kd-download-task-summary {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 3rem minmax(0, 1fr);
-  align-items: start;
-  gap: 0.55rem;
-  padding: 0;
-  color: inherit;
-  font: inherit;
-  text-align: left;
+/* The cover and the text lines are placed by the head's grid directly. */
+.kd-download-task-summary,
+.kd-download-task-copy {
+  display: contents;
+}
+.kd-download-task-summary > :first-child {
+  grid-area: cover;
 }
 .kd-download-task-cover {
   position: relative;
@@ -4325,17 +4333,12 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
     linear-gradient(135deg, transparent 0 49%, var(--kd-line-soft) 49% 51%, transparent 51%),
     var(--kd-panel-inset);
 }
-.kd-download-task[data-state="done"] .kd-download-task-cover,
-.kd-download-task[data-state="canceled"] .kd-download-task-cover {
-  opacity: 0.76;
-}
-.kd-download-task-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.22rem;
+.kd-download-task[data-state="canceled"] .kd-download-task-summary > :first-child {
+  opacity: 0.6;
 }
 .kd-download-task-byline {
+  grid-area: byline;
+  margin-top: 0.2rem;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -4343,6 +4346,8 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   min-width: 0;
 }
 .kd-download-task-title {
+  grid-area: title;
+  min-width: 0;
   overflow: hidden;
   color: var(--kd-text);
   font-size: var(--kd-size);
@@ -4363,6 +4368,8 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: none;
 }
 .kd-download-task-meta {
+  grid-area: meta;
+  margin-top: 0.2rem;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -4495,6 +4502,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
+  margin-left: auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -4547,19 +4555,41 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 @media (prefers-reduced-motion: reduce) {
   .kd-download-task-spinner { animation: none; }
 }
+/* The buttons are taller than the title's line; they overhang it instead of opening it up. */
 .kd-download-task-actions {
-  flex: none;
+  grid-area: actions;
   display: flex;
   align-items: center;
   gap: 0.05rem;
+  margin: -0.22rem 0 -0.22rem 0.3rem;
 }
 .kd-download-task-actions .kd-btn-icon {
   width: 1.5rem;
   height: 1.5rem;
   padding: 0;
 }
+/* How far a running task has come, in the tone of its state. */
+.kd-download-task-progress {
+  grid-area: bar;
+  height: 2px;
+  margin-top: 0.42rem;
+  overflow: hidden;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--kd-download-task-tone) 18%, transparent);
+}
+.kd-download-task-progress > span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--kd-download-task-tone);
+  transform-origin: left center;
+  transition: transform 0.25s linear;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-download-task-progress > span { transition: none; }
+}
 .kd-download-task-error {
-  margin: 0.45rem 0 0 5.38rem;
+  margin: 0.45rem 0 0 var(--kd-download-task-inset);
   color: var(--kd-danger);
   font-size: var(--kd-size-xs);
   white-space: pre-wrap;
@@ -4570,19 +4600,26 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   color: var(--kd-faint);
 }
 .kd-download-task-notice {
-  margin-left: 5.38rem;
+  margin-left: var(--kd-download-task-inset);
 }
 .kd-download-task-notice {
   margin-top: 0.45rem;
 }
 
 @container (max-width: 320px) {
+  .kd-download-task {
+    --kd-download-task-inset: 3.5rem;
+  }
+  .kd-download-task-head {
+    grid-template-columns: 3rem minmax(0, 1fr) auto;
+    grid-template-areas:
+      "cover title actions"
+      "cover byline byline"
+      "cover meta meta"
+      "cover bar bar";
+  }
   .kd-download-task-order {
     display: none;
-  }
-  .kd-download-task-error,
-  .kd-download-task-notice {
-    margin-left: 3.55rem;
   }
 }
 
@@ -8017,7 +8054,7 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .vj-task-overview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(70px, .6fr); gap: .6rem; height: 3.3rem; overflow: hidden; }
 .vj-task-media-grid { display: grid; gap: .5rem; min-width: 0; overflow: hidden; }
 .vj-task-media { display: grid; grid-template-columns: 32px minmax(0, 1fr); grid-template-rows: 2.2rem 1.1rem; column-gap: .4rem; min-width: 0; }
-.vj-task-summary .kd-download-task-cover { width: min(32px, 2.2rem); height: min(32px, 2.2rem); margin-top: 0; }
+.vj-task-summary .kd-task-cover { --kd-task-cover-size: min(32px, 2.2rem); border-radius: 3px; }
 .vj-task-media-info { display: grid; grid-template-rows: repeat(2, 1.1rem); min-width: 0; line-height: 1.1rem; }
 .vj-task-media-title { font-size: var(--kd-size-sm); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .vj-task-media-info small { color: var(--kd-muted); font-size: var(--kd-size-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }

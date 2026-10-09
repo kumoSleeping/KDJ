@@ -1,0 +1,10 @@
+/* Sakura98: a row's actions are raised keys, twice as tall as the title's line. The title sits
+   level with them instead of hanging from the top of a tall first line, and the keys end clear
+   of the state under them. */
+:root[data-theme-pack="sakulaptop98"] .kd-download-task-actions {
+  margin-top: -0.3rem;
+  margin-bottom: 0;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-download-task-title {
+  align-self: center;
+}

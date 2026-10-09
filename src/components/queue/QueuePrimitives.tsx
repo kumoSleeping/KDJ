@@ -3,6 +3,7 @@ import { AlertTriangle, Ban, Check, Clock3, History, Loader2, Pause, Play, Trash
 import { Button } from "../common";
 import { Select } from "../common/Select";
 import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
+import "./QueuePrimitives.css";
 
 /** Shared queue geometry deliberately retains the established download design tokens. */
 export function QueueFrame({ className = "", style, ...props }: ComponentProps<"div">) {
@@ -11,12 +12,22 @@ export function QueueFrame({ className = "", style, ...props }: ComponentProps<"
 export function QueueList({ children, className = "", style, ...props }: ComponentProps<"div">) {
   return <div {...props} className={`kd-scroll kd-grow kd-download-task-list ${className}`} style={{ minHeight: 0, ...style }}>{children}</div>;
 }
+/**
+ * One task row, the same on every task page: order number, cover, title with the row's actions,
+ * a detail line that ends in the state, the facts, and a progress line while the task runs.
+ * Extra lines (an error, a notice) are children and start under the text column. The root
+ * element takes any attribute a caller passes, such as `data-task-id`.
+ */
 export function QueueEntry({ order, title, titleTooltip = title, subtitle, state, status, stateTitle, missing,
-  percent, cover, metadata, actions, children, className = "", ...props }: Omit<ComponentProps<"article">, "title"> & {
+  percent, progress, cover, metadata, actions, children, className = "", ...props }: Omit<ComponentProps<"article">, "title"> & {
   order: string; title: string; titleTooltip?: string; subtitle?: string;
   state: string; status: string; stateTitle?: string; missing?: boolean;
-  percent?: string; cover: ReactNode; metadata?: ReactNode; actions?: ReactNode;
+  percent?: string;
+  /** 0..1 while the task is running and how far it has come is known; draws the progress line. */
+  progress?: number;
+  cover: ReactNode; metadata?: ReactNode; actions?: ReactNode;
 }) {
+  const ratio = progress === undefined || !Number.isFinite(progress) ? undefined : Math.min(1, Math.max(0, progress));
   return <article {...props} className={`kd-download-task ${className}`} data-state={state} data-missing={missing || undefined}>
     <div className="kd-download-task-head">
       <span className="kd-download-task-order kd-mono" aria-label={`队列第 ${Number.parseInt(order, 10)} 项`}>{order}</span>
@@ -35,6 +46,11 @@ export function QueueEntry({ order, title, titleTooltip = title, subtitle, state
             </span>
           </span>
           {metadata && <span className="kd-download-task-meta">{metadata}</span>}
+          {ratio !== undefined && <span className="kd-download-task-progress" role="progressbar" aria-label={`${title} 进度`}
+            aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(ratio * 100)}>
+            {/* The length is data, not layout, so it is set inline. */}
+            <span style={{ transform: `scaleX(${ratio})` }} />
+          </span>}
         </span>
       </div>
       {actions && <div className="kd-download-task-actions">{actions}</div>}
