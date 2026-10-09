@@ -42,6 +42,7 @@ const times = (v: number) => `×${v.toFixed(2)}`;
 const resolutions = [["1920x1080", "1080p · 16:9"], ["1280x720", "720p · 16:9"], ["1920x840", "1920 × 840 · 超宽"], ["2560x1080", "2560 × 1080 · 超宽"]] as const;
 const studioTabIds = studioTabs.map(tab => tab.id);
 const frameRates = [{ value: 30, label: "30 fps" }, { value: 60, label: "60 fps" }] as const;
+const qualities = [{ value: "high", label: "高" }, { value: "standard", label: "标准" }, { value: "low", label: "低" }] as const;
 function Toggle({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
   return <button type="button" className="kd-djp-toggle kd-viz-toggle" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} onClick={() => onChange(!checked)}>
     <span className="kd-djp-toggle-label">{label}</span>
@@ -606,7 +607,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
           {resolutions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </Select></Row>
         <div className="kd-viz-row"><span>帧率</span><Segmented label="帧率" options={frameRates} value={p.output.fps} onChange={fps => edit(n => { n.output.fps = fps; })} /></div>
-        {duration > 0 && <div className="kd-viz-row"><span>预计大小</span><output>约 {formatBytes(studioExportBytes(p.scene.canvas.width, p.scene.canvas.height, p.output.fps, duration))}</output></div>}
+        <div className="kd-viz-row"><span>画质</span><Segmented label="画质" options={qualities} value={p.output.quality ?? "standard"} onChange={quality => edit(n => { n.output.quality = quality; })} /></div>
+        {duration > 0 && <div className="kd-viz-row"><span>预计大小</span><output>约 {formatBytes(studioExportBytes(p.scene.canvas.width, p.scene.canvas.height, p.output.fps, duration, p.output.quality))}</output></div>}
         <Row label="文件名"><input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></Row>
         <Toggle label="水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
       </Group>}

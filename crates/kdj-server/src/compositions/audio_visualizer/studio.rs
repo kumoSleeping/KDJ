@@ -301,6 +301,8 @@ struct Export {
     #[serde(default)] pixel_format: PixelFormat,
     /// Frames in each uploaded GOP; H.264 only.
     #[serde(default)] chunk_frames: u32,
+    /// What a hardware encoder is held to, from the project's quality; 0 leaves it to the canvas.
+    #[serde(default)] video_bitrate: u64,
 }
 impl Export {
     fn frames(&self) -> u64 { (self.duration * self.fps as f64).ceil() as u64 }
@@ -317,6 +319,7 @@ impl Export {
     fn validate(&self) -> Result<()> {
         let chunked = if self.pixel_format == PixelFormat::H264 { (1..=600).contains(&self.chunk_frames) } else { self.chunk_frames == 0 };
         ensure!(chunked, "视频分段长度无效");
+        ensure!(self.video_bitrate == 0 || (1_000_000..=80_000_000).contains(&self.video_bitrate), "视频码率无效");
         ensure!(self.width >= 320 && self.width <= 2560 && self.height >= 180 && self.height <= 1440 && self.width % 2 == 0 && self.height % 2 == 0 && [30, 60].contains(&self.fps), "输出画布或帧率无效");
         ensure!(self.duration.is_finite() && self.duration > 0. && self.duration <= MAX_DURATION_MS as f64 / 1000., "输出时长无效");
         Ok(())
@@ -425,9 +428,10 @@ async fn render(p: &Export, audio: &std::path::Path, output: &std::path::Path, j
         frame_pipe::render(&kdj_providers::ffmpeg::binary()?, &mux_args(p, audio, &stage.0), duration, &job.cancel, job.clone(),
             |v| job.update(|s| s.progress = s.progress.max(v * 0.96))).await?;
     } else {
+        let bitrate = if p.video_bitrate > 0 { p.video_bitrate } else { acceleration::bitrate(p.width, p.height, p.fps as f64) };
         acceleration::render_frames(&render_args(p, audio, &stage.0), duration, &job.cancel, p.acceleration,
             |v| job.update(|s| s.progress = s.progress.max(v * 0.96)),
-            |message| job.update(|s| s.status = message.to_owned()), job.clone(), (p.width, p.height, p.fps as f64)).await?;
+            |message| job.update(|s| s.status = message.to_owned()), job.clone(), bitrate).await?;
     }
     check(&job.cancel)?;
     job.update(|s| { s.phase = "validating".into(); s.status = "校验画面、音轨和文件版本".into(); s.progress = 0.97; s.demand = None; });
@@ -489,8 +493,10 @@ mod tests {
     }
     #[test]
     fn studio_canvas_limits() {
-        let mut p = Export { track_id: 1, signature: String::new(), duration: 3., output_path: String::new(), width: 1920, height: 840, fps: 60, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0 };
-        assert!(p.validate().is_ok()); p.width = 1921; assert!(p.validate().is_err()); p.width = 1920; p.duration = f64::NAN; assert!(p.validate().is_err());
+        let mut p = Export { track_id: 1, signature: String::new(), duration: 3., output_path: String::new(), width: 1920, height: 840, fps: 60, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0, video_bitrate: 0 };
+        assert!(p.validate().is_ok()); p.width = 1921; assert!(p.validate().is_err()); p.width = 1920;
+        p.video_bitrate = 8_000_000; assert!(p.validate().is_ok()); p.video_bitrate = 900_000; assert!(p.validate().is_err(), "a bitrate no encoder holds a picture at"); p.video_bitrate = 0;
+        p.duration = f64::NAN; assert!(p.validate().is_err());
     }
     #[test]
     fn studio_transport_is_bounded_and_replayable() {
@@ -560,7 +566,7 @@ mod tests {
     }
     #[test]
     fn studio_graph_uses_only_argv_paths_and_no_overwrite() {
-        let p = Export { track_id: 1, signature: String::new(), duration: 2., output_path: String::new(), width: 320, height: 180, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0 };
+        let p = Export { track_id: 1, signature: String::new(), duration: 2., output_path: String::new(), width: 320, height: 180, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::default(), chunk_frames: 0, video_bitrate: 0 };
         let args = render_args(&p, std::path::Path::new("odd ' [audio].wav"), std::path::Path::new("stage"));
         assert!(!args.contains(&"-y".into())); assert_eq!(args.windows(2).filter(|a| a[0] == "-i" && a[1] == "pipe:0").count(), 1);
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1]; assert!(!graph.contains("odd"));
@@ -584,7 +590,7 @@ mod tests {
         bytes
     }
     fn h264(duration: f64, chunk_frames: u32) -> Export {
-        Export { track_id: 1, signature: String::new(), duration, output_path: String::new(), width: 1920, height: 1080, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::H264, chunk_frames }
+        Export { track_id: 1, signature: String::new(), duration, output_path: String::new(), width: 1920, height: 1080, fps: 30, acceleration: EncodingAcceleration::default(), pixel_format: PixelFormat::H264, chunk_frames, video_bitrate: 0 }
     }
     #[test]
     fn studio_h264_gops_are_counted_and_must_open_with_their_parameter_sets() {

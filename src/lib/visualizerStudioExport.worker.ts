@@ -61,7 +61,7 @@ async function openEncoder(): Promise<void> {
   if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") throw new Error("这个 WebView 没有 WebCodecs");
   const { width, height } = prepared.project.scene.canvas, fps = prepared.project.output.fps;
   const config: VideoEncoderConfig = {
-    codec: studioAvcCodec(width, height, fps), width, height, framerate: fps, bitrate: studioVideoBitrate(width, height, fps),
+    codec: studioAvcCodec(width, height, fps), width, height, framerate: fps, bitrate: studioVideoBitrate(width, height, fps, prepared.project.output.quality),
     bitrateMode: "variable", latencyMode: "quality", hardwareAcceleration: "prefer-hardware", avc: { format: "annexb" },
   };
   if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error("系统硬件编码器不支持这个画布");

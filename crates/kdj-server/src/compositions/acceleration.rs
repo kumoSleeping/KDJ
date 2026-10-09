@@ -524,7 +524,7 @@ fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     }
 }
 
-fn bitrate(width: u32, height: u32, fps: f64) -> u64 {
+pub(super) fn bitrate(width: u32, height: u32, fps: f64) -> u64 {
     if width == 0 || height == 0 {
         return DEFAULT_BITRATE;
     }
@@ -589,12 +589,13 @@ pub async fn render_with_status(
 }
 
 /// Explicit opt-in for a frame source that can regenerate every frame on retry.
+/// `bitrate` is what a hardware encoder is held to; x264 stays sized by the picture.
 pub(super) async fn render_frames(
     args: &[String], duration: i64, cancel: &CancellationToken,
     preference: EncodingAcceleration, progress: impl FnMut(f64), status: impl Fn(&str),
-    source: Arc<dyn super::frame_pipe::FrameSource>, canvas: (u32, u32, f64),
+    source: Arc<dyn super::frame_pipe::FrameSource>, bitrate: u64,
 ) -> Result<()> {
-    render_inner(args, duration, cancel, preference, progress, status, Some(&source), Some(canvas)).await
+    render_inner(args, duration, cancel, preference, progress, status, Some(&source), Some(bitrate)).await
 }
 
 async fn attempt(
@@ -611,7 +612,7 @@ async fn attempt(
 async fn render_inner(
     args: &[String], duration: i64, cancel: &CancellationToken,
     preference: EncodingAcceleration, progress: impl FnMut(f64), status: impl Fn(&str),
-    frames: Option<&Arc<dyn super::frame_pipe::FrameSource>>, canvas: Option<(u32, u32, f64)>,
+    frames: Option<&Arc<dyn super::frame_pipe::FrameSource>>, target: Option<u64>,
 ) -> Result<()> {
     check_cancel(cancel)?;
     status("CPU 编码");
@@ -642,8 +643,8 @@ async fn render_inner(
         crate::diagnostics::record("warn", "hardware", "encoder.probe", &format!("没有可用硬件编码器，使用 CPU；preference={preference:?}"));
         return attempt(args, duration, cancel, report, frames).await;
     };
-    let bitrate = match canvas {
-        Some((width, height, fps)) => bitrate(width, height, fps),
+    let bitrate = match target {
+        Some(target) => target,
         None => source_bitrate(args, &layout, cancel).await?,
     };
     // Discovery may have taken seconds. Recheck both the output and executable

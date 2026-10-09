@@ -115,6 +115,8 @@ Linux 上无头 Chromium / Playwright WebKit、真实服务端与 FFmpeg（CPU �
 - 启动时每个 Worker 先真实编码 4 帧。打开会话失败、超时（15 秒）、输出不是 Annex B 关键帧、或参数集与其它 Worker 不同的 Worker 不参与编码；能编码的不足一半时整体退回。显卡驱动对并发编码会话数有限制，这是预期情况。
 - 任务开始被服务端拒绝，或导出中途失败（编码器报错、输出帧数不符、时间戳回退即出现了重排帧、服务端拒收某个 GOP）：取消本次任务，改由 FFmpeg 编码自动重新导出一次，并记录一条 `visualizer-export / editor-encoder` 诊断。
 
+画质与体积：硬件编码器按目标码率输出，与画面内容无关；原先固定为 1080p30 12 Mbps、60 fps 翻倍，四分钟的歌是 360 MB 或 720 MB。导出页现在有“画质”三档（`output.quality`，可选字段，缺省为标准），1080p30 分别为 12 / 8 / 5 Mbps，按像素数等比、60 fps 乘 1.5（`studioVideoBitrate`），其下一行显示按该码率和歌曲时长算出的预计大小。编辑器把码率随任务发给服务端（`video_bitrate`），WebView 编码和 FFmpeg 硬件编码用同一个数；x264 软件编码仍是 CRF 19，按画面内容定体积，通常比预计大小小。
+
 控制台的 `[visualizer export]` 日志带 `encoder: "webview" | "ffmpeg"`，导出状态显示“系统硬件编码”时即为新路径。
 
 尚未验证：这条路径没有做过测速，也没有在 Windows（WebView2 / Media Foundation）真机上运行过。实现时只在本机 Chrome 的 Worker 中确认过 `VideoEncoder` 的硬件与软件 H.264 配置均可用；WKWebView 上是否启用、各家硬件编码器的码流是否都能通过上述检查、实际快多少，都以手动导出为准。直接把 GPU 画布交给编码器（省掉读回与转色）会更快，但成品的色彩矩阵将由 WebView 决定，需先确认再做。

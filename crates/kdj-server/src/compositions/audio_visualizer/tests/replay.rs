@@ -62,7 +62,7 @@ async fn hardware_failure_restarts_the_entire_frame_source() {
         |value| progress.lock().unwrap().push(value),
         |message| messages.lock().unwrap().push(message.to_owned()),
         source.clone(),
-        (320, 180, 30.),
+        acceleration::bitrate(320, 180, 30.),
     )
     .await;
     let messages = messages.into_inner().unwrap();
