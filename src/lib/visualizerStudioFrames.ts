@@ -23,16 +23,20 @@ export function studioAvcCodec(width: number, height: number, fps: number): stri
   return `avc1.6400${level}`;
 }
 
-/** The server's hardware-encoder target: 12 Mbps at 1080p30, proportional to pixels and rate. */
-export function studioVideoBitrate(width: number, height: number, fps: number): number {
-  return Math.max(3_000_000, Math.min(80_000_000, Math.round(12_000_000 * width * height / (1920 * 1080) * fps / 30)));
+export type StudioQuality = "high" | "standard" | "low";
+/** Video bits per second at 1080p30. A hardware encoder spends its target whatever the
+ * picture shows, and this one is mostly still: 8 Mbps is what video sites ask of an upload. */
+const QUALITY_BITRATE: Record<StudioQuality, number> = { high: 12_000_000, standard: 8_000_000, low: 5_000_000 };
+
+/** What a hardware encoder is held to: proportional to pixels, half as much again at 60 fps. */
+export function studioVideoBitrate(width: number, height: number, fps: number, quality: StudioQuality = "standard"): number {
+  return Math.max(1_500_000, Math.min(80_000_000, Math.round(QUALITY_BITRATE[quality] * width * height / (1920 * 1080) * (fps > 30 ? 1.5 : 1))));
 }
 
-/** What a hardware-encoded export weighs: the encoder holds its target bitrate whatever
- * the picture shows, beside 256 kbps of AAC. Without a hardware encoder x264 sizes the
- * file by the picture instead, and it comes out smaller than this. */
-export function studioExportBytes(width: number, height: number, fps: number, seconds: number): number {
-  return Math.round(seconds * (studioVideoBitrate(width, height, fps) + 256_000) / 8);
+/** What a hardware-encoded export weighs, beside 256 kbps of AAC. Without a hardware
+ * encoder x264 sizes the file by the picture instead, and it comes out smaller than this. */
+export function studioExportBytes(width: number, height: number, fps: number, seconds: number, quality?: StudioQuality): number {
+  return Math.round(seconds * (studioVideoBitrate(width, height, fps, quality) + 256_000) / 8);
 }
 
 /** SPS and PPS that open an Annex B GOP, as hex; null unless a key picture follows them.
