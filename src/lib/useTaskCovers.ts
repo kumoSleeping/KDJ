@@ -19,6 +19,7 @@ import {
   type TaskCoverAddresses,
   type TaskCoverStackView,
 } from "./taskCovers";
+import type { VisualizerExportTask } from "./visualizerExportQueue";
 import { knownVisualizerExportPoster, visualizerExportPoster } from "./visualizerExportPoster";
 
 /**
@@ -65,9 +66,11 @@ export function useWorkshopExportCovers(project: CompositionProject | undefined,
 /**
  * The pictures of a visualizer export. The project's own picture is read from the queued
  * snapshot the first time a row asks; `pending` is true until that answer is in, so the box
- * waits for it instead of showing the song's cover and then swapping.
+ * waits for it instead of showing the song's cover and then swapping. The song comes from the
+ * task, or from the snapshot for a task queued before tasks recorded it.
  */
-export function useVisualizerExportCovers(taskId: string): { urls: string[]; pending: boolean } {
+export function useVisualizerExportCovers(task: Pick<VisualizerExportTask, "id" | "trackId">): { urls: string[]; pending: boolean } {
+  const taskId = task.id;
   const [poster, setPoster] = useState(() => knownVisualizerExportPoster(taskId));
   useEffect(() => {
     let current = true;
@@ -75,9 +78,10 @@ export function useVisualizerExportCovers(taskId: string): { urls: string[]; pen
     void visualizerExportPoster(taskId).then((value) => { if (current) setPoster(value); });
     return () => { current = false; };
   }, [taskId]);
-  const revision = useTrackRevisions([poster?.trackId]);
-  const urls = useMemo(() => visualizerExportCovers({ poster: poster?.url, trackId: poster?.trackId }, appCoverAddresses),
-    [poster, revision]);
+  const trackId = task.trackId ?? poster?.trackId;
+  const revision = useTrackRevisions([trackId]);
+  const urls = useMemo(() => visualizerExportCovers({ poster: poster?.url, trackId }, appCoverAddresses),
+    [poster, trackId, revision]);
   return { urls, pending: !poster };
 }
 

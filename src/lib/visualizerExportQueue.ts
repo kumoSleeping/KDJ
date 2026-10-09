@@ -14,6 +14,8 @@ export interface VisualizerExportTask {
   status: string;
   error: string;
   createdAt: number;
+  /** The song the export was made for. Tasks queued before this was recorded do not have it. */
+  trackId?: number;
 }
 export const visualizerExportActive = (task: VisualizerExportTask) => ["queued", "preparing", "encoding", "validating"].includes(task.phase);
 export const visualizerExportStartable = (task: VisualizerExportTask) => ["ready", "failed", "canceled"].includes(task.phase);

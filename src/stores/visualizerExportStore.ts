@@ -123,7 +123,8 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     }
     const task: VisualizerExportTask = { id: crypto.randomUUID(), name: snapshot.project.text.title || snapshot.project.track.title || filename,
       filename, outputPath: path(filename), width: snapshot.project.scene.canvas.width, height: snapshot.project.scene.canvas.height,
-      fps: snapshot.project.output.fps, phase: "ready", progress: 0, status: "待导出", error: "", createdAt: Date.now() };
+      fps: snapshot.project.output.fps, phase: "ready", progress: 0, status: "待导出", error: "", createdAt: Date.now(),
+      trackId: snapshot.project.track.id };
     // Reserve the name synchronously, but don't expose an exportable task until
     // its image bytes and project snapshot have committed successfully.
     snapshot.project.output.filename = filename;

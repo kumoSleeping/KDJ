@@ -12,9 +12,9 @@ import "./ExportQueuePanel.css";
 const fail = (error: unknown) => useVisualizerExportStore.setState({ error: error instanceof Error ? error.message : String(error) });
 
 /** The picture of a visualizer export: the project's own picture, then the cover of its song. */
-function VisualizerExportCover({ taskId }: { taskId: string }) {
-  const { urls, pending } = useVisualizerExportCovers(taskId);
-  return <TaskCover urls={urls} pending={pending} owner={taskId} kind="visualizer" />;
+function VisualizerExportCover({ task }: { task: VisualizerExportTask }) {
+  const { urls, pending } = useVisualizerExportCovers(task);
+  return <TaskCover urls={urls} pending={pending} owner={task.id} kind="visualizer" />;
 }
 
 export function VisualizerExportTasks({ heading = true, firstOrder = 1, tasks: visibleTasks }: {
@@ -31,7 +31,7 @@ export function VisualizerExportTasks({ heading = true, firstOrder = 1, tasks: v
       return <QueueEntry key={task.id} data-task-id={task.id} order={String(firstOrder + index)} title={task.name} subtitle="可视化"
         state={running ? "processing" : task.phase} status={task.status}
         percent={running ? formatPercent(task.progress) : undefined} progress={running ? task.progress : undefined}
-        cover={<VisualizerExportCover taskId={task.id} />}
+        cover={<VisualizerExportCover task={task} />}
         metadata={<>
           <span className="kd-download-task-quality kd-mono"><Video size={10} />{task.width} × {task.height} · {task.fps} fps</span>
           {directory && <span className="kd-download-task-target kd-mono" title={task.outputPath}><FolderOpen size={10} />{folderName(directory)}</span>}
