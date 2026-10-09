@@ -1,7 +1,10 @@
 /* 聚合搜索: the search kind and its sources on the left, the editor on the right. Nothing is
    drawn between or around them: the editor is one softly tinted field, and spacing does the rest.
-   The field carries the motion: its tint spreads from the click on focus, and a sheen crosses it
-   while a search runs. */
+   The field and the source marks carry one piece of motion in the theme colour, click to results:
+   ink blooms from the click, follows the typed text, a comet launches on Enter while the asked
+   marks fire in turn, a stream runs while sources are pending, each mark settles on what came
+   back, and the glow sinks toward the list. Everything is transform and opacity inside the
+   field's own box, so it works at any width. */
 
 /* —— The band grows out of the title bar's lower edge —— */
 .kd-search-band-host {
@@ -51,6 +54,14 @@
   padding: 0.25rem 0.55rem;
   color: var(--kd-text);
   cursor: text;
+  /* The motion's colour, and the brighter core of what travels. */
+  --kd-search-glow: var(--kd-theme);
+  --kd-search-core: color-mix(in srgb, var(--kd-theme) 62%, #fff);
+  --kd-search-glint: color-mix(in srgb, color-mix(in srgb, var(--kd-theme) 35%, #fff) 36%, transparent);
+}
+:root[data-theme="light"] .kd-searchbar {
+  --kd-search-core: var(--kd-theme);
+  --kd-search-glint: rgb(255 255 255 / 0.86);
 }
 
 /* What kind, and where it searches. */
@@ -97,6 +108,10 @@
     opacity: 0;
     transform: translateY(0.4em);
   }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .kd-searchbar .kd-plat {
   width: 1.6rem;
@@ -104,7 +119,7 @@
 }
 
 /* The editor: a tinted field with no outline. Hover deepens the tint a little; focus is the
-   second tint (::before), the caret, and the tip line changing to what Enter does. */
+   ink (::before) blooming from the click, the caret, and the tip line changing to what Enter does. */
 .kd-searchbar-copy {
   position: relative;
   display: flex;
@@ -117,15 +132,30 @@
 .kd-searchbar:hover .kd-searchbar-copy {
   background: color-mix(in srgb, var(--kd-text) 6.5%, var(--kd-panel));
 }
-.kd-searchbar-copy::before {
-  --kd-search-focus-tint: color-mix(in srgb, var(--kd-text) 3.5%, transparent);
+/* A running search charges the whole field, focused or not. */
+.kd-searchbar[data-searching="run"] .kd-searchbar-copy {
+  background: color-mix(in srgb, var(--kd-search-glow) 9%, color-mix(in srgb, var(--kd-text) 5%, var(--kd-panel)));
+}
+
+/* —— Focus: ink blooms from the click ——
+   The tint and its bright front share one geometry: a layer a seventh wider than the field on
+   each side, scaled out from the click. The tint stays; the front fades as it reaches the ends. */
+.kd-searchbar-copy::before,
+.kd-search-front {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  /* A seventh wider on each side: the spreading tint has soft ends, and once spread they lie outside the field. */
   left: -20%;
   width: 140%;
+  opacity: 0;
+  transform: scaleX(0);
+  /* A click spreads the ink from where it landed; the keyboard starts at the leading edge. */
+  transform-origin: calc(var(--kd-search-origin, 0px) + 100% / 7) center;
+  pointer-events: none;
+}
+.kd-searchbar-copy::before {
+  --kd-search-focus-tint: color-mix(in srgb, var(--kd-search-glow) 10%, transparent);
   background: linear-gradient(
     90deg,
     transparent,
@@ -133,18 +163,92 @@
     var(--kd-search-focus-tint) calc(600% / 7),
     transparent
   );
-  opacity: 0;
-  transform: scaleX(0);
-  /* A click spreads the tint from where it landed; the keyboard starts at the leading edge. */
-  transform-origin: calc(var(--kd-search-origin, 0px) + 100% / 7) center;
-  /* Leaving, it fades where it lies and only then folds away. */
-  transition: opacity 220ms ease, transform 0s linear 220ms;
-  pointer-events: none;
+  /* Leaving, the ink draws back to where it came from. */
+  transition: transform 300ms cubic-bezier(0.5, 0, 0.8, 0.3), opacity 300ms ease-in;
 }
 .kd-searchbar-copy[data-input-focused="true"]::before {
   opacity: 1;
   transform: scaleX(1);
-  transition: transform 420ms cubic-bezier(0.22, 0.9, 0.26, 1), opacity 120ms ease;
+  transition: transform 520ms cubic-bezier(0.2, 0.85, 0.25, 1), opacity 90ms ease;
+}
+.kd-search-fx {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* The ink is measured in the typed text's own em. */
+  font-size: var(--kd-size);
+  pointer-events: none;
+}
+.kd-search-front {
+  --kd-search-front-tint: color-mix(in srgb, var(--kd-search-glow) 58%, transparent);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--kd-search-front-tint) calc(100% / 7 * 0.9),
+    transparent calc(100% / 7 * 2.4),
+    transparent calc(100% - 100% / 7 * 2.4),
+    var(--kd-search-front-tint) calc(100% - 100% / 7 * 0.9),
+    transparent
+  );
+}
+.kd-searchbar-copy[data-input-focused="true"] .kd-search-front {
+  animation: kd-search-front 560ms cubic-bezier(0.2, 0.85, 0.25, 1) both;
+}
+@keyframes kd-search-front {
+  from { opacity: 1; transform: scaleX(0); }
+  55% { opacity: 1; }
+  to { opacity: 0; transform: scaleX(1); }
+}
+/* The drop itself: one ring where the click landed. */
+.kd-search-splash {
+  position: absolute;
+  top: 50%;
+  left: var(--kd-search-origin, var(--kd-search-pad));
+  width: 3.4rem;
+  height: 3.4rem;
+  margin: -1.7rem 0 0 -1.7rem;
+  border-radius: 50%;
+  background: radial-gradient(
+    closest-side,
+    transparent 52%,
+    color-mix(in srgb, var(--kd-search-glow) 50%, transparent) 76%,
+    transparent
+  );
+  opacity: 0;
+}
+.kd-searchbar-copy[data-input-focused="true"] .kd-search-splash {
+  animation: kd-search-splash 520ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+@keyframes kd-search-splash {
+  from { opacity: 1; transform: scale(0.12); }
+  to { opacity: 0; transform: scale(1.7); }
+}
+
+/* —— Typing: the ink deepens under the text ——
+   A layer four fields wide slides so its soft end stays a little ahead of the text. The reach
+   comes from the characters typed (--kd-search-ink, in em), never from a layout read. */
+.kd-search-ink {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -300%;
+  width: 400%;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--kd-search-glow) 9%, transparent) calc(100% - 4.5em),
+    transparent
+  );
+  opacity: 0;
+  /* A quarter of its own width is one field: at -25% its soft end rests on the field's leading edge. */
+  transform: translateX(-25%);
+  transition: transform 280ms cubic-bezier(0.2, 0.85, 0.25, 1), opacity 220ms ease;
+}
+.kd-searchbar-copy[data-input-focused="true"]:not([data-empty]) .kd-search-ink {
+  opacity: 1;
+  transform: translateX(calc(-25% + var(--kd-search-pad) + var(--kd-search-ink, 0) * 1em + 3.5em));
+}
+.kd-searchbar[data-batch] .kd-search-ink {
+  display: none;
 }
 .kd-searchbar-input {
   position: relative;
@@ -162,7 +266,7 @@
   font-size: var(--kd-size);
   font-weight: 400;
   line-height: var(--kd-search-leading);
-  caret-color: color-mix(in srgb, var(--kd-text) 78%, var(--kd-panel));
+  caret-color: var(--kd-search-glow);
   resize: none;
   white-space: pre;
   overflow: auto;
@@ -206,7 +310,7 @@
   width: 1.5px;
   height: 1.08em;
   border-radius: 1px;
-  background: color-mix(in srgb, var(--kd-text) 72%, transparent);
+  background: var(--kd-search-glow);
   transform: translateY(-50%);
   animation: kd-search-caret-blink 1.15s ease-in-out infinite;
   pointer-events: none;
@@ -234,7 +338,10 @@
   /* Returns when the field is cleared. */
   animation: kd-search-fade-in 220ms ease-out backwards;
 }
-@keyframes kd-search-fade-in { from { opacity: 0; } }
+@keyframes kd-search-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 .kd-search-tip {
   min-width: 0;
   display: flex;
@@ -303,6 +410,12 @@
 .kd-search-tip[data-input-focused="true"] .kd-search-tip-text[data-mode="input"] {
   opacity: 1;
   transform: translateY(0);
+  /* The line that says what Enter does arrives lit by the bloom, then cools to the tip colour. */
+  animation: kd-search-tip-lit 900ms ease-out both;
+}
+@keyframes kd-search-tip-lit {
+  from { color: var(--kd-search-glow); }
+  to { color: var(--kd-muted); }
 }
 @keyframes kd-search-tip-cycle {
   from {
@@ -315,45 +428,227 @@
   }
 }
 
-/* —— A running search ——
-   A soft band of the theme colour crosses the field, behind the text, until the results land;
-   then it fades with their arrival. */
+/* —— Launch: Enter ——
+   A glint runs through the typed text up to the caret, and a comet leaves the caret for the far
+   end of the field with its tail behind it. Both play once per search. */
+.kd-search-glint {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 5em;
+  font-size: var(--kd-size);
+  background: linear-gradient(100deg, transparent 18%, var(--kd-search-glint) 50%, transparent 82%);
+  pointer-events: none;
+  animation: kd-search-glint 380ms cubic-bezier(0.4, 0, 0.3, 1) both;
+}
+@keyframes kd-search-glint {
+  from { opacity: 1; transform: translateX(-100%); }
+  70% { opacity: 1; }
+  /* The band is 5em wide: its middle ends on the caret. */
+  to { opacity: 0; transform: translateX(calc(var(--kd-search-pad) + var(--kd-search-ink, 0) * 1em - 2.5em)); }
+}
+.kd-search-comet {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 44%;
+  background:
+    radial-gradient(ellipse 1.9em 62% at calc(100% - 1.5em) 50%, var(--kd-search-core) 0 26%, transparent),
+    linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in srgb, var(--kd-search-glow) 20%, transparent) 42%,
+      color-mix(in srgb, var(--kd-search-glow) 62%, transparent) calc(100% - 1.7em),
+      transparent calc(100% - 0.2em)
+    );
+  animation: kd-search-comet 640ms cubic-bezier(0.3, 0.2, 0.2, 1) 110ms both;
+}
+@keyframes kd-search-comet {
+  /* Head at the caret; 100% of the field is 100% / 44% of the comet's own width. */
+  from { opacity: 0; transform: translateX(calc(-100% + var(--kd-search-pad) + var(--kd-search-ink, 0) * 1em + 1.5em)); }
+  10% { opacity: 1; }
+  78% { opacity: 1; }
+  to { opacity: 0; transform: translateX(calc(100% / 0.44)); }
+}
+
+/* —— Pending: the stream ——
+   After the comet, the same shape keeps crossing the field, bright edge leading, until the
+   results land. The layer is two fields wide and holds two of them a field apart, so sliding it
+   by one field loops without a seam; it fades in behind the comet and out with the landing. */
 .kd-search-sheen {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 0;
-  width: 36%;
+  width: 200%;
   background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, var(--kd-theme) 15%, transparent) 50%,
-    transparent
-  );
-  transform: translateX(-100%);
+      90deg,
+      transparent 2%,
+      color-mix(in srgb, var(--kd-search-glow) 12%, transparent) 20%,
+      color-mix(in srgb, var(--kd-search-glow) 36%, transparent) 54%,
+      color-mix(in srgb, var(--kd-search-core) 64%, transparent) 62%,
+      color-mix(in srgb, var(--kd-search-glow) 16%, transparent) 67%,
+      transparent 72%
+    )
+    0 0 / 50% 100% repeat-x;
   animation:
-    kd-search-sheen-travel 1.5s cubic-bezier(0.42, 0, 0.3, 1) infinite,
-    kd-search-fade-in 180ms ease-out backwards;
+    kd-search-stream 1.05s linear infinite,
+    kd-search-fade-in 280ms ease-out 440ms backwards;
   transition: opacity 360ms ease;
-  pointer-events: none;
 }
-/* The pass keeps going while it fades, so the hand-off never shows a stopped band. */
+/* The stream keeps flowing while it fades. An answer that beat the fade-in never shows it. */
 .kd-searchbar[data-searching="done"] .kd-search-sheen {
   opacity: 0;
+  animation: kd-search-stream 1.05s linear infinite;
 }
-@keyframes kd-search-sheen-travel {
-  /* 100% of the field is 100% / 36% of the band's own width. */
-  to { transform: translateX(calc(100% / 0.36)); }
+@keyframes kd-search-stream {
+  from { transform: translateX(-50%); }
+  to { transform: translateX(0); }
+}
+
+/* —— Landing ——
+   The field flashes once and the light falls out through its lower edge, toward the list. */
+.kd-search-land {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--kd-search-glow) 14%, transparent),
+    color-mix(in srgb, var(--kd-search-glow) 52%, transparent)
+  );
+  animation: kd-search-land 460ms cubic-bezier(0.5, 0, 0.75, 0.45) both;
+}
+@keyframes kd-search-land {
+  from { opacity: 0; transform: translateY(-40%); }
+  26% { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(100%); }
+}
+
+/* —— The source marks during a search ——
+   Each asked mark fires in turn with a ring in its own colour, then waits with an arc orbiting
+   it. When the results land a mark that brought rows settles with a burst and a tick; one that
+   failed shakes and dims; one that had nothing only dims. --kd-plat-i is the firing order. */
+.kd-searchbar .kd-plat[data-search] {
+  position: relative;
+  --kd-plat-at: calc(var(--kd-plat-i, 0) * 70ms);
+}
+.kd-searchbar .kd-plat[data-search]::before,
+.kd-searchbar .kd-plat[data-search]::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+.kd-searchbar .kd-plat[data-search]::before {
+  inset: 0;
+  border: 1.5px solid currentColor;
+}
+.kd-searchbar .kd-plat[data-search="run"] > svg {
+  animation:
+    kd-plat-fire 440ms cubic-bezier(0.3, 1.45, 0.5, 1) calc(var(--kd-plat-at) + 40ms) both,
+    kd-plat-breathe 820ms ease-in-out calc(var(--kd-plat-at) + 500ms) infinite alternate;
+}
+.kd-searchbar .kd-plat[data-search="run"]::before {
+  animation: kd-plat-ring 560ms cubic-bezier(0.2, 0.7, 0.3, 1) calc(var(--kd-plat-at) + 70ms) both;
+}
+.kd-searchbar .kd-plat[data-search="run"]::after {
+  inset: -1px;
+  background: conic-gradient(transparent 0 190deg, currentColor 352deg, transparent);
+  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  mask: radial-gradient(closest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  animation:
+    kd-plat-orbit 900ms linear calc(var(--kd-plat-at) + 420ms) infinite,
+    kd-plat-appear 240ms ease-out calc(var(--kd-plat-at) + 420ms) both;
+}
+@keyframes kd-plat-fire {
+  from { transform: scale(1); }
+  30% { transform: scale(0.8); }
+  65% { transform: scale(1.32); }
+  to { transform: scale(1); }
+}
+@keyframes kd-plat-breathe {
+  from { transform: scale(1); }
+  to { transform: scale(1.13); }
+}
+@keyframes kd-plat-ring {
+  from { opacity: 0.95; transform: scale(0.4); }
+  to { opacity: 0; transform: scale(1.8); }
+}
+@keyframes kd-plat-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes kd-plat-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.kd-searchbar .kd-plat:is([data-search="hit"], [data-search="settle"]) > svg {
+  animation: kd-plat-settle 480ms cubic-bezier(0.3, 1.5, 0.5, 1) calc(var(--kd-plat-i, 0) * 60ms) both;
+}
+.kd-searchbar .kd-plat[data-search="hit"]::before {
+  border-width: 2px;
+  animation: kd-plat-burst 620ms cubic-bezier(0.2, 0.7, 0.3, 1) calc(var(--kd-plat-i, 0) * 60ms) both;
+}
+/* The tick: a small disc in the mark's colour at its corner, there for a moment. */
+.kd-searchbar .kd-plat[data-search="hit"]::after {
+  right: -1px;
+  bottom: -1px;
+  width: 11px;
+  height: 11px;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 11 11'%3E%3Cpath d='M3 5.8 4.8 7.5 8.2 3.8' fill='none' stroke='%23fff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+      center / 11px 11px no-repeat,
+    currentColor;
+  animation: kd-plat-tick 820ms cubic-bezier(0.3, 1.5, 0.5, 1) calc(var(--kd-plat-i, 0) * 60ms + 90ms) both;
+}
+.kd-searchbar .kd-plat[data-search="fail"] > svg {
+  animation:
+    kd-plat-shake 420ms ease-in-out calc(var(--kd-plat-i, 0) * 60ms) both,
+    kd-plat-dim 860ms ease-out calc(var(--kd-plat-i, 0) * 60ms) both;
+}
+.kd-searchbar .kd-plat[data-search="miss"] > svg {
+  animation: kd-plat-dim 760ms ease-out calc(var(--kd-plat-i, 0) * 60ms) both;
+}
+@keyframes kd-plat-settle {
+  from { transform: scale(1.13); }
+  40% { transform: scale(1.36); }
+  to { transform: scale(1); }
+}
+@keyframes kd-plat-burst {
+  from { opacity: 1; transform: scale(0.5); }
+  to { opacity: 0; transform: scale(2.1); }
+}
+@keyframes kd-plat-tick {
+  from { opacity: 0; transform: scale(0.2); }
+  22% { opacity: 1; transform: scale(1.2); }
+  36% { transform: scale(1); }
+  74% { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.7); }
+}
+@keyframes kd-plat-shake {
+  from { transform: translateX(0); }
+  18% { transform: translateX(-3px); }
+  38% { transform: translateX(3px); }
+  58% { transform: translateX(-2px); }
+  78% { transform: translateX(2px); }
+  to { transform: translateX(0); }
+}
+@keyframes kd-plat-dim {
+  from { opacity: 1; }
+  28% { opacity: 0.28; }
+  64% { opacity: 0.28; }
+  to { opacity: 1; }
 }
 
 /* —— Hand-off to the results ——
-   The pane's own spinner only shows for a search slow enough to need it, and the rows fade in
-   under a header that is already in place. */
+   The pane's own spinner only shows for a search slow enough to need it. How the rows arrive
+   is ResultTable.css. */
 .kd-search-loading {
   animation: kd-search-fade-in 260ms ease-out 360ms backwards;
-}
-.kd-workspace-pane-remote .kd-table[data-kind="results"] > tbody {
-  animation: kd-search-fade-in 320ms ease-out backwards;
 }
 
 /* —— Sakura98: the editor is a sunken 98 field ——
@@ -369,53 +664,276 @@
   background: var(--kd-panel-inset);
   box-shadow: var(--s98-sunken);
 }
-/* The bevel is the field's edge here: the focus tint stays inside it and wipes with a hard end. */
-:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy::before {
-  inset: 2px;
-  width: auto;
-  background: color-mix(in srgb, var(--kd-theme) 7%, transparent);
-  transform-origin: calc(var(--kd-search-origin, 0px) - 2px) center;
-}
 :root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar-input:focus-visible {
   outline: none;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-search-sheen {
-  top: 2px;
-  bottom: 2px;
+
+/* —— Sakura98: the same choreography, drawn in pixels ——
+   Nothing glows here. The ink is a hard wipe inside the bevel that moves in steps, the click
+   leaves a sparkle, a heart hops along a dotted trail on Enter, 98 progress chunks march while
+   sources are pending, and the marks answer with square frames, sparkles and hearts. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar {
+  --kd-search-core: var(--kd-theme);
+  --kd-s98-heart: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 7 6' shape-rendering='crispEdges'%3E%3Cpath d='M1 0h2v1h1V0h2v1h1v2H6v1H5v1H4v1H3V5H2V4H1V3H0V1h1z'/%3E%3C/svg%3E");
+  --kd-s98-spark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 5 5' shape-rendering='crispEdges'%3E%3Cpath d='M2 0h1v2h2v1H3v2H2V3H0V2h2z'/%3E%3C/svg%3E");
+}
+/* The bevel is the field's edge: every layer stays inside it. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-fx {
+  inset: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-searchbar-copy::before {
+  inset: 2px;
+  width: auto;
+  background: color-mix(in srgb, var(--kd-search-glow) 13%, transparent);
+  transform-origin: calc(var(--kd-search-origin, 0px) - 2px) center;
+  transition: transform 240ms steps(4, end), opacity 240ms steps(4, end);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-searchbar-copy[data-input-focused="true"]::before {
+  transition: transform 420ms steps(7, end), opacity 0s;
+}
+/* The front of the wipe: two hard bars that run to the ends and step out. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-front {
+  left: 0;
+  width: 100%;
+  background: linear-gradient(
+    90deg,
+    var(--kd-search-glow) 0 6px,
+    transparent 6px calc(100% - 6px),
+    var(--kd-search-glow) calc(100% - 6px)
+  );
+  transform-origin: calc(var(--kd-search-origin, 0px) - 2px) center;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-searchbar-copy[data-input-focused="true"] .kd-search-front {
+  animation: kd-search-front-98 420ms steps(7, end) both;
+}
+@keyframes kd-search-front-98 {
+  from { opacity: 0.6; transform: scaleX(0); }
+  to { opacity: 0; transform: scaleX(1); }
+}
+/* A sparkle where the click landed, growing a pixel size at a time. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-splash {
+  width: 15px;
+  height: 15px;
+  margin: -8px 0 0 -8px;
+  border-radius: 0;
+  background: var(--kd-search-glow);
+  -webkit-mask: var(--kd-s98-spark) center / 15px 15px no-repeat;
+  mask: var(--kd-s98-spark) center / 15px 15px no-repeat;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-searchbar-copy[data-input-focused="true"] .kd-search-splash {
+  animation: kd-search-spark-98 440ms steps(1, end) both;
+}
+@keyframes kd-search-spark-98 {
+  from { opacity: 1; transform: scale(0.34); }
+  25% { opacity: 1; transform: scale(0.67); }
+  50% { opacity: 1; transform: scale(1); }
+  75% { opacity: 1; transform: scale(0.67); }
+  to { opacity: 0; transform: scale(0.67); }
+}
+/* Typing stays plain in a 98 field: the caret is the only thing that moves. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar :is(.kd-search-ink, .kd-search-glint) {
+  display: none;
+}
+/* Enter: a heart hops from the caret to the far end, leaving a dotted trail. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-comet {
+  width: 30%;
+  background:
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--kd-search-glow) 72%, transparent) 0 4px, transparent 4px 12px)
+    0 50% / calc(100% - 22px) 4px no-repeat;
+  animation:
+    kd-search-comet-98 660ms steps(12, end) 80ms both,
+    kd-search-comet-98-show 660ms steps(1, end) 80ms both;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-comet::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 0;
+  width: 14px;
+  height: 12px;
+  margin-top: -6px;
+  background: var(--kd-search-glow);
+  -webkit-mask: var(--kd-s98-heart) center / 14px 12px no-repeat;
+  mask: var(--kd-s98-heart) center / 14px 12px no-repeat;
+}
+@keyframes kd-search-comet-98 {
+  from { transform: translateX(calc(-100% + var(--kd-search-pad) + var(--kd-search-ink, 0) * 1em + 16px)); }
+  /* 100% of the field is 100% / 30% of the trail's own width. */
+  to { transform: translateX(calc(100% / 0.3)); }
+}
+@keyframes kd-search-comet-98-show {
+  from { opacity: 0; }
+  5% { opacity: 1; }
+  to { opacity: 1; }
+}
+/* Pending: a run of 98 progress chunks marches across the field, a chunk at a time. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-sheen {
+  top: 3px;
+  bottom: 3px;
+  width: 100%;
+  background:
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--kd-search-glow) 38%, transparent) 0 10px, transparent 10px 14px)
+    -122px 0 / 122px 100% no-repeat;
+  animation: kd-search-chunks-98 1.6s steps(20, end) 640ms infinite;
+  transition: opacity 240ms steps(3, end);
+}
+@keyframes kd-search-chunks-98 {
+  from { background-position: -122px 0; }
+  to { background-position: calc(100% + 122px) 0; }
+}
+/* Landing: one hard block drops out through the bottom of the field. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-land {
+  background: color-mix(in srgb, var(--kd-search-glow) 30%, transparent);
+  animation: kd-search-land-98 300ms steps(5, end) both;
+}
+@keyframes kd-search-land-98 {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 1; transform: translateY(100%); }
+}
+/* The marks: a square frame steps outward as each fires, a sparkle twinkles at its corner while
+   it waits, and a heart hops off the ones that brought rows. A failed source blinks twice. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search]::before {
+  inset: 1px;
+  border-width: 2px;
+  border-radius: 0;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search]::after {
+  border-radius: 0;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="run"] > svg {
+  animation: kd-plat-pop-98 360ms steps(1, end) calc(var(--kd-plat-at) + 40ms) both;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="run"]::before {
+  animation: kd-plat-frame-98 400ms steps(4, end) calc(var(--kd-plat-at) + 60ms) both;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="run"]::after {
+  inset: -3px -3px auto auto;
+  width: 10px;
+  height: 10px;
+  background: currentColor;
+  -webkit-mask: var(--kd-s98-spark) center / 10px 10px no-repeat;
+  mask: var(--kd-s98-spark) center / 10px 10px no-repeat;
+  animation: kd-plat-twinkle-98 720ms steps(1, end) calc(var(--kd-plat-at) + 400ms) infinite;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat:is([data-search="hit"], [data-search="settle"]) > svg {
+  animation: kd-plat-pop-98 360ms steps(1, end) calc(var(--kd-plat-i, 0) * 60ms) both;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="hit"]::before {
+  animation: kd-plat-frame-98 400ms steps(4, end) calc(var(--kd-plat-i, 0) * 60ms) both;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="hit"]::after {
+  inset: -4px -4px auto auto;
+  width: 14px;
+  height: 12px;
+  background: currentColor;
+  -webkit-mask: var(--kd-s98-heart) center / 14px 12px no-repeat;
+  mask: var(--kd-s98-heart) center / 14px 12px no-repeat;
+  animation: kd-plat-heart-98 760ms steps(1, end) calc(var(--kd-plat-i, 0) * 60ms + 80ms) both;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="fail"] > svg {
+  animation: kd-plat-blink-98 520ms steps(1, end) calc(var(--kd-plat-i, 0) * 60ms) both;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="miss"] > svg {
+  animation: kd-plat-blink-98 260ms steps(1, end) calc(var(--kd-plat-i, 0) * 60ms) both;
+}
+@keyframes kd-plat-pop-98 {
+  from { transform: scale(1); }
+  25% { transform: scale(0.8); }
+  50% { transform: scale(1.33); }
+  75% { transform: scale(1.14); }
+  to { transform: scale(1); }
+}
+@keyframes kd-plat-frame-98 {
+  from { opacity: 1; transform: scale(0.5); }
+  to { opacity: 0; transform: scale(1.5); }
+}
+@keyframes kd-plat-twinkle-98 {
+  from { opacity: 1; transform: scale(0.5); }
+  34% { opacity: 1; transform: scale(1); }
+  67% { opacity: 0; transform: scale(1); }
+  to { opacity: 0; transform: scale(1); }
+}
+@keyframes kd-plat-heart-98 {
+  from { opacity: 0; transform: translateY(4px); }
+  12% { opacity: 1; transform: translateY(4px); }
+  34% { opacity: 1; transform: translateY(2px); }
+  56% { opacity: 1; transform: translateY(0); }
+  80% { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 0; transform: translateY(-2px); }
+}
+@keyframes kd-plat-blink-98 {
+  from { opacity: 0.25; }
+  25% { opacity: 1; }
+  50% { opacity: 0.25; }
+  75% { opacity: 1; }
+  to { opacity: 1; }
 }
 
+/* —— Reduced motion ——
+   Nothing travels, pops or shakes. Focus is the tint simply being there; a running search is the
+   field held in the glow colour with a still ring on each asked mark; the landing is the tick
+   fading in and out, and a source with nothing dims and returns. The !important flags only undo
+   the animations above, in either theme pack. */
 @media (prefers-reduced-motion: reduce) {
   .kd-search-band-host,
   .kd-search-band,
   .kd-search-placeholder,
   .kd-search-kind-text,
-  .kd-search-tip-text[data-mode="idle"],
-  .kd-search-loading,
-  .kd-workspace-pane-remote .kd-table[data-kind="results"] > tbody {
-    animation: none;
+  .kd-search-tip-text,
+  .kd-search-loading {
+    animation: none !important;
   }
   .kd-search-band-host,
   .kd-searchbar-copy,
   .kd-searchbar-copy::before,
-  .kd-searchbar-copy[data-input-focused="true"]::before,
   .kd-searchbar-input,
+  .kd-search-ink,
   .kd-search-tip-action,
   .kd-search-tip-text,
   .kd-search-sheen {
-    transition: none;
+    transition: none !important;
   }
   .kd-searchbar-copy::before {
-    transform: none;
+    transform: none !important;
   }
   .kd-search-tip-text,
   .kd-search-tip[data-input-focused="true"] .kd-search-tip-text {
     transform: none;
   }
-  /* A search still shows in the field: the whole of it, held, instead of a travelling band. */
-  .kd-search-sheen {
-    width: 100%;
-    background: color-mix(in srgb, var(--kd-theme) 9%, transparent);
-    transform: none;
-    animation: none;
+  .kd-search-front,
+  .kd-search-splash,
+  .kd-search-glint,
+  .kd-search-comet,
+  .kd-search-land {
+    display: none;
   }
+  /* A search still shows in the field: the whole of it, held, instead of a travelling stream. */
+  .kd-search-sheen {
+    width: 100% !important;
+    background: color-mix(in srgb, var(--kd-search-glow) 12%, transparent) !important;
+    transform: none;
+    animation: none !important;
+  }
+  .kd-searchbar .kd-plat[data-search] > svg,
+  .kd-searchbar .kd-plat[data-search]::before {
+    animation: none !important;
+  }
+  .kd-searchbar .kd-plat[data-search="run"]::before {
+    opacity: 0.55;
+  }
+  .kd-searchbar .kd-plat[data-search="run"]::after {
+    display: none;
+  }
+  .kd-searchbar .kd-plat[data-search="hit"]::after {
+    animation: kd-plat-tick-calm 820ms ease both !important;
+  }
+  .kd-searchbar .kd-plat:is([data-search="fail"], [data-search="miss"]) > svg {
+    animation: kd-plat-dim 860ms ease-out both !important;
+  }
+}
+@keyframes kd-plat-tick-calm {
+  from { opacity: 0; }
+  22% { opacity: 1; }
+  74% { opacity: 1; }
+  to { opacity: 0; }
 }

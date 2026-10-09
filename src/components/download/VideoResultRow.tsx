@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Check,
   ChevronDown,
@@ -171,8 +171,8 @@ export interface VideoResultRowProps extends VideoSeed {
   rowNumber: number;
   /** 挂在批量结果父包下时，视频行也必须占用一层树形缩进。 */
   indent?: boolean;
-  /** 父包里的最后一个视频，用于结束树形导引线。 */
-  last?: boolean;
+  /** Mounted into a list that had already settled: the row slots in on its own. Read once, at mount. */
+  late?: boolean;
   /** 收藏夹/搜索返回的视频可进入与歌曲相同的全选和批量下载流程。 */
   selectable?: boolean;
   selected?: boolean;
@@ -210,7 +210,7 @@ export function VideoResultRow({
   layout,
   rowNumber,
   indent = false,
-  last = false,
+  late = false,
   selectable = false,
   selected = false,
   selectionMode = false,
@@ -235,6 +235,11 @@ export function VideoResultRow({
   const displayCover = cover.trim() || info?.cover?.trim() || "";
   const [localPartsExpanded, setLocalPartsExpanded] = useState(false);
   const partsExpanded = expanded ?? localPartsExpanded;
+  // How the row entered is decided when it mounts and never changes, so a re-render cannot replay it.
+  const [bornLate] = useState(late);
+  // Parts opened by the user unfold; ones already open when the row mounted are simply there.
+  const [unfold, setUnfold] = useState(!partsExpanded);
+  if (!partsExpanded && !unfold) setUnfold(true);
   const [resolvingParts, setResolvingParts] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
@@ -444,6 +449,7 @@ export function VideoResultRow({
     <Fragment>
       <tr
         data-video="true"
+        data-enter={bornLate ? "late" : undefined}
         data-selecting={selectionMode ? "true" : undefined}
         aria-selected={selected}
         onContextMenu={(event) => {
@@ -521,10 +527,27 @@ export function VideoResultRow({
             case "title":
               return (
                 <td key={column.key} className="kd-td-strong" data-col="title" title={title} {...cellDrag}>
-                  <span
-                    className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}
-                    data-last={indent && last ? "true" : undefined}
-                  >
+                  <span className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}>
+                    <span
+                      className="kd-thumb"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        clearTextSelection();
+                        bindPointerDrag(event, 0);
+                      }}
+                    >
+                      <CoverImage
+                        src={displayCover ? thumbUrl(displayCover) : ""}
+                        loading="lazy"
+                        draggable={false}
+                        referrerPolicy="no-referrer"
+                      />
+                    </span>
+                    <span className="kd-result-title-text">{title}</span>
+                    {hasMultiplePages ? (
+                      <span className="kd-video-page-count kd-mono">{knownPageCount}P</span>
+                    ) : null}
+                    {/* The parts toggle trails the title and its count, so every cover starts on the same column. */}
                     {canExpandParts ? (
                       <button
                         type="button"
@@ -556,25 +579,6 @@ export function VideoResultRow({
                           <ChevronRight size={13} />
                         )}
                       </button>
-                    ) : null}
-                    <span
-                      className="kd-thumb"
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                        clearTextSelection();
-                        bindPointerDrag(event, 0);
-                      }}
-                    >
-                      <CoverImage
-                        src={displayCover ? thumbUrl(displayCover) : ""}
-                        loading="lazy"
-                        draggable={false}
-                        referrerPolicy="no-referrer"
-                      />
-                    </span>
-                    <span className="kd-result-title-text">{title}</span>
-                    {hasMultiplePages ? (
-                      <span className="kd-video-page-count kd-mono">{knownPageCount}P</span>
                     ) : null}
                   </span>
                 </td>
@@ -634,6 +638,8 @@ export function VideoResultRow({
               data-video="true"
               data-video-part="true"
               data-parent-indented={indent ? "true" : undefined}
+              data-unfold={unfold ? "true" : undefined}
+              style={unfold ? ({ "--kd-unfold-i": Math.min(pageIndex, 8) } as CSSProperties) : undefined}
               aria-label={`P${pageIndex + 1}，${page.title}，${playClick === "single" ? "单击" : "双击"}预览`}
               tabIndex={0}
               onContextMenu={(event) => {

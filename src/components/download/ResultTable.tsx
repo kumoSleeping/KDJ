@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -66,6 +66,8 @@ import {
 } from "../../lib/resultSelection";
 import { removeLocalStorage } from "../../lib/storageWrite";
 import { isEditable } from "../../lib/useLibraryClipboard";
+import { publishSearchOutcome, searchOutcomeOf } from "./searchMotion";
+import "./ResultTable.css";
 
 export {
   resultRowActionUsesSelection,
@@ -156,6 +158,12 @@ const RESULT_COLUMN_PREFS_SCHEMA: TableColumnPrefsSchema = {
   maxWidth: RESULT_COLUMN_MAX_WIDTH,
 };
 
+/**
+ * How long a delivered list is "arriving": the cascade of its first rows plus the glow that
+ * pours over them (ResultTable.css). After it the table carries no entrance rules at all.
+ */
+const RESULT_REVEAL_MS = 1100;
+
 function loadPrefs(): TableColumnPrefs {
   return loadTableColumnPrefs(RESULT_COLUMN_PREFS_KEY, RESULT_COLUMN_PREFS_SCHEMA);
 }
@@ -198,6 +206,34 @@ export function ResultTable({
   const parentPressRef = useRef<number | null>(null);
   const suppressParentClickRef = useRef<number | null>(null);
   const totalGroups = items.reduce((sum, item) => sum + item.groups.length, 0);
+  /** Nothing to show yet: the spinner stands in for the list. */
+  const waiting = loading && totalGroups === 0 && !video;
+
+  // The list arrives once, in the render that replaces the spinner with rows. Re-renders, a
+  // remount of the pane and later row changes never replay it: `reveal` is back to 0 by then.
+  const [arrival, setArrival] = useState({ waiting, reveal: 0 });
+  if (arrival.waiting !== waiting) {
+    setArrival({ waiting, reveal: waiting ? 0 : arrival.reveal + 1 });
+  }
+  const reveal = arrival.reveal;
+  useEffect(() => {
+    if (!reveal) return;
+    const timer = window.setTimeout(
+      () => setArrival((current) => (current.reveal ? { ...current, reveal: 0 } : current)),
+      RESULT_REVEAL_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [reveal]);
+  // Rows that mount after the table has settled (a later source, another page of a collection,
+  // a reopened package) slot in on their own instead of joining a cascade.
+  const [settled, setSettled] = useState(false);
+  useEffect(() => setSettled(true), []);
+  const lateRows = settled && !reveal;
+
+  // The search bar's source marks settle on what this list came back with.
+  useLayoutEffect(() => {
+    if (!loading) publishSearchOutcome(searchOutcomeOf(items, video));
+  }, [loading, items, video]);
 
   const [colPrefs, setColPrefs] = useState(loadPrefs);
   const colPrefsRef = useRef(colPrefs);
@@ -322,7 +358,7 @@ export function ResultTable({
     return () => window.removeEventListener("keydown", onKey);
   }, [selectionMode, selected.size, onSelectionModeChange]);
 
-  if (loading && totalGroups === 0 && !video) {
+  if (waiting) {
     return (
       <div
         className="kd-empty kd-search-loading"
@@ -371,16 +407,7 @@ export function ResultTable({
           case "title":
             return (
               <td key={key} className="kd-td-strong" data-col="title" title={collection.title}>
-                <span
-                  className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}
-                  data-last={
-                    indent &&
-                    collectionIndex === item.collections.length - 1 &&
-                    item.groups.length === 0
-                      ? "true"
-                      : undefined
-                  }
-                >
+                <span className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}>
                   <span className="kd-thumb kd-result-collection-cover">
                     <CoverImage
                       src={thumbUrl(collection.cover)}
@@ -509,7 +536,13 @@ export function ResultTable({
   return (
     <>
       <InlineNotice text={dragError} onDismiss={() => setDragError("")} block />
-      <table className="kd-table" data-kind="results" style={{ minWidth: tableMinWidthPx }}>
+      {reveal ? <span key={reveal} className="kd-result-pour" aria-hidden="true" /> : null}
+      <table
+        className="kd-table"
+        data-kind="results"
+        data-reveal={reveal || undefined}
+        style={{ minWidth: tableMinWidthPx }}
+      >
         <colgroup>
           <col style={{ width: selectionColWidth }} />
           <col style={{ width: leadWidth }} />
@@ -564,6 +597,7 @@ export function ResultTable({
               totalColumns={totalColumns}
               layout={layout}
               rowNumber={1}
+              late={lateRows}
             />
           )}
           {items.map((item, index) => {
@@ -644,8 +678,8 @@ export function ResultTable({
                       totalColumns={totalColumns}
                       layout={layout}
                       rowNumber={flatRowOffset + position + 1}
+                      late={lateRows}
                       indent={!itemFlat}
-                      last={position === item.groups.length - 1}
                       selectable={group.sources.some((source) => source.platform !== "local")}
                       selected={selected.has(selectionKey(index, group.group_id))}
                       selectionMode={selectionMode}
@@ -676,8 +710,8 @@ export function ResultTable({
                       columns={visibleColumns}
                       layout={layout}
                       indent={!itemFlat}
-                      last={position === item.groups.length - 1}
                       rowNumber={flatRowOffset + position + 1}
+                      late={lateRows}
                       inspected={inspectedGroup === selectionKey(index, group.group_id)}
                       sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
                       selected={selected.has(selectionKey(index, group.group_id))}

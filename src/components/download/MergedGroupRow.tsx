@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -61,10 +61,10 @@ export interface MergedGroupRowProps {
   layout: LayoutMode;
   /** 普通单击选中并展示在线详情；与批量下载勾选状态相互独立。 */
   inspected: boolean;
-  /** 挂在某个"包"（歌单/一次搜索）底下时缩进并画导引线。 */
+  /** 挂在某个"包"（歌单/一次搜索）底下时缩进一档。 */
   indent?: boolean;
-  /** 包里的最后一行，竖导引线到此为止。 */
-  last?: boolean;
+  /** Mounted into a list that had already settled: the row slots in on its own. Read once, at mount. */
+  late?: boolean;
   onToggleSelect(): void;
   onEnterSelection(): void;
   onToggleExpand(): void;
@@ -108,7 +108,7 @@ export function MergedGroupRow({
   layout,
   inspected,
   indent = false,
-  last = false,
+  late = false,
   onToggleSelect,
   onEnterSelection,
   onToggleExpand,
@@ -134,6 +134,11 @@ export function MergedGroupRow({
   const pointerDragCleanupRef = useRef<(() => void) | null>(null);
   const suppressClickRef = useRef(false);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
+  // How the row entered is decided when it mounts and never changes, so a re-render cannot replay it.
+  const [bornLate] = useState(late);
+  // Sources opened by the user unfold; ones already open when the row mounted are simply there.
+  const [unfold, setUnfold] = useState(!expanded);
+  if (!expanded && !unfold) setUnfold(true);
 
   /**
    * 试听放哪个来源：优先当前选中的；选中的是 B 站就退而求其次找一家音乐
@@ -194,21 +199,6 @@ export function MergedGroupRow({
 
   const titleCell = (
     <>
-      {multi && (
-        <button
-          type="button"
-          className="kd-result-source-toggle"
-          aria-label={expanded ? "收起来源" : "展开来源"}
-          aria-expanded={expanded}
-          title={expanded ? "收起来源" : "展开来源"}
-          onClick={(event) => {
-            event.stopPropagation();
-            onToggleExpand();
-          }}
-        >
-          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        </button>
-      )}
       {/* 封面只负责识别歌曲，不再叠播放三角；横屏双击、竖屏单击试听。 */}
       <span
         className="kd-thumb"
@@ -229,6 +219,22 @@ export function MergedGroupRow({
         />
       </span>
       <span className="kd-result-title-text">{group.title}</span>
+      {/* The sources toggle trails the title, so every cover starts on the same column. */}
+      {multi && (
+        <button
+          type="button"
+          className="kd-result-source-toggle"
+          aria-label={expanded ? "收起来源" : "展开来源"}
+          aria-expanded={expanded}
+          title={expanded ? "收起来源" : "展开来源"}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleExpand();
+          }}
+        >
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
+      )}
       {previewPending && (
         <span className="kd-result-resolving" role="status">
           <LoaderCircle className="kd-spin" size={11} aria-hidden="true" />
@@ -262,10 +268,7 @@ export function MergedGroupRow({
       case "title":
         return (
           <td key={key} className="kd-td-strong" data-col="title" title={group.title} {...cellDrag}>
-            <span
-              className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}
-              data-last={indent && last ? "true" : undefined}
-            >
+            <span className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}>
               {titleCell}
             </span>
           </td>
@@ -344,9 +347,13 @@ export function MergedGroupRow({
             colSpan={1}
             className="kd-muted kd-result-source-child"
             data-parent-indented={indent ? "true" : undefined}
+            data-picked={index === sourceIndex ? "true" : undefined}
           >
-            <span className="kd-row" style={{ gap: "0.4rem" }}>
-              {index === sourceIndex ? <Check size={12} /> : <span style={{ width: 12 }} />}
+            <span className="kd-result-source-line">
+              {/* The pick mark sits in the cover's slot, so the source's title starts under the song's. */}
+              <span className="kd-result-source-pick">
+                {index === sourceIndex ? <Check size={13} /> : null}
+              </span>
               <span className="kd-truncate">{source.title}</span>
               <span className="kd-faint">·</span>
               <span className="kd-truncate kd-faint">{source.artists.join(", ") || DASH}</span>
@@ -403,6 +410,7 @@ export function MergedGroupRow({
         data-kd-search-result=""
         data-inspected={inspected ? "true" : undefined}
         data-resolving={previewPending ? "true" : undefined}
+        data-enter={bornLate ? "late" : undefined}
         aria-busy={previewPending ? "true" : undefined}
         aria-label={
           layout === "narrow"
@@ -533,6 +541,9 @@ export function MergedGroupRow({
                 : `${source.title || group.title}，单击查看此来源详情，双击播放`
             }
             data-local={source.platform === "local" ? "true" : undefined}
+            data-source-child="true"
+            data-unfold={unfold ? "true" : undefined}
+            style={unfold ? ({ "--kd-unfold-i": Math.min(index, 8) } as CSSProperties) : undefined}
             onClick={(event) => {
               if (layout === "narrow" && event.detail > 1 && !event.metaKey && !event.ctrlKey) return;
               if (source.platform === "local") {
