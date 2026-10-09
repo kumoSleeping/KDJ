@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useSyncExternalStore } from "react";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
+import { useVideoPip, videoPipFloats } from "../../lib/videoPip";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 
@@ -12,7 +13,9 @@ export function VisualizerPopup() {
   // A draft must have only one editor; the studio owns it while explicitly open.
   const editingTrackId = useVisualizerStudioStore(state => state.inlineSettings ? null : state.track?.id ?? null);
   const inlineSettings = useVisualizerStudioStore(state => state.inlineSettings);
-  const shown = open && canVisualizeTrack(track) && track.id !== editingTrackId;
+  // One floating media window: a floating video (a network preview plays over the song) has it.
+  const videoFloats = useVideoPip(videoPipFloats);
+  const shown = open && canVisualizeTrack(track) && track.id !== editingTrackId && !videoFloats;
   useEffect(() => {
     if (!inlineSettings) return;
     const editor = useVisualizerStudioStore.getState();

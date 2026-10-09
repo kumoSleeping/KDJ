@@ -1,0 +1,30 @@
+/* The floating media window in motion. Its resting look is `kd-pip-float` in design.css; the
+   travel itself is a script-driven transform (see lib/floatingMediaMotion.ts), because where it
+   goes depends on where the user parked the window. */
+
+/* The still picture of the song that is leaving. It is a `kd-pip-float` too, so a theme frames
+   it like the window it copies. */
+.kd-float-ghost {
+  z-index: 81;
+  cursor: default;
+  pointer-events: none;
+}
+.kd-float-ghost > .kd-pip-float-stage {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+}
+.kd-float-ghost-picture {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+/* A window whose picture has already been handed to a ghost, in the moment before its owner
+   takes it down. */
+.kd-pip-float[data-float-superseded] {
+  visibility: hidden;
+}

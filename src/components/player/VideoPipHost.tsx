@@ -22,6 +22,7 @@ import {
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PictureInPicture2 } from "lucide-react";
+import { FloatingMediaResizeHandles, useFloatingMediaWindow } from "./FloatingMediaWindow";
 import { FloatingVideoControls, FloatingVideoScrub, PreviewVolume } from "./FloatingVideoControls";
 import { api } from "../../lib/api";
 import { observeVideoPreview } from "../../lib/videoPreviewDiagnostics";
@@ -49,11 +50,6 @@ import {
   attachYoutubeVideoPreview,
   type YoutubeVideoPreviewController,
 } from "../../lib/youtubeVideoPreview";
-import {
-  clampVideoFloatBox,
-  clampVideoFloatWidth,
-  videoFloatHeight,
-} from "../../lib/videoFloatBox";
 import {
   APPLY_VIDEO_MODE_EVENT,
   LOCAL_VIDEO_EVENT,
@@ -83,7 +79,6 @@ import {
 } from "../download/VideoPreview";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 
-const FLOAT_DEFAULT_W = 352;
 const YOUTUBE_MIN_W = 360;
 const YOUTUBE_HEADER_H = 28;
 const YOUTUBE_RESIZE_FOOTER_H = 8;
@@ -95,9 +90,8 @@ function currentNetworkVolume(): number {
   return getPreviewOutputGain();
 }
 
-type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
-
-const RESIZE_EDGES: ResizeEdge[] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
+/** The platform embed is a native view: only the corner below it can take a handle. */
+const PLATFORM_RESIZE_EDGES = ["se"] as const;
 
 type WebKitPresentationMode = "inline" | "picture-in-picture" | "fullscreen";
 type WebKitPipVideo = HTMLVideoElement & {
@@ -174,16 +168,6 @@ async function exitSystemPip(video: HTMLVideoElement | null): Promise<void> {
   useVideoPip.getState().setSystemPip(false);
 }
 
-function defaultFloatPos(width: number): { x: number; y: number } {
-  const margin = 16;
-  const playerH = 60;
-  const height = (width * 9) / 16;
-  return {
-    x: Math.max(margin, window.innerWidth - width - margin),
-    y: Math.max(margin, window.innerHeight - playerH - margin - height - 8),
-  };
-}
-
 function sessionKey(session: VideoPipSession): string {
   return session.source === "network"
     ? `net:${session.platform}:${session.bvid}#${session.page}`
@@ -243,19 +227,6 @@ interface PlatformEmbedStatus {
   duration: number;
 }
 
-function clampHostFloatBox(
-  box: { x: number; y: number; w: number },
-  viewportWidth: number,
-  viewportHeight: number,
-  session: VideoPipSession | null | undefined,
-) {
-  return clampVideoFloatBox(
-    usesPlatformPlayer(session) ? { ...box, w: Math.max(YOUTUBE_MIN_W, box.w) } : box,
-    viewportWidth,
-    Math.max(1, viewportHeight - (usesPlatformPlayer(session) ? YOUTUBE_EXTRA_H : 0)),
-  );
-}
-
 function youtubeBounds(node: HTMLElement | null): YoutubeEmbedBounds | null {
   if (!node) return null;
   const rect = node.getBoundingClientRect();
@@ -288,7 +259,6 @@ function applyPanelChrome(session: VideoPipSession, mode: VideoPreviewMode): voi
 }
 
 export function VideoPipHost() {
-  const floatRef = useRef<HTMLDivElement | null>(null);
   const youtubeEmbedSlotRef = useRef<HTMLDivElement | null>(null);
   const pipCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const pipVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -320,22 +290,6 @@ export function VideoPipHost() {
   const fullscreenRef = useRef(false);
   const fullscreenTransitionRef = useRef(false);
   const fullscreenRequestRef = useRef(0);
-  const dragRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
-  } | null>(null);
-  const resizeRef = useRef<{
-    pointerId: number;
-    edge: ResizeEdge;
-    startX: number;
-    startY: number;
-    startW: number;
-    originX: number;
-    originY: number;
-  } | null>(null);
 
   const mode = useVideoPip((state) => state.mode);
   const panelTarget = useVideoPip((state) => state.panelTarget);
@@ -354,10 +308,6 @@ export function VideoPipHost() {
       : (state.settings?.bilibili_preview_player ?? "kdj");
   });
   const [platformFallbackSessionKey, setPlatformFallbackSessionKey] = useState<string | null>(null);
-  const [floatBox, setFloatBox] = useState(() => ({
-    ...defaultFloatPos(FLOAT_DEFAULT_W),
-    w: FLOAT_DEFAULT_W,
-  }));
   const [videoFullscreen, setVideoFullscreen] = useState(false);
 
   const applyVideoFullscreen = useCallback(async (next: boolean): Promise<void> => {
@@ -454,6 +404,24 @@ export function VideoPipHost() {
     setPlatformFallbackSessionKey(null);
   }, [session ? sessionKey(session) : "", onlinePlayerPreference]);
   const activeVideo = localSwap.activeVideo;
+  // Place, size and motion of the window come from the box it shares with the visualizer.
+  const floatWindow = useFloatingMediaWindow({
+    shown: showFloating,
+    locked: videoFullscreen,
+    shared: true,
+    content: {
+      ratio: 16 / 9,
+      extraHeight: isPlatformPlayer ? YOUTUBE_EXTRA_H : 0,
+      minWidth: isPlatformPlayer ? YOUTUBE_MIN_W : 0,
+    },
+    // A transform cannot carry the sibling native view of a platform player.
+    motion: !isPlatformPlayer && !videoFullscreen,
+    contentKey: session ? sessionKey(session) : "",
+    title: session?.title ?? "",
+    picture: activeVideo,
+    song: session?.source === "local" ? session.trackId : null,
+  });
+  const floatRect = floatWindow.rect;
 
   useEffect(() => {
     const video = activeVideo();
@@ -553,19 +521,11 @@ export function VideoPipHost() {
     };
   }, [activeVideo, hostActive, isLocal]);
 
-  // 浮窗可以放到当前视口所能容纳的最大 16:9 尺寸；应用窗口缩小时再自动收回。
-  // 同一个 resize 事件也用于识别用户从 macOS 原生全屏手势 / Esc 退出的情况。
+  // resize 事件用于识别用户从 macOS 原生全屏手势 / Esc 退出的情况；
+  // 浮窗的位置和尺寸由共享的浮动媒体窗口按当前视口推导。
   useEffect(() => {
     let syncFrame = 0;
     const onWindowResize = () => {
-      setFloatBox((previous) =>
-        clampHostFloatBox(
-          previous,
-          window.innerWidth,
-          window.innerHeight,
-          useVideoPip.getState().session,
-        ),
-      );
       if (!fullscreenRef.current || fullscreenTransitionRef.current) return;
       cancelAnimationFrame(syncFrame);
       syncFrame = requestAnimationFrame(() => {
@@ -577,14 +537,6 @@ export function VideoPipHost() {
             }
             fullscreenRef.current = false;
             setVideoFullscreen(false);
-            setFloatBox((previous) =>
-              clampHostFloatBox(
-                previous,
-                window.innerWidth,
-                window.innerHeight,
-                useVideoPip.getState().session,
-              ),
-            );
           })
           .catch(() => undefined);
       });
@@ -1156,10 +1108,6 @@ export function VideoPipHost() {
       return;
     }
     if (!panelReady) return;
-    // 窗口尺寸可能在首次挂载后变了，出小窗时把尺寸和位置一起夹回可视区。
-    setFloatBox((previous) =>
-      clampHostFloatBox(previous, window.innerWidth, window.innerHeight, session),
-    );
     let cancelled = false;
     const frame = requestAnimationFrame(() => {
       if (cancelled) return;
@@ -1195,7 +1143,7 @@ export function VideoPipHost() {
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [floatBox.w, floatBox.x, floatBox.y, isPlatformPlayer, showSurface, videoFullscreen, panelBounds]);
+  }, [floatRect.w, floatRect.h, floatRect.x, floatRect.y, isPlatformPlayer, showSurface, videoFullscreen, panelBounds]);
 
   // 切走应用（窗口失焦 / 页面隐藏）时，默认把正在播的浮动预览送进系统画中画
   useEffect(() => {
@@ -1742,6 +1690,8 @@ export function VideoPipHost() {
 
   const close = () => {
     if (fullscreenRef.current) void applyVideoFullscreen(false);
+    // The picture that slides away is copied before the source is released.
+    floatWindow.preserve();
     stopHost();
     useVideoPip.getState().close();
     if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
@@ -1805,112 +1755,6 @@ export function VideoPipHost() {
     seekTo(at, false);
   };
 
-  const onDragPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || videoFullscreen) return;
-    if (
-      (event.target as HTMLElement).closest(
-        "button, a, input, .kd-pip-resize, .kd-pip-float-scrub",
-      )
-    ) {
-      return;
-    }
-    const node = floatRef.current;
-    if (!node) return;
-    dragRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: floatBox.x,
-      originY: floatBox.y,
-    };
-    node.setPointerCapture(event.pointerId);
-  };
-
-  const onDragPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const resize = resizeRef.current;
-    if (resize && resize.pointerId === event.pointerId) {
-      const dx = event.clientX - resize.startX;
-      const dy = event.clientY - resize.startY;
-      const startH = videoFloatHeight(resize.startW);
-      const edge = resize.edge;
-      // 宽高锁 16:9：横边按 dx 改宽，竖边按 dy 换算成宽，角取变化更大的一侧
-      let nextW = resize.startW;
-      if (edge === "e" || edge === "ne" || edge === "se") nextW = resize.startW + dx;
-      if (edge === "w" || edge === "nw" || edge === "sw") nextW = resize.startW - dx;
-      if (edge === "s" || edge === "n") {
-        nextW = ((edge === "s" ? startH + dy : startH - dy) * 16) / 9;
-      } else if (edge === "se" || edge === "sw") {
-        const fromH = ((startH + dy) * 16) / 9;
-        if (Math.abs(fromH - resize.startW) > Math.abs(nextW - resize.startW)) nextW = fromH;
-      } else if (edge === "ne" || edge === "nw") {
-        const fromH = ((startH - dy) * 16) / 9;
-        if (Math.abs(fromH - resize.startW) > Math.abs(nextW - resize.startW)) nextW = fromH;
-      }
-
-      let nextX = resize.originX;
-      let nextY = resize.originY;
-      const clampedW = clampVideoFloatWidth(
-        isPlatformPlayer ? Math.max(YOUTUBE_MIN_W, nextW) : nextW,
-        window.innerWidth,
-        Math.max(1, window.innerHeight - (isPlatformPlayer ? YOUTUBE_EXTRA_H : 0)),
-      );
-      if (edge === "w" || edge === "nw" || edge === "sw") {
-        nextX = resize.originX + (resize.startW - clampedW);
-      }
-      if (edge === "n" || edge === "ne" || edge === "nw") {
-        nextY = resize.originY + (startH - videoFloatHeight(clampedW));
-      }
-      setFloatBox(
-        clampHostFloatBox(
-          { x: nextX, y: nextY, w: clampedW },
-          window.innerWidth,
-          window.innerHeight,
-          session,
-        ),
-      );
-      return;
-    }
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
-    setFloatBox(
-      clampHostFloatBox(
-        { x: drag.originX + dx, y: drag.originY + dy, w: floatBox.w },
-        window.innerWidth,
-        window.innerHeight,
-        session,
-      ),
-    );
-  };
-
-  const onDragPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (resizeRef.current?.pointerId === event.pointerId) resizeRef.current = null;
-    if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
-    try {
-      floatRef.current?.releasePointerCapture(event.pointerId);
-    } catch {
-      /* ignore */
-    }
-  };
-
-  const onResizePointerDown = (edge: ResizeEdge) => (event: ReactPointerEvent<HTMLSpanElement>) => {
-    event.stopPropagation();
-    if (event.button !== 0 || videoFullscreen) return;
-    const node = floatRef.current;
-    if (!node) return;
-    resizeRef.current = {
-      pointerId: event.pointerId,
-      edge,
-      startX: event.clientX,
-      startY: event.clientY,
-      startW: floatBox.w,
-      originX: floatBox.x,
-      originY: floatBox.y,
-    };
-    node.setPointerCapture(event.pointerId);
-  };
-
   const title = session?.title || "视频预览";
 
   return (
@@ -1920,7 +1764,7 @@ export function VideoPipHost() {
       data-idle={!hostActive ? "true" : undefined}
     >
       <div
-        ref={showFloating ? floatRef : undefined}
+        ref={floatWindow.bind}
         className={showSurface ? "kd-pip-float" : "kd-pip-shell"}
         data-docked={docked ? "true" : undefined}
         data-fullscreen={showSurface && videoFullscreen ? "true" : undefined}
@@ -1930,19 +1774,14 @@ export function VideoPipHost() {
             ? { left: panelBounds.x, top: panelBounds.y, width: panelBounds.width, height: panelBounds.height }
             : showFloating
             ? {
-                left: floatBox.x,
-                top: floatBox.y,
-                width: floatBox.w,
-                ...(isPlatformPlayer && !videoFullscreen
-                  ? { height: videoFloatHeight(floatBox.w) + YOUTUBE_EXTRA_H }
-                  : {}),
+                left: floatRect.x,
+                top: floatRect.y,
+                width: floatRect.w,
+                ...(isPlatformPlayer && !videoFullscreen ? { height: floatRect.h } : {}),
               }
             : undefined
         }
-        onPointerDown={showFloating ? onDragPointerDown : undefined}
-        onPointerMove={showFloating ? onDragPointerMove : undefined}
-        onPointerUp={showFloating ? onDragPointerUp : undefined}
-        onPointerCancel={showFloating ? onDragPointerUp : undefined}
+        {...(showFloating ? floatWindow.frameProps : {})}
       >
         <div className="kd-pip-float-stage">
           {isPlatformPlayer && (
@@ -2044,16 +1883,10 @@ export function VideoPipHost() {
               }}
             />
           )}
-          {showFloating &&
-            RESIZE_EDGES.filter((edge) => !isPlatformPlayer || edge === "se").map((edge) => (
-              <span
-                key={edge}
-                className="kd-pip-resize"
-                data-edge={edge}
-                aria-hidden="true"
-                onPointerDown={onResizePointerDown(edge)}
-              />
-            ))}
+          {showFloating && !videoFullscreen && (
+            <FloatingMediaResizeHandles window={floatWindow} name="视频小窗"
+              edges={isPlatformPlayer ? PLATFORM_RESIZE_EDGES : undefined} />
+          )}
         </div>
       </div>
     </div>

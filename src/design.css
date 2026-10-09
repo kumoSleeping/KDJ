@@ -6769,10 +6769,17 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-player-lyricsbtn[data-on="true"]:hover:not(:disabled) {
   color: var(--kd-theme-strong);
 }
+/* 画面小窗键（视频小窗 / 可视化小窗）与歌词键同一套：小窗开着就是主题红。 */
+.kd-player-popupbtn[data-on="true"] {
+  color: var(--kd-theme);
+}
+.kd-player-popupbtn[data-on="true"]:hover:not(:disabled) {
+  color: var(--kd-theme-strong);
+}
 /* Sakura latches switches while enabled and the mode button while its menu is
    open. Transport/download/reroll actions retain only the theme's :active feedback.
    Apply here so already-installed theme packs receive the fix through HMR too. */
-:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn)[aria-pressed="true"],
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn)[aria-pressed="true"],
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-mode[aria-expanded="true"] {
   color: var(--kd-theme);
   box-shadow: var(--s98-sunken);
