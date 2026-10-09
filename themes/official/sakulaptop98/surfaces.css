@@ -51,9 +51,6 @@
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-manager-control-head {
   background: transparent;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-app .kd-search-band .kd-searchbar {
-  background: var(--s98-content-paper);
-}
 /* Explore uses a compact action beside the word chips, not a full raised toolbar key. */
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-vj-actions .kd-btn {
   padding: 0.2rem 0.35rem;
