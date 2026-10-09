@@ -44,3 +44,22 @@ export interface DrawerSpec {
    */
   close(): boolean | void;
 }
+
+/**
+ * One thing the rolled-up drawer offers: an app that is opened by hand. The head lists these
+ * while nothing is open and keeps them as small icons while an app is; an app that is only ever
+ * opened from elsewhere (a row's menu, a button on the picture) needs no entry.
+ */
+export interface DrawerEntry {
+  /** The `id` of the app it opens; also `data-drawer-entry` on the control. */
+  id: string;
+  /** A word or two beside the icon while the drawer is rolled up. */
+  label: string;
+  /** The full name, for the tooltip and assistive technology. */
+  title?: string;
+  icon: ReactNode;
+  /** What is going on in the app while it is put away, as a small number; nothing at zero. */
+  count?: number;
+  /** Asks for the app. Putting it away again is the open app's own `close`. */
+  open(): void;
+}

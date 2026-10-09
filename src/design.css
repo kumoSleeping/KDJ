@@ -792,22 +792,41 @@ textarea {
   min-height: 0;
   flex: 1 1 auto;
 }
-/* Search spans the content width; the sidebar starts below it. */
+/* The top row on a wide window: the aggregate search takes what the drawer's head leaves. The
+   head hangs at the right of this row (see Drawer.css) and is exactly as wide as the drawer,
+   so the row only keeps that width free; nothing is drawn between the two. */
+.kd-table-wrap[data-drawer-head] {
+  --kd-drawer-w: max(min(var(--kd-right, 25rem), 45%), min(17rem, 100%));
+}
+.kd-table-wrap[data-drawer-head] > .kd-panel-dock-top {
+  box-sizing: border-box;
+  min-height: var(--kd-drawer-head-h);
+  padding-right: var(--kd-drawer-w);
+  background: var(--s98-face, var(--kd-panel));
+}
+/* A small window has no room for both: the rolled-up head keeps only its icons and the search
+   takes the rest. An open drawer is as wide as ever and comes down over the search's end. */
+@container kd-table-wrap (max-width: 34rem) {
+  .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top { padding-right: var(--kd-drawer-lip-w); }
+}
+/* An editor column stands beside the whole of the list's column: the search row, its head and
+   the drawer keep to the left of it. */
 .kd-main-slot > .kd-table-wrap[data-aside="open"] {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 1px min(var(--kd-right, 25rem), 45%);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
 }
-.kd-table-wrap[data-aside="open"] > .kd-search-band-host { grid-column: 1 / -1; grid-row: 1; }
-.kd-table-wrap[data-aside="open"] > .kd-track-preview-row { grid-column: 1; grid-row: 2; }
-.kd-table-wrap[data-aside="open"] > .kd-local-list-slot { grid-column: 1; grid-row: 3; }
+.kd-table-wrap[data-aside="open"] > .kd-panel-dock-top { grid-column: 1; grid-row: 1; }
+.kd-table-wrap[data-aside="open"] > .kd-local-list-slot { grid-column: 1; grid-row: 2; }
+/* Both lines are named: an open end would be the wrap's own edge for a positioned box. */
+.kd-table-wrap[data-aside="open"] > .kd-drawer-host { grid-column: 1 / 2; grid-row: 1 / -1; }
 .kd-table-wrap[data-aside="open"] > .kd-split-handle {
   grid-column: 2;
-  grid-row: 2 / -1;
+  grid-row: 1 / -1;
 }
 .kd-table-wrap[data-aside="open"] > .kd-split-aside {
   grid-column: 3;
-  grid-row: 2 / -1;
+  grid-row: 1 / -1;
   min-width: 0;
   border-left: 1px solid var(--kd-line);
   box-shadow: none;
@@ -1114,7 +1133,7 @@ textarea {
   --kd-visible-right: min(var(--kd-right, 25rem), calc(100% - 1px));
   position: relative;
   isolation: isolate;
-  container-type: inline-size;
+  container: kd-table-wrap / inline-size;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1338,6 +1357,11 @@ textarea {
 }
 .kd-app[data-mac="true"] .kd-app-chrome {
   padding-left: var(--kd-traffic-pad);
+}
+/* The drawer's head is this bar's lower edge coming down, so no edge is drawn where it hangs;
+   the search row below has the bar's own tone. Theme packs keep their title bar. */
+:root:not([data-theme-pack]) .kd-app-chrome[data-drawer-lip="true"] {
+  border-bottom-color: transparent;
 }
 /* 与左栏同宽：从窗左缘起算，导航靠右贴侧栏右缘；Mac 红绿灯用 padding 躲开。 */
 .kd-app-chrome-tree {
@@ -4830,7 +4854,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0 0.75rem;
+  /* While a drawer is down over this bar's right end, its tools stay beside the sheet
+     (--kd-drawer-cover is written by DrawerHost). */
+  padding: 0 calc(0.75rem + var(--kd-drawer-cover, 0px)) 0 0.75rem;
   border-bottom: 1px solid var(--kd-line-soft);
   /* 分析 / 多选 / 下载时也不染主题粉红，保持面板本色 */
   background: var(--kd-panel);
@@ -4842,7 +4868,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 /* The library rail is the containing list's header, not a passive status strip. */
 .kd-workspace-pane-local > .kd-activity {
   background: var(--s98-caption, color-mix(in srgb, var(--kd-panel) 88%, var(--kd-text) 12%));
-  border-top: 1px solid var(--kd-line);
   border-bottom: 1px solid color-mix(in srgb, var(--kd-text) 32%, var(--kd-panel));
   color: var(--kd-text);
 }

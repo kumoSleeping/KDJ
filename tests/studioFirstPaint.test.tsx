@@ -153,25 +153,52 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     await act(async()=> { host.querySelector<HTMLElement>('[aria-label="关闭可视化配置"]')!.click(); await wait(60); });
     assert.equal(editor().track,null,'closing the column app ends the hosted controls');
     await act(async()=>dock.unmount());
-    // ---- The drawer: one app at a time; the one that is replaced or closed leaves as it was.
+    // ---- The drawer: a head that is always there, one app at a time; the one that is replaced or
+    // closed leaves as it was.
     const column = createRoot(host);
-    const spec = (id:string) => ({ id, title:id, extent:"two-thirds" as const, body:<input data-probe={id} defaultValue=""/>, close(){} });
-    const show = (id:string|null) => act(async()=> { column.render(<DrawerHost spec={id ? spec(id) : null}/>); });
+    const asked: string[] = [];
+    const entries = [{ id:"lyrics", label:"歌词", icon:<i/>, open(){ asked.push("open lyrics"); } }];
+    const spec = (id:string) => ({ id, title:id, extent:"two-thirds" as const, body:<input data-probe={id} defaultValue=""/>, close(){ asked.push(`close ${id}`); } });
+    // A body is built one frame after its sheet.
+    const show = async (id:string|null) => {
+      await act(async()=> { column.render(<DrawerHost spec={id ? spec(id) : null} entries={entries}/>); });
+      await act(async()=> { step(lastFrameTime+16); await wait(0); });
+    };
     const sheet = (id:string) => host.querySelector<HTMLElement>(`.kd-drawer[data-app="${id}"]`);
+    const entry = () => host.querySelectorAll<HTMLElement>('[data-drawer-entry="lyrics"]');
+    const title = () => host.querySelector('.kd-drawer-head .kd-drawer-title:not([data-leaving]) .kd-title-tabs-title')?.textContent;
+    await show(null);
+    assert.ok(host.querySelector('.kd-drawer-head'),'the head is there with nothing open');
+    assert.equal(host.querySelectorAll('.kd-drawer').length,0);
+    assert.ok(entry().length===1 && entry()[0].closest('.kd-drawer-launcher'),'rolled up, the head lists the apps opened by hand');
     await show('visualizer');
+    assert.equal(title(),'visualizer','the open app is named in the head');
+    assert.equal(sheet('visualizer')!.querySelector('.kd-title-tabs'),null,'the sheet has no title row of its own');
+    assert.ok(entry().length===1 && entry()[0].closest('.kd-drawer-tail'),'one live entry per app, beside the title');
+    await act(async()=> { entry()[0].click(); });
+    assert.deepEqual(asked,['open lyrics'],'another app\'s entry asks for it');
     const probe = sheet('visualizer')!.querySelector('input')!;
     probe.value = 'typed';
     await show('lyrics');
     assert.equal(sheet('visualizer')?.dataset.leaving,'true','a replaced app rolls up instead of vanishing');
     assert.ok(sheet('visualizer')!.querySelector('input')===probe,'and it is the same instance, not a fresh mount');
     assert.equal(sheet('lyrics')?.dataset.leaving,undefined,'the new app comes down over it');
-    await act(async()=> { await wait(460); });
+    assert.equal(title(),'lyrics');
+    assert.equal(host.querySelector('.kd-drawer-title[data-leaving] .kd-title-tabs-title')?.textContent,'visualizer','the old title slides out');
+    assert.equal(entry()[0].getAttribute('aria-pressed'),'true');
+    await act(async()=> { entry()[0].click(); });
+    assert.equal(asked.at(-1),'close lyrics','the open app\'s entry puts it away');
+    await act(async()=> { host.querySelector<HTMLElement>('.kd-drawer-rollup')!.click(); });
+    assert.equal(asked.filter(item => item==='close lyrics').length,2,'and so does the roll-up button');
+    await act(async()=> { await wait(480); });
     assert.equal(sheet('visualizer'),null,'nothing waits underneath to come back');
+    assert.equal(host.querySelector('.kd-drawer-title[data-leaving]'),null);
     await show(null);
     assert.equal(sheet('lyrics')?.dataset.leaving,'true','a closed app rolls up');
+    assert.ok(entry()[0].closest('.kd-drawer-launcher'),'and the head offers its apps again');
     await show('lyrics');
     assert.equal(host.querySelectorAll('.kd-drawer[data-app="lyrics"]:not([data-leaving])').length,1,'asked for again while leaving: it comes down again');
-    await act(async()=> { await wait(460); });
+    await act(async()=> { await wait(480); });
     assert.equal(host.querySelectorAll('.kd-drawer').length,1);
     await act(async()=>column.unmount());
     console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension, drawer app, leaving apps");
