@@ -1,19 +1,22 @@
 import { studioDuration, validateVisualizerProject, type VisualizerDraft, type VisualizerProject } from "./visualizerStudio";
 import { drawStudioFrame, loadStudioImages, prepareStudio, studioCanvas, type PreparedStudio } from "./visualizerStudioRenderer";
 import { getBridge } from "./bridge";
-import { studioWorkerCount } from "./visualizerStudioFrames";
+import { studioChunkFrames, studioWorkerCount } from "./visualizerStudioFrames";
 import { visualizerApi, type VisualizerJobStatus } from "./api";
-import type { StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest } from "./visualizerStudioExport.worker";
+import { captureDiagnostic } from "./diagnostics";
+import type { StudioWorkerCommand, StudioWorkerReply, StudioWorkerRequest, StudioWorkerResult } from "./visualizerStudioExport.worker";
 
 const terminal = (status: VisualizerJobStatus) => ["done", "failed", "canceled"].includes(status.phase);
 /** The encoder moved past this frame, a retry replaced its pass, or the job already
  * ended. The next snapshot says which; none of these is a renderer failure. */
 const superseded = (error: unknown) => /过期或重复的视频帧|导出任务已结束/.test(error instanceof Error ? error.message : String(error));
 
-/** Renders and uploads frames. `slots` uploads may be in flight at once. */
+/** Renders and uploads frames. `slots` uploads may be in flight at once. An `h264`
+ * producer encodes too: its unit is a GOP of `chunkFrames` frames, not one frame. */
 interface FrameProducer {
   slots: number;
-  format: "rgba" | "yuv420p";
+  format: "rgba" | "yuv420p" | "h264";
+  chunkFrames?: number;
   upload(job: string, token: number, index: number): Promise<VisualizerJobStatus>;
   release(): void;
 }
@@ -36,13 +39,32 @@ export async function runStudioExport(draft: VisualizerDraft, outputPath: string
     ]);
     signal.throwIfAborted();
     const prepared = prepareStudio(draft.project, images, analysis.timeline);
-    producer = await createStudioFrameProducer(draft.project, prepared, images, signal);
-    signal.throwIfAborted();
-    job = await visualizerApi.start({ track_id: draft.project.track.id, signature: analysis.signature,
-      duration: studioDuration(analysis.timeline), width: draft.project.scene.canvas.width,
-      height: draft.project.scene.canvas.height, fps: draft.project.output.fps,
-      acceleration: draft.project.output.acceleration, output_path: outputPath, pixel_format: producer.format });
-    return await pumpFrames(job, producer, signal, onStatus);
+    // An export encoded by the editor's renderers can lose its encoder midway (a driver
+    // reset, a session taken away). It is then redone once with FFmpeg encoding.
+    for (let encode = draft.project.output.acceleration !== "software"; ; encode = false) {
+      producer = await createStudioFrameProducer(draft.project, prepared, images, signal, encode);
+      signal.throwIfAborted();
+      const editor = producer.format === "h264";
+      let status: VisualizerJobStatus | undefined, failure: unknown;
+      try {
+        job = await visualizerApi.start({ track_id: draft.project.track.id, signature: analysis.signature,
+          duration: studioDuration(analysis.timeline), width: draft.project.scene.canvas.width,
+          height: draft.project.scene.canvas.height, fps: draft.project.output.fps,
+          acceleration: draft.project.output.acceleration, output_path: outputPath, pixel_format: producer.format,
+          ...(producer.chunkFrames ? { chunk_frames: producer.chunkFrames } : {}) });
+        status = await pumpFrames(job, producer, signal, onStatus);
+      } catch (error) {
+        if (!editor || signal.aborted) throw error;
+        failure = error;
+      }
+      if (!editor || signal.aborted || status && status.phase !== "failed") return status!;
+      // Respect the backend commit point: a completed file is the result.
+      const final = status ?? (job ? await visualizerApi.cancel(job.id) : undefined);
+      if (final?.phase === "done") return final;
+      captureDiagnostic("visualizer-export", "editor-encoder", failure ?? final?.error, "改由 FFmpeg 编码后重新导出", "warn");
+      job = null;
+      producer.release(); producer = undefined;
+    }
   } catch (error) {
     if (job) {
       // Respect the backend commit point: a completed file cannot be canceled.
@@ -87,7 +109,8 @@ async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, s
             .finally(() => { active--; changed(); });
         }
       }
-      if (!active && !polling) {
+      // A GOP takes a renderer seconds, and nothing else tells the server the editor is alive.
+      if ((!active || producer.format === "h264") && !polling) {
         polling = true;
         visualizerApi.poll(first.id, demand?.token ?? 0, signal)
           .then(accept, error => { failure ??= error; })
@@ -102,10 +125,10 @@ async function pumpFrames(first: VisualizerJobStatus, producer: FrameProducer, s
 
 /** Parallel workers when the WebView can draw off the editor thread; otherwise the
  * measured single-canvas path. Never change producers during encoding. */
-async function createStudioFrameProducer(project: VisualizerProject, prepared: PreparedStudio, images: HTMLImageElement[], signal: AbortSignal): Promise<FrameProducer> {
+async function createStudioFrameProducer(project: VisualizerProject, prepared: PreparedStudio, images: HTMLImageElement[], signal: AbortSignal, encode: boolean): Promise<FrameProducer> {
   if (typeof OffscreenCanvas !== "undefined" && typeof Worker !== "undefined") {
     try {
-      return await createStudioWorkerPool(project, prepared, images, signal);
+      return await createStudioWorkerPool(project, prepared, images, signal, encode);
     } catch (error) {
       signal.throwIfAborted();
       console.warn("[visualizer export] worker renderers unavailable, drawing on the editor thread", error);
@@ -121,9 +144,11 @@ async function createStudioFrameProducer(project: VisualizerProject, prepared: P
 }
 
 const WORKER_SETUP_MS = 30_000;
+/** Opening a hardware session and encoding four frames; a driver that hangs must not hold the export. */
+const ENCODER_SETUP_MS = 15_000;
 
 class StudioWorker {
-  private calls = new Map<number, { resolve: (status: VisualizerJobStatus | undefined) => void; reject: (error: Error) => void }>();
+  private calls = new Map<number, { resolve: (result: StudioWorkerResult) => void; reject: (error: Error) => void }>();
   private next = 0;
   private dead: Error | undefined;
   // Vite emits the worker chunk; tool bundles that leave this URL unresolved fail to
@@ -135,12 +160,12 @@ class StudioWorker {
       const reply = event.data, call = this.calls.get(reply.id);
       if (!call) return;
       this.calls.delete(reply.id); this.pending--;
-      if (reply.ok) call.resolve(reply.status); else call.reject(new Error(reply.message));
+      if (reply.ok) call.resolve(reply); else call.reject(new Error(reply.message));
     };
     this.worker.onerror = event => { event.preventDefault(); this.fail(new Error(event.message || "可视化导出线程异常退出")); };
     this.worker.onmessageerror = () => this.fail(new Error("可视化导出线程消息无法解析"));
   }
-  call(command: StudioWorkerCommand, transfer: Transferable[] = []): Promise<VisualizerJobStatus | undefined> {
+  call(command: StudioWorkerCommand, transfer: Transferable[] = []): Promise<StudioWorkerResult> {
     if (this.dead) return Promise.reject(this.dead);
     const id = ++this.next;
     return new Promise((resolve, reject) => {
@@ -156,7 +181,24 @@ class StudioWorker {
   terminate() { this.worker.terminate(); this.fail(new DOMException("可视化导出已结束", "AbortError")); }
 }
 
-async function createStudioWorkerPool(project: VisualizerProject, prepared: PreparedStudio, images: HTMLImageElement[], signal: AbortSignal): Promise<FrameProducer> {
+/** The renderers that opened a hardware encoder writing the same parameter sets as the
+ * first one that did. Drivers cap concurrent sessions, so some renderers may get none. */
+async function openStudioEncoders(workers: StudioWorker[]): Promise<{ encoders: StudioWorker[]; reason: string }> {
+  let timer = 0;
+  const late = new Promise<never>((_, reject) => { timer = window.setTimeout(() => reject(new Error("硬件编码器启动超时")), ENCODER_SETUP_MS); });
+  const probes = await Promise.allSettled(workers.map(worker => Promise.race([worker.call({ type: "encoder" }), late])));
+  window.clearTimeout(timer);
+  const encoders: StudioWorker[] = [];
+  let parameters: string | undefined, reason = "";
+  probes.forEach((probe, k) => {
+    if (probe.status === "rejected") { reason ||= probe.reason instanceof Error ? probe.reason.message : String(probe.reason); return; }
+    parameters ??= probe.value.parameters;
+    if (probe.value.parameters === parameters) encoders.push(workers[k]); else reason ||= "各编码会话的参数集不一致";
+  });
+  return { encoders, reason };
+}
+
+async function createStudioWorkerPool(project: VisualizerProject, prepared: PreparedStudio, images: HTMLImageElement[], signal: AbortSignal, encode: boolean): Promise<FrameProducer> {
   const started = performance.now(), { width, height } = prepared.project.scene.canvas, fps = prepared.project.output.fps;
   const timeline = prepared.timeline, count = Math.ceil(studioDuration(timeline) * fps);
   const imagePixels = images.reduce((sum, image) => sum + image.naturalWidth * image.naturalHeight, 0);
@@ -188,21 +230,47 @@ async function createStudioWorkerPool(project: VisualizerProject, prepared: Prep
     const hint = !(rates.get(false)! > rates.get(true)! * 1.15);
     if (hint) await Promise.all(workers.map(worker => worker.call({ type: "context", willReadFrequently: true })));
     signal.throwIfAborted();
+    // The renderers are up: from here only the encoder probe is bounded, by its own limit.
+    window.clearTimeout(timer);
+    const opened = encode ? await openStudioEncoders(workers) : { encoders: [], reason: "" };
+    // Encoding in the renderers pays only while most of them still draw: with fewer
+    // sessions than that, every renderer uploading frames to FFmpeg is the faster pool.
+    const encoders = opened.encoders.length * 2 >= size ? opened.encoders : [];
+    if (encode && !encoders.length) console.info("[visualizer export] renderers do not encode; FFmpeg will", { sessions: opened.encoders.length, workers: size, reason: opened.reason });
+    signal.throwIfAborted();
     const calibrationMs = performance.now() - started;
     let frames = 0;
+    const log = (encoder: string, active: number) => console.info("[visualizer export]", { encoder, workers: active, frames, elapsedMs: performance.now() - started, calibrationMs,
+      willReadFrequently: hint, calibrationFramesPerSecond: Object.fromEntries([...rates].map(([key, rate]) => [String(key), rate * 1000])) });
+    const idle = (pool: StudioWorker[]) => pool.reduce((a, b) => b.pending < a.pending ? b : a);
+    if (encoders.length) {
+      for (const worker of workers) if (!encoders.includes(worker)) worker.terminate();
+      const chunkFrames = studioChunkFrames(fps);
+      return {
+        // One per renderer: a GOP occupies its encoder from the first frame to the flush.
+        slots: encoders.length, format: "h264", chunkFrames,
+        upload: async (job, token, index) => {
+          const { status } = await idle(encoders).call({ type: "encode", job, token, index });
+          frames += Math.min(chunkFrames, count - index * chunkFrames);
+          return status!;
+        },
+        release() {
+          for (const worker of encoders) worker.terminate();
+          log("webview", encoders.length);
+        },
+      };
+    }
     return {
       // Two per worker: one frame draws while the previous one uploads.
       slots: size * 2, format: "yuv420p",
       upload: async (job, token, index) => {
-        const worker = workers.reduce((a, b) => b.pending < a.pending ? b : a);
-        const status = await worker.call({ type: "upload", job, token, index });
+        const { status } = await idle(workers).call({ type: "upload", job, token, index });
         frames++;
         return status!;
       },
       release() {
         for (const worker of workers) worker.terminate();
-        console.info("[visualizer export]", { workers: size, frames, elapsedMs: performance.now() - started, calibrationMs,
-          willReadFrequently: hint, calibrationFramesPerSecond: Object.fromEntries([...rates].map(([key, rate]) => [String(key), rate * 1000])) });
+        log("ffmpeg", size);
       },
     };
   } catch (error) {

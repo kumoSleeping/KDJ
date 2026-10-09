@@ -99,3 +99,22 @@ Linux 上无头 Chromium / Playwright WebKit、真实服务端与 FFmpeg（CPU �
 | WebKit | 45.6 s | 17.4 s |
 
 新旧成品对比 PSNR 47–48 dB。Chromium 现在接近 WebView 上传 I420 的上限（约 100 fps）；WebKit 受其自身绘制速度限制。macOS / Windows 真机和 VideoToolbox 尚未测量。
+
+## 编辑器内硬件编码（2026-10-10）
+
+并行化之后，瓶颈是 WebView 向本地服务回环上传原始帧（I420 约 100 fps 封顶）以及 FFmpeg 一侧的编码。有系统硬件编码器时，渲染 Worker 现在自己编码，只上传压缩后的码流：
+
+- `visualizerStudioExport.worker.ts`：每个 Worker 持有一个 WebCodecs `VideoEncoder`（H.264 High、`prefer-hardware`、Annex B）。画面仍是同一套 Canvas 渲染、读回、`rgbaToYuv420`，再以带 BT.709 限定范围标记的 I420 `VideoFrame` 送入编码器，所以像素与上传 I420 的路径一致，不依赖 WebView 自己的 RGB→YUV 矩阵。
+- 视频按一秒一个闭合 GOP 切分（`studioChunkFrames`）。一个 Worker 画并编完整个 GOP、`flush` 后整段上传；GOP 乱序完成、按序混流，沿用原有的窗口与令牌协议，只是单位从“帧”变成“GOP”。
+- `studio.rs`：`pixel_format: "h264"` 加 `chunk_frames`。每个 GOP 入队前检查：Annex B、以带 SPS/PPS 的关键帧开头、画面数与该段应有帧数相等、参数集与第一段逐字节相同。FFmpeg 只做 `-c:v copy` 与音轨编码，并用 `h264_metadata` 把码流标记为 BT.709 限定范围。成品仍走原有的时长、编码格式校验和不覆盖式提交。
+- 待处理的是压缩后的 GOP（1080p30 约 1.5 MB），不再是 128 MB 的原始帧窗口。
+
+何时不走这条路径（全部退回“Worker 上传 I420、FFmpeg 编码”，行为与之前相同）：
+
+- 工程选择了软件编码；WebView 没有 WebCodecs，或 `isConfigSupported` 对硬件编码返回不支持。
+- 启动时每个 Worker 先真实编码 4 帧。打开会话失败、超时（15 秒）、输出不是 Annex B 关键帧、或参数集与其它 Worker 不同的 Worker 不参与编码；能编码的不足一半时整体退回。显卡驱动对并发编码会话数有限制，这是预期情况。
+- 任务开始被服务端拒绝，或导出中途失败（编码器报错、输出帧数不符、时间戳回退即出现了重排帧、服务端拒收某个 GOP）：取消本次任务，改由 FFmpeg 编码自动重新导出一次，并记录一条 `visualizer-export / editor-encoder` 诊断。
+
+控制台的 `[visualizer export]` 日志带 `encoder: "webview" | "ffmpeg"`，导出状态显示“系统硬件编码”时即为新路径。
+
+尚未验证：这条路径没有做过测速，也没有在 Windows（WebView2 / Media Foundation）真机上运行过。实现时只在本机 Chrome 的 Worker 中确认过 `VideoEncoder` 的硬件与软件 H.264 配置均可用；WKWebView 上是否启用、各家硬件编码器的码流是否都能通过上述检查、实际快多少，都以手动导出为准。直接把 GPU 画布交给编码器（省掉读回与转色）会更快，但成品的色彩矩阵将由 WebView 决定，需先确认再做。
