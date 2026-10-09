@@ -3052,6 +3052,7 @@ pub fn run() {
         desktop_player::playback_control,
         desktop_player::playback_state,
         desktop_player::playback_waveform_window,
+        desktop_player::playback_trace,
         midi::midi_devices,
         midi::midi_send,
         youtube_proof::youtube_mint_gvs_po_token,
@@ -3088,6 +3089,7 @@ pub fn run() {
         desktop_player::playback_control,
         desktop_player::playback_state,
         desktop_player::playback_waveform_window,
+        desktop_player::playback_trace,
         media_permission_granted
     ]);
     #[cfg(all(mobile, target_os = "ios"))]

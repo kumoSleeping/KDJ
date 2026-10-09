@@ -183,6 +183,7 @@ import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
 import { NowPlayingInfoHost } from "./NowPlayingInfo";
 import { PlayerVolume } from "./PlayerVolume";
+import { tracePlayback, watchMainThread } from "../../lib/playbackTrace";
 import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { LyricsButtonMenu } from "./LyricsButtonMenu";
@@ -1014,9 +1015,9 @@ export function PlayerBar() {
     [],
   );
   /** 已提交、等待后端落地的跳转；期间迟到的旧位置事件不能把进度条弹回去。 */
-  const pendingSeekRef = useRef<{ trackId: number; position: number; settledAt: number | null } | null>(null);
+  const pendingSeekRef = useRef<{ trackId: number; position: number; settledAt: number | null; sentAt?: number } | null>(null);
   /** 原生 seek 单飞：请求槽只保留最后一个目标，避免 Android commandTail 被连续点击填满。 */
-  const nativeSeekRequestRef = useRef<{ trackId: number; position: number; onDispatch?(): void; onCancel?(): void } | null>(null);
+  const nativeSeekRequestRef = useRef<{ trackId: number; position: number; at: number; onDispatch?(): void; onCancel?(): void } | null>(null);
   const nativeSeekInFlightRef = useRef(false);
   /** 上一次派出、权威状态尚未回到非 busy（未落地）的 seek：所属曲目和派出时刻。 */
   const nativeSeekUnlandedRef = useRef<{ trackId: number; at: number } | null>(null);
@@ -1117,10 +1118,11 @@ export function PlayerBar() {
 
     nativeSeekRequestRef.current = null;
     nativeSeekInFlightRef.current = true;
-    nativeSeekUnlandedRef.current = { trackId: request.trackId, at: performance.now() };
+    const dispatchedAt = performance.now();
+    nativeSeekUnlandedRef.current = { trackId: request.trackId, at: dispatchedAt };
     const target = request.position;
     // 旧曲目的状态边沿可能已清掉 pendingSeek；在真正发命令前重新 pin 一次。
-    pendingSeekRef.current = { trackId: request.trackId, position: target, settledAt: null };
+    pendingSeekRef.current = { trackId: request.trackId, position: target, settledAt: null, sentAt: dispatchedAt };
     request.onDispatch?.();
     void player
       .seek(target)
@@ -1149,6 +1151,10 @@ export function PlayerBar() {
       })
       .finally(() => {
         nativeSeekInFlightRef.current = false;
+        tracePlayback("seek", {
+          track: request.trackId, to: Math.round(target * 10) / 10,
+          waited: Math.round(dispatchedAt - request.at), ack: Math.round(performance.now() - dispatchedAt),
+        });
         // 若点击发生在本次命令确认前，沿用最新槽位。
         nativeSeekDrainRef.current();
         // 暂停时没有后续快照：确认后自己再对一次账，不让按住的位置悬着。
@@ -1164,7 +1170,7 @@ export function PlayerBar() {
       const position = Math.max(0, target);
       nativeSeekRequestRef.current?.onCancel?.();
       pendingSeekRef.current = { trackId, position, settledAt: null };
-      nativeSeekRequestRef.current = { trackId, position, ...callbacks };
+      nativeSeekRequestRef.current = { trackId, position, at: performance.now(), ...callbacks };
       nativeSeekDrainRef.current();
     },
     [nativePlayer],
@@ -1185,6 +1191,7 @@ export function PlayerBar() {
     pendingSeekRef.current = null;
   }, []);
   useEffect(() => () => invalidateNativeSeek(), [invalidateNativeSeek]);
+  useEffect(() => desktopNative ? watchMainThread() : undefined, [desktopNative]);
 
   /** 进度条当前仍应显示的点击位置；权威状态已不支持它时就地释放。 */
   const heldSeek = useCallback((state: UnifiedPlayerState) => {
@@ -1203,6 +1210,12 @@ export function PlayerBar() {
       distance: Math.abs(state.currentTime - pending.position),
       settledMs: pending.settledAt === null ? 0 : now - pending.settledAt,
     })) return pending;
+    if (pending.sentAt !== undefined) {
+      tracePlayback("seek-shown", {
+        track: pending.trackId, ms: Math.round(now - pending.sentAt),
+        off: Math.round(Math.abs(state.currentTime - pending.position) * 10) / 10,
+      });
+    }
     pendingSeekRef.current = null;
     return null;
   }, []);

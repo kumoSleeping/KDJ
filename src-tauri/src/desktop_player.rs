@@ -244,6 +244,15 @@ pub async fn playback_control(
         .map_err(|error| format!("等待播放实时控制失败：{error}"))?
 }
 
+/// Slow moments the WebView measured itself (a stalled main thread, a late input event, a seek's
+/// wait and landing), written beside the coordinator's own timeline so one log explains a hang.
+#[tauri::command]
+pub fn playback_trace(event: String, detail: String) {
+    let event: String = event.chars().take(48).collect();
+    let detail: String = detail.chars().take(400).collect();
+    tracing::info!(target: "kdj_ui_trace", %event, %detail, "webview trace");
+}
+
 #[tauri::command]
 pub async fn playback_state(
     player: tauri::State<'_, DesktopPlayerHandle>,
