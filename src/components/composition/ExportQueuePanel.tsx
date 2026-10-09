@@ -8,8 +8,10 @@ import { visualizerExportActive, visualizerExportStartable } from "../../lib/vis
 import { useWorkshopStore } from "../../stores/workshopStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import type { CompositionProject, WorkshopJob } from "../../types/workshop";
+import { useWorkshopExportCovers } from "../../lib/useTaskCovers";
 import { Button, InlineNotice } from "../common";
-import { QueueCover, QueueEntry, QueueFrame, QueueList, QueueOverview } from "../queue/QueuePrimitives";
+import { TaskCoverStack } from "../common/TaskCover";
+import { QueueEntry, QueueFrame, QueueList, QueueOverview } from "../queue/QueuePrimitives";
 import { VisualizerExportTasks } from "./VisualizerExportTasks";
 import "./ExportQueuePanel.css";
 
@@ -23,6 +25,15 @@ const cancelable = (job: WorkshopJob) => ["queued", "rendering", "validating"].i
 const exported = (job: WorkshopJob | undefined) => job?.phase === "complete" || job?.phase === "import_failed";
 const fail = (error: unknown) => useWorkshopStore.setState({ error: error instanceof Error ? error.message : String(error) });
 
+/**
+ * The picture of a mixing-editor export: the finished file once it is in the library, and until
+ * then the sources it is made of, as a stack.
+ */
+function WorkshopExportCover({ project, job }: { project?: CompositionProject; job?: WorkshopJob }) {
+  const { covers, more } = useWorkshopExportCovers(project, job);
+  return <TaskCoverStack covers={covers} more={more} owner={job?.id ?? project?.id ?? ""} kind="mix" />;
+}
+
 function WorkshopExportRow({ project, job, order, canStart, history = false }: {
   project?: CompositionProject; job?: WorkshopJob; order: number; canStart: boolean; history?: boolean;
 }) {
@@ -34,9 +45,10 @@ function WorkshopExportRow({ project, job, order, canStart, history = false }: {
   const snapshotProject = project && (!job || job.revision === project.revision) ? project : undefined;
   const video = job?.path ? /\.mp4$/i.test(job.path) : (project?.output.format ?? "mp4") === "mp4";
   const directory = job?.path ? job.path.replace(/[\\/][^\\/]*$/, "") : project?.output.directory || "";
-  return <QueueEntry order={String(order)} title={title} subtitle="VJ 剪辑" state={state}
+  return <QueueEntry data-task-id={job?.id ?? project?.id} order={String(order)} title={title} subtitle="VJ 剪辑" state={state}
     status={job ? phases[job.phase] ?? job.phase : "待导出"}
-    percent={rendering ? formatPercent(job.progress) : undefined} cover={<QueueCover artwork="" video={video} />}
+    percent={rendering ? formatPercent(job.progress) : undefined} progress={rendering ? job.progress : undefined}
+    cover={<WorkshopExportCover project={project} job={job} />}
     metadata={<>
       {snapshotProject && <span className="kd-download-task-quality kd-mono">
         {video ? <Video size={10} /> : <Music2 size={10} />}
@@ -62,7 +74,6 @@ function WorkshopExportRow({ project, job, order, canStart, history = false }: {
       {job?.path && !running && <Button variant="ghost" size="sm" iconOnly title={`打开所在文件夹：${job.path}`} aria-label={`打开所在文件夹 ${title}`}
         onClick={() => void getBridge().revealPath(job.path).catch(fail)}><FolderOpen size={12} /></Button>}
     </>}>
-    {rendering && <progress className="kd-export-task-progress" max={1} value={job.progress} aria-label={`${title} 导出进度`} />}
     {!history && job?.detail && <div className="kd-export-task-detail">{job.detail}</div>}
     {job?.error && <div className="kd-download-task-error" role="status">{job.error}</div>}
   </QueueEntry>;
@@ -110,10 +121,11 @@ export function ExportQueuePanel({ history = false }: { history?: boolean }) {
     { count: pendingCount, label: "待开始", tone: "queued" },
     { count: failedCount, label: "失败", tone: "failed" },
   ].filter(fact => fact.count > 0);
+  const finishedCount = history ? visibleJobs.length + visibleVisualizerTasks.length : 0;
   const canStart = !batchSubmitting && !canceling && (startableIds.length > 0 || visibleVisualizerTasks.some(visualizerExportStartable));
   const canCancel = !canceling && (batchSubmitting || visibleJobs.some(cancelable) || visibleVisualizerTasks.some(visualizerExportActive));
   return <QueueFrame className="kd-export-page">
-    {!history && <QueueOverview facts={facts} total={pending.length + visibleJobs.length + visibleVisualizerTasks.length} canStart={canStart}
+    {!history && <section className="kd-download-prefs" aria-label="导出队列概览"><QueueOverview facts={facts} total={pending.length + visibleJobs.length + visibleVisualizerTasks.length} canStart={canStart}
       startTitle="开始待导出任务并重试失败任务" onStart={() => {
         if (visibleVisualizerTasks.some(visualizerExportStartable)) useVisualizerExportStore.getState().start();
         void useWorkshopStore.getState().exportAll(undefined, startableIds).catch(fail);
@@ -128,7 +140,16 @@ export function ExportQueuePanel({ history = false }: { history?: boolean }) {
           const errors = results.filter(result => result.status === "rejected");
           if (errors.length) fail(errors.map(result => String(result.reason)).join("；"));
         }).finally(() => setCanceling(false));
-      }} />}
+      }} /></section>}
+    {/* The finished page opens with its count where the other pages have their overview, so the
+        first row starts at the same height on all four. */}
+    {history && <section className="kd-download-prefs kd-download-overview" aria-label="导出成品概览">
+      <div className="kd-download-summary" aria-live="polite">
+        {finishedCount > 0 && <span className="kd-download-summary-fact" data-tone="finished">
+          <strong>{finishedCount}</strong><span>成品</span>
+        </span>}
+      </div>
+    </section>}
     <InlineNotice text={error} onDismiss={() => useWorkshopStore.setState({ error: "" })} block />
     <InlineNotice text={visualizerError} onDismiss={() => useVisualizerExportStore.setState({ error: "" })} block />
     <QueueList ref={scrollRef} onScroll={event => {

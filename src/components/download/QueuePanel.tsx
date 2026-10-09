@@ -17,7 +17,7 @@ import { copyText } from "../../lib/copyText";
 import { copyShareContent, remoteArtwork } from "../../lib/shareClipboard";
 import { formatShareText, platformShareLink } from "../../lib/shareLink";
 import { useSharePrefs } from "../../lib/sharePrefs";
-import { folderName, formatDate, formatPercent, thumbUrl } from "../../lib/format";
+import { folderName, formatDate, formatPercent } from "../../lib/format";
 import { SEARCH_QUEUE_DROP_ATTR } from "../../lib/folderDrop";
 import {
   enqueueSearchQueuePayload,
@@ -32,8 +32,11 @@ import { useDownloadStore } from "../../stores/downloadStore";
 import { useTaskPanelStore } from "../../stores/taskPanelStore";
 import { useFfmpegStore } from "../../stores/ffmpegStore";
 import type { DownloadTask, Quality, TaskPhase, TaskState } from "../../types";
+import { taskCoverKind } from "../../lib/taskCovers";
+import { useDownloadTaskCovers } from "../../lib/useTaskCovers";
 import { Button, ContextMenu, InlineNotice } from "../common";
-import { QueueChoice, QueueCover, QueueEntry, QueueFrame, QueueList, QueueOverview } from "../queue/QueuePrimitives";
+import { TaskCover } from "../common/TaskCover";
+import { QueueChoice, QueueEntry, QueueFrame, QueueList, QueueOverview } from "../queue/QueuePrimitives";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 import { PlatformMark } from "./PlatformMark";
 
@@ -77,11 +80,13 @@ const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
 const AUDIO_QUALITIES: Quality[] = ["flac", "320", "128"];
 
 /**
- * 队列可能一次塞进几百首，只让滚动视口内的封面进入 DOM。
- * 固定尺寸外框始终保留，因此图片挂载/卸载不会推动文字或滚动位置。
+ * The cover of a download, the same from the queue to the history: the picture it was searched
+ * with, then the library's picture of the imported file, then the platform's thumbnail. The list
+ * of addresses only changes with the fields it is derived from, so the progress ticks that
+ * re-render the row leave the loaded picture alone.
  */
 function QueueTaskCover({ task }: { task: DownloadTask }) {
-  return <QueueCover artwork={task.cover?.trim() ? thumbUrl(task.cover, 96) : ""} video={task.kind === "video"} />;
+  return <TaskCover urls={useDownloadTaskCovers(task)} owner={task.id} kind={taskCoverKind({ kind: "download", task })} />;
 }
 
 /**
@@ -334,6 +339,7 @@ function QueueRow({
 
   return (
     <QueueEntry
+      data-task-id={task.id}
       order={order}
       title={task.title}
       titleTooltip={`${task.title} — ${task.artist}`}
@@ -343,6 +349,7 @@ function QueueRow({
       stateTitle={stateTitle}
       missing={missing}
       percent={showPercent ? formatPercent(task.progress) : undefined}
+      progress={showPercent ? task.progress : undefined}
       cover={<QueueTaskCover task={task} />}
       onContextMenu={(event) => {
         event.preventDefault();

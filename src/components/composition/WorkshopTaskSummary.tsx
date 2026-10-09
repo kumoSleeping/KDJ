@@ -1,8 +1,9 @@
 import { memo } from "react";
 import { MarqueeText } from "../common/MarqueeText";
 import { Layers2 } from "lucide-react";
-import { QueueCover } from "../queue/QueuePrimitives";
-import { api } from "../../lib/api";
+import { TaskCover } from "../common/TaskCover";
+import { workshopSourceCover } from "../../lib/taskCovers";
+import { appCoverAddresses } from "../../lib/useTaskCovers";
 import { clipDuration, formatTime, projectDuration, isImageSource, isVisualSource, layerSources, layerTitle } from "../../lib/workshop";
 import type { CompositionProject, WorkshopLayer } from "../../types/workshop";
 
@@ -55,7 +56,7 @@ export const WorkshopTaskSummary = memo(function WorkshopTaskSummary({ project: 
         const end = Math.max(start, ...clips.map(c => c.start_ms + clipDuration(c)));
         const gains = [...new Set(clips.map(c => c.sound.muted ? 0 : Math.round(c.sound.gain * 100)))];
         return <div className="vj-task-media" key={layer.id}>
-          <QueueCover artwork={source.track_id > 0 ? api.coverUrl(source.track_id) : api.workshopFrameUrl(p.id, source.id, 0)} video={source.video} />
+          <TaskCover urls={workshopSourceCover(p.id, source, appCoverAddresses)} owner={source.id} kind={isVisualSource(source) ? "video" : "song"} />
           <div className="vj-task-media-info">
             <span className="vj-task-media-title" title={sources.map(s => s.path).join(" / ")}>{layerTitle(p, layer)}</span>
             <small>{clips.length > 0 && clips.every(c => c.picture.subtitle) ? "字幕" : sources.length > 1 ? `${sources.length} 个素材` : source.kind === "gif" ? "GIF" : isImageSource(source) ? "图片" : source.video ? "视频" : "音频"} · {clips.length} 段{sources.some(s => s.audio) && gains.length ? ` · 音量 ${gains.join(" / ")}%` : ""}</small>

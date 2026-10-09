@@ -1,0 +1,6 @@
+/* Sakura98: a row's actions are raised keys, taller than the default theme's icon buttons. They
+   keep a little air above the state that sits under them. */
+:root[data-theme-pack="sakulaptop98"] .kd-download-task-actions {
+  margin-top: -0.12rem;
+  margin-bottom: 0.1rem;
+}
