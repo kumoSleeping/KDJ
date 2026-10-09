@@ -1,0 +1,128 @@
+/* The drawer hangs from the bottom edge of the list's toolbar and covers the right of the list.
+   The host only clips what is above that edge, so the sheet appears from behind it. */
+.kd-drawer-host {
+  position: absolute;
+  z-index: 30;
+  top: var(--kd-work-rail-h);
+  right: 0;
+  bottom: 0;
+  width: min(var(--kd-right, 25rem), 45%);
+  min-width: min(17rem, 100%);
+  pointer-events: none;
+  clip-path: inset(0 0 -4rem -4rem);
+}
+.kd-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  /* Never lower than the top of 曲目信息 when that is up (see --kd-info-lift). */
+  height: min(var(--kd-drawer-extent), calc(100% - var(--kd-info-lift, 0px)));
+  min-height: min(12rem, 100%);
+  border-bottom-left-radius: 14px;
+  /* On a dark list a shadow alone does not lift the sheet; it is also a shade lighter. */
+  background: color-mix(in srgb, var(--kd-text) 4%, var(--kd-panel));
+  /* The edge of a surface that floats over the list: a soft drop, no drawn line. */
+  box-shadow: 0 22px 50px -12px rgb(0 0 0 / 0.72), 0 2px 12px -2px rgb(0 0 0 / 0.5);
+  color: var(--kd-text);
+  overflow: hidden;
+  pointer-events: auto;
+  will-change: transform;
+  transition: height 380ms cubic-bezier(0.22, 0.9, 0.26, 1);
+  animation: kd-drawer-down 520ms both;
+}
+.kd-drawer[data-extent="two-thirds"] { --kd-drawer-extent: 66.667%; }
+.kd-drawer[data-extent="full"] { --kd-drawer-extent: 100%; border-bottom-left-radius: 0; }
+:root[data-theme="light"] .kd-drawer {
+  background: var(--kd-panel);
+  box-shadow: 0 18px 44px -16px rgb(30 34 44 / 0.26), 0 2px 10px -2px rgb(30 34 44 / 0.1);
+}
+.kd-drawer[data-leaving] { animation: kd-drawer-up 300ms cubic-bezier(0.5, 0, 0.9, 0.4) both; }
+/* Pulled down fast, it reaches the end, gives a little and settles: the top stays behind the
+   toolbar the whole time, only the bottom edge moves. */
+@keyframes kd-drawer-down {
+  0% { transform: translateY(-100%); animation-timing-function: cubic-bezier(0.2, 0.75, 0.3, 1); }
+  64% { transform: translateY(0); animation-timing-function: cubic-bezier(0.3, 0, 0.5, 1); }
+  82% { transform: translateY(-7px); animation-timing-function: cubic-bezier(0.4, 0, 0.4, 1); }
+  100% { transform: translateY(0); }
+}
+@keyframes kd-drawer-up {
+  from { transform: translateY(0); }
+  to { transform: translateY(-100%); }
+}
+/* What is written on the sheet arrives a moment after the sheet itself. */
+.kd-drawer-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  animation: kd-drawer-content 420ms cubic-bezier(0.22, 0.9, 0.26, 1) 90ms both;
+}
+.kd-drawer[data-leaving] > .kd-drawer-content { animation: none; }
+@keyframes kd-drawer-content {
+  from { opacity: 0; transform: translateY(-14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.kd-drawer-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.kd-drawer-resize {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 5px;
+  cursor: col-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-drawer, .kd-drawer[data-leaving] { animation-duration: 1ms; transition: none; }
+  .kd-drawer-content { animation: none; }
+}
+
+/* ---- What the apps put on the sheet. The sheet is the only surface: a body brings no frame,
+   no head and no background of its own. ---- */
+.kd-drawer-body > * { min-width: 0; }
+.kd-drawer-body .kd-panel { border: 0; box-shadow: none; background: transparent; }
+.kd-drawer-body > .kd-split-aside-body { flex: 1 1 auto; min-height: 0; padding: 0 1.1rem 1rem; }
+
+/* 歌词 */
+.kd-drawer-lyrics { flex: 1 1 auto; height: auto; min-height: 0; gap: 0; padding: 0 0.35rem 0.5rem; }
+.kd-drawer-lyrics > .kd-detail-lyrics-panel > .kd-panel-head { display: none; }
+
+/* 下载与导出 */
+.kd-drawer-tasks { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding: 0 0.35rem 0.5rem; }
+
+/* 设置 */
+.kd-drawer-settings { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.kd-drawer-settings > .kd-preferences { flex: 1 1 auto; min-height: 0; }
+.kd-drawer-settings > .kd-preferences > .kd-djp { padding: 0.25rem 1.1rem 1.25rem; }
+
+/* 可视化配置、编辑 Meta */
+.kd-drawer-body > .kd-viz-dock { background: transparent; }
+.kd-drawer-body > .kd-meta-editor { flex: 1 1 auto; min-height: 0; }
+
+/* Sakura98: the sheet is a 98 window face, square and bevelled, with the pack's hard shadow.
+   Kept here so it does not depend on the installed copy of the pack. */
+:root[data-theme-pack="sakulaptop98"] .kd-drawer {
+  border-radius: 0;
+  background: var(--s98-face-hi, var(--kd-panel));
+  box-shadow: var(--s98-raised), 4px 6px 0 -1px rgb(120 40 70 / 0.22);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drawer-host { clip-path: inset(0 0 -1rem -1rem); }
+:root[data-theme-pack="sakulaptop98"] .kd-title-tabs { padding: 0.8rem 0.7rem 0.5rem 1rem; }
+
+/* No rules between the groups of a drawer: spacing and the group titles separate them. */
+.kd-drawer .kd-drawer-body :is(.kd-download-prefs, .kd-download-defaults, .kd-meta-editor-foot, .kd-viz-bar, .kd-viz-group) {
+  border-top: 0;
+  border-bottom: 0;
+}
+.kd-drawer .kd-drawer-body .kd-viz-group + .kd-viz-group { margin-top: 0.4rem; }
+:root:not([data-theme-pack]) .kd-drawer .kd-drawer-body .kd-panel-head { border-bottom: 0; }

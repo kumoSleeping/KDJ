@@ -2,13 +2,15 @@ import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { AsideHead } from "../chrome/AsideHead";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
+import { useDrawer } from "../drawer/Drawer";
 import "./VisualizerDock.css";
 
 const VisualizerStudioPanel = lazy(() => import("./VisualizerStudioPanel"));
 
 /**
- * The visualizer configuration as one app of the right column: the song it belongs to, the way
- * out, and either the whole editor or, while the floating picture is the editor, its controls.
+ * The visualizer configuration as the body of a drawer (or of the phone's sheet, where it also
+ * draws its own head): either the whole editor or, while the floating picture is the editor,
+ * its controls.
  */
 export function VisualizerDock() {
   const openTrack = useVisualizerStudioStore(state => state.track);
@@ -37,14 +39,15 @@ export function VisualizerDock() {
     const scrolled = live.querySelector(".kd-viz-settings"), copy = still.querySelector(".kd-viz-settings");
     if (scrolled && copy) copy.scrollTop = scrolled.scrollTop;
   }), []);
+  const inDrawer = useDrawer() !== null;
   const { track, inlineSettings } = shown.current;
   if (!track) return null;
   const name = track.title || track.filename;
   return <div className="kd-viz-dock">
-    <AsideHead title="可视化配置" tools={<>
+    {!inDrawer && <AsideHead title="可视化配置" tools={<>
       <span className="kd-viz-dock-song" title={track.artist ? `${name} · ${track.artist}` : name}>{name}</span>
       <button type="button" className="kd-aside-head-close" aria-label="关闭可视化配置" title="关闭可视化配置" onClick={requestClose}><X size={15} /></button>
-    </>} />
+    </>} />}
     <div className="kd-viz-dock-body">
       {inlineSettings ? <>
         <div className="kd-viz-panel kd-viz-settings-host" ref={setHost} />

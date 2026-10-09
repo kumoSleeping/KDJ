@@ -1,16 +1,18 @@
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { formatDuration } from "../../lib/format";
-import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
+import { getPlayerSessionState, subscribePlayerSession } from "../../lib/playerSession";
 import {
   getSongPreviewState,
   sourceKey,
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
-import { streamCoverUrl, streamMeta, streamTrackById } from "../../lib/streamTrack";
+import { useCoverLoad } from "../../lib/coverLoad";
+import { streamCoverUrls, streamMeta, streamTrackById } from "../../lib/streamTrack";
 import type { Track } from "../../types";
 import { InlineNotice } from "../common";
+import { MarqueeText } from "../common/MarqueeText";
 import { DetailPanelStack } from "../library/DetailPanelStack";
-import { CoverImage } from "../common/VinylPlaceholder";
+import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
 import { OnlineTrackCacheFacts } from "./OnlineTrackCacheFacts";
@@ -42,10 +44,11 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
   renderPanels?(information: ReactNode): ReactNode;
 }) {
   const isPreview = mode === "preview";
+  // Nothing here shows the position, so the panel does not follow the player clock.
   const session = useSyncExternalStore(
     subscribePlayerSession,
-    getPlayerSession,
-    getPlayerSession,
+    getPlayerSessionState,
+    getPlayerSessionState,
   );
   const preview = useSyncExternalStore(
     subscribeSongPreviewState,
@@ -73,7 +76,8 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
 
   const errorText =
     actionError || matchingPreview?.error || (active ? session.error : "");
-  const cover = streamCoverUrl(track);
+  // The small rendition the player-bar disc shows, then the picture as the provider gave it.
+  const cover = useCoverLoad(track.id, streamCoverUrls(track));
 
   const information = (
       <div
@@ -86,28 +90,31 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
             style={{ width: 88, height: 88 }}
             aria-label="在线曲目封面"
           >
-            <CoverImage
-              src={cover}
-              alt=""
-              className="kd-stream-detail-cover-image"
-              loading="eager"
-            />
+            {cover.face === "missing" ? <VinylPlaceholder /> : null}
+            {/* No referrer, like every other online cover: image hosts that check where a
+                request comes from refuse the app's own origin. */}
+            {cover.src ? (
+              <img
+                key={track.id}
+                ref={cover.imageRef}
+                src={cover.src}
+                alt=""
+                className="kd-stream-detail-cover-image"
+                loading="eager"
+                draggable={false}
+                referrerPolicy="no-referrer"
+                style={cover.face === "missing" ? { display: "none" } : undefined}
+                onLoad={cover.onLoad}
+                onError={cover.onError}
+              />
+            ) : null}
           </div>
         </div>
         <div className="kd-track-detail-summary" style={{ minWidth: 0 }}>
-          <div
-            className="kd-truncate"
-            style={{ fontWeight: 700, fontSize: "var(--kd-size-lg)" }}
-            title={track.title || track.filename}
-          >
-            {track.title || track.filename}
-          </div>
-          <div className="kd-truncate kd-muted" title={track.artist}>
-            {track.artist || "未知艺术家"}
-          </div>
-          <div className="kd-truncate kd-faint" title={track.album}>
-            {track.album || "—"}
-          </div>
+          {/* Like a library track: what does not fit scrolls instead of ending in an ellipsis. */}
+          <MarqueeText className="kd-track-detail-title" text={track.title || track.filename} />
+          <MarqueeText className="kd-muted" text={track.artist || "未知艺术家"} />
+          <MarqueeText className="kd-faint" text={track.album || "—"} />
           <div
             className="kd-row kd-faint kd-track-detail-facts"
             style={{

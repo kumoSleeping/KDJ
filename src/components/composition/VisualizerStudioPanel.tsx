@@ -27,7 +27,9 @@ import { useAppStore } from "../../stores/appStore";
 import { usePreviewFullscreen } from "../../lib/usePreviewFullscreen";
 import { applyVisualizerPreferences, loadVisualizerPreferences, saveVisualizerPreferences, switchVisualizerContentLayout } from "../../lib/visualizerStudioPreferences";
 import { EditorSeparator, EditorTabs } from "../workspace/EditorChrome";
-import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
+import { SlidePages } from "../drawer/SlidePages";
+import { useDrawer } from "../drawer/Drawer";
+import { studioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
 import "./VisualizerStudioPanel.css";
 
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
@@ -36,6 +38,7 @@ const ratio = (v: number) => `${Math.round(v * 100)}%`;
 const signedPercent = (v: number) => `${v > 0 ? "+" : ""}${Number(v.toFixed(1))}%`;
 const times = (v: number) => `×${v.toFixed(2)}`;
 const resolutions = [["1920x1080", "1080p · 16:9"], ["1280x720", "720p · 16:9"], ["1920x840", "1920 × 840 · 超宽"], ["2560x1080", "2560 × 1080 · 超宽"]] as const;
+const studioTabIds = studioTabs.map(tab => tab.id);
 const frameRates = [{ value: 30, label: "30 fps" }, { value: 60, label: "60 fps" }] as const;
 function Toggle({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
   return <button type="button" className="kd-djp-toggle kd-viz-toggle" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} onClick={() => onChange(!checked)}>
@@ -61,13 +64,6 @@ function ImageChoice({ blob, label, action, disabled, onPick, onRemove }: { blob
   </div>;
 }
 
-const studioTabs = [{ id: "scene", label: "画面" }, { id: "pictures", label: "图片" }, { id: "text", label: "文字" }, { id: "output", label: "导出" }] as const;
-type StudioTab = typeof studioTabs[number]["id"];
-const STUDIO_TAB_KEY = "kd-visualizer-studio-tab";
-function savedStudioTab(): StudioTab {
-  const saved = readLocalStorage(STUDIO_TAB_KEY);
-  return studioTabs.find(tab => tab.id === saved)?.id ?? "scene";
-}
 
 /** Playback ticks update just the overlay, not every settings control in Studio. */
 function StudioPosition({ position, scrub, refresh, children }: {
@@ -321,7 +317,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     if (target.width !== width) target.width = width;
     if (target.height !== height) target.height = height;
     let frame = 0, nextDraw = -Infinity, lastTime = NaN, visible = true;
-    // Another app of the right column is in front (RightDock keeps this one mounted): paint
+    // Under an ancestor marked `data-covered` the picture is hidden behind something else: paint
     // nothing meanwhile, and catch up once when the picture is uncovered.
     let owed = false;
     const covered = () => { const yes = target.closest("[data-covered]") !== null; if (yes) owed = true; return yes; };
@@ -519,10 +515,11 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     finally { setLoadingLyrics(false); }
   }
 
-  const [tab, setTab] = useState(savedStudioTab);
+  const tab = useStudioTab(state => state.tab);
+  const selectTab = useStudioTab(state => state.setTab);
   const tabPanelId = useId();
-  // A view preference only; it is never part of a visualizer project.
-  const selectTab = (next: StudioTab) => { setTab(next); writeLocalStorageSoon(STUDIO_TAB_KEY, next); };
+  // In a drawer the sections are the drawer's title; elsewhere the inspector carries its own tabs.
+  const inDrawer = useDrawer() !== null || !!settingsTarget?.closest(".kd-drawer");
   const lyricsVisible = hasLyrics && p?.lyrics.mode !== "off";
   const togglePreviewLyrics = () => {
     if (!hasLyrics) void loadSongLyrics();
@@ -556,7 +553,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   </Group>;
   const moveLeftContent = (patch: Partial<NonNullable<VisualizerProject["leftContent"]>>) => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), ...patch }; });
   const inspector = <aside className="kd-viz-inspector" aria-label="可视化设置">
-    <EditorTabs<StudioTab> label="可视化设置分区" tabs={studioTabs} value={tab} onChange={selectTab} panelId={tabPanelId} />
+    {!inDrawer && <EditorTabs<StudioTab> label="可视化设置分区" tabs={studioTabs} value={tab} onChange={selectTab} panelId={tabPanelId} />}
+    <SlidePages page={tab} order={studioTabIds}>
     <fieldset id={tabPanelId} role="tabpanel" className="kd-viz-settings kd-scroll" disabled={busy}>{p && draft && <>
       {tab === "scene" && <>
         <Group title="画面">
@@ -611,6 +609,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
         <Toggle label="水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
       </Group>}
     </>}</fieldset>
+    </SlidePages>
   </aside>;
 
   return <section ref={panel} tabIndex={-1} className="kd-viz-panel" data-inline={inline || undefined} data-floating={floating || undefined} aria-label="音频可视化编辑器" onKeyDown={e => {

@@ -60,6 +60,9 @@
 ## UI Visual Consistency
 
 - Selected controls use theme-red text/icons without added selection backgrounds, borders, shadows, or decorative bars. Keep keyboard focus indicators distinct from selection.
+- Do not draw divider lines. Separate groups, rows, toolbars, headers and adjacent regions with spacing, alignment, type weight or a change of surface tone — never with hairlines, rules, `border-top`/`border-bottom` separators or pseudo-element lines between them. A line is allowed only where it is the edge of a surface that floats over other content or a control's own outline (an input's focus state, a table's column resize handle).
+- Never adopt Ant Design or another component library's look or components; the UI is hand-written to this project's own design.
 - Use compact icon/text actions; do not introduce solid red action blocks or rectangular red slider thumbs.
 - Do not impose a global zero-radius rule or inherit another project's visual style. Use restrained radii appropriate to each component.
+- Side apps on a wide window (lyrics, downloads/exports, settings, visualizer configuration, Meta editor, tips, previews) are apps of the one drawer over the list. Describe a new one with `DrawerSpec` (`src/components/drawer/drawerSchema.ts`) and let `DrawerHost` draw its title, close button, extent and motion; never add another right-hand column, floating panel or hand-made head for such a surface. A panel with sibling pages uses `TitleTabs` for its title row and `SlidePages` for the sideways switch instead of a new tab strip. Rules and a worked example: `docs/drawer-schema.md`.
 - Local video and workshop previews must share `FloatingVideoControls`, `FloatingVideoScrub`, and the `kd-pip-float` styles. Controls overlay the picture; do not create separate white header/footer strips.

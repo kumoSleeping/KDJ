@@ -18,7 +18,12 @@ import {
   type FloatResizeEdge,
   type FloatViewport,
 } from "../../lib/floatingMediaBox";
-import { floatingMediaMotion, type FloatingMediaPresenter } from "../../lib/floatingMediaMotion";
+import {
+  floatChromeElement,
+  floatingMediaMotion,
+  measureFloatViewport,
+  type FloatingMediaPresenter,
+} from "../../lib/floatingMediaMotion";
 import { useFloatingMediaBox } from "../../lib/floatingMediaStore";
 import "./FloatingMediaWindow.css";
 
@@ -75,16 +80,29 @@ export interface FloatingMediaWindow {
   preserve(): void;
 }
 
-function useViewport(): FloatViewport {
-  const [viewport, setViewport] = useState<FloatViewport>(() => ({ width: window.innerWidth, height: window.innerHeight }));
+/**
+ * The viewport and the bottom of the top chrome above it. Both are measured again when the
+ * window comes on screen: a host that is always mounted renders before the chrome exists.
+ */
+function useViewport(shown: boolean): FloatViewport {
+  const [viewport, setViewport] = useState<FloatViewport>(measureFloatViewport);
   useEffect(() => {
-    const measure = () => setViewport(previous =>
-      previous.width === window.innerWidth && previous.height === window.innerHeight
-        ? previous : { width: window.innerWidth, height: window.innerHeight });
+    const measure = () => setViewport(previous => {
+      const next = measureFloatViewport();
+      return previous.width === next.width && previous.height === next.height && previous.top === next.top
+        ? previous : next;
+    });
     measure();
     window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, []);
+    // A theme pack or a platform class can change the chrome's height without a window resize.
+    const chrome = floatChromeElement();
+    const resized = chrome && typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    if (chrome) resized?.observe(chrome);
+    return () => {
+      window.removeEventListener("resize", measure);
+      resized?.disconnect();
+    };
+  }, [shown]);
   return viewport;
 }
 
@@ -95,7 +113,7 @@ function useViewport(): FloatViewport {
  */
 export function useFloatingMediaWindow(options: FloatingMediaWindowOptions): FloatingMediaWindow {
   const { shown, shared, content } = options;
-  const viewport = useViewport();
+  const viewport = useViewport(shown);
   const sharedRect = useFloatingMediaBox(state => state.rect);
   const [privateRect, setPrivateRect] = useState<FloatRect | null>(null);
   const remembered = shared ? sharedRect : privateRect;

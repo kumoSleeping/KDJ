@@ -2,6 +2,7 @@ import { isCompositionPreview } from "../../lib/streamTrack";
 import { MarqueeText } from "../common/MarqueeText";
 import { PlaybackModeButton, MODE_UI } from "./PlaybackModeButton";
 import {
+  memo,
   useCallback,
   useEffect,
   useRef,
@@ -182,6 +183,9 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
 import { NowPlayingInfoHost } from "./NowPlayingInfo";
+import { useDeckSongSwap } from "./deckSongSwap";
+import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
+import "./DeckSongSwap.css";
 import { PlayerVolume } from "./PlayerVolume";
 import { tracePlayback, watchMainThread } from "../../lib/playbackTrace";
 import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
@@ -397,6 +401,23 @@ function viewForTrack(track: Track): PlayerDeckView {
 }
 
 /**
+ * The bar re-renders on every tick of the player clock. These parts of it read their own stores
+ * and take props that do not change with the clock, so they sit out those renders.
+ */
+const BarLyricsHost = memo(LyricsHost);
+const BarInfoHost = memo(NowPlayingInfoHost);
+const BarModeButton = memo(PlaybackModeButton);
+const BarEq = memo(PlayerEq);
+const showToast = (text: string) => {
+  useToastStore.getState().show(text);
+};
+
+/** A cover that is already loaded when its record appears (fetched during the exit) arrives with it. */
+function revealLoadedCover(image: HTMLImageElement | null): void {
+  if (image?.complete && image.naturalWidth > 0) image.style.opacity = "1";
+}
+
+/**
  * 播放条左侧的当前曲目卡片，点开曲目信息；拖入操作映射到实际通道。
  * 右侧不再是下一首：那里是 EQ / 播放控制，拖入仍替换下一首。
  */
@@ -409,7 +430,6 @@ function PlayerDeck({
   transitioning,
   dropActive,
   detailEnabled,
-  expanded,
   resolving = false,
   failed = false,
   onOpen,
@@ -425,8 +445,6 @@ function PlayerDeck({
   transitioning: boolean;
   dropActive: boolean;
   detailEnabled: boolean;
-  /** 曲目信息层是否已展开。 */
-  expanded?: boolean;
   /** 在线直链解析中：封面标题已就位，媒体尚未可播。 */
   resolving?: boolean;
   failed?: boolean;
@@ -435,8 +453,15 @@ function PlayerDeck({
   onDragLeave(event: React.DragEvent<HTMLElement>): void;
   onDrop(event: React.DragEvent<HTMLElement>): void;
 }) {
-  const [coverFailed, setCoverFailed] = useState(false);
-  useEffect(() => setCoverFailed(false), [view?.key]);
+  // The card belongs to the playing song: on a change it shows the old song until that has been
+  // swiped away, then the new one arrives (see useDeckSongSwap).
+  const swap = useDeckSongSwap(view, `player-deck-${side}`);
+  // 曲目信息 rises from the bar's top edge (see NowPlayingInfoHost). The card reads whether it
+  // is up itself, so the panel coming and going re-renders the card and not the whole bar.
+  const expanded = useNowPlayingInfo(nowPlayingInfoVisible);
+  const shown = swap.view;
+  const [failedCover, setFailedCover] = useState("");
+  const coverFailed = Boolean(shown?.cover) && failedCover === shown?.cover;
   // 接歌途中保留当前/下一首的身份，交接完成后更新曲目。
   const stateLabel = failed ? "播放失败" : resolving ? "加载中" : active ? "正在播放" : "下一首";
   return (
@@ -448,6 +473,8 @@ function PlayerDeck({
       data-resolving={resolving ? "true" : undefined}
       data-empty={!view ? "true" : undefined}
       data-drop-active={dropActive ? "true" : undefined}
+      data-swap={swap.phase ?? undefined}
+      style={swap.style}
       {...{ [TRACK_DECK_DROP_TARGET_ATTR]: String(physicalSide) }}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -476,24 +503,28 @@ function PlayerDeck({
         }
         onClick={onOpen}
       >
+        {/* The swipe moves this box; the record inside keeps its own spin through it. */}
         <span className="kd-player-disc" aria-hidden="true">
           <span className="kd-player-disc-record" data-spinning={spinning ? "true" : undefined}>
-            {view?.cover && !coverFailed ? (
+            {shown?.cover && !coverFailed ? (
               <img
-                src={view.cover}
+                // One element per song: a new record never arrives wearing the old cover.
+                key={swap.song}
+                ref={revealLoadedCover}
+                src={shown.cover}
                 alt=""
                 referrerPolicy="no-referrer"
                 onError={(event) => {
                   event.currentTarget.style.opacity = "0";
-                  setCoverFailed(true);
+                  setFailedCover(shown.cover);
                 }}
                 onLoad={(event) => {
                   event.currentTarget.style.opacity = "1";
                 }}
               />
-            ) : view?.video ? (
+            ) : shown?.video ? (
               <Clapperboard size={15} />
-            ) : view ? (
+            ) : shown ? (
               <Disc3 size={17} />
             ) : (
               <Music2 size={15} />
@@ -502,8 +533,8 @@ function PlayerDeck({
         </span>
         <span className="kd-player-deck-copy">
           <span className="kd-player-deck-state">{stateLabel}</span>
-          <MarqueeText className="kd-player-title" text={view?.title ?? "等待下一首"} />
-          <MarqueeText className="kd-player-artist" text={view?.subtitle ?? "\u00a0"} />
+          <MarqueeText className="kd-player-title" text={shown?.title ?? "等待下一首"} />
+          <MarqueeText className="kd-player-artist" text={shown?.subtitle ?? "\u00a0"} />
         </span>
       </button>
     </div>
@@ -774,10 +805,13 @@ export function PlayerBar() {
 
   // 当前正主由已挂载的全局波形以可见优先级读取；这里只低优先级预取下一首。
   // 两者若同时冷启动，可见请求会抢先，预测曲不会排在当前曲前面。
+  // The warm-up waits until the song change on screen has left and arrived, so its fetch and
+  // decode stay out of those frames.
+  // 在线后继只保留展示元数据；真正轮到播放时才向平台解析直链。
+  // 否则暂停在一首在线曲目上也会产生用户未发起的平台请求。
   useEffect(() => {
-    prefetchWaveform(predicted);
-    // 在线后继只保留展示元数据；真正轮到播放时才向平台解析直链。
-    // 否则暂停在一首在线曲目上也会产生用户未发起的平台请求。
+    const timer = window.setTimeout(() => prefetchWaveform(predicted), SONG_SWAP_OUT_MS + SONG_SWAP_IN_MS);
+    return () => window.clearTimeout(timer);
   }, [track?.id, predicted?.id]);
   const visualActiveIndexRef = useRef<0 | 1>(deckMemoryRef.current.activeIndex);
   const [djTransition, setDjTransition] = useState(() => djEngine.transitionState());
@@ -4219,8 +4253,6 @@ export function PlayerBar() {
     writeLocalStorageSoon(PLAYER_DECK_MEMORY_KEY, JSON.stringify(memory), 1_000);
   }, [track?.id, position]);
 
-  /** 曲目信息从播放条顶边升起（见 NowPlayingInfoHost）；这里只读它是否在场。 */
-  const infoOpen = useNowPlayingInfo(nowPlayingInfoVisible);
   const lastDeckOpenRef = useRef<{ trackId: number; at: number } | null>(null);
   const openDeck = (view: PlayerDeckView | null) => {
     const deckTrack = view?.track;
@@ -4615,7 +4647,7 @@ export function PlayerBar() {
           事件监听在上面的 effect 里挂到 frontEl 上 */}
       {/* 不再挂隐藏视频实例：播放面板已有可见播放器，双实例会同时解码并
           互相回传 seek，画面就一卡一卡。音频是主时钟，打开详情时再对齐即可。 */}
-      <LyricsHost current={track} playing={playing} allowDesktop={!video} />
+      <BarLyricsHost current={track} playing={playing} allowDesktop={!video} />
 
       <div className="kd-player-leading">
         <PlayerDeck
@@ -4633,7 +4665,6 @@ export function PlayerBar() {
           failed={playbackFailed}
           dropActive={deckDropSide === "left"}
           detailEnabled
-          expanded={infoOpen}
           onOpen={() => openDeck(currentBarView)}
           onDragOver={(event) => deckDragOver(event, "left")}
           onDragLeave={(event) => {
@@ -4642,7 +4673,7 @@ export function PlayerBar() {
           onDrop={(event) => void dropOnDeck(event, "left")}
         />
       </div>
-      <NowPlayingInfoHost trackId={track?.id ?? null} playing={playing} />
+      <BarInfoHost trackId={track?.id ?? null} playing={playing} />
 
       {/* 三颗走带键：上一首 / 播放停止 / 下一首。
           全是裸图标，没有按钮框——一条播放条上摆三个描边方块太吵，
@@ -4817,7 +4848,7 @@ export function PlayerBar() {
 
         <div className="kd-player-transport-side" data-side="right">
 
-        <PlaybackModeButton />
+        <BarModeButton />
         {downloadSource ? (
           <button
             type="button"
@@ -4869,7 +4900,7 @@ export function PlayerBar() {
         onDrop={(event) => void dropOnDeck(event, "right")}
       >
         {/* 旋钮失败只是一条提示，不能改写媒体会话的错误文案。 */}
-        <PlayerEq onError={(text) => useToastStore.getState().show(text)} />
+        <BarEq onError={showToast} />
       </div>
 
       <div className="kd-player-scrub">
@@ -4881,6 +4912,7 @@ export function PlayerBar() {
             className="kd-player-wave"
             renderProfile="release-overview"
             releaseOverviewIntent="player"
+            songSwapMotion
             trackId={pipSession.trackId}
             track={track?.id === pipSession.trackId ? track : undefined}
             position={pipPosition}
@@ -4944,6 +4976,7 @@ export function PlayerBar() {
             className="kd-player-wave"
             renderProfile="release-overview"
             releaseOverviewIntent="player"
+            songSwapMotion
             trackId={displayTrack.id}
             track={displayTrack}
             position={track?.id === displayTrack.id ? position : 0}
@@ -4970,6 +5003,7 @@ export function PlayerBar() {
             className="kd-player-wave"
             renderProfile="release-overview"
             releaseOverviewIntent="player"
+            songSwapMotion
             trackId={track.id}
             track={track}
             position={position}

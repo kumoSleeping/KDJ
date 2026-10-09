@@ -122,11 +122,22 @@ function playerBarInset(): number {
  */
 export function TrackMetaEditorHost() {
   const trackId = useTrackMetaEditor((state) => state.trackId);
-  return trackId === null ? null : <TrackMetaEditorLoader trackId={trackId} />;
+  // A wide main window edits in its drawer instead (see TrackMetaEditorDrawer).
+  const docked = useTrackMetaEditor((state) => state.docked);
+  return trackId === null || docked ? null : <TrackMetaEditorLoader trackId={trackId} />;
+}
+
+/** The editor as the body of a drawer: the drawer writes the title and puts it away. */
+export function TrackMetaEditorDrawer() {
+  const trackId = useTrackMetaEditor((state) => state.trackId);
+  // The drawer keeps a closed app on screen while it rolls up; keep showing what it showed.
+  const shown = useRef(trackId);
+  if (trackId !== null) shown.current = trackId;
+  return shown.current === null ? null : <TrackMetaEditorLoader trackId={shown.current} docked />;
 }
 
 /** Owns the edited track's record: read fresh when the editor opens, replaced by each write. */
-function TrackMetaEditorLoader({ trackId }: { trackId: number }) {
+function TrackMetaEditorLoader({ trackId, docked = false }: { trackId: number; docked?: boolean }) {
   const [loaded, setLoaded] = useState<{ track: Track | null; error: string }>({ track: null, error: "" });
   const revision = useRef(0);
   const shownTrack = useRef<Track | null>(null);
@@ -167,13 +178,15 @@ function TrackMetaEditorLoader({ trackId }: { trackId: number }) {
   }, [trackId]);
   const { track, error } = loaded;
   if (!track && !error) return null;
-  return <TrackMetaEditorWindow track={track} error={error} onUpdated={onUpdated} />;
+  return <TrackMetaEditorWindow track={track} error={error} onUpdated={onUpdated} docked={docked} />;
 }
 
-function TrackMetaEditorWindow({ track, error, onUpdated }: {
+function TrackMetaEditorWindow({ track, error, onUpdated, docked }: {
   track: Track | null;
   error: string;
   onUpdated(track: Track): void;
+  /** In a drawer: only the form, without a window around it. */
+  docked: boolean;
 }) {
   const content = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
@@ -194,6 +207,23 @@ function TrackMetaEditorWindow({ track, error, onUpdated }: {
   useEffect(() => {
     (content.current?.querySelector<HTMLElement>("input.kd-input") ?? frame())?.focus({ preventScroll: true });
   }, [track?.id, request]);
+  const form = (
+      <div
+        ref={content}
+        className="kd-meta-editor"
+        onKeyDown={(event) => {
+          // Escape inside a field belongs to that field (an IME composition, a half-typed value);
+          // it is not also a request to close the window.
+          if (event.key === "Escape" && (event.nativeEvent.isComposing
+            || (event.target as Element).closest("input, textarea, select"))) event.stopPropagation();
+        }}
+      >
+        {track
+          ? <TrackMetaForm key={track.id} track={track} onUpdated={onUpdated} onBusy={setBusy} />
+          : <div className="kd-meta-editor-scroll"><InlineNotice text={error} /></div>}
+      </div>
+  );
+  if (docked) return form;
   return (
     <FloatingPanelWindow
       className="kd-meta-editor-window"
@@ -211,20 +241,7 @@ function TrackMetaEditorWindow({ track, error, onUpdated }: {
       onMoveEnd={rememberPosition}
       onMoveCancel={rememberPosition}
     >
-      <div
-        ref={content}
-        className="kd-meta-editor"
-        onKeyDown={(event) => {
-          // Escape inside a field belongs to that field (an IME composition, a half-typed value);
-          // it is not also a request to close the window.
-          if (event.key === "Escape" && (event.nativeEvent.isComposing
-            || (event.target as Element).closest("input, textarea, select"))) event.stopPropagation();
-        }}
-      >
-        {track
-          ? <TrackMetaForm key={track.id} track={track} onUpdated={onUpdated} onBusy={setBusy} />
-          : <div className="kd-meta-editor-scroll"><InlineNotice text={error} /></div>}
-      </div>
+      {form}
     </FloatingPanelWindow>
   );
 }

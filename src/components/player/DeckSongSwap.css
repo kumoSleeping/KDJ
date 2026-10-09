@@ -1,0 +1,74 @@
+/* The deck card on the song-change clock (src/lib/songSwapMotion.ts; useDeckSongSwap sets the two
+   durations and easings as --kd-swap-*). The card turns over under one upward swipe, like the
+   face of a drum: the old record and its lines tip back over the top while they fade, and the
+   new ones roll up from below and settle, the way 曲目信息 rises out of the same bar. The state
+   label is not the song's and stays where it is.
+
+   The record's box is what moves; the record inside keeps its spin. Only transform and opacity
+   are animated. The lines trail the record by a few tens of ms and still end with it. */
+.kd-player-deck[data-swap="out"] .kd-player-disc {
+  animation: kd-deck-record-out var(--kd-swap-out) var(--kd-swap-out-ease) both;
+}
+.kd-player-deck[data-swap="out"] .kd-player-title {
+  animation: kd-deck-line-out calc(var(--kd-swap-out) - 30ms) var(--kd-swap-out-ease) 30ms both;
+}
+.kd-player-deck[data-swap="out"] .kd-player-artist {
+  animation: kd-deck-line-out calc(var(--kd-swap-out) - 60ms) var(--kd-swap-out-ease) 60ms both;
+}
+/* A song that was still arriving when the next change came goes back the way it came: its
+   entrance runs backwards from where it had got to (--kd-swap-rewind is that moment, counted
+   from the end of the entrance), so nothing jumps and nothing is swiped twice. The keyframes
+   are the entrance's under another name: a running animation whose name stays the same would
+   keep its clock and land at the end of the reversed run at once. */
+.kd-player-deck[data-swap="back"] .kd-player-disc {
+  animation: kd-deck-record-back var(--kd-swap-in) var(--kd-swap-in-ease) var(--kd-swap-rewind, 0ms) reverse both;
+}
+.kd-player-deck[data-swap="back"] .kd-player-title {
+  animation: kd-deck-line-back calc(var(--kd-swap-in) - 45ms) var(--kd-swap-in-ease) var(--kd-swap-rewind, 0ms) reverse both;
+}
+.kd-player-deck[data-swap="back"] .kd-player-artist {
+  animation: kd-deck-line-back calc(var(--kd-swap-in) - 90ms) var(--kd-swap-in-ease) var(--kd-swap-rewind, 0ms) reverse both;
+}
+.kd-player-deck[data-swap="in"] .kd-player-disc {
+  animation: kd-deck-record-in var(--kd-swap-in) var(--kd-swap-in-ease) both;
+}
+.kd-player-deck[data-swap="in"] .kd-player-title {
+  animation: kd-deck-line-in calc(var(--kd-swap-in) - 45ms) var(--kd-swap-in-ease) 45ms both;
+}
+.kd-player-deck[data-swap="in"] .kd-player-artist {
+  animation: kd-deck-line-in calc(var(--kd-swap-in) - 90ms) var(--kd-swap-in-ease) 90ms both;
+}
+@keyframes kd-deck-record-out {
+  from { opacity: 1; transform: perspective(16rem) translateY(0) rotateX(0deg) scale(1); }
+  to { opacity: 0; transform: perspective(16rem) translateY(-56%) rotateX(76deg) scale(0.84); }
+}
+@keyframes kd-deck-record-in {
+  from { opacity: 0; transform: perspective(16rem) translateY(56%) rotateX(-76deg) scale(0.84); }
+  to { opacity: 1; transform: perspective(16rem) translateY(0) rotateX(0deg) scale(1); }
+}
+@keyframes kd-deck-record-back {
+  from { opacity: 0; transform: perspective(16rem) translateY(56%) rotateX(-76deg) scale(0.84); }
+  to { opacity: 1; transform: perspective(16rem) translateY(0) rotateX(0deg) scale(1); }
+}
+/* A line travels half its own height: where the state label sits right above the title (the
+   Sakura pack, the portrait bar) the turning line has faded before it reaches the label. */
+@keyframes kd-deck-line-out {
+  from { opacity: 1; transform: perspective(44rem) translateY(0) rotateX(0deg); }
+  to { opacity: 0; transform: perspective(44rem) translateY(-50%) rotateX(70deg); }
+}
+@keyframes kd-deck-line-in {
+  from { opacity: 0; transform: perspective(44rem) translateY(50%) rotateX(-70deg); }
+  to { opacity: 1; transform: perspective(44rem) translateY(0) rotateX(0deg); }
+}
+@keyframes kd-deck-line-back {
+  from { opacity: 0; transform: perspective(44rem) translateY(50%) rotateX(-70deg); }
+  to { opacity: 1; transform: perspective(44rem) translateY(0) rotateX(0deg); }
+}
+/* useDeckSongSwap does not hold a song back under reduced motion; this covers a preference
+   that changes while a swipe is under way. */
+@media (prefers-reduced-motion: reduce) {
+  .kd-player-deck[data-swap] :is(.kd-player-disc, .kd-player-title, .kd-player-artist) {
+    animation: none;
+    opacity: 1;
+  }
+}

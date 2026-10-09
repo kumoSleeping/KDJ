@@ -7,7 +7,7 @@
 import { api } from "./api";
 import { isEditorWindow } from "./windowRole";
 import { streamRecoveryPolicy } from "./streamRecovery";
-import { thumbUrl } from "./format";
+import { onlineCoverUrls, thumbUrl } from "./format";
 import {
   usesRemotePlaybackSource,
 } from "./playbackTrackSource";
@@ -469,6 +469,11 @@ function notifyStreamMeta(trackId: number): void {
 export function streamCoverUrl(track: Track): string {
   const cover = streamMeta(track)?.cover ?? "";
   return cover ? thumbUrl(cover, 96) : "";
+}
+
+/** Every address that can show an online track's cover, {@link streamCoverUrl} first. */
+export function streamCoverUrls(track: Track): string[] {
+  return onlineCoverUrls(streamMeta(track)?.cover ?? "", 96);
 }
 
 /** 主播放条装 src 时用：在线流优先，否则走曲库音频接口。 */

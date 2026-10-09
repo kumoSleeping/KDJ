@@ -848,7 +848,6 @@ export function NarrowFolderRail({
         <RailContent icon={<Library {...RAIL_ICON} />} label="全部曲目" />
       </button>
       </div>
-      <span className="kd-narrow-rail-sep" />
       <div ref={sourceListRef} className="kd-narrow-source-roots kd-scroll" aria-label="媒体来源" style={sourceHeight === null ? undefined : { flexBasis: sourceHeight }}>
         {roots.map((root) => renderLocalFolderButton(root, true))}
         {enabledStreamRoots.map((streamRoot) => (

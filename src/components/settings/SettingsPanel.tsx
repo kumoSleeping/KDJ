@@ -1,3 +1,4 @@
+import { useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Select } from "../common/Select";
 import { ChevronDown, ChevronRight, Copy, Download, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
@@ -537,7 +538,12 @@ function KdjAiPromptPanel() {
   );
 }
 
-export function SettingsPanel({ preferences = false }: { preferences?: boolean }) {
+export function SettingsPanel({ preferences = false, page }: {
+  preferences?: boolean;
+  /** Show one page of the sections (the settings drawer); without it every section is listed. */
+  page?: SettingsPage;
+}) {
+  const on = (id: SettingsPage) => !page || page === id;
   const showKdjAiPrompt = ["darwin", "win32"].includes(getBridge().platform);
   const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
@@ -725,6 +731,8 @@ export function SettingsPanel({ preferences = false }: { preferences?: boolean }
 
   useEffect(() => {
     if (!focusEpoch) return;
+    // The update section is on the last page of the drawer.
+    useSettingsPage.getState().setPage("system");
     let frame = 0;
     const scrollToUpdate = () => {
       const section = updateSectionRef.current;
@@ -747,7 +755,7 @@ export function SettingsPanel({ preferences = false }: { preferences?: boolean }
     <div className={preferences ? "kd-col kd-preferences" : "kd-col"} style={{ height: "100%", minHeight: 0 }}>
       <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}>
         <InlineNotice text={settingsError} block />
-        <Panel heading="通用" dense>
+        {on("general") && <Panel heading="通用" dense>
           <div className="kd-djp-groups" aria-label="通用">
             <div>
               <FontScaleStepper
@@ -816,9 +824,9 @@ export function SettingsPanel({ preferences = false }: { preferences?: boolean }
               />
             </div>
           </div>
-        </Panel>
+        </Panel>}
 
-        <Panel heading="流媒体播放" dense>
+        {on("playback") && <Panel heading="流媒体播放" dense>
           <div className="kd-djp-groups">
             <div className="kd-djp-switch-list" aria-label="流媒体播放">
               <CycleToggle<Quality>
@@ -916,9 +924,9 @@ export function SettingsPanel({ preferences = false }: { preferences?: boolean }
               ) : null}
             </div>
           </div>
-        </Panel>
+        </Panel>}
 
-        <Panel heading="快捷键方向键控制" dense>
+        {on("general") && <Panel heading="快捷键方向键控制" dense>
           <div className="kd-djp-switch-list" aria-label="快捷键方向键控制">
             <Switch
               checked={arrowKeyControlEnabled}
@@ -949,9 +957,9 @@ export function SettingsPanel({ preferences = false }: { preferences?: boolean }
               }
             />
           </div>
-        </Panel>
+        </Panel>}
 
-        <Panel heading="下载源与账号" dense>
+        {on("sources") && <Panel heading="下载源与账号" dense>
           <InlineNotice text={accountsError} block />
           <div className="kd-djp-switch-list" aria-label="下载源与账号">
             {SEARCH_PLATFORMS.map((item) => {
@@ -977,9 +985,9 @@ export function SettingsPanel({ preferences = false }: { preferences?: boolean }
               );
             })}
           </div>
-        </Panel>
+        </Panel>}
 
-        <Panel heading="存储空间" dense>
+        {on("system") && <Panel heading="存储空间" dense>
           <div className="kd-cache-overview" aria-label="存储空间占用">
             {cacheOverview ? (
               (["media", "waveform", "lyrics", "basic", "logs", "other"] as const).map((category) => (
@@ -1021,14 +1029,14 @@ export function SettingsPanel({ preferences = false }: { preferences?: boolean }
             block
             onDismiss={() => setActivityLogSettingsError("")}
           />
-        </Panel>
+        </Panel>}
 
-        <ActivityLogPanel />
+        {on("system") && <ActivityLogPanel />}
 
-        {["darwin", "win32", "linux"].includes(getBridge().platform) ? <FfmpegPanel /> : null}
-        {showKdjAiPrompt ? <KdjAiPromptPanel /> : null}
+        {on("sources") && ["darwin", "win32", "linux"].includes(getBridge().platform) ? <FfmpegPanel /> : null}
+        {on("system") && showKdjAiPrompt ? <KdjAiPromptPanel /> : null}
 
-        <div ref={updateSectionRef} id="kd-settings-update">
+        {on("system") && <div ref={updateSectionRef} id="kd-settings-update">
           <Panel heading="软件更新" dense>
             <UpdateRow />
             <div className="kd-djp-switch-list" style={{ marginTop: "0.35rem" }}>
@@ -1040,7 +1048,7 @@ export function SettingsPanel({ preferences = false }: { preferences?: boolean }
               />
             </div>
           </Panel>
-        </div>
+        </div>}
       </div>
     </div>
   );

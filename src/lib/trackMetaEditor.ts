@@ -15,6 +15,9 @@ interface TrackMetaEditorState {
   dirty: boolean;
   /** Counts requests the draft refused; the editor says why nothing happened. */
   refused: number;
+  /** A drawer of the main window shows the editor, so the floating window stays away. */
+  docked: boolean;
+  setDocked(docked: boolean): void;
   /** Where the window was last dragged to. A session memory, not a preference. */
   position: { left: number; top: number } | null;
   open(trackId: number, anchor?: TrackMetaEditorAnchor): boolean;
@@ -32,6 +35,8 @@ export const useTrackMetaEditor = create<TrackMetaEditorState>((set, get) => ({
   dirty: false,
   refused: 0,
   position: null,
+  docked: false,
+  setDocked: docked => { if (get().docked !== docked) set({ docked }); },
   open(trackId, anchor) {
     // Online tracks have no library record to write to.
     if (!Number.isFinite(trackId) || trackId <= 0) return false;

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { ChevronsDown, LoaderCircle, Pencil, Pin, TextQuote } from "lucide-react";
 import { isVideoTrack } from "../../lib/format";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
@@ -17,39 +17,6 @@ import "./NowPlayingInfo.css";
 
 /** The retreat into the bar; the panel stays mounted this long after it is dismissed. */
 const LEAVE_MS = SONG_SWAP_OUT_MS + 20;
-
-/**
- * The panel is as wide as the workspace's right column, so the two share one left edge whether
- * that column is open or not. The player bar sits outside the workspace, so the width is read
- * from the column when it is open and worked out the way design.css sizes it
- * (`min(--kd-right, 45%)` of the content area) when it is not.
- */
-function useRightColumnWidth(target: RefObject<HTMLElement | null>): void {
-  useLayoutEffect(() => {
-    const node = target.current;
-    const wrap = document.querySelector<HTMLElement>(".kd-main-slot > .kd-table-wrap");
-    const shell = wrap?.closest<HTMLElement>(".kd-section-body");
-    if (!node || !wrap || !shell) return;
-    const publish = () => {
-      // A closed column may stay in the tree at no width.
-      let width = wrap.querySelector<HTMLElement>(":scope > .kd-split-aside")?.getBoundingClientRect().width ?? 0;
-      if (width < 1) {
-        const dragged = parseFloat(shell.style.getPropertyValue("--kd-right"));
-        const preferred = Number.isFinite(dragged) ? dragged : 25 * parseFloat(getComputedStyle(document.documentElement).fontSize);
-        width = Math.min(preferred, wrap.clientWidth * 0.45);
-      }
-      // One more pixel: the panel's left border continues the column's dividing line.
-      node.style.setProperty("--kd-info-w", `${Math.round(width) + 1}px`);
-    };
-    publish();
-    const resized = new ResizeObserver(publish);
-    resized.observe(wrap);
-    const changed = new MutationObserver(publish);
-    changed.observe(shell, { attributes: true, attributeFilter: ["style"] });
-    changed.observe(wrap, { attributes: true, attributeFilter: ["data-aside"] });
-    return () => { resized.disconnect(); changed.disconnect(); };
-  }, [target]);
-}
 
 /**
  * Keeps the panel mounted while it is up and for the length of its retreat, and brings it up
@@ -96,12 +63,15 @@ export function NowPlayingInfoHost({ trackId, playing }: { trackId: number | nul
   const [shown, setShown] = useState(playingTrack);
   const swapping = mounted && visible && !!shown && !!playingTrack && shown.id !== playingTrack.id;
   useEffect(() => {
+    // A panel on its way down keeps the song it went down with: changing it there would start
+    // its retreat over from the top.
+    if (mounted && !visible) return;
     if (!swapping) { setShown(playingTrack); return; }
     const timer = window.setTimeout(() => setShown(playingTrack), SONG_SWAP_OUT_MS);
     return () => window.clearTimeout(timer);
-  }, [playingTrack, swapping]);
+  }, [playingTrack, swapping, mounted, visible]);
   useEffect(() => {
-    // The right column and the toast make room for the panel (see --kd-info-lift).
+    // The drawer and the toast make room for the panel (see --kd-info-lift).
     if (!mounted || !visible) document.documentElement.style.removeProperty("--kd-info-lift");
     return () => { document.documentElement.style.removeProperty("--kd-info-lift"); };
   }, [mounted, visible]);
@@ -111,8 +81,6 @@ export function NowPlayingInfoHost({ trackId, playing }: { trackId: number | nul
 /** 曲目信息 and Meta of the loaded deck, risen from the player bar it belongs to. */
 function NowPlayingInfo({ track, leaving }: { track: Track; leaving: boolean }) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const clipRef = useRef<HTMLDivElement>(null);
-  useRightColumnWidth(clipRef);
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel || leaving) return;
@@ -198,7 +166,7 @@ function NowPlayingInfo({ track, leaving }: { track: Track; leaving: boolean }) 
       {information}
     </Panel>;
   };
-  return <div ref={clipRef} className="kd-player-info-clip" data-leaving={leaving || undefined}>
+  return <div className="kd-player-info-clip" data-leaving={leaving || undefined}>
     <div ref={panelRef} className="kd-player-info kd-scroll" role="dialog" aria-label={video ? "视频信息" : "曲目信息"}
       data-held={held || undefined}
       onPointerEnter={() => setHeld(true)} onPointerLeave={() => setHeld(false)}

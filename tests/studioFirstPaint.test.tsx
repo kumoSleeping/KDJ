@@ -6,7 +6,7 @@ import VisualizerStudioPanel from "../src/components/composition/VisualizerStudi
 import { useVisualizerStudioStore } from "../src/stores/visualizerStudioStore";
 import { VisualizerDock } from "../src/components/composition/VisualizerDock";
 import { useSidePanels } from "../src/lib/sidePanels";
-import { RightDock } from "../src/components/workspace/RightDock";
+import { DrawerHost } from "../src/components/drawer/Drawer";
 
 const dom = new JSDOM('<div id="root"></div><div id="dock"></div>', { url: "http://localhost" });
 dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
@@ -153,33 +153,28 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     await act(async()=> { host.querySelector<HTMLElement>('[aria-label="关闭可视化配置"]')!.click(); await wait(60); });
     assert.equal(editor().track,null,'closing the column app ends the hosted controls');
     await act(async()=>dock.unmount());
-    // ---- The column itself: the front app that closes stays, as it was, while it leaves.
+    // ---- The drawer: one app at a time; the one that is replaced or closed leaves as it was.
     const column = createRoot(host);
-    const app = (id:string) => ({ id, label:id, node:<input data-probe={id} defaultValue=""/> });
-    const show = (ids:string[], order:string[]) => act(async()=> { column.render(<RightDock apps={ids.map(app)} order={order}/>); });
-    const section = (id:string) => host.querySelector<HTMLElement>(`.kd-dock-app[data-app="${id}"]`);
-    await show(['lyrics','visualizer'],['lyrics','visualizer']);
-        const probe = section('visualizer')!.querySelector('input')!;
+    const spec = (id:string) => ({ id, title:id, extent:"two-thirds" as const, body:<input data-probe={id} defaultValue=""/>, close(){} });
+    const show = (id:string|null) => act(async()=> { column.render(<DrawerHost spec={id ? spec(id) : null}/>); });
+    const sheet = (id:string) => host.querySelector<HTMLElement>(`.kd-drawer[data-app="${id}"]`);
+    await show('visualizer');
+    const probe = sheet('visualizer')!.querySelector('input')!;
     probe.value = 'typed';
-    assert.equal(section('lyrics')!.dataset.covered,'true');
-    await show(['lyrics'],['lyrics']);
-    assert.equal(section('visualizer')?.dataset.leaving,'true','a closed front app slides out instead of vanishing');
-    assert.ok(section('visualizer')!.querySelector('input')===probe,'and it is the same instance, not a fresh mount');
-    assert.equal(section('lyrics')!.dataset.covered,undefined,'the app beneath is revealed at once');
-    await act(async()=> { await wait(340); });
-    assert.equal(section('visualizer'),null);
-    // Raising changes the front without changing the set: the app in front is the one that leaves.
-    await show(['lyrics','visualizer'],['lyrics','visualizer']);
-    await show(['lyrics','visualizer'],['visualizer','lyrics']);
-    await show(['visualizer'],['visualizer']);
-    assert.equal(section('lyrics')?.dataset.leaving,'true','the raised app leaves visibly');
-    await show(['lyrics','visualizer'],['visualizer','lyrics']);
-    assert.equal(section('lyrics')?.dataset.leaving,undefined,'reopened while leaving: it is simply open again');
-    assert.equal(host.querySelectorAll('.kd-dock-app[data-app="lyrics"]').length,1);
-    await show(['lyrics'],['lyrics']);
-    assert.equal(section('visualizer'),null,'a covered app that closes is simply gone');
+    await show('lyrics');
+    assert.equal(sheet('visualizer')?.dataset.leaving,'true','a replaced app rolls up instead of vanishing');
+    assert.ok(sheet('visualizer')!.querySelector('input')===probe,'and it is the same instance, not a fresh mount');
+    assert.equal(sheet('lyrics')?.dataset.leaving,undefined,'the new app comes down over it');
+    await act(async()=> { await wait(460); });
+    assert.equal(sheet('visualizer'),null,'nothing waits underneath to come back');
+    await show(null);
+    assert.equal(sheet('lyrics')?.dataset.leaving,'true','a closed app rolls up');
+    await show('lyrics');
+    assert.equal(host.querySelectorAll('.kd-drawer[data-app="lyrics"]:not([data-leaving])').length,1,'asked for again while leaving: it comes down again');
+    await act(async()=> { await wait(460); });
+    assert.equal(host.querySelectorAll('.kd-drawer').length,1);
     await act(async()=>column.unmount());
-    console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension, column app, leaving apps");
+    console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension, drawer app, leaving apps");
   } finally {
     await act(async()=>root.unmount()); dom.window.close();
   }

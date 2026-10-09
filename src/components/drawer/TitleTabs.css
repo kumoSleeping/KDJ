@@ -1,0 +1,87 @@
+/* A title row. The page in view is written as the title; the other pages wait beside it. */
+.kd-title-tabs {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex: none;
+  min-width: 0;
+  padding: 0.95rem 0.75rem 0.55rem 1.1rem;
+}
+.kd-title-tabs-text { flex: 1 1 auto; min-width: 0; }
+.kd-title-tabs-title,
+.kd-title-tabs-list > button {
+  margin: 0;
+  color: var(--kd-text);
+  font: inherit;
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+}
+.kd-title-tabs-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-title-tabs-list {
+  display: flex;
+  align-items: baseline;
+  gap: 0.85rem;
+  min-width: 0;
+}
+/* A quiet word is a real smaller word, so the row is evenly spaced whichever page is in view;
+   only this one short row is laid out again while a switch plays. */
+.kd-title-tabs-list > button {
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--kd-muted);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: font-size 300ms cubic-bezier(0.22, 0.9, 0.26, 1), color 200ms ease;
+}
+.kd-title-tabs-list > button > span { display: inline-block; }
+.kd-title-tabs-list > button:hover { color: var(--kd-text); }
+.kd-title-tabs-list > button[aria-selected="true"] {
+  color: var(--kd-theme);
+  font-size: 1.4rem;
+  font-weight: 700;
+}
+.kd-title-tabs-list > button:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text)); outline-offset: 2px; }
+.kd-title-tabs-caption {
+  margin-top: 0.1rem;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-title-tabs-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  /* Level with the first line of the title. */
+  min-height: 1.75rem;
+  color: var(--kd-muted);
+}
+.kd-title-tabs-tools > button,
+.kd-title-tabs-tools .kd-title-tabs-tool {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  cursor: pointer;
+}
+.kd-title-tabs-tools > button:hover:not(:disabled) { color: var(--kd-text); }
+.kd-title-tabs-tools > button[aria-pressed="true"] { color: var(--kd-theme); }
+.kd-title-tabs-tools > button:disabled { opacity: 0.4; cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  .kd-title-tabs-list > button { transition: none; }
+}

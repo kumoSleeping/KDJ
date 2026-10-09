@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useSidePanels } from "../../lib/sidePanels";
-import { PanelCollapseContext } from "../common/panelCollapse";
+import { PanelCollapseContext, PanelDockedContext } from "../common/panelCollapse";
 import { DownloadTaskPanel } from "./TaskPanels";
 import { LyricsDetailPanel } from "./LyricsView";
 import "./SidePanels.css";
@@ -14,6 +14,14 @@ export function SideLyrics() {
       value={{ label: "歌词", collapse: () => useSidePanels.getState().setLyrics(false) }}>
       <LyricsDetailPanel track={track} reserveEmpty visibleHeader />
     </PanelCollapseContext.Provider>}
+  </section>;
+}
+
+/** The lyrics as the body of a drawer: the drawer writes the title and puts it away. */
+export function DrawerLyrics() {
+  const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  return <section className="kd-side-panels kd-drawer-lyrics">
+    {track && <PanelDockedContext.Provider value><LyricsDetailPanel track={track} reserveEmpty /></PanelDockedContext.Provider>}
   </section>;
 }
 
