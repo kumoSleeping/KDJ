@@ -135,7 +135,10 @@ function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { acti
     const node = activeRef.current;
     const list = listRef.current;
     if (!node || !list) return;
-    const top = node.offsetTop - list.clientHeight * 0.36;
+    // The sung line rests on the list's centre line. Measured from the boxes on screen:
+    // `offsetTop` is relative to whichever ancestor happens to be positioned.
+    const listBox = list.getBoundingClientRect(), lineBox = node.getBoundingClientRect();
+    const top = list.scrollTop + (lineBox.top - listBox.top) - (list.clientHeight - lineBox.height) / 2;
     list.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   }, [active, trackId]);
 

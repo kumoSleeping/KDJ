@@ -488,7 +488,9 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
 
   // 列表、详情与播放器必须共享同一 cache key。modified_at 在换封面后由后端更新，
   // 既能复用已经加载的缩略图，也能在图片变化时可靠失效。
-  const coverUrl = api.coverUrl(track.id, track.modified_at);
+  // 这个封面格只有一百来像素宽。请求缩略图而不是原图：内嵌封面可能有十几 MB，
+  // 原图要读几秒，曲目信息升起的那几秒里一直是占位。
+  const coverUrl = api.coverUrl(track.id, track.modified_at, 256);
   /** 当前 <img> 上已经画出来的封面属于哪首曲目。 */
   const coverShownRef = useRef<number | null>(null);
   useEffect(() => {

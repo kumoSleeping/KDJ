@@ -8014,8 +8014,8 @@ button.kd-camelot-grid-key { cursor: pointer; }
   mask-image: linear-gradient(
     to bottom,
     transparent 0%,
-    #000 12%,
-    #000 78%,
+    #000 15%,
+    #000 85%,
     transparent 100%
   );
 }
