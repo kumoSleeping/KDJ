@@ -1670,7 +1670,6 @@ textarea {
 }
 .kd-search-band textarea.kd-searchbar-input {
   height: 2rem;
-  line-height: 1.45;
 }
 .kd-search-band .kd-searchbar[data-batch] textarea.kd-searchbar-input {
   height: auto;
@@ -6647,6 +6646,13 @@ body[data-kd-sidebar-root-dragging="true"] * {
   cursor: pointer;
   pointer-events: auto;
   -webkit-app-region: no-drag;
+  transition: opacity 0.2s ease, visibility 0.2s;
+}
+/* Keep the icon slot so focus never pulls the hint text toward the leading edge. */
+.kd-search-tip[data-input-focused="true"] .kd-search-tip-action {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 .kd-search-tip-action:hover,
 .kd-search-tip-action:focus-visible,
@@ -6686,35 +6692,58 @@ body[data-kd-sidebar-root-dragging="true"] * {
   align-items: center;
   gap: 0.18rem;
   overflow: hidden;
-  animation: kd-search-tip-cycle 8s ease-in-out both;
 }
 .kd-search-tip-copy {
+  min-width: 0;
+  display: grid;
+  overflow: hidden;
+}
+.kd-search-tip-text {
+  grid-area: 1 / 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
-.kd-search-tip[data-fixed="true"] {
-  animation: none;
+.kd-search-tip-text[data-mode="idle"] {
+  animation: kd-search-tip-cycle 0.2s ease-out;
+}
+.kd-search-tip-text[data-mode="input"] {
+  opacity: 0;
+  transform: translateY(0.2em);
+}
+.kd-search-tip[data-input-focused="true"] .kd-search-tip-text[data-mode="idle"] {
+  opacity: 0;
+  transform: translateY(-0.2em);
+}
+.kd-search-tip[data-input-focused="true"] .kd-search-tip-text[data-mode="input"] {
+  opacity: 1;
+  transform: translateY(0);
 }
 @keyframes kd-search-tip-cycle {
-  0% {
+  from {
     opacity: 0;
-    transform: translateY(0.45em);
+    transform: translateY(0.2em);
   }
-  9%,
-  90% {
+  to {
     opacity: 1;
     transform: translateY(0);
   }
-  100% {
-    opacity: 0;
-    transform: translateY(-0.35em);
-  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .kd-search-tip {
+  .kd-search-tip-text[data-mode="idle"] {
     animation: none;
+  }
+  .kd-search-tip-action,
+  .kd-search-tip-text {
+    transition: none;
+  }
+  .kd-search-tip-text,
+  .kd-search-tip[data-input-focused="true"] .kd-search-tip-text {
+    transform: none;
   }
 }
 .kd-searchbar-input {
@@ -6750,6 +6779,10 @@ textarea.kd-searchbar-input {
   white-space: pre;
   overflow-x: auto;
   overflow-y: auto;
+}
+/* A textarea lays its line at the top; distribute the spare height equally. */
+.kd-searchbar:not([data-batch]) textarea.kd-searchbar-input {
+  padding-block: calc((2rem - 1.55em) / 2);
 }
 .kd-searchbar[data-batch] textarea.kd-searchbar-input {
   height: auto;
