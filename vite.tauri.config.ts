@@ -11,6 +11,7 @@
  *   npm run tauri:build   # 出安装包
  */
 import react from "@vitejs/plugin-react";
+import { withoutReactPerformanceTracks } from "./vite.react-dev";
 import { build as buildWithEsbuild } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
@@ -94,7 +95,7 @@ export default defineConfig({
   // dependency generations, which manifests as an otherwise inexplicable Invalid Hook Call.
   // `target/` is checkout-local, so every Tauri session gets one coherent dependency graph.
   cacheDir: "target/vite-tauri-cache",
-  plugins: [react(), youtubeNativePoDevBundle()],
+  plugins: [react(), youtubeNativePoDevBundle(), withoutReactPerformanceTracks()],
   resolve: nativeYoutubeRuntime
     ? undefined
     : {

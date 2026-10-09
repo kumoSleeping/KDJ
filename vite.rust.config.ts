@@ -10,6 +10,7 @@
  */
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { withoutReactPerformanceTracks } from "./vite.react-dev";
 
 const API_PORT = process.env.KDJ_PORT ?? "8788";
 
@@ -44,6 +45,6 @@ window.kdj = {
 }
 
 export default defineConfig({
-  plugins: [react(), devBridge()],
+  plugins: [react(), devBridge(), withoutReactPerformanceTracks()],
   server: { port: 5274, strictPort: true },
 });
