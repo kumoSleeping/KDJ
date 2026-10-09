@@ -115,6 +115,8 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
         await useLibraryStore.getState().refresh();
       });
       await flush();
+      // Cached rows survive the query change, so re-read one to see the new query serialized.
+      await act(async () => { await useLibraryStore.getState().refreshTrackSummaries([1]); });
       assert.equal(useLibraryStore.getState().error, "");
       assert.ok(useLibraryStore.getState().summaryById.size > 0);
       assert.equal(indexQueries.at(-1)!.get("analyzed"), analyzed === "no" ? "false" : null);
@@ -166,11 +168,16 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     const horizontal = document.querySelector<HTMLElement>('[role="scrollbar"][data-axis="horizontal"]')!;
     await act(async () => horizontal.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true })));
     assert.equal(box.scrollLeft, 400);
+    // The background fill holds every row in memory, so a jump across the library needs no request.
+    for (let i = 0; i < 400 && useLibraryStore.getState().summaryById.size < 10000; i += 1) await flush();
+    assert.equal(useLibraryStore.getState().summaryById.size, 10000);
+    assert.ok(requests.every(values => values.length <= 500));
+    const requestsBeforeJump = requests.length;
     await act(async () => { box.scrollTop = 359300; box.dispatchEvent(new Event("scroll")); });
-    await flush(); await flush();
+    await flush();
     assert.ok(document.querySelector('tr[data-kd-track-id="10000"]'));
-    assert.ok(requests.some(values => values.includes(10000)));
-    assert.ok(requests.flat().every(id => id <= 400 || id >= 9600), "no sequential walk through intermediate songs");
+    assert.equal(document.querySelector("tr[data-loading-track]"), null, "no placeholder rows after a far jump");
+    assert.equal(requests.length, requestsBeforeJump);
     await act(async () => useLibraryStore.getState().select(1));
     await act(async () => useLibraryStore.getState().select(10000, "range"));
     assert.equal(useLibraryStore.getState().selectedIds.length, 10000);

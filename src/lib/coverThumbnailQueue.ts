@@ -1,6 +1,6 @@
-const MAX_ACTIVE_COVER_REQUESTS = 2;
-const MAX_CACHED_COVERS = 128;
-const MAX_CACHED_COVER_BYTES = 16 * 1024 * 1024;
+const MAX_ACTIVE_COVER_REQUESTS = 4;
+const MAX_CACHED_COVERS = 512;
+const MAX_CACHED_COVER_BYTES = 32 * 1024 * 1024;
 
 interface CacheEntry {
   objectUrl: string;

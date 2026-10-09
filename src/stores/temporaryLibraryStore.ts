@@ -119,9 +119,8 @@ export function createTemporaryLibrary(folder: string) {
         if (next.orderedIds === previous.orderedIds && next.summaryById === previous.summaryById) return;
         clearTimeout(refreshTimer);
         refreshTimer = setTimeout(() => {
-          const ids = [...store.getState().summaryById.keys()];
-          lane.invalidate(ids);
-          void lane.refreshChanged(ids);
+          lane.invalidateAll();
+          void lane.refreshIndex();
         }, 150);
       });
       return () => {

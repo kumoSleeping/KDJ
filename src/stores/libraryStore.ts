@@ -984,6 +984,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         const ids = [...new Set([...get().orderedIds, ...get().selectedIds])];
         api.invalidateTrackDetail(ids);
         libraryWindow.invalidate(ids);
+        // 摘要缓存跨查询保留：断线期间别的文件夹里的行也可能变了。
+        libraryWindow.invalidateAll();
         void Promise.all([get().refresh(), get().refreshStats(), get().refreshFolders(), get().refreshUndo()]);
         return;
       }

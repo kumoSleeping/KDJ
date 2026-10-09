@@ -71,7 +71,7 @@ test("library reconnect refreshes data and replaces lost terminal progress", asy
     zustand: { create }, "../lib/api": { api: { invalidateTrackDetail: (ids: number[]) => invalidated.push(ids) } },
     "../lib/folderStartup": {}, "../lib/libraryPaste": {}, "../lib/outsideFolder": {}, "../lib/tableSort": {},
     "../lib/workspaceSession": { readWorkspaceSession: () => ({ local: {} }) },
-    "../lib/libraryWindow": { LibraryWindow: class { invalidate(ids: number[]) { invalidated.push(ids); } } },
+    "../lib/libraryWindow": { LibraryWindow: class { invalidate(ids: number[]) { invalidated.push(ids); } invalidateAll() {} } },
   };
   const store = loadStore("src/stores/libraryStore.ts", modules).useLibraryStore;
   let refreshed = 0;

@@ -26,35 +26,36 @@ test("cancel/reacquire, priority, bounded caches, and retry classification", asy
     await tick();
     assert.equal(coverThumbnailQueueStats().active, 0);
 
-    const a = acquireCoverThumbnail("a", "/a");
-    const b = acquireCoverThumbnail("b", "/b");
+    const base = calls.length;
+    const running = ["a", "b", "c", "d"].map((key) => acquireCoverThumbnail(key, `/${key}`));
     const low = acquireCoverThumbnail("low", "/low", 2);
     const high = acquireCoverThumbnail("high", "/high", 0);
-    calls[2].resolve(ok()); await a.promise; await tick();
-    assert.equal(calls[4].url, "/high");
-    calls[3].resolve(ok()); calls[4].resolve(ok());
-    await Promise.all([b.promise, high.promise]); await tick();
-    calls[5].resolve(ok()); await low.promise; await tick();
-    for (const lease of [a,b,low,high]) lease.release();
+    assert.equal(calls.length, base + 4, "four covers load at once; the rest queue");
+    calls[base].resolve(ok()); await running[0].promise; await tick();
+    assert.equal(calls[base + 4].url, "/high");
+    for (const call of calls.slice(base + 1, base + 5)) call.resolve(ok());
+    await Promise.all([...running.map((lease) => lease.promise), high.promise]); await tick();
+    calls[base + 5].resolve(ok()); await low.promise; await tick();
+    for (const lease of [...running, low, high]) lease.release();
 
     const noArt = acquireCoverThumbnail("none", "/none");
     const missing = assert.rejects(noArt.promise, /404/);
-    calls[6].resolve(new Response(null, { status: 404 }));
+    calls.at(-1)!.resolve(new Response(null, { status: 404 }));
     await missing; await tick(); noArt.release();
-    assert.equal(calls.length, 7, "404 is not retried");
+    assert.equal(calls.length, base + 7, "404 is not retried");
 
     const transient = acquireCoverThumbnail("retry", "/retry");
-    calls[7].resolve(new Response(null, { status: 503 }));
+    calls.at(-1)!.resolve(new Response(null, { status: 503 }));
     await new Promise(resolve => setTimeout(resolve, 550));
-    assert.equal(calls.length, 9);
-    calls[8].resolve(ok()); await transient.promise; await tick(); transient.release();
+    assert.equal(calls.length, base + 9);
+    calls.at(-1)!.resolve(ok()); await transient.promise; await tick(); transient.release();
 
-    for (let i = 0; i < 140; i++) {
+    for (let i = 0; i < 530; i++) {
       const lease = acquireCoverThumbnail(`cache-${i}`, `/cache-${i}`);
       calls.at(-1)!.resolve(ok());
       await lease.promise; await tick(); lease.release();
     }
-    assert.ok(coverThumbnailQueueStats().cached <= 128);
+    assert.ok(coverThumbnailQueueStats().cached <= 512);
     assert.equal(coverThumbnailQueueStats().active, 0);
     assert.equal(coverThumbnailQueueStats().queued, 0);
   } finally { globalThis.fetch = original; }

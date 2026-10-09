@@ -38,25 +38,57 @@ interface Dependencies {
   summaries(ids: number[], query: LibraryQuery, signal: AbortSignal): Promise<TrackSummary[]>;
   publish(snapshot: LibraryWindowSnapshot): void;
 }
-interface Job { controller: AbortController; ids: number[]; epochs: number[]; generation: number }
-const BATCH = 200;
-const CACHE_SIZE = 2000;
+interface Job { controller: AbortController; ids: number[]; epochs: number[]; generation: number; background: boolean }
+/** The summaries endpoint rejects more than 500 IDs per request. */
+const BATCH = 500;
+const REQUESTS = 2;
+/** Whole libraries stay in memory; only larger ones fall back to least-recently-used eviction. */
+const CACHE_LIMIT = 50_000;
 
-/** Query-scoped, ID-addressed data lane. All asynchronous writes verify their owner. */
+/** A new identity over the live row map: subscribers see a change without the rows being copied. */
+class SummaryView implements ReadonlyMap<number, TrackSummary> {
+  constructor(private readonly rows: Map<number, TrackSummary>) {}
+  get size() { return this.rows.size; }
+  get(id: number) { return this.rows.get(id); }
+  has(id: number) { return this.rows.has(id); }
+  forEach(callback: (value: TrackSummary, key: number, map: ReadonlyMap<number, TrackSummary>) => void, thisArg?: unknown) {
+    this.rows.forEach((value, key) => callback.call(thisArg, value, key, this));
+  }
+  entries() { return this.rows.entries(); }
+  keys() { return this.rows.keys(); }
+  values() { return this.rows.values(); }
+  [Symbol.iterator]() { return this.rows[Symbol.iterator](); }
+}
+
+/**
+ * ID-addressed data lane. The index is query-scoped; row summaries do not depend on the query, so
+ * they outlive it and a new sort, filter or folder only swaps the ID order. All asynchronous
+ * writes verify their owner.
+ */
 export class LibraryWindow {
   private query: LibraryQuery = {};
   private generation = 0;
+  /** Generation of the index on display; it trails `generation` until the new index arrives. */
+  private indexGeneration = 0;
   private ids: number[] = [];
   private positions = new Map<number, number>();
   private cache = new Map<number, TrackSummary>();
+  private revision = 0;
+  private view = new SummaryView(this.cache);
+  private viewRevision = 0;
   private epochs = new Map<number, number>();
   private stale = new Set<number>();
   private failed = new Set<number>();
   private desired: number[] = [];
-  private visible = new Set<number>();
+  private center = 0;
+  /** Rows outside the demanded range may still be missing or stale. */
+  private fillPending = false;
+  /** A failed request pauses the background fill until a retry, a new query or a fresh index. */
+  private fillHalted = false;
   private jobs = new Set<Job>();
   private indexRequest: AbortController | null = null;
   private auxiliary = new Set<AbortController>();
+  private auxiliaryWaiting = 0;
   private loading = false;
   private error = "";
   private latency = 200;
@@ -69,29 +101,43 @@ export class LibraryWindow {
 
   dispose(): void {
     // Advancing the generation also releases range waiters and rejects late responses.
-    this.changeQuery({});
-    this.loading = false;
-    this.publish();
-  }
-
-  changeQuery(query: LibraryQuery): void {
     this.generation += 1;
+    this.indexGeneration = this.generation;
     this.indexRequest?.abort();
     this.indexRequest = null;
     for (const job of this.jobs) job.controller.abort();
     for (const controller of this.auxiliary) controller.abort();
-    this.auxiliary.clear();
     this.jobs.clear();
-    this.query = { ...query };
+    this.auxiliary.clear();
+    this.query = {};
     this.ids = [];
     this.positions = new Map();
     this.cache.clear();
+    this.revision += 1;
     this.epochs.clear();
-    this.failed.clear();
     this.stale.clear();
+    this.failed.clear();
     this.missingChecked.clear();
     this.desired = [];
-    this.visible.clear();
+    this.fillPending = false;
+    this.fillHalted = false;
+    this.loading = false;
+    this.error = "";
+    this.demandVersion += 1;
+    this.publish();
+  }
+
+  /** The current order and rows stay on display until `refreshIndex` delivers the new order. */
+  changeQuery(query: LibraryQuery): void {
+    this.generation += 1;
+    this.indexRequest?.abort();
+    this.indexRequest = null;
+    for (const controller of this.auxiliary) controller.abort();
+    this.auxiliary.clear();
+    this.query = { ...query };
+    this.failed.clear();
+    this.missingChecked.clear();
+    this.fillHalted = false;
     this.loading = true;
     this.error = "";
     this.demandVersion += 1;
@@ -109,16 +155,29 @@ export class LibraryWindow {
       const result = await this.request(controller, this.dependencies.index(this.query, controller.signal));
       if (controller !== this.indexRequest || generation !== this.generation) return;
       const ids = [...new Set(result.track_ids)];
-      if (ids.length !== this.ids.length || ids.some((id, i) => id !== this.ids[i])) {
+      const swapped = this.indexGeneration !== generation;
+      if (swapped || ids.length !== this.ids.length || ids.some((id, i) => id !== this.ids[i])) {
         this.ids = ids;
         this.positions = new Map(ids.map((id, index) => [id, index]));
-        for (const id of this.cache.keys()) if (!this.positions.has(id)) this.cache.delete(id);
-        this.desired = this.desired.filter((id) => this.positions.has(id));
+        this.desired = swapped ? [] : this.desired.filter((id) => this.positions.has(id));
+        if (swapped) { this.center = 0; this.demandVersion += 1; }
+        this.fillPending = true;
       }
+      this.indexGeneration = generation;
+      this.fillHalted = false;
       for (const id of this.failed) if (!this.positions.has(id)) this.failed.delete(id);
       if (!this.failed.size) this.error = "";
     } catch (error) {
       if (controller !== this.indexRequest || generation !== this.generation) return;
+      if (this.indexGeneration !== generation) {
+        // The previous query's order cannot stand in for a query that failed to load.
+        this.ids = [];
+        this.positions = new Map();
+        this.desired = [];
+        this.center = 0;
+        this.indexGeneration = generation;
+        this.demandVersion += 1;
+      }
       this.error = message(error);
     } finally {
       if (controller === this.indexRequest && generation === this.generation) {
@@ -130,24 +189,18 @@ export class LibraryWindow {
     }
   }
 
+  /** Scrolling only reorders the queue: requests already in flight finish and their rows are kept. */
   ensureRange(start: number, end: number, visibleStart = start, visibleEnd = end): Promise<void> {
     const lo = Math.max(0, Math.floor(start / BATCH) * BATCH);
     const hi = Math.min(this.ids.length, Math.ceil(end / BATCH) * BATCH);
     const desired = this.ids.slice(lo, hi);
-    this.visible = new Set(this.ids.slice(Math.max(0, visibleStart), Math.max(0, visibleEnd)));
+    this.center = Math.max(0, Math.floor((Math.max(0, visibleStart) + Math.max(0, visibleEnd)) / 2));
     if (desired.length !== this.desired.length || desired.some((id, i) => id !== this.desired[i])) {
       this.desired = desired;
       this.demandVersion += 1;
+      for (const id of desired) this.touch(id);
+      this.evict();
     }
-    const wanted = new Set(desired);
-    for (const job of this.jobs) {
-      if (!job.ids.some((id) => wanted.has(id))) {
-        job.controller.abort();
-        this.jobs.delete(job);
-      }
-    }
-    for (const id of desired) this.touch(id);
-    this.evict();
     this.pump();
     this.publish();
     const version = this.demandVersion;
@@ -165,6 +218,7 @@ export class LibraryWindow {
     });
   }
 
+  /** Stale rows stay on display until the request lanes replace them. */
   invalidate(ids: number[]): void {
     for (const id of ids) {
       this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1);
@@ -172,23 +226,40 @@ export class LibraryWindow {
       this.failed.delete(id);
       this.missingChecked.delete(id);
     }
+    this.fillPending = true;
+  }
+
+  /** Rows cached under an earlier query are not in the current index, so name them all. */
+  invalidateAll(): void {
+    this.invalidate([...this.cache.keys()]);
   }
 
   async refreshChanged(ids: number[]): Promise<void> {
     const generation = this.generation;
     const cached = ids.filter((id) => this.cache.has(id));
-    // Refreshing the small ID index replaces all frontend global sorting/refill logic.
+    // Refreshing the small ID index replaces all frontend global sorting/refill logic; the request
+    // lanes then re-read whichever of the changed rows it still lists.
     await this.refreshIndex();
     if (generation !== this.generation) return;
-    if (cached.length) await this.resolveIds(cached);
-    this.pump();
-    this.publish();
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        if (generation !== this.generation || this.fillHalted || cached.every((id) =>
+          !this.positions.has(id) || this.failed.has(id) || !this.stale.has(id))) {
+          this.waiters.delete(check);
+          resolve();
+        }
+      };
+      this.waiters.add(check);
+      check();
+    });
   }
 
   async retry(): Promise<void> {
     this.failed.clear();
     this.missingChecked.clear();
     this.error = "";
+    this.fillPending = true;
+    this.fillHalted = false;
     await this.refreshIndex();
   }
 
@@ -202,11 +273,17 @@ export class LibraryWindow {
       if (cached && !this.stale.has(id)) { result.set(id, cached); this.touch(id); }
       else needed.push(id);
     }
-    // Explicit lookup lane shares the two-request budget with viewport work.
+    // Explicit lookup lane shares the two-request budget with viewport work; a waiting lookup
+    // reserves the next free slot so the background fill cannot starve it.
     for (let offset = 0; offset < needed.length; offset += BATCH) {
-      while (this.jobs.size + this.auxiliary.size >= 2) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 5));
-        if (generation !== this.generation) return [];
+      this.auxiliaryWaiting += 1;
+      try {
+        while (this.jobs.size + this.auxiliary.size >= REQUESTS) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 5));
+          if (generation !== this.generation) return [];
+        }
+      } finally {
+        this.auxiliaryWaiting -= 1;
       }
       const batch = needed.slice(offset, offset + BATCH);
       const epochs = batch.map((id) => this.epochs.get(id) ?? 0);
@@ -218,7 +295,7 @@ export class LibraryWindow {
         for (const row of rows) {
           if ((this.epochs.get(row.id) ?? 0) !== epochs[batch.indexOf(row.id)]) continue;
           result.set(row.id, row);
-          if (this.positions.has(row.id)) this.accept(row);
+          this.accept(row);
         }
       } catch (error) {
         if (generation !== this.generation || !this.auxiliary.has(controller)) return [];
@@ -234,7 +311,7 @@ export class LibraryWindow {
 
   update(row: TrackSummary): void {
     this.invalidate([row.id]);
-    if (this.positions.has(row.id)) this.accept(row);
+    this.accept(row);
     this.evict();
     this.publish();
   }
@@ -244,13 +321,16 @@ export class LibraryWindow {
     this.ids = this.ids.filter((id) => !ids.has(id));
     this.positions = new Map(this.ids.map((id, index) => [id, index]));
     this.desired = this.desired.filter((id) => !ids.has(id));
-    for (const id of ids) this.cache.delete(id);
+    for (const id of ids) if (this.cache.delete(id)) this.revision += 1;
     this.publish();
   }
 
   accept(row: TrackSummary): void {
     const old = this.cache.get(row.id);
-    this.cache.set(row.id, old && sameSummary(old, row) ? old : row);
+    if (!old || !sameSummary(old, row)) {
+      this.cache.set(row.id, row);
+      this.revision += 1;
+    }
     this.stale.delete(row.id);
     this.failed.delete(row.id);
   }
@@ -260,38 +340,76 @@ export class LibraryWindow {
     if (value) { this.cache.delete(id); this.cache.set(id, value); }
   }
   private evict(): void {
+    if (this.cache.size <= CACHE_LIMIT) return;
     const pinned = new Set(this.desired);
     for (const id of this.cache.keys()) {
-      if (this.cache.size <= CACHE_SIZE) break;
-      if (!pinned.has(id)) this.cache.delete(id);
+      if (this.cache.size <= CACHE_LIMIT) break;
+      if (!pinned.has(id)) { this.cache.delete(id); this.revision += 1; }
     }
   }
+  private wanted(id: number, pending: Set<number>): boolean {
+    return !pending.has(id) && !this.failed.has(id) && (!this.cache.has(id) || this.stale.has(id));
+  }
+  /** Demanded rows first, nearest the viewport; then the rest of the index, outward from it. */
+  private nextBatch(): { ids: number[]; background: boolean } {
+    const pending = new Set<number>();
+    let filling = false;
+    for (const job of this.jobs) {
+      filling ||= job.background;
+      for (const id of job.ids) pending.add(id);
+    }
+    const demand = this.desired.filter((id) => this.wanted(id, pending));
+    if (demand.length) {
+      const distance = (id: number) => Math.abs((this.positions.get(id) ?? 0) - this.center);
+      demand.sort((a, b) => distance(a) - distance(b));
+      return { ids: demand.slice(0, BATCH), background: false };
+    }
+    // One background request at a time leaves the other slot free for wherever the user jumps.
+    if (filling || !this.fillPending || this.fillHalted) return { ids: [], background: true };
+    const ids: number[] = [];
+    let room = CACHE_LIMIT - this.cache.size;
+    const take = (id: number) => {
+      if (!this.wanted(id, pending)) return;
+      if (!this.cache.has(id) && room-- <= 0) return;
+      ids.push(id);
+    };
+    let before = Math.min(this.center, this.ids.length - 1);
+    let after = before + 1;
+    while (ids.length < BATCH && (before >= 0 || after < this.ids.length)) {
+      if (before >= 0) take(this.ids[before--]);
+      if (after < this.ids.length && ids.length < BATCH) take(this.ids[after++]);
+    }
+    if (!ids.length) this.fillPending = false;
+    return { ids, background: true };
+  }
   private pump(): void {
-    const pending = new Set([...this.jobs].flatMap((job) => job.ids));
-    const needed = this.desired.filter((id) => !pending.has(id) && !this.failed.has(id)
-      && (!this.cache.has(id) || this.stale.has(id)));
-    needed.sort((a, b) => Number(this.visible.has(b)) - Number(this.visible.has(a)));
-    while (this.jobs.size + this.auxiliary.size < 2 && needed.length) {
-      const ids = needed.splice(0, BATCH);
-      const job: Job = { ids, epochs: ids.map((id) => this.epochs.get(id) ?? 0),
+    // Until the new index arrives, the IDs on display belong to the previous query's filter.
+    if (this.indexGeneration !== this.generation) return;
+    while (this.jobs.size + this.auxiliary.size + (this.auxiliaryWaiting ? 1 : 0) < REQUESTS) {
+      const { ids, background } = this.nextBatch();
+      if (!ids.length) break;
+      const job: Job = { ids, epochs: ids.map((id) => this.epochs.get(id) ?? 0), background,
         generation: this.generation, controller: new AbortController() };
       this.jobs.add(job);
       const started = performance.now();
       void this.request(job.controller, this.dependencies.summaries(ids, this.query, job.controller.signal)).then((rows) => {
-        if (!this.owns(job)) return;
-        this.latency = this.latency * 0.7 + (performance.now() - started) * 0.3;
+        if (!this.jobs.has(job)) return;
+        const current = job.generation === this.generation;
+        if (current) this.latency = this.latency * 0.7 + (performance.now() - started) * 0.3;
         const found = new Set(rows.map((row) => row.id));
         let checkIndex = false;
-        for (const [i, id] of ids.entries()) {
+        // A row absent under an older query's filter says nothing about the current one.
+        if (current) for (const [i, id] of ids.entries()) {
           if (!this.positions.has(id) || (this.epochs.get(id) ?? 0) !== job.epochs[i]) continue;
           if (!found.has(id)) {
             this.failed.add(id);
             if (!this.missingChecked.has(id)) { this.missingChecked.add(id); checkIndex = true; }
           }
         }
+        const slots = new Map(ids.map((id, i) => [id, i]));
         for (const row of rows) {
-          const i = ids.indexOf(row.id);
-          if (i >= 0 && this.positions.has(row.id) && (this.epochs.get(row.id) ?? 0) === job.epochs[i]) this.accept(row);
+          const i = slots.get(row.id);
+          if (i !== undefined && (this.epochs.get(row.id) ?? 0) === job.epochs[i]) this.accept(row);
         }
         if (checkIndex) {
           this.error = "部分曲目已变化，请重试";
@@ -299,12 +417,14 @@ export class LibraryWindow {
         }
         this.evict();
       }).catch((error: unknown) => {
-        if (!this.owns(job)) return;
+        if (!this.jobs.has(job) || job.generation !== this.generation) return;
         for (const id of ids) this.failed.add(id);
+        this.fillHalted = true;
         this.error = message(error);
       }).finally(() => {
-        if (!this.owns(job)) return;
-        this.jobs.delete(job);
+        if (!this.jobs.delete(job)) return;
+        // Rows this request did not deliver are open to the background fill again.
+        this.fillPending = true;
         this.pump();
         this.publish();
       });
@@ -321,17 +441,18 @@ export class LibraryWindow {
     try { return await Promise.race([work, cancellation]); }
     finally { clearTimeout(timer); controller.signal.removeEventListener("abort", cancel); }
   }
-  private owns(job: Job): boolean {
-    return job.generation === this.generation && this.jobs.has(job);
-  }
   private publish(): void {
+    if (this.viewRevision !== this.revision) {
+      this.view = new SummaryView(this.cache);
+      this.viewRevision = this.revision;
+    }
+    let demanded = false;
+    for (const job of this.jobs) demanded ||= !job.background;
     const previous = this.lastSnapshot;
-    const sameCache = previous && previous.summaryById.size === this.cache.size
-      && [...this.cache].every(([id, row]) => previous.summaryById.get(id) === row);
     const snapshot: LibraryWindowSnapshot = { orderedIds: this.ids, indexById: this.positions,
-      summaryById: sameCache ? previous.summaryById : new Map(this.cache),
+      summaryById: this.view,
       total: this.ids.length,
-      queryVersion: this.generation, loading: this.loading, loadingMore: this.jobs.size > 0,
+      queryVersion: this.indexGeneration, loading: this.loading, loadingMore: demanded,
       error: this.error, requestLatency: this.latency };
     if (!previous || Object.keys(snapshot).some((key) =>
       snapshot[key as keyof LibraryWindowSnapshot] !== previous[key as keyof LibraryWindowSnapshot])) {

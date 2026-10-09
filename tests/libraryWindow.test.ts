@@ -20,59 +20,69 @@ function fixture() {
   return { lane, requests, snapshot: () => snapshot, publications: () => publications };
 }
 
-test("ten thousand IDs support direct tail lookup with only one 200-summary request", async () => {
+const sorted = (values: number[]) => [...values].sort((a, b) => a - b);
+
+test("the index starts a background fill; a far jump takes the free slot without cancelling it", async () => {
   const f = fixture();
   await f.lane.refreshIndex();
-  const ready = f.lane.ensureRange(9800, 10000);
   assert.equal(f.requests.length, 1);
-  assert.deepEqual(f.requests[0].ids, ids.slice(9800));
-  f.requests[0].resolve(rows(f.requests[0].ids));
+  assert.deepEqual(f.requests[0].ids, ids.slice(0, 500));
+  const ready = f.lane.ensureRange(9800, 10000);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.requests[0].signal.aborted, false);
+  assert.deepEqual(sorted(f.requests[1].ids), ids.slice(9500));
+  assert.equal(f.requests[1].ids[0], 9901, "rows nearest the viewport lead the batch");
+  const empty = f.snapshot().summaryById;
+  f.requests[1].resolve(rows(f.requests[1].ids));
   await ready;
   assert.equal(f.snapshot().total, 10000);
-  assert.equal(f.snapshot().summaryById.size, 200);
+  assert.equal(f.snapshot().summaryById.size, 500);
+  assert.notEqual(f.snapshot().summaryById, empty, "arriving rows publish a new map identity");
   const before = f.publications();
   await f.lane.ensureRange(9800, 10000);
   assert.equal(f.publications(), before, "unchanged demand does not cause a React publish loop");
+  f.lane.dispose();
 });
 
-test("background refill cannot truncate the page that arrived while it was pending", async () => {
+test("a changed row stays on display while only that row is re-read", async () => {
   const f = fixture();
   await f.lane.refreshIndex();
-  const initial = f.lane.ensureRange(0, 200);
-  f.requests[0].resolve(rows(ids.slice(0, 200)));
-  await initial;
+  f.requests[0].resolve(rows(f.requests[0].ids));
+  await tick();
+  await f.lane.ensureRange(0, 200);
+  const issued = f.requests.length;
   f.lane.invalidate([1]);
   const update = f.lane.refreshChanged([1]);
-  const next = f.lane.ensureRange(200, 400);
   await tick();
-  const page = f.requests.find((request) => request.ids.includes(201))!;
-  page.resolve(rows(page.ids));
-  await next;
-  const refill = f.requests.find((request, index) => index > 0 && request.ids.includes(1))!;
-  refill.resolve([{ ...rows([1])[0], title: "updated" }]);
+  assert.equal(f.requests.length, issued + 1);
+  assert.deepEqual(f.requests[issued].ids, [1]);
+  assert.equal(f.snapshot().summaryById.get(1)?.title, "Song 1");
+  f.requests[issued].resolve([{ ...rows([1])[0], title: "updated" }]);
   await update;
-  assert.equal(f.snapshot().summaryById.size, 400);
+  assert.equal(f.snapshot().summaryById.size, 500);
   assert.equal(f.snapshot().summaryById.get(1)?.title, "updated");
   assert.equal(f.snapshot().orderedIds.length, 10000);
-  assert.ok(f.snapshot().summaryById.has(400));
+  f.lane.dispose();
 });
 
-test("obsolete failures cannot clear a new query's loading state", async () => {
+test("a request from the previous query keeps its rows but not its failures", async () => {
   const f = fixture();
   await f.lane.refreshIndex();
-  const old = f.lane.ensureRange(0, 200);
+  const old = f.lane.ensureRange(600, 700);
+  assert.deepEqual(sorted(f.requests[1].ids), ids.slice(500, 1000));
   f.lane.changeQuery({ folder: "b" });
+  assert.equal(f.requests[0].signal.aborted, false);
   await f.lane.refreshIndex();
-  const next = f.lane.ensureRange(5000, 5200);
-  f.requests[0].reject(new Error("obsolete"));
+  assert.equal(f.requests.length, 2, "in-flight requests still hold both slots");
+  f.requests[1].reject(new Error("obsolete"));
   await tick();
-  assert.equal(f.snapshot().loadingMore, true);
   assert.equal(f.snapshot().error, "");
-  assert.equal(f.snapshot().summaryById.size, 0);
-  f.requests[1].resolve(rows(f.requests[1].ids));
-  await Promise.all([old, next]);
-  assert.equal(f.snapshot().summaryById.size, 200);
-  assert.ok(!f.snapshot().summaryById.has(1));
+  f.requests[0].resolve(rows(f.requests[0].ids));
+  await tick();
+  assert.equal(f.snapshot().summaryById.size, 500);
+  assert.deepEqual(f.requests[2].ids, ids.slice(500, 1000), "rows of the failed obsolete request are requested again");
+  await old;
+  f.lane.dispose();
 });
 
 test("in-flight summaries invalidated by an event cannot overwrite newer metadata", async () => {
@@ -83,49 +93,133 @@ test("in-flight summaries invalidated by an event cannot overwrite newer metadat
   f.requests[0].resolve(rows(f.requests[0].ids));
   await ready;
   assert.equal(f.snapshot().summaryById.get(1)?.title, "new");
+  f.lane.dispose();
 });
 
-test("far jumps cancel irrelevant requests; failed and empty ranges pause until retry", async () => {
+test("far jumps keep earlier requests; failed and empty ranges pause until retry", async () => {
   const f = fixture();
   await f.lane.refreshIndex();
-  const old = f.lane.ensureRange(0, 200);
+  const old = f.lane.ensureRange(2000, 2200);
   const tail = f.lane.ensureRange(9800, 10000);
-  assert.equal(f.requests[0].signal.aborted, true);
-  f.requests[1].reject(new Error("offline"));
-  await tail;
-  await old;
-  await f.lane.ensureRange(9800, 10000);
   assert.equal(f.requests.length, 2);
-  assert.equal(f.snapshot().error, "offline");
-  await f.lane.retry();
+  assert.equal(f.requests[1].signal.aborted, false);
+  await old;
+  f.requests[1].resolve(rows(f.requests[1].ids));
+  await tick();
+  assert.equal(f.snapshot().summaryById.size, 500, "rows of the superseded range are kept");
+  assert.deepEqual(sorted(f.requests[2].ids), ids.slice(9500));
+  f.requests[2].reject(new Error("offline"));
+  await tail;
+  await f.lane.ensureRange(9800, 10000);
   assert.equal(f.requests.length, 3);
-  f.requests[2].resolve([]);
+  assert.equal(f.snapshot().error, "offline");
+  f.requests[0].resolve(rows(f.requests[0].ids));
+  await tick();
+  assert.equal(f.requests.length, 3, "a failure pauses the background fill");
+  await f.lane.retry();
+  assert.equal(f.requests.length, 5);
+  assert.deepEqual(sorted(f.requests[3].ids), ids.slice(9500));
+  f.requests[3].resolve([]);
   await tick(); await tick();
   await f.lane.ensureRange(9800, 10000);
-  assert.equal(f.requests.length, 3, "missing IDs do not spin on a non-changing index");
+  assert.equal(f.requests.filter((request) => request.ids.includes(10000)).length, 2, "missing IDs do not spin on a non-changing index");
   assert.ok(f.snapshot().error);
-  f.requests[0].resolve(rows(f.requests[0].ids));
+  f.lane.dispose();
 });
 
-test("LRU eviction preserves complete order, with at most two summary requests and 2000 cached rows", async () => {
-  let snapshot!: LibraryWindowSnapshot;
-  let active = 0, peak = 0;
-  const lane = new LibraryWindow({ index: async () => ({ track_ids: ids, total: ids.length }),
-    summaries: async (values) => { peak = Math.max(peak, ++active); await tick(); active--; return rows(values); },
-    publish: (value) => { snapshot = value; } });
+function autoLane(all: number[], index: () => number[] = () => all) {
+  const state = { snapshot: undefined as unknown as LibraryWindowSnapshot, active: 0, peak: 0, requested: [] as number[][] };
+  const lane = new LibraryWindow({ index: async () => ({ track_ids: index(), total: index().length }),
+    summaries: async (values) => {
+      state.requested.push(values);
+      state.peak = Math.max(state.peak, ++state.active);
+      await tick();
+      state.active--;
+      return rows(values);
+    },
+    publish: (value) => { state.snapshot = value; } });
+  const idle = async () => { do { await tick(); } while (state.active > 0); };
+  return { lane, state, idle };
+}
+
+test("the whole library stays in memory with at most two summary requests of 500 rows", async () => {
+  const { lane, state, idle } = autoLane(ids);
   lane.changeQuery({});
   await lane.refreshIndex();
   for (let start = 0; start < 10000; start += 400) await lane.ensureRange(start, start + 400);
-  assert.ok(peak <= 2);
-  assert.equal(snapshot.total, 10000);
-  assert.equal(snapshot.summaryById.size, 2000);
-  assert.equal(snapshot.indexById.get(1), 0);
-  assert.equal(snapshot.indexById.get(10000), 9999);
+  await idle();
+  assert.ok(state.peak <= 2);
+  assert.ok(state.requested.every((values) => values.length <= 500));
+  assert.deepEqual(sorted(state.requested.flat()), ids, "every row is requested exactly once");
+  assert.equal(state.snapshot.total, 10000);
+  assert.equal(state.snapshot.summaryById.size, 10000);
+  assert.equal(state.snapshot.loadingMore, false);
+  assert.equal(state.snapshot.indexById.get(1), 0);
+  assert.equal(state.snapshot.indexById.get(10000), 9999);
   const selected = ids.slice(99, 9900);
   assert.equal(selected.length, 9801, "selection is independent of cached summaries");
+  const issued = state.requested.length;
   const explicit = await lane.resolveIds([1, 10000]);
   assert.deepEqual(explicit.map((row) => row.id), [1, 10000]);
-  assert.equal(snapshot.summaryById.size, 2000);
+  await lane.ensureRange(4000, 4400);
+  assert.equal(state.requested.length, issued, "scrolling a loaded library requests nothing");
+});
+
+test("a new sort keeps the rows on display and only swaps the ID order", async () => {
+  let order = ids;
+  const { lane, state, idle } = autoLane(ids, () => order);
+  lane.changeQuery({ sort: "title" });
+  await lane.refreshIndex();
+  await idle();
+  const issued = state.requested.length;
+  const first = state.snapshot;
+  const row = first.summaryById.get(7);
+  order = [...ids].reverse();
+  lane.changeQuery({ sort: "bpm" });
+  assert.equal(state.snapshot.loading, true);
+  assert.equal(state.snapshot.orderedIds, first.orderedIds, "the previous order stays until the new index arrives");
+  assert.equal(state.snapshot.queryVersion, first.queryVersion);
+  await lane.refreshIndex();
+  await idle();
+  assert.equal(state.snapshot.orderedIds[0], 10000);
+  assert.equal(state.snapshot.queryVersion, first.queryVersion + 1);
+  assert.equal(state.snapshot.summaryById.get(7), row);
+  assert.equal(state.requested.length, issued, "no summary is requested again");
+});
+
+test("a query whose index fails does not keep showing the previous order", async () => {
+  let fail = false;
+  let snapshot!: LibraryWindowSnapshot;
+  const lane = new LibraryWindow({
+    index: async () => { if (fail) throw new Error("offline"); return { track_ids: [1, 2, 3], total: 3 }; },
+    summaries: async (values) => rows(values), publish: (value) => { snapshot = value; } });
+  lane.changeQuery({ folder: "a" });
+  await lane.refreshIndex();
+  await tick();
+  fail = true;
+  lane.changeQuery({ folder: "b" });
+  assert.equal(snapshot.orderedIds.length, 3);
+  await lane.refreshIndex();
+  assert.equal(snapshot.orderedIds.length, 0);
+  assert.equal(snapshot.error, "offline");
+  assert.equal(snapshot.loading, false);
+});
+
+test("libraries beyond the cache limit evict least-recently-used rows around the demanded range", async () => {
+  const huge = Array.from({ length: 50500 }, (_, i) => i + 1);
+  const { lane, state, idle } = autoLane(huge);
+  lane.changeQuery({});
+  await lane.refreshIndex();
+  await idle();
+  assert.equal(state.snapshot.summaryById.size, 50000, "the background fill stops at the limit");
+  await lane.ensureRange(50400, 50500);
+  await idle();
+  assert.equal(state.snapshot.summaryById.size, 50000);
+  assert.ok(state.snapshot.summaryById.has(50500));
+  assert.ok(!state.snapshot.summaryById.has(1));
+  assert.equal(state.snapshot.total, 50500);
+  assert.ok(state.peak <= 2);
+  assert.deepEqual((await lane.resolveIds([1])).map((row) => row.id), [1]);
 });
 
 test("virtual ranges remain bounded across shrink, pending rows, resize, row height and velocity", () => {
@@ -135,7 +229,8 @@ test("virtual ranges remain bounded across shrink, pending rows, resize, row hei
         const view = libraryViewport({ total, pending, rowHeight, height, velocity, top: 350000, headerHeight: 28, latency: 400 });
         assert.ok(0 <= view.start && view.start <= view.end && view.end <= total + pending);
         assert.ok(view.top <= view.maxTop);
-        assert.ok(view.end - view.start <= 5 * Math.ceil((height - 28) / rowHeight) + 2);
+        assert.ok(view.end - view.start <= 6 * Math.ceil((height - 28) / rowHeight) + 2);
+        assert.ok(view.fetchStart <= view.trackStart && view.trackEnd <= view.fetchEnd, "every rendered row is demanded");
         assert.ok(view.trackEnd <= total && view.fetchEnd <= total);
       }
   assert.equal(restoreLibraryAnchor([1, 3, 4], 2, 1, 5, 36, 0), 41);

@@ -449,6 +449,7 @@ function trackCell(
   selectionControl?: React.ReactNode,
   onRate?: (rating: number) => void,
   coverPriority = 1,
+  textOnly = false,
 ) {
   switch (key) {
     case "title":
@@ -457,7 +458,7 @@ function trackCell(
           {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          <TrackCoverThumb track={track} priority={coverPriority} />
+          {textOnly ? <span className="kd-thumb" draggable={false} /> : <TrackCoverThumb track={track} priority={coverPriority} />}
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -547,7 +548,7 @@ function trackCell(
     case "rating":
       return (
         <td key={key} data-col="rating">
-          <TableRating value={track.rating} onChange={onRate} />
+          {textOnly ? null : <TableRating value={track.rating} onChange={onRate} />}
         </td>
       );
     default:
@@ -564,6 +565,8 @@ interface TrackCellsProps {
   keyNotation: KeyNotation;
   selectionMode: boolean;
   selected: boolean;
+  /** 快速滚动中：新挂载的行先只画文字，封面和评分控件等停下再补。 */
+  textOnly: boolean;
   onToggle(id: number): void;
   onRate(id: number, rating: number): void;
 }
@@ -581,9 +584,13 @@ const TrackCells = memo(function TrackCells({
   keyNotation,
   selectionMode,
   selected,
+  textOnly,
   onToggle,
   onRate,
 }: TrackCellsProps) {
+  // 已经画全的行不退回纯文字：封面在滚动开始时消失再出现，比一直留着更扎眼。
+  const fullRef = useRef(!textOnly);
+  if (!textOnly) fullRef.current = true;
   return (
     <>
       {showIndex ? <td data-col="index">{displayIndex}</td> : null}
@@ -608,6 +615,7 @@ const TrackCells = memo(function TrackCells({
           ) : undefined,
           column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
           coverPriority,
+          !fullRef.current,
         ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
         return cloneElement(
           cell,
@@ -617,6 +625,36 @@ const TrackCells = memo(function TrackCells({
           </span>,
         );
       })}
+      <td className="kd-table-fill" aria-hidden="true" />
+    </>
+  );
+}, (previous, next) => {
+  // 进入快速滚动不重画已有的行（它们保持画全）；只有滚动停下才需要把纯文字行补全。
+  for (const key of Object.keys(next) as (keyof TrackCellsProps)[]) {
+    if (key === "textOnly" ? previous.textOnly && !next.textOnly : previous[key] !== next[key]) return false;
+  }
+  return true;
+});
+
+/** 摘要还没到的行：列结构和真实行相同，数据到达时只换内容，不重新排版。 */
+const PlaceholderCells = memo(function PlaceholderCells({
+  displayIndex,
+  showIndex,
+  columns,
+}: Pick<TrackCellsProps, "displayIndex" | "showIndex" | "columns">) {
+  return (
+    <>
+      {showIndex ? <td data-col="index">{displayIndex}</td> : null}
+      {columns.map((column) => (
+        <td key={column.key} data-col={column.key}>
+          {column.key === "title" ? (
+            <span className="kd-track-drag-surface">
+              <span className="kd-thumb" />
+              <span className="kd-track-loading-skeleton" />
+            </span>
+          ) : null}
+        </td>
+      ))}
       <td className="kd-table-fill" aria-hidden="true" />
     </>
   );
@@ -641,6 +679,8 @@ const PENDING_STATES = new Set(["queued", "running", "processing", "paused", "fa
  * （见 TrackTable 里的量测 effect），这里只是首帧还没量到时的占位。
  */
 const FALLBACK_ROW_H = 36;
+/** px/ms。超过这个速度单行已经读不清，封面和评分控件留到停下再画。 */
+const TEXT_ONLY_SCROLL_VELOCITY = 2.4;
 /** 原生拖放结束回调早于 WebView 清掉边缘自动滚动，留一小段静默期吞掉尾帧。 */
 const EXTERNAL_DRAG_SCROLL_SETTLE_MS = 240;
 
@@ -1377,6 +1417,8 @@ export const TrackTable = memo(function TrackTable({
   /** 虚拟滚动需要的滚动位置/视口高度；一帧最多重算一次（见 onScroll）。 */
   const [view, setView] = useState({ top: 0, height: 0 });
   const [fastScrolling, setFastScrolling] = useState(false);
+  /** 快到看不清单行时，新进入窗口的行只画文字（见 TrackCells）。 */
+  const [textOnlyRows, setTextOnlyRows] = useState(false);
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
   const rowHRef = useRef(FALLBACK_ROW_H);
   /** 横向滚动不能进入虚拟列表更新链；否则拖底部横滚条时每帧重渲染整张可视表。 */
@@ -1384,6 +1426,7 @@ export const TrackTable = memo(function TrackTable({
   const scrollRafRef = useRef(0);
   const scrollSampleRef = useRef({ top: 0, at: 0 });
   const fastScrollingRef = useRef(false);
+  const textOnlyRowsRef = useRef(false);
   const scrollIdleTimerRef = useRef<number | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   /** 滚动容器 ref：身份必须稳定（见 JSX 处的注释）。值没变就不 setState，
@@ -1710,11 +1753,17 @@ export const TrackTable = memo(function TrackTable({
             fastScrollingRef.current = true;
             setFastScrolling(true);
           }
+          if (velocity > TEXT_ONLY_SCROLL_VELOCITY && !textOnlyRowsRef.current) {
+            textOnlyRowsRef.current = true;
+            setTextOnlyRows(true);
+          }
           if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
           scrollIdleTimerRef.current = window.setTimeout(() => {
             scrollIdleTimerRef.current = null;
             fastScrollingRef.current = false;
             setFastScrolling(false);
+            textOnlyRowsRef.current = false;
+            setTextOnlyRows(false);
             const anchor = anchorRef.current;
             if (persistentSession) updateLocalWorkspaceSession({ scrollTop: node.scrollTop, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
           }, 140);
@@ -2035,13 +2084,14 @@ export const TrackTable = memo(function TrackTable({
                 keyNotation={keyNotation}
                 selectionMode={selectionMode}
                 selected={selected.has(track.id)}
+                textOnly={textOnlyRows}
                 onToggle={toggleTrackSelection}
                 onRate={rateTrack}
               />
             </tr>
           ) : (
             <tr key={id} data-loading-track="true" aria-busy="true">
-              <td colSpan={tableColSpan} style={{ height: rowH }}><span className="kd-track-loading-skeleton" /></td>
+              <PlaceholderCells displayIndex={index + 1} showIndex={showIndexCol} columns={visibleColumns} />
             </tr>
           ))}
           {winEnd < viewport.count && (
