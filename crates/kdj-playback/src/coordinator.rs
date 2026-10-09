@@ -1949,17 +1949,14 @@ impl Actor {
     }
 
     fn load(&mut self, mut source: PlaybackSource) -> Result<(), String> {
-        if source.intent_id > 0 {
-            if source.intent_id < self.latest_manager_intent {
-                tracing::debug!(
-                    event = "manager_load_superseded_before_prepare",
-                    track_id = source.track_id,
-                    intent_id = source.intent_id,
-                    latest_intent_id = self.latest_manager_intent,
-                );
-                return Ok(());
-            }
-            self.latest_manager_intent = source.intent_id;
+        if source.intent_id > 0 && source.intent_id < self.latest_manager_intent {
+            tracing::debug!(
+                event = "manager_load_superseded_before_prepare",
+                track_id = source.track_id,
+                intent_id = source.intent_id,
+                latest_intent_id = self.latest_manager_intent,
+            );
+            return Ok(());
         }
         self.open_output()?;
         validate_source(&source)?;
@@ -1980,6 +1977,13 @@ impl Actor {
         // 状态先落账、激活后执行：一旦激活失败必须整体回滚，
         // 否则状态层声称新曲目、硬件却还在旧 Deck 上发声。
         let checkpoint = self.state.clone();
+        // The intent is committed only here, and rolled back with the state below: promotion
+        // discards a pending Load whose intent is not the latest, so a Load rejected on the way
+        // must not leave an earlier, still valid one waiting for a stream that will be dropped.
+        let previous_intent = self.latest_manager_intent;
+        if source.intent_id > 0 {
+            self.latest_manager_intent = source.intent_id;
+        }
         self.state.desired_playing = source.autoplay;
         self.state.phase = PlaybackPhase::Loading;
         self.state.track_id = Some(source.track_id);
@@ -1995,19 +1999,45 @@ impl Actor {
             self.activate(deck, Activation::Hard, source.position)
         } else {
             let target = self.target_deck();
-            if let Some(pending) = self.pending[target as usize]
+            match self.pending[target as usize]
                 .as_mut()
                 .filter(|pending| same_source(&pending.request, &source))
             {
-                pending.activation = Some(Activation::Hard);
-                return Ok(());
+                Some(pending) => {
+                    // The decoder keeps running and the newer request takes its stream over.
+                    // Keeping the old intent here made promotion discard the stream as
+                    // superseded: nothing was left to activate and the state stayed in Loading.
+                    pending.activation = Some(Activation::Hard);
+                    pending.request = source;
+                    Ok(())
+                }
+                None => self.start_stream(target, source, Some(Activation::Hard)),
             }
-            self.start_stream(target, source, Some(Activation::Hard))
         };
         if result.is_err() {
             self.state = checkpoint;
+            self.latest_manager_intent = previous_intent;
+        } else {
+            self.drop_superseded_manager_loads();
         }
         result
+    }
+
+    /// A manager Load that was accepted owns the transport. A replacement still decoding for an
+    /// earlier Load of another song can no longer be activated; left in place it would be
+    /// promoted later onto a Deck that has since been given to the new song.
+    fn drop_superseded_manager_loads(&mut self) {
+        for deck in [DeckId::A, DeckId::B] {
+            let stale = self.pending[deck as usize].as_ref().is_some_and(|pending| {
+                matches!(pending.activation, Some(Activation::Hard))
+                    && Some(pending.request.track_id) != self.state.track_id
+            });
+            if stale {
+                // Cancels the decoder and fences its late `WorkerFinished`.
+                self.bump_pending_revision(deck);
+                self.pending[deck as usize] = None;
+            }
+        }
     }
 
     fn replace_audio(&mut self, mut source: PlaybackSource) -> Result<(), String> {
@@ -4114,6 +4144,11 @@ impl Actor {
         };
         self.volume = volume;
         self.state.volume = volume;
+        // A closed output takes the stored gain when it opens (`open_output`). Failing here
+        // rejected every Load after a device failure, because a Load applies its gain first.
+        if self.player.is_none() {
+            return Ok(());
+        }
         self.send(RtCommand::SetMasterGain(volume))
     }
 
@@ -4614,6 +4649,25 @@ impl Actor {
                     latest_intent_id = self.latest_manager_intent,
                 );
                 cancel_stream(&pending.cancel);
+                // Its worker now reports "cancelled" under this Deck's current revision; without
+                // a new revision that reads as the installed decoder dying and clears the Deck.
+                self.bump_pending_revision(deck);
+                let awaited = self.state.phase == PlaybackPhase::Loading
+                    && self.state.track_id == Some(pending.request.track_id)
+                    && self
+                        .pending
+                        .iter()
+                        .flatten()
+                        .all(|other| other.activation.is_none())
+                    && self
+                        .deferred_stream
+                        .as_ref()
+                        .is_none_or(|deferred| deferred.activation.is_none());
+                if awaited {
+                    // No stream is left to complete the Load the state names. Report the Deck
+                    // that is audible instead of staying in Loading for good.
+                    self.restore_audible_manager_deck("换曲请求已被取代，已保留当前声音".into());
+                }
                 continue;
             }
             tracing::info!(
@@ -9212,6 +9266,161 @@ mod tests {
                 RtCommand::SetDeckPfl { deck: target, enabled: false } if *target == deck
             )));
         }
+    }
+
+    #[test]
+    fn a_repeated_load_takes_over_the_stream_already_decoding_for_it() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+
+        let mut first = source(7, 0.0);
+        first.intent_id = 1;
+        first.autoplay = true;
+        actor.load(first.clone()).expect("首次换源");
+        let revision = actor.pending.iter().flatten().next().unwrap().revision;
+        let mut again = first;
+        again.intent_id = 2;
+        actor.load(again).expect("同一首的再次换源");
+
+        let pending: Vec<&PendingStream> = actor.pending.iter().flatten().collect();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].revision, revision,
+            "the decoder is not restarted"
+        );
+        assert_eq!(
+            pending[0].request.intent_id, actor.latest_manager_intent,
+            "promotion discards a pending Load whose intent is not the latest"
+        );
+        assert!(matches!(pending[0].activation, Some(Activation::Hard)));
+    }
+
+    #[test]
+    fn a_rejected_load_leaves_the_earlier_load_able_to_finish() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+
+        let mut first = source(7, 0.0);
+        first.intent_id = 1;
+        actor.load(first).expect("首次换源");
+        knobs.fail_send.store(true, Ordering::Relaxed);
+        let mut rejected = source(8, 0.0);
+        rejected.intent_id = 2;
+        assert!(actor.load(rejected).is_err());
+
+        assert_eq!(actor.latest_manager_intent, 1);
+        assert_eq!(actor.state.track_id, Some(7));
+        let pending: Vec<&PendingStream> = actor.pending.iter().flatten().collect();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request.intent_id, 1);
+    }
+
+    #[test]
+    fn loading_an_installed_song_drops_the_load_it_replaces() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        // Song 1 plays on A; song 2 is the prewarmed next song on B.
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.decks[1] = Some(live_runtime(2, 0.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+
+        let mut other = source(3, 0.0);
+        other.intent_id = 1;
+        actor.load(other).expect("换到第三首");
+        let stale = actor.pending[1].as_ref().expect("装到另一台 Deck").revision;
+        let mut next = source(2, 0.0);
+        next.intent_id = 2;
+        actor.load(next).expect("改换到已预热的下一首");
+
+        assert_eq!(actor.front, DeckId::B);
+        assert_eq!(actor.state.track_id, Some(2));
+        assert!(actor.pending.iter().all(Option::is_none));
+        // The cancelled decoder reports back; it must not read as song 2's decoder dying.
+        actor.handle(Request::WorkerFinished {
+            deck: DeckId::B,
+            revision: stale,
+            result: Err("stream preparation cancelled".into()),
+        });
+        assert!(actor.decks[1].is_some());
+        assert_eq!(actor.state.track_id, Some(2));
+        assert_ne!(actor.state.phase, PlaybackPhase::Error);
+    }
+
+    #[test]
+    fn a_superseded_stream_never_strands_the_state_in_loading() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.front = DeckId::A;
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].is_playing = true;
+        actor.state.decks[0].desired_playing = true;
+        let (stream, mut writer) = StreamSource::bounded(4_801);
+        for _ in 0..4_800 {
+            writer.push([0.2, 0.2], || false).unwrap();
+        }
+        let mut request = source(9, 0.0);
+        request.intent_id = 4;
+        actor.latest_manager_intent = 5;
+        actor.revisions[1] = 42;
+        actor.pending[1] = Some(PendingStream {
+            revision: 42,
+            source: PlaybackStream::Stereo(stream),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 100,
+            activation: Some(Activation::Hard),
+            cancel: Arc::new(AtomicU64::new(42)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: None,
+            seek: StreamSeekControl::new(),
+            scratch_cache: None,
+        });
+        actor.state.track_id = Some(9);
+        actor.state.phase = PlaybackPhase::Loading;
+        actor.state.buffering = true;
+
+        actor.promote_ready_streams();
+
+        assert!(actor.pending[1].is_none());
+        assert_eq!(
+            actor.state.track_id,
+            Some(1),
+            "the audible song is reported"
+        );
+        assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+        assert!(!actor.state.buffering);
+        actor.handle(Request::WorkerFinished {
+            deck: DeckId::B,
+            revision: 42,
+            result: Err("stream preparation cancelled".into()),
+        });
+        assert!(actor.decks[0].is_some());
+        assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+    }
+
+    #[test]
+    fn volume_is_kept_for_a_closed_output() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.player = None;
+        knobs.sent.lock().unwrap().clear();
+
+        actor.set_volume(0.3).expect("输出关闭时音量仍被接受");
+        assert!(knobs.sent.lock().unwrap().is_empty());
+        actor.open_output().expect("打开测试输出");
+
+        assert!(knobs.sent.lock().unwrap().iter().any(|command| matches!(
+            command,
+            RtCommand::SetMasterGain(gain) if (*gain - 0.3).abs() < f32::EPSILON
+        )));
     }
 
     #[test]
