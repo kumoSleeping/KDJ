@@ -296,8 +296,9 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
         const file = await load();
         const updated = await setCover(track.id, file);
         onUpdated?.(updated);
+        // 新封面带着新的 modified_at 到达后由上面的 effect 接手；这里不盖占位——
+        // 同一秒内换图时地址不变，图片不会重新加载，占位就再也揭不掉。
         setHasCover(true);
-        setCoverLoading(true);
         return true;
       } catch (error: unknown) {
         setNotice(`${label}失败：${(error as Error).message}`);
@@ -487,9 +488,16 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
   // 列表、详情与播放器必须共享同一 cache key。modified_at 在换封面后由后端更新，
   // 既能复用已经加载的缩略图，也能在图片变化时可靠失效。
   const coverUrl = api.coverUrl(track.id, track.modified_at);
+  /** 当前 <img> 上已经画出来的封面属于哪首曲目。 */
+  const coverShownRef = useRef<number | null>(null);
   useEffect(() => {
+    // modified_at 在分析完成、保存标签时也会变。同一首曲目换修订时旧图留在原处，新图
+    // 加载完直接替换；只有换了曲目、或这首还没有画出过封面，才盖上占位。
+    if (coverShownRef.current !== track.id) {
+      coverShownRef.current = null;
+      setCoverLoading(true);
+    }
     setHasCover(true);
-    setCoverLoading(true);
   }, [coverUrl]);
   const downloadPlatform = localDownloadPlatform(track);
   const fileFactsText = [
@@ -551,9 +559,13 @@ export function TrackDetail({ track, restoreTarget = null, mode = "detail", onEd
                 className="kd-cover-edit-image"
                 draggable={false}
                 data-loading={coverLoading ? "true" : undefined}
-                onLoad={() => setCoverLoading(false)}
+                onLoad={() => {
+                  coverShownRef.current = track.id;
+                  setCoverLoading(false);
+                }}
                 // 没封面时后端返回 404
                 onError={() => {
+                  coverShownRef.current = null;
                   setCoverLoading(false);
                   setHasCover(false);
                 }}

@@ -81,7 +81,13 @@ export function QueueCover({ artwork, video = false }: { artwork: string; video?
     const host = hostRef.current;
     if (!host || !artwork) { setVisible(false); return; }
     if (!("IntersectionObserver" in window)) { setVisible(true); return; }
-    const observer = new IntersectionObserver(([entry]) => setVisible(Boolean(entry?.isIntersecting)), { root: host.closest(".kd-download-task-list") });
+    // Load shortly before the row scrolls in, then keep the image: unmounting it on the way out
+    // made every cover pop in again on the way back.
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) return;
+      setVisible(true);
+      observer.disconnect();
+    }, { root: host.closest(".kd-download-task-list"), rootMargin: "240px 0px" });
     observer.observe(host); return () => observer.disconnect();
   }, [artwork]);
   const fallback = video ? <span className="kd-download-task-cover-fallback"><Video size={18} /></span> : <VinylPlaceholder />;
