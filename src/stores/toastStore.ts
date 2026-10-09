@@ -1,28 +1,32 @@
-import { create } from "zustand";
+import { dismissTask, showTask } from "../components/tasks/taskBubbleStore";
+import type { TaskTone } from "../components/tasks/taskBubbleSchema";
 
-/** 右下角浮层默认停留时间。点叉可提前关掉。 */
-export const TOAST_DURATION_MS = 10_000;
+/**
+ * Plain messages from code that has nothing more to say than a sentence: each becomes a task
+ * bubble (docs/task-bubbles.md). A report with a cover, progress or an action calls `showTask`
+ * itself.
+ */
+const FAILURE = /失败|无法|失效|错误|出错|异常|不可用|放不了|过期|拒绝|需要/;
 
-interface ToastStore {
-  text: string;
-  /** 同一句话再推一次也要重新计时、重新入场。 */
-  token: number;
-  show(text: string): void;
-  dismiss(): void;
+/** A sentence that reports a failure is shown, and stays, as an error. */
+export function noticeTone(text: string): TaskTone {
+  return FAILURE.test(text) ? "error" : "info";
 }
 
-export const useToastStore = create<ToastStore>((set) => ({
-  text: "",
-  token: 0,
-  show(text) {
-    const next = text.trim();
-    if (!next) {
-      set({ text: "" });
-      return;
-    }
-    set((state) => ({ text: next, token: state.token + 1 }));
-  },
-  dismiss() {
-    set({ text: "" });
-  },
-}));
+const shown = new Set<string>();
+
+/** Show one sentence as a bubble of its own; the same sentence again starts its stay over. */
+export function showNotice(text: string, id = `notice:${text}`): void {
+  const title = text.trim();
+  if (!title) return;
+  shown.add(id);
+  showTask({ id, kind: "notice", title, tone: noticeTone(title), onDismiss: () => { shown.delete(id); } });
+}
+
+export const useToastStore = {
+  getState: () => ({
+    show: (text: string) => showNotice(text),
+    /** Takes away the sentences shown through this store. */
+    dismiss: () => { for (const id of [...shown]) dismissTask(id); },
+  }),
+};

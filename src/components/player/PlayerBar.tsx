@@ -106,7 +106,8 @@ import {
 } from "../../lib/videoPip";
 import type { SongSource, Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
-import { useToastStore } from "../../stores/toastStore";
+import { showNotice } from "../../stores/toastStore";
+import { dismissTask } from "../tasks/taskBubbleStore";
 import {
   PLAY_EVENT,
   isCompleteTrack,
@@ -182,7 +183,8 @@ import {
 } from "../../lib/playerTransitionPolicy";
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
-import { NowPlayingInfoHost } from "./NowPlayingInfo";
+import { NowPlayingTask } from "./NowPlayingTask";
+import { BarLyricsEntry, BarMetaEntry } from "./BarSongEntries";
 import { useDeckSongSwap } from "./deckSongSwap";
 import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
 import "./DeckSongSwap.css";
@@ -358,6 +360,7 @@ interface PlayerDeckView {
 }
 
 const PLAYER_DECK_MEMORY_KEY = "kd-player-decks";
+const PLAYER_NOTICE_TASK = "player-notice";
 interface PlayerDeckMemory {
   leftId: number | null;
   rightId: number | null;
@@ -405,11 +408,11 @@ function viewForTrack(track: Track): PlayerDeckView {
  * and take props that do not change with the clock, so they sit out those renders.
  */
 const BarLyricsHost = memo(LyricsHost);
-const BarInfoHost = memo(NowPlayingInfoHost);
+const BarInfoHost = memo(NowPlayingTask);
 const BarModeButton = memo(PlaybackModeButton);
 const BarEq = memo(PlayerEq);
-const showToast = (text: string) => {
-  useToastStore.getState().show(text);
+const showEqNotice = (text: string) => {
+  showNotice(text);
 };
 
 /** A cover that is already loaded when its record appears (fetched during the exit) arrives with it. */
@@ -456,14 +459,15 @@ function PlayerDeck({
   // The card belongs to the playing song: on a change it shows the old song until that has been
   // swiped away, then the new one arrives (see useDeckSongSwap).
   const swap = useDeckSongSwap(view, `player-deck-${side}`);
-  // 曲目信息 rises from the bar's top edge (see NowPlayingInfoHost). The card reads whether it
-  // is up itself, so the panel coming and going re-renders the card and not the whole bar.
+  // 曲目信息 is the playing song's task bubble (see NowPlayingTask). The card reads whether it
+  // is up itself, so the bubble coming and going re-renders the card and not the whole bar.
   const expanded = useNowPlayingInfo(nowPlayingInfoVisible);
   const shown = swap.view;
   const [failedCover, setFailedCover] = useState("");
   const coverFailed = Boolean(shown?.cover) && failedCover === shown?.cover;
-  // 接歌途中保留当前/下一首的身份，交接完成后更新曲目。
-  const stateLabel = failed ? "播放失败" : resolving ? "加载中" : active ? "正在播放" : "下一首";
+  // The card shows the incoming song from the start of a transition; until the outgoing one
+  // has faded the label says that the two are being mixed.
+  const stateLabel = failed ? "播放失败" : resolving ? "加载中" : transitioning ? "正在接歌" : active ? "正在播放" : "下一首";
   return (
     <div
       className="kd-player-deck"
@@ -823,14 +827,15 @@ export function PlayerBar() {
   } | null>(null);
   const transitionVisualRef = useRef<typeof transitionVisual>(null);
   /**
-   * 播放/STEM 这类瞬时消息走全局右下角浮层；这里只留一份给媒体会话
-   * 判断是不是致命播放错误，不再插进底栏。
+   * The player's own message is one task bubble, replaced by the next message and taken away
+   * when playback is in order again. The copy kept here is what the media session publishes
+   * as its error.
    */
   const [notice, setNoticeState] = useState("");
   const setNotice = useCallback((text: string) => {
     setNoticeState(text);
-    if (text) useToastStore.getState().show(text);
-    else useToastStore.getState().dismiss();
+    if (text) showNotice(text, PLAYER_NOTICE_TASK);
+    else dismissTask(PLAYER_NOTICE_TASK);
   }, []);
   const [browserMediaStatus, setBrowserMediaStatus] = useState<PlayerSessionStatus>("idle");
   const [failedLoadTrackId, setFailedLoadTrackId] = useState<number | null>(null);
@@ -4165,11 +4170,16 @@ export function PlayerBar() {
         ? viewForTrack(physicalTracks[1])
         : null;
   }
-  // The bar presents roles; physical deck ownership can alternate underneath it.
-  const barCurrentIndex: 0 | 1 = transitionShowing ? transitionVisual.outgoingIndex : visualActiveIndex;
+  // The bar presents roles; physical deck ownership can alternate underneath it. A transition
+  // hands the card to the incoming song when it starts, the moment 曲目信息 and the waveform
+  // change, so the card turns with them whether or not the songs are mixed; the outgoing song
+  // is only heard out.
+  const barCurrentIndex: 0 | 1 = transitionShowing ? transitionVisual.incomingIndex : visualActiveIndex;
   const barNextIndex: 0 | 1 = barCurrentIndex === 0 ? 1 : 0;
   const currentBarView = barCurrentIndex === 0 ? leftDeckView : rightDeckView;
-  const nextBarView = barNextIndex === 0 ? leftDeckView : rightDeckView;
+  // What the next key would play. During a transition the other deck holds the song that is
+  // leaving, which is not what comes next.
+  const nextBarView = predictedDeckView;
   const deckPlaying = pipDriving && pipSession?.source === "network" ? pipPlaying : playing;
   const playbackVisualRate = pipDriving
     ? 1
@@ -4700,6 +4710,7 @@ export function PlayerBar() {
             >
               <Blend size={14} />
             </button>
+            <BarLyricsEntry />
             {/* 歌词和弹窗各管各的：歌词键只开关悬浮歌词，弹窗键只开关画面小窗。 */}
             {canDesktopLyrics && !video ? (
               <button
@@ -4849,6 +4860,8 @@ export function PlayerBar() {
         <div className="kd-player-transport-side" data-side="right">
 
         <BarModeButton />
+        {/* A library song is edited where an online one is downloaded: the two never meet. */}
+        {!pipDriving && displayTrack && usesLocalLibraryRecord(displayTrack) ? <BarMetaEntry trackId={displayTrack.id} /> : null}
         {downloadSource ? (
           <button
             type="button"
@@ -4900,7 +4913,7 @@ export function PlayerBar() {
         onDrop={(event) => void dropOnDeck(event, "right")}
       >
         {/* 旋钮失败只是一条提示，不能改写媒体会话的错误文案。 */}
-        <BarEq onError={showToast} />
+        <BarEq onError={showEqNotice} />
       </div>
 
       <div className="kd-player-scrub">

@@ -230,18 +230,13 @@
   border-color: var(--s98-shadow);
   box-shadow: inset 1px 0 var(--s98-white);
 }
-:root[data-theme-pack="sakulaptop98"] :is(.kd-dialog, .kd-context-menu, .kd-toast, .kd-lyrics-source-menu,
+:root[data-theme-pack="sakulaptop98"] :is(.kd-dialog, .kd-context-menu, .kd-lyrics-source-menu,
   .kd-media-tools-dialog, .vj-subtitle-dialog, .vj-dialog, .vj-menu) {
   background: var(--kd-panel);
   color: var(--kd-text);
   border: 1px solid transparent;
   border-radius: 2px;
   box-shadow: var(--kd-shadow-float);
-}
-/* Notifications must not sit over the seek surface or transport controls. */
-:root[data-theme-pack="sakulaptop98"] .kd-toast {
-  top: calc(var(--kd-chrome-top) + var(--kd-safe-top, 0px) + 0.5rem);
-  bottom: auto;
 }
 :root[data-theme-pack="sakulaptop98"] .kd-dialog-foot {
   background: var(--s98-face);

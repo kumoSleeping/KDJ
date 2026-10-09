@@ -1,0 +1,308 @@
+/* 任务信息: task bubbles (docs/task-bubbles.md). The host covers the window above the player bar
+   and clips at the bar's top edge, so a bubble emerges from behind that edge although its
+   resting place is detached from the bar: a gap to the bar and to the window edge, round on
+   every corner, lifted by a soft shadow and no drawn line. */
+.kd-task-host {
+  --kd-task-gap: 12px;
+  position: fixed;
+  z-index: 120;
+  top: 0;
+  right: 0;
+  bottom: var(--kd-task-floor, 0px);
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+/* A bubble's place in the stack. The newest rests at the bottom; each one that stays lifts the
+   older ones by its own height (--kd-task-lift, measured by the host). */
+.kd-task-slot {
+  position: absolute;
+  right: var(--kd-task-gap);
+  bottom: var(--kd-task-gap);
+  width: min(24rem, calc(100% - 2 * var(--kd-task-gap)));
+  transform: translateY(calc(-1 * var(--kd-task-lift, 0px)));
+  transition: transform var(--kd-task-in) var(--kd-task-in-ease);
+}
+.kd-task {
+  /* From its place down to below the bar's edge, shadow included. */
+  --kd-task-drop: calc(100% + var(--kd-task-gap) + var(--kd-task-lift, 0px) + 20px);
+  --kd-task-surface: color-mix(in srgb, var(--kd-text) 6%, var(--kd-panel));
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--kd-task-surface);
+  box-shadow: 0 14px 34px -10px rgb(0 0 0 / 0.7), 0 2px 10px -2px rgb(0 0 0 / 0.5);
+  color: var(--kd-text);
+  font: var(--kd-size-sm)/1.35 var(--kd-font);
+  pointer-events: auto;
+  will-change: transform;
+}
+:root[data-theme="light"] .kd-task {
+  --kd-task-surface: var(--kd-panel);
+  box-shadow: 0 12px 30px -12px rgb(30 34 44 / 0.3), 0 2px 8px -2px rgb(30 34 44 / 0.14);
+}
+/* 460 ms up and 360 ms down: the song-change clock (src/lib/songSwapMotion.ts), which the host
+   passes in. Both ends of every keyframe are written out: WebKit keeps an animation with an
+   implied keyframe on the main thread. */
+.kd-task[data-phase="in"] { animation: kd-task-rise var(--kd-task-in) var(--kd-task-in-ease) both; }
+.kd-task[data-phase="out"] { animation: kd-task-sink var(--kd-task-out) var(--kd-task-out-ease) both; }
+@keyframes kd-task-rise {
+  from { transform: translateY(var(--kd-task-drop)); }
+  to { transform: translateY(0); }
+}
+@keyframes kd-task-sink {
+  from { transform: translateY(0); }
+  to { transform: translateY(var(--kd-task-drop)); }
+}
+@keyframes kd-task-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes kd-task-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-task-slot { transition: none; }
+  .kd-task[data-phase="in"] { animation: kd-task-fade-in 140ms linear both; }
+  .kd-task[data-phase="out"] { animation: kd-task-fade-out 140ms linear both; }
+}
+
+.kd-task-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 3.25rem;
+  padding: 8px 8px 8px 10px;
+}
+.kd-task-main[data-opens] { cursor: pointer; }
+/* Only the actions are left above an open body that restates the summary. */
+.kd-task-main[data-bare] {
+  min-height: 0;
+  padding-bottom: 4px;
+}
+
+/* Covers: one alone, or up to three overlapping with the count of the rest beside them. Each
+   later cover is tucked under the one before it and keeps a rim of the surface around it. */
+.kd-task-covers,
+.kd-task-cover-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+.kd-task-cover-row { position: relative; }
+.kd-task-cover {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  overflow: hidden;
+  border-radius: 7px;
+}
+.kd-task-cover > img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.kd-task-cover:not([data-face="image"]) > img { opacity: 0; }
+.kd-task-cover > .kd-vinyl-placeholder { width: 92%; height: 92%; }
+.kd-task-covers:not([data-count="1"]) .kd-task-cover {
+  width: 2.1rem;
+  height: 2.1rem;
+  box-shadow: 0 0 0 2px var(--kd-task-surface);
+}
+.kd-task-cover + .kd-task-cover { margin-left: -0.8rem; }
+.kd-task-cover:nth-child(1) { z-index: 3; }
+.kd-task-cover:nth-child(2) { z-index: 2; }
+.kd-task-cover:nth-child(3) { z-index: 1; }
+/* How a task with covers ended: a small mark on the corner of the stack. */
+.kd-task-badge {
+  position: absolute;
+  z-index: 4;
+  right: -5px;
+  bottom: -4px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--kd-task-surface);
+  color: var(--kd-ok);
+}
+.kd-task[data-tone="error"] .kd-task-badge { color: var(--kd-warn); }
+.kd-task-more {
+  margin-left: 6px;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+/* Without a cover, a mark says what kind of report this is. */
+.kd-task-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  color: var(--kd-muted);
+}
+.kd-task[data-tone="success"] .kd-task-mark { color: var(--kd-ok); }
+/* Amber, not red: red is what is selected or acted on here. */
+.kd-task[data-tone="error"] .kd-task-mark { color: var(--kd-warn); }
+
+.kd-task-copy {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 1px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+button.kd-task-copy { cursor: pointer; }
+button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-offset: 3px; border-radius: 4px; }
+.kd-task-title {
+  min-width: 0;
+  font-weight: 650;
+}
+/* An error is read in full rather than scrolled past. */
+.kd-task-title[data-wrap] {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+.kd-task-detail,
+.kd-task-facts {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-task-facts {
+  display: flex;
+  gap: 0.6rem;
+  color: var(--kd-faint);
+  font-variant-numeric: tabular-nums;
+}
+.kd-task-facts > span { flex: none; }
+.kd-task-progress {
+  display: block;
+  height: 3px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kd-muted) 24%, transparent);
+}
+.kd-task-progress > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--kd-text-body);
+  transform-origin: 0 50%;
+  transition: transform 240ms linear;
+}
+.kd-task[data-tone="success"] .kd-task-progress > i { background: var(--kd-ok); }
+
+.kd-task-tools {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 1px;
+  margin-left: auto;
+}
+.kd-task-action {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.kd-task-action:hover { color: var(--kd-text); }
+.kd-task-action:focus-visible { outline: 1px solid var(--kd-theme); outline-offset: -1px; }
+.kd-task-action[aria-pressed="true"] { color: var(--kd-theme); }
+/* The stay: a ring that empties, paused while the stack is in use. */
+.kd-task-countdown {
+  width: 14px;
+  height: 14px;
+  margin-right: 3px;
+  transform: rotate(-90deg);
+  pointer-events: none;
+}
+.kd-task-countdown > circle {
+  fill: none;
+  stroke: color-mix(in srgb, var(--kd-muted) 30%, transparent);
+  stroke-width: 1.6;
+}
+.kd-task-countdown > circle + circle {
+  stroke: var(--kd-muted);
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  animation: kd-task-countdown var(--kd-task-stay, 5s) linear both;
+}
+.kd-task[data-held] .kd-task-countdown > circle + circle { animation-play-state: paused; }
+@keyframes kd-task-countdown {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: 1; }
+}
+
+/* The fuller content of an expanded bubble. */
+.kd-task-body {
+  max-height: min(26rem, calc(100dvh - var(--kd-task-floor, 0px) - 9rem));
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 12px 12px;
+  animation: kd-task-fade-in 160ms linear both;
+}
+
+/* Sakura98: a small window of its own — the pack's face, its bevel and hard drop, squared. */
+:root[data-theme-pack="sakulaptop98"] .kd-task {
+  --kd-task-surface: var(--s98-face);
+  border-radius: 3px;
+  box-shadow: var(--kd-shadow-float);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-main { padding: 9px 9px 9px 11px; }
+:root[data-theme-pack="sakulaptop98"] .kd-task-cover {
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--s98-shadow);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-covers:not([data-count="1"]) .kd-task-cover {
+  box-shadow: 0 0 0 1px var(--s98-shadow), 0 0 0 2px var(--s98-face);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-action {
+  border-radius: 2px;
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+  color: var(--kd-text-body);
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-tools { gap: 3px; }
+:root[data-theme-pack="sakulaptop98"] .kd-task-action:hover { color: var(--kd-theme); }
+:root[data-theme-pack="sakulaptop98"] .kd-task-action:active,
+:root[data-theme-pack="sakulaptop98"] .kd-task-action[aria-pressed="true"] {
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-action[aria-pressed="true"] { color: var(--kd-theme); }
+:root[data-theme-pack="sakulaptop98"] .kd-task-progress {
+  height: 6px;
+  border-radius: 0;
+  background: var(--kd-panel);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-progress > i { background: var(--kd-theme); border-radius: 0; }

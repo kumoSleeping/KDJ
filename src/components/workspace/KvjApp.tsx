@@ -4,7 +4,7 @@ import { connectEvents, selectConnected, useAppStore } from "../../stores/appSto
 import type { KvjTab } from "../../stores/kvjStore";
 import { useWorkshopDrop } from "../../lib/workshopDrop";
 import { api } from "../../lib/api";
-import { ToastHost } from "../common";
+import { TaskBubbleHost } from "../tasks/TaskBubbleHost";
 import { AppChrome } from "../chrome/AppChrome";
 import { ChromeThemeButton } from "../chrome/ChromeActions";
 import { CompositionWorkshop } from "../composition/CompositionWorkshop";
@@ -60,6 +60,6 @@ export function KvjApp({ tab }: { tab: KvjTab }) {
     {ready ? <EditorPanel tab={tab} />
       : <div className="kd-kvj-loading" role="status">{booting ? <LoaderCircle className="kd-spin" size={20} />
         : <><span>{error}</span><button type="button" aria-label="重试连接" title="重试连接" onClick={() => void bootEditor()}><RefreshCw size={16} /></button></>}</div>}
-    <ToastHost />
+    <TaskBubbleHost sources={["exports"]} />
   </div>;
 }

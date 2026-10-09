@@ -3052,8 +3052,8 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* ============================================================
  * 就地提示（InlineNotice）
  * ------------------------------------------------------------
- * 面板里、按钮旁边的失败回执仍贴在出事的地方。瞬时消息（播放/STEM）
- * 走右下角 .kd-toast，10 秒后自己弹回，不再插进播放条。
+ * 面板里、按钮旁边的失败回执仍贴在出事的地方。瞬时消息（播放失败等）
+ * 是一条任务信息（docs/task-bubbles.md），不再插进播放条。
  *
  * 提示保持紧凑，错误与操作状态按实际语义呈现。
  * 也没有左侧竖条一类的装饰，就是一枚芯片加一行字。
@@ -3082,63 +3082,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   padding: 0.3rem 0.5rem;
 }
 
-@keyframes kd-toast-in {
-  from { transform: translateY(110%); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-@keyframes kd-toast-out {
-  from { transform: translateY(0); opacity: 1; }
-  to { transform: translateY(110%); opacity: 0; }
-}
-.kd-toast {
-  position: fixed;
-  right: 0.7rem;
-  bottom: calc(0.7rem + env(safe-area-inset-bottom, 0px));
-  z-index: 120;
-  display: flex;
-  align-items: center;
-  max-width: min(32rem, calc(100% - 1.1rem));
-  gap: 0.45rem;
-  padding: 0.38rem 0.48rem;
-  border: 1px solid var(--kd-line);
-  background: color-mix(in srgb, var(--kd-panel-raised) 94%, transparent);
-  box-shadow: 0 5px 18px rgba(0,0,0,0.28);
-  color: var(--kd-text);
-  font: 650 var(--kd-size)/1.35 var(--kd-font);
-  animation: kd-toast-in 180ms var(--kd-pop-ease) both;
-}
-.kd-toast[data-leaving="true"] {
-  animation: kd-toast-out 180ms ease-in both;
-}
-/* 主窗口里停在播放条上方：右下角是 EQ，提示不能盖住正在拧的旋钮。 */
-.kd-app[data-work-mode="manager"] .kd-toast {
-  bottom: calc(var(--kd-player-h) + 3.3rem + env(safe-area-inset-bottom, 0px));
-}
-.kd-app[data-work-mode="manager"][data-tall="true"] .kd-toast {
-  bottom: calc(var(--kd-player-h) + 9rem + env(safe-area-inset-bottom, 0px));
-}
-@media (max-width: 560px) {
-  .kd-app[data-work-mode="manager"][data-tall="true"] .kd-toast {
-    bottom: calc(var(--kd-player-h) + 12.8rem + env(safe-area-inset-bottom, 0px));
-  }
-}
-.kd-toast > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-toast > button {
-  flex: none;
-  width: 1.1rem;
-  height: 1.1rem;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-}
-
 /* ============================================================
  * 侧方弹出动画（Sheet / 桌面右栏 / 对话框共用）
  * 只改 :root 的 --kd-pop-* 或下面两段 keyframes，全部弹出一起变。
@@ -3159,9 +3102,7 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-pop-panel,
-  .kd-pop-scrim,
-  .kd-toast,
-  .kd-toast[data-leaving="true"] {
+  .kd-pop-scrim {
     animation: none;
   }
 }
@@ -6788,10 +6729,25 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-player-popupbtn[data-on="true"]:hover:not(:disabled) {
   color: var(--kd-theme-strong);
 }
+/* 歌词 and 编辑 Meta, the bar's entries of the song: the same quiet keys, red while what they
+   open is open. They need a little more room beside the transport than the bar has on a
+   narrow window, where they are left out; the song's task bubble still offers both. */
+.kd-player-songbtn { width: 1.45rem; }
+.kd-player-songbtn[data-on="true"] { color: var(--kd-theme); }
+.kd-player-songbtn[data-on="true"]:hover:not(:disabled) { color: var(--kd-theme-strong); }
+@media (min-width: 1200px) {
+  .kd-app:not([data-tall="true"]) .kd-player-transport { width: min(31.5rem, 100%); }
+}
+@media (max-width: 1199px) {
+  .kd-app:not([data-tall="true"]) .kd-player-songbtn { display: none; }
+}
+@media (max-width: 479px) {
+  .kd-app[data-tall="true"] .kd-player-songbtn { display: none; }
+}
 /* Sakura latches switches while enabled and the mode button while its menu is
    open. Transport/download/reroll actions retain only the theme's :active feedback.
    Apply here so already-installed theme packs receive the fix through HMR too. */
-:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn)[aria-pressed="true"],
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn, .kd-player-songbtn)[aria-pressed="true"],
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-mode[aria-expanded="true"] {
   color: var(--kd-theme);
   box-shadow: var(--s98-sunken);
