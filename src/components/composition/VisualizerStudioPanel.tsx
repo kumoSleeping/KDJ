@@ -17,7 +17,6 @@ import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { FloatingVideoControls, FloatingVideoScrub } from "../player/FloatingVideoControls";
 import { FloatingPreviewFrame } from "../player/FloatingPreviewFrame";
 import { useToastStore } from "../../stores/toastStore";
-import { noteVisualizerExportSong } from "../tasks/taskCovers";
 import { getCompositionClock } from "../../lib/compositionPlayback";
 import { prefersReducedSeekMotion, SEEK_TRANSITION_MS } from "../../lib/seekTransition";
 import { useVisualizerPopup } from "../../lib/visualizerPopup";
@@ -467,10 +466,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     if (!draft || !prepared || busy || analyzing) return;
     setBusy(true); setNotice("");
     try {
-      // The export's task bubble is drawn from the queue itself; it only needs to know the song.
-      noteVisualizerExportSong(draft.project.track.id);
       await useVisualizerExportStore.getState().enqueue(draft);
-    } catch (error) { noteVisualizerExportSong(0); setNotice(`加入导出队列失败：${message(error)}`); }
+    } catch (error) { setNotice(`加入导出队列失败：${message(error)}`); }
     finally { setBusy(false); }
   }
   function seek(time: number) {

@@ -109,7 +109,7 @@ function watchExports(): () => void {
       const before = phases.get(key);
       const added = before === undefined && task.createdAt >= since;
       phases.set(key, task.phase);
-      const cover = visualizerTaskCover(task.id, added);
+      const cover = visualizerTaskCover(task);
       // Added to the queue but not started: say so once, as the queue's own bubble.
       if (added && task.phase === "ready" && !tasksShow("exports")) {
         showTask({ id: "exports", kind: "export", title: task.name, detail: "已加入导出队列",
