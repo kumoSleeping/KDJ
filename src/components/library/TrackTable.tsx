@@ -23,12 +23,13 @@ import {
   Video,
   Image as ImageIcon,
 } from "lucide-react";
-import { libraryViewport, restoreLibraryAnchor } from "../../lib/libraryViewport";
+import { libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../../lib/libraryViewport";
+import { attachWheelScroll } from "../../lib/wheelScroll";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
-import { acquireCoverThumbnail, type CoverThumbnailLease } from "../../lib/coverThumbnailQueue";
+import { acquireCoverThumbnail, peekCoverThumbnail, type CoverThumbnailLease } from "../../lib/coverThumbnailQueue";
 import { OverlayScrollbars } from "../common/OverlayScrollbars";
-import { CoverImage } from "../common/VinylPlaceholder";
+import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
 import { TableRating } from "../common/TableRating";
 import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
@@ -321,10 +322,14 @@ export interface TrackTableProps {
  */
 function TrackCoverThumb({ track, priority }: { track: TrackSummary; priority: number }) {
   const [attempt, setAttempt] = useState(0);
-  const [cover, setCover] = useState("");
   const retryTimer = useRef<number | null>(null);
   const leaseRef = useRef<CoverThumbnailLease | null>(null);
   const isVideo = isVideoTrack(track.format);
+  const revision = isVideo ? `${track.modified_at}-${attempt}` : track.modified_at;
+  const key = `${track.id}:${revision}:64`;
+  // 首帧直接用已有结论：缓存里的封面、或已知没有封面。结论未知时格子保持空白，
+  // 不先画唱盘再换成封面；同一行换修订时，旧图留到新图到达。
+  const [shown, setShown] = useState(() => peekCoverThumbnail(key));
 
   useEffect(() => {
     setAttempt(0);
@@ -332,17 +337,18 @@ function TrackCoverThumb({ track, priority }: { track: TrackSummary; priority: n
 
   useEffect(() => {
     let alive = true;
-    setCover("");
-    const revision = isVideo ? `${track.modified_at}-${attempt}` : track.modified_at;
-    const key = `${track.id}:${revision}:64`;
     const lease = acquireCoverThumbnail(key, api.coverUrl(track.id, revision, 64), priority);
     leaseRef.current = lease;
     void lease.promise
       .then((objectUrl) => {
-        if (alive && objectUrl) setCover(objectUrl);
+        if (alive && objectUrl) setShown((current) => current.src === objectUrl ? current : { src: objectUrl, missing: false });
       })
       .catch(() => {
-        if (!alive || !isVideo || attempt >= 12) return;
+        if (!alive) return;
+        if (!isVideo || attempt >= 12) {
+          setShown({ src: "", missing: true });
+          return;
+        }
         // 后端热重启 / 首次抽帧排队时稍候再试。每次换 URL，失败缓存不会卡住重试。
         retryTimer.current = window.setTimeout(() => {
           retryTimer.current = null;
@@ -356,16 +362,16 @@ function TrackCoverThumb({ track, priority }: { track: TrackSummary; priority: n
       if (leaseRef.current === lease) leaseRef.current = null;
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
     };
-  }, [attempt, isVideo, track.id, track.modified_at]);
+  }, [key]);
   useEffect(() => { leaseRef.current?.setPriority(priority); }, [priority]);
 
   return (
     <span className="kd-thumb" draggable={false}>
-      {isVideo ? (
-        cover ? <img key={cover} src={cover} alt="" draggable={false} /> : null
-      ) : (
-        <CoverImage src={cover} loading="lazy" />
-      )}
+      {shown.src ? (
+        isVideo ? <img key={shown.src} src={shown.src} alt="" draggable={false} /> : <CoverImage src={shown.src} />
+      ) : shown.missing && !isVideo ? (
+        <VinylPlaceholder />
+      ) : null}
     </span>
   );
 }
@@ -450,7 +456,6 @@ function trackCell(
   selectionControl?: React.ReactNode,
   onRate?: (rating: number) => void,
   coverPriority = 1,
-  textOnly = false,
 ) {
   switch (key) {
     case "title":
@@ -459,7 +464,7 @@ function trackCell(
           {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          {textOnly ? <span className="kd-thumb" draggable={false} /> : <TrackCoverThumb track={track} priority={coverPriority} />}
+          <TrackCoverThumb track={track} priority={coverPriority} />
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -549,7 +554,7 @@ function trackCell(
     case "rating":
       return (
         <td key={key} data-col="rating">
-          {textOnly ? null : <TableRating value={track.rating} onChange={onRate} />}
+          <TableRating value={track.rating} onChange={onRate} />
         </td>
       );
     default:
@@ -566,8 +571,6 @@ interface TrackCellsProps {
   keyNotation: KeyNotation;
   selectionMode: boolean;
   selected: boolean;
-  /** 快速滚动中：新挂载的行先只画文字，封面和评分控件等停下再补。 */
-  textOnly: boolean;
   onToggle(id: number): void;
   onRate(id: number, rating: number): void;
 }
@@ -585,13 +588,9 @@ const TrackCells = memo(function TrackCells({
   keyNotation,
   selectionMode,
   selected,
-  textOnly,
   onToggle,
   onRate,
 }: TrackCellsProps) {
-  // 已经画全的行不退回纯文字：封面在滚动开始时消失再出现，比一直留着更扎眼。
-  const fullRef = useRef(!textOnly);
-  if (!textOnly) fullRef.current = true;
   return (
     <>
       {showIndex ? <td data-col="index">{displayIndex}</td> : null}
@@ -616,7 +615,6 @@ const TrackCells = memo(function TrackCells({
           ) : undefined,
           column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
           coverPriority,
-          !fullRef.current,
         ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
         return cloneElement(
           cell,
@@ -629,12 +627,6 @@ const TrackCells = memo(function TrackCells({
       <td className="kd-table-fill" aria-hidden="true" />
     </>
   );
-}, (previous, next) => {
-  // 进入快速滚动不重画已有的行（它们保持画全）；只有滚动停下才需要把纯文字行补全。
-  for (const key of Object.keys(next) as (keyof TrackCellsProps)[]) {
-    if (key === "textOnly" ? previous.textOnly && !next.textOnly : previous[key] !== next[key]) return false;
-  }
-  return true;
 });
 
 /** 摘要还没到的行：列结构和真实行相同，数据到达时只换内容，不重新排版。 */
@@ -680,8 +672,6 @@ const PENDING_STATES = new Set(["queued", "running", "processing", "paused", "fa
  * （见 TrackTable 里的量测 effect），这里只是首帧还没量到时的占位。
  */
 const FALLBACK_ROW_H = 36;
-/** px/ms。超过这个速度单行已经读不清，封面和评分控件留到停下再画。 */
-const TEXT_ONLY_SCROLL_VELOCITY = 2.4;
 /** 原生拖放结束回调早于 WebView 清掉边缘自动滚动，留一小段静默期吞掉尾帧。 */
 const EXTERNAL_DRAG_SCROLL_SETTLE_MS = 240;
 
@@ -763,7 +753,6 @@ export const TrackTable = memo(function TrackTable({
   const indexById = useTableStore((state) => state.indexById);
   const summaryById = useTableStore((state) => state.summaryById);
   const queryVersion = useTableStore((state) => state.queryVersion);
-  const requestLatency = useTableStore((state) => state.requestLatency);
   const ensureRange = useTableStore((state) => state.ensureRange);
   const loadingMore = useTableStore((state) => state.loadingMore);
   const settings = useAppStore((state) => state.settings);
@@ -874,6 +863,8 @@ export const TrackTable = memo(function TrackTable({
       pointerDragCleanupRef.current?.();
       htmlExternalDragScrollUnlockRef.current?.();
       resizeObserverRef.current?.disconnect();
+      wheelScrollCleanupRef.current?.();
+      wheelScrollCleanupRef.current = null;
       // 两个 ref 都要归零：留着已取消的帧号，onScroll 会一直以为还有一帧在排队。
       if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
       scrollRafRef.current = 0;
@@ -1415,25 +1406,20 @@ export const TrackTable = memo(function TrackTable({
   const scrollRestoreDoneRef = useRef(false);
   const anchorRef = useRef({ id: null as number | null, index: 0, offset: 0 });
   const previousQueryRef = useRef(queryVersion);
-  const scrollVelocityRef = useRef(0);
-  const scrollTravelRef = useRef(0);
   const [headerH, setHeaderH] = useState(28);
+  const headerHRef = useRef(28);
   const [rootFont, setRootFont] = useState(16);
-  /** 虚拟滚动需要的滚动位置/视口高度；一帧最多重算一次（见 onScroll）。 */
+  /** 渲染窗口的基准位置（按步长取整，见 libraryWindowTop）和视口高度。 */
   const [view, setView] = useState({ top: 0, height: 0 });
-  const [fastScrolling, setFastScrolling] = useState(false);
-  /** 快到看不清单行时，新进入窗口的行只画文字（见 TrackCells）。 */
-  const [textOnlyRows, setTextOnlyRows] = useState(false);
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
   const rowHRef = useRef(FALLBACK_ROW_H);
   /** 横向滚动不能进入虚拟列表更新链；否则拖底部横滚条时每帧重渲染整张可视表。 */
   const scrollTopRef = useRef(0);
   const scrollRafRef = useRef(0);
-  const scrollSampleRef = useRef({ top: 0, at: 0 });
-  const fastScrollingRef = useRef(false);
-  const textOnlyRowsRef = useRef(false);
   const scrollIdleTimerRef = useRef<number | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const wheelScrollCleanupRef = useRef<(() => void) | null>(null);
+  const syncWindowRef = useRef<() => void>(() => {});
   /** 滚动容器 ref：身份必须稳定（见 JSX 处的注释）。值没变就不 setState，
       否则 ResizeObserver 的初次回调会和自己触发的重渲染互相喂食。 */
   const trackScrollerRef = useCallback((el: HTMLDivElement | null) => {
@@ -1443,10 +1429,13 @@ export const TrackTable = memo(function TrackTable({
     // 视口高度决定渲染窗口：面板拖宽拖窄、窗口缩放都要重算。
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
+    wheelScrollCleanupRef.current?.();
+    wheelScrollCleanupRef.current = null;
     if (el) {
+      wheelScrollCleanupRef.current = attachWheelScroll(el, () => rowHRef.current, () => syncWindowRef.current());
       const updateView = () =>
         setView((current) => {
-          const top = el.scrollTop;
+          const top = libraryWindowTop(el.scrollTop, rowHRef.current);
           const height = el.clientHeight;
           return current.top === top && current.height === height ? current : { top, height };
         });
@@ -1644,6 +1633,39 @@ export const TrackTable = memo(function TrackTable({
   selectedIdRef.current = selectedId;
   pendingCountRef.current = pendingDownloads.length;
 
+  /**
+   * 把渲染窗口对齐到滚动容器此刻的位置，并在当前帧内提交（flushSync）：滚动位置和它
+   * 对应的行必须在同一帧画出来。只在 React 之外（动画帧）调用。
+   */
+  const syncWindow = useCallback(() => {
+    const node = scrollerRef.current;
+    if (!node) return;
+    const rowHeight = rowHRef.current;
+    const pending = pendingCountRef.current;
+    const ids = libraryStore.getState().orderedIds;
+    const maxTop = Math.max(0, (ids.length + pending) * rowHeight + headerHRef.current - node.clientHeight);
+    if (node.scrollTop > maxTop) node.scrollTop = maxTop;
+    const top = node.scrollTop;
+    if (top !== scrollTopRef.current) {
+      scrollTopRef.current = top;
+      const index = Math.max(0, Math.floor(top / rowHeight) - pending);
+      anchorRef.current = { id: ids[index] ?? null, index, offset: top % rowHeight };
+      if (persistentSession) {
+        if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
+        scrollIdleTimerRef.current = window.setTimeout(() => {
+          scrollIdleTimerRef.current = null;
+          const anchor = anchorRef.current;
+          updateLocalWorkspaceSession({ scrollTop: scrollTopRef.current, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
+        }, 140);
+      }
+    }
+    const next = { top: libraryWindowTop(top, rowHeight), height: node.clientHeight };
+    flushSync(() => {
+      setView((current) => current.top === next.top && current.height === next.height ? current : next);
+    });
+  }, [libraryStore, persistentSession]);
+  syncWindowRef.current = syncWindow;
+
   useLayoutEffect(() => {
     const box = scrollerRef.current;
     if (!box) return;
@@ -1656,6 +1678,7 @@ export const TrackTable = memo(function TrackTable({
         setRowH(height);
       }
       const header = box.querySelector("thead")?.getBoundingClientRect().height ?? 28;
+      headerHRef.current = header;
       setHeaderH((old) => Math.abs(old - header) > 0.5 ? header : old);
     };
     measure();
@@ -1669,9 +1692,7 @@ export const TrackTable = memo(function TrackTable({
   }, [total > 0, layout, colPrefs, pendingDownloads.length > 0]);
 
   const viewport = libraryViewport({ total, pending: pendingDownloads.length, top: view.top,
-    height: view.height || 720, rowHeight: rowH, headerHeight: headerH,
-    velocity: fastScrolling ? scrollVelocityRef.current : 0,
-    travel: fastScrolling ? scrollTravelRef.current : 0, latency: requestLatency });
+    height: view.height || 720, rowHeight: rowH, headerHeight: headerH });
   const { start: winStart, end: winEnd } = viewport;
   const windowedTracks = orderedIds.slice(viewport.trackStart, viewport.trackEnd)
     .map((id, offset) => ({ id, track: summaryById.get(id), index: viewport.trackStart + offset }));
@@ -1700,7 +1721,8 @@ export const TrackTable = memo(function TrackTable({
     desired = Math.min(viewport.maxTop, Math.max(0, desired));
     if (Math.abs(box.scrollTop - desired) > 0.5) box.scrollTop = desired;
     scrollTopRef.current = box.scrollTop;
-    setView((old) => old.top === desired && old.height === box.clientHeight ? old : { top: desired, height: box.clientHeight });
+    const windowTop = libraryWindowTop(desired, rowH);
+    setView((old) => old.top === windowTop && old.height === box.clientHeight ? old : { top: windowTop, height: box.clientHeight });
     const index = Math.max(0, Math.floor(desired / rowH) - pendingDownloads.length);
     anchorRef.current = { id: orderedIds[index] ?? null, index, offset: desired % rowH };
   }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop]);
@@ -1731,62 +1753,16 @@ export const TrackTable = memo(function TrackTable({
       // 和滚动重算都不会再空转渲染。
       ref={trackScrollerRef}
       onScroll={(event) => {
-        const el = event.currentTarget;
-        const top = el.scrollTop;
-        // 这一个容器同时横滚和竖滚。底部横滚条每移动一个像素也会发 scroll；
-        // 旧代码不看方向就 requestAnimationFrame → setView(新对象)，导致可视区
-        // 没变也每帧重渲染几十行表格，主线程被占后原生 thumb 只能顿一下再追上。
-        // 横滚完全不影响虚拟窗口，必须在进入 React/预取路径前同步退出。
-        if (top === scrollTopRef.current) return;
-        scrollTopRef.current = top;
-        // 竖向滚动事件比帧率高得多；只对真正变化的 scrollTop 一帧合并一次。
-        if (scrollRafRef.current) return;
-        scrollRafRef.current = requestAnimationFrame(() => {
-          scrollRafRef.current = 0;
-          const node = scrollerRef.current;
-          if (!node) return;
-          const count = libraryStore.getState().orderedIds.length + pendingCountRef.current;
-          const maxTop = Math.max(0, count * rowHRef.current + headerH - node.clientHeight);
-          if (node.scrollTop > maxTop) node.scrollTop = maxTop;
-          const now = performance.now();
-          const previous = scrollSampleRef.current;
-          const elapsed = Math.max(1, now - previous.at);
-          const signedVelocity = previous.at > 0 ? (node.scrollTop - previous.top) / elapsed : 0;
-          const velocity = Math.abs(signedVelocity);
-          scrollVelocityRef.current = signedVelocity;
-          scrollTravelRef.current = previous.at > 0 ? Math.abs(node.scrollTop - previous.top) : 0;
-          scrollSampleRef.current = { top: node.scrollTop, at: now };
-          const enterFast = velocity > 0.8 && !fastScrollingRef.current;
-          const enterTextOnly = velocity > TEXT_ONLY_SCROLL_VELOCITY && !textOnlyRowsRef.current;
-          if (enterFast) fastScrollingRef.current = true;
-          if (enterTextOnly) textOnlyRowsRef.current = true;
-          const windowAt = () => ({ top: Math.floor(node.scrollTop / rowHRef.current) * rowHRef.current, height: node.clientHeight });
-          if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
-          scrollIdleTimerRef.current = window.setTimeout(() => {
-            scrollIdleTimerRef.current = null;
-            fastScrollingRef.current = false;
-            setFastScrolling(false);
-            textOnlyRowsRef.current = false;
-            setTextOnlyRows(false);
-            // 停下后的窗口以滚动容器此刻的实际位置为准，不依赖最后一帧是否送达。
-            const rest = windowAt();
-            setView((current) => current.top === rest.top && current.height === rest.height ? current : rest);
-            const anchor = anchorRef.current;
-            if (persistentSession) updateLocalWorkspaceSession({ scrollTop: node.scrollTop, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
-          }, 140);
-          const index = Math.max(0, Math.floor(node.scrollTop / rowHRef.current) - pendingCountRef.current);
-          anchorRef.current = { id: libraryStore.getState().orderedIds[index] ?? null, index, offset: node.scrollTop % rowHRef.current };
-          const next = windowAt();
-          // 这一帧就把新窗口提交进 DOM。普通 setState 会排到本帧绘制之后：滚动位置已经
-          // 画出来，对应的行却晚一帧以上才到；拖滑块时每帧都换一整屏，于是一直是空白。
-          flushSync(() => {
-            if (enterFast) setFastScrolling(true);
-            if (enterTextOnly) setTextOnlyRows(true);
-            setView((current) =>
-              current.top === next.top && current.height === next.height ? current : next,
-            );
+        // 这一个容器同时横滚和竖滚；横滚不影响虚拟窗口，在进入 React 之前退出。
+        if (event.currentTarget.scrollTop === scrollTopRef.current) return;
+        // 滚轮和触控板由 attachWheelScroll 在本帧内同步完成；这里处理其余来源
+        //（拖滑块、键盘、触摸、定位），一帧合并一次。
+        if (!scrollRafRef.current) {
+          scrollRafRef.current = requestAnimationFrame(() => {
+            scrollRafRef.current = 0;
+            syncWindow();
           });
-        });
+        }
       }}
     >
       {/* 批选动作在曲库半栏 LibraryWorkRail，这里不再单独占一条。 */}
@@ -2097,7 +2073,6 @@ export const TrackTable = memo(function TrackTable({
                 keyNotation={keyNotation}
                 selectionMode={selectionMode}
                 selected={selected.has(track.id)}
-                textOnly={textOnlyRows}
                 onToggle={toggleTrackSelection}
                 onRate={rateTrack}
               />

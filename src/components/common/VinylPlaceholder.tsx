@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 /** 没有封面时使用的小黑胶唱盘；尺寸跟随父容器，列表和详情共用同一张脸。 */
 export function VinylPlaceholder({ className = "" }: { className?: string }) {
@@ -30,11 +30,11 @@ export function CoverImage({
   /** 某些入口有比唱盘更准确的空封面语义，例如歌单搜索用列表图标。 */
   fallback?: ReactNode;
 }) {
-  const [failed, setFailed] = useState(!src);
+  // Remember which URL failed instead of a flag that an effect resets: a new `src` is then
+  // shown in the render that delivers it, not one commit later behind the placeholder.
+  const [failedSrc, setFailedSrc] = useState("");
 
-  useEffect(() => setFailed(!src), [src]);
-
-  if (failed) return fallback ?? <VinylPlaceholder />;
+  if (!src || failedSrc === src) return fallback ?? <VinylPlaceholder />;
   return (
     <img
       src={src}
@@ -44,7 +44,7 @@ export function CoverImage({
       draggable={draggable}
       referrerPolicy={referrerPolicy}
       onLoad={onLoad}
-      onError={() => setFailed(true)}
+      onError={() => setFailedSrc(src)}
     />
   );
 }

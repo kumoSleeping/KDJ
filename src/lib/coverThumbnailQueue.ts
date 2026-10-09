@@ -33,6 +33,9 @@ export interface CoverThumbnailLease {
 }
 
 const cache = new Map<string, CacheEntry>();
+/** Keys the server answered "no cover" for. Only a first-paint hint: every lease still asks. */
+const knownMissing = new Set<string>();
+const MAX_KNOWN_MISSING = 8192;
 const tasks = new Map<string, CoverTask>();
 const queue: CoverTask[] = [];
 let active = 0;
@@ -106,6 +109,7 @@ function start(task: CoverTask): void {
   active += 1;
   void fetchCover(task.url, task.controller.signal)
     .then((blob) => {
+      knownMissing.delete(task.key);
       const clients = [...task.clients].filter((client) => !client.released);
       if (clients.length === 0) return;
       const objectUrl = URL.createObjectURL(blob);
@@ -120,6 +124,10 @@ function start(task: CoverTask): void {
       evictUnused();
     })
     .catch((error: unknown) => {
+      if (error instanceof CoverThumbnailError && error.status < 500) {
+        if (knownMissing.size >= MAX_KNOWN_MISSING) knownMissing.clear();
+        knownMissing.add(task.key);
+      }
       for (const client of task.clients) {
         if (!client.released) client.reject(error);
       }
@@ -205,6 +213,14 @@ export function acquireCoverThumbnail(key: string, url: string, priority = 1, { 
       }
     },
   };
+}
+
+/**
+ * What is already known about a cover, without starting work. A row that mounts with a cached
+ * cover (or a known absence) paints it at once instead of passing through an empty frame.
+ */
+export function peekCoverThumbnail(key: string): { src: string; missing: boolean } {
+  return { src: cache.get(key)?.objectUrl ?? "", missing: knownMissing.has(key) };
 }
 
 export function coverThumbnailQueueStats(): { active: number; queued: number; cached: number } {

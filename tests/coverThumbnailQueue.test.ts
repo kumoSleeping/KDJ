@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acquireCoverThumbnail, coverThumbnailQueueStats } from "../src/lib/coverThumbnailQueue";
+import { acquireCoverThumbnail, coverThumbnailQueueStats, peekCoverThumbnail } from "../src/lib/coverThumbnailQueue";
 
 test("cancel/reacquire, priority, bounded caches, and retry classification", async () => {
   const original = globalThis.fetch;
@@ -43,11 +43,20 @@ test("cancel/reacquire, priority, bounded caches, and retry classification", asy
     calls.at(-1)!.resolve(new Response(null, { status: 404 }));
     await missing; await tick(); noArt.release();
     assert.equal(calls.length, base + 7, "404 is not retried");
+    assert.deepEqual(peekCoverThumbnail("none"), { src: "", missing: true }, "a remount can paint the placeholder at once");
+    assert.deepEqual(peekCoverThumbnail("never-asked"), { src: "", missing: false });
+    const added = acquireCoverThumbnail("none", "/none");
+    assert.equal(calls.length, base + 8, "a known absence is still asked again");
+    calls.at(-1)!.resolve(ok());
+    const addedUrl = await added.promise; await tick();
+    assert.deepEqual(peekCoverThumbnail("none"), { src: addedUrl, missing: false }, "a remount paints the cached cover in its first frame");
+    added.release();
 
     const transient = acquireCoverThumbnail("retry", "/retry");
     calls.at(-1)!.resolve(new Response(null, { status: 503 }));
     await new Promise(resolve => setTimeout(resolve, 550));
-    assert.equal(calls.length, base + 9);
+    assert.equal(calls.length, base + 10);
+    assert.equal(peekCoverThumbnail("retry").missing, false, "a server error says nothing about the cover");
     calls.at(-1)!.resolve(ok()); await transient.promise; await tick(); transient.release();
 
     for (let i = 0; i < 530; i++) {

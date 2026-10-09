@@ -6,7 +6,7 @@ import { DEFAULT_FILTER, useLibraryStore, type LibraryStore } from "./librarySto
 
 /** A list owns its query, cache and selection; file operations and clipboard stay shared. */
 export type LibraryPaneStore = Pick<LibraryStore,
-  | "orderedIds" | "indexById" | "summaryById" | "queryVersion" | "requestLatency"
+  | "orderedIds" | "indexById" | "summaryById" | "queryVersion"
   | "ensureRange" | "resolveSummaries" | "retryList" | "total" | "loading" | "loadingMore" | "error"
   | "filter" | "setFilter" | "cycleSort" | "selectedId" | "selectedIds" | "selectedTrack"
   | "select" | "selectAll" | "selectionMode" | "setSelectionMode" | "clipboard" | "copyToClipboard"
@@ -50,7 +50,7 @@ export function createTemporaryLibrary(folder: string) {
     } catch { /* List errors have their own retry control. */ }
   };
   store = createStore<LibraryPaneStore>((set, get) => ({
-    orderedIds: [], indexById: new Map(), summaryById: new Map(), queryVersion: 0, requestLatency: 200,
+    orderedIds: [], indexById: new Map(), summaryById: new Map(), queryVersion: 0,
     total: 0, loading: true, loadingMore: false, error: "",
     filter: { ...DEFAULT_FILTER, folder, sort: "custom" },
     selectedId: null, selectedIds: [], selectedTrack: null, selectionMode: false,

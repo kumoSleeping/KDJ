@@ -265,7 +265,6 @@ export interface LibraryStore {
   indexById: ReadonlyMap<number, number>;
   summaryById: ReadonlyMap<number, TrackSummary>;
   queryVersion: number;
-  requestLatency: number;
   ensureRange(start: number, end: number, visibleStart?: number, visibleEnd?: number): Promise<void>;
   resolveSummaries(ids: number[]): Promise<TrackSummary[]>;
   retryList(): Promise<void>;
@@ -395,7 +394,7 @@ export interface LibraryStore {
 }
 
 export const useLibraryStore = create<LibraryStore>()((set, get) => ({
-  orderedIds: [], indexById: new Map(), summaryById: new Map(), queryVersion: 0, requestLatency: 200,
+  orderedIds: [], indexById: new Map(), summaryById: new Map(), queryVersion: 0,
   ensureRange: (start, end, visibleStart, visibleEnd) => libraryWindow.ensureRange(start, end, visibleStart, visibleEnd),
   resolveSummaries: (ids) => libraryWindow.resolveIds(ids),
   retryList: () => libraryWindow.retry(),

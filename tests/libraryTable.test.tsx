@@ -178,6 +178,18 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.ok(document.querySelector('tr[data-kd-track-id="10000"]'));
     assert.equal(document.querySelector("tr[data-loading-track]"), null, "no placeholder rows after a far jump");
     assert.equal(requests.length, requestsBeforeJump);
+    // Wheel scrolling is applied by the page: the frame that moves the container renders its rows.
+    await act(async () => { box.scrollTop = 0; box.dispatchEvent(new Event("scroll")); });
+    await flush();
+    const wheel = new dom.window.WheelEvent("wheel", { deltaY: 180_000, bubbles: true, cancelable: true });
+    box.dispatchEvent(wheel);
+    assert.equal(wheel.defaultPrevented, true, "the WebView does not scroll the list on its own thread");
+    assert.equal(box.scrollTop, 0);
+    act(() => { const current = [...frames.values()]; frames.clear(); for (const callback of current) callback(performance.now()); });
+    assert.equal(box.scrollTop, 180_000);
+    assert.ok(document.querySelector('tr[data-kd-track-id="5001"]'), "rows are committed in the frame that scrolled");
+    assert.equal(document.querySelector("tr[data-loading-track]"), null);
+    assert.equal(requests.length, requestsBeforeJump);
     await act(async () => useLibraryStore.getState().select(1));
     await act(async () => useLibraryStore.getState().select(10000, "range"));
     assert.equal(useLibraryStore.getState().selectedIds.length, 10000);

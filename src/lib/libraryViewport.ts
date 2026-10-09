@@ -1,9 +1,17 @@
 export interface LibraryViewportInput {
-  total: number; pending: number; top: number; height: number; rowHeight: number;
-  headerHeight: number; velocity: number; latency: number;
-  /** Pixels scrolled since the previous frame of a fast scroll. */
-  travel?: number;
+  total: number; pending: number; top: number; height: number; rowHeight: number; headerHeight: number;
 }
+/** Screens of rows kept rendered beyond each edge of the viewport. */
+const OVERSCAN_SCREENS = 2;
+/** The rendered window moves in steps of this many rows, so most scroll frames reuse it as is. */
+const WINDOW_STEP = 8;
+
+/** The scroll offset the rendered window is computed from: it only changes once per step. */
+export function libraryWindowTop(scrollTop: number, rowHeight: number): number {
+  const step = Math.max(1, rowHeight) * WINDOW_STEP;
+  return Math.floor(Math.max(0, scrollTop) / step) * step;
+}
+
 export function libraryViewport(input: LibraryViewportInput) {
   const rowHeight = Math.max(1, input.rowHeight);
   const height = Math.max(rowHeight, input.height - input.headerHeight);
@@ -12,26 +20,18 @@ export function libraryViewport(input: LibraryViewportInput) {
   const top = Math.min(maxTop, Math.max(0, input.top));
   const screen = Math.max(1, Math.ceil(height / rowHeight));
   const visibleStart = Math.min(count, Math.floor(top / rowHeight));
-  const visibleEnd = Math.min(count, Math.ceil((top + height) / rowHeight));
-  const fast = Math.abs(input.velocity) > 0.8;
-  // A frame that travels past the whole look-ahead (a dragged scrollbar handle) keeps none of the
-  // rows it rendered, so rendering six screens only delays the one under the pointer.
-  const jump = fast && (input.travel ?? 0) >= 4 * height;
-  // Rows are rendered two screens around a resting viewport; a fast scroll trades the rows
-  // behind it for up to four screens (a quarter second of travel) in the direction of motion.
-  const ahead = jump ? screen
-    : fast ? Math.min(4 * screen, Math.max(2 * screen, Math.ceil(Math.abs(input.velocity) * 250 / rowHeight))) : 2 * screen;
-  const behind = fast ? screen : 2 * screen;
-  const start = Math.max(0, visibleStart - (input.velocity < 0 ? ahead : behind));
-  const end = Math.min(count, visibleEnd + (input.velocity < 0 ? behind : ahead));
-  const prefetch = Math.min(5, Math.max(1, Math.ceil(2 + Math.abs(input.velocity) * input.latency / height))) * screen;
+  // `top` may trail the real offset by up to one step (see libraryWindowTop).
+  const visibleEnd = Math.min(count, Math.ceil((top + height) / rowHeight) + WINDOW_STEP);
+  const start = Math.max(0, visibleStart - OVERSCAN_SCREENS * screen);
+  const end = Math.min(count, visibleEnd + OVERSCAN_SCREENS * screen);
   const trackIndex = (index: number) => Math.min(input.total, Math.max(0, index - input.pending));
   return { top, maxTop, count, start, end, visibleStart, visibleEnd,
     trackStart: trackIndex(Math.max(input.pending, start)), trackEnd: trackIndex(end),
     visibleTrackStart: trackIndex(visibleStart), visibleTrackEnd: trackIndex(visibleEnd),
-    // Every rendered row is demanded, so none of them waits behind the background fill.
-    fetchStart: trackIndex(Math.max(0, Math.min(start, visibleStart - (input.velocity < 0 ? prefetch : screen)))),
-    fetchEnd: trackIndex(Math.min(count, Math.max(end, visibleEnd + (input.velocity < 0 ? screen : prefetch)))),
+    // Rows are demanded a screen before they are rendered; the rest of the library follows in
+    // the background fill.
+    fetchStart: trackIndex(Math.max(0, start - screen)),
+    fetchEnd: trackIndex(Math.min(count, end + screen)),
   };
 }
 

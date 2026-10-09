@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LibraryWindow, type LibraryWindowSnapshot } from "../src/lib/libraryWindow";
-import { libraryViewport, restoreLibraryAnchor } from "../src/lib/libraryViewport";
+import { libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../src/lib/libraryViewport";
 import type { TrackSummary } from "../src/types";
 
 const ids = Array.from({ length: 10000 }, (_, i) => i + 1);
@@ -222,17 +222,27 @@ test("libraries beyond the cache limit evict least-recently-used rows around the
   assert.deepEqual((await lane.resolveIds([1])).map((row) => row.id), [1]);
 });
 
-test("virtual ranges remain bounded across shrink, pending rows, resize, row height and velocity", () => {
+test("virtual ranges remain bounded and cover every offset of their step", () => {
   for (const total of [0, 1, 200, 10000]) for (const pending of [0, 10000])
-    for (const rowHeight of [24, 36, 52]) for (const height of [300, 720, 1100])
-      for (const velocity of [-30, 0, 30]) {
-        const view = libraryViewport({ total, pending, rowHeight, height, velocity, top: 350000, headerHeight: 28, latency: 400 });
-        assert.ok(0 <= view.start && view.start <= view.end && view.end <= total + pending);
+    for (const rowHeight of [24, 36, 52]) for (const height of [300, 720, 1100]) {
+      const screen = Math.ceil((height - 28) / rowHeight);
+      const count = total + pending;
+      for (const scrollTop of [0, 17, 3600, 350000, count * rowHeight]) {
+        const view = libraryViewport({ total, pending, rowHeight, height, top: libraryWindowTop(scrollTop, rowHeight), headerHeight: 28 });
+        assert.ok(0 <= view.start && view.start <= view.end && view.end <= count);
         assert.ok(view.top <= view.maxTop);
-        assert.ok(view.end - view.start <= 6 * Math.ceil((height - 28) / rowHeight) + 2);
+        assert.ok(view.end - view.start <= 5 * screen + 2 * 8 + 2);
         assert.ok(view.fetchStart <= view.trackStart && view.trackEnd <= view.fetchEnd, "every rendered row is demanded");
         assert.ok(view.trackEnd <= total && view.fetchEnd <= total);
+        // The window is computed from a stepped offset; the rows at the real one must be in it.
+        const real = Math.min(scrollTop, Math.max(0, count * rowHeight - (height - 28)));
+        const first = Math.min(count, Math.floor(real / rowHeight));
+        const last = Math.min(count, Math.ceil((real + height - 28) / rowHeight));
+        assert.ok(view.start <= first && last <= view.end, "the visible rows are rendered");
+        assert.ok(first - view.start >= Math.min(first, screen) && view.end - last >= Math.min(count - last, screen),
+          "at least a screen is rendered beyond each edge");
       }
+    }
   assert.equal(restoreLibraryAnchor([1, 3, 4], 2, 1, 5, 36, 0), 41);
   assert.equal(restoreLibraryAnchor([1, 2, 3], 3, 0, 5, 36, 2), 149);
 });

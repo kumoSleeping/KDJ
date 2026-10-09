@@ -30,7 +30,6 @@ export interface LibraryWindowSnapshot {
   loading: boolean;
   loadingMore: boolean;
   error: string;
-  requestLatency: number;
 }
 interface Dependencies {
   requestTimeoutMs?: number;
@@ -100,7 +99,6 @@ export class LibraryWindow {
   private auxiliaryWaiting = 0;
   private loading = false;
   private error = "";
-  private latency = 200;
   private demandVersion = 0;
   private waiters = new Set<() => void>();
   private missingChecked = new Set<number>();
@@ -413,11 +411,9 @@ export class LibraryWindow {
       const job: Job = { ids, epochs: ids.map((id) => this.epochs.get(id) ?? 0), background,
         generation: this.generation, controller: new AbortController() };
       this.jobs.add(job);
-      const started = performance.now();
       void this.request(job.controller, this.dependencies.summaries(ids, this.query, job.controller.signal)).then((rows) => {
         if (!this.jobs.has(job)) return;
         const current = job.generation === this.generation;
-        if (current) this.latency = this.latency * 0.7 + (performance.now() - started) * 0.3;
         const found = new Set(rows.map((row) => row.id));
         let checkIndex = false;
         // A row absent under an older query's filter says nothing about the current one.
@@ -507,7 +503,7 @@ export class LibraryWindow {
       summaryById: this.view,
       total: this.ids.length,
       queryVersion: this.indexGeneration, loading: this.loading, loadingMore: demanded,
-      error: this.error, requestLatency: this.latency };
+      error: this.error };
     if (!previous || Object.keys(snapshot).some((key) =>
       snapshot[key as keyof LibraryWindowSnapshot] !== previous[key as keyof LibraryWindowSnapshot])) {
       this.lastSnapshot = snapshot;
