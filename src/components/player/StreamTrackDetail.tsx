@@ -1,6 +1,6 @@
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { formatDuration } from "../../lib/format";
-import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
+import { getPlayerSessionState, subscribePlayerSession } from "../../lib/playerSession";
 import {
   getSongPreviewState,
   sourceKey,
@@ -43,10 +43,11 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
   renderPanels?(information: ReactNode): ReactNode;
 }) {
   const isPreview = mode === "preview";
+  // Nothing here shows the position, so the panel does not follow the player clock.
   const session = useSyncExternalStore(
     subscribePlayerSession,
-    getPlayerSession,
-    getPlayerSession,
+    getPlayerSessionState,
+    getPlayerSessionState,
   );
   const preview = useSyncExternalStore(
     subscribeSongPreviewState,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 /** Reading speed of the scroll, in px per second, whatever the length of the text. */
 export const MARQUEE_SPEED = 50;
@@ -64,7 +64,7 @@ function arrivalRemaining(box: HTMLElement): number {
  * scrolls back and forth at a constant speed with short fixed pauses at both ends; the pointer
  * resting on it pauses the scroll, and reduced motion leaves it still behind an ellipsis.
  */
-export function MarqueeText({ className, text }: { className: string; text: string }) {
+export const MarqueeText = memo(function MarqueeText({ className, text }: { className: string; text: string }) {
   const boxRef = useRef<HTMLSpanElement | null>(null);
   const [shift, setShift] = useState(0);
 
@@ -141,4 +141,4 @@ export function MarqueeText({ className, text }: { className: string; text: stri
     data-marquee={shift ? "true" : undefined}>
     <span key={text} className="kd-marquee">{text}</span>
   </span>;
-}
+});
