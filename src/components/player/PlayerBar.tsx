@@ -4881,6 +4881,7 @@ export function PlayerBar() {
             className="kd-player-wave"
             renderProfile="release-overview"
             releaseOverviewIntent="player"
+            songSwapMotion
             trackId={pipSession.trackId}
             track={track?.id === pipSession.trackId ? track : undefined}
             position={pipPosition}
@@ -4944,6 +4945,7 @@ export function PlayerBar() {
             className="kd-player-wave"
             renderProfile="release-overview"
             releaseOverviewIntent="player"
+            songSwapMotion
             trackId={displayTrack.id}
             track={displayTrack}
             position={track?.id === displayTrack.id ? position : 0}
@@ -4970,6 +4972,7 @@ export function PlayerBar() {
             className="kd-player-wave"
             renderProfile="release-overview"
             releaseOverviewIntent="player"
+            songSwapMotion
             trackId={track.id}
             track={track}
             position={position}
