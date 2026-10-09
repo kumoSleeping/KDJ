@@ -462,8 +462,9 @@ function PlayerDeck({
   const shown = swap.view;
   const [failedCover, setFailedCover] = useState("");
   const coverFailed = Boolean(shown?.cover) && failedCover === shown?.cover;
-  // 接歌途中保留当前/下一首的身份，交接完成后更新曲目。
-  const stateLabel = failed ? "播放失败" : resolving ? "加载中" : active ? "正在播放" : "下一首";
+  // The card shows the incoming song from the start of a transition; until the outgoing one
+  // has faded the label says that the two are being mixed.
+  const stateLabel = failed ? "播放失败" : resolving ? "加载中" : transitioning ? "正在接歌" : active ? "正在播放" : "下一首";
   return (
     <div
       className="kd-player-deck"
@@ -4165,11 +4166,16 @@ export function PlayerBar() {
         ? viewForTrack(physicalTracks[1])
         : null;
   }
-  // The bar presents roles; physical deck ownership can alternate underneath it.
-  const barCurrentIndex: 0 | 1 = transitionShowing ? transitionVisual.outgoingIndex : visualActiveIndex;
+  // The bar presents roles; physical deck ownership can alternate underneath it. A transition
+  // hands the card to the incoming song when it starts, the moment 曲目信息 and the waveform
+  // change, so the card turns with them whether or not the songs are mixed; the outgoing song
+  // is only heard out.
+  const barCurrentIndex: 0 | 1 = transitionShowing ? transitionVisual.incomingIndex : visualActiveIndex;
   const barNextIndex: 0 | 1 = barCurrentIndex === 0 ? 1 : 0;
   const currentBarView = barCurrentIndex === 0 ? leftDeckView : rightDeckView;
-  const nextBarView = barNextIndex === 0 ? leftDeckView : rightDeckView;
+  // What the next key would play. During a transition the other deck holds the song that is
+  // leaving, which is not what comes next.
+  const nextBarView = predictedDeckView;
   const deckPlaying = pipDriving && pipSession?.source === "network" ? pipPlaying : playing;
   const playbackVisualRate = pipDriving
     ? 1
