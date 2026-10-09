@@ -117,7 +117,8 @@ export function panelDockAt(x: number, y: number, excludeId?: string): PanelDock
     if (!zone || zone.closest("[hidden]")) continue;
     const box = zone.getBoundingClientRect();
     const edgeBand = side === "top" ? 12 : 0;
-    if (box.width <= 0 || box.height <= 0 || x < box.left || x > box.right || y < box.top - edgeBand || y > box.bottom + edgeBand) continue;
+    // An empty top dock stays collapsed; its edge is still a drop target.
+    if (box.width <= 0 || (side !== "top" && box.height <= 0) || x < box.left || x > box.right || y < box.top - edgeBand || y > box.bottom + edgeBand) continue;
     // The outer edge inserts a full row, not a third cell under whichever column
     // happens to be under the pointer. This allows swapping EQ with the whole row below it.
     if (side === "top" && (y <= box.top + edgeBand || y >= box.bottom - edgeBand)) {
@@ -201,9 +202,13 @@ export function highlightPanelDock(x: number, y: number, id?: string) {
     const box = plan.cells.get(id);
     if (box) {
       const preview = viewportSplitRect(zone, box), bounds = zone.getBoundingClientRect();
+      // Preview the first top panel over the list, without creating an empty row.
+      const bottom = target.side === "top" && bounds.height === 0
+        ? zone.closest(".kd-table-wrap")?.getBoundingClientRect().bottom ?? bounds.bottom
+        : bounds.bottom;
       const left = Math.max(preview.left, bounds.left), top = Math.max(preview.top, bounds.top);
       const width = Math.max(0, Math.min(preview.left + preview.width, bounds.right) - left);
-      const height = Math.max(0, Math.min(preview.top + preview.height, bounds.bottom) - top);
+      const height = Math.max(0, Math.min(preview.top + preview.height, bottom) - top);
       if (width > 0 && height > 0) showSplitPreview({ left, top, width, height }); else clearSplitPreview();
     } else clearSplitPreview();
   } else {
