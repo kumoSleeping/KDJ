@@ -182,6 +182,8 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
 import { NowPlayingInfoHost } from "./NowPlayingInfo";
+import { useDeckSongSwap } from "./deckSongSwap";
+import "./DeckSongSwap.css";
 import { PlayerVolume } from "./PlayerVolume";
 import { tracePlayback, watchMainThread } from "../../lib/playbackTrace";
 import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
@@ -396,6 +398,11 @@ function viewForTrack(track: Track): PlayerDeckView {
   };
 }
 
+/** A cover that is already loaded when its record appears (fetched during the exit) arrives with it. */
+function revealLoadedCover(image: HTMLImageElement | null): void {
+  if (image?.complete && image.naturalWidth > 0) image.style.opacity = "1";
+}
+
 /**
  * 播放条左侧的当前曲目卡片，点开曲目信息；拖入操作映射到实际通道。
  * 右侧不再是下一首：那里是 EQ / 播放控制，拖入仍替换下一首。
@@ -435,8 +442,12 @@ function PlayerDeck({
   onDragLeave(event: React.DragEvent<HTMLElement>): void;
   onDrop(event: React.DragEvent<HTMLElement>): void;
 }) {
-  const [coverFailed, setCoverFailed] = useState(false);
-  useEffect(() => setCoverFailed(false), [view?.key]);
+  // The card belongs to the playing song: on a change it shows the old song until that has been
+  // swiped away, then the new one arrives (see useDeckSongSwap).
+  const swap = useDeckSongSwap(view, `player-deck-${side}`);
+  const shown = swap.view;
+  const [failedCover, setFailedCover] = useState("");
+  const coverFailed = Boolean(shown?.cover) && failedCover === shown?.cover;
   // 接歌途中保留当前/下一首的身份，交接完成后更新曲目。
   const stateLabel = failed ? "播放失败" : resolving ? "加载中" : active ? "正在播放" : "下一首";
   return (
@@ -448,6 +459,8 @@ function PlayerDeck({
       data-resolving={resolving ? "true" : undefined}
       data-empty={!view ? "true" : undefined}
       data-drop-active={dropActive ? "true" : undefined}
+      data-swap={swap.phase ?? undefined}
+      style={swap.style}
       {...{ [TRACK_DECK_DROP_TARGET_ATTR]: String(physicalSide) }}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -476,24 +489,28 @@ function PlayerDeck({
         }
         onClick={onOpen}
       >
+        {/* The swipe moves this box; the record inside keeps its own spin through it. */}
         <span className="kd-player-disc" aria-hidden="true">
           <span className="kd-player-disc-record" data-spinning={spinning ? "true" : undefined}>
-            {view?.cover && !coverFailed ? (
+            {shown?.cover && !coverFailed ? (
               <img
-                src={view.cover}
+                // One element per song: a new record never arrives wearing the old cover.
+                key={swap.song}
+                ref={revealLoadedCover}
+                src={shown.cover}
                 alt=""
                 referrerPolicy="no-referrer"
                 onError={(event) => {
                   event.currentTarget.style.opacity = "0";
-                  setCoverFailed(true);
+                  setFailedCover(shown.cover);
                 }}
                 onLoad={(event) => {
                   event.currentTarget.style.opacity = "1";
                 }}
               />
-            ) : view?.video ? (
+            ) : shown?.video ? (
               <Clapperboard size={15} />
-            ) : view ? (
+            ) : shown ? (
               <Disc3 size={17} />
             ) : (
               <Music2 size={15} />
@@ -502,8 +519,8 @@ function PlayerDeck({
         </span>
         <span className="kd-player-deck-copy">
           <span className="kd-player-deck-state">{stateLabel}</span>
-          <MarqueeText className="kd-player-title" text={view?.title ?? "等待下一首"} />
-          <MarqueeText className="kd-player-artist" text={view?.subtitle ?? "\u00a0"} />
+          <MarqueeText className="kd-player-title" text={shown?.title ?? "等待下一首"} />
+          <MarqueeText className="kd-player-artist" text={shown?.subtitle ?? "\u00a0"} />
         </span>
       </button>
     </div>
