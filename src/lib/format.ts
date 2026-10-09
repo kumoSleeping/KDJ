@@ -85,6 +85,27 @@ export function formatPercent(ratio: number | null | undefined, digits = 0): str
 
 
 /**
+ * 网易云接口回的是 http://p1.music.126.net/...，B 站还有协议相对的 //i2.hdslb.com/...，
+ * 而 CSP 的 img-src 只放行 https 外链——不归一协议图根本到不了 <img>。
+ */
+export function loadableCoverUrl(cover: string): string {
+  return (cover.startsWith("//") ? `https:${cover}` : cover).replace(
+    /^http:\/\/(?!127\.0\.0\.1)/i,
+    "https://",
+  );
+}
+
+/**
+ * Every address that can show an online cover, best first: the small rendition, then the
+ * picture as the provider gave it. The size rewrite is a guess about each CDN's address
+ * scheme, so the unsized address is what a box falls back to when the small one does not load.
+ */
+export function onlineCoverUrls(cover: string, size = 48): string[] {
+  const full = cover.trim() ? loadableCoverUrl(cover.trim()) : "";
+  return [...new Set([thumbUrl(cover.trim(), size), full])].filter(Boolean);
+}
+
+/**
  * 把封面地址换成尽量小的缩略图。
  *
  * 搜索结果一屏几十行，每行都拉一张 500×500 的原图，网络和内存都白扔——
@@ -93,12 +114,7 @@ export function formatPercent(ratio: number | null | undefined, digits = 0): str
  */
 export function thumbUrl(cover: string, size = 48): string {
   if (!cover) return "";
-  // 网易云接口回的是 http://p1.music.126.net/...，B 站还有协议相对的 //i2.hdslb.com/...，
-  // 而 CSP 的 img-src 只放行 https 外链——不归一协议图根本到不了 <img>。
-  const url = (cover.startsWith("//") ? `https:${cover}` : cover).replace(
-    /^http:\/\/(?!127\.0\.0\.1)/i,
-    "https://",
-  );
+  const url = loadableCoverUrl(cover);
   // B 站：hdslb 用 @宽w_高h_1c 后缀出缩略图；已带 @ 参数的不再叠加
   if (/hdslb\.com/.test(url)) {
     return url.includes("@") ? url : `${url}@${size * 2}w_${size * 2}h_1c.jpg`;

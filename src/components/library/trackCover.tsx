@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Plus } from "lucide-react";
 import { api } from "../../lib/api";
+import { newerRevision, useCoverLoad } from "../../lib/coverLoad";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import { normalizePriority, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
@@ -90,10 +91,24 @@ export function useTrackCover(track: Track, { onUpdated, receivesDrops = true }:
   const settings = useAppStore((state) => state.settings);
   const setCover = useLibraryStore((state) => state.setCover);
   const busy = useSyncExternalStore(subscribeWriting, () => writing.has(track.id), () => false);
-  /** 没封面时后端 404。记下来换成一个可以点的占位块，而不是留一个破图标。 */
-  const [hasCover, setHasCover] = useState(true);
-  /** 冷读内嵌封面时保留可见反馈，避免把尚未返回误看成“没有封面”。 */
-  const [coverLoading, setCoverLoading] = useState(true);
+  // 列表、详情与播放器必须共享同一 cache key。modified_at 在换封面后由后端更新，
+  // 既能复用已经加载的缩略图，也能在图片变化时可靠失效。
+  // 封面格只有几十到一百来像素宽，先请求缩略图而不是原图：内嵌封面可能有十几 MB，
+  // 原图要读几秒，曲目信息升起的那几秒里一直是占位。
+  // The thumbnail is made by the backend's own decoder, which refuses pictures the webview
+  // shows without trouble (very large ones, formats it was not built with) and answers 404
+  // for them. The original — the address the player-bar disc loads — is the second source.
+  // 曲目信息 holds the record the song started with; the list's row is refreshed whenever the
+  // library changes. A cover written after the song started is asked for under the row's revision.
+  const listedRevision = useLibraryStore((state) => state.summaryById.get(track.id)?.modified_at);
+  const revision = newerRevision(track.modified_at, listedRevision);
+  const coverLoad = useCoverLoad(track.id, [
+    api.coverUrl(track.id, revision, 256),
+    api.coverUrl(track.id, revision),
+  ]);
+  const renewCover = coverLoad.renew;
+  /** 没封面时后端 404。换成一个可以点的占位块，而不是留一个破图标。 */
+  const hasCover = coverLoad.face !== "missing";
   const [dropping, setDropping] = useState(false);
   /**
    * 这一栏里所有操作（评分 / 保存元数据 / 换封面）的失败原因。
@@ -125,8 +140,6 @@ export function useTrackCover(track: Track, { onUpdated, receivesDrops = true }:
   // 切曲目时把这一首的回执和匹配结果整个丢掉；**不跟着 track 的字段变**。
   useEffect(() => {
     setNotice("");
-    setHasCover(true);
-    setCoverLoading(true);
     resetSearch();
   }, [track.id, resetSearch]);
 
@@ -155,9 +168,9 @@ export function useTrackCover(track: Track, { onUpdated, receivesDrops = true }:
         const file = await load();
         const updated = await setCover(id, file);
         onUpdated?.(updated);
-        // 新封面带着新的 modified_at 到达后由下面的 effect 接手；这里不盖占位——
-        // 同一秒内换图时地址不变，图片不会重新加载，占位就再也揭不掉。
-        setHasCover(true);
+        // 新封面通常带着新的 modified_at 到达，地址随之改变。地址没变时（同一刻内连换两次）
+        // 之前失败过的地址也要重新问一遍；这里不盖占位，图片不重新加载的话占位就再也揭不掉。
+        renewCover();
         return true;
       } catch (error: unknown) {
         setNotice(`${label}失败：${(error as Error).message}`);
@@ -166,7 +179,7 @@ export function useTrackCover(track: Track, { onUpdated, receivesDrops = true }:
         setWriting(id, false);
       }
     },
-    [setCover, track.id, onUpdated],
+    [setCover, track.id, onUpdated, renewCover],
   );
 
   const reuseCover = useCallback(
@@ -324,23 +337,6 @@ export function useTrackCover(track: Track, { onUpdated, receivesDrops = true }:
     finishTrackDrop();
   };
 
-  // 列表、详情与播放器必须共享同一 cache key。modified_at 在换封面后由后端更新，
-  // 既能复用已经加载的缩略图，也能在图片变化时可靠失效。
-  // 封面格只有几十到一百来像素宽。请求缩略图而不是原图：内嵌封面可能有十几 MB，
-  // 原图要读几秒，曲目信息升起的那几秒里一直是占位。
-  const coverUrl = api.coverUrl(track.id, track.modified_at, 256);
-  /** 当前 <img> 上已经画出来的封面属于哪首曲目。 */
-  const coverShownRef = useRef<number | null>(null);
-  useEffect(() => {
-    // modified_at 在分析完成、保存标签时也会变。同一首曲目换修订时旧图留在原处，新图
-    // 加载完直接替换；只有换了曲目、或这首还没有画出过封面，才盖上占位。
-    if (coverShownRef.current !== track.id) {
-      coverShownRef.current = null;
-      setCoverLoading(true);
-    }
-    setHasCover(true);
-  }, [coverUrl]); // eslint-disable-line react-hooks/exhaustive-deps
-
   return {
     busy,
     notice,
@@ -354,22 +350,12 @@ export function useTrackCover(track: Track, { onUpdated, receivesDrops = true }:
     selectCandidate,
     resetSearch,
     hasCover,
-    coverLoading,
-    coverUrl,
+    /** What the cover box draws and the image element it draws it with; see useCoverLoad. */
+    image: coverLoad,
     dropping,
     // stopPropagation 是必须的：外层有接收音频文件的拖放区，
     // 不拦住的话拖进来的图片会被当成"要入库的曲目"
     dropHandlers: { onDragOver, onDragLeave, onDrop },
-    onCoverLoad: () => {
-      coverShownRef.current = track.id;
-      setCoverLoading(false);
-    },
-    // 没封面时后端返回 404
-    onCoverError: () => {
-      coverShownRef.current = null;
-      setCoverLoading(false);
-      setHasCover(false);
-    },
   };
 }
 
@@ -383,7 +369,7 @@ export function TrackCoverBox({ track, cover, size = 88, droppable = true, label
   title: string;
   onActivate(box: HTMLElement): void;
 }) {
-  const { hasCover, coverLoading, dropping } = cover;
+  const { hasCover, image, dropping } = cover;
   return (
     <div className="kd-cover-edit-stack" style={{ width: size }}>
       <div
@@ -414,26 +400,30 @@ export function TrackCoverBox({ track, cover, size = 88, droppable = true, label
         }}
         {...(droppable ? cover.dropHandlers : undefined)}
       >
-        {hasCover ? (
-          <>
-            {coverLoading ? (
-              <span className="kd-cover-loading-placeholder" aria-hidden="true">
-                <VinylPlaceholder />
-              </span>
-            ) : null}
-            <img
-              src={cover.coverUrl}
-              alt=""
-              className="kd-cover-edit-image"
-              draggable={false}
-              data-loading={coverLoading ? "true" : undefined}
-              onLoad={cover.onCoverLoad}
-              onError={cover.onCoverError}
-            />
-          </>
-        ) : (
+        {/* 冷读内嵌封面时保留可见反馈，避免把尚未返回误看成“没有封面”。 */}
+        {image.face === "loading" ? (
+          <span className="kd-cover-loading-placeholder" aria-hidden="true">
+            <VinylPlaceholder />
+          </span>
+        ) : !hasCover ? (
           <VinylPlaceholder />
-        )}
+        ) : null}
+        {/* One element per track, kept across the faces: while the box says "no cover" a later
+            attempt still loads here, out of the layout, and shows the moment it succeeds. */}
+        {image.src ? (
+          <img
+            key={track.id}
+            ref={image.imageRef}
+            src={image.src}
+            alt=""
+            className="kd-cover-edit-image"
+            draggable={false}
+            data-loading={image.face === "image" ? undefined : "true"}
+            style={hasCover ? undefined : { display: "none" }}
+            onLoad={image.onLoad}
+            onError={image.onError}
+          />
+        ) : null}
         {!hasCover && (
           <span className="kd-cover-plus" aria-hidden="true">
             <Plus size={14} strokeWidth={2.5} />

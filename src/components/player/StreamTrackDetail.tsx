@@ -6,11 +6,12 @@ import {
   sourceKey,
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
-import { streamCoverUrl, streamMeta, streamTrackById } from "../../lib/streamTrack";
+import { useCoverLoad } from "../../lib/coverLoad";
+import { streamCoverUrls, streamMeta, streamTrackById } from "../../lib/streamTrack";
 import type { Track } from "../../types";
 import { InlineNotice } from "../common";
 import { DetailPanelStack } from "../library/DetailPanelStack";
-import { CoverImage } from "../common/VinylPlaceholder";
+import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
 import { PlatformMark } from "../download/PlatformMark";
 import { OnlineTrackCacheFacts } from "./OnlineTrackCacheFacts";
@@ -73,7 +74,8 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
 
   const errorText =
     actionError || matchingPreview?.error || (active ? session.error : "");
-  const cover = streamCoverUrl(track);
+  // The small rendition the player-bar disc shows, then the picture as the provider gave it.
+  const cover = useCoverLoad(track.id, streamCoverUrls(track));
 
   const information = (
       <div
@@ -86,12 +88,24 @@ export function StreamTrackDetail({ track, restoreTarget = null, mode = "detail"
             style={{ width: 88, height: 88 }}
             aria-label="在线曲目封面"
           >
-            <CoverImage
-              src={cover}
-              alt=""
-              className="kd-stream-detail-cover-image"
-              loading="eager"
-            />
+            {cover.face === "missing" ? <VinylPlaceholder /> : null}
+            {/* No referrer, like every other online cover: image hosts that check where a
+                request comes from refuse the app's own origin. */}
+            {cover.src ? (
+              <img
+                key={track.id}
+                ref={cover.imageRef}
+                src={cover.src}
+                alt=""
+                className="kd-stream-detail-cover-image"
+                loading="eager"
+                draggable={false}
+                referrerPolicy="no-referrer"
+                style={cover.face === "missing" ? { display: "none" } : undefined}
+                onLoad={cover.onLoad}
+                onError={cover.onError}
+              />
+            ) : null}
           </div>
         </div>
         <div className="kd-track-detail-summary" style={{ minWidth: 0 }}>
