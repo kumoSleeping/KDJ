@@ -13,7 +13,7 @@ use futures_util::StreamExt as _;
 use kdj_core::models::{
     Account, AccountState, CollectionResolveResponse, CollectionResult, Platform, QrSession,
     QrStateValue, ResolveKind, ResolveResponse, SearchKind, SongSource, StreamPlaylist,
-    StreamPlaylistResponse, VideoDownloadRequest, VideoInfo, VideoPage, VideoStreamOption,
+    StreamPlaylistResponse, VideoDownloadRequest, VideoInfo, VideoPage,
 };
 use kdj_core::paths::{finalize_filename, sanitize_filename_value};
 use serde_json::{json, Value};
@@ -136,8 +136,12 @@ impl YoutubeProvider {
     }
 
     async fn video_source(&self, id: &str) -> Result<SongSource> {
-        let info = self.client.video_info(id).await?;
-        Ok(source_from_details(&info.video_details))
+        if let Some(info) = self.client.cached_video(id) {
+            return Ok(source_from_details(&info.video_details));
+        }
+        let metadata = self.client.watch_metadata(id).await?;
+        source_from_watch_metadata(&metadata, id)
+            .context("YouTube 没有返回这个视频的元数据")
     }
 
     async fn playlist_sources(
@@ -220,41 +224,22 @@ impl YoutubeProvider {
     pub async fn resolve_video(&self, url_or_id: &str) -> Result<VideoInfo> {
         self.ensure_enabled()?;
         let video_id = video_id_from_input(url_or_id)?;
-        let info = self.client.video_info(&video_id).await?;
-        let details = &info.video_details;
-        let mut options: Vec<VideoStreamOption> = info
-            .formats
-            .iter()
-            .filter(|format| format.has_video)
-            .filter_map(|format| {
-                let height = format.height? as i64;
-                Some(VideoStreamOption {
-                    quality_id: format.itag as i64,
-                    label: format
-                        .quality_label
-                        .clone()
-                        .unwrap_or_else(|| format!("{height}P")),
-                    height,
-                    codec: format.mime_type.video_codec.clone().unwrap_or_default(),
-                })
-            })
-            .collect();
-        options.sort_by_key(|option| option.height);
-        options.dedup_by_key(|option| option.height);
-        let duration = details.length_seconds.parse::<i64>().unwrap_or(0);
+        let source = self.video_source(&video_id).await?;
+        let duration = source.duration.unwrap_or(0.0) as i64;
         Ok(VideoInfo {
             platform: Platform::Youtube,
-            bvid: details.video_id.clone(),
-            title: details.title.clone(),
-            author: details.owner_channel_name.clone(),
-            cover: best_thumbnail(&details.thumbnails),
+            bvid: source.key.clone(),
+            title: source.title.clone(),
+            author: source.artist_text(),
+            cover: source.cover.clone(),
             duration,
             pages: vec![VideoPage {
                 index: 0,
-                title: details.title.clone(),
+                title: source.title,
                 duration,
             }],
-            options,
+            // Native HLS chooses quality at playback/download time, not during link lookup.
+            options: Vec::new(),
             logged_in: self.auth.is_logged_in(),
         })
     }
@@ -1235,6 +1220,55 @@ fn best_thumbnail(items: &[Thumbnail]) -> String {
         .max_by_key(|item| item.width.saturating_mul(item.height))
         .map(|item| item.url.clone())
         .unwrap_or_default()
+}
+
+fn source_from_watch_metadata(body: &Value, video_id: &str) -> Option<SongSource> {
+    if body
+        .pointer("/currentVideoEndpoint/watchEndpoint/videoId")?
+        .as_str()?
+        != video_id
+    {
+        return None;
+    }
+    if let Some(items) = body
+        .pointer("/contents/twoColumnWatchNextResults/playlist/playlist/contents")
+        .and_then(Value::as_array)
+    {
+        for item in items {
+            let renderer = item.get("playlistPanelVideoRenderer").or_else(|| {
+                item.pointer(
+                    "/playlistPanelVideoWrapperRenderer/primaryRenderer/playlistPanelVideoRenderer",
+                )
+            });
+            if let Some(source) = renderer.and_then(youtube_playlist_video_renderer) {
+                if source.key == video_id {
+                    return Some(source);
+                }
+            }
+        }
+    }
+    // Some videos cannot create a Mix but still have a normal watch-page metadata section.
+    let contents = body
+        .pointer("/contents/twoColumnWatchNextResults/results/results/contents")?
+        .as_array()?;
+    let title = contents
+        .iter()
+        .find_map(|item| item.pointer("/videoPrimaryInfoRenderer/title"))
+        .map(renderer_text)
+        .filter(|title| !title.is_empty())?;
+    let author = contents
+        .iter()
+        .find_map(|item| {
+            item.pointer("/videoSecondaryInfoRenderer/owner/videoOwnerRenderer/title")
+        })
+        .map(renderer_text)
+        .unwrap_or_default();
+    youtube_playlist_video_renderer(&json!({
+        "videoId": video_id,
+        "title": { "simpleText": title },
+        "shortBylineText": { "simpleText": author },
+        "thumbnail": { "thumbnails": [{ "url": format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg") }] }
+    }))
 }
 
 fn native_audio_format(formats: &[VideoFormat]) -> Option<VideoFormat> {
