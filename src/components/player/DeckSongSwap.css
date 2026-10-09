@@ -1,8 +1,8 @@
 /* The deck card on the song-change clock (src/lib/songSwapMotion.ts; useDeckSongSwap sets the two
    durations and easings as --kd-swap-*). The card turns over under one upward swipe, like the
    face of a drum: the old record and its lines tip back over the top while they fade, and the
-   new ones roll up from below and settle, the way 曲目信息 rises out of the same bar. The state
-   label is not the song's and stays where it is.
+   new ones roll up from below and settle, the way the song's task bubble rises from behind the
+   same bar. The state label is not the song's and stays where it is.
 
    The record's box is what moves; the record inside keeps its spin. Only transform and opacity
    are animated. The lines trail the record by a few tens of ms and still end with it. */

@@ -4,7 +4,7 @@
  * It comes in across the viewport edge it is nearest to and leaves the same way. On a song
  * change the old picture leaves first and the new one then comes out of that same edge, on the
  * clock every surface of the playing song shares (see songSwapMotion.ts), so the window and the
- * 曲目信息 panel move as one.
+ * 曲目信息 bubble move as one.
  *
  * Presentation only. A window is moved by an animation on its own box; its media elements are
  * never remounted, resized or re-timed here, and nothing waits on this module. The picture
@@ -273,7 +273,7 @@ class FloatingMediaMotion {
     const entrance = this.entrance?.owner === presenter ? this.entrance : null;
     if (entrance && performance.now() < entrance.revealAt) {
       // Still out of sight from the last change: the newest song takes the turn, and the wait
-      // starts over, exactly as it does for the panel.
+      // starts over, exactly as it does for the 曲目信息 bubble.
       this.arrive(presenter, SONG_SWAP_OUT_MS);
       return;
     }

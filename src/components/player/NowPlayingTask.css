@@ -1,0 +1,8 @@
+/* The fuller detail of 曲目信息 inside its task bubble: the library's own summary of the song,
+   on the bubble's surface. */
+.kd-now-playing-detail > .kd-track-detail { gap: 0; }
+.kd-now-playing-detail .kd-track-detail-hero { gap: 0.75rem; }
+.kd-now-playing-detail .kd-cover-edit-stack,
+.kd-now-playing-detail .kd-cover-edit { width: 76px !important; height: 76px !important; }
+.kd-now-playing-detail .kd-cover-edit-stack { height: auto !important; }
+.kd-track-detail-title { font-weight: 700; font-size: var(--kd-size-lg); }

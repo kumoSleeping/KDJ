@@ -106,7 +106,8 @@ import {
 } from "../../lib/videoPip";
 import type { SongSource, Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
-import { useToastStore } from "../../stores/toastStore";
+import { showNotice } from "../../stores/toastStore";
+import { dismissTask } from "../tasks/taskBubbleStore";
 import {
   PLAY_EVENT,
   isCompleteTrack,
@@ -182,7 +183,7 @@ import {
 } from "../../lib/playerTransitionPolicy";
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
-import { NowPlayingInfoHost } from "./NowPlayingInfo";
+import { NowPlayingTask } from "./NowPlayingTask";
 import { useDeckSongSwap } from "./deckSongSwap";
 import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
 import "./DeckSongSwap.css";
@@ -358,6 +359,7 @@ interface PlayerDeckView {
 }
 
 const PLAYER_DECK_MEMORY_KEY = "kd-player-decks";
+const PLAYER_NOTICE_TASK = "player-notice";
 interface PlayerDeckMemory {
   leftId: number | null;
   rightId: number | null;
@@ -405,11 +407,11 @@ function viewForTrack(track: Track): PlayerDeckView {
  * and take props that do not change with the clock, so they sit out those renders.
  */
 const BarLyricsHost = memo(LyricsHost);
-const BarInfoHost = memo(NowPlayingInfoHost);
+const BarInfoHost = memo(NowPlayingTask);
 const BarModeButton = memo(PlaybackModeButton);
 const BarEq = memo(PlayerEq);
-const showToast = (text: string) => {
-  useToastStore.getState().show(text);
+const showEqNotice = (text: string) => {
+  showNotice(text);
 };
 
 /** A cover that is already loaded when its record appears (fetched during the exit) arrives with it. */
@@ -456,8 +458,8 @@ function PlayerDeck({
   // The card belongs to the playing song: on a change it shows the old song until that has been
   // swiped away, then the new one arrives (see useDeckSongSwap).
   const swap = useDeckSongSwap(view, `player-deck-${side}`);
-  // 曲目信息 rises from the bar's top edge (see NowPlayingInfoHost). The card reads whether it
-  // is up itself, so the panel coming and going re-renders the card and not the whole bar.
+  // 曲目信息 is the playing song's task bubble (see NowPlayingTask). The card reads whether it
+  // is up itself, so the bubble coming and going re-renders the card and not the whole bar.
   const expanded = useNowPlayingInfo(nowPlayingInfoVisible);
   const shown = swap.view;
   const [failedCover, setFailedCover] = useState("");
@@ -824,14 +826,15 @@ export function PlayerBar() {
   } | null>(null);
   const transitionVisualRef = useRef<typeof transitionVisual>(null);
   /**
-   * 播放/STEM 这类瞬时消息走全局右下角浮层；这里只留一份给媒体会话
-   * 判断是不是致命播放错误，不再插进底栏。
+   * The player's own message is one task bubble, replaced by the next message and taken away
+   * when playback is in order again. The copy kept here is what the media session publishes
+   * as its error.
    */
   const [notice, setNoticeState] = useState("");
   const setNotice = useCallback((text: string) => {
     setNoticeState(text);
-    if (text) useToastStore.getState().show(text);
-    else useToastStore.getState().dismiss();
+    if (text) showNotice(text, PLAYER_NOTICE_TASK);
+    else dismissTask(PLAYER_NOTICE_TASK);
   }, []);
   const [browserMediaStatus, setBrowserMediaStatus] = useState<PlayerSessionStatus>("idle");
   const [failedLoadTrackId, setFailedLoadTrackId] = useState<number | null>(null);
@@ -4906,7 +4909,7 @@ export function PlayerBar() {
         onDrop={(event) => void dropOnDeck(event, "right")}
       >
         {/* 旋钮失败只是一条提示，不能改写媒体会话的错误文案。 */}
-        <BarEq onError={showToast} />
+        <BarEq onError={showEqNotice} />
       </div>
 
       <div className="kd-player-scrub">

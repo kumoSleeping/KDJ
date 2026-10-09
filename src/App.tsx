@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
-import { Button, EmptyState, ToastHost } from "./components/common";
+import { Button, EmptyState } from "./components/common";
+import { TaskBubbleHost } from "./components/tasks/TaskBubbleHost";
 import { Workspace } from "./components/workspace/Workspace";
 import { PlayerBar } from "./components/player/PlayerBar";
 import { VideoPipHost } from "./components/player/VideoPipHost";
@@ -18,6 +19,9 @@ import { useWorkshopDrop } from "./lib/workshopDrop";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
 // 队列、设置与日夜模式从顶栏专用按钮进入。
+
+/** The activities of the main window that report as task bubbles by themselves. */
+const APP_TASK_SOURCES = ["downloads", "exports", "imports"] as const;
 
 /** 关窗/刷新前把所有会出声的媒体瞬间静音，避免硬卸时爆音。 */
 function silenceAllMedia(): void {
@@ -140,7 +144,7 @@ export default function App() {
         )}
       </div>
 
-      <ToastHost />
+      <TaskBubbleHost sources={APP_TASK_SOURCES} />
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
       {ready && (
         <>
