@@ -654,17 +654,12 @@
   stroke-width: 2;
 }
 :root[data-theme-pack="sakulaptop98"] :is(.kd-manager-mixer-eq, .kd-manager-mixer-eq > .kd-dj-eq-chart,
-  .kd-manager-scroll-wave, .kd-manager-focus-wave, .kd-dj-eq-chart) {
+  .kd-dj-eq-chart) {
   background: var(--kd-wave-detail-bg) !important;
 }
-:root[data-theme-pack="sakulaptop98"] :is(.kd-manager-mixer-eq, .kd-manager-scroll-wave) {
+:root[data-theme-pack="sakulaptop98"] .kd-manager-mixer-eq {
   border-color: var(--s98-shadow);
   box-shadow: var(--s98-sunken);
-}
-:root[data-theme-pack="sakulaptop98"] .kd-manager-focus-wave {
-  --kd-manager-beat-minor: #d998ad;
-  --kd-manager-beat-major: #ad6f83;
-  --kd-manager-beat-label: #704452;
 }
 :root[data-theme-pack="sakulaptop98"] :is(.kd-dj-eq-curve, .kd-manager-mixer-eq .kd-dj-eq-curve) > path {
   stroke: #921c40;

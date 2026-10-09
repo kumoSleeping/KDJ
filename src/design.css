@@ -7738,63 +7738,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
   gap: 0.38rem;
   min-width: 0;
 }
-.kd-manager-scroll-wave {
-  position: relative;
-  isolation: isolate;
-  height: clamp(7.5rem, 15vw, 10rem);
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-wave-detail-bg, #080a0d);
-}
-.kd-manager-focus-wave {
-  --kd-manager-beat-minor: rgba(220, 227, 235, 0.13);
-  --kd-manager-beat-major: rgba(220, 227, 235, 0.24);
-  --kd-manager-beat-label: rgba(220, 227, 235, 0.52);
-  width: 100%;
-  height: 100% !important;
-  min-width: 0;
-  background: var(--kd-wave-detail-bg, #080a0d) !important;
-}
-.kd-manager-wave-window {
-  position: relative;
-  overflow: hidden;
-  contain: layout paint style;
-  cursor: pointer;
-  touch-action: none;
-}
-.kd-manager-wave-window:focus-visible {
-  outline: 1px solid color-mix(in srgb, var(--kd-muted) 72%, transparent);
-  outline-offset: -1px;
-}
-.kd-manager-focus-wave .kd-wave-beat-grid > i[data-beat="2"],
-.kd-manager-focus-wave .kd-wave-beat-grid > i[data-beat="4"] {
-  display: none;
-}
-.kd-manager-focus-wave .kd-wave-beat-grid > i {
-  width: var(--kd-wave-beat-local-width, 1px);
-  background: var(--kd-manager-beat-minor);
-}
-.kd-manager-focus-wave .kd-wave-beat-grid > i[data-bar="true"] {
-  width: var(--kd-wave-beat-local-width, 1px);
-  background: var(--kd-manager-beat-major);
-}
-.kd-manager-focus-wave .kd-wave-beat-grid > i > span {
-  color: var(--kd-manager-beat-label);
-  text-shadow: none;
-}
-.kd-manager-wave-needle {
-  position: absolute;
-  z-index: 9;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 0.5px;
-  transform: translateX(-0.25px);
-  background: var(--kd-theme);
-  box-shadow: none;
-  pointer-events: none;
-}
 .kd-manager-knob-stack {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -7838,15 +7781,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
 :root[data-theme="light"] .kd-dj-arcknob-needle {
   stroke: #18191c;
   stroke-width: 2.25;
-}
-:root[data-theme="light"] .kd-manager-scroll-wave,
-:root[data-theme="light"] .kd-manager-focus-wave {
-  background: #fff !important;
-}
-:root[data-theme="light"] .kd-manager-focus-wave {
-  --kd-manager-beat-minor: rgba(56, 65, 78, 0.16);
-  --kd-manager-beat-major: rgba(56, 65, 78, 0.28);
-  --kd-manager-beat-label: rgba(56, 65, 78, 0.56);
 }
 @media (max-width: 430px) {
   .kd-manager-control-head {
