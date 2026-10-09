@@ -6729,10 +6729,25 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-player-popupbtn[data-on="true"]:hover:not(:disabled) {
   color: var(--kd-theme-strong);
 }
+/* 歌词 and 编辑 Meta, the bar's entries of the song: the same quiet keys, red while what they
+   open is open. They need a little more room beside the transport than the bar has on a
+   narrow window, where they are left out; the song's task bubble still offers both. */
+.kd-player-songbtn { width: 1.45rem; }
+.kd-player-songbtn[data-on="true"] { color: var(--kd-theme); }
+.kd-player-songbtn[data-on="true"]:hover:not(:disabled) { color: var(--kd-theme-strong); }
+@media (min-width: 1200px) {
+  .kd-app:not([data-tall="true"]) .kd-player-transport { width: min(31.5rem, 100%); }
+}
+@media (max-width: 1199px) {
+  .kd-app:not([data-tall="true"]) .kd-player-songbtn { display: none; }
+}
+@media (max-width: 479px) {
+  .kd-app[data-tall="true"] .kd-player-songbtn { display: none; }
+}
 /* Sakura latches switches while enabled and the mode button while its menu is
    open. Transport/download/reroll actions retain only the theme's :active feedback.
    Apply here so already-installed theme packs receive the fix through HMR too. */
-:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn)[aria-pressed="true"],
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn, .kd-player-songbtn)[aria-pressed="true"],
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-mode[aria-expanded="true"] {
   color: var(--kd-theme);
   box-shadow: var(--s98-sunken);

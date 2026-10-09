@@ -184,6 +184,7 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
 import { NowPlayingTask } from "./NowPlayingTask";
+import { BarLyricsEntry, BarMetaEntry } from "./BarSongEntries";
 import { useDeckSongSwap } from "./deckSongSwap";
 import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
 import "./DeckSongSwap.css";
@@ -4709,6 +4710,7 @@ export function PlayerBar() {
             >
               <Blend size={14} />
             </button>
+            <BarLyricsEntry />
             {/* 歌词和弹窗各管各的：歌词键只开关悬浮歌词，弹窗键只开关画面小窗。 */}
             {canDesktopLyrics && !video ? (
               <button
@@ -4858,6 +4860,8 @@ export function PlayerBar() {
         <div className="kd-player-transport-side" data-side="right">
 
         <BarModeButton />
+        {/* A library song is edited where an online one is downloaded: the two never meet. */}
+        {!pipDriving && displayTrack && usesLocalLibraryRecord(displayTrack) ? <BarMetaEntry trackId={displayTrack.id} /> : null}
         {downloadSource ? (
           <button
             type="button"
