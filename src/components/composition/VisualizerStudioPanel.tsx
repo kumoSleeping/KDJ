@@ -1,10 +1,10 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
 import { X, PictureInPicture2, Undo2, Redo2, ImagePlus, ListPlus, RotateCcw, Captions, LoaderCircle, SlidersHorizontal } from "lucide-react";
 import { createPortal } from "react-dom";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { isEditorWindow, usesKvjWindow } from "../../lib/windowRole";
 import type { TrackSummary } from "../../types";
 import { Select } from "../common/Select";
+import { Slider } from "../common/Slider";
+import { Segmented } from "../common/Segmented";
 import type { VisualizerFeatureTimeline } from "../../types/audioVisualizer";
 import { api, visualizerApi } from "../../lib/api";
 import { createVisualizerProject, loadVisualizerDraft, saveVisualizerDraft, studioDuration, studioLyricText, hasStudioLyrics, syncVisualizerImages, validateVisualizerProject, STUDIO_IMAGE_LIMIT, clamp, type VisualizerDraft, type VisualizerProject } from "../../lib/visualizerStudio";
@@ -24,38 +24,41 @@ import { useLyricsStore } from "../../stores/lyricsStore";
 import { LyricsSourcePicker } from "../player/LyricsSourcePicker";
 import type { LyricsEngine } from "../../lib/lyricsPrefs";
 import { useAppStore } from "../../stores/appStore";
-import { useVideoPip } from "../../lib/videoPip";
 import { usePreviewFullscreen } from "../../lib/usePreviewFullscreen";
-import { ArcKnob } from "../player/ManagerMixerControls";
 import { applyVisualizerPreferences, loadVisualizerPreferences, saveVisualizerPreferences, switchVisualizerContentLayout } from "../../lib/visualizerStudioPreferences";
 import { EditorSeparator, EditorTabs } from "../workspace/EditorChrome";
 import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
 import "./VisualizerStudioPanel.css";
 
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
-function Range({ label, value, resetValue, min = 0, max = 1, step = .01, disabled = false, percentagePoints = false, onChange }: { label: string; value: number; resetValue: number; min?: number; max?: number; step?: number; disabled?: boolean; percentagePoints?: boolean; onChange: (value: number) => void }) {
-  const unit = percentagePoints ? 1 : 100;
-  const relative = (v: number) => 50 + (v - resetValue) * unit;
-  const format = (v: number) => `${Number(v.toFixed(2))}%`;
-  // Display a delta from the real default, not a remapping of the allowed range.
-  // Retain the full parameter limits; neutral is always drawn at twelve o'clock.
-  return <div className="kd-viz-dial"><span>{label}</span><ArcKnob label={label} value={relative(value)} min={relative(min)} max={relative(max)} step={step * unit} center={50} size="xs" disabled={disabled} snapToCenter={false} resetLabel="双击回到 50%（默认）" format={format} onChange={v => onChange(clamp(Number((resetValue + (v - 50) / unit).toFixed(6)), min, max))} onReset={() => onChange(resetValue)} /><output title={`实际值 ${Number(value.toFixed(3))}；默认值 ${Number(resetValue.toFixed(3))}`}>{format(relative(value))}</output></div>;
-}
+const percent = (v: number) => `${Number(v.toFixed(1))}%`;
+const ratio = (v: number) => `${Math.round(v * 100)}%`;
+const signedPercent = (v: number) => `${v > 0 ? "+" : ""}${Number(v.toFixed(1))}%`;
+const times = (v: number) => `×${v.toFixed(2)}`;
+const resolutions = [["1920x1080", "1080p · 16:9"], ["1280x720", "720p · 16:9"], ["1920x840", "1920 × 840 · 超宽"], ["2560x1080", "2560 × 1080 · 超宽"]] as const;
+const frameRates = [{ value: 30, label: "30 fps" }, { value: 60, label: "60 fps" }] as const;
 function Toggle({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void }) {
   return <button type="button" className="kd-djp-toggle kd-viz-toggle" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} onClick={() => onChange(!checked)}>
     <span className="kd-djp-toggle-label">{label}</span>
     <span className="kd-djp-toggle-state" data-onoff={checked ? "on" : "off"} aria-hidden="true">{checked ? "开" : "关"}</span>
   </button>;
 }
-function Group({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) { return <section className="kd-viz-group" aria-label={title} title={hint}><h3>{title}</h3><div className="kd-viz-fields">{children}</div></section>; }
-function ImageChoice({ blob, label, disabled, onClick }: { blob?: Blob; label: string; disabled: boolean; onClick: () => void }) {
+function Group({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) { return <section className="kd-viz-group" aria-label={title}><h3 title={hint}>{title}</h3><div className="kd-viz-fields">{children}</div></section>; }
+/** A named control on the parameter grid: the name in the label column, the control beside it. */
+function Row({ label, children }: { label: string; children: ReactNode }) { return <label className="kd-viz-row"><span>{label}</span>{children}</label>; }
+function ImageChoice({ blob, label, action, disabled, onPick, onRemove }: { blob?: Blob; label: string; action: string; disabled: boolean; onPick: () => void; onRemove?: () => void }) {
   const [url, setUrl] = useState("");
   useEffect(() => {
     if (!blob) { setUrl(""); return; }
     const next = URL.createObjectURL(blob); setUrl(next);
     return () => URL.revokeObjectURL(next);
   }, [blob]);
-  return <button type="button" className="kd-viz-image-choice" disabled={disabled} onClick={onClick}>{url ? <img src={url} alt="" /> : <ImagePlus size={16} aria-hidden="true" />}<span>{label}</span></button>;
+  return <div className="kd-viz-image">
+    <button type="button" className="kd-viz-image-choice" disabled={disabled} aria-label={action} title={action} onClick={onPick}>
+      <span className="kd-viz-image-thumb">{url ? <img src={url} alt="" /> : <ImagePlus size={16} aria-hidden="true" />}</span><span>{label}</span>
+    </button>
+    {onRemove && <button type="button" className="kd-viz-image-remove" disabled={disabled} aria-label={`移除${label}`} title={`移除${label}`} onClick={onRemove}><X size={13} /></button>}
+  </div>;
 }
 
 const studioTabs = [{ id: "scene", label: "画面" }, { id: "pictures", label: "图片" }, { id: "text", label: "文字" }, { id: "output", label: "导出" }] as const;
@@ -83,29 +86,21 @@ function StudioPosition({ position, scrub, refresh, children }: {
 
 type ContentState = "loading" | "ready" | "empty";
 
-/** `popup`: the picture exists only as the floating window; closing that window closes the popup. */
-export default function VisualizerStudioPanel({ onClose, inlineTrack, showDetails = true, popup = false, onContentStateChange }: { onClose?: () => void; inlineTrack?: TrackSummary; showDetails?: boolean; popup?: boolean; onContentStateChange?: (state: ContentState) => void }) {
+/**
+ * `inlineTrack`: the playing song's picture, hosted by another surface. `popup`: that picture
+ * exists only as the floating window; closing that window closes the popup.
+ * `track`: the configuration of exactly this song (the right column's app); without either,
+ * the song the store has open.
+ */
+export default function VisualizerStudioPanel({ onClose, inlineTrack, track: pinnedTrack, showDetails = true, popup = false, onContentStateChange }: { onClose?: () => void; inlineTrack?: TrackSummary; track?: TrackSummary; showDetails?: boolean; popup?: boolean; onContentStateChange?: (state: ContentState) => void }) {
   const selectedTrack = useVisualizerStudioStore(s => s.track);
-  const fromPlayback = useVisualizerStudioStore(s => s.fromPlayback);
-  const track = inlineTrack ?? selectedTrack;
-  return track ? <Studio key={track.id} track={track} fromPlayback={inlineTrack ? true : fromPlayback} inline={!!inlineTrack} showDetails={showDetails} popup={popup} onClose={onClose} onContentStateChange={onContentStateChange} /> : null;
+  const track = inlineTrack ?? pinnedTrack ?? selectedTrack;
+  return track ? <Studio key={track.id} track={track} inline={!!inlineTrack} showDetails={showDetails} popup={popup} onClose={onClose} onContentStateChange={onContentStateChange} /> : null;
 }
-function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onContentStateChange }: { track: TrackSummary; fromPlayback: boolean; inline: boolean; showDetails: boolean; popup: boolean; onClose?: () => void; onContentStateChange?: (state: ContentState) => void }) {
-  const readOnlyPreview = inline && usesKvjWindow();
-  const [savedRevision, setSavedRevision] = useState(0);
+function Studio({ track, inline, showDetails, popup, onClose, onContentStateChange }: { track: TrackSummary; inline: boolean; showDetails: boolean; popup: boolean; onClose?: () => void; onContentStateChange?: (state: ContentState) => void }) {
   const dirty = useRef(false);
-  useEffect(() => {
-    if (!readOnlyPreview) return;
-    let active = true;
-    const stop = getCurrentWebviewWindow().listen<number>("kdj:visualizer-saved", event => {
-      if (active && event.payload === track.id) setSavedRevision(value => value + 1);
-    });
-    void stop.catch(error => useToastStore.getState().show(`无法同步可视化：${message(error)}`));
-    return () => { active = false; void stop.then(unlisten => unlisten()).catch(() => undefined); };
-  }, [readOnlyPreview, track.id]);
   const settingsOpen = useVisualizerStudioStore(state => inline && state.inlineSettings && state.track?.id === track.id);
   const settingsTarget = useVisualizerStudioStore(state => settingsOpen ? state.settingsTarget : null);
-  const previewRequest = useVisualizerStudioStore(state => !inline && state.track?.id === track.id ? state.previewRequest : 0);
   const [draft, setDraft] = useState<VisualizerDraft | null>(null);
   const latestDraft = useRef(draft); latestDraft.current = draft;
   const [images, setImages] = useState<HTMLImageElement[]>([]);
@@ -122,8 +117,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
   const lyricMatching = useLyricsStore(s => !!s.byId[track.id]?.inflight);
   const [notice, setNotice] = useState("");
   const { fullscreen: expanded, applyFullscreen } = usePreviewFullscreen();
-  const [detached, setDetached] = useState(() => previewRequest > 0);
-  useEffect(() => { if (previewRequest > 0) setDetached(true); }, [previewRequest]);
+  const [detached, setDetached] = useState(false);
   const floating = popup || detached;
   const setFloating = (value: boolean) => {
     if (popup && !value) useVisualizerPopup.getState().setOpen(false);
@@ -180,12 +174,8 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
   }, [inline, track.id, previewRequested]);
 
   useEffect(() => {
-    // Following a switch must not reissue play while the new transport is loading.
-    // Opening KVJ settings is not a DJ transport command; only explicit play/seek loads a source.
-    if (!fromPlayback && !isEditorWindow) {
-      const pip = useVideoPip.getState(); if (pip.active) pip.clear();
-      if (getCompositionClock().trackId !== track.id) playTrack(track, false, "composition", 0);
-    }
+    // Opening the configuration is not a transport command: what is playing keeps playing.
+    // Only this picture's own play and seek load its song.
     const update = () => {
       const clock = getCompositionClock(), active = clock.trackId === track.id && clock.ready;
       playingRef.current = active && clock.playing;
@@ -199,7 +189,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
     };
     const unlisten = subscribePlayerSession(update), timer = window.setInterval(update, 125);
     update(); return () => { unlisten(); window.clearInterval(timer); };
-  }, [track.id, fromPlayback]);
+  }, [track.id]);
 
   useEffect(() => {
     if (inline) return;
@@ -215,15 +205,13 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
       let restored: VisualizerDraft | undefined;
       try {
         const current = latestDraft.current;
-        restored = current && !readOnlyPreview ? { project: structuredClone(current.project), images: current.images } : await loadVisualizerDraft(track.id);
+        restored = current ? { project: structuredClone(current.project), images: current.images } : await loadVisualizerDraft(track.id);
         if (restored?.images.length) validateVisualizerProject(restored.project);
       } catch { restored = undefined; }
       const install = (next: VisualizerDraft) => {
-        if (!(readOnlyPreview && restored)) {
-          const preferences = loadVisualizerPreferences(next.project);
-          if (preferences) applyVisualizerPreferences(next.project, preferences);
-          else rememberCommon(next.project);
-        }
+        const preferences = loadVisualizerPreferences(next.project);
+        if (preferences) applyVisualizerPreferences(next.project, preferences);
+        else rememberCommon(next.project);
         next.project.output.directoryMode = "download";
         next.project.output.directory = useAppStore.getState().settings?.download_dir || "";
         setDraft(next);
@@ -257,17 +245,17 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
       });
     })().catch(e => { if (active) { setMediaFailed(true); setNotice(message(e)); } });
     return () => { active = false; controller.abort(); };
-  }, [track.id, loadAllowed, savedRevision, readOnlyPreview]);
+  }, [track.id, loadAllowed]);
 
   useEffect(() => {
-    if (!draft || readOnlyPreview || !dirty.current) return;
+    if (!draft || !dirty.current) return;
     const snapshot = draft;
     const timer = window.setTimeout(() => {
       saveChain.current = saveChain.current.catch(() => undefined).then(() => saveVisualizerDraft(snapshot));
       void saveChain.current.then(() => setNotice(current => current.startsWith("无法记住当前调整：") ? "" : current), e => { setNotice(`无法记住当前调整：${message(e)}`); });
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [draft, readOnlyPreview]);
+  }, [draft]);
   useEffect(() => {
     let active = true;
     setMediaFailed(false);
@@ -333,6 +321,10 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
     if (target.width !== width) target.width = width;
     if (target.height !== height) target.height = height;
     let frame = 0, nextDraw = -Infinity, lastTime = NaN, visible = true;
+    // Another app of the right column is in front (RightDock keeps this one mounted): paint
+    // nothing meanwhile, and catch up once when the picture is uncovered.
+    let owed = false;
+    const covered = () => { const yes = target.closest("[data-covered]") !== null; if (yes) owed = true; return yes; };
     let transitionStart = performance.now();
     let lastDrawAt = transitionStart, lastRate = 0;
     let lastRevision: number | null = null;
@@ -372,17 +364,18 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
     };
     const tick = (now: number) => {
       frame = 0;
-      if (document.hidden || !visible) return;
+      if (document.hidden || !visible || covered()) return;
       draw(now);
       if (playingRef.current || previous) frame = requestAnimationFrame(tick);
     };
     const resume = () => {
       cancelAnimationFrame(frame); frame = 0;
-      if (!document.hidden && visible) { draw(performance.now(), true); if (playingRef.current || previous) frame = requestAnimationFrame(tick); }
+      if (!document.hidden && visible && !covered()) { draw(performance.now(), true); if (playingRef.current || previous) frame = requestAnimationFrame(tick); }
     };
     drawPreview.current = () => {
-      if (document.hidden || !visible) return;
-      if (!playingRef.current || scrubTime.current !== null) draw(performance.now());
+      if (document.hidden || !visible || covered()) return;
+      if (owed) { owed = false; draw(performance.now(), true); }
+      else if (!playingRef.current || scrubTime.current !== null) draw(performance.now());
       if ((playingRef.current || previous) && !frame) frame = requestAnimationFrame(tick);
       else if (!playingRef.current && !previous && frame) { cancelAnimationFrame(frame); frame = 0; }
     };
@@ -396,7 +389,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
   useEffect(() => {
     return () => {
       const snapshot = latestDraft.current;
-      if (snapshot && !readOnlyPreview && dirty.current) void saveChain.current.catch(() => undefined).then(() => saveVisualizerDraft(snapshot))
+      if (snapshot && dirty.current) void saveChain.current.catch(() => undefined).then(() => saveVisualizerDraft(snapshot))
         .catch(error => useToastStore.getState().show(`无法记住可视化调整：${message(error)}`));
     };
   }, []);
@@ -414,12 +407,11 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
     history.current.future = []; history.current.last = now;
   }
   function rememberCommon(project: VisualizerProject) {
-    if (readOnlyPreview) return;
     try { saveVisualizerPreferences(project); }
     catch (error) { setNotice(`无法记住通用设置：${message(error)}`); }
   }
   function edit(fn: (project: VisualizerProject) => void) {
-    if (!draft || busy || readOnlyPreview) return;
+    if (!draft || busy) return;
     checkpoint(draft); const project = structuredClone(draft.project); fn(project);
     switchVisualizerContentLayout(project, draft.project); rememberCommon(project);
     setDraft({ ...draft, project });
@@ -436,7 +428,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
     rememberCommon(project); replaceDraft({ project, images: draft.images });
   }
   function undo(redo = false) {
-    if (!draft || busy || readOnlyPreview) return;
+    if (!draft || busy) return;
     dirty.current = true;
     const from = redo ? history.current.future : history.current.past, to = redo ? history.current.past : history.current.future;
     const next = from.pop(); if (next) { to.push(draft); rememberCommon(next.project); setDraft(next); history.current.last = 0; }
@@ -458,7 +450,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
     const file = e.target.files?.[0]; e.target.value = ""; if (!file) return;
     try { if (!/\.(png|jpe?g|webp|bmp)$/i.test(file.name)) throw new Error("请选择 PNG / JPEG / WebP / BMP 图片"); await installImage(file, imageSlot.current); } catch (error) { setNotice(message(error)); }
   }
-  async function saveNow() { if (!draft || readOnlyPreview || !dirty.current) return; await saveChain.current.catch(() => undefined); await saveVisualizerDraft(draft); }
+  async function saveNow() { if (!draft || !dirty.current) return; await saveChain.current.catch(() => undefined); await saveVisualizerDraft(draft); }
   function requestClose() { if (onClose) onClose(); else void close(); }
   async function close(): Promise<boolean> {
     if (closing.current) return false;
@@ -541,8 +533,6 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
   const settings = (node: ReactNode) => !inline ? node : settingsTarget ? createPortal(node, settingsTarget) : null;
   const settingsVisible = !inline || showDetails || !!settingsTarget;
   const toolbar = <div className="kd-viz-bar kd-editor-bar" role="toolbar" aria-label="可视化操作">
-    <div className="kd-viz-song"><strong title={track.title || track.filename}>{track.title || track.filename}</strong>{track.artist && <small title={track.artist}>{track.artist}</small>}</div>
-    <EditorSeparator />
     <button type="button" disabled={!history.current.past.length || busy} onClick={() => undo()} title="撤销 · ⌘/Ctrl Z" aria-label="撤销"><Undo2 size={14} /></button>
     <button type="button" disabled={!history.current.future.length || busy} onClick={() => undo(true)} title="重做 · ⌘/Ctrl Shift Z" aria-label="重做"><Redo2 size={14} /></button>
     <EditorSeparator />
@@ -556,65 +546,69 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
     <button type="button" className="kd-viz-export" title="加入导出队列" aria-label="加入导出队列" disabled={!prepared || analyzing || busy} onClick={() => void enqueueExport()}><ListPlus size={14} /><span>{busy ? "加入中…" : "加入队列"}</span></button>
   </div>;
   const noticeRow = notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>;
+  const pickImage = (slot: number) => { imageSlot.current = slot; imageInput.current?.click(); };
+  // Where the picture sits in its frame: also set by dragging it in the preview.
   const pictureSide = (side: "left" | "right") => p && <Group title={side === "left" ? "左侧图片" : "右侧图片"}>
-    <Range label="水平位置" percentagePoints value={p.scene[side].focus_x * 100} resetValue={defaults.scene[side].focus_x * 100} max={100} step={1} onChange={v => edit(n => { n.scene[side].focus_x = v / 100; })} />
-    <Range label="垂直位置" percentagePoints value={p.scene[side].focus_y * 100} resetValue={defaults.scene[side].focus_y * 100} max={100} step={1} onChange={v => edit(n => { n.scene[side].focus_y = v / 100; })} />
-    <Range label="缩放" value={p.scene[side].zoom} resetValue={defaults.scene[side].zoom} min={1} max={4} onChange={v => edit(n => { n.scene[side].zoom = v; })} />
-    {side === "left" && <Range label="背景加深（%）" percentagePoints value={p.look.leftVeil * 100} resetValue={defaults.look.leftVeil * 100} max={100} step={1} onChange={v => edit(n => { n.look.leftVeil = v / 100; })} />}
+    <Slider label="水平" value={p.scene[side].focus_x * 100} defaultValue={defaults.scene[side].focus_x * 100} min={0} max={100} origin={50} format={percent} onChange={v => edit(n => { n.scene[side].focus_x = v / 100; })} />
+    <Slider label="垂直" value={p.scene[side].focus_y * 100} defaultValue={defaults.scene[side].focus_y * 100} min={0} max={100} origin={50} format={percent} onChange={v => edit(n => { n.scene[side].focus_y = v / 100; })} />
+    <Slider label="缩放" value={p.scene[side].zoom} defaultValue={defaults.scene[side].zoom} min={1} max={4} step={.01} format={times} onChange={v => edit(n => { n.scene[side].zoom = v; })} />
+    {side === "left" && <Slider label="加深" value={p.look.leftVeil * 100} defaultValue={defaults.look.leftVeil * 100} min={0} max={100} format={percent} onChange={v => edit(n => { n.look.leftVeil = v / 100; })} />}
   </Group>;
+  const moveLeftContent = (patch: Partial<NonNullable<VisualizerProject["leftContent"]>>) => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), ...patch }; });
   const inspector = <aside className="kd-viz-inspector" aria-label="可视化设置">
     <EditorTabs<StudioTab> label="可视化设置分区" tabs={studioTabs} value={tab} onChange={selectTab} panelId={tabPanelId} />
     <fieldset id={tabPanelId} role="tabpanel" className="kd-viz-settings kd-scroll" disabled={busy}>{p && draft && <>
       {tab === "scene" && <>
         <Group title="画面">
-          <Range label="左右画面比例" percentagePoints value={p.scene.arc.position * 100} resetValue={defaults.scene.arc.position * 100} min={25} max={75} step={.5} onChange={v => edit(n => { n.scene.arc.position = v / 100; })} />
-          <Range label="背景动态" value={p.look.motion} resetValue={defaults.look.motion} onChange={v => edit(n => { n.look.motion = v; })} />
-          <Range label="频谱强度" value={p.look.spectrumGain} resetValue={defaults.look.spectrumGain} min={.1} max={3} onChange={v => edit(n => { n.look.spectrumGain = v; })} />
+          <Slider label="左右比例" value={p.scene.arc.position * 100} defaultValue={defaults.scene.arc.position * 100} min={25} max={75} step={.5} format={percent} onChange={v => edit(n => { n.scene.arc.position = v / 100; })} />
+          <Slider label="背景动态" value={p.look.motion} defaultValue={defaults.look.motion} min={0} max={1} step={.01} format={ratio} onChange={v => edit(n => { n.look.motion = v; })} />
+          <Slider label="频谱强度" value={p.look.spectrumGain} defaultValue={defaults.look.spectrumGain} min={.1} max={3} step={.05} format={ratio} onChange={v => edit(n => { n.look.spectrumGain = v; })} />
         </Group>
-        <Group title="元素">
-          <Toggle label="显示唱片" checked={p.scene.disc.mode !== "hidden"} onChange={v => edit(n => { n.scene.disc.mode = v ? "cover" : "hidden"; })} />
-          <Toggle label="显示频谱" checked={p.look.mainSpectrum || p.look.smallSpectrum !== "off"} onChange={v => edit(n => { n.look.mainSpectrum = v; n.look.smallSpectrum = v ? "mixed" : "off"; })} />
-          <Toggle label="显示能量线" checked={p.look.energyLine} onChange={v => edit(n => { n.look.energyLine = v; })} />
+        <Group title="显示">
+          <Toggle label="唱片" checked={p.scene.disc.mode !== "hidden"} onChange={v => edit(n => { n.scene.disc.mode = v ? "cover" : "hidden"; })} />
+          <Toggle label="频谱" checked={p.look.mainSpectrum || p.look.smallSpectrum !== "off"} onChange={v => edit(n => { n.look.mainSpectrum = v; n.look.smallSpectrum = v ? "mixed" : "off"; })} />
+          <Toggle label="能量线" checked={p.look.energyLine} onChange={v => edit(n => { n.look.energyLine = v; })} />
         </Group>
-        <Group title="左侧整体" hint="封面、文字、歌词及下方频谱一起移动，背景和分界圆弧不变">
-          <Range label="左右移动（%）" percentagePoints value={leftContent.x * 100} resetValue={defaults.leftContent!.x * 100} min={-40} max={40} step={.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), x: v / 100 }; })} />
-          <Range label="上下移动（%）" percentagePoints value={leftContent.y * 100} resetValue={defaults.leftContent!.y * 100} min={-40} max={40} step={.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), y: v / 100 }; })} />
-          <Range label="整体缩放" value={leftContent.scale} resetValue={defaults.leftContent!.scale} min={.5} max={1.5} onChange={v => edit(n => { n.leftContent = { ...(n.leftContent ?? defaults.leftContent!), scale: v }; })} />
+        <Group title="左侧内容" hint="封面、文字、歌词及下方频谱一起移动，背景和分界圆弧不变">
+          <Slider label="水平" value={leftContent.x * 100} defaultValue={defaults.leftContent!.x * 100} min={-40} max={40} step={.5} origin={0} format={signedPercent} onChange={v => moveLeftContent({ x: v / 100 })} />
+          <Slider label="垂直" value={leftContent.y * 100} defaultValue={defaults.leftContent!.y * 100} min={-40} max={40} step={.5} origin={0} format={signedPercent} onChange={v => moveLeftContent({ y: v / 100 })} />
+          <Slider label="缩放" value={leftContent.scale} defaultValue={defaults.leftContent!.scale} min={.5} max={1.5} step={.01} format={ratio} onChange={v => moveLeftContent({ scale: v })} />
         </Group>
       </>}
       {tab === "pictures" && <>
         <Group title="图片">
-          <ImageChoice blob={draft.images[0]} label={draft.images.length ? "更换主图" : "添加主图"} disabled={busy} onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }} />
-          <ImageChoice blob={draft.images[1]} label={draft.images.length > 1 ? "更换背景图" : "添加背景图"} disabled={busy || !draft.images.length} onClick={() => { imageSlot.current = 1; imageInput.current?.click(); }} />
-          {draft.images.length > 1 && <div className="kd-viz-wide kd-viz-buttons">
-            <button type="button" onClick={() => { const project = structuredClone(p); syncVisualizerImages(project, 1); replaceDraft({ project, images: draft.images.slice(0, 1) }); }}>移除背景图</button>
-          </div>}
+          <div className="kd-viz-images">
+            <ImageChoice blob={draft.images[0]} label="主图" action={draft.images.length ? "更换主图" : "添加主图"} disabled={busy} onPick={() => pickImage(0)} />
+            <ImageChoice blob={draft.images[1]} label="背景图" action={draft.images.length > 1 ? "更换背景图" : "添加背景图"} disabled={busy || !draft.images.length} onPick={() => pickImage(1)}
+              onRemove={draft.images.length > 1 ? () => { const project = structuredClone(p); syncVisualizerImages(project, 1); replaceDraft({ project, images: draft.images.slice(0, 1) }); } : undefined} />
+          </div>
         </Group>
         {pictureSide("left")}{pictureSide("right")}
       </>}
       {tab === "text" && <>
         <Group title="歌曲信息">
-          {([["title", "歌曲标题"], ["artist", "艺人"], ["album", "专辑"]] as const).map(([key, label]) => <label key={key} className="kd-viz-wide">{label}<input value={p.text[key]} maxLength={500} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></label>)}
-          <Toggle label="显示专辑信息" checked={p.text.showAlbum === true} onChange={v => edit(n => { n.text.showAlbum = v; })} />
-          <Range label="整体字号" value={p.text.scale} resetValue={defaults.text.scale} min={.5} max={1.5} onChange={v => edit(n => { n.text.scale = v; })} />
+          {([["title", "标题"], ["artist", "艺人"], ["album", "专辑"]] as const).map(([key, label]) => <Row key={key} label={label}><input value={p.text[key]} maxLength={500} onChange={e => edit(n => { n.text[key] = e.target.value; })} /></Row>)}
+          <Toggle label="显示专辑" checked={p.text.showAlbum === true} onChange={v => edit(n => { n.text.showAlbum = v; })} />
+          <Slider label="字号" value={p.text.scale} defaultValue={defaults.text.scale} min={.5} max={1.5} step={.01} format={ratio} onChange={v => edit(n => { n.text.scale = v; })} />
         </Group>
         <Group title="歌词">
-          {hasLyrics ? <Toggle label="显示歌词" checked={p.lyrics.mode !== "off"} onChange={v => edit(n => { n.lyrics.mode = v ? "scroll" : "off"; })} /> : <button type="button" disabled={loadingLyrics} aria-busy={loadingLyrics} onClick={() => void loadSongLyrics()}><Captions size={15} aria-hidden="true" />{loadingLyrics ? "正在匹配歌词…" : "尝试匹配歌词"}</button>}
+          {hasLyrics && <Toggle label="显示歌词" checked={p.lyrics.mode !== "off"} onChange={v => edit(n => { n.lyrics.mode = v ? "scroll" : "off"; })} />}
           {hasLyrics && <Toggle label="显示翻译" checked={p.lyrics.showTranslation !== false} onChange={v => edit(n => { n.lyrics.showTranslation = v; })} />}
-          <div className="kd-viz-wide kd-viz-buttons">
+          <div className="kd-viz-buttons">
             <LyricsSourcePicker platform={lyricSource} disabled={busy || !draft} matching={loadingLyrics || lyricMatching} onSelect={platform => void loadSongLyrics(platform)} />
-            {hasLyrics && <button type="button" disabled={loadingLyrics || lyricMatching} aria-busy={loadingLyrics} onClick={() => void loadSongLyrics()}>{loadingLyrics ? "正在读取歌词…" : "重新读取歌词"}</button>}
+            <button type="button" disabled={loadingLyrics || lyricMatching} aria-busy={loadingLyrics} onClick={() => void loadSongLyrics()}>
+              {!hasLyrics && <Captions size={14} aria-hidden="true" />}{loadingLyrics ? hasLyrics ? "正在读取歌词…" : "正在匹配歌词…" : hasLyrics ? "重新读取" : "匹配歌词"}</button>
             <button type="button" onClick={() => lyricInput.current?.click()}>导入歌词</button>
           </div>
         </Group>
       </>}
       {tab === "output" && <Group title="导出">
-        <label>分辨率<Select value={`${p.scene.canvas.width}x${p.scene.canvas.height}`} onChange={e => { const [width, height] = e.target.value.split("x").map(Number); edit(n => { n.scene.canvas = { width, height, fps: 30 }; }); }}>
-          <option value="1920x1080">1080p · 16:9</option><option value="1280x720">720p · 16:9</option><option value="1920x840">1920 × 840 · 超宽</option><option value="2560x1080">2560 × 1080 · 超宽</option>
-        </Select></label>
-        <label>帧率<Select value={p.output.fps} onChange={e => edit(n => { n.output.fps = Number(e.target.value) as 30 | 60; })}><option value={30}>30 fps</option><option value={60}>60 fps</option></Select></label>
-        <label className="kd-viz-wide">文件名<input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></label>
-        <Toggle label="显示水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
+        <Row label="分辨率"><Select value={`${p.scene.canvas.width}x${p.scene.canvas.height}`} onChange={e => { const [width, height] = e.target.value.split("x").map(Number); edit(n => { n.scene.canvas = { width, height, fps: 30 }; }); }}>
+          {resolutions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </Select></Row>
+        <div className="kd-viz-row"><span>帧率</span><Segmented label="帧率" options={frameRates} value={p.output.fps} onChange={fps => edit(n => { n.output.fps = fps; })} /></div>
+        <Row label="文件名"><input value={p.output.filename} onChange={e => edit(n => { n.output.filename = e.target.value; })} /></Row>
+        <Toggle label="水印" checked={p.output.watermark !== false} onChange={v => edit(n => { n.output.watermark = v; })} />
       </Group>}
     </>}</fieldset>
   </aside>;
@@ -623,18 +617,18 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
       e.stopPropagation();
       if (e.key === "Escape" && (expanded || !inline)) { e.preventDefault(); if (expanded) void applyFullscreen(false); else requestClose(); return; }
       const target = e.target as HTMLElement;
-      if (target.closest("input, textarea, select, [contenteditable=true]")) return;
+      if (target.closest("input:not([type=range]), textarea, select, [contenteditable=true]")) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(e.shiftKey); }
       if (e.key === " " && !target.closest("button, summary, [role=slider], [role=tab]")) { e.preventDefault(); togglePlayback(); }
     }}>
-    {settings(<>{toolbar}{noticeRow}</>)}
+    {inline && settings(<>{toolbar}{noticeRow}</>)}
     <div className="kd-viz-content">
     <div className="kd-viz-preview-column">
     <FloatingPreviewFrame floating={floating} fullscreen={expanded} editing={!floating && !expanded} compact={emptyMedia}
       ratio={inline ? 16 / 9 : p ? p.scene.canvas.width / p.scene.canvas.height : 16 / 9}
       onEscape={() => { if (expanded) void applyFullscreen(false); else if (floating) setFloating(false); else requestClose(); }}>
-      {prepared && p ? <canvas ref={canvas} aria-label={readOnlyPreview ? "音频可视化预览" : "音频可视化预览，可拖动左右图片调整位置"} onPointerDown={e => {
-        if (readOnlyPreview || busy || floating || expanded || e.button !== 0 || !e.isPrimary || !draft) return;
+      {prepared && p ? <canvas ref={canvas} aria-label="音频可视化预览，可拖动左右图片调整位置" onPointerDown={e => {
+        if (busy || floating || expanded || e.button !== 0 || !e.isPrimary || !draft) return;
         const rect = e.currentTarget.getBoundingClientRect(), scene = prepared.project.scene;
         const scale = Math.min(rect.width / scene.canvas.width, rect.height / scene.canvas.height);
         if (!scale) return;
@@ -673,7 +667,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
           onLoad={() => setCoverAvailable(true)} onError={() => setCoverAvailable(false)} />}
         {loadAllowed && <div className="kd-viz-empty-action">
           {!draft || analyzing || draft.images.length ? <LoaderCircle className="kd-spin" size={20} role="status" aria-label={!draft ? "正在加载可视化" : "正在分析音频"} />
-            : <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => { if (readOnlyPreview) useVisualizerStudioStore.getState().open(track); else { imageSlot.current = 0; imageInput.current?.click(); } }}><ImagePlus size={20} /></button>}
+            : <button type="button" disabled={busy} aria-label="添加图片" title="添加图片" onClick={() => { imageSlot.current = 0; imageInput.current?.click(); }}><ImagePlus size={20} /></button>}
         </div>}
       </div>}
       {inline && !settingsTarget && notice && <div className="kd-viz-notice kd-viz-inline-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>}
@@ -684,7 +678,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
           extra={<>
             {!floating && <button type="button" aria-label="打开预览小窗" title="打开预览小窗" onClick={() => { void applyFullscreen(false).then(ok => { if (ok) setFloating(true); }); }}><PictureInPicture2 size={13} /></button>}
             {/* Entries live in the control row: the picture's corners belong to the hosting panel's own tools. */}
-            {inline && !expanded && !readOnlyPreview && <button type="button"
+            {inline && !expanded && <button type="button"
               title={loadingLyrics ? "正在匹配歌词…" : lyricsVisible ? "关闭歌词" : "开启歌词"}
               aria-label={lyricsVisible ? "关闭可视化歌词" : "开启可视化歌词"} aria-pressed={lyricsVisible}
               aria-busy={loadingLyrics} disabled={!p || busy || loadingLyrics || lyricMatching}
@@ -697,7 +691,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
               {busy ? <LoaderCircle size={13} className="kd-spin" /> : <ListPlus size={13} />}
             </button>}
             {inline && !expanded && <button type="button"
-              aria-label="打开可视化操作与设置" title="可视化操作与设置" aria-pressed={readOnlyPreview ? undefined : settingsOpen}
+              aria-label="打开可视化操作与设置" title="可视化操作与设置" aria-pressed={settingsOpen}
               onClick={event => { event.stopPropagation(); useVisualizerStudioStore.getState().openInlineSettings(track); }}><SlidersHorizontal size={13} /></button>}
           </>} />
         <FloatingVideoScrub position={cursor} duration={duration} aria-label="预览时间" aria-disabled={busy}
@@ -709,6 +703,7 @@ function Studio({ track, fromPlayback, inline, showDetails, popup, onClose, onCo
       </>}</StudioPosition>}
     </FloatingPreviewFrame>
     </div>
+    {!inline && <>{toolbar}{noticeRow}</>}
     {settingsVisible && settings(inspector)}
     </div>
     <input hidden ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/bmp" onChange={e => void onImage(e)} />

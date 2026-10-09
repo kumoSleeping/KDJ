@@ -1,6 +1,4 @@
-/* Workspace owns the right-panel shell. The editor has one scrolling surface. */
-.kd-split-aside-body:has(> .kd-viz-panel),
-.kd-sheet-body:has(> .kd-viz-panel) { overflow: hidden; }
+/* The hosting column owns the shell (VisualizerDock). The configuration has one scrolling surface. */
 .kd-viz-panel {
   position: relative;
   display: flex;
@@ -38,7 +36,7 @@
 .kd-viz-panel :focus-visible { outline: 1px solid var(--kd-muted); outline-offset: 2px; }
 .kd-viz-panel fieldset { margin: 0; border: 0; min-width: 0; }
 
-/* ---- Preview surface, shared by the detail panel, the studio stage and the small window. */
+/* ---- Preview surface, shared by the column's app and the floating window. */
 .kd-viz-content { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
 .kd-viz-preview-column { flex: none; min-width: 0; }
 .kd-viz-panel .kd-viz-preview {
@@ -49,8 +47,8 @@
   min-width: 0;
   max-width: none;
   margin: 0;
-  border: 1px solid var(--kd-line-soft);
-  border-radius: 6px;
+  border: 0;
+  border-radius: 0;
   box-shadow: none;
   overflow: hidden;
   background: var(--kd-panel-inset);
@@ -75,73 +73,80 @@
 .kd-viz-notice > button { flex: none; min-height: 18px; padding: 2px; }
 .kd-viz-inline-notice { position: absolute; z-index: 5; bottom: 0; left: 0; right: 0; margin: 0; padding: 4px 6px; border-bottom: 0; }
 
-/* ---- Detail-panel preview: the panel is already the container, so no second window frame. */
+/* ---- A hosted picture (the floating window's source): no frame, no layout of its own. */
 .kd-viz-panel[data-inline="true"] { height: auto; overflow: visible; }
 .kd-viz-panel[data-inline="true"] .kd-viz-content { display: block; overflow: visible; }
-.kd-viz-panel[data-inline="true"] .kd-viz-preview-column { padding: 0 0 6px; }
-.kd-viz-panel[data-inline="true"] .kd-viz-preview { border: 0; border-radius: 0; box-shadow: none; }
 
-/* ---- Document row: what is being edited, history, and the way out to the export queue. */
-.kd-viz-bar { flex-wrap: wrap; row-gap: 2px; }
-.kd-viz-song { display: flex; align-items: baseline; flex: 0 1 auto; gap: 8px; min-width: 0; max-width: 46%; }
-.kd-viz-song > strong,
-.kd-viz-song > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--kd-size-sm); }
-.kd-viz-song > strong { font-weight: 600; }
-.kd-viz-song > small { color: var(--kd-muted); font-size: var(--kd-size-xs); }
+/* ---- The right column's app: the picture across the top, its controls beneath. The picture
+   never takes more than about two fifths of the window's height, however wide the column. */
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-column {
+  display: grid;
+  justify-items: center;
+  border-bottom: 1px solid var(--kd-line-soft);
+  background: var(--kd-panel-inset);
+}
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview { width: min(100%, calc(38vh * var(--kd-preview-ratio, 1.7778))); }
+/* Popped out or fullscreen, the picture leaves no hole behind. */
+.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-column:empty { display: none; }
+
+/* ---- Document row: history, what the picture shows, and the way out to the export queue. */
+.kd-viz-panel .kd-viz-bar,
+.kd-viz-settings-host .kd-viz-bar { flex-wrap: wrap; row-gap: 2px; min-height: 36px; padding: 4px 8px; border-bottom-color: var(--kd-line-soft); }
 .kd-viz-panel .kd-viz-export { color: var(--kd-text); font-weight: 500; }
 .kd-viz-panel .kd-viz-export:hover:not(:disabled) { color: var(--kd-theme); }
 
-/* ---- Inspector: one section switch, one column of aligned parameter rows. */
+/* ---- Inspector: one section switch, then parameter rows on one grid: a name column, the
+   control, and a value column that sliders and switches share. */
 .kd-viz-inspector { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--kd-panel); }
-.kd-viz-settings { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 16px 20px; }
+.kd-viz-inspector > .kd-editor-tabs { padding-inline: 8px; }
+.kd-viz-settings {
+  --kd-slider-label: 4.5em;
+  --kd-slider-value: 3.25rem;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 16px 16px;
+}
 .kd-viz-group { min-width: 0; }
 .kd-viz-group + .kd-viz-group { border-top: 1px solid var(--kd-line-soft); }
-.kd-viz-group > h3 { margin: 0; padding: 12px 0 8px; font-size: var(--kd-size-xs); font-weight: 600; }
-.kd-viz-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding-bottom: 14px; align-items: center; }
-.kd-viz-fields > label { display: grid; grid-template-columns: minmax(64px, 34%) minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; color: var(--kd-text-body); }
+.kd-viz-group > h3 { margin: 0; padding: 12px 0 6px; color: var(--kd-text); font-size: var(--kd-size-xs); font-weight: 600; }
+.kd-viz-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding-bottom: 12px; align-items: center; }
+.kd-viz-row {
+  display: grid;
+  grid-template-columns: var(--kd-slider-label) minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0.5rem;
+  min-width: 0;
+  min-height: 1.75rem;
+  color: var(--kd-text-body);
+}
+.kd-viz-row > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-viz-row > .kd-segmented { justify-self: start; }
+/* A select reads like the text fields around it: its value at the left, the arrow at the right. */
+.kd-viz-panel .kd-select-control { justify-content: space-between; }
 .kd-viz-panel input:not([type=range]):not([type=checkbox]),
 .kd-viz-panel .kd-select-control { width: 100%; min-width: 0; min-height: 28px; padding: 3px 6px; border: 1px solid var(--kd-line-soft); border-radius: 4px; background: var(--kd-viz-field-bg, var(--kd-panel-inset)); color: var(--kd-text); }
-.kd-viz-panel .kd-viz-image-choice { justify-content: flex-start; gap: 8px; width: 100%; min-height: 40px; padding: 0; white-space: normal; }
-.kd-viz-image-choice img { display: block; flex: none; width: 36px; height: 36px; object-fit: cover; border-radius: 4px; }
-.kd-viz-dial { display: grid; grid-template-columns: minmax(0, 1fr) 28px 5ch; align-items: center; gap: 6px; min-height: 30px; min-width: 0; }
-.kd-viz-dial > span { min-width: 0; color: var(--kd-text-body); }
-.kd-viz-dial > output { text-align: right; color: var(--kd-muted); font-variant-numeric: tabular-nums; }
-.kd-viz-dial .kd-dj-arcknob > b { display: none; }
-.kd-viz-panel .kd-viz-toggle { display: flex; justify-content: space-between; align-items: center; gap: 6px; width: 100%; min-height: 30px; min-width: 0; padding: 2px 0; }
+.kd-viz-panel .kd-viz-toggle { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; width: 100%; min-height: 1.75rem; min-width: 0; padding: 0; }
 .kd-viz-toggle .kd-djp-toggle-label { color: var(--kd-text-body); white-space: normal; }
+.kd-viz-toggle .kd-djp-toggle-state { font-weight: 600; }
 .kd-viz-toggle .kd-djp-toggle-state[data-onoff="on"] { color: var(--kd-theme); }
-.kd-viz-fields > button:not(.kd-viz-toggle, .kd-viz-image-choice) { justify-self: start; }
-.kd-viz-wide { grid-column: 1 / -1; }
-.kd-viz-buttons { display: flex; gap: 4px 8px; flex-wrap: wrap; align-items: center; }
+.kd-viz-buttons { display: flex; gap: 0 14px; flex-wrap: wrap; align-items: center; min-width: 0; min-height: 1.75rem; }
+.kd-viz-panel .kd-viz-buttons > button { padding-inline: 0; }
+.kd-viz-panel .kd-viz-buttons > .kd-lyrics-source-picker { align-self: center; }
 
-/* ---- Studio window: the picture is the stage, fitted to the space beside the inspector. */
-.kd-viz-panel:not([data-inline="true"]) .kd-viz-content {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(300px, 34%, 380px);
-  background: var(--kd-bg);
-}
-.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-column {
-  container-type: size;
-  display: grid;
-  place-items: center;
-  min-height: 0;
-  padding: clamp(14px, 3vw, 36px);
-  overflow: hidden;
-  background: var(--kd-panel-inset);
-}
-.kd-viz-panel:not([data-inline="true"]) .kd-viz-preview {
-  width: min(100%, calc(100cqh * var(--kd-preview-ratio, 1.7778)));
-  border-color: var(--kd-line);
-  border-radius: 8px;
-}
-.kd-viz-panel:not([data-inline="true"]) .kd-viz-inspector { border-left: 1px solid var(--kd-line); }
-@container (max-width: 640px) {
-  .kd-viz-panel:not([data-inline="true"]) .kd-viz-content { display: flex; }
-  .kd-viz-panel:not([data-inline="true"]) .kd-viz-preview-column { flex: none; height: clamp(170px, 40vh, 340px); padding: 12px; }
-  .kd-viz-panel:not([data-inline="true"]) .kd-viz-inspector { border-left: 0; border-top: 1px solid var(--kd-line); }
+/* The two pictures a scene is built from, side by side while there is room. */
+.kd-viz-images { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
+.kd-viz-image { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.kd-viz-panel .kd-viz-image-choice { flex: 1 1 auto; justify-content: flex-start; gap: 8px; min-width: 0; min-height: 44px; padding: 0; color: var(--kd-text-body); }
+.kd-viz-image-choice > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.kd-viz-image-thumb { display: grid; place-items: center; flex: none; width: 44px; height: 44px; overflow: hidden; border-radius: 4px; background: var(--kd-panel-inset); color: var(--kd-muted); }
+.kd-viz-image-thumb > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.kd-viz-panel .kd-viz-image-remove { flex: none; min-height: 24px; padding: 4px; }
+@container (max-width: 300px) {
+  .kd-viz-images { grid-template-columns: minmax(0, 1fr); }
+  .kd-viz-settings { --kd-slider-label: 4em; --kd-slider-value: 3rem; padding-inline: 10px; }
 }
 
-/* ---- Settings hosted in the workspace side panel while the picture stays in its own panel. */
+/* ---- The floating picture's controls, hosted by the column while the picture stays afloat. */
 .kd-viz-settings-host { overflow: hidden; }
-.kd-viz-settings-host .kd-viz-song { flex-basis: 100%; max-width: none; padding-block: 4px 2px; }
-.kd-viz-settings-host .kd-viz-song + .kd-editor-sep { display: none; }
