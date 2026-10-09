@@ -38,13 +38,24 @@ export function PlaybackPanel({ indexTarget = null, searchOpen = true, renderSea
   const keyNotation = useAppStore(state => state.settings?.key_notation ?? "camelot");
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const lyricsEntry = useLyricsStore(state => state.get(track?.id));
-  const lyricsReady = !!track && !isVideoTrack(track.format) && streamMeta(track)?.kind !== "video"
-    && hasVisibleLyrics(lyricsEntry.lines);
+  const lyricsCapable = !!track && !isVideoTrack(track.format) && streamMeta(track)?.kind !== "video";
+  const lyricsReady = lyricsCapable && hasVisibleLyrics(lyricsEntry.lines);
   const expandedPanelId = usePanelViewport(state => state.expandedPanelId);
   useEffect(() => {
     if (!lyricsReady && expandedPanelId === "kd-activity-panels:lyrics")
       usePanelViewport.getState().setExpandedPanel(null);
   }, [lyricsReady, expandedPanelId]);
+  // The entry does not depend on an earlier match: opening it is an explicit request,
+  // so a missing or failed match is retried and the panel expands once lyrics arrive.
+  const openLyrics = () => {
+    if (!track) return;
+    const expand = () => usePanelViewport.getState().setExpandedPanel("kd-activity-panels:lyrics");
+    if (lyricsReady) return expand();
+    const id = track.id;
+    void useLyricsStore.getState().ensure(track, { matchMissing: true }).then(() => {
+      if (getPlayingTrack()?.id === id && hasVisibleLyrics(useLyricsStore.getState().get(id).lines)) expand();
+    });
+  };
   const editingTrackId = useVisualizerStudioStore(state => state.inlineSettings ? null : state.track?.id ?? null);
   const inlineSettings = useVisualizerStudioStore(state => state.inlineSettings);
   const showVisualization = useDetailVisualizerPrefs(state => state.showVisualization);
@@ -99,8 +110,8 @@ export function PlaybackPanel({ indexTarget = null, searchOpen = true, renderSea
           {track && <AsyncPanelBody kind="visualizer" state="empty" />}
         </Panel>}
       <Panel key="information" heading={video ? "视频信息" : "曲目信息"} className={!track ? "kd-panel-placeholder" : undefined}
-        visibleHeader={!!track && !video} actions={track && !video && lyricsReady ? <button type="button" className="kd-manager-panel-action" aria-label="打开歌词"
-          title="打开歌词" onClick={() => usePanelViewport.getState().setExpandedPanel("kd-activity-panels:lyrics")}>
+        visibleHeader={!!track && !video} actions={!video && lyricsCapable ? <button type="button" className="kd-manager-panel-action" aria-label="打开歌词"
+          title="打开歌词" aria-busy={!lyricsReady && !!lyricsEntry.inflight} onClick={openLyrics}>
           <TextQuote size={14} aria-hidden="true" />
         </button> : undefined} dense>{information}</Panel>
       {metadata ?? <Panel key="metadata" heading="Meta" className="kd-panel-placeholder" dense />}
