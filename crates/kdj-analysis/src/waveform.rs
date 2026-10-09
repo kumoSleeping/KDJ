@@ -670,7 +670,7 @@ fn analyze_waveform_evidence_frames(
                 continue;
             }
             handles.push(scope.spawn(move || {
-                kdj_core::thread_qos::prefer_background();
+                let _background = kdj_core::thread_qos::prefer_background();
                 analyze_waveform_evidence_frame_range(samples, sr, first, last, cancelled)
             }));
         }
@@ -1977,7 +1977,7 @@ fn release_band_energy_frames_with_workers_cancellable(
                 continue;
             }
             handles.push(scope.spawn(move || {
-                kdj_core::thread_qos::prefer_background();
+                let _background = kdj_core::thread_qos::prefer_background();
                 release_band_energy_frame_range_cancellable(
                     samples, n_fft, hop, window, low_end, high_end, first, last, cancelled,
                 )

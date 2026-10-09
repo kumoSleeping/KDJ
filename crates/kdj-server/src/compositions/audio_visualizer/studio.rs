@@ -209,7 +209,7 @@ async fn analyze(State(state): State<Arc<AppState>>, Json(p): Json<Analyze>) -> 
     api_check((1..=MAX_DURATION_MS).contains(&duration), "初版支持最长 30 分钟的完整音频")?;
     let path = audio.clone(); let token = cancel.clone();
     let timeline = tokio::task::spawn_blocking(move || {
-        kdj_core::thread_qos::prefer_background();
+        let _background = kdj_core::thread_qos::prefer_background();
         kdj_analysis::visualizer::analyze_at_fps(&path, &p.spectrum, 60, &|| token.is_cancelled())
     }).await.map_err(anyhow::Error::from)??;
     api_check(fingerprint(&audio)? == signature, "分析期间歌曲已变化，请重新打开工程")?;

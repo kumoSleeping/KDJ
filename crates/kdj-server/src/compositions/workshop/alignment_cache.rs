@@ -186,7 +186,7 @@ impl Workshop {
             let feature_started = std::time::Instant::now();
             let features = Arc::new(
                 tokio::task::spawn_blocking(move || {
-                    kdj_core::thread_qos::prefer_background();
+                    let _background = kdj_core::thread_qos::prefer_background();
                     AudioFeatures::prepare(&pcm, || worker_cancel.is_cancelled())
                 })
                 .await??,

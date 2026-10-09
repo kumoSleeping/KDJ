@@ -893,7 +893,7 @@ impl CompositionManager {
     ) -> Result<()> {
         let permit_cancel = cancel.clone();
         let _permit = tokio::task::spawn_blocking(move || {
-            kdj_core::thread_qos::prefer_background();
+            let _background = kdj_core::thread_qos::prefer_background();
             work_scheduler()
                 .acquire(WorkRequest::new(WorkClass::MediaComposition), || {
                     permit_cancel.is_cancelled()
@@ -974,7 +974,7 @@ impl CompositionManager {
                 let is_overlay = audio.is_video;
                 let sections=video.options.alignment_mode==AlignmentMode::Sections && video.options.length_policy==LengthPolicy::FullAudio;
                 tokio::task::spawn_blocking(move || {
-                    kdj_core::thread_qos::prefer_background();
+                    let _background = kdj_core::thread_qos::prefer_background();
                     if is_overlay {
                         kdj_analysis::alignment::align_segment(&apcm, &vpcm, || {
                             cancel.is_cancelled()

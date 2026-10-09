@@ -388,7 +388,7 @@ impl WaveformCoordinator {
         let _ = std::thread::Builder::new()
             .name("waveform-worker".into())
             .spawn(move || {
-                kdj_core::thread_qos::prefer_background();
+                let _background = kdj_core::thread_qos::prefer_background();
                 worker.warm_loop();
             });
         coordinator
@@ -810,7 +810,7 @@ impl WaveformCoordinator {
         let coord = Arc::clone(self);
         let compute_cancellation = request_token.cancellation.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            kdj_core::thread_qos::prefer_background();
+            let _background = kdj_core::thread_qos::prefer_background();
             let _decode_permit = decode_permit;
             let _work = work_permit;
             if compute_cancellation.is_cancelled() {

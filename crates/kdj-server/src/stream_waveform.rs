@@ -948,7 +948,7 @@ impl StreamWaveformCoordinator {
     fn spawn(&self, job: AnalyzeJob) {
         let coordinator = self.clone();
         tokio::task::spawn_blocking(move || {
-            kdj_core::thread_qos::prefer_background();
+            let _background = kdj_core::thread_qos::prefer_background();
             // The online track currently feeding the Deck is not a bulk-library job. Classifying
             // it as `LibraryAnalysis` made the scheduler wait for `live_audio_decks == 0`, so the
             // exact moment a user pressed Play was also the moment every online waveform and

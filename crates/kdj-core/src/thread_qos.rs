@@ -19,8 +19,32 @@ pub fn prefer_live_audio() {
     }
 }
 
+/// Held for the length of a background task; the thread gets its normal priority back when it
+/// is dropped.
+///
+/// Background work mostly runs on shared blocking-pool threads, and the next task on the same
+/// thread is often interactive: a playback command, a library query, a cover. A demotion that
+/// outlived its task left those running at background priority behind the analysis workers.
+#[must_use = "the thread returns to its normal priority when this is dropped"]
+pub struct BackgroundPriority(());
+
+impl Drop for BackgroundPriority {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let _ =
+                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_DEFAULT, 0);
+        }
+        // Linux and Android: an unprivileged thread cannot lower its nice value again.
+        #[cfg(windows)]
+        unsafe {
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+        }
+    }
+}
+
 /// Full-file waveform and BPM/key analysis. Must not steal the live Deck.
-pub fn prefer_background() {
+pub fn prefer_background() -> BackgroundPriority {
     #[cfg(target_os = "macos")]
     unsafe {
         let _ = libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
@@ -33,6 +57,7 @@ pub fn prefer_background() {
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
+    BackgroundPriority(())
 }
 
 /// Set the child's priority without changing a Tokio runtime thread's QoS.
@@ -53,6 +78,8 @@ pub fn background_command(command: &mut std::process::Command) {
 const THREAD_PRIORITY_ABOVE_NORMAL: i32 = 1;
 #[cfg(windows)]
 const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+#[cfg(windows)]
+const THREAD_PRIORITY_NORMAL: i32 = 0;
 
 #[cfg(windows)]
 unsafe extern "system" {

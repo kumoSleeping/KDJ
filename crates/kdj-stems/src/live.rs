@@ -517,7 +517,7 @@ fn note_pool_started() {
     let _ = thread::Builder::new()
         .name("kdj-stem-resource-log".into())
         .spawn(|| {
-            kdj_core::thread_qos::prefer_background();
+            let _background = kdj_core::thread_qos::prefer_background();
             let mut previous: Option<(Instant, ProcessResourceSnapshot)> = None;
             loop {
                 thread::sleep(Duration::from_secs(5));

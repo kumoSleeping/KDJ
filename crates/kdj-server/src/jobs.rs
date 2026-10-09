@@ -753,7 +753,7 @@ fn spawn_analysis_target(
                 let stats = stats.clone();
                 let cancel = cancel.clone();
                 scope.spawn(move || {
-                    kdj_core::thread_qos::prefer_background();
+                    let _background = kdj_core::thread_qos::prefer_background();
                     for track_id in chunk {
                         // 先排队拿全局额度，**拿到之后**再看取消：闸门里等了
                         // 半分钟才轮到的线程，看到的必须是最新的取消状态

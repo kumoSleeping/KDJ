@@ -101,7 +101,7 @@ pub fn spawn(state: Arc<AppState>, ids: Vec<i64>, priority: bool, precise: bool)
         .register(&job, ids.len(), done.clone(), false);
     let result_job = job.clone();
     tokio::task::spawn_blocking(move || {
-        kdj_core::thread_qos::prefer_background();
+        let _background = kdj_core::thread_qos::prefer_background();
         let total = ids.len();
         let mut updated = Vec::new();
         for &id in &ids {

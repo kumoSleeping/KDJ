@@ -43,7 +43,7 @@ impl Workshop {
                 let checkpoint = checkpoint.clone();
                 let coarse_started = std::time::Instant::now();
                 let score = tokio::task::spawn_blocking(move || {
-                    kdj_core::thread_qos::prefer_background();
+                    let _background = kdj_core::thread_qos::prefer_background();
                     alignment::coarse_similarity(&summary, &b, allow_fuzzy, &|| checkpoint())
                 })
                 .await??;
@@ -95,7 +95,7 @@ impl Workshop {
                         fuzzy_pass, pair_fuzzy, "block comparison started");
                     let single_pair = source.blocks.len() == 1 && reference.blocks.len() == 1;
                     let found = tokio::task::spawn_blocking(move || -> Result<RecordingMatch> {
-                        kdj_core::thread_qos::prefer_background();
+                        let _background = kdj_core::thread_qos::prefer_background();
                         let mut found = alignment::compare_blocks(&a, &b, pair_fuzzy, segment_only, &|| checkpoint())?;
                         if single_pair && !segment_only && found.fuzzy.verified.len() == 1 {
                             for candidate in &found.fuzzy.review {
@@ -192,7 +192,7 @@ impl Workshop {
                 after.reference_start_ms -= target.start_ms;
                 let checkpoint = checkpoint.clone();
                 let plan = tokio::task::spawn_blocking(move || {
-                    kdj_core::thread_qos::prefer_background();
+                    let _background = kdj_core::thread_qos::prefer_background();
                     alignment::short_review_pair(&a, &b, &before, &after, &|| checkpoint())
                 }).await??;
                 if let Some(mut plan) = plan {

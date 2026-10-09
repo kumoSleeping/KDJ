@@ -243,7 +243,7 @@ pub fn run(
     prepare_only: bool,
     input: super::audio_input::Selection,
 ) {
-    kdj_core::thread_qos::prefer_background();
+    let _background = kdj_core::thread_qos::prefer_background();
     let result = (|| -> Result<()> {
         publish(&app, &session, |v| {
             let preparing = ListenerStatus {
