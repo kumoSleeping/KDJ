@@ -113,21 +113,26 @@
   animation: kd-drawer-in 400ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 /* At rest the panel is an ordinary box again, not a layer kept for moving. Only then may its
-   height follow what it holds (`content`); while it comes down nothing is laid out again. */
+   height follow what it holds (`fit`, `at-least-half`); while it comes in nothing is laid out
+   again. */
 .kd-drawer[data-settled] {
   animation: none;
   transition: height 380ms cubic-bezier(0.22, 0.9, 0.26, 1);
 }
+/* A panel whose height is still being measured waits beyond the edge, so that it comes in at
+   the height it keeps (see DrawerLayer). */
+.kd-drawer[data-held] { animation-play-state: paused; }
 .kd-drawer[data-extent="two-thirds"] { --kd-drawer-extent: 0.66667; }
 .kd-drawer[data-extent="full"] { --kd-drawer-extent: 1; }
-/* `fit`: exactly as tall as what it holds needs, whatever that is, up to the whole way down. */
+/* `fit`: exactly as tall as what it holds needs (--kd-drawer-fit, measured by DrawerHost),
+   whatever that is, up to the whole way down. Half the way while that is not known. */
 .kd-drawer[data-extent="fit"] {
   height: min(max(12rem, var(--kd-drawer-fit, calc(var(--kd-drawer-room) * 0.5))), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
 }
-/* `content`: two thirds while what it holds fits there, then exactly as tall as that needs
-   (--kd-drawer-fit, measured by DrawerHost), growing row by row up to the whole way down. */
-.kd-drawer[data-extent="content"] {
-  height: min(max(calc(var(--kd-drawer-room) * 0.66667), var(--kd-drawer-fit, 0px)), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
+/* `at-least-half`: half the way while what it holds fits there, then exactly as tall as that
+   needs, growing row by row up to the whole way down. */
+.kd-drawer[data-extent="at-least-half"] {
+  height: min(max(calc(var(--kd-drawer-room) * 0.5), var(--kd-drawer-fit, 0px)), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
 }
 /* It leaves the way it came, and only then does the next one come in (see DrawerHost). */
 .kd-drawer[data-leaving] { animation: kd-drawer-out 260ms cubic-bezier(0.55, 0, 0.8, 0.35) both; }
@@ -211,7 +216,8 @@
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list { gap: 0.9rem; }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list > button { color: color-mix(in srgb, var(--kd-text) 58%, transparent); font-weight: 600; }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list > button[aria-selected="true"] { color: var(--kd-text); font-weight: 800; }
-:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-caption { margin-top: 0; font-size: var(--kd-size-xs); color: color-mix(in srgb, var(--kd-text) 70%, transparent); }
+/* The song or folder it belongs to, at the far end of the caption bar in plain small type. */
+:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-caption { font-size: var(--kd-size-xs); color: color-mix(in srgb, var(--kd-text) 70%, transparent); }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-tools { min-height: 0; gap: 3px; color: var(--kd-text); }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-tools > button {
   width: 1.35rem;
@@ -229,6 +235,8 @@
 .kd-drawer-body > * { min-width: 0; }
 .kd-drawer-body .kd-panel { border: 0; box-shadow: none; background: transparent; }
 .kd-drawer-body > .kd-split-aside-body { flex: 1 1 auto; min-height: 0; padding: 0 1.1rem 1rem; }
+/* 使用提示 is as long as its list: it does not stretch to fill a panel that is sized by it. */
+.kd-drawer-body .kd-tips-panel { min-height: 0; }
 
 /* 歌词 */
 .kd-drawer-lyrics { flex: 1 1 auto; height: auto; min-height: 0; gap: 0; padding: 0 0.35rem 0.5rem; }

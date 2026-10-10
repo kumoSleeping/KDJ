@@ -2,15 +2,23 @@ import type { ReactNode } from "react";
 
 /**
  * How tall the drawer's panel is over the list.
- * - `two-thirds`: always two thirds of the way down.
- * - `content`: two thirds while everything fits there; beyond that exactly as tall as what it
- *   holds needs, growing with it, up to the whole way down.
- * - `fit`: exactly as tall as what it holds needs — short for a short page, long for a long
- *   one — up to the whole way down.
- * - `full`: always the whole way down.
+ * - `fit`: the usual case. Exactly as tall as what it holds needs — short for a short page,
+ *   long for a long one — following it as it changes (a switch of page included), up to the
+ *   whole way down.
+ * - `at-least-half`: as `fit`, but never shorter than half the way down. Only for an app that
+ *   needs empty room even while it holds nothing (downloads: things are dropped on its blank).
+ * - `two-thirds`: always two thirds of the way down. For a view with no height of its own
+ *   (lyrics scroll about the line being sung).
+ * - `full`: always the whole way down (a docked picture with such a view beneath it).
  * A height the user drags (the panel's bottom edge) replaces any of these until it is reset.
+ *
+ * `fit` and `at-least-half` are measured from the body's scrolling elements, which carry the
+ * class `kd-scroll` or the attribute `data-drawer-scroll`. Every part beside them, and everything
+ * inside them, must have a height of its own: one that merely fills what it is given says
+ * nothing about what it needs. A body that is still fetching what decides its height carries
+ * `data-drawer-pending` on some element until it has it.
  */
-export type DrawerExtent = "two-thirds" | "content" | "fit" | "full";
+export type DrawerExtent = "fit" | "at-least-half" | "two-thirds" | "full";
 
 /** One page of a drawer. Its label is a word of the drawer's title. */
 export interface DrawerPage {
@@ -32,7 +40,11 @@ export interface DrawerSpec {
   id: string;
   /** The title. With `pages` the page labels are shown in its place and this names the drawer. */
   title: string;
-  /** What the drawer belongs to right now: a song, a folder. One short line under the title. */
+  /**
+   * What the drawer belongs to right now: a song, a folder. Written small and quiet at the far
+   * end of the title row, on the title's baseline, before the tools; it is cut short first when
+   * the row runs out of room. Never a line of its own under the title.
+   */
   caption?: ReactNode;
   extent: DrawerExtent;
   /** Pages switched from the title row. The body wraps what changes in `SlidePages`. */

@@ -19,6 +19,7 @@ Object.assign(globalThis, {
   requestAnimationFrame: (f: FrameRequestCallback) => { frames.set(++next, f); return next; },
   cancelAnimationFrame: (id: number) => frames.delete(id),
   ResizeObserver: class { observe() {} disconnect() {} },
+  MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
 });
 Object.defineProperty(document, "hidden", { configurable: true, value: false });
 Object.defineProperty(dom.window.HTMLCanvasElement.prototype, "getContext", { value: () => ({ save(){},restore(){},drawImage(){},globalAlpha:1 }) });
@@ -173,6 +174,7 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     assert.ok(entry().length===1 && entry()[0].closest('.kd-drawer-launcher'),'the apps opened by hand are listed beside the search');
     await show('visualizer');
     assert.equal(title(),'visualizer','the panel carries the open app\'s title row');
+    assert.equal(sheet('visualizer')?.dataset.held,undefined,'a panel of a fixed extent comes in at once');
     assert.ok(entry().length===1 && entry()[0].closest('.kd-drawer-launcher'),'the entries stay where they are while a panel is out');
     await act(async()=> { entry()[0].click(); });
     assert.deepEqual(asked,['open lyrics'],'another app\'s entry asks for it');
@@ -202,7 +204,18 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     assert.equal(host.querySelectorAll('.kd-drawer[data-app="lyrics"]:not([data-leaving])').length,1,'and then comes in again');
     assert.equal(host.querySelectorAll('.kd-drawer').length,1);
     await act(async()=>column.unmount());
-    console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension, drawer app, leaving apps");
+    // ---- A panel sized by what it holds waits beyond the edge for its first measure, a moment
+    // at most; its caption stands on the title's own line.
+    const fitted = createRoot(host);
+    await act(async()=> { fitted.render(<DrawerHost spec={{ id:"fitted", title:"fitted", caption:"song · artist", extent:"fit", body:<div className="kd-scroll"/>, close(){} }}/>); });
+    assert.equal(sheet('fitted')?.dataset.held,'true','a fitted panel waits for its height');
+    const caption = sheet('fitted')!.querySelector('.kd-title-tabs-text > .kd-title-tabs-caption');
+    assert.equal(caption?.textContent,'song · artist');
+    assert.equal(caption?.previousElementSibling?.className,'kd-title-tabs-title','the caption follows the title on its line');
+    await act(async()=> { await wait(160); });
+    assert.equal(sheet('fitted')?.dataset.held,undefined,'and comes in anyway when no measure arrives');
+    await act(async()=>fitted.unmount());
+    console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension, drawer app, leaving apps, fitted panel");
   } finally {
     await act(async()=>root.unmount()); dom.window.close();
   }
