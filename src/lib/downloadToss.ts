@@ -22,7 +22,7 @@ import "./dragRefusal";
 import { holdDrawer } from "./drawerHold";
 import { useSidePanels } from "./sidePanels";
 import {
-  flushTossHandovers, SHEET_DOWN_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossHandover, tossHandoverAt, tossRise,
+  flushTossHandovers, SHEET_DOWN_MS, SHEET_SWAP_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossHandover, tossHandoverAt, tossRise,
   type TossHandover, type TossPoint,
 } from "./tossPath";
 
@@ -509,9 +509,10 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     if (ended || failed) return;
     const landing = findLanding(open, before);
     if (!landing) { fade(); return; }
-    // The drawer was asked for but its panel is not there yet (another app is still leaving):
-    // it has its whole way to come, so the parcel takes its time as for a sheet that sets out now.
-    const sheetLeft = landing.sheetLeftMs || (open && !shownDrawer() ? SHEET_DOWN_MS : 0);
+    // The drawer was asked for but its panel is not there yet: it has its whole way to come, and
+    // when another app's panel is still out, that one leaves first.
+    const swapping = document.querySelector(".kd-drawer") !== null;
+    const sheetLeft = landing.sheetLeftMs || (open && !shownDrawer() ? SHEET_DOWN_MS + (swapping ? SHEET_SWAP_MS : 0) : 0);
     const distance = Math.hypot(landing.point.x - lifted.x, landing.point.y - lifted.y);
     const arc = tossArc(lifted, landing.point, tossRise(lifted, landing.point, hop));
     const duration = tossFlightMs(distance, sheetLeft, hop);

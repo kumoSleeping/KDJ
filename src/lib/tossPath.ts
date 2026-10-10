@@ -5,8 +5,10 @@
 
 export interface TossPoint { x: number; y: number }
 
-/** The sheet of the drawer takes this long to come down (Drawer.css, kd-drawer-down). */
-export const SHEET_DOWN_MS = 520;
+/** The drawer's panel takes this long to slide in (Drawer.css, kd-drawer-in). */
+export const SHEET_DOWN_MS = 400;
+/** A panel that replaces another waits this long for it to leave first (Drawer.css, kd-drawer-out). */
+export const SHEET_SWAP_MS = 260;
 /** The block at the source turns into the parcel before it leaves. */
 export const TOSS_LIFT_MS = 180;
 /** A dropped item is already in the hand: the parcel only pops up. */

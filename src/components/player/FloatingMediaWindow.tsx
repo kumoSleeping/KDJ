@@ -154,7 +154,8 @@ export function useFloatingMediaWindow(options: FloatingMediaWindowOptions): Flo
   const locked = Boolean(options.locked);
   useLayoutEffect(() => {
     const node = element.current;
-    const next = shown && !locked && node ? Math.round(parseFloat(getComputedStyle(node).paddingTop) || 0) : 0;
+    const style = shown && !locked && node ? node.ownerDocument.defaultView?.getComputedStyle(node) : null;
+    const next = style ? Math.round(parseFloat(style.paddingTop) || 0) : 0;
     setStrip(current => current === next ? current : next);
   }, [shown, locked, packId]);
   const presenter = useRef<FloatingMediaPresenter | null>(null);
