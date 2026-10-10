@@ -478,6 +478,31 @@ export function forgetQueuedAnalysis(): void {
   lastLightBackfillAt = 0;
 }
 
+/**
+ * The user's choice of mode — from the control on the library rail (there while analysis has
+ * something to do) or from the settings (always there). A pause also stops what is running.
+ */
+export function chooseAutoAnalysisMode(next: AutoAnalysisMode): void {
+  const library = useLibraryStore.getState();
+  const { saveSettings } = useAppStore.getState();
+  if (next !== "paused") {
+    // 取消过的 id 不能一直留在本会话去重集合里，否则恢复后它们不会再入队。
+    if (autoAnalysisMode() === "paused") forgetQueuedAnalysis();
+    library.setAutoAnalyzeSuspended(false);
+    void saveSettings({ auto_analyze: true, auto_analysis_mode: next }).catch(() => undefined);
+    return;
+  }
+  // 取消是协作式的：正在解码 / FFT 的任务会在细粒度检查点退出，完整结果才写库。
+  // 配置先落盘；后端扫描若恰好尚未结束，也会在 jobs.rs 再读这个开关。
+  void Promise.all([
+    saveSettings({ auto_analyze: false, auto_analysis_mode: "paused" }),
+    library.cancelAnalyze(),
+  ])
+    // 保存设置自行回滚；取消请求失败也不能让这个点击留下未处理的 Promise。
+    .catch(() => undefined)
+    .finally(forgetQueuedAnalysis);
+}
+
 /** 挂上选中订阅和空闲探测，返回停掉它们的函数。连不上后端时不该跑，所以由 App 控制。 */
 export function startAutoAnalyze(): () => void {
   const unsubscribe = useLibraryStore.subscribe((state, previous) => {

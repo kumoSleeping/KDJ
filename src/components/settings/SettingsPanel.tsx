@@ -25,6 +25,8 @@ import {
   type AppFontScale,
 } from "../../lib/fontScale";
 import { api } from "../../lib/api";
+import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
+import { resolveAutoAnalysisMode } from "../../lib/autoAnalysisMode";
 import {
   installOfficialTheme,
   optionValues,
@@ -48,6 +50,7 @@ import { useLibraryStore } from "../../stores/libraryStore";
 import { useLyricsStore } from "../../stores/lyricsStore";
 import type {
   ActivityLogSettings,
+  AutoAnalysisMode,
   CacheCategory,
   CacheCategoryStats,
   CacheOverview,
@@ -591,6 +594,7 @@ export function SettingsPanel({ preferences = false, page }: {
   const verifyAccountsIfStale = useAppStore((state) => state.verifyAccountsIfStale);
   const settingsError = useAppStore((state) => state.settingsError);
   const refreshLibrary = useLibraryStore((state) => state.refresh);
+  const autoAnalyzeSuspended = useLibraryStore((state) => state.autoAnalyzeSuspended);
   const refreshLibraryStats = useLibraryStore((state) => state.refreshStats);
 
   useEffect(() => {
@@ -821,6 +825,18 @@ export function SettingsPanel({ preferences = false, page }: {
                 ]}
                 title="原链接仅分享网址；包含信息会附上歌曲名与艺术家；更多信息沿用相同文字，并额外附上 Share from KDJ 版本水印和小尺寸缩略封面。"
                 onChange={setShareContentMode}
+              />
+              {/* The rail over the list carries this control only while analysis has work to do. */}
+              <CycleToggle<AutoAnalysisMode>
+                label="自动分析"
+                value={autoAnalyzeSuspended ? "paused" : resolveAutoAnalysisMode(settings)}
+                options={[
+                  { id: "light", text: "轻量" },
+                  { id: "full", text: "全力" },
+                  { id: "paused", text: "已暂停" },
+                ]}
+                title="轻量：单线程并主动留空；全力：最多两个后台任务，播放时自动收窄；已暂停：不再自动分析，并停下正在进行的分析。"
+                onChange={chooseAutoAnalysisMode}
               />
             </div>
           </div>
