@@ -16,15 +16,32 @@ export interface LayoutSignals {
   chrome: ChromeMode;
   /** 手机竖屏版面：单栏、两段式顶栏，旁路内容进抽屉。 */
   portrait: boolean;
-  /** 竖长窗口：宽:高不超过 3:4（宽是 3，高是 4）。桌面用它给播放条分层、把搜索排成两行、给侧栏换一份宽窄。 */
+  /** 竖长窗口：宽:高不超过 3:4（宽是 3，高是 4）。桌面用它给播放条分层、把搜索排成两行、给侧栏换一份宽窄；播放条在竖长窗口里默认收起（playerBarAway.ts）。 */
   tall: boolean;
 }
 
-/** 只有明显的竖长才算；接近方形的桌面窄窗仍是普通横向播放条。 */
-const PORTRAIT = "(max-aspect-ratio: 3/4)";
+/**
+ * 只有明显的竖长才算；接近方形的桌面窄窗仍是普通横向播放条。
+ * 全应用判断“竖长”只用这一条，React 之外要知道窗口形状的地方也读它。
+ */
+export const TALL_WINDOW_QUERY = "(max-aspect-ratio: 3/4)";
+
+/** 窗口现在是不是竖长。没有 matchMedia 的环境（单元测试）按横向算。 */
+export function windowIsTall(): boolean {
+  return typeof window !== "undefined" && !!window.matchMedia?.(TALL_WINDOW_QUERY).matches;
+}
+
+/** 窗口跨过竖长界线时通知一次；返回取消订阅。 */
+export function watchWindowTall(listener: (tall: boolean) => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  const query = window.matchMedia(TALL_WINDOW_QUERY);
+  const onChange = () => listener(query.matches);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+}
 
 function read(): LayoutSignals {
-  const tall = window.matchMedia(PORTRAIT).matches;
+  const tall = windowIsTall();
   const platform = window.kdj?.platform;
   const portrait = tall && (platform === "android" || platform === "ios");
   const columns: LayoutMode = portrait ? "narrow" : "wide";
@@ -35,13 +52,10 @@ function read(): LayoutSignals {
 export function useLayoutSignals(): LayoutSignals {
   const [signals, setSignals] = useState(read);
   useEffect(() => {
-    const portrait = window.matchMedia(PORTRAIT);
     const onChange = () => setSignals(read());
-    portrait.addEventListener("change", onChange);
+    const stop = watchWindowTall(onChange);
     onChange();
-    return () => {
-      portrait.removeEventListener("change", onChange);
-    };
+    return stop;
   }, []);
   return signals;
 }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
+import { act, createElement } from "react";
+import type { Track } from "../src/types";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -116,4 +118,78 @@ test("task bubbles: one bubble per id, a capped stack, and one bubble for a run 
   assert.equal(spec("downloads")?.title, "F", "a failure from before the run is not part of it");
   assert.equal(spec("downloads")?.tone, "success");
   reporter.stop();
+});
+
+test("the playing song's bubble: a message beside the bar, the transport while the bar is away", async () => {
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost" });
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document, localStorage: dom.window.localStorage,
+    HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, MutationObserver: dom.window.MutationObserver,
+    CustomEvent: dom.window.CustomEvent, Event: dom.window.Event,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window), IS_REACT_ACT_ENVIRONMENT: true,
+    ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
+  });
+  const { createRoot } = await import("react-dom/client");
+  const { NowPlayingTask, NOW_PLAYING_TASK } = await import("../src/components/player/NowPlayingTask");
+  const { useTaskBubbles } = await import("../src/components/tasks/taskBubbleStore");
+  const { useNowPlayingInfo } = await import("../src/lib/nowPlayingInfo");
+  const { usePlayerBarAway } = await import("../src/lib/playerBarAway");
+  const { setPlayingTrack } = await import("../src/lib/playingTrack");
+  const info = () => useNowPlayingInfo.getState();
+  const entry = () => useTaskBubbles.getState().entries.find(candidate => candidate.spec.id === NOW_PLAYING_TASK && !candidate.leaving);
+  const keys = () => entry()?.spec.actions?.map(action => action.id);
+
+  useTaskBubbles.setState({ entries: [] });
+  usePlayerBarAway.setState({ tall: false, collapsed: true, phase: "up" });
+  useNowPlayingInfo.setState({ open: false, pinned: true, peek: 0, barAway: false });
+  setPlayingTrack({ id: 7, path: "/library/7.mp3", filename: "7.mp3", title: "Song", artist: "Artist", album: "",
+    format: "mp3", size: 1, duration: 200, bpm: 128, modified_at: "a", source_platform: "bilibili", music_key: "",
+    camelot: "8A", open_key: "", tags: [], cue_points: [] } as unknown as Track);
+  let popups = 0;
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  await act(async () => root.render(createElement(NowPlayingTask, {
+    trackId: 7, playing: false, popup: "visualizer", popupOn: false, onPopup: () => { popups += 1; },
+  })));
+
+  // Pinned beside the bar: the bar is the transport, the bubble an ordinary message.
+  const pinned = entry();
+  assert.ok(pinned, "a pinned bubble is up");
+  assert.equal(pinned.spec.controls, undefined, "no transport beside the bar");
+  assert.equal(pinned.spec.dismiss, undefined, "its key simply rolls it down");
+  assert.equal(pinned.spec.stay, 0);
+  assert.equal(pinned.spec.body, undefined, "it does not expand");
+  assert.equal(pinned.spec.origin?.label, "B站", "where the file was downloaded from");
+  assert.deepEqual(keys(), ["lyrics", "popup", "meta", "pin"]);
+  entry()!.spec.actions!.find(action => action.id === "popup")!.onSelect(dom.window.document.body);
+  assert.equal(popups, 1, "the bar's own toggle");
+
+  // The bar starts down: the same bubble is given the transport (the host unfolds the row),
+  // and its key says that it brings the bar back.
+  await act(async () => info().setBarAway(true));
+  assert.equal(entry()?.order, pinned.order, "the bubble that was up, not a new one");
+  assert.ok(entry()?.spec.controls != null, "the transport while the bar is away");
+  assert.equal(entry()?.spec.dismiss?.label, "展开播放条");
+  // The bar starts back: the transport is taken away again and the pinned bubble stays.
+  await act(async () => info().setBarAway(false));
+  assert.equal(entry()?.order, pinned.order);
+  assert.equal(entry()?.spec.controls, undefined);
+
+  // A song's own peek beside the bar is a message too.
+  await act(async () => { info().close(); });
+  assert.equal(entry(), undefined);
+  await act(async () => info().startPeek());
+  assert.ok((entry()?.spec.stay ?? 0) > 0);
+  assert.equal(entry()?.spec.controls, undefined);
+  // The bar goes while it is up: it stays, with the transport.
+  await act(async () => info().setBarAway(true));
+  assert.equal(entry()?.spec.stay, 0);
+  assert.ok(entry()?.spec.controls != null);
+
+  // Rolled down by hand with the bar away: the bar is asked back.
+  await act(async () => useTaskBubbles.getState().dismiss(NOW_PLAYING_TASK, "user"));
+  assert.equal(entry(), undefined);
+  assert.equal(usePlayerBarAway.getState().collapsed, false);
+  assert.equal(info().barAway, false);
+
+  await act(async () => root.unmount());
+  setPlayingTrack(null);
 });

@@ -1,14 +1,8 @@
-/* The fuller detail of 曲目信息 inside its task bubble: the library's own summary of the song,
-   on the bubble's surface. */
-.kd-now-playing-detail > .kd-track-detail { gap: 0; }
-.kd-now-playing-detail .kd-track-detail-hero { gap: 0.75rem; }
-.kd-now-playing-detail .kd-cover-edit-stack,
-.kd-now-playing-detail .kd-cover-edit { width: 76px !important; height: 76px !important; }
-.kd-now-playing-detail .kd-cover-edit-stack { height: auto !important; }
+/* The name of a song in its detail summary (TrackDetail, StreamTrackDetail). */
 .kd-track-detail-title { font-weight: 700; font-size: var(--kd-size-lg); }
 
-/* ---- The mini transport of the bubble (NowPlayingTransport): three keys and the progress
-   line. Ink on the bubble's surface; nothing here is the theme colour. ---- */
+/* ---- The mini transport of the bubble (NowPlayingTransport): three keys, the time played and
+   the progress line. Ink on the bubble's surface; nothing here is the theme colour. ---- */
 .kd-now-transport {
   display: flex;
   align-items: center;
@@ -36,7 +30,9 @@
   transition: color 0.12s, background-color 0.12s;
 }
 .kd-now-key:hover { color: var(--kd-text); }
-.kd-now-key:focus-visible,
+/* The keys fill the height of their row, which the host clips while it unfolds: their focus
+   ring is drawn inside them. */
+.kd-now-key:focus-visible { outline: 1px solid var(--kd-text-body); outline-offset: -1px; }
 .kd-now-line:focus-visible { outline: 1px solid var(--kd-text-body); outline-offset: 1px; }
 /* Play / pause is the key the row is for: a soft round bed sets it apart from its neighbours. */
 .kd-now-go {
@@ -66,7 +62,6 @@
   line-height: 1;
   text-align: right;
 }
-.kd-now-line + .kd-now-time { text-align: left; }
 /* The line is as tall as the mini waveform, so both forms take the pointer on the same strip.
    --kd-now-seek is how much of the song was played, 0..1; the transport writes it. */
 .kd-now-line {

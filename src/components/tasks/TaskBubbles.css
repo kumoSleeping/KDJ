@@ -206,11 +206,19 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 }
 .kd-task-facts {
   display: flex;
+  align-items: center;
   gap: 0.6rem;
   color: var(--kd-faint);
   font-variant-numeric: tabular-nums;
 }
 .kd-task-facts > span { flex: none; }
+/* Where the task's subject comes from: a small mark that leads the facts. A platform's brand
+   mark keeps its own colour. */
+.kd-task-facts > .kd-task-origin {
+  display: grid;
+  place-items: center;
+  margin-right: -0.2rem;
+}
 .kd-task-progress {
   display: block;
   height: 3px;
@@ -288,9 +296,34 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
   animation: kd-task-fade-in 160ms linear both;
 }
 
-/* The task's own live controls: a row along the bottom, under the summary or the open body. */
-.kd-task-controls { padding: 0 10px 10px; }
-.kd-task[data-controls] .kd-task-main:not([data-bare]) { padding-bottom: 8px; }
+/* The task's own live controls: a row along the bottom, under the summary or the open body.
+   A task may give or take them while its bubble is up (the playing song: its transport, while
+   the player bar is away). The row then unfolds open or folds away: its track goes between
+   nothing and the row's height while the row fades, and the bubble, which stands on its
+   bottom edge, grows upwards. Both ways run on the clock and curve the stack above is lifted
+   by (--kd-task-in: the large-surface pair of the motion schema, --kd-motion-in and
+   --kd-ease-out), and the host has told the stack where the bubble's height ends, so what is
+   stacked on it rides along instead of following frame by frame. The summary above keeps its
+   own padding either way: nothing but the row's track changes size. */
+.kd-task-controls {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows var(--kd-task-in) var(--kd-task-in-ease), opacity var(--kd-task-in) var(--kd-task-in-ease);
+}
+.kd-task-controls[data-open] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.kd-task-controls-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+.kd-task-controls-row { padding: 0 10px 10px; }
+/* Reduced motion: the row is there or not at once, and only fades. */
+@media (prefers-reduced-motion: reduce) {
+  .kd-task-controls { transition: opacity var(--kd-motion-reduced) linear; }
+}
 .kd-task[data-controls] .kd-task-body { padding-bottom: 10px; }
 
 /* Sakura98: a bubble is a small 98 window — the pack's face inside its bevel and hard drop,
@@ -388,7 +421,8 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 :root[data-theme-pack="sakulaptop98"] .kd-task-progress > i { background: var(--kd-theme); border-radius: 0; }
 
 /* ---- Sizes. A task says how much room it takes (`size` in its spec); the host only has these
-   three. Everything is sized from the slot, so a bubble never changes size while it is up. ---- */
+   three. Everything is sized from the slot, so nothing but a row of controls unfolding changes
+   a bubble's size while it is up. ---- */
 .kd-task-slot[data-size="small"] {
   width: fit-content;
   max-width: min(20rem, calc(100% - 2 * var(--kd-task-gap)));
@@ -406,9 +440,21 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
   height: 4.25rem;
   border-radius: 9px;
 }
-.kd-task-slot[data-size="large"] .kd-task[data-controls] .kd-task-main:not([data-bare]) { padding-bottom: 9px; }
-.kd-task-slot[data-size="large"] .kd-task-controls { padding: 0 12px 11px; }
+.kd-task-slot[data-size="large"] .kd-task-controls-row { padding: 0 12px 11px; }
+/* The keys of a large bubble sit in its top right corner, level with the top of the cover,
+   instead of half way down its side. */
+.kd-task-slot[data-size="large"] .kd-task-tools { align-self: flex-start; }
 .kd-task-slot[data-size="large"] .kd-task-copy { gap: 3px; }
 .kd-task-slot[data-size="large"] .kd-task-title { font-size: var(--kd-size-lg); font-weight: 700; line-height: 1.3; }
 .kd-task-slot[data-size="large"] .kd-task-detail { font-size: var(--kd-size-sm); }
 .kd-task-slot[data-size="large"] .kd-task-facts { margin-top: 1px; }
+
+/* A tall desktop window (竖长, src/lib/useLayoutMode.ts): a large bubble spans the window, with
+   the same gap on its left and on its right. The bar is put away there unless the listener
+   brought it back, so the playing song's bubble is the window's usual transport and reads as
+   its bar. Regular and small bubbles keep their size and stack above it at the right. A phone
+   keeps the sizes above. */
+.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-task-slot[data-size="large"] {
+  left: var(--kd-task-gap);
+  width: auto;
+}

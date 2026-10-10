@@ -1,10 +1,15 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { ChevronsDown, ChevronsUp } from "lucide-react";
-import { MOTION_IN_MS, MOTION_REDUCED_MS, leaveDuration, motion, prefersReducedMotion } from "../../lib/motion";
-import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { ChevronsDown } from "lucide-react";
+import { MOTION_IN_MS, MOTION_REDUCED_MS, leaveDuration, prefersReducedMotion } from "../../lib/motion";
 import {
-  nextPlayerBarPhase,
+  advancePlayerBar,
+  endPlayerBarSlide,
+  nowPlayingInfoVisible,
+  settlePlayerBar,
+  useNowPlayingInfo,
+} from "../../lib/nowPlayingInfo";
+import {
+  playerBarAwayWanted,
   playerBarMoving,
   playerBarStandsDown,
   usePlayerBarAway,
@@ -12,50 +17,58 @@ import {
 } from "../../lib/playerBarAway";
 import { dismissTask } from "../tasks/taskBubbleStore";
 import { NOW_PLAYING_TASK } from "./NowPlayingTask";
-import "./PlayerBarAway.css";
 
-const POP = motion("pop");
+/** The playing song's bubble as the host draws it, and the key on it that sends it away. */
+const BUBBLE = `.kd-task[data-kind="playing"]`;
+const BUBBLE_KEY = `${BUBBLE} .kd-task-dismiss`;
 
-/** The key that took the keyboard's focus with it when the bar went or came: its counterpart
- *  takes the focus over, so a listener who works by keyboard is not left on nothing. */
-let handFocusTo: "return" | "collapse" | null = null;
+/** The key that had the keyboard's focus when the bar went or came: its counterpart takes the
+ *  focus over, so a listener who works by keyboard is not left on nothing. */
+let handFocusTo: "bubble" | "collapse" | null = null;
 
 /**
- * Drives where the bar is (src/lib/playerBarAway.ts) from the listener's choice. `offered` is
- * false in a layout that does not offer the collapse: the bar is then up whatever was chosen.
- * A slide runs for its whole time before the bar settles; the first render takes the place the
- * bar was left in without moving. The playing song's bubble hears of it in the same pass, so it
- * rises as the bar starts down (see nowPlayingKeptAway).
+ * Drives where the bar is (src/lib/playerBarAway.ts) from the listener's choice for the shape
+ * the window is in. `song` says whether there is a song for the playing song's bubble to show:
+ * without one the bar is up whatever was chosen, because the bubble is what stands in for the
+ * bar (see playerBarAwayWanted).
+ *
+ * The first render takes the bar's place without moving. After that the bar slides, and a slide
+ * runs for its whole time before the next one can start: when what is wanted changes on the way
+ * (the window dragged across the two shapes and back, the bubble sent away while the bar is
+ * still going down), the bar arrives first and then sets off again. The bubble is handed the
+ * transport as the bar starts down and gives it back as the bar starts up
+ * (src/lib/nowPlayingInfo.ts).
  */
-export function usePlayerBarPhase(offered: boolean): PlayerBarPhase {
-  const away = usePlayerBarAway(state => state.collapsed) && offered;
+export function usePlayerBarPhase(song: boolean): PlayerBarPhase {
+  const away = usePlayerBarAway(state => playerBarAwayWanted(state.collapsed, song));
   const phase = usePlayerBarAway(state => state.phase);
   const settled = useRef(false);
   useLayoutEffect(() => {
-    const bar = usePlayerBarAway.getState();
-    useNowPlayingInfo.getState().setBarAway(away);
-    // A bubble that was only kept for the bar leaves as the bar starts back, before the stack
-    // decides what rides up with the bar.
-    if (!away && !nowPlayingInfoVisible(useNowPlayingInfo.getState())) dismissTask(NOW_PLAYING_TASK);
-    const rest: PlayerBarPhase = away ? "away" : "up";
     if (!settled.current) {
       settled.current = true;
-      bar.setPhase(rest);
+      settlePlayerBar(away);
       return;
     }
-    const step = nextPlayerBarPhase(bar.phase, away);
-    if (!step) return;
-    bar.setPhase(step);
-    const time = away ? leaveDuration("slide") : prefersReducedMotion() ? MOTION_REDUCED_MS : MOTION_IN_MS;
-    const timer = window.setTimeout(() => bar.setPhase(rest), time + 20);
+    if (advancePlayerBar(away) !== "returning") return;
+    const focused = document.activeElement;
+    if (focused?.closest(BUBBLE) && focused.matches(":focus-visible")) handFocusTo = "collapse";
+    // A bubble that was only up for the bar leaves as the bar starts back, before the stack
+    // decides what rides up with the bar.
+    if (!nowPlayingInfoVisible(useNowPlayingInfo.getState())) dismissTask(NOW_PLAYING_TASK);
+  }, [away, phase]);
+  useEffect(() => {
+    if (!playerBarMoving(phase)) return;
+    const time = phase === "leaving" ? leaveDuration("slide") : prefersReducedMotion() ? MOTION_REDUCED_MS : MOTION_IN_MS;
+    const timer = window.setTimeout(endPlayerBarSlide, time + 20);
     return () => window.clearTimeout(timer);
-  }, [away]);
-  // What stood beside the bar makes room for the key at the bottom-left corner (PlayerBarAway.css).
-  const standsDown = playerBarStandsDown(phase);
-  useLayoutEffect(() => {
-    document.documentElement.toggleAttribute("data-kd-bar-away", standsDown);
-    return () => document.documentElement.removeAttribute("data-kd-bar-away");
-  }, [standsDown]);
+  }, [phase]);
+  useEffect(() => {
+    if (phase !== "leaving" || handFocusTo !== "bubble") return;
+    handFocusTo = null;
+    // The bubble is drawn in the pass after this one.
+    const frame = requestAnimationFrame(() => document.querySelector<HTMLElement>(BUBBLE_KEY)?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [phase]);
   return phase;
 }
 
@@ -75,7 +88,10 @@ export function playerBarPhaseProps(phase: PlayerBarPhase) {
   };
 }
 
-/** The key on the bar that puts the whole bar away. Playback goes on. */
+/**
+ * The key on the bar that puts the whole bar away. Playback goes on, and the playing song's
+ * bubble comes up as the transport; the key on that bubble brings the bar back.
+ */
 export function PlayerBarCollapseKey() {
   const phase = usePlayerBarAway(state => state.phase);
   const key = useRef<HTMLButtonElement>(null);
@@ -88,52 +104,9 @@ export function PlayerBarCollapseKey() {
     onClick={event => {
       // A slide is never turned around halfway: the key acts once the bar has arrived.
       if (usePlayerBarAway.getState().phase !== "up") return;
-      handFocusTo = event.currentTarget.matches(":focus-visible") ? "return" : null;
+      handFocusTo = event.currentTarget.matches(":focus-visible") ? "bubble" : null;
       usePlayerBarAway.getState().setCollapsed(true);
     }}>
     <ChevronsDown size={15} aria-hidden="true" />
   </button>;
 }
-
-/**
- * The little thing at the bottom-left corner while the bar is away: the playing record, turning
- * while it plays, on a small floating surface. Clicking it brings the bar back up. It pops in
- * when the bar has gone and pops out as the bar starts back (docs/motion-schema.md).
- */
-export const PlayerBarReturnKey = memo(function PlayerBarReturnKey({ cover, spinning }: {
-  /** The cover of the song on the deck, "" when there is none to show. */
-  cover: string;
-  spinning: boolean;
-}) {
-  const [root, setRoot] = useState<HTMLElement | null>(null);
-  useLayoutEffect(() => { setRoot(document.querySelector<HTMLElement>(".kd-app")); }, []);
-  const [failed, setFailed] = useState("");
-  const key = useRef<HTMLButtonElement | null>(null);
-  // The schema's own ref plays the leaving gesture when the key is taken away.
-  const attach = useCallback((node: HTMLButtonElement | null) => {
-    key.current = node;
-    return node ? POP.ref(node) : undefined;
-  }, []);
-  useEffect(() => {
-    if (!root || handFocusTo !== "return") return;
-    handFocusTo = null;
-    key.current?.focus();
-  }, [root]);
-  if (!root) return null;
-  return createPortal(
-    <button type="button" className="kd-bar-return" aria-label="展开播放条" title="展开播放条"
-      {...POP} ref={attach}
-      onClick={event => {
-        handFocusTo = event.currentTarget.matches(":focus-visible") ? "collapse" : null;
-        usePlayerBarAway.getState().setCollapsed(false);
-      }}>
-      <span className="kd-bar-return-record" data-spinning={spinning ? "true" : undefined} aria-hidden="true">
-        {cover && failed !== cover
-          ? <img key={cover} src={cover} alt="" draggable={false} referrerPolicy="no-referrer" onError={() => setFailed(cover)} />
-          : <i />}
-      </span>
-      <ChevronsUp className="kd-bar-return-mark" size={16} aria-hidden="true" />
-    </button>,
-    root,
-  );
-});

@@ -26,11 +26,16 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
 - **The size.** `size` is `small` (a one-line note, as wide as its text), `regular` (default: a
   cover and two lines) or `large` (a big cover and a title-size name: the playing song). A kind
   of task picks the one that fits what it says; nothing sets a bubble's width or cover by hand.
+  In a tall desktop window (`tall` in `src/lib/useLayoutMode.ts`) a `large` bubble spans the
+  window, with the same gap on its left and its right; `regular` and `small` keep their size
+  and stack above it at the right.
 - **The stay.** Each kind chooses its own `stay`: the playing song 5 s, a short note such as
   "没有找到歌词" 3 s. `stay` in ms; left out, the tone decides (`TASK_STAY_MS`: 5 s, an error 10 s).
   `stay: 0` keeps the bubble until it is dismissed — a pinned or opened bubble. The ring shows the
   time that is left and stops while the stack is hovered or focused. Every bubble can be rolled
   down by hand; `escape: true` also lets Esc do it (only for a bubble the user called up).
+  `dismiss: { label, icon? }` rewrites the key that rolls it down when doing so does more than
+  put the bubble away — never by testing an id in the host.
 - **Tone is not selection.** `info`, `success`, `error` colour the leading mark only (on a cover
   stack, a small mark on its corner); an error is amber, never the theme red. An error shows its
   whole sentence (up to four lines) instead of scrolling it.
@@ -39,16 +44,32 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   an address, or `{ key, urls }` with every address that can show it, best first — the host loads
   it with `useCoverLoad` (`src/lib/coverLoad.ts`), so a refused thumbnail falls back to the
   original. Where a task's covers come from is decided in `taskCovers.ts` only.
+- **Where it comes from.** `origin: { label, mark }` is a small mark at the head of the facts
+  line: the platform a song is streamed or was downloaded from. A brand mark keeps its own
+  colour; the host places it.
 - **Fuller content** goes in `body`; the host draws the control that expands it inside the same
   bubble. `replacesSummary` hides the compact summary while a body that restates it is open.
+  No bubble uses it today: the playing song's no longer expands.
 - **Live controls** go in `controls`: one row along the bottom of the bubble, in the compact and
-  the expanded form alike. The task supplies the controls, the host their row. The playing song
-  puts its mini transport there (`NowPlayingTransport.tsx`): previous, play / pause, next and a
-  progress line that is the song's mini waveform when it has one. They send the player's own
-  commands (`requestPlayerCommand`) and read the position from the player session without
-  re-rendering the bubble.
+  the expanded form alike. The task supplies the controls, the host their row. A task may give
+  or take them while its bubble is up; the host then unfolds the row open or folds it away (its
+  grid track between `0fr` and `1fr`, the row fading with it, 460 ms on the arriving curve both
+  ways — the clock the stack is lifted by), the bubble growing upwards from its resting place.
+  The host measures where the bubble's height is going once, before the row moves, so the
+  bubbles stacked above and `--kd-info-lift` move there in one step alongside it.
+  The playing song puts its mini transport there only while the player bar is away
+  (`NowPlayingTransport.tsx`): previous, play / pause, next, the time played and a progress
+  line that is the song's mini waveform when it has one. They send the player's own commands
+  (`requestPlayerCommand`) and read the position from the player session without re-rendering
+  the bubble. Beside the bar the bubble is an ordinary message, because the bar is the
+  transport: a pinned bubble opens its transport as the bar starts down and closes it as the
+  bar starts back up.
+- **The keys.** `actions` are compact icon keys in the bubble's tool row, before the key that
+  rolls it down; a `large` bubble has that row in its top right corner. A key that is on
+  (`pressed`) is written in full-strength ink, never in red. The playing song's are 歌词, 小窗
+  (the floating video or visualizer, the same toggle as the bar's own key), 编辑 Meta and 固定.
 - **The caption bar (Sakura98).** In the Sakura98 pack a bubble is a small 98 window: the tools
-  row (the ring, the actions, expand, 收起) is laid across its top as the window's caption bar,
+  row (the ring, the actions, the key that rolls it down) is laid across its top as the window's caption bar,
   in the drawer caption's tone and type, with the bubble's name at its left; the summary, the
   body and the controls sit beneath on the face. The name comes from `kind`: `TASK_KIND_NAMES`
   in `TaskBubbleHost.tsx` (`playing` 正在播放, `download` 下载, `export` 导出, `import` 导入);
@@ -63,14 +84,26 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   over the list ends above it; a bubble that leaves by itself may cover the drawer's bottom for
   its stay.
 - **The bar put away.** The player bar can slide down out of the window
-  (`src/lib/playerBarAway.ts`; a key at the bottom-left corner brings it back). The stack then
-  stands on the window's bottom edge; bubbles that are up when the slide starts ride the bar's
-  top edge while it slides. While
-  the bar is away the playing song's bubble is kept up as if it were pinned, because it is the
-  transport — until the listener dismisses or unpins it; then only new songs bring it up, for
-  their stay, until the bar is put away again or they pin or open it. That state is separate
-  from the pin (`nowPlayingKeptAway` in `src/lib/nowPlayingInfo.ts`): when the bar returns the
-  bubble is held by what held it before.
+  (`src/lib/playerBarAway.ts`). The stack then stands on the window's bottom edge; bubbles that
+  are up when the slide starts ride the bar's top edge while it slides.
+- **The bar or the playing song's bubble.** The listener always has a transport on screen: the
+  bar, the bubble, or both (`src/lib/nowPlayingInfo.ts`).
+  - While the bar is away the bubble is up and stays up (`barAway`), from the moment the bar
+    starts down. Nothing lets it leave by itself, and it is never pushed out.
+  - Sending it away — its key, which then reads 展开播放条, Esc, the now-playing card — brings
+    the bar back: the bubble rolls down as the bar slides up. That is the only way back to the
+    bar.
+  - Both at once is the pin. With the bar up, a pinned bubble stays beside it. With the bar
+    away the pin key shows and changes the same preference: it says whether the bubble is still
+    there when the bar is back. Dismissing a pinned bubble clears the pin, as everywhere.
+  - Without a song there is nothing for the bubble to show, so the bar is up whatever was
+    chosen; the choice is not rewritten and applies again when a song is on the deck. At launch
+    the deck remembered from the last run counts as a song while it is being fetched.
+  - Each shape of the window has its own choice: a wide window keeps the bar unless it was put
+    away, a tall one keeps it away unless it was brought back. Crossing from one shape to the
+    other is the same handover as the key. A slide always runs to its end; if what is wanted
+    changes on the way, the bar arrives and sets off again.
+  - A phone keeps its bar: the collapse is not offered there.
 - **No divider lines** inside a bubble (see AGENTS.md), and nothing is written in an empty one.
 
 ## Adding a kind of task
@@ -90,6 +123,7 @@ showTask({
   progress: 0.4,                      // optional 0..1
   tone: "success",                    // info | success | error
   stay: 5_000,                        // optional; 0 keeps it up
+  origin: { label: "B站", mark: <PlatformMark id="bilibili" size={12} branded /> },  // optional
   actions: [{ id: "undo", label: "撤回", icon: <Undo2 size={14} />, onSelect: undo }],
   onOpen: () => openSettings(),       // the bubble itself was clicked
 });
@@ -110,7 +144,7 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 
 | Task | Bubble | Where |
 | --- | --- | --- |
-| A song starts (not pause/resume) | `now-playing`: cover, title, artist, BPM · key · length · format; 歌词, 编辑 Meta, 固定; the mini transport; expands to the library's summary | `NowPlayingTask.tsx` |
+| A song starts (not pause/resume) | `now-playing`: cover, title, artist, the source's mark, BPM · key · length · format; 歌词, 小窗, 编辑 Meta, 固定; the mini transport while the bar is away | `NowPlayingTask.tsx` |
 | Downloads started / progress / ended / failed | `downloads`: one bubble per run | source `downloads` |
 | Exports added / started / ended / failed (mixing and visualizer) | `exports` | source `exports` |
 | A folder import ended or failed | `import` | source `imports` |
