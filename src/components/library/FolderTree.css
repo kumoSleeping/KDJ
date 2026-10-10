@@ -3,8 +3,9 @@
  * (.kd-narrow-folder-rail).
  *
  * Folders are real directories on disk, so the tree reads as a file browser;
- * online sources borrow the same rows. Red is spent on one thing only: the item
- * that is open (and a drop that is about to land).
+ * online sources borrow the same rows. Everything is ink on the panel: the item that is
+ * open is written in full-strength text with more weight, a drop that is about to land
+ * takes a neutral tint. The only colour is a source's own brand mark.
  * ========================================================== */
 
 /* ---------- Expanded tree: one column grid for every row ---------- */
@@ -59,7 +60,7 @@
   left: 0;
   right: 0;
   height: 2px;
-  background: var(--kd-theme);
+  background: var(--kd-text);
   pointer-events: none;
   animation: kd-motion-fade-in var(--kd-motion-micro-out) var(--kd-ease-out) backwards;
 }
@@ -199,7 +200,7 @@ button.kd-folder-caret:hover:not(:disabled) {
      of its own): a press on the ⋯ button must reach the button, not the hidden number. */
   pointer-events: none;
 }
-/* 未入库的数量是"待办"而不是"已有"：加号和实墨就够，红色留给当前项。 */
+/* 未入库的数量是"待办"而不是"已有"：加号和实墨就够。 */
 .kd-folder-count[data-pending="true"] {
   color: var(--kd-text);
   font-weight: 600;
@@ -244,9 +245,12 @@ button.kd-folder-caret:hover:not(:disabled) {
   color: var(--kd-text);
 }
 
-/* 当前文件夹只用主题红字，不铺底色、不描红侧条；多选的文件夹同样只换墨色。 */
+/* The folder, source or playlist that is open: full-strength ink and more weight, its icon in
+   the same ink. No colour, no background, no bar; folders picked together read the same way.
+   A source keeps its brand mark (see the platform rules below). */
 .kd-folder:is([data-active="true"], [data-selected="true"]) {
-  color: var(--kd-theme);
+  color: var(--kd-text);
+  font-weight: 700;
 }
 .kd-folder:is([data-active="true"], [data-selected="true"]) > .kd-folder-icon {
   color: inherit;
@@ -269,11 +273,11 @@ button.kd-folder-caret:hover:not(:disabled) {
   outline-offset: -1.5px;
 }
 
-/* 拖到目标上：整行染色加一圈细线，在余光里也认得出，但不是一整块实心红。 */
+/* 拖到目标上：整行换一档底色加一圈细线，在余光里也认得出；用墨色，不用主题色。 */
 .kd-folder:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) {
-  background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-theme) 46%, transparent);
-  color: var(--kd-theme);
+  background: color-mix(in srgb, var(--kd-text) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-text) 46%, transparent);
+  color: var(--kd-text);
   /* Declared on the target only: the tint eases in and is gone the moment the pointer leaves. */
   transition: background-color var(--kd-motion-micro-out) var(--kd-ease-out),
     box-shadow var(--kd-motion-micro-out) var(--kd-ease-out);
@@ -284,11 +288,11 @@ button.kd-folder-caret:hover:not(:disabled) {
 /* 拖文件夹换顺序：落点画成一条插入线，不染色——染色是"放进这个文件夹"的意思，
    两种操作必须一眼分得开。 */
 .kd-folder[data-edge="before"] {
-  box-shadow: inset 0 2px 0 var(--kd-theme);
+  box-shadow: inset 0 2px 0 var(--kd-text);
   background: transparent;
 }
 .kd-folder[data-edge="after"] {
-  box-shadow: inset 0 -2px 0 var(--kd-theme);
+  box-shadow: inset 0 -2px 0 var(--kd-text);
   background: transparent;
 }
 
@@ -501,9 +505,11 @@ div.kd-stream-status:hover {
   color: var(--kd-faint);
   cursor: default;
 }
+/* The open item of the rail: ink and weight, like the tree's. */
 .kd-narrow-folder-rail button[data-active="true"],
 .kd-narrow-folder-rail button[data-active="true"]:hover {
-  color: var(--kd-theme);
+  color: var(--kd-text);
+  font-weight: 700;
 }
 .kd-narrow-folder-rail button:focus-visible,
 .kd-narrow-rail-resize:focus-visible {
@@ -515,9 +521,9 @@ div.kd-stream-status:hover {
   outline-offset: -1.5px;
 }
 .kd-narrow-folder-rail button:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) {
-  background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-theme) 46%, transparent);
-  color: var(--kd-theme);
+  background: color-mix(in srgb, var(--kd-text) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-text) 46%, transparent);
+  color: var(--kd-text);
   transition: color 120ms ease, background-color var(--kd-motion-micro-out) var(--kd-ease-out),
     box-shadow var(--kd-motion-micro-out) var(--kd-ease-out);
 }
@@ -600,7 +606,7 @@ div.kd-stream-status:hover {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--kd-text);
+  color: var(--kd-text-body);
   text-align: left;
   cursor: pointer;
 }
@@ -608,7 +614,8 @@ div.kd-stream-status:hover {
   background: var(--kd-hover);
 }
 .kd-folder-picker button[data-active="true"] {
-  color: var(--kd-theme);
+  color: var(--kd-text);
+  font-weight: 700;
   background: transparent;
   box-shadow: none;
 }
@@ -644,10 +651,30 @@ div.kd-stream-status:hover {
   }
 }
 
-/* Sakura98: expanded headers and disclosure keys stay pressed in.
-   Selection and hover keep their existing colours and focus indicators. */
+/* Sakura98: expanded headers and disclosure keys stay pressed in. Hover and focus keep the
+   pack's own indicators. */
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder[data-sidebar-root-row]:is([aria-expanded="true"], :has(> .kd-folder-caret[aria-expanded="true"])),
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder[aria-expanded="true"] > .kd-folder-caret:has(svg),
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-caret[aria-expanded="true"]:has(svg) {
   box-shadow: var(--s98-sunken);
+}
+/* Sakura98: the open item is ink and weight here too. The pack's own sheet (theme.css) still
+   writes it in the theme colour, also with `!important` for folders picked together, so these
+   rules are one step more specific and say so as firmly. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder:is([data-active="true"], [data-selected="true"]) {
+  color: var(--kd-text) !important;
+  font-weight: 700;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-narrow-folder-rail button[data-active="true"],
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-picker button[data-active="true"] {
+  color: var(--kd-text);
+  font-weight: 700;
+}
+/* Its read-outs stay the quiet sunken chips they are on every other row. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder:is([data-active="true"], [data-selected="true"]) .kd-folder-count {
+  color: var(--kd-muted);
+  font-weight: 400;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder:is([data-active="true"], [data-selected="true"]) .kd-folder-drag {
+  color: inherit;
 }
