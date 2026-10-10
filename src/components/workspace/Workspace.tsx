@@ -236,6 +236,12 @@ interface CollectionSearchSnapshot {
   scrollLeft: number;
 }
 
+/** A list fetched from its provider batch by batch, and the size the provider gives for it. */
+interface PiecewiseList {
+  playlist: StreamPlaylist;
+  total: number;
+}
+
 interface OpenStreamPlaylistOptions {
   startup?: ForegroundStreamStartup;
 }
@@ -414,9 +420,17 @@ export function Workspace() {
    * brought back) and starts where it says; rows added to or taken from a list are not.
    */
   const [resultDelivery, setResultDelivery] = useState<ResultDelivery>({ id: 0, top: 0, left: 0 });
-  const deliverResults = useCallback((top = 0, left = 0) => {
+  /**
+   * The delivered list when its provider hands it over in pieces (a Bilibili favourites
+   * folder): where the rest comes from and how long the whole is. It belongs to the list on
+   * screen, not to what the sidebar highlights — with the local list pinned beside it, a click
+   * on a local folder clears the highlight while this list is still there and still grows.
+   */
+  const [piecewiseList, setPiecewiseList] = useState<PiecewiseList | null>(null);
+  const deliverResults = useCallback((top = 0, left = 0, piecewise: PiecewiseList | null = null) => {
     moreRowsRequestRef.current = null;
     setLoadingMoreRows(false);
+    setPiecewiseList(piecewise);
     setResultDelivery((current) => ({ id: current.id + 1, top, left }));
   }, []);
   const [activeStreamPlaylist, setActiveStreamPlaylist] = useState<ActiveStreamPlaylist | null>(
@@ -528,8 +542,8 @@ export function Workspace() {
   );
   /** Collection rows in hand, and how long the list is where the provider knows more. */
   const collectionRows = useMemo(() => collectionRowsInHand(items ?? []), [items]);
-  const collectionTotal = openedCollection && openedStreamPlaylist?.platform === "bilibili"
-    ? Math.max(collectionRows, openedStreamPlaylist.count)
+  const collectionTotal = openedCollection && piecewiseList
+    ? Math.max(collectionRows, piecewiseList.total)
     : collectionRows;
   const hasMoreCollectionRows = collectionShown < collectionTotal;
   // How far an online playlist is shown is part of where it was left (see openStreamPlaylist).
@@ -556,7 +570,7 @@ export function Workspace() {
       setCollectionShown(step.shown);
       return;
     }
-    const playlist = openedStreamPlaylist;
+    const playlist = piecewiseList?.playlist;
     const asked = step.fetch;
     if (!playlist) return;
     const request = {};
@@ -571,12 +585,14 @@ export function Workspace() {
       .then((response) => {
         if (!current()) return;
         const fetched = streamPlaylistItem(playlist, response);
+        const received = response.sources.length;
+        setPiecewiseList((list) =>
+          list && { ...list, total: fetchedCollectionTotal(asked, received, list.total) },
+        );
+        // The sidebar's own record of the playlist learns the real size too, while it has one.
         setOpenedStreamPlaylist((opened) =>
           opened && opened.platform === playlist.platform && opened.key === playlist.key
-            ? {
-                ...opened,
-                count: fetchedCollectionTotal(asked, response.sources.length, opened.count),
-              }
+            ? { ...opened, count: fetchedCollectionTotal(asked, received, opened.count) }
             : opened,
         );
         setItems((list) =>
@@ -594,7 +610,7 @@ export function Workspace() {
         moreRowsRequestRef.current = null;
         setLoadingMoreRows(false);
       });
-  }, [collectionRows, collectionShown, collectionTotal, openedStreamPlaylist]);
+  }, [collectionRows, collectionShown, collectionTotal, piecewiseList]);
   /**
    * The two names the rail's call site still uses, kept so that it reads as it did until its
    * pager is gone: there are no pages any more, so a change of page is the next batch and
@@ -1072,7 +1088,11 @@ export function Workspace() {
       });
       setItems([resolved]);
       setCollectionShown(view.shown);
-      deliverResults(view.scrollTop);
+      deliverResults(
+        view.scrollTop,
+        0,
+        fetchedInPieces ? { playlist, total: resolvedPlaylist.count } : null,
+      );
       if (browsePlatform) {
         const active = { platform: browsePlatform, key: playlist.key } as const;
         setActiveStreamPlaylist(active);
@@ -1155,6 +1175,7 @@ export function Workspace() {
         count: Math.max(0, playlist.count - 1),
       };
       setOpenedStreamPlaylist(nextPlaylist);
+      setPiecewiseList((list) => list && { ...list, total: Math.max(0, list.total - 1) });
       if (inspectedOnlineGroup === removedGroupKey) {
         setInspectedOnlineGroup(null);
         updateStreamWorkspaceSession({
@@ -2208,13 +2229,10 @@ export function Workspace() {
 
   const downloadOpenedCollection = useCallback(async () => {
     let item = openedCollection;
-    const playlist = openedStreamPlaylist;
     if (!item) return;
     // “全部下载”是明确的全量动作；只有这时才允许把尚未浏览的 B 站页补齐。
-    if (
-      playlist?.platform === "bilibili"
-      && playlist.count > item.groups.length
-    ) {
+    if (piecewiseList && piecewiseList.total > item.groups.length) {
+      const playlist = piecewiseList.playlist;
       const requestId = ++resultRequestSeqRef.current;
       setBusy(true);
       setQueueError("");
@@ -2230,8 +2248,14 @@ export function Workspace() {
             streamPlaylistItem(playlist, response).groups,
           ),
         };
+        const total = item.groups.length;
         setItems([item]);
-        setOpenedStreamPlaylist({ ...playlist, count: item.groups.length });
+        setPiecewiseList({ playlist, total });
+        setOpenedStreamPlaylist((opened) =>
+          opened && opened.platform === playlist.platform && opened.key === playlist.key
+            ? { ...opened, count: total }
+            : opened,
+        );
       } catch (error) {
         if (requestId === resultRequestSeqRef.current) {
           setQueueError(`读取完整收藏夹失败：${errorText(error)}`);
@@ -2242,7 +2266,7 @@ export function Workspace() {
       }
     }
     await downloadResolvedItem(item);
-  }, [downloadResolvedItem, openedCollection, openedStreamPlaylist]);
+  }, [downloadResolvedItem, openedCollection, piecewiseList]);
 
   const downloadGroup = useCallback(
     async (group: MergedGroup) => {
