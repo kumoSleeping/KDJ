@@ -40,7 +40,7 @@ import {
   type WaveformMotionClock,
 } from "../../lib/waveformMotion";
 import { ContextMenu } from "../common";
-import { drawWaveformCanvas } from "./WaveformCanvas";
+import { drawWaveformCanvas, drawWaveformPushFrame } from "./WaveformCanvas";
 import { THEME_CHANGE_EVENT } from "../../lib/themePack";
 import { useWaveformData } from "./useWaveformData";
 import { markerRatio, WaveformCueMarkers, WaveformLoopFills } from "./WaveformMarkers";
@@ -51,10 +51,16 @@ import {
   SONG_SWAP_OUT_MS,
 } from "../../lib/songSwapMotion";
 import {
+  addWaveformPushes,
   advanceWaveformSongMotion,
   mountedWaveformSongMotion,
+  newWaveformStretches,
   startWaveformSongCollapse,
+  waveformPushLevel,
+  waveformPushOver,
   waveformSongMotionWakeAt,
+  type WaveformCoverage,
+  type WaveformPush,
 } from "../../lib/waveformSongMotion";
 import {
   getLiveDeckClock,
@@ -1131,6 +1137,55 @@ export function Waveform({
     ? Math.min(1, Math.max(0, amplitudeScale))
     : 1;
 
+  // A picture that arrives in pieces (a streamed song, see waveformSongMotion.ts): which columns
+  // the canvas was last painted from, the pushes that are running, and the finished picture
+  // their frames are copied from. Frames are requested only while a push runs.
+  const arrivalRef = useRef<{
+    trackId: number;
+    coverage: WaveformCoverage | null;
+    pushes: WaveformPush[];
+    picture: HTMLCanvasElement | null;
+    frame: number;
+  }>({ trackId, coverage: null, pushes: [], picture: null, frame: 0 });
+  const stopWaveformPushes = () => {
+    const arrival = arrivalRef.current;
+    if (arrival.frame) cancelAnimationFrame(arrival.frame);
+    arrival.frame = 0;
+    arrival.pushes = [];
+  };
+  const paintWaveformPushes = (whole: boolean) => {
+    const arrival = arrivalRef.current;
+    const canvas = canvasRef.current;
+    if (!canvas || !arrival.picture) {
+      stopWaveformPushes();
+      return;
+    }
+    const now = performance.now();
+    drawWaveformPushFrame(
+      canvas,
+      arrival.picture,
+      arrival.pushes.map((push) => ({
+        from: push.from,
+        to: push.to,
+        level: (at) => waveformPushLevel(push, at, now),
+      })),
+      whole,
+    );
+    // A push that is over has just been drawn at its full height.
+    arrival.pushes = arrival.pushes.filter((push) => !waveformPushOver(push, now));
+    if (arrival.pushes.length === 0 || arrival.frame) return;
+    arrival.frame = requestAnimationFrame(() => {
+      arrivalRef.current.frame = 0;
+      paintWaveformPushes(false);
+    });
+  };
+  useEffect(() => () => {
+    const arrival = arrivalRef.current;
+    if (arrival.frame) cancelAnimationFrame(arrival.frame);
+    arrival.frame = 0;
+    arrival.pushes = [];
+  }, []);
+
   // Viewport Decks paint a 3-screen sliding window; overview still uses the host width.
   useLayoutEffect(() => {
     const host = hostRef.current;
@@ -1139,6 +1194,14 @@ export function Waveform({
     // While the old song's picture closes, the canvas keeps the bitmap it has. The effect runs
     // again when the hold ends and paints the song that is shown then.
     if (!host || !rail || !canvas || !displayWave || holdingPicture) return;
+    const arrival = arrivalRef.current;
+    if (arrival.trackId !== trackId) {
+      stopWaveformPushes();
+      arrival.trackId = trackId;
+      arrival.coverage = null;
+    }
+    // Only the first paint of this run shows new data; the later ones follow a resize.
+    let arriving = songMotion && !reducedMotion && !viewport.active;
     let resizeTimer = 0;
     let paintedSize = "";
     const sizeKey = () => `${canvas.clientWidth}:${canvas.clientHeight || height}:${window.devicePixelRatio || 1}`;
@@ -1151,8 +1214,17 @@ export function Waveform({
       if (width <= 0 || renderedHeight <= 0) return;
       const size = sizeKey();
       if (size === paintedSize) return;
-      drawWaveformCanvas(
-        canvas,
+      // The stretches this data covers for the first time grow in from their near end; what
+      // was shown stays. A stretch narrower than two pixels is simply painted.
+      const now = performance.now();
+      const stretches = arriving
+        ? newWaveformStretches(arrival.coverage, displayWave.known ?? "all", displayWave.amp.length, 2 / width)
+        : [];
+      const pushes = arriving && (stretches.length > 0 || arrival.pushes.length > 0)
+        ? addWaveformPushes(arrival.pushes, stretches, now)
+        : [];
+      const paint = (target: HTMLCanvasElement) => drawWaveformCanvas(
+        target,
         displayWave,
         width,
         renderedHeight,
@@ -1162,6 +1234,19 @@ export function Waveform({
         canvasProfile,
         renderedAmplitudeScale,
       );
+      if (pushes.length > 0) {
+        // The finished picture is painted off screen once; the frames of the push copy from it.
+        arrival.picture ??= document.createElement("canvas");
+        paint(arrival.picture);
+        arrival.pushes = pushes;
+        paintWaveformPushes(true);
+      } else {
+        stopWaveformPushes();
+        paint(canvas);
+      }
+      // A picture with nothing drawn yet is not a picture: its first data grows as a whole.
+      arrival.coverage = !ready ? null : displayWave.known ? Uint8Array.from(displayWave.known, Number) : "all";
+      arriving = false;
       paintedSize = size;
     };
     const scheduleRender = () => {
