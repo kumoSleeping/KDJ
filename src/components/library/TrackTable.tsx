@@ -26,7 +26,6 @@ import {
 } from "lucide-react";
 import { LIBRARY_REST_PACE, libraryScrollPace, libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { createLibraryStandIns, standInGap, type LibraryStandIns } from "../../lib/libraryStandIns";
-import { displayTrackKey } from "../../lib/keyDisplay";
 import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
@@ -38,7 +37,7 @@ import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../common/dragGhost";
 import "../common/DragGhost.css";
-import { markListArrival } from "./listArrival";
+import { createListArrival, type ListArrival } from "./listArrival";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent } from "../../lib/shareClipboard";
 import {
@@ -305,6 +304,11 @@ export interface TrackTableProps {
   selectedIds: number[];
   /** 分屏中只有当前点亮板块可以消费全局删除快捷键。 */
   shortcutActive: boolean;
+  /**
+   * 这张表所在的板块此刻是否显示（板块切走时只是 display: none，表格不卸载）。每次重新显示，
+   * 列表都重新"到场"一次（见 listArrival）。不传按一直显示算。
+   */
+  visible?: boolean;
   sort: TrackSort;
   order: SortOrder;
   /** 副排序键：主键相同的那一撮再按它排。null = 只按主键。 */
@@ -591,35 +595,6 @@ function trackCell(
   }
 }
 
-/**
- * 替身行里一个格子的文字（见 libraryStandIns）：和 trackCell 画出来的文字一致。没有文字的
- * 格子（评分、能量条）返回 null。
- */
-function standInCellText(track: TrackSummary, key: string, index: number, keyNotation: KeyNotation): string | null {
-  switch (key) {
-    case "index": return String(index + 1);
-    case "title": return track.title || track.filename;
-    case "artist": return track.artist || DASH;
-    case "album": return track.album || DASH;
-    case "bpm": return formatBpm(track.bpm);
-    case "camelot": return displayTrackKey(track, keyNotation) || DASH;
-    case "duration": return formatDuration(track.duration);
-    case "format": return track.format.toUpperCase() || DASH;
-    case "size": return formatBytes(track.size);
-    case "file_created_at": return formatDate(track.file_created_at);
-    case "added_at": return formatDate(track.added_at);
-    case "samplerate": return track.samplerate ? `${track.samplerate / 1000} kHz` : DASH;
-    case "channels": return track.channels ? `${track.channels}ch` : DASH;
-    case "bitrate": return track.bitrate ? `${track.bitrate} kbps` : DASH;
-    case "genre":
-    case "year":
-    case "filename":
-    case "path": return String(track[key] || DASH);
-    case "source_platform": return track.source_platform || "local";
-    default: return null;
-  }
-}
-
 interface TrackCellsProps {
   track: TrackSummary;
   /** 在当前顺序里的位置（从 0 起）。 */
@@ -860,6 +835,16 @@ const SCROLL_REST_MS = 140;
 const TRACED_SCROLL_SCREENS = 3;
 /** 快滚途中每走过这么多行，把摘要的加载重心挪到眼前一次。 */
 const FLIGHT_DEMAND_ROWS = 300;
+/**
+ * 记下的一次到场动画（见 listArrival），等行提交之后开始：列表被呈现（"list"），或快滚慢下来后
+ * 行追上滚动（"chase"；`built` 是那之前表格已经造好的行，它们一直在屏幕上，不参与）。`view` 是
+ * 那时行该在的渲染窗口，提交出来的窗口对上了才开始。
+ */
+type ArrivalDue = { view: LibraryView; at: number } & (
+  | { gesture: "list" }
+  | { gesture: "chase"; direction: -1 | 1; built: { start: number; end: number } });
+/** "list" 等窗口对上（换查询后要再提交一次）最多等这么久，过了还没对上就作废。"chase" 只认紧接着的那一次提交。 */
+const ARRIVAL_DUE_MS = 400;
 
 export const TrackTable = memo(function TrackTable({
   libraryStore = useLibraryStore,
@@ -877,6 +862,7 @@ export const TrackTable = memo(function TrackTable({
   onSelect,
   onSort,
   shortcutActive,
+  visible = true,
 }: TrackTableProps) {
   const useTableStore = <T,>(selector: (state: LibraryPaneStore) => T) => useStore(libraryStore, selector);
   const shortcutActiveRef = useRef(shortcutActive);
@@ -1552,7 +1538,17 @@ export const TrackTable = memo(function TrackTable({
   /** 表格自己渲染出来的行范围，以及替身行上一帧盖住的范围。 */
   const renderedRowsRef = useRef({ start: 0, end: 0 });
   const coveredRowsRef = useRef<(readonly [number, number])[]>([]);
-  const keyNotationRef = useRef<KeyNotation>("camelot");
+  /** 快滚把表格的行甩在了后面：这期间不造行（见 syncWindow），记下它的去向，慢下来时行从来的那一侧追上来。 */
+  const flightRef = useRef<-1 | 1 | null>(null);
+  /** 行的到场动画（见 listArrival）。 */
+  const arrivalRef = useRef<ListArrival | null>(null);
+  /**
+   * 行提交之后要开始的到场动画（见 ArrivalDue）。
+   */
+  const arrivalDueRef = useRef<ArrivalDue | null>(null);
+  /** 正在进行的到场动画涉及的行号，按出场先后；期间新挂载的行（摘要刚到）按原位加入。 */
+  const arrivalRowsRef = useRef<number[]>([]);
+  const visibleRef = useRef(visible);
   /** 快滚途中上一次把加载重心挪到的行。 */
   const flightDemandRowRef = useRef(-1);
   /** 这一次滚动的统计，停稳时写进原生日志。 */
@@ -1776,36 +1772,70 @@ export const TrackTable = memo(function TrackTable({
   pendingCountRef.current = pendingDownloads.length;
 
   /**
-   * 给滚动容器此刻的位置画上替身行，并记下它们和真实的行一起盖住了哪些行。`direction` 是
-   * 快滚的去向，替身行的余量大部分放在前方；0 表示表格自己在造行，这时只补视口里缺的行
-   * （平时没有），不占画布。
+   * 给滚动容器此刻的位置画上替身行（快滚时代替行的灰条，见 libraryStandIns），并记下它们和真实
+   * 的行一起盖住了哪些行。`direction` 是快滚的去向，替身行的余量大部分放在前方；0 表示表格自己
+   * 在造行，这时只补视口里缺的行（平时没有），不占画布。
    */
   const paintStandIns = useCallback((direction: -1 | 0 | 1) => {
     const standIns = standInsRef.current;
     if (!standIns) return;
-    const { orderedIds: ids, summaryById: summaries } = libraryStore.getState();
     const pending = pendingCountRef.current;
-    const notation = keyNotationRef.current;
     const pace = paceRef.current;
     coveredRowsRef.current = standIns.update({
-      rowHeight: rowHRef.current, count: ids.length + pending, first: pending, direction,
+      rowHeight: rowHRef.current, count: libraryStore.getState().orderedIds.length + pending, first: pending, direction,
       // 甩动在平滑后的速度跟上之前就已经是全速了：两者取大。
       speed: Math.max(Math.abs(pace.speed), Math.abs(pace.instant)),
       windowStart: renderedRowsRef.current.start, windowEnd: renderedRowsRef.current.end,
-      version: [ids, notation, pending],
-      data: summaries,
-      text(row, column) {
-        const track = summaries.get(ids[row - pending]);
-        return track ? standInCellText(track, column, row - pending, notation) : undefined;
-      },
     });
   }, [libraryStore]);
+
+  /** 行号（待下载行在前，曲目在后）对应的、表格此刻渲染出来的行；不在渲染窗口里的是空位。 */
+  const mountedRows = useCallback((rows: readonly number[]) => {
+    const body = scrollerRef.current?.querySelector<HTMLElement>("table.kd-table > tbody");
+    if (!body) return [];
+    const { start, end } = renderedRowsRef.current;
+    // tbody 的子元素依次是：上占位行（有的话）、渲染窗口里的每一行、下占位行。
+    const offset = body.firstElementChild?.hasAttribute("data-spacer") ? 1 : 0;
+    return rows.map((row) => row >= start && row < end ? body.children[offset + row - start] as HTMLElement | undefined : undefined);
+  }, []);
+
+  /**
+   * 开始一次到场动画（见 listArrival），在行已经提交之后调用。返回有没有行在动。
+   * - "list"：视口里的行自上而下依次升起。
+   * - "chase"：快滚慢下来，刚造好的行追上滚动——从滚动来的那一侧开始，顺着滚动的方向一行接
+   *   一行；滚动的余势还会带进视口的前方一屏跟在最后。之前就在的行不动。
+   */
+  const startArrival = useCallback((due: ArrivalDue) => {
+    const box = scrollerRef.current;
+    const arrival = arrivalRef.current;
+    if (!box || !arrival) return false;
+    const rowHeight = rowHRef.current;
+    const top = Math.max(0, box.scrollTop);
+    const first = Math.floor(top / rowHeight);
+    const last = Math.ceil((top + Math.max(rowHeight, box.clientHeight - headerHRef.current)) / rowHeight);
+    const { start, end } = renderedRowsRef.current;
+    const from = Math.max(start, first);
+    const to = Math.min(end, last);
+    const rows: number[] = [];
+    if (due.gesture === "list") {
+      for (let row = from; row < to; row += 1) rows.push(row);
+    } else {
+      const reach = last - first;
+      const fresh = (row: number) => { if (row < due.built.start || row >= due.built.end) rows.push(row); };
+      if (due.direction > 0) for (let row = from; row < Math.min(end, to + reach); row += 1) fresh(row);
+      else for (let row = to - 1; row >= Math.max(start, from - reach); row -= 1) fresh(row);
+    }
+    arrivalRowsRef.current = rows;
+    arrival.start(due.gesture, due.gesture === "chase" && due.direction < 0 ? "above" : "below", mountedRows(rows));
+    return arrival.gesture() !== null;
+  }, [mountedRows]);
 
   /**
    * 把表格对齐到滚动容器此刻的位置。滚动由 WebView 的滚动线程执行，页面拿到位置时它已经在
    * 屏幕上了，所以：
    * - 阅读速度的滚动：在这一帧内提交对应的行（flushSync），每晚一帧露出的就是空白；
-   * - 快滚：一行也不造。造行以毫秒计，追不上；这期间只画替身行，慢下来再一次造好。
+   * - 快滚：一行也不造。造行以毫秒计，追不上；这期间只画替身行（灰条），慢下来再一次造好，
+   *   造好的行用一次到场动画追上滚动（见 listArrival 的 "chase"）。
    * 只在 React 之外（动画帧）调用；`now` 是这一帧的时间戳。
    */
   const syncWindow = useCallback((now: number) => {
@@ -1850,17 +1880,23 @@ export const TrackTable = memo(function TrackTable({
         paceRef.current = LIBRARY_REST_PACE;
         scrollSampleAtRef.current = 0;
         const box = scrollerRef.current;
+        const flight = flightRef.current;
+        flightRef.current = null;
         if (box) {
           const rest: LibraryView = { top: libraryWindowTop(box.scrollTop, rowHRef.current), height: box.clientHeight };
           if (sameLibraryView(viewRef.current, rest)) paintStandIns(0);
-          else setView(rest);
+          else {
+            // 快滚直接停住（拖滑块松手、键盘、定位）：这里的行造好之后追上来。
+            if (flight) arrivalDueRef.current = { gesture: "chase", view: rest, at: performance.now(), direction: flight, built: { ...renderedRowsRef.current } };
+            setView(rest);
+          }
           const done = scrollTraceRef.current;
           const painting = standInsRef.current?.takeStats();
           if (import.meta.env.DEV && Math.abs(box.scrollTop - done.from) >= TRACED_SCROLL_SCREENS * box.clientHeight) {
             tracePlayback("library-scroll", { ms: Math.round(performance.now() - done.startedAt), px: Math.round(box.scrollTop - done.from),
               frames: done.frames, slow: done.slow, gapMax: Math.round(done.gapMax), travelMax: Math.round(done.travelMax),
               speedMax: Math.round(done.speedMax * 1000), held: done.held, bare: done.bare, bareMax: done.bareMax,
-              standIns: standInsRef.current?.ready() ? 1 : 0, text: painting?.text ?? 0, bars: painting?.bars ?? 0,
+              standIns: standInsRef.current?.ready() ? 1 : 0, bars: painting?.bars ?? 0,
               paintMs: Math.round(painting?.ms ?? 0), paintMax: Math.round(painting?.worst ?? 0) });
           }
         }
@@ -1873,6 +1909,10 @@ export const TrackTable = memo(function TrackTable({
     // 快滚且替身行可用：表格的行原地不动，不进 React。
     if (pace.fast && standInsRef.current?.ready()) {
       scrollTraceRef.current.held += 1;
+      flightRef.current = pace.speed < 0 ? -1 : 1;
+      // 到场动画还没做完就又甩了出去：行就地站好，不带着动画被滚走。
+      arrivalDueRef.current = null;
+      if (arrivalRef.current?.gesture()) arrivalRef.current.stop();
       // 表格不动，就没有人告诉数据层眼前是哪里：后台补齐还在围着起飞的位置转，替身行只能画
       // 占位条。隔一段路挪一次加载重心。
       const row = Math.max(0, Math.floor(top / rowHeight) - pending);
@@ -1887,8 +1927,12 @@ export const TrackTable = memo(function TrackTable({
       return;
     }
     flightDemandRowRef.current = -1;
+    const flight = flightRef.current;
+    flightRef.current = null;
     const next: LibraryView = { top: libraryWindowTop(top, rowHeight), height };
     if (!sameLibraryView(viewRef.current, next)) {
+      // 快滚慢下来的这一帧：行在这里一次造好，提交之后追上滚动（见下面处理 arrivalDueRef 的 effect）。
+      if (flight) arrivalDueRef.current = { gesture: "chase", view: next, at: performance.now(), direction: flight, built: { ...renderedRowsRef.current } };
       viewRef.current = next;
       flushSync(() => setView(next));
     }
@@ -1929,7 +1973,6 @@ export const TrackTable = memo(function TrackTable({
   const windowedTracks = orderedIds.slice(viewport.trackStart, viewport.trackEnd)
     .map((id, offset) => ({ id, track: summaryById.get(id), index: viewport.trackStart + offset }));
   renderedRowsRef.current = { start: winStart, end: winEnd };
-  keyNotationRef.current = keyNotation;
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
@@ -1942,21 +1985,35 @@ export const TrackTable = memo(function TrackTable({
       if (standInsRef.current === standIns) standInsRef.current = null;
     };
   }, []);
-  // 行换了（窗口移动、数据到达、换序）之后，在同一帧里把替身行让给真实的行。
   useLayoutEffect(() => {
+    const box = scrollerRef.current;
+    if (!box) return;
+    const arrival = createListArrival(box);
+    arrivalRef.current = arrival;
+    return () => {
+      arrival.stop();
+      if (arrivalRef.current === arrival) arrivalRef.current = null;
+    };
+  }, []);
+  // 行换了（窗口移动、换序、列表变长变短）之后，在同一帧里把替身行让给真实的行。行要追上滚动
+  // 的那一次除外：那时替身行在到场的行上淡出，由下面处理 arrivalDueRef 的 effect 交接。
+  useLayoutEffect(() => {
+    if (arrivalDueRef.current?.gesture === "chase") return;
     const pace = paceRef.current;
     paintStandIns(!pace.fast ? 0 : pace.speed < 0 ? -1 : 1);
-  }, [paintStandIns, winStart, winEnd, orderedIds, summaryById, keyNotation, pendingDownloads.length]);
+  }, [paintStandIns, winStart, winEnd, orderedIds, pendingDownloads.length]);
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
     if (!box) return;
     let desired = box.scrollTop;
+    let presented = false;
     if (previousQueryRef.current !== queryVersion) {
       if (previousQueryRef.current > 0) scrollRestoreDoneRef.current = true;
       previousQueryRef.current = queryVersion;
       // The initial index starts a query too; persisted position applies once on startup.
-      if (scrollRestoreDoneRef.current) { desired = 0; markListArrival(box); }
+      // Another list from here on: it starts at its top, and it arrives.
+      if (scrollRestoreDoneRef.current) { desired = 0; presented = true; }
       anchorRef.current = { id: null, index: 0, offset: 0 };
     }
     if (!scrollRestoreDoneRef.current && total > 0) {
@@ -1965,6 +2022,8 @@ export const TrackTable = memo(function TrackTable({
         ? restoreLibraryAnchor(orderedIds, saved.topVisibleTrackId, Math.floor(saved.scrollTop / rowH), saved.rowOffset, rowH, pendingDownloads.length)
         : saved.scrollTop;
       scrollRestoreDoneRef.current = true;
+      // The list is on screen for the first time, wherever it was left: that is an arrival too.
+      presented = true;
     } else if (total > 0 && anchorRef.current.id !== null) {
       const anchor = anchorRef.current;
       desired = restoreLibraryAnchor(orderedIds, anchor.id, anchor.index, anchor.offset, rowH, pendingDownloads.length);
@@ -1974,9 +2033,53 @@ export const TrackTable = memo(function TrackTable({
     scrollTopRef.current = box.scrollTop;
     const windowTop = libraryWindowTop(desired, rowH);
     setView((old) => old.top === windowTop && old.height === box.clientHeight ? old : { top: windowTop, height: box.clientHeight });
+    if (presented) arrivalDueRef.current = { gesture: "list", view: { top: windowTop, height: box.clientHeight }, at: performance.now() };
     const index = Math.max(0, Math.floor(desired / rowH) - pendingDownloads.length);
     anchorRef.current = { id: orderedIds[index] ?? null, index, offset: desired % rowH };
   }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop]);
+
+  // 板块重新显示：列表再到场一次。隐藏期间容器没有尺寸，渲染窗口退回了列表开头；先按容器恢复的
+  // 位置把窗口摆对，行提交后再开始。
+  useLayoutEffect(() => {
+    if (visibleRef.current === visible) return;
+    visibleRef.current = visible;
+    const box = scrollerRef.current;
+    if (!visible || !box) {
+      arrivalDueRef.current = null;
+      arrivalRef.current?.stop();
+      return;
+    }
+    const top = libraryWindowTop(box.scrollTop, rowHRef.current);
+    const height = box.clientHeight;
+    // 恢复位置不是一次滚动。
+    scrollTopRef.current = box.scrollTop;
+    setView((current) => current.top === top && current.height === height ? current : { top, height });
+    arrivalDueRef.current = { gesture: "list", view: { top, height }, at: performance.now() };
+  }, [visible]);
+
+  /**
+   * 到场动画的交接，每次提交之后看一眼（平时两个 ref 都是空的，什么也不做）：
+   * - 有一次到场在等（arrivalDueRef），而渲染窗口已经对上滚动位置：给行做上标记，动画开始。
+   *   行追上滚动的那一次，替身行同时在它们上面淡出。
+   * - 动画进行中又提交了一次：期间新挂载的行（占位行换成了真实的行）按原来的位置加入。
+   * 放在换查询和板块显示这两个 effect 之后：它们在同一次提交里定下滚动位置和要不要到场。
+   */
+  useLayoutEffect(() => {
+    const due = arrivalDueRef.current;
+    if (!due) {
+      if (arrivalRef.current?.gesture()) arrivalRef.current.join(mountedRows(arrivalRowsRef.current));
+      return;
+    }
+    const matched = sameLibraryView(view, due.view);
+    // 窗口还没跟上（这次提交里刚 setView，马上会再提交一次）：等下一次。等不到就作废，不留到以后
+    // 某次无关的提交上。（对上了就开始，不看用了多久：慢的机器上造这一屏行本身就要几百毫秒。）
+    if (!matched && due.gesture === "list" && performance.now() - due.at <= ARRIVAL_DUE_MS) return;
+    arrivalDueRef.current = null;
+    const started = matched && visibleRef.current && !paceRef.current.fast && startArrival(due);
+    if (due.gesture !== "chase") return;
+    // 行在追：视口附近的替身行在它们上面淡出。没有行要追（之前的行一直盖着视口）就直接收掉。
+    if (!started || !standInsRef.current?.settle()) paintStandIns(0);
+  });
 
   useEffect(() => {
     if (total > 0) void ensureRange(viewport.fetchStart, viewport.fetchEnd, viewport.visibleTrackStart, viewport.visibleTrackEnd);

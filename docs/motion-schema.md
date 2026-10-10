@@ -124,8 +124,19 @@ next to its styles:
 | List | What moves | Code |
 | --- | --- | --- |
 | The sidebar tree and the compact rail | Shown: the rows arrive 12ms apart (the first twelve; all in by 292ms). A branch the user opens: its rows arrive the same way while what lies below slides down (240ms). A branch the user closes: its picture is covered from below as the rows under it close up (240ms). A playlist that was opened: 600ms later the rows travel to their new order (320ms), the opened one lifted. Only the user's own toggle moves a branch; a render, a selection, a count or a drag never does. | `components/library/sidebarMotion.ts`, `FolderTree.css` |
-| The local track list | After navigation (the query version the table resets its scroll on): the first twelve rows fade in 8ms apart, all settled by 248ms. Never on a scroll, a re-render or a row update; the mark is dropped as soon as the list is scrolled. | `components/library/listArrival.ts`, `ListArrival.css` |
-| The search results | A delivered list arrives row after row (28ms apart). | `components/download/ResultTable.css` |
+| The local track list, presented | Every time the list is put before the user — at startup, as another folder or 全部曲目, after a sort or filter that replaced it, and each time its pane is shown again after the search results or an online playlist — the rows in view play the gesture of a presented list (below): the first fourteen rise 14px as they fade in, 28ms apart from the top one, each cover scales in 70ms after its row, the rest of the screen fades in a frame after the fourteenth; all there by 914ms. It plays where the list is, not only at its top. A track that loads while its row is arriving takes the row's place in step; a list replaced while it is still arriving (a filter typed letter by letter) lets the rows that stay carry on and starts only the ones new to the view. Never on a scroll at reading speed, a re-render, a selection, a row update or rows the virtual window swaps in; scrolling the list away ends it at once. Sakura98 types the lines out on the same beats, without a glide. | `components/library/listArrival.ts`, `ListArrival.css` |
+| The local track list, after a fast scroll | While a scroll is too fast to build rows for, the table builds none and shows quiet bars (`lib/libraryStandIns.ts`). Where the scroll slows down the rows are built once and catch up with it: the same rise as a presented list on the clock of a menu's items (8ms apart, 160ms each, the cover 40ms behind, all there by 304ms), starting with the row nearest to where the scroll came from and travelling the way the scroll goes — rising from below after a scroll towards the end of the list, dropping from above after one towards its top. One screen further ahead fades in with the last beat; rows that were on screen all along do not move. The bars still in view fade out over the arriving rows (micro-out). A second fling ends it at once. | `components/library/listArrival.ts`, `ListArrival.css`, `lib/libraryStandIns.ts` |
+| The search results | A delivered list arrives by the gesture of a presented list, row after row (28ms apart), the source badges a beat after the covers. | `components/download/ResultTable.css` |
+
+The gesture of a presented list is one description for both tables, in `motion.css` ("A list
+that is presented"): the tokens `--kd-motion-list-lead` (60ms), `--kd-motion-list-step` (28ms),
+`--kd-motion-list-row` (380ms), `--kd-motion-list-rest` (240ms), `--kd-motion-list-cover` (420ms),
+`--kd-motion-list-cover-after` (70ms), the curves `--kd-ease-list` and `--kd-ease-list-cover`, and
+the keyframes `kd-motion-list-rise`, `kd-motion-list-drop` and `kd-motion-list-cover`. A table says
+for itself which rows are marked and when: the results by `data-reveal` and `nth-child`, the
+local list by a script that marks the rows in view (`data-kd-arrive` on the scroll container,
+`data-kd-arrive-row` and `--kd-arrive-i` on each row), because its rows are a window of a much
+longer list.
 
 Dragging has two gestures of its own: a card dropped on the downloads hops into the list as
 itself (`lib/downloadToss.ts`; the download is handed to the queue when it has nearly landed),

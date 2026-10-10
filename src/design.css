@@ -7799,9 +7799,9 @@ button.kd-camelot-grid-key { cursor: pointer; }
   z-index: 5;
   pointer-events: none;
 }
-/* Stand-in rows of the track table (src/lib/libraryStandIns.ts): canvases laid over the rows the
-   table has not built, scrolling with it. The scroll container above is positioned, so they are
-   placed in its content. They never take the pointer. */
+/* What a fast scroll of the track table shows (src/lib/libraryStandIns.ts): canvases of bars laid
+   over the rows the table has not built, scrolling with it. The scroll container above is
+   positioned, so they are placed in its content. They never take the pointer. */
 .kd-table-standins {
   position: absolute;
   top: 0;
@@ -7817,6 +7817,15 @@ button.kd-camelot-grid-key { cursor: pointer; }
   top: 0;
   left: 0;
   transform-origin: 0 0;
+}
+/* The scroll slowed down and the rows are arriving underneath (ListArrival.css, the chase): the
+   bars still in view fade out over them, most of the way at once so that text and bar are not
+   read together, and are released when the fade is over. */
+.kd-table-standins > canvas[data-leaving] {
+  animation: kd-motion-fade-out var(--kd-motion-micro-out) var(--kd-ease-out) both;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-table-standins > canvas[data-leaving] {
+  animation-timing-function: steps(2, end);
 }
 .kd-scroll-handle {
   position: absolute;

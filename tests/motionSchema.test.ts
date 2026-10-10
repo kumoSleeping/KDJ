@@ -108,10 +108,11 @@ test("a reorder names the rows that changed places, by how many, and the one tha
 });
 
 test("the sidebar's and the list's motion moves only transform, opacity and the clip, on the shared clock", () => {
-  for (const file of ["../src/components/library/FolderTree.css", "../src/components/library/ListArrival.css"]) {
+  // The sidebar keeps its keyframes; the list's gesture is the shared one of motion.css, and its own sheet only has the Sakura98 tick.
+  for (const [file, own] of [["../src/components/library/FolderTree.css", 4], ["../src/components/library/ListArrival.css", 1]] as const) {
     const sheet = fs.readFileSync(new URL(file, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
     const blocks = [...sheet.matchAll(/@keyframes\s+([\w-]+)\s*\{((?:[^{}]*\{[^{}]*\})+)\s*\}/g)];
-    assert.ok(blocks.length >= 4, `${file} has its keyframes`);
+    assert.ok(blocks.length >= own, `${file} has its keyframes`);
     for (const [, name, body] of blocks) {
       assert.match(body, /\bfrom\s*\{/, `${name} has from`);
       assert.match(body, /\bto\s*\{/, `${name} has to`);
@@ -125,4 +126,25 @@ test("the sidebar's and the list's motion moves only transform, opacity and the 
       for (const [, ms] of value.matchAll(/(?<![\w-])(\d+)ms/g)) assert.ok(Number(ms) <= 120, `literal ${ms}ms in "${value.trim()}"`);
     }
   }
+});
+
+test("a presented list is one gesture: the search results and the local list take it from the schema", () => {
+  const read = (file: string) => fs.readFileSync(new URL(file, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const results = read("../src/components/download/ResultTable.css");
+  const local = read("../src/components/library/ListArrival.css");
+  for (const [name, sheet] of [["the search results", results], ["the local list", local]] as const) {
+    assert.match(sheet, /animation:\s*kd-motion-list-rise\s+var\(--kd-motion-list-row\)\s+var\(--kd-ease-list\)/, `${name}: rows rise on the shared clock`);
+    assert.match(sheet, /animation:\s*kd-motion-list-cover\s+var\(--kd-motion-list-cover\)\s+var\(--kd-ease-list-cover\)/, `${name}: covers follow`);
+    assert.match(sheet, /var\(--kd-motion-list-cover-after\)/, `${name}: a cover is a beat behind its row`);
+    assert.doesNotMatch(sheet, /@keyframes\s+kd-(?:result|list)-(?:rise|cover)(?![\w-])/, `${name} has no copy of the keyframes`);
+  }
+  for (const name of ["rise", "drop", "cover"]) assert.match(css, new RegExp(`@keyframes\\s+kd-motion-list-${name}\\b`));
+  // The beats the results write out row by row are the lead and the step the local list computes with.
+  const lead = token("list-lead"), step = token("list-step");
+  const beats = [...results.matchAll(/nth-child\((\d+)\)\s*\{\s*--kd-reveal-at:\s*(\d+)ms/g)].map((match) => [Number(match[1]), Number(match[2])]);
+  assert.equal(beats.length, 14);
+  for (const [row, at] of beats) assert.equal(at, lead + (row - 1) * step, `row ${row} of the results starts on the shared beat`);
+  // Rows past the cascade: a frame after the last staggered one, in both lists.
+  assert.equal(Number(/--kd-reveal-at:\s*(\d+)ms/.exec(results)?.[1]), lead + 13 * step + 16);
+  assert.match(local, /var\(--kd-motion-list-lead\) \+ var\(--kd-arrive-i, 0\) \* var\(--kd-motion-list-step\) \+ 16ms/);
 });

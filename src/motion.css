@@ -177,6 +177,39 @@
 [data-kd-stagger="down"] > :nth-child(10), [data-kd-stagger="up"] > :nth-last-child(10) { --kd-motion-i: 9; }
 [data-kd-leaving][data-kd-stagger] > * { animation: none; }
 
+/* ---------- A list that is presented ---------- */
+/* Rows are not surfaces, but a list that arrives does so by one gesture wherever it is: its
+   rows rise into place as they fade in, one a step after the other, and each cover scales in a
+   beat after its row. The search results (components/download/ResultTable.css) and the local
+   track list (components/library/ListArrival.css) both take their numbers and keyframes from
+   here; each list says for itself which rows are marked, and when. */
+:root {
+  /* The first row starts this long after the list is there; each next one a step later. */
+  --kd-motion-list-lead: 60ms;
+  --kd-motion-list-step: 28ms;
+  --kd-motion-list-row: 380ms;
+  /* Rows past the staggered ones only fade, together. */
+  --kd-motion-list-rest: 240ms;
+  /* A cover follows its row by `after` and lands a little past its size. */
+  --kd-motion-list-cover: 420ms;
+  --kd-motion-list-cover-after: 70ms;
+  --kd-ease-list: cubic-bezier(0.2, 0.85, 0.25, 1);
+  --kd-ease-list-cover: cubic-bezier(0.3, 1.45, 0.5, 1);
+}
+@keyframes kd-motion-list-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* The same from above: rows that catch up with a scroll towards the top of the list. */
+@keyframes kd-motion-list-drop {
+  from { opacity: 0; transform: translateY(-14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes kd-motion-list-cover {
+  from { opacity: 0; transform: scale(0.5) rotate(-10deg); }
+  to { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+
 /* ---------- Reduced motion: nothing travels, everything is a short fade ---------- */
 @media (prefers-reduced-motion: reduce) {
   [data-kd-motion] {
