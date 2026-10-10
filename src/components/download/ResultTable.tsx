@@ -46,6 +46,7 @@ import {
   RESULT_COLUMN_MIN_WIDTH,
   RESULT_COLUMN_PREFS_KEY,
   RESULT_COLUMNS,
+  RESULT_GUTTER_WIDTH,
   RESULT_LEAD_WIDTH,
   resultColumnKeysWithData,
   type ResultColumn,
@@ -58,11 +59,15 @@ import {
   RESOLVED_COLLECTION_PAGE_SIZE,
 } from "../../lib/searchCollections";
 import { CoverImage } from "../common/VinylPlaceholder";
+import { RowPick } from "../common/RowPick";
 import {
+  pickStateOf,
   resultRowActionUsesSelection,
   selectableGroups,
   selectionKey,
+  selectionRun,
 } from "../../lib/resultSelection";
+import { tossItemKey } from "../../lib/downloadToss";
 import { removeLocalStorage } from "../../lib/storageWrite";
 import { isEditable } from "../../lib/useLibraryClipboard";
 import {
@@ -136,7 +141,7 @@ export interface ResultTableProps {
   onToggleItem(index: number): void;
   onToggleItemAll(index: number): void;
   onToggleAll(): void;
-  /** 单曲显式下载入口（右键菜单等；序号列本身不再放下载键）。 */
+  /** 单曲显式下载入口（首个数据列右端的下载键、右键菜单）。 */
   onDownloadGroup(group: MergedGroup): void;
   /** 右键落在现有选区内时，把整组选中结果加入队列。 */
   onDownloadSelected(): void;
@@ -315,6 +320,31 @@ const ResultTableView = memo(function ResultTableView({
   selectedRef.current = selected;
   const toggleSelectRef = useRef(onToggleSelect);
   toggleSelectRef.current = onToggleSelect;
+  /**
+   * Rows are being picked: the mode was asked for (a row menu's 选择, the head's mark, select
+   * all), or something is already picked (⌘/Ctrl-click, Shift-click). The work rail reads the
+   * same condition. While it holds, every row that can be downloaded shows the selection mark
+   * in place of its number, and a plain click on it picks or drops it instead of opening it.
+   */
+  const selecting = selectionMode || selected.size > 0;
+  const tableRef = useRef<HTMLTableElement>(null);
+  /** The row touched last — picked, dropped or opened: where a Shift-click's run starts. */
+  const anchorRef = useRef<string | null>(null);
+  const pickRow = (key: string, range: boolean) => {
+    // The run follows the rows as they are shown, whatever page or package they belong to.
+    const shown = range
+      ? Array.from(tableRef.current?.querySelectorAll<HTMLElement>("tbody > tr[data-pick-key]") ?? [])
+          .map((row) => row.dataset.pickKey ?? "")
+      : [];
+    const run = range ? selectionRun(shown, anchorRef.current, key) : null;
+    anchorRef.current = key;
+    if (!run) {
+      onToggleSelect(key);
+      return;
+    }
+    // A run only adds: what was picked before it stays picked.
+    for (const item of run) if (!selected.has(item)) onToggleSelect(item);
+  };
   const parentPressRef = useRef<number | null>(null);
   const suppressParentClickRef = useRef<number | null>(null);
   const totalGroups = items.reduce((sum, item) => sum + item.groups.length, 0);
@@ -392,12 +422,10 @@ const ResultTableView = memo(function ResultTableView({
       !colPrefs.hidden.includes(column.key) && columnsWithData.has(column.key),
   );
   const leadWidth = widthFor("lead", RESULT_LEAD_WIDTH);
-  // 批选列只在 selectionMode 时占满勾选宽；平时留一点左边距，别贴死边缘。
-  // 不能继续写死 2.2rem：fixed 布局下 <col> 会盖过 .kd-selection-cell { width: 0 }。
-  const selectionColWidth = selectionMode ? "2.2rem" : "0.35rem";
+  // 左边距 + 序号 + 数据列 + 弹性空白列。批选不占列：选择标记落在序号格里。
   const totalColumns = 3 + visibleColumns.length;
   const tableMinWidthPx =
-    remStringToPx(selectionColWidth) +
+    remStringToPx(RESULT_GUTTER_WIDTH) +
     remStringToPx(leadWidth) +
     visibleColumns.reduce(
       (sum, column) => sum + remStringToPx(widthFor(column.key, column.width)),
@@ -590,7 +618,7 @@ const ResultTableView = memo(function ResultTableView({
           title={`进入${collectionLabel}`}
           {...foldingRowProps(leaving === undefined ? undefined : foldOrder(collectionIndex, leaving))}
         >
-          <td className="kd-selection-cell" />
+          <td className="kd-result-gutter" />
           <td className="kd-result-lead" data-col="index">
             {loadingCollection ? (
               <LoaderCircle className="kd-spin" size={12} aria-hidden="true" />
@@ -651,13 +679,14 @@ const ResultTableView = memo(function ResultTableView({
     <>
       <InlineNotice text={dragError} onDismiss={() => setDragError("")} block />
       <table
+        ref={tableRef}
         className="kd-table"
         data-kind="results"
         data-reveal={reveal || undefined}
         style={{ minWidth: tableMinWidthPx }}
       >
         <colgroup>
-          <col style={{ width: selectionColWidth }} />
+          <col style={{ width: RESULT_GUTTER_WIDTH }} />
           <col style={{ width: leadWidth }} />
           {visibleColumns.map((column) => (
             <col key={column.key} style={{ width: widthFor(column.key, column.width) }} />
@@ -674,18 +703,28 @@ const ResultTableView = memo(function ResultTableView({
                 setColMenu({ x: event.clientX, y: event.clientY });
               }}
             >
-              <th className="kd-selection-cell" data-active={selectionMode ? "true" : undefined}>
-                {selectionMode && (
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    aria-label="全选"
-                    onChange={onToggleAll}
+              <th className="kd-result-gutter" />
+              <th
+                data-col="index"
+                data-picking={selecting ? "true" : undefined}
+                style={{ width: leadWidth }}
+                title={selecting ? undefined : "当前列表中的序号"}
+              >
+                <span className="kd-th-label">序号</span>
+                {/* Above the rows' marks, in their place: all of the list, a part of it, none. */}
+                {selecting ? (
+                  <RowPick
+                    className="kd-pick-head"
+                    state={allSelected ? "all" : selected.size > 0 ? "some" : "none"}
+                    label="全选"
+                    disabled={selectableTotal === 0}
+                    onToggle={() => {
+                      onToggleAll();
+                      // Dropping every row through the head's mark stays in the mode.
+                      onSelectionModeChange(true);
+                    }}
                   />
-                )}
-              </th>
-              <th data-col="index" style={{ width: leadWidth }} title="当前列表中的序号">
-                序号
+                ) : null}
                 <span
                   className="kd-col-resize"
                   data-active={resizingCol === "lead" ? "true" : undefined}
@@ -741,9 +780,10 @@ const ResultTableView = memo(function ResultTableView({
             // 合集详情已经是独立页面，不再有可折叠的父行；普通批量包仍保留折叠。
             const collapsed = !directCollection && collapsedItems.has(index);
             const pickable = selectableGroups(item);
-            const itemSelected =
-              pickable.length > 0 &&
-              pickable.every((group) => selected.has(selectionKey(index, group.group_id)));
+            const itemPick = pickStateOf(
+              pickable.map((group) => selectionKey(index, group.group_id)),
+              selected,
+            );
 
             const packageRowCount = item.collections.length + visibleGroups.length;
             // A package that folds away shows pictures of the rows that can be on screen.
@@ -757,6 +797,10 @@ const ResultTableView = memo(function ResultTableView({
                 leaving === undefined
                   ? undefined
                   : foldOrder(item.collections.length + visiblePosition, leaving);
+              // The source a download of this group takes (the workspace picks the same one).
+              const pickedSource = (candidate: MergedGroup) =>
+                candidate.sources[sourceIndex[candidate.group_id] ?? candidate.best_source_index]
+                  ?? candidate.sources[0];
               const dragSources = () => {
                 const currentKey = selectionKey(index, group.group_id);
                 const draggingSelection = selected.has(currentKey);
@@ -806,10 +850,12 @@ const ResultTableView = memo(function ResultTableView({
                       indent={!itemFlat}
                       selectable={group.sources.some((source) => source.platform !== "local")}
                       selected={selected.has(selectionKey(index, group.group_id))}
-                      selectionMode={selectionMode}
+                      selectionMode={selecting}
+                      pickKey={selectionKey(index, group.group_id)}
+                      tossItem={pickedSource(group) ? tossItemKey(pickedSource(group)!) : undefined}
                       expanded={expandedGroups.has(group.group_id)}
                       onToggleExpand={() => onToggleExpand(group.group_id)}
-                      onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
+                      onToggleSelect={(range) => pickRow(selectionKey(index, group.group_id), range === true)}
                       onEnterSelection={() => onSelectionModeChange(true)}
                       onDownloadSelected={
                         resultRowActionUsesSelection(
@@ -841,7 +887,8 @@ const ResultTableView = memo(function ResultTableView({
                       sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
                       selected={selected.has(selectionKey(index, group.group_id))}
                       selectable={group.sources.some((source) => source.platform !== "local")}
-                      selectionMode={selectionMode}
+                      selectionMode={selecting}
+                      pickKey={selectionKey(index, group.group_id)}
                       expanded={expandedGroups.has(group.group_id)}
                       followingSongs={item.groups
                         .slice(position + 1)
@@ -852,12 +899,13 @@ const ResultTableView = memo(function ResultTableView({
                           );
                           return next ? [next] : [];
                         })}
-                      onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
+                      onToggleSelect={(range) => pickRow(selectionKey(index, group.group_id), range === true)}
                       onEnterSelection={() => onSelectionModeChange(true)}
                       onToggleExpand={() => onToggleExpand(group.group_id)}
                       onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
                       onInspect={(sourceIdx) => {
                         const groupKey = selectionKey(index, group.group_id);
+                        anchorRef.current = groupKey;
                         onInspectGroup(group, sourceIdx, groupKey);
                       }}
                       onDownload={() => {
@@ -915,7 +963,6 @@ const ResultTableView = memo(function ResultTableView({
                 <tr
                   data-tree="parent"
                   data-collection-kind={collectionKind ?? undefined}
-                  data-selecting={selectionMode ? "true" : undefined}
                   onClick={() => {
                     if (suppressParentClickRef.current === index) {
                       suppressParentClickRef.current = null;
@@ -928,7 +975,7 @@ const ResultTableView = memo(function ResultTableView({
                     if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
                     parentPressRef.current = window.setTimeout(() => {
                       // 包行自身没有独立操作；长按只抑制随后那次误点击，不得直接
-                      // 开复选框。具体歌曲长按会打开和桌面相同的右键菜单。
+                      // 进入批选。具体歌曲长按会打开和桌面相同的右键菜单。
                       suppressParentClickRef.current = index;
                       parentPressRef.current = null;
                     }, 480);
@@ -945,22 +992,22 @@ const ResultTableView = memo(function ResultTableView({
                     event.preventDefault();
                   }}
                 >
-                  <td className="kd-selection-cell" data-active={selectionMode ? "true" : undefined}>
-                    {selectionMode && (
-                      <input
-                        type="checkbox"
-                        checked={itemSelected}
-                        disabled={pickable.length === 0}
-                        aria-label={`选择「${item.title || item.entry}」全部曲目`}
-                        onChange={() => onToggleItemAll(index)}
-                        onClick={(event) => event.stopPropagation()}
-                      />
-                    )}
-                  </td>
+                  <td className="kd-result-gutter" />
                   <td className="kd-result-lead">
                     {(item.groups.length > 0 || item.collections.length > 0) && (
                       <span className="kd-result-lead-actions">
-                        <span className="kd-result-lead-spacer" aria-hidden="true" />
+                        {/* The package's own mark takes the empty slot before its chevron. */}
+                        {selecting && pickable.length > 0 ? (
+                          <span className="kd-result-lead-spacer">
+                            <RowPick
+                              state={itemPick}
+                              label={`选择「${item.title || item.entry}」全部曲目`}
+                              onToggle={() => onToggleItemAll(index)}
+                            />
+                          </span>
+                        ) : (
+                          <span className="kd-result-lead-spacer" aria-hidden="true" />
+                        )}
                         <button
                           type="button"
                           className="kd-result-lead-btn"

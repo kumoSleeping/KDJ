@@ -336,7 +336,7 @@
 :root[data-theme-pack="sakulaptop98"] .kd-aside-face > button {
   padding: 4px 6px;
 }
-:root[data-theme-pack="sakulaptop98"] :is(input[type="checkbox"], input[type="radio"], .kd-selection-cell input[type="checkbox"]) {
+:root[data-theme-pack="sakulaptop98"] :is(input[type="checkbox"], input[type="radio"]) {
   background: var(--kd-panel-inset);
   border: 1px solid transparent;
   box-shadow: var(--s98-sunken);
@@ -348,7 +348,7 @@
 :root[data-theme-pack="sakulaptop98"] input[type="radio"] {
   border-radius: 50%;
 }
-:root[data-theme-pack="sakulaptop98"] :is(input[type="checkbox"], .kd-selection-cell input[type="checkbox"]):checked::after {
+:root[data-theme-pack="sakulaptop98"] input[type="checkbox"]:checked::after {
   border-color: var(--kd-theme);
 }
 :root[data-theme-pack="sakulaptop98"] input[type="radio"]:checked::after {

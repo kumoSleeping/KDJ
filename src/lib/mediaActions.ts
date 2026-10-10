@@ -6,7 +6,7 @@
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import type { DownloadTask, Quality, SongSource } from "../types";
-import { tossToDownloads } from "./downloadToss";
+import { tossItemKey, tossToDownloads } from "./downloadToss";
 
 export interface EnqueueMediaOptions {
   quality?: Quality | null;
@@ -57,7 +57,13 @@ export async function enqueueMediaDownloads(
   // The parcel leaves from wherever the user started this (a row, a menu item, a drop point).
   // The request goes out when it has nearly landed, so the new row and the parcel arrive
   // together; `ready` never fails to resolve (see downloadToss.ts).
-  const toss = tossToDownloads({ title: sources[0]?.title, cover: sources[0]?.cover, count: sources.length });
+  // Several at once: the rows of the batch that are on screen gather into the parcel first.
+  const toss = tossToDownloads({
+    title: sources[0]?.title,
+    cover: sources[0]?.cover,
+    count: sources.length,
+    gather: sources.length > 1 ? sources.map(tossItemKey) : undefined,
+  });
   await toss.ready;
   const queued = useDownloadStore.getState().enqueue(normalizedDownloadSources(sources, options), options);
   queued.then(undefined, () => toss.fail());

@@ -14,7 +14,59 @@ export const TOSS_LIFT_MS = 180;
 /** A dropped item is already in the hand: the parcel only pops up. */
 export const TOSS_POP_MS = 90;
 
+/**
+ * A batch gathers before it is thrown: the covers of its rows that are on screen come together
+ * at the source and stack, and the parcel comes up out of the stack. This takes the place of
+ * the lift, so the throw itself, the handover and the drawer's hold are what they are for one
+ * item. It is short on purpose: the download is still handed over within TOSS_HANDOVER_LIMIT_MS.
+ */
+export const TOSS_GATHER_MS = 320;
+/** At most this many covers travel; the rest of the batch is the number on the parcel. */
+export const TOSS_GATHER_MAX = 6;
+/** One cover's way to the stack, and the moment by which the last one is there. */
+const GATHER_TRAVEL_MS = 200;
+const GATHER_STACKED_MS = 250;
+/** Covers leave at most this far apart, the one nearest the stack first. */
+const GATHER_STEP_MS = 16;
+
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+
+/** One cover of a gathering batch: when it leaves, how long it travels and where it rests in the stack. */
+export interface TossGatherTile {
+  delay: number;
+  duration: number;
+  /** Its place in the stack, from the stack's centre, and its tilt there in degrees. */
+  x: number;
+  y: number;
+  turn: number;
+}
+
+/**
+ * The plan for `tiles` covers (TOSS_GATHER_MAX at most), in the order they leave. They come to
+ * rest as a small fan — a few pixels apart, each tilted a little more than its neighbour — and
+ * every one is in the stack by the time the parcel comes up over it.
+ */
+export function tossGatherPlan(tiles: number): TossGatherTile[] {
+  const count = clamp(Math.floor(tiles), 0, TOSS_GATHER_MAX);
+  const step = count > 1 ? Math.min(GATHER_STEP_MS, (GATHER_STACKED_MS - GATHER_TRAVEL_MS) / (count - 1)) : 0;
+  return Array.from({ length: count }, (_, index) => {
+    const fromMiddle = index - (count - 1) / 2;
+    return {
+      delay: Math.round(index * step),
+      duration: GATHER_TRAVEL_MS,
+      x: fromMiddle * 5,
+      y: Math.abs(fromMiddle) * 1.5,
+      turn: fromMiddle * 7,
+    };
+  });
+}
+
+/** Which `wanted` of `available` things take part, spread evenly over them (first and last included). */
+export function tossGatherPick(available: number, wanted = TOSS_GATHER_MAX): number[] {
+  const count = Math.max(0, Math.floor(available));
+  if (count <= wanted) return Array.from({ length: count }, (_, index) => index);
+  return Array.from({ length: wanted }, (_, index) => Math.round(index * (count - 1) / (wanted - 1)));
+}
 
 /**
  * How far above the higher of its two ends the parcel rises. A throw across the window rises

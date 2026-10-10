@@ -1,0 +1,200 @@
+/* The selection mark of the lists (RowPick.tsx): a small ring that fills with ink and takes a
+   tick. It lives in the index cell of a row, in the number's place, and in the head of that
+   column; nothing is added to a table for it and nothing moves when it comes or goes.
+   Only transform and opacity move. No colour of its own: ink on the panel colour. */
+.kd-pick {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  width: 0.875rem;
+  height: 0.875rem;
+  place-items: center;
+  border-radius: 50%;
+  /* The ring is the mark's own outline, drawn inside its box. */
+  box-shadow: inset 0 0 0 1.5px currentColor;
+  color: var(--kd-faint);
+}
+/* The fill grows out of the centre of the ring. */
+.kd-pick::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--kd-text);
+  opacity: 0;
+  transform: scale(0.3);
+  transition:
+    transform var(--kd-motion-micro) var(--kd-ease-spring),
+    opacity var(--kd-motion-micro-out) linear;
+}
+.kd-pick > svg {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.kd-pick-tick,
+.kd-pick-dash {
+  opacity: 0;
+  transform: scale(0.5);
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    transform var(--kd-motion-micro) var(--kd-ease-spring),
+    opacity var(--kd-motion-micro-out) linear;
+}
+/* The tick is cut out of the fill; the dash of a part-picked set is ink inside the ring. */
+.kd-pick-tick { stroke: var(--kd-panel); }
+.kd-pick-dash { stroke: var(--kd-text); }
+.kd-pick[data-state="all"],
+.kd-pick[data-state="some"] {
+  color: var(--kd-text);
+}
+.kd-pick[data-state="all"]::before,
+.kd-pick[data-state="all"] .kd-pick-tick,
+.kd-pick[data-state="some"] .kd-pick-dash {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* The mark as a control. Its box is the mark; the pointer gets a little more room around it. */
+.kd-pick-control {
+  position: relative;
+  display: inline-grid;
+  appearance: none;
+  flex: none;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+.kd-pick-control::after {
+  content: "";
+  position: absolute;
+  inset: -0.4rem;
+}
+/* A row that is pointed at strengthens its empty mark; the mark itself answers in full ink. */
+.kd-table tbody tr:hover .kd-pick[data-state="none"] { color: var(--kd-muted); }
+.kd-pick-control:hover:not(:disabled) > .kd-pick { color: var(--kd-text); }
+.kd-pick-control:disabled { cursor: default; }
+.kd-pick-control:disabled > .kd-pick { opacity: 0.45; }
+/* Keyboard focus is a line around the mark, apart from it: a picked mark is filled. */
+.kd-pick-control:focus-visible {
+  outline: 1.5px solid var(--kd-text);
+  outline-offset: 2px;
+}
+
+/* A row's index cell: the number and the mark share one spot, the number's — both end at the
+   right-hand edge of the cell's text. While the mark is there the number is taken out of the
+   flow (it keeps its place: it is hung from the same edge), so a long number in a narrow index
+   column cannot push the mark aside or turn into an ellipsis next to it. */
+.kd-row-index {
+  position: relative;
+  display: inline-grid;
+  align-items: center;
+  justify-items: end;
+}
+/* With the mark in it the spot may be narrower than the mark (an index column at its smallest):
+   the mark then reaches out to the left and its right-hand edge stays where the number's was. */
+.kd-row-index[data-picking] {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 100%;
+}
+/* A line of the cell's own text, empty: the spot is as tall as the number's line with or
+   without the number in it, so the mark is centred on that line. */
+.kd-row-index::before { content: "\200b"; }
+.kd-row-index::before,
+.kd-row-index > * { grid-area: 1 / 1; }
+.kd-row-number {
+  transition:
+    transform var(--kd-motion-micro) var(--kd-ease-out),
+    opacity var(--kd-motion-micro-out) linear;
+}
+.kd-row-index[data-picking] > .kd-row-number {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  opacity: 0;
+  transform: scale(0.6);
+  pointer-events: none;
+}
+.kd-table tbody td[data-picking] { text-overflow: clip; }
+/* The mark pops into the number's place when picking starts (`data-pop`); a row that is
+   built while rows are being picked — scrolled in, another page — simply has it. */
+.kd-row-index[data-pop] > .kd-pick-control,
+.kd-table thead th > .kd-pick-head {
+  animation: kd-pick-in var(--kd-motion-micro) var(--kd-ease-spring) backwards;
+}
+@keyframes kd-pick-in {
+  from { opacity: 0; transform: scale(0.4); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* The head of the index column: its mark stands over the rows' marks, the label steps back. */
+.kd-table thead th > .kd-th-label {
+  transition: opacity var(--kd-motion-micro-out) linear;
+}
+.kd-table thead th[data-picking="true"] > .kd-th-label { opacity: 0; }
+.kd-table thead th > .kd-pick-head {
+  position: absolute;
+  top: 0;
+  right: 0.35rem;
+  bottom: 0;
+  margin: auto 0;
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+/* The work rail's glyph for "rows are being picked" is the same mark. */
+.kd-activity-glyph > .kd-pick { width: 0.8125rem; height: 0.8125rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  .kd-pick::before,
+  .kd-pick-tick,
+  .kd-pick-dash,
+  .kd-row-number {
+    transform: none;
+    transition: opacity var(--kd-motion-reduced) linear;
+  }
+  .kd-row-index[data-picking] > .kd-row-number { transform: none; }
+  .kd-row-index[data-pop] > .kd-pick-control,
+  .kd-table thead th > .kd-pick-head {
+    animation: kd-pick-fade var(--kd-motion-reduced) linear backwards;
+  }
+}
+@keyframes kd-pick-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Sakura98: the pack's own check box — a sunken white well with a tick in the pack's colour.
+   Its picked rows keep the pack's row highlight. */
+:root[data-theme-pack="sakulaptop98"] .kd-pick {
+  border-radius: 2px;
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+  color: var(--kd-theme);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pick::before { display: none; }
+:root[data-theme-pack="sakulaptop98"] .kd-pick-tick,
+:root[data-theme-pack="sakulaptop98"] .kd-pick-dash {
+  stroke: var(--kd-theme);
+  stroke-width: 2.2;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-pick-control,
+:root[data-theme-pack="sakulaptop98"] .kd-pick-control:focus-visible { border-radius: 2px; }
+:root[data-theme-pack="sakulaptop98"] .kd-pick-control:focus-visible { outline: 1px dotted var(--kd-text); }

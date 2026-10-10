@@ -26,8 +26,11 @@ import { useSharePrefs } from "../../lib/sharePrefs";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
+import { RowIndex, RowPick } from "../common/RowPick";
+import { TOSS_ITEM_ATTR, tossItemKey } from "../../lib/downloadToss";
 import { PlatformMark } from "./PlatformMark";
-import { ResultDownloadIndex } from "./ResultDownloadIndex";
+import { resultDownloadKeyColumn } from "./resultColumns";
+import { ResultDownloadKey, withDownloadKey } from "./ResultDownloadKey";
 import { foldingRowProps, foldOrder, useFold } from "./searchMotion";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
@@ -51,9 +54,12 @@ export interface MergedGroupRowProps {
   selected: boolean;
   /** 纯本地结果只用于提示“已经有了”，不能送进在线下载队列。 */
   selectable: boolean;
+  /** Rows are being picked: the number gives way to the selection mark and a plain click picks. */
   selectionMode: boolean;
+  /** The row's key in the selection, written on the row so a Shift-click can follow the rows as shown. */
+  pickKey?: string;
   expanded: boolean;
-  /** 可见数据列（顺序已按用户偏好排好；不含勾选/动作列）。 */
+  /** 可见数据列（顺序已按用户偏好排好；不含左边距/序号列）。 */
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
   /** 当前集合（或普通结果列表）中的可见序号。 */
   rowNumber: number;
@@ -67,7 +73,8 @@ export interface MergedGroupRowProps {
   late?: boolean;
   /** The row's package is folding away: the row is a picture that fades out, this many steps in. */
   leave?: number;
-  onToggleSelect(): void;
+  /** `range`: pick the run from the row touched last to this one (Shift-click). */
+  onToggleSelect(range?: boolean): void;
   onEnterSelection(): void;
   onToggleExpand(): void;
   onPickSource(index: number): void;
@@ -104,6 +111,7 @@ export function MergedGroupRow({
   selected,
   selectable,
   selectionMode,
+  pickKey,
   expanded,
   columns,
   rowNumber,
@@ -160,9 +168,16 @@ export function MergedGroupRow({
   );
   useEffect(() => () => pointerDragCleanupRef.current?.(), []);
 
-  const toggleSelection = () => {
-    onToggleSelect();
+  const toggleSelection = (range = false) => {
+    onToggleSelect(range);
   };
+  // The download key is offered in the first data column, and not while rows are being picked.
+  const keyColumn = resultDownloadKeyColumn(columns);
+  const downloadKey = selectable && !selectionMode
+    ? <ResultDownloadKey title={group.title} onDownload={onDownloadSingle} />
+    : null;
+  const keyed = (key: string, content: React.ReactNode) =>
+    key === keyColumn ? withDownloadKey(content, downloadKey) : content;
 
   /** 把当前组/来源送进主播放条试听。双击或设置成单击时触发。 */
   const playGroup = () => {
@@ -223,7 +238,7 @@ export function MergedGroupRow({
           referrerPolicy="no-referrer"
         />
       </span>
-      <span className="kd-result-title-text">{group.title}</span>
+      {withDownloadKey(group.title, keyColumn === "title" ? downloadKey : null, "kd-result-title-text")}
       {/* The sources toggle trails the title, so every cover starts on the same column. */}
       {multi && (
         <button
@@ -282,61 +297,63 @@ export function MergedGroupRow({
       case "artist":
         return (
           <td key={key} data-col="artist" title={group.artists.join(", ")} {...cellDrag}>
-            {group.artists.join(", ") || DASH}
+            {keyed(key, group.artists.join(", ") || DASH)}
           </td>
         );
       case "album":
         return (
           <td key={key} data-col="album" title={group.album} {...cellDrag}>
-            {group.album || DASH}
+            {keyed(key, group.album || DASH)}
           </td>
         );
       case "duration":
         return (
           <td key={key} className="kd-td-num" data-col="duration" {...cellDrag}>
-            {formatDuration(group.duration)}
+            {keyed(key, formatDuration(group.duration))}
           </td>
         );
       case "sources":
         return (
           <td key={key} data-col="sources" {...cellDrag}>
-            <span
-              className="kd-source-dots"
-              title={platformMarks.map((mark) => PLATFORM_LABEL[mark.platform]).join(" / ")}
-            >
-              {platformMarks.map((mark) => (
-                <span
-                  key={mark.platform}
-                  className="kd-source-dot"
-                  data-platform={mark.platform}
-                  data-active={mark.active ? "true" : "false"}
-                >
-                  <PlatformMark id={mark.platform} size={12} />
-                </span>
-              ))}
-            </span>
+            {keyed(key, (
+              <span
+                className="kd-source-dots"
+                title={platformMarks.map((mark) => PLATFORM_LABEL[mark.platform]).join(" / ")}
+              >
+                {platformMarks.map((mark) => (
+                  <span
+                    key={mark.platform}
+                    className="kd-source-dot"
+                    data-platform={mark.platform}
+                    data-active={mark.active ? "true" : "false"}
+                  >
+                    <PlatformMark id={mark.platform} size={12} />
+                  </span>
+                ))}
+              </span>
+            ))}
           </td>
         );
       case "from":
         return (
           <td key={key} className="kd-mono" data-col="from" {...cellDrag}>
-            {active ? PLATFORM_LABEL[active.platform] : DASH}
+            {keyed(key, active ? PLATFORM_LABEL[active.platform] : DASH)}
           </td>
         );
       case "quality":
         return (
           <td key={key} className="kd-td-num kd-mono" data-col="quality" {...cellDrag}>
-            {active ? qualityLabel(active) : DASH}
+            {keyed(key, active ? qualityLabel(active) : DASH)}
           </td>
         );
       case "vip":
         return (
           <td key={key} data-col="vip" style={{ width: "3rem" }} {...cellDrag}>
-            {active?.vip && (
+            {keyed(key, active?.vip ? (
               <span className="kd-chip" data-tone="warn">
                 VIP
               </span>
-            )}
+            ) : null)}
           </td>
         );
       default:
@@ -412,8 +429,13 @@ export function MergedGroupRow({
   return (
     <Fragment>
       <tr
-        aria-selected={selected || inspected}
+        // While rows are being picked "selected" means picked; the row whose details are open
+        // is told apart by data-inspected.
+        aria-selected={selectionMode ? selected : selected || inspected}
         data-kd-search-result=""
+        data-pick-key={selectable ? pickKey : undefined}
+        data-downloadable={selectable ? "true" : undefined}
+        {...{ [TOSS_ITEM_ATTR]: selectable && active ? tossItemKey(active) : undefined }}
         data-inspected={inspected ? "true" : undefined}
         data-resolving={previewPending ? "true" : undefined}
         data-enter={bornLate && leave === undefined ? "late" : undefined}
@@ -427,17 +449,20 @@ export function MergedGroupRow({
         // table-row 在 macOS WKWebView 里不是可靠的原生拖动源；选中后由每个 td 起拖。
         draggable={false}
         onClick={(event) => {
-          if (!event.metaKey && !event.ctrlKey && hasTextSelectionWithin(event.currentTarget)) return;
+          const picking = selectionMode || event.metaKey || event.ctrlKey || event.shiftKey;
+          if (!picking && hasTextSelectionWithin(event.currentTarget)) return;
           if (suppressClickRef.current) {
             suppressClickRef.current = false;
             return;
           }
-          // 控件自己消费点击（展开、勾选），和视频行同一条 closest 规则
+          // 控件自己消费点击（展开、选择标记），和视频行同一条 closest 规则
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
           // touch 双点会发两次 click；竖屏首下已经直接播放，第二下不能再重启。
-          if (layout === "narrow" && event.detail > 1 && !event.metaKey && !event.ctrlKey) return;
-          if (selectable && (selectionMode || event.metaKey || event.ctrlKey)) {
-            toggleSelection();
+          if (layout === "narrow" && event.detail > 1 && !picking) return;
+          // Picking: a plain click anywhere on the row picks or drops it (⌘/Ctrl-click starts
+          // the picking, Shift-click takes the run from the row touched last). Nothing opens or plays.
+          if (selectable && picking) {
+            toggleSelection(event.shiftKey);
             return;
           }
           if (selectionMode) return;
@@ -447,7 +472,7 @@ export function MergedGroupRow({
           else onInspect(sourceIndex);
         }}
         onDoubleClick={(event) => {
-          if (event.metaKey || event.ctrlKey) return;
+          if (event.metaKey || event.ctrlKey || event.shiftKey) return;
           if (!selectionMode && layout !== "narrow") playGroup();
         }}
         tabIndex={0}
@@ -455,29 +480,38 @@ export function MergedGroupRow({
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
-          if (layout === "narrow" && !selectionMode) {
+          if (selectionMode) {
+            if (selectable) toggleSelection(event.shiftKey);
+            return;
+          }
+          if (layout === "narrow") {
             playGroup();
             return;
           }
-          if ((event.metaKey || event.ctrlKey) && !selectionMode) {
+          if (event.metaKey || event.ctrlKey) {
             playGroup();
             return;
           }
-          if (!selectionMode) onInspect(sourceIndex);
+          onInspect(sourceIndex);
         }}
         onContextMenu={(event) => {
           event.preventDefault();
           setRowMenu({ x: event.clientX, y: event.clientY });
         }}
         onMouseDown={(event) => {
-          if (selectable && (event.metaKey || event.ctrlKey) && !(event.target as HTMLElement).closest("button, select, label, input, a")) {
+          // A click that picks must not select text on its way (Shift would stretch a selection).
+          if (
+            selectable
+            && (selectionMode || event.metaKey || event.ctrlKey || event.shiftKey)
+            && !(event.target as HTMLElement).closest("button, select, label, input, a")
+          ) {
             event.preventDefault();
             clearTextSelection();
           }
         }}
         onPointerDown={(event) => {
           if (event.pointerType === "mouse") {
-            if (!selectable || selectionMode || event.metaKey || event.ctrlKey) return;
+            if (!selectable || selectionMode || event.metaKey || event.ctrlKey || event.shiftKey) return;
             pointerDragCleanupRef.current?.();
             pointerDragCleanupRef.current = onPointerDragStart?.(event, () => {
               suppressClickRef.current = true;
@@ -506,19 +540,8 @@ export function MergedGroupRow({
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}
-          className="kd-selection-cell"
-          data-active={selectionMode ? "true" : undefined}
-        >
-          {selectionMode && selectable && (
-            <input
-              type="checkbox"
-              checked={selected}
-              aria-label={`选择 ${group.title}`}
-              onChange={toggleSelection}
-              onClick={(event) => event.stopPropagation()}
-            />
-          )}
-        </td>
+          className="kd-result-gutter"
+        />
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
@@ -526,10 +549,18 @@ export function MergedGroupRow({
           className="kd-result-lead"
           data-col="index"
         >
-          <ResultDownloadIndex
-            rowNumber={rowNumber}
-            title={group.title}
-            onDownload={selectable ? onDownloadSingle : undefined}
+          <RowIndex
+            number={rowNumber}
+            picking={selectionMode}
+            pick={selectable ? (
+              // The row itself takes the keyboard (Enter / Space pick it), so its mark is not a tab stop.
+              <RowPick
+                state={selected ? "all" : "none"}
+                label={`选择 ${group.title}`}
+                tabbable={false}
+                onToggle={(event) => toggleSelection(event.shiftKey)}
+              />
+            ) : null}
           />
         </td>
         {columns.map((column) => dataCell(column.key))}
@@ -558,16 +589,18 @@ export function MergedGroupRow({
             onClick={(event) => {
               if (layout === "narrow" && event.detail > 1 && !event.metaKey && !event.ctrlKey) return;
               if (source.platform === "local") {
-                if (layout === "narrow") playSource(source);
+                if (layout === "narrow" && !selectionMode) playSource(source);
                 return;
               }
               // 移动端选源后立刻播放，不能用全屏详情抽屉拦住结果列表。
               onPickSource(index);
+              // While rows are being picked a source is only chosen: nothing opens or plays.
+              if (selectionMode) return;
               if (layout === "narrow") playSource(source);
               else onInspect(index);
             }}
             onDoubleClick={() => {
-              if (layout === "narrow") return;
+              if (layout === "narrow" || selectionMode) return;
               if (source.platform === "local") return;
               onPickSource(index);
               playSource(source);
@@ -579,10 +612,11 @@ export function MergedGroupRow({
               if (event.key !== "Enter" && event.key !== " ") return;
               event.preventDefault();
               if (source.platform === "local") {
-                if (layout === "narrow") playSource(source);
+                if (layout === "narrow" && !selectionMode) playSource(source);
                 return;
               }
               onPickSource(index);
+              if (selectionMode) return;
               if (layout === "narrow" || event.metaKey || event.ctrlKey) {
                 playSource(source);
                 return;

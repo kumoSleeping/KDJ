@@ -286,36 +286,6 @@ input[type="radio"] {
   flex: none;
 }
 
-/* 列表批选框比设置页开关更小；单元格只在右键/长按进入批选后占宽。
-   勾选态：细描边 + 红色对勾，不铺整块红底（白天模式下大红砖特别丑）。 */
-.kd-selection-cell {
-  width: 0 !important;
-  padding-right: 0 !important;
-  padding-left: 0 !important;
-  overflow: hidden;
-}
-.kd-selection-cell[data-active="true"] {
-  width: 1.55rem !important;
-  padding-right: 0.25rem !important;
-  padding-left: 0.4rem !important;
-}
-.kd-selection-cell input[type="checkbox"] {
-  width: 0.78rem;
-  height: 0.78rem;
-  background: transparent;
-  border-color: var(--kd-muted);
-}
-.kd-selection-cell input[type="checkbox"]:checked {
-  background: transparent;
-  border-color: var(--kd-theme);
-}
-.kd-selection-cell input[type="checkbox"]:checked::after {
-  width: 0.22rem;
-  height: 0.4rem;
-  margin-top: -1px;
-  border-color: var(--kd-theme);
-  border-width: 0 1.5px 1.5px 0;
-}
 input[type="checkbox"]:checked {
   background: var(--kd-theme);
   border-color: var(--kd-theme);
@@ -2045,10 +2015,22 @@ body[data-kd-col-dragging="true"] * {
 .kd-table tbody tr[data-spacer]:hover > td {
   background: transparent;
 }
-/* 曲目选中使用一层底色，不描边；具体颜色由内置/主题包样式决定。 */
+/* 曲目选中使用一层底色，不描边；具体颜色由内置/主题包样式决定。
+   While rows are being picked (data-selecting) the mark and the type say which rows are in:
+   a picked row is full ink with more weight, the others step back to the muted colour, and
+   no row carries the selection tone. The row whose details are open keeps it. */
 .kd-table tbody tr[aria-selected="true"] td {
-  background: var(--kd-selected);
   color: var(--kd-text);
+}
+.kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) td {
+  background: var(--kd-selected);
+}
+.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) > td,
+.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) .kd-td-strong {
+  color: var(--kd-muted);
+}
+.kd-table tbody tr[data-selecting="true"][aria-selected="true"] .kd-td-strong {
+  font-weight: 700;
 }
 /* 可拖元素一律不能框选文字：拖一下变成「全选文本」比不能复制糟得多。
    曲库格子必须保持 draggable（WKWebView），用这条禁选，而不是摘掉 draggable。 */
@@ -2106,31 +2088,6 @@ body[data-kd-track-pointer-dragging="true"] {
 }
 .kd-table tbody td.kd-td-num > .kd-track-drag-surface {
   justify-content: flex-start;
-}
-/* 曲库批选：只在右键「选择」后出现；和封面同一基线，勾上是红钩不是红砖。 */
-.kd-row-select {
-  appearance: none;
-  width: 0.85rem;
-  height: 0.85rem;
-  margin: 0 0.45rem 0 0;
-  padding: 0;
-  display: inline-grid;
-  place-items: center;
-  vertical-align: -5px;
-  border: 1px solid var(--kd-muted);
-  background: transparent;
-  color: transparent;
-  cursor: pointer;
-  flex: none;
-}
-.kd-row-select[aria-pressed="true"] {
-  border-color: var(--kd-theme);
-  background: transparent;
-  color: var(--kd-theme);
-}
-.kd-row-select > svg {
-  display: block;
-  stroke-width: 2.5;
 }
 /* 焦点行不再单独描线（黑线红线都试过，用户都嫌吵）：
    单选时选中即焦点，多选时详情栏标题自证是哪一首。 */
@@ -2654,7 +2611,8 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-table tbody tr[data-tree="parent"]:hover td {
   --kd-result-package-bg: var(--kd-hover);
 }
-/* 在线结果序号在整行悬停时原位切换为下载按钮。 */
+/* 在线结果的序号格：平时是序号，批选时原位换成选择标记（RowPick.css）。
+   下载键在首个数据列右端（ResultTable.css）。 */
 .kd-table tbody td.kd-result-lead {
   padding: 0 0.35rem;
   overflow: visible;
@@ -2666,52 +2624,17 @@ body[data-kd-search-pointer-dragging="true"] * {
   padding-left: 0.35rem;
   padding-right: 0.35rem;
 }
-.kd-result-index {
+.kd-result-index,
+.kd-result-lead .kd-row-number {
   font-variant-numeric: tabular-nums;
 }
-.kd-result-download-index {
-  position: relative;
-  display: inline-grid;
-  min-width: 1.4rem;
-  min-height: 1.4rem;
-  align-items: center;
-  justify-items: end;
-}
-.kd-result-download-btn {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+/* The strip left of the index column is the table's left margin and nothing else. */
+.kd-table thead th.kd-result-gutter,
+.kd-table tbody td.kd-result-gutter {
   padding: 0;
-  border: none;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--kd-text);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
 }
-.kd-table tr:hover .kd-result-download-btn,
-.kd-result-download-index:focus-within .kd-result-download-btn {
-  opacity: 1;
-  pointer-events: auto;
-}
-.kd-table tr:hover .kd-result-download-index:has(button) > .kd-result-index,
-.kd-result-download-index:focus-within > .kd-result-index {
-  opacity: 0;
-}
-.kd-result-download-btn:hover {
-  color: var(--kd-theme);
-}
-.kd-result-download-btn:focus-visible {
-  outline: 1px solid var(--kd-theme);
-  outline-offset: 1px;
-}
-.kd-result-download-btn:disabled {
-  cursor: wait;
-  color: var(--kd-muted);
-}
-.kd-table[data-kind="results"] tbody tr:has(.kd-result-download-btn):hover > td {
+/* A row that can be downloaded answers the pointer with a slightly deeper tone. */
+.kd-table[data-kind="results"] tbody tr[data-downloadable="true"]:hover > td {
   background: color-mix(in srgb, var(--kd-hover), #000 7%);
 }
 /* 多来源展开属于歌曲标题，不再占用（或伪装成）独立下载列。
@@ -2777,10 +2700,13 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-table tr[data-tree="parent"][data-collection-kind] .kd-result-lead-btn:hover {
   color: var(--kd-result-collection-color);
 }
+/* The slot before a package's chevron: empty, or the package's own selection mark while rows are being picked. */
 .kd-table tr[data-tree="parent"] .kd-result-lead-spacer {
+  display: grid;
   flex: none;
   width: 1.55rem;
   height: 1.55rem;
+  place-items: center end;
 }
 /* A package's children step in by one indent; the step alone says they belong to it. */
 .kd-tree-indent {
@@ -8337,15 +8263,18 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .kd-overlay-scroll-host .kd-table thead th { z-index: 6; }
 .kd-overlay-scroll-host .kd-selection-bar { z-index: 7; }
 
-/* Selected library rows need a continuous, high-contrast surface. */
+/* Selected library rows need a continuous, high-contrast surface — except while rows are
+   being picked: there the selection mark and the type carry it (see the base rule above). */
 html:root .kd-table tbody tr[aria-selected="true"] > td {
-  background:var(--kd-selected) !important;
   color:var(--kd-text) !important;
+}
+html:root .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) > td {
+  background:var(--kd-selected) !important;
 }
 html:root .kd-table tbody tr[aria-selected="true"] > td :is(.kd-td-strong, .kd-muted, .kd-faint, button, a, small) { color:var(--kd-text) !important; }
 /* Row selection is a neutral surface, separate from red control selection.
    Do not inherit the light theme's transparent --kd-selected control token. */
-html:root:not([data-theme-pack]) .kd-table tbody tr[aria-selected="true"] > td {
+html:root:not([data-theme-pack]) .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) > td {
   background: color-mix(in srgb, var(--kd-text) 12%, var(--kd-panel)) !important;
 }
 /* Also refresh already-installed Sakura packs without requiring a reinstall. */

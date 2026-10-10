@@ -2,7 +2,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { api } from "../lib/api";
 import { LibraryWindow } from "../lib/libraryWindow";
 import { cycleTableSort } from "../lib/tableSort";
-import { DEFAULT_FILTER, useLibraryStore, type LibraryStore } from "./libraryStore";
+import { DEFAULT_FILTER, useLibraryStore, withSelectionRun, type LibraryStore } from "./libraryStore";
 
 /** A list owns its query, cache and selection; file operations and clipboard stay shared. */
 export type LibraryPaneStore = Pick<LibraryStore,
@@ -70,7 +70,9 @@ export function createTemporaryLibrary(folder: string) {
       } else if (id !== null && mode === "range" && current.selectedId !== null) {
         const from = current.indexById.get(current.selectedId);
         const to = current.indexById.get(id);
-        if (from !== undefined && to !== undefined) ids = current.orderedIds.slice(Math.min(from, to), Math.max(from, to) + 1);
+        if (from !== undefined && to !== undefined) {
+          ids = withSelectionRun(current.selectedIds, current.orderedIds.slice(Math.min(from, to), Math.max(from, to) + 1));
+        }
       }
       const selectedId = id !== null && ids.includes(id) ? id : ids.at(-1) ?? null;
       set({ selectedId, selectedIds: ids, selectedTrack: current.selectedTrack?.id === selectedId ? current.selectedTrack : null,

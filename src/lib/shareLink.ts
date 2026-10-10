@@ -207,6 +207,56 @@ export function trackShareLink(track: TrackLike): string | null {
   return withBilibiliPage(link, bilibiliDownloadedVideoParts(track)?.page);
 }
 
+/**
+ * A SoundCloud download is stored under the track's URN (`soundcloud:tracks:<id>`), not under
+ * its public address: the page of a track is `soundcloud.com/<artist>/<slug>`, which the library
+ * does not keep. This is the id of such a record, or null when the record is not one (another
+ * platform, or an old record whose key already is the permalink).
+ */
+export function soundCloudTrackId(track: TrackLike): string | null {
+  if (track.source_platform.trim().toLowerCase() !== "soundcloud") return null;
+  const matched = track.source_key.trim().match(/^(?:soundcloud:tracks:)?(\d+)$/);
+  return matched?.[1] ?? null;
+}
+
+/** The address SoundCloud's own resolver takes for a track known by its id. */
+export function soundCloudTrackApiUrl(id: string): string {
+  return `https://api.soundcloud.com/tracks/${id}`;
+}
+
+/**
+ * The page of the stored SoundCloud track among sources that came back from the platform: only
+ * the source with the very same id counts, so a similar upload of the same song is never shared
+ * in its place.
+ */
+export function soundCloudStoredShareLink(
+  track: TrackLike,
+  sources: readonly SourceLike[],
+): string | null {
+  const id = soundCloudTrackId(track);
+  if (!id) return null;
+  for (const source of sources) {
+    if (source.platform !== "soundcloud") continue;
+    const sourceId = soundCloudTrackId({ source_platform: source.platform, source_key: source.key })
+      ?? soundCloudTrackId({ source_platform: source.platform, source_key: payloadText(source.payload, "urn") });
+    if (sourceId !== id) continue;
+    const link = songSourceShareLink(source);
+    if (link) return link;
+  }
+  return null;
+}
+
+/**
+ * What is left when the platform cannot be asked for the page (offline, SoundCloud switched off):
+ * SoundCloud's own player addressed by the id. It opens that exact track and links to its page.
+ */
+export function soundCloudPlayerShareLink(track: TrackLike): string | null {
+  const id = soundCloudTrackId(track);
+  return id
+    ? `https://w.soundcloud.com/player/?url=${encodeURIComponent(soundCloudTrackApiUrl(id))}`
+    : null;
+}
+
 /** 旧版没有保留 BV 号时，用 KDJ 的多 P 命名规则还原原视频搜索词。 */
 export function bilibiliVideoShareSearchQuery(
   track: Partial<Pick<Track, "title" | "filename">>,
