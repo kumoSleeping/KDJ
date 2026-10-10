@@ -220,6 +220,9 @@ function useLyricsFollow(followed: number, layoutKey: unknown) {
     const from = list.scrollTop;
     const kind = glide && !prefersReducedMotion() && typeof list.animate === "function"
       ? glideKind(to - from, plan.viewport) : "none";
+    // Already there (the last lines of a short column share one resting place): what is still
+    // gliding goes on.
+    if (glide && Math.abs(to - from) < 1) return;
     const moves = kind === "none" ? [] : planGlide(plan, from, to, index, at => {
       const running = glides.current.get(at);
       const progress = running?.animation.effect?.getComputedTiming().progress;
