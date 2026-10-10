@@ -9,6 +9,8 @@ import {
   BarChart3,
   ClipboardPaste,
   Copy,
+  Eye,
+  EyeOff,
   Folder,
   FolderDown,
   FolderInput,
@@ -82,6 +84,7 @@ import { ContextMenu, InlineNotice, Sheet } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
 import { isMidiBrowseActivate, MIDI_BROWSE_ID_ATTR, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
+import { useSidebarCounts } from "../../lib/sidebarCounts";
 import "./FolderTree.css";
 import { createSidebarMotion, type SidebarMotion } from "./sidebarMotion";
 import { setDragGhost } from "../common/dragGhost";
@@ -1113,6 +1116,7 @@ export function FolderTree({
   const settings = useAppStore((state) => state.settings);
   const { accounts, accountsError } = useStreamBrowseLifecycle(true);
   const hiddenPlatforms = useSidebarVisibilityStore((state) => state.hiddenPlatforms);
+  const countsShown = useSidebarCounts((state) => state.shown);
   const { openStreamRootMenu, streamRootMenu } = useStreamRootMenu();
   const saveSettings = useAppStore((state) => state.saveSettings);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
@@ -1637,6 +1641,24 @@ export function FolderTree({
     onNavigate?.();
   };
 
+  // The eye of a top-level row, left of the row's own action: it turns the counts of the whole
+  // sidebar off and on. A button, so a press on it neither opens the row nor starts a reorder.
+  const countsEye = (
+    <button
+      type="button"
+      className="kd-folder-more kd-folder-eye"
+      aria-label="显示数量"
+      aria-pressed={countsShown}
+      title={countsShown ? "隐藏数量" : "显示数量"}
+      onClick={(event) => {
+        event.stopPropagation();
+        useSidebarCounts.getState().setShown(!countsShown);
+      }}
+    >
+      {countsShown ? <Eye {...ROW_ICON} /> : <EyeOff {...ROW_ICON} />}
+    </button>
+  );
+
   const renderStreamRoot = (streamRoot: (typeof STREAM_ROOTS)[number]) => {
     const platform = streamRoot.id;
     const playlists = streamPlaylists[platform];
@@ -1695,7 +1717,7 @@ export function FolderTree({
           </span>
           <span className="kd-folder-name kd-truncate">{playlist.title}</span>
           <span className="kd-folder-trail">
-            <span className="kd-folder-count">{playlist.count}</span>
+            {countsShown && <span className="kd-folder-count">{playlist.count}</span>}
           </span>
         </button>
       );
@@ -1734,7 +1756,8 @@ export function FolderTree({
           <span className="kd-folder-name kd-truncate">{streamRoot.label}</span>
           <span
             className="kd-folder-trail"
-            data-action={canBrowse || undefined}
+            data-action={canBrowse ? "true" : "eye"}
+            data-eye=""
             data-busy={(canBrowse && loading) || undefined}
           >
             {needsLogin ? (
@@ -1742,10 +1765,11 @@ export function FolderTree({
                 {accountState === "expired" ? "重新登录" : "登录"}
               </span>
             ) : (
-              count !== undefined && count > 0 && (
+              countsShown && count !== undefined && count > 0 && (
                 <span className="kd-folder-count">{count}</span>
               )
             )}
+            {countsEye}
             {canBrowse && (
               <button
                 type="button"
@@ -1855,7 +1879,9 @@ export function FolderTree({
                       </span>
                       <span className="kd-folder-name kd-truncate">{section.label}</span>
                       <span className="kd-folder-trail">
-                        <span className="kd-folder-count">{section.playlists.length}</span>
+                        {countsShown && (
+                          <span className="kd-folder-count">{section.playlists.length}</span>
+                        )}
                       </span>
                     </button>
                     {sectionOpen && (
@@ -2119,15 +2145,19 @@ export function FolderTree({
             />
           </span>
           <span className="kd-folder-name kd-truncate">{node.name}</span>
-          <span className="kd-folder-trail" data-action="true">
-            {/* 未入库的用不同的样子标出来，点一下就导入——空文件夹和"没扫过"是两回事 */}
+          <span className="kd-folder-trail" data-action="true" data-eye={depth === 0 ? "" : undefined}>
+            {/* 未入库的用不同的样子标出来，点一下就导入——空文件夹和"没扫过"是两回事。
+                它是待办而不是统计：数量关掉以后也留着。 */}
             {node.pending_count > 0 ? (
               <span className="kd-folder-count" data-pending="true">
                 {importing === node.path ? "…" : `+${node.pending_count}`}
               </span>
             ) : (
-              node.total_count > 0 && <span className="kd-folder-count">{node.total_count}</span>
+              countsShown && node.total_count > 0 && (
+                <span className="kd-folder-count">{node.total_count}</span>
+              )
             )}
+            {depth === 0 && countsEye}
             <button
               type="button"
               className="kd-folder-more"
@@ -2236,8 +2266,9 @@ export function FolderTree({
         <Library {...ROW_ICON} />
       </span>
       <span className="kd-folder-name kd-truncate">全部曲目</span>
-      <span className="kd-folder-trail" data-action="true">
-        <span className="kd-folder-count">{allTrackCount}</span>
+      <span className="kd-folder-trail" data-action="true" data-eye="">
+        {countsShown && <span className="kd-folder-count">{allTrackCount}</span>}
+        {countsEye}
         <button
           type="button"
           className="kd-folder-more"
@@ -2285,8 +2316,9 @@ export function FolderTree({
         <Files {...ROW_ICON} />
       </span>
       <span className="kd-folder-name kd-truncate">其他</span>
-      <span className="kd-folder-trail">
-        <span className="kd-folder-count">{folders!.outside}</span>
+      <span className="kd-folder-trail" data-action="eye" data-eye="">
+        {countsShown && <span className="kd-folder-count">{folders!.outside}</span>}
+        {countsEye}
       </span>
     </div>
   );
