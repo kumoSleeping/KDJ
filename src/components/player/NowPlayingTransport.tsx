@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { LoaderCircle, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import { formatDuration } from "../../lib/format";
 import { usesLocalLibraryRecord } from "../../lib/playbackTrackSource";
@@ -9,20 +9,26 @@ import {
   subscribePlayerSession,
 } from "../../lib/playerSession";
 import { trackPointerSession } from "../../lib/pointerSession";
+import { isStreamTrack } from "../../lib/streamTrack";
+import { useThemePack } from "../../lib/themePack";
 import {
   cachedReleaseOverviewWaveform,
   loadReleaseOverviewById,
+  streamWaveformSnapshot,
   subscribeReleaseOverviewWaveform,
+  subscribeStreamWaveform,
 } from "../../lib/waveformCache";
-import type { Track } from "../../types";
+import type { Track, Waveform } from "../../types";
+import { createReleaseOverviewColour } from "../library/WaveformCanvas";
 import {
   MINI_WAVE_BARS,
   MINI_WAVE_HEIGHT,
   MINI_WAVE_PITCH,
   miniWaveformBars,
   miniWaveformLevels,
-  miniWaveformPath,
+  miniWaveformShape,
   seekFraction,
+  type MiniWaveShape,
 } from "./miniWaveform";
 
 /** The arrow keys on the progress line, in seconds; Shift takes the larger step. */
@@ -34,29 +40,47 @@ const SEEK_LANDED_S = 1.5;
 const SEEK_WAIT_MS = 700;
 
 /**
- * The song's overview as the path of a mini waveform of `bars` bars, once it is in the shared
- * cache.
+ * The song's overview as it stands in the shared caches: a library song's whole overview once it
+ * is loaded; an online song's as far as its media has been analysed, growing while the song
+ * loads (the player bar feeds that cache whether it is on screen or not).
  */
-function useMiniWaveform(track: Track, bars: number): string | null {
-  const [wave, setWave] = useState(() => cachedReleaseOverviewWaveform(track.id));
+function useSongOverview(track: Track): Waveform | null {
+  const stream = isStreamTrack(track);
+  const read = () => stream
+    ? streamWaveformSnapshot(track.id)?.waveform ?? null
+    : cachedReleaseOverviewWaveform(track.id);
+  const [wave, setWave] = useState(read);
   useEffect(() => {
-    const read = () => setWave(cachedReleaseOverviewWaveform(track.id));
-    read();
-    const unsubscribe = subscribeReleaseOverviewWaveform(track.id, read);
-    // The bar's own waveform asks for it too; with the bar away this is the only reader. An
-    // online song's waveform grows with its media and is not asked for here.
+    const sync = () => setWave(read());
+    sync();
+    if (stream) return subscribeStreamWaveform(track.id, sync);
+    const unsubscribe = subscribeReleaseOverviewWaveform(track.id, sync);
+    // The bar's own waveform asks for it too; with the bar away this is the only reader.
     if (!cachedReleaseOverviewWaveform(track.id) && usesLocalLibraryRecord(track)) {
       void loadReleaseOverviewById(track.id, "visible").catch(() => undefined);
     }
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [track.id]);
+  return wave;
+}
+
+/**
+ * The song's overview as a mini waveform of `bars` bars in the colours the player bar's rail
+ * paints it in, on the current theme, and the length of song those bars are spread over. Null
+ * until there is something of the song to draw.
+ */
+function useMiniWaveform(track: Track, bars: number): { shape: MiniWaveShape; duration: number } | null {
+  const wave = useSongOverview(track);
+  // A theme or a pack changes the colours a song is painted in.
+  const theme = useThemePack(state => state.epoch);
   return useMemo(() => {
     // An overview of a part of the song is not the song's shape.
     if (!wave || wave.source_start !== undefined || wave.source_end !== undefined) return null;
-    const levels = miniWaveformLevels(wave.amp, bars);
-    return levels ? miniWaveformPath(levels) : null;
-  }, [wave, bars]);
+    const levels = miniWaveformLevels(wave, bars);
+    return levels ? { shape: miniWaveformShape(levels, createReleaseOverviewColour()), duration: wave.duration } : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wave, bars, theme]);
 }
 
 /**
@@ -79,19 +103,24 @@ function NowPlayingSeek({ track }: { track: Track }) {
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  const path = useMiniWaveform(track, bars);
+  const wave = useMiniWaveform(track, bars);
+  const shape = wave?.shape ?? null;
   const elapsed = useRef<HTMLSpanElement>(null);
   /** The place under the pointer while the line is dragged, 0..1, until the player has taken it. */
   const scrub = useRef<number | null>(null);
   const abandon = useRef<(() => void) | null>(null);
   /** The seek that was sent when the line was let go: where to, and how long to wait for it. */
   const sought = useRef<{ position: number; until: number } | null>(null);
-  const live = useRef({ track });
-  live.current = { track };
+  const live = useRef({ track, drawn: 0 });
+  live.current = { track, drawn: wave && wave.duration > 0 ? wave.duration : 0 };
 
+  // The bars are spread over the length their waveform has, so the playhead is measured along
+  // the same length, as on the player bar's rail: an online song's file is not always as long
+  // as the player was told. Without bars it is the player's figure, then the catalogue's.
   const total = () => {
     const session = getPlayerSession();
-    return (session.trackId === live.current.track.id ? session.duration : 0) || live.current.track.duration || 0;
+    return live.current.drawn
+      || (session.trackId === live.current.track.id ? session.duration : 0) || live.current.track.duration || 0;
   };
   /** The last position the player reported for this song. */
   const heard = useRef(0);
@@ -130,6 +159,8 @@ function NowPlayingSeek({ track }: { track: Track }) {
       painter.current();
     });
   }, [track.id]);
+  // The length the playhead is measured along has changed: put it where it belongs now.
+  useLayoutEffect(() => painter.current(), [wave?.duration]);
   useEffect(() => () => abandon.current?.(), []);
 
   /** Ask the player to go there. False when there is nothing to seek in. */
@@ -153,7 +184,7 @@ function NowPlayingSeek({ track }: { track: Track }) {
   return <div className="kd-now-seek">
     <span ref={elapsed} className="kd-now-time" aria-hidden="true" />
     <div ref={line} className="kd-now-line" role="slider" tabIndex={0} aria-label="播放进度" aria-valuemin={0}
-      data-wave={path ? "true" : undefined}
+      data-wave={shape ? "true" : undefined}
       onPointerDown={event => {
         if (event.button !== 0 || total() <= 0) return;
         event.preventDefault();
@@ -189,19 +220,25 @@ function NowPlayingSeek({ track }: { track: Track }) {
         if (getPlayerSession().trackId !== live.current.track.id) return;
         seekTo(step ? getPlayerSession().position + step * (event.shiftKey ? SEEK_STEP_LARGE : SEEK_STEP) : 0);
       }}>
-      {path ? <>
-        <MiniWave path={path} bars={bars} />
-        <MiniWave path={path} bars={bars} played />
+      {shape ? <>
+        <MiniWave shape={shape} bars={bars} />
+        <MiniWave shape={shape} bars={bars} played />
       </> : <span className="kd-now-rail" aria-hidden="true"><i /></span>}
     </div>
   </div>;
 }
 
-/** One layer of the mini waveform: the whole song muted, and over it the played part in ink. */
-function MiniWave({ path, bars, played }: { path: string; bars: number; played?: boolean }) {
+/**
+ * One layer of the mini waveform: the whole song quietened, and over it the played part in the
+ * song's full colours. A layer is one path per colour (--kd-now-bar) and one for the stretches
+ * of the song that are not known yet; the style sheet decides how either layer shows them.
+ */
+function MiniWave({ shape, bars, played }: { shape: MiniWaveShape; bars: number; played?: boolean }) {
   return <svg className="kd-now-wave" data-played={played ? "true" : undefined} aria-hidden="true"
     viewBox={`0 0 ${bars * MINI_WAVE_PITCH} ${MINI_WAVE_HEIGHT}`} preserveAspectRatio="none">
-    <path d={path} />
+    {shape.rail ? <path className="kd-now-wave-rail" d={shape.rail} /> : null}
+    {shape.strokes.map((stroke, index) => <path key={index} d={stroke.path}
+      style={{ "--kd-now-bar": `rgb(${stroke.colour.join(" ")})` } as CSSProperties} />)}
   </svg>;
 }
 

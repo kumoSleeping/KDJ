@@ -219,6 +219,31 @@ function drawTargetDetailColumns(
 }
 
 /**
+ * The colour a release-overview column is painted in on the current theme, from its low / mid /
+ * high strengths: the overview palette, the theme's band pigments, and contrast calibrated to
+ * the theme's overview well. Resolved once per picture, not per column. The mini waveform of the
+ * playing song's bubble takes its colours here too, so it agrees with the rail.
+ */
+export function createReleaseOverviewColour(): (
+  low: number,
+  mid: number,
+  high: number,
+) => WaveformDisplayRgb {
+  // Overview wells may differ from input/list wells. Keep contrast calibrated
+  // to the actual backdrop without remapping the signal's frequency colours.
+  const background = themeRgb("--kd-wave-overview-bg", themeRgb("--kd-panel-inset", typeof document !== "undefined"
+    && document.documentElement?.dataset.theme === "light"
+    ? RELEASE_OVERVIEW_LIGHT_BACKGROUND
+    : RELEASE_OVERVIEW_DARK_BACKGROUND));
+  const waveBandRgb = createWaveBandMapper();
+  return (low, mid, high) => waveformSurfaceContrastRgb(
+    waveBandRgb(releaseOverviewWaveformDisplayRgb(low, mid, high), [low, mid, high]),
+    background,
+    RELEASE_OVERVIEW_CONTRAST,
+  );
+}
+
+/**
  * Keep the v0.2.41 solid column style. Each visible CSS pixel independently takes the median of
  * its own source-time interval. Adjacent intervals never overlap, so short outliers are omitted
  * without fitting high and low neighbours into circles or diamonds. Retina only refines edges.
@@ -231,10 +256,9 @@ function drawReleaseOverviewColumns(
   mid: number,
   availableHalfHeight: number,
   edgeScales: ArrayLike<number> | null,
-  background: WaveformDisplayRgb,
 ) {
   const columnWidth = cssWidth / width;
-  const waveBandRgb = createWaveBandMapper();
+  const columnColour = createReleaseOverviewColour();
   for (let index = 0; index < width; index += 1) {
     if (!columns.known[index]) continue;
     // A known quiet interval still gets a one-CSS-pixel centre line. Without this floor, low
@@ -246,16 +270,7 @@ function drawReleaseOverviewColumns(
         * (edgeScales?.[index] ?? 1)
         * availableHalfHeight,
     );
-    const colour = releaseOverviewWaveformDisplayRgb(
-      columns.r[index],
-      columns.g[index],
-      columns.b[index],
-    );
-    const [r, g, b] = waveformSurfaceContrastRgb(
-      waveBandRgb(colour, [columns.r[index], columns.g[index], columns.b[index]]),
-      background,
-      RELEASE_OVERVIEW_CONTRAST,
-    );
+    const [r, g, b] = columnColour(columns.r[index], columns.g[index], columns.b[index]);
     ctx.fillStyle = `rgb(${[r, g, b].join(",")})`;
     ctx.fillRect(index * columnWidth, mid - half, columnWidth + 0.01, half * 2);
   }
@@ -463,12 +478,6 @@ export function drawWaveformCanvas(
     ? waveformEdgeScales(columnAmp, columnKnown, 4, 0.02, columns.edgeScale)
     : null;
   if (releaseOverview) {
-    // Overview wells may differ from input/list wells. Keep contrast calibrated
-    // to the actual backdrop without remapping the signal's frequency colours.
-    const background = themeRgb("--kd-wave-overview-bg", themeRgb("--kd-panel-inset", typeof document !== "undefined"
-      && document.documentElement?.dataset.theme === "light"
-      ? RELEASE_OVERVIEW_LIGHT_BACKGROUND
-      : RELEASE_OVERVIEW_DARK_BACKGROUND));
     drawReleaseOverviewColumns(
       ctx,
       columns,
@@ -477,7 +486,6 @@ export function drawWaveformCanvas(
       mid,
       availableHalfHeight,
       edgeScales,
-      background,
     );
     return;
   }
