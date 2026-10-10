@@ -105,8 +105,8 @@
    bars are a dim trace of their colour and the played part stands out by strength as before.
    The plain line of a song without a waveform keeps about the weight it has on the panel. */
 .kd-task[data-backdrop-ink] .kd-now-line {
-  --kd-now-wave-rest: color-mix(in srgb, var(--kd-muted) 14%, transparent);
-  --kd-now-wave-tint: 32%;
+  --kd-now-wave-rest: color-mix(in srgb, var(--kd-muted) 18%, transparent);
+  --kd-now-wave-tint: 38%;
   --kd-now-rail: color-mix(in srgb, var(--kd-muted) 30%, transparent);
 }
 
