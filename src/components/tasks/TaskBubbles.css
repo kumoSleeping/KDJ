@@ -458,3 +458,9 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
   left: var(--kd-task-gap);
   width: auto;
 }
+/* A bubble that spans the window and is kept up holds its strip, as the bar does: the page ends
+   above it (--kd-info-lift, the height the kept stack reaches, set by the host) instead of
+   running underneath. A bubble that leaves by itself still passes over the page. */
+.kd-app[data-tall="true"]:not([data-mobile="true"]) { padding-bottom: var(--kd-info-lift, 0px); }
+/* The drawer hangs in that shortened page already; it does not keep clear of the bubble twice. */
+.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer-sheets { --kd-info-lift: 0px; }
