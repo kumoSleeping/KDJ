@@ -269,16 +269,37 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.deepEqual(useLibraryStore.getState().clipboard, { ids: [42], op: "copy" });
     useLibraryStore.setState({ clipboard: null });
     ids = ids.slice(0, 200);
+    const arriving = () => box.getAttribute("data-kd-arrive");
+    const arrivedBefore = arriving();
     await act(async () => { await useLibraryStore.getState().refresh(); });
     await flush();
     assert.ok(box.scrollTop <= 7200);
     assert.ok(document.querySelectorAll("tr[data-kd-track-id]").length > 0);
+    // The same list in a new state (shorter, re-read) is not an arrival; the mark of an earlier
+    // one may only have run out in the meantime.
+    assert.ok(arriving() === arrivedBefore || arriving() === null, "a refresh of the same query does not mark an arrival");
+    const arrivedMid = arriving();
     await act(async () => {
       useLibraryStore.getState().setFilter({ q: "changed query" });
       await useLibraryStore.getState().refresh();
     });
     await flush();
     assert.equal(box.scrollTop, 0, "query changes reset the actual scroll offset");
+    assert.ok(arriving() !== null && arriving() !== arrivedMid, "a changed query marks the list as arriving, anew");
+    const arrivedNow = arriving();
+    await act(async () => { useLibraryStore.getState().select(ids[3]); });
+    await flush();
+    assert.equal(arriving(), arrivedNow, "a selection does not start the arrival again");
+    // Leaving the top ends it at once; the table goes on from there without the mark.
+    box.scrollTop = 720;
+    box.dispatchEvent(new dom.window.Event("scroll"));
+    assert.equal(arriving(), null, "scrolling drops the mark");
+    await flush();
+    assert.equal(arriving(), null);
+    box.scrollTop = 0;
+    box.dispatchEvent(new dom.window.Event("scroll"));
+    await flush();
+    assert.equal(arriving(), null, "returning to the top is not an arrival");
     ids = [];
     await act(async () => { await useLibraryStore.getState().refresh(); });
     await flush();
