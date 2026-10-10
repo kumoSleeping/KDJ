@@ -47,6 +47,10 @@ import {
   matchedBilibiliVideoShareLink,
   matchedTrackShareLink,
   trackShareLink,
+  soundCloudPlayerShareLink,
+  soundCloudStoredShareLink,
+  soundCloudTrackApiUrl,
+  soundCloudTrackId,
   trackShareSearchQuery,
   writeShareLinkDrag,
 } from "../../lib/shareLink";
@@ -99,7 +103,7 @@ import {
   type TrackSort,
 } from "../../stores/libraryStore";
 import type { DownloadTask } from "../../types";
-import type { FileDisposalMode, KeyNotation, TrackSummary } from "../../types";
+import type { FileDisposalMode, KeyNotation, SongSource, TrackSummary } from "../../types";
 import { playTrack } from "../../lib/playTrack";
 import {
   beginColumnPointerReorder,
@@ -435,36 +439,66 @@ function localTrackShareCacheKey(track: TrackSummary): string {
   const query = isVideoTrack(track.format)
     ? bilibiliVideoShareSearchQuery(track)
     : trackShareSearchQuery(track);
-  return `${track.id}:${track.modified_at}:${query}`;
+  return `${track.id}:${track.modified_at}:${track.source_key}:${query}`;
 }
 
-/** 旧本地曲目走严格同名匹配；B 站多 P 视频按 KDJ 固定文件名还原父标题。 */
+/**
+ * The page of a SoundCloud download. The record keeps the track's id, not its address, so the
+ * platform is asked for the address of that id: first its resolver, then a search for the title
+ * in which only the source with the same id counts. When SoundCloud cannot be asked at all, its
+ * player addressed by the id is shared instead. A title match is never used: the id is known.
+ */
+function resolveSoundCloudShareLink(track: TrackSummary, id: string): Promise<string | null> {
+  const stored = (sources: readonly SongSource[]) => soundCloudStoredShareLink(track, sources);
+  const query = trackShareSearchQuery(track);
+  return api.resolve(soundCloudTrackApiUrl(id), 1)
+    .then((response) => stored(response.sources))
+    .catch(() => null)
+    .then((link) => link ?? (query
+      ? api.search({ query, platforms: ["soundcloud"], limit: 12, merge: false, kind: "song" })
+        .then((response) => stored([
+          ...(response.per_platform.soundcloud ?? []),
+          ...response.groups.flatMap((group) => group.sources),
+        ]))
+        .catch(() => null)
+      : null))
+    .then((link) => link ?? soundCloudPlayerShareLink(track));
+}
+
+/**
+ * 没有直接链接的本地曲目：SoundCloud 下载按曲目 id 向平台取回页面地址；B 站多 P 视频按
+ * KDJ 固定文件名还原父标题；其余旧曲目走严格同名匹配。
+ */
 function resolveLocalTrackShareLink(track: TrackSummary): Promise<string | null> {
   const direct = trackShareLink(track);
   if (direct) return Promise.resolve(direct);
   const video = isVideoTrack(track.format);
+  const soundCloudId = soundCloudTrackId(track);
   const query = video
     ? bilibiliVideoShareSearchQuery(track)
     : trackShareSearchQuery(track);
-  if (!query) return Promise.resolve(null);
+  if (!soundCloudId && !query) return Promise.resolve(null);
   const cacheKey = localTrackShareCacheKey(track);
   if (resolvedLocalTrackShareLinks.has(cacheKey)) {
     return Promise.resolve(resolvedLocalTrackShareLinks.get(cacheKey) ?? null);
   }
   const cached = localTrackShareLinkCache.get(cacheKey);
   if (cached) return cached;
-  const pending = api.search({
-    query,
-    platforms: video ? ["bilibili"] : ["wyy", "qqm"],
-    limit: 8,
-    merge: false,
-    kind: "song",
-  }).then((response) => video
-    ? matchedBilibiliVideoShareLink(track, response.per_platform.bilibili ?? [])
-    : matchedTrackShareLink(
-      track,
-      response.groups.flatMap((group) => group.sources),
-    )).catch(() => null).then((link) => {
+  const pending = (soundCloudId
+    ? resolveSoundCloudShareLink(track, soundCloudId)
+    : api.search({
+      query,
+      platforms: video ? ["bilibili"] : ["wyy", "qqm"],
+      limit: 8,
+      merge: false,
+      kind: "song",
+    }).then((response) => video
+      ? matchedBilibiliVideoShareLink(track, response.per_platform.bilibili ?? [])
+      : matchedTrackShareLink(
+        track,
+        response.groups.flatMap((group) => group.sources),
+      )).catch(() => null)
+  ).then((link) => {
     resolvedLocalTrackShareLinks.set(cacheKey, link);
     return link;
   });
@@ -891,7 +925,6 @@ export const TrackTable = memo(function TrackTable({
   const keyNotation = settings?.key_notation ?? "camelot";
   const filterFolder = useTableStore((state) => state.filter.folder);
   const removeTracks = useTableStore((state) => state.removeTracks);
-  const startAnalyze = useTableStore((state) => state.startAnalyze);
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
   const localExternalDragMode = usePlaybackPrefs((state) => state.localExternalDragMode);
@@ -1417,15 +1450,15 @@ export const TrackTable = memo(function TrackTable({
   // 菜单开合都退膛：残留的"已确认"状态比误删只差一次点击
   useEffect(() => setArmed(false), [rowMenu]);
 
-  // 老版本入库的 B 站视频没有 BV 号。菜单打开时先严格找回，用户真正点击复制时
-  // 链接已经就绪，仍处在一次明确的复制手势里。
+  // 老版本入库的 B 站视频没有 BV 号，SoundCloud 下载只存了曲目 id、没有页面地址。菜单打开时
+  // 先找回，用户真正点击复制时链接已经就绪，仍处在一次明确的复制手势里。
   useEffect(() => {
     setMenuShareResolution(null);
     if (
       !rowMenu
       || trackShareLink(rowMenu.track)
-      || !isVideoTrack(rowMenu.track.format)
-      || !bilibiliVideoShareSearchQuery(rowMenu.track)
+      || !(soundCloudTrackId(rowMenu.track)
+        || (isVideoTrack(rowMenu.track.format) && bilibiliVideoShareSearchQuery(rowMenu.track)))
     ) {
       return;
     }
@@ -1448,11 +1481,11 @@ export const TrackTable = memo(function TrackTable({
     : [];
   const rowShareCacheKey = rowMenu ? localTrackShareCacheKey(rowMenu.track) : "";
   const directRowShareLink = rowMenu ? trackShareLink(rowMenu.track) : null;
-  const videoShareResolution =
+  const lookedUpShare =
     rowMenu && menuShareResolution?.cacheKey === rowShareCacheKey
       ? menuShareResolution
       : null;
-  const rowShareLink = directRowShareLink ?? videoShareResolution?.link ?? null;
+  const rowShareLink = directRowShareLink ?? lookedUpShare?.link ?? null;
   const rowSameNameQuery = rowMenu && !isVideoTrack(rowMenu.track.format)
     ? trackShareSearchQuery(rowMenu.track)
     : "";
@@ -2474,7 +2507,7 @@ export const TrackTable = memo(function TrackTable({
             <Copy size={12} />
             复制标题
           </button>
-          {(rowShareLink || videoShareResolution) && (
+          {(rowShareLink || lookedUpShare) && (
             <button
               type="button"
               disabled={!rowShareLink}
@@ -2483,7 +2516,7 @@ export const TrackTable = memo(function TrackTable({
               }}
             >
               <Link2 size={12} />
-              {videoShareResolution?.loading
+              {lookedUpShare?.loading
                 ? "查找分享链接…"
                 : rowShareLink
                   ? "复制分享内容"
@@ -2534,11 +2567,6 @@ export const TrackTable = memo(function TrackTable({
             const chosen = new Set(menuIds);
             return orderedIds.filter(id => chosen.has(id));
           }} close={() => setRowMenu(null)} />
-          <button type="button" disabled={menuIds.length === 1 && isImageTrack(rowMenu.track.format)} onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true, false, "v4"); }}><BarChart3 size={12} />BPM V4 分析</button>
-          <button type="button" disabled={menuIds.length === 1 && isImageTrack(rowMenu.track.format)} onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true); }}>
-            <BarChart3 size={12} />
-            重新分析{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
-          </button>
           {menuIds.length === 1 && (
             <button
               type="button"
