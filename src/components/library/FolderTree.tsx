@@ -1,7 +1,7 @@
 import { FOLDER_DND_TYPE, beginTemporaryFolderDrag, endTemporaryFolderDrag } from "../../lib/temporaryFolderDrag";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -58,7 +58,7 @@ import {
   isSearchDownloadDrag,
 } from "../../lib/searchDrag";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
-import { orderStreamPlaylistsByRecent } from "../../lib/streamPlaylistOrder";
+import { orderStreamPlaylistsByRecent, type StreamPlaylistRecentEntry } from "../../lib/streamPlaylistOrder";
 import { withForegroundStreamPlaceholder } from "../../lib/streamStartup";
 import {
   finishTrackDrop,
@@ -80,9 +80,10 @@ import {
 import type { AccountState, FolderNode, FolderTree as FolderTreeData, StreamPlaylist } from "../../types";
 import { ContextMenu, InlineNotice, Sheet } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
-import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
+import { isMidiBrowseActivate, MIDI_BROWSE_ID_ATTR, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 import { readLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import "./FolderTree.css";
+import { createSidebarMotion, type SidebarMotion } from "./sidebarMotion";
 import { setDragGhost } from "../common/dragGhost";
 import "../common/DragGhost.css";
 
@@ -278,6 +279,48 @@ function useStreamBrowseLifecycle(enabled: boolean) {
   }, [accounts, accountsError, appBooting, bindStreamAccount, enabled]);
 
   return { accounts, accountsError };
+}
+
+/** Rows that appear this long after the tree and its roots were shown still belong to its arrival. */
+const TREE_SHOWN_SETTLE_MS = 250;
+const TREE_SHOWN_LIMIT_MS = 3000;
+/** How long an opened playlist keeps its place before it goes to the front of its list. */
+const RECENT_MOVE_WAIT_MS = 600;
+
+/**
+ * The recency the sidebar orders its playlists by, as it is shown. The store records an opened
+ * playlist at once (and saves it); the list on screen follows a beat later, and then as a
+ * movement: the rows travel to their new places (`motion.reorder`). Opening another playlist
+ * during the wait starts the wait again, and everything opened by then moves in one go.
+ * `rows` selects the playlist rows inside `scope`; while none is on screen the order simply
+ * follows the store.
+ */
+function useShownRecents(
+  recents: Record<StreamBrowsePlatform, StreamPlaylistRecentEntry[]>,
+  motion: SidebarMotion,
+  scope: { readonly current: Element | null },
+  rows: string,
+) {
+  const [shown, setShown] = useState(recents);
+  const latest = useRef(recents);
+  latest.current = recents;
+  useEffect(() => {
+    if (shown === recents) return;
+    if (!scope.current?.querySelector(rows)) {
+      setShown(recents);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      motion.reorder(
+        scope.current,
+        rows,
+        (row) => row.getAttribute(MIDI_BROWSE_ID_ATTR) ?? "",
+        () => flushSync(() => setShown(latest.current)),
+      );
+    }, RECENT_MOVE_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [motion, recents, rows, scope, shown]);
+  return shown;
 }
 
 function trackIdsFromDrop(event: React.DragEvent): number[] {
@@ -519,6 +562,32 @@ export function NarrowFolderRail({
     return () => window.removeEventListener("dragend", clearDrop, true);
   }, []);
 
+  /* How the rail's items arrive (sidebarMotion.ts): all of them when the rail is shown, the
+     lower list when another source is picked or its playlists have been read, a section's
+     playlists when it is opened or closed. Nothing else moves an item. */
+  const [railMotion] = useState(() => createSidebarMotion("button", ".kd-narrow-source-children"));
+  const shownRecentlyOpened = useShownRecents(
+    streamRecentlyOpened,
+    railMotion,
+    railRef,
+    ".kd-narrow-source-children button[data-stream-platform]",
+  );
+  const railSourceKey =
+    narrowSource.kind === "stream" ? `stream:${narrowSource.platform}` : `local:${narrowSource.rootPath}`;
+  const railPlaylistsRead =
+    narrowSource.kind === "stream" && streamPlaylists[narrowSource.platform] !== null;
+  const railShownRef = useRef<{ source: string; read: boolean } | null>(null);
+  useLayoutEffect(() => {
+    const before = railShownRef.current;
+    railShownRef.current = expanded ? null : { source: railSourceKey, read: railPlaylistsRead };
+    if (expanded) return;
+    if (!before) {
+      railMotion.reveal(railRef.current);
+    } else if (before.source !== railSourceKey || (railPlaylistsRead && !before.read)) {
+      railMotion.reveal(railRef.current?.querySelector(".kd-narrow-source-children"));
+    }
+  }, [expanded, railMotion, railPlaylistsRead, railSourceKey]);
+
   if (expanded) {
     return (
       <aside className="kd-narrow-folder-panel" aria-label="文件夹侧栏">
@@ -649,7 +718,7 @@ export function NarrowFolderRail({
     const playlists = streamPlaylists[platform];
     const orderedPlaylists = orderStreamPlaylistsByRecent(
       withForegroundStreamPlaceholder(playlists ?? [], platform, startupForeground),
-      streamRecentlyOpened[platform],
+      shownRecentlyOpened[platform],
     );
     const loading = streamLoading[platform];
     const platformError = streamErrors[platform];
@@ -740,34 +809,41 @@ export function NarrowFolderRail({
                   type="button"
                   aria-expanded={sectionOpen}
                   title={`${sectionOpen ? "收起" : "展开"}${section.label}`}
-                  onClick={() =>
-                    setStreamSectionExpanded(platform, section.id, !sectionOpen)
-                  }
+                  onClick={() => {
+                    railMotion.expect(`section:${platform}:${section.id}`, !sectionOpen);
+                    setStreamSectionExpanded(platform, section.id, !sectionOpen);
+                  }}
                 >
                   <RailContent
                     icon={sectionOpen ? <FolderOpen {...RAIL_ICON} /> : <Folder {...RAIL_ICON} />}
                     label={section.label}
                   />
                 </button>
-                {sectionOpen &&
-                  section.playlists.map((playlist) => {
-                    const active =
-                      effectiveActiveStreamPlaylist?.platform === platform &&
-                      effectiveActiveStreamPlaylist.key === playlist.key;
-                    return (
-                      <button
-                        key={`narrow-stream-playlist:${platform}:${playlist.key}`}
-                        type="button"
-                        data-active={active || undefined}
-                        data-stream-platform={platform}
-                        {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
-                        title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
-                        onClick={() => openStreamPlaylist(platform, playlist)}
-                      >
-                        <RailContent icon={<ListMusic {...RAIL_ICON} />} label={playlist.title} />
-                      </button>
-                    );
-                  })}
+                {sectionOpen && (
+                  <div
+                    className="kd-narrow-branch"
+                    ref={railMotion.branch(`section:${platform}:${section.id}`)}
+                  >
+                    {section.playlists.map((playlist) => {
+                      const active =
+                        effectiveActiveStreamPlaylist?.platform === platform &&
+                        effectiveActiveStreamPlaylist.key === playlist.key;
+                      return (
+                        <button
+                          key={`narrow-stream-playlist:${platform}:${playlist.key}`}
+                          type="button"
+                          data-active={active || undefined}
+                          data-stream-platform={platform}
+                          {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
+                          title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
+                          onClick={() => openStreamPlaylist(platform, playlist)}
+                        >
+                          <RailContent icon={<ListMusic {...RAIL_ICON} />} label={playlist.title} />
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -1342,13 +1418,67 @@ export function FolderTree({
     setForgetArmed("");
   }, [menu?.node.path]);
 
-  const toggle = (path: string) =>
+  /* How the tree's rows arrive and fold (sidebarMotion.ts). A branch only moves for the user's
+     own toggle, announced with `expect` right before the state changes; every other render
+     leaves the rows where they are. */
+  const [treeMotion] = useState(() => createSidebarMotion(".kd-folder", ".kd-folder-list"));
+  const shownRecentlyOpened = useShownRecents(
+    streamRecentlyOpened,
+    treeMotion,
+    rootListRef,
+    ".kd-folder-stream-playlist",
+  );
+  // The tree was shown: its rows arrive once. What is still on its way at that moment — the
+  // local roots while they are being read, the folders of a root that is opened because it is
+  // new — arrives as it comes, within a short while of the roots; nothing that was already
+  // there moves again, and after that a row that appears is simply there.
+  const foldersRead = folders !== null;
+  const shownRowsRef = useRef<{ rows: Set<Element>; shownAt: number; readAt: number } | "settled" | null>(null);
+  useLayoutEffect(() => {
+    const list = rootListRef.current;
+    const shown = shownRowsRef.current;
+    if (!list || shown === "settled") return;
+    const now = performance.now();
+    if (shown !== null && (
+      (shown.readAt > 0 && now - shown.readAt > TREE_SHOWN_SETTLE_MS)
+      // Roots that take this long (or never come) are not part of the tree being shown.
+      || now - shown.shownAt > TREE_SHOWN_LIMIT_MS
+    )) {
+      shownRowsRef.current = "settled";
+      return;
+    }
+    if (shown === null) treeMotion.reveal(list);
+    else treeMotion.reveal(list, (row) => !shown.rows.has(row));
+    shownRowsRef.current = {
+      rows: new Set(list.querySelectorAll(".kd-folder")),
+      shownAt: shown?.shownAt ?? now,
+      readAt: shown !== null && shown.readAt > 0 ? shown.readAt : foldersRead ? now : 0,
+    };
+  });
+  // A source's playlists arrive in its open branch after signing in (nothing read → read) or
+  // when a refresh the user asked for has come back. A refresh in the background moves nothing.
+  const streamReadRef = useRef<Partial<Record<StreamBrowsePlatform, { read: boolean; loading: boolean }>>>({});
+  const refreshAskedRef = useRef(new Set<StreamBrowsePlatform>());
+  useLayoutEffect(() => {
+    for (const platform of STREAM_BROWSE_PLATFORMS) {
+      const before = streamReadRef.current[platform];
+      const now = { read: streamPlaylists[platform] !== null, loading: streamLoading[platform] };
+      streamReadRef.current[platform] = now;
+      if (!before || !now.read || now.loading) continue;
+      const refreshed = before.loading && refreshAskedRef.current.delete(platform);
+      if (!before.read || refreshed) treeMotion.reveal(treeMotion.branchElement(`stream:${platform}`));
+    }
+  }, [streamLoading, streamPlaylists, treeMotion]);
+
+  const toggle = (path: string) => {
+    treeMotion.expect(`folder:${path}`, !expanded.has(path));
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
       return next;
     });
+  };
 
   /**
    * 点开一个还没入库的目录 = 顺手把它导进来。用户不该为了看见歌先去点一次「添加文件夹」。
@@ -1476,6 +1606,7 @@ export function FolderTree({
     accountState: AccountState | undefined,
   ) => {
     const opening = !streamExpanded[platform];
+    treeMotion.expect(`stream:${platform}`, opening);
     setStreamExpanded(platform, opening);
     if (opening && accountCanBrowse(accountState)) {
       void loadStreamPlaylists(platform);
@@ -1483,6 +1614,7 @@ export function FolderTree({
   };
 
   const refreshStreamRoot = (platform: StreamBrowsePlatform) => {
+    refreshAskedRef.current.add(platform);
     void loadStreamPlaylists(platform, true);
   };
 
@@ -1510,7 +1642,7 @@ export function FolderTree({
     const playlists = streamPlaylists[platform];
     const orderedPlaylists = orderStreamPlaylistsByRecent(
       withForegroundStreamPlaceholder(playlists ?? [], platform, startupForeground),
-      streamRecentlyOpened[platform],
+      shownRecentlyOpened[platform],
     );
     const loading = streamLoading[platform];
     const error = streamErrors[platform];
@@ -1636,97 +1768,109 @@ export function FolderTree({
           </span>
         </div>
 
-        {open && !accountState && (
-          <button
-            type="button"
-            className="kd-folder kd-folder-action kd-stream-status"
-            style={depthStyle(1)}
-            title={accountsError || "正在读取账号状态"}
-            disabled={!accountsError}
-            onClick={() => void useAppStore.getState().refreshAccounts()}
-          >
-            <span className="kd-folder-caret" />
-            <span className="kd-folder-icon">
-              {accountsError ? (
-                <AlertTriangle {...ROW_ICON} />
-              ) : (
-                <LoaderCircle className="kd-spin" {...ROW_ICON} />
-              )}
-            </span>
-            <span className="kd-folder-name kd-truncate">
-              {accountsError ? "账号状态读取失败，点此重试" : "正在读取账号状态"}
-            </span>
-          </button>
-        )}
-
-        {open && canBrowse && loading && playlists === null && (
-          <div className="kd-folder kd-stream-status" style={depthStyle(1)} aria-live="polite">
-            <span className="kd-folder-caret" />
-            <span className="kd-folder-icon">
-              <LoaderCircle className="kd-spin" {...ROW_ICON} />
-            </span>
-            <span className="kd-folder-name kd-truncate">正在读取歌单</span>
-          </div>
-        )}
-
-        {open && canBrowse && error && (
-          <div
-            className="kd-folder kd-stream-status kd-stream-error"
-            style={depthStyle(1)}
-            title={error}
-          >
-            <span className="kd-folder-caret" />
-            <span className="kd-folder-icon">
-              <AlertTriangle {...ROW_ICON} />
-            </span>
-            <span className="kd-folder-name kd-truncate">{error}</span>
-            <span className="kd-folder-trail">
+        {/* Everything a source unfolds is one branch, so it can arrive and fold as one. */}
+        {open && (
+          <div className="kd-tree-branch" ref={treeMotion.branch(`stream:${platform}`)}>
+            {!accountState && (
               <button
                 type="button"
-                className="kd-stream-inline-action"
-                disabled={loading}
-                onClick={() => refreshStreamRoot(platform)}
+                className="kd-folder kd-folder-action kd-stream-status"
+                style={depthStyle(1)}
+                title={accountsError || "正在读取账号状态"}
+                disabled={!accountsError}
+                onClick={() => void useAppStore.getState().refreshAccounts()}
               >
-                重试
+                <span className="kd-folder-caret" />
+                <span className="kd-folder-icon">
+                  {accountsError ? (
+                    <AlertTriangle {...ROW_ICON} />
+                  ) : (
+                    <LoaderCircle className="kd-spin" {...ROW_ICON} />
+                  )}
+                </span>
+                <span className="kd-folder-name kd-truncate">
+                  {accountsError ? "账号状态读取失败，点此重试" : "正在读取账号状态"}
+                </span>
               </button>
-            </span>
+            )}
+
+            {canBrowse && loading && playlists === null && (
+              <div className="kd-folder kd-stream-status" style={depthStyle(1)} aria-live="polite">
+                <span className="kd-folder-caret" />
+                <span className="kd-folder-icon">
+                  <LoaderCircle className="kd-spin" {...ROW_ICON} />
+                </span>
+                <span className="kd-folder-name kd-truncate">正在读取歌单</span>
+              </div>
+            )}
+
+            {canBrowse && error && (
+              <div
+                className="kd-folder kd-stream-status kd-stream-error"
+                style={depthStyle(1)}
+                title={error}
+              >
+                <span className="kd-folder-caret" />
+                <span className="kd-folder-icon">
+                  <AlertTriangle {...ROW_ICON} />
+                </span>
+                <span className="kd-folder-name kd-truncate">{error}</span>
+                <span className="kd-folder-trail">
+                  <button
+                    type="button"
+                    className="kd-stream-inline-action"
+                    disabled={loading}
+                    onClick={() => refreshStreamRoot(platform)}
+                  >
+                    重试
+                  </button>
+                </span>
+              </div>
+            )}
+
+            {/* 平台的默认收藏直接作为可点击项展示；不再套一层只有一个子项的目录。 */}
+            {canBrowse && favoritePlaylists.map((playlist) => playlistRow(playlist, 1))}
+
+            {canBrowse &&
+              sections.map((section) => {
+                const sectionOpen = streamSectionExpanded[platform][section.id];
+                return (
+                  <div key={`stream-section:${platform}:${section.id}`} className="kd-stream-section">
+                    <button
+                      type="button"
+                      className="kd-folder kd-folder-action kd-stream-section-label"
+                      style={depthStyle(1)}
+                      aria-expanded={sectionOpen}
+                      title={`${sectionOpen ? "收起" : "展开"}${section.label}`}
+                      onClick={() => {
+                        treeMotion.expect(`section:${platform}:${section.id}`, !sectionOpen);
+                        setStreamSectionExpanded(platform, section.id, !sectionOpen);
+                      }}
+                    >
+                      <span className="kd-folder-caret">
+                        <Disclosure open={sectionOpen} />
+                      </span>
+                      <span className="kd-folder-icon">
+                        {sectionOpen ? <FolderOpen {...ROW_ICON} /> : <Folder {...ROW_ICON} />}
+                      </span>
+                      <span className="kd-folder-name kd-truncate">{section.label}</span>
+                      <span className="kd-folder-trail">
+                        <span className="kd-folder-count">{section.playlists.length}</span>
+                      </span>
+                    </button>
+                    {sectionOpen && (
+                      <div
+                        className="kd-tree-branch"
+                        ref={treeMotion.branch(`section:${platform}:${section.id}`)}
+                      >
+                        {section.playlists.map((playlist) => playlistRow(playlist, 2))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
           </div>
         )}
-
-        {/* 平台的默认收藏直接作为可点击项展示；不再套一层只有一个子项的目录。 */}
-        {open && canBrowse && favoritePlaylists.map((playlist) => playlistRow(playlist, 1))}
-
-        {open &&
-          canBrowse &&
-          sections.map((section) => {
-            const sectionOpen = streamSectionExpanded[platform][section.id];
-            return (
-              <div key={`stream-section:${platform}:${section.id}`} className="kd-stream-section">
-                <button
-                  type="button"
-                  className="kd-folder kd-folder-action kd-stream-section-label"
-                  style={depthStyle(1)}
-                  aria-expanded={sectionOpen}
-                  title={`${sectionOpen ? "收起" : "展开"}${section.label}`}
-                  onClick={() =>
-                    setStreamSectionExpanded(platform, section.id, !sectionOpen)
-                  }
-                >
-                  <span className="kd-folder-caret">
-                    <Disclosure open={sectionOpen} />
-                  </span>
-                  <span className="kd-folder-icon">
-                    {sectionOpen ? <FolderOpen {...ROW_ICON} /> : <Folder {...ROW_ICON} />}
-                  </span>
-                  <span className="kd-folder-name kd-truncate">{section.label}</span>
-                  <span className="kd-folder-trail">
-                    <span className="kd-folder-count">{section.playlists.length}</span>
-                  </span>
-                </button>
-                {sectionOpen && section.playlists.map((playlist) => playlistRow(playlist, 2))}
-              </div>
-            );
-          })}
       </div>
     );
   };
@@ -1745,7 +1889,7 @@ export function FolderTree({
     if (renaming?.node.path === node.path) {
       // The row gives way to a field in the same place; it takes no click, drag or drop.
       return (
-        <div key={node.path}>
+        <div key={node.path} className="kd-tree-node">
           <div className="kd-folder kd-folder-new" style={depthStyle(depth)}>
             <span className="kd-folder-caret">
               {node.children.length > 0 ? <Disclosure open={open} /> : null}
@@ -1781,12 +1925,16 @@ export function FolderTree({
               }}
             />
           </div>
-          {open && node.children.map((child) => render(child, depth + 1))}
+          {open && node.children.length > 0 && (
+            <div className="kd-tree-branch" ref={treeMotion.branch(`folder:${node.path}`)}>
+              {node.children.map((child) => render(child, depth + 1))}
+            </div>
+          )}
         </div>
       );
     }
     return (
-      <div key={node.path}>
+      <div key={node.path} className="kd-tree-node">
         <div
           className="kd-folder"
           data-sidebar-root-row={depth === 0 ? "" : undefined}
@@ -2026,7 +2174,11 @@ export function FolderTree({
             />
           </div>
         )}
-        {open && node.children.map((child) => render(child, depth + 1))}
+        {open && node.children.length > 0 && (
+          <div className="kd-tree-branch" ref={treeMotion.branch(`folder:${node.path}`)}>
+            {node.children.map((child) => render(child, depth + 1))}
+          </div>
+        )}
       </div>
     );
   };

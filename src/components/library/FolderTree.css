@@ -3,8 +3,9 @@
  * (.kd-narrow-folder-rail).
  *
  * Folders are real directories on disk, so the tree reads as a file browser;
- * online sources borrow the same rows. Red is spent on one thing only: the item
- * that is open (and a drop that is about to land).
+ * online sources borrow the same rows. Everything is ink on the panel: the item that is
+ * open is written in full-strength text with more weight, a drop that is about to land
+ * takes a neutral tint. The only colour is a source's own brand mark.
  * ========================================================== */
 
 /* ---------- Expanded tree: one column grid for every row ---------- */
@@ -59,7 +60,7 @@
   left: 0;
   right: 0;
   height: 2px;
-  background: var(--kd-theme);
+  background: var(--kd-text);
   pointer-events: none;
   animation: kd-motion-fade-in var(--kd-motion-micro-out) var(--kd-ease-out) backwards;
 }
@@ -199,7 +200,7 @@ button.kd-folder-caret:hover:not(:disabled) {
      of its own): a press on the ⋯ button must reach the button, not the hidden number. */
   pointer-events: none;
 }
-/* 未入库的数量是"待办"而不是"已有"：加号和实墨就够，红色留给当前项。 */
+/* 未入库的数量是"待办"而不是"已有"：加号和实墨就够。 */
 .kd-folder-count[data-pending="true"] {
   color: var(--kd-text);
   font-weight: 600;
@@ -244,9 +245,12 @@ button.kd-folder-caret:hover:not(:disabled) {
   color: var(--kd-text);
 }
 
-/* 当前文件夹只用主题红字，不铺底色、不描红侧条；多选的文件夹同样只换墨色。 */
+/* The folder, source or playlist that is open: full-strength ink and more weight, its icon in
+   the same ink. No colour, no background, no bar; folders picked together read the same way.
+   A source keeps its brand mark (see the platform rules below). */
 .kd-folder:is([data-active="true"], [data-selected="true"]) {
-  color: var(--kd-theme);
+  color: var(--kd-text);
+  font-weight: 700;
 }
 .kd-folder:is([data-active="true"], [data-selected="true"]) > .kd-folder-icon {
   color: inherit;
@@ -269,11 +273,11 @@ button.kd-folder-caret:hover:not(:disabled) {
   outline-offset: -1.5px;
 }
 
-/* 拖到目标上：整行染色加一圈细线，在余光里也认得出，但不是一整块实心红。 */
+/* 拖到目标上：整行换一档底色加一圈细线，在余光里也认得出；用墨色，不用主题色。 */
 .kd-folder:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) {
-  background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-theme) 46%, transparent);
-  color: var(--kd-theme);
+  background: color-mix(in srgb, var(--kd-text) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-text) 46%, transparent);
+  color: var(--kd-text);
   /* Declared on the target only: the tint eases in and is gone the moment the pointer leaves. */
   transition: background-color var(--kd-motion-micro-out) var(--kd-ease-out),
     box-shadow var(--kd-motion-micro-out) var(--kd-ease-out);
@@ -284,11 +288,11 @@ button.kd-folder-caret:hover:not(:disabled) {
 /* 拖文件夹换顺序：落点画成一条插入线，不染色——染色是"放进这个文件夹"的意思，
    两种操作必须一眼分得开。 */
 .kd-folder[data-edge="before"] {
-  box-shadow: inset 0 2px 0 var(--kd-theme);
+  box-shadow: inset 0 2px 0 var(--kd-text);
   background: transparent;
 }
 .kd-folder[data-edge="after"] {
-  box-shadow: inset 0 -2px 0 var(--kd-theme);
+  box-shadow: inset 0 -2px 0 var(--kd-text);
   background: transparent;
 }
 
@@ -501,9 +505,11 @@ div.kd-stream-status:hover {
   color: var(--kd-faint);
   cursor: default;
 }
+/* The open item of the rail: ink and weight, like the tree's. */
 .kd-narrow-folder-rail button[data-active="true"],
 .kd-narrow-folder-rail button[data-active="true"]:hover {
-  color: var(--kd-theme);
+  color: var(--kd-text);
+  font-weight: 700;
 }
 .kd-narrow-folder-rail button:focus-visible,
 .kd-narrow-rail-resize:focus-visible {
@@ -515,9 +521,9 @@ div.kd-stream-status:hover {
   outline-offset: -1.5px;
 }
 .kd-narrow-folder-rail button:is([data-drop="true"], [data-kd-pointer-track-over="folder"]) {
-  background: color-mix(in srgb, var(--kd-theme) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-theme) 46%, transparent);
-  color: var(--kd-theme);
+  background: color-mix(in srgb, var(--kd-text) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-text) 46%, transparent);
+  color: var(--kd-text);
   transition: color 120ms ease, background-color var(--kd-motion-micro-out) var(--kd-ease-out),
     box-shadow var(--kd-motion-micro-out) var(--kd-ease-out);
 }
@@ -600,7 +606,7 @@ div.kd-stream-status:hover {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--kd-text);
+  color: var(--kd-text-body);
   text-align: left;
   cursor: pointer;
 }
@@ -608,7 +614,8 @@ div.kd-stream-status:hover {
   background: var(--kd-hover);
 }
 .kd-folder-picker button[data-active="true"] {
-  color: var(--kd-theme);
+  color: var(--kd-text);
+  font-weight: 700;
   background: transparent;
   box-shadow: none;
 }
@@ -624,6 +631,120 @@ div.kd-stream-status:hover {
   min-width: 0;
   font-size: var(--kd-size);
   overflow-wrap: anywhere;
+}
+
+/* ============================================================
+ * Rows arriving and folding (sidebarMotion.ts sets the marks; the clock is motion.css).
+ *
+ * Arriving: each row rises a little and fades in, the first twelve one step apart (the last has
+ * arrived after 292ms) and the next ones together with the twelfth. The marks are on the rows
+ * only for that long, so no render, selection or count can play it again.
+ * A branch the user opens: what lies below slides down from where it was (240ms), and the
+ * branch is uncovered at the same pace, so nothing overlaps while its rows arrive.
+ * A branch the user closes: a picture of it stays over the place it held, is covered from
+ * below as the rows under it close up, and its own rows go from the last one up.
+ * Only transform, opacity and the clip move; every keyframe names both ends.
+ * ========================================================== */
+.kd-tree-node,
+.kd-stream-root,
+.kd-stream-section,
+.kd-narrow-stream-section {
+  /* The picture of a closed branch is placed inside its owner. */
+  position: relative;
+}
+.kd-tree-branch {
+  min-width: 0;
+}
+.kd-folder-pane,
+.kd-narrow-folder-rail,
+.kd-folder-picker {
+  /* A branch opens and shuts in a beat and a half of the small clock: 240ms. */
+  --kd-tree-fold-time: calc(var(--kd-motion-micro) * 1.5);
+}
+/* The rail's items are a column with a gap; a section's playlists keep it. */
+.kd-narrow-branch {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.1rem;
+}
+[data-kd-tree-enter] {
+  animation: kd-tree-row-in var(--kd-motion-micro) var(--kd-ease-out) backwards;
+  animation-delay: calc(var(--kd-tree-i, 0) * 12ms);
+}
+@keyframes kd-tree-row-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+[data-kd-tree-shift] {
+  animation: kd-tree-shift var(--kd-tree-fold-time) var(--kd-ease-out) backwards;
+}
+@keyframes kd-tree-shift {
+  from { transform: translateY(var(--kd-tree-shift, 0px)); }
+  to { transform: translateY(0); }
+}
+[data-kd-tree-unfold] {
+  animation: kd-tree-unfold var(--kd-tree-fold-time) var(--kd-ease-out) backwards;
+}
+@keyframes kd-tree-unfold {
+  from { clip-path: inset(0 0 100% 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+[data-kd-tree-fold] {
+  position: absolute;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  animation: kd-tree-fold var(--kd-tree-fold-time) var(--kd-ease-out) forwards;
+}
+@keyframes kd-tree-fold {
+  from { clip-path: inset(0 0 0 0); }
+  to { clip-path: inset(0 0 100% 0); }
+}
+[data-kd-tree-fold]:is(.kd-tree-branch, .kd-narrow-branch) :is(.kd-folder, .kd-narrow-branch > button) {
+  animation: kd-tree-row-out var(--kd-motion-micro-out) var(--kd-ease-in) forwards;
+  animation-delay: calc(var(--kd-tree-i, 11) * var(--kd-motion-stagger));
+}
+@keyframes kd-tree-row-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-4px); }
+}
+/* A playlist that was opened goes to the front of its list a beat after the click
+   (useShownRecents in FolderTree.tsx): every row whose place changed travels there from where
+   it was, in two beats of the small clock. The one that went up is lifted while it passes the
+   others: it lies over them on a raised face and is a touch larger on the way. */
+[data-kd-tree-move] {
+  animation: kd-tree-shift calc(var(--kd-motion-micro) * 2) var(--kd-ease-out) backwards;
+}
+[data-kd-tree-move="lift"] {
+  position: relative;
+  z-index: 1;
+  animation: kd-tree-shift calc(var(--kd-motion-micro) * 2) var(--kd-ease-out) backwards,
+    kd-tree-lift calc(var(--kd-motion-micro) * 2) ease-in-out backwards;
+}
+/* The raised face is a layer of its own behind the row's content: it comes and goes by opacity. */
+[data-kd-tree-move="lift"]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: 6px;
+  background: var(--kd-panel-raised);
+  box-shadow: var(--kd-float-shadow);
+  pointer-events: none;
+  animation: kd-tree-lift-face calc(var(--kd-motion-micro) * 2) linear both;
+}
+@keyframes kd-tree-lift-face {
+  from { opacity: 0; }
+  12% { opacity: 1; }
+  70% { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes kd-tree-lift {
+  from { scale: 1; }
+  40% { scale: 1.03; }
+  to { scale: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -642,12 +763,89 @@ div.kd-stream-status:hover {
   .kd-sidebar-root-slot[data-root-edge]::after {
     animation: none;
   }
+  /* Rows arrive with one short fade and nothing slides or folds (the script asks for neither). */
+  [data-kd-tree-enter] {
+    animation: kd-motion-fade-in var(--kd-motion-reduced) linear backwards;
+    animation-delay: 0ms;
+  }
+  [data-kd-tree-shift],
+  [data-kd-tree-move],
+  [data-kd-tree-move]::before,
+  [data-kd-tree-unfold],
+  [data-kd-tree-fold],
+  [data-kd-tree-fold]:is(.kd-tree-branch, .kd-narrow-branch) :is(.kd-folder, .kd-narrow-branch > button) {
+    animation: none;
+  }
 }
 
-/* Sakura98: expanded headers and disclosure keys stay pressed in.
-   Selection and hover keep their existing colours and focus indicators. */
+/* Sakura98: expanded headers and disclosure keys stay pressed in. Hover and focus keep the
+   pack's own indicators. */
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder[data-sidebar-root-row]:is([aria-expanded="true"], :has(> .kd-folder-caret[aria-expanded="true"])),
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder[aria-expanded="true"] > .kd-folder-caret:has(svg),
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-caret[aria-expanded="true"]:has(svg) {
   box-shadow: var(--s98-sunken);
+}
+/* Sakura98: the open item is ink and weight here too. The pack's own sheet (theme.css) still
+   writes it in the theme colour, also with `!important` for folders picked together, so these
+   rules are one step more specific and say so as firmly. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder:is([data-active="true"], [data-selected="true"]) {
+  color: var(--kd-text) !important;
+  font-weight: 700;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-narrow-folder-rail button[data-active="true"],
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-picker button[data-active="true"] {
+  color: var(--kd-text);
+  font-weight: 700;
+}
+/* Its read-outs stay the quiet sunken chips they are on every other row. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder:is([data-active="true"], [data-selected="true"]) .kd-folder-count {
+  color: var(--kd-muted);
+  font-weight: 400;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder:is([data-active="true"], [data-selected="true"]) .kd-folder-drag {
+  color: inherit;
+}
+/* Sakura98: rows are drawn a line at a time with a two-step rise, and a branch opens and shuts
+   in four steps instead of a glide. */
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-enter] {
+  animation-name: kd-tree-row-in-98;
+  animation-duration: 120ms;
+  animation-timing-function: steps(1, end);
+}
+@keyframes kd-tree-row-in-98 {
+  from { opacity: 0; transform: translateY(4px); }
+  34% { opacity: 1; transform: translateY(4px); }
+  67% { opacity: 1; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+:root[data-theme-pack="sakulaptop98"] :is([data-kd-tree-shift], [data-kd-tree-unfold], [data-kd-tree-fold]) {
+  animation-timing-function: steps(4, end);
+}
+/* A playlist changing places hops there in six steps, as a raised key. */
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-move] {
+  animation-timing-function: steps(6, end);
+}
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-move="lift"] {
+  animation: kd-tree-shift calc(var(--kd-motion-micro) * 2) steps(6, end) backwards;
+}
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-move="lift"]::before {
+  border-radius: 2px;
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+  animation-timing-function: steps(1, end);
+}
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-fold]:is(.kd-tree-branch, .kd-narrow-branch) :is(.kd-folder, .kd-narrow-branch > button) {
+  animation-name: kd-tree-row-out-98;
+  animation-timing-function: steps(1, end);
+}
+@keyframes kd-tree-row-out-98 {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme-pack="sakulaptop98"] [data-kd-tree-enter] {
+    animation-name: kd-motion-fade-in;
+    animation-duration: var(--kd-motion-reduced);
+    animation-timing-function: linear;
+  }
 }

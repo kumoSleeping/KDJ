@@ -38,6 +38,7 @@ import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../common/dragGhost";
 import "../common/DragGhost.css";
+import { markListArrival } from "./listArrival";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent } from "../../lib/shareClipboard";
 import {
@@ -1955,7 +1956,7 @@ export const TrackTable = memo(function TrackTable({
       if (previousQueryRef.current > 0) scrollRestoreDoneRef.current = true;
       previousQueryRef.current = queryVersion;
       // The initial index starts a query too; persisted position applies once on startup.
-      if (scrollRestoreDoneRef.current) desired = 0;
+      if (scrollRestoreDoneRef.current) { desired = 0; markListArrival(box); }
       anchorRef.current = { id: null, index: 0, offset: 0 };
     }
     if (!scrollRestoreDoneRef.current && total > 0) {

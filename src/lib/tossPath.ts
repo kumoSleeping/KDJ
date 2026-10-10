@@ -1,4 +1,7 @@
-/** The geometry and timing of a download parcel's flight. No DOM here, so it can be tested. */
+/**
+ * The geometry and timing of a download parcel's flight, and when the download it stands for
+ * is handed to the queue. No DOM here, so it can be tested.
+ */
 
 export interface TossPoint { x: number; y: number }
 
@@ -45,4 +48,78 @@ export function tossArc(from: TossPoint, to: TossPoint, rise: number, steps = 24
 export function tossFlightMs(distance: number, sheetLeftMs: number, hop: boolean): number {
   const own = hop ? clamp(240 + distance * 0.3, 260, 420) : clamp(360 + distance * 0.22, 420, 600);
   return Math.round(clamp(Math.max(own, sheetLeftMs > 0 ? sheetLeftMs + 60 : 0), own, 700));
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Handing the download over                                                                    */
+/* ------------------------------------------------------------------------------------------ */
+
+/**
+ * The download is handed to the queue this long before the parcel touches down, so that its row
+ * is in the list when the parcel arrives and takes the landing highlight — not while the parcel
+ * is still on its way.
+ */
+export const TOSS_HANDOVER_LEAD_MS = 130;
+/**
+ * Whatever becomes of the flight (animations that never start in a hidden window, a parcel that
+ * finds nowhere to land), the download is handed over at the latest this long after the toss
+ * began. Longer than the longest flight's own moment, shorter than the drawer's hold.
+ */
+export const TOSS_HANDOVER_LIMIT_MS = 900;
+
+/** From the start of the flight to the moment the download is handed over. */
+export function tossHandoverAt(flightMs: number): number {
+  return Math.max(0, flightMs - TOSS_HANDOVER_LEAD_MS);
+}
+
+export interface TossHandover {
+  /** Resolves when the download is to be handed to the queue. Always resolves, and only once. */
+  readonly ready: Promise<void>;
+  /** Hands over now. Harmless when it already happened. */
+  deliver(): void;
+  /** Hands over in `ms` from now instead of at the limit. */
+  within(ms: number): void;
+  delivered(): boolean;
+}
+
+const waiting = new Set<() => void>();
+
+/**
+ * One download waiting for its parcel. It is handed over when `deliver` is called, when the
+ * time given to `within` has passed, or after `limitMs` — whichever comes first.
+ */
+export function tossHandover(limitMs = TOSS_HANDOVER_LIMIT_MS): TossHandover {
+  let resolve!: () => void;
+  const ready = new Promise<void>(done => { resolve = done; });
+  let done = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deliver = () => {
+    if (done) return;
+    done = true;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    waiting.delete(deliver);
+    resolve();
+  };
+  const within = (ms: number) => {
+    if (done) return;
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(deliver, Math.max(0, ms));
+  };
+  waiting.add(deliver);
+  within(limitMs);
+  return { ready, deliver, within, delivered: () => done };
+}
+
+/**
+ * Hands over every download that is still waiting for its parcel. For the moments when timers
+ * stop being reliable or the page is about to go: the window was hidden, or is being closed.
+ */
+export function flushTossHandovers(): void {
+  for (const deliver of [...waiting]) deliver();
+}
+
+/** How many downloads are waiting for their parcels. */
+export function waitingTossHandovers(): number {
+  return waiting.size;
 }

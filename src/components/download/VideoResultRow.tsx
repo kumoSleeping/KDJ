@@ -324,10 +324,12 @@ export function VideoResultRow({
   const download = useCallback(async (pageIndex = 0) => {
     setSending(true);
     setSendError("");
-    // The parcel leaves from the row or menu item that was clicked; the request does not wait for it.
+    // The parcel leaves from the row or menu item that was clicked; the request goes out when it
+    // has nearly landed.
     const toss = tossToDownloads({ title: title.trim() });
     try {
       const request = buildRequest(pageIndex);
+      await toss.ready;
       const task = await api.videoDownload(request);
       rememberVideoEnqueue(task.id, request);
       mergeTasks([
