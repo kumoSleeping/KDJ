@@ -1,9 +1,18 @@
-/* 任务信息: task bubbles (docs/task-bubbles.md). The host covers the window above the player bar
-   and clips at the bar's top edge, so a bubble emerges from behind that edge although its
-   resting place is detached from the bar: a gap to the bar and to the window edge, round on
-   every corner, lifted by a soft shadow and no drawn line. */
+/* 任务信息: task bubbles (docs/task-bubbles.md). A bubble comes up in one of two places, each
+   with a host and a stack of its own; everything below is written once for both, and the top
+   one is the mirror image (--kd-task-dir).
+
+   The bottom host covers the window above the player bar and clips at the bar's top edge, so a
+   bubble emerges from behind that edge although its resting place is detached from the bar: a
+   gap to the bar and to the window edge, round on every corner, lifted by a soft shadow and no
+   drawn line. */
 .kd-task-host {
   --kd-task-gap: 12px;
+  /* Which way a stack grows from its edge, and the opposite of the way a bubble leaves: up
+     from the bar here, down from the search row at the top. */
+  --kd-task-dir: -1;
+  /* How far beyond its edge a bubble's shadow still reaches. */
+  --kd-task-edge: 20px;
   position: fixed;
   z-index: 120;
   top: 0;
@@ -12,6 +21,21 @@
   left: 0;
   overflow: hidden;
   pointer-events: none;
+}
+/* The top host hangs under the search row, where the drawer's panels have their place: it
+   clips at that row's bottom edge and ends at the right edge of the list's column
+   (--kd-task-ceiling and --kd-task-ceiling-right, measured by the host when a bubble comes up
+   there). Its gap is the drawer's, so a bubble and the panel it pushes down share a right
+   edge. Without a drawer (a phone, an editor window) it hangs under the window's top bar,
+   which on a phone includes the status bar's inset. */
+.kd-task-host[data-place="top"] {
+  --kd-task-gap: 10px;
+  --kd-task-dir: 1;
+  /* A shadow falls downwards: more of it is left below a bubble that has gone up. */
+  --kd-task-edge: 36px;
+  top: var(--kd-task-ceiling, var(--kd-chrome-top, 0px));
+  right: var(--kd-task-ceiling-right, 0px);
+  bottom: 0;
 }
 /* The player bar is being put away or brought back (src/lib/playerBarAway.ts). From the start
    of its slide the host reaches the window's bottom; with bubbles standing on the bar it rides
@@ -27,19 +51,26 @@
   from { transform: translateY(0); }
   to { transform: translateY(calc(-1 * var(--kd-task-ride, 0px))); }
 }
-/* A bubble's place in the stack. The newest rests at the bottom; each one that stays lifts the
-   older ones by its own height (--kd-task-lift, measured by the host). */
+/* A bubble's place in the stack. The base, or else the newest, rests at the stack's edge; each
+   one that stays moves the others away from it by its own height (--kd-task-lift, measured by
+   the host). */
 .kd-task-slot {
   position: absolute;
   right: var(--kd-task-gap);
   bottom: var(--kd-task-gap);
   width: min(24rem, calc(100% - 2 * var(--kd-task-gap)));
-  transform: translateY(calc(-1 * var(--kd-task-lift, 0px)));
+  transform: translateY(calc(var(--kd-task-dir) * var(--kd-task-lift, 0px)));
   transition: transform var(--kd-task-in) var(--kd-task-in-ease);
 }
+.kd-task-host[data-place="top"] .kd-task-slot {
+  top: var(--kd-task-gap);
+  bottom: auto;
+}
 .kd-task {
-  /* From its place down to below the bar's edge, shadow included. */
-  --kd-task-drop: calc(100% + var(--kd-task-gap) + var(--kd-task-lift, 0px) + 20px);
+  /* From its place to where it is out of sight, its own height and then --kd-task-away: to
+     beyond the stack's edge, shadow included, or, for a bubble that rests beyond a base
+     bubble, to behind that bubble (the host says where). */
+  --kd-task-drop: calc(-1 * var(--kd-task-dir) * (100% + var(--kd-task-away, calc(var(--kd-task-gap) + var(--kd-task-lift, 0px) + var(--kd-task-edge)))));
   /* The list's own colour: a floating surface is set apart by its edge and shadow, the same
      ones the drawer and the menus use, not by a tone of its own. */
   --kd-task-surface: var(--kd-panel);
@@ -55,9 +86,10 @@
   pointer-events: auto;
   will-change: transform;
 }
-/* 460 ms up and 360 ms down: the song-change clock (src/lib/songSwapMotion.ts), which the host
-   passes in. Both ends of every keyframe are written out: WebKit keeps an animation with an
-   implied keyframe on the main thread. */
+/* 460 ms in and 360 ms out: the song-change clock (src/lib/songSwapMotion.ts), which the host
+   passes in. One pair of keyframes serves both places: --kd-task-drop lies below a bottom
+   bubble and above a top one. Both ends of every keyframe are written out: WebKit keeps an
+   animation with an implied keyframe on the main thread. */
 .kd-task[data-phase="in"] { animation: kd-task-rise var(--kd-task-in) var(--kd-task-in-ease) both; }
 .kd-task[data-phase="out"] { animation: kd-task-sink var(--kd-task-out) var(--kd-task-out-ease) both; }
 @keyframes kd-task-rise {
@@ -299,8 +331,8 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 /* The task's own live controls: a row along the bottom, under the summary or the open body.
    A task may give or take them while its bubble is up (the playing song: its transport, while
    the player bar is away). The row then unfolds open or folds away: its track goes between
-   nothing and the row's height while the row fades, and the bubble, which stands on its
-   bottom edge, grows upwards. Both ways run on the clock and curve the stack above is lifted
+   nothing and the row's height while the row fades, and the bubble, which is held by the edge
+   nearest its stack's, grows away from it (upwards at the bottom). Both ways run on the clock and curve the stack above is lifted
    by (--kd-task-in: the large-surface pair of the motion schema, --kd-motion-in and
    --kd-ease-out), and the host has told the stack where the bubble's height ends, so what is
    stacked on it rides along instead of following frame by frame. The summary above keeps its

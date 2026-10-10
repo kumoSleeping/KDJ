@@ -9,6 +9,14 @@ export type TaskTone = "info" | "success" | "error";
 
 export type TaskSize = "small" | "regular" | "large";
 
+/**
+ * Where a bubble comes up. `bottom` (the default): from behind the player bar's top edge, at
+ * the bottom right. `top`: from behind the bottom edge of the search row, at the top right,
+ * where the drawer hangs — for what answers a click up there, which would not be seen at the
+ * other end of the window. Each place has its own stack; a bubble leaves the way it came.
+ */
+export type TaskPlacement = "bottom" | "top";
+
 /** Why a bubble left. `timeout`: its stay ran out. `user`: dismissed on the bubble or by Esc.
  *  `caller`: its owner took it away. `crowded`: newer bubbles pushed it out. */
 export type TaskDismissReason = "timeout" | "user" | "caller" | "crowded";
@@ -69,6 +77,21 @@ export interface TaskBubbleSpec {
    */
   size?: TaskSize;
   /**
+   * Where the bubble comes up: `bottom` (the default) or `top`. Chosen by where the listener
+   * is looking when the task reports: `top` for the answer to something pressed in the top
+   * row. It is read when the bubble arrives; showing an id that is up at the other place
+   * sends that bubble off and brings a new one up where it is now wanted.
+   */
+  placement?: TaskPlacement;
+  /**
+   * This bubble is the floor of its stack: it rests nearest the edge the stack stands on,
+   * whatever arrives after it. Later bubbles rest beyond it, the newest nearest to it, and
+   * come out from behind it; none of them moves it. For the one bubble that is the window's
+   * furniture rather than a passing report (the playing song, which is the transport while
+   * the player bar is away).
+   */
+  base?: boolean;
+  /**
    * How long the bubble stays, in ms, before it rolls back down. Each kind of task chooses its
    * own: a song 5 s, a short note 3 s. 0 keeps it up until it is
    * dismissed: a pinned or opened bubble. Left out, the tone decides (see TASK_STAY_MS).
@@ -113,10 +136,14 @@ export interface TaskBubbleSpec {
 
 /** How long a bubble stays when its spec does not say. An error stays readable for longer. */
 export const TASK_STAY_MS: Record<TaskTone, number> = { info: 5_000, success: 5_000, error: 10_000 };
-/** More bubbles than this, and the oldest that are not kept up leave. */
+/** More bubbles than this in one place, and the oldest there that are not kept up leave. */
 export const TASK_VISIBLE_LIMIT = 3;
 /** Covers drawn before the rest is counted. */
 export const TASK_COVER_LIMIT = 3;
+
+export function taskPlacement(spec: Pick<TaskBubbleSpec, "placement">): TaskPlacement {
+  return spec.placement ?? "bottom";
+}
 
 export function taskStay(spec: Pick<TaskBubbleSpec, "stay" | "tone">): number {
   return spec.stay ?? TASK_STAY_MS[spec.tone ?? "info"];
