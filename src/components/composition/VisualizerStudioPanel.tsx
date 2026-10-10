@@ -87,7 +87,8 @@ type ContentState = "loading" | "ready" | "empty";
 
 /**
  * `inlineTrack`: the playing song's picture, hosted by another surface. `popup`: that picture
- * exists only as the floating window; closing that window closes the popup.
+ * exists only as the floating window; closing that window closes the popup. The window comes up
+ * with the song's first picture and not before, so a song with nothing to show never opens it.
  * `track`: the configuration of exactly this song (the right column's app); without either,
  * the song the store has open.
  */
@@ -117,7 +118,6 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   const [notice, setNotice] = useState("");
   const { fullscreen: expanded, applyFullscreen } = usePreviewFullscreen();
   const [detached, setDetached] = useState(false);
-  const floating = popup || detached;
   const setFloating = (value: boolean) => {
     if (popup && !value) useVisualizerPopup.getState().setOpen(false);
     else setDetached(value);
@@ -162,7 +162,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     observer.observe(target);
     return () => observer.disconnect();
   }, [inline]);
-  const previewRequested = !inline || previewVisible || floating || expanded || settingsOpen;
+  // The popup asks for its song's picture before its window exists: the window waits for it.
+  const previewRequested = !inline || previewVisible || popup || detached || expanded || settingsOpen;
   useEffect(() => {
     if (!inline || !previewRequested) return;
     // Hidden dock slots stay mounted to preserve editors, but are not requests to
@@ -283,6 +284,12 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     if (!loadAllowed || !p || !images.length || images.length !== p.scene.images.length) return null;
     try { return prepareStudio(p, images, analysis?.timeline ?? firstPaintTimeline, previewWidth); } catch { return null; }
   }, [p, images, analysis, firstPaintTimeline, previewWidth, loadAllowed]);
+  // The popup's window is up from the first picture this song could draw (its cover, or a
+  // picture saved with its project) until the song leaves. A song with neither keeps it away;
+  // a picture that is only being replaced does not take it down.
+  const pictured = useRef(false);
+  if (prepared) pictured.current = true;
+  const floating = popup ? pictured.current : detached;
   const emptyMedia = inline && !prepared && (draft ? draft.images.length === 0 : coverAvailable === false);
   const contentState: ContentState = prepared ? "ready" : emptyMedia || mediaFailed || (images.length > 0 && !!p && images.length === p.scene.images.length) ? "empty" : "loading";
   // Effects run after the canvas layout effect has painted the first complete frame.

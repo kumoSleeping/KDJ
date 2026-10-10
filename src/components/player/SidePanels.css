@@ -48,10 +48,12 @@
 .kd-activity-panel-host[hidden],
 .kd-split-aside[hidden],
 .kd-split-handle[hidden] { display: none !important; }
-/* The visualizer of the playing song lives in its floating window only. */
+/* The visualizer of the playing song lives in its floating window only. What stays here while
+   that window waits for a picture is not on screen, in the tab order or read out. */
 .kd-viz-popup-host {
   position: absolute;
   width: 0;
   height: 0;
   overflow: hidden;
+  visibility: hidden;
 }
