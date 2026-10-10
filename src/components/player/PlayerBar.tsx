@@ -131,6 +131,7 @@ import { updateStreamCue } from "../../lib/streamCue";
 import {
   cachedReleaseOverviewWaveform,
   mergeCachedStreamWaveform,
+  streamWaveformLayout,
   mediaBufferedRanges,
   prefetchWaveform,
   updateStreamWaveform,
@@ -192,6 +193,7 @@ import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
 import "./DeckSongSwap.css";
 import { PlayerVolume } from "./PlayerVolume";
 import { tracePlayback, watchMainThread } from "../../lib/playbackTrace";
+import { streamWaveformTrace } from "../../lib/streamWaveformTrace";
 import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
 import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
 import { LyricsButtonMenu } from "./LyricsButtonMenu";
@@ -231,6 +233,8 @@ interface StreamAnalysisPollSession {
   lastRevision: number;
   /** The waveform of `lastRevision` was merged as the finished one. */
   completeApplied: boolean;
+  /** What the last `stream-waveform` trace line written for this token said. */
+  traced: string;
 }
 
 /** Manager view of the two low-level playback Decks. The public performance surface is gone,
@@ -281,6 +285,7 @@ function subscribeStreamAnalysisPoll(
       terminal: false,
       lastRevision: -1,
       completeApplied: false,
+      traced: "",
     };
     streamAnalysisPollers.set(track.id, session);
   }
@@ -333,6 +338,17 @@ function subscribeStreamAnalysisPoll(
           );
           session!.lastRevision = progress.revision;
           session!.completeApplied = waveformComplete;
+        }
+        if (import.meta.env.DEV) {
+          // What the server said and where the rail put it, a few lines a song (see
+          // streamWaveformTrace.ts): the native log then tells a slow prefix from a squeeze.
+          const layout = streamWaveformLayout(track.id);
+          const trace = streamWaveformTrace(track.id, track.path.split(":")[1] ?? "", progress,
+            waveformComplete, totalDuration(), layout.rail, layout.finished);
+          if (trace.signature !== session!.traced) {
+            session!.traced = trace.signature;
+            tracePlayback("stream-waveform", trace.detail);
+          }
         }
         const allEnded = [...session!.subscribers].every((item) => item.ended());
         const delay = streamAnalysisPollDelay(
