@@ -58,22 +58,29 @@
   min-width: 0;
   height: 34px;
 }
+/* The key and, on its right, its two steps one above the other: raise on top, lower below. */
 .kd-eq-key {
   display: inline-grid;
-  grid-template-columns: 22px auto 22px;
+  grid-template-columns: auto 18px;
+  grid-template-rows: 15px 15px;
+  align-content: center;
   align-items: center;
+  column-gap: 3px;
+  row-gap: 1px;
 }
+.kd-eq-key > .kd-eq-value { grid-area: 1 / 1 / 3 / 2; }
+.kd-eq-step[data-step="up"] { grid-area: 1 / 2; }
+.kd-eq-step[data-step="down"] { grid-area: 2 / 2; }
 .kd-eq-step {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 28px;
+  width: 18px;
+  height: 15px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: 3px;
   background: transparent;
   color: var(--kd-text-body);
-  font: 700 15px/1 var(--kd-font);
   cursor: pointer;
 }
 .kd-eq-step:hover:not(:disabled) { color: var(--kd-text); background: var(--kd-hover); }
@@ -87,6 +94,20 @@
   min-width: 0;
 }
 .kd-eq-key > .kd-eq-value { justify-items: center; min-width: 2.5rem; }
+/* Sakura98: a 98 spin control — two small raised keys stacked inside the key's field. These
+   outweigh the pack's own stepper rule, which was written for keys on either side. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-eq .kd-eq-key {
+  grid-template-columns: auto 16px;
+  grid-template-rows: 12px 12px;
+  column-gap: 2px;
+  row-gap: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-eq .kd-eq-key > .kd-eq-step {
+  width: 16px;
+  height: 12px;
+  border-radius: 0;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-eq .kd-eq-key > .kd-eq-step > svg { width: 10px; height: 10px; }
 .kd-eq-value > small {
   display: inline-flex;
   align-items: baseline;
