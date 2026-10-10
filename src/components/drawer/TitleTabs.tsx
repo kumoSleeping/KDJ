@@ -32,6 +32,7 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
   children?: ReactNode;
 }) {
   const list = useRef<HTMLDivElement>(null);
+  const pick = (id: T) => { if (id !== value) onChange?.(id); };
   const move = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!tabs?.length || event.altKey || event.ctrlKey || event.metaKey) return;
     const at = tabs.findIndex(tab => tab.id === value);
@@ -41,7 +42,7 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
     event.preventDefault();
     event.stopPropagation();
     const target = tabs[(next + tabs.length) % tabs.length];
-    onChange?.(target.id);
+    pick(target.id);
     list.current?.querySelector<HTMLElement>(`[data-tab="${target.id}"]`)?.focus({ preventScroll: true });
   };
   return <header className="kd-title-tabs">
@@ -49,7 +50,11 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
       {tabs?.length ? <div ref={list} className="kd-title-tabs-list" role="tablist" aria-label={label} onKeyDown={move}>
         {tabs.map(tab => <button key={tab.id} type="button" role="tab" data-tab={tab.id}
           aria-selected={tab.id === value} aria-controls={panelId} aria-label={tab.title} title={tab.title}
-          tabIndex={tab.id === value ? 0 : -1} onClick={() => onChange?.(tab.id)}>
+          tabIndex={tab.id === value ? 0 : -1}
+          // A page word answers the press itself, not its release; a finger, the keyboard and
+          // assistive technology arrive as a click.
+          onPointerDown={event => { if (event.button === 0 && event.pointerType !== "touch") pick(tab.id); }}
+          onClick={() => pick(tab.id)}>
           <span>{tab.label}</span>
         </button>)}
       </div> : <h2 className="kd-title-tabs-title">{title ?? label}</h2>}

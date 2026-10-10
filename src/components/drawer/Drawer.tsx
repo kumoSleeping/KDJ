@@ -31,10 +31,12 @@ export function useDrawer(): string | null { return useContext(DrawerContext); }
 function fittingHeight(sheet: HTMLElement, body: HTMLElement): number | null {
   if (body.querySelector("[data-drawer-pending]")) return null;
   // A part that is squeezed to nothing still counts; one that is not drawn at all (a page that
-  // is kept but hidden) does not.
+  // is kept but hidden) does not, nor does the still copy of a page that is sliding out: the
+  // height follows the page that arrives from the moment the switch starts.
   const scrollers = [body, ...body.querySelectorAll<HTMLElement>(".kd-scroll, [data-drawer-scroll]")].filter(node => {
     const overflow = getComputedStyle(node).overflowY;
-    return overflow !== "visible" && overflow !== "hidden" && overflow !== "clip" && node.getClientRects().length > 0;
+    return overflow !== "visible" && overflow !== "hidden" && overflow !== "clip" && node.getClientRects().length > 0
+      && !node.closest(".kd-slide-ghost");
   });
   if (!scrollers.length) return null;
   const range = document.createRange();
@@ -51,6 +53,26 @@ function fittingHeight(sheet: HTMLElement, body: HTMLElement): number | null {
   });
   // Whole pixels, rounded up so that nothing is left to scroll; the margin absorbs float noise.
   return Math.ceil(sheet.getBoundingClientRect().height + lack - 0.05);
+}
+
+/** The title row: the title or the page words, the caption, the app's tools and the roll-up key. */
+function DrawerTitle({ spec, page, leaving, panelId }: { spec: DrawerSpec; page?: string; leaving: boolean; panelId: string }) {
+  return <TitleTabs label={spec.title} title={spec.title} tabs={spec.pages} value={page}
+    onChange={leaving ? undefined : spec.onPage} panelId={spec.pages ? panelId : undefined} caption={spec.caption}>
+    {spec.tools}
+    <button type="button" className="kd-drawer-rollup" aria-label={`收起${spec.title}`} title={`收起${spec.title} · Esc`}
+      onClick={() => { spec.close(); }}>
+      <ChevronsRight size={16} aria-hidden="true" />
+    </button>
+  </TitleTabs>;
+}
+
+/**
+ * The title row of an app with pages. It alone reads the page in view (`usePage`), so a switch
+ * of page redraws this row and the body that follows the same state, and nothing above them.
+ */
+function PagedTitle({ usePage, ...title }: { spec: DrawerSpec; usePage(): string; leaving: boolean; panelId: string }) {
+  return <DrawerTitle {...title} page={usePage()} />;
 }
 
 function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart, onHeightStart, onHeightReset }: {
@@ -126,7 +148,7 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
     const changed = new MutationObserver(schedule);
     changed.observe(node, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "open", "aria-expanded", "data-drawer-pending"] });
     return () => { cancelAnimationFrame(frame); resized.disconnect(); changed.disconnect(); };
-  }, [sized, spec.page, leaving]);
+  }, [sized, leaving]);
   // The animation is the usual end of a leaving drawer; the timer covers a tab in the background.
   useEffect(() => {
     if (!leaving) return;
@@ -144,14 +166,8 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
       else setSettled(true);
     }}>
     <DrawerContext.Provider value={spec.id}>
-      <TitleTabs label={spec.title} title={spec.title} tabs={spec.pages} value={spec.page}
-        onChange={leaving ? undefined : spec.onPage} panelId={spec.pages ? panelId : undefined} caption={spec.caption}>
-        {spec.tools}
-        <button type="button" className="kd-drawer-rollup" aria-label={`收起${spec.title}`} title={`收起${spec.title} · Esc`}
-          onClick={() => { spec.close(); }}>
-          <ChevronsRight size={16} aria-hidden="true" />
-        </button>
-      </TitleTabs>
+      {spec.usePage ? <PagedTitle spec={spec} usePage={spec.usePage} leaving={leaving} panelId={panelId} />
+        : <DrawerTitle spec={spec} leaving={leaving} panelId={panelId} />}
       <div ref={body} className="kd-drawer-body" id={panelId} role={spec.pages ? "tabpanel" : undefined}
         data-late={eager ? undefined : "true"}>{built ? spec.body : null}</div>
     </DrawerContext.Provider>

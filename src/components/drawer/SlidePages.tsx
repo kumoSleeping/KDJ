@@ -1,7 +1,7 @@
 import { Component, createRef, type ReactNode } from "react";
 import "./SlidePages.css";
 
-export const SLIDE_PAGES_MS = 380;
+export const SLIDE_PAGES_MS = 300;
 const EASE = "cubic-bezier(0.22, 0.9, 0.26, 1)";
 
 /** A still copy of the page that is on screen, scroll positions included. */

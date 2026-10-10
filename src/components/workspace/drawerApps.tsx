@@ -1,11 +1,11 @@
 import { useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { Download, Settings, TextQuote } from "lucide-react";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
-import { settingsPages, useSettingsPage } from "../../lib/settingsPages";
+import { settingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { visualizerExportActive } from "../../lib/visualizerExportQueue";
-import { studioTabs, useStudioTab } from "../../lib/visualizerStudioTabs";
+import { studioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
@@ -40,6 +40,12 @@ const songLine = (track: { title?: string | null; filename?: string | null; arti
   return track.artist ? `${name} · ${track.artist}` : name || undefined;
 };
 
+// The page in view of each app with pages. The drawer's title row calls these itself, so a
+// switch of page is not a change of the workspace that lists the apps.
+const useTaskView = () => useTaskPanelStore(state => state.view);
+const useSettingsPageInView = () => useSettingsPage(state => state.page);
+const useStudioTabInView = () => useStudioTab(state => state.tab);
+
 /**
  * The apps the list's drawer can show that are opened from stores, each described by the drawer
  * schema (see docs/drawer-schema.md). Only open apps are listed; the workspace shows the one
@@ -49,10 +55,7 @@ export function useDrawerApps(): DrawerSpec[] {
   const lyrics = useSidePanels(state => state.lyrics);
   const downloads = useSidePanels(state => state.downloads);
   const settings = useAppStore(state => state.showSettings);
-  const taskView = useTaskPanelStore(state => state.view);
-  const settingsPage = useSettingsPage(state => state.page);
   const visualizerTrack = useVisualizerStudioStore(state => state.track);
-  const studioTab = useStudioTab(state => state.tab);
   const metaId = useTrackMetaEditor(state => state.trackId);
   const metaTrack = useLibraryStore(state => metaId === null ? undefined : state.summaryById.get(metaId));
   const playing = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
@@ -71,7 +74,7 @@ export function useDrawerApps(): DrawerSpec[] {
     // Things are dropped on its blank space, so it keeps room even while it lists nothing.
     extent: "at-least-half",
     pages: taskViews,
-    page: taskView,
+    usePage: useTaskView,
     onPage: id => useTaskPanelStore.getState().setView(id as TaskPanelView),
     body: <div className="kd-task-window kd-download-window kd-drawer-tasks"><DownloadTaskPages /></div>,
     close: () => useSidePanels.getState().setDownloads(false),
@@ -81,8 +84,8 @@ export function useDrawerApps(): DrawerSpec[] {
     title: "设置",
     extent: "fit",
     pages: settingsPages,
-    page: settingsPage,
-    onPage: id => useSettingsPage.getState().setPage(id as typeof settingsPage),
+    usePage: useSettingsPageInView,
+    onPage: id => useSettingsPage.getState().setPage(id as SettingsPage),
     body: <DrawerSettings />,
     close: () => useAppStore.getState().dismissOverlay(),
   });
@@ -92,8 +95,8 @@ export function useDrawerApps(): DrawerSpec[] {
     caption: songLine(visualizerTrack),
     extent: "fit",
     pages: studioTabs,
-    page: studioTab,
-    onPage: id => useStudioTab.getState().setTab(id as typeof studioTab),
+    usePage: useStudioTabInView,
+    onPage: id => useStudioTab.getState().setTab(id as StudioTab),
     body: <VisualizerDock />,
     close: () => useVisualizerStudioStore.getState().requestClose(),
   });

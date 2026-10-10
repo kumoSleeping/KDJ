@@ -67,7 +67,11 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   as its title (`TitleTabs`: the page in view at title size in full-strength text colour, the others
   smaller and quiet beside it). The body wraps the part that changes in
   `<SlidePages page={…} order={…}>`, which slides the old picture out and the new one in from the
-  side its title lies on. Pages need not stay mounted.
+  side its title lies on. Pages need not stay mounted. The page in view is read where it is
+  shown: the spec gives `usePage`, a hook the title row calls, and the body reads the same state
+  itself. Never pass the page down from the component that lists the apps — a switch of page
+  would then redraw the whole workspace before the drawer could answer. A page word answers the
+  press, not its release, and the panel's height starts for the new page as the slide starts.
 - **The caption is on the title's line.** What the app belongs to right now (a song, a folder)
   is `caption`: small, in the muted colour, at the far end of the title row before the tools,
   on the title's baseline. It has only the room the title leaves and is cut short with an
@@ -106,7 +110,7 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
      caption: songLine(track),        // optional: what it belongs to right now
      extent: "at-least-half",         // most apps: "fit"
      pages: taskViews,                // optional: [{ id, label, title? }]
-     page: taskView,
+     usePage: useTaskView,            // a hook: () => useTaskPanelStore(state => state.view)
      onPage: id => setTaskView(id),
      tools: <button …/>,              // optional compact actions before the close button
      body: <DownloadTaskPages />,     // uses <SlidePages page={taskView} order={ids}>

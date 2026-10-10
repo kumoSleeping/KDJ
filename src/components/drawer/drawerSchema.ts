@@ -49,7 +49,12 @@ export interface DrawerSpec {
   extent: DrawerExtent;
   /** Pages switched from the title row. The body wraps what changes in `SlidePages`. */
   pages?: readonly DrawerPage[];
-  page?: string;
+  /**
+   * The page in view, as a hook the title row calls. The page is read where it is shown — by
+   * the title and by the body — so a switch redraws those two and nothing around the drawer.
+   * Always the same hook for an app: `() => useStore(state => state.page)`.
+   */
+  usePage?(): string;
   onPage?(id: string): void;
   /** Compact actions at the right end of the title row, before the close button. */
   tools?: ReactNode;
