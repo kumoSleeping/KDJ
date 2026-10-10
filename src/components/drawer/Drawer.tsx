@@ -1,6 +1,7 @@
 import { createContext, startTransition, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type Ref } from "react";
 import { ChevronsRight } from "lucide-react";
 import { TitleTabs } from "./TitleTabs";
+import { useSurfaceBackdrop } from "../common/SurfaceBackdrop";
 import { createPortal } from "react-dom";
 import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import { raiseSurface } from "../../lib/surfaceOrder";
@@ -155,9 +156,11 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
     const timer = window.setTimeout(onGone, LEAVE_MS + 120);
     return () => window.clearTimeout(timer);
   }, [leaving, onGone]);
+  // The app's own layer under the whole panel, and the ink that layer asks for.
+  const backdrop = useSurfaceBackdrop(spec.backdrop);
   return <section ref={layer} className="kd-drawer" data-app={spec.id} data-extent={spec.extent}
-    style={fit === null ? undefined : { "--kd-drawer-fit": `${fit}px` } as CSSProperties}
-    data-leaving={leaving || undefined} data-held={held || undefined} data-settled={settled && !leaving || undefined}
+    style={fit === null ? backdrop.style : { ...backdrop.style, "--kd-drawer-fit": `${fit}px` } as CSSProperties}
+    {...backdrop.attributes} data-leaving={leaving || undefined} data-held={held || undefined} data-settled={settled && !leaving || undefined}
     role="region" aria-label={leaving ? undefined : spec.title}
     aria-hidden={leaving || undefined} inert={leaving}
     onAnimationEnd={event => {
@@ -165,6 +168,7 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
       if (leaving) onGone();
       else setSettled(true);
     }}>
+    {backdrop.layer}
     <DrawerContext.Provider value={spec.id}>
       {spec.usePage ? <PagedTitle spec={spec} usePage={spec.usePage} leaving={leaving} panelId={panelId} />
         : <DrawerTitle spec={spec} leaving={leaving} panelId={panelId} />}

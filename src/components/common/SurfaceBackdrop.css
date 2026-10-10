@@ -1,0 +1,25 @@
+/* The backdrop slot of a floating surface (SurfaceBackdrop.tsx). The layer lies behind the
+   surface's content and inside its own clip: the surface is its own stacking context, so a
+   layer below zero is still above the surface's background and cannot slip under the surface;
+   nothing the surface holds has to be lifted over it. A surface that is not positioned says
+   so itself (the lyrics block does). */
+[data-backdrop] { isolation: isolate; }
+.kd-backdrop {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+/* The ink of a surface whose backdrop has said what reads on it. Only this surface: the
+   properties are set on it and inherited by what it holds. `--kd-theme` is ink in the built-in
+   themes and has to follow here, because the document resolved it before these were set. */
+[data-backdrop-ink] {
+  --kd-text: var(--kd-backdrop-text);
+  --kd-text-body: var(--kd-backdrop-body);
+  --kd-muted: var(--kd-backdrop-muted);
+  --kd-faint: var(--kd-backdrop-faint);
+  --kd-theme: var(--kd-backdrop-text);
+  --kd-theme-ink: var(--kd-backdrop-base);
+  color: var(--kd-backdrop-text);
+}

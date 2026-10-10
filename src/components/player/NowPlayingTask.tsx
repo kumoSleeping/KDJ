@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { PanelBottomOpen, Pencil, PictureInPicture2, Pin, ScrollText } from "lucide-react";
+import { Palette, PanelBottomOpen, Pencil, PictureInPicture2, Pin, ScrollText } from "lucide-react";
 import { formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
 import { displayTrackKey } from "../../lib/keyDisplay";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
@@ -12,6 +12,7 @@ import {
   useNowPlayingInfo,
 } from "../../lib/nowPlayingInfo";
 import { newerRevision } from "../../lib/coverLoad";
+import { useSongColor } from "../../lib/songColor";
 import { songSwapEntranceDelay } from "../../lib/songSwapMotion";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
@@ -22,6 +23,7 @@ import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
 import { trackTaskCover } from "../tasks/taskCovers";
 import { localDownloadPlatform } from "./LocalTrackCacheFacts";
 import { NowPlayingTransport } from "./NowPlayingTransport";
+import { SongColorBackdrop, useSongColorAvailable } from "./SongColorBackdrop";
 import { useLyricsEntry } from "./lyricsEntry";
 import "./NowPlayingTask.css";
 
@@ -93,6 +95,10 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     const info = useNowPlayingInfo.getState();
     if (!info.pinned && !info.barAway) info.close();
   });
+  // 歌曲色彩: the cover's colours behind this bubble and the lyrics. Not offered where a theme
+  // pack draws the two surfaces its own way.
+  const colourOffered = useSongColorAvailable();
+  const colourOn = useSongColor(state => state.on);
   const live = useRef({ track, lyrics, onPopup });
   live.current = { track, lyrics, onPopup };
 
@@ -136,6 +142,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
       dismiss: barAway ? { label: "展开播放条", icon: <PanelBottomOpen size={14} aria-hidden="true" /> } : undefined,
       // The transport only while the bar is away: beside the bar the bubble is a message.
       controls: barAway ? <NowPlayingTransport track={track} /> : undefined,
+      backdrop: colourOffered ? <SongColorBackdrop surface="bubble" /> : undefined,
       // The song's toggles, then its editor, then the bubble's own keys.
       actions: [
         ...(video ? [] : [{
@@ -149,6 +156,12 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
           pressed: popupOn,
           icon: <PictureInPicture2 size={14} aria-hidden="true" />,
           onSelect: () => live.current.onPopup?.(),
+        }] : []),
+        ...(colourOffered ? [{
+          id: "color", label: colourOn ? "关闭歌曲色彩" : "打开歌曲色彩", pressed: colourOn,
+          icon: <Palette size={14} aria-hidden="true" />,
+          // The colour spreads from this key, and drains back into it.
+          onSelect: (bubble: HTMLElement) => useSongColor.getState().toggle(bubble.querySelector('[data-task-action="color"]')),
         }] : []),
         ...(library ? [{
           id: "meta", label: "编辑 Meta", pressed: editingMeta,
@@ -176,7 +189,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching]);
+  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
   return null;
 }

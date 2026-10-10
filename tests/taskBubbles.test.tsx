@@ -160,7 +160,10 @@ test("the playing song's bubble: a message beside the bar, the transport while t
   assert.equal(pinned.spec.placement, undefined, "at the bottom");
   assert.equal(pinned.spec.body, undefined, "it does not expand");
   assert.equal(pinned.spec.origin?.label, "B站", "where the file was downloaded from");
-  assert.deepEqual(keys(), ["lyrics", "popup", "meta", "pin"]);
+  // The song's toggles (歌词, 小窗, 歌曲色彩), its editor, then the bubble's own pin.
+  assert.deepEqual(keys(), ["lyrics", "popup", "color", "meta", "pin"]);
+  assert.equal(entry()!.spec.actions!.find(action => action.id === "color")!.pressed, false, "歌曲色彩 is off until it is switched on");
+  assert.ok(pinned.spec.backdrop != null, "the bubble offers its backdrop slot to the song's colours");
   entry()!.spec.actions!.find(action => action.id === "popup")!.onSelect(dom.window.document.body);
   assert.equal(popups, 1, "the bar's own toggle");
 

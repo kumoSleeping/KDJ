@@ -12,7 +12,8 @@ The drawer is a **floating panel** with two parts:
 - **The panel** slides in from the right over the list, below that row, and rests free of
   every edge, with a gap all round, rounded corners, a hairline edge and a soft shadow — the same
   floating surface as a task bubble or a menu (`--kd-float-edge`, `--kd-float-shadow`). It is the
-  list's own colour: never give it a tone of its own. It carries the app's title row (title or
+  list's own colour: never give it a tone of its own (one narrow exception: the lyrics under
+  歌曲色彩, see "A backdrop" below). It carries the app's title row (title or
   page tabs, then at the far end the caption, tools and the roll-up button) and its body. It
   covers the list; it never takes a column from it, so the list does not reflow while the drawer
   moves. Its width is `--kd-drawer-w` (the dragged `--kd-right` up to 45 % of the list's column).
@@ -78,6 +79,19 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   ellipsis first; the page words are never squeezed by it. It keeps to the far end so that it
   does not move when the page words change size. Never write it, or anything else, on a line of
   its own under the title.
+- **A backdrop — the one exception to the panel's colour.** A spec may give `backdrop`: a layer
+  under the whole panel, title row included. The host draws it in the panel's backdrop slot
+  (`src/components/common/SurfaceBackdrop.tsx`): the panel's first child, absolutely placed, one
+  step below everything on the panel inside the panel's own stacking context (`isolation`, so
+  the panel is not a containing block for anything it was not one for before) and inside its
+  rounded clip. The panel's extent, edge, shadow, resize edges and motion are untouched, and
+  the layer takes no pointer. A layer that changes what can be read calls `useBackdropInk()`;
+  the panel then carries `data-backdrop-ink` and takes its text colours from the layer, scoped
+  to that panel. This exists for one thing: the lyrics app while the listener has switched
+  歌曲色彩 on (`SongColorBackdrop`, described in `docs/task-bubbles.md`), where the panel is the
+  song's colours instead of the list's. No other app gives its panel a tone; do not use the
+  slot for decoration. Where the lyrics are shown without a drawer (the sheet of a narrow
+  window) the lyrics block has the same slot (`backdrop` on `LyricsDetailPanel`).
 - **No divider lines** inside a drawer (see AGENTS.md): groups are separated by spacing and type.
 - **Motion.** The panel slides in from beyond the window's right edge in one decelerating move
   and stops; it leaves the same way, accelerating. A new app waits until the one before it has

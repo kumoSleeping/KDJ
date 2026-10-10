@@ -60,6 +60,14 @@ export interface DrawerSpec {
   tools?: ReactNode;
   body: ReactNode;
   /**
+   * A layer of the app's own under the whole panel, title row included: the host draws it in
+   * the panel's backdrop slot (src/components/common/SurfaceBackdrop.tsx), inside the panel's
+   * shape and behind everything on it. The panel is the list's colour and an app gives it no
+   * tone of its own; this is the one narrow exception, for the lyrics under 歌曲色彩, whose
+   * layer also says which ink reads on it (`useBackdropInk`).
+   */
+  backdrop?: ReactNode;
+  /**
    * Puts the app away. Returns false when it refuses (an unsaved draft): the drawer then
    * stays, and an app that was opened over it gives way instead.
    */

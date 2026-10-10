@@ -18,6 +18,7 @@ import { SlidePages } from "../drawer/SlidePages";
 import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
+import { SongColorBackdrop } from "../player/SongColorBackdrop";
 import { requestPlayingLyrics } from "../player/lyricsEntry";
 import { DownloadTaskPages, taskViews } from "../player/TaskPanels";
 import { SettingsPanel } from "../settings/SettingsPanel";
@@ -66,6 +67,7 @@ export function useDrawerApps(): DrawerSpec[] {
     caption: songLine(playing),
     extent: "two-thirds",
     body: <DrawerLyrics />,
+    backdrop: <SongColorBackdrop surface="lyrics" />,
     close: () => useSidePanels.getState().setLyrics(false),
   });
   if (downloads) apps.push({

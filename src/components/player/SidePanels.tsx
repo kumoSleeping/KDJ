@@ -4,6 +4,7 @@ import { useSidePanels } from "../../lib/sidePanels";
 import { PanelCollapseContext, PanelDockedContext } from "../common/panelCollapse";
 import { DownloadTaskPanel } from "./TaskPanels";
 import { LyricsDetailPanel } from "./LyricsView";
+import { SongColorBackdrop } from "./SongColorBackdrop";
 import "./SidePanels.css";
 
 /** The lyrics as one app of the right column. */
@@ -43,7 +44,7 @@ export function SidePanels() {
   return <section className="kd-side-panels" aria-label="侧栏">
     {lyrics && track && <PanelCollapseContext.Provider
       value={{ label: "歌词", collapse: () => useSidePanels.getState().setLyrics(false) }}>
-      <LyricsDetailPanel track={track} reserveEmpty visibleHeader />
+      <LyricsDetailPanel track={track} reserveEmpty visibleHeader backdrop={<SongColorBackdrop surface="lyrics" />} />
     </PanelCollapseContext.Provider>}
     {downloads && <PanelCollapseContext.Provider
       value={{ label: "下载与导出", collapse: () => useSidePanels.getState().setDownloads(false) }}>

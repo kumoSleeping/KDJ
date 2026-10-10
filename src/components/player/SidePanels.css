@@ -36,6 +36,9 @@
 .kd-side-panels > .kd-detail-lyrics-panel .kd-async-panel-clip { display: flex; flex-direction: column; }
 .kd-side-panels > .kd-detail-lyrics-panel .kd-async-panel-space { flex: 1; height: 0; min-height: 0; }
 .kd-side-panels > .kd-detail-lyrics-panel .kd-lyrics[data-has-content] { height: 100%; max-height: none; }
+/* The lyrics block carries its own backdrop here (no drawer panel does): it is what the layer
+   is laid out against. */
+.kd-side-panels .kd-lyrics[data-backdrop] { position: relative; }
 /* Alone, the task list fills the column; beside the lyrics it keeps a fixed share. */
 .kd-side-panels > .kd-download-window:only-child { flex: 1 1 0; }
 .kd-side-panels > .kd-download-window:only-child > .kd-task-window-body {
