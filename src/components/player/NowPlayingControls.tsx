@@ -6,6 +6,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import type { KeyNotation, Track } from "../../types";
 import { camelotColor } from "../../lib/camelot";
 import { displayTransposedTrackKey, keyTextToCamelot } from "../../lib/keyDisplay";
@@ -225,9 +226,13 @@ function NowPlayingControls({
       </div>
 
       <div className="kd-eq-readouts">
+        {/* The readout with its two steps as a small vertical pair on its right: raise above,
+            lower below (placed by PlayerEq.css; the order here is the keyboard's). */}
         <div className="kd-eq-key" role="group" aria-label="音调">
-          <button type="button" className="kd-eq-step" aria-label="降低一个半音" title="降低一个半音"
-            disabled={!ready || pitchDraft <= -12} onClick={() => setPitch(pitchDraft - 1)}>−</button>
+          <button type="button" className="kd-eq-step" data-step="down" aria-label="降低一个半音" title="降低一个半音"
+            disabled={!ready || pitchDraft <= -12} onClick={() => setPitch(pitchDraft - 1)}>
+            <ChevronDown size={12} strokeWidth={2.6} aria-hidden="true" />
+          </button>
           <span className="kd-eq-value" title={pitchDraft === 0 ? undefined : `${pitchDraft > 0 ? "+" : ""}${pitchDraft} 个半音`}>
             <small>KEY{pitchDraft === 0 ? null : <i>{pitchDraft > 0 ? "+" : ""}{pitchDraft}</i>}</small>
             <strong
@@ -236,8 +241,10 @@ function NowPlayingControls({
                 : undefined}
             >{currentKey || "—"}</strong>
           </span>
-          <button type="button" className="kd-eq-step" aria-label="升高一个半音" title="升高一个半音"
-            disabled={!ready || pitchDraft >= 12} onClick={() => setPitch(pitchDraft + 1)}>+</button>
+          <button type="button" className="kd-eq-step" data-step="up" aria-label="升高一个半音" title="升高一个半音"
+            disabled={!ready || pitchDraft >= 12} onClick={() => setPitch(pitchDraft + 1)}>
+            <ChevronUp size={12} strokeWidth={2.6} aria-hidden="true" />
+          </button>
         </div>
         <span className="kd-eq-value" data-kind="bpm" data-warn={analysisWarning ? "true" : undefined}
           title={analysisWarning || (confidence != null ? `节拍置信度 ${Math.round(confidence * 100)}%` : undefined)}>

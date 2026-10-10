@@ -116,6 +116,7 @@ import {
   playTrack,
 } from "../../lib/playTrack";
 import { getPlayingTrack, setPlayingTrack } from "../../lib/playingTrack";
+import { useLayoutSignals } from "../../lib/useLayoutMode";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
 import {
   ARROW_KEY_LIST_STEP_EVENT,
@@ -184,6 +185,7 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
 import { NowPlayingTask } from "./NowPlayingTask";
+import { PlayerBarCollapseKey, PlayerBarReturnKey, playerBarPhaseProps, usePlayerBarPhase } from "./PlayerBarAway";
 import { BarLyricsEntry, BarMetaEntry } from "./BarSongEntries";
 import { useDeckSongSwap } from "./deckSongSwap";
 import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
@@ -411,6 +413,7 @@ const BarLyricsHost = memo(LyricsHost);
 const BarInfoHost = memo(NowPlayingTask);
 const BarModeButton = memo(PlaybackModeButton);
 const BarEq = memo(PlayerEq);
+const BarCollapseKey = memo(PlayerBarCollapseKey);
 const showEqNotice = (text: string) => {
   showNotice(text);
 };
@@ -546,6 +549,12 @@ function PlayerDeck({
 }
 
 export function PlayerBar() {
+  // The bar can be put away on the desktop's ordinary wide bar. The layered bar of a tall
+  // window and the phone layouts keep it: there the bar is the whole of the transport.
+  const barLayout = useLayoutSignals();
+  const collapseOffered = !barLayout.tall && !barLayout.portrait
+    && window.kdj?.platform !== "android" && window.kdj?.platform !== "ios";
+  const barPhase = usePlayerBarPhase(collapseOffered);
   const mobileNative = usesNativeMobilePlayer();
   const playerRuntime = runtimePlayer();
   const desktopNative = playerRuntime.kind === "desktop-native";
@@ -4652,6 +4661,7 @@ export function PlayerBar() {
     <div
       className="kd-player"
       data-pip={pipDriving ? "true" : undefined}
+      {...playerBarPhaseProps(barPhase)}
     >
       {/* 这里不再渲染 <audio>：播放元素归 djEngine 所有（两台 deck 互换正主），
           事件监听在上面的 effect 里挂到 frontEl 上 */}
@@ -4684,6 +4694,12 @@ export function PlayerBar() {
         />
       </div>
       <BarInfoHost trackId={track?.id ?? null} playing={playing} />
+      {barPhase === "away" ? (
+        <PlayerBarReturnKey
+          cover={currentBarView?.cover ?? ""}
+          spinning={Boolean(currentBarView) && (transitionShowing || performanceDecks[barCurrentIndex].playing)}
+        />
+      ) : null}
 
       {/* 三颗走带键：上一首 / 播放停止 / 下一首。
           全是裸图标，没有按钮框——一条播放条上摆三个描边方块太吵，
@@ -4898,6 +4914,7 @@ export function PlayerBar() {
               : `−${formatDuration(remaining)} / ${formatDuration(playbackDuration)}`
             : timeDisplayMode === "elapsed" ? "--:-- / --:--" : "−−:−− / −−:−−"}
         </span>
+        {collapseOffered ? <BarCollapseKey /> : null}
         </div>
       </div>
 
@@ -4920,7 +4937,10 @@ export function PlayerBar() {
         {/* 本地视频沿用曲库分析波形；网络视频没有音频波形时保留细进度条。
             在线试听则按需解码真实波形，解码未完成时由 Waveform 自己显示进度降级。 */}
         <div className="kd-player-wave-stage">
-          {pipDriving && pipSession?.source === "local" ? (
+          {barPhase === "away" ? (
+            // Out of sight, nothing is drawn: the waveform comes back with the bar.
+            <div className="kd-player-wave-idle" aria-hidden="true" />
+          ) : pipDriving && pipSession?.source === "local" ? (
           <Waveform
             className="kd-player-wave"
             renderProfile="release-overview"

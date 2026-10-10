@@ -41,6 +41,12 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   original. Where a task's covers come from is decided in `taskCovers.ts` only.
 - **Fuller content** goes in `body`; the host draws the control that expands it inside the same
   bubble. `replacesSummary` hides the compact summary while a body that restates it is open.
+- **Live controls** go in `controls`: one row along the bottom of the bubble, in the compact and
+  the expanded form alike. The task supplies the controls, the host their row. The playing song
+  puts its mini transport there (`NowPlayingTransport.tsx`): previous, play / pause, next and a
+  progress line that is the song's mini waveform when it has one. They send the player's own
+  commands (`requestPlayerCommand`) and read the position from the player session without
+  re-rendering the bubble.
 - **Motion.** 460 ms up, 360 ms down, the easings of `src/lib/songSwapMotion.ts`; transform and
   opacity only; under reduced motion a short fade. A bubble with `song` belongs to the playing
   song: when that changes while the bubble is up, it rolls down with the old song and rises with
@@ -48,6 +54,15 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
 - **The drawer.** `--kd-info-lift` is published only for a bubble that is kept up, so the drawer
   over the list ends above it; a bubble that leaves by itself may cover the drawer's bottom for
   its stay.
+- **The bar put away.** The player bar can slide down out of the window
+  (`src/lib/playerBarAway.ts`; a key at the bottom-left corner brings it back). The stack then
+  stands on the window's bottom edge; bubbles that are up when the slide starts ride the bar's
+  top edge while it slides. While
+  the bar is away the playing song's bubble is kept up as if it were pinned, because it is the
+  transport — until the listener dismisses or unpins it; then only new songs bring it up, for
+  their stay, until the bar is put away again or they pin or open it. That state is separate
+  from the pin (`nowPlayingKeptAway` in `src/lib/nowPlayingInfo.ts`): when the bar returns the
+  bubble is held by what held it before.
 - **No divider lines** inside a bubble (see AGENTS.md), and nothing is written in an empty one.
 
 ## Adding a kind of task
@@ -87,7 +102,7 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 
 | Task | Bubble | Where |
 | --- | --- | --- |
-| A song starts (not pause/resume) | `now-playing`: cover, title, artist, BPM · key · length · format; 歌词, 编辑 Meta, 固定; expands to the library's summary | `NowPlayingTask.tsx` |
+| A song starts (not pause/resume) | `now-playing`: cover, title, artist, BPM · key · length · format; 歌词, 编辑 Meta, 固定; the mini transport; expands to the library's summary | `NowPlayingTask.tsx` |
 | Downloads started / progress / ended / failed | `downloads`: one bubble per run | source `downloads` |
 | Exports added / started / ended / failed (mixing and visualizer) | `exports` | source `exports` |
 | A folder import ended or failed | `import` | source `imports` |

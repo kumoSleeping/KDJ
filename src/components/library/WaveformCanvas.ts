@@ -546,3 +546,57 @@ export function drawWaveformCanvas(
     );
   }
 }
+
+/** How wide one slice of a growing stretch is, in CSS px: every slice has one height. */
+const PUSH_SLICE_PX = 3;
+
+/** A stretch of the picture that is growing in: fractions of the canvas width and its bars' level. */
+export interface WaveformPushStretch {
+  from: number;
+  to: number;
+  /** How tall the bars at `at` (a fraction of the width) stand right now, 0..1. */
+  level(at: number): number;
+}
+
+/**
+ * One frame of a picture that arrives in pieces (see waveformSongMotion.ts). `picture` is the
+ * finished waveform, painted off screen at the size of `canvas`. Inside every stretch the bars
+ * are copied from it slice by slice, squeezed about the centre line to the level their push has
+ * reached; outside the stretches the canvas keeps what it has, or takes the whole picture when
+ * `whole` is set (a new piece has just arrived). Nothing of the waveform is rendered again here.
+ */
+export function drawWaveformPushFrame(
+  canvas: HTMLCanvasElement,
+  picture: HTMLCanvasElement,
+  stretches: readonly WaveformPushStretch[],
+  whole: boolean,
+): void {
+  if (canvas.width !== picture.width) canvas.width = picture.width;
+  if (canvas.height !== picture.height) canvas.height = picture.height;
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  if (!ctx || width <= 0 || height <= 0) return;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (whole) {
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(picture, 0, 0);
+  }
+  const spans = stretches.map((stretch) => ({
+    stretch,
+    left: Math.max(0, Math.floor(stretch.from * width)),
+    right: Math.min(width, Math.ceil(stretch.to * width)),
+  })).filter((span) => span.right > span.left);
+  // Every stretch is emptied before any is drawn: two that touch share a pixel column.
+  for (const span of spans) ctx.clearRect(span.left, 0, span.right - span.left, height);
+  const slice = Math.max(1, Math.round(PUSH_SLICE_PX * (window.devicePixelRatio || 1)));
+  for (const { stretch, left, right } of spans) {
+    for (let x = left; x < right; x += slice) {
+      const wide = Math.min(slice, right - x);
+      const level = Math.min(1, Math.max(0, stretch.level((x + wide / 2) / width)));
+      if (level <= 0) continue;
+      const tall = height * level;
+      ctx.drawImage(picture, x, 0, wide, height, x, (height - tall) / 2, wide, tall);
+    }
+  }
+}

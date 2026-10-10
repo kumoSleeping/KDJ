@@ -6,3 +6,135 @@
 .kd-now-playing-detail .kd-cover-edit { width: 76px !important; height: 76px !important; }
 .kd-now-playing-detail .kd-cover-edit-stack { height: auto !important; }
 .kd-track-detail-title { font-weight: 700; font-size: var(--kd-size-lg); }
+
+/* ---- The mini transport of the bubble (NowPlayingTransport): three keys and the progress
+   line. Ink on the bubble's surface; nothing here is the theme colour. ---- */
+.kd-now-transport {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.kd-now-keys {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+.kd-now-key {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+  transition: color 0.12s, background-color 0.12s;
+}
+.kd-now-key:hover { color: var(--kd-text); }
+.kd-now-key:focus-visible,
+.kd-now-line:focus-visible { outline: 1px solid var(--kd-text-body); outline-offset: 1px; }
+/* Play / pause is the key the row is for: a soft round bed sets it apart from its neighbours. */
+.kd-now-go {
+  width: 1.75rem;
+  height: 1.75rem;
+  background: color-mix(in srgb, var(--kd-muted) 16%, transparent);
+  color: var(--kd-text);
+}
+.kd-now-go:hover { background: color-mix(in srgb, var(--kd-muted) 26%, transparent); }
+.kd-now-go:active { transform: scale(0.94); }
+/* The triangle's weight sits left of its box. */
+.kd-now-go:not([data-playing]) > svg:not(.kd-spin) { transform: translateX(0.5px); }
+
+.kd-now-seek {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.kd-now-time {
+  flex: none;
+  min-width: 2.1rem;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: right;
+}
+.kd-now-line + .kd-now-time { text-align: left; }
+/* The line is as tall as the mini waveform, so both forms take the pointer on the same strip.
+   --kd-now-seek is how much of the song was played, 0..1; the transport writes it. */
+.kd-now-line {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 3rem;
+  height: 18px;
+  border-radius: 4px;
+  cursor: pointer;
+  touch-action: none;
+}
+.kd-now-wave {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+/* A stroke per bar, as thick on screen however far the line is stretched, with round ends. */
+.kd-now-wave > path {
+  fill: none;
+  stroke: color-mix(in srgb, var(--kd-muted) 42%, transparent);
+  stroke-width: 2.5px;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+.kd-now-wave[data-played] { clip-path: inset(0 calc((1 - var(--kd-now-seek, 0)) * 100%) 0 0); }
+.kd-now-wave[data-played] > path { stroke: var(--kd-text); }
+/* Without a waveform: one rounded line. */
+.kd-now-rail {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 4px;
+  margin-top: -2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kd-muted) 26%, transparent);
+  pointer-events: none;
+}
+.kd-now-rail > i {
+  display: block;
+  height: 100%;
+  background: var(--kd-text);
+  transform: scaleX(var(--kd-now-seek, 0));
+  transform-origin: 0 50%;
+}
+.kd-now-seek[data-scrubbing] > .kd-now-time { color: var(--kd-text); }
+
+/* Sakura98: the pack's small raised keys and a sunken well for the line, all square. */
+:root[data-theme-pack="sakulaptop98"] .kd-now-key {
+  border-radius: 0;
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+  color: var(--kd-text-body);
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-now-keys { gap: 3px; }
+:root[data-theme-pack="sakulaptop98"] .kd-now-key:hover { color: var(--kd-theme); }
+:root[data-theme-pack="sakulaptop98"] .kd-now-key:active { box-shadow: var(--s98-sunken); transform: none; }
+:root[data-theme-pack="sakulaptop98"] .kd-now-go { width: 1.9rem; height: 1.5rem; background: var(--s98-face-hi); }
+:root[data-theme-pack="sakulaptop98"] .kd-now-line {
+  height: 22px;
+  border-radius: 0;
+  background: var(--kd-panel);
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-now-wave { inset: 2px 3px; width: calc(100% - 6px); height: 18px; }
+:root[data-theme-pack="sakulaptop98"] .kd-now-rail { right: 3px; left: 3px; border-radius: 0; }

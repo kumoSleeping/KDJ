@@ -5,7 +5,13 @@ import { displayTrackKey } from "../../lib/keyDisplay";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { trackMetaEditorAnchor, useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { isStreamTrack, streamCoverUrls, streamMeta } from "../../lib/streamTrack";
-import { NOW_PLAYING_PEEK_MS, nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
+import {
+  NOW_PLAYING_PEEK_MS,
+  nowPlayingHeld,
+  nowPlayingInfoVisible,
+  nowPlayingKeptAway,
+  useNowPlayingInfo,
+} from "../../lib/nowPlayingInfo";
 import { newerRevision } from "../../lib/coverLoad";
 import { songSwapEntranceDelay } from "../../lib/songSwapMotion";
 import { useAppStore } from "../../stores/appStore";
@@ -14,6 +20,7 @@ import { TrackDetail } from "../library/TrackDetail";
 import type { TaskBubbleSpec } from "../tasks/taskBubbleSchema";
 import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
 import { trackTaskCover } from "../tasks/taskCovers";
+import { NowPlayingTransport } from "./NowPlayingTransport";
 import { StreamTrackDetail } from "./StreamTrackDetail";
 import { useLyricsEntry } from "./lyricsEntry";
 import type { Track } from "../../types";
@@ -33,14 +40,16 @@ function NowPlayingDetail({ track }: { track: Track }) {
 /**
  * 曲目信息 as a task bubble: the song that is playing, with the entries that belong to it.
  * It comes up for a moment when another song starts (pausing and resuming the same song does
- * not), stays while it is opened from the now-playing card or pinned, and follows the song
- * across changes. The host draws it; this only says what it shows and keeps it in step with
- * useNowPlayingInfo.
+ * not), stays while it is opened from the now-playing card or pinned, or while the player bar
+ * is put away (then it is the listener's transport), and follows the song across changes. The
+ * host draws it; this only says what it shows and keeps it in step with useNowPlayingInfo.
  */
 export function NowPlayingTask({ trackId, playing }: { trackId: number | null; playing: boolean }) {
   const visible = useNowPlayingInfo(nowPlayingInfoVisible);
-  const open = useNowPlayingInfo(state => state.open);
-  const pinned = useNowPlayingInfo(state => state.pinned);
+  // Held: it stays until it is dismissed. `fixed` is what the pin shows: pinned by the
+  // listener, or kept as if it were because the bar is away.
+  const held = useNowPlayingInfo(nowPlayingHeld);
+  const fixed = useNowPlayingInfo(state => state.pinned || nowPlayingKeptAway(state));
   const peek = useNowPlayingInfo(state => state.peek);
   const detailed = useNowPlayingInfo(state => state.detailed);
   const song = useRef({ trackId, announced: true, enterAt: 0 });
@@ -73,15 +82,17 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
   // reachable under the list's later revision.
   const listedRevision = useLibraryStore(state => track && track.id > 0 ? state.summaryById.get(track.id)?.modified_at : undefined);
   const editingMeta = useTrackMetaEditor(state => !!track && state.trackId === track.id);
-  // Opening the lyrics replaces what the bubble is up for, unless the listener pinned it.
+  // Opening the lyrics replaces what the bubble is up for, unless the listener pinned it or it
+  // is the transport of a bar that is away.
   const lyrics = useLyricsEntry(track, () => {
-    if (!useNowPlayingInfo.getState().pinned) useNowPlayingInfo.getState().close();
+    const info = useNowPlayingInfo.getState();
+    if (!info.pinned && !nowPlayingKeptAway(info)) info.close();
   });
   const live = useRef({ track, lyrics });
   live.current = { track, lyrics };
 
   // Raised again whenever what holds it changes; in between only its content is kept current.
-  const raise = `${open}:${pinned}:${peek}`;
+  const raise = `${held}:${fixed}:${peek}`;
   const raised = useRef("");
   useEffect(() => {
     if (!visible || !track) {
@@ -110,9 +121,10 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
       covers: cover ? [cover] : [],
       song: track.id,
       size: "large",
-      stay: open || pinned ? 0 : NOW_PLAYING_PEEK_MS,
+      stay: held ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,
       body: <NowPlayingDetail track={track} />,
+      controls: <NowPlayingTransport track={track} />,
       replacesSummary: true,
       expanded: detailed,
       onExpand: next => useNowPlayingInfo.getState().setDetailed(next),
@@ -128,9 +140,13 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
           onSelect: (bubble: HTMLElement) => useTrackMetaEditor.getState().toggle(track.id, trackMetaEditorAnchor(bubble)),
         }] : []),
         {
-          id: "pin", label: pinned ? "取消固定" : "固定曲目信息", pressed: pinned,
+          id: "pin", label: fixed ? "取消固定" : "固定曲目信息", pressed: fixed,
           icon: <Pin size={14} aria-hidden="true" />,
-          onSelect: () => useNowPlayingInfo.getState().setPinned(!useNowPlayingInfo.getState().pinned),
+          // Unpinning a bubble that is only kept for the bar lets it go as well.
+          onSelect: () => {
+            const info = useNowPlayingInfo.getState();
+            info.setPinned(!(info.pinned || nowPlayingKeptAway(info)));
+          },
         },
       ],
       onDismiss: reason => {
@@ -145,7 +161,7 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, raise, open, pinned, track, listedRevision, keyNotation, editingMeta, detailed, lyrics.open, lyrics.matching]);
+  }, [visible, raise, held, fixed, track, listedRevision, keyNotation, editingMeta, detailed, lyrics.open, lyrics.matching]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
   return null;
 }

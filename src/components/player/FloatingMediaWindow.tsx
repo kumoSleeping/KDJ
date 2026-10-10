@@ -26,6 +26,7 @@ import {
   type FloatingMediaPresenter,
 } from "../../lib/floatingMediaMotion";
 import { useFloatingMediaBox } from "../../lib/floatingMediaStore";
+import { playerBarFloor, playerBarStandsDown, usePlayerBarAway } from "../../lib/playerBarAway";
 import "./FloatingMediaWindow.css";
 
 const EDGE_LABELS: Record<FloatResizeEdge, string> = {
@@ -116,19 +117,21 @@ export function useFloatingMediaWindow(options: FloatingMediaWindowOptions): Flo
   const { shown, shared, content } = options;
   const viewport = useViewport(shown);
   const sharedRect = useFloatingMediaBox(state => state.rect);
+  const barDown = usePlayerBarAway(state => playerBarStandsDown(state.phase));
   const [privateRect, setPrivateRect] = useState<FloatRect | null>(null);
   const remembered = shared ? sharedRect : privateRect;
   const { ratio, extraHeight = 0, minWidth = 0 } = content;
   const rect = useMemo(() => {
     const shape = { ratio, extraHeight, minWidth };
-    // Never placed: above the player bar as it stands now. (The bar is measured again whenever
-    // the window comes on screen; a host that is always mounted renders before the bar exists.)
+    // Never placed: above the player bar as it stands now, or on the window's bottom while the
+    // bar is put away. (The bar is measured again whenever the window comes on screen and when
+    // the bar goes or comes; a host that is always mounted renders before the bar exists.)
     const base = remembered ?? (shared ? null : options.initial?.(viewport))
-      ?? defaultFloatRect(viewport, document.querySelector<HTMLElement>(".kd-player")?.offsetHeight || undefined);
+      ?? defaultFloatRect(viewport, playerBarFloor());
     return resolveFloatRect(base, viewport, shape);
     // `initial` only seeds a box that has never been placed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remembered, shared, shown, viewport, ratio, extraHeight, minWidth]);
+  }, [remembered, shared, shown, viewport, ratio, extraHeight, minWidth, barDown]);
 
   const live = useRef({ rect, viewport, content, remembered, options });
   live.current = { rect, viewport, content, remembered, options };

@@ -2,9 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../src/lib/songSwapMotion";
 import {
+  WAVEFORM_PUSH_LIMIT,
+  WAVEFORM_PUSH_MS,
+  addWaveformPushes,
   advanceWaveformSongMotion,
   mountedWaveformSongMotion,
+  newWaveformStretches,
   startWaveformSongCollapse,
+  waveformPushLevel,
+  waveformPushOver,
   waveformSongMotionWakeAt,
   type WaveformSongMotion,
 } from "../src/lib/waveformSongMotion";
@@ -156,4 +162,91 @@ test("a collapse that reaches the screen late still runs its whole time", () => 
 
   const grown = shown(3, 0);
   assert.equal(startWaveformSongCollapse(grown, 9_000), grown, "only a closing picture is timed");
+});
+
+/** A mask of `length` columns with the given [from, to) ranges covered. */
+const mask = (length: number, ...ranges: [number, number][]) => {
+  const columns = new Uint8Array(length);
+  for (const [from, to] of ranges) columns.fill(1, from, to);
+  return columns;
+};
+
+test("a picture that arrives in pieces: only the stretch that is new is pushed", () => {
+  // Nothing painted before, or a whole waveform before: nothing is new in this sense.
+  assert.deepEqual(newWaveformStretches(null, mask(100, [0, 40])), []);
+  assert.deepEqual(newWaveformStretches(null, "all", 100), []);
+  assert.deepEqual(newWaveformStretches("all", "all", 100), []);
+  assert.deepEqual(newWaveformStretches("all", mask(100, [0, 40])), []);
+
+  // The decoded prefix extends: the new stretch starts where the old one ended.
+  assert.deepEqual(newWaveformStretches(mask(100, [0, 40]), mask(100, [0, 55])), [{ from: 0.4, to: 0.55 }]);
+  // The same data again, or less of it: nothing moves.
+  assert.deepEqual(newWaveformStretches(mask(100, [0, 40]), mask(100, [0, 40])), []);
+  assert.deepEqual(newWaveformStretches(mask(100, [0, 40]), mask(100, [0, 30])), []);
+  // Several pieces at once (the prefix, and what was heard after a seek), in song order.
+  assert.deepEqual(
+    newWaveformStretches(mask(100, [0, 20], [60, 62]), mask(100, [0, 30], [60, 70])),
+    [{ from: 0.2, to: 0.3 }, { from: 0.62, to: 0.7 }],
+  );
+  // A gap that closes is new as well; the columns on either side of it are not.
+  assert.deepEqual(newWaveformStretches(mask(100, [0, 20], [30, 50]), mask(100, [0, 50])), [{ from: 0.2, to: 0.3 }]);
+  // The finished waveform replaces the partial one: what was missing is the last push.
+  assert.deepEqual(newWaveformStretches(mask(100, [0, 80]), "all"), [{ from: 0.8, to: 1 }]);
+  assert.deepEqual(newWaveformStretches(mask(100, [0, 100]), "all"), []);
+  // Masks of different lengths are compared by place in the song.
+  assert.deepEqual(newWaveformStretches(mask(50, [0, 20]), mask(100, [0, 60])), [{ from: 0.4, to: 0.6 }]);
+  assert.deepEqual(newWaveformStretches(mask(200, [0, 80]), mask(100, [0, 60])), [{ from: 0.4, to: 0.6 }]);
+  // Too short to be seen (the bucket under the playhead): painted, not pushed.
+  assert.deepEqual(newWaveformStretches(mask(4096, [0, 400]), mask(4096, [0, 401]), 0, 2 / 1000), []);
+  assert.deepEqual(
+    newWaveformStretches(mask(4096, [0, 400], [900, 901]), mask(4096, [0, 500], [900, 902]), 0, 2 / 1000),
+    [{ from: 400 / 4096, to: 500 / 4096 }],
+  );
+  assert.deepEqual(newWaveformStretches(mask(0), mask(100, [0, 10])), []);
+});
+
+test("a push travels from the near end of its stretch to the far end and then stands", () => {
+  const push = { from: 0.4, to: 0.6, startedAt: 1_000 };
+  const level = (at: number, after: number) => waveformPushLevel(push, at, 1_000 + after);
+  // At the start nothing of the stretch stands; at the end all of it does.
+  for (const at of [0.4, 0.5, 0.6]) {
+    assert.equal(level(at, 0), 0);
+    assert.equal(level(at, WAVEFORM_PUSH_MS), 1);
+    assert.equal(level(at, WAVEFORM_PUSH_MS * 4), 1);
+  }
+  // In between the near end is ahead of the middle, and the middle ahead of the far end.
+  for (const after of [60, 120, 180, 240]) {
+    assert.ok(level(0.4, after) >= level(0.5, after) && level(0.5, after) >= level(0.6, after), `ordered at ${after}`);
+    assert.ok(level(0.4, after) > level(0.6, after), `a front at ${after}`);
+  }
+  // The far end waits for the front; every bar only ever grows.
+  assert.equal(level(0.6, WAVEFORM_PUSH_MS * 0.4), 0);
+  let before = 0;
+  for (let after = 0; after <= WAVEFORM_PUSH_MS; after += 10) {
+    assert.ok(level(0.5, after) >= before);
+    before = level(0.5, after);
+  }
+  assert.equal(waveformPushOver(push, 1_000 + WAVEFORM_PUSH_MS - 1), false);
+  assert.equal(waveformPushOver(push, 1_000 + WAVEFORM_PUSH_MS), true);
+  // A place outside the stretch is read as its nearest end.
+  assert.equal(waveformPushLevel(push, 0.1, 1_050), waveformPushLevel(push, 0.4, 1_050));
+});
+
+test("increments that arrive faster than a push each keep their own clock", () => {
+  let running = addWaveformPushes([], [{ from: 0.2, to: 0.3 }], 0);
+  assert.deepEqual(running, [{ from: 0.2, to: 0.3, startedAt: 0 }]);
+  // The next piece arrives mid-push: the first goes on from where it is, the second starts.
+  running = addWaveformPushes(running, [{ from: 0.3, to: 0.35 }], 100);
+  assert.deepEqual(running.map((push) => push.startedAt), [0, 100]);
+  // New data without a new stretch keeps what is running and drops what is over.
+  running = addWaveformPushes(running, [], WAVEFORM_PUSH_MS);
+  assert.deepEqual(running, [{ from: 0.3, to: 0.35, startedAt: 100 }]);
+  assert.deepEqual(addWaveformPushes(running, [], 100 + WAVEFORM_PUSH_MS), []);
+  // A burst never keeps more than the limit: the oldest are shown finished.
+  let burst: ReturnType<typeof addWaveformPushes> = [];
+  for (let piece = 0; piece < WAVEFORM_PUSH_LIMIT + 3; piece += 1) {
+    burst = addWaveformPushes(burst, [{ from: piece / 100, to: (piece + 1) / 100 }], piece);
+  }
+  assert.equal(burst.length, WAVEFORM_PUSH_LIMIT);
+  assert.equal(burst[0].startedAt, 3);
 });
