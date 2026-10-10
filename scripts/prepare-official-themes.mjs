@@ -17,7 +17,11 @@ async function filesIn(dir) {
   }
   return paths.sort();
 }
-for (const id of ["sakulaptop98"]) {
+// Every folder under themes/official/ is a downloadable pack; there may be none (Sakura98 is a
+// local pack now, in themes/local/, and needs no digests).
+const ids = (await readdir(root, { withFileTypes: true }).catch(() => []))
+  .filter(entry => entry.isDirectory() && !entry.name.startsWith(".")).map(entry => entry.name);
+for (const id of ids) {
   const path = join(root, id, "theme.json");
   const manifest = JSON.parse(await readFile(path, "utf8"));
   const files = (await filesIn(dirname(path))).filter(file => file !== "theme.json");

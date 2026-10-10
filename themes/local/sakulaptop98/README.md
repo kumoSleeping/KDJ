@@ -1,11 +1,10 @@
 # Sakura98
 
-版本 **6.1.9**，官方按需下载主题，固定浅色。沿用内部 ID 和文件夹名 `sakulaptop98`，保留已有用户的主题选择。
+本地主题，固定浅色，不作为官方主题发布。沿用内部 ID 和文件夹名 `sakulaptop98`，保留已有用户的主题选择。版本见 `theme.json`。
 
 ## 安装
 
-在 KDJ 设置的官方主题中下载 **Sakura98**，安装成功后自动切换。安装包不内置此主题。
-也可以将完整 `sakulaptop98` 文件夹放入数据目录的 `themes/`，在设置中选择 **Sakura98**。
+将完整 `sakulaptop98` 文件夹放入数据目录的 `themes/`（设置 → 主题旁的文件夹按钮可直接打开），在设置中选择 **Sakura98**。安装包不内置此主题，设置里也没有下载入口。
 
 macOS 默认位置：`~/Library/Application Support/com.kdj.app/data/themes/sakulaptop98/`。
 

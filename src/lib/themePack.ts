@@ -50,9 +50,8 @@ interface StoredSelection extends ThemeSelection {
   boot?: { window: Partial<Record<ThemeMode, string>>; attrs: string[] };
 }
 
-export const OFFICIAL_THEMES = [
-  { id: "sakulaptop98", name: "Sakura98" },
-];
+/** Packs offered for download in the settings. None at present: Sakura98 is a local pack. */
+export const OFFICIAL_THEMES: { id: string; name: string }[] = [];
 
 export const THEME_PACK_STORAGE_KEY = "kd-theme-pack";
 export const THEME_CHANGE_EVENT = "kd-theme-change";

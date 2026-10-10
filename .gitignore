@@ -45,6 +45,7 @@ output/
 div.kd-player-wave
 sidecar/kumodeck.egg-info/
 
-# 本地第三方主题不入库；官方主题独立托管，不参与应用打包。
+# 本地第三方主题不入库；官方主题独立托管，仓库自带的本地主题在 themes/local/，都不参与应用打包。
 themes/*/
 !themes/official/
+!themes/local/

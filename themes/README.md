@@ -3,23 +3,22 @@
 一个主题包就是一个文件夹。放进客户端数据目录的 `themes/` 下（设置 → General → 主题旁的文件夹按钮可直接打开），
 再到设置里选中即可。分享时把整个文件夹打包发给对方，对方解压到同一位置。
 
-## 官方主题与发布
+## 内置外观、官方主题与本地主题
 
-- **Shiro**（默认浅色）和 **Dark**（默认深色）是内置基础外观，无需下载。顶栏原日夜按钮轮播 Shiro → Dark → 已安装的官方主题 → 其他已安装主题；不会自动下载。
-- **Sakura98** 为官方可选主题，在设置中点击下载；安装成功后自动切换。
-- 官方源文件位于本仓库 `themes/official/`，客户端只从
-  `https://raw.githubusercontent.com/kumoSleeping/KDJ/main/themes/official/` 按需下载。
-  发布前需将该目录与应用代码一同推送到 GitHub；本地未推送的改动不会出现在下载源。
-- **发行安装包不包含可选主题、主题图片或字体**。不要把 `themes/` 加入 `public/`、Vite 导入或 Tauri `bundle.resources`。
-  客户端启动不自动下载，未安装时官方主题仅显示下载操作。
-- 安装使用有大小上限的临时目录、逐文件 SHA-256 校验和同磁盘重命名。失败保留现有主题；更新前将旧文件夹完整保留为
+- **Shiro**（默认浅色）和 **Dark**（默认深色）是内置基础外观，无需下载。顶栏原日夜按钮轮播 Shiro → Dark → 已安装的主题；不会自动下载。
+- **目前没有官方可选主题**：设置里不显示下载入口。官方主题的机制仍在——服务端的 `OFFICIAL_THEMES`、前端
+  `src/lib/themePack.ts` 的同名列表，以及本仓库 `themes/official/<id>/`（客户端只从
+  `https://raw.githubusercontent.com/kumoSleeping/KDJ/main/themes/official/` 按需下载）。以后要发布官方主题时，
+  三处一起加，并运行 `node scripts/prepare-official-themes.mjs` 生成下载所需的文件摘要。
+- **Sakura98 是本地主题**，源文件在本仓库 `themes/local/sakulaptop98/`，不再作为官方主题发布，也不从网络下载。
+  使用方法：把整个 `sakulaptop98` 文件夹复制到数据目录的 `themes/` 下，再到设置里选中。已经装过的不受影响：
+  它一直就是数据目录里的一个文件夹，选择也保留（内部 ID 仍是 `sakulaptop98`）。仓库里的改动不会自动到达已安装的
+  那一份，改完需要重新复制。
+- **发行安装包不包含任何可选主题、主题图片或字体**。不要把 `themes/` 加入 `public/`、Vite 导入或 Tauri `bundle.resources`。
+- 官方主题的安装使用有大小上限的临时目录、逐文件 SHA-256 校验和同磁盘重命名。失败保留现有主题；更新前将旧文件夹完整保留为
   数据目录 `themes/.backup-<id>-<随机标识>/`，其中的自定义文件不会被删除。
-- Sakura98 沿用内部 ID `sakulaptop98`，改显示名称不迁移或重写用户设置。
 
-维护官方主题后运行 `node scripts/prepare-official-themes.mjs` 更新下载所需的文件摘要。
-将主题内容和 `theme.json` 同次提交。
-
-第三方本地主题仍可放在本目录直接子文件夹中（这些文件夹被 git 忽略），截图脚本会直接读取。
+第三方本地主题仍可放在本目录直接子文件夹中（这些文件夹被 git 忽略）；截图脚本会读取 `themes/local/`、`themes/official/` 下的主题。
 
 ## 目录结构
 

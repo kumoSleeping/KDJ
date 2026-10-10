@@ -75,8 +75,15 @@ async function demoTracks(dir) {
 try {
   const dataDir = path.join(tmp, "data"), music = path.join(tmp, "music");
   await fs.mkdir(dataDir);
-  await fs.mkdir(path.join(root, "themes"), { recursive: true });
-  await fs.symlink(path.join(root, "themes"), path.join(dataDir, "themes"));
+  // 数据目录的 themes/ 下每个主题一个文件夹：把仓库里 themes/local、themes/official 和直接放在 themes/ 下的主题都链过去
+  await fs.mkdir(path.join(dataDir, "themes"));
+  for (const group of ["", "local", "official"]) {
+    const dir = path.join(root, "themes", group);
+    for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      if (!entry.isDirectory() || entry.name === "local" || entry.name === "official") continue;
+      await fs.symlink(path.join(dir, entry.name), path.join(dataDir, "themes", entry.name)).catch(() => undefined);
+    }
+  }
   await demoTracks(music);
 
   const port = await freePort();

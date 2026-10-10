@@ -329,7 +329,7 @@ function ThemePackRows() {
           ) : null}
         </span>
       </div>
-      <div className="kd-theme-official">
+      {official.length > 0 && <div className="kd-theme-official">
         {official.map(theme => {
           const installed = packs.some(pack => pack.dir === theme.id && pack.manifest);
           return (
@@ -345,7 +345,7 @@ function ThemePackRows() {
             </div>
           );
         })}
-      </div>
+      </div>}
       {active && active.options.length > 0 ? (
         <div className="kd-djp-switch-list" aria-label="主题选项">
           {active.options.map((option) => (

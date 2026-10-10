@@ -22,7 +22,9 @@ use crate::state::AppState;
 
 const MAX_MANIFEST: u64 = 64 * 1024;
 const OFFICIAL_SOURCE: &str = "https://raw.githubusercontent.com/kumoSleeping/KDJ/main/themes/official";
-const OFFICIAL_THEMES: &[(&str, &str)] = &[("sakulaptop98", "Sakura98")];
+/// Packs offered for download in the settings. None at present: Sakura98 is a local pack
+/// (`themes/local/` in the repository), put into the data directory by hand.
+const OFFICIAL_THEMES: &[(&str, &str)] = &[];
 static INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub fn router() -> Router<Arc<AppState>> {
