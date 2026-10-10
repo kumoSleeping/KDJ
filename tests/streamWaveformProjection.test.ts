@@ -166,3 +166,30 @@ test("a song whose length the transport does not know is as long as its finished
   assert.deepEqual(drawn(finished), { count: BUCKETS, last: BUCKETS - 1 });
   song.done();
 });
+
+test("the dev trace writes a line when the layout of a song changes, not on every poll", async () => {
+  const { streamWaveformTrace } = await import("../src/lib/streamWaveformTrace");
+  const answer = (more: Record<string, unknown>) => ({
+    enabled: true, waveform: decoded(48, 240), covered_seconds: 48, revision: 3, cached_bytes: 1_000, total_bytes: 5_000,
+    complete: false, active: true, waveform_status: "partial", ...more,
+  }) as never;
+  const loading = streamWaveformTrace(-5, "qqm", answer({}), false, 240, 240, false);
+  assert.deepEqual(loading.detail, {
+    track: -5, platform: "qqm", status: "partial", complete: "false", active: "true", revision: 3,
+    covered: 48, bytes: "1000/5000", bar: 240, rail: 240, probed: 0, place: "prefix",
+  });
+  // The next pass is being decoded, the lease flag flips, two more seconds arrive: no news.
+  const same = streamWaveformTrace(-5, "qqm", answer({ waveform_status: "analyzing", active: false, covered_seconds: 49.5, revision: 4 }), false, 240, 240, false);
+  assert.equal(same.signature, loading.signature);
+  assert.notEqual(streamWaveformTrace(-5, "qqm", answer({ covered_seconds: 96 }), false, 240, 240, false).signature, loading.signature);
+  assert.notEqual(streamWaveformTrace(-5, "qqm", answer({}), false, 300, 300, false).signature, loading.signature, "the bar's duration changed");
+
+  const done = { waveform_status: "ready", complete: true, active: false, analysis_status: "ready", analysis: { duration: 96 } };
+  const clip = streamWaveformTrace(-5, "qqm", answer({ ...done, covered_seconds: 96 }), true, 240, 96, true);
+  assert.equal(clip.detail.place, "full");
+  assert.deepEqual([clip.detail.bar, clip.detail.rail, clip.detail.probed], [240, 96, 96], "the decode overruled the bar's duration");
+  const short = streamWaveformTrace(-5, "qqm", answer({ ...done, covered_seconds: 150, analysis: { duration: 240 } }), true, 240, 240, true);
+  assert.equal(short.detail.place, "prefix", "a finished decode that fell short");
+  assert.equal(streamWaveformTrace(-5, "qqm", answer({}), false, 240, 240, true).detail.place, "kept-finished");
+  assert.equal(streamWaveformTrace(-5, "qqm", answer({ waveform: null, waveform_status: "waiting" }), false, 240, 240, false).detail.place, "none");
+});

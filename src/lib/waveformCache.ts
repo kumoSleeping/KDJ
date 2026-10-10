@@ -679,6 +679,15 @@ export function streamWaveformSnapshot(trackId: number): StreamWaveformSnapshot 
   return entry.snapshot;
 }
 
+/**
+ * How the cache lays a song out at the moment: the length of the rail, and whether it holds
+ * the finished waveform. Read by the analysis poll's dev trace; it does not touch the entry.
+ */
+export function streamWaveformLayout(trackId: number): { rail: number; finished: boolean } {
+  const entry = streamCache.get(trackId);
+  return { rail: entry?.snapshot.waveform.duration ?? 0, finished: entry?.complete ?? false };
+}
+
 export function subscribeStreamWaveform(trackId: number, listener: () => void): () => void {
   let listeners = streamListeners.get(trackId);
   if (!listeners) {
