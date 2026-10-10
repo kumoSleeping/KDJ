@@ -130,6 +130,7 @@ leaving gesture when React unmounts the element. Variants:
 | Sidebar drag feedback (drop tint, insertion mark, lifted root) | micro-out clock, in `FolderTree.css` |
 | The player bar put away and brought back (`PlayerBarAway.tsx`) | `slide` from the bottom edge, both ways; it stays mounted and sets `data-kd-leaving` itself |
 | The work rail over a list (`WorkRail.tsx`, `railTurn.ts`) | `turn`, item by item — see below |
+| A line that changes in the search bar: the tip line (every 8 s, and when the empty field is focused or left), the search kind (`RollText`) | `turn`: the old line `out`, the new one `in` after it |
 
 ### The work rail
 

@@ -168,9 +168,10 @@ function shuffleTipIndexes(avoidFirst?: number): number[] {
 }
 
 /**
- * One line of text that changes. The old line rolls out through the top of its clipped box while
- * the new one rolls in from below, so the two never lie over each other and nothing around them
- * moves. The first line is simply there.
+ * One line of text that changes, by the schema's `turn` — the gesture of the work rail under
+ * the field: the old line lifts away, then the new one comes up from below. The two share one
+ * clipped line box and are never legible at once, and nothing around them moves. The first
+ * line is simply there.
  */
 function RollText({ text, className }: { text: string; className?: string }) {
   const [line, setLine] = useState<{ text: string; previous: string | null; turn: number }>({
@@ -178,14 +179,17 @@ function RollText({ text, className }: { text: string; className?: string }) {
     previous: null,
     turn: 0,
   });
-  if (line.text !== text) setLine({ text, previous: line.text, turn: line.turn + 1 });
+  if (line.text !== text) {
+    // While the old line is still leaving, the new one has not shown yet: it only gets other words.
+    setLine(line.previous === null ? { text, previous: line.text, turn: line.turn + 1 } : { ...line, text });
+  }
   return (
     <span className={className ? `kd-roll ${className}` : "kd-roll"}>
       {line.previous !== null && (
         <span
           key={`out:${line.turn}`}
           className="kd-roll-line"
-          data-roll="out"
+          data-kd-turn="out"
           aria-hidden="true"
           onAnimationEnd={() => {
             setLine((current) => (current.previous === null ? current : { ...current, previous: null }));
@@ -194,7 +198,12 @@ function RollText({ text, className }: { text: string; className?: string }) {
           {line.previous}
         </span>
       )}
-      <span key={line.turn} className="kd-roll-line" data-roll={line.turn ? "in" : undefined}>
+      <span
+        key={line.turn}
+        className="kd-roll-line"
+        data-kd-turn={line.turn ? "in" : undefined}
+        data-kd-turn-after={line.turn ? "" : undefined}
+      >
         {line.text}
       </span>
     </span>
