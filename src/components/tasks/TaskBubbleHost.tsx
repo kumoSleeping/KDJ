@@ -157,6 +157,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
   const covers = spec.covers ?? [];
   const summary = !(expanded && spec.replacesSummary);
   const progress = typeof spec.progress === "number" ? Math.min(1, Math.max(0, spec.progress)) : null;
+  const dismissLabel = spec.dismiss?.label ?? "收起";
   const copy = <>
     {tone === "error"
       ? <span className="kd-task-title" data-wrap="true" title={spec.title}>{spec.title}</span>
@@ -201,9 +202,10 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
             onClick={() => setExpanded(!expanded)}>
             <ChevronsUpDown size={14} aria-hidden="true" />
           </button>}
-          <button type="button" className="kd-task-action" aria-label="收起" title={spec.escape ? "收起（Esc）" : "收起"}
+          <button type="button" className="kd-task-action kd-task-dismiss" aria-label={dismissLabel}
+            title={spec.escape ? `${dismissLabel}（Esc）` : dismissLabel}
             onClick={() => useTaskBubbles.getState().dismiss(id, "user")}>
-            <ChevronsDown size={14} aria-hidden="true" />
+            {spec.dismiss?.icon ?? <ChevronsDown size={14} aria-hidden="true" />}
           </button>
         </div>
       </div>
@@ -217,8 +219,9 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
  * 任务信息: the one place task bubbles are drawn. They rise from behind the top edge of the
  * player bar to a resting place detached from it, at the bottom right, and roll back down;
  * several stack upwards with the newest nearest the bar. With the bar put away they stand on
- * the window's bottom edge instead. `sources` names the app's own activities this window
- * reports (see taskSources.ts).
+ * the window's bottom edge instead, and the playing song's bubble is always among them. In a
+ * tall desktop window a large bubble spans the window (TaskBubbles.css). `sources` names the
+ * app's own activities this window reports (see taskSources.ts).
  */
 export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] }) {
   const entries = useTaskBubbles(state => state.entries);

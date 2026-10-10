@@ -26,11 +26,16 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
 - **The size.** `size` is `small` (a one-line note, as wide as its text), `regular` (default: a
   cover and two lines) or `large` (a big cover and a title-size name: the playing song). A kind
   of task picks the one that fits what it says; nothing sets a bubble's width or cover by hand.
+  In a tall desktop window (`tall` in `src/lib/useLayoutMode.ts`) a `large` bubble spans the
+  window, with the same gap on its left and its right; `regular` and `small` keep their size
+  and stack above it at the right.
 - **The stay.** Each kind chooses its own `stay`: the playing song 5 s, a short note such as
   "没有找到歌词" 3 s. `stay` in ms; left out, the tone decides (`TASK_STAY_MS`: 5 s, an error 10 s).
   `stay: 0` keeps the bubble until it is dismissed — a pinned or opened bubble. The ring shows the
   time that is left and stops while the stack is hovered or focused. Every bubble can be rolled
   down by hand; `escape: true` also lets Esc do it (only for a bubble the user called up).
+  `dismiss: { label, icon? }` rewrites the key that rolls it down when doing so does more than
+  put the bubble away — never by testing an id in the host.
 - **Tone is not selection.** `info`, `success`, `error` colour the leading mark only (on a cover
   stack, a small mark on its corner); an error is amber, never the theme red. An error shows its
   whole sentence (up to four lines) instead of scrolling it.
@@ -55,14 +60,26 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   over the list ends above it; a bubble that leaves by itself may cover the drawer's bottom for
   its stay.
 - **The bar put away.** The player bar can slide down out of the window
-  (`src/lib/playerBarAway.ts`; a key at the bottom-left corner brings it back). The stack then
-  stands on the window's bottom edge; bubbles that are up when the slide starts ride the bar's
-  top edge while it slides. While
-  the bar is away the playing song's bubble is kept up as if it were pinned, because it is the
-  transport — until the listener dismisses or unpins it; then only new songs bring it up, for
-  their stay, until the bar is put away again or they pin or open it. That state is separate
-  from the pin (`nowPlayingKeptAway` in `src/lib/nowPlayingInfo.ts`): when the bar returns the
-  bubble is held by what held it before.
+  (`src/lib/playerBarAway.ts`). The stack then stands on the window's bottom edge; bubbles that
+  are up when the slide starts ride the bar's top edge while it slides.
+- **The bar or the playing song's bubble.** The listener always has a transport on screen: the
+  bar, the bubble, or both (`src/lib/nowPlayingInfo.ts`).
+  - While the bar is away the bubble is up and stays up (`barAway`), from the moment the bar
+    starts down. Nothing lets it leave by itself, and it is never pushed out.
+  - Sending it away — its key, which then reads 展开播放条, Esc, the now-playing card — brings
+    the bar back: the bubble rolls down as the bar slides up. That is the only way back to the
+    bar.
+  - Both at once is the pin. With the bar up, a pinned bubble stays beside it. With the bar
+    away the pin key shows and changes the same preference: it says whether the bubble is still
+    there when the bar is back. Dismissing a pinned bubble clears the pin, as everywhere.
+  - Without a song there is nothing for the bubble to show, so the bar is up whatever was
+    chosen; the choice is not rewritten and applies again when a song is on the deck. At launch
+    the deck remembered from the last run counts as a song while it is being fetched.
+  - Each shape of the window has its own choice: a wide window keeps the bar unless it was put
+    away, a tall one keeps it away unless it was brought back. Crossing from one shape to the
+    other is the same handover as the key. A slide always runs to its end; if what is wanted
+    changes on the way, the bar arrives and sets off again.
+  - A phone keeps its bar: the collapse is not offered there.
 - **No divider lines** inside a bubble (see AGENTS.md), and nothing is written in an empty one.
 
 ## Adding a kind of task

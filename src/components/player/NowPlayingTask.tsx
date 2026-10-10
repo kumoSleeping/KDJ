@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { Pencil, Pin, ScrollText } from "lucide-react";
+import { PanelBottomOpen, Pencil, Pin, ScrollText } from "lucide-react";
 import { formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
 import { displayTrackKey } from "../../lib/keyDisplay";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
@@ -9,7 +9,6 @@ import {
   NOW_PLAYING_PEEK_MS,
   nowPlayingHeld,
   nowPlayingInfoVisible,
-  nowPlayingKeptAway,
   useNowPlayingInfo,
 } from "../../lib/nowPlayingInfo";
 import { newerRevision } from "../../lib/coverLoad";
@@ -40,16 +39,18 @@ function NowPlayingDetail({ track }: { track: Track }) {
 /**
  * 曲目信息 as a task bubble: the song that is playing, with the entries that belong to it.
  * It comes up for a moment when another song starts (pausing and resuming the same song does
- * not), stays while it is opened from the now-playing card or pinned, or while the player bar
- * is put away (then it is the listener's transport), and follows the song across changes. The
- * host draws it; this only says what it shows and keeps it in step with useNowPlayingInfo.
+ * not), stays while it is opened from the now-playing card or pinned, and follows the song
+ * across changes. While the player bar is put away it is the listener's transport: it stays,
+ * and its dismiss key is the way back to the bar. The host draws it; this only says what it
+ * shows and keeps it in step with useNowPlayingInfo.
  */
 export function NowPlayingTask({ trackId, playing }: { trackId: number | null; playing: boolean }) {
   const visible = useNowPlayingInfo(nowPlayingInfoVisible);
-  // Held: it stays until it is dismissed. `fixed` is what the pin shows: pinned by the
-  // listener, or kept as if it were because the bar is away.
+  // Held: it stays until it is dismissed. With the bar away that is always so, and the pin
+  // says whether it will still stay beside the bar when the bar is back.
   const held = useNowPlayingInfo(nowPlayingHeld);
-  const fixed = useNowPlayingInfo(state => state.pinned || nowPlayingKeptAway(state));
+  const pinned = useNowPlayingInfo(state => state.pinned);
+  const barAway = useNowPlayingInfo(state => state.barAway);
   const peek = useNowPlayingInfo(state => state.peek);
   const detailed = useNowPlayingInfo(state => state.detailed);
   const song = useRef({ trackId, announced: true, enterAt: 0 });
@@ -86,13 +87,13 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
   // is the transport of a bar that is away.
   const lyrics = useLyricsEntry(track, () => {
     const info = useNowPlayingInfo.getState();
-    if (!info.pinned && !nowPlayingKeptAway(info)) info.close();
+    if (!info.pinned && !info.barAway) info.close();
   });
   const live = useRef({ track, lyrics });
   live.current = { track, lyrics };
 
   // Raised again whenever what holds it changes; in between only its content is kept current.
-  const raise = `${held}:${fixed}:${peek}`;
+  const raise = `${held}:${pinned}:${peek}`;
   const raised = useRef("");
   useEffect(() => {
     if (!visible || !track) {
@@ -123,6 +124,8 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
       size: "large",
       stay: held ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,
+      // Rolling it down with the bar away is the way back to the bar, and the key says so.
+      dismiss: barAway ? { label: "展开播放条", icon: <PanelBottomOpen size={14} aria-hidden="true" /> } : undefined,
       body: <NowPlayingDetail track={track} />,
       controls: <NowPlayingTransport track={track} />,
       replacesSummary: true,
@@ -140,17 +143,16 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
           onSelect: (bubble: HTMLElement) => useTrackMetaEditor.getState().toggle(track.id, trackMetaEditorAnchor(bubble)),
         }] : []),
         {
-          id: "pin", label: fixed ? "取消固定" : "固定曲目信息", pressed: fixed,
+          id: "pin",
+          label: pinned ? "取消固定" : barAway ? "固定：展开播放条后保留曲目信息" : "固定曲目信息",
+          pressed: pinned,
           icon: <Pin size={14} aria-hidden="true" />,
-          // Unpinning a bubble that is only kept for the bar lets it go as well.
-          onSelect: () => {
-            const info = useNowPlayingInfo.getState();
-            info.setPinned(!(info.pinned || nowPlayingKeptAway(info)));
-          },
+          onSelect: () => useNowPlayingInfo.getState().setPinned(!useNowPlayingInfo.getState().pinned),
         },
       ],
       onDismiss: reason => {
-        // Its stay ran out: the peek is over. Dismissed by hand, it goes whatever held it.
+        // Its stay ran out: the peek is over. Dismissed by hand, it goes whatever held it, and
+        // the bar comes back if it was away.
         if (reason === "timeout" || reason === "crowded") useNowPlayingInfo.getState().endPeek();
         else if (reason === "user") useNowPlayingInfo.getState().close();
       },
@@ -161,7 +163,7 @@ export function NowPlayingTask({ trackId, playing }: { trackId: number | null; p
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, raise, held, fixed, track, listedRevision, keyNotation, editingMeta, detailed, lyrics.open, lyrics.matching]);
+  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, detailed, lyrics.open, lyrics.matching]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
   return null;
 }

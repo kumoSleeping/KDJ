@@ -357,3 +357,13 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 .kd-task-slot[data-size="large"] .kd-task-title { font-size: var(--kd-size-lg); font-weight: 700; line-height: 1.3; }
 .kd-task-slot[data-size="large"] .kd-task-detail { font-size: var(--kd-size-sm); }
 .kd-task-slot[data-size="large"] .kd-task-facts { margin-top: 1px; }
+
+/* A tall desktop window (竖长, src/lib/useLayoutMode.ts): a large bubble spans the window, with
+   the same gap on its left and on its right. The bar is put away there unless the listener
+   brought it back, so the playing song's bubble is the window's usual transport and reads as
+   its bar. Regular and small bubbles keep their size and stack above it at the right. A phone
+   keeps the sizes above. */
+.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-task-slot[data-size="large"] {
+  left: var(--kd-task-gap);
+  width: auto;
+}

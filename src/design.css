@@ -3121,10 +3121,11 @@ body[data-kd-search-pointer-dragging="true"] * {
   background: linear-gradient(to top, rgba(0, 0, 0, 0.14), transparent);
   pointer-events: none;
 }
-/* The bar put away (src/lib/playerBarAway.ts). From the start of its slide the bar is out of
-   the grid and lies over the page along the window's bottom: the content takes its row once,
-   under the bar that still covers it, and the slide (the motion schema's `slide` from the
-   bottom edge, set in PlayerBarAway.tsx) moves nothing but the bar. Away, it is not drawn. */
+/* The bar put away (src/lib/playerBarAway.ts), in a wide window and in a tall one alike. From
+   the start of its slide the bar is out of the grid and lies over the page along the window's
+   bottom: the content takes its row once, under the bar that still covers it, and the slide
+   (the motion schema's `slide` from the bottom edge, set in PlayerBarAway.tsx) moves nothing
+   but the bar. Away, it is not drawn; the playing song's task bubble is the transport then. */
 .kd-player[data-bar] {
   position: fixed;
   right: 0;
@@ -3135,6 +3136,9 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* The soft shadow above the bar would stay behind as a strip on the window's edge. */
 .kd-player[data-bar="leaving"]::before,
 .kd-player[data-bar="away"]::before { content: none; }
+/* The key that puts the bar away ends the row of tools after the transport. It keeps its size
+   where that row is short of room (the layered bar of a tall window clips the row's start). */
+.kd-player-collapse { flex: none; }
 .kd-player-leading {
   grid-area: auto;
   position: absolute;

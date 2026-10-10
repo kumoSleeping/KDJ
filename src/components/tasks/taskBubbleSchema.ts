@@ -88,6 +88,12 @@ export interface TaskBubbleSpec {
   song?: string | number;
   /** Esc dismisses it. For a bubble the user called up; never for a transient report. */
   escape?: boolean;
+  /**
+   * What the dismiss key says, and optionally shows, when rolling this bubble down does more
+   * than put it away (the playing song while the player bar is away: 展开播放条). Left out, the
+   * key is the host's plain 收起.
+   */
+  dismiss?: { label: string; icon?: ReactNode };
   /** Called once when the bubble starts to leave, whatever made it leave. */
   onDismiss?(reason: TaskDismissReason): void;
 }

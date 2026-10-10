@@ -116,7 +116,7 @@ import {
   playTrack,
 } from "../../lib/playTrack";
 import { getPlayingTrack, setPlayingTrack } from "../../lib/playingTrack";
-import { useLayoutSignals } from "../../lib/useLayoutMode";
+import { playerBarCollapseOffered } from "../../lib/playerBarAway";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
 import {
   ARROW_KEY_LIST_STEP_EVENT,
@@ -185,7 +185,7 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
 import { NowPlayingTask } from "./NowPlayingTask";
-import { PlayerBarCollapseKey, PlayerBarReturnKey, playerBarPhaseProps, usePlayerBarPhase } from "./PlayerBarAway";
+import { PlayerBarCollapseKey, playerBarPhaseProps, usePlayerBarPhase } from "./PlayerBarAway";
 import { BarLyricsEntry, BarMetaEntry } from "./BarSongEntries";
 import { useDeckSongSwap } from "./deckSongSwap";
 import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
@@ -549,12 +549,6 @@ function PlayerDeck({
 }
 
 export function PlayerBar() {
-  // The bar can be put away on the desktop's ordinary wide bar. The layered bar of a tall
-  // window and the phone layouts keep it: there the bar is the whole of the transport.
-  const barLayout = useLayoutSignals();
-  const collapseOffered = !barLayout.tall && !barLayout.portrait
-    && window.kdj?.platform !== "android" && window.kdj?.platform !== "ios";
-  const barPhase = usePlayerBarPhase(collapseOffered);
   const mobileNative = usesNativeMobilePlayer();
   const playerRuntime = runtimePlayer();
   const desktopNative = playerRuntime.kind === "desktop-native";
@@ -805,6 +799,14 @@ export function PlayerBar() {
     position?: number,
   ) => Promise<void>>(async () => {});
   const [retainedDecksLoaded, setRetainedDecksLoaded] = useState(false);
+  // The bar can be put away on the desktop, in a wide window and in a tall one; the playing
+  // song's bubble is then the transport, so the bar is only away while there is a song for it.
+  // At launch the deck remembered from the last run counts as one while it is being fetched: the
+  // bar keeps the place it was left in instead of showing for a moment and sliding away.
+  const barPhase = usePlayerBarPhase(
+    track !== null
+      || (!retainedDecksLoaded && (deckMemoryRef.current.leftId !== null || deckMemoryRef.current.rightId !== null)),
+  );
   const [visualActiveIndex, setVisualActiveIndex] = useState<0 | 1>(deckMemoryRef.current.activeIndex);
 
   useEffect(() => {
@@ -4694,12 +4696,6 @@ export function PlayerBar() {
         />
       </div>
       <BarInfoHost trackId={track?.id ?? null} playing={playing} />
-      {barPhase === "away" ? (
-        <PlayerBarReturnKey
-          cover={currentBarView?.cover ?? ""}
-          spinning={Boolean(currentBarView) && (transitionShowing || performanceDecks[barCurrentIndex].playing)}
-        />
-      ) : null}
 
       {/* 三颗走带键：上一首 / 播放停止 / 下一首。
           全是裸图标，没有按钮框——一条播放条上摆三个描边方块太吵，
@@ -4914,7 +4910,8 @@ export function PlayerBar() {
               : `−${formatDuration(remaining)} / ${formatDuration(playbackDuration)}`
             : timeDisplayMode === "elapsed" ? "--:-- / --:--" : "−−:−− / −−:−−"}
         </span>
-        {collapseOffered ? <BarCollapseKey /> : null}
+        {/* Offered where the playing song's bubble can take over: on the desktop, with a song. */}
+        {track && playerBarCollapseOffered() ? <BarCollapseKey /> : null}
         </div>
       </div>
 
