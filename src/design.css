@@ -2022,6 +2022,16 @@ body[data-kd-col-dragging="true"] * {
   cursor: grabbing !important;
   user-select: none !important;
   -webkit-user-select: none !important;
+.kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) td {
+  background: var(--kd-selected);
+}
+.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) > td,
+.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) .kd-td-strong {
+  color: var(--kd-muted);
+}
+.kd-table tbody tr[data-selecting="true"][aria-selected="true"] .kd-td-strong {
+  font-weight: 700;
+}
 }
 .kd-table tbody td {
   height: var(--kd-row-h);
@@ -2045,9 +2055,11 @@ body[data-kd-col-dragging="true"] * {
 .kd-table tbody tr[data-spacer]:hover > td {
   background: transparent;
 }
-/* 曲目选中使用一层底色，不描边；具体颜色由内置/主题包样式决定。 */
+/* 曲目选中使用一层底色，不描边；具体颜色由内置/主题包样式决定。
+   While rows are being picked (data-selecting) the mark and the type say which rows are in:
+   a picked row is full ink with more weight, the others step back to the muted colour, and
+   no row carries the selection tone. The row whose details are open keeps it. */
 .kd-table tbody tr[aria-selected="true"] td {
-  background: var(--kd-selected);
   color: var(--kd-text);
 }
 /* 可拖元素一律不能框选文字：拖一下变成「全选文本」比不能复制糟得多。
@@ -2106,31 +2118,6 @@ body[data-kd-track-pointer-dragging="true"] {
 }
 .kd-table tbody td.kd-td-num > .kd-track-drag-surface {
   justify-content: flex-start;
-}
-/* 曲库批选：只在右键「选择」后出现；和封面同一基线，勾上是红钩不是红砖。 */
-.kd-row-select {
-  appearance: none;
-  width: 0.85rem;
-  height: 0.85rem;
-  margin: 0 0.45rem 0 0;
-  padding: 0;
-  display: inline-grid;
-  place-items: center;
-  vertical-align: -5px;
-  border: 1px solid var(--kd-muted);
-  background: transparent;
-  color: transparent;
-  cursor: pointer;
-  flex: none;
-}
-.kd-row-select[aria-pressed="true"] {
-  border-color: var(--kd-theme);
-  background: transparent;
-  color: var(--kd-theme);
-}
-.kd-row-select > svg {
-  display: block;
-  stroke-width: 2.5;
 }
 /* 焦点行不再单独描线（黑线红线都试过，用户都嫌吵）：
    单选时选中即焦点，多选时详情栏标题自证是哪一首。 */
@@ -8281,6 +8268,9 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .vj-rhythm-ruler > i { position: absolute; top: 16px; bottom: 0; border-left: 1px solid color-mix(in srgb, var(--kd-muted) 22%, transparent); }
 .vj-rhythm-ruler > i[data-bar] { border-left-color: color-mix(in srgb, var(--kd-muted) 50%, transparent); }
 .vj-rhythm-ruler > span { position: absolute; font-size: 10px; line-height: 14px; white-space: nowrap; padding-left: 3px; color: var(--kd-muted); font-variant-numeric: tabular-nums; }
+html:root .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) > td {
+  background:var(--kd-selected) !important;
+}
 .vj-bar-number, .vj-tempo-label { top: 0; }
 
 /* Keep clip settings compact so the material tracks retain the editing space. */
@@ -8337,15 +8327,15 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .kd-overlay-scroll-host .kd-table thead th { z-index: 6; }
 .kd-overlay-scroll-host .kd-selection-bar { z-index: 7; }
 
-/* Selected library rows need a continuous, high-contrast surface. */
+/* Selected library rows need a continuous, high-contrast surface — except while rows are
+   being picked: there the selection mark and the type carry it (see the base rule above). */
 html:root .kd-table tbody tr[aria-selected="true"] > td {
-  background:var(--kd-selected) !important;
   color:var(--kd-text) !important;
 }
 html:root .kd-table tbody tr[aria-selected="true"] > td :is(.kd-td-strong, .kd-muted, .kd-faint, button, a, small) { color:var(--kd-text) !important; }
 /* Row selection is a neutral surface, separate from red control selection.
    Do not inherit the light theme's transparent --kd-selected control token. */
-html:root:not([data-theme-pack]) .kd-table tbody tr[aria-selected="true"] > td {
+html:root:not([data-theme-pack]) .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) > td {
   background: color-mix(in srgb, var(--kd-text) 12%, var(--kd-panel)) !important;
 }
 /* Also refresh already-installed Sakura packs without requiring a reinstall. */

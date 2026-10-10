@@ -1,7 +1,6 @@
 import { WorkRailCollapse } from "./WorkRailControls";
 import {
   ArrowLeft,
-  CheckSquare,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -14,6 +13,7 @@ import { useDownloadStore } from "../../stores/downloadStore";
 import { Button, InlineNotice } from "../common";
 import { SEARCH_PLATFORMS } from "../download/SearchBar";
 import { PlatformMark } from "../download/PlatformMark";
+import { PickMark } from "../common/RowPick";
 import { WorkRail, WorkRailSelection } from "./WorkRail";
 
 const PLATFORM_ORDER = SEARCH_PLATFORMS.map((item) => item.id);
@@ -110,7 +110,7 @@ export function SearchWorkRail({
   if (selecting) {
     glyphs.push(
       <span key="sel" className="kd-activity-glyph kd-activity-glyph-sel" aria-hidden="true">
-        <CheckSquare size={13} strokeWidth={2.25} />
+        <PickMark state="all" />
       </span>,
     );
     texts.push(

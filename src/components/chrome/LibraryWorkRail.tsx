@@ -5,7 +5,6 @@ import { createPortal } from "react-dom";
 import { LibraryWorkRailToolsTargetContext } from "./libraryWorkRailTools";
 import {
   BarChart3,
-  CheckSquare,
   Copy,
   Download,
   Film,
@@ -35,6 +34,7 @@ import { useLibraryStore } from "../../stores/libraryStore";
 import { Button } from "../common";
 import { DETAIL_EVENT, type DetailEventDetail } from "../library/TrackTable";
 import { AnalysisGlyph } from "./ActivityRail";
+import { PickMark } from "../common/RowPick";
 import { WorkRail, WorkRailSelection } from "./WorkRail";
 
 function ScanGlyph() {
@@ -267,7 +267,7 @@ export function LibraryWorkRail({
         idle={false}
         glyphs={[
           <span key="sel" className="kd-activity-glyph kd-activity-glyph-sel" aria-hidden="true">
-            <CheckSquare size={13} strokeWidth={2.25} />
+            <PickMark state="all" />
           </span>,
         ]}
         texts={[

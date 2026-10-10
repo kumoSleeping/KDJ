@@ -50,6 +50,12 @@ export type MediaFilter = "all" | "audio" | "video";
 /** 多选点击语义，和访达/资源管理器一致。 */
 export type SelectMode = "replace" | "toggle" | "range";
 
+/** A selection with a run of rows added to it: what was picked stays, in its order, then the rest of the run. */
+export function withSelectionRun(selected: readonly number[], run: readonly number[]): number[] {
+  const had = new Set(selected);
+  return [...selected, ...run.filter((id) => !had.has(id))];
+}
+
 export interface LibraryFilter {
   q: string;
   key: string; // Camelot 码，如 "8A"；空串 = 不限
@@ -670,12 +676,14 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     }
     if (mode === "range" && selectedId !== null) {
       // Shift 点：按**当前显示顺序**取区间，不是按 id——用户看到的是排序后的表。
+      // The run is added to what is already picked, never taken in its place: with one row
+      // selected that is the run itself, and in a batch nothing picked earlier is lost.
       const from = indexById.get(selectedId) ?? -1;
       const to = indexById.get(id) ?? -1;
       if (from >= 0 && to >= 0) {
         const [lo, hi] = from <= to ? [from, to] : [to, from];
         updateLocalWorkspaceSession({ selectedId: id });
-        set({ selectedIds: orderedIds.slice(lo, hi + 1), selectedId: id });
+        set({ selectedIds: withSelectionRun(selectedIds, orderedIds.slice(lo, hi + 1)), selectedId: id });
         void get().ensureSelectedTrack(id);
         return;
       }

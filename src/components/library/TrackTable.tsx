@@ -33,6 +33,7 @@ import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { acquireCoverThumbnail, peekCoverThumbnail, type CoverThumbnailLease } from "../../lib/coverThumbnailQueue";
 import { OverlayScrollbars } from "../common/OverlayScrollbars";
 import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
+import { RowIndex, RowPick } from "../common/RowPick";
 import { TableRating } from "../common/TableRating";
 import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
@@ -46,11 +47,11 @@ import {
   formatShareText,
   matchedBilibiliVideoShareLink,
   matchedTrackShareLink,
-  trackShareLink,
   soundCloudPlayerShareLink,
   soundCloudStoredShareLink,
   soundCloudTrackApiUrl,
   soundCloudTrackId,
+  trackShareLink,
   trackShareSearchQuery,
   writeShareLinkDrag,
 } from "../../lib/shareLink";
@@ -472,8 +473,8 @@ function resolveSoundCloudShareLink(track: TrackSummary, id: string): Promise<st
 function resolveLocalTrackShareLink(track: TrackSummary): Promise<string | null> {
   const direct = trackShareLink(track);
   if (direct) return Promise.resolve(direct);
-  const video = isVideoTrack(track.format);
   const soundCloudId = soundCloudTrackId(track);
+  const video = isVideoTrack(track.format);
   const query = video
     ? bilibiliVideoShareSearchQuery(track)
     : trackShareSearchQuery(track);
@@ -515,7 +516,6 @@ function trackCell(
   track: TrackSummary,
   key: string,
   keyNotation: KeyNotation,
-  selectionControl: React.ReactNode,
   onRate: ((rating: number) => void) | undefined,
   index: number,
   coverLane: CoverLane,
@@ -524,7 +524,6 @@ function trackCell(
     case "title":
       return (
         <td key={key} data-col="title" className="kd-td-strong" title={track.title || track.filename}>
-          {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
           <TrackCoverThumb track={track} index={index} lane={coverLane} />
@@ -662,9 +661,11 @@ interface TrackCellsProps {
   showIndex: boolean;
   columns: readonly Column[];
   keyNotation: KeyNotation;
+  /** Rows are being picked: the index gives way to the selection mark (see TrackTable's `selecting`). */
   selectionMode: boolean;
   selected: boolean;
-  onToggle(id: number): void;
+  /** `range` picks the run from the row touched last to this one. */
+  onToggle(id: number, range?: boolean): void;
   onRate(id: number, rating: number): void;
 }
 
@@ -686,26 +687,26 @@ const TrackCells = memo(function TrackCells({
 }: TrackCellsProps) {
   return (
     <>
-      {showIndex ? <td data-col="index">{index + 1}</td> : null}
+      {showIndex ? (
+        <td data-col="index" data-picking={selectionMode ? "true" : undefined}>
+          <RowIndex
+            number={index + 1}
+            picking={selectionMode}
+            pick={(
+              <RowPick
+                state={selected ? "all" : "none"}
+                label={`选择 ${track.title || track.filename}`}
+                onToggle={(event) => onToggle(track.id, event.shiftKey)}
+              />
+            )}
+          />
+        </td>
+      ) : null}
       {columns.map((column) => {
         const cell = trackCell(
           track,
           column.key,
           keyNotation,
-          column.key === "title" && selectionMode ? (
-            <button
-              type="button"
-              className="kd-row-select"
-              aria-label={selected ? "取消选择" : "选择曲目"}
-              aria-pressed={selected}
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggle(track.id);
-              }}
-            >
-              <Check size={9} />
-            </button>
-          ) : undefined,
           column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
           index,
           coverLane,
@@ -955,7 +956,7 @@ export const TrackTable = memo(function TrackTable({
   const undoName = undo.op === "copy" ? "复制" : undo.op === "delete" ? "删除" : "移动";
   const updateTrack = useTableStore((state) => state.updateTrack);
   const toggleTrackSelection = useCallback(
-    (id: number) => onSelect(id, "toggle"),
+    (id: number, range = false) => onSelect(id, range ? "range" : "toggle"),
     [onSelect],
   );
   const rateTrack = useCallback(
@@ -964,6 +965,13 @@ export const TrackTable = memo(function TrackTable({
   );
   const selectionMode = useTableStore((state) => state.selectionMode);
   const setSelectionMode = useTableStore((state) => state.setSelectionMode);
+  /**
+   * Rows are being picked: the mode was asked for (the row menu's 选择, the head's mark), or a
+   * batch already exists (⌘/Ctrl-click, Shift-click, select all). The work rail reads the same
+   * condition, so the list and its rail are in the mode together. While it holds, every row
+   * shows the selection mark in place of its number and a plain click picks or drops the row.
+   */
+  const selecting = selectionMode || selectedIds.length > 1;
   const downloadTasks = useDownloadStore((state) => state.list);
   const pendingDownloads = useMemo(
     () => downloadTasks.filter((task) => isPendingForFolder(task, filterFolder, indexById)),
@@ -982,11 +990,11 @@ export const TrackTable = memo(function TrackTable({
   const htmlExternalDragScrollUnlockRef = useRef<((settleMs?: number) => void) | null>(null);
   const suppressContextMenuUntilRef = useRef(0);
 
-  // Esc 的语义是取消这一轮显式批选：菜单、复选框和选区一起收掉。
+  // Esc 的语义是取消这一轮批选：菜单、选择标记和选区一起收掉。
   // 全选走 useLibraryClipboard（Cmd/Ctrl+A），不挂在「仅多选时」——
   // 只选了一首时也要能全选。
   useEffect(() => {
-    if (!shortcutActive || (!selectionMode && selectedIds.length <= 1)) return;
+    if (!shortcutActive || !selecting) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       // 搜索框用 Esc 清空关键词、输入法用 Esc 取消候选：都不该连带清掉批选。
@@ -997,7 +1005,7 @@ export const TrackTable = memo(function TrackTable({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [shortcutActive, selectionMode, selectedIds.length, libraryStore, setSelectionMode]);
+  }, [shortcutActive, selecting, libraryStore, setSelectionMode]);
 
   /* ------------------------------------------------ 行右键菜单（多选操作） */
   /**
@@ -2061,11 +2069,12 @@ export const TrackTable = memo(function TrackTable({
         suppressClickRef.current = null;
         return;
       }
-      if (selectionMode) {
+      if (selecting) {
         // 双点会依次送 detail=1 / 2 两次 click。竖屏的单击就是播放，
         // 第二下既不该重复起播，也不该把选择状态又翻回去。
         if (playClick === "single" && event.detail > 1) return;
-        onSelect(track.id, "toggle");
+        // A plain click picks or drops the row; Shift picks the run up to it. Nothing plays.
+        onSelect(track.id, event.shiftKey ? "range" : "toggle");
         return;
       }
       // 同上：先让第一下立即播放，第二下只被吞掉；不要等双击超时，
@@ -2101,7 +2110,7 @@ export const TrackTable = memo(function TrackTable({
     },
     cancelPress,
     doubleClick(track) {
-      if (selectionMode || playClick !== "double") return;
+      if (selecting || playClick !== "double") return;
       const submitted = doubleClickPlaybackRef.current;
       doubleClickPlaybackRef.current = null;
       if (
@@ -2117,7 +2126,7 @@ export const TrackTable = memo(function TrackTable({
       if (Date.now() < suppressContextMenuUntilRef.current) return;
       cancelPress();
       setPendingMenu(null);
-      // 右键只开菜单；用户明确点菜单里的「选择」后才显示复选框。
+      // 右键只开菜单；用户明确点菜单里的「选择」后才进入批选（序号换成选择标记）。
       setRowMenu({ x: event.clientX, y: event.clientY, track });
     },
   };
@@ -2208,8 +2217,28 @@ export const TrackTable = memo(function TrackTable({
             }}
           >
             {showIndexCol ? (
-              <th data-col="index" style={{ width: indexWidth }} title="当前列表中的序号">
-                序号
+              <th
+                data-col="index"
+                data-picking={selecting ? "true" : undefined}
+                style={{ width: indexWidth }}
+                title={selecting ? undefined : "当前列表中的序号"}
+              >
+                <span className="kd-th-label">序号</span>
+                {/* Above the rows' marks, in their place: all of the list, a part of it, none. */}
+                {selecting ? (
+                  <RowPick
+                    className="kd-pick-head"
+                    state={selectedIds.length === 0 ? "none" : selectedIds.length >= orderedIds.length ? "all" : "some"}
+                    label="全选"
+                    onToggle={() => {
+                      const store = libraryStore.getState();
+                      if (selectedIds.length >= orderedIds.length) store.select(null);
+                      else store.selectAll();
+                      // Clearing through the store leaves the mode; the head's mark stays in it.
+                      store.setSelectionMode(true);
+                    }}
+                  />
+                ) : null}
                 <span
                   className="kd-col-resize"
                   data-active={resizingCol === INDEX_COL_KEY ? "true" : undefined}
@@ -2370,7 +2399,7 @@ export const TrackTable = memo(function TrackTable({
               selected={selected.has(track.id)}
               focused={track.id === selectedId}
               playing={track.id === playingId}
-              selectionMode={selectionMode}
+              selectionMode={selecting}
               linkDrag={htmlExternalLinkDrag}
               actions={rowActions}
               coverLane={coverLane}
@@ -2490,7 +2519,8 @@ export const TrackTable = memo(function TrackTable({
             type="button"
             onClick={() => {
               setSelectionMode(true);
-              if (!selected.has(rowMenu.track.id)) onSelect(rowMenu.track.id, "toggle");
+              // The batch starts with this row; a row that is merely the current one is not part of it.
+              if (!selected.has(rowMenu.track.id)) onSelect(rowMenu.track.id, selecting ? "toggle" : "replace");
               setRowMenu(null);
             }}
           >
