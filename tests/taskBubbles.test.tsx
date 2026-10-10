@@ -156,6 +156,8 @@ test("the playing song's bubble: a message beside the bar, the transport while t
   assert.equal(pinned.spec.controls, undefined, "no transport beside the bar");
   assert.equal(pinned.spec.dismiss, undefined, "its key simply rolls it down");
   assert.equal(pinned.spec.stay, 0);
+  assert.equal(pinned.spec.base, true, "it is the floor of the stack: later notices rest above it");
+  assert.equal(pinned.spec.placement, undefined, "at the bottom");
   assert.equal(pinned.spec.body, undefined, "it does not expand");
   assert.equal(pinned.spec.origin?.label, "B站", "where the file was downloaded from");
   assert.deepEqual(keys(), ["lyrics", "popup", "meta", "pin"]);
