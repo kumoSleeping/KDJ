@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { createPortal } from "react-dom";
 import { AlertTriangle, Check, ChevronsDown, ChevronsUpDown, Info, LoaderCircle } from "lucide-react";
 import { useCoverLoad } from "../../lib/coverLoad";
+import { playerBarMoving, usePlayerBarAway } from "../../lib/playerBarAway";
 import { prefersReducedSeekMotion } from "../../lib/seekTransition";
 import {
   SONG_SWAP_IN_EASE,
@@ -172,6 +173,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || undefined}
+      data-controls={spec.controls != null || undefined}
       onPointerEnter={() => onHeld(id, true)} onPointerLeave={() => onHeld(id, false)}
       onFocus={() => onHeld(id, true)}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onHeld(id, false); }}>
@@ -206,6 +208,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
         </div>
       </div>
       {expanded && <div className="kd-task-body kd-scroll">{spec.body}</div>}
+      {spec.controls != null && <div className="kd-task-controls">{spec.controls}</div>}
     </article>
   </div>;
 }
@@ -213,8 +216,9 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
 /**
  * 任务信息: the one place task bubbles are drawn. They rise from behind the top edge of the
  * player bar to a resting place detached from it, at the bottom right, and roll back down;
- * several stack upwards with the newest nearest the bar. `sources` names the app's own
- * activities this window reports (see taskSources.ts).
+ * several stack upwards with the newest nearest the bar. With the bar put away they stand on
+ * the window's bottom edge instead. `sources` names the app's own activities this window
+ * reports (see taskSources.ts).
  */
 export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] }) {
   const entries = useTaskBubbles(state => state.entries);
@@ -237,7 +241,19 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
   useEffect(() => sourceKey ? startTaskSources(sourceKey.split(",") as TaskSource[]) : undefined, [sourceKey]);
 
   // The stack stands on the top edge of the player bar; without a bar, on the window's bottom.
+  // `floor` is the bar's height. A bar that is put away (src/lib/playerBarAway.ts) lies over the
+  // page from the moment it starts to slide: the host then reaches the window's bottom, and the
+  // bubbles that are up ride the bar's top edge down, or back up, by a transform on the same
+  // clock. That is settled when the slide starts: with nothing standing on the bar there is
+  // nothing to carry, and a bubble the slide itself brings (the playing song, as the bar goes)
+  // rises from the window's edge while the bar sinks behind it.
   const [floor, setFloor] = useState(0);
+  const barPhase = usePlayerBarAway(state => state.phase);
+  const ride = useRef({ phase: barPhase, on: false });
+  if (ride.current.phase !== barPhase) {
+    ride.current = { phase: barPhase, on: playerBarMoving(barPhase) && entries.some(entry => !entry.leaving) };
+  }
+  const riding = ride.current.on;
   const [root, setRoot] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => { setRoot(document.querySelector<HTMLElement>(".kd-app")); }, []);
   useLayoutEffect(() => {
@@ -275,15 +291,20 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
 
   // The drawer over the list ends above a bubble that is kept up (see --kd-info-lift in
   // Drawer.css). A bubble that leaves by itself may cover the drawer's bottom for its stay.
+  // While a stack rides the sliding bar, the list already reaches the window's bottom and the
+  // stack is still on the bar: the drawer keeps clear of the bar's height as well, and takes
+  // that room when the bar is gone.
+  const lift = kept > 0 ? Math.round(kept + (riding ? floor : 0)) : 0;
   useEffect(() => {
-    if (kept > 0) document.documentElement.style.setProperty("--kd-info-lift", `${Math.round(kept)}px`);
+    if (lift > 0) document.documentElement.style.setProperty("--kd-info-lift", `${lift}px`);
     else document.documentElement.style.removeProperty("--kd-info-lift");
-  }, [kept]);
+  }, [lift]);
   useEffect(() => () => { document.documentElement.style.removeProperty("--kd-info-lift"); }, []);
 
   if (entries.length === 0) return null;
   return createPortal(
-    <div className="kd-task-host" style={{ ...TASK_CLOCK, "--kd-task-floor": `${floor}px` } as CSSProperties}>
+    <div className="kd-task-host" data-floor={riding && !prefersReducedSeekMotion() ? (barPhase === "leaving" ? "down" : "up") : undefined}
+      style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px` } as CSSProperties}>
       {ordered.map((entry, index) => <TaskBubble key={`${entry.spec.id}:${entry.order}`} entry={entry}
         lift={lifts.current[entry.spec.id] ?? 0} front={ordered.length - index}
         held={holds.length > 0} onHeld={onHeld} onSize={onSize} />)}

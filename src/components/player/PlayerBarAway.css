@@ -1,0 +1,94 @@
+/* The player bar put away (src/lib/playerBarAway.ts, PlayerBarAway.tsx). The bar's own rules
+   for it are with the bar in design.css; here is the key that brings it back and the room the
+   sidebar leaves for that key. */
+
+/* The little thing at the bottom-left corner: the playing record on a small floating surface,
+   detached from the window's edges by the same gap as a task bubble at the other corner. */
+.kd-bar-return {
+  position: fixed;
+  z-index: 110;
+  bottom: 12px;
+  left: 12px;
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border: 1px solid var(--kd-float-edge, var(--kd-line));
+  border-radius: 12px;
+  background: var(--kd-panel);
+  box-shadow: var(--kd-float-shadow);
+  color: #fff;
+  cursor: pointer;
+}
+.kd-bar-return:focus-visible { outline: 2px solid var(--kd-text-body); outline-offset: 2px; }
+.kd-bar-return:active > .kd-bar-return-record { transform: scale(0.94); }
+.kd-bar-return > * { grid-area: 1 / 1; }
+/* A record with the cover as its label. The box takes the press; the turn is on its face, so
+   the two transforms never meet. */
+.kd-bar-return-record {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  transition: transform 0.08s;
+}
+.kd-bar-return-record::before,
+.kd-bar-return-record > img,
+.kd-bar-return-record > i { grid-area: 1 / 1; }
+.kd-bar-return-record::before {
+  content: "";
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: repeating-radial-gradient(circle at center, #17171a 0 1px, #050506 1.5px 3px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.kd-bar-return-record > img,
+.kd-bar-return-record > i {
+  position: relative;
+  width: 62%;
+  height: 62%;
+  border-radius: 50%;
+  object-fit: cover;
+  animation: kd-bar-return-spin 2.8s linear infinite paused;
+}
+/* No cover: a plain label with its spindle hole. */
+.kd-bar-return-record > i {
+  width: 40%;
+  height: 40%;
+  background: radial-gradient(circle, #050506 0 16%, #8e8e93 18% 100%);
+}
+.kd-bar-return-record[data-spinning] > img,
+.kd-bar-return-record[data-spinning] > i { animation-play-state: running; }
+@keyframes kd-bar-return-spin {
+  from { transform: rotate(0turn); }
+  to { transform: rotate(1turn); }
+}
+/* Under the pointer or the keyboard's focus the record says what the key does. */
+.kd-bar-return-mark {
+  position: relative;
+  opacity: 0;
+  transition: opacity 0.12s;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.9));
+  pointer-events: none;
+}
+.kd-bar-return-record > img,
+.kd-bar-return-record > i { transition: opacity 0.12s; }
+.kd-bar-return:is(:hover, :focus-visible) > .kd-bar-return-mark { opacity: 1; }
+.kd-bar-return:is(:hover, :focus-visible) .kd-bar-return-record > :is(img, i) { opacity: 0.25; }
+@media (prefers-reduced-motion: reduce) {
+  .kd-bar-return-record > img,
+  .kd-bar-return-record > i { animation: none; }
+}
+
+/* The sidebar ends above the key, so nothing of it lies under the key. */
+:root[data-kd-bar-away] .kd-app:not([data-tall="true"]) .kd-tree-slot { padding-bottom: 3.75rem; }
+
+/* Sakura98: the pack's face, bevel and hard drop, square. */
+:root[data-theme-pack="sakulaptop98"] .kd-bar-return {
+  border-radius: 0;
+  background: var(--s98-face);
+  box-shadow: var(--kd-shadow-float);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-bar-return:active { box-shadow: var(--s98-sunken); }

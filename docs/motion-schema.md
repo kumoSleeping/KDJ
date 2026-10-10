@@ -109,6 +109,8 @@ leaving gesture when React unmounts the element. Variants:
 | `Sheet` (phones; the portrait folder picker from the bottom) | `slide` in from its edge, scrim `fade`; closes at once |
 | `InlineNotice`; the sidebar's new-folder row and rename field | `pop` in |
 | Sidebar drag feedback (drop tint, insertion mark, lifted root) | micro-out clock, in `FolderTree.css` |
+| The player bar put away and brought back (`PlayerBarAway.tsx`) | `slide` from the bottom edge, both ways; it stays mounted and sets `data-kd-leaving` itself |
+| The key at the bottom-left corner that brings the bar back | `pop`, both ways |
 
 Not on it by design: the drawer, 曲目信息, the floating media window and the search bar keep
 their own choreography on the same clock. Tooltips are the system's (`title`).

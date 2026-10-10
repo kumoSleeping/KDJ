@@ -75,6 +75,12 @@ export interface TaskBubbleSpec {
   expanded?: boolean;
   onExpand?(expanded: boolean): void;
   /**
+   * The task's own live controls, drawn as a row along the bottom of the bubble in both the
+   * compact and the expanded form (the playing song: its transport and progress). The task
+   * supplies the controls; the row, its place and its spacing are the host's.
+   */
+  controls?: ReactNode;
+  /**
    * The playing song this bubble is about. While the bubble is up and this changes, it rolls
    * down with the old song and rises with the new one on the song-change clock
    * (src/lib/songSwapMotion.ts), and it counts as a surface of that song.
