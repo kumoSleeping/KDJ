@@ -566,6 +566,8 @@ export function Workspace() {
   }, [revealSearchPane]);
   const localPaneVisible = visiblePaneOrder.includes("local");
   const searchPaneVisible = visiblePaneOrder.includes("search");
+  // The rail's pager is gone; until the list pages itself on scroll nothing calls this.
+  void changeCollectionPage;
   const [dragWorkspacePane, setDragWorkspacePane] = useState<WorkspacePaneKind | null>(null);
   const [workspacePaneDropTarget, setWorkspacePaneDropTarget] =
     useState<WorkspacePaneKind | null>(null);
@@ -2391,7 +2393,7 @@ export function Workspace() {
                     );
                   }}
                 >
-                  <LibraryWorkRail mode="rail"
+                  <LibraryWorkRail mode="rail" shown={localPaneVisible}
                     aggregateSearchOpen={aggregateSearchOpen}
                     onOpenAggregateSearch={openAggregateSearch}
                   />
@@ -2462,7 +2464,7 @@ export function Workspace() {
                       onFocusCapture={() => focusWorkspacePane("search")}
                     >
                       {temporaryLibrary ? <TemporaryFolderPane key={temporaryLibrary.id} library={temporaryLibrary}
-                        active={activeWorkspacePane === "search"} layout={layout}
+                        active={activeWorkspacePane === "search"} shown={searchPaneVisible} layout={layout}
                         onSelect={(id, mode, clickCount) => selectTrack(id, mode, clickCount, temporaryLibrary.store)}
                         onClose={() => {
                           setTemporaryLibrary(null);
@@ -2483,7 +2485,6 @@ export function Workspace() {
                         collectionWindow={openedCollectionWindow}
                         canGoBack={collectionSearchSnapshot !== null}
                         onGoBack={returnToCollectionSearch}
-                        onCollectionPageChange={changeCollectionPage}
                         onDownloadCollection={() => void downloadOpenedCollection()}
                         loading={busy || loadingCollections.size > 0}
                         selectionCount={chosen.size}
@@ -2501,6 +2502,9 @@ export function Workspace() {
                         showVideoAudioOnly={chosenHasVideo}
                         videoAudioOnly={videoAudioOnly}
                         onToggleVideoAudioOnly={setVideoAudioOnly}
+                        streamPlaylist={openedStreamPlaylist}
+                        video={video}
+                        shown={searchPaneVisible}
                         onClose={() => {
                           resultRequestSeqRef.current += 1;
                           setBusy(false);

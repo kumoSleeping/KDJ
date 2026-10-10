@@ -4938,6 +4938,17 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-rail-item[hidden] {
   display: none;
 }
+/* A task that has its own glyph, kept beside its words (a download running in the queue). */
+.kd-rail-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.kd-rail-task > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* 曲库内搜：平常只是右端小按键；点开后只占右侧一段，左侧任务/分析状态常驻。 */
 .kd-activity-trailing-tools {
   display: inline-flex;
@@ -5086,7 +5097,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   white-space: nowrap;
 }
 .kd-collection-rail-actions,
-.kd-collection-rail-pagination,
 .kd-collection-rail-download {
   display: inline-flex;
   align-items: center;
@@ -5118,37 +5128,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-collection-rail-download:disabled {
   opacity: 0.35;
   cursor: default;
-}
-.kd-collection-rail-pagination {
-  gap: 0.05rem;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.kd-collection-rail-pagination > button {
-  appearance: none;
-  display: inline-grid;
-  place-items: center;
-  width: 1.45rem;
-  height: 1.55rem;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--kd-collection-rail-accent, var(--kd-theme));
-  cursor: pointer;
-}
-.kd-collection-rail-pagination > button:hover:not(:disabled) {
-  color: var(--kd-text);
-}
-.kd-collection-rail-pagination > button:disabled {
-  color: var(--kd-faint);
-  opacity: 0.45;
-  cursor: default;
-}
-.kd-collection-rail-pagination > span {
-  min-width: 2.7rem;
-  text-align: center;
 }
 .kd-activity-actions .kd-chrome-actions {
   gap: 0.25rem;
