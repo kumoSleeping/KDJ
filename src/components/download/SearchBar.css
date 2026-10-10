@@ -1,5 +1,6 @@
-/* 聚合搜索: the search kind and its sources on the left, the editor on the right. Nothing is
-   drawn between or around them: the editor is one softly tinted field, and spacing does the rest.
+/* 聚合搜索: the search kind and its sources on the left, the editor on the right (in a tall
+   window: above, and the editor below). Nothing is drawn between or around them: the editor is
+   one softly tinted field, and spacing does the rest.
 
    A search is drawn as a waveform, under the text and in the selected sources' own colours:
    - focus: the field's tone deepens, nothing travels;
@@ -123,6 +124,47 @@
 .kd-searchbar .kd-plat {
   width: 1.6rem;
   height: 1.6rem;
+}
+
+/* —— A tall window: two rows ——
+   A desktop window no wider than 3:4 (useLayoutMode) leaves one row too little room for the
+   editor. There the kind and the sources keep the first row, which they share with the drawer's
+   entries at its right end (Drawer.css; those stay exactly where they are), and the editor takes
+   a second row of its own across the whole of the list's column. It still grows downward for a
+   batch, and the waveform still lies on its first line. Only spacing separates the two rows.
+   The head the drawer hangs from is both rows, so its panel starts below the editor: the sheets
+   follow .kd-drawer-area, whose top is --kd-drawer-head-h. A phone has no drawer head
+   ([data-drawer-head] is the wide columns only) and keeps its one row. */
+.kd-app[data-tall="true"] {
+  /* The first row is the one-row head, kept under a name of its own before the head grows. */
+  --kd-search-head-row: var(--kd-drawer-head-h);
+  /* The second row: one line of the editor (--kd-search-h) and the space above it. */
+  --kd-search-row-gap: 0.25rem;
+  --kd-search-second-row: 2.5rem;
+}
+/* On whole pixels at any interface font size, like the head itself. */
+@supports (width: round(1px, 1px)) {
+  .kd-app[data-tall="true"] { --kd-search-second-row: round(2.5rem, 1px); }
+}
+.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] {
+  --kd-drawer-head-h: calc(var(--kd-search-head-row) + var(--kd-search-second-row));
+}
+.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] .kd-drawer-launcher {
+  height: var(--kd-search-head-row);
+}
+.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar {
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: var(--kd-search-row-gap);
+}
+/* The entries' column is kept clear beside the first row only, so the editor reaches the right
+   edge. A theme pack's caption is part of the dock: there the whole dock stays left of the
+   entries, as in a wide window, and both rows end where they begin. */
+:root:not([data-theme-pack]) .kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top {
+  padding-right: 0;
+}
+:root:not([data-theme-pack]) .kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar-tools {
+  /* The entries' width, less the right padding of the band and of the bar (0.75rem + 0.55rem). */
+  margin-right: calc(var(--kd-drawer-lip-w) - 1.3rem);
 }
 
 /* —— A line that changes (RollText): the kind, the tip ——
