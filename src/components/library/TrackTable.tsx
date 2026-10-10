@@ -37,7 +37,7 @@ import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../common/dragGhost";
 import "../common/DragGhost.css";
-import { createListArrival, type ListArrival } from "./listArrival";
+import { createListArrival, LIST_ARRIVAL_STEPS, type ListArrival } from "./listArrival";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent } from "../../lib/shareClipboard";
 import {
@@ -1996,7 +1996,7 @@ export const TrackTable = memo(function TrackTable({
     };
   }, []);
   // 行换了（窗口移动、换序、列表变长变短）之后，在同一帧里把替身行让给真实的行。行要追上滚动
-  // 的那一次除外：那时替身行在到场的行上淡出，由下面处理 arrivalDueRef 的 effect 交接。
+  // 的那一次除外：那时替身行赶在到场的行前面让开，由下面处理 arrivalDueRef 的 effect 交接。
   useLayoutEffect(() => {
     if (arrivalDueRef.current?.gesture === "chase") return;
     const pace = paceRef.current;
@@ -2060,7 +2060,7 @@ export const TrackTable = memo(function TrackTable({
   /**
    * 到场动画的交接，每次提交之后看一眼（平时两个 ref 都是空的，什么也不做）：
    * - 有一次到场在等（arrivalDueRef），而渲染窗口已经对上滚动位置：给行做上标记，动画开始。
-   *   行追上滚动的那一次，替身行同时在它们上面淡出。
+   *   行追上滚动的那一次，替身行同时赶在它们前面让开。
    * - 动画进行中又提交了一次：期间新挂载的行（占位行换成了真实的行）按原来的位置加入。
    * 放在换查询和板块显示这两个 effect 之后：它们在同一次提交里定下滚动位置和要不要到场。
    */
@@ -2077,8 +2077,10 @@ export const TrackTable = memo(function TrackTable({
     arrivalDueRef.current = null;
     const started = matched && visibleRef.current && !paceRef.current.fast && startArrival(due);
     if (due.gesture !== "chase") return;
-    // 行在追：视口附近的替身行在它们上面淡出。没有行要追（之前的行一直盖着视口）就直接收掉。
-    if (!started || !standInsRef.current?.settle()) paintStandIns(0);
+    // 行在追：视口附近的替身行赶在它们前面一行一行让开，节奏和行出场的节奏一样。没有行要追
+    // （之前的行一直盖着视口）就直接收掉。
+    const sweep = { row: arrivalRowsRef.current[0], direction: due.direction, rows: LIST_ARRIVAL_STEPS };
+    if (!started || !standInsRef.current?.settle(sweep)) paintStandIns(0);
   });
 
   useEffect(() => {

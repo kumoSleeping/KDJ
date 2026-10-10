@@ -41,8 +41,17 @@ const BARS_SCALE = 0.25;
 const BARS_PER_FRAME = 16;
 /** Canvases keep their pixels this long after the last stand-in was shown: the next flick reuses them. */
 const SPARE_PIXELS_MS = 4000;
-/** The attribute of a canvas that is fading out under the rows that caught up (design.css). */
+/** The attribute of a canvas that is being wiped away ahead of the rows that caught up (design.css). */
 export const STAND_IN_LEAVING_ATTR = "data-leaving";
+/**
+ * What the keyframes of the wipe read from a leaving canvas: the clip it starts with and the one
+ * it ends with, and the part of the wipe's time it waits and then takes (the wipe passes from
+ * one canvas to the next).
+ */
+const WIPE_FROM = "--kd-wipe-from";
+const WIPE_TO = "--kd-wipe-to";
+const WIPE_WAIT = "--kd-wipe-wait";
+const WIPE_SHARE = "--kd-wipe-share";
 
 export interface StandInPlanInput {
   /** Offset of the viewport's first row pixel, in pixels from the first row. */
@@ -162,6 +171,17 @@ export interface StandInFrame {
   speed: number;
 }
 
+/**
+ * How the rows that caught up arrive: `row` starts first, then its neighbour in `direction`
+ * (1: the one below), `rows` of them within the time a surface takes to leave; whatever lies
+ * beyond comes when they have all started.
+ */
+export interface StandInSweep {
+  row: number;
+  direction: -1 | 1;
+  rows: number;
+}
+
 export interface StandInStats {
   /** Tiles painted and the time spent painting, since the last reading. */
   bars: number;
@@ -179,12 +199,14 @@ export interface LibraryStandIns {
    */
   update(frame: StandInFrame): (readonly [number, number])[];
   /**
-   * The scroll has slowed down and the table has built its rows here. The stand-ins near the
-   * viewport fade out over the rows as those arrive, the others go at once; until the fade is over
-   * an `update` without a direction leaves them alone, and one with a direction (the next fling)
-   * ends it. Returns whether anything is fading.
+   * The scroll has slowed down and the table has built its rows here; they arrive one after the
+   * other (see StandInSweep). The stand-ins near the viewport are wiped away just ahead of them,
+   * row by row at the pace the rows start, so a row never shows through its own bar and no place
+   * is left bare; the others go at once. Until the wipe is over an `update` without a direction
+   * leaves them alone, and one with a direction (the next fling) ends it. Returns whether
+   * anything is leaving.
    */
-  settle(): boolean;
+  settle(sweep: StandInSweep): boolean;
   /** The layout, columns or theme may have changed: measure a real row again. */
   invalidate(): void;
   /** What painting cost since the last call. */
@@ -202,6 +224,9 @@ interface Tile {
   start: number;
   end: number;
   shown: string;
+  /** The rows of it on show: [shownStart, shownEnd). */
+  shownStart: number;
+  shownEnd: number;
 }
 
 function lastText(node: Node): Text | null {
@@ -236,7 +261,7 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
   /** The bars of one tile, drawn once and copied onto every tile. */
   let pattern: { canvas: HTMLCanvasElement; shape: Template; left: number; width: number; rowHeight: number } | null = null;
   let trim: ReturnType<typeof setTimeout> | null = null;
-  /** Running while the tiles left on show fade out (see settle). */
+  /** Running while the tiles left on show are wiped away (see settle). */
   let leaving: ReturnType<typeof setTimeout> | null = null;
   let lastFrame: StandInFrame | null = null;
   let frameRequest = 0;
@@ -293,14 +318,17 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
 
   const release = (tile: Tile) => {
     tile.canvas.style.display = "none";
-    tile.canvas.removeAttribute(STAND_IN_LEAVING_ATTR);
+    if (tile.canvas.hasAttribute(STAND_IN_LEAVING_ATTR)) {
+      tile.canvas.removeAttribute(STAND_IN_LEAVING_ATTR);
+      for (const property of [WIPE_FROM, WIPE_TO, WIPE_WAIT, WIPE_SHARE]) tile.canvas.style.removeProperty(property);
+    }
     tile.shown = "none";
     spare.push(tile.canvas);
     tiles.delete(tile.index);
   };
   const obtain = (index: number): Tile => {
     const canvas = spare.pop() ?? layer.appendChild(document.createElement("canvas"));
-    const tile: Tile = { canvas, index, painted: false, fresh: false, start: 0, end: 0, shown: "" };
+    const tile: Tile = { canvas, index, painted: false, fresh: false, start: 0, end: 0, shown: "", shownStart: 0, shownEnd: 0 };
     canvas.style.display = "none";
     canvas.style.clipPath = "";
     tiles.set(index, tile);
@@ -474,6 +502,8 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
       const clipTop = (item.shownStart - item.index * STAND_IN_TILE_ROWS) * rowHeight;
       const clipBottom = (item.end - item.shownEnd) * rowHeight;
       const shown = !tile.painted ? "none" : clipTop || clipBottom ? `inset(${clipTop}px 0 ${clipBottom}px 0)` : "all";
+      tile.shownStart = item.shownStart;
+      tile.shownEnd = item.shownEnd;
       if (shown !== tile.shown) {
         tile.shown = shown;
         tile.canvas.style.display = shown === "none" ? "none" : "";
@@ -496,7 +526,7 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
     return covered;
   };
 
-  const settle = () => {
+  const settle = (sweep: StandInSweep) => {
     if (leaving !== null) return true;
     if (frameRequest) cancelAnimationFrame(frameRequest);
     frameRequest = 0;
@@ -507,14 +537,37 @@ export function createLibraryStandIns(scroller: HTMLElement, layer: HTMLElement)
       keepOrTrim();
       return false;
     }
-    // What the rest of the scroll can still bring into view while the fade lasts: a screen either side.
+    const rowHeight = boxed.rowHeight;
+    // What the rest of the scroll can still bring into view while the wipe lasts: a screen either side.
     const reach = scroller.clientHeight;
     const from = scroller.scrollTop - reach;
     const to = scroller.scrollTop + 2 * reach;
+    // The rows the wipe passes, [first, last), and whether a row has been passed when it is over.
+    const first = sweep.direction > 0 ? sweep.row : sweep.row + 1 - sweep.rows;
+    const last = first + sweep.rows;
     for (const tile of [...tiles.values()]) {
-      const top = shape.bodyTop + tile.index * STAND_IN_TILE_ROWS * boxed.rowHeight;
-      if (tile.shown === "none" || top >= to || top + STAND_IN_TILE_ROWS * boxed.rowHeight <= from) release(tile);
-      else tile.canvas.setAttribute(STAND_IN_LEAVING_ATTR, "");
+      const base = tile.index * STAND_IN_TILE_ROWS;
+      const top = shape.bodyTop + base * rowHeight;
+      // Rows the arriving ones started behind (the scroll has passed them) have nothing to wait for.
+      const start = sweep.direction > 0 ? Math.max(tile.shownStart, first) : tile.shownStart;
+      const end = sweep.direction > 0 ? tile.shownEnd : Math.min(tile.shownEnd, last);
+      if (tile.shown === "none" || start >= end || top >= to || top + STAND_IN_TILE_ROWS * rowHeight <= from) {
+        release(tile);
+        continue;
+      }
+      // The canvas runs from its first row slot; a clip is so many pixels in from its top and its bottom.
+      const inset = (shownFrom: number, shownTo: number) =>
+        `inset(${(shownFrom - base) * rowHeight}px 0 ${(tile.end - shownTo) * rowHeight}px 0)`;
+      // The rows of this tile the wipe passes, and when it reaches them on its way.
+      const passedFrom = Math.min(end, Math.max(start, first));
+      const passedTo = Math.max(passedFrom, Math.min(end, last));
+      const style = tile.canvas.style;
+      style.setProperty(WIPE_FROM, inset(start, end));
+      style.setProperty(WIPE_TO, sweep.direction > 0 ? inset(passedTo, end) : inset(start, passedFrom));
+      const wait = Math.min(sweep.rows, Math.max(0, sweep.direction > 0 ? passedFrom - first : last - passedTo));
+      style.setProperty(WIPE_WAIT, (wait / sweep.rows).toFixed(3));
+      style.setProperty(WIPE_SHARE, ((passedTo - passedFrom) / sweep.rows).toFixed(3));
+      tile.canvas.setAttribute(STAND_IN_LEAVING_ATTR, "");
     }
     keepOrTrim();
     if (!tiles.size) return false;

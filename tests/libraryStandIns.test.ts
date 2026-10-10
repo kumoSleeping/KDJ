@@ -58,7 +58,7 @@ test("a faster scroll reaches further ahead, up to a limit", () => {
   assert.equal(standInGap([[0, 5], [8, 12]], 3, 10), 3);
 });
 
-test("tiles are bars copied from one pattern, never text; they fade out over the rows that caught up and never reach past the table", async () => {
+test("tiles are bars copied from one pattern, never text; they are wiped away ahead of the rows that caught up and never reach past the table", async () => {
   const dom = new JSDOM(`<!doctype html><html><body><div class="kd-scroll"><table class="kd-table"><thead><tr><th>t</th></tr></thead>
     <tbody><tr data-kd-track-id="1"><td data-col="title"><span><span class="kd-thumb"></span>Song</span></td><td data-col="bpm">128</td></tr></tbody>
     </table><div class="layer"></div></div></body></html>`, { url: "http://localhost" });
@@ -142,36 +142,58 @@ test("tiles are bars copied from one pattern, never text; they fade out over the
   assert.equal(standInGap(covered, 600, 700), 0);
   assert.ok(covered.every(([, end]) => end <= 700));
 
-  // The scroll slowed down and the table built its rows here. The tiles around the viewport fade
-  // out over them; those further away go at once.
+  // The scroll slowed down and the table built its rows here; they arrive from row 600 downwards,
+  // fourteen of them one after the other. The tiles around the viewport are wiped away ahead of
+  // them; those further away, and whatever lies behind the first arriving row, go at once.
+  const down = { row: 600, direction: 1, rows: 14 } as const;
+  const wipe = (canvas: HTMLCanvasElement) => ["from", "to", "wait", "share"].map((name) => canvas.style.getPropertyValue(`--kd-wipe-${name}`));
+  const tileAt = (row: number) => shown().find((canvas) => canvas.style.transform === `translate(0px, ${28 + Math.floor(row / STAND_IN_TILE_ROWS) * STAND_IN_TILE_ROWS * 36}px)`)!;
   standIns.update(frame({ speed: 5 }));
   settleFrames();
   assert.ok(shown().length >= 6);
-  assert.equal(standIns.settle(), true);
-  assert.ok(leaving().length >= 1 && leaving().length <= 3, `only the tiles a screen either side of the viewport fade (${leaving().length})`);
+  assert.ok(tileAt(590), "a screen behind a fast scroll is covered");
+  assert.equal(standIns.settle(down), true);
+  assert.equal(leaving().length, 2, "the tile under the viewport and the next one");
   assert.deepEqual(shown(), leaving());
-  // While they fade, the table asking for its resting state takes nothing away…
+  // Rows 600…623 are one tile: bars leave rows 600…613 at the pace the rows start, over the whole of the time; the rest waits for the last beat.
+  assert.deepEqual(wipe(tileAt(600)), ["inset(0px 0 0px 0)", `inset(${14 * 36}px 0 0px 0)`, "0.000", "1.000"]);
+  assert.deepEqual(wipe(tileAt(624)), ["inset(0px 0 0px 0)", "inset(0px 0 0px 0)", "1.000", "0.000"], "rows past the cascade keep their bars until it is over");
+  // While they leave, the table asking for its resting state takes nothing away…
   const fading = leaving();
   covered = standIns.update(frame({ direction: 0, windowStart: 560, windowEnd: 680 }));
   assert.deepEqual(covered, [[560, 680]]);
   assert.deepEqual(shown(), fading);
-  // …and the fade ends on the clock of a surface that leaves.
+  // …and it is over on the clock of a surface that leaves; nothing of it stays on a canvas.
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(shown().length, 0);
   assert.equal(leaving().length, 0);
+  assert.ok(canvases().every((canvas) => !canvas.style.getPropertyValue("--kd-wipe-from") && !canvas.style.getPropertyValue("--kd-wipe-to")));
 
-  // A second fling while the stand-ins fade: they are bars again at once, none of them fading.
+  // Towards the top the rows arrive from the bottom one upwards (row 618 first): the wipe runs the other way.
+  standIns.update(frame({ speed: 5, direction: -1, windowStart: 900, windowEnd: 1000 }));
+  settleFrames();
+  assert.equal(standIns.settle({ row: 618, direction: -1, rows: 14 }), true);
+  assert.deepEqual(wipe(tileAt(600)), [`inset(0px 0 ${5 * 36}px 0)`, `inset(0px 0 ${19 * 36}px 0)`, "0.000", "1.000"], "rows 619…623 lie behind the scroll; 605…618 are passed");
+  assert.deepEqual(wipe(tileAt(590)), ["inset(0px 0 0px 0)", "inset(0px 0 0px 0)", "1.000", "0.000"]);
+  // A wipe that crosses from one tile into the next: each takes its share of the time, one after the other.
+  await new Promise((resolve) => setTimeout(resolve, 150));
   standIns.update(frame({ speed: 5 }));
   settleFrames();
-  assert.equal(standIns.settle(), true);
-  covered = standIns.update(frame({ speed: 20, windowStart: 560, windowEnd: 680 }));
+  assert.equal(standIns.settle({ row: 616, direction: 1, rows: 14 }), true);
+  assert.deepEqual(wipe(tileAt(600)), [`inset(${16 * 36}px 0 0px 0)`, `inset(${24 * 36}px 0 0px 0)`, "0.000", "0.571"], "rows 616…623: eight of the fourteen, first");
+  assert.deepEqual(wipe(tileAt(624)), ["inset(0px 0 0px 0)", `inset(${6 * 36}px 0 0px 0)`, "0.571", "0.429"], "rows 624…629: the other six, after them");
+  assert.equal(shown().every((canvas) => canvas.style.transform !== tileAt(600).style.transform || canvas === tileAt(600)), true);
+
+  // A second fling while the stand-ins leave: they are bars again at once, none of them leaving.
+  covered = standIns.update(frame({ speed: 20, windowStart: 560, windowEnd: 580 }));
   assert.equal(leaving().length, 0);
   assert.equal(standInGap(covered, 600, 619 + 6 * 19), 0);
   assert.ok(shown().length >= 6);
+  assert.ok(shown().every((canvas) => !canvas.style.getPropertyValue("--kd-wipe-from")));
 
-  // Reduced motion: nothing fades, the stand-ins are simply gone.
+  // Reduced motion: nothing is wiped, the stand-ins are simply gone.
   reducedMotion = true;
-  assert.equal(standIns.settle(), false);
+  assert.equal(standIns.settle(down), false);
   assert.equal(shown().length, 0);
   reducedMotion = false;
 
@@ -179,7 +201,7 @@ test("tiles are bars copied from one pattern, never text; they fade out over the
   covered = standIns.update(frame({ direction: 0, windowStart: 560, windowEnd: 680 }));
   assert.equal(shown().length, 0);
   assert.deepEqual(covered, [[560, 680]]);
-  assert.equal(standIns.settle(), false, "nothing on show, nothing to fade");
+  assert.equal(standIns.settle(down), false, "nothing on show, nothing to wipe");
   standIns.destroy();
   assert.equal(canvases().length, 0);
 });

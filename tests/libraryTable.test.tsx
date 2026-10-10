@@ -500,7 +500,7 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
       assert.equal(rowOf(first - (last - first))!.getAttribute("data-kd-arrive-row"), "rest");
       assert.equal(rowOf(first - (last - first) - 1)!.hasAttribute("data-kd-arrive-row"), false, "further ahead: built, not animated");
       assert.equal(rowOf(last)!.hasAttribute("data-kd-arrive-row"), false, "behind the scroll: built, not animated");
-      assert.ok(fading() > 0 && fading() === tiles().length, "the stand-ins still in view fade out over the arriving rows");
+      assert.ok(fading() > 0 && fading() === tiles().length, "the stand-ins still in view make way for the arriving rows");
       // The rest of the scroll plays out at reading speed while they arrive: the window steps on,
       // and no row is started again.
       for (let step = 0; step < 16; step += 1) scrollBy(-20);
