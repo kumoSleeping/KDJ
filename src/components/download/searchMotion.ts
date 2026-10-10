@@ -1,9 +1,13 @@
+import { useEffect, useState, type CSSProperties, type HTMLAttributes } from "react";
+import { MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import type { IntakeItem, Platform, VideoInfo } from "../../types";
+import { PLATFORM_BRAND } from "./PlatformMark";
 
 /**
- * What the search bar's motion needs to know about a search without owning it: how far the
- * typed text reaches, and which sources a finished search heard back from. The result table
- * publishes the second; the bar's source marks settle on it.
+ * What the search's motion needs to know without owning the search: the colours of the selected
+ * sources, how far the submitted text reaches, which sources a finished search heard back from
+ * (the result table publishes it; the bar's source marks settle on it), and how rows that were
+ * unfolded in the results fold back.
  */
 
 /** A running search, then the moment its results land. */
@@ -19,11 +23,12 @@ export interface SearchOutcome {
   fails: ReadonlySet<Platform>;
 }
 
-const WIDE_GLYPH = /[ᄀ-ᇿ⺀-鿿가-힯豈-﫿＀-｠￠-￦]/;
+const WIDE_GLYPH = /[ᄀ-ᇿ⺀-鿿가-힯豈-﫿＀-｠￠-￦]/;
 
 /**
- * Rough width of one line of text in em, from character classes alone. The field's ink follows
- * the typed text with this, so typing never reads the layout.
+ * Rough width of one line of text in em, from character classes alone. A search's waveform
+ * steps back behind the submitted text with this: worked out once per search, never while
+ * typing, and without reading the layout.
  */
 export function estimateTextEm(text: string): number {
   let em = 0;
@@ -35,6 +40,23 @@ export function estimateTextEm(text: string): number {
     else em += 0.54;
   }
   return Math.round(em * 100) / 100;
+}
+
+/**
+ * The colours a search is drawn in: the brand colour of every selected source, in the order of
+ * the marks. Neighbours of one colour count once, and there are always two stops, so the list
+ * can be written straight into a gradient (`--kd-search-tones`). Empty when nothing is selected.
+ */
+export function searchTones(
+  marks: ReadonlyArray<Platform>,
+  selected: ReadonlyArray<Platform>,
+): string[] {
+  const tones: string[] = [];
+  for (const platform of marks) {
+    const tone = selected.includes(platform) ? PLATFORM_BRAND[platform] : undefined;
+    if (tone && tones[tones.length - 1] !== tone) tones.push(tone);
+  }
+  return tones.length === 1 ? [tones[0], tones[0]] : tones;
 }
 
 /** Which sources a delivered list heard back from. Local copies are not a searched source. */
@@ -107,4 +129,67 @@ export function subscribeSearchOutcome(listener: () => void): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+/**
+ * Rows that were unfolded under a result row fold back in two beats (ResultTable.css): they fade
+ * out from the last one up ("out"), then the room they held closes ("shut").
+ */
+export type FoldPhase = "open" | "out" | "shut" | "closed";
+
+/** One row's fade, the step between rows, and how many steps are told apart. */
+const FOLD_OUT_MS = 100;
+const FOLD_STEP_MS = 12;
+const FOLD_STEPS = 6;
+/** The room the rows held closing. */
+const FOLD_SHUT_MS = 160;
+/** A long package fades only the rows that can be on screen; the rest simply go. */
+export const FOLD_MAX_ROWS = 40;
+
+/** When a row starts to leave, in steps: the last row first. */
+export function foldOrder(index: number, rows: number): number {
+  return Math.max(0, Math.min(rows - 1 - index, FOLD_STEPS));
+}
+
+/** How long the rows take to fade out, the first row's later start included. */
+export function foldOutDuration(rows: number): number {
+  return FOLD_OUT_MS + FOLD_STEP_MS * foldOrder(0, rows);
+}
+
+/**
+ * Follows `open` and keeps what was closed on screen for as long as it takes to fold away.
+ * Opening again at any point simply shows the rows. Under reduced motion the rows fade and the
+ * room closes at once.
+ */
+export function useFold(open: boolean, rows: number): FoldPhase {
+  const [phase, setPhase] = useState<FoldPhase>(open ? "open" : "closed");
+  if (open && phase !== "open") setPhase("open");
+  else if (!open && phase === "open") setPhase(rows > 0 ? "out" : "closed");
+
+  useEffect(() => {
+    if (phase !== "out" && phase !== "shut") return;
+    const reduced = prefersReducedMotion();
+    const wait = phase === "shut" ? FOLD_SHUT_MS : reduced ? MOTION_REDUCED_MS : foldOutDuration(rows);
+    const timer = window.setTimeout(() => {
+      setPhase((current) => {
+        if (current !== phase) return current;
+        return phase === "out" && !reduced ? "shut" : "closed";
+      });
+    }, wait);
+    return () => window.clearTimeout(timer);
+  }, [phase, rows]);
+
+  return phase;
+}
+
+/** What a row carries while it fades out: it is a picture of itself, not a control. */
+export function foldingRowProps(order: number | undefined): HTMLAttributes<HTMLTableRowElement> | undefined {
+  if (order === undefined) return undefined;
+  return {
+    "data-fold": "out",
+    inert: true,
+    "aria-hidden": true,
+    tabIndex: -1,
+    style: { "--kd-fold-i": order } as CSSProperties,
+  } as HTMLAttributes<HTMLTableRowElement>;
 }

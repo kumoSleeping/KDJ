@@ -1,10 +1,16 @@
 /* 聚合搜索: the search kind and its sources on the left, the editor on the right. Nothing is
    drawn between or around them: the editor is one softly tinted field, and spacing does the rest.
-   The field and the source marks carry one piece of motion in the theme colour, click to results:
-   ink blooms from the click, follows the typed text, a comet launches on Enter while the asked
-   marks fire in turn, a stream runs while sources are pending, each mark settles on what came
-   back, and the glow sinks toward the list. Everything is transform and opacity inside the
-   field's own box, so it works at any width. */
+
+   A search is drawn as a waveform, under the text and in the selected sources' own colours:
+   - focus: the field's tone deepens, nothing travels;
+   - Enter: a centre line is drawn along the field and mirrored bars rise out of it;
+   - pending: the bars keep moving like a playing waveform, a phase travelling along the field,
+     while the asked source marks breathe in turn;
+   - landing: the bars settle back into the line, the line fades, and each mark settles on what
+     its source brought back.
+   Typing moves nothing but the caret. The colours are --kd-search-tones, written by
+   SearchBar.tsx when the selection changes: one source's brand colour, or several in the order
+   of the marks. They are never the theme's. */
 
 /* —— The band grows out of the title bar's lower edge —— */
 .kd-search-band-host {
@@ -27,8 +33,14 @@
 .kd-search-band-host:not([data-open="true"]) > .kd-search-band {
   pointer-events: none;
 }
-@keyframes kd-search-band-grow { from { grid-template-rows: 0fr; } }
-@keyframes kd-search-band-rise { from { transform: translateY(-100%); } }
+@keyframes kd-search-band-grow {
+  from { grid-template-rows: 0fr; }
+  to { grid-template-rows: 1fr; }
+}
+@keyframes kd-search-band-rise {
+  from { transform: translateY(-100%); }
+  to { transform: translateY(0); }
+}
 
 /* —— The row: [kind · sources] [editor] —— */
 .kd-search-command {
@@ -45,6 +57,18 @@
   --kd-search-h: 2.25rem;
   --kd-search-leading: 1.55em;
   --kd-search-pad: 0.7rem;
+  /* The colours of a search when no source is selected; a selection writes its own. */
+  --kd-search-tones: var(--kd-muted), var(--kd-muted);
+  /* How strong the waveform lies under the text. */
+  --kd-search-wave: 0.55;
+  /* The waveform's bars: one 240px tile of 48 mirrored bars, cut into six layers (every sixth
+     bar), so six transforms move a whole field of them. */
+  --kd-search-wave-1: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2036'%20preserveAspectRatio='none'%3E%3Crect%20x='1'%20y='4.85'%20width='3'%20height='26.3'%20rx='1.5'/%3E%3Crect%20x='31'%20y='6.15'%20width='3'%20height='23.7'%20rx='1.5'/%3E%3Crect%20x='61'%20y='10.4'%20width='3'%20height='15.2'%20rx='1.5'/%3E%3Crect%20x='91'%20y='7.8'%20width='3'%20height='20.4'%20rx='1.5'/%3E%3Crect%20x='121'%20y='11.65'%20width='3'%20height='12.7'%20rx='1.5'/%3E%3Crect%20x='151'%20y='9.95'%20width='3'%20height='16.1'%20rx='1.5'/%3E%3Crect%20x='181'%20y='8.85'%20width='3'%20height='18.3'%20rx='1.5'/%3E%3Crect%20x='211'%20y='10.3'%20width='3'%20height='15.4'%20rx='1.5'/%3E%3C/svg%3E");
+  --kd-search-wave-2: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2036'%20preserveAspectRatio='none'%3E%3Crect%20x='6'%20y='4.3'%20width='3'%20height='27.4'%20rx='1.5'/%3E%3Crect%20x='36'%20y='7.95'%20width='3'%20height='20.1'%20rx='1.5'/%3E%3Crect%20x='66'%20y='10.3'%20width='3'%20height='15.4'%20rx='1.5'/%3E%3Crect%20x='96'%20y='3'%20width='3'%20height='30'%20rx='1.5'/%3E%3Crect%20x='126'%20y='12.75'%20width='3'%20height='10.5'%20rx='1.5'/%3E%3Crect%20x='156'%20y='11.55'%20width='3'%20height='12.9'%20rx='1.5'/%3E%3Crect%20x='186'%20y='6.65'%20width='3'%20height='22.7'%20rx='1.5'/%3E%3Crect%20x='216'%20y='13.4'%20width='3'%20height='9.2'%20rx='1.5'/%3E%3C/svg%3E");
+  --kd-search-wave-3: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2036'%20preserveAspectRatio='none'%3E%3Crect%20x='11'%20y='9.35'%20width='3'%20height='17.3'%20rx='1.5'/%3E%3Crect%20x='41'%20y='7.8'%20width='3'%20height='20.4'%20rx='1.5'/%3E%3Crect%20x='71'%20y='8.1'%20width='3'%20height='19.8'%20rx='1.5'/%3E%3Crect%20x='101'%20y='5.2'%20width='3'%20height='25.6'%20rx='1.5'/%3E%3Crect%20x='131'%20y='9.8'%20width='3'%20height='16.4'%20rx='1.5'/%3E%3Crect%20x='161'%20y='8.2'%20width='3'%20height='19.6'%20rx='1.5'/%3E%3Crect%20x='191'%20y='8.5'%20width='3'%20height='19'%20rx='1.5'/%3E%3Crect%20x='221'%20y='14.25'%20width='3'%20height='7.5'%20rx='1.5'/%3E%3C/svg%3E");
+  --kd-search-wave-4: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2036'%20preserveAspectRatio='none'%3E%3Crect%20x='16'%20y='7.45'%20width='3'%20height='21.1'%20rx='1.5'/%3E%3Crect%20x='46'%20y='12.15'%20width='3'%20height='11.7'%20rx='1.5'/%3E%3Crect%20x='76'%20y='8.5'%20width='3'%20height='19'%20rx='1.5'/%3E%3Crect%20x='106'%20y='6.35'%20width='3'%20height='23.3'%20rx='1.5'/%3E%3Crect%20x='136'%20y='8.1'%20width='3'%20height='19.8'%20rx='1.5'/%3E%3Crect%20x='166'%20y='5.6'%20width='3'%20height='24.8'%20rx='1.5'/%3E%3Crect%20x='196'%20y='10.85'%20width='3'%20height='14.3'%20rx='1.5'/%3E%3Crect%20x='226'%20y='9.95'%20width='3'%20height='16.1'%20rx='1.5'/%3E%3C/svg%3E");
+  --kd-search-wave-5: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2036'%20preserveAspectRatio='none'%3E%3Crect%20x='21'%20y='6.2'%20width='3'%20height='23.6'%20rx='1.5'/%3E%3Crect%20x='51'%20y='14.5'%20width='3'%20height='7'%20rx='1.5'/%3E%3Crect%20x='81'%20y='7.85'%20width='3'%20height='20.3'%20rx='1.5'/%3E%3Crect%20x='111'%20y='6.5'%20width='3'%20height='23'%20rx='1.5'/%3E%3Crect%20x='141'%20y='12.6'%20width='3'%20height='10.8'%20rx='1.5'/%3E%3Crect%20x='171'%20y='3'%20width='3'%20height='30'%20rx='1.5'/%3E%3Crect%20x='201'%20y='7.75'%20width='3'%20height='20.5'%20rx='1.5'/%3E%3Crect%20x='231'%20y='10.75'%20width='3'%20height='14.5'%20rx='1.5'/%3E%3C/svg%3E");
+  --kd-search-wave-6: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2036'%20preserveAspectRatio='none'%3E%3Crect%20x='26'%20y='6.6'%20width='3'%20height='22.8'%20rx='1.5'/%3E%3Crect%20x='56'%20y='11'%20width='3'%20height='14'%20rx='1.5'/%3E%3Crect%20x='86'%20y='9.8'%20width='3'%20height='16.4'%20rx='1.5'/%3E%3Crect%20x='116'%20y='10.35'%20width='3'%20height='15.3'%20rx='1.5'/%3E%3Crect%20x='146'%20y='11'%20width='3'%20height='14'%20rx='1.5'/%3E%3Crect%20x='176'%20y='4.55'%20width='3'%20height='26.9'%20rx='1.5'/%3E%3Crect%20x='206'%20y='8.55'%20width='3'%20height='18.9'%20rx='1.5'/%3E%3Crect%20x='236'%20y='8.65'%20width='3'%20height='18.7'%20rx='1.5'/%3E%3C/svg%3E");
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   /* The kind and the sources stay on the first line while the editor grows under it. */
@@ -54,14 +78,9 @@
   padding: 0.25rem 0.55rem;
   color: var(--kd-text);
   cursor: text;
-  /* The motion's colour, and the brighter core of what travels. */
-  --kd-search-glow: var(--kd-theme);
-  --kd-search-core: color-mix(in srgb, var(--kd-theme) 62%, #fff);
-  --kd-search-glint: color-mix(in srgb, color-mix(in srgb, var(--kd-theme) 35%, #fff) 36%, transparent);
 }
 :root[data-theme="light"] .kd-searchbar {
-  --kd-search-core: var(--kd-theme);
-  --kd-search-glint: rgb(255 255 255 / 0.86);
+  --kd-search-wave: 0.46;
 }
 
 /* What kind, and where it searches. */
@@ -76,6 +95,8 @@
 .kd-search-kind {
   appearance: none;
   flex: none;
+  /* Room for the longest kind (three glyphs), so changing it moves neither the marks nor the field. */
+  min-width: calc(3em + 0.16rem);
   height: 1.5rem;
   padding: 0 0.08rem;
   overflow: hidden;
@@ -86,7 +107,8 @@
   font-family: inherit;
   font-size: 0.68rem;
   font-weight: 700;
-  line-height: 1;
+  line-height: 1.5;
+  text-align: start;
   white-space: nowrap;
   cursor: pointer;
   transition: color 0.12s;
@@ -98,30 +120,48 @@
   outline: 1px solid var(--kd-muted);
   outline-offset: 2px;
 }
-/* A changed kind settles into place instead of swapping. */
-.kd-search-kind-text {
-  display: inline-block;
-  animation: kd-search-kind-in 240ms cubic-bezier(0.22, 0.9, 0.26, 1) backwards;
-}
-@keyframes kd-search-kind-in {
-  from {
-    opacity: 0;
-    transform: translateY(0.4em);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 .kd-searchbar .kd-plat {
   width: 1.6rem;
   height: 1.6rem;
 }
 
-/* The editor: a tinted field with no outline. Hover deepens the tint a little; focus is the
-   ink (::before) blooming from the click, the caret, and the tip line changing to what Enter does. */
+/* —— A line that changes (RollText): the kind, the tip ——
+   One clipped line box. The old line rolls out through its top while the new one rolls in from
+   below; the two never lie over each other, and only transform and opacity move. */
+.kd-roll {
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+}
+.kd-roll-line {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-roll-line[data-roll="in"] {
+  animation: kd-roll-in 220ms var(--kd-ease-out) backwards;
+}
+.kd-roll-line[data-roll="out"] {
+  animation: kd-roll-out 220ms var(--kd-ease-out) both;
+}
+@keyframes kd-roll-in {
+  from { opacity: 0; transform: translateY(100%); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes kd-roll-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-100%); }
+}
+
+/* —— The editor: a tinted field with no outline ——
+   Hover and focus only deepen its tone. The field is its own stacking context: the waveform is
+   its first layer, the text — the editor, the tip line, the caret of the empty field — lies
+   above it, and everything is clipped to the rounded box. */
 .kd-searchbar-copy {
   position: relative;
+  isolation: isolate;
   display: flex;
   min-width: 0;
   overflow: hidden;
@@ -132,124 +172,118 @@
 .kd-searchbar:hover .kd-searchbar-copy {
   background: color-mix(in srgb, var(--kd-text) 6.5%, var(--kd-panel));
 }
-/* A running search charges the whole field, focused or not. */
-.kd-searchbar[data-searching="run"] .kd-searchbar-copy {
-  background: color-mix(in srgb, var(--kd-search-glow) 9%, color-mix(in srgb, var(--kd-text) 5%, var(--kd-panel)));
+.kd-searchbar .kd-searchbar-copy[data-input-focused="true"] {
+  background: color-mix(in srgb, var(--kd-text) 9%, var(--kd-panel));
 }
 
-/* —— Focus: ink blooms from the click ——
-   The tint and its bright front share one geometry: a layer a seventh wider than the field on
-   each side, scaled out from the click. The tint stays; the front fades as it reaches the ends. */
-.kd-searchbar-copy::before,
-.kd-search-front {
+/* —— A search: the waveform ——
+   It lies on the editor's first line, so a batch keeps it beside the kind and the marks. Three
+   parts, each moved by transform and opacity alone:
+   - the centre line, drawn from the leading edge;
+   - the bars, which rise out of the line and settle back into it (one scaleY for all of them);
+   - six layers of bars inside, each scaled about the line on the same loop, a sixth of a period
+     apart, so a phase travels along the field.
+   Every part is painted in the selection's colours, laid once along the whole field; the bars
+   only cut their shape out of them. Behind the submitted text (--kd-search-text, its reach in
+   em, set once per search) the bars are fainter and the line is not drawn at all, so nothing
+   strikes through a word. An answer that beats the rise waits for it (--kd-search-hold). */
+.kd-search-wave {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--kd-search-h);
+  overflow: hidden;
+  font-size: var(--kd-size);
+  opacity: var(--kd-search-wave);
+  pointer-events: none;
+  /* Where the submitted text ends, from the field's leading edge. */
+  --kd-search-text-end: calc(var(--kd-search-pad) + var(--kd-search-text, 0em));
+  /* Soft ends: the wave does not run into the field's corners. */
+  -webkit-mask: linear-gradient(90deg, transparent, #000 1.6rem, #000 calc(100% - 1.6rem), transparent);
+  mask: linear-gradient(90deg, transparent, #000 1.6rem, #000 calc(100% - 1.6rem), transparent);
+}
+.kd-search-wave-line,
+.kd-search-wave-bars,
+.kd-search-wave-bars > i {
+  position: absolute;
+  right: 0;
+  left: 0;
+}
+.kd-search-wave-line::before,
+.kd-search-wave-bars > i {
+  background: linear-gradient(90deg, var(--kd-search-tones));
+}
+.kd-search-wave-line {
+  top: calc(50% - 1px);
+  height: 2px;
+  -webkit-mask: linear-gradient(90deg, transparent calc(var(--kd-search-text-end) + 0.3em), #000 calc(var(--kd-search-text-end) + 1.8em));
+  mask: linear-gradient(90deg, transparent calc(var(--kd-search-text-end) + 0.3em), #000 calc(var(--kd-search-text-end) + 1.8em));
+}
+.kd-search-wave-line::before {
   content: "";
   position: absolute;
+  inset: 0;
+  border-radius: 1px;
+  transform-origin: 0 50%;
+  animation: kd-search-wave-line 260ms var(--kd-ease-out) both;
+}
+.kd-search-wave-bars {
   top: 0;
   bottom: 0;
-  left: -20%;
-  width: 140%;
-  opacity: 0;
-  transform: scaleX(0);
-  /* A click spreads the ink from where it landed; the keyboard starts at the leading edge. */
-  transform-origin: calc(var(--kd-search-origin, 0px) + 100% / 7) center;
-  pointer-events: none;
+  -webkit-mask: linear-gradient(90deg, rgb(0 0 0 / 0.4) var(--kd-search-text-end), #000 calc(var(--kd-search-text-end) + 2.5em));
+  mask: linear-gradient(90deg, rgb(0 0 0 / 0.4) var(--kd-search-text-end), #000 calc(var(--kd-search-text-end) + 2.5em));
+  animation: kd-search-wave-rise 380ms var(--kd-ease-spring) 160ms both;
 }
-.kd-searchbar-copy::before {
-  --kd-search-focus-tint: color-mix(in srgb, var(--kd-search-glow) 10%, transparent);
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--kd-search-focus-tint) calc(100% / 7),
-    var(--kd-search-focus-tint) calc(600% / 7),
-    transparent
-  );
-  /* Leaving, the ink draws back to where it came from. */
-  transition: transform 300ms cubic-bezier(0.5, 0, 0.8, 0.3), opacity 300ms ease-in;
+.kd-search-wave-bars > i {
+  top: 0;
+  bottom: 0;
+  -webkit-mask: var(--kd-search-wave-tile) 0 0 / 240px 100% repeat-x;
+  mask: var(--kd-search-wave-tile) 0 0 / 240px 100% repeat-x;
+  /* A later layer is a sixth of the loop behind: the crest runs toward the field's far end. */
+  animation: kd-search-wave-play 1.2s ease-in-out calc((var(--kd-search-wave-i) - 6) * 200ms) infinite both;
 }
-.kd-searchbar-copy[data-input-focused="true"]::before {
-  opacity: 1;
-  transform: scaleX(1);
-  transition: transform 520ms cubic-bezier(0.2, 0.85, 0.25, 1), opacity 90ms ease;
+.kd-search-wave-bars > i:nth-child(1) { --kd-search-wave-i: 0; --kd-search-wave-tile: var(--kd-search-wave-1); }
+.kd-search-wave-bars > i:nth-child(2) { --kd-search-wave-i: 1; --kd-search-wave-tile: var(--kd-search-wave-2); }
+.kd-search-wave-bars > i:nth-child(3) { --kd-search-wave-i: 2; --kd-search-wave-tile: var(--kd-search-wave-3); }
+.kd-search-wave-bars > i:nth-child(4) { --kd-search-wave-i: 3; --kd-search-wave-tile: var(--kd-search-wave-4); }
+.kd-search-wave-bars > i:nth-child(5) { --kd-search-wave-i: 4; --kd-search-wave-tile: var(--kd-search-wave-5); }
+.kd-search-wave-bars > i:nth-child(6) { --kd-search-wave-i: 5; --kd-search-wave-tile: var(--kd-search-wave-6); }
+/* Landing. The settle and the fade have no backwards fill: until they start, the rise and the
+   drawn line keep showing, so nothing jumps when the answer arrives. */
+.kd-searchbar[data-searching="done"] .kd-search-wave-bars {
+  animation:
+    kd-search-wave-rise 380ms var(--kd-ease-spring) 160ms both,
+    kd-search-wave-settle 280ms var(--kd-ease-in) var(--kd-search-hold, 0ms) forwards;
 }
-.kd-search-fx {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  /* The ink is measured in the typed text's own em. */
-  font-size: var(--kd-size);
-  pointer-events: none;
+.kd-searchbar[data-searching="done"] .kd-search-wave-line::before {
+  animation:
+    kd-search-wave-line 260ms var(--kd-ease-out) both,
+    kd-search-wave-out 220ms ease-out calc(var(--kd-search-hold, 0ms) + 260ms) forwards;
 }
-.kd-search-front {
-  --kd-search-front-tint: color-mix(in srgb, var(--kd-search-glow) 58%, transparent);
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--kd-search-front-tint) calc(100% / 7 * 0.9),
-    transparent calc(100% / 7 * 2.4),
-    transparent calc(100% - 100% / 7 * 2.4),
-    var(--kd-search-front-tint) calc(100% - 100% / 7 * 0.9),
-    transparent
-  );
+@keyframes kd-search-wave-line {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
 }
-.kd-searchbar-copy[data-input-focused="true"] .kd-search-front {
-  animation: kd-search-front 560ms cubic-bezier(0.2, 0.85, 0.25, 1) both;
+@keyframes kd-search-wave-rise {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
 }
-@keyframes kd-search-front {
-  from { opacity: 1; transform: scaleX(0); }
-  55% { opacity: 1; }
-  to { opacity: 0; transform: scaleX(1); }
+@keyframes kd-search-wave-play {
+  from { transform: scaleY(0.32); }
+  36% { transform: scaleY(1); }
+  66% { transform: scaleY(0.56); }
+  to { transform: scaleY(0.32); }
 }
-/* The drop itself: one ring where the click landed. */
-.kd-search-splash {
-  position: absolute;
-  top: 50%;
-  left: var(--kd-search-origin, var(--kd-search-pad));
-  width: 3.4rem;
-  height: 3.4rem;
-  margin: -1.7rem 0 0 -1.7rem;
-  border-radius: 50%;
-  background: radial-gradient(
-    closest-side,
-    transparent 52%,
-    color-mix(in srgb, var(--kd-search-glow) 50%, transparent) 76%,
-    transparent
-  );
-  opacity: 0;
+@keyframes kd-search-wave-settle {
+  from { transform: scaleY(1); }
+  to { transform: scaleY(0); }
 }
-.kd-searchbar-copy[data-input-focused="true"] .kd-search-splash {
-  animation: kd-search-splash 520ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
-}
-@keyframes kd-search-splash {
-  from { opacity: 1; transform: scale(0.12); }
-  to { opacity: 0; transform: scale(1.7); }
+@keyframes kd-search-wave-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
-/* —— Typing: the ink deepens under the text ——
-   A layer four fields wide slides so its soft end stays a little ahead of the text. The reach
-   comes from the characters typed (--kd-search-ink, in em), never from a layout read. */
-.kd-search-ink {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -300%;
-  width: 400%;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--kd-search-glow) 9%, transparent) calc(100% - 4.5em),
-    transparent
-  );
-  opacity: 0;
-  /* A quarter of its own width is one field: at -25% its soft end rests on the field's leading edge. */
-  transform: translateX(-25%);
-  transition: transform 280ms cubic-bezier(0.2, 0.85, 0.25, 1), opacity 220ms ease;
-}
-.kd-searchbar-copy[data-input-focused="true"]:not([data-empty]) .kd-search-ink {
-  opacity: 1;
-  transform: translateX(calc(-25% + var(--kd-search-pad) + var(--kd-search-ink, 0) * 1em + 3.5em));
-}
-.kd-searchbar[data-batch] .kd-search-ink {
-  display: none;
-}
 .kd-searchbar-input {
   position: relative;
   z-index: 1;
@@ -266,7 +300,7 @@
   font-size: var(--kd-size);
   font-weight: 400;
   line-height: var(--kd-search-leading);
-  caret-color: var(--kd-search-glow);
+  caret-color: var(--kd-text);
   resize: none;
   white-space: pre;
   overflow: auto;
@@ -279,8 +313,8 @@
 }
 /* Keep selected query text visible even when a theme's generic selection blends into the editor. */
 :root .kd-searchbar .kd-searchbar-input::selection {
-  color: var(--kd-theme-ink);
-  background: var(--kd-theme);
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-text) 22%, transparent);
 }
 .kd-searchbar-input::-webkit-scrollbar {
   display: none;
@@ -310,7 +344,7 @@
   width: 1.5px;
   height: 1.08em;
   border-radius: 1px;
-  background: var(--kd-search-glow);
+  background: var(--kd-text);
   transform: translateY(-50%);
   animation: kd-search-caret-blink 1.15s ease-in-out infinite;
   pointer-events: none;
@@ -379,269 +413,77 @@
   background: transparent;
 }
 .kd-search-tip-action[data-open="true"] {
-  color: var(--kd-theme);
+  color: var(--kd-text);
 }
+/* The tip line: one clipped line, turned by RollText. */
 .kd-search-tip-copy {
   min-width: 0;
   display: grid;
   overflow: hidden;
 }
-.kd-search-tip-text {
-  grid-area: 1 / 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 1;
-  transform: translateY(0);
-  transition: opacity 0.2s ease, transform 0.2s ease;
-}
-.kd-search-tip-text[data-mode="idle"] {
-  animation: kd-search-tip-cycle 0.2s ease-out;
-}
-.kd-search-tip-text[data-mode="input"] {
-  opacity: 0;
-  transform: translateY(0.2em);
-}
-.kd-search-tip[data-input-focused="true"] .kd-search-tip-text[data-mode="idle"] {
-  opacity: 0;
-  transform: translateY(-0.2em);
-}
-.kd-search-tip[data-input-focused="true"] .kd-search-tip-text[data-mode="input"] {
-  opacity: 1;
-  transform: translateY(0);
-  /* The line that says what Enter does arrives lit by the bloom, then cools to the tip colour. */
-  animation: kd-search-tip-lit 900ms ease-out both;
-}
-@keyframes kd-search-tip-lit {
-  from { color: var(--kd-search-glow); }
-  to { color: var(--kd-muted); }
-}
-@keyframes kd-search-tip-cycle {
-  from {
-    opacity: 0;
-    transform: translateY(0.2em);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* —— Launch: Enter ——
-   A glint runs through the typed text up to the caret, and a comet leaves the caret for the far
-   end of the field with its tail behind it. Both play once per search. */
-.kd-search-glint {
-  position: absolute;
-  z-index: 2;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 5em;
-  font-size: var(--kd-size);
-  background: linear-gradient(100deg, transparent 18%, var(--kd-search-glint) 50%, transparent 82%);
-  pointer-events: none;
-  animation: kd-search-glint 380ms cubic-bezier(0.4, 0, 0.3, 1) both;
-}
-@keyframes kd-search-glint {
-  from { opacity: 1; transform: translateX(-100%); }
-  70% { opacity: 1; }
-  /* The band is 5em wide: its middle ends on the caret. */
-  to { opacity: 0; transform: translateX(calc(var(--kd-search-pad) + var(--kd-search-ink, 0) * 1em - 2.5em)); }
-}
-.kd-search-comet {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 44%;
-  background:
-    radial-gradient(ellipse 1.9em 62% at calc(100% - 1.5em) 50%, var(--kd-search-core) 0 26%, transparent),
-    linear-gradient(
-      90deg,
-      transparent,
-      color-mix(in srgb, var(--kd-search-glow) 20%, transparent) 42%,
-      color-mix(in srgb, var(--kd-search-glow) 62%, transparent) calc(100% - 1.7em),
-      transparent calc(100% - 0.2em)
-    );
-  animation: kd-search-comet 640ms cubic-bezier(0.3, 0.2, 0.2, 1) 110ms both;
-}
-@keyframes kd-search-comet {
-  /* Head at the caret; 100% of the field is 100% / 44% of the comet's own width. */
-  from { opacity: 0; transform: translateX(calc(-100% + var(--kd-search-pad) + var(--kd-search-ink, 0) * 1em + 1.5em)); }
-  10% { opacity: 1; }
-  78% { opacity: 1; }
-  to { opacity: 0; transform: translateX(calc(100% / 0.44)); }
-}
-
-/* —— Pending: the stream ——
-   After the comet, the same shape keeps crossing the field, bright edge leading, until the
-   results land. The layer is two fields wide and holds two of them a field apart, so sliding it
-   by one field loops without a seam; it fades in behind the comet and out with the landing. */
-.kd-search-sheen {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 200%;
-  background: linear-gradient(
-      90deg,
-      transparent 2%,
-      color-mix(in srgb, var(--kd-search-glow) 12%, transparent) 20%,
-      color-mix(in srgb, var(--kd-search-glow) 36%, transparent) 54%,
-      color-mix(in srgb, var(--kd-search-core) 64%, transparent) 62%,
-      color-mix(in srgb, var(--kd-search-glow) 16%, transparent) 67%,
-      transparent 72%
-    )
-    0 0 / 50% 100% repeat-x;
-  animation:
-    kd-search-stream 1.05s linear infinite,
-    kd-search-fade-in 280ms ease-out 440ms backwards;
-  transition: opacity 360ms ease;
-}
-/* The stream keeps flowing while it fades. An answer that beat the fade-in never shows it. */
-.kd-searchbar[data-searching="done"] .kd-search-sheen {
-  opacity: 0;
-  animation: kd-search-stream 1.05s linear infinite;
-}
-@keyframes kd-search-stream {
-  from { transform: translateX(-50%); }
-  to { transform: translateX(0); }
-}
-
-/* —— Landing ——
-   The field flashes once and the light falls out through its lower edge, toward the list. */
-.kd-search-land {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--kd-search-glow) 14%, transparent),
-    color-mix(in srgb, var(--kd-search-glow) 52%, transparent)
-  );
-  animation: kd-search-land 460ms cubic-bezier(0.5, 0, 0.75, 0.45) both;
-}
-@keyframes kd-search-land {
-  from { opacity: 0; transform: translateY(-40%); }
-  26% { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(100%); }
-}
 
 /* —— The source marks during a search ——
-   Each asked mark fires in turn with a ring in its own colour, then waits with an arc orbiting
-   it. When the results land a mark that brought rows settles with a burst and a tick; one that
-   failed shakes and dims; one that had nothing only dims. --kd-plat-i is the firing order. */
+   Each asked mark breathes in turn while its source is pending. When the results land, a mark
+   that brought rows settles and shows a tick in its own colour for a moment; one that had
+   nothing dims and returns; one that failed dims under a small cross in ink. --kd-plat-i is the
+   mark's place among the asked ones. */
 .kd-searchbar .kd-plat[data-search] {
   position: relative;
-  --kd-plat-at: calc(var(--kd-plat-i, 0) * 70ms);
-}
-.kd-searchbar .kd-plat[data-search]::before,
-.kd-searchbar .kd-plat[data-search]::after {
-  content: "";
-  position: absolute;
-  border-radius: 50%;
-  opacity: 0;
-  pointer-events: none;
-}
-.kd-searchbar .kd-plat[data-search]::before {
-  inset: 0;
-  border: 1.5px solid currentColor;
 }
 .kd-searchbar .kd-plat[data-search="run"] > svg {
-  animation:
-    kd-plat-fire 440ms cubic-bezier(0.3, 1.45, 0.5, 1) calc(var(--kd-plat-at) + 40ms) both,
-    kd-plat-breathe 820ms ease-in-out calc(var(--kd-plat-at) + 500ms) infinite alternate;
+  animation: kd-plat-wait 700ms ease-in-out calc(var(--kd-plat-i, 0) * 110ms) infinite alternate both;
 }
-.kd-searchbar .kd-plat[data-search="run"]::before {
-  animation: kd-plat-ring 560ms cubic-bezier(0.2, 0.7, 0.3, 1) calc(var(--kd-plat-at) + 70ms) both;
-}
-.kd-searchbar .kd-plat[data-search="run"]::after {
-  inset: -1px;
-  background: conic-gradient(transparent 0 190deg, currentColor 352deg, transparent);
-  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
-  mask: radial-gradient(closest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
-  animation:
-    kd-plat-orbit 900ms linear calc(var(--kd-plat-at) + 420ms) infinite,
-    kd-plat-appear 240ms ease-out calc(var(--kd-plat-at) + 420ms) both;
-}
-@keyframes kd-plat-fire {
+@keyframes kd-plat-wait {
   from { transform: scale(1); }
-  30% { transform: scale(0.8); }
-  65% { transform: scale(1.32); }
-  to { transform: scale(1); }
-}
-@keyframes kd-plat-breathe {
-  from { transform: scale(1); }
-  to { transform: scale(1.13); }
-}
-@keyframes kd-plat-ring {
-  from { opacity: 0.95; transform: scale(0.4); }
-  to { opacity: 0; transform: scale(1.8); }
-}
-@keyframes kd-plat-orbit {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-@keyframes kd-plat-appear {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  to { transform: scale(1.16); }
 }
 .kd-searchbar .kd-plat:is([data-search="hit"], [data-search="settle"]) > svg {
-  animation: kd-plat-settle 480ms cubic-bezier(0.3, 1.5, 0.5, 1) calc(var(--kd-plat-i, 0) * 60ms) both;
+  animation: kd-plat-settle 260ms var(--kd-ease-out) both;
 }
-.kd-searchbar .kd-plat[data-search="hit"]::before {
-  border-width: 2px;
-  animation: kd-plat-burst 620ms cubic-bezier(0.2, 0.7, 0.3, 1) calc(var(--kd-plat-i, 0) * 60ms) both;
+@keyframes kd-plat-settle {
+  from { transform: scale(1.1); }
+  to { transform: scale(1); }
 }
-/* The tick: a small disc in the mark's colour at its corner, there for a moment. */
-.kd-searchbar .kd-plat[data-search="hit"]::after {
+.kd-searchbar .kd-plat:is([data-search="miss"], [data-search="fail"]) > svg {
+  animation: kd-plat-dim 800ms ease-out calc(var(--kd-plat-i, 0) * 40ms) both;
+}
+@keyframes kd-plat-dim {
+  from { opacity: 1; }
+  24% { opacity: 0.28; }
+  70% { opacity: 0.28; }
+  to { opacity: 1; }
+}
+/* The badge at a mark's corner: a tick on a disc of the mark's colour, or a cross in ink. */
+.kd-searchbar .kd-plat:is([data-search="hit"], [data-search="fail"])::after {
+  content: "";
+  position: absolute;
   right: -1px;
   bottom: -1px;
   width: 11px;
   height: 11px;
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  animation: kd-plat-badge 760ms ease-out calc(var(--kd-plat-i, 0) * 40ms + 40ms) both;
+}
+.kd-searchbar .kd-plat[data-search="hit"]::after {
   background:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 11 11'%3E%3Cpath d='M3 5.8 4.8 7.5 8.2 3.8' fill='none' stroke='%23fff' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
       center / 11px 11px no-repeat,
     currentColor;
-  animation: kd-plat-tick 820ms cubic-bezier(0.3, 1.5, 0.5, 1) calc(var(--kd-plat-i, 0) * 60ms + 90ms) both;
 }
-.kd-searchbar .kd-plat[data-search="fail"] > svg {
-  animation:
-    kd-plat-shake 420ms ease-in-out calc(var(--kd-plat-i, 0) * 60ms) both,
-    kd-plat-dim 860ms ease-out calc(var(--kd-plat-i, 0) * 60ms) both;
+.kd-searchbar .kd-plat[data-search="fail"]::after {
+  --kd-plat-cross: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 11 11'%3E%3Cpath d='M2.6 2.6 8.4 8.4M8.4 2.6 2.6 8.4' fill='none' stroke='%23000' stroke-width='1.9' stroke-linecap='round'/%3E%3C/svg%3E");
+  border-radius: 0;
+  background: var(--kd-text);
+  -webkit-mask: var(--kd-plat-cross) center / 11px 11px no-repeat;
+  mask: var(--kd-plat-cross) center / 11px 11px no-repeat;
 }
-.kd-searchbar .kd-plat[data-search="miss"] > svg {
-  animation: kd-plat-dim 760ms ease-out calc(var(--kd-plat-i, 0) * 60ms) both;
-}
-@keyframes kd-plat-settle {
-  from { transform: scale(1.13); }
-  40% { transform: scale(1.36); }
-  to { transform: scale(1); }
-}
-@keyframes kd-plat-burst {
-  from { opacity: 1; transform: scale(0.5); }
-  to { opacity: 0; transform: scale(2.1); }
-}
-@keyframes kd-plat-tick {
-  from { opacity: 0; transform: scale(0.2); }
-  22% { opacity: 1; transform: scale(1.2); }
-  36% { transform: scale(1); }
-  74% { opacity: 1; transform: scale(1); }
-  to { opacity: 0; transform: scale(0.7); }
-}
-@keyframes kd-plat-shake {
-  from { transform: translateX(0); }
-  18% { transform: translateX(-3px); }
-  38% { transform: translateX(3px); }
-  58% { transform: translateX(-2px); }
-  78% { transform: translateX(2px); }
-  to { transform: translateX(0); }
-}
-@keyframes kd-plat-dim {
-  from { opacity: 1; }
-  28% { opacity: 0.28; }
-  64% { opacity: 0.28; }
-  to { opacity: 1; }
+@keyframes kd-plat-badge {
+  from { opacity: 0; transform: scale(0.4); }
+  20% { opacity: 1; transform: scale(1); }
+  76% { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(1); }
 }
 
 /* —— Hand-off to the results ——
@@ -668,272 +510,134 @@
   outline: none;
 }
 
-/* —— Sakura98: the same choreography, drawn in pixels ——
-   Nothing glows here. The ink is a hard wipe inside the bevel that moves in steps, the click
-   leaves a sparkle, a heart hops along a dotted trail on Enter, 98 progress chunks march while
-   sources are pending, and the marks answer with square frames, sparkles and hearts. */
+/* —— Sakura98: the same waveform, in pixels ——
+   Nothing is soft here. The focused field turns the pack's white at once. The bars are square
+   and six pixels wide, their heights come in four-pixel sizes, and the line, the rise and the
+   loop all move in steps. The marks step instead of easing, and their badges are square. */
 :root[data-theme-pack="sakulaptop98"] .kd-searchbar {
-  --kd-search-core: var(--kd-theme);
-  --kd-s98-heart: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 7 6' shape-rendering='crispEdges'%3E%3Cpath d='M1 0h2v1h1V0h2v1h1v2H6v1H5v1H4v1H3V5H2V4H1V3H0V1h1z'/%3E%3C/svg%3E");
-  --kd-s98-spark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 5 5' shape-rendering='crispEdges'%3E%3Cpath d='M2 0h1v2h2v1H3v2H2V3H0V2h2z'/%3E%3C/svg%3E");
+  --kd-search-wave: 0.6;
+  --kd-search-wave-1: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2032'%20preserveAspectRatio='none'%20shape-rendering='crispEdges'%3E%3Crect%20x='1'%20y='4'%20width='6'%20height='24'/%3E%3Crect%20x='49'%20y='12'%20width='6'%20height='8'/%3E%3Crect%20x='97'%20y='2'%20width='6'%20height='28'/%3E%3Crect%20x='145'%20y='12'%20width='6'%20height='8'/%3E%3Crect%20x='193'%20y='8'%20width='6'%20height='16'/%3E%3C/svg%3E");
+  --kd-search-wave-2: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2032'%20preserveAspectRatio='none'%20shape-rendering='crispEdges'%3E%3Crect%20x='9'%20y='6'%20width='6'%20height='20'/%3E%3Crect%20x='57'%20y='12'%20width='6'%20height='8'/%3E%3Crect%20x='105'%20y='6'%20width='6'%20height='20'/%3E%3Crect%20x='153'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='201'%20y='8'%20width='6'%20height='16'/%3E%3C/svg%3E");
+  --kd-search-wave-3: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2032'%20preserveAspectRatio='none'%20shape-rendering='crispEdges'%3E%3Crect%20x='17'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='65'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='113'%20y='6'%20width='6'%20height='20'/%3E%3Crect%20x='161'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='209'%20y='8'%20width='6'%20height='16'/%3E%3C/svg%3E");
+  --kd-search-wave-4: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2032'%20preserveAspectRatio='none'%20shape-rendering='crispEdges'%3E%3Crect%20x='25'%20y='4'%20width='6'%20height='24'/%3E%3Crect%20x='73'%20y='6'%20width='6'%20height='20'/%3E%3Crect%20x='121'%20y='12'%20width='6'%20height='8'/%3E%3Crect%20x='169'%20y='2'%20width='6'%20height='28'/%3E%3Crect%20x='217'%20y='12'%20width='6'%20height='8'/%3E%3C/svg%3E");
+  --kd-search-wave-5: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2032'%20preserveAspectRatio='none'%20shape-rendering='crispEdges'%3E%3Crect%20x='33'%20y='6'%20width='6'%20height='20'/%3E%3Crect%20x='81'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='129'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='177'%20y='4'%20width='6'%20height='24'/%3E%3Crect%20x='225'%20y='10'%20width='6'%20height='12'/%3E%3C/svg%3E");
+  --kd-search-wave-6: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20240%2032'%20preserveAspectRatio='none'%20shape-rendering='crispEdges'%3E%3Crect%20x='41'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='89'%20y='6'%20width='6'%20height='20'/%3E%3Crect%20x='137'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='185'%20y='8'%20width='6'%20height='16'/%3E%3Crect%20x='233'%20y='8'%20width='6'%20height='16'/%3E%3C/svg%3E");
 }
-/* The bevel is the field's edge: every layer stays inside it. */
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-fx {
-  inset: 2px;
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy {
+  transition: none;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-searchbar-copy::before {
-  inset: 2px;
-  width: auto;
-  background: color-mix(in srgb, var(--kd-search-glow) 13%, transparent);
-  transform-origin: calc(var(--kd-search-origin, 0px) - 2px) center;
-  transition: transform 240ms steps(4, end), opacity 240ms steps(4, end);
+:root[data-theme-pack="sakulaptop98"] .kd-panel-slot[data-panel-id="search"] .kd-searchbar .kd-searchbar-copy[data-input-focused="true"] {
+  background: color-mix(in srgb, var(--s98-white) 62%, var(--kd-panel-inset));
 }
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-searchbar-copy[data-input-focused="true"]::before {
-  transition: transform 420ms steps(7, end), opacity 0s;
+/* The bevel is the field's edge: the wave stays inside it and ends square. */
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-wave {
+  top: 2px;
+  right: 2px;
+  left: 2px;
+  height: calc(var(--kd-search-h) - 4px);
+  -webkit-mask: none;
+  mask: none;
 }
-/* The front of the wipe: two hard bars that run to the ends and step out. */
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-front {
-  left: 0;
-  width: 100%;
-  background: linear-gradient(
-    90deg,
-    var(--kd-search-glow) 0 6px,
-    transparent 6px calc(100% - 6px),
-    var(--kd-search-glow) calc(100% - 6px)
-  );
-  transform-origin: calc(var(--kd-search-origin, 0px) - 2px) center;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-searchbar-copy[data-input-focused="true"] .kd-search-front {
-  animation: kd-search-front-98 420ms steps(7, end) both;
-}
-@keyframes kd-search-front-98 {
-  from { opacity: 0.6; transform: scaleX(0); }
-  to { opacity: 0; transform: scaleX(1); }
-}
-/* A sparkle where the click landed, growing a pixel size at a time. */
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-splash {
-  width: 15px;
-  height: 15px;
-  margin: -8px 0 0 -8px;
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-wave-line::before {
   border-radius: 0;
-  background: var(--kd-search-glow);
-  -webkit-mask: var(--kd-s98-spark) center / 15px 15px no-repeat;
-  mask: var(--kd-s98-spark) center / 15px 15px no-repeat;
+  animation-timing-function: steps(8, end);
 }
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-searchbar-copy[data-input-focused="true"] .kd-search-splash {
-  animation: kd-search-spark-98 440ms steps(1, end) both;
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-wave-bars {
+  animation-timing-function: steps(4, end);
 }
-@keyframes kd-search-spark-98 {
-  from { opacity: 1; transform: scale(0.34); }
-  25% { opacity: 1; transform: scale(0.67); }
-  50% { opacity: 1; transform: scale(1); }
-  75% { opacity: 1; transform: scale(0.67); }
-  to { opacity: 0; transform: scale(0.67); }
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-wave-bars > i {
+  animation-timing-function: steps(3, end);
 }
-/* Typing stays plain in a 98 field: the caret is the only thing that moves. */
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar :is(.kd-search-ink, .kd-search-glint) {
-  display: none;
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar[data-searching="done"] .kd-search-wave-bars {
+  animation-timing-function: steps(4, end);
 }
-/* Enter: a heart hops from the caret to the far end, leaving a dotted trail. */
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-comet {
-  width: 30%;
-  background:
-    repeating-linear-gradient(90deg, color-mix(in srgb, var(--kd-search-glow) 72%, transparent) 0 4px, transparent 4px 12px)
-    0 50% / calc(100% - 22px) 4px no-repeat;
-  animation:
-    kd-search-comet-98 660ms steps(12, end) 80ms both,
-    kd-search-comet-98-show 660ms steps(1, end) 80ms both;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-comet::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  right: 0;
-  width: 14px;
-  height: 12px;
-  margin-top: -6px;
-  background: var(--kd-search-glow);
-  -webkit-mask: var(--kd-s98-heart) center / 14px 12px no-repeat;
-  mask: var(--kd-s98-heart) center / 14px 12px no-repeat;
-}
-@keyframes kd-search-comet-98 {
-  from { transform: translateX(calc(-100% + var(--kd-search-pad) + var(--kd-search-ink, 0) * 1em + 16px)); }
-  /* 100% of the field is 100% / 30% of the trail's own width. */
-  to { transform: translateX(calc(100% / 0.3)); }
-}
-@keyframes kd-search-comet-98-show {
-  from { opacity: 0; }
-  5% { opacity: 1; }
-  to { opacity: 1; }
-}
-/* Pending: a run of 98 progress chunks marches across the field, a chunk at a time. */
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-sheen {
-  top: 3px;
-  bottom: 3px;
-  width: 100%;
-  background:
-    repeating-linear-gradient(90deg, color-mix(in srgb, var(--kd-search-glow) 38%, transparent) 0 10px, transparent 10px 14px)
-    -122px 0 / 122px 100% no-repeat;
-  animation: kd-search-chunks-98 1.6s steps(20, end) 640ms infinite;
-  transition: opacity 240ms steps(3, end);
-}
-@keyframes kd-search-chunks-98 {
-  from { background-position: -122px 0; }
-  to { background-position: calc(100% + 122px) 0; }
-}
-/* Landing: one hard block drops out through the bottom of the field. */
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-search-land {
-  background: color-mix(in srgb, var(--kd-search-glow) 30%, transparent);
-  animation: kd-search-land-98 300ms steps(5, end) both;
-}
-@keyframes kd-search-land-98 {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 1; transform: translateY(100%); }
-}
-/* The marks: a square frame steps outward as each fires, a sparkle twinkles at its corner while
-   it waits, and a heart hops off the ones that brought rows. A failed source blinks twice. */
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search]::before {
-  inset: 1px;
-  border-width: 2px;
-  border-radius: 0;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search]::after {
-  border-radius: 0;
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar[data-searching="done"] .kd-search-wave-line::before {
+  animation-timing-function: steps(8, end), steps(2, end);
 }
 :root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="run"] > svg {
-  animation: kd-plat-pop-98 360ms steps(1, end) calc(var(--kd-plat-at) + 40ms) both;
+  animation: kd-plat-wait-98 640ms steps(1, end) calc(var(--kd-plat-i, 0) * 160ms) infinite both;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="run"]::before {
-  animation: kd-plat-frame-98 400ms steps(4, end) calc(var(--kd-plat-at) + 60ms) both;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="run"]::after {
-  inset: -3px -3px auto auto;
-  width: 10px;
-  height: 10px;
-  background: currentColor;
-  -webkit-mask: var(--kd-s98-spark) center / 10px 10px no-repeat;
-  mask: var(--kd-s98-spark) center / 10px 10px no-repeat;
-  animation: kd-plat-twinkle-98 720ms steps(1, end) calc(var(--kd-plat-at) + 400ms) infinite;
+@keyframes kd-plat-wait-98 {
+  from { transform: scale(1); }
+  50% { transform: scale(1.16); }
+  to { transform: scale(1.16); }
 }
 :root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat:is([data-search="hit"], [data-search="settle"]) > svg {
-  animation: kd-plat-pop-98 360ms steps(1, end) calc(var(--kd-plat-i, 0) * 60ms) both;
+  animation: kd-plat-settle 120ms steps(2, end) both;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="hit"]::before {
-  animation: kd-plat-frame-98 400ms steps(4, end) calc(var(--kd-plat-i, 0) * 60ms) both;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="hit"]::after {
-  inset: -4px -4px auto auto;
-  width: 14px;
-  height: 12px;
-  background: currentColor;
-  -webkit-mask: var(--kd-s98-heart) center / 14px 12px no-repeat;
-  mask: var(--kd-s98-heart) center / 14px 12px no-repeat;
-  animation: kd-plat-heart-98 760ms steps(1, end) calc(var(--kd-plat-i, 0) * 60ms + 80ms) both;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="fail"] > svg {
-  animation: kd-plat-blink-98 520ms steps(1, end) calc(var(--kd-plat-i, 0) * 60ms) both;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat[data-search="miss"] > svg {
-  animation: kd-plat-blink-98 260ms steps(1, end) calc(var(--kd-plat-i, 0) * 60ms) both;
-}
-@keyframes kd-plat-pop-98 {
-  from { transform: scale(1); }
-  25% { transform: scale(0.8); }
-  50% { transform: scale(1.33); }
-  75% { transform: scale(1.14); }
-  to { transform: scale(1); }
-}
-@keyframes kd-plat-frame-98 {
-  from { opacity: 1; transform: scale(0.5); }
-  to { opacity: 0; transform: scale(1.5); }
-}
-@keyframes kd-plat-twinkle-98 {
-  from { opacity: 1; transform: scale(0.5); }
-  34% { opacity: 1; transform: scale(1); }
-  67% { opacity: 0; transform: scale(1); }
-  to { opacity: 0; transform: scale(1); }
-}
-@keyframes kd-plat-heart-98 {
-  from { opacity: 0; transform: translateY(4px); }
-  12% { opacity: 1; transform: translateY(4px); }
-  34% { opacity: 1; transform: translateY(2px); }
-  56% { opacity: 1; transform: translateY(0); }
-  80% { opacity: 0; transform: translateY(-2px); }
-  to { opacity: 0; transform: translateY(-2px); }
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat:is([data-search="miss"], [data-search="fail"]) > svg {
+  animation: kd-plat-blink-98 560ms steps(1, end) calc(var(--kd-plat-i, 0) * 40ms) both;
 }
 @keyframes kd-plat-blink-98 {
-  from { opacity: 0.25; }
+  from { opacity: 0.28; }
   25% { opacity: 1; }
-  50% { opacity: 0.25; }
+  50% { opacity: 0.28; }
   75% { opacity: 1; }
   to { opacity: 1; }
 }
+:root[data-theme-pack="sakulaptop98"] .kd-searchbar .kd-plat:is([data-search="hit"], [data-search="fail"])::after {
+  border-radius: 0;
+  animation: kd-plat-badge-98 760ms steps(1, end) calc(var(--kd-plat-i, 0) * 40ms + 40ms) both;
+}
+@keyframes kd-plat-badge-98 {
+  from { opacity: 0; }
+  10% { opacity: 1; }
+  80% { opacity: 0; }
+  to { opacity: 0; }
+}
 
 /* —— Reduced motion ——
-   Nothing travels, pops or shakes. Focus is the tint simply being there; a running search is the
-   field held in the glow colour with a still ring on each asked mark; the landing is the tick
-   fading in and out, and a source with nothing dims and returns. The !important flags only undo
-   the animations above, in either theme pack. */
+   Nothing travels, rolls, rises or breathes. A search is a still centre line in the
+   selection's colours, there while sources are pending and faded out when the answer lands; a
+   changed line of text fades; a mark only shows its badge or dims. The !important flags only
+   undo the animations above, in either theme pack. */
 @media (prefers-reduced-motion: reduce) {
   .kd-search-band-host,
   .kd-search-band,
   .kd-search-placeholder,
-  .kd-search-kind-text,
-  .kd-search-tip-text,
   .kd-search-loading {
     animation: none !important;
   }
   .kd-search-band-host,
   .kd-searchbar-copy,
-  .kd-searchbar-copy::before,
   .kd-searchbar-input,
-  .kd-search-ink,
-  .kd-search-tip-action,
-  .kd-search-tip-text,
-  .kd-search-sheen {
+  .kd-search-tip-action {
     transition: none !important;
   }
-  .kd-searchbar-copy::before {
-    transform: none !important;
+  /* The lines still hand over, so the old one is taken away when its fade ends. */
+  .kd-roll-line[data-roll="in"] {
+    animation: kd-search-fade-in var(--kd-motion-reduced) linear backwards !important;
   }
-  .kd-search-tip-text,
-  .kd-search-tip[data-input-focused="true"] .kd-search-tip-text {
-    transform: none;
+  .kd-roll-line[data-roll="out"] {
+    animation: kd-search-fade-out var(--kd-motion-reduced) linear both !important;
   }
-  .kd-search-front,
-  .kd-search-splash,
-  .kd-search-glint,
-  .kd-search-comet,
-  .kd-search-land {
+  .kd-search-wave-bars {
     display: none;
   }
-  /* A search still shows in the field: the whole of it, held, instead of a travelling stream. */
-  .kd-search-sheen {
-    width: 100% !important;
-    background: color-mix(in srgb, var(--kd-search-glow) 12%, transparent) !important;
-    transform: none;
+  .kd-search-wave-line::before {
+    animation: kd-search-fade-in var(--kd-motion-reduced) linear backwards !important;
+  }
+  .kd-searchbar[data-searching="done"] .kd-search-wave-line::before {
+    animation: kd-search-fade-out var(--kd-motion-reduced) linear both !important;
+  }
+  .kd-searchbar .kd-plat[data-search="run"] > svg,
+  .kd-searchbar .kd-plat:is([data-search="hit"], [data-search="settle"]) > svg {
     animation: none !important;
   }
-  .kd-searchbar .kd-plat[data-search] > svg,
-  .kd-searchbar .kd-plat[data-search]::before {
-    animation: none !important;
+  .kd-searchbar .kd-plat:is([data-search="miss"], [data-search="fail"]) > svg {
+    animation: kd-plat-dim 800ms ease-out both !important;
   }
-  .kd-searchbar .kd-plat[data-search="run"]::before {
-    opacity: 0.55;
-  }
-  .kd-searchbar .kd-plat[data-search="run"]::after {
-    display: none;
-  }
-  .kd-searchbar .kd-plat[data-search="hit"]::after {
-    animation: kd-plat-tick-calm 820ms ease both !important;
-  }
-  .kd-searchbar .kd-plat:is([data-search="fail"], [data-search="miss"]) > svg {
-    animation: kd-plat-dim 860ms ease-out both !important;
+  .kd-searchbar .kd-plat:is([data-search="hit"], [data-search="fail"])::after {
+    animation: kd-plat-badge-calm 760ms ease both !important;
   }
 }
-@keyframes kd-plat-tick-calm {
+@keyframes kd-search-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes kd-plat-badge-calm {
   from { opacity: 0; }
   22% { opacity: 1; }
-  74% { opacity: 1; }
+  76% { opacity: 1; }
   to { opacity: 0; }
 }

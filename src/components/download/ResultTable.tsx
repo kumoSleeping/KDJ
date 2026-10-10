@@ -1,8 +1,7 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
   ChevronRight,
   ListMusic,
   LoaderCircle,
@@ -66,7 +65,14 @@ import {
 } from "../../lib/resultSelection";
 import { removeLocalStorage } from "../../lib/storageWrite";
 import { isEditable } from "../../lib/useLibraryClipboard";
-import { publishSearchOutcome, searchOutcomeOf } from "./searchMotion";
+import {
+  FOLD_MAX_ROWS,
+  foldingRowProps,
+  foldOrder,
+  publishSearchOutcome,
+  searchOutcomeOf,
+  useFold,
+} from "./searchMotion";
 import "./ResultTable.css";
 
 export {
@@ -159,16 +165,122 @@ const RESULT_COLUMN_PREFS_SCHEMA: TableColumnPrefsSchema = {
 };
 
 /**
- * How long a delivered list is "arriving": the cascade of its first rows plus the glow that
- * pours over them (ResultTable.css). After it the table carries no entrance rules at all.
+ * How long a delivered list is "arriving": the cascade of its first rows, their covers and
+ * badges (ResultTable.css). After it the table carries no entrance rules at all.
  */
 const RESULT_REVEAL_MS = 1100;
+
+const NO_ITEMS: IntakeItem[] = [];
+
+type ResultTableHandlers = Required<Pick<
+  ResultTableProps,
+  | "onSelectionModeChange"
+  | "onToggleSelect"
+  | "onToggleExpand"
+  | "onPickSource"
+  | "onToggleItem"
+  | "onToggleItemAll"
+  | "onToggleAll"
+  | "onDownloadGroup"
+  | "onDownloadSelected"
+  | "onInspectGroup"
+  | "onRemoveStreamGroup"
+  | "onLoadCollection"
+>>;
+
+/**
+ * The rows of one package (a playlist, an album, one entry of a batch). Collapsing the package
+ * folds them away instead of dropping them: they fade as pictures of themselves, then one empty
+ * row stands in for them and closes the room they held (ResultTable.css, "Folding back").
+ */
+function PackageRows({
+  open,
+  count,
+  columns,
+  children,
+}: {
+  open: boolean;
+  /** Rows the package shows when open; the fold is told how many of them take part. */
+  count: number;
+  /** Cells in a row, for the row that stands in for the folded ones. */
+  columns: number;
+  /** The package's rows; `leaving` asks for the pictures that fade out. */
+  children(leaving: boolean): ReactNode;
+}) {
+  const phase = useFold(open, Math.min(count, FOLD_MAX_ROWS));
+  const endRef = useRef<HTMLTableRowElement>(null);
+  const heightRef = useRef(0);
+  // Measured once, when the rows start to leave and before anything has moved: the room they hold.
+  useLayoutEffect(() => {
+    if (phase !== "out") return;
+    let height = 0;
+    let row = endRef.current?.previousElementSibling;
+    while (row instanceof HTMLElement && row.dataset.fold) {
+      height += row.offsetHeight;
+      row = row.previousElementSibling;
+    }
+    heightRef.current = height;
+  }, [phase]);
+
+  if (phase === "closed") return null;
+  if (phase === "shut") {
+    return (
+      <tr data-fold="shut" aria-hidden="true">
+        <td colSpan={columns} style={{ "--kd-fold-h": `${heightRef.current}px` } as CSSProperties} />
+      </tr>
+    );
+  }
+  return (
+    <>
+      <Fragment key="rows">{children(phase === "out")}</Fragment>
+      {phase === "out" ? <tr key="end" ref={endRef} hidden /> : null}
+    </>
+  );
+}
+
+/**
+ * The table re-renders for what it shows, not for its owner. The workspace renders on every
+ * keystroke in the search field and hands over fresh handlers each time; they are read at the
+ * moment of the call instead, so typing over a long list of results does not render its rows.
+ */
+export function ResultTable(props: ResultTableProps) {
+  const latest = useRef(props);
+  latest.current = props;
+  const handlers = useMemo<ResultTableHandlers>(
+    () => ({
+      onSelectionModeChange: (value) => latest.current.onSelectionModeChange(value),
+      onToggleSelect: (key) => latest.current.onToggleSelect(key),
+      onToggleExpand: (groupId) => latest.current.onToggleExpand(groupId),
+      onPickSource: (groupId, index) => latest.current.onPickSource(groupId, index),
+      onToggleItem: (index) => latest.current.onToggleItem(index),
+      onToggleItemAll: (index) => latest.current.onToggleItemAll(index),
+      onToggleAll: () => latest.current.onToggleAll(),
+      onDownloadGroup: (group) => latest.current.onDownloadGroup(group),
+      onDownloadSelected: () => latest.current.onDownloadSelected(),
+      onInspectGroup: (group, sourceIndex, groupKey) =>
+        latest.current.onInspectGroup(group, sourceIndex, groupKey),
+      onRemoveStreamGroup: (group, sourceIndex) =>
+        latest.current.onRemoveStreamGroup?.(group, sourceIndex),
+      onLoadCollection: (collection) => latest.current.onLoadCollection(collection),
+    }),
+    [],
+  );
+  return (
+    <ResultTableView
+      {...props}
+      {...handlers}
+      items={props.items.length ? props.items : NO_ITEMS}
+      // Whether the list can be edited remotely is data; the handler behind it is read late.
+      onRemoveStreamGroup={props.onRemoveStreamGroup ? handlers.onRemoveStreamGroup : undefined}
+    />
+  );
+}
 
 function loadPrefs(): TableColumnPrefs {
   return loadTableColumnPrefs(RESULT_COLUMN_PREFS_KEY, RESULT_COLUMN_PREFS_SCHEMA);
 }
 
-export function ResultTable({
+const ResultTableView = memo(function ResultTableView({
   items,
   video,
   loading,
@@ -394,8 +506,9 @@ export function ResultTable({
       selectableGroups(item).every((group) => selected.has(selectionKey(index, group.group_id))),
     );
 
-  const renderCollectionRows = (item: IntakeItem, indent: boolean) =>
-    item.collections.map((collection, collectionIndex) => {
+  // `leaving` is how many rows of the package fade out together with these (PackageRows).
+  const renderCollectionRows = (item: IntakeItem, indent: boolean, leaving?: number) =>
+    item.collections.slice(0, leaving ?? item.collections.length).map((collection, collectionIndex) => {
       const token = collectionToken(collection);
       const loadingCollection = loadingCollections.has(token);
       const collectionLabel = KIND_LABEL[collection.kind];
@@ -475,6 +588,7 @@ export function ResultTable({
             openCollection();
           }}
           title={`进入${collectionLabel}`}
+          {...foldingRowProps(leaving === undefined ? undefined : foldOrder(collectionIndex, leaving))}
         >
           <td className="kd-selection-cell" />
           <td className="kd-result-lead" data-col="index">
@@ -536,7 +650,6 @@ export function ResultTable({
   return (
     <>
       <InlineNotice text={dragError} onDismiss={() => setDragError("")} block />
-      {reveal ? <span key={reveal} className="kd-result-pour" aria-hidden="true" /> : null}
       <table
         className="kd-table"
         data-kind="results"
@@ -632,8 +745,18 @@ export function ResultTable({
               pickable.length > 0 &&
               pickable.every((group) => selected.has(selectionKey(index, group.group_id)));
 
-            const groupRows = visibleGroups.map((group, visiblePosition) => {
+            const packageRowCount = item.collections.length + visibleGroups.length;
+            // A package that folds away shows pictures of the rows that can be on screen.
+            const renderGroupRows = (leaving?: number) =>
+              (leaving === undefined
+                ? visibleGroups
+                : visibleGroups.slice(0, Math.max(0, leaving - item.collections.length))
+              ).map((group, visiblePosition) => {
               const position = visibleGroupStart + visiblePosition;
+              const leave =
+                leaving === undefined
+                  ? undefined
+                  : foldOrder(item.collections.length + visiblePosition, leaving);
               const dragSources = () => {
                 const currentKey = selectionKey(index, group.group_id);
                 const draggingSelection = selected.has(currentKey);
@@ -679,6 +802,7 @@ export function ResultTable({
                       layout={layout}
                       rowNumber={flatRowOffset + position + 1}
                       late={lateRows}
+                      leave={leave}
                       indent={!itemFlat}
                       selectable={group.sources.some((source) => source.platform !== "local")}
                       selected={selected.has(selectionKey(index, group.group_id))}
@@ -712,6 +836,7 @@ export function ResultTable({
                       indent={!itemFlat}
                       rowNumber={flatRowOffset + position + 1}
                       late={lateRows}
+                      leave={leave}
                       inspected={inspectedGroup === selectionKey(index, group.group_id)}
                       sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
                       selected={selected.has(selectionKey(index, group.group_id))}
@@ -774,16 +899,15 @@ export function ResultTable({
             });
             // 已解析合集是独立详情页：这里仅渲染当前页歌曲，不再在表内重复合集头、
             // 下载和分页。它们统一由顶部工作条承载。
-            const rows =
-              !collapsed ? (
-                <>
-                  {renderCollectionRows(item, !itemFlat)}
-                  {groupRows}
-                </>
-              ) : null;
+            const renderRows = (leaving?: number) => (
+              <>
+                {renderCollectionRows(item, !itemFlat, leaving)}
+                {renderGroupRows(leaving)}
+              </>
+            );
 
             if (itemFlat) {
-              return <Fragment key={item.entry}>{rows}</Fragment>;
+              return <Fragment key={item.entry}>{collapsed ? null : renderRows()}</Fragment>;
             }
 
             return (
@@ -848,7 +972,8 @@ export function ResultTable({
                             onToggleItem(index);
                           }}
                         >
-                          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                          {/* One chevron: the stylesheet turns it while the package is open. */}
+                          <ChevronRight size={13} />
                         </button>
                       </span>
                     )}
@@ -863,7 +988,7 @@ export function ResultTable({
                       {!collectionKind ? (
                         <span
                           className="kd-chip"
-                          data-tone={item.kind === "error" ? "danger" : "theme"}
+                          data-tone={item.kind === "error" ? "danger" : undefined}
                         >
                           {KIND_LABEL[item.kind]}
                         </span>
@@ -913,7 +1038,11 @@ export function ResultTable({
                     </span>
                   </td>
                 </tr>
-                {rows}
+                <PackageRows open={!collapsed} count={packageRowCount} columns={totalColumns}>
+                  {(leaving) =>
+                    renderRows(leaving ? Math.min(packageRowCount, FOLD_MAX_ROWS) : undefined)
+                  }
+                </PackageRows>
               </Fragment>
             );
           })}
@@ -968,4 +1097,4 @@ export function ResultTable({
       )}
     </>
   );
-}
+});

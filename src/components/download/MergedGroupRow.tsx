@@ -1,6 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
-  ChevronDown,
   ChevronRight,
   Check,
   Copy,
@@ -29,6 +28,7 @@ import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
 import { PlatformMark } from "./PlatformMark";
 import { ResultDownloadIndex } from "./ResultDownloadIndex";
+import { foldingRowProps, foldOrder, useFold } from "./searchMotion";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
 export const PLATFORM_LABEL: Record<Platform, string> = {
@@ -65,6 +65,8 @@ export interface MergedGroupRowProps {
   indent?: boolean;
   /** Mounted into a list that had already settled: the row slots in on its own. Read once, at mount. */
   late?: boolean;
+  /** The row's package is folding away: the row is a picture that fades out, this many steps in. */
+  leave?: number;
   onToggleSelect(): void;
   onEnterSelection(): void;
   onToggleExpand(): void;
@@ -109,6 +111,7 @@ export function MergedGroupRow({
   inspected,
   indent = false,
   late = false,
+  leave,
   onToggleSelect,
   onEnterSelection,
   onToggleExpand,
@@ -139,6 +142,8 @@ export function MergedGroupRow({
   // Sources opened by the user unfold; ones already open when the row mounted are simply there.
   const [unfold, setUnfold] = useState(!expanded);
   if (!expanded && !unfold) setUnfold(true);
+  // Closed sources fold back: they fade as pictures, then one empty row closes the room they held.
+  const sourcesFold = useFold(expanded, group.sources.length);
 
   /**
    * 试听放哪个来源：优先当前选中的；选中的是 B 站就退而求其次找一家音乐
@@ -232,7 +237,8 @@ export function MergedGroupRow({
             onToggleExpand();
           }}
         >
-          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          {/* One chevron: the stylesheet turns it when the sources are open. */}
+          <ChevronRight size={13} />
         </button>
       )}
       {previewPending && (
@@ -410,7 +416,7 @@ export function MergedGroupRow({
         data-kd-search-result=""
         data-inspected={inspected ? "true" : undefined}
         data-resolving={previewPending ? "true" : undefined}
-        data-enter={bornLate ? "late" : undefined}
+        data-enter={bornLate && leave === undefined ? "late" : undefined}
         aria-busy={previewPending ? "true" : undefined}
         aria-label={
           layout === "narrow"
@@ -494,6 +500,7 @@ export function MergedGroupRow({
           if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
           pressTimerRef.current = null;
         }}
+        {...foldingRowProps(leave)}
       >
         <td
           draggable={selectable}
@@ -529,8 +536,12 @@ export function MergedGroupRow({
         <td className="kd-table-fill" aria-hidden="true" />
       </tr>
 
-      {expanded &&
-        group.sources.map((source, index) => (
+      {(sourcesFold === "open" || sourcesFold === "out") &&
+        group.sources.map((source, index) => {
+          // Leaving with the package, or folding back under this row: the last source goes first.
+          const sourceLeave =
+            leave ?? (sourcesFold === "out" ? foldOrder(index, group.sources.length) : undefined);
+          return (
           <tr
             key={`${source.platform}:${source.key}`}
             data-resolving={previewPendingSourceKey === sourceKey(source) ? "true" : undefined}
@@ -542,7 +553,7 @@ export function MergedGroupRow({
             }
             data-local={source.platform === "local" ? "true" : undefined}
             data-source-child="true"
-            data-unfold={unfold ? "true" : undefined}
+            data-unfold={unfold && sourceLeave === undefined ? "true" : undefined}
             style={unfold ? ({ "--kd-unfold-i": Math.min(index, 8) } as CSSProperties) : undefined}
             onClick={(event) => {
               if (layout === "narrow" && event.detail > 1 && !event.metaKey && !event.ctrlKey) return;
@@ -578,13 +589,23 @@ export function MergedGroupRow({
               }
               onInspect(index);
             }}
+            {...foldingRowProps(sourceLeave)}
           >
             <td />
             <td />
             {columns.map((column) => sourceDataCell(column.key, source, index))}
             <td className="kd-table-fill" aria-hidden="true" />
           </tr>
-        ))}
+          );
+        })}
+      {sourcesFold === "shut" && (
+        <tr data-fold="shut" aria-hidden="true">
+          <td
+            colSpan={columns.length + 3}
+            style={{ "--kd-fold-h": `calc(var(--kd-row-h) * ${group.sources.length})` } as CSSProperties}
+          />
+        </tr>
+      )}
       {rowMenu && (
         <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
           <button
