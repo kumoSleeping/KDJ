@@ -66,6 +66,9 @@ stable, other surfaces are aligned to them.
   gesture becomes an 80ms fade and items do not stagger. A surface adds nothing for it.
 - A surface in the flow (a notice, an inline field) has no leaving gesture: the space it held
   closes at once. Only a fixed or absolute surface leaves as a picture.
+  The sidebar's branches are the one exception, and they keep to the rule's reason: React still
+  removes the branch at once, the picture is placed absolutely over the place it held, and the
+  rows below close up by `transform` (see "Lists" below) — nothing in the flow waits.
 - The look of a small floating surface is shared too: `border: 1px solid var(--kd-float-edge)`,
   `box-shadow: var(--kd-float-shadow)`, a radius of 6–7px, `background: var(--kd-panel-raised)`.
   Groups inside it are set apart by spacing and a quiet label (`.kd-menu-heading`), never by a
@@ -109,6 +112,24 @@ leaving gesture when React unmounts the element. Variants:
 | `Sheet` (phones; the portrait folder picker from the bottom) | `slide` in from its edge, scrim `fade`; closes at once |
 | `InlineNotice`; the sidebar's new-folder row and rename field | `pop` in |
 | Sidebar drag feedback (drop tint, insertion mark, lifted root) | micro-out clock, in `FolderTree.css` |
+
+## Lists
+
+Rows of a list are not surfaces, but they move on the same clock and by the same rules (both
+keyframe ends named, transform / opacity / clip only, marks set by a script and taken off when
+the gesture ends, reduced motion = a short fade or nothing). Each list keeps its own keyframes
+next to its styles:
+
+| List | What moves | Code |
+| --- | --- | --- |
+| The sidebar tree and the compact rail | Shown: the rows arrive 12ms apart (the first twelve; all in by 292ms). A branch the user opens: its rows arrive the same way while what lies below slides down (240ms). A branch the user closes: its picture is covered from below as the rows under it close up (240ms). A playlist that was opened: 600ms later the rows travel to their new order (320ms), the opened one lifted. Only the user's own toggle moves a branch; a render, a selection, a count or a drag never does. | `components/library/sidebarMotion.ts`, `FolderTree.css` |
+| The local track list | After navigation (the query version the table resets its scroll on): the first twelve rows fade in 8ms apart, all settled by 248ms. Never on a scroll, a re-render or a row update; the mark is dropped as soon as the list is scrolled. | `components/library/listArrival.ts`, `ListArrival.css` |
+| The search results | A delivered list arrives row after row (28ms apart). | `components/download/ResultTable.css` |
+
+Dragging has two gestures of its own: a card dropped on the downloads hops into the list as
+itself (`lib/downloadToss.ts`; the download is handed to the queue when it has nearly landed),
+and a card let go on a place that does not take it shakes its head and fades
+(`lib/dragRefusal.ts`, `DragGhost.css`).
 
 Not on it by design: the drawer, 曲目信息, the floating media window and the search bar keep
 their own choreography on the same clock. Tooltips are the system's (`title`).

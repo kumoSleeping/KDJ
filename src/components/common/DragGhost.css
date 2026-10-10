@@ -105,8 +105,27 @@
   line-height: 1.35rem;
   text-align: center;
 }
+/* Refused: let go on a place that does not take it (refuseDragGhost). The card shakes its head
+   two or three times, ends still and fades. The tilt is its transform, so the shake uses the
+   translate property and both hold. No colour, no message: the shake is the answer. */
+.kd-drag-ghost[data-refused] > .kd-drag-ghost-card {
+  animation: kd-drag-ghost-no calc(var(--kd-motion-micro) * 2) cubic-bezier(0.36, 0.07, 0.19, 0.97) both,
+    kd-motion-fade-out var(--kd-motion-micro-out) var(--kd-ease-in) calc(var(--kd-motion-micro) * 2) forwards;
+}
+@keyframes kd-drag-ghost-no {
+  from { translate: 0 0; }
+  16% { translate: -8px 0; }
+  36% { translate: 7px 0; }
+  56% { translate: -5px 0; }
+  76% { translate: 3px 0; }
+  to { translate: 0 0; }
+}
 @media (prefers-reduced-motion: reduce) {
   .kd-drag-ghost-card { animation: none; }
+  /* No shake: the card only dims away. */
+  .kd-drag-ghost[data-refused] > .kd-drag-ghost-card {
+    animation: kd-motion-fade-out var(--kd-motion-reduced) linear forwards;
+  }
 }
 
 /* Sakura98: a small 98 window face, square and bevelled, with the pack's hard shadow. */
@@ -137,4 +156,8 @@
   from { opacity: 0; transform: rotate(-2deg) scale(0.86); }
   to { opacity: 1; transform: rotate(-2deg) scale(1); }
 }
-:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost:not(.kd-drag-ghost-stage) > .kd-drag-ghost-card { animation-name: kd-drag-ghost-in-98; }
+:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost:not(.kd-drag-ghost-stage, [data-refused]) > .kd-drag-ghost-card { animation-name: kd-drag-ghost-in-98; }
+/* The refusal jumps from side to side instead of gliding, and blinks out. */
+:root[data-theme-pack="sakulaptop98"] .kd-drag-ghost[data-refused] > .kd-drag-ghost-card {
+  animation-timing-function: steps(1, end), steps(1, end);
+}

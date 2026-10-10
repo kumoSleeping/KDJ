@@ -446,6 +446,8 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
       // goes to the 下载 entry instead of putting the preview away.
       const toss = tossToDownloads({ title: req.title.trim(), open: false });
       try {
+        // The request goes out when the parcel has nearly landed.
+        await toss.ready;
         const task = await api.videoDownload({
           platform: req.platform,
           bvid: req.bvid,

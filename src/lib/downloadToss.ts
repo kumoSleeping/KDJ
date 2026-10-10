@@ -1,20 +1,30 @@
 /**
  * The download parcel. When a download is started from something on screen, that block turns
  * into a small parcel, is thrown along a parabola and lands in the downloads drawer, which is
- * asked for first so that it is on its way down while the parcel flies. A drop starts the same
- * flight as a short hop from where the item was let go.
+ * asked for first so that it is on its way while the parcel flies. A drop starts the same
+ * flight as a short hop from where the item was let go — and there the card that was dragged
+ * hops in as itself instead of turning into a parcel.
  *
- * The download itself never waits for any of this: callers enqueue as before and only tell the
- * toss that they did. While a parcel is in the air the drawer is held on the downloads (see
- * drawerHold.ts). Styles are in components/download/DownloadToss.css.
+ * The download belongs to the landing. A caller starts the toss, waits for `ready` and only then
+ * hands the download to the queue: `ready` resolves shortly before touchdown (tossPath.ts,
+ * TOSS_HANDOVER_LEAD_MS), so the new row is in the list when the parcel arrives and not while it
+ * is still in the air. `ready` always resolves, and once: at once when nothing flies (no source
+ * on screen, reduced motion, a hidden window, too many parcels), early when the flight ends for
+ * any other reason, when the window is hidden or about to go, and after a fixed limit at the
+ * latest. While a parcel is in the air the drawer is held on the downloads (see drawerHold.ts),
+ * which covers the handover. Styles are in components/download/DownloadToss.css.
  */
 
-import { coverTile, ghostGlyph, isElement, loadedCover } from "../components/common/dragGhost";
+import { coverTile, droppedDragCard, ghostGlyph, isElement, loadedCover, type DroppedCard } from "../components/common/dragGhost";
 import { useDownloadStore } from "../stores/downloadStore";
 import { useTaskPanelStore } from "../stores/taskPanelStore";
+import "./dragRefusal";
 import { holdDrawer } from "./drawerHold";
 import { useSidePanels } from "./sidePanels";
-import { TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossRise, type TossPoint } from "./tossPath";
+import {
+  flushTossHandovers, SHEET_DOWN_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossHandover, tossHandoverAt, tossRise,
+  type TossHandover, type TossPoint,
+} from "./tossPath";
 
 /** A rectangle on screen; a `DOMRect` is one. */
 export interface TossBox { left: number; top: number; width: number; height: number }
@@ -40,6 +50,11 @@ export interface TossRequest {
 }
 
 export interface TossHandle {
+  /**
+   * Resolves when the download is to be handed to the queue: shortly before the parcel lands,
+   * or at once when nothing flies. It always resolves, exactly once; await it and then enqueue.
+   */
+  readonly ready: Promise<void>;
   /** The enqueue failed: the parcel fades where it is and nothing is highlighted. */
   fail(): void;
 }
@@ -63,7 +78,7 @@ const ARROW = '<path d="M12 5.5v11"/><path d="m7 12 5 5 5-5"/>';
 const HEART = '<path d="M7 5h4v2h2V5h4v2h2v6h-2v2h-2v2h-2v2h-2v-2H9v-2H7v-2H5V7h2z" fill="currentColor" stroke="none"/>';
 const NOTE = '<path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>';
 
-const NOOP: TossHandle = { fail() {} };
+const NOOP: TossHandle = { ready: Promise.resolve(), fail() {} };
 
 /* ------------------------------------------------------------------------------------------ */
 /* Where the user's hand was                                                                    */
@@ -150,6 +165,10 @@ function trackHand(): void {
   };
   window.addEventListener("pointermove", pointerDragged, options);
   window.addEventListener("pointerup", pointerDragged, options);
+  // A hidden window runs its timers late or not at all, and a closing one never: downloads
+  // that still wait for their parcels are handed over now.
+  window.addEventListener("pagehide", flushTossHandovers);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) flushTossHandovers(); });
 }
 trackHand();
 
@@ -227,6 +246,13 @@ function revealRow(list: HTMLElement, row: HTMLElement): void {
 
 interface Landing { point: TossPoint; sheetLeftMs: number }
 
+/**
+ * Where the parcel lands, as far as it can be told now: on the row of a task added since
+ * `before` if there is one, else where the next row will go (after the last row, or at the top
+ * of an empty list), else on the drawer's title row, else on the 下载 entry. The download is
+ * handed over late in the flight, so "where the next row will go" is the usual answer at launch;
+ * the flight asks again while it is under way (see `fly`) and corrects its end.
+ */
 function findLanding(open: boolean, before: ReadonlySet<string>): Landing | null {
   const drawer = open ? shownDrawer() : null;
   if (drawer) {
@@ -334,7 +360,29 @@ function remoteCover(url: string | undefined, into: HTMLElement): void {
   image.src = url;
 }
 
-function buildParcel(origin: Origin, request: TossRequest, count: number): { host: HTMLElement; body: HTMLElement; chip: HTMLElement | null; parcel: HTMLElement } {
+/** What flies: the element placed along the arc, the one corrected towards a moved target, and the one that turns and shrinks. */
+interface Flyer {
+  host: HTMLElement;
+  aim: HTMLElement;
+  body: HTMLElement;
+  /** The block at the source that turns into the parcel; null for a hop. */
+  chip: HTMLElement | null;
+  /** The parcel, or the dragged card when that hops in as itself. */
+  cargo: HTMLElement;
+  card: boolean;
+}
+
+function flyer(chip: HTMLElement | null, cargo: HTMLElement, card: boolean): Flyer {
+  const body = part("kd-toss-body", chip, cargo);
+  const aim = part("kd-toss-aim", body);
+  const host = document.createElement("div");
+  host.className = "kd-toss";
+  host.setAttribute("aria-hidden", "true");
+  host.append(aim);
+  return { host, aim, body, chip, cargo, card };
+}
+
+function buildParcel(origin: Origin, request: TossRequest, count: number): Flyer {
   const label = count === 1 ? coverTile(origin.cover, 16) : null;
   const parcel = part("kd-toss-parcel",
     part("kd-toss-parcel-lid"),
@@ -358,42 +406,50 @@ function buildParcel(origin: Origin, request: TossRequest, count: number): { hos
     Object.assign(chip.style, { width: `${width}px`, height: `${height}px`, left: `${-width / 2}px`, top: `${-height / 2}px` });
     chip.style.setProperty("--kd-toss-shrink", String(PARCEL_PX / width));
   }
-  const body = part("kd-toss-body", chip, parcel);
-  const host = document.createElement("div");
-  host.className = "kd-toss";
-  host.setAttribute("aria-hidden", "true");
-  host.append(body);
-  return { host, body, chip, parcel };
+  return flyer(chip, parcel, false);
+}
+
+/** The card that was dragged, hung by the centre of its cover: that is the point that flies and lands. */
+function buildCard(dropped: DroppedCard): Flyer {
+  return flyer(null, part("kd-toss-card", dropped.card), true);
 }
 
 const place = (point: TossPoint) => `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0)`;
 
 let airborne = 0;
 
-function fly(origin: Origin, request: TossRequest, count: number, before: ReadonlySet<string>, release: () => void): TossHandle {
+function fly(origin: Origin, request: TossRequest, count: number, before: ReadonlySet<string>, handover: TossHandover, release: () => void): TossHandle {
   const open = request.open !== false;
   const hop = origin.rect === null;
-  const { host, body, chip, parcel } = buildParcel(origin, request, count);
+  // A drop: the card the user was holding goes on from where it was let go.
+  const dropped = hop ? droppedDragCard() : null;
+  const { host, aim, body, chip, cargo, card } = dropped ? buildCard(dropped) : buildParcel(origin, request, count);
+  const start = dropped ? { x: origin.point.x + dropped.cover.x, y: origin.point.y + dropped.cover.y } : origin.point;
   let ended = false;
   let failed = false;
+  let stopAiming = () => undefined as void;
   const end = () => {
     if (ended) return;
     ended = true;
     window.clearTimeout(guard);
+    stopAiming();
     host.remove();
     airborne -= 1;
+    // A flight that ends without having reached its handover (cancelled animations, nowhere to
+    // land) still delivers the download.
+    handover.deliver();
     release();
   };
   // Whatever happens to the animations (a tab in the background, a cancelled effect), the
   // parcel is taken away and the drawer let go.
   const guard = window.setTimeout(end, 2400);
   airborne += 1;
-  host.style.transform = place(origin.point);
+  host.style.transform = place(start);
   document.body.append(host);
 
   const liftMs = hop ? TOSS_POP_MS : TOSS_LIFT_MS;
-  const lifted = { x: origin.point.x, y: origin.point.y - (hop ? 0 : 8) };
-  host.animate([{ transform: place(origin.point) }, { transform: place(lifted) }],
+  const lifted = { x: start.x, y: start.y - (hop ? 0 : 8) };
+  host.animate([{ transform: place(start) }, { transform: place(lifted) }],
     { duration: liftMs, easing: "cubic-bezier(0.2, 0.8, 0.3, 1)", fill: "forwards" });
   // The block gathers itself and shrinks away; the parcel comes up in its place as it goes.
   chip?.animate([
@@ -402,7 +458,11 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     { transform: `scale(${chip.style.getPropertyValue("--kd-toss-shrink")})`, opacity: 0 },
   ], { duration: liftMs, easing: "cubic-bezier(0.5, 0, 0.6, 1)", fill: "forwards" });
   const pop = "cubic-bezier(0.2, 0.9, 0.3, 1.25)";
-  const appear = parcel.animate(hop ? [
+  const appear = cargo.animate(card ? [
+    // Already in the hand, and seen: it only gathers itself for the hop.
+    { transform: "scale(1)", opacity: 1 },
+    { transform: "scale(0.96)", opacity: 1 },
+  ] : hop ? [
     { transform: "scale(0.4)", opacity: 0, easing: pop },
     { transform: "scale(1)", opacity: 1 },
   ] : [
@@ -413,11 +473,14 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
 
   const fade = () => {
     if (ended) return;
+    // Nothing will land: the download does not wait for the fade.
+    handover.deliver();
     host.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: "ease-in", fill: "forwards" }).finished.then(end, end);
   };
 
   const land = (at: TossPoint) => {
     if (ended) return;
+    stopAiming();
     const ring = part("kd-toss-ring");
     ring.style.transform = place(at);
     const wave = part("kd-toss-ring-wave");
@@ -428,10 +491,14 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
       { duration: RING_MS, easing: "cubic-bezier(0.2, 0.7, 0.3, 1)", fill: "forwards" }).finished.then(gone, gone);
     window.setTimeout(gone, RING_MS + 400);
     if (open) highlightAdded(before, () => failed);
-    // The squash keeps the tilt the parcel arrived with, so it does not snap upright first.
+    // The squash keeps the tilt and size it arrived with, so it does not snap upright first.
     const tilt = getComputedStyle(body).transform;
     const arrived = tilt && tilt !== "none" ? tilt : "scale(0.84)";
-    body.animate([
+    body.animate(card ? [
+      { transform: arrived, opacity: 1 },
+      { transform: "translateY(3px) scale(0.5, 0.34)", opacity: 1, offset: 0.45 },
+      { transform: "translateY(5px) scale(0.3, 0.16)", opacity: 0 },
+    ] : [
       { transform: arrived, opacity: 1 },
       { transform: "translateY(4px) scale(1.14, 0.6)", opacity: 1, offset: 0.45 },
       { transform: "translateY(6px) scale(0.6, 0.3)", opacity: 0 },
@@ -442,20 +509,64 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     if (ended || failed) return;
     const landing = findLanding(open, before);
     if (!landing) { fade(); return; }
+    // The drawer was asked for but its panel is not there yet (another app is still leaving):
+    // it has its whole way to come, so the parcel takes its time as for a sheet that sets out now.
+    const sheetLeft = landing.sheetLeftMs || (open && !shownDrawer() ? SHEET_DOWN_MS : 0);
     const distance = Math.hypot(landing.point.x - lifted.x, landing.point.y - lifted.y);
     const arc = tossArc(lifted, landing.point, tossRise(lifted, landing.point, hop));
-    const duration = tossFlightMs(distance, landing.sheetLeftMs, hop);
+    const duration = tossFlightMs(distance, sheetLeft, hop);
     const turn = landing.point.x >= lifted.x ? 1 : -1;
-    body.animate([
+    body.animate(card ? [
+      // The card keeps its own tilt; it leans a little into the hop and is smaller when it lands.
+      { transform: "rotate(0deg) scale(1)" },
+      { transform: `rotate(${5 * turn}deg) scale(0.62)` },
+    ] : [
       { transform: `rotate(${-7 * turn}deg) scale(1)` },
       { transform: `rotate(${16 * turn}deg) scale(0.84)` },
-    ], { duration, easing: "cubic-bezier(0.3, 0, 0.7, 1)", fill: "forwards" });
-    host.animate(arc.map(step => ({ transform: place({ x: lifted.x + step.x, y: lifted.y + step.y }) })),
-      { duration, easing: "linear", fill: "forwards" }).finished.then(() => land(landing.point), end);
+    ], { duration, easing: card ? "cubic-bezier(0.5, 0, 0.8, 0.7)" : "cubic-bezier(0.3, 0, 0.7, 1)", fill: "forwards" });
+    const flight = host.animate(arc.map(step => ({ transform: place({ x: lifted.x + step.x, y: lifted.y + step.y }) })),
+      { duration, easing: "linear", fill: "forwards" });
+
+    // The download goes to the queue when the parcel has nearly arrived.
+    handover.within(tossHandoverAt(duration));
+
+    // The arc ends where the target was at launch. The target may still move — the panel is
+    // mounted during the flight, the list grows by the row of this very download — so the end
+    // is corrected on the way: `aim` carries the difference, eased over what is left of the flight.
+    let offset = { x: 0, y: 0 };
+    let correction: Animation | null = null;
+    const reaim = () => {
+      if (ended) return;
+      const now = findLanding(open, before);
+      if (!now) return;
+      const next = { x: now.point.x - landing.point.x, y: now.point.y - landing.point.y };
+      if (Math.hypot(next.x - offset.x, next.y - offset.y) < 2) return;
+      const matrix = new DOMMatrixReadOnly(getComputedStyle(aim).transform);
+      const from = { x: matrix.e, y: matrix.f };
+      const left = Math.max(1, duration - Number(flight.currentTime ?? duration));
+      offset = next;
+      correction?.cancel();
+      correction = aim.animate([{ transform: place(from) }, { transform: place(next) }],
+        { duration: left, easing: "cubic-bezier(0.3, 0, 0.4, 1)", fill: "forwards" });
+    };
+    let frame = 0;
+    const onTasks = () => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; reaim(); });
+    };
+    const unsubscribe = useDownloadStore.subscribe(onTasks);
+    const timers = [0.5, 0.8].map(share => window.setTimeout(reaim, duration * share));
+    stopAiming = () => {
+      stopAiming = () => undefined;
+      unsubscribe();
+      timers.forEach(timer => window.clearTimeout(timer));
+      if (frame) cancelAnimationFrame(frame);
+    };
+    flight.finished.then(() => land({ x: landing.point.x + offset.x, y: landing.point.y + offset.y }), end);
   };
   appear.finished.then(launch, end);
 
   return {
+    ready: handover.ready,
     fail() {
       if (failed) return;
       failed = true;
@@ -466,7 +577,7 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
 
 /**
  * Throws a parcel into the downloads. Call it at the moment a download is started; it returns
- * at once and never delays the download.
+ * at once. Hand the download to the queue when the returned `ready` has resolved.
  */
 export function tossToDownloads(request: TossRequest = {}): TossHandle {
   if (typeof document === "undefined") return NOOP;
@@ -481,11 +592,13 @@ export function tossToDownloads(request: TossRequest = {}): TossHandle {
   // A source that is not on screen (a pane scrolled or switched away) has nothing to lift off.
   const onScreen = origin !== null && origin.point.x >= 0 && origin.point.x <= window.innerWidth
     && origin.point.y >= 0 && origin.point.y <= window.innerHeight;
-  if (!origin || !onScreen || still || airborne >= MAX_PARCELS) {
-    // Nothing flies: the drawer opens and the new task appears highlighted.
+  // In a hidden window no animation runs and no frame ends one: the download must not wait there.
+  if (!origin || !onScreen || still || document.hidden || airborne >= MAX_PARCELS) {
+    // Nothing flies: the download goes to the queue at once, the drawer opens and the new task
+    // appears highlighted.
     let failed = false;
     if (open) highlightAdded(before, () => failed);
-    return { fail() { failed = true; } };
+    return { ready: Promise.resolve(), fail() { failed = true; } };
   }
-  return fly(origin, request, Math.max(1, Math.floor(request.count ?? 1)), before, open ? holdDrawer(DOWNLOADS_APP) : () => undefined);
+  return fly(origin, request, Math.max(1, Math.floor(request.count ?? 1)), before, tossHandover(), open ? holdDrawer(DOWNLOADS_APP) : () => undefined);
 }

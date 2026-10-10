@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { DRAWER_HOLD_LIMIT_MS, heldDrawerFront, holdDrawer, releaseDrawerHolds, useDrawerHold } from "../src/lib/drawerHold";
-import { SHEET_DOWN_MS, TOSS_LIFT_MS, tossArc, tossFlightMs, tossRise } from "../src/lib/tossPath";
+import {
+  flushTossHandovers, SHEET_DOWN_MS, TOSS_HANDOVER_LEAD_MS, TOSS_HANDOVER_LIMIT_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs,
+  tossHandover, tossHandoverAt, tossRise, waitingTossHandovers,
+} from "../src/lib/tossPath";
 
 const held = () => useDrawerHold.getState().heldApp;
 
@@ -107,4 +110,96 @@ test("the parcel lands just after the sheet has settled, within the planned tota
   }
   assert.ok(tossFlightMs(80, 0, true) <= 300);
   assert.ok(tossFlightMs(80, 430, true) >= 490);
+});
+
+/** Lets the promise callbacks that are already due run. */
+const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("the download is handed over shortly before touchdown, not at launch", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    for (const [distance, hop] of [[120, false], [900, false], [1600, false], [80, true], [400, true]] as const) {
+      const flight = tossFlightMs(distance, 0, hop);
+      const at = tossHandoverAt(flight);
+      assert.equal(flight - at, TOSS_HANDOVER_LEAD_MS, "a fixed lead before the landing");
+      assert.ok(at >= flight / 2, `in the second half of a ${flight}ms flight`);
+      const handover = tossHandover();
+      let handed = 0;
+      void handover.ready.then(() => { handed += 1; });
+      // The parcel lifts off first; nothing is handed over while it does.
+      mock.timers.tick(hop ? TOSS_POP_MS : TOSS_LIFT_MS);
+      await settle();
+      assert.equal(handed, 0);
+      handover.within(at);
+      mock.timers.tick(at - 1);
+      await settle();
+      assert.equal(handed, 0, "still in the air");
+      mock.timers.tick(1);
+      await settle();
+      assert.equal(handed, 1);
+      assert.ok(handover.delivered());
+      // The flight's end, a failure and a flush all deliver again: nothing is enqueued twice.
+      handover.deliver();
+      handover.within(0);
+      flushTossHandovers();
+      mock.timers.tick(TOSS_HANDOVER_LIMIT_MS);
+      await settle();
+      assert.equal(handed, 1);
+    }
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a flight that never reports back still hands the download over, inside the drawer's hold", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    // The longest flight reaches its handover before the limit, and the limit lies inside the hold.
+    assert.ok(TOSS_LIFT_MS + tossHandoverAt(tossFlightMs(4000, SHEET_DOWN_MS, false)) < TOSS_HANDOVER_LIMIT_MS);
+    assert.ok(TOSS_HANDOVER_LIMIT_MS < DRAWER_HOLD_LIMIT_MS);
+    const release = holdDrawer("downloads");
+    const handover = tossHandover();
+    let handed = 0;
+    void handover.ready.then(() => { handed += 1; });
+    mock.timers.tick(TOSS_HANDOVER_LIMIT_MS - 1);
+    await settle();
+    assert.equal(handed, 0);
+    mock.timers.tick(1);
+    await settle();
+    assert.equal(handed, 1, "handed over at the limit although no flight was ever scheduled");
+    assert.equal(held(), "downloads", "the drawer is still held at that moment");
+    release();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a flight that ends early, a hidden window or a closing one hand over at once", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const early = tossHandover();
+    const first = tossHandover();
+    const second = tossHandover();
+    const order: string[] = [];
+    void early.ready.then(() => order.push("early"));
+    void first.ready.then(() => order.push("first"));
+    void second.ready.then(() => order.push("second"));
+    assert.equal(waitingTossHandovers(), 3);
+    // The parcel found nowhere to land.
+    early.deliver();
+    await settle();
+    assert.deepEqual(order, ["early"]);
+    assert.equal(waitingTossHandovers(), 2);
+    // pagehide / visibilitychange: every download still waiting goes now, in the order asked.
+    first.within(400);
+    flushTossHandovers();
+    await settle();
+    assert.deepEqual(order, ["early", "first", "second"]);
+    assert.equal(waitingTossHandovers(), 0);
+    mock.timers.tick(TOSS_HANDOVER_LIMIT_MS);
+    await settle();
+    assert.deepEqual(order, ["early", "first", "second"]);
+  } finally {
+    mock.timers.reset();
+  }
 });

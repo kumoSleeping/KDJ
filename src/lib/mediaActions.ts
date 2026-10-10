@@ -55,8 +55,10 @@ export async function enqueueMediaDownloads(
   }
   useAppStore.getState().openQueuePanel();
   // The parcel leaves from wherever the user started this (a row, a menu item, a drop point).
-  // It only decorates: the request below is already on its way.
+  // The request goes out when it has nearly landed, so the new row and the parcel arrive
+  // together; `ready` never fails to resolve (see downloadToss.ts).
   const toss = tossToDownloads({ title: sources[0]?.title, cover: sources[0]?.cover, count: sources.length });
+  await toss.ready;
   const queued = useDownloadStore.getState().enqueue(normalizedDownloadSources(sources, options), options);
   queued.then(undefined, () => toss.fail());
   return queued;

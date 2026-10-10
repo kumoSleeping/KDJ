@@ -568,9 +568,10 @@ export async function enqueueSearchDrop(
 export async function enqueueSearchQueuePayload(payload: ActiveSearchDrag): Promise<void> {
   const downloads = useDownloadStore.getState();
   if (payload.kind === "video") {
-    // Dropped: the parcel hops from where the item was let go. Songs get theirs in
-    // enqueueMediaDownloads.
+    // Dropped: the card hops in from where the item was let go, and the request goes out when it
+    // has nearly landed. Songs get theirs in enqueueMediaDownloads.
     const toss = tossToDownloads({ title: payload.title });
+    await toss.ready;
     const task = await api.videoDownload({
       ...payload.request,
       title: payload.title,
@@ -617,11 +618,14 @@ export async function enqueueSearchPayload(
   const lib = useLibraryStore.getState();
   lib.setFilter({ folder: dest, sort: "custom" });
   useAppStore.getState().openQueuePanel();
-  // A drop on a folder is a download too: the parcel goes from the drop point to the queue.
+  // A drop on a folder is a download too: the card hops from the drop point to the queue.
   const toss = tossToDownloads({
     title: payload.kind === "video" ? payload.title : payload.sources[0]?.title,
     count: payload.kind === "video" ? 1 : payload.sources.length,
   });
+  // The rows appear — in the queue and as pending rows of the folder — when the card has
+  // nearly landed, not while it is still in the air.
+  await toss.ready;
 
   const downloads = useDownloadStore.getState();
   if (payload.kind === "video") {
