@@ -229,6 +229,8 @@ interface StreamAnalysisPollSession {
   disposed: boolean;
   terminal: boolean;
   lastRevision: number;
+  /** The waveform of `lastRevision` was merged as the finished one. */
+  completeApplied: boolean;
 }
 
 /** Manager view of the two low-level playback Decks. The public performance surface is gone,
@@ -278,6 +280,7 @@ function subscribeStreamAnalysisPoll(
       disposed: false,
       terminal: false,
       lastRevision: -1,
+      completeApplied: false,
     };
     streamAnalysisPollers.set(track.id, session);
   }
@@ -306,7 +309,14 @@ function subscribeStreamAnalysisPoll(
         if (session!.disposed) return;
         recordStreamCacheProgress(track.id, progress);
         recordStreamAnalysisProgress(track.id, progress);
-        if (progress.waveform && progress.revision > session!.lastRevision) {
+        const waveformComplete = progress.waveform_status === "ready"
+          || (progress.waveform_status === undefined && progress.complete && !progress.active);
+        // The server keeps the revision when its final pass decoded no more than the last
+        // prefix did: "ready" can arrive without a new one, and still has to be applied.
+        if (progress.waveform && (
+          progress.revision > session!.lastRevision
+          || (waveformComplete && !session!.completeApplied && progress.revision === session!.lastRevision)
+        )) {
           const total = totalDuration();
           const covered = Math.min(total, Math.max(0, progress.covered_seconds));
           mergeCachedStreamWaveform(
@@ -316,10 +326,13 @@ function subscribeStreamAnalysisPoll(
             progress.waveform,
             progress.revision,
             covered > 0 ? [{ start: 0, end: covered }] : [],
-            progress.waveform_status === "ready"
-              || (progress.waveform_status === undefined && progress.complete && !progress.active),
+            waveformComplete,
+            // The container's own duration: what lets a finished decode overrule `total`, which
+            // on the native player is only the catalogue's figure (see streamWaveformExtent.ts).
+            progress.analysis_status === "ready" ? progress.analysis?.duration ?? 0 : 0,
           );
           session!.lastRevision = progress.revision;
+          session!.completeApplied = waveformComplete;
         }
         const allEnded = [...session!.subscribers].every((item) => item.ended());
         const delay = streamAnalysisPollDelay(

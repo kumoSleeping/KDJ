@@ -89,8 +89,12 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   bubbles stacked above and `--kd-info-lift` move there in one step alongside it.
   The playing song puts its mini transport there only while the player bar is away
   (`NowPlayingTransport.tsx`): previous, play / pause, next, the time played and a progress
-  line that is the song's mini waveform when it has one. They send the player's own commands
-  (`requestPlayerCommand`) and read the position from the player session without re-rendering
+  line that is the song's mini waveform when it has one: bars in the colours the bar's rail
+  paints the song in, each reaching up and down as far as the sound does there; the part not
+  played yet gives most of its colour up to a neutral (`--kd-now-wave-rest`,
+  `--kd-now-wave-tint` on `.kd-now-line`, for a surface behind the bubble to retune), and a
+  stretch of an online song that is not analysed yet is the plain line. They send the player's
+  own commands (`requestPlayerCommand`) and read the position from the player session without re-rendering
   the bubble. Beside the bar the bubble is an ordinary message, because the bar is the
   transport: a pinned bubble opens its transport as the bar starts down and closes it as the
   bar starts back up.

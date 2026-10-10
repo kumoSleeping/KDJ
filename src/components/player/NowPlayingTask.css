@@ -63,8 +63,15 @@
   text-align: right;
 }
 /* The line is as tall as the mini waveform, so both forms take the pointer on the same strip.
-   --kd-now-seek is how much of the song was played, 0..1; the transport writes it. */
+   --kd-now-seek is how much of the song was played, 0..1; the transport writes it.
+   What is left of the song is drawn from three values a surface behind the bubble may retune:
+   --kd-now-wave-rest, the neutral a bar that was not played yet is mixed with;
+   --kd-now-wave-tint, how much of its own colour such a bar keeps;
+   --kd-now-rail, the line where the song has no waveform (yet). */
 .kd-now-line {
+  --kd-now-wave-rest: color-mix(in srgb, var(--kd-muted) 34%, transparent);
+  --kd-now-wave-tint: 34%;
+  --kd-now-rail: color-mix(in srgb, var(--kd-muted) 26%, transparent);
   position: relative;
   flex: 1 1 auto;
   min-width: 3rem;
@@ -81,16 +88,22 @@
   overflow: visible;
   pointer-events: none;
 }
-/* A stroke per bar, as thick on screen however far the line is stretched, with round ends. */
+/* A stroke per bar, as thick on screen however far the line is stretched, with round ends. A
+   path is the bars of one colour of the song (--kd-now-bar, the colour the player bar's rail
+   paints that sound in). Before the playhead they are that colour; after it the colour is mostly
+   given up to the neutral, so the played part stands out by colour and by strength. */
 .kd-now-wave > path {
   fill: none;
-  stroke: color-mix(in srgb, var(--kd-muted) 42%, transparent);
+  stroke: color-mix(in srgb, var(--kd-now-bar, var(--kd-text)) var(--kd-now-wave-tint), var(--kd-now-wave-rest));
   stroke-width: 2.5px;
   stroke-linecap: round;
   vector-effect: non-scaling-stroke;
 }
 .kd-now-wave[data-played] { clip-path: inset(0 calc((1 - var(--kd-now-seek, 0)) * 100%) 0 0); }
-.kd-now-wave[data-played] > path { stroke: var(--kd-text); }
+.kd-now-wave[data-played] > path { stroke: var(--kd-now-bar, var(--kd-text)); }
+/* A stretch of an online song that is not analysed yet is the plain line, as below. */
+.kd-now-wave > .kd-now-wave-rail { stroke: var(--kd-now-rail); stroke-width: 4px; }
+.kd-now-wave[data-played] > .kd-now-wave-rail { stroke: var(--kd-text); }
 /* Without a waveform: one rounded line. */
 .kd-now-rail {
   position: absolute;
@@ -101,7 +114,7 @@
   margin-top: -2px;
   overflow: hidden;
   border-radius: 2px;
-  background: color-mix(in srgb, var(--kd-muted) 26%, transparent);
+  background: var(--kd-now-rail);
   pointer-events: none;
 }
 .kd-now-rail > i {
