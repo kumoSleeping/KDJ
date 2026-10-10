@@ -189,3 +189,10 @@
     animation: none !important;
   }
 }
+
+/* A content turn preserves its containing panel and uses the shared surface clock. */
+.kd-turn { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.kd-turn-live { min-width: 0; min-height: 0; }
+.kd-activity-turn { flex: 1 1 auto; }
+.kd-activity-turn > .kd-turn-live { display: flex; align-items: center; gap: 0.65rem; }
+.kd-lyrics-turn, .kd-lyrics-turn > .kd-turn-live { display: flex; flex-direction: column; flex: 1 1 auto; height: 100%; }

@@ -91,7 +91,7 @@
   pointer-events: none;
 }
 .kd-drawer {
-  --kd-drawer-room: calc(100% - var(--kd-drawer-gap));
+  --kd-drawer-room: calc(100% - var(--kd-drawer-gap) - var(--kd-top-notice-lift, 0px));
   position: absolute;
   top: 0;
   right: var(--kd-drawer-gap);
@@ -268,3 +268,6 @@
    Kept as weak as the rules it replaces, so a row's own states (running, hovered, just added)
    still colour it. */
 :where(.kd-drawer .kd-drawer-body) :is(.kd-download-task-list, .kd-download-task) { background: transparent; }
+
+/* A top report pushes the existing drawer down, on the same surface clock. */
+.kd-drawer-sheets { transform: translateY(var(--kd-top-notice-lift, 0px)); transition: transform var(--kd-motion-in) var(--kd-ease-out); }

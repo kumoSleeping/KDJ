@@ -1,3 +1,5 @@
+import { MOTION_IN_MS } from "./motion";
+import { SONG_SWAP_IN_EASE } from "./songSwapMotion";
 /**
  * The download parcel. When a download is started from something on screen, that block turns
  * into a small parcel, is thrown along a parabola and lands in the downloads drawer, which is
@@ -19,7 +21,7 @@ import { coverTile, droppedDragCard, ghostGlyph, isElement, loadedCover, type Dr
 import { useDownloadStore } from "../stores/downloadStore";
 import { useTaskPanelStore } from "../stores/taskPanelStore";
 import "./dragRefusal";
-import { holdDrawer } from "./drawerHold";
+import { holdDrawer, DRAWER_HOLD_LIMIT_MS } from "./drawerHold";
 import { useSidePanels } from "./sidePanels";
 import {
   flushTossHandovers, SHEET_DOWN_MS, SHEET_SWAP_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossHandover, tossHandoverAt, tossRise,
@@ -447,16 +449,39 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
   host.style.transform = place(start);
   document.body.append(host);
 
+  // A batch gathers visible selected covers into one parcel before the parcel takes off.
+  // Off-screen rows need no DOM or thumbnails: the parcel's count represents those too.
+  const gather: Promise<unknown>[] = [];
+  if (count > 1) {
+    const rows = [...document.querySelectorAll<HTMLElement>('tbody tr[aria-selected="true"]')]
+      .filter(row => row.offsetWidth > 0 && row.getBoundingClientRect().bottom > 0)
+      .slice(0, Math.min(count, 6));
+    for (const row of rows) {
+      const cover = loadedCover(row);
+      if (!cover) continue;
+      const rect = cover.getBoundingClientRect();
+      const tile = cover.cloneNode(true) as HTMLImageElement;
+      tile.removeAttribute("id"); tile.setAttribute("aria-hidden", "true");
+      Object.assign(tile.style, { position: "absolute", width: `${PARCEL_PX}px`, height: `${PARCEL_PX}px`, left: "0", top: "0", objectFit: "cover", borderRadius: "4px", pointerEvents: "none" });
+      host.append(tile);
+      const animation = tile.animate([
+        { transform: `translate(${rect.left - start.x}px, ${rect.top - start.y}px) scale(1)`, opacity: 0.9 },
+        { transform: "translate(-17px, -17px) scale(0.65)", opacity: 0 },
+      ], { duration: MOTION_IN_MS, easing: SONG_SWAP_IN_EASE, fill: "forwards" });
+      gather.push(animation.finished.finally(() => tile.remove()));
+    }
+  }
+  const gatherMs = gather.length ? MOTION_IN_MS : 0;
   const liftMs = hop ? TOSS_POP_MS : TOSS_LIFT_MS;
   const lifted = { x: start.x, y: start.y - (hop ? 0 : 8) };
   host.animate([{ transform: place(start) }, { transform: place(lifted) }],
-    { duration: liftMs, easing: "cubic-bezier(0.2, 0.8, 0.3, 1)", fill: "forwards" });
+    { duration: liftMs, delay: gatherMs, easing: "cubic-bezier(0.2, 0.8, 0.3, 1)", fill: "forwards" });
   // The block gathers itself and shrinks away; the parcel comes up in its place as it goes.
   chip?.animate([
     { transform: "scale(1)", opacity: 1 },
     { transform: "scale(1.04)", opacity: 1, offset: 0.3 },
     { transform: `scale(${chip.style.getPropertyValue("--kd-toss-shrink")})`, opacity: 0 },
-  ], { duration: liftMs, easing: "cubic-bezier(0.5, 0, 0.6, 1)", fill: "forwards" });
+  ], { duration: liftMs, delay: gatherMs, easing: "cubic-bezier(0.5, 0, 0.6, 1)", fill: "forwards" });
   const pop = "cubic-bezier(0.2, 0.9, 0.3, 1.25)";
   const appear = cargo.animate(card ? [
     // Already in the hand, and seen: it only gathers itself for the hop.
@@ -469,7 +494,7 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     { transform: "scale(0.4)", opacity: 0 },
     { transform: "scale(0.45)", opacity: 0, offset: 0.4, easing: pop },
     { transform: "scale(1)", opacity: 1 },
-  ], { duration: liftMs, fill: "both" });
+  ], { duration: liftMs, delay: gatherMs, fill: "both" });
 
   const fade = () => {
     if (ended) return;
@@ -564,7 +589,7 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     };
     flight.finished.then(() => land({ x: landing.point.x + offset.x, y: landing.point.y + offset.y }), end);
   };
-  appear.finished.then(launch, end);
+  Promise.all([appear.finished, ...gather]).then(launch, end);
 
   return {
     ready: handover.ready,
@@ -601,5 +626,5 @@ export function tossToDownloads(request: TossRequest = {}): TossHandle {
     if (open) highlightAdded(before, () => failed);
     return { ready: Promise.resolve(), fail() { failed = true; } };
   }
-  return fly(origin, request, Math.max(1, Math.floor(request.count ?? 1)), before, tossHandover(), open ? holdDrawer(DOWNLOADS_APP) : () => undefined);
+  return fly(origin, request, Math.max(1, Math.floor(request.count ?? 1)), before, tossHandover(), open ? holdDrawer(DOWNLOADS_APP, DRAWER_HOLD_LIMIT_MS + ((request.count ?? 1) > 1 ? MOTION_IN_MS : 0)) : () => undefined);
 }

@@ -1,3 +1,5 @@
+import { useLyricsPresentation } from "../../lib/lyricsPresentation";
+import { useSidePanels } from "../../lib/sidePanels";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { ChevronsDown } from "lucide-react";
 import { MOTION_IN_MS, MOTION_REDUCED_MS, leaveDuration, prefersReducedMotion } from "../../lib/motion";
@@ -40,7 +42,13 @@ let handFocusTo: "bubble" | "collapse" | null = null;
  * (src/lib/nowPlayingInfo.ts).
  */
 export function usePlayerBarPhase(song: boolean): PlayerBarPhase {
-  const away = usePlayerBarAway(state => playerBarAwayWanted(state.collapsed, song));
+  const extent = useLyricsPresentation(state => state.extent);
+  const lyrics = useSidePanels(state => state.lyrics);
+  const tall = usePlayerBarAway(state => state.tall);
+  const preferredAway = usePlayerBarAway(state => playerBarAwayWanted(state.collapsed, song));
+  // Fullscreen temporarily hands transport to the same bubble, without rewriting either
+  // orientation's persisted preference. Leaving fullscreen restores the normal handover.
+  const away = preferredAway || (song && lyrics && tall && extent === "fullscreen");
   const phase = usePlayerBarAway(state => state.phase);
   const settled = useRef(false);
   useLayoutEffect(() => {

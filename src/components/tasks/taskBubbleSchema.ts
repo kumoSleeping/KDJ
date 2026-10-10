@@ -68,6 +68,8 @@ export interface TaskBubbleSpec {
    * acts on most, with a big cover and a title-size name (the playing song).
    */
   size?: TaskSize;
+  /** Reports opened near the top can emerge above the drawer instead of behind the transport. */
+  placement?: "top" | "bottom";
   /**
    * How long the bubble stays, in ms, before it rolls back down. Each kind of task chooses its
    * own: a song 5 s, a short note 3 s. 0 keeps it up until it is

@@ -286,36 +286,17 @@ input[type="radio"] {
   flex: none;
 }
 
-/* 列表批选框比设置页开关更小；单元格只在右键/长按进入批选后占宽。
-   勾选态：细描边 + 红色对勾，不铺整块红底（白天模式下大红砖特别丑）。 */
-.kd-selection-cell {
-  width: 0 !important;
-  padding-right: 0 !important;
-  padding-left: 0 !important;
-  overflow: hidden;
-}
-.kd-selection-cell[data-active="true"] {
-  width: 1.55rem !important;
-  padding-right: 0.25rem !important;
-  padding-left: 0.4rem !important;
-}
+/* Selection uses the existing index/cover slots; columns never move. */
+.kd-selection-cell { width: 0 !important; padding: 0 !important; position: relative; overflow: visible; }
 .kd-selection-cell input[type="checkbox"] {
-  width: 0.78rem;
-  height: 0.78rem;
-  background: transparent;
-  border-color: var(--kd-muted);
+  position: absolute; z-index: 2; left: 0.35rem; top: 50%; transform: translateY(-50%);
+  width: 1rem; height: 1rem; margin: 0; border: 1px solid var(--kd-muted); border-radius: 50%;
+  background: var(--kd-panel); color: var(--kd-text);
 }
-.kd-selection-cell input[type="checkbox"]:checked {
-  background: transparent;
-  border-color: var(--kd-theme);
-}
-.kd-selection-cell input[type="checkbox"]:checked::after {
-  width: 0.22rem;
-  height: 0.4rem;
-  margin-top: -1px;
-  border-color: var(--kd-theme);
-  border-width: 0 1.5px 1.5px 0;
-}
+.kd-selection-cell input[type="checkbox"]:checked { background: var(--kd-panel); border-color: var(--kd-text); }
+.kd-selection-cell input[type="checkbox"]:checked::after { border-color: var(--kd-text); }
+.kd-table tr[data-selecting="true"] > td[data-col="index"] > * { visibility: hidden; }
+.kd-collection-load-more { display: flex; justify-content: center; padding: 12px; }
 input[type="checkbox"]:checked {
   background: var(--kd-theme);
   border-color: var(--kd-theme);
@@ -2108,26 +2089,13 @@ body[data-kd-track-pointer-dragging="true"] {
   justify-content: flex-start;
 }
 /* 曲库批选：只在右键「选择」后出现；和封面同一基线，勾上是红钩不是红砖。 */
+.kd-track-selection-cover { position: relative; display: inline-flex; flex: none; align-items: center; }
 .kd-row-select {
-  appearance: none;
-  width: 0.85rem;
-  height: 0.85rem;
-  margin: 0 0.45rem 0 0;
-  padding: 0;
-  display: inline-grid;
-  place-items: center;
-  vertical-align: -5px;
-  border: 1px solid var(--kd-muted);
-  background: transparent;
-  color: transparent;
-  cursor: pointer;
-  flex: none;
+  position: absolute; inset: 0; margin: auto; width: 1.25rem; height: 1.25rem; padding: 0;
+  display: grid; place-items: center; border: 1px solid var(--kd-muted); border-radius: 50%;
+  background: var(--kd-panel); color: transparent; cursor: pointer;
 }
-.kd-row-select[aria-pressed="true"] {
-  border-color: var(--kd-theme);
-  background: transparent;
-  color: var(--kd-theme);
-}
+.kd-row-select[aria-pressed="true"] { border-color: var(--kd-text); color: var(--kd-text); }
 .kd-row-select > svg {
   display: block;
   stroke-width: 2.5;
@@ -2695,10 +2663,6 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-result-download-index:focus-within .kd-result-download-btn {
   opacity: 1;
   pointer-events: auto;
-}
-.kd-table tr:hover .kd-result-download-index:has(button) > .kd-result-index,
-.kd-result-download-index:focus-within > .kd-result-index {
-  opacity: 0;
 }
 .kd-result-download-btn:hover {
   color: var(--kd-theme);
@@ -8423,3 +8387,10 @@ html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr[aria-selected="true
   margin: 1rem 0 0;
   color: var(--kd-muted);
 }
+
+.kd-result-first-cell { position: relative; }
+.kd-result-first-content { display: block; overflow: hidden; text-overflow: ellipsis; }
+.kd-result-first-cell > .kd-result-download-index { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); }
+.kd-result-first-cell > .kd-result-download-index > .kd-result-index { display: none; }
+.kd-result-first-cell:has(.kd-result-download-btn):is(:hover, :focus-within) > .kd-result-first-content { padding-right: 24px; }
+.kd-result-first-cell .kd-result-download-btn { background: var(--kd-panel); }

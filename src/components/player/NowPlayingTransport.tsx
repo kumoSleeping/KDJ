@@ -13,6 +13,8 @@ import {
   cachedReleaseOverviewWaveform,
   loadReleaseOverviewById,
   subscribeReleaseOverviewWaveform,
+  subscribeStreamWaveform,
+  streamWaveformSnapshot,
 } from "../../lib/waveformCache";
 import type { Track } from "../../types";
 import {
@@ -20,8 +22,7 @@ import {
   MINI_WAVE_HEIGHT,
   MINI_WAVE_PITCH,
   miniWaveformBars,
-  miniWaveformLevels,
-  miniWaveformPath,
+  miniWaveformSegments,
   seekFraction,
 } from "./miniWaveform";
 
@@ -37,12 +38,13 @@ const SEEK_WAIT_MS = 700;
  * The song's overview as the path of a mini waveform of `bars` bars, once it is in the shared
  * cache.
  */
-function useMiniWaveform(track: Track, bars: number): string | null {
-  const [wave, setWave] = useState(() => cachedReleaseOverviewWaveform(track.id));
+function useMiniWaveform(track: Track, bars: number): ReturnType<typeof miniWaveformSegments> | null {
+  const cached = () => track.id < 0 ? streamWaveformSnapshot(track.id)?.waveform ?? null : cachedReleaseOverviewWaveform(track.id);
+  const [wave, setWave] = useState(cached);
   useEffect(() => {
-    const read = () => setWave(cachedReleaseOverviewWaveform(track.id));
+    const read = () => setWave(cached());
     read();
-    const unsubscribe = subscribeReleaseOverviewWaveform(track.id, read);
+    const unsubscribe = track.id < 0 ? subscribeStreamWaveform(track.id, read) : subscribeReleaseOverviewWaveform(track.id, read);
     // The bar's own waveform asks for it too; with the bar away this is the only reader. An
     // online song's waveform grows with its media and is not asked for here.
     if (!cachedReleaseOverviewWaveform(track.id) && usesLocalLibraryRecord(track)) {
@@ -54,8 +56,8 @@ function useMiniWaveform(track: Track, bars: number): string | null {
   return useMemo(() => {
     // An overview of a part of the song is not the song's shape.
     if (!wave || wave.source_start !== undefined || wave.source_end !== undefined) return null;
-    const levels = miniWaveformLevels(wave.amp, bars);
-    return levels ? miniWaveformPath(levels) : null;
+    const segments = miniWaveformSegments(wave, bars);
+    return segments.length ? segments : null;
   }, [wave, bars]);
 }
 
@@ -198,10 +200,10 @@ function NowPlayingSeek({ track }: { track: Track }) {
 }
 
 /** One layer of the mini waveform: the whole song muted, and over it the played part in ink. */
-function MiniWave({ path, bars, played }: { path: string; bars: number; played?: boolean }) {
+function MiniWave({ path, bars, played }: { path: ReturnType<typeof miniWaveformSegments>; bars: number; played?: boolean }) {
   return <svg className="kd-now-wave" data-played={played ? "true" : undefined} aria-hidden="true"
     viewBox={`0 0 ${bars * MINI_WAVE_PITCH} ${MINI_WAVE_HEIGHT}`} preserveAspectRatio="none">
-    <path d={path} />
+    {path.map((segment, i) => <path key={i} d={segment.path} style={{ stroke: segment.color }} />)}
   </svg>;
 }
 

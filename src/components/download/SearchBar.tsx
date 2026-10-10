@@ -10,6 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
+import { TurnContents } from "../common/TurnContents";
 import { useSearchPresets } from "./useSearchPresets";
 import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import {
@@ -256,7 +257,7 @@ function SearchTipCarousel({
         </button>
         {/* A focused field says what Enter does; otherwise the tips turn. */}
         <span className="kd-search-tip-copy" aria-hidden="true">
-          <RollText text={inputFocused ? SEARCH_INPUT_TIP : SEARCH_TIPS[tipIndex]} />
+          <TurnContents changeKey={inputFocused ? "input" : `tip:${tipIndex}`}><span>{inputFocused ? SEARCH_INPUT_TIP : SEARCH_TIPS[tipIndex]}</span></TurnContents>
         </span>
       </span>
     </span>

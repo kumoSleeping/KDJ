@@ -218,7 +218,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
     </span>}
   </>;
   const open = spec.onOpen;
-  return <div className="kd-task-slot" data-size={spec.size ?? "regular"} style={{ "--kd-task-lift": `${lift}px`, zIndex: front } as CSSProperties}>
+  return <div className="kd-task-slot" data-size={spec.size ?? "regular"} data-placement={spec.placement ?? "bottom"} style={{ "--kd-task-lift": `${lift}px`, zIndex: front } as CSSProperties}>
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || undefined}
@@ -332,11 +332,15 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
 
   // Newest first: each bubble that is staying lifts the older ones above it. One that is
   // leaving gives its place up at once and keeps the lift it had.
-  const ordered = [...entries].sort((a, b) => b.order - a.order);
+  const ordered = [...entries].sort((a, b) => Number(b.spec.kind === "playing") - Number(a.spec.kind === "playing") || b.order - a.order);
   const lifts = useRef<Record<string, number>>({});
-  let stacked = 0, kept = 0;
+  let stacked = 0, kept = 0, topStacked = 0;
   for (const entry of ordered) {
     const id = entry.spec.id;
+    if (entry.spec.placement === "top") {
+      if (!entry.leaving) { lifts.current[id] = topStacked; topStacked += (sizes[id] ?? 0) + STACK_GAP; }
+      continue;
+    }
     if (entry.leaving) { lifts.current[id] ??= stacked; continue; }
     lifts.current[id] = stacked;
     const height = sizes[id] ?? 0;
@@ -352,19 +356,30 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
   // that room when the bar is gone.
   const lift = kept > 0 ? Math.round(kept + (riding ? floor : 0)) : 0;
   useEffect(() => {
+    const transport = ordered.find(entry => entry.spec.kind === "playing" && !entry.leaving);
+    document.documentElement.style.setProperty("--kd-transport-lift", `${transport ? (sizes[transport.spec.id] ?? 0) + EDGE_GAP * 2 : 0}px`);
     if (lift > 0) document.documentElement.style.setProperty("--kd-info-lift", `${lift}px`);
     else document.documentElement.style.removeProperty("--kd-info-lift");
-  }, [lift]);
-  useEffect(() => () => { document.documentElement.style.removeProperty("--kd-info-lift"); }, []);
+  }, [lift, entries, sizes]);
+  useEffect(() => {
+    document.documentElement.style.setProperty("--kd-top-notice-lift", `${topStacked}px`);
+    return () => { document.documentElement.style.removeProperty("--kd-top-notice-lift"); };
+  }, [topStacked]);
+  useEffect(() => () => { document.documentElement.style.removeProperty("--kd-info-lift"); document.documentElement.style.removeProperty("--kd-transport-lift"); }, []);
 
   if (entries.length === 0) return null;
   return createPortal(
-    <div className="kd-task-host" data-floor={riding && !prefersReducedSeekMotion() ? (barPhase === "leaving" ? "down" : "up") : undefined}
+    <><div className="kd-task-host" data-floor={riding && !prefersReducedSeekMotion() ? (barPhase === "leaving" ? "down" : "up") : undefined}
       style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px` } as CSSProperties}>
-      {ordered.map((entry, index) => <TaskBubble key={`${entry.spec.id}:${entry.order}`} entry={entry}
+      {ordered.filter(entry => entry.spec.placement !== "top").map((entry, index) => <TaskBubble key={`${entry.spec.id}:${entry.order}`} entry={entry}
         lift={lifts.current[entry.spec.id] ?? 0} front={ordered.length - index}
         held={holds.length > 0} onHeld={onHeld} onSize={onSize} />)}
-    </div>,
+    </div>
+    <div className="kd-task-host" data-edge="top" style={TASK_CLOCK}>
+      {ordered.filter(entry => entry.spec.placement === "top").map((entry, index) => <TaskBubble key={`${entry.spec.id}:${entry.order}`} entry={entry}
+        lift={lifts.current[entry.spec.id] ?? 0} front={ordered.length - index}
+        held={holds.length > 0} onHeld={onHeld} onSize={onSize} />)}
+    </div></>,
     root ?? document.body,
   );
 }

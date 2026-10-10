@@ -61,3 +61,14 @@ test("the bars follow the line's width, in steps and within bounds", () => {
   assert.equal(miniWaveformBars(545), miniWaveformBars(540), "a few pixels do not redraw it");
   assert.equal(miniWaveformBars(5000), MINI_WAVE_MAX_BARS);
 });
+
+test("mini waveform retains per-bar colour and asymmetric loudness without changing density", async () => {
+  const { miniWaveformSegments } = await import("../src/components/player/miniWaveform");
+  const wave = { track_id: 1, duration: 2, amp: [0.8, 0.4], r: [240, 20], g: [80, 180], b: [40, 220], minimum: [-0.2, -0.4], maximum: [0.8, 0.1] };
+  const bars = miniWaveformSegments(wave, 2);
+  assert.equal(bars.length, 2);
+  assert.equal(bars[0].color, "rgb(240 80 40)");
+  assert.equal(bars[1].color, "rgb(20 180 220)");
+  const first = /M[\d.]+ ([\d.]+)V([\d.]+)/.exec(bars[0].path)!;
+  assert.ok(9 - Number(first[1]) > Number(first[2]) - 9);
+});

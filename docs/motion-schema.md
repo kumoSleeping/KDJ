@@ -124,8 +124,8 @@ next to its styles:
 | List | What moves | Code |
 | --- | --- | --- |
 | The sidebar tree and the compact rail | Shown: the rows arrive 12ms apart (the first twelve; all in by 292ms). A branch the user opens: its rows arrive the same way while what lies below slides down (240ms). A branch the user closes: its picture is covered from below as the rows under it close up (240ms). A playlist that was opened: 600ms later the rows travel to their new order (320ms), the opened one lifted. Only the user's own toggle moves a branch; a render, a selection, a count or a drag never does. | `components/library/sidebarMotion.ts`, `FolderTree.css` |
-| The local track list | After navigation (the query version the table resets its scroll on): the first twelve rows fade in 8ms apart, all settled by 248ms. Never on a scroll, a re-render or a row update; the mark is dropped as soon as the list is scrolled. | `components/library/listArrival.ts`, `ListArrival.css` |
-| The search results | A delivered list arrives row after row (28ms apart). | `components/download/ResultTable.css` |
+| The local track list | On navigation and each return to the pane, real rows rise in 8ms steps on the shared arrival clock. Newly mounted virtual rows use the same short rise in the scroll direction; existing rows stay put. No painted stand-in list. | `components/library/listArrival.ts`, `ListArrival.css` |
+| The search results | A delivered list and each return to its pane arrive row after row (28ms apart); repeated deliveries restart the same gesture. | `components/download/ResultTable.css` |
 
 Dragging has two gestures of its own: a card dropped on the downloads hops into the list as
 itself (`lib/downloadToss.ts`; the download is handed to the queue when it has nearly landed),

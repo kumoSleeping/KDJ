@@ -391,6 +391,8 @@ export interface IntakeRequest {
 }
 
 export interface IntakeItem {
+  /** Client-side continuation for a collection resolved in bounded batches. */
+  continuation?: { collection: CollectionResult; total: number };
   /** 拆出来的原始文本（链接或关键词）。 */
   entry: string;
   kind: IntakeKind;

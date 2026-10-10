@@ -1,5 +1,9 @@
+import { useSongColor } from "./SongColor";
+import { useLayoutSignals } from "../../lib/useLayoutMode";
+import { useSidePanels } from "../../lib/sidePanels";
+import { useLyricsPresentation } from "../../lib/lyricsPresentation";
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { PanelBottomOpen, Pencil, PictureInPicture2, Pin, ScrollText } from "lucide-react";
+import { Palette, PanelBottomOpen, Pencil, PictureInPicture2, Pin, ScrollText } from "lucide-react";
 import { formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
 import { displayTrackKey } from "../../lib/keyDisplay";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
@@ -82,6 +86,12 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
   useEffect(() => () => { if (entrance.current !== null) window.clearTimeout(entrance.current); }, []);
 
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  const color = useLyricsPresentation(state => state.color);
+  const extent = useLyricsPresentation(state => state.extent);
+  const lyricsVisible = useSidePanels(state => state.lyrics);
+  const { tall } = useLayoutSignals();
+  const focus = tall && lyricsVisible && extent === "fullscreen";
+  useSongColor(track);
   const keyNotation = useAppStore(state => state.settings?.key_notation ?? "camelot");
   // The bubble holds the record the song started with; a cover written since then is only
   // reachable under the list's later revision.
@@ -132,11 +142,12 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
       stay: held ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,
       // Rolling it down with the bar away is the way back to the bar, and the key says so.
-      dismiss: barAway ? { label: "展开播放条", icon: <PanelBottomOpen size={14} aria-hidden="true" /> } : undefined,
+      dismiss: focus ? { label: "退出全屏" } : barAway ? { label: "展开播放条", icon: <PanelBottomOpen size={14} aria-hidden="true" /> } : undefined,
       // The transport only while the bar is away: beside the bar the bubble is a message.
-      controls: barAway ? <NowPlayingTransport track={track} /> : undefined,
+      controls: barAway || focus ? <NowPlayingTransport track={track} /> : undefined,
       // The song's toggles, then its editor, then the bubble's own keys.
       actions: [
+        { id: "song-color", label: "随曲色彩", pressed: color, icon: <Palette size={14} aria-hidden="true" />, onSelect: () => useLyricsPresentation.getState().toggleColor() },
         ...(video ? [] : [{
           id: "lyrics", label: lyrics.open ? "关闭歌词" : "打开歌词", pressed: lyrics.open, busy: lyrics.matching,
           icon: <ScrollText size={14} aria-hidden="true" />,
@@ -166,7 +177,10 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
         // Its stay ran out: the peek is over. Dismissed by hand, it goes whatever held it, and
         // the bar comes back if it was away.
         if (reason === "timeout" || reason === "crowded") useNowPlayingInfo.getState().endPeek();
-        else if (reason === "user") useNowPlayingInfo.getState().close();
+        else if (reason === "user") {
+          if (focus) useLyricsPresentation.getState().setExtent("long");
+          else useNowPlayingInfo.getState().close();
+        }
       },
     };
     if (raised.current !== raise) {
@@ -175,7 +189,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching]);
+  }, [focus, color, visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
   return null;
 }

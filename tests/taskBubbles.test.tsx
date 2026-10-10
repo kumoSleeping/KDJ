@@ -158,7 +158,7 @@ test("the playing song's bubble: a message beside the bar, the transport while t
   assert.equal(pinned.spec.stay, 0);
   assert.equal(pinned.spec.body, undefined, "it does not expand");
   assert.equal(pinned.spec.origin?.label, "B站", "where the file was downloaded from");
-  assert.deepEqual(keys(), ["lyrics", "popup", "meta", "pin"]);
+  assert.deepEqual(keys(), ["song-color", "lyrics", "popup", "meta", "pin"]);
   entry()!.spec.actions!.find(action => action.id === "popup")!.onSelect(dom.window.document.body);
   assert.equal(popups, 1, "the bar's own toggle");
 

@@ -1,48 +1,28 @@
-/* The local track list arriving (listArrival.ts): the scroll container carries data-kd-arrive
-   for 300ms after the list was replaced, and only then. The first twelve rows fade in and rise
-   a few pixels one step (8ms) apart, the rest of the first screens come with the twelfth; all
-   are settled after 248ms. Rows are laid out by the table itself (spacer rows above and below
-   the rendered window, no transforms), so an animated row moves over its own place and nothing
-   is laid out again. Much quicker than the search results on purpose: this list is already on
-   the disk. */
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody {
-  /* A row's step in the cascade; the first eleven name their own below, the rest inherit this. */
-  --kd-arrive-i: 11;
+/* The existing list rise, shared by navigation and real rows catching up during scrolling.
+   Virtual spacers never carry this mark; only transform and opacity move. */
+.kd-table[data-kind="library"] > tbody > tr[data-kd-row-arrive] {
+  animation: kd-list-arrive-a var(--kd-motion-in) var(--kd-ease-out) calc(var(--kd-arrive-i) * var(--kd-motion-stagger)) backwards;
 }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:not([data-spacer]):nth-child(-n + 60) {
-  animation: kd-list-arrive-a var(--kd-motion-micro) var(--kd-ease-out) calc(var(--kd-arrive-i) * var(--kd-motion-stagger)) backwards;
-}
-/* A list replaced while the last one is still arriving starts over (see markListArrival). */
-[data-kd-arrive="b"] > .kd-table[data-kind="library"] > tbody > tr:not([data-spacer]):nth-child(-n + 60) {
+.kd-table[data-kind="library"] > tbody > tr[data-kd-row-arrive="b"] {
   animation-name: kd-list-arrive-b;
 }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(1) { --kd-arrive-i: 0; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(2) { --kd-arrive-i: 1; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(3) { --kd-arrive-i: 2; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(4) { --kd-arrive-i: 3; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(5) { --kd-arrive-i: 4; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(6) { --kd-arrive-i: 5; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(7) { --kd-arrive-i: 6; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(8) { --kd-arrive-i: 7; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(9) { --kd-arrive-i: 8; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(10) { --kd-arrive-i: 9; }
-[data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:nth-child(11) { --kd-arrive-i: 10; }
+.kd-table[data-kind="library"] > tbody > tr[data-kd-catchup] {
+  animation-duration: var(--kd-motion-micro);
+}
 @keyframes kd-list-arrive-a {
-  from { opacity: 0; transform: translateY(5px); }
+  from { opacity: 0; transform: translateY(var(--kd-arrive-y, 14px)); }
   to { opacity: 1; transform: translateY(0); }
 }
 @keyframes kd-list-arrive-b {
-  from { opacity: 0; transform: translateY(5px); }
+  from { opacity: 0; transform: translateY(var(--kd-arrive-y, 14px)); }
   to { opacity: 1; transform: translateY(0); }
 }
-
-/* Sakura98: the listing is typed out, a line at a time, without a glide. */
-:root[data-theme-pack="sakulaptop98"] [data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr:not([data-spacer]):nth-child(-n + 60) {
+:root[data-theme-pack="sakulaptop98"] .kd-table[data-kind="library"] > tbody > tr[data-kd-row-arrive] {
   animation-name: kd-list-tick-98-a;
-  animation-duration: 48ms;
+  animation-duration: var(--kd-motion-item);
   animation-timing-function: steps(1, end);
 }
-:root[data-theme-pack="sakulaptop98"] [data-kd-arrive="b"] > .kd-table[data-kind="library"] > tbody > tr:not([data-spacer]):nth-child(-n + 60) {
+:root[data-theme-pack="sakulaptop98"] .kd-table[data-kind="library"] > tbody > tr[data-kd-row-arrive="b"] {
   animation-name: kd-list-tick-98-b;
 }
 @keyframes kd-list-tick-98-a {
@@ -53,10 +33,8 @@
   from { opacity: 0; }
   to { opacity: 1; }
 }
-
-/* Reduced motion: the list is simply there. */
 @media (prefers-reduced-motion: reduce) {
-  [data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr {
+  .kd-table[data-kind="library"] > tbody > tr[data-kd-row-arrive] {
     animation: none !important;
   }
 }

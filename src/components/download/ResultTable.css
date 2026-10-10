@@ -45,7 +45,7 @@
 
 /* —— Arrival ——
    The table carries data-reveal only while a delivered list is arriving (ResultTable.tsx), so
-   none of this can run again on a re-render, a remount or a scroll. The first fourteen rows rise
+   ordinary re-renders and scrolling do not restart it; a delivered list or remount does. The first fourteen rows rise
    one after another, each cover scales in a beat after its row and the source badges land a
    beat after that; every row past the cascade arrives together on its last beat. */
 .kd-table[data-reveal] > tbody > tr {
@@ -100,11 +100,33 @@
   to { transform: translate(0, 0) scale(1); }
 }
 
+/* Alternate names replay the same gesture when another delivered list reuses its rows. */
+.kd-table[data-reveal="b"] > tbody > tr { animation-name: kd-result-fade-b; }
+.kd-table[data-reveal="b"] > tbody > tr:nth-child(-n + 14) { animation-name: kd-result-rise-b; }
+.kd-table[data-reveal="b"] > tbody > tr:nth-child(-n + 14) .kd-thumb { animation-name: kd-result-cover-b; }
+.kd-table[data-reveal="b"] > tbody > tr:nth-child(-n + 14) .kd-source-dot { animation-name: kd-result-badge-b; }
+@keyframes kd-result-rise-b {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes kd-result-fade-b {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes kd-result-cover-b {
+  from { opacity: 0; transform: scale(0.5) rotate(-10deg); }
+  to { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+@keyframes kd-result-badge-b {
+  from { transform: translate(-0.5rem, -0.3rem) scale(0); }
+  to { transform: translate(0, 0) scale(1); }
+}
+
 /* —— Later rows ——
    A row that mounts into a settled list (data-enter is fixed at mount) slots in where it lands;
    sources and parts the user opens unfold from under their row, one after another. */
 .kd-table tbody tr[data-enter="late"] {
-  animation: kd-result-slot 260ms ease-out backwards;
+  animation: kd-result-slot var(--kd-motion-in) var(--kd-ease-out) calc(var(--kd-late-i, 0) * var(--kd-motion-stagger)) backwards;
 }
 .kd-table tbody tr[data-unfold="true"] {
   animation: kd-result-unfold 260ms cubic-bezier(0.2, 0.85, 0.25, 1) calc(var(--kd-unfold-i, 0) * 34ms) backwards;

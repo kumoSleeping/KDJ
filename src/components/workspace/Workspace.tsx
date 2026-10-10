@@ -1,3 +1,4 @@
+import { LoaderCircle } from "lucide-react";
 import { PanelStack } from "../common/PanelStack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
@@ -178,9 +179,9 @@ function matchesEditableStreamOrigin(origin: StreamPlaylist["origin"]): boolean 
 
 function streamPlaylistItem(
   playlist: StreamPlaylist,
-  response: StreamPlaylistResponse,
+  response: Pick<StreamPlaylistResponse, "title" | "sources"> & { platform: Platform; key?: string },
 ): IntakeItem {
-  const token = `${response.platform}:playlist:${response.key}`;
+  const token = `${response.platform}:playlist:${response.key ?? playlist.key}`;
   return {
     entry: token,
     kind: "playlist",
@@ -203,13 +204,22 @@ function streamPlaylistItem(
   };
 }
 
-/** 视频链接识别：单视频直接进视频行；B 站收藏夹和 YouTube 播放列表
- * 走通用集合解析。music.youtube.com 则始终归 YouTube Music。 */
+/** B 站单视频直接进视频行；YouTube 链接走 intake，同时返回已确认的 Music 音频。 */
 const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
 const BILI_FAVLIST_RE = /\/favlist(?:[/?#]|$)[^\s]*[?&]fid=\d+|^\s*\d{6,}\s*$/i;
-const YOUTUBE_VIDEO_RE = /(?:^|\.)youtube\.com|youtu\.be/i;
-const YOUTUBE_MUSIC_RE = /music\.youtube\.com/i;
-const YOUTUBE_PLAYLIST_RE = /youtube\.com\/playlist\?/i;
+function youtubeLinkPlatform(text: string): "youtube" | "ytm" | null {
+  try {
+    const url = new URL(text.trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    const host = url.hostname.toLowerCase().replace(/\.$/, "");
+    if (host === "music.youtube.com") return "ytm";
+    return host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com")
+      ? "youtube"
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 const LOCAL_PANE_PIN_KEY = "kd-workspace-local-pane-pinned-v1";
 const WORKSPACE_PANES_KEY = "kd-workspace-panes-v2";
@@ -395,6 +405,8 @@ export function Workspace() {
   const [collectionSearchSnapshot, setCollectionSearchSnapshot] =
     useState<CollectionSearchSnapshot | null>(null);
   const [collectionPage, setCollectionPage] = useState(1);
+  const [loadingCollectionPage, setLoadingCollectionPage] = useState(false);
+  const collectionPageLoadingRef = useRef(false);
   const [activeStreamPlaylist, setActiveStreamPlaylist] = useState<ActiveStreamPlaylist | null>(
     () => startupForeground
       ? {
@@ -502,60 +514,42 @@ export function Workspace() {
     () => openedCollectionItem(items ?? []),
     [items],
   );
-  const openedCollectionWindow = useMemo(
-    () => {
-      if (!openedCollection) return null;
-      const total = openedStreamPlaylist?.platform === "bilibili"
-        ? Math.max(openedCollection.groups.length, openedStreamPlaylist.count)
-        : openedCollection.groups.length;
-      return collectionPageWindow(total, collectionPage);
-    },
-    [collectionPage, openedCollection, openedStreamPlaylist],
-  );
+  const openedCollectionWindow = useMemo(() => openedCollection ? collectionPageWindow(
+    Math.max(openedCollection.groups.length, openedStreamPlaylist?.count ?? 0, openedCollection.continuation?.total ?? 0), collectionPage,
+  ) : null, [collectionPage, openedCollection, openedStreamPlaylist]);
   const changeCollectionPage = useCallback((requestedPage: number) => {
-    if (!openedCollection) return;
+    if (!openedCollection || collectionPageLoadingRef.current) return;
     const playlist = openedStreamPlaylist;
-    const total = playlist?.platform === "bilibili"
-      ? Math.max(openedCollection.groups.length, playlist.count)
-      : openedCollection.groups.length;
+    const continuation = openedCollection.continuation;
+    const total = Math.max(openedCollection.groups.length, playlist?.count ?? 0, continuation?.total ?? 0);
     const window = collectionPageWindow(total, requestedPage);
-    const scrollTop = () => requestAnimationFrame(() => {
-      searchScrollRef.current?.scrollTo({ top: 0, left: 0 });
-    });
-    if (
-      playlist?.platform !== "bilibili"
-      || window.end <= openedCollection.groups.length
-    ) {
+    if (window.end <= openedCollection.groups.length || (!playlist && !continuation)) {
       setCollectionPage(window.page);
-      scrollTop();
       return;
     }
-
     const requestId = ++resultRequestSeqRef.current;
-    setBusy(true);
+    collectionPageLoadingRef.current = true;
+    setLoadingCollectionPage(true);
     setSearchError("");
-    void api
-      .streamPlaylist(playlist, window.end)
-      .then((response) => {
-        if (requestId !== resultRequestSeqRef.current) return;
-        const resolved = streamPlaylistItem(playlist, response);
-        const reachedEnd = response.sources.length < window.end;
-        const actualTotal = reachedEnd
-          ? response.sources.length
-          : Math.max(playlist.count, response.sources.length);
+    const request = playlist ? api.streamPlaylist(playlist, window.end) : api.resolveCollection(continuation!.collection, window.end);
+    void request.then(response => {
+      if (requestId !== resultRequestSeqRef.current) return;
+      const actualTotal = response.sources.length < window.end ? response.sources.length : Math.max(total, response.sources.length);
+      if (playlist) {
         setOpenedStreamPlaylist({ ...playlist, count: actualTotal });
+        setItems([streamPlaylistItem(playlist, response)]);
+      } else if (continuation) {
+        const resolved = resolvedCollectionItem(continuation.collection, { ...response, kind: continuation.collection.kind });
+        if (actualTotal > response.sources.length) resolved.continuation = { ...continuation, total: actualTotal };
         setItems([resolved]);
-        setCollectionPage(collectionPageWindow(actualTotal, window.page).page);
-        scrollTop();
-      })
-      .catch((error) => {
-        if (requestId === resultRequestSeqRef.current) {
-          setSearchError(`载入下一页失败：${errorText(error)}`);
-        }
-      })
-      .finally(() => {
-        if (requestId === resultRequestSeqRef.current) setBusy(false);
-      });
+      }
+      setCollectionPage(collectionPageWindow(actualTotal, window.page).page);
+    }).catch(error => {
+      if (requestId === resultRequestSeqRef.current) setSearchError(`载入更多曲目失败：${errorText(error)}`);
+    }).finally(() => {
+      collectionPageLoadingRef.current = false;
+      setLoadingCollectionPage(false);
+    });
   }, [openedCollection, openedStreamPlaylist]);
   const revealLoadedCollection = useCallback(() => {
     revealSearchPane();
@@ -844,16 +838,9 @@ export function Workspace() {
     setRestorableWorkspaceSource("local");
     setLoadingCollections(new Set());
 
-    // 单视频链接直接进入通用视频面板；B 站收藏夹与 YouTube 播放列表则交给
-    // provider 展开成批量结果。music.youtube.com 始终留给 YTM 音乐来源。
+    // YouTube 单视频也走 intake：视频和经过 Music 确认的音频独立成行。
     const directVideoPlatform =
-      BILI_RE.test(text) && !BILI_FAVLIST_RE.test(text)
-        ? "bilibili"
-        : YOUTUBE_VIDEO_RE.test(text) &&
-            !YOUTUBE_MUSIC_RE.test(text) &&
-            !YOUTUBE_PLAYLIST_RE.test(text)
-          ? "youtube"
-          : null;
+      BILI_RE.test(text) && !BILI_FAVLIST_RE.test(text) ? "bilibili" : null;
     if (directVideoPlatform) {
       setBusy(true);
       setSearchError("");
@@ -894,8 +881,7 @@ export function Workspace() {
     // 关键词搜索则剥掉不支持所选类型的平台，保留其余来源继续返回结果。
     // 集合链接按域名补上唯一归属平台，避免用户刚好没勾该源时被其它 provider 误判。
     const isFavlistInput = BILI_FAVLIST_RE.test(text);
-    const isYoutubePlaylist = YOUTUBE_VIDEO_RE.test(text) && !YOUTUBE_MUSIC_RE.test(text);
-    const isYtmLink = YOUTUBE_MUSIC_RE.test(text);
+    const youtubePlatform = youtubeLinkPlatform(text);
     const isLinkInput = /https?:\/\//i.test(text);
     const requestPlatforms = isLinkInput
       ? ([...orderedPlatforms] as Platform[])
@@ -903,8 +889,9 @@ export function Workspace() {
           (searchCapabilities[platform] ?? ["song"]).includes(requestedKind),
         );
     if (isFavlistInput && !requestPlatforms.includes("bilibili")) requestPlatforms.push("bilibili");
-    if (isYoutubePlaylist && !requestPlatforms.includes("youtube")) requestPlatforms.push("youtube");
-    if (isYtmLink && !requestPlatforms.includes("ytm")) requestPlatforms.push("ytm");
+    if (youtubePlatform && !requestPlatforms.includes(youtubePlatform)) {
+      requestPlatforms.push(youtubePlatform);
+    }
     if (requestPlatforms.length === 0) {
       setItems([]);
       revealSearchPane();
@@ -993,11 +980,8 @@ export function Workspace() {
       useStreamBrowseStore.getState().setActive(active);
     }
     try {
-      // B 站收藏夹每页只有 20 条；初次只取够当前 UI 页的数量。后续翻页由
-      // provider 的累计缓存补齐，不能因为点开 800 条收藏夹就立刻扫完整站列表。
-      const initialLimit = playlist.platform === "bilibili"
-        ? RESOLVED_COLLECTION_PAGE_SIZE
-        : 0;
+      // 初次只取第一批；继续向下浏览时由 provider 的累计缓存补齐。
+      const initialLimit = RESOLVED_COLLECTION_PAGE_SIZE;
       const response = options.startup
         ? await loadForegroundStreamOnce(
             options.startup,
@@ -1013,9 +997,7 @@ export function Workspace() {
         return false;
       }
       const resolved = streamPlaylistItem(playlist, response);
-      const resolvedPlaylist = playlist.platform === "bilibili"
-        && initialLimit > 0
-        && response.sources.length < initialLimit
+      const resolvedPlaylist = response.sources.length < initialLimit
         ? { ...playlist, count: response.sources.length }
         : playlist;
       setOpenedStreamPlaylist(resolvedPlaylist);
@@ -1951,6 +1933,7 @@ export function Workspace() {
   }, [explorePending, query, submit, settings, saveSettings]);
 
   const toggleSelect = useCallback((key: string) => {
+    setSearchSelectionMode(true);
     setChosen((current) => {
       const next = new Set(current);
       if (!next.delete(key)) next.add(key);
@@ -2037,9 +2020,12 @@ export function Workspace() {
     setSearchError("");
     setLoadingCollections((current) => new Set(current).add(token));
     try {
-      const response = await api.resolveCollection(collection, 0);
+      const response = await api.resolveCollection(collection, RESOLVED_COLLECTION_PAGE_SIZE);
       if (requestId !== resultRequestSeqRef.current) return;
       const resolved = resolvedCollectionItem(collection, response);
+      if (response.sources.length >= RESOLVED_COLLECTION_PAGE_SIZE && collection.count > response.sources.length) {
+        resolved.continuation = { collection, total: collection.count };
+      }
       // 候选列表与合集详情是两个页面状态；详情页只保留这一个合集的歌曲。
       setCollectionSearchSnapshot(snapshot);
       setCollectionPage(1);
@@ -2166,20 +2152,20 @@ export function Workspace() {
     let item = openedCollection;
     const playlist = openedStreamPlaylist;
     if (!item) return;
-    // “全部下载”是明确的全量动作；只有这时才允许把尚未浏览的 B 站页补齐。
+    // “全部下载”补齐未浏览的集合，再将整批交给下载队列。
     if (
-      playlist?.platform === "bilibili"
-      && playlist.count > item.groups.length
+      (playlist && playlist.count > item.groups.length) || item.continuation
     ) {
       const requestId = ++resultRequestSeqRef.current;
       setBusy(true);
       setQueueError("");
       try {
-        const response = await api.streamPlaylist(playlist, 0);
+        const response = playlist ? await api.streamPlaylist(playlist, 0) : await api.resolveCollection(item.continuation!.collection, 0);
         if (requestId !== resultRequestSeqRef.current) return;
-        item = streamPlaylistItem(playlist, response);
+        item = playlist ? streamPlaylistItem(playlist, response)
+          : resolvedCollectionItem(item.continuation!.collection, { ...response, kind: item.continuation!.collection.kind });
         setItems([item]);
-        setOpenedStreamPlaylist({ ...playlist, count: item.groups.length });
+        if (playlist) setOpenedStreamPlaylist({ ...playlist, count: item.groups.length });
       } catch (error) {
         if (requestId === resultRequestSeqRef.current) {
           setQueueError(`读取完整收藏夹失败：${errorText(error)}`);
@@ -2417,6 +2403,7 @@ export function Workspace() {
                     block
                   />
                   <TrackTable
+                    visible={localPaneVisible}
                     total={total}
                     loading={loading}
                     layout={layout}
@@ -2548,6 +2535,11 @@ export function Workspace() {
                         className="kd-scroll"
                         ref={searchScrollRef}
                         onScroll={(event) => {
+                          const box = event.currentTarget;
+                          if (!busy && !loadingCollectionPage && openedCollectionWindow && openedCollectionWindow.page < openedCollectionWindow.pageCount
+                            && box.scrollHeight - box.scrollTop - box.clientHeight < 120) {
+                            changeCollectionPage(collectionPage + 1);
+                          }
                           if (activeStreamPlaylist) {
                             updateStreamWorkspaceSession({
                               scrollTop: event.currentTarget.scrollTop,
@@ -2556,6 +2548,7 @@ export function Workspace() {
                         }}
                       >
                         <ResultTable
+                          visible={searchPaneVisible}
                           items={items ?? []}
                           video={video}
                           loading={busy}
@@ -2594,6 +2587,14 @@ export function Workspace() {
                           onLoadCollection={(collection) => void loadCollection(collection)}
                           loadingCollections={loadingCollections}
                         />
+                        {openedCollectionWindow && openedCollectionWindow.page < openedCollectionWindow.pageCount && (
+                          <div className="kd-collection-load-more">
+                            <button type="button" className="kd-icon-btn" disabled={loadingCollectionPage} aria-label="加载更多"
+                              onClick={() => changeCollectionPage(collectionPage + 1)}>
+                              <LoaderCircle size={16} className={loadingCollectionPage ? "kd-spin" : undefined} />
+                            </button>
+                          </div>
+                        )}
                       </div>
                       </>}
                     </div>

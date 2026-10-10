@@ -1,3 +1,5 @@
+import { MOTION_IN_MS, prefersReducedMotion } from "../../lib/motion";
+import { SONG_SWAP_IN_EASE } from "../../lib/songSwapMotion";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   lyricExtraLabel,
@@ -115,6 +117,9 @@ function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { acti
   const started = startedLrcIndex(entry.lines ?? [], position);
   const listRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLButtonElement>(null);
+  const linesRef = useRef<HTMLDivElement>(null);
+  const scrollMotion = useRef<Animation | null>(null);
+  const centered = useRef(false);
   /** 用户刚点过某句：短暂关掉自动跟滚，避免立刻又滚回当前句。 */
   const userSeekUntilRef = useRef(0);
 
@@ -135,12 +140,21 @@ function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { acti
     const node = activeRef.current;
     const list = listRef.current;
     if (!node || !list) return;
-    // The sung line rests on the list's centre line. Measured from the boxes on screen:
-    // `offsetTop` is relative to whichever ancestor happens to be positioned.
+    const content = linesRef.current;
+    if (!content) return;
+    const before = node.getBoundingClientRect().top;
+    scrollMotion.current?.cancel();
     const listBox = list.getBoundingClientRect(), lineBox = node.getBoundingClientRect();
-    const top = list.scrollTop + (lineBox.top - listBox.top) - (list.clientHeight - lineBox.height) / 2;
-    list.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
-  }, [active, trackId]);
+    const top = list.scrollTop + lineBox.top - listBox.top - (list.clientHeight - lineBox.height) / 2;
+    list.scrollTop = Math.max(0, top);
+    const delta = before - node.getBoundingClientRect().top;
+    if (centered.current && content.animate && !prefersReducedMotion() && Math.abs(delta) > 0.5) {
+      scrollMotion.current = content.animate([{ transform: `translateY(${delta}px)` }, { transform: "translateY(0)" }],
+        { duration: MOTION_IN_MS, easing: SONG_SWAP_IN_EASE });
+    }
+    centered.current = true;
+  }, [active, trackId, layer]);
+  useEffect(() => () => scrollMotion.current?.cancel(), []);
 
   return (
     <div className="kd-lyrics" data-has-content={lines.length > 0 || !!entry.error || entry.status === "error" ? "true" : undefined}>
@@ -151,7 +165,8 @@ function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { acti
       </div>
       <div className="kd-lyrics-stage">
         {entry.error || entry.status === "error" ? <p className="kd-lyrics-empty" role="alert">{entry.error || "歌词暂时不可用"}</p> : null}
-        <div ref={listRef} className="kd-lyrics-scroll" aria-live="polite">
+        <div ref={listRef} className="kd-lyrics-scroll" aria-live="polite" onWheel={() => { userSeekUntilRef.current = performance.now() + 1500; scrollMotion.current?.cancel(); }}>
+          <div ref={linesRef} className="kd-lyrics-lines">
           {lines.map((line, index) => {
             const context = active >= 0 ? active : started;
             const distance = context < 0 ? index + 1 : Math.abs(index - context);
@@ -184,6 +199,7 @@ function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { acti
               </button>
             );
           })}
+          </div>
         </div>
       </div>
     </div>

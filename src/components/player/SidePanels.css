@@ -9,7 +9,7 @@
   padding: 6px;
 }
 .kd-side-panels:empty { display: none; }
-.kd-side-panels > .kd-panel {
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-panel {
   display: flex;
   flex-direction: column;
   flex: none;
@@ -18,7 +18,7 @@
   margin: 0;
   overflow: hidden;
 }
-.kd-side-panels > .kd-panel > .kd-panel-head {
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-panel > .kd-panel-head {
   flex: 0 0 24px;
   min-height: 24px;
   height: 24px;
@@ -27,18 +27,18 @@
 }
 .kd-side-panels .kd-panel-head .kd-row { gap: 0; }
 .kd-side-panels .kd-manager-panel-action { width: 16px; height: 18px; }
-.kd-side-panels > .kd-detail-lyrics-panel { flex: 1 1 0; min-height: 12rem; }
-.kd-side-panels > .kd-detail-lyrics-panel > .kd-async-panel-body {
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-detail-lyrics-panel { flex: 1 1 0; min-height: 12rem; }
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-detail-lyrics-panel > .kd-async-panel-body {
   flex: 1 1 0;
   height: 0;
   min-height: 0;
 }
-.kd-side-panels > .kd-detail-lyrics-panel .kd-async-panel-clip { display: flex; flex-direction: column; }
-.kd-side-panels > .kd-detail-lyrics-panel .kd-async-panel-space { flex: 1; height: 0; min-height: 0; }
-.kd-side-panels > .kd-detail-lyrics-panel .kd-lyrics[data-has-content] { height: 100%; max-height: none; }
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-detail-lyrics-panel .kd-async-panel-clip { display: flex; flex-direction: column; }
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-detail-lyrics-panel .kd-async-panel-space { flex: 1; height: 0; min-height: 0; }
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-detail-lyrics-panel .kd-lyrics[data-has-content] { height: 100%; max-height: none; }
 /* Alone, the task list fills the column; beside the lyrics it keeps a fixed share. */
-.kd-side-panels > .kd-download-window:only-child { flex: 1 1 0; }
-.kd-side-panels > .kd-download-window:only-child > .kd-task-window-body {
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-download-window:only-child { flex: 1 1 0; }
+:is(.kd-side-panels, .kd-lyrics-turn > .kd-turn-live) > .kd-download-window:only-child > .kd-task-window-body {
   flex: 1 1 0;
   height: 0;
   max-height: none;
@@ -56,4 +56,54 @@
   height: 0;
   overflow: hidden;
   visibility: hidden;
+}
+
+.kd-lyrics-presentation { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.kd-lyrics-lines { min-height: 100%; padding-block: min(35vh, 12rem); }
+.kd-lyrics .kd-lyrics-scroll { scroll-behavior: auto; }
+
+/* Cover colours stay inside the two existing song surfaces. Text keeps the theme's ink. */
+:root[data-song-color="true"] :is(.kd-drawer[data-app="lyrics"], .kd-sheet:has(.kd-lyrics-presentation), .kd-task[data-kind="playing"]) { isolation: isolate; }
+:root[data-song-color="true"] :is(.kd-drawer[data-app="lyrics"], .kd-sheet:has(.kd-lyrics-presentation), .kd-task[data-kind="playing"])::before {
+  content: ""; position: absolute; inset: -12%; z-index: -1; pointer-events: none;
+  background: radial-gradient(ellipse at 20% 30%, var(--kd-song-color-a), transparent 65%),
+    radial-gradient(ellipse at 80% 70%, var(--kd-song-color-b), transparent 65%),
+    radial-gradient(ellipse at 65% 20%, var(--kd-song-color-c), transparent 60%);
+  opacity: 0.28;
+  filter: blur(24px);
+  transform: translateX(var(--kd-song-drift, 0%)) scale(var(--kd-song-pulse, 1));
+  transition: transform var(--kd-motion-in) var(--kd-ease-out), opacity var(--kd-motion-in) var(--kd-ease-out);
+}
+:root[data-song-color="true"] :is(.kd-drawer[data-app="lyrics"], .kd-sheet:has(.kd-lyrics-presentation)) :is(.kd-panel, .kd-lyrics, .kd-panel-head) { background: transparent; }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-song-color="true"] :is(.kd-drawer[data-app="lyrics"], .kd-sheet:has(.kd-lyrics-presentation), .kd-task[data-kind="playing"])::before { transform: none; transition: none; }
+}
+/* Portrait focus uses the existing drawer and task bubble, keeping desktop window chrome free. */
+@media (max-aspect-ratio: 3/4) {
+  :root[data-lyrics-fullscreen="true"] .kd-app .kd-drawer-sheets:has([data-app="lyrics"]) {
+    left: 2px !important; top: var(--kd-chrome-top, 36px) !important;
+    width: calc(100% - 4px) !important;
+    height: calc(100dvh - var(--kd-chrome-top, 36px) - var(--kd-transport-lift, 150px)) !important;
+    --kd-info-lift: 0px;
+  }
+  :root[data-lyrics-fullscreen="true"] .kd-app .kd-drawer[data-app="lyrics"] { height: calc(100% - 10px) !important; }
+  :root[data-lyrics-fullscreen="true"] .kd-app .kd-player { visibility: hidden; }
+  :root[data-lyrics-fullscreen="true"] .kd-app :is(.kd-tree-slot, .kd-search-band-host, .kd-workspace-pane, .kd-drawer-launcher, .kd-split-handle) { visibility: hidden; pointer-events: none; }
+  :root[data-lyrics-fullscreen="true"] .kd-app .kd-task-slot[data-size="large"] { left: 12px; right: 12px; width: auto; }
+  :root[data-lyrics-fullscreen="true"] .kd-app[data-mobile="true"] .kd-drawer-sheets:has([data-app="lyrics"]) { top: env(safe-area-inset-top, 0px) !important; }
+}
+
+@media (max-aspect-ratio: 3/4) {
+  :root[data-lyrics-fullscreen="true"] .kd-app .kd-sheet-scrim:has(.kd-lyrics-presentation) {
+    position: fixed; inset: var(--kd-safe-top, 0px) 0 var(--kd-transport-lift, 150px); z-index: 80;
+  }
+  :root[data-lyrics-fullscreen="true"] .kd-app .kd-sheet:has(.kd-lyrics-presentation) { width: calc(100% - 24px); margin-inline: 12px; max-width: none; }
+}
+
+.kd-side-panels > .kd-lyrics-presentation { flex: 1 1 auto; min-height: 0; }
+.kd-app[data-mobile="true"] .kd-side-panels > .kd-lyrics-presentation[data-extent="standard"] { flex: 0 1 66.667%; }
+.kd-app[data-mobile="true"] .kd-side-panels > .kd-lyrics-presentation[data-extent="long"] { flex: 1 1 100%; }
+
+@starting-style {
+  :root[data-song-color="true"] :is(.kd-drawer[data-app="lyrics"], .kd-sheet:has(.kd-lyrics-presentation), .kd-task[data-kind="playing"])::before { opacity: 0; transform: scale(0.7); }
 }

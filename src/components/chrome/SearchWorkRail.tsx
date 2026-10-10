@@ -1,9 +1,7 @@
 import { WorkRailCollapse } from "./WorkRailControls";
 import {
   ArrowLeft,
-  CheckSquare,
-  ChevronLeft,
-  ChevronRight,
+  CircleCheck,
   Download,
   ListMusic,
 } from "lucide-react";
@@ -81,7 +79,6 @@ export function SearchWorkRail({
   collectionWindow,
   canGoBack,
   onGoBack,
-  onCollectionPageChange,
   onDownloadCollection,
   loading,
   selectionCount,
@@ -110,7 +107,7 @@ export function SearchWorkRail({
   if (selecting) {
     glyphs.push(
       <span key="sel" className="kd-activity-glyph kd-activity-glyph-sel" aria-hidden="true">
-        <CheckSquare size={13} strokeWidth={2.25} />
+        <CircleCheck size={13} strokeWidth={2.25} />
       </span>,
     );
     texts.push(
@@ -289,38 +286,11 @@ export function SearchWorkRail({
   return (
     <WorkRail
       idle={idle}
+      transitionKey={`${collection?.title ?? "search"}:${selecting ? "selection" : "results"}`}
       glyphs={glyphs}
       texts={texts}
       actions={
         <>
-          {!selecting && collection && collectionWindow && collectionWindow.pageCount > 1 ? (
-            <span className="kd-collection-rail-actions" data-kind={collection.kind}>
-              <span
-                className="kd-collection-rail-pagination"
-                aria-label={`第 ${collectionWindow.page} 页，共 ${collectionWindow.pageCount} 页`}
-              >
-                <button
-                  type="button"
-                  disabled={loading || collectionWindow.page <= 1}
-                  aria-label="上一页"
-                  title="上一页"
-                  onClick={() => onCollectionPageChange(collectionWindow.page - 1)}
-                >
-                  <ChevronLeft size={14} aria-hidden="true" />
-                </button>
-                <span>{collectionWindow.page} / {collectionWindow.pageCount}</span>
-                <button
-                  type="button"
-                  disabled={loading || collectionWindow.page >= collectionWindow.pageCount}
-                  aria-label="下一页"
-                  title="下一页"
-                  onClick={() => onCollectionPageChange(collectionWindow.page + 1)}
-                >
-                  <ChevronRight size={14} aria-hidden="true" />
-                </button>
-              </span>
-            </span>
-          ) : null}
           <WorkRailCollapse label="收起在线结果" onClick={onClose} />
           {asideToggle}
         </>

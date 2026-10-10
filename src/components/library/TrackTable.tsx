@@ -25,9 +25,6 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 import { LIBRARY_REST_PACE, libraryScrollPace, libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../../lib/libraryViewport";
-import { createLibraryStandIns, standInGap, type LibraryStandIns } from "../../lib/libraryStandIns";
-import { displayTrackKey } from "../../lib/keyDisplay";
-import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { acquireCoverThumbnail, peekCoverThumbnail, type CoverThumbnailLease } from "../../lib/coverThumbnailQueue";
@@ -38,7 +35,7 @@ import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../common/dragGhost";
 import "../common/DragGhost.css";
-import { markListArrival } from "./listArrival";
+import { markListArrival, markListCatchup } from "./listArrival";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent } from "../../lib/shareClipboard";
 import {
@@ -286,6 +283,7 @@ function loadColumnPrefs(): ColumnPrefs {
 }
 
 export interface TrackTableProps {
+  visible?: boolean;
   libraryStore?: LibraryPaneStoreApi;
   persistentSession?: boolean;
   total: number;
@@ -455,7 +453,7 @@ function resolveLocalTrackShareLink(track: TrackSummary): Promise<string | null>
   if (cached) return cached;
   const pending = api.search({
     query,
-    platforms: video ? ["bilibili"] : ["wyy", "qqm"],
+    platforms: video ? ["bilibili"] : track.source_platform === "soundcloud" ? ["soundcloud"] : ["wyy", "qqm"],
     limit: 8,
     merge: false,
     kind: "song",
@@ -490,10 +488,9 @@ function trackCell(
     case "title":
       return (
         <td key={key} data-col="title" className="kd-td-strong" title={track.title || track.filename}>
-          {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          <TrackCoverThumb track={track} index={index} lane={coverLane} />
+          <span className="kd-track-selection-cover"><TrackCoverThumb track={track} index={index} lane={coverLane} />{selectionControl}</span>
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -588,35 +585,6 @@ function trackCell(
       );
     default:
       return null;
-  }
-}
-
-/**
- * 替身行里一个格子的文字（见 libraryStandIns）：和 trackCell 画出来的文字一致。没有文字的
- * 格子（评分、能量条）返回 null。
- */
-function standInCellText(track: TrackSummary, key: string, index: number, keyNotation: KeyNotation): string | null {
-  switch (key) {
-    case "index": return String(index + 1);
-    case "title": return track.title || track.filename;
-    case "artist": return track.artist || DASH;
-    case "album": return track.album || DASH;
-    case "bpm": return formatBpm(track.bpm);
-    case "camelot": return displayTrackKey(track, keyNotation) || DASH;
-    case "duration": return formatDuration(track.duration);
-    case "format": return track.format.toUpperCase() || DASH;
-    case "size": return formatBytes(track.size);
-    case "file_created_at": return formatDate(track.file_created_at);
-    case "added_at": return formatDate(track.added_at);
-    case "samplerate": return track.samplerate ? `${track.samplerate / 1000} kHz` : DASH;
-    case "channels": return track.channels ? `${track.channels}ch` : DASH;
-    case "bitrate": return track.bitrate ? `${track.bitrate} kbps` : DASH;
-    case "genre":
-    case "year":
-    case "filename":
-    case "path": return String(track[key] || DASH);
-    case "source_platform": return track.source_platform || "local";
-    default: return null;
   }
 }
 
@@ -856,12 +824,8 @@ function sameLibraryView(a: LibraryView, b: LibraryView): boolean {
 }
 /** 这么久没有新的滚动帧就算停稳。 */
 const SCROLL_REST_MS = 140;
-/** 一次滚动走过这么多屏才写一条跟踪日志（开发版）。 */
-const TRACED_SCROLL_SCREENS = 3;
-/** 快滚途中每走过这么多行，把摘要的加载重心挪到眼前一次。 */
-const FLIGHT_DEMAND_ROWS = 300;
-
 export const TrackTable = memo(function TrackTable({
+  visible = true,
   libraryStore = useLibraryStore,
   persistentSession = true,
   total,
@@ -891,7 +855,6 @@ export const TrackTable = memo(function TrackTable({
   const keyNotation = settings?.key_notation ?? "camelot";
   const filterFolder = useTableStore((state) => state.filter.folder);
   const removeTracks = useTableStore((state) => state.removeTracks);
-  const startAnalyze = useTableStore((state) => state.startAnalyze);
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
   const localExternalDragMode = usePlaybackPrefs((state) => state.localExternalDragMode);
@@ -1424,7 +1387,7 @@ export const TrackTable = memo(function TrackTable({
     if (
       !rowMenu
       || trackShareLink(rowMenu.track)
-      || !isVideoTrack(rowMenu.track.format)
+      || (!isVideoTrack(rowMenu.track.format) && rowMenu.track.source_platform !== "soundcloud")
       || !bilibiliVideoShareSearchQuery(rowMenu.track)
     ) {
       return;
@@ -1546,17 +1509,8 @@ export const TrackTable = memo(function TrackTable({
   const paceRef = useRef(LIBRARY_REST_PACE);
   /** 上一次滚动采样的时刻；0 表示停着。 */
   const scrollSampleAtRef = useRef(0);
-  /** 替身行：快滚时代替真实的行（见 libraryStandIns）。 */
-  const standInLayerRef = useRef<HTMLDivElement | null>(null);
-  const standInsRef = useRef<LibraryStandIns | null>(null);
-  /** 表格自己渲染出来的行范围，以及替身行上一帧盖住的范围。 */
-  const renderedRowsRef = useRef({ start: 0, end: 0 });
-  const coveredRowsRef = useRef<(readonly [number, number])[]>([]);
-  const keyNotationRef = useRef<KeyNotation>("camelot");
-  /** 快滚途中上一次把加载重心挪到的行。 */
-  const flightDemandRowRef = useRef(-1);
-  /** 这一次滚动的统计，停稳时写进原生日志。 */
-  const scrollTraceRef = useRef({ startedAt: 0, from: 0, frames: 0, slow: 0, gapMax: 0, travelMax: 0, speedMax: 0, bare: 0, bareMax: 0, held: 0 });
+  const arrivalPendingRef = useRef(true);
+  const seenRowsRef = useRef(new WeakSet<HTMLElement>());
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
   const rowHRef = useRef(FALLBACK_ROW_H);
   /** 横向滚动不能进入虚拟列表更新链；否则拖底部横滚条时每帧重渲染整张可视表。 */
@@ -1581,8 +1535,7 @@ export const TrackTable = memo(function TrackTable({
           return current.top === top && current.height === height ? current : { top, height };
         });
       updateView();
-      // 容器变宽变窄会改列宽：替身行要重新量一遍真实的行。
-      const observer = new ResizeObserver(() => { standInsRef.current?.invalidate(); updateView(); });
+      const observer = new ResizeObserver(updateView);
       observer.observe(el);
       resizeObserverRef.current = observer;
     }
@@ -1775,39 +1728,8 @@ export const TrackTable = memo(function TrackTable({
   selectedIdRef.current = selectedId;
   pendingCountRef.current = pendingDownloads.length;
 
-  /**
-   * 给滚动容器此刻的位置画上替身行，并记下它们和真实的行一起盖住了哪些行。`direction` 是
-   * 快滚的去向，替身行的余量大部分放在前方；0 表示表格自己在造行，这时只补视口里缺的行
-   * （平时没有），不占画布。
-   */
-  const paintStandIns = useCallback((direction: -1 | 0 | 1) => {
-    const standIns = standInsRef.current;
-    if (!standIns) return;
-    const { orderedIds: ids, summaryById: summaries } = libraryStore.getState();
-    const pending = pendingCountRef.current;
-    const notation = keyNotationRef.current;
-    const pace = paceRef.current;
-    coveredRowsRef.current = standIns.update({
-      rowHeight: rowHRef.current, count: ids.length + pending, first: pending, direction,
-      // 甩动在平滑后的速度跟上之前就已经是全速了：两者取大。
-      speed: Math.max(Math.abs(pace.speed), Math.abs(pace.instant)),
-      windowStart: renderedRowsRef.current.start, windowEnd: renderedRowsRef.current.end,
-      version: [ids, notation, pending],
-      data: summaries,
-      text(row, column) {
-        const track = summaries.get(ids[row - pending]);
-        return track ? standInCellText(track, column, row - pending, notation) : undefined;
-      },
-    });
-  }, [libraryStore]);
-
-  /**
-   * 把表格对齐到滚动容器此刻的位置。滚动由 WebView 的滚动线程执行，页面拿到位置时它已经在
-   * 屏幕上了，所以：
-   * - 阅读速度的滚动：在这一帧内提交对应的行（flushSync），每晚一帧露出的就是空白；
-   * - 快滚：一行也不造。造行以毫秒计，追不上；这期间只画替身行，慢下来再一次造好。
-   * 只在 React 之外（动画帧）调用；`now` 是这一帧的时间戳。
-   */
+  // Keep the real, bounded row window current even during a fling. New rows catch up with
+  // the existing list gesture; no canvas substitutes interrupt covers, text or interaction.
   const syncWindow = useCallback((now: number) => {
     const node = scrollerRef.current;
     if (!node) return;
@@ -1817,84 +1739,31 @@ export const TrackTable = memo(function TrackTable({
     const height = node.clientHeight;
     const listEnd = Math.max(0, (ids.length + pending) * rowHeight + headerHRef.current - height);
     const reach = Math.max(0, node.scrollHeight - height);
-    // 列表变短而 DOM 还没跟上时，容器能滚到列表之外：拉回来。只在 DOM 确实更长时才写——到边后的
-    // 回弹同样会报出范围之外的位置，那是 WebView 自己的动画，写回去就是和它打架。
     if (node.scrollTop > listEnd && reach > listEnd + 1) node.scrollTop = listEnd;
-    // 回弹不算滚动：位置按可滚范围取，到边之后不再变化，表格和替身行都不动。
     const top = Math.min(Math.min(listEnd, reach), Math.max(0, node.scrollTop));
     if (top !== scrollTopRef.current) {
-      const travel = top - scrollTopRef.current;
-      // 停着之后的第一帧没有上一个时刻可比，按一帧算。
       const elapsed = scrollSampleAtRef.current ? now - scrollSampleAtRef.current : 16;
-      paceRef.current = libraryScrollPace(paceRef.current, travel, elapsed, height);
-      const trace = scrollTraceRef.current;
-      if (!scrollSampleAtRef.current) Object.assign(trace, { startedAt: now, from: scrollTopRef.current, frames: 0, slow: 0, gapMax: 0, travelMax: 0, speedMax: 0, bare: 0, bareMax: 0, held: 0 });
-      // 这一帧开始时，新视口里有多少行既没有真实的行也没有替身行：滚动线程已经把它们露出来了。
-      const first = Math.floor(top / rowHeight);
-      const bare = standInGap(coveredRowsRef.current, Math.max(pending, first),
-        Math.min(ids.length + pending, Math.ceil((top + height - headerHRef.current) / rowHeight)));
-      trace.frames += 1;
-      if (elapsed > 50) trace.slow += 1;
-      trace.gapMax = Math.max(trace.gapMax, elapsed);
-      trace.travelMax = Math.max(trace.travelMax, Math.abs(travel));
-      trace.speedMax = Math.max(trace.speedMax, Math.abs(paceRef.current.speed));
-      if (bare) { trace.bare += 1; trace.bareMax = Math.max(trace.bareMax, bare); }
+      paceRef.current = libraryScrollPace(paceRef.current, top - scrollTopRef.current, elapsed, height);
       scrollSampleAtRef.current = now;
       scrollTopRef.current = top;
-      const index = Math.max(0, first - pending);
+      const index = Math.max(0, Math.floor(top / rowHeight) - pending);
       anchorRef.current = { id: ids[index] ?? null, index, offset: top % rowHeight };
       if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
       scrollIdleTimerRef.current = window.setTimeout(() => {
         scrollIdleTimerRef.current = null;
-        // 停稳：造出这里的行。
         paceRef.current = LIBRARY_REST_PACE;
         scrollSampleAtRef.current = 0;
-        const box = scrollerRef.current;
-        if (box) {
-          const rest: LibraryView = { top: libraryWindowTop(box.scrollTop, rowHRef.current), height: box.clientHeight };
-          if (sameLibraryView(viewRef.current, rest)) paintStandIns(0);
-          else setView(rest);
-          const done = scrollTraceRef.current;
-          const painting = standInsRef.current?.takeStats();
-          if (import.meta.env.DEV && Math.abs(box.scrollTop - done.from) >= TRACED_SCROLL_SCREENS * box.clientHeight) {
-            tracePlayback("library-scroll", { ms: Math.round(performance.now() - done.startedAt), px: Math.round(box.scrollTop - done.from),
-              frames: done.frames, slow: done.slow, gapMax: Math.round(done.gapMax), travelMax: Math.round(done.travelMax),
-              speedMax: Math.round(done.speedMax * 1000), held: done.held, bare: done.bare, bareMax: done.bareMax,
-              standIns: standInsRef.current?.ready() ? 1 : 0, text: painting?.text ?? 0, bars: painting?.bars ?? 0,
-              paintMs: Math.round(painting?.ms ?? 0), paintMax: Math.round(painting?.worst ?? 0) });
-          }
-        }
         if (!persistentSession) return;
         const anchor = anchorRef.current;
         updateLocalWorkspaceSession({ scrollTop: scrollTopRef.current, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
       }, SCROLL_REST_MS);
     }
-    const pace = paceRef.current;
-    // 快滚且替身行可用：表格的行原地不动，不进 React。
-    if (pace.fast && standInsRef.current?.ready()) {
-      scrollTraceRef.current.held += 1;
-      // 表格不动，就没有人告诉数据层眼前是哪里：后台补齐还在围着起飞的位置转，替身行只能画
-      // 占位条。隔一段路挪一次加载重心。
-      const row = Math.max(0, Math.floor(top / rowHeight) - pending);
-      if (Math.abs(row - flightDemandRowRef.current) >= FLIGHT_DEMAND_ROWS) {
-        flightDemandRowRef.current = row;
-        const screen = Math.ceil(height / rowHeight);
-        const ahead = pace.speed < 0 ? [6, 1] : [1, 6];
-        void libraryStore.getState().ensureRange(Math.max(0, row - ahead[0] * screen), Math.min(ids.length, row + (1 + ahead[1]) * screen),
-          row, Math.min(ids.length, row + screen));
-      }
-      paintStandIns(pace.speed < 0 ? -1 : 1);
-      return;
-    }
-    flightDemandRowRef.current = -1;
     const next: LibraryView = { top: libraryWindowTop(top, rowHeight), height };
     if (!sameLibraryView(viewRef.current, next)) {
       viewRef.current = next;
       flushSync(() => setView(next));
     }
-    // 一步之内的滚动帧窗口不变，不进 React。
-    paintStandIns(0);
-  }, [libraryStore, persistentSession, paintStandIns]);
+  }, [libraryStore, persistentSession]);
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
@@ -1908,8 +1777,6 @@ export const TrackTable = memo(function TrackTable({
         setRowH(height);
       }
       const header = box.querySelector("thead")?.getBoundingClientRect().height ?? 28;
-      // 行高、列或主题变了：替身行按新的样子重新量。
-      standInsRef.current?.invalidate();
       headerHRef.current = header;
       setHeaderH((old) => Math.abs(old - header) > 0.5 ? header : old);
     };
@@ -1928,26 +1795,6 @@ export const TrackTable = memo(function TrackTable({
   const { start: winStart, end: winEnd } = viewport;
   const windowedTracks = orderedIds.slice(viewport.trackStart, viewport.trackEnd)
     .map((id, offset) => ({ id, track: summaryById.get(id), index: viewport.trackStart + offset }));
-  renderedRowsRef.current = { start: winStart, end: winEnd };
-  keyNotationRef.current = keyNotation;
-
-  useLayoutEffect(() => {
-    const box = scrollerRef.current;
-    const layer = standInLayerRef.current;
-    if (!box || !layer) return;
-    const standIns = createLibraryStandIns(box, layer);
-    standInsRef.current = standIns;
-    return () => {
-      standIns.destroy();
-      if (standInsRef.current === standIns) standInsRef.current = null;
-    };
-  }, []);
-  // 行换了（窗口移动、数据到达、换序）之后，在同一帧里把替身行让给真实的行。
-  useLayoutEffect(() => {
-    const pace = paceRef.current;
-    paintStandIns(!pace.fast ? 0 : pace.speed < 0 ? -1 : 1);
-  }, [paintStandIns, winStart, winEnd, orderedIds, summaryById, keyNotation, pendingDownloads.length]);
-
   useLayoutEffect(() => {
     const box = scrollerRef.current;
     if (!box) return;
@@ -1956,7 +1803,8 @@ export const TrackTable = memo(function TrackTable({
       if (previousQueryRef.current > 0) scrollRestoreDoneRef.current = true;
       previousQueryRef.current = queryVersion;
       // The initial index starts a query too; persisted position applies once on startup.
-      if (scrollRestoreDoneRef.current) { desired = 0; markListArrival(box); }
+      if (scrollRestoreDoneRef.current) desired = 0;
+      arrivalPendingRef.current = true;
       anchorRef.current = { id: null, index: 0, offset: 0 };
     }
     if (!scrollRestoreDoneRef.current && total > 0) {
@@ -1977,6 +1825,21 @@ export const TrackTable = memo(function TrackTable({
     const index = Math.max(0, Math.floor(desired / rowH) - pendingDownloads.length);
     anchorRef.current = { id: orderedIds[index] ?? null, index, offset: desired % rowH };
   }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop]);
+
+  useLayoutEffect(() => {
+    const box = scrollerRef.current;
+    if (!box) return;
+    if (!visible) { arrivalPendingRef.current = true; return; }
+    const rows = Array.from(box.querySelectorAll<HTMLElement>("tbody > tr:not([data-spacer]):not([data-loading-track])"));
+    const fresh = rows.filter((row) => !seenRowsRef.current.has(row));
+    rows.forEach((row) => seenRowsRef.current.add(row));
+    if (arrivalPendingRef.current && rows.length) {
+      markListArrival(box);
+      arrivalPendingRef.current = false;
+    } else if (fresh.length) {
+      markListCatchup(fresh, paceRef.current.speed < 0 ? -1 : 1);
+    }
+  }, [visible, queryVersion, winStart, winEnd, summaryById, pendingDownloads]);
 
   useEffect(() => {
     if (total > 0) void ensureRange(viewport.fetchStart, viewport.fetchEnd, viewport.visibleTrackStart, viewport.visibleTrackEnd);
@@ -2129,8 +1992,7 @@ export const TrackTable = memo(function TrackTable({
       // 和滚动重算都不会再空转渲染。
       ref={trackScrollerRef}
       onScroll={() => {
-        // 这一个容器同时横滚和竖滚；横滚不影响虚拟窗口，syncWindow 里窗口没变就不进 React，
-        // 只让替身行换到新露出的列。
+        // 横滚不影响虚拟窗口；窗口没变就不进入 React。
         // 滚轮、触控板、触摸由 WebView 的滚动线程执行，拖滑块、键盘、定位由页面执行；
         // 都从这里进来，一帧合并一次，并在这一帧内提交对应的行。
         if (!scrollRafRef.current) {
@@ -2362,8 +2224,6 @@ export const TrackTable = memo(function TrackTable({
           )}
         </tbody>
       </table>
-      {/* 替身行的画布（见 libraryStandIns）。放在表格之后：OverlayScrollbars 观察的是容器的第一个子元素。 */}
-      <div className="kd-table-standins" aria-hidden="true" ref={standInLayerRef} />
       {/* 选列菜单。开着的时候点勾选不关闭——一次通常要调好几列，
           调一列关一次等于逼用户右键三回。点别处 / Esc / 恢复默认才关。 */}
       {colMenu && (
@@ -2534,11 +2394,6 @@ export const TrackTable = memo(function TrackTable({
             const chosen = new Set(menuIds);
             return orderedIds.filter(id => chosen.has(id));
           }} close={() => setRowMenu(null)} />
-          <button type="button" disabled={menuIds.length === 1 && isImageTrack(rowMenu.track.format)} onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true, false, "v4"); }}><BarChart3 size={12} />BPM V4 分析</button>
-          <button type="button" disabled={menuIds.length === 1 && isImageTrack(rowMenu.track.format)} onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true); }}>
-            <BarChart3 size={12} />
-            重新分析{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
-          </button>
           {menuIds.length === 1 && (
             <button
               type="button"

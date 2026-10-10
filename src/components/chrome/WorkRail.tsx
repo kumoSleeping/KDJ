@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { isValidElement, type ReactNode } from "react";
+import { TurnContents } from "../common/TurnContents";
 
 /**
  * 板块自有工作条：左侧小图标与说明，右侧可挂搜索/动作。
@@ -11,6 +12,7 @@ export function WorkRail({
   trailing,
   actions,
   label,
+  transitionKey,
 }: {
   idle?: boolean;
   glyphs: ReactNode[];
@@ -20,6 +22,7 @@ export function WorkRail({
   /** 本栏的全局入口，贴在右端，和搜索平台键上下对齐。 */
   actions?: ReactNode;
   label: string;
+  transitionKey?: string;
 }) {
   return (
     <div
@@ -29,8 +32,10 @@ export function WorkRail({
       aria-live="polite"
       aria-label={label}
     >
+      <TurnContents className="kd-activity-turn" stagger changeKey={transitionKey ?? `${label}:${texts.map(text => isValidElement(text) ? text.key : "").join(":")}`}>
       {glyphs.length > 0 ? <div className="kd-activity-glyphs">{glyphs}</div> : null}
       {texts.length > 0 ? <div className="kd-activity-texts">{texts}</div> : null}
+      </TurnContents>
       {trailing}
       {actions && <div className="kd-activity-actions">{actions}</div>}
     </div>

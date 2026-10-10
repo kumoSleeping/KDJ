@@ -17,7 +17,7 @@ async function filesIn(dir) {
   }
   return paths.sort();
 }
-for (const id of ["sakulaptop98"]) {
+for (const id of []) {
   const path = join(root, id, "theme.json");
   const manifest = JSON.parse(await readFile(path, "utf8"));
   const files = (await filesIn(dirname(path))).filter(file => file !== "theme.json");

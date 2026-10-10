@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { LibraryWorkRailToolsTargetContext } from "./libraryWorkRailTools";
 import {
   BarChart3,
-  CheckSquare,
+  CircleCheck,
   Copy,
   Download,
   Film,
@@ -75,8 +75,6 @@ export function LibraryWorkRail({
   const analyze = useLibraryStore((state) => state.analyze);
   const maintenance = useLibraryStore((state) => state.maintenance);
   const autoAnalyzeSuspended = useLibraryStore((state) => state.autoAnalyzeSuspended);
-  const stats = useLibraryStore((state) => state.stats);
-  const total = useLibraryStore((state) => state.total);
   const filter = useLibraryStore((state) => state.filter);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const selectedIds = useLibraryStore((state) => state.selectedIds);
@@ -267,7 +265,7 @@ export function LibraryWorkRail({
         idle={false}
         glyphs={[
           <span key="sel" className="kd-activity-glyph kd-activity-glyph-sel" aria-hidden="true">
-            <CheckSquare size={13} strokeWidth={2.25} />
+            <CircleCheck size={13} strokeWidth={2.25} />
           </span>,
         ]}
         texts={[
@@ -374,56 +372,17 @@ export function LibraryWorkRail({
   }
 
   if (activeMaintenance.length === 0 && !scanning && analyze === null && !downloading) {
-    const trackTotal = stats?.total ?? total;
-    const analyzed = stats?.analyzed ?? 0;
-    const pending = Math.max(0, trackTotal - analyzed);
-    glyphs.push(
-      <span key="n" className="kd-activity-glyph" aria-hidden="true">
-        <Music2 size={13} strokeWidth={2.25} />
-      </span>,
-    );
-    texts.push(
-      <span key="n" className="kd-activity-text">
-        曲库 {trackTotal} 首
-      </span>,
-    );
-    glyphs.push(
-      <span key="a" className="kd-activity-glyph" aria-hidden="true">
-        <BarChart3 size={13} strokeWidth={2.25} />
-      </span>,
-    );
-    texts.push(
-      <span key="a" className="kd-activity-text">
-        {pending === 0 ? "已全部分析" : `已分析 ${analyzed} · 未分析 ${pending}`}
-      </span>,
-    );
+    glyphs.push(<span key="folder" className="kd-activity-glyph" aria-hidden="true"><BarChart3 size={13} strokeWidth={2.25} /></span>);
+    const folder = filter.folder.replaceAll("\\", "/").replace(/\/+$/, "");
+    texts.push(<span key="folder" className="kd-activity-text" title={filter.folder}>{folder.split("/").pop() || "曲库"}</span>);
   }
 
-  texts.push(
-    <button
-      key="auto-analyze"
-      type="button"
-      className="kd-activity-control"
+  if (analyze !== null) texts.push(
+    <button key="auto-analyze" type="button" className="kd-activity-control" disabled={savingSettings}
       aria-label={`自动分析：${autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}`}
-      disabled={savingSettings}
-      title={
-        autoAnalysisMode === "light"
-          ? "轻量：单线程并主动留空；点击切换到有余量的全力模式"
-          : autoAnalysisMode === "full"
-            ? "全力：最多两个后台任务，播放时自动收窄；点击暂停"
-            : "已暂停；点击后从轻量模式恢复"
-      }
-      onClick={toggleAutoAnalyze}
-    >
-      {autoAnalysisMode === "light" ? (
-        <Play size={11} />
-      ) : autoAnalysisMode === "full" ? (
-        <BarChart3 size={11} />
-      ) : (
-        <Pause size={11} />
-      )}
-      自动分析：
-      {autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}
+      onClick={toggleAutoAnalyze}>
+      {autoPaused ? <Pause size={11} /> : <Play size={11} />}
+      自动分析：{autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}
     </button>,
   );
 
@@ -432,6 +391,7 @@ export function LibraryWorkRail({
   return (
     <WorkRail
       idle={idle}
+      transitionKey={`${filter.folder}:${idle ? "idle" : scanning ? "scan" : analyze ? "analysis" : "tasks"}`}
       glyphs={glyphs}
       texts={texts}
       trailing={trailing}

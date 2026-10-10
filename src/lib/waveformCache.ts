@@ -289,7 +289,10 @@ function overlayCachedPrefix(
   ) {
     return;
   }
-  const covered = clamp(prefix.coveredSeconds, 0, total);
+  // A finished overview describes the entire playable asset. Provider/transport duration
+  // can differ from decoded PCM (previews, AAC priming); never squeeze that full shape
+  // back into a prefix. Only an unfinished capture uses its decoded coverage boundary.
+  const covered = entry.complete ? total : clamp(prefix.coveredSeconds, 0, total);
   if (covered <= 0) return;
   const endBucket = Math.min(STREAM_BUCKETS, Math.ceil((covered / total) * STREAM_BUCKETS));
   for (let bucket = 0; bucket < endBucket; bucket += 1) {

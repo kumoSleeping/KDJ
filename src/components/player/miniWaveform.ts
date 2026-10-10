@@ -75,3 +75,28 @@ export function seekFraction(clientX: number, left: number, width: number): numb
   if (!(width > 0)) return 0;
   return Math.min(1, Math.max(0, (clientX - left) / width));
 }
+
+/** Preserve the overview's colour and separate upper/lower loudness envelopes per bar. */
+export function miniWaveformSegments(wave: import("../../types").Waveform, count: number): { path: string; color: string }[] {
+  const levels = miniWaveformLevels(wave.amp, count);
+  if (!levels) return [];
+  const middle = MINI_WAVE_HEIGHT / 2;
+  const reach = (MINI_WAVE_HEIGHT - MINI_WAVE_STROKE) / 2;
+  return levels.map((level, bar) => {
+    const from = Math.floor(bar * wave.amp.length / count);
+    const to = Math.max(from + 1, Math.floor((bar + 1) * wave.amp.length / count));
+    let red = 0, green = 0, blue = 0, weight = 0, upper = 0, lower = 0;
+    for (let i = from; i < to && i < wave.amp.length; i++) {
+      const w = Math.abs(wave.amp[i]) + 0.001;
+      red += (wave.r[i] ?? 0) * w; green += (wave.g[i] ?? 0) * w; blue += (wave.b[i] ?? 0) * w; weight += w;
+      upper = Math.max(upper, wave.maximum?.[i] ?? wave.amp[i]);
+      lower = Math.max(lower, -(wave.minimum?.[i] ?? -wave.amp[i]));
+    }
+    const peak = Math.max(upper, lower, 0.001);
+    const x = bar * MINI_WAVE_PITCH + MINI_WAVE_PITCH / 2;
+    return {
+      path: `M${x} ${(middle - level * reach * upper / peak).toFixed(2)}V${(middle + level * reach * lower / peak).toFixed(2)}`,
+      color: `rgb(${Math.round(red / weight)} ${Math.round(green / weight)} ${Math.round(blue / weight)})`,
+    };
+  });
+}

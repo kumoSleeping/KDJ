@@ -29,7 +29,7 @@ const isVideo = (track: Track) => isVideoTrack(track.format) || streamMeta(track
  */
 export function requestPlayingLyrics(onOpened?: () => void): void {
   const track = getPlayingTrack();
-  const none = (detail?: string) => showTask({ id: "lyrics-entry", kind: "notice", title: "没有找到歌词", detail, size: "small", stay: 3_000 });
+  const none = (detail?: string) => showTask({ id: "lyrics-entry", kind: "notice", placement: "top", title: "没有找到歌词", detail, size: "small", stay: 3_000 });
   if (!track) { none(); return; }
   if (isVideo(track)) { none(track.title || track.filename); return; }
   const show = () => { useSidePanels.getState().setLyrics(true); onOpened?.(); };

@@ -20,7 +20,7 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
 - **One bubble per id.** Showing an id that is up changes that bubble in place and starts its stay
   over. `updateTask(id, patch)` changes it without restarting the stay and does nothing when it is
   not up. `dismissTask(id)` rolls it down.
-- **The stack.** The newest bubble rests nearest the bar and lifts the older ones. More than
+- **The stack.** The playing bubble stays nearest the bar; new task bubbles lift older task bubbles above it. More than
   `TASK_VISIBLE_LIMIT` (3) that leave by themselves, and the oldest of them leave now, an error
   last. A bubble that is kept up (`stay: 0`) is not counted and never pushed out.
 - **The size.** `size` is `small` (a one-line note, as wide as its text), `regular` (default: a
@@ -150,3 +150,5 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 | A folder import ended or failed | `import` | source `imports` |
 | The player's own message (playback, transition and deck errors, "下一首已替换为…") | `player-notice` | `PlayerBar.tsx` `setNotice` |
 | Every other former toast (window, fullscreen, import-drop, visualizer memory errors) | `notice:<text>` | `showNotice` |
+
+`placement: "top"` uses the same host and motion for notices that belong above the active drawer (for example unavailable lyrics). The host reserves `--kd-top-notice-lift` so drawer contents move down and return when the notice leaves. Bottom transport clearance uses `--kd-transport-lift`, independent of download notices.

@@ -1,6 +1,5 @@
-import { useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import { Download, Settings, TextQuote } from "lucide-react";
-import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { settingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
@@ -18,6 +17,7 @@ import { SlidePages } from "../drawer/SlidePages";
 import type { DrawerEntry, DrawerSpec } from "../drawer/drawerSchema";
 import { TrackMetaEditorDrawer } from "../library/TrackMetaEditor";
 import { DrawerLyrics } from "../player/SidePanels";
+import { useLyricsPresentation } from "../../lib/lyricsPresentation";
 import { requestPlayingLyrics } from "../player/lyricsEntry";
 import { DownloadTaskPages, taskViews } from "../player/TaskPanels";
 import { SettingsPanel } from "../settings/SettingsPanel";
@@ -58,13 +58,12 @@ export function useDrawerApps(): DrawerSpec[] {
   const visualizerTrack = useVisualizerStudioStore(state => state.track);
   const metaId = useTrackMetaEditor(state => state.trackId);
   const metaTrack = useLibraryStore(state => metaId === null ? undefined : state.summaryById.get(metaId));
-  const playing = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  const lyricsExtent = useLyricsPresentation(state => state.extent);
   const apps: DrawerSpec[] = [];
   if (lyrics) apps.push({
     id: "lyrics",
     title: "歌词",
-    caption: songLine(playing),
-    extent: "two-thirds",
+    extent: lyricsExtent === "standard" ? "two-thirds" : "full",
     body: <DrawerLyrics />,
     close: () => useSidePanels.getState().setLyrics(false),
   });

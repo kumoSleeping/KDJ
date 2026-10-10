@@ -78,12 +78,12 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
   const { useDownloadStore } = await import("../src/stores/downloadStore");
   const { TrackTable } = await import("../src/components/library/TrackTable");
   const root = createRoot(document.getElementById("root")!);
-  function Host({ shortcutActive = true }: { shortcutActive?: boolean } = {}) {
+  function Host({ shortcutActive = true, visible = true }: { shortcutActive?: boolean; visible?: boolean } = {}) {
     const total = useLibraryStore(state => state.total);
     const loading = useLibraryStore(state => state.loading);
     const selectedId = useLibraryStore(state => state.selectedId);
     const selectedIds = useLibraryStore(state => state.selectedIds);
-    return createElement(TrackTable, { total, loading, selectedId, selectedIds, layout: "wide", shortcutActive,
+    return createElement(TrackTable, { total, loading, selectedId, selectedIds, layout: "wide", shortcutActive, visible,
       sort: "file_created_at", order: "desc", sort2: null, order2: "asc",
       onSelect: useLibraryStore.getState().select, onSort() {} });
   }
@@ -200,7 +200,8 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.ok(document.querySelector('tr[data-kd-track-id="5001"]'), "rows are committed in the frame that reported the scroll");
     assert.equal(document.querySelector("tr[data-loading-track]"), null);
     assert.equal(requests.length, requestsBeforeJump);
-    // No canvas here, so there are no stand-in rows: the table builds its own rows at any speed.
+    // The real row window follows every speed; a painted stand-in list is never mounted.
+    assert.equal(document.querySelector(".kd-table-standins"), null);
     assert.equal(document.querySelectorAll(".kd-table-standins canvas").length, 0);
     const landed = rows();
     assert.ok(landed >= 5 * 19, `two screens either side of the viewport (${landed})`);
@@ -269,7 +270,7 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.deepEqual(useLibraryStore.getState().clipboard, { ids: [42], op: "copy" });
     useLibraryStore.setState({ clipboard: null });
     ids = ids.slice(0, 200);
-    const arriving = () => box.getAttribute("data-kd-arrive");
+    const arriving = () => box.querySelector("tr[data-kd-track-id]")?.getAttribute("data-kd-row-arrive") ?? null;
     const arrivedBefore = arriving();
     await act(async () => { await useLibraryStore.getState().refresh(); });
     await flush();
@@ -290,16 +291,21 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     await act(async () => { useLibraryStore.getState().select(ids[3]); });
     await flush();
     assert.equal(arriving(), arrivedNow, "a selection does not start the arrival again");
-    // Leaving the top ends it at once; the table goes on from there without the mark.
+    await act(async () => root.render(createElement(StrictMode, {}, createElement(Host, { visible: false }))));
+    await act(async () => root.render(createElement(StrictMode, {}, createElement(Host, { visible: true }))));
+    assert.ok(arriving() !== null && arriving() !== arrivedNow, "returning to a mounted pane replays the arrival");
+    // A scroll no longer cancels the cascade mid-flight. Only newly mounted real rows catch
+    // up; existing visible rows retain their animation rather than flashing from the start.
+    const beforeScrollRow = box.querySelector("tr[data-kd-track-id]")!;
+    const beforeScrollMark = beforeScrollRow.getAttribute("data-kd-row-arrive");
     box.scrollTop = 720;
     box.dispatchEvent(new dom.window.Event("scroll"));
-    assert.equal(arriving(), null, "scrolling drops the mark");
     await flush();
-    assert.equal(arriving(), null);
+    assert.equal(beforeScrollRow.getAttribute("data-kd-row-arrive"), beforeScrollMark);
+    assert.equal(document.querySelector(".kd-table-standins"), null);
     box.scrollTop = 0;
     box.dispatchEvent(new dom.window.Event("scroll"));
     await flush();
-    assert.equal(arriving(), null, "returning to the top is not an arrival");
     ids = [];
     await act(async () => { await useLibraryStore.getState().refresh(); });
     await flush();

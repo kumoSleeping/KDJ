@@ -1,3 +1,4 @@
+import { cloneElement, type ReactElement, type TdHTMLAttributes } from "react";
 import { Download } from "lucide-react";
 
 /** 保留序号占位，悬停或键盘聚焦时直接下载当前行。 */
@@ -35,4 +36,11 @@ export function ResultDownloadIndex({ rowNumber, title, onDownload, disabled = f
       )}
     </span>
   );
+}
+
+/** Attach the same download action to the right of the first data column, whichever it is. */
+export function withResultDownload(cell: ReactElement<TdHTMLAttributes<HTMLTableCellElement>>, title: string, onDownload?: () => void, disabled = false) {
+  return cloneElement(cell, { className: `${cell.props.className ?? ""} kd-result-first-cell` },
+    <span className="kd-result-first-content">{cell.props.children}</span>,
+    <ResultDownloadIndex rowNumber={0} title={title} onDownload={onDownload} disabled={disabled} />);
 }

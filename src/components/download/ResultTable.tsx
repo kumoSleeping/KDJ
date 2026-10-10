@@ -110,6 +110,7 @@ function previewItem(group: MergedGroup, preferredIndex: number): SongPreviewIte
 }
 
 export interface ResultTableProps {
+  visible?: boolean;
   items: IntakeItem[];
   /** 贴 B 站链接解析出来的那一个视频，置顶在结果最前面。 */
   video: VideoInfo | null;
@@ -128,7 +129,7 @@ export interface ResultTableProps {
   sourceIndex: Record<string, number>;
   /** 最后由用户点开的在线曲目；由工作台持久化以便重启恢复。 */
   inspectedGroup: string | null;
-  /** 已打开合集的当前页；合集标题和翻页入口由顶部工作条统一承载。 */
+  /** 已打开合集累积显示到的批次；向下滚动时继续追加。 */
   collectionPage: number;
   onToggleSelect(key: string): void;
   onToggleExpand(groupId: string): void;
@@ -281,6 +282,7 @@ function loadPrefs(): TableColumnPrefs {
 }
 
 const ResultTableView = memo(function ResultTableView({
+  visible = true,
   items,
   video,
   loading,
@@ -321,19 +323,20 @@ const ResultTableView = memo(function ResultTableView({
   /** Nothing to show yet: the spinner stands in for the list. */
   const waiting = loading && totalGroups === 0 && !video;
 
-  // The list arrives once, in the render that replaces the spinner with rows. Re-renders, a
-  // remount of the pane and later row changes never replay it: `reveal` is back to 0 by then.
-  const [arrival, setArrival] = useState({ waiting, reveal: 0 });
-  if (arrival.waiting !== waiting) {
-    setArrival({ waiting, reveal: waiting ? 0 : arrival.reveal + 1 });
+  // A cached pane must arrive too. Keep a monotonic cycle separate from the active mark:
+  // clearing the previous mark must not reset the next navigation back to the same animation.
+  const identity = JSON.stringify([video?.bvid, items.map((item) => [item.entry, item.groups[0]?.group_id])]);
+  const hasRows = totalGroups > 0 || !!video || items.some((item) => item.collections.length > 0);
+  const [arrival, setArrival] = useState({ identity, waiting, loading, visible, cycle: hasRows ? 1 : 0, active: hasRows && visible });
+  if (arrival.identity !== identity || arrival.waiting !== waiting || arrival.loading !== loading || arrival.visible !== visible) {
+    const delivered = visible && hasRows && (arrival.identity !== identity || !arrival.visible || (arrival.waiting && !waiting) || (arrival.loading && !loading && !arrival.active));
+    setArrival({ identity, waiting, loading, visible, cycle: arrival.cycle + (delivered ? 1 : 0), active: !visible || waiting || (loading && !arrival.loading) ? false : delivered || arrival.active });
   }
-  const reveal = arrival.reveal;
+  const reveal = arrival.active ? arrival.cycle : 0;
   useEffect(() => {
     if (!reveal) return;
-    const timer = window.setTimeout(
-      () => setArrival((current) => (current.reveal ? { ...current, reveal: 0 } : current)),
-      RESULT_REVEAL_MS,
-    );
+    const timer = window.setTimeout(() => setArrival((current) =>
+      current.cycle === reveal ? { ...current, active: false } : current), RESULT_REVEAL_MS);
     return () => window.clearTimeout(timer);
   }, [reveal]);
   // Rows that mount after the table has settled (a later source, another page of a collection,
@@ -392,9 +395,8 @@ const ResultTableView = memo(function ResultTableView({
       !colPrefs.hidden.includes(column.key) && columnsWithData.has(column.key),
   );
   const leadWidth = widthFor("lead", RESULT_LEAD_WIDTH);
-  // 批选列只在 selectionMode 时占满勾选宽；平时留一点左边距，别贴死边缘。
-  // 不能继续写死 2.2rem：fixed 布局下 <col> 会盖过 .kd-selection-cell { width: 0 }。
-  const selectionColWidth = selectionMode ? "2.2rem" : "0.35rem";
+  // 选择标记复用序号的位置；进入多选不再增宽或挤动数据列。
+  const selectionColWidth = "0.35rem";
   const totalColumns = 3 + visibleColumns.length;
   const tableMinWidthPx =
     remStringToPx(selectionColWidth) +
@@ -653,7 +655,7 @@ const ResultTableView = memo(function ResultTableView({
       <table
         className="kd-table"
         data-kind="results"
-        data-reveal={reveal || undefined}
+        data-reveal={reveal ? (reveal % 2 ? "a" : "b") : undefined}
         style={{ minWidth: tableMinWidthPx }}
       >
         <colgroup>
@@ -727,9 +729,9 @@ const ResultTableView = memo(function ResultTableView({
                   RESOLVED_COLLECTION_PAGE_SIZE,
                 )
               : null;
-            const visibleGroupStart = pageWindow?.start ?? 0;
+            const visibleGroupStart = 0;
             const visibleGroups = pageWindow
-              ? item.groups.slice(pageWindow.start, pageWindow.end)
+              ? item.groups.slice(0, pageWindow.end)
               : item.groups;
             const flatRowOffset = itemFlat
               ? (video ? 1 : 0) +

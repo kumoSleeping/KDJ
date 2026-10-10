@@ -23,7 +23,7 @@ import { useDownloadStore } from "../../stores/downloadStore";
 import type { MergedGroup, VideoDownloadRequest, VideoInfo, VideoPage } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "./PlatformMark";
-import { ResultDownloadIndex } from "./ResultDownloadIndex";
+import { withResultDownload } from "./ResultDownloadIndex";
 import { foldingRowProps, foldOrder, useFold } from "./searchMotion";
 import { requestVideoPreview } from "./VideoPreview";
 import { useTrackClickPrefs, playClickForLayout } from "../../lib/trackClickPrefs";
@@ -239,7 +239,9 @@ export function VideoResultRow({
   const [localPartsExpanded, setLocalPartsExpanded] = useState(false);
   const partsExpanded = expanded ?? localPartsExpanded;
   // How the row entered is decided when it mounts and never changes, so a re-render cannot replay it.
-  const [bornLate] = useState(late);
+  const [bornLate, setBornLate] = useState(late);
+  // A fresh whole-list arrival owns this row now; do not replay its old insertion gesture.
+  if (bornLate && !late) setBornLate(false);
   // Parts opened by the user unfold; ones already open when the row mounted are simply there.
   const [unfold, setUnfold] = useState(!partsExpanded);
   if (!partsExpanded && !unfold) setUnfold(true);
@@ -456,6 +458,7 @@ export function VideoResultRow({
     <Fragment>
       <tr
         data-video="true"
+        style={bornLate ? { "--kd-late-i": Math.min((rowNumber - 1) % 50, 13) } as CSSProperties : undefined}
         data-enter={bornLate && leave === undefined ? "late" : undefined}
         data-selecting={selectionMode ? "true" : undefined}
         aria-selected={selected}
@@ -523,12 +526,7 @@ export function VideoResultRow({
           ) : null}
         </td>
         <td className="kd-result-lead" data-col="index" {...cellDrag}>
-          <ResultDownloadIndex
-            rowNumber={rowNumber}
-            title={title}
-            onDownload={bvid ? () => { void download(0); } : undefined}
-            disabled={sending}
-          />
+          {rowNumber}
         </td>
         {columns.map((column) => {
           switch (column.key) {
@@ -633,7 +631,7 @@ export function VideoResultRow({
             default:
               return <td key={column.key} {...cellDrag} />;
           }
-        })}
+        }).map((cell, index) => index === 0 ? withResultDownload(cell, title, bvid ? () => { void download(0); } : undefined, sending) : cell)}
         <td className="kd-table-fill" aria-hidden="true" />
       </tr>
       {partsFold === "open" || partsFold === "out"

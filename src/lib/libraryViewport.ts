@@ -16,8 +16,7 @@ export function libraryWindowTop(scrollTop: number, rowHeight: number): number {
  * How the scroll container is moving, as seen from the frames that reach the page.
  *
  * The WebView scrolls on its own thread and tells the page afterwards. Rows can be built for a
- * scroll at reading speed; a fast one runs past them, so while it lasts the table builds none and
- * shows painted stand-ins instead (see libraryStandIns).
+ * scroll at reading speed; during a fling newly mounted real rows use a short catch-up rise.
  */
 export interface LibraryScrollPace {
   /** Smoothed signed speed, px/ms. */

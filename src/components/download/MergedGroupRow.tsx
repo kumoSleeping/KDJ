@@ -27,7 +27,7 @@ import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
 import { PlatformMark } from "./PlatformMark";
-import { ResultDownloadIndex } from "./ResultDownloadIndex";
+import { withResultDownload } from "./ResultDownloadIndex";
 import { foldingRowProps, foldOrder, useFold } from "./searchMotion";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
@@ -138,7 +138,9 @@ export function MergedGroupRow({
   const suppressClickRef = useRef(false);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
   // How the row entered is decided when it mounts and never changes, so a re-render cannot replay it.
-  const [bornLate] = useState(late);
+  const [bornLate, setBornLate] = useState(late);
+  // A fresh whole-list arrival owns this row now; do not replay its old insertion gesture.
+  if (bornLate && !late) setBornLate(false);
   // Sources opened by the user unfold; ones already open when the row mounted are simply there.
   const [unfold, setUnfold] = useState(!expanded);
   if (!expanded && !unfold) setUnfold(true);
@@ -416,6 +418,7 @@ export function MergedGroupRow({
         data-kd-search-result=""
         data-inspected={inspected ? "true" : undefined}
         data-resolving={previewPending ? "true" : undefined}
+        style={bornLate ? { "--kd-late-i": Math.min((rowNumber - 1) % 50, 13) } as CSSProperties : undefined}
         data-enter={bornLate && leave === undefined ? "late" : undefined}
         aria-busy={previewPending ? "true" : undefined}
         aria-label={
@@ -526,13 +529,11 @@ export function MergedGroupRow({
           className="kd-result-lead"
           data-col="index"
         >
-          <ResultDownloadIndex
-            rowNumber={rowNumber}
-            title={group.title}
-            onDownload={selectable ? onDownloadSingle : undefined}
-          />
+          {rowNumber}
         </td>
-        {columns.map((column) => dataCell(column.key))}
+        {columns.map((column, index) => index === 0
+          ? withResultDownload(dataCell(column.key), group.title, selectable ? onDownloadSingle : undefined)
+          : dataCell(column.key))}
         <td className="kd-table-fill" aria-hidden="true" />
       </tr>
 

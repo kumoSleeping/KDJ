@@ -90,7 +90,8 @@
   vector-effect: non-scaling-stroke;
 }
 .kd-now-wave[data-played] { clip-path: inset(0 calc((1 - var(--kd-now-seek, 0)) * 100%) 0 0); }
-.kd-now-wave[data-played] > path { stroke: var(--kd-text); }
+.kd-now-wave:not([data-played]) { opacity: 0.45; }
+.kd-now-wave[data-played] { opacity: 1; }
 /* Without a waveform: one rounded line. */
 .kd-now-rail {
   position: absolute;

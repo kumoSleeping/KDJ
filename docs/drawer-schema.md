@@ -143,3 +143,5 @@ should use this pair instead of inventing another tab strip: `TitleTabs` for the
 children) and `SlidePages` around
 the content that changes. `useDrawer()` tells a component whether it is shown inside a drawer, so
 that it can leave out a head it only needs elsewhere (see `VisualizerDock`).
+
+Lyrics reuse the drawer with a `LyricsPresentation` context menu: standard uses two thirds of the available room, longer uses the full room, and fullscreen only applies to tall windows. Wide windows render fullscreen as longer. Portrait fullscreen keeps the existing playing task bubble as transport, preserves desktop window chrome, and temporarily overrides the bar position without persisting that override. Cover colour is optional and restricted to these two song surfaces.
