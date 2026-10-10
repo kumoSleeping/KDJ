@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { Download, Settings, TextQuote } from "lucide-react";
+import { shownLyricsExtent, useLyricsExtent, useLyricsExtentShape } from "../../lib/lyricsExtent";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { settingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useSidePanels } from "../../lib/sidePanels";
@@ -47,6 +48,10 @@ const useTaskView = () => useTaskPanelStore(state => state.view);
 const useSettingsPageInView = () => useSettingsPage(state => state.page);
 const useStudioTabInView = () => useStudioTab(state => state.tab);
 
+/** Full-screen lyrics give the window back by becoming the longer drawer again. */
+const LYRICS_WINDOW = { label: "退出全屏", leave: () => useLyricsExtent.getState().setExtent("longer") };
+const songIsPlaying = () => getPlayingTrack() !== null;
+
 /**
  * The apps the list's drawer can show that are opened from stores, each described by the drawer
  * schema (see docs/drawer-schema.md). Only open apps are listed; the workspace shows the one
@@ -59,13 +64,17 @@ export function useDrawerApps(): DrawerSpec[] {
   const visualizerTrack = useVisualizerStudioStore(state => state.track);
   const metaId = useTrackMetaEditor(state => state.trackId);
   const metaTrack = useLibraryStore(state => metaId === null ? undefined : state.summaryById.get(metaId));
-  const playing = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  // How tall the lyrics are is the listener's choice (the menu on the panel, lyricsExtent.ts).
+  // Full screen needs a song: the playing song's bubble is the other half of that window.
+  const lyricsExtent = shownLyricsExtent(useLyricsExtent(state => state.extent), useLyricsExtentShape());
+  const playing = useSyncExternalStore(subscribePlayingTrack, songIsPlaying, songIsPlaying);
   const apps: DrawerSpec[] = [];
   if (lyrics) apps.push({
     id: "lyrics",
     title: "歌词",
-    caption: songLine(playing),
-    extent: "two-thirds",
+    // No caption: the lyrics are always those of the playing song.
+    extent: lyricsExtent === "standard" ? "two-thirds" : "full",
+    takesWindow: lyricsExtent === "full" && playing ? LYRICS_WINDOW : undefined,
     body: <DrawerLyrics />,
     backdrop: <SongColorBackdrop surface="lyrics" />,
     close: () => useSidePanels.getState().setLyrics(false),

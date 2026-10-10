@@ -14,6 +14,7 @@ import {
 import { newerRevision } from "../../lib/coverLoad";
 import { useSongColor } from "../../lib/songColor";
 import { songSwapEntranceDelay } from "../../lib/songSwapMotion";
+import { useWindowTaken } from "../../lib/windowTaken";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { PLATFORM_LABEL } from "../download/MergedGroupRow";
@@ -180,7 +181,12 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
         // Its stay ran out: the peek is over. Dismissed by hand, it goes whatever held it, and
         // the bar comes back if it was away.
         if (reason === "timeout" || reason === "crowded") useNowPlayingInfo.getState().endPeek();
-        else if (reason === "user") useNowPlayingInfo.getState().close();
+        else if (reason === "user") {
+          useNowPlayingInfo.getState().close();
+          // An app that had the window with this bubble as its transport (full-screen lyrics)
+          // gives the window back: the bar the listener asked for needs its row.
+          useWindowTaken.getState().leave?.();
+        }
       },
     };
     if (raised.current !== raise) {

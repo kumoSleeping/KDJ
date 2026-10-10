@@ -164,6 +164,73 @@
 .kd-drawer-sheets[data-sized] .kd-drawer {
   height: min(var(--kd-drawer-user-h), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
 }
+/* —— Taking the window (DrawerSpec.takesWindow, src/lib/windowTaken.ts) ——
+   The panel is the window's one block: from under the title bar down to the strip the playing
+   song's bubble holds, with the bubble's own gap to the window's edge on either side and the
+   same gap between the two. --kd-window-floor is that strip's height as the window knows it
+   (--kd-info-lift, which a tall window sets to nothing inside the drawer's frame). The panel
+   grows out of its drawer place and closes back down to it by a clip (DrawerLayer). */
+.kd-app { --kd-window-floor: var(--kd-info-lift, 0px); }
+/* A tall window's page already ends that gap above a bubble that is kept across it
+   (TaskBubbles.css): a panel that comes all the way down there keeps no second gap of its own,
+   so the drawer at its longest and the block above end on the same line. */
+.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer {
+  --kd-drawer-room: calc(100% - max(0px, var(--kd-drawer-gap) - var(--kd-window-floor, 0px)));
+}
+/* Such a panel's shadow falls into that gap. Where the frame of the panels is cut off at the
+   list's bottom edge, the cut is taken to the far side of the gap in a tall window: nothing
+   but the bubble's own strip lies beyond it. */
+.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer-sheets {
+  clip-path: inset(-100vmax -100vmax calc(-1 * min(12px, var(--kd-window-floor, 0px))) -100vmax);
+}
+.kd-drawer-sheets .kd-drawer[data-takes-window] {
+  /* --kd-task-gap in TaskBubbles.css. */
+  --kd-window-gap: 12px;
+  position: fixed;
+  top: calc(var(--kd-chrome-top, 0px) + var(--kd-window-gap));
+  right: var(--kd-window-gap);
+  bottom: max(var(--kd-window-floor, 0px), var(--kd-window-gap));
+  left: var(--kd-window-gap);
+  height: auto;
+  min-height: 0;
+  /* The block has no room to give to a bubble that comes up at the top: it is not pushed down
+     for one (--kd-info-drop); the bubble lies over its top for its stay. */
+  --kd-info-drop: 0px;
+}
+/* The panel's surface without the panel, for the time it grows or shrinks (morphPanel in
+   Drawer.tsx): the clip that shows the panel cuts its edge and shadow off, and this carries
+   them. It is laid out on the block and scaled down to the drawer's rectangle. */
+.kd-drawer-surface {
+  position: fixed;
+  box-sizing: border-box;
+  border: 1px solid var(--kd-float-edge, var(--kd-line));
+  border-radius: var(--kd-drawer-radius);
+  background: var(--kd-panel);
+  box-shadow: var(--kd-float-shadow);
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-drawer-surface {
+  border: 0;
+  border-radius: 0;
+  background: var(--s98-face-hi, var(--kd-panel));
+  box-shadow: var(--s98-raised), 4px 6px 0 -1px rgb(120 40 70 / 0.22);
+}
+/* Everything else of the window is out of sight meanwhile: it fades on the clock the panel
+   grows by, and is then not drawn at all. It stays mounted (and inert, see Workspace.tsx), so
+   giving the window back shows the page as it was left. The window keeps its own background
+   and its title bar. */
+.kd-stage { transition: opacity var(--kd-motion-in) var(--kd-ease-out); }
+/* It goes on the curve the panel grows by, fastest at first: what the growing panel passes
+   over has all but gone by the time it is reached. */
+.kd-app[data-taken-by] .kd-stage {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--kd-motion-out) var(--kd-ease-out), visibility 0s linear var(--kd-motion-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-stage, .kd-app[data-taken-by] .kd-stage { transition: none; }
+}
 @keyframes kd-drawer-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }

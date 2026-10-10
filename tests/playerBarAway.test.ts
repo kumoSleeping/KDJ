@@ -116,6 +116,47 @@ test("the bar is only away where the bubble can stand in for it", () => {
   assert.equal(playerBarAwayWanted(true, true, false), false, "a phone keeps its bar");
 });
 
+test("an app that has the window sends the bar away without touching the listener's choice", () => {
+  const stored = storage();
+  relaunch();
+  song = true;
+  assert.equal(playerBarAwayWanted(false, true, true, true), true, "the bubble is the window's transport");
+  assert.equal(playerBarAwayWanted(false, false, true, true), false, "no song: nothing for the bubble to show");
+  assert.equal(playerBarAwayWanted(false, true, false, true), false, "a phone keeps its bar");
+
+  // A wide window with the bar up: full-screen lyrics take the window, then give it back.
+  let taken = true;
+  const drive = () => advancePlayerBar(playerBarAwayWanted(bar().collapsed, song, true, taken));
+  drive();
+  assert.equal(bar().phase, "leaving");
+  assert.equal(info().barAway, true, "the bubble is kept, with its transport, from the start of the slide");
+  endPlayerBarSlide();
+  drive();
+  assert.equal(bar().phase, "away");
+  assert.equal(bar().collapsed, false, "the choice is not the window's to change");
+  assert.equal(stored.getItem("kd-player-bar-collapsed"), null);
+  assert.equal(stored.getItem("kd-player-bar-collapsed-tall"), null);
+
+  taken = false;
+  drive();
+  assert.equal(bar().phase, "returning");
+  assert.equal(info().barAway, false);
+  endPlayerBarSlide();
+  drive();
+  assert.equal(bar().phase, "up", "the bar is back where the listener left it");
+  assert.equal(visible(), false, "and the bubble that was only up for it is let go");
+
+  // A bar that was put away by choice stays away when the window is given back.
+  bar().setCollapsed(true);
+  drive(); endPlayerBarSlide(); drive();
+  taken = true; drive();
+  taken = false; drive();
+  assert.equal(bar().phase, "away");
+  assert.equal(info().barAway, true);
+  bar().setCollapsed(false);
+  drive(); endPlayerBarSlide(); drive();
+});
+
 test("putting the bar away hands the transport to the bubble; sending the bubble away brings the bar back", () => {
   const stored = storage();
   relaunch();

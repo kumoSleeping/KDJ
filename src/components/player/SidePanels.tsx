@@ -3,7 +3,8 @@ import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { PanelCollapseContext, PanelDockedContext } from "../common/panelCollapse";
 import { DownloadTaskPanel } from "./TaskPanels";
-import { LyricsDetailPanel } from "./LyricsView";
+import { useLyricsExtentMenu } from "./LyricsExtentMenu";
+import { PlayingLyricsPanel } from "./LyricsView";
 import { SongColorBackdrop } from "./SongColorBackdrop";
 import "./SidePanels.css";
 
@@ -11,18 +12,23 @@ import "./SidePanels.css";
 export function SideLyrics() {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   return <section className="kd-side-panels" aria-label="歌词">
-    {track && <PanelCollapseContext.Provider
+    <PanelCollapseContext.Provider
       value={{ label: "歌词", collapse: () => useSidePanels.getState().setLyrics(false) }}>
-      <LyricsDetailPanel track={track} reserveEmpty visibleHeader />
-    </PanelCollapseContext.Provider>}
+      <PlayingLyricsPanel track={track} visibleHeader />
+    </PanelCollapseContext.Provider>
   </section>;
 }
 
-/** The lyrics as the body of a drawer: the drawer writes the title and puts it away. */
+/**
+ * The lyrics as the body of a drawer: the drawer writes the title and puts it away. A right
+ * click or a long press on it offers how tall the lyrics are (LyricsExtentMenu).
+ */
 export function DrawerLyrics() {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
-  return <section className="kd-side-panels kd-drawer-lyrics">
-    {track && <PanelDockedContext.Provider value><LyricsDetailPanel track={track} reserveEmpty /></PanelDockedContext.Provider>}
+  const extent = useLyricsExtentMenu();
+  return <section className="kd-side-panels kd-drawer-lyrics" {...extent.props}>
+    <PanelDockedContext.Provider value><PlayingLyricsPanel track={track} /></PanelDockedContext.Provider>
+    {extent.menu}
   </section>;
 }
 
@@ -42,9 +48,9 @@ export function SidePanels() {
   const lyrics = useSidePanels(state => state.lyrics);
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   return <section className="kd-side-panels" aria-label="侧栏">
-    {lyrics && track && <PanelCollapseContext.Provider
+    {lyrics && <PanelCollapseContext.Provider
       value={{ label: "歌词", collapse: () => useSidePanels.getState().setLyrics(false) }}>
-      <LyricsDetailPanel track={track} reserveEmpty visibleHeader backdrop={<SongColorBackdrop surface="lyrics" />} />
+      <PlayingLyricsPanel track={track} visibleHeader backdrop={<SongColorBackdrop surface="lyrics" />} />
     </PanelCollapseContext.Provider>}
     {downloads && <PanelCollapseContext.Provider
       value={{ label: "下载与导出", collapse: () => useSidePanels.getState().setDownloads(false) }}>

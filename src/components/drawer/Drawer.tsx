@@ -1,10 +1,13 @@
 import { createContext, startTransition, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type Ref } from "react";
-import { ChevronsRight } from "lucide-react";
+import { ChevronsRight, Minimize2 } from "lucide-react";
 import { TitleTabs } from "./TitleTabs";
 import { useSurfaceBackdrop } from "../common/SurfaceBackdrop";
 import { createPortal } from "react-dom";
+import { MOTION_IN_MS, MOTION_OUT_MS, prefersReducedMotion } from "../../lib/motion";
+import { SONG_SWAP_IN_EASE, SONG_SWAP_OUT_EASE } from "../../lib/songSwapMotion";
 import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import { raiseSurface } from "../../lib/surfaceOrder";
+import { useWindowTaken } from "../../lib/windowTaken";
 import type { DrawerEntry, DrawerSpec } from "./drawerSchema";
 import "./Drawer.css";
 
@@ -16,6 +19,16 @@ const LEAVE_MS = 260;
 const HOLD_MS = 120;
 const HEIGHT_KEY = "kd-drawer-height";
 const MIN_HEIGHT = 180;
+
+const heightResets = new Set<() => void>();
+/**
+ * Gives the panel's height back to the app's own extent, as a double click on its bottom edge
+ * does. For an app whose extent the listener chooses elsewhere (the lyrics' menu): a height that
+ * was dragged earlier would otherwise keep that choice from showing.
+ */
+export function resetDrawerHeight(): void {
+  for (const reset of heightResets) reset();
+}
 
 const DrawerContext = createContext<string | null>(null);
 /** The id of the drawer a component is shown in, or null outside one. */
@@ -56,14 +69,87 @@ function fittingHeight(sheet: HTMLElement, body: HTMLElement): number | null {
   return Math.ceil(sheet.getBoundingClientRect().height + lack - 0.05);
 }
 
-/** The title row: the title or the page words, the caption, the app's tools and the roll-up key. */
+/** Where a panel lies in the window, by its layout alone: a panel on its way in is moved by a
+ *  transform, which its painted box would include. */
+interface PanelBox { left: number; top: number; right: number; bottom: number }
+function panelBox(node: HTMLElement): PanelBox {
+  const parent = node.offsetParent?.getBoundingClientRect();
+  const left = (parent?.left ?? 0) + node.offsetLeft, top = (parent?.top ?? 0) + node.offsetTop;
+  return { left, top, right: left + node.offsetWidth, bottom: top + node.offsetHeight };
+}
+
+/** A morph under way: its animations, and the surface that stands in for the panel's edge. */
+interface PanelMorph { animations: Animation[]; surface: HTMLElement | null }
+
+function endMorph(morph: PanelMorph): void {
+  for (const animation of morph.animations) animation.cancel();
+  morph.surface?.remove();
+  morph.animations = [];
+  morph.surface = null;
+}
+
+/**
+ * The panel between its place as a drawer and the window's block (`takesWindow`). The panel is
+ * laid out as the block throughout; what is seen of it grows out of the drawer's rectangle, or
+ * closes down to it (`grow` false), by a clip. Nothing on it is stretched: the title keeps to
+ * the corner it belongs to, the tools to theirs, and the body's middle stays the middle of what
+ * is seen. A body that is drawn larger in the window (--kd-drawer-window-zoom, set by the app's
+ * own stylesheet) is scaled by that, so its words grow with the panel instead of jumping.
+ *
+ * The clip cuts the panel's own edge and shadow off, so an empty surface with the panel's look
+ * lies under it for the gesture and is moved over the same rectangles: the block is seen to
+ * grow and shrink as a thing with an edge, and no edge appears from nowhere when it ends.
+ *
+ * Both rectangles are measured before this is called; it only starts the animations.
+ */
+function morphPanel(node: HTMLElement, drawer: PanelBox, block: PanelBox, grow: boolean): PanelMorph {
+  const style = getComputedStyle(node);
+  const radius = style.borderTopLeftRadius || "0px";
+  const zoom = Number.parseFloat(style.getPropertyValue("--kd-drawer-window-zoom")) || 1;
+  const timing: KeyframeAnimationOptions = grow
+    ? { duration: MOTION_IN_MS, easing: SONG_SWAP_IN_EASE, fill: "backwards" }
+    // Held at its end until the panel takes its drawer place in the same frame (DrawerLayer).
+    : { duration: MOTION_OUT_MS, easing: SONG_SWAP_OUT_EASE, fill: "forwards" };
+  const px = (value: number) => `${value.toFixed(1)}px`;
+  const at = (x: number, y: number, scale = "1"): Keyframe => ({ transform: `translate(${px(x)}, ${px(y)}) scale(${scale})` });
+  const run = (element: Element | null, small: Keyframe, large: Keyframe) =>
+    element ? [element.animate(grow ? [small, large] : [large, small], timing)] : [];
+  const dx = drawer.left - block.left, dy = drawer.top - block.top;
+  const width = block.right - block.left, height = block.bottom - block.top;
+  const surface = document.createElement("div");
+  surface.className = "kd-drawer-surface";
+  surface.setAttribute("aria-hidden", "true");
+  Object.assign(surface.style, { left: px(block.left), top: px(block.top), width: px(width), height: px(height) });
+  node.before(surface);
+  return {
+    surface,
+    animations: [
+      ...run(node,
+        { clipPath: `inset(${px(dy)} ${px(block.right - drawer.right)} ${px(block.bottom - drawer.bottom)} ${px(dx)} round ${radius})` },
+        { clipPath: `inset(0px 0px 0px 0px round ${radius})` }),
+      ...run(surface,
+        at(dx, dy, `${((drawer.right - drawer.left) / Math.max(1, width)).toFixed(4)}, ${((drawer.bottom - drawer.top) / Math.max(1, height)).toFixed(4)}`),
+        at(0, 0, "1, 1")),
+      ...run(node.querySelector(":scope > .kd-title-tabs > .kd-title-tabs-text"), at(dx, dy), at(0, 0)),
+      ...run(node.querySelector(":scope > .kd-title-tabs > .kd-title-tabs-tools"), at(drawer.right - block.right, dy), at(0, 0)),
+      ...run(node.querySelector(":scope > .kd-drawer-body"),
+        at((drawer.left + drawer.right - block.left - block.right) / 2, (drawer.top + drawer.bottom - block.top - block.bottom) / 2, (1 / zoom).toFixed(4)),
+        at(0, 0)),
+    ],
+  };
+}
+
+/** The title row: the title or the page words, the caption, the app's tools and the roll-up key.
+ *  While the app has the window that key gives the window back instead. */
 function DrawerTitle({ spec, page, leaving, panelId }: { spec: DrawerSpec; page?: string; leaving: boolean; panelId: string }) {
+  const taking = spec.takesWindow;
+  const away = taking ? taking.label : `收起${spec.title}`;
   return <TitleTabs label={spec.title} title={spec.title} tabs={spec.pages} value={page}
     onChange={leaving ? undefined : spec.onPage} panelId={spec.pages ? panelId : undefined} caption={spec.caption}>
     {spec.tools}
-    <button type="button" className="kd-drawer-rollup" aria-label={`收起${spec.title}`} title={`收起${spec.title} · Esc`}
-      onClick={() => { spec.close(); }}>
-      <ChevronsRight size={16} aria-hidden="true" />
+    <button type="button" className="kd-drawer-rollup" aria-label={away} title={`${away} · Esc`}
+      onClick={() => { if (taking) taking.leave(); else spec.close(); }}>
+      {taking ? <Minimize2 size={15} aria-hidden="true" /> : <ChevronsRight size={16} aria-hidden="true" />}
     </button>
   </TitleTabs>;
 }
@@ -96,6 +182,45 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
   const fitRef = useRef(fit);
   fitRef.current = fit;
   const sized = spec.extent === "fit" || spec.extent === "at-least-half";
+  // The app takes the window (`takesWindow`). The panel has the window's layout from the moment
+  // it is asked to and grows into it; asked to give it back, it keeps that layout while what is
+  // seen of it closes down to its drawer place, and takes that place when the gesture is over.
+  // The app has let go by then: the page is back and in use while the panel shrinks.
+  const wantsWindow = !!spec.takesWindow;
+  const [inWindow, setInWindow] = useState(wantsWindow);
+  if (wantsWindow && !inWindow) setInWindow(true);
+  const wanted = useRef(wantsWindow);
+  const morph = useRef<PanelMorph>({ animations: [], surface: null });
+  useLayoutEffect(() => {
+    const node = layer.current;
+    if (!node || leaving || wanted.current === wantsWindow) return;
+    wanted.current = wantsWindow;
+    endMorph(morph.current);
+    if (prefersReducedMotion() || typeof node.animate !== "function") {
+      if (!wantsWindow) setInWindow(false);
+      return;
+    }
+    // Measured once, before anything moves: the panel's place as a drawer and as the block.
+    node.removeAttribute("data-takes-window");
+    const drawer = panelBox(node);
+    node.setAttribute("data-takes-window", "true");
+    const running = morphPanel(node, drawer, panelBox(node), wantsWindow);
+    morph.current = running;
+    const clip = running.animations[0];
+    if (wantsWindow) {
+      // Grown: the panel's own edge is back, and the stand-in goes.
+      clip?.addEventListener("finish", () => { if (morph.current === running) endMorph(running); });
+      return;
+    }
+    // The gesture's own end; the timer covers a window that is not being drawn.
+    const settle = () => { if (morph.current === running) setInWindow(false); };
+    clip?.addEventListener("finish", settle);
+    const timer = window.setTimeout(settle, MOTION_OUT_MS * 3);
+    return () => window.clearTimeout(timer);
+  }, [wantsWindow, leaving]);
+  // Back in its drawer place: what held the shrunken picture goes in the same frame.
+  useLayoutEffect(() => { if (!inWindow) endMorph(morph.current); }, [inWindow]);
+  useEffect(() => () => endMorph(morph.current), []);
   // An app that keeps room (`at-least-half`) is built with the sheet and measured before the
   // first paint: the sheet starts at the height it will keep, and what is thrown at it
   // (lib/downloadToss.ts) finds its list from the first frame. Any other body is built a frame
@@ -159,6 +284,7 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
   // The app's own layer under the whole panel, and the ink that layer asks for.
   const backdrop = useSurfaceBackdrop(spec.backdrop);
   return <section ref={layer} className="kd-drawer" data-app={spec.id} data-extent={spec.extent}
+    data-takes-window={inWindow || undefined}
     style={fit === null ? backdrop.style : { ...backdrop.style, "--kd-drawer-fit": `${fit}px` } as CSSProperties}
     {...backdrop.attributes} data-leaving={leaving || undefined} data-held={held || undefined} data-settled={settled && !leaving || undefined}
     role="region" aria-label={leaving ? undefined : spec.title}
@@ -175,9 +301,9 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
       <div ref={body} className="kd-drawer-body" id={panelId} role={spec.pages ? "tabpanel" : undefined}
         data-late={eager ? undefined : "true"}>{built ? spec.body : null}</div>
     </DrawerContext.Provider>
-    {onResizeStart && !leaving && <div className="kd-drawer-resize" role="separator" aria-orientation="vertical"
+    {onResizeStart && !leaving && !inWindow && <div className="kd-drawer-resize" role="separator" aria-orientation="vertical"
       aria-label="调整抽屉宽度" onPointerDown={onResizeStart} />}
-    {!leaving && <div className="kd-drawer-resize" data-edge="bottom" role="separator" aria-orientation="horizontal"
+    {!leaving && !inWindow && <div className="kd-drawer-resize" data-edge="bottom" role="separator" aria-orientation="horizontal"
       aria-label="调整抽屉高度" title="拖动调整高度 · 双击恢复" onPointerDown={onHeightStart} onDoubleClick={onHeightReset} />}
   </section>;
 }
@@ -241,11 +367,20 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
       // Escape inside a field or a modal dialog belongs to that field or dialog.
       if (event.target instanceof Element && event.target.closest("input, textarea, select, dialog[open], [role='menu']")) return;
       event.preventDefault();
-      open.close();
+      // An app that has the window gives it back first; the next Esc puts it away.
+      if (open.takesWindow) open.takesWindow.leave();
+      else open.close();
     };
     window.addEventListener("keydown", dismiss);
     return () => window.removeEventListener("keydown", dismiss);
   }, []);
+  // The app in front has the window for as long as its description says so (lib/windowTaken.ts).
+  const takenBy = spec?.takesWindow ? spec.id : null;
+  useLayoutEffect(() => {
+    if (!takenBy) return;
+    useWindowTaken.getState().take(takenBy, () => specRef.current?.takesWindow?.leave());
+    return () => useWindowTaken.getState().release(takenBy);
+  }, [takenBy]);
   const host = useRef<HTMLDivElement | null>(null);
   const setHost = (node: HTMLDivElement | null) => {
     host.current = node;
@@ -286,6 +421,10 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
     removeLocalStorage(HEIGHT_KEY);
     setUserHeight(null);
   };
+  useEffect(() => {
+    heightResets.add(resetHeight);
+    return () => { heightResets.delete(resetHeight); };
+  });
   // The open app's entry puts it away; any other asks for its own app.
   const ask = (entry: DrawerEntry) => { if (spec?.id === entry.id) spec.close(); else entry.open(); };
   // One panel on screen at a time: while one is leaving, the next waits its turn.

@@ -1,5 +1,6 @@
 import { PanelStack } from "../common/PanelStack";
 import { useSidePanels } from "../../lib/sidePanels";
+import { useWindowTaken, windowTaken } from "../../lib/windowTaken";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { EditorDock } from "./EditorDock";
 import { useStore } from "zustand";
@@ -338,6 +339,7 @@ export function Workspace() {
   const streamAccountKeys = useStreamBrowseStore((state) => state.accountKeys);
   const startupForeground = useStreamBrowseStore((state) => state.startupForeground);
   const { columns: layout, chrome, portrait, tall } = useLayoutSignals();
+  const windowIsTaken = useWindowTaken(windowTaken);
 
   const total = useLibraryStore((state) => state.total);
   const loading = useLibraryStore((state) => state.loading);
@@ -2333,7 +2335,8 @@ export function Workspace() {
             />
           }
         />
-        <div className="kd-stage">
+        {/* An app that has the window hides the page: it stays mounted, and takes no input. */}
+        <div className="kd-stage" inert={windowIsTaken}>
         <div
           className="kd-split"
           inert={showSettings && layout === "narrow"}

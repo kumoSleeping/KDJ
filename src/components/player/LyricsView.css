@@ -1,0 +1,48 @@
+/* The lyrics of the playing song on the song-change clock (src/lib/songSwapMotion.ts;
+   useLyricsTurn sets the two durations and easings as --kd-swap-*). The panel stays; its
+   content turns over under the same upward move as the deck card and the song's bubble: the
+   old lyrics lift away and fade, and the next song's come up from below, line after line.
+   Only transform and opacity move. A panel's first lyrics simply appear (AsyncPanelBody). */
+.kd-lyrics[data-turn="out"] { animation: kd-lyrics-turn-out var(--kd-swap-out) var(--kd-swap-out-ease) both; }
+.kd-lyrics[data-arrive] { animation: kd-lyrics-turn-in var(--kd-swap-in) var(--kd-swap-in-ease) backwards; }
+/* The lines trail the surface they are on, the ones below the sung line a little more each
+   (--kd-lyrics-wait, the stagger of the glide), and all have arrived when it has. */
+.kd-lyrics[data-arrive] .kd-lyrics-line {
+  animation: kd-lyrics-line-in calc(var(--kd-swap-in) - 2 * var(--kd-lyrics-wait, 0ms)) var(--kd-swap-in-ease) calc(2 * var(--kd-lyrics-wait, 0ms)) backwards;
+}
+/* Lyrics that were still coming out when the next change came go back the way they came: the
+   entrance runs backwards from where it had got to (--kd-swap-rewind, counted from its end).
+   The keyframes are the entrance's under another name, so the run starts over (DeckSongSwap.css). */
+.kd-lyrics[data-turn="back"] {
+  animation: kd-lyrics-turn-back var(--kd-swap-in) var(--kd-swap-in-ease) var(--kd-swap-rewind, 0ms) reverse both;
+}
+@keyframes kd-lyrics-turn-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-1.1rem); }
+}
+@keyframes kd-lyrics-turn-in {
+  from { opacity: 0; transform: translateY(0.9rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes kd-lyrics-turn-back {
+  from { opacity: 0; transform: translateY(0.9rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes kd-lyrics-line-in {
+  from { transform: translateY(1.4rem); }
+  to { transform: translateY(0); }
+}
+/* useLyricsTurn does not hold the old lyrics back under reduced motion; this covers a
+   preference that changes while a turn is under way. */
+@media (prefers-reduced-motion: reduce) {
+  .kd-lyrics[data-turn], .kd-lyrics[data-arrive], .kd-lyrics[data-arrive] .kd-lyrics-line { animation: none; }
+}
+
+/* Full screen (a tall window, lib/lyricsExtent.ts): the lyrics are the window's block above the
+   playing song's bubble, and have the room for larger words. --kd-drawer-window-zoom tells the
+   drawer by how much, so the words grow with the panel instead of jumping (Drawer.tsx). */
+.kd-drawer[data-app="lyrics"][data-takes-window] { --kd-drawer-window-zoom: 1.4; }
+.kd-drawer[data-app="lyrics"][data-takes-window] .kd-lyrics-line { padding-block: 0.75rem; }
+.kd-drawer[data-app="lyrics"][data-takes-window] .kd-lyrics-line-text { font-size: calc(1.05rem * var(--kd-drawer-window-zoom)); }
+.kd-drawer[data-app="lyrics"][data-takes-window] .kd-lyrics-line-roma { font-size: calc(0.74rem * var(--kd-drawer-window-zoom)); }
+.kd-drawer[data-app="lyrics"][data-takes-window] .kd-lyrics-line-trans { font-size: calc(0.78rem * var(--kd-drawer-window-zoom)); }

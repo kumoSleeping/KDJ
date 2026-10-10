@@ -7086,7 +7086,7 @@ button.kd-camelot-grid-key { cursor: pointer; }
 }
 .kd-lyrics-embedded-tools .kd-lyrics-layer { align-self: center; margin: 0; }
 .kd-detail-lyrics-panel .kd-lyrics-stage { min-height: 0; }
-.kd-detail-lyrics-panel .kd-lyrics-scroll { padding: 1.2rem 0.7rem 1.8rem; }
+.kd-detail-lyrics-panel .kd-lyrics-scroll { padding-inline: 0.7rem; }
 .kd-lyrics-source-picker,
 .kd-viz-panel .kd-lyrics-source-picker {
   display: inline-flex;
@@ -7127,12 +7127,17 @@ button.kd-camelot-grid-key { cursor: pointer; }
   display: flex;
   flex-direction: column;
 }
+/* The column follows the song (lib/lyricsGlide.ts): its scroll position is set at once and the
+   lines glide to it, so it does not scroll smoothly by itself. The room above the first line
+   and below the last is half the column (--kd-lyrics-half, measured by the view), so either
+   can rest on the centre line. Lines are measured from the column: it is their offset parent. */
 .kd-lyrics-scroll {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 2.4rem 1rem 3.2rem;
-  scroll-behavior: smooth;
+  overflow-anchor: none;
+  padding: calc(var(--kd-lyrics-half, 6rem) - 1.3rem) 1rem;
   mask-image: linear-gradient(
     to bottom,
     transparent 0%,
@@ -7141,11 +7146,14 @@ button.kd-camelot-grid-key { cursor: pointer; }
     transparent 100%
   );
 }
+/* A line's emphasis — ink, opacity, size, weight — changes over the time of the glide and with
+   its curve (--kd-lyrics-glide*, set by the view from lib/lyricsGlide.ts), and a line below the
+   sung one waits as long as its glide does (--kd-lyrics-wait), so the two arrive together.
+   The glide owns the line's transform; the size grows on the body inside it. */
 .kd-lyrics-line {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.2rem;
   width: 100%;
   margin: 0;
   padding: 0.55rem 0.65rem;
@@ -7156,42 +7164,65 @@ button.kd-camelot-grid-key { cursor: pointer; }
   text-align: center;
   color: var(--kd-lyrics-soft);
   opacity: 0.42;
-  transform: scale(0.96);
   transition:
-    color 220ms ease,
-    opacity 220ms ease,
-    transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    color var(--kd-lyrics-glide, 420ms) ease var(--kd-lyrics-wait, 0ms),
+    opacity var(--kd-lyrics-glide, 420ms) ease var(--kd-lyrics-wait, 0ms);
 }
+.kd-lyrics-line:not([data-past])[data-dist="1"] { --kd-lyrics-wait: var(--kd-lyrics-stagger, 28ms); }
+.kd-lyrics-line:not([data-past])[data-dist="2"] { --kd-lyrics-wait: calc(2 * var(--kd-lyrics-stagger, 28ms)); }
+.kd-lyrics-line:not([data-past])[data-dist="3"] { --kd-lyrics-wait: calc(3 * var(--kd-lyrics-stagger, 28ms)); }
+.kd-lyrics-line:not([data-past])[data-dist="4"] { --kd-lyrics-wait: calc(4 * var(--kd-lyrics-stagger, 28ms)); }
+.kd-lyrics-line-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  max-width: 100%;
+  transform: scale(0.96);
+  transition: transform var(--kd-lyrics-glide, 420ms) var(--kd-lyrics-glide-ease, ease) var(--kd-lyrics-wait, 0ms);
+}
+/* The pointer is answered at once, not on the song's clock. */
 .kd-lyrics-line:hover {
   opacity: 0.88;
   color: var(--kd-lyrics-ink);
+  transition-duration: 160ms;
+  transition-delay: 0ms;
 }
 .kd-lyrics-line:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--kd-text) 35%, transparent);
   outline-offset: 2px;
   border-radius: 0.4rem;
 }
-.kd-lyrics-line[data-dist="1"] {
-  opacity: 0.62;
-  transform: scale(0.98);
-}
+.kd-lyrics-line[data-dist="1"] { opacity: 0.62; }
+.kd-lyrics-line[data-dist="1"] .kd-lyrics-line-body { transform: scale(0.98); }
 .kd-lyrics-line[data-dist="0"],
 .kd-lyrics-line[data-active="true"] {
   color: var(--kd-lyrics-ink);
   opacity: 1;
-  transform: scale(1.045);
 }
+.kd-lyrics-line:is([data-dist="0"], [data-active="true"]) .kd-lyrics-line-body { transform: scale(1.045); }
+/* The words are written in both weights on the same spot. The line is as wide as the heavier,
+   so becoming the sung line moves nothing. The weights fade into each other: the one that
+   leaves goes in the first part of the glide and the one that arrives takes all of it, so two
+   sets of letters of different widths are hardly ever seen at once. */
 .kd-lyrics-line-text {
+  display: grid;
+  justify-items: center;
   font-size: 1.05rem;
-  font-weight: 500;
   letter-spacing: 0.02em;
   line-height: 1.45;
   max-width: 22em;
 }
-.kd-lyrics-line[data-active="true"] .kd-lyrics-line-text {
-  font-weight: 700;
-  letter-spacing: 0.03em;
+.kd-lyrics-line-text > span {
+  grid-area: 1 / 1;
+  transition: opacity var(--kd-lyrics-glide, 420ms) ease-out var(--kd-lyrics-wait, 0ms);
 }
+.kd-lyrics-line-sung { font-weight: 700; opacity: 0; }
+.kd-lyrics-line-waiting { font-weight: 500; }
+.kd-lyrics-line:not([data-active="true"]) .kd-lyrics-line-sung,
+.kd-lyrics-line[data-active="true"] .kd-lyrics-line-waiting { transition-duration: calc(var(--kd-lyrics-glide, 420ms) * 0.4); }
+.kd-lyrics-line[data-active="true"] .kd-lyrics-line-sung { opacity: 1; }
+.kd-lyrics-line[data-active="true"] .kd-lyrics-line-waiting { opacity: 0; }
 .kd-lyrics-line-roma {
   font-size: 0.74rem;
   font-weight: 400;
@@ -7214,6 +7245,9 @@ button.kd-camelot-grid-key { cursor: pointer; }
 }
 .kd-lyrics-line[data-active="true"] .kd-lyrics-line-trans {
   opacity: 0.78;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-lyrics-line, .kd-lyrics-line-body, .kd-lyrics-line-text > span { transition: none; }
 }
 .kd-lyrics-empty {
   margin: auto;
