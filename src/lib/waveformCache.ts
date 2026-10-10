@@ -1,6 +1,7 @@
 import type { Track, Waveform } from "../types";
 import { api } from "./api";
 import { isStreamTrack } from "./streamTrack";
+import { completedStreamDuration } from "./streamWaveformExtent";
 import { overviewWaveformFromDetail } from "./waveformViewport";
 
 /** 当前曲、下一台 Deck 和最近查看过的歌曲足够；避免整晚演出后数组只增不减。 */
@@ -140,6 +141,13 @@ interface StreamWaveformEntry {
   } | null;
   /** Whether the server has published the final analyzed waveform, not just finished caching. */
   complete: boolean;
+  /**
+   * The song's length as the finished decode measured it, when that overrules the duration the
+   * transport reports (see streamWaveformExtent.ts); 0 while the transport's stands. Every later
+   * projection uses it, whoever asks: a rail that mounts afterwards still passes the transport's
+   * duration, and would squeeze the finished waveform back into a prefix.
+   */
+  mediaDuration: number;
   /** Raw evidence keeps accumulating; immutable presentation snapshots publish at most 5 Hz. */
   lastSnapshotAtMs: number;
 }
@@ -176,6 +184,7 @@ function emptyStreamEntry(trackId: number, duration: number): StreamWaveformEntr
     analyserKnown: Array(STREAM_BUCKETS).fill(false),
     cachedPrefix: null,
     complete: false,
+    mediaDuration: 0,
     lastSnapshotAtMs: -Infinity,
   };
 }
@@ -511,7 +520,7 @@ export function updateStreamWaveform(
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const entry = streamCache.get(trackId) ?? emptyStreamEntry(trackId, safeDuration);
   const previous = entry.snapshot;
-  const total = safeDuration || previous.waveform.duration;
+  const total = entry.mediaDuration || safeDuration || previous.waveform.duration;
   const nextRanges =
     bufferedRanges === undefined
       ? previous.bufferedRanges
@@ -570,6 +579,11 @@ export function updateStreamWaveform(
  * `coveredSeconds` 是已经得到 PCM 的时长，而 `duration` 是整曲长度。两者不可混用：
  * 这里的 `buildStreamSnapshot` 会只覆盖前者对应的固定桶，保留其他区域已有的 analyser
  * 样本和 `buffered` 占位。
+ *
+ * That holds while the song loads. A `complete` waveform is the whole file decoded, and
+ * `duration` is only what the transport reports (catalogue metadata on the native player): when
+ * the two disagree and the container's own duration (`probedSeconds`) confirms the decode, the
+ * song is as long as the decode says, not a prefix of the transport's figure.
  */
 function mergeProgressiveOverviewWaveform(
   trackId: number,
@@ -579,18 +593,21 @@ function mergeProgressiveOverviewWaveform(
   sourceRevision: number,
   bufferedRanges?: readonly StreamBufferedRange[],
   complete = false,
+  probedSeconds = 0,
 ): StreamWaveformSnapshot {
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const entry = streamCache.get(trackId) ?? emptyStreamEntry(trackId, safeDuration);
   const previous = entry.snapshot;
-  const total = safeDuration || previous.waveform.duration;
-  const nextRanges =
-    bufferedRanges === undefined
-      ? previous.bufferedRanges
-      : normalizeBufferedRanges(bufferedRanges, total);
   const previousPrefix = entry.cachedPrefix;
   // HTTP 轮询可能乱序返回；旧快照不能把已缓存得更远的波形缩回去。
   if (previousPrefix && sourceRevision < previousPrefix.revision) {
+    touchStreamEntry(trackId, entry);
+    return previous;
+  }
+  // The finished waveform of a song is not given up for a prefix of the same song. Playing it
+  // again makes the server start its capture over, and its first prefixes carry newer revisions
+  // than the complete picture this cache still holds; only another complete one replaces it.
+  if (entry.complete && !complete) {
     touchStreamEntry(trackId, entry);
     return previous;
   }
@@ -611,6 +628,14 @@ function mergeProgressiveOverviewWaveform(
     revision: sourceRevision,
   };
   entry.complete ||= complete;
+  if (complete) {
+    entry.mediaDuration = completedStreamDuration(safeDuration, coveredSeconds, probedSeconds);
+  }
+  const total = entry.mediaDuration || safeDuration || previous.waveform.duration;
+  const nextRanges =
+    bufferedRanges === undefined
+      ? previous.bufferedRanges
+      : normalizeBufferedRanges(bufferedRanges, total);
   const next = buildStreamSnapshot(entry, trackId, total, nextRanges, previous.revision + 1);
   // Prefixes stay visually stable while growing, but the completed analysis is authoritative.
   // Freezing it too would permanently keep early analyser silence/partial-bucket amplitudes
@@ -632,6 +657,7 @@ export function mergeCachedStreamWaveform(
   sourceRevision: number,
   bufferedRanges?: readonly StreamBufferedRange[],
   complete = false,
+  probedSeconds = 0,
 ): StreamWaveformSnapshot {
   if (trackId >= 0) throw new Error("渐进在线波形只接受负 track id");
   return mergeProgressiveOverviewWaveform(
@@ -642,6 +668,7 @@ export function mergeCachedStreamWaveform(
     sourceRevision,
     bufferedRanges,
     complete,
+    probedSeconds,
   );
 }
 
