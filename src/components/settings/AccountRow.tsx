@@ -83,8 +83,8 @@ export const settingRow = {
     // 老的 1.5rem 间距在 350px 里是纯浪费，够把文字和按钮分开就行
     columnGap: "0.75rem",
     rowGap: "0.3rem",
-    padding: "0.55rem 0",
-    borderBottom: "1px solid var(--kd-line-soft)",
+    // Rows are told apart by their own spacing; there is no rule between them.
+    padding: "0.6rem 0",
   },
   /** 头像 + 文字块。flex:1 让它去抢剩余宽度，minWidth:0 才允许它缩到比内容还窄 */
   text: {

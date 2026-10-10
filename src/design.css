@@ -6814,10 +6814,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   justify-content: space-between;
   gap: 0.7rem;
   min-height: 2.35rem;
-  border-bottom: 1px solid var(--kd-line-soft);
-}
-.kd-cache-overview-row:last-child {
-  border-bottom: 0;
 }
 .kd-cache-overview-copy {
   display: flex;
