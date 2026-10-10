@@ -7,6 +7,8 @@ import { useVisualizerStudioStore } from "../src/stores/visualizerStudioStore";
 import { VisualizerDock } from "../src/components/composition/VisualizerDock";
 import { useSidePanels } from "../src/lib/sidePanels";
 import { DrawerHost } from "../src/components/drawer/Drawer";
+import { VisualizerPopup } from "../src/components/player/VisualizerPopup";
+import { useVisualizerPopup } from "../src/lib/visualizerPopup";
 
 const dom = new JSDOM('<div id="root"></div><div id="dock"></div>', { url: "http://localhost" });
 dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as any;
@@ -34,6 +36,8 @@ const fixture = {
   prepares: 0, imageLoads: 0, analyses: 0,
   session: { trackId: 42 as number | null }, commands: [] as any[], plays: [] as any[],
   windows: [] as any[],
+  cover: true,
+  playing: null as any,
 };
 Object.assign(globalThis, { studioTest: fixture });
 const root = createRoot(document.getElementById("root")!);
@@ -143,6 +147,8 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
       root.render(<VisualizerStudioPanel inlineTrack={track} showDetails={false} popup onClose={() => { if (editor().inlineSettings) editor().close(); }}/>);
       await wait(60);
     });
+    const floatingWindow = () => document.querySelector('[role="dialog"][aria-label="可视化预览小窗"]');
+    assert.ok(floatingWindow()?.querySelector('canvas'),'the window comes up with the song\'s picture in it');
     await act(async()=> { editor().openInlineSettings(track); await wait(30); });
     assert.equal(fixture.windows.length,0,'the gear must not ask for a separate window');
     assert.equal(editor().inlineSettings,true);
@@ -152,6 +158,45 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     assert.equal(typeof editor().beforeClose,'function','the unsaved-change guard is registered');
     await act(async()=> { host.querySelector<HTMLElement>('[aria-label="关闭可视化配置"]')!.click(); await wait(60); });
     assert.equal(editor().track,null,'closing the column app ends the hosted controls');
+    // A song with no cover and no picture of its own: mounted the same way, its window stays away.
+    const reported: string[] = [];
+    await act(async()=> {
+      fixture.cover = false; fixture.session.trackId = 44;
+      root.render(<VisualizerStudioPanel key={44} inlineTrack={{ ...track, id:44, title:'Bare' }} showDetails={false} popup onContentStateChange={state => reported.push(state)}/>);
+      await wait(60);
+    });
+    assert.equal(floatingWindow(),null,'a song with nothing to show does not bring the window up');
+    assert.deepEqual(reported,['loading','empty'],'and says so, without ever having been ready');
+    // The next song with a cover brings it back.
+    await act(async()=> {
+      fixture.cover = true; fixture.session.trackId = 42;
+      root.render(<VisualizerStudioPanel key={42} inlineTrack={track} showDetails={false} popup/>);
+      await wait(60);
+    });
+    assert.ok(floatingWindow()?.querySelector('canvas'),'the next song with a cover brings the window back');
+    // ---- The window's host, with the visualizer on and the drawer's controls following the song.
+    const song = (id:number,title:string) => ({ ...track, id, title, format:"wav" });
+    const play = (playing:ReturnType<typeof song>,cover:boolean) => act(async()=> {
+      fixture.cover = cover; fixture.session.trackId = playing.id; fixture.playing = playing;
+      fixture.listeners.forEach(f=>f()); await wait(80);
+    });
+    fixture.playing = song(42,'Test');
+    await act(async()=> { root.render(<VisualizerPopup/>); useVisualizerPopup.getState().setOpen(true); await wait(80); });
+    assert.ok(floatingWindow()?.querySelector('canvas'),'the playing song\'s window is up');
+    await act(async()=> { editor().openInlineSettings(fixture.playing); await wait(30); });
+    await play(song(45,'Next'),true);
+    assert.equal(editor().track?.id,45,'the controls follow to the next song that has a picture');
+    assert.equal(editor().inlineSettings,true);
+    assert.ok(floatingWindow()?.querySelector('canvas'));
+    await play(song(44,'Bare'),false);
+    assert.equal(floatingWindow(),null,'a song without a cover passes with no window');
+    assert.equal(editor().track,null,'and the window\'s controls leave with it');
+    assert.equal(useVisualizerPopup.getState().open,true,'the visualizer itself stays on');
+    await play(song(42,'Test'),true);
+    assert.ok(floatingWindow()?.querySelector('canvas'),'the window is back with the next song that has one');
+    assert.equal(editor().track,null,'the controls stay closed until asked for');
+    await act(async()=> { useVisualizerPopup.getState().setOpen(false); await wait(20); });
+    assert.equal(floatingWindow(),null,'switching the visualizer off takes the window down');
     await act(async()=>dock.unmount());
     // ---- The drawer: entries that are always there, one floating panel at a time; the one that
     // is replaced or closed leaves as it was.
@@ -202,7 +247,7 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     assert.equal(host.querySelectorAll('.kd-drawer[data-app="lyrics"]:not([data-leaving])').length,1,'and then comes in again');
     assert.equal(host.querySelectorAll('.kd-drawer').length,1);
     await act(async()=>column.unmount());
-    console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension, drawer app, leaving apps");
+    console.log("PASS: early artwork, retained canvas, paused redraw suppression, 120Hz→30fps pacing, isolated position updates, background suspension, drawer app, a window only with a picture, leaving apps");
   } finally {
     await act(async()=>root.unmount()); dom.window.close();
   }
