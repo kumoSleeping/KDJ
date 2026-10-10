@@ -3,17 +3,17 @@ import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { PanelCollapseContext, PanelDockedContext } from "../common/panelCollapse";
 import { DownloadTaskPanel } from "./TaskPanels";
-import { LyricsDetailPanel } from "./LyricsView";
+import { PlayingLyricsPanel } from "./LyricsView";
 import "./SidePanels.css";
 
 /** The lyrics as one app of the right column. */
 export function SideLyrics() {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   return <section className="kd-side-panels" aria-label="歌词">
-    {track && <PanelCollapseContext.Provider
+    <PanelCollapseContext.Provider
       value={{ label: "歌词", collapse: () => useSidePanels.getState().setLyrics(false) }}>
-      <LyricsDetailPanel track={track} reserveEmpty visibleHeader />
-    </PanelCollapseContext.Provider>}
+      <PlayingLyricsPanel track={track} visibleHeader />
+    </PanelCollapseContext.Provider>
   </section>;
 }
 
@@ -21,7 +21,7 @@ export function SideLyrics() {
 export function DrawerLyrics() {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   return <section className="kd-side-panels kd-drawer-lyrics">
-    {track && <PanelDockedContext.Provider value><LyricsDetailPanel track={track} reserveEmpty /></PanelDockedContext.Provider>}
+    <PanelDockedContext.Provider value><PlayingLyricsPanel track={track} /></PanelDockedContext.Provider>
   </section>;
 }
 
@@ -41,9 +41,9 @@ export function SidePanels() {
   const lyrics = useSidePanels(state => state.lyrics);
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   return <section className="kd-side-panels" aria-label="侧栏">
-    {lyrics && track && <PanelCollapseContext.Provider
+    {lyrics && <PanelCollapseContext.Provider
       value={{ label: "歌词", collapse: () => useSidePanels.getState().setLyrics(false) }}>
-      <LyricsDetailPanel track={track} reserveEmpty visibleHeader />
+      <PlayingLyricsPanel track={track} visibleHeader />
     </PanelCollapseContext.Provider>}
     {downloads && <PanelCollapseContext.Provider
       value={{ label: "下载与导出", collapse: () => useSidePanels.getState().setDownloads(false) }}>

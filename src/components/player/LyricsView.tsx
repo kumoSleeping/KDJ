@@ -37,6 +37,8 @@ import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { isVideoTrack } from "../../lib/format";
 import { streamMeta } from "../../lib/streamTrack";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
+import { useLyricsTurn, type LyricsTurnView } from "./useLyricsTurn";
+import "./LyricsView.css";
 import { Panel } from "../common";
 import { AsyncPanelBody } from "../common/AsyncPanelBody";
 import type { Track } from "../../types";
@@ -47,12 +49,19 @@ interface LyricClock { active: number; started: number }
 const clockAt = (lines: LrcLine[], position: number): LyricClock =>
   ({ active: activeLrcIndex(lines, position), started: startedLrcIndex(lines, position) });
 
+/** For this long after a song starts, the position the player last reported may still be the
+ *  previous song's (the bar announces the new song before its media has been reset). */
+const STALE_POSITION_MS = 2_000;
+
 /**
  * Where the player is among the lines of `trackId`. The player reports its position many times
- * a second; the view is drawn again only when that crosses into another line.
+ * a second; the view is drawn again only when that crosses into another line. `songSince` is
+ * when the song started, when the view knows (performance.now(); 0 otherwise): a view that comes
+ * up right after it starts at the song's beginning and waits for the first report.
  */
-function usePlayerLyricClock(trackId: number | null, lines: LrcLine[]): LyricClock {
-  const remembered = () => trackId == null ? 0 : getLatestPlayerSync(trackId)?.position ?? 0;
+function usePlayerLyricClock(trackId: number | null, lines: LrcLine[], songSince = 0): LyricClock {
+  const remembered = () => trackId == null || (songSince > 0 && performance.now() - songSince < STALE_POSITION_MS)
+    ? 0 : getLatestPlayerSync(trackId)?.position ?? 0;
   const [clock, setClock] = useState(() => clockAt(lines, remembered()));
   useEffect(() => {
     const at = (position: number) => {
@@ -71,6 +80,8 @@ function usePlayerLyricClock(trackId: number | null, lines: LrcLine[]): LyricClo
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onSync);
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
+    // `songSince` only matters when the view comes up.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trackId, lines]);
   return clock;
 }
@@ -111,19 +122,42 @@ interface LyricsDetailProps {
   transport?: { position: number; seek(position: number): void };
 }
 
-export function LyricsDetailPanel({ track, transport, reserveEmpty = false, visibleHeader = false }: LyricsDetailProps) {
+const isVideo = (track: Track) => isVideoTrack(track.format) || streamMeta(track)?.kind === "video";
+
+/** The lyrics of one song as a panel: the song's detail, a video's side column. */
+export function LyricsDetailPanel(props: LyricsDetailProps) {
+  return <LyricsPanel {...props} />;
+}
+
+/**
+ * The lyrics of the playing song, in a panel that stays where it is across songs (the drawer,
+ * the side column, a phone's sheet). When the song changes its content turns over: the old
+ * lyrics leave, and the next song's come out once they are ready (useLyricsTurn).
+ */
+export function PlayingLyricsPanel({ track, visibleHeader = false }: { track: Track | null; visibleHeader?: boolean }) {
+  const turn = useLyricsTurn(track);
+  // No song and nothing on its way out: there is no panel, as before.
+  if (!track && !turn.track) return null;
+  return <LyricsPanel track={turn.track} turn={turn} reserveEmpty visibleHeader={visibleHeader} />;
+}
+
+function LyricsPanel({ track, transport, reserveEmpty = false, visibleHeader = false, turn }: Omit<LyricsDetailProps, "track"> & {
+  /** Null while a turning panel waits for the next song's lyrics: it then holds nothing. */
+  track: Track | null;
+  turn?: LyricsTurnView;
+}) {
   const [actionsHost, setActionsHost] = useState<HTMLSpanElement | null>(null);
-  const entry = useLyricsStore(state => state.get(track.id));
+  const entry = useLyricsStore(state => state.get(track?.id));
   const prefsEpoch = useLyricsPrefs(state => state.prefsEpoch);
-  useEffect(() => { void useLyricsStore.getState().ensure(track, {cacheOnly:true}); }, [track.id, prefsEpoch]);
-  const video = isVideoTrack(track.format) || streamMeta(track)?.kind === "video";
-  const ready = !video && hasVisibleLyrics(entry.lines);
-  const state = ready ? "ready" : !video && (entry.status === "idle" || entry.status === "loading") ? "loading" : "empty";
+  useEffect(() => { if (track) void useLyricsStore.getState().ensure(track, {cacheOnly:true}); }, [track?.id, prefsEpoch]);
+  const video = !!track && isVideo(track);
+  const ready = !!track && !video && hasVisibleLyrics(entry.lines);
+  const state = ready ? "ready" : !track || (!video && (entry.status === "idle" || entry.status === "loading")) ? "loading" : "empty";
   if (!reserveEmpty && !ready) return null;
   return (
     <Panel heading="歌词" visibleHeader={visibleHeader} actionsHost={actionsHost} padded={false} dense className="kd-detail-lyrics-panel">
       <AsyncPanelBody kind="lyrics" state={state}>
-        {ready && <LyricsView track={track} transport={transport} actionsRef={setActionsHost} />}
+        {ready && track && <LyricsView key={turn?.key} track={track} transport={transport} actionsRef={setActionsHost} turn={turn} />}
       </AsyncPanelBody>
     </Panel>
   );
@@ -284,7 +318,11 @@ function useLyricsFollow(followed: number, layoutKey: unknown) {
   };
 }
 
-function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { actionsRef(node: HTMLSpanElement | null): void }) {
+function LyricsView({ track, transport, actionsRef, turn }: LyricsDetailProps & {
+  actionsRef(node: HTMLSpanElement | null): void;
+  /** The view's part in a change of song, in a panel that follows the playing song. */
+  turn?: LyricsTurnView;
+}) {
   const trackId = track.id;
   const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const activeTrack = playingTrack?.id === trackId;
@@ -297,7 +335,7 @@ function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { acti
   const prefsEpoch = useLyricsPrefs((state) => state.prefsEpoch);
   const cycleLyricExtra = useLyricsPrefs((state) => state.cycleLyricExtra);
   const lines = entry.lines ?? [];
-  const playerClock = usePlayerLyricClock(transport ? null : trackId, lines);
+  const playerClock = usePlayerLyricClock(transport ? null : trackId, lines, turn?.songSince);
   const { active, started } = transport ? clockAt(lines, transport.position) : playerClock;
 
   const translated = entry.translated ?? [];
@@ -313,7 +351,11 @@ function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { acti
   }, [trackId, prefsEpoch]);
 
   return (
-    <div className="kd-lyrics" style={LYRICS_CLOCK} data-has-content={lines.length > 0 || !!entry.error || entry.status === "error" ? "true" : undefined}>
+    <div className="kd-lyrics" style={turn ? { ...LYRICS_CLOCK, ...turn.style } : LYRICS_CLOCK}
+      data-has-content={lines.length > 0 || !!entry.error || entry.status === "error" ? "true" : undefined}
+      // Lyrics on their way out are a picture: they take no click and are not read out.
+      data-turn={turn?.leaving ? turn.phase : undefined} data-arrive={turn?.arriving || undefined}
+      inert={turn?.leaving || undefined} aria-hidden={turn?.leaving || undefined}>
       <div className="kd-lyrics-embedded-tools">
         <LyricsSourcePicker platform={entry.meta?.platform} disabled={!activeTrack && !transport} matching={!!entry.inflight} onSelect={platform => void useLyricsStore.getState().ensure(track, { platform })} />
         {canCycle ? <button type="button" className="kd-lyrics-layer" title={lyricExtraTitle(layer)} aria-label={lyricExtraTitle(layer)} onClick={() => cycleLyricExtra(hasMeaning, hasRomaji)}>{lyricExtraLabel(layer)}</button> : null}

@@ -1,8 +1,8 @@
 /**
  * One clock for everything that leaves and comes back when the song changes.
  *
- * 曲目信息, the floating video and the deck card of the player bar all belong to the playing
- * song. On a change each one that is on screen leaves first, and the new ones arrive together
+ * 曲目信息, the floating video, the deck card of the player bar and the lyrics all belong to
+ * the playing song. On a change each one that is on screen leaves first, and the new ones arrive together
  * afterwards: a surface that has nothing to take away still waits out the others' exit instead
  * of arriving alone.
  */
