@@ -1651,7 +1651,9 @@ export function Workspace() {
   if (layout === "wide" && asidePanel) drawerApps.push({
     id: showSearchTips ? "tips" : showFolders ? "folders" : showDuplicates ? "duplicates" : "preview",
     title: asideLabel || "面板",
-    extent: previewAside ? "full" : "content",
+    // 提示和重复分析有多少内容就多高；文件夹要留出能把东西拖进去的空处；
+    // 网络视频下面的歌词没有自己的高度，所以铺到底。
+    extent: showSearchTips ? "fit" : showFolders ? "at-least-half" : showDuplicates ? "fit" : "full",
     tools: asideTools,
     body: <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>,
     close: () => {

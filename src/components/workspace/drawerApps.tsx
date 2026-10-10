@@ -68,7 +68,8 @@ export function useDrawerApps(): DrawerSpec[] {
   if (downloads) apps.push({
     id: "downloads",
     title: "下载与导出",
-    extent: "content",
+    // Things are dropped on its blank space, so it keeps room even while it lists nothing.
+    extent: "at-least-half",
     pages: taskViews,
     page: taskView,
     onPage: id => useTaskPanelStore.getState().setView(id as TaskPanelView),
@@ -89,7 +90,7 @@ export function useDrawerApps(): DrawerSpec[] {
     id: VISUALIZER_DOCK_APP,
     title: "可视化配置",
     caption: songLine(visualizerTrack),
-    extent: "full",
+    extent: "fit",
     pages: studioTabs,
     page: studioTab,
     onPage: id => useStudioTab.getState().setTab(id as typeof studioTab),
@@ -100,7 +101,7 @@ export function useDrawerApps(): DrawerSpec[] {
     id: "meta",
     title: "编辑 Meta",
     caption: songLine(metaTrack),
-    extent: "content",
+    extent: "fit",
     body: <TrackMetaEditorDrawer />,
     close: () => useTrackMetaEditor.getState().close(),
   });

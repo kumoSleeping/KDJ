@@ -564,7 +564,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   const inspector = <aside className="kd-viz-inspector" aria-label="可视化设置">
     {!inDrawer && <EditorTabs<StudioTab> label="可视化设置分区" tabs={studioTabs} value={tab} onChange={selectTab} panelId={tabPanelId} />}
     <SlidePages page={tab} order={studioTabIds}>
-    <fieldset id={tabPanelId} role="tabpanel" className="kd-viz-settings kd-scroll" disabled={busy}>{p && draft && <>
+    {/* A drawer sized by these controls does not take their absence for their height. */}
+    <fieldset id={tabPanelId} role="tabpanel" className="kd-viz-settings kd-scroll" disabled={busy} data-drawer-pending={p && draft ? undefined : ""}>{p && draft && <>
       {tab === "scene" && <>
         <Group title="画面">
           <Slider label="左右比例" value={p.scene.arc.position * 100} defaultValue={defaults.scene.arc.position * 100} min={25} max={75} step={.5} format={percent} onChange={v => edit(n => { n.scene.arc.position = v / 100; })} />
