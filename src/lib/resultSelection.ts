@@ -22,3 +22,31 @@ export function selectableGroups(item: IntakeItem): MergedGroup[] {
     (group) => group.sources.some((source) => source.platform !== "local"),
   );
 }
+
+/**
+ * Shift-click: the rows from the one touched last to the one clicked, both included, in the
+ * order they are shown. Null when either is not among the rows shown (the anchor was on another
+ * page, or was folded away) — the click then picks its own row only.
+ */
+export function selectionRun(
+  shown: readonly string[],
+  anchor: string | null,
+  target: string,
+): string[] | null {
+  if (anchor === null) return null;
+  const from = shown.indexOf(anchor);
+  const to = shown.indexOf(target);
+  if (from < 0 || to < 0) return null;
+  return shown.slice(Math.min(from, to), Math.max(from, to) + 1);
+}
+
+/** All of a set of rows is picked, a part of it, or none: what the head's mark shows. */
+export function pickStateOf(
+  keys: readonly string[],
+  selected: ReadonlySet<string>,
+): "none" | "some" | "all" {
+  let picked = 0;
+  for (const key of keys) if (selected.has(key)) picked += 1;
+  if (picked === 0) return "none";
+  return picked === keys.length ? "all" : "some";
+}

@@ -286,36 +286,6 @@ input[type="radio"] {
   flex: none;
 }
 
-/* 列表批选框比设置页开关更小；单元格只在右键/长按进入批选后占宽。
-   勾选态：细描边 + 红色对勾，不铺整块红底（白天模式下大红砖特别丑）。 */
-.kd-selection-cell {
-  width: 0 !important;
-  padding-right: 0 !important;
-  padding-left: 0 !important;
-  overflow: hidden;
-}
-.kd-selection-cell[data-active="true"] {
-  width: 1.55rem !important;
-  padding-right: 0.25rem !important;
-  padding-left: 0.4rem !important;
-}
-.kd-selection-cell input[type="checkbox"] {
-  width: 0.78rem;
-  height: 0.78rem;
-  background: transparent;
-  border-color: var(--kd-muted);
-}
-.kd-selection-cell input[type="checkbox"]:checked {
-  background: transparent;
-  border-color: var(--kd-theme);
-}
-.kd-selection-cell input[type="checkbox"]:checked::after {
-  width: 0.22rem;
-  height: 0.4rem;
-  margin-top: -1px;
-  border-color: var(--kd-theme);
-  border-width: 0 1.5px 1.5px 0;
-}
 input[type="checkbox"]:checked {
   background: var(--kd-theme);
   border-color: var(--kd-theme);
@@ -2022,16 +1992,6 @@ body[data-kd-col-dragging="true"] * {
   cursor: grabbing !important;
   user-select: none !important;
   -webkit-user-select: none !important;
-.kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) td {
-  background: var(--kd-selected);
-}
-.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) > td,
-.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) .kd-td-strong {
-  color: var(--kd-muted);
-}
-.kd-table tbody tr[data-selecting="true"][aria-selected="true"] .kd-td-strong {
-  font-weight: 700;
-}
 }
 .kd-table tbody td {
   height: var(--kd-row-h);
@@ -2061,6 +2021,16 @@ body[data-kd-col-dragging="true"] * {
    no row carries the selection tone. The row whose details are open keeps it. */
 .kd-table tbody tr[aria-selected="true"] td {
   color: var(--kd-text);
+}
+.kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) td {
+  background: var(--kd-selected);
+}
+.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) > td,
+.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) .kd-td-strong {
+  color: var(--kd-muted);
+}
+.kd-table tbody tr[data-selecting="true"][aria-selected="true"] .kd-td-strong {
+  font-weight: 700;
 }
 /* 可拖元素一律不能框选文字：拖一下变成「全选文本」比不能复制糟得多。
    曲库格子必须保持 draggable（WKWebView），用这条禁选，而不是摘掉 draggable。 */
@@ -2641,7 +2611,8 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-table tbody tr[data-tree="parent"]:hover td {
   --kd-result-package-bg: var(--kd-hover);
 }
-/* 在线结果序号在整行悬停时原位切换为下载按钮。 */
+/* 在线结果的序号格：平时是序号，批选时原位换成选择标记（RowPick.css）。
+   下载键在首个数据列右端（ResultTable.css）。 */
 .kd-table tbody td.kd-result-lead {
   padding: 0 0.35rem;
   overflow: visible;
@@ -2653,52 +2624,17 @@ body[data-kd-search-pointer-dragging="true"] * {
   padding-left: 0.35rem;
   padding-right: 0.35rem;
 }
-.kd-result-index {
+.kd-result-index,
+.kd-result-lead .kd-row-number {
   font-variant-numeric: tabular-nums;
 }
-.kd-result-download-index {
-  position: relative;
-  display: inline-grid;
-  min-width: 1.4rem;
-  min-height: 1.4rem;
-  align-items: center;
-  justify-items: end;
-}
-.kd-result-download-btn {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+/* The strip left of the index column is the table's left margin and nothing else. */
+.kd-table thead th.kd-result-gutter,
+.kd-table tbody td.kd-result-gutter {
   padding: 0;
-  border: none;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--kd-text);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
 }
-.kd-table tr:hover .kd-result-download-btn,
-.kd-result-download-index:focus-within .kd-result-download-btn {
-  opacity: 1;
-  pointer-events: auto;
-}
-.kd-table tr:hover .kd-result-download-index:has(button) > .kd-result-index,
-.kd-result-download-index:focus-within > .kd-result-index {
-  opacity: 0;
-}
-.kd-result-download-btn:hover {
-  color: var(--kd-theme);
-}
-.kd-result-download-btn:focus-visible {
-  outline: 1px solid var(--kd-theme);
-  outline-offset: 1px;
-}
-.kd-result-download-btn:disabled {
-  cursor: wait;
-  color: var(--kd-muted);
-}
-.kd-table[data-kind="results"] tbody tr:has(.kd-result-download-btn):hover > td {
+/* A row that can be downloaded answers the pointer with a slightly deeper tone. */
+.kd-table[data-kind="results"] tbody tr[data-downloadable="true"]:hover > td {
   background: color-mix(in srgb, var(--kd-hover), #000 7%);
 }
 /* 多来源展开属于歌曲标题，不再占用（或伪装成）独立下载列。
@@ -2764,10 +2700,13 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-table tr[data-tree="parent"][data-collection-kind] .kd-result-lead-btn:hover {
   color: var(--kd-result-collection-color);
 }
+/* The slot before a package's chevron: empty, or the package's own selection mark while rows are being picked. */
 .kd-table tr[data-tree="parent"] .kd-result-lead-spacer {
+  display: grid;
   flex: none;
   width: 1.55rem;
   height: 1.55rem;
+  place-items: center end;
 }
 /* A package's children step in by one indent; the step alone says they belong to it. */
 .kd-tree-indent {
@@ -8268,9 +8207,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .vj-rhythm-ruler > i { position: absolute; top: 16px; bottom: 0; border-left: 1px solid color-mix(in srgb, var(--kd-muted) 22%, transparent); }
 .vj-rhythm-ruler > i[data-bar] { border-left-color: color-mix(in srgb, var(--kd-muted) 50%, transparent); }
 .vj-rhythm-ruler > span { position: absolute; font-size: 10px; line-height: 14px; white-space: nowrap; padding-left: 3px; color: var(--kd-muted); font-variant-numeric: tabular-nums; }
-html:root .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) > td {
-  background:var(--kd-selected) !important;
-}
 .vj-bar-number, .vj-tempo-label { top: 0; }
 
 /* Keep clip settings compact so the material tracks retain the editing space. */
@@ -8331,6 +8267,9 @@ html:root .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true
    being picked: there the selection mark and the type carry it (see the base rule above). */
 html:root .kd-table tbody tr[aria-selected="true"] > td {
   color:var(--kd-text) !important;
+}
+html:root .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) > td {
+  background:var(--kd-selected) !important;
 }
 html:root .kd-table tbody tr[aria-selected="true"] > td :is(.kd-td-strong, .kd-muted, .kd-faint, button, a, small) { color:var(--kd-text) !important; }
 /* Row selection is a neutral surface, separate from red control selection.

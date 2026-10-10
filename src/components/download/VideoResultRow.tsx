@@ -22,8 +22,10 @@ import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import type { MergedGroup, VideoDownloadRequest, VideoInfo, VideoPage } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
+import { RowIndex, RowPick } from "../common/RowPick";
 import { PlatformMark } from "./PlatformMark";
-import { ResultDownloadIndex } from "./ResultDownloadIndex";
+import { resultDownloadKeyColumn } from "./resultColumns";
+import { ResultDownloadKey, withDownloadKey } from "./ResultDownloadKey";
 import { foldingRowProps, foldOrder, useFold } from "./searchMotion";
 import { requestVideoPreview } from "./VideoPreview";
 import { useTrackClickPrefs, playClickForLayout } from "../../lib/trackClickPrefs";
@@ -163,7 +165,7 @@ export interface VideoResultRowProps extends VideoSeed {
   info?: VideoInfo | null;
   /** 可见数据列（与 ResultTable / MergedGroupRow 同一套偏好）。 */
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
-  /** 整行单元格总数（勾选 + 动作 + 数据列），错误提示行用。 */
+  /** 整行单元格总数（左边距 + 序号 + 数据列 + 空白列），错误提示行用。 */
   totalColumns: number;
   /** 当前布局档位，决定单击/双击预览行为。 */
   layout: LayoutMode;
@@ -178,13 +180,17 @@ export interface VideoResultRowProps extends VideoSeed {
   /** 收藏夹/搜索返回的视频可进入与歌曲相同的全选和批量下载流程。 */
   selectable?: boolean;
   selected?: boolean;
+  /** Rows are being picked: the number gives way to the selection mark and a plain click picks. */
   selectionMode?: boolean;
+  /** The row's key in the selection, written on the row so a Shift-click can follow the rows as shown. */
+  pickKey?: string;
   /** What a batch download knows this row by (downloadToss.ts): its cover joins the gathering. */
   tossItem?: string;
   /** 搜索结果里的分 P 与歌曲多来源共用同一套展开状态。 */
   expanded?: boolean;
   onToggleExpand?(): void;
-  onToggleSelect?(): void;
+  /** `range`: pick the run from the row touched last to this one (Shift-click). */
+  onToggleSelect?(range?: boolean): void;
   onEnterSelection?(): void;
   /** 当前行位于现有选区内时，右键下载应交给整组选区入口。 */
   onDownloadSelected?(): void;
@@ -219,6 +225,7 @@ export function VideoResultRow({
   selectable = false,
   selected = false,
   selectionMode = false,
+  pickKey,
   tossItem,
   expanded,
   onToggleExpand,
@@ -400,6 +407,13 @@ export function VideoResultRow({
       event.preventDefault();
     },
   };
+  // The download key is offered in the first data column, and not while rows are being picked.
+  const keyColumn = resultDownloadKeyColumn(columns);
+  const downloadKey = bvid && !selectionMode
+    ? <ResultDownloadKey title={title} onDownload={() => { void download(0); }} disabled={sending} />
+    : null;
+  const keyed = (key: string, content: React.ReactNode) =>
+    key === keyColumn ? withDownloadKey(content, downloadKey) : content;
 
   const partCell = (columnKey: string, page: VideoPage, pageIndex: number) => {
     switch (columnKey) {
@@ -461,6 +475,8 @@ export function VideoResultRow({
         data-video="true"
         data-enter={bornLate && leave === undefined ? "late" : undefined}
         data-selecting={selectionMode ? "true" : undefined}
+        data-pick-key={selectable ? pickKey : undefined}
+        data-downloadable={bvid ? "true" : undefined}
         {...{ [TOSS_ITEM_ATTR]: selectable ? tossItem : undefined }}
         aria-selected={selected}
         onContextMenu={(event) => {
@@ -469,7 +485,7 @@ export function VideoResultRow({
           setRowMenu({ x: event.clientX, y: event.clientY, pageIndex: 0, part: false });
         }}
         onDoubleClick={(event) => {
-          if (event.metaKey || event.ctrlKey) return;
+          if (event.metaKey || event.ctrlKey || event.shiftKey) return;
           if (suppressClickRef.current) {
             suppressClickRef.current = false;
             return;
@@ -483,8 +499,19 @@ export function VideoResultRow({
         }}
         onPointerDown={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
-          if (selectionMode || event.metaKey || event.ctrlKey) return;
+          if (selectionMode || event.metaKey || event.ctrlKey || event.shiftKey) return;
           bindPointerDrag(event);
+        }}
+        onMouseDown={(event) => {
+          // A click that picks must not select text on its way (Shift would stretch a selection).
+          if (
+            selectable
+            && (selectionMode || event.metaKey || event.ctrlKey || event.shiftKey)
+            && !(event.target as HTMLElement).closest("button, select, label, input, a")
+          ) {
+            event.preventDefault();
+            clearTextSelection();
+          }
         }}
         onClick={(event) => {
           if (suppressClickRef.current) {
@@ -493,8 +520,10 @@ export function VideoResultRow({
           }
           if (!bvid) return;
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
-          if (selectable && (selectionMode || event.metaKey || event.ctrlKey)) {
-            onToggleSelect?.();
+          // Picking: a plain click anywhere on the row picks or drops it (⌘/Ctrl-click starts
+          // the picking, Shift-click takes the run from the row touched last). Nothing is previewed.
+          if (selectable && (selectionMode || event.metaKey || event.ctrlKey || event.shiftKey)) {
+            onToggleSelect?.(event.shiftKey);
             return;
           }
           if (selectionMode) return;
@@ -511,27 +540,18 @@ export function VideoResultRow({
         }
         {...foldingRowProps(leave)}
       >
-        <td
-          className="kd-selection-cell"
-          data-active={selectionMode ? "true" : undefined}
-          {...cellDrag}
-        >
-          {selectionMode && selectable ? (
-            <input
-              type="checkbox"
-              checked={selected}
-              aria-label={`选择 ${title}`}
-              onChange={() => onToggleSelect?.()}
-              onClick={(event) => event.stopPropagation()}
-            />
-          ) : null}
-        </td>
+        <td className="kd-result-gutter" {...cellDrag} />
         <td className="kd-result-lead" data-col="index" {...cellDrag}>
-          <ResultDownloadIndex
-            rowNumber={rowNumber}
-            title={title}
-            onDownload={bvid ? () => { void download(0); } : undefined}
-            disabled={sending}
+          <RowIndex
+            number={rowNumber}
+            picking={selectionMode}
+            pick={selectable ? (
+              <RowPick
+                state={selected ? "all" : "none"}
+                label={`选择 ${title}`}
+                onToggle={(event) => onToggleSelect?.(event.shiftKey)}
+              />
+            ) : null}
           />
         </td>
         {columns.map((column) => {
@@ -555,7 +575,7 @@ export function VideoResultRow({
                         referrerPolicy="no-referrer"
                       />
                     </span>
-                    <span className="kd-result-title-text">{title}</span>
+                    {withDownloadKey(title, keyColumn === "title" ? downloadKey : null, "kd-result-title-text")}
                     {hasMultiplePages ? (
                       <span className="kd-video-page-count kd-mono">{knownPageCount}P</span>
                     ) : null}
@@ -595,45 +615,51 @@ export function VideoResultRow({
             case "artist":
               return (
                 <td key={column.key} data-col="artist" title={author || undefined} {...cellDrag}>
-                  {author || DASH}
+                  {keyed(column.key, author || DASH)}
                 </td>
               );
             case "album":
               return (
                 <td key={column.key} data-col="album" {...cellDrag}>
-                  {DASH}
+                  {keyed(column.key, DASH)}
                 </td>
               );
             case "duration":
               return (
                 <td key={column.key} className="kd-td-num" data-col="duration" {...cellDrag}>
-                  {formatDuration(duration ?? info?.duration ?? null)}
+                  {keyed(column.key, formatDuration(duration ?? info?.duration ?? null))}
                 </td>
               );
             case "sources":
               return (
                 <td key={column.key} data-col="sources" {...cellDrag}>
-                  <span className="kd-source-dots" title={platform === "youtube" ? "YouTube" : "B站"}>
-                    <span className="kd-source-dot" data-platform={platform} data-active="true">
-                      <PlatformMark id={platform} size={12} />
+                  {keyed(column.key, (
+                    <span className="kd-source-dots" title={platform === "youtube" ? "YouTube" : "B站"}>
+                      <span className="kd-source-dot" data-platform={platform} data-active="true">
+                        <PlatformMark id={platform} size={12} />
+                      </span>
                     </span>
-                  </span>
+                  ))}
                 </td>
               );
             case "from":
               return (
                 <td key={column.key} className="kd-mono" data-col="from" {...cellDrag}>
-                  {platform === "youtube" ? "YouTube" : "B站"}
+                  {keyed(column.key, platform === "youtube" ? "YouTube" : "B站")}
                 </td>
               );
             case "quality":
               return (
                 <td key={column.key} className="kd-td-num kd-mono" data-col="quality" {...cellDrag}>
-                  {qualityLabel}
+                  {keyed(column.key, qualityLabel)}
                 </td>
               );
             case "vip":
-              return <td key={column.key} data-col="vip" style={{ width: "3rem" }} {...cellDrag} />;
+              return (
+                <td key={column.key} data-col="vip" style={{ width: "3rem" }} {...cellDrag}>
+                  {keyed(column.key, null)}
+                </td>
+              );
             default:
               return <td key={column.key} {...cellDrag} />;
           }
@@ -688,7 +714,7 @@ export function VideoResultRow({
               }}
               {...foldingRowProps(partLeave)}
             >
-              <td className="kd-selection-cell" {...cellDrag} />
+              <td className="kd-result-gutter" {...cellDrag} />
               <td className="kd-result-lead" data-col="index" {...cellDrag} />
               {columns.map((column) => partCell(column.key, page, pageIndex))}
               <td className="kd-table-fill" aria-hidden="true" />

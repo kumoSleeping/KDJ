@@ -43,6 +43,86 @@
   padding-left: 2.5rem;
 }
 
+/* —— The download key ——
+   It belongs to the first data column, whatever that is (resultDownloadKeyColumn), and lies at
+   the right-hand end of that cell: a bare icon in muted ink, full ink under the pointer. It
+   shows while the row is pointed at or has keyboard focus. The cell's content does not move for
+   it: its tail fades out under the key through a mask. What trails a title — the sources
+   chevron, a part count — lies outside the keyed span, so the key never covers it. */
+.kd-result-keyed {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+}
+td > .kd-result-keyed { width: 100%; }
+.kd-result-keyed-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-result-key {
+  position: absolute;
+  /* Above the text it lies over: a masked element is a layer of its own. */
+  z-index: 1;
+  top: 0;
+  right: -0.2rem;
+  bottom: 0;
+  display: grid;
+  appearance: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin: auto 0;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  background: none;
+  color: var(--kd-muted);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--kd-motion-micro-out) linear;
+}
+.kd-table tbody tr:hover .kd-result-key,
+.kd-table tbody tr:focus-visible .kd-result-key,
+.kd-result-key:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.kd-table tbody tr:hover .kd-result-keyed-body,
+.kd-table tbody tr:focus-visible .kd-result-keyed-body,
+.kd-result-key:focus-visible + .kd-result-keyed-body {
+  -webkit-mask-image: linear-gradient(to left, transparent 1.2rem, #000 2.5rem);
+  mask-image: linear-gradient(to left, transparent 1.2rem, #000 2.5rem);
+}
+.kd-result-key:hover:not(:disabled) { color: var(--kd-text); }
+.kd-result-key:focus-visible {
+  outline: 1px solid var(--kd-text);
+  outline-offset: -3px;
+}
+.kd-result-key:disabled {
+  color: var(--kd-faint);
+  cursor: progress;
+}
+/* No pointer to hover with (a phone): the key is always there, quiet. */
+@media (hover: none) {
+  .kd-result-key {
+    color: var(--kd-faint);
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .kd-result-keyed-body {
+    -webkit-mask-image: linear-gradient(to left, transparent 1.2rem, #000 2.5rem);
+    mask-image: linear-gradient(to left, transparent 1.2rem, #000 2.5rem);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-result-key { transition: none; }
+}
+
 /* —— Arrival ——
    The table carries data-reveal only while a delivered list is arriving (ResultTable.tsx), so
    none of this can run again on a re-render, a remount or a scroll. The first fourteen rows rise

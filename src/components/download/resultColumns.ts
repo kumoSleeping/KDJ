@@ -2,7 +2,7 @@ import type { IntakeItem, MergedGroup, VideoInfo } from "../../types";
 
 /**
  * 下载搜索结果表的数据列定义。
- * 勾选列和行首动作列固定在左侧，不参与换序/显隐。
+ * 左边距和序号列固定在左侧，不参与换序/显隐。
  */
 
 export interface ResultColumn {
@@ -26,6 +26,8 @@ export const RESULT_COLUMNS: ResultColumn[] = [
 ];
 
 export const RESULT_LEAD_WIDTH = "2.5rem";
+/** The strip left of the index column: the table's left margin. It never changes width. */
+export const RESULT_GUTTER_WIDTH = "0.35rem";
 export const RESULT_COLUMN_PREFS_KEY = "kd-download-columns";
 
 export const RESULT_COLUMN_MIN_WIDTH: Record<string, string> = {
@@ -115,4 +117,13 @@ export function resultColumnKeysWithData(
   }
 
   return present;
+}
+
+/**
+ * The column that carries a row's download key: the first data column that is shown, whatever
+ * it is — the title unless the user has put another column in front of it. `columns` are the
+ * visible data columns in the user's order (the index column is not one of them).
+ */
+export function resultDownloadKeyColumn(columns: ReadonlyArray<{ key: string }>): string | null {
+  return columns[0]?.key ?? null;
 }
