@@ -43,6 +43,7 @@ export function installDownloadEntryDrop(): void {
     event.preventDefault();
     finishSearchDrop();
     void enqueueSearchQueuePayload(payload).catch((error: unknown) =>
-      useToastStore.getState().show(`加入队列失败：${error instanceof Error ? error.message : String(error)}`));
+      // The entry it was dropped on is in the top row: the failure is said there.
+      useToastStore.getState().show(`加入队列失败：${error instanceof Error ? error.message : String(error)}`, "top"));
   }, true);
 }

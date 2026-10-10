@@ -137,8 +137,8 @@ export function useDrawerEntries(): DrawerEntry[] {
       id: "lyrics",
       label: "歌词",
       icon: <TextQuote size={15} aria-hidden="true" />,
-      // No lyrics: a small note says so; an empty panel does not come out.
-      open: () => requestPlayingLyrics(),
+      // No lyrics: a small note says so, under this entry; an empty panel does not come out.
+      open: () => requestPlayingLyrics(undefined, "top"),
     },
     {
       id: "settings",

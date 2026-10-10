@@ -342,7 +342,7 @@ export function LibraryWorkRail({
         className="kd-activity-control"
         disabled={scan.current === "正在取消…"}
         title="取消导入并清除本次新增记录；保留原文件和原有曲库"
-        onClick={() => void cancelScan().catch(error => useToastStore.getState().show(`取消导入失败：${String(error)}`))}
+        onClick={() => void cancelScan().catch(error => useToastStore.getState().show(`取消导入失败：${String(error)}`, "top"))}
       >
         <X size={11} />
         {scan.current === "正在取消…" ? "正在取消导入" : "取消导入"}
