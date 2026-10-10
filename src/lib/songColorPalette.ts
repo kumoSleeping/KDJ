@@ -4,12 +4,13 @@
  *
  * The cover is read by the palette extractor the visualizer already has
  * (visualizerStudioPalette.ts): up to five colours with the share of the picture each one
- * covers. This file only decides what the field makes of them. The field is deep and the text
- * on it light, as in Apple Music's lyrics, in the light theme and the dark one alike — so every
+ * covers. This file only decides what the field makes of them. The dark field is deep and the
+ * text on it light, as in Apple Music's lyrics — so every
  * colour is brought into a band of lightness that light ink reads on, its chroma kept rich but
  * capped, and the four masses are pushed apart when the cover gives colours that are too alike.
  * The ink for the two surfaces is derived from the same result and holds a contrast floor
- * against the brightest the field gets.
+ * against the brightest the field gets. The light theme maps these hues to a pale, low-chroma
+ * field with neutral dark ink instead (`lightSongColorPalette`).
  *
  * Pure: no DOM, no canvas. Colours are worked in OKLCH, where a step of lightness or hue looks
  * the same size whatever the hue is.
@@ -32,7 +33,7 @@ export interface SongColorInk {
 export interface SongColorPalette {
   /** Where the colours come from: the cover, or nothing that could be read. */
   source: "cover" | "default";
-  /** The floor of the field: its deepest colour. */
+  /** The colour under the drifting masses. */
   base: string;
   /** The masses that drift over the floor, the one that covers most first. */
   masses: readonly [string, string, string, string];
@@ -169,11 +170,11 @@ function massFrom(colour: Lch): Lch {
   };
 }
 
-/** Light ink at `lightness`, lifted until it holds `floor` against a field as bright as `against`. */
-function inkAt(lightness: number, hue: number, chroma: number, against: number, floor: number): string {
+/** Ink moved toward white (or black) until it holds `floor` against `against`. */
+function inkAt(lightness: number, hue: number, chroma: number, against: number, floor: number, direction: 1 | -1 = 1): string {
   let l = lightness, rgb = lchToRgb({ l, c: chroma, h: hue });
-  while (l < 1 && luminanceContrast(relativeLuminance(rgb), against) < floor) {
-    l = Math.min(1, l + 0.01);
+  while (l > 0 && l < 1 && luminanceContrast(relativeLuminance(rgb), against) < floor) {
+    l = clamp(l + direction * 0.01, 0, 1);
     rgb = lchToRgb({ l, c: chroma, h: hue });
   }
   return toHex(rgb);
@@ -287,7 +288,45 @@ export function songColorPalette(
     { l: GLOW_LIGHT, c: clamp(lightest.c * 1.2, 0.04, 0.12), h: lightest.h });
 }
 
-/** The brightest the field gets where the glow is at its peak, as a relative luminance. */
+/** A pale rendering of the same hues, without fetching or extracting the cover again.
+ * Keep a little tonal variation, but neither a dark cover nor a saturated one may turn the
+ * light panel into a dark island. Greys remain grey; the ink is neutral, not a tinted control. */
+export function lightSongColorPalette(palette: SongColorPalette): SongColorPalette {
+  const pale = (hex: string, base = false, glow = false): Rgb => {
+    const colour = rgbToLch(parseHex(hex) ?? [0, 0, 0]);
+    return lchToRgb({
+      // Leave room for the hue instead of washing it almost to white. The floor carries
+      // the leading hue too, so the soft edges do not dissolve into a colourless panel.
+      l: glow ? 0.97 : base ? 0.955 : 0.87 + 0.06 * clamp((colour.l - 0.17) / 0.32, 0, 1),
+      c: Math.min(colour.c * 0.6, glow ? 0.028 : base ? 0.024 : 0.075),
+      h: colour.h,
+    });
+  };
+  const masses = palette.masses.map(colour => pale(colour));
+  const base = pale(palette.base, true), glow = pale(palette.glow, false, true);
+  // A component-wise lower bound also covers sRGB blends of differently hued masses,
+  // their soft edges, and the glow, not just each solid colour in isolation.
+  const colours = [base, ...masses, glow];
+  const darkest = relativeLuminance([
+    Math.min(...colours.map(rgb => rgb[0])),
+    Math.min(...colours.map(rgb => rgb[1])),
+    Math.min(...colours.map(rgb => rgb[2])),
+  ]);
+  return {
+    source: palette.source,
+    base: toHex(base),
+    masses: [toHex(masses[0]), toHex(masses[1]), toHex(masses[2]), toHex(masses[3])],
+    glow: toHex(glow),
+    ink: {
+      text: inkAt(0.27, 0, 0, darkest, INK_TEXT_CONTRAST, -1),
+      body: inkAt(0.37, 0, 0, darkest, INK_TEXT_CONTRAST, -1),
+      muted: inkAt(0.46, 0, 0, darkest, INK_MUTED_CONTRAST, -1),
+      faint: inkAt(0.54, 0, 0, darkest, INK_FAINT_CONTRAST, -1),
+    },
+  };
+}
+
+/** The brightest the dark field gets where the glow is at its peak, as a relative luminance. */
 export function fieldPeakLuminance(palette: SongColorPalette): number {
   const brightest = Math.max(...palette.masses.map(mass => relativeLuminance(parseHex(mass) ?? [0, 0, 0])));
   const glow = relativeLuminance(parseHex(palette.glow) ?? [0, 0, 0]);

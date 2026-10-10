@@ -66,15 +66,18 @@ export const NOTHING_PRESENTED: ArrivalState = {
  * The arrival after the table has come to `now`. A list is presented when there are rows on
  * screen that were not there a moment ago: another delivery, rows where the spinner or nothing
  * was, or the pane shown again. A list delivered while the pane is away is presented when the
- * pane returns.
+ * pane returns. While a request is pending, bringing retained rows back is not a presentation:
+ * record their visibility without a cascade, so ending the request cannot replay them either.
+ * A genuinely new delivery may arrive before the caller lowers its loading flag.
  */
-export function arrivalAfter(seen: ArrivalState, now: ArrivalView): ArrivalState {
+export function arrivalAfter(seen: ArrivalState, now: ArrivalView, loading = false): ArrivalState {
   if (seen.delivery === now.delivery && seen.shown === now.shown && seen.listed === now.listed) {
     return seen;
   }
   const visible = now.shown && now.listed;
   const wasVisible = seen.shown && seen.listed;
-  const presented = visible && (!wasVisible || seen.delivery !== now.delivery);
+  const delivered = Number.isFinite(seen.delivery) && seen.delivery !== now.delivery;
+  const presented = visible && (!wasVisible || delivered) && (!loading || delivered);
   return { ...now, run: presented ? seen.run + 1 : seen.run };
 }
 

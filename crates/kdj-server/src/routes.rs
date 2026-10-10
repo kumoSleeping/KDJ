@@ -3424,6 +3424,48 @@ async fn intake_one(state: &Arc<AppState>, entry: &str, payload: &IntakeRequest)
             .into_iter()
             .map(crate::aggregate::singleton_group)
             .collect();
+        if response.platform == Platform::Youtube && response.kind == ResolveKind::Song {
+            if let Some(video_id) = item
+                .groups
+                .first()
+                .and_then(|group| group.sources.first())
+                .map(|source| source.key.clone())
+            {
+                // Keep video and Music audio in separate rows, even when cross-platform merge
+                // is enabled. A catalogue failure must never discard a successfully resolved video.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    state.youtubemusic.linked_audio_source(&video_id),
+                )
+                .await
+                {
+                    Ok(Ok(Some(source))) => {
+                        // The Music catalogue can supply a missing duration for the same video.
+                        // A distinct official audio counterpart must retain its own duration.
+                        if source.key == video_id {
+                            if let Some(video) = item.groups.first_mut() {
+                                if video.duration.is_none() {
+                                    video.duration = source.duration;
+                                    for original in &mut video.sources {
+                                        original.duration = source.duration;
+                                    }
+                                }
+                            }
+                        }
+                        item.groups.push(crate::aggregate::singleton_group(source));
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        item.errors
+                            .insert(Platform::Ytm.to_string(), format!("{error:#}"));
+                    }
+                    Err(_) => {
+                        item.errors
+                            .insert(Platform::Ytm.to_string(), "查询对应音频超时".into());
+                    }
+                }
+            }
+        }
         return item;
     }
 

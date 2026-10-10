@@ -10,6 +10,7 @@ const LYRICS_KEY = "kd-side-lyrics-open";
  */
 export const useSidePanels = create<{
   downloads: boolean;
+  /** Remembered intent. No lyrics for the current song suspends its surface, not this flag. */
   lyrics: boolean;
   raised: { id: string | null; token: number };
   setDownloads(open: boolean): void;

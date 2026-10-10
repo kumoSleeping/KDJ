@@ -35,6 +35,9 @@ export interface TaskAction {
   icon: ReactNode;
   pressed?: boolean;
   busy?: boolean;
+  /** Optional secondary menu, anchored to this key. Right click or the keyboard menu key. */
+  onContextMenu?(anchor: HTMLElement): void;
+  menuOpen?: boolean;
   /** `bubble` is the bubble's own element, for what opens beside it. */
   onSelect(bubble: HTMLElement): void;
 }

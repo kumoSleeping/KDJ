@@ -1,5 +1,7 @@
 const MAX_ACTIVE_COVER_REQUESTS = 4;
-const MAX_CACHED_COVERS = 512;
+// A 2,000-song browse must not evict the beginning merely because rows unmounted. Keep a
+// generous entry ceiling alongside the unchanged byte budget; large artwork still yields.
+const MAX_CACHED_COVERS = 4096;
 const MAX_CACHED_COVER_BYTES = 32 * 1024 * 1024;
 
 interface CacheEntry {
@@ -139,6 +141,9 @@ function pump(): void {
   while (active < MAX_ACTIVE_COVER_REQUESTS && queue.length > 0) {
     const priority = (task: CoverTask) => Math.min(...[...task.clients].map((client) => client.priority));
     queue.sort((a, b) => priority(a) - priority(b));
+    // Infinity parks a table's queued artwork while it is flinging or restoring its text.
+    // Existing consumers elsewhere still determine a shared task's minimum priority.
+    if (priority(queue[0]) === Infinity) return;
     const task = queue.shift();
     if (!task || task.clients.size === 0) continue;
     start(task);
@@ -193,7 +198,11 @@ export function acquireCoverThumbnail(key: string, url: string, priority = 1, { 
 
   return {
     promise,
-    setPriority(value) { client.priority = value; pump(); },
+    setPriority(value) {
+      if (client.priority === value) return;
+      client.priority = value;
+      pump();
+    },
     release() {
       if (client.released) return;
       client.released = true;

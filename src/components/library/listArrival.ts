@@ -5,10 +5,10 @@
  *   filter that replaced it, and every time its pane is shown again. The rows in view rise into
  *   place while they fade in, one after another from the top, each cover a beat after its row:
  *   the gesture of the search results, on the same clock (motion.css, "Lists").
- * - "chase": a fast scroll outran the rows (the table builds none while it lasts and shows bars
- *   instead, see lib/libraryStandIns.ts) and has slowed down. The rows built there run after the
- *   scroll and catch up with it: the same rise, a few times quicker, starting with the row nearest
- *   to where the scroll came from and travelling the way the scroll goes.
+ * - "chase": a fast scroll leaves only accurate row numbers (lib/libraryStandIns.ts). As it
+ *   slows, libraryRowRecovery commits small batches of real contents and calls reveal for each.
+ *   They use the same rise, a few times quicker, in the direction of travel. Numbers never move;
+ *   previously built rows do not replay this gesture when the listener scrolls back.
  *
  * The table says which rows, in the order they arrive (it knows the viewport and its rendered
  * window); this module marks them and takes the marks off when the gesture is over. A row carries
@@ -32,7 +32,7 @@ export const LIST_ARRIVAL_ROW_ATTR = "data-kd-arrive-row";
 export const LIST_ARRIVAL_STEPS = 14;
 /**
  * How long the marks stay: a little longer than the gesture (ListArrival.css; the stylesheet's
- * numbers are checked against these in tests/listArrival.test.ts).
+ * numbers are checked against these in tests/libraryTable.test.tsx).
  * list: 60 + 13 × 28 + 70 + 420 = 914ms until the last cover has landed.
  * chase: 13 × 8 + 40 + 160 = 304ms.
  */
@@ -54,6 +54,8 @@ export interface ListArrival {
    * started (a loading row whose track arrived) takes its place in it, in step with the others.
    */
   join(rows: readonly Row[]): void;
+  /** A newly committed batch gets a complete gesture, without restarting earlier batches. */
+  reveal(rows: readonly Row[], side: ListArrivalSide): void;
   /** The gesture that is running. */
   gesture(): ListArrivalGesture | null;
   /** Ends it at once: every row is simply there. */
@@ -61,7 +63,7 @@ export interface ListArrival {
 }
 
 export function createListArrival(scroller: HTMLElement): ListArrival {
-  let live: { gesture: ListArrivalGesture; startedAt: number; timer: ReturnType<typeof setTimeout>; rows: Set<HTMLElement>; origin: number } | null = null;
+  let live: { gesture: ListArrivalGesture; side: ListArrivalSide; startedAt: number; timer: ReturnType<typeof setTimeout>; rows: Set<HTMLElement>; origin: number } | null = null;
 
   const mark = (rows: readonly Row[], lag: number) => {
     if (!live) return;
@@ -94,7 +96,7 @@ export function createListArrival(scroller: HTMLElement): ListArrival {
     }
   };
 
-  return {
+  const arrival: ListArrival = {
     start(gesture, side, rows) {
       // A list replaced while it is still being presented (a filter typed letter by letter): the
       // rows that stay go on arriving, and only the ones that are new to the view start.
@@ -110,7 +112,7 @@ export function createListArrival(scroller: HTMLElement): ListArrival {
         clearTimeout(live.timer);
         scroller.removeEventListener("scroll", onScroll);
       }
-      const mine = { gesture, startedAt: performance.now(), rows: kept ?? new Set<HTMLElement>(), origin: scroller.scrollTop,
+      const mine = { gesture, side, startedAt: performance.now(), rows: kept ?? new Set<HTMLElement>(), origin: scroller.scrollTop,
         // Its own end only: a gesture that started meanwhile is not this timer's to stop.
         timer: setTimeout(() => { if (live === mine) stop(); }, LIST_ARRIVAL_MS[gesture]) };
       live = mine;
@@ -123,7 +125,22 @@ export function createListArrival(scroller: HTMLElement): ListArrival {
     join(rows) {
       if (live) mark(rows, performance.now() - live.startedAt);
     },
+    reveal(rows, side) {
+      if (prefersReducedMotion() || !rows.some(Boolean)) return;
+      if (!live || (live.gesture === "chase" && live.side !== side)) {
+        arrival.start("chase", side, rows);
+        return;
+      }
+      // A presented list retains its gesture; a chase adds this batch on its own clock.
+      // Neither cold data nor a slow commit should skip straight to an expired animation.
+      for (const row of live.rows) if (!row.isConnected) live.rows.delete(row);
+      mark(rows, 0);
+      const current = live;
+      clearTimeout(current.timer);
+      current.timer = setTimeout(() => { if (live === current) stop(); }, LIST_ARRIVAL_MS[current.gesture]);
+    },
     gesture: () => live?.gesture ?? null,
     stop,
   };
+  return arrival;
 }

@@ -151,6 +151,9 @@
 }
 /* It leaves the way it came, and only then does the next one come in (see DrawerHost). */
 .kd-drawer[data-leaving] { animation: kd-drawer-out 260ms cubic-bezier(0.55, 0, 0.8, 0.35) both; }
+/* A song replaces its whole panel on the same clock as the playing-song bubble. */
+.kd-drawer[data-content-turn] { animation-duration: var(--kd-motion-in); animation-timing-function: var(--kd-ease-out); }
+.kd-drawer[data-content-turn][data-leaving] { animation-duration: var(--kd-motion-out); animation-timing-function: var(--kd-ease-in); }
 /* The distance covers the panel, its gap and its shadow, so nothing of it is left at the edge. */
 @keyframes kd-drawer-in {
   from { transform: translateX(calc(100% + var(--kd-drawer-gap) + 3rem)); }
@@ -265,7 +268,8 @@
   cursor: row-resize;
 }
 @media (prefers-reduced-motion: reduce) {
-  .kd-drawer, .kd-drawer[data-leaving] { animation-duration: 1ms; transition: none; }
+  .kd-drawer, .kd-drawer[data-leaving],
+  .kd-drawer[data-content-turn], .kd-drawer[data-content-turn][data-leaving] { animation-duration: 1ms; transition: none; }
   .kd-drawer[data-settled] { transition: none; }
   .kd-drawer-body[data-late]:not(:empty) { animation: none; }
 }

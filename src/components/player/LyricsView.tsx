@@ -136,9 +136,9 @@ export function LyricsDetailPanel(props: LyricsDetailProps) {
 }
 
 /**
- * The lyrics of the playing song, in a panel that stays where it is across songs (the drawer,
- * the side column, a phone's sheet). When the song changes its content turns over: the old
- * lyrics leave, and the next song's come out once they are ready (useLyricsTurn).
+ * The lyrics body. A drawer supplies a fixed song and replaces the whole shell on a change;
+ * a host that keeps its shell (the phone's shared sheet) turns the content here instead.
+ * Both report their presence on the song-change clock through useLyricsTurn.
  */
 export function PlayingLyricsPanel({ track, visibleHeader = false, backdrop }: {
   track: Track | null;

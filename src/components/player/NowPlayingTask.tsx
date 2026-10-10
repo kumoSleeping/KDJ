@@ -26,6 +26,7 @@ import { localDownloadPlatform } from "./LocalTrackCacheFacts";
 import { NowPlayingTransport } from "./NowPlayingTransport";
 import { SongColorBackdrop, useSongColorAvailable } from "./SongColorBackdrop";
 import { useLyricsEntry } from "./lyricsEntry";
+import { useLyricsExtentMenu } from "./LyricsExtentMenu";
 import "./NowPlayingTask.css";
 
 export const NOW_PLAYING_TASK = "now-playing";
@@ -85,6 +86,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
   useEffect(() => () => { if (entrance.current !== null) window.clearTimeout(entrance.current); }, []);
 
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  const extent = useLyricsExtentMenu(visible ? track?.id : null);
   const keyNotation = useAppStore(state => state.settings?.key_notation ?? "camelot");
   // The bubble holds the record the song started with; a cover written since then is only
   // reachable under the list's later revision.
@@ -137,7 +139,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
       song: track.id,
       size: "large",
       base: true,
-      stay: held ? 0 : NOW_PLAYING_PEEK_MS,
+      stay: held || extent.opened ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,
       // Rolling it down with the bar away is the way back to the bar, and the key says so.
       dismiss: barAway ? { label: "展开播放条", icon: <PanelBottomOpen size={14} aria-hidden="true" /> } : undefined,
@@ -150,6 +152,8 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
           id: "lyrics", label: lyrics.open ? "关闭歌词" : "打开歌词", pressed: lyrics.open, busy: lyrics.matching,
           icon: <ScrollText size={14} aria-hidden="true" />,
           onSelect: () => live.current.lyrics.toggle(),
+          onContextMenu: extent.openFrom,
+          menuOpen: extent.opened,
         }]),
         ...(popup ? [{
           id: "popup",
@@ -195,7 +199,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn]);
+  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn, extent.openFrom, extent.opened]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
-  return null;
+  return visible && track ? extent.menu : null;
 }

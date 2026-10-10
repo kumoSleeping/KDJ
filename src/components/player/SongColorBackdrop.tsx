@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { getLatestPlayerSync, MEDIA_SYNC_EVENT, type MediaSyncDetail } from "../../lib/mediaSync";
 import { MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import { getPlayerSession } from "../../lib/playerSession";
@@ -13,9 +13,9 @@ import {
   waveLoudness,
   type BeatAnchor,
 } from "../../lib/songColorBeat";
-import { GLOW_PEAK_ALPHA, parseHex } from "../../lib/songColorPalette";
+import { GLOW_PEAK_ALPHA, lightSongColorPalette, parseHex } from "../../lib/songColorPalette";
 import { SONG_SWAP_IN_MS } from "../../lib/songSwapMotion";
-import { useThemePack } from "../../lib/themePack";
+import { THEME_CHANGE_EVENT, useThemePack } from "../../lib/themePack";
 import { cachedReleaseOverviewWaveform } from "../../lib/waveformCache";
 import { useBackdropInk } from "../common/SurfaceBackdrop";
 import "./SongColorBackdrop.css";
@@ -42,6 +42,12 @@ import "./SongColorBackdrop.css";
 export function useSongColorAvailable(): boolean {
   return useThemePack(state => state.active === null);
 }
+
+function subscribeTheme(listener: () => void): () => void {
+  window.addEventListener(THEME_CHANGE_EVENT, listener);
+  return () => window.removeEventListener(THEME_CHANGE_EVENT, listener);
+}
+const isLightTheme = () => document.documentElement.dataset.theme === "light";
 
 /** One side of a mass's bitmap, in px. The blobs have no detail to lose. */
 const BITMAP = 96;
@@ -175,7 +181,13 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
   // The field that is shown, and under it the one it is replacing while the new one fades in.
   const [fields, setFields] = useState<readonly SongColorField[]>(() => field ? [field] : []);
   if (field && fields[fields.length - 1]?.key !== field.key) setFields([...fields.slice(-1), field]);
-  const current = fields[fields.length - 1] ?? null;
+  const light = useSyncExternalStore(subscribeTheme, isLightTheme);
+  // Retone both sides of a song crossfade together when the theme changes. Do not crossfade
+  // a dark field into a pale one under ink that belongs to just one of them.
+  const shownFields = useMemo(() => light
+    ? fields.map(entry => ({ ...entry, palette: lightSongColorPalette(entry.palette) }))
+    : fields, [fields, light]);
+  const current = shownFields[shownFields.length - 1] ?? null;
   const settle = useCallback(() => setFields(list => list.length > 1 ? list.slice(-1) : list), []);
   useEffect(() => {
     if (fields.length < 2) return;
@@ -230,9 +242,9 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
       inkTimer.current = window.setTimeout(() => setInk(inkRef.current), ms * easeTime(SPREAD_EASE, wash.centre));
     });
     return () => { cancelled = true; };
-    // The palette is read through the ref: only another field, or a return from leaving, is news.
+    // The palette is read through the ref: another field, theme, or return from leaving is news.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.key, leaving]);
+  }, [current?.key, light, leaving]);
   useEffect(() => () => window.clearTimeout(inkTimer.current), []);
 
   // Leaving: the colour drains back into the key, quicker than it came, and the layer is taken
@@ -371,7 +383,7 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
       }
     }}>
     <div ref={swell} className="kd-songcolor-swell">
-      {fields.map((shownField, index) => <div key={shownField.key} className="kd-songcolor-field"
+      {shownFields.map((shownField, index) => <div key={shownField.key} className="kd-songcolor-field"
         data-arriving={index > 0 || undefined} style={{ backgroundColor: shownField.palette.base } as CSSProperties}
         onAnimationEnd={event => { if (event.target === event.currentTarget) settle(); }}>
         {shownField.palette.masses.map((colour, mass) => <span key={mass} className="kd-songcolor-drift" data-mass={mass}>
@@ -381,7 +393,7 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
     </div>
     <div ref={level} className="kd-songcolor-level">
       <div ref={glow} className="kd-songcolor-glow">
-        {fields.map((shownField, index) => <Blobs key={shownField.key} className={index > 0 ? "kd-songcolor-arriving" : undefined}
+        {shownFields.map((shownField, index) => <Blobs key={shownField.key} className={index > 0 ? "kd-songcolor-arriving" : undefined}
           colour={shownField.palette.glow} blobs={GLOW_BLOB} strength={GLOW_PEAK_ALPHA} />)}
       </div>
     </div>

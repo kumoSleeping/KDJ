@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 import { Check } from "lucide-react";
 import {
   LYRICS_EXTENT_LABEL,
@@ -17,16 +17,17 @@ const LONG_PRESS_SLOP = 8;
 
 /**
  * The menu of the lyrics panel: how tall the lyrics are (lib/lyricsExtent.ts). It opens on a
- * right click or a long press anywhere on the panel; `props` go on the panel's element and
- * `menu` is rendered inside it. The choice in force carries the check mark of a `Select`. A
+ * right click or a long press anywhere on the panel; `props` go on the panel's element.
+ * `buttonProps`/`openFrom` offer the same menu from its player key, anchored above it when
+ * needed; render `menu` alongside either trigger. The current choice carries a check mark. A
  * window that offers no choice (an upright phone) has no menu.
  */
-export function useLyricsExtentMenu() {
+export function useLyricsExtentMenu(identity?: string | number | null) {
   const stored = useLyricsExtent(state => state.extent);
   const shape = useLyricsExtentShape();
   const choices = lyricsExtentChoices(shape);
   const shown = shownLyricsExtent(stored, shape);
-  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const [at, setAt] = useState<{ x: number; y: number; anchorTop?: number; anchorElement?: HTMLElement } | null>(null);
   const press = useRef<{ timer: number; x: number; y: number } | null>(null);
   /** The click that ends a long press is not a click on the line under the finger. */
   const swallowClick = useRef(0);
@@ -35,12 +36,17 @@ export function useLyricsExtentMenu() {
     press.current = null;
   };
   useEffect(() => cancelPress, []);
+  useEffect(() => { setAt(null); cancelPress(); }, [identity]);
   const offered = choices.length > 1;
+  const openFrom = useCallback((anchor: HTMLElement) => {
+    anchor.focus({ preventScroll: true });
+    const box = anchor.getBoundingClientRect();
+    setAt({ x: box.left, y: box.bottom + 4, anchorTop: box.top, anchorElement: anchor });
+  }, []);
   // Events of a menu drawn elsewhere (the source picker's) reach here through React's tree.
   const inside = (event: { currentTarget: HTMLElement; target: EventTarget }) =>
     event.target instanceof Node && event.currentTarget.contains(event.target);
-  return {
-    props: offered ? {
+  const props = offered ? {
       onContextMenu(event: MouseEvent<HTMLElement>) {
         if (!inside(event)) return;
         event.preventDefault();
@@ -83,8 +89,27 @@ export function useLyricsExtentMenu() {
         event.preventDefault();
         event.stopPropagation();
       },
-    } : {},
-    menu: at && offered ? <ContextMenu x={at.x} y={at.y} label="歌词高度" onClose={() => setAt(null)}>
+    } : {};
+  return {
+    props,
+    openFrom: offered ? openFrom : undefined,
+    opened: !!at && offered,
+    buttonProps: {
+      ...props,
+      "aria-haspopup": offered ? "menu" as const : undefined,
+      "aria-expanded": offered ? !!at : undefined,
+      onContextMenu: offered ? (event: MouseEvent<HTMLElement>) => {
+        event.preventDefault();
+        cancelPress();
+        openFrom(event.currentTarget);
+      } : undefined,
+      onKeyDown: offered ? (event: KeyboardEvent<HTMLElement>) => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        event.preventDefault();
+        openFrom(event.currentTarget);
+      } : undefined,
+    },
+    menu: at && offered ? <ContextMenu {...at} label="歌词高度" onClose={() => setAt(null)}>
       <div className="kd-menu-heading" role="presentation">歌词高度</div>
       {choices.map(choice => <button key={choice} type="button" role="menuitemradio" aria-checked={shown === choice}
         onClick={() => {

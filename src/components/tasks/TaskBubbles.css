@@ -294,6 +294,14 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 /* On: full ink and a heavier stroke. Red is not the theme (AGENTS.md). */
 .kd-task-action[aria-pressed="true"] { color: var(--kd-text); }
 .kd-task-action[aria-pressed="true"] > svg { stroke-width: 2.6; }
+/* The playing song\'s switches are commands, not a selection strip. Their open state does
+   not darken or embolden the keys; the accessible state and action label still change. */
+:root:not([data-theme-pack]) .kd-task[data-kind="playing"] .kd-task-action[aria-pressed] {
+  color: var(--kd-muted);
+}
+:root:not([data-theme-pack]) .kd-task[data-kind="playing"] .kd-task-action[aria-pressed] > svg {
+  stroke-width: 2;
+}
 /* The stay: a ring that empties, paused while the stack is in use. */
 .kd-task-countdown {
   width: 14px;

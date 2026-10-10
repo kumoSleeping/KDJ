@@ -524,10 +524,19 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         ? { selectedId: null, selectedIds: [], selectedTrack: null, selectionMode: false }
         : {}),
     });
-    filterTimer = setTimeout(() => {
-      filterTimer = null;
+    // Only fields typed character by character need debouncing. Folder navigation, sorting
+    // and discrete filters fetch now, alongside the rail's turn rather than after it.
+    const fields = Object.keys(patch);
+    const typing = fields.length > 0 && fields.every((key) =>
+      key === "q" || key === "bpmMin" || key === "bpmMax");
+    if (typing) {
+      filterTimer = setTimeout(() => {
+        filterTimer = null;
+        void get().refresh();
+      }, FILTER_DEBOUNCE_MS);
+    } else {
       void get().refresh();
-    }, FILTER_DEBOUNCE_MS);
+    }
   },
 
   resetFilter() {

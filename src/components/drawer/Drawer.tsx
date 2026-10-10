@@ -3,7 +3,7 @@ import { ChevronsRight, Minimize2 } from "lucide-react";
 import { TitleTabs } from "./TitleTabs";
 import { useSurfaceBackdrop } from "../common/SurfaceBackdrop";
 import { createPortal } from "react-dom";
-import { MOTION_IN_MS, MOTION_OUT_MS, prefersReducedMotion } from "../../lib/motion";
+import { MOTION_IN_MS, MOTION_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import { SONG_SWAP_IN_EASE, SONG_SWAP_OUT_EASE } from "../../lib/songSwapMotion";
 import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
 import { raiseSurface } from "../../lib/surfaceOrder";
@@ -252,9 +252,10 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
   const [settled, setSettled] = useState(false);
   useEffect(() => {
     if (held) return;
-    const timer = window.setTimeout(() => setSettled(true), ENTER_MS + 80);
+    const duration = prefersReducedMotion() ? MOTION_REDUCED_MS : spec.contentKey !== undefined ? MOTION_IN_MS : ENTER_MS;
+    const timer = window.setTimeout(() => setSettled(true), duration + 80);
     return () => window.clearTimeout(timer);
-  }, [held]);
+  }, [held, spec.contentKey]);
   useEffect(() => {
     if (!sized) return;
     const node = body.current, sheet = layer.current, host = sheet?.parentElement;
@@ -276,14 +277,19 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
     return () => { cancelAnimationFrame(frame); resized.disconnect(); changed.disconnect(); };
   }, [sized, leaving]);
   // The animation is the usual end of a leaving drawer; the timer covers a tab in the background.
+  // Loading the next song must not restart that deadline on every parent render.
+  const gone = useRef(onGone);
+  gone.current = onGone;
   useEffect(() => {
     if (!leaving) return;
-    const timer = window.setTimeout(onGone, LEAVE_MS + 120);
+    const duration = prefersReducedMotion() ? MOTION_REDUCED_MS : spec.contentKey !== undefined ? MOTION_OUT_MS : LEAVE_MS;
+    const timer = window.setTimeout(() => gone.current(), duration + 120);
     return () => window.clearTimeout(timer);
-  }, [leaving, onGone]);
+  }, [leaving, spec.contentKey]);
   // The app's own layer under the whole panel, and the ink that layer asks for.
   const backdrop = useSurfaceBackdrop(spec.backdrop);
   return <section ref={layer} className="kd-drawer" data-app={spec.id} data-extent={spec.extent}
+    data-content-turn={spec.contentKey !== undefined || undefined}
     data-takes-window={inWindow || undefined}
     style={fit === null ? backdrop.style : { ...backdrop.style, "--kd-drawer-fit": `${fit}px` } as CSSProperties}
     {...backdrop.attributes} data-leaving={leaving || undefined} data-held={held || undefined} data-settled={settled && !leaving || undefined}
@@ -343,21 +349,27 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
   /** Dragging the left edge changes the width. */
   onResizeStart?(event: PointerEvent<HTMLDivElement>): void;
 }) {
-  const [layers, setLayers] = useState<{ key: number; id: string; leaving: DrawerSpec | null }[]>(
-    () => spec ? [{ key: 1, id: spec.id, leaving: null }] : []);
+  // The app can remain enabled while its panel has nothing to show. Its entry still closes
+  // that intent; only the visual layer is suspended.
+  const panel = spec?.suspended ? null : spec;
+  const [layers, setLayers] = useState<{ key: number; id: string; contentKey?: string | number; leaving: DrawerSpec | null }[]>(
+    () => panel ? [{ key: 1, id: panel.id, contentKey: panel.contentKey, leaving: null }] : []);
   const sequence = useRef(1);
-  // What was shown after the last commit: the picture a replaced app leaves with.
-  const last = useRef<DrawerSpec | null>(spec);
+  // Freeze the outgoing description, including its song, until the whole shell has left.
+  const last = useRef<DrawerSpec | null>(panel);
   const front = layers.find(layer => !layer.leaving);
-  if ((spec?.id ?? null) !== (front?.id ?? null)) {
+  if ((panel?.id ?? null) !== (front?.id ?? null) || panel?.contentKey !== front?.contentKey) {
     const gone = last.current;
+    const waiting = layers.some(layer => layer.leaving);
     const next = [
-      ...layers.map(layer => layer.leaving || !gone ? layer : { ...layer, leaving: gone }).filter(layer => layer.leaving),
-      ...(spec ? [{ key: ++sequence.current, id: spec.id, leaving: null }] : []),
+      // A queued front has never been drawn. Drop it on another change instead of making
+      // it an outgoing layer and briefly flashing a skipped song.
+      ...layers.flatMap(layer => layer.leaving ? [layer] : !waiting && gone ? [{ ...layer, leaving: gone }] : []),
+      ...(panel ? [{ key: ++sequence.current, id: panel.id, contentKey: panel.contentKey, leaving: null }] : []),
     ];
     setLayers(next);
   }
-  useLayoutEffect(() => { last.current = spec; });
+  useLayoutEffect(() => { last.current = panel; });
   const specRef = useRef(spec);
   specRef.current = spec;
   useEffect(() => {
@@ -375,7 +387,7 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
     return () => window.removeEventListener("keydown", dismiss);
   }, []);
   // The app in front has the window for as long as its description says so (lib/windowTaken.ts).
-  const takenBy = spec?.takesWindow ? spec.id : null;
+  const takenBy = panel?.takesWindow ? panel.id : null;
   useLayoutEffect(() => {
     if (!takenBy) return;
     useWindowTaken.getState().take(takenBy, () => specRef.current?.takesWindow?.leave());
@@ -387,7 +399,7 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
     if (typeof hostRef === "function") hostRef(node);
     else if (hostRef) hostRef.current = node;
   };
-  const panel = useId();
+  const panelIdPrefix = useId();
   // The height the user dragged the panel to, in px; null leaves it to each app's extent.
   const [userHeight, setUserHeight] = useState<number | null>(() => {
     const saved = Number.parseFloat(readLocalStorage(HEIGHT_KEY) ?? "");
@@ -463,15 +475,15 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
     style={userHeight === null ? undefined : { "--kd-drawer-user-h": `${userHeight}px` } as CSSProperties}
     onPointerDownCapture={() => raiseSurface(sheets.current)}>
     {layers.map(layer => {
-      const shown = layer.leaving ?? spec;
+      const shown = layer.leaving ?? panel;
       if (!shown || (waiting && !layer.leaving)) return null;
-      return <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} userSized={userHeight !== null} panelId={`${panel}-${layer.key}`}
+      return <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} userSized={userHeight !== null} panelId={`${panelIdPrefix}-${layer.key}`}
         onResizeStart={onResizeStart} onHeightStart={startHeightDrag} onHeightReset={resetHeight}
         onGone={() => setLayers(list => list.filter(item => item.key !== layer.key))} />;
     })}
   </div> : null;
   return <div ref={node => { setHost(node); setOutside(node ? node.closest<HTMLElement>(".kd-app") ?? node.parentElement : null); }}
-    className="kd-drawer-host" data-open={spec ? "true" : undefined}>
+    className="kd-drawer-host" data-open={panel ? "true" : undefined}>
     {entries.length ? <nav className="kd-drawer-launcher" aria-label="侧边应用">
       <DrawerEntries entries={entries} front={spec?.id ?? null} onAsk={ask} />
     </nav> : null}

@@ -38,6 +38,11 @@ export interface DrawerPage {
 export interface DrawerSpec {
   /** Stable name of the app; also `data-app` on the drawer for theme packs and tests. */
   id: string;
+  /** Another content identity leaves with its whole panel before the new one enters.
+   * Keep `id` stable: the app's remembered open state and order do not change with a song. */
+  contentKey?: string | number;
+  /** Still enabled, but nothing to show yet. Keep the entry and order, not an empty shell. */
+  suspended?: boolean;
   /** The title. With `pages` the page labels are shown in its place and this names the drawer. */
   title: string;
   /**

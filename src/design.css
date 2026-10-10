@@ -4935,23 +4935,24 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   color: var(--kd-text);
   background: transparent;
 }
-/* 输入区独立描边，不改变外层工作条与右侧操作的位置。 */
+/* 与聚合搜索的输入面一致：浅底、六像素圆角，悬停和聚焦只加深底色。
+   高度适配工作条，不挤占左侧文件夹/分析状态，也不移动右侧操作。 */
 .kd-activity-search {
   flex: 1 1 auto;
   max-width: none;
   min-width: 0;
-  height: calc(100% - 4px);
-  min-height: 1.4rem;
+  height: calc(var(--kd-work-rail-h) - 0.3rem);
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0 0.35rem;
-  border: 1px solid color-mix(in srgb, var(--kd-muted) 24%, var(--kd-panel));
-  border-radius: 5px;
-  background: var(--kd-panel);
+  padding: 0 0.55rem;
+  border: none;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--kd-text) 5%, var(--kd-panel));
   box-shadow: none;
   color: var(--kd-muted);
-  transition: border-color 0.12s ease;
+  cursor: text;
+  transition: background-color var(--kd-motion-micro) var(--kd-ease-out);
 }
 .kd-activity-search-expanded {
   width: 100%;
@@ -4959,10 +4960,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   margin-right: 0;
 }
 .kd-activity-search:hover {
-  border-color: color-mix(in srgb, var(--kd-muted) 40%, var(--kd-panel));
+  background: color-mix(in srgb, var(--kd-text) 6.5%, var(--kd-panel));
 }
 .kd-activity-search:focus-within {
-  border-color: var(--kd-muted);
+  background: color-mix(in srgb, var(--kd-text) 9%, var(--kd-panel));
   color: var(--kd-text);
 }
 .kd-activity-search > svg {
@@ -4977,12 +4978,19 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   outline: none;
   background: transparent;
   color: var(--kd-text);
-  font: inherit;
-  font-size: var(--kd-size-sm);
+  font-family: inherit;
+  font-size: var(--kd-size);
+  font-weight: 400;
+  line-height: 1.55;
+  caret-color: var(--kd-text);
 }
 .kd-activity-search > input::placeholder {
   color: var(--kd-faint);
-  transition: color 0.12s, opacity 0.12s;
+  opacity: 1;
+}
+:root .kd-activity-search > input::selection {
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-text) 22%, transparent);
 }
 .kd-activity-search > input::-webkit-search-cancel-button {
   display: none;
@@ -5002,6 +5010,23 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 }
 .kd-activity-search > button:hover {
   color: var(--kd-text);
+}
+.kd-activity-search > button:focus-visible {
+  outline: 1px solid var(--kd-muted);
+  outline-offset: 1px;
+}
+/* 主题包沿用聚合搜索的下凹输入面，不套用内置主题的浅灰底。 */
+:root[data-theme-pack="sakulaptop98"] .kd-activity-search {
+  border-radius: 2px;
+  background: var(--kd-panel-inset);
+  box-shadow: var(--s98-sunken);
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-activity-search:focus-within {
+  background: color-mix(in srgb, var(--s98-white) 62%, var(--kd-panel-inset));
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-activity-search { transition: none; }
 }
 .kd-activity-actions {
   display: inline-flex;
@@ -6375,21 +6400,16 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-workspace-pane-remote > .kd-scroll {
   overflow-x: auto;
   overscroll-behavior-x: contain;
-  /* 全局默认藏滚动条，但表格列能自由加宽后必须给一条可拖回最左侧的横滚条。 */
-  scrollbar-width: thin;
-  scrollbar-color: var(--kd-line) transparent;
+  /* 横竖滚动共用浮动滑块，不再启用会与它重叠的原生滚动条。 */
+  scrollbar-width: none;
+  scrollbar-gutter: auto;
 }
 .kd-table-wrap > .kd-scroll::-webkit-scrollbar,
 .kd-workspace-pane-local > .kd-scroll::-webkit-scrollbar,
 .kd-workspace-pane-remote > .kd-scroll::-webkit-scrollbar {
+  display: none;
   width: 0;
-  height: 8px;
-}
-.kd-table-wrap > .kd-scroll::-webkit-scrollbar-thumb,
-.kd-workspace-pane-local > .kd-scroll::-webkit-scrollbar-thumb,
-.kd-workspace-pane-remote > .kd-scroll::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--kd-line);
+  height: 0;
 }
 /* 固定宽度的真实列之外留一个弹性空白列：只由它吸收视口剩余宽度。
    拖标题时艺人/BPM 等列因此不会跟着按比例伸缩。 */
@@ -6639,6 +6659,12 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   align-items: center;
   gap: 0.1rem;
   margin-right: 0.2rem;
+}
+.kd-player-colorbtn { width: 1.45rem; }
+/* Panel switches keep the same quiet ink in either state; labels and aria-pressed carry it.
+   Auto-advance is a playback mode, not a panel switch. Theme packs keep their own keys. */
+:root:not([data-theme-pack]) .kd-player-float-tools button[aria-pressed]:not(.kd-player-auto-advance) {
+  color: var(--kd-muted);
 }
 .kd-player-auto-advance {
   width: 1.45rem;
@@ -7716,15 +7742,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
   .kd-manager-header-tempo { min-width: 0; }
 }
 
-/* Actual pending data in the virtual song window; empty libraries have no filler. */
-.kd-track-loading-skeleton {
-  display: block;
-  width: min(14rem, 45%);
-  height: 0.45rem;
-  border-radius: 2px;
-  background: var(--kd-line);
-}
-
 /* Floating scroll handles: a short pill with no rail and no gutter. The transparent hit strip is
    wider than the painted pill. The track table hosts its own pair; every other container shares
    the pair in .kd-scroll-float (src/lib/scrollPills.ts). */
@@ -7754,9 +7771,8 @@ button.kd-camelot-grid-key { cursor: pointer; }
   z-index: 5;
   pointer-events: none;
 }
-/* What a fast scroll of the track table shows (src/lib/libraryStandIns.ts): canvases of bars laid
-   over the rows the table has not built, scrolling with it. The scroll container above is
-   positioned, so they are placed in its content. They never take the pointer. */
+/* Fast-scroll row numbers (libraryStandIns.ts), at device resolution and only as wide as the
+   index column. They scroll with the content and hand off to DOM numbers without an animation. */
 .kd-table-standins {
   position: absolute;
   top: 0;
@@ -7772,19 +7788,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
   top: 0;
   left: 0;
   transform-origin: 0 0;
-}
-/* The scroll slowed down and the rows built there are arriving one after the other
-   (ListArrival.css, the chase). The bars still in view are wiped away just ahead of them, at the
-   pace the rows start: a row never shows through its own bar, and no place is left bare. The
-   script gives each canvas the clip it starts with and the one it ends with, and the share of
-   the time the wipe spends on it and waits before reaching it, and releases it when it is over. */
-.kd-table-standins > canvas[data-leaving] {
-  animation: kd-table-standins-wipe calc(var(--kd-motion-micro-out) * var(--kd-wipe-share, 1)) linear
-    calc(var(--kd-motion-micro-out) * var(--kd-wipe-wait, 0)) both;
-}
-@keyframes kd-table-standins-wipe {
-  from { clip-path: var(--kd-wipe-from); }
-  to { clip-path: var(--kd-wipe-to); }
 }
 .kd-scroll-handle {
   position: absolute;

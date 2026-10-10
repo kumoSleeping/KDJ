@@ -100,7 +100,10 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   bar starts back up.
 - **The keys.** `actions` are compact icon keys in the bubble's tool row, before the key that
   rolls it down; a `large` bubble has that row in its top right corner. A key that is on
-  (`pressed`) is written in full-strength ink, never in red. The playing song's are 歌词, 小窗
+  (`pressed`) is normally written in full-strength ink, never in red. The playing song's switches
+  keep their ordinary muted ink and stroke in either state; their labels and `aria-pressed`
+  still describe the state. Its lyrics key also opens the panel's height menu by right click or
+  the keyboard menu key (`TaskAction.onContextMenu`), without toggling lyrics. Its keys are 歌词, 小窗
   (the floating video or visualizer, the same toggle as the bar's own key), 歌曲色彩, 编辑 Meta
   and 固定. Each button carries its action's id as `data-task-action`.
 - **A backdrop.** `backdrop` is a layer of the task's own under everything the bubble holds. The

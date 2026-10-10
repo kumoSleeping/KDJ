@@ -260,6 +260,17 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
           </svg>}
           {spec.actions?.map(action => <button key={action.id} type="button" className="kd-task-action" data-task-action={action.id}
             aria-label={action.label} title={action.label} aria-pressed={action.pressed}
+            aria-haspopup={action.onContextMenu ? "menu" : undefined}
+            aria-expanded={action.onContextMenu ? !!action.menuOpen : undefined}
+            onContextMenu={action.onContextMenu ? event => {
+              event.preventDefault();
+              action.onContextMenu?.(event.currentTarget);
+            } : undefined}
+            onKeyDown={action.onContextMenu ? event => {
+              if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+              event.preventDefault();
+              action.onContextMenu?.(event.currentTarget);
+            } : undefined}
             aria-busy={action.busy || undefined} onClick={() => { if (node.current) action.onSelect(node.current); }}>
             {action.busy ? <LoaderCircle size={14} className="kd-spin" aria-hidden="true" /> : action.icon}
           </button>)}

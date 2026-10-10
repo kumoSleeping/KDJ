@@ -28,6 +28,13 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
 - **One at a time.** A newly asked-for app comes down over the one that was there; that one rolls
   up beneath it and is closed. Nothing waits underneath: closing the drawer shows the list, and an
   app that is wanted again is asked for again from its own entry.
+- **A song can replace the whole panel.** The lyrics keep the stable app id `lyrics`, but give
+  `contentKey` the current song's id. On a change the host takes the old panel away with its
+  old song before bringing in the new one, on the 360/460 ms song-change clock. A pending or
+  missing lyric sets `suspended`: the shell stays put away, while its entry and remembered
+  enabled state remain. Lyrics arriving later bring the panel back; no timeout opens an empty
+  shell. A queued song that is skipped is discarded, never briefly drawn. Manual close still
+  switches lyrics off. The phone's shared lyrics/downloads sheet also omits unavailable lyrics.
 - **An app never draws its own shell.** No head, no close button, no frame, no background, no
   entrance or exit motion. It supplies a `DrawerSpec` and a body; `DrawerHost` draws the rest.
 - **Opened from an entry or from elsewhere.** An app that people open by hand has an entry beside
@@ -52,7 +59,8 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   A height the user dragged (the bottom edge) replaces any of these until it is reset.
   In a tall window a bubble that is kept across the bottom already ends the page a gap above
   itself, so a panel that comes all the way down there keeps no second gap of its own.
-- **The lyrics choose their own.** A right click or a long press on the lyrics panel offers
+- **The lyrics choose their own.** A right click or a long press on the lyrics panel, or a
+  right click on the lyrics key in the player bar or playing-song bubble, offers
   标准 (`two-thirds`), 更长 (`full`: down to just above the player bar, or the playing song's
   bubble while the bar is away) and, in a tall desktop window only, 全屏 (`takesWindow`, below).
   The choice is remembered (`src/lib/lyricsExtent.ts`); a stored 全屏 is shown and marked as

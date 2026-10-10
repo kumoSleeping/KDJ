@@ -12,7 +12,7 @@ import type { Track } from "../../types";
 export interface LyricsEntry {
   /** A video has no lyrics entry. */
   available: boolean;
-  /** The lyrics are showing in the drawer. */
+  /** Lyrics are enabled, including while a song without lyrics keeps the drawer put away. */
   open: boolean;
   /** A match asked for by this entry is under way. */
   matching: boolean;
@@ -34,12 +34,16 @@ export function requestPlayingLyrics(onOpened?: () => void, near?: TaskPlacement
   const none = (detail?: string) => showTask({ id: "lyrics-entry", kind: "notice", title: "没有找到歌词", detail, size: "small", stay: 3_000, placement: near });
   if (!track) { none(); return; }
   if (isVideo(track)) { none(track.title || track.filename); return; }
-  const show = () => { useSidePanels.getState().setLyrics(true); onOpened?.(); };
-  if (hasVisibleLyrics(useLyricsStore.getState().get(track.id).lines)) { show(); return; }
+  // Remember intent now, not when an asynchronous match returns. A second press can cancel
+  // it while matching, and a song without lyrics must not turn the preference off.
+  useSidePanels.getState().setLyrics(true);
+  const request = useSidePanels.getState().raised.token;
+  if (hasVisibleLyrics(useLyricsStore.getState().get(track.id).lines)) { onOpened?.(); return; }
   const id = track.id;
   void useLyricsStore.getState().ensure(track, { matchMissing: true }).then(() => {
-    if (getPlayingTrack()?.id !== id) return;
-    if (hasVisibleLyrics(useLyricsStore.getState().get(id).lines)) show();
+    const panels = useSidePanels.getState();
+    if (getPlayingTrack()?.id !== id || !panels.lyrics || panels.raised.token !== request) return;
+    if (hasVisibleLyrics(useLyricsStore.getState().get(id).lines)) onOpened?.();
     else none(track.title || track.filename);
   });
 }
@@ -57,7 +61,7 @@ export function useLyricsEntry(track: Track | null, onOpened?: () => void): Lyri
   return {
     available: !!track && !video,
     open,
-    matching: !open && !ready && !!entry.inflight,
+    matching: !ready && !!entry.inflight,
     toggle() {
       if (!track || video) return;
       if (useSidePanels.getState().lyrics) { useSidePanels.getState().setLyrics(false); return; }

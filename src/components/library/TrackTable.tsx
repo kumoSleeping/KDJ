@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { LIBRARY_REST_PACE, libraryScrollPace, libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { createLibraryStandIns, standInGap, type LibraryStandIns } from "../../lib/libraryStandIns";
+import { createLibraryRowRecovery, type LibraryRowRecovery } from "../../lib/libraryRowRecovery";
 import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
@@ -38,7 +39,7 @@ import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../common/dragGhost";
 import "../common/DragGhost.css";
-import { createListArrival, LIST_ARRIVAL_STEPS, type ListArrival } from "./listArrival";
+import { createListArrival, type ListArrival } from "./listArrival";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent } from "../../lib/shareClipboard";
 import {
@@ -332,9 +333,11 @@ export interface TrackTableProps {
  * 移动后统一改它们的优先级（见 TrackTable 里的 coverLane）。
  */
 interface WaitingCover { index: number; lease: CoverThumbnailLease }
-interface CoverLane { start: number; end: number; waiting: Set<WaitingCover> }
+interface CoverLane { start: number; end: number; fast: boolean; recovering: boolean; waiting: Set<WaitingCover> }
 function coverLanePriority(lane: CoverLane, index: number): number {
-  return index >= lane.start && index < lane.end ? 0 : 1;
+  if (lane.fast) return Infinity;
+  if (index >= lane.start && index < lane.end) return 0;
+  return lane.recovering ? Infinity : 1;
 }
 
 /**
@@ -376,7 +379,7 @@ function TrackCoverThumb({ track, index, lane }: { track: TrackSummary; index: n
         lane.waiting.delete(waiting);
         if (!alive) return;
         if (!isVideo || attempt >= 12) {
-          setShown({ src: "", missing: true });
+          setShown(current => current.missing && !current.src ? current : { src: "", missing: true });
           return;
         }
         // 后端热重启 / 首次抽帧排队时稍候再试。每次换 URL，失败缓存不会卡住重试。
@@ -652,31 +655,12 @@ const TrackCells = memo(function TrackCells({
   track,
   index,
   coverLane,
-  showIndex,
   columns,
   keyNotation,
-  selectionMode,
-  selected,
-  onToggle,
   onRate,
 }: TrackCellsProps) {
   return (
     <>
-      {showIndex ? (
-        <td data-col="index" data-picking={selectionMode ? "true" : undefined}>
-          <RowIndex
-            number={index + 1}
-            picking={selectionMode}
-            pick={(
-              <RowPick
-                state={selected ? "all" : "none"}
-                label={`选择 ${track.title || track.filename}`}
-                onToggle={(event) => onToggle(track.id, event.shiftKey)}
-              />
-            )}
-          />
-        </td>
-      ) : null}
       {columns.map((column) => {
         const cell = trackCell(
           track,
@@ -699,28 +683,9 @@ const TrackCells = memo(function TrackCells({
   );
 });
 
-/** 摘要还没到的行：列结构和真实行相同，数据到达时只换内容，不重新排版。 */
-const PlaceholderCells = memo(function PlaceholderCells({
-  index,
-  showIndex,
-  columns,
-}: Pick<TrackCellsProps, "index" | "showIndex" | "columns">) {
-  return (
-    <>
-      {showIndex ? <td data-col="index">{index + 1}</td> : null}
-      {columns.map((column) => (
-        <td key={column.key} data-col={column.key}>
-          {column.key === "title" ? (
-            <span className="kd-track-drag-surface">
-              <span className="kd-thumb" />
-              <span className="kd-track-loading-skeleton" />
-            </span>
-          ) : null}
-        </td>
-      ))}
-      <td className="kd-table-fill" aria-hidden="true" />
-    </>
-  );
+/** 空位只留序号（由 TrackRow 持有）；一个空格跨过数据列，不制造假的内容或控件。 */
+const PlaceholderCells = memo(function PlaceholderCells({ columns }: Pick<TrackCellsProps, "columns">) {
+  return <td colSpan={columns.length + 1} aria-hidden="true" />;
 });
 
 /**
@@ -737,7 +702,9 @@ interface TrackRowActions {
   linkDragEnd(): void;
 }
 
-interface TrackRowProps extends TrackCellsProps {
+interface TrackRowProps extends Omit<TrackCellsProps, "track"> {
+  track: TrackSummary | undefined;
+  recovery: LibraryRowRecovery;
   focused: boolean;
   playing: boolean;
   /** Windows 分享链接走 WebView2 原生 HTML5 拖放。 */
@@ -751,33 +718,61 @@ interface TrackRowProps extends TrackCellsProps {
  */
 const TrackRow = memo(function TrackRow({
   track,
+  recovery,
   focused,
   playing,
   linkDrag,
   actions,
   ...cells
 }: TrackRowProps) {
+  const rowRef = useRef<HTMLTableRowElement | null>(null);
+  const [admitted, setAdmitted] = useState(() => Boolean(track) && !recovery.deferred());
+  const ready = admitted || !recovery.deferred() ? track : undefined;
+  const id = track?.id;
+  const index = cells.index;
+  const readable = Boolean(ready);
+  useLayoutEffect(() => {
+    if (readable && id !== undefined) {
+      if (!admitted) setAdmitted(true);
+      recovery.remember(id);
+      return;
+    }
+    // Register even when the summary is missing. A response arriving after a fling must still
+    // pass through the commit budget, rather than materializing every cold row together.
+    return recovery.enqueue({ index, available: id !== undefined, fresh: id !== undefined && !recovery.seen(id),
+      admit: () => setAdmitted(true), element: () => rowRef.current });
+  }, [recovery, index, admitted, id, readable]);
   return (
     <tr
+      ref={rowRef}
       aria-selected={cells.selected}
-      data-kd-track-id={track.id}
+      aria-busy={!ready || undefined}
+      data-loading-track={!ready ? "true" : undefined}
+      data-kd-track-id={ready?.id}
       data-focus={focused ? "true" : undefined}
       data-playing={playing ? "true" : undefined}
       data-selecting={cells.selectionMode ? "true" : undefined}
-      // macOS 与文件外拖走 pointer 状态机；Windows 分享链接用 WebView2 原生
-      // text/uri-list，才能让浏览器、聊天等外部应用直接接住 URL。
-      draggable={linkDrag}
-      onDragStart={linkDrag ? (event) => actions.linkDragStart(event, track) : undefined}
-      onDragEnd={linkDrag ? actions.linkDragEnd : undefined}
-      onClick={(event) => actions.click(event, track)}
-      onPointerDown={(event) => actions.pointerDown(event, track)}
+      // 空位没有交互；序号和 tr 在补入内容时不替换、不移动。
+      draggable={Boolean(ready && linkDrag)}
+      onDragStart={ready && linkDrag ? (event) => actions.linkDragStart(event, ready) : undefined}
+      onDragEnd={ready && linkDrag ? actions.linkDragEnd : undefined}
+      onClick={ready ? (event) => actions.click(event, ready) : undefined}
+      onPointerDown={ready ? (event) => actions.pointerDown(event, ready) : undefined}
       onPointerUp={actions.cancelPress}
       onPointerCancel={actions.cancelPress}
       onPointerLeave={actions.cancelPress}
-      onDoubleClick={() => actions.doubleClick(track)}
-      onContextMenu={(event) => actions.contextMenu(event, track)}
+      onDoubleClick={ready ? () => actions.doubleClick(ready) : undefined}
+      onContextMenu={ready ? (event) => actions.contextMenu(event, ready) : undefined}
     >
-      <TrackCells track={track} {...cells} />
+      {cells.showIndex ? (
+        <td data-col="index" data-picking={cells.selectionMode && ready ? "true" : undefined}>
+          <RowIndex number={index + 1} picking={cells.selectionMode} pick={ready ? (
+            <RowPick state={cells.selected ? "all" : "none"} label={`选择 ${ready.title || ready.filename}`}
+              onToggle={(event) => cells.onToggle(ready.id, event.shiftKey)} />
+          ) : null} />
+        </td>
+      ) : null}
+      {ready ? <TrackCells track={ready} {...cells} /> : <PlaceholderCells columns={cells.columns} />}
     </tr>
   );
 });
@@ -870,15 +865,9 @@ const SCROLL_REST_MS = 140;
 const TRACED_SCROLL_SCREENS = 3;
 /** 快滚途中每走过这么多行，把摘要的加载重心挪到眼前一次。 */
 const FLIGHT_DEMAND_ROWS = 300;
-/**
- * 记下的一次到场动画（见 listArrival），等行提交之后开始：列表被呈现（"list"），或快滚慢下来后
- * 行追上滚动（"chase"；`built` 是那之前表格已经造好的行，它们一直在屏幕上，不参与）。`view` 是
- * 那时行该在的渲染窗口，提交出来的窗口对上了才开始。
- */
-type ArrivalDue = { view: LibraryView; at: number } & (
-  | { gesture: "list" }
-  | { gesture: "chase"; direction: -1 | 1; built: { start: number; end: number } });
-/** "list" 等窗口对上（换查询后要再提交一次）最多等这么久，过了还没对上就作废。"chase" 只认紧接着的那一次提交。 */
+/** 列表被呈现时等渲染窗口对齐；滚动补入由每批真实内容自己开始动画。 */
+type ArrivalDue = { view: LibraryView; at: number };
+/** 换查询后等窗口对上最多这么久。 */
 const ARRIVAL_DUE_MS = 400;
 
 export const TrackTable = memo(function TrackTable({
@@ -1579,8 +1568,6 @@ export const TrackTable = memo(function TrackTable({
   /** 表格自己渲染出来的行范围，以及替身行上一帧盖住的范围。 */
   const renderedRowsRef = useRef({ start: 0, end: 0 });
   const coveredRowsRef = useRef<(readonly [number, number])[]>([]);
-  /** 快滚把表格的行甩在了后面：这期间不造行（见 syncWindow），记下它的去向，慢下来时行从来的那一侧追上来。 */
-  const flightRef = useRef<-1 | 1 | null>(null);
   /** 行的到场动画（见 listArrival）。 */
   const arrivalRef = useRef<ListArrival | null>(null);
   /**
@@ -1601,6 +1588,32 @@ export const TrackTable = memo(function TrackTable({
   const scrollRafRef = useRef(0);
   const scrollIdleTimerRef = useRef<number | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const coverLane = useRef<CoverLane>({ start: 0, end: 0, fast: false, recovering: false, waiting: new Set() }).current;
+  const rowRecovery = useMemo(() => createLibraryRowRecovery(() => {
+    const box = scrollerRef.current;
+    const top = Math.max(0, box?.scrollTop ?? 0);
+    return {
+      first: Math.floor(top / rowHRef.current) - pendingCountRef.current,
+      end: Math.ceil((top + Math.max(rowHRef.current, (box?.clientHeight ?? 0) - headerHRef.current)) / rowHRef.current) - pendingCountRef.current,
+      moving: scrollSampleAtRef.current !== 0,
+      visible: visibleRef.current && Boolean(box?.clientHeight),
+    };
+  }, (rows, direction) => arrivalRef.current?.reveal(rows, direction < 0 ? "above" : "below"), () => {
+    coverLane.recovering = false;
+    for (const waiting of coverLane.waiting) waiting.lease.setPriority(coverLanePriority(coverLane, waiting.index));
+  }), [coverLane]);
+  useLayoutEffect(() => () => rowRecovery.destroy(), [rowRecovery]);
+  const refreshCoverLane = useCallback(() => {
+    const box = scrollerRef.current;
+    const top = Math.max(0, box?.scrollTop ?? 0);
+    const start = Math.floor(top / rowHRef.current) - pendingCountRef.current;
+    const end = Math.ceil((top + Math.max(rowHRef.current, (box?.clientHeight ?? 0) - headerHRef.current)) / rowHRef.current) - pendingCountRef.current;
+    const fast = paceRef.current.fast || !visibleRef.current;
+    const recovering = rowRecovery.deferred();
+    if (start === coverLane.start && end === coverLane.end && fast === coverLane.fast && recovering === coverLane.recovering) return;
+    Object.assign(coverLane, { start, end, fast, recovering });
+    for (const waiting of coverLane.waiting) waiting.lease.setPriority(coverLanePriority(coverLane, waiting.index));
+  }, [coverLane, rowRecovery]);
   /** 滚动容器 ref：身份必须稳定（见 JSX 处的注释）。值没变就不 setState，
       否则 ResizeObserver 的初次回调会和自己触发的重渲染互相喂食。 */
   const trackScrollerRef = useCallback((el: HTMLDivElement | null) => {
@@ -1790,7 +1803,12 @@ export const TrackTable = memo(function TrackTable({
   );
   /** 只有曲库行需要序号列；纯待下载占位时不占左侧空白。 */
   const showIndexCol = total > 0;
-  const indexWidth = fitWidth ? "10%" : widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
+  const configuredIndexWidth = widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
+  // Four/five-digit row numbers must stay legible, including while they are the only content.
+  const indexWidth = fitWidth ? "10%" : `${Math.max(
+    Number.parseFloat(configuredIndexWidth) * (configuredIndexWidth.endsWith("px") ? 1 : rootFont),
+    (Math.max(1.75, String(total).length * 0.55 + 0.7)) * rootFont,
+  )}px`;
   const displayWidthFor = (column: Column) => fitWidth
     ? DJ_TRACK_TABLE_COLUMN_WIDTHS[column.key as keyof typeof DJ_TRACK_TABLE_COLUMN_WIDTHS]
     : widthFor(column.key, column.width ?? "4rem");
@@ -1813,7 +1831,7 @@ export const TrackTable = memo(function TrackTable({
   pendingCountRef.current = pendingDownloads.length;
 
   /**
-   * 给滚动容器此刻的位置画上替身行（快滚时代替行的灰条，见 libraryStandIns），并记下它们和真实
+   * 给滚动容器此刻的位置画上编号空行（见 libraryStandIns），并记下它们和真实
    * 的行一起盖住了哪些行。`direction` 是快滚的去向，替身行的余量大部分放在前方；0 表示表格自己
    * 在造行，这时只补视口里缺的行（平时没有），不占画布。
    */
@@ -1837,16 +1855,14 @@ export const TrackTable = memo(function TrackTable({
     const { start, end } = renderedRowsRef.current;
     // tbody 的子元素依次是：上占位行（有的话）、渲染窗口里的每一行、下占位行。
     const offset = body.firstElementChild?.hasAttribute("data-spacer") ? 1 : 0;
-    return rows.map((row) => row >= start && row < end ? body.children[offset + row - start] as HTMLElement | undefined : undefined);
+    return rows.map((row) => {
+      const element = row >= start && row < end ? body.children[offset + row - start] as HTMLElement | undefined : undefined;
+      return element?.hasAttribute("data-loading-track") ? undefined : element;
+    });
   }, []);
 
-  /**
-   * 开始一次到场动画（见 listArrival），在行已经提交之后调用。返回有没有行在动。
-   * - "list"：视口里的行自上而下依次升起。
-   * - "chase"：快滚慢下来，刚造好的行追上滚动——从滚动来的那一侧开始，顺着滚动的方向一行接
-   *   一行；滚动的余势还会带进视口的前方一屏跟在最后。之前就在的行不动。
-   */
-  const startArrival = useCallback((due: ArrivalDue) => {
+  /** 列表被呈现：只让已经有真实内容的可视行到场，空位等内容就绪后再浮现。 */
+  const startArrival = useCallback(() => {
     const box = scrollerRef.current;
     const arrival = arrivalRef.current;
     if (!box || !arrival) return false;
@@ -1858,16 +1874,9 @@ export const TrackTable = memo(function TrackTable({
     const from = Math.max(start, first);
     const to = Math.min(end, last);
     const rows: number[] = [];
-    if (due.gesture === "list") {
-      for (let row = from; row < to; row += 1) rows.push(row);
-    } else {
-      const reach = last - first;
-      const fresh = (row: number) => { if (row < due.built.start || row >= due.built.end) rows.push(row); };
-      if (due.direction > 0) for (let row = from; row < Math.min(end, to + reach); row += 1) fresh(row);
-      else for (let row = to - 1; row >= Math.max(start, from - reach); row -= 1) fresh(row);
-    }
+    for (let row = from; row < to; row += 1) rows.push(row);
     arrivalRowsRef.current = rows;
-    arrival.start(due.gesture, due.gesture === "chase" && due.direction < 0 ? "above" : "below", mountedRows(rows));
+    arrival.start("list", "below", mountedRows(rows));
     return arrival.gesture() !== null;
   }, [mountedRows]);
 
@@ -1875,8 +1884,8 @@ export const TrackTable = memo(function TrackTable({
    * 把表格对齐到滚动容器此刻的位置。滚动由 WebView 的滚动线程执行，页面拿到位置时它已经在
    * 屏幕上了，所以：
    * - 阅读速度的滚动：在这一帧内提交对应的行（flushSync），每晚一帧露出的就是空白；
-   * - 快滚：一行也不造。造行以毫秒计，追不上；这期间只画替身行（灰条），慢下来再一次造好，
-   *   造好的行用一次到场动画追上滚动（见 listArrival 的 "chase"）。
+   * - 快滚：冻结窗口，只预绘制清晰编号。减速时同步换入廉价行壳，再由 rowRecovery 每帧
+   *   补入少量真实内容；动画跟随实际提交，而不是一次造好后仅延迟显示。
    * 只在 React 之外（动画帧）调用；`now` 是这一帧的时间戳。
    */
   const syncWindow = useCallback((now: number) => {
@@ -1921,23 +1930,22 @@ export const TrackTable = memo(function TrackTable({
         paceRef.current = LIBRARY_REST_PACE;
         scrollSampleAtRef.current = 0;
         const box = scrollerRef.current;
-        const flight = flightRef.current;
-        flightRef.current = null;
         if (box) {
           const rest: LibraryView = { top: libraryWindowTop(box.scrollTop, rowHRef.current), height: box.clientHeight };
           if (sameLibraryView(viewRef.current, rest)) paintStandIns(0);
           else {
-            // 快滚直接停住（拖滑块松手、键盘、定位）：这里的行造好之后追上来。
-            if (flight) arrivalDueRef.current = { gesture: "chase", view: rest, at: performance.now(), direction: flight, built: { ...renderedRowsRef.current } };
-            setView(rest);
+            // 此处只同步空行壳；真实内容由 rowRecovery 分帧补入。
+            flushSync(() => setView(rest));
           }
+          rowRecovery.resume();
+          refreshCoverLane();
           const done = scrollTraceRef.current;
           const painting = standInsRef.current?.takeStats();
           if (import.meta.env.DEV && Math.abs(box.scrollTop - done.from) >= TRACED_SCROLL_SCREENS * box.clientHeight) {
             tracePlayback("library-scroll", { ms: Math.round(performance.now() - done.startedAt), px: Math.round(box.scrollTop - done.from),
               frames: done.frames, slow: done.slow, gapMax: Math.round(done.gapMax), travelMax: Math.round(done.travelMax),
               speedMax: Math.round(done.speedMax * 1000), held: done.held, bare: done.bare, bareMax: done.bareMax,
-              standIns: standInsRef.current?.ready() ? 1 : 0, bars: painting?.bars ?? 0,
+              standIns: standInsRef.current?.ready() ? 1 : 0, tiles: painting?.tiles ?? 0,
               paintMs: Math.round(painting?.ms ?? 0), paintMax: Math.round(painting?.worst ?? 0) });
           }
         }
@@ -1947,39 +1955,39 @@ export const TrackTable = memo(function TrackTable({
       }, SCROLL_REST_MS);
     }
     const pace = paceRef.current;
+    refreshCoverLane();
     // 快滚且替身行可用：表格的行原地不动，不进 React。
     if (pace.fast && standInsRef.current?.ready()) {
       scrollTraceRef.current.held += 1;
-      flightRef.current = pace.speed < 0 ? -1 : 1;
+      const direction = (pace.instant || pace.speed) < 0 ? -1 : 1;
+      rowRecovery.hold(direction);
       // 到场动画还没做完就又甩了出去：行就地站好，不带着动画被滚走。
       arrivalDueRef.current = null;
       if (arrivalRef.current?.gesture()) arrivalRef.current.stop();
-      // 表格不动，就没有人告诉数据层眼前是哪里：后台补齐还在围着起飞的位置转，替身行只能画
-      // 占位条。隔一段路挪一次加载重心。
+      // 表格不动，就没有人告诉数据层眼前是哪里：后台补齐还在围着起飞的位置转，眼前只有
+      // 编号。隔一段路挪一次加载重心。
       const row = Math.max(0, Math.floor(top / rowHeight) - pending);
       if (Math.abs(row - flightDemandRowRef.current) >= FLIGHT_DEMAND_ROWS) {
         flightDemandRowRef.current = row;
         const screen = Math.ceil(height / rowHeight);
-        const ahead = pace.speed < 0 ? [6, 1] : [1, 6];
+        const ahead = direction < 0 ? [6, 1] : [1, 6];
         void libraryStore.getState().ensureRange(Math.max(0, row - ahead[0] * screen), Math.min(ids.length, row + (1 + ahead[1]) * screen),
           row, Math.min(ids.length, row + screen));
       }
-      paintStandIns(pace.speed < 0 ? -1 : 1);
+      paintStandIns(direction);
       return;
     }
     flightDemandRowRef.current = -1;
-    const flight = flightRef.current;
-    flightRef.current = null;
     const next: LibraryView = { top: libraryWindowTop(top, rowHeight), height };
     if (!sameLibraryView(viewRef.current, next)) {
-      // 快滚慢下来的这一帧：行在这里一次造好，提交之后追上滚动（见下面处理 arrivalDueRef 的 effect）。
-      if (flight) arrivalDueRef.current = { gesture: "chase", view: next, at: performance.now(), direction: flight, built: { ...renderedRowsRef.current } };
+      // 快滚慢下来只创建编号行壳，不在惯性尾段一次建好五屏真实内容。
       viewRef.current = next;
       flushSync(() => setView(next));
     }
+    rowRecovery.resume(pace.instant ? (pace.instant < 0 ? -1 : 1) : undefined);
     // 一步之内的滚动帧窗口不变，不进 React。
     paintStandIns(0);
-  }, [libraryStore, persistentSession, paintStandIns]);
+  }, [libraryStore, persistentSession, paintStandIns, rowRecovery, refreshCoverLane]);
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
@@ -2036,12 +2044,10 @@ export const TrackTable = memo(function TrackTable({
       if (arrivalRef.current === arrival) arrivalRef.current = null;
     };
   }, []);
-  // 行换了（窗口移动、换序、列表变长变短）之后，在同一帧里把替身行让给真实的行。行要追上滚动
-  // 的那一次除外：那时替身行赶在到场的行前面让开，由下面处理 arrivalDueRef 的 effect 交接。
+  // 编号画布与 DOM 编号在同一帧交接；数据内容的动画不触碰序号。
   useLayoutEffect(() => {
-    if (arrivalDueRef.current?.gesture === "chase") return;
     const pace = paceRef.current;
-    paintStandIns(!pace.fast ? 0 : pace.speed < 0 ? -1 : 1);
+    paintStandIns(!pace.fast ? 0 : (pace.instant || pace.speed) < 0 ? -1 : 1);
   }, [paintStandIns, winStart, winEnd, orderedIds, pendingDownloads.length]);
 
   useLayoutEffect(() => {
@@ -2052,6 +2058,9 @@ export const TrackTable = memo(function TrackTable({
     if (previousQueryRef.current !== queryVersion) {
       if (previousQueryRef.current > 0) scrollRestoreDoneRef.current = true;
       previousQueryRef.current = queryVersion;
+      paceRef.current = LIBRARY_REST_PACE;
+      scrollSampleAtRef.current = 0;
+      rowRecovery.resume();
       // The initial index starts a query too; persisted position applies once on startup.
       // Another list from here on: it starts at its top, and it arrives.
       if (scrollRestoreDoneRef.current) { desired = 0; presented = true; }
@@ -2074,10 +2083,10 @@ export const TrackTable = memo(function TrackTable({
     scrollTopRef.current = box.scrollTop;
     const windowTop = libraryWindowTop(desired, rowH);
     setView((old) => old.top === windowTop && old.height === box.clientHeight ? old : { top: windowTop, height: box.clientHeight });
-    if (presented) arrivalDueRef.current = { gesture: "list", view: { top: windowTop, height: box.clientHeight }, at: performance.now() };
+    if (presented) arrivalDueRef.current = { view: { top: windowTop, height: box.clientHeight }, at: performance.now() };
     const index = Math.max(0, Math.floor(desired / rowH) - pendingDownloads.length);
     anchorRef.current = { id: orderedIds[index] ?? null, index, offset: desired % rowH };
-  }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop]);
+  }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop, rowRecovery]);
 
   // 板块重新显示：列表再到场一次。隐藏期间容器没有尺寸，渲染窗口退回了列表开头；先按容器恢复的
   // 位置把窗口摆对，行提交后再开始。
@@ -2086,6 +2095,7 @@ export const TrackTable = memo(function TrackTable({
     visibleRef.current = visible;
     const box = scrollerRef.current;
     if (!visible || !box) {
+      rowRecovery.hold();
       arrivalDueRef.current = null;
       arrivalRef.current?.stop();
       return;
@@ -2095,33 +2105,24 @@ export const TrackTable = memo(function TrackTable({
     // 恢复位置不是一次滚动。
     scrollTopRef.current = box.scrollTop;
     setView((current) => current.top === top && current.height === height ? current : { top, height });
-    arrivalDueRef.current = { gesture: "list", view: { top, height }, at: performance.now() };
-  }, [visible]);
+    arrivalDueRef.current = { view: { top, height }, at: performance.now() };
+    paceRef.current = LIBRARY_REST_PACE;
+    rowRecovery.resume();
+  }, [visible, rowRecovery]);
 
-  /**
-   * 到场动画的交接，每次提交之后看一眼（平时两个 ref 都是空的，什么也不做）：
-   * - 有一次到场在等（arrivalDueRef），而渲染窗口已经对上滚动位置：给行做上标记，动画开始。
-   *   行追上滚动的那一次，替身行同时赶在它们前面让开。
-   * - 动画进行中又提交了一次：期间新挂载的行（占位行换成了真实的行）按原来的位置加入。
-   * 放在换查询和板块显示这两个 effect 之后：它们在同一次提交里定下滚动位置和要不要到场。
-   */
+  // 列表呈现的动画仍由窗口交接；滚动补建的动画由 rowRecovery 在小批提交后接入。
   useLayoutEffect(() => {
     const due = arrivalDueRef.current;
     if (!due) {
-      if (arrivalRef.current?.gesture()) arrivalRef.current.join(mountedRows(arrivalRowsRef.current));
+      if (arrivalRef.current?.gesture() === "list") arrivalRef.current.join(mountedRows(arrivalRowsRef.current));
       return;
     }
     const matched = sameLibraryView(view, due.view);
-    // 窗口还没跟上（这次提交里刚 setView，马上会再提交一次）：等下一次。等不到就作废，不留到以后
-    // 某次无关的提交上。（对上了就开始，不看用了多久：慢的机器上造这一屏行本身就要几百毫秒。）
-    if (!matched && due.gesture === "list" && performance.now() - due.at <= ARRIVAL_DUE_MS) return;
+    if (!matched && performance.now() - due.at <= ARRIVAL_DUE_MS) return;
     arrivalDueRef.current = null;
-    const started = matched && visibleRef.current && !paceRef.current.fast && startArrival(due);
-    if (due.gesture !== "chase") return;
-    // 行在追：视口附近的替身行赶在它们前面一行一行让开，节奏和行出场的节奏一样。没有行要追
-    // （之前的行一直盖着视口）就直接收掉。
-    const sweep = { row: arrivalRowsRef.current[0], direction: due.direction, rows: LIST_ARRIVAL_STEPS };
-    if (!started || !standInsRef.current?.settle(sweep)) paintStandIns(0);
+    if (matched && visibleRef.current && !paceRef.current.fast) {
+      if (!startArrival() && windowedTracks.some(row => !row.track)) arrivalDueRef.current = due;
+    }
   });
 
   useEffect(() => {
@@ -2247,12 +2248,9 @@ export const TrackTable = memo(function TrackTable({
 
   // 等待中的封面请求按可视范围排先后。范围在渲染时写入，行挂载时的 effect 读到的就是它；
   // 窗口移动后在这里给还在等的请求换优先级。
-  const coverLane = useRef<CoverLane>({ start: 0, end: 0, waiting: new Set() }).current;
-  coverLane.start = viewport.visibleTrackStart;
-  coverLane.end = viewport.visibleTrackEnd;
-  useEffect(() => {
-    for (const waiting of coverLane.waiting) waiting.lease.setPriority(coverLanePriority(coverLane, waiting.index));
-  }, [coverLane, viewport.visibleTrackStart, viewport.visibleTrackEnd]);
+  useLayoutEffect(() => {
+    refreshCoverLane();
+  }, [refreshCoverLane, visible, viewport.visibleTrackStart, viewport.visibleTrackEnd]);
 
   const moveColumn = (from: string, to: string) => {
     if (from === to) return;
@@ -2277,7 +2275,7 @@ export const TrackTable = memo(function TrackTable({
       ref={trackScrollerRef}
       onScroll={() => {
         // 这一个容器同时横滚和竖滚；横滚不影响虚拟窗口，syncWindow 里窗口没变就不进 React，
-        // 只让替身行换到新露出的列。
+        // 编号画布随容器横向移动，不为它重绘。
         // 滚轮、触控板、触摸由 WebView 的滚动线程执行，拖滑块、键盘、定位由页面执行；
         // 都从这里进来，一帧合并一次，并在这一帧内提交对应的行。
         if (!scrollRafRef.current) {
@@ -2496,14 +2494,15 @@ export const TrackTable = memo(function TrackTable({
             </tr>
             );
           })}
-          {windowedTracks.map(({ id, track, index }) => track ? (
+          {windowedTracks.map(({ id, track, index }) => (
             <TrackRow
-              key={track.id}
+              key={id}
               track={track}
+              recovery={rowRecovery}
               index={index}
-              selected={selected.has(track.id)}
-              focused={track.id === selectedId}
-              playing={track.id === playingId}
+              selected={selected.has(id)}
+              focused={id === selectedId}
+              playing={id === playingId}
               selectionMode={selecting}
               linkDrag={htmlExternalLinkDrag}
               actions={rowActions}
@@ -2514,10 +2513,6 @@ export const TrackTable = memo(function TrackTable({
               onToggle={toggleTrackSelection}
               onRate={rateTrack}
             />
-          ) : (
-            <tr key={id} data-loading-track="true" aria-busy="true">
-              <PlaceholderCells index={index} showIndex={showIndexCol} columns={visibleColumns} />
-            </tr>
           ))}
           {winEnd < viewport.count && (
             <tr data-spacer="bottom" aria-hidden="true">

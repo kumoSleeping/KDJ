@@ -380,15 +380,16 @@ const ResultTableView = memo(function ResultTableView({
   // rows where the spinner was, or the pane back on screen (resultArrival.ts). Each presentation
   // is one cascade from the first row in view; a re-render or a change of the rows is none.
   const [arrival, setArrival] = useState(() =>
-    arrivalAfter(NOTHING_PRESENTED, { delivery: delivery.id, shown: paneShown, listed }),
+    arrivalAfter(NOTHING_PRESENTED, { delivery: delivery.id, shown: paneShown, listed }, loading),
   );
-  const arrivalNow = arrivalAfter(arrival, { delivery: delivery.id, shown: paneShown, listed });
+  const arrivalNow = arrivalAfter(arrival, { delivery: delivery.id, shown: paneShown, listed }, loading);
   if (arrivalNow !== arrival) setArrival(arrivalNow);
   const bodyRef = useRef<HTMLTableSectionElement>(null);
   /** The delivery whose starting position has been taken; the pane coming back keeps its place. */
   const placedRef = useRef<number | null>(null);
   const deliveryRef = useRef(delivery);
   deliveryRef.current = delivery;
+  const clearArrivalRef = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     const table = tableRef.current;
     const body = bodyRef.current;
@@ -401,8 +402,15 @@ const ResultTableView = memo(function ResultTableView({
       scroller.scrollLeft = delivered.left;
     }
     // Measured once, before anything moves: the cascade starts on the first row in view.
-    return arriveRows(body.rows, firstRowInView(table, body.rows, scroller));
+    const clear = arriveRows(body.rows, firstRowInView(table, body.rows, scroller));
+    clearArrivalRef.current = clear;
+    return clear;
   }, [arrivalNow.run]);
+  useLayoutEffect(() => {
+    // display:none cancels CSS animations. Remove their marks too, so reopening retained
+    // results during a search cannot restart a half-finished cascade in the browser.
+    if (!paneShown) clearArrivalRef.current?.();
+  }, [paneShown]);
   // Marks the rows put on themselves (slotting in, unfolding) come off when their gesture ends.
   useEffect(() => {
     const table = tableRef.current;

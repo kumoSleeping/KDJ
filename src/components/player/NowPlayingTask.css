@@ -88,6 +88,20 @@
   overflow: visible;
   pointer-events: none;
 }
+/* A fine, rounded playhead extends just beyond the bars without framing them.
+   Keep it inside the endpoints and follow the same position as the played layer. */
+.kd-now-line[data-wave]::after {
+  content: "";
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: clamp(1px, calc(var(--kd-now-seek, 0) * 100%), calc(100% - 1px));
+  width: 1.5px;
+  border-radius: 999px;
+  background: var(--kd-text);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
 /* A stroke per bar, as thick on screen however far the line is stretched, with round ends. A
    path is the bars of one colour of the song (--kd-now-bar, the colour the player bar's rail
    paints that sound in). Before the playhead they are that colour; after it the colour is mostly
@@ -146,3 +160,9 @@
 }
 :root[data-theme-pack="sakulaptop98"] .kd-now-wave { inset: 2px 3px; width: calc(100% - 6px); height: 18px; }
 :root[data-theme-pack="sakulaptop98"] .kd-now-rail { right: 3px; left: 3px; border-radius: 0; }
+:root[data-theme-pack="sakulaptop98"] .kd-now-line[data-wave]::after {
+  top: 1px;
+  bottom: 1px;
+  left: clamp(4px, calc(3px + var(--kd-now-seek, 0) * (100% - 6px)), calc(100% - 4px));
+  border-radius: 0;
+}
