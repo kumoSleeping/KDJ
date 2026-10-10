@@ -5,8 +5,19 @@ import type {
   MergedGroup,
 } from "../types";
 
-export const RESOLVED_COLLECTION_PAGE_SIZE = 50;
+/**
+ * An opened collection is one list that grows: this many rows are shown at first, and the same
+ * number more each time the end of what is shown is reached.
+ */
+export const COLLECTION_BATCH_SIZE = 50;
+/**
+ * A list whose further rows are fetched from the provider is reopened at startup where it was
+ * left only when that place lies within this many rows; a deeper one starts at its top instead
+ * of walking the provider's pages before anything is shown.
+ */
+export const RESTORED_FETCH_ROWS = COLLECTION_BATCH_SIZE * 4;
 
+/** What the top rail is told about the opened collection. `total` is its whole size. */
 export interface CollectionPageWindow {
   total: number;
   page: number;
@@ -15,31 +26,150 @@ export interface CollectionPageWindow {
   end: number;
 }
 
+function rowCount(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
+
 /**
- * 已完整载入的远程集合只分页渲染，下载、全选和试听队列仍使用完整曲目集。
- * requestedPage 可能来自旧 UI state；集合刷新变短时在这里统一夹回有效页。
+ * The opened collection as the rail sees it: the whole size and how far it is shown. The list
+ * is not cut into pages any more, so there is always exactly one.
  */
-export function collectionPageWindow(
-  total: number,
-  requestedPage: number | undefined,
-  pageSize = RESOLVED_COLLECTION_PAGE_SIZE,
-): CollectionPageWindow {
-  const safeTotal = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : 0;
-  const safePageSize = Number.isFinite(pageSize) ? Math.max(1, Math.trunc(pageSize)) : 1;
-  const pageCount = Math.max(1, Math.ceil(safeTotal / safePageSize));
-  const numericPage =
-    typeof requestedPage === "number" && Number.isFinite(requestedPage)
-      ? Math.trunc(requestedPage)
-      : 1;
-  const page = Math.min(pageCount, Math.max(1, numericPage));
-  const start = Math.min(safeTotal, (page - 1) * safePageSize);
+export function collectionListWindow(total: number, shown: number): CollectionPageWindow {
+  const safeTotal = rowCount(total);
   return {
     total: safeTotal,
-    page,
-    pageCount,
-    start,
-    end: Math.min(safeTotal, start + safePageSize),
+    page: 1,
+    pageCount: 1,
+    start: 0,
+    end: Math.min(safeTotal, rowCount(shown)),
   };
+}
+
+/** Rows of opened collections the list has in hand, shown or not. */
+export function collectionRowsInHand(items: readonly IntakeItem[]): number {
+  return items.reduce(
+    (sum, item) => (isResolvedCollectionItem(item) ? sum + item.groups.length : sum),
+    0,
+  );
+}
+
+export interface CollectionReveal {
+  /**
+   * Per item, how many of its rows are shown; `null` for an item that is not reached yet. An
+   * item that is not an opened collection is shown whole or not at all.
+   */
+  rows: (number | null)[];
+  /** Collection rows shown, over all items. */
+  shown: number;
+}
+
+/**
+ * Which rows a list shows once `shown` collection rows are revealed. The list is always a
+ * prefix of the whole one: collections fill in order, and nothing below a collection that is
+ * only partly shown is there yet. So rows are only ever added at the end.
+ */
+export function collectionReveal(items: readonly IntakeItem[], shown: number): CollectionReveal {
+  let left = rowCount(shown);
+  let cut = false;
+  const rows = items.map((item) => {
+    if (cut) return null;
+    if (!isResolvedCollectionItem(item)) return item.groups.length;
+    const count = Math.min(left, item.groups.length);
+    left -= count;
+    cut = count < item.groups.length;
+    return count;
+  });
+  return { rows, shown: rowCount(shown) - left };
+}
+
+export interface CollectionBatchStep {
+  /** Rows shown once the batch has landed. */
+  shown: number;
+  /**
+   * The cumulative number of rows to ask the provider for, when the batch is not in hand;
+   * `null` when it only has to be shown.
+   */
+  fetch: number | null;
+}
+
+/**
+ * The next batch of a list that shows `shown` rows, has `inHand` and is `total` long (a
+ * provider that hands its list over in pieces knows a longer total than what is in hand).
+ * `null` when everything is shown.
+ */
+export function nextCollectionBatch(
+  shown: number,
+  inHand: number,
+  total: number,
+  batch = COLLECTION_BATCH_SIZE,
+): CollectionBatchStep | null {
+  const have = rowCount(inHand);
+  const all = Math.max(have, rowCount(total));
+  const now = Math.min(rowCount(shown), have);
+  if (now >= all) return null;
+  const next = Math.min(all, now + Math.max(1, rowCount(batch)));
+  return { shown: next, fetch: next > have ? next : null };
+}
+
+/**
+ * What a provider's answer to "the first `asked` rows" says about the list: one that comes
+ * back short has ended there, whatever the directory claimed.
+ */
+export function fetchedCollectionTotal(asked: number, received: number, claimed: number): number {
+  return received < asked ? rowCount(received) : Math.max(rowCount(claimed), rowCount(received));
+}
+
+function groupSourceKey(group: MergedGroup): string {
+  const source = group.sources[0];
+  return source ? `${source.platform}:${source.key}` : group.group_id;
+}
+
+/**
+ * The rows in hand followed by the ones a longer answer added. Rows in hand stay the objects
+ * they are (their ids carry the selection and the row's state); a song a list holds twice is
+ * told apart by counting.
+ */
+export function appendFetchedGroups(
+  inHand: readonly MergedGroup[],
+  fetched: readonly MergedGroup[],
+): MergedGroup[] {
+  const held = new Map<string, number>();
+  const ids = new Set<string>();
+  for (const group of inHand) {
+    const key = groupSourceKey(group);
+    held.set(key, (held.get(key) ?? 0) + 1);
+    ids.add(group.group_id);
+  }
+  const next = [...inHand];
+  for (const group of fetched) {
+    const key = groupSourceKey(group);
+    const count = held.get(key) ?? 0;
+    if (count > 0) {
+      held.set(key, count - 1);
+      continue;
+    }
+    // An id is the row's key in the table: never hand out one that is already taken.
+    let id = group.group_id;
+    while (ids.has(id)) id = `${id}+`;
+    ids.add(id);
+    next.push(id === group.group_id ? group : { ...group, group_id: id });
+  }
+  return next;
+}
+
+/**
+ * Where a list that was open when the app closed is opened again: `shown` rows and the scroll
+ * position, or its top when getting there would mean fetching more than RESTORED_FETCH_ROWS.
+ */
+export function restoredCollectionView(
+  saved: { shown: number; scrollTop: number },
+  fetched: boolean,
+): { shown: number; scrollTop: number } {
+  const shown = Math.max(COLLECTION_BATCH_SIZE, rowCount(saved.shown));
+  if (fetched && shown > RESTORED_FETCH_ROWS) {
+    return { shown: COLLECTION_BATCH_SIZE, scrollTop: 0 };
+  }
+  return { shown, scrollTop: Math.max(0, Number.isFinite(saved.scrollTop) ? saved.scrollTop : 0) };
 }
 
 export function collectionToken(collection: CollectionResult): string {

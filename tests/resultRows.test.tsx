@@ -37,7 +37,7 @@ test("the result table: the same picking, and the download key in the first data
       items, video: null, loading: false, searched: true, layout: "wide",
       selected: chosen, selectionMode: mode, onSelectionModeChange: setMode,
       expandedGroups: new Set<string>(), collapsedItems: new Set<number>(), sourceIndex: {},
-      inspectedGroup: inspected, collectionPage: 1,
+      inspectedGroup: inspected, delivery: { id: 1, top: 0, left: 0 }, paneShown: true, collectionShown: 50, hasMoreRows: false, loadingMoreRows: false, onShowMoreRows() {},
       onToggleSelect: (entry: string) => setChosen(current => {
         const next = new Set(current);
         if (!next.delete(entry)) next.add(entry);
@@ -184,7 +184,7 @@ test("the result table: the same picking, and the download key in the first data
         items: batch, video: null, loading: false, searched: true, layout: "wide",
         selected: new Set(chosen), selectionMode: mode, onSelectionModeChange() {},
         expandedGroups: new Set<string>(), collapsedItems: new Set<number>(), sourceIndex: {},
-        inspectedGroup: null, collectionPage: 1,
+        inspectedGroup: null, delivery: { id: 1, top: 0, left: 0 }, paneShown: true, collectionShown: 50, hasMoreRows: false, loadingMoreRows: false, onShowMoreRows() {},
         onToggleSelect() {}, onToggleExpand() {}, onPickSource() {}, onToggleItem() {},
         onToggleItemAll: (index: number) => { toggledPackages.push(index); },
         onToggleAll() {}, onDownloadGroup() {}, onDownloadSelected() {}, onInspectGroup() {},

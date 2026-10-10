@@ -1,5 +1,5 @@
-/* 搜索结果表: how a row is laid out, how a delivered list arrives, and how what was unfolded
-   under a row folds back.
+/* 搜索结果表: how a row is laid out, how a list that is presented arrives, how an opened
+   collection grows at its foot, and how what was unfolded under a row folds back.
    Rows are separated by spacing and the hover tone only; nothing is drawn between them.
    The base cell, hover and selection rules are the shared .kd-table ones in design.css. */
 
@@ -124,42 +124,44 @@ td > .kd-result-keyed { width: 100%; }
 }
 
 /* —— Arrival ——
-   The table carries data-reveal only while a delivered list is arriving (ResultTable.tsx), so
-   none of this can run again on a re-render, a remount or a scroll. The first fourteen rows rise
-   one after another, each cover scales in a beat after its row and the source badges land a
-   beat after that; every row past the cascade arrives together on its last beat. */
-.kd-table[data-reveal] > tbody > tr {
+   Rows carry data-reveal only while they arrive (resultArrival.ts marks them and takes the mark
+   off), so none of this can run again on a re-render, a selection or a scroll, and every list
+   that is presented plays it afresh: a delivered list, the pane shown again, a batch added at
+   the end. The mark is the row's step: fourteen rows rise one after another from the first one
+   in view (28 ms apart), each cover scales in a beat after its row and the source badges land a
+   beat after that; the rows behind them ("rest") arrive together on the last beat. */
+.kd-table[data-kind="results"] > tbody > tr[data-reveal] {
   --kd-reveal-at: 440ms;
-  animation: kd-result-fade 240ms ease-out var(--kd-reveal-at) backwards;
-}
-.kd-table[data-reveal] > tbody > tr:nth-child(-n + 14) {
   animation: kd-result-rise 380ms cubic-bezier(0.2, 0.85, 0.25, 1) var(--kd-reveal-at) backwards;
 }
-.kd-table[data-reveal] > tbody > tr:nth-child(1) { --kd-reveal-at: 60ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(2) { --kd-reveal-at: 88ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(3) { --kd-reveal-at: 116ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(4) { --kd-reveal-at: 144ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(5) { --kd-reveal-at: 172ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(6) { --kd-reveal-at: 200ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(7) { --kd-reveal-at: 228ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(8) { --kd-reveal-at: 256ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(9) { --kd-reveal-at: 284ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(10) { --kd-reveal-at: 312ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(11) { --kd-reveal-at: 340ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(12) { --kd-reveal-at: 368ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(13) { --kd-reveal-at: 396ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(14) { --kd-reveal-at: 424ms; }
-.kd-table[data-reveal] > tbody > tr:nth-child(-n + 14) .kd-thumb {
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="rest"] {
+  animation: kd-result-fade 240ms ease-out var(--kd-reveal-at) backwards;
+}
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="0"] { --kd-reveal-at: 60ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="1"] { --kd-reveal-at: 88ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="2"] { --kd-reveal-at: 116ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="3"] { --kd-reveal-at: 144ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="4"] { --kd-reveal-at: 172ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="5"] { --kd-reveal-at: 200ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="6"] { --kd-reveal-at: 228ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="7"] { --kd-reveal-at: 256ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="8"] { --kd-reveal-at: 284ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="9"] { --kd-reveal-at: 312ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="10"] { --kd-reveal-at: 340ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="11"] { --kd-reveal-at: 368ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="12"] { --kd-reveal-at: 396ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal="13"] { --kd-reveal-at: 424ms; }
+.kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-thumb {
   animation: kd-result-cover 420ms cubic-bezier(0.3, 1.45, 0.5, 1) calc(var(--kd-reveal-at) + 70ms) backwards;
 }
-.kd-table[data-reveal] > tbody > tr:nth-child(-n + 14) .kd-source-dot {
+.kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-source-dot {
   animation: kd-result-badge 340ms cubic-bezier(0.3, 1.6, 0.5, 1) calc(var(--kd-reveal-at) + 170ms) backwards;
 }
 /* A merged group's badges fan out one by one. */
-.kd-table[data-reveal] > tbody > tr:nth-child(-n + 14) .kd-source-dot:nth-child(2) {
+.kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-source-dot:nth-child(2) {
   animation-delay: calc(var(--kd-reveal-at) + 230ms);
 }
-.kd-table[data-reveal] > tbody > tr:nth-child(-n + 14) .kd-source-dot:nth-child(n + 3) {
+.kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-source-dot:nth-child(n + 3) {
   animation-delay: calc(var(--kd-reveal-at) + 290ms);
 }
 @keyframes kd-result-rise {
@@ -181,8 +183,10 @@ td > .kd-result-keyed { width: 100%; }
 }
 
 /* —— Later rows ——
-   A row that mounts into a settled list (data-enter is fixed at mount) slots in where it lands;
-   sources and parts the user opens unfold from under their row, one after another. */
+   A row that mounts into a settled list (a package opened again) slots in where it lands;
+   sources and parts the user opens unfold from under their row, one after another. The row sets
+   the mark when it mounts and the table takes it off when the gesture is over (settleRowGestures),
+   so it plays once. */
 .kd-table tbody tr[data-enter="late"] {
   animation: kd-result-slot 260ms ease-out backwards;
 }
@@ -226,19 +230,38 @@ td > .kd-result-keyed { width: 100%; }
   to { height: 0; }
 }
 
+/* —— More of the list ——
+   An opened collection grows as its end is reached. The foot holds its room for as long as there
+   is more to come, and a ring turns in it while the next batch is fetched: ink, no surface. It
+   waits a moment before showing, so a batch that is there at once shows no ring at all. */
+.kd-result-more {
+  /* Under a table wider than the pane the ring stays in the middle of what is seen. */
+  position: sticky;
+  left: 0;
+  display: grid;
+  height: 2.75rem;
+  place-items: center;
+  color: var(--kd-muted);
+}
+.kd-result-more > svg {
+  animation:
+    kd-rotate 0.9s linear infinite,
+    kd-result-fade var(--kd-motion-micro) ease-out 120ms backwards;
+}
+
 /* —— Sakura98: the list is drawn, not faded ——
    Rows tick in a line at a time with a two-step drop, covers zoom by pixel sizes, and folded
    rows blink out before their room closes in steps. */
-:root[data-theme-pack="sakulaptop98"] .kd-table[data-reveal] > tbody > tr {
-  animation: kd-result-tick-98 120ms steps(1, end) var(--kd-reveal-at) backwards;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-table[data-reveal] > tbody > tr:nth-child(-n + 14) {
+:root[data-theme-pack="sakulaptop98"] .kd-table[data-kind="results"] > tbody > tr[data-reveal] {
   animation: kd-result-drop-98 150ms steps(1, end) var(--kd-reveal-at) backwards;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-table[data-reveal] > tbody > tr:nth-child(-n + 14) .kd-thumb {
+:root[data-theme-pack="sakulaptop98"] .kd-table[data-kind="results"] > tbody > tr[data-reveal="rest"] {
+  animation: kd-result-tick-98 120ms steps(1, end) var(--kd-reveal-at) backwards;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-thumb {
   animation: kd-result-cover-98 240ms steps(1, end) calc(var(--kd-reveal-at) + 60ms) backwards;
 }
-:root[data-theme-pack="sakulaptop98"] .kd-table[data-reveal] > tbody > tr:nth-child(-n + 14) .kd-source-dot {
+:root[data-theme-pack="sakulaptop98"] .kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-source-dot {
   animation-name: kd-result-badge-98;
   animation-duration: 180ms;
   animation-timing-function: steps(1, end);
@@ -277,18 +300,20 @@ td > .kd-result-keyed { width: 100%; }
 }
 
 /* —— Reduced motion ——
-   The list is simply there after one short fade of the whole body; nothing rises or scales.
-   Folded rows fade and their room closes at once (useFold skips the second beat). */
+   The rows that arrive are simply there after one short fade, all together; nothing rises or
+   scales. Folded rows fade and their room closes at once (useFold skips the second beat). */
 @media (prefers-reduced-motion: reduce) {
-  .kd-table[data-reveal] > tbody > tr,
-  .kd-table[data-reveal] > tbody > tr .kd-thumb,
-  .kd-table[data-reveal] > tbody > tr .kd-source-dot,
+  .kd-table[data-kind="results"] > tbody > tr[data-reveal] .kd-thumb,
+  .kd-table[data-kind="results"] > tbody > tr[data-reveal] .kd-source-dot,
   .kd-table tbody tr[data-enter="late"],
   .kd-table tbody tr[data-unfold="true"] {
     animation: none !important;
   }
-  .kd-table[data-reveal] > tbody {
-    animation: kd-result-fade 200ms ease-out backwards;
+  .kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-fold]) {
+    animation: kd-result-fade 200ms ease-out backwards !important;
+  }
+  .kd-result-more > svg {
+    animation: kd-rotate 0.9s linear infinite;
   }
   .kd-table tbody tr[data-fold="out"] {
     animation: kd-result-fade-out var(--kd-motion-reduced) linear both !important;
