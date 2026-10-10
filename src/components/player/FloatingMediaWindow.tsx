@@ -1,3 +1,4 @@
+import { useThemePack } from "../../lib/themePack";
 import { raiseSurface } from "../../lib/surfaceOrder";
 import {
   useEffect,
@@ -120,7 +121,12 @@ export function useFloatingMediaWindow(options: FloatingMediaWindowOptions): Flo
   const barDown = usePlayerBarAway(state => playerBarStandsDown(state.phase));
   const [privateRect, setPrivateRect] = useState<FloatRect | null>(null);
   const remembered = shared ? sharedRect : privateRect;
-  const { ratio, extraHeight = 0, minWidth = 0 } = content;
+  // A theme pack may give the window a strip of its own above the picture (Sakura98's caption
+  // bar, as padding); the box is that much taller than its picture.
+  const [strip, setStrip] = useState(0);
+  const packId = useThemePack(state => state.active?.id ?? null);
+  const { ratio, minWidth = 0 } = content;
+  const extraHeight = (content.extraHeight ?? 0) + strip;
   const rect = useMemo(() => {
     const shape = { ratio, extraHeight, minWidth };
     // Never placed: above the player bar as it stands now, or on the window's bottom while the
@@ -145,6 +151,12 @@ export function useFloatingMediaWindow(options: FloatingMediaWindowOptions): Flo
 
   const element = useRef<HTMLElement | null>(null);
   const bind = useRef((node: HTMLElement | null) => { element.current = node; }).current;
+  const locked = Boolean(options.locked);
+  useLayoutEffect(() => {
+    const node = element.current;
+    const next = shown && !locked && node ? Math.round(parseFloat(getComputedStyle(node).paddingTop) || 0) : 0;
+    setStrip(current => current === next ? current : next);
+  }, [shown, locked, packId]);
   const presenter = useRef<FloatingMediaPresenter | null>(null);
   if (!presenter.current) {
     const self: FloatingMediaPresenter = {
