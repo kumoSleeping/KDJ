@@ -52,10 +52,9 @@ import {
 } from "./resultColumns";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import {
-  collectionPageWindow,
+  collectionReveal,
   collectionToken,
   isResolvedCollectionItem,
-  RESOLVED_COLLECTION_PAGE_SIZE,
 } from "../../lib/searchCollections";
 import { CoverImage } from "../common/VinylPlaceholder";
 import {
@@ -73,6 +72,15 @@ import {
   searchOutcomeOf,
   useFold,
 } from "./searchMotion";
+import {
+  arrivalAfter,
+  arriveRows,
+  firstRowInView,
+  nearListEnd,
+  NOTHING_PRESENTED,
+  settleRowGestures,
+  type ResultDelivery,
+} from "./resultArrival";
 import "./ResultTable.css";
 
 export {
@@ -116,6 +124,13 @@ export interface ResultTableProps {
   loading: boolean;
   /** 已处理过一次（用来区分"还没搜"和"搜了没结果"）。 */
   searched: boolean;
+  /**
+   * Which list this is and where it starts. A new id is a list the user has not seen: its rows
+   * arrive in a cascade. Rows added to or taken from the list keep the id.
+   */
+  delivery: ResultDelivery;
+  /** The pane holding the table is on screen; coming back on screen presents the list again. */
+  paneShown: boolean;
   /** 当前布局档位，决定搜索结果行的单击/双击播放行为。 */
   layout: LayoutMode;
   selected: Set<string>;
@@ -128,8 +143,14 @@ export interface ResultTableProps {
   sourceIndex: Record<string, number>;
   /** 最后由用户点开的在线曲目；由工作台持久化以便重启恢复。 */
   inspectedGroup: string | null;
-  /** 已打开合集的当前页；合集标题和翻页入口由顶部工作条统一承载。 */
-  collectionPage: number;
+  /** How many rows of the opened collection(s) are shown so far; the list grows in batches. */
+  collectionShown: number;
+  /** There are rows beyond the shown ones, in hand or still at the provider. */
+  hasMoreRows: boolean;
+  /** The next batch is being fetched: a ring turns at the foot of the list. */
+  loadingMoreRows: boolean;
+  /** The end of what is shown came into reach. */
+  onShowMoreRows(): void;
   onToggleSelect(key: string): void;
   onToggleExpand(groupId: string): void;
   onPickSource(groupId: string, index: number): void;
@@ -164,12 +185,6 @@ const RESULT_COLUMN_PREFS_SCHEMA: TableColumnPrefsSchema = {
   maxWidth: RESULT_COLUMN_MAX_WIDTH,
 };
 
-/**
- * How long a delivered list is "arriving": the cascade of its first rows, their covers and
- * badges (ResultTable.css). After it the table carries no entrance rules at all.
- */
-const RESULT_REVEAL_MS = 1100;
-
 const NO_ITEMS: IntakeItem[] = [];
 
 type ResultTableHandlers = Required<Pick<
@@ -186,6 +201,7 @@ type ResultTableHandlers = Required<Pick<
   | "onInspectGroup"
   | "onRemoveStreamGroup"
   | "onLoadCollection"
+  | "onShowMoreRows"
 >>;
 
 /**
@@ -262,6 +278,7 @@ export function ResultTable(props: ResultTableProps) {
       onRemoveStreamGroup: (group, sourceIndex) =>
         latest.current.onRemoveStreamGroup?.(group, sourceIndex),
       onLoadCollection: (collection) => latest.current.onLoadCollection(collection),
+      onShowMoreRows: () => latest.current.onShowMoreRows(),
     }),
     [],
   );
@@ -285,6 +302,8 @@ const ResultTableView = memo(function ResultTableView({
   video,
   loading,
   searched,
+  delivery,
+  paneShown,
   layout,
   selected,
   selectionMode,
@@ -293,7 +312,10 @@ const ResultTableView = memo(function ResultTableView({
   collapsedItems,
   sourceIndex,
   inspectedGroup,
-  collectionPage,
+  collectionShown,
+  hasMoreRows,
+  loadingMoreRows,
+  onShowMoreRows,
   onToggleSelect,
   onToggleExpand,
   onPickSource,
@@ -321,26 +343,120 @@ const ResultTableView = memo(function ResultTableView({
   /** Nothing to show yet: the spinner stands in for the list. */
   const waiting = loading && totalGroups === 0 && !video;
 
-  // The list arrives once, in the render that replaces the spinner with rows. Re-renders, a
-  // remount of the pane and later row changes never replay it: `reveal` is back to 0 by then.
-  const [arrival, setArrival] = useState({ waiting, reveal: 0 });
-  if (arrival.waiting !== waiting) {
-    setArrival({ waiting, reveal: waiting ? 0 : arrival.reveal + 1 });
-  }
-  const reveal = arrival.reveal;
+  /** There are rows on screen (or would be, were the pane shown). */
+  const listed = !waiting && (items.length > 0 || Boolean(video));
+
+  // A list is presented when it is one the user has not just been looking at: another delivery,
+  // rows where the spinner was, or the pane back on screen (resultArrival.ts). Each presentation
+  // is one cascade from the first row in view; a re-render or a change of the rows is none.
+  const [arrival, setArrival] = useState(() =>
+    arrivalAfter(NOTHING_PRESENTED, { delivery: delivery.id, shown: paneShown, listed }),
+  );
+  const arrivalNow = arrivalAfter(arrival, { delivery: delivery.id, shown: paneShown, listed });
+  if (arrivalNow !== arrival) setArrival(arrivalNow);
+  const tableRef = useRef<HTMLTableElement>(null);
+  const bodyRef = useRef<HTMLTableSectionElement>(null);
+  /** The delivery whose starting position has been taken; the pane coming back keeps its place. */
+  const placedRef = useRef<number | null>(null);
+  const deliveryRef = useRef(delivery);
+  deliveryRef.current = delivery;
+  useLayoutEffect(() => {
+    const table = tableRef.current;
+    const body = bodyRef.current;
+    if (!arrivalNow.run || !table || !body) return;
+    const scroller = table.parentElement;
+    const delivered = deliveryRef.current;
+    if (scroller && placedRef.current !== delivered.id) {
+      placedRef.current = delivered.id;
+      scroller.scrollTop = delivered.top;
+      scroller.scrollLeft = delivered.left;
+    }
+    // Measured once, before anything moves: the cascade starts on the first row in view.
+    return arriveRows(body.rows, firstRowInView(table, body.rows, scroller));
+  }, [arrivalNow.run]);
+  // Marks the rows put on themselves (slotting in, unfolding) come off when their gesture ends.
   useEffect(() => {
-    if (!reveal) return;
-    const timer = window.setTimeout(
-      () => setArrival((current) => (current.reveal ? { ...current, reveal: 0 } : current)),
-      RESULT_REVEAL_MS,
-    );
-    return () => window.clearTimeout(timer);
-  }, [reveal]);
-  // Rows that mount after the table has settled (a later source, another page of a collection,
-  // a reopened package) slot in on their own instead of joining a cascade.
-  const [settled, setSettled] = useState(false);
-  useEffect(() => setSettled(true), []);
-  const lateRows = settled && !reveal;
+    const table = tableRef.current;
+    return table ? settleRowGestures(table) : undefined;
+  }, [listed]);
+
+  // Opened collections grow in batches: the table shows a prefix of the list, so a batch only
+  // ever adds rows at the end.
+  const reveal = useMemo(() => collectionReveal(items, collectionShown), [items, collectionShown]);
+  /** The last row of the previous commit, and how much of which delivery was shown then. */
+  const tailRef = useRef<Element | null>(null);
+  const grownRef = useRef({ delivery: Number.NaN, shown: 0 });
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    const before = grownRef.current;
+    grownRef.current = { delivery: delivery.id, shown: reveal.shown };
+    const tail = tailRef.current;
+    if (
+      !body ||
+      before.delivery !== delivery.id ||
+      reveal.shown <= before.shown ||
+      tail?.parentElement !== body
+    ) return;
+    // The batch that was just added arrives; the rows that were there do not move.
+    return arriveRows(body.rows, Array.prototype.indexOf.call(body.rows, tail) + 1);
+  }, [delivery.id, reveal.shown]);
+  useLayoutEffect(() => {
+    tailRef.current = bodyRef.current?.lastElementChild ?? null;
+  });
+
+  // The next batch is due when the end of what is shown comes into reach: on a scroll, on a
+  // pane that grew, and right after a batch that did not fill the pane. A batch that failed
+  // (the fetch ended and nothing was added) is asked for again by the user's next scroll or
+  // turn of the wheel, never by itself.
+  const moreRef = useRef({ loading: loadingMoreRows, ask: onShowMoreRows, failed: false });
+  moreRef.current.loading = loadingMoreRows;
+  moreRef.current.ask = onShowMoreRows;
+  const fetchFromRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (loadingMoreRows) {
+      fetchFromRef.current = reveal.shown;
+    } else if (fetchFromRef.current !== null) {
+      moreRef.current.failed = fetchFromRef.current === reveal.shown;
+      fetchFromRef.current = null;
+    }
+  }, [loadingMoreRows, reveal.shown]);
+  useEffect(() => {
+    moreRef.current.failed = false;
+  }, [delivery.id]);
+  useEffect(() => {
+    const scroller = tableRef.current?.parentElement;
+    if (!scroller || !hasMoreRows || !paneShown) return;
+    const check = (byUser: boolean) => {
+      const more = moreRef.current;
+      if (more.loading || (more.failed && !byUser)) return;
+      if (!nearListEnd(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight)) return;
+      more.failed = false;
+      more.ask();
+    };
+    const onScroll = () => check(true);
+    // At the very end a turn of the wheel scrolls nothing, so it is heard on its own.
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY > 0) check(true);
+    };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    scroller.addEventListener("wheel", onWheel, { passive: true });
+    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => check(false));
+    resize?.observe(scroller);
+    check(false);
+    return () => {
+      scroller.removeEventListener("scroll", onScroll);
+      scroller.removeEventListener("wheel", onWheel);
+      resize?.disconnect();
+    };
+  }, [hasMoreRows, paneShown, listed, delivery.id, reveal.shown]);
+
+  // Rows of a package that mount after their list was delivered (the package was opened again)
+  // slot in on their own. A batch added to a flat list is not late: it arrives as a batch.
+  const settledRef = useRef<number | null>(null);
+  const lateRows = settledRef.current === delivery.id;
+  useLayoutEffect(() => {
+    if (listed) settledRef.current = delivery.id;
+  }, [delivery.id, listed]);
 
   // The search bar's source marks settle on what this list came back with.
   useLayoutEffect(() => {
@@ -651,9 +767,9 @@ const ResultTableView = memo(function ResultTableView({
     <>
       <InlineNotice text={dragError} onDismiss={() => setDragError("")} block />
       <table
+        ref={tableRef}
         className="kd-table"
         data-kind="results"
-        data-reveal={reveal || undefined}
         style={{ minWidth: tableMinWidthPx }}
       >
         <colgroup>
@@ -699,7 +815,8 @@ const ResultTableView = memo(function ResultTableView({
             </tr>
           </thead>
         )}
-        <tbody>
+        {/* A delivered list is a new body: every row of it is new, whatever the last list held. */}
+        <tbody key={delivery.id} ref={bodyRef}>
           {/* 贴进来的那条链接置顶：它是用户刚刚亲手要的东西，不该排在搜索结果后面 */}
           {video && (
             <VideoResultRow
@@ -720,16 +837,11 @@ const ResultTableView = memo(function ResultTableView({
                 ? item.kind
                 : null;
             const itemFlat = flat || directCollection;
-            const pageWindow = directCollection
-              ? collectionPageWindow(
-                  item.groups.length,
-                  collectionPage,
-                  RESOLVED_COLLECTION_PAGE_SIZE,
-                )
-              : null;
-            const visibleGroupStart = pageWindow?.start ?? 0;
-            const visibleGroups = pageWindow
-              ? item.groups.slice(pageWindow.start, pageWindow.end)
+            // Not reached yet: a collection above this item is only partly shown.
+            const shownGroups = reveal.rows[index];
+            if (shownGroups === null || shownGroups === undefined) return null;
+            const visibleGroups = shownGroups < item.groups.length
+              ? item.groups.slice(0, shownGroups)
               : item.groups;
             const flatRowOffset = itemFlat
               ? (video ? 1 : 0) +
@@ -746,17 +858,27 @@ const ResultTableView = memo(function ResultTableView({
               pickable.every((group) => selected.has(selectionKey(index, group.group_id)));
 
             const packageRowCount = item.collections.length + visibleGroups.length;
+            // What plays on after a row is the rest of the whole item, shown or not. Worked out
+            // once per item: a collection that has grown long renders many rows.
+            const following = { songs: [] as SongPreviewItem[], after: [] as number[] };
+            for (const candidate of item.groups) {
+              const song = previewItem(
+                candidate,
+                sourceIndex[candidate.group_id] ?? candidate.best_source_index,
+              );
+              if (song) following.songs.push(song);
+              following.after.push(following.songs.length);
+            }
             // A package that folds away shows pictures of the rows that can be on screen.
             const renderGroupRows = (leaving?: number) =>
               (leaving === undefined
                 ? visibleGroups
                 : visibleGroups.slice(0, Math.max(0, leaving - item.collections.length))
-              ).map((group, visiblePosition) => {
-              const position = visibleGroupStart + visiblePosition;
+              ).map((group, position) => {
               const leave =
                 leaving === undefined
                   ? undefined
-                  : foldOrder(item.collections.length + visiblePosition, leaving);
+                  : foldOrder(item.collections.length + position, leaving);
               const dragSources = () => {
                 const currentKey = selectionKey(index, group.group_id);
                 const draggingSelection = selected.has(currentKey);
@@ -801,7 +923,7 @@ const ResultTableView = memo(function ResultTableView({
                       totalColumns={totalColumns}
                       layout={layout}
                       rowNumber={flatRowOffset + position + 1}
-                      late={lateRows}
+                      late={lateRows && !itemFlat}
                       leave={leave}
                       indent={!itemFlat}
                       selectable={group.sources.some((source) => source.platform !== "local")}
@@ -835,7 +957,7 @@ const ResultTableView = memo(function ResultTableView({
                       layout={layout}
                       indent={!itemFlat}
                       rowNumber={flatRowOffset + position + 1}
-                      late={lateRows}
+                      late={lateRows && !itemFlat}
                       leave={leave}
                       inspected={inspectedGroup === selectionKey(index, group.group_id)}
                       sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
@@ -843,15 +965,7 @@ const ResultTableView = memo(function ResultTableView({
                       selectable={group.sources.some((source) => source.platform !== "local")}
                       selectionMode={selectionMode}
                       expanded={expandedGroups.has(group.group_id)}
-                      followingSongs={item.groups
-                        .slice(position + 1)
-                        .flatMap((candidate) => {
-                          const next = previewItem(
-                            candidate,
-                            sourceIndex[candidate.group_id] ?? candidate.best_source_index,
-                          );
-                          return next ? [next] : [];
-                        })}
+                      followingSongs={following.songs.slice(following.after[position])}
                       onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
                       onEnterSelection={() => onSelectionModeChange(true)}
                       onToggleExpand={() => onToggleExpand(group.group_id)}
@@ -897,8 +1011,8 @@ const ResultTableView = memo(function ResultTableView({
                     />
                   );
             });
-            // 已解析合集是独立详情页：这里仅渲染当前页歌曲，不再在表内重复合集头、
-            // 下载和分页。它们统一由顶部工作条承载。
+            // 已解析合集是独立详情页：这里仅渲染已展示到的歌曲，不再在表内重复合集头和
+            // 下载。它们统一由顶部工作条承载。
             const renderRows = (leaving?: number) => (
               <>
                 {renderCollectionRows(item, !itemFlat, leaving)}
@@ -1048,6 +1162,18 @@ const ResultTableView = memo(function ResultTableView({
           })}
         </tbody>
       </table>
+      {/* The room at the foot is held while the list can still grow, so the ring that turns
+          there during a fetch moves nothing. */}
+      {hasMoreRows ? (
+        <div
+          className="kd-result-more"
+          role={loadingMoreRows ? "status" : undefined}
+          aria-label={loadingMoreRows ? "正在载入更多" : undefined}
+          aria-hidden={loadingMoreRows ? undefined : true}
+        >
+          {loadingMoreRows ? <LoaderCircle className="kd-spin" size={16} aria-hidden="true" /> : null}
+        </div>
+      ) : null}
       {colMenu && (
         <ContextMenu x={colMenu.x} y={colMenu.y} onClose={() => setColMenu(null)}>
           {orderedColumns.map((column) => {

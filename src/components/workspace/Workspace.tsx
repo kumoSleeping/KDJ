@@ -118,9 +118,14 @@ import {
   type ForegroundStreamStartup,
 } from "../../lib/streamStartup";
 import {
-  collectionPageWindow,
+  appendFetchedGroups,
+  COLLECTION_BATCH_SIZE,
+  collectionListWindow,
+  collectionRowsInHand,
+  fetchedCollectionTotal,
+  nextCollectionBatch,
   openedCollectionItem,
-  RESOLVED_COLLECTION_PAGE_SIZE,
+  restoredCollectionView,
   resolvedCollectionItem,
 } from "../../lib/searchCollections";
 import { useLibraryClipboard } from "../../lib/useLibraryClipboard";
@@ -154,6 +159,7 @@ import { DuplicateAnalysisPanel } from "../library/DuplicateAnalysisPanel";
 import { isApplyingNav, readPlace, useNavStore } from "../../stores/navStore";
 import { useVideoPip } from "../../lib/videoPip";
 import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
+import type { ResultDelivery } from "../download/resultArrival";
 import {
   DEFAULT_PRIORITY,
   normalizeSearchPlatforms,
@@ -394,7 +400,25 @@ export function Workspace() {
   /** 从合集候选进入详情时保存上一页；返回只恢复这一次搜索现场。 */
   const [collectionSearchSnapshot, setCollectionSearchSnapshot] =
     useState<CollectionSearchSnapshot | null>(null);
-  const [collectionPage, setCollectionPage] = useState(1);
+  /**
+   * Opened collections are one growing list: this many of their rows are shown, and the next
+   * batch comes when the end of them is reached (showMoreCollectionRows).
+   */
+  const [collectionShown, setCollectionShown] = useState(COLLECTION_BATCH_SIZE);
+  const [loadingMoreRows, setLoadingMoreRows] = useState(false);
+  /** The batch being fetched, if any: one at a time, and only for the list that asked. */
+  const moreRowsRequestRef = useRef<object | null>(null);
+  /**
+   * The list the result table presents. Every list the user has not just been looking at is a
+   * new delivery (a search answer, an opened collection or playlist, the previous results
+   * brought back) and starts where it says; rows added to or taken from a list are not.
+   */
+  const [resultDelivery, setResultDelivery] = useState<ResultDelivery>({ id: 0, top: 0, left: 0 });
+  const deliverResults = useCallback((top = 0, left = 0) => {
+    moreRowsRequestRef.current = null;
+    setLoadingMoreRows(false);
+    setResultDelivery((current) => ({ id: current.id + 1, top, left }));
+  }, []);
   const [activeStreamPlaylist, setActiveStreamPlaylist] = useState<ActiveStreamPlaylist | null>(
     () => startupForeground
       ? {
@@ -502,68 +526,86 @@ export function Workspace() {
     () => openedCollectionItem(items ?? []),
     [items],
   );
+  /** Collection rows in hand, and how long the list is where the provider knows more. */
+  const collectionRows = useMemo(() => collectionRowsInHand(items ?? []), [items]);
+  const collectionTotal = openedCollection && openedStreamPlaylist?.platform === "bilibili"
+    ? Math.max(collectionRows, openedStreamPlaylist.count)
+    : collectionRows;
+  const hasMoreCollectionRows = collectionShown < collectionTotal;
+  // How far an online playlist is shown is part of where it was left (see openStreamPlaylist).
+  useEffect(() => {
+    if (activeStreamPlaylist && openedCollection) {
+      updateStreamWorkspaceSession({ shown: Math.min(collectionShown, collectionRows) });
+    }
+  }, [activeStreamPlaylist, collectionRows, collectionShown, openedCollection]);
   const openedCollectionWindow = useMemo(
-    () => {
-      if (!openedCollection) return null;
-      const total = openedStreamPlaylist?.platform === "bilibili"
-        ? Math.max(openedCollection.groups.length, openedStreamPlaylist.count)
-        : openedCollection.groups.length;
-      return collectionPageWindow(total, collectionPage);
-    },
-    [collectionPage, openedCollection, openedStreamPlaylist],
+    () => (openedCollection ? collectionListWindow(collectionTotal, collectionShown) : null),
+    [collectionShown, collectionTotal, openedCollection],
   );
-  const changeCollectionPage = useCallback((requestedPage: number) => {
-    if (!openedCollection) return;
-    const playlist = openedStreamPlaylist;
-    const total = playlist?.platform === "bilibili"
-      ? Math.max(openedCollection.groups.length, playlist.count)
-      : openedCollection.groups.length;
-    const window = collectionPageWindow(total, requestedPage);
-    const scrollTop = () => requestAnimationFrame(() => {
-      searchScrollRef.current?.scrollTo({ top: 0, left: 0 });
-    });
-    if (
-      playlist?.platform !== "bilibili"
-      || window.end <= openedCollection.groups.length
-    ) {
-      setCollectionPage(window.page);
-      scrollTop();
+  /**
+   * The end of what is shown was reached: the next batch. Rows in hand are simply shown; a
+   * Bilibili favourites folder hands its list over in pieces, so its next piece is fetched
+   * (the provider takes a cumulative count). A fetch that fails leaves the list as it is and is
+   * asked for again by the next scroll.
+   */
+  const showMoreCollectionRows = useCallback(() => {
+    if (moreRowsRequestRef.current) return;
+    const step = nextCollectionBatch(collectionShown, collectionRows, collectionTotal);
+    if (!step) return;
+    if (step.fetch === null) {
+      setCollectionShown(step.shown);
       return;
     }
-
-    const requestId = ++resultRequestSeqRef.current;
-    setBusy(true);
+    const playlist = openedStreamPlaylist;
+    const asked = step.fetch;
+    if (!playlist) return;
+    const request = {};
+    const requestId = resultRequestSeqRef.current;
+    const current = () =>
+      moreRowsRequestRef.current === request && requestId === resultRequestSeqRef.current;
+    moreRowsRequestRef.current = request;
+    setLoadingMoreRows(true);
     setSearchError("");
     void api
-      .streamPlaylist(playlist, window.end)
+      .streamPlaylist(playlist, asked)
       .then((response) => {
-        if (requestId !== resultRequestSeqRef.current) return;
-        const resolved = streamPlaylistItem(playlist, response);
-        const reachedEnd = response.sources.length < window.end;
-        const actualTotal = reachedEnd
-          ? response.sources.length
-          : Math.max(playlist.count, response.sources.length);
-        setOpenedStreamPlaylist({ ...playlist, count: actualTotal });
-        setItems([resolved]);
-        setCollectionPage(collectionPageWindow(actualTotal, window.page).page);
-        scrollTop();
+        if (!current()) return;
+        const fetched = streamPlaylistItem(playlist, response);
+        setOpenedStreamPlaylist((opened) =>
+          opened && opened.platform === playlist.platform && opened.key === playlist.key
+            ? {
+                ...opened,
+                count: fetchedCollectionTotal(asked, response.sources.length, opened.count),
+              }
+            : opened,
+        );
+        setItems((list) =>
+          list && list.length === 1 && list[0].entry === fetched.entry
+            ? [{ ...list[0], groups: appendFetchedGroups(list[0].groups, fetched.groups) }]
+            : list,
+        );
+        setCollectionShown(asked);
       })
       .catch((error) => {
-        if (requestId === resultRequestSeqRef.current) {
-          setSearchError(`载入下一页失败：${errorText(error)}`);
-        }
+        if (current()) setSearchError(`载入更多失败：${errorText(error)}`);
       })
       .finally(() => {
-        if (requestId === resultRequestSeqRef.current) setBusy(false);
+        if (moreRowsRequestRef.current !== request) return;
+        moreRowsRequestRef.current = null;
+        setLoadingMoreRows(false);
       });
-  }, [openedCollection, openedStreamPlaylist]);
-  const revealLoadedCollection = useCallback(() => {
-    revealSearchPane();
-    // 搜索面板可能刚从另一栏恢复；等它挂载并完成结果表布局后再回到新集合顶部。
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => searchScrollRef.current?.scrollTo({ top: 0, left: 0 }));
-    });
-  }, [revealSearchPane]);
+  }, [collectionRows, collectionShown, collectionTotal, openedStreamPlaylist]);
+  /**
+   * The two names the rail's call site still uses, kept so that it reads as it did until its
+   * pager is gone: there are no pages any more, so a change of page is the next batch and
+   * "page 1" is the first batch.
+   */
+  const changeCollectionPage = useCallback((_page: number) => {
+    showMoreCollectionRows();
+  }, [showMoreCollectionRows]);
+  const setCollectionPage = useCallback((_page: 1) => {
+    setCollectionShown(COLLECTION_BATCH_SIZE);
+  }, []);
   const localPaneVisible = visiblePaneOrder.includes("local");
   const searchPaneVisible = visiblePaneOrder.includes("search");
   const [dragWorkspacePane, setDragWorkspacePane] = useState<WorkspacePaneKind | null>(null);
@@ -646,8 +688,10 @@ export function Workspace() {
     const snapshot = collectionSearchSnapshot;
     setItems(snapshot.items);
     setVideo(snapshot.video);
+    // The previous results come back where they were left.
+    deliverResults(snapshot.scrollTop, snapshot.scrollLeft);
     setCollectionSearchSnapshot(null);
-    setCollectionPage(1);
+    setCollectionShown(COLLECTION_BATCH_SIZE);
     setLoadingCollections(new Set());
     setChosen(new Set());
     setSearchSelectionMode(false);
@@ -661,17 +705,10 @@ export function Workspace() {
       accountKey: null,
       inspectedGroup: null,
       scrollTop: 0,
+      shown: 0,
     });
     setRestorableWorkspaceSource("local");
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        searchScrollRef.current?.scrollTo({
-          top: snapshot.scrollTop,
-          left: snapshot.scrollLeft,
-        });
-      });
-    });
-  }, [collectionSearchSnapshot]);
+  }, [collectionSearchSnapshot, deliverResults]);
 
   /**
    * 批量与否不再是一个要手动按的开关：贴进来的内容有换行、或一口气贴了
@@ -687,7 +724,7 @@ export function Workspace() {
     setChosen(new Set());
     setSearchSelectionMode(false);
     setCollectionSearchSnapshot(null);
-    setCollectionPage(1);
+    setCollectionShown(COLLECTION_BATCH_SIZE);
   }, [hasResults]);
 
   useEffect(() => {
@@ -832,7 +869,6 @@ export function Workspace() {
     revealSearchPane();
     const requestId = ++resultRequestSeqRef.current;
     setCollectionSearchSnapshot(null);
-    setCollectionPage(1);
     setActiveStreamPlaylist(null);
     setInspectedOnlineGroup(null);
     updateStreamWorkspaceSession({
@@ -840,6 +876,7 @@ export function Workspace() {
       accountKey: null,
       inspectedGroup: null,
       scrollTop: 0,
+      shown: 0,
     });
     setRestorableWorkspaceSource("local");
     setLoadingCollections(new Set());
@@ -864,6 +901,7 @@ export function Workspace() {
         const info = await api.videoResolve(text, directVideoPlatform);
         if (requestId !== resultRequestSeqRef.current) return;
         setVideo(info);
+        deliverResults();
       } catch (error) {
         if (requestId !== resultRequestSeqRef.current) return;
         setVideo(null);
@@ -924,7 +962,11 @@ export function Workspace() {
         kind: requestedKind,
       });
       if (requestId !== resultRequestSeqRef.current) return;
+      // The list on screen stayed there while this search ran; its answer replaces it as a new
+      // list, from its top.
       setItems(response.items);
+      setCollectionShown(COLLECTION_BATCH_SIZE);
+      deliverResults();
       revealSearchPane();
     } catch (error) {
       if (requestId !== resultRequestSeqRef.current) return;
@@ -937,7 +979,7 @@ export function Workspace() {
       if (requestId === resultRequestSeqRef.current) setBusy(false);
     }
     // merge 是常量，不进依赖。
-  }, [query, platforms, batch, searchKind, searchCapabilities, settings, revealSearchPane]);
+  }, [query, platforms, batch, searchKind, searchCapabilities, settings, revealSearchPane, deliverResults]);
 
   /**
    * 左侧平台歌单/收藏夹只是远程浏览入口：点开后复用搜索结果这张表和下载队列，
@@ -962,7 +1004,7 @@ export function Workspace() {
     };
     const requestId = ++resultRequestSeqRef.current;
     setCollectionSearchSnapshot(null);
-    setCollectionPage(1);
+    setCollectionShown(COLLECTION_BATCH_SIZE);
     streamOpenNavigationRef.current = true;
     queueMicrotask(() => {
       streamOpenNavigationRef.current = false;
@@ -973,6 +1015,7 @@ export function Workspace() {
       accountKey: currentAccountKey,
       inspectedGroup: null,
       scrollTop: 0,
+      shown: 0,
     });
     setBusy(true);
     setVideo(null);
@@ -992,12 +1035,15 @@ export function Workspace() {
       setActiveStreamPlaylist(active);
       useStreamBrowseStore.getState().setActive(active);
     }
+    // A list reopened at startup comes back as far as it was shown and where it was scrolled to.
+    const fetchedInPieces = playlist.platform === "bilibili";
+    const view = options.startup
+      ? restoredCollectionView(restoredWorkspaceSessionRef.current.stream, fetchedInPieces)
+      : { shown: COLLECTION_BATCH_SIZE, scrollTop: 0 };
     try {
-      // B 站收藏夹每页只有 20 条；初次只取够当前 UI 页的数量。后续翻页由
+      // B 站收藏夹每页只有 20 条；初次只取够首批展示的数量。后续批次由
       // provider 的累计缓存补齐，不能因为点开 800 条收藏夹就立刻扫完整站列表。
-      const initialLimit = playlist.platform === "bilibili"
-        ? RESOLVED_COLLECTION_PAGE_SIZE
-        : 0;
+      const initialLimit = fetchedInPieces ? view.shown : 0;
       const response = options.startup
         ? await loadForegroundStreamOnce(
             options.startup,
@@ -1025,16 +1071,12 @@ export function Workspace() {
         inspectedGroup: null,
       });
       setItems([resolved]);
+      setCollectionShown(view.shown);
+      deliverResults(view.scrollTop);
       if (browsePlatform) {
         const active = { platform: browsePlatform, key: playlist.key } as const;
         setActiveStreamPlaylist(active);
         useStreamBrowseStore.getState().setActive(active);
-      }
-      if (options.startup) {
-        const top = restoredWorkspaceSessionRef.current.stream.scrollTop;
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => searchScrollRef.current?.scrollTo({ top, left: 0 }));
-        });
       }
       return true;
     } catch (error) {
@@ -1055,6 +1097,7 @@ export function Workspace() {
         accountKey: null,
         inspectedGroup: null,
         scrollTop: 0,
+        shown: 0,
       });
       setRestorableWorkspaceSource("local");
       activateWorkspacePane("local");
@@ -1063,7 +1106,7 @@ export function Workspace() {
     } finally {
       if (requestId === resultRequestSeqRef.current) setBusy(false);
     }
-  }, [activateWorkspacePane, setHasResults]);
+  }, [activateWorkspacePane, deliverResults, setHasResults]);
 
   const openStreamPlaylistFromUser = useCallback(async (playlist: StreamPlaylist) => {
     await openStreamPlaylist(playlist);
@@ -2042,8 +2085,9 @@ export function Workspace() {
       const resolved = resolvedCollectionItem(collection, response);
       // 候选列表与合集详情是两个页面状态；详情页只保留这一个合集的歌曲。
       setCollectionSearchSnapshot(snapshot);
-      setCollectionPage(1);
+      setCollectionShown(COLLECTION_BATCH_SIZE);
       setItems([resolved]);
+      deliverResults();
       setChosen(new Set());
       setSearchSelectionMode(false);
       setCollapsedItems(new Set());
@@ -2057,7 +2101,7 @@ export function Workspace() {
       } else {
         setActiveStreamPlaylist(null);
       }
-      revealLoadedCollection();
+      revealSearchPane();
     } catch (error) {
       if (requestId !== resultRequestSeqRef.current) return;
       setSearchError(`载入集合失败：${errorText(error)}`);
@@ -2068,7 +2112,7 @@ export function Workspace() {
         return next;
       });
     }
-  }, [items, revealLoadedCollection, video]);
+  }, [deliverResults, items, revealSearchPane, video]);
 
   const chosenSources = useMemo(() => {
     const picked: SongSource[] = [];
@@ -2177,7 +2221,15 @@ export function Workspace() {
       try {
         const response = await api.streamPlaylist(playlist, 0);
         if (requestId !== resultRequestSeqRef.current) return;
-        item = streamPlaylistItem(playlist, response);
+        // The whole folder is in hand now; the list on screen keeps its rows and how far it
+        // is shown, and goes on growing from what was fetched.
+        item = {
+          ...item,
+          groups: appendFetchedGroups(
+            item.groups,
+            streamPlaylistItem(playlist, response).groups,
+          ),
+        };
         setItems([item]);
         setOpenedStreamPlaylist({ ...playlist, count: item.groups.length });
       } catch (error) {
@@ -2560,6 +2612,8 @@ export function Workspace() {
                           video={video}
                           loading={busy}
                           searched={hasResults}
+                          delivery={resultDelivery}
+                          paneShown={searchPaneVisible}
                           layout={layout}
                           selected={chosen}
                           selectionMode={searchSelectionMode}
@@ -2568,7 +2622,10 @@ export function Workspace() {
                           collapsedItems={collapsedItems}
                           sourceIndex={sourceIndex}
                           inspectedGroup={inspectedOnlineGroup}
-                          collectionPage={collectionPage}
+                          collectionShown={collectionShown}
+                          hasMoreRows={hasMoreCollectionRows}
+                          loadingMoreRows={loadingMoreRows}
+                          onShowMoreRows={showMoreCollectionRows}
                           onToggleSelect={toggleSelect}
                           onToggleExpand={toggleExpand}
                           onPickSource={pickSource}

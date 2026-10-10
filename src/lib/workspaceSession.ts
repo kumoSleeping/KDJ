@@ -4,6 +4,7 @@ import { writeLocalStorageNow, writeLocalStorageSoon } from "./storageWrite";
 const STORAGE_KEY = "kd-workspace-session-v1";
 const MAX_TEXT = 4_096;
 const MAX_SCROLL = 1_000_000_000;
+const MAX_SHOWN_ROWS = 100_000;
 const DEFAULT_LOCAL_SORT = "file_created_at";
 
 export type RestorableWorkspaceSource = "local" | "stream";
@@ -27,6 +28,12 @@ export interface StreamWorkspaceSession {
   accountKey: string | null;
   inspectedGroup: string | null;
   scrollTop: number;
+  /**
+   * How many rows of the playlist were shown (it grows in batches as it is scrolled); 0 when
+   * nothing more than the first batch is known. The scroll position only means something
+   * together with it.
+   */
+  shown: number;
 }
 
 export interface WorkspaceSession {
@@ -56,6 +63,7 @@ export const DEFAULT_WORKSPACE_SESSION: WorkspaceSession = {
     accountKey: null,
     inspectedGroup: null,
     scrollTop: 0,
+    shown: 0,
   },
 };
 
@@ -143,6 +151,7 @@ export function normalizeWorkspaceSession(value: unknown): WorkspaceSession {
           ? text(streamState.inspectedGroup) || null
           : null,
       scrollTop: scroll(streamState?.scrollTop),
+      shown: Math.trunc(Math.min(MAX_SHOWN_ROWS, scroll(streamState?.shown))),
     },
   };
 }
