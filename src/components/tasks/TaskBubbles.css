@@ -293,16 +293,85 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 .kd-task[data-controls] .kd-task-main:not([data-bare]) { padding-bottom: 8px; }
 .kd-task[data-controls] .kd-task-body { padding-bottom: 10px; }
 
-/* Sakura98: a small window of its own — the pack's face, its bevel and hard drop, squared. */
-/* Square at every size: the size rules above round a large bubble, which a 98 window is not. */
+/* Sakura98: a bubble is a small 98 window — the pack's face inside its bevel and hard drop,
+   squared, with a caption bar across its top in the same tone and type as the drawer's. The
+   bar is the tools row itself, taken out of the summary's line and laid along the window's top
+   edge inside the bevel: what the bubble is (data-caption, named by the host from its kind) at
+   the left, the countdown and the keys at the right as the pack's raised caption buttons. The
+   window makes room for the bar with padding, as the pack's floating window does, so the
+   summary beneath keeps the padding of its size and the host measures the taller bubble as it
+   is. Kept here so it does not depend on the installed copy of the pack. */
+/* Square at every size: the size rules below round a large bubble, which a 98 window is not. */
 :root[data-theme-pack="sakulaptop98"] .kd-task-slot .kd-task {
   --kd-task-surface: var(--s98-face);
+  /* The bevel and a rim of the face around what is inside, and the height of the bar. */
+  --kd-task-frame: 3px;
+  --kd-task-caption: 1.6rem;
+  padding: calc(var(--kd-task-frame) + var(--kd-task-caption)) var(--kd-task-frame) var(--kd-task-frame);
   border: 0;
   border-radius: 0;
   box-shadow: var(--kd-shadow-float);
 }
+:root[data-theme-pack="sakulaptop98"] .kd-task-tools {
+  position: absolute;
+  top: var(--kd-task-frame);
+  right: var(--kd-task-frame);
+  left: var(--kd-task-frame);
+  box-sizing: border-box;
+  height: var(--kd-task-caption);
+  gap: 3px;
+  margin: 0;
+  padding: 2px 3px 2px 0.5rem;
+  background: var(--s98-caption);
+  box-shadow: inset 0 1px var(--s98-white), inset 0 -1px var(--s98-shadow);
+  color: var(--kd-text);
+}
+/* A caption is small bold type; a name too long for its bar is cut before the keys. */
+:root[data-theme-pack="sakulaptop98"] .kd-task-tools::before {
+  content: attr(data-caption);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-action {
+  flex: none;
+  width: 1.35rem;
+  height: 1.25rem;
+  border-radius: 0;
+  background: var(--s98-face);
+  box-shadow: var(--s98-raised);
+  color: var(--kd-text);
+  transition: none;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-action > svg { width: 13px; height: 13px; }
+:root[data-theme-pack="sakulaptop98"] .kd-task-action:hover { color: var(--kd-theme); }
+:root[data-theme-pack="sakulaptop98"] .kd-task-action:active,
+:root[data-theme-pack="sakulaptop98"] .kd-task-action[aria-pressed="true"] {
+  box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-action[aria-pressed="true"] { color: var(--kd-theme); }
+/* The ring is ink on the caption's tone. */
+:root[data-theme-pack="sakulaptop98"] .kd-task-countdown {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-right: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-countdown > circle { stroke: color-mix(in srgb, var(--kd-text) 26%, transparent); }
+:root[data-theme-pack="sakulaptop98"] .kd-task-countdown > circle + circle { stroke: var(--kd-text); }
+/* A one-line note: a lower bar with smaller keys, and never narrower than its bar needs. */
+:root[data-theme-pack="sakulaptop98"] .kd-task-slot[data-size="small"] .kd-task {
+  --kd-task-caption: 1.4rem;
+  min-width: 7rem;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-task-slot[data-size="small"] .kd-task-tools::before { font-size: var(--kd-size-xs); }
+:root[data-theme-pack="sakulaptop98"] .kd-task-slot[data-size="small"] .kd-task-action { width: 1.2rem; height: 1.1rem; }
+:root[data-theme-pack="sakulaptop98"] .kd-task-slot[data-size="small"] .kd-task-action > svg { width: 12px; height: 12px; }
 :root[data-theme-pack="sakulaptop98"] .kd-task-slot .kd-task-cover { border-radius: 0; }
-:root[data-theme-pack="sakulaptop98"] .kd-task-main { padding: 9px 9px 9px 11px; }
 :root[data-theme-pack="sakulaptop98"] .kd-task-cover {
   border-radius: 2px;
   box-shadow: 0 0 0 1px var(--s98-shadow);
@@ -310,20 +379,6 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 :root[data-theme-pack="sakulaptop98"] .kd-task-covers:not([data-count="1"]) .kd-task-cover {
   box-shadow: 0 0 0 1px var(--s98-shadow), 0 0 0 2px var(--s98-face);
 }
-:root[data-theme-pack="sakulaptop98"] .kd-task-action {
-  border-radius: 2px;
-  background: var(--s98-face-hi);
-  box-shadow: var(--s98-raised);
-  color: var(--kd-text-body);
-  transition: none;
-}
-:root[data-theme-pack="sakulaptop98"] .kd-task-tools { gap: 3px; }
-:root[data-theme-pack="sakulaptop98"] .kd-task-action:hover { color: var(--kd-theme); }
-:root[data-theme-pack="sakulaptop98"] .kd-task-action:active,
-:root[data-theme-pack="sakulaptop98"] .kd-task-action[aria-pressed="true"] {
-  box-shadow: var(--s98-sunken);
-}
-:root[data-theme-pack="sakulaptop98"] .kd-task-action[aria-pressed="true"] { color: var(--kd-theme); }
 :root[data-theme-pack="sakulaptop98"] .kd-task-progress {
   height: 6px;
   border-radius: 0;

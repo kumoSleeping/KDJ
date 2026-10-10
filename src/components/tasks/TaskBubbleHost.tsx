@@ -65,6 +65,17 @@ function TaskCoverStack({ covers, count, tone }: { covers: readonly TaskCover[];
   </span>;
 }
 
+/** What a bubble of each kind is called. A theme pack that draws a bubble as a small window
+ *  writes this on its caption bar (Sakura98, in TaskBubbles.css); the built-in themes show no
+ *  name. A kind without a name of its own is a note. */
+const TASK_KIND_NAMES: Readonly<Record<string, string | undefined>> = {
+  playing: "正在播放",
+  download: "下载",
+  export: "导出",
+  import: "导入",
+};
+const TASK_NOTE_NAME = "提示";
+
 function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
   entry: TaskBubbleEntry;
   /** How far above its resting place at the bottom of the stack this bubble sits, in px. */
@@ -185,7 +196,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
         {summary && (open
           ? <button type="button" className="kd-task-copy" onClick={open}>{copy}</button>
           : <div className="kd-task-copy">{copy}</div>)}
-        <div className="kd-task-tools">
+        <div className="kd-task-tools" data-caption={TASK_KIND_NAMES[spec.kind] ?? TASK_NOTE_NAME}>
           {timed && <svg key={entry.token} className="kd-task-countdown" viewBox="0 0 16 16" role="img" aria-label="即将收起"
             style={{ "--kd-task-stay": `${stay}ms` } as CSSProperties}>
             <circle cx="8" cy="8" r="5.5" />

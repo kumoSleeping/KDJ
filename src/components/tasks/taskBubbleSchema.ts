@@ -34,7 +34,12 @@ export interface TaskAction {
 export interface TaskBubbleSpec {
   /** One bubble per id. Showing an id that is up changes that bubble instead of adding one. */
   id: string;
-  /** What kind of task this is: `playing`, `download`, `export`, `notice`, … Styling hook only. */
+  /**
+   * What kind of task this is: `playing`, `download`, `export`, `import`, `notice`, … A styling
+   * hook (data-kind), and what the bubble is called where a theme pack gives it a caption bar:
+   * the host names the kinds it knows (TASK_KIND_NAMES in TaskBubbleHost.tsx: 正在播放, 下载,
+   * 导出, 导入) and calls every other kind 提示.
+   */
   kind: string;
   title: string;
   /** One quiet line under the title. */

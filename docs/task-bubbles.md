@@ -47,6 +47,14 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   progress line that is the song's mini waveform when it has one. They send the player's own
   commands (`requestPlayerCommand`) and read the position from the player session without
   re-rendering the bubble.
+- **The caption bar (Sakura98).** In the Sakura98 pack a bubble is a small 98 window: the tools
+  row (the ring, the actions, expand, 收起) is laid across its top as the window's caption bar,
+  in the drawer caption's tone and type, with the bubble's name at its left; the summary, the
+  body and the controls sit beneath on the face. The name comes from `kind`: `TASK_KIND_NAMES`
+  in `TaskBubbleHost.tsx` (`playing` 正在播放, `download` 下载, `export` 导出, `import` 导入);
+  any other kind is 提示. It is carried as `data-caption` on the tools row and drawn by the
+  pack's rules in `TaskBubbles.css` only — the built-in themes show no name, and a task never
+  writes its own caption.
 - **Motion.** 460 ms up, 360 ms down, the easings of `src/lib/songSwapMotion.ts`; transform and
   opacity only; under reduced motion a short fade. A bubble with `song` belongs to the playing
   song: when that changes while the bubble is up, it rolls down with the old song and rises with
@@ -72,7 +80,7 @@ One call, from wherever the activity is started or observed:
 ```tsx
 showTask({
   id: "cache-clear",                  // stable: the same id updates the same bubble
-  kind: "cache",                      // styling hook (data-kind)
+  kind: "cache",                      // styling hook (data-kind); names the caption bar
   title: "已清理缓存",
   detail: "释放 1.2 GB",               // optional quiet line
   facts: ["波形", "歌词"],              // optional short facts, one quieter line
