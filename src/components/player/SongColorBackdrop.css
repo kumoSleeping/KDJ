@@ -18,19 +18,18 @@
 /* A mass: the bitmap is 170 % of the surface about its centre, so its blobs reach over the
    edges and no rim of it ever shows. The span drifts across, the bitmap inside it turns and
    swells, each on its own slow loop there and back; the four are out of step with each other,
-   so the field never repeats to the eye. */
+   so the field never repeats to the eye. The animations are what makes these layers: nothing
+   is promoted by hand, so a field that is still (reduced motion) is one flat picture. */
 .kd-songcolor-drift {
   position: absolute;
   inset: -35%;
   animation: kd-songcolor-move-drift var(--kd-songcolor-drift, 29s) ease-in-out var(--kd-songcolor-lead, 0s) infinite alternate;
-  will-change: transform;
 }
 .kd-songcolor-drift > canvas {
   display: block;
   width: 100%;
   height: 100%;
   animation: kd-songcolor-move-turn var(--kd-songcolor-turn, 23s) ease-in-out var(--kd-songcolor-lead, 0s) infinite alternate;
-  will-change: transform;
 }
 @keyframes kd-songcolor-move-drift {
   from { transform: translate3d(var(--kd-songcolor-x0), var(--kd-songcolor-y0), 0); }
@@ -74,7 +73,6 @@
   position: absolute;
   inset: 12% -12%;
   opacity: 0.3;
-  will-change: transform, opacity;
 }
 .kd-songcolor[data-surface="bubble"] .kd-songcolor-glow { inset: -90% 50% -90% -16%; }
 .kd-songcolor-glow > canvas {
@@ -100,11 +98,25 @@
    panel colour. */
 [data-backdrop-ink] .kd-lyrics { --kd-lyrics-soft: var(--kd-text); }
 
+/* The bubble's mini waveform is drawn in the song's own colours (NowPlayingTask.css). What is
+   left to play gives most of its colour up to a neutral; on the panel colour that neutral is the
+   muted ink, which here is light and would make the part not yet played brighter than the part
+   that was. On the field it is given up to the field instead: a thin veil of the ink, so those
+   bars are a dim trace of their colour and the played part stands out by strength as before.
+   The plain line of a song without a waveform keeps about the weight it has on the panel. */
+.kd-task[data-backdrop-ink] .kd-now-line {
+  --kd-now-wave-rest: color-mix(in srgb, var(--kd-muted) 14%, transparent);
+  --kd-now-wave-tint: 32%;
+  --kd-now-rail: color-mix(in srgb, var(--kd-muted) 30%, transparent);
+}
+
 /* Another song: its field fades in over the last one on the song-change clock
-   (src/lib/songSwapMotion.ts — the large-surface pair of the motion schema). */
+   (src/lib/songSwapMotion.ts): it starts when what belonged to the last song has left and takes
+   the time the new song's surfaces take to arrive. Evenly, as every fade here: on the arriving
+   curve the colours would have changed in the first few frames. */
 .kd-songcolor-field[data-arriving],
 .kd-songcolor-arriving {
-  animation: kd-songcolor-fade-in var(--kd-motion-in) var(--kd-ease-out) backwards;
+  animation: kd-songcolor-fade-in var(--kd-motion-in) linear backwards;
 }
 @keyframes kd-songcolor-fade-in {
   from { opacity: 0; }

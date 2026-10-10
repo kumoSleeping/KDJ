@@ -31,8 +31,8 @@ import "./SongColorBackdrop.css";
  * `transform` alone (SongColorBackdrop.css). A lighter glow swells on the beat. Nothing here
  * runs per frame: the beat is one animation as long as a bar, set to the song's place when
  * it starts, is sought or changes tempo (songColorBeat.ts), and the song's energy is read from
- * its overview once a bar. Everything stops while the song is paused or the window is hidden,
- * and under reduced motion the field is still.
+ * its overview once a bar. Everything stops while the song is paused, the window is hidden or
+ * the surface is not drawn, and under reduced motion the field is still.
  *
  * A theme pack draws these surfaces its own way (Sakura98: small 98 windows on a face colour),
  * so the look is not offered under one: `useSongColorAvailable`.
@@ -288,6 +288,8 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
     let position = latest?.position ?? (session.trackId === trackId ? session.position : 0);
     let rate = latest?.rate && latest.rate > 0 ? latest.rate : 1;
     let anchor: BeatAnchor | null = null, live = false, cycle = Number.NaN;
+    // A layer that is in the document but not drawn (a sheet that is kept while closed) rests.
+    let seen = true;
 
     const run = (on: boolean) => {
       if (on === live) return;
@@ -318,7 +320,7 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
       }
     };
     const hear = () => {
-      if (!playing || document.hidden) { run(false); return; }
+      if (!playing || !seen || document.hidden) { run(false); return; }
       const now = performance.now();
       const to = beat.synced ? beatCorrection(anchor, position, rate, now, beat) : anchor ? null : 0;
       if (to !== null) {
@@ -344,7 +346,13 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
     hear();
     window.addEventListener(MEDIA_SYNC_EVENT, onSync);
     document.addEventListener("visibilitychange", hear);
+    const watcher = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
+      seen = entries[entries.length - 1].isIntersecting;
+      hear();
+    }) : null;
+    watcher?.observe(node);
     return () => {
+      watcher?.disconnect();
       window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
       document.removeEventListener("visibilitychange", hear);
       for (const pulse of pulses) pulse.cancel();

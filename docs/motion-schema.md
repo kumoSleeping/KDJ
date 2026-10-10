@@ -141,5 +141,5 @@ drift and its glow swells by `transform` and `opacity` on layers painted once, b
 ends named, no script per frame. Its three gestures: switched on, the colour spreads from its
 key as one circle across both surfaces (`clip-path`, `backwards` fill, the front at 1.5 px/ms,
 420–900 ms); switched off, it drains back into the key on `--kd-ease-in` (2.8 px/ms,
-220–420 ms); another song's field fades in over the last one on `--kd-motion-in` /
-`--kd-ease-out`. Under reduced motion the field is still and all three are an 80 ms fade.
+220–420 ms); another song's field fades in over the last one, evenly, over `--kd-motion-in`
+once the last song's surfaces have left. Under reduced motion the field is still and all three are an 80 ms fade.
