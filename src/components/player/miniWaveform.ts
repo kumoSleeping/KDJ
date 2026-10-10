@@ -147,7 +147,7 @@ export interface MiniWaveShape {
 }
 
 /** The colour steps tried, finest first, until the bars fit in the colours a line may have. */
-const COLOUR_STEPS = [12, 16, 24, 32, 48, 64, 96, 128, 256];
+const COLOUR_STEPS = [12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 128, 256];
 
 /**
  * The bars as SVG paths in a box `bars.length * MINI_WAVE_PITCH` wide and MINI_WAVE_HEIGHT high:
