@@ -162,6 +162,12 @@
 .kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer {
   --kd-drawer-room: calc(100% - max(0px, var(--kd-drawer-gap) - var(--kd-window-floor, 0px)));
 }
+/* Such a panel's shadow falls into that gap. Where the frame of the panels is cut off at the
+   list's bottom edge, the cut is taken to the far side of the gap in a tall window: nothing
+   but the bubble's own strip lies beyond it. */
+.kd-app[data-tall="true"]:not([data-mobile="true"]) .kd-drawer-sheets {
+  clip-path: inset(-100vmax -100vmax calc(-1 * min(12px, var(--kd-window-floor, 0px))) -100vmax);
+}
 .kd-drawer-sheets .kd-drawer[data-takes-window] {
   /* --kd-task-gap in TaskBubbles.css. */
   --kd-window-gap: 12px;
@@ -172,6 +178,9 @@
   left: var(--kd-window-gap);
   height: auto;
   min-height: 0;
+  /* The block has no room to give to a bubble that comes up at the top: it is not pushed down
+     for one (--kd-info-drop); the bubble lies over its top for its stay. */
+  --kd-info-drop: 0px;
 }
 /* The panel's surface without the panel, for the time it grows or shrinks (morphPanel in
    Drawer.tsx): the clip that shows the panel cuts its edge and shadow off, and this carries

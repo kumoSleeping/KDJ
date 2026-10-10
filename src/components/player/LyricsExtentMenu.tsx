@@ -50,9 +50,12 @@ export function useLyricsExtentMenu() {
         const keyed = event.clientX === 0 && event.clientY === 0;
         setAt(keyed ? { x: box.left + box.width / 2, y: box.top + box.height / 2 } : { x: event.clientX, y: event.clientY });
       },
-      // A right click asks for the menu; it does not move the focus to the line under it.
+      // A right click asks for the menu; it does not move the focus to the line under it. Nor
+      // does the mouse press a browser makes up when the finger of a long press lifts: the
+      // focus stays in the menu that has just opened, where Esc belongs to the menu.
       onMouseDown(event: MouseEvent<HTMLElement>) {
-        if (event.button === 2 && inside(event)) event.preventDefault();
+        if (!inside(event)) return;
+        if (event.button === 2 || performance.now() <= swallowClick.current) event.preventDefault();
       },
       onPointerDown(event: PointerEvent<HTMLElement>) {
         if (event.pointerType === "mouse" || !inside(event)) return;
