@@ -1,7 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Check,
-  ChevronDown,
   ChevronRight,
   Copy,
   Download,
@@ -25,6 +24,7 @@ import type { MergedGroup, VideoDownloadRequest, VideoInfo, VideoPage } from "..
 import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "./PlatformMark";
 import { ResultDownloadIndex } from "./ResultDownloadIndex";
+import { foldingRowProps, foldOrder, useFold } from "./searchMotion";
 import { requestVideoPreview } from "./VideoPreview";
 import { useTrackClickPrefs, playClickForLayout } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
@@ -173,6 +173,8 @@ export interface VideoResultRowProps extends VideoSeed {
   indent?: boolean;
   /** Mounted into a list that had already settled: the row slots in on its own. Read once, at mount. */
   late?: boolean;
+  /** The row's package is folding away: the row is a picture that fades out, this many steps in. */
+  leave?: number;
   /** 收藏夹/搜索返回的视频可进入与歌曲相同的全选和批量下载流程。 */
   selectable?: boolean;
   selected?: boolean;
@@ -211,6 +213,7 @@ export function VideoResultRow({
   rowNumber,
   indent = false,
   late = false,
+  leave,
   selectable = false,
   selected = false,
   selectionMode = false,
@@ -263,6 +266,8 @@ export function VideoResultRow({
     platform === "bilibili" ? (info ? pages.length : (pageCount ?? 0)) : 0;
   const hasMultiplePages = knownPageCount > 1;
   const canExpandParts = platform === "bilibili" && hasMultiplePages;
+  // Closed parts fold back: they fade as pictures, then one empty row closes the room they held.
+  const partsFold = useFold(hasMultiplePages && partsExpanded, pages.length);
 
   const toggleParts = useCallback(() => {
     if (resolvingParts) return;
@@ -449,7 +454,7 @@ export function VideoResultRow({
     <Fragment>
       <tr
         data-video="true"
-        data-enter={bornLate ? "late" : undefined}
+        data-enter={bornLate && leave === undefined ? "late" : undefined}
         data-selecting={selectionMode ? "true" : undefined}
         aria-selected={selected}
         onContextMenu={(event) => {
@@ -498,6 +503,7 @@ export function VideoResultRow({
             ? "单击预览视频；下载细项可在队列里调整"
             : "双击预览视频；下载细项可在队列里调整"
         }
+        {...foldingRowProps(leave)}
       >
         <td
           className="kd-selection-cell"
@@ -573,11 +579,8 @@ export function VideoResultRow({
                           toggleParts();
                         }}
                       >
-                        {partsExpanded ? (
-                          <ChevronDown size={13} />
-                        ) : (
-                          <ChevronRight size={13} />
-                        )}
+                        {/* One chevron: the stylesheet turns it when the parts are open. */}
+                        <ChevronRight size={13} />
                       </button>
                     ) : null}
                   </span>
@@ -631,14 +634,18 @@ export function VideoResultRow({
         })}
         <td className="kd-table-fill" aria-hidden="true" />
       </tr>
-      {hasMultiplePages && partsExpanded
-        ? pages.map((page, pageIndex) => (
+      {partsFold === "open" || partsFold === "out"
+        ? pages.map((page, pageIndex) => {
+            // Leaving with the package, or folding back under this row: the last part goes first.
+            const partLeave =
+              leave ?? (partsFold === "out" ? foldOrder(pageIndex, pages.length) : undefined);
+            return (
             <tr
               key={`${bvid}:p${pageIndex + 1}`}
               data-video="true"
               data-video-part="true"
               data-parent-indented={indent ? "true" : undefined}
-              data-unfold={unfold ? "true" : undefined}
+              data-unfold={unfold && partLeave === undefined ? "true" : undefined}
               style={unfold ? ({ "--kd-unfold-i": Math.min(pageIndex, 8) } as CSSProperties) : undefined}
               aria-label={`P${pageIndex + 1}，${page.title}，${playClick === "single" ? "单击" : "双击"}预览`}
               tabIndex={0}
@@ -673,14 +680,24 @@ export function VideoResultRow({
                 event.preventDefault();
                 if (!selectionMode) previewPage(pageIndex);
               }}
+              {...foldingRowProps(partLeave)}
             >
               <td className="kd-selection-cell" {...cellDrag} />
               <td className="kd-result-lead" data-col="index" {...cellDrag} />
               {columns.map((column) => partCell(column.key, page, pageIndex))}
               <td className="kd-table-fill" aria-hidden="true" />
             </tr>
-          ))
+            );
+          })
         : null}
+      {partsFold === "shut" ? (
+        <tr data-fold="shut" aria-hidden="true">
+          <td
+            colSpan={totalColumns}
+            style={{ "--kd-fold-h": `calc(var(--kd-row-h) * ${pages.length})` } as CSSProperties}
+          />
+        </tr>
+      ) : null}
       {sendError ? (
         <tr data-video="true">
           <td colSpan={totalColumns}>

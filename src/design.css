@@ -2730,7 +2730,22 @@ body[data-kd-search-pointer-dragging="true"] * {
   vertical-align: -0.25rem;
 }
 .kd-result-source-toggle:hover {
-  color: var(--kd-theme);
+  color: var(--kd-text);
+}
+/* One chevron for both states: it turns down when its rows are open and back when they fold. */
+.kd-result-source-toggle > svg,
+.kd-table tr[data-tree="parent"] .kd-result-lead-btn > svg {
+  transition: transform var(--kd-motion-micro) var(--kd-ease-out);
+}
+.kd-result-source-toggle[aria-expanded="true"] > svg,
+.kd-table tr[data-tree="parent"] .kd-result-lead-btn[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-result-source-toggle > svg,
+  .kd-table tr[data-tree="parent"] .kd-result-lead-btn > svg {
+    transition: none;
+  }
 }
 /* 批量关键词结果仍有一行包头，它的唯一行首动作是展开/收起；限定作用域，
    防止这套动作格重新渗回普通在线曲目的序号列。 */
@@ -2755,7 +2770,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   cursor: pointer;
 }
 .kd-table tr[data-tree="parent"] .kd-result-lead-btn:hover {
-  color: var(--kd-theme);
+  color: var(--kd-text);
 }
 .kd-table tr[data-tree="parent"][data-collection-kind] .kd-result-lead-btn,
 .kd-table tr[data-tree="parent"][data-collection-kind] .kd-result-lead-btn:hover {
@@ -2797,7 +2812,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   align-items: center;
   gap: 0.2rem;
   margin-left: 0.45rem;
-  color: var(--kd-theme);
+  color: var(--kd-text-body);
   font-size: var(--kd-size-xs);
   font-weight: 650;
   white-space: nowrap;

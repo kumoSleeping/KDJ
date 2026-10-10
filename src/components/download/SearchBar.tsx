@@ -1,5 +1,8 @@
 import {
+  memo,
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -24,6 +27,7 @@ import {
   estimateTextEm,
   getSearchOutcome,
   searchMarkState,
+  searchTones,
   subscribeSearchOutcome,
   type SearchOutcome,
   type SearchPhase,
@@ -50,7 +54,7 @@ export interface SearchPlatformProps {
   /** 手机顶栏的重叠预览；第一次点只展开，不误切来源。 */
   collapsed?: boolean;
   onExpand?: () => void;
-  /** A search in flight or just landed: the selected marks fire, wait, then settle on what came back. */
+  /** A search in flight or just landed: the selected marks wait, then settle on what came back. */
   searchPhase?: SearchPhase | null;
   searchOutcome?: SearchOutcome | null;
 }
@@ -77,9 +81,11 @@ export interface SearchBarProps extends SearchPlatformProps {
 }
 
 /** A submit that never raised `busy` (rejected input, a page change) ends the search motion by itself. */
-const SEARCH_SHEEN_START_GRACE_MS = 700;
-/** The landing: the field's glow sinks and the marks settle one after another (SearchBar.css). */
-const SEARCH_LANDING_MS = 900;
+const SEARCH_START_GRACE_MS = 700;
+/** The waveform's line is drawn and its bars have risen (SearchBar.css): an answer that beats them waits. */
+const SEARCH_RISE_MS = 540;
+/** The landing: the waveform settles into its line and the marks settle one after another (SearchBar.css). */
+const SEARCH_LANDING_MS = 1000;
 
 /**
  * 在线搜索：左边是搜索类型与来源，右边是输入。
@@ -87,9 +93,10 @@ const SEARCH_LANDING_MS = 900;
  * 两部分之间不画线：输入区自己是一块浅色底，和来源靠间距分开。
  * 平台键只负责来源多选与顺序；提交靠 Enter（Shift+Enter 换行），不再单独放放大镜。
  *
- * The field carries one piece of motion from click to results: its ink blooms from the click,
- * follows the text, a comet launches on Enter while the selected marks fire, a stream runs
- * while sources are pending, and the glow sinks toward the list when the results land.
+ * A search is drawn as a waveform under the text, in the selected sources' colours: on Enter a
+ * centre line is drawn and bars rise out of it, they keep playing while sources are pending,
+ * and they settle back into the line when the results land. Focus only deepens the field's
+ * tone, and typing moves nothing but the caret.
  */
 const SEARCH_KIND_LABEL: Record<SearchKind, string> = {
   song: "单曲",
@@ -160,6 +167,40 @@ function shuffleTipIndexes(avoidFirst?: number): number[] {
   return indexes;
 }
 
+/**
+ * One line of text that changes. The old line rolls out through the top of its clipped box while
+ * the new one rolls in from below, so the two never lie over each other and nothing around them
+ * moves. The first line is simply there.
+ */
+function RollText({ text, className }: { text: string; className?: string }) {
+  const [line, setLine] = useState<{ text: string; previous: string | null; turn: number }>({
+    text,
+    previous: null,
+    turn: 0,
+  });
+  if (line.text !== text) setLine({ text, previous: line.text, turn: line.turn + 1 });
+  return (
+    <span className={className ? `kd-roll ${className}` : "kd-roll"}>
+      {line.previous !== null && (
+        <span
+          key={`out:${line.turn}`}
+          className="kd-roll-line"
+          data-roll="out"
+          aria-hidden="true"
+          onAnimationEnd={() => {
+            setLine((current) => (current.previous === null ? current : { ...current, previous: null }));
+          }}
+        >
+          {line.previous}
+        </span>
+      )}
+      <span key={line.turn} className="kd-roll-line" data-roll={line.turn ? "in" : undefined}>
+        {line.text}
+      </span>
+    </span>
+  );
+}
+
 function SearchTipCarousel({
   inputFocused,
   tipsOpen,
@@ -177,6 +218,7 @@ function SearchTipCarousel({
   const queuedTipsRef = useRef<number[]>([]);
 
   useEffect(() => {
+    // The tips only turn while nobody is at the field: never while it is focused, typed in or composed in.
     if (inputFocused || actionFocused) return;
     const timer = window.setInterval(() => {
       if (queuedTipsRef.current.length === 0) {
@@ -212,9 +254,9 @@ function SearchTipCarousel({
         >
           <HintBulbIcon size={14} aria-hidden="true" />
         </button>
+        {/* A focused field says what Enter does; otherwise the tips turn. */}
         <span className="kd-search-tip-copy" aria-hidden="true">
-          <span key={tipIndex} className="kd-search-tip-text" data-mode="idle">{SEARCH_TIPS[tipIndex]}</span>
-          <span className="kd-search-tip-text" data-mode="input">{SEARCH_INPUT_TIP}</span>
+          <RollText text={inputFocused ? SEARCH_INPUT_TIP : SEARCH_TIPS[tipIndex]} />
         </span>
       </span>
     </span>
@@ -241,22 +283,22 @@ export function SearchBar({
 }: SearchBarProps) {
   const detail = presentation === "detail";
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const fieldRef = useRef<HTMLDivElement>(null);
   const presets = useSearchPresets({ query, onQueryChange, track: presetTrack, playingTrack, inputRef });
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [platformsExpanded, setPlatformsExpanded] = useState(false);
-  const [sheenPhase, setSheenPhase] = useState<SearchPhase | null>(null);
-  /** Counts launches, so each search gets a fresh comet. */
-  const [launchSeq, setLaunchSeq] = useState(0);
+  const [wavePhase, setWavePhase] = useState<SearchPhase | null>(null);
+  /** Counts launches, so each search gets a fresh waveform, and how far its text reaches (em). */
+  const [launch, setLaunch] = useState({ seq: 0, textEm: 0 });
+  /** When the current waveform set off, and how long a landing waits for it to have risen. */
+  const launchedAtRef = useRef(0);
+  const [landingHold, setLandingHold] = useState(0);
   const searchOutcome = useSyncExternalStore(subscribeSearchOutcome, getSearchOutcome, getSearchOutcome);
-  /** The pointer press that is about to focus the field; a keyboard focus has none. */
-  const pointerFocusRef = useRef(false);
-  /** 提交后在等结果：见过 busy=true 之后，busy 落回 false 才收起流光。 */
-  const sheenPendingRef = useRef(false);
-  const sheenSawBusyRef = useRef(false);
+  /** 提交后在等结果：见过 busy=true 之后，busy 落回 false 才收起波形。 */
+  const wavePendingRef = useRef(false);
+  const waveSawBusyRef = useRef(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
   const inputRows = batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
@@ -265,46 +307,63 @@ export function SearchBar({
     ? searchKinds[(Math.max(-1, currentKindIndex) + 1) % searchKinds.length]
     : searchKind;
 
-  const startSheen = () => {
-    sheenPendingRef.current = true;
+  // The search's colours: the selected sources' own, in the order of their marks. Set once per
+  // selection as --kd-search-tones; the stylesheet has a neutral pair for an empty selection.
+  const settingsPriority = useAppStore((state) => state.settings?.platform_priority);
+  const markOrder = platformProps.priority ?? settingsPriority ?? DEFAULT_PRIORITY;
+  const selectedPlatforms = platformProps.platforms;
+  const barStyle = useMemo(() => {
+    const tones = searchTones(normalizePriority(markOrder), selectedPlatforms);
+    return tones.length ? ({ "--kd-search-tones": tones.join(", ") } as CSSProperties) : undefined;
+  }, [markOrder, selectedPlatforms]);
+  const expandPlatforms = useCallback(() => setPlatformsExpanded(true), []);
+
+  const startWave = () => {
+    wavePendingRef.current = true;
     // Explore 代搜时 submit 可能已经把 busy 拉高，这一帧就要算「见过 busy」。
-    sheenSawBusyRef.current = busy;
+    waveSawBusyRef.current = busy;
     clearSearchOutcome();
-    setLaunchSeq((seq) => seq + 1);
-    setSheenPhase("run");
+    launchedAtRef.current = performance.now();
+    // Once per search: the waveform steps back behind this much text (the longest line of a batch).
+    const textEm = Math.max(...query.split("\n").map(estimateTextEm));
+    setLaunch((current) => ({ seq: current.seq + 1, textEm }));
+    setWavePhase("run");
+  };
+  const landWave = () => {
+    wavePendingRef.current = false;
+    setLandingHold(Math.max(0, Math.round(SEARCH_RISE_MS - (performance.now() - launchedAtRef.current))));
+    setWavePhase("done");
   };
 
   useEffect(() => {
-    if (!sheenPendingRef.current) return;
+    if (!wavePendingRef.current) return;
     if (busy) {
-      sheenSawBusyRef.current = true;
+      waveSawBusyRef.current = true;
       return;
     }
     // 提交瞬间 busy 还没拉高：先别收。等真正跑完一轮再淡出。
-    if (!sheenSawBusyRef.current) return;
-    sheenPendingRef.current = false;
-    setSheenPhase("done");
+    if (!waveSawBusyRef.current) return;
+    landWave();
   }, [busy]);
 
   useEffect(() => {
-    if (sheenPhase === "run") {
+    if (wavePhase === "run") {
       const timer = window.setTimeout(() => {
-        if (!sheenPendingRef.current || sheenSawBusyRef.current) return;
-        sheenPendingRef.current = false;
-        setSheenPhase("done");
-      }, SEARCH_SHEEN_START_GRACE_MS);
+        if (!wavePendingRef.current || waveSawBusyRef.current) return;
+        landWave();
+      }, SEARCH_START_GRACE_MS);
       return () => window.clearTimeout(timer);
     }
-    if (sheenPhase === "done") {
-      const timer = window.setTimeout(() => setSheenPhase(null), SEARCH_LANDING_MS);
+    if (wavePhase === "done") {
+      const timer = window.setTimeout(() => setWavePhase(null), landingHold + SEARCH_LANDING_MS);
       return () => window.clearTimeout(timer);
     }
-  }, [sheenPhase]);
+  }, [wavePhase, landingHold]);
 
   useEffect(() => {
     if (burstNonce === lastNonceRef.current) return;
     lastNonceRef.current = burstNonce;
-    if (burstNonce > 0) startSheen();
+    if (burstNonce > 0) startWave();
   }, [burstNonce]);
 
   useEffect(() => {
@@ -313,7 +372,7 @@ export function SearchBar({
 
   const fireSubmit = () => {
     if (!canSubmit) return;
-    startSheen();
+    startWave();
     onSubmit();
   };
 
@@ -322,7 +381,7 @@ export function SearchBar({
       className="kd-search-command"
       data-presentation={presentation}
       data-stacked={stacked || undefined}
-      aria-busy={sheenPhase === "run" || undefined}
+      aria-busy={wavePhase === "run" || undefined}
       onSubmit={(event) => {
         event.preventDefault();
         fireSubmit();
@@ -334,16 +393,8 @@ export function SearchBar({
         data-batch={batch || undefined}
         data-stacked={stacked || undefined}
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
-        data-searching={sheenPhase ?? undefined}
-        onPointerDownCapture={(event) => {
-          // The field's ink blooms from where the click lands. One read per click, none while typing.
-          const field = fieldRef.current;
-          if (!field || inputFocused || (event.target as HTMLElement).closest("button")) return;
-          const rect = field.getBoundingClientRect();
-          const x = Math.min(rect.width, Math.max(0, event.clientX - rect.left));
-          field.style.setProperty("--kd-search-origin", `${Math.round(x)}px`);
-          pointerFocusRef.current = true;
-        }}
+        data-searching={wavePhase ?? undefined}
+        style={barStyle}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
           inputRef.current?.focus();
@@ -359,38 +410,48 @@ export function SearchBar({
               title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
               onClick={() => onSearchKindChange(nextSearchKind)}
             >
-              <span key={searchKind} className="kd-search-kind-text">{SEARCH_KIND_LABEL[searchKind]}</span>
+              <RollText text={SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
             </button>
           )}
           <SearchPlatforms
             {...platformProps}
             collapsed={!detail && stacked && !platformsExpanded}
-            onExpand={() => setPlatformsExpanded(true)}
-            searchPhase={sheenPhase}
+            onExpand={expandPlatforms}
+            searchPhase={wavePhase}
             searchOutcome={searchOutcome}
           />
         </div>
         <div
-          ref={fieldRef}
           className="kd-searchbar-copy"
           data-empty={!query || undefined}
           data-input-focused={inputFocused ? "true" : undefined}
-          // How far the last typed line reaches, in em: the ink under the text and the comet's start.
-          style={{ "--kd-search-ink": batch ? 0 : estimateTextEm(query) } as CSSProperties}
           onPointerDown={() => {
             if (stacked && platformsExpanded) setPlatformsExpanded(false);
           }}
         >
-          <span className="kd-search-fx" aria-hidden="true">
-            <span className="kd-search-ink" />
-            <span className="kd-search-front" />
-            <span className="kd-search-splash" />
-            {sheenPhase ? <span className="kd-search-sheen" /> : null}
-            {/* Keyed by the launch, not the phase: an answer that comes back early lets the comet finish its flight. */}
-            {sheenPhase ? <span key={launchSeq} className="kd-search-comet" /> : null}
-            {sheenPhase === "done" ? <span className="kd-search-land" /> : null}
-          </span>
-          {sheenPhase ? <span key={launchSeq} className="kd-search-glint" aria-hidden="true" /> : null}
+          {/* The waveform of a search: the field's first layer, under the text. Keyed by the launch,
+              not the phase, so an answer that comes back early lets it rise before it settles. */}
+          {wavePhase ? (
+            <span
+              key={launch.seq}
+              className="kd-search-wave"
+              aria-hidden="true"
+              style={{
+                "--kd-search-text": `${launch.textEm}em`,
+                "--kd-search-hold": wavePhase === "done" ? `${landingHold}ms` : undefined,
+              } as CSSProperties}
+            >
+              <span className="kd-search-wave-line" />
+              <span className="kd-search-wave-bars">
+                <i />
+                <i />
+                <i />
+                <i />
+                <i />
+                <i />
+              </span>
+            </span>
+          ) : null}
           {!query && (
             <SearchTipCarousel
               inputFocused={inputFocused}
@@ -405,21 +466,21 @@ export function SearchBar({
             style={{ "--kd-search-rows": inputRows } as CSSProperties}
             value={query}
             placeholder=""
+            // Titles and links are not prose: no spelling marks under them.
+            spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="off"
             aria-label="关键词、单曲链接或歌单链接，支持多行，@ 选择歌曲名"
             role="combobox"
             {...presets.aria}
             title="搜索（Enter；Shift + Enter 换行；@ 歌曲名）"
-            onFocus={() => {
-              // A keyboard focus blooms from the leading edge. The origin stays through blur, so the ink recedes to where it came from.
-              if (!pointerFocusRef.current) fieldRef.current?.style.removeProperty("--kd-search-origin");
-              pointerFocusRef.current = false;
-              setInputFocused(true);
-            }}
+            onFocus={() => setInputFocused(true)}
             onBlur={event => {
               setInputFocused(false);
               presets.onBlur(event.relatedTarget);
             }}
-            onSelect={presets.syncCaret}
+            // Only a query with an @ in it has suggestions to place; plain typing does not track the caret.
+            onSelect={query.includes("@") ? presets.syncCaret : undefined}
             onCompositionStart={() => {
               composingRef.current = true;
             }}
@@ -436,7 +497,10 @@ export function SearchBar({
                 fireSubmit();
               }
             }}
-            onChange={(event) => { onQueryChange(event.target.value); presets.syncCaret(); }}
+            onChange={(event) => {
+              onQueryChange(event.target.value);
+              if (event.target.value.includes("@")) presets.syncCaret();
+            }}
           />
         </div>
       </div>
@@ -450,7 +514,7 @@ export function SearchBar({
  *
  * 不用 HTML5 draggable：WKWebView 上经常只 dragstart 不 drop，还会抢走 pointer 序列。
  */
-export function SearchPlatforms({
+export const SearchPlatforms = memo(function SearchPlatforms({
   platforms,
   onTogglePlatform,
   priority: priorityProp,
@@ -490,7 +554,7 @@ export function SearchPlatforms({
   const collapsedOrdered = (selectedOrdered.length ? selectedOrdered : ordered.slice(0, 1)).slice(0, 2);
   const collapsedOverflow = Math.max(0, selectedOrdered.length - collapsedOrdered.length);
   const rendered = collapsed ? collapsedOrdered : ordered;
-  // The marks a search asks, in the order they fire.
+  // The marks a search asks, in the order they answer.
   const asked = searchPhase ? rendered.filter((item) => platforms.includes(item.id)) : [];
 
   const reorder = (from: Platform, to: Platform) => {
@@ -673,4 +737,4 @@ export function SearchPlatforms({
       ) : null}
     </div>
   );
-}
+});
