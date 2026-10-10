@@ -4,9 +4,9 @@ import { useEffect, useState } from "react";
  * 所有响应式部件只认同一组判据。
  *
  * 桌面窗口无论拖成什么形状，版面都不换：侧栏、顶栏、搜索和列表保持原位。
- * 窗口变成竖长（tall）时，底栏播放条改成多层；侧栏的宽窄换成用户在竖长窗口里
- * 调过的那一份——横向和竖长各记各的，见 sidebarShape。单栏竖屏版面（portrait）
- * 只属于手机。
+ * 窗口变成竖长（tall）时，底栏播放条改成多层，聚合搜索排成两行（类型和来源一行、
+ * 输入框一行，见 SearchBar.css）；侧栏的宽窄换成用户在竖长窗口里调过的那一份——
+ * 横向和竖长各记各的，见 sidebarShape。单栏竖屏版面（portrait）只属于手机。
  */
 export type LayoutMode = "wide" | "narrow";
 export type ChromeMode = "inline" | "stacked";
@@ -16,7 +16,7 @@ export interface LayoutSignals {
   chrome: ChromeMode;
   /** 手机竖屏版面：单栏、两段式顶栏，旁路内容进抽屉。 */
   portrait: boolean;
-  /** 竖长窗口：宽:高不超过 3:4（宽是 3，高是 4）。桌面用它给播放条分层、给侧栏换一份宽窄。 */
+  /** 竖长窗口：宽:高不超过 3:4（宽是 3，高是 4）。桌面用它给播放条分层、把搜索排成两行、给侧栏换一份宽窄。 */
   tall: boolean;
 }
 

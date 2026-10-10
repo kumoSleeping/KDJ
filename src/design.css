@@ -816,7 +816,8 @@ textarea {
   flex: 1 1 auto;
 }
 /* The top row on a wide window: the aggregate search, and at its right end the drawer's entries
-   (see Drawer.css), which take only the width of their icons. Nothing is drawn between them. */
+   (see Drawer.css), which take only the width of their icons. Nothing is drawn between them.
+   In a tall window the search takes two rows and the head is both of them (see SearchBar.css). */
 .kd-table-wrap[data-drawer-head] {
   /* The dragged width, from a narrow panel up to most of the list's column. */
   --kd-drawer-w: max(min(var(--kd-right, 25rem), 88%), min(16rem, 100%));
