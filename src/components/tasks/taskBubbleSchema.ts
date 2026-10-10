@@ -94,6 +94,14 @@ export interface TaskBubbleSpec {
    */
   controls?: ReactNode;
   /**
+   * A layer of the task's own under everything the bubble holds: the host draws it in the
+   * bubble's backdrop slot (src/components/common/SurfaceBackdrop.tsx), inside the bubble's
+   * shape and behind its content, and changes nothing else for it. A layer that changes what
+   * can be read on the bubble says which ink reads on it (`useBackdropInk`), and the bubble
+   * takes its text colours from that. The playing song's 歌曲色彩 is the one such layer.
+   */
+  backdrop?: ReactNode;
+  /**
    * The playing song this bubble is about. While the bubble is up and this changes, it rolls
    * down with the old song and rises with the new one on the song-change clock
    * (src/lib/songSwapMotion.ts), and it counts as a surface of that song.

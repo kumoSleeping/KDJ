@@ -12,6 +12,7 @@ import {
   setSongSurfacePresent,
 } from "../../lib/songSwapMotion";
 import { MarqueeText } from "../common/MarqueeText";
+import { useSurfaceBackdrop } from "../common/SurfaceBackdrop";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { TASK_COVER_LIMIT, taskStay, type TaskCover, type TaskBubbleSpec } from "./taskBubbleSchema";
 import { useTaskBubbles, type TaskBubbleEntry } from "./taskBubbleStore";
@@ -203,6 +204,8 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
   const summary = !(expanded && spec.replacesSummary);
   const progress = typeof spec.progress === "number" ? Math.min(1, Math.max(0, spec.progress)) : null;
   const dismissLabel = spec.dismiss?.label ?? "收起";
+  // The task's own layer under everything the bubble holds, and the ink that layer asks for.
+  const backdrop = useSurfaceBackdrop(spec.backdrop);
   const copy = <>
     {tone === "error"
       ? <span className="kd-task-title" data-wrap="true" title={spec.title}>{spec.title}</span>
@@ -222,10 +225,11 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || undefined}
-      data-controls={hasControls || undefined}
+      data-controls={hasControls || undefined} {...backdrop.attributes} style={backdrop.style}
       onPointerEnter={() => onHeld(id, true)} onPointerLeave={() => onHeld(id, false)}
       onFocus={() => onHeld(id, true)}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onHeld(id, false); }}>
+      {backdrop.layer}
       <div className="kd-task-main" data-opens={open ? "true" : undefined} data-bare={summary ? undefined : "true"}
         onClick={open ? event => { if (!(event.target as Element).closest("button, a, input")) open(); } : undefined}>
         {summary && (covers.length > 0
@@ -240,7 +244,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
             <circle cx="8" cy="8" r="5.5" />
             <circle cx="8" cy="8" r="5.5" pathLength={1} />
           </svg>}
-          {spec.actions?.map(action => <button key={action.id} type="button" className="kd-task-action"
+          {spec.actions?.map(action => <button key={action.id} type="button" className="kd-task-action" data-task-action={action.id}
             aria-label={action.label} title={action.label} aria-pressed={action.pressed}
             aria-busy={action.busy || undefined} onClick={() => { if (node.current) action.onSelect(node.current); }}>
             {action.busy ? <LoaderCircle size={14} className="kd-spin" aria-hidden="true" /> : action.icon}

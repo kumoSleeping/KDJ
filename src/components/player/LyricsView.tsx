@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   lyricExtraLabel,
   lyricExtraTitle,
@@ -20,6 +20,7 @@ import { streamMeta } from "../../lib/streamTrack";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
 import { Panel } from "../common";
 import { AsyncPanelBody } from "../common/AsyncPanelBody";
+import { useSurfaceBackdrop } from "../common/SurfaceBackdrop";
 import type { Track } from "../../types";
 
 function usePlayerPosition(trackId: number | null): number {
@@ -78,8 +79,13 @@ interface LyricsDetailProps {
   visibleHeader?: boolean;
   /** An existing non-audio transport can supply its own clock and seek route. */
   transport?: { position: number; seek(position: number): void };
+  /**
+   * A layer under the lyrics block where no drawer panel carries one (the sheet of a narrow
+   * window): drawn in the block's backdrop slot, see SurfaceBackdrop.tsx.
+   */
+  backdrop?: ReactNode;
 }
-export function LyricsDetailPanel({ track, transport, reserveEmpty = false, visibleHeader = false }: LyricsDetailProps) {
+export function LyricsDetailPanel({ track, transport, backdrop, reserveEmpty = false, visibleHeader = false }: LyricsDetailProps) {
   const [actionsHost, setActionsHost] = useState<HTMLSpanElement | null>(null);
   const entry = useLyricsStore(state => state.get(track.id));
   const prefsEpoch = useLyricsPrefs(state => state.prefsEpoch);
@@ -91,14 +97,15 @@ export function LyricsDetailPanel({ track, transport, reserveEmpty = false, visi
   return (
     <Panel heading="歌词" visibleHeader={visibleHeader} actionsHost={actionsHost} padded={false} dense className="kd-detail-lyrics-panel">
       <AsyncPanelBody kind="lyrics" state={state}>
-        {ready && <LyricsView track={track} transport={transport} actionsRef={setActionsHost} />}
+        {ready && <LyricsView track={track} transport={transport} backdrop={backdrop} actionsRef={setActionsHost} />}
       </AsyncPanelBody>
     </Panel>
   );
 }
 
-function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { actionsRef(node: HTMLSpanElement | null): void }) {
+function LyricsView({ track, transport, backdrop, actionsRef }: LyricsDetailProps & { actionsRef(node: HTMLSpanElement | null): void }) {
   const trackId = track.id;
+  const under = useSurfaceBackdrop(backdrop);
   const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const activeTrack = playingTrack?.id === trackId;
   const entry = useSyncExternalStore(
@@ -143,7 +150,9 @@ function LyricsView({ track, transport, actionsRef }: LyricsDetailProps & { acti
   }, [active, trackId]);
 
   return (
-    <div className="kd-lyrics" data-has-content={lines.length > 0 || !!entry.error || entry.status === "error" ? "true" : undefined}>
+    <div className="kd-lyrics" data-has-content={lines.length > 0 || !!entry.error || entry.status === "error" ? "true" : undefined}
+      {...under.attributes} style={under.style}>
+      {under.layer}
       <div className="kd-lyrics-embedded-tools">
         <LyricsSourcePicker platform={entry.meta?.platform} disabled={!activeTrack && !transport} matching={!!entry.inflight} onSelect={platform => void useLyricsStore.getState().ensure(track, { platform })} />
         {canCycle ? <button type="button" className="kd-lyrics-layer" title={lyricExtraTitle(layer)} aria-label={lyricExtraTitle(layer)} onClick={() => cycleLyricExtra(hasMeaning, hasRomaji)}>{lyricExtraLabel(layer)}</button> : null}
