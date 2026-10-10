@@ -35,7 +35,7 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   menu, a button on the picture — has no entry and comes down as the same panel. Do not add a second button for an app that has
   an entry (the window chrome keeps 下载 and 设置 only where there is no drawer, on a phone).
 - **How far it comes down** is the spec's `extent`, measured from under the search row to the
-  bottom of the list, less the gap (never lower than a task bubble that is kept up,
+  bottom of the list, less the gap (never lower than a bottom task bubble that is kept up,
   `--kd-info-lift`):
   - `fit` — the usual case: exactly as tall as what it holds needs, short or long, following the
     content as it changes (a switch of page included), up to the whole way down (settings, the
@@ -84,6 +84,19 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   left completely. Only `transform` moves: what is on the panel rides
   with it, and its height follows its content only once it is at rest. Keep it that way — no
   bounce, no second layer fading over a moving panel.
+- **Pushed down by a top bubble.** A task bubble that comes up at the top
+  (`docs/task-bubbles.md`) takes the panel's place under the search row. While it is there the
+  panel is pushed down by what the top stack takes, `--kd-info-drop` (set by `TaskBubbleHost`,
+  one value per change of that stack), and it comes back as the last bubble starts to leave.
+  Only the panel's place moves: `translate` on `.kd-drawer`, which adds to the slide's
+  `transform`. It goes down on the clock the bubble arrives by (460 ms, the arriving curve) and
+  comes back on the one the bubble leaves by (360 ms, the leaving curve), so the panel and the
+  bubble move as one. Its height, its extent and what it holds are untouched, so nothing is
+  laid out again and no `fit` is measured during the move; a panel that comes out while a
+  bubble is up slides in at the pushed place. The frame of the panels (`.kd-drawer-sheets`) is
+  clipped at its bottom edge, where the list ends, so a panel that reaches the whole way down
+  goes behind that edge for the bubble's stay instead of over the player bar. An app does
+  nothing for any of this, whatever its extent.
 - **Depth.** The panel and the floating media window share one order: whichever was opened or
   touched last is in front (`src/lib/surfaceOrder.ts`).
 - **It takes no room.** The panel floats over the list and its toolbar; nothing beneath it is
