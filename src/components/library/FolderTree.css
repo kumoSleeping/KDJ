@@ -225,7 +225,7 @@ button.kd-folder-caret:hover:not(:disabled) {
   color: var(--kd-text);
 }
 .kd-folder:is(:hover, :focus-visible, [data-menu="true"]) > .kd-folder-trail[data-action] > .kd-folder-more,
-.kd-folder-trail[data-busy] > .kd-folder-more,
+.kd-folder-trail[data-busy] > .kd-folder-more:not(.kd-folder-eye),
 .kd-folder-more:focus-visible {
   opacity: 1;
 }
@@ -243,6 +243,37 @@ button.kd-folder-caret:hover:not(:disabled) {
 }
 .kd-folder:is(:hover, :focus-visible) .kd-folder-login {
   color: var(--kd-text);
+}
+/* A top-level row has a second key, the eye that turns every count of the sidebar off and on
+   (sidebarCounts.ts). It has a column of its own left of the row's action, and the count lies
+   over both columns: the count still trades places with the keys, the eye stands in the same
+   place on every top-level row, and the row keeps one width with the counts on or off. */
+.kd-folder-trail[data-eye] {
+  /* The second column is at least an action wide, also on a row that has none. */
+  grid-template-columns: 1fr minmax(1.05rem, auto);
+}
+.kd-folder-trail[data-eye] > * {
+  grid-area: 1 / 2;
+}
+.kd-folder-trail[data-eye] > .kd-folder-eye {
+  grid-area: 1 / 1;
+  margin-right: 0;
+}
+.kd-folder-trail[data-eye] > .kd-folder-count {
+  grid-area: 1 / 1 / 2 / 3;
+}
+.kd-folder-trail[data-eye] > .kd-folder-login {
+  margin-left: 0.2rem;
+}
+/* Without a pointer that hovers the eye would be a key nobody sees under a tap on the row:
+   it is not there, and a row whose only key it is keeps its count. */
+@media (hover: none) {
+  .kd-folder-eye {
+    display: none;
+  }
+  .kd-folder:is(:hover, :focus-visible) > .kd-folder-trail[data-action="eye"] > .kd-folder-count {
+    opacity: 1;
+  }
 }
 
 /* The folder, source or playlist that is open: full-strength ink and more weight, its icon in
@@ -804,6 +835,15 @@ div.kd-stream-status:hover {
 }
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder:is([data-active="true"], [data-selected="true"]) .kd-folder-drag {
   color: inherit;
+}
+/* Sakura98: the eye is a raised key like the action beside it (theme.css draws both); the
+   pack's keys are a full 1.25rem wide and stand a step apart. */
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-trail[data-eye] {
+  grid-template-columns: 1fr minmax(1.25rem, auto);
+  column-gap: 2px;
+}
+:root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder-trail[data-eye] > .kd-folder-login {
+  margin-left: 0;
 }
 /* Sakura98: rows are drawn a line at a time with a two-step rise, and a branch opens and shuts
    in four steps instead of a glide. */
