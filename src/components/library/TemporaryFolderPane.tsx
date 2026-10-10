@@ -11,9 +11,11 @@ import { enqueueSearchDrop, isSearchDownloadDrag } from "../../lib/searchDrag";
 import { TrackTable } from "./TrackTable";
 import { InlineNotice } from "../common";
 
-export function TemporaryFolderPane({ library, active, layout, onSelect, onClose }: {
+export function TemporaryFolderPane({ library, active, shown = true, layout, onSelect, onClose }: {
   library: TemporaryLibrary;
   active: boolean;
+  /** False while its pane is hidden; see `WorkRail`. */
+  shown?: boolean;
   layout: LayoutMode;
   onSelect(id: number, mode: SelectMode, clickCount?: number): void;
   onClose(): void;
@@ -34,7 +36,7 @@ export function TemporaryFolderPane({ library, active, layout, onSelect, onClose
       void enqueueSearchDrop(event, folder).catch((error: unknown) => library.store.setState({ error: String(error) }));
     }}
   >
-    <WorkRail idle={!state.loading} label="临时文件夹"
+    <WorkRail idle={!state.loading} label="临时文件夹" shown={shown}
       glyphs={[<Folder key="folder" size={13} aria-hidden="true" />]}
       texts={[
         <span key="title" className="kd-activity-text kd-collection-rail-title" title={folder}>
