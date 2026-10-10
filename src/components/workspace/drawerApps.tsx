@@ -1,6 +1,5 @@
-import { useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import { Download, Settings, TextQuote } from "lucide-react";
-import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { settingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
@@ -58,12 +57,11 @@ export function useDrawerApps(): DrawerSpec[] {
   const visualizerTrack = useVisualizerStudioStore(state => state.track);
   const metaId = useTrackMetaEditor(state => state.trackId);
   const metaTrack = useLibraryStore(state => metaId === null ? undefined : state.summaryById.get(metaId));
-  const playing = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const apps: DrawerSpec[] = [];
   if (lyrics) apps.push({
     id: "lyrics",
     title: "歌词",
-    caption: songLine(playing),
+    // No caption: the lyrics are always those of the playing song.
     extent: "two-thirds",
     body: <DrawerLyrics />,
     close: () => useSidePanels.getState().setLyrics(false),

@@ -77,7 +77,8 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   on the title's baseline. It has only the room the title leaves and is cut short with an
   ellipsis first; the page words are never squeezed by it. It keeps to the far end so that it
   does not move when the page words change size. Never write it, or anything else, on a line of
-  its own under the title.
+  its own under the title. An app that can only be about one thing has none: the lyrics are
+  always the playing song's, so their title row does not repeat the song.
 - **No divider lines** inside a drawer (see AGENTS.md): groups are separated by spacing and type.
 - **Motion.** The panel slides in from beyond the window's right edge in one decelerating move
   and stops; it leaves the same way, accelerating. A new app waits until the one before it has
