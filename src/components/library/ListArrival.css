@@ -45,11 +45,12 @@
 }
 
 /* —— Sakura98: the listing is typed out, a line at a time, without a glide ——
-   On the same beats; a cover comes with its line. */
+   On the same beats; a line is there the moment its turn comes (after a fast scroll that is the
+   moment its bar is wiped away), and a cover comes with its line. */
 :root[data-theme-pack="sakulaptop98"] [data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr[data-kd-arrive-row] {
   animation-name: kd-list-tick-98;
   animation-duration: 48ms;
-  animation-timing-function: steps(1, end);
+  animation-timing-function: steps(1, start);
 }
 :root[data-theme-pack="sakulaptop98"] [data-kd-arrive] > .kd-table[data-kind="library"] > tbody > tr[data-kd-arrive-row] .kd-thumb {
   animation: none;
