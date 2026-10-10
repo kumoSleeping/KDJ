@@ -126,11 +126,16 @@ next to its styles:
 | The sidebar tree and the compact rail | Shown: the rows arrive 12ms apart (the first twelve; all in by 292ms). A branch the user opens: its rows arrive the same way while what lies below slides down (240ms). A branch the user closes: its picture is covered from below as the rows under it close up (240ms). A playlist that was opened: 600ms later the rows travel to their new order (320ms), the opened one lifted. Only the user's own toggle moves a branch; a render, a selection, a count or a drag never does. | `components/library/sidebarMotion.ts`, `FolderTree.css` |
 | The local track list | After navigation (the query version the table resets its scroll on): the first twelve rows fade in 8ms apart, all settled by 248ms. Never on a scroll, a re-render or a row update; the mark is dropped as soon as the list is scrolled. | `components/library/listArrival.ts`, `ListArrival.css` |
 | The search results | A delivered list arrives row after row (28ms apart). | `components/download/ResultTable.css` |
+| The lyrics | When the sung line changes, the column's scroll position is set at once and the lines on screen glide to it from where they were (420ms, a curve that passes the centre line by about 2% and settles); the lines the column leaves behind follow 28ms apart (the first four). A line's emphasis — ink, opacity, size, and its two weights fading into each other — changes over the same time. A glide that is interrupted starts again from where each line has got to; a change further than the column is tall is a jump (the lines settle over 28px in 240ms). The listener's own scroll pauses following for 3s; a click on a line holds it until the seek has landed. | `lib/lyricsGlide.ts`, `components/player/LyricsView.tsx`, `design.css` |
 
 Dragging has two gestures of its own: a card dropped on the downloads hops into the list as
 itself (`lib/downloadToss.ts`; the download is handed to the queue when it has nearly landed),
 and a card let go on a place that does not take it shakes its head and fades
 (`lib/dragRefusal.ts`, `DragGhost.css`).
+
+The lyrics' glide is the one place a script starts animations line by line (one compositor
+animation per line on screen, from positions measured once per layout); nothing is read or
+written while they run.
 
 Not on it by design: the drawer, 曲目信息, the floating media window and the search bar keep
 their own choreography on the same clock. Tooltips are the system's (`title`).
