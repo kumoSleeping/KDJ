@@ -1,5 +1,5 @@
 /* The download parcel (lib/downloadToss.ts): the block that was clicked turns into a parcel, the
-   parcel is thrown into the downloads drawer. Everything here lives above the drawer and the
+   parcel is thrown into the downloads drawer; the covers of a batch gather into it first. Everything here lives above the drawer and the
    menus and never takes input. Only transform and opacity move. */
 .kd-toss,
 .kd-toss-ring {
@@ -67,6 +67,43 @@
 .kd-toss-chip-cover > canvas,
 .kd-toss-chip-cover > img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .kd-toss-chip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* A batch gathers: copies of the covers of its rows on screen travel to the source and stack
+   there; the parcel comes up over the stack. One inert layer under the parcel. */
+.kd-toss-gather {
+  position: fixed;
+  z-index: 10049;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.kd-toss-tile {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  will-change: transform;
+}
+/* A cover as it lies in its row: 26px, hung by its centre. */
+.kd-toss-tile-face {
+  position: absolute;
+  top: -13px;
+  left: -13px;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 4px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--kd-text) 14%, var(--kd-panel-raised));
+  color: var(--kd-text);
+  box-shadow: 0 5px 12px -5px rgb(0 0 0 / 0.5), 0 1px 3px -1px rgb(0 0 0 / 0.3);
+  will-change: transform, opacity;
+}
+.kd-toss-tile-face > canvas { display: block; width: 100%; height: 100%; }
 
 /* The parcel: a small box in the theme colour, a lighter lid, a down arrow on its face. */
 .kd-toss-parcel {
@@ -209,7 +246,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .kd-toss, .kd-toss-ring { display: none; }
+  .kd-toss, .kd-toss-ring, .kd-toss-gather { display: none; }
   .kd-download-task[data-kd-toss-landed] .kd-download-task-cover,
   .kd-download-summary[data-kd-toss-pulse] { animation: none; }
   [data-kd-search-queue-drop="entry"],
@@ -226,6 +263,11 @@
   border-radius: 0;
   background: var(--s98-white, #fff);
   box-shadow: var(--s98-sunken);
+}
+:root[data-theme-pack="sakulaptop98"] .kd-toss-tile-face {
+  border-radius: 0;
+  background: var(--s98-white, #fff);
+  box-shadow: 0 0 0 1px var(--s98-frame, #5a1830), 2px 2px 0 rgb(120 40 70 / 0.3);
 }
 :root[data-theme-pack="sakulaptop98"] .kd-toss-parcel {
   border-radius: 0;

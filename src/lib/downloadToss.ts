@@ -5,6 +5,11 @@
  * flight as a short hop from where the item was let go — and there the card that was dragged
  * hops in as itself instead of turning into a parcel.
  *
+ * A batch (several selected rows, a whole collection) gathers first: the covers of its rows that
+ * are on screen travel to the source and stack there, the parcel comes up out of the stack with
+ * the count on it, and only then it is thrown. Rows that are not on screen are the count alone;
+ * nothing is built or loaded for them. One item, and a drop, are as described above.
+ *
  * The download belongs to the landing. A caller starts the toss, waits for `ready` and only then
  * hands the download to the queue: `ready` resolves shortly before touchdown (tossPath.ts,
  * TOSS_HANDOVER_LEAD_MS), so the new row is in the list when the parcel arrives and not while it
@@ -22,7 +27,8 @@ import "./dragRefusal";
 import { holdDrawer } from "./drawerHold";
 import { useSidePanels } from "./sidePanels";
 import {
-  flushTossHandovers, SHEET_DOWN_MS, SHEET_SWAP_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossHandover, tossHandoverAt, tossRise,
+  flushTossHandovers, SHEET_DOWN_MS, SHEET_SWAP_MS, TOSS_GATHER_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossGatherPick,
+  tossGatherPlan, tossHandover, tossHandoverAt, tossRise,
   type TossHandover, type TossPoint,
 } from "./tossPath";
 
@@ -43,6 +49,11 @@ export interface TossRequest {
   /** Several items go as one parcel with this count on it. */
   count?: number;
   /**
+   * The items of a batch, as `tossItemKey` names them. The rows on screen that carry one of
+   * them (TOSS_ITEM_ATTR) gather into the parcel before it is thrown.
+   */
+  gather?: readonly string[];
+  /**
    * False leaves the drawer as it is and aims at the 下载 entry instead (a download started from
    * inside another drawer app must not put that app away).
    */
@@ -57,6 +68,13 @@ export interface TossHandle {
   readonly ready: Promise<void>;
   /** The enqueue failed: the parcel fades where it is and nothing is highlighted. */
   fail(): void;
+}
+
+/** Written on a row that stands for something downloadable: what a batch knows the row by. */
+export const TOSS_ITEM_ATTR = "data-kd-toss-item";
+/** The name of a source in a batch and on its row. */
+export function tossItemKey(source: { platform: string; key: string }): string {
+  return `${source.platform}:${source.key}`;
 }
 
 /** The mark on a task row a parcel has just landed on, and on the list's head when no row came. */
@@ -382,7 +400,86 @@ function flyer(chip: HTMLElement | null, cargo: HTMLElement, card: boolean): Fly
   return { host, aim, body, chip, cargo, card };
 }
 
-function buildParcel(origin: Origin, request: TossRequest, count: number): Flyer {
+/* ------------------------------------------------------------------------------------------ */
+/* A batch gathers                                                                              */
+/* ------------------------------------------------------------------------------------------ */
+
+const TILE_PX = 26;
+
+interface GatherSource { at: TossPoint; cover: HTMLImageElement | null }
+
+/** The part of the window in which rows of `row`'s list can be seen: its scroller, below the sticky head. */
+function listBand(row: Element): Box {
+  const scroller = row.closest(".kd-scroll");
+  const bounds = scroller?.getBoundingClientRect() ?? box(0, 0, window.innerWidth, window.innerHeight);
+  const head = row.closest("table")?.tHead?.offsetHeight ?? 0;
+  const top = Math.max(0, bounds.top + head);
+  const left = Math.max(0, bounds.left);
+  return box(left, top, Math.min(window.innerWidth, bounds.right) - left, Math.min(window.innerHeight, bounds.bottom) - top);
+}
+
+/**
+ * The rows of a batch that are on screen, as the place of each one's cover. Read once, before
+ * anything moves; rows outside the list's visible part are left alone.
+ */
+function gatherSources(keys: readonly string[] | undefined): GatherSource[] {
+  if (!keys || keys.length < 2) return [];
+  const wanted = new Set(keys);
+  const seen: { row: Element; at: TossPoint }[] = [];
+  let band: Box | null = null;
+  for (const row of document.querySelectorAll(`tbody > tr[${TOSS_ITEM_ATTR}]`)) {
+    if (!wanted.has(row.getAttribute(TOSS_ITEM_ATTR) ?? "")) continue;
+    band ??= listBand(row);
+    const rect = (row.querySelector(".kd-thumb") ?? row).getBoundingClientRect();
+    const at = centre(rect);
+    if (rect.width === 0 || at.y < band.top || at.y > band.bottom || at.x < band.left || at.x > band.right) continue;
+    seen.push({ row, at });
+  }
+  // Only the covers that will travel are looked for and copied.
+  return tossGatherPick(seen.length).map(index => ({ at: seen[index].at, cover: loadedCover(seen[index].row) }));
+}
+
+/**
+ * The covers of a batch travel to `to` and stack there; the stack sinks into the parcel that
+ * comes up over it. Pictures only: one inert layer, removed when the gesture is over.
+ */
+function gatherInto(to: TossPoint, sources: readonly GatherSource[]): void {
+  const layer = document.createElement("div");
+  layer.className = "kd-toss-gather";
+  layer.setAttribute("aria-hidden", "true");
+  layer.setAttribute("inert", "");
+  // The nearest cover leaves first, so the stack grows from the source outwards.
+  const ordered = [...sources].sort((a, b) => Math.hypot(a.at.x - to.x, a.at.y - to.y) - Math.hypot(b.at.x - to.x, b.at.y - to.y));
+  const sinkAt = TOSS_GATHER_MS - TOSS_POP_MS;
+  const sunk: Promise<unknown>[] = [];
+  tossGatherPlan(ordered.length).forEach((step, index) => {
+    const { at, cover } = ordered[index];
+    const face = part("kd-toss-tile-face", coverTile(cover, TILE_PX) ?? icon("", NOTE, 14));
+    const tile = part("kd-toss-tile", face);
+    tile.style.transform = place(at);
+    layer.append(tile);
+    const rest = { x: to.x + step.x, y: to.y + step.y };
+    tile.animate([{ transform: place(at) }, { transform: place(rest) }],
+      { duration: step.duration, delay: step.delay, easing: "cubic-bezier(0.5, 0, 0.2, 1)", fill: "both" });
+    // It lifts off its row, tilts into its place in the fan, and sinks into the parcel at the end.
+    const arrived = (step.delay + step.duration) / TOSS_GATHER_MS;
+    const settled = `rotate(${step.turn}deg) scale(0.85)`;
+    sunk.push(face.animate([
+      { transform: "rotate(0deg) scale(1)", opacity: 1, offset: 0 },
+      { transform: "rotate(0deg) scale(1.12)", opacity: 1, offset: Math.min(arrived * 0.4, 0.2) + step.delay / TOSS_GATHER_MS, easing: "ease-out" },
+      { transform: settled, opacity: 1, offset: Math.min(arrived, sinkAt / TOSS_GATHER_MS) },
+      { transform: settled, opacity: 1, offset: sinkAt / TOSS_GATHER_MS, easing: "ease-in" },
+      { transform: `rotate(${step.turn}deg) scale(0.4)`, opacity: 0, offset: 1 },
+    ], { duration: TOSS_GATHER_MS, easing: "linear", fill: "both" }).finished);
+  });
+  document.body.append(layer);
+  // Gone when the last cover has sunk into the parcel — and in any case, like the parcel itself.
+  const gone = () => layer.remove();
+  Promise.all(sunk).then(gone, gone);
+  window.setTimeout(gone, 2400);
+}
+
+function buildParcel(origin: Origin, request: TossRequest, count: number, gathering = false): Flyer {
   const label = count === 1 ? coverTile(origin.cover, 16) : null;
   const parcel = part("kd-toss-parcel",
     part("kd-toss-parcel-lid"),
@@ -394,7 +491,8 @@ function buildParcel(origin: Origin, request: TossRequest, count: number): Flyer
   if (badge) badge.textContent = count > 99 ? "99+" : String(count);
 
   let chip: HTMLElement | null = null;
-  if (origin.rect) {
+  // A batch that gathers needs no block at the source: its covers are what turns into the parcel.
+  if (origin.rect && !gathering) {
     const tile = coverTile(origin.cover, 28);
     const cover = part("kd-toss-chip-cover", tile ?? icon("", NOTE, 15));
     if (!tile) remoteCover(request.cover, cover);
@@ -423,7 +521,11 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
   const hop = origin.rect === null;
   // A drop: the card the user was holding goes on from where it was let go.
   const dropped = hop ? droppedDragCard() : null;
-  const { host, aim, body, chip, cargo, card } = dropped ? buildCard(dropped) : buildParcel(origin, request, count);
+  // Several items started from something on screen: their covers gather first. A drop already
+  // holds its items in one card.
+  const gathered = hop ? [] : gatherSources(count > 1 ? request.gather : undefined);
+  const gathering = gathered.length > 0;
+  const { host, aim, body, chip, cargo, card } = dropped ? buildCard(dropped) : buildParcel(origin, request, count, gathering);
   const start = dropped ? { x: origin.point.x + dropped.cover.x, y: origin.point.y + dropped.cover.y } : origin.point;
   let ended = false;
   let failed = false;
@@ -447,8 +549,9 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
   host.style.transform = place(start);
   document.body.append(host);
 
-  const liftMs = hop ? TOSS_POP_MS : TOSS_LIFT_MS;
+  const liftMs = hop ? TOSS_POP_MS : gathering ? TOSS_GATHER_MS : TOSS_LIFT_MS;
   const lifted = { x: start.x, y: start.y - (hop ? 0 : 8) };
+  if (gathering) gatherInto(start, gathered);
   host.animate([{ transform: place(start) }, { transform: place(lifted) }],
     { duration: liftMs, easing: "cubic-bezier(0.2, 0.8, 0.3, 1)", fill: "forwards" });
   // The block gathers itself and shrinks away; the parcel comes up in its place as it goes.
@@ -464,6 +567,11 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     { transform: "scale(0.96)", opacity: 1 },
   ] : hop ? [
     { transform: "scale(0.4)", opacity: 0, easing: pop },
+    { transform: "scale(1)", opacity: 1 },
+  ] : gathering ? [
+    // Nothing to see until the covers have stacked; then it comes up out of the stack.
+    { transform: "scale(0.4)", opacity: 0 },
+    { transform: "scale(0.4)", opacity: 0, offset: 1 - TOSS_POP_MS / TOSS_GATHER_MS, easing: pop },
     { transform: "scale(1)", opacity: 1 },
   ] : [
     { transform: "scale(0.4)", opacity: 0 },

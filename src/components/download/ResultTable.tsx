@@ -63,6 +63,7 @@ import {
   selectableGroups,
   selectionKey,
 } from "../../lib/resultSelection";
+import { tossItemKey } from "../../lib/downloadToss";
 import { removeLocalStorage } from "../../lib/storageWrite";
 import { isEditable } from "../../lib/useLibraryClipboard";
 import {
@@ -757,6 +758,10 @@ const ResultTableView = memo(function ResultTableView({
                 leaving === undefined
                   ? undefined
                   : foldOrder(item.collections.length + visiblePosition, leaving);
+              // The source a download of this group takes (the workspace picks the same one).
+              const pickedSource = (candidate: MergedGroup) =>
+                candidate.sources[sourceIndex[candidate.group_id] ?? candidate.best_source_index]
+                  ?? candidate.sources[0];
               const dragSources = () => {
                 const currentKey = selectionKey(index, group.group_id);
                 const draggingSelection = selected.has(currentKey);
@@ -807,6 +812,7 @@ const ResultTableView = memo(function ResultTableView({
                       selectable={group.sources.some((source) => source.platform !== "local")}
                       selected={selected.has(selectionKey(index, group.group_id))}
                       selectionMode={selectionMode}
+                      tossItem={pickedSource(group) ? tossItemKey(pickedSource(group)!) : undefined}
                       expanded={expandedGroups.has(group.group_id)}
                       onToggleExpand={() => onToggleExpand(group.group_id)}
                       onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { DRAWER_HOLD_LIMIT_MS, heldDrawerFront, holdDrawer, releaseDrawerHolds, useDrawerHold } from "../src/lib/drawerHold";
 import {
-  flushTossHandovers, SHEET_DOWN_MS, TOSS_HANDOVER_LEAD_MS, TOSS_HANDOVER_LIMIT_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs,
+  flushTossHandovers, SHEET_DOWN_MS, SHEET_SWAP_MS, TOSS_GATHER_MAX, TOSS_GATHER_MS, TOSS_HANDOVER_LEAD_MS, TOSS_HANDOVER_LIMIT_MS,
+  TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossGatherPick, tossGatherPlan,
   tossHandover, tossHandoverAt, tossRise, waitingTossHandovers,
 } from "../src/lib/tossPath";
 
@@ -172,6 +173,42 @@ test("a flight that never reports back still hands the download over, inside the
   } finally {
     mock.timers.reset();
   }
+});
+
+test("a batch gathers before it is thrown: a handful of covers, a small stack, the same handover limit", () => {
+  for (const tiles of [1, 2, 3, TOSS_GATHER_MAX, 40]) {
+    const plan = tossGatherPlan(tiles);
+    assert.equal(plan.length, Math.min(tiles, TOSS_GATHER_MAX), "never more covers than the cap");
+    // They leave one after another and every one is in the stack before the parcel has come up.
+    assert.ok(plan.every((tile, index) => index === 0 || tile.delay >= plan[index - 1].delay));
+    assert.ok(plan.every(tile => tile.delay + tile.duration <= TOSS_GATHER_MS - TOSS_POP_MS / 2), `stacked in time for ${tiles}`);
+    // A fan, not a spread: a few pixels and a few degrees, even on both sides of the centre.
+    assert.ok(plan.every(tile => Math.abs(tile.x) <= 14 && tile.y >= 0 && tile.y <= 5 && Math.abs(tile.turn) <= 18));
+    assert.ok(Math.abs(plan.reduce((sum, tile) => sum + tile.x, 0)) < 1e-6);
+    assert.ok(Math.abs(plan.reduce((sum, tile) => sum + tile.turn, 0)) < 1e-6);
+  }
+  assert.deepEqual(tossGatherPlan(0), []);
+  // Which rows of a long batch send their cover: spread over what is on screen, both ends included.
+  assert.deepEqual(tossGatherPick(3), [0, 1, 2]);
+  const spread = tossGatherPick(40);
+  assert.equal(spread.length, TOSS_GATHER_MAX);
+  assert.equal(spread[0], 0);
+  assert.equal(spread.at(-1), 39);
+  assert.ok(spread.every((value, index) => index === 0 || value > spread[index - 1]));
+  assert.deepEqual(tossGatherPick(0), []);
+
+  // The gathering takes the place of the lift. The download of a batch is still handed over
+  // before the limit and the whole gesture ends inside the drawer's hold, whatever the way and
+  // whatever the sheet is doing; against one item it waits a short beat longer, no more.
+  for (const sheetLeft of [0, SHEET_DOWN_MS, SHEET_DOWN_MS + SHEET_SWAP_MS]) {
+    for (const distance of [80, 500, 1600, 4000]) {
+      const flight = tossFlightMs(distance, sheetLeft, false);
+      assert.ok(TOSS_GATHER_MS + tossHandoverAt(flight) < TOSS_HANDOVER_LIMIT_MS, `handover at ${distance}px, sheet ${sheetLeft}`);
+      // 170ms of landing follow the flight (downloadToss.ts, LAND_MS).
+      assert.ok(TOSS_GATHER_MS + flight + 170 < DRAWER_HOLD_LIMIT_MS);
+    }
+  }
+  assert.ok(TOSS_GATHER_MS > TOSS_LIFT_MS && TOSS_GATHER_MS - TOSS_LIFT_MS <= 150);
 });
 
 test("a flight that ends early, a hidden window or a closing one hand over at once", async () => {

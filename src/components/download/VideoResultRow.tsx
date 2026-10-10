@@ -15,7 +15,7 @@ import { useSharePrefs } from "../../lib/sharePrefs";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { rememberVideoEnqueue } from "../../lib/queueTaskDraft";
 import { beginVideoPointerDrag } from "../../lib/searchDrag";
-import { tossToDownloads } from "../../lib/downloadToss";
+import { TOSS_ITEM_ATTR, tossToDownloads } from "../../lib/downloadToss";
 import { clearTextSelection } from "../../lib/textSelection";
 import { prewarmYoutubeEmbed } from "../../lib/youtubeEmbed";
 import { useAppStore } from "../../stores/appStore";
@@ -179,6 +179,8 @@ export interface VideoResultRowProps extends VideoSeed {
   selectable?: boolean;
   selected?: boolean;
   selectionMode?: boolean;
+  /** What a batch download knows this row by (downloadToss.ts): its cover joins the gathering. */
+  tossItem?: string;
   /** 搜索结果里的分 P 与歌曲多来源共用同一套展开状态。 */
   expanded?: boolean;
   onToggleExpand?(): void;
@@ -217,6 +219,7 @@ export function VideoResultRow({
   selectable = false,
   selected = false,
   selectionMode = false,
+  tossItem,
   expanded,
   onToggleExpand,
   onToggleSelect,
@@ -458,6 +461,7 @@ export function VideoResultRow({
         data-video="true"
         data-enter={bornLate && leave === undefined ? "late" : undefined}
         data-selecting={selectionMode ? "true" : undefined}
+        {...{ [TOSS_ITEM_ATTR]: selectable ? tossItem : undefined }}
         aria-selected={selected}
         onContextMenu={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;

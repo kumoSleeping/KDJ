@@ -26,6 +26,7 @@ import { useSharePrefs } from "../../lib/sharePrefs";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
+import { TOSS_ITEM_ATTR, tossItemKey } from "../../lib/downloadToss";
 import { PlatformMark } from "./PlatformMark";
 import { ResultDownloadIndex } from "./ResultDownloadIndex";
 import { foldingRowProps, foldOrder, useFold } from "./searchMotion";
@@ -414,6 +415,7 @@ export function MergedGroupRow({
       <tr
         aria-selected={selected || inspected}
         data-kd-search-result=""
+        {...{ [TOSS_ITEM_ATTR]: selectable && active ? tossItemKey(active) : undefined }}
         data-inspected={inspected ? "true" : undefined}
         data-resolving={previewPending ? "true" : undefined}
         data-enter={bornLate && leave === undefined ? "late" : undefined}

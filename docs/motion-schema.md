@@ -127,10 +127,17 @@ next to its styles:
 | The local track list | After navigation (the query version the table resets its scroll on): the first twelve rows fade in 8ms apart, all settled by 248ms. Never on a scroll, a re-render or a row update; the mark is dropped as soon as the list is scrolled. | `components/library/listArrival.ts`, `ListArrival.css` |
 | The search results | A delivered list arrives row after row (28ms apart). | `components/download/ResultTable.css` |
 
-Dragging has two gestures of its own: a card dropped on the downloads hops into the list as
-itself (`lib/downloadToss.ts`; the download is handed to the queue when it has nearly landed),
-and a card let go on a place that does not take it shakes its head and fades
-(`lib/dragRefusal.ts`, `DragGhost.css`).
+A download has gestures of its own (`lib/downloadToss.ts`, timings in `lib/tossPath.ts`; the
+download is handed to the queue when the parcel has nearly landed). One item started from a row
+or a button: the block that was clicked turns into a parcel (180ms) and is thrown into the
+downloads. Several at once — picked rows, a whole collection: the covers of the rows of the batch
+that are on screen (six at most, a note glyph where a row has no loaded cover) travel to the
+place that was clicked and stack there as a small fan, the parcel comes up out of the stack with
+the count on it (320ms in all, in place of the lift), and then it is thrown the same way. Rows of
+the batch that are not on screen are the count alone. A card dropped on the downloads hops into
+the list as itself. A card let go on a place that does not take it shakes its head and fades
+(`lib/dragRefusal.ts`, `DragGhost.css`). Under reduced motion nothing travels: the new task is
+simply highlighted.
 
 Not on it by design: the drawer, 曲目信息, the floating media window and the search bar keep
 their own choreography on the same clock. Tooltips are the system's (`title`).
