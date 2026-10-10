@@ -1,0 +1,146 @@
+/* 歌曲色彩: the field behind the lyrics and the playing song's bubble (SongColorBackdrop.tsx).
+   It fills its surface's backdrop slot. Everything that moves here moves by transform or
+   opacity on a layer that was painted once: the masses are small bitmaps stretched over the
+   surface, so their softness is in the picture and no filter is ever drawn, let alone
+   animated. */
+.kd-songcolor {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  contain: strict;
+}
+.kd-songcolor-swell,
+.kd-songcolor-field,
+.kd-songcolor-level {
+  position: absolute;
+  inset: 0;
+}
+/* A mass: the bitmap is 170 % of the surface about its centre, so its blobs reach over the
+   edges and no rim of it ever shows. The span drifts across, the bitmap inside it turns and
+   swells, each on its own slow loop there and back; the four are out of step with each other,
+   so the field never repeats to the eye. */
+.kd-songcolor-drift {
+  position: absolute;
+  inset: -35%;
+  animation: kd-songcolor-move-drift var(--kd-songcolor-drift, 29s) ease-in-out var(--kd-songcolor-lead, 0s) infinite alternate;
+  will-change: transform;
+}
+.kd-songcolor-drift > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  animation: kd-songcolor-move-turn var(--kd-songcolor-turn, 23s) ease-in-out var(--kd-songcolor-lead, 0s) infinite alternate;
+  will-change: transform;
+}
+@keyframes kd-songcolor-move-drift {
+  from { transform: translate3d(var(--kd-songcolor-x0), var(--kd-songcolor-y0), 0); }
+  to { transform: translate3d(var(--kd-songcolor-x1), var(--kd-songcolor-y1), 0); }
+}
+@keyframes kd-songcolor-move-turn {
+  from { transform: rotate(var(--kd-songcolor-r0)) scale(var(--kd-songcolor-s0)); }
+  to { transform: rotate(var(--kd-songcolor-r1)) scale(var(--kd-songcolor-s1)); }
+}
+.kd-songcolor-drift[data-mass="0"] {
+  --kd-songcolor-drift: 31s; --kd-songcolor-turn: 23s; --kd-songcolor-lead: -7s;
+  --kd-songcolor-x0: -8%; --kd-songcolor-y0: -5%; --kd-songcolor-x1: 9%; --kd-songcolor-y1: 7%;
+  --kd-songcolor-r0: -12deg; --kd-songcolor-s0: 1; --kd-songcolor-r1: 10deg; --kd-songcolor-s1: 1.16;
+}
+.kd-songcolor-drift[data-mass="1"] {
+  --kd-songcolor-drift: 37s; --kd-songcolor-turn: 27s; --kd-songcolor-lead: -19s;
+  --kd-songcolor-x0: 8%; --kd-songcolor-y0: 6%; --kd-songcolor-x1: -9%; --kd-songcolor-y1: -7%;
+  --kd-songcolor-r0: 9deg; --kd-songcolor-s0: 1.14; --kd-songcolor-r1: -13deg; --kd-songcolor-s1: 1;
+}
+.kd-songcolor-drift[data-mass="2"] {
+  --kd-songcolor-drift: 23s; --kd-songcolor-turn: 33s; --kd-songcolor-lead: -3s;
+  --kd-songcolor-x0: -6%; --kd-songcolor-y0: 9%; --kd-songcolor-x1: 7%; --kd-songcolor-y1: -8%;
+  --kd-songcolor-r0: -15deg; --kd-songcolor-s0: 1.04; --kd-songcolor-r1: 12deg; --kd-songcolor-s1: 1.22;
+}
+.kd-songcolor-drift[data-mass="3"] {
+  --kd-songcolor-drift: 27s; --kd-songcolor-turn: 19s; --kd-songcolor-lead: -13s;
+  --kd-songcolor-x0: 9%; --kd-songcolor-y0: -7%; --kd-songcolor-x1: -7%; --kd-songcolor-y1: 8%;
+  --kd-songcolor-r0: 12deg; --kd-songcolor-s0: 1.2; --kd-songcolor-r1: -10deg; --kd-songcolor-s1: 1.02;
+}
+/* The masses run while the song runs (the layer sets data-live from the player's reports). */
+.kd-songcolor:not([data-live]) :is(.kd-songcolor-drift, .kd-songcolor-drift > canvas) { animation-play-state: paused; }
+
+/* The glow: a lighter mass that swells on the beat (an animation the layer makes, one bar
+   long). Where it sits is the surface's: about the line being sung in the lyrics, about the
+   cover in the bubble. Its wrapper carries how strong the song is there, set once a bar. */
+.kd-songcolor-level {
+  opacity: 0.75;
+  transition: opacity 1600ms linear;
+}
+.kd-songcolor-glow {
+  position: absolute;
+  inset: 12% -12%;
+  opacity: 0.3;
+  will-change: transform, opacity;
+}
+.kd-songcolor[data-surface="bubble"] .kd-songcolor-glow { inset: -90% 50% -90% -16%; }
+.kd-songcolor-glow > canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* The dark theme keeps the field a step deeper, so the two surfaces do not glare in a dark
+   window. The ink was chosen for the lighter field and only gains by it. */
+:root[data-theme="dark"] .kd-songcolor::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #000;
+  opacity: 0.16;
+}
+
+/* The lines that are not being sung are dimmed by their own opacity; on the field they start
+   from the full ink instead of the muted one, so they keep about the weight they have on the
+   panel colour. */
+[data-backdrop-ink] .kd-lyrics { --kd-lyrics-soft: var(--kd-text); }
+
+/* Another song: its field fades in over the last one on the song-change clock
+   (src/lib/songSwapMotion.ts — the large-surface pair of the motion schema). */
+.kd-songcolor-field[data-arriving],
+.kd-songcolor-arriving {
+  animation: kd-songcolor-fade-in var(--kd-motion-in) var(--kd-ease-out) backwards;
+}
+@keyframes kd-songcolor-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes kd-songcolor-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* Switched on by its key: the colour spreads from the key as one circle over both surfaces
+   (the layer measures it once and writes it here), and drains back into the key when it is
+   switched off. A layer that only arrives late, or under reduced motion, fades. */
+.kd-songcolor[data-wash="in"] {
+  animation: kd-songcolor-spread var(--kd-songcolor-wash, 460ms) var(--kd-songcolor-ease, linear) backwards;
+}
+.kd-songcolor[data-wash="out"] {
+  animation: kd-songcolor-drain var(--kd-songcolor-wash, 360ms) var(--kd-songcolor-ease, linear) both;
+}
+.kd-songcolor[data-wash="fade"] { animation: kd-songcolor-fade-in var(--kd-motion-micro) linear backwards; }
+.kd-songcolor[data-wash="fade-out"] { animation: kd-songcolor-fade-out var(--kd-motion-micro-out) linear both; }
+@keyframes kd-songcolor-spread {
+  from { clip-path: circle(0px at var(--kd-songcolor-x, 100%) var(--kd-songcolor-y, 0%)); }
+  to { clip-path: circle(var(--kd-songcolor-reach, 150%) at var(--kd-songcolor-x, 100%) var(--kd-songcolor-y, 0%)); }
+}
+@keyframes kd-songcolor-drain {
+  from { clip-path: circle(var(--kd-songcolor-reach, 150%) at var(--kd-songcolor-x, 100%) var(--kd-songcolor-y, 0%)); }
+  to { clip-path: circle(0px at var(--kd-songcolor-x, 100%) var(--kd-songcolor-y, 0%)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kd-songcolor-drift,
+  .kd-songcolor-drift > canvas { animation: none; }
+  .kd-songcolor-level { transition: none; }
+  .kd-songcolor-field[data-arriving],
+  .kd-songcolor-arriving,
+  .kd-songcolor[data-wash="fade"] { animation-duration: var(--kd-motion-reduced); animation-timing-function: linear; }
+  .kd-songcolor[data-wash="fade-out"] { animation-duration: var(--kd-motion-reduced); }
+}
