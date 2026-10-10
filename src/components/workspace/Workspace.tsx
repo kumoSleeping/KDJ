@@ -6,7 +6,7 @@ import { useStore } from "zustand";
 import { createTemporaryLibrary, type TemporaryLibrary, type LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
 import { useTemporaryFolderDrop } from "../../lib/temporaryFolderDrag";
 import { TemporaryFolderPane } from "../library/TemporaryFolderPane";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, ApiError } from "../../lib/api";
 import { clearTextSelection } from "../../lib/textSelection";
 import {
@@ -65,6 +65,13 @@ import {
   type StreamBrowsePlatform,
 } from "../../stores/streamBrowseStore";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
+import {
+  readSidebarState,
+  sameSidebarState,
+  writeSidebarState,
+  type SidebarShape,
+  type SidebarState,
+} from "../../lib/sidebarShape";
 import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
@@ -318,7 +325,7 @@ export function Workspace() {
         : null;
   const streamAccountKeys = useStreamBrowseStore((state) => state.accountKeys);
   const startupForeground = useStreamBrowseStore((state) => state.startupForeground);
-  const { columns: layout, chrome, portrait } = useLayoutSignals();
+  const { columns: layout, chrome, portrait, tall } = useLayoutSignals();
 
   const total = useLibraryStore((state) => state.total);
   const loading = useLibraryStore((state) => state.loading);
@@ -1197,18 +1204,13 @@ export function Workspace() {
   // chrome：inline 一行搜索，stacked 竖屏两段式——见 useLayoutMode。
   // 文件夹导航在所有尺寸都常驻；竖屏只收成窄轨，避免手机状态下失去入口。
   const showTree = true;
-  // 侧栏宽窄只是用户上一次的选择：窗口拖成什么形状都不替用户改，重启后原样恢复。
-  // 只有手机竖屏没存过时从窄轨起步，免得首屏被文件夹占满。
-  const [compactTreeExpanded, setCompactTreeExpanded] = useState(() => {
-    const saved = readLocalStorage("kd-compact-tree-expanded");
-    return saved === null ? !portrait : saved === "1";
-  });
-  const savedCompactTreeRef = useRef(compactTreeExpanded);
-  useEffect(() => {
-    if (savedCompactTreeRef.current === compactTreeExpanded) return;
-    savedCompactTreeRef.current = compactTreeExpanded;
-    writeLocalStorageNow("kd-compact-tree-expanded", compactTreeExpanded ? "1" : "0");
-  }, [compactTreeExpanded]);
+  // 侧栏宽窄是用户的选择，横向窗口和竖长窗口各记各的（见 sidebarShape）：在哪种
+  // 形状里调就只改哪一份，窗口跨过 3:4 时换成另一份，重启后原样恢复。手机只有一份，
+  // 没存过时从窄轨起步，免得首屏被文件夹占满。
+  const sidebarShape: SidebarShape = tall && !portrait ? "tall" : "wide";
+  const [compactTreeExpanded, setCompactTreeExpanded] = useState(
+    () => readSidebarState(sidebarShape, !portrait).expanded,
+  );
   const workspacePaneSizeKey = portrait
     ? "kd-workspace-pane-sizes-portrait-v2"
     : "kd-workspace-pane-sizes-regular-v2";
@@ -1778,11 +1780,24 @@ export function Workspace() {
   useEffect(() => {
     const el = shellRef.current;
     if (!el) return;
-    for (const side of ["left", "right"] as const) {
-      const saved = readLocalStorage(`kd-split-${side}`);
-      if (saved) el.style.setProperty(`--kd-${side}`, `${saved}px`);
-    }
+    const saved = readLocalStorage("kd-split-right");
+    if (saved) el.style.setProperty("--kd-right", `${saved}px`);
   }, []);
+
+  // 左栏按窗口形状取自己那一份：打开时一次，窗口跨过 3:4 时再换一次。只读不写；
+  // 赶在绘制之前换完，不会先按另一种形状的宽窄画一帧。窄轨 ↔ 展开本来就没有过渡，
+  // 这里同样直接到位。
+  const sidebarDefaultExpanded = !portrait;
+  useLayoutEffect(() => {
+    const el = shellRef.current;
+    if (!el) return;
+    const state = readSidebarState(sidebarShape, sidebarDefaultExpanded);
+    if (state.width === null) el.style.removeProperty("--kd-left");
+    else el.style.setProperty("--kd-left", `${state.width}px`);
+    setCompactTreeExpanded(state.expanded);
+    // 手机转向不换份（sidebarShape 不变），默认值跟着变也不该重读。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarShape]);
 
   const LEFT_COLUMN_BOUNDS = [140, 420] as const;
   const LEFT_RAIL_WIDTH = 58;
@@ -1804,6 +1819,10 @@ export function Workspace() {
       ? LEFT_COLUMN_BOUNDS
       : [Math.min(240, rightHostWidth), rightHostWidth] as const;
     let treeExpanded = compactTreeExpanded;
+    // 松手时和按下时比：只点了一下把手不算调整，不写。
+    const sidebarBefore: SidebarState | null = side === "left"
+      ? readSidebarState(sidebarShape, compactTreeExpanded)
+      : null;
     let pendingClientX = event.clientX;
     let resizeFrame = 0;
     if (side === "right") document.body.dataset.kdPaneResizing = "right";
@@ -1845,13 +1864,21 @@ export function Workspace() {
         delete document.body.dataset.kdPaneResizing;
         window.dispatchEvent(new Event("kd:pane-resize-end"));
       }
-      if (side === "left" && !treeExpanded) {
-        // 最小轨道是一个布局状态，不把 58px 当作展开宽度存下来。
-        shell.style.setProperty("--kd-left", `${Math.max(min, LEFT_RAIL_WIDTH)}px`);
+      if (sidebarBefore) {
+        let width = sidebarBefore.width;
+        if (treeExpanded) {
+          const dragged = Number(shell.style.getPropertyValue("--kd-left").replace("px", ""));
+          if (Number.isFinite(dragged) && dragged > 0) width = dragged;
+        } else {
+          // 最小轨道是一个布局状态，不把 58px 当作展开宽度存下来。
+          shell.style.setProperty("--kd-left", `${Math.max(min, LEFT_RAIL_WIDTH)}px`);
+        }
+        const next: SidebarState = { expanded: treeExpanded, width };
+        if (!sameSidebarState(sidebarBefore, next)) writeSidebarState(sidebarShape, next);
         return;
       }
-      const value = shell.style.getPropertyValue(`--kd-${side}`).replace("px", "");
-      if (value) writeLocalStorageNow(`kd-split-${side}`, value);
+      const value = shell.style.getPropertyValue("--kd-right").replace("px", "");
+      if (value) writeLocalStorageNow("kd-split-right", value);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -1861,8 +1888,13 @@ export function Workspace() {
 
   const resetColumn = (side: "left" | "right") => {
     shellRef.current?.style.removeProperty(`--kd-${side}`);
-    removeLocalStorage(`kd-split-${side}`);
-    if (side === "right") window.dispatchEvent(new Event("kd:pane-resize-end"));
+    if (side === "left") {
+      const state = readSidebarState(sidebarShape, compactTreeExpanded);
+      if (state.width !== null) writeSidebarState(sidebarShape, { ...state, width: null });
+      return;
+    }
+    removeLocalStorage("kd-split-right");
+    window.dispatchEvent(new Event("kd:pane-resize-end"));
   };
 
   /**
