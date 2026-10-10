@@ -41,6 +41,12 @@ export interface TaskBubbleSpec {
   detail?: string;
   /** Short facts, drawn as one quieter line (BPM, key, length, …). */
   facts?: readonly string[];
+  /**
+   * Where the task's subject comes from: a small mark the host draws at the head of the facts
+   * line (the platform a song is streamed or was downloaded from), with `label` as its name.
+   * A brand mark keeps its own colour.
+   */
+  origin?: { label: string; mark: ReactNode };
   /** Up to three are shown, overlapping; the rest becomes "+N". */
   covers?: readonly TaskCover[];
   /** How many things the covers stand for, when that is more than the covers given. */
@@ -76,8 +82,10 @@ export interface TaskBubbleSpec {
   onExpand?(expanded: boolean): void;
   /**
    * The task's own live controls, drawn as a row along the bottom of the bubble in both the
-   * compact and the expanded form (the playing song: its transport and progress). The task
-   * supplies the controls; the row, its place and its spacing are the host's.
+   * compact and the expanded form (the playing song's transport and progress, while the player
+   * bar is away). The task supplies the controls; the row, its place and its spacing are the
+   * host's. A task may give or take them while its bubble is up: the host unfolds the row open
+   * and folds it away.
    */
   controls?: ReactNode;
   /**

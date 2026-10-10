@@ -138,15 +138,49 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
     return () => window.removeEventListener("keydown", dismiss);
   }, [escape, id]);
 
+  // The task's own controls may come and go while its bubble is up (the playing song's
+  // transport, with the player bar away). The row then unfolds open or folds away instead of
+  // jumping (TaskBubbles.css): it is in the bubble from before it has any height until after it
+  // has lost it, and shows the controls it last had while it closes. A bubble that comes up
+  // with its controls simply has them.
+  const hasControls = spec.controls != null;
+  const lastControls = useRef(spec.controls);
+  if (hasControls) lastControls.current = spec.controls;
+  const [controlsRow, setControlsRow] = useState(hasControls);
+  const [controlsOpen, setControlsOpen] = useState(hasControls);
+  const controlsClip = useRef<HTMLDivElement>(null);
+  const controlsWere = useRef(hasControls);
+  /** The row is on its way: the bubble's height is not what the stack stands on. */
+  const folding = useRef(false);
+
   useLayoutEffect(() => {
     const element = node.current;
     if (!element) return;
-    const report = () => onSize(id, element.offsetHeight);
+    const report = () => { if (!folding.current) onSize(id, element.offsetHeight); };
     report();
     const observer = new ResizeObserver(report);
     observer.observe(element);
     return () => { observer.disconnect(); onSize(id, null); };
   }, [id, onSize]);
+  useLayoutEffect(() => {
+    if (controlsWere.current === hasControls) return;
+    controlsWere.current = hasControls;
+    const element = node.current, clip = controlsClip.current;
+    if (!element || !clip) return;
+    // Measured once, before the row moves: the height the bubble is going to. The stack above
+    // and the drawer's limit move there in one step, on the row's own clock, instead of
+    // following its height frame by frame.
+    folding.current = true;
+    onSize(id, element.offsetHeight - clip.offsetHeight + (hasControls ? clip.scrollHeight : 0));
+    setControlsRow(true);
+    setControlsOpen(hasControls);
+    const timer = window.setTimeout(() => {
+      folding.current = false;
+      if (hasControls) onSize(id, element.offsetHeight);
+      else setControlsRow(false);
+    }, (reduced ? REDUCED_LEAVE_MS : SONG_SWAP_IN_MS) + 20);
+    return () => window.clearTimeout(timer);
+  }, [hasControls, id, onSize, reduced]);
   useEffect(() => () => onHeld(id, false), [id, onHeld]);
 
   const [ownExpanded, setOwnExpanded] = useState(false);
@@ -163,7 +197,10 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
       ? <span className="kd-task-title" data-wrap="true" title={spec.title}>{spec.title}</span>
       : <MarqueeText className="kd-task-title" text={spec.title} />}
     {spec.detail && <span className="kd-task-detail" title={spec.detail}>{spec.detail}</span>}
-    {!!spec.facts?.length && <span className="kd-task-facts">{spec.facts.map(fact => <span key={fact}>{fact}</span>)}</span>}
+    {(spec.origin || !!spec.facts?.length) && <span className="kd-task-facts">
+      {spec.origin && <span className="kd-task-origin" role="img" aria-label={spec.origin.label} title={spec.origin.label}>{spec.origin.mark}</span>}
+      {spec.facts?.map(fact => <span key={fact}>{fact}</span>)}
+    </span>}
     {progress !== null && <span className="kd-task-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100}
       aria-valuenow={Math.round(progress * 100)} aria-label={`${spec.title} 进度`}>
       <i style={{ transform: `scaleX(${progress})` }} />
@@ -174,7 +211,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || undefined}
-      data-controls={spec.controls != null || undefined}
+      data-controls={hasControls || undefined}
       onPointerEnter={() => onHeld(id, true)} onPointerLeave={() => onHeld(id, false)}
       onFocus={() => onHeld(id, true)}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onHeld(id, false); }}>
@@ -210,7 +247,12 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
         </div>
       </div>
       {expanded && <div className="kd-task-body kd-scroll">{spec.body}</div>}
-      {spec.controls != null && <div className="kd-task-controls">{spec.controls}</div>}
+      {(hasControls || controlsRow) && <div className="kd-task-controls" data-open={hasControls && controlsOpen ? "true" : undefined}
+        inert={!hasControls}>
+        <div ref={controlsClip} className="kd-task-controls-clip">
+          <div className="kd-task-controls-row">{hasControls ? spec.controls : lastControls.current}</div>
+        </div>
+      </div>}
     </article>
   </div>;
 }

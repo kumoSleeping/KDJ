@@ -19,6 +19,7 @@ import {
   MINI_WAVE_BARS,
   MINI_WAVE_HEIGHT,
   MINI_WAVE_PITCH,
+  miniWaveformBars,
   miniWaveformLevels,
   miniWaveformPath,
   seekFraction,
@@ -32,8 +33,11 @@ const SEEK_LANDED_S = 1.5;
 /** How long the line waits for that answer before it shows the player's position again. */
 const SEEK_WAIT_MS = 700;
 
-/** The song's overview as the path of the mini waveform, once it is in the shared cache. */
-function useMiniWaveform(track: Track): string | null {
+/**
+ * The song's overview as the path of a mini waveform of `bars` bars, once it is in the shared
+ * cache.
+ */
+function useMiniWaveform(track: Track, bars: number): string | null {
   const [wave, setWave] = useState(() => cachedReleaseOverviewWaveform(track.id));
   useEffect(() => {
     const read = () => setWave(cachedReleaseOverviewWaveform(track.id));
@@ -50,22 +54,33 @@ function useMiniWaveform(track: Track): string | null {
   return useMemo(() => {
     // An overview of a part of the song is not the song's shape.
     if (!wave || wave.source_start !== undefined || wave.source_end !== undefined) return null;
-    const levels = miniWaveformLevels(wave.amp, MINI_WAVE_BARS);
+    const levels = miniWaveformLevels(wave.amp, bars);
     return levels ? miniWaveformPath(levels) : null;
-  }, [wave]);
+  }, [wave, bars]);
 }
 
 /**
  * The progress of the playing song as a line that can be clicked or dragged: the mini waveform
- * when the song has one, a plain rounded line otherwise, with the time played before it and the
- * time left after it. The position is written straight into the elements from the player
- * session, so the clock re-renders nothing.
+ * when the song has one, a plain rounded line otherwise, with the time played before it. The
+ * row has no room for a second clock, so the time left is not written; the line shows it. The
+ * waveform has as many bars as the line has room for, so a long line (the bubble spanning a
+ * tall window) shows more of the song instead of the same bars pulled apart. The position is
+ * written straight into the elements from the player session, so the clock re-renders nothing.
  */
 function NowPlayingSeek({ track }: { track: Track }) {
-  const path = useMiniWaveform(track);
   const line = useRef<HTMLDivElement>(null);
+  const [bars, setBars] = useState(MINI_WAVE_BARS);
+  useLayoutEffect(() => {
+    const node = line.current;
+    if (!node) return;
+    const measure = () => setBars(miniWaveformBars(node.offsetWidth));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const path = useMiniWaveform(track, bars);
   const elapsed = useRef<HTMLSpanElement>(null);
-  const remaining = useRef<HTMLSpanElement>(null);
   /** The place under the pointer while the line is dragged, 0..1, until the player has taken it. */
   const scrub = useRef<number | null>(null);
   const abandon = useRef<(() => void) | null>(null);
@@ -98,9 +113,7 @@ function NowPlayingSeek({ track }: { track: Track }) {
       }
     }
     const played = length > 0 ? formatDuration(at) : "--:--";
-    const left = length > 0 ? `−${formatDuration(Math.max(0, length - at))}` : "−−:−−";
     if (elapsed.current && elapsed.current.textContent !== played) elapsed.current.textContent = played;
-    if (remaining.current && remaining.current.textContent !== left) remaining.current.textContent = left;
   };
   const painter = useRef(paint);
   painter.current = paint;
@@ -177,27 +190,26 @@ function NowPlayingSeek({ track }: { track: Track }) {
         seekTo(step ? getPlayerSession().position + step * (event.shiftKey ? SEEK_STEP_LARGE : SEEK_STEP) : 0);
       }}>
       {path ? <>
-        <MiniWave path={path} />
-        <MiniWave path={path} played />
+        <MiniWave path={path} bars={bars} />
+        <MiniWave path={path} bars={bars} played />
       </> : <span className="kd-now-rail" aria-hidden="true"><i /></span>}
     </div>
-    <span ref={remaining} className="kd-now-time" aria-hidden="true" />
   </div>;
 }
 
 /** One layer of the mini waveform: the whole song muted, and over it the played part in ink. */
-function MiniWave({ path, played }: { path: string; played?: boolean }) {
+function MiniWave({ path, bars, played }: { path: string; bars: number; played?: boolean }) {
   return <svg className="kd-now-wave" data-played={played ? "true" : undefined} aria-hidden="true"
-    viewBox={`0 0 ${MINI_WAVE_BARS * MINI_WAVE_PITCH} ${MINI_WAVE_HEIGHT}`} preserveAspectRatio="none">
+    viewBox={`0 0 ${bars * MINI_WAVE_PITCH} ${MINI_WAVE_HEIGHT}`} preserveAspectRatio="none">
     <path d={path} />
   </svg>;
 }
 
 /**
- * The mini transport of the playing song's bubble: previous, play / pause, next and the
- * progress line. The keys send the same commands the lyrics and detail panels send
- * (requestPlayerCommand): the player bar alone carries them out, whether it is on screen or put
- * away.
+ * The mini transport of the playing song's bubble while the player bar is away: previous,
+ * play / pause, next, the time played and the progress line. The keys send the same commands
+ * the lyrics and detail panels send (requestPlayerCommand): the player bar carries them out
+ * although it is out of sight.
  */
 export function NowPlayingTransport({ track }: { track: Track }) {
   const session = useSyncExternalStore(subscribePlayerSession, getPlayerSessionState, getPlayerSessionState);

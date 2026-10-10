@@ -44,14 +44,30 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   an address, or `{ key, urls }` with every address that can show it, best first — the host loads
   it with `useCoverLoad` (`src/lib/coverLoad.ts`), so a refused thumbnail falls back to the
   original. Where a task's covers come from is decided in `taskCovers.ts` only.
+- **Where it comes from.** `origin: { label, mark }` is a small mark at the head of the facts
+  line: the platform a song is streamed or was downloaded from. A brand mark keeps its own
+  colour; the host places it.
 - **Fuller content** goes in `body`; the host draws the control that expands it inside the same
   bubble. `replacesSummary` hides the compact summary while a body that restates it is open.
+  No bubble uses it today: the playing song's no longer expands.
 - **Live controls** go in `controls`: one row along the bottom of the bubble, in the compact and
-  the expanded form alike. The task supplies the controls, the host their row. The playing song
-  puts its mini transport there (`NowPlayingTransport.tsx`): previous, play / pause, next and a
-  progress line that is the song's mini waveform when it has one. They send the player's own
-  commands (`requestPlayerCommand`) and read the position from the player session without
-  re-rendering the bubble.
+  the expanded form alike. The task supplies the controls, the host their row. A task may give
+  or take them while its bubble is up; the host then unfolds the row open or folds it away (its
+  grid track between `0fr` and `1fr`, the row fading with it, 460 ms on the arriving curve both
+  ways — the clock the stack is lifted by), the bubble growing upwards from its resting place.
+  The host measures where the bubble's height is going once, before the row moves, so the
+  bubbles stacked above and `--kd-info-lift` move there in one step alongside it.
+  The playing song puts its mini transport there only while the player bar is away
+  (`NowPlayingTransport.tsx`): previous, play / pause, next, the time played and a progress
+  line that is the song's mini waveform when it has one. They send the player's own commands
+  (`requestPlayerCommand`) and read the position from the player session without re-rendering
+  the bubble. Beside the bar the bubble is an ordinary message, because the bar is the
+  transport: a pinned bubble opens its transport as the bar starts down and closes it as the
+  bar starts back up.
+- **The keys.** `actions` are compact icon keys in the bubble's tool row, before the key that
+  rolls it down; a `large` bubble has that row in its top right corner. A key that is on
+  (`pressed`) is written in full-strength ink, never in red. The playing song's are 歌词, 小窗
+  (the floating video or visualizer, the same toggle as the bar's own key), 编辑 Meta and 固定.
 - **Motion.** 460 ms up, 360 ms down, the easings of `src/lib/songSwapMotion.ts`; transform and
   opacity only; under reduced motion a short fade. A bubble with `song` belongs to the playing
   song: when that changes while the bubble is up, it rolls down with the old song and rises with
@@ -99,6 +115,7 @@ showTask({
   progress: 0.4,                      // optional 0..1
   tone: "success",                    // info | success | error
   stay: 5_000,                        // optional; 0 keeps it up
+  origin: { label: "B站", mark: <PlatformMark id="bilibili" size={12} branded /> },  // optional
   actions: [{ id: "undo", label: "撤回", icon: <Undo2 size={14} />, onSelect: undo }],
   onOpen: () => openSettings(),       // the bubble itself was clicked
 });
@@ -119,7 +136,7 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 
 | Task | Bubble | Where |
 | --- | --- | --- |
-| A song starts (not pause/resume) | `now-playing`: cover, title, artist, BPM · key · length · format; 歌词, 编辑 Meta, 固定; the mini transport; expands to the library's summary | `NowPlayingTask.tsx` |
+| A song starts (not pause/resume) | `now-playing`: cover, title, artist, the source's mark, BPM · key · length · format; 歌词, 小窗, 编辑 Meta, 固定; the mini transport while the bar is away | `NowPlayingTask.tsx` |
 | Downloads started / progress / ended / failed | `downloads`: one bubble per run | source `downloads` |
 | Exports added / started / ended / failed (mixing and visualizer) | `exports` | source `exports` |
 | A folder import ended or failed | `import` | source `imports` |

@@ -4,7 +4,9 @@ import {
   MINI_WAVE_BARS,
   MINI_WAVE_HEIGHT,
   MINI_WAVE_PITCH,
+  MINI_WAVE_MAX_BARS,
   MINI_WAVE_STROKE,
+  miniWaveformBars,
   miniWaveformLevels,
   miniWaveformPath,
   seekFraction,
@@ -48,4 +50,14 @@ test("seeking on the line: the pointer's place along it, kept inside", () => {
   assert.equal(seekFraction(40, 100, 200), 0);
   assert.equal(seekFraction(900, 100, 200), 1);
   assert.equal(seekFraction(150, 100, 0), 0, "a line that is not laid out seeks nowhere");
+});
+
+test("the bars follow the line's width, in steps and within bounds", () => {
+  assert.equal(miniWaveformBars(0), MINI_WAVE_BARS, "not laid out yet");
+  assert.equal(miniWaveformBars(Number.NaN), MINI_WAVE_BARS);
+  assert.equal(miniWaveformBars(250), MINI_WAVE_BARS, "the line of the bubble at its usual width");
+  assert.equal(miniWaveformBars(40), MINI_WAVE_BARS / 2, "a short line keeps a readable shape");
+  assert.equal(miniWaveformBars(540), 104, "a long line shows more of the song");
+  assert.equal(miniWaveformBars(545), miniWaveformBars(540), "a few pixels do not redraw it");
+  assert.equal(miniWaveformBars(5000), MINI_WAVE_MAX_BARS);
 });

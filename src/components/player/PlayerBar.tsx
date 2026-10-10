@@ -3867,6 +3867,21 @@ export function PlayerBar() {
   // 画面小窗：视频走共享视频小窗，歌曲走可视化小窗；没有可视化的来源不提供这个键。
   const popupTrack = !video && canVisualizeTrack(displayTrack ?? null);
   const popupOn = video ? pipMode === "float" : visualizerPopup;
+  const togglePopup = () => {
+    if (!video) {
+      setVisualizerPopup(!visualizerPopup);
+      return;
+    }
+    cyclePipMode();
+    // 叉掉小窗会清掉会话；再次主动开启时，恢复当前本地视频而不是等下一次换曲。
+    if (!useVideoPip.getState().active && displayTrack && isVideoTrack(displayTrack.format)) {
+      requestLocalVideo(displayTrack, playing);
+    }
+  };
+  // The playing song's bubble offers the same key (with the bar away it is the only one).
+  const togglePopupRef = useRef(togglePopup);
+  togglePopupRef.current = togglePopup;
+  const toggleBubblePopup = useCallback(() => togglePopupRef.current(), []);
   /**
    * Android 的悬浮歌词要「显示在其他应用上层」权限，必须先拿到再翻开关，
    * 否则开关亮着而屏幕上什么都没有。桌面不需要该权限，直接翻。
@@ -4695,7 +4710,13 @@ export function PlayerBar() {
           onDrop={(event) => void dropOnDeck(event, "left")}
         />
       </div>
-      <BarInfoHost trackId={track?.id ?? null} playing={playing} />
+      <BarInfoHost
+        trackId={track?.id ?? null}
+        playing={playing}
+        popup={video ? "video" : popupTrack ? "visualizer" : null}
+        popupOn={popupOn}
+        onPopup={toggleBubblePopup}
+      />
 
       {/* 三颗走带键：上一首 / 播放停止 / 下一首。
           全是裸图标，没有按钮框——一条播放条上摆三个描边方块太吵，
@@ -4766,17 +4787,7 @@ export function PlayerBar() {
                     ? popupOn ? "视频小窗：开。点一下关闭" : "在小窗里播放视频"
                     : popupOn ? "可视化小窗：开。点一下关闭" : "在小窗里显示可视化"
                 }
-                onClick={() => {
-                  if (!video) {
-                    setVisualizerPopup(!visualizerPopup);
-                    return;
-                  }
-                  cyclePipMode();
-                  // 叉掉小窗会清掉会话；再次主动开启时，恢复当前本地视频而不是等下一次换曲。
-                  if (!useVideoPip.getState().active && displayTrack && isVideoTrack(displayTrack.format)) {
-                    requestLocalVideo(displayTrack, playing);
-                  }
-                }}
+                onClick={togglePopup}
               >
                 <PictureInPicture2 size={13} />
               </button>

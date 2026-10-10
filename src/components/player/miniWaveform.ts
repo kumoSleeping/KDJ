@@ -3,7 +3,24 @@
  * overview, small enough to be the bubble's progress line. Pure geometry; NowPlayingTransport
  * draws it once per song and only moves the split between what was played and what is left.
  */
+/** The bars of a line about 250 px long, and of one that is not laid out yet. */
 export const MINI_WAVE_BARS = 48;
+/**
+ * A bar's share of the line on screen, in px, and the most bars a line is given. The count
+ * follows the line's width in steps, so a window being sized redraws the wave now and then,
+ * not on every pixel.
+ */
+const BAR_SPAN = 5.25;
+const BAR_STEP = 8;
+export const MINI_WAVE_MAX_BARS = 192;
+
+/** How many bars a line `width` px long has room for; MINI_WAVE_BARS before it is laid out. */
+export function miniWaveformBars(width: number): number {
+  if (!(width > 0)) return MINI_WAVE_BARS;
+  const bars = Math.round(width / BAR_SPAN / BAR_STEP) * BAR_STEP;
+  return Math.min(MINI_WAVE_MAX_BARS, Math.max(MINI_WAVE_BARS / 2, bars));
+}
+
 /** The box the bars are drawn in, in px. Its width is stretched to the line; its height is not. */
 export const MINI_WAVE_HEIGHT = 18;
 /** One bar's place along the box. */

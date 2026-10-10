@@ -11,7 +11,6 @@ import {
 import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 const PINNED_KEY = "kd-now-playing-pinned";
-const DETAILED_KEY = "kd-now-playing-detailed";
 /** How long the bubble stays up after a song starts, unless it is held or pinned. */
 export const NOW_PLAYING_PEEK_MS = 5_000;
 
@@ -62,12 +61,10 @@ export function readNowPlayingHold(): NowPlayingHold {
  * is away (`barAway`), or another song has just started (a timed peek).
  *
  * With the bar: opened or pinned it stays until it is dismissed; a peek leaves by itself. With
- * the bar away it always stays, the pin only says whether it will still stay when the bar is
- * back, and dismissing it is the way back to the bar.
+ * the bar away it always stays and carries the mini transport, the pin only says whether it
+ * will still stay when the bar is back, and dismissing it is the way back to the bar.
  */
 export const useNowPlayingInfo = create<NowPlayingHold & {
-  /** The bubble shows the fuller detail instead of the compact summary. A preference. */
-  detailed: boolean;
   /** The now-playing card: bring the bubble up and keep it, or send it away as `close` does. */
   toggle(): void;
   /**
@@ -77,14 +74,12 @@ export const useNowPlayingInfo = create<NowPlayingHold & {
    */
   close(): void;
   setPinned(pinned: boolean): void;
-  setDetailed(detailed: boolean): void;
   startPeek(): void;
   endPeek(): void;
   /** The bar's driver: the bar starts down (the bubble is kept from now) or starts back up. */
   setBarAway(away: boolean): void;
 }>((set, get) => ({
   ...readNowPlayingHold(),
-  detailed: readLocalStorage(DETAILED_KEY) === "true",
   toggle() {
     if (nowPlayingHeld(get())) return get().close();
     // During a peek the card keeps the bubble instead of dismissing what was about to leave.
@@ -102,10 +97,6 @@ export const useNowPlayingInfo = create<NowPlayingHold & {
     // Unpinned beside the bar, the bubble goes back to leaving by itself: a fresh countdown
     // starts. With the bar away it stays, as the transport, and leaves when the bar is back.
     set(get().barAway ? { pinned, open: false } : { pinned, open: false, peek: ++peeks });
-  },
-  setDetailed(detailed) {
-    writeLocalStorageNow(DETAILED_KEY, String(detailed));
-    set({ detailed });
   },
   startPeek() {
     if (!nowPlayingHeld(get())) set({ peek: ++peeks });
