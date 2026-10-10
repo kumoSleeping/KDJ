@@ -4,8 +4,9 @@ Anything the app reports while the user is doing something else — a song has s
 download or an export has started, ended or failed, an action could not be carried out — is a
 **task bubble**. A bubble rises from behind the top edge of the player bar to a resting place at
 the bottom right that is detached from the bar (a gap to the bar and to the window edge, round on
-every corner, a soft shadow and no drawn line), stays for a while and rolls back down. There is
-no other toast, snackbar or corner pop-up in the app.
+every corner, a soft shadow and no drawn line), stays for a while and rolls back down. One that
+answers something pressed in the window's top row comes up at the top right instead, the same
+bubble in mirror image. There is no other toast, snackbar or corner pop-up in the app.
 
 Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `TaskBubbleHost.tsx`,
 `TaskBubbles.css`, `taskBatch.ts`, `taskSources.ts`, `taskCovers.ts`). The song's own bubble is
@@ -20,15 +21,44 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
 - **One bubble per id.** Showing an id that is up changes that bubble in place and starts its stay
   over. `updateTask(id, patch)` changes it without restarting the stay and does nothing when it is
   not up. `dismissTask(id)` rolls it down.
-- **The stack.** The newest bubble rests nearest the bar and lifts the older ones. More than
-  `TASK_VISIBLE_LIMIT` (3) that leave by themselves, and the oldest of them leave now, an error
-  last. A bubble that is kept up (`stay: 0`) is not counted and never pushed out.
+- **The place.** `placement` is `bottom` (the default) or `top`. It is chosen by where the
+  listener is looking when the task reports, not by what the task is: `top` is for the answer to
+  something pressed or dropped in the top row (the drawer's entries, the list's work rail), which
+  would not be seen at the other end of the window. What an activity reports by itself — a
+  download, an export, an import, the song, the player's messages — stays at the bottom.
+  - A top bubble drops from behind the bottom edge of the search row to a place at the top right,
+    under the drawer's entries, and leaves upwards behind the same edge. Its key points up.
+    Everything else — surface, sizes, tones, ring, hold, Esc, keys, the caption bar of a theme
+    pack — is the bottom bubble's: nothing is drawn again for the top. In the stylesheet one
+    sign (`--kd-task-dir`) turns the stack and the gesture over.
+  - That place is where the drawer's panels hang (`.kd-drawer-area`: under the search row, two
+    rows down in a tall window, left of an editor column). The host measures its top and right
+    edge when a bubble comes up there and when it changes size. A window without a drawer (a
+    phone, an editor window) hangs the stack under its top bar (`--kd-chrome-top`, which
+    includes a phone's status-bar inset).
+  - The place is read when the bubble arrives. `updateTask` cannot move a bubble; showing an id
+    that is up at the other place sends that bubble away where it is — its owner is not told of
+    a dismissal — and brings a new one up where it is now wanted.
+- **The stack.** Each place has its own, and they mirror each other. The newest bubble rests
+  nearest the stack's edge (the bar; at the top, the search row) and moves the older ones away
+  from it. More than `TASK_VISIBLE_LIMIT` (3) in one place that leave by themselves, and the
+  oldest of them there leave now, an error last. A bubble that is kept up (`stay: 0`) is not
+  counted and never pushed out. The stay waits while the pointer or the focus is in that stack.
+- **The base.** `base: true` makes a bubble the floor of its stack: it rests nearest the edge
+  whatever arrives after it, and nothing that comes or goes moves it. Later bubbles rest beyond
+  it, the newest nearest to it. They come out from behind it and go back behind it — the base is
+  drawn over them, and they start just inside its far edge — instead of crossing its face from
+  the stack's edge; one the base cannot hide (a larger size, or taller than the base) travels to
+  the edge like any other. The playing song is the base of the bottom stack, kept up or not:
+  it is the bubble with keys on it, and in a tall window it is the transport, so a download
+  notice must not slide in under it and shove it — nor, kept up, change the height the page and
+  the drawer keep clear of (`--kd-info-lift`). The host orders by this flag; it never tests an id.
 - **The size.** `size` is `small` (a one-line note, as wide as its text), `regular` (default: a
   cover and two lines) or `large` (a big cover and a title-size name: the playing song). A kind
   of task picks the one that fits what it says; nothing sets a bubble's width or cover by hand.
   In a tall desktop window (`tall` in `src/lib/useLayoutMode.ts`) a `large` bubble spans the
   window, with the same gap on its left and its right; `regular` and `small` keep their size
-  and stack above it at the right.
+  and stack above it at the right, where they rise from behind it.
 - **The stay.** Each kind chooses its own `stay`: the playing song 5 s, a short note such as
   "没有找到歌词" 3 s. `stay` in ms; left out, the tone decides (`TASK_STAY_MS`: 5 s, an error 10 s).
   `stay: 0` keeps the bubble until it is dismissed — a pinned or opened bubble. The ring shows the
@@ -76,13 +106,22 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   any other kind is 提示. It is carried as `data-caption` on the tools row and drawn by the
   pack's rules in `TaskBubbles.css` only — the built-in themes show no name, and a task never
   writes its own caption.
-- **Motion.** 460 ms up, 360 ms down, the easings of `src/lib/songSwapMotion.ts`; transform and
-  opacity only; under reduced motion a short fade. A bubble with `song` belongs to the playing
+- **Motion.** 460 ms in, 360 ms out, the easings of `src/lib/songSwapMotion.ts`; transform and
+  opacity only; under reduced motion a short fade. A bottom bubble rises and rolls back down, a
+  top one drops and leaves upwards: one pair of keyframes, whose far end (`--kd-task-drop`) lies
+  below the one and above the other. A bubble with `song` belongs to the playing
   song: when that changes while the bubble is up, it rolls down with the old song and rises with
   the new one, and it is registered as a surface of the song.
-- **The drawer.** `--kd-info-lift` is published only for a bubble that is kept up, so the drawer
-  over the list ends above it; a bubble that leaves by itself may cover the drawer's bottom for
-  its stay.
+- **The drawer.** `--kd-info-lift` is published only for a bottom bubble that is kept up, so the
+  drawer over the list ends above it; a bubble that leaves by itself may cover the drawer's
+  bottom for its stay. The top stack has the drawer's own place, so there every bubble that is
+  staying counts: `--kd-info-drop` is how far the stack reaches down from the search row (its
+  gap, the bubbles and the gap after the last), and the panel is pushed down by that — a
+  `translate`, nothing laid out or measured again (`docs/drawer-schema.md`) — and comes back as
+  the last bubble starts to leave. The panel goes down with the arriving bubble on the arriving
+  clock and follows the leaving one up on the leaving clock (`--kd-info-drop-clock`, set with
+  the drop), so the two move as one. These are written once per change of a stack, never per
+  frame.
 - **The bar put away.** The player bar can slide down out of the window
   (`src/lib/playerBarAway.ts`). The stack then stands on the window's bottom edge; bubbles that
   are up when the slide starts ride the bar's top edge while it slides.
@@ -123,6 +162,7 @@ showTask({
   progress: 0.4,                      // optional 0..1
   tone: "success",                    // info | success | error
   stay: 5_000,                        // optional; 0 keeps it up
+  placement: "top",                   // optional: the answer to something pressed in the top row
   origin: { label: "B站", mark: <PlatformMark id="bilibili" size={12} branded /> },  // optional
   actions: [{ id: "undo", label: "撤回", icon: <Undo2 size={14} />, onSelect: undo }],
   onOpen: () => openSettings(),       // the bubble itself was clicked
@@ -130,7 +170,8 @@ showTask({
 ```
 
 A plain sentence from code that has nothing else to say goes through `showNotice(text)`
-(`src/stores/toastStore.ts`); a sentence that reports a failure is shown as an error.
+(`src/stores/toastStore.ts`); a sentence that reports a failure is shown as an error. Its third
+argument is the placement (`useToastStore.getState().show(text, "top")`).
 
 An activity that already lives in a store and should report without a call from its entry points
 is a **source** (`taskSources.ts`): it subscribes to the store and feeds a
@@ -142,11 +183,14 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 
 ## What reports today
 
-| Task | Bubble | Where |
-| --- | --- | --- |
-| A song starts (not pause/resume) | `now-playing`: cover, title, artist, the source's mark, BPM · key · length · format; 歌词, 小窗, 编辑 Meta, 固定; the mini transport while the bar is away | `NowPlayingTask.tsx` |
-| Downloads started / progress / ended / failed | `downloads`: one bubble per run | source `downloads` |
-| Exports added / started / ended / failed (mixing and visualizer) | `exports` | source `exports` |
-| A folder import ended or failed | `import` | source `imports` |
-| The player's own message (playback, transition and deck errors, "下一首已替换为…") | `player-notice` | `PlayerBar.tsx` `setNotice` |
-| Every other former toast (window, fullscreen, import-drop, visualizer memory errors) | `notice:<text>` | `showNotice` |
+| Task | Bubble | Place | Where |
+| --- | --- | --- | --- |
+| A song starts (not pause/resume) | `now-playing`: cover, title, artist, the source's mark, BPM · key · length · format; 歌词, 小窗, 编辑 Meta, 固定; the mini transport while the bar is away | bottom, the base | `NowPlayingTask.tsx` |
+| Downloads started / progress / ended / failed | `downloads`: one bubble per run | bottom | source `downloads` |
+| Exports added / started / ended / failed (mixing and visualizer) | `exports` | bottom | source `exports` |
+| A folder import ended or failed | `import` | bottom | source `imports` |
+| The player's own message (playback, transition and deck errors, "下一首已替换为…") | `player-notice` | bottom | `PlayerBar.tsx` `setNotice` |
+| The playing song has no lyrics to open ("没有找到歌词") | `lyrics-entry`, small, 3 s | top when asked from the drawer's 歌词 entry; bottom from the bar's key or the song's bubble | `lyricsEntry.ts` `requestPlayingLyrics(onOpened, near)` |
+| A search result dropped on the 下载 entry could not be queued ("加入队列失败…") | `notice:<text>` | top | `downloadDropEntry.ts` |
+| Cancelling an import from the list's work rail failed ("取消导入失败…") | `notice:<text>` | top | `LibraryWorkRail.tsx` |
+| Every other former toast (window, fullscreen, import-drop, visualizer memory errors) | `notice:<text>` | bottom | `showNotice` |

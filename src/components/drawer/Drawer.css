@@ -89,6 +89,10 @@
   /* Its place among the floating surfaces: the one touched last is in front (lib/surfaceOrder.ts). */
   z-index: var(--kd-surface-z, 80);
   pointer-events: none;
+  /* The frame ends where the list ends. A panel that is pushed down past that (--kd-info-drop,
+     below) goes behind this edge instead of over the player bar; the other three sides are
+     open, for the panel's shadow and its way in from the right. */
+  clip-path: inset(-100vmax -100vmax 0 -100vmax);
 }
 .kd-drawer {
   --kd-drawer-room: calc(100% - var(--kd-drawer-gap));
@@ -111,13 +115,24 @@
   pointer-events: auto;
   /* One move: in from beyond the right edge, slowing all the way, and it stops where it ends. */
   animation: kd-drawer-in 400ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  /* A task bubble that comes up at the top (docs/task-bubbles.md) takes the panel's place
+     under the search row and pushes the panel down by what its stack takes: --kd-info-drop,
+     which TaskBubbleHost sets once when that stack changes. The panel comes back when the
+     bubble starts to leave. Only the panel's place moves, by `translate` (so it adds to the
+     slide above instead of replacing it): its height and everything on it stay as they are,
+     and nothing is measured again. It goes down on the clock the bubble arrives by and comes
+     back on the one the bubble leaves by (--kd-info-drop-clock, set with the drop), so the
+     two move as one. */
+  --kd-drawer-drop-clock: var(--kd-info-drop-clock, var(--kd-motion-in) var(--kd-ease-out));
+  translate: 0 var(--kd-info-drop, 0px);
+  transition: translate var(--kd-drawer-drop-clock);
 }
 /* At rest the panel is an ordinary box again, not a layer kept for moving. Only then may its
    height follow what it holds (`fit`, `at-least-half`); while it comes in nothing is laid out
    again. */
 .kd-drawer[data-settled] {
   animation: none;
-  transition: height 380ms cubic-bezier(0.22, 0.9, 0.26, 1);
+  transition: height 380ms cubic-bezier(0.22, 0.9, 0.26, 1), translate var(--kd-drawer-drop-clock);
 }
 /* A panel whose height is still being measured waits beyond the edge, so that it comes in at
    the height it keeps (see DrawerLayer). */
@@ -183,7 +198,7 @@
   cursor: row-resize;
 }
 @media (prefers-reduced-motion: reduce) {
-  .kd-drawer, .kd-drawer[data-leaving] { animation-duration: 1ms; }
+  .kd-drawer, .kd-drawer[data-leaving] { animation-duration: 1ms; transition: none; }
   .kd-drawer[data-settled] { transition: none; }
   .kd-drawer-body[data-late]:not(:empty) { animation: none; }
 }

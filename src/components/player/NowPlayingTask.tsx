@@ -129,6 +129,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
       covers: cover ? [cover] : [],
       song: track.id,
       size: "large",
+      base: true,
       stay: held ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,
       // Rolling it down with the bar away is the way back to the bar, and the key says so.

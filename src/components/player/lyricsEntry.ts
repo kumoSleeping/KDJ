@@ -4,6 +4,7 @@ import { getPlayingTrack } from "../../lib/playingTrack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { streamMeta } from "../../lib/streamTrack";
 import { useLyricsStore } from "../../stores/lyricsStore";
+import type { TaskPlacement } from "../tasks/taskBubbleSchema";
 import { showTask } from "../tasks/taskBubbleStore";
 import type { Track } from "../../types";
 
@@ -25,11 +26,12 @@ const isVideo = (track: Track) => isVideoTrack(track.format) || streamMeta(track
  * Ask for the lyrics of the playing song, from any entry. They open in the drawer when there
  * are some, after a match if none has been made yet; when there is nothing to show, a small
  * note says so for a moment instead of an empty drawer coming out. `onOpened` runs when the
- * lyrics do open.
+ * lyrics do open. `near` is the end of the window the entry that asked is at: the note comes up
+ * there, where the listener is looking (the drawer's entry in the top row: `top`).
  */
-export function requestPlayingLyrics(onOpened?: () => void): void {
+export function requestPlayingLyrics(onOpened?: () => void, near?: TaskPlacement): void {
   const track = getPlayingTrack();
-  const none = (detail?: string) => showTask({ id: "lyrics-entry", kind: "notice", title: "没有找到歌词", detail, size: "small", stay: 3_000 });
+  const none = (detail?: string) => showTask({ id: "lyrics-entry", kind: "notice", title: "没有找到歌词", detail, size: "small", stay: 3_000, placement: near });
   if (!track) { none(); return; }
   if (isVideo(track)) { none(track.title || track.filename); return; }
   const show = () => { useSidePanels.getState().setLyrics(true); onOpened?.(); };

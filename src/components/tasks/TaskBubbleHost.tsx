@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, Check, ChevronsDown, ChevronsUpDown, Info, LoaderCircle } from "lucide-react";
+import { AlertTriangle, Check, ChevronsDown, ChevronsUp, ChevronsUpDown, Info, LoaderCircle } from "lucide-react";
 import { useCoverLoad } from "../../lib/coverLoad";
 import { playerBarMoving, usePlayerBarAway } from "../../lib/playerBarAway";
 import { prefersReducedSeekMotion } from "../../lib/seekTransition";
@@ -13,15 +13,20 @@ import {
 } from "../../lib/songSwapMotion";
 import { MarqueeText } from "../common/MarqueeText";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
-import { TASK_COVER_LIMIT, taskStay, type TaskCover, type TaskBubbleSpec } from "./taskBubbleSchema";
-import { useTaskBubbles, type TaskBubbleEntry } from "./taskBubbleStore";
+import { TASK_COVER_LIMIT, taskStay, type TaskCover, type TaskBubbleSpec, type TaskPlacement, type TaskSize } from "./taskBubbleSchema";
+import { taskEntryKey, useTaskBubbles, type TaskBubbleEntry } from "./taskBubbleStore";
 import { startTaskSources, type TaskSource } from "./taskSources";
 import "./TaskBubbles.css";
 
-/** The gap between two bubbles of the stack, in px. The gap to the bar and the window edge is
- *  --kd-task-gap in TaskBubbles.css. */
+/** The gap between two bubbles of a stack, in px. */
 const STACK_GAP = 8;
-const EDGE_GAP = 12;
+/** The gap between a stack and the edges it stands on and beside: --kd-task-gap in
+ *  TaskBubbles.css, which at the top is the drawer's own gap. */
+const EDGE_GAP: Record<TaskPlacement, number> = { bottom: 12, top: 10 };
+/** How far inside the top edge of a base bubble a bubble that comes out from behind it starts,
+ *  so that nothing of its edge or shadow shows before it moves. */
+const BEHIND_INSET = 6;
+const SIZE_RANK: Record<TaskSize, number> = { small: 0, regular: 1, large: 2 };
 /** The exit under reduced motion: a short fade. */
 const REDUCED_LEAVE_MS = 140;
 
@@ -76,17 +81,23 @@ const TASK_KIND_NAMES: Readonly<Record<string, string | undefined>> = {
 };
 const TASK_NOTE_NAME = "提示";
 
-function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
+function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
   entry: TaskBubbleEntry;
-  /** How far above its resting place at the bottom of the stack this bubble sits, in px. */
+  /** How far from the resting place nearest its stack's edge this bubble sits, in px. */
   lift: number;
-  /** Newer bubbles are drawn over older ones, so one that leaves sinks behind them. */
+  /** How far beyond its resting place it is out of sight, less its own height, in px: set for
+   *  a bubble that comes and goes behind the base bubble. Null: beyond the stack's edge. */
+  away: number | null;
+  /** Bubbles nearer the stack's edge are drawn over those beyond them, so one that leaves goes
+   *  behind what stays. */
   front: number;
   held: boolean;
-  onHeld(id: string, held: boolean): void;
-  onSize(id: string, height: number | null): void;
+  onHeld(key: string, held: boolean): void;
+  onSize(key: string, height: number | null): void;
 }) {
   const id = entry.spec.id;
+  /** This arrival, in the host's books. */
+  const key = taskEntryKey(entry);
   const reduced = prefersReducedSeekMotion();
   const node = useRef<HTMLElement>(null);
 
@@ -108,9 +119,9 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
   const songBound = entry.spec.song !== undefined;
   useEffect(() => {
     if (!songBound) return;
-    setSongSurfacePresent(`task:${id}`, true);
-    return () => setSongSurfacePresent(`task:${id}`, false);
-  }, [id, songBound]);
+    setSongSurfacePresent(`task:${key}`, true);
+    return () => setSongSurfacePresent(`task:${key}`, false);
+  }, [key, songBound]);
 
   useEffect(() => {
     if (!entry.leaving) return;
@@ -167,32 +178,32 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
   useLayoutEffect(() => {
     const element = node.current;
     if (!element) return;
-    const report = () => { if (!folding.current) onSize(id, element.offsetHeight); };
+    const report = () => { if (!folding.current) onSize(key, element.offsetHeight); };
     report();
     const observer = new ResizeObserver(report);
     observer.observe(element);
-    return () => { observer.disconnect(); onSize(id, null); };
-  }, [id, onSize]);
+    return () => { observer.disconnect(); onSize(key, null); };
+  }, [key, onSize]);
   useLayoutEffect(() => {
     if (controlsWere.current === hasControls) return;
     controlsWere.current = hasControls;
     const element = node.current, clip = controlsClip.current;
     if (!element || !clip) return;
-    // Measured once, before the row moves: the height the bubble is going to. The stack above
-    // and the drawer's limit move there in one step, on the row's own clock, instead of
+    // Measured once, before the row moves: the height the bubble is going to. The rest of the
+    // stack and the drawer's limit move there in one step, on the row's own clock, instead of
     // following its height frame by frame.
     folding.current = true;
-    onSize(id, element.offsetHeight - clip.offsetHeight + (hasControls ? clip.scrollHeight : 0));
+    onSize(key, element.offsetHeight - clip.offsetHeight + (hasControls ? clip.scrollHeight : 0));
     setControlsRow(true);
     setControlsOpen(hasControls);
     const timer = window.setTimeout(() => {
       folding.current = false;
-      if (hasControls) onSize(id, element.offsetHeight);
+      if (hasControls) onSize(key, element.offsetHeight);
       else setControlsRow(false);
     }, (reduced ? REDUCED_LEAVE_MS : SONG_SWAP_IN_MS) + 20);
     return () => window.clearTimeout(timer);
-  }, [hasControls, id, onSize, reduced]);
-  useEffect(() => () => onHeld(id, false), [id, onHeld]);
+  }, [hasControls, key, onSize, reduced]);
+  useEffect(() => () => onHeld(key, false), [key, onHeld]);
 
   const [ownExpanded, setOwnExpanded] = useState(false);
   const expandable = spec.body != null;
@@ -218,14 +229,17 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
     </span>}
   </>;
   const open = spec.onOpen;
-  return <div className="kd-task-slot" data-size={spec.size ?? "regular"} style={{ "--kd-task-lift": `${lift}px`, zIndex: front } as CSSProperties}>
+  // The key that sends it away points the way it goes.
+  const Away = entry.place === "top" ? ChevronsUp : ChevronsDown;
+  return <div className="kd-task-slot" data-size={spec.size ?? "regular"}
+    style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`, zIndex: front } as CSSProperties}>
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
       data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || undefined}
       data-controls={hasControls || undefined}
-      onPointerEnter={() => onHeld(id, true)} onPointerLeave={() => onHeld(id, false)}
-      onFocus={() => onHeld(id, true)}
-      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onHeld(id, false); }}>
+      onPointerEnter={() => onHeld(key, true)} onPointerLeave={() => onHeld(key, false)}
+      onFocus={() => onHeld(key, true)}
+      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onHeld(key, false); }}>
       <div className="kd-task-main" data-opens={open ? "true" : undefined} data-bare={summary ? undefined : "true"}
         onClick={open ? event => { if (!(event.target as Element).closest("button, a, input")) open(); } : undefined}>
         {summary && (covers.length > 0
@@ -253,7 +267,7 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
           <button type="button" className="kd-task-action kd-task-dismiss" aria-label={dismissLabel}
             title={spec.escape ? `${dismissLabel}（Esc）` : dismissLabel}
             onClick={() => useTaskBubbles.getState().dismiss(id, "user")}>
-            {spec.dismiss?.icon ?? <ChevronsDown size={14} aria-hidden="true" />}
+            {spec.dismiss?.icon ?? <Away size={14} aria-hidden="true" />}
           </button>
         </div>
       </div>
@@ -268,46 +282,105 @@ function TaskBubble({ entry, lift, front, held, onHeld, onSize }: {
   </div>;
 }
 
+/** One place's stack, as the host lays it out. */
+interface TaskStack {
+  /** Nearest the stack's edge first: the base, then the newest. */
+  ordered: TaskBubbleEntry[];
+  /** How far the bubbles that are kept up reach from the edge, the gap on either side of them
+   *  included; 0 with none. */
+  kept: number;
+  /** How far the bubbles that are staying reach from the edge, the gaps before the first and
+   *  after the last included; 0 with none. */
+  reach: number;
+  /** Per arrival: where it is out of sight behind the base bubble (see TaskBubble's `away`). */
+  away: Record<string, number>;
+}
+
 /**
- * 任务信息: the one place task bubbles are drawn. They rise from behind the top edge of the
- * player bar to a resting place detached from it, at the bottom right, and roll back down;
- * several stack upwards with the newest nearest the bar. With the bar put away they stand on
- * the window's bottom edge instead, and the playing song's bubble is always among them. In a
- * tall desktop window a large bubble spans the window (TaskBubbles.css). `sources` names the
- * app's own activities this window reports (see taskSources.ts).
+ * Lay one place's stack out. A base bubble rests nearest the edge whatever came after it; then
+ * the newest, each one that is staying moving the older ones further out by its own height.
+ * One that is leaving gives its place up at once and keeps the lift it had (`lifts`, the host's
+ * record, is brought up to date here).
+ *
+ * A bubble beyond a base that is staying comes out from behind it and goes back behind it,
+ * instead of crossing its face from the stack's edge: the base is drawn over it, and `away` is
+ * where it is wholly behind the base. That holds while the base is at least as large a size
+ * and tall enough to hide it; otherwise it travels to the stack's edge like any other.
+ */
+function layStack(place: TaskPlacement, entries: readonly TaskBubbleEntry[], sizes: Readonly<Record<string, number>>,
+  lifts: Record<string, number>): TaskStack {
+  const ordered = entries.filter(entry => entry.place === place)
+    .sort((a, b) => Number(!!b.spec.base) - Number(!!a.spec.base) || b.order - a.order);
+  const away: Record<string, number> = {};
+  let stacked = 0, kept = 0, staying = 0;
+  let cover: { from: number; to: number; rank: number } | null = null;
+  for (const entry of ordered) {
+    const key = taskEntryKey(entry);
+    const height = sizes[key] ?? 0;
+    const rank = SIZE_RANK[entry.spec.size ?? "regular"];
+    if (entry.leaving) lifts[key] ??= stacked;
+    else lifts[key] = stacked;
+    if (!entry.spec.base && cover && height > 0 && rank <= cover.rank && height + BEHIND_INSET <= cover.to - cover.from) {
+      away[key] = lifts[key] - cover.to + BEHIND_INSET;
+    }
+    if (entry.leaving) continue;
+    if (entry.spec.base) cover = { from: stacked, to: stacked + height, rank };
+    if (taskStay(entry.spec) === 0) kept = Math.max(kept, stacked + height + EDGE_GAP[place] * 2);
+    stacked += height + STACK_GAP;
+    staying += 1;
+  }
+  return { ordered, kept, reach: staying > 0 ? EDGE_GAP[place] + stacked : 0, away };
+}
+
+/**
+ * 任务信息: the one place task bubbles are drawn. There are two places a bubble can come up
+ * (`placement` in its spec), each with a stack of its own that mirrors the other.
+ *
+ * At the bottom they rise from behind the top edge of the player bar to a resting place
+ * detached from it, at the bottom right, and roll back down; several stack upwards with the
+ * newest nearest the bar. With the bar put away they stand on the window's bottom edge instead,
+ * and the playing song's bubble is the base of that stack. In a tall desktop window a large
+ * bubble spans the window (TaskBubbles.css).
+ *
+ * At the top they drop from behind the bottom edge of the search row, at the top right where
+ * the drawer hangs, and leave upwards; several stack downwards with the newest nearest that
+ * edge, and the drawer's panel is pushed down by what the stack takes (--kd-info-drop).
+ *
+ * `sources` names the app's own activities this window reports (see taskSources.ts).
  */
 export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] }) {
   const entries = useTaskBubbles(state => state.entries);
+  // The host's books are kept per arrival (taskEntryKey), not per id.
   const [sizes, setSizes] = useState<Readonly<Record<string, number>>>({});
   const [holds, setHolds] = useState<readonly string[]>([]);
-  const onSize = useCallback((id: string, height: number | null) => {
+  const onSize = useCallback((key: string, height: number | null) => {
     setSizes(before => {
       if (height === null) {
-        if (!(id in before)) return before;
-        const { [id]: _gone, ...rest } = before;
+        if (!(key in before)) return before;
+        const { [key]: _gone, ...rest } = before;
         return rest;
       }
-      return before[id] === height ? before : { ...before, [id]: height };
+      return before[key] === height ? before : { ...before, [key]: height };
     });
   }, []);
-  const onHeld = useCallback((id: string, held: boolean) => {
-    setHolds(before => held === before.includes(id) ? before : held ? [...before, id] : before.filter(other => other !== id));
+  const onHeld = useCallback((key: string, held: boolean) => {
+    setHolds(before => held === before.includes(key) ? before : held ? [...before, key] : before.filter(other => other !== key));
   }, []);
   const sourceKey = sources?.join(",") ?? "";
   useEffect(() => sourceKey ? startTaskSources(sourceKey.split(",") as TaskSource[]) : undefined, [sourceKey]);
 
-  // The stack stands on the top edge of the player bar; without a bar, on the window's bottom.
-  // `floor` is the bar's height. A bar that is put away (src/lib/playerBarAway.ts) lies over the
-  // page from the moment it starts to slide: the host then reaches the window's bottom, and the
-  // bubbles that are up ride the bar's top edge down, or back up, by a transform on the same
-  // clock. That is settled when the slide starts: with nothing standing on the bar there is
-  // nothing to carry, and a bubble the slide itself brings (the playing song, as the bar goes)
-  // rises from the window's edge while the bar sinks behind it.
+  // The bottom stack stands on the top edge of the player bar; without a bar, on the window's
+  // bottom. `floor` is the bar's height. A bar that is put away (src/lib/playerBarAway.ts) lies
+  // over the page from the moment it starts to slide: the host then reaches the window's
+  // bottom, and the bubbles that are up ride the bar's top edge down, or back up, by a
+  // transform on the same clock. That is settled when the slide starts: with nothing standing
+  // on the bar there is nothing to carry, and a bubble the slide itself brings (the playing
+  // song, as the bar goes) rises from the window's edge while the bar sinks behind it.
   const [floor, setFloor] = useState(0);
   const barPhase = usePlayerBarAway(state => state.phase);
   const ride = useRef({ phase: barPhase, on: false });
   if (ride.current.phase !== barPhase) {
-    ride.current = { phase: barPhase, on: playerBarMoving(barPhase) && entries.some(entry => !entry.leaving) };
+    ride.current = { phase: barPhase, on: playerBarMoving(barPhase) && entries.some(entry => entry.place === "bottom" && !entry.leaving) };
   }
   const riding = ride.current.on;
   const [root, setRoot] = useState<HTMLElement | null>(null);
@@ -330,41 +403,90 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
     return () => { children.disconnect(); size.disconnect(); };
   }, [root]);
 
-  // Newest first: each bubble that is staying lifts the older ones above it. One that is
-  // leaving gives its place up at once and keeps the lift it had.
-  const ordered = [...entries].sort((a, b) => b.order - a.order);
-  const lifts = useRef<Record<string, number>>({});
-  let stacked = 0, kept = 0;
-  for (const entry of ordered) {
-    const id = entry.spec.id;
-    if (entry.leaving) { lifts.current[id] ??= stacked; continue; }
-    lifts.current[id] = stacked;
-    const height = sizes[id] ?? 0;
-    if (taskStay(entry.spec) === 0) kept = Math.max(kept, stacked + height + EDGE_GAP * 2);
-    stacked += height + STACK_GAP;
-  }
-  for (const id of Object.keys(lifts.current)) if (!entries.some(entry => entry.spec.id === id)) delete lifts.current[id];
+  // The top stack hangs from the top edge of the place the drawer's panels have: the list's
+  // column under the search row (.kd-drawer-area, see Drawer.css), which is two rows down in a
+  // tall window and ends left of an editor column. It is measured when a bubble comes up
+  // there and when that place changes size, never while one moves. A window without a drawer
+  // (a phone, the editor windows) hangs it under the window's own top bar (TaskBubbles.css).
+  const topUp = entries.some(entry => entry.place === "top");
+  const [ceiling, setCeiling] = useState<{ top: number; right: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!root || !topUp) return;
+    const area = root.querySelector<HTMLElement>(".kd-drawer-area");
+    if (!area) { setCeiling(null); return; }
+    const measure = () => {
+      const box = area.getBoundingClientRect();
+      // A list that is not laid out (another view has the window) has no such place.
+      if (box.width === 0 && box.height === 0) { setCeiling(null); return; }
+      const top = Math.round(box.top), right = Math.max(0, Math.round(document.documentElement.clientWidth - box.right));
+      setCeiling(before => before && before.top === top && before.right === right ? before : { top, right });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const resized = new ResizeObserver(measure);
+    resized.observe(area);
+    return () => { window.removeEventListener("resize", measure); resized.disconnect(); };
+  }, [root, topUp]);
 
-  // The drawer over the list ends above a bubble that is kept up (see --kd-info-lift in
+  const lifts = useRef<Record<string, number>>({});
+  const bottom = layStack("bottom", entries, sizes, lifts.current);
+  const top = layStack("top", entries, sizes, lifts.current);
+  for (const key of Object.keys(lifts.current)) if (!entries.some(entry => taskEntryKey(entry) === key)) delete lifts.current[key];
+
+  // The drawer over the list ends above a bottom bubble that is kept up (see --kd-info-lift in
   // Drawer.css). A bubble that leaves by itself may cover the drawer's bottom for its stay.
   // While a stack rides the sliding bar, the list already reaches the window's bottom and the
   // stack is still on the bar: the drawer keeps clear of the bar's height as well, and takes
   // that room when the bar is gone.
-  const lift = kept > 0 ? Math.round(kept + (riding ? floor : 0)) : 0;
+  const lift = bottom.kept > 0 ? Math.round(bottom.kept + (riding ? floor : 0)) : 0;
   useEffect(() => {
     if (lift > 0) document.documentElement.style.setProperty("--kd-info-lift", `${lift}px`);
     else document.documentElement.style.removeProperty("--kd-info-lift");
   }, [lift]);
-  useEffect(() => () => { document.documentElement.style.removeProperty("--kd-info-lift"); }, []);
+  // The top stack has the drawer's own place, so every bubble that is staying there pushes
+  // the panel down, kept up or not, and the panel comes back as the last one starts to leave
+  // (see --kd-info-drop in Drawer.css). One value per change of the stack, like the lift.
+  // Pushed, the panel moves with the bubble that arrives, on the arriving clock. Released, it
+  // follows the bubble that leaves on the leaving clock (--kd-info-drop-clock), so the two go
+  // up together instead of the panel running in under a bubble that has hardly set off.
+  const drop = Math.round(top.reach);
+  const dropWas = useRef(0);
+  useEffect(() => {
+    const style = document.documentElement.style;
+    if (drop > 0) style.setProperty("--kd-info-drop", `${drop}px`);
+    else style.removeProperty("--kd-info-drop");
+    if (drop < dropWas.current) style.setProperty("--kd-info-drop-clock", "var(--kd-motion-out) var(--kd-ease-in)");
+    else style.removeProperty("--kd-info-drop-clock");
+    dropWas.current = drop;
+  }, [drop]);
+  useEffect(() => () => {
+    for (const name of ["--kd-info-lift", "--kd-info-drop", "--kd-info-drop-clock"]) document.documentElement.style.removeProperty(name);
+  }, []);
 
   if (entries.length === 0) return null;
+  // The stay waits while the pointer or the focus is in a stack: that stack's, not the other's.
+  const heldAt = (stack: TaskStack) => stack.ordered.some(entry => holds.includes(taskEntryKey(entry)));
+  const bubbles = (stack: TaskStack) => {
+    const held = heldAt(stack);
+    return stack.ordered.map((entry, index) => {
+      const key = taskEntryKey(entry);
+      return <TaskBubble key={key} entry={entry} lift={lifts.current[key] ?? 0} away={stack.away[key] ?? null}
+        front={stack.ordered.length - index} held={held} onHeld={onHeld} onSize={onSize} />;
+    });
+  };
   return createPortal(
-    <div className="kd-task-host" data-floor={riding && !prefersReducedSeekMotion() ? (barPhase === "leaving" ? "down" : "up") : undefined}
-      style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px` } as CSSProperties}>
-      {ordered.map((entry, index) => <TaskBubble key={`${entry.spec.id}:${entry.order}`} entry={entry}
-        lift={lifts.current[entry.spec.id] ?? 0} front={ordered.length - index}
-        held={holds.length > 0} onHeld={onHeld} onSize={onSize} />)}
-    </div>,
+    <>
+      {bottom.ordered.length > 0 && <div className="kd-task-host" data-place="bottom"
+        data-floor={riding && !prefersReducedSeekMotion() ? (barPhase === "leaving" ? "down" : "up") : undefined}
+        style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px` } as CSSProperties}>
+        {bubbles(bottom)}
+      </div>}
+      {top.ordered.length > 0 && <div className="kd-task-host" data-place="top"
+        style={{ ...TASK_CLOCK, "--kd-task-ceiling": ceiling ? `${ceiling.top}px` : undefined,
+          "--kd-task-ceiling-right": ceiling ? `${ceiling.right}px` : undefined } as CSSProperties}>
+        {bubbles(top)}
+      </div>}
+    </>,
     root ?? document.body,
   );
 }
