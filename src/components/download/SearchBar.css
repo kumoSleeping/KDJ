@@ -168,8 +168,10 @@
 }
 
 /* —— A line that changes (RollText): the kind, the tip ——
-   One clipped line box. The old line rolls out through its top while the new one rolls in from
-   below; the two never lie over each other, and only transform and opacity move. */
+   One clipped line box for the old line and the new one. They turn over by the schema's `turn`
+   (motion.css): the old line lifts away, then the new one comes up — the same gesture and
+   clock as the work rail under the field. Focusing the empty field turns the tip line this
+   way too. */
 .kd-roll {
   display: grid;
   min-width: 0;
@@ -181,20 +183,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.kd-roll-line[data-roll="in"] {
-  animation: kd-roll-in 220ms var(--kd-ease-out) backwards;
-}
-.kd-roll-line[data-roll="out"] {
-  animation: kd-roll-out 220ms var(--kd-ease-out) both;
-}
-@keyframes kd-roll-in {
-  from { opacity: 0; transform: translateY(100%); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes kd-roll-out {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(-100%); }
 }
 
 /* —— The editor: a tinted field with no outline ——
@@ -645,13 +633,6 @@
   .kd-searchbar-input,
   .kd-search-tip-action {
     transition: none !important;
-  }
-  /* The lines still hand over, so the old one is taken away when its fade ends. */
-  .kd-roll-line[data-roll="in"] {
-    animation: kd-search-fade-in var(--kd-motion-reduced) linear backwards !important;
-  }
-  .kd-roll-line[data-roll="out"] {
-    animation: kd-search-fade-out var(--kd-motion-reduced) linear both !important;
   }
   .kd-search-wave-bars {
     display: none;

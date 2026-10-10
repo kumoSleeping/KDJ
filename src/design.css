@@ -235,7 +235,7 @@
   --kd-float-edge: var(--kd-line);
   --kd-float-shadow: var(--kd-shadow-float);
 }
-:root[data-theme="light"]:not([data-theme-pack]) .kd-workspace-pane-local > .kd-activity {
+:root[data-theme="light"]:not([data-theme-pack]) .kd-workspace-pane .kd-activity {
   background: var(--kd-panel);
   border-color: var(--kd-line);
 }
@@ -4739,15 +4739,17 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-activity[data-idle="true"] {
   background: var(--kd-panel);
 }
-/* The library rail is the containing list's header, not a passive status strip. */
-.kd-workspace-pane-local > .kd-activity {
+/* A pane's rail is the containing list's header, not a passive status strip. Every pane's
+   rail is the same surface — the local list's, the online list's, a temporary folder's — so
+   the strip does not change when one pane takes the place of another. */
+.kd-workspace-pane .kd-activity {
   background: var(--s98-caption, color-mix(in srgb, var(--kd-panel) 88%, var(--kd-text) 12%));
   border-bottom: 1px solid color-mix(in srgb, var(--kd-text) 32%, var(--kd-panel));
   color: var(--kd-text);
 }
-.kd-workspace-pane-local > .kd-activity .kd-activity-text { color: var(--kd-text); font-weight: 600; }
-.kd-workspace-pane-local > .kd-activity .kd-activity-control { color: var(--kd-text); }
-.kd-workspace-pane-local > .kd-activity .kd-activity-glyphs { color: var(--kd-text); }
+.kd-workspace-pane .kd-activity .kd-activity-text { color: var(--kd-text); font-weight: 600; }
+.kd-workspace-pane .kd-activity .kd-activity-control { color: var(--kd-text); }
+.kd-workspace-pane .kd-activity .kd-activity-glyphs { color: var(--kd-text); }
 .kd-activity-glyphs {
   display: inline-flex;
   align-items: center;
@@ -4832,9 +4834,12 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-collection-rail-platform[data-platform="youtube"] { color: #ff0000; }
 .kd-collection-rail-platform[data-platform="bilibili"] { color: #fb7299; }
 .kd-collection-rail-platform[data-platform="local"] { color: #3b82f6; }
+/* The text area always takes what the two ends leave, so the right-hand tools never move when
+   its content changes; it is as tall as the strip, which is what clips an item that turns. */
 .kd-activity-texts {
   display: flex;
   align-items: center;
+  align-self: stretch;
   gap: 0.65rem;
   min-width: 0;
   flex: 1 1 auto;
@@ -4844,6 +4849,31 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 }
 .kd-activity-texts::-webkit-scrollbar {
   display: none;
+}
+/* One item of the strip: the box that turns (motion.css, `turn`; WorkRail.tsx). Running text
+   gives way first when the strip is short; a glyph, a count or a control keeps its width. */
+.kd-rail-item {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  min-width: 0;
+}
+.kd-rail-item[data-yields="true"] {
+  flex: 0 1 auto;
+}
+.kd-rail-item[hidden] {
+  display: none;
+}
+/* A task that has its own glyph, kept beside its words (a download running in the queue). */
+.kd-rail-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.kd-rail-task > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* 曲库内搜：平常只是右端小按键；点开后只占右侧一段，左侧任务/分析状态常驻。 */
 .kd-activity-trailing-tools {
@@ -4993,7 +5023,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   white-space: nowrap;
 }
 .kd-collection-rail-actions,
-.kd-collection-rail-pagination,
 .kd-collection-rail-download {
   display: inline-flex;
   align-items: center;
@@ -5025,40 +5054,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-collection-rail-download:disabled {
   opacity: 0.35;
   cursor: default;
-}
-.kd-collection-rail-pagination {
-  gap: 0.05rem;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.kd-collection-rail-pagination > button {
-  appearance: none;
-  display: inline-grid;
-  place-items: center;
-  width: 1.45rem;
-  height: 1.55rem;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--kd-collection-rail-accent, var(--kd-theme));
-  cursor: pointer;
-}
-.kd-collection-rail-pagination > button:hover:not(:disabled) {
-  color: var(--kd-text);
-}
-.kd-collection-rail-pagination > button:disabled {
-  color: var(--kd-faint);
-  opacity: 0.45;
-  cursor: default;
-}
-.kd-collection-rail-pagination > span {
-  min-width: 2.7rem;
-  text-align: center;
-}
-.kd-activity:not(:has(.kd-activity-search)):not(:has(.kd-activity-search-toggle)) .kd-activity-actions {
-  margin-left: auto;
 }
 .kd-activity-actions .kd-chrome-actions {
   gap: 0.25rem;

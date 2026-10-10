@@ -15,6 +15,8 @@
   /* Items of a menu follow its surface: each one this much later, the last by 208ms. */
   --kd-motion-item: 112ms;
   --kd-motion-stagger: 8ms;
+  /* Content that turns over in place: each item of the cascade this much after the one before. */
+  --kd-motion-turn-gap: 24ms;
   /* Large surfaces: a sheet, a drawer, a panel. The same clock as src/lib/songSwapMotion.ts. */
   --kd-motion-in: 460ms;
   --kd-motion-out: 360ms;
@@ -177,6 +179,41 @@
 [data-kd-stagger="down"] > :nth-child(10), [data-kd-stagger="up"] > :nth-last-child(10) { --kd-motion-i: 9; }
 [data-kd-leaving][data-kd-stagger] > * { animation: none; }
 
+/* ---------- turn: content that is replaced in place ---------- */
+/* A line of text, or the items of a strip, that give way to others (the work rail, the search
+   field's tip line): what is there lifts away and what comes is laid out from below.
+   `--kd-turn-step` is an item's place in its cascade — leaving counts from the last item,
+   arriving from the first. `data-kd-turn-after` holds an arrival back until what it replaces
+   has gone, where the two are in the document at once. An item that stays and only closes up
+   to its new place is given `data-kd-turn-shift` and the distance in `--kd-turn-shift`. */
+@keyframes kd-motion-turn-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-0.45rem); }
+}
+@keyframes kd-motion-turn-in {
+  from { opacity: 0; transform: translateY(0.45rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes kd-motion-turn-shift {
+  from { transform: translateX(var(--kd-turn-shift, 0px)); }
+  to { transform: translateX(0); }
+}
+[data-kd-turn-shift] {
+  animation: kd-motion-turn-shift var(--kd-motion-micro) var(--kd-ease-out) backwards;
+}
+[data-kd-turn="out"] {
+  pointer-events: none;
+  animation: kd-motion-turn-out var(--kd-motion-micro-out) var(--kd-ease-in)
+    calc(var(--kd-turn-step, 0) * var(--kd-motion-turn-gap)) forwards;
+}
+[data-kd-turn="in"] {
+  animation: kd-motion-turn-in var(--kd-motion-micro) var(--kd-ease-out)
+    calc(var(--kd-turn-step, 0) * var(--kd-motion-turn-gap)) backwards;
+}
+[data-kd-turn="in"][data-kd-turn-after] {
+  animation-delay: var(--kd-motion-micro-out);
+}
+
 /* ---------- Reduced motion: nothing travels, everything is a short fade ---------- */
 @media (prefers-reduced-motion: reduce) {
   [data-kd-motion] {
@@ -186,6 +223,18 @@
     animation: kd-motion-fade-out var(--kd-motion-reduced) linear forwards !important;
   }
   [data-kd-stagger] > * {
+    animation: none !important;
+  }
+  [data-kd-turn="out"] {
+    animation: kd-motion-fade-out var(--kd-motion-reduced) linear forwards !important;
+  }
+  [data-kd-turn="in"] {
+    animation: kd-motion-fade-in var(--kd-motion-reduced) linear backwards !important;
+  }
+  [data-kd-turn="in"][data-kd-turn-after] {
+    animation-delay: var(--kd-motion-reduced) !important;
+  }
+  [data-kd-turn-shift] {
     animation: none !important;
   }
 }

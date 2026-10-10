@@ -22,7 +22,7 @@ import {
   nextAutoAnalysisMode,
   resolveAutoAnalysisMode,
 } from "../../lib/autoAnalysisMode";
-import { forgetQueuedAnalysis } from "../../lib/autoAnalyze";
+import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import {
   getPlayingTrack,
@@ -35,6 +35,7 @@ import { Button } from "../common";
 import { DETAIL_EVENT, type DetailEventDetail } from "../library/TrackTable";
 import { AnalysisGlyph } from "./ActivityRail";
 import { PickMark } from "../common/RowPick";
+import { libraryRailView } from "./libraryRailView";
 import { WorkRail, WorkRailSelection } from "./WorkRail";
 
 function ScanGlyph() {
@@ -50,8 +51,13 @@ function ScanGlyph() {
 /**
  * 曲库半栏工作条，与搜索半栏 SearchWorkRail 同行对齐。
  *
- * - 平常：概况 + 右侧小搜索入口
- * - 点开搜索：左侧概况 / 任务保持可见，搜索框在右侧展开；多选再顶掉搜索
+ * - 平常：正在看的那个列表的名字（侧栏里的同一个名字）+ 右侧小搜索入口
+ * - 有任务：导入 / 分析 / 升级的进度顶掉名字；分析完了又只剩名字
+ * - 点开搜索：左侧名字 / 任务保持可见，搜索框在右侧展开；多选再顶掉搜索
+ *
+ * The auto-analysis control is on the strip only while analysis has something to do: a batch
+ * is running, or the automation is paused with tracks left. Its permanent home is the
+ * settings (通用 → 自动分析).
  *
  * `showDownloads`：搜索半栏没开时，下载进度暂挂这里，避免任务悬空。
  */
@@ -61,8 +67,11 @@ export function LibraryWorkRail({
   aggregateSearchOpen = true,
   onOpenAggregateSearch,
   mode = "rail",
+  shown = true,
 }: {
   mode?: "rail" | "tools" | "tasks";
+  /** False while the local pane is hidden; see `WorkRail`. */
+  shown?: boolean;
   showDownloads?: boolean;
   /** 宽屏右栏开合键，始终位于本栏工具组最右侧。 */
   asideToggle?: ReactNode;
@@ -76,7 +85,7 @@ export function LibraryWorkRail({
   const maintenance = useLibraryStore((state) => state.maintenance);
   const autoAnalyzeSuspended = useLibraryStore((state) => state.autoAnalyzeSuspended);
   const stats = useLibraryStore((state) => state.stats);
-  const total = useLibraryStore((state) => state.total);
+  const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const selectedIds = useLibraryStore((state) => state.selectedIds);
@@ -88,7 +97,6 @@ export function LibraryWorkRail({
   const running = downloadList.find((task) => task.state === "running");
   const settings = useAppStore((state) => state.settings);
   const savingSettings = useAppStore((state) => state.savingSettings);
-  const saveSettings = useAppStore((state) => state.saveSettings);
 
   const toolsTarget = useContext(LibraryWorkRailToolsTargetContext);
   const selecting = selectionMode || selectedIds.length > 1;
@@ -176,26 +184,7 @@ export function LibraryWorkRail({
     : resolveAutoAnalysisMode(settings);
   const autoPaused = autoAnalysisMode === "paused";
 
-  const toggleAutoAnalyze = () => {
-    const nextMode = nextAutoAnalysisMode(autoAnalysisMode);
-    if (nextMode !== "paused") {
-      // 取消过的 id 不能一直留在本会话去重集合里，否则恢复后它们不会再入队。
-      if (autoPaused) forgetQueuedAnalysis();
-      useLibraryStore.getState().setAutoAnalyzeSuspended(false);
-      void saveSettings({ auto_analyze: true, auto_analysis_mode: nextMode }).catch(() => undefined);
-      return;
-    }
-
-    // 取消是协作式的：正在解码 / FFT 的任务会在细粒度检查点退出，完整结果才写库。
-    // 配置先落盘；后端扫描若恰好尚未结束，也会在 jobs.rs 再读这个开关。
-    void Promise.all([
-      saveSettings({ auto_analyze: false, auto_analysis_mode: "paused" }),
-      useLibraryStore.getState().cancelAnalyze(),
-    ])
-      // 保存设置自行回滚；取消请求失败也不能让这个点击留下未处理的 Promise。
-      .catch(() => undefined)
-      .finally(forgetQueuedAnalysis);
-  };
+  const toggleAutoAnalyze = () => chooseAutoAnalysisMode(nextAutoAnalysisMode(autoAnalysisMode));
 
   const locatePlayingToggle = (
     <button
@@ -304,6 +293,7 @@ export function LibraryWorkRail({
         ]}
         trailing={trailing}
         label="曲库多选"
+        shown={shown}
       />
     );
   }
@@ -373,61 +363,67 @@ export function LibraryWorkRail({
     );
   }
 
-  if (activeMaintenance.length === 0 && !scanning && analyze === null && !downloading) {
-    const trackTotal = stats?.total ?? total;
-    const analyzed = stats?.analyzed ?? 0;
-    const pending = Math.max(0, trackTotal - analyzed);
+  const idle = activeMaintenance.length === 0 && !scanning && analyze === null && !downloading;
+  if (idle) {
+    // Nothing is running: the strip only says which list this is. One leading glyph, then the
+    // name and its number as the sidebar gives them; both are keyed by the list, so another
+    // folder turns them over together.
+    const view = libraryRailView(filter.folder, folders, stats?.total ?? null);
     glyphs.push(
-      <span key="n" className="kd-activity-glyph" aria-hidden="true">
-        <Music2 size={13} strokeWidth={2.25} />
-      </span>,
-    );
-    texts.push(
-      <span key="n" className="kd-activity-text">
-        曲库 {trackTotal} 首
-      </span>,
-    );
-    glyphs.push(
-      <span key="a" className="kd-activity-glyph" aria-hidden="true">
+      <span key="view" className="kd-activity-glyph" aria-hidden="true">
         <BarChart3 size={13} strokeWidth={2.25} />
       </span>,
     );
     texts.push(
-      <span key="a" className="kd-activity-text">
-        {pending === 0 ? "已全部分析" : `已分析 ${analyzed} · 未分析 ${pending}`}
+      <span
+        key={`view:${view.key}`}
+        className="kd-activity-text kd-collection-rail-title"
+        title={view.path || undefined}
+      >
+        {view.name}
       </span>,
     );
+    if (view.count !== null) {
+      texts.push(
+        <span key={`view-count:${view.key}`} className="kd-collection-rail-count">
+          {view.count} 首
+        </span>,
+      );
+    }
   }
 
-  texts.push(
-    <button
-      key="auto-analyze"
-      type="button"
-      className="kd-activity-control"
-      aria-label={`自动分析：${autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}`}
-      disabled={savingSettings}
-      title={
-        autoAnalysisMode === "light"
-          ? "轻量：单线程并主动留空；点击切换到有余量的全力模式"
-          : autoAnalysisMode === "full"
-            ? "全力：最多两个后台任务，播放时自动收窄；点击暂停"
-            : "已暂停；点击后从轻量模式恢复"
-      }
-      onClick={toggleAutoAnalyze}
-    >
-      {autoAnalysisMode === "light" ? (
-        <Play size={11} />
-      ) : autoAnalysisMode === "full" ? (
-        <BarChart3 size={11} />
-      ) : (
-        <Pause size={11} />
-      )}
-      自动分析：
-      {autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}
-    </button>,
-  );
-
-  const idle = activeMaintenance.length === 0 && !scanning && analyze === null && !downloading;
+  // Paused with tracks left is the one resting state that keeps the control: without it a
+  // click on 「已暂停」 would take away the only way back that is in sight.
+  const unanalyzed = stats ? Math.max(0, stats.total - stats.analyzed) : 0;
+  if (analyze !== null || (autoPaused && unanalyzed > 0)) {
+    texts.push(
+      <button
+        key="auto-analyze"
+        type="button"
+        className="kd-activity-control"
+        aria-label={`自动分析：${autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}`}
+        disabled={savingSettings}
+        title={
+          autoAnalysisMode === "light"
+            ? "轻量：单线程并主动留空；点击切换到有余量的全力模式"
+            : autoAnalysisMode === "full"
+              ? "全力：最多两个后台任务，播放时自动收窄；点击暂停"
+              : "已暂停；点击后从轻量模式恢复"
+        }
+        onClick={toggleAutoAnalyze}
+      >
+        {autoAnalysisMode === "light" ? (
+          <Play size={11} />
+        ) : autoAnalysisMode === "full" ? (
+          <BarChart3 size={11} />
+        ) : (
+          <Pause size={11} />
+        )}
+        自动分析：
+        {autoAnalysisMode === "light" ? "轻量" : autoAnalysisMode === "full" ? "全力" : "已暂停"}
+      </button>,
+    );
+  }
 
   return (
     <WorkRail
@@ -435,7 +431,8 @@ export function LibraryWorkRail({
       glyphs={glyphs}
       texts={texts}
       trailing={trailing}
-      label={idle ? "曲库概况" : "曲库任务"}
+      label={idle ? "曲库" : "曲库任务"}
+      shown={shown}
     />
   );
 }

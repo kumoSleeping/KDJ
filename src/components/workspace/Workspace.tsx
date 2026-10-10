@@ -611,17 +611,6 @@ export function Workspace() {
         setLoadingMoreRows(false);
       });
   }, [collectionRows, collectionShown, collectionTotal, piecewiseList]);
-  /**
-   * The two names the rail's call site still uses, kept so that it reads as it did until its
-   * pager is gone: there are no pages any more, so a change of page is the next batch and
-   * "page 1" is the first batch.
-   */
-  const changeCollectionPage = useCallback((_page: number) => {
-    showMoreCollectionRows();
-  }, [showMoreCollectionRows]);
-  const setCollectionPage = useCallback((_page: 1) => {
-    setCollectionShown(COLLECTION_BATCH_SIZE);
-  }, []);
   const localPaneVisible = visiblePaneOrder.includes("local");
   const searchPaneVisible = visiblePaneOrder.includes("search");
   const [dragWorkspacePane, setDragWorkspacePane] = useState<WorkspacePaneKind | null>(null);
@@ -2467,7 +2456,7 @@ export function Workspace() {
                     );
                   }}
                 >
-                  <LibraryWorkRail mode="rail"
+                  <LibraryWorkRail mode="rail" shown={localPaneVisible}
                     aggregateSearchOpen={aggregateSearchOpen}
                     onOpenAggregateSearch={openAggregateSearch}
                   />
@@ -2538,7 +2527,7 @@ export function Workspace() {
                       onFocusCapture={() => focusWorkspacePane("search")}
                     >
                       {temporaryLibrary ? <TemporaryFolderPane key={temporaryLibrary.id} library={temporaryLibrary}
-                        active={activeWorkspacePane === "search"} layout={layout}
+                        active={activeWorkspacePane === "search"} shown={searchPaneVisible} layout={layout}
                         onSelect={(id, mode, clickCount) => selectTrack(id, mode, clickCount, temporaryLibrary.store)}
                         onClose={() => {
                           setTemporaryLibrary(null);
@@ -2559,7 +2548,6 @@ export function Workspace() {
                         collectionWindow={openedCollectionWindow}
                         canGoBack={collectionSearchSnapshot !== null}
                         onGoBack={returnToCollectionSearch}
-                        onCollectionPageChange={changeCollectionPage}
                         onDownloadCollection={() => void downloadOpenedCollection()}
                         loading={busy || loadingCollections.size > 0}
                         selectionCount={chosen.size}
@@ -2577,12 +2565,15 @@ export function Workspace() {
                         showVideoAudioOnly={chosenHasVideo}
                         videoAudioOnly={videoAudioOnly}
                         onToggleVideoAudioOnly={setVideoAudioOnly}
+                        streamPlaylist={openedStreamPlaylist}
+                        video={video}
+                        shown={searchPaneVisible}
                         onClose={() => {
                           resultRequestSeqRef.current += 1;
                           setBusy(false);
                           setHasResults(false);
                           setCollectionSearchSnapshot(null);
-                          setCollectionPage(1);
+                          setCollectionShown(COLLECTION_BATCH_SIZE);
                           setActiveStreamPlaylist(null);
                           setInspectedOnlineGroup(null);
                           updateStreamWorkspaceSession({

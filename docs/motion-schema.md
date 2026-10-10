@@ -15,6 +15,7 @@ The drawer has its own description on the same clock: `docs/drawer-schema.md`.
 | `--kd-motion-micro` | 160ms | a small surface arriving: menu, popover, tooltip, notice |
 | `--kd-motion-micro-out` | 110ms | the same surface leaving; drag feedback |
 | `--kd-motion-item` / `--kd-motion-stagger` | 112ms / 8ms | the items of a menu following its surface (all in by 208ms) |
+| `--kd-motion-turn-gap` | 24ms | the items of a strip that turns over, one after the other (`turn`) |
 | `--kd-motion-in` | 460ms | a large surface arriving: sheet, drawer, panel |
 | `--kd-motion-out` | 360ms | a large surface leaving |
 | `--kd-motion-reduced` | 80ms | every gesture under reduced motion |
@@ -35,6 +36,21 @@ stable, other surfaces are aligned to them.
 | `pop` | scales up about its own centre (micro, spring) | scales down a little and fades (micro-out) | whatever appears *in place*: a small window, a notice, a field that replaces a label |
 | `slide` | slides in from the edge it is attached to (in, ease-out) | slides back out (out, ease-in) | a sheet or panel that belongs to an edge; `data-kd-edge="right|left|top|bottom"` |
 | `fade` | opacity only (micro) | opacity only (micro-out) | what lies behind a surface: a scrim |
+
+`turn` is the fifth gesture, for content that is **replaced in place** while what holds it stays:
+a line of text, the items of a strip. It is not a `data-kd-motion` value, because the old and the
+new content are different elements:
+
+| Mark | Moves | Clock |
+| --- | --- | --- |
+| `data-kd-turn="out"` | lifts away and fades; it is a picture from here on (`inert`, `aria-hidden`) | micro-out, ease-in, `forwards` |
+| `data-kd-turn="in"` | comes up from below and fades in | micro, ease-out, `backwards` |
+| `data-kd-turn-after` (with `in`) | waits for the leaving one, where both are in the document at once | delayed by micro-out |
+| `data-kd-turn-shift` + `--kd-turn-shift` | an item that stays glides from where it stood to its new place | micro, ease-out |
+
+`--kd-turn-step` (0, 1, 2 …) is an item's place in its cascade, `--kd-motion-turn-gap` apart:
+leaving counts from the last item, arriving from the first. Under reduced motion both are an
+80ms fade without steps, and a shift is a jump.
 
 - The origin of `unfold` is the element's `transform-origin`: set it inline, or with `--kd-origin`
   (default: top left). `ContextMenu` computes it: the pointer or the anchor's corner as seen from
@@ -113,6 +129,38 @@ leaving gesture when React unmounts the element. Variants:
 | `InlineNotice`; the sidebar's new-folder row and rename field | `pop` in |
 | Sidebar drag feedback (drop tint, insertion mark, lifted root) | micro-out clock, in `FolderTree.css` |
 | The player bar put away and brought back (`PlayerBarAway.tsx`) | `slide` from the bottom edge, both ways; it stays mounted and sets `data-kd-leaving` itself |
+| The work rail over a list (`WorkRail.tsx`, `railTurn.ts`) | `turn`, item by item — see below |
+| A line that changes in the search bar: the tip line (every 8 s, and when the empty field is focused or left), the search kind (`RollText`) | `turn`: the old line `out`, the new one `in` after it |
+
+### The work rail
+
+The strip above a list (`.kd-activity`: the library's, the online results', a temporary
+folder's) stays; its content turns over. The rail knows its items by key — glyphs, texts and
+controls, then the tools at its right-hand end:
+
+- An item whose key is gone leaves as a picture, the last one first; when the pictures are out,
+  the items whose keys are new are laid out, the first one first. Three steps at most are
+  staggered each way, so a full turn is over within 110 + 72 + 160 + 72 = 414 ms and a usual
+  one (three items for three) in about 370 ms.
+- An item whose key is the same before and after is not touched: it is the same element (a
+  field keeps its text and focus) and, if the content before it changed width, it glides to
+  its new place (`data-kd-turn-shift`). The text area takes all the width the two ends leave,
+  so the tools at the right never move when the text changes.
+- The same key with other text is not a turn: a progress count or a file name
+  (「正在分析 3/4 首 · …」) changes where it stands. What is another thing gets another key —
+  the name and the number of a folder are keyed by the folder, so going to another folder
+  turns exactly those two over.
+- A change during a turn joins it: what is no longer wanted starts to leave at once, what is
+  wanted waits for the pictures. The rail waits for the animations themselves
+  (`getAnimations()` … `finished`), not for a timer; where nothing is animated (a hidden pane,
+  a test) a stage is over at once.
+- Two rails that take each other's place — the local pane's and the online pane's when one
+  pane is shown at a time, or two rails in the same pane — hand the strip over: the rail that
+  stops being shown (`shown={false}`, or unmounted) leaves its items behind for that commit,
+  and the rail that starts being shown lets them leave as pictures before it lays out its
+  own. Two panes side by side keep their own strips.
+- The controls of the new state are usable from the moment they are on the strip; a picture
+  takes no click, no focus and is not read out by the strip's live region.
 
 ## Lists
 
