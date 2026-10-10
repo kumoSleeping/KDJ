@@ -3,6 +3,7 @@ import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { PanelCollapseContext, PanelDockedContext } from "../common/panelCollapse";
 import { DownloadTaskPanel } from "./TaskPanels";
+import { useLyricsExtentMenu } from "./LyricsExtentMenu";
 import { PlayingLyricsPanel } from "./LyricsView";
 import "./SidePanels.css";
 
@@ -17,11 +18,16 @@ export function SideLyrics() {
   </section>;
 }
 
-/** The lyrics as the body of a drawer: the drawer writes the title and puts it away. */
+/**
+ * The lyrics as the body of a drawer: the drawer writes the title and puts it away. A right
+ * click or a long press on it offers how tall the lyrics are (LyricsExtentMenu).
+ */
 export function DrawerLyrics() {
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
-  return <section className="kd-side-panels kd-drawer-lyrics">
+  const extent = useLyricsExtentMenu();
+  return <section className="kd-side-panels kd-drawer-lyrics" {...extent.props}>
     <PanelDockedContext.Provider value><PlayingLyricsPanel track={track} /></PanelDockedContext.Provider>
+    {extent.menu}
   </section>;
 }
 

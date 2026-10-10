@@ -104,6 +104,10 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
     other is the same handover as the key. A slide always runs to its end; if what is wanted
     changes on the way, the bar arrives and sets off again.
   - A phone keeps its bar: the collapse is not offered there.
+  - An app that has the window (full-screen lyrics, `takesWindow` in `docs/drawer-schema.md`)
+    sends the bar away the same way for as long as it has it, without reading or writing
+    either shape's choice. The bubble is then the window's lower block. Its 展开播放条 key
+    still does what it says, and so also gives the window back.
 - **No divider lines** inside a bubble (see AGENTS.md), and nothing is written in an empty one.
 
 ## Adding a kind of task

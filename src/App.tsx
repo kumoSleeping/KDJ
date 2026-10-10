@@ -16,6 +16,7 @@ import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 import { flushLocalStorageWrites } from "./lib/storageWrite";
 import { useWorkshopDrop } from "./lib/workshopDrop";
+import { useWindowTaken } from "./lib/windowTaken";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
 // 队列、设置与日夜模式从顶栏专用按钮进入。
@@ -45,6 +46,8 @@ export default function App() {
   const ready = connected && !booting;
   const { columns, chrome, portrait, tall } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
+  // A drawer app that has the window (full-screen lyrics): the stylesheet keys off it.
+  const takenBy = useWindowTaken(state => state.by);
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
@@ -112,6 +115,7 @@ export default function App() {
       data-chrome={chrome}
       data-portrait={portrait ? "true" : undefined}
       data-tall={tall ? "true" : undefined}
+      data-taken-by={takenBy ?? undefined}
       data-work-mode="manager"
     >
       <div className="kd-body">

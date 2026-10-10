@@ -49,6 +49,14 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
     lyrics view beneath it).
 
   A height the user dragged (the bottom edge) replaces any of these until it is reset.
+  In a tall window a bubble that is kept across the bottom already ends the page a gap above
+  itself, so a panel that comes all the way down there keeps no second gap of its own.
+- **The lyrics choose their own.** A right click or a long press on the lyrics panel offers
+  标准 (`two-thirds`), 更长 (`full`: down to just above the player bar, or the playing song's
+  bubble while the bar is away) and, in a tall desktop window only, 全屏 (`takesWindow`, below).
+  The choice is remembered (`src/lib/lyricsExtent.ts`); a stored 全屏 is shown and marked as
+  更长 wherever it is not offered, without being rewritten. Choosing from the menu also gives
+  a dragged height back (`resetDrawerHeight`), since that would keep the choice from showing.
 - **What is measured.** A body's scrolling element carries the class `kd-scroll` (or
   `data-drawer-scroll`); `fit` and `at-least-half` measure what it lacks or has to spare. A
   scrolling element inside another is added to the one around it; of several side by side the
@@ -97,6 +105,39 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   on landing. Until then the drawer keeps showing that app; another app that is asked for, or a
   close, is applied at the release, with its usual motion. A hold lets go by itself after 1.5 s,
   and an app that refuses to close is never covered by a held one.
+
+## Taking the window
+
+An app may ask for the whole window with `takesWindow: { label, leave }` in its spec (today:
+full-screen lyrics in a tall desktop window). It is a mode of the same panel, not another
+surface:
+
+- **Two blocks.** The panel becomes the window's one block, from under the title bar down to
+  the playing song's bubble, with the bubble's gap (12 px) to the window's edges and between
+  the two. The bubble is the other block: it spans the bottom and carries the transport.
+- **Everything else stands back** while `src/lib/windowTaken.ts` names the app:
+  `.kd-app[data-taken-by]` fades the page under the title bar (`.kd-stage`) and then stops
+  drawing it; `Workspace` makes it `inert`. It stays mounted, so the page is as it was left —
+  scroll positions, selections — the moment the window is given back. The title bar and the
+  window's own background stay. The player bar goes away as if it had been put away
+  (`playerBarAwayWanted(…, taken)`), which keeps the bubble up with its transport; neither
+  window shape's own choice for the bar is read or written for it.
+- **The way back** is `leave`: the key at the end of the title row (it then carries `label`
+  and another icon) and Esc call it instead of `close`, and the app returns to the `extent` in
+  its spec. The bubble's 展开播放条 key also gives the window back, because the bar it calls
+  needs its row. The app's own menu works as everywhere.
+- **Motion.** The panel has the block's layout at once and grows into it: what is seen of it
+  opens out from the drawer's rectangle by a `clip-path`, the title and the tools keep to their
+  corners and the body's middle stays the middle of what is seen, by transforms — nothing is
+  stretched, and both rectangles are measured once before anything moves (`morphPanel` in
+  `Drawer.tsx`). 460 ms out, 360 ms back, the app's curves; the page fades on the same clock.
+  Giving the window back plays it in reverse on the block's layout and the panel takes its
+  drawer place when that has ended; the page is back and usable from the first frame. A body
+  that is drawn larger in the window says by how much in `--kd-drawer-window-zoom` on its
+  `.kd-drawer[data-app]`, and its content grows with the panel instead of jumping. Reduced
+  motion: the layout changes at once.
+- The panel is not resized by its edges while it has the window, and an app that is put away
+  while it has the window leaves by the drawer's usual slide.
 
 ## Adding an app
 

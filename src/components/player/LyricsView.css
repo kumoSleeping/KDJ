@@ -37,3 +37,12 @@
 @media (prefers-reduced-motion: reduce) {
   .kd-lyrics[data-turn], .kd-lyrics[data-arrive], .kd-lyrics[data-arrive] .kd-lyrics-line { animation: none; }
 }
+
+/* Full screen (a tall window, lib/lyricsExtent.ts): the lyrics are the window's block above the
+   playing song's bubble, and have the room for larger words. --kd-drawer-window-zoom tells the
+   drawer by how much, so the words grow with the panel instead of jumping (Drawer.tsx). */
+.kd-drawer[data-app="lyrics"][data-takes-window] { --kd-drawer-window-zoom: 1.4; }
+.kd-drawer[data-app="lyrics"][data-takes-window] .kd-lyrics-line { padding-block: 0.75rem; }
+.kd-drawer[data-app="lyrics"][data-takes-window] .kd-lyrics-line-text { font-size: calc(1.05rem * var(--kd-drawer-window-zoom)); }
+.kd-drawer[data-app="lyrics"][data-takes-window] .kd-lyrics-line-roma { font-size: calc(0.74rem * var(--kd-drawer-window-zoom)); }
+.kd-drawer[data-app="lyrics"][data-takes-window] .kd-lyrics-line-trans { font-size: calc(0.78rem * var(--kd-drawer-window-zoom)); }

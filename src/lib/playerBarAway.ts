@@ -43,9 +43,13 @@ export function playerBarCollapseOffered(): boolean {
  * Whether the bar is to be away. The listener always has a transport on screen, the bar or the
  * playing song's bubble: so the bar is only away while there is a song for that bubble to show
  * (`song`), whatever was chosen, and the choice itself is left as it is for when a song arrives.
+ *
+ * `taken`: an app has the window (src/lib/windowTaken.ts) and the bubble is its transport. The
+ * bar is then away as if it had been put away, for as long as that lasts; neither shape's
+ * choice is read or written for it, so the bar is back where the listener left it afterwards.
  */
-export function playerBarAwayWanted(collapsed: boolean, song: boolean, offered = playerBarCollapseOffered()): boolean {
-  return collapsed && offered && song;
+export function playerBarAwayWanted(collapsed: boolean, song: boolean, offered = playerBarCollapseOffered(), taken = false): boolean {
+  return (collapsed || taken) && offered && song;
 }
 
 /** Where a launch finds the bar, before anything is known about the deck. */

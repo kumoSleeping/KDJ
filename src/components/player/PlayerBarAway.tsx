@@ -15,6 +15,7 @@ import {
   usePlayerBarAway,
   type PlayerBarPhase,
 } from "../../lib/playerBarAway";
+import { useWindowTaken, windowTaken } from "../../lib/windowTaken";
 import { dismissTask } from "../tasks/taskBubbleStore";
 import { NOW_PLAYING_TASK } from "./NowPlayingTask";
 
@@ -30,7 +31,8 @@ let handFocusTo: "bubble" | "collapse" | null = null;
  * Drives where the bar is (src/lib/playerBarAway.ts) from the listener's choice for the shape
  * the window is in. `song` says whether there is a song for the playing song's bubble to show:
  * without one the bar is up whatever was chosen, because the bubble is what stands in for the
- * bar (see playerBarAwayWanted).
+ * bar (see playerBarAwayWanted). An app that has the window (full-screen lyrics) sends the bar
+ * away the same way without touching the choice.
  *
  * The first render takes the bar's place without moving. After that the bar slides, and a slide
  * runs for its whole time before the next one can start: when what is wanted changes on the way
@@ -40,7 +42,8 @@ let handFocusTo: "bubble" | "collapse" | null = null;
  * (src/lib/nowPlayingInfo.ts).
  */
 export function usePlayerBarPhase(song: boolean): PlayerBarPhase {
-  const away = usePlayerBarAway(state => playerBarAwayWanted(state.collapsed, song));
+  const taken = useWindowTaken(windowTaken);
+  const away = usePlayerBarAway(state => playerBarAwayWanted(state.collapsed, song, undefined, taken));
   const phase = usePlayerBarAway(state => state.phase);
   const settled = useRef(false);
   useLayoutEffect(() => {

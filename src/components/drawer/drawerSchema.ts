@@ -60,6 +60,15 @@ export interface DrawerSpec {
   tools?: ReactNode;
   body: ReactNode;
   /**
+   * The app takes the window (a tall desktop window's full-screen lyrics): its panel is the
+   * window's one block, from under the title bar down to the playing song's bubble with the
+   * bubble's gap on either side, and the rest of the window is out of sight meanwhile
+   * (src/lib/windowTaken.ts). The panel grows out of the place it has as a drawer and goes back
+   * into it. `leave` gives the window back: the key at the end of the title row, which then
+   * carries `label`, and Esc call it instead of `close`. `extent` is what the panel returns to.
+   */
+  takesWindow?: { label: string; leave(): void };
+  /**
    * Puts the app away. Returns false when it refuses (an unsaved draft): the drawer then
    * stays, and an app that was opened over it gives way instead.
    */
