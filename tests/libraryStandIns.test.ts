@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { STAND_IN_TILE_ROWS, createLibraryStandIns, standInGap, standInPlan, type StandInFrame, type StandInPlanInput } from "../src/lib/libraryStandIns";
+import { STAND_IN_LEAVING_ATTR, STAND_IN_TILE_ROWS, createLibraryStandIns, standInGap, standInPlan, type StandInFrame, type StandInPlanInput } from "../src/lib/libraryStandIns";
 
 const base: StandInPlanInput = { top: 0, height: 684, rowHeight: 36, count: 10_000, first: 0, windowStart: 0, windowEnd: 0, direction: 0 };
 const shown = (input: StandInPlanInput) => standInPlan(input).map((tile) => [tile.shownStart, tile.shownEnd] as const);
@@ -41,7 +41,7 @@ test("pending downloads keep their own rows; the last tile ends with the table",
   assert.equal(Math.max(...plan.map((tile) => tile.end)), 60);
 });
 
-test("a faster scroll reaches further ahead, up to a limit, and only the near screens are worth their text", () => {
+test("a faster scroll reaches further ahead, up to a limit", () => {
   const at = (lead: number, direction: -1 | 1 = 1) => standInPlan({ ...base, top: 1000 * 36, direction, lead });
   const reach = (plan: ReturnType<typeof standInPlan>, direction: -1 | 1) => direction > 0
     ? Math.max(...plan.map((tile) => tile.end)) - 1019 : 1000 - Math.min(...plan.map((tile) => tile.start));
@@ -51,22 +51,23 @@ test("a faster scroll reaches further ahead, up to a limit, and only the near sc
     const far = at(30_000, direction);
     assert.ok(reach(far, direction) >= 833 && reach(far, direction) < 833 + STAND_IN_TILE_ROWS);
     assert.equal(standInGap(far.map((tile) => [tile.shownStart, tile.shownEnd] as const), direction > 0 ? 1000 : 1000 - 833, direction > 0 ? 1019 + 833 : 1019), 0);
-    assert.ok(far.filter((tile) => tile.near).length <= 9 && far.some((tile) => tile.near) && far.some((tile) => !tile.near));
-    assert.ok(far.every((tile) => !tile.urgent || tile.near));
+    assert.ok(far.filter((tile) => tile.urgent).length <= 2 && far.some((tile) => tile.urgent));
   }
   assert.ok(reach(at(10_000_000), 1) <= 65 * STAND_IN_TILE_ROWS, "no more than the limit of tiles");
   assert.equal(standInPlan({ ...base, top: 1000 * 36, direction: 0, lead: 30_000, windowStart: 900, windowEnd: 1100 }).length, 0);
   assert.equal(standInGap([[0, 5], [8, 12]], 3, 10), 3);
 });
 
-test("tiles are repainted in place when rows arrive, hidden only when the order changes, and never reach past the table", () => {
+test("tiles are bars copied from one pattern, never text; they are wiped away ahead of the rows that caught up and never reach past the table", async () => {
   const dom = new JSDOM(`<!doctype html><html><body><div class="kd-scroll"><table class="kd-table"><thead><tr><th>t</th></tr></thead>
     <tbody><tr data-kd-track-id="1"><td data-col="title"><span><span class="kd-thumb"></span>Song</span></td><td data-col="bpm">128</td></tr></tbody>
     </table><div class="layer"></div></div></body></html>`, { url: "http://localhost" });
   const frames: (() => void)[] = [];
+  let reducedMotion = false;
+  dom.window.matchMedia = (() => ({ matches: reducedMotion, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
   Object.assign(globalThis, { window: dom.window, document: dom.window.document, Node: dom.window.Node, localStorage: dom.window.localStorage,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
-    requestAnimationFrame: (callback: () => void) => frames.push(callback), cancelAnimationFrame: () => {} });
+    requestAnimationFrame: (callback: () => void) => frames.push(callback), cancelAnimationFrame: () => { frames.length = 0; } });
   const { document } = dom.window;
   const scroller = document.querySelector<HTMLElement>(".kd-scroll")!;
   const layer = document.querySelector<HTMLElement>(".layer")!;
@@ -87,21 +88,21 @@ test("tiles are repainted in place when rows arrive, hidden only when the order 
   dom.window.Range.prototype.getBoundingClientRect = function () {
     return this.startContainer.parentElement!.closest("td")!.dataset.col === "title" ? box(40, 38 - scrollTop, 30, 16) : box(610, 38 - scrollTop, 20, 16);
   };
-  const texts = new Map<HTMLCanvasElement, string[]>();
+  // What each canvas was asked to draw: the pattern is made of rectangles, a tile is one copy of it.
+  const drawn = new Map<HTMLCanvasElement, string[]>();
   dom.window.HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement) {
-    const drawn: string[] = [];
-    texts.set(this, drawn);
-    return { setTransform() {}, clearRect() { drawn.length = 0; }, fillText(text: string) { drawn.push(text); }, drawImage() { drawn.push("(bars)"); },
-      beginPath() {}, rect() {}, fill() {}, fillRect() {}, roundRect() {}, save() {}, restore() {}, clip() {} };
+    const calls = drawn.get(this) ?? [];
+    drawn.set(this, calls);
+    return { setTransform() {}, clearRect() { calls.length = 0; }, fillText() { calls.push("text"); }, drawImage() { calls.push("copy"); },
+      beginPath() {}, rect() {}, fill() {}, fillRect() { calls.push("bar"); }, roundRect() {}, save() {}, restore() {}, clip() {} };
   } as unknown as typeof dom.window.HTMLCanvasElement.prototype.getContext;
 
-  const loaded = new Set<number>();
-  for (let row = 0; row < 150; row += 1) loaded.add(row);
-  const frame = (over: Partial<StandInFrame> = {}): StandInFrame => ({ rowHeight: 36, count: 2000, first: 0, windowStart: 0, windowEnd: 60, direction: 1, speed: 5,
-    version: ["order"], data: "first batch", text: (row, column) => loaded.has(row) ? `${column} ${row}` : undefined, ...over });
+  const frame = (over: Partial<StandInFrame> = {}): StandInFrame =>
+    ({ rowHeight: 36, count: 2000, first: 0, windowStart: 0, windowEnd: 60, direction: 1, speed: 5, ...over });
   const canvases = () => [...layer.querySelectorAll("canvas")];
   const shown = () => canvases().filter((canvas) => canvas.style.display !== "none");
-  const settle = () => { while (frames.length) frames.shift()!(); };
+  const leaving = () => canvases().filter((canvas) => canvas.hasAttribute(STAND_IN_LEAVING_ATTR));
+  const settleFrames = () => { while (frames.length) frames.shift()!(); };
   const standIns = createLibraryStandIns(scroller, layer);
   assert.equal(standIns.ready(), true);
 
@@ -110,73 +111,97 @@ test("tiles are repainted in place when rows arrive, hidden only when the order 
   let covered = standIns.update(frame());
   assert.equal(standInGap(covered, 100, 119 + 6 * 19), 0, "the viewport and six screens ahead are covered at once");
   assert.equal(layer.style.height, `${28 + 2000 * 36}px`, "the layer is the table's box, so no canvas lengthens the scroll range");
-  settle();
-  assert.ok(shown().length >= 6);
-  assert.ok(shown().every((canvas) => canvas.style.transform.startsWith("translate(0px, ")));
-  assert.ok([...texts.values()].some((drawn) => drawn.includes("title 100")));
-  assert.ok(shown().every((canvas) => !texts.get(canvas)!.includes("(bars)")), "at a readable speed the near screens are text");
-  assert.ok([...texts.values()].every((drawn) => !drawn.includes("title 150")), "rows that have not loaded have no text yet");
-
-  // The next batch of rows arrives: nothing on show is hidden, and the new text is painted.
+  settleFrames();
   const before = shown();
-  for (let row = 150; row < 400; row += 1) loaded.add(row);
-  standIns.update(frame({ data: "second batch" }));
-  assert.deepEqual(shown(), before, "arriving rows never blank a tile");
-  settle();
-  assert.deepEqual(shown(), before);
-  assert.ok([...texts.values()].some((drawn) => drawn.includes("title 150")));
+  assert.ok(before.length >= 6);
+  assert.ok(before.every((canvas) => canvas.style.transform.startsWith("translate(0px, ")));
+  assert.ok(before.every((canvas) => drawn.get(canvas)!.join() === "copy"), "a tile is one copy of the pattern");
+  assert.ok([...drawn.values()].every((calls) => !calls.includes("text")), "no text is ever painted");
+  assert.equal(standIns.takeStats().bars, before.length);
 
-  // Being asked to measure again with nothing changed repaints nothing.
-  const paints = [...texts.values()].map((drawn) => drawn.length);
+  // The same frame again, rows that arrive, a request to measure again with nothing changed: nothing is painted.
+  standIns.update(frame());
   standIns.invalidate();
-  standIns.update(frame({ data: "second batch" }));
-  settle();
-  assert.deepEqual([...texts.values()].map((drawn) => drawn.length), paints);
+  standIns.update(frame());
+  settleFrames();
+  assert.equal(standIns.takeStats().bars, 0);
   assert.deepEqual(shown(), before);
 
-  // A new order: what the tiles show is wrong. Each is painted again before it is shown, as text
-  // while the frame has time and as bars after that, so none is left blank or showing the old order.
-  loaded.delete(101);
-  standIns.takeStats();
-  covered = standIns.update(frame({ data: "second batch", version: ["another order"] }));
-  assert.equal(standInGap(covered, 100, 119 + 6 * 19), 0);
-  const repainted = standIns.takeStats();
-  assert.equal(repainted.text + repainted.bars >= before.length, true, "every tile was painted again in that frame");
-  assert.ok([...texts.values()].every((drawn) => !drawn.includes("title 101")), "nothing of the old order is left on show");
-  loaded.add(101);
-  settle();
-  assert.equal(shown().length, before.length);
-
-  // A flick at 60 px/ms: half a second of travel ahead, as bars, all of it within two frames; no text is painted.
-  const order = { data: "second batch", version: ["another order"] };
-  const textTiles = shown().length;
-  covered = standIns.update(frame({ ...order, speed: 60 }));
+  // A flick at 60 px/ms: half a second of travel ahead, all of it within two frames.
+  covered = standIns.update(frame({ speed: 60 }));
   if (frames.length) frames.shift()!();
-  covered = standIns.update(frame({ ...order, speed: 60 }));
+  covered = standIns.update(frame({ speed: 60 }));
   assert.equal(standInGap(covered, 100, 119 + 833), 0, "thirty thousand pixels ahead are covered");
   assert.ok(shown().length >= 30);
-  assert.equal(shown().filter((canvas) => texts.get(canvas)!.includes("(bars)")).length, shown().length - textTiles, "every new tile is bars");
-  assert.deepEqual(standIns.takeStats().bars, shown().length - textTiles);
-  // The next batch does not touch bars; slowing down turns the near screens into text again.
-  standIns.takeStats();
-  scrollTop = 600 * 36;
-  standIns.update(frame({ ...order, speed: 60 }));
-  settle();
-  assert.equal(standIns.takeStats().text, 0, "nothing is read at that speed");
-  for (let row = 400; row < 2000; row += 1) loaded.add(row);
-  standIns.update(frame({ ...order, data: "third batch", speed: 60 }));
-  settle();
-  assert.equal(standIns.takeStats().text, 0, "arriving rows repaint no bars");
-  covered = standIns.update(frame({ ...order, data: "third batch", speed: 5 }));
-  assert.equal(standInGap(covered, 600, 619 + 6 * 19), 0);
-  settle();
-  assert.ok([...texts.values()].some((drawn) => drawn.includes("title 600")), "the viewport reads as text again");
-  assert.ok(shown().every((canvas) => !texts.get(canvas)!.includes("(bars)")));
+  assert.equal(standIns.takeStats().bars, shown().length - before.length, "only the new tiles are painted");
 
-  // The scroll slowed down and the table built its rows here: no canvas stays on show.
-  covered = standIns.update(frame({ ...order, data: "third batch", direction: 0, windowStart: 560, windowEnd: 680 }));
+  // The list got shorter under the viewport: the last tile ends with the table.
+  scrollTop = 600 * 36;
+  covered = standIns.update(frame({ speed: 5, count: 700 }));
+  settleFrames();
+  assert.equal(standInGap(covered, 600, 700), 0);
+  assert.ok(covered.every(([, end]) => end <= 700));
+
+  // The scroll slowed down and the table built its rows here; they arrive from row 600 downwards,
+  // fourteen of them one after the other. The tiles around the viewport are wiped away ahead of
+  // them; those further away, and whatever lies behind the first arriving row, go at once.
+  const down = { row: 600, direction: 1, rows: 14 } as const;
+  const wipe = (canvas: HTMLCanvasElement) => ["from", "to", "wait", "share"].map((name) => canvas.style.getPropertyValue(`--kd-wipe-${name}`));
+  const tileAt = (row: number) => shown().find((canvas) => canvas.style.transform === `translate(0px, ${28 + Math.floor(row / STAND_IN_TILE_ROWS) * STAND_IN_TILE_ROWS * 36}px)`)!;
+  standIns.update(frame({ speed: 5 }));
+  settleFrames();
+  assert.ok(shown().length >= 6);
+  assert.ok(tileAt(590), "a screen behind a fast scroll is covered");
+  assert.equal(standIns.settle(down), true);
+  assert.equal(leaving().length, 2, "the tile under the viewport and the next one");
+  assert.deepEqual(shown(), leaving());
+  // Rows 600…623 are one tile: bars leave rows 600…613 at the pace the rows start, over the whole of the time; the rest waits for the last beat.
+  assert.deepEqual(wipe(tileAt(600)), ["inset(0px 0 0px 0)", `inset(${14 * 36}px 0 0px 0)`, "0.000", "1.000"]);
+  assert.deepEqual(wipe(tileAt(624)), ["inset(0px 0 0px 0)", "inset(0px 0 0px 0)", "1.000", "0.000"], "rows past the cascade keep their bars until it is over");
+  // While they leave, the table asking for its resting state takes nothing away…
+  const fading = leaving();
+  covered = standIns.update(frame({ direction: 0, windowStart: 560, windowEnd: 680 }));
+  assert.deepEqual(covered, [[560, 680]]);
+  assert.deepEqual(shown(), fading);
+  // …and it is over on the clock of a surface that leaves; nothing of it stays on a canvas.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(shown().length, 0);
+  assert.equal(leaving().length, 0);
+  assert.ok(canvases().every((canvas) => !canvas.style.getPropertyValue("--kd-wipe-from") && !canvas.style.getPropertyValue("--kd-wipe-to")));
+
+  // Towards the top the rows arrive from the bottom one upwards (row 618 first): the wipe runs the other way.
+  standIns.update(frame({ speed: 5, direction: -1, windowStart: 900, windowEnd: 1000 }));
+  settleFrames();
+  assert.equal(standIns.settle({ row: 618, direction: -1, rows: 14 }), true);
+  assert.deepEqual(wipe(tileAt(600)), [`inset(0px 0 ${5 * 36}px 0)`, `inset(0px 0 ${19 * 36}px 0)`, "0.000", "1.000"], "rows 619…623 lie behind the scroll; 605…618 are passed");
+  assert.deepEqual(wipe(tileAt(590)), ["inset(0px 0 0px 0)", "inset(0px 0 0px 0)", "1.000", "0.000"]);
+  // A wipe that crosses from one tile into the next: each takes its share of the time, one after the other.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  standIns.update(frame({ speed: 5 }));
+  settleFrames();
+  assert.equal(standIns.settle({ row: 616, direction: 1, rows: 14 }), true);
+  assert.deepEqual(wipe(tileAt(600)), [`inset(${16 * 36}px 0 0px 0)`, `inset(${24 * 36}px 0 0px 0)`, "0.000", "0.571"], "rows 616…623: eight of the fourteen, first");
+  assert.deepEqual(wipe(tileAt(624)), ["inset(0px 0 0px 0)", `inset(${6 * 36}px 0 0px 0)`, "0.571", "0.429"], "rows 624…629: the other six, after them");
+  assert.equal(shown().every((canvas) => canvas.style.transform !== tileAt(600).style.transform || canvas === tileAt(600)), true);
+
+  // A second fling while the stand-ins leave: they are bars again at once, none of them leaving.
+  covered = standIns.update(frame({ speed: 20, windowStart: 560, windowEnd: 580 }));
+  assert.equal(leaving().length, 0);
+  assert.equal(standInGap(covered, 600, 619 + 6 * 19), 0);
+  assert.ok(shown().length >= 6);
+  assert.ok(shown().every((canvas) => !canvas.style.getPropertyValue("--kd-wipe-from")));
+
+  // Reduced motion: nothing is wiped, the stand-ins are simply gone.
+  reducedMotion = true;
+  assert.equal(standIns.settle(down), false);
+  assert.equal(shown().length, 0);
+  reducedMotion = false;
+
+  // A table that builds its own rows holds no canvas on show.
+  covered = standIns.update(frame({ direction: 0, windowStart: 560, windowEnd: 680 }));
   assert.equal(shown().length, 0);
   assert.deepEqual(covered, [[560, 680]]);
+  assert.equal(standIns.settle(down), false, "nothing on show, nothing to wipe");
   standIns.destroy();
   assert.equal(canvases().length, 0);
 });

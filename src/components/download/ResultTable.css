@@ -129,13 +129,15 @@ td > .kd-result-keyed { width: 100%; }
    that is presented plays it afresh: a delivered list, the pane shown again, a batch added at
    the end. The mark is the row's step: fourteen rows rise one after another from the first one
    in view (28 ms apart), each cover scales in a beat after its row and the source badges land a
-   beat after that; the rows behind them ("rest") arrive together on the last beat. */
+   beat after that; the rows behind them ("rest") arrive together on the last beat. The rise and
+   the cover are the shared gesture of a presented list (motion.css, "A list that is presented"),
+   which the local track list plays too; the beats below are its lead (60ms) and step (28ms). */
 .kd-table[data-kind="results"] > tbody > tr[data-reveal] {
   --kd-reveal-at: 440ms;
-  animation: kd-result-rise 380ms cubic-bezier(0.2, 0.85, 0.25, 1) var(--kd-reveal-at) backwards;
+  animation: kd-motion-list-rise var(--kd-motion-list-row) var(--kd-ease-list) var(--kd-reveal-at) backwards;
 }
 .kd-table[data-kind="results"] > tbody > tr[data-reveal="rest"] {
-  animation: kd-result-fade 240ms ease-out var(--kd-reveal-at) backwards;
+  animation: kd-result-fade var(--kd-motion-list-rest) ease-out var(--kd-reveal-at) backwards;
 }
 .kd-table[data-kind="results"] > tbody > tr[data-reveal="0"] { --kd-reveal-at: 60ms; }
 .kd-table[data-kind="results"] > tbody > tr[data-reveal="1"] { --kd-reveal-at: 88ms; }
@@ -152,7 +154,7 @@ td > .kd-result-keyed { width: 100%; }
 .kd-table[data-kind="results"] > tbody > tr[data-reveal="12"] { --kd-reveal-at: 396ms; }
 .kd-table[data-kind="results"] > tbody > tr[data-reveal="13"] { --kd-reveal-at: 424ms; }
 .kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-thumb {
-  animation: kd-result-cover 420ms cubic-bezier(0.3, 1.45, 0.5, 1) calc(var(--kd-reveal-at) + 70ms) backwards;
+  animation: kd-motion-list-cover var(--kd-motion-list-cover) var(--kd-ease-list-cover) calc(var(--kd-reveal-at) + var(--kd-motion-list-cover-after)) backwards;
 }
 .kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-source-dot {
   animation: kd-result-badge 340ms cubic-bezier(0.3, 1.6, 0.5, 1) calc(var(--kd-reveal-at) + 170ms) backwards;
@@ -164,17 +166,9 @@ td > .kd-result-keyed { width: 100%; }
 .kd-table[data-kind="results"] > tbody > tr[data-reveal]:not([data-reveal="rest"]) .kd-source-dot:nth-child(n + 3) {
   animation-delay: calc(var(--kd-reveal-at) + 290ms);
 }
-@keyframes kd-result-rise {
-  from { opacity: 0; transform: translateY(14px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 @keyframes kd-result-fade {
   from { opacity: 0; }
   to { opacity: 1; }
-}
-@keyframes kd-result-cover {
-  from { opacity: 0; transform: scale(0.5) rotate(-10deg); }
-  to { opacity: 1; transform: scale(1) rotate(0deg); }
 }
 /* No opacity here: a badge of a source that is not the picked one keeps its own dimming. */
 @keyframes kd-result-badge {

@@ -7720,9 +7720,9 @@ button.kd-camelot-grid-key { cursor: pointer; }
   z-index: 5;
   pointer-events: none;
 }
-/* Stand-in rows of the track table (src/lib/libraryStandIns.ts): canvases laid over the rows the
-   table has not built, scrolling with it. The scroll container above is positioned, so they are
-   placed in its content. They never take the pointer. */
+/* What a fast scroll of the track table shows (src/lib/libraryStandIns.ts): canvases of bars laid
+   over the rows the table has not built, scrolling with it. The scroll container above is
+   positioned, so they are placed in its content. They never take the pointer. */
 .kd-table-standins {
   position: absolute;
   top: 0;
@@ -7738,6 +7738,19 @@ button.kd-camelot-grid-key { cursor: pointer; }
   top: 0;
   left: 0;
   transform-origin: 0 0;
+}
+/* The scroll slowed down and the rows built there are arriving one after the other
+   (ListArrival.css, the chase). The bars still in view are wiped away just ahead of them, at the
+   pace the rows start: a row never shows through its own bar, and no place is left bare. The
+   script gives each canvas the clip it starts with and the one it ends with, and the share of
+   the time the wipe spends on it and waits before reaching it, and releases it when it is over. */
+.kd-table-standins > canvas[data-leaving] {
+  animation: kd-table-standins-wipe calc(var(--kd-motion-micro-out) * var(--kd-wipe-share, 1)) linear
+    calc(var(--kd-motion-micro-out) * var(--kd-wipe-wait, 0)) both;
+}
+@keyframes kd-table-standins-wipe {
+  from { clip-path: var(--kd-wipe-from); }
+  to { clip-path: var(--kd-wipe-to); }
 }
 .kd-scroll-handle {
   position: absolute;

@@ -2489,6 +2489,7 @@ export function Workspace() {
                     selectedId={selectedId}
                     selectedIds={selectedIds}
                     shortcutActive={activeWorkspacePane === "local"}
+                    visible={localPaneVisible}
                     sort={filter.sort}
                     order={filter.order}
                     onSelect={selectTrack}
@@ -2527,7 +2528,7 @@ export function Workspace() {
                       onFocusCapture={() => focusWorkspacePane("search")}
                     >
                       {temporaryLibrary ? <TemporaryFolderPane key={temporaryLibrary.id} library={temporaryLibrary}
-                        active={activeWorkspacePane === "search"} shown={searchPaneVisible} layout={layout}
+                        active={activeWorkspacePane === "search"} shown={searchPaneVisible} visible={searchPaneVisible} layout={layout}
                         onSelect={(id, mode, clickCount) => selectTrack(id, mode, clickCount, temporaryLibrary.store)}
                         onClose={() => {
                           setTemporaryLibrary(null);

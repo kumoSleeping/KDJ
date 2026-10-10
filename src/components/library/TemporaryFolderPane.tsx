@@ -11,11 +11,13 @@ import { enqueueSearchDrop, isSearchDownloadDrag } from "../../lib/searchDrag";
 import { TrackTable } from "./TrackTable";
 import { InlineNotice } from "../common";
 
-export function TemporaryFolderPane({ library, active, shown = true, layout, onSelect, onClose }: {
+export function TemporaryFolderPane({ library, active, shown = true, visible = true, layout, onSelect, onClose }: {
   library: TemporaryLibrary;
   active: boolean;
   /** False while its pane is hidden; see `WorkRail`. */
   shown?: boolean;
+  /** Whether the pane this folder is in is the shown one: its list arrives again each time it is. */
+  visible?: boolean;
   layout: LayoutMode;
   onSelect(id: number, mode: SelectMode, clickCount?: number): void;
   onClose(): void;
@@ -55,7 +57,7 @@ export function TemporaryFolderPane({ library, active, shown = true, layout, onS
     </div>}
     <TrackTable libraryStore={library.store} persistentSession={false} layout={layout}
       total={state.total} loading={state.loading} selectedId={state.selectedId} selectedIds={state.selectedIds}
-      shortcutActive={active} sort={state.filter.sort} order={state.filter.order}
+      shortcutActive={active} visible={visible} sort={state.filter.sort} order={state.filter.order}
       sort2={state.filter.sort2} order2={state.filter.order2} onSelect={onSelect} onSort={state.cycleSort} />
   </div>;
 }
