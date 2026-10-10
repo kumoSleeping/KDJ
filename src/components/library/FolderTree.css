@@ -633,6 +633,120 @@ div.kd-stream-status:hover {
   overflow-wrap: anywhere;
 }
 
+/* ============================================================
+ * Rows arriving and folding (sidebarMotion.ts sets the marks; the clock is motion.css).
+ *
+ * Arriving: each row rises a little and fades in, the first twelve one step apart (the last has
+ * arrived after 292ms) and the next ones together with the twelfth. The marks are on the rows
+ * only for that long, so no render, selection or count can play it again.
+ * A branch the user opens: what lies below slides down from where it was (240ms), and the
+ * branch is uncovered at the same pace, so nothing overlaps while its rows arrive.
+ * A branch the user closes: a picture of it stays over the place it held, is covered from
+ * below as the rows under it close up, and its own rows go from the last one up.
+ * Only transform, opacity and the clip move; every keyframe names both ends.
+ * ========================================================== */
+.kd-tree-node,
+.kd-stream-root,
+.kd-stream-section,
+.kd-narrow-stream-section {
+  /* The picture of a closed branch is placed inside its owner. */
+  position: relative;
+}
+.kd-tree-branch {
+  min-width: 0;
+}
+.kd-folder-pane,
+.kd-narrow-folder-rail,
+.kd-folder-picker {
+  /* A branch opens and shuts in a beat and a half of the small clock: 240ms. */
+  --kd-tree-fold-time: calc(var(--kd-motion-micro) * 1.5);
+}
+/* The rail's items are a column with a gap; a section's playlists keep it. */
+.kd-narrow-branch {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.1rem;
+}
+[data-kd-tree-enter] {
+  animation: kd-tree-row-in var(--kd-motion-micro) var(--kd-ease-out) backwards;
+  animation-delay: calc(var(--kd-tree-i, 0) * 12ms);
+}
+@keyframes kd-tree-row-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+[data-kd-tree-shift] {
+  animation: kd-tree-shift var(--kd-tree-fold-time) var(--kd-ease-out) backwards;
+}
+@keyframes kd-tree-shift {
+  from { transform: translateY(var(--kd-tree-shift, 0px)); }
+  to { transform: translateY(0); }
+}
+[data-kd-tree-unfold] {
+  animation: kd-tree-unfold var(--kd-tree-fold-time) var(--kd-ease-out) backwards;
+}
+@keyframes kd-tree-unfold {
+  from { clip-path: inset(0 0 100% 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+[data-kd-tree-fold] {
+  position: absolute;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  animation: kd-tree-fold var(--kd-tree-fold-time) var(--kd-ease-out) forwards;
+}
+@keyframes kd-tree-fold {
+  from { clip-path: inset(0 0 0 0); }
+  to { clip-path: inset(0 0 100% 0); }
+}
+[data-kd-tree-fold]:is(.kd-tree-branch, .kd-narrow-branch) :is(.kd-folder, .kd-narrow-branch > button) {
+  animation: kd-tree-row-out var(--kd-motion-micro-out) var(--kd-ease-in) forwards;
+  animation-delay: calc(var(--kd-tree-i, 11) * var(--kd-motion-stagger));
+}
+@keyframes kd-tree-row-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-4px); }
+}
+/* A playlist that was opened goes to the front of its list a beat after the click
+   (useShownRecents in FolderTree.tsx): every row whose place changed travels there from where
+   it was, in two beats of the small clock. The one that went up is lifted while it passes the
+   others: it lies over them on a raised face and is a touch larger on the way. */
+[data-kd-tree-move] {
+  animation: kd-tree-shift calc(var(--kd-motion-micro) * 2) var(--kd-ease-out) backwards;
+}
+[data-kd-tree-move="lift"] {
+  position: relative;
+  z-index: 1;
+  animation: kd-tree-shift calc(var(--kd-motion-micro) * 2) var(--kd-ease-out) backwards,
+    kd-tree-lift calc(var(--kd-motion-micro) * 2) ease-in-out backwards;
+}
+/* The raised face is a layer of its own behind the row's content: it comes and goes by opacity. */
+[data-kd-tree-move="lift"]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: 6px;
+  background: var(--kd-panel-raised);
+  box-shadow: var(--kd-float-shadow);
+  pointer-events: none;
+  animation: kd-tree-lift-face calc(var(--kd-motion-micro) * 2) linear both;
+}
+@keyframes kd-tree-lift-face {
+  from { opacity: 0; }
+  12% { opacity: 1; }
+  70% { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes kd-tree-lift {
+  from { scale: 1; }
+  40% { scale: 1.03; }
+  to { scale: 1; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .kd-folder:is([data-drop="true"], [data-kd-pointer-track-over="folder"]),
   .kd-narrow-folder-rail button:is([data-drop="true"], [data-kd-pointer-track-over="folder"]),
@@ -647,6 +761,19 @@ div.kd-stream-status:hover {
   }
   .kd-sidebar-root-slot[data-root-edge]::before,
   .kd-sidebar-root-slot[data-root-edge]::after {
+    animation: none;
+  }
+  /* Rows arrive with one short fade and nothing slides or folds (the script asks for neither). */
+  [data-kd-tree-enter] {
+    animation: kd-motion-fade-in var(--kd-motion-reduced) linear backwards;
+    animation-delay: 0ms;
+  }
+  [data-kd-tree-shift],
+  [data-kd-tree-move],
+  [data-kd-tree-move]::before,
+  [data-kd-tree-unfold],
+  [data-kd-tree-fold],
+  [data-kd-tree-fold]:is(.kd-tree-branch, .kd-narrow-branch) :is(.kd-folder, .kd-narrow-branch > button) {
     animation: none;
   }
 }
@@ -677,4 +804,48 @@ div.kd-stream-status:hover {
 }
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-folder:is([data-active="true"], [data-selected="true"]) .kd-folder-drag {
   color: inherit;
+}
+/* Sakura98: rows are drawn a line at a time with a two-step rise, and a branch opens and shuts
+   in four steps instead of a glide. */
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-enter] {
+  animation-name: kd-tree-row-in-98;
+  animation-duration: 120ms;
+  animation-timing-function: steps(1, end);
+}
+@keyframes kd-tree-row-in-98 {
+  from { opacity: 0; transform: translateY(4px); }
+  34% { opacity: 1; transform: translateY(4px); }
+  67% { opacity: 1; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+:root[data-theme-pack="sakulaptop98"] :is([data-kd-tree-shift], [data-kd-tree-unfold], [data-kd-tree-fold]) {
+  animation-timing-function: steps(4, end);
+}
+/* A playlist changing places hops there in six steps, as a raised key. */
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-move] {
+  animation-timing-function: steps(6, end);
+}
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-move="lift"] {
+  animation: kd-tree-shift calc(var(--kd-motion-micro) * 2) steps(6, end) backwards;
+}
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-move="lift"]::before {
+  border-radius: 2px;
+  background: var(--s98-face-hi);
+  box-shadow: var(--s98-raised);
+  animation-timing-function: steps(1, end);
+}
+:root[data-theme-pack="sakulaptop98"] [data-kd-tree-fold]:is(.kd-tree-branch, .kd-narrow-branch) :is(.kd-folder, .kd-narrow-branch > button) {
+  animation-name: kd-tree-row-out-98;
+  animation-timing-function: steps(1, end);
+}
+@keyframes kd-tree-row-out-98 {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme-pack="sakulaptop98"] [data-kd-tree-enter] {
+    animation-name: kd-motion-fade-in;
+    animation-duration: var(--kd-motion-reduced);
+    animation-timing-function: linear;
+  }
 }
