@@ -1018,13 +1018,13 @@ export interface MiniPlayerState {
 export interface MiniPlayerBridge {
   state(): Promise<MiniPlayerState>;
   /**
-   * 完整窗口直接消失，窗口变成气泡，先停在屏幕之外；`rect` 是气泡在完整窗口里的位置
+   * 完整窗口淡出，窗口变成气泡，先不显示；`rect` 是气泡在完整窗口里的位置
    * （CSS 像素），`homeRight`/`homeBottom` 是它在完整窗口里原位的右、下边。页面按新大小画好后
    * 调 `reveal` 才出现。
    */
-  collapse(rect: { x: number; y: number; width: number; height: number; homeRight: number; homeBottom: number }): Promise<MiniPlayerState>;
+  collapse(rect: { x: number; y: number; width: number; height: number; homeRight: number; homeBottom: number }, animated: boolean): Promise<MiniPlayerState>;
   /** 页面已按窗口的新大小画好：窗口在该在的地方出现。 */
-  reveal(): Promise<MiniPlayerState>;
+  reveal(animated: boolean): Promise<MiniPlayerState>;
   /** 迷你播放器所在（或将要去）的位置，相对完整窗口左上角，CSS 像素；没有自己的位置时为 null。 */
   place(width: number, height: number): Promise<[number, number] | null>;
   /** 沿抛物线飞到上次放下它的地方。 */
@@ -1032,7 +1032,7 @@ export interface MiniPlayerBridge {
   /** 记下现在的位置，沿抛物线飞回完整窗口里气泡所在的角上；`stay` 时留在原地。 */
   recall(animated: boolean, stay: boolean): Promise<void>;
   /** 气泡消失，窗口变回完整窗口，先停在屏幕之外，`reveal` 后出现。 */
-  expand(): Promise<MiniPlayerState>;
+  expand(animated: boolean): Promise<MiniPlayerState>;
   /** 换歌：从最近的屏幕边缘滑出去再回来。毫秒。 */
   dip(outMs: number, inMs: number): Promise<void>;
   /** 气泡换了大小，窗口立刻跟上。CSS 像素。 */

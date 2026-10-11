@@ -70,6 +70,12 @@
   box-shadow: none;
   animation: none;
 }
+/* The transport row is open the moment the bubble is the window: the window has the height
+   of the open bubble, and a row still unfolding would leave a bare strip under it. */
+:root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] .kd-task-controls,
+:root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] .kd-task-controls * {
+  transition: none;
+}
 /* The macOS window rounds its own corners; a square line would be cut by them. */
 :root[data-kd-mini="on"]:has(.kd-app[data-mac="true"]) .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] {
   border-color: transparent;

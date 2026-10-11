@@ -23,8 +23,15 @@ use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 const STATE_FILE: &str = "mini-player.json";
 /// The bubble's flight between its corner of the whole window and its place.
 const FLIGHT_MS: u64 = 420;
-/// A window left beyond the screens is shown after this long whatever the page does.
-const REVEAL_WITHIN: Duration = Duration::from_millis(900);
+/// A window left out of sight is shown after this long whatever the page does.
+const REVEAL_WITHIN: Duration = Duration::from_millis(1600);
+/// The window goes out of sight and comes back by a short fade (macOS), so the moment it is
+/// another window is a soft one and not a flicker.
+const FADE_OUT_MS: u64 = 110;
+const FADE_IN_MS: u64 = 160;
+/// All but clear rather than clear: still a window on show to the system, so the page in it
+/// goes on drawing.
+const CLEAR: f64 = 0.01;
 const TICK: Duration = Duration::from_millis(8);
 /// The last frame is handed to the window's own thread; the page is told afterwards.
 const SETTLE: Duration = Duration::from_millis(40);
@@ -386,12 +393,10 @@ async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Durat
     tokio::time::sleep(SETTLE).await;
 }
 
-/// Makes the window clear, or solid again. macOS only: there a window that is given a size is
-/// brought back onto its screen, so it cannot be put out of sight by moving it. All but clear
-/// rather than clear, so that it is still a window on show to the system and the page in it
-/// goes on drawing.
+/// How solid the window is. macOS only: there a window that is given a size is brought back
+/// onto its screen, so it cannot be put out of sight by moving it.
 #[cfg(target_os = "macos")]
-fn veil(window: &WebviewWindow, veiled: bool) {
+fn set_alpha(window: &WebviewWindow, alpha: f64) {
     use objc2::msg_send;
     use objc2_app_kit::NSWindow;
 
@@ -401,20 +406,39 @@ fn veil(window: &WebviewWindow, veiled: bool) {
         // SAFETY: Tauri owns this NSWindow for target's lifetime, and the lookup and the
         // AppKit call run in one main-thread closure holding that owner.
         let Some(native) = (unsafe { raw.cast::<NSWindow>().as_ref() }) else { return; };
-        let alpha: f64 = if veiled { 0.01 } else { 1.0 };
         // SAFETY: setAlphaValue: takes a CGFloat and returns nothing.
         let _: () = unsafe { msg_send![native, setAlphaValue: alpha] };
     });
 }
 
 #[cfg(not(target_os = "macos"))]
-fn veil(_window: &WebviewWindow, _veiled: bool) {}
+fn set_alpha(_window: &WebviewWindow, _alpha: f64) {}
+
+/// The window fades from `from` to `to`. Nothing happens where a window has no such thing.
+async fn fade(window: &WebviewWindow, from: f64, to: f64, duration: Duration) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let started = Instant::now();
+    loop {
+        let t = if duration.is_zero() {
+            1.0
+        } else {
+            (started.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0)
+        };
+        set_alpha(window, from + (to - from) * t);
+        if t >= 1.0 {
+            break;
+        }
+        tokio::time::sleep(TICK).await;
+    }
+}
 
 /// Takes the window out of sight as it is: nothing of what is done to it next (its ways, its
-/// size) is seen. Clear on macOS; elsewhere beyond the screens, where a window stays put.
-fn conceal(window: &WebviewWindow) -> Result<(), String> {
+/// size) is seen. Faded out on macOS; elsewhere beyond the screens, where a window stays put.
+async fn conceal(window: &WebviewWindow, animated: bool) -> Result<(), String> {
     if cfg!(target_os = "macos") {
-        veil(window, true);
+        fade(window, 1.0, CLEAR, time(animated, FADE_OUT_MS)).await;
     } else {
         let current = frame_of(window)?;
         let (x, y) = beyond(&monitors_of(window));
@@ -433,18 +457,17 @@ async fn park(app: &AppHandle, window: &WebviewWindow, frame: Frame) {
         Frame { x, y, ..frame }
     };
     apply(window, hidden, true);
-    // Short: for as long as the window is concealed, nothing of it is on the screen.
-    tokio::time::sleep(TICK * 2).await;
+    tokio::time::sleep(SETTLE).await;
     let (app, window) = (app.clone(), window.clone());
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(REVEAL_WITHIN).await;
-        reveal(&app, &window).await;
+        reveal(&app, &window, true).await;
     });
 }
 
 /// Shows a concealed window where it was to be shown. Once: a second call finds nothing
 /// pending.
-async fn reveal(app: &AppHandle, window: &WebviewWindow) {
+async fn reveal(app: &AppHandle, window: &WebviewWindow, animated: bool) {
     let Some(mini) = app.try_state::<MiniPlayer>() else { return; };
     let shown = {
         let mut inner = mini.lock();
@@ -459,7 +482,7 @@ async fn reveal(app: &AppHandle, window: &WebviewWindow) {
         let _ = window.maximize();
         tokio::time::sleep(SETTLE).await;
     }
-    veil(window, false);
+    fade(window, CLEAR, 1.0, time(animated, FADE_IN_MS)).await;
     if session.expanding {
         tokio::time::sleep(SETTLE).await;
         // Only now is a move or a resize the main window's again.
@@ -536,7 +559,12 @@ pub fn mini_player_state(app: AppHandle) -> Result<MiniPlayerState, String> {
 /// The whole window is gone and the window is the bubble: `rect` is where the bubble is in
 /// the whole window (CSS pixels of the viewport). It is shown there by `mini_player_reveal`.
 #[tauri::command]
-pub async fn mini_player_collapse(app: AppHandle, window: WebviewWindow, rect: ClientRect) -> Result<MiniPlayerState, String> {
+pub async fn mini_player_collapse(
+    app: AppHandle,
+    window: WebviewWindow,
+    rect: ClientRect,
+    animated: bool,
+) -> Result<MiniPlayerState, String> {
     main_only(&window)?;
     let mini = mini_of(&app)?;
     let _step = Step::begin(&mini)?;
@@ -587,7 +615,7 @@ pub async fn mini_player_collapse(app: AppHandle, window: WebviewWindow, rect: C
         });
         inner.saved.on_top
     };
-    conceal(&window)?;
+    conceal(&window, animated).await?;
     if maximized {
         // A maximized window does not take a size.
         let _ = window.unmaximize();
@@ -600,9 +628,9 @@ pub async fn mini_player_collapse(app: AppHandle, window: WebviewWindow, rect: C
 
 /// The page has drawn for the window's new size: the window is shown where it belongs.
 #[tauri::command]
-pub async fn mini_player_reveal(app: AppHandle, window: WebviewWindow) -> Result<MiniPlayerState, String> {
+pub async fn mini_player_reveal(app: AppHandle, window: WebviewWindow, animated: bool) -> Result<MiniPlayerState, String> {
     main_only(&window)?;
-    reveal(&app, &window).await;
+    reveal(&app, &window, animated).await;
     Ok(mini_of(&app)?.state())
 }
 
@@ -690,7 +718,7 @@ pub async fn mini_player_recall(app: AppHandle, window: WebviewWindow, animated:
 /// The bubble is gone and the window is the whole window again, beyond the screens until
 /// `mini_player_reveal` shows it where it was.
 #[tauri::command]
-pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow) -> Result<MiniPlayerState, String> {
+pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated: bool) -> Result<MiniPlayerState, String> {
     main_only(&window)?;
     let mini = mini_of(&app)?;
     let _step = Step::begin(&mini)?;
@@ -704,7 +732,7 @@ pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow) -> Result
         session.expanding = true;
         session.full
     };
-    conceal(&window)?;
+    conceal(&window, animated).await?;
     dress(&app, &window, false, false);
     park(&app, &window, full).await;
     Ok(mini.state())

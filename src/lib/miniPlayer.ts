@@ -9,9 +9,9 @@ import { useWindowTaken } from "./windowTaken";
  * they are; the window's frame is the native side's (src-tauri/src/mini_player.rs) and what is
  * drawn, and in which order, is decided here.
  *
- * Nothing is animated about the window's size. The whole window is gone at once and the
- * bubble is left where it was, as a window of its own; back, the whole window is there at
- * once. The one thing that moves is the bubble: it flies in an arc, like something thrown,
+ * Nothing is animated about the window's size. The whole window fades away and the bubble is
+ * there in its place, as a window of its own; back, the bubble fades and the whole window is
+ * there. The one thing that moves is the bubble: it flies in an arc, like something thrown,
  * between its corner of the whole window and the place the listener last left it at.
  *
  * Down: the bar leaves and the bubble becomes the transport (`readying`, a few frames); the
@@ -113,6 +113,20 @@ function insideWindow(place: readonly [number, number] | null | undefined, width
   return !!place && place[0] >= 0 && place[1] >= 0 && place[0] + width <= of.width && place[1] + height <= of.height;
 }
 
+/** How long the page may take to learn the window's new size, in ms. */
+const RESIZE_WAIT_MS = 700;
+
+/**
+ * The page has the size the window was given, and has drawn for it. Nothing is hurried here:
+ * the window is out of sight meanwhile, and showing it a frame early shows the last picture
+ * of the other size.
+ */
+async function drawnFor(width: number, height: number): Promise<void> {
+  const until = performance.now() + RESIZE_WAIT_MS;
+  while (performance.now() < until && (Math.abs(window.innerWidth - width) > 2 || Math.abs(window.innerHeight - height) > 2)) await frame();
+  for (let drawn = 0; drawn < 4; drawn += 1) await frame();
+}
+
 /** The bubble once it is the transport (the bar has been sent away), or as it is if it never is. */
 async function transportBubble(): Promise<HTMLElement | null> {
   let bubble: HTMLElement | null = null;
@@ -137,8 +151,8 @@ let switching = false;
 async function restore(): Promise<void> {
   const bridge = window.kdj?.miniPlayer;
   if (bridge && (await bridge.state().catch(() => null))?.active) {
-    await bridge.expand().catch(() => {});
-    await bridge.reveal().catch(() => {});
+    await bridge.expand(false).catch(() => {});
+    await bridge.reveal(false).catch(() => {});
   }
   clearPage();
   useWindowTaken.getState().release(MINI_PLAYER);
@@ -182,15 +196,21 @@ export async function collapseToMiniPlayer(): Promise<void> {
     keepLayout(whole);
     const state = await bridge.collapse({
       x: at.x, y: at.y, width: box.width, height, homeRight: home.x + box.width, homeBottom: home.y + height,
-    });
+    }, animated);
     useMiniPlayer.setState({ onTop: state.onTop });
     setPhase("on");
     flight?.cancel();
     flight = null;
     // The page draws the bubble as the window before the window is shown again.
-    await frame();
-    await frame();
-    await bridge.reveal();
+    await drawnFor(box.width, height);
+    // Should the bubble be another height than was foreseen, the window takes it now, out of
+    // sight, and not a moment after it is shown.
+    const tall = Math.ceil(bubble.getBoundingClientRect().height);
+    if (tall > 0 && Math.abs(tall - window.innerHeight) >= 1) {
+      await bridge.fit(window.innerWidth, tall).catch(() => {});
+      await drawnFor(window.innerWidth, tall);
+    }
+    await bridge.reveal(animated);
     // A place outside the whole window: the mini player's own window flies there.
     await bridge.settle(animated).catch(() => {});
   } catch (error) {
@@ -221,16 +241,15 @@ export async function expandFromMiniPlayer(): Promise<void> {
     }
     // Otherwise the mini player's own window flies back to that corner first.
     await bridge.recall(animated, !!away).catch(() => {});
-    await bridge.expand();
+    await bridge.expand(animated);
     setPhase("landing");
     if (away && slot) {
       flight = fly(slot, away, { x: 0, y: 0 }, animated);
       flight?.pause();
     }
     // The page draws the whole window, the bubble still at its place, before it is shown.
-    await frame();
-    await frame();
-    await bridge.reveal();
+    if (whole) await drawnFor(whole.width, whole.height);
+    await bridge.reveal(animated);
     flight?.play();
     await flight?.finished.catch(() => {});
     clearPage();

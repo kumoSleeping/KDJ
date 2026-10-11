@@ -41,7 +41,7 @@ test("the whole window goes at once and the bubble flies to its place, and back 
     miniPlayer: {
       state: async () => state(),
       place: async (width: number, tall: number) => { ask(`place ${width}x${tall}`); return place; },
-      collapse: async (rect: { x: number; y: number; width: number; height: number; homeRight: number; homeBottom: number }) => {
+      collapse: async (rect: { x: number; y: number; width: number; height: number; homeRight: number; homeBottom: number }, _animated: boolean) => {
         ask(`collapse ${rect.x},${rect.y} ${rect.width}x${rect.height} home ${rect.homeRight},${rect.homeBottom}`);
         if (failCollapse) throw new Error("no");
         resize(384, 148);

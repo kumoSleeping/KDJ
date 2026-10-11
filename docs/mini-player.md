@@ -33,7 +33,13 @@ frame). macOS and Windows run the same steps through the same window calls.
 ## Rules
 
 - **Nothing is animated about the window's size, and there is never an empty window to
-  watch.** The whole window goes and comes at once. An earlier version shrank and grew the
+  watch.** The whole window goes and comes by a short fade (macOS: about a tenth of a second
+  out, a little more in), which is what makes the moment it becomes another window soft; a
+  hard cut there read as a flicker.
+- **Not hurried.** Between going out of sight and coming back the page waits until it has
+  the window's new size and has drawn several frames for it (`drawnFor`). Showing the window
+  a frame early shows the last picture of the other size; a tenth of a second more out of
+  sight is not noticed. An earlier version shrank and grew the
   window (first empty, then with the page drawn to fit) and was rejected both times: the one
   thing that moves is the bubble's flight.
 - **The window never changes size where it can be seen.** A WebView shows its last picture,
