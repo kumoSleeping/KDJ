@@ -765,7 +765,7 @@ export function SettingsPanel({ preferences = false, page }: {
 
         {on("system") && <ActivityLogPanel />}
 
-        {on("sources") && ["darwin", "win32", "linux"].includes(getBridge().platform) ? <FfmpegPanel /> : null}
+        {on("system") && ["darwin", "win32", "linux"].includes(getBridge().platform) ? <FfmpegPanel /> : null}
       </div>
     </div>
   );
