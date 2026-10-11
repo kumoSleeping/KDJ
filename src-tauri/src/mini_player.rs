@@ -70,6 +70,9 @@ struct Session {
     maximized: bool,
     /// From the bubble's right and bottom edges to the whole window's.
     corner: (i32, i32),
+    /// It has arrived at its place: from now until it is called back, a move is the
+    /// listener's own and is where it will be next time.
+    settled: bool,
 }
 
 #[derive(Default)]
@@ -131,6 +134,28 @@ impl MiniPlayer {
 /// The main window is the mini player now: its frame is not the main window's to remember.
 pub fn active(app: &AppHandle) -> bool {
     app.try_state::<MiniPlayer>().is_some_and(|mini| mini.lock().session.is_some())
+}
+
+/// The window was moved. As a settled mini player that is the listener dragging it; the steps
+/// of the way down and back are this module's own and are not remembered.
+pub fn moved(app: &AppHandle, position: PhysicalPosition<i32>) {
+    let Some(mini) = app.try_state::<MiniPlayer>() else { return; };
+    let mut inner = mini.lock();
+    if !inner.busy && inner.session.is_some_and(|session| session.settled) {
+        inner.saved.place = Some((position.x, position.y));
+    }
+}
+
+/// The app is closing as a mini player: where it was dragged to is kept for the next run.
+pub fn persist(app: &AppHandle) {
+    let Some(mini) = app.try_state::<MiniPlayer>() else { return; };
+    let saved = {
+        let inner = mini.lock();
+        inner.session.map(|_| inner.saved)
+    };
+    if let Some(saved) = saved {
+        mini.save(saved);
+    }
 }
 
 /// One step at a time. Dropped at the end of a command, whatever way it ends.
@@ -407,6 +432,7 @@ pub async fn mini_player_collapse(
             full,
             maximized,
             corner: (full.right() - bubble.right(), full.bottom() - bubble.bottom()),
+            settled: false,
         });
         inner.saved.on_top
     };
@@ -435,12 +461,14 @@ pub async fn mini_player_settle(app: AppHandle, window: WebviewWindow, animated:
         return Err("不是迷你播放器".into());
     }
     let current = frame_of(&window)?;
-    let Some((x, y)) = place.and_then(|place| {
+    if let Some((x, y)) = place.and_then(|place| {
         place_on_screen(place, (current.width, current.height), &screens_of(&window))
-    }) else {
-        return Ok(());
-    };
-    animate(&window, current, Frame { x, y, ..current }, time(animated, TRAVEL_MS)).await;
+    }) {
+        animate(&window, current, Frame { x, y, ..current }, time(animated, TRAVEL_MS)).await;
+    }
+    if let Some(session) = mini.lock().session.as_mut() {
+        session.settled = true;
+    }
     Ok(())
 }
 
@@ -454,9 +482,12 @@ pub async fn mini_player_recall(app: AppHandle, window: WebviewWindow, animated:
     let current = frame_of(&window)?;
     let (session, saved) = {
         let mut inner = mini.lock();
-        let Some(session) = inner.session else {
+        let Some(session) = inner.session.as_mut() else {
             return Err("不是迷你播放器".into());
         };
+        // The way back is not a move of the listener's.
+        session.settled = false;
+        let session = *session;
         inner.saved.place = Some((current.x, current.y));
         (session, inner.saved)
     };

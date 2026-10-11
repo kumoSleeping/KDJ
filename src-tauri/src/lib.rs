@@ -1829,6 +1829,7 @@ pub(crate) fn request_desktop_exit(app: &tauri::AppHandle) {
     }
     capture_main_window_state(app);
     persist_main_window_state(app);
+    mini_player::persist(app);
     shutdown_desktop_runtime(app);
     let _ = std::thread::Builder::new()
         .name("kdj-exit-watchdog".into())
@@ -3135,7 +3136,11 @@ pub fn run() {
             return;
         }
         match event {
-            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+            tauri::WindowEvent::Moved(position) => {
+                mini_player::moved(window.app_handle(), *position);
+                capture_main_window_state(window.app_handle());
+            }
+            tauri::WindowEvent::Resized(_) => {
                 capture_main_window_state(window.app_handle());
             }
             tauri::WindowEvent::CloseRequested { .. } => {
@@ -3163,6 +3168,7 @@ pub fn run() {
                 tracing::info!(?code, "desktop runtime exit requested");
                 capture_main_window_state(app_handle);
                 persist_main_window_state(app_handle);
+                mini_player::persist(app_handle);
                 shutdown_desktop_runtime(app_handle);
             }
             let _ = (app_handle, event);
