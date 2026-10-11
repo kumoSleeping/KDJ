@@ -6,6 +6,7 @@ import { ContextMenu } from "../common/ContextMenu";
 import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePack";
 import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
+import { useSongColor, useSongColorAvailable } from "../../lib/songColor";
 
 export interface ChromeActionsProps {
   settingsOpen: boolean;
@@ -92,8 +93,23 @@ export function ChromeActions({
       </ContextMenu>}
 
       <ChromeThemeButton />
+      <ChromeSongColorButton />
     </div>
   );
+}
+
+/** One global entry for the lyrics and playing-song backdrops. Only their background layers
+ * animate; the workspace and floating surfaces keep their opaque theme backgrounds. */
+function ChromeSongColorButton() {
+  const available = useSongColorAvailable();
+  const on = useSongColor(state => state.on);
+  if (!available) return null;
+  const label = on ? "关闭歌曲色彩" : "打开歌曲色彩";
+  return <button type="button" className="kd-chrome-btn kd-chrome-songcolor"
+    title={label} aria-label={label} aria-pressed={on}
+    onClick={event => useSongColor.getState().toggle(event.currentTarget)}>
+    <Palette size={16} aria-hidden="true" />
+  </button>;
 }
 
 /** The main window and editor windows share the same theme control. */

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { Palette, PanelBottomOpen, Pencil, PictureInPicture2, Pin, ScrollText } from "lucide-react";
+import { PanelBottomOpen, Pencil, PictureInPicture2, Pin, ScrollText } from "lucide-react";
 import { formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
 import { displayTrackKey } from "../../lib/keyDisplay";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
@@ -12,7 +12,7 @@ import {
   useNowPlayingInfo,
 } from "../../lib/nowPlayingInfo";
 import { newerRevision } from "../../lib/coverLoad";
-import { useSongColor } from "../../lib/songColor";
+import { useSongColorAvailable } from "../../lib/songColor";
 import { songSwapEntranceDelay } from "../../lib/songSwapMotion";
 import { useWindowTaken } from "../../lib/windowTaken";
 import { useAppStore } from "../../stores/appStore";
@@ -24,7 +24,7 @@ import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
 import { trackTaskCover } from "../tasks/taskCovers";
 import { localDownloadPlatform } from "./LocalTrackCacheFacts";
 import { NowPlayingTransport } from "./NowPlayingTransport";
-import { SongColorBackdrop, useSongColorAvailable } from "./SongColorBackdrop";
+import { SongColorBackdrop } from "./SongColorBackdrop";
 import { useLyricsEntry } from "./lyricsEntry";
 import { useLyricsExtentMenu } from "./LyricsExtentMenu";
 import "./NowPlayingTask.css";
@@ -101,7 +101,6 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
   // 歌曲色彩: the cover's colours behind this bubble and the lyrics. Not offered where a theme
   // pack draws the two surfaces its own way.
   const colourOffered = useSongColorAvailable();
-  const colourOn = useSongColor(state => state.on);
   const live = useRef({ track, lyrics, onPopup });
   live.current = { track, lyrics, onPopup };
 
@@ -162,12 +161,6 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
           icon: <PictureInPicture2 size={14} aria-hidden="true" />,
           onSelect: () => live.current.onPopup?.(),
         }] : []),
-        ...(colourOffered ? [{
-          id: "color", label: colourOn ? "关闭歌曲色彩" : "打开歌曲色彩", pressed: colourOn,
-          icon: <Palette size={14} aria-hidden="true" />,
-          // The colour spreads from this key, and drains back into it.
-          onSelect: (bubble: HTMLElement) => useSongColor.getState().toggle(bubble.querySelector('[data-task-action="color"]')),
-        }] : []),
         ...(library ? [{
           id: "meta", label: "编辑 Meta", pressed: editingMeta,
           icon: <Pencil size={14} aria-hidden="true" />,
@@ -199,7 +192,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn, extent.openFrom, extent.opened]);
+  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, extent.openFrom, extent.opened]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
   return visible && track ? extent.menu : null;
 }

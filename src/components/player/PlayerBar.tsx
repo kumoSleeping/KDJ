@@ -17,7 +17,6 @@ import {
   Download,
   LoaderCircle,
   Music2,
-  Palette,
   Pause,
   Play,
   RefreshCw,
@@ -187,8 +186,6 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
 import { NowPlayingTask } from "./NowPlayingTask";
-import { useSongColor } from "../../lib/songColor";
-import { useSongColorAvailable } from "./SongColorBackdrop";
 import { PlayerBarCollapseKey, playerBarPhaseProps, usePlayerBarPhase } from "./PlayerBarAway";
 import { BarLyricsEntry, BarMetaEntry } from "./BarSongEntries";
 import { useDeckSongSwap } from "./deckSongSwap";
@@ -446,22 +443,6 @@ const BarInfoHost = memo(NowPlayingTask);
 const BarModeButton = memo(PlaybackModeButton);
 const BarEq = memo(PlayerEq);
 const BarCollapseKey = memo(PlayerBarCollapseKey);
-const BarSongColorKey = memo(function BarSongColorKey() {
-  const available = useSongColorAvailable();
-  const on = useSongColor(state => state.on);
-  if (!available) return null;
-  const label = on ? "关闭歌曲色彩" : "打开歌曲色彩";
-  return <button
-    type="button"
-    className="kd-player-step kd-player-colorbtn"
-    aria-label={label}
-    title={label}
-    aria-pressed={on}
-    onClick={event => useSongColor.getState().toggle(event.currentTarget)}
-  >
-    <Palette size={14} aria-hidden="true" />
-  </button>;
-});
 const showEqNotice = (text: string) => {
   showNotice(text);
 };
@@ -4772,27 +4753,7 @@ export function PlayerBar() {
       <div className="kd-player-transport">
         <div className="kd-player-transport-side" data-side="left">
           <div className="kd-player-float-tools">
-            <button
-              type="button"
-              className="kd-player-step kd-player-auto-advance"
-              aria-label={autoAdvance ? "关闭自动切歌" : "开启自动切歌"}
-              aria-pressed={autoAdvance}
-              data-on={autoAdvance ? "true" : undefined}
-              title={
-                mobileNative
-                  ? autoAdvance
-                    ? "自动切歌：开。曲目结束后继续播放；移动端使用普通切换"
-                    : "自动切歌：关。曲目结束后停止"
-                  : autoAdvance
-                    ? `自动切歌：开。双击、下一首和曲目结束都会使用 ${djBars} 小节过渡`
-                    : "自动切歌：关。显式换歌直接切换，曲目结束后停止"
-              }
-              onClick={toggleAutoAdvance}
-            >
-              <Blend size={14} />
-            </button>
             <BarLyricsEntry />
-            <BarSongColorKey />
             {/* 歌词和弹窗各管各的：歌词键只开关悬浮歌词，弹窗键只开关画面小窗。 */}
             {canDesktopLyrics && !video ? (
               <button
@@ -4931,6 +4892,25 @@ export function PlayerBar() {
 
         <div className="kd-player-transport-side" data-side="right">
 
+        <button
+          type="button"
+          className="kd-player-step kd-player-auto-advance"
+          aria-label={autoAdvance ? "关闭自动切歌" : "开启自动切歌"}
+          aria-pressed={autoAdvance}
+          data-on={autoAdvance ? "true" : undefined}
+          title={
+            mobileNative
+              ? autoAdvance
+                ? "自动切歌：开。曲目结束后继续播放；移动端使用普通切换"
+                : "自动切歌：关。曲目结束后停止"
+              : autoAdvance
+                ? `自动切歌：开。双击、下一首和曲目结束都会使用 ${djBars} 小节过渡`
+                : "自动切歌：关。显式换歌直接切换，曲目结束后停止"
+          }
+          onClick={toggleAutoAdvance}
+        >
+          <Blend size={14} />
+        </button>
         <BarModeButton />
         {/* A library song is edited where an online one is downloaded: the two never meet. */}
         {!pipDriving && displayTrack && usesLocalLibraryRecord(displayTrack) ? <BarMetaEntry trackId={displayTrack.id} /> : null}
