@@ -160,6 +160,8 @@ fn decrypt_encrypted_value(
     value: String,
     encrypted_value: &[u8],
     keys: Vec<Vec<u8>>,
+    domain: &str,
+    database_version: i64,
 ) -> Result<String> {
     if encrypted_value.len() < 3 {
         bail!("Browser cookie ciphertext is truncated")
@@ -188,14 +190,7 @@ fn decrypt_encrypted_value(
         match cipher.decrypt(nonce, ciphertext.as_ref()) {
             Ok(plaintext) => {
                 // Successfully decrypted, try to convert to string
-                let plaintext = if key_type == b"v20" {
-                    let payload = plaintext
-                        .get(32..)
-                        .context("Browser cookie payload is truncated")?;
-                    String::from_utf8(payload.to_vec()).context("Can't decode encrypted value")
-                } else {
-                    String::from_utf8(plaintext).context("Can't decode encrypted value")
-                };
+                let plaintext = windows_cookie_payload(&plaintext, domain, database_version);
 
                 match plaintext {
                     Ok(text) => return Ok(text),
@@ -213,6 +208,24 @@ fn decrypt_encrypted_value(
         bail!("Browser application-bound encryption prevented reading this session")
     }
     bail!("Browser session decryption failed")
+}
+
+// Chromium schema 24 binds every encrypted value to its domain, including v10.
+// This is a database format change, independent of App-Bound Encryption.
+#[cfg(any(windows, test))]
+fn windows_cookie_payload(plaintext: &[u8], domain: &str, database_version: i64) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let payload = if database_version >= 24 {
+        let expected = Sha256::digest(domain.as_bytes());
+        if !plaintext.starts_with(expected.as_slice()) {
+            bail!("Browser cookie domain validation failed")
+        }
+        &plaintext[32..]
+    } else {
+        plaintext
+    };
+    String::from_utf8(payload.to_vec())
+        .map_err(|_| eyre::eyre!("Browser cookie is not valid UTF-8"))
 }
 
 /// Decrypt cookie value using aes cbc
@@ -317,6 +330,12 @@ fn query_cookies(
         db_path.to_str().unwrap_or("")
     );
     let connection = sqlite::connect(db_path)?;
+    #[cfg(windows)]
+    let database_version: i64 = connection.query_row(
+        "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'version'",
+        [],
+        |row| row.get(0),
+    )?;
     let mut query =
         "SELECT host_key, path, is_secure, expires_utc, name, value, CAST(encrypted_value AS BLOB), is_httponly, samesite FROM cookies ".to_string();
 
@@ -350,6 +369,15 @@ fn query_cookies(
         if encrypted_value.is_empty() {
             continue;
         }
+        #[cfg(windows)]
+        let decrypted_value = decrypt_encrypted_value(
+            value,
+            &encrypted_value,
+            keys.to_owned(),
+            &host_key,
+            database_version,
+        )?;
+        #[cfg(unix)]
         let decrypted_value = decrypt_encrypted_value(value, &encrypted_value, keys.to_owned())?;
         let http_only: bool = row.get(7)?;
 
@@ -367,4 +395,27 @@ fn query_cookies(
         cookies.push(cookie);
     }
     Ok(cookies)
+}
+
+#[cfg(test)]
+mod windows_payload_tests {
+    use super::windows_cookie_payload;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn schema_controls_domain_prefix_and_rejects_wrong_domain() {
+        let token = b"test-session";
+        assert_eq!(
+            windows_cookie_payload(token, ".soundcloud.com", 23).unwrap(),
+            "test-session"
+        );
+        let mut payload = Sha256::digest(b".soundcloud.com").to_vec();
+        payload.extend_from_slice(token);
+        assert_eq!(
+            windows_cookie_payload(&payload, ".soundcloud.com", 24).unwrap(),
+            "test-session"
+        );
+        assert!(windows_cookie_payload(&payload, ".youtube.com", 24).is_err());
+        assert!(windows_cookie_payload(&payload[..20], ".soundcloud.com", 24).is_err());
+    }
 }

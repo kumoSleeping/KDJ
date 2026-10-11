@@ -5007,6 +5007,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "url",
  "windows 0.51.1",
  "zbus 3.15.2",

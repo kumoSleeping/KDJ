@@ -84,6 +84,9 @@ features = ["derive"]
 version = "1"
 features = ["preserve_order"]
 
+[dependencies.sha2]
+version = "0.10"
+
 [dependencies.url]
 version = "2"
 
