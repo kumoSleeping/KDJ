@@ -41,7 +41,7 @@ export function startPreferenceWindowSync(): Promise<void> {
       } };
     }
     const bindings = [
-      bind("playback", usePlaybackPrefs, ["transportFade", "tempoRange", "playingDetailPinned", "detailWaveformVisible", "detailControlVisible", "localExternalDragMode", "timeDisplayMode"]),
+      bind("playback", usePlaybackPrefs, ["tempoRange", "playingDetailPinned", "detailWaveformVisible", "detailControlVisible", "localExternalDragMode", "timeDisplayMode"]),
       bind("keyboard", useArrowKeyControl, ["enabled", "horizontalMode", "verticalMode"]),
       bind("share", useSharePrefs, ["contentMode"]),
       bind("lyrics", useLyricsPrefs, ["engines", "displaySource", "tryOnlineWhenMissing"], patch => {

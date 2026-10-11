@@ -195,6 +195,7 @@ import { useDeckSongSwap } from "./deckSongSwap";
 import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
 import "./DeckSongSwap.css";
 import { PlayerVolume } from "./PlayerVolume";
+import { usePlayerBarLayout } from "./usePlayerBarLayout";
 import { SlidePages } from "../drawer/SlidePages";
 import { PLAYER_BAR_FACES, usePlayerBarFace, type PlayerBarFace } from "../../lib/playerBarFace";
 import { tracePlayback, watchMainThread } from "../../lib/playbackTrace";
@@ -630,6 +631,7 @@ function PlayerDeck({
 }
 
 export function PlayerBar() {
+  const barLayoutRef = usePlayerBarLayout();
   const mobileNative = usesNativeMobilePlayer();
   const playerRuntime = runtimePlayer();
   const desktopNative = playerRuntime.kind === "desktop-native";
@@ -4758,6 +4760,7 @@ export function PlayerBar() {
 
   return (
     <div
+      ref={barLayoutRef}
       className="kd-player"
       data-pip={pipDriving ? "true" : undefined}
       {...playerBarPhaseProps(barPhase)}
@@ -4920,6 +4923,7 @@ export function PlayerBar() {
       >
         <SlidePages className="kd-player-faces" axis="y" page={barFace} order={PLAYER_BAR_FACES}>
           <div className="kd-player-face" data-face="tools" hidden={barFace !== "tools"}>
+            <div className="kd-player-tool-scroll">
             <div className="kd-player-float-tools">
               <BarLyricsEntry />
               <BarSongColorKey />
@@ -5018,6 +5022,7 @@ export function PlayerBar() {
                 <RefreshCw size={13} aria-hidden="true" />
               </button>
             )}
+            </div>
             <BarFaceKey of="tools" />
           </div>
           <div className="kd-player-face" data-face="eq" hidden={barFace !== "eq"}>

@@ -1,7 +1,6 @@
 import { useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Select } from "../common/Select";
-import { ChevronDown, ChevronRight, Copy, Download, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import {
   enginesFromMode,
   enginesMode,
@@ -27,18 +26,8 @@ import {
 import { api } from "../../lib/api";
 import { chooseAutoAnalysisMode } from "../../lib/autoAnalyze";
 import { resolveAutoAnalysisMode } from "../../lib/autoAnalysisMode";
-import {
-  installOfficialTheme,
-  optionValues,
-  refreshThemePacks,
-  selectThemePack,
-  setThemeOption,
-  useThemePack,
-} from "../../lib/themePack";
 import { getBridge } from "../../lib/bridge";
-import { copyText } from "../../lib/copyText";
 import { formatBytes } from "../../lib/format";
-import { createKdjAiPrompt } from "../../lib/kdjAiPrompt";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { clearStreamAnalysisCache } from "../../lib/streamAnalysis";
@@ -54,7 +43,6 @@ import type {
   CacheCategory,
   CacheCategoryStats,
   CacheOverview,
-  CliInstallStatus,
   KeyNotation,
   Quality,
   StreamCacheStats,
@@ -121,15 +109,12 @@ function cacheCategoryDetail(category: CacheCategory | "other", stats: CacheCate
     : category === "logs"
       ? `最近 ${stats.items} 条 · ${stats.files} 个文件`
       : `${stats.files} 个文件`;
-  const size = stats.bytes > 0
-    ? `${stats.estimated ? "约 " : ""}${formatBytes(stats.bytes)}`
-    : "0 B";
   const active = stats.active > 0
     ? category === "basic"
       ? ` · ${stats.active} 个任务运行中`
       : ` · ${stats.active} 首写入中`
     : "";
-  return `${count} · ${size}${active}`;
+  return `${count}${active}`;
 }
 
 function CacheOverviewRow({
@@ -149,7 +134,12 @@ function CacheOverviewRow({
   return (
     <div className="kd-cache-overview-row" data-confirming={confirming || undefined}>
       <span className="kd-cache-overview-copy">
-        <span className="kd-cache-overview-label">{CACHE_CATEGORY_LABEL[category]}</span>
+        <span className="kd-cache-overview-summary">
+          <span className="kd-cache-overview-label">{CACHE_CATEGORY_LABEL[category]}</span>
+          <span className="kd-cache-overview-size kd-num">
+            {stats.bytes > 0 ? `${stats.estimated ? "约 " : ""}${formatBytes(stats.bytes)}` : "0 B"}
+          </span>
+        </span>
         <span className="kd-cache-overview-detail">{cacheCategoryDetail(category, stats)}</span>
       </span>
       {category !== "other" ? (
@@ -272,282 +262,12 @@ function FontScaleStepper({
   );
 }
 
-/** 主题包：数据目录 themes/ 下的文件夹。打开面板时重扫一次，不常驻监听。 */
-function ThemePackRows() {
-  const { dir, packs, official, installing, selection, active, error } = useThemePack();
-  useEffect(() => {
-    // Opening settings only rescans the list; reloading would briefly remove the active CSS.
-    void refreshThemePacks(false);
-  }, []);
-  const mode = useAppStore(state => state.settings?.theme ?? "system");
-  const saveSettings = useAppStore(state => state.saveSettings);
-  const selected = selection.id ?? (mode === "system"
-    ? `builtin-${document.documentElement.dataset.theme ?? "light"}` : `builtin-${mode}`);
-  const choose = async (value: string) => {
-    try {
-      if (value === "builtin-light" || value === "builtin-dark") {
-        await selectThemePack(null);
-        await saveSettings({ theme: value === "builtin-light" ? "light" : "dark" });
-      } else await selectThemePack(value);
-    } catch (cause) {
-      useThemePack.setState({ error: (cause as Error).message });
-    }
-  };
-  const values = active ? optionValues(active, selection.options[active.id]) : {};
-  return (
-    <>
-      <div className="kd-djp-font-stepper kd-theme-row" role="group" aria-label="主题">
-        <span className="kd-djp-font-copy">
-          <span className="kd-djp-toggle-label">主题</span>
-        </span>
-        <span className="kd-djp-font-actions">
-          <span className="kd-theme-select">
-          <Select
-            className="kd-select"
-            disabled={installing !== null}
-            aria-label="主题"
-            value={selected}
-            onChange={(event) => void choose(event.target.value)}
-          >
-            <option value="builtin-light">Shiro</option>
-            <option value="builtin-dark">Dark</option>
-            {/* 选中的包不在了也留着这一项：把文件夹放回来就恢复，不悄悄改掉用户的选择 */}
-            {selection.id && !packs.some((pack) => pack.dir === selected) ? (
-              <option value={selected}>{selected}</option>
-            ) : null}
-            {packs.map((pack) => (
-              <option key={pack.dir} value={pack.dir}>{official.find(item => item.id === pack.dir)?.name ?? pack.manifest?.name ?? pack.dir}</option>
-            ))}
-          </Select>
-          </span>
-          {dir ? (
-            <button
-              type="button"
-              aria-label="打开主题文件夹"
-              title="打开主题文件夹"
-              onClick={() => void window.kdj?.openPath(dir).catch(() => undefined)}
-            >
-              <FolderOpen size={14} />
-            </button>
-          ) : null}
-        </span>
-      </div>
-      {official.length > 0 && <div className="kd-theme-official">
-        {official.map(theme => {
-          const installed = packs.some(pack => pack.dir === theme.id && pack.manifest);
-          return (
-            <div className="kd-theme-official-row" key={theme.id}>
-              <span>{theme.name}<small>官方</small></span>
-              <button type="button" className="kd-btn" data-variant="ghost"
-                disabled={installing !== null}
-                aria-label={`${installed ? "更新" : "下载"}${theme.name}`}
-                onClick={() => void installOfficialTheme(theme.id)}>
-                <Download size={13} aria-hidden="true" />
-                {installing === theme.id ? "下载中…" : installed ? "更新" : "下载"}
-              </button>
-            </div>
-          );
-        })}
-      </div>}
-      {active && active.options.length > 0 ? (
-        <div className="kd-djp-switch-list" aria-label="主题选项">
-          {active.options.map((option) => (
-            <Switch
-              key={option.id}
-              checked={values[option.id]}
-              label={option.label}
-              onChange={() => void setThemeOption(option.id, !values[option.id])}
-            />
-          ))}
-        </div>
-      ) : null}
-      <InlineNotice text={error} block />
-    </>
-  );
-}
-
-function SettingsExpandToggle({
-  expanded,
-  onToggle,
-  label,
-}: {
-  expanded: boolean;
-  onToggle(): void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      className="kd-djp-section-toggle"
-      aria-expanded={expanded}
-      aria-label={expanded ? `收起${label}` : `展开${label}`}
-      title={expanded ? "收起" : "展开"}
-      onClick={onToggle}
-    >
-      {expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
-    </button>
-  );
-}
-
-function KdjAiPromptPanel() {
-  const bridge = getBridge();
-  const [cliStatus, setCliStatus] = useState<CliInstallStatus | null>(null);
-  const [cliBusy, setCliBusy] = useState(false);
-  const [notice, setNotice] = useState("");
-  const [ok, setOk] = useState(false);
-  const prompt = useMemo(
-    () => createKdjAiPrompt(cliStatus?.invocation ?? "kdj"),
-    [cliStatus?.invocation],
-  );
-
-  useEffect(() => {
-    let disposed = false;
-    const readStatus = bridge.cliInstallStatus;
-    if (!readStatus) return;
-    setCliBusy(true);
-    void readStatus()
-      .then((status) => {
-        if (disposed) return;
-        setCliStatus(status);
-      })
-      .catch((error) => {
-        if (disposed) return;
-        setOk(false);
-        setNotice(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => {
-        if (!disposed) setCliBusy(false);
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [bridge]);
-
-  const installCli = () => {
-    const install = bridge.installCli;
-    if (!install || cliBusy) return;
-    setCliBusy(true);
-    setNotice("");
-    setOk(false);
-    void install()
-      .then((status) => {
-        setCliStatus(status);
-        setOk(true);
-        setNotice(`CLI 已安装 · v${status.installedVersion ?? status.currentVersion}`);
-      })
-      .catch((error) => {
-        setOk(false);
-        setNotice(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => setCliBusy(false));
-  };
-
-  const copyPrompt = () => {
-    setNotice("");
-    setOk(false);
-    void copyText(prompt)
-      .then(() => {
-        setOk(true);
-        setNotice("已复制完整 Prompt");
-      })
-      .catch((error) => {
-        setOk(false);
-        setNotice(error instanceof Error ? error.message : String(error));
-      });
-  };
-
-  const installedVersion = cliStatus?.installedVersion;
-  const cliState = (() => {
-    if (!cliStatus) return { label: "正在检测 CLI…", detail: "", action: "" };
-    switch (cliStatus.state) {
-      case "current":
-        return {
-          label: `CLI 已安装 · v${installedVersion ?? cliStatus.currentVersion}`,
-          detail: "与当前版本一致",
-          action: "",
-        };
-      case "outdated":
-        return {
-          label: `CLI 已安装 · v${installedVersion ?? "未知"}`,
-          detail: `当前 v${cliStatus.currentVersion}`,
-          action: "更新 CLI",
-        };
-      case "broken":
-        return {
-          label: "CLI 入口失效",
-          detail: `当前 v${cliStatus.currentVersion}`,
-          action: "更新 CLI",
-        };
-      case "conflict":
-        return {
-          label: "CLI 安装位置已被其他命令占用",
-          detail: cliStatus.installPath,
-          action: "",
-        };
-      case "missing":
-        return {
-          label: "CLI 未安装",
-          detail: `当前 v${cliStatus.currentVersion}`,
-          action: "安装 CLI",
-        };
-      default:
-        return { label: "当前平台不支持 CLI", detail: "", action: "" };
-    }
-  })();
-
-  return (
-    <Panel heading="让 AI 操作 KDJ" dense>
-      <div className="kd-ai-prompt">
-        <div className="kd-cli-install-row" title={cliStatus?.installPath}>
-          <span className="kd-cli-install-copy">
-            <strong>{cliState.label}</strong>
-            {cliState.detail ? <small>{cliState.detail}</small> : null}
-          </span>
-          {cliState.action ? (
-            <Button variant="ghost" size="sm" disabled={cliBusy} onClick={installCli}>
-              {cliStatus?.state === "missing" ? (
-                <Download size={12} aria-hidden="true" />
-              ) : (
-                <RefreshCw size={12} aria-hidden="true" />
-              )}
-              {cliBusy ? "处理中…" : cliState.action}
-            </Button>
-          ) : null}
-        </div>
-        <p className="kd-ai-prompt-copy">把下面整段发给 AI，它会先读取当前 CLI 能力，再操作 KDJ。</p>
-        <textarea
-          className="kd-textarea kd-ai-prompt-textarea"
-          value={prompt}
-          readOnly
-          spellCheck={false}
-          aria-label="KDJ AI 操作 Prompt"
-        />
-        <div className="kd-ai-prompt-actions">
-          <Button variant="ghost" size="sm" disabled={!cliStatus || cliBusy} onClick={copyPrompt}>
-            <Copy size={12} aria-hidden="true" />
-            复制 Prompt
-          </Button>
-        </div>
-      </div>
-      <InlineNotice
-        text={notice}
-        tone={ok ? "ok" : "warn"}
-        onDismiss={() => {
-          setNotice("");
-          setOk(false);
-        }}
-      />
-    </Panel>
-  );
-}
-
 export function SettingsPanel({ preferences = false, page }: {
   preferences?: boolean;
   /** Show one page of the sections (the settings drawer); without it every section is listed. */
   page?: SettingsPage;
 }) {
   const on = (id: SettingsPage) => !page || page === id;
-  const showKdjAiPrompt = ["darwin", "win32"].includes(getBridge().platform);
   const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const [appFontScale, setFontScale] = useState(() => Number.parseFloat(document.documentElement.style.fontSize) || readAppFontScale());
@@ -566,10 +286,8 @@ export function SettingsPanel({ preferences = false, page }: {
   const [activityLogSettings, setActivityLogSettings] = useState<ActivityLogSettings | null>(null);
   const [activityLogSettingsBusy, setActivityLogSettingsBusy] = useState(false);
   const [activityLogSettingsError, setActivityLogSettingsError] = useState("");
-  const [lyricsExpanded, setLyricsExpanded] = useState(false);
+  const [systemReady, setSystemReady] = useState(false);
 
-  const transportFade = usePlaybackPrefs((state) => state.transportFade);
-  const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
   const tempoRange = usePlaybackPrefs((state) => state.tempoRange);
   const setTempoRange = usePlaybackPrefs((state) => state.setTempoRange);
   const timeDisplayMode = usePlaybackPrefs((state) => state.timeDisplayMode);
@@ -643,6 +361,7 @@ export function SettingsPanel({ preferences = false, page }: {
               : String(logSettingsResult.reason),
           );
         }
+        setSystemReady(true);
       });
     };
     refresh();
@@ -735,8 +454,8 @@ export function SettingsPanel({ preferences = false, page }: {
 
   useEffect(() => {
     if (!focusEpoch) return;
-    // The update section is on the last page of the drawer.
-    useSettingsPage.getState().setPage("system");
+    // Updates lead the general page, including when opened from the title bar.
+    useSettingsPage.getState().setPage("general");
     let frame = 0;
     const scrollToUpdate = () => {
       const section = updateSectionRef.current;
@@ -757,20 +476,32 @@ export function SettingsPanel({ preferences = false, page }: {
 
   return (
     <div className={preferences ? "kd-col kd-preferences" : "kd-col"} style={{ height: "100%", minHeight: 0 }}>
-      <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}>
+      <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}
+        data-drawer-pending={on("system") && !systemReady ? "" : undefined}>
         <InlineNotice text={settingsError} block />
+        {on("general") && <div ref={updateSectionRef} id="kd-settings-update">
+          <Panel heading="软件更新" dense>
+            <UpdateRow />
+            <div className="kd-djp-switch-list" style={{ marginTop: "0.35rem" }}>
+              <Switch
+                checked={autoCheck}
+                label="自动检测更新"
+                title="启动时检查一次，之后每 5 分钟静默检查；关掉后只保留手动检查。"
+                onChange={() => setAutoCheck(!autoCheck)}
+              />
+            </div>
+          </Panel>
+        </div>}
+
         {on("general") && <Panel heading="通用" dense>
           <div className="kd-djp-groups" aria-label="通用">
-            <div>
-              <FontScaleStepper
-                value={appFontScale}
-                onChange={(next) => {
-                  setFontScale(next);
-                  setAppFontScale(next);
-                }}
-              />
-              <ThemePackRows />
-            </div>
+            <FontScaleStepper
+              value={appFontScale}
+              onChange={(next) => {
+                setFontScale(next);
+                setAppFontScale(next);
+              }}
+            />
             <div className="kd-djp-switch-list" aria-label="列表与播放">
               <CycleToggle<KeyNotation>
                 label="列表调性"
@@ -781,12 +512,6 @@ export function SettingsPanel({ preferences = false, page }: {
                 ]}
                 title="歌曲列表统一显示 Camelot 数字制或传统音名；不会改写曲目数据。"
                 onChange={(next) => void saveSettings({ key_notation: next }).catch(() => undefined)}
-              />
-              <Switch
-                checked={transportFade}
-                label="播放 / 暂停渐入渐出"
-                title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
-                onChange={() => setTransportFade(!transportFade)}
               />
               <CycleToggle<TimeDisplayMode>
                 label="计时方式"
@@ -913,16 +638,8 @@ export function SettingsPanel({ preferences = false, page }: {
               />
             </div>
             <div className="kd-djp-group">
-              <div className="kd-djp-label-row">
-                <span className="kd-djp-label">歌词</span>
-                <SettingsExpandToggle
-                  expanded={lyricsExpanded}
-                  onToggle={() => setLyricsExpanded((open) => !open)}
-                  label="歌词"
-                />
-              </div>
-              {lyricsExpanded ? (
-                <div className="kd-djp-switch-list" aria-label="歌词选项">
+              <span className="kd-djp-label">歌词</span>
+              <div className="kd-djp-switch-list" aria-label="歌词选项">
                 <Switch
                   checked={tryOnlineWhenMissing}
                   label="无歌词时尝试匹配"
@@ -936,8 +653,7 @@ export function SettingsPanel({ preferences = false, page }: {
                   title="点击切换：全部 / 仅网易云 / 仅 QQ / 仅 YouTube Music。至少保留一家。"
                   onChange={(mode) => setLyricsEngines(enginesFromMode(mode))}
                 />
-                </div>
-              ) : null}
+              </div>
             </div>
           </div>
         </Panel>}
@@ -1050,21 +766,6 @@ export function SettingsPanel({ preferences = false, page }: {
         {on("system") && <ActivityLogPanel />}
 
         {on("sources") && ["darwin", "win32", "linux"].includes(getBridge().platform) ? <FfmpegPanel /> : null}
-        {on("system") && showKdjAiPrompt ? <KdjAiPromptPanel /> : null}
-
-        {on("system") && <div ref={updateSectionRef} id="kd-settings-update">
-          <Panel heading="软件更新" dense>
-            <UpdateRow />
-            <div className="kd-djp-switch-list" style={{ marginTop: "0.35rem" }}>
-              <Switch
-                checked={autoCheck}
-                label="自动检测更新"
-                title="启动时检查一次，之后每 5 分钟静默检查；关掉后只保留手动检查。"
-                onChange={() => setAutoCheck(!autoCheck)}
-              />
-            </div>
-          </Panel>
-        </div>}
       </div>
     </div>
   );

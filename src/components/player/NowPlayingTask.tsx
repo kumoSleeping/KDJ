@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { Palette, PanelBottomOpen, Pencil, PictureInPicture2, Pin, ScrollText } from "lucide-react";
 import { formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
 import { displayTrackKey } from "../../lib/keyDisplay";
@@ -22,6 +22,7 @@ import { PlatformMark } from "../download/PlatformMark";
 import type { TaskBubbleSpec } from "../tasks/taskBubbleSchema";
 import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
 import { trackTaskCover } from "../tasks/taskCovers";
+import { prepareTaskCovers } from "../tasks/taskCoverPreparation";
 import { localDownloadPlatform } from "./LocalTrackCacheFacts";
 import { NowPlayingTransport } from "./NowPlayingTransport";
 import { SongColorBackdrop } from "./SongColorBackdrop";
@@ -93,6 +94,17 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
   // The bubble holds the record the song started with; a cover written since then is only
   // reachable under the list's later revision.
   const listedRevision = useLibraryStore(state => track && track.id > 0 ? state.summaryById.get(track.id)?.modified_at : undefined);
+  // Begin with the track, not with the popup: the other song surfaces are still leaving.
+  // The host joins this preparation and only reveals the bubble once the images have decoded.
+  const covers = useMemo(() => {
+    if (!track) return [];
+    const cover = trackTaskCover(
+      { id: track.id, modified_at: newerRevision(track.modified_at, listedRevision) },
+      isStreamTrack(track) ? streamCoverUrls(track) : [],
+    );
+    return cover ? [cover] : [];
+  }, [track, listedRevision]);
+  useEffect(() => { void prepareTaskCovers(covers); }, [covers]);
   const editingMeta = useTrackMetaEditor(state => !!track && state.trackId === track.id);
   // Opening the lyrics replaces what the bubble is up for, unless the listener pinned it or it
   // is the transport of a bar that is away.
@@ -118,10 +130,6 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     }
     const video = isVideoTrack(track.format) || streamMeta(track)?.kind === "video";
     const library = !isStreamTrack(track);
-    const cover = trackTaskCover(
-      { id: track.id, modified_at: newerRevision(track.modified_at, listedRevision) },
-      library ? [] : streamCoverUrls(track),
-    );
     const key = displayTrackKey(track, keyNotation);
     // Where it is streamed from, or was downloaded from; a file of the listener's own has none.
     const platform = library ? localDownloadPlatform(track) : streamMeta(track)?.source?.platform ?? null;
@@ -137,9 +145,10 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
         library ? track.format.toUpperCase() : "",
       ].filter(Boolean),
       origin: platform ? { label: PLATFORM_LABEL[platform], mark: <PlatformMark id={platform} size={12} branded /> } : undefined,
-      covers: cover ? [cover] : [],
+      covers,
       song: track.id,
       size: "large",
+      layout: "two-row",
       base: true,
       stay: held || extent.opened ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,
@@ -203,7 +212,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, raise, held, pinned, barAway, track, listedRevision, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn, extent.openFrom, extent.opened]);
+  }, [visible, raise, held, pinned, barAway, track, covers, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn, extent.openFrom, extent.opened]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
   return visible && track ? extent.menu : null;
 }

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { createPortal } from "react-dom";
 import { AlertTriangle, Check, ChevronsDown, ChevronsUp, ChevronsUpDown, Info, LoaderCircle } from "lucide-react";
 import { useCoverLoad } from "../../lib/coverLoad";
+import { useMiniPlayer } from "../../lib/miniPlayer";
+import { MOTION_MICRO_MS, MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS } from "../../lib/motion";
 import { playerBarMoving, usePlayerBarAway } from "../../lib/playerBarAway";
 import { prefersReducedSeekMotion } from "../../lib/seekTransition";
 import {
@@ -17,6 +19,7 @@ import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { TASK_COVER_LIMIT, taskStay, type TaskCover, type TaskBubbleSpec, type TaskPlacement, type TaskSize } from "./taskBubbleSchema";
 import { taskEntryKey, useTaskBubbles, type TaskBubbleEntry } from "./taskBubbleStore";
 import { startTaskSources, type TaskSource } from "./taskSources";
+import { usePreparedTaskCovers } from "./taskCoverPreparation";
 import "./TaskBubbles.css";
 
 /** The gap between two bubbles of a stack, in px. */
@@ -59,10 +62,12 @@ function ToneMark({ tone, size = 16 }: { tone: NonNullable<TaskBubbleSpec["tone"
 }
 
 /** Up to three covers overlapping, how many more there are, and how the task ended. */
-function TaskCoverStack({ covers, count, tone }: { covers: readonly TaskCover[]; count: number; tone: NonNullable<TaskBubbleSpec["tone"]> }) {
+function TaskCoverStack({ covers, count, tone, turn }: {
+  covers: readonly TaskCover[]; count: number; tone: NonNullable<TaskBubbleSpec["tone"]>; turn?: "in" | "out";
+}) {
   const shown = covers.slice(0, TASK_COVER_LIMIT);
   const more = Math.max(covers.length, count) - shown.length;
-  return <span className="kd-task-covers" data-count={shown.length}>
+  return <span className="kd-task-covers" data-count={shown.length} data-kd-turn={turn}>
     <span className="kd-task-cover-row">
       {shown.map(cover => <TaskCoverImage key={coverKey(cover)} cover={cover} />)}
       {tone !== "info" && <span className="kd-task-badge"><ToneMark tone={tone} size={10} /></span>}
@@ -82,7 +87,7 @@ const TASK_KIND_NAMES: Readonly<Record<string, string | undefined>> = {
 };
 const TASK_NOTE_NAME = "提示";
 
-function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
+interface TaskBubbleProps {
   entry: TaskBubbleEntry;
   /** How far from the resting place nearest its stack's edge this bubble sits, in px. */
   lift: number;
@@ -95,11 +100,37 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
   held: boolean;
   onHeld(key: string, held: boolean): void;
   onSize(key: string, height: number | null): void;
-}) {
+}
+
+/** Preparing is not an arrival: no empty surface, stack space or countdown yet. An existing
+ * bubble keeps its picture while the next covers load, but its live controls follow playback. */
+function TaskBubble(props: TaskBubbleProps) {
+  const { entry } = props;
+  const covers = usePreparedTaskCovers(entry.spec.covers ?? []);
+  const previous = useRef<TaskBubbleEntry | null>(null);
+  if (covers !== null && !entry.leaving) previous.current = { ...entry, spec: { ...entry.spec, covers } };
+  const shown = previous.current;
+  useEffect(() => {
+    if (entry.leaving && !shown) useTaskBubbles.getState().remove(entry.spec.id, entry.token);
+  }, [entry.leaving, entry.spec.id, entry.token, !!shown]);
+  if (!shown) return null;
+  const preparedEntry = covers !== null && !entry.leaving ? shown : {
+    ...shown,
+    leaving: entry.leaving,
+    token: entry.leaving ? entry.token : shown.token,
+    spec: entry.leaving ? shown.spec : { ...shown.spec, controls: entry.spec.controls, actions: entry.spec.actions,
+      tools: entry.spec.tools, stay: entry.spec.stay, escape: entry.spec.escape,
+      dismiss: entry.spec.dismiss, onDismiss: entry.spec.onDismiss },
+  };
+  return <ReadyTaskBubble {...props} entry={preparedEntry} preparing={covers === null} />;
+}
+
+function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, preparing }: TaskBubbleProps & { preparing: boolean }) {
   const id = entry.spec.id;
   /** This arrival, in the host's books. */
   const key = taskEntryKey(entry);
   const reduced = prefersReducedSeekMotion();
+  const mini = useMiniPlayer(state => state.phase === "on") && entry.spec.song !== undefined;
   const node = useRef<HTMLElement>(null);
 
   // A bubble about the playing song keeps the old song while it rolls down, then rises with
@@ -107,16 +138,37 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
   const [shownSong, setShownSong] = useState(entry.spec.song);
   const kept = useRef(entry.spec);
   const changed = shownSong !== entry.spec.song;
-  const swapping = changed && shownSong !== undefined && entry.spec.song !== undefined && !entry.leaving && !reduced;
+  const swapping = changed && shownSong !== undefined && entry.spec.song !== undefined && !entry.leaving && (!reduced || mini);
   if (!changed) kept.current = entry.spec;
-  const spec = swapping ? kept.current : entry.spec;
+  const spec = swapping || (changed && entry.leaving) ? kept.current : entry.spec;
+  const [turningIn, setTurningIn] = useState(false);
+  const wasSwapping = useRef(false);
+  useLayoutEffect(() => {
+    if (swapping) wasSwapping.current = true;
+    else if (wasSwapping.current) {
+      wasSwapping.current = false;
+      // Also bring the old content back if a rapid skip returned to its song mid-exit.
+      setTurningIn(mini && !entry.leaving);
+    }
+  }, [swapping, mini, entry.leaving]);
+  const exitMs = mini ? (reduced ? MOTION_REDUCED_MS : MOTION_MICRO_OUT_MS) : SONG_SWAP_OUT_MS;
   useEffect(() => {
-    if (!changed) return;
+    if (!changed || preparing || entry.leaving) return;
     if (!swapping) { setShownSong(entry.spec.song); return; }
-    const timer = window.setTimeout(() => setShownSong(entry.spec.song), SONG_SWAP_OUT_MS);
+    const timer = window.setTimeout(() => {
+      setShownSong(entry.spec.song);
+    }, exitMs);
     return () => window.clearTimeout(timer);
-    // The newest song is the one that rises: a later change starts the wait over.
-  }, [changed, swapping, entry.spec.song]);
+    // The newest prepared song is the one that arrives; skipped songs do not queue.
+  }, [changed, swapping, entry.spec.song, entry.leaving, exitMs, mini, preparing]);
+  useEffect(() => {
+    if (!turningIn) return;
+    const timer = window.setTimeout(() => setTurningIn(false), reduced ? MOTION_REDUCED_MS : MOTION_MICRO_MS);
+    return () => window.clearTimeout(timer);
+  }, [turningIn, shownSong, reduced]);
+  // The window stays put. Only the cover and copy turn, using the work rail/search text's
+  // existing gesture; the transport and window keys remain available throughout.
+  const turn = mini ? swapping ? "out" : turningIn ? "in" : undefined : undefined;
   const songBound = entry.spec.song !== undefined;
   useEffect(() => {
     if (!songBound) return;
@@ -138,14 +190,14 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
   useEffect(() => {
     if (!timed) return;
     if (countdown.current.token !== entry.token) countdown.current = { token: entry.token, remaining: stay };
-    if (held) return;
+    if (held || preparing || swapping) return;
     const started = performance.now(), remaining = countdown.current.remaining;
     const timer = window.setTimeout(() => useTaskBubbles.getState().dismiss(id, "timeout"), remaining);
     return () => {
       window.clearTimeout(timer);
       countdown.current.remaining = Math.max(0, remaining - (performance.now() - started));
     };
-  }, [timed, held, entry.token, stay, id]);
+  }, [timed, held, preparing, swapping, entry.token, stay, id]);
 
   const escape = !!entry.spec.escape && !entry.leaving;
   useEffect(() => {
@@ -166,9 +218,10 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
   // jumping (TaskBubbles.css): it is in the bubble from before it has any height until after it
   // has lost it, and shows the controls it last had while it closes. A bubble that comes up
   // with its controls simply has them.
-  const hasControls = spec.controls != null;
-  const lastControls = useRef(spec.controls);
-  if (hasControls) lastControls.current = spec.controls;
+  const controls = mini ? entry.spec.controls : spec.controls;
+  const hasControls = controls != null;
+  const lastControls = useRef(controls);
+  if (hasControls) lastControls.current = controls;
   const [controlsRow, setControlsRow] = useState(hasControls);
   const [controlsOpen, setControlsOpen] = useState(hasControls);
   const controlsClip = useRef<HTMLDivElement>(null);
@@ -237,8 +290,8 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
   return <div className="kd-task-slot" data-size={spec.size ?? "regular"}
     style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`, zIndex: front } as CSSProperties}>
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
-      data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
-      data-expanded={expanded || undefined} data-held={held || undefined}
+      data-kind={spec.kind} data-layout={spec.layout} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
+      data-expanded={expanded || undefined} data-held={held || preparing || swapping || undefined}
       data-controls={hasControls || undefined} {...backdrop.attributes} style={backdrop.style}
       onPointerEnter={() => onHeld(key, true)} onPointerLeave={() => onHeld(key, false)}
       onFocus={() => onHeld(key, true)}
@@ -247,18 +300,18 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
       <div className="kd-task-main" data-opens={open ? "true" : undefined} data-bare={summary ? undefined : "true"}
         onClick={open ? event => { if (!(event.target as Element).closest("button, a, input")) open(); } : undefined}>
         {summary && (covers.length > 0
-          ? <TaskCoverStack covers={covers} count={spec.count ?? covers.length} tone={tone} />
-          : <span className="kd-task-mark">{spec.icon ?? <ToneMark tone={tone} />}</span>)}
+          ? <TaskCoverStack covers={covers} count={spec.count ?? covers.length} tone={tone} turn={turn} />
+          : <span className="kd-task-mark" data-kd-turn={turn}>{spec.icon ?? <ToneMark tone={tone} />}</span>)}
         {summary && (open
-          ? <button type="button" className="kd-task-copy" onClick={open}>{copy}</button>
-          : <div className="kd-task-copy">{copy}</div>)}
+          ? <button type="button" className="kd-task-copy" data-kd-turn={turn} inert={swapping} aria-hidden={swapping || undefined} onClick={open}>{copy}</button>
+          : <div className="kd-task-copy" data-kd-turn={turn} inert={swapping} aria-hidden={swapping || undefined}>{copy}</div>)}
         <div className="kd-task-tools" data-caption={TASK_KIND_NAMES[spec.kind] ?? TASK_NOTE_NAME}>
           {timed && <svg key={entry.token} className="kd-task-countdown" viewBox="0 0 16 16" role="img" aria-label="即将收起"
             style={{ "--kd-task-stay": `${stay}ms` } as CSSProperties}>
             <circle cx="8" cy="8" r="5.5" />
             <circle cx="8" cy="8" r="5.5" pathLength={1} />
           </svg>}
-          {spec.actions?.map(action => <button key={action.id} type="button" className="kd-task-action" data-task-action={action.id}
+          {(mini ? entry.spec.actions : spec.actions)?.map(action => <button key={action.id} type="button" className="kd-task-action" data-task-action={action.id}
             aria-label={action.label} title={action.label} aria-pressed={action.pressed}
             aria-haspopup={action.onContextMenu ? "menu" : undefined}
             aria-expanded={action.onContextMenu ? !!action.menuOpen : undefined}
@@ -291,7 +344,7 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
       {(hasControls || controlsRow) && <div className="kd-task-controls" data-open={hasControls && controlsOpen ? "true" : undefined}
         inert={!hasControls}>
         <div ref={controlsClip} className="kd-task-controls-clip">
-          <div className="kd-task-controls-row">{hasControls ? spec.controls : lastControls.current}</div>
+          <div className="kd-task-controls-row">{hasControls ? controls : lastControls.current}</div>
         </div>
       </div>}
     </article>
@@ -333,6 +386,7 @@ function layStack(place: TaskPlacement, entries: readonly TaskBubbleEntry[], siz
   for (const entry of ordered) {
     const key = taskEntryKey(entry);
     const height = sizes[key] ?? 0;
+    if (height === 0) continue; // Still preparing: it takes no room in the stack or drawer.
     const rank = SIZE_RANK[entry.spec.size ?? "regular"];
     if (entry.leaving) lifts[key] ??= stacked;
     else lifts[key] = stacked;

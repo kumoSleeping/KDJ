@@ -22,8 +22,8 @@ function normalizeTimeDisplayMode(value: unknown): TimeDisplayMode {
 }
 
 export interface PlaybackPrefs {
-  /** 播放时渐入、暂停时渐出；包络由 Rust realtime renderer 执行。 */
-  transportFade: boolean;
+  /** 播放时渐入、暂停时渐出固定开启；包络由 Rust realtime renderer 执行。 */
+  readonly transportFade: true;
   /** 管理模式 Tempo 控件相对原速可调整的最大百分比。 */
   tempoRange: TempoRange;
   /** 详情栏是否始终读取当前播放曲目；切歌时跟随，跨重启保留。 */
@@ -61,8 +61,8 @@ function load(): PlaybackPrefs {
     const applyVdjDefaults =
       typeof data.version !== "number" || data.version < STORAGE_VERSION;
     const prefs: PlaybackPrefs = {
-      transportFade:
-        typeof data.transportFade === "boolean" ? data.transportFade : DEFAULTS.transportFade,
+      // 不再提供开关，旧的关闭偏好也不影响固定开启的播放包络。
+      transportFade: true,
       tempoRange: normalizeTempoRange(data.tempoRange),
       playingDetailPinned:
         typeof data.playingDetailPinned === "boolean"
@@ -91,7 +91,6 @@ function save(prefs: PlaybackPrefs): void {
 }
 
 interface PlaybackPrefsState extends PlaybackPrefs {
-  setTransportFade(value: boolean): void;
   setTempoRange(value: TempoRange): void;
   setPlayingDetailPinned(value: boolean): void;
   setDetailWaveformVisible(value: boolean): void;
@@ -102,19 +101,6 @@ interface PlaybackPrefsState extends PlaybackPrefs {
 
 export const usePlaybackPrefs = create<PlaybackPrefsState>((set, get) => ({
   ...load(),
-  setTransportFade(transportFade) {
-    const next = {
-      transportFade,
-      tempoRange: get().tempoRange,
-      playingDetailPinned: get().playingDetailPinned,
-      detailWaveformVisible: get().detailWaveformVisible,
-      detailControlVisible: get().detailControlVisible,
-      localExternalDragMode: get().localExternalDragMode,
-      timeDisplayMode: get().timeDisplayMode,
-    };
-    set({ transportFade });
-    save(next);
-  },
   setTempoRange(tempoRange) {
     const next = {
       transportFade: get().transportFade,

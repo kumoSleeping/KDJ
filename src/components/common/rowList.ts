@@ -196,6 +196,11 @@ export interface RowListOptions {
   measured?: boolean;
   /** Another list: a short one starts being built whole again. */
   resetKey?: unknown;
+  /** Keep even a short task list windowed: page switches must not copy thousands of rows. */
+  windowed?: boolean;
+  /** In-memory scroll geometry retained when a page is unmounted. */
+  initialOffset?: number;
+  initialMeasurementsCache?: RowVirtualizerOptions["initialMeasurementsCache"];
   /**
    * The list scrolls itself (see the head of this file): it takes the wheel, is never built whole,
    * keeps half a screen of rows beyond either edge and renders in the scroll event.
@@ -207,8 +212,8 @@ export interface RowListOptions {
  * The virtualizer of a row list, and whether a short list has been built whole. `rowHeight` is
  * the estimate; call `measure()` when it changes.
  */
-export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHeight, screenRows, getKey, measured = false, resetKey, own = false }: RowListOptions) {
-  const whole = !own && count <= ROW_LIST_WHOLE;
+export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHeight, screenRows, getKey, measured = false, resetKey, own = false, windowed = false, initialOffset, initialMeasurementsCache }: RowListOptions) {
+  const whole = !own && !windowed && count <= ROW_LIST_WHOLE;
   // Rows of a short list built beyond the window so far: [0, grown).
   const [grown, setGrown] = useState(0);
   const grownRef = useRef(0);
@@ -245,6 +250,8 @@ export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHe
     overscan: own ? Math.max(OWN_OVERSCAN_ROWS, Math.ceil(screenRows / 2)) : rowListOverscan(screenRows),
     rangeExtractor,
     getItemKey: getKey,
+    initialOffset,
+    initialMeasurementsCache,
     scrollMargin: headHeight,
     scrollToFn: rowListScrollTo,
     observeElementOffset: own ? observeOwnOffset : observeRowListOffset,

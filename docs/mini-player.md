@@ -19,9 +19,11 @@ frame and its motion). macOS and Windows run the same steps through the same win
   moved by dragging it anywhere that is not a key or the transport. It floats over other
   windows and is on every desktop unless 置顶 is switched off (remembered). Its height follows
   the bubble's.
-- **Another song.** The mini player stays where it is and shows the new song when the bubble
-  has it. (In the whole window the bubble rolls down behind the bar and rises again; the mini
-  player has no bar to go behind.)
+- **Another song.** The mini player stays where it is. Once the next cover is prepared, the
+  cover and song text turn over with the motion schema’s existing `turn` gesture (as in the
+  work rail and search text); its surface, window keys and live transport stay put. It never
+  sends the window off screen and back. In the whole window the bubble keeps its usual roll
+  down and rise.
 - **Back.** The key 展开窗口. The mini player goes into that corner again, and the whole
   window fades in as it was. The place the mini player was left at is remembered for next
   time, across launches (`mini-player.json` in the data directory); a place on a display that

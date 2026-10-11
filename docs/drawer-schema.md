@@ -75,12 +75,16 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   that takes `flex: 1` of what is left, or a page stretched with `min-height: 100%` inside the
   scrolling element, only fills what it is given and makes the measure meaningless — give it a
   size (a picture: a ratio and a cap) or keep the app out of the sized extents. A body that is
-  still fetching what decides its height puts `data-drawer-pending` on an element until it has
-  it; nothing is measured meanwhile, and the panel is half the way down.
+  still fetching what decides its height puts `data-drawer-pending` on an element until the
+  first result or error is ready. Nothing is measured meanwhile; a `fit` panel waits beyond
+  the edge rather than arriving at a short loading page's height. A leaving page's still copy
+  does not keep the new page waiting.
 - **When the body is built.** An `at-least-half` body is built with its panel and measured
   before the first paint. Any other body is built one frame after its panel, so a heavy app does
-  not hold up that frame. A `fit` panel waits beyond the edge for its first measure (a few
-  frames, 120 ms at most) and then comes in at the height it keeps.
+  not hold up that frame. A `fit` panel waits for its first measure and then comes in at the
+  height it keeps, with its body already visible. The 120 ms fallback is only for a body
+  without a measure, never for explicitly pending content. Height measurements stop throughout
+  the entrance and resume once the panel rests; loading cannot resize it halfway into view.
 - **Pages are the title.** An app with several pages lists them in `pages`; the drawer writes them
   as its title (`TitleTabs`: the page in view at title size in full-strength text colour, the others
   smaller and quiet beside it). The body wraps the part that changes in

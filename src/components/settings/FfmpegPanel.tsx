@@ -48,7 +48,7 @@ export function FfmpegPanel() {
   const managedInstall = ["windows", "macos"].includes(platform ?? "") && !!getBridge().installMediaTools;
   const supported = status?.arch === "x86_64" || (platform === "macos" && status?.arch === "aarch64");
   return <Panel heading="媒体工具" dense>
-    <div className="kd-ai-prompt kd-ffmpeg-settings">
+    <div className="kd-ai-prompt kd-ffmpeg-settings" data-drawer-pending={!status && !error ? "" : undefined}>
       <div className="kd-ffmpeg-actions">
         <span className="kd-ai-prompt-copy">FFmpeg / ffprobe</span>
         {managedInstall && <Button variant="ghost" size="sm" disabled={busy || !supported} onClick={() => void install("download")}>
