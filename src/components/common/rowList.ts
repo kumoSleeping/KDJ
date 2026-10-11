@@ -125,7 +125,10 @@ export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHe
     const indices: number[] = [];
     for (let index = first; index <= last; index += 1) indices.push(index);
     return indices;
-  }, []);
+    // The virtualizer keeps the indexes it extracted until the range or this function changes:
+    // the function is another one for every chunk, or the chunk is not built before the next scroll.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [whole, grown]);
   const virtualizer = useVirtualizer<HTMLElement, HTMLElement>({
     count,
     getScrollElement: () => scrollerRef.current,

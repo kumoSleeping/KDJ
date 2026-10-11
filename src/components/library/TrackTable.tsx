@@ -928,8 +928,19 @@ export const TrackTable = memo(function TrackTable({
   const loadingMore = useTableStore((state) => state.loadingMore);
   const settings = useAppStore((state) => state.settings);
   const keyNotation = settings?.key_notation ?? "camelot";
-  /** The library's medians for the loudness column; one subscription for every row. */
-  const energyBaselines = useLibraryStore((state) => state.stats);
+  /**
+   * The library's medians for the loudness column, read once for every row. The stats arrive as a
+   * new object with every analysed batch: the rows are given the three numbers they read, and
+   * another object only when one of them has changed.
+   */
+  const rmsMedian = useLibraryStore((state) => state.stats?.rms_db_median);
+  const energyMedian = useLibraryStore((state) => state.stats?.energy_median);
+  const peakMedian = useLibraryStore((state) => state.stats?.peak_db_median);
+  const hasStats = useLibraryStore((state) => state.stats !== null);
+  const energyBaselines = useMemo<EnergyBaselines | null>(
+    () => hasStats ? { rms_db_median: rmsMedian, energy_median: energyMedian, peak_db_median: peakMedian } : null,
+    [hasStats, rmsMedian, energyMedian, peakMedian],
+  );
   const filterFolder = useTableStore((state) => state.filter.folder);
   const removeTracks = useTableStore((state) => state.removeTracks);
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
