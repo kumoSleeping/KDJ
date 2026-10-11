@@ -1,8 +1,7 @@
 import { dropWorkshopTracks, paintWorkshopDrop } from "../../lib/workshopDrop";
 import { useStore } from "zustand";
 import type { LibraryPaneStore, LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
-import { cloneElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { flushSync } from "react-dom";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type Ref } from "react";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import {
   Check,
@@ -24,22 +23,20 @@ import {
   Video,
   Image as ImageIcon,
 } from "lucide-react";
-import { LIBRARY_REST_PACE, libraryScrollPace, libraryViewport, libraryWindowTop, restoreLibraryAnchor } from "../../lib/libraryViewport";
-import { createLibraryStandIns, standInGap, type LibraryStandIns } from "../../lib/libraryStandIns";
-import { createLibraryRowRecovery, type LibraryRowRecovery } from "../../lib/libraryRowRecovery";
-import { tracePlayback } from "../../lib/playbackTrace";
+import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
+import { useRowList, useScrollMotion } from "../common/rowList";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
-import { acquireCoverThumbnail, peekCoverThumbnail, type CoverThumbnailLease } from "../../lib/coverThumbnailQueue";
 import { OverlayScrollbars } from "../common/OverlayScrollbars";
-import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
+import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { RowIndex, RowPick } from "../common/RowPick";
 import { TableRating } from "../common/TableRating";
 import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../common/dragGhost";
 import "../common/DragGhost.css";
-import { createListArrival, type ListArrival } from "./listArrival";
+import { createListArrival, type ListArrival } from "../common/listArrival";
+import "../common/RowList.css";
 import { copyText } from "../../lib/copyText";
 import { copyShareContent } from "../../lib/shareClipboard";
 import {
@@ -104,7 +101,7 @@ import {
   type TrackSort,
 } from "../../stores/libraryStore";
 import type { DownloadTask } from "../../types";
-import type { FileDisposalMode, KeyNotation, SongSource, TrackSummary } from "../../types";
+import type { FileDisposalMode, KeyNotation, LibraryStats, SongSource, TrackSummary } from "../../types";
 import { playTrack } from "../../lib/playTrack";
 import {
   beginColumnPointerReorder,
@@ -146,16 +143,20 @@ export interface DetailEventDetail {
 }
 
 /** 1..10 的能量条。未分析时全灰。 */
+export type EnergyBaselines = Pick<LibraryStats, "rms_db_median" | "energy_median" | "peak_db_median">;
 export function EnergyMeter({
   value,
   rmsDb = null,
   peakDb = null,
+  baselines,
 }: {
   value: number | null;
   rmsDb?: number | null;
   peakDb?: number | null;
+  /** The library's medians (its stats); read once by the table, not by every row. */
+  baselines: EnergyBaselines | null | undefined;
 }) {
-  const stats = useLibraryStore((state) => state.stats);
+  const stats = baselines;
   const rmsBaseline = stats?.rms_db_median;
   const energyBaseline = stats?.energy_median;
   const peakBaseline = stats?.peak_db_median;
@@ -328,90 +329,57 @@ export interface TrackTableProps {
   onSort(sort: TrackSort): void;
 }
 
-/**
- * 封面请求的先后由可视范围决定。行不为此重渲染：等待中的请求登记在这里，表格在窗口
- * 移动后统一改它们的优先级（见 TrackTable 里的 coverLane）。
- */
-interface WaitingCover { index: number; lease: CoverThumbnailLease }
-interface CoverLane { start: number; end: number; fast: boolean; recovering: boolean; waiting: Set<WaitingCover> }
-function coverLanePriority(lane: CoverLane, index: number): number {
-  if (lane.fast) return Infinity;
-  if (index >= lane.start && index < lane.end) return 0;
-  return lane.recovering ? Infinity : 1;
-}
+/** Covers known to be missing (an audio file without a picture): the placeholder is there from the first frame. */
+const coversMissing = new Set<string>();
+/** A video's first frame is extracted on demand; a service that is restarting is asked again. */
+const COVER_RETRIES = 12;
+const COVER_RETRY_MS = 3000;
 
 /**
- * 曲库表的封面格。
- *
- * 后端重启、首次视频抽帧排队时会短暂断开/超时；旧版一收到一次 img error 就直接
- * 写 `visibility: hidden`，服务恢复后浏览器也不会再请求，于是抽帧早就成功了列表
- * 仍永远空白。视频封面用 fetch 先确认 HTTP 成功、转成 Blob URL 后才交给 img；
- * 这样 WKWebView 不会把开发时后端重启造成的图片加载失败永久黏在原节点上。普通
- * 音频没有内嵌图很常见，仍直接退回灰色占位，避免为每一首无图文件轮询。
+ * 曲库表的封面格：一个普通的 <img>，由浏览器自己的图片管线按需请求、解码和缓存（loading="lazy"
+ * 只请求滚到眼前的；decoding="async" 不占主线程）。甩动（hold）期间不挂图片：行一停下来才挂。
+ * 没有封面的音频记在 coversMissing 里，再次挂载时第一帧就是唱盘；视频首帧由后端抽取，服务短暂
+ * 重启或抽帧排队时换个地址稍后再试，不能一次失败就永久空白。
  */
-function TrackCoverThumb({ track, index, lane }: { track: TrackSummary; index: number; lane: CoverLane }) {
-  const [attempt, setAttempt] = useState(0);
-  const retryTimer = useRef<number | null>(null);
-  const waitingRef = useRef<WaitingCover | null>(null);
+function TrackCoverThumb({ track, hold }: { track: TrackSummary; hold: boolean }) {
   const isVideo = isVideoTrack(track.format);
-  const revision = isVideo ? `${track.modified_at}-${attempt}` : track.modified_at;
-  const key = `${track.id}:${revision}:64`;
-  // 首帧直接用已有结论：缓存里的封面、或已知没有封面。结论未知时格子保持空白，
-  // 不先画唱盘再换成封面；同一行换修订时，旧图留到新图到达。
-  const [shown, setShown] = useState(() => peekCoverThumbnail(key));
-
+  const key = `${track.id}:${track.modified_at}`;
+  const [attempt, setAttempt] = useState(0);
+  const [missing, setMissing] = useState(() => coversMissing.has(key));
+  const retryTimer = useRef<number | null>(null);
   useEffect(() => {
     setAttempt(0);
-  }, [track.id, track.modified_at]);
-
-  useEffect(() => {
-    let alive = true;
-    const lease = acquireCoverThumbnail(key, api.coverUrl(track.id, revision, 64), coverLanePriority(lane, index));
-    const waiting: WaitingCover = { index, lease };
-    waitingRef.current = waiting;
-    lane.waiting.add(waiting);
-    void lease.promise
-      .then((objectUrl) => {
-        lane.waiting.delete(waiting);
-        if (alive && objectUrl) setShown((current) => current.src === objectUrl ? current : { src: objectUrl, missing: false });
-      })
-      .catch(() => {
-        lane.waiting.delete(waiting);
-        if (!alive) return;
-        if (!isVideo || attempt >= 12) {
-          setShown(current => current.missing && !current.src ? current : { src: "", missing: true });
-          return;
-        }
-        // 后端热重启 / 首次抽帧排队时稍候再试。每次换 URL，失败缓存不会卡住重试。
-        retryTimer.current = window.setTimeout(() => {
-          retryTimer.current = null;
-          setAttempt((value) => value + 1);
-        }, 3000);
-      });
-
+    setMissing(coversMissing.has(key));
     return () => {
-      alive = false;
-      lease.release();
-      lane.waiting.delete(waiting);
-      if (waitingRef.current === waiting) waitingRef.current = null;
       if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+      retryTimer.current = null;
     };
-  }, [key, lane]);
-  // 排序变化会让同一行换位置；等待中的请求跟着换优先级。
-  useEffect(() => {
-    const waiting = waitingRef.current;
-    if (!waiting || waiting.index === index) return;
-    waiting.index = index;
-    waiting.lease.setPriority(coverLanePriority(lane, index));
-  }, [index, lane]);
-
+  }, [key]);
+  const revision = isVideo && attempt > 0 ? `${track.modified_at}-${attempt}` : track.modified_at;
   return (
     <span className="kd-thumb" draggable={false}>
-      {shown.src ? (
-        isVideo ? <img key={shown.src} src={shown.src} alt="" draggable={false} /> : <CoverImage src={shown.src} />
-      ) : shown.missing && !isVideo ? (
+      {missing && !isVideo ? (
         <VinylPlaceholder />
-      ) : null}
+      ) : missing || hold ? null : (
+        <img
+          src={api.coverUrl(track.id, revision, 64)}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          onError={() => {
+            if (!isVideo || attempt >= COVER_RETRIES) {
+              coversMissing.add(key);
+              setMissing(true);
+              return;
+            }
+            retryTimer.current = window.setTimeout(() => {
+              retryTimer.current = null;
+              setAttempt((value) => value + 1);
+            }, COVER_RETRY_MS);
+          }}
+        />
+      )}
     </span>
   );
 }
@@ -524,16 +492,14 @@ function trackCell(
   key: string,
   keyNotation: KeyNotation,
   onRate: ((rating: number) => void) | undefined,
-  index: number,
-  coverLane: CoverLane,
+  baselines: EnergyBaselines | null | undefined,
+  coverHold: boolean,
 ) {
   switch (key) {
     case "title":
       return (
-        <td key={key} data-col="title" className="kd-td-strong" title={track.title || track.filename}>
-          {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
-              在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          <TrackCoverThumb track={track} index={index} lane={coverLane} />
+        <div key={key} className="kd-list-cell kd-td-strong" role="gridcell" data-col="title" data-flex="" title={track.title || track.filename}>
+          <TrackCoverThumb track={track} hold={coverHold} />
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -541,64 +507,64 @@ function trackCell(
             </span>
           )}
           {isImageTrack(track.format) && <span className="kd-video-mark" title={track.format.toLowerCase() === "gif" ? "GIF" : "图片"} role="img" aria-label={track.format.toLowerCase() === "gif" ? "GIF" : "图片"}><ImageIcon size={11} aria-hidden="true" /></span>}
-          {track.title || track.filename}
-        </td>
+          <span className="kd-truncate">{track.title || track.filename}</span>
+        </div>
       );
     case "artist":
       // data-empty 是给竖屏用的：那边没有"列"要对齐，
       // 一个孤零零的破折号只是噪声，直接不占位
       return (
-        <td key={key} data-col="artist" data-empty={track.artist ? undefined : "true"} title={track.artist}>
+        <div key={key} className="kd-list-cell" role="gridcell" data-col="artist" data-empty={track.artist ? undefined : "true"} title={track.artist}>
           {track.artist || DASH}
-        </td>
+        </div>
       );
     case "album":
       return (
-        <td key={key} data-col="album" title={track.album}>
+        <div key={key} className="kd-list-cell" role="gridcell" data-col="album" title={track.album}>
           {track.album || DASH}
-        </td>
+        </div>
       );
     case "bpm":
       return (
-        <td key={key} data-col="bpm" className="kd-td-num">
+        <div key={key} className="kd-list-cell kd-td-num" role="gridcell" data-col="bpm">
           {formatBpm(track.bpm)}
-        </td>
+        </div>
       );
     case "camelot":
       return (
-        <td key={key} data-col="camelot">
+        <div key={key} className="kd-list-cell" role="gridcell" data-col="camelot" data-flex="">
           <TrackKeyChip track={track} notation={keyNotation} />
-        </td>
+        </div>
       );
     case "energy":
       return (
-        <td key={key} data-col="energy">
-          <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
-        </td>
+        <div key={key} className="kd-list-cell" role="gridcell" data-col="energy" data-flex="">
+          <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} baselines={baselines} />
+        </div>
       );
     case "duration":
       return (
-        <td key={key} data-col="duration" className="kd-td-num">
+        <div key={key} className="kd-list-cell kd-td-num" role="gridcell" data-col="duration">
           {formatDuration(track.duration)}
-        </td>
+        </div>
       );
     case "format":
       return (
-        <td key={key} data-col="format" className="kd-mono kd-muted">
+        <div key={key} className="kd-list-cell kd-mono kd-muted" role="gridcell" data-col="format">
           {track.format.toUpperCase() || DASH}
-        </td>
+        </div>
       );
     case "size":
       return (
-        <td key={key} data-col="size" className="kd-td-num kd-mono kd-muted">
+        <div key={key} className="kd-list-cell kd-td-num kd-mono kd-muted" role="gridcell" data-col="size">
           {formatBytes(track.size)}
-        </td>
+        </div>
       );
     case "file_created_at":
       return (
-        <td key={key} data-col="file_created_at" className="kd-mono kd-muted">
+        <div key={key} className="kd-list-cell kd-mono kd-muted" role="gridcell" data-col="file_created_at">
           {formatDate(track.file_created_at)}
-        </td>
+        </div>
       );
     case "samplerate":
     case "channels":
@@ -608,7 +574,7 @@ function trackCell(
         : key === "channels"
           ? track.channels ? `${track.channels}ch` : DASH
           : track.bitrate ? `${track.bitrate} kbps` : DASH;
-      return <td key={key} data-col={key} className="kd-mono kd-muted" title={value}>{value}</td>;
+      return <div key={key} className="kd-list-cell kd-mono kd-muted" role="gridcell" data-col={key} title={value}>{value}</div>;
     }
     case "genre":
     case "year":
@@ -616,15 +582,15 @@ function trackCell(
     case "filename":
     case "path": {
       const value = track[key] || (key === "source_platform" ? "local" : "");
-      return <td key={key} data-col={key} title={value}>{value || DASH}</td>;
+      return <div key={key} className="kd-list-cell" role="gridcell" data-col={key} title={value}>{value || DASH}</div>;
     }
     case "added_at":
-      return <td key={key} data-col={key} className="kd-mono kd-muted">{formatDate(track.added_at)}</td>;
+      return <div key={key} className="kd-list-cell kd-mono kd-muted" role="gridcell" data-col={key}>{formatDate(track.added_at)}</div>;
     case "rating":
       return (
-        <td key={key} data-col="rating">
+        <div key={key} className="kd-list-cell" role="gridcell" data-col="rating" data-flex="">
           <TableRating value={track.rating} onChange={onRate} />
-        </td>
+        </div>
       );
     default:
       return null;
@@ -633,59 +599,43 @@ function trackCell(
 
 interface TrackCellsProps {
   track: TrackSummary;
-  /** 在当前顺序里的位置（从 0 起）。 */
-  index: number;
-  coverLane: CoverLane;
-  showIndex: boolean;
   columns: readonly Column[];
   keyNotation: KeyNotation;
-  /** Rows are being picked: the index gives way to the selection mark (see TrackTable's `selecting`). */
-  selectionMode: boolean;
-  selected: boolean;
-  /** `range` picks the run from the row touched last to this one. */
-  onToggle(id: number, range?: boolean): void;
+  baselines: EnergyBaselines | null | undefined;
+  /** A fling is under way: no cover is asked for until it rests. */
+  coverHold: boolean;
   onRate(id: number, rating: number): void;
 }
 
 /**
- * 行的选中、焦点和播放标记只改 <tr> 的属性；单元格树单独 memo 后，封面、能量条和
+ * 行的选中、焦点和播放标记只改行元素的属性；单元格树单独 memo 后，封面、能量条和
  * 评分控件不会跟着重复执行。
  */
 const TrackCells = memo(function TrackCells({
   track,
-  index,
-  coverLane,
   columns,
   keyNotation,
+  baselines,
+  coverHold,
   onRate,
 }: TrackCellsProps) {
   return (
     <>
-      {columns.map((column) => {
-        const cell = trackCell(
-          track,
-          column.key,
-          keyNotation,
-          column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
-          index,
-          coverLane,
-        ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
-        return cloneElement(
-          cell,
-          { draggable: false },
-          <span className="kd-track-drag-surface" draggable={false}>
-            {cell.props.children}
-          </span>,
-        );
-      })}
-      <td className="kd-table-fill" aria-hidden="true" />
+      {columns.map((column) => trackCell(
+        track,
+        column.key,
+        keyNotation,
+        column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
+        baselines,
+        coverHold,
+      ))}
     </>
   );
 });
 
 /** 空位只留序号（由 TrackRow 持有）；一个空格跨过数据列，不制造假的内容或控件。 */
 const PlaceholderCells = memo(function PlaceholderCells({ columns }: Pick<TrackCellsProps, "columns">) {
-  return <td colSpan={columns.length + 1} aria-hidden="true" />;
+  return <div className="kd-list-cell" aria-hidden="true" style={{ gridColumn: `span ${columns.length}` }} />;
 });
 
 /**
@@ -693,66 +643,75 @@ const PlaceholderCells = memo(function PlaceholderCells({ columns }: Pick<TrackC
  * rowActions），所以窗口移动、选区变化都不会让没变的行重渲染。
  */
 interface TrackRowActions {
-  click(event: React.MouseEvent<HTMLTableRowElement>, track: TrackSummary): void;
+  click(event: React.MouseEvent<HTMLDivElement>, track: TrackSummary): void;
   doubleClick(track: TrackSummary): void;
-  pointerDown(event: React.PointerEvent<HTMLTableRowElement>, track: TrackSummary): void;
+  pointerDown(event: React.PointerEvent<HTMLDivElement>, track: TrackSummary): void;
   cancelPress(): void;
-  contextMenu(event: React.MouseEvent<HTMLTableRowElement>, track: TrackSummary): void;
-  linkDragStart(event: React.DragEvent<HTMLTableRowElement>, track: TrackSummary): void;
+  contextMenu(event: React.MouseEvent<HTMLDivElement>, track: TrackSummary): void;
+  linkDragStart(event: React.DragEvent<HTMLDivElement>, track: TrackSummary): void;
   linkDragEnd(): void;
 }
 
 interface TrackRowProps extends Omit<TrackCellsProps, "track"> {
+  /** The row's key in the list: the track's id. Its summary may not have arrived yet. */
+  id: number;
   track: TrackSummary | undefined;
-  recovery: LibraryRowRecovery;
+  /** 在当前顺序里的位置（从 0 起）。 */
+  index: number;
+  /** Where the row lies in the list, in pixels from the first row. */
+  top: number;
+  showIndex: boolean;
+  /** Rows are being picked: the index gives way to the selection mark (see TrackTable's `selecting`). */
+  selectionMode: boolean;
+  selected: boolean;
   focused: boolean;
   playing: boolean;
   /** Windows 分享链接走 WebView2 原生 HTML5 拖放。 */
   linkDrag: boolean;
   actions: TrackRowActions;
+  /** `range` picks the run from the row touched last to this one. */
+  onToggle(id: number, range?: boolean): void;
+  ref: Ref<HTMLDivElement>;
 }
 
 /**
- * 一行曲目。滚动只是把窗口挪几行：留在窗口里的行 props 不变，整行跳过；真正要渲染的
- * 只有新进来的那几行。
+ * 一行曲目：一个绝对定位的块，由 `top` 摆在自己的位置上。滚动只是把窗口挪几行：留在窗口里的行
+ * props 不变，整行跳过；真正要渲染的只有新进来的那几行。摘要到达时内容在同一个元素里换上，行
+ * 不重挂。
  */
 const TrackRow = memo(function TrackRow({
+  id,
   track,
-  recovery,
+  index,
+  top,
+  showIndex,
+  selectionMode,
+  selected,
   focused,
   playing,
   linkDrag,
   actions,
+  onToggle,
+  ref,
   ...cells
 }: TrackRowProps) {
-  const rowRef = useRef<HTMLTableRowElement | null>(null);
-  const [admitted, setAdmitted] = useState(() => Boolean(track) && !recovery.deferred());
-  const ready = admitted || !recovery.deferred() ? track : undefined;
-  const id = track?.id;
-  const index = cells.index;
-  const readable = Boolean(ready);
-  useLayoutEffect(() => {
-    if (readable && id !== undefined) {
-      if (!admitted) setAdmitted(true);
-      recovery.remember(id);
-      return;
-    }
-    // Register even when the summary is missing. A response arriving after a fling must still
-    // pass through the commit budget, rather than materializing every cold row together.
-    return recovery.enqueue({ index, available: id !== undefined, fresh: id !== undefined && !recovery.seen(id),
-      admit: () => setAdmitted(true), element: () => rowRef.current });
-  }, [recovery, index, admitted, id, readable]);
+  const ready = track;
   return (
-    <tr
-      ref={rowRef}
-      aria-selected={cells.selected}
+    <div
+      ref={ref}
+      className="kd-list-row"
+      role="row"
+      aria-rowindex={index + 1}
+      style={{ top }}
+      data-kd-row-key={id}
+      aria-selected={selected}
       aria-busy={!ready || undefined}
       data-loading-track={!ready ? "true" : undefined}
       data-kd-track-id={ready?.id}
       data-focus={focused ? "true" : undefined}
       data-playing={playing ? "true" : undefined}
-      data-selecting={cells.selectionMode ? "true" : undefined}
-      // 空位没有交互；序号和 tr 在补入内容时不替换、不移动。
+      data-selecting={selectionMode ? "true" : undefined}
+      // 空位没有交互；序号和行在补入内容时不替换、不移动。
       draggable={Boolean(ready && linkDrag)}
       onDragStart={ready && linkDrag ? (event) => actions.linkDragStart(event, ready) : undefined}
       onDragEnd={ready && linkDrag ? actions.linkDragEnd : undefined}
@@ -764,16 +723,86 @@ const TrackRow = memo(function TrackRow({
       onDoubleClick={ready ? () => actions.doubleClick(ready) : undefined}
       onContextMenu={ready ? (event) => actions.contextMenu(event, ready) : undefined}
     >
-      {cells.showIndex ? (
-        <td data-col="index" data-picking={cells.selectionMode && ready ? "true" : undefined}>
-          <RowIndex number={index + 1} picking={cells.selectionMode} pick={ready ? (
-            <RowPick state={cells.selected ? "all" : "none"} label={`选择 ${ready.title || ready.filename}`}
-              onToggle={(event) => cells.onToggle(ready.id, event.shiftKey)} />
+      {showIndex ? (
+        <div className="kd-list-cell" role="gridcell" data-col="index" data-flex="" data-picking={selectionMode && ready ? "true" : undefined}>
+          <RowIndex number={index + 1} picking={selectionMode} pick={ready ? (
+            <RowPick state={selected ? "all" : "none"} label={`选择 ${ready.title || ready.filename}`}
+              onToggle={(event) => onToggle(ready.id, event.shiftKey)} />
           ) : null} />
-        </td>
+        </div>
       ) : null}
       {ready ? <TrackCells track={ready} {...cells} /> : <PlaceholderCells columns={cells.columns} />}
-    </tr>
+    </div>
+  );
+});
+
+/** 有曲目时下载态占独立序号列，和下面 1/2/3 同宽；无曲目时不单独占一列。 */
+const PendingRow = memo(function PendingRow({ task, top, showIndex, showArtist, showFormat, onMenu, ref }: {
+  task: DownloadTask;
+  top: number;
+  showIndex: boolean;
+  showArtist: boolean;
+  showFormat: boolean;
+  onMenu(event: React.MouseEvent<HTMLDivElement>, task: DownloadTask): void;
+  ref: Ref<HTMLDivElement>;
+}) {
+  return (
+    <div
+      ref={ref}
+      className="kd-list-row"
+      role="row"
+      style={{ top }}
+      data-kd-row-key={`pending:${task.id}`}
+      data-pending="true"
+      data-pending-state={task.state}
+      onContextMenu={(event) => onMenu(event, task)}
+    >
+      {showIndex ? (
+        <div className="kd-list-cell kd-pending-index" role="gridcell" data-col="index" data-flex="">
+          <PendingStateMark task={task} />
+        </div>
+      ) : null}
+      <div
+        className="kd-list-cell kd-td-strong kd-pending-lead"
+        role="gridcell"
+        data-col="title"
+        data-flex=""
+        style={{ gridColumn: showIndex ? "2 / -1" : "1 / -1" }}
+        title={task.title || "未命名"}
+      >
+        <span className="kd-pending-title">
+          {!showIndex ? <PendingStateMark task={task} /> : null}
+          <span className="kd-thumb" aria-hidden="true">
+            {task.cover ? (
+              <img
+                src={thumbUrl(task.cover)}
+                alt=""
+                loading="lazy"
+                draggable={false}
+                referrerPolicy="no-referrer"
+                onError={(event) => { event.currentTarget.style.visibility = "hidden"; }}
+              />
+            ) : null}
+          </span>
+          {task.kind === "video" && (
+            <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
+              <Video size={11} aria-hidden="true" />
+            </span>
+          )}
+          <span className="kd-truncate">{task.title || "未命名"}</span>
+          {showArtist && task.artist ? (
+            <span className="kd-pending-side kd-muted kd-truncate" title={task.artist}>
+              {task.artist}
+            </span>
+          ) : null}
+          {showFormat ? (
+            <span className="kd-pending-side kd-mono kd-muted">
+              {task.kind === "video" ? "视频" : task.quality || DASH}
+            </span>
+          ) : null}
+        </span>
+      </div>
+    </div>
   );
 });
 
@@ -792,7 +821,7 @@ function sameFolderPath(a: string, b: string): boolean {
 const PENDING_STATES = new Set(["queued", "running", "processing", "paused", "failed"]);
 
 /**
- * 虚拟滚动的兜底行高（= --kd-row-h）。真实行高以渲染出来的第一行为准
+ * 虚拟列表的兜底行高（= --kd-row-h）。真实行高以渲染出来的第一行为准
  * （见 TrackTable 里的量测 effect），这里只是首帧还没量到时的占位。
  */
 const FALLBACK_ROW_H = 36;
@@ -853,21 +882,11 @@ function isPendingForFolder(task: DownloadTask, filterFolder: string, indexById:
   return !indexById.has(task.track_id);
 }
 
-/** 渲染窗口的基准位置（按步长取整，见 libraryWindowTop）和视口高度。 */
-interface LibraryView { top: number; height: number }
-const REST_VIEW: LibraryView = { top: 0, height: 0 };
-function sameLibraryView(a: LibraryView, b: LibraryView): boolean {
-  return a.top === b.top && a.height === b.height;
-}
-/** 这么久没有新的滚动帧就算停稳。 */
-const SCROLL_REST_MS = 140;
-/** 一次滚动走过这么多屏才写一条跟踪日志（开发版）。 */
-const TRACED_SCROLL_SCREENS = 3;
-/** 快滚途中每走过这么多行，把摘要的加载重心挪到眼前一次。 */
-const FLIGHT_DEMAND_ROWS = 300;
-/** 列表被呈现时等渲染窗口对齐；滚动补入由每批真实内容自己开始动画。 */
-type ArrivalDue = { view: LibraryView; at: number };
-/** 换查询后等窗口对上最多这么久。 */
+/**
+ * 列表被呈现时，等渲染出的行对上它的位置（换查询后最多等这么久）再开始到场；滚动补入的行由
+ * 到场模块按自己的时钟接上（见 common/listArrival）。
+ */
+interface ArrivalDue { offset: number; at: number }
 const ARRIVAL_DUE_MS = 400;
 
 export const TrackTable = memo(function TrackTable({
@@ -899,6 +918,8 @@ export const TrackTable = memo(function TrackTable({
   const loadingMore = useTableStore((state) => state.loadingMore);
   const settings = useAppStore((state) => state.settings);
   const keyNotation = settings?.key_notation ?? "camelot";
+  /** The library's medians for the loudness column; one subscription for every row. */
+  const energyBaselines = useLibraryStore((state) => state.stats);
   const filterFolder = useTableStore((state) => state.filter.folder);
   const removeTracks = useTableStore((state) => state.removeTracks);
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
@@ -1010,19 +1031,13 @@ export const TrackTable = memo(function TrackTable({
     () => () => {
       pointerDragCleanupRef.current?.();
       htmlExternalDragScrollUnlockRef.current?.();
-      resizeObserverRef.current?.disconnect();
-      // 两个 ref 都要归零：留着已取消的帧号，onScroll 会一直以为还有一帧在排队。
-      if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
-      scrollRafRef.current = 0;
-      if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
-      scrollIdleTimerRef.current = null;
     },
     [],
   );
 
   /** 触屏长按整行后启动系统文件拖动；明显纵向移动时优先让列表滚动。 */
   const beginTrackSystemFileDrag = (
-    event: React.PointerEvent<HTMLTableRowElement>,
+    event: React.PointerEvent<HTMLDivElement>,
     track: TrackSummary,
   ): boolean => {
     const startFileDrag = window.kdj?.startFileDrag;
@@ -1136,7 +1151,7 @@ export const TrackTable = memo(function TrackTable({
    * 本地曲目不用 WebKit 的原生 draggable：它经常把按住移动解释成框选/多选，
    * 或只发 dragstart 不发 drop。这里直接跟踪指针，松手时按坐标命中文件夹。
    */
-  const beginTrackPointerDrag = (event: React.PointerEvent<HTMLTableRowElement>, track: TrackSummary) => {
+  const beginTrackPointerDrag = (event: React.PointerEvent<HTMLDivElement>, track: TrackSummary) => {
     if (event.pointerType !== "mouse" || event.button !== 0) return;
     if ((event.target as HTMLElement).closest("button, input, select, textarea, a, label")) return;
     // Windows 的 URL 数据拖放交给 WebView2 原生 HTML5 链路；文件与 macOS 链接仍用
@@ -1547,7 +1562,7 @@ export const TrackTable = memo(function TrackTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trashSupported, shortcutActive]);
 
-  /* ------------------------------------------------ 回到正在播的那首 */
+  /* ------------------------------------------------ 滚动容器、行高、到场 */
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const initialSessionRef = useRef(persistentSession ? readWorkspaceSession().local : { scrollTop: 0, topVisibleTrackId: null, rowOffset: 0 });
   const scrollRestoreDoneRef = useRef(false);
@@ -1556,136 +1571,45 @@ export const TrackTable = memo(function TrackTable({
   const [headerH, setHeaderH] = useState(28);
   const headerHRef = useRef(28);
   const [rootFont, setRootFont] = useState(16);
-  const [view, setView] = useState<LibraryView>(REST_VIEW);
-  const viewRef = useRef(view);
-  viewRef.current = view;
-  const paceRef = useRef(LIBRARY_REST_PACE);
-  /** 上一次滚动采样的时刻；0 表示停着。 */
-  const scrollSampleAtRef = useRef(0);
-  /** 替身行：快滚时代替真实的行（见 libraryStandIns）。 */
-  const standInLayerRef = useRef<HTMLDivElement | null>(null);
-  const standInsRef = useRef<LibraryStandIns | null>(null);
-  /** 表格自己渲染出来的行范围，以及替身行上一帧盖住的范围。 */
-  const renderedRowsRef = useRef({ start: 0, end: 0 });
-  const coveredRowsRef = useRef<(readonly [number, number])[]>([]);
-  /** 行的到场动画（见 listArrival）。 */
-  const arrivalRef = useRef<ListArrival | null>(null);
-  /**
-   * 行提交之后要开始的到场动画（见 ArrivalDue）。
-   */
-  const arrivalDueRef = useRef<ArrivalDue | null>(null);
-  /** 正在进行的到场动画涉及的行号，按出场先后；期间新挂载的行（摘要刚到）按原位加入。 */
-  const arrivalRowsRef = useRef<number[]>([]);
-  const visibleRef = useRef(visible);
-  /** 快滚途中上一次把加载重心挪到的行。 */
-  const flightDemandRowRef = useRef(-1);
-  /** 这一次滚动的统计，停稳时写进原生日志。 */
-  const scrollTraceRef = useRef({ startedAt: 0, from: 0, frames: 0, slow: 0, gapMax: 0, travelMax: 0, speedMax: 0, bare: 0, bareMax: 0, held: 0 });
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
   const rowHRef = useRef(FALLBACK_ROW_H);
-  /** 横向滚动不能进入虚拟列表更新链；否则拖底部横滚条时每帧重渲染整张可视表。 */
-  const scrollTopRef = useRef(0);
-  const scrollRafRef = useRef(0);
-  const scrollIdleTimerRef = useRef<number | null>(null);
-  const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const coverLane = useRef<CoverLane>({ start: 0, end: 0, fast: false, recovering: false, waiting: new Set() }).current;
-  const rowRecovery = useMemo(() => createLibraryRowRecovery(() => {
-    const box = scrollerRef.current;
-    const top = Math.max(0, box?.scrollTop ?? 0);
-    return {
-      first: Math.floor(top / rowHRef.current) - pendingCountRef.current,
-      end: Math.ceil((top + Math.max(rowHRef.current, (box?.clientHeight ?? 0) - headerHRef.current)) / rowHRef.current) - pendingCountRef.current,
-      moving: scrollSampleAtRef.current !== 0,
-      visible: visibleRef.current && Boolean(box?.clientHeight),
+  /** 行的到场动画（见 common/listArrival）。 */
+  const arrivalRef = useRef<ListArrival | null>(null);
+  /** 行渲染到位之后要开始的到场动画（见 ArrivalDue）。 */
+  const arrivalDueRef = useRef<ArrivalDue | null>(null);
+  const visibleRef = useRef(visible);
+  const pendingCountRef = useRef(0);
+  /** 已挂载的行，按行的键（曲目 id / 待下载任务）；到场动画按它找到行。 */
+  const rowElementsRef = useRef(new Map<string, HTMLElement>());
+  const registerRow = useCallback((el: HTMLDivElement) => {
+    const key = el.dataset.kdRowKey ?? "";
+    const rows = rowElementsRef.current;
+    rows.set(key, el);
+    return () => {
+      if (rows.get(key) === el) rows.delete(key);
     };
-  }, (rows, direction) => arrivalRef.current?.reveal(rows, direction < 0 ? "above" : "below"), () => {
-    coverLane.recovering = false;
-    for (const waiting of coverLane.waiting) waiting.lease.setPriority(coverLanePriority(coverLane, waiting.index));
-  }), [coverLane]);
-  useLayoutEffect(() => () => rowRecovery.destroy(), [rowRecovery]);
-  const refreshCoverLane = useCallback(() => {
-    const box = scrollerRef.current;
-    const top = Math.max(0, box?.scrollTop ?? 0);
-    const start = Math.floor(top / rowHRef.current) - pendingCountRef.current;
-    const end = Math.ceil((top + Math.max(rowHRef.current, (box?.clientHeight ?? 0) - headerHRef.current)) / rowHRef.current) - pendingCountRef.current;
-    const fast = paceRef.current.fast || !visibleRef.current;
-    const recovering = rowRecovery.deferred();
-    if (start === coverLane.start && end === coverLane.end && fast === coverLane.fast && recovering === coverLane.recovering) return;
-    Object.assign(coverLane, { start, end, fast, recovering });
-    for (const waiting of coverLane.waiting) waiting.lease.setPriority(coverLanePriority(coverLane, waiting.index));
-  }, [coverLane, rowRecovery]);
-  /** 滚动容器 ref：身份必须稳定（见 JSX 处的注释）。值没变就不 setState，
-      否则 ResizeObserver 的初次回调会和自己触发的重渲染互相喂食。 */
+  }, []);
+  /** 滚动容器 ref：可视区域优先分析要知道"曲目表滚到哪了"。 */
   const trackScrollerRef = useCallback((el: HTMLDivElement | null) => {
     scrollerRef.current = el;
-    scrollTopRef.current = el?.scrollTop ?? 0;
     if (persistentSession) observeTrackScroller(el);
-    // 视口高度决定渲染窗口：面板拖宽拖窄、窗口缩放都要重算。
-    resizeObserverRef.current?.disconnect();
-    resizeObserverRef.current = null;
-    if (el) {
-      const updateView = () =>
-        setView((current) => {
-          const top = libraryWindowTop(el.scrollTop, rowHRef.current);
-          const height = el.clientHeight;
-          return current.top === top && current.height === height ? current : { top, height };
-        });
-      updateView();
-      // 容器变宽变窄会改列宽：替身行要重新量一遍真实的行。
-      const observer = new ResizeObserver(() => { standInsRef.current?.invalidate(); updateView(); });
-      observer.observe(el);
-      resizeObserverRef.current = observer;
-    }
-  }, []);
+  }, [persistentSession]);
   // centerSelected 挂在 [] 上，靠 ref 拿最新值，不为它重挂全局事件
   const selectedIdRef = useRef(selectedId);
   // 只取 id：播放进度之类的变化不该让整张表重渲染
   const playingId = useSyncExternalStore(subscribePlayingTrack, () => getPlayingTrack()?.id ?? null, () => null);
-  const pendingCountRef = useRef(0);
+  const virtualizerRef = useRef<ReturnType<typeof useRowList> | null>(null);
   useEffect(() => {
     const scrollTrackIntoCenter = (trackId: number | null | undefined, attemptsLeft = 40) => {
       const id = trackId ?? selectedIdRef.current;
       if (id == null) return;
-
-      const box = scrollerRef.current;
-      if (!box) {
-        if (attemptsLeft > 0) {
-          requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
-        }
-        return;
-      }
-
       const index = libraryStore.getState().indexById.get(id) ?? -1;
-      if (index < 0) {
-        if (attemptsLeft > 0) {
-          requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
-        }
+      const virtualizer = virtualizerRef.current;
+      if (index < 0 || !virtualizer || !scrollerRef.current) {
+        if (attemptsLeft > 0) requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
         return;
       }
-
-      const row = box.querySelector(`tr[data-kd-track-id="${id}"]`);
-      if (row) {
-        row.scrollIntoView({ block: "center" });
-        return;
-      }
-
-      const height = rowHRef.current;
-      if (height <= 0) {
-        if (attemptsLeft > 0) {
-          requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
-        }
-        return;
-      }
-
-      // 虚拟滚动：先把滚动条推到目标附近，等下一帧行挂进 DOM 再精确居中。
-      const pending = pendingCountRef.current;
-      box.scrollTop = Math.max(
-        0,
-        pending * height + index * height - (box.clientHeight - height) / 2,
-      );
-      if (attemptsLeft > 0) {
-        requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
-      }
+      virtualizer.scrollToIndex(pendingCountRef.current + index, { align: "center" });
     };
 
     // 有精确的关闭前滚动位置时优先恢复它；没有存档才按选中行居中。
@@ -1812,228 +1736,81 @@ export const TrackTable = memo(function TrackTable({
   const displayWidthFor = (column: Column) => fitWidth
     ? DJ_TRACK_TABLE_COLUMN_WIDTHS[column.key as keyof typeof DJ_TRACK_TABLE_COLUMN_WIDTHS]
     : widthFor(column.key, column.width ?? "4rem");
-  const tableColSpan = visibleColumns.length + (showIndexCol ? 1 : 0) + 1;
   const tableMinWidthPx = useMemo(() => {
     const px = (value: string) => Number.parseFloat(value) * (value.endsWith("px") ? 1 : rootFont);
     return fitWidth ? "100%" : (showIndexCol ? px(indexWidth) : 0)
       + visibleColumns.reduce((sum, column) => sum + px(displayWidthFor(column)), 0);
   }, [fitWidth, showIndexCol, indexWidth, visibleColumns, colPrefs.widths, rootFont]);
 
-  /* ---------------------------------------------------- 虚拟滚动 */
+  /* ---------------------------------------------------- 虚拟列表 */
   /**
-   * 曲库上千首时把每一行都挂进 DOM 是滚动卡顿和空白的根源：
-   * 每次滚动都要重排上千个带封面的格子，懒加载的图片追不上滚动就留出白块。
-   * 行高恒定（td 全是 nowrap + 固定 --kd-row-h，内容撑不高），
-   * 所以只渲染视口附近的一小段，上下各垫一根占位行把总高度撑住——
-   * 滚动条位置、行序号、拖放落点都和全量渲染时一致。
+   * 行是绝对定位的独立块（common/RowList.css），只有视口附近的行存在；滚动由 WebView 的滚动线程
+   * 执行，页面在报回位置的那一帧渲染对应的行（common/rowList.ts），前后各留十几行。滚动帧里
+   * 不量布局、不切祖先属性、不提交别的东西：一行便宜到亚毫秒，就不需要替身行和分帧补入。
    */
   selectedIdRef.current = selectedId;
   pendingCountRef.current = pendingDownloads.length;
-
-  /**
-   * 给滚动容器此刻的位置画上编号空行（见 libraryStandIns），并记下它们和真实
-   * 的行一起盖住了哪些行。`direction` 是快滚的去向，替身行的余量大部分放在前方；0 表示表格自己
-   * 在造行，这时只补视口里缺的行（平时没有），不占画布。
-   */
-  const paintStandIns = useCallback((direction: -1 | 0 | 1) => {
-    const standIns = standInsRef.current;
-    if (!standIns) return;
-    const pending = pendingCountRef.current;
-    const pace = paceRef.current;
-    coveredRowsRef.current = standIns.update({
-      rowHeight: rowHRef.current, count: libraryStore.getState().orderedIds.length + pending, first: pending, direction,
-      // 甩动在平滑后的速度跟上之前就已经是全速了：两者取大。
-      speed: Math.max(Math.abs(pace.speed), Math.abs(pace.instant)),
-      windowStart: renderedRowsRef.current.start, windowEnd: renderedRowsRef.current.end,
-    });
-  }, [libraryStore]);
-
-  /** 行号（待下载行在前，曲目在后）对应的、表格此刻渲染出来的行；不在渲染窗口里的是空位。 */
-  const mountedRows = useCallback((rows: readonly number[]) => {
-    const body = scrollerRef.current?.querySelector<HTMLElement>("table.kd-table > tbody");
-    if (!body) return [];
-    const { start, end } = renderedRowsRef.current;
-    // tbody 的子元素依次是：上占位行（有的话）、渲染窗口里的每一行、下占位行。
-    const offset = body.firstElementChild?.hasAttribute("data-spacer") ? 1 : 0;
-    return rows.map((row) => {
-      const element = row >= start && row < end ? body.children[offset + row - start] as HTMLElement | undefined : undefined;
-      return element?.hasAttribute("data-loading-track") ? undefined : element;
-    });
-  }, []);
-
-  /** 列表被呈现：只让已经有真实内容的可视行到场，空位等内容就绪后再浮现。 */
-  const startArrival = useCallback(() => {
+  const pending = pendingDownloads.length;
+  const count = pending + total;
+  const getKey = useCallback(
+    (index: number) => index < pending ? `pending:${pendingDownloads[index].id}` : orderedIds[index - pending] ?? `gap:${index}`,
+    [pending, pendingDownloads, orderedIds],
+  );
+  // 先于虚拟化器听 scroll：它在同一个事件里同步渲染，渲染后的 effect 要读到这次滚动的方向。
+  // 停稳：记下顶部的行（后台换索引时按它保持位置），持久会话也记下位置。
+  const { fling, motion } = useScrollMotion(scrollerRef, () => {
     const box = scrollerRef.current;
-    const arrival = arrivalRef.current;
-    if (!box || !arrival) return false;
-    const rowHeight = rowHRef.current;
-    const top = Math.max(0, box.scrollTop);
-    const first = Math.floor(top / rowHeight);
-    const last = Math.ceil((top + Math.max(rowHeight, box.clientHeight - headerHRef.current)) / rowHeight);
-    const { start, end } = renderedRowsRef.current;
-    const from = Math.max(start, first);
-    const to = Math.min(end, last);
-    const rows: number[] = [];
-    for (let row = from; row < to; row += 1) rows.push(row);
-    arrivalRowsRef.current = rows;
-    arrival.start("list", "below", mountedRows(rows));
-    return arrival.gesture() !== null;
-  }, [mountedRows]);
-
-  /**
-   * 把表格对齐到滚动容器此刻的位置。滚动由 WebView 的滚动线程执行，页面拿到位置时它已经在
-   * 屏幕上了，所以：
-   * - 阅读速度的滚动：在这一帧内提交对应的行（flushSync），每晚一帧露出的就是空白；
-   * - 快滚：冻结窗口，只预绘制清晰编号。减速时同步换入廉价行壳，再由 rowRecovery 每帧
-   *   补入少量真实内容；动画跟随实际提交，而不是一次造好后仅延迟显示。
-   * 只在 React 之外（动画帧）调用；`now` 是这一帧的时间戳。
-   */
-  const syncWindow = useCallback((now: number) => {
-    const node = scrollerRef.current;
-    if (!node) return;
-    const rowHeight = rowHRef.current;
-    const pending = pendingCountRef.current;
+    if (!box) return;
     const ids = libraryStore.getState().orderedIds;
-    const height = node.clientHeight;
-    const listEnd = Math.max(0, (ids.length + pending) * rowHeight + headerHRef.current - height);
-    const reach = Math.max(0, node.scrollHeight - height);
-    // 列表变短而 DOM 还没跟上时，容器能滚到列表之外：拉回来。只在 DOM 确实更长时才写——到边后的
-    // 回弹同样会报出范围之外的位置，那是 WebView 自己的动画，写回去就是和它打架。
-    if (node.scrollTop > listEnd && reach > listEnd + 1) node.scrollTop = listEnd;
-    // 回弹不算滚动：位置按可滚范围取，到边之后不再变化，表格和替身行都不动。
-    const top = Math.min(Math.min(listEnd, reach), Math.max(0, node.scrollTop));
-    if (top !== scrollTopRef.current) {
-      const travel = top - scrollTopRef.current;
-      // 停着之后的第一帧没有上一个时刻可比，按一帧算。
-      const elapsed = scrollSampleAtRef.current ? now - scrollSampleAtRef.current : 16;
-      paceRef.current = libraryScrollPace(paceRef.current, travel, elapsed, height);
-      const trace = scrollTraceRef.current;
-      if (!scrollSampleAtRef.current) Object.assign(trace, { startedAt: now, from: scrollTopRef.current, frames: 0, slow: 0, gapMax: 0, travelMax: 0, speedMax: 0, bare: 0, bareMax: 0, held: 0 });
-      // 这一帧开始时，新视口里有多少行既没有真实的行也没有替身行：滚动线程已经把它们露出来了。
-      const first = Math.floor(top / rowHeight);
-      const bare = standInGap(coveredRowsRef.current, Math.max(pending, first),
-        Math.min(ids.length + pending, Math.ceil((top + height - headerHRef.current) / rowHeight)));
-      trace.frames += 1;
-      if (elapsed > 50) trace.slow += 1;
-      trace.gapMax = Math.max(trace.gapMax, elapsed);
-      trace.travelMax = Math.max(trace.travelMax, Math.abs(travel));
-      trace.speedMax = Math.max(trace.speedMax, Math.abs(paceRef.current.speed));
-      if (bare) { trace.bare += 1; trace.bareMax = Math.max(trace.bareMax, bare); }
-      scrollSampleAtRef.current = now;
-      scrollTopRef.current = top;
-      const index = Math.max(0, first - pending);
-      anchorRef.current = { id: ids[index] ?? null, index, offset: top % rowHeight };
-      if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
-      scrollIdleTimerRef.current = window.setTimeout(() => {
-        scrollIdleTimerRef.current = null;
-        // 停稳：造出这里的行。
-        paceRef.current = LIBRARY_REST_PACE;
-        scrollSampleAtRef.current = 0;
-        const box = scrollerRef.current;
-        if (box) {
-          const rest: LibraryView = { top: libraryWindowTop(box.scrollTop, rowHRef.current), height: box.clientHeight };
-          if (sameLibraryView(viewRef.current, rest)) paintStandIns(0);
-          else {
-            // 此处只同步空行壳；真实内容由 rowRecovery 分帧补入。
-            flushSync(() => setView(rest));
-          }
-          rowRecovery.resume();
-          refreshCoverLane();
-          const done = scrollTraceRef.current;
-          const painting = standInsRef.current?.takeStats();
-          if (import.meta.env.DEV && Math.abs(box.scrollTop - done.from) >= TRACED_SCROLL_SCREENS * box.clientHeight) {
-            tracePlayback("library-scroll", { ms: Math.round(performance.now() - done.startedAt), px: Math.round(box.scrollTop - done.from),
-              frames: done.frames, slow: done.slow, gapMax: Math.round(done.gapMax), travelMax: Math.round(done.travelMax),
-              speedMax: Math.round(done.speedMax * 1000), held: done.held, bare: done.bare, bareMax: done.bareMax,
-              standIns: standInsRef.current?.ready() ? 1 : 0, tiles: painting?.tiles ?? 0,
-              paintMs: Math.round(painting?.ms ?? 0), paintMax: Math.round(painting?.worst ?? 0) });
-          }
-        }
-        if (!persistentSession) return;
-        const anchor = anchorRef.current;
-        updateLocalWorkspaceSession({ scrollTop: scrollTopRef.current, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
-      }, SCROLL_REST_MS);
-    }
-    const pace = paceRef.current;
-    refreshCoverLane();
-    // 快滚且替身行可用：表格的行原地不动，不进 React。
-    if (pace.fast && standInsRef.current?.ready()) {
-      scrollTraceRef.current.held += 1;
-      const direction = (pace.instant || pace.speed) < 0 ? -1 : 1;
-      rowRecovery.hold(direction);
-      // 到场动画还没做完就又甩了出去：行就地站好，不带着动画被滚走。
-      arrivalDueRef.current = null;
-      if (arrivalRef.current?.gesture()) arrivalRef.current.stop();
-      // 表格不动，就没有人告诉数据层眼前是哪里：后台补齐还在围着起飞的位置转，眼前只有
-      // 编号。隔一段路挪一次加载重心。
-      const row = Math.max(0, Math.floor(top / rowHeight) - pending);
-      if (Math.abs(row - flightDemandRowRef.current) >= FLIGHT_DEMAND_ROWS) {
-        flightDemandRowRef.current = row;
-        const screen = Math.ceil(height / rowHeight);
-        const ahead = direction < 0 ? [6, 1] : [1, 6];
-        void libraryStore.getState().ensureRange(Math.max(0, row - ahead[0] * screen), Math.min(ids.length, row + (1 + ahead[1]) * screen),
-          row, Math.min(ids.length, row + screen));
-      }
-      paintStandIns(direction);
-      return;
-    }
-    flightDemandRowRef.current = -1;
-    const next: LibraryView = { top: libraryWindowTop(top, rowHeight), height };
-    if (!sameLibraryView(viewRef.current, next)) {
-      // 快滚慢下来只创建编号行壳，不在惯性尾段一次建好五屏真实内容。
-      viewRef.current = next;
-      flushSync(() => setView(next));
-    }
-    rowRecovery.resume(pace.instant ? (pace.instant < 0 ? -1 : 1) : undefined);
-    // 一步之内的滚动帧窗口不变，不进 React。
-    paintStandIns(0);
-  }, [libraryStore, persistentSession, paintStandIns, rowRecovery, refreshCoverLane]);
+    const top = Math.max(0, box.scrollTop);
+    const index = Math.max(0, Math.floor(top / rowHRef.current) - pendingCountRef.current);
+    const anchor = { id: ids[index] ?? null, index, offset: top % rowHRef.current };
+    anchorRef.current = anchor;
+    if (persistentSession) updateLocalWorkspaceSession({ scrollTop: top, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
+  });
+
+  const virtualizer = useRowList({ scrollerRef, count, rowHeight: rowH, headHeight: headerH, getKey });
+  virtualizerRef.current = virtualizer;
+  const items = virtualizer.getVirtualItems();
+  const range = virtualizer.range;
+  const screen = Math.max(1, Math.ceil(Math.max(rowH, (virtualizer.scrollRect?.height ?? 720) - headerH) / rowH));
+  // 数据在渲染前一屏开始请求；其余由数据层在后台补齐。
+  const demand = libraryDemand({
+    total, pending, screen,
+    start: items[0]?.index ?? 0, end: items.length ? items[items.length - 1].index + 1 : 0,
+    visibleStart: range?.startIndex ?? 0, visibleEnd: range ? range.endIndex + 1 : 0,
+  });
+  useEffect(() => {
+    if (total > 0) void ensureRange(demand.fetchStart, demand.fetchEnd, demand.visibleTrackStart, demand.visibleTrackEnd);
+  }, [ensureRange, total, orderedIds, queryVersion, demand.fetchStart, demand.fetchEnd, demand.visibleTrackStart, demand.visibleTrackEnd]);
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
     if (!box) return;
     const measure = () => {
       setRootFont(Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16);
-      const row = box.querySelector<HTMLTableRowElement>("tbody tr:not([data-spacer])");
+      const row = box.querySelector<HTMLElement>(".kd-list-row");
       const height = row?.getBoundingClientRect().height ?? FALLBACK_ROW_H;
       if (height > 0 && Math.abs(height - rowHRef.current) > 0.5) {
         rowHRef.current = height;
         setRowH(height);
       }
-      const header = box.querySelector("thead")?.getBoundingClientRect().height ?? 28;
-      // 行高、列或主题变了：替身行按新的样子重新量。
-      standInsRef.current?.invalidate();
+      const header = box.querySelector(".kd-list-head")?.getBoundingClientRect().height ?? 28;
       headerHRef.current = header;
       setHeaderH((old) => Math.abs(old - header) > 0.5 ? header : old);
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(box);
-    const row = box.querySelector("tbody tr:not([data-spacer])");
+    const row = box.querySelector(".kd-list-row");
     if (row) observer.observe(row);
     const theme = new MutationObserver(measure);
     theme.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "data-theme", "class"] });
     return () => { observer.disconnect(); theme.disconnect(); };
-  }, [total > 0, layout, colPrefs, pendingDownloads.length > 0]);
+  }, [total > 0, layout, colPrefs.hidden, colPrefs.order, pendingDownloads.length > 0]);
+  // 行高变了（字号、主题）：每一行的位置都按新的行高算。
+  useLayoutEffect(() => { virtualizer.measure(); }, [rowH, virtualizer]);
 
-  const viewport = libraryViewport({ total, pending: pendingDownloads.length, top: view.top,
-    height: view.height || 720, rowHeight: rowH, headerHeight: headerH });
-  const { start: winStart, end: winEnd } = viewport;
-  const windowedTracks = orderedIds.slice(viewport.trackStart, viewport.trackEnd)
-    .map((id, offset) => ({ id, track: summaryById.get(id), index: viewport.trackStart + offset }));
-  renderedRowsRef.current = { start: winStart, end: winEnd };
-
-  useLayoutEffect(() => {
-    const box = scrollerRef.current;
-    const layer = standInLayerRef.current;
-    if (!box || !layer) return;
-    const standIns = createLibraryStandIns(box, layer);
-    standInsRef.current = standIns;
-    return () => {
-      standIns.destroy();
-      if (standInsRef.current === standIns) standInsRef.current = null;
-    };
-  }, []);
   useLayoutEffect(() => {
     const box = scrollerRef.current;
     if (!box) return;
@@ -2044,11 +1821,6 @@ export const TrackTable = memo(function TrackTable({
       if (arrivalRef.current === arrival) arrivalRef.current = null;
     };
   }, []);
-  // 编号画布与 DOM 编号在同一帧交接；数据内容的动画不触碰序号。
-  useLayoutEffect(() => {
-    const pace = paceRef.current;
-    paintStandIns(!pace.fast ? 0 : (pace.instant || pace.speed) < 0 ? -1 : 1);
-  }, [paintStandIns, winStart, winEnd, orderedIds, pendingDownloads.length]);
 
   useLayoutEffect(() => {
     const box = scrollerRef.current;
@@ -2058,9 +1830,6 @@ export const TrackTable = memo(function TrackTable({
     if (previousQueryRef.current !== queryVersion) {
       if (previousQueryRef.current > 0) scrollRestoreDoneRef.current = true;
       previousQueryRef.current = queryVersion;
-      paceRef.current = LIBRARY_REST_PACE;
-      scrollSampleAtRef.current = 0;
-      rowRecovery.resume();
       // The initial index starts a query too; persisted position applies once on startup.
       // Another list from here on: it starts at its top, and it arrives.
       if (scrollRestoreDoneRef.current) { desired = 0; presented = true; }
@@ -2069,65 +1838,101 @@ export const TrackTable = memo(function TrackTable({
     if (!scrollRestoreDoneRef.current && total > 0) {
       const saved = initialSessionRef.current;
       desired = saved.topVisibleTrackId !== null
-        ? restoreLibraryAnchor(orderedIds, saved.topVisibleTrackId, Math.floor(saved.scrollTop / rowH), saved.rowOffset, rowH, pendingDownloads.length)
+        ? restoreLibraryAnchor(orderedIds, saved.topVisibleTrackId, Math.floor(saved.scrollTop / rowH), saved.rowOffset, rowH, pending)
         : saved.scrollTop;
       scrollRestoreDoneRef.current = true;
       // The list is on screen for the first time, wherever it was left: that is an arrival too.
       presented = true;
     } else if (total > 0 && anchorRef.current.id !== null) {
       const anchor = anchorRef.current;
-      desired = restoreLibraryAnchor(orderedIds, anchor.id, anchor.index, anchor.offset, rowH, pendingDownloads.length);
+      desired = restoreLibraryAnchor(orderedIds, anchor.id, anchor.index, anchor.offset, rowH, pending);
     }
-    desired = Math.min(viewport.maxTop, Math.max(0, desired));
+    const maxTop = Math.max(0, count * rowH + headerHRef.current - box.clientHeight);
+    desired = Math.min(maxTop, Math.max(0, desired));
     if (Math.abs(box.scrollTop - desired) > 0.5) box.scrollTop = desired;
-    scrollTopRef.current = box.scrollTop;
-    const windowTop = libraryWindowTop(desired, rowH);
-    setView((old) => old.top === windowTop && old.height === box.clientHeight ? old : { top: windowTop, height: box.clientHeight });
-    if (presented) arrivalDueRef.current = { view: { top: windowTop, height: box.clientHeight }, at: performance.now() };
-    const index = Math.max(0, Math.floor(desired / rowH) - pendingDownloads.length);
+    if (presented) arrivalDueRef.current = { offset: desired, at: performance.now() };
+    const index = Math.max(0, Math.floor(desired / rowH) - pending);
     anchorRef.current = { id: orderedIds[index] ?? null, index, offset: desired % rowH };
-  }, [orderedIds, queryVersion, total, rowH, pendingDownloads.length, viewport.maxTop, rowRecovery]);
+  }, [orderedIds, queryVersion, total, count, rowH, pending]);
 
-  // 板块重新显示：列表再到场一次。隐藏期间容器没有尺寸，渲染窗口退回了列表开头；先按容器恢复的
-  // 位置把窗口摆对，行提交后再开始。
+  // 板块重新显示：列表再到场一次，在它原来的位置。隐藏（display: none）期间容器没有尺寸，
+  // 位置可能被清成了 0：按停稳时记下的行放回去。
   useLayoutEffect(() => {
     if (visibleRef.current === visible) return;
     visibleRef.current = visible;
     const box = scrollerRef.current;
     if (!visible || !box) {
-      rowRecovery.hold();
       arrivalDueRef.current = null;
       arrivalRef.current?.stop();
       return;
     }
-    const top = libraryWindowTop(box.scrollTop, rowHRef.current);
-    const height = box.clientHeight;
-    // 恢复位置不是一次滚动。
-    scrollTopRef.current = box.scrollTop;
-    setView((current) => current.top === top && current.height === height ? current : { top, height });
-    arrivalDueRef.current = { view: { top, height }, at: performance.now() };
-    paceRef.current = LIBRARY_REST_PACE;
-    rowRecovery.resume();
-  }, [visible, rowRecovery]);
+    const anchor = anchorRef.current;
+    if (box.scrollTop === 0 && anchor.id !== null && total > 0) {
+      const wanted = restoreLibraryAnchor(orderedIds, anchor.id, anchor.index, anchor.offset, rowHRef.current, pendingCountRef.current);
+      if (wanted > 0) box.scrollTop = wanted;
+    }
+    arrivalDueRef.current = { offset: box.scrollTop, at: performance.now() };
+  }, [visible, total, orderedIds]);
 
-  // 列表呈现的动画仍由窗口交接；滚动补建的动画由 rowRecovery 在小批提交后接入。
+  /**
+   * The rows under the viewport, [first, last): from the one at the head's lower edge (the row
+   * the session remembers) to the one at the bottom. The virtualizer's own range also counts a
+   * row that lies wholly under the head.
+   */
+  const viewBounds = useCallback(() => {
+    const offset = Math.max(0, virtualizer.scrollOffset ?? 0);
+    const height = Math.max(rowH, (virtualizer.scrollRect?.height ?? 0) - headerH);
+    const first = Math.min(count, Math.floor(offset / rowH));
+    const last = Math.min(count, Math.max(first, Math.ceil((offset + height) / rowH)));
+    return { first, last };
+  }, [virtualizer, rowH, headerH, count]);
+  /** The rows in view, in the order they arrive from the top; one not mounted is a gap. */
+  const rowsInView = useCallback(() => {
+    const rows: (HTMLElement | null)[] = [];
+    const { first, last } = viewBounds();
+    for (let index = first; index < last; index += 1) {
+      rows.push(rowElementsRef.current.get(String(getKey(index))) ?? null);
+    }
+    return rows;
+  }, [viewBounds, getKey]);
+
+  // 列表被呈现：渲染出的行对上了它的位置，视口里的行到场。
   useLayoutEffect(() => {
     const due = arrivalDueRef.current;
-    if (!due) {
-      if (arrivalRef.current?.gesture() === "list") arrivalRef.current.join(mountedRows(arrivalRowsRef.current));
+    const arrival = arrivalRef.current;
+    const box = scrollerRef.current;
+    if (!due || !arrival || !box || !visibleRef.current) return;
+    const offset = virtualizer.scrollOffset ?? 0;
+    if (Math.abs(offset - due.offset) > 1 || Math.abs(box.scrollTop - due.offset) > 1) {
+      if (performance.now() - due.at > ARRIVAL_DUE_MS) arrivalDueRef.current = null;
       return;
     }
-    const matched = sameLibraryView(view, due.view);
-    if (!matched && performance.now() - due.at <= ARRIVAL_DUE_MS) return;
+    const rows = rowsInView();
+    if (!rows.some(Boolean)) return;
     arrivalDueRef.current = null;
-    if (matched && visibleRef.current && !paceRef.current.fast) {
-      if (!startArrival() && windowedTracks.some(row => !row.track)) arrivalDueRef.current = due;
-    }
+    arrival.present(rows);
   });
 
-  useEffect(() => {
-    if (total > 0) void ensureRange(viewport.fetchStart, viewport.fetchEnd, viewport.visibleTrackStart, viewport.visibleTrackEnd);
-  }, [ensureRange, total, orderedIds, queryVersion, viewport.fetchStart, viewport.fetchEnd, viewport.visibleTrackStart, viewport.visibleTrackEnd]);
+  // 行追上滚动：一次甩动跑在了造行的帧前面，视口里的位置先露了出来、行后到。这样的行按它离
+  // 来向那一边的距离接上同一个时钟，一行接一行到场；阅读速度的滚动在视口外就把行备好，不会到这里。
+  const seenKeysRef = useRef(new Set<string>());
+  useLayoutEffect(() => {
+    const seen = seenKeysRef.current;
+    const next = new Set<string>();
+    for (const item of items) next.add(String(item.key));
+    seenKeysRef.current = next;
+    const arrival = arrivalRef.current;
+    const { moving, direction } = motion.current;
+    if (!arrival || !moving || arrival.gesture() === "list" || arrivalDueRef.current) return;
+    const { first, last } = viewBounds();
+    for (const item of items) {
+      if (seen.has(String(item.key)) || item.index < first || item.index >= last) continue;
+      const row = rowElementsRef.current.get(String(item.key));
+      if (!row) continue;
+      const step = direction < 0 ? last - 1 - item.index : item.index - first;
+      arrival.chase(row, step, direction < 0 ? "above" : "below");
+    }
+  });
 
   // 行交互的实现每次渲染都换成最新的闭包；交给行的 rowActions 身份不变，行不会因此重渲染。
   const rowActionsLatest = useRef<TrackRowActions>(null as unknown as TrackRowActions);
@@ -2246,17 +2051,23 @@ export const TrackTable = memo(function TrackTable({
     linkDragEnd: () => rowActionsLatest.current.linkDragEnd(),
   }), []);
 
-  // 等待中的封面请求按可视范围排先后。范围在渲染时写入，行挂载时的 effect 读到的就是它；
-  // 窗口移动后在这里给还在等的请求换优先级。
-  useLayoutEffect(() => {
-    refreshCoverLane();
-  }, [refreshCoverLane, visible, viewport.visibleTrackStart, viewport.visibleTrackEnd]);
-
   const moveColumn = (from: string, to: string) => {
     if (from === to) return;
     // 以当前看到的顺序为基准重排，理由同 PanelStack.commit。
     saveColPrefs({ ...colPrefs, order: moveColumnOrder(colPrefs.order, colIds, from, to) });
   };
+
+  const listStyle = {
+    "--kd-list-cols": [showIndexCol ? indexWidth : null, ...visibleColumns.map(displayWidthFor), "minmax(0, 1fr)"].filter(Boolean).join(" "),
+    "--kd-list-min-width": typeof tableMinWidthPx === "number" ? `${tableMinWidthPx}px` : tableMinWidthPx,
+  } as CSSProperties;
+  const showArtist = visibleColumns.some((column) => column.key === "artist");
+  const showFormat = visibleColumns.some((column) => column.key === "format");
+  const onPendingMenu = useCallback((event: React.MouseEvent<HTMLDivElement>, task: DownloadTask) => {
+    event.preventDefault();
+    setRowMenu(null);
+    setPendingMenu({ x: event.clientX, y: event.clientY, task });
+  }, []);
 
   return (
     <div className="kd-overlay-scroll-host">
@@ -2264,268 +2075,182 @@ export const TrackTable = memo(function TrackTable({
       className="kd-scroll"
       style={{ height: "100%", overflowAnchor: "none" }}
       aria-busy={loading || loadingMore}
-      // 可视区域优先分析要知道"曲目表滚到哪了"。不挂这个 ref 它也能靠
-      // DOM 自己找到表（认 td[data-col="title"]），但那条路在列结构变动时
-      // 会静默失效——显式挂上就不再依赖任何选择器。
-      // scrollerRef 蹭同一个 ref：滚回选中行（见上面 DETAIL_EVENT）也要这个容器。
-      // ref 必须是稳定函数（useCallback）：内联箭头每次渲染都是新身份，React 会
-      // 反复 detach/attach，attach 里的 setView 又触发渲染——死循环就是这么来的。
-      // setView 走相等守卫：值没变就返回旧对象， ResizeObserver 的初次回调
-      // 和滚动重算都不会再空转渲染。
+      // 这一个容器同时横滚和竖滚。滚轮、触控板、触摸由 WebView 的滚动线程执行，拖滑块、键盘、
+      // 定位由页面执行；都从容器的 scroll 事件进来，虚拟化在那一帧渲染对应的行。
       ref={trackScrollerRef}
-      onScroll={() => {
-        // 这一个容器同时横滚和竖滚；横滚不影响虚拟窗口，syncWindow 里窗口没变就不进 React，
-        // 编号画布随容器横向移动，不为它重绘。
-        // 滚轮、触控板、触摸由 WebView 的滚动线程执行，拖滑块、键盘、定位由页面执行；
-        // 都从这里进来，一帧合并一次，并在这一帧内提交对应的行。
-        if (!scrollRafRef.current) {
-          scrollRafRef.current = requestAnimationFrame((now) => {
-            scrollRafRef.current = 0;
-            syncWindow(now);
-          });
-        }
-      }}
     >
-      {/* 批选动作在曲库半栏 LibraryWorkRail，这里不再单独占一条。 */}
-      {/* data-kind 区分曲库表和搜索结果表（两者共用 .kd-table，但结果表里有
-          视频大行那套自排版，套不得两行式）；data-layout 是两行式的开关，
-          见 TrackTableProps.layout 里为什么不能交给容器宽度判。 */}
-      <table
-        className="kd-table"
+      {/* data-kind 区分曲库表和搜索结果表（两者共用行列表的样式）。 */}
+      <div
+        className="kd-list"
+        role="grid"
+        aria-rowcount={count}
         data-kind="library"
         data-layout={layout}
         data-fit-width={fitWidth || undefined}
-        style={{ minWidth: tableMinWidthPx }}
+        style={listStyle}
       >
-        {/* 每个真实列由 col 锁住自己的宽度，最后一列只吃剩余空白。
-            这样拖标题不会再按比例挤动艺人/BPM；总宽超过视口时由外层横向滚动。 */}
-        <colgroup>
-          {showIndexCol ? <col data-col="index" style={{ width: indexWidth }} /> : null}
-          {visibleColumns.map((column) => (
-            <col
-              key={column.key}
-              data-col={column.key}
-              style={{ width: displayWidthFor(column) }}
-            />
-          ))}
-          <col />
-        </colgroup>
-        <thead>
-          {/* 右键任意列头 = 选列菜单；拖列头 = 换列序；列头右缘把手 = 调列宽。
-              指针移动超过阈值才算拖动，并拦掉松手后的排序 click。 */}
-          <tr
-            onContextMenu={(event) => {
-              event.preventDefault();
-              setColMenu({ x: event.clientX, y: event.clientY });
-            }}
-          >
-            {showIndexCol ? (
-              <th
-                data-col="index"
-                data-picking={selecting ? "true" : undefined}
-                style={{ width: indexWidth }}
-                title={selecting ? undefined : "当前列表中的序号"}
-              >
-                <span className="kd-th-label">序号</span>
-                {/* Above the rows' marks, in their place: all of the list, a part of it, none. */}
-                {selecting ? (
-                  <RowPick
-                    className="kd-pick-head"
-                    state={selectedIds.length === 0 ? "none" : selectedIds.length >= orderedIds.length ? "all" : "some"}
-                    label="全选"
-                    onToggle={() => {
-                      const store = libraryStore.getState();
-                      if (selectedIds.length >= orderedIds.length) store.select(null);
-                      else store.selectAll();
-                      // Clearing through the store leaves the mode; the head's mark stays in it.
-                      store.setSelectionMode(true);
-                    }}
-                  />
-                ) : null}
-                <span
-                  className="kd-col-resize"
-                  data-active={resizingCol === INDEX_COL_KEY ? "true" : undefined}
-                  onPointerDown={(event) => beginColumnResize(INDEX_COL_KEY, event)}
-                  onClick={(event) => event.stopPropagation()}
-                  aria-hidden="true"
-                />
-              </th>
-            ) : null}
-            {visibleColumns.map((column) => {
-              const colWidth = displayWidthFor(column);
-              return (
-              <th
-                key={column.key}
-                data-col={column.key}
-                data-column-reorder="true"
-                style={{ width: colWidth }}
-                className={column.align === "num" ? "kd-td-num" : undefined}
-                data-sortable={column.id ? "true" : undefined}
-                onClick={
-                  column.id
-                    ? () => {
-                        if (suppressSortClickRef.current) {
-                          suppressSortClickRef.current = false;
-                          return;
-                        }
-                        onSort(column.id as TrackSort);
-                      }
-                    : undefined
-                }
-                data-sort={
-                  column.id !== null
-                    ? column.id === sort
-                      ? "1"
-                      : column.id === sort2
-                        ? "2"
-                        : undefined
-                    : undefined
-                }
-                onPointerDown={(event) => {
-                  if (resizingCol) return;
-                  beginColumnPointerReorder(event, column.key, visibleColumns.map((item) => item.key), {
-                    onStart: setDragCol,
-                    onOver: setOverCol,
-                    onMove: moveColumn,
-                    onEnd: () => {
-                      setDragCol(null);
-                      setOverCol(null);
-                    },
-                    onDragged: suppressNextSortClick,
-                  });
-                }}
-                data-dragging={dragCol === column.key ? "true" : undefined}
-                data-col-drop={
-                  dragCol && dragCol !== column.key && overCol === column.key
-                    ? colIds.indexOf(dragCol) < colIds.indexOf(column.key)
-                      ? "after"
-                      : "before"
-                    : undefined
-                }
-                title={
-                  column.id
-                    ? tableSortTitle({ sort, order, sort2, order2 }, column.id)
-                    : "拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
-                }
-              >
-                {column.label}
-                {/* 主、副排序仍由 store 中的 sort / sort2 区分；表头只显示方向，
-                    避免带圈数字与列名字号不协调。层级说明保留在表头 title 中。 */}
-                {column.id !== null && column.id === sort && (
-                  <TableSortMark order={order} />
-                )}
-                {column.id !== null && column.id !== sort && column.id === sort2 && (
-                  <TableSortMark order={order2} secondary />
-                )}
-                <span
-                  className="kd-col-resize"
-                  data-active={resizingCol === column.key ? "true" : undefined}
-                  onPointerDown={(event) => beginColumnResize(column.key, event)}
-                  onClick={(event) => event.stopPropagation()}
-                  aria-hidden="true"
-                />
-              </th>
-              );
-            })}
-            <th className="kd-table-fill" aria-hidden="true" />
-          </tr>
-        </thead>
-        <tbody>
-          {winStart > 0 && <tr data-spacer="top" aria-hidden="true"><td colSpan={tableColSpan} style={{ height: winStart * rowH }} /></tr>}
-          {pendingDownloads.slice(winStart, Math.min(winEnd, pendingDownloads.length)).map((task) => {
-            /** 有曲目时下载态占独立序号列，和下面 1/2/3 同宽；无曲目时不单独占一列。 */
-            const showArtist = visibleColumns.some((column) => column.key === "artist");
-            const showFormat = visibleColumns.some((column) => column.key === "format");
-            return (
-            <tr
-              key={`pending:${task.id}`}
-              data-pending="true"
-              data-pending-state={task.state}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setRowMenu(null);
-                setPendingMenu({ x: event.clientX, y: event.clientY, task });
-              }}
+        {/* 右键任意列头 = 选列菜单；拖列头 = 换列序；列头右缘把手 = 调列宽。
+            指针移动超过阈值才算拖动，并拦掉松手后的排序 click。 */}
+        <div
+          className="kd-list-head"
+          role="row"
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setColMenu({ x: event.clientX, y: event.clientY });
+          }}
+        >
+          {showIndexCol ? (
+            <div
+              className="kd-list-hcell"
+              role="columnheader"
+              data-col="index"
+              data-picking={selecting ? "true" : undefined}
+              title={selecting ? undefined : "当前列表中的序号"}
             >
-              {showIndexCol ? (
-                <td data-col="index" className="kd-pending-index">
-                  <PendingStateMark task={task} />
-                </td>
+              <span className="kd-th-label">序号</span>
+              {/* Above the rows' marks, in their place: all of the list, a part of it, none. */}
+              {selecting ? (
+                <RowPick
+                  className="kd-pick-head"
+                  state={selectedIds.length === 0 ? "none" : selectedIds.length >= orderedIds.length ? "all" : "some"}
+                  label="全选"
+                  onToggle={() => {
+                    const store = libraryStore.getState();
+                    if (selectedIds.length >= orderedIds.length) store.select(null);
+                    else store.selectAll();
+                    // Clearing through the store leaves the mode; the head's mark stays in it.
+                    store.setSelectionMode(true);
+                  }}
+                />
               ) : null}
-              <td
-                colSpan={Math.max(1, visibleColumns.length)}
-                data-col="title"
-                className="kd-td-strong kd-pending-lead"
-                title={task.title || "未命名"}
-              >
-                <span className="kd-pending-title">
-                  {!showIndexCol ? <PendingStateMark task={task} /> : null}
-                  <span className="kd-thumb" aria-hidden="true">
-                    {task.cover ? (
-                      <img
-                        src={thumbUrl(task.cover)}
-                        alt=""
-                        loading="lazy"
-                        draggable={false}
-                        referrerPolicy="no-referrer"
-                        onError={(event) => { event.currentTarget.style.visibility = "hidden"; }}
-                      />
-                    ) : null}
-                  </span>
-                  {task.kind === "video" && (
-                    <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
-                      <Video size={11} aria-hidden="true" />
-                    </span>
-                  )}
-                  <span className="kd-truncate">{task.title || "未命名"}</span>
-                  {showArtist && task.artist ? (
-                    <span className="kd-pending-side kd-muted kd-truncate" title={task.artist}>
-                      {task.artist}
-                    </span>
-                  ) : null}
-                  {showFormat ? (
-                    <span className="kd-pending-side kd-mono kd-muted">
-                      {task.kind === "video" ? "视频" : task.quality || DASH}
-                    </span>
-                  ) : null}
-                </span>
-              </td>
-              <td className="kd-table-fill" aria-hidden="true" />
-            </tr>
+              <span
+                className="kd-col-resize"
+                data-active={resizingCol === INDEX_COL_KEY ? "true" : undefined}
+                onPointerDown={(event) => beginColumnResize(INDEX_COL_KEY, event)}
+                onClick={(event) => event.stopPropagation()}
+                aria-hidden="true"
+              />
+            </div>
+          ) : null}
+          {visibleColumns.map((column) => (
+            <div
+              key={column.key}
+              className={column.align === "num" ? "kd-list-hcell kd-td-num" : "kd-list-hcell"}
+              role="columnheader"
+              data-col={column.key}
+              data-column-reorder="true"
+              data-sortable={column.id ? "true" : undefined}
+              onClick={
+                column.id
+                  ? () => {
+                      if (suppressSortClickRef.current) {
+                        suppressSortClickRef.current = false;
+                        return;
+                      }
+                      onSort(column.id as TrackSort);
+                    }
+                  : undefined
+              }
+              data-sort={
+                column.id !== null
+                  ? column.id === sort
+                    ? "1"
+                    : column.id === sort2
+                      ? "2"
+                      : undefined
+                  : undefined
+              }
+              onPointerDown={(event) => {
+                if (resizingCol) return;
+                beginColumnPointerReorder(event, column.key, visibleColumns.map((item) => item.key), {
+                  onStart: setDragCol,
+                  onOver: setOverCol,
+                  onMove: moveColumn,
+                  onEnd: () => {
+                    setDragCol(null);
+                    setOverCol(null);
+                  },
+                  onDragged: suppressNextSortClick,
+                });
+              }}
+              data-dragging={dragCol === column.key ? "true" : undefined}
+              data-col-drop={
+                dragCol && dragCol !== column.key && overCol === column.key
+                  ? colIds.indexOf(dragCol) < colIds.indexOf(column.key)
+                    ? "after"
+                    : "before"
+                  : undefined
+              }
+              title={
+                column.id
+                  ? tableSortTitle({ sort, order, sort2, order2 }, column.id)
+                  : "拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
+              }
+            >
+              {column.label}
+              {/* 主、副排序仍由 store 中的 sort / sort2 区分；表头只显示方向，
+                  避免带圈数字与列名字号不协调。层级说明保留在表头 title 中。 */}
+              {column.id !== null && column.id === sort && (
+                <TableSortMark order={order} />
+              )}
+              {column.id !== null && column.id !== sort && column.id === sort2 && (
+                <TableSortMark order={order2} secondary />
+              )}
+              <span
+                className="kd-col-resize"
+                data-active={resizingCol === column.key ? "true" : undefined}
+                onPointerDown={(event) => beginColumnResize(column.key, event)}
+                onClick={(event) => event.stopPropagation()}
+                aria-hidden="true"
+              />
+            </div>
+          ))}
+        </div>
+        <div className="kd-list-body" role="rowgroup" style={{ height: virtualizer.getTotalSize() }}>
+          {items.map((item) => {
+            const top = item.start - headerH;
+            if (item.index < pending) {
+              const task = pendingDownloads[item.index];
+              return (
+                <PendingRow
+                  key={item.key}
+                  ref={registerRow}
+                  task={task}
+                  top={top}
+                  showIndex={showIndexCol}
+                  showArtist={showArtist}
+                  showFormat={showFormat}
+                  onMenu={onPendingMenu}
+                />
+              );
+            }
+            const id = orderedIds[item.index - pending];
+            return (
+              <TrackRow
+                key={item.key}
+                ref={registerRow}
+                id={id}
+                track={summaryById.get(id)}
+                index={item.index - pending}
+                top={top}
+                selected={selected.has(id)}
+                focused={id === selectedId}
+                playing={id === playingId}
+                selectionMode={selecting}
+                linkDrag={htmlExternalLinkDrag}
+                actions={rowActions}
+                showIndex={showIndexCol}
+                columns={visibleColumns}
+                keyNotation={keyNotation}
+                baselines={energyBaselines}
+                coverHold={fling}
+                onToggle={toggleTrackSelection}
+                onRate={rateTrack}
+              />
             );
           })}
-          {windowedTracks.map(({ id, track, index }) => (
-            <TrackRow
-              key={id}
-              track={track}
-              recovery={rowRecovery}
-              index={index}
-              selected={selected.has(id)}
-              focused={id === selectedId}
-              playing={id === playingId}
-              selectionMode={selecting}
-              linkDrag={htmlExternalLinkDrag}
-              actions={rowActions}
-              coverLane={coverLane}
-              showIndex={showIndexCol}
-              columns={visibleColumns}
-              keyNotation={keyNotation}
-              onToggle={toggleTrackSelection}
-              onRate={rateTrack}
-            />
-          ))}
-          {winEnd < viewport.count && (
-            <tr data-spacer="bottom" aria-hidden="true">
-              <td
-                colSpan={tableColSpan}
-                style={{ height: (viewport.count - winEnd) * rowH }}
-              />
-            </tr>
-          )}
-        </tbody>
-      </table>
-      {/* 替身行的画布（见 libraryStandIns）。放在表格之后：OverlayScrollbars 观察的是容器的第一个子元素。 */}
-      <div className="kd-table-standins" aria-hidden="true" ref={standInLayerRef} />
+        </div>
+      </div>
       {/* 选列菜单。开着的时候点勾选不关闭——一次通常要调好几列，
           调一列关一次等于逼用户右键三回。点别处 / Esc / 恢复默认才关。 */}
       {colMenu && (

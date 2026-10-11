@@ -263,14 +263,14 @@ export function observeTrackScroller(element: HTMLElement | null): void {
 /**
  * 找到曲目表的滚动容器。
  *
- * 认表认的是 `td[data-col="title"]`：搜索结果表和曲目表长得一模一样
- * （同一套 `.kd-scroll` + `.kd-table`），按 class 找会认错表，
- * 按下标映射就会算出**另一张表**的曲目 id。`data-col` 只有曲目表在用。
+ * 认表认的是 `.kd-list[data-kind="library"]`：搜索结果表和曲目表长得一模一样
+ * （同一套 `.kd-scroll` + 行列表），只按 `.kd-scroll` 找会认错表，
+ * 按下标映射就会算出**另一张表**的曲目 id。
  */
 function findScroller(): HTMLElement | null {
   if (scroller?.isConnected) return scroller;
-  const cell = document.querySelector("td[data-col='title']");
-  scroller = cell?.closest<HTMLElement>(".kd-scroll") ?? null;
+  const list = document.querySelector('.kd-list[data-kind="library"]');
+  scroller = list?.closest<HTMLElement>(".kd-scroll") ?? null;
   scrollerTop = scroller?.scrollTop ?? 0;
   return scroller;
 }
@@ -284,7 +284,7 @@ function findScroller(): HTMLElement | null {
  */
 function viewportIds(limit: number): number[] {
   const box = findScroller();
-  const body = box?.querySelector("tbody");
+  const body = box?.querySelector(".kd-list-body");
   if (!box || !body) return [];
   const byId = useLibraryStore.getState().summaryById;
 
@@ -293,10 +293,10 @@ function viewportIds(limit: number): number[] {
   const inView: number[] = [];
   const nearby: number[] = [];
 
-  // 曲目表是虚拟滚动的：tbody 里只有视口附近的一小段加两根占位行，
-  // 行下标和 tracks 对不上，不能再按下标映射。直接读行上的
-  // data-kd-track-id；占位行和「待下载」行没有这个属性，自然被跳过。
-  const rows = body.querySelectorAll<HTMLTableRowElement>("tr[data-kd-track-id]");
+  // 曲目表是虚拟的：只有视口附近的行存在，行下标和 tracks 对不上，不能再按下标映射。
+  // 直接读行上的 data-kd-track-id；还没载入的行和「待下载」行没有这个属性，自然被跳过。
+  // 行按位置顺序挂载，所以越过下边界之后不用再量。
+  const rows = body.querySelectorAll<HTMLElement>(".kd-list-row[data-kd-track-id]");
   for (const row of rows) {
     const rect = row.getBoundingClientRect();
     if (rect.bottom < view.top - margin) continue;

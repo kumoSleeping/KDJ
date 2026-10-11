@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LibraryWindow, type LibraryWindowSnapshot } from "../src/lib/libraryWindow";
-import { LIBRARY_REST_PACE, libraryScrollPace, libraryViewport, libraryWindowTop, restoreLibraryAnchor, type LibraryScrollPace } from "../src/lib/libraryViewport";
+import { libraryDemand, restoreLibraryAnchor } from "../src/lib/libraryViewport";
+import { REST_PACE, scrollPace, type ScrollPace } from "../src/components/common/rowList";
 import type { TrackSummary } from "../src/types";
 
 const ids = Array.from({ length: 10000 }, (_, i) => i + 1);
@@ -222,55 +223,49 @@ test("libraries beyond the cache limit evict least-recently-used rows around the
   assert.deepEqual((await lane.resolveIds([1])).map((row) => row.id), [1]);
 });
 
-test("virtual ranges remain bounded and cover every offset of their step", () => {
-  for (const total of [0, 1, 200, 10000]) for (const pending of [0, 10000])
-    for (const rowHeight of [24, 36, 52]) for (const height of [300, 720, 1100]) {
-      const screen = Math.ceil((height - 28) / rowHeight);
-      const count = total + pending;
-      for (const scrollTop of [0, 17, 3600, 350000, count * rowHeight]) {
-        const view = libraryViewport({ total, pending, rowHeight, height, top: libraryWindowTop(scrollTop, rowHeight), headerHeight: 28 });
-        assert.ok(0 <= view.start && view.start <= view.end && view.end <= count);
-        assert.ok(view.top <= view.maxTop);
-        assert.ok(view.end - view.start <= 5 * screen + 2 * 8 + 2);
-        assert.ok(view.fetchStart <= view.trackStart && view.trackEnd <= view.fetchEnd, "every rendered row is demanded");
-        assert.ok(view.trackEnd <= total && view.fetchEnd <= total);
-        // The window is computed from a stepped offset; the rows at the real one must be in it.
-        const real = Math.min(scrollTop, Math.max(0, count * rowHeight - (height - 28)));
-        const first = Math.min(count, Math.floor(real / rowHeight));
-        const last = Math.min(count, Math.ceil((real + height - 28) / rowHeight));
-        assert.ok(view.start <= first && last <= view.end, "the visible rows are rendered");
-        assert.ok(first - view.start >= Math.min(first, screen) && view.end - last >= Math.min(count - last, screen),
-          "at least a screen is rendered beyond each edge");
-      }
+test("the demand follows the rendered rows: a screen beyond them, clamped to the tracks there are", () => {
+  for (const total of [0, 1, 200, 10000]) for (const pending of [0, 10000]) for (const screen of [8, 19, 46]) {
+    const count = total + pending;
+    for (const start of [0, 17, 3600, count]) {
+      const end = Math.min(count, start + screen + 24);
+      const demand = libraryDemand({ total, pending, screen, start, end, visibleStart: Math.min(count, start + 12), visibleEnd: end });
+      assert.ok(0 <= demand.fetchStart && demand.fetchStart <= demand.visibleTrackStart);
+      assert.ok(demand.visibleTrackStart <= demand.visibleTrackEnd && demand.visibleTrackEnd <= demand.fetchEnd && demand.fetchEnd <= total);
+      // Every rendered track row is demanded, and a screen beyond either end of them.
+      const trackStart = Math.min(total, Math.max(0, start - pending));
+      const trackEnd = Math.min(total, Math.max(0, end - pending));
+      assert.ok(demand.fetchStart <= trackStart && trackEnd <= demand.fetchEnd);
+      // Rendered rows that are pending downloads demand no track; past them, a screen of tracks.
+      const clamp = (index: number) => Math.min(total, Math.max(0, index - pending));
+      if (start >= pending) assert.equal(demand.fetchStart, clamp(start - screen));
+      if (end > pending) assert.equal(demand.fetchEnd, clamp(end + screen));
     }
+  }
   assert.equal(restoreLibraryAnchor([1, 3, 4], 2, 1, 5, 36, 0), 41);
   assert.equal(restoreLibraryAnchor([1, 2, 3], 3, 0, 5, 36, 2), 149);
 });
 
-test("scroll pace: wheel notches stay calm, a flick turns fast with hysteresis, a jump is fast at once", () => {
-  const run = (pace: LibraryScrollPace, frames: number, travel: number, elapsed = 16) => {
-    for (let i = 0; i < frames; i += 1) pace = libraryScrollPace(pace, travel, elapsed, 700);
+test("scroll pace: wheel notches stay calm, a flick turns fast with hysteresis", () => {
+  const run = (pace: ScrollPace, frames: number, travel: number, elapsed = 16) => {
+    for (let i = 0; i < frames; i += 1) pace = scrollPace(pace, travel, elapsed);
     return pace;
   };
   // One notch moves a hundred pixels in a single frame; ten a second is still an ordinary scroll.
-  let pace = LIBRARY_REST_PACE;
+  let pace = REST_PACE;
   for (let notch = 0; notch < 10; notch += 1) {
-    pace = libraryScrollPace(pace, 100, notch ? 100 : 16, 700);
+    pace = scrollPace(pace, 100, notch ? 100 : 16);
     assert.equal(pace.fast, false);
   }
   // Reading speed: a screen and a half per second.
-  assert.equal(run(LIBRARY_REST_PACE, 60, 16).fast, false);
+  assert.equal(run(REST_PACE, 60, 16).fast, false);
   // A trackpad flick at 6000 px/s is fast within a few frames, either way.
-  const flick = run(LIBRARY_REST_PACE, 6, 96);
+  const flick = run(REST_PACE, 6, 96);
   assert.ok(flick.fast && flick.speed > 3);
-  assert.ok(run(LIBRARY_REST_PACE, 6, -96).fast && run(LIBRARY_REST_PACE, 6, -96).speed < -3);
+  assert.ok(run(REST_PACE, 6, -96).fast && run(REST_PACE, 6, -96).speed < -3);
   // Momentum decays: still fast at 2500 px/s, calm again below 2000 px/s.
   assert.equal(run(flick, 30, 40).fast, true);
   assert.equal(run(flick, 40, 28).fast, false);
-  assert.equal(run(LIBRARY_REST_PACE, 40, 40).fast, false, "2500 px/s does not start a fast scroll");
-  // A dragged handle, or a page that stalled while the WebView kept scrolling: two screens in one frame.
-  assert.equal(libraryScrollPace(LIBRARY_REST_PACE, -1400, 16, 700).fast, true);
-  assert.equal(libraryScrollPace(run(flick, 40, 12), 1500, 400, 700).fast, true);
+  assert.equal(run(REST_PACE, 40, 40).fast, false, "2500 px/s does not start a fast scroll");
 });
 
 test("late index response cannot replace the newer query order", async () => {

@@ -144,8 +144,8 @@ function describePress(target: Element): Press {
     const rect = item.getBoundingClientRect();
     return { at, rect, point: centre(rect), cover: menuRow?.cover ?? null, title: menuRow?.title ?? "" };
   }
-  const row = target.closest("tr");
-  if (row?.closest("tbody")) {
+  const row = target.closest(".kd-list-row, tbody tr");
+  if (row) {
     menuRow = { cover: loadedCover(row), title: rowTitle(row) };
     const rect = rowBlock(row);
     return { at, rect, point: centre(rect), ...menuRow };
@@ -170,7 +170,7 @@ function trackHand(): void {
   window.addEventListener("pointerdown", press, options);
   window.addEventListener("click", press, options);
   window.addEventListener("contextmenu", event => {
-    const row = isElement(event.target) ? event.target.closest("tbody tr") : null;
+    const row = isElement(event.target) ? event.target.closest(".kd-list-row, tbody tr") : null;
     if (row) menuRow = { cover: loadedCover(row), title: rowTitle(row) };
   }, options);
   // A shortcut has no place on screen; a key that presses a button is followed by its click.
@@ -198,7 +198,7 @@ function resolveOrigin(request: TossRequest): Origin | null {
   const title = request.title?.trim() ?? "";
   const from = request.from;
   if (isElement(from)) {
-    const row = from.closest("tbody tr");
+    const row = from.closest(".kd-list-row, tbody tr");
     const rect = row ? rowBlock(row) : from.getBoundingClientRect();
     return { rect, point: centre(rect), cover: loadedCover(row ?? from), title: title || (row ? rowTitle(row) : "") };
   }
@@ -427,7 +427,7 @@ function gatherSources(keys: readonly string[] | undefined): GatherSource[] {
   const wanted = new Set(keys);
   const seen: { row: Element; at: TossPoint }[] = [];
   let band: Box | null = null;
-  for (const row of document.querySelectorAll(`tbody > tr[${TOSS_ITEM_ATTR}]`)) {
+  for (const row of document.querySelectorAll(`.kd-list-row[${TOSS_ITEM_ATTR}], tbody > tr[${TOSS_ITEM_ATTR}]`)) {
     if (!wanted.has(row.getAttribute(TOSS_ITEM_ATTR) ?? "")) continue;
     band ??= listBand(row);
     const rect = (row.querySelector(".kd-thumb") ?? row).getBoundingClientRect();

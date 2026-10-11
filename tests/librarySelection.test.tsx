@@ -46,22 +46,22 @@ test("the library table: picking rows opens no column, a plain click picks, the 
       onSelect: useLibraryStore.getState().select, onSort() {} });
   }
   const state = () => useLibraryStore.getState();
-  const row = (id: number) => document.querySelector<HTMLElement>(`tr[data-kd-track-id="${id}"]`)!;
-  const marks = () => document.querySelectorAll('tr[data-kd-track-id] [role="checkbox"]');
-  const head = () => document.querySelector<HTMLElement>('thead [role="checkbox"]');
+  const row = (id: number) => document.querySelector<HTMLElement>(`.kd-list-row[data-kd-track-id="${id}"]`)!;
+  const marks = () => document.querySelectorAll('.kd-list-row[data-kd-track-id] [role="checkbox"]');
+  const head = () => document.querySelector<HTMLElement>('.kd-list-head [role="checkbox"]');
   try {
     await act(async () => {
       await state().refresh();
       root.render(createElement(Host));
     });
     await flush(); await flush();
-    const table = document.querySelector(".kd-table")!;
-    const rows = document.querySelectorAll("tr[data-kd-track-id]").length;
+    const table = document.querySelector(".kd-list")!;
+    const rows = document.querySelectorAll(".kd-list-row[data-kd-track-id]").length;
     assert.equal(rows, 30);
     const idle = layoutOf(table);
     assert.equal(marks().length, 0, "no mark while nothing is being picked");
     assert.equal(head(), null);
-    assert.equal(row(2).querySelector('td[data-col="index"]')?.textContent, "2");
+    assert.equal(row(2).querySelector('.kd-list-cell[data-col="index"]')?.textContent, "2");
 
     // A plain click selects one row: that is the current row, not a batch.
     await click(row(2));
@@ -73,9 +73,9 @@ test("the library table: picking rows opens no column, a plain click picks, the 
     assert.deepEqual(state().selectedIds, [2, 5]);
     assert.equal(marks().length, rows, "one mark per row");
     assert.equal(layoutOf(table), idle, "no column is added and none changes width");
-    assert.equal(row(5).querySelector('td[data-col="index"] [role="checkbox"]')?.getAttribute("aria-checked"), "true");
-    assert.equal(row(6).querySelector('td[data-col="index"] [role="checkbox"]')?.getAttribute("aria-checked"), "false");
-    assert.equal(row(5).querySelector('td[data-col="title"] [role="checkbox"], td[data-col="title"] input'), null, "nothing is put in front of the title");
+    assert.equal(row(5).querySelector('.kd-list-cell[data-col="index"] [role="checkbox"]')?.getAttribute("aria-checked"), "true");
+    assert.equal(row(6).querySelector('.kd-list-cell[data-col="index"] [role="checkbox"]')?.getAttribute("aria-checked"), "false");
+    assert.equal(row(5).querySelector('.kd-list-cell[data-col="title"] [role="checkbox"], .kd-list-cell[data-col="title"] input'), null, "nothing is put in front of the title");
     assert.equal(row(5).getAttribute("aria-selected"), "true");
     assert.equal(row(6).getAttribute("data-selecting"), "true");
     assert.equal(head()?.getAttribute("aria-checked"), "mixed");
@@ -84,9 +84,9 @@ test("the library table: picking rows opens no column, a plain click picks, the 
     assert.equal(row(6).querySelector(".kd-row-number")?.textContent, "6");
 
     // A plain click anywhere on a row picks it or drops it; it replaces nothing and plays nothing.
-    await click(row(8).querySelector('td[data-col="artist"]')!);
+    await click(row(8).querySelector('.kd-list-cell[data-col="artist"]')!);
     assert.deepEqual(state().selectedIds, [2, 5, 8]);
-    await click(row(5).querySelector('td[data-col="title"]')!);
+    await click(row(5).querySelector('.kd-list-cell[data-col="title"]')!);
     assert.deepEqual(state().selectedIds, [2, 8]);
     // Shift-click takes the run from the row touched last; what was picked stays picked.
     await click(row(12), { shiftKey: true });

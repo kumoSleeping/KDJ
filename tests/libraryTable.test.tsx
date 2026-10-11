@@ -9,7 +9,14 @@ const makeRow = (id: number): TrackSummary => ({ id, path: `/library/${id}.mp3`,
   camelot: "8A", modified_at: "a", duration: 100, rating: 0, bpm: 128,
   file_created_at: id, analyzed_at: "now", source_platform: "local" } as TrackSummary);
 
-test("real table/store: direct jump, full selection, shrink, empty result, and bounded pending rows", async (t) => {
+/** The list's geometry in this document: a 720px scroll box, a 28px head, 36px rows. */
+const BOX_H = 720;
+const HEAD_H = 28;
+const ROW_H = 36;
+/** The rows under the viewport at `scrollTop`: [first, last), as the table counts them. */
+const inView = (scrollTop: number) => [Math.floor(scrollTop / ROW_H), Math.ceil((scrollTop + BOX_H - HEAD_H) / ROW_H)] as const;
+
+test("real list/store: direct jump, full selection, shrink, empty result, and bounded pending rows", async (t) => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { url: "http://localhost" });
   let frameId = 0;
   const frames = new Map<number, FrameRequestCallback>();
@@ -17,7 +24,7 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
   const cancel = (id: number) => frames.delete(id);
   Object.assign(globalThis, { window: dom.window, document: dom.window.document,
     localStorage: dom.window.localStorage, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element,
-    HTMLTableRowElement: dom.window.HTMLTableRowElement, MutationObserver: dom.window.MutationObserver,
+    MutationObserver: dom.window.MutationObserver,
     CustomEvent: dom.window.CustomEvent, Event: dom.window.Event,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
     requestAnimationFrame: raf, cancelAnimationFrame: cancel, IS_REACT_ACT_ENVIRONMENT: true,
@@ -31,24 +38,28 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
   dom.window.HTMLMediaElement.prototype.pause = () => {};
   dom.window.HTMLCanvasElement.prototype.getContext = (() => null) as typeof dom.window.HTMLCanvasElement.prototype.getContext;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
-  Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { get() { return 720; } });
+  const kind = (element: Element) => element.classList.contains("kd-scroll") ? "box"
+    : element.classList.contains("kd-list-row") ? "row" : element.classList.contains("kd-list-head") ? "head" : "other";
+  const heightOf = (element: Element) => ({ box: BOX_H, row: ROW_H, head: HEAD_H, other: BOX_H })[kind(element)];
+  Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { get() { return BOX_H; } });
   Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { get() { return 1000; } });
+  // The virtualizer measures the scroll box by its offset size.
+  Object.defineProperty(dom.window.HTMLElement.prototype, "offsetHeight", { get() { return kind(this) === "other" ? 0 : heightOf(this); } });
+  Object.defineProperty(dom.window.HTMLElement.prototype, "offsetWidth", { get() { return 1000; } });
   Object.defineProperty(dom.window.HTMLElement.prototype, "scrollWidth", { get() { return 1400; } });
   Object.defineProperty(dom.window.HTMLElement.prototype, "scrollHeight", { get() {
-    if (!this.classList.contains("kd-scroll")) return 720;
-    return 28 + [...this.querySelectorAll("tbody > tr")].reduce((height, row) =>
-      height + (row.hasAttribute("data-spacer") ? parseFloat(row.firstElementChild?.getAttribute("style")?.match(/height: ([\d.]+)px/)?.[1] ?? "0") : 36), 0);
+    if (!this.classList.contains("kd-scroll")) return BOX_H;
+    const body = this.querySelector<HTMLElement>(".kd-list-body");
+    return HEAD_H + (body ? parseFloat(body.style.height) || 0 : 0);
   } });
   dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
-    return { x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: this.tagName === "TR" ? 36 : 720,
-      width: 1000, height: this.tagName === "THEAD" ? 28 : this.tagName === "TR" ? 36 : 720, toJSON() {} };
+    const height = heightOf(this);
+    return { x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: height, width: 1000, height, toJSON() {} };
   };
   let ids = Array.from({ length: 10000 }, (_, index) => index + 1);
   const requests: number[][] = [];
   const indexQueries: URLSearchParams[] = [];
   const summaryQueries: Record<string, unknown>[] = [];
-  /** While set, summaries are not answered: the rows they belong to stay loading rows. */
-  let summariesHeld: Promise<void> | null = null;
   const coverQueries: URL[] = [];
   const originalFetch = globalThis.fetch;
   // Keep the real API client so URL and JSON serialization are both exercised.
@@ -69,7 +80,6 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
       }
       const requested = body.track_ids as number[];
       requests.push(requested);
-      if (summariesHeld) await summariesHeld;
       return Response.json(requested.filter(id => ids.includes(id)).map(makeRow));
     }
     const detail = url.pathname.match(/^\/api\/library\/tracks\/(\d+)$/);
@@ -82,6 +92,7 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
   const { useLibraryStore } = await import("../src/stores/libraryStore");
   const { useDownloadStore } = await import("../src/stores/downloadStore");
   const { TrackTable } = await import("../src/components/library/TrackTable");
+  const { LIST_ARRIVAL_MS, LIST_ARRIVAL_STEPS } = await import("../src/components/common/listArrival");
   const root = createRoot(document.getElementById("root")!);
   function Host({ shortcutActive = true, visible = true }: { shortcutActive?: boolean; visible?: boolean } = {}) {
     const total = useLibraryStore(state => state.total);
@@ -99,6 +110,14 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
       await new Promise(resolve => setImmediate(resolve));
     });
   };
+  /** The scroll the WebView performs reaches the page as a scroll event. */
+  const scrollTo = (box: HTMLElement, top: number) => act(() => { box.scrollTop = top; box.dispatchEvent(new Event("scroll")); });
+  const rows = () => [...document.querySelectorAll<HTMLElement>(".kd-list-row[data-kd-track-id]")];
+  const rowOf = (id: number) => document.querySelector<HTMLElement>(`.kd-list-row[data-kd-track-id="${id}"]`);
+  const arrivingRows = () => [...document.querySelectorAll<HTMLElement>(".kd-list-row[data-kd-arrive]")];
+  const arrivalOf = () => { const marks = new Set(arrivingRows().map(row => row.getAttribute("data-kd-arrive"))); assert.ok(marks.size <= 1, "one gesture at a time"); return [...marks][0] ?? null; };
+  const stepOf = (row: HTMLElement) => Number(row.style.getPropertyValue("--kd-arrive-i"));
+  const arrivalOver = (gesture: "list" | "chase") => act(async () => { await new Promise(resolve => setTimeout(resolve, LIST_ARRIVAL_MS[gesture] + 40)); });
   try {
     await act(async () => {
       useLibraryStore.getState().setFilter({ folder: "/library", folderDeep: true, analyzed: "yes", bpmMin: 120 });
@@ -110,26 +129,23 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.ok(useLibraryStore.getState().summaryById.size > 0);
     // The list is on screen for the first time: the rows in view arrive, the first fourteen one
     // after the other and the rest of the screen with the last beat. Rows out of sight are left alone.
-    const { LIST_ARRIVAL_MS, LIST_ARRIVAL_STEPS } = await import("../src/components/library/listArrival");
-    const arrivalOf = (scroller: Element) => scroller.getAttribute("data-kd-arrive");
-    const arrivingRows = (scroller: Element) => [...scroller.querySelectorAll<HTMLElement>("tbody > tr[data-kd-arrive-row]")];
-    const stepOf = (row: HTMLElement) => Number(row.style.getPropertyValue("--kd-arrive-i"));
-    const arrivalOver = (gesture: "list" | "chase") => act(async () => { await new Promise(resolve => setTimeout(resolve, LIST_ARRIVAL_MS[gesture] + 40)); });
     {
-      const scroller = document.querySelector<HTMLDivElement>(".kd-scroll")!;
-      assert.equal(arrivalOf(scroller), "list");
-      assert.equal(scroller.getAttribute("data-kd-arrive-from"), "below");
-      const rows = arrivingRows(scroller);
-      assert.equal(rows.length, 20, "the rows of the viewport: 692px of 36px rows");
-      assert.deepEqual(rows.map(row => row.dataset.kdTrackId), Array.from({ length: 20 }, (_, index) => String(index + 1)),
-        "the tracks that loaded after the gesture began took their rows' places in it");
-      assert.deepEqual(rows.map(stepOf), Array.from({ length: 20 }, (_, index) => Math.min(index, LIST_ARRIVAL_STEPS - 1)));
-      assert.deepEqual(rows.map(row => row.getAttribute("data-kd-arrive-row")), Array.from({ length: 20 }, (_, index) => index < LIST_ARRIVAL_STEPS ? "step" : "rest"));
+      assert.equal(arrivalOf(), "list");
+      const arriving = arrivingRows();
+      assert.equal(arriving.length, 20, "the rows of the viewport: 692px of 36px rows");
+      assert.deepEqual(arriving.map(row => row.dataset.kdTrackId), Array.from({ length: 20 }, (_, index) => String(index + 1)));
+      assert.deepEqual(arriving.map(stepOf), Array.from({ length: 20 }, (_, index) => Math.min(index, LIST_ARRIVAL_STEPS - 1)));
+      assert.deepEqual(arriving.map(row => row.getAttribute("data-kd-arrive-row")), Array.from({ length: 20 }, (_, index) => index < LIST_ARRIVAL_STEPS ? "step" : "rest"));
+      assert.ok(rows().length > 20, "rows beyond the viewport are built, and not marked");
       await arrivalOver("list");
-      assert.equal(arrivalOf(scroller), null, "the marks are taken off when the gesture is over");
-      assert.equal(arrivingRows(scroller).length, 0);
-      assert.equal(scroller.querySelector("tr[style*='--kd-arrive']"), null);
+      assert.equal(arrivalOf(), null, "the marks are taken off when the gesture is over");
+      assert.equal(document.querySelector(".kd-list-row[style*='--kd-arrive']"), null);
     }
+    // Rows are independent blocks placed at their offsets, not a table.
+    assert.equal(document.querySelector("table, tbody, tr, td"), null);
+    assert.equal(rowOf(1)!.style.top, "0px");
+    assert.equal(rowOf(2)!.style.top, `${ROW_H}px`);
+    assert.equal(document.querySelector<HTMLElement>(".kd-list-body")!.style.height, `${10000 * ROW_H}px`);
     assert.equal(indexQueries[0].get("folder_deep"), "true");
     assert.equal(indexQueries[0].get("analyzed"), "true");
     assert.equal(indexQueries[0].get("bpm_min"), "120");
@@ -152,6 +168,7 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
       assert.equal(summaryQueries.at(-1)!.folder_deep, undefined);
       assert.equal(summaryQueries.at(-1)!.bpm_min, undefined);
     }
+    await arrivalOver("list");
     // Layout determines activation; legacy preferences cannot change it or pin details.
     const { playClickForLayout, shouldPinDetailOnClick } = await import("../src/lib/trackClickPrefs");
     for (const layout of ["wide", "narrow"] as const) {
@@ -161,23 +178,23 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
         assert.equal(shouldPinDetailOnClick(prefs, layout), false);
       }
     }
-    const row = document.querySelector<HTMLElement>("tr[data-kd-track-id]")!;
+    const row = rows()[0];
     await act(async () => {
       row.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, detail: 1 }));
     });
     assert.equal(useLibraryStore.getState().selectedId, Number(row.dataset.kdTrackId));
     assert.equal(useLibraryStore.getState().total, 10000);
-    assert.ok(document.querySelectorAll("tr[data-kd-track-id]").length <= 102);
+    assert.ok(rows().length <= 60, "only the rows near the viewport exist");
     const box = document.querySelector<HTMLDivElement>(".kd-scroll")!;
     const vertical = document.querySelector<HTMLElement>('[role="scrollbar"][data-axis="vertical"]')!;
     assert.equal(vertical.style.display, "");
-    assert.equal(vertical.getAttribute("aria-valuemax"), "359308");
+    assert.equal(vertical.getAttribute("aria-valuemax"), String(HEAD_H + 10000 * ROW_H - BOX_H));
     await act(async () => {
       vertical.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
       box.dispatchEvent(new Event("scroll"));
     });
     await flush();
-    assert.equal(box.scrollTop, 359308);
+    assert.equal(box.scrollTop, HEAD_H + 10000 * ROW_H - BOX_H);
     const pointer = (type: string, y: number) => {
       const event = new dom.window.MouseEvent(type, { clientY: y, clientX: 999, button: 0, bubbles: true, cancelable: true });
       Object.defineProperty(event, "pointerId", { value: 7 });
@@ -200,84 +217,62 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.equal(useLibraryStore.getState().summaryById.size, 10000);
     assert.ok(requests.every(values => values.length <= 500));
     const requestsBeforeJump = requests.length;
-    await act(async () => { box.scrollTop = 359300; box.dispatchEvent(new Event("scroll")); });
+    await scrollTo(box, 359300);
     await flush();
-    assert.ok(document.querySelector('tr[data-kd-track-id="10000"]'));
-    assert.equal(document.querySelector("tr[data-loading-track]"), null, "no placeholder rows after a far jump");
+    assert.ok(rowOf(10000));
+    assert.equal(document.querySelector(".kd-list-row[data-loading-track]"), null, "no placeholder rows after a far jump");
     assert.equal(requests.length, requestsBeforeJump);
     // Wheel and trackpad scrolling belongs to the WebView's scrolling thread: the page must not cancel it.
-    await act(async () => { box.scrollTop = 0; box.dispatchEvent(new Event("scroll")); });
+    await scrollTo(box, 0);
     await flush();
     const wheel = new dom.window.WheelEvent("wheel", { deltaY: 180_000, bubbles: true, cancelable: true });
     box.dispatchEvent(wheel);
     assert.equal(wheel.defaultPrevented, false, "the list is scrolled by the WebView, not by the page");
     assert.equal(box.scrollTop, 0);
-    // The scroll it performs reaches the page as a scroll event; that frame commits the rows.
-    let clock = performance.now();
-    const frame = (elapsed: number) => act(() => {
-      clock += elapsed;
-      const current = [...frames.values()]; frames.clear();
-      for (const callback of current) callback(clock);
-    });
-    const rows = () => document.querySelectorAll("tr[data-kd-track-id]").length;
-    const ratings = () => document.querySelectorAll("tr[data-kd-track-id] .kd-table-rating").length;
-    box.scrollTop = 180_000;
-    box.dispatchEvent(new Event("scroll"));
-    frame(16);
-    assert.ok(document.querySelector('tr[data-kd-track-id="5001"]'), "rows are committed in the frame that reported the scroll");
-    assert.equal(document.querySelector("tr[data-loading-track]"), null);
+    // The scroll it performs reaches the page as a scroll event; the rows are rendered in that event.
+    const ratings = () => document.querySelectorAll(".kd-list-row[data-kd-track-id] .kd-table-rating").length;
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 200)); });
+    await scrollTo(box, 180_000);
+    assert.ok(rowOf(5001), "rows are rendered in the event that reported the scroll");
+    assert.equal(document.querySelector(".kd-list-row[data-loading-track]"), null);
     assert.equal(requests.length, requestsBeforeJump);
-    // No canvas here, so there are no stand-in rows: the table builds its own rows at any speed.
-    assert.equal(document.querySelectorAll(".kd-table-standins canvas").length, 0);
-    const landed = rows();
-    assert.ok(landed >= 5 * 19, `two screens either side of the viewport (${landed})`);
+    const landed = rows().length;
+    assert.ok(landed >= 20 && landed <= 60, `the viewport and a dozen rows either side (${landed})`);
     assert.equal(ratings(), landed, "every row is complete");
-    // The rows that stay in the window while it moves keep their nodes: only entering rows are rendered.
-    const kept = document.querySelector('tr[data-kd-track-id="5001"]')!;
+    assert.equal(rowOf(5001)!.style.top, `${5000 * ROW_H}px`, "a row lies at its own offset");
+    // The rows that stay near the viewport keep their nodes: only entering rows are rendered.
+    const kept = rowOf(5001)!;
     const keptRating = kept.querySelector(".kd-table-rating");
-    for (let step = 1; step <= 24; step += 1) {
-      box.scrollTop = 180_000 + step * 30;
-      box.dispatchEvent(new Event("scroll"));
-      frame(16);
-    }
-    assert.ok(document.querySelector('tr[data-kd-track-id="5060"]'), "the window followed the scroll");
-    assert.equal(document.querySelector('tr[data-kd-track-id="5001"]'), kept);
+    for (let step = 1; step <= 8; step += 1) await scrollTo(box, 180_000 + step * 30);
+    assert.ok(rowOf(5030), "the rows followed the scroll");
+    assert.equal(rowOf(5001), kept);
     assert.equal(kept.querySelector(".kd-table-rating"), keptRating);
-    assert.equal(ratings(), rows());
+    assert.equal(ratings(), rows().length);
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
     await flush();
     // Past either end the WebView bounces and reports offsets outside the list. That is not a scroll:
     // the page neither pulls the container back nor moves its rows.
     const end = box.scrollHeight - box.clientHeight;
-    box.scrollTop = end;
-    box.dispatchEvent(new Event("scroll"));
-    frame(16);
-    assert.ok(document.querySelector('tr[data-kd-track-id="10000"]'));
-    const lastRow = document.querySelector('tr[data-kd-track-id="10000"]');
-    const atEnd = rows();
+    await scrollTo(box, end);
+    assert.ok(rowOf(10000));
+    const lastRow = rowOf(10000);
     for (const overshoot of [40, 90, 30, 0]) {
-      box.scrollTop = end + overshoot;
-      box.dispatchEvent(new Event("scroll"));
-      frame(16);
+      await scrollTo(box, end + overshoot);
       assert.equal(box.scrollTop, end + overshoot, "the bounce at the bottom is left to the WebView");
-      assert.equal(document.querySelector('tr[data-kd-track-id="10000"]'), lastRow);
-      assert.equal(rows(), atEnd);
+      assert.equal(rowOf(10000), lastRow);
+      assert.equal(lastRow!.style.top, `${9999 * ROW_H}px`);
     }
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
     await flush();
-    box.scrollTop = 0;
-    box.dispatchEvent(new Event("scroll"));
-    frame(16);
+    await scrollTo(box, 0);
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
     await flush();
-    const firstRow = document.querySelector('tr[data-kd-track-id="1"]');
+    const firstRow = rowOf(1);
     assert.ok(firstRow);
     for (const overshoot of [-50, -120, -20, 0]) {
-      box.scrollTop = overshoot;
-      box.dispatchEvent(new Event("scroll"));
-      frame(16);
+      await scrollTo(box, overshoot);
       assert.equal(box.scrollTop, overshoot, "the bounce at the top is left to the WebView");
-      assert.equal(document.querySelector('tr[data-kd-track-id="1"]'), firstRow);
+      assert.equal(rowOf(1), firstRow);
     }
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
     await flush();
@@ -296,31 +291,31 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     assert.deepEqual(useLibraryStore.getState().clipboard, { ids: [42], op: "copy" });
     useLibraryStore.setState({ clipboard: null });
     ids = ids.slice(0, 200);
-    const arriving = () => arrivalOf(box);
-    assert.equal(arriving(), null);
+    await arrivalOver("chase");
+    assert.equal(arrivalOf(), null);
     await act(async () => { await useLibraryStore.getState().refresh(); });
     await flush();
     assert.ok(box.scrollTop <= 7200);
-    assert.ok(document.querySelectorAll("tr[data-kd-track-id]").length > 0);
+    assert.ok(rows().length > 0);
     // The same list in a new state (shorter, re-read) is not presented again.
-    assert.equal(arriving(), null, "a refresh of the same query is not an arrival");
-    assert.equal(arrivingRows(box).length, 0);
+    assert.equal(arrivalOf(), null, "a refresh of the same query is not an arrival");
     await act(async () => {
       useLibraryStore.getState().setFilter({ q: "changed query" });
       await useLibraryStore.getState().refresh();
     });
     await flush();
     assert.equal(box.scrollTop, 0, "query changes reset the actual scroll offset");
-    assert.equal(arriving(), "list", "another list arrives");
-    const presented = arrivingRows(box);
+    await scrollTo(box, 0);
+    assert.equal(arrivalOf(), "list", "another list arrives");
+    const presented = arrivingRows();
     assert.deepEqual(presented.map(row => row.dataset.kdTrackId), Array.from({ length: 20 }, (_, index) => String(ids[index])));
     assert.deepEqual(presented.map(stepOf), Array.from({ length: 20 }, (_, index) => Math.min(index, LIST_ARRIVAL_STEPS - 1)));
     // A selection, a row that updates and a re-render leave the gesture as it is: nothing is marked again.
     await act(async () => { useLibraryStore.getState().select(ids[3]); });
     await act(async () => { await useLibraryStore.getState().refreshTrackSummaries([ids[5]]); });
     await flush();
-    assert.equal(arriving(), "list");
-    assert.deepEqual(arrivingRows(box), presented, "the same rows, the same nodes");
+    assert.equal(arrivalOf(), "list");
+    assert.deepEqual(arrivingRows(), presented, "the same rows, the same nodes");
     assert.ok(presented.every(row => !row.style.getPropertyValue("--kd-arrive-lag")), "no row was started again");
     // Replaced again while it is still arriving: the rows in view are arriving, whichever of them are new.
     await act(async () => {
@@ -328,42 +323,40 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
       await useLibraryStore.getState().refresh();
     });
     await flush();
-    assert.equal(arriving(), "list");
-    assert.equal(arrivingRows(box).length, 20);
-    // Leaving the place it arrived at ends it at once; the table goes on from there without the marks.
-    box.scrollTop = 720;
-    box.dispatchEvent(new dom.window.Event("scroll"));
-    assert.equal(arriving(), null, "scrolling drops the marks");
-    assert.equal(arrivingRows(box).length, 0);
-    await flush();
-    assert.equal(arriving(), null);
-    box.scrollTop = 0;
-    box.dispatchEvent(new dom.window.Event("scroll"));
-    await flush();
-    assert.equal(arriving(), null, "returning to the top is not an arrival");
+    await scrollTo(box, 0);
+    assert.equal(arrivalOf(), "list");
+    assert.equal(arrivingRows().length, 20);
+    // Leaving the place it arrived at ends it at once. A screen further on, the rows that were not
+    // built yet catch up with the scroll instead (a chase); the presented list is not marked again.
+    await scrollTo(box, 720);
+    assert.notEqual(arrivalOf(), "list", "scrolling drops the marks of the presented list");
+    assert.ok(presented.every(row => !row.hasAttribute("data-kd-arrive")));
+    await arrivalOver("chase");
+    assert.equal(arrivalOf(), null);
+    await scrollTo(box, 0);
+    await arrivalOver("chase");
+    assert.equal(arrivalOf(), null, "returning to the top is not a presentation");
     // The pane is put away and shown again (it stays mounted, display: none): the list arrives
     // again where it was left, however far down that is.
-    box.scrollTop = 100 * 36;
-    box.dispatchEvent(new dom.window.Event("scroll"));
+    await scrollTo(box, 100 * ROW_H);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
     await flush();
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
-    await flush();
-    assert.equal(arriving(), null);
+    assert.equal(arrivalOf(), null);
     await act(async () => root.render(createElement(StrictMode, {}, createElement(Host, { visible: false }))));
-    assert.equal(arriving(), null, "a hidden list does not arrive");
+    assert.equal(arrivalOf(), null, "a hidden list does not arrive");
     await act(async () => root.render(createElement(StrictMode, {}, createElement(Host, { visible: true }))));
-    assert.equal(arriving(), "list", "shown again: it arrives");
-    assert.deepEqual(arrivingRows(box).map(row => row.dataset.kdTrackId), Array.from({ length: 20 }, (_, index) => String(ids[100 + index])),
+    assert.equal(arrivalOf(), "list", "shown again: it arrives");
+    assert.deepEqual(arrivingRows().map(row => row.dataset.kdTrackId), Array.from({ length: 20 }, (_, index) => String(ids[100 + index])),
       "the rows in view, not the top of the list");
-    assert.deepEqual(arrivingRows(box).map(stepOf).slice(0, 3), [0, 1, 2]);
-    const shownAgain = arrivingRows(box);
+    assert.deepEqual(arrivingRows().map(stepOf).slice(0, 3), [0, 1, 2]);
+    const shownAgain = arrivingRows();
     await act(async () => root.render(createElement(StrictMode, {}, createElement(Host, { visible: true }))));
-    assert.deepEqual(arrivingRows(box), shownAgain, "a render that changes nothing does not start it again");
+    assert.deepEqual(arrivingRows(), shownAgain, "a render that changes nothing does not start it again");
     await act(async () => root.render(createElement(StrictMode, {}, createElement(Host, { visible: false }))));
-    assert.equal(arriving(), null, "put away mid-arrival: the marks go");
-    assert.equal(arrivingRows(box).length, 0);
+    assert.equal(arrivalOf(), null, "put away mid-arrival: the marks go");
     await act(async () => root.render(createElement(StrictMode, {}, createElement(Host, { visible: true }))));
-    assert.equal(arriving(), "list");
+    assert.equal(arrivalOf(), "list");
+    await arrivalOver("list");
     // Reduced motion: the list is simply there, and one that was arriving stops.
     reducedMotion = true;
     await act(async () => {
@@ -372,31 +365,23 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     });
     await flush();
     assert.equal(box.scrollTop, 0);
-    assert.equal(arriving(), null);
-    assert.equal(arrivingRows(box).length, 0);
+    await scrollTo(box, 0);
+    assert.equal(arrivalOf(), null);
     reducedMotion = false;
     ids = [];
     await act(async () => { await useLibraryStore.getState().refresh(); });
     await flush();
-    assert.equal(document.querySelectorAll("tbody tr").length, 0);
-    assert.equal(document.querySelector("tbody")!.textContent, "");
+    assert.equal(document.querySelectorAll(".kd-list-row").length, 0);
+    assert.equal(document.querySelector(".kd-list-body")!.textContent, "");
     await act(async () => useDownloadStore.setState({ list: Array.from({ length: 10000 }, (_, index) => ({
       id: String(index), state: "queued", dest_dir: "/library", title: `Pending ${index}`, artist: "", progress: 0,
     })) as never }));
     await flush();
-    assert.ok(document.querySelectorAll('tr[data-pending="true"]').length <= 102);
+    const pendingRows = document.querySelectorAll('.kd-list-row[data-pending="true"]').length;
+    assert.ok(pendingRows > 0 && pendingRows <= 60, `pending downloads are virtualized too (${pendingRows})`);
     await act(async () => { root.render(null); useDownloadStore.setState({ list: [] }); });
     ids = Array.from({ length: 10000 }, (_, index) => index + 1);
     const { updateLocalWorkspaceSession } = await import("../src/lib/workspaceSession");
-    // The table mounted next finds a canvas it can paint on and a row it can measure, so a fast
-    // scroll of it holds the rows back and shows stand-ins, as it does in the app (see below).
-    Object.assign(globalThis, { Node: dom.window.Node });
-    const fakeContext = { setTransform() {}, clearRect() {}, drawImage() {}, beginPath() {}, rect() {}, fill() {}, fillRect() {}, roundRect() {} };
-    const paintable = (on: boolean) => {
-      dom.window.HTMLCanvasElement.prototype.getContext = (() => on ? fakeContext : null) as unknown as typeof dom.window.HTMLCanvasElement.prototype.getContext;
-    };
-    paintable(true);
-    dom.window.Range.prototype.getBoundingClientRect = () => ({ x: 40, y: 10, left: 40, top: 10, right: 80, bottom: 26, width: 40, height: 16, toJSON() {} });
     await act(async () => {
       await useLibraryStore.getState().refresh();
       updateLocalWorkspaceSession({ topVisibleTrackId: 9500, rowOffset: 7, scrollTop: 341971 });
@@ -404,18 +389,20 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     });
     await flush();
     const restored = document.querySelector<HTMLDivElement>(".kd-scroll")!;
-    paintable(false);
-    assert.equal(restored.scrollTop, 9499 * 36 + 7);
-    assert.ok(document.querySelector('tr[data-kd-track-id="9500"]'));
+    assert.equal(restored.scrollTop, 9499 * ROW_H + 7);
+    // The offset the page wrote reaches it back as a scroll event; the rows there are rendered then.
+    await scrollTo(restored, restored.scrollTop);
+    assert.ok(rowOf(9500));
     // Presented where it had been left: the rows in view there arrive, not the top of the list.
-    assert.equal(arrivalOf(restored), "list");
-    assert.equal(arrivingRows(restored)[0], document.querySelector('tr[data-kd-track-id="9500"]'));
-    assert.equal(arrivingRows(restored).length, 20);
+    assert.equal(arrivalOf(), "list");
+    assert.equal(arrivingRows()[0], rowOf(9500));
+    assert.equal(arrivingRows().length, 20);
+    await arrivalOver("list");
     // Pressing a row prepares the system drag preview from the thumbnail route, not the original cover.
     await act(async () => {
       const down = pointer("pointerdown", 200);
       Object.defineProperty(down, "pointerType", { value: "mouse" });
-      document.querySelector('tr[data-kd-track-id="9500"] td')!.dispatchEvent(down);
+      rowOf(9500)!.querySelector(".kd-list-cell")!.dispatchEvent(down);
       window.dispatchEvent(pointer("pointercancel", 200));
     });
     await flush();
@@ -425,181 +412,100 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
 
     // —— A fast scroll, and the rows catching up with it ——
     {
-      paintable(true);
-      const table = restored;
-      const body = table.querySelector("tbody")!;
-      const tiles = () => [...table.querySelectorAll<HTMLCanvasElement>(".kd-table-standins canvas")].filter(canvas => canvas.style.display !== "none");
-      const fading = () => table.querySelectorAll(".kd-table-standins canvas[data-leaving]").length;
-      const builtRows = () => [...body.children].filter(row => !row.hasAttribute("data-spacer"));
-      const rowOf = (index: number) => table.querySelector<HTMLElement>(`tr[data-kd-track-id="${index + 1}"]`);
-      /** The rows [first, last) under the viewport: 692px of rows below the header. */
-      const inView = () => [Math.floor(table.scrollTop / 36), Math.ceil((table.scrollTop + 692) / 36)] as const;
-      const scrollBy = (pixels: number, elapsed = 16) => {
-        table.scrollTop += pixels;
-        table.dispatchEvent(new Event("scroll"));
-        frame(elapsed);
-      };
+      const scrollBy = (pixels: number) => scrollTo(restored, restored.scrollTop + pixels);
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
       await flush();
-      // The clock of timers stands still in this part and is moved by hand: building rows in
-      // JSDOM takes longer than the gestures that are timed here.
+      // The clock of timers stands still in this part and is moved by hand.
       t.mock.timers.enable({ apis: ["setTimeout"] });
       const pass = (ms: number) => act(async () => { t.mock.timers.tick(ms); });
-      /** Long enough without a scroll frame for the table to take the scroll as over. */
+      /** Long enough without a scroll frame for the list to take the scroll as over. */
       const rest = async () => { await pass(220); await flush(); };
-      // Every change of the rows React makes: a fast scroll must make none.
+      // Every change of the rows React makes.
+      const body = restored.querySelector(".kd-list-body")!;
       const built: MutationRecord[] = [];
       const watch = new dom.window.MutationObserver(records => { built.push(...records); });
       watch.observe(body, { childList: true });
       const commits = () => { built.push(...watch.takeRecords()); const count = built.length; built.length = 0; return count; };
 
-      // A scroll at reading speed marks nothing: rows are committed in the frame, as they are,
-      // with no stand-in.
+      // A scroll at reading speed marks nothing: the rows it reaches were built beyond the viewport
+      // before it got there, in the event of an earlier scroll.
       commits();
       for (let step = 0; step < 40; step += 1) {
-        scrollBy(-30);
-        assert.equal(arrivalOf(table), null, "reading speed: no arrival");
-        assert.equal(tiles().length, 0);
-        assert.ok(rowOf(inView()[0]) && rowOf(inView()[1] - 1), "the rows are there in the frame that reported the scroll");
+        await scrollBy(-30);
+        assert.equal(arrivalOf(), null, "reading speed: no arrival");
+        const [first, last] = inView(restored.scrollTop);
+        assert.ok(rowOf(first + 1) && rowOf(last), "the rows are there in the event that reported the scroll");
       }
-      assert.ok(commits() > 0, "the window followed, a step at a time");
-      assert.equal(arrivingRows(table).length, 0);
+      assert.ok(commits() > 0, "the rows followed, a few at a time");
       await rest();
 
-      // A fling towards the top: no row is built, frame after frame; the stand-ins cover the viewport.
+      // A fling towards the top: the viewport lands where no row was built. The rows built in that
+      // event chase it: the one nearest to where it came from first (the bottom one), dropping in from
+      // above, a step apart; after the fourteenth the rest come with the last beat. Rows beyond the
+      // viewport are built without a mark.
       commits();
-      const heldRows = builtRows();
-      for (let step = 0; step < 20; step += 1) {
-        scrollBy(-3000);
-        assert.ok(tiles().length > 0, "stand-ins on show");
-        assert.equal(rowOf(inView()[0]), null, "the viewport has run past the rows");
-      }
-      // It slows down. Until the pace is one rows can be built for, still nothing is built.
-      let slowing = 0;
-      while (arrivalOf(table) === null && slowing < 80) {
-        assert.equal(commits(), 0, "a fast scroll commits no rows");
-        assert.deepEqual(builtRows(), heldRows);
-        scrollBy(-20);
-        slowing += 1;
-      }
-      assert.ok(slowing > 5 && slowing < 80, `the pace dropped after ${slowing} slow frames`);
-      // That frame built the rows here, once, and they run after the scroll: the row nearest to
-      // where it came from first (the bottom one), dropping in from above; a screen further on in
-      // the direction of travel comes with the last beat; rows the scroll has passed are left alone.
+      await scrollBy(-3000);
       assert.ok(commits() > 0);
-      assert.equal(arrivalOf(table), "chase");
-      assert.equal(table.getAttribute("data-kd-arrive-from"), "above");
-      let [first, last] = inView();
-      let chasing = arrivingRows(table);
-      assert.equal(chasing.length, 2 * (last - first), "the viewport and a screen ahead");
-      assert.equal(stepOf(rowOf(last - 1)!), 0);
-      assert.equal(stepOf(rowOf(last - 2)!), 1);
-      assert.equal(stepOf(rowOf(first)!), LIST_ARRIVAL_STEPS - 1);
-      assert.equal(rowOf(last - 1)!.getAttribute("data-kd-arrive-row"), "step");
-      assert.equal(rowOf(first - 1)!.getAttribute("data-kd-arrive-row"), "rest");
-      assert.equal(rowOf(first - (last - first))!.getAttribute("data-kd-arrive-row"), "rest");
-      assert.equal(rowOf(first - (last - first) - 1)!.hasAttribute("data-kd-arrive-row"), false, "further ahead: built, not animated");
-      assert.equal(rowOf(last)!.hasAttribute("data-kd-arrive-row"), false, "behind the scroll: built, not animated");
-      assert.ok(fading() > 0 && fading() === tiles().length, "the stand-ins still in view make way for the arriving rows");
-      // The rest of the scroll plays out at reading speed while they arrive: the window steps on,
-      // and no row is started again.
-      for (let step = 0; step < 16; step += 1) scrollBy(-20);
-      assert.ok(commits() > 0);
-      assert.equal(arrivalOf(table), "chase");
-      assert.deepEqual(arrivingRows(table).filter(row => row.isConnected), chasing.filter(row => row.isConnected));
-      assert.ok(arrivingRows(table).every(row => !row.style.getPropertyValue("--kd-arrive-lag")));
-
-      // A second fling before they have arrived: the rows are simply there, the stand-ins are back.
-      scrollBy(-3000);
-      assert.equal(arrivalOf(table), null);
-      assert.equal(arrivingRows(table).length, 0);
-      assert.equal(table.querySelector("tr[style*='--kd-arrive']"), null);
-      assert.equal(fading(), 0);
-      assert.ok(tiles().length > 0);
-      assert.equal(commits(), 0);
-      // It stops dead (a dragged handle let go): the rows are built when the scroll has rested, and chase the same way.
-      await rest();
-      assert.equal(arrivalOf(table), "chase");
-      assert.equal(table.getAttribute("data-kd-arrive-from"), "above");
-      [first, last] = inView();
-      assert.equal(stepOf(rowOf(last - 1)!), 0);
+      assert.equal(arrivalOf(), "chase");
+      let [first, last] = inView(restored.scrollTop);
+      let chasing = arrivingRows();
+      assert.equal(chasing.length, last - first, "the rows of the viewport");
+      assert.ok(chasing.every(row => row.getAttribute("data-kd-arrive-from") === "above"));
+      assert.equal(stepOf(rowOf(last)!), 0);
+      assert.equal(stepOf(rowOf(last - 1)!), 1);
+      assert.equal(stepOf(rowOf(first + 1)!), LIST_ARRIVAL_STEPS - 1);
+      assert.equal(rowOf(last)!.getAttribute("data-kd-arrive-row"), "step");
+      assert.equal(rowOf(first + 1)!.getAttribute("data-kd-arrive-row"), "rest");
+      assert.equal(rowOf(first)!.hasAttribute("data-kd-arrive"), false, "beyond the viewport: built, not animated");
+      assert.ok(chasing.every(row => !row.style.getPropertyValue("--kd-arrive-lag")), "the first rows start the clock");
+      // The next frame of the fling lands further on: its rows join the same chase, as far into it
+      // as the clock already is, each at its own step from the edge.
+      await scrollBy(-3000);
+      assert.equal(arrivalOf(), "chase");
+      [first, last] = inView(restored.scrollTop);
+      const joined = arrivingRows().filter(row => !chasing.includes(row));
+      assert.ok(joined.length > 0);
+      assert.ok(joined.every(row => /^\d+ms$/.test(row.style.getPropertyValue("--kd-arrive-lag"))), "joined late: as far as the others");
+      assert.equal(stepOf(rowOf(last)!), 0);
+      // The chase is over in a third of a second: the marks come off; the rows stay.
       await pass(LIST_ARRIVAL_MS.chase + 40);
-      assert.equal(arrivalOf(table), null, "over in a third of a second");
-      assert.equal(arrivingRows(table).length, 0);
-      assert.equal(tiles().length, 0, "no canvas stays on show over the rows");
+      assert.equal(arrivalOf(), null, "over in a third of a second");
+      assert.equal(rowOf(last)!.getAttribute("style"), `top: ${(last - 1) * ROW_H}px;`, "nothing of it stays on a row");
+      await rest();
 
       // Towards the end of the list the rows rise from below, the top one first.
-      for (let step = 0; step < 12; step += 1) scrollBy(3000);
-      for (slowing = 0; arrivalOf(table) === null && slowing < 80; slowing += 1) scrollBy(20);
-      assert.equal(arrivalOf(table), "chase");
-      assert.equal(table.getAttribute("data-kd-arrive-from"), "below");
-      [first, last] = inView();
-      chasing = arrivingRows(table);
-      assert.equal(chasing[0], rowOf(first));
+      await scrollBy(6000);
+      assert.equal(arrivalOf(), "chase");
+      [first, last] = inView(restored.scrollTop);
+      chasing = arrivingRows();
+      assert.ok(chasing.every(row => row.getAttribute("data-kd-arrive-from") === "below"));
+      assert.equal(chasing[0], rowOf(first + 1));
       assert.deepEqual(chasing.slice(0, 4).map(stepOf), [0, 1, 2, 3]);
-      assert.equal(chasing.at(-1), rowOf(last + (last - first) - 1));
-      await rest();
       await pass(LIST_ARRIVAL_MS.chase + 40);
-
-      // A quick flick that never leaves the rows the table had built is not a chase: they were on screen all along.
-      commits();
-      for (let step = 0; step < 4; step += 1) scrollBy(150);
-      assert.ok(tiles().length === 0 || arrivalOf(table) === null);
-      for (slowing = 0; slowing < 60; slowing += 1) scrollBy(4);
-      assert.equal(arrivalOf(table), null, "nothing new came into view");
-      assert.equal(arrivingRows(table).length, 0);
       await rest();
-      assert.equal(arrivalOf(table), null);
-      assert.equal(tiles().length, 0);
 
-      // Reduced motion: the rows are simply there when the scroll slows down, and the stand-ins go at once.
+      // A quick flick that never leaves the rows the list had built is not a chase: they were there all along.
+      commits();
+      for (let step = 0; step < 4; step += 1) {
+        await scrollBy(150);
+        assert.equal(arrivalOf(), null, "nothing new came into view");
+      }
+      await rest();
+
+      // Reduced motion: the rows are simply there when the scroll lands.
       reducedMotion = true;
-      for (let step = 0; step < 12; step += 1) scrollBy(-3000);
-      assert.ok(tiles().length > 0);
-      for (slowing = 0; rowOf(inView()[0]) === null && slowing < 80; slowing += 1) scrollBy(-20);
-      assert.ok(rowOf(inView()[0]) && rowOf(inView()[1] - 1));
-      assert.equal(arrivalOf(table), null);
-      assert.equal(tiles().length, 0);
+      await scrollBy(-6000);
+      [first, last] = inView(restored.scrollTop);
+      assert.ok(rowOf(first + 1) && rowOf(last));
+      assert.equal(arrivalOf(), null);
       reducedMotion = false;
       await rest();
-
-      // Rows whose tracks have not loaded: the loading rows chase, and a track that arrives
-      // meanwhile takes its row's place in step with the others instead of starting over.
-      // (A short list of tracks nobody has seen, so that all of them load in one answer.)
-      const turns = async () => { for (let turn = 0; turn < 12; turn += 1) await new Promise(resolve => setImmediate(resolve)); };
-      let release = () => {};
-      summariesHeld = new Promise(resolve => { release = resolve; });
-      ids = Array.from({ length: 400 }, (_, index) => index + 20001);
-      await act(async () => { void useLibraryStore.getState().refresh(); await turns(); });
-      await flush();
-      assert.ok(table.scrollTop > 13000, "the shorter list is shown at its end");
-      for (let step = 0; step < 3; step += 1) scrollBy(-3000);
-      for (slowing = 0; arrivalOf(table) === null && slowing < 80; slowing += 1) scrollBy(-20);
-      assert.equal(arrivalOf(table), "chase");
-      chasing = arrivingRows(table);
-      assert.ok(chasing.length > 0 && chasing.every(row => row.hasAttribute("data-loading-track")), "loading rows arrive like any other");
-      const steps = chasing.map(stepOf);
-      await act(async () => { release(); summariesHeld = null; await turns(); });
-      await flush();
-      const loaded = arrivingRows(table);
-      assert.equal(arrivalOf(table), "chase");
-      assert.ok(loaded.length === chasing.length && loaded.every(row => row.hasAttribute("data-kd-track-id")), "the tracks took over their rows");
-      assert.deepEqual(loaded.map(stepOf), steps, "each at its row's step");
-      assert.ok(loaded.every(row => /^\d+ms$/.test(row.style.getPropertyValue("--kd-arrive-lag"))), "and as far into the gesture as the others are");
-      await pass(LIST_ARRIVAL_MS.chase + 40);
-      assert.equal(arrivalOf(table), null);
-      assert.equal(arrivingRows(table).length, 0);
       await pass(2000);
       t.mock.timers.reset();
       watch.disconnect();
-      // Back to the library the rest of the test expects, and to a table without a canvas.
-      ids = Array.from({ length: 10000 }, (_, index) => index + 1);
-      await act(async () => { await useLibraryStore.getState().refresh(); });
-      await flush();
-      paintable(false);
     }
 
-    // Mount a second real table, with its own query and keyboard/clipboard owner.
+    // Mount a second real list, with its own query and keyboard/clipboard owner.
     const { createTemporaryLibrary } = await import("../src/stores/temporaryLibraryStore");
     const { TemporaryFolderPane } = await import("../src/components/library/TemporaryFolderPane");
     const { useLibraryClipboard } = await import("../src/lib/useLibraryClipboard");
@@ -632,7 +538,7 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
     const deleted: number[][] = [];
     await act(async () => useLibraryStore.setState({ removeTracks: async (ids) => { deleted.push(ids); return {}; } }));
     await press("Backspace", "Backspace");
-    assert.deepEqual(deleted, [temporary.store.getState().selectedIds], "only the active table handles deletion");
+    assert.deepEqual(deleted, [temporary.store.getState().selectedIds], "only the active list handles deletion");
     await act(async () => useLibraryStore.setState({ removeTracks: originalRemove }));
 
     await press("a", "KeyA");
@@ -689,93 +595,72 @@ test("real table/store: direct jump, full selection, shrink, empty result, and b
   }
 });
 
-test("list arrival: the marks outlast the gesture the stylesheet describes, restart cleanly and are taken off", async (t) => {
+test("list arrival: the marks outlast the gesture the stylesheet describes, join one clock, and are taken off", async (t) => {
   const fs = await import("node:fs");
-  const { createListArrival, LIST_ARRIVAL_MS, LIST_ARRIVAL_STEPS } = await import("../src/components/library/listArrival");
+  const { createListArrival, LIST_ARRIVAL_BEATS, LIST_ARRIVAL_MS, LIST_ARRIVAL_STEPS } = await import("../src/components/common/listArrival");
   // The numbers the marks have to outlast are the stylesheet's.
   const strip = (file: string) => fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const motion = strip("src/motion.css");
-  const sheet = strip("src/components/library/ListArrival.css");
+  const sheet = strip("src/components/common/ListArrival.css");
   const token = (name: string) => {
     const value = new RegExp(`--kd-motion-${name}:\\s*(\\d+)ms`).exec(motion)?.[1];
     assert.ok(value, `--kd-motion-${name} is defined in ms`);
     return Number(value);
   };
   const lastStep = LIST_ARRIVAL_STEPS - 1;
+  assert.deepEqual(LIST_ARRIVAL_BEATS.list, { lead: token("list-lead"), step: token("list-step"), row: token("list-row"),
+    rest: token("list-rest"), cover: token("list-cover"), coverAfter: token("list-cover-after") });
   const list = token("list-lead") + lastStep * token("list-step") + token("list-cover-after") + token("list-cover");
   assert.ok(token("list-lead") + lastStep * token("list-step") + token("list-row") <= list, "the last cover is the last thing to land");
   assert.ok(LIST_ARRIVAL_MS.list >= list && LIST_ARRIVAL_MS.list <= list + 100, `a presented list is over after ${list}ms`);
   const coverAfter = Number(/\[data-kd-arrive="chase"\][^{]*\.kd-thumb\s*\{[^}]*\+\s*(\d+)ms/.exec(sheet)?.[1]);
+  assert.deepEqual(LIST_ARRIVAL_BEATS.chase, { lead: 0, step: token("stagger"), row: token("micro"), rest: token("micro"), cover: token("micro"), coverAfter });
   const chase = lastStep * token("stagger") + coverAfter + token("micro");
-  assert.match(sheet, /\[data-kd-arrive="chase"\][^{]*\{\s*animation:\s*kd-motion-list-rise\s+var\(--kd-motion-micro\)\s+var\(--kd-ease-list\)\s+calc\(var\(--kd-arrive-i, 0\) \* var\(--kd-motion-stagger\)/);
+  assert.match(sheet, /\.kd-list-row\[data-kd-arrive="chase"\]\s*\{\s*animation:\s*kd-motion-list-rise\s+var\(--kd-motion-micro\)\s+var\(--kd-ease-list\)\s+calc\(var\(--kd-arrive-i, 0\) \* var\(--kd-motion-stagger\)/);
   assert.ok(LIST_ARRIVAL_MS.chase >= chase && LIST_ARRIVAL_MS.chase <= chase + 60, `the chase is over after ${chase}ms`);
   assert.ok(chase <= 320, "about a quarter of a second, never long enough to stand in the way of reading");
+  assert.doesNotMatch(sheet, /\[data-kd-arrive[^\]]*\]\s*>|\[data-kd-arrive[^\]]*\]\s+\.kd-list-row/, "the marks are on the rows, never on an ancestor");
 
-  const dom = new JSDOM("<!doctype html><div class='kd-scroll'><table class='kd-table'><tbody></tbody></table></div>", { url: "http://localhost" });
+  const dom = new JSDOM("<!doctype html><div class='kd-scroll'><div class='kd-list'><div class='kd-list-body'></div></div></div>", { url: "http://localhost" });
   let reduced = false;
   dom.window.matchMedia = (() => ({ matches: reduced, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
-  const styleReads: Element[] = [];
-  Object.assign(globalThis, { window: dom.window, document: dom.window.document,
-    getComputedStyle: (element: Element) => { styleReads.push(element); return dom.window.getComputedStyle(element); } });
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document });
   t.mock.timers.enable({ apis: ["setTimeout"] });
   try {
     const scroller = document.querySelector<HTMLElement>(".kd-scroll")!;
-    const body = document.querySelector("tbody")!;
-    const row = () => body.appendChild(document.createElement("tr"));
+    const body = document.querySelector(".kd-list-body")!;
+    const row = () => { const element = body.appendChild(document.createElement("div")); element.className = "kd-list-row"; return element; };
     const rows = Array.from({ length: 20 }, row);
     const marks = () => rows.map(element => element.getAttribute("data-kd-arrive-row"));
+    const clean = (element: HTMLElement) => !element.hasAttribute("data-kd-arrive") && !element.hasAttribute("data-kd-arrive-row")
+      && !element.hasAttribute("data-kd-arrive-from") && (element.getAttribute("style") ?? "") === "";
     const arrival = createListArrival(scroller);
     assert.equal(arrival.gesture(), null);
 
-    // Rows in the order they arrive; a row that is not mounted keeps its place as a gap.
-    arrival.start("chase", "above", [rows[0], null, rows[2], ...rows.slice(3)]);
-    assert.equal(arrival.gesture(), "chase");
-    assert.equal(scroller.getAttribute("data-kd-arrive"), "chase");
-    assert.equal(scroller.getAttribute("data-kd-arrive-from"), "above");
+    // Presented: rows in the order they arrive; a row that is not mounted keeps its place as a gap.
+    arrival.present([rows[0], null, rows[2], ...rows.slice(3)]);
+    assert.equal(arrival.gesture(), "list");
+    assert.equal(rows[0].getAttribute("data-kd-arrive"), "list");
+    assert.equal(rows[0].getAttribute("data-kd-arrive-from"), "below");
     assert.equal(marks()[1], null);
     assert.equal(rows[2].style.getPropertyValue("--kd-arrive-i"), "2");
     assert.equal(rows[13].getAttribute("data-kd-arrive-row"), "step");
     assert.equal(rows[14].getAttribute("data-kd-arrive-row"), "rest");
     assert.equal(rows[19].style.getPropertyValue("--kd-arrive-i"), String(lastStep), "past the cascade: with its last beat");
-    // The row that was missing is mounted: it joins at its own step, as late as it is; the others are not touched.
-    arrival.join(rows);
-    assert.equal(rows[1].getAttribute("data-kd-arrive-row"), "step");
-    assert.equal(rows[1].style.getPropertyValue("--kd-arrive-i"), "1");
-    assert.equal(rows[0].style.getPropertyValue("--kd-arrive-lag"), "");
-    // A chase goes on while the scroll plays out.
-    scroller.scrollTop = 400;
+    // Being put where it is, is not leaving; a scroll that leaves that place ends it.
     scroller.dispatchEvent(new dom.window.Event("scroll"));
-    assert.equal(arrival.gesture(), "chase");
-
-    // Another gesture over rows that are still arriving: they must be seen without their marks
-    // in between, or the animation they already run simply goes on.
-    styleReads.length = 0;
-    arrival.start("list", "below", rows);
-    assert.ok(styleReads.length === 1 && rows.includes(styleReads[0] as HTMLTableRowElement), "the style is settled once, on a row that was marked");
     assert.equal(arrival.gesture(), "list");
-    assert.equal(scroller.getAttribute("data-kd-arrive-from"), "below");
-    assert.ok(rows.every(element => !element.style.getPropertyValue("--kd-arrive-lag")), "every row starts from its beginning");
-    // The first gesture's timer is not this one's end.
-    t.mock.timers.tick(LIST_ARRIVAL_MS.chase + 10);
-    assert.equal(arrival.gesture(), "list");
-    // A presented list is left alone by a scroll: one that leaves the place it arrived at ends it.
-    scroller.dispatchEvent(new dom.window.Event("scroll"));
-    assert.equal(arrival.gesture(), "list", "being put where it is, is not leaving");
-    scroller.scrollTop = 440;
+    scroller.scrollTop = 40;
     scroller.dispatchEvent(new dom.window.Event("scroll"));
     assert.equal(arrival.gesture(), null);
-    assert.ok(marks().every(mark => mark === null));
-    assert.ok(rows.every(element => element.getAttribute("style") === null || element.getAttribute("style") === ""), "nothing of it stays on a row");
-    assert.equal(scroller.hasAttribute("data-kd-arrive") || scroller.hasAttribute("data-kd-arrive-from"), false);
+    assert.ok(rows.every(clean), "nothing of it stays on a row");
 
     // A list presented again while it arrives (a filter typed letter by letter): the rows that
     // stay carry on untouched, the ones new to the view start, and the gesture lasts for them.
-    arrival.start("list", "below", rows.slice(0, 6));
+    arrival.present(rows.slice(0, 6));
     t.mock.timers.tick(300);
-    styleReads.length = 0;
     const fresh = row();
-    arrival.start("list", "below", [rows[0], rows[3], fresh]);
-    assert.equal(styleReads.length, 0, "nothing is started again");
+    arrival.present([rows[0], rows[3], fresh]);
     assert.deepEqual([rows[0], rows[3]].map(element => element.style.getPropertyValue("--kd-arrive-i")), ["0", "3"], "a row keeps the step it is arriving on");
     assert.equal(fresh.getAttribute("data-kd-arrive-row"), "step");
     assert.equal(fresh.style.getPropertyValue("--kd-arrive-i"), "2");
@@ -784,23 +669,39 @@ test("list arrival: the marks outlast the gesture the stylesheet describes, rest
     assert.equal(arrival.gesture(), "list", "the time runs from the last presentation");
     t.mock.timers.tick(1);
     assert.equal(arrival.gesture(), null);
-    assert.equal(fresh.hasAttribute("data-kd-arrive-row") || rows[0].hasAttribute("data-kd-arrive-row"), false);
+    assert.ok(clean(fresh) && clean(rows[0]));
     fresh.remove();
 
-    // It ends by itself.
-    arrival.start("list", "below", rows);
-    t.mock.timers.tick(LIST_ARRIVAL_MS.list - 1);
+    // A chase: every row joins one clock at its own step; a row late for its landing is simply there.
+    arrival.chase(rows[5], 0, "above");
+    assert.equal(arrival.gesture(), "chase");
+    assert.equal(rows[5].getAttribute("data-kd-arrive-from"), "above");
+    assert.equal(rows[5].style.getPropertyValue("--kd-arrive-lag"), "", "the first row starts the clock");
+    arrival.chase(rows[4], 1, "above");
+    assert.equal(rows[4].style.getPropertyValue("--kd-arrive-i"), "1");
+    arrival.chase(rows[0], 19, "above");
+    assert.equal(rows[0].getAttribute("data-kd-arrive-row"), "rest");
+    // The other side ends the chase and starts another from there.
+    arrival.chase(rows[6], 0, "below");
+    assert.ok(clean(rows[5]) && clean(rows[4]) && clean(rows[0]));
+    assert.equal(rows[6].getAttribute("data-kd-arrive-from"), "below");
+    // A presented list is left alone by a chase: it ends first.
+    arrival.present(rows.slice(0, 3));
     assert.equal(arrival.gesture(), "list");
-    t.mock.timers.tick(1);
+    arrival.chase(rows[9], 0, "below");
+    assert.equal(arrival.gesture(), "chase");
+    assert.ok(clean(rows[0]));
+    t.mock.timers.tick(LIST_ARRIVAL_MS.chase + 1);
     assert.equal(arrival.gesture(), null);
-    assert.ok(marks().every(mark => mark === null));
+    assert.ok(rows.every(clean));
     // Nothing to mark, or reduced motion: nothing starts.
-    arrival.start("chase", "below", [null, undefined]);
+    arrival.present([null, undefined]);
     assert.equal(arrival.gesture(), null);
     reduced = true;
-    arrival.start("list", "below", rows);
+    arrival.present(rows);
+    arrival.chase(rows[0], 0, "below");
     assert.equal(arrival.gesture(), null);
-    assert.ok(marks().every(mark => mark === null));
+    assert.ok(rows.every(clean));
   } finally {
     t.mock.timers.reset();
     dom.window.close();

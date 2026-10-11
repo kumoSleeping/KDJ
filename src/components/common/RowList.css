@@ -1,0 +1,79 @@
+/* The row list: what the local track list and the search results are built on.
+
+   A list is a stack of independent blocks, not a table. Every block is absolutely positioned,
+   placed by `top` at its own offset; a row is a grid whose columns the list sets in
+   --kd-list-cols, and the head is the same grid, sticky at the top. The local list's blocks are
+   its rows; a search result's block is a row with what unfolds under it (its sources, a video's
+   parts, a package), so that stays together and is measured as one. Building or removing a
+   block lays out that block alone (contain), the columns change by one custom property, and a
+   row's arrival (ListArrival.css) moves the row over its own place. Only the blocks near the
+   viewport exist (a virtualizer, @tanstack/react-virtual); the body holds the height of all of
+   them, so the scroll range and the floating handles are those of the whole list.
+
+   Appearance (ink, hover, selection, the cells of each list) is in design.css; this file is
+   the layout alone. */
+.kd-list {
+  position: relative;
+  box-sizing: border-box;
+  /* As wide as its columns at least; wider than that, the fill column takes the rest. */
+  min-width: var(--kd-list-min-width, 0px);
+}
+.kd-list-head {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: grid;
+  grid-template-columns: var(--kd-list-cols);
+  align-items: stretch;
+  background: var(--kd-panel);
+}
+.kd-list-body {
+  position: relative;
+  width: 100%;
+}
+/* What the body places: a row of the local list, or a block of the results. */
+.kd-list-body > .kd-list-row,
+.kd-list-block {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: 100%;
+  contain: layout style;
+}
+.kd-list-row {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--kd-row-h);
+  display: grid;
+  grid-template-columns: var(--kd-list-cols);
+  align-items: center;
+}
+/* The rows of a block follow one another and are as tall as their contents. */
+.kd-list-block .kd-list-row {
+  position: relative;
+  height: auto;
+  min-height: var(--kd-row-h);
+}
+.kd-list-cell,
+.kd-list-hcell {
+  box-sizing: border-box;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kd-list-cell {
+  display: block;
+  height: 100%;
+  line-height: var(--kd-row-h);
+}
+/* A cell that lays its contents out in a line (a cover before a title, a mark, a control). */
+.kd-list-cell[data-flex] {
+  display: flex;
+  align-items: center;
+  line-height: normal;
+}
+.kd-list-hcell {
+  position: relative;
+}

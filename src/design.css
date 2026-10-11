@@ -7771,24 +7771,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
   z-index: 5;
   pointer-events: none;
 }
-/* Fast-scroll row numbers (libraryStandIns.ts), at device resolution and only as wide as the
-   index column. They scroll with the content and hand off to DOM numbers without an animation. */
-.kd-table-standins {
-  position: absolute;
-  top: 0;
-  left: 0;
-  /* Sized to the table by the script; nothing painted beyond it may extend the scroll range. */
-  width: 0;
-  height: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-.kd-table-standins > canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  transform-origin: 0 0;
-}
 .kd-scroll-handle {
   position: absolute;
   box-sizing: border-box;
@@ -8397,3 +8379,163 @@ html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr[aria-selected="true
   margin: 1rem 0 0;
   color: var(--kd-muted);
 }
+
+/* ============================================================
+ * 行列表（components/common/RowList.css 管布局，这里管外观）
+ * 曲库表和搜索结果表共用：表头、单元格、悬停、选中、批选、待下载行。
+ * ========================================================== */
+.kd-list-hcell {
+  padding: 0.4rem 0.6rem;
+  /* The head floats over the rows: the line is the edge of that surface. */
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  user-select: none;
+  -webkit-user-select: none !important;
+}
+/* 换序与调宽共用同一根 2px 中性定位线；差异由光标和移动方向表达，不再加装饰。 */
+.kd-list-hcell .kd-col-resize {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+}
+.kd-list-hcell .kd-col-resize::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background-color 0.12s;
+}
+.kd-list-hcell .kd-col-resize:hover::after {
+  background: color-mix(in srgb, var(--kd-layout-guide) 72%, transparent);
+}
+.kd-list-hcell .kd-col-resize[data-active="true"]::after {
+  background: var(--kd-layout-guide);
+}
+.kd-list-hcell[data-sortable="true"] {
+  cursor: pointer;
+}
+.kd-list-hcell[data-sortable="true"]:hover {
+  color: var(--kd-text);
+}
+.kd-list-hcell[data-column-reorder="true"] {
+  cursor: grab;
+}
+.kd-list-hcell[data-dragging="true"] {
+  opacity: 1;
+}
+.kd-list-hcell[data-col-drop]::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  z-index: 4;
+  width: 2px;
+  background: var(--kd-layout-guide);
+  pointer-events: none;
+}
+.kd-list-hcell[data-col-drop="before"]::before {
+  left: -1px;
+}
+.kd-list-hcell[data-col-drop="after"]::before {
+  right: -1px;
+}
+.kd-list-cell {
+  padding: 0 0.6rem;
+  color: var(--kd-text-body);
+}
+.kd-list-cell > .kd-thumb {
+  flex: 0 0 22px;
+}
+.kd-list-row:hover {
+  background: var(--kd-hover);
+}
+/* 曲目选中使用一层底色，不描边；具体颜色由内置/主题包样式决定。
+   While rows are being picked (data-selecting) the mark and the type say which rows are in:
+   a picked row is full ink with more weight, the others step back to the muted colour, and
+   no row carries the selection tone. The row whose details are open keeps it. */
+.kd-list-row[aria-selected="true"] .kd-list-cell {
+  color: var(--kd-text);
+}
+.kd-list-row:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) {
+  background: var(--kd-selected);
+}
+.kd-list-row[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) > .kd-list-cell,
+.kd-list-row[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) .kd-td-strong {
+  color: var(--kd-muted);
+}
+.kd-list-row[data-selecting="true"][aria-selected="true"] .kd-td-strong {
+  font-weight: 700;
+}
+.kd-list-row[data-kd-track-id] {
+  cursor: grab;
+}
+.kd-list-cell[data-col="rating"] {
+  /* 通用格左右各 0.6rem 会把五颗星挤出列宽，触发自动补省略号。 */
+  padding-right: 0.35rem;
+  padding-left: 0.35rem;
+  text-overflow: clip;
+}
+.kd-list-hcell[data-col="artist"],
+.kd-list-hcell[data-col="album"],
+.kd-list-cell[data-col="artist"],
+.kd-list-cell[data-col="album"] {
+  /* 两列主动让位给标题；左右表共用同一套内边距与字色。 */
+  padding-right: 0.25rem;
+  padding-left: 0.25rem;
+  color: var(--kd-text-body);
+}
+.kd-list[data-kind="library"] [data-col="index"] {
+  color: var(--kd-faint);
+  text-align: right;
+  justify-content: flex-end;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+}
+/* 拖进文件夹后、尚未落盘的占位行 */
+.kd-list-row[data-pending="true"] {
+  color: var(--kd-muted);
+  cursor: default;
+}
+.kd-list-row[data-pending-state="failed"] {
+  color: var(--kd-danger);
+}
+.kd-list-row[data-pending="true"] .kd-list-cell.kd-pending-lead {
+  max-width: none;
+}
+/* 待下载图标落在序号格里：与曲目序号同列同宽、同 padding。 */
+.kd-list-row[data-pending="true"] .kd-list-cell.kd-pending-index .kd-pending-mark {
+  display: inline-flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+.kd-list-row[data-pending="true"] .kd-pending-mark {
+  flex: none;
+}
+/* Selected rows need a continuous, high-contrast surface — except while rows are being
+   picked: there the selection mark and the type carry it (see the base rule above). */
+html:root .kd-list-row[aria-selected="true"] > .kd-list-cell {
+  color: var(--kd-text) !important;
+}
+html:root .kd-list-row:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) {
+  background: var(--kd-selected) !important;
+}
+html:root .kd-list-row[aria-selected="true"] > .kd-list-cell :is(.kd-td-strong, .kd-muted, .kd-faint, button, a, small) { color: var(--kd-text) !important; }
+/* Row selection is a neutral surface, separate from red control selection. */
+html:root:not([data-theme-pack]) .kd-list-row:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) {
+  background: color-mix(in srgb, var(--kd-text) 12%, var(--kd-panel)) !important;
+}
+html:root[data-theme-pack="sakulaptop98"] .kd-list-row[aria-selected="true"] { background: #edb4ce !important; }
