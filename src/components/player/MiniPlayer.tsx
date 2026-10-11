@@ -131,7 +131,9 @@ export function MiniPlayerHost() {
       const next = getPlayingTrack()?.id ?? null;
       if (next === song) return;
       song = next;
-      if (next !== null) dipMiniPlayer();
+      // Away until the bubble's own description is of this song.
+      if (next !== null) dipMiniPlayer(() => useTaskBubbles.getState().entries.some(entry =>
+        entry.spec.kind === "playing" && !entry.leaving && entry.spec.song === getPlayingTrack()?.id));
     });
     document.addEventListener("pointerdown", drag);
     window.addEventListener("keydown", key, true);

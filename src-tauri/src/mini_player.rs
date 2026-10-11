@@ -232,9 +232,31 @@ fn paced(pace: Pace, t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     match pace {
         Pace::Both => ease(t),
-        Pace::Leaving => t * t * t,
-        Pace::Arriving => 1.0 - (1.0 - t).powi(3),
+        Pace::Leaving => t * t,
+        Pace::Arriving => 1.0 - (1.0 - t).powi(2),
     }
+}
+
+/// Whether a move also fades the window (macOS; elsewhere a window has no such thing and
+/// nothing happens). A window that leaves the screen is clear before the last quarter of its
+/// way, and one that comes onto it is clear for the first quarter: macOS keeps part of a
+/// window with a title bar on its screen however far it is sent, so the end of the way out,
+/// where it would stand still with its edge showing, is never seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fade {
+    None,
+    Out,
+    In,
+}
+
+/// How solid the window is when it has gone `gone` of its way.
+fn faded(fade: Fade, gone: f64) -> Option<f64> {
+    let solid = match fade {
+        Fade::None => return None,
+        Fade::Out => 1.0 - gone / 0.75,
+        Fade::In => (gone - 0.25) / 0.75,
+    };
+    Some(CLEAR + (1.0 - CLEAR) * solid.clamp(0.0, 1.0))
 }
 
 fn ease(t: f64) -> f64 {
@@ -403,8 +425,11 @@ fn apply(window: &WebviewWindow, frame: Frame, resize: bool) {
 }
 
 /// Moves the window from `from` to `to`, rising `arc` above the straight line on the way.
-async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Duration, arc: f64, pace: Pace) {
+async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Duration, arc: f64, pace: Pace, fade: Fade) {
     if from == to {
+        if let Some(alpha) = faded(fade, 1.0) {
+            set_alpha(window, alpha);
+        }
         return;
     }
     let started = Instant::now();
@@ -415,7 +440,11 @@ async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Durat
         } else {
             (started.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0)
         };
-        let next = along(from, to, paced(pace, t), arc);
+        let gone = paced(pace, t);
+        let next = along(from, to, gone, arc);
+        if let Some(alpha) = faded(fade, gone) {
+            set_alpha(window, alpha);
+        }
         if next != shown {
             apply(window, next, false);
             shown = next;
@@ -712,7 +741,7 @@ pub async fn mini_player_settle(app: AppHandle, window: WebviewWindow, animated:
     }) {
         let to = Frame { x, y, ..current };
         let arc = arc_of(current, to, window.scale_factor().unwrap_or(1.0));
-        animate(&window, current, to, time(animated, FLIGHT_MS), arc, Pace::Both).await;
+        animate(&window, current, to, time(animated, FLIGHT_MS), arc, Pace::Both, Fade::None).await;
     }
     if let Some(session) = mini.lock().session.as_mut() {
         session.settled = true;
@@ -747,7 +776,7 @@ pub async fn mini_player_recall(app: AppHandle, window: WebviewWindow, animated:
     let home = corner_frame(session.full, session.corner, (current.width, current.height));
     let to = Frame { x: home.x, y: home.y, ..current };
     let arc = arc_of(current, to, window.scale_factor().unwrap_or(1.0));
-    animate(&window, current, to, time(animated, FLIGHT_MS), arc, Pace::Both).await;
+    animate(&window, current, to, time(animated, FLIGHT_MS), arc, Pace::Both, Fade::None).await;
     Ok(())
 }
 
@@ -777,35 +806,34 @@ pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated:
 /// How long a mini player that left the screen stays away before it comes back by itself.
 const AWAY_AT_MOST: Duration = Duration::from_millis(2600);
 
-/// Back onto the screen where it left it, with the size the bubble has now (physical pixels;
-/// None: the size it has). Once: a second call finds it back.
+/// Back to where it left from, with the size the bubble has now (physical pixels; None: the
+/// size it has). Once: a second call finds it back.
 async fn come_back(app: &AppHandle, window: &WebviewWindow, duration: Duration, size: Option<(u32, u32)>) {
     let Some(mini) = app.try_state::<MiniPlayer>() else { return; };
     let Some(home) = mini.lock().session.and_then(|session| session.away_from) else { return; };
+    // From where it really is: on macOS that is not where it was sent.
     let Ok(mut now) = frame_of(window) else { return; };
     let mut to = home;
     if let Some(size) = size.filter(|size| *size != (now.width, now.height) && size.0 >= SMALLEST && size.1 >= SMALLEST) {
-        // The new size is taken where it is not seen. macOS brings a window that is given a
-        // size back onto its screen: it is clear for that, and put outside again.
+        // It is clear (macOS) or beyond the screen (elsewhere): the new size is not seen.
         to = resized_in_place(home, size, &screens_of(window));
-        let outside_again = Frame { x: now.x + (to.x - home.x), y: now.y + (to.y - home.y), width: size.0, height: size.1 };
-        set_alpha(window, CLEAR);
-        apply(window, outside_again, true);
+        let away = if cfg!(target_os = "macos") { None } else { outside(to, &monitors_of(window), true) };
+        let sized = away.unwrap_or(Frame { x: now.x, y: now.y, width: size.0, height: size.1 });
+        apply(window, sized, true);
         tokio::time::sleep(SETTLE).await;
-        apply(window, outside_again, false);
-        tokio::time::sleep(TICK * 2).await;
-        set_alpha(window, 1.0);
-        now = outside_again;
+        now = frame_of(window).unwrap_or(sized);
     }
-    animate(window, now, to, duration, 0.0, Pace::Arriving).await;
+    animate(window, now, to, duration, 0.0, Pace::Arriving, Fade::In).await;
+    set_alpha(window, 1.0);
     let mut inner = mini.lock();
     if let Some(session) = inner.session.as_mut() {
         session.away_from = None;
     }
 }
 
-/// Another song: the mini player leaves the screen past its nearest edge, the way the bubble
-/// rolls down behind the bar in the whole window. It stays away until `mini_player_come_back`,
+/// Another song: the mini player leaves towards the nearest edge of its screen, the way the
+/// bubble rolls down behind the bar in the whole window, fading as it goes (macOS, where a
+/// window cannot be sent all the way off its screen). It stays away until `mini_player_come_back`,
 /// so the page changes what it shows out of sight. False: there is no way off this screen
 /// that does not lead onto another, or it is not a mini player at rest; nothing moved.
 #[tauri::command]
@@ -823,7 +851,7 @@ pub async fn mini_player_leave(app: AppHandle, window: WebviewWindow, out_ms: u6
     if let Some(session) = mini.lock().session.as_mut() {
         session.away_from = Some(current);
     }
-    animate(&window, current, away, Duration::from_millis(out_ms), 0.0, Pace::Leaving).await;
+    animate(&window, current, away, Duration::from_millis(out_ms), 0.0, Pace::Leaving, Fade::Out).await;
     // Should the page never call it back, it comes back anyway.
     let (app, window) = (app.clone(), window.clone());
     tauri::async_runtime::spawn(async move {

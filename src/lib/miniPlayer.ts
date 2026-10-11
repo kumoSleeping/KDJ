@@ -55,9 +55,9 @@ const FLIGHT_RISE = { share: 0.3, least: 56, most: 240 } as const;
 /** How long the stand-in stays after the window is back under it: it goes a little late, never
  *  a little early. */
 const STAND_IN_LINGERS_MS = 120;
-const DIP_OUT_MS = 240;
-const DIP_IN_MS = 380;
-const DIP_AWAY_MS = { least: 160, most: 1400 } as const;
+const DIP_OUT_MS = 260;
+const DIP_IN_MS = 360;
+const DIP_AWAY_MS = { least: 120, most: 1200 } as const;
 
 export const useMiniPlayer = create<{ phase: MiniPlayerPhase; onTop: boolean }>(() => ({ phase: "off", onTop: true }));
 
@@ -290,20 +290,17 @@ let away = false;
 
 const pause = (ms: number) => new Promise<void>(resolve => { window.setTimeout(resolve, ms); });
 
-/** The bubble shows one song and is not on its way anywhere: the new song is in it. */
-function bubbleAtRest(): boolean {
-  const bubbles = document.querySelectorAll(MINI_PLAYER_BUBBLE);
-  return bubbles.length === 1 && bubbles[0].getAttribute("data-phase") !== "out";
-}
+/** The bubble that shows the song as it is now, not one that is still letting the last one go. */
+const BUBBLE_AT_REST = `${MINI_PLAYER_BUBBLE}:not([data-phase="out"])`;
 
 /**
  * Another song. In the whole window the bubble rolls down behind the bar with the old song and
  * rises with the new one; the mini player has the screen for a window, so it leaves past the
  * screen's edge, changes what it shows while it is away, and comes back. Once per change: it
- * stays away until the bubble shows the new song and nothing else, however many steps the
- * bubble takes to get there, and a change that comes while it is away is waited out with it.
+ * stays away until `ready` says the bubble shows the new song, however many steps the bubble
+ * takes to get there, and a change that comes while it is away is waited out with it.
  */
-export function dipMiniPlayer(): void {
+export function dipMiniPlayer(ready: () => boolean): void {
   const bridge = window.kdj?.miniPlayer;
   if (!bridge || switching || away || useMiniPlayer.getState().phase !== "on" || prefersReducedMotion()) return;
   away = true;
@@ -313,8 +310,8 @@ export function dipMiniPlayer(): void {
       const until = performance.now() + DIP_AWAY_MS.most;
       await pause(DIP_AWAY_MS.least);
       // Timers, not frames: a window that is off the screen may not be given any.
-      while (performance.now() < until && !bubbleAtRest()) await pause(40);
-      const box = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.getBoundingClientRect();
+      while (performance.now() < until && !(ready() && document.querySelector(BUBBLE_AT_REST))) await pause(30);
+      const box = document.querySelector<HTMLElement>(BUBBLE_AT_REST)?.getBoundingClientRect();
       await bridge.comeBack(DIP_IN_MS, box?.width ?? 0, box ? Math.ceil(box.height) : 0);
     } catch {
       // The native side brings it back by itself.

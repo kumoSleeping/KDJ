@@ -62,6 +62,11 @@
 :root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] > .kd-task-slot:has(> .kd-task:not([data-kind="playing"])) {
   display: none;
 }
+/* A bubble that is letting the last song go while the one for the new song is up already is
+   not drawn: the window shows the new song the moment it has it. */
+:root[data-kd-mini="on"] .kd-task-host:has(> .kd-task-slot > .kd-task[data-kind="playing"]:not([data-phase="out"])) > .kd-task-slot:has(> .kd-task[data-kind="playing"][data-phase="out"]) {
+  display: none;
+}
 /* Another song: in the whole window the bubble rolls down behind the bar and rises again. The
    mini player has no bar to go behind; its window leaves the screen instead (dipMiniPlayer),
    and the bubble in it stays put. */

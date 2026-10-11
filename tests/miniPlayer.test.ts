@@ -117,7 +117,7 @@ test("the whole window goes at once and the bubble flies to its place, and back 
   assert.equal(mini.useMiniPlayer.getState().onTop, false);
 
   // Another song takes the window off the screen and back; not under reduced motion.
-  mini.dipMiniPlayer();
+  mini.dipMiniPlayer(() => true);
   assert.equal(asked.length, 0);
 
   // Back, from a place outside the whole window (or its own corner): the window flies back
