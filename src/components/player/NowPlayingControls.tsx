@@ -223,6 +223,8 @@ function NowPlayingControls({
         <ArcKnob size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
         <ArcKnob size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
         <ArcKnob size="xs" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
+        {/* Tempo ends the knobs' row, so the readouts' row is the two readouts alone. */}
+        <TempoControl rate={tempoDraft} range={tempoRange} onRate={setRate} disabled={!ready} />
       </div>
 
       <div className="kd-eq-readouts">
@@ -251,7 +253,6 @@ function NowPlayingControls({
           <small>BPM</small>
           <strong>{effectiveBpm ? effectiveBpm.toFixed(1) : "—"}</strong>
         </span>
-        <TempoControl rate={tempoDraft} range={tempoRange} onRate={setRate} disabled={!ready} />
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
-/* EQ / 播放控制 docked in the player bar: knobs on the transport's row, readouts beneath. */
+/* EQ / 播放控制 docked in the player bar: knobs and the tempo slider on the transport's row,
+   the KEY and BPM readouts beneath. */
 .kd-app .kd-player { --kd-player-eq-w: clamp(236px, 19vw, 268px); }
 .kd-player-eq {
   position: relative;
@@ -15,7 +16,8 @@
 }
 .kd-player-eq .kd-manager-knob-stack {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  /* Five knobs and, ending the row, the tempo slider with a little more room than a knob. */
+  grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(3.4rem, 1.5fr);
   align-items: center;
   gap: 2px;
   min-height: 0;
@@ -49,10 +51,10 @@
   white-space: nowrap;
 }
 
-/* Readouts: a key stepper, the tempo-adjusted BPM, and the tempo that adjusts it. */
+/* Readouts: a key stepper and the tempo-adjusted BPM. */
 .kd-eq-readouts {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto;
   align-items: center;
   column-gap: 10px;
   min-width: 0;
