@@ -158,7 +158,8 @@ import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
 import { CompositionWorkshop } from "../composition/CompositionWorkshop";
 import { DuplicateAnalysisPanel } from "../library/DuplicateAnalysisPanel";
-import { isApplyingNav, readPlace, useNavStore } from "../../stores/navStore";
+import { isApplyingNav, readPlace, registerWorkspaceNav, useNavStore, type NavPane } from "../../stores/navStore";
+import { ChromeHistory } from "../chrome/ChromeHistory";
 import { useVideoPip } from "../../lib/videoPip";
 import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
 import type { ResultDelivery } from "../download/resultArrival";
@@ -243,6 +244,25 @@ type MovableWorkspacePaneKind = Exclude<WorkspacePaneKind, "local">;
 interface CollectionSearchSnapshot {
   items: IntakeItem[];
   video: VideoInfo | null;
+  scrollTop: number;
+  scrollLeft: number;
+}
+
+/**
+ * An online list as it was on screen when the user went elsewhere (another search, a playlist,
+ * the local list, the pane closed), kept under its delivery number so the bar's back key can
+ * bring it back as it was (stores/navStore.ts).
+ */
+interface ArchivedList {
+  items: IntakeItem[] | null;
+  video: VideoInfo | null;
+  /** The search bar's text that produced it. */
+  query: string;
+  openedStreamPlaylist: StreamPlaylist | null;
+  activeStreamPlaylist: ActiveStreamPlaylist | null;
+  piecewiseList: PiecewiseList | null;
+  collectionShown: number;
+  collectionSearchSnapshot: CollectionSearchSnapshot | null;
   scrollTop: number;
   scrollLeft: number;
 }
@@ -440,12 +460,63 @@ export function Workspace() {
    * on a local folder clears the highlight while this list is still there and still grows.
    */
   const [piecewiseList, setPiecewiseList] = useState<PiecewiseList | null>(null);
+  /** The lists the history can return to, by delivery number; see ArchivedList. */
+  const listArchiveRef = useRef(new Map<number, ArchivedList>());
+  /** Delivery numbers are handed out from here, never reused: a restored list keeps its own. */
+  const listSeqRef = useRef(0);
+  /** The search bar's text that produced the list on screen. */
+  const listQueryRef = useRef("");
+  /** Where the results are scrolled to, from the scroll events (the pane may be display:none). */
+  const searchScrollPosRef = useRef({ top: 0, left: 0 });
+  /**
+   * The online list as it was last rendered. Callbacks read it when they are about to replace
+   * the list, before React applies their own updates, so it is the list the user was looking at.
+   */
+  const liveListRef = useRef<{
+    deliveryId: number;
+    hasResults: boolean;
+    temporaryLibrary: TemporaryLibrary | null;
+    searchPaneVisible: boolean;
+    visiblePaneOrder: WorkspacePaneKind[];
+    items: IntakeItem[] | null;
+    video: VideoInfo | null;
+    openedStreamPlaylist: StreamPlaylist | null;
+    activeStreamPlaylist: ActiveStreamPlaylist | null;
+    piecewiseList: PiecewiseList | null;
+    collectionShown: number;
+    collectionSearchSnapshot: CollectionSearchSnapshot | null;
+  } | null>(null);
+  /** The list on screen goes into the archive under its number (nothing when only a spinner). */
+  const archiveLiveList = useCallback(() => {
+    const live = liveListRef.current;
+    if (!live || !live.hasResults || live.temporaryLibrary) return;
+    if (live.items === null && !live.video) return;
+    const archive = listArchiveRef.current;
+    archive.set(live.deliveryId, {
+      items: live.items,
+      video: live.video,
+      query: listQueryRef.current,
+      openedStreamPlaylist: live.openedStreamPlaylist,
+      activeStreamPlaylist: live.activeStreamPlaylist,
+      piecewiseList: live.piecewiseList,
+      collectionShown: live.collectionShown,
+      collectionSearchSnapshot: live.collectionSearchSnapshot,
+      scrollTop: searchScrollPosRef.current.top,
+      scrollLeft: searchScrollPosRef.current.left,
+    });
+    // Lists the history has dropped are let go.
+    const kept = useNavStore.getState().searchesKept();
+    kept.add(live.deliveryId);
+    for (const key of [...archive.keys()]) if (!kept.has(key)) archive.delete(key);
+  }, []);
   const deliverResults = useCallback((top = 0, left = 0, piecewise: PiecewiseList | null = null) => {
+    archiveLiveList();
     moreRowsRequestRef.current = null;
     setLoadingMoreRows(false);
     setPiecewiseList(piecewise);
-    setResultDelivery((current) => ({ id: current.id + 1, top, left }));
-  }, []);
+    listSeqRef.current += 1;
+    setResultDelivery({ id: listSeqRef.current, top, left });
+  }, [archiveLiveList]);
   const [activeStreamPlaylist, setActiveStreamPlaylist] = useState<ActiveStreamPlaylist | null>(
     () => startupForeground
       ? {
@@ -884,6 +955,21 @@ export function Workspace() {
   const submit = useCallback(async (platformsOverride?: Platform[]) => {
     const text = query.trim();
     if (!text) return;
+    // A list the user is looking at stays under the running search until its answer replaces
+    // it. A list that is not on screen (the pane closed or hidden, a temporary folder in its
+    // place) must not come back with it: it goes into the archive, and the pane opens blank.
+    const live = liveListRef.current;
+    if (live && (!live.searchPaneVisible || !live.hasResults || live.temporaryLibrary)) {
+      archiveLiveList();
+      setItems(null);
+      setVideo(null);
+      setOpenedStreamPlaylist(null);
+      setPiecewiseList(null);
+      setExpandedGroups(new Set());
+      setCollapsedItems(new Set());
+      setSourceIndex({});
+      setCollectionShown(COLLECTION_BATCH_SIZE);
+    }
     revealSearchPane();
     const requestId = ++resultRequestSeqRef.current;
     setCollectionSearchSnapshot(null);
@@ -913,6 +999,7 @@ export function Workspace() {
         if (requestId !== resultRequestSeqRef.current) return;
         setVideo(info);
         deliverResults();
+        listQueryRef.current = text;
       } catch (error) {
         if (requestId !== resultRequestSeqRef.current) return;
         setVideo(null);
@@ -980,6 +1067,7 @@ export function Workspace() {
       setSourceIndex({});
       setCollectionShown(COLLECTION_BATCH_SIZE);
       deliverResults();
+      listQueryRef.current = text;
       revealSearchPane();
     } catch (error) {
       if (requestId !== resultRequestSeqRef.current) return;
@@ -992,7 +1080,7 @@ export function Workspace() {
       if (requestId === resultRequestSeqRef.current) setBusy(false);
     }
     // merge 是常量，不进依赖。
-  }, [query, platforms, batch, searchKind, searchCapabilities, settings, revealSearchPane, deliverResults]);
+  }, [query, platforms, batch, searchKind, searchCapabilities, settings, revealSearchPane, deliverResults, archiveLiveList]);
 
   /**
    * 左侧平台歌单/收藏夹只是远程浏览入口：点开后复用搜索结果这张表和下载队列，
@@ -2293,9 +2381,126 @@ export function Workspace() {
   const sortBy = useLibraryStore((state) => state.cycleSort);
   const commitNav = useNavStore((state) => state.commit);
 
-  // 地点变化时写入浏览历史（应用历史时跳过，避免自己推自己）
+  liveListRef.current = {
+    deliveryId: resultDelivery.id,
+    hasResults,
+    temporaryLibrary,
+    searchPaneVisible,
+    visiblePaneOrder,
+    items,
+    video,
+    openedStreamPlaylist,
+    activeStreamPlaylist,
+    piecewiseList,
+    collectionShown,
+    collectionSearchSnapshot,
+  };
+  /** The online pane closed by its key: the list is archived first, so the back key finds it. */
+  const closeResults = useCallback(() => {
+    archiveLiveList();
+    resultRequestSeqRef.current += 1;
+    setBusy(false);
+    setHasResults(false);
+    setCollectionSearchSnapshot(null);
+    setCollectionShown(COLLECTION_BATCH_SIZE);
+    setActiveStreamPlaylist(null);
+    setInspectedOnlineGroup(null);
+    updateStreamWorkspaceSession({
+      playlist: null,
+      accountKey: null,
+      inspectedGroup: null,
+      scrollTop: 0,
+    });
+    setRestorableWorkspaceSource("local");
+    activateWorkspacePane("local");
+    setLoadingCollections(new Set());
+    setChosen(new Set());
+    setSearchSelectionMode(false);
+  }, [activateWorkspacePane, archiveLiveList, setHasResults]);
+  /** An archived list put back on screen as it was, under its own number. */
+  const restoreList = useCallback((key: number, kept: ArchivedList, pane: NavPane) => {
+    archiveLiveList();
+    // A search still running answers to a list that is no longer wanted.
+    resultRequestSeqRef.current += 1;
+    setBusy(false);
+    setLoadingCollections(new Set());
+    setSearchError("");
+    setTemporaryLibrary(null);
+    setItems(kept.items);
+    setVideo(kept.video);
+    setQuery(kept.query);
+    listQueryRef.current = kept.query;
+    setOpenedStreamPlaylist(kept.openedStreamPlaylist);
+    setActiveStreamPlaylist(kept.activeStreamPlaylist);
+    setCollectionShown(kept.collectionShown);
+    setCollectionSearchSnapshot(kept.collectionSearchSnapshot);
+    setChosen(new Set());
+    setSearchSelectionMode(false);
+    setCollapsedItems(new Set());
+    setExpandedGroups(new Set());
+    setSourceIndex({});
+    setInspectedOnlineGroup(null);
+    moreRowsRequestRef.current = null;
+    setLoadingMoreRows(false);
+    setPiecewiseList(kept.piecewiseList);
+    setResultDelivery({ id: key, top: kept.scrollTop, left: kept.scrollLeft });
+    setHasResults(true);
+    if (kept.openedStreamPlaylist && kept.activeStreamPlaylist) {
+      setRestorableWorkspaceSource("stream");
+      updateStreamWorkspaceSession({
+        playlist: kept.openedStreamPlaylist,
+        accountKey: useStreamBrowseStore.getState().accountKeys[kept.activeStreamPlaylist.platform] ?? null,
+        inspectedGroup: null,
+        scrollTop: kept.scrollTop,
+        shown: kept.collectionShown,
+      });
+    } else {
+      setRestorableWorkspaceSource("local");
+      updateStreamWorkspaceSession({
+        playlist: null,
+        accountKey: null,
+        inspectedGroup: null,
+        scrollTop: 0,
+        shown: 0,
+      });
+    }
+    activateWorkspacePane(pane ?? "search");
+  }, [activateWorkspacePane, archiveLiveList, setHasResults]);
+  // What this workspace adds to a place in the history, and how it goes back to one.
+  useEffect(() => registerWorkspaceNav({
+    read() {
+      const live = liveListRef.current;
+      if (!live) return { search: null, pane: null };
+      const listed = live.items !== null || live.video !== null;
+      return {
+        search: live.hasResults && !live.temporaryLibrary && listed ? live.deliveryId : null,
+        pane: live.visiblePaneOrder.length === 1 ? live.visiblePaneOrder[0] : null,
+      };
+    },
+    apply(search, pane) {
+      const live = liveListRef.current;
+      if (!live) return;
+      const online = live.hasResults && !live.temporaryLibrary;
+      if (search === null) {
+        if (online) closeResults();
+        if (pane) activateWorkspacePane(pane);
+        return;
+      }
+      if (online && search === live.deliveryId) {
+        if (pane) activateWorkspacePane(pane);
+        return;
+      }
+      const kept = listArchiveRef.current.get(search);
+      if (kept) restoreList(search, kept, pane);
+      else if (pane) activateWorkspacePane(pane);
+    },
+  }), [activateWorkspacePane, closeResults, restoreList]);
+
+  // 地点变化时写入浏览历史（应用历史时跳过，避免自己推自己）。一次搜索或载入还在路上时
+  // 不记：它的答案到了才是一个地点。
+  const listBusy = busy || loadingCollections.size > 0;
   useEffect(() => {
-    if (isApplyingNav()) return;
+    if (isApplyingNav() || listBusy) return;
     const timer = window.setTimeout(() => commitNav(readPlace()), 40);
     return () => window.clearTimeout(timer);
   }, [
@@ -2309,6 +2514,11 @@ export function Workspace() {
     showPreview,
     showFolders,
     showComposition,
+    listBusy,
+    hasResults,
+    temporaryLibrary,
+    visiblePaneOrder,
+    resultDelivery.id,
   ]);
 
   return (
@@ -2319,6 +2529,7 @@ export function Workspace() {
         data-compact-tree={compactTreeExpanded ? "open" : "closed"}
       >
         <AppChrome
+          history={<ChromeHistory />}
           drawerLip={layout === "wide"}
           // Mac 用 Overlay 红绿灯；Windows / Linux 关掉系统标题栏后自绘三键。
           showWindowControls={
@@ -2579,26 +2790,7 @@ export function Workspace() {
                         streamPlaylist={openedStreamPlaylist}
                         video={video}
                         shown={searchPaneVisible}
-                        onClose={() => {
-                          resultRequestSeqRef.current += 1;
-                          setBusy(false);
-                          setHasResults(false);
-                          setCollectionSearchSnapshot(null);
-                          setCollectionShown(COLLECTION_BATCH_SIZE);
-                          setActiveStreamPlaylist(null);
-                          setInspectedOnlineGroup(null);
-                          updateStreamWorkspaceSession({
-                            playlist: null,
-                            accountKey: null,
-                            inspectedGroup: null,
-                            scrollTop: 0,
-                          });
-                          setRestorableWorkspaceSource("local");
-                          activateWorkspacePane("local");
-                          setLoadingCollections(new Set());
-                          setChosen(new Set());
-                          setSearchSelectionMode(false);
-                        }}
+                        onClose={closeResults}
                       />
                       <InlineNotice text={searchError} onDismiss={() => setSearchError("")} block />
                       {songPreviewState.phase === "error" &&
@@ -2626,6 +2818,10 @@ export function Workspace() {
                         className="kd-scroll"
                         ref={searchScrollRef}
                         onScroll={(event) => {
+                          searchScrollPosRef.current = {
+                            top: event.currentTarget.scrollTop,
+                            left: event.currentTarget.scrollLeft,
+                          };
                           if (activeStreamPlaylist) {
                             updateStreamWorkspaceSession({
                               scrollTop: event.currentTarget.scrollTop,

@@ -1,9 +1,12 @@
 /**
  * 浏览历史：回到「上一个打开的地方」。
  *
- * 记的是工作台地点（曲库/搜索、文件夹、旁路面板、选中曲），
- * 不是播放进度。← → 在地点栈里走；撤销优先恢复刚关掉的旁路面板，
- * 没有可恢复的面板时退化为后退一步。
+ * 记的是工作台地点（曲库/搜索、文件夹、旁路面板、在线内容），不是播放进度。
+ * 顶栏左上角的返回键在地点栈里往回走；撤销优先恢复刚关掉的旁路面板，没有可恢复的
+ * 面板时退化为后退一步。
+ *
+ * 在线内容（搜索结果、打开的合集或歌单）归 Workspace 管：它把每一份送到屏上的列表
+ * 存档，在这里只留一个编号（`search`），回去时由它按编号把列表原样放回来。
  */
 
 import { create } from "zustand";
@@ -20,15 +23,37 @@ export type OverlayKind =
   | "duplicates"
   | "lyrics";
 
+/** Which of the stage's panes is the one on screen; null when both are (the local list pinned). */
+export type NavPane = "local" | "search" | null;
+
 export interface Place {
   listMode: ListMode;
   folder: string;
   folderDeep: boolean;
   selectedId: number | null;
   overlay: OverlayKind | null;
+  /** The online list on screen, by the number Workspace archived it under; null when none. */
+  search: number | null;
+  pane: NavPane;
+}
+
+/** What the workspace adds to a place, and how it brings one back. */
+export interface WorkspaceNav {
+  read(): { search: number | null; pane: NavPane };
+  apply(search: number | null, pane: NavPane): void;
 }
 
 const MAX = 80;
+
+let workspaceNav: WorkspaceNav | null = null;
+
+/** Workspace registers itself while mounted; returns the unregister. */
+export function registerWorkspaceNav(nav: WorkspaceNav): () => void {
+  workspaceNav = nav;
+  return () => {
+    if (workspaceNav === nav) workspaceNav = null;
+  };
+}
 
 function overlayOf(): OverlayKind | null {
   const app = useAppStore.getState();
@@ -45,22 +70,30 @@ function overlayOf(): OverlayKind | null {
 export function readPlace(): Place {
   const app = useAppStore.getState();
   const lib = useLibraryStore.getState();
+  const workspace = workspaceNav?.read() ?? { search: null, pane: null };
   return {
     listMode: app.listMode,
     folder: lib.filter.folder,
     folderDeep: lib.filter.folderDeep,
     selectedId: lib.selectedId,
     overlay: overlayOf(),
+    search: workspace.search,
+    pane: workspace.pane,
   };
 }
 
-function samePlace(a: Place, b: Place): boolean {
+/**
+ * The same place, whichever song is selected in it: picking songs is not going somewhere, so
+ * it does not grow the history, but the place remembers the last pick (see `commit`).
+ */
+export function samePlace(a: Place, b: Place): boolean {
   return (
     a.listMode === b.listMode &&
     a.folder === b.folder &&
     a.folderDeep === b.folderDeep &&
-    a.selectedId === b.selectedId &&
-    a.overlay === b.overlay
+    a.overlay === b.overlay &&
+    a.search === b.search &&
+    a.pane === b.pane
   );
 }
 
@@ -113,6 +146,7 @@ export function applyPlace(place: Place): void {
     } else if (place.selectedId === null && lib.selectedId !== null) {
       lib.select(null, "replace");
     }
+    workspaceNav?.apply(place.search, place.pane);
     applyOverlay(place.overlay);
   } finally {
     queueMicrotask(() => {
@@ -138,6 +172,8 @@ interface NavStore {
   /** 恢复刚关掉的面板；没有则后退一步。 */
   undo(): void;
   rememberDismiss(overlay: OverlayKind | null): void;
+  /** Every archived online list the history can still return to (for Workspace to keep). */
+  searchesKept(): Set<number>;
 }
 
 function flags(state: Pick<NavStore, "past" | "future" | "dismissedOverlay" | "present">) {
@@ -161,7 +197,11 @@ export const useNavStore = create<NavStore>()((set, get) => ({
     if (applying) return;
     const next = place ?? readPlace();
     const { present, past } = get();
-    if (present && samePlace(present, next)) return;
+    if (present && samePlace(present, next)) {
+      // The same place with another song picked: the place keeps the pick, the stack stays.
+      if (present.selectedId !== next.selectedId) set({ present: next });
+      return;
+    }
     const grown = present ? [...past, present] : past;
     const trimmed = grown.length > MAX ? grown.slice(grown.length - MAX) : grown;
     set({
@@ -222,5 +262,14 @@ export const useNavStore = create<NavStore>()((set, get) => ({
       dismissedOverlay: overlay,
       ...flags({ ...get(), dismissedOverlay: overlay }),
     });
+  },
+
+  searchesKept() {
+    const { past, present, future } = get();
+    const kept = new Set<number>();
+    for (const place of [...past, ...(present ? [present] : []), ...future]) {
+      if (place.search !== null) kept.add(place.search);
+    }
+    return kept;
   },
 }));

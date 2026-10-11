@@ -9,7 +9,7 @@ function startWindowDrag(event: ReactPointerEvent<HTMLElement>): void {
 }
 
 export interface AppChromeProps {
-  /** 浏览历史：默认塞在左侧栏宽内；竖屏改 `historyEnd` 并入右侧。 */
+  /** 浏览历史：排在顶栏最左（Mac 在红绿灯右边）；竖屏改 `historyEnd` 并入右侧。 */
   history?: ReactNode;
   actions?: ReactNode;
   /** 历史键改到右侧与设置/下载同排；左侧空给红绿灯。 */
@@ -24,7 +24,7 @@ export interface AppChromeProps {
 }
 
 /**
- * 整窗顶栏：拖窗区 + 历史导航 + 右侧全局动作。
+ * 整窗顶栏：左起历史导航、拖窗区、右侧全局动作。
  * 在线搜索在内容区顶上；设置与主题切换放在顶部右侧动作区。
  */
 export function AppChrome({

@@ -627,9 +627,6 @@ textarea {
   /* 内容落在状态栏下方的 28px 带里；绝对定位的历史键也要避开。 */
   align-items: center;
 }
-.kd-app[data-mobile="true"] .kd-app-chrome-tree {
-  top: var(--kd-safe-top);
-}
 .kd-app[data-mobile="true"] .kd-sheet-head {
   box-sizing: border-box;
   padding-top: var(--kd-safe-top);
@@ -1339,35 +1336,16 @@ textarea {
 :root:not([data-theme-pack]) .kd-app-chrome[data-drawer-lip="true"] {
   border-bottom-color: transparent;
 }
-/* 与左栏同宽：从窗左缘起算，导航靠右贴侧栏右缘；Mac 红绿灯用 padding 躲开。 */
+/* 历史键排在顶栏最左；Mac 的红绿灯由 .kd-app-chrome 自己的 padding-left 让开，键紧跟其后。 */
 .kd-app-chrome-tree {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  z-index: 2;
-  box-sizing: border-box;
-  width: var(--kd-left, 15rem);
+  flex: none;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  padding-left: min(var(--kd-traffic-pad, 0px), max(0px, calc(var(--kd-left, 15rem) - 5rem)));
-  padding-right: 0.15rem;
-  pointer-events: none;
   -webkit-app-region: no-drag;
 }
-.kd-app-chrome-tree > * {
-  pointer-events: auto;
-}
-.kd-section-body[data-compact-tree="closed"] .kd-app-chrome-tree {
-  width: 3.65rem;
-  padding-left: min(var(--kd-traffic-pad, 0px), max(0px, calc(3.65rem - 5rem)));
-}
-/* 窄侧栏装不下红绿灯垫，历史键会被压到圆钮下面——改成先让出红绿灯再排键。 */
-.kd-app[data-mac="true"] .kd-section-body[data-compact-tree="closed"] .kd-app-chrome-tree {
-  width: calc(var(--kd-traffic-pad, 0px) + 5.4rem);
-  padding-left: var(--kd-traffic-pad, 0px);
-  justify-content: flex-start;
+.kd-chrome-history {
+  display: inline-flex;
+  align-items: center;
 }
 .kd-app-chrome-actions {
   flex: none;
