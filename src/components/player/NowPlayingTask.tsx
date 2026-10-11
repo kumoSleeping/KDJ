@@ -150,33 +150,37 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
       // The transport only while the bar is away: beside the bar the bubble is a message.
       controls: barAway ? <NowPlayingTransport track={track} /> : undefined,
       backdrop: colourOffered ? <SongColorBackdrop surface="bubble" /> : undefined,
-      // The song's toggles, then its editor, then the bubble's own keys.
+      // The song's switches, then its editor, then the bubble's own keys. The switches are the
+      // bar's: beside the bar the bubble does not repeat them; with the bar away it is the
+      // transport and carries them, on the facts line under the bubble's own keys.
       actions: [
-        ...(video ? [] : [{
-          id: "lyrics", label: lyrics.open ? "关闭歌词" : "打开歌词", pressed: lyrics.open, busy: lyrics.matching,
-          icon: <ScrollText size={14} aria-hidden="true" />,
-          onSelect: () => live.current.lyrics.toggle(),
-          onContextMenu: extent.openFrom,
-          menuOpen: extent.opened,
-        }]),
-        ...(popup ? [{
-          id: "popup",
-          label: popup === "video" ? (popupOn ? "关闭视频小窗" : "打开视频小窗") : (popupOn ? "关闭可视化小窗" : "打开可视化小窗"),
-          pressed: popupOn,
-          icon: <PictureInPicture2 size={14} aria-hidden="true" />,
-          onSelect: () => live.current.onPopup?.(),
-        }] : []),
-        ...(colourOffered ? [{
-          id: "color", label: colourOn ? "关闭歌曲色彩" : "打开歌曲色彩", pressed: colourOn,
-          icon: <Palette size={14} aria-hidden="true" />,
-          // The colour spreads from this key, and drains back into it.
-          onSelect: (bubble: HTMLElement) => useSongColor.getState().toggle(bubble.querySelector('[data-task-action="color"]')),
-        }] : []),
-        ...(library ? [{
-          id: "meta", label: "编辑 Meta", pressed: editingMeta,
-          icon: <Pencil size={14} aria-hidden="true" />,
-          onSelect: (bubble: HTMLElement) => useTrackMetaEditor.getState().toggle(track.id, trackMetaEditorAnchor(bubble)),
-        }] : []),
+        ...(!barAway ? [] : [
+          ...(video ? [] : [{
+            id: "lyrics", row: "facts" as const, label: lyrics.open ? "关闭歌词" : "打开歌词", pressed: lyrics.open, busy: lyrics.matching,
+            icon: <ScrollText size={14} aria-hidden="true" />,
+            onSelect: () => live.current.lyrics.toggle(),
+            onContextMenu: extent.openFrom,
+            menuOpen: extent.opened,
+          }]),
+          ...(popup ? [{
+            id: "popup", row: "facts" as const,
+            label: popup === "video" ? (popupOn ? "关闭视频小窗" : "打开视频小窗") : (popupOn ? "关闭可视化小窗" : "打开可视化小窗"),
+            pressed: popupOn,
+            icon: <PictureInPicture2 size={14} aria-hidden="true" />,
+            onSelect: () => live.current.onPopup?.(),
+          }] : []),
+          ...(colourOffered ? [{
+            id: "color", row: "facts" as const, label: colourOn ? "关闭歌曲色彩" : "打开歌曲色彩", pressed: colourOn,
+            icon: <Palette size={14} aria-hidden="true" />,
+            // The colour spreads from this key, and drains back into it.
+            onSelect: (bubble: HTMLElement) => useSongColor.getState().toggle(bubble.querySelector('[data-task-action="color"]')),
+          }] : []),
+          ...(library ? [{
+            id: "meta", row: "facts" as const, label: "编辑 Meta", pressed: editingMeta,
+            icon: <Pencil size={14} aria-hidden="true" />,
+            onSelect: (bubble: HTMLElement) => useTrackMetaEditor.getState().toggle(track.id, trackMetaEditorAnchor(bubble)),
+          }] : []),
+        ]),
         {
           id: "pin",
           label: pinned ? "取消固定" : barAway ? "固定：展开播放条后保留曲目信息" : "固定曲目信息",

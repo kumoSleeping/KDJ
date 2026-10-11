@@ -269,12 +269,24 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 }
 .kd-task[data-tone="success"] .kd-task-progress > i { background: var(--kd-ok); }
 
-.kd-task-tools {
+/* The keys, at the bubble's right: the tool row, and under it, when the task gives any, the
+   switches of what the bubble is about, level with the end of the facts line. */
+.kd-task-side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  align-self: stretch;
+  margin-left: auto;
+}
+.kd-task-side[data-switches] { justify-content: space-between; }
+.kd-task-tools,
+.kd-task-switches {
   display: flex;
   flex: none;
   align-items: center;
   gap: 1px;
-  margin-left: auto;
 }
 .kd-task-action {
   display: grid;
@@ -483,7 +495,8 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 .kd-task-slot[data-size="large"] .kd-task-controls-row { padding: 0 12px 11px; }
 /* The keys of a large bubble sit in its top right corner, level with the top of the cover,
    instead of half way down its side. */
-.kd-task-slot[data-size="large"] .kd-task-tools { align-self: flex-start; }
+.kd-task-slot[data-size="large"] .kd-task-side { justify-content: flex-start; }
+.kd-task-slot[data-size="large"] .kd-task-side[data-switches] { justify-content: space-between; }
 .kd-task-slot[data-size="large"] .kd-task-copy { gap: 3px; }
 .kd-task-slot[data-size="large"] .kd-task-title { font-size: var(--kd-size-lg); font-weight: 700; line-height: 1.3; }
 .kd-task-slot[data-size="large"] .kd-task-detail { font-size: var(--kd-size-sm); }

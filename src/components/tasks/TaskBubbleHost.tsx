@@ -14,7 +14,7 @@ import {
 import { MarqueeText } from "../common/MarqueeText";
 import { useSurfaceBackdrop } from "../common/SurfaceBackdrop";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
-import { TASK_COVER_LIMIT, taskStay, type TaskCover, type TaskBubbleSpec, type TaskPlacement, type TaskSize } from "./taskBubbleSchema";
+import { TASK_COVER_LIMIT, taskStay, type TaskAction, type TaskCover, type TaskBubbleSpec, type TaskPlacement, type TaskSize } from "./taskBubbleSchema";
 import { taskEntryKey, useTaskBubbles, type TaskBubbleEntry } from "./taskBubbleStore";
 import { startTaskSources, type TaskSource } from "./taskSources";
 import "./TaskBubbles.css";
@@ -234,6 +234,24 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
   const open = spec.onOpen;
   // The key that sends it away points the way it goes.
   const Away = entry.place === "top" ? ChevronsUp : ChevronsDown;
+  const corner = spec.actions?.filter(action => action.row !== "facts") ?? [];
+  const switches = spec.actions?.filter(action => action.row === "facts") ?? [];
+  const renderAction = (action: TaskAction) => <button key={action.id} type="button" className="kd-task-action" data-task-action={action.id}
+    aria-label={action.label} title={action.label} aria-pressed={action.pressed}
+    aria-haspopup={action.onContextMenu ? "menu" : undefined}
+    aria-expanded={action.onContextMenu ? !!action.menuOpen : undefined}
+    onContextMenu={action.onContextMenu ? event => {
+      event.preventDefault();
+      action.onContextMenu?.(event.currentTarget);
+    } : undefined}
+    onKeyDown={action.onContextMenu ? event => {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+      event.preventDefault();
+      action.onContextMenu?.(event.currentTarget);
+    } : undefined}
+    aria-busy={action.busy || undefined} onClick={() => { if (node.current) action.onSelect(node.current); }}>
+    {action.busy ? <LoaderCircle size={14} className="kd-spin" aria-hidden="true" /> : action.icon}
+  </button>;
   return <div className="kd-task-slot" data-size={spec.size ?? "regular"}
     style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`, zIndex: front } as CSSProperties}>
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
@@ -252,39 +270,29 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
         {summary && (open
           ? <button type="button" className="kd-task-copy" onClick={open}>{copy}</button>
           : <div className="kd-task-copy">{copy}</div>)}
-        <div className="kd-task-tools" data-caption={TASK_KIND_NAMES[spec.kind] ?? TASK_NOTE_NAME}>
-          {timed && <svg key={entry.token} className="kd-task-countdown" viewBox="0 0 16 16" role="img" aria-label="即将收起"
-            style={{ "--kd-task-stay": `${stay}ms` } as CSSProperties}>
-            <circle cx="8" cy="8" r="5.5" />
-            <circle cx="8" cy="8" r="5.5" pathLength={1} />
-          </svg>}
-          {spec.actions?.map(action => <button key={action.id} type="button" className="kd-task-action" data-task-action={action.id}
-            aria-label={action.label} title={action.label} aria-pressed={action.pressed}
-            aria-haspopup={action.onContextMenu ? "menu" : undefined}
-            aria-expanded={action.onContextMenu ? !!action.menuOpen : undefined}
-            onContextMenu={action.onContextMenu ? event => {
-              event.preventDefault();
-              action.onContextMenu?.(event.currentTarget);
-            } : undefined}
-            onKeyDown={action.onContextMenu ? event => {
-              if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-              event.preventDefault();
-              action.onContextMenu?.(event.currentTarget);
-            } : undefined}
-            aria-busy={action.busy || undefined} onClick={() => { if (node.current) action.onSelect(node.current); }}>
-            {action.busy ? <LoaderCircle size={14} className="kd-spin" aria-hidden="true" /> : action.icon}
-          </button>)}
-          {spec.tools}
-          {expandable && <button type="button" className="kd-task-action" aria-expanded={expanded}
-            aria-label={expanded ? "收起详情" : "展开详情"} title={expanded ? "收起详情" : "展开详情"}
-            onClick={() => setExpanded(!expanded)}>
-            <ChevronsUpDown size={14} aria-hidden="true" />
-          </button>}
-          <button type="button" className="kd-task-action kd-task-dismiss" aria-label={dismissLabel}
-            title={spec.escape ? `${dismissLabel}（Esc）` : dismissLabel}
-            onClick={() => useTaskBubbles.getState().dismiss(id, "user")}>
-            {spec.dismiss?.icon ?? <Away size={14} aria-hidden="true" />}
-          </button>
+        {/* The keys: the bubble's own in the tool row, and, under them at the end of the facts
+            line, the switches of what the bubble is about when the task gives any. */}
+        <div className="kd-task-side" data-switches={switches.length > 0 || undefined}>
+          <div className="kd-task-tools" data-caption={TASK_KIND_NAMES[spec.kind] ?? TASK_NOTE_NAME}>
+            {timed && <svg key={entry.token} className="kd-task-countdown" viewBox="0 0 16 16" role="img" aria-label="即将收起"
+              style={{ "--kd-task-stay": `${stay}ms` } as CSSProperties}>
+              <circle cx="8" cy="8" r="5.5" />
+              <circle cx="8" cy="8" r="5.5" pathLength={1} />
+            </svg>}
+            {corner.map(renderAction)}
+            {spec.tools}
+            {expandable && <button type="button" className="kd-task-action" aria-expanded={expanded}
+              aria-label={expanded ? "收起详情" : "展开详情"} title={expanded ? "收起详情" : "展开详情"}
+              onClick={() => setExpanded(!expanded)}>
+              <ChevronsUpDown size={14} aria-hidden="true" />
+            </button>}
+            <button type="button" className="kd-task-action kd-task-dismiss" aria-label={dismissLabel}
+              title={spec.escape ? `${dismissLabel}（Esc）` : dismissLabel}
+              onClick={() => useTaskBubbles.getState().dismiss(id, "user")}>
+              {spec.dismiss?.icon ?? <Away size={14} aria-hidden="true" />}
+            </button>
+          </div>
+          {switches.length > 0 && <div className="kd-task-switches">{switches.map(renderAction)}</div>}
         </div>
       </div>
       {expanded && <div className="kd-task-body kd-scroll">{spec.body}</div>}

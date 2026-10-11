@@ -160,12 +160,9 @@ test("the playing song's bubble: a message beside the bar, the transport while t
   assert.equal(pinned.spec.placement, undefined, "at the bottom");
   assert.equal(pinned.spec.body, undefined, "it does not expand");
   assert.equal(pinned.spec.origin?.label, "B站", "where the file was downloaded from");
-  // The song's toggles (歌词, 小窗, 歌曲色彩), its editor, then the bubble's own pin.
-  assert.deepEqual(keys(), ["lyrics", "popup", "color", "meta", "pin"]);
-  assert.equal(entry()!.spec.actions!.find(action => action.id === "color")!.pressed, false, "歌曲色彩 is off until it is switched on");
+  // Beside the bar the song's switches are the bar's: the bubble has only its own pin.
+  assert.deepEqual(keys(), ["pin"]);
   assert.ok(pinned.spec.backdrop != null, "the bubble offers its backdrop slot to the song's colours");
-  entry()!.spec.actions!.find(action => action.id === "popup")!.onSelect(dom.window.document.body);
-  assert.equal(popups, 1, "the bar's own toggle");
 
   // The bar starts down: the same bubble is given the transport (the host unfolds the row),
   // and its key says that it brings the bar back.
@@ -173,6 +170,13 @@ test("the playing song's bubble: a message beside the bar, the transport while t
   assert.equal(entry()?.order, pinned.order, "the bubble that was up, not a new one");
   assert.ok(entry()?.spec.controls != null, "the transport while the bar is away");
   assert.equal(entry()?.spec.dismiss?.label, "展开播放条");
+  // Now it carries the song's switches (歌词, 小窗, 歌曲色彩), its editor, on the facts row,
+  // and the bubble's own pin stays in the tool row.
+  assert.deepEqual(keys(), ["lyrics", "popup", "color", "meta", "pin"]);
+  assert.deepEqual(entry()!.spec.actions!.map(action => action.row), ["facts", "facts", "facts", "facts", undefined]);
+  assert.equal(entry()!.spec.actions!.find(action => action.id === "color")!.pressed, false, "歌曲色彩 is off until it is switched on");
+  entry()!.spec.actions!.find(action => action.id === "popup")!.onSelect(dom.window.document.body);
+  assert.equal(popups, 1, "the bar's own toggle");
   // The bar starts back: the transport is taken away again and the pinned bubble stays.
   await act(async () => info().setBarAway(false));
   assert.equal(entry()?.order, pinned.order);

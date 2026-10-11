@@ -35,6 +35,13 @@ export interface TaskAction {
   icon: ReactNode;
   pressed?: boolean;
   busy?: boolean;
+  /**
+   * Where the key sits. `tools` (the default) is the bubble's tool row, with the ring and the
+   * key that rolls it down: the bubble's own keys. `facts` is a second, lower row at the end
+   * of the facts line, for the switches of what the bubble is about (the playing song's
+   * 歌词, 小窗, …) when the bubble carries them. The host lays out both rows.
+   */
+  row?: "tools" | "facts";
   /** Optional secondary menu, anchored to this key. Right click or the keyboard menu key. */
   onContextMenu?(anchor: HTMLElement): void;
   menuOpen?: boolean;

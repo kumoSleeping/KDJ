@@ -98,14 +98,20 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   the bubble. Beside the bar the bubble is an ordinary message, because the bar is the
   transport: a pinned bubble opens its transport as the bar starts down and closes it as the
   bar starts back up.
-- **The keys.** `actions` are compact icon keys in the bubble's tool row, before the key that
-  rolls it down; a `large` bubble has that row in its top right corner. A key that is on
+- **The keys.** `actions` are compact icon keys. By default (`row: "tools"`) they are in the
+  bubble's tool row, before the key that rolls it down; a `large` bubble has that row in its
+  top right corner. `row: "facts"` puts a key in a second row under it, level with the end of
+  the facts line: the switches of what the bubble is about, kept apart from the bubble's own
+  keys so neither row grows long enough to squeeze the title. A key that is on
   (`pressed`) is normally written in full-strength ink, never in red. The playing song's switches
   keep their ordinary muted ink and stroke in either state; their labels and `aria-pressed`
   still describe the state. Its lyrics key also opens the panel's height menu by right click or
-  the keyboard menu key (`TaskAction.onContextMenu`), without toggling lyrics. Its keys are 歌词, 小窗
-  (the floating video or visualizer, the same toggle as the bar's own key), 歌曲色彩, 编辑 Meta
-  and 固定. Each button carries its action's id as `data-task-action`.
+  the keyboard menu key (`TaskAction.onContextMenu`), without toggling lyrics. Its own keys are
+  固定, the mini player's and the one that rolls it down. Its switches — 歌词, 小窗 (the floating
+  video or visualizer, the same toggle as the bar's own key), 歌曲色彩 and 编辑 Meta — are the
+  bar's keys: beside the bar the bubble does not repeat them, and only while the bar is away,
+  the bubble being the transport, does it carry them, on the facts row. Each button carries its
+  action's id as `data-task-action`.
 - **A backdrop.** `backdrop` is a layer of the task's own under everything the bubble holds. The
   host draws it in the bubble's backdrop slot (`src/components/common/SurfaceBackdrop.tsx`): the
   first child of the bubble, absolutely placed, one step below its content in the bubble's own

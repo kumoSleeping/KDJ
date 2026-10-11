@@ -18,8 +18,15 @@ test("song colour: the choice is kept, and nothing is drawn, fetched or listened
   });
   dom.window.matchMedia = (() => ({ matches: false, addEventListener() {}, removeEventListener() {} })) as never;
   // Every cover request and every listener on the window is counted.
+  // Covers only: the transport the bubble carries with the bar away asks for the song's
+  // waveform, which is not this look's doing; that request is left pending, as if the server
+  // were still drawing it.
   const fetched: string[] = [];
-  globalThis.fetch = (async (input: unknown) => { fetched.push(String(input)); return new Response(null, { status: 404 }); }) as typeof fetch;
+  globalThis.fetch = ((input: unknown) => {
+    if (String(input).includes("/waveform/")) return new Promise<Response>(() => undefined);
+    fetched.push(String(input));
+    return Promise.resolve(new Response(null, { status: 404 }));
+  }) as typeof fetch;
   const heard: string[] = [];
   const listen = dom.window.addEventListener.bind(dom.window);
   dom.window.addEventListener = ((type: string, ...rest: unknown[]) => { heard.push(type); return (listen as (...args: unknown[]) => void)(type, ...rest); }) as typeof dom.window.addEventListener;
@@ -58,8 +65,10 @@ test("song colour: the choice is kept, and nothing is drawn, fetched or listened
   setPlayingTrack({ id: 7, path: "/library/7.mp3", filename: "7.mp3", title: "Song", artist: "Artist", album: "",
     format: "mp3", size: 1, duration: 200, bpm: 128, first_beat: 0.1, modified_at: "a", source_platform: "local", music_key: "",
     camelot: "8A", open_key: "", tags: [], cue_points: [] } as unknown as Track);
-  usePlayerBarAway.setState({ tall: false, collapsed: false, phase: "up" });
-  useNowPlayingInfo.setState({ open: false, pinned: true, peek: 0, barAway: false });
+  // The bar is away: the bubble is the transport and carries the song's switches, 歌曲色彩
+  // among them (beside the bar they are the bar's keys).
+  usePlayerBarAway.setState({ tall: false, collapsed: true, phase: "away" });
+  useNowPlayingInfo.setState({ open: false, pinned: true, peek: 0, barAway: true });
   useTaskBubbles.setState({ entries: [] });
   const root = createRoot(dom.window.document.getElementById("root")!);
   heard.length = 0;
