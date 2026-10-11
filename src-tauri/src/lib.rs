@@ -1120,6 +1120,65 @@ async fn soundcloud_web_login_response(response: reqwest::Response) -> Result<()
 }
 
 #[cfg(desktop)]
+const SOUNDCLOUD_WEB_LOGIN_POPUP_PREFIX: &str = "soundcloud-web-login-popup-";
+
+/// SoundCloud 的 Google / Facebook / Apple 登录走 `window.open`，再靠 `window.opener` 把结果
+/// 交回登录页。没有新窗口处理器时请求会被吞掉，站点只报 “Please enable popup windows and
+/// try again”。弹窗接在登录窗口的 WebView 配置上（同一个无痕会话，opener 仍在），用同一份
+/// 导航白名单，自己不能再开窗口。
+#[cfg(desktop)]
+fn open_soundcloud_web_login_popup(
+    app: &tauri::AppHandle,
+    url: &tauri::Url,
+    features: tauri::webview::NewWindowFeatures,
+) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tauri::webview::NewWindowResponse;
+
+    static NEXT_POPUP: AtomicU64 = AtomicU64::new(0);
+
+    if !soundcloud_web_login_navigation_allowed(url) {
+        return NewWindowResponse::Deny;
+    }
+    let Ok(blank) = tauri::Url::parse("about:blank") else {
+        return NewWindowResponse::Deny;
+    };
+    let label = format!(
+        "{SOUNDCLOUD_WEB_LOGIN_POPUP_PREFIX}{}",
+        NEXT_POPUP.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut builder =
+        tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::External(blank))
+            .title("SoundCloud 登录")
+            .inner_size(520.0, 720.0)
+            .resizable(true);
+    if features.position().is_none() {
+        builder = builder.center();
+    }
+    let window = builder
+        // 页面要的位置和尺寸优先；这一步同时把弹窗接到登录窗口的 WebView 配置上。
+        .window_features(features)
+        // Windows 上无痕是每个 WebView 自己的开关；不设就落到另一个 profile。
+        .incognito(true)
+        .on_navigation(soundcloud_web_login_navigation_allowed)
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .build();
+    match window {
+        Ok(window) => NewWindowResponse::Create { window },
+        Err(_) => NewWindowResponse::Deny,
+    }
+}
+
+#[cfg(desktop)]
+fn close_soundcloud_web_login_popups(app: &tauri::AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if label.starts_with(SOUNDCLOUD_WEB_LOGIN_POPUP_PREFIX) {
+            let _ = window.close();
+        }
+    }
+}
+
+#[cfg(desktop)]
 fn finish_soundcloud_web_login(
     app: &tauri::AppHandle,
     completed: &std::sync::atomic::AtomicBool,
@@ -1168,6 +1227,7 @@ fn open_soundcloud_web_login_window(app: tauri::AppHandle) -> Result<(), String>
     };
     let client = local_api_client()?;
     let completed = Arc::new(AtomicBool::new(false));
+    let app_on_popup = app.clone();
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         SOUNDCLOUD_WEB_LOGIN_WINDOW,
@@ -1181,12 +1241,19 @@ fn open_soundcloud_web_login_window(app: tauri::AppHandle) -> Result<(), String>
     // 登录凭证只在这个窗口的生命周期内存在；验证后的最小会话由 provider 单独保存。
     .incognito(true)
     .on_navigation(soundcloud_web_login_navigation_allowed)
+    .on_new_window(move |url, features| {
+        open_soundcloud_web_login_popup(&app_on_popup, &url, features)
+    })
     .build()
     .map_err(|error| format!("打开 SoundCloud 登录窗口失败：{error}"))?;
 
     let app_on_close = app.clone();
     let completed_on_close = Arc::clone(&completed);
     window.on_window_event(move |event| {
+        // 登录窗口没了，弹窗的结果已无处可交。
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            close_soundcloud_web_login_popups(&app_on_close);
+        }
         if matches!(event, tauri::WindowEvent::CloseRequested { .. })
             && !completed_on_close.swap(true, Ordering::SeqCst)
         {
