@@ -4,8 +4,8 @@
  * (library/TrackTable.tsx) and the search results (download/ResultTable.tsx).
  *
  * The WebView scrolls on its own thread and tells the page afterwards; the virtualizer renders
- * the rows for the offset it is told in that same frame (flushSync), and keeps `overscan` rows
- * ready on either side so a scroll at reading speed never shows a row being built. Nothing
+ * the rows for the offset it is told in that same frame (flushSync), and keeps about a screen
+ * and a half of rows ready on either side so a scroll, back or on, finds its rows built. Nothing
  * else happens in a scroll frame: no row is measured, no layout is read, no attribute is put
  * on an ancestor. A fast fling can still outrun the frames that build rows; the rows that are
  * built after the viewport reached their places then arrive one after another
@@ -14,8 +14,13 @@
 import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useVirtualizer, type VirtualizerOptions } from "@tanstack/react-virtual";
 
-/** Rows kept rendered beyond either edge of the viewport. */
+/** Rows kept rendered beyond either edge of the viewport, at least; the lists ask for about a screen and a half. */
 export const ROW_LIST_OVERSCAN = 12;
+/** Screens of rows kept rendered beyond either edge of the viewport: a scroll back finds its rows built. */
+export const ROW_LIST_OVERSCAN_SCREENS = 1.5;
+export function rowListOverscan(screenRows: number): number {
+  return Math.max(ROW_LIST_OVERSCAN, Math.ceil(ROW_LIST_OVERSCAN_SCREENS * screenRows));
+}
 
 type RowVirtualizerOptions = VirtualizerOptions<HTMLElement, HTMLElement>;
 
@@ -42,15 +47,17 @@ export interface RowListOptions {
   getKey(index: number): string | number;
   /** Rows are as tall as their contents and measured when they are mounted. */
   measured?: boolean;
+  /** Rows (blocks) kept rendered beyond either edge; `rowListOverscan` of the screen by default. */
+  overscan?: number;
 }
 
 /** The virtualizer of a row list. `rowHeight` is the estimate; call `measure()` when it changes. */
-export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHeight, getKey, measured = false }: RowListOptions) {
+export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHeight, getKey, measured = false, overscan = ROW_LIST_OVERSCAN }: RowListOptions) {
   return useVirtualizer<HTMLElement, HTMLElement>({
     count,
     getScrollElement: () => scrollerRef.current,
     estimateSize: estimateSize ?? (() => rowHeight),
-    overscan: ROW_LIST_OVERSCAN,
+    overscan,
     getItemKey: getKey,
     scrollMargin: headHeight,
     scrollToFn: rowListScrollTo,

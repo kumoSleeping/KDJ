@@ -84,7 +84,7 @@ import {
   type ResultDelivery,
 } from "./resultArrival";
 import { resultBlocks, resultListIsFlat, resultPickKeys, resultRowCount, type ResultBlock } from "./resultBlocks";
-import { useRowList, useScrollMotion } from "../common/rowList";
+import { rowListOverscan, useRowList, useScrollMotion } from "../common/rowList";
 import { createListArrival, type ListArrival } from "../common/listArrival";
 import "../common/RowList.css";
 import "./ResultTable.css";
@@ -416,7 +416,10 @@ const ResultTableView = memo(function ResultTableView({
   // The scroll listener hears a scroll before the virtualizer renders for it: the effects of
   // that render read the scroll's direction.
   const { motion } = useScrollMotion(scrollerRef, () => {});
-  const virtualizer = useRowList({ scrollerRef, count: blocks.length, rowHeight: rowH, estimateSize, headHeight: headPx, getKey, measured: true });
+  const screenRef = useRef(20);
+  const virtualizer = useRowList({ scrollerRef, count: blocks.length, rowHeight: rowH, estimateSize, headHeight: headPx, getKey, measured: true,
+    overscan: rowListOverscan(screenRef.current) });
+  screenRef.current = Math.max(1, Math.ceil(Math.max(rowH, (virtualizer.scrollRect?.height ?? 720) - headPx) / rowH));
   const virtualItems = virtualizer.getVirtualItems();
   /** The mounted blocks by their key; the arrival finds its rows through them. */
   const blockElementsRef = useRef(new Map<string, HTMLElement>());
@@ -518,12 +521,19 @@ const ResultTableView = memo(function ResultTableView({
   }, [virtualizer, virtualItems, headPx, rowH]);
 
   const seenBlocksRef = useRef(new Set<string>());
+  /** Blocks built once in this delivery: their rows do not replay the chase when they come back. */
+  const everBuiltRef = useRef({ delivery: Number.NaN, keys: new Set<string>() });
   const grownRef = useRef({ delivery: Number.NaN, shown: 0 });
   useLayoutEffect(() => {
     const seen = seenBlocksRef.current;
     const next = new Set<string>();
     for (const item of virtualItems) next.add(String(item.key));
     seenBlocksRef.current = next;
+    if (everBuiltRef.current.delivery !== delivery.id) everBuiltRef.current = { delivery: delivery.id, keys: new Set() };
+    const built = everBuiltRef.current.keys;
+    const builtNow = new Set<string>();
+    for (const key of next) if (!built.has(key)) { built.add(key); builtNow.add(key); }
+    const wasBuilt = (key: string) => !builtNow.has(key);
     const before = grownRef.current;
     grownRef.current = { delivery: delivery.id, shown: reveal.shown };
     const grown = before.delivery === delivery.id && reveal.shown > before.shown;
@@ -550,13 +560,15 @@ const ResultTableView = memo(function ResultTableView({
       arrivalNow.present(fresh.map((placed) => placed.row));
       return;
     }
-    // Rows that a scroll outran catch up with it, from the side it came from.
+    // Rows that a scroll outran catch up with it, from the side it came from; rows built once
+    // before are simply there again.
     const { moving, direction } = motion.current;
     if (!moving || arrivalNow.gesture() === "list") return;
     const offset = Math.max(0, virtualizer.scrollOffset ?? 0);
     const viewTop = offset;
     const viewBottom = offset + Math.max(virtualizer.scrollRect?.height ?? 0, headPx + rowH) - headPx;
     for (const placed of fresh) {
+      if (wasBuilt(placed.block)) continue;
       const step = direction < 0
         ? Math.max(0, Math.round((viewBottom - placed.top - rowH) / rowH))
         : Math.max(0, Math.round((placed.top - viewTop) / rowH));

@@ -24,7 +24,7 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
-import { useRowList, useScrollMotion } from "../common/rowList";
+import { rowListOverscan, useRowList, useScrollMotion } from "../common/rowList";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { OverlayScrollbars } from "../common/OverlayScrollbars";
@@ -331,21 +331,28 @@ export interface TrackTableProps {
 
 /** Covers known to be missing (an audio file without a picture): the placeholder is there from the first frame. */
 const coversMissing = new Set<string>();
+/** Covers the browser has shown once: it has them decoded, so a row built again shows them at once. */
+const coversShown = new Set<string>();
 /** A video's first frame is extracted on demand; a service that is restarting is asked again. */
 const COVER_RETRIES = 12;
 const COVER_RETRY_MS = 3000;
 
 /**
  * 曲库表的封面格：一个普通的 <img>，由浏览器自己的图片管线按需请求、解码和缓存（loading="lazy"
- * 只请求滚到眼前的；decoding="async" 不占主线程）。甩动（hold）期间不挂图片：行一停下来才挂。
- * 没有封面的音频记在 coversMissing 里，再次挂载时第一帧就是唱盘；视频首帧由后端抽取，服务短暂
- * 重启或抽帧排队时换个地址稍后再试，不能一次失败就永久空白。
+ * 只请求滚到眼前的）。甩动途中新建的行先不挂图片，停下来才挂（hold）；已经挂着的封面不拆；
+ * 浏览器显示过的封面（coversShown）重新挂载时同步解码，不闪。没有封面的音频记在 coversMissing
+ * 里，再次挂载时第一帧就是唱盘；视频首帧由后端抽取，服务短暂重启或抽帧排队时换个地址稍后再试，
+ * 不能一次失败就永久空白。
  */
 function TrackCoverThumb({ track, hold }: { track: TrackSummary; hold: boolean }) {
   const isVideo = isVideoTrack(track.format);
   const key = `${track.id}:${track.modified_at}`;
   const [attempt, setAttempt] = useState(0);
   const [missing, setMissing] = useState(() => coversMissing.has(key));
+  // Only a row built during a fling waits for it to rest; one built at rest keeps its cover
+  // through the next fling, and a cover the browser has shown is never held.
+  const [held, setHeld] = useState(() => hold && !coversShown.has(key));
+  if (held && !hold) setHeld(false);
   const retryTimer = useRef<number | null>(null);
   useEffect(() => {
     setAttempt(0);
@@ -360,13 +367,14 @@ function TrackCoverThumb({ track, hold }: { track: TrackSummary; hold: boolean }
     <span className="kd-thumb" draggable={false}>
       {missing && !isVideo ? (
         <VinylPlaceholder />
-      ) : missing || hold ? null : (
+      ) : missing || held ? null : (
         <img
           src={api.coverUrl(track.id, revision, 64)}
           alt=""
           loading="lazy"
-          decoding="async"
+          decoding={coversShown.has(key) ? "sync" : "async"}
           draggable={false}
+          onLoad={() => coversShown.add(key)}
           onError={() => {
             if (!isVideo || attempt >= COVER_RETRIES) {
               coversMissing.add(key);
@@ -888,6 +896,8 @@ function isPendingForFolder(task: DownloadTask, filterFolder: string, indexById:
  */
 interface ArrivalDue { offset: number; at: number }
 const ARRIVAL_DUE_MS = 400;
+/** Rows remembered as built (they do not replay the chase); past this many the memory starts over. */
+const MAX_BUILT_REMEMBERED = 50_000;
 
 export const TrackTable = memo(function TrackTable({
   libraryStore = useLibraryStore,
@@ -1769,11 +1779,14 @@ export const TrackTable = memo(function TrackTable({
     if (persistentSession) updateLocalWorkspaceSession({ scrollTop: top, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
   });
 
-  const virtualizer = useRowList({ scrollerRef, count, rowHeight: rowH, headHeight: headerH, getKey });
+  // About a screen and a half of rows beyond either edge: a scroll back finds its rows built.
+  const screenRef = useRef(20);
+  const virtualizer = useRowList({ scrollerRef, count, rowHeight: rowH, headHeight: headerH, getKey, overscan: rowListOverscan(screenRef.current) });
   virtualizerRef.current = virtualizer;
   const items = virtualizer.getVirtualItems();
   const range = virtualizer.range;
   const screen = Math.max(1, Math.ceil(Math.max(rowH, (virtualizer.scrollRect?.height ?? 720) - headerH) / rowH));
+  screenRef.current = screen;
   // 数据在渲染前一屏开始请求；其余由数据层在后台补齐。
   const demand = libraryDemand({
     total, pending, screen,
@@ -1915,23 +1928,32 @@ export const TrackTable = memo(function TrackTable({
 
   // 行追上滚动：一次甩动跑在了造行的帧前面，视口里的位置先露了出来、行后到。这样的行按它离
   // 来向那一边的距离接上同一个时钟，一行接一行到场；阅读速度的滚动在视口外就把行备好，不会到这里。
+  // 建过一次的行（everBuilt）再回来时直接就位，不重播。
   const seenKeysRef = useRef(new Set<string>());
+  const everBuiltRef = useRef(new Set<string>());
   useLayoutEffect(() => {
     const seen = seenKeysRef.current;
+    const built = everBuiltRef.current;
     const next = new Set<string>();
     for (const item of items) next.add(String(item.key));
     seenKeysRef.current = next;
     const arrival = arrivalRef.current;
     const { moving, direction } = motion.current;
-    if (!arrival || !moving || arrival.gesture() === "list" || arrivalDueRef.current) return;
+    const settle = () => {
+      if (built.size > MAX_BUILT_REMEMBERED) built.clear();
+      for (const key of next) built.add(key);
+    };
+    if (!arrival || !moving || arrival.gesture() === "list" || arrivalDueRef.current) { settle(); return; }
     const { first, last } = viewBounds();
     for (const item of items) {
-      if (seen.has(String(item.key)) || item.index < first || item.index >= last) continue;
+      const key = String(item.key);
+      if (seen.has(key) || built.has(key) || item.index < first || item.index >= last) continue;
       const row = rowElementsRef.current.get(String(item.key));
       if (!row) continue;
       const step = direction < 0 ? last - 1 - item.index : item.index - first;
       arrival.chase(row, step, direction < 0 ? "above" : "below");
     }
+    settle();
   });
 
   // 行交互的实现每次渲染都换成最新的闭包；交给行的 rowActions 身份不变，行不会因此重渲染。

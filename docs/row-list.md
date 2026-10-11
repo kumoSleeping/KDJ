@@ -14,7 +14,7 @@ WebKit 的表格布局不是增量的：往 `<table>` 里插几行，整张表�
   - `.kd-list-body`：撑出整份列表高度的层；它的直接子元素由虚拟化器按 `top` 绝对定位，`contain: layout style`。
   - `.kd-list-row`：一行，`display: grid; grid-template-columns: var(--kd-list-cols)`。曲库的行直接是 body 的子元素；搜索结果的一个"块"（`.kd-list-block`）里装一行和在它下面展开的内容（来源、分 P、整个包），块内的行按流排列、高度由内容决定，块被测量。
   - `.kd-list-cell` / `.kd-list-hcell`：格。文字格是 block 并省略号；装封面、标记、控件的格加 `data-flex`。
-- `src/components/common/rowList.ts`：`useRowList`（`@tanstack/react-virtual`；固定行高或按块估算 + 测量；`scrollMargin` 是表头高；`scrollToFn` 直接写 `scrollTop`）和 `useScrollMotion`（方向、是否在滚、是否甩动；甩动期间不挂封面）。
+- `src/components/common/rowList.ts`：`useRowList`（`@tanstack/react-virtual`；固定行高或按块估算 + 测量；视口外前后各留约一屏半，`rowListOverscan`；`scrollMargin` 是表头高；`scrollToFn` 直接写 `scrollTop`）和 `useScrollMotion`（方向、是否在滚、是否甩动；甩动期间新建的行先不挂封面）。
 - `src/components/common/listArrival.ts` + `ListArrival.css`：行的到场（`present` 呈现一份列表，`chase` 让晚到的行接上一个时钟）。标记只在行上。
 - 外观（墨色、悬停、选中、批选、各列的格）在 `src/design.css` 的"行列表"一节；结果表自己的在 `ResultTable.css`。
 
@@ -24,7 +24,7 @@ WebKit 的表格布局不是增量的：往 `<table>` 里插几行，整张表�
 2. 行要便宜：只渲染可见列；格里不套包装层；每行不订阅 store（曲库的响度基准由表读一次下发）；封面是普通 `<img loading="lazy" decoding="async">`。
 3. 行由 `top` 定位，永远不用 transform 定位——到场动画要用 transform 动行本身。
 4. 动画的标记在行上（`data-kd-arrive*`、`--kd-arrive-*`），结束后去掉；不在 `.kd-scroll`、`.kd-list`、`.kd-list-body` 上放任何会被后代选择器用到的属性。
-5. 新的一张列表：给 `useRowList` 一个 `count`、`getKey`、行高（或块估算）和表头高，用 `getVirtualItems()` 渲染，`getTotalSize()` 撑 body；在 layout effect 里按"呈现"与"追上"的规则调用 `listArrival`；外部要找行用 `.kd-list-row[...]`，不要假定没挂载的行在 DOM 里（Shift 区间、MIDI 步进这类要用数据模型，不要用 DOM 顺序）。
+5. 新的一张列表：给 `useRowList` 一个 `count`、`getKey`、行高（或块估算）和表头高，用 `getVirtualItems()` 渲染，`getTotalSize()` 撑 body；在 layout effect 里按"呈现"与"追上"的规则调用 `listArrival`（建过一次的行不再追上）；外部要找行用 `.kd-list-row[...]`，不要假定没挂载的行在 DOM 里（Shift 区间、MIDI 步进这类要用数据模型，不要用 DOM 顺序）。
 
 ## 两张列表怎么用它
 
