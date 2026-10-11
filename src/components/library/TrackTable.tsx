@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { listScrollsItself, rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
+import { scrollTopTo } from "../../lib/wheelScroll";
 import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
@@ -1677,7 +1678,11 @@ export const TrackTable = memo(function TrackTable({
         if (attemptsLeft > 0) requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
         return;
       }
-      virtualizer.scrollToIndex(pendingCountRef.current + index, { align: "center" });
+      // The rows of the place are built before the offset is written (scrollTopTo): a jump that
+      // moved first would show a frame of padding in WebKit, as a flick did.
+      const target = virtualizer.getOffsetForIndex(pendingCountRef.current + index, "center");
+      if (target) scrollTopTo(scrollerRef.current, target[0]);
+      else virtualizer.scrollToIndex(pendingCountRef.current + index, { align: "center" });
     };
 
     // 有精确的关闭前滚动位置时优先恢复它；没有存档才按选中行居中。
