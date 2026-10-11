@@ -27,11 +27,21 @@ const TITLE_TAIL_AT = /\s*[(\uff08\[\u3010]|\s+(?=(?:feat|ft)\.?\s)/iu;
 const TITLE_LEADING = 1.22;
 const TITLE_TAIL_LEADING = 1.45;
 /** The steps of ink between the light one and the deep one along the arc. */
-const ARC_INK_STEPS = 8;
+const ARC_INK_STEPS = 12;
 /** The luminance of the picture under a bar at which its ink starts to leave white, and at
  * which it has become the cover's colour. White is kept up to about 0.4, the middle of the two. */
 const ARC_INK_FROM = .3;
 const ARC_INK_TO = .52;
+/** The arc is of one ink. It is the cover's colour when this share of its bars stand on a part
+ * of the picture too pale for white, and white otherwise. */
+const ARC_INK_PALE = .4;
+const ARC_INK_PALE_SHARE = .3;
+/** How far along the way to the other ink a bar may go for the place it stands on: a white
+ * arc takes on a light tint of the colour over a pale patch, a coloured arc goes lighter over
+ * a dark one. Never the whole way: an arc that is white here and the full colour there is cut
+ * in two. */
+const ARC_INK_TINT = .45;
+const ARC_INK_LIFT = .4;
 
 interface RollingLyric extends LyricLine { start: number; end: number }
 interface LyricCard { canvas: HTMLCanvasElement }
@@ -254,27 +264,35 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
     const u = (i + .5) / 100 * 1.24 - .12, distance = Math.abs(u - .5);
     return { point: arcPoint(p, u, 0), frequency: .08 + distance * (u < .5 ? 1.65 : 1.84), envelope: .16 + .84 * Math.cos(clamp(distance * 2) * Math.PI / 2) ** .65 };
   });
-  // Each bar takes the ink of the place it stands on: the middle of its usual length, read
-  // over a small box and evened out along the arc. Between a dark part of the picture and a
-  // pale one the ink shades from white through the cover's colour to its deep tone over a
-  // run of bars, instead of turning from one to the other between two of them.
+  // What each bar stands on: the middle of its usual length, read over a small box of the
+  // picture and evened out over a long run of bars. The arc as a whole takes one ink, white
+  // or the cover's colour, by how much of it stands on pale ground; a bar then only leans
+  // from that ink toward the other for its own place, so the arc shades within one colour
+  // and is never a white stretch beside a coloured one.
   const stood = arcBars.map(({ point: [x, y, nx, ny] }) => {
     const out = w * p.scene.spectrum.length * .5, box = probeHeight * .05;
     return groundLuminance(rightLuminance, (x + nx * out - (arc.cx - arc.radius)) * probe - box / 2, (y + ny * out) * probe - box / 2, box, box);
   });
   const arcInks: ArcInk[] = Array.from({ length: ARC_INK_STEPS + 1 }, (_, step) => {
     const tone = step / ARC_INK_STEPS;
-    // The edge is of the other polarity, and weakest where the ink is the colour itself.
-    return { color: inkTone(p.look.accent, tone), edge: tone < .5 ? "6,26,40" : "255,255,255", strength: .42 + .3 * Math.abs(tone * 2 - 1), bars: [] };
+    // The edge is of the other polarity: dark and at full strength round the white and its
+    // tints, which have only that to stand on over a pale patch.
+    return { color: inkTone(p.look.accent, tone), edge: tone < .5 ? "6,26,40" : "255,255,255", strength: tone < .5 ? .72 : .42 + .3 * (tone * 2 - 1), bars: [] };
   });
-  const arcSteps = arcBars.map((_, i) => {
+  const even = arcBars.map((_, i) => {
     let sum = 0, weight = 0;
-    for (let n = Math.max(0, i - 4); n <= Math.min(arcBars.length - 1, i + 4); n++) { const share = 5 - Math.abs(n - i); sum += stood[n] * share; weight += share; }
-    const k = clamp((sum / weight - ARC_INK_FROM) / (ARC_INK_TO - ARC_INK_FROM)), step = Math.round(k * k * (3 - 2 * k) * ARC_INK_STEPS);
+    for (let n = Math.max(0, i - 8); n <= Math.min(arcBars.length - 1, i + 8); n++) { const share = 9 - Math.abs(n - i); sum += stood[n] * share; weight += share; }
+    return sum / weight;
+  });
+  const seen = even.filter((_, i) => arcBars[i].point[1] >= 0 && arcBars[i].point[1] <= h);
+  const coloured = seen.filter(luminance => luminance > ARC_INK_PALE).length >= Math.max(1, seen.length * ARC_INK_PALE_SHARE);
+  const arcSteps = even.map((luminance, i) => {
+    const k = clamp((luminance - ARC_INK_FROM) / (ARC_INK_TO - ARC_INK_FROM)), pale = k * k * (3 - 2 * k);
+    const step = Math.round((coloured ? 1 - ARC_INK_LIFT * (1 - pale) : ARC_INK_TINT * pale) * ARC_INK_STEPS);
     arcInks[step].bars.push(i); return step;
   });
   const railX = Math.floor(rightX - h * .06);
-  const rail = cachedLayer(source, ["rail", w, h, p.scene.arc, p.look.accent, arcSteps.join("")], () => {
+  const rail = cachedLayer(source, ["rail", w, h, p.scene.arc, p.look.accent, arcSteps.join(".")], () => {
     const layer = visualizerCanvas(Math.ceil(leftWidth - railX + h * .06), h);
     // The rail is shaded as the bars along it are.
     const stops = arcBars.flatMap((bar, i) => bar.point[1] >= 0 && bar.point[1] <= h ? [{ at: bar.point[1] / h, color: arcInks[arcSteps[i]].color }] : []);
