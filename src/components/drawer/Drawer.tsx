@@ -139,13 +139,13 @@ function morphPanel(node: HTMLElement, drawer: PanelBox, block: PanelBox, grow: 
   };
 }
 
-/** The title row: the title or the page words, the caption, the app's tools and the roll-up key.
+/** The title row: the title or the page words, the app's tools and the roll-up key.
  *  While the app has the window that key gives the window back instead. */
 function DrawerTitle({ spec, page, leaving, panelId }: { spec: DrawerSpec; page?: string; leaving: boolean; panelId: string }) {
   const taking = spec.takesWindow;
   const away = taking ? taking.label : `收起${spec.title}`;
   return <TitleTabs label={spec.title} title={spec.title} tabs={spec.pages} value={page}
-    onChange={leaving ? undefined : spec.onPage} panelId={spec.pages ? panelId : undefined} caption={spec.caption}>
+    onChange={leaving ? undefined : spec.onPage} panelId={spec.pages ? panelId : undefined}>
     {spec.tools}
     <button type="button" className="kd-drawer-rollup" aria-label={away} title={`${away} · Esc`}
       onClick={() => { if (taking) taking.leave(); else spec.close(); }}>

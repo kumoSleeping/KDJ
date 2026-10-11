@@ -302,8 +302,6 @@
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list { gap: 0.9rem; }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list > button { color: color-mix(in srgb, var(--kd-text) 58%, transparent); font-weight: 600; }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-list > button[aria-selected="true"] { color: var(--kd-text); font-weight: 800; }
-/* The song or folder it belongs to, at the far end of the caption bar in plain small type. */
-:root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-caption { font-size: var(--kd-size-xs); color: color-mix(in srgb, var(--kd-text) 70%, transparent); }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-tools { min-height: 0; gap: 3px; color: var(--kd-text); }
 :root[data-theme-pack="sakulaptop98"] .kd-drawer > .kd-title-tabs .kd-title-tabs-tools > button {
   width: 1.35rem;

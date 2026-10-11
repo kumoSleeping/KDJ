@@ -39,7 +39,7 @@ const percent = (v: number) => `${Number(v.toFixed(1))}%`;
 const ratio = (v: number) => `${Math.round(v * 100)}%`;
 const signedPercent = (v: number) => `${v > 0 ? "+" : ""}${Number(v.toFixed(1))}%`;
 const times = (v: number) => `×${v.toFixed(2)}`;
-const resolutions = [["1920x1080", "1080p · 16:9"], ["1280x720", "720p · 16:9"], ["1920x840", "1920 × 840 · 超宽"], ["2560x1080", "2560 × 1080 · 超宽"]] as const;
+const resolutions = [["1920x1080", "1080p · 16:9"], ["1280x720", "720p · 16:9"], ["1440x1080", "1440 × 1080 · 4:3"], ["960x720", "960 × 720 · 4:3"], ["1920x840", "1920 × 840 · 超宽"], ["2560x1080", "2560 × 1080 · 超宽"]] as const;
 const studioTabIds = studioTabs.map(tab => tab.id);
 const frameRates = [{ value: 30, label: "30 fps" }, { value: 60, label: "60 fps" }] as const;
 const qualities = [{ value: "high", label: "高" }, { value: "standard", label: "标准" }, { value: "low", label: "低" }] as const;
@@ -644,7 +644,9 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     <div className="kd-viz-preview-column">
     <FloatingPreviewFrame floating={floating} fullscreen={expanded} editing={!floating && !expanded} compact={emptyMedia}
       shared={popup} title={track.title || track.filename}
-      ratio={inline ? 16 / 9 : p ? p.scene.canvas.width / p.scene.canvas.height : 16 / 9}
+      // The picture is the shape of the canvas it will be exported as, wherever it is shown: the
+      // editor, the floating window and fullscreen all follow a change of 分辨率 at once.
+      ratio={p ? p.scene.canvas.width / p.scene.canvas.height : 16 / 9}
       onEscape={() => { if (expanded) void applyFullscreen(false); else if (floating) setFloating(false); else requestClose(); }}>
       {prepared && p ? <canvas ref={canvas} aria-label="音频可视化预览，可拖动左右图片调整位置" onPointerDown={e => {
         if (busy || floating || expanded || e.button !== 0 || !e.isPrimary || !draft) return;

@@ -250,13 +250,11 @@ const track = { id:42,title:"Test",artist:"",album:"",filename:"test.wav",path:"
     assert.equal(host.querySelectorAll('.kd-drawer').length,1);
     await act(async()=>column.unmount());
     // ---- A panel sized by what it holds waits beyond the edge for its first measure, a moment
-    // at most; its caption stands on the title's own line.
+    // at most; the title row holds the title alone.
     const fitted = createRoot(host);
-    await act(async()=> { fitted.render(<DrawerHost spec={{ id:"fitted", title:"fitted", caption:"song · artist", extent:"fit", body:<div className="kd-scroll"/>, close(){} }}/>); });
+    await act(async()=> { fitted.render(<DrawerHost spec={{ id:"fitted", title:"fitted", extent:"fit", body:<div className="kd-scroll"/>, close(){} }}/>); });
     assert.equal(sheet('fitted')?.dataset.held,'true','a fitted panel waits for its height');
-    const caption = sheet('fitted')!.querySelector('.kd-title-tabs-text > .kd-title-tabs-caption');
-    assert.equal(caption?.textContent,'song · artist');
-    assert.equal(caption?.previousElementSibling?.className,'kd-title-tabs-title','the caption follows the title on its line');
+    assert.equal(sheet('fitted')!.querySelector('.kd-title-tabs-text')?.children.length,1,'nothing stands beside the title');
     await act(async()=> { await wait(160); });
     assert.equal(sheet('fitted')?.dataset.held,undefined,'and comes in anyway when no measure arrives');
     await act(async()=>fitted.unmount());

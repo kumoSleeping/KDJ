@@ -36,9 +36,13 @@ export function VisualizerPopup() {
   useEffect(() => {
     if (!inlineSettings) return;
     const editor = useVisualizerStudioStore.getState();
+    // A song asked for by hand (the row's menu) is on its way to playing: its controls wait.
+    if (editor.editorIfNoWindow !== null && editor.editorIfNoWindow !== track?.id) return;
     if (settingsStay && track) editor.follow(track);
+    // Asked for by hand and found to bring no window: the editor is where it gets a picture.
+    else if (track && open && editor.editorIfNoWindow === track.id) editor.open(track);
     else editor.close();
-  }, [track, inlineSettings, settingsStay]);
+  }, [track, inlineSettings, settingsStay, open]);
   return shown ? <div className="kd-viz-popup-host">
     <Suspense fallback={null}>
       <VisualizerStudioPanel key={track.id} inlineTrack={track} showDetails={false} popup

@@ -10,10 +10,10 @@ export interface TitleTab<T extends string = string> {
 
 /**
  * A title made of the pages it switches between: the page in view is written at title size,
- * the others wait beside it, smaller and quieter. With no tabs it is a plain title. A caption
- * is written small and quiet at the far end of the same line, never on a line of its own.
+ * the others wait beside it, smaller and quieter. With no tabs it is a plain title. Nothing
+ * else is written on the title's line: the title row names the app, not what it is about.
  */
-export function TitleTabs<T extends string>({ label, title, tabs, value, onChange, panelId, caption, children }: {
+export function TitleTabs<T extends string>({ label, title, tabs, value, onChange, panelId, children }: {
   /** Names the group for assistive technology. */
   label: string;
   /** Shown when there are no tabs. */
@@ -23,11 +23,6 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
   onChange?(id: T): void;
   /** Element the tabs switch. */
   panelId?: string;
-  /**
-   * What the title belongs to right now, on the title's own line: at its far end, before the
-   * actions, on the title's baseline. It is cut short first when the row runs out of room.
-   */
-  caption?: ReactNode;
   /** Actions at the right end of the row. */
   children?: ReactNode;
 }) {
@@ -58,7 +53,6 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
           <span>{tab.label}</span>
         </button>)}
       </div> : <h2 className="kd-title-tabs-title">{title ?? label}</h2>}
-      {caption ? <div className="kd-title-tabs-caption" title={typeof caption === "string" ? caption : undefined}>{caption}</div> : null}
     </div>
     {children ? <div className="kd-title-tabs-tools">{children}</div> : null}
   </header>;

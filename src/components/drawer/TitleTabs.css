@@ -7,8 +7,7 @@
   min-width: 0;
   padding: 0.95rem 0.75rem 0.55rem 1.1rem;
 }
-/* The title and its caption share one line and one baseline: the title at the start, the
-   caption at the far end. */
+/* The title's line. */
 .kd-title-tabs-text {
   display: flex;
   align-items: baseline;
@@ -57,18 +56,6 @@
   font-weight: 700;
 }
 .kd-title-tabs-list > button:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text)); outline-offset: 2px; }
-/* The caption has what the title leaves and nothing of its own: it is the first to be cut
-   short. It keeps to the far end, so it stays put while the page words change size. */
-.kd-title-tabs-caption {
-  flex: 1 1 0;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-sm);
-  text-align: end;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .kd-title-tabs-tools {
   display: flex;
   align-items: center;

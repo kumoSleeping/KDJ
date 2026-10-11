@@ -14,7 +14,7 @@ The drawer is a **floating panel** with two parts:
   floating surface as a task bubble or a menu (`--kd-float-edge`, `--kd-float-shadow`). It is the
   list's own colour: never give it a tone of its own (one narrow exception: the lyrics under
   歌曲色彩, see "A backdrop" below). It carries the app's title row (title or
-  page tabs, then at the far end the caption, tools and the roll-up button) and its body. It
+  page tabs, then at the far end the tools and the roll-up button) and its body. It
   covers the list; it never takes a column from it, so the list does not reflow while the drawer
   moves. Its width is `--kd-drawer-w` (the dragged `--kd-right` up to 45 % of the list's column).
 
@@ -89,13 +89,10 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   itself. Never pass the page down from the component that lists the apps — a switch of page
   would then redraw the whole workspace before the drawer could answer. A page word answers the
   press, not its release, and the panel's height starts for the new page as the slide starts.
-- **The caption is on the title's line.** What the app belongs to right now (a song, a folder)
-  is `caption`: small, in the muted colour, at the far end of the title row before the tools,
-  on the title's baseline. It has only the room the title leaves and is cut short with an
-  ellipsis first; the page words are never squeezed by it. It keeps to the far end so that it
-  does not move when the page words change size. Never write it, or anything else, on a line of
-  its own under the title. An app that can only be about one thing has none: the lyrics are
-  always the playing song's, so their title row does not repeat the song.
+- **The title row names the app, nothing more.** What the app is about right now (a song, a
+  folder) is not written beside the title or the page words, and never on a line of its own
+  under them: the body shows it where it is used. A song's name squeezed after four page
+  words was cut short on most widths and was taken out (2026-10-11).
 - **A backdrop — the one exception to the panel's colour.** A spec may give `backdrop`: a layer
   under the whole panel, title row included. The host draws it in the panel's backdrop slot
   (`src/components/common/SurfaceBackdrop.tsx`): the panel's first child, absolutely placed, one
@@ -184,7 +181,6 @@ surface:
    if (open) apps.push({
      id: "downloads",                 // stable; also data-app on the sheet
      title: "下载与导出",              // names the drawer; shown when there are no pages
-     caption: songLine(track),        // optional: what it belongs to right now
      extent: "at-least-half",         // most apps: "fit"
      pages: taskViews,                // optional: [{ id, label, title? }]
      usePage: useTaskView,            // a hook: () => useTaskPanelStore(state => state.view)
@@ -216,7 +212,6 @@ surface:
 
 `TitleTabs` and `SlidePages` do not depend on the drawer. Any panel with a few sibling pages
 should use this pair instead of inventing another tab strip: `TitleTabs` for the title row
-(`tabs`, `value`, `onChange`, optional `caption` at the far end of the title's line, actions as
-children) and `SlidePages` around
+(`tabs`, `value`, `onChange`, actions as children) and `SlidePages` around
 the content that changes. `useDrawer()` tells a component whether it is shown inside a drawer, so
 that it can leave out a head it only needs elsewhere (see `VisualizerDock`).

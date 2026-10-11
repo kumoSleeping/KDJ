@@ -309,6 +309,10 @@ export function VideoPipHost() {
   });
   const [platformFallbackSessionKey, setPlatformFallbackSessionKey] = useState<string | null>(null);
   const [videoFullscreen, setVideoFullscreen] = useState(false);
+  // The picture's own width / height, once the source has told it. The floating window is the
+  // shape of the video it holds, not of a 16:9 frame; a change (metadata arriving, another
+  // song's picture) reshapes the window where it is, with the width it has.
+  const [sourceRatio, setSourceRatio] = useState<number | null>(null);
 
   const applyVideoFullscreen = useCallback(async (next: boolean): Promise<void> => {
     const previous = fullscreenRef.current;
@@ -410,7 +414,8 @@ export function VideoPipHost() {
     locked: videoFullscreen,
     shared: true,
     content: {
-      ratio: 16 / 9,
+      // An official embed is a 16:9 frame of its own; a decoded video is its own shape.
+      ratio: isPlatformPlayer ? 16 / 9 : sourceRatio ?? 16 / 9,
       extraHeight: isPlatformPlayer ? YOUTUBE_EXTRA_H : 0,
       minWidth: isPlatformPlayer ? YOUTUBE_MIN_W : 0,
     },
@@ -1430,6 +1435,13 @@ export function VideoPipHost() {
     const video = activeVideo();
     if (!video) return;
     const stillActive = () => localSwap.isActiveVideo(video);
+    const onSize = () => {
+      if (!stillActive() || !(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
+      const ratio = video.videoWidth / video.videoHeight;
+      setSourceRatio(current => current !== null && Math.abs(current - ratio) < 1e-3 ? current : ratio);
+    };
+    // The slot that became active may already know its picture's shape.
+    onSize();
     const onEnter = () => {
       if (stillActive()) useVideoPip.getState().setSystemPip(true);
     };
@@ -1590,6 +1602,7 @@ export function VideoPipHost() {
           .getState()
           .setDuration(Number.isFinite(video.duration) ? video.duration : 0);
       }
+      onSize();
     };
     const onEnded = () => {
       if (!stillActive()) return;
@@ -1618,6 +1631,8 @@ export function VideoPipHost() {
     video.addEventListener("timeupdate", onTime);
     video.addEventListener("seeked", onSeeked);
     video.addEventListener("loadedmetadata", onMeta);
+    // A stream whose picture changes shape mid-way says so with `resize`.
+    video.addEventListener("resize", onSize);
     video.addEventListener("ended", onEnded);
     video.addEventListener("error", onError);
     return () => {
@@ -1632,6 +1647,7 @@ export function VideoPipHost() {
       video.removeEventListener("timeupdate", onTime);
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("loadedmetadata", onMeta);
+      video.removeEventListener("resize", onSize);
       video.removeEventListener("ended", onEnded);
       video.removeEventListener("error", onError);
     };
@@ -1783,7 +1799,10 @@ export function VideoPipHost() {
         }
         {...(showFloating ? floatWindow.frameProps : {})}
       >
-        <div className="kd-pip-float-stage">
+        <div className="kd-pip-float-stage"
+          // Floating and decoded here: the stage is the video's own shape, live. Docked,
+          // fullscreen and official embeds fill the box they are given (see the stylesheet).
+          style={showFloating && !isPlatformPlayer && !videoFullscreen && sourceRatio ? { aspectRatio: String(sourceRatio) } : undefined}>
           {isPlatformPlayer && (
             <div
               ref={youtubeEmbedSlotRef}

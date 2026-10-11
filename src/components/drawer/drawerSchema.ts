@@ -45,12 +45,6 @@ export interface DrawerSpec {
   suspended?: boolean;
   /** The title. With `pages` the page labels are shown in its place and this names the drawer. */
   title: string;
-  /**
-   * What the drawer belongs to right now: a song, a folder. Written small and quiet at the far
-   * end of the title row, on the title's baseline, before the tools; it is cut short first when
-   * the row runs out of room. Never a line of its own under the title.
-   */
-  caption?: ReactNode;
   extent: DrawerExtent;
   /** Pages switched from the title row. The body wraps what changes in `SlidePages`. */
   pages?: readonly DrawerPage[];
