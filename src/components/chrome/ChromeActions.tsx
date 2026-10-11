@@ -6,6 +6,7 @@ import { ContextMenu } from "../common/ContextMenu";
 import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePack";
 import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
+import { ChromeMiniPlayerKey } from "../player/MiniPlayer";
 
 export interface ChromeActionsProps {
   settingsOpen: boolean;
@@ -91,6 +92,7 @@ export function ChromeActions({
         </button>
       </ContextMenu>}
 
+      <ChromeMiniPlayerKey />
       <ChromeThemeButton />
     </div>
   );

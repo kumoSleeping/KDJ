@@ -103,16 +103,18 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   stretch of an online song that is not analysed yet is the plain line. They send the player's
   own commands (`requestPlayerCommand`) and read the position from the player session without re-rendering
   the bubble. Beside the bar the bubble is an ordinary message, because the bar is the
-  transport: a pinned bubble opens its transport as the bar starts down and closes it as the
-  bar starts back up.
+  transport: the bubble opens its transport as the bar starts down and closes it as the bar
+  starts back up.
 - **The keys.** `actions` are compact icon keys in the bubble's tool row, before the key that
   rolls it down; a `large` bubble has that row in its top right corner. A key that is on
   (`pressed`) is normally written in full-strength ink, never in red. The playing song's switches
   keep their ordinary muted ink and stroke in either state; their labels and `aria-pressed`
   still describe the state. Its lyrics key also opens the panel's height menu by right click or
   the keyboard menu key (`TaskAction.onContextMenu`), without toggling lyrics. Its keys are 歌词, 小窗
-  (the floating video or visualizer, the same toggle as the bar's own key), 歌曲色彩, 编辑 Meta
-  and 固定. Each button carries its action's id as `data-task-action`.
+  (the floating video or visualizer, the same toggle as the bar's own key) and 歌曲色彩, one
+  row; there is no pin (what holds the bubble is decided, `nowPlayingInfo.ts`) and the way down
+  to the mini player is among the window's keys at the top right. Each button carries its
+  action's id as `data-task-action`.
 - **A backdrop.** `backdrop` is a layer of the task's own under everything the bubble holds. The
   host draws it in the bubble's backdrop slot (`src/components/common/SurfaceBackdrop.tsx`): the
   first child of the bubble, absolutely placed, one step below its content in the bubble's own
@@ -185,9 +187,6 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   - Sending it away — its key, which then reads 展开播放条, Esc, the now-playing card — brings
     the bar back: the bubble rolls down as the bar slides up. That is the only way back to the
     bar.
-  - Both at once is the pin. With the bar up, a pinned bubble stays beside it. With the bar
-    away the pin key shows and changes the same preference: it says whether the bubble is still
-    there when the bar is back. Dismissing a pinned bubble clears the pin, as everywhere.
   - Without a song there is nothing for the bubble to show, so the bar is up whatever was
     chosen; the choice is not rewritten and applies again when a song is on the deck. At launch
     the deck remembered from the last run counts as a song while it is being fetched.
@@ -243,7 +242,7 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 
 | Task | Bubble | Place | Where |
 | --- | --- | --- | --- |
-| A song starts (not pause/resume) | `now-playing`: cover, title, artist, the source's mark, BPM · key · length · format; 歌词, 小窗, 歌曲色彩, 编辑 Meta, 固定; the mini transport while the bar is away; the song's colours as its backdrop while 歌曲色彩 is on | bottom, the base | `NowPlayingTask.tsx` |
+| A song starts (not pause/resume) | `now-playing`: cover, title, artist (two lines, no figures); 歌词, 小窗, 歌曲色彩; the mini transport while the bar is away; the song's colours as its backdrop while 歌曲色彩 is on | bottom, the base | `NowPlayingTask.tsx` |
 | Downloads started / progress / ended / failed | `downloads`: one bubble per run | bottom | source `downloads` |
 | Exports added / started / ended / failed (mixing and visualizer) | `exports` | bottom | source `exports` |
 | A folder import ended or failed | `import` | bottom | source `imports` |

@@ -76,10 +76,9 @@
 :root[data-kd-mini="on"]:has(.kd-app[data-mac="true"]) .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] {
   border-color: transparent;
 }
-/* The mini player's keys are all in the bubble at all times (MiniPlayer.tsx): the one that
-   takes the window down shows in the whole window, the two of the mini player as that. */
-:root:not([data-kd-mini="on"]) .kd-mini-key[data-when="mini"],
-:root[data-kd-mini="on"] .kd-mini-key[data-when="whole"] {
+/* The mini player's two keys are in the bubble at all times (MiniPlayer.tsx) and show as the
+   mini player only; the way down is among the window's keys (ChromeActions). */
+:root:not([data-kd-mini="on"]) .kd-mini-key[data-when="mini"] {
   display: none;
 }
 /* Its keys are the mini player's own two: the others open things the whole window shows. */

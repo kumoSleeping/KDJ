@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
-import { Palette, PanelBottomOpen, Pencil, PictureInPicture2, Pin, ScrollText } from "lucide-react";
-import { formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
-import { displayTrackKey } from "../../lib/keyDisplay";
+import { Palette, PanelBottomOpen, PictureInPicture2, ScrollText } from "lucide-react";
+import { isVideoTrack } from "../../lib/format";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
-import { trackMetaEditorAnchor, useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { isStreamTrack, streamCoverUrls, streamMeta } from "../../lib/streamTrack";
 import {
   NOW_PLAYING_PEEK_MS,
@@ -15,15 +13,11 @@ import { newerRevision } from "../../lib/coverLoad";
 import { useSongColor, useSongColorAvailable } from "../../lib/songColor";
 import { songSwapEntranceDelay } from "../../lib/songSwapMotion";
 import { useWindowTaken } from "../../lib/windowTaken";
-import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import { PLATFORM_LABEL } from "../download/MergedGroupRow";
-import { PlatformMark } from "../download/PlatformMark";
 import type { TaskBubbleSpec } from "../tasks/taskBubbleSchema";
 import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
 import { trackTaskCover } from "../tasks/taskCovers";
 import { prepareTaskCovers } from "../tasks/taskCoverPreparation";
-import { localDownloadPlatform } from "./LocalTrackCacheFacts";
 import { NowPlayingTransport } from "./NowPlayingTransport";
 import { SongColorBackdrop } from "./SongColorBackdrop";
 import { useLyricsEntry } from "./lyricsEntry";
@@ -58,10 +52,8 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
   onPopup?(): void;
 }) {
   const visible = useNowPlayingInfo(nowPlayingInfoVisible);
-  // Held: it stays until it is dismissed. With the bar away that is always so, and the pin
-  // says whether it will still stay beside the bar when the bar is back.
+  // Held: it stays until it is dismissed. With the bar away that is always so.
   const held = useNowPlayingInfo(nowPlayingHeld);
-  const pinned = useNowPlayingInfo(state => state.pinned);
   const barAway = useNowPlayingInfo(state => state.barAway);
   const peek = useNowPlayingInfo(state => state.peek);
   const song = useRef({ trackId, announced: true, enterAt: 0 });
@@ -90,7 +82,6 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
 
   const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
   const extent = useLyricsExtentMenu(visible ? track?.id : null);
-  const keyNotation = useAppStore(state => state.settings?.key_notation ?? "camelot");
   // The bubble holds the record the song started with; a cover written since then is only
   // reachable under the list's later revision.
   const listedRevision = useLibraryStore(state => track && track.id > 0 ? state.summaryById.get(track.id)?.modified_at : undefined);
@@ -105,12 +96,11 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     return cover ? [cover] : [];
   }, [track, listedRevision]);
   useEffect(() => { void prepareTaskCovers(covers); }, [covers]);
-  const editingMeta = useTrackMetaEditor(state => !!track && state.trackId === track.id);
-  // Opening the lyrics replaces what the bubble is up for, unless the listener pinned it or it
-  // is the transport of a bar that is away.
+  // Opening the lyrics replaces what the bubble is up for, unless it is the transport of a bar
+  // that is away.
   const lyrics = useLyricsEntry(track, () => {
     const info = useNowPlayingInfo.getState();
-    if (!info.pinned && !info.barAway) info.close();
+    if (!info.barAway) info.close();
   });
   // 歌曲色彩: the cover's colours behind this bubble and the lyrics. Not offered where a theme
   // pack draws the two surfaces its own way.
@@ -120,7 +110,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
   live.current = { track, lyrics, onPopup };
 
   // Raised again whenever what holds it changes; in between only its content is kept current.
-  const raise = `${held}:${pinned}:${peek}`;
+  const raise = `${held}:${peek}`;
   const raised = useRef("");
   useEffect(() => {
     if (!visible || !track) {
@@ -129,22 +119,13 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
       return;
     }
     const video = isVideoTrack(track.format) || streamMeta(track)?.kind === "video";
-    const library = !isStreamTrack(track);
-    const key = displayTrackKey(track, keyNotation);
-    // Where it is streamed from, or was downloaded from; a file of the listener's own has none.
-    const platform = library ? localDownloadPlatform(track) : streamMeta(track)?.source?.platform ?? null;
+    // Two lines: the song and who it is by. The figures (BPM, key, length, format) and the
+    // source's mark are the bar's and the list's to show.
     const spec: TaskBubbleSpec = {
       id: NOW_PLAYING_TASK,
       kind: "playing",
       title: track.title || track.filename,
       detail: track.artist || undefined,
-      facts: [
-        track.bpm ? `${formatBpm(track.bpm)} BPM` : "",
-        key,
-        track.duration ? formatDuration(track.duration) : "",
-        library ? track.format.toUpperCase() : "",
-      ].filter(Boolean),
-      origin: platform ? { label: PLATFORM_LABEL[platform], mark: <PlatformMark id={platform} size={12} branded /> } : undefined,
       covers,
       song: track.id,
       size: "large",
@@ -180,18 +161,6 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
           // The colour spreads from this key, and drains back into it.
           onSelect: (bubble: HTMLElement) => useSongColor.getState().toggle(bubble.querySelector('[data-task-action="color"]')),
         }] : []),
-        ...(library ? [{
-          id: "meta", label: "编辑 Meta", pressed: editingMeta,
-          icon: <Pencil size={14} aria-hidden="true" />,
-          onSelect: (bubble: HTMLElement) => useTrackMetaEditor.getState().toggle(track.id, trackMetaEditorAnchor(bubble)),
-        }] : []),
-        {
-          id: "pin",
-          label: pinned ? "取消固定" : barAway ? "固定：展开播放条后保留曲目信息" : "固定曲目信息",
-          pressed: pinned,
-          icon: <Pin size={14} aria-hidden="true" />,
-          onSelect: () => useNowPlayingInfo.getState().setPinned(!useNowPlayingInfo.getState().pinned),
-        },
       ],
       onDismiss: reason => {
         // Its stay ran out: the peek is over. Dismissed by hand, it goes whatever held it, and
@@ -211,7 +180,7 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
     } else {
       updateTask(NOW_PLAYING_TASK, spec);
     }
-  }, [visible, raise, held, pinned, barAway, track, covers, keyNotation, editingMeta, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn, extent.openFrom, extent.opened]);
+  }, [visible, raise, held, barAway, track, covers, popup, popupOn, lyrics.open, lyrics.matching, colourOffered, colourOn, extent.openFrom, extent.opened]);
   useEffect(() => () => dismissTask(NOW_PLAYING_TASK), []);
   return visible && track ? extent.menu : null;
 }

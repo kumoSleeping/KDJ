@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { prefersReducedMotion } from "./motion";
-import { endPlayerBarSlide } from "./nowPlayingInfo";
+import { endPlayerBarSlide, nowPlayingInfoVisible, useNowPlayingInfo } from "./nowPlayingInfo";
 import { tracePlayback } from "./playbackTrace";
 import { playerBarMoving, usePlayerBarAway } from "./playerBarAway";
 import { useWindowTaken } from "./windowTaken";
@@ -105,6 +105,19 @@ async function drawnFor(width: number, height: number): Promise<void> {
 }
 
 /** The bubble once it is the transport (the bar has been sent away), or as it is if it never is. */
+/** The playing song's bubble slot, raised if it is down, once its arrival is over. */
+async function bubbleSlot(): Promise<HTMLElement | null> {
+  const info = useNowPlayingInfo.getState();
+  if (!nowPlayingInfoVisible(info)) info.toggle();
+  for (let waited = 0; waited < READY_FRAMES * 4; waited += 1) {
+    const bubble = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE);
+    if (bubble?.parentElement && bubble.getAttribute("data-phase") === "in"
+      && !bubble.getAnimations({ subtree: true }).some(animation => animation.playState === "running")) return bubble.parentElement;
+    await frame();
+  }
+  return document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.parentElement ?? null;
+}
+
 async function transportBubble(): Promise<HTMLElement | null> {
   let bubble: HTMLElement | null = null;
   for (let waited = 0; waited < READY_FRAMES; waited += 1) {
@@ -161,7 +174,9 @@ export async function collapseToMiniPlayer(): Promise<void> {
       taken.leave?.();
       await frame();
     }
-    const slot = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.parentElement;
+    // The way down is a key of the window, so the bubble may be down (its peek over): it is
+    // raised and let arrive first, as its place and width are the mini player's.
+    const slot = await bubbleSlot();
     if (!slot) throw new Error("no playing song to show");
     const box = slot.getBoundingClientRect();
     whole = { width: window.innerWidth, height: window.innerHeight };

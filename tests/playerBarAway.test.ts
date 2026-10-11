@@ -168,8 +168,7 @@ test("putting the bar away hands the transport to the bubble; sending the bubble
   pass();
   assert.equal(bar().phase, "leaving");
   assert.equal(nowPlayingHeld(info()), true);
-  assert.deepEqual([info().pinned, info().open, info().peek], [false, false, 0]);
-  assert.equal(stored.getItem("kd-now-playing-pinned"), null, "the pin is untouched");
+  assert.deepEqual([info().open, info().peek], [false, 0]);
   arrive();
   assert.equal(bar().phase, "away");
   // A new song does not turn the transport into a timed bubble.
@@ -201,45 +200,9 @@ test("putting the bar away hands the transport to the bubble; sending the bubble
   assert.equal(visible(), false);
 });
 
-test("the pin is both at once: it decides whether the bubble stays beside the bar", () => {
-  const stored = storage();
+test("the card opens and keeps the bubble beside the bar, and sends it away again", () => {
+  storage();
   relaunch();
-
-  // Pinned beside the bar, then the bar is put away: the bubble stays, still pinned.
-  info().setPinned(true);
-  bar().setCollapsed(true);
-  pass();
-  arrive();
-  assert.deepEqual([bar().phase, info().pinned, visible()], ["away", true, true]);
-  // Dismissing it brings the bar back and clears the pin, as dismissing does everywhere.
-  info().close();
-  pass();
-  arrive();
-  assert.deepEqual([bar().phase, info().pinned, visible()], ["up", false, false]);
-  assert.equal(stored.getItem("kd-now-playing-pinned"), "false");
-
-  // With the bar away the pin key changes the real preference, and the bubble stays either way.
-  bar().setCollapsed(true);
-  pass();
-  arrive();
-  info().setPinned(true);
-  assert.equal(stored.getItem("kd-now-playing-pinned"), "true");
-  info().setPinned(false);
-  assert.equal(stored.getItem("kd-now-playing-pinned"), "false");
-  assert.equal(info().peek, 0, "unpinned as the transport, it does not start counting down");
-  assert.equal(visible(), true);
-  pass();
-  assert.equal(bar().phase, "away");
-
-  // Unpinned beside the bar it goes back to leaving by itself.
-  info().close();
-  pass();
-  arrive();
-  info().setPinned(true);
-  info().setPinned(false);
-  assert.ok(info().peek > 0);
-  info().endPeek();
-  assert.equal(visible(), false);
 
   // The card: opens and keeps it, and sends it away again.
   info().toggle();
@@ -290,13 +253,11 @@ test("crossing between the shapes is the same handover, and a slide is finished 
   arrive();
   assert.equal(bar().phase, "away");
 
-  // A pinned bubble stays through the bar coming back.
-  info().setPinned(true);
+  // Nothing holds the bubble beside the bar: it goes as the bar comes back.
   bar().setTall(false);
   pass();
   arrive();
-  assert.deepEqual([bar().phase, visible()], ["up", true]);
-  info().close();
+  assert.deepEqual([bar().phase, visible()], ["up", false]);
 
   // The bubble sent away while the bar is still going down: the bar finishes, then returns.
   bar().setCollapsed(true);
@@ -380,7 +341,6 @@ test("whatever the listener does, in any order, the bar or the bubble is on scre
     dismiss: () => { if (song && visible()) info().close(); },
     // The now-playing card is on the bar: out of reach while the bar is down.
     card: () => { if (!playerBarStandsDown(bar().phase) && song) info().toggle(); },
-    pin: () => { if (song && visible()) info().setPinned(!info().pinned); },
     newSong: () => { if (song) info().startPeek(); },
     peekEnds: () => info().endPeek(),
     shape: () => bar().setTall(!bar().tall),

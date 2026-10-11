@@ -140,7 +140,7 @@ test("the playing song's bubble: a message beside the bar, the transport while t
 
   useTaskBubbles.setState({ entries: [] });
   usePlayerBarAway.setState({ tall: false, collapsed: true, phase: "up" });
-  useNowPlayingInfo.setState({ open: false, pinned: true, peek: 0, barAway: false });
+  useNowPlayingInfo.setState({ open: true, peek: 0, barAway: false });
   setPlayingTrack({ id: 7, path: "/library/7.mp3", filename: "7.mp3", title: "Song", artist: "Artist", album: "",
     format: "mp3", size: 1, duration: 200, bpm: 128, modified_at: "a", source_platform: "bilibili", music_key: "",
     camelot: "8A", open_key: "", tags: [], cue_points: [] } as unknown as Track);
@@ -150,18 +150,19 @@ test("the playing song's bubble: a message beside the bar, the transport while t
     trackId: 7, playing: false, popup: "visualizer", popupOn: false, onPopup: () => { popups += 1; },
   })));
 
-  // Pinned beside the bar: the bar is the transport, the bubble an ordinary message.
+  // Opened beside the bar: the bar is the transport, the bubble an ordinary message.
   const pinned = entry();
-  assert.ok(pinned, "a pinned bubble is up");
+  assert.ok(pinned, "an opened bubble is up");
   assert.equal(pinned.spec.controls, undefined, "no transport beside the bar");
   assert.equal(pinned.spec.dismiss, undefined, "its key simply rolls it down");
   assert.equal(pinned.spec.stay, 0);
   assert.equal(pinned.spec.base, true, "it is the floor of the stack: later notices rest above it");
   assert.equal(pinned.spec.placement, undefined, "at the bottom");
   assert.equal(pinned.spec.body, undefined, "it does not expand");
-  assert.equal(pinned.spec.origin?.label, "B站", "where the file was downloaded from");
-  // The song's toggles (歌词, 小窗, 歌曲色彩), its editor, then the bubble's own pin.
-  assert.deepEqual(keys(), ["lyrics", "popup", "color", "meta", "pin"]);
+  assert.equal(pinned.spec.origin, undefined, "two lines, no figures and no source mark");
+  assert.equal(pinned.spec.facts, undefined);
+  // The song's toggles (歌词, 小窗, 歌曲色彩) and nothing else: no pin, no editor, no way down.
+  assert.deepEqual(keys(), ["lyrics", "popup", "color"]);
   assert.equal(entry()!.spec.actions!.find(action => action.id === "color")!.pressed, false, "歌曲色彩 is off until it is switched on");
   assert.ok(pinned.spec.backdrop != null, "the bubble offers its backdrop slot to the song's colours");
   entry()!.spec.actions!.find(action => action.id === "popup")!.onSelect(dom.window.document.body);
@@ -173,7 +174,7 @@ test("the playing song's bubble: a message beside the bar, the transport while t
   assert.equal(entry()?.order, pinned.order, "the bubble that was up, not a new one");
   assert.ok(entry()?.spec.controls != null, "the transport while the bar is away");
   assert.equal(entry()?.spec.dismiss?.label, "展开播放条");
-  // The bar starts back: the transport is taken away again and the pinned bubble stays.
+  // The bar starts back: the transport is taken away again and the opened bubble stays.
   await act(async () => info().setBarAway(false));
   assert.equal(entry()?.order, pinned.order);
   assert.equal(entry()?.spec.controls, undefined);

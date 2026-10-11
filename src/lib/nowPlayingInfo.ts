@@ -8,10 +8,11 @@ import {
   usePlayerBarAway,
   type PlayerBarPhase,
 } from "./playerBarAway";
-import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
+import { removeLocalStorage } from "./storageWrite";
 
+/** The pin of earlier builds: there is no pin key any more, what holds the bubble is decided here. */
 const PINNED_KEY = "kd-now-playing-pinned";
-/** How long the bubble stays up after a song starts, unless it is held or pinned. */
+/** How long the bubble stays up after a song starts, unless it is held. */
 export const NOW_PLAYING_PEEK_MS = 5_000;
 
 let peeks = 0;
@@ -20,15 +21,12 @@ let peeks = 0;
 export interface NowPlayingHold {
   /** Opened from the now-playing card. */
   open: boolean;
-  /** Pinned by the listener: it stays beside the bar. A preference. */
-  pinned: boolean;
   /** Identifies the running peek; a new value restarts the countdown. 0 = not peeking. */
   peek: number;
   /**
    * The player bar is put away, so the bubble is the listener's transport: it is up whatever
-   * else holds it, from the moment the bar starts down until the bar starts back. It is never
-   * written into `pinned`: when the bar returns, the bubble is held by exactly what holds it
-   * then. The listener cannot have neither — sending the bubble away brings the bar back
+   * else holds it, from the moment the bar starts down until the bar starts back. When the bar
+   * returns, the bubble is held by exactly what holds it then. The listener cannot have neither — sending the bubble away brings the bar back
    * (`close`).
    */
   barAway: boolean;
@@ -36,44 +34,43 @@ export interface NowPlayingHold {
 
 /** The bubble stays until it is dismissed, instead of leaving by itself. */
 export const nowPlayingHeld = (state: NowPlayingHold): boolean =>
-  state.open || state.pinned || state.barAway;
+  state.open || state.barAway;
 
 export const nowPlayingInfoVisible = (state: NowPlayingHold): boolean =>
   nowPlayingHeld(state) || state.peek > 0;
 
 /**
- * What holds the bubble at launch: the pin as it was left, and the bar's place as the window's
- * shape and its choice give it. The bar's driver corrects that in its first pass when there is
- * no song to show.
+ * What holds the bubble at launch: the bar's place as the window's shape and its choice give
+ * it. The bar's driver corrects that in its first pass when there is no song to show.
  */
 export function readNowPlayingHold(): NowPlayingHold {
+  removeLocalStorage(PINNED_KEY);
   return {
     open: false,
-    pinned: readLocalStorage(PINNED_KEY) === "true",
     peek: 0,
     barAway: readPlayerBarAway(),
   };
 }
 
 /**
- * 曲目信息, the task bubble of the playing song (NowPlayingTask). It is up while any of four
- * things holds it: the listener opened it from the now-playing card, pinned it, the player bar
- * is away (`barAway`), or another song has just started (a timed peek).
+ * 曲目信息, the task bubble of the playing song (NowPlayingTask). It is up while any of three
+ * things holds it: the listener opened it from the now-playing card, the player bar is away
+ * (`barAway`), or another song has just started (a timed peek). Nothing is a preference: there
+ * is no pin, whether it stays follows from these alone.
  *
- * With the bar: opened or pinned it stays until it is dismissed; a peek leaves by itself. With
- * the bar away it always stays and carries the mini transport, the pin only says whether it
- * will still stay when the bar is back, and dismissing it is the way back to the bar.
+ * With the bar: opened it stays until it is dismissed; a peek leaves by itself. With the bar
+ * away it always stays and carries the mini transport, and dismissing it is the way back to
+ * the bar.
  */
 export const useNowPlayingInfo = create<NowPlayingHold & {
   /** The now-playing card: bring the bubble up and keep it, or send it away as `close` does. */
   toggle(): void;
   /**
-   * The listener sends the bubble away, whatever holds it: its own key, Esc, the card. That
-   * clears the pin. With the bar away it also asks the bar back — the bubble lets go at once, so
+   * The listener sends the bubble away, whatever holds it: its own key, Esc, the card. With
+   * the bar away it also asks the bar back — the bubble lets go at once, so
    * it rolls down as the bar starts up.
    */
   close(): void;
-  setPinned(pinned: boolean): void;
   startPeek(): void;
   endPeek(): void;
   /** The bar's driver: the bar starts down (the bubble is kept from now) or starts back up. */
@@ -86,17 +83,9 @@ export const useNowPlayingInfo = create<NowPlayingHold & {
     set({ open: true, peek: 0 });
   },
   close() {
-    const { pinned, barAway } = get();
-    if (pinned) writeLocalStorageNow(PINNED_KEY, "false");
-    set({ open: false, pinned: false, peek: 0, barAway: false });
+    const { barAway } = get();
+    set({ open: false, peek: 0, barAway: false });
     if (barAway) usePlayerBarAway.getState().setCollapsed(false);
-  },
-  setPinned(pinned) {
-    writeLocalStorageNow(PINNED_KEY, String(pinned));
-    if (pinned) { set({ pinned, peek: 0 }); return; }
-    // Unpinned beside the bar, the bubble goes back to leaving by itself: a fresh countdown
-    // starts. With the bar away it stays, as the transport, and leaves when the bar is back.
-    set(get().barAway ? { pinned, open: false } : { pinned, open: false, peek: ++peeks });
   },
   startPeek() {
     if (!nowPlayingHeld(get())) set({ peek: ++peeks });

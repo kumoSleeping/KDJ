@@ -10,8 +10,9 @@ frame and its motion). macOS and Windows run the same steps through the same win
 
 ## What the listener gets
 
-- **Down.** The key 收成迷你播放器 in the tool row of the playing song's bubble. The whole
-  window is gone at once, and the mini player pops out of the nearest corner of its screen at
+- **Down.** The key 收成迷你播放器 among the window's keys at the top right (ChromeActions);
+  it is there only with a song. A bubble that is down (its peek over) is raised and let arrive
+  first, since its place and width are the mini player's. The whole window is gone at once, and the mini player pops out of the nearest corner of its screen at
   the place it was last left at (a short way, fading in). With no place of its own yet, that
   is where the bubble stood.
 - **As the mini player.** The window is the bubble: cover, title, the mini transport. Under the
@@ -26,7 +27,8 @@ frame and its motion). macOS and Windows run the same steps through the same win
   whole window the bubble keeps its usual roll down and rise.
 - **Its keys.** 置顶 and 展开窗口 stand in a column at the right edge, as tall as the cover and
   level with its top and bottom edges (MiniPlayer.css); the title has the whole width between
-  the cover and them. In the whole window the same two keys are in the bubble's tool row.
+  the cover and them. In the whole window they are not shown; the bubble's tool row has the
+  song's keys only.
 - **Back.** The key 展开窗口. The mini player goes into that corner again, and the whole
   window fades in as it was. The place the mini player was left at is remembered for next
   time, across launches (`mini-player.json` in the data directory); a place on a display that
