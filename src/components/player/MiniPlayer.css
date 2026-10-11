@@ -1,8 +1,8 @@
 /* The mini player (src/lib/miniPlayer.ts): the whole window taken down to the playing song's
    bubble. `data-kd-mini="on"` is on the document element while the window is the bubble; it
-   is set and taken away while the window is out of sight, so every rule below is the state
-   the window is shown in and none of them is a motion: the window's pop and its fade are the
-   native side's. */
+   is set and taken away while the window is out of sight. The window's pop and its fade are
+   the native side's; song changes turn the cover and copy inside the stationary surface
+   (TaskBubbleHost, the motion schema's existing content turn). */
 
 /* —— The window is the bubble ——
    The page keeps the whole window's layout (--kd-mini-w, --kd-mini-h) and is not drawn: it is
@@ -52,10 +52,10 @@
   border-radius: 0;
   box-shadow: none;
 }
-/* Another song: in the whole window the bubble rolls down behind the bar and rises again. The
-   mini player has no bar to go behind: the bubble stays put and shows the new song when it
-   has it. The rise keeps its name and only loses its time, so it does not start over when
-   the window is whole again. */
+/* Another song turns the cover and copy, not the surface or its window. Keep the ordinary
+   bubble's rise/sink suppressed; TaskBubbleHost marks only the changing contents for turn.
+   The rise keeps its name and only loses its time, so it does not start over when the
+   window is whole again. */
 :root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"][data-phase="out"] {
   animation: none;
 }

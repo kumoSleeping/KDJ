@@ -4,7 +4,7 @@ import { create } from "zustand";
 export const settingsPages = [
   { id: "general", label: "通用" },
   { id: "playback", label: "播放" },
-  { id: "sources", label: "下载" },
+  { id: "sources", label: "登录" },
   { id: "system", label: "系统" },
 ] as const;
 export type SettingsPage = typeof settingsPages[number]["id"];

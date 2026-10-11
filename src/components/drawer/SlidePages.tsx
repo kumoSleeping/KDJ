@@ -15,7 +15,12 @@ function still(page: HTMLElement): HTMLElement {
   copy.inert = true;
   // Ids in a copy would answer for the live page's labels and controls.
   copy.removeAttribute("id");
-  to.forEach(node => node.removeAttribute("id"));
+  to.forEach(node => {
+    node.removeAttribute("id");
+    // A picture neither waits for data nor replays a list's unfinished arrival.
+    node.removeAttribute("data-drawer-pending");
+    node.removeAttribute("data-kd-arrive");
+  });
   // Scroll offsets can only be set once the copy is in the document.
   (copy as HTMLElement & { restoreScroll?(): void }).restoreScroll = () => {
     for (const [node, top] of scrolled) node.scrollTop = top;

@@ -19,7 +19,7 @@ export interface ChromeActionsProps {
   onTasks(): void;
   /**
    * Whether 下载与导出 and 设置 are offered here. On a wide window they are entries of the
-   * drawer's head instead; the update button stays, since it opens settings at 系统.
+   * drawer's head instead; the update button stays, since it opens settings at 通用.
    */
   sideApps?: boolean;
 }

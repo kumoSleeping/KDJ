@@ -10,15 +10,16 @@
 /* —— The list is presented ——
    The first fourteen rows in view rise one step after the other, each cover scales in a beat
    after its row, and the rows below them fade in together a frame after the fourteenth. */
-.kd-list-row[data-kd-arrive="list"] {
+:is(.kd-list-row, .kd-download-task)[data-kd-arrive="list"] {
   animation: kd-motion-list-rise var(--kd-motion-list-row) var(--kd-ease-list)
     calc(var(--kd-motion-list-lead) + var(--kd-arrive-i, 0) * var(--kd-motion-list-step) - var(--kd-arrive-lag, 0ms)) backwards;
 }
-.kd-list-row[data-kd-arrive="list"][data-kd-arrive-row="rest"] {
+:is(.kd-list-row, .kd-download-task)[data-kd-arrive="list"][data-kd-arrive-row="rest"] {
   animation: kd-motion-fade-in var(--kd-motion-list-rest) ease-out
     calc(var(--kd-motion-list-lead) + var(--kd-arrive-i, 0) * var(--kd-motion-list-step) + 16ms - var(--kd-arrive-lag, 0ms)) backwards;
 }
-.kd-list-row[data-kd-arrive="list"][data-kd-arrive-row="step"] .kd-thumb {
+.kd-list-row[data-kd-arrive="list"][data-kd-arrive-row="step"] .kd-thumb,
+.kd-download-task[data-kd-arrive="list"][data-kd-arrive-row="step"] .kd-download-task-summary > :first-child {
   animation: kd-motion-list-cover var(--kd-motion-list-cover) var(--kd-ease-list-cover)
     calc(var(--kd-motion-list-lead) + var(--kd-arrive-i, 0) * var(--kd-motion-list-step) + var(--kd-motion-list-cover-after) - var(--kd-arrive-lag, 0ms)) backwards;
 }
@@ -43,12 +44,13 @@
 }
 
 /* —— Sakura98: the listing is typed out, a line at a time, without a glide —— */
-:root[data-theme-pack="sakulaptop98"] .kd-list-row[data-kd-arrive] {
+:root[data-theme-pack="sakulaptop98"] :is(.kd-list-row, .kd-download-task)[data-kd-arrive] {
   animation-name: kd-list-tick-98;
   animation-duration: 48ms;
   animation-timing-function: steps(1, start);
 }
-:root[data-theme-pack="sakulaptop98"] .kd-list-row[data-kd-arrive] .kd-thumb {
+:root[data-theme-pack="sakulaptop98"] .kd-list-row[data-kd-arrive] .kd-thumb,
+:root[data-theme-pack="sakulaptop98"] .kd-download-task[data-kd-arrive] .kd-download-task-summary > :first-child {
   animation: none;
 }
 @keyframes kd-list-tick-98 {
@@ -58,8 +60,9 @@
 
 /* —— Reduced motion: the list is simply there (listArrival.ts marks nothing) —— */
 @media (prefers-reduced-motion: reduce) {
-  .kd-list-row[data-kd-arrive],
-  .kd-list-row[data-kd-arrive] .kd-thumb {
+  :is(.kd-list-row, .kd-download-task)[data-kd-arrive],
+  .kd-list-row[data-kd-arrive] .kd-thumb,
+  .kd-download-task[data-kd-arrive] .kd-download-task-summary > :first-child {
     animation: none !important;
   }
 }

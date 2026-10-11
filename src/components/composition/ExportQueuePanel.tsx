@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { CircleMinus, Download, FolderOpen, Music2, RotateCcw, Video } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
@@ -11,8 +11,9 @@ import type { CompositionProject, WorkshopJob } from "../../types/workshop";
 import { useWorkshopExportCovers } from "../../lib/useTaskCovers";
 import { Button, InlineNotice } from "../common";
 import { TaskCoverStack } from "../common/TaskCover";
-import { QueueEntry, QueueFrame, QueueList, QueueOverview } from "../queue/QueuePrimitives";
-import { VisualizerExportTasks } from "./VisualizerExportTasks";
+import { QueueEntry, QueueFrame, QueueOverview } from "../queue/QueuePrimitives";
+import { QueueTaskList, type QueueListPosition } from "../queue/QueueTaskList";
+import { VisualizerExportRow } from "./VisualizerExportTasks";
 import "./ExportQueuePanel.css";
 
 const phases: Record<string, string> = {
@@ -80,7 +81,7 @@ function WorkshopExportRow({ project, job, order, canStart, history = false }: {
 }
 
 /** Queue and completed exports are read-only views of the same task sources. */
-export function ExportQueuePanel({ history = false }: { history?: boolean }) {
+export function ExportQueuePanel({ history = false, position }: { history?: boolean; position: QueueListPosition }) {
   const projects = useWorkshopStore(state => state.projects);
   const jobs = useWorkshopStore(state => state.jobs);
   const batchSubmitting = useWorkshopStore(state => state.batchSubmitting);
@@ -88,15 +89,6 @@ export function ExportQueuePanel({ history = false }: { history?: boolean }) {
   const visualizerTasks = useVisualizerExportStore(state => state.tasks);
   const visualizerError = useVisualizerExportStore(state => state.error);
   const [canceling, setCanceling] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const scrollPositions = useRef({ queue: 0, history: 0 });
-  useLayoutEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollPositions.current[history ? "history" : "queue"];
-  }, [history]);
-  useEffect(() => {
-    void useWorkshopStore.getState().refresh();
-    void useVisualizerExportStore.getState().initialize().catch(() => undefined);
-  }, []);
   const projectsById = new Map(projects.map(project => [project.id, project]));
   const currentJobs = new Map<string, WorkshopJob>();
   for (const job of jobs) {
@@ -152,14 +144,23 @@ export function ExportQueuePanel({ history = false }: { history?: boolean }) {
     </section>}
     <InlineNotice text={error} onDismiss={() => useWorkshopStore.setState({ error: "" })} block />
     <InlineNotice text={visualizerError} onDismiss={() => useVisualizerExportStore.setState({ error: "" })} block />
-    <QueueList ref={scrollRef} onScroll={event => {
-      scrollPositions.current[history ? "history" : "queue"] = event.currentTarget.scrollTop;
-    }}>
-      {pending.map((project, index) => <WorkshopExportRow key={project.id} project={project} job={currentJobs.get(project.id)}
-        order={index + 1} canStart={startableIds.includes(project.id)} />)}
-      {visibleJobs.map((job, index) => <WorkshopExportRow key={job.id} job={job} project={projectsById.get(job.project_id)}
-        order={pending.length + index + 1} canStart={false} history={history} />)}
-      <VisualizerExportTasks heading={false} firstOrder={pending.length + visibleJobs.length + 1} tasks={visibleVisualizerTasks} />
-    </QueueList>
+    <QueueTaskList count={pending.length + visibleJobs.length + visibleVisualizerTasks.length} position={position}
+      getKey={index => index < pending.length ? `project:${pending[index].id}`
+        : index < pending.length + visibleJobs.length ? `job:${visibleJobs[index - pending.length].id}`
+        : `visualizer:${visibleVisualizerTasks[index - pending.length - visibleJobs.length].id}`}>
+      {index => {
+        if (index < pending.length) {
+          const project = pending[index];
+          return <WorkshopExportRow project={project} job={currentJobs.get(project.id)}
+            order={index + 1} canStart={startableIds.includes(project.id)} />;
+        }
+        if (index < pending.length + visibleJobs.length) {
+          const job = visibleJobs[index - pending.length];
+          return <WorkshopExportRow job={job} project={projectsById.get(job.project_id)}
+            order={index + 1} canStart={false} history={history} />;
+        }
+        return <VisualizerExportRow task={visibleVisualizerTasks[index - pending.length - visibleJobs.length]} order={index + 1} />;
+      }}
+    </QueueTaskList>
   </QueueFrame>;
 }

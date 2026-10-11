@@ -15,7 +15,7 @@ import "./Drawer.css";
 const ENTER_MS = 400;
 /** The slide back out; a panel that was put away stays mounted this long. */
 const LEAVE_MS = 260;
-/** A `fit` panel waits beyond the edge this long, at most, for its height to be measured. */
+/** Fallback for a body with no measure; explicit pending content is allowed to finish first. */
 const HOLD_MS = 120;
 const HEIGHT_KEY = "kd-drawer-height";
 const MIN_HEIGHT = 180;
@@ -43,7 +43,7 @@ export function useDrawer(): string | null { return useContext(DrawerContext); }
  * it is still waiting for what decides its height (`data-drawer-pending`).
  */
 function fittingHeight(sheet: HTMLElement, body: HTMLElement): number | null {
-  if (body.querySelector("[data-drawer-pending]")) return null;
+  if (pendingBody(body)) return null;
   // A part that is squeezed to nothing still counts; one that is not drawn at all (a page that
   // is kept but hidden) does not, nor does the still copy of a page that is sliding out: the
   // height follows the page that arrives from the moment the switch starts.
@@ -67,6 +67,11 @@ function fittingHeight(sheet: HTMLElement, body: HTMLElement): number | null {
   });
   // Whole pixels, rounded up so that nothing is left to scroll; the margin absorbs float noise.
   return Math.ceil(sheet.getBoundingClientRect().height + lack - 0.05);
+}
+
+/** A leaving page's still copy cannot keep the new page waiting. */
+function pendingBody(body: HTMLElement): boolean {
+  return [...body.querySelectorAll("[data-drawer-pending]")].some(node => !node.closest(".kd-slide-ghost"));
 }
 
 /** Where a panel lies in the window, by its layout alone: a panel on its way in is moved by a
@@ -237,27 +242,32 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
     if (eager && body.current && layer.current) setFit(fittingHeight(layer.current, body.current));
     // Only the first picture is decided here; later changes are followed below.
   }, []);
-  // A `fit` panel does not know its height until its body is built and measured, a few frames
-  // on. It waits beyond the edge for that, so that it comes in at the height it keeps instead of
-  // changing height on the way. A body that takes longer (a picture still being fetched) is not
-  // waited for: the panel comes in at half the room and follows when the height is known.
+  // A `fit` panel arrives at its prepared height. Explicitly pending content (settings'
+  // storage statistics, for example) must not be mistaken for a short finished page.
   const [patient, setPatient] = useState(spec.extent === "fit" && !userSized);
-  const held = patient && fit === null && !leaving;
+  const held = patient && fit === null;
   useEffect(() => {
-    if (!patient) return;
-    const timer = window.setTimeout(() => setPatient(false), HOLD_MS);
+    if (!held || leaving) return;
+    const timer = window.setTimeout(() => {
+      const node = body.current, sheet = layer.current;
+      if (node && pendingBody(node)) return;
+      // The fallback can run before the scheduled measurement; finish it before releasing.
+      if (node && sheet) setFit(fittingHeight(sheet, node));
+      setPatient(false);
+    }, HOLD_MS);
     return () => window.clearTimeout(timer);
-  }, [patient]);
+  }, [held, leaving]);
   // At rest the sheet is no longer a moving layer, and a change of height may be shown.
   const [settled, setSettled] = useState(false);
   useEffect(() => {
-    if (held) return;
+    if (held || leaving) return;
     const duration = prefersReducedMotion() ? MOTION_REDUCED_MS : spec.contentKey !== undefined ? MOTION_IN_MS : ENTER_MS;
     const timer = window.setTimeout(() => setSettled(true), duration + 80);
     return () => window.clearTimeout(timer);
-  }, [held, spec.contentKey]);
+  }, [held, leaving, spec.contentKey]);
   useEffect(() => {
-    if (!sized) return;
+    // Measure before the entrance and at rest, never while the panel is sliding in.
+    if (!sized || !built || (!held && !settled)) return;
     const node = body.current, sheet = layer.current, host = sheet?.parentElement;
     if (!node || !sheet || !host || leaving) return;
     let frame = 0;
@@ -266,6 +276,8 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
       const next = fittingHeight(sheet, node);
       // A pixel either way is rounding, not a change of content.
       if (next !== null && (fitRef.current === null || Math.abs(next - fitRef.current) > 1)) setFit(next);
+      // A completed body with no measurable scroller uses its extent, not an endless hold.
+      if (next === null && !pendingBody(node)) setPatient(false);
     };
     const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
     schedule();
@@ -275,17 +287,19 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
     const changed = new MutationObserver(schedule);
     changed.observe(node, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "open", "aria-expanded", "data-drawer-pending"] });
     return () => { cancelAnimationFrame(frame); resized.disconnect(); changed.disconnect(); };
-  }, [sized, leaving]);
+  }, [sized, built, held, settled, leaving]);
   // The animation is the usual end of a leaving drawer; the timer covers a tab in the background.
   // Loading the next song must not restart that deadline on every parent render.
   const gone = useRef(onGone);
   gone.current = onGone;
   useEffect(() => {
     if (!leaving) return;
+    // Cancelled before it was visible: there is no outgoing picture to animate.
+    if (held) { gone.current(); return; }
     const duration = prefersReducedMotion() ? MOTION_REDUCED_MS : spec.contentKey !== undefined ? MOTION_OUT_MS : LEAVE_MS;
     const timer = window.setTimeout(() => gone.current(), duration + 120);
     return () => window.clearTimeout(timer);
-  }, [leaving, spec.contentKey]);
+  }, [leaving, held, spec.contentKey]);
   // The app's own layer under the whole panel, and the ink that layer asks for.
   const backdrop = useSurfaceBackdrop(spec.backdrop);
   return <section ref={layer} className="kd-drawer" data-app={spec.id} data-extent={spec.extent}
@@ -294,7 +308,7 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
     style={fit === null ? backdrop.style : { ...backdrop.style, "--kd-drawer-fit": `${fit}px` } as CSSProperties}
     {...backdrop.attributes} data-leaving={leaving || undefined} data-held={held || undefined} data-settled={settled && !leaving || undefined}
     role="region" aria-label={leaving ? undefined : spec.title}
-    aria-hidden={leaving || undefined} inert={leaving}
+    aria-hidden={leaving || held || undefined} inert={leaving || held}
     onAnimationEnd={event => {
       if (event.target !== event.currentTarget) return;
       if (leaving) onGone();
@@ -305,7 +319,7 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
       {spec.usePage ? <PagedTitle spec={spec} usePage={spec.usePage} leaving={leaving} panelId={panelId} />
         : <DrawerTitle spec={spec} leaving={leaving} panelId={panelId} />}
       <div ref={body} className="kd-drawer-body" id={panelId} role={spec.pages ? "tabpanel" : undefined}
-        data-late={eager ? undefined : "true"}>{built ? spec.body : null}</div>
+        data-late={eager || spec.extent === "fit" ? undefined : "true"}>{built ? spec.body : null}</div>
     </DrawerContext.Provider>
     {onResizeStart && !leaving && !inWindow && <div className="kd-drawer-resize" role="separator" aria-orientation="vertical"
       aria-label="调整抽屉宽度" onPointerDown={onResizeStart} />}

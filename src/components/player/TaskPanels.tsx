@@ -1,8 +1,10 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
 import { ExternalLink, Radio, Square } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useLiveVjStore } from "../../stores/liveVjStore";
+import { useWorkshopStore } from "../../stores/workshopStore";
+import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { liveVjRunning, liveVjSupported } from "../../lib/liveVj";
 import { useLiveVjStatus } from "../../lib/useLiveVjStatus";
 import { useTrackCoverStack } from "../../lib/useTaskCovers";
@@ -11,6 +13,7 @@ import { TaskCoverStack } from "../common/TaskCover";
 import { QueuePanel } from "../download/QueuePanel";
 import { ExportQueuePanel } from "../composition/ExportQueuePanel";
 import { SlidePages } from "../drawer/SlidePages";
+import type { QueueListPosition } from "../queue/QueueTaskList";
 import "./TaskPanels.css";
 
 /** The task pages in title order: what is running and what is done, for downloads and for exports. */
@@ -22,15 +25,41 @@ export const taskViews: { id: TaskPanelView; label: string; title?: string }[] =
 ];
 const taskViewIds = taskViews.map(item => item.id);
 
-/** The page in view of the task list. Switching slides sideways in title order. */
+/** Give the title and slide a painted frame before building the requested page. */
+function TaskPageBody({ view, position, onReady }: {
+  view: TaskPanelView; position: QueueListPosition; onReady(): void;
+}) {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => startTransition(() => setReady(true)));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  useEffect(() => { if (ready) onReady(); }, [ready, onReady]);
+  const exportView = view === "exports" || view === "export-history";
+  return <div className="kd-task-page" data-drawer-pending={!ready || undefined} aria-busy={!ready || undefined}>
+    {ready && (exportView
+      ? <ExportQueuePanel history={view === "export-history"} position={position} />
+      : <QueuePanel history={view === "history"} position={position} />)}
+  </div>;
+}
+
+/** Only the requested page is mounted; the stores retain data, not hidden copies of the lists. */
 export function DownloadTaskPages() {
   const view = useTaskPanelStore(state => state.view);
-  const exportView = view === "exports" || view === "export-history";
-  const [visitedExports, setVisitedExports] = useState(exportView);
-  useEffect(() => { if (exportView) setVisitedExports(true); }, [exportView]);
+  const positions = useRef<Record<TaskPanelView, QueueListPosition>>({
+    downloads: {}, history: {}, exports: {}, "export-history": {},
+  });
+  const visitedExports = useRef(false);
+  const onReady = useCallback(() => {
+    if ((view !== "exports" && view !== "export-history") || visitedExports.current) return;
+    visitedExports.current = true;
+    void useWorkshopStore.getState().refresh();
+    void useVisualizerExportStore.getState().initialize().catch(() => undefined);
+  }, [view]);
   return <SlidePages page={view} order={taskViewIds}>
-    <div className="kd-task-page" hidden={exportView}><QueuePanel history={view === "history"} /></div>
-    {(visitedExports || exportView) && <div className="kd-task-page" hidden={!exportView}><ExportQueuePanel history={view === "export-history"} /></div>}
+    <TaskPageBody key={view} view={view} position={positions.current[view]} onReady={onReady} />
   </SlidePages>;
 }
 

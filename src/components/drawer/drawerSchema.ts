@@ -16,7 +16,8 @@ import type { ReactNode } from "react";
  * class `kd-scroll` or the attribute `data-drawer-scroll`. Every part beside them, and everything
  * inside them, must have a height of its own: one that merely fills what it is given says
  * nothing about what it needs. A body that is still fetching what decides its height carries
- * `data-drawer-pending` on some element until it has it.
+ * `data-drawer-pending` until its first result or error; a `fit` panel waits offscreen for that
+ * initial content and keeps its measured height throughout the entrance.
  */
 export type DrawerExtent = "fit" | "at-least-half" | "two-thirds" | "full";
 

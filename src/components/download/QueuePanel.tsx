@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -36,7 +36,8 @@ import { taskCoverKind } from "../../lib/taskCovers";
 import { useDownloadTaskCovers } from "../../lib/useTaskCovers";
 import { Button, ContextMenu, InlineNotice } from "../common";
 import { TaskCover } from "../common/TaskCover";
-import { QueueChoice, QueueEntry, QueueFrame, QueueList, QueueOverview } from "../queue/QueuePrimitives";
+import { QueueChoice, QueueEntry, QueueFrame, QueueOverview } from "../queue/QueuePrimitives";
+import { QueueTaskList, type QueueListPosition } from "../queue/QueueTaskList";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 import { PlatformMark } from "./PlatformMark";
 import { installDownloadEntryDrop } from "../../lib/downloadDropEntry";
@@ -678,21 +679,14 @@ function QueuePrefsBar({
   );
 }
 
-export function QueuePanel({ history = false }: { history?: boolean }) {
+export function QueuePanel({ history = false, position }: { history?: boolean; position: QueueListPosition }) {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
   const done = useDownloadStore((store) => store.history);
   const checkMissingFiles = useDownloadStore((store) => store.checkMissingFiles);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const scrollPositions = useRef({ downloads: 0, history: 0 });
-  useLayoutEffect(() => {
-    const node = scrollRef.current;
-    const view = history ? "history" : "downloads";
-    if (node) node.scrollTop = scrollPositions.current[view];
-  }, [history]);
-  const visibleTasks = history
+  const visibleTasks = useMemo(() => history
     ? sortDownloadHistory([...done, ...list.filter((task) => task.state === "canceled")])
-    : list.filter((task) => task.state !== "canceled");
+    : list.filter((task) => task.state !== "canceled"), [history, done, list]);
   // 挂载、切到历史视图和窗口重新聚焦时 stat；文件多半是用户切到文件管理器里挪走的。
   useEffect(() => {
     void checkMissingFiles();
@@ -808,18 +802,9 @@ export function QueuePanel({ history = false }: { history?: boolean }) {
 
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
-      <QueueList ref={scrollRef} onScroll={event => {
-        scrollPositions.current[history ? "history" : "downloads"] = event.currentTarget.scrollTop;
-      }}>
-        {visibleTasks.map((task, index) => (
-          <QueueRow
-            key={task.id}
-            task={task}
-            order={String(index + 1)}
-            onOpenTask={openTask}
-          />
-        ))}
-      </QueueList>
+      <QueueTaskList count={visibleTasks.length} getKey={index => visibleTasks[index].id} position={position}>
+        {index => <QueueRow task={visibleTasks[index]} order={String(index + 1)} onOpenTask={openTask} />}
+      </QueueTaskList>
     </QueueFrame>
   );
 }

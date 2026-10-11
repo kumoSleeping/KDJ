@@ -136,7 +136,7 @@
 }
 /* A panel whose height is still being measured waits beyond the edge, so that it comes in at
    the height it keeps (see DrawerLayer). */
-.kd-drawer[data-held] { animation-play-state: paused; }
+.kd-drawer[data-held] { animation-play-state: paused; visibility: hidden; }
 .kd-drawer[data-extent="two-thirds"] { --kd-drawer-extent: 0.66667; }
 .kd-drawer[data-extent="full"] { --kd-drawer-extent: 1; }
 /* `fit`: exactly as tall as what it holds needs (--kd-drawer-fit, measured by DrawerHost),

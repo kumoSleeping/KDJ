@@ -11,7 +11,6 @@
   resize: vertical;
 }
 .kd-task-page { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
-.kd-task-page[hidden] { display: none; }
 .kd-download-window .kd-download-task-list { overflow-y: auto; overscroll-behavior: contain; }
 .kd-task-tabs { display: inline-flex; align-items: center; gap: 8px; }
 .kd-task-window .kd-task-tabs > button {

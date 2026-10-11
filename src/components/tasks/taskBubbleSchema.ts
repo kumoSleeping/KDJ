@@ -79,6 +79,9 @@ export interface TaskBubbleSpec {
    * acts on most, with a big cover and a title-size name (the playing song).
    */
   size?: TaskSize;
+  /** At narrow widths, give the tools two rows beside the summary and live controls.
+   * The controls give up width, not another row of height. */
+  layout?: "two-row";
   /**
    * Where the bubble comes up: `bottom` (the default) or `top`. Chosen by where the listener
    * is looking when the task reports: `top` for the answer to something pressed in the top
