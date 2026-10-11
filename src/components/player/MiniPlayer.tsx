@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Maximize2, Minimize2, Pin, PinOff } from "lucide-react";
+import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
 import { lyricLineAt } from "../../lib/miniPlayerLyric";
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
@@ -65,11 +66,13 @@ function useMiniPlayerLyric(on: boolean): void {
     if (!on) return;
     let cached: number | null = null;
     const playing = () => useTaskBubbles.getState().entries.find(entry => entry.spec.kind === "playing" && !entry.leaving);
-    const write = (line: string) => {
+    const write = (line: string, keep = false) => {
       const entry = playing();
       const track = getPlayingTrack();
       if (!entry || !track || entry.spec.song !== track.id) return;
-      const detail = line || track.artist || undefined;
+      // A song with lyrics keeps the line between two of them, so the window does not change
+      // height every time the singing stops.
+      const detail = line || track.artist || (keep ? "\u00a0" : undefined);
       if (entry.spec.detail !== detail) updateTask(entry.spec.id, { detail });
     };
     const update = () => {
@@ -81,7 +84,8 @@ function useMiniPlayerLyric(on: boolean): void {
         void useLyricsStore.getState().ensure(track, { cacheOnly: true });
       }
       const session = getPlayerSession();
-      write(session.trackId === track.id ? lyricLineAt(useLyricsStore.getState().get(track.id).lines, session.position) : "");
+      const lines = useLyricsStore.getState().get(track.id).lines;
+      write(session.trackId === track.id ? lyricLineAt(lines, session.position) : "", hasVisibleLyrics(lines));
     };
     const stops = [subscribePlayerSession(update), subscribePlayingTrack(update), useLyricsStore.subscribe(update), useTaskBubbles.subscribe(update)];
     update();

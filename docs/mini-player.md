@@ -37,10 +37,15 @@ frame). macOS and Windows run the same steps through the same window calls.
   window (first empty, then with the page drawn to fit) and was rejected both times: the one
   thing that moves is the bubble's flight.
 - **The window never changes size where it can be seen.** A WebView shows its last picture,
-  from the top-left corner, until the page has drawn for the new size. So the native side
-  puts the window beyond the screens, gives it its size there, and shows it at its frame when
-  the page has drawn (`collapse`/`expand`, then `reveal`); should the page never ask, it is
-  shown after a moment anyway.
+  from the top-left corner, until the page has drawn for the new size (a window that grows
+  shows the window's own colour where the picture ends). So the native side takes the window
+  out of sight, gives it its size, and shows it at its frame when the page has drawn
+  (`collapse`/`expand`, then `reveal`); should the page never ask, it is shown after a moment
+  anyway. Out of sight is all but clear on macOS, which brings a window that is given a size
+  back onto its screen (moving it beyond the screens there showed the resize: a flicker going
+  down, and a tall blank window before the whole one coming back); elsewhere it is beyond the
+  screens. Everything done to the window in between, the main window's smallest size
+  included, comes after it is out of sight.
 - **Who flies.** While the mini player's place lies wholly inside the whole window's frame,
   the page flies the bubble (`fly()` in `miniPlayer.ts`, a transform along `flightPath`): down
   before the whole window goes, back after it has come, which is the order the listener is
