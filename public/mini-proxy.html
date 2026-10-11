@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <!-- The mini player's stand-in (src/lib/miniPlayerProxy.ts, src-tauri/src/mini_player.rs):
+         a small window that shows a picture of the playing song's bubble while the main
+         window changes between the whole window and the mini player. It holds no app code and
+         takes no input. CSP is script-src 'self': the script is a file of its own. -->
+    <meta charset="UTF-8" />
+    <title>KDJ</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      body { pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <script src="/mini-proxy.js"></script>
+  </body>
+</html>

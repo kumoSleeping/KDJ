@@ -55,6 +55,19 @@ frame). macOS and Windows run the same steps through the same window calls.
   down, and a tall blank window before the whole one coming back); elsewhere it is beyond the
   screens. Everything done to the window in between, the main window's smallest size
   included, comes after it is out of sight.
+- **The bubble is never seen to leave the screen: the stand-in.** While the window is out of
+  sight, a second small window (`mini-proxy`, `public/mini-proxy.html` and `.js`) stands in
+  for the bubble. It is shown exactly over the bubble before the window goes and taken away a
+  little after the window is back with the bubble under it, so the two overlap at both ends
+  and what the listener sees is a bubble that stays while the window behind it goes or comes.
+  It has the main window's frame (so it and the mini player are one shape, shadow included)
+  and shows a picture: `miniPlayerProxy.ts` hands it the bubble's markup, the page's style
+  sheets (once) and the root's attributes, and its page lays that out as the bubble looks as
+  the mini player. It holds no app code, takes no input, and may call only the two commands
+  that fetch the picture and say it is drawn (`capabilities/mini-proxy.json`). Should it not
+  be drawn in time, the steps go on without it. The mini player's three keys are in the
+  bubble at all times and CSS shows the ones that apply, so a picture taken in the whole
+  window has the mini player's keys.
 - **Who flies.** While the mini player's place lies wholly inside the whole window's frame,
   the page flies the bubble (`fly()` in `miniPlayer.ts`, a transform along `flightPath`): down
   before the whole window goes, back after it has come, which is the order the listener is

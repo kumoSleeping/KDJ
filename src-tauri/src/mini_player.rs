@@ -10,8 +10,14 @@
 //! the place it was last left at. The page draws that flight itself while both ends are inside
 //! the whole window; otherwise the mini player's own window flies (`settle`, `recall`).
 //!
+//! While the window is out of sight a second, small window stands in for the bubble (the
+//! stand-in, `mini_proxy_*`): a picture of the bubble that the page hands over, shown exactly
+//! over the bubble before the window goes and taken away after the window is back. So the
+//! bubble is never seen to leave the screen: when the whole window goes it is still there, and
+//! when the whole window comes it is there until the window's own bubble is under it.
+//!
 //! Every platform runs the same steps through the same window calls; only the macOS window
-//! buttons need a call of their own.
+//! buttons and its fade need calls of their own.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -38,6 +44,9 @@ const SETTLE: Duration = Duration::from_millis(40);
 /// Kept between the mini player and the edge of its screen when it is put back.
 const SCREEN_MARGIN: i32 = 8;
 const SMALLEST: u32 = 48;
+/// The stand-in window, and how long it may take to have the bubble's picture drawn.
+const PROXY_LABEL: &str = "mini-proxy";
+const PROXY_READY_WITHIN: Duration = Duration::from_millis(900);
 
 /// Outer top-left corner and inner size, in physical pixels. The main window has no frame of
 /// its own on any desktop (an overlaid title bar on macOS, no decorations elsewhere).
@@ -98,6 +107,11 @@ struct Inner {
     saved: Saved,
     session: Option<Session>,
     busy: bool,
+    /// The picture the stand-in is to show, until its page has fetched it, and which showing
+    /// it belongs to; `proxy_drawn` is the showing the stand-in last said it had drawn.
+    proxy_order: Option<String>,
+    proxy_token: u64,
+    proxy_drawn: u64,
 }
 
 pub struct MiniPlayer {
@@ -860,6 +874,135 @@ pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height
     if next != current {
         apply(&window, next, true);
     }
+    Ok(())
+}
+
+fn proxy_window(app: &AppHandle) -> Result<WebviewWindow, String> {
+    if let Some(window) = app.get_webview_window(PROXY_LABEL) {
+        return Ok(window);
+    }
+    let builder = tauri::WebviewWindowBuilder::new(app, PROXY_LABEL, tauri::WebviewUrl::App("mini-proxy.html".into()))
+        .title("KDJ")
+        .inner_size(384.0, 148.0)
+        .resizable(false)
+        .always_on_top(true)
+        .visible_on_all_workspaces(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .visible(false);
+    // The frame the main window has: the stand-in and the mini player are then one shape.
+    #[cfg(target_os = "macos")]
+    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.decorations(false);
+    let window = builder.build().map_err(|error| error.to_string())?;
+    show_window_buttons(&window, false);
+    Ok(window)
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct ProxyRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyOrder {
+    token: u64,
+    picture: String,
+}
+
+/// The stand-in shows `picture` (what the page made of the bubble, for the stand-in's page to
+/// lay out) exactly over `rect` of the main window (CSS pixels of the viewport), or over the
+/// whole main window when that is the bubble already. It is shown only when it has drawn the
+/// picture; false: it did not in time, and the steps go on without it.
+#[tauri::command]
+pub async fn mini_proxy_show(
+    app: AppHandle,
+    window: WebviewWindow,
+    rect: Option<ProxyRect>,
+    picture: String,
+) -> Result<bool, String> {
+    main_only(&window)?;
+    let mini = mini_of(&app)?;
+    let proxy = proxy_window(&app)?;
+    let whole = frame_of(&window)?;
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let px = |value: f64| (value * scale).round();
+    let frame = rect.map_or(whole, |rect| Frame {
+        x: whole.x + px(rect.x) as i32,
+        y: whole.y + px(rect.y) as i32,
+        width: px(rect.width).max(1.0) as u32,
+        height: px(rect.height).max(1.0) as u32,
+    });
+    let token = {
+        let mut inner = mini.lock();
+        inner.proxy_token += 1;
+        inner.proxy_order = Some(picture);
+        inner.proxy_token
+    };
+    // Out of sight until it has drawn, and a window that draws meanwhile.
+    set_alpha(&proxy, CLEAR);
+    let hidden = if cfg!(target_os = "macos") {
+        frame
+    } else {
+        let (x, y) = beyond(&monitors_of(&window));
+        Frame { x, y, ..frame }
+    };
+    apply(&proxy, hidden, true);
+    let _ = proxy.show();
+    // A stand-in that is loaded fetches the order now; one that is loading fetches it when it has.
+    let _ = proxy.eval("window.__kdMiniProxyFetch && window.__kdMiniProxyFetch()");
+    let started = Instant::now();
+    let drawn = loop {
+        if mini.lock().proxy_drawn == token {
+            break true;
+        }
+        if started.elapsed() >= PROXY_READY_WITHIN {
+            break false;
+        }
+        tokio::time::sleep(TICK).await;
+    };
+    if !drawn {
+        let _ = proxy.hide();
+        return Ok(false);
+    }
+    apply(&proxy, frame, false);
+    set_alpha(&proxy, 1.0);
+    tokio::time::sleep(SETTLE).await;
+    Ok(true)
+}
+
+/// The stand-in is taken away: what it stood in for is on show under it.
+#[tauri::command]
+pub fn mini_proxy_hide(app: AppHandle) -> Result<(), String> {
+    if let Some(proxy) = app.get_webview_window(PROXY_LABEL) {
+        let _ = proxy.hide();
+    }
+    Ok(())
+}
+
+/// The stand-in's page asks what it is to show.
+#[tauri::command]
+pub fn mini_proxy_take(app: AppHandle, window: WebviewWindow) -> Result<Option<ProxyOrder>, String> {
+    if window.label() != PROXY_LABEL {
+        return Err("只有迷你播放器的替身可以取画面".into());
+    }
+    let mini = mini_of(&app)?;
+    let mut inner = mini.lock();
+    let token = inner.proxy_token;
+    Ok(inner.proxy_order.take().map(|picture| ProxyOrder { token, picture }))
+}
+
+/// The stand-in's page has drawn the picture of showing `token`.
+#[tauri::command]
+pub fn mini_proxy_drawn(app: AppHandle, window: WebviewWindow, token: u64) -> Result<(), String> {
+    if window.label() != PROXY_LABEL {
+        return Err("只有迷你播放器的替身可以报告".into());
+    }
+    mini_of(&app)?.lock().proxy_drawn = token;
     Ok(())
 }
 

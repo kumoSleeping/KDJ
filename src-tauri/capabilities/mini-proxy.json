@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "mini-proxy",
+  "description": "迷你播放器的替身窗口：只显示主窗口交给它的一张气泡画面，只能调用取画面和报告画好的两个应用命令（命令自身校验窗口标签）。",
+  "windows": [
+    "mini-proxy"
+  ],
+  "permissions": [
+    "core:event:allow-listen"
+  ]
+}

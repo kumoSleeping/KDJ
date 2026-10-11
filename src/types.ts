@@ -1040,6 +1040,12 @@ export interface MiniPlayerBridge {
   /** 气泡换了大小，窗口立刻跟上。CSS 像素。 */
   fit(width: number, height: number): Promise<void>;
   setOnTop(onTop: boolean): Promise<MiniPlayerState>;
+  /**
+   * 替身小窗（src/lib/miniPlayerProxy.ts）：把 `picture` 画好后正好盖在主窗口的 `rect` 上
+   * （CSS 像素；null 表示盖住整个主窗口，即它已经是气泡时）。没能及时画好返回 false。
+   */
+  proxyShow(rect: { x: number; y: number; width: number; height: number } | null, picture: string): Promise<boolean>;
+  proxyHide(): Promise<void>;
 }
 
 export interface KdjBridge {

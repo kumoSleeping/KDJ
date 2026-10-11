@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { dropStandIn, raiseStandIn } from "./miniPlayerProxy";
 import { prefersReducedMotion } from "./motion";
 import { useWindowTaken } from "./windowTaken";
 
@@ -51,6 +52,9 @@ const FLIGHT_RISE = { share: 0.3, least: 56, most: 240 } as const;
 /** Another song: how long the mini player takes to leave the screen and to come back onto it,
  *  and how long it stays away: at least long enough for the bubble to have let the old song
  *  go, at most this long whatever the bubble does. */
+/** How long the stand-in stays after the window is back under it: it goes a little late, never
+ *  a little early. */
+const STAND_IN_LINGERS_MS = 120;
 const DIP_OUT_MS = 240;
 const DIP_IN_MS = 380;
 const DIP_AWAY_MS = { least: 160, most: 1400 } as const;
@@ -156,6 +160,7 @@ async function restore(): Promise<void> {
     await bridge.expand(false).catch(() => {});
     await bridge.reveal(false).catch(() => {});
   }
+  dropStandIn();
   clearPage();
   useWindowTaken.getState().release(MINI_PLAYER);
   setPhase("off");
@@ -195,6 +200,8 @@ export async function collapseToMiniPlayer(): Promise<void> {
       await flight?.finished.catch(() => {});
       at = { x: place[0], y: place[1] };
     }
+    // The stand-in is over the bubble before the whole window goes, and stays when it has gone.
+    const covered = await raiseStandIn(slot, { x: at.x, y: at.y, width: box.width, height });
     keepLayout(whole);
     const state = await bridge.collapse({
       x: at.x, y: at.y, width: box.width, height, homeRight: home.x + box.width, homeBottom: home.y + height,
@@ -213,6 +220,11 @@ export async function collapseToMiniPlayer(): Promise<void> {
       await drawnFor(window.innerWidth, tall);
     }
     await bridge.reveal(animated);
+    // The window is the bubble under the stand-in: only now is the stand-in taken away.
+    if (covered) {
+      await pause(STAND_IN_LINGERS_MS);
+      dropStandIn();
+    }
     // A place outside the whole window: the mini player's own window flies there.
     await bridge.settle(animated).catch(() => {});
   } catch (error) {
@@ -243,6 +255,9 @@ export async function expandFromMiniPlayer(): Promise<void> {
     }
     // Otherwise the mini player's own window flies back to that corner first.
     await bridge.recall(animated, !!away).catch(() => {});
+    // The stand-in is over the mini player before it goes, and stays until the whole window
+    // is there with its bubble under it.
+    const covered = slot ? await raiseStandIn(slot, null) : false;
     await bridge.expand(animated);
     setPhase("landing");
     if (away && slot) {
@@ -252,6 +267,10 @@ export async function expandFromMiniPlayer(): Promise<void> {
     // The page draws the whole window, the bubble still at its place, before it is shown.
     if (whole) await drawnFor(whole.width, whole.height);
     await bridge.reveal(animated);
+    if (covered) {
+      await pause(STAND_IN_LINGERS_MS);
+      dropStandIn();
+    }
     flight?.play();
     await flight?.finished.catch(() => {});
     clearPage();

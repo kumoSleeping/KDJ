@@ -297,6 +297,8 @@ async function createTauriBridge(): Promise<KdjBridge> {
       comeBack: (inMs, width, height) => tauriInvoke("mini_player_come_back", { inMs, width, height }),
       fit: (width, height) => tauriInvoke("mini_player_fit", { width, height }),
       setOnTop: (onTop) => tauriInvoke("mini_player_set_on_top", { onTop }),
+      proxyShow: (rect, picture) => tauriInvoke("mini_proxy_show", { rect, picture }),
+      proxyHide: () => tauriInvoke("mini_proxy_hide"),
     } : undefined,
     desktopLyrics: desktop
       ? // 颜色和不透明度不进 Rust：它们不影响窗口尺寸或层级，歌词窗口那个
