@@ -2796,11 +2796,15 @@ body[data-kd-search-pointer-dragging="true"] * {
   z-index: 60;
   isolation: isolate;
   display: grid;
-  /* 右侧 EQ 的固定宽度：右列至少留出这么多，波形也按它在右边收住。 */
+  /* 旋钮那一排（五颗旋钮 + Tempo）的宽度。 */
   --kd-player-eq-w: clamp(264px, 26vw, 336px);
+  /* 走带右边那一块（工具键 / 旋钮，一次一面）至少留出的宽度：窗口够宽时旋钮那面一行排得下，
+     窄了旋钮先收到最小，再窄那一面自己横向滚，不把左边的歌名挤没。两面共用同一个数，
+     换面时别的都不动。 */
+  --kd-player-side-w: clamp(14rem, 42vw, 26.5rem);
   /* 行列结构由应用统一控制，主题只负责外观，不能用独立断点把桌面底栏拆成三行。
-     中间控制组按内容取宽，两侧均分余量，但右列不小于 EQ；只有统一的竖屏布局在下方改成三行。 */
-  grid-template-columns: minmax(0, 1fr) auto minmax(var(--kd-player-eq-w), 1fr) !important;
+     中间控制组按内容取宽，两侧均分余量，但右列不小于上面那个数；只有统一的竖屏布局在下方改成三行。 */
+  grid-template-columns: minmax(0, 1fr) auto minmax(var(--kd-player-side-w), 1fr) !important;
   grid-template-rows: auto auto !important;
   grid-template-areas:
     "now controls next"
@@ -2871,11 +2875,12 @@ body[data-kd-search-pointer-dragging="true"] * {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 0.25rem;
   min-width: 0;
 }
-/* 桌面播放条的两台 deck 占用网格两侧真正剩下的宽度。中间工具组会因视频键、
-   时间等内容变宽，不能再用「视口一半减固定值」估算安全边界；那会让左侧长标题
-   钻到工具下面。跨两行仍保留大唱盘，同时网格列会自动扩展空闲空间并在工具前收住。 */
+/* 桌面播放条的两侧占用网格两侧真正剩下的宽度。中间走带组按内容取宽，不能再用
+   「视口一半减固定值」估算安全边界；那会让左侧长标题钻到走带下面。左边跨两行保留
+   大唱盘；右边只占走带那一行，下面一整行都是波形的。 */
 .kd-app:not([data-tall="true"]) .kd-player-leading,
 .kd-app:not([data-tall="true"]) .kd-player-trailing {
   position: relative;
@@ -2885,13 +2890,16 @@ body[data-kd-search-pointer-dragging="true"] * {
   left: auto;
   width: auto;
   align-self: stretch;
-  grid-row: 1 / -1;
 }
 .kd-app:not([data-tall="true"]) .kd-player-leading {
   grid-column: 1;
+  grid-row: 1 / -1;
 }
 .kd-app:not([data-tall="true"]) .kd-player-trailing {
   grid-column: 3;
+  grid-row: 1;
+  /* 旋钮那面的高度；工具键那面矮一些，行高不跟着换面变。 */
+  min-height: 42px;
 }
 .kd-player-deck {
   width: 100%;
@@ -2921,7 +2929,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   text-align: inherit;
   cursor: pointer;
 }
-/* 右侧是 EQ / 播放控制：贴右、跨两行。整块仍是“下一首”通道的拖入目标。 */
+/* 右侧是工具键 / 旋钮那一块：贴右。整块仍是“下一首”通道的拖入目标。 */
 .kd-player-trailing {
   border-radius: 0.65rem;
   transition: background 0.12s, box-shadow 0.12s;
@@ -3075,13 +3083,11 @@ body[data-kd-search-pointer-dragging="true"] * {
   /* 左唱盘是绝对定位，原先 wave 横跨整行只是被黑胶盖住；实际轨道仍从
      唱盘里面穿过去。这里把起点与左侧文字（唱盘之后）对齐。 */
   margin-left: calc(0.85rem + 4.25rem + 0.35rem);
-  /* 右侧在 EQ 前收住：EQ 跨两行，波形不能从它下面穿过去。 */
-  margin-right: calc(var(--kd-player-eq-w) + 0.75rem);
+  /* 右边一直到头：和上一行末尾的键收在同一条边上。 */
   grid-template-columns: minmax(10rem, 1fr);
   grid-template-areas: "waveform";
   align-items: center;
   column-gap: 0.45rem;
-  padding-right: clamp(0.2rem, 0.6vw, 0.5rem);
   font-variant-numeric: tabular-nums;
   color: var(--kd-muted);
   font-size: var(--kd-size-xs);
@@ -6220,22 +6226,24 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   grid-area: controls;
   position: relative;
   z-index: 2;
-  width: min(30rem, 100%);
+  /* 左边只有音量，右边只有时间：两侧等宽（取宽的那个），三颗键就在这一组的正中。 */
+  width: max-content;
+  max-width: 100%;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   column-gap: 0.45rem;
 }
-/* 三颗走带键自己组成中列；左右辅助工具不会再参与它们的几何中心。 */
+/* 三颗走带键自己组成中列；左右的音量和时间不参与它们的几何中心。 */
 .kd-player-transport-core {
   grid-column: 2;
   display: flex;
   align-items: center;
   gap: 0.45rem;
 }
-/* 宽屏仍让辅助工具贴着走带组；三行播放器会在下面的响应式规则里把两侧
-   工具接成一列，从整条控制行的左端开始排。 */
+/* 宽屏让音量和时间贴着走带组；竖长窗口的三行播放器在上面的规则里把它们推到
+   控制行的两端。 */
 .kd-player-transport-side {
   min-width: 0;
   display: flex;
@@ -6411,6 +6419,32 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   gap: 0.1rem;
   margin-right: 0.2rem;
 }
+/* 走带右边那一块的两面：工具键、旋钮，只显示一面，横着滑着换（SlidePages，换面键在
+   PlayerBar.tsx）。两面都贴右端，换面键和收起键始终留在它们右边，不跟着滑。 */
+.kd-player-faces { align-self: stretch; }
+.kd-player-faces > .kd-slide-page {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+}
+.kd-player-face {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.kd-player-face[hidden] { display: none; }
+/* 旋钮那面占满这一块，旋钮靠右（用外边距推，不用 justify-content：放不下时要能滚到开头）。 */
+.kd-player-face[data-face="eq"] {
+  flex: 1 1 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.kd-player-face[data-face="eq"]::-webkit-scrollbar { display: none; }
+.kd-player-face[data-face="eq"] > .kd-player-eq { margin-left: auto; }
+.kd-player-facekey { flex: none; }
+.kd-player-facekey[data-on="true"] { color: var(--kd-text); }
 .kd-player-colorbtn { width: 1.45rem; }
 /* Panel switches keep the same quiet ink in either state; labels and aria-pressed carry it.
    Auto-advance is a playback mode, not a panel switch. Theme packs keep their own keys. */
@@ -6433,7 +6467,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   height: 1.7rem;
   margin-left: 0;
 }
-/* 与旁边自动切歌键同一套：灰=歌词关闭/视频侧栏，红=歌词开启/视频小窗。音量左侧这一组开关键是界面里唯一允许用红色的地方。 */
+/* 与旁边自动切歌键同一套：灰=歌词关闭/视频侧栏，红=歌词开启/视频小窗。走带右边工具键里的这一组开关键是界面里唯一允许用红色的地方。 */
 .kd-player-lyricsbtn[data-on="true"] {
   color: var(--kd-red);
 }
@@ -6453,9 +6487,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-player-songbtn { width: 1.45rem; }
 .kd-player-songbtn[data-on="true"] { color: var(--kd-red); }
 .kd-player-songbtn[data-on="true"]:hover:not(:disabled) { color: color-mix(in srgb, var(--kd-red) 85%, #000); }
-@media (min-width: 1200px) {
-  .kd-app:not([data-tall="true"]) .kd-player-transport { width: min(31.5rem, 100%); }
-}
 @media (max-width: 1199px) {
   .kd-app:not([data-tall="true"]) .kd-player-songbtn { display: none; }
 }
@@ -6465,7 +6496,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 /* Sakura latches switches while enabled and the mode button while its menu is
    open. Transport/download/reroll actions retain only the theme's :active feedback.
    Apply here so already-installed theme packs receive the fix through HMR too. */
-:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn, .kd-player-songbtn)[aria-pressed="true"],
+:root[data-theme-pack="sakulaptop98"] .kd-app :is(.kd-player-auto-advance, .kd-player-lyricsbtn, .kd-player-popupbtn, .kd-player-songbtn, .kd-player-facekey)[aria-pressed="true"],
 :root[data-theme-pack="sakulaptop98"] .kd-app .kd-player-mode[aria-expanded="true"] {
   color: var(--kd-theme);
   box-shadow: var(--s98-sunken);

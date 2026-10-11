@@ -215,7 +215,7 @@ function NowPlayingControls({
 
   return (
     <div className="kd-manager-control" data-side={side === null ? undefined : side === 0 ? "a" : "b"} aria-busy={!ready}>
-      {/* Controls sit on the transport's row, readouts on the waveform's row below. */}
+      {/* Controls first, readouts after: beside them on a wide window, beneath on a tall one. */}
       <div className="kd-manager-knob-stack">
         <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
           format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }} />
