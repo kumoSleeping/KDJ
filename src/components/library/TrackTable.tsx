@@ -24,7 +24,7 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
-import { useRowList, useScrollMotion } from "../common/rowList";
+import { rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
 import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
@@ -712,8 +712,6 @@ interface TrackRowProps extends Omit<TrackCellsProps, "track"> {
   track: TrackSummary | undefined;
   /** 在当前顺序里的位置（从 0 起）。 */
   index: number;
-  /** Where the row lies in the list, in pixels from the first row. */
-  top: number;
   showIndex: boolean;
   /** Rows are being picked: the index gives way to the selection mark (see TrackTable's `selecting`). */
   selectionMode: boolean;
@@ -729,9 +727,9 @@ interface TrackRowProps extends Omit<TrackCellsProps, "track"> {
 }
 
 /**
- * 一行曲目：一个绝对定位的块，由 `top` 摆在自己的位置上。滚动只是把窗口挪几行：留在窗口里的行
- * props 不变，整行跳过；真正要渲染的只有新进来的那几行。摘要到达时内容在同一个元素里换上，行
- * 不重挂。
+ * 一行曲目：文档流里的一个 grid，不定位（定位元素是 WebKit 的一个层，两千个层让每次滚动都要
+ * 遍历两千个层）。窗口挪动时留在窗口里的行 props 不变，整行跳过；真正要渲染的只有新进来的那几行。
+ * 摘要到达时内容在同一个元素里换上，行不重挂。
  */
 /** Dev: rows rendered since the page loaded (the scroll trace reads the difference). */
 let rowRenders = 0;
@@ -740,7 +738,6 @@ const TrackRow = memo(function TrackRow({
   id,
   track,
   index,
-  top,
   showIndex,
   selectionMode,
   selected,
@@ -760,7 +757,6 @@ const TrackRow = memo(function TrackRow({
       className="kd-list-row"
       role="row"
       aria-rowindex={index + 1}
-      style={{ top }}
       data-kd-row-key={id}
       aria-selected={selected}
       aria-busy={!ready || undefined}
@@ -795,9 +791,8 @@ const TrackRow = memo(function TrackRow({
 });
 
 /** 有曲目时下载态占独立序号列，和下面 1/2/3 同宽；无曲目时不单独占一列。 */
-const PendingRow = memo(function PendingRow({ task, top, showIndex, showArtist, showFormat, onMenu, ref }: {
+const PendingRow = memo(function PendingRow({ task, showIndex, showArtist, showFormat, onMenu, ref }: {
   task: DownloadTask;
-  top: number;
   showIndex: boolean;
   showArtist: boolean;
   showFormat: boolean;
@@ -809,7 +804,6 @@ const PendingRow = memo(function PendingRow({ task, top, showIndex, showArtist, 
       ref={ref}
       className="kd-list-row"
       role="row"
-      style={{ top }}
       data-kd-row-key={`pending:${task.id}`}
       data-pending="true"
       data-pending-state={task.state}
@@ -2335,9 +2329,8 @@ export const TrackTable = memo(function TrackTable({
             </div>
           ))}
         </div>
-        <div className="kd-list-body" role="rowgroup" style={{ height: virtualizer.getTotalSize() }}>
+        <div className="kd-list-body" role="rowgroup" style={rowListPadding(items, virtualizer.getTotalSize(), headerH)}>
           {items.map((item) => {
-            const top = item.start - headerH;
             if (item.index < pending) {
               const task = pendingDownloads[item.index];
               return (
@@ -2345,7 +2338,6 @@ export const TrackTable = memo(function TrackTable({
                   key={item.key}
                   ref={registerRow}
                   task={task}
-                  top={top}
                   showIndex={showIndexCol}
                   showArtist={showArtist}
                   showFormat={showFormat}
@@ -2361,7 +2353,6 @@ export const TrackTable = memo(function TrackTable({
                 id={id}
                 track={summaryById.get(id)}
                 index={item.index - pending}
-                top={top}
                 selected={selected.has(id)}
                 focused={id === selectedId}
                 playing={id === playingId}

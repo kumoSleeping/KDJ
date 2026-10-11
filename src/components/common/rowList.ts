@@ -116,12 +116,14 @@ export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHe
   }, [whole, grown, count]);
   const rangeExtractor = useCallback((range: Range) => {
     const window = defaultRangeExtractor(range);
-    // The rows built so far, never past the list (it may have shrunk before the count caught up).
-    const built = Math.min(grownRef.current, range.count);
-    if (built === 0 || (window[0] ?? 0) <= 0 && (window[window.length - 1] ?? -1) >= built - 1) return window;
+    // A short list grows outward from the window, a chunk a tick, until it is whole: one run
+    // of rows, never a gap (the body's padding stands in for what is not built).
+    const grown = grownRef.current;
+    if (grown === 0 || window.length === 0) return window;
+    const first = Math.max(0, window[0] - grown);
+    const last = Math.min(range.count - 1, window[window.length - 1] + grown);
     const indices: number[] = [];
-    for (let index = 0; index < built; index += 1) indices.push(index);
-    for (const index of window) if (index >= built) indices.push(index);
+    for (let index = first; index <= last; index += 1) indices.push(index);
     return indices;
   }, []);
   const virtualizer = useVirtualizer<HTMLElement, HTMLElement>({
@@ -140,6 +142,21 @@ export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHe
     measureElement: measured ? undefined : () => rowHeight,
   });
   return { virtualizer, whole, mounted: whole && grown >= count };
+}
+
+/**
+ * The room the rows that are not built would take, above and below the built ones: the body's
+ * padding, so the built rows lie at their places in the normal flow. `headHeight` is the
+ * virtualizer's scrollMargin, which its offsets include.
+ */
+export function rowListPadding(items: readonly { start: number; end: number }[], totalSize: number, headHeight: number) {
+  if (items.length === 0) return { paddingTop: 0, paddingBottom: Math.max(0, totalSize) };
+  const first = items[0];
+  const last = items[items.length - 1];
+  return {
+    paddingTop: Math.max(0, first.start - headHeight),
+    paddingBottom: Math.max(0, totalSize - (last.end - headHeight)),
+  };
 }
 
 /**

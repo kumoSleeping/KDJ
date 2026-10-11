@@ -84,7 +84,7 @@ import {
   type ResultDelivery,
 } from "./resultArrival";
 import { resultBlocks, resultListIsFlat, resultPickKeys, resultRowCount, type ResultBlock } from "./resultBlocks";
-import { useRowList, useScrollMotion } from "../common/rowList";
+import { rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
 import { createListArrival, type ListArrival } from "../common/listArrival";
 import "../common/RowList.css";
 import "./ResultTable.css";
@@ -1328,7 +1328,7 @@ const ResultTableView = memo(function ResultTableView({
             {visibleColumns.map(renderColumnHead)}
           </div>
         )}
-        <div ref={bodyRef} className="kd-list-body" role="rowgroup" style={{ height: virtualizer.getTotalSize() }}>
+        <div ref={bodyRef} className="kd-list-body" role="rowgroup" style={rowListPadding(virtualItems, virtualizer.getTotalSize(), headPx)}>
           {virtualItems.map((item) => (
             <div
               key={item.key}
@@ -1336,7 +1336,6 @@ const ResultTableView = memo(function ResultTableView({
               className="kd-list-block"
               data-index={item.index}
               data-kd-block-key={String(item.key)}
-              style={{ top: item.start - headPx }}
             >
               {renderBlock(blocks[item.index])}
             </div>

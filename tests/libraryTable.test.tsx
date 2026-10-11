@@ -50,7 +50,8 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
   Object.defineProperty(dom.window.HTMLElement.prototype, "scrollHeight", { get() {
     if (!this.classList.contains("kd-scroll")) return BOX_H;
     const body = this.querySelector<HTMLElement>(".kd-list-body");
-    return HEAD_H + (body ? parseFloat(body.style.height) || 0 : 0);
+    if (!body) return HEAD_H;
+    return HEAD_H + (parseFloat(body.style.paddingTop) || 0) + body.querySelectorAll(".kd-list-row").length * ROW_H + (parseFloat(body.style.paddingBottom) || 0);
   } });
   dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
     const height = heightOf(this);
@@ -141,11 +142,13 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
       assert.equal(arrivalOf(), null, "the marks are taken off when the gesture is over");
       assert.equal(document.querySelector(".kd-list-row[style*='--kd-arrive']"), null);
     }
-    // Rows are independent blocks placed at their offsets, not a table.
+    // Rows are blocks in the normal flow, not a table and not positioned (a positioned row would
+    // be a layer); the body's padding stands in for the rows that are not built.
     assert.equal(document.querySelector("table, tbody, tr, td"), null);
-    assert.equal(rowOf(1)!.style.top, "0px");
-    assert.equal(rowOf(2)!.style.top, `${ROW_H}px`);
-    assert.equal(document.querySelector<HTMLElement>(".kd-list-body")!.style.height, `${10000 * ROW_H}px`);
+    assert.equal(rowOf(1)!.getAttribute("style") ?? "", "", "a row carries no position of its own");
+    const body = () => document.querySelector<HTMLElement>(".kd-list-body")!;
+    assert.equal(body().style.paddingTop, "0px");
+    assert.equal(parseFloat(body().style.paddingBottom), (10000 - rows().length) * ROW_H);
     assert.equal(indexQueries[0].get("folder_deep"), "true");
     assert.equal(indexQueries[0].get("analyzed"), "true");
     assert.equal(indexQueries[0].get("bpm_min"), "120");
@@ -239,7 +242,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     const landed = rows().length;
     assert.ok(landed >= 20 && landed <= 160, `the viewport and three screens either side (${landed})`);
     assert.equal(ratings(), landed, "every row is complete");
-    assert.equal(rowOf(5001)!.style.top, `${5000 * ROW_H}px`, "a row lies at its own offset");
+    assert.equal(parseFloat(body().style.paddingTop) / ROW_H, Number(rows()[0].dataset.kdTrackId) - 1, "the rows lie at their places under the padding");
     // The rows that stay near the viewport keep their nodes: only entering rows are rendered.
     const kept = rowOf(5001)!;
     const keptRating = kept.querySelector(".kd-table-rating");
@@ -260,7 +263,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
       await scrollTo(box, end + overshoot);
       assert.equal(box.scrollTop, end + overshoot, "the bounce at the bottom is left to the WebView");
       assert.equal(rowOf(10000), lastRow, "the last row keeps its node through the bounce");
-      assert.equal(lastRow!.style.top, `${9999 * ROW_H}px`);
+      assert.equal(body().style.paddingBottom, "0px");
     }
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
     await flush();
@@ -470,7 +473,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
       // The chase is over in a third of a second: the marks come off; the rows stay.
       await pass(LIST_ARRIVAL_MS.chase + 40);
       assert.equal(arrivalOf(), null, "over in a third of a second");
-      assert.equal(rowOf(last)!.getAttribute("style"), `top: ${(last - 1) * ROW_H}px;`, "nothing of it stays on a row");
+      assert.equal(rowOf(last)!.getAttribute("style") ?? "", "", "nothing of it stays on a row");
       await rest();
 
       // Towards the end of the list the rows rise from below, the top one first. (Rows built once

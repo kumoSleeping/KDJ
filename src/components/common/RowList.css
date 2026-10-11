@@ -1,14 +1,16 @@
 /* The row list: what the local track list and the search results are built on.
 
-   A list is a stack of independent blocks, not a table. Every block is absolutely positioned,
-   placed by `top` at its own offset; a row is a grid whose columns the list sets in
-   --kd-list-cols, and the head is the same grid, sticky at the top. The local list's blocks are
-   its rows; a search result's block is a row with what unfolds under it (its sources, a video's
-   parts, a package), so that stays together and is measured as one. Building or removing a
-   block lays out that block alone (contain), the columns change by one custom property, and a
-   row's arrival (ListArrival.css) moves the row over its own place. Only the blocks near the
-   viewport exist (a virtualizer, @tanstack/react-virtual); the body holds the height of all of
-   them, so the scroll range and the floating handles are those of the whole list.
+   A list is a stack of blocks in the normal flow, not a table and not positioned: a positioned
+   element is a layer to WebKit, and a list of two thousand layers makes every scroll
+   notification, hit test and tile paint walk two thousand layers on the main thread. A row is a
+   grid whose columns the list sets in --kd-list-cols, and the head is the same grid, sticky at
+   the top. The local list's blocks are its rows; a search result's block is a row with what
+   unfolds under it (its sources, a video's parts, a package), so that stays together and is
+   measured as one. The columns change by one custom property, and a row's arrival
+   (ListArrival.css) moves the row over its own place. Only the blocks near the viewport exist (a
+   virtualizer, @tanstack/react-virtual) when the list is long; the body's padding stands in for
+   the rest, so the scroll range and the floating handles are those of the whole list. A short
+   list is built whole and the body then has no padding at all.
 
    Appearance (ink, hover, selection, the cells of each list) is in design.css; this file is
    the layout alone. */
@@ -28,18 +30,8 @@
   background: var(--kd-panel);
 }
 .kd-list-body {
-  position: relative;
-  width: 100%;
-}
-/* What the body places: a row of the local list, or a block of the results. */
-.kd-list-body > .kd-list-row,
-.kd-list-block {
-  position: absolute;
-  top: 0;
-  left: 0;
   box-sizing: border-box;
   width: 100%;
-  contain: layout style;
 }
 .kd-list-row {
   box-sizing: border-box;
@@ -51,7 +43,6 @@
 }
 /* The rows of a block follow one another and are as tall as their contents. */
 .kd-list-block .kd-list-row {
-  position: relative;
   height: auto;
   min-height: var(--kd-row-h);
 }

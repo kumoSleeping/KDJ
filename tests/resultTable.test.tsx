@@ -51,8 +51,8 @@ test("the result list: every presented list cascades once, and an opened collect
   Object.defineProperty(proto, "clientHeight", { configurable: true, get() { return paneHeight; } });
   Object.defineProperty(proto, "scrollHeight", { configurable: true, get(this: HTMLElement) {
     const body = this.querySelector<HTMLElement>(".kd-list-body");
-    return (this.querySelector(".kd-list-head") ? HEAD : 0) + (body ? parseFloat(body.style.height) || 0 : 0)
-      + (this.querySelector(".kd-result-more") ? 44 : 0);
+    const rows = body ? (parseFloat(body.style.paddingTop) || 0) + body.querySelectorAll(".kd-list-row").length * ROW + (parseFloat(body.style.paddingBottom) || 0) : 0;
+    return (this.querySelector(".kd-list-head") ? HEAD : 0) + rows + (this.querySelector(".kd-result-more") ? 44 : 0);
   } });
   proto.getBoundingClientRect = function () {
     const height = heightOf(this) || paneHeight;
