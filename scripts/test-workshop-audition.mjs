@@ -36,6 +36,9 @@ test('audition swaps only audio at the live position, retains video lease, and p
   const mocks = {
     react: React, './api': {api}, './unifiedPlayer': {runtimePlayer:()=>player},
     './mediaSync': {getLocalVideoClock:()=>null},
+    './workshopPreviewPolicy': {acquireWorkshopVideoPlayback() {}},
+    './windowRole': {isKvjWindow: false},
+    './kvjPreviewPlayback': {useKvjPreviewPlayback() { assert.fail('this test uses the main-window transport'); }},
     './streamTrack': {makeCompositionPreviewTrack:()=>({id:-1}),updateCompositionPreviewAudio:(_track,url)=>calls.metadata.push(url)},
     './playTrack': {PLAY_EVENT:'play',playTrack(track) { state.trackId=track.id; state.playing=true;state.status='playing'; calls.play++; publish(); }},
     '../stores/workshopStore': {useWorkshopStore:store}, './workshop': {projectDuration:()=>180000},

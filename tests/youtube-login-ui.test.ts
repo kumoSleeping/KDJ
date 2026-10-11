@@ -58,7 +58,7 @@ test("desktop YouTube and SoundCloud login controls dispatch separately and show
       })));
       await click("连接");
       if (platform === "soundcloud") {
-        assert.equal([...document.querySelectorAll("button")].find(node => node.textContent === "尝试连接")?.disabled, true);
+        assert.equal([...document.querySelectorAll("button")].find(node => node.textContent === "尝试连接")?.disabled, false);
         await click("扩展连接");
         assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="SoundCloud 扩展配对码"]')?.value,
           `KDJ-SC1:5274:${"a".repeat(64)}`);

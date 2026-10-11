@@ -954,8 +954,7 @@ export function AccountRow({
                   size="sm"
                   variant="primary"
                   disabled={
-                    youtubeBusy || webLoginBusy || !youtubeBrowser || !youtubeProfile ||
-                    (soundcloudAccount && Boolean(selectedYoutubeProfile?.requires_elevation))
+                    youtubeBusy || webLoginBusy || !youtubeBrowser || !youtubeProfile
                   }
                   onClick={() => void importYoutubeBrowser()}
                 >
