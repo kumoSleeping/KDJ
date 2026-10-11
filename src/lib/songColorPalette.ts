@@ -326,6 +326,37 @@ export function lightSongColorPalette(palette: SongColorPalette): SongColorPalet
   };
 }
 
+/** `hex`'s hue at another lightness, with no more chroma than it has or than `chroma`: a light
+ *  of one of the field's colours. A grey stays grey. */
+export function toneOf(hex: string, lightness: number, chroma: number): string {
+  const rgb = parseHex(hex);
+  if (!rgb) return hex;
+  const colour = rgbToLch(rgb);
+  return toHex(lchToRgb({ l: clamp(lightness, 0, 1), c: Math.min(colour.c, chroma), h: colour.h }));
+}
+
+/** White holds this against a picture up to a luminance of 0.3; past that the ink turns dark. */
+export const GROUND_INK_CONTRAST = 3;
+/** Whether white ink still reads on a picture of mean luminance `ground`. */
+export const whiteReadsOn = (ground: number) => luminanceContrast(1, clamp(ground, 0, 1)) >= GROUND_INK_CONTRAST;
+
+/**
+ * Ink for a mark that lies on a picture of mean luminance `ground` (the visualizer's
+ * waveform): all but white while white still reads there, and on a pale picture a deep tone of
+ * `hex`'s hue instead, dark enough to hold the text floor.
+ */
+export function inkOnGround(hex: string, ground: number): { color: string; light: boolean } {
+  const colour = rgbToLch(parseHex(hex) ?? [255, 255, 255]);
+  const under = clamp(ground, 0, 1), hued = colour.c >= NEUTRAL_CHROMA;
+  const light = whiteReadsOn(under);
+  return {
+    light,
+    color: light
+      ? inkAt(0.985, colour.h, hued ? 0.012 : 0, under, GROUND_INK_CONTRAST)
+      : inkAt(0.3, colour.h, hued ? Math.min(colour.c, 0.08) : 0, under, INK_TEXT_CONTRAST, -1),
+  };
+}
+
 /** The brightest the dark field gets where the glow is at its peak, as a relative luminance. */
 export function fieldPeakLuminance(palette: SongColorPalette): number {
   const brightest = Math.max(...palette.masses.map(mass => relativeLuminance(parseHex(mass) ?? [0, 0, 0])));

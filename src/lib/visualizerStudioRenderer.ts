@@ -1,12 +1,29 @@
 import type { VisualizerFeatureTimeline, VisualizerFeatureFrame } from "../types/audioVisualizer";
 import { defaultVisualizerTransform } from "./audioVisualizerScene";
 import { fitVisualizerImage, visualizerCanvas, type VisualizerImage } from "./audioVisualizerImage";
+import { beatLevel, beatPulseIndex, GLOW_REST, PULSES_PER_CYCLE, songBeat, type SongBeat } from "./songColorBeat";
+import { inkOnGround, parseHex, relativeLuminance, songColorPalette, toneOf, whiteReadsOn } from "./songColorPalette";
 import { extractStudioPalette, type StudioPalette } from "./visualizerStudioPalette";
-import { clamp, lyricIndex, parseVisualizerLyrics, prepareStudioMotion, sampleStudioFeatures, sampleStudioMotion, studioClock, studioDuration, studioPercentile, STUDIO_FONTS, validateVisualizerProject, type LyricLine, type StudioMotion, type VisualizerProject } from "./visualizerStudio";
+import { clamp, lyricIndex, parseVisualizerLyrics, prepareStudioMotion, sampleStudioFeatures, sampleStudioMotion, studioBeatGrid, studioClock, studioDuration, studioPercentile, STUDIO_FONTS, validateVisualizerProject, type LyricLine, type StudioMotion, type VisualizerProject } from "./visualizerStudio";
 
 const LYRIC_ACTIVE_SCALE = 1.2;
 const LYRIC_PREVIEW_SCALE = .88;
 const PREVIEW_SHADOW_STEPS = [[2, .046], [1, .17], [.5, .34]] as const;
+const CANVAS_COLOR = "#ecf1eb";
+/** Analysis bands are log magnitudes (-60..0 dB). This is how steeply a bar's height falls
+ * below the loudest band: at 5.5 a band 30 dB down stood at 6 % and only the few loudest
+ * bars rose from the rail; at 3.2 it stands at 17 % and the body of the spectrum is seen. */
+const SPECTRUM_CONTRAST = 3.2;
+/** Music has less energy the higher the band; the top of the range is lifted by this much. */
+const SPECTRUM_TILT = .2;
+/** How much of a bar's length the kick carries: bars stand at 90 % and reach 120 % on a hit. */
+const SPECTRUM_KICK = .3;
+/** A title stays on one line down to this share of its size, then takes a second line. */
+const TITLE_ONE_LINE = .72;
+/** A bracketed tail or a "feat." under its title, as a share of the title's size. */
+const TITLE_TAIL = .52;
+const TITLE_TAIL_AT = /\s*[(\uff08\[\u3010]|\s+(?=(?:feat|ft)\.?\s)/iu;
+const TITLE_LEADING = 1.16;
 
 interface RollingLyric extends LyricLine { start: number; end: number }
 interface LyricCard { canvas: HTMLCanvasElement }
@@ -14,16 +31,29 @@ interface DiscLayers { back: HTMLCanvasElement; front: HTMLCanvasElement; x: num
 interface ClockLayer { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D; key: string; top: number }
 interface LyricViewport {
   canvas: HTMLCanvasElement; context: CanvasRenderingContext2D; mask: CanvasGradient;
-  top: number; padding: number; leadY: number; gap: number; size: number; cardHeight: number;
+  top: number; padding: number; leadY: number; gap: number; size: number; cardHeight: number; fullHeight: number;
   settledKey?: string;
 }
+/** What a mark is drawn in on the picture under it, and the edge that sets it off: light ink
+ * with a dark edge, or on a pale picture dark ink with a light one. `edge` is "r,g,b". */
+interface StudioInk { color: string; edge: string; light: boolean }
+/** The lights of one half of the picture, and how they are laid on it: added to a picture that
+ * is dark enough to be lit, and on a pale one, where light would not show, laid on as colour. */
+interface StudioGlow { lights: HTMLCanvasElement[]; mist: HTMLCanvasElement; wash: HTMLCanvasElement; tint: string; blend: GlobalCompositeOperation }
+/** A picture is pale from this mean luminance up. */
+const PALE_GROUND = .4;
+/** The song's pulse in one frame. `hit` 0..1 is how far it is out, already scaled by how loud
+ * the song is there and by the project's 律动; `lead` is the light it falls on, -1 for all of
+ * them; `kick` 0..1 is the low end's own movement, for the bars. */
+interface StudioRhythm { hit: number; lead: number; kick: number }
 export interface PreparedStudio {
   project: VisualizerProject; timeline: VisualizerFeatureTimeline; motion: StudioMotion[]; lyrics: LyricLine[];
   left: HTMLCanvasElement; reflection: HTMLCanvasElement; leftWidth: number;
   right: HTMLCanvasElement; rightX: number; disc: HTMLCanvasElement; cover: HTMLCanvasElement;
-  light: HTMLCanvasElement; mist: HTMLCanvasElement; energyTrace: Float32Array; spectrumScale: number;
+  rightGlow: StudioGlow; leftGlow: StudioGlow; beat: SongBeat;
+  arcInk: StudioInk; arcInks: { light: StudioInk; dark: StudioInk }; leftInk: StudioInk; energyTrace: Float32Array; spectrumScale: number;
   palette: StudioPalette; leftShade: StudioPalette["shade"]; rail: HTMLCanvasElement; railX: number; information: HTMLCanvasElement;
-  arcBars: { point: [number, number, number, number]; frequency: number; envelope: number }[];
+  arcBars: { point: [number, number, number, number]; frequency: number; envelope: number; light: boolean }[];
   arcBarWidth: number; arcLengths: Float64Array; discLayers: DiscLayers | null; clockLayer: ClockLayer | null;
   lyricCards: Map<number, LyricCard>; lyricFlow: RollingLyric[]; lyricViewport: LyricViewport | null;
   contentScale: number; watermark: HTMLCanvasElement | null;
@@ -38,8 +68,9 @@ function cachedLayer(image: VisualizerImage, key: unknown[], render: () => HTMLC
   if (cached) { layers.delete(id); layers.set(id, cached); return cached; }
   const layer = render(); layers.set(id, layer);
   // Bound retained textures even while dragging, resizing or changing presets.
-  // One complete scene uses ten layers, including the two small disc caches.
-  if (layers.size > 10) layers.delete(layers.keys().next().value!);
+  // One complete scene uses twelve layers, including the two small disc caches and the two
+  // small renderings the waveform's ink is read from.
+  if (layers.size > 12) layers.delete(layers.keys().next().value!);
   return layer;
 }
 const timelineData = new WeakMap<VisualizerFeatureTimeline, { motion: StudioMotion[]; energyTrace: Float32Array; spectrumScale: number }>();
@@ -47,7 +78,7 @@ function prepareTimeline(timeline: VisualizerFeatureTimeline) {
   const cached = timelineData.get(timeline); if (cached) return cached;
   const rmsReference = Math.max(.025, studioPercentile(timeline.frames.map(f => f.rms), .95));
   const peak = studioPercentile(timeline.frames.map(f => Math.max(...f.bands)), .95);
-  const spectrumScale = .85 / Math.max(.25, Math.expm1(peak * 5.5) / Math.expm1(5.5));
+  const spectrumScale = .85 / Math.max(.25, Math.expm1(peak * SPECTRUM_CONTRAST) / Math.expm1(SPECTRUM_CONTRAST));
   const follow = 1 - Math.exp(-6 / timeline.fps); let baseline = 0;
   // AC energy, not fabricated PCM or a clipped, filled volume meter.
   const energyTrace = Float32Array.from(timeline.frames, f => {
@@ -57,7 +88,54 @@ function prepareTimeline(timeline: VisualizerFeatureTimeline) {
   const result = { motion: prepareStudioMotion(timeline), energyTrace, spectrumScale };
   timelineData.set(timeline, result); return result;
 }
-let lightSprites: { light: HTMLCanvasElement; mist: HTMLCanvasElement } | undefined;
+const lightSprites = new Map<string, HTMLCanvasElement>();
+/** One sprite per colour and kind; a song's and the last song's are all that is kept. */
+function lightSprite(color: string, mist: boolean, heart: number): HTMLCanvasElement {
+  const key = `${mist ? "mist" : "light"}:${color}:${heart}`, cached = lightSprites.get(key);
+  if (cached) { lightSprites.delete(key); lightSprites.set(key, cached); return cached; }
+  const sprite = lightTexture(mist, color, heart); lightSprites.set(key, sprite);
+  if (lightSprites.size > 28) lightSprites.delete(lightSprites.keys().next().value!);
+  return sprite;
+}
+/** One half's lights from the cover's colours as 歌曲色彩 reads them (songColorPalette.ts): a
+ * light for each of the field's four masses, the mist and the wash in its glow. */
+function studioGlow(field: ReturnType<typeof songColorPalette>, pale: boolean): StudioGlow {
+  // Added as light, a light is all but white at its heart. Laid on as colour it is the colour
+  // all through, and a light tone of it: a pastel breath on the picture, where a deeper tone or
+  // a multiply reads as a stain.
+  const tone = pale ? .83 : .8, chroma = pale ? .15 : .16, heart = pale ? 0 : .85;
+  return {
+    lights: field.masses.map(mass => lightSprite(toneOf(mass, tone, chroma), false, heart)),
+    mist: lightSprite(toneOf(field.glow, .86, pale ? .12 : .1), true, pale ? 0 : 1),
+    wash: lightSprite(toneOf(field.glow, pale ? .84 : .8, .15), false, pale ? 0 : .5),
+    tint: toneOf(field.glow, pale ? .8 : .86, pale ? .16 : .1),
+    blend: pale ? "source-over" : "screen",
+  };
+}
+interface Ground { luminance: Float32Array; width: number; height: number }
+const grounds = new WeakMap<HTMLCanvasElement, Ground>();
+/** The relative luminance of every pixel of a small baked layer, over the canvas colour where
+ * the layer is clear: what a mark drawn on it lies on. Read once per layer. */
+function groundOf(layer: HTMLCanvasElement): Ground {
+  const known = grounds.get(layer); if (known) return known;
+  const { width, height } = layer, probe = visualizerCanvas(width, height), c = probe.getContext("2d", { willReadFrequently: true })!;
+  c.fillStyle = CANVAS_COLOR; c.fillRect(0, 0, width, height); c.drawImage(layer, 0, 0);
+  const pixels = c.getImageData(0, 0, width, height).data, luminance = new Float32Array(width * height);
+  for (let i = 0; i < luminance.length; i++) luminance[i] = relativeLuminance([pixels[i * 4], pixels[i * 4 + 1], pixels[i * 4 + 2]]);
+  const ground = { luminance, width, height }; grounds.set(layer, ground); return ground;
+}
+/** Its mean over a box, as much of the box as lies on the layer. */
+function groundLuminance(ground: Ground, x: number, y: number, width: number, height: number): number {
+  const left = clamp(Math.floor(x), 0, ground.width - 1), top = clamp(Math.floor(y), 0, ground.height - 1);
+  const right = clamp(Math.ceil(x + width), left + 1, ground.width), bottom = clamp(Math.ceil(y + height), top + 1, ground.height);
+  let sum = 0;
+  for (let row = top; row < bottom; row++) for (let column = left; column < right; column++) sum += ground.luminance[row * ground.width + column];
+  return sum / ((right - left) * (bottom - top));
+}
+function studioInk(accent: string, ground: number): StudioInk {
+  const ink = inkOnGround(accent, ground);
+  return { ...ink, edge: ink.light ? "6,26,40" : "255,255,255" };
+}
 export async function loadStudioImages(blobs: Blob[]): Promise<HTMLImageElement[]> {
   if (blobs.length < 1 || blobs.length > 2) throw new Error("需要一至两张图片");
   return Promise.all(blobs.map(blob => new Promise<HTMLImageElement>((resolve, reject) => {
@@ -86,18 +164,20 @@ function fitStudioPicture(image: VisualizerImage, transform: Parameters<typeof f
   return canvas;
 }
 
-/** Small baked sprites keep diffusion soft without full-resolution per-frame filters. */
-function lightTexture(mist: boolean): HTMLCanvasElement {
+/** Small baked sprites keep diffusion soft without full-resolution per-frame filters.
+ * A light is `color` in its halo and, by `heart`, white toward its middle. */
+function lightTexture(mist: boolean, color: string, heart: number): HTMLCanvasElement {
   const canvas = visualizerCanvas(384, 384);
-  const c = canvas.getContext("2d")!;
+  const c = canvas.getContext("2d")!, rgb = parseHex(color) ?? [255, 255, 255];
+  const toward = (white: number) => rgb.map(channel => Math.round(channel + (255 - channel) * white)).join(",");
   const lobes = mist ? [[.37, .48, .34, .34], [.60, .42, .29, .30], [.51, .63, .30, .26], [.66, .59, .22, .20], [.29, .38, .21, .18]] : [[.5, .5, .49, 1]];
   for (const [x, y, radius, alpha] of lobes) {
     const g = c.createRadialGradient(x * 384, y * 384, 0, x * 384, y * 384, radius * 384);
-    g.addColorStop(0, `rgba(250,255,255,${alpha})`);
-    g.addColorStop(.22, `rgba(237,255,255,${alpha * .86})`);
-    g.addColorStop(.50, `rgba(163,241,255,${alpha * .40})`);
-    g.addColorStop(.82, `rgba(95,216,246,${alpha * .08})`);
-    g.addColorStop(1, "rgba(95,216,246,0)");
+    g.addColorStop(0, `rgba(${toward(.94 * heart)},${alpha})`);
+    g.addColorStop(.22, `rgba(${toward(.78 * heart)},${alpha * .86})`);
+    g.addColorStop(.50, `rgba(${toward(.3 * heart)},${alpha * .40})`);
+    g.addColorStop(.82, `rgba(${toward(0)},${alpha * .08})`);
+    g.addColorStop(1, `rgba(${toward(0)},0)`);
     c.fillStyle = g; c.fillRect(0, 0, 384, 384);
   }
   return canvas;
@@ -144,10 +224,25 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
     c.globalCompositeOperation = "destination-over"; c.fillStyle = "#eff4ef"; c.fillRect(0, 0, size, size); c.globalCompositeOperation = "source-over";
     return layer;
   });
+  // The waveform takes its ink from the picture it lies on. The bars of the arc reach into
+  // the right-hand picture; the small spectrum lies on the left one, under its veil. Both are
+  // read from a rendering of the picture at one fixed small size, so that the preview and the
+  // export, which bake their layers at different sizes, come to the same ink.
+  const probe = 240 / w, probeHeight = Math.round(h * probe), probeWidth = Math.max(2, Math.round((w - (arc.cx - arc.radius)) * probe));
+  const rightGround = cachedLayer(source, ["ground-right", p.scene.right, probe, probeWidth, probeHeight, p.look.rightFit], () => fitStudioPicture(source, { ...p.scene.right, blur: p.scene.right.blur * probe }, probeWidth, probeHeight, p.look.rightFit || "auto"));
+  const leftGround = cachedLayer(leftSource, ["ground-left", p.scene.left, probe, p.look.leftFit], () => fitStudioPicture(leftSource, { ...p.scene.left, blur: p.scene.left.blur * probe }, 96, 96, p.look.leftFit || "cover"));
+  const reach = (arc.radius * (1 - Math.cos(arc.angle)) + w * p.scene.spectrum.length * 1.3) * probe;
+  const rightLuminance = groundOf(rightGround), arcLuminance = groundLuminance(rightLuminance, 0, 0, reach, probeHeight);
+  // The rail is one line and takes the ink of the strip as a whole; each bar takes the ink of
+  // the place it stands on, so a picture that is half sky and half ground gets both.
+  const arcInk = studioInk(p.look.accent, arcLuminance), arcInks = { light: studioInk(p.look.accent, 0), dark: studioInk(p.look.accent, 1) };
+  const veil = clamp(p.look.leftVeil * leftShade.alphaScale), shade = relativeLuminance(parseHex(leftShade.color) ?? [98, 98, 98]);
+  const leftLuminance = groundLuminance(groundOf(leftGround), 0, 0, 96, 96) * (1 - veil) + shade * veil;
+  const leftInk = studioInk(p.look.accent, leftLuminance);
   const railX = Math.floor(rightX - h * .06);
-  const rail = cachedLayer(source, ["rail", w, h, p.scene.arc, p.look.accent], () => {
+  const rail = cachedLayer(source, ["rail", w, h, p.scene.arc, p.look.accent, arcInk], () => {
     const layer = visualizerCanvas(Math.ceil(leftWidth - railX + h * .06), h);
-    const c = layer.getContext("2d")!; c.translate(-railX, 0); paintArcRail(c, p); return layer;
+    const c = layer.getContext("2d")!; c.translate(-railX, 0); paintArcRail(c, p, arcInk); return layer;
   });
   const lyrics = parseVisualizerLyrics(p.lyrics.lrc, p.lyrics.translation, p.lyrics.showTranslation !== false);
   const lyricFlow: RollingLyric[] = [];
@@ -171,16 +266,29 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
     paintText(c, "@KDJ", layer.width - h * .004, h * .034, h * .026, layer.width - h * .008, STUDIO_FONTS.sans, "500");
     return layer;
   });
-  lightSprites ??= { light: lightTexture(false), mist: lightTexture(true) };
+  const field = songColorPalette(palette.colors);
+  const rightGlow = studioGlow(field, groundLuminance(rightLuminance, 0, 0, probeWidth, probeHeight) > PALE_GROUND), leftGlow = studioGlow(field, leftLuminance > PALE_GROUND);
+  const beat = songBeat(studioBeatGrid(p.track));
   // Extra off-canvas bars continue the radial tips through both image edges.
   const arcBars = Array.from({ length: 100 }, (_, i) => {
     const u = (i + .5) / 100 * 1.24 - .12, distance = Math.abs(u - .5);
-    return { point: arcPoint(p, u, 0), frequency: .08 + distance * (u < .5 ? 1.65 : 1.84), envelope: .16 + .84 * Math.cos(clamp(distance * 2) * Math.PI / 2) ** .65 };
+    return { point: arcPoint(p, u, 0), frequency: .08 + distance * (u < .5 ? 1.65 : 1.84), envelope: .16 + .84 * Math.cos(clamp(distance * 2) * Math.PI / 2) ** .65, light: true };
   });
+  // Where each bar stands on the right-hand picture: the middle of its usual length, read over
+  // a small box, and evened out along the arc so that neighbours do not alternate.
+  const stood = arcBars.map(({ point: [x, y, nx, ny] }) => {
+    const out = w * p.scene.spectrum.length * .5, box = probeHeight * .04;
+    return groundLuminance(rightLuminance, (x + nx * out - (arc.cx - arc.radius)) * probe - box / 2, (y + ny * out) * probe - box / 2, box, box);
+  });
+  for (const [i, bar] of arcBars.entries()) {
+    let sum = 0, count = 0;
+    for (let n = Math.max(0, i - 3); n <= Math.min(arcBars.length - 1, i + 3); n++) { sum += stood[n]; count++; }
+    bar.light = whiteReadsOn(sum / count);
+  }
   const arcBarWidth = arc.radius * arc.angle * 2 * 1.24 / arcBars.length;
   const discLayers = p.scene.disc.mode === "hidden" ? null : prepareDiscLayers(p, discSource, cover, size);
   const smallCount = Math.max(20, Math.round(48 * Math.min(1, contentScale)));
-  return { project: p, timeline, ...prepareTimeline(timeline), lyrics, lyricCards: new Map(), lyricFlow, lyricViewport, contentScale, left, reflection, leftWidth, right, rightX, disc, cover, ...lightSprites, palette, leftShade, rail, railX, information, arcBars, arcBarWidth, arcLengths: new Float64Array(arcBars.length), discLayers, clockLayer: null, watermark,
+  return { project: p, timeline, ...prepareTimeline(timeline), lyrics, lyricCards: new Map(), lyricFlow, lyricViewport, contentScale, left, reflection, leftWidth, right, rightX, disc, cover, rightGlow, leftGlow, beat, arcInk, arcInks, leftInk, palette, leftShade, rail, railX, information, arcBars, arcBarWidth, arcLengths: new Float64Array(arcBars.length), discLayers, clockLayer: null, watermark,
     features: { bands: [], bass: 0, rms: 0, onset: 0 }, smallValues: new Float64Array(smallCount), smallSmooth: new Float64Array(smallCount),
     preview: previewWidth !== undefined };
 }
@@ -241,6 +349,60 @@ function paintText(c: CanvasRenderingContext2D, text: string, x: number, y: numb
   c.font = `${weight} ${fitted}px ${font}`;
   if (outline) { c.strokeStyle = "rgba(9,24,30,.72)"; c.lineWidth = Math.max(.5, fitted * .035); c.lineJoin = "round"; c.strokeText(text, x, y); }
   c.fillStyle = color; c.fillText(text, x, y); c.restore();
+}
+/**
+ * A title or a name. On one line while it fits at no less than 72 % of its size. Past that
+ * it takes a second line: a bracketed tail or a "feat." goes under the title in a smaller,
+ * lighter face when it has one, so the name itself keeps its size; any other title is broken
+ * at a word into two even lines, and a third when two would be small. Nothing is cut off and
+ * nothing moves: only a title too long for three lines goes on getting smaller. The last line
+ * keeps `baseline` and the block grows upward into `room`. Returns the top of the block.
+ */
+function paintTitle(c: CanvasRenderingContext2D, text: string, x: number, baseline: number, size: number, width: number, room: number, font: string, weight: string): number {
+  const title = text.trim(); if (!title) return baseline - size * .8;
+  c.save(); c.textBaseline = "alphabetic";
+  // Widths per px of size; canvas text scales evenly with it.
+  const unit = (value: string, face: string) => { c.font = `${face} 100px ${font}`; return Math.max(.001, c.measureText(value).width / 100); };
+  let rows: { text: string; size: number; weight: string }[] = [];
+  const whole = unit(title, weight);
+  if (whole * size * TITLE_ONE_LINE <= width) rows = [{ text: title, size: Math.min(size, width / whole), weight }];
+  else {
+    const points = lyricWrapPoints(title);
+    const wrapAt = (at: number, limit: number) => { c.font = `${weight} ${at}px ${font}`; return wrapRows(c, points, limit); };
+    // The largest size at which the title takes no more than `lines` rows of the block's room.
+    const wrapped = (lines: number) => {
+      let lo = 0, hi = Math.min(size, room / (.8 + (lines - 1) * TITLE_LEADING)), found = [title];
+      for (let attempt = 0; attempt < 14; attempt++) {
+        const at = attempt ? (lo + hi) / 2 : hi, fit = wrapAt(at, width);
+        if (fit.fits && fit.rows.length <= lines) { lo = at; found = fit.rows; if (!attempt) break; } else hi = at;
+      }
+      return { size: lo, rows: found };
+    };
+    const two = wrapped(2), three = two.size >= size * .5 ? two : wrapped(3), block = three.size > two.size ? three : two;
+    const cut = title.search(TITLE_TAIL_AT), head = cut > 0 ? title.slice(0, cut).trimEnd() : "", tail = cut > 0 ? title.slice(cut).trimStart() : "";
+    const lead = head && tail ? Math.min(size, width / unit(head, weight), room / (.8 + TITLE_TAIL * 1.3)) : 0;
+    const under = lead ? Math.min(lead * TITLE_TAIL, width / unit(tail, "400")) : 0;
+    if (lead >= block.size && lead >= size * .6 && under >= lead * .36) rows = [{ text: head, size: lead, weight }, { text: tail, size: under, weight: "400" }];
+    else {
+      // Even lines: the narrowest measure that still gives this many rows.
+      let narrow = width / block.rows.length, wide = width, even = block.rows;
+      for (let attempt = 0; attempt < 10 && block.rows.length > 1 && block.size > 0; attempt++) {
+        const measure = (narrow + wide) / 2, fit = wrapAt(block.size, measure);
+        if (fit.fits && fit.rows.length <= block.rows.length) { wide = measure; even = fit.rows; } else narrow = measure;
+      }
+      // A single word too long for any of this is fitted to the line, as it always was.
+      rows = even.map(row => ({ text: row, size: block.size > 0 ? block.size : Math.max(4, width / whole), weight }));
+    }
+  }
+  let y = baseline, top = baseline;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    c.font = `${row.weight} ${row.size}px ${font}`;
+    c.strokeStyle = "rgba(9,24,30,.72)"; c.lineWidth = Math.max(.5, row.size * .035); c.lineJoin = "round"; c.strokeText(row.text, x, y);
+    c.fillStyle = "#ffffff"; c.fillText(row.text, x, y);
+    top = y - row.size * .8; y -= row.size * (row.weight === weight ? TITLE_LEADING : 1.3);
+  }
+  c.restore(); return top;
 }
 function label(c: CanvasRenderingContext2D, text: string, x: number, y: number, h: number, font: string, accent: string): void {
   c.save(); c.shadowColor = "transparent"; c.shadowBlur = 0;
@@ -330,18 +492,29 @@ function paintDisc(c: CanvasRenderingContext2D, s: PreparedStudio, t: number): v
   c.drawImage(layers.front, layers.x, layers.y);
 }
 function spectrumValue(f: VisualizerFeatureFrame, at: number, gain: number): number {
-  const n = clamp(at, 0, 1) * (f.bands.length - 1), i = Math.floor(n), k = n - i;
-  const level = clamp((f.bands[i] || 0) * (1 - k) + (f.bands[Math.min(i + 1, f.bands.length - 1)] || 0) * k);
+  const place = clamp(at, 0, 1), n = place * (f.bands.length - 1), i = Math.floor(n), k = n - i;
+  const level = clamp(((f.bands[i] || 0) * (1 - k) + (f.bands[Math.min(i + 1, f.bands.length - 1)] || 0) * k) * (1 + SPECTRUM_TILT * place));
   // Analysis bands are log magnitudes (-60..0 dB), not linear bar heights.
   // Recover contrast before visual gain so a dense master is not a uniform comb.
-  return clamp(Math.expm1(level * 5.5) / Math.expm1(5.5) * gain);
+  return clamp(Math.expm1(level * SPECTRUM_CONTRAST) / Math.expm1(SPECTRUM_CONTRAST) * gain);
 }
-function paintArcRail(c: CanvasRenderingContext2D, p: VisualizerProject): void {
+/** The pulse of one frame, from its time alone: the song's beat grid as 歌曲色彩 keeps it
+ * (songColorBeat.ts) where the song has one, and the analysed onsets where it has none. How
+ * far it goes follows how loud the song is there, as the field's glow does. Lights and colour
+ * only: the pictures keep their slow continuous path. */
+function studioRhythm(s: PreparedStudio, t: number, m: StudioMotion): StudioRhythm {
+  const depth = clamp(s.project.look.motion * 1.5), strength = .35 + .65 * m.energy;
+  const level = s.beat.synced ? beatLevel(t, s.beat) : m.pulse * .85;
+  const lead = s.beat.synced ? (beatPulseIndex(t, s.beat) % PULSES_PER_CYCLE + PULSES_PER_CYCLE) % PULSES_PER_CYCLE : -1;
+  return { hit: level * strength * depth, lead, kick: clamp(Math.max(m.bass, m.pulse * .7)) };
+}
+function paintArcRail(c: CanvasRenderingContext2D, p: VisualizerProject, ink: StudioInk): void {
   const { height: h } = p.scene.canvas, shift = 0;
   c.save();
-  c.shadowColor = "rgba(14,39,42,.45)"; c.shadowBlur = h * .011;
-  arcPath(c, p, shift, undefined, -h * .007); c.strokeStyle = "rgba(240,250,234,.9)"; c.lineWidth = h * .006; c.stroke(); c.shadowBlur = 0;
-  arcPath(c, p, shift, undefined, -h * .017); c.strokeStyle = "rgba(246,255,248,.8)"; c.lineWidth = h * .0024; c.setLineDash([h * .01, h * .005]); c.stroke(); c.setLineDash([]);
+  c.shadowColor = `rgba(${ink.edge},${ink.light ? .45 : .6})`; c.shadowBlur = h * .011;
+  c.globalAlpha = .9; arcPath(c, p, shift, undefined, -h * .007); c.strokeStyle = ink.color; c.lineWidth = h * .006; c.stroke(); c.shadowBlur = 0;
+  c.globalAlpha = .8; arcPath(c, p, shift, undefined, -h * .017); c.lineWidth = h * .0024; c.setLineDash([h * .01, h * .005]); c.stroke(); c.setLineDash([]);
+  c.globalAlpha = 1;
   arcPath(c, p, shift, undefined, h * .004); c.strokeStyle = p.look.accent; c.lineWidth = h * .0025; c.stroke();
   const dots = 56;
   for (let i = 0; i <= dots; i++) {
@@ -362,38 +535,51 @@ function paintPreviewSpectrumShadow(c: CanvasRenderingContext2D, path: Path2D, w
   }
   c.restore();
 }
-function paintArc(c: CanvasRenderingContext2D, s: PreparedStudio, f: VisualizerFeatureFrame): void {
+function paintArc(c: CanvasRenderingContext2D, s: PreparedStudio, f: VisualizerFeatureFrame, rhythm: StudioRhythm): void {
   const p = s.project, { width: w, height: h } = p.scene.canvas;
+  if (rhythm.hit > 0 && p.look.glow > 0) {
+    // The rail glows in the cover's colour on the beat: wide faint strokes under a narrow one.
+    c.save(); c.globalCompositeOperation = s.rightGlow.blend; c.strokeStyle = s.rightGlow.tint;
+    for (const [width, alpha] of [[.075, .14], [.038, .24], [.016, .45]]) { c.globalAlpha = alpha * rhythm.hit; c.lineWidth = h * width; arcPath(c, p, 0, undefined, h * .002); c.stroke(); }
+    c.restore();
+  }
   c.drawImage(s.rail, s.railX, 0); c.save();
   if (p.look.mainSpectrum) {
-    const count = s.arcBars.length, gain = p.look.spectrumGain * s.spectrumScale;
+    // Each song is scaled to its own loud passages; there is no gain to set by hand.
+    const count = s.arcBars.length, gain = s.spectrumScale, kick = 1 - SPECTRUM_KICK / 3 + SPECTRUM_KICK * rhythm.kick;
     c.lineCap = "butt";
     for (let i = 0; i < count; i++) {
       const bar = s.arcBars[i];
-      s.arcLengths[i] = h * .004 + spectrumValue(f, bar.frequency, gain) * bar.envelope * w * p.scene.spectrum.length * 1.2;
+      s.arcLengths[i] = h * .007 + spectrumValue(f, bar.frequency, gain) * bar.envelope * kick * w * p.scene.spectrum.length * 1.2;
     }
     // Low/mid bands occupy the middle of the arc, with treble toward both ends.
     // Gentle edge attenuation balances the composition without inventing beats.
-    for (const cyan of [false, true]) {
-      const path = new Path2D();
+    // The bars on dark ground, the bars on pale ground, then the accent's core over both.
+    for (const pass of [0, 1, 2]) {
+      const cyan = pass === 2, ink = pass ? s.arcInks.dark : s.arcInks.light, path = new Path2D(); let drawn = cyan;
       for (let i = 0; i < count; i++) {
+        if (!cyan && s.arcBars[i].light !== (pass === 0)) continue;
+        drawn = true;
         const [x, y, nx, ny] = s.arcBars[i].point, length = s.arcLengths[i];
-        if (!cyan) { path.moveTo(x - nx * h * .026, y - ny * h * .026); path.lineTo(x - nx * (h * .026 + length * .34), y - ny * (h * .026 + length * .34)); }
+        // The bars stand taller than they did; their echo into the left half keeps its reach,
+        // so it comes no further into the lyrics.
+        if (!cyan) { path.moveTo(x - nx * h * .026, y - ny * h * .026); path.lineTo(x - nx * (h * .026 + length * .26), y - ny * (h * .026 + length * .26)); }
         path.moveTo(x + nx * h * .012, y + ny * h * .012);
         path.lineTo(x + nx * (length * (cyan ? .68 : 1) + h * .012), y + ny * (length * (cyan ? .68 : 1) + h * .012));
       }
-      c.strokeStyle = cyan ? p.look.accent : "rgba(255,255,255,.97)";
-      c.lineWidth = Math.max(1, s.arcBarWidth * (cyan ? .34 : .70));
-      if (!cyan && s.preview) paintPreviewSpectrumShadow(c, path, c.lineWidth, h * .004, "6,26,40", .5);
-      c.shadowColor = s.preview ? "transparent" : "rgba(6,26,40,.5)"; c.shadowBlur = cyan || s.preview ? 0 : h * .004;
+      if (!drawn) continue;
+      c.strokeStyle = cyan ? p.look.accent : ink.color;
+      c.lineWidth = Math.max(1, s.arcBarWidth * (cyan ? .36 : .76));
+      if (!cyan && s.preview) paintPreviewSpectrumShadow(c, path, c.lineWidth, h * .005, ink.edge, .72);
+      c.shadowColor = s.preview ? "transparent" : `rgba(${ink.edge},.72)`; c.shadowBlur = cyan || s.preview ? 0 : h * .005;
       c.stroke(path);
     }
   }
   c.restore();
 }
-function paintSmallSpectrum(c: CanvasRenderingContext2D, s: PreparedStudio, f: VisualizerFeatureFrame, t: number): void {
-  const p = s.project, mode = p.look.smallSpectrum; if (mode === "off") return;
-  const gain = p.look.spectrumGain * s.spectrumScale;
+function paintSmallSpectrum(c: CanvasRenderingContext2D, s: PreparedStudio, f: VisualizerFeatureFrame, t: number, rhythm: StudioRhythm): void {
+  const p = s.project, mode = p.look.smallSpectrum, ink = s.leftInk; if (mode === "off") return;
+  const gain = s.spectrumScale * (1 - SPECTRUM_KICK / 3 + SPECTRUM_KICK * rhythm.kick);
   const lyricLayout = p.lyrics.mode !== "off" && s.lyricFlow.length > 0;
   const { width: w, height: h } = p.scene.canvas, x = w * .066 * s.contentScale, width = w * .376 * s.contentScale, base = h * (lyricLayout ? .935 : .925), amp = h * (lyricLayout ? .105 : .145), count = Math.max(20, Math.round(48 * Math.min(1, s.contentScale)));
   const values = s.smallValues;
@@ -411,21 +597,21 @@ function paintSmallSpectrum(c: CanvasRenderingContext2D, s: PreparedStudio, f: V
       const y = center - value * traceHeight, px = x + i / points * width;
       if (i === 0) c.moveTo(px, y); else c.lineTo(px, y);
     }
-    c.strokeStyle = "rgba(9,24,30,.78)"; c.lineWidth = Math.max(2.4, h * .007); c.stroke();
-    c.strokeStyle = "#f9fcff"; c.lineWidth = Math.max(1.3, h * .004); c.stroke();
+    c.strokeStyle = `rgba(${ink.edge},.78)`; c.lineWidth = Math.max(2.6, h * .0085); c.stroke();
+    c.strokeStyle = ink.color; c.lineWidth = Math.max(1.5, h * .005); c.stroke();
   }
   if (mode !== "line") {
     const path = new Path2D();
     for (let i = 0; i < count; i++) {
       const height = Math.max(h * .002, values[i] * amp);
-      path.rect(x + i * width / count, base - height, width / count * .68, height);
+      path.rect(x + i * width / count, base - height, width / count * .74, height);
     }
     if (s.preview) {
       c.save(); const transform = c.getTransform(), zoom = Math.hypot(transform.a, transform.b) || 1;
-      c.translate(0, h * .002 / zoom); paintPreviewSpectrumShadow(c, path, 0, h * .002, "15,31,38", .65); c.restore();
+      c.translate(0, h * .002 / zoom); paintPreviewSpectrumShadow(c, path, 0, h * .0026, ink.edge, .78); c.restore();
     }
     // Full-resolution sharp bars, with native shadows retained for export.
-    c.fillStyle = "rgba(255,255,255,.97)"; c.shadowColor = s.preview ? "transparent" : "rgba(15,31,38,.65)"; c.shadowBlur = s.preview ? 0 : h * .002; c.shadowOffsetY = s.preview ? 0 : h * .002; c.fill(path);
+    c.fillStyle = ink.color; c.shadowColor = s.preview ? "transparent" : `rgba(${ink.edge},.78)`; c.shadowBlur = s.preview ? 0 : h * .0026; c.shadowOffsetY = s.preview ? 0 : h * .002; c.fill(path);
     c.shadowBlur = 0; c.shadowOffsetY = 0;
   }
   if (mode !== "bars") {
@@ -445,25 +631,41 @@ function paintSmallSpectrum(c: CanvasRenderingContext2D, s: PreparedStudio, f: V
   }
   c.restore();
 }
-function paintLights(c: CanvasRenderingContext2D, s: PreparedStudio, t: number, m: StudioMotion, shift: number): void {
+function paintLights(c: CanvasRenderingContext2D, s: PreparedStudio, t: number, m: StudioMotion, shift: number, rhythm: StudioRhythm): void {
   const p = s.project, { width: w, height: h } = p.scene.canvas;
   c.save();
-  c.save(); arcPath(c, p, shift, "right"); c.clip(); c.globalCompositeOperation = "screen";
+  const glow = s.rightGlow;
+  if (p.look.glow > 0 && rhythm.hit > 0) {
+    // Both halves breathe with the pulse: a wide wash of the glow behind the content on the
+    // left, and one from behind the arc into the picture on the right.
+    const radius = h * .7, reach = h * .85;
+    c.save(); arcPath(c, p, shift, "left"); c.clip(); c.globalCompositeOperation = s.leftGlow.blend;
+    c.globalAlpha = Math.min(1, p.look.glow * rhythm.hit);
+    c.drawImage(s.leftGlow.wash, w * .25 * s.contentScale - radius, h * .56 - radius, radius * 2, radius * 2); c.restore();
+    c.save(); arcPath(c, p, shift, "right"); c.clip(); c.globalCompositeOperation = glow.blend;
+    c.globalAlpha = Math.min(1, p.look.glow * .9 * rhythm.hit);
+    c.drawImage(glow.wash, s.rightX + h * .04 - reach, h / 2 - reach, reach * 2, reach * 2); c.restore();
+  }
+  c.save(); arcPath(c, p, shift, "right"); c.clip(); c.globalCompositeOperation = glow.blend;
   const anchors = [[.65, .20], [.80, .31], [.86, .49], [.63, .84]];
   for (const [i, [ax, ay]] of anchors.entries()) {
     const drift = t * .25 + i * 2.3;
     const x = w * (ax + Math.sin(drift) * .018), y = h * (ay + Math.cos(drift * .73) * .035);
     const breathe = ((1 + Math.sin(t * (.68 + i * .07) + i * 2.1)) / 2) ** 2;
+    // The pulse falls on each light in turn, so the colour moves round the picture with the
+    // bar; the other three answer it at half strength.
+    const hit = rhythm.hit * (rhythm.lead < 0 || rhythm.lead === i ? 1 : .5);
     if ((p.look.mist ?? .38) > 0) {
       c.save(); c.translate(x + Math.sin(drift * .81) * h * .035, y); c.rotate(Math.sin(drift) * .35);
-      c.globalAlpha = (p.look.mist ?? .38) * (.10 + breathe * .30 + m.drift * .08);
+      c.globalAlpha = (p.look.mist ?? .38) * (.10 + breathe * .30 + m.drift * .08) * (1 + .5 * hit);
       const width = h * (.46 + i % 2 * .1), height = h * (.24 + m.drift * .035);
-      c.drawImage(s.mist, -width / 2, -height / 2, width, height); c.restore();
+      c.drawImage(glow.mist, -width / 2, -height / 2, width, height); c.restore();
     }
     if (p.look.glow > 0) {
-      const radius = h * (.065 + i % 2 * .015) * (.8 + breathe * .35);
-      c.globalAlpha = p.look.glow * (.08 + breathe * .58 + m.drift * .15);
-      c.drawImage(s.light, x - radius, y - radius, radius * 2, radius * 2);
+      // Between beats a light rests at the share of its peak the field's glow rests at.
+      const radius = h * (.065 + i % 2 * .015) * (.8 + breathe * .35) * (1 + .8 * hit);
+      c.globalAlpha = Math.min(1, p.look.glow * 1.6 * (GLOW_REST + (1 - GLOW_REST) * hit) * (.5 + .5 * breathe + m.drift * .15));
+      c.drawImage(glow.lights[i % glow.lights.length], x - radius, y - radius, radius * 2, radius * 2);
     }
   }
   c.restore();
@@ -492,16 +694,46 @@ function prepareLyricViewport(p: VisualizerProject, contentScale: number, flow: 
   const slots = Math.min(2, flow.length);
   const scaleBudget = LYRIC_ACTIVE_SCALE + (slots > 1 ? LYRIC_PREVIEW_SCALE : 0);
   const cardHeight = Math.floor((Math.ceil(h * .82 - restingTop) - padding * 2 - gap * (slots - 1)) / scaleBudget);
-  const rowBudget = 1.3 + extraLines * .84 * 1.30;
-  // Reserve complete original/translation blocks for both current and next cues.
-  // A long wrapped block fits once and keeps that layout when promoted.
+  // The line being sung may take the whole viewport when it needs it; the next one then
+  // waits out of sight (paintRollingLyrics).
+  const fullHeight = Math.floor((Math.ceil(h * .82 - restingTop) - padding * 2) / LYRIC_ACTIVE_SCALE);
+  const rowBudget = 1.3 + Math.min(1, extraLines) * .84 * 1.30;
+  // Reserve complete original/translation blocks for both current and next cues: the size
+  // is set by the usual cue, an original with its translation. One cue with more lines
+  // than that is fitted on its own and does not make every other cue small.
   const size = Math.min(h * .060 * p.lyrics.size * p.text.scale * Math.min(1, contentScale), cardHeight / rowBudget);
   const mask = context.createLinearGradient(0, 0, 0, canvas.height);
   // Fully opaque at the lead slot; feather the entire upper exit band, while
   // retaining only a narrow lower edge so the preview stays readable.
   mask.addColorStop(0, "rgba(0,0,0,0)"); mask.addColorStop(leadY / canvas.height, "#000");
   mask.addColorStop(1 - padding / canvas.height, "#000"); mask.addColorStop(1, "rgba(0,0,0,0)");
-  return { canvas, context, mask, top, padding, leadY, gap, size, cardHeight };
+  return { canvas, context, mask, top, padding, leadY, gap, size, cardHeight, fullHeight };
+}
+/** Rows of `text` no wider than `width` in the context's font. A row ends at a word's end
+ * while one fits, and inside a word only when the word alone is wider than the row. `fits` is
+ * false when not even one glyph does. */
+function wrapRows(c: CanvasRenderingContext2D, { chars, breaks }: ReturnType<typeof lyricWrapPoints>, width: number): { rows: string[]; fits: boolean } {
+  const rows: string[] = []; let fits = true;
+  for (let offset = 0; offset < chars.length;) {
+    while (offset < chars.length && /^\s+$/u.test(chars[offset])) offset++;
+    if (offset === chars.length) break;
+    let lo = 0, hi = chars.length - offset;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (c.measureText(chars.slice(offset, offset + mid).join("")).width <= width) lo = mid; else hi = mid - 1;
+    }
+    if (!lo) fits = false;
+    let end = offset + Math.max(1, lo);
+    if (end < chars.length) {
+      // Prefer the last complete word that fits. Split at a grapheme only
+      // when the first word itself is wider than the entire line.
+      for (let boundary = end; boundary > offset; boundary--) {
+        if (breaks.has(boundary)) { end = boundary; break; }
+      }
+    }
+    rows.push(chars.slice(offset, end).join("").trimEnd()); offset = end;
+  }
+  return { rows, fits };
 }
 const lyricWords = new Intl.Segmenter("en", { granularity: "word" });
 const lyricGraphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
@@ -529,35 +761,21 @@ function lyricCard(s: PreparedStudio, index: number): LyricCard | null {
   const c = card.getContext("2d")!, font = STUDIO_FONTS[p.text.font];
   // Wrap at the enlarged active width so promotion never clips the right edge.
   const width = w * .455 * s.contentScale / LYRIC_ACTIVE_SCALE, texts = line.lines.map(lyricWrapPoints);
-  const available = viewport.cardHeight;
+  // A long line wraps at its size and is given the room: up to the whole viewport, the next
+  // cue waiting out of sight. It is made smaller only when even that is not enough.
+  const available = viewport.fullHeight;
   const layout = (size: number) => {
     const rows: { text: string; size: number; y: number; translated: boolean }[] = [];
     let y = size, fitsWidth = true;
-    for (const [i, { chars, breaks }] of texts.entries()) {
+    for (const [i, text] of texts.entries()) {
       const fontSize = size * (i ? .84 : 1);
       if (i) y += fontSize * 1.30;
       c.font = `${i ? 600 : 700} ${fontSize}px ${font}`;
-      let rowIndex = 0;
-      for (let offset = 0; offset < chars.length;) {
-        while (offset < chars.length && /^\s+$/u.test(chars[offset])) offset++;
-        if (offset === chars.length) break;
-        if (rowIndex++) y += fontSize * 1.18;
-        let lo = 0, hi = chars.length - offset;
-        while (lo < hi) {
-          const mid = Math.ceil((lo + hi) / 2);
-          if (c.measureText(chars.slice(offset, offset + mid).join("")).width <= width) lo = mid; else hi = mid - 1;
-        }
-        if (!lo) fitsWidth = false;
-        let end = offset + Math.max(1, lo);
-        if (end < chars.length) {
-          // Prefer the last complete word that fits. Split at a grapheme only
-          // when the first word itself is wider than the entire line.
-          for (let boundary = end; boundary > offset; boundary--) {
-            if (breaks.has(boundary)) { end = boundary; break; }
-          }
-        }
-        rows.push({ text: chars.slice(offset, end).join("").trimEnd(), size: fontSize, y, translated: i > 0 });
-        offset = end;
+      const wrapped = wrapRows(c, text, width);
+      if (!wrapped.fits) fitsWidth = false;
+      for (const [row, line] of wrapped.rows.entries()) {
+        if (row) y += fontSize * 1.18;
+        rows.push({ text: line, size: fontSize, y, translated: i > 0 });
       }
     }
     return { size, rows, fitsWidth, height: Math.ceil(Math.max(size * 1.3, y + size * .28)) };
@@ -614,6 +832,11 @@ function paintRollingLyrics(c: CanvasRenderingContext2D, s: PreparedStudio, time
   const layer = viewport.context, x = Math.round(w * .004 * s.contentScale), y = viewport.leadY;
   const oldStep = (previous?.canvas.height ?? current.canvas.height) * LYRIC_ACTIVE_SCALE + viewport.gap;
   const step = current.canvas.height * currentScale + viewport.gap;
+  // A cue is shown ahead of its turn only where it has room under the one being sung, at
+  // rest. One that waited out of sight comes in with the roll instead of appearing whole.
+  const bottom = viewport.canvas.height - viewport.padding + 1;
+  const ahead = (lead: LyricCard, follower: LyricCard) => y + lead.canvas.height * LYRIC_ACTIVE_SCALE + viewport.gap + follower.canvas.height * LYRIC_PREVIEW_SCALE <= bottom;
+  const waited = previous && !ahead(previous, current) ? enter : 1;
   layer.clearRect(0, 0, viewport.canvas.width, viewport.canvas.height);
   const draw = (item: LyricCard, top: number, alpha: number, scale = 1) => {
     if (alpha <= 0) return;
@@ -632,9 +855,9 @@ function paintRollingLyrics(c: CanvasRenderingContext2D, s: PreparedStudio, time
   const currentAlpha = time >= cue.start ? 1 : previewAlpha;
   const visibleScale = currentScale + (LYRIC_PREVIEW_SCALE - currentScale) * lastFade;
   const visibleY = currentY - (current.canvas.height * LYRIC_ACTIVE_SCALE + viewport.gap) * lastFade;
-  draw(current, visibleY, currentAlpha * (1 - lastFade), visibleScale);
+  draw(current, visibleY, currentAlpha * (1 - lastFade) * waited, visibleScale);
   // Scale from the shared left origin so both cues stay left-aligned.
-  if (next) draw(next, currentY + step, previewAlpha * enter, LYRIC_PREVIEW_SCALE);
+  if (next && ahead(current, next)) draw(next, currentY + step, previewAlpha * enter, LYRIC_PREVIEW_SCALE);
   layer.globalAlpha = 1; layer.globalCompositeOperation = "destination-in"; layer.fillStyle = viewport.mask;
   layer.fillRect(0, 0, viewport.canvas.width, viewport.canvas.height); layer.globalCompositeOperation = "source-over";
   c.drawImage(viewport.canvas, w * .04 * s.contentScale, viewport.top);
@@ -650,19 +873,28 @@ function paintInformation(c: CanvasRenderingContext2D, p: VisualizerProject, lyr
   const textX = w * .044 * contentScale, max = w * .435 * contentScale, font = STUDIO_FONTS[p.text.font], scale = p.text.scale * Math.min(1, contentScale), labelSize = h * scale;
   // Keep labels just above their body line as the overall text scale changes.
   const above = (baseline: number, size: number) => h * (baseline - (size * .85 + .013) * scale);
+  // The same place over a block that has grown upward: just above its first line.
+  const over = (top: number, size: number) => top - h * (size * .05 + .013) * scale, labelRoom = h * .055 * scale;
+  // A title that takes a second line grows into the gap under the sleeve; the lyrics, the
+  // spectrum and everything else beneath it stay where they are.
+  const disc = p.scene.disc, sleeve = disc.mode === "hidden" ? 0 : disc.y * h + Math.min(w, h) * disc.size * Math.min(1, contentScale) / 2 + h * .028;
   if (p.text.showAlbum && (p.text.album || p.text.title).trim()) {
     label(c, "Artwork/Album", w * .035 * contentScale, above(.108, .035), labelSize, font, p.look.accent);
     paintText(c, p.text.album || p.text.title, w * .035 * contentScale, h * .108, h * .035 * scale, max, font);
   }
   paintText(c, p.text.collaboration, w * .186 * contentScale, h * .285, h * .080 * scale, w * .285 * contentScale, STUDIO_FONTS.serif, "400");
-  if (!lyricLayout && p.text.title.trim()) label(c, "Track Name", textX, above(.485, .082), labelSize, font, p.look.accent);
-  paintText(c, p.text.title, textX, h * (lyricLayout ? .435 : .485), h * (lyricLayout ? .078 : .082) * scale, max, font, "700");
+  const titleBase = h * (lyricLayout ? .435 : .485), titleSize = h * (lyricLayout ? .078 : .082) * scale;
+  const ceiling = Math.max(sleeve, h * .14, lyricLayout && p.text.credit.trim() ? h * .362 : 0) + (lyricLayout ? 0 : labelRoom);
+  const titleTop = paintTitle(c, p.text.title, textX, titleBase, titleSize, max, Math.max(titleSize * .8, titleBase - ceiling), font, "700");
+  if (!lyricLayout && p.text.title.trim()) label(c, "Track Name", textX, over(titleTop, .082), labelSize, font, p.look.accent);
   paintText(c, p.text.subtitle, textX, h * (lyricLayout ? .495 : .532), h * .026 * scale, max, font);
   if (lyricLayout) {
     paintText(c, p.text.credit, w * .186 * contentScale, h * .35, h * .022 * scale, w * .285 * contentScale, font);
   } else {
-    if (p.text.artist.trim()) label(c, "Artist Name", textX, above(.67, .083), labelSize, font, p.look.accent);
-    paintText(c, p.text.artist, textX, h * .67, h * .083 * scale, max, font, "600");
+    const artistBase = h * .67, artistSize = h * .083 * scale;
+    const floor = (p.text.subtitle.trim() ? h * .542 : titleBase + titleSize * .25) + labelRoom;
+    const artistTop = paintTitle(c, p.text.artist, textX, artistBase, artistSize, max, Math.max(artistSize * .8, artistBase - floor), font, "600");
+    if (p.text.artist.trim()) label(c, "Artist Name", textX, over(artistTop, .083), labelSize, font, p.look.accent);
     paintText(c, p.text.credit, textX, h * .721, h * .025 * scale, max, font);
   }
   c.restore();
@@ -692,12 +924,12 @@ export function drawStudioFrame(c: CanvasRenderingContext2D, s: PreparedStudio, 
   const p = s.project, { width: w, height: h } = p.scene.canvas;
   const t = clamp(Number.isFinite(seconds) ? seconds : 0, 0, studioDuration(s.timeline));
   const m = sampleStudioMotion(s.motion, t, s.timeline.fps), f = sampleStudioFeatures(s.timeline, t, s.features);
-  const shift = 0;
+  const shift = 0, rhythm = studioRhythm(s, t, m), ink = s.leftInk;
   c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = 1; c.globalCompositeOperation = "source-over"; c.shadowBlur = 0;
-  c.fillStyle = "#ecf1eb"; c.fillRect(0, 0, w, h);
+  c.fillStyle = CANVAS_COLOR; c.fillRect(0, 0, w, h);
   c.save(); arcPath(c, p, shift, "left"); c.clip(); paintLeftLayers(c, s, t, m); c.restore();
   c.save(); arcPath(c, p, shift, "right"); c.clip(); paintRightImage(c, s, m); c.restore();
-  paintLights(c, s, t, m, shift); paintArc(c, s, f);
+  paintLights(c, s, t, m, shift, rhythm); paintArc(c, s, f, rhythm);
   if (s.watermark) c.drawImage(s.watermark, w * .984 - s.watermark.width, h * .984 - s.watermark.height);
   // Move the content as one block, independently of backgrounds and the arc.
   // Normalized offsets keep preview, seeks and full-resolution export identical.
@@ -706,11 +938,11 @@ export function drawStudioFrame(c: CanvasRenderingContext2D, s: PreparedStudio, 
   c.scale(layout.scale, layout.scale); c.translate(-anchorX, -anchorY);
   paintDisc(c, s, t);
   if (p.text.visible) c.drawImage(s.information, 0, 0);
-  paintSmallSpectrum(c, s, f, t);
+  paintSmallSpectrum(c, s, f, t, rhythm);
   if (p.text.progress) {
     const x = w * .066 * s.contentScale, width = w * .376 * s.contentScale, y = h * .960, duration = studioDuration(s.timeline), ratio = clamp(t / Math.max(.001, duration));
-    c.save(); c.lineWidth = Math.max(1, h * .0018); c.strokeStyle = "rgba(247,255,255,.65)"; c.beginPath(); c.moveTo(x, y); c.lineTo(x + width, y); c.stroke();
-    c.fillStyle = "#ffffff"; c.shadowColor = p.look.accent; c.shadowBlur = h * .008; c.beginPath(); c.arc(x + width * ratio, y, h * .006, 0, Math.PI * 2); c.fill();
+    c.save(); c.lineWidth = Math.max(1, h * .0018); c.strokeStyle = ink.color; c.globalAlpha = .65; c.beginPath(); c.moveTo(x, y); c.lineTo(x + width, y); c.stroke();
+    c.globalAlpha = 1; c.fillStyle = ink.color; c.shadowColor = p.look.accent; c.shadowBlur = h * .008; c.beginPath(); c.arc(x + width * ratio, y, h * .006, 0, Math.PI * 2); c.fill();
     c.restore(); paintClocks(c, s, t);
   }
   paintLyrics(c, s, t); c.restore(); c.restore();

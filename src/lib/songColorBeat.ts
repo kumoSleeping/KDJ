@@ -105,6 +105,21 @@ export interface BeatStep { offset: number; level: number; easing: string }
 
 /** How much of a pulse its rise takes. */
 const ATTACK = 0.14;
+/** The top of the swell of a song without a tempo. */
+const FREE_LEVEL = 0.7;
+/** The curves of a pulse's rise and fall and of that slow swell, as cubic-bezier numbers. */
+type Curve = readonly [number, number, number, number];
+const RISE: Curve = [0.3, 0.7, 0.4, 1];
+const FALL: Curve = [0.22, 0.5, 0.36, 1];
+const SWELL: Curve = [0.37, 0, 0.63, 1];
+const css = (curve: Curve) => `cubic-bezier(${curve.join(", ")})`;
+/** How far out a pulse goes: the downbeat a little further than the rest when it is known. */
+const pulseLevel = (beat: SongBeat, pulse: number) => beat.accented ? (pulse === 0 ? 1 : 0.72) : 0.85;
+
+/** The glow between beats, as a share of its peak; how far it and the field grow on a beat. */
+export const GLOW_REST = 0.3;
+export const GLOW_SWELL = 0.09;
+export const FIELD_SWELL = 0.024;
 
 /**
  * The pulse over one cycle. In time with the song: a quick rise on each pulse and a long fall
@@ -114,23 +129,47 @@ const ATTACK = 0.14;
 export function beatSteps(beat: SongBeat): BeatStep[] {
   if (!beat.synced) {
     return [
-      { offset: 0, level: 0, easing: "cubic-bezier(0.37, 0, 0.63, 1)" },
-      { offset: 0.5, level: 0.7, easing: "cubic-bezier(0.37, 0, 0.63, 1)" },
+      { offset: 0, level: 0, easing: css(SWELL) },
+      { offset: 0.5, level: FREE_LEVEL, easing: css(SWELL) },
       { offset: 1, level: 0, easing: "linear" },
     ];
   }
   const steps: BeatStep[] = [];
   for (let pulse = 0; pulse < PULSES_PER_CYCLE; pulse += 1) {
     const start = pulse / PULSES_PER_CYCLE;
-    steps.push({ offset: start, level: 0, easing: "cubic-bezier(0.3, 0.7, 0.4, 1)" });
-    steps.push({
-      offset: start + ATTACK / PULSES_PER_CYCLE,
-      level: beat.accented ? (pulse === 0 ? 1 : 0.72) : 0.85,
-      easing: "cubic-bezier(0.22, 0.5, 0.36, 1)",
-    });
+    steps.push({ offset: start, level: 0, easing: css(RISE) });
+    steps.push({ offset: start + ATTACK / PULSES_PER_CYCLE, level: pulseLevel(beat, pulse), easing: css(FALL) });
   }
   steps.push({ offset: 1, level: 0, easing: "linear" });
   return steps;
+}
+
+/** y of a CSS cubic-bezier at x. */
+function curveAt([x1, y1, x2, y2]: Curve, x: number): number {
+  const at = (a: number, b: number, s: number) => 3 * a * s * (1 - s) ** 2 + 3 * b * s * s * (1 - s) + s ** 3;
+  let low = 0, high = 1;
+  for (let step = 0; step < 20; step += 1) {
+    const middle = (low + high) / 2;
+    if (at(x1, x2, middle) < x) low = middle; else high = middle;
+  }
+  return at(y1, y2, (low + high) / 2);
+}
+
+/** Which pulse of the song `positionSec` is in: it changes once a pulse. */
+export function beatPulseIndex(positionSec: number, beat: SongBeat): number {
+  return Math.floor(((Number.isFinite(positionSec) ? positionSec : 0) - beat.originSec) / (beat.cycleSec / PULSES_PER_CYCLE));
+}
+
+/**
+ * How far the pulse is out when the song is at `positionSec`, 0..1: the keyframes of
+ * `beatSteps` as a function of the song's time, for a picture that is drawn frame by frame
+ * (the visualizer) and must show the same frame whenever it is asked for the same moment.
+ */
+export function beatLevel(positionSec: number, beat: SongBeat): number {
+  const at = beatCycleTime(positionSec, beat) / (beat.cycleSec * 1000);
+  if (!beat.synced) return FREE_LEVEL * (at < 0.5 ? curveAt(SWELL, at * 2) : 1 - curveAt(SWELL, at * 2 - 1));
+  const place = at * PULSES_PER_CYCLE, pulse = Math.min(PULSES_PER_CYCLE - 1, Math.floor(place)), within = place - pulse;
+  return pulseLevel(beat, pulse) * (within < ATTACK ? curveAt(RISE, within / ATTACK) : 1 - curveAt(FALL, (within - ATTACK) / (1 - ATTACK)));
 }
 
 /** The loudness the field treats as the song's full strength: a high percentile of its overview. */

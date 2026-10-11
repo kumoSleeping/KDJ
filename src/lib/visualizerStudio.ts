@@ -6,13 +6,19 @@ import type { StudioQuality } from "./visualizerStudioFrames";
 
 export interface VisualizerProject {
   version: 1;
-  track: Pick<TrackSummary, "id" | "path" | "title" | "artist" | "album" | "filename">;
+  /** The song, and its beat grid as the library knew it when the project was last opened:
+   * the lights keep time by it. A project saved before the grid was kept has none. */
+  track: Pick<TrackSummary, "id" | "path" | "title" | "artist" | "album" | "filename"> & Partial<StudioBeatGrid>;
   scene: AudioVisualizerScene;
   leftContent?: { x: number; y: number; scale: number };
   output: { fps: 30 | 60; quality?: StudioQuality; acceleration: "auto" | "software"; directory: string; directoryMode?: "download" | "custom"; filename: string; watermark?: boolean };
   text: { visible: boolean; showAlbum?: boolean; title: string; artist: string; album: string; subtitle: string; collaboration: string; credit: string; scale: number; font: "sans" | "serif"; progress: boolean };
   look: { leftFit?: "auto" | "cover" | "contain"; rightFit?: "auto" | "cover" | "contain"; leftRotationRpm?: number; leftReflection?: number; mist?: number; accentMode?: "image" | "manual"; traceSpeed?: number; accent: string; leftVeil: number; mainSpectrum: boolean; smallSpectrum: "off" | "bars" | "line" | "mixed"; energyLine: boolean; spectrumGain: number; motion: number; glow: number; particles: number };
   lyrics: { mode: "off" | "subtitle" | "scroll" | "ring"; lrc: string; translation: string; showTranslation?: boolean; offset: number; size: number };
+}
+export type StudioBeatGrid = Record<"bpm" | "first_beat" | "beat_origin" | "downbeat_origin" | "downbeat_confidence", number | null>;
+export function studioBeatGrid(track: Partial<StudioBeatGrid>): StudioBeatGrid {
+  return { bpm: track.bpm ?? null, first_beat: track.first_beat ?? null, beat_origin: track.beat_origin ?? null, downbeat_origin: track.downbeat_origin ?? null, downbeat_confidence: track.downbeat_confidence ?? null };
 }
 export interface VisualizerDraft { project: VisualizerProject; images: Blob[] }
 export interface LyricLine { time: number; lines: string[] }
@@ -29,7 +35,7 @@ export function createVisualizerProject(track: TrackSummary): VisualizerProject 
   scene.disc = { mode: "cover", image: 0, x: 0.132, y: 0.245, size: 0.20, rpm: 5, direction: 1 };
   scene.spectrum = { bands: 64, length: 0.105, sensitivity: 1, smoothing: 0.72, color: [72, 223, 241, 255] };
   return {
-    version: 1, track: { id: track.id, path: track.path, title: track.title, artist: track.artist, album: track.album, filename: track.filename }, scene,
+    version: 1, track: { id: track.id, path: track.path, title: track.title, artist: track.artist, album: track.album, filename: track.filename, ...studioBeatGrid(track) }, scene,
     output: { fps: 30, acceleration: "auto", watermark: true, directory: "", directoryMode: "download", filename: `${safeVisualizerName(track.title || track.filename)}-可视化.mp4` },
     text: { visible: true, showAlbum: false, title: track.title || track.filename, artist: track.artist || "", album: track.album || "", subtitle: "", collaboration: "", credit: "", scale: 1, font: "sans", progress: true },
     look: { leftFit: "cover", rightFit: "auto", leftRotationRpm: .35, leftReflection: .42, mist: .38, accentMode: "image", traceSpeed: 7, accent: "#45dce8", leftVeil: DEFAULT_STUDIO_LEFT_VEIL, mainSpectrum: true, smallSpectrum: "mixed", energyLine: true, spectrumGain: 1, motion: 0.65, glow: 0.38, particles: 0.35 },

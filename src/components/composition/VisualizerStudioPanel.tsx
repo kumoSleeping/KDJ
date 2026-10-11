@@ -7,7 +7,7 @@ import { Slider } from "../common/Slider";
 import { Segmented } from "../common/Segmented";
 import type { VisualizerFeatureTimeline } from "../../types/audioVisualizer";
 import { api, visualizerApi } from "../../lib/api";
-import { createVisualizerProject, loadVisualizerDraft, saveVisualizerDraft, studioDuration, studioLyricText, hasStudioLyrics, syncVisualizerImages, validateVisualizerProject, STUDIO_IMAGE_LIMIT, clamp, type VisualizerDraft, type VisualizerProject } from "../../lib/visualizerStudio";
+import { createVisualizerProject, loadVisualizerDraft, saveVisualizerDraft, studioBeatGrid, studioDuration, studioLyricText, hasStudioLyrics, syncVisualizerImages, validateVisualizerProject, STUDIO_IMAGE_LIMIT, clamp, type VisualizerDraft, type VisualizerProject } from "../../lib/visualizerStudio";
 import { drawStudioFrame, loadStudioImages, prepareStudio, studioPictureSideAt } from "../../lib/visualizerStudioRenderer";
 import { studioExportBytes } from "../../lib/visualizerStudioFrames";
 import { formatBytes } from "../../lib/format";
@@ -246,6 +246,16 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     })().catch(e => { if (active) { setMediaFailed(true); setNotice(message(e)); } });
     return () => { active = false; controller.abort(); };
   }, [track.id, loadAllowed]);
+  // The lights keep time by the song's beat grid, which can be analysed or corrected while
+  // its picture is up.
+  useEffect(() => {
+    setDraft(current => {
+      if (!current) return current;
+      const grid = studioBeatGrid(track), kept = studioBeatGrid(current.project.track);
+      if ((Object.keys(grid) as (keyof typeof grid)[]).every(key => grid[key] === kept[key])) return current;
+      return { ...current, project: { ...current.project, track: { ...current.project.track, ...grid } } };
+    });
+  }, [track.bpm, track.first_beat, track.beat_origin, track.downbeat_origin, track.downbeat_confidence]);
 
   useEffect(() => {
     if (!draft || !dirty.current) return;
@@ -553,10 +563,8 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   </div>;
   const noticeRow = notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>;
   const pickImage = (slot: number) => { imageSlot.current = slot; imageInput.current?.click(); };
-  // Where the picture sits in its frame: also set by dragging it in the preview.
+  // Where the picture sits in its frame is set by dragging it in the preview.
   const pictureSide = (side: "left" | "right") => p && <Group title={side === "left" ? "左侧图片" : "右侧图片"}>
-    <Slider label="水平" value={p.scene[side].focus_x * 100} defaultValue={defaults.scene[side].focus_x * 100} min={0} max={100} origin={50} format={percent} onChange={v => edit(n => { n.scene[side].focus_x = v / 100; })} />
-    <Slider label="垂直" value={p.scene[side].focus_y * 100} defaultValue={defaults.scene[side].focus_y * 100} min={0} max={100} origin={50} format={percent} onChange={v => edit(n => { n.scene[side].focus_y = v / 100; })} />
     <Slider label="缩放" value={p.scene[side].zoom} defaultValue={defaults.scene[side].zoom} min={1} max={4} step={.01} format={times} onChange={v => edit(n => { n.scene[side].zoom = v; })} />
     {side === "left" && <Slider label="加深" value={p.look.leftVeil * 100} defaultValue={defaults.look.leftVeil * 100} min={0} max={100} format={percent} onChange={v => edit(n => { n.look.leftVeil = v / 100; })} />}
   </Group>;
@@ -569,13 +577,12 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
       {tab === "scene" && <>
         <Group title="画面">
           <Slider label="左右比例" value={p.scene.arc.position * 100} defaultValue={defaults.scene.arc.position * 100} min={25} max={75} step={.5} format={percent} onChange={v => edit(n => { n.scene.arc.position = v / 100; })} />
-          <Slider label="背景动态" value={p.look.motion} defaultValue={defaults.look.motion} min={0} max={1} step={.01} format={ratio} onChange={v => edit(n => { n.look.motion = v; })} />
-          <Slider label="频谱强度" value={p.look.spectrumGain} defaultValue={defaults.look.spectrumGain} min={.1} max={3} step={.05} format={ratio} onChange={v => edit(n => { n.look.spectrumGain = v; })} />
+          {/* One strength for everything that moves with the song: the pictures' drift and the lights' pulse. */}
+          <Slider label="律动" value={p.look.motion} defaultValue={defaults.look.motion} min={0} max={1} step={.01} format={ratio} onChange={v => edit(n => { n.look.motion = v; })} />
         </Group>
         <Group title="显示">
           <Toggle label="唱片" checked={p.scene.disc.mode !== "hidden"} onChange={v => edit(n => { n.scene.disc.mode = v ? "cover" : "hidden"; })} />
-          <Toggle label="频谱" checked={p.look.mainSpectrum || p.look.smallSpectrum !== "off"} onChange={v => edit(n => { n.look.mainSpectrum = v; n.look.smallSpectrum = v ? "mixed" : "off"; })} />
-          <Toggle label="能量线" checked={p.look.energyLine} onChange={v => edit(n => { n.look.energyLine = v; })} />
+          <Toggle label="波形" checked={p.look.mainSpectrum || p.look.smallSpectrum !== "off" || p.look.energyLine} onChange={v => edit(n => { n.look.mainSpectrum = n.look.energyLine = v; n.look.smallSpectrum = v ? "mixed" : "off"; })} />
         </Group>
         <Group title="左侧内容" hint="封面、文字、歌词及下方频谱一起移动，背景和分界圆弧不变">
           <Slider label="水平" value={leftContent.x * 100} defaultValue={defaults.leftContent!.x * 100} min={-40} max={40} step={.5} origin={0} format={signedPercent} onChange={v => moveLeftContent({ x: v / 100 })} />

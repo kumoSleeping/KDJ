@@ -9,6 +9,8 @@ import {
   beatCycleIndex,
   beatCycleTime,
   beatDrift,
+  beatLevel,
+  beatPulseIndex,
   beatSteps,
   songBeat,
   waveEnergy,
@@ -97,4 +99,28 @@ test("song colour beat: the song's energy comes from its overview", () => {
   assert.equal(waveEnergy(amp, 0, 200, 10, 2), 0.6);
   assert.equal(waveEnergy(amp, loud, 0, 10, 2), 0.6);
   near(waveEnergy(amp, loud, 200, 500, 2), 1, 1e-6);
+});
+
+test("song colour beat: the pulse as a function of the song's time is the keyframes' pulse", () => {
+  // 120 BPM from a trusted downbeat at 0.5 s: a pulse every half second, the first of four the bar's.
+  const beat = songBeat({ bpm: 120, first_beat: 0.5, beat_origin: 0.5, downbeat_origin: 0.5, downbeat_confidence: 0.9 });
+  const steps = beatSteps(beat), pulse = beat.cycleSec / PULSES_PER_CYCLE;
+  // Every keyframe is met: nothing at the start of a pulse, its level at the top of the rise.
+  for (const step of steps.slice(0, -1)) near(beatLevel(beat.originSec + step.offset * beat.cycleSec, beat), step.level, 1e-4);
+  near(beatLevel(beat.originSec + 0.14 * pulse, beat), 1, 1e-4);
+  near(beatLevel(beat.originSec + 1.14 * pulse, beat), 0.72, 1e-4);
+  // A quick rise and a long fall: half way through a pulse it is well down, and still falling.
+  const half = beatLevel(beat.originSec + 0.5 * pulse, beat), late = beatLevel(beat.originSec + 0.9 * pulse, beat);
+  assert.ok(half < 0.5 && half > late && late > 0, `${half} > ${late} > 0`);
+  // The same moment always gives the same value, wherever in the song it is and before the grid starts.
+  near(beatLevel(beat.originSec + 0.3 + 40 * beat.cycleSec, beat), beatLevel(beat.originSec + 0.3, beat), 1e-6);
+  near(beatLevel(beat.originSec + 0.3 - 3 * beat.cycleSec, beat), beatLevel(beat.originSec + 0.3, beat), 1e-6);
+  assert.equal(beatPulseIndex(beat.originSec, beat), 0);
+  assert.equal(beatPulseIndex(beat.originSec + 2.2 * pulse, beat), 2);
+  assert.equal(beatPulseIndex(beat.originSec - 0.2 * pulse, beat), -1);
+  // Without a tempo: one slow swell to 0.7 and back over the free cycle.
+  const free = songBeat(null);
+  near(beatLevel(0, free), 0, 1e-4);
+  near(beatLevel(free.cycleSec / 2, free), 0.7, 1e-4);
+  near(beatLevel(free.cycleSec / 4, free), 0.35, 1e-3);
 });

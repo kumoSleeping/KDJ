@@ -8,6 +8,9 @@ import {
   beatCorrection,
   beatCycleIndex,
   beatSteps,
+  FIELD_SWELL,
+  GLOW_REST,
+  GLOW_SWELL,
   songBeat,
   waveEnergy,
   waveLoudness,
@@ -62,11 +65,6 @@ const MASS_BLOBS: readonly (readonly (readonly [number, number, number])[])[] = 
 const GLOW_BLOB: readonly (readonly [number, number, number])[] = [[0.5, 0.5, 0.5]];
 /** How a blob fades from its centre to its rim: a bell, so two that overlap blend. */
 const FALLOFF: readonly (readonly [number, number])[] = [[0, 1], [0.2, 0.92], [0.45, 0.6], [0.7, 0.24], [0.88, 0.06], [1, 0]];
-
-/** The glow between beats, as a share of its peak; how far it and the field grow on a beat. */
-const GLOW_REST = 0.3;
-const GLOW_SWELL = 0.09;
-const FIELD_SWELL = 0.024;
 
 /** The front of the wash: px per ms, and the limits of how long it may take. */
 const SPREAD_SPEED = 1.5;

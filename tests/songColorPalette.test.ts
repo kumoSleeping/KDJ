@@ -6,11 +6,14 @@ import {
   INK_FAINT_CONTRAST,
   INK_MUTED_CONTRAST,
   INK_TEXT_CONTRAST,
+  GROUND_INK_CONTRAST,
   fieldPeakLuminance,
+  inkOnGround,
   luminanceContrast,
   parseHex,
   relativeLuminance,
   songColorPalette,
+  toneOf,
   type SongColorPalette,
 } from "../src/lib/songColorPalette";
 
@@ -83,4 +86,28 @@ test("song colour: monochrome art stays monochrome, and nothing to go on is the 
   assert.equal(DEFAULT_SONG_COLOR.source, "default");
   // The default is quiet: far less chroma than a cover's field.
   for (const mass of DEFAULT_SONG_COLOR.masses) assert.ok(spread(mass) < 60, mass);
+});
+
+test("song colour: ink on a picture is light while white reads there and a deep tone of the hue past that", () => {
+  for (const accent of ["#45dce8", "#d2475f", "#8a8a8a", "#f2d24b"]) {
+    for (const ground of [0, 0.05, 0.18, 0.29, 0.31, 0.5, 0.8, 1]) {
+      const ink = inkOnGround(accent, ground), luminance = relativeLuminance(parseHex(ink.color)!);
+      assert.equal(ink.light, ground <= 0.3, `${accent} on ${ground}`);
+      // Either way the mark holds its floor against the picture's mean.
+      assert.ok(luminanceContrast(luminance, ground) >= (ink.light ? GROUND_INK_CONTRAST : INK_TEXT_CONTRAST) - 0.05, `${accent} on ${ground}: ${ink.color}`);
+      assert.equal(luminance > ground, ink.light);
+    }
+  }
+  // A grey accent gives grey ink: no hue is invented.
+  const grey = parseHex(inkOnGround("#8a8a8a", 0.8).color)!;
+  assert.ok(Math.max(...grey) - Math.min(...grey) <= 2, String(grey));
+});
+
+test("song colour: a light of a field's colour keeps its hue and is no stronger than the colour was", () => {
+  const light = parseHex(toneOf("#7a1f2b", 0.84, 0.13))!;
+  assert.ok(light[0] > light[1] && light[0] > light[2], `still red: ${light}`);
+  assert.ok(relativeLuminance(light) > 0.5, "and light");
+  const grey = parseHex(toneOf("#4a4a4a", 0.84, 0.13))!;
+  assert.ok(Math.max(...grey) - Math.min(...grey) <= 2, String(grey));
+  assert.equal(toneOf("not a colour", 0.5, 0.1), "not a colour");
 });
