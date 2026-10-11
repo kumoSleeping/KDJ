@@ -50,8 +50,8 @@ const OWN_OVERSCAN_ROWS = 8;
 const WHEEL_GESTURE_MS = 120;
 /** The travel after which a wheel gesture is taken to run along one axis. */
 const WHEEL_AXIS_PX = 4;
-/** A wheel that reports lines is taken to mean this many pixels a line. */
-const WHEEL_LINE_PX = 40;
+/** A wheel that reports lines is taken to mean this many pixels a line, as over the scroll handles (scrollPills.ts). */
+const WHEEL_LINE_PX = 16;
 
 /** How many rows (blocks) to keep beyond either edge of the viewport. */
 export function rowListOverscan(screenRows: number): number {

@@ -61,9 +61,9 @@ test("a list that scrolls itself: the wheel moves it, a gesture keeps its axis, 
     assert.deepEqual([list.scrollTop, list.scrollLeft], [380, 50]);
     // A wheel that reports lines or pages; Shift turns a vertical wheel sideways.
     assert.equal(wheel(row, 5000, { deltaY: 3, deltaMode: 1 }), true);
-    assert.equal(list.scrollTop, 380 + 3 * 40);
+    assert.equal(list.scrollTop, 380 + 3 * 16);
     assert.equal(wheel(row, 6000, { deltaY: -1, deltaMode: 2 }), true);
-    assert.equal(list.scrollTop, 500 - 600);
+    assert.equal(list.scrollTop, 428 - 600);
     list.scrollTop = 0;
     assert.equal(wheel(row, 7000, { deltaY: 120, shiftKey: true }), true);
     assert.deepEqual([list.scrollTop, list.scrollLeft], [0, 170]);
