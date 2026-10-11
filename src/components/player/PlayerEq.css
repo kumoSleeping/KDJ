@@ -1,6 +1,6 @@
 /* EQ / 播放控制 docked in the player bar, as one of the two faces to the right of the transport
    (src/lib/playerBarFace.ts). A wide window: one row, knobs and the tempo slider, then the KEY
-   and BPM readouts; the waveform has the whole row below. A narrow bar: the readouts beneath. */
+   and BPM readouts; the waveform has the whole row below. A tall window: the readouts beneath. */
 .kd-app .kd-player { --kd-player-eq-w: clamp(236px, 19vw, 268px); }
 .kd-player-eq {
   position: relative;
@@ -15,19 +15,15 @@
   padding: 0;
   background: transparent;
 }
-.kd-app .kd-player-eq { width: auto; min-width: min-content; }
-.kd-app .kd-player:not([data-layout="compact"]) .kd-player-eq .kd-manager-control {
+.kd-app:not([data-tall="true"]) .kd-player-eq { width: auto; min-width: min-content; }
+.kd-app:not([data-tall="true"]) .kd-player-eq .kd-manager-control {
   /* The knobs give way down to the width their labels need; narrower than that, the face scrolls. */
   grid-template-columns: minmax(13.4rem, var(--kd-player-eq-w)) auto;
   align-items: center;
   column-gap: 12px;
 }
 /* The readouts are never squeezed: a cut-off BPM reads as another number. */
-.kd-app .kd-player-eq .kd-eq-readouts { min-width: max-content; }
-/* The narrow bar lends the EQ both rows. Its controls scroll, not the face/collapse keys. */
-.kd-app .kd-player[data-layout="compact"] .kd-player-eq .kd-manager-control {
-  grid-template-columns: minmax(13.4rem, 1fr);
-}
+.kd-app:not([data-tall="true"]) .kd-player-eq .kd-eq-readouts { min-width: max-content; }
 .kd-player-eq .kd-manager-knob-stack {
   display: grid;
   /* Five knobs and, ending the row, the tempo slider with a little more room than a knob. */
