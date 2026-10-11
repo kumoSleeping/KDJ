@@ -2874,7 +2874,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   width: clamp(11rem, calc(50% - 7.8rem), 34rem);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 0.25rem;
   min-width: 0;
 }
@@ -2929,7 +2929,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   text-align: inherit;
   cursor: pointer;
 }
-/* 右侧是工具键 / 旋钮那一块：贴右。整块仍是“下一首”通道的拖入目标。 */
+/* 右侧是工具键 / 旋钮那一块：贴着走带。整块仍是“下一首”通道的拖入目标。 */
 .kd-player-trailing {
   border-radius: 0.65rem;
   transition: background 0.12s, box-shadow 0.12s;
@@ -6419,13 +6419,13 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   gap: 0.1rem;
   margin-right: 0.2rem;
 }
-/* 走带右边那一块的两面：工具键、旋钮，只显示一面，横着滑着换（SlidePages，换面键在
-   PlayerBar.tsx）。两面都贴右端，换面键和收起键始终留在它们右边，不跟着滑。 */
+/* 走带右边那一块的两面：工具键、旋钮，只显示一面，上下滑着换（SlidePages，换面键在
+   PlayerBar.tsx）。换面键打头，两面跟在它后面贴着走带排；剩下的宽度空着，收起键独自在最右。 */
 .kd-player-faces { align-self: stretch; }
 .kd-player-faces > .kd-slide-page {
   flex-direction: row;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 .kd-player-face {
   flex: 0 1 auto;
@@ -6435,14 +6435,13 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   gap: 0.25rem;
 }
 .kd-player-face[hidden] { display: none; }
-/* 旋钮那面占满这一块，旋钮靠右（用外边距推，不用 justify-content：放不下时要能滚到开头）。 */
+/* 旋钮那面占满这一块；放不下时这一面自己横向滚。 */
 .kd-player-face[data-face="eq"] {
   flex: 1 1 auto;
   overflow-x: auto;
   scrollbar-width: none;
 }
 .kd-player-face[data-face="eq"]::-webkit-scrollbar { display: none; }
-.kd-player-face[data-face="eq"] > .kd-player-eq { margin-left: auto; }
 .kd-player-facekey { flex: none; }
 .kd-player-facekey[data-on="true"] { color: var(--kd-text); }
 .kd-player-colorbtn { width: 1.45rem; }

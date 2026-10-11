@@ -28,14 +28,17 @@ interface SlidePagesProps {
   page: string;
   /** Every page in title order: a later page arrives from the right, an earlier one from the left. */
   order: readonly string[];
+  /** `y`: the pages travel up and down instead — a later page arrives from below, an earlier one from above. */
+  axis?: "x" | "y";
   className?: string;
   children: ReactNode;
 }
 
 /**
- * Switches pages by sliding sideways. The children are whatever the page in view renders; when
- * `page` changes, a still copy of the old picture slides out while the new one slides in from
- * the side its title lies on. Pages need not stay mounted, and nothing is asked of them.
+ * Switches pages by sliding sideways (or up and down, `axis="y"`). The children are whatever the
+ * page in view renders; when `page` changes, a still copy of the old picture slides out while the
+ * new one slides in from the side its title lies on. Pages need not stay mounted, and nothing is
+ * asked of them.
  */
 export class SlidePages extends Component<SlidePagesProps> {
   private host = createRef<HTMLDivElement>();
@@ -61,9 +64,10 @@ export class SlidePages extends Component<SlidePagesProps> {
     (copy as HTMLElement & { restoreScroll?(): void }).restoreScroll?.();
     this.ghost = copy;
     const timing = { duration: SLIDE_PAGES_MS, easing: EASE };
-    copy.animate([{ transform: "translateX(0)" }, { transform: `translateX(${-100 * forward}%)` }], { ...timing, fill: "forwards" })
+    const move = this.props.axis === "y" ? "translateY" : "translateX";
+    copy.animate([{ transform: `${move}(0)` }, { transform: `${move}(${-100 * forward}%)` }], { ...timing, fill: "forwards" })
       .finished.then(() => { copy.remove(); if (this.ghost === copy) this.ghost = null; }, () => copy.remove());
-    page.animate([{ transform: `translateX(${100 * forward}%)` }, { transform: "translateX(0)" }], timing);
+    page.animate([{ transform: `${move}(${100 * forward}%)` }, { transform: `${move}(0)` }], timing);
   }
 
   componentWillUnmount() { this.ghost?.remove(); }

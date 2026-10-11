@@ -4877,7 +4877,8 @@ export function PlayerBar() {
       </div>
 
       {/* 走带右边只有一块地方，一次只放一面：歌和接歌的那排键，或者这台 deck 的旋钮、Tempo
-          和读数。末尾那颗键换面，两面横着滑着换。整块仍接收拖入：拖到这里替换下一首。 */}
+          和读数。都贴着走带排，开头那颗键换面，两面上下滑着换；只有收起键留在最右。
+          整块仍接收拖入：拖到这里替换下一首。 */}
       <div
         className="kd-player-trailing"
         data-drop-active={deckDropSide === "right" ? "true" : undefined}
@@ -4888,7 +4889,18 @@ export function PlayerBar() {
         }}
         onDrop={(event) => void dropOnDeck(event, "right")}
       >
-        <SlidePages className="kd-player-faces" page={barFace} order={PLAYER_BAR_FACES}>
+        <button
+          type="button"
+          className="kd-player-step kd-player-facekey"
+          aria-label={barFace === "eq" ? "换回播放工具" : "换成旋钮和 Tempo"}
+          aria-pressed={barFace === "eq"}
+          data-on={barFace === "eq" ? "true" : undefined}
+          title={barFace === "eq" ? "换回播放工具" : "换成旋钮和 Tempo"}
+          onClick={toggleBarFace}
+        >
+          <SlidersHorizontal size={14} />
+        </button>
+        <SlidePages className="kd-player-faces" axis="y" page={barFace} order={PLAYER_BAR_FACES}>
           <div className="kd-player-face" data-face="tools" hidden={barFace !== "tools"}>
             <div className="kd-player-float-tools">
               <button
@@ -4997,17 +5009,6 @@ export function PlayerBar() {
         {lyricsMenu && !video && lyricsMenu.trackId === (displayTrack?.id ?? null) ? (
           <LyricsButtonMenu {...lyricsMenu} track={displayTrack ?? null} onClose={() => setLyricsMenu(null)} />
         ) : null}
-        <button
-          type="button"
-          className="kd-player-step kd-player-facekey"
-          aria-label={barFace === "eq" ? "换回播放工具" : "换成旋钮和 Tempo"}
-          aria-pressed={barFace === "eq"}
-          data-on={barFace === "eq" ? "true" : undefined}
-          title={barFace === "eq" ? "换回播放工具" : "换成旋钮和 Tempo"}
-          onClick={toggleBarFace}
-        >
-          <SlidersHorizontal size={14} />
-        </button>
         {/* Offered where the playing song's bubble can take over: on the desktop, with a song. */}
         {track && playerBarCollapseOffered() ? <BarCollapseKey /> : null}
       </div>

@@ -4,12 +4,12 @@ import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 /**
  * What the player bar shows to the right of the transport, one at a time: `tools`, the keys of
  * the song and of what plays next (lyrics, song colour, small windows, auto-advance, mode …), or
- * `eq`, the deck's knobs, tempo slider and readouts. The key that ends the row switches between
- * them, and the choice is kept across runs.
+ * `eq`, the deck's knobs, tempo slider and readouts. The key they follow switches between them,
+ * and the choice is kept across runs.
  */
 export type PlayerBarFace = "tools" | "eq";
 
-/** In the order they lie: the knobs arrive from the right, the keys come back from the left. */
+/** In the order they lie: the knobs come up from below, the keys come back down from above. */
 export const PLAYER_BAR_FACES: readonly PlayerBarFace[] = ["tools", "eq"];
 
 const FACE_KEY = "kd-player-bar-face";

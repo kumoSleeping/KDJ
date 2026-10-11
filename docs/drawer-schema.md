@@ -210,7 +210,9 @@ surface:
 
 ## Reusing the pieces elsewhere
 
-`TitleTabs` and `SlidePages` do not depend on the drawer. Any panel with a few sibling pages
+`TitleTabs` and `SlidePages` do not depend on the drawer. (`SlidePages` takes `axis="y"` for a
+strip too low and too wide for a sideways pass: the player bar's two faces to the right of the
+transport, `src/lib/playerBarFace.ts`, travel up and down.) Any panel with a few sibling pages
 should use this pair instead of inventing another tab strip: `TitleTabs` for the title row
 (`tabs`, `value`, `onChange`, actions as children) and `SlidePages` around
 the content that changes. `useDrawer()` tells a component whether it is shown inside a drawer, so
