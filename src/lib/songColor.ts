@@ -15,9 +15,15 @@ import { songSwapEntranceDelay } from "./songSwapMotion";
 import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 import { isStreamTrack, streamCoverUrls, streamMeta } from "./streamTrack";
 import { extractStudioPalette } from "./visualizerStudioPalette";
+import { useThemePack } from "./themePack";
 import type { Track } from "../types";
 
 const STORAGE_KEY = "kd-song-color";
+
+/** A theme pack owns its surfaces; keep the choice but do not retone the pack. */
+export function useSongColorAvailable(): boolean {
+  return useThemePack(state => state.active === null);
+}
 
 /** The press that last changed the choice: which way, where the key was on screen, and when. */
 export interface SongColorWash {
