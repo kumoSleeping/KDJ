@@ -14,6 +14,14 @@
 
    Appearance (ink, hover, selection, the cells of each list) is in design.css; this file is
    the layout alone. */
+/* A list that scrolls itself (rowList.ts, `own`): the container is hidden, not auto. WebKit
+   scrolls an auto container on its own thread and moves the tiles the moment the page writes an
+   offset, before it has painted the ones it is heading for: a fast fling is blank for a frame
+   however early the rows are built. A hidden container is scrolled by the main thread, with
+   the rows and their paint in one commit. The wheel, the handles and the page keys are the
+   page's own there, and the native scrollbars are hidden app-wide anyway. */
+.kd-scroll[data-own-scroll] { overflow: hidden; }
+
 .kd-list {
   position: relative;
   box-sizing: border-box;

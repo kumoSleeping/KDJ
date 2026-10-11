@@ -22,9 +22,15 @@
  *   twenty thousand layers, and the frames of a scroll take tens of milliseconds each with
  *   React doing nothing.
  * So such a list takes the wheel and moves itself (`ownWheel`), keeps only the rows around the
- * viewport, and renders the rows a scroll reaches in the event that reports it. The scroll, the
- * rows and the tiles they need are then committed together: when the page is late the list
- * stands still for that frame, and it is never blank.
+ * viewport, and renders the rows a scroll reaches in the event that reports it. Its container is
+ * `overflow: hidden` (`data-own-scroll`, RowList.css): WebKit gives only an `auto` or `scroll`
+ * container a node on its scrolling thread (`RenderBox::scrollsOverflowY`,
+ * `RenderLayerScrollableArea::canUseCompositedScrolling`), and a written offset is handed to that
+ * thread at once (`AsyncScrollingCoordinator::requestScrollToPosition`), which moves the tiles
+ * before the page has painted the ones it is heading for. A hidden container is scrolled by the
+ * main thread: the scroll, the rows and the tiles they need are committed together, when the
+ * page is late the list stands still for that frame, and it is never blank. The wheel, the scroll
+ * handles and the page keys (`ownKeys`) are then the page's to do.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { defaultRangeExtractor, useVirtualizer, type Range, type VirtualizerOptions } from "@tanstack/react-virtual";
@@ -52,6 +58,8 @@ const WHEEL_GESTURE_MS = 120;
 const WHEEL_AXIS_PX = 4;
 /** A wheel that reports lines is taken to mean this many pixels a line, as over the scroll handles (scrollPills.ts). */
 const WHEEL_LINE_PX = 16;
+/** The keys that scroll a container by a page or to an end, which a hidden container no longer answers itself. */
+const PAGE_KEYS = new Set(["PageUp", "PageDown", "Home", "End", " "]);
 
 /** How many rows (blocks) to keep beyond either edge of the viewport. */
 export function rowListOverscan(screenRows: number): number {
@@ -184,6 +192,36 @@ export function ownWheel(list: HTMLElement): () => void {
   return () => list.removeEventListener("wheel", onWheel);
 }
 
+/**
+ * The page keys of a list that scrolls itself: Page Up / Down, Space, Home and End move it as
+ * the engine would move an `auto` container, for the element that has the focus or, with none,
+ * for the list the pointer last pressed in (as WebKit chooses the container of a key scroll).
+ * A field keeps its keys.
+ */
+export function ownKeys(list: HTMLElement): () => void {
+  let pressedWithin = false;
+  const onPointerDown = (event: PointerEvent) => { pressedWithin = event.target instanceof Node && list.contains(event.target); };
+  const onKey = (event: KeyboardEvent) => {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || !PAGE_KEYS.has(event.key)) return;
+    const active = document.activeElement;
+    const focused = active && active !== document.body ? active : null;
+    if (focused ? !list.contains(focused) : !pressedWithin) return;
+    if (focused instanceof HTMLElement && (focused.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(focused.tagName))) return;
+    // The engine's page step: the viewport less a line of context.
+    const page = Math.max(list.clientHeight * 0.875, list.clientHeight - 40);
+    const top = event.key === "Home" ? 0 : event.key === "End" ? list.scrollHeight
+      : list.scrollTop + (event.key === "PageUp" || (event.key === " " && event.shiftKey) ? -page : page);
+    event.preventDefault();
+    scrollTopTo(list, top);
+  };
+  document.addEventListener("pointerdown", onPointerDown, { capture: true });
+  window.addEventListener("keydown", onKey);
+  return () => {
+    document.removeEventListener("pointerdown", onPointerDown, { capture: true });
+    window.removeEventListener("keydown", onKey);
+  };
+}
+
 export interface RowListOptions {
   scrollerRef: RefObject<HTMLElement | null>;
   /** Rows (blocks) in the list. */
@@ -246,7 +284,11 @@ export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHe
   }, [whole, grown]);
   useEffect(() => {
     const list = scrollerRef.current;
-    if (own && list) return ownWheel(list);
+    if (!own || !list) return;
+    // `overflow: hidden` (RowList.css): the container has no scrolling-thread node, see the head of this file.
+    list.dataset.ownScroll = "";
+    const wheel = ownWheel(list), keys = ownKeys(list);
+    return () => { wheel(); keys(); delete list.dataset.ownScroll; };
   }, [own, scrollerRef]);
   const virtualizer = useVirtualizer<HTMLElement, HTMLElement>({
     count,
