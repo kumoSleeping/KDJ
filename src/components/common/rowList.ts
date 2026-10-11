@@ -11,9 +11,24 @@
  * and the DOM does not change while it scrolls at all. A long list keeps three screens of rows
  * beyond either edge of the viewport and moves that window only once a whole screen has been
  * travelled, without flushSync, so the rows that come and go do so two screens from view.
+ *
+ * That is how a list is left to the WebView. In WebKit a list may scroll itself instead (`own`),
+ * and then it is the other way round, for two things that are WebKit's own:
+ * - It paints an overflow container about one tile beyond its viewport, so a fling it performs on
+ *   its own thread runs past what is painted whatever the page does.
+ * - Every box that clips its overflow (each cell with its ellipsis) is a layer, and every scroll
+ *   and every tile it paints walks all the layers in the container (RenderBox::requiresLayer,
+ *   RenderLayer::recursiveUpdateLayerPositionsAfterScroll): two thousand rows built whole are
+ *   twenty thousand layers, and the frames of a scroll take tens of milliseconds each with
+ *   React doing nothing.
+ * So such a list takes the wheel and moves itself (`ownWheel`), keeps only the rows around the
+ * viewport, and renders the rows a scroll reaches in the event that reports it. The scroll, the
+ * rows and the tiles they need are then committed together: when the page is late the list
+ * stands still for that frame, and it is never blank.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { defaultRangeExtractor, useVirtualizer, type Range, type VirtualizerOptions } from "@tanstack/react-virtual";
+import { wheelPixels } from "../../lib/wheelScroll";
 
 /**
  * Lists up to this many rows (blocks) are rendered whole: the window around the viewport comes
@@ -29,6 +44,14 @@ export const ROW_LIST_OVERSCAN_SCREENS = 3;
 export const ROW_LIST_STEP_SCREENS = 1;
 /** This long without a scroll frame and the scroll has rested. */
 export const SCROLL_REST_MS = 150;
+/** Rows kept beyond either edge of the viewport of a list that scrolls itself, at the least. */
+const OWN_OVERSCAN_ROWS = 8;
+/** A wheel event this long after the last one starts another gesture. */
+const WHEEL_GESTURE_MS = 120;
+/** The travel after which a wheel gesture is taken to run along one axis. */
+const WHEEL_AXIS_PX = 4;
+/** A wheel that reports lines is taken to mean this many pixels a line. */
+const WHEEL_LINE_PX = 40;
 
 /** How many rows (blocks) to keep beyond either edge of the viewport. */
 export function rowListOverscan(screenRows: number): number {
@@ -79,6 +102,83 @@ const observeRowListOffset: RowVirtualizerOptions["observeElementOffset"] = (ins
   };
 };
 
+/**
+ * A list that scrolls itself: the virtualizer hears of every scroll in the event that reports it,
+ * and (useFlushSync) the rows for it are rendered there, before the frame is painted.
+ */
+const observeOwnOffset: RowVirtualizerOptions["observeElementOffset"] = (instance, cb) => {
+  const element = instance.scrollElement;
+  if (!element) return;
+  let idle: ReturnType<typeof setTimeout> | null = null;
+  const onScroll = () => {
+    cb(element.scrollTop, true);
+    if (idle !== null) clearTimeout(idle);
+    idle = setTimeout(() => { idle = null; cb(element.scrollTop, false); }, SCROLL_REST_MS);
+  };
+  cb(element.scrollTop, false);
+  element.addEventListener("scroll", onScroll, { passive: true });
+  return () => {
+    element.removeEventListener("scroll", onScroll);
+    if (idle !== null) clearTimeout(idle);
+  };
+};
+
+/**
+ * WebKit (the macOS and Linux WebView, Safari): the engine in which a list scrolls itself (see
+ * the head of this file). Chromium rasters far ahead of the viewport and a touch screen sends no
+ * wheel, so the list is left to the WebView there.
+ */
+export function listScrollsItself(agent = typeof navigator === "undefined" ? "" : navigator.userAgent): boolean {
+  return /AppleWebKit\//.test(agent) && !/Chrom(e|ium)\/|Edg\/|Android/.test(agent);
+}
+
+/** Whether something between the wheel's target and the list scrolls on its own along that axis. */
+function scrollsWithin(target: EventTarget | null, list: HTMLElement, vertical: boolean): boolean {
+  for (let node = target instanceof Element ? target : null; node && node !== list; node = node.parentElement) {
+    const room = vertical ? node.scrollHeight - node.clientHeight : node.scrollWidth - node.clientWidth;
+    if (room <= 1) continue;
+    const style = getComputedStyle(node);
+    const overflow = vertical ? style.overflowY : style.overflowX;
+    if (overflow === "auto" || overflow === "scroll") return true;
+  }
+  return false;
+}
+
+/**
+ * The list takes the wheel and moves itself. A gesture (a swipe with its momentum, a turn of a
+ * wheel) runs along the axis it started on, as the WebView's own scrolling does, so a vertical
+ * fling does not shake a list that is wider than its pane. A pinch and a wheel over something
+ * that scrolls inside the list are left alone. Returns what takes the listener off.
+ */
+export function ownWheel(list: HTMLElement): () => void {
+  let last = -Infinity;
+  let axis: "x" | "y" | null = null;
+  let travelX = 0;
+  let travelY = 0;
+  let inner: boolean | null = null;
+  const onWheel = (event: WheelEvent) => {
+    if (event.defaultPrevented || event.ctrlKey) return;
+    // When the system produced it, not when the page got to it: a late page does not split a gesture.
+    if (event.timeStamp - last > WHEEL_GESTURE_MS) { axis = null; travelX = 0; travelY = 0; inner = null; }
+    last = event.timeStamp;
+    const page = event.deltaMode === 2;
+    const delta = wheelPixels(event, WHEEL_LINE_PX, page ? list.clientWidth : 0, page ? list.clientHeight : 0);
+    if (axis === null) {
+      travelX += Math.abs(delta.x);
+      travelY += Math.abs(delta.y);
+      if (travelX + travelY >= WHEEL_AXIS_PX) axis = travelY >= travelX ? "y" : "x";
+    }
+    const vertical = axis === null ? Math.abs(delta.y) >= Math.abs(delta.x) : axis === "y";
+    inner ??= scrollsWithin(event.target, list, vertical);
+    if (inner) return;
+    event.preventDefault();
+    if (vertical) { if (delta.y) list.scrollTop += delta.y; }
+    else if (delta.x) list.scrollLeft += delta.x;
+  };
+  list.addEventListener("wheel", onWheel, { passive: false });
+  return () => list.removeEventListener("wheel", onWheel);
+}
+
 export interface RowListOptions {
   scrollerRef: RefObject<HTMLElement | null>;
   /** Rows (blocks) in the list. */
@@ -96,14 +196,19 @@ export interface RowListOptions {
   measured?: boolean;
   /** Another list: a short one starts being built whole again. */
   resetKey?: unknown;
+  /**
+   * The list scrolls itself (see the head of this file): it takes the wheel, is never built whole,
+   * keeps half a screen of rows beyond either edge and renders in the scroll event.
+   */
+  own?: boolean;
 }
 
 /**
  * The virtualizer of a row list, and whether a short list has been built whole. `rowHeight` is
  * the estimate; call `measure()` when it changes.
  */
-export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHeight, screenRows, getKey, measured = false, resetKey }: RowListOptions) {
-  const whole = count <= ROW_LIST_WHOLE;
+export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHeight, screenRows, getKey, measured = false, resetKey, own = false }: RowListOptions) {
+  const whole = !own && count <= ROW_LIST_WHOLE;
   // Rows of a short list built beyond the window so far: [0, grown).
   const [grown, setGrown] = useState(0);
   const grownRef = useRef(0);
@@ -129,18 +234,23 @@ export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHe
     // the function is another one for every chunk, or the chunk is not built before the next scroll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whole, grown]);
+  useEffect(() => {
+    const list = scrollerRef.current;
+    if (own && list) return ownWheel(list);
+  }, [own, scrollerRef]);
   const virtualizer = useVirtualizer<HTMLElement, HTMLElement>({
     count,
     getScrollElement: () => scrollerRef.current,
     estimateSize: estimateSize ?? (() => rowHeight),
-    overscan: rowListOverscan(screenRows),
+    overscan: own ? Math.max(OWN_OVERSCAN_ROWS, Math.ceil(screenRows / 2)) : rowListOverscan(screenRows),
     rangeExtractor,
     getItemKey: getKey,
     scrollMargin: headHeight,
     scrollToFn: rowListScrollTo,
-    observeElementOffset: observeRowListOffset,
-    // Nothing is flushed in a scroll frame: a render the window needs is an ordinary one.
-    useFlushSync: false,
+    observeElementOffset: own ? observeOwnOffset : observeRowListOffset,
+    // Left to the WebView, nothing is flushed in a scroll frame: a render the window needs is an
+    // ordinary one. A list that scrolls itself renders the rows of a scroll before it is painted.
+    useFlushSync: own,
     // A measured list reads a block's height once, when it mounts; a fixed one never.
     measureElement: measured ? undefined : () => rowHeight,
   });

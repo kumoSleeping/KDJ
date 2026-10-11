@@ -11,7 +11,8 @@
 - 虚拟窗口和实际滚动位置同时限制在有效范围；后台变更保持顶部歌曲 ID 和行内偏移，切换查询回顶部。旧会话的像素位置仍可恢复。
 - 列表是行列表（`docs/row-list.md`）：行是文档流里的 grid，不定位，没建出来的行由 body 的 padding 代替，由 `@tanstack/react-virtual` 决定建哪些（`src/components/common/rowList.ts`）。不是 `<table>`：表格的行插入会让整表重排，行上的动画又合成不了；也不是绝对定位的块：每个定位元素都是 WebKit 的一个层，两千个层让每次滚动都要遍历两千个层（2026-10-12 的滚动日志：JS 每帧一两毫秒，主线程却每帧 50 到 180 毫秒）。
 - 节奏跟着 WebKit 的瓦片走，不跟帧走。三千首以内的列表整体挂载：先挂视口附近的窗口，再每隔一帧挂 250 行；之后滚动时 DOM 零改动。更长的列表保留视口前后各三屏，滚过整整一屏才挪一次窗口，不用 flushSync，挂卸行的位置离视口两三屏。滚动帧里不渲染、不量布局、不切祖先属性。
-- 滚轮、触控板和触摸滚动由 WebView 的滚动线程执行，页面不取消 wheel 事件；拖滑块、键盘、定位这些页面自己执行的滚动同样只走容器的 scroll 事件。
+- WebKit 里（macOS、Linux 的 WebView）曲库自己滚：页面接滚轮、写 `scrollTop`，只保留视口前后各半屏的行，每个 scroll 事件里把进出窗口的行渲染好；一次进来太多行时先只有序号，随后填内容。原因和做法见 `docs/row-list.md` 的"WebKit 里曲库自己滚"。上一条的整体挂载和三屏窗口是其它引擎的。
+- 其它引擎里滚轮、触控板和触摸滚动由 WebView 的滚动线程执行，页面不取消 wheel 事件；拖滑块、键盘、定位这些页面自己执行的滚动同样只走容器的 scroll 事件。
 - 到顶或到底之后 WebView 的回弹会继续报出范围之外的滚动位置。那不算滚动：虚拟化器按可滚范围取行，页面不把容器拉回去。
 - 停稳（150 毫秒没有新的滚动帧）时记下顶部的行和行内偏移：后台换索引时按它保持位置，持久会话也记下它；板块被 `display: none` 隐藏后重新显示时按它放回。
 - 行的到场（`src/components/common/listArrival.ts`、`ListArrival.css`，数值和关键帧在 `motion.css` 的 "A list that is presented"）。标记只在行上：`data-kd-arrive`（哪一种）、`data-kd-arrive-row`（第几拍的 step，还是跟最后一拍一起的 rest）、`data-kd-arrive-from`（行从哪一侧来）、`--kd-arrive-i`（第几拍）、晚加入的行带 `--kd-arrive-lag`；动画结束后全部去掉。不在祖先上放任何标记，所以标一行只让这一行的样式失效。行由 `top` 定位、没有 transform，动画只动行自身的 opacity/transform，由合成器执行。

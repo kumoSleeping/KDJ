@@ -14,6 +14,23 @@ WKWebView 的合成器自己滚，显示的是主线程事先画好的瓦片。�
 - 更长的列表只保留视口前后各三屏；虚拟化器用自己的滚动观察器（`observeRowListOffset`）：滚过整整一屏才知会一次，停稳再知会一次，不用 flushSync。于是行的挂卸发生在离视口两三屏之外，可见瓦片不受影响。
 - 等着在某个位置"呈现"的列表（换查询、恢复位置、板块重新显示）在滚动监听里自己要一次渲染（`useScrollMotion` 的 `onScroll`），因为小位移不会让虚拟化器渲染。
 
+## WebKit 里曲库自己滚（`own`）
+
+上面是把滚动交给 WebView 的做法。在 WebKit（macOS 和 Linux 的 WebView；`listScrollsItself()`）里曲库反过来，由页面自己滚，原因是 WebKit 自己的两件事：
+
+- 它给 overflow 容器只预画视口外大约一块瓦片（整页滚动是三倍可视高度，`TileController::adjustTileCoverageRectForScrolling`）。滚动线程自己执行的甩动一两帧就越过去，页面再快也是白的。
+- 凡是裁剪溢出的盒子都是一个层（`RenderBox::requiresLayer()` 里的 `hasNonVisibleOverflow()`；`contain: layout`、定位、z-index 也是），每个带省略号的格都算。每次滚动 WebKit 把容器里所有的层走一遍，清裁剪缓存、重算重绘范围（`RenderLayer::recursiveUpdateLayerPositionsAfterScroll`），画瓦片时再走。两千行整体挂载是两万个层：2026-10-12 的滚动日志里 React 每次渲染一两毫秒，主线程却只有二三十帧。
+
+所以这样的列表：
+
+- 自己接滚轮（`ownWheel`）：`wheel` 取消默认动作，页面写 `scrollTop`。一次手势（一划连同它的惯性、滚轮的一格）沿它开始的那个轴走，竖着甩不会带着比板块宽的列表左右晃；捏合缩放、落在列表里另一个能滚的东西上的滚轮不接。没有回弹。
+- 只保留视口前后各半屏的行（至少 8 行），不整体挂载。层数是整体挂载的几十分之一。
+- 每个 scroll 事件都知会虚拟化器，并在事件里渲染（`useFlushSync`）：滚动、要露出的行、它们的瓦片在同一次提交里。页面慢了，列表停一帧，不会白。
+- 一次进来的行超过 `FILL_ROWS`（拖滑块、跳到正在播的歌）时，这些行先只有序号，不占那一帧；跳动停下 60 毫秒后离视口近的先填内容，每 16 毫秒一步。被呈现的列表（换查询、恢复位置）整行到场，不走这条。
+- 没有"行追上滚动"（`chase`）：行在露出的那一帧就在。
+
+搜索结果和其它引擎（Chromium 的光栅化远在视口之前；触摸屏不发滚轮）不变。
+
 ## 一次与行无关的更新不该碰到行
 
 整份列表在页面里时，行的任何一个 prop 换了身份就是全部行重渲染。两个已经踩过的：
@@ -35,7 +52,7 @@ WKWebView 的合成器自己滚，显示的是主线程事先画好的瓦片。�
 
 ## 规则
 
-1. 滚动帧里不渲染、不 `flushSync`、不读布局（`getBoundingClientRect`、`offsetTop`、`scrollHeight`）、不画 canvas、不切祖先的属性；位置从 `useScrollMotion` 读。
+1. 滚动帧里不读布局（`getBoundingClientRect`、`offsetTop`、`scrollHeight`）、不画 canvas、不切祖先的属性；位置从 `useScrollMotion` 读。交给 WebView 滚的列表在滚动帧里也不渲染、不 `flushSync`；自己滚的列表只由虚拟化器在 scroll 事件里渲染进出窗口的那几行。
 2. 行要便宜：只渲染可见列；格里不套包装层；每行不订阅 store（曲库的响度基准由表读一次下发）；封面是普通 `<img>`，在视口外两三屏就挂好，显示过的同步解码。
 3. 行和块永远不定位（没有 `position`、`top`、`transform`、`contain`）；到场动画用 transform 动行本身。
 4. 动画的标记在行上（`data-kd-arrive*`、`--kd-arrive-*`），结束后去掉；不在 `.kd-scroll`、`.kd-list`、`.kd-list-body` 上放任何会被后代选择器用到的属性。

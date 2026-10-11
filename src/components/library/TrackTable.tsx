@@ -24,7 +24,7 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
-import { rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
+import { listScrollsItself, rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
 import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
@@ -896,6 +896,11 @@ function isPendingForFolder(task: DownloadTask, filterFolder: string, indexById:
  */
 interface ArrivalDue { offset: number; at: number }
 const ARRIVAL_DUE_MS = 400;
+/** Rows of a list that scrolls itself given their contents in one step; more than these entering at once come as their numbers. */
+const FILL_ROWS = 12;
+const FILL_PAUSE_MS = 16;
+/** No contents are filled in this soon after rows came as numbers: the jump may still be going on. */
+const FILL_AFTER_JUMP_MS = 60;
 /** Rows remembered as built (they do not replay the chase); past this many the memory starts over. */
 const MAX_BUILT_REMEMBERED = 50_000;
 
@@ -1881,11 +1886,61 @@ export const TrackTable = memo(function TrackTable({
     trace.loop = requestAnimationFrame(tick);
   });
 
-  // A short list is rendered whole; a long one keeps three screens beyond either edge (rowList.ts).
+  // Left to the WebView, a short list is rendered whole and a long one keeps three screens beyond
+  // either edge; in WebKit the list scrolls itself and keeps the rows around the viewport (rowList.ts).
+  const own = useMemo(() => listScrollsItself(), []);
   const screenRef = useRef(20);
-  const { virtualizer, whole, mounted } = useRowList({ scrollerRef, count, rowHeight: rowH, headHeight: headerH, getKey, screenRows: screenRef.current, resetKey: queryVersion });
+  const { virtualizer, whole, mounted } = useRowList({ scrollerRef, count, rowHeight: rowH, headHeight: headerH, getKey, screenRows: screenRef.current, resetKey: queryVersion, own });
   virtualizerRef.current = virtualizer;
   const items = virtualizer.getVirtualItems();
+
+  /**
+   * 自己滚动的列表：滚动到哪里，那里的行在同一帧里就建好，所以序号永远在。一帧里进来的行太多时
+   * （拖滑块、跳转）这些行先只有序号，不占那一帧；滚动缓下来后离视口近的先填上内容，一步十几行。
+   */
+  const shellsRef = useRef<{ items: typeof items; ids: readonly number[]; query: number; keys: Set<number>; shells: Set<number>; jumpedAt: number }>(
+    { items: [], ids: orderedIds, query: queryVersion, keys: new Set(), shells: new Set(), jumpedAt: 0 });
+  if (own && shellsRef.current.items !== items) {
+    const before = shellsRef.current;
+    const keys = new Set<number>();
+    const shells = new Set<number>();
+    const entering: number[] = [];
+    for (const item of items) {
+      if (item.index < pending) continue;
+      const id = orderedIds[item.index - pending];
+      keys.add(id);
+      if (before.shells.has(id)) shells.add(id);
+      else if (!before.keys.has(id)) entering.push(id);
+    }
+    // Another list, the same one in another order, and a list being presented come whole.
+    const jumped = before.query === queryVersion && before.ids === orderedIds && !arrivalDueRef.current
+      && motion.current.moving && entering.length > FILL_ROWS;
+    if (jumped) for (const id of entering) shells.add(id);
+    shellsRef.current = { items, ids: orderedIds, query: queryVersion, keys, shells, jumpedAt: jumped ? performance.now() : before.jumpedAt };
+  }
+  const shells = shellsRef.current.shells;
+  const [, stepFill] = useReducer((step: number) => step + 1, 0);
+  const hasShells = shells.size > 0;
+  useEffect(() => {
+    if (!hasShells) return;
+    let timer = 0;
+    const fill = () => {
+      const state = shellsRef.current;
+      if (state.shells.size === 0) return;
+      // The jump is still going on: its rows would be gone before they were read.
+      if (performance.now() - state.jumpedAt >= FILL_AFTER_JUMP_MS) {
+        const height = Math.max(rowHRef.current, (virtualizerRef.current?.scrollRect?.height ?? 720) - headerHRef.current);
+        const centre = (motion.current.offset + height / 2) / rowHRef.current - pendingCountRef.current;
+        const positions = libraryStore.getState().indexById;
+        const nearest = [...state.shells].sort((a, b) => Math.abs((positions.get(a) ?? 0) - centre) - Math.abs((positions.get(b) ?? 0) - centre));
+        shellsRef.current = { ...state, shells: new Set(nearest.slice(FILL_ROWS)) };
+        stepFill();
+      }
+      if (shellsRef.current.shells.size > 0) timer = window.setTimeout(fill, FILL_PAUSE_MS);
+    };
+    timer = window.setTimeout(fill, FILL_PAUSE_MS);
+    return () => window.clearTimeout(timer);
+  }, [hasShells]);
   const range = virtualizer.range;
   const screen = Math.max(1, Math.ceil(Math.max(rowH, (virtualizer.scrollRect?.height ?? 720) - headerH) / rowH));
   screenRef.current = screen;
@@ -2050,7 +2105,8 @@ export const TrackTable = memo(function TrackTable({
       if (built.size > MAX_BUILT_REMEMBERED) built.clear();
       for (const key of next) built.add(key);
     };
-    if (!arrival || !moving || arrival.gesture() === "list" || arrivalDueRef.current) { settle(); return; }
+    // A list that scrolls itself builds its rows in the frame that shows them: none is late.
+    if (own || !arrival || !moving || arrival.gesture() === "list" || arrivalDueRef.current) { settle(); return; }
     const { first, last } = viewBounds();
     for (const item of items) {
       const key = String(item.key);
@@ -2357,7 +2413,7 @@ export const TrackTable = memo(function TrackTable({
                 key={item.key}
                 ref={registerRow}
                 id={id}
-                track={summaryById.get(id)}
+                track={shells.has(id) ? undefined : summaryById.get(id)}
                 index={item.index - pending}
                 selected={selected.has(id)}
                 focused={id === selectedId}
