@@ -28,7 +28,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { defaultRangeExtractor, useVirtualizer, type Range, type VirtualizerOptions } from "@tanstack/react-virtual";
-import { wheelPixels } from "../../lib/wheelScroll";
+import { buildsAhead, scrollTopTo, wheelPixels } from "../../lib/wheelScroll";
 
 /**
  * Lists up to this many rows (blocks) are rendered whole: the window around the viewport comes
@@ -104,7 +104,8 @@ const observeRowListOffset: RowVirtualizerOptions["observeElementOffset"] = (ins
 
 /**
  * A list that scrolls itself: the virtualizer hears of every scroll in the event that reports it,
- * and (useFlushSync) the rows for it are rendered there, before the frame is painted.
+ * and (useFlushSync) the rows for it are rendered there, before the frame is painted. A scroll
+ * the page writes itself is heard of before it is written (`scrollTopTo`).
  */
 const observeOwnOffset: RowVirtualizerOptions["observeElementOffset"] = (instance, cb) => {
   const element = instance.scrollElement;
@@ -117,7 +118,11 @@ const observeOwnOffset: RowVirtualizerOptions["observeElementOffset"] = (instanc
   };
   cb(element.scrollTop, false);
   element.addEventListener("scroll", onScroll, { passive: true });
+  // A scroll the page is about to write (the wheel, the scroll handle) has its rows built first;
+  // the scroll event that follows reports the same offset and renders nothing.
+  const release = buildsAhead(element, (top) => cb(top, true));
   return () => {
+    release();
     element.removeEventListener("scroll", onScroll);
     if (idle !== null) clearTimeout(idle);
   };
@@ -172,7 +177,7 @@ export function ownWheel(list: HTMLElement): () => void {
     inner ??= scrollsWithin(event.target, list, vertical);
     if (inner) return;
     event.preventDefault();
-    if (vertical) { if (delta.y) list.scrollTop += delta.y; }
+    if (vertical) { if (delta.y) scrollTopTo(list, list.scrollTop + delta.y); }
     else if (delta.x) list.scrollLeft += delta.x;
   };
   list.addEventListener("wheel", onWheel, { passive: false });

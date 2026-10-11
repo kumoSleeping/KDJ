@@ -121,6 +121,23 @@ test("a list that scrolls itself: few rows exist, the rows of a scroll are there
     await act(async () => { rowOf(3)!.dispatchEvent(wheel); });
     assert.equal(wheel.defaultPrevented, true);
     assert.equal(box.scrollTop, 90);
+    // The rows of the place a wheel moves the list to are built before it is moved there: no scroll
+    // event has reported anything yet (this document sends none for a written offset).
+    const flick = new dom.window.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 2000 });
+    Object.defineProperty(flick, "timeStamp", { value: wheel.timeStamp + 1000 });
+    await act(async () => { rowOf(3)!.dispatchEvent(flick); });
+    assert.equal(box.scrollTop, 2090);
+    { const [first, last] = inView(2090); for (let id = first; id <= last; id += 1) assert.ok(whole(rowOf(id)), `row ${id} was there before the list moved`); }
+    await act(async () => { box.dispatchEvent(new Event("scroll")); });
+    // A wheel at the list's end moves nothing and starts no scroll.
+    await act(async () => { box.scrollTop = 0; box.dispatchEvent(new Event("scroll")); });
+    const up = new dom.window.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -300 });
+    Object.defineProperty(up, "timeStamp", { value: wheel.timeStamp + 3000 });
+    await act(async () => { rowOf(3)!.dispatchEvent(up); });
+    assert.equal(up.defaultPrevented, true);
+    assert.ok(rowOf(1), "the top is still there");
+    await act(async () => { box.scrollTop = 90; box.dispatchEvent(new Event("scroll")); });
+    await until(() => built().every(whole), "the rows that came as numbers on the way back are filled in");
 
     // The rows a scroll reaches are there in the event that reports it: a listener that runs after
     // the list's own finds them built. At reading speed they are whole rows.

@@ -1,5 +1,5 @@
 import { scrollFromThumb, scrollThumb, thumbPosition } from "./scrollThumb";
-import { wheelPixels } from "./wheelScroll";
+import { scrollTopTo, wheelPixels } from "./wheelScroll";
 
 /**
  * One pair of floating scroll handles for every scroll container that has none of its own.
@@ -252,7 +252,7 @@ export function installScrollPills(): () => void {
       if (at.pointerId !== pointerId) return;
       at.preventDefault();
       const value = scrollFromThumb(initial + coordinate(at) - start, metric.extent, metric.travel);
-      if (axis === "vertical") node.scrollTop = value;
+      if (axis === "vertical") scrollTopTo(node, value);
       else node.scrollLeft = value;
       paint();
     };
@@ -277,7 +277,7 @@ export function installScrollPills(): () => void {
     if (!node) return;
     const delta = wheelPixels(event, 16, node.clientWidth, node.clientHeight);
     node.scrollLeft += delta.x;
-    node.scrollTop += delta.y;
+    if (delta.y) scrollTopTo(node, node.scrollTop + delta.y);
     input = { target: node, at: performance.now() };
     event.preventDefault();
   };
