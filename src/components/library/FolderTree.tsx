@@ -69,6 +69,13 @@ import {
   TRACK_DND_TYPE,
 } from "../../lib/trackDrag";
 import { useAppStore } from "../../stores/appStore";
+import { useSettingsPage } from "../../lib/settingsPages";
+
+/** 登录在设置的「登录」页：先翻到那一页，再打开设置。 */
+function openLoginSettings(): void {
+  useSettingsPage.getState().setPage("sources");
+  useAppStore.getState().openSettingsPanel();
+}
 import { useLibraryStore } from "../../stores/libraryStore";
 import { useSidebarVisibilityStore } from "../../stores/sidebarVisibilityStore";
 import {
@@ -755,7 +762,7 @@ export function NarrowFolderRail({
           <button
             type="button"
             title="打开设置登录账号"
-            onClick={() => useAppStore.getState().openSettingsPanel()}
+            onClick={openLoginSettings}
           >
             <RailContent
               icon={<LogIn {...RAIL_ICON} />}
@@ -1688,7 +1695,7 @@ export function FolderTree({
     const activateRoot = () => {
       if (needsLogin) {
         // 旋钮只负责浏览，不替用户弹出设置面板。
-        if (!isMidiBrowseActivate()) useAppStore.getState().openSettingsPanel();
+        if (!isMidiBrowseActivate()) openLoginSettings();
         return;
       }
       if (isMidiBrowseActivate() && streamExpanded[platform]) return;
