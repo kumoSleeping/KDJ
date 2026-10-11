@@ -264,12 +264,12 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
             aria-expanded={action.onContextMenu ? !!action.menuOpen : undefined}
             onContextMenu={action.onContextMenu ? event => {
               event.preventDefault();
-              action.onContextMenu?.(event.currentTarget);
+              action.onContextMenu?.(event.currentTarget, event.clientX === 0 && event.clientY === 0 ? "keyboard" : "pointer");
             } : undefined}
             onKeyDown={action.onContextMenu ? event => {
               if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
               event.preventDefault();
-              action.onContextMenu?.(event.currentTarget);
+              action.onContextMenu?.(event.currentTarget, "keyboard");
             } : undefined}
             aria-busy={action.busy || undefined} onClick={() => { if (node.current) action.onSelect(node.current); }}>
             {action.busy ? <LoaderCircle size={14} className="kd-spin" aria-hidden="true" /> : action.icon}
