@@ -29,7 +29,6 @@ import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { OverlayScrollbars } from "../common/OverlayScrollbars";
-import { ProgressBar } from "../common/ProgressBar";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { RowIndex, RowPick } from "../common/RowPick";
 import { TableRating } from "../common/TableRating";
@@ -336,11 +335,8 @@ export interface TrackTableProps {
 const coversMissing = new Set<string>();
 /** Covers the browser has shown once: it has them decoded, so a row built again shows them at once. */
 const coversShown = new Set<string>();
-/** Told when a cover has settled either way (the list's loading line counts them). */
-const coverListeners = new Set<() => void>();
 function coverSettled(key: string, shown: boolean): void {
   (shown ? coversShown : coversMissing).add(key);
-  for (const listener of coverListeners) listener();
 }
 export function coverKeyOf(track: TrackSummary): string {
   return `${track.id}:${track.modified_at}`;
@@ -349,10 +345,6 @@ export function coverKeyOf(track: TrackSummary): string {
 export function isCoverSettled(track: TrackSummary): boolean {
   const key = coverKeyOf(track);
   return coversShown.has(key) || coversMissing.has(key);
-}
-function subscribeCovers(listener: () => void): () => void {
-  coverListeners.add(listener);
-  return () => { coverListeners.delete(listener); };
 }
 /** A video's first frame is extracted on demand; a service that is restarting is asked again. */
 const COVER_RETRIES = 12;
@@ -404,42 +396,6 @@ function TrackCoverThumb({ track }: { track: TrackSummary }) {
         />
       )}
     </span>
-  );
-}
-
-/**
- * 整体挂载的列表（几千首以内）在建完所有行、载完所有封面之前，表头下沿有一条细线走进度；
- * 之后滚动时 DOM 不再改动，封面也都在。线只在还有事要做时存在。
- */
-function ListLoadLine({ ids, summaryById, mounted }: {
-  ids: readonly number[];
-  summaryById: ReadonlyMap<number, TrackSummary>;
-  mounted: boolean;
-}) {
-  // One render per frame at most, however many covers land in it.
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    let frame = 0;
-    const unsubscribe = subscribeCovers(() => {
-      if (!frame) frame = requestAnimationFrame(() => { frame = 0; setTick((value) => value + 1); });
-    });
-    return () => { unsubscribe(); if (frame) cancelAnimationFrame(frame); };
-  }, []);
-  const settled = useMemo(() => {
-    let done = 0;
-    for (const id of ids) {
-      const track = summaryById.get(id);
-      if (track && isCoverSettled(track)) done += 1;
-    }
-    return done;
-    // `tick` is the covers that landed since the last frame.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ids, summaryById, tick]);
-  if (ids.length === 0 || (mounted && settled >= ids.length)) return null;
-  return (
-    <div className="kd-list-load" aria-label="正在载入列表">
-      <ProgressBar value={(mounted ? 0.2 : 0) + 0.8 * settled / ids.length} />
-    </div>
   );
 }
 
@@ -1005,9 +961,13 @@ export const TrackTable = memo(function TrackTable({
   const undoLast = useTableStore((state) => state.undoLast);
   const undoName = undo.op === "copy" ? "复制" : undo.op === "delete" ? "删除" : "移动";
   const updateTrack = useTableStore((state) => state.updateTrack);
+  // The workspace hands over a fresh onSelect on many of its renders; the rows must not render
+  // for that (two thousand rows is a third of a second), so the handler they hold is one object.
+  const onSelectLatest = useRef(onSelect);
+  onSelectLatest.current = onSelect;
   const toggleTrackSelection = useCallback(
-    (id: number, range = false) => onSelect(id, range ? "range" : "toggle"),
-    [onSelect],
+    (id: number, range = false) => onSelectLatest.current(id, range ? "range" : "toggle"),
+    [],
   );
   const rateTrack = useCallback(
     (id: number, rating: number) => { void updateTrack(id, { rating }); },
@@ -1030,12 +990,17 @@ export const TrackTable = memo(function TrackTable({
    */
   const renderStartedAt = performance.now();
   const traceRef = useRef({ running: false, startedAt: 0, from: 0, frames: 0, scrolls: 0, slow: 0, gapMax: 0, lastFrame: 0, loop: 0,
-    renders: 0, renderMs: 0, rowRendersAt: 0, bumps: 0, publishes: 0, downloads: 0, prevSummaries: summaryById, prevDownloads: downloadTasks });
+    renders: 0, renderMs: 0, rowRendersAt: 0, bumps: 0, publishes: 0, downloads: 0, layoutMs: 0, styleMs: 0, props: 0,
+    prevSummaries: summaryById, prevDownloads: downloadTasks, prevProps: [] as unknown[] });
   if (import.meta.env.DEV) {
     const trace = traceRef.current;
     trace.renders += 1;
     if (trace.prevSummaries !== summaryById) { trace.publishes += 1; trace.prevSummaries = summaryById; }
     if (trace.prevDownloads !== downloadTasks) { trace.downloads += 1; trace.prevDownloads = downloadTasks; }
+    // Renders caused by the table's own props changing (the workspace rendering), as against its hooks.
+    const props = [total, loading, layout, fitWidth, selectedId, selectedIds, shortcutActive, visible, sort, order, sort2, order2, onSelect, onSort];
+    if (trace.prevProps.some((value, index) => value !== props[index])) trace.props += 1;
+    trace.prevProps = props;
   }
   useLayoutEffect(() => {
     if (import.meta.env.DEV) traceRef.current.renderMs += performance.now() - renderStartedAt;
@@ -1846,7 +1811,8 @@ export const TrackTable = memo(function TrackTable({
         tracePlayback("library-scroll", { ms: Math.round(performance.now() - trace.startedAt), px: Math.round(top - trace.from),
           scrolls: trace.scrolls, frames: trace.frames, slow: trace.slow, gapMax: Math.round(trace.gapMax),
           renders: trace.renders, renderMs: Math.round(trace.renderMs), rowRenders: rowRenders - trace.rowRendersAt,
-          bumps: trace.bumps, publishes: trace.publishes, downloads: trace.downloads,
+          props: trace.props, bumps: trace.bumps, publishes: trace.publishes, downloads: trace.downloads,
+          layoutMs: Math.round(trace.layoutMs), styleMs: Math.round(trace.styleMs),
           rows: rowElementsRef.current.size, count: ids.length, whole: whole ? 1 : 0, built: mounted ? 1 : 0,
           covers, due: arrivalDueRef.current ? 1 : 0 });
       }
@@ -1862,13 +1828,26 @@ export const TrackTable = memo(function TrackTable({
     trace.scrolls += 1;
     if (trace.running) return;
     Object.assign(trace, { running: true, startedAt: performance.now(), from: motion.current.offset, frames: 0, scrolls: 1, slow: 0, gapMax: 0,
-      lastFrame: performance.now(), renders: 0, renderMs: 0, rowRendersAt: rowRenders, bumps: 0, publishes: 0, downloads: 0 });
+      lastFrame: performance.now(), renders: 0, renderMs: 0, rowRendersAt: rowRenders, bumps: 0, publishes: 0, downloads: 0,
+      layoutMs: 0, styleMs: 0, props: 0 });
     const tick = (now: number) => {
       const gap = now - trace.lastFrame;
       trace.lastFrame = now;
       trace.frames += 1;
       if (gap > 50) trace.slow += 1;
       trace.gapMax = Math.max(trace.gapMax, gap);
+      // Whether something left layout or style dirty this frame: a forced read is free when clean.
+      const box = scrollerRef.current;
+      const row = box?.querySelector<HTMLElement>(".kd-list-row");
+      if (box && row) {
+        const t0 = performance.now();
+        void box.offsetHeight;
+        const t1 = performance.now();
+        void getComputedStyle(row).color;
+        const t2 = performance.now();
+        trace.layoutMs += t1 - t0;
+        trace.styleMs += t2 - t1;
+      }
       if (trace.running) trace.loop = requestAnimationFrame(tick);
     };
     trace.loop = requestAnimationFrame(tick);
@@ -2254,7 +2233,6 @@ export const TrackTable = memo(function TrackTable({
               />
             </div>
           ) : null}
-          {whole && total > 0 ? <ListLoadLine ids={orderedIds} summaryById={summaryById} mounted={mounted} /> : null}
           {visibleColumns.map((column) => (
             <div
               key={column.key}
