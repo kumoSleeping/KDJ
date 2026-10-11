@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { COVER_RETRY_MS } from "../../lib/coverLoad";
 import { TASK_COVER_LIMIT, type TaskCover } from "./taskBubbleSchema";
 
-/** A slow or broken cover must not keep a notification (or the only transport) waiting. */
-const COVER_READY_MS = 1_500;
+/** A slow or broken cover must not keep the playing song's bubble (or the only transport)
+ * waiting: preparation starts with the song change, so the peek usually finds it ready. */
+const COVER_READY_MS = 300;
 const CACHE_LIMIT = 24;
 
 type PreparedCover = {
@@ -96,15 +97,18 @@ export async function prepareTaskCovers(covers: readonly TaskCover[]): Promise<r
   }));
 }
 
-/** Null until the visible covers have decoded or are known to be unavailable. */
-export function usePreparedTaskCovers(covers: readonly TaskCover[]): readonly TaskCover[] | null {
+/** Null until the visible covers have decoded or are known to be unavailable. A bubble that is
+ * not `prepared` shows its covers as they load, as before, and never waits. */
+export function usePreparedTaskCovers(covers: readonly TaskCover[], prepared: boolean): readonly TaskCover[] | null {
   const key = JSON.stringify(covers);
   const [result, setResult] = useState<{ key: string; covers: readonly TaskCover[] } | null>(null);
   useEffect(() => {
+    if (!prepared) return;
     let current = true;
     void prepareTaskCovers(covers).then(value => { if (current) setResult({ key, covers: value }); });
     return () => { current = false; };
-  }, [key]);
+  }, [key, prepared]);
+  if (!prepared) return covers;
   if (result?.key === key) return result.covers;
   const known = covers.slice(0, TASK_COVER_LIMIT).map(knownCover);
   if (known.some(entry => !entry?.ready)) return null;

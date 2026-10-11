@@ -17,6 +17,10 @@ const ENTER_MS = 400;
 const LEAVE_MS = 260;
 /** Fallback for a body with no measure; explicit pending content is allowed to finish first. */
 const HOLD_MS = 120;
+/** How long pending content (`data-drawer-pending`) may keep a `fit` panel out of sight. Past
+ *  it the panel comes in at the extent's default height and follows its measure when it has one:
+ *  a request that hangs must not hang the drawer. */
+const PENDING_HOLD_MS = 600;
 const HEIGHT_KEY = "kd-drawer-height";
 const MIN_HEIGHT = 180;
 
@@ -255,6 +259,11 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
       if (node && sheet) setFit(fittingHeight(sheet, node));
       setPatient(false);
     }, HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [held, leaving]);
+  useEffect(() => {
+    if (!held || leaving) return;
+    const timer = window.setTimeout(() => setPatient(false), PENDING_HOLD_MS);
     return () => window.clearTimeout(timer);
   }, [held, leaving]);
   // At rest the sheet is no longer a moving layer, and a change of height may be shown.
