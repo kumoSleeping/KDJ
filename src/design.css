@@ -3634,6 +3634,15 @@ body[data-kd-search-pointer-dragging="true"] * {
   height: 0.38rem;
   bottom: 2.15rem; /* 让开底部播放/时间一行 */
 }
+/* 可视化小窗的进度条跟 chrome 一起出现：鼠标没放上去就不显示 */
+.kd-viz-floating-preview .kd-pip-float-scrub {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.kd-viz-floating-preview:hover .kd-pip-float-scrub,
+.kd-viz-floating-preview:has(:focus-visible, .kd-pip-volume[data-open]) .kd-pip-float-scrub {
+  opacity: 1;
+}
 .kd-pip-float-scrub-fill {
   display: block;
   height: 100%;

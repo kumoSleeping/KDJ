@@ -119,6 +119,7 @@ import {
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, InlineNotice } from "../common";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
+import { useVisualizerPopup } from "../../lib/visualizerPopup";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { dragPreviewFromBlob, vinylDragPreview } from "../../lib/dragPreview";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
@@ -2690,8 +2691,15 @@ export const TrackTable = memo(function TrackTable({
             </button>
           )}
           <button type="button" disabled={menuIds.length !== 1 || isImageTrack(rowMenu.track.format)} onClick={() => {
-            useVisualizerStudioStore.getState().open(rowMenu.track);
+            // The song's visualizer is the floating window of the playing song, with its
+            // controls in the drawer: no picture is embedded in the drawer. A video has no
+            // visualizer, so it still opens the editor.
+            const track = rowMenu.track;
             setRowMenu(null);
+            if (isVideoTrack(track.format)) { useVisualizerStudioStore.getState().open(track); return; }
+            if (getPlayingTrack()?.id !== track.id) playFromTable(track);
+            useVisualizerPopup.getState().setOpen(true);
+            useVisualizerStudioStore.getState().openInlineSettings(track, { editorIfNoWindow: true });
           }}><BarChart3 size={12} />新建可视化</button>
           <WorkshopAddMenu ids={() => {
             const chosen = new Set(menuIds);

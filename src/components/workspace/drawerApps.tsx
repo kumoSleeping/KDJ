@@ -9,7 +9,6 @@ import { visualizerExportActive } from "../../lib/visualizerExportQueue";
 import { studioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
-import { useLibraryStore } from "../../stores/libraryStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerStudioStore, VISUALIZER_DOCK_APP } from "../../stores/visualizerStudioStore";
@@ -36,12 +35,6 @@ function DrawerSettings() {
   </SlidePages>;
 }
 
-const songLine = (track: { title?: string | null; filename?: string | null; artist?: string | null } | null | undefined) => {
-  if (!track) return undefined;
-  const name = track.title || track.filename || "";
-  return track.artist ? `${name} · ${track.artist}` : name || undefined;
-};
-
 // The page in view of each app with pages. The drawer's title row calls these itself, so a
 // switch of page is not a change of the workspace that lists the apps.
 const useTaskView = () => useTaskPanelStore(state => state.view);
@@ -62,7 +55,6 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   const settings = useAppStore(state => state.showSettings);
   const visualizerTrack = useVisualizerStudioStore(state => state.track);
   const metaId = useTrackMetaEditor(state => state.trackId);
-  const metaTrack = useLibraryStore(state => metaId === null ? undefined : state.summaryById.get(metaId));
   // How tall the lyrics are is the listener's choice (the menu on the panel, lyricsExtent.ts).
   // Full screen needs a song: the playing song's bubble is the other half of that window.
   const lyricsExtent = shownLyricsExtent(useLyricsExtent(state => state.extent), useLyricsExtentShape());
@@ -72,7 +64,6 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
     contentKey: lyricsSong.track?.id,
     suspended: !lyricsSong.visible,
     title: "歌词",
-    // No caption: the lyrics are always those of the playing song.
     extent: lyricsExtent === "standard" ? "two-thirds" : "full",
     takesWindow: lyricsExtent === "full" && lyricsSong.visible ? LYRICS_WINDOW : undefined,
     body: lyricsSong.track ? <DrawerLyrics track={lyricsSong.track} /> : null,
@@ -103,7 +94,6 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   if (visualizerTrack) apps.push({
     id: VISUALIZER_DOCK_APP,
     title: "可视化配置",
-    caption: songLine(visualizerTrack),
     extent: "fit",
     pages: studioTabs,
     usePage: useStudioTabInView,
@@ -114,7 +104,6 @@ export function useDrawerApps(lyricsSong: PlayingLyrics): DrawerSpec[] {
   if (metaId !== null) apps.push({
     id: "meta",
     title: "编辑 Meta",
-    caption: songLine(metaTrack),
     extent: "fit",
     body: <TrackMetaEditorDrawer />,
     close: () => useTrackMetaEditor.getState().close(),
