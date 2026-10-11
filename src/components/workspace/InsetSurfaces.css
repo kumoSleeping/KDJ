@@ -1,0 +1,157 @@
+/* Inset surfaces (docs/inset-surfaces.md): the parts of the window that stand on it instead
+   of being cut out of it. Three things, after the macOS Finder:
+
+   1. the sidebar is a panel of its own, with a gap to the window on every side, so what it
+      lists ends inside the panel's own bottom edge and is not cut off by the window's;
+   2. a list stands on a bar that says where it is (LibraryFootBar.tsx), so its last row is
+      not cut off by the window's edge either;
+   3. the keys of the window's top bar are raised round keys.
+
+   A floating surface here is the list's own colour set apart by an edge and a soft shadow,
+   as the drawer, the menus and the task bubbles are; none has a tone of its own. A theme pack
+   draws its own surfaces and a phone has no room to give away: neither gets any of this. */
+
+:root {
+  --kd-inset-gap: 8px;
+  --kd-inset-radius: 12px;
+  --kd-inset-shadow: 0 8px 20px -10px rgba(0, 0, 0, 0.6), 0 1px 3px -1px rgba(0, 0, 0, 0.45);
+  --kd-key-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.09), 0 1px 3px rgba(0, 0, 0, 0.5), 0 5px 10px -5px rgba(0, 0, 0, 0.5);
+  --kd-key-shadow-down: 0 0 0 0.5px rgba(255, 255, 255, 0.09), 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+:root[data-theme="light"] {
+  --kd-inset-shadow: 0 8px 20px -10px rgba(0, 0, 0, 0.16), 0 1px 3px -1px rgba(0, 0, 0, 0.1);
+  --kd-key-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.09), 0 1px 3px rgba(0, 0, 0, 0.12), 0 5px 10px -5px rgba(0, 0, 0, 0.14);
+  --kd-key-shadow-down: 0 0 0 0.5px rgba(0, 0, 0, 0.09), 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+/* —— 1. The sidebar ——
+   One panel from the top of the window to the bottom of the page: the corner of the top bar
+   over the sidebar (the window buttons on macOS) is its head, the folder column its body. It
+   is drawn once, behind both, by the element that holds both; the two are clear over it.
+   Only with the full sidebar in a wide window: the narrow rail is narrower than the window
+   buttons it would have to hold. */
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-section-body[data-compact-tree="open"]:has(> .kd-stage > .kd-split[data-layout="wide"] > .kd-tree-slot) {
+  position: relative;
+  background: var(--kd-panel);
+}
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-section-body[data-compact-tree="open"]:has(> .kd-stage > .kd-split[data-layout="wide"] > .kd-tree-slot)::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: var(--kd-inset-gap);
+  bottom: var(--kd-inset-gap);
+  left: var(--kd-inset-gap);
+  /* The folder column's width, less the gap on the left and a narrower one to the list. */
+  width: calc(var(--kd-left) - var(--kd-inset-gap) - 5px);
+  box-sizing: border-box;
+  border: 1px solid var(--kd-float-edge, var(--kd-line));
+  border-radius: var(--kd-inset-radius);
+  background: var(--kd-panel);
+  box-shadow: var(--kd-inset-shadow);
+  pointer-events: none;
+}
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-section-body[data-compact-tree="open"]:has(> .kd-stage > .kd-split[data-layout="wide"] > .kd-tree-slot) > .kd-app-chrome {
+  background: transparent;
+}
+/* The folder column keeps inside the panel: its content is cut by the panel's round bottom,
+   not by the window. */
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-section-body[data-compact-tree="open"] .kd-split[data-layout="wide"] > .kd-tree-slot {
+  margin: 0 6px calc(var(--kd-inset-gap) + 1px) calc(var(--kd-inset-gap) + 1px);
+  overflow: hidden;
+  border-radius: 0 0 calc(var(--kd-inset-radius) - 1px) calc(var(--kd-inset-radius) - 1px);
+  background: transparent;
+}
+/* The gap is what separates the panel from the list: the handle between them draws its line
+   only while it is being reached for. */
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-section-body[data-compact-tree="open"] .kd-split[data-layout="wide"] > .kd-split-handle:not(:hover):not(:active)::after {
+  background: transparent;
+}
+
+/* —— 2. The bar a list stands on ——
+   The list's last row ends at this bar, whatever the window's height. It is told apart from
+   the list by its tone, not by a line. */
+.kd-list-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  height: 1.6rem;
+  padding: 0 0.75rem;
+  background: var(--kd-panel-inset);
+  color: var(--kd-muted);
+  font-size: var(--kd-size-sm);
+  line-height: 1;
+  white-space: nowrap;
+}
+.kd-list-foot-path {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  min-width: 0;
+  overflow: hidden;
+}
+.kd-list-foot-path > button,
+.kd-list-foot-path > span {
+  flex: 0 1 auto;
+  min-width: 1.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kd-list-foot-path > button {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.kd-list-foot-path > button:hover { color: var(--kd-text-body); }
+/* Where the list is, as against the way there: full-strength ink, and never shortened first. */
+.kd-list-foot-path > [aria-current] {
+  flex-shrink: 0;
+  max-width: 100%;
+  color: var(--kd-text-body);
+}
+.kd-list-foot-path > svg {
+  flex: none;
+  color: var(--kd-faint);
+}
+.kd-list-foot-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* —— 3. The top bar's keys ——
+   Round, raised from the bar by a soft shadow, a little apart from each other. Pressed, a key
+   sits lower. The window's own minimise, maximise and close are not keys of this kind. */
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-app-chrome-actions > .kd-chrome-actions {
+  gap: 0.45rem;
+  margin-right: 0.2rem;
+}
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-app-chrome-actions .kd-chrome-btn {
+  --kd-key: min(1.75rem, calc(var(--kd-chrome-top, 2.5rem) - 8px));
+  width: var(--kd-key);
+  min-width: var(--kd-key);
+  height: var(--kd-key);
+  padding: 0;
+  border-radius: 999px;
+  background: var(--kd-panel-raised);
+  box-shadow: var(--kd-key-shadow);
+  transition: box-shadow 0.12s, transform 0.12s;
+}
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-app-chrome-actions .kd-chrome-btn:hover,
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-app-chrome-actions .kd-chrome-btn[data-open="true"] {
+  background: var(--kd-panel-raised);
+  box-shadow: var(--kd-key-shadow);
+}
+:root:not([data-theme-pack]) .kd-app:not([data-mobile="true"]) .kd-app-chrome-actions .kd-chrome-btn:active {
+  box-shadow: var(--kd-key-shadow-down);
+  transform: translateY(0.5px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-app-chrome-actions .kd-chrome-btn { transition: none; }
+}
