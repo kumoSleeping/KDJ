@@ -3,6 +3,7 @@ import { ChevronRight } from "lucide-react";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { FolderNode } from "../../types";
+import "./LibraryFootBar.css";
 
 /** The folders from a library root down to `path`, or null when the tree does not hold it. */
 function chainTo(nodes: readonly FolderNode[], path: string): FolderNode[] | null {
@@ -15,7 +16,7 @@ function chainTo(nodes: readonly FolderNode[], path: string): FolderNode[] | nul
 }
 
 /**
- * The bar the library's list stands on (InsetSurfaces.css): where the list is — the way down
+ * The bar the library's list stands on (LibraryFootBar.css): where the list is — the way down
  * from the library root, each step a key back to that folder — and how many songs it holds.
  * It is there whatever the list holds, so the list's last row always ends at it and never at
  * the window's edge. It says what is, and nothing else: no hints, no actions of its own.

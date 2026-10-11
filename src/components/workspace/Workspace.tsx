@@ -2,7 +2,6 @@ import { PanelStack } from "../common/PanelStack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useWindowTaken, windowTaken } from "../../lib/windowTaken";
 import { LibraryFootBar } from "../library/LibraryFootBar";
-import "./InsetSurfaces.css";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { EditorDock } from "./EditorDock";
 import { useStore } from "zustand";

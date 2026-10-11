@@ -1,0 +1,57 @@
+/* The bar the library's list stands on (LibraryFootBar.tsx): the list's last row ends at this
+   bar, whatever the window's height, and never at the window's edge. It is told apart from
+   the list by its tone, not by a line. */
+.kd-list-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  height: 1.6rem;
+  padding: 0 0.75rem;
+  background: var(--kd-panel-inset);
+  color: var(--kd-muted);
+  font-size: var(--kd-size-sm);
+  line-height: 1;
+  white-space: nowrap;
+}
+.kd-list-foot-path {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  min-width: 0;
+  overflow: hidden;
+}
+.kd-list-foot-path > button,
+.kd-list-foot-path > span {
+  flex: 0 1 auto;
+  min-width: 1.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kd-list-foot-path > button {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.kd-list-foot-path > button:hover { color: var(--kd-text-body); }
+/* Where the list is, as against the way there: full-strength ink, and never shortened first. */
+.kd-list-foot-path > [aria-current] {
+  flex-shrink: 0;
+  max-width: 100%;
+  color: var(--kd-text-body);
+}
+.kd-list-foot-path > svg {
+  flex: none;
+  color: var(--kd-faint);
+}
+.kd-list-foot-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
