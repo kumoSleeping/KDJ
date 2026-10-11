@@ -24,6 +24,9 @@ export interface ContextMenuProps {
   id?: string;
   label?: string;
   initialFocus?: "selected" | "first" | "last" | "none";
+  /** Pointer-opened menus keep keyboard focus without drawing a keyboard focus ring until
+   * a key is used. Omitted: preserve the browser's usual focus-visible behavior. */
+  input?: "pointer" | "keyboard";
   role?: "menu" | "listbox";
   /** A menu opened from an item of another menu unfolds out of that item's side. */
   unfoldFrom?: "anchor" | "side";
@@ -41,10 +44,11 @@ export interface ContextMenuProps {
  * pointer, or the anchor's corner — and its items follow. When its owner unmounts it, it folds
  * back into that point as an inert picture; the owner's action never waits for it.
  */
-export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = false, minWidth, id, label, onClose, keepOpen, children, className, initialFocus = "selected", role = "menu", unfoldFrom = "anchor" }: ContextMenuProps) {
+export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = false, minWidth, id, label, onClose, keepOpen, children, className, initialFocus = "selected", input, role = "menu", unfoldFrom = "anchor" }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
   const search = useRef({ text: "", time: 0 });
+  const [inputMode, setInputMode] = useState(input);
   /** Where the menu is, and the point inside it that it unfolds from (`ox`, `oy`, in px). */
   const [pos, setPos] = useState({ x, y, ox: 0, oy: 0, up: false });
   /** True while the items follow the surface in; afterwards an added item simply appears. */
@@ -160,15 +164,20 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = fal
       popover="manual"
       className={["kd-context-menu", className].filter(Boolean).join(" ")}
       data-kd-motion="unfold"
+      data-menu-input={inputMode}
       data-kd-from={unfoldFrom === "side" ? "side" : undefined}
       data-kd-stagger={opening ? (pos.up ? "up" : "down") : undefined}
       style={{ left: pos.x, top: pos.y, transformOrigin: `${pos.ox}px ${pos.oy}px`,
         minWidth: minWidth === undefined ? undefined : `min(${minWidth}px, calc(100vw - 16px))` }}
       role={role}
       aria-label={label}
-      onPointerDown={event => event.stopPropagation()}
+      onPointerDown={event => {
+        if (input !== undefined) setInputMode("pointer");
+        event.stopPropagation();
+      }}
       onClick={event => event.stopPropagation()}
       onKeyDown={event => {
+        if (input !== undefined && !["Shift", "Control", "Alt", "Meta"].includes(event.key)) setInputMode("keyboard");
         if (event.defaultPrevented) return;
         if (event.key === "Escape" || event.key === "Tab") {
           if (event.key === "Escape") event.preventDefault();
