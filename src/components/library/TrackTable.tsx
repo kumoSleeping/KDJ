@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
 import { useRowList, useScrollMotion } from "../common/rowList";
+import { tracePlayback } from "../../lib/playbackTrace";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { OverlayScrollbars } from "../common/OverlayScrollbars";
@@ -732,6 +733,9 @@ interface TrackRowProps extends Omit<TrackCellsProps, "track"> {
  * props 不变，整行跳过；真正要渲染的只有新进来的那几行。摘要到达时内容在同一个元素里换上，行
  * 不重挂。
  */
+/** Dev: rows rendered since the page loaded (the scroll trace reads the difference). */
+let rowRenders = 0;
+
 const TrackRow = memo(function TrackRow({
   id,
   track,
@@ -748,6 +752,7 @@ const TrackRow = memo(function TrackRow({
   ref,
   ...cells
 }: TrackRowProps) {
+  if (import.meta.env.DEV) rowRenders += 1;
   const ready = track;
   return (
     <div
@@ -1024,6 +1029,23 @@ export const TrackTable = memo(function TrackTable({
    */
   const selecting = selectionMode || selectedIds.length > 1;
   const downloadTasks = useDownloadStore((state) => state.list);
+  /**
+   * Dev: what the list did during one scroll, from its first frame until it rests, written to
+   * the native log (`library-scroll`): frames and the longest gap between them, renders of the
+   * table and of rows and the time they took, what triggered them, and what the list was.
+   */
+  const renderStartedAt = performance.now();
+  const traceRef = useRef({ running: false, startedAt: 0, from: 0, frames: 0, scrolls: 0, slow: 0, gapMax: 0, lastFrame: 0, loop: 0,
+    renders: 0, renderMs: 0, rowRendersAt: 0, bumps: 0, publishes: 0, downloads: 0, prevSummaries: summaryById, prevDownloads: downloadTasks });
+  if (import.meta.env.DEV) {
+    const trace = traceRef.current;
+    trace.renders += 1;
+    if (trace.prevSummaries !== summaryById) { trace.publishes += 1; trace.prevSummaries = summaryById; }
+    if (trace.prevDownloads !== downloadTasks) { trace.downloads += 1; trace.prevDownloads = downloadTasks; }
+  }
+  useLayoutEffect(() => {
+    if (import.meta.env.DEV) traceRef.current.renderMs += performance.now() - renderStartedAt;
+  });
   const pendingDownloads = useMemo(
     () => downloadTasks.filter((task) => isPendingForFolder(task, filterFolder, indexById)),
     [downloadTasks, filterFolder, indexById],
@@ -1820,11 +1842,43 @@ export const TrackTable = memo(function TrackTable({
     if (!box) return;
     const ids = libraryStore.getState().orderedIds;
     const top = Math.max(0, box.scrollTop);
+    if (import.meta.env.DEV) {
+      const trace = traceRef.current;
+      if (trace.running) {
+        trace.running = false;
+        cancelAnimationFrame(trace.loop);
+        let covers = 0;
+        for (const id of ids) { const track = libraryStore.getState().summaryById.get(id); if (track && isCoverSettled(track)) covers += 1; }
+        tracePlayback("library-scroll", { ms: Math.round(performance.now() - trace.startedAt), px: Math.round(top - trace.from),
+          scrolls: trace.scrolls, frames: trace.frames, slow: trace.slow, gapMax: Math.round(trace.gapMax),
+          renders: trace.renders, renderMs: Math.round(trace.renderMs), rowRenders: rowRenders - trace.rowRendersAt,
+          bumps: trace.bumps, publishes: trace.publishes, downloads: trace.downloads,
+          rows: rowElementsRef.current.size, count: ids.length, whole: whole ? 1 : 0, built: mounted ? 1 : 0,
+          covers, due: arrivalDueRef.current ? 1 : 0 });
+      }
+    }
     const index = Math.max(0, Math.floor(top / rowHRef.current) - pendingCountRef.current);
     const anchor = { id: ids[index] ?? null, index, offset: top % rowHRef.current };
     anchorRef.current = anchor;
     if (persistentSession) updateLocalWorkspaceSession({ scrollTop: top, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
-  }, () => { if (arrivalDueRef.current) bump(); });
+  }, () => {
+    if (arrivalDueRef.current) { bump(); traceRef.current.bumps += 1; }
+    if (!import.meta.env.DEV) return;
+    const trace = traceRef.current;
+    trace.scrolls += 1;
+    if (trace.running) return;
+    Object.assign(trace, { running: true, startedAt: performance.now(), from: motion.current.offset, frames: 0, scrolls: 1, slow: 0, gapMax: 0,
+      lastFrame: performance.now(), renders: 0, renderMs: 0, rowRendersAt: rowRenders, bumps: 0, publishes: 0, downloads: 0 });
+    const tick = (now: number) => {
+      const gap = now - trace.lastFrame;
+      trace.lastFrame = now;
+      trace.frames += 1;
+      if (gap > 50) trace.slow += 1;
+      trace.gapMax = Math.max(trace.gapMax, gap);
+      if (trace.running) trace.loop = requestAnimationFrame(tick);
+    };
+    trace.loop = requestAnimationFrame(tick);
+  });
 
   // A short list is rendered whole; a long one keeps three screens beyond either edge (rowList.ts).
   const screenRef = useRef(20);
@@ -1969,7 +2023,11 @@ export const TrackTable = memo(function TrackTable({
       return;
     }
     const rows = rowsInView();
-    if (rows.length === 0 || !rows.every(Boolean)) return;
+    if (rows.length === 0 || !rows.every(Boolean)) {
+      // The rows there are not built yet; a presentation that waits too long is given up.
+      if (performance.now() - due.at > ARRIVAL_DUE_MS) arrivalDueRef.current = null;
+      return;
+    }
     arrivalDueRef.current = null;
     arrival.present(rows);
   });
