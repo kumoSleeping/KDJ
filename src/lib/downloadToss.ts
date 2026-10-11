@@ -13,7 +13,8 @@
  * The download belongs to the landing. A caller starts the toss, waits for `ready` and only then
  * hands the download to the queue: `ready` resolves shortly before touchdown (tossPath.ts,
  * TOSS_HANDOVER_LEAD_MS), so the new row is in the list when the parcel arrives and not while it
- * is still in the air. `ready` always resolves, and once: at once when nothing flies (no source
+ * is still in the air. A picture's export goes the same way into the exports queue (`to`). `ready`
+ * always resolves, and once: at once when nothing flies (no source
  * on screen, reduced motion, a hidden window, too many parcels), early when the flight ends for
  * any other reason, when the window is hidden or about to go, and after a fixed limit at the
  * latest. While a parcel is in the air the drawer is held on the downloads (see drawerHold.ts),
@@ -22,7 +23,9 @@
 
 import { coverTile, droppedDragCard, ghostGlyph, isElement, loadedCover, type DroppedCard } from "../components/common/dragGhost";
 import { useDownloadStore } from "../stores/downloadStore";
-import { useTaskPanelStore } from "../stores/taskPanelStore";
+import { useTaskPanelStore, type TaskPanelView } from "../stores/taskPanelStore";
+import { useVisualizerExportStore } from "../stores/visualizerExportStore";
+import { useWorkshopStore } from "../stores/workshopStore";
 import "./dragRefusal";
 import { holdDrawer } from "./drawerHold";
 import { useSidePanels } from "./sidePanels";
@@ -58,7 +61,45 @@ export interface TossRequest {
    * inside another drawer app must not put that app away).
    */
   open?: boolean;
+  /** Which queue the parcel is for: the downloads (the default) or the exports. */
+  to?: TossTarget;
 }
+
+/** Where a parcel is going: the downloads queue, or the exports queue (a picture's export). */
+export type TossTarget = "downloads" | "exports";
+interface Target {
+  view: TaskPanelView;
+  /** The ids of the rows the queue has now: the parcel lands on one added since. */
+  before(): Set<string>;
+  /** Hears of the queue's rows changing. */
+  subscribe(listener: () => void): () => void;
+  /** The queue's list in the drawer, as shown. */
+  list(drawer: Element): HTMLElement | null;
+  /** The list builds only the rows around its viewport: a row that joins at the end is built once the list is scrolled there. */
+  windowed: boolean;
+}
+const TARGETS: Record<TossTarget, Target> = {
+  downloads: {
+    view: "downloads",
+    before: () => new Set(useDownloadStore.getState().tasks.keys()),
+    subscribe: listener => useDownloadStore.subscribe(listener),
+    list: drawer => Array.from(drawer.querySelectorAll<HTMLElement>(".kd-download-dropzone:not([data-history]) .kd-download-task-list"))
+      .find(node => !node.closest(".kd-slide-ghost, [hidden]")) ?? null,
+    windowed: false,
+  },
+  exports: {
+    view: "exports",
+    // The exports list has the workshop's projects and jobs beside the pictures: none of them is new.
+    before: () => {
+      const workshop = useWorkshopStore.getState();
+      return new Set([...useVisualizerExportStore.getState().tasks.map(task => task.id), ...workshop.jobs.map(job => job.id), ...workshop.projects.map(project => project.id)]);
+    },
+    subscribe: listener => useVisualizerExportStore.subscribe(listener),
+    list: drawer => Array.from(drawer.querySelectorAll<HTMLElement>(".kd-download-task-list"))
+      .find(node => !node.closest(".kd-slide-ghost, [hidden], [data-drawer-pending]")) ?? null,
+    windowed: true,
+  },
+};
 
 export interface TossHandle {
   /**
@@ -271,15 +312,16 @@ interface Landing { point: TossPoint; sheetLeftMs: number }
  * handed over late in the flight, so "where the next row will go" is the usual answer at launch;
  * the flight asks again while it is under way (see `fly`) and corrects its end.
  */
-function findLanding(open: boolean, before: ReadonlySet<string>): Landing | null {
+function findLanding(open: boolean, before: ReadonlySet<string>, target: Target): Landing | null {
   const drawer = open ? shownDrawer() : null;
   if (drawer) {
     const left = sheetLeftMs(drawer);
-    const list = Array.from(drawer.querySelectorAll<HTMLElement>(".kd-download-dropzone:not([data-history]) .kd-download-task-list"))
-      .find(node => !node.closest(".kd-slide-ghost, [hidden]"));
+    const list = target.list(drawer);
     if (list) {
       const box = settledRect(list);
       const row = newRows(before, list)[0];
+      // The next row joins at the end: a windowed list is scrolled there so that it builds it.
+      if (!row && target.windowed) list.scrollTop = list.scrollHeight;
       if (row) {
         revealRow(list, row);
         const at = settledRect(row.querySelector(".kd-download-task-cover") ?? row);
@@ -328,7 +370,7 @@ function mark(element: HTMLElement, attribute: string, ms: number, startedAt: nu
  * Highlights the rows of the tasks added since `before` as they appear. When none has come by
  * the time the highlight would be over, the head of the list answers instead.
  */
-function highlightAdded(before: ReadonlySet<string>, cancelled: () => boolean): void {
+function highlightAdded(before: ReadonlySet<string>, cancelled: () => boolean, target: Target): void {
   const startedAt = performance.now();
   let found = false;
   const look = () => {
@@ -341,9 +383,14 @@ function highlightAdded(before: ReadonlySet<string>, cancelled: () => boolean): 
       found = true;
       mark(row, TOSS_LANDED_ATTR, HIGHLIGHT_MS, startedAt);
     }
+    if (found || !target.windowed) return;
+    // Not built yet: the new row is at the end of a windowed list, which builds it once it is there.
+    const drawer = shownDrawer();
+    const list = drawer ? target.list(drawer) : null;
+    if (list) list.scrollTop = list.scrollHeight;
   };
   look();
-  const stop = useDownloadStore.subscribe(() => { requestAnimationFrame(look); });
+  const stop = target.subscribe(() => { requestAnimationFrame(look); });
   window.setTimeout(() => {
     stop();
     if (found || cancelled()) return;
@@ -516,7 +563,7 @@ const place = (point: TossPoint) => `translate3d(${point.x.toFixed(1)}px, ${poin
 
 let airborne = 0;
 
-function fly(origin: Origin, request: TossRequest, count: number, before: ReadonlySet<string>, handover: TossHandover, release: () => void): TossHandle {
+function fly(origin: Origin, request: TossRequest, count: number, before: ReadonlySet<string>, handover: TossHandover, release: () => void, target: Target): TossHandle {
   const open = request.open !== false;
   const hop = origin.rect === null;
   // A drop: the card the user was holding goes on from where it was let go.
@@ -598,7 +645,7 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     wave.animate([{ transform: "scale(0.35)", opacity: 0.55 }, { transform: "scale(1.5)", opacity: 0 }],
       { duration: RING_MS, easing: "cubic-bezier(0.2, 0.7, 0.3, 1)", fill: "forwards" }).finished.then(gone, gone);
     window.setTimeout(gone, RING_MS + 400);
-    if (open) highlightAdded(before, () => failed);
+    if (open) highlightAdded(before, () => failed, target);
     // The squash keeps the tilt and size it arrived with, so it does not snap upright first.
     const tilt = getComputedStyle(body).transform;
     const arrived = tilt && tilt !== "none" ? tilt : "scale(0.84)";
@@ -615,7 +662,7 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
 
   const launch = () => {
     if (ended || failed) return;
-    const landing = findLanding(open, before);
+    const landing = findLanding(open, before, target);
     if (!landing) { fade(); return; }
     // The drawer was asked for but its panel is not there yet: it has its whole way to come, and
     // when another app's panel is still out, that one leaves first.
@@ -646,7 +693,7 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     let correction: Animation | null = null;
     const reaim = () => {
       if (ended) return;
-      const now = findLanding(open, before);
+      const now = findLanding(open, before, target);
       if (!now) return;
       const next = { x: now.point.x - landing.point.x, y: now.point.y - landing.point.y };
       if (Math.hypot(next.x - offset.x, next.y - offset.y) < 2) return;
@@ -691,9 +738,10 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
 export function tossToDownloads(request: TossRequest = {}): TossHandle {
   if (typeof document === "undefined") return NOOP;
   const open = request.open !== false;
-  const before = new Set(useDownloadStore.getState().tasks.keys());
+  const target = TARGETS[request.to ?? "downloads"];
+  const before = target.before();
   if (open) {
-    useTaskPanelStore.getState().setView("downloads");
+    useTaskPanelStore.getState().setView(target.view);
     useSidePanels.getState().setDownloads(true);
   }
   const origin = resolveOrigin(request);
@@ -706,8 +754,8 @@ export function tossToDownloads(request: TossRequest = {}): TossHandle {
     // Nothing flies: the download goes to the queue at once, the drawer opens and the new task
     // appears highlighted.
     let failed = false;
-    if (open) highlightAdded(before, () => failed);
+    if (open) highlightAdded(before, () => failed, target);
     return { ready: Promise.resolve(), fail() { failed = true; } };
   }
-  return fly(origin, request, Math.max(1, Math.floor(request.count ?? 1)), before, tossHandover(), open ? holdDrawer(DOWNLOADS_APP) : () => undefined);
+  return fly(origin, request, Math.max(1, Math.floor(request.count ?? 1)), before, tossHandover(), open ? holdDrawer(DOWNLOADS_APP) : () => undefined, target);
 }
