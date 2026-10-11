@@ -12,7 +12,7 @@ import {
   useNowPlayingInfo,
 } from "../../lib/nowPlayingInfo";
 import { newerRevision } from "../../lib/coverLoad";
-import { useSongColor } from "../../lib/songColor";
+import { useSongColor, useSongColorAvailable } from "../../lib/songColor";
 import { songSwapEntranceDelay } from "../../lib/songSwapMotion";
 import { useWindowTaken } from "../../lib/windowTaken";
 import { useAppStore } from "../../stores/appStore";
@@ -24,7 +24,7 @@ import { dismissTask, showTask, updateTask } from "../tasks/taskBubbleStore";
 import { trackTaskCover } from "../tasks/taskCovers";
 import { localDownloadPlatform } from "./LocalTrackCacheFacts";
 import { NowPlayingTransport } from "./NowPlayingTransport";
-import { SongColorBackdrop, useSongColorAvailable } from "./SongColorBackdrop";
+import { SongColorBackdrop } from "./SongColorBackdrop";
 import { useLyricsEntry } from "./lyricsEntry";
 import { useLyricsExtentMenu } from "./LyricsExtentMenu";
 import "./NowPlayingTask.css";
