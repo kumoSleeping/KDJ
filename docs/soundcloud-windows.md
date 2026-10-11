@@ -1,8 +1,13 @@
 # Windows SoundCloud 浏览器连接
 
-Mac 保留原有 Profile/钥匙串读取。Windows Edge/Chrome 的 App-Bound Encryption
-不适合作为普通桌面程序的解密接口；Windows 新增扩展连接，不要求管理员、不关闭加密、
-不重启浏览器，也不复制完整 Profile。
+Mac 保留原有 Profile/钥匙串读取。Windows 优先尝试读取所选浏览器 Profile：
+先使用当前用户的 DPAPI 密钥，不因配置中存在 App-Bound 密钥就提前拒绝；
+按 Cookie 数据库版本解析并验证域名校验值。读取不会强制关闭浏览器。
+这不能保证解密应用绑定的会话，也不能保证访问浏览器锁住的数据库，必须实机验收。
+
+扩展是后备方案。当前实现仍是开发版配对码流程；面向普通用户的商店安装入口和
+Native Messaging 自动连接尚未实现，也尚未上架。正式体验目标是 KDJ 打开商店页，
+用户确认安装后自动接回 KDJ，不要求解压、开发者模式或复制配对码。
 
 ## 使用
 
