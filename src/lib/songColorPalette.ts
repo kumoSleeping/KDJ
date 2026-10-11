@@ -352,15 +352,24 @@ export function lightColours(palette: SongColorPalette, lightness: number, chrom
   });
 }
 
-/** White holds this against a picture up to a luminance of 0.3; past that the ink turns dark. */
-export const GROUND_INK_CONTRAST = 3;
+/** White ink, with the dark edge it is drawn with, is kept while it holds this against the
+ *  picture: up to a luminance of about 0.4. Past that the ink is the cover's colour. */
+export const GROUND_INK_CONTRAST = 2.3;
+/** The ink of a pale picture: the hue itself, full and of middling lightness, not a tone so
+ *  deep that it reads as black. Only a cover without a hue gets a dark grey. */
+const COLOUR_INK_LIGHT = 0.47;
+const COLOUR_INK_CHROMA = 0.17;
+const GREY_INK_LIGHT = 0.3;
+const colourInk = (colour: Lch): Lch => colour.c >= NEUTRAL_CHROMA
+  ? { l: COLOUR_INK_LIGHT, c: Math.min(colour.c * 1.5, COLOUR_INK_CHROMA), h: colour.h }
+  : { l: GREY_INK_LIGHT, c: 0, h: colour.h };
 /** Whether white ink still reads on a picture of mean luminance `ground`. */
 export const whiteReadsOn = (ground: number) => luminanceContrast(1, clamp(ground, 0, 1)) >= GROUND_INK_CONTRAST;
 
 /**
  * Ink for a mark that lies on a picture of mean luminance `ground` (the visualizer's
- * waveform): all but white while white still reads there, and on a pale picture a deep tone of
- * `hex`'s hue instead, dark enough to hold the text floor.
+ * waveform): all but white while white still reads there, and on a pale picture `hex`'s hue
+ * as a full colour instead. A cover that has no hue gets a dark grey there.
  */
 export function inkOnGround(hex: string, ground: number): { color: string; light: boolean } {
   const colour = rgbToLch(parseHex(hex) ?? [255, 255, 255]);
@@ -370,21 +379,20 @@ export function inkOnGround(hex: string, ground: number): { color: string; light
     light,
     color: light
       ? inkAt(0.985, colour.h, hued ? 0.012 : 0, under, GROUND_INK_CONTRAST)
-      : inkAt(0.3, colour.h, hued ? Math.min(colour.c, 0.08) : 0, under, INK_TEXT_CONTRAST, -1),
+      : hued ? toHex(lchToRgb(colourInk(colour))) : inkAt(GREY_INK_LIGHT, colour.h, 0, under, INK_TEXT_CONTRAST, -1),
   };
 }
 
 /**
- * Ink part of the way from the light ink to the deep one: at `tone` 0 all but white, at 1 the
- * deep tone of `hex`'s hue, and between them the hue at its fullest rather than a grey, so a
- * run of marks that crosses from a dark part of a picture to a pale one shades through the
- * cover's colour.
+ * Ink part of the way from the light ink to the ink of a pale picture: at `tone` 0 all but
+ * white, at 1 `hex`'s hue as a full colour, and on the way it takes the colour on early, so a
+ * run of marks that crosses from a dark part of a picture to a pale one shades from white into
+ * the cover's colour and never through a grey or toward black.
  */
 export function inkTone(hex: string, tone: number): string {
   const colour = rgbToLch(parseHex(hex) ?? [255, 255, 255]), at = clamp(tone, 0, 1), hued = colour.c >= NEUTRAL_CHROMA;
-  const light = hued ? 0.012 : 0, deep = hued ? Math.min(colour.c, 0.08) : 0;
-  const chroma = light + (deep - light) * at + (hued ? Math.min(colour.c, 0.13) * Math.sin(Math.PI * at) : 0);
-  return toHex(lchToRgb({ l: 0.985 + (0.3 - 0.985) * at, c: chroma, h: colour.h }));
+  const end = colourInk(colour), light = hued ? 0.012 : 0;
+  return toHex(lchToRgb({ l: 0.985 + (end.l - 0.985) * at, c: light + (end.c - light) * Math.min(1, at * 1.6), h: colour.h }));
 }
 
 /** The brightest the dark field gets where the glow is at its peak, as a relative luminance. */

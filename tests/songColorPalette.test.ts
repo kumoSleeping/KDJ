@@ -90,14 +90,20 @@ test("song colour: monochrome art stays monochrome, and nothing to go on is the 
   for (const mass of DEFAULT_SONG_COLOR.masses) assert.ok(spread(mass) < 60, mass);
 });
 
-test("song colour: ink on a picture is light while white reads there and a deep tone of the hue past that", () => {
+test("song colour: ink on a picture is light while white reads there and the cover's colour past that, never near black", () => {
+  const spread = (hex: string) => { const rgb = parseHex(hex)!; return Math.max(...rgb) - Math.min(...rgb); };
   for (const accent of ["#45dce8", "#d2475f", "#8a8a8a", "#f2d24b"]) {
-    for (const ground of [0, 0.05, 0.18, 0.29, 0.31, 0.5, 0.8, 1]) {
+    for (const ground of [0, 0.05, 0.18, 0.29, 0.39, 0.45, 0.6, 0.8, 1]) {
       const ink = inkOnGround(accent, ground), luminance = relativeLuminance(parseHex(ink.color)!);
-      assert.equal(ink.light, ground <= 0.3, `${accent} on ${ground}`);
-      // Either way the mark holds its floor against the picture's mean.
-      assert.ok(luminanceContrast(luminance, ground) >= (ink.light ? GROUND_INK_CONTRAST : INK_TEXT_CONTRAST) - 0.05, `${accent} on ${ground}: ${ink.color}`);
+      assert.equal(ink.light, ground <= 0.4, `${accent} on ${ground}`);
       assert.equal(luminance > ground, ink.light);
+      if (ink.light) assert.ok(luminanceContrast(luminance, ground) >= GROUND_INK_CONTRAST - 0.05, `${accent} on ${ground}: ${ink.color}`);
+      else if (accent === "#8a8a8a") assert.ok(luminanceContrast(luminance, ground) >= INK_TEXT_CONTRAST - 0.05, `grey on ${ground}: ${ink.color}`);
+      else {
+        // A colour, and one that still stands off the picture: not a tone so deep it reads as black.
+        assert.ok(spread(ink.color) >= 60 && luminance >= 0.08, `${accent} on ${ground}: ${ink.color}`);
+        assert.ok(luminanceContrast(luminance, ground) >= 1.9, `${accent} on ${ground}: ${ink.color}`);
+      }
     }
   }
   // A grey accent gives grey ink: no hue is invented.
@@ -117,15 +123,17 @@ test("song colour: a light of a field's colour keeps its hue and is no stronger 
 test("song colour: ink between white and the deep tone goes by the colour, not by grey", () => {
   const spread = (hex: string) => { const rgb = parseHex(hex)!; return Math.max(...rgb) - Math.min(...rgb); };
   const steps = Array.from({ length: 9 }, (_, step) => inkTone("#3f7fd0", step / 8));
-  // From all but white to a deep tone, darker at every step.
-  assert.ok(relativeLuminance(parseHex(steps[0])!) > 0.9 && relativeLuminance(parseHex(steps[8])!) < 0.08, `${steps[0]} … ${steps[8]}`);
+  // From all but white to the colour itself, darker at every step but never near black.
+  const end = relativeLuminance(parseHex(steps[8])!);
+  assert.ok(relativeLuminance(parseHex(steps[0])!) > 0.9 && end > 0.08 && end < 0.3, `${steps[0]} … ${steps[8]}`);
   for (let step = 1; step < steps.length; step += 1) {
     assert.ok(relativeLuminance(parseHex(steps[step])!) < relativeLuminance(parseHex(steps[step - 1])!), `step ${step}: ${steps[step]}`);
   }
-  // The middle is the colour at its fullest: more of it than either end has.
-  assert.ok(spread(steps[4]) > spread(steps[0]) + 40 && spread(steps[4]) > spread(steps[8]), steps.join(" "));
-  const middle = parseHex(steps[4])!;
-  assert.ok(middle[2] > middle[0], `still blue: ${steps[4]}`);
+  // The colour is taken on early: from the middle on every step is plainly the hue.
+  for (let step = 4; step <= 8; step += 1) {
+    const rgb = parseHex(steps[step])!;
+    assert.ok(spread(steps[step]) > spread(steps[0]) + 40 && rgb[2] > rgb[0], `step ${step}: ${steps[step]}`);
+  }
   // A grey accent shades through greys.
   for (let step = 0; step <= 8; step += 1) assert.ok(spread(inkTone("#8a8a8a", step / 8)) <= 2);
 });

@@ -29,9 +29,9 @@ const TITLE_TAIL_LEADING = 1.45;
 /** The steps of ink between the light one and the deep one along the arc. */
 const ARC_INK_STEPS = 8;
 /** The luminance of the picture under a bar at which its ink starts to leave white, and at
- * which it has reached the deep tone. White holds 3:1 up to 0.3, the middle of the two. */
-const ARC_INK_FROM = .22;
-const ARC_INK_TO = .4;
+ * which it has become the cover's colour. White is kept up to about 0.4, the middle of the two. */
+const ARC_INK_FROM = .3;
+const ARC_INK_TO = .52;
 
 interface RollingLyric extends LyricLine { start: number; end: number }
 interface LyricCard { canvas: HTMLCanvasElement }
