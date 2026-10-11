@@ -2796,12 +2796,15 @@ body[data-kd-search-pointer-dragging="true"] * {
   z-index: 60;
   isolation: isolate;
   display: grid;
-  /* 右侧 EQ 的固定宽度：右列至少留出这么多，波形也按它在右边收住。 */
+  /* 右侧 EQ 旋钮排的宽度：右列至少留出这么多。波形在右边只给读数让位
+     （--kd-player-readouts-w），两个值都在 PlayerEq.css 里定。 */
   --kd-player-eq-w: clamp(264px, 26vw, 336px);
   /* 行列结构由应用统一控制，主题只负责外观，不能用独立断点把桌面底栏拆成三行。
-     中间控制组按内容取宽，两侧均分余量，但右列不小于 EQ；只有统一的竖屏布局在下方改成三行。 */
-  grid-template-columns: minmax(0, 1fr) auto minmax(var(--kd-player-eq-w), 1fr) !important;
-  grid-template-rows: auto auto !important;
+     正在播是播放条的主语，它的列有地板，先缩的是中间控制组和余量；右列不小于 EQ。
+     第一行放得下一行的碟片和两行文案；窗口在横屏与竖长之间时下方改成两列两行，
+     竖长窗口在下方改成三行。 */
+  grid-template-columns: minmax(13rem, 1fr) minmax(0, auto) minmax(var(--kd-player-eq-w), 1fr) !important;
+  grid-template-rows: minmax(3.2rem, auto) auto !important;
   grid-template-areas:
     "now controls next"
     "wave wave wave" !important;
@@ -2875,7 +2878,8 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 /* 桌面播放条的两台 deck 占用网格两侧真正剩下的宽度。中间工具组会因视频键、
    时间等内容变宽，不能再用「视口一半减固定值」估算安全边界；那会让左侧长标题
-   钻到工具下面。跨两行仍保留大唱盘，同时网格列会自动扩展空闲空间并在工具前收住。 */
+   钻到工具下面。两块都跨两行：左边的碟片和文案只用第一行，第二行让给波形；
+   右边旋钮在第一行、读数在第二行右端（PlayerEq.css 用 subgrid 对到这两行）。 */
 .kd-app:not([data-tall="true"]) .kd-player-leading,
 .kd-app:not([data-tall="true"]) .kd-player-trailing {
   position: relative;
@@ -2898,10 +2902,10 @@ body[data-kd-search-pointer-dragging="true"] * {
   height: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: 4.75rem minmax(0, 1fr);
-  grid-template-rows: minmax(2.75rem, auto) minmax(2.25rem, 1fr);
+  grid-template-columns: 3.25rem minmax(0, 1fr);
+  grid-template-rows: minmax(2.75rem, auto) minmax(0, 1fr);
   align-items: center;
-  column-gap: 0.65rem;
+  column-gap: 0.5rem;
   padding: 0.08rem 0;
   color: inherit;
   font: inherit;
@@ -2937,9 +2941,10 @@ body[data-kd-search-pointer-dragging="true"] * {
 .kd-player-deck[data-drop-active="true"] .kd-player-deck-state {
   color: var(--kd-text-body);
 }
+/* The disc is one row high, level with the copy: the row under it is the waveform's. */
 .kd-player-deck[data-side="left"] .kd-player-disc {
   grid-column: 1;
-  grid-row: 1 / 3;
+  grid-row: 1;
 }
 .kd-player-deck[data-side="left"] .kd-player-deck-copy {
   grid-column: 2;
@@ -3072,11 +3077,10 @@ body[data-kd-search-pointer-dragging="true"] * {
   z-index: 2;
   min-width: 0;
   display: grid;
-  /* 左唱盘是绝对定位，原先 wave 横跨整行只是被黑胶盖住；实际轨道仍从
-     唱盘里面穿过去。这里把起点与左侧文字（唱盘之后）对齐。 */
-  margin-left: calc(0.85rem + 4.25rem + 0.35rem);
-  /* 右侧在 EQ 前收住：EQ 跨两行，波形不能从它下面穿过去。 */
-  margin-right: calc(var(--kd-player-eq-w) + 0.75rem);
+  /* 第二行左起就是波形：碟片只占第一行，不再给它让出一段。 */
+  margin-left: 0;
+  /* 右侧在 KEY / BPM 读数前收住：旋钮在第一行，波形从它们下面一直走到读数。 */
+  margin-right: calc(var(--kd-player-readouts-w) + 0.75rem);
   grid-template-columns: minmax(10rem, 1fr);
   grid-template-areas: "waveform";
   align-items: center;
@@ -3097,6 +3101,22 @@ body[data-kd-search-pointer-dragging="true"] * {
   pointer-events: auto;
   /* 相对唱盘文案再往下让半拍，柱顶不容易顶到艺人行。 */
   margin-top: 0.1rem;
+}
+/* 横屏与竖长之间的窗口（方形附近）：三列放不下有地板的正在播、整组走带键和 EQ，
+   先消失的就是正在播。改成两列两行：正在播和走带键一行，波形和 EQ 一行，EQ 的
+   旋钮和读数排成一行（PlayerEq.css）。竖长窗口有自己的三行版面，手机不走这里。 */
+@media (max-width: 62em) {
+  .kd-app:not([data-tall="true"]) .kd-player {
+    /* 走带组跨后两列、EQ 只占最后一列：两者各按自己的宽度，波形拿到 EQ 之外的全部。 */
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, auto) !important;
+    grid-template-rows: minmax(3.2rem, auto) auto !important;
+    grid-template-areas:
+      "now controls controls"
+      "wave wave next" !important;
+  }
+  .kd-app:not([data-tall="true"]) .kd-player-leading { grid-area: now; }
+  .kd-app:not([data-tall="true"]) .kd-player-trailing { grid-area: next; }
+  .kd-app:not([data-tall="true"]) .kd-player-scrub { margin-right: 0; }
 }
 .kd-player-time {
   min-width: 0;
@@ -5361,15 +5381,15 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-player-disc {
   position: relative;
   flex: none;
-  width: 4.6rem;
-  height: 4.6rem;
+  width: 3.05rem;
+  height: 3.05rem;
   display: grid;
   place-items: center;
   color: var(--kd-faint);
 }
 .kd-player-disc-record {
-  width: 4.15rem;
-  height: 4.15rem;
+  width: 2.75rem;
+  height: 2.75rem;
   display: grid;
   place-items: center;
   overflow: hidden;

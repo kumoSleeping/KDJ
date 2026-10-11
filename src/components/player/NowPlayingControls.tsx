@@ -14,7 +14,7 @@ import {
   useManagerMixer,
   type ManagerMixerValues,
 } from "../../lib/managerMixer";
-import { usePlaybackPrefs, type TempoRange } from "../../lib/playbackPrefs";
+import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { channelFaderGain, eqBandDb } from "../../lib/performanceCues";
 import { usePlayingDeck } from "./usePlayingDeck";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
@@ -38,49 +38,10 @@ function runtimeMixer(values: ManagerMixerValues) {
   };
 }
 
-/** Tempo as a short slider beside the BPM it changes; the offset is the reset control. */
-function TempoControl({
-  rate,
-  range,
-  onRate,
-  disabled = false,
-}: {
-  disabled?: boolean;
-  rate: number;
-  range: TempoRange;
-  onRate(rate: number): void;
-}) {
-  const minRate = Math.max(0.5, 1 - range / 100);
-  const maxRate = Math.min(2, 1 + range / 100);
+/** A tempo as its distance from the original: +3.2%, −0.5%. */
+function tempoOffset(rate: number): string {
   const percent = (rate - 1) * 100;
-  const moved = Math.abs(rate - 1) >= 0.0005;
-  const offset = `${percent >= 0 ? "+" : ""}${percent.toFixed(1)}%`;
-  return (
-    <div className="kd-eq-tempo">
-      <input
-        type="range"
-        min={minRate}
-        max={maxRate}
-        step={0.001}
-        value={clamp(rate, minRate, maxRate)}
-        disabled={disabled}
-        aria-label={`Tempo ${offset}`}
-        title={`Tempo ${offset}`}
-        style={{ "--kd-eq-tempo-at": `${((clamp(rate, minRate, maxRate) - minRate) / (maxRate - minRate)) * 100}%` } as CSSProperties}
-        onChange={(event) => onRate(Number(event.currentTarget.value))}
-        onDoubleClick={() => onRate(1)}
-      />
-      <button
-        type="button"
-        className="kd-eq-tempo-offset"
-        aria-label="恢复原始 Tempo"
-        title="恢复原始 Tempo"
-        data-moved={moved || undefined}
-        disabled={disabled || !moved}
-        onClick={() => onRate(1)}
-      >{offset}</button>
-    </div>
-  );
+  return `${percent >= 0 ? "+" : ""}${percent.toFixed(1)}%`;
 }
 
 /** How long after its acknowledgement a command may take to show up in the player's reports. */
@@ -212,10 +173,14 @@ function NowPlayingControls({
   const confidence = analyzedTrack.bpm_confidence;
   const analysisWarning = analyzedTrack.analysis_error || analysis.error || analysis.result?.errors.join("；") || "";
   const effectiveBpm = baseBpm ? baseBpm * tempoDraft : null;
+  const minRate = Math.max(0.5, 1 - tempoRange / 100);
+  const maxRate = Math.min(2, 1 + tempoRange / 100);
+  const tempoMoved = Math.abs(tempoDraft - 1) >= 0.0005;
 
   return (
     <div className="kd-manager-control" data-side={side === null ? undefined : side === 0 ? "a" : "b"} aria-busy={!ready}>
-      {/* Controls sit on the transport's row, readouts on the waveform's row below. */}
+      {/* The knobs sit on the transport's row, the two readouts on the waveform's row below,
+          at its right end: the waveform runs under the knobs up to them (design.css). */}
       <div className="kd-manager-knob-stack">
         <ArcKnob size="xs" label="GAIN" value={mixer.gain} onChange={(gain) => setMixer({ gain })} onReset={() => setMixer({ gain: 0 })}
           format={value => { const db = value < 0 ? value * 24 : value * 6; return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`; }} />
@@ -223,6 +188,11 @@ function NowPlayingControls({
         <ArcKnob size="xs" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
         <ArcKnob size="xs" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
         <ArcKnob size="xs" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
+        {/* Tempo is the sixth knob: twelve o'clock is the original tempo, and while it is moved
+            the label gives way to the offset. Its range is the setting's. */}
+        <ArcKnob size="xs" label="TEMPO" value={clamp(tempoDraft, minRate, maxRate)} min={minRate} max={maxRate} step={0.001} center={1}
+          disabled={!ready} onChange={setRate} onReset={() => setRate(1)} resetLabel="双击恢复原速"
+          format={tempoOffset} readout={tempoMoved ? tempoOffset(tempoDraft) : undefined} />
       </div>
 
       <div className="kd-eq-readouts">
@@ -251,7 +221,6 @@ function NowPlayingControls({
           <small>BPM</small>
           <strong>{effectiveBpm ? effectiveBpm.toFixed(1) : "—"}</strong>
         </span>
-        <TempoControl rate={tempoDraft} range={tempoRange} onRate={setRate} disabled={!ready} />
       </div>
     </div>
   );

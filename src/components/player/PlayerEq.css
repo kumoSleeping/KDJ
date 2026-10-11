@@ -1,5 +1,10 @@
-/* EQ / 播放控制 docked in the player bar: knobs on the transport's row, readouts beneath. */
-.kd-app .kd-player { --kd-player-eq-w: clamp(236px, 19vw, 268px); }
+/* EQ / 播放控制 docked in the player bar: six knobs on the transport's row, the KEY and BPM
+   readouts beneath at the bar's right end. The knobs' width is the right column's floor; the
+   readouts' width (--kd-player-readouts-w) is all the waveform's row gives up on the right. */
+.kd-app .kd-player {
+  --kd-player-eq-w: clamp(200px, 16vw, 224px);
+  --kd-player-readouts-w: 7.75rem;
+}
 .kd-player-eq {
   position: relative;
   width: var(--kd-player-eq-w, 100%);
@@ -13,9 +18,57 @@
   padding: 0;
   background: transparent;
 }
+/* In the wide bar the two rows are the bar's own two rows: the knobs on the first, the readouts
+   on the second, so the waveform can run under the knobs up to the readouts. Each level hands
+   the bar's rows down (subgrid) and the strip's gap becomes the bar's row gap. */
+.kd-app:not([data-tall="true"]) .kd-player-trailing {
+  display: grid;
+  grid-template-rows: subgrid;
+  justify-content: end;
+}
+.kd-app:not([data-tall="true"]) .kd-player-eq,
+.kd-app:not([data-tall="true"]) .kd-player-eq .kd-manager-control {
+  display: grid;
+  grid-row: 1 / -1;
+  grid-template-rows: subgrid;
+  gap: 0;
+  align-self: stretch;
+}
+.kd-app:not([data-tall="true"]) .kd-player-eq .kd-manager-knob-stack { grid-row: 1; align-self: center; }
+.kd-app:not([data-tall="true"]) .kd-eq-readouts {
+  grid-row: 2;
+  justify-self: end;
+  width: var(--kd-player-readouts-w);
+  align-self: center;
+}
+/* Between the wide and the tall window (design.css) the strip has the waveform's row to itself
+   at the right: knobs and readouts side by side on that one row. */
+@media (max-width: 62em) {
+  .kd-app:not([data-tall="true"]) .kd-player-trailing {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .kd-app:not([data-tall="true"]) .kd-player-eq {
+    display: block;
+    width: auto;
+    grid-row: auto;
+    align-self: center;
+  }
+  .kd-app:not([data-tall="true"]) .kd-player-eq .kd-manager-control {
+    display: grid;
+    grid-row: auto;
+    grid-template-columns: var(--kd-player-eq-w) var(--kd-player-readouts-w);
+    grid-template-rows: none;
+    gap: 0 10px;
+    align-items: center;
+  }
+  .kd-app:not([data-tall="true"]) .kd-player-eq .kd-manager-knob-stack { grid-row: auto; }
+  .kd-app:not([data-tall="true"]) .kd-eq-readouts { grid-row: auto; justify-self: start; }
+}
 .kd-player-eq .kd-manager-knob-stack {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   align-items: center;
   gap: 2px;
   min-height: 0;
@@ -44,15 +97,15 @@
   overflow: hidden;
   font-size: 9px;
   line-height: 12px;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   text-align: center;
   white-space: nowrap;
 }
 
-/* Readouts: a key stepper, the tempo-adjusted BPM, and the tempo that adjusts it. */
+/* Readouts: a key stepper and the tempo-adjusted BPM. */
 .kd-eq-readouts {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   column-gap: 10px;
   min-width: 0;
@@ -127,50 +180,8 @@
 .kd-eq-key .kd-eq-value > strong { color: color-mix(in oklab, var(--kd-key-color, var(--kd-text)) 78%, #fff); }
 :root[data-theme="light"] .kd-eq-key .kd-eq-value > strong { color: color-mix(in oklab, var(--kd-key-color, var(--kd-text)) 88%, #111); }
 .kd-eq-value[data-warn="true"] > strong { color: var(--kd-warn); }
-.kd-eq-tempo {
-  --kd-eq-tempo-line: color-mix(in srgb, var(--kd-muted) 34%, transparent);
-  --kd-eq-tempo-thumb: color-mix(in srgb, var(--kd-text-body) 60%, var(--kd-panel));
-  display: grid;
-  grid-template-rows: 18px 11px;
-  align-content: center;
-  min-width: 0;
-}
-.kd-eq-tempo > input[type="range"] {
-  appearance: none;
-  width: 100%;
-  min-width: 0;
-  height: 18px;
-  margin: 0;
-  /* One hairline with a notch at the original tempo. */
-  background:
-    linear-gradient(var(--kd-eq-tempo-line), var(--kd-eq-tempo-line)) center / 1px 9px no-repeat,
-    linear-gradient(var(--kd-eq-tempo-line), var(--kd-eq-tempo-line)) center / 100% 1px no-repeat;
-  cursor: ew-resize;
-}
-.kd-eq-tempo > input[type="range"]::-webkit-slider-runnable-track { height: 1px; background: transparent; }
-.kd-eq-tempo > input[type="range"]::-webkit-slider-thumb {
-  appearance: none;
-  width: 5px;
-  height: 14px;
-  margin-top: -6.5px;
-  border: 0;
-  border-radius: 2px;
-  background: var(--kd-eq-tempo-thumb);
-}
-.kd-eq-tempo > input[type="range"]:disabled { cursor: default; opacity: 0.5; }
-.kd-eq-tempo-offset {
-  justify-self: center;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--kd-muted);
-  font: 700 9px/11px var(--kd-font);
-  font-variant-numeric: tabular-nums;
-  cursor: pointer;
-}
-/* At the original tempo the offset says nothing; it keeps its line so the strip does not shift. */
-.kd-eq-tempo-offset:not([data-moved]) { visibility: hidden; }
-.kd-eq-tempo-offset[data-moved] { color: var(--kd-theme); }
+/* The tempo knob's offset is a number: it keeps its digits still. */
+.kd-player-eq .kd-dj-arcknob[data-control="tempo"] > b { font-variant-numeric: tabular-nums; }
 
 /* Default themes: the strip is drawn with the bar's own line weight and colours rather than the
    mixer panel's raised white knobs, so it reads as part of the bar. Theme packs draw their own. */
