@@ -6419,8 +6419,8 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   gap: 0.1rem;
   margin-right: 0.2rem;
 }
-/* 走带右边那一块的两面：工具键、旋钮，只显示一面，上下滑着换（SlidePages，换面键在
-   PlayerBar.tsx）。换面键打头，两面跟在它后面贴着走带排；剩下的宽度空着，收起键独自在最右。 */
+/* 走带右边那一块的两面：工具键、旋钮，只显示一面，上下滑着换（SlidePages）。两面贴着走带
+   排，各自以换面键收尾（PlayerBar.tsx 的 BarFaceKey）；剩下的宽度空着，收起键独自在最右。 */
 .kd-player-faces { align-self: stretch; }
 .kd-player-faces > .kd-slide-page {
   flex-direction: row;
@@ -6432,17 +6432,35 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
 }
 .kd-player-face[hidden] { display: none; }
-/* 旋钮那面占满这一块；放不下时这一面自己横向滚。 */
-.kd-player-face[data-face="eq"] {
-  flex: 1 1 auto;
+.kd-player-face[data-face="eq"] { gap: 0.35rem; }
+/* 旋钮那一段：放不下时它自己横向滚，换面键不跟着滚走。 */
+.kd-player-face-scroll {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
 }
-.kd-player-face[data-face="eq"]::-webkit-scrollbar { display: none; }
-.kd-player-facekey { flex: none; }
+.kd-player-face-scroll::-webkit-scrollbar { display: none; }
+/* 竖长窗口里旋钮是两行、铺满这一格。 */
+.kd-app[data-tall="true"] .kd-player-face[data-face="eq"],
+.kd-app[data-tall="true"] .kd-player-face-scroll { flex: 1 1 auto; }
+/* 这一排的键一个尺寸：同宽同高、同样大的图标，键挨着键，间距由键宽自己给。 */
+.kd-player-trailing .kd-player-step {
+  flex: none;
+  width: 1.7rem;
+  height: 1.7rem;
+  margin: 0;
+}
+.kd-player-trailing .kd-player-step > svg {
+  width: 14px;
+  height: 14px;
+}
+.kd-player-trailing .kd-player-float-tools {
+  gap: 0;
+  margin: 0;
+}
 .kd-player-facekey[data-on="true"] { color: var(--kd-text); }
 .kd-player-colorbtn { width: 1.45rem; }
 /* Panel switches keep the same quiet ink in either state; labels and aria-pressed carry it.

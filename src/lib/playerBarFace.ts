@@ -4,8 +4,8 @@ import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 /**
  * What the player bar shows to the right of the transport, one at a time: `tools`, the keys of
  * the song and of what plays next (lyrics, song colour, small windows, auto-advance, mode …), or
- * `eq`, the deck's knobs, tempo slider and readouts. The key they follow switches between them,
- * and the choice is kept across runs.
+ * `eq`, the deck's knobs, tempo slider and readouts. The key that ends either face switches to
+ * the other, and the choice is kept across runs.
  */
 export type PlayerBarFace = "tools" | "eq";
 

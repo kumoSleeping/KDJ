@@ -197,7 +197,7 @@ import { SONG_SWAP_IN_MS, SONG_SWAP_OUT_MS } from "../../lib/songSwapMotion";
 import "./DeckSongSwap.css";
 import { PlayerVolume } from "./PlayerVolume";
 import { SlidePages } from "../drawer/SlidePages";
-import { PLAYER_BAR_FACES, usePlayerBarFace } from "../../lib/playerBarFace";
+import { PLAYER_BAR_FACES, usePlayerBarFace, type PlayerBarFace } from "../../lib/playerBarFace";
 import { tracePlayback, watchMainThread } from "../../lib/playbackTrace";
 import { streamWaveformTrace } from "../../lib/streamWaveformTrace";
 import { nowPlayingInfoVisible, useNowPlayingInfo } from "../../lib/nowPlayingInfo";
@@ -465,6 +465,37 @@ const BarSongColorKey = memo(function BarSongColorKey() {
     <Palette size={14} aria-hidden="true" />
   </button>;
 });
+/** The face key that had the keyboard's focus when it was pressed: the other face's key takes it over. */
+let handFaceFocus = false;
+/**
+ * The key that ends a face of the region right of the transport and switches to the other one
+ * (src/lib/playerBarFace.ts). Each face has its own, so the key leaves and arrives with its face.
+ */
+const BarFaceKey = memo(function BarFaceKey({ of }: { of: PlayerBarFace }) {
+  const face = usePlayerBarFace(state => state.face);
+  const key = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (face !== of || !handFaceFocus) return;
+    handFaceFocus = false;
+    key.current?.focus();
+  }, [face, of]);
+  const label = of === "eq" ? "换回播放工具" : "换成旋钮和 Tempo";
+  return <button
+    ref={key}
+    type="button"
+    className="kd-player-step kd-player-facekey"
+    aria-label={label}
+    title={label}
+    aria-pressed={of === "eq"}
+    data-on={of === "eq" ? "true" : undefined}
+    onClick={event => {
+      handFaceFocus = event.currentTarget.matches(":focus-visible");
+      usePlayerBarFace.getState().toggle();
+    }}
+  >
+    <SlidersHorizontal size={14} aria-hidden="true" />
+  </button>;
+});
 const showEqNotice = (text: string) => {
   showNotice(text);
 };
@@ -631,7 +662,6 @@ export function PlayerBar() {
   const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
   const [lyricsMenu, setLyricsMenu] = useState<{ x: number; y: number; top: number; trackId: number | null } | null>(null);
   const barFace = usePlayerBarFace((state) => state.face);
-  const toggleBarFace = usePlayerBarFace((state) => state.toggle);
   const setDesktopLyricsOn = useLyricsPrefs((state) => state.setDesktopEnabled);
   const canDesktopLyrics = Boolean(window.kdj?.desktopLyrics);
   const pipMode = useVideoPip((state) => state.mode);
@@ -4877,7 +4907,7 @@ export function PlayerBar() {
       </div>
 
       {/* 走带右边只有一块地方，一次只放一面：歌和接歌的那排键，或者这台 deck 的旋钮、Tempo
-          和读数。都贴着走带排，开头那颗键换面，两面上下滑着换；只有收起键留在最右。
+          和读数。都贴着走带排，每一面末尾那颗键换面，两面上下滑着换；只有收起键留在最右。
           整块仍接收拖入：拖到这里替换下一首。 */}
       <div
         className="kd-player-trailing"
@@ -4889,17 +4919,6 @@ export function PlayerBar() {
         }}
         onDrop={(event) => void dropOnDeck(event, "right")}
       >
-        <button
-          type="button"
-          className="kd-player-step kd-player-facekey"
-          aria-label={barFace === "eq" ? "换回播放工具" : "换成旋钮和 Tempo"}
-          aria-pressed={barFace === "eq"}
-          data-on={barFace === "eq" ? "true" : undefined}
-          title={barFace === "eq" ? "换回播放工具" : "换成旋钮和 Tempo"}
-          onClick={toggleBarFace}
-        >
-          <SlidersHorizontal size={14} />
-        </button>
         <SlidePages className="kd-player-faces" axis="y" page={barFace} order={PLAYER_BAR_FACES}>
           <div className="kd-player-face" data-face="tools" hidden={barFace !== "tools"}>
             <div className="kd-player-float-tools">
@@ -5000,10 +5019,15 @@ export function PlayerBar() {
                 <RefreshCw size={13} aria-hidden="true" />
               </button>
             )}
+            <BarFaceKey of="tools" />
           </div>
           <div className="kd-player-face" data-face="eq" hidden={barFace !== "eq"}>
-            {/* 旋钮失败只是一条提示，不能改写媒体会话的错误文案。 */}
-            <BarEq onError={showEqNotice} />
+            {/* 旋钮失败只是一条提示，不能改写媒体会话的错误文案。窗口窄到放不下时只有旋钮
+                这一段横向滚，换面键留在原地。 */}
+            <div className="kd-player-face-scroll">
+              <BarEq onError={showEqNotice} />
+            </div>
+            <BarFaceKey of="eq" />
           </div>
         </SlidePages>
         {lyricsMenu && !video && lyricsMenu.trackId === (displayTrack?.id ?? null) ? (

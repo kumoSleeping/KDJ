@@ -15,6 +15,7 @@ import {
   usePlayerBarAway,
   type PlayerBarPhase,
 } from "../../lib/playerBarAway";
+import { tracePlayback } from "../../lib/playbackTrace";
 import { useWindowTaken, windowTaken } from "../../lib/windowTaken";
 import { dismissTask } from "../tasks/taskBubbleStore";
 import { NOW_PLAYING_TASK } from "./NowPlayingTask";
@@ -62,8 +63,23 @@ export function usePlayerBarPhase(song: boolean): PlayerBarPhase {
   useEffect(() => {
     if (!playerBarMoving(phase)) return;
     const time = phase === "leaving" ? leaveDuration("slide") : prefersReducedMotion() ? MOTION_REDUCED_MS : MOTION_IN_MS;
-    const timer = window.setTimeout(endPlayerBarSlide, time + 20);
-    return () => window.clearTimeout(timer);
+    // What the slide really got, into the app's log (`bar-slide`): the animation that is on the
+    // bar, and the frames drawn in its time. A slide nobody saw has no animation or no frames.
+    const animation = document.querySelector<HTMLElement>(".kd-player")?.getAnimations()[0];
+    const started = performance.now();
+    let frames = 0;
+    let counting = requestAnimationFrame(function count() { frames += 1; counting = requestAnimationFrame(count); });
+    const timer = window.setTimeout(() => {
+      cancelAnimationFrame(counting);
+      tracePlayback("bar-slide", {
+        phase,
+        animation: animation instanceof CSSAnimation ? animation.animationName : animation ? "other" : null,
+        frames,
+        ms: Math.round(performance.now() - started),
+      });
+      endPlayerBarSlide();
+    }, time + 20);
+    return () => { window.clearTimeout(timer); cancelAnimationFrame(counting); };
   }, [phase]);
   useEffect(() => {
     if (phase !== "leaving" || handFocusTo !== "bubble") return;
