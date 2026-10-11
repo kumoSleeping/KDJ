@@ -1018,34 +1018,20 @@ export interface MiniPlayerState {
 export interface MiniPlayerBridge {
   state(): Promise<MiniPlayerState>;
   /**
-   * 完整窗口淡出，窗口变成气泡，先不显示；`rect` 是气泡在完整窗口里的位置
-   * （CSS 像素），`homeRight`/`homeBottom` 是它在完整窗口里原位的右、下边。页面按新大小画好后
-   * 调 `reveal` 才出现。
+   * 完整窗口淡出，窗口变成气泡，先不显示；`rect` 是气泡此刻在完整窗口里的位置和大小
+   * （CSS 像素），`tall` 是页面预计它作为迷你播放器时的高度。页面按新大小画好后调 `reveal`。
    */
-  collapse(rect: { x: number; y: number; width: number; height: number; homeRight: number; homeBottom: number }, animated: boolean): Promise<MiniPlayerState>;
-  /** 页面已按窗口的新大小画好：窗口在该在的地方出现。 */
+  collapse(rect: { x: number; y: number; width: number; height: number; tall: number }, animated: boolean): Promise<MiniPlayerState>;
+  /**
+   * 页面已按窗口的新大小画好。迷你播放器在气泡原来的地方出现，沿抛物线跳到上次放下它的地方；
+   * 完整窗口则在原处淡入。
+   */
   reveal(animated: boolean): Promise<MiniPlayerState>;
-  /** 迷你播放器所在（或将要去）的位置，相对完整窗口左上角，CSS 像素；没有自己的位置时为 null。 */
-  place(width: number, height: number): Promise<[number, number] | null>;
-  /** 沿抛物线飞到上次放下它的地方。 */
-  settle(animated: boolean): Promise<void>;
-  /** 记下现在的位置，沿抛物线飞回完整窗口里气泡所在的角上；`stay` 时留在原地。 */
-  recall(animated: boolean, stay: boolean): Promise<void>;
-  /** 气泡消失，窗口变回完整窗口，先停在屏幕之外，`reveal` 后出现。 */
+  /** 记下现在的位置，沿抛物线跳回完整窗口里气泡所在的角上并消失；窗口变回完整窗口，`reveal` 后出现。 */
   expand(animated: boolean): Promise<MiniPlayerState>;
-  /** 换歌：从最近的屏幕边缘滑出去并留在外面；没有可走的边（或不是静止的迷你播放器）时为 false。毫秒。 */
-  leave(outMs: number): Promise<boolean>;
-  /** 页面已经换成新歌：按气泡现在的大小（CSS 像素）回到滑出去的地方。 */
-  comeBack(inMs: number, width: number, height: number): Promise<void>;
   /** 气泡换了大小，窗口立刻跟上。CSS 像素。 */
   fit(width: number, height: number): Promise<void>;
   setOnTop(onTop: boolean): Promise<MiniPlayerState>;
-  /**
-   * 替身小窗（src/lib/miniPlayerProxy.ts）：把 `picture` 画好后正好盖在主窗口的 `rect` 上
-   * （CSS 像素；null 表示盖住整个主窗口，即它已经是气泡时）。没能及时画好返回 false。
-   */
-  proxyShow(rect: { x: number; y: number; width: number; height: number } | null, picture: string): Promise<boolean>;
-  proxyHide(): Promise<void>;
 }
 
 export interface KdjBridge {

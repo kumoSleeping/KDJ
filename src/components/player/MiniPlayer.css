@@ -1,32 +1,8 @@
 /* The mini player (src/lib/miniPlayer.ts): the whole window taken down to the playing song's
-   bubble. The phase is on the document element; each rule below is for one or more of them.
-
-   readying   the bar leaves, the bubble becomes the transport; the page stays as it is
-   flying     the bubble flies to its place in front of the page (miniPlayer.ts moves it)
-   on         the window is the bubble
-   landing    the whole window is back, and the bubble flies into its corner of it
-
-   Nothing here animates: the window is the whole window or the bubble, and the one thing that
-   moves is the bubble's flight. */
-
-/* —— The page is on show whenever the window is the whole window ——
-   Having the window (lib/windowTaken.ts) hides the page for an app that covers it; the mini
-   player covers nothing. */
-:root:is([data-kd-mini="readying"], [data-kd-mini="flying"], [data-kd-mini="landing"]) .kd-app[data-taken-by] .kd-stage {
-  opacity: 1;
-  visibility: visible;
-  transition: none;
-}
-/* The bubble flies from and to its own corner of the window: the stack stands on the window's
-   bottom from the start of the flight, not on a bar that is on its way out. */
-:root:is([data-kd-mini="flying"], [data-kd-mini="landing"]) .kd-task-host[data-place="bottom"] {
-  bottom: 0;
-  animation: none;
-}
-:root:is([data-kd-mini="flying"], [data-kd-mini="landing"]) .kd-task-host[data-place="bottom"] > .kd-task-slot {
-  transition: none;
-  will-change: transform;
-}
+   bubble. `data-kd-mini="on"` is on the document element while the window is the bubble; it
+   is set and taken away while the window is out of sight, so every rule below is the state
+   the window is shown in and none of them is a motion: the window's fade and its jump are the
+   native side's. */
 
 /* —— The window is the bubble ——
    The page keeps the whole window's layout (--kd-mini-w, --kd-mini-h) and is not drawn: it is
@@ -43,8 +19,7 @@
   right: auto;
   width: var(--kd-mini-w, 100%);
 }
-/* No gap, no lift, no corner or shadow of its own: the window has those. Other messages wait
-   in the whole window. */
+/* No gap and no lift: the bubble fills the window. Other messages wait in the whole window. */
 :root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] {
   --kd-task-gap: 0px;
   bottom: 0;
@@ -67,13 +42,24 @@
 :root[data-kd-mini="on"] .kd-task-host:has(> .kd-task-slot > .kd-task[data-kind="playing"]:not([data-phase="out"])) > .kd-task-slot:has(> .kd-task[data-kind="playing"][data-phase="out"]) {
   display: none;
 }
-/* Another song: in the whole window the bubble rolls down behind the bar and rises again. The
-   mini player has no bar to go behind; its window leaves the screen instead (dipMiniPlayer),
-   and the bubble in it stays put. */
+/* No corner or shadow of its own: the window has those. */
 :root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] {
   border-radius: 0;
   box-shadow: none;
+}
+/* Another song: in the whole window the bubble rolls down behind the bar and rises again. The
+   mini player has no bar to go behind: the bubble stays put and shows the new song when it
+   has it. The rise keeps its name and only loses its time, so it does not start over when
+   the window is whole again. */
+:root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"][data-phase="out"] {
   animation: none;
+}
+:root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"][data-phase="in"] {
+  animation-duration: 0s;
+}
+/* The page behind is there at once when the window is given back (Drawer.css fades it). */
+:root[data-kd-mini="on"] .kd-app .kd-stage {
+  transition: none;
 }
 /* The transport row is open the moment the bubble is the window: the window has the height
    of the open bubble, and a row still unfolding would leave a bare strip under it. */

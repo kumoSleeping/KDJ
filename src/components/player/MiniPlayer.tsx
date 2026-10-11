@@ -9,7 +9,6 @@ import { updateTask, useTaskBubbles } from "../tasks/taskBubbleStore";
 import {
   MINI_PLAYER_BUBBLE,
   collapseToMiniPlayer,
-  dipMiniPlayer,
   expandFromMiniPlayer,
   fitMiniPlayer,
   miniPlayerOffered,
@@ -34,9 +33,7 @@ export function MiniPlayerKeys() {
   const phase = useMiniPlayer(state => state.phase);
   const onTop = useMiniPlayer(state => state.onTop);
   if (!miniPlayerOffered()) return null;
-  // All of them are in the bubble at all times and MiniPlayer.css shows the ones that apply:
-  // a picture taken of the bubble in the whole window (miniPlayerProxy.ts) then holds the keys
-  // it has as the mini player.
+  // All of them are in the bubble at all times and MiniPlayer.css shows the ones that apply.
   const floats = onTop ? "置顶：开。点一下不再浮在其他窗口上面" : "置顶：关。点一下浮在其他窗口上面";
   return <>
     <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini" data-when="whole"
@@ -99,9 +96,8 @@ function useMiniPlayerLyric(on: boolean): void {
 
 /**
  * What the mini player needs of the page while it lasts: the bubble is the window's handle,
- * the window keeps the bubble's height, Esc does not roll the only thing on screen away,
- * another song takes the window off the screen and back, and a window left without a song to
- * show is given back.
+ * the window keeps the bubble's height, Esc does not roll the only thing on screen away, and
+ * a window left without a song to show is given back.
  */
 export function MiniPlayerHost() {
   const on = useMiniPlayer(state => state.phase === "on");
@@ -119,26 +115,28 @@ export function MiniPlayerHost() {
       event.preventDefault();
       event.stopPropagation();
     };
+    // The window follows the bubble the moment it changes height (another song's title).
+    let watched: Element | null = null;
+    const sized = typeof ResizeObserver === "function" ? new ResizeObserver(() => { fitMiniPlayer(); }) : null;
+    const watch = () => {
+      const bubble = document.querySelector(MINI_PLAYER_BUBBLE);
+      if (bubble === watched) return;
+      sized?.disconnect();
+      watched = bubble;
+      if (bubble) sized?.observe(bubble);
+    };
     let missingSince = 0;
     const fit = window.setInterval(() => {
+      watch();
       if (fitMiniPlayer()) { missingSince = 0; return; }
       missingSince ||= performance.now();
       if (performance.now() - missingSince > MISSING_MS) void expandFromMiniPlayer();
     }, FIT_EVERY_MS);
-    // Another song: the window leaves the screen and comes back with it, once.
-    let song = getPlayingTrack()?.id ?? null;
-    const stopSong = subscribePlayingTrack(() => {
-      const next = getPlayingTrack()?.id ?? null;
-      if (next === song) return;
-      song = next;
-      // Away until the bubble's own description is of this song.
-      if (next !== null) dipMiniPlayer(() => useTaskBubbles.getState().entries.some(entry =>
-        entry.spec.kind === "playing" && !entry.leaving && entry.spec.song === getPlayingTrack()?.id));
-    });
     document.addEventListener("pointerdown", drag);
     window.addEventListener("keydown", key, true);
+    watch();
     return () => {
-      stopSong();
+      sized?.disconnect();
       window.clearInterval(fit);
       document.removeEventListener("pointerdown", drag);
       window.removeEventListener("keydown", key, true);

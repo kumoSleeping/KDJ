@@ -6,9 +6,9 @@ import { JSDOM } from "jsdom";
  * The steps of the mini player in the order the page takes them (src/lib/miniPlayer.ts), with
  * the native side replaced by a record of what it was asked and of what the page showed then.
  */
-test("the whole window goes at once and the bubble flies to its place, and back the same way; a step that fails gives the window back", async () => {
+test("the whole window goes as it is, the page changes out of sight, and the window is shown when it has drawn; a step that fails gives the window back", async () => {
   const dom = new JSDOM(`<!doctype html><html><body><div class="kd-app"><div class="kd-body"></div>
-    <div class="kd-task-host" data-place="bottom"><div class="kd-task-slot"><article class="kd-task" data-kind="playing"></article></div></div></div></body></html>`,
+    <div class="kd-task-host" data-place="bottom"><div class="kd-task-slot"><article class="kd-task" data-kind="playing"><div class="kd-task-controls-clip"></div></article></div></div></div></body></html>`,
     { url: "http://localhost" });
   // Reduced motion: every wait is over at once, the order of the steps is the same.
   dom.window.matchMedia = ((query: string) => ({ matches: query.includes("reduce"), addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
@@ -25,7 +25,7 @@ test("the whole window goes at once and the bubble flies to its place, and back 
   };
   // The whole window, with the bubble standing on the bar, 12 px from the right edge.
   resize(1360, 880);
-  let at = { left: 964, top: 640 }, height = 148;
+  let at = { left: 964, top: 640 }, height = 120;
   const box = () => ({ ...at, width: 384, height, right: at.left + 384, bottom: at.top + height, x: at.left, y: at.top, toJSON() {} });
   slot.getBoundingClientRect = box;
   bubble.getBoundingClientRect = box;
@@ -33,64 +33,54 @@ test("the whole window goes at once and the bubble flies to its place, and back 
   const asked: string[] = [];
   let active = false;
   let failCollapse = false;
-  let place: [number, number] | null = null;
   const phaseNow = () => dom.window.document.documentElement.getAttribute("data-kd-mini");
   const ask = (what: string) => { asked.push(`${what} @${phaseNow() ?? "off"}`); };
   const state = () => ({ active, onTop: true, fullWidth: active ? 1360 : 0, fullHeight: active ? 880 : 0 });
   (dom.window as unknown as { kdj: unknown }).kdj = {
     miniPlayer: {
       state: async () => state(),
-      place: async (width: number, tall: number) => { ask(`place ${width}x${tall}`); return place; },
-      collapse: async (rect: { x: number; y: number; width: number; height: number; homeRight: number; homeBottom: number }, _animated: boolean) => {
-        ask(`collapse ${rect.x},${rect.y} ${rect.width}x${rect.height} home ${rect.homeRight},${rect.homeBottom}`);
+      collapse: async (rect: { x: number; y: number; width: number; height: number; tall: number }, _animated: boolean) => {
+        ask(`collapse ${rect.x},${rect.y} ${rect.width}x${rect.height} tall ${rect.tall}`);
         if (failCollapse) throw new Error("no");
-        resize(384, 148);
+        resize(384, rect.tall);
+        // As the mini player the bubble has its transport row: taller than on the bar.
         at = { left: 0, top: 0 };
+        height = 148;
         active = true;
         return state();
       },
       reveal: async () => { ask("reveal"); return state(); },
-      settle: async (animated: boolean) => { ask(`settle ${animated}`); },
-      recall: async (animated: boolean, stay: boolean) => { ask(`recall ${animated} stay=${stay}`); },
       expand: async () => {
         ask("expand");
         resize(1360, 880);
-        at = { left: 964, top: 720 };
+        at = { left: 964, top: 640 };
+        height = 120;
         active = false;
         return state();
       },
-      leave: async (out: number) => { ask(`leave ${out}`); return true; },
-      comeBack: async (back: number, width: number, tall: number) => { ask(`back ${back} ${width}x${tall}`); },
-      fit: async (width: number, tall: number) => { ask(`fit ${width}x${tall}`); },
+      fit: async (width: number, tall: number) => { ask(`fit ${width}x${tall}`); resize(width, tall); },
       setOnTop: async (onTop: boolean) => { ask(`top ${onTop}`); return { active, onTop }; },
     },
   };
 
   const mini = await import("../src/lib/miniPlayer");
   const { useWindowTaken } = await import("../src/lib/windowTaken");
+  const { usePlayerBarAway } = await import("../src/lib/playerBarAway");
   assert.equal(mini.miniPlayerOffered(), true);
 
-  // The flight is an arc: it starts and lands exactly, and rises above the line between.
-  const path = mini.flightPath({ x: 0, y: 0 }, { x: -600, y: -200 });
-  assert.deepEqual(path[0], { x: 0, y: 0 });
-  assert.deepEqual(path[path.length - 1], { x: -600, y: -200 });
-  assert.ok(path[12].y < -100 - 150, `halfway it is well above the line: ${path[12].y}`);
-  assert.equal(mini.flightPath({ x: 5, y: 5 }, { x: 5, y: 5 })[12].y, 5, "nowhere to go: no arc");
-
-  // —— No place of its own yet: it stays where the bubble is. ——
   // Another app has the window: it gives it back first.
   let lyricsLeft = 0;
   useWindowTaken.getState().take("lyrics", () => { lyricsLeft += 1; useWindowTaken.getState().release("lyrics"); });
   await mini.collapseToMiniPlayer();
   assert.equal(lyricsLeft, 1);
   assert.deepEqual(asked, [
-    "place 384x148 @readying",
-    // The window is the bubble in its corner of the whole window, on the window's bottom where
-    // it stands once the bar is gone; the page is on show until that moment.
-    "collapse 964,720 384x148 home 1348,868 @readying",
-    // It is shown again only when the page is the bubble.
+    // The whole window goes with the page as it is: the bubble where it stands on the bar, and
+    // nothing of the mini player on the page yet.
+    "collapse 964,640 384x120 tall 120 @off",
+    // Out of sight the bubble became the transport and is taller than foreseen: the window
+    // takes that height before it is shown.
+    "fit 384x148 @on",
     "reveal @on",
-    "settle false @on",
   ]);
   assert.equal(mini.useMiniPlayer.getState().phase, "on");
   assert.equal(useWindowTaken.getState().by, mini.MINI_PLAYER, "the page is inert and the bar away while it lasts");
@@ -110,55 +100,40 @@ test("the whole window goes at once and the bubble flies to its place, and back 
   slot.remove();
   assert.equal(mini.fitMiniPlayer(), false);
   host.append(slot);
-  height = 148;
 
   await mini.setMiniPlayerOnTop(false);
   assert.equal(asked.pop(), "top false @on");
   assert.equal(mini.useMiniPlayer.getState().onTop, false);
 
-  // Another song takes the window off the screen and back; not under reduced motion.
-  mini.dipMiniPlayer(() => true);
-  assert.equal(asked.length, 0);
-
-  // Back, from a place outside the whole window (or its own corner): the window flies back
-  // first, then the whole window is there. The bubble's key and the window's `leave` are the
-  // same way.
-  place = [1500, 40];
+  // Back: the mini player goes first; out of sight the page is the whole window's again, the
+  // bar at rest without its slide; then the window is shown. The bubble's key and the
+  // window's `leave` are the same way.
+  usePlayerBarAway.getState().setPhase("returning");
   useWindowTaken.getState().leave?.();
   await new Promise(resolve => setTimeout(resolve, 80));
-  assert.deepEqual(asked, ["place 384x148 @on", "recall false stay=false @on", "expand @on", "reveal @landing"]);
+  assert.deepEqual(asked, ["expand @on", "reveal @off"]);
+  assert.equal(usePlayerBarAway.getState().phase, "up");
   assert.equal(phaseNow(), null);
   assert.equal(mini.useMiniPlayer.getState().phase, "off");
   assert.equal(useWindowTaken.getState().by, null);
   assert.equal(dom.window.document.documentElement.style.getPropertyValue("--kd-mini-w"), "");
 
-  // —— A place inside the whole window: the bubble flies there in front of the page, and the
-  // whole window goes when it has landed. ——
+  // The second time the window is given the height it had as the mini player at once, and
+  // needs no other.
   asked.length = 0;
-  at = { left: 964, top: 640 };
-  place = [120, 300];
   await mini.collapseToMiniPlayer();
-  assert.deepEqual(asked, [
-    "place 384x148 @readying",
-    "collapse 120,300 384x148 home 1348,868 @flying",
-    "reveal @on",
-    "settle false @on",
-  ]);
-  // Back: the whole window is there first, the bubble still at its place, and then it flies in.
+  assert.deepEqual(asked, ["collapse 964,640 384x120 tall 148 @off", "reveal @on"]);
   asked.length = 0;
   await mini.expandFromMiniPlayer();
-  assert.deepEqual(asked, ["place 384x148 @on", "recall false stay=true @on", "expand @on", "reveal @landing"]);
-  assert.equal(phaseNow(), null);
+  assert.deepEqual(asked, ["expand @on", "reveal @off"]);
 
   // The native side refuses: the whole window is there again, nothing is left on the page.
   asked.length = 0;
-  at = { left: 964, top: 640 };
-  place = null;
   failCollapse = true;
   const warn = console.warn;
   console.warn = () => {};
   try { await mini.collapseToMiniPlayer(); } finally { console.warn = warn; }
-  assert.equal(asked.length, 2);
+  assert.equal(asked.length, 1);
   assert.equal(phaseNow(), null);
   assert.equal(dom.window.document.documentElement.style.getPropertyValue("--kd-mini-w"), "");
   assert.equal(useWindowTaken.getState().by, null);

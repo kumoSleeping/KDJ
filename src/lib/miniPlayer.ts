@@ -1,6 +1,8 @@
 import { create } from "zustand";
-import { dropStandIn, raiseStandIn } from "./miniPlayerProxy";
 import { prefersReducedMotion } from "./motion";
+import { endPlayerBarSlide } from "./nowPlayingInfo";
+import { tracePlayback } from "./playbackTrace";
+import { playerBarMoving, usePlayerBarAway } from "./playerBarAway";
 import { useWindowTaken } from "./windowTaken";
 
 /**
@@ -9,30 +11,24 @@ import { useWindowTaken } from "./windowTaken";
  * they are; the window's frame is the native side's (src-tauri/src/mini_player.rs) and what is
  * drawn, and in which order, is decided here.
  *
- * Nothing is animated about the window's size. The whole window fades away and the bubble is
- * there in its place, as a window of its own; back, the bubble fades and the whole window is
- * there. The one thing that moves is the bubble: it flies in an arc, like something thrown,
- * between its corner of the whole window and the place the listener last left it at.
- *
- * Down: the bar leaves and the bubble becomes the transport (`readying`, a few frames); the
- * bubble flies to its place (`flying`); the whole window is gone and the bubble is the window
- * (`on`). Back: the whole window is there, its bubble's corner empty and the bubble still at
- * its place; the bubble flies back into the corner (`landing`).
- *
- * That is what is seen when the place lies inside the whole window's frame, and the page
- * draws the flight itself. A place outside it cannot be drawn by a page that ends at the
- * window's edge: then the mini player's own window flies, after the whole window has gone and
- * before it is back.
+ * Down: the whole window fades away as it is; the mini player appears where the bubble stood
+ * and jumps, in an arc like something thrown, to the place the listener last left it at. Back:
+ * it jumps to the bubble's corner of the whole window, is gone as it lands, and the whole
+ * window is there as it was. The fade and the jump are the window's own (the native side's);
+ * nothing else is seen to move.
  *
  * A WebView shows its last picture until the page has drawn for a new size, so the window is
- * never given another size where it can be seen: the native side puts it beyond the screens
- * first and shows it again when the page says it has drawn (`reveal`).
+ * never given another size where it can be seen. Everything the page does for the other
+ * size (the bar going or coming, the bubble becoming the transport or giving it back, the
+ * layout) is done while the window is out of sight, at once and without its own motion, and
+ * the window is shown when the page has drawn (`reveal`). That is the one wait there is, and
+ * it lasts as long as the drawing takes.
  *
- * The phase is written on the document element (`data-kd-mini`); MiniPlayer.css draws each.
+ * The phase is written on the document element (`data-kd-mini`); MiniPlayer.css draws it.
  * While it lasts the mini player has the window (lib/windowTaken.ts), which is what makes the
  * page inert and sends the bar away.
  */
-export type MiniPlayerPhase = "off" | "readying" | "flying" | "on" | "landing";
+export type MiniPlayerPhase = "off" | "on";
 
 /** Who has the window (`data-taken-by`) while the mini player lasts. */
 export const MINI_PLAYER = "mini-player";
@@ -40,24 +36,12 @@ export const MINI_PLAYER_ATTR = "data-kd-mini";
 /** The playing song's bubble in its stack: the mini player is this element and nothing else. */
 export const MINI_PLAYER_BUBBLE = '.kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"]';
 
-/** How many frames the bubble may take to come up as the transport once the bar is sent away. */
+/** How many frames the bubble may take to come up as the transport once the bar is sent away,
+ *  and the bar to be at rest once its slide is ended for it. */
 const READY_FRAMES = 15;
-/** The gap a bubble keeps to the window's edges (--kd-task-gap), where it cannot be measured. */
-const BUBBLE_EDGE = 12;
-/** The bubble's flight, and how high it rises above the straight line, in px: a share of the
- *  distance within limits. The native side flies its window by the same numbers. */
-const FLIGHT_MS = 420;
-const FLIGHT_EASE = "cubic-bezier(0.65, 0, 0.35, 1)";
-const FLIGHT_RISE = { share: 0.3, least: 56, most: 240 } as const;
-/** Another song: how long the mini player takes to leave the screen and to come back onto it,
- *  and how long it stays away: at least long enough for the bubble to have let the old song
- *  go, at most this long whatever the bubble does. */
-/** How long the stand-in stays after the window is back under it: it goes a little late, never
- *  a little early. */
-const STAND_IN_LINGERS_MS = 120;
-const DIP_OUT_MS = 260;
-const DIP_IN_MS = 360;
-const DIP_AWAY_MS = { least: 120, most: 1200 } as const;
+const BAR_FRAMES = 6;
+/** How long the page may take to learn the window's new size, in ms. */
+const RESIZE_WAIT_MS = 700;
 
 export const useMiniPlayer = create<{ phase: MiniPlayerPhase; onTop: boolean }>(() => ({ phase: "off", onTop: true }));
 
@@ -74,15 +58,14 @@ function setPhase(phase: MiniPlayerPhase): void {
 
 const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 
-interface Point { x: number; y: number }
-/** The whole window the mini player came from, in CSS px, and the gap its bubble kept there. */
-interface Whole { width: number; height: number; edge: number }
-let whole: Whole | null = null;
-/** The bubble's flight inside the page, while it lasts. */
-let flight: Animation | null = null;
+/** The whole window the mini player came from, in CSS px. */
+let whole: { width: number; height: number } | null = null;
+/** How tall the mini player was the last time: what the window is given before the bubble can
+ *  be measured as one, so that it seldom needs a second size. */
+let lastHeight = 0;
 
 /** The page keeps the whole window's layout while the window is the bubble. */
-function keepLayout(of: Whole): void {
+function keepLayout(of: { width: number; height: number }): void {
   const style = document.documentElement.style;
   style.setProperty("--kd-mini-w", `${of.width}px`);
   style.setProperty("--kd-mini-h", `${of.height}px`);
@@ -90,47 +73,19 @@ function keepLayout(of: Whole): void {
 
 /** Nothing of the mini player is left on the page. */
 function clearPage(): void {
-  flight?.cancel();
-  flight = null;
   for (const name of ["--kd-mini-w", "--kd-mini-h"]) document.documentElement.style.removeProperty(name);
 }
 
-/** The points of an arc from `from` to `to`, both measured from where the bubble is laid out. */
-export function flightPath(from: Point, to: Point, steps = 24): Point[] {
-  const distance = Math.hypot(to.x - from.x, to.y - from.y);
-  const rise = distance < 1 ? 0 : Math.min(FLIGHT_RISE.most, Math.max(FLIGHT_RISE.least, distance * FLIGHT_RISE.share));
-  return Array.from({ length: steps + 1 }, (_, step) => {
-    const t = step / steps;
-    return { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t - rise * 4 * t * (1 - t) };
-  });
-}
-
-/** Flies the bubble inside the page. It holds both ends until it is cancelled. */
-function fly(slot: HTMLElement, from: Point, to: Point, animated: boolean): Animation | null {
-  if (typeof slot.animate !== "function") return null;
-  return slot.animate(
-    flightPath(from, to).map(point => ({ transform: `translate(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px)` })),
-    { duration: animated ? FLIGHT_MS : 0, easing: FLIGHT_EASE, fill: "both" },
-  );
-}
-
-/** A bubble of this size at `place` (from the window's top-left corner) is all inside the window. */
-function insideWindow(place: readonly [number, number] | null | undefined, width: number, height: number, of: { width: number; height: number }): place is readonly [number, number] {
-  return !!place && place[0] >= 0 && place[1] >= 0 && place[0] + width <= of.width && place[1] + height <= of.height;
-}
-
-/** How long the page may take to learn the window's new size, in ms. */
-const RESIZE_WAIT_MS = 700;
-
 /**
- * The page has the size the window was given, and has drawn for it. Nothing is hurried here:
- * the window is out of sight meanwhile, and showing it a frame early shows the last picture
- * of the other size.
+ * The page has the size the window was given, and has drawn for it: the frame that lays it
+ * out and the one that shows it. The window is out of sight meanwhile; shown before the page
+ * has the size, it shows the last picture of the other one.
  */
 async function drawnFor(width: number, height: number): Promise<void> {
   const until = performance.now() + RESIZE_WAIT_MS;
   while (performance.now() < until && (Math.abs(window.innerWidth - width) > 2 || Math.abs(window.innerHeight - height) > 2)) await frame();
-  for (let drawn = 0; drawn < 4; drawn += 1) await frame();
+  await frame();
+  await frame();
 }
 
 /** The bubble once it is the transport (the bar has been sent away), or as it is if it never is. */
@@ -144,14 +99,27 @@ async function transportBubble(): Promise<HTMLElement | null> {
   return bubble;
 }
 
-/** How tall the bubble is going to be when its transport row has opened (TaskBubbleHost.tsx). */
-function restingHeight(bubble: HTMLElement): number {
-  const tall = bubble.offsetHeight || bubble.getBoundingClientRect().height;
-  const clip = bubble.querySelector<HTMLElement>(".kd-task-controls-clip");
-  return Math.ceil(clip ? tall - clip.offsetHeight + clip.scrollHeight : tall);
+/**
+ * The bar is where it is wanted without sliding there (lib/playerBarAway.ts): the window is
+ * out of sight, and a slide that began now would be halfway when it is shown.
+ */
+async function barAtRest(): Promise<void> {
+  for (let waited = 0; waited < BAR_FRAMES; waited += 1) {
+    await frame();
+    if (!playerBarMoving(usePlayerBarAway.getState().phase)) return;
+    endPlayerBarSlide();
+  }
 }
 
 let switching = false;
+
+/** How long each part of a way took, in ms, into the app's log (`mini-down`, `mini-back`): the
+ *  window's own motion, the time out of sight, and the showing. */
+function traced(event: string, marks: number[], names: string[]): void {
+  const detail: Record<string, number> = {};
+  names.forEach((name, index) => { detail[name] = Math.round(marks[index + 1] - marks[index]); });
+  tracePlayback(event, detail);
+}
 
 /** The whole window again, from whatever step went wrong. */
 async function restore(): Promise<void> {
@@ -160,7 +128,6 @@ async function restore(): Promise<void> {
     await bridge.expand(false).catch(() => {});
     await bridge.reveal(false).catch(() => {});
   }
-  dropStandIn();
   clearPage();
   useWindowTaken.getState().release(MINI_PLAYER);
   setPhase("off");
@@ -178,55 +145,36 @@ export async function collapseToMiniPlayer(): Promise<void> {
       taken.leave?.();
       await frame();
     }
-    const size = { width: window.innerWidth, height: window.innerHeight };
-    setPhase("readying");
-    useWindowTaken.getState().take(MINI_PLAYER, () => { void expandFromMiniPlayer(); });
-    const bubble = await transportBubble();
-    const slot = bubble?.parentElement;
-    if (!bubble || !slot) throw new Error("no playing song to show");
+    const slot = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.parentElement;
+    if (!slot) throw new Error("no playing song to show");
     const box = slot.getBoundingClientRect();
-    const height = restingHeight(bubble);
-    const edge = Math.max(0, Math.round(size.width - box.right));
-    whole = { ...size, edge };
-    // Its own corner of the whole window: where it stands once the bar is gone.
-    const home = { x: box.left, y: Math.max(0, size.height - edge - height) };
-    let at = home;
-    const place = await bridge.place(box.width, height).catch(() => null);
-    if (insideWindow(place, box.width, height, size) && Math.hypot(place[0] - home.x, place[1] - home.y) >= 1) {
-      // Its place is inside the whole window: it flies there in front of the page.
-      setPhase("flying");
-      const laid = { x: home.x, y: size.height - edge - box.height };
-      flight = fly(slot, { x: box.left - laid.x, y: box.top - laid.y }, { x: place[0] - home.x, y: place[1] - home.y }, animated);
-      await flight?.finished.catch(() => {});
-      at = { x: place[0], y: place[1] };
-    }
-    // The stand-in is over the bubble before the whole window goes, and stays when it has gone.
-    const covered = await raiseStandIn(slot, { x: at.x, y: at.y, width: box.width, height });
-    keepLayout(whole);
-    const state = await bridge.collapse({
-      x: at.x, y: at.y, width: box.width, height, homeRight: home.x + box.width, homeBottom: home.y + height,
-    }, animated);
+    const foreseen = Math.max(lastHeight, Math.ceil(box.height));
+    whole = { width: window.innerWidth, height: window.innerHeight };
+    const marks = [performance.now()];
+    // The whole window goes as it is: nothing in it has moved.
+    const state = await bridge.collapse({ x: box.left, y: box.top, width: box.width, height: box.height, tall: foreseen }, animated);
+    marks.push(performance.now());
     useMiniPlayer.setState({ onTop: state.onTop });
+    // Out of sight: the bar goes, and the bubble is the transport and the window.
+    keepLayout(whole);
+    useWindowTaken.getState().take(MINI_PLAYER, () => { void expandFromMiniPlayer(); });
     setPhase("on");
-    flight?.cancel();
-    flight = null;
-    // The page draws the bubble as the window before the window is shown again.
-    await drawnFor(box.width, height);
-    // Should the bubble be another height than was foreseen, the window takes it now, out of
-    // sight, and not a moment after it is shown.
+    const bubble = await transportBubble();
+    if (!bubble) throw new Error("no playing song to show");
+    await drawnFor(box.width, foreseen);
+    // Should the bubble be another height than was foreseen, the window takes it now, and not
+    // a moment after it is shown.
     const tall = Math.ceil(bubble.getBoundingClientRect().height);
     if (tall > 0 && Math.abs(tall - window.innerHeight) >= 1) {
       await bridge.fit(window.innerWidth, tall).catch(() => {});
       await drawnFor(window.innerWidth, tall);
     }
+    if (tall > 0) lastHeight = tall;
+    marks.push(performance.now());
+    // It appears where the bubble stood and jumps to its place.
     await bridge.reveal(animated);
-    // The window is the bubble under the stand-in: only now is the stand-in taken away.
-    if (covered) {
-      await pause(STAND_IN_LINGERS_MS);
-      dropStandIn();
-    }
-    // A place outside the whole window: the mini player's own window flies there.
-    await bridge.settle(animated).catch(() => {});
+    marks.push(performance.now());
+    traced("mini-down", marks, ["fade", "unseen", "jump"]);
   } catch (error) {
     console.warn("mini player: collapse failed", error);
     await restore();
@@ -241,84 +189,26 @@ export async function expandFromMiniPlayer(): Promise<void> {
   switching = true;
   const animated = !prefersReducedMotion();
   try {
-    await dipping;
-    const slot = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.parentElement ?? null;
-    // From its corner of the whole window to where it is now, when that is inside the window.
-    let away: Point | null = null;
-    if (slot && whole) {
-      const box = slot.getBoundingClientRect();
-      const home = { x: whole.width - whole.edge - box.width, y: whole.height - whole.edge - box.height };
-      const place = await bridge.place(box.width, box.height).catch(() => null);
-      if (insideWindow(place, box.width, box.height, whole) && Math.hypot(place[0] - home.x, place[1] - home.y) >= 1) {
-        away = { x: place[0] - home.x, y: place[1] - home.y };
-      }
-    }
-    // Otherwise the mini player's own window flies back to that corner first.
-    await bridge.recall(animated, !!away).catch(() => {});
-    // The stand-in is over the mini player before it goes, and stays until the whole window
-    // is there with its bubble under it.
-    const covered = slot ? await raiseStandIn(slot, null) : false;
+    const marks = [performance.now()];
+    // It jumps back to the bubble's corner of the whole window and is gone as it lands.
     await bridge.expand(animated);
-    setPhase("landing");
-    if (away && slot) {
-      flight = fly(slot, away, { x: 0, y: 0 }, animated);
-      flight?.pause();
-    }
-    // The page draws the whole window, the bubble still at its place, before it is shown.
-    if (whole) await drawnFor(whole.width, whole.height);
-    await bridge.reveal(animated);
-    if (covered) {
-      await pause(STAND_IN_LINGERS_MS);
-      dropStandIn();
-    }
-    flight?.play();
-    await flight?.finished.catch(() => {});
+    marks.push(performance.now());
+    // Out of sight: the bar is in its row again and the bubble on it, without their slides.
+    useWindowTaken.getState().release(MINI_PLAYER);
+    await barAtRest();
     clearPage();
     setPhase("off");
-    useWindowTaken.getState().release(MINI_PLAYER);
+    if (whole) await drawnFor(whole.width, whole.height);
+    marks.push(performance.now());
+    await bridge.reveal(animated);
+    marks.push(performance.now());
+    traced("mini-back", marks, ["jump", "unseen", "fade"]);
   } catch (error) {
     console.warn("mini player: expand failed", error);
     await restore();
   } finally {
     switching = false;
   }
-}
-
-/** A dip that is on its way: the way back to the whole window waits for it. */
-let dipping: Promise<void> = Promise.resolve();
-let away = false;
-
-const pause = (ms: number) => new Promise<void>(resolve => { window.setTimeout(resolve, ms); });
-
-/** The bubble that shows the song as it is now, not one that is still letting the last one go. */
-const BUBBLE_AT_REST = `${MINI_PLAYER_BUBBLE}:not([data-phase="out"])`;
-
-/**
- * Another song. In the whole window the bubble rolls down behind the bar with the old song and
- * rises with the new one; the mini player has the screen for a window, so it leaves past the
- * screen's edge, changes what it shows while it is away, and comes back. Once per change: it
- * stays away until `ready` says the bubble shows the new song, however many steps the bubble
- * takes to get there, and a change that comes while it is away is waited out with it.
- */
-export function dipMiniPlayer(ready: () => boolean): void {
-  const bridge = window.kdj?.miniPlayer;
-  if (!bridge || switching || away || useMiniPlayer.getState().phase !== "on" || prefersReducedMotion()) return;
-  away = true;
-  dipping = (async () => {
-    try {
-      if (!await bridge.leave(DIP_OUT_MS)) return;
-      const until = performance.now() + DIP_AWAY_MS.most;
-      await pause(DIP_AWAY_MS.least);
-      // Timers, not frames: a window that is off the screen may not be given any.
-      while (performance.now() < until && !(ready() && document.querySelector(BUBBLE_AT_REST))) await pause(30);
-      const box = document.querySelector<HTMLElement>(BUBBLE_AT_REST)?.getBoundingClientRect();
-      await bridge.comeBack(DIP_IN_MS, box?.width ?? 0, box ? Math.ceil(box.height) : 0);
-    } catch {
-      // The native side brings it back by itself.
-    } finally {
-      away = false;
-    }
-  })();
 }
 
 export async function setMiniPlayerOnTop(onTop: boolean): Promise<void> {
@@ -339,7 +229,7 @@ export async function syncMiniPlayer(): Promise<void> {
   useMiniPlayer.setState({ onTop: state.onTop });
   if (!state.active || switching || useMiniPlayer.getState().phase !== "off") return;
   if (state.fullWidth && state.fullHeight) {
-    whole = { width: state.fullWidth, height: state.fullHeight, edge: BUBBLE_EDGE };
+    whole = { width: state.fullWidth, height: state.fullHeight };
     keepLayout(whole);
   }
   useWindowTaken.getState().take(MINI_PLAYER, () => { void expandFromMiniPlayer(); });
