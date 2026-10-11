@@ -47,14 +47,13 @@ pub fn chromium_based(
 
     #[cfg(feature = "appbound")]
     {
-        let keys = if !appbound_key.is_empty() {
-            if !privilege::user::privileged() {
-                bail!("Chrome cookies from version v130 can be decrypted only when running as admin due to appbound encryption!")
-            }
-            crate::windows::appbound::get_keys(appbound_key)?
-        } else {
-            get_keys(legacy_key)?
-        };
+        // A profile can contain both legacy and application-bound cookies. The
+        // presence of an APPB key alone does not say how the requested site is
+        // encrypted. Try the user's ordinary DPAPI key without elevating.
+        let mut keys = get_keys(legacy_key)?;
+        if !appbound_key.is_empty() && privilege::user::privileged() {
+            keys.extend(crate::windows::appbound::get_keys(appbound_key)?);
+        }
         query_cookies(keys, db_path, domains)
     }
 
@@ -90,6 +89,9 @@ fn create_pbkdf2_key(password: &str, salt: &[u8; 9], iterations: u32) -> Vec<u8>
 #[cfg(target_os = "windows")]
 fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
     let mut keydpapi: Vec<u8> = general_purpose::STANDARD.decode(key64)?;
+    if !keydpapi.starts_with(b"DPAPI") {
+        bail!("Browser legacy key has an unsupported format")
+    }
     let keydpapi = &mut keydpapi[5..];
     let v10_key = crate::windows::dpapi::decrypt(keydpapi)?;
     let keys: Vec<Vec<u8>> = vec![v10_key];
@@ -159,6 +161,9 @@ fn decrypt_encrypted_value(
     encrypted_value: &[u8],
     keys: Vec<Vec<u8>>,
 ) -> Result<String> {
+    if encrypted_value.len() < 3 {
+        bail!("Browser cookie ciphertext is truncated")
+    }
     let key_type = &encrypted_value[..3];
     if !value.is_empty() || !(key_type == b"v11" || key_type == b"v10" || key_type == b"v20") {
         // unknown key_type or value isn't encrypted
@@ -167,6 +172,9 @@ fn decrypt_encrypted_value(
     }
     log::debug!("key type: {:?}", key_type);
 
+    if encrypted_value.len() < 3 + 12 + 16 {
+        bail!("Browser cookie ciphertext is truncated")
+    }
     let encrypted_value = &encrypted_value[3..];
     let nonce = &encrypted_value[..12]; // iv
     let ciphertext = &encrypted_value[12..];
@@ -181,8 +189,10 @@ fn decrypt_encrypted_value(
             Ok(plaintext) => {
                 // Successfully decrypted, try to convert to string
                 let plaintext = if key_type == b"v20" {
-                    String::from_utf8(plaintext[32..].to_vec())
-                        .context("Can't decode encrypted value")
+                    let payload = plaintext
+                        .get(32..)
+                        .context("Browser cookie payload is truncated")?;
+                    String::from_utf8(payload.to_vec()).context("Can't decode encrypted value")
                 } else {
                     String::from_utf8(plaintext).context("Can't decode encrypted value")
                 };
@@ -199,7 +209,10 @@ fn decrypt_encrypted_value(
             }
         }
     }
-    bail!("decrypt_encrypted_value failed")
+    if key_type == b"v20" {
+        bail!("Browser application-bound encryption prevented reading this session")
+    }
+    bail!("Browser session decryption failed")
 }
 
 /// Decrypt cookie value using aes cbc
@@ -279,12 +292,10 @@ fn unlock_file(mut path: PathBuf) -> Result<PathBuf> {
         }
     }
 
-    // Elegantly restart the process which lock the cookies file (And unlock it) using restart manager API
+    // Never force-close the user's browser to read its session. Let SQLite
+    // report a locked/inaccessible database if a snapshot was unavailable.
     if !shadow_copy_success {
-        log::warn!("Unlocking Chrome database... This may take a while (sometimes up to a minute)");
-        unsafe {
-            crate::windows::restart_manager::release_file_lock(path.to_str().unwrap());
-        }
+        log::debug!("Reading browser database without a shadow copy");
     }
     Ok(path)
 }
