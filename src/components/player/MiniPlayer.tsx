@@ -1,8 +1,14 @@
 import { useEffect } from "react";
 import { Maximize2, Minimize2, Pin, PinOff } from "lucide-react";
+import { lyricLineAt } from "../../lib/miniPlayerLyric";
+import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
+import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
+import { useLyricsStore } from "../../stores/lyricsStore";
+import { updateTask, useTaskBubbles } from "../tasks/taskBubbleStore";
 import {
   MINI_PLAYER_BUBBLE,
   collapseToMiniPlayer,
+  dipMiniPlayer,
   expandFromMiniPlayer,
   fitMiniPlayer,
   miniPlayerOffered,
@@ -27,8 +33,7 @@ export function MiniPlayerKeys() {
   const phase = useMiniPlayer(state => state.phase);
   const onTop = useMiniPlayer(state => state.onTop);
   if (!miniPlayerOffered()) return null;
-  // The bubble that fills the window has the mini player's keys from the moment it comes up.
-  if (phase === "off" || phase === "readying") {
+  if (phase !== "on") {
     return <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini"
       aria-label="收成迷你播放器" title="收成迷你播放器" disabled={phase !== "off"}
       onClick={() => { void collapseToMiniPlayer(); }}>
@@ -38,25 +43,65 @@ export function MiniPlayerKeys() {
   const floats = onTop ? "置顶：开。点一下不再浮在其他窗口上面" : "置顶：关。点一下浮在其他窗口上面";
   return <>
     <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini-top"
-      aria-label={onTop ? "取消置顶" : "置顶"} title={floats} aria-pressed={onTop} disabled={phase !== "on"}
+      aria-label={onTop ? "取消置顶" : "置顶"} title={floats} aria-pressed={onTop}
       onClick={() => { void setMiniPlayerOnTop(!onTop); }}>
       {onTop ? <Pin size={14} aria-hidden="true" /> : <PinOff size={14} aria-hidden="true" />}
     </button>
     <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini"
-      aria-label="展开窗口" title="展开窗口" disabled={phase !== "on"} onClick={() => { void expandFromMiniPlayer(); }}>
+      aria-label="展开窗口" title="展开窗口" onClick={() => { void expandFromMiniPlayer(); }}>
       <Maximize2 size={14} aria-hidden="true" />
     </button>
   </>;
 }
 
 /**
+ * The line under the title is the lyric that is being sung, while the song has lyrics and the
+ * window is the mini player; otherwise it is the artist, as in the whole window. The bubble's
+ * own description is written by NowPlayingTask; this only keeps that one line current, and
+ * hands it back when the mini player ends.
+ */
+function useMiniPlayerLyric(on: boolean): void {
+  useEffect(() => {
+    if (!on) return;
+    let cached: number | null = null;
+    const playing = () => useTaskBubbles.getState().entries.find(entry => entry.spec.kind === "playing" && !entry.leaving);
+    const write = (line: string) => {
+      const entry = playing();
+      const track = getPlayingTrack();
+      if (!entry || !track || entry.spec.song !== track.id) return;
+      const detail = line || track.artist || undefined;
+      if (entry.spec.detail !== detail) updateTask(entry.spec.id, { detail });
+    };
+    const update = () => {
+      const track = getPlayingTrack();
+      if (!track) return;
+      if (cached !== track.id) {
+        cached = track.id;
+        // Lyrics that are already kept for the song; looking them up online stays the lyrics' own.
+        void useLyricsStore.getState().ensure(track, { cacheOnly: true });
+      }
+      const session = getPlayerSession();
+      write(session.trackId === track.id ? lyricLineAt(useLyricsStore.getState().get(track.id).lines, session.position) : "");
+    };
+    const stops = [subscribePlayerSession(update), subscribePlayingTrack(update), useLyricsStore.subscribe(update), useTaskBubbles.subscribe(update)];
+    update();
+    return () => {
+      for (const stop of stops) stop();
+      write("");
+    };
+  }, [on]);
+}
+
+/**
  * What the mini player needs of the page while it lasts: the bubble is the window's handle,
- * the window keeps the bubble's height, Esc does not roll the only thing on screen away, and
- * a window left without a song to show is given back.
+ * the window keeps the bubble's height, Esc does not roll the only thing on screen away,
+ * another song takes the window off the screen and back, and a window left without a song to
+ * show is given back.
  */
 export function MiniPlayerHost() {
   const on = useMiniPlayer(state => state.phase === "on");
   useEffect(() => { void syncMiniPlayer(); }, []);
+  useMiniPlayerLyric(on);
   useEffect(() => {
     if (!on) return;
     const drag = (event: PointerEvent) => {
@@ -75,9 +120,18 @@ export function MiniPlayerHost() {
       missingSince ||= performance.now();
       if (performance.now() - missingSince > MISSING_MS) void expandFromMiniPlayer();
     }, FIT_EVERY_MS);
+    // The bubble starts to let the old song go (TaskBubbleHost.tsx): the window leaves with it.
+    let letting = false;
+    const swap = new MutationObserver(() => {
+      const out = document.querySelector(MINI_PLAYER_BUBBLE)?.getAttribute("data-phase") === "out";
+      if (out && !letting) dipMiniPlayer();
+      letting = out;
+    });
+    swap.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["data-phase"] });
     document.addEventListener("pointerdown", drag);
     window.addEventListener("keydown", key, true);
     return () => {
+      swap.disconnect();
       window.clearInterval(fit);
       document.removeEventListener("pointerdown", drag);
       window.removeEventListener("keydown", key, true);

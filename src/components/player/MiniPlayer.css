@@ -2,117 +2,79 @@
    bubble. The phase is on the document element; each rule below is for one or more of them.
 
    readying   the bar leaves, the bubble becomes the transport; the page stays as it is
-   shrinking  the window comes down: the page is drawn to fit it, the bubble comes up over it
+   flying     the bubble flies to its place in front of the page (miniPlayer.ts moves it)
    on         the window is the bubble
-   growing    the window grows back: the bubble goes, the page under it grows with the window
+   landing    the whole window is back, and the bubble flies into its corner of it
 
-   What changes with the window's size (how small the page is drawn, how large and how solid
-   the bubble) is written on the elements by miniPlayer.ts, once per frame. */
+   Nothing here animates: the window is the whole window or the bubble, and the one thing that
+   moves is the bubble's flight. */
 
-/* —— The page is on show while the window changes size ——
+/* —— The page is on show whenever the window is the whole window ——
    Having the window (lib/windowTaken.ts) hides the page for an app that covers it; the mini
-   player covers nothing until the bubble is the window. */
-:root:is([data-kd-mini="readying"], [data-kd-mini="shrinking"], [data-kd-mini="growing"]) .kd-app[data-taken-by] .kd-stage {
+   player covers nothing. */
+:root:is([data-kd-mini="readying"], [data-kd-mini="flying"], [data-kd-mini="landing"]) .kd-app[data-taken-by] .kd-stage {
   opacity: 1;
   visibility: visible;
   transition: none;
 }
+/* The bubble flies from and to its own corner of the window: the stack stands on the window's
+   bottom from the start of the flight, not on a bar that is on its way out. */
+:root:is([data-kd-mini="flying"], [data-kd-mini="landing"]) .kd-task-host[data-place="bottom"] {
+  bottom: 0;
+  animation: none;
+}
+:root:is([data-kd-mini="flying"], [data-kd-mini="landing"]) .kd-task-host[data-place="bottom"] > .kd-task-slot {
+  transition: none;
+  will-change: transform;
+}
 
-/* —— The page keeps the whole window's layout ——
-   From the moment the window starts to change until it is whole again, the page is as large
-   as the whole window was (--kd-mini-w, --kd-mini-h): nothing in it is laid out again for any
-   size on the way, and it has its scroll positions when it is back. */
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]) .kd-app {
+/* —— The window is the bubble ——
+   The page keeps the whole window's layout (--kd-mini-w, --kd-mini-h) and is not drawn: it is
+   never laid out for the bubble's size, and it is there, at its scroll positions, the moment
+   the window is whole again. */
+:root[data-kd-mini="on"] .kd-app {
   width: var(--kd-mini-w, 100%);
   height: var(--kd-mini-h, 100%);
-}
-/* The body starts at the window's top-left corner and is drawn smaller from there. Transform
-   only: however heavy the page is, fitting it to the window is the compositor's work. */
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="growing"]) .kd-body {
-  transform-origin: 0 0;
-  will-change: transform;
 }
 :root[data-kd-mini="on"] .kd-app > :not(.kd-task-host[data-place="bottom"]) {
   visibility: hidden;
 }
-/* What lies over the page by the window's own edges (the bar on its way out, a floating
-   picture, an editor, a message at the top) cannot be drawn smaller with it, and goes. */
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]) .kd-app > :not(.kd-body):not(.kd-task-host[data-place="bottom"]) {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms linear;
-}
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]) .kd-player[data-bar] {
+:root[data-kd-mini="on"] .kd-player[data-bar] {
   right: auto;
   width: var(--kd-mini-w, 100%);
 }
-
-/* —— The bubble fills the window ——
-   Laid out as wide as it is in the whole window (--kd-mini-bw), from the window's top-left
-   corner, and drawn as large as fills the window's width (--kd-mini-bs): several times its
-   size and clear at first, its own size and solid when the window is its size. No gap, no
-   lift, no corner or shadow of its own: the window has those. Other messages wait in the
-   whole window. */
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]) .kd-task-host[data-place="bottom"] {
+/* No gap, no lift, no corner or shadow of its own: the window has those. Other messages wait
+   in the whole window. */
+:root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] {
   --kd-task-gap: 0px;
   bottom: 0;
   animation: none;
 }
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]) .kd-task-host[data-place="bottom"] > .kd-task-slot {
+:root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] > .kd-task-slot {
   top: 0;
   right: auto;
   bottom: auto;
   left: 0;
-  width: var(--kd-mini-bw, 100%);
-  transform-origin: 0 0;
-  transform: scale(var(--kd-mini-bs, 1));
-  opacity: var(--kd-mini-o, 1);
-  transition: none;
-  will-change: transform, opacity;
-}
-:root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] > .kd-task-slot {
   width: 100%;
   transform: none;
-  opacity: 1;
-  will-change: auto;
+  transition: none;
 }
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]) .kd-task-host[data-place="bottom"] > .kd-task-slot:has(> .kd-task:not([data-kind="playing"])) {
+:root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] > .kd-task-slot:has(> .kd-task:not([data-kind="playing"])) {
   display: none;
 }
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]) .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] {
+/* Another song: in the whole window the bubble rolls down behind the bar and rises again. The
+   mini player has no bar to go behind; its window leaves the screen instead (dipMiniPlayer),
+   and the bubble in it stays put. */
+:root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] {
   border-radius: 0;
   box-shadow: none;
+  animation: none;
 }
 /* The macOS window rounds its own corners; a square line would be cut by them. */
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]):has(.kd-app[data-mac="true"]) .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] {
+:root[data-kd-mini="on"]:has(.kd-app[data-mac="true"]) .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] {
   border-color: transparent;
 }
 /* Its keys are the mini player's own two: the others open things the whole window shows. */
-:root:is([data-kd-mini="shrinking"], [data-kd-mini="on"], [data-kd-mini="growing"]) .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] .kd-task-action:not(.kd-mini-key) {
+:root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] .kd-task-action:not(.kd-mini-key) {
   display: none;
-}
-
-/* —— The bubble's copy in the page ——
-   While the bubble fills the window, a copy of it stands in the page where the bubble is in
-   the whole window, and is drawn smaller with the page (miniPlayer.ts). It is a still. */
-.kd-mini-ghost {
-  position: absolute;
-  z-index: 0;
-  top: 0;
-  left: 0;
-  width: var(--kd-mini-w, 100%);
-  height: var(--kd-mini-h, 100%);
-  transform-origin: 0 0;
-  pointer-events: none;
-}
-.kd-mini-ghost,
-.kd-mini-ghost * {
-  animation: none !important;
-  transition: none !important;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  :root[data-kd-mini] .kd-app > :not(.kd-body):not(.kd-task-host[data-place="bottom"]) {
-    transition: none;
-  }
 }
