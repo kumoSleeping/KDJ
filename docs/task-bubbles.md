@@ -104,7 +104,7 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   keep their ordinary muted ink and stroke in either state; their labels and `aria-pressed`
   still describe the state. Its lyrics key also opens the panel's height menu by right click or
   the keyboard menu key (`TaskAction.onContextMenu`), without toggling lyrics. Its keys are 歌词, 小窗
-  (the floating video or visualizer, the same toggle as the bar's own key), 歌曲色彩, 编辑 Meta
+  (the floating video or visualizer, the same toggle as the bar's own key), 编辑 Meta
   and 固定. Each button carries its action's id as `data-task-action`.
 - **A backdrop.** `backdrop` is a layer of the task's own under everything the bubble holds. The
   host draws it in the bubble's backdrop slot (`src/components/common/SurfaceBackdrop.tsx`): the
@@ -116,10 +116,14 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   `SurfaceBackdrop.css` maps them to `--kd-text`, `--kd-text-body`, `--kd-muted`, `--kd-faint`
   and `--kd-theme` for that bubble only. Nothing is ever written on the document for it. The
   one such layer is the playing song's 歌曲色彩 (below); a bubble is otherwise the list's colour.
-- **歌曲色彩.** A look that is off until its key on the playing song's bubble switches it on
-  (remembered in `kd-song-color`): the lyrics panel and that bubble — those two surfaces and
-  nothing else — get a deep field of colour taken from the song's cover, with light ink on it
-  in the light theme and the dark one alike. `src/lib/songColorPalette.ts` makes the field from
+- **歌曲色彩.** The palette key at the main window's top right is its one entry (remembered
+  in `kd-song-color`); neither player bar repeats it. The lyrics panel and playing-song bubble
+  carry the cover's hues: pale colour with dark ink in the light theme, a deep field with light
+  ink in the dark theme.
+  Only the backdrop layers animate: never capture or crossfade the whole page, its text or
+  its floating messages. Each bubble keeps its opaque theme background underneath the colour
+  layers, including while the colour is loading, changing songs or switching off.
+  `src/lib/songColorPalette.ts` makes the field from
   the colours `extractStudioPalette` finds (four masses, a floor and a glow, each brought into a
   band of lightness that keeps the ink's contrast floor; a cover in greys stays grey; without a
   cover that can be read it is a calm slate). `SongColorBackdrop.tsx` draws it: the masses are small bitmaps painted once per song
@@ -132,8 +136,8 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   hidden; under reduced motion the field is still. Switched on, the colour spreads from the
   key as one circle over both surfaces (`clip-path`, measured once); switched off, it drains
   back into the key, quicker; another song's colours fade in over the last on the song-change
-  clock. While it is off nothing of it is in the document, no cover is fetched and nothing
-  listens to the player. Under a theme pack the look is not offered: the pack draws the two
+  clock. Both backdrops share one cover extraction session. While it is off no cover is fetched
+  for this look and nothing of it listens to the player. Under a theme pack the look is not offered: the pack draws the two
   surfaces its own way, so the key and the layer are left out and the choice is kept.
 - **The caption bar (Sakura98).** In the Sakura98 pack a bubble is a small 98 window: the tools
   row (the ring, the actions, the key that rolls it down) is laid across its top as the window's caption bar,
@@ -227,7 +231,7 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 
 | Task | Bubble | Place | Where |
 | --- | --- | --- | --- |
-| A song starts (not pause/resume) | `now-playing`: cover, title, artist, the source's mark, BPM · key · length · format; 歌词, 小窗, 歌曲色彩, 编辑 Meta, 固定; the mini transport while the bar is away; the song's colours as its backdrop while 歌曲色彩 is on | bottom, the base | `NowPlayingTask.tsx` |
+| A song starts (not pause/resume) | `now-playing`: cover, title, artist, the source's mark, BPM · key · length · format; 歌词, 小窗, 编辑 Meta, 固定; the mini transport while the bar is away; the song's colours as its backdrop while 歌曲色彩 is on | bottom, the base | `NowPlayingTask.tsx` |
 | Downloads started / progress / ended / failed | `downloads`: one bubble per run | bottom | source `downloads` |
 | Exports added / started / ended / failed (mixing and visualizer) | `exports` | bottom | source `exports` |
 | A folder import ended or failed | `import` | bottom | source `imports` |

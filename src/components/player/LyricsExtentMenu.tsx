@@ -27,7 +27,7 @@ export function useLyricsExtentMenu(identity?: string | number | null) {
   const shape = useLyricsExtentShape();
   const choices = lyricsExtentChoices(shape);
   const shown = shownLyricsExtent(stored, shape);
-  const [at, setAt] = useState<{ x: number; y: number; anchorTop?: number; anchorElement?: HTMLElement } | null>(null);
+  const [at, setAt] = useState<{ x: number; y: number; anchorTop?: number; anchorElement?: HTMLElement; input: "pointer" | "keyboard" } | null>(null);
   const press = useRef<{ timer: number; x: number; y: number } | null>(null);
   /** The click that ends a long press is not a click on the line under the finger. */
   const swallowClick = useRef(0);
@@ -38,10 +38,10 @@ export function useLyricsExtentMenu(identity?: string | number | null) {
   useEffect(() => cancelPress, []);
   useEffect(() => { setAt(null); cancelPress(); }, [identity]);
   const offered = choices.length > 1;
-  const openFrom = useCallback((anchor: HTMLElement) => {
+  const openFrom = useCallback((anchor: HTMLElement, input: "pointer" | "keyboard" = "pointer") => {
     anchor.focus({ preventScroll: true });
     const box = anchor.getBoundingClientRect();
-    setAt({ x: box.left, y: box.bottom + 4, anchorTop: box.top, anchorElement: anchor });
+    setAt({ x: box.left, y: box.bottom + 4, anchorTop: box.top, anchorElement: anchor, input });
   }, []);
   // Events of a menu drawn elsewhere (the source picker's) reach here through React's tree.
   const inside = (event: { currentTarget: HTMLElement; target: EventTarget }) =>
@@ -54,7 +54,8 @@ export function useLyricsExtentMenu(identity?: string | number | null) {
         // From the keyboard there is no pointer: the menu hangs from the panel's middle.
         const box = event.currentTarget.getBoundingClientRect();
         const keyed = event.clientX === 0 && event.clientY === 0;
-        setAt(keyed ? { x: box.left + box.width / 2, y: box.top + box.height / 2 } : { x: event.clientX, y: event.clientY });
+        setAt(keyed ? { x: box.left + box.width / 2, y: box.top + box.height / 2, input: "keyboard" }
+          : { x: event.clientX, y: event.clientY, input: "pointer" });
       },
       // A right click asks for the menu; it does not move the focus to the line under it. Nor
       // does the mouse press a browser makes up when the finger of a long press lifts: the
@@ -72,7 +73,7 @@ export function useLyricsExtentMenu(identity?: string | number | null) {
           timer: window.setTimeout(() => {
             press.current = null;
             swallowClick.current = performance.now() + 700;
-            setAt({ x, y });
+            setAt({ x, y, input: "pointer" });
           }, LONG_PRESS_MS),
         };
       },
@@ -101,12 +102,12 @@ export function useLyricsExtentMenu(identity?: string | number | null) {
       onContextMenu: offered ? (event: MouseEvent<HTMLElement>) => {
         event.preventDefault();
         cancelPress();
-        openFrom(event.currentTarget);
+        openFrom(event.currentTarget, event.clientX === 0 && event.clientY === 0 ? "keyboard" : "pointer");
       } : undefined,
       onKeyDown: offered ? (event: KeyboardEvent<HTMLElement>) => {
         if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
         event.preventDefault();
-        openFrom(event.currentTarget);
+        openFrom(event.currentTarget, "keyboard");
       } : undefined,
     },
     menu: at && offered ? <ContextMenu {...at} label="歌词高度" onClose={() => setAt(null)}>

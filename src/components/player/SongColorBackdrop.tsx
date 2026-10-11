@@ -3,7 +3,7 @@ import { getLatestPlayerSync, MEDIA_SYNC_EVENT, type MediaSyncDetail } from "../
 import { MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import { getPlayerSession } from "../../lib/playerSession";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
-import { getSongColorField, subscribeSongColorField, useSongColor, type SongColorField } from "../../lib/songColor";
+import { getSongColorField, subscribeSongColorField, useSongColor, useSongColorAvailable, type SongColorField } from "../../lib/songColor";
 import {
   beatCorrection,
   beatCycleIndex,
@@ -18,7 +18,7 @@ import {
 } from "../../lib/songColorBeat";
 import { GLOW_PEAK_ALPHA, lightSongColorPalette, parseHex } from "../../lib/songColorPalette";
 import { SONG_SWAP_IN_MS } from "../../lib/songSwapMotion";
-import { THEME_CHANGE_EVENT, useThemePack } from "../../lib/themePack";
+import { THEME_CHANGE_EVENT } from "../../lib/themePack";
 import { cachedReleaseOverviewWaveform } from "../../lib/waveformCache";
 import { useBackdropInk } from "../common/SurfaceBackdrop";
 import "./SongColorBackdrop.css";
@@ -41,16 +41,17 @@ import "./SongColorBackdrop.css";
  * so the look is not offered under one: `useSongColorAvailable`.
  */
 
-/** The look is offered: no theme pack is drawing the surfaces. */
-export function useSongColorAvailable(): boolean {
-  return useThemePack(state => state.active === null);
-}
-
 function subscribeTheme(listener: () => void): () => void {
   window.addEventListener(THEME_CHANGE_EVENT, listener);
   return () => window.removeEventListener(THEME_CHANGE_EVENT, listener);
 }
 const isLightTheme = () => document.documentElement.dataset.theme === "light";
+
+function subscribeReducedMotion(listener: () => void): () => void {
+  const query = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+  query?.addEventListener?.("change", listener);
+  return () => query?.removeEventListener?.("change", listener);
+}
 
 /** One side of a mass's bitmap, in px. The blobs have no detail to lose. */
 const BITMAP = 96;
@@ -164,7 +165,7 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
   const level = useRef<HTMLDivElement>(null);
   const glow = useRef<HTMLDivElement>(null);
   const setInk = useBackdropInk();
-  const reduced = prefersReducedMotion();
+  const reduced = useSyncExternalStore(subscribeReducedMotion, prefersReducedMotion);
   const [mountedAt] = useState(() => performance.now());
 
   // The colours of the playing song. Subscribed before the first paint, so a song whose colours
@@ -216,7 +217,7 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
     if (!node || !current || leaving) return;
     if (arrived.current) {
       // Back from a drain that was cut short, or another song's colours.
-      if (node.dataset.wash === "out" || node.dataset.wash === "fade-out") node.removeAttribute("data-wash");
+      if (reduced || node.dataset.wash === "out" || node.dataset.wash === "fade-out") node.removeAttribute("data-wash");
       window.clearTimeout(inkTimer.current);
       setInk(inkRef.current);
       return;
@@ -242,7 +243,7 @@ function SongColorLayer({ surface, leaving, onGone }: { surface: "bubble" | "lyr
     return () => { cancelled = true; };
     // The palette is read through the ref: another field, theme, or return from leaving is news.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.key, light, leaving]);
+  }, [current?.key, light, leaving, reduced]);
   useEffect(() => () => window.clearTimeout(inkTimer.current), []);
 
   // Leaving: the colour drains back into the key, quicker than it came, and the layer is taken
