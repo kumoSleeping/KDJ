@@ -20,10 +20,10 @@ frame and its motion). macOS and Windows run the same steps through the same win
   windows and is on every desktop unless 置顶 is switched off (remembered). Its height follows
   the bubble's.
 - **Another song.** The mini player stays where it is. Once the next cover is prepared, the
-  cover and song text turn over with the motion schema’s existing `turn` gesture (as in the
-  work rail and search text); its surface, window keys and live transport stay put. It never
-  sends the window off screen and back. In the whole window the bubble keeps its usual roll
-  down and rise.
+  cover, the song's text and the seek line cross-fade in place (the `turn` gesture's times,
+  none of its travel: a half-rem lift reads as the strip being bumped); its surface, window
+  keys and transport keys stay put. It never sends the window off screen and back. In the
+  whole window the bubble keeps its usual roll down and rise.
 - **Its keys.** 置顶 and 展开窗口 stand in a column at the right edge, as tall as the cover and
   level with its top and bottom edges (MiniPlayer.css); the title has the whole width between
   the cover and them. In the whole window the same two keys are in the bubble's tool row.
