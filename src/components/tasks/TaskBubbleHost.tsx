@@ -274,6 +274,7 @@ function TaskBubble({ entry, lift, away, front, held, onHeld, onSize }: {
             aria-busy={action.busy || undefined} onClick={() => { if (node.current) action.onSelect(node.current); }}>
             {action.busy ? <LoaderCircle size={14} className="kd-spin" aria-hidden="true" /> : action.icon}
           </button>)}
+          {spec.tools}
           {expandable && <button type="button" className="kd-task-action" aria-expanded={expanded}
             aria-label={expanded ? "收起详情" : "展开详情"} title={expanded ? "收起详情" : "展开详情"}
             onClick={() => setExpanded(!expanded)}>

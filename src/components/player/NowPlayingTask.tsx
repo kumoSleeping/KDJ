@@ -28,8 +28,10 @@ import { SongColorBackdrop, useSongColorAvailable } from "./SongColorBackdrop";
 import { useLyricsEntry } from "./lyricsEntry";
 import { useLyricsExtentMenu } from "./LyricsExtentMenu";
 import "./NowPlayingTask.css";
+import { MiniPlayerKeys } from "./MiniPlayer";
 
 export const NOW_PLAYING_TASK = "now-playing";
+const MINI_PLAYER_KEYS = <MiniPlayerKeys />;
 
 /**
  * 曲目信息 as a task bubble: the song that is playing, where it comes from, and the entries
@@ -141,6 +143,8 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
       base: true,
       stay: held || extent.opened ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,
+      // The window itself can be taken down to this bubble, and brought back from it.
+      tools: MINI_PLAYER_KEYS,
       // Rolling it down with the bar away is the way back to the bar, and the key says so.
       dismiss: barAway ? { label: "展开播放条", icon: <PanelBottomOpen size={14} aria-hidden="true" /> } : undefined,
       // The transport only while the bar is away: beside the bar the bubble is a message.

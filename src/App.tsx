@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
 import { Button, EmptyState } from "./components/common";
 import { TaskBubbleHost } from "./components/tasks/TaskBubbleHost";
+import { MiniPlayerHost } from "./components/player/MiniPlayer";
 import { Workspace } from "./components/workspace/Workspace";
 import { PlayerBar } from "./components/player/PlayerBar";
 import { VideoPipHost } from "./components/player/VideoPipHost";
@@ -149,6 +150,7 @@ export default function App() {
       </div>
 
       <TaskBubbleHost sources={APP_TASK_SOURCES} />
+      <MiniPlayerHost />
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
       {ready && (
         <>

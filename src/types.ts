@@ -1003,6 +1003,25 @@ export interface CliInstallStatus {
   invocation: string;
 }
 
+/**
+ * 迷你播放器的窗口一侧（src-tauri/src/mini_player.rs）。页面决定画什么和步骤的先后，
+ * 这里只动窗口的位置和大小。`animated: false` 时每一步一次到位。
+ */
+export interface MiniPlayerBridge {
+  state(): Promise<{ active: boolean; onTop: boolean }>;
+  /** 窗口原地收到 `rect`：气泡在视口里的位置，CSS 像素。 */
+  collapse(rect: { x: number; y: number; width: number; height: number }, animated: boolean): Promise<{ active: boolean; onTop: boolean }>;
+  /** 移到上次放下它的地方。 */
+  settle(animated: boolean): Promise<void>;
+  /** 记下现在的位置，回到完整窗口里气泡所在的角上。 */
+  recall(animated: boolean): Promise<void>;
+  /** 长回完整窗口。 */
+  expand(animated: boolean): Promise<{ active: boolean; onTop: boolean }>;
+  /** 气泡换了大小，窗口立刻跟上。CSS 像素。 */
+  fit(width: number, height: number): Promise<void>;
+  setOnTop(onTop: boolean): Promise<{ active: boolean; onTop: boolean }>;
+}
+
 export interface KdjBridge {
   baseUrl: string;
   /** 每次进程启动重新生成；只用于认证本机 HTTP/WS，不得写入日志或持久化到前端。 */
@@ -1158,6 +1177,8 @@ export interface KdjBridge {
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
+  /** 主窗口收成迷你播放器再放回来（src/lib/miniPlayer.ts）。只有桌面壳的主窗口有。 */
+  miniPlayer?: MiniPlayerBridge;
   /** 同步原生窗口底色，避免 macOS 拖窗时露出与页面主题不符的底层。 */
   /** "dark" / "light"，或主题包给的 #rrggbb。 */
   setWindowBackground: (theme: string) => void;

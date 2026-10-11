@@ -120,6 +120,12 @@ export interface TaskBubbleSpec {
    */
   controls?: ReactNode;
   /**
+   * Keys of the task's own in the tool row, after its `actions` and before the key that rolls
+   * the bubble down. For a key that keeps its own state and so is not rebuilt with the spec
+   * (the playing song's mini player keys). They are `kd-task-action` buttons like the rest.
+   */
+  tools?: ReactNode;
+  /**
    * A layer of the task's own under everything the bubble holds: the host draws it in the
    * bubble's backdrop slot (src/components/common/SurfaceBackdrop.tsx), inside the bubble's
    * shape and behind its content, and changes nothing else for it. A layer that changes what

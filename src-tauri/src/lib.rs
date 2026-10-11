@@ -34,6 +34,8 @@ mod desktop_player;
 #[cfg(desktop)]
 mod midi;
 #[cfg(desktop)]
+mod mini_player;
+#[cfg(desktop)]
 mod live_vj;
 #[cfg(desktop)]
 mod kvj_window;
@@ -2247,6 +2249,11 @@ fn capture_main_window_state(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    // As a mini player the window has the bubble's frame; the one to restore is the whole
+    // window's, which stays as it was last captured.
+    if mini_player::active(app) {
+        return;
+    }
     let Some(cache) = app.try_state::<MainWindowStateCache>() else {
         return;
     };
@@ -2938,6 +2945,7 @@ pub fn run() {
         {
             let data_dir = bridge.config.data_dir.clone();
             let state = load_main_window_state(&data_dir);
+            app.manage(mini_player::MiniPlayer::load(&data_dir));
             app.manage(MainWindowStateCache {
                 data_dir,
                 state: Mutex::new(state),
@@ -3067,7 +3075,14 @@ pub fn run() {
         bilibili_embed::bilibili_embed_set_bounds,
         bilibili_embed::bilibili_embed_status,
         bilibili_embed::bilibili_embed_control,
-        bilibili_embed::bilibili_embed_close
+        bilibili_embed::bilibili_embed_close,
+        mini_player::mini_player_state,
+        mini_player::mini_player_collapse,
+        mini_player::mini_player_settle,
+        mini_player::mini_player_recall,
+        mini_player::mini_player_expand,
+        mini_player::mini_player_fit,
+        mini_player::mini_player_set_on_top
     ]);
     #[cfg(all(mobile, target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![

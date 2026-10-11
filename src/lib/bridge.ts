@@ -285,6 +285,15 @@ async function createTauriBridge(): Promise<KdjBridge> {
     setWindowBackground: (theme) => {
       void tauriInvoke("set_window_background", { theme }).catch(() => {});
     },
+    miniPlayer: desktop ? {
+      state: () => tauriInvoke("mini_player_state"),
+      collapse: (rect, animated) => tauriInvoke("mini_player_collapse", { rect, animated }),
+      settle: (animated) => tauriInvoke("mini_player_settle", { animated }),
+      recall: (animated) => tauriInvoke("mini_player_recall", { animated }),
+      expand: (animated) => tauriInvoke("mini_player_expand", { animated }),
+      fit: (width, height) => tauriInvoke("mini_player_fit", { width, height }),
+      setOnTop: (onTop) => tauriInvoke("mini_player_set_on_top", { onTop }),
+    } : undefined,
     desktopLyrics: desktop
       ? // 颜色和不透明度不进 Rust：它们不影响窗口尺寸或层级，歌词窗口那个
         // WebView 自己读 lyricsPrefs（localStorage + lyrics-prefs-changed 广播）。

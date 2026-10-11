@@ -1,0 +1,93 @@
+/* The mini player (src/lib/miniPlayer.ts): the whole window taken down to the playing song's
+   bubble. The phase is on the document element; each rule below is one of them.
+
+   folding    the page folds into the bubble, the bar leaves (the window is taken)
+   flat       nothing but the window's own colour: the native window changes size now
+   on         the bubble fills the window
+   unfolding  the page comes back out of the bubble */
+
+/* —— The page folds to where the bubble is, and unfolds from there ——
+   The body starts at the window's top-left corner, so a point of the viewport is a point of
+   it. Transform and opacity only: the fold runs on the compositor however heavy the page is. */
+:root[data-kd-mini] .kd-body {
+  transform-origin: var(--kd-mini-x, calc(100% - 13rem)) var(--kd-mini-y, calc(100% - 5rem));
+  transition:
+    transform var(--kd-motion-in) var(--kd-ease-out),
+    opacity var(--kd-motion-in) var(--kd-ease-out);
+}
+:root[data-kd-mini="folding"] .kd-body,
+:root[data-kd-mini="flat"] .kd-body,
+:root[data-kd-mini="on"] .kd-body {
+  transform: scale(0.14);
+  opacity: 0;
+  transition:
+    transform var(--kd-motion-out) var(--kd-ease-in),
+    opacity var(--kd-motion-out) var(--kd-ease-out);
+}
+/* Whatever else lies over the page (a floating picture, an editor) goes with it. */
+:root[data-kd-mini] .kd-app > :not(.kd-task-host):not(.kd-body):not(.kd-player) {
+  transition: opacity var(--kd-motion-out) var(--kd-ease-out);
+}
+:root[data-kd-mini="folding"] .kd-app > :not(.kd-task-host):not(.kd-body):not(.kd-player) {
+  opacity: 0;
+}
+
+/* —— Flat, and as the mini player: only the bubble is drawn ——
+   The page is not laid out again for every size the window passes through on its way, and
+   has its scroll positions when it is back. */
+:root[data-kd-mini="flat"] .kd-app > :not(.kd-task-host),
+:root[data-kd-mini="on"] .kd-app > :not(.kd-task-host) {
+  visibility: hidden;
+}
+:root[data-kd-mini="flat"] .kd-stage,
+:root[data-kd-mini="on"] .kd-stage {
+  content-visibility: hidden;
+}
+:root[data-kd-mini="flat"] .kd-task-host,
+:root[data-kd-mini="on"] .kd-task-host[data-place="top"] {
+  opacity: 0;
+  pointer-events: none;
+}
+:root[data-kd-mini] .kd-task-host { transition: opacity 110ms linear; }
+:root[data-kd-mini="flat"] .kd-task-host * { pointer-events: none; }
+
+/* —— The bubble is the window ——
+   No gap, no lift, no corner or shadow of its own: the window has those. Other messages wait
+   in the whole window. */
+:root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] {
+  --kd-task-gap: 0px;
+  bottom: 0;
+}
+:root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] .kd-task-slot {
+  width: 100%;
+  transform: none;
+  transition: none;
+}
+:root[data-kd-mini="on"] .kd-task-slot:has(> .kd-task:not([data-kind="playing"])) {
+  display: none;
+}
+:root[data-kd-mini="on"] .kd-task[data-kind="playing"] {
+  border-radius: 0;
+  box-shadow: none;
+}
+/* The macOS window rounds its own corners; a square line would be cut by them. */
+:root[data-kd-mini="on"]:has(.kd-app[data-mac="true"]) .kd-task[data-kind="playing"] {
+  border-color: transparent;
+}
+/* Its keys are the mini player's own two: the others open things the whole window shows. */
+:root[data-kd-mini="on"] .kd-task[data-kind="playing"] .kd-task-action:not(.kd-mini-key) {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-kd-mini] .kd-body,
+  :root[data-kd-mini] .kd-app > :not(.kd-task-host):not(.kd-body):not(.kd-player),
+  :root[data-kd-mini] .kd-task-host {
+    transition: none;
+  }
+  :root[data-kd-mini="folding"] .kd-body,
+  :root[data-kd-mini="flat"] .kd-body,
+  :root[data-kd-mini="on"] .kd-body {
+    transform: none;
+  }
+}
