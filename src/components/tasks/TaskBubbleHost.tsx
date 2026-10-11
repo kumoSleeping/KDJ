@@ -399,6 +399,11 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
     ride.current = { phase: barPhase, on: playerBarMoving(barPhase) && entries.some(entry => entry.place === "bottom" && !entry.leaving) };
   }
   const riding = ride.current.on;
+  // A bar that comes back with nothing to carry finds the bubbles that are still up on their
+  // way down at the window's edge (the playing song's, sent away to bring the bar back). There
+  // is no top edge at rest to clip them at, so for that slide the stack is drawn under the bar
+  // (TaskBubbles.css): they go down behind it, as they do behind its edge while it is up.
+  const underBar = barPhase === "returning" && !riding;
   const [root, setRoot] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => { setRoot(document.querySelector<HTMLElement>(".kd-app")); }, []);
   useLayoutEffect(() => {
@@ -494,6 +499,7 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
     <>
       {bottom.ordered.length > 0 && <div className="kd-task-host" data-place="bottom"
         data-floor={riding && !prefersReducedSeekMotion() ? (barPhase === "leaving" ? "down" : "up") : undefined}
+        data-under-bar={underBar ? "true" : undefined}
         style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px` } as CSSProperties}>
         {bubbles(bottom)}
       </div>}

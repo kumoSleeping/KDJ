@@ -51,6 +51,11 @@
   from { transform: translateY(0); }
   to { transform: translateY(calc(-1 * var(--kd-task-ride, 0px))); }
 }
+/* The bar comes back and nothing rides it: the bubbles that are up are rolling down at the
+   window's edge, where the host has no edge of the bar to clip them at. For that slide the
+   stack lies under the bar (z-index 60 in design.css) and over what the bar is over, so a
+   bubble goes down behind the bar there as well. */
+.kd-task-host[data-under-bar] { z-index: 59; }
 /* A bubble's place in the stack. The base, or else the newest, rests at the stack's edge; each
    one that stays moves the others away from it by its own height (--kd-task-lift, measured by
    the host). */

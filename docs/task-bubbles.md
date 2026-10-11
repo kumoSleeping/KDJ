@@ -161,7 +161,10 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   frame.
 - **The bar put away.** The player bar can slide down out of the window
   (`src/lib/playerBarAway.ts`). The stack then stands on the window's bottom edge; bubbles that
-  are up when the slide starts ride the bar's top edge while it slides.
+  are up when the slide starts ride the bar's top edge while it slides. A bubble that leaves
+  as the bar starts back (the playing song's, sent away to bring the bar back) goes down
+  behind the rising bar, never across its face: with nothing to ride, the bottom stack is
+  drawn under the bar for that slide.
 - **The bar or the playing song's bubble.** The listener always has a transport on screen: the
   bar, the bubble, or both (`src/lib/nowPlayingInfo.ts`).
   - While the bar is away the bubble is up and stays up (`barAway`), from the moment the bar

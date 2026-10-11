@@ -417,6 +417,30 @@ test("the host: a stack at the bottom and one at the top, and a base bubble that
   await act(async () => { dismissTask("m", "user"); });
   assert.deepEqual(reasons, ["user"]);
 
+  // --- The bar comes back. A bubble that is sent away as it starts up goes down behind it:
+  // the stack is drawn under the bar for that slide. One that stays rides the bar's top edge.
+  const bottomHost = () => page.querySelector<HTMLElement>('.kd-task-host[data-place="bottom"]')!;
+  await act(async () => { useTaskBubbles.setState({ entries: [] }); usePlayerBarAway.setState({ phase: "away" }); });
+  await act(async () => { showTask({ id: "song", kind: "song", title: "song", size: "large", base: true, stay: 0 }); });
+  assert.equal(bottomHost().dataset.underBar, undefined, "with the bar away the stack is over the page as ever");
+  await act(async () => { dismissTask("song"); usePlayerBarAway.setState({ phase: "returning" }); });
+  assert.ok(drawn("song", true), "the bubble is rolling down");
+  assert.equal(bottomHost().dataset.underBar, "true", "under the bar that is sliding up");
+  assert.equal(bottomHost().dataset.floor, undefined, "nothing rides the bar");
+  await left();
+  await act(async () => { usePlayerBarAway.setState({ phase: "up" }); });
+  await act(async () => { note("n1"); });
+  assert.equal(bottomHost().dataset.underBar, undefined, "beside the bar the host clips at its top edge instead");
+  await act(async () => { usePlayerBarAway.setState({ phase: "leaving" }); });
+  assert.equal(bottomHost().dataset.floor, "down", "what stands on the bar rides it down");
+  assert.equal(bottomHost().dataset.underBar, undefined);
+  await act(async () => { usePlayerBarAway.setState({ phase: "away" }); });
+  await act(async () => { usePlayerBarAway.setState({ phase: "returning" }); });
+  assert.equal(bottomHost().dataset.floor, "up", "and back up");
+  assert.equal(bottomHost().dataset.underBar, undefined, "a stack that rides the bar is never under it");
+  await act(async () => { usePlayerBarAway.setState({ phase: "up" }); dismissTask("n1"); });
+  await left();
+
   await act(async () => root.unmount());
   assert.equal(rootStyle("--kd-info-drop"), "");
   assert.equal(rootStyle("--kd-info-drop-clock"), "");
