@@ -34,15 +34,16 @@ test("the whole window goes as it is, the page changes out of sight, and the win
   let active = false;
   let failCollapse = false;
   const phaseNow = () => dom.window.document.documentElement.getAttribute("data-kd-mini");
+  /** The size the page keeps its layout at, whatever the window's is. */
+  const kept = () => dom.window.document.body.style.getPropertyValue("--kd-mini-w") || "none";
   const ask = (what: string) => { asked.push(`${what} @${phaseNow() ?? "off"}`); };
   const state = () => ({ active, onTop: true, fullWidth: active ? 1360 : 0, fullHeight: active ? 880 : 0 });
   (dom.window as unknown as { kdj: unknown }).kdj = {
     miniPlayer: {
       state: async () => state(),
-      collapse: async (rect: { x: number; y: number; width: number; height: number; tall: number }, _animated: boolean) => {
-        ask(`collapse ${rect.x},${rect.y} ${rect.width}x${rect.height} tall ${rect.tall}`);
+      collapse: async (rect: { x: number; y: number; width: number; height: number }, _animated: boolean) => {
+        ask(`collapse ${rect.x},${rect.y} ${rect.width}x${rect.height} in ${dom.window.innerWidth}x${dom.window.innerHeight}`);
         if (failCollapse) throw new Error("no");
-        resize(384, rect.tall);
         // As the mini player the bubble has its transport row: taller than on the bar.
         at = { left: 0, top: 0 };
         height = 148;
@@ -58,7 +59,7 @@ test("the whole window goes as it is, the page changes out of sight, and the win
         active = false;
         return state();
       },
-      fit: async (width: number, tall: number) => { ask(`fit ${width}x${tall}`); resize(width, tall); },
+      fit: async (width: number, tall: number) => { ask(`fit ${width}x${tall} kept ${kept()}`); resize(width, tall); },
       setOnTop: async (onTop: boolean) => { ask(`top ${onTop}`); return { active, onTop }; },
     },
   };
@@ -74,17 +75,18 @@ test("the whole window goes as it is, the page changes out of sight, and the win
   await mini.collapseToMiniPlayer();
   assert.equal(lyricsLeft, 1);
   assert.deepEqual(asked, [
-    // The whole window goes with the page as it is: the bubble where it stands on the bar, and
-    // nothing of the mini player on the page yet.
-    "collapse 964,640 384x120 tall 120 @off",
-    // Out of sight the bubble became the transport and is taller than foreseen: the window
-    // takes that height before it is shown.
-    "fit 384x148 @on",
+    // The whole window goes with the page as it is, and keeps its size: the bubble where it
+    // stands on the bar, and nothing of the mini player on the page yet.
+    "collapse 964,640 384x120 in 1360x880 @off",
+    // Out of sight the bubble became the transport. Only now, with the page holding the whole
+    // window's layout, is the window given the bubble's size.
+    "fit 384x148 kept 1360px @on",
     "reveal @on",
   ]);
   assert.equal(mini.useMiniPlayer.getState().phase, "on");
   assert.equal(useWindowTaken.getState().by, mini.MINI_PLAYER, "the page is inert and the bar away while it lasts");
-  assert.equal(dom.window.document.documentElement.style.getPropertyValue("--kd-mini-w"), "1360px", "the page keeps the whole window's layout");
+  assert.equal(kept(), "1360px", "the page keeps the whole window's layout");
+  assert.equal(dom.window.document.body.style.getPropertyValue("--kd-mini-bw"), "384px", "and the bubble its width");
 
   // A second press while it is the mini player does nothing.
   asked.length = 0;
@@ -96,7 +98,7 @@ test("the whole window goes as it is, the page changes out of sight, and the win
   assert.equal(asked.length, 0, "same height: nothing asked");
   height = 176;
   assert.equal(mini.fitMiniPlayer(), true);
-  assert.equal(asked.pop(), "fit 384x176 @on");
+  assert.equal(asked.pop(), "fit 384x176 kept 1360px @on");
   slot.remove();
   assert.equal(mini.fitMiniPlayer(), false);
   host.append(slot);
@@ -116,16 +118,24 @@ test("the whole window goes as it is, the page changes out of sight, and the win
   assert.equal(phaseNow(), null);
   assert.equal(mini.useMiniPlayer.getState().phase, "off");
   assert.equal(useWindowTaken.getState().by, null);
-  assert.equal(dom.window.document.documentElement.style.getPropertyValue("--kd-mini-w"), "");
+  assert.equal(kept(), "none");
 
-  // The second time the window is given the height it had as the mini player at once, and
-  // needs no other.
+  // The page is given the whole window's size back only when the window has it: the stand-in
+  // for the native side makes it whole a little late.
   asked.length = 0;
   await mini.collapseToMiniPlayer();
-  assert.deepEqual(asked, ["collapse 964,640 384x120 tall 148 @off", "reveal @on"]);
+  let keptWhenWhole = "";
+  const late = setTimeout(() => { keptWhenWhole = kept(); resize(1360, 880); }, 30);
+  const expand = (dom.window as unknown as { kdj: { miniPlayer: { expand: () => Promise<unknown> } } }).kdj.miniPlayer;
+  const whole = expand.expand;
+  expand.expand = async () => { ask("expand"); at = { left: 964, top: 640 }; height = 120; active = false; return state(); };
   asked.length = 0;
   await mini.expandFromMiniPlayer();
+  clearTimeout(late);
+  expand.expand = whole;
   assert.deepEqual(asked, ["expand @on", "reveal @off"]);
+  assert.equal(keptWhenWhole, "1360px", "still kept while the window was the bubble's size");
+  assert.equal(kept(), "none");
 
   // The native side refuses: the whole window is there again, nothing is left on the page.
   asked.length = 0;
@@ -135,7 +145,7 @@ test("the whole window goes as it is, the page changes out of sight, and the win
   try { await mini.collapseToMiniPlayer(); } finally { console.warn = warn; }
   assert.equal(asked.length, 1);
   assert.equal(phaseNow(), null);
-  assert.equal(dom.window.document.documentElement.style.getPropertyValue("--kd-mini-w"), "");
+  assert.equal(kept(), "none");
   assert.equal(useWindowTaken.getState().by, null);
 
   // A page loaded again inside a window that is the mini player takes up where the window is,
@@ -146,7 +156,7 @@ test("the whole window goes as it is, the page changes out of sight, and the win
   await mini.syncMiniPlayer();
   assert.equal(phaseNow(), "on");
   assert.equal(useWindowTaken.getState().by, mini.MINI_PLAYER);
-  assert.equal(dom.window.document.documentElement.style.getPropertyValue("--kd-mini-w"), "1360px");
+  assert.equal(kept(), "1360px");
   await mini.expandFromMiniPlayer();
   assert.equal(phaseNow(), null);
 });

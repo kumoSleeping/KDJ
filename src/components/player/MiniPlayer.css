@@ -1,7 +1,7 @@
 /* The mini player (src/lib/miniPlayer.ts): the whole window taken down to the playing song's
    bubble. `data-kd-mini="on"` is on the document element while the window is the bubble; it
    is set and taken away while the window is out of sight, so every rule below is the state
-   the window is shown in and none of them is a motion: the window's fade and its jump are the
+   the window is shown in and none of them is a motion: the window's pop and its fade are the
    native side's. */
 
 /* —— The window is the bubble ——
@@ -15,9 +15,13 @@
 :root[data-kd-mini="on"] .kd-app > :not(.kd-task-host[data-place="bottom"]) {
   visibility: hidden;
 }
+/* The bar is away (the bubble is the transport) and keeps its row all the same: taken out of
+   it, the list above would have another height, and be laid out for it, twice per visit. */
 :root[data-kd-mini="on"] .kd-player[data-bar] {
+  position: relative;
   right: auto;
-  width: var(--kd-mini-w, 100%);
+  bottom: auto;
+  left: auto;
 }
 /* No gap and no lift: the bubble fills the window. Other messages wait in the whole window. */
 :root[data-kd-mini="on"] .kd-task-host[data-place="bottom"] {
@@ -30,7 +34,8 @@
   right: auto;
   bottom: auto;
   left: 0;
-  width: 100%;
+  /* The width it has in the whole window: its height is then known before the window is its. */
+  width: var(--kd-mini-bw, 100%);
   transform: none;
   transition: none;
 }

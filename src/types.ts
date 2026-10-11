@@ -1018,18 +1018,18 @@ export interface MiniPlayerState {
 export interface MiniPlayerBridge {
   state(): Promise<MiniPlayerState>;
   /**
-   * 完整窗口淡出，窗口变成气泡，先不显示；`rect` 是气泡此刻在完整窗口里的位置和大小
-   * （CSS 像素），`tall` 是页面预计它作为迷你播放器时的高度。页面按新大小画好后调 `reveal`。
+   * 完整窗口立刻消失并成为迷你播放器，先不显示，也还不改大小；`rect` 是气泡此刻在完整窗口里的
+   * 位置和大小（CSS 像素）。页面随后用 `fit` 给它气泡的大小，按新大小画好后调 `reveal`。
    */
-  collapse(rect: { x: number; y: number; width: number; height: number; tall: number }, animated: boolean): Promise<MiniPlayerState>;
+  collapse(rect: { x: number; y: number; width: number; height: number }, animated: boolean): Promise<MiniPlayerState>;
   /**
-   * 页面已按窗口的新大小画好。迷你播放器在气泡原来的地方出现，沿抛物线跳到上次放下它的地方；
+   * 页面已按窗口的新大小画好。迷你播放器在上次放下它的地方、从所在屏幕最近的角上弹出；
    * 完整窗口则在原处淡入。
    */
   reveal(animated: boolean): Promise<MiniPlayerState>;
-  /** 记下现在的位置，沿抛物线跳回完整窗口里气泡所在的角上并消失；窗口变回完整窗口，`reveal` 后出现。 */
+  /** 记下现在的位置，收回屏幕角上并消失；窗口变回完整窗口，`reveal` 后出现。 */
   expand(animated: boolean): Promise<MiniPlayerState>;
-  /** 气泡换了大小，窗口立刻跟上。CSS 像素。 */
+  /** 气泡的大小（CSS 像素），窗口立刻跟上；还没显示时是它将要显示的大小。 */
   fit(width: number, height: number): Promise<void>;
   setOnTop(onTop: boolean): Promise<MiniPlayerState>;
 }

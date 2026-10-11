@@ -6,12 +6,12 @@
 //! sight (`conceal`), given its new size, and shown again (`mini_player_reveal`) once the page
 //! has drawn for that size.
 //!
-//! Down, the whole window fades away; the mini player appears where the bubble stood in it and
-//! jumps, in an arc like something thrown, to the place it was last left at. Back, it jumps to
-//! the bubble's corner of the whole window, is gone as it lands, and the whole window is there.
-//! Those are all the steps: a fade and the jump, and between them the window is out of sight
-//! for as long as the page needs to draw the other size, and no longer. Nothing stands in for
-//! it meanwhile and nothing waits for the look of it.
+//! Down, the whole window is gone at once, and the mini player pops out of the nearest corner
+//! of its screen at the place it was last left at. Back, it goes into that corner again, and
+//! the whole window fades in. Those are all the steps, and between them the window is out of
+//! sight for as long as the page needs to draw the other size, and no longer. Nothing flies
+//! from one place to another, nothing stands in for the window meanwhile, and nothing waits
+//! for the look of it.
 //!
 //! Every platform runs the same steps through the same window calls; only the macOS window
 //! buttons and its fade need calls of their own.
@@ -24,17 +24,17 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 const STATE_FILE: &str = "mini-player.json";
-/// The jump between the bubble's corner of the whole window and the mini player's place.
-const FLIGHT_MS: u64 = 340;
-/// The share of the jump's time the mini player takes to appear as it sets off, and to be gone
-/// as it lands.
-const FLIGHT_FADE: f64 = 0.25;
+/// The mini player pops out of the nearest corner of its screen and goes back into it: this
+/// far (CSS pixels), appearing as it comes and gone before it has arrived there.
+const POP_PX: f64 = 32.0;
+const POP_IN_MS: u64 = 200;
+const POP_OUT_MS: u64 = 150;
+/// The share of the pop's time the mini player takes to be all there, or to be gone.
+const POP_FADE: f64 = 0.7;
 /// A window left out of sight is shown after this long whatever the page does.
 const REVEAL_WITHIN: Duration = Duration::from_millis(1600);
-/// The whole window goes out of sight and comes back by a short fade (macOS): a hard cut
-/// there read as a flicker.
-const FADE_OUT_MS: u64 = 70;
-const FADE_IN_MS: u64 = 100;
+/// The whole window comes back by a short fade (macOS). It goes at once.
+const FADE_IN_MS: u64 = 140;
 /// All but clear rather than clear: still a window on show to the system, so the page in it
 /// goes on drawing.
 const CLEAR: f64 = 0.01;
@@ -114,8 +114,6 @@ pub struct ClientRect {
     y: f64,
     width: f64,
     height: f64,
-    /// How tall the page expects it to be as the mini player (with its transport row).
-    tall: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -205,76 +203,61 @@ impl Drop for Step<'_> {
     }
 }
 
-/// Whether the mini player appears as it sets off on its jump or is gone as it lands (macOS;
-/// elsewhere a window has no such thing and nothing happens).
+/// Whether the mini player comes out of its corner or goes into it. It fades as it moves
+/// (macOS; elsewhere a window has no such thing and it only moves).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fade {
-    In,
+enum Pop {
     Out,
+    Away,
 }
 
-/// How solid the window is when `t` of the jump's time has gone.
-fn faded(fade: Fade, t: f64) -> f64 {
-    let solid = match fade {
-        Fade::In => t / FLIGHT_FADE,
-        Fade::Out => (1.0 - t) / FLIGHT_FADE,
+/// How solid the window is when `t` of the pop's time has gone.
+fn faded(pop: Pop, t: f64) -> f64 {
+    let solid = match pop {
+        Pop::Out => t / POP_FADE,
+        Pop::Away => (1.0 - t) / POP_FADE,
     };
     CLEAR + (1.0 - CLEAR) * solid.clamp(0.0, 1.0)
 }
 
-fn ease(t: f64) -> f64 {
+/// How far along its way the window is: coming out it slows into its place, going away it
+/// gathers speed.
+fn paced(pop: Pop, t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
-    if t < 0.5 {
-        4.0 * t * t * t
-    } else {
-        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    match pop {
+        Pop::Out => 1.0 - (1.0 - t).powi(3),
+        Pop::Away => t * t,
     }
 }
 
-/// How high a flight rises above the straight line between its ends, in physical pixels.
-fn arc_of(from: Frame, to: Frame, scale: f64) -> f64 {
-    let distance = ((to.x - from.x) as f64).hypot((to.y - from.y) as f64);
-    if distance < 1.0 { 0.0 } else { (distance * 0.3).clamp(56.0 * scale, 240.0 * scale) }
-}
-
-/// The highest point a flight reaches: its smallest y.
-fn summit(from: Frame, to: Frame, arc: f64) -> f64 {
-    let (start, fall) = (from.y as f64, (to.y - from.y) as f64);
-    let at = |t: f64| start + fall * t - arc * 4.0 * t * (1.0 - t);
-    let turn = if arc > 0.0 { ((4.0 * arc - fall) / (8.0 * arc)).clamp(0.0, 1.0) } else { 0.0 };
-    at(turn).min(at(0.0)).min(at(1.0))
-}
-
-/// `arc`, lowered until the flight stays below `ceiling`: macOS does not let a window above
-/// the top of its screen, and one sent there stops at the edge and slides along it. A straight
-/// line when no arc fits.
-fn arc_within(from: Frame, to: Frame, arc: f64, ceiling: i32) -> f64 {
-    let mut arc = arc;
-    for _ in 0..16 {
-        if summit(from, to, arc) >= ceiling as f64 {
-            return arc;
+/// Where `frame` is tucked a little way (`reach`, physical pixels) into the nearest corner of
+/// its screen: where the mini player pops out from and goes back into. Never beyond the
+/// screen: macOS does not let a window past the top, and one sent there stops at the edge.
+fn tucked(frame: Frame, screens: &[Frame], reach: i32) -> Frame {
+    let Some(screen) = screens.iter().copied().max_by_key(|screen| overlap(frame, *screen)) else {
+        return frame;
+    };
+    let towards = |at: i32, length: u32, from: i32, room: u32| {
+        let last = from + room as i32 - length as i32;
+        if last < from {
+            return at;
         }
-        arc *= 0.7;
+        let far = at as i64 + length as i64 / 2 > from as i64 + room as i64 / 2;
+        (if far { at + reach } else { at - reach }).clamp(from.min(at), last.max(at))
+    };
+    Frame {
+        x: towards(frame.x, frame.width, screen.x, screen.width),
+        y: towards(frame.y, frame.height, screen.y, screen.height),
+        ..frame
     }
-    0.0
 }
 
-/// The top of the screens a flight starts and ends on: the lower of the two.
-fn ceiling_of(from: Frame, to: Frame, screens: &[Frame]) -> i32 {
-    [from, to]
-        .into_iter()
-        .filter_map(|frame| screens.iter().copied().max_by_key(|screen| overlap(frame, *screen)))
-        .map(|screen| screen.y)
-        .max()
-        .unwrap_or(i32::MIN)
-}
-
-/// The frame at `t` of a flight: along the line, lifted by a parabola that is `arc` high
-/// halfway and nothing at both ends.
-fn along(from: Frame, to: Frame, t: f64, arc: f64) -> Frame {
-    let mut frame = between(from, to, t);
-    frame.y -= (arc * 4.0 * t * (1.0 - t)).round() as i32;
-    frame
+/// Where the mini player is shown: with `size` at the place it was last left at, or with no
+/// such place on a screen that is there, at `corner` (the bubble's corner of the whole window).
+fn shown_at(place: Option<(i32, i32)>, corner: Frame, screens: &[Frame]) -> Frame {
+    place
+        .and_then(|place| place_on_screen(place, (corner.width, corner.height), screens))
+        .map_or(corner, |(x, y)| Frame { x, y, ..corner })
 }
 
 /// A corner no screen shows: a window put there is not seen, and is still a window that
@@ -401,9 +384,8 @@ fn apply(window: &WebviewWindow, frame: Frame, resize: bool) {
     }
 }
 
-/// Moves the window from `from` to `to`, rising `arc` above the straight line on the way,
-/// slow at both ends.
-async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Duration, arc: f64, fade: Fade) {
+/// The mini player comes out of its corner, or goes into it: from `from` to `to`, fading.
+async fn pop(window: &WebviewWindow, from: Frame, to: Frame, duration: Duration, pop: Pop) {
     let started = Instant::now();
     let mut shown = from;
     loop {
@@ -412,8 +394,8 @@ async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Durat
         } else {
             (started.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0)
         };
-        let next = along(from, to, ease(t), arc);
-        set_alpha(window, faded(fade, t));
+        let next = between(from, to, paced(pop, t));
+        set_alpha(window, faded(pop, t));
         if next != shown {
             apply(window, next, false);
             shown = next;
@@ -423,14 +405,11 @@ async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Durat
         }
         tokio::time::sleep(TICK).await;
     }
-    tokio::time::sleep(SETTLE).await;
 }
 
-/// The jump between the bubble's corner of the whole window and the mini player's place.
-async fn jump(window: &WebviewWindow, from: Frame, to: Frame, animated: bool, fade: Fade) {
-    let rise = arc_of(from, to, window.scale_factor().unwrap_or(1.0));
-    let arc = arc_within(from, to, rise, ceiling_of(from, to, &screens_of(window)));
-    animate(window, from, to, time(animated, FLIGHT_MS), arc, fade).await;
+/// How far the mini player's pop reaches, in physical pixels.
+fn reach_of(window: &WebviewWindow) -> i32 {
+    (POP_PX * window.scale_factor().unwrap_or(1.0)).round() as i32
 }
 
 /// How solid the window is. macOS only: there a window that is given a size is brought back
@@ -474,12 +453,12 @@ async fn fade(window: &WebviewWindow, from: f64, to: f64, duration: Duration) {
     }
 }
 
-/// Takes the window out of sight as it is: nothing of what is done to it next (its ways, its
-/// size) is seen. Faded out on macOS over `fade`; elsewhere beyond the screens, where a window
+/// Takes the window out of sight as it is, at once: nothing of what is done to it next (its
+/// ways, its size) is seen. Clear on macOS; elsewhere beyond the screens, where a window
 /// stays put.
-async fn conceal(window: &WebviewWindow, fade_for: Duration) -> Result<(), String> {
+fn conceal(window: &WebviewWindow) -> Result<(), String> {
     if cfg!(target_os = "macos") {
-        fade(window, 1.0, CLEAR, fade_for).await;
+        set_alpha(window, CLEAR);
     } else {
         let current = frame_of(window)?;
         apply(window, out_of_sight(window, current), false);
@@ -498,10 +477,9 @@ fn out_of_sight(window: &WebviewWindow, frame: Frame) -> Frame {
     Frame { x, y, ..frame }
 }
 
-/// A concealed window takes `frame`'s size; `mini_player_reveal` shows it at `frame`. Should
-/// the page never ask, it is shown anyway.
-fn park(app: &AppHandle, window: &WebviewWindow, frame: Frame) {
-    apply(window, out_of_sight(window, frame), true);
+/// A concealed window is shown by `mini_player_reveal`. Should the page never ask, it is shown
+/// anyway.
+fn shown_at_last(app: &AppHandle, window: &WebviewWindow) {
     let (app, window) = (app.clone(), window.clone());
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(REVEAL_WITHIN).await;
@@ -509,23 +487,20 @@ fn park(app: &AppHandle, window: &WebviewWindow, frame: Frame) {
     });
 }
 
-/// Shows a concealed window. The whole window fades in where it was. The mini player appears
-/// where the bubble stood in the whole window and jumps to the place it was last left at;
-/// with no such place on a screen that is there, it fades in and stays. Once: a second call
-/// finds nothing pending.
+/// Shows a concealed window. The whole window fades in where it was. The mini player pops
+/// out of the nearest corner of its screen. Once: a second call finds nothing pending.
 async fn reveal(app: &AppHandle, window: &WebviewWindow, animated: bool) {
     let Some(mini) = app.try_state::<MiniPlayer>() else { return; };
     let shown = {
         let mut inner = mini.lock();
-        let place = inner.saved.place;
         inner.session.as_mut().and_then(|session| {
             let frame = session.pending.take()?;
-            Some((frame, *session, place))
+            Some((frame, *session))
         })
     };
-    let Some((frame, session, place)) = shown else { return; };
-    apply(window, frame, false);
+    let Some((frame, session)) = shown else { return; };
     if session.expanding {
+        apply(window, frame, true);
         if session.maximized {
             let _ = window.maximize();
             tokio::time::sleep(SETTLE).await;
@@ -536,14 +511,11 @@ async fn reveal(app: &AppHandle, window: &WebviewWindow, animated: bool) {
         mini.lock().session = None;
         return;
     }
-    let to = place
-        .and_then(|place| place_on_screen(place, (frame.width, frame.height), &screens_of(window)))
-        .map_or(frame, |(x, y)| Frame { x, y, ..frame });
-    if to == frame {
-        fade(window, CLEAR, 1.0, time(animated, FADE_IN_MS)).await;
-    } else {
-        jump(window, frame, to, animated, Fade::In).await;
-    }
+    let from = tucked(frame, &screens_of(window), reach_of(window));
+    // Its size as well: it has it already, unless the page never came to give it one.
+    apply(window, from, true);
+    pop(window, from, frame, time(animated, POP_IN_MS), Pop::Out).await;
+    tokio::time::sleep(SETTLE).await;
     // From here on a move is the listener's own.
     let mut inner = mini.lock();
     if let Some(session) = inner.session.as_mut() {
@@ -617,9 +589,10 @@ pub fn mini_player_state(app: AppHandle) -> Result<MiniPlayerState, String> {
     Ok(mini_of(&app)?.state())
 }
 
-/// The whole window fades away and the window becomes the bubble, out of sight: `rect` is the
-/// bubble as it stands in the whole window. `mini_player_reveal` shows it there and sends it
-/// to its place.
+/// The whole window is gone at once and is the mini player from here on, out of sight and still
+/// of the whole window's size: `rect` is the bubble as it stands in it. The page gives it the
+/// bubble's size when it has made ready for it (`mini_player_fit`), and `mini_player_reveal`
+/// shows it at the place it was last left at.
 #[tauri::command]
 pub async fn mini_player_collapse(
     app: AppHandle,
@@ -664,10 +637,10 @@ pub async fn mini_player_collapse(
         return Err("曲目信息不在窗口里".into());
     }
     let corner = (full.right() - bubble.right(), full.bottom() - bubble.bottom());
-    let tall = px(rect.tall).max(0.0) as u32;
-    let start = corner_frame(full, corner, (bubble.width, if tall < SMALLEST { bubble.height } else { tall }));
+    let screens = screens_of(&window);
     let on_top = {
         let mut inner = mini.lock();
+        let start = shown_at(inner.saved.place, bubble, &screens);
         // From here on a move or a resize is the mini player's, not the main window's.
         inner.session = Some(Session {
             full,
@@ -680,14 +653,16 @@ pub async fn mini_player_collapse(
         });
         inner.saved.on_top
     };
-    conceal(&window, time(animated, FADE_OUT_MS)).await?;
+    // At once, with motion or without: there is nothing to animate about its going.
+    let _ = animated;
+    conceal(&window)?;
     if maximized {
         // A maximized window does not take a size.
         let _ = window.unmaximize();
         tokio::time::sleep(SETTLE).await;
     }
     dress(&app, &window, true, on_top);
-    park(&app, &window, start);
+    shown_at_last(&app, &window);
     Ok(mini.state())
 }
 
@@ -699,9 +674,9 @@ pub async fn mini_player_reveal(app: AppHandle, window: WebviewWindow, animated:
     Ok(mini_of(&app)?.state())
 }
 
-/// Back to the whole window. The mini player jumps to the bubble's corner of the whole window
-/// and is gone as it lands; the window is the whole window again, out of sight until
-/// `mini_player_reveal`. Where the mini player stood is where it is found next time.
+/// Back to the whole window. The mini player goes into the nearest corner of its screen; the
+/// window is the whole window again, out of sight until `mini_player_reveal`. Where the mini
+/// player stood is where it is found next time.
 #[tauri::command]
 pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated: bool) -> Result<MiniPlayerState, String> {
     main_only(&window)?;
@@ -724,25 +699,21 @@ pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated:
         }
         (session, shown, inner.saved)
     };
-    let home = corner_frame(session.full, session.corner, (current.width, current.height));
-    let to = Frame { x: home.x, y: home.y, ..current };
     if shown {
         mini.save(saved);
+        let to = tucked(current, &screens_of(&window), reach_of(&window));
+        pop(&window, current, to, time(animated, POP_OUT_MS), Pop::Away).await;
     }
-    if shown && to != current {
-        jump(&window, current, to, animated, Fade::Out).await;
-        conceal(&window, Duration::ZERO).await?;
-    } else {
-        conceal(&window, time(animated, FADE_OUT_MS)).await?;
-    }
+    conceal(&window)?;
     dress(&app, &window, false, false);
-    park(&app, &window, session.full);
+    apply(&window, out_of_sight(&window, session.full), true);
+    shown_at_last(&app, &window);
     Ok(mini.state())
 }
 
-/// The bubble has another size (another song's title, another row): the window follows at
-/// once. `width` and `height` are CSS pixels. Out of sight on its way down, it keeps the
-/// bubble's corner of the whole window; at its place, the edges nearest its screen's.
+/// The bubble's size (CSS pixels): the window takes it at once. Out of sight on its way down,
+/// that is the size it is going to be shown with, at the place it was last left at; on show
+/// (another song's title, another row), it keeps the edges nearest its screen's.
 #[tauri::command]
 pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height: f64) -> Result<(), String> {
     main_only(&window)?;
@@ -752,6 +723,7 @@ pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height
     if size.0 < SMALLEST || size.1 < SMALLEST {
         return Ok(());
     }
+    let screens = screens_of(&window);
     let waiting = {
         let mut inner = mini.lock();
         if inner.busy {
@@ -760,9 +732,13 @@ pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height
         let Some(session) = inner.session.as_mut().filter(|session| !session.expanding) else {
             return Ok(());
         };
+        let session = *session;
+        let place = inner.saved.place;
         session.pending.is_some().then(|| {
-            let start = corner_frame(session.full, session.corner, size);
-            session.pending = Some(start);
+            let start = shown_at(place, corner_frame(session.full, session.corner, size), &screens);
+            if let Some(session) = inner.session.as_mut() {
+                session.pending = Some(start);
+            }
             start
         })
     };
@@ -771,7 +747,7 @@ pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height
         return Ok(());
     }
     let current = frame_of(&window)?;
-    let next = resized_in_place(current, size, &screens_of(&window));
+    let next = resized_in_place(current, size, &screens);
     if next != current {
         apply(&window, next, true);
     }
@@ -803,49 +779,34 @@ mod tests {
     const FULL: Frame = Frame { x: 40, y: 60, width: 1360, height: 800 };
 
     #[test]
-    fn the_frame_starts_and_ends_exactly_and_slows_at_both_ends() {
-        let bubble = Frame { x: 1004, y: 700, width: 384, height: 148 };
-        assert_eq!(between(FULL, bubble, ease(0.0)), FULL);
-        assert_eq!(between(FULL, bubble, ease(1.0)), bubble);
-        let early = between(FULL, bubble, ease(0.1));
-        let middle = between(FULL, bubble, ease(0.5));
-        assert!(FULL.width - early.width < 10, "slow out of the whole window: {early:?}");
-        assert_eq!(middle.width, (FULL.width + bubble.width) / 2);
+    fn it_pops_out_of_the_nearest_corner_of_its_screen_and_never_beyond_it() {
+        // At the top right, 60 from the right edge and 8 under the menu bar: from the right,
+        // and from no higher than the screen's top.
+        let place = Frame { x: 996, y: 33, width: 384, height: 148 };
+        assert_eq!(tucked(place, &[SCREEN], 32), Frame { x: 1028, y: 25, ..place });
+        // At the bottom left: from the left and from below.
+        let low = Frame { x: 100, y: 600, width: 384, height: 148 };
+        assert_eq!(tucked(low, &[SCREEN], 32), Frame { x: 68, y: 632, ..low });
+        // Against the edge already: it has nowhere to come from on that side.
+        let edge = Frame { x: 1440 - 384, y: 300, width: 384, height: 148 };
+        assert_eq!(tucked(edge, &[SCREEN], 32).x, edge.x);
+        assert_eq!(tucked(place, &[], 32), place);
+        // It comes out slowing into its place and is all there before it arrives; it goes
+        // gathering speed and is gone before it has got there.
+        assert_eq!(between(low, place, paced(Pop::Out, 0.0)), low);
+        assert_eq!(between(low, place, paced(Pop::Out, 1.0)), place);
+        assert!(paced(Pop::Out, 0.5) > 0.8 && paced(Pop::Away, 0.5) < 0.3);
+        assert!(faded(Pop::Out, 0.0) < 0.02 && faded(Pop::Out, 0.7) > 0.99 && faded(Pop::Out, 1.0) > 0.99);
+        assert!(faded(Pop::Away, 0.0) > 0.99 && faded(Pop::Away, 0.3) > 0.99 && faded(Pop::Away, 1.0) < 0.02);
     }
 
     #[test]
-    fn a_flight_rises_between_its_ends_and_lands_exactly() {
-        let from = Frame { x: 1004, y: 700, width: 384, height: 148 };
-        let to = Frame { x: 40, y: 600, width: 384, height: 148 };
-        let arc = arc_of(from, to, 2.0);
-        assert!(arc >= 112.0 && arc <= 480.0, "{arc}");
-        assert_eq!(along(from, to, 0.0, arc), from);
-        assert_eq!(along(from, to, 1.0, arc), to);
-        assert_eq!(along(from, to, 0.5, arc).y, 650 - arc.round() as i32);
-        // Nowhere to go: no arc.
-        assert_eq!(arc_of(from, from, 2.0), 0.0);
-    }
-
-    #[test]
-    fn a_flight_stays_below_the_top_of_its_screen() {
-        // From the bottom right of the whole window to the top right of the screen.
-        let from = Frame { x: 2000, y: 1500, width: 768, height: 296 };
-        let to = Frame { x: 2096, y: 66, width: 768, height: 296 };
-        let rise = arc_of(from, to, 2.0);
-        assert!(summit(from, to, rise) < 60.0, "as thrown it would pass the top: {}", summit(from, to, rise));
-        let arc = arc_within(from, to, rise, 60);
-        assert!(arc > 0.0 && arc < rise, "{arc}");
-        assert!(summit(from, to, arc) >= 60.0);
-        // With room above, the arc is as thrown; with none at either end, a straight line.
-        assert_eq!(arc_within(from, to, rise, -4000), rise);
-        assert_eq!(arc_within(from, to, rise, 100), 0.0);
-        // Downwards, the summit is where it started or above.
-        assert!(summit(to, from, rise) <= 66.0);
-        let screens = [SCREEN, Frame { x: 1440, y: 0, width: 1920, height: 1080 }];
-        assert_eq!(ceiling_of(FULL, Frame { x: 2000, y: 40, width: 384, height: 148 }, &screens), 25);
-        // The mini player is there before a quarter of its jump has gone, and gone the same way.
-        assert!(faded(Fade::In, 0.0) < 0.02 && faded(Fade::In, 0.25) > 0.99 && faded(Fade::In, 1.0) > 0.99);
-        assert!(faded(Fade::Out, 0.0) > 0.99 && faded(Fade::Out, 0.75) > 0.99 && faded(Fade::Out, 1.0) < 0.02);
+    fn it_is_shown_where_it_was_left_or_else_where_the_bubble_stood() {
+        let corner = corner_frame(FULL, (12, 12), (384, 148));
+        assert_eq!(shown_at(Some((1000, 40)), corner, &[SCREEN]), Frame { x: 1000, y: 40, ..corner });
+        assert_eq!(shown_at(None, corner, &[SCREEN]), corner);
+        // Left on a display that is gone: where the bubble stood.
+        assert_eq!(shown_at(Some((3000, 40)), corner, &[SCREEN]), corner);
     }
 
     #[test]
