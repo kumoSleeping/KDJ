@@ -1,6 +1,5 @@
 import { create } from "zustand";
-import { MOTION_IN_MS, MOTION_OUT_MS, prefersReducedMotion } from "./motion";
-import { usePlayerBarAway } from "./playerBarAway";
+import { prefersReducedMotion } from "./motion";
 import { useWindowTaken } from "./windowTaken";
 
 /**
@@ -9,35 +8,48 @@ import { useWindowTaken } from "./windowTaken";
  * they are; the window's frame is the native side's (src-tauri/src/mini_player.rs) and what is
  * drawn, and in which order, is decided here.
  *
- * Down: the page folds into the bubble while the player bar leaves and the bubble becomes the
- * transport (`folding`); the bubble fades and the window, one flat colour now, comes down to
- * where the bubble stood (`flat`); the bubble fills it and comes back (`on`), and it goes to
- * the place the listener last left it at. Back: it returns to its corner of the whole window,
- * fades (`flat`), the window grows, and the page unfolds out of it (`unfolding`).
+ * The page is on show all the way. While the window changes size the page keeps the layout of
+ * the whole window and is drawn smaller to fit the window as it is at that moment, and the
+ * bubble, drawn to fill the window, comes up over it. So the listener watches the window they
+ * had become the bubble, and the bubble become that window again; at no point is there an
+ * empty window to wait in front of.
  *
- * The window only changes size while it shows one flat colour. A WebView draws its last
- * picture from the top-left corner until the page has laid out for the new size, so a bubble
- * on show at the bottom right would jump on every step of the way.
+ * Down: the bar leaves and the bubble becomes the transport (`readying`, a few frames, enough
+ * to know how tall the bubble will be); the window comes down to where the bubble stands
+ * (`shrinking`); it is the bubble (`on`) and goes to the place the listener last left it at.
+ * Back: it returns to its corner of the whole window, and the window grows (`growing`).
+ *
+ * Everything drawn during a change of size is a function of the window's width alone and is
+ * anchored at the window's top-left corner. A WebView shows its last picture from that corner
+ * until the page has drawn for the new size, so a picture that is one frame late is then a
+ * frame late and nothing else; anything held to another corner, or to a place on the screen,
+ * would be thrown about by however late that frame is.
  *
  * The phase is written on the document element (`data-kd-mini`); MiniPlayer.css draws each.
- * While it lasts the mini player has the window (lib/windowTaken.ts), which is what hides the
- * page, makes it inert and sends the bar away.
+ * While it lasts the mini player has the window (lib/windowTaken.ts), which is what makes the
+ * page inert and sends the bar away.
  */
-export type MiniPlayerPhase = "off" | "folding" | "flat" | "on" | "unfolding";
+export type MiniPlayerPhase = "off" | "readying" | "shrinking" | "on" | "growing";
 
 /** Who has the window (`data-taken-by`) while the mini player lasts. */
 export const MINI_PLAYER = "mini-player";
 export const MINI_PLAYER_ATTR = "data-kd-mini";
-/** The playing song's bubble: the mini player is this element and nothing else. */
-export const MINI_PLAYER_BUBBLE = '.kd-task[data-kind="playing"]';
+/** The playing song's bubble in its stack: the mini player is this element and nothing else. */
+export const MINI_PLAYER_BUBBLE = '.kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"]';
+const BUBBLE_HOST = '.kd-task-host[data-place="bottom"]';
+const PAGE = ".kd-body";
 
-/** The page folds on the clock the bar leaves by, and unfolds on the one it returns by. */
-const FOLD_MS = MOTION_OUT_MS;
-const UNFOLD_MS = MOTION_IN_MS;
-/** The bubble gives way to the flat window, and comes back in it (MiniPlayer.css). */
-const FLAT_MS = 110;
-/** How long the bubble may take to come up and stop changing size once the bar has left. */
-const BUBBLE_WAIT_MS = 1500;
+/** How many frames the bubble may take to come up as the transport once the bar is sent away. */
+const READY_FRAMES = 15;
+/** The gap a bubble keeps to the window's edges (--kd-task-gap), where it cannot be measured. */
+const BUBBLE_EDGE = 12;
+/**
+ * The bubble comes up over the page between these shares of the way down, and goes between
+ * them on the way back: the page is whole while the window has hardly moved, and the bubble is
+ * whole well before the window is its size.
+ */
+const BUBBLE_FROM = 0.1;
+const BUBBLE_BY = 0.62;
 
 export const useMiniPlayer = create<{ phase: MiniPlayerPhase; onTop: boolean }>(() => ({ phase: "off", onTop: true }));
 
@@ -52,32 +64,124 @@ function setPhase(phase: MiniPlayerPhase): void {
   useMiniPlayer.setState({ phase });
 }
 
-const wait = (ms: number) => new Promise<void>(resolve => { if (ms > 0) window.setTimeout(resolve, ms); else resolve(); });
 const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+const share = (value: number) => Math.min(1, Math.max(0, value));
 
-/** The bubble once it is up and has kept its box for a few frames, or null if none came. */
-async function settledBubble(): Promise<DOMRect | null> {
-  const deadline = performance.now() + BUBBLE_WAIT_MS;
-  let last: DOMRect | null = null;
-  let still = 0;
-  while (performance.now() < deadline) {
-    await frame();
-    const moving = usePlayerBarAway.getState().phase;
-    const box = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.getBoundingClientRect() ?? null;
-    const same = !!box && !!last && Math.abs(box.left - last.left) < 0.5 && Math.abs(box.top - last.top) < 0.5
-      && Math.abs(box.width - last.width) < 0.5 && Math.abs(box.height - last.height) < 0.5;
-    still = same && moving !== "leaving" && moving !== "returning" ? still + 1 : 0;
-    last = box;
-    if (box && still >= 4) return box;
-  }
-  return last;
+/** The whole window the mini player came from, in CSS px, and the gap its bubble kept there. */
+interface Whole { width: number; height: number; edge: number }
+let whole: Whole | null = null;
+/** A change of size that is being drawn: the whole window, the bubble's width, the copy of the
+ *  bubble that stands in the page meanwhile, and the window width last drawn for. */
+let morph: { whole: Whole; bubble: number; ghost: HTMLElement | null; drawn: number } | null = null;
+
+/** The page keeps the whole window's layout from here on, whatever size the window is. */
+function keepLayout(of: Whole, bubble: number): void {
+  const style = document.documentElement.style;
+  style.setProperty("--kd-mini-w", `${of.width}px`);
+  style.setProperty("--kd-mini-h", `${of.height}px`);
+  style.setProperty("--kd-mini-bw", `${bubble}px`);
 }
 
-/** Where the page folds to: the bubble if it is up, else the corner it will come up in. */
-function aimAt(box: DOMRect | null): void {
-  const style = document.documentElement.style;
-  style.setProperty("--kd-mini-x", box ? `${box.left + box.width / 2}px` : "calc(100% - 13rem)");
-  style.setProperty("--kd-mini-y", box ? `${box.top + box.height / 2}px` : "calc(100% - 5rem)");
+/**
+ * Draws for the window as wide as it is now: the page as small as the window is of the whole
+ * one, the bubble as large as fills it. Written on the three elements themselves: a custom
+ * property on the root would have every element of the page restyled on every frame.
+ */
+function follow(): void {
+  if (!morph) return;
+  const width = window.innerWidth;
+  if (width === morph.drawn) return;
+  morph.drawn = width;
+  const fit = `scale(${(width / morph.whole.width).toFixed(5)})`;
+  const page = document.querySelector<HTMLElement>(PAGE);
+  if (page) page.style.transform = fit;
+  if (morph.ghost) morph.ghost.style.transform = fit;
+  const host = document.querySelector<HTMLElement>(BUBBLE_HOST);
+  if (!host) return;
+  const down = share((morph.whole.width - width) / Math.max(1, morph.whole.width - morph.bubble));
+  host.style.setProperty("--kd-mini-bs", (width / morph.bubble).toFixed(5));
+  host.style.setProperty("--kd-mini-o", share((down - BUBBLE_FROM) / (BUBBLE_BY - BUBBLE_FROM)).toFixed(3));
+}
+
+/** Runs a change of the window's size and keeps the page drawn for every size on the way. */
+async function following<T>(change: () => Promise<T>): Promise<T> {
+  let live = true;
+  const tick = () => {
+    if (!live) return;
+    follow();
+    requestAnimationFrame(tick);
+  };
+  window.addEventListener("resize", follow);
+  requestAnimationFrame(tick);
+  try {
+    return await change();
+  } finally {
+    live = false;
+    window.removeEventListener("resize", follow);
+    follow();
+  }
+}
+
+/** The change of size is over: the bubble is drawn as it lies, and its copy is gone. */
+function endMorph(): void {
+  morph?.ghost?.remove();
+  morph = null;
+  const host = document.querySelector<HTMLElement>(BUBBLE_HOST);
+  host?.style.removeProperty("--kd-mini-bs");
+  host?.style.removeProperty("--kd-mini-o");
+}
+
+/** Nothing of the mini player is left on the page. */
+function clearPage(): void {
+  endMorph();
+  document.querySelector<HTMLElement>(PAGE)?.style.removeProperty("transform");
+  for (const name of ["--kd-mini-w", "--kd-mini-h", "--kd-mini-bw"]) document.documentElement.style.removeProperty(name);
+}
+
+/**
+ * A copy of the bubble that stands in the page, where the bubble is in the whole window, while
+ * the bubble itself is drawn to fill the window: the page that shrinks away still has its
+ * bubble, and the one that grows back has it where the real one will be. It is a picture: it
+ * takes no pointer and no focus and is not read out.
+ */
+function ghostOf(slot: HTMLElement, at: { left: number; top: number; width: number }): HTMLElement | null {
+  const host = slot.parentElement;
+  if (!host) return null;
+  const ghost = document.createElement("div");
+  ghost.className = "kd-mini-ghost";
+  ghost.setAttribute("aria-hidden", "true");
+  ghost.setAttribute("inert", "");
+  const copy = slot.cloneNode(true) as HTMLElement;
+  Object.assign(copy.style, {
+    top: `${at.top}px`, right: "auto", bottom: "auto", left: `${at.left}px`, width: `${at.width}px`,
+    transform: "none", opacity: "1",
+  });
+  // A copied canvas is empty: what the original shows is drawn across.
+  const drawn = slot.querySelectorAll("canvas");
+  copy.querySelectorAll("canvas").forEach((canvas, index) => {
+    try { canvas.getContext("2d")?.drawImage(drawn[index], 0, 0); } catch { /* an empty canvas is the panel colour */ }
+  });
+  ghost.append(copy);
+  host.append(ghost);
+  return ghost;
+}
+
+/** The bubble once it is the transport (the bar has been sent away), or as it is if it never is. */
+async function transportBubble(): Promise<HTMLElement | null> {
+  let bubble: HTMLElement | null = null;
+  for (let waited = 0; waited < READY_FRAMES; waited += 1) {
+    await frame();
+    bubble = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE);
+    if (bubble?.querySelector(".kd-task-controls-clip")) return bubble;
+  }
+  return bubble;
+}
+
+/** How tall the bubble is going to be when its transport row has opened (TaskBubbleHost.tsx). */
+function restingHeight(bubble: HTMLElement): number {
+  const tall = bubble.offsetHeight || bubble.getBoundingClientRect().height;
+  const clip = bubble.querySelector<HTMLElement>(".kd-task-controls-clip");
+  return Math.ceil(clip ? tall - clip.offsetHeight + clip.scrollHeight : tall);
 }
 
 let switching = false;
@@ -86,6 +190,7 @@ let switching = false;
 async function restore(animated: boolean): Promise<void> {
   const bridge = window.kdj?.miniPlayer;
   if (bridge && (await bridge.state().catch(() => null))?.active) await bridge.expand(animated).catch(() => {});
+  clearPage();
   useWindowTaken.getState().release(MINI_PLAYER);
   setPhase("off");
 }
@@ -102,17 +207,29 @@ export async function collapseToMiniPlayer(): Promise<void> {
       taken.leave?.();
       await frame();
     }
-    aimAt(document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.getBoundingClientRect() ?? null);
-    setPhase("folding");
+    const size = { width: window.innerWidth, height: window.innerHeight };
+    setPhase("readying");
     useWindowTaken.getState().take(MINI_PLAYER, () => { void expandFromMiniPlayer(); });
-    const [box] = await Promise.all([settledBubble(), wait(animated ? FOLD_MS : 0)]);
-    if (!box) throw new Error("no playing song to show");
-    setPhase("flat");
-    await wait(animated ? FLAT_MS : 0);
+    const bubble = await transportBubble();
+    const slot = bubble?.parentElement;
+    if (!bubble || !slot) throw new Error("no playing song to show");
+    const box = slot.getBoundingClientRect();
+    const height = restingHeight(bubble);
+    const edge = Math.max(0, Math.round(size.width - box.right));
+    whole = { ...size, edge };
+    // Where the bubble stands once the bar is gone: its corner of the whole window.
+    const home = { x: box.left, y: Math.max(0, size.height - edge - height), width: box.width, height };
+    morph = { whole, bubble: box.width, ghost: ghostOf(slot, box), drawn: Number.NaN };
+    keepLayout(whole, box.width);
+    setPhase("shrinking");
+    follow();
+    // The page is drawn once as the picture it is from here on before the window moves.
     await frame();
-    const state = await bridge.collapse({ x: box.left, y: box.top, width: box.width, height: box.height }, animated);
+    await frame();
+    const state = await following(() => bridge.collapse(home, animated));
     useMiniPlayer.setState({ onTop: state.onTop });
     setPhase("on");
+    endMorph();
     await frame();
     await frame();
     await bridge.settle(animated).catch(() => {});
@@ -131,17 +248,27 @@ export async function expandFromMiniPlayer(): Promise<void> {
   const animated = !prefersReducedMotion();
   try {
     await bridge.recall(animated).catch(() => {});
-    setPhase("flat");
-    await wait(animated ? FLAT_MS : 0);
+    const slot = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.parentElement;
+    if (slot && whole) {
+      const box = slot.getBoundingClientRect();
+      // The page is under the bubble again, with a copy of the bubble where it is going to be.
+      const ghost = ghostOf(slot, { left: whole.width - whole.edge - box.width, top: whole.height - whole.edge - box.height, width: box.width });
+      // The copy is the bubble of the whole window: without the key only the mini player has.
+      ghost?.querySelector('[data-task-action="mini-top"]')?.remove();
+      morph = { whole, bubble: box.width, ghost, drawn: Number.NaN };
+      keepLayout(whole, box.width);
+      setPhase("growing");
+      follow();
+      await frame();
+      await frame();
+    }
+    await following(() => bridge.expand(animated));
+    // The page lays out for the window as it is now before it is its own size again.
     await frame();
-    await bridge.expand(animated);
-    // The page lays out for the whole window before it is shown unfolding.
     await frame();
-    await frame();
-    setPhase("unfolding");
-    useWindowTaken.getState().release(MINI_PLAYER);
-    await wait(animated ? UNFOLD_MS : 0);
+    clearPage();
     setPhase("off");
+    useWindowTaken.getState().release(MINI_PLAYER);
   } catch (error) {
     console.warn("mini player: expand failed", error);
     await restore(animated);
@@ -167,6 +294,10 @@ export async function syncMiniPlayer(): Promise<void> {
   if (!state) return;
   useMiniPlayer.setState({ onTop: state.onTop });
   if (!state.active || switching || useMiniPlayer.getState().phase !== "off") return;
+  if (state.fullWidth && state.fullHeight) {
+    whole = { width: state.fullWidth, height: state.fullHeight, edge: BUBBLE_EDGE };
+    keepLayout(whole, window.innerWidth);
+  }
   useWindowTaken.getState().take(MINI_PLAYER, () => { void expandFromMiniPlayer(); });
   setPhase("on");
 }

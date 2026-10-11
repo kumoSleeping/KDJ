@@ -2,10 +2,9 @@
 //! bubble and brought back, so playback, the page and its state never leave their WebView.
 //!
 //! The page owns what is drawn and the order of the steps (src/lib/miniPlayer.ts); this owns the
-//! window's frame. A change of size is only made while the page shows one flat colour: a
-//! WebView draws its last picture from the top-left corner until the page has laid out again,
-//! so anything anchored elsewhere would jump on every step. A move changes no layout, and the
-//! bubble is on show for it.
+//! window's frame. The page is on show for every change: while the size changes it draws
+//! itself to fit the window as it is at that moment, from the window's top-left corner, which
+//! is where a WebView shows its last picture until the page has drawn for the new size.
 //!
 //! Collapse: `mini_player_collapse` takes the frame from the whole window to the bubble where
 //! it stands, `mini_player_settle` moves it to where the listener last left it. Expand:
@@ -21,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 const STATE_FILE: &str = "mini-player.json";
-const RESIZE_MS: u64 = 240;
+/// The page is watched all the way: long enough to follow, short enough not to be waited for.
+const RESIZE_MS: u64 = 320;
 const TRAVEL_MS: u64 = 280;
 const TICK: Duration = Duration::from_millis(8);
 /// The last frame is handed to the window's own thread; the page is told afterwards.
@@ -67,6 +67,8 @@ impl Default for Saved {
 #[derive(Debug, Clone, Copy)]
 struct Session {
     full: Frame,
+    /// The whole window's size in CSS pixels: what the page keeps its layout at meanwhile.
+    full_css: (f64, f64),
     maximized: bool,
     /// From the bubble's right and bottom edges to the whole window's.
     corner: (i32, i32),
@@ -100,6 +102,9 @@ pub struct ClientRect {
 pub struct MiniPlayerState {
     active: bool,
     on_top: bool,
+    /// The whole window's size in CSS pixels while this is the mini player, else 0.
+    full_width: f64,
+    full_height: f64,
 }
 
 impl MiniPlayer {
@@ -118,7 +123,8 @@ impl MiniPlayer {
 
     fn state(&self) -> MiniPlayerState {
         let inner = self.lock();
-        MiniPlayerState { active: inner.session.is_some(), on_top: inner.saved.on_top }
+        let (full_width, full_height) = inner.session.map_or((0.0, 0.0), |session| session.full_css);
+        MiniPlayerState { active: inner.session.is_some(), on_top: inner.saved.on_top, full_width, full_height }
     }
 
     fn save(&self, saved: Saved) {
@@ -380,8 +386,8 @@ pub fn mini_player_state(app: AppHandle) -> Result<MiniPlayerState, String> {
     Ok(mini_of(&app)?.state())
 }
 
-/// The window comes down to `rect`, the bubble's place in the page (CSS pixels of the
-/// viewport), without moving it on the screen.
+/// The window comes down to `rect`: where the bubble stands in the whole window (CSS pixels
+/// of the viewport).
 #[tauri::command]
 pub async fn mini_player_collapse(
     app: AppHandle,
@@ -430,6 +436,7 @@ pub async fn mini_player_collapse(
         // From here on a move or a resize is the mini player's, not the main window's.
         inner.session = Some(Session {
             full,
+            full_css: (full.width as f64 / scale, full.height as f64 / scale),
             maximized,
             corner: (full.right() - bubble.right(), full.bottom() - bubble.bottom()),
             settled: false,

@@ -27,7 +27,8 @@ export function MiniPlayerKeys() {
   const phase = useMiniPlayer(state => state.phase);
   const onTop = useMiniPlayer(state => state.onTop);
   if (!miniPlayerOffered()) return null;
-  if (phase !== "on") {
+  // The bubble that fills the window has the mini player's keys from the moment it comes up.
+  if (phase === "off" || phase === "readying") {
     return <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini"
       aria-label="收成迷你播放器" title="收成迷你播放器" disabled={phase !== "off"}
       onClick={() => { void collapseToMiniPlayer(); }}>
@@ -37,12 +38,12 @@ export function MiniPlayerKeys() {
   const floats = onTop ? "置顶：开。点一下不再浮在其他窗口上面" : "置顶：关。点一下浮在其他窗口上面";
   return <>
     <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini-top"
-      aria-label={onTop ? "取消置顶" : "置顶"} title={floats} aria-pressed={onTop}
+      aria-label={onTop ? "取消置顶" : "置顶"} title={floats} aria-pressed={onTop} disabled={phase !== "on"}
       onClick={() => { void setMiniPlayerOnTop(!onTop); }}>
       {onTop ? <Pin size={14} aria-hidden="true" /> : <PinOff size={14} aria-hidden="true" />}
     </button>
     <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini"
-      aria-label="展开窗口" title="展开窗口" onClick={() => { void expandFromMiniPlayer(); }}>
+      aria-label="展开窗口" title="展开窗口" disabled={phase !== "on"} onClick={() => { void expandFromMiniPlayer(); }}>
       <Maximize2 size={14} aria-hidden="true" />
     </button>
   </>;

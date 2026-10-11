@@ -1005,21 +1005,29 @@ export interface CliInstallStatus {
 
 /**
  * 迷你播放器的窗口一侧（src-tauri/src/mini_player.rs）。页面决定画什么和步骤的先后，
- * 这里只动窗口的位置和大小。`animated: false` 时每一步一次到位。
+ * 这里只动窗口的位置和大小；窗口变大小的每一帧页面都跟着画。`animated: false` 时每一步一次到位。
  */
+export interface MiniPlayerState {
+  active: boolean;
+  onTop: boolean;
+  /** 收起前完整窗口的大小，CSS 像素；不是迷你播放器时为 0。 */
+  fullWidth?: number;
+  fullHeight?: number;
+}
+
 export interface MiniPlayerBridge {
-  state(): Promise<{ active: boolean; onTop: boolean }>;
-  /** 窗口原地收到 `rect`：气泡在视口里的位置，CSS 像素。 */
-  collapse(rect: { x: number; y: number; width: number; height: number }, animated: boolean): Promise<{ active: boolean; onTop: boolean }>;
+  state(): Promise<MiniPlayerState>;
+  /** 窗口收到 `rect`：气泡在完整窗口里落脚的位置，CSS 像素。 */
+  collapse(rect: { x: number; y: number; width: number; height: number }, animated: boolean): Promise<MiniPlayerState>;
   /** 移到上次放下它的地方。 */
   settle(animated: boolean): Promise<void>;
   /** 记下现在的位置，回到完整窗口里气泡所在的角上。 */
   recall(animated: boolean): Promise<void>;
   /** 长回完整窗口。 */
-  expand(animated: boolean): Promise<{ active: boolean; onTop: boolean }>;
+  expand(animated: boolean): Promise<MiniPlayerState>;
   /** 气泡换了大小，窗口立刻跟上。CSS 像素。 */
   fit(width: number, height: number): Promise<void>;
-  setOnTop(onTop: boolean): Promise<{ active: boolean; onTop: boolean }>;
+  setOnTop(onTop: boolean): Promise<MiniPlayerState>;
 }
 
 export interface KdjBridge {
