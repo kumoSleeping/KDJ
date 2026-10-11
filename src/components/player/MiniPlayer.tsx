@@ -124,18 +124,18 @@ export function MiniPlayerHost() {
       missingSince ||= performance.now();
       if (performance.now() - missingSince > MISSING_MS) void expandFromMiniPlayer();
     }, FIT_EVERY_MS);
-    // The bubble starts to let the old song go (TaskBubbleHost.tsx): the window leaves with it.
-    let letting = false;
-    const swap = new MutationObserver(() => {
-      const out = document.querySelector(MINI_PLAYER_BUBBLE)?.getAttribute("data-phase") === "out";
-      if (out && !letting) dipMiniPlayer();
-      letting = out;
+    // Another song: the window leaves the screen and comes back with it, once.
+    let song = getPlayingTrack()?.id ?? null;
+    const stopSong = subscribePlayingTrack(() => {
+      const next = getPlayingTrack()?.id ?? null;
+      if (next === song) return;
+      song = next;
+      if (next !== null) dipMiniPlayer();
     });
-    swap.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["data-phase"] });
     document.addEventListener("pointerdown", drag);
     window.addEventListener("keydown", key, true);
     return () => {
-      swap.disconnect();
+      stopSong();
       window.clearInterval(fit);
       document.removeEventListener("pointerdown", drag);
       window.removeEventListener("keydown", key, true);

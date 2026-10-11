@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { prefersReducedMotion } from "./motion";
-import { SONG_SWAP_IN_MS } from "./songSwapMotion";
 import { useWindowTaken } from "./windowTaken";
 
 /**
@@ -49,9 +48,12 @@ const BUBBLE_EDGE = 12;
 const FLIGHT_MS = 420;
 const FLIGHT_EASE = "cubic-bezier(0.65, 0, 0.35, 1)";
 const FLIGHT_RISE = { share: 0.3, least: 56, most: 240 } as const;
-/** Another song: how long the mini player takes to leave the screen. A little under the time
- *  the bubble keeps the old song (songSwapMotion.ts), so it is out of sight when that changes. */
-const DIP_OUT_MS = 300;
+/** Another song: how long the mini player takes to leave the screen and to come back onto it,
+ *  and how long it stays away: at least long enough for the bubble to have let the old song
+ *  go, at most this long whatever the bubble does. */
+const DIP_OUT_MS = 240;
+const DIP_IN_MS = 380;
+const DIP_AWAY_MS = { least: 160, most: 1400 } as const;
 
 export const useMiniPlayer = create<{ phase: MiniPlayerPhase; onTop: boolean }>(() => ({ phase: "off", onTop: true }));
 
@@ -265,16 +267,42 @@ export async function expandFromMiniPlayer(): Promise<void> {
 
 /** A dip that is on its way: the way back to the whole window waits for it. */
 let dipping: Promise<void> = Promise.resolve();
+let away = false;
+
+const pause = (ms: number) => new Promise<void>(resolve => { window.setTimeout(resolve, ms); });
+
+/** The bubble shows one song and is not on its way anywhere: the new song is in it. */
+function bubbleAtRest(): boolean {
+  const bubbles = document.querySelectorAll(MINI_PLAYER_BUBBLE);
+  return bubbles.length === 1 && bubbles[0].getAttribute("data-phase") !== "out";
+}
 
 /**
  * Another song. In the whole window the bubble rolls down behind the bar with the old song and
  * rises with the new one; the mini player has the screen for a window, so it leaves past the
- * screen's edge and comes back, and what it shows changes while it is away.
+ * screen's edge, changes what it shows while it is away, and comes back. Once per change: it
+ * stays away until the bubble shows the new song and nothing else, however many steps the
+ * bubble takes to get there, and a change that comes while it is away is waited out with it.
  */
 export function dipMiniPlayer(): void {
   const bridge = window.kdj?.miniPlayer;
-  if (!bridge || switching || useMiniPlayer.getState().phase !== "on" || prefersReducedMotion()) return;
-  dipping = bridge.dip(DIP_OUT_MS, SONG_SWAP_IN_MS).catch(() => {});
+  if (!bridge || switching || away || useMiniPlayer.getState().phase !== "on" || prefersReducedMotion()) return;
+  away = true;
+  dipping = (async () => {
+    try {
+      if (!await bridge.leave(DIP_OUT_MS)) return;
+      const until = performance.now() + DIP_AWAY_MS.most;
+      await pause(DIP_AWAY_MS.least);
+      // Timers, not frames: a window that is off the screen may not be given any.
+      while (performance.now() < until && !bubbleAtRest()) await pause(40);
+      const box = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.getBoundingClientRect();
+      await bridge.comeBack(DIP_IN_MS, box?.width ?? 0, box ? Math.ceil(box.height) : 0);
+    } catch {
+      // The native side brings it back by itself.
+    } finally {
+      away = false;
+    }
+  })();
 }
 
 export async function setMiniPlayerOnTop(onTop: boolean): Promise<void> {

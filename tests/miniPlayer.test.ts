@@ -59,7 +59,8 @@ test("the whole window goes at once and the bubble flies to its place, and back 
         active = false;
         return state();
       },
-      dip: async (out: number, back: number) => { ask(`dip ${out} ${back}`); },
+      leave: async (out: number) => { ask(`leave ${out}`); return true; },
+      comeBack: async (back: number, width: number, tall: number) => { ask(`back ${back} ${width}x${tall}`); },
       fit: async (width: number, tall: number) => { ask(`fit ${width}x${tall}`); },
       setOnTop: async (onTop: boolean) => { ask(`top ${onTop}`); return { active, onTop }; },
     },

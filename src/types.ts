@@ -1033,8 +1033,10 @@ export interface MiniPlayerBridge {
   recall(animated: boolean, stay: boolean): Promise<void>;
   /** 气泡消失，窗口变回完整窗口，先停在屏幕之外，`reveal` 后出现。 */
   expand(animated: boolean): Promise<MiniPlayerState>;
-  /** 换歌：从最近的屏幕边缘滑出去再回来。毫秒。 */
-  dip(outMs: number, inMs: number): Promise<void>;
+  /** 换歌：从最近的屏幕边缘滑出去并留在外面；没有可走的边（或不是静止的迷你播放器）时为 false。毫秒。 */
+  leave(outMs: number): Promise<boolean>;
+  /** 页面已经换成新歌：按气泡现在的大小（CSS 像素）回到滑出去的地方。 */
+  comeBack(inMs: number, width: number, height: number): Promise<void>;
   /** 气泡换了大小，窗口立刻跟上。CSS 像素。 */
   fit(width: number, height: number): Promise<void>;
   setOnTop(onTop: boolean): Promise<MiniPlayerState>;

@@ -88,6 +88,9 @@ struct Session {
     pending: Option<Frame>,
     /// That new size is the whole window's: showing it ends the mini player.
     expanding: bool,
+    /// It has left the screen for a change of song: the frame it left from and comes back
+    /// to. Until it is back, where it is is no place of the listener's choosing.
+    away_from: Option<Frame>,
 }
 
 #[derive(Default)]
@@ -165,7 +168,7 @@ pub fn active(app: &AppHandle) -> bool {
 pub fn moved(app: &AppHandle, position: PhysicalPosition<i32>) {
     let Some(mini) = app.try_state::<MiniPlayer>() else { return; };
     let mut inner = mini.lock();
-    if !inner.busy && inner.session.is_some_and(|session| session.settled) {
+    if !inner.busy && inner.session.is_some_and(|session| session.settled && session.away_from.is_none()) {
         inner.saved.place = Some((position.x, position.y));
     }
 }
@@ -199,6 +202,24 @@ impl<'a> Step<'a> {
 impl Drop for Step<'_> {
     fn drop(&mut self) {
         self.0.lock().busy = false;
+    }
+}
+
+/// How a move is paced: gathering speed and slowing (a flight), only gathering speed (leaving
+/// the screen), only slowing (coming onto it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pace {
+    Both,
+    Leaving,
+    Arriving,
+}
+
+fn paced(pace: Pace, t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    match pace {
+        Pace::Both => ease(t),
+        Pace::Leaving => t * t * t,
+        Pace::Arriving => 1.0 - (1.0 - t).powi(3),
     }
 }
 
@@ -368,7 +389,7 @@ fn apply(window: &WebviewWindow, frame: Frame, resize: bool) {
 }
 
 /// Moves the window from `from` to `to`, rising `arc` above the straight line on the way.
-async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Duration, arc: f64) {
+async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Duration, arc: f64, pace: Pace) {
     if from == to {
         return;
     }
@@ -380,7 +401,7 @@ async fn animate(window: &WebviewWindow, from: Frame, to: Frame, duration: Durat
         } else {
             (started.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0)
         };
-        let next = along(from, to, ease(t), arc);
+        let next = along(from, to, paced(pace, t), arc);
         if next != shown {
             apply(window, next, false);
             shown = next;
@@ -612,6 +633,7 @@ pub async fn mini_player_collapse(
             settled: false,
             pending: Some(bubble),
             expanding: false,
+            away_from: None,
         });
         inner.saved.on_top
     };
@@ -676,7 +698,7 @@ pub async fn mini_player_settle(app: AppHandle, window: WebviewWindow, animated:
     }) {
         let to = Frame { x, y, ..current };
         let arc = arc_of(current, to, window.scale_factor().unwrap_or(1.0));
-        animate(&window, current, to, time(animated, FLIGHT_MS), arc).await;
+        animate(&window, current, to, time(animated, FLIGHT_MS), arc, Pace::Both).await;
     }
     if let Some(session) = mini.lock().session.as_mut() {
         session.settled = true;
@@ -711,7 +733,7 @@ pub async fn mini_player_recall(app: AppHandle, window: WebviewWindow, animated:
     let home = corner_frame(session.full, session.corner, (current.width, current.height));
     let to = Frame { x: home.x, y: home.y, ..current };
     let arc = arc_of(current, to, window.scale_factor().unwrap_or(1.0));
-    animate(&window, current, to, time(animated, FLIGHT_MS), arc).await;
+    animate(&window, current, to, time(animated, FLIGHT_MS), arc, Pace::Both).await;
     Ok(())
 }
 
@@ -738,23 +760,81 @@ pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated:
     Ok(mini.state())
 }
 
-/// Another song: the mini player leaves the screen past its nearest edge and comes back, the
-/// way the bubble rolls down behind the bar and rises again in the whole window. The page
-/// changes what it shows while it is away. Times are milliseconds.
+/// How long a mini player that left the screen stays away before it comes back by itself.
+const AWAY_AT_MOST: Duration = Duration::from_millis(2600);
+
+/// Back onto the screen where it left it, with the size the bubble has now (physical pixels;
+/// None: the size it has). Once: a second call finds it back.
+async fn come_back(app: &AppHandle, window: &WebviewWindow, duration: Duration, size: Option<(u32, u32)>) {
+    let Some(mini) = app.try_state::<MiniPlayer>() else { return; };
+    let Some(home) = mini.lock().session.and_then(|session| session.away_from) else { return; };
+    let Ok(mut now) = frame_of(window) else { return; };
+    let mut to = home;
+    if let Some(size) = size.filter(|size| *size != (now.width, now.height) && size.0 >= SMALLEST && size.1 >= SMALLEST) {
+        // The new size is taken where it is not seen. macOS brings a window that is given a
+        // size back onto its screen: it is clear for that, and put outside again.
+        to = resized_in_place(home, size, &screens_of(window));
+        let outside_again = Frame { x: now.x + (to.x - home.x), y: now.y + (to.y - home.y), width: size.0, height: size.1 };
+        set_alpha(window, CLEAR);
+        apply(window, outside_again, true);
+        tokio::time::sleep(SETTLE).await;
+        apply(window, outside_again, false);
+        tokio::time::sleep(TICK * 2).await;
+        set_alpha(window, 1.0);
+        now = outside_again;
+    }
+    animate(window, now, to, duration, 0.0, Pace::Arriving).await;
+    let mut inner = mini.lock();
+    if let Some(session) = inner.session.as_mut() {
+        session.away_from = None;
+    }
+}
+
+/// Another song: the mini player leaves the screen past its nearest edge, the way the bubble
+/// rolls down behind the bar in the whole window. It stays away until `mini_player_come_back`,
+/// so the page changes what it shows out of sight. False: there is no way off this screen
+/// that does not lead onto another, or it is not a mini player at rest; nothing moved.
 #[tauri::command]
-pub async fn mini_player_dip(app: AppHandle, window: WebviewWindow, out_ms: u64, in_ms: u64) -> Result<(), String> {
+pub async fn mini_player_leave(app: AppHandle, window: WebviewWindow, out_ms: u64) -> Result<bool, String> {
     main_only(&window)?;
     let mini = mini_of(&app)?;
     let _step = Step::begin(&mini)?;
-    if !mini.lock().session.is_some_and(|session| session.settled && session.pending.is_none()) {
-        return Ok(());
+    if !mini.lock().session.is_some_and(|session| session.settled && session.pending.is_none() && session.away_from.is_none()) {
+        return Ok(false);
     }
     let current = frame_of(&window)?;
     let Some(away) = outside(current, &monitors_of(&window), !cfg!(target_os = "macos")) else {
-        return Ok(());
+        return Ok(false);
     };
-    animate(&window, current, away, Duration::from_millis(out_ms), 0.0).await;
-    animate(&window, away, current, Duration::from_millis(in_ms), 0.0).await;
+    if let Some(session) = mini.lock().session.as_mut() {
+        session.away_from = Some(current);
+    }
+    animate(&window, current, away, Duration::from_millis(out_ms), 0.0, Pace::Leaving).await;
+    // Should the page never call it back, it comes back anyway.
+    let (app, window) = (app.clone(), window.clone());
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(AWAY_AT_MOST).await;
+        come_back(&app, &window, Duration::from_millis(360), None).await;
+    });
+    Ok(true)
+}
+
+/// The page shows the new song: the mini player comes back to where it left the screen, with
+/// the bubble's size as it is now (CSS pixels).
+#[tauri::command]
+pub async fn mini_player_come_back(
+    app: AppHandle,
+    window: WebviewWindow,
+    in_ms: u64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    main_only(&window)?;
+    let mini = mini_of(&app)?;
+    let _step = Step::begin(&mini)?;
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let size = ((width * scale).round().max(0.0) as u32, (height * scale).round().max(0.0) as u32);
+    come_back(&app, &window, Duration::from_millis(in_ms), Some(size)).await;
     Ok(())
 }
 
@@ -766,7 +846,7 @@ pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height
     let mini = mini_of(&app)?;
     {
         let inner = mini.lock();
-        if inner.session.is_none() || inner.busy {
+        if inner.busy || !inner.session.is_some_and(|session| session.away_from.is_none()) {
             return Ok(());
         }
     }

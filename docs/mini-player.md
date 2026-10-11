@@ -22,7 +22,10 @@ frame). macOS and Windows run the same steps through the same window calls.
 - **Another song.** In the whole window the bubble rolls down behind the bar and rises with
   the new song. The mini player has the screen for a window: it leaves past the nearest edge
   of its screen and comes back with the new song (not past an edge another screen lies
-  beyond; with none free it changes in place).
+  beyond, and not past the top on macOS; with none free it changes in place). It leaves once
+  per change of song (`dipMiniPlayer`, from the playing track and not from what the bubble
+  does), stays away until the bubble shows the new song and nothing else, takes the bubble's
+  new size while it is away, and only then comes back: it never comes halfway and goes again.
 - **Back.** The key 展开窗口. The whole window is there at once, its bubble's corner empty and
   the bubble still at its place; the bubble flies back into the corner, and the bar returns.
   The place it was left at is remembered for next time, across launches (`mini-player.json` in
