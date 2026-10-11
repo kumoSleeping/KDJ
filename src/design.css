@@ -1929,13 +1929,14 @@ textarea {
   border: 1px solid var(--kd-line-soft);
   border-radius: 4px;
   box-shadow: 0 1px 3px rgb(0 0 0 / 16%);
-  overflow: hidden;
+  /* No clip on the frame (a box that clips is a layer in WebKit): the picture rounds itself. */
 }
 .kd-thumb > img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  border-radius: 3px;
 }
 /* 无封面歌曲共用的小黑胶唱盘。唱片自己就是轮廓，不再套一层方形封面框。 */
 .kd-thumb:has(> .kd-vinyl-placeholder),
@@ -2659,32 +2660,47 @@ body[data-kd-search-pointer-dragging="true"] * {
   color: var(--kd-danger);
 }
 .kd-table-rating {
-  display: inline-flex;
-  align-items: center;
-  gap: 0;
-  color: var(--kd-faint);
-}
-.kd-table-rating > button {
-  appearance: none;
-  display: grid;
-  place-items: center;
-  width: 0.62rem;
+  /* Five stars from two masks: the outline of all five under the filled ones up to the rating
+     (TableRating.tsx). One element, no SVG per star. */
+  --kd-star-outline: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'%3E%3Cpolygon points='12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'/%3E%3C/svg%3E");
+  --kd-star-filled: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black' stroke='black' stroke-width='2' stroke-linejoin='round'%3E%3Cpolygon points='12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2'/%3E%3C/svg%3E");
+  --kd-star-size: 0.69rem;
+  position: relative;
+  display: inline-block;
+  width: calc(var(--kd-star-size) * 5);
   height: 1.25rem;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: inherit;
+  color: var(--kd-faint);
   cursor: pointer;
+  vertical-align: middle;
 }
-.kd-table-rating > button:has(svg[fill="currentColor"]) {
-  color: #e0a400;
+.kd-table-rating[data-static] {
+  cursor: default;
 }
-.kd-table-rating:hover > button {
+.kd-table-rating::before,
+.kd-table-rating::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  background: currentColor;
+  -webkit-mask: var(--kd-star-outline) 0 50% / var(--kd-star-size) var(--kd-star-size) repeat-x;
+  mask: var(--kd-star-outline) 0 50% / var(--kd-star-size) var(--kd-star-size) repeat-x;
+}
+.kd-table-rating::after {
+  width: calc(var(--kd-rating-shown, var(--kd-rating, 0)) * var(--kd-star-size));
+  background: #e0a400;
+  -webkit-mask-image: var(--kd-star-filled);
+  mask-image: var(--kd-star-filled);
+}
+.kd-table-rating:hover:not([data-static]) {
   color: var(--kd-muted);
 }
-.kd-table-rating > button:hover,
-.kd-table-rating > button:has(~ button:hover) {
-  color: #e0a400;
+.kd-table-rating:focus-visible {
+  outline: 1.5px solid var(--kd-text);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 /* ============================================================

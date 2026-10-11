@@ -609,7 +609,7 @@ export function VideoResultRow({
               );
             case "artist":
               return (
-                <div role="gridcell" className="kd-list-cell" key={column.key} data-col="artist" title={author || undefined} {...cellDrag}>
+                <div role="gridcell" className="kd-list-cell" key={column.key} data-col="artist" data-clip="" title={author || undefined} {...cellDrag}>
                   {keyed(column.key, author || DASH)}
                 </div>
               );

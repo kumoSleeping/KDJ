@@ -14,7 +14,7 @@ WKWebView 的合成器自己滚，显示的是主线程事先画好的瓦片。�
 - 更长的列表只保留视口前后各三屏；虚拟化器用自己的滚动观察器（`observeRowListOffset`）：滚过整整一屏才知会一次，停稳再知会一次，不用 flushSync。于是行的挂卸发生在离视口两三屏之外，可见瓦片不受影响。
 - 等着在某个位置"呈现"的列表（换查询、恢复位置、板块重新显示）在滚动监听里自己要一次渲染（`useScrollMotion` 的 `onScroll`），因为小位移不会让虚拟化器渲染。
 
-## WebKit 里曲库自己滚（`own`）
+## WebKit 里列表自己滚（`own`，曲库和搜索结果都是）
 
 上面是把滚动交给 WebView 的做法。在 WebKit（macOS 和 Linux 的 WebView；`listScrollsItself()`）里曲库反过来，由页面自己滚，原因是 WebKit 自己的两件事：
 
@@ -53,7 +53,7 @@ WKWebView 的合成器自己滚，显示的是主线程事先画好的瓦片。�
 ## 规则
 
 1. 滚动帧里不读布局（`getBoundingClientRect`、`offsetTop`、`scrollHeight`）、不画 canvas、不切祖先的属性；位置从 `useScrollMotion` 读。交给 WebView 滚的列表在滚动帧里也不渲染、不 `flushSync`；自己滚的列表只由虚拟化器在 scroll 事件里渲染进出窗口的那几行。
-2. 行要便宜：只渲染可见列；格里不套包装层；每行不订阅 store（曲库的响度基准由表读一次下发）；封面是普通 `<img>`，在视口外两三屏就挂好，显示过的同步解码。
+2. 行要便宜：只渲染可见列；格里不套包装层；每行不订阅 store（曲库的响度基准由表读一次下发）；封面是普通 `<img>`，显示过的同步解码。在 WebKit 里每个裁切溢出的盒子都是一个层，每次滚动都要遍历全部层，所以只有文字可能超长的格才带 `data-clip`（省略号），数字和日期格不裁切；封面框不裁切，图片自己圆角；评分是一个元素两张遮罩，不是五个 SVG 按钮。
 3. 行和块永远不定位（没有 `position`、`top`、`transform`、`contain`）；到场动画用 transform 动行本身。
 4. 动画的标记在行上（`data-kd-arrive*`、`--kd-arrive-*`），结束后去掉；不在 `.kd-scroll`、`.kd-list`、`.kd-list-body` 上放任何会被后代选择器用到的属性。
 5. 新的一张列表：给 `useRowList` 一个 `count`、`getKey`、行高（或块估算）和表头高，用 `getVirtualItems()` 渲染，`getTotalSize()` 撑 body；在 layout effect 里按"呈现"与"追上"的规则调用 `listArrival`（建过一次的行不再追上）；外部要找行用 `.kd-list-row[...]`，不要假定没挂载的行在 DOM 里（Shift 区间、MIDI 步进这类要用数据模型，不要用 DOM 顺序）。

@@ -528,13 +528,13 @@ function trackCell(
       // data-empty 是给竖屏用的：那边没有"列"要对齐，
       // 一个孤零零的破折号只是噪声，直接不占位
       return (
-        <div key={key} className="kd-list-cell" role="gridcell" data-col="artist" data-empty={track.artist ? undefined : "true"} title={track.artist}>
+        <div key={key} className="kd-list-cell" role="gridcell" data-col="artist" data-clip="" data-empty={track.artist ? undefined : "true"} title={track.artist}>
           {track.artist || DASH}
         </div>
       );
     case "album":
       return (
-        <div key={key} className="kd-list-cell" role="gridcell" data-col="album" title={track.album}>
+        <div key={key} className="kd-list-cell" role="gridcell" data-col="album" data-clip="" title={track.album}>
           {track.album || DASH}
         </div>
       );
@@ -596,7 +596,7 @@ function trackCell(
     case "filename":
     case "path": {
       const value = track[key] || (key === "source_platform" ? "local" : "");
-      return <div key={key} className="kd-list-cell" role="gridcell" data-col={key} title={value}>{value || DASH}</div>;
+      return <div key={key} className="kd-list-cell" role="gridcell" data-col={key} data-clip="" title={value}>{value || DASH}</div>;
     }
     case "added_at":
       return <div key={key} className="kd-list-cell kd-mono kd-muted" role="gridcell" data-col={key}>{formatDate(track.added_at)}</div>;

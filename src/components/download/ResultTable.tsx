@@ -84,7 +84,7 @@ import {
   type ResultDelivery,
 } from "./resultArrival";
 import { resultBlocks, resultListIsFlat, resultPickKeys, resultRowCount, type ResultBlock } from "./resultBlocks";
-import { rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
+import { listScrollsItself, rowListPadding, useRowList, useScrollMotion } from "../common/rowList";
 import { createListArrival, type ListArrival } from "../common/listArrival";
 import "../common/RowList.css";
 import "./ResultTable.css";
@@ -420,7 +420,9 @@ const ResultTableView = memo(function ResultTableView({
   const arrivalDueRef = useRef<{ offset: number; at: number } | null>(null);
   const motion = useScrollMotion(scrollerRef, () => {}, () => { if (arrivalDueRef.current) bump(); });
   const screenRef = useRef(20);
-  const { virtualizer } = useRowList({ scrollerRef, count: blocks.length, rowHeight: rowH, estimateSize, headHeight: headPx, getKey, measured: true,
+  // In WebKit the list scrolls itself and keeps the blocks around the viewport (rowList.ts).
+  const own = useMemo(() => listScrollsItself(), []);
+  const { virtualizer } = useRowList({ scrollerRef, count: blocks.length, rowHeight: rowH, estimateSize, headHeight: headPx, getKey, measured: true, own,
     screenRows: screenRef.current, resetKey: delivery.id });
   screenRef.current = Math.max(1, Math.ceil(Math.max(rowH, (virtualizer.scrollRect?.height ?? 720) - headPx) / rowH));
   const virtualItems = virtualizer.getVirtualItems();
@@ -562,9 +564,10 @@ const ResultTableView = memo(function ResultTableView({
       return;
     }
     // Rows that a scroll outran catch up with it, from the side it came from; rows built once
-    // before are simply there again.
+    // before are simply there again. A list that scrolls itself builds its rows in the frame
+    // that shows them: none is late.
     const { moving, direction } = motion.current;
-    if (!moving || arrivalNow.gesture() === "list") return;
+    if (own || !moving || arrivalNow.gesture() === "list") return;
     const offset = Math.max(0, motion.current.offset);
     const viewTop = offset;
     const viewBottom = offset + Math.max(virtualizer.scrollRect?.height ?? 0, headPx + rowH) - headPx;
@@ -581,7 +584,9 @@ const ResultTableView = memo(function ResultTableView({
   // pane that grew, and right after a batch that did not fill the pane. A batch that failed
   // (the fetch ended and nothing was added) is asked for again by the user's next scroll or
   // turn of the wheel, never by itself.
-  const moreRef = useRef({ loading: loadingMoreRows, ask: onShowMoreRows, failed: false });
+  // `askedFor`: the batch asked for from this many rows; it is not asked for again (a wheel and
+  // the scroll it causes both reach the end) until the list grew or the fetch ended empty.
+  const moreRef = useRef({ loading: loadingMoreRows, ask: onShowMoreRows, failed: false, askedFor: null as number | null });
   moreRef.current.loading = loadingMoreRows;
   moreRef.current.ask = onShowMoreRows;
   const fetchFromRef = useRef<number | null>(null);
@@ -591,8 +596,12 @@ const ResultTableView = memo(function ResultTableView({
     } else if (fetchFromRef.current !== null) {
       moreRef.current.failed = fetchFromRef.current === reveal.shown;
       fetchFromRef.current = null;
+      moreRef.current.askedFor = null;
     }
   }, [loadingMoreRows, reveal.shown]);
+  useEffect(() => {
+    moreRef.current.askedFor = null;
+  }, [reveal.shown]);
   useEffect(() => {
     moreRef.current.failed = false;
   }, [delivery.id]);
@@ -600,9 +609,10 @@ const ResultTableView = memo(function ResultTableView({
     if (!scroller || !hasMoreRows || !paneShown) return;
     const check = (byUser: boolean) => {
       const more = moreRef.current;
-      if (more.loading || (more.failed && !byUser)) return;
+      if (more.loading || (more.failed && !byUser) || more.askedFor === reveal.shown) return;
       if (!nearListEnd(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight)) return;
       more.failed = false;
+      more.askedFor = reveal.shown;
       more.ask();
     };
     const onScroll = () => check(true);
@@ -832,13 +842,13 @@ const ResultTableView = memo(function ResultTableView({
           );
         case "artist":
           return (
-            <div key={key} role="gridcell" className="kd-list-cell" data-col="artist" title={collection.subtitle}>
+            <div key={key} role="gridcell" className="kd-list-cell" data-col="artist" data-clip="" title={collection.subtitle}>
               {collection.subtitle}
             </div>
           );
         case "album":
           return (
-            <div key={key} role="gridcell" className="kd-list-cell kd-muted" data-col="album">
+            <div key={key} role="gridcell" className="kd-list-cell kd-muted" data-col="album" data-clip="">
               {KIND_LABEL[collection.kind]}
             </div>
           );

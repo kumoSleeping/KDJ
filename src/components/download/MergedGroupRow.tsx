@@ -296,13 +296,13 @@ export function MergedGroupRow({
         );
       case "artist":
         return (
-          <div role="gridcell" className="kd-list-cell" key={key} data-col="artist" title={group.artists.join(", ")} {...cellDrag}>
+          <div role="gridcell" className="kd-list-cell" key={key} data-col="artist" data-clip="" title={group.artists.join(", ")} {...cellDrag}>
             {keyed(key, group.artists.join(", ") || DASH)}
           </div>
         );
       case "album":
         return (
-          <div role="gridcell" className="kd-list-cell" key={key} data-col="album" title={group.album} {...cellDrag}>
+          <div role="gridcell" className="kd-list-cell" key={key} data-col="album" data-clip="" title={group.album} {...cellDrag}>
             {keyed(key, group.album || DASH)}
           </div>
         );
