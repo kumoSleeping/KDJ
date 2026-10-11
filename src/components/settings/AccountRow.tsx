@@ -195,6 +195,13 @@ export function AccountRow({
   const [youtubeBrowser, setYoutubeBrowser] = useState("");
   const [youtubeProfile, setYoutubeProfile] = useState("");
   const [youtubeHeaders, setYoutubeHeaders] = useState("");
+  const [soundcloudPair, setSoundcloudPair] = useState("");
+  const [soundcloudPairBusy, setSoundcloudPairBusy] = useState(false);
+  useEffect(() => {
+    if (!soundcloudPair) return;
+    const timer = window.setTimeout(() => setSoundcloudPair(""), 300_000);
+    return () => window.clearTimeout(timer);
+  }, [soundcloudPair]);
   /** 打开用（安卓可能是 content URI）。 */
   const [savedPath, setSavedPath] = useState("");
   /** 给用户看的路径；没有就退化成 savedPath。 */
@@ -827,6 +834,31 @@ export function AccountRow({
             padding: "0 0 0.45rem 2.4rem",
           }}
         >
+          {soundcloudAccount && ["windows", "win32"].includes(String(getBridge().platform)) && (
+            <div style={{ display: "grid", gap: "0.3rem" }}>
+              <Button size="sm" variant="ghost" disabled={soundcloudPairBusy || !sourceEnabled}
+                onClick={async () => {
+                  setSoundcloudPairBusy(true);
+                  setNotice("");
+                  setSoundcloudPair("");
+                  try {
+                    const pair = await api.soundcloudExtensionPair();
+                    setSoundcloudPair(pair.code);
+                  } catch (error) {
+                    setNotice(`浏览器配对失败：${error instanceof Error ? error.message : String(error)}`);
+                  } finally {
+                    setSoundcloudPairBusy(false);
+                  }
+                }}>
+                {soundcloudPairBusy ? "正在配对" : "扩展连接"}
+              </Button>
+              {soundcloudPair && <>
+                <input aria-label="SoundCloud 扩展配对码" readOnly value={soundcloudPair}
+                  onFocus={(event) => event.currentTarget.select()} />
+                <small className="kd-faint">配对码有效期 5 分钟 · 在 KDJ SoundCloud 扩展中连接</small>
+              </>}
+            </div>
+          )}
           {(soundcloudWebLoginAvailable || ytmWebLoginAvailable) && (
             <div
               style={{
@@ -922,7 +954,8 @@ export function AccountRow({
                   size="sm"
                   variant="primary"
                   disabled={
-                    youtubeBusy || webLoginBusy || !youtubeBrowser || !youtubeProfile
+                    youtubeBusy || webLoginBusy || !youtubeBrowser || !youtubeProfile ||
+                    (soundcloudAccount && Boolean(selectedYoutubeProfile?.requires_elevation))
                   }
                   onClick={() => void importYoutubeBrowser()}
                 >
@@ -937,7 +970,9 @@ export function AccountRow({
               </small>
               {selectedYoutubeProfile?.requires_elevation && (
                 <small style={{ color: "var(--kd-warn)", lineHeight: 1.35 }}>
-                  此 Windows Profile 使用应用绑定加密；请以管理员运行，或改用 Firefox。
+                  {soundcloudAccount
+                    ? "此 Windows Profile 使用应用绑定加密；可使用扩展连接已有登录。"
+                    : "此 Windows Profile 使用应用绑定加密；请以管理员运行，或改用 Firefox。"}
                 </small>
               )}
             </>

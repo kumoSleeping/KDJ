@@ -204,6 +204,13 @@ impl SoundCloudProvider {
         self.import_browser_session(session).await
     }
 
+    /// The extension reads only SoundCloud's cookie via the browser's own cookie API.
+    pub async fn import_extension_session(&self, token: String, expires_at: i64) -> Result<()> {
+        self.ensure_enabled()?;
+        let session = browser_session_from_token(token, expires_at, "浏览器扩展 · SoundCloud".into())?;
+        self.import_browser_session(session).await
+    }
+
     async fn import_browser_session(&self, session: SoundCloudSession) -> Result<()> {
         let (status, profile) = self
             .authenticated_get_once(&session.access_token, "/me", &[], true)

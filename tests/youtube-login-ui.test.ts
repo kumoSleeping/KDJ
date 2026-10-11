@@ -30,9 +30,12 @@ test("desktop YouTube and SoundCloud login controls dispatch separately and show
     },
     __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: () => {} },
   });
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    supported: true, platform: "windows", browsers: [],
-  }), { status: 200, headers: { "content-type": "application/json" } });
+  globalThis.fetch = async (input) => new Response(JSON.stringify(String(input).endsWith("/extension")
+    ? { code: `KDJ-SC1:5274:${"a".repeat(64)}`, expires_in: 300 }
+    : { supported: true, platform: "windows", browsers: String(input).includes("soundcloud")
+        ? [{ id: "edge", label: "Edge", profiles: [{ id: "default", label: "Default", requires_elevation: true }] }]
+        : [] }
+  ), { status: 200, headers: { "content-type": "application/json" } });
   const { createElement, act } = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { AccountRow } = await import("../src/components/settings/AccountRow");
@@ -54,6 +57,14 @@ test("desktop YouTube and SoundCloud login controls dispatch separately and show
         key: platform, account, sourceEnabled: true, onToggleSource: () => {},
       })));
       await click("连接");
+      if (platform === "soundcloud") {
+        assert.equal([...document.querySelectorAll("button")].find(node => node.textContent === "尝试连接")?.disabled, true);
+        await click("扩展连接");
+        assert.equal(document.querySelector<HTMLInputElement>('input[aria-label="SoundCloud 扩展配对码"]')?.value,
+          `KDJ-SC1:5274:${"a".repeat(64)}`);
+      } else {
+        assert.ok(![...document.querySelectorAll("button")].some(node => node.textContent === "扩展连接"));
+      }
       await click("打开登录窗口");
       assert.ok(calls.includes(platform));
       assert.ok(calls.includes(`${platform}-web-login://result`));

@@ -870,6 +870,8 @@ export const api = {
     post<Account>("/accounts/soundcloud/login/oauth/callback", body),
   soundcloudBrowserCatalog: () =>
     request<BrowserCatalog>("/accounts/soundcloud/login/browsers"),
+  soundcloudExtensionPair: () =>
+    post<{ code: string; expires_in: number }>("/accounts/soundcloud/login/extension"),
   soundcloudBrowserLogin: (browser: string, profile?: string) =>
     post<Account>("/accounts/soundcloud/login/browser", { browser, profile }),
   ytmBrowserCatalog: () =>
