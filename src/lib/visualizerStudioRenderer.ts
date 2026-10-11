@@ -2,7 +2,7 @@ import type { VisualizerFeatureTimeline, VisualizerFeatureFrame } from "../types
 import { defaultVisualizerTransform } from "./audioVisualizerScene";
 import { fitVisualizerImage, visualizerCanvas, type VisualizerImage } from "./audioVisualizerImage";
 import { beatLevel, beatPulseIndex, GLOW_REST, PULSES_PER_CYCLE, songBeat, type SongBeat } from "./songColorBeat";
-import { inkOnGround, parseHex, relativeLuminance, songColorPalette, toneOf, whiteReadsOn } from "./songColorPalette";
+import { inkOnGround, inkTone, lightColours, parseHex, relativeLuminance, songColorPalette, toneOf } from "./songColorPalette";
 import { extractStudioPalette, type StudioPalette } from "./visualizerStudioPalette";
 import { clamp, lyricIndex, parseVisualizerLyrics, prepareStudioMotion, sampleStudioFeatures, sampleStudioMotion, studioBeatGrid, studioClock, studioDuration, studioPercentile, STUDIO_FONTS, validateVisualizerProject, type LyricLine, type StudioMotion, type VisualizerProject } from "./visualizerStudio";
 
@@ -21,9 +21,17 @@ const SPECTRUM_KICK = .3;
 /** A title stays on one line down to this share of its size, then takes a second line. */
 const TITLE_ONE_LINE = .72;
 /** A bracketed tail or a "feat." under its title, as a share of the title's size. */
-const TITLE_TAIL = .52;
+const TITLE_TAIL = .55;
 const TITLE_TAIL_AT = /\s*[(\uff08\[\u3010]|\s+(?=(?:feat|ft)\.?\s)/iu;
-const TITLE_LEADING = 1.16;
+/** From one line of a title to the next, and to a tail under it, as shares of the lower line's size. */
+const TITLE_LEADING = 1.22;
+const TITLE_TAIL_LEADING = 1.45;
+/** The steps of ink between the light one and the deep one along the arc. */
+const ARC_INK_STEPS = 8;
+/** The luminance of the picture under a bar at which its ink starts to leave white, and at
+ * which it has reached the deep tone. White holds 3:1 up to 0.3, the middle of the two. */
+const ARC_INK_FROM = .22;
+const ARC_INK_TO = .4;
 
 interface RollingLyric extends LyricLine { start: number; end: number }
 interface LyricCard { canvas: HTMLCanvasElement }
@@ -37,9 +45,16 @@ interface LyricViewport {
 /** What a mark is drawn in on the picture under it, and the edge that sets it off: light ink
  * with a dark edge, or on a pale picture dark ink with a light one. `edge` is "r,g,b". */
 interface StudioInk { color: string; edge: string; light: boolean }
-/** The lights of one half of the picture, and how they are laid on it: added to a picture that
- * is dark enough to be lit, and on a pale one, where light would not show, laid on as colour. */
-interface StudioGlow { lights: HTMLCanvasElement[]; mist: HTMLCanvasElement; wash: HTMLCanvasElement; tint: string; blend: GlobalCompositeOperation }
+/** One step of the arc's ink, the strength of its edge, and the bars that take it. */
+interface ArcInk { color: string; edge: string; strength: number; bars: number[] }
+interface TitleRow { text: string; size: number; weight: string }
+/** A title laid out: its rows, and its height from the top of the first to the last baseline. */
+interface TitleBlock { rows: TitleRow[]; height: number }
+/** The lights of one half of the picture. They are laid on as colour, never added as light: a
+ * colour laid on a picture makes it no lighter than the colour is, where an added light turned
+ * every bright patch it fell on white. Only the mist, which does not pulse, is still light on
+ * a picture dark enough to show it. */
+interface StudioGlow { lights: HTMLCanvasElement[]; mist: HTMLCanvasElement; wash: HTMLCanvasElement; tint: string; mistBlend: GlobalCompositeOperation }
 /** A picture is pale from this mean luminance up. */
 const PALE_GROUND = .4;
 /** The song's pulse in one frame. `hit` 0..1 is how far it is out, already scaled by how loud
@@ -51,9 +66,9 @@ export interface PreparedStudio {
   left: HTMLCanvasElement; reflection: HTMLCanvasElement; leftWidth: number;
   right: HTMLCanvasElement; rightX: number; disc: HTMLCanvasElement; cover: HTMLCanvasElement;
   rightGlow: StudioGlow; leftGlow: StudioGlow; beat: SongBeat;
-  arcInk: StudioInk; arcInks: { light: StudioInk; dark: StudioInk }; leftInk: StudioInk; energyTrace: Float32Array; spectrumScale: number;
+  arcInks: ArcInk[]; leftInk: StudioInk; energyTrace: Float32Array; spectrumScale: number;
   palette: StudioPalette; leftShade: StudioPalette["shade"]; rail: HTMLCanvasElement; railX: number; information: HTMLCanvasElement;
-  arcBars: { point: [number, number, number, number]; frequency: number; envelope: number; light: boolean }[];
+  arcBars: { point: [number, number, number, number]; frequency: number; envelope: number }[];
   arcBarWidth: number; arcLengths: Float64Array; discLayers: DiscLayers | null; clockLayer: ClockLayer | null;
   lyricCards: Map<number, LyricCard>; lyricFlow: RollingLyric[]; lyricViewport: LyricViewport | null;
   contentScale: number; watermark: HTMLCanvasElement | null;
@@ -100,16 +115,15 @@ function lightSprite(color: string, mist: boolean, heart: number): HTMLCanvasEle
 /** One half's lights from the cover's colours as 歌曲色彩 reads them (songColorPalette.ts): a
  * light for each of the field's four masses, the mist and the wash in its glow. */
 function studioGlow(field: ReturnType<typeof songColorPalette>, pale: boolean): StudioGlow {
-  // Added as light, a light is all but white at its heart. Laid on as colour it is the colour
-  // all through, and a light tone of it: a pastel breath on the picture, where a deeper tone or
-  // a multiply reads as a stain.
-  const tone = pale ? .83 : .8, chroma = pale ? .15 : .16, heart = pale ? 0 : .85;
+  // A tone light enough to glow on a dark picture, and on a pale one a pastel: a deeper tone
+  // there reads as a stain.
+  const glow = toneOf(field.glow, pale ? .84 : .74, .17, 1.6);
   return {
-    lights: field.masses.map(mass => lightSprite(toneOf(mass, tone, chroma), false, heart)),
-    mist: lightSprite(toneOf(field.glow, .86, pale ? .12 : .1), true, pale ? 0 : 1),
-    wash: lightSprite(toneOf(field.glow, pale ? .84 : .8, .15), false, pale ? 0 : .5),
-    tint: toneOf(field.glow, pale ? .8 : .86, pale ? .16 : .1),
-    blend: pale ? "source-over" : "screen",
+    lights: lightColours(field, pale ? .83 : .74, pale ? .15 : .19).map(color => lightSprite(color, false, 0)),
+    mist: lightSprite(toneOf(field.glow, .86, .1), true, pale ? 0 : .6),
+    wash: lightSprite(glow, false, 0),
+    tint: glow,
+    mistBlend: pale ? "source-over" : "screen",
   };
 }
 interface Ground { luminance: Float32Array; width: number; height: number }
@@ -231,18 +245,40 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
   const probe = 240 / w, probeHeight = Math.round(h * probe), probeWidth = Math.max(2, Math.round((w - (arc.cx - arc.radius)) * probe));
   const rightGround = cachedLayer(source, ["ground-right", p.scene.right, probe, probeWidth, probeHeight, p.look.rightFit], () => fitStudioPicture(source, { ...p.scene.right, blur: p.scene.right.blur * probe }, probeWidth, probeHeight, p.look.rightFit || "auto"));
   const leftGround = cachedLayer(leftSource, ["ground-left", p.scene.left, probe, p.look.leftFit], () => fitStudioPicture(leftSource, { ...p.scene.left, blur: p.scene.left.blur * probe }, 96, 96, p.look.leftFit || "cover"));
-  const reach = (arc.radius * (1 - Math.cos(arc.angle)) + w * p.scene.spectrum.length * 1.3) * probe;
-  const rightLuminance = groundOf(rightGround), arcLuminance = groundLuminance(rightLuminance, 0, 0, reach, probeHeight);
-  // The rail is one line and takes the ink of the strip as a whole; each bar takes the ink of
-  // the place it stands on, so a picture that is half sky and half ground gets both.
-  const arcInk = studioInk(p.look.accent, arcLuminance), arcInks = { light: studioInk(p.look.accent, 0), dark: studioInk(p.look.accent, 1) };
+  const rightLuminance = groundOf(rightGround);
   const veil = clamp(p.look.leftVeil * leftShade.alphaScale), shade = relativeLuminance(parseHex(leftShade.color) ?? [98, 98, 98]);
   const leftLuminance = groundLuminance(groundOf(leftGround), 0, 0, 96, 96) * (1 - veil) + shade * veil;
   const leftInk = studioInk(p.look.accent, leftLuminance);
+  // Extra off-canvas bars continue the radial tips through both image edges.
+  const arcBars = Array.from({ length: 100 }, (_, i) => {
+    const u = (i + .5) / 100 * 1.24 - .12, distance = Math.abs(u - .5);
+    return { point: arcPoint(p, u, 0), frequency: .08 + distance * (u < .5 ? 1.65 : 1.84), envelope: .16 + .84 * Math.cos(clamp(distance * 2) * Math.PI / 2) ** .65 };
+  });
+  // Each bar takes the ink of the place it stands on: the middle of its usual length, read
+  // over a small box and evened out along the arc. Between a dark part of the picture and a
+  // pale one the ink shades from white through the cover's colour to its deep tone over a
+  // run of bars, instead of turning from one to the other between two of them.
+  const stood = arcBars.map(({ point: [x, y, nx, ny] }) => {
+    const out = w * p.scene.spectrum.length * .5, box = probeHeight * .05;
+    return groundLuminance(rightLuminance, (x + nx * out - (arc.cx - arc.radius)) * probe - box / 2, (y + ny * out) * probe - box / 2, box, box);
+  });
+  const arcInks: ArcInk[] = Array.from({ length: ARC_INK_STEPS + 1 }, (_, step) => {
+    const tone = step / ARC_INK_STEPS;
+    // The edge is of the other polarity, and weakest where the ink is the colour itself.
+    return { color: inkTone(p.look.accent, tone), edge: tone < .5 ? "6,26,40" : "255,255,255", strength: .42 + .3 * Math.abs(tone * 2 - 1), bars: [] };
+  });
+  const arcSteps = arcBars.map((_, i) => {
+    let sum = 0, weight = 0;
+    for (let n = Math.max(0, i - 4); n <= Math.min(arcBars.length - 1, i + 4); n++) { const share = 5 - Math.abs(n - i); sum += stood[n] * share; weight += share; }
+    const k = clamp((sum / weight - ARC_INK_FROM) / (ARC_INK_TO - ARC_INK_FROM)), step = Math.round(k * k * (3 - 2 * k) * ARC_INK_STEPS);
+    arcInks[step].bars.push(i); return step;
+  });
   const railX = Math.floor(rightX - h * .06);
-  const rail = cachedLayer(source, ["rail", w, h, p.scene.arc, p.look.accent, arcInk], () => {
+  const rail = cachedLayer(source, ["rail", w, h, p.scene.arc, p.look.accent, arcSteps.join("")], () => {
     const layer = visualizerCanvas(Math.ceil(leftWidth - railX + h * .06), h);
-    const c = layer.getContext("2d")!; c.translate(-railX, 0); paintArcRail(c, p, arcInk); return layer;
+    // The rail is shaded as the bars along it are.
+    const stops = arcBars.flatMap((bar, i) => bar.point[1] >= 0 && bar.point[1] <= h ? [{ at: bar.point[1] / h, color: arcInks[arcSteps[i]].color }] : []);
+    const c = layer.getContext("2d")!; c.translate(-railX, 0); paintArcRail(c, p, stops); return layer;
   });
   const lyrics = parseVisualizerLyrics(p.lyrics.lrc, p.lyrics.translation, p.lyrics.showTranslation !== false);
   const lyricFlow: RollingLyric[] = [];
@@ -254,7 +290,7 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
   }
   const lyricViewport = lyricFlow.length ? prepareLyricViewport(p, contentScale, lyricFlow) : null;
   const lyricLayout = p.lyrics.mode !== "off" && lyrics.length > 0;
-  const information = cachedLayer(source, ["text", w, h, p.text, p.look.accent, lyricLayout, contentScale], () => {
+  const information = cachedLayer(source, ["text", w, h, p.text, p.look.accent, lyricLayout, contentScale, p.scene.disc.mode, p.scene.disc.size, p.scene.disc.y], () => {
     const layer = visualizerCanvas(Math.ceil(w * .51 * contentScale), Math.ceil(h * .75));
     paintInformation(layer.getContext("2d")!, p, lyricLayout, contentScale); return layer;
   });
@@ -269,26 +305,10 @@ export function prepareStudio(project: VisualizerProject, images: VisualizerImag
   const field = songColorPalette(palette.colors);
   const rightGlow = studioGlow(field, groundLuminance(rightLuminance, 0, 0, probeWidth, probeHeight) > PALE_GROUND), leftGlow = studioGlow(field, leftLuminance > PALE_GROUND);
   const beat = songBeat(studioBeatGrid(p.track));
-  // Extra off-canvas bars continue the radial tips through both image edges.
-  const arcBars = Array.from({ length: 100 }, (_, i) => {
-    const u = (i + .5) / 100 * 1.24 - .12, distance = Math.abs(u - .5);
-    return { point: arcPoint(p, u, 0), frequency: .08 + distance * (u < .5 ? 1.65 : 1.84), envelope: .16 + .84 * Math.cos(clamp(distance * 2) * Math.PI / 2) ** .65, light: true };
-  });
-  // Where each bar stands on the right-hand picture: the middle of its usual length, read over
-  // a small box, and evened out along the arc so that neighbours do not alternate.
-  const stood = arcBars.map(({ point: [x, y, nx, ny] }) => {
-    const out = w * p.scene.spectrum.length * .5, box = probeHeight * .04;
-    return groundLuminance(rightLuminance, (x + nx * out - (arc.cx - arc.radius)) * probe - box / 2, (y + ny * out) * probe - box / 2, box, box);
-  });
-  for (const [i, bar] of arcBars.entries()) {
-    let sum = 0, count = 0;
-    for (let n = Math.max(0, i - 3); n <= Math.min(arcBars.length - 1, i + 3); n++) { sum += stood[n]; count++; }
-    bar.light = whiteReadsOn(sum / count);
-  }
   const arcBarWidth = arc.radius * arc.angle * 2 * 1.24 / arcBars.length;
   const discLayers = p.scene.disc.mode === "hidden" ? null : prepareDiscLayers(p, discSource, cover, size);
   const smallCount = Math.max(20, Math.round(48 * Math.min(1, contentScale)));
-  return { project: p, timeline, ...prepareTimeline(timeline), lyrics, lyricCards: new Map(), lyricFlow, lyricViewport, contentScale, left, reflection, leftWidth, right, rightX, disc, cover, rightGlow, leftGlow, beat, arcInk, arcInks, leftInk, palette, leftShade, rail, railX, information, arcBars, arcBarWidth, arcLengths: new Float64Array(arcBars.length), discLayers, clockLayer: null, watermark,
+  return { project: p, timeline, ...prepareTimeline(timeline), lyrics, lyricCards: new Map(), lyricFlow, lyricViewport, contentScale, left, reflection, leftWidth, right, rightX, disc, cover, rightGlow, leftGlow, beat, arcInks, leftInk, palette, leftShade, rail, railX, information, arcBars, arcBarWidth, arcLengths: new Float64Array(arcBars.length), discLayers, clockLayer: null, watermark,
     features: { bands: [], bass: 0, rms: 0, onset: 0 }, smallValues: new Float64Array(smallCount), smallSmooth: new Float64Array(smallCount),
     preview: previewWidth !== undefined };
 }
@@ -351,58 +371,63 @@ function paintText(c: CanvasRenderingContext2D, text: string, x: number, y: numb
   c.fillStyle = color; c.fillText(text, x, y); c.restore();
 }
 /**
- * A title or a name. On one line while it fits at no less than 72 % of its size. Past that
- * it takes a second line: a bracketed tail or a "feat." goes under the title in a smaller,
- * lighter face when it has one, so the name itself keeps its size; any other title is broken
- * at a word into two even lines, and a third when two would be small. Nothing is cut off and
- * nothing moves: only a title too long for three lines goes on getting smaller. The last line
- * keeps `baseline` and the block grows upward into `room`. Returns the top of the block.
+ * A title or a name, laid out in `room` of height. On one line at its size when that fits.
+ * When it does not: a bracketed tail or a "feat." goes under it in a smaller, lighter face, so
+ * the name itself keeps its size; a title without one stays on its line down to 72 % and is
+ * then broken at a word into two even lines, and a third when two would be small. Nothing is
+ * cut off and nothing moves: only a title too long for three lines goes on getting smaller.
  */
-function paintTitle(c: CanvasRenderingContext2D, text: string, x: number, baseline: number, size: number, width: number, room: number, font: string, weight: string): number {
-  const title = text.trim(); if (!title) return baseline - size * .8;
-  c.save(); c.textBaseline = "alphabetic";
+function titleBlock(c: CanvasRenderingContext2D, text: string, size: number, width: number, room: number, font: string, weight: string): TitleBlock {
+  const title = text.trim(); if (!title) return { rows: [], height: 0 };
   // Widths per px of size; canvas text scales evenly with it.
   const unit = (value: string, face: string) => { c.font = `${face} 100px ${font}`; return Math.max(.001, c.measureText(value).width / 100); };
-  let rows: { text: string; size: number; weight: string }[] = [];
-  const whole = unit(title, weight);
-  if (whole * size * TITLE_ONE_LINE <= width) rows = [{ text: title, size: Math.min(size, width / whole), weight }];
-  else {
-    const points = lyricWrapPoints(title);
-    const wrapAt = (at: number, limit: number) => { c.font = `${weight} ${at}px ${font}`; return wrapRows(c, points, limit); };
-    // The largest size at which the title takes no more than `lines` rows of the block's room.
-    const wrapped = (lines: number) => {
-      let lo = 0, hi = Math.min(size, room / (.8 + (lines - 1) * TITLE_LEADING)), found = [title];
-      for (let attempt = 0; attempt < 14; attempt++) {
-        const at = attempt ? (lo + hi) / 2 : hi, fit = wrapAt(at, width);
-        if (fit.fits && fit.rows.length <= lines) { lo = at; found = fit.rows; if (!attempt) break; } else hi = at;
-      }
-      return { size: lo, rows: found };
-    };
-    const two = wrapped(2), three = two.size >= size * .5 ? two : wrapped(3), block = three.size > two.size ? three : two;
+  const whole = unit(title, weight), line = Math.min(size, width / whole);
+  let rows: TitleRow[] = [{ text: title, size: line, weight }];
+  if (line < size) {
     const cut = title.search(TITLE_TAIL_AT), head = cut > 0 ? title.slice(0, cut).trimEnd() : "", tail = cut > 0 ? title.slice(cut).trimStart() : "";
-    const lead = head && tail ? Math.min(size, width / unit(head, weight), room / (.8 + TITLE_TAIL * 1.3)) : 0;
+    const lead = head && tail ? Math.min(size, width / unit(head, weight), room / (.8 + TITLE_TAIL * TITLE_TAIL_LEADING)) : 0;
     const under = lead ? Math.min(lead * TITLE_TAIL, width / unit(tail, "400")) : 0;
-    if (lead >= block.size && lead >= size * .6 && under >= lead * .36) rows = [{ text: head, size: lead, weight }, { text: tail, size: under, weight: "400" }];
-    else {
-      // Even lines: the narrowest measure that still gives this many rows.
-      let narrow = width / block.rows.length, wide = width, even = block.rows;
-      for (let attempt = 0; attempt < 10 && block.rows.length > 1 && block.size > 0; attempt++) {
-        const measure = (narrow + wide) / 2, fit = wrapAt(block.size, measure);
-        if (fit.fits && fit.rows.length <= block.rows.length) { wide = measure; even = fit.rows; } else narrow = measure;
+    if (lead > line * 1.05 && lead >= size * .6 && under >= lead * .36) rows = [{ text: head, size: lead, weight }, { text: tail, size: under, weight: "400" }];
+    else if (line < size * TITLE_ONE_LINE) {
+      const points = lyricWrapPoints(title);
+      const wrapAt = (at: number, limit: number) => { c.font = `${weight} ${at}px ${font}`; return wrapRows(c, points, limit); };
+      // The largest size at which the title takes no more than `lines` rows of the block's room.
+      const wrapped = (lines: number) => {
+        let lo = 0, hi = Math.min(size, room / (.8 + (lines - 1) * TITLE_LEADING)), found = [title];
+        for (let attempt = 0; attempt < 14; attempt++) {
+          const at = attempt ? (lo + hi) / 2 : hi, fit = wrapAt(at, width);
+          if (fit.fits && fit.rows.length <= lines) { lo = at; found = fit.rows; if (!attempt) break; } else hi = at;
+        }
+        return { size: lo, rows: found };
+      };
+      const two = wrapped(2), three = two.size >= size * .5 ? two : wrapped(3), block = three.size > two.size ? three : two;
+      if (block.size > line) {
+        // Even lines: the narrowest measure that still gives this many rows.
+        let narrow = width / block.rows.length, wide = width, even = block.rows;
+        for (let attempt = 0; attempt < 10 && block.rows.length > 1; attempt++) {
+          const measure = (narrow + wide) / 2, fit = wrapAt(block.size, measure);
+          if (fit.fits && fit.rows.length <= block.rows.length) { wide = measure; even = fit.rows; } else narrow = measure;
+        }
+        rows = even.map(row => ({ text: row, size: block.size, weight }));
       }
-      // A single word too long for any of this is fitted to the line, as it always was.
-      rows = even.map(row => ({ text: row, size: block.size > 0 ? block.size : Math.max(4, width / whole), weight }));
+      // Otherwise a single line fitted to the measure is the larger, as it always was.
     }
   }
-  let y = baseline, top = baseline;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i];
+  return { rows, height: rows.reduce((sum, row, i) => sum + (i ? titleAdvance(row, weight) : row.size * .8), 0) };
+}
+/** From the baseline above a row to its own: a tail sits further under its title than a line under a line. */
+const titleAdvance = (row: TitleRow, weight: string) => row.size * (row.weight === weight ? TITLE_LEADING : TITLE_TAIL_LEADING);
+/** Draws a laid-out title with the top of its first row at `top`; returns its last baseline. */
+function paintTitleBlock(c: CanvasRenderingContext2D, block: TitleBlock, x: number, top: number, font: string): number {
+  let y = top;
+  c.save(); c.textBaseline = "alphabetic";
+  for (const [i, row] of block.rows.entries()) {
+    y += i ? titleAdvance(row, block.rows[0].weight) : row.size * .8;
     c.font = `${row.weight} ${row.size}px ${font}`;
     c.strokeStyle = "rgba(9,24,30,.72)"; c.lineWidth = Math.max(.5, row.size * .035); c.lineJoin = "round"; c.strokeText(row.text, x, y);
     c.fillStyle = "#ffffff"; c.fillText(row.text, x, y);
-    top = y - row.size * .8; y -= row.size * (row.weight === weight ? TITLE_LEADING : 1.3);
   }
-  c.restore(); return top;
+  c.restore(); return y;
 }
 function label(c: CanvasRenderingContext2D, text: string, x: number, y: number, h: number, font: string, accent: string): void {
   c.save(); c.shadowColor = "transparent"; c.shadowBlur = 0;
@@ -508,11 +533,14 @@ function studioRhythm(s: PreparedStudio, t: number, m: StudioMotion): StudioRhyt
   const lead = s.beat.synced ? (beatPulseIndex(t, s.beat) % PULSES_PER_CYCLE + PULSES_PER_CYCLE) % PULSES_PER_CYCLE : -1;
   return { hit: level * strength * depth, lead, kick: clamp(Math.max(m.bass, m.pulse * .7)) };
 }
-function paintArcRail(c: CanvasRenderingContext2D, p: VisualizerProject, ink: StudioInk): void {
+function paintArcRail(c: CanvasRenderingContext2D, p: VisualizerProject, stops: { at: number; color: string }[]): void {
   const { height: h } = p.scene.canvas, shift = 0;
+  const ink = c.createLinearGradient(0, 0, 0, h);
+  for (const stop of stops) ink.addColorStop(clamp(stop.at), stop.color);
+  if (!stops.length) ink.addColorStop(0, "#ffffff");
   c.save();
-  c.shadowColor = `rgba(${ink.edge},${ink.light ? .45 : .6})`; c.shadowBlur = h * .011;
-  c.globalAlpha = .9; arcPath(c, p, shift, undefined, -h * .007); c.strokeStyle = ink.color; c.lineWidth = h * .006; c.stroke(); c.shadowBlur = 0;
+  c.shadowColor = "rgba(14,39,42,.45)"; c.shadowBlur = h * .011;
+  c.globalAlpha = .9; arcPath(c, p, shift, undefined, -h * .007); c.strokeStyle = ink; c.lineWidth = h * .006; c.stroke(); c.shadowBlur = 0;
   c.globalAlpha = .8; arcPath(c, p, shift, undefined, -h * .017); c.lineWidth = h * .0024; c.setLineDash([h * .01, h * .005]); c.stroke(); c.setLineDash([]);
   c.globalAlpha = 1;
   arcPath(c, p, shift, undefined, h * .004); c.strokeStyle = p.look.accent; c.lineWidth = h * .0025; c.stroke();
@@ -539,7 +567,7 @@ function paintArc(c: CanvasRenderingContext2D, s: PreparedStudio, f: VisualizerF
   const p = s.project, { width: w, height: h } = p.scene.canvas;
   if (rhythm.hit > 0 && p.look.glow > 0) {
     // The rail glows in the cover's colour on the beat: wide faint strokes under a narrow one.
-    c.save(); c.globalCompositeOperation = s.rightGlow.blend; c.strokeStyle = s.rightGlow.tint;
+    c.save(); c.strokeStyle = s.rightGlow.tint;
     for (const [width, alpha] of [[.075, .14], [.038, .24], [.016, .45]]) { c.globalAlpha = alpha * rhythm.hit; c.lineWidth = h * width; arcPath(c, p, 0, undefined, h * .002); c.stroke(); }
     c.restore();
   }
@@ -554,26 +582,28 @@ function paintArc(c: CanvasRenderingContext2D, s: PreparedStudio, f: VisualizerF
     }
     // Low/mid bands occupy the middle of the arc, with treble toward both ends.
     // Gentle edge attenuation balances the composition without inventing beats.
-    // The bars on dark ground, the bars on pale ground, then the accent's core over both.
-    for (const pass of [0, 1, 2]) {
-      const cyan = pass === 2, ink = pass ? s.arcInks.dark : s.arcInks.light, path = new Path2D(); let drawn = cyan;
-      for (let i = 0; i < count; i++) {
-        if (!cyan && s.arcBars[i].light !== (pass === 0)) continue;
-        drawn = true;
-        const [x, y, nx, ny] = s.arcBars[i].point, length = s.arcLengths[i];
-        // The bars stand taller than they did; their echo into the left half keeps its reach,
-        // so it comes no further into the lyrics.
-        if (!cyan) { path.moveTo(x - nx * h * .026, y - ny * h * .026); path.lineTo(x - nx * (h * .026 + length * .26), y - ny * (h * .026 + length * .26)); }
-        path.moveTo(x + nx * h * .012, y + ny * h * .012);
-        path.lineTo(x + nx * (length * (cyan ? .68 : 1) + h * .012), y + ny * (length * (cyan ? .68 : 1) + h * .012));
-      }
-      if (!drawn) continue;
-      c.strokeStyle = cyan ? p.look.accent : ink.color;
-      c.lineWidth = Math.max(1, s.arcBarWidth * (cyan ? .36 : .76));
-      if (!cyan && s.preview) paintPreviewSpectrumShadow(c, path, c.lineWidth, h * .005, ink.edge, .72);
-      c.shadowColor = s.preview ? "transparent" : `rgba(${ink.edge},.72)`; c.shadowBlur = cyan || s.preview ? 0 : h * .005;
+    // The bars of each step of ink, then the accent's core over them all.
+    const trace = (path: Path2D, i: number, core: boolean) => {
+      const [x, y, nx, ny] = s.arcBars[i].point, length = s.arcLengths[i];
+      // The bars stand taller than they did; their echo into the left half keeps its reach,
+      // so it comes no further into the lyrics.
+      if (!core) { path.moveTo(x - nx * h * .026, y - ny * h * .026); path.lineTo(x - nx * (h * .026 + length * .26), y - ny * (h * .026 + length * .26)); }
+      path.moveTo(x + nx * h * .012, y + ny * h * .012);
+      path.lineTo(x + nx * (length * (core ? .68 : 1) + h * .012), y + ny * (length * (core ? .68 : 1) + h * .012));
+    };
+    c.lineWidth = Math.max(1, s.arcBarWidth * .76);
+    for (const ink of s.arcInks) {
+      if (!ink.bars.length) continue;
+      const path = new Path2D();
+      for (const i of ink.bars) trace(path, i, false);
+      if (s.preview) paintPreviewSpectrumShadow(c, path, c.lineWidth, h * .005, ink.edge, ink.strength);
+      c.strokeStyle = ink.color; c.shadowColor = s.preview ? "transparent" : `rgba(${ink.edge},${ink.strength})`; c.shadowBlur = s.preview ? 0 : h * .005;
       c.stroke(path);
     }
+    const core = new Path2D();
+    for (let i = 0; i < count; i++) trace(core, i, true);
+    c.strokeStyle = p.look.accent; c.lineWidth = Math.max(1, s.arcBarWidth * .36); c.shadowColor = "transparent"; c.shadowBlur = 0;
+    c.stroke(core);
   }
   c.restore();
 }
@@ -639,14 +669,14 @@ function paintLights(c: CanvasRenderingContext2D, s: PreparedStudio, t: number, 
     // Both halves breathe with the pulse: a wide wash of the glow behind the content on the
     // left, and one from behind the arc into the picture on the right.
     const radius = h * .7, reach = h * .85;
-    c.save(); arcPath(c, p, shift, "left"); c.clip(); c.globalCompositeOperation = s.leftGlow.blend;
+    c.save(); arcPath(c, p, shift, "left"); c.clip();
     c.globalAlpha = Math.min(1, p.look.glow * rhythm.hit);
     c.drawImage(s.leftGlow.wash, w * .25 * s.contentScale - radius, h * .56 - radius, radius * 2, radius * 2); c.restore();
-    c.save(); arcPath(c, p, shift, "right"); c.clip(); c.globalCompositeOperation = glow.blend;
+    c.save(); arcPath(c, p, shift, "right"); c.clip();
     c.globalAlpha = Math.min(1, p.look.glow * .9 * rhythm.hit);
     c.drawImage(glow.wash, s.rightX + h * .04 - reach, h / 2 - reach, reach * 2, reach * 2); c.restore();
   }
-  c.save(); arcPath(c, p, shift, "right"); c.clip(); c.globalCompositeOperation = glow.blend;
+  c.save(); arcPath(c, p, shift, "right"); c.clip();
   const anchors = [[.65, .20], [.80, .31], [.86, .49], [.63, .84]];
   for (const [i, [ax, ay]] of anchors.entries()) {
     const drift = t * .25 + i * 2.3;
@@ -657,14 +687,15 @@ function paintLights(c: CanvasRenderingContext2D, s: PreparedStudio, t: number, 
     const hit = rhythm.hit * (rhythm.lead < 0 || rhythm.lead === i ? 1 : .5);
     if ((p.look.mist ?? .38) > 0) {
       c.save(); c.translate(x + Math.sin(drift * .81) * h * .035, y); c.rotate(Math.sin(drift) * .35);
-      c.globalAlpha = (p.look.mist ?? .38) * (.10 + breathe * .30 + m.drift * .08) * (1 + .5 * hit);
+      c.globalCompositeOperation = glow.mistBlend;
+      c.globalAlpha = (p.look.mist ?? .38) * (.10 + breathe * .30 + m.drift * .08);
       const width = h * (.46 + i % 2 * .1), height = h * (.24 + m.drift * .035);
       c.drawImage(glow.mist, -width / 2, -height / 2, width, height); c.restore();
     }
     if (p.look.glow > 0) {
       // Between beats a light rests at the share of its peak the field's glow rests at.
       const radius = h * (.065 + i % 2 * .015) * (.8 + breathe * .35) * (1 + .8 * hit);
-      c.globalAlpha = Math.min(1, p.look.glow * 1.6 * (GLOW_REST + (1 - GLOW_REST) * hit) * (.5 + .5 * breathe + m.drift * .15));
+      c.globalAlpha = Math.min(1, p.look.glow * 1.3 * (GLOW_REST + (1 - GLOW_REST) * hit) * (.5 + .5 * breathe + m.drift * .15));
       c.drawImage(glow.lights[i % glow.lights.length], x - radius, y - radius, radius * 2, radius * 2);
     }
   }
@@ -873,30 +904,56 @@ function paintInformation(c: CanvasRenderingContext2D, p: VisualizerProject, lyr
   const textX = w * .044 * contentScale, max = w * .435 * contentScale, font = STUDIO_FONTS[p.text.font], scale = p.text.scale * Math.min(1, contentScale), labelSize = h * scale;
   // Keep labels just above their body line as the overall text scale changes.
   const above = (baseline: number, size: number) => h * (baseline - (size * .85 + .013) * scale);
-  // The same place over a block that has grown upward: just above its first line.
-  const over = (top: number, size: number) => top - h * (size * .05 + .013) * scale, labelRoom = h * .055 * scale;
-  // A title that takes a second line grows into the gap under the sleeve; the lyrics, the
-  // spectrum and everything else beneath it stay where they are.
   const disc = p.scene.disc, sleeve = disc.mode === "hidden" ? 0 : disc.y * h + Math.min(w, h) * disc.size * Math.min(1, contentScale) / 2 + h * .028;
+  const ceiling = Math.max(sleeve, h * .14);
   if (p.text.showAlbum && (p.text.album || p.text.title).trim()) {
     label(c, "Artwork/Album", w * .035 * contentScale, above(.108, .035), labelSize, font, p.look.accent);
     paintText(c, p.text.album || p.text.title, w * .035 * contentScale, h * .108, h * .035 * scale, max, font);
   }
   paintText(c, p.text.collaboration, w * .186 * contentScale, h * .285, h * .080 * scale, w * .285 * contentScale, STUDIO_FONTS.serif, "400");
-  const titleBase = h * (lyricLayout ? .435 : .485), titleSize = h * (lyricLayout ? .078 : .082) * scale;
-  const ceiling = Math.max(sleeve, h * .14, lyricLayout && p.text.credit.trim() ? h * .362 : 0) + (lyricLayout ? 0 : labelRoom);
-  const titleTop = paintTitle(c, p.text.title, textX, titleBase, titleSize, max, Math.max(titleSize * .8, titleBase - ceiling), font, "700");
-  if (!lyricLayout && p.text.title.trim()) label(c, "Track Name", textX, over(titleTop, .082), labelSize, font, p.look.accent);
-  paintText(c, p.text.subtitle, textX, h * (lyricLayout ? .495 : .532), h * .026 * scale, max, font);
   if (lyricLayout) {
+    // Over the lyrics the title keeps its place above them and takes a second line upward,
+    // into the gap under the sleeve; with nothing under it, it comes a little lower first.
+    const size = h * .078 * scale, top = Math.max(ceiling + h * .012, p.text.credit.trim() ? h * .362 : 0);
+    const one = h * .435, lower = p.text.subtitle.trim() ? one : h * .452;
+    const block = titleBlock(c, p.text.title, size, max, Math.max(size * .8, lower - top), font, "700");
+    paintTitleBlock(c, block, textX, (block.rows.length > 1 ? lower : one) - block.height, font);
+    paintText(c, p.text.subtitle, textX, h * .495, h * .026 * scale, max, font);
     paintText(c, p.text.credit, w * .186 * contentScale, h * .35, h * .022 * scale, w * .285 * contentScale, font);
-  } else {
-    const artistBase = h * .67, artistSize = h * .083 * scale;
-    const floor = (p.text.subtitle.trim() ? h * .542 : titleBase + titleSize * .25) + labelRoom;
-    const artistTop = paintTitle(c, p.text.artist, textX, artistBase, artistSize, max, Math.max(artistSize * .8, artistBase - floor), font, "600");
-    if (p.text.artist.trim()) label(c, "Artist Name", textX, over(artistTop, .083), labelSize, font, p.look.accent);
-    paintText(c, p.text.credit, textX, h * .721, h * .025 * scale, max, font);
+    c.restore(); return;
   }
+  // Without lyrics the title and the artist are one column between the sleeve and the
+  // waveform, each under its label. The column is set in the room there is: its blocks keep an
+  // even gap that opens up when there is room to spare, and when a long title or name needs
+  // more lines everything is made a little smaller together, never one line squeezed against
+  // the next. The artist is never set larger than the title.
+  const labelHeight = h * .03 * scale, labelGap = (size: number) => h * (size * .08 + .018) * scale;
+  const regionTop = ceiling + h * .012, subtitle = p.text.subtitle.trim(), credit = p.text.credit.trim();
+  const region = h * (credit ? .68 : .715) - regionTop;
+  const head = (block: TitleBlock, size: number) => block.rows.length ? labelHeight + labelGap(size) + block.height : 0;
+  const title = titleBlock(c, p.text.title, h * .082 * scale, max, h * .175 * scale, font, "700");
+  const artist = titleBlock(c, p.text.artist, Math.min(h * .083 * scale, title.rows[0]?.size ?? Infinity), max, h * .16 * scale, font, "600");
+  const both = title.rows.length > 0 && artist.rows.length > 0, least = both ? h * .04 * scale : 0;
+  // Both are laid out at their sizes first and then brought down by one factor, so the two
+  // keep their proportions and the shape they were given: a title does not lose its second
+  // line, or go smaller than the artist, because the artist needed room.
+  const set = title.height + artist.height, kept = head(title, .082) + head(artist, .083) - set + (subtitle ? h * .047 * scale : 0) + least;
+  const fit = set > 0 ? clamp((region - kept) / set, .4, 1) : 1;
+  for (const block of [title, artist]) { for (const row of block.rows) row.size *= fit; block.height *= fit; }
+  const total = kept - least + set * fit;
+  const gap = both ? clamp((region - total) * .6, least, h * .085) : 0;
+  let y = regionTop + Math.max(0, region - total - gap) * .45;
+  if (title.rows.length) {
+    label(c, "Track Name", textX, y + labelHeight, labelSize, font, p.look.accent);
+    y = paintTitleBlock(c, title, textX, y + labelHeight + labelGap(.082), font);
+  }
+  if (subtitle) { y += h * .047 * scale; paintText(c, p.text.subtitle, textX, y, h * .026 * scale, max, font); }
+  if (artist.rows.length) {
+    y += gap;
+    label(c, "Artist Name", textX, y + labelHeight, labelSize, font, p.look.accent);
+    y = paintTitleBlock(c, artist, textX, y + labelHeight + labelGap(.083), font);
+  }
+  paintText(c, p.text.credit, textX, y + h * .051 * scale, h * .025 * scale, max, font);
   c.restore();
 }
 

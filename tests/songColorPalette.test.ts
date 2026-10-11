@@ -9,6 +9,8 @@ import {
   GROUND_INK_CONTRAST,
   fieldPeakLuminance,
   inkOnGround,
+  inkTone,
+  lightColours,
   luminanceContrast,
   parseHex,
   relativeLuminance,
@@ -110,4 +112,33 @@ test("song colour: a light of a field's colour keeps its hue and is no stronger 
   const grey = parseHex(toneOf("#4a4a4a", 0.84, 0.13))!;
   assert.ok(Math.max(...grey) - Math.min(...grey) <= 2, String(grey));
   assert.equal(toneOf("not a colour", 0.5, 0.1), "not a colour");
+});
+
+test("song colour: ink between white and the deep tone goes by the colour, not by grey", () => {
+  const spread = (hex: string) => { const rgb = parseHex(hex)!; return Math.max(...rgb) - Math.min(...rgb); };
+  const steps = Array.from({ length: 9 }, (_, step) => inkTone("#3f7fd0", step / 8));
+  // From all but white to a deep tone, darker at every step.
+  assert.ok(relativeLuminance(parseHex(steps[0])!) > 0.9 && relativeLuminance(parseHex(steps[8])!) < 0.08, `${steps[0]} … ${steps[8]}`);
+  for (let step = 1; step < steps.length; step += 1) {
+    assert.ok(relativeLuminance(parseHex(steps[step])!) < relativeLuminance(parseHex(steps[step - 1])!), `step ${step}: ${steps[step]}`);
+  }
+  // The middle is the colour at its fullest: more of it than either end has.
+  assert.ok(spread(steps[4]) > spread(steps[0]) + 40 && spread(steps[4]) > spread(steps[8]), steps.join(" "));
+  const middle = parseHex(steps[4])!;
+  assert.ok(middle[2] > middle[0], `still blue: ${steps[4]}`);
+  // A grey accent shades through greys.
+  for (let step = 0; step <= 8; step += 1) assert.ok(spread(inkTone("#8a8a8a", step / 8)) <= 2);
+});
+
+test("song colour: no light is a grey among coloured ones, and an all-grey field stays grey", () => {
+  const spread = (hex: string) => { const rgb = parseHex(hex)!; return Math.max(...rgb) - Math.min(...rgb); };
+  // A cover that is mostly white with one colour: one mass carries the white.
+  const palette = songColorPalette([{ color: "#f4f4f2", share: 0.6 }, { color: "#d2475f", share: 0.3 }, { color: "#2b2b2b", share: 0.1 }]);
+  const lights = lightColours(palette, 0.74, 0.19);
+  assert.equal(lights.length, 4);
+  for (const light of lights) assert.ok(spread(light) >= 40, `${light} has a hue (${palette.masses})`);
+  // None of them is light enough to flash white where it falls.
+  for (const light of lights) assert.ok(relativeLuminance(parseHex(light)!) < 0.6, light);
+  const grey = lightColours(songColorPalette([{ color: "#eeeeee", share: 0.5 }, { color: "#222222", share: 0.5 }]), 0.74, 0.19);
+  for (const light of grey) assert.ok(spread(light) <= 6, light);
 });

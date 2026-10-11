@@ -326,13 +326,30 @@ export function lightSongColorPalette(palette: SongColorPalette): SongColorPalet
   };
 }
 
-/** `hex`'s hue at another lightness, with no more chroma than it has or than `chroma`: a light
+/** `hex`'s hue at another lightness, its chroma times `lift` but no more than `chroma`: a light
  *  of one of the field's colours. A grey stays grey. */
-export function toneOf(hex: string, lightness: number, chroma: number): string {
+export function toneOf(hex: string, lightness: number, chroma: number, lift = 1): string {
   const rgb = parseHex(hex);
   if (!rgb) return hex;
   const colour = rgbToLch(rgb);
-  return toHex(lchToRgb({ l: clamp(lightness, 0, 1), c: Math.min(colour.c, chroma), h: colour.h }));
+  return toHex(lchToRgb({ l: clamp(lightness, 0, 1), c: colour.c < NEUTRAL_CHROMA ? Math.min(colour.c, chroma) : Math.min(colour.c * lift, chroma), h: colour.h }));
+}
+
+/**
+ * The colours of the four lights of a field (the visualizer's): each mass's own hue at
+ * `lightness`, as rich as `chroma` allows. A mass that carries a cover's white, black or grey
+ * has no hue of its own; among colours it takes the glow's, a step round the circle, so that
+ * no light is a grey flash among coloured ones. A field that is all grey stays grey.
+ */
+export function lightColours(palette: SongColorPalette, lightness: number, chroma: number): string[] {
+  const glow = rgbToLch(parseHex(palette.glow) ?? [255, 255, 255]);
+  const masses = palette.masses.map(mass => rgbToLch(parseHex(mass) ?? [128, 128, 128]));
+  const own = (mass: Lch) => mass.c >= 0.05;
+  const hued = glow.c >= NEUTRAL_CHROMA || masses.some(own);
+  return masses.map((mass, index) => {
+    if (own(mass) || !hued) return toHex(lchToRgb({ l: lightness, c: own(mass) ? Math.min(mass.c * 1.6, chroma) : Math.min(mass.c, chroma), h: mass.h }));
+    return toHex(lchToRgb({ l: lightness, c: Math.min(glow.c * 1.6, chroma), h: (glow.h + (index % 2 ? 24 : -24) + 360) % 360 }));
+  });
 }
 
 /** White holds this against a picture up to a luminance of 0.3; past that the ink turns dark. */
@@ -355,6 +372,19 @@ export function inkOnGround(hex: string, ground: number): { color: string; light
       ? inkAt(0.985, colour.h, hued ? 0.012 : 0, under, GROUND_INK_CONTRAST)
       : inkAt(0.3, colour.h, hued ? Math.min(colour.c, 0.08) : 0, under, INK_TEXT_CONTRAST, -1),
   };
+}
+
+/**
+ * Ink part of the way from the light ink to the deep one: at `tone` 0 all but white, at 1 the
+ * deep tone of `hex`'s hue, and between them the hue at its fullest rather than a grey, so a
+ * run of marks that crosses from a dark part of a picture to a pale one shades through the
+ * cover's colour.
+ */
+export function inkTone(hex: string, tone: number): string {
+  const colour = rgbToLch(parseHex(hex) ?? [255, 255, 255]), at = clamp(tone, 0, 1), hued = colour.c >= NEUTRAL_CHROMA;
+  const light = hued ? 0.012 : 0, deep = hued ? Math.min(colour.c, 0.08) : 0;
+  const chroma = light + (deep - light) * at + (hued ? Math.min(colour.c, 0.13) * Math.sin(Math.PI * at) : 0);
+  return toHex(lchToRgb({ l: 0.985 + (0.3 - 0.985) * at, c: chroma, h: colour.h }));
 }
 
 /** The brightest the dark field gets where the glow is at its peak, as a relative luminance. */
