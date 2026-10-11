@@ -473,10 +473,7 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
   max-width: min(20rem, calc(100% - 2 * var(--kd-task-gap)));
 }
 .kd-task-slot[data-size="small"] .kd-task-main { min-height: 2.5rem; padding-block: 5px; }
-.kd-task-slot[data-size="large"] {
-  width: min(28rem, calc(100% - 2 * var(--kd-task-gap)));
-  container: task-bubble / inline-size;
-}
+.kd-task-slot[data-size="large"] { width: min(28rem, calc(100% - 2 * var(--kd-task-gap))); }
 .kd-task-slot[data-size="large"] .kd-task { border-radius: 14px; }
 .kd-task-slot[data-size="large"] .kd-task-main:not([data-bare]) {
   gap: 14px;
@@ -496,51 +493,6 @@ button.kd-task-copy:focus-visible { outline: 1px solid var(--kd-theme); outline-
 .kd-task-slot[data-size="large"] .kd-task-title { font-size: var(--kd-size-lg); font-weight: 700; line-height: 1.3; }
 .kd-task-slot[data-size="large"] .kd-task-detail { font-size: var(--kd-size-sm); }
 .kd-task-slot[data-size="large"] .kd-task-facts { margin-top: 1px; }
-
-/* A two-row task lends the progress row's right end to its tools, just as the player bar does.
-   Use the slot's width: the same bubble can stand in a wide window, span a tall one, or be
-   the mini player. Its owner still supplies only a spec; the host owns all of this layout.
-   A theme pack keeps its caption bar. */
-@container task-bubble (max-width: 40rem) {
-  :root:not([data-theme-pack]) .kd-task[data-layout="two-row"] {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) max-content;
-    grid-template-rows: auto auto;
-    align-items: center;
-    column-gap: 10px;
-    padding: 12px;
-  }
-  :root:not([data-theme-pack]) .kd-task[data-layout="two-row"] .kd-task-main {
-    display: contents;
-  }
-  :root:not([data-theme-pack]) .kd-task[data-layout="two-row"] :is(.kd-task-covers, .kd-task-mark) {
-    grid-area: 1 / 1;
-  }
-  :root:not([data-theme-pack]) .kd-task[data-layout="two-row"] .kd-task-copy {
-    grid-area: 1 / 2;
-  }
-  :root:not([data-theme-pack]) .kd-task[data-layout="two-row"] .kd-task-tools {
-    grid-area: 1 / 3 / 3 / 4;
-    display: grid;
-    grid-template-rows: minmax(1.5rem, 1fr) 1.75rem;
-    grid-auto-flow: column;
-    grid-auto-columns: 1.5rem;
-    align-self: stretch;
-    align-items: center;
-    row-gap: 8px;
-    margin: 0;
-  }
-  :root:not([data-theme-pack]) .kd-task[data-layout="two-row"] .kd-task-controls {
-    grid-area: 2 / 1 / 3 / 3;
-    min-width: 0;
-  }
-  :root:not([data-theme-pack]) .kd-task[data-layout="two-row"] .kd-task-controls-row {
-    padding: 8px 0 0;
-  }
-  :root:not([data-theme-pack]) .kd-task[data-layout="two-row"] .kd-task-body {
-    grid-area: 3 / 1 / 4 / -1;
-  }
-}
 
 /* A tall desktop window (竖长, src/lib/useLayoutMode.ts): a large bubble spans the window, with
    the same gap on its left and on its right. The bar is put away there unless the listener

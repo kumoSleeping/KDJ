@@ -59,12 +59,6 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   In a tall desktop window (`tall` in `src/lib/useLayoutMode.ts`) a `large` bubble spans the
   window, with the same gap on its left and its right; `regular` and `small` keep their size
   and stack above it at the right, where they rise from behind it.
-- **Two-row layout.** `layout: "two-row"` lets a large bubble lend the live-controls row's
-  right end to its tools when its own width is at most 40rem. The cover and copy stay above
-  the controls; the tools occupy two rows beside both, and the waveform gets shorter rather
-  than adding a third row. The playing song uses this in the corner, in a tall window and as
-  the mini player. The host owns the layout and the row still unfolds on its existing clock.
-  A theme pack keeps its caption bar.
 - **The stay.** Each kind chooses its own `stay`: the playing song 5 s, a short note such as
   "没有找到歌词" 3 s. `stay` in ms; left out, the tone decides (`TASK_STAY_MS`: 5 s, an error 10 s).
   `stay: 0` keeps the bubble until it is dismissed — a pinned or opened bubble. The ring shows the
@@ -79,13 +73,14 @@ Code: `src/components/tasks/` (`taskBubbleSchema.ts`, `taskBubbleStore.ts`, `Tas
   `count` says how many things they stand for when that is more than the covers given. A cover is
   an address, or `{ key, urls }` with every address that can show it, best first — the host loads
   it with `useCoverLoad` (`src/lib/coverLoad.ts`), so a refused thumbnail falls back to the
-  original. `taskCoverPreparation.ts` fetches and decodes the visible covers in parallel before
-  an arrival; the playing song starts that work before its peek, while the previous song is
-  leaving. Preparation shares a small decoded-image cache and tries fallback addresses within
-  a 1.5 s budget. Failed or timed-out covers use the no-cover face for that arrival, not a late
-  image popping into view; a later opening can try again. While preparing, a new bubble takes
-  no stack space and spends none of its stay; an existing one keeps its picture and its live
-  controls. Where a task's covers come from is decided in `taskCovers.ts` only.
+  original. For the playing song only, `taskCoverPreparation.ts` fetches and decodes the cover before
+  the arrival: the work starts with the song change, while the previous song is leaving, and
+  the peek waits for it 300 ms at most. Preparation shares a small decoded-image cache and
+  tries fallback addresses within that budget. A failed or late cover means the no-cover face
+  for that arrival, not an image popping into a bubble that is already up; a later opening
+  tries again. While preparing, the bubble takes no stack space and spends none of its stay; an
+  existing one keeps its picture and its live controls. Every other bubble comes up at once and
+  shows its covers as they load. Where a task's covers come from is decided in `taskCovers.ts` only.
 - **Where it comes from.** `origin: { label, mark }` is a small mark at the head of the facts
   line: the platform a song is streamed or was downloaded from. A brand mark keeps its own
   colour; the host places it.

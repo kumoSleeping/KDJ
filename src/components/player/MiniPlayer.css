@@ -86,3 +86,13 @@
 :root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] .kd-task-action:not(.kd-mini-key) {
   display: none;
 }
+/* Its two keys stand in a column at the right, as tall as the cover (TaskBubbles.css, the large
+   bubble's single cover): the top key level with the cover's top edge, the bottom one with its
+   bottom edge, and the song's text has the whole width between. The tool row of the whole
+   window would put them side by side in the corner over the transport. */
+:root[data-kd-mini="on"] .kd-task-host > .kd-task-slot > .kd-task[data-kind="playing"] .kd-task-tools {
+  flex-direction: column;
+  justify-content: space-between;
+  align-self: center;
+  height: 4.25rem;
+}

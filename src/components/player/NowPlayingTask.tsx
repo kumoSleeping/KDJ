@@ -148,7 +148,6 @@ export function NowPlayingTask({ trackId, playing, popup = null, popupOn = false
       covers,
       song: track.id,
       size: "large",
-      layout: "two-row",
       base: true,
       stay: held || extent.opened ? 0 : NOW_PLAYING_PEEK_MS,
       escape: true,

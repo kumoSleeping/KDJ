@@ -24,6 +24,9 @@ frame and its motion). macOS and Windows run the same steps through the same win
   work rail and search text); its surface, window keys and live transport stay put. It never
   sends the window off screen and back. In the whole window the bubble keeps its usual roll
   down and rise.
+- **Its keys.** 置顶 and 展开窗口 stand in a column at the right edge, as tall as the cover and
+  level with its top and bottom edges (MiniPlayer.css); the title has the whole width between
+  the cover and them. In the whole window the same two keys are in the bubble's tool row.
 - **Back.** The key 展开窗口. The mini player goes into that corner again, and the whole
   window fades in as it was. The place the mini player was left at is remembered for next
   time, across launches (`mini-player.json` in the data directory); a place on a display that

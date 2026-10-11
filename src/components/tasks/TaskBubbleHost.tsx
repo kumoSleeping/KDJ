@@ -102,11 +102,13 @@ interface TaskBubbleProps {
   onSize(key: string, height: number | null): void;
 }
 
-/** Preparing is not an arrival: no empty surface, stack space or countdown yet. An existing
- * bubble keeps its picture while the next covers load, but its live controls follow playback. */
+/** The playing song's bubble waits (briefly) for its cover: preparing is not an arrival, with no
+ * empty surface, stack space or countdown yet, and an existing bubble keeps its picture while
+ * the next covers load, though its live controls follow playback. Every other bubble comes up at
+ * once and shows its covers as they load. */
 function TaskBubble(props: TaskBubbleProps) {
   const { entry } = props;
-  const covers = usePreparedTaskCovers(entry.spec.covers ?? []);
+  const covers = usePreparedTaskCovers(entry.spec.covers ?? [], entry.spec.kind === "playing");
   const previous = useRef<TaskBubbleEntry | null>(null);
   if (covers !== null && !entry.leaving) previous.current = { ...entry, spec: { ...entry.spec, covers } };
   const shown = previous.current;
@@ -290,7 +292,7 @@ function ReadyTaskBubble({ entry, lift, away, front, held, onHeld, onSize, prepa
   return <div className="kd-task-slot" data-size={spec.size ?? "regular"}
     style={{ "--kd-task-lift": `${lift}px`, "--kd-task-away": away === null ? undefined : `${away}px`, zIndex: front } as CSSProperties}>
     <article ref={node} className="kd-task" role={tone === "error" ? "alert" : "status"}
-      data-kind={spec.kind} data-layout={spec.layout} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
+      data-kind={spec.kind} data-tone={tone} data-phase={entry.leaving || swapping ? "out" : "in"}
       data-expanded={expanded || undefined} data-held={held || preparing || swapping || undefined}
       data-controls={hasControls || undefined} {...backdrop.attributes} style={backdrop.style}
       onPointerEnter={() => onHeld(key, true)} onPointerLeave={() => onHeld(key, false)}
