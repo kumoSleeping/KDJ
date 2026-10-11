@@ -1,7 +1,6 @@
 import { PanelStack } from "../common/PanelStack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useWindowTaken, windowTaken } from "../../lib/windowTaken";
-import { LibraryFootBar } from "../library/LibraryFootBar";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { EditorDock } from "./EditorDock";
 import { useStore } from "zustand";
@@ -2507,7 +2506,6 @@ export function Workspace() {
                     sort2={filter.sort2}
                     order2={filter.order2}
                   />
-                  <LibraryFootBar />
                 </div>
 
                 {visiblePaneOrder.slice(0, -1).map((left, index) => {
