@@ -36,7 +36,7 @@ export interface TaskAction {
   pressed?: boolean;
   busy?: boolean;
   /** Optional secondary menu, anchored to this key. Right click or the keyboard menu key. */
-  onContextMenu?(anchor: HTMLElement): void;
+  onContextMenu?(anchor: HTMLElement, input: "pointer" | "keyboard"): void;
   menuOpen?: boolean;
   /** `bubble` is the bubble's own element, for what opens beside it. */
   onSelect(bubble: HTMLElement): void;

@@ -63,7 +63,8 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   right click on the lyrics key in the player bar or playing-song bubble, offers
   标准 (`two-thirds`), 更长 (`full`: down to just above the player bar, or the playing song's
   bubble while the bar is away) and, in a tall desktop window only, 全屏 (`takesWindow`, below).
-  The choice is remembered (`src/lib/lyricsExtent.ts`); a stored 全屏 is shown and marked as
+  Pointer-opened height menus show the check mark without a keyboard focus ring; using the
+  keyboard restores the focus indication. The choice is remembered (`src/lib/lyricsExtent.ts`); a stored 全屏 is shown and marked as
   更长 wherever it is not offered, without being rewritten. Choosing from the menu also gives
   a dragged height back (`resetDrawerHeight`), since that would keep the choice from showing.
 - **What is measured.** A body's scrolling element carries the class `kd-scroll` (or

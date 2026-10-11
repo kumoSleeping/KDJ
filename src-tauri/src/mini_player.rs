@@ -100,11 +100,15 @@ struct Inner {
     saved: Saved,
     session: Option<Session>,
     busy: bool,
+    /// Each way down or back owns its fallback; a timer from another way does nothing.
+    generation: u64,
 }
 
 pub struct MiniPlayer {
     path: PathBuf,
     inner: Mutex<Inner>,
+    /// Window mutations, including a fallback reveal, must finish before the next begins.
+    steps: tokio::sync::Mutex<()>,
 }
 
 /// The bubble as it stands in the whole window, in CSS pixels of the viewport.
@@ -133,7 +137,7 @@ impl MiniPlayer {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
             .unwrap_or_default();
-        Self { path, inner: Mutex::new(Inner { saved, ..Inner::default() }) }
+        Self { path, inner: Mutex::new(Inner { saved, ..Inner::default() }), steps: tokio::sync::Mutex::new(()) }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -183,23 +187,31 @@ pub fn persist(app: &AppHandle) {
     }
 }
 
-/// One step at a time. Dropped at the end of a command, whatever way it ends.
-struct Step<'a>(&'a MiniPlayer);
+/// One step at a time, through its last animation frame. A page reveal waits for a fallback
+/// already showing the window rather than returning while that animation is still running.
+struct Step<'a> {
+    mini: &'a MiniPlayer,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
 
 impl<'a> Step<'a> {
-    fn begin(mini: &'a MiniPlayer) -> Result<Self, String> {
-        let mut inner = mini.lock();
-        if inner.busy {
-            return Err("迷你播放器正在切换".into());
-        }
-        inner.busy = true;
-        Ok(Self(mini))
+    async fn begin(mini: &'a MiniPlayer) -> Self {
+        let guard = mini.steps.lock().await;
+        mini.lock().busy = true;
+        Self { mini, _guard: guard }
+    }
+
+    /// A resize notification during a transition is superseded by the next measurement.
+    fn try_begin(mini: &'a MiniPlayer) -> Option<Self> {
+        let guard = mini.steps.try_lock().ok()?;
+        mini.lock().busy = true;
+        Some(Self { mini, _guard: guard })
     }
 }
 
 impl Drop for Step<'_> {
     fn drop(&mut self) {
-        self.0.lock().busy = false;
+        self.mini.lock().busy = false;
     }
 }
 
@@ -477,22 +489,26 @@ fn out_of_sight(window: &WebviewWindow, frame: Frame) -> Frame {
     Frame { x, y, ..frame }
 }
 
-/// A concealed window is shown by `mini_player_reveal`. Should the page never ask, it is shown
-/// anyway.
-fn shown_at_last(app: &AppHandle, window: &WebviewWindow) {
+/// A concealed window is shown by `mini_player_reveal`. Should the page never ask, only this
+/// transition is shown anyway: an old timer must not consume a later transition's pending frame.
+fn shown_at_last(app: &AppHandle, window: &WebviewWindow, generation: u64, animated: bool) {
     let (app, window) = (app.clone(), window.clone());
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(REVEAL_WITHIN).await;
-        reveal(&app, &window, true).await;
+        reveal(&app, &window, generation, animated).await;
     });
 }
 
 /// Shows a concealed window. The whole window fades in where it was. The mini player pops
-/// out of the nearest corner of its screen. Once: a second call finds nothing pending.
-async fn reveal(app: &AppHandle, window: &WebviewWindow, animated: bool) {
+/// out of the nearest corner of its screen. Once: a second call waits, then finds nothing pending.
+async fn reveal(app: &AppHandle, window: &WebviewWindow, generation: u64, animated: bool) {
     let Some(mini) = app.try_state::<MiniPlayer>() else { return; };
+    let _step = Step::begin(&mini).await;
     let shown = {
         let mut inner = mini.lock();
+        if inner.generation != generation {
+            return;
+        }
         inner.session.as_mut().and_then(|session| {
             let frame = session.pending.take()?;
             Some((frame, *session))
@@ -602,7 +618,7 @@ pub async fn mini_player_collapse(
 ) -> Result<MiniPlayerState, String> {
     main_only(&window)?;
     let mini = mini_of(&app)?;
-    let _step = Step::begin(&mini)?;
+    let _step = Step::begin(&mini).await;
     if mini.lock().session.is_some() {
         return Err("已经是迷你播放器".into());
     }
@@ -638,8 +654,9 @@ pub async fn mini_player_collapse(
     }
     let corner = (full.right() - bubble.right(), full.bottom() - bubble.bottom());
     let screens = screens_of(&window);
-    let on_top = {
+    let (on_top, generation) = {
         let mut inner = mini.lock();
+        inner.generation = inner.generation.wrapping_add(1);
         let start = shown_at(inner.saved.place, bubble, &screens);
         // From here on a move or a resize is the mini player's, not the main window's.
         inner.session = Some(Session {
@@ -651,10 +668,9 @@ pub async fn mini_player_collapse(
             pending: Some(start),
             expanding: false,
         });
-        inner.saved.on_top
+        (inner.saved.on_top, inner.generation)
     };
     // At once, with motion or without: there is nothing to animate about its going.
-    let _ = animated;
     conceal(&window)?;
     if maximized {
         // A maximized window does not take a size.
@@ -662,7 +678,7 @@ pub async fn mini_player_collapse(
         tokio::time::sleep(SETTLE).await;
     }
     dress(&app, &window, true, on_top);
-    shown_at_last(&app, &window);
+    shown_at_last(&app, &window, generation, animated);
     Ok(mini.state())
 }
 
@@ -670,8 +686,10 @@ pub async fn mini_player_collapse(
 #[tauri::command]
 pub async fn mini_player_reveal(app: AppHandle, window: WebviewWindow, animated: bool) -> Result<MiniPlayerState, String> {
     main_only(&window)?;
-    reveal(&app, &window, animated).await;
-    Ok(mini_of(&app)?.state())
+    let mini = mini_of(&app)?;
+    let generation = mini.lock().generation;
+    reveal(&app, &window, generation, animated).await;
+    Ok(mini.state())
 }
 
 /// Back to the whole window. The mini player goes into the nearest corner of its screen; the
@@ -681,9 +699,9 @@ pub async fn mini_player_reveal(app: AppHandle, window: WebviewWindow, animated:
 pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated: bool) -> Result<MiniPlayerState, String> {
     main_only(&window)?;
     let mini = mini_of(&app)?;
-    let _step = Step::begin(&mini)?;
+    let _step = Step::begin(&mini).await;
     let current = frame_of(&window)?;
-    let (session, shown, saved) = {
+    let (session, shown, saved, generation) = {
         let mut inner = mini.lock();
         let Some(session) = inner.session.as_mut() else {
             return Err("不是迷你播放器".into());
@@ -697,7 +715,8 @@ pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated:
         if shown {
             inner.saved.place = Some((current.x, current.y));
         }
-        (session, shown, inner.saved)
+        inner.generation = inner.generation.wrapping_add(1);
+        (session, shown, inner.saved, inner.generation)
     };
     if shown {
         mini.save(saved);
@@ -707,7 +726,7 @@ pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated:
     conceal(&window)?;
     dress(&app, &window, false, false);
     apply(&window, out_of_sight(&window, session.full), true);
-    shown_at_last(&app, &window);
+    shown_at_last(&app, &window, generation, animated);
     Ok(mini.state())
 }
 
@@ -718,6 +737,7 @@ pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated:
 pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height: f64) -> Result<(), String> {
     main_only(&window)?;
     let mini = mini_of(&app)?;
+    let Some(_step) = Step::try_begin(&mini) else { return Ok(()); };
     let scale = window.scale_factor().map_err(|error| error.to_string())?;
     let size = ((width * scale).round().max(0.0) as u32, (height * scale).round().max(0.0) as u32);
     if size.0 < SMALLEST || size.1 < SMALLEST {
@@ -726,9 +746,6 @@ pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height
     let screens = screens_of(&window);
     let waiting = {
         let mut inner = mini.lock();
-        if inner.busy {
-            return Ok(());
-        }
         let Some(session) = inner.session.as_mut().filter(|session| !session.expanding) else {
             return Ok(());
         };
@@ -755,13 +772,14 @@ pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height
 }
 
 #[tauri::command]
-pub fn mini_player_set_on_top(app: AppHandle, window: WebviewWindow, on_top: bool) -> Result<MiniPlayerState, String> {
+pub async fn mini_player_set_on_top(app: AppHandle, window: WebviewWindow, on_top: bool) -> Result<MiniPlayerState, String> {
     main_only(&window)?;
     let mini = mini_of(&app)?;
+    let _step = Step::begin(&mini).await;
     let (active, saved) = {
         let mut inner = mini.lock();
         inner.saved.on_top = on_top;
-        (inner.session.is_some(), inner.saved)
+        (inner.session.is_some_and(|session| !session.expanding), inner.saved)
     };
     mini.save(saved);
     if active {

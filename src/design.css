@@ -14,10 +14,7 @@
 :root {
   color-scheme: dark;
 
-  /* —— 主色 ——
-     The interface has no colour of its own: what used to be the theme red is ink, the text
-     colour, and what sits on it takes the panel colour. Red (--kd-red) is kept for the few
-     keys that are allowed it (see AGENTS.md); a theme pack brings its own --kd-theme. */
+  /* —— 主色 —— */
   --kd-red: #ef4444;
   --kd-theme: var(--kd-text);
   --kd-theme-ink: var(--kd-panel);
@@ -5505,6 +5502,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   outline: 1px solid var(--kd-muted);
   outline-offset: -2px;
 }
+/* Programmatic menu focus after a right click is not keyboard navigation. Keep the check
+   mark, and restore the ordinary ring as soon as the listener uses the keyboard. */
+.kd-context-menu[data-menu-input="pointer"] > button:focus-visible { outline: none; }
 .kd-context-menu > button[aria-checked="true"],
 .kd-context-menu > button[aria-checked="true"]:hover:not(:disabled) {
   color: var(--kd-theme);
@@ -6480,19 +6480,13 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-player-facekey[data-on="true"] { color: var(--kd-text); }
 .kd-player-colorbtn { width: 1.45rem; }
 /* Panel switches keep the same quiet ink in either state; labels and aria-pressed carry it.
-   Auto-advance is a playback mode, not a panel switch. Theme packs keep their own keys. */
-:root:not([data-theme-pack]) .kd-player-float-tools button[aria-pressed]:not(.kd-player-auto-advance) {
+   Theme packs keep their own keys. */
+:root:not([data-theme-pack]) .kd-player-float-tools button[aria-pressed] {
   color: var(--kd-muted);
 }
 .kd-player-auto-advance {
   width: 1.45rem;
   height: 1.7rem;
-}
-.kd-player-auto-advance[data-on="true"] {
-  color: var(--kd-red);
-}
-.kd-player-auto-advance[data-on="true"]:hover:not(:disabled) {
-  color: color-mix(in srgb, var(--kd-red) 85%, #000);
 }
 .kd-player-lyricsbtn {
   position: relative;
