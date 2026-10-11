@@ -990,8 +990,24 @@ export const TrackTable = memo(function TrackTable({
    */
   const renderStartedAt = performance.now();
   const traceRef = useRef({ running: false, startedAt: 0, from: 0, frames: 0, scrolls: 0, slow: 0, gapMax: 0, lastFrame: 0, loop: 0,
-    renders: 0, renderMs: 0, rowRendersAt: 0, bumps: 0, publishes: 0, downloads: 0, layoutMs: 0, styleMs: 0, props: 0,
+    renders: 0, renderMs: 0, rowRendersAt: 0, bumps: 0, publishes: 0, downloads: 0, layoutMs: 0, styleMs: 0, layoutPreMs: 0, props: 0,
     prevSummaries: summaryById, prevDownloads: downloadTasks, prevProps: [] as unknown[] });
+  // Dev: before any scroll handler runs (a capturing listener on the window runs first), was
+  // layout already dirty? Then it is the frame before (its handlers, the player bar's text, a
+  // sticky head) that leaves it so, not the handlers of this event.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const before = (event: Event) => {
+      const box = scrollerRef.current;
+      const trace = traceRef.current;
+      if (!box || event.target !== box || !trace.running) return;
+      const t0 = performance.now();
+      void box.offsetHeight;
+      trace.layoutPreMs += performance.now() - t0;
+    };
+    window.addEventListener("scroll", before, { capture: true, passive: true });
+    return () => window.removeEventListener("scroll", before, { capture: true });
+  }, []);
   if (import.meta.env.DEV) {
     const trace = traceRef.current;
     trace.renders += 1;
@@ -1812,7 +1828,8 @@ export const TrackTable = memo(function TrackTable({
           scrolls: trace.scrolls, frames: trace.frames, slow: trace.slow, gapMax: Math.round(trace.gapMax),
           renders: trace.renders, renderMs: Math.round(trace.renderMs), rowRenders: rowRenders - trace.rowRendersAt,
           props: trace.props, bumps: trace.bumps, publishes: trace.publishes, downloads: trace.downloads,
-          layoutMs: Math.round(trace.layoutMs), styleMs: Math.round(trace.styleMs),
+          layoutMs: Math.round(trace.layoutMs), styleMs: Math.round(trace.styleMs), layoutPreMs: Math.round(trace.layoutPreMs),
+          playing: getPlayingTrack() ? 1 : 0,
           rows: rowElementsRef.current.size, count: ids.length, whole: whole ? 1 : 0, built: mounted ? 1 : 0,
           covers, due: arrivalDueRef.current ? 1 : 0 });
       }
@@ -1829,7 +1846,7 @@ export const TrackTable = memo(function TrackTable({
     if (trace.running) return;
     Object.assign(trace, { running: true, startedAt: performance.now(), from: motion.current.offset, frames: 0, scrolls: 1, slow: 0, gapMax: 0,
       lastFrame: performance.now(), renders: 0, renderMs: 0, rowRendersAt: rowRenders, bumps: 0, publishes: 0, downloads: 0,
-      layoutMs: 0, styleMs: 0, props: 0 });
+      layoutMs: 0, styleMs: 0, layoutPreMs: 0, props: 0 });
     const tick = (now: number) => {
       const gap = now - trace.lastFrame;
       trace.lastFrame = now;
