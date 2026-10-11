@@ -666,11 +666,13 @@ function paintLights(c: CanvasRenderingContext2D, s: PreparedStudio, t: number, 
   c.save();
   const glow = s.rightGlow;
   if (p.look.glow > 0 && rhythm.hit > 0) {
-    // Both halves breathe with the pulse: a wide wash of the glow behind the content on the
-    // left, and one from behind the arc into the picture on the right.
+    // Both halves breathe with the pulse: a wide wash of the glow from behind the arc into the
+    // picture on the right, and a faint one behind the content on the left. The right leads.
+    // The left is where the words are read: it answers only the strong beats, and those at
+    // well under half of what the right shows, so nothing flashes behind the text.
     const radius = h * .7, reach = h * .85;
     c.save(); arcPath(c, p, shift, "left"); c.clip();
-    c.globalAlpha = Math.min(1, p.look.glow * rhythm.hit);
+    c.globalAlpha = Math.min(1, p.look.glow * .4 * rhythm.hit * rhythm.hit);
     c.drawImage(s.leftGlow.wash, w * .25 * s.contentScale - radius, h * .56 - radius, radius * 2, radius * 2); c.restore();
     c.save(); arcPath(c, p, shift, "right"); c.clip();
     c.globalAlpha = Math.min(1, p.look.glow * .9 * rhythm.hit);
