@@ -68,7 +68,7 @@ test("song colour: the choice is kept, and nothing is drawn, fetched or listened
   // The bar is away: the bubble is the transport and carries the song's switches, 歌曲色彩
   // among them (beside the bar they are the bar's keys).
   usePlayerBarAway.setState({ tall: false, collapsed: true, phase: "away" });
-  useNowPlayingInfo.setState({ open: false, pinned: true, peek: 0, barAway: true });
+  useNowPlayingInfo.setState({ open: false, peek: 0, barAway: true });
   useTaskBubbles.setState({ entries: [] });
   const root = createRoot(dom.window.document.getElementById("root")!);
   heard.length = 0;
@@ -82,7 +82,7 @@ test("song colour: the choice is kept, and nothing is drawn, fetched or listened
   const actions = () => useTaskBubbles.getState().entries.find(entry => entry.spec.id === NOW_PLAYING_TASK && !entry.leaving)?.spec.actions ?? [];
 
   // Off: the bubble has its slot and its key, and that is all there is.
-  assert.ok(bubble(), "the pinned bubble is up");
+  assert.ok(bubble(), "the bubble is up as the transport");
   assert.equal(layersOn(), 0, "no layer");
   assert.equal(dom.window.document.querySelectorAll("canvas").length, 0, "no bitmap");
   assert.equal(songColorSessionRunning(), false, "nothing reads covers");
