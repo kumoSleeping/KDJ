@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   AlertTriangle,
   Check,
@@ -84,7 +84,7 @@ import {
   type ResultDelivery,
 } from "./resultArrival";
 import { resultBlocks, resultListIsFlat, resultPickKeys, resultRowCount, type ResultBlock } from "./resultBlocks";
-import { rowListOverscan, useRowList, useScrollMotion } from "../common/rowList";
+import { useRowList, useScrollMotion } from "../common/rowList";
 import { createListArrival, type ListArrival } from "../common/listArrival";
 import "../common/RowList.css";
 import "./ResultTable.css";
@@ -415,10 +415,13 @@ const ResultTableView = memo(function ResultTableView({
   const getKey = useCallback((index: number) => `${delivery.id}:${blocks[index]?.key ?? index}`, [blocks, delivery.id]);
   // The scroll listener hears a scroll before the virtualizer renders for it: the effects of
   // that render read the scroll's direction.
-  const { motion } = useScrollMotion(scrollerRef, () => {});
+  // A list waiting to be presented at an offset asks for a render when the scroll reaches it.
+  const [, bump] = useReducer((tick: number) => tick + 1, 0);
+  const arrivalDueRef = useRef<{ offset: number; at: number } | null>(null);
+  const motion = useScrollMotion(scrollerRef, () => {}, () => { if (arrivalDueRef.current) bump(); });
   const screenRef = useRef(20);
-  const virtualizer = useRowList({ scrollerRef, count: blocks.length, rowHeight: rowH, estimateSize, headHeight: headPx, getKey, measured: true,
-    overscan: rowListOverscan(screenRef.current) });
+  const { virtualizer } = useRowList({ scrollerRef, count: blocks.length, rowHeight: rowH, estimateSize, headHeight: headPx, getKey, measured: true,
+    screenRows: screenRef.current, resetKey: delivery.id });
   screenRef.current = Math.max(1, Math.ceil(Math.max(rowH, (virtualizer.scrollRect?.height ?? 720) - headPx) / rowH));
   const virtualItems = virtualizer.getVirtualItems();
   /** The mounted blocks by their key; the arrival finds its rows through them. */
@@ -465,8 +468,7 @@ const ResultTableView = memo(function ResultTableView({
       if (arrivalRef.current === created) arrivalRef.current = null;
     };
   }, [scroller]);
-  /** The presentation that starts once the rows at its place are rendered. */
-  const arrivalDueRef = useRef<{ offset: number; at: number } | null>(null);
+  /** The presentation that starts once the rows at its place are rendered (declared with the scroll listener). */
   /** The delivery whose starting position has been taken; the pane coming back keeps its place. */
   const placedRef = useRef<number | null>(null);
   const deliveryRef = useRef(delivery);
@@ -501,7 +503,7 @@ const ResultTableView = memo(function ResultTableView({
    * height. Nothing is measured.
    */
   const rowsInView = useCallback((): PlacedRow[] => {
-    const offset = Math.max(0, virtualizer.scrollOffset ?? 0);
+    const offset = Math.max(0, motion.current.offset);
     const height = virtualizer.scrollRect?.height ?? 0;
     const viewTop = offset + headPx;
     const viewBottom = offset + Math.max(height, headPx + rowH);
@@ -518,7 +520,7 @@ const ResultTableView = memo(function ResultTableView({
       }
     }
     return rows;
-  }, [virtualizer, virtualItems, headPx, rowH]);
+  }, [virtualizer, virtualItems, motion, headPx, rowH]);
 
   const seenBlocksRef = useRef(new Set<string>());
   /** Blocks built once in this delivery: their rows do not replay the chase when they come back. */
@@ -542,8 +544,7 @@ const ResultTableView = memo(function ResultTableView({
     const due = arrivalDueRef.current;
     if (due) {
       // The list is presented: once the rows at its place are rendered, the ones in view arrive.
-      const offset = virtualizer.scrollOffset ?? 0;
-      if (Math.abs(offset - due.offset) > 1 || Math.abs(scroller.scrollTop - due.offset) > 1) {
+      if (Math.abs(motion.current.offset - due.offset) > 1) {
         if (performance.now() - due.at > ARRIVAL_DUE_MS) arrivalDueRef.current = null;
         return;
       }
@@ -564,7 +565,7 @@ const ResultTableView = memo(function ResultTableView({
     // before are simply there again.
     const { moving, direction } = motion.current;
     if (!moving || arrivalNow.gesture() === "list") return;
-    const offset = Math.max(0, virtualizer.scrollOffset ?? 0);
+    const offset = Math.max(0, motion.current.offset);
     const viewTop = offset;
     const viewBottom = offset + Math.max(virtualizer.scrollRect?.height ?? 0, headPx + rowH) - headPx;
     for (const placed of fresh) {

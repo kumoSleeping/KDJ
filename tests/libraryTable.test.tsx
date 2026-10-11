@@ -184,7 +184,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     });
     assert.equal(useLibraryStore.getState().selectedId, Number(row.dataset.kdTrackId));
     assert.equal(useLibraryStore.getState().total, 10000);
-    assert.ok(rows().length <= 100, "only the rows near the viewport exist");
+    assert.ok(rows().length <= 160, "only the rows near the viewport exist");
     const box = document.querySelector<HTMLDivElement>(".kd-scroll")!;
     const vertical = document.querySelector<HTMLElement>('[role="scrollbar"][data-axis="vertical"]')!;
     assert.equal(vertical.style.display, "");
@@ -237,7 +237,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     assert.equal(document.querySelector(".kd-list-row[data-loading-track]"), null);
     assert.equal(requests.length, requestsBeforeJump);
     const landed = rows().length;
-    assert.ok(landed >= 20 && landed <= 100, `the viewport and a screen and a half either side (${landed})`);
+    assert.ok(landed >= 20 && landed <= 160, `the viewport and three screens either side (${landed})`);
     assert.equal(ratings(), landed, "every row is complete");
     assert.equal(rowOf(5001)!.style.top, `${5000 * ROW_H}px`, "a row lies at its own offset");
     // The rows that stay near the viewport keep their nodes: only entering rows are rendered.
@@ -245,7 +245,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     const keptRating = kept.querySelector(".kd-table-rating");
     for (let step = 1; step <= 8; step += 1) await scrollTo(box, 180_000 + step * 30);
     assert.ok(rowOf(5030), "the rows followed the scroll");
-    assert.equal(rowOf(5001), kept);
+    assert.equal(rowOf(5001), kept, "a row that stays keeps its node");
     assert.equal(kept.querySelector(".kd-table-rating"), keptRating);
     assert.equal(ratings(), rows().length);
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
@@ -259,7 +259,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     for (const overshoot of [40, 90, 30, 0]) {
       await scrollTo(box, end + overshoot);
       assert.equal(box.scrollTop, end + overshoot, "the bounce at the bottom is left to the WebView");
-      assert.equal(rowOf(10000), lastRow);
+      assert.equal(rowOf(10000), lastRow, "the last row keeps its node through the bounce");
       assert.equal(lastRow!.style.top, `${9999 * ROW_H}px`);
     }
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
@@ -272,7 +272,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     for (const overshoot of [-50, -120, -20, 0]) {
       await scrollTo(box, overshoot);
       assert.equal(box.scrollTop, overshoot, "the bounce at the top is left to the WebView");
-      assert.equal(rowOf(1), firstRow);
+      assert.equal(rowOf(1), firstRow, "the first row keeps its node through the bounce");
     }
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
     await flush();
@@ -378,7 +378,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     })) as never }));
     await flush();
     const pendingRows = document.querySelectorAll('.kd-list-row[data-pending="true"]').length;
-    assert.ok(pendingRows > 0 && pendingRows <= 100, `pending downloads are virtualized too (${pendingRows})`);
+    assert.ok(pendingRows > 0 && pendingRows <= 160, `pending downloads are virtualized too (${pendingRows})`);
     await act(async () => { root.render(null); useDownloadStore.setState({ list: [] }); });
     ids = Array.from({ length: 10000 }, (_, index) => index + 1);
     const { updateLocalWorkspaceSession } = await import("../src/lib/workspaceSession");
@@ -395,7 +395,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
     assert.ok(rowOf(9500));
     // Presented where it had been left: the rows in view there arrive, not the top of the list.
     assert.equal(arrivalOf(), "list");
-    assert.equal(arrivingRows()[0], rowOf(9500));
+    assert.equal(arrivingRows()[0], rowOf(9500), "the restored list arrives from the row the session remembered");
     assert.equal(arrivingRows().length, 20);
     await arrivalOver("list");
     // Pressing a row prepares the system drag preview from the thumbnail route, not the original cover.
@@ -475,12 +475,12 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
 
       // Towards the end of the list the rows rise from below, the top one first. (Rows built once
       // before would simply be there again: the fling lands past everything built so far.)
-      await scrollBy(9500);
+      await scrollBy(12000);
       assert.equal(arrivalOf(), "chase");
       [first, last] = inView(restored.scrollTop);
       chasing = arrivingRows();
       assert.ok(chasing.every(row => row.getAttribute("data-kd-arrive-from") === "below"));
-      assert.equal(chasing[0], rowOf(first + 1));
+      assert.equal(chasing[0], rowOf(first + 1), "towards the end: the top row first");
       assert.deepEqual(chasing.slice(0, 4).map(stepOf), [0, 1, 2, 3]);
       await pass(LIST_ARRIVAL_MS.chase + 40);
       await rest();
@@ -494,7 +494,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
       await rest();
 
       // Rows built before come back as they are: no chase, whatever the speed.
-      await scrollBy(-9500);
+      await scrollBy(-12000);
       assert.equal(arrivalOf(), null, "rows built once do not replay");
       await rest();
       // Reduced motion: the rows are simply there when the scroll lands.

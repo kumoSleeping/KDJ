@@ -1,7 +1,7 @@
 import { dropWorkshopTracks, paintWorkshopDrop } from "../../lib/workshopDrop";
 import { useStore } from "zustand";
 import type { LibraryPaneStore, LibraryPaneStoreApi } from "../../stores/temporaryLibraryStore";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type Ref } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type CSSProperties, type Ref } from "react";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import {
   Check,
@@ -24,10 +24,11 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 import { libraryDemand, restoreLibraryAnchor } from "../../lib/libraryViewport";
-import { rowListOverscan, useRowList, useScrollMotion } from "../common/rowList";
+import { useRowList, useScrollMotion } from "../common/rowList";
 import { api } from "../../lib/api";
 import { WorkshopAddMenu } from "../composition/WorkshopAddMenu";
 import { OverlayScrollbars } from "../common/OverlayScrollbars";
+import { ProgressBar } from "../common/ProgressBar";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { RowIndex, RowPick } from "../common/RowPick";
 import { TableRating } from "../common/TableRating";
@@ -334,26 +335,39 @@ export interface TrackTableProps {
 const coversMissing = new Set<string>();
 /** Covers the browser has shown once: it has them decoded, so a row built again shows them at once. */
 const coversShown = new Set<string>();
+/** Told when a cover has settled either way (the list's loading line counts them). */
+const coverListeners = new Set<() => void>();
+function coverSettled(key: string, shown: boolean): void {
+  (shown ? coversShown : coversMissing).add(key);
+  for (const listener of coverListeners) listener();
+}
+export function coverKeyOf(track: TrackSummary): string {
+  return `${track.id}:${track.modified_at}`;
+}
+/** A cover that has been shown or is known to be missing: nothing is left to load for it. */
+export function isCoverSettled(track: TrackSummary): boolean {
+  const key = coverKeyOf(track);
+  return coversShown.has(key) || coversMissing.has(key);
+}
+function subscribeCovers(listener: () => void): () => void {
+  coverListeners.add(listener);
+  return () => { coverListeners.delete(listener); };
+}
 /** A video's first frame is extracted on demand; a service that is restarting is asked again. */
 const COVER_RETRIES = 12;
 const COVER_RETRY_MS = 3000;
 
 /**
- * 曲库表的封面格：一个普通的 <img>，由浏览器自己的图片管线按需请求、解码和缓存（loading="lazy"
- * 只请求滚到眼前的）。甩动途中新建的行先不挂图片，停下来才挂（hold）；已经挂着的封面不拆；
- * 浏览器显示过的封面（coversShown）重新挂载时同步解码，不闪。没有封面的音频记在 coversMissing
- * 里，再次挂载时第一帧就是唱盘；视频首帧由后端抽取，服务短暂重启或抽帧排队时换个地址稍后再试，
- * 不能一次失败就永久空白。
+ * 曲库表的封面格：一个普通的 <img>，由浏览器自己的图片管线请求、解码和缓存。行在视口外两三屏
+ * 就挂好（rowList.ts），所以图片进入视口时已经在了，不用 lazy。浏览器显示过的封面（coversShown）
+ * 重新挂载时同步解码，不闪。没有封面的音频记在 coversMissing 里，再次挂载时第一帧就是唱盘；视频
+ * 首帧由后端抽取，服务短暂重启或抽帧排队时换个地址稍后再试，不能一次失败就永久空白。
  */
-function TrackCoverThumb({ track, hold }: { track: TrackSummary; hold: boolean }) {
+function TrackCoverThumb({ track }: { track: TrackSummary }) {
   const isVideo = isVideoTrack(track.format);
-  const key = `${track.id}:${track.modified_at}`;
+  const key = coverKeyOf(track);
   const [attempt, setAttempt] = useState(0);
   const [missing, setMissing] = useState(() => coversMissing.has(key));
-  // Only a row built during a fling waits for it to rest; one built at rest keeps its cover
-  // through the next fling, and a cover the browser has shown is never held.
-  const [held, setHeld] = useState(() => hold && !coversShown.has(key));
-  if (held && !hold) setHeld(false);
   const retryTimer = useRef<number | null>(null);
   useEffect(() => {
     setAttempt(0);
@@ -368,17 +382,16 @@ function TrackCoverThumb({ track, hold }: { track: TrackSummary; hold: boolean }
     <span className="kd-thumb" draggable={false}>
       {missing && !isVideo ? (
         <VinylPlaceholder />
-      ) : missing || held ? null : (
+      ) : missing ? null : (
         <img
           src={api.coverUrl(track.id, revision, 64)}
           alt=""
-          loading="lazy"
           decoding={coversShown.has(key) ? "sync" : "async"}
           draggable={false}
-          onLoad={() => coversShown.add(key)}
+          onLoad={() => coverSettled(key, true)}
           onError={() => {
             if (!isVideo || attempt >= COVER_RETRIES) {
-              coversMissing.add(key);
+              coverSettled(key, false);
               setMissing(true);
               return;
             }
@@ -390,6 +403,42 @@ function TrackCoverThumb({ track, hold }: { track: TrackSummary; hold: boolean }
         />
       )}
     </span>
+  );
+}
+
+/**
+ * 整体挂载的列表（几千首以内）在建完所有行、载完所有封面之前，表头下沿有一条细线走进度；
+ * 之后滚动时 DOM 不再改动，封面也都在。线只在还有事要做时存在。
+ */
+function ListLoadLine({ ids, summaryById, mounted }: {
+  ids: readonly number[];
+  summaryById: ReadonlyMap<number, TrackSummary>;
+  mounted: boolean;
+}) {
+  // One render per frame at most, however many covers land in it.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let frame = 0;
+    const unsubscribe = subscribeCovers(() => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; setTick((value) => value + 1); });
+    });
+    return () => { unsubscribe(); if (frame) cancelAnimationFrame(frame); };
+  }, []);
+  const settled = useMemo(() => {
+    let done = 0;
+    for (const id of ids) {
+      const track = summaryById.get(id);
+      if (track && isCoverSettled(track)) done += 1;
+    }
+    return done;
+    // `tick` is the covers that landed since the last frame.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ids, summaryById, tick]);
+  if (ids.length === 0 || (mounted && settled >= ids.length)) return null;
+  return (
+    <div className="kd-list-load" aria-label="正在载入列表">
+      <ProgressBar value={(mounted ? 0.2 : 0) + 0.8 * settled / ids.length} />
+    </div>
   );
 }
 
@@ -502,13 +551,12 @@ function trackCell(
   keyNotation: KeyNotation,
   onRate: ((rating: number) => void) | undefined,
   baselines: EnergyBaselines | null | undefined,
-  coverHold: boolean,
 ) {
   switch (key) {
     case "title":
       return (
         <div key={key} className="kd-list-cell kd-td-strong" role="gridcell" data-col="title" data-flex="" title={track.title || track.filename}>
-          <TrackCoverThumb track={track} hold={coverHold} />
+          <TrackCoverThumb track={track} />
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -611,8 +659,6 @@ interface TrackCellsProps {
   columns: readonly Column[];
   keyNotation: KeyNotation;
   baselines: EnergyBaselines | null | undefined;
-  /** A fling is under way: no cover is asked for until it rests. */
-  coverHold: boolean;
   onRate(id: number, rating: number): void;
 }
 
@@ -625,7 +671,6 @@ const TrackCells = memo(function TrackCells({
   columns,
   keyNotation,
   baselines,
-  coverHold,
   onRate,
 }: TrackCellsProps) {
   return (
@@ -636,7 +681,6 @@ const TrackCells = memo(function TrackCells({
         keyNotation,
         column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
         baselines,
-        coverHold,
       ))}
     </>
   );
@@ -1609,7 +1653,7 @@ export const TrackTable = memo(function TrackTable({
   const selectedIdRef = useRef(selectedId);
   // 只取 id：播放进度之类的变化不该让整张表重渲染
   const playingId = useSyncExternalStore(subscribePlayingTrack, () => getPlayingTrack()?.id ?? null, () => null);
-  const virtualizerRef = useRef<ReturnType<typeof useRowList> | null>(null);
+  const virtualizerRef = useRef<ReturnType<typeof useRowList>["virtualizer"] | null>(null);
   useEffect(() => {
     const scrollTrackIntoCenter = (trackId: number | null | undefined, attemptsLeft = 40) => {
       const id = trackId ?? selectedIdRef.current;
@@ -1769,7 +1813,9 @@ export const TrackTable = memo(function TrackTable({
   );
   // 先于虚拟化器听 scroll：它在同一个事件里同步渲染，渲染后的 effect 要读到这次滚动的方向。
   // 停稳：记下顶部的行（后台换索引时按它保持位置），持久会话也记下位置。
-  const { fling, motion } = useScrollMotion(scrollerRef, () => {
+  // A list waiting to be presented at an offset asks for a render when the scroll reaches it.
+  const [, bump] = useReducer((tick: number) => tick + 1, 0);
+  const motion = useScrollMotion(scrollerRef, () => {
     const box = scrollerRef.current;
     if (!box) return;
     const ids = libraryStore.getState().orderedIds;
@@ -1778,11 +1824,11 @@ export const TrackTable = memo(function TrackTable({
     const anchor = { id: ids[index] ?? null, index, offset: top % rowHRef.current };
     anchorRef.current = anchor;
     if (persistentSession) updateLocalWorkspaceSession({ scrollTop: top, topVisibleTrackId: anchor.id, rowOffset: anchor.offset });
-  });
+  }, () => { if (arrivalDueRef.current) bump(); });
 
-  // About a screen and a half of rows beyond either edge: a scroll back finds its rows built.
+  // A short list is rendered whole; a long one keeps three screens beyond either edge (rowList.ts).
   const screenRef = useRef(20);
-  const virtualizer = useRowList({ scrollerRef, count, rowHeight: rowH, headHeight: headerH, getKey, overscan: rowListOverscan(screenRef.current) });
+  const { virtualizer, whole, mounted } = useRowList({ scrollerRef, count, rowHeight: rowH, headHeight: headerH, getKey, screenRows: screenRef.current, resetKey: queryVersion });
   virtualizerRef.current = virtualizer;
   const items = virtualizer.getVirtualItems();
   const range = virtualizer.range;
@@ -1894,12 +1940,12 @@ export const TrackTable = memo(function TrackTable({
    * row that lies wholly under the head.
    */
   const viewBounds = useCallback(() => {
-    const offset = Math.max(0, virtualizer.scrollOffset ?? 0);
+    const offset = Math.max(0, motion.current.offset);
     const height = Math.max(rowH, (virtualizer.scrollRect?.height ?? 0) - headerH);
     const first = Math.min(count, Math.floor(offset / rowH));
     const last = Math.min(count, Math.max(first, Math.ceil((offset + height) / rowH)));
     return { first, last };
-  }, [virtualizer, rowH, headerH, count]);
+  }, [virtualizer, motion, rowH, headerH, count]);
   /** The rows in view, in the order they arrive from the top; one not mounted is a gap. */
   const rowsInView = useCallback(() => {
     const rows: (HTMLElement | null)[] = [];
@@ -1916,13 +1962,14 @@ export const TrackTable = memo(function TrackTable({
     const arrival = arrivalRef.current;
     const box = scrollerRef.current;
     if (!due || !arrival || !box || !visibleRef.current) return;
-    const offset = virtualizer.scrollOffset ?? 0;
-    if (Math.abs(offset - due.offset) > 1 || Math.abs(box.scrollTop - due.offset) > 1) {
+    // The rows at the list's place are rendered once the scroll it was put at has reached the
+    // page and the rows under the viewport exist.
+    if (Math.abs(motion.current.offset - due.offset) > 1) {
       if (performance.now() - due.at > ARRIVAL_DUE_MS) arrivalDueRef.current = null;
       return;
     }
     const rows = rowsInView();
-    if (!rows.some(Boolean)) return;
+    if (rows.length === 0 || !rows.every(Boolean)) return;
     arrivalDueRef.current = null;
     arrival.present(rows);
   });
@@ -2155,6 +2202,7 @@ export const TrackTable = memo(function TrackTable({
               />
             </div>
           ) : null}
+          {whole && total > 0 ? <ListLoadLine ids={orderedIds} summaryById={summaryById} mounted={mounted} /> : null}
           {visibleColumns.map((column) => (
             <div
               key={column.key}
@@ -2266,7 +2314,6 @@ export const TrackTable = memo(function TrackTable({
                 columns={visibleColumns}
                 keyNotation={keyNotation}
                 baselines={energyBaselines}
-                coverHold={fling}
                 onToggle={toggleTrackSelection}
                 onRate={rateTrack}
               />

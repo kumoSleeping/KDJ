@@ -6,6 +6,14 @@
 
 WebKit 的表格布局不是增量的：往 `<table>` 里插几行，整张表重排；表格行和格也拿不到自己的合成层，行上的 opacity/transform 动画退回主线程逐帧重绘。再加上滚动由 WebView 的滚动线程执行、页面只能事后追，每次追赶都是一次大型同步布局——起步卡、落地卡、动画丢帧，都是这个结构的直接后果。
 
+## 节奏：为什么不按帧渲染
+
+WKWebView 的合成器自己滚，显示的是主线程事先画好的瓦片。滚动内容的 DOM 每改一次，相关瓦片就作废要重画；主线程在滚动期间每忙一毫秒，就是少画一毫秒前方的瓦片。所以：
+
+- 几千行以内（`ROW_LIST_WHOLE`）的列表整体挂载：先挂视口附近的窗口，再每隔一帧挂一块（250 行），直到全部建完；之后滚动时 DOM 零改动，封面也都在。建完所有行、载完所有封面之前，表头下沿有一条进度细线（曲库的 `ListLoadLine`）。
+- 更长的列表只保留视口前后各三屏；虚拟化器用自己的滚动观察器（`observeRowListOffset`）：滚过整整一屏才知会一次，停稳再知会一次，不用 flushSync。于是行的挂卸发生在离视口两三屏之外，可见瓦片不受影响。
+- 等着在某个位置"呈现"的列表（换查询、恢复位置、板块重新显示）在滚动监听里自己要一次渲染（`useScrollMotion` 的 `onScroll`），因为小位移不会让虚拟化器渲染。
+
 ## 结构
 
 - `src/components/common/RowList.css`：布局。
@@ -14,14 +22,14 @@ WebKit 的表格布局不是增量的：往 `<table>` 里插几行，整张表�
   - `.kd-list-body`：撑出整份列表高度的层；它的直接子元素由虚拟化器按 `top` 绝对定位，`contain: layout style`。
   - `.kd-list-row`：一行，`display: grid; grid-template-columns: var(--kd-list-cols)`。曲库的行直接是 body 的子元素；搜索结果的一个"块"（`.kd-list-block`）里装一行和在它下面展开的内容（来源、分 P、整个包），块内的行按流排列、高度由内容决定，块被测量。
   - `.kd-list-cell` / `.kd-list-hcell`：格。文字格是 block 并省略号；装封面、标记、控件的格加 `data-flex`。
-- `src/components/common/rowList.ts`：`useRowList`（`@tanstack/react-virtual`；固定行高或按块估算 + 测量；视口外前后各留约一屏半，`rowListOverscan`；`scrollMargin` 是表头高；`scrollToFn` 直接写 `scrollTop`）和 `useScrollMotion`（方向、是否在滚、是否甩动；甩动期间新建的行先不挂封面）。
+- `src/components/common/rowList.ts`：`useRowList`（`@tanstack/react-virtual`；固定行高或按块估算 + 测量；整体挂载或前后各三屏；`scrollMargin` 是表头高；`scrollToFn` 直接写 `scrollTop`；返回 `{ virtualizer, whole, mounted }`）和 `useScrollMotion`（上一帧的位置、方向、是否在滚；在 scroll 事件里读位置不触发布局）。
 - `src/components/common/listArrival.ts` + `ListArrival.css`：行的到场（`present` 呈现一份列表，`chase` 让晚到的行接上一个时钟）。标记只在行上。
 - 外观（墨色、悬停、选中、批选、各列的格）在 `src/design.css` 的"行列表"一节；结果表自己的在 `ResultTable.css`。
 
 ## 规则
 
-1. 滚动帧里只做虚拟化器做的事：在 scroll 事件里渲染对应的行。不 `flushSync` 别的东西，不读布局（`getBoundingClientRect`、`offsetTop`、`scrollHeight`），不画 canvas，不切祖先的属性。
-2. 行要便宜：只渲染可见列；格里不套包装层；每行不订阅 store（曲库的响度基准由表读一次下发）；封面是普通 `<img loading="lazy" decoding="async">`。
+1. 滚动帧里不渲染、不 `flushSync`、不读布局（`getBoundingClientRect`、`offsetTop`、`scrollHeight`）、不画 canvas、不切祖先的属性；位置从 `useScrollMotion` 读。
+2. 行要便宜：只渲染可见列；格里不套包装层；每行不订阅 store（曲库的响度基准由表读一次下发）；封面是普通 `<img>`，在视口外两三屏就挂好，显示过的同步解码。
 3. 行由 `top` 定位，永远不用 transform 定位——到场动画要用 transform 动行本身。
 4. 动画的标记在行上（`data-kd-arrive*`、`--kd-arrive-*`），结束后去掉；不在 `.kd-scroll`、`.kd-list`、`.kd-list-body` 上放任何会被后代选择器用到的属性。
 5. 新的一张列表：给 `useRowList` 一个 `count`、`getKey`、行高（或块估算）和表头高，用 `getVirtualItems()` 渲染，`getTotalSize()` 撑 body；在 layout effect 里按"呈现"与"追上"的规则调用 `listArrival`（建过一次的行不再追上）；外部要找行用 `.kd-list-row[...]`，不要假定没挂载的行在 DOM 里（Shift 区间、MIDI 步进这类要用数据模型，不要用 DOM 顺序）。

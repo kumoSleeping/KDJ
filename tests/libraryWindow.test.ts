@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { LibraryWindow, type LibraryWindowSnapshot } from "../src/lib/libraryWindow";
 import { libraryDemand, restoreLibraryAnchor } from "../src/lib/libraryViewport";
-import { REST_PACE, scrollPace, type ScrollPace } from "../src/components/common/rowList";
 import type { TrackSummary } from "../src/types";
 
 const ids = Array.from({ length: 10000 }, (_, i) => i + 1);
@@ -243,29 +242,6 @@ test("the demand follows the rendered rows: a screen beyond them, clamped to the
   }
   assert.equal(restoreLibraryAnchor([1, 3, 4], 2, 1, 5, 36, 0), 41);
   assert.equal(restoreLibraryAnchor([1, 2, 3], 3, 0, 5, 36, 2), 149);
-});
-
-test("scroll pace: wheel notches stay calm, a flick turns fast with hysteresis", () => {
-  const run = (pace: ScrollPace, frames: number, travel: number, elapsed = 16) => {
-    for (let i = 0; i < frames; i += 1) pace = scrollPace(pace, travel, elapsed);
-    return pace;
-  };
-  // One notch moves a hundred pixels in a single frame; ten a second is still an ordinary scroll.
-  let pace = REST_PACE;
-  for (let notch = 0; notch < 10; notch += 1) {
-    pace = scrollPace(pace, 100, notch ? 100 : 16);
-    assert.equal(pace.fast, false);
-  }
-  // Reading speed: a screen and a half per second.
-  assert.equal(run(REST_PACE, 60, 16).fast, false);
-  // A trackpad flick at 6000 px/s is fast within a few frames, either way.
-  const flick = run(REST_PACE, 6, 96);
-  assert.ok(flick.fast && flick.speed > 3);
-  assert.ok(run(REST_PACE, 6, -96).fast && run(REST_PACE, 6, -96).speed < -3);
-  // Momentum decays: still fast at 2500 px/s, calm again below 2000 px/s.
-  assert.equal(run(flick, 30, 40).fast, true);
-  assert.equal(run(flick, 40, 28).fast, false);
-  assert.equal(run(REST_PACE, 40, 40).fast, false, "2500 px/s does not start a fast scroll");
 });
 
 test("late index response cannot replace the newer query order", async () => {

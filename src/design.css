@@ -8273,3 +8273,18 @@ html:root:not([data-theme-pack]) .kd-list-row:is([aria-selected="true"]:not([dat
   background: color-mix(in srgb, var(--kd-text) 12%, var(--kd-panel)) !important;
 }
 html:root[data-theme-pack="sakulaptop98"] .kd-list-row[aria-selected="true"] { background: #edb4ce !important; }
+/* The loading line of a list being built whole (TrackTable's ListLoadLine): along the head's
+   lower edge, over it, so nothing moves when it goes. Ink, no colour. */
+.kd-list-load {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+.kd-list-load > .kd-progress {
+  height: 2px;
+  border-radius: 0;
+  background: transparent;
+}
