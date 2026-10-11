@@ -58,8 +58,12 @@ const WHEEL_GESTURE_MS = 120;
 const WHEEL_AXIS_PX = 4;
 /** A wheel that reports lines is taken to mean this many pixels a line, as over the scroll handles (scrollPills.ts). */
 const WHEEL_LINE_PX = 16;
-/** The keys that scroll a container by a page or to an end, which a hidden container no longer answers itself. */
-const PAGE_KEYS = new Set(["PageUp", "PageDown", "Home", "End", " "]);
+/**
+ * The keys that scroll a container by a page or to an end, which a hidden container no longer
+ * answers itself. Not Space: it is the player's (usePlayerShortcuts) and never scrolled a list
+ * here; both listen on the window, so which of them got it would depend on which mounted first.
+ */
+const PAGE_KEYS = new Set(["PageUp", "PageDown", "Home", "End"]);
 
 /** How many rows (blocks) to keep beyond either edge of the viewport. */
 export function rowListOverscan(screenRows: number): number {
@@ -193,9 +197,9 @@ export function ownWheel(list: HTMLElement): () => void {
 }
 
 /**
- * The page keys of a list that scrolls itself: Page Up / Down, Space, Home and End move it as
- * the engine would move an `auto` container, for the element that has the focus or, with none,
- * for the list the pointer last pressed in (as WebKit chooses the container of a key scroll).
+ * The page keys of a list that scrolls itself: Page Up / Down, Home and End move it as the
+ * engine would move an `auto` container, for the element that has the focus or, with none, for
+ * the list the pointer last pressed in (as WebKit chooses the container of a key scroll).
  * A field keeps its keys.
  */
 export function ownKeys(list: HTMLElement): () => void {
@@ -210,7 +214,7 @@ export function ownKeys(list: HTMLElement): () => void {
     // The engine's page step: the viewport less a line of context.
     const page = Math.max(list.clientHeight * 0.875, list.clientHeight - 40);
     const top = event.key === "Home" ? 0 : event.key === "End" ? list.scrollHeight
-      : list.scrollTop + (event.key === "PageUp" || (event.key === " " && event.shiftKey) ? -page : page);
+      : list.scrollTop + (event.key === "PageUp" ? -page : page);
     event.preventDefault();
     scrollTopTo(list, top);
   };

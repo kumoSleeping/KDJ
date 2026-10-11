@@ -20,14 +20,17 @@ test("the page keys of a list that scrolls itself move it by a page, to the ends
   // Nothing pressed, nothing focused: the keys are not the list's.
   assert.equal(press("PageDown"), false);
   assert.equal(list.scrollTop, 0);
-  // The pointer last pressed in the list: a page less a line of context, Space the same, Shift+Space back.
+  // The pointer last pressed in the list: a page less a line of context.
   pointer(list.firstElementChild!);
   assert.equal(press("PageDown"), true);
   assert.equal(list.scrollTop, 760);
-  assert.equal(press(" "), true);
+  assert.equal(press("PageDown"), true);
   assert.equal(list.scrollTop, 1520);
-  assert.equal(press(" ", { shiftKey: true }), true);
-  assert.equal(list.scrollTop, 760);
+  // Space is the player's key, with Shift too: the list leaves it for the player's shortcut to take.
+  assert.equal(press(" "), false);
+  assert.equal(press(" ", { shiftKey: true }), false);
+  assert.equal(list.scrollTop, 1520);
+  assert.equal(press("PageUp"), true);
   assert.equal(press("PageUp"), true);
   assert.equal(list.scrollTop, 0);
   assert.equal(press("End"), true);

@@ -27,7 +27,7 @@ WKWebView 的合成器自己滚，显示的是主线程事先画好的瓦片。�
 - 只保留视口前后各半屏的行（至少 8 行），不整体挂载。层数是整体挂载的几十分之一。
 - 容器是 `overflow: hidden`（`data-own-scroll`，RowList.css），不是 `auto`。WebKit 只给 `auto` / `scroll` 的容器滚动线程节点（`RenderBox::scrollsOverflowY` → `RenderLayerScrollableArea::canUseCompositedScrolling`），有节点的容器页面一写 `scrollTop` 就立刻交给滚动线程（`AsyncScrollingCoordinator::requestScrollToPosition`），瓦片先动、主线程后画：每帧走过的距离一旦超过预画的那一块瓦片（约 500 像素，2026-10-12 的日志里 715 像素/帧的甩动必白、223 的不白），行建得再早也白一帧。hidden 的容器由主线程滚：滚动、要露出的行、它们的瓦片在同一次提交里。页面慢了，列表停一帧，不会白。代价是滚动的每一帧都重画视口（不再是合成器挪瓦片）。
 - 每个 scroll 事件都知会虚拟化器，并在事件里渲染（`useFlushSync`）。
-- hidden 的容器不再自己答应键盘：`ownKeys` 接 Page Up / Down、空格、Home、End，焦点在列表里或上一次按下在列表里时才接，输入框里不接。
+- hidden 的容器不再自己答应键盘：`ownKeys` 接 Page Up / Down、Home、End，焦点在列表里或上一次按下在列表里时才接，输入框里不接。空格不接：它是播放/暂停（`usePlayerShortcuts`），两边都挂在 window 上，接了的话谁拿到按键取决于谁先挂载。
 - 页面自己写的滚动（滚轮、拖滑块）先建行、后移动：`scrollTopTo`（`src/lib/wheelScroll.ts`）先把目的地告诉虚拟化器，行建好了再写 `scrollTop`。WebKit 把页面写入的滚动位置立刻交给滚动线程（`RenderLayerScrollableArea::scrollToOffset` 先走 `requestScrollToPosition`），而能让行建出来的 scroll 事件要到下一次渲染更新才来：先移动的话，一次十几行的轻甩会落在还没有行的地方，露白一帧。只能在事件处理里调用（它同步渲染一次），effect 和渲染里照旧直接写 `scrollTop`。
 - 一次进来的行超过 `FILL_ROWS`（拖滑块、跳到正在播的歌）时，这些行先只有序号，不占那一帧；跳动停下 60 毫秒后离视口近的先填内容，每 16 毫秒一步。被呈现的列表（换查询、恢复位置）整行到场，不走这条。一次很快的甩动在最快的那几帧里也会超过这个数（每帧十二行约是每秒两万多像素）：那几帧进来的行只有序号，甩动慢下来后进来的行是整行，留在窗口里的序号行随后补上。这是有意的，不是没渲染完：那个速度下内容读不了，序号能让人知道滚到了哪里。
 - 没有"行追上滚动"（`chase`）：行在露出的那一帧就在。
