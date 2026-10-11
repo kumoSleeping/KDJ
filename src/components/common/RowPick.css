@@ -1,6 +1,6 @@
 /* The selection mark of the lists (RowPick.tsx): a small ring that fills with ink and takes a
    tick. It lives in the index cell of a row, in the number's place, and in the head of that
-   column; nothing is added to a table for it and nothing moves when it comes or goes.
+   column; nothing is added to a list for it and nothing moves when it comes or goes.
    Only transform and opacity move. No colour of its own: ink on the panel colour. */
 .kd-pick {
   position: relative;
@@ -82,7 +82,6 @@
   inset: -0.4rem;
 }
 /* A row that is pointed at strengthens its empty mark; the mark itself answers in full ink. */
-.kd-table tbody tr:hover .kd-pick[data-state="none"],
 .kd-list-row:hover .kd-pick[data-state="none"] { color: var(--kd-muted); }
 .kd-pick-control:hover:not(:disabled) > .kd-pick { color: var(--kd-text); }
 .kd-pick-control:disabled { cursor: default; }
@@ -130,12 +129,10 @@
   transform: scale(0.6);
   pointer-events: none;
 }
-.kd-table tbody td[data-picking],
 .kd-list-cell[data-picking] { text-overflow: clip; }
 /* The mark pops into the number's place when picking starts (`data-pop`); a row that is
    built while rows are being picked — scrolled in, another page — simply has it. */
 .kd-row-index[data-pop] > .kd-pick-control,
-.kd-table thead th > .kd-pick-head,
 .kd-list-hcell > .kd-pick-head {
   animation: kd-pick-in var(--kd-motion-micro) var(--kd-ease-spring) backwards;
 }
@@ -145,13 +142,10 @@
 }
 
 /* The head of the index column: its mark stands over the rows' marks, the label steps back. */
-.kd-table thead th > .kd-th-label,
 .kd-list-hcell > .kd-th-label {
   transition: opacity var(--kd-motion-micro-out) linear;
 }
-.kd-table thead th[data-picking="true"] > .kd-th-label,
 .kd-list-hcell[data-picking="true"] > .kd-th-label { opacity: 0; }
-.kd-table thead th > .kd-pick-head,
 .kd-list-hcell > .kd-pick-head {
   position: absolute;
   top: 0;
@@ -175,7 +169,6 @@
   }
   .kd-row-index[data-picking] > .kd-row-number { transform: none; }
   .kd-row-index[data-pop] > .kd-pick-control,
-  .kd-table thead th > .kd-pick-head,
   .kd-list-hcell > .kd-pick-head {
     animation: kd-pick-fade var(--kd-motion-reduced) linear backwards;
   }

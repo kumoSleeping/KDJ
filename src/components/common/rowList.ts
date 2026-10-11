@@ -35,6 +35,8 @@ export interface RowListOptions {
   count: number;
   /** The height of a row (the measured one in a list whose rows are measured). */
   rowHeight: number;
+  /** A block's estimated height, when blocks hold more than one row; `rowHeight` otherwise. */
+  estimateSize?(index: number): number;
   /** The height of the head that stands above the rows in the same scroll container. */
   headHeight: number;
   getKey(index: number): string | number;
@@ -43,11 +45,11 @@ export interface RowListOptions {
 }
 
 /** The virtualizer of a row list. `rowHeight` is the estimate; call `measure()` when it changes. */
-export function useRowList({ scrollerRef, count, rowHeight, headHeight, getKey, measured = false }: RowListOptions) {
+export function useRowList({ scrollerRef, count, rowHeight, estimateSize, headHeight, getKey, measured = false }: RowListOptions) {
   return useVirtualizer<HTMLElement, HTMLElement>({
     count,
     getScrollElement: () => scrollerRef.current,
-    estimateSize: () => rowHeight,
+    estimateSize: estimateSize ?? (() => rowHeight),
     overscan: ROW_LIST_OVERSCAN,
     getItemKey: getKey,
     scrollMargin: headHeight,

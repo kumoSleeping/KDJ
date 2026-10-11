@@ -288,33 +288,33 @@ export function MergedGroupRow({
     switch (key) {
       case "title":
         return (
-          <td key={key} className="kd-td-strong" data-col="title" title={group.title} {...cellDrag}>
+          <div role="gridcell" key={key} className="kd-list-cell kd-td-strong" data-col="title" title={group.title} {...cellDrag} data-flex="">
             <span className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}>
               {titleCell}
             </span>
-          </td>
+          </div>
         );
       case "artist":
         return (
-          <td key={key} data-col="artist" title={group.artists.join(", ")} {...cellDrag}>
+          <div role="gridcell" className="kd-list-cell" key={key} data-col="artist" title={group.artists.join(", ")} {...cellDrag}>
             {keyed(key, group.artists.join(", ") || DASH)}
-          </td>
+          </div>
         );
       case "album":
         return (
-          <td key={key} data-col="album" title={group.album} {...cellDrag}>
+          <div role="gridcell" className="kd-list-cell" key={key} data-col="album" title={group.album} {...cellDrag}>
             {keyed(key, group.album || DASH)}
-          </td>
+          </div>
         );
       case "duration":
         return (
-          <td key={key} className="kd-td-num" data-col="duration" {...cellDrag}>
+          <div role="gridcell" key={key} className="kd-list-cell kd-td-num" data-col="duration" {...cellDrag}>
             {keyed(key, formatDuration(group.duration))}
-          </td>
+          </div>
         );
       case "sources":
         return (
-          <td key={key} data-col="sources" {...cellDrag}>
+          <div role="gridcell" className="kd-list-cell" key={key} data-col="sources" {...cellDrag} data-flex="">
             {keyed(key, (
               <span
                 className="kd-source-dots"
@@ -332,32 +332,32 @@ export function MergedGroupRow({
                 ))}
               </span>
             ))}
-          </td>
+          </div>
         );
       case "from":
         return (
-          <td key={key} className="kd-mono" data-col="from" {...cellDrag}>
+          <div role="gridcell" key={key} className="kd-list-cell kd-mono" data-col="from" {...cellDrag}>
             {keyed(key, active ? PLATFORM_LABEL[active.platform] : DASH)}
-          </td>
+          </div>
         );
       case "quality":
         return (
-          <td key={key} className="kd-td-num kd-mono" data-col="quality" {...cellDrag}>
+          <div role="gridcell" key={key} className="kd-list-cell kd-td-num kd-mono" data-col="quality" {...cellDrag}>
             {keyed(key, active ? qualityLabel(active) : DASH)}
-          </td>
+          </div>
         );
       case "vip":
         return (
-          <td key={key} data-col="vip" style={{ width: "3rem" }} {...cellDrag}>
+          <div role="gridcell" className="kd-list-cell" key={key} data-col="vip" style={{ width: "3rem" }} {...cellDrag} data-flex="">
             {keyed(key, active?.vip ? (
               <span className="kd-chip" data-tone="warn">
                 VIP
               </span>
             ) : null)}
-          </td>
+          </div>
         );
       default:
-        return <td key={key} {...cellDrag} />;
+        return <div role="gridcell" className="kd-list-cell" key={key} {...cellDrag} />;
     }
   };
 
@@ -365,13 +365,12 @@ export function MergedGroupRow({
     switch (key) {
       case "title":
         return (
-          <td
+          <div role="gridcell"
             key={key}
-            colSpan={1}
-            className="kd-muted kd-result-source-child"
+            className="kd-list-cell kd-muted kd-result-source-child"
             data-parent-indented={indent ? "true" : undefined}
             data-picked={index === sourceIndex ? "true" : undefined}
-          >
+           data-flex="">
             <span className="kd-result-source-line">
               {/* The pick mark sits in the cover's slot, so the source's title starts under the song's. */}
               <span className="kd-result-source-pick">
@@ -387,48 +386,48 @@ export function MergedGroupRow({
                 </span>
               )}
             </span>
-          </td>
+          </div>
         );
       case "artist":
       case "album":
       case "sources":
-        return <td key={key} />;
+        return <div role="gridcell" className="kd-list-cell" key={key} />;
       case "duration":
         return (
-          <td key={key} className="kd-td-num kd-muted">
+          <div role="gridcell" key={key} className="kd-list-cell kd-td-num kd-muted">
             {formatDuration(source.duration)}
-          </td>
+          </div>
         );
       case "from":
         return (
-          <td key={key} className="kd-mono kd-muted">
+          <div role="gridcell" key={key} className="kd-list-cell kd-mono kd-muted">
             {PLATFORM_LABEL[source.platform]}
-          </td>
+          </div>
         );
       case "quality":
         return (
-          <td key={key} className="kd-td-num kd-mono kd-muted">
+          <div role="gridcell" key={key} className="kd-list-cell kd-td-num kd-mono kd-muted">
             {qualityLabel(source)}
-          </td>
+          </div>
         );
       case "vip":
         return (
-          <td key={key}>
+          <div role="gridcell" className="kd-list-cell" key={key}>
             {source.vip && (
               <span className="kd-chip" data-tone="warn">
                 VIP
               </span>
             )}
-          </td>
+          </div>
         );
       default:
-        return <td key={key} />;
+        return <div role="gridcell" className="kd-list-cell" key={key} />;
     }
   };
 
   return (
     <Fragment>
-      <tr
+      <div className="kd-list-row" role="row"
         // While rows are being picked "selected" means picked; the row whose details are open
         // is told apart by data-inspected.
         aria-selected={selectionMode ? selected : selected || inspected}
@@ -536,19 +535,19 @@ export function MergedGroupRow({
         }}
         {...foldingRowProps(leave)}
       >
-        <td
+        <div role="gridcell"
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}
-          className="kd-result-gutter"
+          className="kd-list-cell kd-result-gutter"
         />
-        <td
+        <div role="gridcell"
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}
-          className="kd-result-lead"
+          className="kd-list-cell kd-result-lead"
           data-col="index"
-        >
+         data-flex="">
           <RowIndex
             number={rowNumber}
             picking={selectionMode}
@@ -562,10 +561,9 @@ export function MergedGroupRow({
               />
             ) : null}
           />
-        </td>
+        </div>
         {columns.map((column) => dataCell(column.key))}
-        <td className="kd-table-fill" aria-hidden="true" />
-      </tr>
+      </div>
 
       {(sourcesFold === "open" || sourcesFold === "out") &&
         group.sources.map((source, index) => {
@@ -573,7 +571,7 @@ export function MergedGroupRow({
           const sourceLeave =
             leave ?? (sourcesFold === "out" ? foldOrder(index, group.sources.length) : undefined);
           return (
-          <tr
+          <div className="kd-list-row" role="row"
             key={`${source.platform}:${source.key}`}
             data-resolving={previewPendingSourceKey === sourceKey(source) ? "true" : undefined}
             aria-busy={previewPendingSourceKey === sourceKey(source) ? "true" : undefined}
@@ -625,20 +623,15 @@ export function MergedGroupRow({
             }}
             {...foldingRowProps(sourceLeave)}
           >
-            <td />
-            <td />
+            <div role="gridcell" className="kd-list-cell" />
+            <div role="gridcell" className="kd-list-cell" />
             {columns.map((column) => sourceDataCell(column.key, source, index))}
-            <td className="kd-table-fill" aria-hidden="true" />
-          </tr>
+              </div>
           );
         })}
       {sourcesFold === "shut" && (
-        <tr data-fold="shut" aria-hidden="true">
-          <td
-            colSpan={columns.length + 3}
-            style={{ "--kd-fold-h": `calc(var(--kd-row-h) * ${group.sources.length})` } as CSSProperties}
-          />
-        </tr>
+        <div className="kd-list-row" role="row" data-fold="shut" aria-hidden="true"
+          style={{ "--kd-fold-h": `calc(var(--kd-row-h) * ${group.sources.length})` } as CSSProperties} />
       )}
       {rowMenu && (
         <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>

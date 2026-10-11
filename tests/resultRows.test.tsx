@@ -51,20 +51,21 @@ test("the result table: the same picking, and the download key in the first data
       onLoadCollection() {}, loadingCollections: new Set<string>(),
     });
   }
-  const row = (id: string) => [...document.querySelectorAll<HTMLElement>("tr[data-kd-search-result]")]
+  const row = (id: string) => [...document.querySelectorAll<HTMLElement>(".kd-list-row[data-kd-search-result]")]
     .find(candidate => candidate.getAttribute("aria-label")?.startsWith(`Song ${id}，`))!;
-  const marks = () => document.querySelectorAll('tbody [role="checkbox"]');
-  const head = () => document.querySelector<HTMLElement>('thead [role="checkbox"]');
+  const marks = () => document.querySelectorAll('.kd-list-body [role="checkbox"]');
+  const head = () => document.querySelector<HTMLElement>('.kd-list-head [role="checkbox"]');
   const picked = () => [...seen.chosen].sort();
-  const keyCell = () => document.querySelector(".kd-result-key")?.closest("td")?.getAttribute("data-col");
+  const keyCell = () => document.querySelector(".kd-result-key")?.closest(".kd-list-cell")?.getAttribute("data-col");
   try {
     await act(async () => root.render(createElement(Host)));
     await flush();
-    const table = document.querySelector(".kd-table")!;
+    const table = document.querySelector(".kd-list")!;
     const idle = layoutOf(table);
     assert.equal(marks().length, 0);
     assert.equal(head(), null);
-    assert.equal(table.querySelector("input[type=checkbox]"), null, "no form check box anywhere in the table");
+    assert.equal(table.querySelector("input[type=checkbox]"), null, "no form check box anywhere in the list");
+    assert.equal(document.querySelector("table, tbody, tr, td"), null, "the results are a row list, not a table");
 
     // The download key: in the first data column (the title), never in the index cell.
     assert.equal(row("a").querySelector(".kd-result-lead")?.textContent, "1", "the number stays a number");
@@ -105,7 +106,7 @@ test("the result table: the same picking, and the download key in the first data
     assert.equal(row("a").getAttribute("data-inspected"), "true");
 
     // A plain click now picks or drops; nothing is opened.
-    await click(row("d").querySelector('td[data-col="artist"]')!);
+    await click(row("d").querySelector('.kd-list-cell[data-col="artist"]')!);
     assert.deepEqual(picked(), ["0:b", "0:d"]);
     await click(row("d"));
     assert.deepEqual(picked(), ["0:b"]);
@@ -168,8 +169,8 @@ test("the result table: the same picking, and the download key in the first data
     await act(async () => second.render(createElement(Host)));
     await flush();
     assert.equal(keyCell(), "artist");
-    assert.equal(document.querySelector('td[data-col="title"] .kd-result-key'), null);
-    assert.equal(row("a").querySelector('td[data-col="artist"] .kd-result-keyed-body')?.textContent, "Artist");
+    assert.equal(document.querySelector('.kd-list-cell[data-col="title"] .kd-result-key'), null);
+    assert.equal(row("a").querySelector('.kd-list-cell[data-col="artist"] .kd-result-keyed-body')?.textContent, "Artist");
     await act(async () => second.unmount());
     localStorage.clear();
 
@@ -192,19 +193,19 @@ test("the result table: the same picking, and the download key in the first data
       });
     }
     const third = createRoot(document.getElementById("root")!);
-    const packageMarks = () => [...document.querySelectorAll<HTMLElement>('tr[data-tree="parent"] [role="checkbox"]')];
+    const packageMarks = () => [...document.querySelectorAll<HTMLElement>('.kd-list-row[data-tree="parent"] [role="checkbox"]')];
     await act(async () => third.render(createElement(BatchHost, { chosen: [], mode: false })));
     await flush();
-    const batchIdle = layoutOf(document.querySelector(".kd-table")!);
+    const batchIdle = layoutOf(document.querySelector(".kd-list")!);
     assert.equal(packageMarks().length, 0);
     await act(async () => third.render(createElement(BatchHost, { chosen: ["0:a", "0:b", "0:c", "1:d"], mode: false })));
     assert.deepEqual(packageMarks().map(mark => mark.getAttribute("aria-checked")), ["true", "mixed"]);
     assert.equal(packageMarks()[1].getAttribute("aria-label"), "选择「two」全部曲目");
-    assert.equal(layoutOf(document.querySelector(".kd-table")!), batchIdle, "the package's mark takes the empty slot before its chevron");
+    assert.equal(layoutOf(document.querySelector(".kd-list")!), batchIdle, "the package's mark takes the empty slot before its chevron");
     // The package's mark picks its rows; it does not fold the package.
     await click(packageMarks()[1]);
     assert.deepEqual(toggledPackages, [1]);
-    assert.equal(document.querySelectorAll("tr[data-kd-search-result]").length, 6);
+    assert.equal(document.querySelectorAll(".kd-list-row[data-kd-search-result]").length, 6);
     await act(async () => third.unmount());
   } finally {
     localStorage.clear();

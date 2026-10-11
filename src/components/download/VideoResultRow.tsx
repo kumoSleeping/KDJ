@@ -165,8 +165,6 @@ export interface VideoResultRowProps extends VideoSeed {
   info?: VideoInfo | null;
   /** 可见数据列（与 ResultTable / MergedGroupRow 同一套偏好）。 */
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
-  /** 整行单元格总数（左边距 + 序号 + 数据列 + 空白列），错误提示行用。 */
-  totalColumns: number;
   /** 当前布局档位，决定单击/双击预览行为。 */
   layout: LayoutMode;
   /** 当前结果列表中的序号。 */
@@ -197,8 +195,6 @@ export interface VideoResultRowProps extends VideoSeed {
   onRemoveFromStreamPlaylist?(): void;
   removeFromStreamPlaylistLabel?: string;
   removingFromStreamPlaylist?: boolean;
-  /** @deprecated 保留兼容；请用 totalColumns。 */
-  colSpan?: number;
 }
 
 /**
@@ -216,7 +212,6 @@ export function VideoResultRow({
   duration,
   info: given,
   columns,
-  totalColumns,
   layout,
   rowNumber,
   indent = false,
@@ -419,13 +414,13 @@ export function VideoResultRow({
     switch (columnKey) {
       case "title":
         return (
-          <td
+          <div role="gridcell"
             key={columnKey}
-            className="kd-muted"
+            className="kd-list-cell kd-muted"
             data-col="title"
             title={`P${pageIndex + 1} · ${page.title}`}
             {...cellDrag}
-          >
+           data-flex="">
             <span className="kd-result-title kd-video-part-title">
               <span className="kd-thumb" aria-hidden="true">
                 <CoverImage
@@ -438,40 +433,40 @@ export function VideoResultRow({
               <span className="kd-video-part-index kd-mono">P{pageIndex + 1}</span>
               <span className="kd-result-title-text">{page.title || `P${pageIndex + 1}`}</span>
             </span>
-          </td>
+          </div>
         );
       case "artist":
       case "album":
       case "sources":
-        return <td key={columnKey} {...cellDrag} />;
+        return <div role="gridcell" className="kd-list-cell" key={columnKey} {...cellDrag} />;
       case "duration":
         return (
-          <td key={columnKey} className="kd-td-num kd-muted" data-col="duration" {...cellDrag}>
+          <div role="gridcell" key={columnKey} className="kd-list-cell kd-td-num kd-muted" data-col="duration" {...cellDrag}>
             {formatDuration(page.duration)}
-          </td>
+          </div>
         );
       case "from":
         return (
-          <td key={columnKey} className="kd-mono kd-muted" data-col="from" {...cellDrag}>
+          <div role="gridcell" key={columnKey} className="kd-list-cell kd-mono kd-muted" data-col="from" {...cellDrag}>
             B站
-          </td>
+          </div>
         );
       case "quality":
         return (
-          <td key={columnKey} className="kd-td-num kd-mono kd-muted" data-col="quality" {...cellDrag}>
+          <div role="gridcell" key={columnKey} className="kd-list-cell kd-td-num kd-mono kd-muted" data-col="quality" {...cellDrag}>
             {qualityLabel}
-          </td>
+          </div>
         );
       case "vip":
-        return <td key={columnKey} {...cellDrag} />;
+        return <div role="gridcell" className="kd-list-cell" key={columnKey} {...cellDrag} />;
       default:
-        return <td key={columnKey} {...cellDrag} />;
+        return <div role="gridcell" className="kd-list-cell" key={columnKey} {...cellDrag} />;
     }
   };
 
   return (
     <Fragment>
-      <tr
+      <div className="kd-list-row" role="row"
         data-video="true"
         data-enter={bornLate && leave === undefined ? "late" : undefined}
         data-selecting={selectionMode ? "true" : undefined}
@@ -540,8 +535,8 @@ export function VideoResultRow({
         }
         {...foldingRowProps(leave)}
       >
-        <td className="kd-result-gutter" {...cellDrag} />
-        <td className="kd-result-lead" data-col="index" {...cellDrag}>
+        <div role="gridcell" className="kd-list-cell kd-result-gutter" {...cellDrag} />
+        <div role="gridcell" className="kd-list-cell kd-result-lead" data-col="index" {...cellDrag} data-flex="">
           <RowIndex
             number={rowNumber}
             picking={selectionMode}
@@ -553,12 +548,12 @@ export function VideoResultRow({
               />
             ) : null}
           />
-        </td>
+        </div>
         {columns.map((column) => {
           switch (column.key) {
             case "title":
               return (
-                <td key={column.key} className="kd-td-strong" data-col="title" title={title} {...cellDrag}>
+                <div role="gridcell" key={column.key} className="kd-list-cell kd-td-strong" data-col="title" title={title} {...cellDrag} data-flex="">
                   <span className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}>
                     <span
                       className="kd-thumb"
@@ -610,29 +605,29 @@ export function VideoResultRow({
                       </button>
                     ) : null}
                   </span>
-                </td>
+                </div>
               );
             case "artist":
               return (
-                <td key={column.key} data-col="artist" title={author || undefined} {...cellDrag}>
+                <div role="gridcell" className="kd-list-cell" key={column.key} data-col="artist" title={author || undefined} {...cellDrag}>
                   {keyed(column.key, author || DASH)}
-                </td>
+                </div>
               );
             case "album":
               return (
-                <td key={column.key} data-col="album" {...cellDrag}>
+                <div role="gridcell" className="kd-list-cell" key={column.key} data-col="album" {...cellDrag}>
                   {keyed(column.key, DASH)}
-                </td>
+                </div>
               );
             case "duration":
               return (
-                <td key={column.key} className="kd-td-num" data-col="duration" {...cellDrag}>
+                <div role="gridcell" key={column.key} className="kd-list-cell kd-td-num" data-col="duration" {...cellDrag}>
                   {keyed(column.key, formatDuration(duration ?? info?.duration ?? null))}
-                </td>
+                </div>
               );
             case "sources":
               return (
-                <td key={column.key} data-col="sources" {...cellDrag}>
+                <div role="gridcell" className="kd-list-cell" key={column.key} data-col="sources" {...cellDrag} data-flex="">
                   {keyed(column.key, (
                     <span className="kd-source-dots" title={platform === "youtube" ? "YouTube" : "B站"}>
                       <span className="kd-source-dot" data-platform={platform} data-active="true">
@@ -640,39 +635,38 @@ export function VideoResultRow({
                       </span>
                     </span>
                   ))}
-                </td>
+                </div>
               );
             case "from":
               return (
-                <td key={column.key} className="kd-mono" data-col="from" {...cellDrag}>
+                <div role="gridcell" key={column.key} className="kd-list-cell kd-mono" data-col="from" {...cellDrag}>
                   {keyed(column.key, platform === "youtube" ? "YouTube" : "B站")}
-                </td>
+                </div>
               );
             case "quality":
               return (
-                <td key={column.key} className="kd-td-num kd-mono" data-col="quality" {...cellDrag}>
+                <div role="gridcell" key={column.key} className="kd-list-cell kd-td-num kd-mono" data-col="quality" {...cellDrag}>
                   {keyed(column.key, qualityLabel)}
-                </td>
+                </div>
               );
             case "vip":
               return (
-                <td key={column.key} data-col="vip" style={{ width: "3rem" }} {...cellDrag}>
+                <div role="gridcell" className="kd-list-cell" key={column.key} data-col="vip" style={{ width: "3rem" }} {...cellDrag} data-flex="">
                   {keyed(column.key, null)}
-                </td>
+                </div>
               );
             default:
-              return <td key={column.key} {...cellDrag} />;
+              return <div role="gridcell" className="kd-list-cell" key={column.key} {...cellDrag} />;
           }
         })}
-        <td className="kd-table-fill" aria-hidden="true" />
-      </tr>
+      </div>
       {partsFold === "open" || partsFold === "out"
         ? pages.map((page, pageIndex) => {
             // Leaving with the package, or folding back under this row: the last part goes first.
             const partLeave =
               leave ?? (partsFold === "out" ? foldOrder(pageIndex, pages.length) : undefined);
             return (
-            <tr
+            <div className="kd-list-row" role="row"
               key={`${bvid}:p${pageIndex + 1}`}
               data-video="true"
               data-video-part="true"
@@ -714,28 +708,23 @@ export function VideoResultRow({
               }}
               {...foldingRowProps(partLeave)}
             >
-              <td className="kd-result-gutter" {...cellDrag} />
-              <td className="kd-result-lead" data-col="index" {...cellDrag} />
+              <div role="gridcell" className="kd-list-cell kd-result-gutter" {...cellDrag} />
+              <div role="gridcell" className="kd-list-cell kd-result-lead" data-col="index" {...cellDrag}  data-flex=""/>
               {columns.map((column) => partCell(column.key, page, pageIndex))}
-              <td className="kd-table-fill" aria-hidden="true" />
-            </tr>
+                  </div>
             );
           })
         : null}
       {partsFold === "shut" ? (
-        <tr data-fold="shut" aria-hidden="true">
-          <td
-            colSpan={totalColumns}
-            style={{ "--kd-fold-h": `calc(var(--kd-row-h) * ${pages.length})` } as CSSProperties}
-          />
-        </tr>
+        <div className="kd-list-row" role="row" data-fold="shut" aria-hidden="true"
+          style={{ "--kd-fold-h": `calc(var(--kd-row-h) * ${pages.length})` } as CSSProperties} />
       ) : null}
       {sendError ? (
-        <tr data-video="true">
-          <td colSpan={totalColumns}>
+        <div className="kd-list-row" role="row" data-video="true">
+          <div role="gridcell" className="kd-list-cell" data-flex="" style={{ gridColumn: "1 / -1" }}>
             <InlineNotice text={sendError} onDismiss={() => setSendError("")} />
-          </td>
-        </tr>
+          </div>
+        </div>
       ) : null}
       {rowMenu && (
         <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>

@@ -183,7 +183,7 @@ export function useFold(open: boolean, rows: number): FoldPhase {
 }
 
 /** What a row carries while it fades out: it is a picture of itself, not a control. */
-export function foldingRowProps(order: number | undefined): HTMLAttributes<HTMLTableRowElement> | undefined {
+export function foldingRowProps(order: number | undefined): HTMLAttributes<HTMLDivElement> | undefined {
   if (order === undefined) return undefined;
   return {
     "data-fold": "out",
@@ -191,5 +191,5 @@ export function foldingRowProps(order: number | undefined): HTMLAttributes<HTMLT
     "aria-hidden": true,
     tabIndex: -1,
     style: { "--kd-fold-i": order } as CSSProperties,
-  } as HTMLAttributes<HTMLTableRowElement>;
+  } as HTMLAttributes<HTMLDivElement>;
 }

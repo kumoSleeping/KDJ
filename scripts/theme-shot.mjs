@@ -164,11 +164,11 @@ try {
       problems.length = 0;
 
       await call("Page.navigate", { url: "http://localhost:5274/" });
-      await until(`${name} 曲目列表`, () => evaluate(`document.querySelectorAll(".kd-app tbody tr").length > 0`), 900);
+      await until(`${name} 曲目列表`, () => evaluate(`document.querySelectorAll(".kd-app .kd-list-row").length > 0`), 900);
       await sleep(1500);
       await shot(`${name}-main`);
       // 选中第一首：详情栏、波形、播放条都出来
-      await evaluate(`document.querySelector(".kd-app tbody tr")?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
+      await evaluate(`document.querySelector(".kd-app .kd-list-row")?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
       await sleep(2500);
       await shot(`${name}-track`);
       await evaluate(`document.querySelector('[aria-label="设置"]')?.click()`);

@@ -10,7 +10,7 @@ export function setUpDom() {
   const cancel = (id: number) => frames.delete(id);
   Object.assign(globalThis, { window: dom.window, document: dom.window.document,
     localStorage: dom.window.localStorage, HTMLElement: dom.window.HTMLElement, Element: dom.window.Element,
-    HTMLTableRowElement: dom.window.HTMLTableRowElement, MutationObserver: dom.window.MutationObserver,
+    MutationObserver: dom.window.MutationObserver,
     CustomEvent: dom.window.CustomEvent, Event: dom.window.Event,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
     requestAnimationFrame: raf, cancelAnimationFrame: cancel, IS_REACT_ACT_ENVIRONMENT: true,
@@ -22,8 +22,9 @@ export function setUpDom() {
   dom.window.HTMLMediaElement.prototype.pause = () => {};
   dom.window.HTMLCanvasElement.prototype.getContext = (() => null) as typeof dom.window.HTMLCanvasElement.prototype.getContext;
   dom.window.HTMLElement.prototype.scrollIntoView = () => {};
-  const heightOf = (element: Element) => element.classList.contains("kd-list-row") || element.tagName === "TR" ? 36
-    : element.classList.contains("kd-list-head") || element.tagName === "THEAD" ? 28 : 720;
+  const heightOf = (element: Element): number => element.classList.contains("kd-list-row") ? 36
+    : element.classList.contains("kd-list-head") ? 28
+    : element.classList.contains("kd-list-block") ? element.querySelectorAll(".kd-list-row").length * 36 : 720;
   Object.defineProperty(dom.window.HTMLElement.prototype, "clientHeight", { configurable: true, get() { return 720; } });
   Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { configurable: true, get() { return 1000; } });
   // The virtualized lists measure their scroll box by its offset size.
@@ -52,13 +53,9 @@ export function setUpDom() {
 }
 
 /** The columns a list is laid out by: nothing of it may change when picking starts or ends. */
-export const layoutOf = (list: Element) => JSON.stringify(list.classList.contains("kd-list") ? {
+export const layoutOf = (list: Element) => JSON.stringify({
   cols: (list as HTMLElement).style.getPropertyValue("--kd-list-cols"),
   head: [...list.querySelectorAll(".kd-list-head > *")].map(cell => cell.getAttribute("data-col") ?? cell.className),
   cells: [...(list.querySelector(".kd-list-row")?.children ?? [])].map(cell => cell.getAttribute("data-col") ?? cell.className),
-} : {
-  cols: [...list.querySelectorAll("colgroup > col")].map(col => col.getAttribute("style")),
-  head: [...list.querySelectorAll("thead th")].map(th => th.getAttribute("data-col") ?? th.className),
-  cells: [...(list.querySelector("tbody tr:not([data-spacer])")?.children ?? [])].map(td => td.getAttribute("data-col") ?? td.className),
 });
 

@@ -1282,16 +1282,6 @@ textarea {
   box-shadow: inset 2px 0 0 var(--kd-theme), inset -2px 0 0 var(--kd-theme);
 }
 
-/* 拖进文件夹后、尚未落盘的占位行 */
-.kd-table tr[data-pending="true"] {
-  color: var(--kd-muted);
-}
-.kd-table tr[data-pending="true"] td {
-  cursor: default;
-}
-.kd-table tr[data-pending-state="failed"] {
-  color: var(--kd-danger);
-}
 .kd-pending-title {
   display: flex;
   align-items: center;
@@ -1823,7 +1813,7 @@ textarea {
 }
 .kd-selection-bar > button:hover:not(:disabled) { color: var(--kd-text); }
 .kd-selection-bar > button:disabled { color: var(--kd-faint); cursor: default; }
-.kd-selection-bar + .kd-table thead th {
+.kd-selection-bar + .kd-list .kd-list-hcell {
   top: 2rem;
 }
 .kd-song-preview-body {
@@ -1920,199 +1910,6 @@ textarea {
   white-space: nowrap;
 }
 
-.kd-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-  /* fixed 布局：每列按业务优先级拿明确宽度，标题远宽于元数据列。
-     用默认的 auto 布局时，配上下面 td 的 `max-width: 0`（省略号必需），
-     浏览器会把没写宽度的列压到最小——结果就是标题被压成 "[..." 而
-     整列都是 "—" 的专辑却稳稳占着 14%。列宽优先级见 TrackTable.tsx 的注释。 */
-  table-layout: fixed;
-}
-.kd-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  text-align: left;
-  white-space: nowrap;
-  user-select: none;
-}
-/* 换序与调宽共用同一根 2px 中性定位线；差异由光标和移动方向表达，不再加装饰。 */
-.kd-table thead th .kd-col-resize {
-  position: absolute;
-  top: 0;
-  right: -3px;
-  width: 7px;
-  height: 100%;
-  cursor: col-resize;
-  z-index: 3;
-}
-.kd-table thead th .kd-col-resize::after {
-  content: "";
-  position: absolute;
-  top: 4px;
-  bottom: 4px;
-  left: 50%;
-  width: 2px;
-  transform: translateX(-50%);
-  background: transparent;
-  transition: background-color 0.12s;
-}
-.kd-table thead th .kd-col-resize:hover::after {
-  background: color-mix(in srgb, var(--kd-layout-guide) 72%, transparent);
-}
-.kd-table thead th .kd-col-resize[data-active="true"]::after {
-  background: var(--kd-layout-guide);
-}
-body[data-kd-col-resizing="true"],
-body[data-kd-col-resizing="true"] * {
-  cursor: col-resize !important;
-  user-select: none !important;
-}
-.kd-table thead th[data-sortable="true"] {
-  cursor: pointer;
-}
-.kd-table thead th[data-sortable="true"]:hover {
-  color: var(--kd-text);
-}
-.kd-table thead th[data-column-reorder="true"] {
-  cursor: grab;
-}
-body[data-kd-col-dragging="true"],
-body[data-kd-col-dragging="true"] * {
-  cursor: grabbing !important;
-  user-select: none !important;
-  -webkit-user-select: none !important;
-}
-.kd-table tbody td {
-  height: var(--kd-row-h);
-  padding: 0 0.6rem;
-  border-bottom: none;
-  color: var(--kd-text-body);
-  vertical-align: middle;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 0;
-}
-.kd-table tbody tr:hover td {
-  background: var(--kd-hover);
-}
-/* 虚拟滚动的占位行：只负责撑出未渲染区域的高度，
-   不吃 hover 底色（不然一大块空白会被整条点亮）、不带内边距。 */
-.kd-table tbody tr[data-spacer] > td {
-  padding: 0;
-}
-.kd-table tbody tr[data-spacer]:hover > td {
-  background: transparent;
-}
-/* 曲目选中使用一层底色，不描边；具体颜色由内置/主题包样式决定。
-   While rows are being picked (data-selecting) the mark and the type say which rows are in:
-   a picked row is full ink with more weight, the others step back to the muted colour, and
-   no row carries the selection tone. The row whose details are open keeps it. */
-.kd-table tbody tr[aria-selected="true"] td {
-  color: var(--kd-text);
-}
-.kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) td {
-  background: var(--kd-selected);
-}
-.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) > td,
-.kd-table tbody tr[data-selecting="true"]:not([aria-selected="true"], [data-inspected="true"]) .kd-td-strong {
-  color: var(--kd-muted);
-}
-.kd-table tbody tr[data-selecting="true"][aria-selected="true"] .kd-td-strong {
-  font-weight: 700;
-}
-/* 可拖元素一律不能框选文字：拖一下变成「全选文本」比不能复制糟得多。
-   曲库格子必须保持 draggable（WKWebView），用这条禁选，而不是摘掉 draggable。 */
-[draggable="true"] {
-  user-select: none;
-  -webkit-user-select: none;
-}
-/* WKWebView 不把 <tr draggable> 稳定识别成拖动源；每个格子都是拖动源。 */
-.kd-table tbody td[draggable="true"],
-.kd-table tbody tr[draggable="true"],
-.kd-track-drag-surface[draggable="true"],
-.kd-queue-row[draggable="true"],
-.kd-thumb[draggable="true"] {
-  -webkit-user-drag: element;
-  cursor: grab;
-  user-select: none;
-  -webkit-user-select: none;
-}
-.kd-table tbody td[draggable="true"]:active,
-.kd-table tbody tr[draggable="true"]:active,
-.kd-track-drag-surface[draggable="true"]:active,
-.kd-queue-row[draggable="true"]:active,
-.kd-thumb[draggable="true"]:active {
-  cursor: grabbing;
-}
-.kd-track-drag-surface {
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* 标题格改成 flex 拖拽面后，长视频名会把封面这个 flex item 压成 0px：
-   截图里「有一条细缝 / 完全没图」就是它。缩略图是媒体身份的一部分，绝不让标题吃掉。 */
-.kd-track-drag-surface > .kd-thumb {
-  flex: 0 0 22px;
-}
-.kd-table tbody tr[data-kd-track-id] > td,
-.kd-table tbody tr[data-kd-track-id] .kd-track-drag-surface {
-  cursor: grab;
-}
-body[data-kd-track-pointer-dragging="true"],
-body[data-kd-track-pointer-dragging="true"] * {
-  cursor: grabbing !important;
-  user-select: none !important;
-  -webkit-user-select: none !important;
-}
-body[data-kd-track-pointer-dragging="true"] {
-  overflow: hidden !important;
-  overscroll-behavior: none;
-  touch-action: none;
-}
-.kd-table tbody td.kd-td-num > .kd-track-drag-surface {
-  justify-content: flex-start;
-}
-/* 焦点行不再单独描线（黑线红线都试过，用户都嫌吵）：
-   单选时选中即焦点，多选时详情栏标题自证是哪一首。 */
-/* 列头拖排：源列头保持完全不透明，避免和下方内容叠在一起；落点画在目标的落入侧——
-   从左边拖来会落到目标右侧、从右边拖来落到左侧（见 TrackTable.moveColumn），
-   与调宽一致只保留一根中性线。 */
-.kd-table thead th[data-dragging="true"] {
-  opacity: 1;
-}
-.kd-table thead th[data-col-drop]::before {
-  content: "";
-  position: absolute;
-  top: 4px;
-  bottom: 4px;
-  z-index: 4;
-  width: 2px;
-  background: var(--kd-layout-guide);
-  pointer-events: none;
-}
-.kd-table thead th[data-col-drop="before"]::before {
-  left: -1px;
-}
-.kd-table thead th[data-col-drop="after"]::before {
-  right: -1px;
-}
 /* 白天模式的列表面板铺白底：默认透出去的是 --kd-bg 灰底，
    一整屏结果看起来发灰发沉，其实内容没问题，是底色的锅 */
 :root[data-theme="light"] .kd-table-wrap {
@@ -2194,12 +1991,12 @@ button.kd-thumb {
  * 外观已与音频 MergedGroupRow 对齐；细项（分 P / 画质 / Offset）改到队列里配。
  * 仍标 data-video，便于拖动与双击预览走视频专用路径。
  * ---------------------------------------------------------------- */
-.kd-table tbody tr[data-video="true"] {
+.kd-list-row[data-video="true"] {
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
 }
-body[data-kd-search-pointer-dragging="true"] .kd-table tbody tr[data-video="true"] {
+body[data-kd-search-pointer-dragging="true"] .kd-list-row[data-video="true"] {
   cursor: grabbing;
 }
 body[data-kd-search-pointer-dragging="true"],
@@ -2456,50 +2253,50 @@ body[data-kd-search-pointer-dragging="true"] * {
 /* 批量结果的包含关系：父行是一个"包"（歌单 / 专辑 / 一次关键词搜索），
    子行缩进一档。包头用中性分区面表达层级，不画线；红色留给真正的
    选中、焦点和状态，不再拿一根红竖线冒充“这是集合”。 */
-.kd-table tbody tr[data-tree="parent"] td {
+.kd-list-row[data-tree="parent"] {
   --kd-result-package-bg: color-mix(in srgb, var(--kd-hover) 45%, var(--kd-panel));
   background: var(--kd-result-package-bg);
   color: var(--kd-text);
 }
-.kd-table tbody tr[data-collection-kind="playlist"] {
+.kd-list-row[data-collection-kind="playlist"] {
   --kd-result-collection-color: #38bdf8;
 }
-.kd-table tbody tr[data-collection-kind="album"] {
+.kd-list-row[data-collection-kind="album"] {
   --kd-result-collection-color: #c084fc;
 }
-.kd-table tbody tr[data-collection-kind="artist"] {
+.kd-list-row[data-collection-kind="artist"] {
   --kd-result-collection-color: #fb923c;
 }
-.kd-table tbody tr[data-collection-kind="radio"] {
+.kd-list-row[data-collection-kind="radio"] {
   --kd-result-collection-color: #2dd4bf;
 }
-:root[data-theme="light"] .kd-table tbody tr[data-collection-kind="playlist"] {
+:root[data-theme="light"] .kd-list-row[data-collection-kind="playlist"] {
   --kd-result-collection-color: #0369a1;
 }
-:root[data-theme="light"] .kd-table tbody tr[data-collection-kind="album"] {
+:root[data-theme="light"] .kd-list-row[data-collection-kind="album"] {
   --kd-result-collection-color: #7e22ce;
 }
-:root[data-theme="light"] .kd-table tbody tr[data-collection-kind="artist"] {
+:root[data-theme="light"] .kd-list-row[data-collection-kind="artist"] {
   --kd-result-collection-color: #c2410c;
 }
-:root[data-theme="light"] .kd-table tbody tr[data-collection-kind="radio"] {
+:root[data-theme="light"] .kd-list-row[data-collection-kind="radio"] {
   --kd-result-collection-color: #0f766e;
 }
 /* 歌单 / 专辑 / 艺术家搜索结果沿用曲目表的列、封面和行高；整行就是“打开”。
    不再用一条跨列文案外加孤立按钮，避免在线来源突然换一套组件语言。 */
-.kd-table tbody tr[data-collection="true"] {
+.kd-list-row[data-collection="true"] {
   cursor: pointer;
 }
-.kd-table tbody tr[data-collection="true"]:focus-visible {
+.kd-list-row[data-collection="true"]:focus-visible {
   outline: none;
 }
-.kd-table tbody tr[data-collection="true"]:focus-visible td {
+.kd-list-row[data-collection="true"]:focus-visible {
   background: var(--kd-hover);
 }
-.kd-table tbody tr[data-collection="true"][data-loading="true"] {
+.kd-list-row[data-collection="true"][data-loading="true"] {
   cursor: wait;
 }
-.kd-table tbody tr[data-collection="true"][data-loading="true"] td {
+.kd-list-row[data-collection="true"][data-loading="true"] {
   color: var(--kd-muted);
 }
 .kd-result-package-head {
@@ -2510,14 +2307,14 @@ body[data-kd-search-pointer-dragging="true"] * {
   gap: 0.45rem;
 }
 /* 普通数据格会裁掉溢出内容；分组格把右侧摘要交给外层横向滚动容器。 */
-.kd-table tbody tr[data-tree="parent"] > td[colspan] {
+.kd-list-row[data-tree="parent"] > .kd-result-package-cell {
   overflow: visible;
 }
 .kd-result-package-head > strong {
   flex: 0 1 auto;
   min-width: 2rem;
 }
-.kd-table tr[data-tree="parent"][data-collection-kind] .kd-result-package-head > strong {
+.kd-list-row[data-tree="parent"][data-collection-kind] .kd-result-package-head > strong {
   color: var(--kd-text-body);
   font-size: var(--kd-size-sm);
   font-weight: 600;
@@ -2608,19 +2405,19 @@ body[data-kd-search-pointer-dragging="true"] * {
     var(--kd-result-package-bg, var(--kd-panel)) 0.65rem
   );
 }
-.kd-table tbody tr[data-tree="parent"]:hover td {
+.kd-list-row[data-tree="parent"]:hover {
   --kd-result-package-bg: var(--kd-hover);
 }
 /* 在线结果的序号格：平时是序号，批选时原位换成选择标记（RowPick.css）。
    下载键在首个数据列右端（ResultTable.css）。 */
-.kd-table tbody td.kd-result-lead {
+.kd-list-cell.kd-result-lead {
   padding: 0 0.35rem;
   overflow: visible;
   vertical-align: middle;
   color: var(--kd-faint);
   text-align: right;
 }
-.kd-table[data-kind="results"] [data-col="index"] {
+.kd-list[data-kind="results"] [data-col="index"] {
   padding-left: 0.35rem;
   padding-right: 0.35rem;
 }
@@ -2629,12 +2426,12 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-variant-numeric: tabular-nums;
 }
 /* The strip left of the index column is the table's left margin and nothing else. */
-.kd-table thead th.kd-result-gutter,
-.kd-table tbody td.kd-result-gutter {
+.kd-list-hcell.kd-result-gutter,
+.kd-list-cell.kd-result-gutter {
   padding: 0;
 }
 /* A row that can be downloaded answers the pointer with a slightly deeper tone. */
-.kd-table[data-kind="results"] tbody tr[data-downloadable="true"]:hover > td {
+.kd-list[data-kind="results"] .kd-list-row[data-downloadable="true"]:hover {
   background: color-mix(in srgb, var(--kd-hover), #000 7%);
 }
 /* 多来源展开属于歌曲标题，不再占用（或伪装成）独立下载列。
@@ -2658,29 +2455,29 @@ body[data-kd-search-pointer-dragging="true"] * {
 }
 /* One chevron for both states: it turns down when its rows are open and back when they fold. */
 .kd-result-source-toggle > svg,
-.kd-table tr[data-tree="parent"] .kd-result-lead-btn > svg {
+.kd-list-row[data-tree="parent"] .kd-result-lead-btn > svg {
   transition: transform var(--kd-motion-micro) var(--kd-ease-out);
 }
 .kd-result-source-toggle[aria-expanded="true"] > svg,
-.kd-table tr[data-tree="parent"] .kd-result-lead-btn[aria-expanded="true"] > svg {
+.kd-list-row[data-tree="parent"] .kd-result-lead-btn[aria-expanded="true"] > svg {
   transform: rotate(90deg);
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-result-source-toggle > svg,
-  .kd-table tr[data-tree="parent"] .kd-result-lead-btn > svg {
+  .kd-list-row[data-tree="parent"] .kd-result-lead-btn > svg {
     transition: none;
   }
 }
 /* 批量关键词结果仍有一行包头，它的唯一行首动作是展开/收起；限定作用域，
    防止这套动作格重新渗回普通在线曲目的序号列。 */
-.kd-table tr[data-tree="parent"] .kd-result-lead-actions {
+.kd-list-row[data-tree="parent"] .kd-result-lead-actions {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
   gap: 0.05rem;
   min-width: 0;
 }
-.kd-table tr[data-tree="parent"] .kd-result-lead-btn {
+.kd-list-row[data-tree="parent"] .kd-result-lead-btn {
   appearance: none;
   flex: none;
   width: 1.55rem;
@@ -2693,15 +2490,15 @@ body[data-kd-search-pointer-dragging="true"] * {
   color: var(--kd-muted);
   cursor: pointer;
 }
-.kd-table tr[data-tree="parent"] .kd-result-lead-btn:hover {
+.kd-list-row[data-tree="parent"] .kd-result-lead-btn:hover {
   color: var(--kd-text);
 }
-.kd-table tr[data-tree="parent"][data-collection-kind] .kd-result-lead-btn,
-.kd-table tr[data-tree="parent"][data-collection-kind] .kd-result-lead-btn:hover {
+.kd-list-row[data-tree="parent"][data-collection-kind] .kd-result-lead-btn,
+.kd-list-row[data-tree="parent"][data-collection-kind] .kd-result-lead-btn:hover {
   color: var(--kd-result-collection-color);
 }
 /* The slot before a package's chevron: empty, or the package's own selection mark while rows are being picked. */
-.kd-table tr[data-tree="parent"] .kd-result-lead-spacer {
+.kd-list-row[data-tree="parent"] .kd-result-lead-spacer {
   display: grid;
   flex: none;
   width: 1.55rem;
@@ -2744,7 +2541,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-weight: 650;
   white-space: nowrap;
 }
-.kd-table tbody tr[data-resolving="true"] {
+.kd-list-row[data-resolving="true"] {
   cursor: progress;
 }
 .kd-video-page-count {
@@ -2754,7 +2551,7 @@ body[data-kd-search-pointer-dragging="true"] * {
   font-size: var(--kd-size-xs);
   font-weight: 500;
 }
-.kd-table tbody tr[data-video-part="true"] td {
+.kd-list-row[data-video-part="true"] .kd-list-cell {
   color: var(--kd-muted);
 }
 .kd-video-part-title {
@@ -2866,25 +2663,6 @@ body[data-kd-search-pointer-dragging="true"] * {
   align-items: center;
   gap: 0;
   color: var(--kd-faint);
-}
-.kd-table tbody td[data-col="rating"] {
-  /* 通用 td 左右各 0.6rem 会把五颗星挤出列宽，触发表格自动补省略号。 */
-  padding-right: 0.35rem;
-  padding-left: 0.35rem;
-  text-overflow: clip;
-}
-.kd-table[data-kind="library"] th[data-col="artist"],
-.kd-table[data-kind="library"] th[data-col="album"],
-.kd-table[data-kind="library"] td[data-col="artist"],
-.kd-table[data-kind="library"] td[data-col="album"],
-.kd-table:not([data-kind="library"]) th[data-col="artist"],
-.kd-table:not([data-kind="library"]) th[data-col="album"],
-.kd-table:not([data-kind="library"]) td[data-col="artist"],
-.kd-table:not([data-kind="library"]) td[data-col="album"] {
-  /* 两列主动让位给标题；左右表共用同一套内边距与字色。 */
-  padding-right: 0.25rem;
-  padding-left: 0.25rem;
-  color: var(--kd-text-body);
 }
 .kd-table-rating > button {
   appearance: none;
@@ -6411,42 +6189,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   width: 0;
   height: 0;
 }
-/* 固定宽度的真实列之外留一个弹性空白列：只由它吸收视口剩余宽度。
-   拖标题时艺人/BPM 等列因此不会跟着按比例伸缩。 */
-.kd-table .kd-table-fill {
-  width: auto;
-  max-width: none;
-  padding: 0;
-}
-/* 默认列宽合计的兜底；用户拖过列宽后由 TrackTable 内联 minWidth 覆盖。 */
-.kd-table[data-kind="library"] {
-  min-width: 53.7rem;
-}
-.kd-table[data-kind="library"] [data-col="index"] {
-  color: var(--kd-faint);
-  text-align: right;
-  padding-left: 0.35rem;
-  padding-right: 0.35rem;
-}
-.kd-table[data-kind="library"] tr[data-pending="true"] td.kd-pending-lead {
-  max-width: none;
-}
-/* 待下载图标落在序号格里：与曲目序号同列同宽、同 padding。 */
-.kd-table[data-kind="library"] tr[data-pending="true"] td.kd-pending-index {
-  vertical-align: middle;
-}
-.kd-table[data-kind="library"] tr[data-pending="true"] td.kd-pending-index .kd-pending-mark {
-  display: inline-flex;
-  justify-content: flex-end;
-  width: 100%;
-}
-.kd-table[data-kind="library"] tr[data-pending="true"] .kd-pending-mark {
-  flex: none;
-}
-/* 搜索结果表：标题对齐曲库 14rem，横向不够就自己滚 */
-.kd-table:not([data-kind="library"]) {
-  min-width: 52rem;
-}
 
 /* 排序只显示方向箭头；主、副层级由交互状态保留，不再用 ①② 占据表头。
    显式继承字号，避免符号使用不同字形时看起来忽大忽小。 */
@@ -8286,24 +8028,8 @@ button.kd-camelot-grid-key { cursor: pointer; }
   user-select: text;
 }
 
-/* Sticky headers sit above the overlay scrollbar, including Sakura's rail. */
-.kd-overlay-scroll-host .kd-table thead th { z-index: 6; }
 .kd-overlay-scroll-host .kd-selection-bar { z-index: 7; }
 
-/* Selected library rows need a continuous, high-contrast surface — except while rows are
-   being picked: there the selection mark and the type carry it (see the base rule above). */
-html:root .kd-table tbody tr[aria-selected="true"] > td {
-  color:var(--kd-text) !important;
-}
-html:root .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) > td {
-  background:var(--kd-selected) !important;
-}
-html:root .kd-table tbody tr[aria-selected="true"] > td :is(.kd-td-strong, .kd-muted, .kd-faint, button, a, small) { color:var(--kd-text) !important; }
-/* Row selection is a neutral surface, separate from red control selection.
-   Do not inherit the light theme's transparent --kd-selected control token. */
-html:root:not([data-theme-pack]) .kd-table tbody tr:is([aria-selected="true"]:not([data-selecting="true"]), [data-inspected="true"]) > td {
-  background: color-mix(in srgb, var(--kd-text) 12%, var(--kd-panel)) !important;
-}
 /* Also refresh already-installed Sakura packs without requiring a reinstall. */
 html:root[data-theme-pack="sakulaptop98"] {
   --kd-wave-low:#d84b88;
@@ -8311,7 +8037,6 @@ html:root[data-theme-pack="sakulaptop98"] {
   --kd-wave-high:#83bacf;
 }
 
-html:root[data-theme-pack="sakulaptop98"] .kd-table tbody tr[aria-selected="true"] > td { background:#edb4ce !important; }
 
 .kd-section-body .kd-sheet-scrim[data-placement="bottom"] {
   left: 0;

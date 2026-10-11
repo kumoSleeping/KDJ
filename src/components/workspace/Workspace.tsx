@@ -1456,8 +1456,9 @@ export function Workspace() {
     const stepSearchPane = (delta: number) => {
       if (temporaryLibrary) { stepPane(delta); return; }
       const rows = [
-        ...document.querySelectorAll<HTMLTableRowElement>(
-          '.kd-workspace-pane-remote[data-pane-active="true"] tr[data-kd-search-result]',
+        // Only the rows near the viewport exist (the list is virtualized): the step moves among them.
+        ...document.querySelectorAll<HTMLElement>(
+          '.kd-workspace-pane-remote[data-pane-active="true"] .kd-list-row[data-kd-search-result]',
         ),
       ];
       const current = rows.findIndex((row) => row.dataset.inspected === "true");

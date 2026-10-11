@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   AlertTriangle,
   Check,
@@ -55,7 +55,6 @@ import type { LayoutMode } from "../../lib/useLayoutMode";
 import {
   collectionReveal,
   collectionToken,
-  isResolvedCollectionItem,
 } from "../../lib/searchCollections";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { RowPick } from "../common/RowPick";
@@ -79,13 +78,15 @@ import {
 } from "./searchMotion";
 import {
   arrivalAfter,
-  arriveRows,
-  firstRowInView,
   nearListEnd,
   NOTHING_PRESENTED,
   settleRowGestures,
   type ResultDelivery,
 } from "./resultArrival";
+import { resultBlocks, resultListIsFlat, resultPickKeys, resultRowCount, type ResultBlock } from "./resultBlocks";
+import { useRowList, useScrollMotion } from "../common/rowList";
+import { createListArrival, type ListArrival } from "../common/listArrival";
+import "../common/RowList.css";
 import "./ResultTable.css";
 
 export {
@@ -104,6 +105,11 @@ const KIND_LABEL: Record<IntakeKind, string> = {
   unknown: "链接",
   error: "失败",
 };
+
+/** The bounds of a row height before the first row is measured (= --kd-row-h). */
+const FALLBACK_ROW_H = 36;
+/** A presented list waits this long for the rows at its place to be rendered before giving up. */
+const ARRIVAL_DUE_MS = 400;
 
 function previewItem(group: MergedGroup, preferredIndex: number): SongPreviewItem | null {
   if (isVideoGroup(group)) return null;
@@ -217,19 +223,16 @@ type ResultTableHandlers = Required<Pick<
 function PackageRows({
   open,
   count,
-  columns,
   children,
 }: {
   open: boolean;
   /** Rows the package shows when open; the fold is told how many of them take part. */
   count: number;
-  /** Cells in a row, for the row that stands in for the folded ones. */
-  columns: number;
   /** The package's rows; `leaving` asks for the pictures that fade out. */
   children(leaving: boolean): ReactNode;
 }) {
   const phase = useFold(open, Math.min(count, FOLD_MAX_ROWS));
-  const endRef = useRef<HTMLTableRowElement>(null);
+  const endRef = useRef<HTMLDivElement>(null);
   const heightRef = useRef(0);
   // Measured once, when the rows start to leave and before anything has moved: the room they hold.
   useLayoutEffect(() => {
@@ -246,15 +249,14 @@ function PackageRows({
   if (phase === "closed") return null;
   if (phase === "shut") {
     return (
-      <tr data-fold="shut" aria-hidden="true">
-        <td colSpan={columns} style={{ "--kd-fold-h": `${heightRef.current}px` } as CSSProperties} />
-      </tr>
+      <div className="kd-list-row" role="row" data-fold="shut" aria-hidden="true"
+        style={{ "--kd-fold-h": `${heightRef.current}px` } as CSSProperties} />
     );
   }
   return (
     <>
       <Fragment key="rows">{children(phase === "out")}</Fragment>
-      {phase === "out" ? <tr key="end" ref={endRef} hidden /> : null}
+      {phase === "out" ? <div key="end" ref={endRef} hidden /> : null}
     </>
   );
 }
@@ -301,6 +303,9 @@ export function ResultTable(props: ResultTableProps) {
 function loadPrefs(): TableColumnPrefs {
   return loadTableColumnPrefs(RESULT_COLUMN_PREFS_KEY, RESULT_COLUMN_PREFS_SCHEMA);
 }
+
+/** A mounted row of a block and where it lies in the list, in pixels from the first row. */
+interface PlacedRow { row: HTMLElement; block: string; top: number }
 
 const ResultTableView = memo(function ResultTableView({
   items,
@@ -349,24 +354,6 @@ const ResultTableView = memo(function ResultTableView({
    * in place of its number, and a plain click on it picks or drops it instead of opening it.
    */
   const selecting = selectionMode || selected.size > 0;
-  const tableRef = useRef<HTMLTableElement>(null);
-  /** The row touched last — picked, dropped or opened: where a Shift-click's run starts. */
-  const anchorRef = useRef<string | null>(null);
-  const pickRow = (key: string, range: boolean) => {
-    // The run follows the rows as they are shown, whatever page or package they belong to.
-    const shown = range
-      ? Array.from(tableRef.current?.querySelectorAll<HTMLElement>("tbody > tr[data-pick-key]") ?? [])
-          .map((row) => row.dataset.pickKey ?? "")
-      : [];
-    const run = range ? selectionRun(shown, anchorRef.current, key) : null;
-    anchorRef.current = key;
-    if (!run) {
-      onToggleSelect(key);
-      return;
-    }
-    // A run only adds: what was picked before it stays picked.
-    for (const item of run) if (!selected.has(item)) onToggleSelect(item);
-  };
   const parentPressRef = useRef<number | null>(null);
   const suppressParentClickRef = useRef<number | null>(null);
   const totalGroups = items.reduce((sum, item) => sum + item.groups.length, 0);
@@ -376,6 +363,30 @@ const ResultTableView = memo(function ResultTableView({
   /** There are rows on screen (or would be, were the pane shown). */
   const listed = !waiting && (items.length > 0 || Boolean(video));
 
+  // Opened collections grow in batches: the list shows a prefix of the rows, so a batch only
+  // ever adds blocks at the end.
+  const reveal = useMemo(() => collectionReveal(items, collectionShown), [items, collectionShown]);
+  /** The list as the virtualizer places it: one block per song, collection or package (resultBlocks.ts). */
+  const blocks = useMemo(
+    () => resultBlocks({ items, video, shownRows: reveal.rows, collapsedItems, expandedGroups }),
+    [items, video, reveal, collapsedItems, expandedGroups],
+  );
+  const flat = resultListIsFlat(items);
+  /** The row touched last — picked, dropped or opened: where a Shift-click's run starts. */
+  const anchorRef = useRef<string | null>(null);
+  const pickRow = (key: string, range: boolean) => {
+    // The run follows the rows as they are shown, whatever page or package they belong to.
+    const shown = range ? resultPickKeys(blocks) : [];
+    const run = range ? selectionRun(shown, anchorRef.current, key) : null;
+    anchorRef.current = key;
+    if (!run) {
+      onToggleSelect(key);
+      return;
+    }
+    // A run only adds: what was picked before it stays picked.
+    for (const item of run) if (!selected.has(item)) onToggleSelect(item);
+  };
+
   // A list is presented when it is one the user has not just been looking at: another delivery,
   // rows where the spinner was, or the pane back on screen (resultArrival.ts). Each presentation
   // is one cascade from the first row in view; a re-render or a change of the rows is none.
@@ -384,61 +395,173 @@ const ResultTableView = memo(function ResultTableView({
   );
   const arrivalNow = arrivalAfter(arrival, { delivery: delivery.id, shown: paneShown, listed }, loading);
   if (arrivalNow !== arrival) setArrival(arrivalNow);
-  const bodyRef = useRef<HTMLTableSectionElement>(null);
+
+  /* ---------------------------------------------------- the row list */
+  // The list lives in the pane's scroller (the workspace renders it there); the virtualizer and
+  // the scroll listener follow that element, found when the list mounts.
+  const [scroller, setScroller] = useState<HTMLElement | null>(null);
+  const scrollerRef = useMemo(() => ({ current: scroller }), [scroller]);
+  const listRef = useCallback((element: HTMLDivElement | null) => {
+    setScroller(element?.closest<HTMLElement>(".kd-scroll") ?? element?.parentElement ?? null);
+  }, []);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [rowH, setRowH] = useState(FALLBACK_ROW_H);
+  const rowHRef = useRef(FALLBACK_ROW_H);
+  const [headH, setHeadH] = useState(28);
+  const headShown = items.length > 0;
+  const headPx = headShown ? headH : 0;
+  const estimateSize = useCallback((index: number) => (blocks[index]?.rows ?? 1) * rowH, [blocks, rowH]);
+  // A delivered list is a new list: every block of it is new, whatever the last list held.
+  const getKey = useCallback((index: number) => `${delivery.id}:${blocks[index]?.key ?? index}`, [blocks, delivery.id]);
+  // The scroll listener hears a scroll before the virtualizer renders for it: the effects of
+  // that render read the scroll's direction.
+  const { motion } = useScrollMotion(scrollerRef, () => {});
+  const virtualizer = useRowList({ scrollerRef, count: blocks.length, rowHeight: rowH, estimateSize, headHeight: headPx, getKey, measured: true });
+  const virtualItems = virtualizer.getVirtualItems();
+  /** The mounted blocks by their key; the arrival finds its rows through them. */
+  const blockElementsRef = useRef(new Map<string, HTMLElement>());
+  const registerBlock = useCallback((element: HTMLDivElement) => {
+    virtualizer.measureElement(element);
+    const key = element.dataset.kdBlockKey ?? "";
+    const elements = blockElementsRef.current;
+    elements.set(key, element);
+    return () => {
+      if (elements.get(key) === element) elements.delete(key);
+    };
+  }, [virtualizer]);
+
+  useLayoutEffect(() => {
+    if (!scroller) return;
+    const measure = () => {
+      const row = scroller.querySelector<HTMLElement>(".kd-list-row:not([data-fold])");
+      const height = row?.getBoundingClientRect().height ?? FALLBACK_ROW_H;
+      if (height > 0 && Math.abs(height - rowHRef.current) > 0.5) {
+        rowHRef.current = height;
+        setRowH(height);
+      }
+      const head = scroller.querySelector(".kd-list-head")?.getBoundingClientRect().height ?? 28;
+      setHeadH((old) => Math.abs(old - head) > 0.5 ? head : old);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(scroller);
+    const row = scroller.querySelector(".kd-list-row:not([data-fold])");
+    if (row) observer.observe(row);
+    return () => observer.disconnect();
+  }, [scroller, listed]);
+  useLayoutEffect(() => { virtualizer.measure(); }, [rowH, virtualizer]);
+
+  /* ---------------------------------------------------- arriving */
+  const arrivalRef = useRef<ListArrival | null>(null);
+  useLayoutEffect(() => {
+    if (!scroller) return;
+    const created = createListArrival(scroller);
+    arrivalRef.current = created;
+    return () => {
+      created.stop();
+      if (arrivalRef.current === created) arrivalRef.current = null;
+    };
+  }, [scroller]);
+  /** The presentation that starts once the rows at its place are rendered. */
+  const arrivalDueRef = useRef<{ offset: number; at: number } | null>(null);
   /** The delivery whose starting position has been taken; the pane coming back keeps its place. */
   const placedRef = useRef<number | null>(null);
   const deliveryRef = useRef(delivery);
   deliveryRef.current = delivery;
-  const clearArrivalRef = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
-    const table = tableRef.current;
-    const body = bodyRef.current;
-    if (!arrivalNow.run || !table || !body) return;
-    const scroller = table.parentElement;
+    if (!arrivalNow.run || !scroller) return;
     const delivered = deliveryRef.current;
-    if (scroller && placedRef.current !== delivered.id) {
+    if (placedRef.current !== delivered.id) {
       placedRef.current = delivered.id;
       scroller.scrollTop = delivered.top;
       scroller.scrollLeft = delivered.left;
     }
-    // Measured once, before anything moves: the cascade starts on the first row in view.
-    const clear = arriveRows(body.rows, firstRowInView(table, body.rows, scroller));
-    clearArrivalRef.current = clear;
-    return clear;
-  }, [arrivalNow.run]);
+    arrivalDueRef.current = { offset: scroller.scrollTop, at: performance.now() };
+  }, [arrivalNow.run, scroller]);
   useLayoutEffect(() => {
     // display:none cancels CSS animations. Remove their marks too, so reopening retained
     // results during a search cannot restart a half-finished cascade in the browser.
-    if (!paneShown) clearArrivalRef.current?.();
+    if (!paneShown) {
+      arrivalDueRef.current = null;
+      arrivalRef.current?.stop();
+    }
   }, [paneShown]);
   // Marks the rows put on themselves (slotting in, unfolding) come off when their gesture ends.
   useEffect(() => {
-    const table = tableRef.current;
-    return table ? settleRowGestures(table) : undefined;
-  }, [listed]);
+    const body = bodyRef.current;
+    return body ? settleRowGestures(body) : undefined;
+  }, [listed, scroller]);
 
-  // Opened collections grow in batches: the table shows a prefix of the list, so a batch only
-  // ever adds rows at the end.
-  const reveal = useMemo(() => collectionReveal(items, collectionShown), [items, collectionShown]);
-  /** The last row of the previous commit, and how much of which delivery was shown then. */
-  const tailRef = useRef<Element | null>(null);
+  /**
+   * The rows of the mounted blocks that lie under the viewport (below the head's lower edge,
+   * above the bottom), top to bottom, by the list's own geometry: a block's offset and the rows'
+   * height. Nothing is measured.
+   */
+  const rowsInView = useCallback((): PlacedRow[] => {
+    const offset = Math.max(0, virtualizer.scrollOffset ?? 0);
+    const height = virtualizer.scrollRect?.height ?? 0;
+    const viewTop = offset + headPx;
+    const viewBottom = offset + Math.max(height, headPx + rowH);
+    const rows: PlacedRow[] = [];
+    for (const item of virtualItems) {
+      const block = blockElementsRef.current.get(String(item.key));
+      if (!block) continue;
+      let at = 0;
+      for (const row of block.querySelectorAll<HTMLElement>(":scope > .kd-list-row")) {
+        if (row.hidden) continue;
+        const top = item.start + at * rowH;
+        at += 1;
+        if (top + rowH > viewTop && top < viewBottom) rows.push({ row, block: String(item.key), top: top - headPx });
+      }
+    }
+    return rows;
+  }, [virtualizer, virtualItems, headPx, rowH]);
+
+  const seenBlocksRef = useRef(new Set<string>());
   const grownRef = useRef({ delivery: Number.NaN, shown: 0 });
   useLayoutEffect(() => {
-    const body = bodyRef.current;
+    const seen = seenBlocksRef.current;
+    const next = new Set<string>();
+    for (const item of virtualItems) next.add(String(item.key));
+    seenBlocksRef.current = next;
     const before = grownRef.current;
     grownRef.current = { delivery: delivery.id, shown: reveal.shown };
-    const tail = tailRef.current;
-    if (
-      !body ||
-      before.delivery !== delivery.id ||
-      reveal.shown <= before.shown ||
-      tail?.parentElement !== body
-    ) return;
-    // The batch that was just added arrives; the rows that were there do not move.
-    return arriveRows(body.rows, Array.prototype.indexOf.call(body.rows, tail) + 1);
-  }, [delivery.id, reveal.shown]);
-  useLayoutEffect(() => {
-    tailRef.current = bodyRef.current?.lastElementChild ?? null;
+    const grown = before.delivery === delivery.id && reveal.shown > before.shown;
+    const arrivalNow = arrivalRef.current;
+    if (!arrivalNow || !scroller || !paneShown) return;
+    const due = arrivalDueRef.current;
+    if (due) {
+      // The list is presented: once the rows at its place are rendered, the ones in view arrive.
+      const offset = virtualizer.scrollOffset ?? 0;
+      if (Math.abs(offset - due.offset) > 1 || Math.abs(scroller.scrollTop - due.offset) > 1) {
+        if (performance.now() - due.at > ARRIVAL_DUE_MS) arrivalDueRef.current = null;
+        return;
+      }
+      const rows = rowsInView();
+      if (rows.length === 0) return;
+      arrivalDueRef.current = null;
+      arrivalNow.present(rows.map((placed) => placed.row));
+      return;
+    }
+    const fresh = rowsInView().filter((placed) => !seen.has(placed.block));
+    if (fresh.length === 0) return;
+    if (grown) {
+      // The batch that was just added arrives; the rows that were there do not move.
+      arrivalNow.present(fresh.map((placed) => placed.row));
+      return;
+    }
+    // Rows that a scroll outran catch up with it, from the side it came from.
+    const { moving, direction } = motion.current;
+    if (!moving || arrivalNow.gesture() === "list") return;
+    const offset = Math.max(0, virtualizer.scrollOffset ?? 0);
+    const viewTop = offset;
+    const viewBottom = offset + Math.max(virtualizer.scrollRect?.height ?? 0, headPx + rowH) - headPx;
+    for (const placed of fresh) {
+      const step = direction < 0
+        ? Math.max(0, Math.round((viewBottom - placed.top - rowH) / rowH))
+        : Math.max(0, Math.round((placed.top - viewTop) / rowH));
+      arrivalNow.chase(placed.row, step, direction < 0 ? "above" : "below");
+    }
   });
 
   // The next batch is due when the end of what is shown comes into reach: on a scroll, on a
@@ -461,7 +584,6 @@ const ResultTableView = memo(function ResultTableView({
     moreRef.current.failed = false;
   }, [delivery.id]);
   useEffect(() => {
-    const scroller = tableRef.current?.parentElement;
     if (!scroller || !hasMoreRows || !paneShown) return;
     const check = (byUser: boolean) => {
       const more = moreRef.current;
@@ -485,7 +607,7 @@ const ResultTableView = memo(function ResultTableView({
       scroller.removeEventListener("wheel", onWheel);
       resize?.disconnect();
     };
-  }, [hasMoreRows, paneShown, listed, delivery.id, reveal.shown]);
+  }, [scroller, hasMoreRows, paneShown, listed, delivery.id, reveal.shown]);
 
   // Rows of a package that mount after their list was delivered (the package was opened again)
   // slot in on their own. A batch added to a flat list is not late: it arrives as a batch.
@@ -545,8 +667,6 @@ const ResultTableView = memo(function ResultTableView({
       !colPrefs.hidden.includes(column.key) && columnsWithData.has(column.key),
   );
   const leadWidth = widthFor("lead", RESULT_LEAD_WIDTH);
-  // 左边距 + 序号 + 数据列 + 弹性空白列。批选不占列：选择标记落在序号格里。
-  const totalColumns = 3 + visibleColumns.length;
   const tableMinWidthPx =
     remStringToPx(RESULT_GUTTER_WIDTH) +
     remStringToPx(leadWidth) +
@@ -555,13 +675,29 @@ const ResultTableView = memo(function ResultTableView({
       0,
     );
 
+  // What plays on after a row is the rest of the whole item, shown or not. Worked out once per
+  // item: a collection that has grown long renders many rows, and renders them on every scroll.
+  const followingByItem = useMemo(() => {
+    const map = new Map<IntakeItem, { songs: SongPreviewItem[]; after: number[] }>();
+    for (const item of items) {
+      const following = { songs: [] as SongPreviewItem[], after: [] as number[] };
+      for (const candidate of item.groups) {
+        const song = previewItem(candidate, sourceIndex[candidate.group_id] ?? candidate.best_source_index);
+        if (song) following.songs.push(song);
+        following.after.push(following.songs.length);
+      }
+      map.set(item, following);
+    }
+    return map;
+  }, [items, sourceIndex]);
+
   const beginColumnResize = (key: string, event: React.PointerEvent<HTMLSpanElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    const th = event.currentTarget.parentElement;
-    if (!th) return;
+    const cell = event.currentTarget.parentElement;
+    if (!cell) return;
     const startX = event.clientX;
-    const startWidth = th.getBoundingClientRect().width;
+    const startWidth = cell.getBoundingClientRect().width;
     const minPx = remStringToPx(RESULT_COLUMN_MIN_WIDTH[key] ?? "2.8rem");
     const maxPx = remStringToPx(RESULT_COLUMN_MAX_WIDTH);
     setResizingCol(key);
@@ -643,12 +779,6 @@ const ResultTableView = memo(function ResultTableView({
     );
   }
 
-  // 单条关键词搜索和单次合集搜索都直接铺列表：查询词与结果总数已经在顶部
-  // 工作条表达，再套一层“查询词 · N 个集合”的父行只会重复语义。
-  const flat =
-    items.length === 1 &&
-    (items[0].kind === "search" ||
-      (items[0].groups.length === 0 && items[0].collections.length > 0));
   // 全选只管得着可下载且尚未入库的行；歌曲与 B 站视频使用同一组选择键。
   const selectableTotal = items.reduce((sum, item) => sum + selectableGroups(item).length, 0);
   const allSelected =
@@ -657,576 +787,561 @@ const ResultTableView = memo(function ResultTableView({
       selectableGroups(item).every((group) => selected.has(selectionKey(index, group.group_id))),
     );
 
-  // `leaving` is how many rows of the package fade out together with these (PackageRows).
-  const renderCollectionRows = (item: IntakeItem, indent: boolean, leaving?: number) =>
-    item.collections.slice(0, leaving ?? item.collections.length).map((collection, collectionIndex) => {
-      const token = collectionToken(collection);
-      const loadingCollection = loadingCollections.has(token);
-      const collectionLabel = KIND_LABEL[collection.kind];
-      const openCollection = () => {
-        if (!loadingCollection) onLoadCollection(collection);
-      };
-      const collectionCell = (key: string) => {
-        switch (key) {
-          case "title":
-            return (
-              <td key={key} className="kd-td-strong" data-col="title" title={collection.title}>
-                <span className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}>
-                  <span className="kd-thumb kd-result-collection-cover">
-                    <CoverImage
-                      src={thumbUrl(collection.cover)}
-                      alt=""
-                      loading="lazy"
-                      fallback={(
-                        <span className="kd-result-collection-cover-fallback" aria-hidden="true">
-                          <ListMusic size={17} strokeWidth={2.15} />
-                        </span>
-                      )}
-                    />
-                  </span>
-                  <span className="kd-result-title-text">{collection.title}</span>
+  // `leave` is the row's step in its package fading out (PackageRows).
+  const renderCollectionRow = (collection: CollectionResult, collectionIndex: number, indent: boolean, leave?: number) => {
+    const token = collectionToken(collection);
+    const loadingCollection = loadingCollections.has(token);
+    const collectionLabel = KIND_LABEL[collection.kind];
+    const openCollection = () => {
+      if (!loadingCollection) onLoadCollection(collection);
+    };
+    const collectionCell = (key: string) => {
+      switch (key) {
+        case "title":
+          return (
+            <div key={key} role="gridcell" className="kd-list-cell kd-td-strong" data-col="title" data-flex="" title={collection.title}>
+              <span className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}>
+                <span className="kd-thumb kd-result-collection-cover">
+                  <CoverImage
+                    src={thumbUrl(collection.cover)}
+                    alt=""
+                    loading="lazy"
+                    fallback={(
+                      <span className="kd-result-collection-cover-fallback" aria-hidden="true">
+                        <ListMusic size={17} strokeWidth={2.15} />
+                      </span>
+                    )}
+                  />
                 </span>
-              </td>
-            );
-          case "artist":
-            return (
-              <td key={key} data-col="artist" title={collection.subtitle}>
-                {collection.subtitle}
-              </td>
-            );
-          case "album":
-            return (
-              <td key={key} data-col="album" className="kd-muted">
-                {KIND_LABEL[collection.kind]}
-              </td>
-            );
-          case "duration":
-            return (
-              <td key={key} data-col="duration" className="kd-td-num kd-muted">
-                {collection.count > 0 ? `${collection.count} 首` : ""}
-              </td>
-            );
-          case "sources":
-            return (
-              <td key={key} data-col="sources">
-                <span
-                  className="kd-row kd-muted kd-result-collection-source"
-                  data-platform={collection.platform}
-                  style={{ gap: "0.35rem" }}
-                >
-                  <PlatformMark id={collection.platform} size={12} />
-                  {PLATFORM_LABEL[collection.platform]}
-                </span>
-              </td>
-            );
-          default:
-            return <td key={key} data-col={key} />;
-        }
-      };
-      return (
-        <tr
-          key={`collection:${token}`}
-          data-collection="true"
-          data-collection-kind={collection.kind}
-          data-loading={loadingCollection || undefined}
-          aria-busy={loadingCollection || undefined}
-          aria-label={`${collection.title}，进入${collectionLabel}`}
-          tabIndex={0}
-          onClick={openCollection}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            openCollection();
-          }}
-          title={`进入${collectionLabel}`}
-          {...foldingRowProps(leaving === undefined ? undefined : foldOrder(collectionIndex, leaving))}
-        >
-          <td className="kd-result-gutter" />
-          <td className="kd-result-lead" data-col="index">
-            {loadingCollection ? (
-              <LoaderCircle className="kd-spin" size={12} aria-hidden="true" />
-            ) : (
-              <span className="kd-result-index">{collectionIndex + 1}</span>
-            )}
-          </td>
-          {visibleColumns.map((column) => collectionCell(column.key))}
-          <td className="kd-table-fill" aria-hidden="true" />
-        </tr>
-      );
-    });
-
-  const renderColumnHead = (column: ResultColumn) => {
-    const colWidth = widthFor(column.key, column.width);
+                <span className="kd-result-title-text">{collection.title}</span>
+              </span>
+            </div>
+          );
+        case "artist":
+          return (
+            <div key={key} role="gridcell" className="kd-list-cell" data-col="artist" title={collection.subtitle}>
+              {collection.subtitle}
+            </div>
+          );
+        case "album":
+          return (
+            <div key={key} role="gridcell" className="kd-list-cell kd-muted" data-col="album">
+              {KIND_LABEL[collection.kind]}
+            </div>
+          );
+        case "duration":
+          return (
+            <div key={key} role="gridcell" className="kd-list-cell kd-td-num kd-muted" data-col="duration">
+              {collection.count > 0 ? `${collection.count} 首` : ""}
+            </div>
+          );
+        case "sources":
+          return (
+            <div key={key} role="gridcell" className="kd-list-cell" data-col="sources" data-flex="">
+              <span
+                className="kd-row kd-muted kd-result-collection-source"
+                data-platform={collection.platform}
+                style={{ gap: "0.35rem" }}
+              >
+                <PlatformMark id={collection.platform} size={12} />
+                {PLATFORM_LABEL[collection.platform]}
+              </span>
+            </div>
+          );
+        default:
+          return <div key={key} role="gridcell" className="kd-list-cell" data-col={key} />;
+      }
+    };
     return (
-      <th
-        key={column.key}
-        data-col={column.key}
-        data-column-reorder="true"
-        style={{ width: colWidth }}
-        className={column.align === "num" ? "kd-td-num" : undefined}
-        onPointerDown={(event) => {
-          if (resizingCol) return;
-          beginColumnPointerReorder(event, column.key, visibleColumns.map((item) => item.key), {
-            onStart: setDragCol,
-            onOver: setOverCol,
-            onMove: moveColumn,
-            onEnd: () => {
-              setDragCol(null);
-              setOverCol(null);
-            },
-          });
+      <div
+        key={`collection:${token}`}
+        className="kd-list-row"
+        role="row"
+        data-collection="true"
+        data-collection-kind={collection.kind}
+        data-loading={loadingCollection || undefined}
+        aria-busy={loadingCollection || undefined}
+        aria-label={`${collection.title}，进入${collectionLabel}`}
+        tabIndex={0}
+        onClick={openCollection}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          openCollection();
         }}
-        data-dragging={dragCol === column.key ? "true" : undefined}
-        data-col-drop={
-          dragCol && dragCol !== column.key && overCol === column.key
-            ? colIds.indexOf(dragCol) < colIds.indexOf(column.key)
-              ? "after"
-              : "before"
-            : undefined
-        }
-        title="拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
+        title={`进入${collectionLabel}`}
+        {...foldingRowProps(leave)}
       >
-        {column.label}
-        <span
-          className="kd-col-resize"
-          data-active={resizingCol === column.key ? "true" : undefined}
-          onPointerDown={(event) => beginColumnResize(column.key, event)}
-          onClick={(event) => event.stopPropagation()}
-          aria-hidden="true"
-        />
-      </th>
+        <div role="gridcell" className="kd-list-cell kd-result-gutter" />
+        <div role="gridcell" className="kd-list-cell kd-result-lead" data-col="index" data-flex="">
+          {loadingCollection ? (
+            <LoaderCircle className="kd-spin" size={12} aria-hidden="true" />
+          ) : (
+            <span className="kd-result-index">{collectionIndex + 1}</span>
+          )}
+        </div>
+        {visibleColumns.map((column) => collectionCell(column.key))}
+      </div>
     );
   };
+
+  const renderGroupRow = (item: IntakeItem, index: number, group: MergedGroup, position: number, rowNumber: number, indent: boolean, leave?: number) => {
+    const following = followingByItem.get(item) ?? { songs: [], after: [] };
+    // The source a download of this group takes (the workspace picks the same one).
+    const pickedSource = (candidate: MergedGroup) =>
+      candidate.sources[sourceIndex[candidate.group_id] ?? candidate.best_source_index]
+        ?? candidate.sources[0];
+    const dragSources = () => {
+      const currentKey = selectionKey(index, group.group_id);
+      const draggingSelection = selected.has(currentKey);
+      const groups = draggingSelection
+        ? items.flatMap((entry, itemIndex) =>
+            entry.groups.flatMap((candidate) =>
+              selected.has(selectionKey(itemIndex, candidate.group_id))
+                ? [candidate]
+                : [],
+            ),
+          )
+        : [group];
+      return groups.flatMap((candidate) => {
+        const preferred =
+          candidate.sources[
+            sourceIndex[candidate.group_id] ?? candidate.best_source_index
+          ] ?? candidate.sources[0];
+        // 本地来源只是“库里已有”；DJ/下载都必须选该组真实在线来源。
+        const picked = preferred?.platform !== "local"
+          ? preferred
+          : candidate.sources.find((source) => source.platform !== "local");
+        if (!picked) return [];
+        const cover = picked.cover?.trim() || candidate.cover?.trim() || "";
+        return [{
+          ...picked,
+          title: candidate.title || picked.title,
+          artists: candidate.artists.length > 0
+            ? candidate.artists
+            : picked.artists,
+          album: candidate.album || picked.album,
+          duration: candidate.duration ?? picked.duration,
+          cover,
+        }];
+      });
+    };
+    // 视频与歌曲共用父包层级；分 P 若展开，会在视频自身的层级上再退一层。
+    return isVideoGroup(group) ? (
+      <VideoResultRow
+        key={group.group_id}
+        {...videoSeedFromGroup(group)}
+        columns={visibleColumns}
+        layout={layout}
+        rowNumber={rowNumber}
+        late={lateRows && indent}
+        leave={leave}
+        indent={indent}
+        selectable={group.sources.some((source) => source.platform !== "local")}
+        selected={selected.has(selectionKey(index, group.group_id))}
+        selectionMode={selecting}
+        pickKey={selectionKey(index, group.group_id)}
+        tossItem={pickedSource(group) ? tossItemKey(pickedSource(group)!) : undefined}
+        expanded={expandedGroups.has(group.group_id)}
+        onToggleExpand={() => onToggleExpand(group.group_id)}
+        onToggleSelect={(range) => pickRow(selectionKey(index, group.group_id), range === true)}
+        onEnterSelection={() => onSelectionModeChange(true)}
+        onDownloadSelected={
+          resultRowActionUsesSelection(
+            selected,
+            selectionKey(index, group.group_id),
+          )
+            ? onDownloadSelected
+            : undefined
+        }
+        onRemoveFromStreamPlaylist={
+          onRemoveStreamGroup
+            ? () => onRemoveStreamGroup(group, 0)
+            : undefined
+        }
+        removeFromStreamPlaylistLabel={removeStreamGroupLabel}
+        removingFromStreamPlaylist={removingStreamGroupIds?.has(group.group_id)}
+      />
+    ) : (
+      <MergedGroupRow
+        key={group.group_id}
+        group={group}
+        columns={visibleColumns}
+        layout={layout}
+        indent={indent}
+        rowNumber={rowNumber}
+        late={lateRows && indent}
+        leave={leave}
+        inspected={inspectedGroup === selectionKey(index, group.group_id)}
+        sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
+        selected={selected.has(selectionKey(index, group.group_id))}
+        selectable={group.sources.some((source) => source.platform !== "local")}
+        selectionMode={selecting}
+        pickKey={selectionKey(index, group.group_id)}
+        expanded={expandedGroups.has(group.group_id)}
+        followingSongs={following.songs.slice(following.after[position])}
+        onToggleSelect={(range) => pickRow(selectionKey(index, group.group_id), range === true)}
+        onEnterSelection={() => onSelectionModeChange(true)}
+        onToggleExpand={() => onToggleExpand(group.group_id)}
+        onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
+        onInspect={(sourceIdx) => {
+          const groupKey = selectionKey(index, group.group_id);
+          anchorRef.current = groupKey;
+          onInspectGroup(group, sourceIdx, groupKey);
+        }}
+        onDownload={() => {
+          const groupKey = selectionKey(index, group.group_id);
+          if (resultRowActionUsesSelection(selected, groupKey)) onDownloadSelected();
+          else onDownloadGroup(group);
+        }}
+        onDownloadSingle={() => onDownloadGroup(group)}
+        onRemoveFromStreamPlaylist={
+          onRemoveStreamGroup
+            ? () => onRemoveStreamGroup(
+                group,
+                sourceIndex[group.group_id] ?? group.best_source_index,
+              )
+            : undefined
+        }
+        removeFromStreamPlaylistLabel={removeStreamGroupLabel}
+        removingFromStreamPlaylist={removingStreamGroupIds?.has(group.group_id)}
+        previewPendingSourceKey={previewPendingSourceKey}
+        previewPendingLabel={previewPendingLabel}
+        onDragStart={(event) => {
+          writeSearchSourcesDrag(
+            event.dataTransfer,
+            dragSources(),
+            event.currentTarget,
+          );
+        }}
+        onDragEnd={() => endSearchDrag()}
+        onPointerDragStart={(event, onActivated) =>
+          beginAudioPointerDrag(
+            event.nativeEvent,
+            dragSources(),
+            group.title,
+            (error) => setDragError(error instanceof Error ? error.message : String(error)),
+            onActivated,
+          )}
+      />
+    );
+  };
+
+  /** A package: its head row and, under it, its collections and the groups reached so far. */
+  const renderPackage = (block: Extract<ResultBlock, { kind: "package" }>) => {
+    const { item, itemIndex: index, shownGroups, collapsed } = block;
+    const collectionKind =
+      item.kind === "playlist" || item.kind === "artist" || item.kind === "album"
+        ? item.kind
+        : null;
+    const visibleGroups = item.groups.slice(0, shownGroups);
+    const pickable = selectableGroups(item);
+    const itemPick = pickStateOf(
+      pickable.map((group) => selectionKey(index, group.group_id)),
+      selected,
+    );
+    const packageRowCount = item.collections.length + visibleGroups.length;
+    // A package that folds away shows pictures of the rows that can be on screen.
+    const renderRows = (leaving?: number) => (
+      <>
+        {item.collections.slice(0, leaving ?? item.collections.length).map((collection, collectionIndex) =>
+          renderCollectionRow(collection, collectionIndex, true, leaving === undefined ? undefined : foldOrder(collectionIndex, leaving)))}
+        {(leaving === undefined ? visibleGroups : visibleGroups.slice(0, Math.max(0, leaving - item.collections.length)))
+          .map((group, position) => renderGroupRow(item, index, group, position, position + 1, true,
+            leaving === undefined ? undefined : foldOrder(item.collections.length + position, leaving)))}
+      </>
+    );
+    return (
+      <>
+        <div
+          className="kd-list-row"
+          role="row"
+          data-tree="parent"
+          data-collection-kind={collectionKind ?? undefined}
+          onClick={() => {
+            if (suppressParentClickRef.current === index) {
+              suppressParentClickRef.current = null;
+              return;
+            }
+            onToggleItem(index);
+          }}
+          onPointerDown={(event) => {
+            if (event.pointerType === "mouse") return;
+            if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
+            parentPressRef.current = window.setTimeout(() => {
+              // 包行自身没有独立操作；长按只抑制随后那次误点击，不得直接
+              // 进入批选。具体歌曲长按会打开和桌面相同的右键菜单。
+              suppressParentClickRef.current = index;
+              parentPressRef.current = null;
+            }, 480);
+          }}
+          onPointerUp={() => {
+            if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
+            parentPressRef.current = null;
+          }}
+          onPointerCancel={() => {
+            if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
+            parentPressRef.current = null;
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+          }}
+        >
+          <div role="gridcell" className="kd-list-cell kd-result-gutter" />
+          <div role="gridcell" className="kd-list-cell kd-result-lead" data-flex="">
+            {(item.groups.length > 0 || item.collections.length > 0) && (
+              <span className="kd-result-lead-actions">
+                {/* The package's own mark takes the empty slot before its chevron. */}
+                {selecting && pickable.length > 0 ? (
+                  <span className="kd-result-lead-spacer">
+                    <RowPick
+                      state={itemPick}
+                      label={`选择「${item.title || item.entry}」全部曲目`}
+                      onToggle={() => onToggleItemAll(index)}
+                    />
+                  </span>
+                ) : (
+                  <span className="kd-result-lead-spacer" aria-hidden="true" />
+                )}
+                <button
+                  type="button"
+                  className="kd-result-lead-btn"
+                  aria-label={collapsed ? `展开「${item.title || item.entry}」` : `收起「${item.title || item.entry}」`}
+                  aria-expanded={!collapsed}
+                  title={collapsed ? "展开" : "收起"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleItem(index);
+                  }}
+                >
+                  {/* One chevron: the stylesheet turns it while the package is open. */}
+                  <ChevronRight size={13} />
+                </button>
+              </span>
+            )}
+          </div>
+          <div role="gridcell" className="kd-list-cell kd-result-package-cell" data-flex="" style={{ gridColumn: "3 / -1" }}>
+            <span className="kd-result-package-head">
+              {collectionKind && item.groups[0]?.cover ? (
+                <span className="kd-thumb kd-result-collection-cover">
+                  <CoverImage src={thumbUrl(item.groups[0].cover)} alt="" loading="lazy" />
+                </span>
+              ) : null}
+              {!collectionKind ? (
+                <span
+                  className="kd-chip"
+                  data-tone={item.kind === "error" ? "danger" : undefined}
+                >
+                  {KIND_LABEL[item.kind]}
+                </span>
+              ) : null}
+              <strong className="kd-truncate" title={item.title || item.entry}>
+                {item.title || item.entry}
+              </strong>
+              {collectionKind && item.platform ? (
+                <span
+                  className="kd-result-collection-platform"
+                  data-platform={item.platform}
+                  title={`来源：${PLATFORM_LABEL[item.platform] ?? item.platform}`}
+                  aria-label={`来源：${PLATFORM_LABEL[item.platform] ?? item.platform}`}
+                >
+                  <PlatformMark id={item.platform} size={12} />
+                </span>
+              ) : null}
+              {item.error && (
+                <span
+                  className="kd-row kd-truncate"
+                  style={{ color: "var(--kd-danger)", gap: "0.25rem" }}
+                  title={item.error}
+                >
+                  <AlertTriangle size={12} />
+                  {item.error}
+                </span>
+              )}
+              {Object.entries(item.errors).map(([platform, message]) => (
+                <span
+                  key={platform}
+                  className="kd-chip"
+                  data-tone="warn"
+                  title={`${platform}：${message}`}
+                >
+                  {PLATFORM_LABEL[platform as keyof typeof PLATFORM_LABEL] ?? platform}{" "}
+                  失败
+                </span>
+              ))}
+              <span className="kd-result-package-actions">
+                {(item.collections.length > 0 || item.groups.length > 0) && (
+                  <span className="kd-result-collection-count">
+                    {item.collections.length > 0 ? `${item.collections.length} 个集合` : ""}
+                    {item.groups.length > 0 ? `${item.collections.length > 0 ? " · " : ""}${item.groups.length} 首` : ""}
+                  </span>
+                )}
+              </span>
+            </span>
+          </div>
+        </div>
+        <PackageRows open={!collapsed} count={packageRowCount}>
+          {(leaving) =>
+            renderRows(leaving ? Math.min(packageRowCount, FOLD_MAX_ROWS) : undefined)
+          }
+        </PackageRows>
+      </>
+    );
+  };
+
+  const renderBlock = (block: ResultBlock) => {
+    switch (block.kind) {
+      case "video":
+        // 贴进来的那条链接置顶：它是用户刚刚亲手要的东西，不该排在搜索结果后面
+        return (
+          <VideoResultRow
+            {...videoSeedFromInfo(block.video)}
+            info={block.video}
+            columns={visibleColumns}
+            layout={layout}
+            rowNumber={1}
+            late={lateRows}
+          />
+        );
+      case "collection":
+        return renderCollectionRow(block.collection, block.collectionIndex, block.indent);
+      case "group":
+        return renderGroupRow(block.item, block.itemIndex, block.group, block.position, block.rowNumber, block.indent);
+      case "package":
+        return renderPackage(block);
+    }
+  };
+
+  const renderColumnHead = (column: ResultColumn) => (
+    <div
+      key={column.key}
+      role="columnheader"
+      className={column.align === "num" ? "kd-list-hcell kd-td-num" : "kd-list-hcell"}
+      data-col={column.key}
+      data-column-reorder="true"
+      onPointerDown={(event) => {
+        if (resizingCol) return;
+        beginColumnPointerReorder(event, column.key, visibleColumns.map((item) => item.key), {
+          onStart: setDragCol,
+          onOver: setOverCol,
+          onMove: moveColumn,
+          onEnd: () => {
+            setDragCol(null);
+            setOverCol(null);
+          },
+        });
+      }}
+      data-dragging={dragCol === column.key ? "true" : undefined}
+      data-col-drop={
+        dragCol && dragCol !== column.key && overCol === column.key
+          ? colIds.indexOf(dragCol) < colIds.indexOf(column.key)
+            ? "after"
+            : "before"
+          : undefined
+      }
+      title="拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
+    >
+      {column.label}
+      <span
+        className="kd-col-resize"
+        data-active={resizingCol === column.key ? "true" : undefined}
+        onPointerDown={(event) => beginColumnResize(column.key, event)}
+        onClick={(event) => event.stopPropagation()}
+        aria-hidden="true"
+      />
+    </div>
+  );
+
+  // 左边距 + 序号 + 数据列 + 弹性空白列。批选不占列：选择标记落在序号格里。
+  const listStyle = {
+    "--kd-list-cols": [RESULT_GUTTER_WIDTH, leadWidth, ...visibleColumns.map((column) => widthFor(column.key, column.width)), "minmax(0, 1fr)"].join(" "),
+    "--kd-list-min-width": `${tableMinWidthPx}px`,
+  } as CSSProperties;
 
   return (
     <>
       <InlineNotice text={dragError} onDismiss={() => setDragError("")} block />
-      <table
-        ref={tableRef}
-        className="kd-table"
+      <div
+        ref={listRef}
+        className="kd-list"
+        role="grid"
         data-kind="results"
-        style={{ minWidth: tableMinWidthPx }}
+        data-flat={flat || undefined}
+        aria-rowcount={resultRowCount(blocks)}
+        style={listStyle}
       >
-        <colgroup>
-          <col style={{ width: RESULT_GUTTER_WIDTH }} />
-          <col style={{ width: leadWidth }} />
-          {visibleColumns.map((column) => (
-            <col key={column.key} style={{ width: widthFor(column.key, column.width) }} />
-          ))}
-          <col />
-        </colgroup>
         {/* 只贴了一条 B 站链接时不摆表头：艺人/专辑/音质这些列底下一个格子都没有，
             光留一排列名反而像"结果没加载出来" */}
-        {items.length > 0 && (
-          <thead>
-            <tr
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setColMenu({ x: event.clientX, y: event.clientY });
-              }}
+        {headShown && (
+          <div
+            className="kd-list-head"
+            role="row"
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setColMenu({ x: event.clientX, y: event.clientY });
+            }}
+          >
+            <div className="kd-list-hcell kd-result-gutter" aria-hidden="true" />
+            <div
+              role="columnheader"
+              className="kd-list-hcell"
+              data-col="index"
+              data-picking={selecting ? "true" : undefined}
+              title={selecting ? undefined : "当前列表中的序号"}
             >
-              <th className="kd-result-gutter" />
-              <th
-                data-col="index"
-                data-picking={selecting ? "true" : undefined}
-                style={{ width: leadWidth }}
-                title={selecting ? undefined : "当前列表中的序号"}
-              >
-                <span className="kd-th-label">序号</span>
-                {/* Above the rows' marks, in their place: all of the list, a part of it, none. */}
-                {selecting ? (
-                  <RowPick
-                    className="kd-pick-head"
-                    state={allSelected ? "all" : selected.size > 0 ? "some" : "none"}
-                    label="全选"
-                    disabled={selectableTotal === 0}
-                    onToggle={() => {
-                      onToggleAll();
-                      // Dropping every row through the head's mark stays in the mode.
-                      onSelectionModeChange(true);
-                    }}
-                  />
-                ) : null}
-                <span
-                  className="kd-col-resize"
-                  data-active={resizingCol === "lead" ? "true" : undefined}
-                  onPointerDown={(event) => beginColumnResize("lead", event)}
-                  onClick={(event) => event.stopPropagation()}
-                  aria-hidden="true"
+              <span className="kd-th-label">序号</span>
+              {/* Above the rows' marks, in their place: all of the list, a part of it, none. */}
+              {selecting ? (
+                <RowPick
+                  className="kd-pick-head"
+                  state={allSelected ? "all" : selected.size > 0 ? "some" : "none"}
+                  label="全选"
+                  disabled={selectableTotal === 0}
+                  onToggle={() => {
+                    onToggleAll();
+                    // Dropping every row through the head's mark stays in the mode.
+                    onSelectionModeChange(true);
+                  }}
                 />
-              </th>
-              {visibleColumns.map(renderColumnHead)}
-              <th className="kd-table-fill" aria-hidden="true" />
-            </tr>
-          </thead>
+              ) : null}
+              <span
+                className="kd-col-resize"
+                data-active={resizingCol === "lead" ? "true" : undefined}
+                onPointerDown={(event) => beginColumnResize("lead", event)}
+                onClick={(event) => event.stopPropagation()}
+                aria-hidden="true"
+              />
+            </div>
+            {visibleColumns.map(renderColumnHead)}
+          </div>
         )}
-        {/* A delivered list is a new body: every row of it is new, whatever the last list held. */}
-        <tbody key={delivery.id} ref={bodyRef}>
-          {/* 贴进来的那条链接置顶：它是用户刚刚亲手要的东西，不该排在搜索结果后面 */}
-          {video && (
-            <VideoResultRow
-              key={video.bvid}
-              {...videoSeedFromInfo(video)}
-              info={video}
-              columns={visibleColumns}
-              totalColumns={totalColumns}
-              layout={layout}
-              rowNumber={1}
-              late={lateRows}
-            />
-          )}
-          {items.map((item, index) => {
-            const directCollection = isResolvedCollectionItem(item);
-            const collectionKind =
-              item.kind === "playlist" || item.kind === "artist" || item.kind === "album"
-                ? item.kind
-                : null;
-            const itemFlat = flat || directCollection;
-            // Not reached yet: a collection above this item is only partly shown.
-            const shownGroups = reveal.rows[index];
-            if (shownGroups === null || shownGroups === undefined) return null;
-            const visibleGroups = shownGroups < item.groups.length
-              ? item.groups.slice(0, shownGroups)
-              : item.groups;
-            const flatRowOffset = itemFlat
-              ? (video ? 1 : 0) +
-                items
-                  .slice(0, index)
-                  .filter(isResolvedCollectionItem)
-                  .reduce((sum, previous) => sum + previous.groups.length, 0)
-              : 0;
-            // 合集详情已经是独立页面，不再有可折叠的父行；普通批量包仍保留折叠。
-            const collapsed = !directCollection && collapsedItems.has(index);
-            const pickable = selectableGroups(item);
-            const itemPick = pickStateOf(
-              pickable.map((group) => selectionKey(index, group.group_id)),
-              selected,
-            );
-
-            const packageRowCount = item.collections.length + visibleGroups.length;
-            // What plays on after a row is the rest of the whole item, shown or not. Worked out
-            // once per item: a collection that has grown long renders many rows.
-            const following = { songs: [] as SongPreviewItem[], after: [] as number[] };
-            for (const candidate of item.groups) {
-              const song = previewItem(
-                candidate,
-                sourceIndex[candidate.group_id] ?? candidate.best_source_index,
-              );
-              if (song) following.songs.push(song);
-              following.after.push(following.songs.length);
-            }
-            // A package that folds away shows pictures of the rows that can be on screen.
-            const renderGroupRows = (leaving?: number) =>
-              (leaving === undefined
-                ? visibleGroups
-                : visibleGroups.slice(0, Math.max(0, leaving - item.collections.length))
-              ).map((group, position) => {
-              const leave =
-                leaving === undefined
-                  ? undefined
-                  : foldOrder(item.collections.length + position, leaving);
-              // The source a download of this group takes (the workspace picks the same one).
-              const pickedSource = (candidate: MergedGroup) =>
-                candidate.sources[sourceIndex[candidate.group_id] ?? candidate.best_source_index]
-                  ?? candidate.sources[0];
-              const dragSources = () => {
-                const currentKey = selectionKey(index, group.group_id);
-                const draggingSelection = selected.has(currentKey);
-                const groups = draggingSelection
-                  ? items.flatMap((entry, itemIndex) =>
-                      entry.groups.flatMap((candidate) =>
-                        selected.has(selectionKey(itemIndex, candidate.group_id))
-                          ? [candidate]
-                          : [],
-                      ),
-                    )
-                  : [group];
-                return groups.flatMap((candidate) => {
-                  const preferred =
-                    candidate.sources[
-                      sourceIndex[candidate.group_id] ?? candidate.best_source_index
-                    ] ?? candidate.sources[0];
-                  // 本地来源只是“库里已有”；DJ/下载都必须选该组真实在线来源。
-                  const picked = preferred?.platform !== "local"
-                    ? preferred
-                    : candidate.sources.find((source) => source.platform !== "local");
-                  if (!picked) return [];
-                  const cover = picked.cover?.trim() || candidate.cover?.trim() || "";
-                  return [{
-                    ...picked,
-                    title: candidate.title || picked.title,
-                    artists: candidate.artists.length > 0
-                      ? candidate.artists
-                      : picked.artists,
-                    album: candidate.album || picked.album,
-                    duration: candidate.duration ?? picked.duration,
-                    cover,
-                  }];
-                });
-              };
-              // 视频与歌曲共用父包层级；分 P 若展开，会在视频自身的层级上再退一层。
-              return isVideoGroup(group) ? (
-                    <VideoResultRow
-                      key={group.group_id}
-                      {...videoSeedFromGroup(group)}
-                      columns={visibleColumns}
-                      totalColumns={totalColumns}
-                      layout={layout}
-                      rowNumber={flatRowOffset + position + 1}
-                      late={lateRows && !itemFlat}
-                      leave={leave}
-                      indent={!itemFlat}
-                      selectable={group.sources.some((source) => source.platform !== "local")}
-                      selected={selected.has(selectionKey(index, group.group_id))}
-                      selectionMode={selecting}
-                      pickKey={selectionKey(index, group.group_id)}
-                      tossItem={pickedSource(group) ? tossItemKey(pickedSource(group)!) : undefined}
-                      expanded={expandedGroups.has(group.group_id)}
-                      onToggleExpand={() => onToggleExpand(group.group_id)}
-                      onToggleSelect={(range) => pickRow(selectionKey(index, group.group_id), range === true)}
-                      onEnterSelection={() => onSelectionModeChange(true)}
-                      onDownloadSelected={
-                        resultRowActionUsesSelection(
-                          selected,
-                          selectionKey(index, group.group_id),
-                        )
-                          ? onDownloadSelected
-                          : undefined
-                      }
-                      onRemoveFromStreamPlaylist={
-                        onRemoveStreamGroup
-                          ? () => onRemoveStreamGroup(group, 0)
-                          : undefined
-                      }
-                      removeFromStreamPlaylistLabel={removeStreamGroupLabel}
-                      removingFromStreamPlaylist={removingStreamGroupIds?.has(group.group_id)}
-                    />
-                  ) : (
-                    <MergedGroupRow
-                      key={group.group_id}
-                      group={group}
-                      columns={visibleColumns}
-                      layout={layout}
-                      indent={!itemFlat}
-                      rowNumber={flatRowOffset + position + 1}
-                      late={lateRows && !itemFlat}
-                      leave={leave}
-                      inspected={inspectedGroup === selectionKey(index, group.group_id)}
-                      sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
-                      selected={selected.has(selectionKey(index, group.group_id))}
-                      selectable={group.sources.some((source) => source.platform !== "local")}
-                      selectionMode={selecting}
-                      pickKey={selectionKey(index, group.group_id)}
-                      expanded={expandedGroups.has(group.group_id)}
-                      followingSongs={following.songs.slice(following.after[position])}
-                      onToggleSelect={(range) => pickRow(selectionKey(index, group.group_id), range === true)}
-                      onEnterSelection={() => onSelectionModeChange(true)}
-                      onToggleExpand={() => onToggleExpand(group.group_id)}
-                      onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
-                      onInspect={(sourceIdx) => {
-                        const groupKey = selectionKey(index, group.group_id);
-                        anchorRef.current = groupKey;
-                        onInspectGroup(group, sourceIdx, groupKey);
-                      }}
-                      onDownload={() => {
-                        const groupKey = selectionKey(index, group.group_id);
-                        if (resultRowActionUsesSelection(selected, groupKey)) onDownloadSelected();
-                        else onDownloadGroup(group);
-                      }}
-                      onDownloadSingle={() => onDownloadGroup(group)}
-                      onRemoveFromStreamPlaylist={
-                        onRemoveStreamGroup
-                          ? () => onRemoveStreamGroup(
-                              group,
-                              sourceIndex[group.group_id] ?? group.best_source_index,
-                            )
-                          : undefined
-                      }
-                      removeFromStreamPlaylistLabel={removeStreamGroupLabel}
-                      removingFromStreamPlaylist={removingStreamGroupIds?.has(group.group_id)}
-                      previewPendingSourceKey={previewPendingSourceKey}
-                      previewPendingLabel={previewPendingLabel}
-                      onDragStart={(event) => {
-                        writeSearchSourcesDrag(
-                          event.dataTransfer,
-                          dragSources(),
-                          event.currentTarget,
-                        );
-                      }}
-                      onDragEnd={() => endSearchDrag()}
-                      onPointerDragStart={(event, onActivated) =>
-                        beginAudioPointerDrag(
-                          event.nativeEvent,
-                          dragSources(),
-                          group.title,
-                          (error) => setDragError(error instanceof Error ? error.message : String(error)),
-                          onActivated,
-                        )}
-                    />
-                  );
-            });
-            // 已解析合集是独立详情页：这里仅渲染已展示到的歌曲，不再在表内重复合集头和
-            // 下载。它们统一由顶部工作条承载。
-            const renderRows = (leaving?: number) => (
-              <>
-                {renderCollectionRows(item, !itemFlat, leaving)}
-                {renderGroupRows(leaving)}
-              </>
-            );
-
-            if (itemFlat) {
-              return <Fragment key={item.entry}>{collapsed ? null : renderRows()}</Fragment>;
-            }
-
-            return (
-              <Fragment key={`${index}:${item.entry}`}>
-                <tr
-                  data-tree="parent"
-                  data-collection-kind={collectionKind ?? undefined}
-                  onClick={() => {
-                    if (suppressParentClickRef.current === index) {
-                      suppressParentClickRef.current = null;
-                      return;
-                    }
-                    onToggleItem(index);
-                  }}
-                  onPointerDown={(event) => {
-                    if (event.pointerType === "mouse") return;
-                    if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
-                    parentPressRef.current = window.setTimeout(() => {
-                      // 包行自身没有独立操作；长按只抑制随后那次误点击，不得直接
-                      // 进入批选。具体歌曲长按会打开和桌面相同的右键菜单。
-                      suppressParentClickRef.current = index;
-                      parentPressRef.current = null;
-                    }, 480);
-                  }}
-                  onPointerUp={() => {
-                    if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
-                    parentPressRef.current = null;
-                  }}
-                  onPointerCancel={() => {
-                    if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
-                    parentPressRef.current = null;
-                  }}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                  }}
-                >
-                  <td className="kd-result-gutter" />
-                  <td className="kd-result-lead">
-                    {(item.groups.length > 0 || item.collections.length > 0) && (
-                      <span className="kd-result-lead-actions">
-                        {/* The package's own mark takes the empty slot before its chevron. */}
-                        {selecting && pickable.length > 0 ? (
-                          <span className="kd-result-lead-spacer">
-                            <RowPick
-                              state={itemPick}
-                              label={`选择「${item.title || item.entry}」全部曲目`}
-                              onToggle={() => onToggleItemAll(index)}
-                            />
-                          </span>
-                        ) : (
-                          <span className="kd-result-lead-spacer" aria-hidden="true" />
-                        )}
-                        <button
-                          type="button"
-                          className="kd-result-lead-btn"
-                          aria-label={collapsed ? `展开「${item.title || item.entry}」` : `收起「${item.title || item.entry}」`}
-                          aria-expanded={!collapsed}
-                          title={collapsed ? "展开" : "收起"}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onToggleItem(index);
-                          }}
-                        >
-                          {/* One chevron: the stylesheet turns it while the package is open. */}
-                          <ChevronRight size={13} />
-                        </button>
-                      </span>
-                    )}
-                  </td>
-                  <td colSpan={Math.max(1, visibleColumns.length + 1)}>
-                    <span className="kd-result-package-head">
-                      {collectionKind && item.groups[0]?.cover ? (
-                        <span className="kd-thumb kd-result-collection-cover">
-                          <CoverImage src={thumbUrl(item.groups[0].cover)} alt="" loading="lazy" />
-                        </span>
-                      ) : null}
-                      {!collectionKind ? (
-                        <span
-                          className="kd-chip"
-                          data-tone={item.kind === "error" ? "danger" : undefined}
-                        >
-                          {KIND_LABEL[item.kind]}
-                        </span>
-                      ) : null}
-                      <strong className="kd-truncate" title={item.title || item.entry}>
-                        {item.title || item.entry}
-                      </strong>
-                      {collectionKind && item.platform ? (
-                        <span
-                          className="kd-result-collection-platform"
-                          data-platform={item.platform}
-                          title={`来源：${PLATFORM_LABEL[item.platform] ?? item.platform}`}
-                          aria-label={`来源：${PLATFORM_LABEL[item.platform] ?? item.platform}`}
-                        >
-                          <PlatformMark id={item.platform} size={12} />
-                        </span>
-                      ) : null}
-                      {item.error && (
-                        <span
-                          className="kd-row kd-truncate"
-                          style={{ color: "var(--kd-danger)", gap: "0.25rem" }}
-                          title={item.error}
-                        >
-                          <AlertTriangle size={12} />
-                          {item.error}
-                        </span>
-                      )}
-                      {Object.entries(item.errors).map(([platform, message]) => (
-                        <span
-                          key={platform}
-                          className="kd-chip"
-                          data-tone="warn"
-                          title={`${platform}：${message}`}
-                        >
-                          {PLATFORM_LABEL[platform as keyof typeof PLATFORM_LABEL] ?? platform}{" "}
-                          失败
-                        </span>
-                      ))}
-                      <span className="kd-result-package-actions">
-                        {(item.collections.length > 0 || item.groups.length > 0) && (
-                          <span className="kd-result-collection-count">
-                            {item.collections.length > 0 ? `${item.collections.length} 个集合` : ""}
-                            {item.groups.length > 0 ? `${item.collections.length > 0 ? " · " : ""}${item.groups.length} 首` : ""}
-                          </span>
-                        )}
-                      </span>
-                    </span>
-                  </td>
-                </tr>
-                <PackageRows open={!collapsed} count={packageRowCount} columns={totalColumns}>
-                  {(leaving) =>
-                    renderRows(leaving ? Math.min(packageRowCount, FOLD_MAX_ROWS) : undefined)
-                  }
-                </PackageRows>
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
-      {/* The room at the foot is held while the list can still grow, so the ring that turns
-          there during a fetch moves nothing. */}
-      {hasMoreRows ? (
-        <div
-          className="kd-result-more"
-          role={loadingMoreRows ? "status" : undefined}
-          aria-label={loadingMoreRows ? "正在载入更多" : undefined}
-          aria-hidden={loadingMoreRows ? undefined : true}
-        >
-          {loadingMoreRows ? <LoaderCircle className="kd-spin" size={16} aria-hidden="true" /> : null}
+        <div ref={bodyRef} className="kd-list-body" role="rowgroup" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualItems.map((item) => (
+            <div
+              key={item.key}
+              ref={registerBlock}
+              className="kd-list-block"
+              data-index={item.index}
+              data-kd-block-key={String(item.key)}
+              style={{ top: item.start - headPx }}
+            >
+              {renderBlock(blocks[item.index])}
+            </div>
+          ))}
         </div>
-      ) : null}
+        {/* The room at the foot is held while the list can still grow, so the ring that turns
+            there during a fetch moves nothing. */}
+        {hasMoreRows ? (
+          <div
+            className="kd-result-more"
+            role={loadingMoreRows ? "status" : undefined}
+            aria-label={loadingMoreRows ? "正在载入更多" : undefined}
+            aria-hidden={loadingMoreRows ? undefined : true}
+          >
+            {loadingMoreRows ? <LoaderCircle className="kd-spin" size={16} aria-hidden="true" /> : null}
+          </div>
+        ) : null}
+      </div>
       {colMenu && (
         <ContextMenu x={colMenu.x} y={colMenu.y} onClose={() => setColMenu(null)}>
           {orderedColumns.map((column) => {
