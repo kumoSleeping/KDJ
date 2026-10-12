@@ -1,5 +1,17 @@
 # Windows SoundCloud 浏览器连接
 
+## Windows 启动前提
+
+Windows MSVC 构建通过仓库 `.cargo/config.toml` 静态链接 C/C++ 运行库；
+Rust 和通过 `cc` 编译的 Rubber Band 使用一致的 CRT 配置，不要求用户另装
+Visual C++ Redistributable。桌面产物门禁调用 `check-windows-runtime.ps1`，
+检查实际 `kdj-app.exe` 及同目录 DLL 的普通和延迟导入，拒绝编号 MSVC 运行库依赖。
+这项检查不能替代无 VC++ 运行库的 Windows 虚拟机启动验收。
+
+2026-10-12 的 de35bc9 测试包在虚拟机报 `MSVCP140.dll` 缺失，未进入账号导入；
+原因是测试分支漏带主目录已有的静态 CRT 配置。后续验收保持虚拟机未安装 VC++
+运行库，先确认新版可以启动，再执行下述账号测试。
+
 Mac 保留原有 Profile/钥匙串读取。Windows 优先尝试读取所选浏览器 Profile：
 先使用当前用户的 DPAPI 密钥，不因配置中存在 App-Bound 密钥就提前拒绝；
 按 Cookie 数据库版本解析并验证域名校验值。读取不会强制关闭浏览器。

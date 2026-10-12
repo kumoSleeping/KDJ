@@ -163,6 +163,13 @@ case "$label" in
     fi
     ;;
   windows-x86_64)
+    # Test the installed program's imports, since CI has VC++ runtimes preinstalled.
+    find_exact nsis "KDJ_${version}_x64-setup.exe"
+    if [ "${#matches[@]}" -eq 1 ]; then
+      app="$(dirname "$(dirname "$(dirname "${matches[0]}")")")/kdj-app.exe"
+      powershell.exe -NoProfile -File \
+        "$(dirname "$0")/check-windows-runtime.ps1" -Binary "$app"
+    fi
     # NSIS is the default installer/updater. MSI is also a promised release format.
     check_artifact "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe" 6551661 7600000
     check_signature "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe"

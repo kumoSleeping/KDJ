@@ -1,0 +1,4 @@
+# Statically link the MSVC runtime for Rust and cc-built native dependencies
+# (including Rubber Band), so Windows installs do not require VC++ Redistributable.
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
