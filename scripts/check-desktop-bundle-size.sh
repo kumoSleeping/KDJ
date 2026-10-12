@@ -171,7 +171,8 @@ case "$label" in
         "$(dirname "$0")/check-windows-runtime.ps1" -Binary "$app"
     fi
     # NSIS is the default installer/updater. MSI is also a promised release format.
-    check_artifact "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe" 6551661 7600000
+    # Static CRT build cdca611 measured 7.61 MB; retain about 1% headroom.
+    check_artifact "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe" 6551661 7700000
     check_signature "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe"
     check_artifact "Windows MSI" msi "KDJ_${version}_x64_en-US.msi" 8884224 10300000
     check_signature "Windows MSI" msi "KDJ_${version}_x64_en-US.msi"
