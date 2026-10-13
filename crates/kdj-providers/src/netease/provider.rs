@@ -752,13 +752,24 @@ impl MusicProvider for NeteaseProvider {
         trace
             .run(async {
                 trace.step("read_profile");
-                let (cookies, source) = crate::browser::reuse_named_cookies(
+                let (cookies, _source) = crate::browser::reuse_named_cookies(
                     browser,
                     profile,
                     &["163.com"],
                     &["MUSIC_U", "__csrf", "NMTID"],
                 )
                 .await?;
+                self.import_cookie_login(cookies).await
+            })
+            .await
+    }
+
+    async fn import_cookie_login(&self, mut cookies: std::collections::BTreeMap<String, String>) -> Result<()> {
+        let trace = crate::browser::login_trace::LoginTrace::new("wyy", "cookies");
+        let source = "导入的 Cookie";
+        trace.run(async {
+                cookies.retain(|name, _| matches!(name.as_str(), "MUSIC_U" | "__csrf" | "NMTID"));
+
                 anyhow::ensure!(
                     cookies.contains_key("MUSIC_U"),
                     "没有从{source}读取到已登录的网易云音乐；请先在这个浏览器登录"

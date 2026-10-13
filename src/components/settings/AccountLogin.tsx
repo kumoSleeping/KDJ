@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ClipboardPaste, Globe2, LoaderCircle, LogIn, QrCode, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
+import { cookieEditorHeaders, MAX_COOKIE_IMPORT_BYTES } from "../../lib/cookieEditorImport";
 import { motion } from "../../lib/motion";
 import { useAppStore } from "../../stores/appStore";
 import type { Account, BrowserCatalog, Platform, QrStateValue, QrVariant } from "../../types";
@@ -10,12 +11,13 @@ import { Button, InlineNotice } from "../common";
 import { Select } from "../common/Select";
 import "./AccountLogin.css";
 
-type Method = "qr" | "browser" | "webview" | "headers";
+type Method = "qr" | "cookies" | "browser" | "webview" | "headers";
 interface WindowResult { status: "done" | "error" | "cancelled" | "browser_required"; message: string }
 
 const METHODS: Record<Method, { label: string; icon: typeof Globe2 }> = {
   qr: { label: "扫码", icon: QrCode },
-  browser: { label: "复用浏览器", icon: Globe2 },
+  cookies: { label: "从 Cookie-Editor 导入", icon: ClipboardPaste },
+  browser: { label: "从浏览器导入（部分支持）", icon: Globe2 },
   webview: { label: "登录窗口", icon: LogIn },
   headers: { label: "请求头", icon: ClipboardPaste },
 };
@@ -38,7 +40,7 @@ const QR_POLL_MS = 1500;
 
 /** The ways one account can be logged in on a desktop, in the order they are offered. */
 export function loginMethods(account: Account): Method[] {
-  return account.login_method === "qr" ? ["qr", "browser"] : ["browser", "webview", "headers"];
+  return account.login_method === "qr" ? ["qr", "cookies", "browser"] : ["cookies", "browser", "webview", "headers"];
 }
 
 /**
@@ -112,6 +114,7 @@ export function AccountLogin({ account, sourceEnabled, onDone }: {
     </ul>
     {windowNotice && <InlineNotice text={windowNotice} className="kd-account-notice" onDismiss={() => setWindowNotice("")} />}
     {method === "qr" && <QrPanel account={account} onDone={onDone} />}
+    {method === "cookies" && <CookieEditorPanel account={account} sourceEnabled={sourceEnabled} onBusy={setPanelBusy} onDone={onDone} />}
     {(method === "browser" || method === "headers") && <LoginPanel key={method} account={account} method={method}
       sourceEnabled={sourceEnabled} onBusy={setPanelBusy} onDone={onDone} />}
   </>;
@@ -372,6 +375,98 @@ function LoginPanel({ account, method, sourceEnabled, onBusy, onDone }: {
       {permissionRequired && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openPermissionSettings()}>开启权限</Button>}
       <Button size="sm" variant="ghost" disabled={!canLogin} onClick={() => void login()}>
         {busy && <LoaderCircle size={13} className="kd-spin" />}{busy ? "正在登录" : "登录"}
+      </Button>
+    </div>
+  </div>;
+}
+
+function CookieEditorPanel({ account, sourceEnabled, onBusy, onDone }: {
+  account: Account; sourceEnabled: boolean; onBusy(value: boolean): void; onDone(): void;
+}) {
+  const [content, setContent] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState(false);
+  const [notice, setNotice] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const alive = useRef(true);
+  const working = useRef(false);
+  const setAccount = useAppStore(state => state.setAccount);
+  const locked = busy || reading;
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; onBusy(false); };
+  }, []);
+
+  const install = async () => {
+    setNotice("");
+    try {
+      const open = getBridge().openExternal;
+      if (!open) throw new Error("当前环境无法打开浏览器");
+      await open("https://cookie-editor.com/#download");
+    } catch { if (alive.current) setNotice("无法打开安装页面"); }
+  };
+
+  const importCookies = async (clipboard = false) => {
+    if (working.current) return;
+    if (account.login_method !== "qr" && !sourceEnabled) {
+      setNotice(`请先开启 ${account.label} 下载源`); return;
+    }
+    working.current = true;
+    setBusy(true); onBusy(true); setNotice("");
+    try {
+      let raw = content;
+      if (clipboard) {
+        try { raw = await navigator.clipboard.readText(); }
+        catch { throw new Error("无法读取剪贴板，请直接粘贴到输入框后导入"); }
+      }
+      if (!alive.current) return;
+      const headers = cookieEditorHeaders(raw, account.platform);
+      const result = await api.cookieEditorLogin(account.platform, headers);
+      if (alive.current) { setContent(""); setAccount(result); onDone(); }
+    } catch (error) {
+      if (alive.current) setNotice(error instanceof Error ? error.message : "导入失败");
+    } finally {
+      working.current = false;
+      if (alive.current) { setBusy(false); onBusy(false); }
+    }
+  };
+
+  const readFile = async (file: File) => {
+    if (working.current) return;
+    setNotice(""); setContent("");
+    if (file.size > MAX_COOKIE_IMPORT_BYTES) { setNotice("Cookie 文件过大，请只导出当前站点"); return; }
+    working.current = true; setReading(true); onBusy(true);
+    try { const text = await file.text(); if (alive.current) setContent(text); }
+    catch { if (alive.current) setNotice("无法读取 Cookie 文件"); }
+    finally {
+      working.current = false;
+      if (alive.current) { setReading(false); onBusy(false); }
+    }
+  };
+
+  return <div className="kd-account-login-panel" role="group" aria-label={`${account.label} · Cookie-Editor`}
+    {...motion("fade")} onKeyDown={event => event.stopPropagation()}>
+    <div className="kd-account-login-controls">
+      <Button size="sm" variant="ghost" disabled={locked} onClick={() => void install()}>安装 Cookie-Editor</Button>
+      <input ref={fileInput} type="file" accept=".json,.txt,application/json,text/plain" hidden disabled={locked}
+        onChange={event => {
+          const file = event.currentTarget.files?.[0]; event.currentTarget.value = "";
+          if (file) void readFile(file);
+        }} />
+      <Button size="sm" variant="ghost" disabled={locked} onClick={() => fileInput.current?.click()}>选择文件</Button>
+    </div>
+    <p className="kd-account-cookie-guide">
+      在已登录的{account.label}站点打开 Cookie-Editor，选择导出 → JSON，回到这里粘贴并导入。Cookie 等同登录凭证，请勿分享。
+    </p>
+    <textarea className="kd-textarea" rows={6} aria-label={`${account.label} Cookie-Editor 导出内容`}
+      autoFocus autoComplete="off" autoCorrect="off" spellCheck={false} value={content} disabled={locked}
+      onChange={event => setContent(event.currentTarget.value)} />
+    {notice && <InlineNotice text={notice} className="kd-account-notice" onDismiss={() => setNotice("")} />}
+    <div className="kd-account-login-actions">
+      <span role="status" className="kd-account-login-status">{reading ? "正在读取文件" : busy ? "正在验证登录" : ""}</span>
+      <Button size="sm" variant="ghost" disabled={locked} onClick={() => void importCookies(true)}>粘贴并导入</Button>
+      <Button size="sm" variant="ghost" disabled={locked || !content.trim()} onClick={() => void importCookies()}>
+        {busy && <LoaderCircle size={13} className="kd-spin" />}导入
       </Button>
     </div>
   </div>;

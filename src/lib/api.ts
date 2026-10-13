@@ -876,6 +876,8 @@ export const api = {
   cancelBrowserLogin: (request_id: string) => request("/accounts/browser/login/cancel", {
     method: "POST", body: JSON.stringify({ request_id }), keepalive: true,
   }),
+  cookieEditorLogin: (platform: Platform, headers: string) =>
+    post<Account>(`/accounts/${platform}/login/cookies`, { headers }),
   soundcloudHeadersLogin: (headers: string) =>
     post<Account>("/accounts/soundcloud/login/headers", { headers }),
   ytmHeadersLogin: (headers: string) =>

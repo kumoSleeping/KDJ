@@ -82,6 +82,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         )
         .route("/api/accounts/{platform}/login/browsers", get(browser_catalog))
         .route("/api/accounts/{platform}/login/browser", post(browser_login))
+        .route("/api/accounts/{platform}/login/cookies", post(cookie_editor_login))
         .route(
             "/api/accounts/soundcloud/login/webview",
             post(soundcloud_webview_login),
@@ -820,6 +821,48 @@ async fn soundcloud_webview_login(
         .import_webview_session(access_token, payload.expires_at)
         .await?;
     let account = state.soundcloud.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+/// Explicit Cookie-Editor import. The browser extension never connects to KDJ.
+async fn cookie_editor_login(
+    State(state): State<Arc<AppState>>,
+    AxumPath(platform): AxumPath<String>,
+    Json(payload): Json<YoutubeHeadersLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let platform = parse_platform(&platform)?;
+    let raw = payload.headers.trim();
+    if raw.is_empty() || raw.len() > 256 * 1024 || raw.contains(['\r', '\n']) {
+        return Err(ApiError::bad_request("Cookie 内容为空、过大或包含非法换行"));
+    }
+    let mut cookies = BTreeMap::new();
+    for pair in raw.strip_prefix("Cookie:").unwrap_or(raw).split(';') {
+        let Some((name, value)) = pair.trim().split_once('=') else {
+            return Err(ApiError::bad_request("Cookie 格式无效"));
+        };
+        let (name, value) = (name.trim(), value.trim());
+        if name.is_empty() || value.is_empty()
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&b))
+            || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err(ApiError::bad_request("Cookie 格式无效"));
+        }
+        if cookies.insert(name.to_owned(), value.to_owned()).is_some_and(|old| old != value) {
+            return Err(ApiError::bad_request("Cookie 包含冲突的登录状态"));
+        }
+    }
+    let account = match platform {
+        Platform::Soundcloud => {
+            state.soundcloud.import_headers(raw).await?;
+            state.soundcloud.account().await
+        }
+        Platform::Ytm | Platform::Youtube => return Ok(Json(youtube_pasted_login(&state, platform, raw).await?)),
+        _ => {
+            let provider = state.provider(platform).ok_or_else(|| ApiError::bad_request("平台不可用"))?;
+            provider.import_cookie_login(cookies).await?;
+            provider.account().await
+        }
+    };
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }
