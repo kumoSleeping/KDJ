@@ -79,6 +79,11 @@ fn private_file(path: &Path) -> std::io::Result<std::fs::File> {
     options.open(path)
 }
 
+/// The directory the diagnostics store actually writes to (including a fallback location).
+pub fn log_directory() -> Option<PathBuf> {
+    STORE.get().map(|store| store.directory.clone())
+}
+
 /// First successful initialization owns the directory (desktop starts before the backend).
 pub fn initialize(directory: PathBuf) -> anyhow::Result<()> {
     if STORE.get().is_some() {

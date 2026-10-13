@@ -197,6 +197,13 @@ impl Bridge {
         if auxiliary_roots && self.is_recorded_download_path(&canonical) {
             return Ok(canonical);
         }
+        // The app's own log folder lives outside every managed root; only that exact
+        // directory (not its parents or arbitrary children) may be opened.
+        if auxiliary_roots
+            && is_exact_directory(&canonical, kdj_server::diagnostics::log_directory().as_deref())
+        {
+            return Ok(canonical);
+        }
 
         let settings = self.config.to_settings();
         let mut roots = vec![self.config.download_dir()];
@@ -225,6 +232,12 @@ impl Bridge {
         }
         Ok(canonical)
     }
+}
+
+fn is_exact_directory(canonical: &Path, directory: Option<&Path>) -> bool {
+    directory
+        .and_then(|directory| directory.canonicalize().ok())
+        .is_some_and(|directory| directory == canonical)
 }
 
 // Requests to the embedded server carry control credentials and local file paths.
@@ -3682,6 +3695,20 @@ mod tests {
             .authorize_existing_path(&outside_file.to_string_lossy(), false)
             .is_err());
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn log_directory_is_openable_only_as_that_exact_directory() {
+        let root = std::env::temp_dir().join(format!("kdj-log-dir-{}", std::process::id()));
+        let logs = root.join("logs");
+        let child = logs.join("sub");
+        std::fs::create_dir_all(&child).unwrap();
+        let logs_c = logs.canonicalize().unwrap();
+        assert!(super::is_exact_directory(&logs_c, Some(&logs)));
+        assert!(!super::is_exact_directory(&child.canonicalize().unwrap(), Some(&logs)));
+        assert!(!super::is_exact_directory(&root.canonicalize().unwrap(), Some(&logs)));
+        assert!(!super::is_exact_directory(&logs_c, None));
         let _ = std::fs::remove_dir_all(root);
     }
 }
