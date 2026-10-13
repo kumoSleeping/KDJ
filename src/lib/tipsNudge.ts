@@ -1,14 +1,33 @@
 import { create } from "zustand";
-import { readLocalStorage, writeLocalStorageSoon } from "./storageWrite";
+import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
-/** Bump the suffix when the tips gain something worth greeting again. */
-const KEY = "kd-tips-greeted-v1";
+/** The version the tips entry last greeted on; a different one is a build it has not met. */
+const KEY = "kd-tips-greeted-version";
 
 /**
- * Whether the tips entry still greets (the little mouse hops under the bulb): until the tips have
- * been opened once on this build's first run. A view preference; losing it only greets again.
+ * Whether the tips key (the bulb) flashes. It does, a few times, the first time a build is opened
+ * (first run or after an update), and not again: the build is written down at once, so a restart
+ * does not repeat it. Opening the tips ends it early. A view preference only.
  */
 export const useTipsNudge = create<{ fresh: boolean; dismiss(): void }>(set => ({
-  fresh: readLocalStorage(KEY) !== "1",
-  dismiss: () => { set({ fresh: false }); writeLocalStorageSoon(KEY, "1"); },
+  fresh: false,
+  dismiss: () => set({ fresh: false }),
 }));
+
+let asked = false;
+/** Called once by the key itself: compares this build with the one it last greeted on. */
+export function greetTipsOnNewBuild(): void {
+  if (asked) return;
+  asked = true;
+  void (async () => {
+    let version = "dev";
+    try {
+      if ((window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
+        version = await (await import("@tauri-apps/api/app")).getVersion();
+      }
+    } catch { /* an unknown build greets once, like any other */ }
+    if (readLocalStorage(KEY) === version) return;
+    writeLocalStorageNow(KEY, version);
+    useTipsNudge.setState({ fresh: true });
+  })();
+}
