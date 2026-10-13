@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   quality:
+    # 只放依赖审计、前端生产构建和体积护栏；单元与界面测试是本地的事，不挡构建（2026-10-13）。
     name: 发布前安全与前端门禁
     runs-on: ubuntu-latest
     steps:
@@ -58,33 +59,6 @@ jobs:
           npm audit --audit-level=low
           npm audit signatures
 
-      - name: 曲库加载与滚动回归
-        run: npm run test:library
-
-      - name: 浏览器登录交互回归
-        run: node scripts/test-library-ui.mjs tests/youtube-login-ui.test.ts
-
-      - name: 播放队列与失败恢复回归
-        run: node --test scripts/test-playback-recovery.mjs
-
-      - name: 混合编辑器与状态恢复回归
-        run: npm run test:workshop && node --import tsx --test tests/stateRecovery.test.ts
-
-      - name: 原生 seek 门禁回归
-        run: node --import tsx --test tests/latestIntentGate.test.ts && node scripts/test-player-lanes.mjs
-
-      - name: 媒体工具安装流程回归
-        run: node --import tsx --test tests/ffmpeg-install.test.ts
-
-      - name: 主题包清单与令牌回归
-        run: node --import tsx --test tests/themePack.test.ts
-
-      - name: 核心行为回归依赖
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: 核心行为回归
-        run: cargo test -p kdj-core -p kdj-library -p kdj-providers -p kdj-server --lib --locked
-
       - name: 前端生产构建
         run: npm run tauri:web:build && npm run size:frontend:check
 
@@ -99,7 +73,7 @@ jobs:
 
   desktop:
     name: ${{ matrix.label }}
-    needs: quality
+    # 不等门禁：打包和门禁并行跑，发布才要求两边都过（见 publish 的 needs）。
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -200,40 +174,13 @@ jobs:
             || sudo apt-get install -y libappindicator3-dev
 
       # 桌面矩阵只负责各平台真实 release 编译、签名和安装包验证，不再在四个平台
-      # 重复冷编整套 workspace 测试。Tauri 打包本身仍会完整编译当前平台的 Rust
+      # 重复冷编整套 workspace 测试（2026-10-13：媒体工具包与 Windows 播放回归也从这里
+      # 拿掉了——它们在 Windows 上要先单独冷编一遍测试版，约 27 分钟，且 quality 已经
+      # 在 Linux 上跑 kdj-core/library/providers/server 的 --lib）。Tauri 打包本身仍会完整编译当前平台的 Rust
       # 代码，任何平台编译或链接错误仍会让该 job 失败。
 
       - name: 安装前端依赖
         run: npm ci
-
-      - name: 媒体工具包导入与恢复回归
-        run: cargo test -p kdj-providers --lib ffmpeg::managed --locked
-
-      - name: 桌面浏览器发现回归
-        if: runner.os == 'Windows' || runner.os == 'macOS'
-        run: cargo test -p kdj-providers --lib browser:: --locked
-
-      - name: Windows Edge 隔离会话与 HttpOnly Cookie 回归
-        if: runner.os == 'Windows'
-        env:
-          KDJ_TEST_ISOLATED_BROWSER: edge
-        run: cargo test -p kdj-providers --lib live_isolated_chromium_start_and_cleanup --locked -- --ignored
-
-      - name: Windows 播放与文件恢复回归
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test -p kdj-player --lib pipeline_reports_decoder
-          cargo test -p kdj-playback --lib platform::tests
-          cargo test -p kdj-playback --lib device_ -- --test-threads=1
-          cargo test -p kdj-playback --lib output_permission -- --test-threads=1
-          cargo test -p kdj-app --lib diagnostics::tests
-          cargo test -p kdj-app --lib release_version::tests --locked
-          cargo test -p kdj-app --lib data_recovery::tests
-          cargo test -p kdj-app --lib live_vj::audio_input::tests
-          cargo test -p kdj-providers --lib net::tests::strict_publication_keeps_source_and_destination_on_collision
-          cargo test -p kdj-providers --lib net::tests::concurrent_downloads_keep_independent_bytes_and_existing_files
 
       # M7（Tauri 壳）落地之前 src-tauri/ 还不完整。这里探测一下而不是硬跑，
       # 让这条流水线在壳做好之前仍然能当"三平台 Rust 测试"用，红叉只留给真问题。
@@ -443,7 +390,7 @@ jobs:
 
   publish:
     name: 发布桌面安装包
-    needs: desktop
+    needs: [quality, desktop]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:

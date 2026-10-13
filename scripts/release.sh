@@ -2,9 +2,9 @@
 # KDJ 一键发版：bump 五处版本号 → 校验 → 提交推送 → 盯 CI → 验证更新端点。
 #
 # 用法：
-#   scripts/release.sh 0.2.13            # 全量校验后发版
+#   scripts/release.sh 0.2.13            # 版本检查后发版；测试交给 CI 的 quality 门禁
 #   scripts/release.sh 1.0.0-rc1         # 带 RC 后缀，也按正式全量更新发布
-#   SKIP_VALIDATION=1 scripts/release.sh 0.2.13   # 跳过本地 typecheck/build/test（慎用）
+#   FULL_VALIDATION=1 scripts/release.sh 0.2.13   # 推送前先在本地跑 audit/typecheck/build/cargo test
 #   WATCH=0 scripts/release.sh 0.2.13    # 推完就退出，不等 CI
 #
 # 设计约束（都是踩过的坑）：
@@ -87,7 +87,7 @@ cargo_v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' C
   || { red "版本号回读不一致：tauri=$tauri npm=$npm_v cargo=$cargo_v"; exit 1; }
 
 # ---- 本地校验 ---------------------------------------------------------------
-if [[ "${SKIP_VALIDATION:-0}" != "1" ]]; then
+if [[ "${FULL_VALIDATION:-0}" == "1" || ( "${SKIP_VALIDATION:-}" == "0" ) ]]; then
   info "npm audit --audit-level=low"
   npm audit --audit-level=low
   info "npm audit signatures"
@@ -101,7 +101,7 @@ if [[ "${SKIP_VALIDATION:-0}" != "1" ]]; then
   info "cargo audit（vendor/glib-0.18.5 已回补 RUSTSEC-2024-0429）"
   cargo audit
 else
-  info "SKIP_VALIDATION=1，跳过本地校验"
+  info "不在本地重跑测试：quality 门禁在 CI 里跑同样的检查（需要时 FULL_VALIDATION=1）"
 fi
 
 # ---- 提交推送 ---------------------------------------------------------------
@@ -168,8 +168,7 @@ watch_run rust-build || {
   red "rust-build 失败或超时。Latest 不会被提升，更新通道仍指向上一版。"
 }
 
-info "盯安卓构建（rust-android）"
-watch_run rust-android || red "安卓构建失败，桌面更新不受影响但 APK 缺失"
+# 安卓不再随发版自动构建，这里不等它；补 APK：gh workflow run rust-android.yml --ref "v$VERSION"
 
 # ---- 终检：更新端点必须已经是新版本 ------------------------------------------
 info "验证更新清单"

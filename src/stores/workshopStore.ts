@@ -326,7 +326,9 @@ export const useWorkshopStore = create<WorkshopStore>()((set, get) => ({
     queue(async () => {
       const p = get().projects.find((p) => p.id === id);
       if (!p) return;
-      if (get().batchSubmitting) throw new Error("请等待批量提交完成");
+      if (get().batchSubmitting || get().jobs.some(j => j.project_id === id && ["queued", "rendering", "validating", "committing", "importing"].includes(j.phase))) {
+        throw new Error("请先取消导出或等待导出完成");
+      }
       const s = await api.deleteWorkshop(p.id, p.revision);
       if (get().activeId === id) set({
         activeId: null,

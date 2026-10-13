@@ -18,7 +18,7 @@
 
   <br>
 
-  <img src="docs/readme-assets/01-library.webp" alt="KDJ library" width="920">
+  <img src="docs/readme-assets/01-library.png" alt="KDJ library" width="920">
 </div>
 
 ---
@@ -50,37 +50,38 @@ KDJ packs cross-platform search, download, local library management, and music a
 
 ## Features
 
-- Download
-  - Cross-platform aggregate search
-  - QR login and source priority ordering
-  - Deduplicated merged results; track / playlist links and batch intake
-  - In-app preview with quality fallback (FLAC / 320 / 128)
-  - One-click playlist download and a configurable download queue
-  - Explore: search Remix and VJ
-- Library
-  - Drag-first organization
-  - Local library / folder scanning and tag editing
-  - Sidebar virtual playlists that reference local tracks without duplicating audio
-  - Camelot wheel with BPM / energy filters
-  - Automatic BPM, key, Camelot / Open Key, loudness, and energy analysis
-  - Harmonic similarity recommendations (library / folder / temporary queue)
-  - Waveform in/out points, star ratings, and cover art
-  - Automatic VJ export (requires [FFmpeg](https://ffmpeg.org/download.html))
+- Search and download
+  - Aggregate search across NetEase, QQ Music, SoundCloud, YouTube Music, YouTube and Bilibili; switch between songs, playlists, artists, albums and podcasts and open the related content
+  - Drag a platform icon to set source priority; turn off unused platforms in Settings
+  - Account login, deduplicated merged results, and track / playlist link parsing (paste several links to batch them)
+  - In-app preview with quality fallback, and downloading the playing online song from the player
+  - Right-click "add to download queue" or drag songs into the queue; per-song quality and save location, batch start and retry, and a history page
+  - Right-click to share a song, with its details and a small cover
+- Library and analysis
+  - Local folder scanning, tag editing, star ratings and cover management; drag local songs out of the app like files
+  - Automatic BPM, key and loudness analysis, with a choice of key notation; light / full / paused analysis modes that give way to playback
+  - Library optimisation finds duplicate songs; multi-select copy with undo
+  - A colour waveform in the player bar, generated progressively for online songs
+- Song visualizer
+  - A moving picture for any local song: cover, title and artist, spectrum and waveform
+  - Previewed live in a floating window you can move and resize, with an export key at its bottom right
+  - A configuration drawer with Scene, Pictures, Text and Output pages
+  - Right-click "export visualizer" or drag local songs into the export queue; finished videos appear under Finished (requires [FFmpeg](https://ffmpeg.org/download.html))
+- Playback
+  - One playback flow for local and online songs, with an optional auto-advance
+  - A standard player and a mini player that docks at a corner of the desktop above other windows
+  - Video and visualizer floating windows that move and resize; a song shows the visualizer you tuned
+  - Tempo, gain and a three-band EQ in the player bar; elapsed or remaining time
+  - Customisable arrow keys and system media keys
+  - Lyrics with word-by-word timing, translation and romanisation, and a desktop lyrics overlay
+  - VJ editing (the mixing editor) and VJ output from the toolbox
+- Other
+  - Light / dark / system theme
+  - A bulb in the top bar teaches search, sidebar, download, visualizer and player with small animations
+  - Lightweight Tauri desktop app; Android supported; automatic update checks on launch
 
 > [!NOTE]
-- Playback
-  - System-level audio output and volume control
-  - Rubber Band R3 pitch-preserving Tempo/BPM Sync for stereo and eight-channel STEM playback
-  - rkb-style waveform preview
-  - Multiple transition effects (crossfade / bass swap / filter / FX)
-  - Video floating window and system picture-in-picture; remux and audio extract
-  - VJ export (video mix + audio mix)
-  - Lyrics indexing and system-level desktop lyrics overlay
-- Other
-  - Light / dark / system theme; carefully designed interaction
-  - Lightweight Tauri desktop app; Android supported
-  - Automatic update checks on launch
-
+> Everyday library management, analysis and playback do not need FFmpeg. The mixing editor's media reading, tempo change and export, video mux and audio extraction, and visualizer export do.
 
 ## Build for development
 

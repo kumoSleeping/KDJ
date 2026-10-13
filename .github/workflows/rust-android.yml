@@ -6,14 +6,14 @@
 # **仍未验证**：这条流水线没在 GitHub 上真跑过，APK 也没装进过真机。
 # 下面的风险注释已按本机实测重排，别再照着旧版去乱设 CC_*/AR_*。
 #
-# 触发只留 workflow_dispatch 和 tag：安卓构建要下 SDK/NDK（~2GB）又要交叉编
-# 译四遍，挂在每次 push 上纯属浪费额度，而且在壳做好之前必然跳过。
+# 触发只留手动：安卓构建要下 SDK/NDK（~2GB）又要交叉编译四遍，不再随 v* tag 自动跑，
+# 桌面发版不等它（2026-10-13）。要给某个版本补 APK：
+#   gh workflow run rust-android.yml --ref v<version>
+# 它在 tag 上跑时，仍会把 APK 传进同一个 Release。
 name: rust-android
 
 on:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
 
 # APK 构建 job 只读；只有独立 publish job 临时获得 contents:write。
 permissions:

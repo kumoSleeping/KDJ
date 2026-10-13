@@ -591,7 +591,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null, w
     const busy = Boolean(job && canCancelExport(job));
     return <div className="kd-kvj-workshop-host" data-vj-drop="" data-vj-project={active ?? undefined}>
       <InlineNotice text={error || recoveryError || ""} />
-      <WorkshopEditor workspace projectDelete={draft && <button type="button" title="删除当前工程，保留素材和导出文件" disabled={saving > 0 || submitting}
+      <WorkshopEditor workspace projectDelete={draft && <button type="button" title="删除当前工程，保留素材和导出文件" disabled={saving > 0 || submitting || busy}
         onClick={() => void useWorkshopStore.getState().deleteProject(draft.id)}><Trash2 size={14} />删除工程</button>} projectActions={<>
         {job && job.phase !== "canceled" && <span className="kd-kvj-export-state" role="status" title={job.error || job.detail || job.path}>
           <QueueStateMark state={job.phase === "rendering" ? "processing" : job.phase === "import_failed" ? "failed" : job.phase} />
@@ -655,7 +655,7 @@ export function CompositionWorkshop({ toolbarTarget = null, backTarget = null, w
           {job && <WorkshopCancelButton key={job.id} job={job} />}
         </>;
         const projectDelete = <button type="button" aria-label={`删除任务 ${p.name}`} title="删除任务"
-            disabled={saving > 0 || submitting}
+            disabled={saving > 0 || submitting || jobs.some(j => j.project_id === p.id && ["queued","rendering","validating","committing","importing"].includes(j.phase))}
             onClick={() => void useWorkshopStore.getState().deleteProject(p.id)}><Trash2 size={14} /></button>;
         const heading = <div className="vj-task-card" data-editing={open || undefined}
             onClick={e => {
