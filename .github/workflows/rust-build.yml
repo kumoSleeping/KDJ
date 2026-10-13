@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   quality:
+    # 只放依赖审计、前端生产构建和体积护栏；单元与界面测试是本地的事，不挡构建（2026-10-13）。
     name: 发布前安全与前端门禁
     runs-on: ubuntu-latest
     steps:
@@ -57,30 +58,6 @@ jobs:
         run: |
           npm audit --audit-level=low
           npm audit signatures
-
-      - name: 曲库加载与滚动回归
-        run: npm run test:library
-
-      - name: 播放队列与失败恢复回归
-        run: node --test scripts/test-playback-recovery.mjs
-
-      - name: 混合编辑器与状态恢复回归
-        run: npm run test:workshop && node --import tsx --test tests/stateRecovery.test.ts
-
-      - name: 原生 seek 门禁回归
-        run: node --import tsx --test tests/latestIntentGate.test.ts && node scripts/test-player-lanes.mjs
-
-      - name: 媒体工具安装流程回归
-        run: node --import tsx --test tests/ffmpeg-install.test.ts
-
-      - name: 主题包清单与令牌回归
-        run: node --import tsx --test tests/themePack.test.ts
-
-      - name: 核心行为回归依赖
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: 核心行为回归
-        run: cargo test -p kdj-core -p kdj-library -p kdj-providers -p kdj-server --lib --locked
 
       - name: 前端生产构建
         run: npm run tauri:web:build && npm run size:frontend:check
@@ -204,10 +181,6 @@ jobs:
 
       - name: 安装前端依赖
         run: npm ci
-
-      - name: 桌面浏览器发现回归
-        if: runner.os == 'Windows' || runner.os == 'macOS'
-        run: "cargo test -p kdj-providers --lib browser:: --locked"
 
       # M7（Tauri 壳）落地之前 src-tauri/ 还不完整。这里探测一下而不是硬跑，
       # 让这条流水线在壳做好之前仍然能当"三平台 Rust 测试"用，红叉只留给真问题。

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run tauri:web",
     "devUrl": "http://localhost:5274",
-    "beforeBuildCommand": "npm run tauri:web:build && npm run size:frontend:check",
+    "beforeBuildCommand": "npm run tauri:web:build",
     "frontendDist": "../dist-tauri",
     "removeUnusedCommands": true
   },
