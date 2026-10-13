@@ -1,0 +1,35 @@
+/* 崩溃页：和应用同一张纸，居中一列。样式表可能还没载入，所以每个值都有后备。 */
+.kd-crash {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: 1.5rem;
+  background: var(--kd-panel, Canvas);
+  color: var(--kd-text, CanvasText);
+  font-family: inherit;
+}
+.kd-crash-body { display: grid; gap: 0.9rem; width: min(30rem, 100%); min-width: 0; }
+.kd-crash-title { margin: 0; font-size: 1.25rem; font-weight: 700; line-height: 1.3; }
+.kd-crash-message {
+  max-height: 4.5rem;
+  margin: 0;
+  overflow: auto;
+  color: var(--kd-muted, GrayText);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.kd-crash-reload {
+  justify-self: start;
+  padding: 0.3rem 0;
+  border: 0;
+  background: none;
+  color: var(--kd-text, CanvasText);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.kd-crash-reload:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text, CanvasText)); outline-offset: 2px; }

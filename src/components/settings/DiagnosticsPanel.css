@@ -1,8 +1,43 @@
-.kd-diagnostic-actions { display: flex; flex-wrap: wrap; gap: 12px; }
-.kd-diagnostic-dialog { color: var(--kd-text, inherit); background: var(--kd-bg, Canvas); border: 1px solid var(--kd-border, GrayText); border-radius: 8px; padding: 18px; width: min(760px, 90vw); max-height: 85vh; overflow: auto; }
-.kd-diagnostic-dialog::backdrop { background: #0007; }
-.kd-diagnostic-dialog header { display: flex; align-items: center; justify-content: space-between; }
-.kd-diagnostic-dialog p { font-size: 12px; line-height: 1.6; }
-.kd-diagnostic-dialog textarea { display: block; width: 100%; min-height: 72px; resize: vertical; margin: 8px 0; color: inherit; background: transparent; border: 1px solid var(--kd-border, GrayText); border-radius: 4px; }
-.kd-diagnostic-dialog pre { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; padding: 10px; border: 1px solid var(--kd-border, GrayText); user-select: text; }
-.kd-diagnostic-consent { display: flex; align-items: center; gap: 6px; margin: 12px 0; font-size: 12px; }
+.kd-diagnostic-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+/* 上报错误：写一句话，按发送。没有窗口、没有蒙版；内容只在要看时展开。 */
+.kd-report { display: grid; gap: 0.6rem; min-width: 0; margin-top: 0.6rem; }
+.kd-report-note {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.55rem 0.65rem;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--kd-text, currentColor) 6%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: var(--kd-size-sm, 0.8125rem);
+  line-height: 1.5;
+  resize: vertical;
+}
+.kd-report-note:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text, currentColor)); outline-offset: 1px; }
+.kd-report-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.25rem; min-width: 0; }
+.kd-report-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--kd-muted, GrayText);
+  font-size: var(--kd-size-xs, 0.75rem);
+  font-variant-numeric: tabular-nums;
+}
+.kd-report-body {
+  max-height: 14rem;
+  margin: 0;
+  padding: 0.6rem 0.65rem;
+  overflow: auto;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--kd-text, currentColor) 6%, transparent);
+  color: var(--kd-text-body, inherit);
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.kd-report-privacy { margin: 0; color: var(--kd-muted, GrayText); font-size: var(--kd-size-xs, 0.75rem); line-height: 1.5; }

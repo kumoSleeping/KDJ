@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import "./MouseDemo.css";
+import "./PointerDemo.css";
 
 /**
- * A little looping picture of a gesture, drawn with a cute mouse: the pointer does the thing on a
- * list while the mouse on the side squeezes along with it. One drawing serves every place that
- * teaches the gesture — the empty download queue (`drag-in`) and the tips drawer
+ * A little looping picture of a gesture: a small pointer does the thing on a drawn list, with the
+ * key it needs beside it. One drawing serves every place that teaches the gesture — the empty download queue (`drag-in`) and the tips drawer
  * (`src/components/download/SearchTipsPanel.tsx`) — so a new lesson is a new scene here.
  *
  * It is a still picture under reduced motion, and it stops while it is out of sight.
  */
-export type MouseDemoScene = "pick-range" | "pick-toggle" | "drag-in" | "search" | "viz-tune" | "pip" | "player-keys";
+export type PointerDemoScene = "pick-range" | "pick-toggle" | "drag-in" | "search" | "viz-tune" | "pip" | "player-keys";
 
 /** What the picture shows for one moment; the next moment is `move` + `stay` later. */
 interface Beat {
@@ -46,13 +45,13 @@ interface Scene {
 
 const ROWS = [0, 1, 2, 3, 4] as const;
 const rowAt = (row: number): readonly [number, number] => [96, 15.5 + 20 * row];
-const AWAY: readonly [number, number] = [132, 64];
+const AWAY: readonly [number, number] = [176, 70];
 
 const CHIP_HOME = [46, 40] as const;
 const TRAY = [169, 56] as const;
 const CORNER: readonly [number, number] = [30, 88];
 
-const SCENES: Record<MouseDemoScene, Scene> = {
+const SCENES: Record<PointerDemoScene, Scene> = {
   "pick-range": {
     rest: 7,
     beats: [
@@ -112,13 +111,13 @@ const SCENES: Record<MouseDemoScene, Scene> = {
   pip: {
     rest: 4,
     beats: [
-      { move: 600, stay: 300, cursor: AWAY, win: [100, 66] },
-      { move: 600, stay: 200, cursor: [110, 71], win: [100, 66] },
-      { move: 80, stay: 250, cursor: [110, 71], press: true, win: [100, 66] },
+      { move: 600, stay: 300, cursor: AWAY, win: [150, 66] },
+      { move: 600, stay: 200, cursor: [160, 71], win: [150, 66] },
+      { move: 80, stay: 250, cursor: [160, 71], press: true, win: [150, 66] },
       { move: 1000, stay: 250, cursor: [28, 19], press: true, win: [18, 14] },
       { move: 0, stay: 1400, cursor: [28, 19], win: [18, 14] },
       { move: 700, stay: 300, cursor: AWAY, win: [18, 14] },
-      { move: 400, stay: 100, cursor: AWAY, win: [100, 66] },
+      { move: 400, stay: 100, cursor: AWAY, win: [150, 66] },
     ],
   },
   "player-keys": {
@@ -152,7 +151,7 @@ const SCENES: Record<MouseDemoScene, Scene> = {
 const isMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** The modifier key a scene holds, as it is written on the keycap. */
-function keyLabel(scene: MouseDemoScene): string | null {
+function keyLabel(scene: PointerDemoScene): string | null {
   if (scene === "pick-range") return "Shift";
   if (scene === "pick-toggle") return isMac() ? "⌘" : "Ctrl";
   if (scene === "search") return "Enter";
@@ -185,41 +184,8 @@ function useSeen(node: { current: Element | null }): boolean {
   return seen;
 }
 
-/** The mouse's face alone, small: where a place wants the character without a scene. */
-export function MouseFace({ className }: { className?: string }) {
-  return <svg className={`kd-demo-face ${className ?? ""}`} viewBox="-14 -19 28 52" aria-hidden="true" focusable="false">
-    <path className="kd-demo-cable" d="M0 15 q0 7 7 8 t9 6" />
-    <path className="kd-demo-mouse-body" d="M-11 -5 A11 11 0 0 1 11 -5 V5 A11 11 0 0 1 -11 5 Z" />
-    <path className="kd-demo-mouse-btn" d="M-11 -5 A11 11 0 0 1 0 -16 V-4 H-11 Z" />
-    <path className="kd-demo-mouse-seam" d="M-11 -4 H11 M0 -16 V-4" />
-    <circle className="kd-demo-eye" cx="-4" cy="5" r="1.4" />
-    <circle className="kd-demo-eye" cx="4" cy="5" r="1.4" />
-    <circle className="kd-demo-blush" cx="-7.4" cy="8.4" r="1.7" />
-    <circle className="kd-demo-blush" cx="7.4" cy="8.4" r="1.7" />
-    <path className="kd-demo-smile" d="M-2.4 8.6 Q0 11 2.4 8.6" />
-  </svg>;
-}
-
-/** The cute mouse at the side: it follows the pointer a little and squeezes when it clicks. */
-function Buddy({ at, cursor, press }: { at: readonly [number, number]; cursor: readonly [number, number]; press: boolean }) {
-  const lean = [(cursor[0] - 110) / 22, (cursor[1] - 56) / 20] as const;
-  return <g className="kd-demo-buddy" style={{ transform: `translate(${at[0] + lean[0]}px, ${at[1] + lean[1]}px)` }}>
-    <g className="kd-demo-mouse" data-press={press || undefined}>
-      <path className="kd-demo-cable" d="M0 15 q0 7 7 8 t9 6" />
-      <path className="kd-demo-mouse-body" d="M-11 -5 A11 11 0 0 1 11 -5 V5 A11 11 0 0 1 -11 5 Z" />
-      <path className="kd-demo-mouse-btn" data-on={press || undefined} d="M-11 -5 A11 11 0 0 1 0 -16 V-4 H-11 Z" />
-      <path className="kd-demo-mouse-seam" d="M-11 -4 H11 M0 -16 V-4" />
-      <circle className="kd-demo-eye" cx="-4" cy="5" r="1.4" />
-      <circle className="kd-demo-eye" cx="4" cy="5" r="1.4" />
-      <circle className="kd-demo-blush" cx="-7.4" cy="8.4" r="1.7" />
-      <circle className="kd-demo-blush" cx="7.4" cy="8.4" r="1.7" />
-      <path className="kd-demo-smile" d="M-2.4 8.6 Q0 11 2.4 8.6" />
-    </g>
-  </g>;
-}
-
-export function MouseDemo({ scene, label, tray = "download" }: {
-  scene: MouseDemoScene;
+export function PointerDemo({ scene, label, tray = "download" }: {
+  scene: PointerDemoScene;
   /** What the picture says, for assistive technology. */
   label?: string;
   /** The tray's mark in `drag-in`: what the thing is dropped on. */
@@ -229,15 +195,16 @@ export function MouseDemo({ scene, label, tray = "download" }: {
   const seen = useSeen(root);
   const [still] = useState(prefersReducedMotion);
   const { beats, rest } = SCENES[scene];
-  const [at, setAt] = useState(still ? rest : 0);
+  const [place, setPlace] = useState({ scene, at: still ? rest : 0 });
+  // A scene has its own number of beats: a place that belongs to another scene starts over.
+  const at = place.scene === scene && place.at < beats.length ? place.at : still ? rest : 0;
   const moving = seen && !still;
   useEffect(() => {
     if (!moving) return;
     const beat = beats[at];
-    const timer = window.setTimeout(() => setAt((at + 1) % beats.length), beat.move + beat.stay);
+    const timer = window.setTimeout(() => setPlace({ scene, at: (at + 1) % beats.length }), beat.move + beat.stay);
     return () => window.clearTimeout(timer);
-  }, [moving, at, beats]);
-  useEffect(() => { if (still) setAt(rest); }, [still, rest]);
+  }, [moving, at, beats, scene]);
 
   const beat = beats[at];
   const picked = beat.picked ?? [];
@@ -268,11 +235,11 @@ export function MouseDemo({ scene, label, tray = "download" }: {
         <rect className="kd-demo-line" data-faint="" x="20" y="10" width="36" height="2.5" rx="1.25" />
       </g>)}
     </g> : scene === "pip" ? <g>
-      <rect className="kd-demo-row-base" x="8" y="8" width="140" height="96" rx="8" />
+      <rect className="kd-demo-row-base" x="8" y="8" width="204" height="96" rx="8" />
       <rect className="kd-demo-line" x="18" y="82" width="60" height="3.4" rx="1.7" />
       <rect className="kd-demo-line" data-faint="" x="18" y="90" width="38" height="3" rx="1.5" />
       <g className="kd-demo-chip" style={{
-        transform: `translate(${(beat.win ?? [100, 66])[0]}px, ${(beat.win ?? [100, 66])[1]}px)`,
+        transform: `translate(${(beat.win ?? [150, 66])[0]}px, ${(beat.win ?? [150, 66])[1]}px)`,
         transitionDuration: `${beat.win && beat.win[0] > 90 && beat.move === 400 ? 0 : beat.move}ms, 0ms`,
         transformBox: "view-box", transformOrigin: "0 0",
       }}>
@@ -343,7 +310,6 @@ export function MouseDemo({ scene, label, tray = "download" }: {
         </g>
       </g>
     </g>}
-    <Buddy at={drag ? [92, 88] : scene === "player-keys" ? [110, 94] : scene === "viz-tune" || scene === "pip" ? [188, 62] : [190, 76]} cursor={beat.cursor} press={press} />
     <g className="kd-demo-pointer" style={{ transform: `translate(${beat.cursor[0]}px, ${beat.cursor[1]}px)`, transitionDuration: duration }}>
       {press && <circle key={at} className="kd-demo-ping" r="7" />}
       <path className="kd-demo-cursor" d="M0 0 V12.5 L3.4 9.6 L5.6 14.6 L8 13.5 L5.8 8.7 H10 Z" />

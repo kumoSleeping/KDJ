@@ -1,10 +1,10 @@
 import { SEARCH_TIPS } from "./SearchBar";
-import { MouseDemo, type MouseDemoScene } from "../common/MouseDemo";
+import { PointerDemo, type PointerDemoScene } from "../common/PointerDemo";
 import { SlidePages } from "../drawer/SlidePages";
 import { tipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
 
 interface Lesson {
-  scene: MouseDemoScene;
+  scene: PointerDemoScene;
   tray?: "download" | "export";
   caption: string;
 }
@@ -23,14 +23,16 @@ const LESSONS: Record<Exclude<TipsPage, "all">, Lesson[]> = {
     { scene: "drag-in", tray: "export", caption: "把本地歌曲拖进导出，一样轻松" },
   ],
   viz: [{ scene: "viz-tune", caption: "拖动滑块，可视化的画面跟着变" }],
-  pip: [{ scene: "pip", caption: "小窗可以拖到喜欢的位置" }],
-  player: [{ scene: "player-keys", caption: "自动切歌、歌词、小窗，点一下就亮" }],
+  player: [
+    { scene: "player-keys", caption: "自动切歌、歌词、小窗，点一下就亮" },
+    { scene: "pip", caption: "小窗可以拖到喜欢的位置" },
+  ],
 };
 
 function Lessons({ page }: { page: Exclude<TipsPage, "all"> }) {
   return <div className="kd-tips-lessons">
-    {LESSONS[page].map((lesson, index) => <figure key={index} className="kd-tips-lesson">
-      <MouseDemo scene={lesson.scene} tray={lesson.tray} label={lesson.caption} />
+    {LESSONS[page].map((lesson, index) => <figure key={`${page}-${index}`} className="kd-tips-lesson">
+      <PointerDemo scene={lesson.scene} tray={lesson.tray} label={lesson.caption} />
       <figcaption>{lesson.caption}</figcaption>
     </figure>)}
   </div>;
