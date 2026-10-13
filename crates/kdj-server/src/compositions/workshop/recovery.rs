@@ -2,7 +2,7 @@ use super::*;
 
 fn empty() -> Journal {
     Journal { version: 1, revision: 0, projects: vec![], jobs: vec![], migrated: vec![], checked_video_geometry: HashSet::new(),
-        position_bases: HashMap::new(), pending_positions: HashMap::new(), stopped_positions: HashSet::new(), recovery_error: String::new() }
+        cleared_exports: HashMap::new(), position_bases: HashMap::new(), pending_positions: HashMap::new(), stopped_positions: HashSet::new(), recovery_error: String::new() }
 }
 
 /// 记录里存在、但本次序列化写不出来的键路径。只比较结构与键名，

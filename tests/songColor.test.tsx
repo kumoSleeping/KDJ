@@ -59,7 +59,7 @@ test("song colour: the choice is kept, and nothing is drawn, fetched or listened
     format: "mp3", size: 1, duration: 200, bpm: 128, first_beat: 0.1, modified_at: "a", source_platform: "local", music_key: "",
     camelot: "8A", open_key: "", tags: [], cue_points: [] } as unknown as Track);
   usePlayerBarAway.setState({ tall: false, collapsed: false, phase: "up" });
-  useNowPlayingInfo.setState({ open: false, pinned: true, peek: 0, barAway: false });
+  useNowPlayingInfo.setState({ open: true, peek: 0, barAway: false });
   useTaskBubbles.setState({ entries: [] });
   const root = createRoot(dom.window.document.getElementById("root")!);
   heard.length = 0;
@@ -73,7 +73,7 @@ test("song colour: the choice is kept, and nothing is drawn, fetched or listened
   const actions = () => useTaskBubbles.getState().entries.find(entry => entry.spec.id === NOW_PLAYING_TASK && !entry.leaving)?.spec.actions ?? [];
 
   // Off: the bubble has its slot and its key, and that is all there is.
-  assert.ok(bubble(), "the pinned bubble is up");
+  assert.ok(bubble(), "the opened bubble is up");
   assert.equal(layersOn(), 0, "no layer");
   assert.equal(dom.window.document.querySelectorAll("canvas").length, 0, "no bitmap");
   assert.equal(songColorSessionRunning(), false, "nothing reads covers");

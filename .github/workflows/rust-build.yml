@@ -206,6 +206,10 @@ jobs:
       - name: 媒体工具包导入与恢复回归
         run: cargo test -p kdj-providers --lib ffmpeg::managed --locked
 
+      - name: 桌面浏览器发现回归
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        run: cargo test -p kdj-providers --lib browser:: --locked
+
       - name: Windows 播放与文件恢复回归
         if: runner.os == 'Windows'
         shell: bash

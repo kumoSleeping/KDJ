@@ -19,10 +19,11 @@ interface State {
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 let initializing: Promise<void> | undefined;
-let worker: { id: string; controller: AbortController } | undefined;
+let worker: { id: string; controller: AbortController; finished: Promise<void> } | undefined;
 let pumping = false;
 let writes = Promise.resolve();
 const reservedPaths = new Set<string>();
+const removals = new Map<string, Promise<void>>();
 function persist(task: VisualizerExportTask): Promise<void> {
   const write = writes.catch(() => undefined).then(() => saveVisualizerExport(task));
   writes = write;
@@ -52,7 +53,10 @@ async function pump(): Promise<void> {
     while (!leavingApp) {
       const task = useVisualizerExportStore.getState().tasks.find(task => task.phase === "queued");
       if (!task) return;
-      const controller = new AbortController(); worker = { id: task.id, controller };
+      const controller = new AbortController();
+      let finish!: () => void;
+      const finished = new Promise<void>(resolve => { finish = resolve; });
+      worker = { id: task.id, controller, finished };
       const leaving = () => { leavingApp = true; controller.abort(); };
       window.addEventListener("pagehide", leaving);
       try {
@@ -78,6 +82,7 @@ async function pump(): Promise<void> {
         const final = useVisualizerExportStore.getState().tasks.find(t => t.id === task.id);
         if (final) await persist(final).catch(report);
         worker = undefined;
+        finish();
       }
     }
   } finally { pumping = false; }
@@ -136,7 +141,7 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
   },
   start(id) {
     if (usesVisualizerWindow()) { void fromOwner({ action: "start", id }).catch(report); return; }
-    set(state => ({ tasks: state.tasks.map(task => (!id || task.id === id) && visualizerExportStartable(task)
+    set(state => ({ tasks: state.tasks.map(task => (!id || task.id === id) && !removals.has(task.id) && visualizerExportStartable(task)
       ? { ...task, phase: "queued", progress: 0, status: "等待导出", error: "" } : task) }));
     void pump().catch(report);
   },
@@ -156,18 +161,29 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
   },
   async remove(id) {
     if (usesVisualizerWindow()) { await fromOwner({ action: "remove", id }); return; }
-    const task = get().tasks.find(t => t.id === id);
-    if (!task || visualizerExportActive(task) || worker?.id === id) return;
-    // Remove from the runnable list before awaiting IO; export/delete clicks
-    // must never race a producer against deletion of its frozen snapshot.
-    set(state => ({ tasks: state.tasks.filter(task => task.id !== id) }));
-    reservedPaths.add(task.outputPath.toLowerCase());
-    try {
-      await writes.catch(() => undefined);
-      await deleteVisualizerExport(id);
-    } catch (error) {
-      set(state => ({ tasks: [...state.tasks, task].sort((a, b) => a.createdAt - b.createdAt) }));
-      report(error);
-    } finally { reservedPaths.delete(task.outputPath.toLowerCase()); }
+    const existing = removals.get(id);
+    if (existing) return existing;
+    // Reserve synchronously: retry/start and repeated clear clicks cannot race cleanup.
+    const removal = Promise.resolve().then(async () => {
+      const task = get().tasks.find(t => t.id === id);
+      if (!task) return;
+      const finished = worker?.id === id ? worker.finished : undefined;
+      if (visualizerExportActive(task)) await get().cancel(id);
+      await finished;
+      const stopped = get().tasks.find(t => t.id === id);
+      if (!stopped) return;
+      set(state => ({ tasks: state.tasks.filter(task => task.id !== id) }));
+      reservedPaths.add(stopped.outputPath.toLowerCase());
+      try {
+        await writes.catch(() => undefined);
+        await deleteVisualizerExport(id);
+      } catch (error) {
+        set(state => ({ tasks: [...state.tasks, stopped].sort((a, b) => a.createdAt - b.createdAt) }));
+        report(error);
+        throw error;
+      } finally { reservedPaths.delete(stopped.outputPath.toLowerCase()); }
+    }).finally(() => { removals.delete(id); });
+    removals.set(id, removal);
+    return removal;
   },
 }));

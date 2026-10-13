@@ -6,9 +6,9 @@
 //! sight (`conceal`), given its new size, and shown again (`mini_player_reveal`) once the page
 //! has drawn for that size.
 //!
-//! Down, the whole window is gone at once, and the mini player pops out of the nearest corner
-//! of its screen at the place it was last left at. Back, it goes into that corner again, and
-//! the whole window fades in. Those are all the steps, and between them the window is out of
+//! Down, the whole window fades out where it is, and the mini player pops out of the nearest
+//! corner of its screen at the place it was last left at. Back, it goes into that corner again,
+//! and the whole window fades in. Those are all the steps, and between them the window is out of
 //! sight for as long as the page needs to draw the other size, and no longer. Nothing flies
 //! from one place to another, nothing stands in for the window meanwhile, and nothing waits
 //! for the look of it.
@@ -33,7 +33,9 @@ const POP_OUT_MS: u64 = 150;
 const POP_FADE: f64 = 0.7;
 /// A window left out of sight is shown after this long whatever the page does.
 const REVEAL_WITHIN: Duration = Duration::from_millis(1600);
-/// The whole window comes back by a short fade (macOS). It goes at once.
+/// The whole window goes by a short fade (macOS) on the way down, and comes back by one on the
+/// way back.
+const FADE_OUT_MS: u64 = 110;
 const FADE_IN_MS: u64 = 140;
 /// All but clear rather than clear: still a window on show to the system, so the page in it
 /// goes on drawing.
@@ -63,18 +65,11 @@ impl Frame {
     }
 }
 
-/// What is kept between runs: where the mini player was left, and whether it floats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What is kept between runs: where the mini player was left. It always floats.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct Saved {
     place: Option<(i32, i32)>,
-    on_top: bool,
-}
-
-impl Default for Saved {
-    fn default() -> Self {
-        Self { place: None, on_top: true }
-    }
 }
 
 /// The whole window as it was, for the way back.
@@ -124,7 +119,6 @@ pub struct ClientRect {
 #[serde(rename_all = "camelCase")]
 pub struct MiniPlayerState {
     active: bool,
-    on_top: bool,
     /// The whole window's size in CSS pixels while this is the mini player, else 0.
     full_width: f64,
     full_height: f64,
@@ -147,7 +141,7 @@ impl MiniPlayer {
     fn state(&self) -> MiniPlayerState {
         let inner = self.lock();
         let (full_width, full_height) = inner.session.map_or((0.0, 0.0), |session| session.full_css);
-        MiniPlayerState { active: inner.session.is_some(), on_top: inner.saved.on_top, full_width, full_height }
+        MiniPlayerState { active: inner.session.is_some(), full_width, full_height }
     }
 
     fn save(&self, saved: Saved) {
@@ -465,12 +459,12 @@ async fn fade(window: &WebviewWindow, from: f64, to: f64, duration: Duration) {
     }
 }
 
-/// Takes the window out of sight as it is, at once: nothing of what is done to it next (its
-/// ways, its size) is seen. Clear on macOS; elsewhere beyond the screens, where a window
-/// stays put.
-fn conceal(window: &WebviewWindow) -> Result<(), String> {
+/// Takes the window out of sight: on macOS it fades out over `fade_for` (at once when that is
+/// zero), and nothing of what is done to it next (its ways, its size) is seen. Elsewhere it is
+/// beyond the screens, where a window stays put.
+async fn conceal(window: &WebviewWindow, fade_for: Duration) -> Result<(), String> {
     if cfg!(target_os = "macos") {
-        set_alpha(window, CLEAR);
+        fade(window, 1.0, CLEAR, fade_for).await;
     } else {
         let current = frame_of(window)?;
         apply(window, out_of_sight(window, current), false);
@@ -570,25 +564,53 @@ fn show_window_buttons(window: &WebviewWindow, shown: bool) {
 #[cfg(not(target_os = "macos"))]
 fn show_window_buttons(_window: &WebviewWindow, _shown: bool) {}
 
+/// Windows 11 rounds the corners of a window that has a frame to size it by. The mini player
+/// cannot be sized and has none, so its corners were square: it asks for round ones by name,
+/// and the whole window gets the system's own choice back. Windows 10 has no round corners and
+/// turns the request down, which is nothing to report.
+#[cfg(windows)]
+fn round_corners(window: &WebviewWindow, round: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT, DWMWCP_ROUND,
+    };
+
+    let Ok(hwnd) = window.hwnd() else { return; };
+    let preference: i32 = if round { DWMWCP_ROUND } else { DWMWCP_DEFAULT };
+    // SAFETY: the handle is this live window's, and the attribute is read as one i32 of the
+    // size given, during the call only.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0 as *mut std::ffi::c_void,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            std::ptr::from_ref(&preference).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn round_corners(_window: &WebviewWindow, _round: bool) {}
+
 fn smallest_main_window(app: &AppHandle) -> Option<tauri::LogicalSize<f64>> {
     let config = app.config().app.windows.iter().find(|window| window.label == "main")?;
     Some(tauri::LogicalSize::new(config.min_width?, config.min_height?))
 }
 
-/// Gives the window the ways of a mini player, or the main window's own back.
-fn dress(app: &AppHandle, window: &WebviewWindow, mini: bool, on_top: bool) {
+/// Gives the window the ways of a mini player, or the main window's own back. The mini player
+/// always floats, on every desktop: it stays in sight when the listener changes desktop.
+fn dress(app: &AppHandle, window: &WebviewWindow, mini: bool) {
     let smallest = if mini { None } else { smallest_main_window(app) };
     let results = [
         window.set_min_size(smallest),
         window.set_resizable(!mini),
-        window.set_always_on_top(mini && on_top),
-        // Floating, it is on every desktop: it stays in sight when the listener changes desktop.
-        window.set_visible_on_all_workspaces(mini && on_top),
+        window.set_always_on_top(mini),
+        window.set_visible_on_all_workspaces(mini),
     ];
     for error in results.into_iter().filter_map(Result::err) {
         tracing::warn!("迷你播放器窗口属性未能切换：{error}");
     }
     show_window_buttons(window, !mini);
+    round_corners(window, mini);
 }
 
 fn mini_of(app: &AppHandle) -> Result<tauri::State<'_, MiniPlayer>, String> {
@@ -605,10 +627,10 @@ pub fn mini_player_state(app: AppHandle) -> Result<MiniPlayerState, String> {
     Ok(mini_of(&app)?.state())
 }
 
-/// The whole window is gone at once and is the mini player from here on, out of sight and still
-/// of the whole window's size: `rect` is the bubble as it stands in it. The page gives it the
-/// bubble's size when it has made ready for it (`mini_player_fit`), and `mini_player_reveal`
-/// shows it at the place it was last left at.
+/// The whole window fades out where it is (with `animated`), and is the mini player from here on,
+/// out of sight and still of the whole window's size: `rect` is the bubble as it stands in it.
+/// The page gives it the bubble's size when it has made ready for it (`mini_player_fit`), and
+/// `mini_player_reveal` shows it at the place it was last left at.
 #[tauri::command]
 pub async fn mini_player_collapse(
     app: AppHandle,
@@ -654,7 +676,7 @@ pub async fn mini_player_collapse(
     }
     let corner = (full.right() - bubble.right(), full.bottom() - bubble.bottom());
     let screens = screens_of(&window);
-    let (on_top, generation) = {
+    let generation = {
         let mut inner = mini.lock();
         inner.generation = inner.generation.wrapping_add(1);
         let start = shown_at(inner.saved.place, bubble, &screens);
@@ -668,16 +690,15 @@ pub async fn mini_player_collapse(
             pending: Some(start),
             expanding: false,
         });
-        (inner.saved.on_top, inner.generation)
+        inner.generation
     };
-    // At once, with motion or without: there is nothing to animate about its going.
-    conceal(&window)?;
+    conceal(&window, time(animated, FADE_OUT_MS)).await?;
     if maximized {
         // A maximized window does not take a size.
         let _ = window.unmaximize();
         tokio::time::sleep(SETTLE).await;
     }
-    dress(&app, &window, true, on_top);
+    dress(&app, &window, true);
     shown_at_last(&app, &window, generation, animated);
     Ok(mini.state())
 }
@@ -723,8 +744,9 @@ pub async fn mini_player_expand(app: AppHandle, window: WebviewWindow, animated:
         let to = tucked(current, &screens_of(&window), reach_of(&window));
         pop(&window, current, to, time(animated, POP_OUT_MS), Pop::Away).await;
     }
-    conceal(&window)?;
-    dress(&app, &window, false, false);
+    // Already out of sight: the pop has taken it clear, so this one is at once.
+    conceal(&window, Duration::ZERO).await?;
+    dress(&app, &window, false);
     apply(&window, out_of_sight(&window, session.full), true);
     shown_at_last(&app, &window, generation, animated);
     Ok(mini.state())
@@ -769,24 +791,6 @@ pub fn mini_player_fit(app: AppHandle, window: WebviewWindow, width: f64, height
         apply(&window, next, true);
     }
     Ok(())
-}
-
-#[tauri::command]
-pub async fn mini_player_set_on_top(app: AppHandle, window: WebviewWindow, on_top: bool) -> Result<MiniPlayerState, String> {
-    main_only(&window)?;
-    let mini = mini_of(&app)?;
-    let _step = Step::begin(&mini).await;
-    let (active, saved) = {
-        let mut inner = mini.lock();
-        inner.saved.on_top = on_top;
-        (inner.session.is_some_and(|session| !session.expanding), inner.saved)
-    };
-    mini.save(saved);
-    if active {
-        window.set_always_on_top(on_top).map_err(|error| error.to_string())?;
-        window.set_visible_on_all_workspaces(on_top).map_err(|error| error.to_string())?;
-    }
-    Ok(mini.state())
 }
 
 #[cfg(test)]
@@ -860,14 +864,5 @@ mod tests {
         let top_left = Frame { x: 16, y: 40, width: 384, height: 148 };
         let grown = resized_in_place(top_left, (384, 200), &[SCREEN]);
         assert_eq!((grown.x, grown.y), (16, 40));
-    }
-
-    #[test]
-    fn it_floats_unless_the_listener_said_otherwise() {
-        assert!(Saved::default().on_top);
-        let saved: Saved = serde_json::from_str(r#"{"place":[10,20]}"#).unwrap();
-        assert_eq!(saved, Saved { place: Some((10, 20)), on_top: true });
-        let saved: Saved = serde_json::from_str(r#"{"on_top":false}"#).unwrap();
-        assert_eq!(saved, Saved { place: None, on_top: false });
     }
 }

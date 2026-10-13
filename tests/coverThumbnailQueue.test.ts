@@ -59,12 +59,15 @@ test("cancel/reacquire, priority, bounded caches, and retry classification", asy
     assert.equal(peekCoverThumbnail("retry").missing, false, "a server error says nothing about the cover");
     calls.at(-1)!.resolve(ok()); await transient.promise; await tick(); transient.release();
 
-    for (let i = 0; i < 530; i++) {
+    // The cache now retains up to 4096 covers; exceed that capacity so eviction is exercised.
+    for (let i = 0; i < 4110; i++) {
       const lease = acquireCoverThumbnail(`cache-${i}`, `/cache-${i}`);
       calls.at(-1)!.resolve(ok());
       await lease.promise; await tick(); lease.release();
     }
-    assert.ok(coverThumbnailQueueStats().cached <= 512);
+    assert.ok(coverThumbnailQueueStats().cached <= 4096);
+    assert.equal(peekCoverThumbnail("cache-0").src, "", "old unused covers are evicted");
+    assert.ok(peekCoverThumbnail("cache-4109").src, "the latest cover remains cached");
     assert.equal(coverThumbnailQueueStats().active, 0);
     assert.equal(coverThumbnailQueueStats().queued, 0);
   } finally { globalThis.fetch = original; }

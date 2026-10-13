@@ -8,3 +8,21 @@
   font-size: var(--kd-size-xs);
   overflow-wrap: anywhere;
 }
+
+/* Reserve the same action width for every export, even when only clearing is available. */
+.kd-export-task .kd-download-task-actions {
+  min-width: 5.5rem;
+  justify-content: flex-end;
+  gap: 0.25rem;
+}
+.kd-export-task .kd-download-task-meta {
+  flex-direction: column;
+  align-items: flex-start;
+}
+.kd-export-task .kd-download-task-quality,
+.kd-export-task .kd-download-task-target {
+  max-width: 100%;
+}
+.kd-export-task .kd-download-task-quality {
+  flex-shrink: 1;
+}

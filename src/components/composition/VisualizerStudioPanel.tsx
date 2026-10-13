@@ -14,7 +14,8 @@ import { formatBytes } from "../../lib/format";
 import { visualizerCropExtent } from "../../lib/audioVisualizerScene";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { tossToDownloads } from "../../lib/downloadToss";
-import { usesVisualizerWindow } from "../../lib/windowRole";
+import { registerVisualizerDraft, reportVisualizerExportError } from "../../lib/visualizerExportActions";
+import { isEditorWindow } from "../../lib/windowRole";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
 import { FloatingVideoControls, FloatingVideoScrub } from "../player/FloatingVideoControls";
 import { FloatingPreviewFrame } from "../player/FloatingPreviewFrame";
@@ -105,6 +106,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   const settingsTarget = useVisualizerStudioStore(state => settingsOpen ? state.settingsTarget : null);
   const [draft, setDraft] = useState<VisualizerDraft | null>(null);
   const latestDraft = useRef(draft); latestDraft.current = draft;
+  useEffect(() => registerVisualizerDraft(track.id, () => latestDraft.current), [track.id]);
   const [images, setImages] = useState<HTMLImageElement[]>([]);
   const [coverAvailable, setCoverAvailable] = useState<boolean | null>(null);
   const [mediaFailed, setMediaFailed] = useState(false);
@@ -112,7 +114,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   const [analyzing, setAnalyzing] = useState(false);
   const analyzedSpectrum = useRef<string | null>(null);
   // Inline selection is not a request to decode another song while playback continues.
-  const [loadAllowed, setLoadAllowed] = useState(() => !inline);
+  const [loadAllowed, setLoadAllowed] = useState(() => !inline || (popup && useVisualizerPopup.getState().track?.id === track.id));
   const [previewVisible, setPreviewVisible] = useState(() => !inline);
   const [loadingLyrics, setLoadingLyrics] = useState(false);
   const lyricSource = useLyricsStore(s => s.byId[track.id]?.meta?.platform);
@@ -484,17 +486,19 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
   }
   // The picture is thrown into the exports queue as a download is into its queue (downloadToss):
   // the queue opens at the exports, the parcel lands on the new row, and no bubble is raised
-  // for it. Inside a drawer the queue is not opened over the studio; a queue that lives in the
-  // visualizer window is not here to land in.
+  // for it. A queue that lives in the visualizer window is not here to land in.
   async function enqueueExport(from?: Element) {
     if (!draft || !prepared || busy || analyzing) return;
     setBusy(true); setNotice("");
-    const toss = usesVisualizerWindow() ? null
-      : tossToDownloads({ to: "exports", from: from ?? null, open: !inDrawer, title: draft.project.text.title || track.title || undefined });
+    const toss = isEditorWindow ? null
+      : tossToDownloads({ to: "exports", from: from ?? null, open: true, title: draft.project.text.title || track.title || undefined });
     try {
       await toss?.ready;
       await useVisualizerExportStore.getState().enqueue(draft);
-    } catch (error) { toss?.fail(); setNotice(`加入导出队列失败：${message(error)}`); }
+    } catch (error) {
+      toss?.fail();
+      reportVisualizerExportError(error);
+    }
     finally { setBusy(false); }
   }
   function seek(time: number) {
@@ -567,8 +571,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
     <button type="button" disabled={!p || busy} onClick={refreshAutomaticConfiguration} aria-label="刷新自动配置"
       title="恢复默认布局、字号、特效和歌曲信息；保留图片、歌词与输出设置，可撤销"><RotateCcw size={14} /></button>
     <span className="kd-editor-spacer" />
-    <span className="kd-editor-status" aria-live="polite">{analyzing ? "正在分析频谱…" : ""}</span>
-    <button type="button" className="kd-viz-export" title="加入导出队列" aria-label="加入导出队列" disabled={!prepared || analyzing || busy} onClick={event => void enqueueExport(event.currentTarget)}><ListPlus size={14} /><span>{busy ? "加入中…" : "加入队列"}</span></button>
+    <button type="button" className="kd-viz-export" title="导出可视化" aria-label="导出可视化" disabled={!prepared || analyzing || busy} onClick={event => void enqueueExport(event.currentTarget)}><ListPlus size={14} /><span>{busy ? "加入中…" : "导出"}</span></button>
   </div>;
   const noticeRow = notice && <div className="kd-viz-notice" role="alert">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}><X size={13} /></button></div>;
   const pickImage = (slot: number) => { imageSlot.current = slot; imageInput.current?.click(); };
@@ -715,7 +718,7 @@ function Studio({ track, inline, showDetails, popup, onClose, onContentStateChan
               onClick={event => { event.stopPropagation(); togglePreviewLyrics(); }}>
               {loadingLyrics ? <LoaderCircle size={13} className="kd-spin" /> : <Captions size={13} />}
             </button>}
-            {inline && !expanded && <button type="button" title={busy ? "正在加入导出队列…" : "加入导出队列"} aria-label="加入导出队列"
+            {inline && !expanded && <button type="button" title={busy ? "正在加入导出队列…" : "导出可视化"} aria-label="导出可视化"
               aria-busy={busy} disabled={!prepared || analyzing || busy}
               onClick={event => { event.stopPropagation(); void enqueueExport(event.currentTarget); }}>
               {busy ? <LoaderCircle size={13} className="kd-spin" /> : <ListPlus size={13} />}

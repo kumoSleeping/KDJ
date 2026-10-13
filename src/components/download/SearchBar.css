@@ -149,22 +149,9 @@
 .kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] {
   --kd-drawer-head-h: calc(var(--kd-search-head-row) + var(--kd-search-second-row));
 }
-.kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] .kd-drawer-launcher {
-  height: var(--kd-search-head-row);
-}
 .kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar {
   grid-template-columns: minmax(0, 1fr);
   row-gap: var(--kd-search-row-gap);
-}
-/* The entries' column is kept clear beside the first row only, so the editor reaches the right
-   edge. A theme pack's caption is part of the dock: there the whole dock stays left of the
-   entries, as in a wide window, and both rows end where they begin. */
-:root:not([data-theme-pack]) .kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top {
-  padding-right: 0;
-}
-:root:not([data-theme-pack]) .kd-app[data-tall="true"] .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top .kd-searchbar-tools {
-  /* The entries' width, less the right padding of the band and of the bar (0.75rem + 0.55rem). */
-  margin-right: calc(var(--kd-drawer-lip-w) - 1.3rem);
 }
 
 /* —— A line that changes (RollText): the kind, the tip ——

@@ -60,6 +60,12 @@ export function formatBpm(bpm: number | null | undefined): string {
   return bpm.toFixed(1);
 }
 
+/** 帧率最多显示两位小数，保留 29.97 等常用值并去掉浮点尾数。 */
+export function formatFrameRate(fps: number | null | undefined): string {
+  if (!isNum(fps) || fps <= 0) return DASH;
+  return String(Number(fps.toFixed(2)));
+}
+
 /**
  * 日期 → `YYYY-MM-DD HH:mm`（本地时区）。
  * 同时吃两种输入：曲库是 ISO8601 字符串，下载任务是 Unix 秒（float），

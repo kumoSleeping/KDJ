@@ -17,6 +17,8 @@ use kdj_core::models::*;
 use kdj_core::Settings;
 use kdj_library::service::{DeletedTrack, FileDisposal, TrackMediaSource, TrackQuery};
 use kdj_providers::{MusicProvider, ProtectedPreviewIdentity, VideoPreviewTrack};
+use kdj_providers::browser::login_trace::LoginTrace;
+use kdj_providers::youtubemusic::auth::BrowserSession;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -87,11 +89,17 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             post(soundcloud_browser_login),
         )
         .route(
+            "/api/accounts/soundcloud/login/browser/authorize",
+            post(soundcloud_browser_authorize),
+        )
+        .route(
             "/api/accounts/soundcloud/login/webview",
             post(soundcloud_webview_login),
         )
+        .route("/api/accounts/soundcloud/login/headers", post(soundcloud_headers_login))
         .route("/api/accounts/ytm/login/browsers", get(browser_catalog))
         .route("/api/accounts/ytm/login/browser", post(ytm_browser_login))
+        .route("/api/accounts/ytm/login/browser/authorize", post(ytm_browser_authorize))
         .route("/api/accounts/ytm/login/headers", post(ytm_headers_login))
         .route("/api/accounts/ytm/login/webview", post(ytm_webview_login))
         .route("/api/accounts/youtube/login/webview", post(youtube_webview_login))
@@ -100,6 +108,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             "/api/accounts/youtube/login/browser",
             post(youtube_browser_login),
         )
+        .route("/api/accounts/youtube/login/browser/authorize", post(youtube_browser_authorize))
         .route(
             "/api/accounts/youtube/login/headers",
             post(youtube_headers_login),
@@ -734,19 +743,19 @@ struct BrowserLoginBody {
     profile: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct SoundCloudWebviewLoginBody {
     access_token: String,
     #[serde(default)]
     expires_at: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct YoutubeHeadersLoginBody {
     headers: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct YoutubeWebviewLoginBody {
     cookie: String,
 }
@@ -775,6 +784,16 @@ async fn soundcloud_browser_login(
     Ok(Json(account))
 }
 
+async fn soundcloud_browser_authorize(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BrowserLoginBody>,
+) -> ApiResult<Json<Account>> {
+    state.soundcloud.import_authorized_browser(payload.browser).await?;
+    let account = state.soundcloud.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
 /// KDJ 原生隔离窗口只把 SoundCloud 的网页登录会话交回本机后端；令牌不经过
 /// renderer。provider 会先请求 `/me` 验证，成功后才替换已有登录态。
 async fn soundcloud_webview_login(
@@ -794,151 +813,100 @@ async fn soundcloud_webview_login(
     Ok(Json(account))
 }
 
-async fn import_youtube_browser(
-    auth: Arc<kdj_providers::youtubemusic::auth::YoutubeAuth>,
-    payload: BrowserLoginBody,
-) -> ApiResult<kdj_providers::youtubemusic::auth::BrowserSession> {
-    let browser = payload.browser.trim().to_string();
-    let profile = payload.profile.map(|profile| profile.trim().to_string());
-    if browser.is_empty() {
-        return Err(ApiError::bad_request("请选择浏览器"));
-    }
-    tokio::task::spawn_blocking(move || auth.import_browser(&browser, profile.as_deref()))
-        .await
-        .map_err(|error| ApiError::bad_request(format!("读取浏览器会话失败：{error}")))?
-        .map_err(Into::into)
-}
-
-/// YouTube Music 只更新自己的会话与账号事件。
-async fn ytm_browser_login(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<BrowserLoginBody>,
-) -> ApiResult<Json<Account>> {
-    let session = import_youtube_browser(state.ytm_auth.clone(), payload).await?;
-    state.youtubemusic.validate_browser_session(&session).await
-        .map_err(|error| ApiError::bad_request(format!("YouTube Music 登录会话验证失败：{error}")))?;
-    state.ytm_auth.save(session)?;
-    let account = state
-        .provider(Platform::Ytm)
-        .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
-        .account()
-        .await;
-    state.hub.publish("account.changed", &account);
-    Ok(Json(account))
-}
-
-/// 普通 YouTube 视频只更新自己的会话与账号事件。
-async fn youtube_browser_login(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<BrowserLoginBody>,
-) -> ApiResult<Json<Account>> {
-    let session = import_youtube_browser(state.youtube_auth.clone(), payload).await?;
-    state
-        .youtube
-        .validate_browser_session(&session)
-        .await
-        .map_err(|error| ApiError::bad_request(format!("YouTube 登录会话验证失败：{error}")))?;
-    state.youtube_auth.save(session)?;
-    let account = state
-        .provider(Platform::Youtube)
-        .ok_or_else(|| ApiError::bad_request("YouTube provider 不可用"))?
-        .account()
-        .await;
-    state.hub.publish("account.changed", &account);
-    Ok(Json(account))
-}
-
-/// ytmusicapi 标准回退：只写 YouTube Music 请求头会话。
-async fn ytm_headers_login(
+async fn soundcloud_headers_login(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<YoutubeHeadersLoginBody>,
 ) -> ApiResult<Json<Account>> {
-    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_headers(&payload.headers)?;
-    state.youtubemusic.validate_browser_session(&session).await
-        .map_err(|error| ApiError::bad_request(format!("YouTube Music 登录会话验证失败：{error}")))?;
-    state.ytm_auth.save(session)?;
-    let account = state
-        .provider(Platform::Ytm)
-        .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
-        .account()
-        .await;
+    state.soundcloud.import_headers(&payload.headers).await?;
+    let account = state.soundcloud.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }
 
-/// 桌面 WebView 登录：Cookie 只在 Rust 侧流转，不进 renderer。
-async fn ytm_webview_login(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<YoutubeWebviewLoginBody>,
-) -> ApiResult<Json<Account>> {
-    let cookie = payload.cookie.trim();
-    if cookie.is_empty() || cookie.len() > 256 * 1024 {
-        return Err(ApiError::bad_request(
-            "YouTube Music 登录窗口没有返回有效会话",
-        ));
-    }
-    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_cookie_header(
-        cookie,
-        "WebView 登录 · music.youtube.com",
-    )?;
-    state
-        .youtubemusic
-        .validate_browser_session(&session)
-        .await
-        .map_err(|error| {
-            ApiError::bad_request(format!("YouTube Music 登录会话验证失败：{error}"))
-        })?;
-    state.ytm_auth.save(session)?;
-    let account = state
-        .provider(Platform::Ytm)
-        .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
-        .account()
-        .await;
-    state.hub.publish("account.changed", &account);
-    Ok(Json(account))
+fn youtube_login_site(platform: Platform) -> &'static str {
+    if platform == Platform::Ytm { "ytm" } else { "youtube" }
 }
 
-/// 普通 YouTube 登录窗口只更新视频来源，验证成功前不替换现有会话。
-async fn youtube_webview_login(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<YoutubeWebviewLoginBody>,
-) -> ApiResult<Json<Account>> {
-    let cookie = payload.cookie.trim();
-    if cookie.is_empty() || cookie.len() > 256 * 1024 {
-        return Err(ApiError::bad_request("YouTube 登录窗口没有返回有效会话"));
-    }
-    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_cookie_header(
-        cookie, "WebView 登录 · www.youtube.com",
-    )?;
-    state.youtube.validate_browser_session(&session).await
-        .map_err(|error| ApiError::bad_request(format!("YouTube 登录会话验证失败：{error}")))?;
-    state.youtube_auth.save(session)?;
-    let account = state.provider(Platform::Youtube)
-        .ok_or_else(|| ApiError::bad_request("YouTube provider 不可用"))?.account().await;
+async fn save_youtube_login(state: &AppState, platform: Platform, session: BrowserSession, trace: &LoginTrace) -> anyhow::Result<Account> {
+    trace.step("validate_account");
+    // Each platform validates and commits its own session. An HTTP 200 anonymous response is rejected.
+    let validation = async {
+        if platform == Platform::Ytm { state.youtubemusic.validate_browser_session(&session).await }
+        else { state.youtube.validate_browser_session(&session).await }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(45), validation).await
+        .map_err(|_| anyhow::anyhow!("账号验证超时，请重试登录"))??;
+    trace.step("save_session");
+    if platform == Platform::Ytm { state.ytm_auth.save(session)?; }
+    else { state.youtube_auth.save(session)?; }
+    let account = state.provider(platform).ok_or_else(|| anyhow::anyhow!("登录来源不可用"))?.account().await;
     state.hub.publish("account.changed", &account);
-    Ok(Json(account))
+    Ok(account)
 }
 
-/// 普通 YouTube 请求头回退；不会覆盖 YouTube Music 会话。
-async fn youtube_headers_login(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<YoutubeHeadersLoginBody>,
-) -> ApiResult<Json<Account>> {
-    let session =
-        kdj_providers::youtubemusic::auth::BrowserSession::from_headers(&payload.headers)?;
-    state
-        .youtube
-        .validate_browser_session(&session)
-        .await
-        .map_err(|error| ApiError::bad_request(format!("YouTube 登录会话验证失败：{error}")))?;
-    state.youtube_auth.save(session)?;
-    let account = state
-        .provider(Platform::Youtube)
-        .ok_or_else(|| ApiError::bad_request("YouTube provider 不可用"))?
-        .account()
-        .await;
-    state.hub.publish("account.changed", &account);
-    Ok(Json(account))
+async fn youtube_direct_login(state: &AppState, platform: Platform, payload: BrowserLoginBody) -> anyhow::Result<Account> {
+    let trace = LoginTrace::new(youtube_login_site(platform), "direct");
+    trace.browser(&payload.browser);
+    trace.run(async {
+        trace.step("read_profile");
+        let auth = if platform == Platform::Ytm { state.ytm_auth.clone() } else { state.youtube_auth.clone() };
+        let session = tokio::task::spawn_blocking(move || auth.import_browser(payload.browser.trim(), payload.profile.as_deref()))
+            .await.map_err(|_| anyhow::anyhow!("读取浏览器会话任务失败"))??;
+        save_youtube_login(state, platform, session, &trace).await
+    }).await
+}
+
+async fn youtube_authorized_login(state: &AppState, platform: Platform, payload: BrowserLoginBody) -> anyhow::Result<Account> {
+    let trace = LoginTrace::new(youtube_login_site(platform), "authorize");
+    trace.run(async {
+        let session = kdj_providers::browser::authorization::read_youtube(&payload.browser, platform, &trace).await?;
+        save_youtube_login(state, platform, session, &trace).await
+    }).await
+}
+
+async fn youtube_pasted_login(state: &AppState, platform: Platform, raw: &str) -> anyhow::Result<Account> {
+    let trace = LoginTrace::new(youtube_login_site(platform), "headers");
+    trace.run(async {
+        trace.step("parse_headers");
+        let session = BrowserSession::from_headers(raw)?;
+        save_youtube_login(state, platform, session, &trace).await
+    }).await
+}
+
+async fn youtube_window_login(state: &AppState, platform: Platform, raw: &str) -> anyhow::Result<Account> {
+    let trace = LoginTrace::new(youtube_login_site(platform), "webview");
+    trace.run(async {
+        trace.step("read_window_session");
+        anyhow::ensure!(!raw.trim().is_empty() && raw.len() <= 256 * 1024, "登录窗口没有返回有效会话");
+        let label = if platform == Platform::Ytm { "登录窗口 · music.youtube.com" } else { "登录窗口 · www.youtube.com" };
+        let session = BrowserSession::from_cookie_header(raw.trim(), label)?;
+        save_youtube_login(state, platform, session, &trace).await
+    }).await
+}
+
+async fn ytm_browser_login(State(state): State<Arc<AppState>>, Json(payload): Json<BrowserLoginBody>) -> ApiResult<Json<Account>> {
+    Ok(Json(youtube_direct_login(&state, Platform::Ytm, payload).await?))
+}
+async fn youtube_browser_login(State(state): State<Arc<AppState>>, Json(payload): Json<BrowserLoginBody>) -> ApiResult<Json<Account>> {
+    Ok(Json(youtube_direct_login(&state, Platform::Youtube, payload).await?))
+}
+async fn ytm_browser_authorize(State(state): State<Arc<AppState>>, Json(payload): Json<BrowserLoginBody>) -> ApiResult<Json<Account>> {
+    Ok(Json(youtube_authorized_login(&state, Platform::Ytm, payload).await?))
+}
+async fn youtube_browser_authorize(State(state): State<Arc<AppState>>, Json(payload): Json<BrowserLoginBody>) -> ApiResult<Json<Account>> {
+    Ok(Json(youtube_authorized_login(&state, Platform::Youtube, payload).await?))
+}
+async fn ytm_headers_login(State(state): State<Arc<AppState>>, Json(payload): Json<YoutubeHeadersLoginBody>) -> ApiResult<Json<Account>> {
+    Ok(Json(youtube_pasted_login(&state, Platform::Ytm, &payload.headers).await?))
+}
+async fn youtube_headers_login(State(state): State<Arc<AppState>>, Json(payload): Json<YoutubeHeadersLoginBody>) -> ApiResult<Json<Account>> {
+    Ok(Json(youtube_pasted_login(&state, Platform::Youtube, &payload.headers).await?))
+}
+async fn ytm_webview_login(State(state): State<Arc<AppState>>, Json(payload): Json<YoutubeWebviewLoginBody>) -> ApiResult<Json<Account>> {
+    Ok(Json(youtube_window_login(&state, Platform::Ytm, &payload.cookie).await?))
+}
+async fn youtube_webview_login(State(state): State<Arc<AppState>>, Json(payload): Json<YoutubeWebviewLoginBody>) -> ApiResult<Json<Account>> {
+    Ok(Json(youtube_window_login(&state, Platform::Youtube, &payload.cookie).await?))
 }
 
 // ---------------------------------------------------------------- 搜索
@@ -3946,27 +3914,12 @@ async fn clear_download_history(
     Ok(Json(json!({ "removed": removed })))
 }
 
-/// 移除一条已经结束的任务记录。运行中的条目必须先取消，不能在它还持有进程时
-/// 直接从队列地图里拔掉。
+/// 清除任务记录并停止任务，保留已下载文件。
 async fn remove_download(
     AxumPath(id): AxumPath<String>,
     axum::Extension(ctx): axum::Extension<Ctx>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let task = ctx
-        .downloads
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found("任务不存在"))?;
-    if !matches!(
-        task.state,
-        TaskState::Paused | TaskState::Done | TaskState::Failed | TaskState::Canceled
-    ) {
-        return Err(ApiError::bad_request(
-            "只能移除暂停或已结束的任务；请先暂停",
-        ));
-    }
-    ctx.downloads
-        .remove_finished(&id)
-        .ok_or_else(|| ApiError::bad_request("任务无法移除"))?;
+    ctx.downloads.clear_task(&id)?;
     Ok(Json(json!({ "removed": true })))
 }
 

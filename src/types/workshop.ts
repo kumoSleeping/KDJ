@@ -130,6 +130,7 @@ export interface WorkshopJob {
   track_id: number | null;
 }
 export interface WorkshopSnapshot {
+  cleared_exports?: Record<string, number>;
   session: string;
   revision: number;
   projects: CompositionProject[];

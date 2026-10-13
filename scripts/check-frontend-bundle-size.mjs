@@ -63,11 +63,12 @@ async function main() {
   // Every desktop target now ships the same proof/player and SABR runtime. Mobile alone
   // uses unsupported stubs. Never let a successful Windows build silently omit the worker.
   const desktop = ["darwin", "windows", "win32", "linux"].includes(platform);
-  // Theme packs add the pack loader, its settings rows and token readers for canvas drawing.
-  // Measured minified outputs: desktop 1.848 MB, mobile 1.594 MB, CSS 246.9 KB.
-  // Allow that growth while keeping patch-level headroom small.
-  const maxTotal = desktop ? 1_860_000 : 1_605_000;
-  const maxCss = 248_000;
+  // 2026-10-12 desktop rebaseline: 480124d before the SoundCloud changes is
+  // 2,388,512 B total / 359,789 B CSS; c6ad81d CI is 2,389,521 B / 359,789 B.
+  // The former theme-pack baseline predates the editor windows, task bubbles
+  // and row-list work. Keep about 1% headroom; mobile's unmeasured budget stays.
+  const maxTotal = desktop ? 2_410_000 : 1_605_000;
+  const maxCss = desktop ? 363_000 : 248_000;
 
   console.log(
     `Frontend bundle (${platform}): total=${total} B, `

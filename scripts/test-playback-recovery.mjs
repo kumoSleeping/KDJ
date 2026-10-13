@@ -40,6 +40,7 @@ function session(resolve) {
     './playerSession': {},
     './streamRecovery': streamRecovery,
     './streamTrack': stream,
+    './windowRole': { isEditorWindow: false },
   };
   const globals = { window: { dispatchEvent() {} }, CustomEvent: class {},
     require(name) { assert.ok(name in dependencies, name); return dependencies[name]; } };

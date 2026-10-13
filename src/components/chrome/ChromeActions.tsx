@@ -18,11 +18,6 @@ export interface ChromeActionsProps {
   /** 下载与导出任务列表：固定在右栏，由这里开关。 */
   tasksOpen: boolean;
   onTasks(): void;
-  /**
-   * Whether 下载与导出 and 设置 are offered here. On a wide window they are entries of the
-   * drawer's head instead; the update button stays, since it opens settings at 通用.
-   */
-  sideApps?: boolean;
 }
 
 /** 顶栏提供设置及工具箱入口；工具箱弹出小菜单，从中进入 VJ 剪辑或 VJ 投放。 */
@@ -33,7 +28,6 @@ export function ChromeActions({
   onOpenUpdate,
   tasksOpen,
   onTasks,
-  sideApps = true,
 }: ChromeActionsProps) {
   const compositionMode = useAppStore(state => state.compositionMode);
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
@@ -45,8 +39,8 @@ export function ChromeActions({
   const liveVjOpen = compositionOpen && compositionMode === "live-vj";
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
-      {sideApps && <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
-        data-kd-search-queue-drop="entry" aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>}
+      <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
+        data-kd-search-queue-drop="entry" aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
       {updateReady ? (
         <button
           type="button"
@@ -62,7 +56,7 @@ export function ChromeActions({
           <span className="kd-chrome-dot" aria-hidden="true" />
         </button>
       ) : null}
-      {sideApps && <button
+      <button
         type="button"
         className="kd-chrome-btn"
         aria-label="设置"
@@ -72,7 +66,7 @@ export function ChromeActions({
         onClick={onSettings}
       >
         <Settings size={16} />
-      </button>}
+      </button>
       <button type="button" className="kd-chrome-btn" title="工具箱" aria-label="工具箱"
         aria-haspopup="menu" aria-expanded={!!tools} data-open={compositionOpen || undefined}
         onClick={event => {

@@ -220,6 +220,14 @@ export interface BrowserCatalog {
   supported: boolean;
   platform: string;
   browsers: BrowserOption[];
+  authorization_browsers?: { id: string; label: string; method?: "remote_debugging" | "system_automation" }[];
+  installed_browsers?: {
+    id: string;
+    label: string;
+    adapter_id: string | null;
+    direct_read_supported: boolean;
+    authorization_supported: boolean;
+  }[];
 }
 
 /** 同一登录会话下的一张可选二维码（QQ 音乐会同时给 QQ 音乐 / QQ 两张）。 */
@@ -1009,7 +1017,6 @@ export interface CliInstallStatus {
  */
 export interface MiniPlayerState {
   active: boolean;
-  onTop: boolean;
   /** 收起前完整窗口的大小，CSS 像素；不是迷你播放器时为 0。 */
   fullWidth?: number;
   fullHeight?: number;
@@ -1031,7 +1038,6 @@ export interface MiniPlayerBridge {
   expand(animated: boolean): Promise<MiniPlayerState>;
   /** 气泡的大小（CSS 像素），窗口立刻跟上；还没显示时是它将要显示的大小。 */
   fit(width: number, height: number): Promise<void>;
-  setOnTop(onTop: boolean): Promise<MiniPlayerState>;
 }
 
 export interface KdjBridge {

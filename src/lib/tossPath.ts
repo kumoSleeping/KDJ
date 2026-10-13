@@ -13,6 +13,8 @@ export const SHEET_SWAP_MS = 260;
 export const TOSS_LIFT_MS = 180;
 /** A dropped item is already in the hand: the parcel only pops up. */
 export const TOSS_POP_MS = 90;
+/** Keep momentum on departure and ease into the queue, without a gravity-driven rush. */
+export const TOSS_FLIGHT_EASING = "cubic-bezier(0.25, 0.45, 0.45, 1)";
 
 /**
  * A batch gathers before it is thrown: the covers of its rows that are on screen come together
@@ -74,7 +76,7 @@ export function tossGatherPick(available: number, wanted = TOSS_GATHER_MAX): num
  */
 export function tossRise(from: TossPoint, to: TossPoint, hop: boolean): number {
   const distance = Math.hypot(to.x - from.x, to.y - from.y);
-  const wanted = hop ? clamp(distance * 0.35, 18, 56) : clamp(distance * 0.16, 28, 90);
+  const wanted = hop ? clamp(distance * 0.16, 12, 30) : clamp(distance * 0.085, 18, 52);
   return Math.max(8, Math.min(wanted, Math.min(from.y, to.y) - 6));
 }
 

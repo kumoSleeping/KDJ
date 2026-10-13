@@ -30,7 +30,7 @@ import "./dragRefusal";
 import { holdDrawer } from "./drawerHold";
 import { useSidePanels } from "./sidePanels";
 import {
-  flushTossHandovers, SHEET_DOWN_MS, SHEET_SWAP_MS, TOSS_GATHER_MS, TOSS_LIFT_MS, TOSS_POP_MS, tossArc, tossFlightMs, tossGatherPick,
+  flushTossHandovers, SHEET_DOWN_MS, SHEET_SWAP_MS, TOSS_GATHER_MS, TOSS_LIFT_MS, TOSS_POP_MS, TOSS_FLIGHT_EASING, tossArc, tossFlightMs, tossGatherPick,
   tossGatherPlan, tossHandover, tossHandoverAt, tossRise,
   type TossHandover, type TossPoint,
 } from "./tossPath";
@@ -680,8 +680,17 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
       { transform: `rotate(${-7 * turn}deg) scale(1)` },
       { transform: `rotate(${16 * turn}deg) scale(0.84)` },
     ], { duration, easing: card ? "cubic-bezier(0.5, 0, 0.8, 0.7)" : "cubic-bezier(0.3, 0, 0.7, 1)", fill: "forwards" });
-    const flight = host.animate(arc.map(step => ({ transform: place({ x: lifted.x + step.x, y: lifted.y + step.y }) })),
-      { duration, easing: "linear", fill: "forwards" });
+    // Parameterize by distance, not ballistic time: the steep descending half must not
+    // move faster than the shallow top. The timing curve then eases the whole flight down.
+    const distances = [0];
+    for (let i = 1; i < arc.length; i++) {
+      distances.push(distances[i - 1] + Math.hypot(arc[i].x - arc[i - 1].x, arc[i].y - arc[i - 1].y));
+    }
+    const length = distances[distances.length - 1];
+    const flight = host.animate(arc.map((step, i) => ({
+      transform: place({ x: lifted.x + step.x, y: lifted.y + step.y }),
+      offset: length > 0 ? distances[i] / length : i / (arc.length - 1),
+    })), { duration, easing: TOSS_FLIGHT_EASING, fill: "forwards" });
 
     // The download goes to the queue when the parcel has nearly arrived.
     handover.within(tossHandoverAt(duration));
@@ -692,7 +701,9 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     let offset = { x: 0, y: 0 };
     let correction: Animation | null = null;
     const reaim = () => {
-      if (ended) return;
+      // A newly inserted row can move the target a long way. Settle the aim before
+      // the final third instead of racing to that row in the last few milliseconds.
+      if (ended || Number(flight.currentTime ?? duration) >= duration * 0.65) return;
       const now = findLanding(open, before, target);
       if (!now) return;
       const next = { x: now.point.x - landing.point.x, y: now.point.y - landing.point.y };
@@ -709,8 +720,8 @@ function fly(origin: Origin, request: TossRequest, count: number, before: Readon
     const onTasks = () => {
       if (!frame) frame = requestAnimationFrame(() => { frame = 0; reaim(); });
     };
-    const unsubscribe = useDownloadStore.subscribe(onTasks);
-    const timers = [0.5, 0.8].map(share => window.setTimeout(reaim, duration * share));
+    const unsubscribe = target.subscribe(onTasks);
+    const timers = [0.3, 0.55].map(share => window.setTimeout(reaim, duration * share));
     stopAiming = () => {
       stopAiming = () => undefined;
       unsubscribe();

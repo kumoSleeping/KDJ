@@ -50,7 +50,7 @@ const STATE_LABEL: Record<TaskState, string> = {
   running: "进行中",
   processing: "处理中",
   done: "完成",
-  failed: "上次下载失败",
+  failed: "下载失败",
   paused: "已暂停",
   canceled: "已取消",
 };
@@ -79,6 +79,9 @@ function stateLabel(task: DownloadTask): string {
   }
   return STATE_LABEL[task.state];
 }
+
+/** 行内操作失败的原因在行里停留多久。 */
+const ACTION_ERROR_MS = 6000;
 
 /** 和视频结果行同一套高度阶梯：点一下切一档。 */
 const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
@@ -296,8 +299,13 @@ function QueueRow({
     (task.state === "done" || task.state === "failed") && Boolean(task.path.trim()) && store.missingIds.has(task.id),
   );
   const shareContentMode = useSharePrefs((state) => state.contentMode);
-  /** 行内操作失败的原因，和任务自己的 error 共用行尾那一行。 */
+  /** 行内操作失败的原因：在第二行顶替任务自己的失败原因，几秒后让回去，行高不变。 */
   const [cancelError, setCancelError] = useState("");
+  useEffect(() => {
+    if (!cancelError) return;
+    const timer = window.setTimeout(() => setCancelError(""), ACTION_ERROR_MS);
+    return () => window.clearTimeout(timer);
+  }, [cancelError]);
   const [retrying, setRetrying] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const active =
@@ -322,19 +330,30 @@ function QueueRow({
       ? { page_index: videoPage.index, page_count: videoPage.count }
       : undefined,
   );
-  const state = missing ? "文件缺失" : stateLabel(task);
+  const failed = task.state === "failed";
+  const imported = failed && Boolean(task.path.trim());
+  // 失败只留一个三角形：「下载失败」四个字不再写出来，原因紧跟在三角形后面。
+  const state = missing ? "文件缺失" : failed && !imported ? "" : stateLabel(task);
   const finished =
     task.state === "done" || task.state === "failed" || task.state === "canceled"
       ? formatDate(task.updated_at)
       : "";
   const previous = task.previous_error?.trim() ?? "";
-  const previousError = task.state === "failed" && previous !== task.error.trim() ? previous : "";
-  // 重试成功或取消后错误行不再显示，前一次失败原因放进状态的 title 里留底。
+  const previousError = failed && previous !== task.error.trim() ? previous : "";
+  const reason = task.error.trim() !== stateLabel(task) ? task.error.trim() : "";
+  // 原因只占一行，放不下的截断；完整的话和前一次的原因在 title 和右键菜单里。
+  const taskProblem = [imported ? stateLabel(task) : "", reason].filter(Boolean).join("：");
+  const taskProblemTitle = [taskProblem, previousError ? `前一次：${previousError}` : ""].filter(Boolean).join("\n");
+  const problem = cancelError || taskProblem;
+  const problemTitle = cancelError || taskProblemTitle;
+  // 重试成功或取消后原因不再显示，前一次失败原因放进状态的 title 里留底。
   const stateTitle = missing
     ? `文件已不在原位置：${task.path}`
-    : previous && (task.state === "done" || task.state === "canceled")
-      ? `前一次失败：${previous}`
-      : undefined;
+    : failed
+      ? [stateLabel(task), previousError ? `前一次：${previousError}` : ""].filter(Boolean).join("\n")
+      : previous && (task.state === "done" || task.state === "canceled")
+        ? `前一次失败：${previous}`
+        : undefined;
   // 失败或取消而且没有落盘的任务不再标目标文件夹：那里根本没有文件可找。
   const recordedTarget = task.path.trim()
     ? task.path.replace(/[\\/][^\\/]*$/, "") || task.path
@@ -353,6 +372,8 @@ function QueueRow({
       status={state}
       stateTitle={stateTitle}
       missing={missing}
+      problem={problem || undefined}
+      problemTitle={problemTitle || undefined}
       percent={showPercent ? formatPercent(task.progress) : undefined}
       progress={showPercent ? task.progress : undefined}
       cover={<QueueTaskCover task={task} />}
@@ -447,13 +468,13 @@ function QueueRow({
             <FolderOpen size={12} />
           </Button>
         ) : null}
-        {!active ? (
+        {(
           <Button
             variant="ghost"
             size="sm"
             iconOnly
-            aria-label="移除队列记录"
-            title="只移除队列记录，不删除下载文件"
+            aria-label="清除下载任务"
+            title="停止并清除任务，保留下载文件"
             onClick={() =>
               void remove(task.id)
                 .then(() => forgetQueueDraft(task.id))
@@ -464,28 +485,9 @@ function QueueRow({
           >
             <Trash2 size={12} />
           </Button>
-        ) : null}
+        )}
       </>}
     >
-      {task.error && task.error.trim() !== stateLabel(task) ? (
-        <div
-          className="kd-download-task-error"
-          title={previousError ? `${task.error}\n前一次：${previousError}` : task.error}
-        >
-          {task.error}
-          {previousError ? (
-            <span className="kd-download-task-error-previous">前一次：{previousError}</span>
-          ) : null}
-        </div>
-      ) : null}
-      {/* 取消失败是"我按了但没反应"，必须留在这一条上：任务还在跑，
-          光看状态根本分不清是没点上还是后端拒绝了 */}
-      {cancelError && (
-        <div className="kd-download-task-notice">
-          <InlineNotice text={cancelError} onDismiss={() => setCancelError("")} />
-        </div>
-      )}
-
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
           <button
@@ -542,6 +544,18 @@ function QueueRow({
               复制文件路径
             </button>
           ) : null}
+          {taskProblem ? (
+            <button
+              type="button"
+              onClick={() => {
+                void copyText(taskProblemTitle);
+                setMenu(null);
+              }}
+            >
+              <Copy size={12} />
+              复制失败原因
+            </button>
+          ) : null}
         </ContextMenu>
       )}
     </QueueEntry>
@@ -563,6 +577,7 @@ function QueuePrefsBar({
   onStart,
   onPause,
   onError,
+  clearAction,
 }: {
   canStart: boolean;
   canPause: boolean;
@@ -574,6 +589,7 @@ function QueuePrefsBar({
   onStart(): void;
   onPause(): void;
   onError(message: string): void;
+  clearAction: import("react").ReactNode;
 }) {
   const settings = useAppStore((store) => store.settings);
   const saveSettings = useAppStore((store) => store.saveSettings);
@@ -608,7 +624,7 @@ function QueuePrefsBar({
     <section className="kd-download-prefs" aria-label="下载队列概览">
       <QueueOverview facts={summaryFacts} total={totalCount} canStart={canStart} canSecondary={canPause}
         startTitle={startActions || undefined} secondaryTitle="暂停下载"
-        secondaryKind="pause" secondaryLabel="暂停" onStart={onStart} onSecondary={onPause} />
+        secondaryKind="pause" secondaryLabel="暂停" onStart={onStart} onSecondary={onPause} extraActions={clearAction} />
 
       <div className="kd-download-defaults" aria-label="默认下载参数">
         <button
@@ -695,7 +711,7 @@ export function QueuePanel({ history = false, position }: { history?: boolean; p
     return () => window.removeEventListener("focus", onFocus);
   }, [checkMissingFiles, history]);
   const pauseAll = useDownloadStore((store) => store.pauseAll);
-  const clearHistory = useDownloadStore((store) => store.clearHistory);
+  const [clearing, setClearing] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
   const pausedCount = list.reduce((sum, task) => sum + (task.state === "paused" ? 1 : 0), 0);
@@ -713,6 +729,15 @@ export function QueuePanel({ history = false, position }: { history?: boolean; p
   const canStart = queuedCount > 0 || pausedCount > 0 || failedCount > 0;
   /** 队列头上两个动作共用一条错误行：一次只按得动一个，堆两条只会把列表往下挤。 */
   const [actionError, setActionError] = useState("");
+
+  const clearAction = <Button variant="ghost" size="sm" disabled={clearing || visibleTasks.length === 0}
+    title="停止并清除当前列表全部任务，保留下载文件" onClick={() => {
+      setClearing(true); setActionError("");
+      void Promise.allSettled(visibleTasks.map(task => useDownloadStore.getState().remove(task.id))).then(results => {
+        const errors = results.filter(result => result.status === "rejected");
+        if (errors.length) setActionError(`清除失败：${errors.map(result => String(result.reason)).join("；")}`);
+      }).finally(() => setClearing(false));
+    }}><Trash2 size={11} />清除</Button>;
 
   const openTask = (task: DownloadTask) => {
     const path = task.path;
@@ -754,8 +779,9 @@ export function QueuePanel({ history = false, position }: { history?: boolean; p
       }}
     >
       {!history && <QueuePrefsBar
-        canStart={canStart}
-        canPause={canPause}
+        clearAction={clearAction}
+        canStart={canStart && !clearing}
+        canPause={canPause && !clearing}
         queuedCount={queuedCount}
         pausedCount={pausedCount}
         failedCount={failedCount}
@@ -787,22 +813,13 @@ export function QueuePanel({ history = false, position }: { history?: boolean; p
           </span>}
         </div>
         <div className="kd-download-overview-actions">
-          <Button variant="ghost" size="sm" disabled={visibleTasks.length === 0}
-            title="只移除历史记录，不删除下载文件"
-            onClick={() => {
-              setActionError("");
-              void clearHistory().catch((error: unknown) =>
-                setActionError(`清记录失败：${(error as Error).message}`),
-              );
-            }}>
-            <Trash2 size={11} />清记录
-          </Button>
+          {clearAction}
         </div>
       </section>}
 
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
-      <QueueTaskList count={visibleTasks.length} getKey={index => visibleTasks[index].id} position={position}>
+      <QueueTaskList emptyMessage={history ? undefined : "在线将歌曲拖入此处准备下载~"} count={visibleTasks.length} getKey={index => visibleTasks[index].id} position={position}>
         {index => <QueueRow task={visibleTasks[index]} order={String(index + 1)} onOpenTask={openTask} />}
       </QueueTaskList>
     </QueueFrame>

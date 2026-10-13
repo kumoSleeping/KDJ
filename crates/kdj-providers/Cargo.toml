@@ -54,6 +54,12 @@ zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2
 sevenz-rust2 = { version = "=0.22.2", default-features = false, features = ["bzip2", "deflate", "ppmd"] }
 
 [target.'cfg(windows)'.dependencies]
+winreg = "0.55"
 # rookie 读取浏览器 SQLite。单独测试 providers 时也要自带 SQLite，
 # 不能依赖应用的 kdj-library 恰好启用 bundled 或 runner 安装 sqlite3.lib。
 rusqlite = { version = "0.35", features = ["bundled"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSURL"] }

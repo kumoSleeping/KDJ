@@ -779,8 +779,7 @@ textarea {
   min-height: 0;
   flex: 1 1 auto;
 }
-/* The top row on a wide window: the aggregate search, and at its right end the drawer's entries
-   (see Drawer.css), which take only the width of their icons. Nothing is drawn between them.
+/* The top row on a wide window belongs entirely to aggregate search.
    In a tall window the search takes two rows and the head is both of them (see SearchBar.css). */
 .kd-table-wrap[data-drawer-head] {
   /* The dragged width, from a narrow panel up to most of the list's column. */
@@ -789,7 +788,6 @@ textarea {
 .kd-table-wrap[data-drawer-head] > .kd-panel-dock-top {
   box-sizing: border-box;
   min-height: var(--kd-drawer-head-h);
-  padding-right: var(--kd-drawer-lip-w);
   background: var(--s98-face, var(--kd-panel));
 }
 /* An editor column stands beside the whole of the list's column: the search row, its head and
@@ -3967,18 +3965,19 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: color-mix(in srgb, var(--kd-hover) 54%, var(--kd-panel));
 }
 /* One grid for every task row: the order number and the cover at the left, the title with the
-   row's actions on the first line, then the detail line with the state at its right end, the
-   facts and, while the task runs, its progress. The lines under the title run the full width,
-   so the state sits at the row's right edge however many actions the row has. */
+   row's actions on the first line, then the detail line with the state at its right end, and
+   the facts. The lines under the title run the full width, so the state sits at the row's
+   right edge however many actions the row has. A row is these three lines in every state: a
+   failure's reason stands in the detail line and the progress lies along the row's foot, so
+   a list does not move when a task starts, fails or is tried again. */
 .kd-download-task-head {
   display: grid;
   grid-template-columns: 1.45rem 3rem minmax(0, 1fr) auto;
-  grid-template-rows: auto auto auto 1fr;
+  grid-template-rows: auto auto auto;
   grid-template-areas:
     "order cover title actions"
     "order cover byline byline"
-    "order cover meta meta"
-    "order cover bar bar";
+    "order cover meta meta";
   column-gap: 0.5rem;
   align-items: start;
   min-width: 0;
@@ -4052,7 +4051,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   grid-area: byline;
   margin-top: 0.2rem;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 0.15rem 0.5rem;
   min-width: 0;
@@ -4086,7 +4084,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: flex;
   align-items: center;
   gap: 0.2rem 0.48rem;
-  flex-wrap: wrap;
   color: var(--kd-faint);
   font-size: 0.68rem;
   font-variant-numeric: tabular-nums;
@@ -4106,9 +4103,11 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-download-task-quality {
   flex: none;
 }
+/* The facts stay on one line. The part's title gives way first, then the folder's name down to
+   a few letters; the rest keep their width. */
 .kd-download-task-page {
   max-width: 11rem;
-  flex: 0 1 auto;
+  flex: 0 20 auto;
   color: var(--kd-text-body);
 }
 .kd-download-task-page > strong {
@@ -4204,6 +4203,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-download-task-target {
   max-width: 7.5rem;
 }
+.kd-download-task-meta > .kd-download-task-target {
+  min-width: 2.75rem;
+}
 .kd-download-task-time {
   flex: none;
 }
@@ -4280,11 +4282,14 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   height: 1.5rem;
   padding: 0;
 }
-/* How far a running task has come, in the tone of its state. */
+/* How far a running task has come, in the tone of its state: along the foot of the row, under
+   its text, in the room the row's own padding leaves. */
 .kd-download-task-progress {
-  grid-area: bar;
+  position: absolute;
+  right: 0.65rem;
+  bottom: 0.24rem;
+  left: calc(0.55rem + var(--kd-download-task-inset));
   height: 2px;
-  margin-top: 0.42rem;
   overflow: hidden;
   border-radius: 1px;
   background: color-mix(in srgb, var(--kd-download-task-tone) 18%, transparent);
@@ -4300,22 +4305,39 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 @media (prefers-reduced-motion: reduce) {
   .kd-download-task-progress > span { transition: none; }
 }
+/* What went wrong, in the detail line: the amber mark and the reason, cut where the line ends
+   (the whole of it is the title). It has the line to itself; the artist is in the title's tip. */
+.kd-download-task-problem {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0.92rem;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--kd-danger);
+  font-size: var(--kd-size-xs);
+  font-weight: 500;
+  line-height: 1.2;
+}
+.kd-download-task-problem > svg {
+  flex: none;
+}
+.kd-download-task-problem > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-download-task-byline[data-problem] > .kd-download-task-artist {
+  display: none;
+}
+/* The export pages still write an error under the row. */
 .kd-download-task-error {
   margin: 0.45rem 0 0 var(--kd-download-task-inset);
   color: var(--kd-danger);
   font-size: var(--kd-size-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-.kd-download-task-error-previous {
-  display: block;
-  color: var(--kd-faint);
-}
-.kd-download-task-notice {
-  margin-left: var(--kd-download-task-inset);
-}
-.kd-download-task-notice {
-  margin-top: 0.45rem;
 }
 
 @container (max-width: 320px) {
@@ -4327,8 +4349,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
     grid-template-areas:
       "cover title actions"
       "cover byline byline"
-      "cover meta meta"
-      "cover bar bar";
+      "cover meta meta";
   }
   .kd-download-task-order {
     display: none;
@@ -5476,7 +5497,8 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   box-shadow: var(--kd-float-shadow);
 }
 .kd-context-menu::backdrop { background: transparent; }
-.kd-context-menu > button:focus-visible {
+.kd-context-menu > button:focus-visible,
+.kd-context-menu[data-menu-input="keyboard"] > button:focus {
   outline: 1px solid var(--kd-muted);
   outline-offset: -2px;
 }
@@ -8323,3 +8345,5 @@ html:root:not([data-theme-pack]) .kd-list-row:is([aria-selected="true"]:not([dat
   background: color-mix(in srgb, var(--kd-text) 12%, var(--kd-panel)) !important;
 }
 html:root[data-theme-pack="sakulaptop98"] .kd-list-row[aria-selected="true"] { background: #edb4ce !important; }
+
+

@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { Maximize2, Minimize2, Pin, PinOff } from "lucide-react";
+import { Maximize2, Minimize2 } from "lucide-react";
 import { hasVisibleLyrics } from "../../lib/lyricsVisibility";
 import { lyricLineAt } from "../../lib/miniPlayerLyric";
 import { getPlayerSession, subscribePlayerSession } from "../../lib/playerSession";
@@ -12,7 +12,6 @@ import {
   expandFromMiniPlayer,
   fitMiniPlayer,
   miniPlayerOffered,
-  setMiniPlayerOnTop,
   syncMiniPlayer,
   useMiniPlayer,
 } from "../../lib/miniPlayer";
@@ -41,26 +40,16 @@ export function ChromeMiniPlayerKey() {
 }
 
 /**
- * The mini player's own keys, in the tool row of the playing song's bubble
- * (docs/task-bubbles.md), shown as the mini player only (MiniPlayer.css): whether it floats
- * over other windows, and the way back.
+ * The mini player's own key, in the tool row of the playing song's bubble
+ * (docs/task-bubbles.md), shown as the mini player only (MiniPlayer.css): the way back.
  */
 export function MiniPlayerKeys() {
   const phase = useMiniPlayer(state => state.phase);
-  const onTop = useMiniPlayer(state => state.onTop);
   if (!miniPlayerOffered()) return null;
-  const floats = onTop ? "置顶：开。点一下不再浮在其他窗口上面" : "置顶：关。点一下浮在其他窗口上面";
-  return <>
-    <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini-top" data-when="mini"
-      aria-label={onTop ? "取消置顶" : "置顶"} title={floats} aria-pressed={onTop} disabled={phase !== "on"}
-      onClick={() => { void setMiniPlayerOnTop(!onTop); }}>
-      {onTop ? <Pin size={14} aria-hidden="true" /> : <PinOff size={14} aria-hidden="true" />}
-    </button>
-    <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini-back" data-when="mini"
-      aria-label="展开窗口" title="展开窗口" disabled={phase !== "on"} onClick={() => { void expandFromMiniPlayer(); }}>
-      <Maximize2 size={14} aria-hidden="true" />
-    </button>
-  </>;
+  return <button type="button" className="kd-task-action kd-mini-key" data-task-action="mini-back" data-when="mini"
+    aria-label="展开窗口" title="展开窗口" disabled={phase !== "on"} onClick={() => { void expandFromMiniPlayer(); }}>
+    <Maximize2 size={14} aria-hidden="true" />
+  </button>;
 }
 
 /**

@@ -6,6 +6,10 @@
 
 use serde::Serialize;
 
+pub mod authorization;
+pub mod discovery;
+pub mod login_trace;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserProfileOption {
     pub id: String,
@@ -25,11 +29,15 @@ pub struct BrowserCatalog {
     pub supported: bool,
     pub platform: String,
     pub browsers: Vec<BrowserOption>,
+    pub authorization_browsers: Vec<authorization::BrowserAuthorizationOption>,
+    pub installed_browsers: Vec<discovery::InstalledBrowser>,
 }
 
 /// 只枚举本机实际存在的浏览器 Profile，不打开 Cookie 数据库，也不会触发钥匙串。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn catalog() -> BrowserCatalog {
+    let installed_browsers = discovery::installed();
+    // Profile discovery is independent: retained data can outlive an uninstalled app.
     let mut browsers = supported_browsers()
         .into_iter()
         .filter_map(|(id, label)| {
@@ -70,6 +78,8 @@ pub fn catalog() -> BrowserCatalog {
         supported: true,
         platform: std::env::consts::OS.into(),
         browsers: browsers.into_iter().map(|(_, browser)| browser).collect(),
+        authorization_browsers: authorization::catalog(&installed_browsers),
+        installed_browsers,
     }
 }
 
@@ -79,6 +89,8 @@ pub fn catalog() -> BrowserCatalog {
         supported: false,
         platform: std::env::consts::OS.into(),
         browsers: Vec::new(),
+        authorization_browsers: Vec::new(),
+        installed_browsers: Vec::new(),
     }
 }
 

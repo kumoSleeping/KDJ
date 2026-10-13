@@ -37,7 +37,7 @@ test("the whole window goes as it is, the page changes out of sight, and the win
   /** The size the page keeps its layout at, whatever the window's is. */
   const kept = () => dom.window.document.body.style.getPropertyValue("--kd-mini-w") || "none";
   const ask = (what: string) => { asked.push(`${what} @${phaseNow() ?? "off"}`); };
-  const state = () => ({ active, onTop: true, fullWidth: active ? 1360 : 0, fullHeight: active ? 880 : 0 });
+  const state = () => ({ active, fullWidth: active ? 1360 : 0, fullHeight: active ? 880 : 0 });
   (dom.window as unknown as { kdj: unknown }).kdj = {
     miniPlayer: {
       state: async () => state(),
@@ -60,7 +60,6 @@ test("the whole window goes as it is, the page changes out of sight, and the win
         return state();
       },
       fit: async (width: number, tall: number) => { ask(`fit ${width}x${tall} kept ${kept()}`); resize(width, tall); },
-      setOnTop: async (onTop: boolean) => { ask(`top ${onTop}`); return { active, onTop }; },
     },
   };
 
@@ -102,10 +101,6 @@ test("the whole window goes as it is, the page changes out of sight, and the win
   slot.remove();
   assert.equal(mini.fitMiniPlayer(), false);
   host.append(slot);
-
-  await mini.setMiniPlayerOnTop(false);
-  assert.equal(asked.pop(), "top false @on");
-  assert.equal(mini.useMiniPlayer.getState().onTop, false);
 
   // Back: the mini player goes first; out of sight the page is the whole window's again, the
   // bar at rest without its slide; then the window is shown. The bubble's key and the
