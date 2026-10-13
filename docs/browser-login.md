@@ -29,12 +29,14 @@
 | Safari | 读它的 Cookie 文件 | 需要「完全磁盘访问权限」；被拒绝时面板给出打开那一页设置的键 |
 | Arc（macOS，仅 SoundCloud 与 YouTube） | Arc 自己的系统自动化接口（`arc_automation.rs`） | macOS 的自动化确认 |
 
-**Windows 的 Chrome / Edge 读不了。** 它们把 Cookie 密钥绑定在浏览器自身（应用绑定加密），普通
-权限的外部程序解不开；KDJ 不提权，也不让用户去开浏览器的远程调试开关。读取会立刻失败，然后：
+**Windows 的 Chrome / Edge 读不了。** 它们运行时锁住 Cookie 库，并把密钥绑定在浏览器自身（应用
+绑定加密）；KDJ 不提权，也不让用户去开浏览器的远程调试开关。读取会立刻失败，然后：
 
-- SoundCloud、YouTube：在**同一个浏览器**里开一个临时窗口（全新的临时配置，用完删除），用户在里面
-  登录一次，KDJ 读回这个站点的登录 Cookie（`isolated_login.rs`；Chromium 走 CDP，Gecko 走
-  WebDriver BiDi）。任何读不到的情况都这样接续，中间的失败不报，只报最后的结果。
+- SoundCloud：在**同一个浏览器**里开一个临时窗口（全新的临时配置，里面没有任何已有登录，用完
+  删除），用户在里面登录一次，KDJ 读回这个站点的登录 Cookie（`isolated_login.rs`；Chromium 走
+  CDP，Gecko 走 WebDriver BiDi）。中间的失败不报，只报最后的结果。
+- YouTube、YouTube Music：报出读取的错误，不开临时窗口。Google 不让这样启动的浏览器登录
+  （2026-10-14 在 Windows 上实测被拒），KDJ 不去伪装它；这两家改用「登录窗口」。
 - 网易云、QQ 音乐、哔哩哔哩：报出读取的错误。它们另有扫码。
 
 规则：
@@ -65,9 +67,12 @@ Chromium：framework 资源 / `chrome.dll`），只获得开临时窗口的能�
 已在真机看到的：Arc 的自动化导入 SoundCloud 真实账号（macOS）；Zen 读取已有配置后 YouTube 会话
 结构校验通过（macOS）。
 
+Windows 上（2026-10-14，候选构建）：临时窗口能打开（此前用带 `\\?\` 前缀的规范路径启动，浏览器
+半秒内退出，已改）；Google 在这个窗口里拒绝登录，所以 YouTube 不再走它。
+
 只有单元测试、没有真实账号走过的：
 
-- 临时窗口登录（两种内核）。Google 可能拒绝带远程调试参数启动的浏览器登录，Firefox 系尤其可能。
+- SoundCloud 在临时窗口里的登录（两种内核）；用 Google 账号登录 SoundCloud 同样会被 Google 拒绝。
 - 网易云、QQ 音乐、哔哩哔哩的复用。QQ 的网页 Cookie 不带 `refresh_key`，票据过期后要重新登录；
   它的验证用的是「读自己的歌单」，这个接口是否一定要求登录态没有实测。
 - Windows 上的一切：注册表发现、Job 清理、Chromium 临时窗口都没在 Windows 上编译或运行过。

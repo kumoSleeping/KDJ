@@ -751,11 +751,9 @@ struct YoutubeWebviewLoginBody {
 async fn browser_catalog(
     AxumPath(platform): AxumPath<String>,
 ) -> ApiResult<Json<kdj_providers::browser::BrowserCatalog>> {
-    // SoundCloud 和 YouTube 读不到已有登录时在浏览器里开临时窗口；其余平台另有扫码。
-    let windows = matches!(
-        parse_platform(&platform)?,
-        Platform::Soundcloud | Platform::Ytm | Platform::Youtube
-    );
+    // SoundCloud 读不到已有登录时在浏览器里开临时窗口。Google 不让这样启动的浏览器登录
+    // （Windows 实测，2026-10-14），所以 YouTube 不开；其余平台另有扫码。
+    let windows = parse_platform(&platform)? == Platform::Soundcloud;
     let catalog = tokio::task::spawn_blocking(move || kdj_providers::browser::catalog(windows))
         .await
         .map_err(|error| ApiError::bad_request(format!("检测浏览器失败：{error}")))?;
@@ -788,6 +786,7 @@ async fn browser_login(
                 Ok(account)
             }
             Platform::Ytm | Platform::Youtube => {
+                anyhow::ensure!(!window, "YouTube 不能在临时窗口登录，请用「登录窗口」");
                 youtube_browser_login(&state, platform, browser, profile, window).await
             }
             _ => {

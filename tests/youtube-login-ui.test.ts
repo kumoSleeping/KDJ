@@ -121,17 +121,20 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         assert.equal(document.querySelector("dialog, [role=dialog]"), null, "a login is never a window over the settings");
         assert.deepEqual([...panel().querySelectorAll("select")[0].querySelectorAll("option")].map(option => option.textContent), ["Edge", "Safari", "Fork"]);
 
-        // What cannot be read is followed by a window of the same browser, and only the end is reported.
+        // On SoundCloud what cannot be read is followed by a window of the same browser, and only
+        // the end is reported. Google does not sign in to such a window, so YouTube asks once.
+        const windows = platform === "soundcloud";
         let before = loginPosts().length;
         const profile = panel().querySelectorAll("select")[1];
         await choose(profile, "work");
         assert.equal(loginPosts().length, before, "choosing a browser or a profile reads nothing");
         await click("登录", panel());
         const attempts = loginPosts().slice(before);
-        assert.deepEqual(attempts.map(post => post.path), Array(2).fill(`/api/accounts/${platform}/login/browser`));
-        assert.deepEqual(attempts.map(post => [post.body.browser, post.body.profile, post.body.window]), [["edge", "work", false], ["edge", undefined, true]]);
+        assert.deepEqual(attempts.map(post => post.path), Array(windows ? 2 : 1).fill(`/api/accounts/${platform}/login/browser`));
+        assert.deepEqual(attempts.map(post => [post.body.browser, post.body.profile, post.body.window]),
+          windows ? [["edge", "work", false], ["edge", undefined, true]] : [["edge", "work", false]]);
         assert.match(String(attempts[0].body.request_id), /^[0-9a-f-]{36}$/);
-        assert.notEqual(attempts[0].body.request_id, attempts[1].body.request_id);
+        if (windows) assert.notEqual(attempts[0].body.request_id, attempts[1].body.request_id);
         assert.equal(notice(), `登录失败：无法连接本地服务：${detail}`);
 
         // A browser that can only be read is asked once; one that can only open a window opens it.
@@ -143,7 +146,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         before = loginPosts().length;
         await choose(panel().querySelectorAll("select")[0], "fork");
         await click("登录", panel());
-        assert.deepEqual(loginPosts().slice(before).map(post => [post.body.browser, post.body.window]), [["fork", true]]);
+        assert.deepEqual(loginPosts().slice(before).map(post => [post.body.browser, post.body.window]), windows ? [["fork", true]] : []);
 
         await click("请求头");
         assert.equal(panel().getAttribute("aria-label"), `${browserAccount(platform).label} · 请求头`);

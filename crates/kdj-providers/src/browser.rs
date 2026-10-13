@@ -193,7 +193,17 @@ pub(crate) fn profile_cookies(
         .or_else(|| profiles.first().map(|profile| profile.id.clone()))
         .context("没有检测到这个浏览器的配置")?;
     let (profile, cookies) = rookie::browser_profile_cookies(&adapter, &selected_id, Some(domains))
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        .map_err(|err| {
+            let cause = err.to_string();
+            // 读取层自己写给用户看的话（Safari 的权限提示）原样给；其余是库的内部报错，
+            // 留在日志里，界面上说人话。
+            if cause.is_ascii() {
+                tracing::warn!(target: "kdj::login", browser = adapter, cause, "browser profile not readable");
+                anyhow::anyhow!("没能读到 {label} 里的登录：它运行时会锁住登录数据，或由它自己加密")
+            } else {
+                anyhow::anyhow!(cause)
+            }
+        })?;
     Ok(BrowserProfileCookies {
         imported_from: format!("{label} · {}", profile.name),
         cookies,

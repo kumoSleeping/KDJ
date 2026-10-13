@@ -201,8 +201,9 @@ function LoginPanel({ account, method, sourceEnabled, onBusy, onDone }: {
   const reuse = method === "browser";
   const selected = catalog?.browsers.find(item => item.id === browser);
   const profiles = selected?.profiles ?? [];
-  // Where a platform has a code to scan, that is its other way in; a login window is for the rest.
-  const windowFallback = account.login_method !== "qr";
+  // Only SoundCloud goes on in a window of the chosen browser when its login cannot be read:
+  // Google refuses to sign in to a browser started that way, and the others have a code to scan.
+  const windowFallback = platform === "soundcloud";
 
   // The parent keeps the other choices still while a login is under way.
   const setBusy = (value: boolean) => { setBusyState(value); onBusy(value); };
@@ -271,7 +272,7 @@ function LoginPanel({ account, method, sourceEnabled, onBusy, onDone }: {
   const login = async (afterPermissionSettings = false) => {
     permissionReturn.current = false;
     // SoundCloud and YouTube refuse a login while their source is switched off.
-    if (windowFallback && !sourceEnabled) { setNotice(`请先开启 ${account.label} 下载源`); return; }
+    if (account.login_method !== "qr" && !sourceEnabled) { setNotice(`请先开启 ${account.label} 下载源`); return; }
     cancelled.current = false;
     setBusy(true);
     setInWindow(false);
