@@ -75,29 +75,30 @@ test("all browser accounts use four explicit login choices and dispatch only the
         for (const [index, method] of methods.entries()) {
           const postsBefore = calls.filter(c => c.startsWith("POST:") || c.startsWith("window:")).length;
           await click(method);
-          const dialog = document.querySelector<HTMLDialogElement>("dialog[open]")!;
-          assert.ok(dialog, "selecting a method opens its operation window");
+          const panel = document.querySelector<HTMLElement>(".kd-account-login-panel")!;
+          assert.ok(panel, "selecting a method opens its flow in place, under the choices");
+          assert.equal(document.querySelector("dialog"), null, "a login flow is never a window over the settings");
           assert.equal(calls.filter(c => c.startsWith("POST:") || c.startsWith("window:")).length, postsBefore,
             "method selection may discover browsers but never read credentials or open a login window");
           if (index === 2) await fillHeaders();
-          await click("登录", dialog);
-          assert.equal(dialog.querySelector(".kd-notice-text")?.textContent, `登录失败：${index === 3 ? "" : "无法连接本地服务："}${detail}`);
+          await click("登录", panel);
+          assert.equal(panel.querySelector(".kd-notice-text")?.textContent, `登录失败：${index === 3 ? "" : "无法连接本地服务："}${detail}`);
           const action = index === 0 ? "browser" : index === 1 ? "browser/authorize" : "headers";
           assert.ok(calls.includes(index === 3 ? `window:${platform}` : `POST:/api/accounts/${platform}/login/${action}`));
           if (index === 3) assert.ok(calls.includes(`${platform}-web-login://result`));
-          await click("关闭", dialog);
-          assert.equal(document.querySelector("dialog"), null);
+          await click(method);
+          assert.equal(document.querySelector(".kd-account-login-panel"), null, "choosing the open way again puts it away");
         }
         await click("导入请求头");
         assert.equal(document.querySelector("textarea")?.value, "", "closing removes pasted credentials");
-        await click("关闭", document.querySelector("dialog")!);
+        await click("导入请求头");
       }
     }
     emptyCatalog = true;
     await click("浏览器授权");
-    const dialog = document.querySelector("dialog")!;
-    assert.equal([...dialog.querySelectorAll("button")].find(b => b.textContent === "登录")?.disabled, true);
-    assert.equal(dialog.querySelector("select"), null, "empty browser choices remain empty");
+    const panel = document.querySelector<HTMLElement>(".kd-account-login-panel")!;
+    assert.equal([...panel.querySelectorAll("button")].find(b => b.textContent === "登录")?.disabled, true);
+    assert.equal(panel.querySelector("select"), null, "empty browser choices remain empty");
   } finally {
     await act(async () => root.unmount());
     globalThis.fetch = originalFetch;

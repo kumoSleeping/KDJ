@@ -9,7 +9,7 @@
 }
 .kd-account-login-methods button {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) 13px;
+  grid-template-columns: 14px minmax(0, 1fr);
   align-items: center;
   gap: 0.65rem;
   width: 100%;
@@ -22,33 +22,29 @@
   text-align: left;
   cursor: pointer;
 }
-.kd-account-login-methods button:hover { color: var(--kd-text); }
+.kd-account-login-methods button:hover:not(:disabled) { color: var(--kd-text); }
+/* The way that is open is written in full strength and heavier; its neighbours stay quiet. */
+.kd-account-login-methods button[data-active] { color: var(--kd-text); font-weight: 600; }
+.kd-account-login-methods button:disabled { cursor: default; opacity: 0.55; }
 .kd-account-login-methods button:focus-visible { outline: 2px solid var(--kd-text); outline-offset: 2px; }
-.kd-account-login-dialog {
-  width: min(27rem, calc(100vw - 2rem));
-  max-height: calc(100dvh - 2rem);
+/* The way that is open unfolds under the choices, in the account's own row: the same column,
+   no window and no mask. */
+.kd-account-login-panel {
+  grid-column: 1 / -1;
+  min-width: 0;
   box-sizing: border-box;
-  padding: 1rem;
-  border: 1px solid var(--kd-float-edge);
-  border-radius: 7px;
-  background: var(--kd-panel-raised);
-  color: var(--kd-text);
-  box-shadow: var(--kd-float-shadow);
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.35rem 0 0.5rem 2.4rem;
   font-size: var(--kd-size-sm);
-  overflow: auto;
 }
-.kd-account-login-dialog::backdrop { background: rgb(0 0 0 / 24%); }
-.kd-account-login-dialog header, .kd-account-login-dialog footer {
+.kd-account-login-panel .kd-textarea { display: block; width: 100%; box-sizing: border-box; font-size: var(--kd-size-xs); resize: vertical; }
+.kd-account-login-controls { display: flex; align-items: center; gap: 0.5rem; }
+.kd-account-login-controls .kd-select-control { flex: 1; min-width: 0; }
+.kd-account-login-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
 }
-.kd-account-login-dialog header { margin-bottom: 1rem; }
-.kd-account-login-dialog header strong { min-width: 0; font-size: inherit; font-weight: 600; }
-.kd-account-login-dialog footer { margin-top: 0.85rem; }
-.kd-account-login-dialog .kd-textarea { display: block; width: 100%; box-sizing: border-box; font-size: var(--kd-size-xs); resize: vertical; }
-.kd-account-login-controls { display: flex; align-items: center; gap: 0.5rem; }
-.kd-account-login-controls .kd-select-control { flex: 1; min-width: 0; }
-.kd-account-login-dialog .kd-account-notice { margin-top: 0.75rem; }
-.kd-account-login-status { color: var(--kd-muted); font-size: var(--kd-size-xs); }
+.kd-account-login-status { min-width: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); }
