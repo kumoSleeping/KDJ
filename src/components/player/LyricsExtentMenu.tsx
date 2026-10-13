@@ -8,7 +8,6 @@ import {
   useLyricsExtentShape,
 } from "../../lib/lyricsExtent";
 import { ContextMenu } from "../common/ContextMenu";
-import { resetDrawerHeight } from "../drawer/Drawer";
 
 /** A finger held still this long asks for the menu, as a right click does (HarmonicList). */
 const LONG_PRESS_MS = 480;
@@ -118,8 +117,6 @@ export function useLyricsExtentMenu(identity?: string | number | null) {
           // The item that is checked already keeps what is stored: in a wide window that may be
           // full screen, shown as 更长, and it is still there when the window is tall again.
           if (choice !== shown) useLyricsExtent.getState().setExtent(choice);
-          // A height dragged earlier would keep the choice from showing.
-          resetDrawerHeight();
         }}>
         <span className="kd-menu-check" aria-hidden="true">{shown === choice && <Check size={13} />}</span>
         <span className="kd-menu-label">{LYRICS_EXTENT_LABEL[choice]}</span>

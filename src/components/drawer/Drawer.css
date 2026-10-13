@@ -164,10 +164,6 @@
   from { transform: translateX(0); }
   to { transform: translateX(calc(100% + var(--kd-drawer-gap) + 3rem)); }
 }
-/* A height the user dragged replaces the app's own extent, within the room there is. */
-.kd-drawer-sheets[data-sized] .kd-drawer {
-  height: min(var(--kd-drawer-user-h), calc(var(--kd-drawer-room) - var(--kd-info-lift, 0px)));
-}
 /* —— Taking the window (DrawerSpec.takesWindow, src/lib/windowTaken.ts) ——
    The panel is the window's one block: from under the title bar down to the strip the playing
    song's bubble holds, with the bubble's own gap to the window's edge on either side and the
@@ -260,13 +256,6 @@
   cursor: col-resize;
   pointer-events: auto;
   touch-action: none;
-}
-.kd-drawer-resize[data-edge="bottom"] {
-  top: auto;
-  right: 0;
-  width: auto;
-  height: 6px;
-  cursor: row-resize;
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-drawer, .kd-drawer[data-leaving],

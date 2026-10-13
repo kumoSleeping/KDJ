@@ -56,7 +56,8 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   - `full` — always all the way down (a network-video preview: a docked picture with such a
     lyrics view beneath it).
 
-  A height the user dragged (the bottom edge) replaces any of these until it is reset.
+  The height is never the listener's to set: there is no bottom edge to drag, and the extent
+  above always decides it. Only the width is dragged.
   In a tall window a bubble that is kept across the bottom already ends the page a gap above
   itself, so a panel that comes all the way down there keeps no second gap of its own.
 - **The lyrics choose their own.** A right click or a long press on the lyrics panel, or a
@@ -65,8 +66,7 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   bubble while the bar is away) and, in a tall desktop window only, 全屏 (`takesWindow`, below).
   Pointer-opened height menus show the check mark without a keyboard focus ring; using the
   keyboard restores the focus indication. The choice is remembered (`src/lib/lyricsExtent.ts`); a stored 全屏 is shown and marked as
-  更长 wherever it is not offered, without being rewritten. Choosing from the menu also gives
-  a dragged height back (`resetDrawerHeight`), since that would keep the choice from showing.
+  更长 wherever it is not offered, without being rewritten.
 - **What is measured.** A body's scrolling element carries the class `kd-scroll` (or
   `data-drawer-scroll`); `fit` and `at-least-half` measure what it lacks or has to spare. A
   scrolling element inside another is added to the one around it; of several side by side the
@@ -139,8 +139,9 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
 - **Depth.** The panel and the floating media window share one order: whichever was opened or
   touched last is in front (`src/lib/surfaceOrder.ts`).
 - **It takes no room.** The panel floats over the list and its toolbar; nothing beneath it is
-  moved or resized for it. It is resized by its left edge (width, up to most of the list's
-  column) and its bottom edge (height; a double click returns to the app's extent).
+  moved or resized for it. It is resized by its left edge only (width, up to most of the
+  list's column); its height is its app's extent (2026-10-13: a dragged height pinned every
+  app to one value and kept a `fit` panel from following its content, so it was taken out).
 - **Refusing to close.** `close()` may return `false` (an unsaved draft). The drawer then stays,
   and an app that was opened over it gives way.
 - **Held while something flies into it.** Motion aimed at an app (the download parcel,
