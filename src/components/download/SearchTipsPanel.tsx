@@ -4,7 +4,7 @@ import { tipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
 
 interface Lesson {
   scene: PointerDemoScene;
-  tray?: "download" | "export";
+  tray?: "download" | "export" | "visualize";
   caption: string;
 }
 
@@ -19,12 +19,21 @@ const LESSONS: Record<TipsPage, Lesson[]> = {
   ],
   download: [
     { scene: "drag-in", tray: "download", caption: "把搜索结果拖进下载，就排进队列~" },
-    { scene: "drag-in", tray: "export", caption: "把本地歌曲拖进导出，一样轻松" },
+    { scene: "menu-toss", tray: "download", caption: "右键一首歌，加入下载队列，它会飞进去" },
   ],
-  viz: [{ scene: "viz-tune", caption: "拖动滑块，可视化的画面跟着变" }],
+  viz: [
+    { scene: "drag-in", tray: "visualize", caption: "把本地歌曲拖进可视化，就排进导出" },
+    { scene: "menu-toss", tray: "visualize", caption: "右键一首歌，导出可视化，同样飞进队列" },
+    { scene: "viz-tune", caption: "拖动滑块，可视化的画面跟着变" },
+  ],
   player: [
     { scene: "player-keys", caption: "自动切歌、歌词、小窗，点一下就亮" },
     { scene: "pip", caption: "小窗可以拖到喜欢的位置" },
+  ],
+  library: [
+    { scene: "add-folder", caption: "点 + 添加文件夹，歌曲自动入库" },
+    { scene: "multi-copy", caption: `多选后 ${mod}C，到目标文件夹 ${mod}V，就复制进去` },
+    { scene: "analyze", caption: "调性和 BPM 会自动分析，不用手动标" },
   ],
 };
 

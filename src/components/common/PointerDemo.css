@@ -138,3 +138,27 @@
 @media (prefers-reduced-motion: reduce) {
   .kd-chrome-btn[data-fresh] > svg:first-child { animation: none; }
 }
+
+/* The right-click menu of menu-toss, the folders, and the key and tempo pills. */
+.kd-demo-menu { opacity: 0; transition: opacity 140ms ease; }
+.kd-demo-menu[data-on] { opacity: 1; }
+.kd-demo-menu-body { fill: color-mix(in srgb, var(--kd-text) 10%, var(--kd-panel)); }
+.kd-demo-menu-item { fill: transparent; transition: fill 120ms ease; }
+.kd-demo-menu-item[data-on] { fill: color-mix(in srgb, var(--kd-text) 18%, transparent); }
+.kd-demo-folder-body { fill: color-mix(in srgb, var(--kd-text) 9%, transparent); transition: fill 160ms ease; }
+.kd-demo-folder-tab { fill: color-mix(in srgb, var(--kd-text) 14%, transparent); }
+.kd-demo-folder[data-on] .kd-demo-folder-body { fill: color-mix(in srgb, var(--kd-text) 20%, transparent); }
+.kd-demo-add { fill: color-mix(in srgb, var(--kd-text) 10%, transparent); transition: fill 120ms ease; }
+.kd-demo-add[data-on] { fill: color-mix(in srgb, var(--kd-text) 24%, transparent); }
+.kd-demo-pill {
+  fill: none;
+  stroke: color-mix(in srgb, var(--kd-text) 30%, transparent);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 3;
+}
+.kd-demo-pill[data-work] { animation: kd-demo-work 700ms ease-in-out infinite alternate; }
+@keyframes kd-demo-work {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+.kd-demo-pill-text { fill: var(--kd-text); font-size: 9.5px; font-weight: 700; transition: opacity 240ms ease; }
