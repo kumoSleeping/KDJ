@@ -141,6 +141,29 @@ impl NeteaseClient {
         self.persist_state(&current)
     }
 
+    /// 换成从浏览器复用来的登录 Cookie。返回换下来的整份状态，验证不过时用
+    /// [`Self::restore_login`] 放回去。
+    pub fn replace_login(&self, cookies: BTreeMap<String, String>) -> Result<SessionState> {
+        let mut current = self.state.write().unwrap();
+        let previous = current.clone();
+        let next = SessionState {
+            logged_out: false,
+            csrf_token: cookies.get("__csrf").cloned().unwrap_or_default(),
+            cookies,
+            profile: None,
+        };
+        self.persist_state(&next)?;
+        *current = next;
+        Ok(previous)
+    }
+
+    pub fn restore_login(&self, previous: SessionState) -> Result<()> {
+        let mut current = self.state.write().unwrap();
+        self.persist_state(&previous)?;
+        *current = previous;
+        Ok(())
+    }
+
     pub fn clear_session(&self) -> Result<()> {
         let mut current = self.state.write().unwrap();
         // Keep an explicit logged-out snapshot so retained legacy imports can never resurrect.

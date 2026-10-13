@@ -747,6 +747,48 @@ impl MusicProvider for NeteaseProvider {
         Ok(())
     }
 
+    async fn import_browser_login(&self, browser: &str, profile: Option<&str>) -> Result<()> {
+        let trace = crate::browser::login_trace::LoginTrace::new("wyy", "reuse");
+        trace
+            .run(async {
+                trace.step("read_profile");
+                let (cookies, source) = crate::browser::reuse_named_cookies(
+                    browser,
+                    profile,
+                    &["163.com"],
+                    &["MUSIC_U", "__csrf", "NMTID"],
+                )
+                .await?;
+                anyhow::ensure!(
+                    cookies.contains_key("MUSIC_U"),
+                    "没有从{source}读取到已登录的网易云音乐；请先在这个浏览器登录"
+                );
+                trace.step("validate_account");
+                let previous = self.client.replace_login(cookies)?;
+                let status = self
+                    .client
+                    .weapi("/weapi/w/nuser/account/get", Map::new())
+                    .await;
+                let signed_in = status.as_ref().is_ok_and(|status| {
+                    let data = status.get("data").unwrap_or(status);
+                    data.get("profile").is_some_and(|profile| !profile.is_null())
+                        && data.pointer("/account/id").is_some()
+                });
+                if !signed_in {
+                    self.client.restore_login(previous)?;
+                    return match status {
+                        Err(error) => Err(error.context("验证网易云登录失败")),
+                        Ok(_) => bail!("{source}里的网易云登录已失效；请在浏览器重新登录后再试"),
+                    };
+                }
+                trace.step("save_session");
+                self.client.set_profile(status.ok())?;
+                self.qr_sessions.lock().unwrap().clear();
+                Ok(())
+            })
+            .await
+    }
+
     async fn search(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>> {
         let keyword = keyword.trim();
         if keyword.is_empty() {

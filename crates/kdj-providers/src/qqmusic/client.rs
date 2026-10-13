@@ -88,6 +88,68 @@ impl Credential {
     }
 }
 
+/// y.qq.com 网页登录留下的 Cookie 名单，[`credential_from_web_cookies`] 只读这些。
+pub const WEB_LOGIN_COOKIES: &[&str] = &[
+    "uin",
+    "wxuin",
+    "qqmusic_key",
+    "qm_keyst",
+    "tmeLoginType",
+    "euin",
+    "psrf_qqopenid",
+    "psrf_qqunionid",
+    "psrf_qqaccess_token",
+    "psrf_qqrefresh_token",
+    "psrf_access_token_expiresAt",
+    "psrf_musickey_createtime",
+    "wxopenid",
+    "wxunionid",
+    "wxrefresh_token",
+];
+
+/// y.qq.com 网页登录的 Cookie → 凭证。网页端的 `login_type` 是 1=QQ、2=微信，和接口用的
+/// tmeLoginType（1=微信、2=QQ）正好相反，所以只认 `tmeLoginType`，没有就看票据前缀。
+/// 网页登录不带 `refresh_key`：这份凭证能用到票据过期，之后要重新登录。
+pub fn credential_from_web_cookies(
+    cookies: &std::collections::BTreeMap<String, String>,
+) -> Option<Credential> {
+    let get = |name: &str| {
+        cookies
+            .get(name)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    };
+    let text = |name: &str| get(name).unwrap_or_default().to_string();
+    let number = |name: &str| get(name).and_then(|value| value.parse::<i64>().ok());
+    let musickey = get("qqmusic_key").or_else(|| get("qm_keyst"))?.to_string();
+    let wechat = musickey.starts_with("W_X");
+    // 微信登录的账号号在 wxuin；同一个浏览器里别的 QQ 站点留下的 uin 是 QQ 号，不是它。
+    let uin = if wechat {
+        get("wxuin").or_else(|| get("uin"))
+    } else {
+        get("uin")
+    }?;
+    // 通用的 QQ 登录 Cookie 写成 o0123456，音乐自己写的是纯数字。
+    let musicid: i64 = uin.trim_start_matches('o').parse().ok().filter(|id| *id > 0)?;
+    Some(Credential {
+        openid: text(if wechat { "wxopenid" } else { "psrf_qqopenid" }),
+        refresh_token: text(if wechat { "wxrefresh_token" } else { "psrf_qqrefresh_token" }),
+        access_token: if wechat { String::new() } else { text("psrf_qqaccess_token") },
+        expired_at: number("psrf_access_token_expiresAt").unwrap_or(0),
+        musicid,
+        musickey,
+        unionid: text(if wechat { "wxunionid" } else { "psrf_qqunionid" }),
+        str_musicid: musicid.to_string(),
+        refresh_key: String::new(),
+        musickey_create_time: number("psrf_musickey_createtime").unwrap_or(0),
+        key_expires_in: 0,
+        encrypt_uin: text("euin"),
+        login_type: number("tmeLoginType")
+            .filter(|kind| matches!(kind, 1 | 2))
+            .unwrap_or(if wechat { 1 } else { 2 }),
+    })
+}
+
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -921,5 +983,41 @@ mod tests {
         assert_eq!(credential.musickey_create_time, 100);
         assert_eq!(credential.login_type, 1);
         assert_eq!(credential.str_musicid(), "123");
+    }
+
+    #[test]
+    fn web_cookies_map_to_a_credential_for_both_login_kinds() {
+        let cookies = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let qq = credential_from_web_cookies(&cookies(&[
+            ("uin", "o0123456"),
+            ("qm_keyst", "Q_H_L_test"),
+            ("psrf_qqopenid", "open"),
+            ("psrf_qqrefresh_token", "refresh"),
+            ("euin", "enc"),
+        ]))
+        .unwrap();
+        assert_eq!((qq.musicid, qq.login_type), (123456, 2));
+        assert_eq!((qq.musickey.as_str(), qq.openid.as_str()), ("Q_H_L_test", "open"));
+        assert_eq!((qq.refresh_token.as_str(), qq.encrypt_uin.as_str()), ("refresh", "enc"));
+        assert!(qq.is_present() && !qq.is_expired());
+
+        let wechat = credential_from_web_cookies(&cookies(&[
+            ("uin", "o0123456"),
+            ("wxuin", "1152921504000000001"),
+            ("qqmusic_key", "W_X_test"),
+            ("wxopenid", "wx-open"),
+            ("tmeLoginType", "1"),
+        ]))
+        .unwrap();
+        assert_eq!((wechat.musicid, wechat.login_type), (1152921504000000001, 1));
+        assert_eq!(wechat.openid, "wx-open");
+
+        assert!(credential_from_web_cookies(&cookies(&[("uin", "123")])).is_none());
+        assert!(credential_from_web_cookies(&cookies(&[("qm_keyst", "Q_H_L_test")])).is_none());
     }
 }

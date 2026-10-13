@@ -1377,6 +1377,43 @@ impl MusicProvider for BilibiliProvider {
         Ok(())
     }
 
+    async fn import_browser_login(&self, browser: &str, profile: Option<&str>) -> Result<()> {
+        let trace = crate::browser::login_trace::LoginTrace::new("bilibili", "reuse");
+        trace
+            .run(async {
+                trace.step("read_profile");
+                let (cookies, source) = crate::browser::reuse_named_cookies(
+                    browser,
+                    profile,
+                    &["bilibili.com"],
+                    &["SESSDATA", "bili_jct", "DedeUserID", "buvid3", "buvid4", "b_nut"],
+                )
+                .await?;
+                anyhow::ensure!(
+                    cookies.contains_key("SESSDATA"),
+                    "没有从{source}读取到已登录的哔哩哔哩；请先在这个浏览器登录"
+                );
+                trace.step("validate_account");
+                let previous = self.client.replace_login(&cookies)?;
+                let checked = self.client.nav().await;
+                if !checked
+                    .as_ref()
+                    .is_ok_and(|data| data.get("isLogin").and_then(Value::as_bool) == Some(true))
+                {
+                    self.client.restore_login(previous)?;
+                    return match checked {
+                        Err(error) => Err(error.context("验证哔哩哔哩登录失败")),
+                        Ok(_) => bail!("{source}里的哔哩哔哩登录已失效；请在浏览器重新登录后再试"),
+                    };
+                }
+                self.qr_sessions.lock().unwrap().clear();
+                self.favorite_folders.lock().await.clear();
+                self.preview_urls.lock().unwrap().clear();
+                Ok(())
+            })
+            .await
+    }
+
     /// B 站关键词搜视频，回和音乐平台同构的 `SongSource`。
     ///
     /// 视频没有"音质档"概念，`max_quality` 留空，混合去重时它自然排在

@@ -1079,6 +1079,51 @@ impl MusicProvider for QqMusicProvider {
         Ok(())
     }
 
+    async fn import_browser_login(&self, browser: &str, profile: Option<&str>) -> Result<()> {
+        let trace = crate::browser::login_trace::LoginTrace::new("qqm", "reuse");
+        trace
+            .run(async {
+                trace.step("read_profile");
+                let (cookies, source) = crate::browser::reuse_named_cookies(
+                    browser,
+                    profile,
+                    &["qq.com"],
+                    super::client::WEB_LOGIN_COOKIES,
+                )
+                .await?;
+                let credential = super::client::credential_from_web_cookies(&cookies)
+                    .with_context(|| {
+                        format!("没有从{source}读取到已登录的 QQ 音乐；请先在这个浏览器登录 y.qq.com")
+                    })?;
+                trace.step("validate_account");
+                let previous = self.client.credential();
+                let uin = credential.str_musicid();
+                self.client.store_credential(credential)?;
+                // 读自己的歌单要登录态；票据无效时接口回 1000，这里就不留下这份凭证。
+                let checked = self
+                    .client
+                    .call(
+                        "music.musicasset.PlaylistBaseRead",
+                        "GetPlaylistByUin",
+                        json!({ "uin": uin }),
+                        QqPlatform::Desktop,
+                    )
+                    .await;
+                if let Err(error) = checked {
+                    if previous.is_present() {
+                        self.client.store_credential(previous)?;
+                    } else {
+                        self.client.clear_credential()?;
+                    }
+                    return Err(error.context(format!("{source}里的 QQ 音乐登录没有通过验证")));
+                }
+                *self.profile.lock().unwrap() = None;
+                self.qr_sessions.lock().unwrap().clear();
+                Ok(())
+            })
+            .await
+    }
+
     async fn search(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>> {
         let keyword = keyword.trim();
         if keyword.is_empty() {

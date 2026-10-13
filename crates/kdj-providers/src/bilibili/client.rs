@@ -135,6 +135,38 @@ impl BiliClient {
         Ok(())
     }
 
+    /// 换成另一份登录（从浏览器复用来的）：设备 Cookie 留着，旧账号的刷新令牌不跟过去。
+    /// 返回换下来的那份，验证不过时用 [`Self::restore_login`] 放回去。
+    pub fn replace_login(
+        &self,
+        incoming: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut current = self.cookies.write().unwrap();
+        let previous = current.clone();
+        let mut cookies = previous.clone();
+        for name in ["sessdata", "bili_jct", "dedeuserid", "ac_time_value"] {
+            cookies.remove(name);
+        }
+        for (name, value) in incoming {
+            let name = name.to_ascii_lowercase();
+            if COOKIE_KEYS.contains(&name.as_str()) && !value.is_empty() {
+                cookies.insert(name, value.clone());
+            }
+        }
+        self.save_session(&cookies)?;
+        *current = cookies;
+        self.wbi.invalidate();
+        Ok(previous)
+    }
+
+    pub fn restore_login(&self, previous: BTreeMap<String, String>) -> Result<()> {
+        let mut current = self.cookies.write().unwrap();
+        self.save_session(&previous)?;
+        *current = previous;
+        self.wbi.invalidate();
+        Ok(())
+    }
+
     fn save_session(&self, cookies: &BTreeMap<String, String>) -> Result<()> {
         let body = serde_json::to_vec_pretty(cookies).context("序列化 B 站登录态失败")?;
         crate::session_fs::write_private_atomic(&self.session_path, &body)
