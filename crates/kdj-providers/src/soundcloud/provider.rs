@@ -183,34 +183,28 @@ impl SoundCloudProvider {
         self.ctx.session_file("soundcloud.json")
     }
 
-    /// 从桌面浏览器的指定 Profile 导入 SoundCloud 网页端 `oauth_token`。读取发生在
-    /// blocking 线程；验证通过后才落盘，不会用无效 Cookie 覆盖现有登录态。
+    /// 复用桌面浏览器里已有的 SoundCloud 登录，或在该浏览器的临时窗口里登录一次
+    /// （`window`）。验证通过后才落盘，不会用无效会话覆盖现有登录态。
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub async fn import_browser(&self, browser: String, profile_id: Option<String>) -> Result<()> {
-        let trace = LoginTrace::new("soundcloud", "direct");
-        trace.browser(&browser);
+    pub async fn import_browser(&self, browser: String, profile_id: Option<String>, window: bool) -> Result<()> {
+        let trace = LoginTrace::new("soundcloud", if window { "window" } else { "reuse" });
         trace.run(async {
             self.ensure_enabled()?;
-            trace.step("read_profile");
-            let session = tokio::task::spawn_blocking(move || {
-                read_browser_session(&browser, profile_id.as_deref())
-            }).await.context("读取 SoundCloud 浏览器会话任务失败")??;
-            self.import_browser_session(session, &trace).await
-        }).await
-    }
-
-    /// Browser-approved connection, or explicitly confirmed Gecko profile read.
-    pub async fn import_authorized_browser(&self, browser: String, profile: Option<String>, confirmed: bool, new_window: bool) -> Result<()> {
-        let trace = LoginTrace::new("soundcloud", "authorize");
-        trace.run(async {
-            self.ensure_enabled()?;
-            let session = crate::browser::authorization::read_soundcloud(&browser, &trace, profile.as_deref(), confirmed, new_window, |imported| {
-                let trace = &trace;
-                async move {
-                    let session = browser_session_from_token(imported.token, imported.expires_at, imported.imported_from)?;
-                    self.validate_browser_import(session, trace).await
-                }
-            }).await?;
+            let session = if window || crate::browser::authorization::reads_existing(&browser) {
+                crate::browser::authorization::read_soundcloud(&browser, window, &trace, |imported| {
+                    let trace = &trace;
+                    async move {
+                        let session = browser_session_from_token(imported.token, imported.expires_at, imported.imported_from)?;
+                        self.validate_browser_import(session, trace).await
+                    }
+                }).await?
+            } else {
+                trace.step("read_profile");
+                let session = tokio::task::spawn_blocking(move || {
+                    read_browser_session(&browser, profile_id.as_deref())
+                }).await.context("读取 SoundCloud 浏览器会话任务失败")??;
+                self.validate_browser_import(session, &trace).await?
+            };
             trace.step("save_session");
             self.set_session(session)
         }).await
@@ -234,14 +228,6 @@ impl SoundCloudProvider {
         let session =
             browser_session_from_token(token, expires_at, "KDJ · SoundCloud 登录窗口".into())?;
         let trace = LoginTrace::new("soundcloud", "webview");
-        trace.run(self.import_browser_session(session, &trace)).await
-    }
-
-    /// The extension reads only SoundCloud's cookie via the browser's own cookie API.
-    pub async fn import_extension_session(&self, token: String, expires_at: i64) -> Result<()> {
-        self.ensure_enabled()?;
-        let session = browser_session_from_token(token, expires_at, "浏览器扩展 · SoundCloud".into())?;
-        let trace = LoginTrace::new("soundcloud", "extension");
         trace.run(self.import_browser_session(session, &trace)).await
     }
 
@@ -269,6 +255,7 @@ impl SoundCloudProvider {
         &self,
         _browser: String,
         _profile_id: Option<String>,
+        _window: bool,
     ) -> Result<()> {
         bail!("移动端无法读取其它应用的浏览器会话；SoundCloud 继续使用匿名访问")
     }
@@ -1392,7 +1379,7 @@ fn browser_session_from_profile(
         })
         .with_context(|| {
             format!(
-                "没有从{}读取到已登录的 SoundCloud 会话；请确认该 Profile 已登录 SoundCloud",
+                "没有从{}读取到已登录的 SoundCloud；请先在这个浏览器登录 SoundCloud",
                 imported.imported_from
             )
         })?;

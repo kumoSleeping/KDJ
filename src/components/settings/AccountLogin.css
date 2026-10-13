@@ -49,6 +49,15 @@
 }
 .kd-account-login-status { min-width: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); }
 
-.kd-account-browser-setup { min-width: 0; margin: 0; padding: 0; border: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); }
-.kd-account-browser-setup legend { padding: 0; color: var(--kd-text); font-weight: 600; }
-.kd-account-browser-setup p { margin: 0.5rem 0 0; }
+/* The code to scan stands in the account's own row. Its paper is white because a code has to be. */
+.kd-account-login-qr { display: flex; gap: 0.75rem; }
+/* Two codes (QQ 音乐) share the row's width instead of standing one under the other. */
+.kd-account-login-qr figure { flex: 0 1 9rem; min-width: 0; margin: 0; display: grid; gap: 0.3rem; justify-items: center; }
+.kd-account-login-qr img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: white;
+  image-rendering: pixelated;
+}
+.kd-account-login-qr figcaption { color: var(--kd-muted); font-size: var(--kd-size-xs); }

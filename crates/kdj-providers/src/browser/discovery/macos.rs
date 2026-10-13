@@ -107,8 +107,8 @@ mod tests {
         for browser in browsers {
             assert!(browser.executable.is_dir());
             eprintln!(
-                "{}: adapter={:?}, authorization={}",
-                browser.label, browser.adapter_id, browser.authorization_supported
+                "{}: adapter={:?}, window={}",
+                browser.label, browser.adapter_id, browser.window_supported
             );
         }
     }

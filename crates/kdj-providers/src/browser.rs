@@ -1,8 +1,8 @@
-//! 桌面浏览器 Profile 枚举与定点 Cookie 读取。
+//! 桌面浏览器登录的复用：枚举本机浏览器和它们的配置，从用户选定的那一个里读限定域名的
+//! Cookie。读不到磁盘配置的两种情况（Arc 的系统自动化、临时登录窗口）在 `authorization`。
 //!
-//! 前端只接触短 id 和可读名称；数据库路径、Cookie 内容与解密过程始终留在
-//! Rust 进程内。YouTube、SoundCloud 等 provider 共用这里，避免各自维护一份
-//! 浏览器名单和 Profile 选择规则。
+//! 前端只接触短 id 和可读名称；数据库路径、Cookie 内容与解密过程始终留在 Rust 进程内。
+//! 所有 provider 共用这里，避免各自维护一份浏览器名单和配置选择规则。
 
 use serde::Serialize;
 
@@ -16,67 +16,70 @@ mod gecko_profiles;
 #[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
 mod profile_tests;
 
-#[cfg(test)]
-mod gecko_rdp_probe;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserProfileOption {
     pub id: String,
     pub label: String,
-    pub requires_elevation: bool,
 }
 
+/// 一个可以拿来登录的浏览器。`reuse`：它已有的登录可以直接读；`window`：它能开一个
+/// 临时登录窗口。两者都是能力，不代表这一次一定成功。
 #[derive(Debug, Clone, Serialize)]
-pub struct BrowserOption {
+pub struct LoginBrowser {
     pub id: String,
     pub label: String,
     pub profiles: Vec<BrowserProfileOption>,
+    pub reuse: bool,
+    pub window: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserCatalog {
     pub supported: bool,
     pub platform: String,
-    pub browsers: Vec<BrowserOption>,
-    pub authorization_browsers: Vec<authorization::BrowserAuthorizationOption>,
-    pub installed_browsers: Vec<discovery::InstalledBrowser>,
+    pub browsers: Vec<LoginBrowser>,
 }
 
-/// 只枚举本机实际存在的浏览器 Profile，不打开 Cookie 数据库，也不会触发钥匙串。
+/// 只枚举本机实际存在的浏览器和配置，不打开 Cookie 数据库，也不会触发钥匙串。
+/// `windows`：这个平台读不到已有登录时会在浏览器里开临时窗口（SoundCloud、YouTube），所以
+/// 只能开窗口的浏览器也列出来，Arc 走它的系统自动化、不选配置。其余平台只列读得到登录的。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn catalog() -> BrowserCatalog {
-    let installed_browsers = discovery::installed();
-    // Profile discovery is independent: retained data can outlive an uninstalled app.
-    let mut browsers = supported_browsers()
-        .into_iter()
-        .filter_map(|(id, label)| {
-            let profiles = rookie::browser_profiles(id).ok()?;
-            if profiles.is_empty() {
-                return None;
-            }
-            let newest = profiles
-                .iter()
-                .map(|profile| profile.last_modified)
-                .max()
-                .unwrap_or(0);
-            Some((
-                newest,
-                BrowserOption {
-                    id: id.into(),
-                    label: label.into(),
-                    profiles: profiles
-                        .into_iter()
-                        .map(|profile| BrowserProfileOption {
-                            id: profile.id,
-                            label: profile.name,
-                            requires_elevation: profile.requires_elevation,
-                        })
-                        .collect(),
-                },
-            ))
-        })
-        .collect::<Vec<_>>();
-    // 最近使用的 Cookie 库排前面，通常就是用户此刻登录目标站点的 Profile。
+pub fn catalog(windows: bool) -> BrowserCatalog {
+    let mut browsers = Vec::new();
+    let mut covered = std::collections::HashSet::new();
+    for installation in discovery::installed() {
+        if let Some(adapter) = &installation.adapter_id {
+            covered.insert(adapter.clone());
+        }
+        let automated = windows && authorization::automated(&installation);
+        let profiles = if automated {
+            Vec::new()
+        } else {
+            installation_profiles(&installation)
+        };
+        let reuse = automated || !profiles.is_empty();
+        let window = windows && installation.window_supported;
+        if reuse || window {
+            browsers.push(login_browser(
+                installation.id,
+                installation.label,
+                profiles,
+                reuse,
+                window,
+            ));
+        }
+    }
+    // 配置数据可以比应用活得久，Linux 上也没有安装登记可查：按 vendor id 补上其余的。
+    for (id, label) in supported_browsers() {
+        if covered.contains(id) {
+            continue;
+        }
+        let profiles = rookie::browser_profiles(id).unwrap_or_default();
+        if !profiles.is_empty() {
+            browsers.push(login_browser(id.into(), label.into(), profiles, true, false));
+        }
+    }
+    // 最近使用的 Cookie 库排前面，通常就是用户此刻登录目标站点的那个浏览器。
     browsers.sort_by(|left, right| {
         right
             .0
@@ -87,24 +90,65 @@ pub fn catalog() -> BrowserCatalog {
         supported: true,
         platform: std::env::consts::OS.into(),
         browsers: browsers.into_iter().map(|(_, browser)| browser).collect(),
-        authorization_browsers: authorization::catalog(&installed_browsers),
-        installed_browsers,
     }
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-pub fn catalog() -> BrowserCatalog {
+pub fn catalog(_windows: bool) -> BrowserCatalog {
     BrowserCatalog {
         supported: false,
         platform: std::env::consts::OS.into(),
         browsers: Vec::new(),
-        authorization_browsers: Vec::new(),
-        installed_browsers: Vec::new(),
     }
 }
 
-/// 从用户明确选择的一个 Profile 读取限定域名的 Cookie。调用方仍需只挑自己需要
-/// 的 Cookie，不能把整份结果保存或返回前端。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn installation_profiles(installation: &discovery::InstalledBrowser) -> Vec<rookie::BrowserProfile> {
+    if installation.engine == Some(discovery::BrowserEngine::Gecko) {
+        return gecko_profiles::profiles(installation).unwrap_or_default();
+    }
+    installation
+        .adapter_id
+        .as_deref()
+        .filter(|adapter| browser_label(adapter).is_some())
+        .and_then(|adapter| rookie::browser_profiles(adapter).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn login_browser(
+    id: String,
+    label: String,
+    profiles: Vec<rookie::BrowserProfile>,
+    reuse: bool,
+    window: bool,
+) -> (u64, LoginBrowser) {
+    let newest = profiles
+        .iter()
+        .map(|profile| profile.last_modified)
+        .max()
+        .unwrap_or(0);
+    let profiles = profiles
+        .into_iter()
+        .map(|profile| BrowserProfileOption {
+            id: profile.id,
+            label: profile.name,
+        })
+        .collect();
+    (
+        newest,
+        LoginBrowser {
+            id,
+            label,
+            profiles,
+            reuse,
+            window,
+        },
+    )
+}
+
+/// 从用户明确选择的一个配置读取限定域名的 Cookie；没选配置就是最近用过的那个。调用方
+/// 仍需只挑自己需要的 Cookie，不能把整份结果保存或返回前端。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) fn profile_cookies(
     browser: &str,
@@ -113,17 +157,42 @@ pub(crate) fn profile_cookies(
 ) -> anyhow::Result<BrowserProfileCookies> {
     use anyhow::Context as _;
 
-    let browser = browser.trim().to_ascii_lowercase();
-    let label =
-        browser_label(&browser).ok_or_else(|| anyhow::anyhow!("不支持的浏览器：{browser}"))?;
+    let profile_id = profile_id.map(str::trim).filter(|id| !id.is_empty());
+    // 每次都重新查一遍安装：请求里的 id 只能选中一个已登记的浏览器，变不成任意路径。
+    let installation = discovery::installed()
+        .into_iter()
+        .find(|installation| installation.id == browser);
+    if let Some(installation) = installation
+        .as_ref()
+        .filter(|installation| installation.engine == Some(discovery::BrowserEngine::Gecko))
+    {
+        return gecko_profiles::read(installation, profile_id, domains);
+    }
+    let (adapter, label) = match installation {
+        Some(installation) => (
+            installation
+                .adapter_id
+                .context("这个浏览器没有可读取的登录数据")?,
+            installation.label,
+        ),
+        None => {
+            let adapter = browser.trim().to_ascii_lowercase();
+            let label = browser_label(&adapter)
+                .with_context(|| format!("不支持的浏览器：{adapter}"))?;
+            (adapter, label.to_string())
+        }
+    };
+    anyhow::ensure!(
+        browser_label(&adapter).is_some(),
+        "这个浏览器没有可读取的登录数据"
+    );
     let profiles =
-        rookie::browser_profiles(&browser).map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        rookie::browser_profiles(&adapter).map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let selected_id = profile_id
-        .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
         .or_else(|| profiles.first().map(|profile| profile.id.clone()))
-        .context("没有检测到这个浏览器的 Profile")?;
-    let (profile, cookies) = rookie::browser_profile_cookies(&browser, &selected_id, Some(domains))
+        .context("没有检测到这个浏览器的配置")?;
+    let (profile, cookies) = rookie::browser_profile_cookies(&adapter, &selected_id, Some(domains))
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     Ok(BrowserProfileCookies {
         imported_from: format!("{label} · {}", profile.name),
@@ -135,6 +204,84 @@ pub(crate) fn profile_cookies(
 pub(crate) struct BrowserProfileCookies {
     pub imported_from: String,
     pub cookies: Vec<rookie::enums::Cookie>,
+}
+
+/// 站点的登录就是几个具名 Cookie 时（网易云、QQ 音乐、哔哩哔哩）用这个：只留名单里的、
+/// 属于这些域名的、没过期的 Cookie；同名的取域名更具体、过期更晚的那一个。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn named_cookies(
+    imported: BrowserProfileCookies,
+    domains: &[&str],
+    names: &[&str],
+) -> (std::collections::BTreeMap<String, String>, String) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let mut chosen: std::collections::BTreeMap<String, (usize, u64, String)> = Default::default();
+    for cookie in imported.cookies {
+        let domain = cookie.domain.trim_start_matches('.');
+        let in_site = domains
+            .iter()
+            .any(|site| domain == *site || domain.ends_with(&format!(".{site}")));
+        let live = cookie.expires.is_none_or(|expires| expires == 0 || expires > now);
+        let Some(name) = names
+            .iter()
+            .find(|name| name.eq_ignore_ascii_case(&cookie.name))
+        else {
+            continue;
+        };
+        if !in_site || !live || cookie.value.trim().is_empty() {
+            continue;
+        }
+        let rank = (domain.len(), cookie.expires.unwrap_or(u64::MAX));
+        if chosen
+            .get(*name)
+            .is_none_or(|(length, expires, _)| (*length, *expires) < rank)
+        {
+            chosen.insert((*name).to_string(), (rank.0, rank.1, cookie.value));
+        }
+    }
+    (
+        chosen
+            .into_iter()
+            .map(|(name, (_, _, value))| (name, value))
+            .collect(),
+        imported.imported_from,
+    )
+}
+
+/// 读选定配置里一个站点的具名登录 Cookie；磁盘读取放在 blocking 线程。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) async fn reuse_named_cookies(
+    browser: &str,
+    profile: Option<&str>,
+    domains: &'static [&'static str],
+    names: &'static [&'static str],
+) -> anyhow::Result<(std::collections::BTreeMap<String, String>, String)> {
+    use anyhow::Context as _;
+
+    let (browser, profile) = (browser.to_owned(), profile.map(str::to_owned));
+    let imported = tokio::task::spawn_blocking(move || {
+        profile_cookies(
+            &browser,
+            profile.as_deref(),
+            domains.iter().map(|domain| domain.to_string()).collect(),
+        )
+    })
+    .await
+    .context("读取浏览器登录状态任务失败")??;
+    Ok(named_cookies(imported, domains, names))
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) async fn reuse_named_cookies(
+    _browser: &str,
+    _profile: Option<&str>,
+    _domains: &'static [&'static str],
+    _names: &'static [&'static str],
+) -> anyhow::Result<(std::collections::BTreeMap<String, String>, String)> {
+    anyhow::bail!("移动端无法读取其它应用的浏览器登录")
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -179,5 +326,66 @@ fn browser_label(browser: &str) -> Option<&'static str> {
         "cachy" => Some("Cachy Browser"),
         "octo_browser" => Some("Octo Browser"),
         _ => None,
+    }
+}
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod tests {
+    use super::*;
+
+    fn cookie(name: &str, value: &str, domain: &str, expires: Option<u64>) -> rookie::enums::Cookie {
+        rookie::enums::Cookie {
+            domain: domain.into(),
+            path: "/".into(),
+            secure: true,
+            expires,
+            name: name.into(),
+            value: value.into(),
+            http_only: true,
+            same_site: 0,
+        }
+    }
+
+    #[test]
+    fn named_cookies_keep_only_the_live_login_cookies_of_the_site() {
+        let (cookies, source) = named_cookies(
+            BrowserProfileCookies {
+                imported_from: "测试浏览器 · 用户".into(),
+                cookies: vec![
+                    cookie("SESSDATA", "site-wide", ".bilibili.com", Some(u64::MAX - 1)),
+                    cookie("SESSDATA", "expired", "www.bilibili.com", Some(1)),
+                    cookie("sessdata", "other-site", ".bilibili.com.evil.test", None),
+                    cookie("bili_jct", "", ".bilibili.com", None),
+                    cookie("unrelated", "x", ".bilibili.com", None),
+                    cookie("DedeUserID", "42", ".bilibili.com", None),
+                ],
+            },
+            &["bilibili.com"],
+            &["SESSDATA", "bili_jct", "DedeUserID"],
+        );
+        assert_eq!(source, "测试浏览器 · 用户");
+        assert_eq!(
+            cookies.into_iter().collect::<Vec<_>>(),
+            vec![
+                ("DedeUserID".to_string(), "42".to_string()),
+                ("SESSDATA".to_string(), "site-wide".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn named_cookies_prefer_the_more_specific_domain() {
+        let (cookies, _) = named_cookies(
+            BrowserProfileCookies {
+                imported_from: String::new(),
+                cookies: vec![
+                    cookie("uin", "o0123", ".qq.com", None),
+                    cookie("uin", "123", ".y.qq.com", None),
+                ],
+            },
+            &["qq.com"],
+            &["uin"],
+        );
+        assert_eq!(cookies["uin"], "123");
     }
 }

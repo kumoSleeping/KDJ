@@ -868,33 +868,18 @@ export const api = {
     request<SoundCloudOAuthStatus>(`/accounts/soundcloud/login/oauth/${encodeURIComponent(state)}`),
   soundcloudOAuthCallback: (body: SoundCloudOAuthCallback) =>
     post<Account>("/accounts/soundcloud/login/oauth/callback", body),
-  soundcloudBrowserCatalog: () =>
-    request<BrowserCatalog>("/accounts/soundcloud/login/browsers"),
-  soundcloudExtensionPair: () =>
-    post<{ code: string; expires_in: number }>("/accounts/soundcloud/login/extension"),
-  soundcloudBrowserLogin: (browser: string, profile?: string) =>
-    post<Account>("/accounts/soundcloud/login/browser", { browser, profile }),
-  soundcloudBrowserAuthorize: (browser: string, request_id: string, profile?: string, profile_read_confirmed = false, new_window = false) =>
-    post<Account>("/accounts/soundcloud/login/browser/authorize", { browser, request_id, profile, profile_read_confirmed, new_window }),
-  soundcloudHeadersLogin: (headers: string) =>
-    post<Account>("/accounts/soundcloud/login/headers", { headers }),
-  ytmBrowserCatalog: () =>
-    request<BrowserCatalog>("/accounts/ytm/login/browsers"),
-  ytmBrowserLogin: (browser: string, profile?: string) =>
-    post<Account>("/accounts/ytm/login/browser", { browser, profile }),
-  ytmBrowserAuthorize: (browser: string, request_id: string, profile?: string, profile_read_confirmed = false, new_window = false) =>
-    post<Account>("/accounts/ytm/login/browser/authorize", { browser, request_id, profile, profile_read_confirmed, new_window }),
-  ytmHeadersLogin: (headers: string) =>
-    post<Account>("/accounts/ytm/login/headers", { headers }),
-  youtubeBrowserCatalog: () =>
-    request<BrowserCatalog>("/accounts/youtube/login/browsers"),
-  youtubeBrowserLogin: (browser: string, profile?: string) =>
-    post<Account>("/accounts/youtube/login/browser", { browser, profile }),
-  youtubeBrowserAuthorize: (browser: string, request_id: string, profile?: string, profile_read_confirmed = false, new_window = false) =>
-    post<Account>("/accounts/youtube/login/browser/authorize", { browser, request_id, profile, profile_read_confirmed, new_window }),
+  browserCatalog: (platform: string) =>
+    request<BrowserCatalog>(`/accounts/${platform}/login/browsers`),
+  /** Reuses the login the chosen browser already has; `window` logs in afresh in a window of it. */
+  browserLogin: (platform: string, body: { browser: string; request_id: string; profile?: string; window?: boolean }) =>
+    post<Account>(`/accounts/${platform}/login/browser`, body),
   cancelBrowserLogin: (request_id: string) => request("/accounts/browser/login/cancel", {
     method: "POST", body: JSON.stringify({ request_id }), keepalive: true,
   }),
+  soundcloudHeadersLogin: (headers: string) =>
+    post<Account>("/accounts/soundcloud/login/headers", { headers }),
+  ytmHeadersLogin: (headers: string) =>
+    post<Account>("/accounts/ytm/login/headers", { headers }),
   youtubeHeadersLogin: (headers: string) =>
     post<Account>("/accounts/youtube/login/headers", { headers }),
 

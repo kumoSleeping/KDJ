@@ -1,6 +1,5 @@
 //! Installed applications are discovered independently of credential adapters.
 //! Discovery never opens a browser, a cookie database, or a keychain.
-use serde::Serialize;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -15,17 +14,16 @@ mod engine;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BrowserEngine { Gecko, Chromium }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct InstalledBrowser {
-    /// Identifies an installation, not a vendor or a successful connection.
+    /// Identifies an installation, not a vendor or a successful login.
     pub id: String,
     pub label: String,
+    /// The vendor whose profile layout and key storage this installation is known to use.
     pub adapter_id: Option<String>,
-    pub direct_read_supported: bool,
-    pub authorization_supported: bool,
-    #[serde(skip)]
+    /// Whether it can show a login window on a fresh profile (`authorization`).
+    pub window_supported: bool,
     pub(crate) engine: Option<BrowserEngine>,
-    #[serde(skip)]
     pub(crate) executable: PathBuf,
 }
 
@@ -40,9 +38,7 @@ pub fn installed() -> Vec<InstalledBrowser> {
 }
 
 fn normalize(mut candidates: Vec<InstalledBrowser>) -> Vec<InstalledBrowser> {
-    candidates.sort_by(|a, b| a.executable.cmp(&b.executable)
-        .then(b.direct_read_supported.cmp(&a.direct_read_supported))
-        .then(b.authorization_supported.cmp(&a.authorization_supported)));
+    candidates.sort_by(|a, b| a.executable.cmp(&b.executable));
     candidates.dedup_by(|a, b| a.id == b.id);
     candidates.sort_by(|a, b| a.label.cmp(&b.label).then(a.id.cmp(&b.id)));
     // Keep multiple installations selectable without exposing their paths to the frontend.
@@ -99,8 +95,8 @@ fn candidate(
         id,
         label,
         adapter_id: adapter.map(str::to_owned),
-        direct_read_supported: adapter.is_some_and(|id| super::browser_label(id).is_some()),
-        authorization_supported: adapter.is_some_and(super::authorization::supports) || engine.is_some(),
+        // A login window needs the engine's own protocol; a name alone never grants one.
+        window_supported: cfg!(any(target_os = "macos", target_os = "windows")) && engine.is_some(),
         executable,
     })
 }
@@ -173,8 +169,7 @@ mod tests {
             id: id.into(),
             label: "Browser".into(),
             adapter_id: None,
-            direct_read_supported: false,
-            authorization_supported: false,
+            window_supported: false,
             executable: PathBuf::from(path),
         };
         let result = normalize(vec![
@@ -184,9 +179,6 @@ mod tests {
         ]);
         assert_eq!(result.len(), 2);
         assert_eq!(result[1].label, "Browser (2)");
-        assert!(!result[0].authorization_supported);
-        let json = serde_json::to_value(&result[0]).unwrap();
-        assert!(json.get("executable").is_none());
-        assert!(json.get("connected").is_none());
+        assert!(!result[0].window_supported);
     }
 }

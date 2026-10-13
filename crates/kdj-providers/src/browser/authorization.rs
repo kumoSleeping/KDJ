@@ -1,41 +1,30 @@
-//! Browser authorization uses existing opt-in CDP/Arc sessions or a temporary real-browser
-//! login window. Gecko reads an existing profile only after explicit KDJ consent.
-//! Never modify the user's browser profile or debugging preferences.
+//! Logins that are not a profile on disk: Arc's own macOS automation, and a temporary window of
+//! the chosen browser on a fresh profile that is removed afterwards. Reading an existing profile
+//! is `super::profile_cookies`. Never modify the user's browser profile or its preferences.
+#![cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 
 use super::login_trace::LoginTrace;
 use crate::youtubemusic::auth::BrowserSession;
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use kdj_core::models::Platform;
-use serde::Serialize;
 use serde_json::{json, Value};
 use std::{path::PathBuf, time::Duration};
-use tokio::{
-    io::AsyncReadExt,
-    net::TcpStream,
-    time::{timeout, Instant},
-};
-use tokio_tungstenite::{
-    connect_async_with_config,
-    tungstenite::{protocol::WebSocketConfig, Error as WebSocketError, Message},
-    MaybeTlsStream, WebSocketStream,
-};
+use tokio::{net::TcpStream, time::timeout};
+use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 #[cfg(target_os = "macos")]
 #[path = "arc_automation.rs"]
 mod arc_automation;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-#[path = "gecko_rdp.rs"]
-mod gecko_rdp;
-#[path = "process_ports.rs"]
-mod process_ports;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[path = "isolated_login.rs"]
 mod isolated_login;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[path = "process_ports.rs"]
+mod process_ports;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
-const AUTH_TIMEOUT: Duration = Duration::from_secs(180);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 static ACTIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -67,43 +56,16 @@ impl LoginSite {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct BrowserAuthorizationOption {
-    pub id: String,
-    pub label: String,
-    pub method: &'static str,
-    pub profiles: Vec<super::BrowserProfileOption>,
-}
-
 struct Browser {
     label: String,
-    root: PathBuf,
     executable: PathBuf,
-    setup_url: &'static str,
+    gecko: bool,
 }
 
-/// This is an adapter capability, never evidence that a connection succeeded.
-pub(crate) fn supports(id: &str) -> bool {
-    setup_url(id).is_some()
-}
-
-fn setup_url(id: &str) -> Option<&'static str> {
-    match id {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        "chrome" => Some("chrome://inspect/#remote-debugging"),
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        "edge" => Some("edge://inspect/#remote-debugging"),
-        #[cfg(target_os = "macos")]
-        "arc" => Some("arc://inspect/#remote-debugging"),
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        "firefox" | "zen" | "librewolf" => Some("about:debugging#/setup"),
-        _ => None,
-    }
-}
-
+/// A browser whose engine is known can show a login window on a fresh profile.
 fn installed_browser(id: &str) -> Option<Browser> {
     let installations = super::discovery::installed();
-    // Accept old vendor ids for existing callers, but new UI selections identify the installation.
+    // The catalog hands out installation ids; the vendor id is what the tests select by.
     let installation = installations
         .iter()
         .find(|browser| browser.id == id)
@@ -112,95 +74,31 @@ fn installed_browser(id: &str) -> Option<Browser> {
                 .iter()
                 .find(|browser| browser.adapter_id.as_deref() == Some(id))
         })?;
-    browser_for_installation(installation)
+    installation.window_supported.then(|| Browser {
+        label: installation.label.clone(),
+        executable: installation.executable.clone(),
+        gecko: installation.engine == Some(super::discovery::BrowserEngine::Gecko),
+    })
 }
 
-fn browser_for_installation(installation: &super::discovery::InstalledBrowser) -> Option<Browser> {
-    let id = installation.adapter_id.as_deref().unwrap_or("");
-    let isolated = match installation.engine {
-        Some(super::discovery::BrowserEngine::Gecko) => Some("kdj:isolated-gecko"),
-        Some(super::discovery::BrowserEngine::Chromium) => Some("kdj:isolated-chromium"),
-        None => None,
-    };
-    // Known Chrome/Edge installations attach on both operating systems. Unknown Chromium
-    // forks keep the isolated fallback; a shared engine alone does not prove opt-in support.
-    let setup_url = match installation.engine {
-        Some(super::discovery::BrowserEngine::Gecko) => Some("kdj:gecko-toolbox"),
-        _ => setup_url(id).or(isolated),
-    }?;
-    #[cfg(target_os = "macos")]
-    let root = {
-        let home = PathBuf::from(std::env::var_os("HOME")?);
-        let folder = match id {
-            "chrome" => "Google/Chrome",
-            "edge" => "Microsoft Edge",
-            "arc" => "Arc/User Data",
-            "firefox" | "zen" | "librewolf" => "",
-            _ => "",
-        };
-        home.join("Library/Application Support").join(folder)
-    };
-    #[cfg(target_os = "windows")]
-    let root = {
-        let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
-        let folder = match id {
-            "chrome" => "Google/Chrome",
-            "edge" => "Microsoft/Edge",
-            "firefox" | "zen" | "librewolf" => "",
-            _ => "",
-        };
-        local.join(folder).join("User Data")
-    };
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        Some(Browser {
-            label: installation.label.clone(),
-            root,
-            executable: installation.executable.clone(),
-            setup_url,
-        })
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = setup_url;
-        None
-    }
+/// Arc answers through its own macOS automation interface instead of a profile KDJ reads.
+/// Its scripts read what the page itself can see, which is enough for SoundCloud and YouTube only.
+pub(super) fn automated(installation: &super::discovery::InstalledBrowser) -> bool {
+    cfg!(target_os = "macos") && installation.adapter_id.as_deref() == Some("arc")
 }
 
-pub(super) fn catalog(
-    installations: &[super::discovery::InstalledBrowser],
-) -> Vec<BrowserAuthorizationOption> {
-    installations
-        .iter()
-        .filter(|browser| browser.authorization_supported)
-        .map(|browser| BrowserAuthorizationOption {
-            id: browser.id.clone(),
-            label: browser.label.clone(),
-            profiles: {
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                { if browser.engine == Some(super::discovery::BrowserEngine::Gecko) {
-                    super::gecko_profiles::options(browser)
-                } else { Vec::new() } }
-                #[cfg(any(target_os = "android", target_os = "ios"))]
-                { Vec::new() }
-            },
-            method: if browser.engine == Some(super::discovery::BrowserEngine::Gecko) {
-                "gecko_rdp"
-            } else if cfg!(target_os = "macos") && browser.adapter_id.as_deref() == Some("arc") {
-                "system_automation"
-            } else if browser_for_installation(browser).is_some_and(|b| matches!(b.setup_url, "kdj:isolated-gecko" | "kdj:isolated-chromium")) {
-                "isolated_window"
-            } else {
-                "remote_debugging"
-            },
-        })
-        .collect()
+fn automated_browser(id: &str) -> Option<super::discovery::InstalledBrowser> {
+    super::discovery::installed()
+        .into_iter()
+        .find(|browser| browser.id == id && automated(browser))
+}
+
+/// Whether this browser's existing SoundCloud / YouTube login is read here, not from its profile.
+pub fn reads_existing(id: &str) -> bool {
+    automated_browser(id).is_some()
 }
 
 impl Browser {
-    fn use_isolated(&mut self) {
-        self.setup_url = if self.setup_url == "kdj:gecko-toolbox" { "kdj:isolated-gecko" } else { "kdj:isolated-chromium" };
-    }
     fn owns_process(&self, pid: u32) -> bool {
         let Some(actual) = process_executable(pid).and_then(|path| path.canonicalize().ok()) else {
             return false;
@@ -223,98 +121,6 @@ impl Browser {
             let _ = actual;
             false
         }
-    }
-
-    async fn open_setup(&self) -> Result<()> {
-        self.open_url(self.setup_url).await
-    }
-
-    async fn open_url(&self, url: &str) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        let mut command = {
-            let mut command = tokio::process::Command::new("/usr/bin/open");
-            command.arg("-a").arg(&self.executable).arg(url);
-            command
-        };
-        #[cfg(target_os = "windows")]
-        let mut command = {
-            let mut command = tokio::process::Command::new(&self.executable);
-            command.arg(url);
-            command
-        };
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            command
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            let mut child = command.spawn().context("无法打开浏览器授权页")?;
-            // Chrome can stay alive if this is its first process. Reap it without blocking login.
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-            });
-            Ok(())
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        bail!("当前系统不支持浏览器授权连接")
-    }
-
-    async fn endpoint(&self) -> Result<Option<String>> {
-        let file = match tokio::fs::File::open(self.root.join("DevToolsActivePort")).await {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => bail!("无法读取浏览器授权状态"),
-        };
-        let mut data = String::new();
-        file.take(4097)
-            .read_to_string(&mut data)
-            .await
-            .context("无法读取浏览器授权状态")?;
-        Ok(Some(parse_endpoint(&data)?))
-    }
-
-    #[cfg(target_os = "windows")]
-    fn has_window(&self) -> bool {
-        use std::ffi::c_void;
-        struct Search<'a> { browser: &'a Browser, found: bool }
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            fn EnumWindows(callback: unsafe extern "system" fn(*mut c_void, isize) -> i32, data: isize) -> i32;
-            fn IsWindowVisible(window: *mut c_void) -> i32;
-            fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
-        }
-        unsafe extern "system" fn visit(window: *mut c_void, data: isize) -> i32 {
-            let search = unsafe { &mut *(data as *mut Search<'_>) };
-            let mut pid = 0;
-            if unsafe { IsWindowVisible(window) } != 0 {
-                unsafe { GetWindowThreadProcessId(window, &mut pid); }
-                if search.browser.owns_process(pid) {
-                    search.found = true;
-                    return 0;
-                }
-            }
-            1
-        }
-        let mut search = Search { browser: self, found: false };
-        unsafe { EnumWindows(visit, &mut search as *mut Search<'_> as isize); }
-        search.found
-    }
-
-    async fn wait_closed(&self) {
-        #[cfg(target_os = "windows")]
-        {
-            let opened = Instant::now();
-            let mut seen = false;
-            loop {
-                let visible = self.has_window();
-                if visible { seen = true; }
-                // Edge's background process can survive every browser window being closed.
-                if !visible && (seen || opened.elapsed() > Duration::from_secs(10)) { return; }
-                tokio::time::sleep(RETRY_INTERVAL).await;
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        std::future::pending::<()>().await;
     }
 }
 
@@ -375,14 +181,14 @@ fn process_executable(_pid: u32) -> Option<PathBuf> {
 }
 
 fn parse_endpoint(text: &str) -> Result<String> {
-    anyhow::ensure!(text.len() <= 4096, "浏览器授权地址无效");
+    anyhow::ensure!(text.len() <= 4096, "浏览器登录地址无效");
     let mut lines = text.lines();
     let port: u16 = lines
         .next()
         .unwrap_or_default()
         .trim()
         .parse()
-        .context("浏览器授权端口无效")?;
+        .context("浏览器登录端口无效")?;
     let path = lines.next().unwrap_or_default().trim();
     let suffix = path.strip_prefix("/devtools/browser/").unwrap_or_default();
     anyhow::ensure!(
@@ -392,7 +198,7 @@ fn parse_endpoint(text: &str) -> Result<String> {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
             && lines.all(|line| line.trim().is_empty()),
-        "浏览器授权地址无效"
+        "浏览器登录地址无效"
     );
     // The file cannot supply a host, scheme, credentials, query, or redirect.
     Ok(format!("ws://127.0.0.1:{port}{path}"))
@@ -405,9 +211,8 @@ struct Connection {
 
 impl Connection {
     async fn verify_browser(&mut self, browser: &Browser) -> Result<()> {
-        // Chrome and Arc both default to port 9222 and retain their discovery file when disabled.
-        // Approval-mode Chromium ignores the UUID in that file. Verify the browser process before
-        // asking for any tabs/cookies so a stale file can never import another browser's account.
+        // Verify the browser process before asking for any tabs or cookies, so the endpoint of
+        // another browser can never import that browser's account.
         let info = self
             .call("SystemInfo.getProcessInfo", json!({}), None)
             .await?;
@@ -420,7 +225,7 @@ impl Connection {
             .and_then(|pid| u32::try_from(pid).ok());
         anyhow::ensure!(
             pid.is_some_and(|pid| browser.owns_process(pid)),
-            "连接端口属于其他浏览器或无法核实；请关闭其他浏览器的远程调试，再在 {} 中重新开启。",
+            "无法核实登录窗口属于 {}，请重试",
             browser.label
         );
         Ok(())
@@ -463,7 +268,7 @@ impl Connection {
                             .await
                             .context("浏览器连接已断开")?;
                     }
-                    Message::Close(_) => bail!("浏览器已结束授权连接"),
+                    Message::Close(_) => bail!("浏览器已结束登录连接"),
                     _ => {}
                 }
             }
@@ -614,34 +419,29 @@ fn cookie_from_response(response: &Value) -> Result<AuthorizedSession> {
     })
 }
 
+
 pub(crate) async fn read_soundcloud<T, F, Fut>(
     browser_id: &str,
+    window: bool,
     trace: &LoginTrace,
-    profile: Option<&str>,
-    confirmed: bool,
-    new_window: bool,
     mut finish: F,
 ) -> Result<T>
 where F: FnMut(AuthorizedSession) -> Fut, Fut: std::future::Future<Output = Result<T>> {
-    // One explicit user action owns one connection/prompt. Don't stack browser permission dialogs.
-    let _active = ACTIVE.try_lock().context("已有浏览器授权正在进行")?;
-    if let Some((cookies, source)) = read_confirmed_gecko(browser_id, profile, confirmed, LoginSite::Soundcloud, trace).await? {
-        let mut session = cookie_from_response(&cookies)?;
-        session.imported_from = source;
-        return finish(session).await;
+    // One click owns one system prompt or one window.
+    let _active = ACTIVE.try_lock().context("已有浏览器登录正在进行")?;
+    if !window {
+        let arc = automated_browser(browser_id).context("这个浏览器的登录要从它的配置读取")?;
+        trace.browser(&arc.label);
+        #[cfg(target_os = "macos")]
+        return finish(arc_automation::read_soundcloud(&arc.executable, trace).await?).await;
+        #[cfg(not(target_os = "macos"))]
+        bail!("当前系统不支持此浏览器登录");
     }
-    let mut browser = installed_browser(browser_id).context("请选择支持授权连接的已安装浏览器")?;
-    if new_window { browser.use_isolated(); }
+    let browser = installed_browser(browser_id).context("这个浏览器不能打开登录窗口")?;
     trace.browser(&browser.label);
-    // Arc exposes Chromium's opt-in page but rejects the approval handshake without a dialog.
-    // Its supported macOS automation interface has a separate, visible system permission.
-    #[cfg(target_os = "macos")]
-    if browser.setup_url == "arc://inspect/#remote-debugging" {
-        return finish(arc_automation::read_soundcloud(&browser.executable, trace).await?).await;
-    }
-    read_authorized(&browser, LoginSite::Soundcloud, trace, |cookies, _| {
+    open_window(&browser, LoginSite::Soundcloud, trace, |cookies, _| {
         let session = cookie_from_response(&cookies).map(|mut session| {
-            session.imported_from = format!("{} · 浏览器授权", browser.label);
+            session.imported_from = format!("{} · 新窗口", browser.label);
             session
         });
         let future = session.map(&mut finish);
@@ -652,10 +452,8 @@ where F: FnMut(AuthorizedSession) -> Fut, Fut: std::future::Future<Output = Resu
 pub async fn read_youtube<T, F, Fut>(
     browser_id: &str,
     platform: Platform,
+    window: bool,
     trace: &LoginTrace,
-    profile: Option<&str>,
-    confirmed: bool,
-    new_window: bool,
     mut finish: F,
 ) -> Result<T>
 where F: FnMut(BrowserSession) -> Fut, Fut: std::future::Future<Output = Result<T>> {
@@ -664,20 +462,20 @@ where F: FnMut(BrowserSession) -> Fut, Fut: std::future::Future<Output = Result<
         Platform::Youtube => LoginSite::Youtube,
         _ => bail!("不支持的登录站点"),
     };
-    let _active = ACTIVE.try_lock().context("已有浏览器授权正在进行")?;
-    if let Some((cookies, source)) = read_confirmed_gecko(browser_id, profile, confirmed, site, trace).await? {
-        return finish(youtube_session(&cookies, &Value::Null, source, site)?).await;
+    let _active = ACTIVE.try_lock().context("已有浏览器登录正在进行")?;
+    if !window {
+        let arc = automated_browser(browser_id).context("这个浏览器的登录要从它的配置读取")?;
+        trace.browser(&arc.label);
+        #[cfg(target_os = "macos")]
+        return finish(arc_automation::read_youtube(&arc.executable, site, trace).await?).await;
+        #[cfg(not(target_os = "macos"))]
+        bail!("当前系统不支持此浏览器登录");
     }
-    let mut browser = installed_browser(browser_id).context("请选择支持授权登录的已安装浏览器")?;
-    if new_window { browser.use_isolated(); }
+    let browser = installed_browser(browser_id).context("这个浏览器不能打开登录窗口")?;
     trace.browser(&browser.label);
-    #[cfg(target_os = "macos")]
-    if browser.setup_url == "arc://inspect/#remote-debugging" {
-        return finish(arc_automation::read_youtube(&browser.executable, site, trace).await?).await;
-    }
-    read_authorized(&browser, site, trace, |cookies, metadata| {
+    open_window(&browser, site, trace, |cookies, metadata| {
         let session = youtube_session(&cookies, &metadata,
-            format!("{} · 浏览器授权", browser.label), site);
+            format!("{} · 新窗口", browser.label), site);
         let future = session.map(&mut finish);
         async move { future?.await }
     }).await
@@ -708,34 +506,6 @@ impl<F> CandidateValidator<F> {
 fn candidate_ready(cookies: &Value, metadata: &Value, site: LoginSite) -> bool {
     if site == LoginSite::Soundcloud { cookie_from_response(cookies).is_ok() }
     else { metadata["authUser"].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 3 && s.bytes().all(|b| b.is_ascii_digit())) && youtube_session(cookies, metadata, String::new(), site).is_ok() }
-}
-
-// Rediscover the exact installation on every request. A consent flag never turns an arbitrary
-// renderer path/browser id into a cookie database, nor silently falls back to a new window.
-async fn read_confirmed_gecko(browser_id: &str, profile: Option<&str>, confirmed: bool, site: LoginSite, trace: &LoginTrace) -> Result<Option<(Value, String)>> {
-    if !confirmed && profile.is_none() { return Ok(None); }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        let installation = super::discovery::installed().into_iter()
-            .find(|b| b.id == browser_id || b.adapter_id.as_deref() == Some(browser_id))
-            .context("所选浏览器已不可用，请重新检测")?;
-        if installation.engine != Some(super::discovery::BrowserEngine::Gecko) { return Ok(None); }
-        anyhow::ensure!(confirmed, "请先允许 KDJ 读取所选浏览器的站点登录状态");
-        trace.browser(&installation.label);
-        trace.step("read_profile");
-        let profile = profile.map(str::to_owned);
-        let domain = if site == LoginSite::Soundcloud { "soundcloud.com" } else { "youtube.com" };
-        let imported = tokio::task::spawn_blocking(move || {
-            super::gecko_profiles::read(&installation, profile.as_deref(), confirmed, vec![domain.into()])
-        }).await.context("读取浏览器登录状态任务失败")??;
-        let cookies: Vec<_> = imported.cookies.into_iter()
-            .filter(|c| c.path == "/" && if site == LoginSite::Soundcloud { c.name == "oauth_token" } else { youtube_cookie_name(&c.name) })
-            .map(|c| json!({"name": c.name, "value": c.value, "domain": c.domain, "path": c.path, "expires": c.expires.unwrap_or(0)}))
-            .collect();
-        Ok(Some((json!({"cookies": cookies}), imported.imported_from)))
-    }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    { let _ = (browser_id, profile, confirmed, site, trace); Ok(None) }
 }
 
 fn youtube_session(
@@ -834,248 +604,20 @@ pub(super) fn apply_youtube_metadata(session: &mut BrowserSession, metadata: &Va
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-async fn read_authorized<T, F, Fut>(browser: &Browser, site: LoginSite, trace: &LoginTrace, finish: F) -> Result<T>
+async fn open_window<T, F, Fut>(browser: &Browser, site: LoginSite, trace: &LoginTrace, finish: F) -> Result<T>
 where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
-    if browser.setup_url == "kdj:gecko-toolbox" {
-        gecko_rdp::read(browser, site, trace, finish).await
-    } else if browser.setup_url == "kdj:isolated-gecko" {
-        isolated_login::read(browser, site, true, trace, finish).await
-    } else if browser.setup_url == "kdj:isolated-chromium" {
-        isolated_login::read(browser, site, false, trace, finish).await
-    } else {
-        read_cdp(browser, site, trace, finish).await
-    }
+    isolated_login::read(browser, site, browser.gecko, trace, finish).await
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-async fn read_authorized<T, F, Fut>(_browser: &Browser, _site: LoginSite, _trace: &LoginTrace, _finish: F) -> Result<T>
+async fn open_window<T, F, Fut>(_browser: &Browser, _site: LoginSite, _trace: &LoginTrace, _finish: F) -> Result<T>
 where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
-    bail!("当前系统不支持浏览器授权")
-}
-
-async fn read_cdp<T, F, Fut>(
-    browser: &Browser,
-    site: LoginSite,
-    trace: &LoginTrace,
-    finish: F,
-) -> Result<T>
-where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
-    // Every explicit retry must return the user to the opt-in page. The discovery file survives
-    // disabling debugging/exiting the browser; its existence is not proof that the bridge is live.
-    trace.step("open_authorization");
-    browser.open_setup().await?;
-    trace.step("wait_browser_permission");
-    tokio::select! {
-        biased;
-        _ = browser.wait_closed() => {
-            trace.detail("wait_browser_permission", "browser_closed");
-            bail!("浏览器窗口已关闭或未能打开；本次授权已停止，可重新登录");
-        }
-        result = read_open_cdp(browser, site, trace, finish) => result,
-    }
-}
-
-async fn read_open_cdp<T, F, Fut>(browser: &Browser, site: LoginSite, trace: &LoginTrace, finish: F) -> Result<T>
-where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
-    let mut connection = wait_for_connection(&browser, AUTH_TIMEOUT).await?;
-    let result = async {
-        trace.step("verify_browser");
-        connection.verify_browser(browser).await?;
-        if let Ok(version) = connection.call("Browser.getVersion", json!({}), None).await {
-            // Version characters only; never log the arbitrary browser response or user agent.
-            if let Some(product) = version["product"].as_str() {
-                let version: String = product.chars().filter(|c| c.is_ascii_digit() || *c == '.').take(32).collect();
-                tracing::info!(target: "kdj::login", browser = browser.label, browser_version = version, "login browser version");
-            }
-        }
-        let mut target = None;
-        let mut validator = CandidateValidator::new(finish);
-        timeout(LOGIN_TIMEOUT, async {
-            loop {
-                let (cookies, metadata) = connection.site_cookies(site, trace, &mut target).await?;
-                if let Some(value) = validator.check(cookies, metadata, site, trace).await? { return Ok(value); }
-                trace.step("wait_browser_login");
-                tokio::time::sleep(RETRY_INTERVAL).await;
-            }
-        }).await.context("等待站点登录超时，请重试")?
-    }
-    .await;
-    // Explicitly disconnect on success AND failure; never close the browser or user's tabs.
-    let _ = timeout(Duration::from_secs(2), connection.socket.close(None)).await;
-    trace.detail(
-        "disconnect",
-        if result.is_ok() {
-            "complete"
-        } else {
-            "after_failure"
-        },
-    );
-    result
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum HandshakeFailure {
-    NotReady,
-    Rejected,
-    Http(u16),
-    Protocol,
-}
-
-fn classify_handshake(error: &WebSocketError) -> HandshakeFailure {
-    match error {
-        WebSocketError::Http(response) => match response.status().as_u16() {
-            403 => HandshakeFailure::Rejected,
-            404 | 410 => HandshakeFailure::NotReady, // endpoint rotated while enabling
-            status => HandshakeFailure::Http(status),
-        },
-        WebSocketError::Io(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::NotConnected
-                    | std::io::ErrorKind::UnexpectedEof
-            ) =>
-        {
-            HandshakeFailure::NotReady
-        }
-        _ => HandshakeFailure::Protocol,
-    }
-}
-
-impl HandshakeFailure {
-    fn message(&self, browser: &str) -> String {
-        match self {
-            Self::Rejected if browser == "Arc" => "Arc 拒绝了授权连接（403）。若没有出现确认弹窗，当前 Arc 无法完成此授权流程；可使用钥匙串读取。".into(),
-            Self::Rejected => format!("{browser} 拒绝了本次连接（403）；再次点击连接可重新打开授权页。"),
-            Self::Http(status) => format!("{browser} 连接失败（HTTP {status}）；可重新点击连接。"),
-            Self::NotReady => format!("{browser} 的授权连接尚未就绪；请开启授权页中的远程调试后重试。"),
-            Self::Protocol => format!("{browser} 的连接响应不兼容；请更新浏览器后重试。"),
-        }
-    }
-}
-
-async fn wait_for_connection(browser: &Browser, duration: Duration) -> Result<Connection> {
-    let deadline = Instant::now() + duration;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        anyhow::ensure!(
-            !remaining.is_zero(),
-            "等待浏览器授权超时；开启远程调试后可重新点击连接。"
-        );
-        if let Some(endpoint) = browser.endpoint().await? {
-            let config = WebSocketConfig::default()
-                .max_message_size(Some(1024 * 1024))
-                .max_frame_size(Some(1024 * 1024));
-            match timeout(
-                remaining,
-                connect_async_with_config(&endpoint, Some(config), true),
-            )
-            .await
-            {
-                Ok(Ok((socket, _))) => return Ok(Connection { socket, next_id: 0 }),
-                Ok(Err(error)) => {
-                    let failure = classify_handshake(&error);
-                    // An explicit browser refusal is final for this click. Do not spam permission
-                    // requests, reinterpret a denial as a stale endpoint, or bypass browser policy.
-                    if failure != HandshakeFailure::NotReady {
-                        bail!("{}", failure.message(&browser.label));
-                    }
-                }
-                Err(_) => bail!("等待浏览器确认超时；请重新点击连接，并在浏览器中允许本次连接。"),
-            }
-        }
-        // Re-read discovery every time; enabling the switch can rotate the port AND socket path.
-        tokio::time::sleep(RETRY_INTERVAL.min(deadline.saturating_duration_since(Instant::now())))
-            .await;
-    }
+    bail!("当前系统不支持浏览器登录窗口")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    pub(super) fn test_browser(root: PathBuf) -> Browser {
-        Browser {
-            label: "Test".into(),
-            root,
-            executable: PathBuf::new(),
-            setup_url: "",
-        }
-    }
-
-    #[tokio::test]
-    async fn retries_stale_discovery_until_switch_publishes_new_endpoint() {
-        let directory = tempfile::tempdir().unwrap();
-        let stale = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let stale_port = stale.local_addr().unwrap().port();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let path = directory.path().join("DevToolsActivePort");
-        tokio::fs::write(&path, format!("{stale_port}\n/devtools/browser/old"))
-            .await
-            .unwrap();
-        drop(stale);
-        let server = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            tokio::fs::write(&path, format!("{port}\n/devtools/browser/new"))
-                .await
-                .unwrap();
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            assert!(matches!(
-                socket.next().await.unwrap().unwrap(),
-                Message::Close(_)
-            ));
-        });
-        let mut connection = wait_for_connection(
-            &test_browser(directory.path().into()),
-            Duration::from_secs(3),
-        )
-        .await
-        .unwrap();
-        connection.socket.close(None).await.unwrap();
-        timeout(Duration::from_secs(1), server)
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn rejection_is_reported_once_without_permission_retry_loop() {
-        let directory = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::fs::write(
-            directory.path().join("DevToolsActivePort"),
-            format!("{port}\n/devtools/browser/denied"),
-        )
-        .await
-        .unwrap();
-        let server = tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            let _ = stream.read(&mut request).await.unwrap();
-            stream
-                .write_all(
-                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 19\r\n\r\nConnection rejected",
-                )
-                .await
-                .unwrap();
-            assert!(timeout(Duration::from_millis(600), listener.accept())
-                .await
-                .is_err());
-        });
-        let result = wait_for_connection(
-            &test_browser(directory.path().into()),
-            Duration::from_secs(3),
-        )
-        .await;
-        assert!(result.err().unwrap().to_string().contains("403"));
-        server.await.unwrap();
-    }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
@@ -1148,29 +690,6 @@ mod tests {
         assert!(youtube_session(&duplicated, &Value::Null, "test".into(), LoginSite::Ytm).is_err());
         assert!(!LoginSite::Ytm.matches("https://music.youtube.com.evil.test/"));
         assert!(!LoginSite::Youtube.matches("https://music.youtube.com/"));
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn existing_browser_routes_match_on_both_desktops() {
-        for (id, engine, expected) in [
-            ("chrome", super::super::discovery::BrowserEngine::Chromium, "chrome://inspect/#remote-debugging"),
-            ("edge", super::super::discovery::BrowserEngine::Chromium, "edge://inspect/#remote-debugging"),
-            ("firefox", super::super::discovery::BrowserEngine::Gecko, "kdj:gecko-toolbox"),
-            ("zen", super::super::discovery::BrowserEngine::Gecko, "kdj:gecko-toolbox"),
-        ] {
-            let installation = super::super::discovery::InstalledBrowser {
-                id: id.into(), label: id.into(), adapter_id: Some(id.into()),
-                engine: Some(engine), executable: PathBuf::from("browser"),
-                authorization_supported: true, direct_read_supported: true,
-            };
-            let mut browser = browser_for_installation(&installation).unwrap();
-            assert_eq!(browser.setup_url, expected);
-            let options = catalog(&[installation]);
-            assert_eq!(options[0].method, if engine == super::super::discovery::BrowserEngine::Gecko { "gecko_rdp" } else { "remote_debugging" });
-            browser.use_isolated();
-            assert_eq!(browser.setup_url, if engine == super::super::discovery::BrowserEngine::Gecko { "kdj:isolated-gecko" } else { "kdj:isolated-chromium" });
-        }
     }
 
     #[tokio::test]
@@ -1286,39 +805,5 @@ mod tests {
             );
             server.await.unwrap();
         }
-    }
-
-    #[tokio::test]
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    #[ignore = "explicitly selected existing Gecko profile; no browser launch, saving, or credential output"]
-    async fn live_confirmed_gecko_youtube() {
-        let id = std::env::var("KDJ_TEST_AUTHORIZATION_BROWSER").expect("select a browser");
-        let browser = super::super::discovery::installed().into_iter()
-            .find(|b| b.id == id || b.adapter_id.as_deref() == Some(&id)).expect("installed browser");
-        let profiles = super::super::gecko_profiles::options(&browser);
-        let profile = match std::env::var("KDJ_TEST_AUTHORIZATION_PROFILE") {
-            Ok(id) => profiles.iter().find(|p| p.id == id).expect("selected profile"),
-            Err(_) => { assert_eq!(profiles.len(), 1, "select a profile explicitly when there are several"); &profiles[0] }
-        };
-        let trace = LoginTrace::new("youtube", "profile_confirmation_test");
-        assert!(read_youtube(&browser.id, Platform::Youtube, &trace, Some(&profile.id), false, false, |s| async { Ok(s) }).await.is_err());
-        let mut session = read_youtube(&browser.id, Platform::Youtube, &trace, Some(&profile.id), true, false, |s| async { Ok(s) }).await
-            .expect("confirmed profile read");
-        session.validate().expect("valid YouTube session structure");
-        assert!(session.imported_from.contains("KDJ 确认读取"));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a running browser and explicit user approval; never prints credentials"]
-    async fn live_browser_authorization() {
-        let browser = std::env::var("KDJ_TEST_AUTHORIZATION_BROWSER")
-            .expect("select the explicitly authorized browser");
-        let trace = LoginTrace::new("soundcloud", "authorization_test");
-        let session = trace
-            .run(read_soundcloud(&browser, &trace, None, false, false, |s| async { Ok(s) }))
-            .await
-            .expect("browser authorization failed");
-        assert!(!session.token.is_empty());
-        eprintln!("SoundCloud session received through browser authorization (token omitted)");
     }
 }

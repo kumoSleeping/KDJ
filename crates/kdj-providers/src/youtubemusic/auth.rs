@@ -14,7 +14,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
-pub use crate::browser::BrowserCatalog;
 use kdj_core::models::Platform;
 
 use crate::provider::ProviderContext;
@@ -296,10 +295,6 @@ impl YoutubeAuth {
             .unwrap_or_default()
     }
 
-    pub fn browser_catalog() -> BrowserCatalog {
-        crate::browser::catalog()
-    }
-
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn import_browser(
         &self,
@@ -331,7 +326,7 @@ impl YoutubeAuth {
         };
         session.validate().with_context(|| {
             format!(
-                "没有从{imported_from}读取到已登录的 {label} 会话；请确认该 Profile 已登录 {label}，或在高级选项导入请求头"
+                "没有从{imported_from}读取到已登录的 {label}；请先在这个浏览器登录 {label}"
             )
         })?;
         Ok(session)

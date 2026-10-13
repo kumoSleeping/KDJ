@@ -98,7 +98,7 @@ fn session_from_reply(reply: Reply) -> Result<AuthorizedSession> {
             Ok(AuthorizedSession {
                 token,
                 expires_at: 0,
-                imported_from: "Arc · 浏览器授权".into(),
+                imported_from: "Arc".into(),
             })
         }
         "not_running" | "no_window" => bail!("请先打开已登录 SoundCloud 的 Arc 窗口，再点击连接"),
@@ -170,7 +170,7 @@ pub(super) async fn read_youtube(
         cookie.len() <= 128 * 1024 && !cookie.contains(['\r', '\n']),
         "Arc 返回的 YouTube 登录状态无效"
     );
-    let mut session = BrowserSession::from_cookie_header(&cookie, "Arc · 浏览器授权")?;
+    let mut session = BrowserSession::from_cookie_header(&cookie, "Arc")?;
     apply_youtube_metadata(&mut session, &reply.metadata.unwrap_or_default());
     Ok(session)
 }

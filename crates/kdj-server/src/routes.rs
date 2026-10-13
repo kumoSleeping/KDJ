@@ -80,35 +80,16 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             "/api/accounts/soundcloud/login/oauth/callback",
             post(soundcloud_oauth_callback),
         )
-        .route(
-            "/api/accounts/soundcloud/login/browsers",
-            get(browser_catalog),
-        )
-        .route(
-            "/api/accounts/soundcloud/login/browser",
-            post(soundcloud_browser_login),
-        )
-        .route(
-            "/api/accounts/soundcloud/login/browser/authorize",
-            post(soundcloud_browser_authorize),
-        )
+        .route("/api/accounts/{platform}/login/browsers", get(browser_catalog))
+        .route("/api/accounts/{platform}/login/browser", post(browser_login))
         .route(
             "/api/accounts/soundcloud/login/webview",
             post(soundcloud_webview_login),
         )
         .route("/api/accounts/soundcloud/login/headers", post(soundcloud_headers_login))
-        .route("/api/accounts/ytm/login/browsers", get(browser_catalog))
-        .route("/api/accounts/ytm/login/browser", post(ytm_browser_login))
-        .route("/api/accounts/ytm/login/browser/authorize", post(ytm_browser_authorize))
         .route("/api/accounts/ytm/login/headers", post(ytm_headers_login))
         .route("/api/accounts/ytm/login/webview", post(ytm_webview_login))
         .route("/api/accounts/youtube/login/webview", post(youtube_webview_login))
-        .route("/api/accounts/youtube/login/browsers", get(browser_catalog))
-        .route(
-            "/api/accounts/youtube/login/browser",
-            post(youtube_browser_login),
-        )
-        .route("/api/accounts/youtube/login/browser/authorize", post(youtube_browser_authorize))
         .route("/api/accounts/browser/login/cancel", post(cancel_browser_login))
         .route(
             "/api/accounts/youtube/login/headers",
@@ -744,10 +725,9 @@ struct BrowserLoginBody {
     request_id: Option<String>,
     #[serde(default)]
     profile: Option<String>,
+    /// 不读已有登录，改在所选浏览器的临时窗口里登录一次。
     #[serde(default)]
-    profile_read_confirmed: bool,
-    #[serde(default)]
-    new_window: bool,
+    window: bool,
 }
 
 #[derive(Deserialize)]
@@ -767,37 +747,62 @@ struct YoutubeWebviewLoginBody {
     cookie: String,
 }
 
-/// 只探测本机浏览器与 Profile；不会读取 Cookie 内容或触发系统钥匙串。
-async fn browser_catalog() -> ApiResult<Json<kdj_providers::browser::BrowserCatalog>> {
-    let catalog = tokio::task::spawn_blocking(kdj_providers::browser::catalog)
+/// 只探测本机浏览器与配置；不会读取 Cookie 内容或触发系统钥匙串。
+async fn browser_catalog(
+    AxumPath(platform): AxumPath<String>,
+) -> ApiResult<Json<kdj_providers::browser::BrowserCatalog>> {
+    // SoundCloud 和 YouTube 读不到已有登录时在浏览器里开临时窗口；其余平台另有扫码。
+    let windows = matches!(
+        parse_platform(&platform)?,
+        Platform::Soundcloud | Platform::Ytm | Platform::Youtube
+    );
+    let catalog = tokio::task::spawn_blocking(move || kdj_providers::browser::catalog(windows))
         .await
         .map_err(|error| ApiError::bad_request(format!("检测浏览器失败：{error}")))?;
     Ok(Json(catalog))
 }
 
-/// 从桌面浏览器的指定 Profile 导入 SoundCloud 网页会话。
-async fn soundcloud_browser_login(
+/// 复用所选浏览器里这个平台已有的登录；`window` 时改在该浏览器的临时窗口里登录一次。
+/// 验证通过才替换现有登录态。
+async fn browser_login(
     State(state): State<Arc<AppState>>,
+    AxumPath(platform): AxumPath<String>,
     Json(payload): Json<BrowserLoginBody>,
 ) -> ApiResult<Json<Account>> {
+    let platform = parse_platform(&platform)?;
     let browser = payload.browser.trim().to_string();
-    let profile = payload.profile.map(|profile| profile.trim().to_string());
     if browser.is_empty() {
         return Err(ApiError::bad_request("请选择浏览器"));
     }
-    state.soundcloud.import_browser(browser, profile).await?;
-    let account = state.soundcloud.account().await;
-    state.hub.publish("account.changed", &account);
-    Ok(Json(account))
-}
-
-async fn soundcloud_browser_authorize(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<BrowserLoginBody>,
-) -> ApiResult<Json<Account>> {
-    crate::browser_login::run(payload.request_id.as_deref(), state.soundcloud.import_authorized_browser(payload.browser, payload.profile, payload.profile_read_confirmed, payload.new_window)).await?;
-    let account = state.soundcloud.account().await;
-    state.hub.publish("account.changed", &account);
+    let profile = payload
+        .profile
+        .map(|profile| profile.trim().to_string())
+        .filter(|profile| !profile.is_empty());
+    let window = payload.window;
+    let account = crate::browser_login::run(payload.request_id.as_deref(), async {
+        match platform {
+            Platform::Soundcloud => {
+                state.soundcloud.import_browser(browser, profile, window).await?;
+                let account = state.soundcloud.account().await;
+                state.hub.publish("account.changed", &account);
+                Ok(account)
+            }
+            Platform::Ytm | Platform::Youtube => {
+                youtube_browser_login(&state, platform, browser, profile, window).await
+            }
+            _ => {
+                anyhow::ensure!(!window, "这个平台用扫码登录，没有登录窗口");
+                let provider = state
+                    .provider(platform)
+                    .ok_or_else(|| anyhow::anyhow!("平台不可用"))?;
+                provider.import_browser_login(&browser, profile.as_deref()).await?;
+                let account = provider.account().await;
+                state.hub.publish("account.changed", &account);
+                Ok(account)
+            }
+        }
+    })
+    .await?;
     Ok(Json(account))
 }
 
@@ -860,22 +865,17 @@ async fn commit_youtube_login(state: &AppState, platform: Platform, session: Bro
     Ok(account)
 }
 
-async fn youtube_direct_login(state: &AppState, platform: Platform, payload: BrowserLoginBody) -> anyhow::Result<Account> {
-    let trace = LoginTrace::new(youtube_login_site(platform), "direct");
-    trace.browser(&payload.browser);
+async fn youtube_browser_login(state: &AppState, platform: Platform, browser: String, profile: Option<String>, window: bool) -> anyhow::Result<Account> {
+    let trace = LoginTrace::new(youtube_login_site(platform), if window { "window" } else { "reuse" });
     trace.run(async {
-        trace.step("read_profile");
-        let auth = if platform == Platform::Ytm { state.ytm_auth.clone() } else { state.youtube_auth.clone() };
-        let session = tokio::task::spawn_blocking(move || auth.import_browser(payload.browser.trim(), payload.profile.as_deref()))
-            .await.map_err(|_| anyhow::anyhow!("读取浏览器会话任务失败"))??;
-        save_youtube_login(state, platform, session, &trace).await
-    }).await
-}
-
-async fn youtube_authorized_login(state: &AppState, platform: Platform, payload: BrowserLoginBody) -> anyhow::Result<Account> {
-    let trace = LoginTrace::new(youtube_login_site(platform), "authorize");
-    trace.run(crate::browser_login::run(payload.request_id.as_deref(), async {
-        let session = kdj_providers::browser::authorization::read_youtube(&payload.browser, platform, &trace, payload.profile.as_deref(), payload.profile_read_confirmed, payload.new_window, |session| {
+        if !window && !kdj_providers::browser::authorization::reads_existing(&browser) {
+            trace.step("read_profile");
+            let auth = if platform == Platform::Ytm { state.ytm_auth.clone() } else { state.youtube_auth.clone() };
+            let session = tokio::task::spawn_blocking(move || auth.import_browser(&browser, profile.as_deref()))
+                .await.map_err(|_| anyhow::anyhow!("读取浏览器会话任务失败"))??;
+            return save_youtube_login(state, platform, session, &trace).await;
+        }
+        let session = kdj_providers::browser::authorization::read_youtube(&browser, platform, window, &trace, |session| {
             let trace = &trace;
             async move {
                 validate_youtube_login(state, platform, &session, trace).await?;
@@ -883,7 +883,7 @@ async fn youtube_authorized_login(state: &AppState, platform: Platform, payload:
             }
         }).await?;
         commit_youtube_login(state, platform, session, &trace).await
-    })).await
+    }).await
 }
 
 #[derive(Deserialize)]
@@ -914,18 +914,6 @@ async fn youtube_window_login(state: &AppState, platform: Platform, raw: &str) -
     }).await
 }
 
-async fn ytm_browser_login(State(state): State<Arc<AppState>>, Json(payload): Json<BrowserLoginBody>) -> ApiResult<Json<Account>> {
-    Ok(Json(youtube_direct_login(&state, Platform::Ytm, payload).await?))
-}
-async fn youtube_browser_login(State(state): State<Arc<AppState>>, Json(payload): Json<BrowserLoginBody>) -> ApiResult<Json<Account>> {
-    Ok(Json(youtube_direct_login(&state, Platform::Youtube, payload).await?))
-}
-async fn ytm_browser_authorize(State(state): State<Arc<AppState>>, Json(payload): Json<BrowserLoginBody>) -> ApiResult<Json<Account>> {
-    Ok(Json(youtube_authorized_login(&state, Platform::Ytm, payload).await?))
-}
-async fn youtube_browser_authorize(State(state): State<Arc<AppState>>, Json(payload): Json<BrowserLoginBody>) -> ApiResult<Json<Account>> {
-    Ok(Json(youtube_authorized_login(&state, Platform::Youtube, payload).await?))
-}
 async fn ytm_headers_login(State(state): State<Arc<AppState>>, Json(payload): Json<YoutubeHeadersLoginBody>) -> ApiResult<Json<Account>> {
     Ok(Json(youtube_pasted_login(&state, Platform::Ytm, &payload.headers).await?))
 }

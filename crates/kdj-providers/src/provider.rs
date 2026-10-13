@@ -307,6 +307,12 @@ pub trait MusicProvider: Send + Sync {
     /// 清空本地登录态。
     async fn logout(&self) -> Result<()>;
 
+    /// 复用桌面浏览器里这个平台已有的登录。`browser` 和 `profile` 是 `browser::catalog`
+    /// 给出的 id；验证通过才替换现有登录态。SoundCloud 和 YouTube 另有自己的入口。
+    async fn import_browser_login(&self, _browser: &str, _profile: Option<&str>) -> Result<()> {
+        anyhow::bail!("这个平台不支持复用浏览器登录")
+    }
+
     async fn search(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>>;
 
     /// 搜索歌单/艺术家/专辑集合。默认不支持，避免把集合 ID 伪装成歌曲 ID。

@@ -3,9 +3,10 @@
 use super::*;
 use std::process::Stdio;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::{Child, Command},
 };
+use tokio_tungstenite::{connect_async_with_config, tungstenite::protocol::WebSocketConfig};
 
 struct Session {
     child: Option<Child>,

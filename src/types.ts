@@ -204,30 +204,21 @@ export interface Account {
   credential_kind?: "anonymous" | "browser_session" | "oauth" | "ytm_oauth" | string;
 }
 
-export interface BrowserProfile {
+/** A browser of this computer that an account can be logged in from. */
+export interface LoginBrowser {
   id: string;
   label: string;
-  requires_elevation: boolean;
-}
-
-export interface BrowserOption {
-  id: string;
-  label: string;
-  profiles: BrowserProfile[];
+  profiles: { id: string; label: string }[];
+  /** The login it already has can be read. */
+  reuse: boolean;
+  /** It can show a login window on a fresh profile. */
+  window: boolean;
 }
 
 export interface BrowserCatalog {
   supported: boolean;
   platform: string;
-  browsers: BrowserOption[];
-  authorization_browsers?: { id: string; label: string; method?: "remote_debugging" | "system_automation" | "gecko_rdp" | "isolated_window" | "profile_confirmation"; profiles?: { id: string; label: string; requires_elevation: boolean }[] }[];
-  installed_browsers?: {
-    id: string;
-    label: string;
-    adapter_id: string | null;
-    direct_read_supported: boolean;
-    authorization_supported: boolean;
-  }[];
+  browsers: LoginBrowser[];
 }
 
 /** 同一登录会话下的一张可选二维码（QQ 音乐会同时给 QQ 音乐 / QQ 两张）。 */

@@ -1,9 +1,7 @@
-//! Gecko's existing profiles, used only after explicit KDJ consent. Discovery reads application
-//! metadata and profiles.ini, never cookies. Unknown forks do not inherit Firefox's profile root.
-use super::{
-    discovery::{BrowserEngine, InstalledBrowser},
-    BrowserProfileOption,
-};
+//! Gecko's existing profiles. Discovery reads application metadata and profiles.ini, never
+//! cookies. Unknown forks do not inherit Firefox's profile root. A read covers ordinary tabs
+//! only: containers, private windows and partitioned sessions are left out.
+use super::discovery::{BrowserEngine, InstalledBrowser};
 use anyhow::{Context, Result};
 use ini::Ini;
 use std::path::{Component, Path, PathBuf};
@@ -38,10 +36,10 @@ fn metadata_root(ini: &Ini, base: &Path, windows: bool) -> Option<PathBuf> {
     Some(base.join(relative))
 }
 
-fn profiles(browser: &InstalledBrowser) -> Result<Vec<rookie::BrowserProfile>> {
+pub(super) fn profiles(browser: &InstalledBrowser) -> Result<Vec<rookie::BrowserProfile>> {
     anyhow::ensure!(
         browser.engine == Some(BrowserEngine::Gecko),
-        "此浏览器不支持已有配置授权"
+        "此浏览器没有可读取的配置"
     );
     // Known stable installations retain their established, platform-specific profile discovery.
     if let Some(adapter @ ("firefox" | "zen" | "librewolf" | "cachy")) =
@@ -86,36 +84,27 @@ fn profiles(browser: &InstalledBrowser) -> Result<Vec<rookie::BrowserProfile>> {
         .map_err(|_| anyhow::anyhow!("无法查找浏览器配置"))
 }
 
-pub(super) fn options(browser: &InstalledBrowser) -> Vec<BrowserProfileOption> {
-    profiles(browser)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|p| BrowserProfileOption {
-            id: p.id,
-            label: p.name,
-            requires_elevation: false,
-        })
-        .collect()
-}
-
 pub(super) fn read(
     browser: &InstalledBrowser,
     profile: Option<&str>,
-    confirmed: bool,
     domains: Vec<String>,
 ) -> Result<super::BrowserProfileCookies> {
-    anyhow::ensure!(confirmed, "请先允许 KDJ 读取所选浏览器的站点登录状态");
-    let profile = profile
-        .filter(|id| !id.is_empty())
-        .context("请选择浏览器配置；请先在该浏览器的普通标签页登录")?;
-    let selected = profiles(browser)?
-        .into_iter()
-        .find(|p| p.id == profile)
-        .context("所选浏览器配置已不可用，请重新检测")?;
+    let mut profiles = profiles(browser)?;
+    // The catalog lists the most recently used profile first; no choice means that one.
+    let selected = match profile {
+        Some(id) => profiles
+            .into_iter()
+            .find(|p| p.id == id)
+            .context("所选浏览器配置已不可用，请重新检测")?,
+        None => {
+            anyhow::ensure!(!profiles.is_empty(), "没有检测到这个浏览器的配置");
+            profiles.remove(0)
+        }
+    };
     let cookies = rookie::mozilla_profile_cookies(&selected, domains)
         .map_err(|_| anyhow::anyhow!("读取浏览器登录状态失败；请稍后重试"))?;
     Ok(super::BrowserProfileCookies {
-        imported_from: format!("{} · {} · KDJ 确认读取", browser.label, selected.name),
+        imported_from: format!("{} · {}", browser.label, selected.name),
         cookies,
     })
 }
@@ -142,21 +131,5 @@ mod tests {
         for invalid in ["../Firefox", "/Firefox", "C:\\Firefox", "..\\Firefox", ""] {
             assert!(relative_path(invalid).is_none());
         }
-    }
-    #[test]
-    fn unconfirmed_read_stops_before_discovery_or_database_access() {
-        let browser = InstalledBrowser {
-            id: "missing".into(),
-            label: "Mystery".into(),
-            adapter_id: None,
-            direct_read_supported: false,
-            authorization_supported: true,
-            engine: Some(BrowserEngine::Gecko),
-            executable: "/missing".into(),
-        };
-        let error = read(&browser, Some("missing"), false, vec!["youtube.com".into()])
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("请先允许"));
     }
 }
