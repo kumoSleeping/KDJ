@@ -5,7 +5,7 @@ import { useSurfaceBackdrop } from "../common/SurfaceBackdrop";
 import { createPortal } from "react-dom";
 import { MOTION_IN_MS, MOTION_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import { SONG_SWAP_IN_EASE, SONG_SWAP_OUT_EASE } from "../../lib/songSwapMotion";
-import { readLocalStorage, removeLocalStorage, writeLocalStorageNow } from "../../lib/storageWrite";
+import { removeLocalStorage } from "../../lib/storageWrite";
 import { raiseSurface } from "../../lib/surfaceOrder";
 import { useWindowTaken } from "../../lib/windowTaken";
 import type { DrawerEntry, DrawerSpec } from "./drawerSchema";
@@ -21,19 +21,9 @@ const HOLD_MS = 120;
  *  it the panel comes in at the extent's default height and follows its measure when it has one:
  *  a request that hangs must not hang the drawer. */
 const PENDING_HOLD_MS = 600;
-const HEIGHT_KEY = "kd-drawer-height";
-const MIN_HEIGHT = 180;
-
-const heightResets = new Set<() => void>();
-/**
- * Gives the panel's height back to the app's own extent, as a double click on its bottom edge
- * does. For an app whose extent the listener chooses elsewhere (the lyrics' menu): a height that
- * was dragged earlier would otherwise keep that choice from showing.
- */
-export function resetDrawerHeight(): void {
-  for (const reset of heightResets) reset();
-}
-
+/** The key a dragged height used to be kept under. A height is the system's to decide: the
+ *  panel's own extent follows what it holds, so a stored value is removed, not read. */
+const LEGACY_HEIGHT_KEY = "kd-drawer-height";
 const DrawerContext = createContext<string | null>(null);
 /** The id of the drawer a component is shown in, or null outside one. */
 export function useDrawer(): string | null { return useContext(DrawerContext); }
@@ -171,17 +161,13 @@ function PagedTitle({ usePage, ...title }: { spec: DrawerSpec; usePage(): string
   return <DrawerTitle {...title} page={usePage()} />;
 }
 
-function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart, onHeightStart, onHeightReset }: {
+function DrawerLayer({ spec, leaving, panelId, onGone, onResizeStart }: {
   spec: DrawerSpec;
   leaving: boolean;
-  /** The user has dragged a height: the app's extent does not decide it. */
-  userSized: boolean;
   /** Names the body for the page tabs in the title row. */
   panelId: string;
   onGone(): void;
   onResizeStart?(event: PointerEvent<HTMLDivElement>): void;
-  onHeightStart(event: PointerEvent<HTMLDivElement>): void;
-  onHeightReset(): void;
 }) {
   const layer = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
@@ -248,7 +234,7 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
   }, []);
   // A `fit` panel arrives at its prepared height. Explicitly pending content (settings'
   // storage statistics, for example) must not be mistaken for a short finished page.
-  const [patient, setPatient] = useState(spec.extent === "fit" && !userSized);
+  const [patient, setPatient] = useState(spec.extent === "fit");
   const held = patient && fit === null;
   useEffect(() => {
     if (!held || leaving) return;
@@ -332,8 +318,6 @@ function DrawerLayer({ spec, leaving, userSized, panelId, onGone, onResizeStart,
     </DrawerContext.Provider>
     {onResizeStart && !leaving && !inWindow && <div className="kd-drawer-resize" role="separator" aria-orientation="vertical"
       aria-label="调整抽屉宽度" onPointerDown={onResizeStart} />}
-    {!leaving && !inWindow && <div className="kd-drawer-resize" data-edge="bottom" role="separator" aria-orientation="horizontal"
-      aria-label="调整抽屉高度" title="拖动调整高度 · 双击恢复" onPointerDown={onHeightStart} onDoubleClick={onHeightReset} />}
   </section>;
 }
 
@@ -423,43 +407,9 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
     else if (hostRef) hostRef.current = node;
   };
   const panelIdPrefix = useId();
-  // The height the user dragged the panel to, in px; null leaves it to each app's extent.
-  const [userHeight, setUserHeight] = useState<number | null>(() => {
-    const saved = Number.parseFloat(readLocalStorage(HEIGHT_KEY) ?? "");
-    return Number.isFinite(saved) && saved > 0 ? saved : null;
-  });
-  const startHeightDrag = (event: PointerEvent<HTMLDivElement>) => {
-    const sheet = event.currentTarget.parentElement, node = sheet?.parentElement;
-    if (event.button !== 0 || !sheet || !node) return;
-    event.preventDefault();
-    const handle = event.currentTarget, from = event.clientY, start = sheet.getBoundingClientRect().height;
-    let height = start;
-    handle.setPointerCapture(event.pointerId);
-    const move = (moved: globalThis.PointerEvent) => {
-      height = Math.max(MIN_HEIGHT, start + moved.clientY - from);
-      node.style.setProperty("--kd-drawer-user-h", `${Math.round(height)}px`);
-      node.dataset.sized = "true";
-    };
-    const end = () => {
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", end);
-      handle.removeEventListener("pointercancel", end);
-      if (Math.abs(height - start) < 2) return;
-      writeLocalStorageNow(HEIGHT_KEY, String(Math.round(height)));
-      setUserHeight(Math.round(height));
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", end);
-    handle.addEventListener("pointercancel", end);
-  };
-  const resetHeight = () => {
-    removeLocalStorage(HEIGHT_KEY);
-    setUserHeight(null);
-  };
-  useEffect(() => {
-    heightResets.add(resetHeight);
-    return () => { heightResets.delete(resetHeight); };
-  });
+  // The width is the listener's; the height never is: each app's extent decides it. A height
+  // dragged by an earlier build is dropped.
+  useEffect(() => { removeLocalStorage(LEGACY_HEIGHT_KEY); }, []);
   // The open app's entry puts it away; any other asks for its own app.
   const ask = (entry: DrawerEntry) => { if (spec?.id === entry.id) spec.close(); else entry.open(); };
   // One panel on screen at a time: while one is leaving, the next waits its turn.
@@ -494,14 +444,13 @@ export function DrawerHost({ spec, entries = [], hostRef, onResizeStart }: {
   // A panel that comes out is in front of the other floating surfaces.
   const frontKey = front?.key;
   useLayoutEffect(() => { if (frontKey !== undefined && !waiting) raiseSurface(sheets.current); }, [frontKey, waiting]);
-  const panels = out ? <div ref={sheets} className="kd-drawer-sheets" data-sized={userHeight === null ? undefined : "true"}
-    style={userHeight === null ? undefined : { "--kd-drawer-user-h": `${userHeight}px` } as CSSProperties}
+  const panels = out ? <div ref={sheets} className="kd-drawer-sheets"
     onPointerDownCapture={() => raiseSurface(sheets.current)}>
     {layers.map(layer => {
       const shown = layer.leaving ?? panel;
       if (!shown || (waiting && !layer.leaving)) return null;
-      return <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} userSized={userHeight !== null} panelId={`${panelIdPrefix}-${layer.key}`}
-        onResizeStart={onResizeStart} onHeightStart={startHeightDrag} onHeightReset={resetHeight}
+      return <DrawerLayer key={layer.key} spec={shown} leaving={!!layer.leaving} panelId={`${panelIdPrefix}-${layer.key}`}
+        onResizeStart={onResizeStart}
         onGone={() => setLayers(list => list.filter(item => item.key !== layer.key))} />;
     })}
   </div> : null;
