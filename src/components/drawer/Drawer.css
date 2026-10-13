@@ -57,6 +57,7 @@
   transition: color 160ms ease;
 }
 .kd-drawer-entry > svg { flex: none; }
+
 .kd-drawer-entry:hover { color: var(--kd-text); }
 .kd-drawer-entry[aria-pressed="true"] { color: var(--kd-text); }
 .kd-drawer-entry:focus-visible { outline: 1px solid var(--kd-focus, var(--kd-text)); outline-offset: 2px; }
@@ -321,6 +322,15 @@
 .kd-drawer-body > .kd-split-aside-body { flex: 1 1 auto; min-height: 0; padding: 0 1.1rem 1rem; }
 /* 使用提示 is as long as its list: it does not stretch to fill a panel that is sized by it. */
 .kd-drawer-body .kd-tips-panel { min-height: 0; }
+/* A lesson: the little mouse's picture, then one line under it. Spacing separates them. */
+.kd-tips-lessons { display: grid; gap: 1.4rem; padding: 0.35rem 0.9rem 1.1rem; }
+.kd-tips-lesson { display: grid; justify-items: center; gap: 0.5rem; margin: 0; }
+.kd-tips-lesson > figcaption {
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+  line-height: 1.5;
+  text-align: center;
+}
 
 /* 歌词 */
 .kd-drawer-lyrics { flex: 1 1 auto; height: auto; min-height: 0; gap: 0; padding: 0 0.35rem 0.5rem; }

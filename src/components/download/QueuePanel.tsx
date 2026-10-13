@@ -41,6 +41,7 @@ import { QueueTaskList, type QueueListPosition } from "../queue/QueueTaskList";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 import { PlatformMark } from "./PlatformMark";
 import { installDownloadEntryDrop } from "../../lib/downloadDropEntry";
+import { MouseDemo } from "../common/MouseDemo";
 import "./DownloadToss.css";
 
 installDownloadEntryDrop();
@@ -819,7 +820,7 @@ export function QueuePanel({ history = false, position }: { history?: boolean; p
 
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
-      <QueueTaskList emptyMessage={history ? undefined : "在线将歌曲拖入此处准备下载~"} count={visibleTasks.length} getKey={index => visibleTasks[index].id} position={position}>
+      <QueueTaskList empty={history ? undefined : <MouseDemo scene="drag-in" tray="download" label="将歌曲拖入此处准备下载" />} count={visibleTasks.length} getKey={index => visibleTasks[index].id} position={position}>
         {index => <QueueRow task={visibleTasks[index]} order={String(index + 1)} onOpenTask={openTask} />}
       </QueueTaskList>
     </QueueFrame>

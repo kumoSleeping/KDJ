@@ -1,0 +1,187 @@
+/* The little mouse and its lessons (MouseDemo.tsx). Neutral ink on the panel: tones of the text
+   colour, never a hue. Only transform and opacity move. */
+.kd-demo {
+  display: block;
+  width: 100%;
+  max-width: 15rem;
+  height: auto;
+  overflow: visible;
+  color: var(--kd-text);
+}
+.kd-demo-row-base,
+.kd-demo-chip-body { fill: color-mix(in srgb, var(--kd-text) 7%, transparent); }
+.kd-demo-chip-body { fill: color-mix(in srgb, var(--kd-text) 12%, var(--kd-panel)); }
+.kd-demo-row-pick {
+  fill: color-mix(in srgb, var(--kd-text) 17%, transparent);
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+.kd-demo-row-pick[data-on] { opacity: 1; }
+.kd-demo-cover { fill: color-mix(in srgb, var(--kd-text) 22%, transparent); }
+.kd-demo-line { fill: color-mix(in srgb, var(--kd-text) 26%, transparent); transition: opacity 120ms ease; }
+.kd-demo-line[data-faint] { fill: color-mix(in srgb, var(--kd-text) 15%, transparent); }
+.kd-demo-tick {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+.kd-demo-tick[data-on] { opacity: 1; }
+.kd-demo-glass { fill: none; stroke: var(--kd-muted); stroke-width: 1.5; stroke-linecap: round; }
+.kd-demo-caret { fill: currentColor; animation: kd-demo-blink 900ms steps(1, end) infinite; }
+@keyframes kd-demo-blink { from { opacity: 1; } 50% { opacity: 0; } to { opacity: 1; } }
+.kd-demo-result { transition: opacity 240ms ease; }
+
+/* The tray things are dropped on. */
+.kd-demo-tray-pop { transform-box: fill-box; transform-origin: center; transition: transform 220ms var(--kd-ease-out, ease-out); }
+.kd-demo-tray[data-hot] .kd-demo-tray-pop { transform: scale(1.04); }
+.kd-demo-tray-box {
+  fill: color-mix(in srgb, var(--kd-text) 5%, transparent);
+  stroke: color-mix(in srgb, var(--kd-text) 30%, transparent);
+  stroke-width: 1.4;
+  stroke-dasharray: 5 5;
+  stroke-linecap: round;
+}
+.kd-demo-tray[data-hot] .kd-demo-tray-box { stroke: var(--kd-text); }
+.kd-demo-tray-mark {
+  fill: none;
+  stroke: var(--kd-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: opacity 200ms ease;
+}
+.kd-demo-tray-mark[data-gone] { opacity: 0; }
+.kd-demo-chip {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition-property: transform, opacity;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1), ease;
+}
+
+/* The visualizer lesson: bars that bounce, and a slider that sets how much. */
+.kd-demo-bars { transform-box: view-box; transform-origin: 0 86px; transition-property: transform; transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
+.kd-demo-bar {
+  fill: color-mix(in srgb, var(--kd-text) 30%, transparent);
+  transform-box: fill-box;
+  transform-origin: bottom;
+  animation: kd-demo-bounce 1100ms ease-in-out infinite alternate;
+}
+@keyframes kd-demo-bounce {
+  from { transform: scaleY(0.18); }
+  to { transform: scaleY(1); }
+}
+.kd-demo-fill {
+  fill: color-mix(in srgb, var(--kd-text) 55%, transparent);
+  transform-box: fill-box;
+  transform-origin: left;
+  transition-property: transform;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+.kd-demo-knob { fill: var(--kd-text); transition-property: transform; transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
+
+/* The keycap that is held. */
+.kd-demo-key-lip { fill: color-mix(in srgb, var(--kd-text) 18%, transparent); }
+.kd-demo-key-face { fill: color-mix(in srgb, var(--kd-text) 8%, var(--kd-panel)); }
+.kd-demo-key-top { transition: transform 120ms ease; }
+.kd-demo-key-text {
+  fill: var(--kd-muted);
+  font-size: 9.5px;
+  font-weight: 600;
+  transition: fill 120ms ease;
+}
+.kd-demo-key[data-down] .kd-demo-key-top { transform: translateY(2.5px); }
+.kd-demo-key[data-down] .kd-demo-key-text { fill: var(--kd-text); }
+
+/* The pointer and the click's ring. */
+.kd-demo-pointer { transition-property: transform; transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
+.kd-demo-cursor {
+  fill: var(--kd-text);
+  stroke: var(--kd-panel);
+  stroke-width: 1;
+  stroke-linejoin: round;
+}
+.kd-demo-ping {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kd-demo-ping 420ms ease-out both;
+}
+@keyframes kd-demo-ping {
+  from { opacity: 0.6; transform: scale(0.4); }
+  to { opacity: 0; transform: scale(1.7); }
+}
+
+/* The mouse itself. */
+.kd-demo-buddy { transition: transform 600ms cubic-bezier(0.22, 0.9, 0.26, 1); }
+.kd-demo-mouse {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  transition: transform 90ms ease;
+}
+.kd-demo-mouse[data-press] { transform: scale(1.05, 0.9); }
+.kd-demo-mouse-body { fill: var(--kd-panel); stroke: currentColor; stroke-width: 1.4; stroke-linejoin: round; }
+.kd-demo-mouse-btn { fill: currentColor; opacity: 0; transition: opacity 80ms ease; }
+.kd-demo-mouse-btn[data-on] { opacity: 0.28; }
+.kd-demo-mouse-seam { fill: none; stroke: currentColor; stroke-width: 1; stroke-linecap: round; opacity: 0.55; }
+.kd-demo-cable { fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; opacity: 0.55; }
+.kd-demo-eye { fill: currentColor; transform-box: fill-box; transform-origin: center; animation: kd-demo-wink 4200ms ease-in-out infinite; }
+@keyframes kd-demo-wink {
+  from { transform: scaleY(1); }
+  94% { transform: scaleY(1); }
+  97% { transform: scaleY(0.1); }
+  to { transform: scaleY(1); }
+}
+.kd-demo-blush { fill: currentColor; opacity: 0.14; }
+.kd-demo-smile { fill: none; stroke: currentColor; stroke-width: 1.1; stroke-linecap: round; }
+
+/* The face on its own (the bulb's first-run greeting). */
+.kd-demo-face { display: block; width: 100%; height: 100%; overflow: visible; color: var(--kd-text); }
+
+@media (prefers-reduced-motion: reduce) {
+  .kd-demo *,
+  .kd-demo-face * { animation: none !important; transition: none !important; }
+}
+
+/* The floating window's play mark, and the player bar's toggle keys. */
+.kd-demo-playmark { fill: var(--kd-muted); }
+.kd-demo-togglekey > * { fill: none; stroke: var(--kd-muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: stroke 140ms ease; }
+.kd-demo-togglekey[data-on] > * { stroke: var(--kd-red, var(--kd-text)); }
+
+/* The first greeting of a new app: the little mouse hops up under the key and clicks it, and the
+   icon bobs with each click. No words; it ends for good once the app has been opened. */
+.kd-chrome-btn[data-fresh] { position: relative; color: var(--kd-text); }
+.kd-chrome-btn[data-fresh] > svg:first-child { animation: kd-fresh-bob 1800ms ease-in-out infinite; }
+.kd-fresh-mouse {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  width: 18px;
+  height: 32px;
+  margin: 1px 0 0 -9px;
+  pointer-events: none;
+  animation: kd-fresh-hop 1800ms ease-in-out infinite;
+}
+@keyframes kd-fresh-hop {
+  from { opacity: 0; transform: translateY(8px); }
+  15% { opacity: 1; transform: translateY(0); }
+  45% { opacity: 1; transform: translateY(-5px); }
+  60% { opacity: 1; transform: translateY(0); }
+  85% { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(8px); }
+}
+@keyframes kd-fresh-bob {
+  from { transform: translateY(0) rotate(0deg); }
+  45% { transform: translateY(0) rotate(0deg); }
+  55% { transform: translateY(-2px) rotate(-8deg); }
+  65% { transform: translateY(0) rotate(6deg); }
+  to { transform: translateY(0) rotate(0deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-chrome-btn[data-fresh] > svg:first-child, .kd-fresh-mouse { animation: none; }
+}
