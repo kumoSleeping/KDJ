@@ -181,6 +181,7 @@ import {
 import { decideNativeLatestIntent, holdsSeekPosition, LatestIntentGate, nativeSeekDispatchDelay, SEEK_SETTLE_MS } from "../../lib/latestIntentGate";
 import {
   shouldBeginManagerTransition,
+  shouldFenceStreamSwitch,
   shouldClearLocalVideoSessionForTrack,
   shouldRequestLocalVideoSessionForTrack,
 } from "../../lib/playerTransitionPolicy";
@@ -1794,7 +1795,17 @@ export function PlayerBar() {
       // 在线占位曲目的封面/标题会立刻换，但媒体 URL 还在 BotGuard/player 请求中。
       // 普通换源必须在 PLAY_EVENT 这一拍停掉旧 Deck；DJ handoff 则刻意保留它，
       // 否则第二台 Deck 即使稍后准备成功，也已经没有可供交叉渐变的退场音频。
-      if (autoPlay && isUnresolvedStreamTrack(next) && !wantsDjTransition) {
+      // The same holds for a stream whose URL is already known (played before, or preloaded as
+      // the queue's next): it still has to buffer, and the old Deck must not sound meanwhile.
+      const fencesStreamSwitch = shouldFenceStreamSwitch({
+        autoPlay,
+        djTransition: wantsDjTransition,
+        nextIsStream: isStreamTrack(next),
+        nextIsUnresolved: isUnresolvedStreamTrack(next),
+        nextIsCompositionPreview: isCompositionPreview(next),
+        purposeIsComposition: parsed.purpose === "composition",
+      });
+      if (fencesStreamSwitch) {
         deferredStreamAutoplayRef.current = next.id;
         pendingTrackSwitchRef.current = {
           trackId: next.id,
@@ -1898,7 +1909,7 @@ export function PlayerBar() {
       }
       setPosition(0);
       setDuration(next.duration ?? 0);
-      commitPlaying(autoPlay && !isUnresolvedStreamTrack(next));
+      commitPlaying(autoPlay && !fencesStreamSwitch);
       // 手动点播的也记进"放过了"：不然自动续播会把用户刚听完的那首再接一遍
       if (autoPlay) markPlayed(next.id);
     };
@@ -2052,8 +2063,8 @@ export function PlayerBar() {
     void (async () => {
       try {
         const wasUnresolved = isUnresolvedStreamTrack(track);
-        if (wasUnresolved) {
-          // 唱盘已经换到这首；解析直链期间先停掉上一首，避免封面已经是新歌、喇叭还在放旧歌。
+        if (wasUnresolved || autoplayAfterResolve) {
+          // 唱盘已经换到这首；解析直链、缓冲期间先停掉上一首，避免封面已经是新歌、喇叭还在放旧歌。
           if (player) {
             // PLAY_EVENT already submitted a physical Clear on the control lane. Await its ACK so
             // this new Load cannot race ahead and leave the previous Deck available for rollback.

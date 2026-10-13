@@ -53,3 +53,32 @@ export function shouldRequestLocalVideoSessionForTrack(
 ): boolean {
   return nextIsVideo && (sessionSource !== "local" || sessionTrackId !== nextTrackId);
 }
+
+export interface SourceSwitchFenceIntent {
+  autoPlay: boolean;
+  /** The switch is a DJ handoff: the outgoing Deck is meant to stay audible for the overlap. */
+  djTransition: boolean;
+  /** The target plays from a provider stream (any id < 0). */
+  nextIsStream: boolean;
+  /** Its provider URL is still being resolved. */
+  nextIsUnresolved: boolean;
+  /** A scratch/preview track of a composition editor keeps its own lifecycle. */
+  nextIsCompositionPreview: boolean;
+  purposeIsComposition: boolean;
+}
+
+/**
+ * A stream cannot start sounding when the user picks it: its URL is still being resolved, or it
+ * is already known but the remote bytes must be buffered first. The UI has already moved to the
+ * new song, so the outgoing Deck must be stopped and its snapshots disowned at the same moment
+ * (Clear + a fence on stale snapshots); a hand-over that keeps it audible until the replacement
+ * is ready is only right for a DJ overlap. Local files load fast enough to keep the old Deck
+ * until the new one is installed (eager manager load). A stream without a URL has always been
+ * fenced, whatever it is for; one whose URL is known is fenced outside the composition editors.
+ */
+export function shouldFenceStreamSwitch(intent: SourceSwitchFenceIntent): boolean {
+  return intent.autoPlay
+    && !intent.djTransition
+    && (intent.nextIsUnresolved
+      || (intent.nextIsStream && !intent.nextIsCompositionPreview && !intent.purposeIsComposition));
+}
