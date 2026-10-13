@@ -9,6 +9,11 @@ use std::path::PathBuf;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+mod engine;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrowserEngine { Gecko, Chromium }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InstalledBrowser {
@@ -18,6 +23,8 @@ pub struct InstalledBrowser {
     pub adapter_id: Option<String>,
     pub direct_read_supported: bool,
     pub authorization_supported: bool,
+    #[serde(skip)]
+    pub(crate) engine: Option<BrowserEngine>,
     #[serde(skip)]
     pub(crate) executable: PathBuf,
 }
@@ -33,7 +40,9 @@ pub fn installed() -> Vec<InstalledBrowser> {
 }
 
 fn normalize(mut candidates: Vec<InstalledBrowser>) -> Vec<InstalledBrowser> {
-    candidates.sort_by(|a, b| a.executable.cmp(&b.executable));
+    candidates.sort_by(|a, b| a.executable.cmp(&b.executable)
+        .then(b.direct_read_supported.cmp(&a.direct_read_supported))
+        .then(b.authorization_supported.cmp(&a.authorization_supported)));
     candidates.dedup_by(|a, b| a.id == b.id);
     candidates.sort_by(|a, b| a.label.cmp(&b.label).then(a.id.cmp(&b.id)));
     // Keep multiple installations selectable without exposing their paths to the frontend.
@@ -74,12 +83,24 @@ fn candidate(
         "installed-{}",
         hex::encode(Sha256::digest(identity.as_bytes()))
     );
+    let engine = match adapter {
+        Some("firefox" | "zen" | "librewolf" | "cachy") => Some(BrowserEngine::Gecko),
+        Some("chrome" | "edge" | "arc" | "brave" | "chromium" | "vivaldi" | "opera" | "opera_gx" | "octo_browser") => Some(BrowserEngine::Chromium),
+        _ => None,
+    };
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let engine = engine.or_else(|| if cfg!(target_os = "macos") {
+        engine::detect_macos(&executable)
+    } else {
+        engine::detect(&executable)
+    });
     Some(InstalledBrowser {
+        engine,
         id,
         label,
         adapter_id: adapter.map(str::to_owned),
         direct_read_supported: adapter.is_some_and(|id| super::browser_label(id).is_some()),
-        authorization_supported: adapter.is_some_and(super::authorization::supports),
+        authorization_supported: adapter.is_some_and(super::authorization::supports) || engine.is_some(),
         executable,
     })
 }
@@ -148,6 +169,7 @@ mod tests {
     #[test]
     fn installations_deduplicate_without_merging_distinct_paths() {
         let browser = |id: &str, path: &str| InstalledBrowser {
+            engine: None,
             id: id.into(),
             label: "Browser".into(),
             adapter_id: None,

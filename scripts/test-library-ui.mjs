@@ -15,7 +15,8 @@ entry._compile((await build({
   logOverride: { "empty-import-meta": "silent" }, write: false,
   plugins: [{ name: "library-test-bridge", setup(build) {
     build.onResolve({ filter: /(^|\/)bridge$/ }, () => ({ path: "bridge", namespace: "library-test" }));
-    build.onLoad({ filter: /.*/, namespace: "library-test" }, () => ({ contents: `
+    build.onLoad({ filter: /.*/, namespace: "library-test" }, () => ({ contents: source === "tests/youtube-login-ui.test.ts"
+      ? "export const getBridge = () => window.kdj;" : `
       export const getBridge = () => ({
         baseUrl: "http://localhost", authToken: "library-test", mediaToken: "library-test", platform: "darwin",
       });

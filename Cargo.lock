@@ -3222,6 +3222,7 @@ dependencies = [
  "reqwest",
  "rookie",
  "rusqlite",
+ "rust-ini",
  "serde",
  "serde_json",
  "sevenz-rust2",
@@ -3234,6 +3235,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "windows-sys 0.61.2",
  "winreg",
  "zip",
 ]
@@ -5012,6 +5014,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "tempfile",
  "url",
  "windows 0.51.1",
  "zbus 3.15.2",

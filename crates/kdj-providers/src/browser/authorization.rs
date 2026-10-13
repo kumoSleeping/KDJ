@@ -1,6 +1,6 @@
-//! Browser-approved attachment to an existing Chrome/Edge session. Both desktop platforms use
-//! the same CDP flow; only installed-browser discovery and opening the opt-in page differ.
-//! Never launch with debugging flags, modify a profile, or decrypt its on-disk credentials.
+//! Browser authorization uses existing opt-in CDP/Arc sessions or a temporary real-browser
+//! login window. Gecko reads an existing profile only after explicit KDJ consent.
+//! Never modify the user's browser profile or debugging preferences.
 
 use super::login_trace::LoginTrace;
 use crate::youtubemusic::auth::BrowserSession;
@@ -25,8 +25,18 @@ use tokio_tungstenite::{
 #[path = "arc_automation.rs"]
 mod arc_automation;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[path = "gecko_rdp.rs"]
+mod gecko_rdp;
+#[path = "process_ports.rs"]
+mod process_ports;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[path = "isolated_login.rs"]
+mod isolated_login;
+
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
-const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
+const AUTH_TIMEOUT: Duration = Duration::from_secs(180);
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 static ACTIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -62,10 +72,11 @@ pub struct BrowserAuthorizationOption {
     pub id: String,
     pub label: String,
     pub method: &'static str,
+    pub profiles: Vec<super::BrowserProfileOption>,
 }
 
 struct Browser {
-    label: &'static str,
+    label: String,
     root: PathBuf,
     executable: PathBuf,
     setup_url: &'static str,
@@ -84,6 +95,8 @@ fn setup_url(id: &str) -> Option<&'static str> {
         "edge" => Some("edge://inspect/#remote-debugging"),
         #[cfg(target_os = "macos")]
         "arc" => Some("arc://inspect/#remote-debugging"),
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        "firefox" | "zen" | "librewolf" => Some("about:debugging#/setup"),
         _ => None,
     }
 }
@@ -103,8 +116,18 @@ fn installed_browser(id: &str) -> Option<Browser> {
 }
 
 fn browser_for_installation(installation: &super::discovery::InstalledBrowser) -> Option<Browser> {
-    let id = installation.adapter_id.as_deref()?;
-    let setup_url = setup_url(id)?;
+    let id = installation.adapter_id.as_deref().unwrap_or("");
+    let isolated = match installation.engine {
+        Some(super::discovery::BrowserEngine::Gecko) => Some("kdj:isolated-gecko"),
+        Some(super::discovery::BrowserEngine::Chromium) => Some("kdj:isolated-chromium"),
+        None => None,
+    };
+    // Known Chrome/Edge installations attach on both operating systems. Unknown Chromium
+    // forks keep the isolated fallback; a shared engine alone does not prove opt-in support.
+    let setup_url = match installation.engine {
+        Some(super::discovery::BrowserEngine::Gecko) => Some("kdj:gecko-toolbox"),
+        _ => setup_url(id).or(isolated),
+    }?;
     #[cfg(target_os = "macos")]
     let root = {
         let home = PathBuf::from(std::env::var_os("HOME")?);
@@ -112,7 +135,8 @@ fn browser_for_installation(installation: &super::discovery::InstalledBrowser) -
             "chrome" => "Google/Chrome",
             "edge" => "Microsoft Edge",
             "arc" => "Arc/User Data",
-            _ => return None,
+            "firefox" | "zen" | "librewolf" => "",
+            _ => "",
         };
         home.join("Library/Application Support").join(folder)
     };
@@ -122,14 +146,15 @@ fn browser_for_installation(installation: &super::discovery::InstalledBrowser) -
         let folder = match id {
             "chrome" => "Google/Chrome",
             "edge" => "Microsoft/Edge",
-            _ => return None,
+            "firefox" | "zen" | "librewolf" => "",
+            _ => "",
         };
         local.join(folder).join("User Data")
     };
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         Some(Browser {
-            label: super::browser_label(id)?,
+            label: installation.label.clone(),
             root,
             executable: installation.executable.clone(),
             setup_url,
@@ -151,8 +176,20 @@ pub(super) fn catalog(
         .map(|browser| BrowserAuthorizationOption {
             id: browser.id.clone(),
             label: browser.label.clone(),
-            method: if cfg!(target_os = "macos") && browser.adapter_id.as_deref() == Some("arc") {
+            profiles: {
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                { if browser.engine == Some(super::discovery::BrowserEngine::Gecko) {
+                    super::gecko_profiles::options(browser)
+                } else { Vec::new() } }
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                { Vec::new() }
+            },
+            method: if browser.engine == Some(super::discovery::BrowserEngine::Gecko) {
+                "gecko_rdp"
+            } else if cfg!(target_os = "macos") && browser.adapter_id.as_deref() == Some("arc") {
                 "system_automation"
+            } else if browser_for_installation(browser).is_some_and(|b| matches!(b.setup_url, "kdj:isolated-gecko" | "kdj:isolated-chromium")) {
+                "isolated_window"
             } else {
                 "remote_debugging"
             },
@@ -161,6 +198,9 @@ pub(super) fn catalog(
 }
 
 impl Browser {
+    fn use_isolated(&mut self) {
+        self.setup_url = if self.setup_url == "kdj:gecko-toolbox" { "kdj:isolated-gecko" } else { "kdj:isolated-chromium" };
+    }
     fn owns_process(&self, pid: u32) -> bool {
         let Some(actual) = process_executable(pid).and_then(|path| path.canonicalize().ok()) else {
             return false;
@@ -186,16 +226,20 @@ impl Browser {
     }
 
     async fn open_setup(&self) -> Result<()> {
+        self.open_url(self.setup_url).await
+    }
+
+    async fn open_url(&self, url: &str) -> Result<()> {
         #[cfg(target_os = "macos")]
         let mut command = {
             let mut command = tokio::process::Command::new("/usr/bin/open");
-            command.arg("-a").arg(&self.executable).arg(self.setup_url);
+            command.arg("-a").arg(&self.executable).arg(url);
             command
         };
         #[cfg(target_os = "windows")]
         let mut command = {
             let mut command = tokio::process::Command::new(&self.executable);
-            command.arg(self.setup_url);
+            command.arg(url);
             command
         };
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -227,6 +271,50 @@ impl Browser {
             .await
             .context("无法读取浏览器授权状态")?;
         Ok(Some(parse_endpoint(&data)?))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn has_window(&self) -> bool {
+        use std::ffi::c_void;
+        struct Search<'a> { browser: &'a Browser, found: bool }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn EnumWindows(callback: unsafe extern "system" fn(*mut c_void, isize) -> i32, data: isize) -> i32;
+            fn IsWindowVisible(window: *mut c_void) -> i32;
+            fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
+        }
+        unsafe extern "system" fn visit(window: *mut c_void, data: isize) -> i32 {
+            let search = unsafe { &mut *(data as *mut Search<'_>) };
+            let mut pid = 0;
+            if unsafe { IsWindowVisible(window) } != 0 {
+                unsafe { GetWindowThreadProcessId(window, &mut pid); }
+                if search.browser.owns_process(pid) {
+                    search.found = true;
+                    return 0;
+                }
+            }
+            1
+        }
+        let mut search = Search { browser: self, found: false };
+        unsafe { EnumWindows(visit, &mut search as *mut Search<'_> as isize); }
+        search.found
+    }
+
+    async fn wait_closed(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            let opened = Instant::now();
+            let mut seen = false;
+            loop {
+                let visible = self.has_window();
+                if visible { seen = true; }
+                // Edge's background process can survive every browser window being closed.
+                if !visible && (seen || opened.elapsed() > Duration::from_secs(10)) { return; }
+                tokio::time::sleep(RETRY_INTERVAL).await;
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        std::future::pending::<()>().await;
     }
 }
 
@@ -389,6 +477,7 @@ impl Connection {
         &mut self,
         site: LoginSite,
         trace: &LoginTrace,
+        selected: &mut Option<String>,
     ) -> Result<(Value, Value)> {
         trace.step("select_page");
         let targets = self.call("Target.getTargets", json!({}), None).await?;
@@ -411,7 +500,15 @@ impl Connection {
             "多个浏览器账号打开了 {}，请只在要登录的账号中保留该站点标签页后重试",
             site.label()
         );
-        let target = if let Some(page) = pages.first() {
+        let target = if let Some(target) = selected.as_ref() {
+            let page = targets["targetInfos"].as_array().into_iter().flatten()
+                .find(|page| page["targetId"].as_str() == Some(target))
+                .context("登录标签页已关闭")?;
+            if !page["url"].as_str().is_some_and(|url| site.matches(url)) {
+                return Ok((json!({"cookies":[]}), Value::Null));
+            }
+            target.clone()
+        } else if let Some(page) = pages.first() {
             page["targetId"]
                 .as_str()
                 .context("登录标签页不可用")?
@@ -429,6 +526,7 @@ impl Connection {
                 .context("无法打开登录标签页")?
                 .to_owned()
         };
+        *selected = Some(target.clone());
         let attached = self
             .call(
                 "Target.attachToTarget",
@@ -451,7 +549,7 @@ impl Connection {
         // Only non-secret account selection metadata. Cookies use Network, including HttpOnly.
         let metadata = if site != LoginSite::Soundcloud && response.is_ok() {
             self.call("Runtime.evaluate", json!({
-                "expression": format!("location.origin === '{}' ? ({{authUser: String(globalThis.ytcfg?.get?.('SESSION_INDEX') ?? '0'), userAgent: navigator.userAgent}}) : null", site.origin()),
+                "expression": format!("location.origin === '{}' ? ({{authUser: String(globalThis.ytcfg?.get?.('SESSION_INDEX') ?? ''), userAgent: navigator.userAgent}}) : null", site.origin()),
                 "returnByValue": true,
             }), Some(session_id)).await.ok()
                 .and_then(|v| v.pointer("/result/value").cloned()).unwrap_or(Value::Null)
@@ -516,51 +614,128 @@ fn cookie_from_response(response: &Value) -> Result<AuthorizedSession> {
     })
 }
 
-pub(crate) async fn read_soundcloud(
+pub(crate) async fn read_soundcloud<T, F, Fut>(
     browser_id: &str,
     trace: &LoginTrace,
-) -> Result<AuthorizedSession> {
+    profile: Option<&str>,
+    confirmed: bool,
+    new_window: bool,
+    mut finish: F,
+) -> Result<T>
+where F: FnMut(AuthorizedSession) -> Fut, Fut: std::future::Future<Output = Result<T>> {
     // One explicit user action owns one connection/prompt. Don't stack browser permission dialogs.
     let _active = ACTIVE.try_lock().context("已有浏览器授权正在进行")?;
-    let browser = installed_browser(browser_id).context("请选择支持授权连接的已安装浏览器")?;
-    trace.browser(browser.label);
+    if let Some((cookies, source)) = read_confirmed_gecko(browser_id, profile, confirmed, LoginSite::Soundcloud, trace).await? {
+        let mut session = cookie_from_response(&cookies)?;
+        session.imported_from = source;
+        return finish(session).await;
+    }
+    let mut browser = installed_browser(browser_id).context("请选择支持授权连接的已安装浏览器")?;
+    if new_window { browser.use_isolated(); }
+    trace.browser(&browser.label);
     // Arc exposes Chromium's opt-in page but rejects the approval handshake without a dialog.
     // Its supported macOS automation interface has a separate, visible system permission.
     #[cfg(target_os = "macos")]
     if browser.setup_url == "arc://inspect/#remote-debugging" {
-        return arc_automation::read_soundcloud(&browser.executable, trace).await;
+        return finish(arc_automation::read_soundcloud(&browser.executable, trace).await?).await;
     }
-    let (cookies, _) = read_cdp(&browser, LoginSite::Soundcloud, trace).await?;
-    cookie_from_response(&cookies).map(|mut session| {
-        session.imported_from = format!("{} · 浏览器授权", browser.label);
-        session
-    })
+    read_authorized(&browser, LoginSite::Soundcloud, trace, |cookies, _| {
+        let session = cookie_from_response(&cookies).map(|mut session| {
+            session.imported_from = format!("{} · 浏览器授权", browser.label);
+            session
+        });
+        let future = session.map(&mut finish);
+        async move { future?.await }
+    }).await
 }
 
-pub async fn read_youtube(
+pub async fn read_youtube<T, F, Fut>(
     browser_id: &str,
     platform: Platform,
     trace: &LoginTrace,
-) -> Result<BrowserSession> {
+    profile: Option<&str>,
+    confirmed: bool,
+    new_window: bool,
+    mut finish: F,
+) -> Result<T>
+where F: FnMut(BrowserSession) -> Fut, Fut: std::future::Future<Output = Result<T>> {
     let site = match platform {
         Platform::Ytm => LoginSite::Ytm,
         Platform::Youtube => LoginSite::Youtube,
         _ => bail!("不支持的登录站点"),
     };
     let _active = ACTIVE.try_lock().context("已有浏览器授权正在进行")?;
-    let browser = installed_browser(browser_id).context("请选择支持授权登录的已安装浏览器")?;
-    trace.browser(browser.label);
+    if let Some((cookies, source)) = read_confirmed_gecko(browser_id, profile, confirmed, site, trace).await? {
+        return finish(youtube_session(&cookies, &Value::Null, source, site)?).await;
+    }
+    let mut browser = installed_browser(browser_id).context("请选择支持授权登录的已安装浏览器")?;
+    if new_window { browser.use_isolated(); }
+    trace.browser(&browser.label);
     #[cfg(target_os = "macos")]
     if browser.setup_url == "arc://inspect/#remote-debugging" {
-        return arc_automation::read_youtube(&browser.executable, site, trace).await;
+        return finish(arc_automation::read_youtube(&browser.executable, site, trace).await?).await;
     }
-    let (cookies, metadata) = read_cdp(&browser, site, trace).await?;
-    youtube_session(
-        &cookies,
-        &metadata,
-        format!("{} · 浏览器授权", browser.label),
-        site,
-    )
+    read_authorized(&browser, site, trace, |cookies, metadata| {
+        let session = youtube_session(&cookies, &metadata,
+            format!("{} · 浏览器授权", browser.label), site);
+        let future = session.map(&mut finish);
+        async move { future?.await }
+    }).await
+}
+
+// A candidate is not a completed login. Keep the browser alive while the provider validates it.
+// Retry a small number of times for cookie-store/account-metadata propagation, never reconnect.
+struct CandidateValidator<F> { finish: F, failures: u8 }
+impl<F> CandidateValidator<F> {
+    fn new(finish: F) -> Self { Self { finish, failures: 0 } }
+    async fn check<T, Fut>(&mut self, cookies: Value, metadata: Value, site: LoginSite, trace: &LoginTrace) -> Result<Option<T>>
+    where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
+        if !candidate_ready(&cookies, &metadata, site) { return Ok(None); }
+        trace.step("validate_account");
+        match (self.finish)(cookies, metadata).await {
+            Ok(value) => Ok(Some(value)),
+            Err(error) => {
+                self.failures += 1;
+                if self.failures >= 3 { return Err(error); }
+                trace.detail("validate_account", "candidate_retry");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(None)
+            }
+        }
+    }
+}
+
+fn candidate_ready(cookies: &Value, metadata: &Value, site: LoginSite) -> bool {
+    if site == LoginSite::Soundcloud { cookie_from_response(cookies).is_ok() }
+    else { metadata["authUser"].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 3 && s.bytes().all(|b| b.is_ascii_digit())) && youtube_session(cookies, metadata, String::new(), site).is_ok() }
+}
+
+// Rediscover the exact installation on every request. A consent flag never turns an arbitrary
+// renderer path/browser id into a cookie database, nor silently falls back to a new window.
+async fn read_confirmed_gecko(browser_id: &str, profile: Option<&str>, confirmed: bool, site: LoginSite, trace: &LoginTrace) -> Result<Option<(Value, String)>> {
+    if !confirmed && profile.is_none() { return Ok(None); }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let installation = super::discovery::installed().into_iter()
+            .find(|b| b.id == browser_id || b.adapter_id.as_deref() == Some(browser_id))
+            .context("所选浏览器已不可用，请重新检测")?;
+        if installation.engine != Some(super::discovery::BrowserEngine::Gecko) { return Ok(None); }
+        anyhow::ensure!(confirmed, "请先允许 KDJ 读取所选浏览器的站点登录状态");
+        trace.browser(&installation.label);
+        trace.step("read_profile");
+        let profile = profile.map(str::to_owned);
+        let domain = if site == LoginSite::Soundcloud { "soundcloud.com" } else { "youtube.com" };
+        let imported = tokio::task::spawn_blocking(move || {
+            super::gecko_profiles::read(&installation, profile.as_deref(), confirmed, vec![domain.into()])
+        }).await.context("读取浏览器登录状态任务失败")??;
+        let cookies: Vec<_> = imported.cookies.into_iter()
+            .filter(|c| c.path == "/" && if site == LoginSite::Soundcloud { c.name == "oauth_token" } else { youtube_cookie_name(&c.name) })
+            .map(|c| json!({"name": c.name, "value": c.value, "domain": c.domain, "path": c.path, "expires": c.expires.unwrap_or(0)}))
+            .collect();
+        Ok(Some((json!({"cookies": cookies}), imported.imported_from)))
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    { let _ = (browser_id, profile, confirmed, site, trace); Ok(None) }
 }
 
 fn youtube_session(
@@ -658,16 +833,50 @@ pub(super) fn apply_youtube_metadata(session: &mut BrowserSession, metadata: &Va
     }
 }
 
-async fn read_cdp(
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn read_authorized<T, F, Fut>(browser: &Browser, site: LoginSite, trace: &LoginTrace, finish: F) -> Result<T>
+where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
+    if browser.setup_url == "kdj:gecko-toolbox" {
+        gecko_rdp::read(browser, site, trace, finish).await
+    } else if browser.setup_url == "kdj:isolated-gecko" {
+        isolated_login::read(browser, site, true, trace, finish).await
+    } else if browser.setup_url == "kdj:isolated-chromium" {
+        isolated_login::read(browser, site, false, trace, finish).await
+    } else {
+        read_cdp(browser, site, trace, finish).await
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn read_authorized<T, F, Fut>(_browser: &Browser, _site: LoginSite, _trace: &LoginTrace, _finish: F) -> Result<T>
+where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
+    bail!("当前系统不支持浏览器授权")
+}
+
+async fn read_cdp<T, F, Fut>(
     browser: &Browser,
     site: LoginSite,
     trace: &LoginTrace,
-) -> Result<(Value, Value)> {
+    finish: F,
+) -> Result<T>
+where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
     // Every explicit retry must return the user to the opt-in page. The discovery file survives
     // disabling debugging/exiting the browser; its existence is not proof that the bridge is live.
     trace.step("open_authorization");
     browser.open_setup().await?;
     trace.step("wait_browser_permission");
+    tokio::select! {
+        biased;
+        _ = browser.wait_closed() => {
+            trace.detail("wait_browser_permission", "browser_closed");
+            bail!("浏览器窗口已关闭或未能打开；本次授权已停止，可重新登录");
+        }
+        result = read_open_cdp(browser, site, trace, finish) => result,
+    }
+}
+
+async fn read_open_cdp<T, F, Fut>(browser: &Browser, site: LoginSite, trace: &LoginTrace, finish: F) -> Result<T>
+where F: FnMut(Value, Value) -> Fut, Fut: std::future::Future<Output = Result<T>> {
     let mut connection = wait_for_connection(&browser, AUTH_TIMEOUT).await?;
     let result = async {
         trace.step("verify_browser");
@@ -679,7 +888,16 @@ async fn read_cdp(
                 tracing::info!(target: "kdj::login", browser = browser.label, browser_version = version, "login browser version");
             }
         }
-        connection.site_cookies(site, trace).await
+        let mut target = None;
+        let mut validator = CandidateValidator::new(finish);
+        timeout(LOGIN_TIMEOUT, async {
+            loop {
+                let (cookies, metadata) = connection.site_cookies(site, trace, &mut target).await?;
+                if let Some(value) = validator.check(cookies, metadata, site, trace).await? { return Ok(value); }
+                trace.step("wait_browser_login");
+                tokio::time::sleep(RETRY_INTERVAL).await;
+            }
+        }).await.context("等待站点登录超时，请重试")?
     }
     .await;
     // Explicitly disconnect on success AND failure; never close the browser or user's tabs.
@@ -762,7 +980,7 @@ async fn wait_for_connection(browser: &Browser, duration: Duration) -> Result<Co
                     // An explicit browser refusal is final for this click. Do not spam permission
                     // requests, reinterpret a denial as a stale endpoint, or bypass browser policy.
                     if failure != HandshakeFailure::NotReady {
-                        bail!("{}", failure.message(browser.label));
+                        bail!("{}", failure.message(&browser.label));
                     }
                 }
                 Err(_) => bail!("等待浏览器确认超时；请重新点击连接，并在浏览器中允许本次连接。"),
@@ -778,9 +996,9 @@ async fn wait_for_connection(browser: &Browser, duration: Duration) -> Result<Co
 mod tests {
     use super::*;
 
-    fn test_browser(root: PathBuf) -> Browser {
+    pub(super) fn test_browser(root: PathBuf) -> Browser {
         Browser {
-            label: "Test",
+            label: "Test".into(),
             root,
             executable: PathBuf::new(),
             setup_url: "",
@@ -932,6 +1150,82 @@ mod tests {
         assert!(!LoginSite::Youtube.matches("https://music.youtube.com/"));
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn existing_browser_routes_match_on_both_desktops() {
+        for (id, engine, expected) in [
+            ("chrome", super::super::discovery::BrowserEngine::Chromium, "chrome://inspect/#remote-debugging"),
+            ("edge", super::super::discovery::BrowserEngine::Chromium, "edge://inspect/#remote-debugging"),
+            ("firefox", super::super::discovery::BrowserEngine::Gecko, "kdj:gecko-toolbox"),
+            ("zen", super::super::discovery::BrowserEngine::Gecko, "kdj:gecko-toolbox"),
+        ] {
+            let installation = super::super::discovery::InstalledBrowser {
+                id: id.into(), label: id.into(), adapter_id: Some(id.into()),
+                engine: Some(engine), executable: PathBuf::from("browser"),
+                authorization_supported: true, direct_read_supported: true,
+            };
+            let mut browser = browser_for_installation(&installation).unwrap();
+            assert_eq!(browser.setup_url, expected);
+            let options = catalog(&[installation]);
+            assert_eq!(options[0].method, if engine == super::super::discovery::BrowserEngine::Gecko { "gecko_rdp" } else { "remote_debugging" });
+            browser.use_isolated();
+            assert_eq!(browser.setup_url, if engine == super::super::discovery::BrowserEngine::Gecko { "kdj:isolated-gecko" } else { "kdj:isolated-chromium" });
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_waits_for_metadata_and_retries_before_returning_verified_session() {
+        let cookies = json!({"cookies":[{"name":"SAPISID","value":"test-only","domain":".youtube.com","expires":-1}]});
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = calls.clone();
+        let mut validator = CandidateValidator::new(move |_, _| {
+            let call = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { if call == 0 { bail!("candidate not yet usable"); } Ok("verified") }
+        });
+        let trace = LoginTrace::new("youtube", "test");
+        assert!(validator.check(cookies.clone(), json!({"authUser":""}), LoginSite::Youtube, &trace).await.unwrap().is_none());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(validator.check(cookies.clone(), json!({"authUser":"2"}), LoginSite::Youtube, &trace).await.unwrap().is_none());
+        assert_eq!(validator.check(cookies, json!({"authUser":"2"}), LoginSite::Youtube, &trace).await.unwrap(), Some("verified"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_candidates_have_a_bounded_validation_budget() {
+        let mut validator = CandidateValidator::new(|_, _| async { Err::<(), _>(anyhow::anyhow!("invalid account")) });
+        let trace = LoginTrace::new("soundcloud", "test");
+        for attempt in 1..=3 {
+            let result = validator.check(json!({"cookies":[{"name":"oauth_token","value":"test-only","domain":".soundcloud.com","expires":-1}]}), Value::Null, LoginSite::Soundcloud, &trace).await;
+            assert_eq!(result.is_err(), attempt == 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_cdp_target_waits_through_redirect_instead_of_switching_accounts() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request = socket.next().await.unwrap().unwrap();
+            let request: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+            assert_eq!(request["method"], "Target.getTargets");
+            socket.send(Message::Text(json!({"id":request["id"], "result":{"targetInfos":[
+                {"type":"page","targetId":"selected","url":"https://accounts.google.com/"},
+                {"type":"page","targetId":"other","url":"https://www.youtube.com/"}
+            ]}}).to_string().into())).await.unwrap();
+            assert!(matches!(socket.next().await.unwrap().unwrap(), Message::Close(_)));
+        });
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}")).await.unwrap();
+        let mut connection = Connection { socket, next_id: 0 };
+        let mut selected = Some("selected".into());
+        let (cookies, metadata) = connection.site_cookies(LoginSite::Youtube, &LoginTrace::new("youtube", "test"), &mut selected).await.unwrap();
+        assert!(!candidate_ready(&cookies, &metadata, LoginSite::Youtube));
+        assert_eq!(selected.as_deref(), Some("selected"));
+        connection.socket.close(None).await.unwrap();
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn authorized_youtube_queries_only_selected_site_and_detaches() {
         for site in [LoginSite::Youtube, LoginSite::Ytm] {
@@ -981,7 +1275,7 @@ mod tests {
             let mut connection = Connection { socket, next_id: 0 };
             let trace = LoginTrace::new("test", "authorize");
             let (cookies, metadata) = trace
-                .run(connection.site_cookies(site, &trace))
+                .run(connection.site_cookies(site, &trace, &mut None))
                 .await
                 .unwrap();
             assert_eq!(
@@ -995,13 +1289,33 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[ignore = "explicitly selected existing Gecko profile; no browser launch, saving, or credential output"]
+    async fn live_confirmed_gecko_youtube() {
+        let id = std::env::var("KDJ_TEST_AUTHORIZATION_BROWSER").expect("select a browser");
+        let browser = super::super::discovery::installed().into_iter()
+            .find(|b| b.id == id || b.adapter_id.as_deref() == Some(&id)).expect("installed browser");
+        let profiles = super::super::gecko_profiles::options(&browser);
+        let profile = match std::env::var("KDJ_TEST_AUTHORIZATION_PROFILE") {
+            Ok(id) => profiles.iter().find(|p| p.id == id).expect("selected profile"),
+            Err(_) => { assert_eq!(profiles.len(), 1, "select a profile explicitly when there are several"); &profiles[0] }
+        };
+        let trace = LoginTrace::new("youtube", "profile_confirmation_test");
+        assert!(read_youtube(&browser.id, Platform::Youtube, &trace, Some(&profile.id), false, false, |s| async { Ok(s) }).await.is_err());
+        let mut session = read_youtube(&browser.id, Platform::Youtube, &trace, Some(&profile.id), true, false, |s| async { Ok(s) }).await
+            .expect("confirmed profile read");
+        session.validate().expect("valid YouTube session structure");
+        assert!(session.imported_from.contains("KDJ 确认读取"));
+    }
+
+    #[tokio::test]
     #[ignore = "requires a running browser and explicit user approval; never prints credentials"]
     async fn live_browser_authorization() {
         let browser = std::env::var("KDJ_TEST_AUTHORIZATION_BROWSER")
             .expect("select the explicitly authorized browser");
         let trace = LoginTrace::new("soundcloud", "authorization_test");
         let session = trace
-            .run(read_soundcloud(&browser, &trace))
+            .run(read_soundcloud(&browser, &trace, None, false, false, |s| async { Ok(s) }))
             .await
             .expect("browser authorization failed");
         assert!(!session.token.is_empty());

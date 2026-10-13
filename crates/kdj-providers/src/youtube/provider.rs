@@ -92,12 +92,16 @@ impl YoutubeProvider {
         account.credential_kind = "anonymous".into();
         if let Some(session) = self.auth.snapshot() {
             account.state = AccountState::Valid;
+            if let Some(profile) = self.auth.cached_profile(&session) {
+                account.nickname = profile.nickname;
+                account.avatar = profile.avatar;
+            }
             account.account_key = session.x_goog_authuser;
             account.credential_kind = "browser_session".into();
             account.detail = if session.imported_from.is_empty() {
                 "登录状态尚未联网核验".into()
             } else {
-                session.imported_from
+                format!("登录来源：{}", session.imported_from)
             };
         } else if !self.ctx.youtube_enabled() {
             account.detail = DISABLED_MESSAGE.into();
@@ -481,8 +485,28 @@ impl MusicProvider for YoutubeProvider {
         if account.state != AccountState::Valid {
             return account;
         }
-        match self.client.account_playlist_directory().await {
-            Ok(_) => account,
+        let Some(session) = self.auth.snapshot() else { return self.cached_account_snapshot(); };
+        let library = self.client.account_playlist_directory().await;
+        if self.auth.snapshot().as_ref() != Some(&session) { return self.cached_account_snapshot(); }
+        match library {
+            Ok(_) => {
+                let profile = self.client.account_menu(&session).await
+                    .and_then(|body| crate::youtubemusic::account_profile::AccountProfile::from_menu(&body));
+                match profile {
+                    Ok(profile) => {
+                        match self.auth.save_profile(&session, &profile) {
+                            Ok(false) => return self.cached_account_snapshot(),
+                            Err(_) => account.detail.push_str(" · 账号资料缓存保存失败"),
+                            Ok(true) => {}
+                        }
+                        account.nickname = profile.nickname;
+                        account.avatar = profile.avatar;
+                    }
+                    Err(_) => account.detail.push_str(" · 账号资料读取失败"),
+                }
+                if self.auth.snapshot().as_ref() != Some(&session) { return self.cached_account_snapshot(); }
+                account
+            },
             Err(error) if is_auth_rejection(&error) => {
                 account.state = AccountState::Expired;
                 account.detail = "登录已失效，请重新连接".into();
@@ -1439,7 +1463,7 @@ mod tests {
         assert_eq!(account.state, AccountState::Valid);
         assert_eq!(account.account_key, "2");
         assert_eq!(account.credential_kind, "browser_session");
-        assert_eq!(account.detail, "测试浏览器");
+        assert_eq!(account.detail, "登录来源：测试浏览器");
 
         let _ = std::fs::remove_dir_all(root);
     }

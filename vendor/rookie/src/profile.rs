@@ -225,9 +225,15 @@ fn chromium_profile_name(profile_dir: &Path, key_path: Option<&Path>) -> String 
 }
 
 fn mozilla_profiles(browser: &str, config: &Browser) -> Result<Vec<BrowserProfile>> {
+    mozilla_profiles_from_roots(browser, &expanded_config_paths(config)?)
+}
+
+/// Enumerate an engine-identified installation's own roots. The caller resolves these from
+/// application metadata; no cookie database is opened during discovery.
+pub fn mozilla_profiles_from_roots(browser: &str, roots: &[PathBuf]) -> Result<Vec<BrowserProfile>> {
     let mut profiles = Vec::new();
     let mut seen = HashSet::new();
-    for root in expanded_config_paths(config)? {
+    for root in roots {
         if !root.is_dir() {
             continue;
         }
@@ -274,7 +280,14 @@ fn mozilla_profiles(browser: &str, config: &Browser) -> Result<Vec<BrowserProfil
             }
         }
     }
+    profiles.sort_by(|a, b| b.last_modified.cmp(&a.last_modified).then(a.name.cmp(&b.name)));
     Ok(profiles)
+}
+
+/// Read one rediscovered Gecko profile; other engine families cannot enter this reader.
+pub fn mozilla_profile_cookies(profile: &BrowserProfile, domains: Vec<String>) -> Result<Vec<Cookie>> {
+    if profile.family != BrowserFamily::Mozilla { bail!("not a Gecko profile"); }
+    crate::browser::mozilla::firefox_default_context(profile.db_path.clone(), domains)
 }
 
 fn push_mozilla_profile(

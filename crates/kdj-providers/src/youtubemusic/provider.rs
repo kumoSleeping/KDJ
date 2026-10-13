@@ -403,13 +403,26 @@ impl MusicProvider for YoutubeMusicProvider {
         if account.state != AccountState::Valid {
             return account;
         }
-        match self.client.library_playlists().await {
+        let Some(session) = self.auth.snapshot() else { return self.cached_account().await; };
+        let library = self.client.library_playlists().await;
+        if self.auth.snapshot().as_ref() != Some(&session) { return self.cached_account().await; }
+        match library {
             Ok(_) => {
-                if let Ok(body) = self.client.account_menu().await {
-                    if let Some(name) = first_text(&body, &["accountName", "name"]) {
-                        account.nickname = name;
+                let profile = self.client.account_menu(&session).await
+                    .and_then(|body| super::account_profile::AccountProfile::from_menu(&body));
+                match profile {
+                    Ok(profile) => {
+                        match self.auth.save_profile(&session, &profile) {
+                            Ok(false) => return self.cached_account().await,
+                            Err(_) => account.detail.push_str(" · 账号资料缓存保存失败"),
+                            Ok(true) => {}
+                        }
+                        account.nickname = profile.nickname;
+                        account.avatar = profile.avatar;
                     }
+                    Err(_) => account.detail.push_str(" · 账号资料读取失败"),
                 }
+                if self.auth.snapshot().as_ref() != Some(&session) { return self.cached_account().await; }
                 account
             }
             Err(error) if is_auth_rejection(&error) => {
@@ -440,10 +453,15 @@ impl MusicProvider for YoutubeMusicProvider {
             };
             return account;
         };
+        if let Some(profile) = self.auth.cached_profile(&session) {
+            account.nickname = profile.nickname;
+            account.avatar = profile.avatar;
+        }
         account.account_key = session.x_goog_authuser;
         account.state = AccountState::Valid;
         account.credential_kind = "browser_session".into();
-        account.detail = session.imported_from;
+        account.detail = if session.imported_from.is_empty() { String::new() }
+            else { format!("登录来源：{}", session.imported_from) };
         account
     }
 
@@ -2056,26 +2074,6 @@ fn format_lrc_stamp(ms: u64) -> String {
 fn playlist_from_browse(body: &Value) -> Option<(String, Vec<SongSource>)> {
     let contents = playlist_contents_from_browse(body);
     (!contents.1.is_empty()).then_some(contents)
-}
-
-fn first_text(value: &Value, keys: &[&str]) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for key in keys {
-                if let Some(text) = map
-                    .get(*key)
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
-                {
-                    return Some(text.to_string());
-                }
-            }
-            map.values().find_map(|child| first_text(child, keys))
-        }
-        Value::Array(items) => items.iter().find_map(|child| first_text(child, keys)),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

@@ -45,6 +45,7 @@ url = "2.5.8"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 rookie = { version = "0.5.6", path = "../../vendor/rookie" }
+rust-ini = "0.21"
 # GUI launches do not inherit shell proxy variables. Honor desktop OS proxies
 # for provider/tool downloads; guarded media and loopback clients opt out explicitly.
 reqwest = { version = "=0.13.4", default-features = false, features = ["system-proxy"] }
@@ -55,6 +56,7 @@ sevenz-rust2 = { version = "=0.22.2", default-features = false, features = ["bzi
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 # rookie 读取浏览器 SQLite。单独测试 providers 时也要自带 SQLite，
 # 不能依赖应用的 kdj-library 恰好启用 bundled 或 runner 安装 sqlite3.lib。
 rusqlite = { version = "0.35", features = ["bundled"] }
@@ -63,3 +65,6 @@ rusqlite = { version = "0.35", features = ["bundled"] }
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSURL"] }
+
+[dev-dependencies]
+rusqlite = { version = "0.35", features = ["bundled"] }

@@ -199,14 +199,20 @@ impl SoundCloudProvider {
         }).await
     }
 
-    /// Chrome/Edge authorizes this connection itself. No cookie database or OS keychain access.
-    pub async fn import_authorized_browser(&self, browser: String) -> Result<()> {
+    /// Browser-approved connection, or explicitly confirmed Gecko profile read.
+    pub async fn import_authorized_browser(&self, browser: String, profile: Option<String>, confirmed: bool, new_window: bool) -> Result<()> {
         let trace = LoginTrace::new("soundcloud", "authorize");
         trace.run(async {
             self.ensure_enabled()?;
-            let imported = crate::browser::authorization::read_soundcloud(&browser, &trace).await?;
-            let session = browser_session_from_token(imported.token, imported.expires_at, imported.imported_from)?;
-            self.import_browser_session(session, &trace).await
+            let session = crate::browser::authorization::read_soundcloud(&browser, &trace, profile.as_deref(), confirmed, new_window, |imported| {
+                let trace = &trace;
+                async move {
+                    let session = browser_session_from_token(imported.token, imported.expires_at, imported.imported_from)?;
+                    self.validate_browser_import(session, trace).await
+                }
+            }).await?;
+            trace.step("save_session");
+            self.set_session(session)
         }).await
     }
 
@@ -240,6 +246,12 @@ impl SoundCloudProvider {
     }
 
     async fn import_browser_session(&self, session: SoundCloudSession, trace: &LoginTrace) -> Result<()> {
+        let session = self.validate_browser_import(session, trace).await?;
+        trace.step("save_session");
+        self.set_session(session)
+    }
+
+    async fn validate_browser_import(&self, session: SoundCloudSession, trace: &LoginTrace) -> Result<SoundCloudSession> {
         trace.step("validate_account");
         let (status, profile) = tokio::time::timeout(Duration::from_secs(45),
             self.authenticated_get_once(&session.access_token, "/me", &[], true))
@@ -249,8 +261,7 @@ impl SoundCloudProvider {
             "浏览器里的 SoundCloud 登录态无效：{}",
             oauth_error(&profile)
         );
-        trace.step("save_session");
-        self.set_session(session_with_profile(session, &profile))
+        Ok(session_with_profile(session, &profile))
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -847,7 +858,7 @@ impl MusicProvider for SoundCloudProvider {
                 account.detail = if imported_from.is_empty() {
                     "已登录".into()
                 } else {
-                    imported_from
+                    format!("登录来源：{imported_from}")
                 };
                 account.nickname = nickname;
                 account.avatar = avatar;
@@ -891,7 +902,7 @@ impl MusicProvider for SoundCloudProvider {
         } else if session.imported_from.is_empty() {
             "登录状态尚未联网核验".into()
         } else {
-            session.imported_from.clone()
+            format!("登录来源：{}", session.imported_from)
         };
         account.account_key = session.user_urn;
         account.credential_kind = session.credential_kind;

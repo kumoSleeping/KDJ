@@ -61,6 +61,9 @@ jobs:
       - name: 曲库加载与滚动回归
         run: npm run test:library
 
+      - name: 浏览器登录交互与 Gecko 会话隔离回归
+        run: node scripts/test-library-ui.mjs tests/youtube-login-ui.test.ts && node --import tsx --test tests/gecko-browser-login.test.ts
+
       - name: 播放队列与失败恢复回归
         run: node --test scripts/test-playback-recovery.mjs
 
@@ -209,6 +212,12 @@ jobs:
       - name: 桌面浏览器发现回归
         if: runner.os == 'Windows' || runner.os == 'macOS'
         run: cargo test -p kdj-providers --lib browser:: --locked
+
+      - name: Windows Edge 隔离会话与 HttpOnly Cookie 回归
+        if: runner.os == 'Windows'
+        env:
+          KDJ_TEST_ISOLATED_BROWSER: edge
+        run: cargo test -p kdj-providers --lib live_isolated_chromium_start_and_cleanup --locked -- --ignored
 
       - name: Windows 播放与文件恢复回归
         if: runner.os == 'Windows'
