@@ -240,6 +240,19 @@ impl YoutubeAuth {
         self.snapshot().is_some()
     }
 
+    pub(crate) fn cached_profile(&self, session: &BrowserSession) -> Option<super::account_profile::AccountProfile> {
+        super::account_profile::load(&self.path.with_extension("profile.json"), session)
+    }
+
+    /// Hold the session lock through the cache write so an old response cannot restore
+    /// identity after logout or attach it to a newly imported account.
+    pub(crate) fn save_profile(&self, expected: &BrowserSession, profile: &super::account_profile::AccountProfile) -> Result<bool> {
+        let current = self.session.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if current.as_ref() != Some(expected) { return Ok(false); }
+        super::account_profile::save(&self.path.with_extension("profile.json"), expected, profile)?;
+        Ok(true)
+    }
+
     pub fn save(&self, mut session: BrowserSession) -> Result<()> {
         session.validate()?;
         if session.created_at == 0 {
@@ -266,6 +279,8 @@ impl YoutubeAuth {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         crate::session_fs::remove_private_file(&self.path)?;
+        // A derived identity cache never contains credentials.
+        let _ = crate::session_fs::remove_private_file(&self.path.with_extension("profile.json"));
         if self.platform == Platform::Ytm {
             if let Some(parent) = self.path.parent() {
                 crate::session_fs::remove_private_file(&parent.join("ytmusic.json"))?;
@@ -529,7 +544,23 @@ mod tests {
         assert!(!video.is_logged_in());
 
         video.save(session("video-session")).unwrap();
+        let original = music.snapshot().unwrap();
+        let profile = super::super::account_profile::AccountProfile {
+            nickname: "Music User".into(), avatar: "https://yt3.ggpht.com/photo".into(),
+        };
+        let credentials_before = std::fs::read(ctx.session_file(YTM_SESSION_FILE)).unwrap();
+        assert!(music.save_profile(&original, &profile).unwrap());
+        assert_eq!(music.cached_profile(&original), Some(profile.clone()));
+        assert_eq!(std::fs::read(ctx.session_file(YTM_SESSION_FILE)).unwrap(), credentials_before);
+        let reopened = YoutubeAuth::new(&ctx, Platform::Ytm).unwrap();
+        assert_eq!(reopened.cached_profile(&reopened.snapshot().unwrap()), Some(profile.clone()));
+        assert!(video.cached_profile(&video.snapshot().unwrap()).is_none());
+        music.save(session("replacement")).unwrap();
+        assert!(!music.save_profile(&original, &profile).unwrap());
+        assert!(music.cached_profile(&music.snapshot().unwrap()).is_none());
         music.clear().unwrap();
+        assert!(!music.save_profile(&original, &profile).unwrap());
+        assert!(!music.path.with_extension("profile.json").exists());
         assert!(!music.is_logged_in());
         assert!(video.is_logged_in());
         assert!(!ctx.session_file(YTM_SESSION_FILE).exists());

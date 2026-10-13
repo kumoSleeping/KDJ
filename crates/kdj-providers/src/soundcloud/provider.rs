@@ -847,7 +847,7 @@ impl MusicProvider for SoundCloudProvider {
                 account.detail = if imported_from.is_empty() {
                     "已登录".into()
                 } else {
-                    imported_from
+                    format!("登录来源：{imported_from}")
                 };
                 account.nickname = nickname;
                 account.avatar = avatar;
@@ -891,7 +891,7 @@ impl MusicProvider for SoundCloudProvider {
         } else if session.imported_from.is_empty() {
             "登录状态尚未联网核验".into()
         } else {
-            session.imported_from.clone()
+            format!("登录来源：{}", session.imported_from)
         };
         account.account_key = session.user_urn;
         account.credential_kind = session.credential_kind;

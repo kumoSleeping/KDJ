@@ -589,10 +589,11 @@ impl YtmClient {
         self.post("browse/edit_playlist", body).await
     }
 
-    /// 登录账号菜单只用于补充昵称，不能用于判断会话有效性：失效 Cookie 也可能
+    /// 登录账号菜单只用于补充真实姓名和头像，不能用于判断会话有效性：失效 Cookie 也可能
     /// 得到一个匿名的 HTTP 200 菜单。
-    pub async fn account_menu(&self) -> Result<Value> {
-        self.post("account/account_menu", Self::web_remix_context())
+    pub async fn account_menu(&self, session: &BrowserSession) -> Result<Value> {
+        self.post_with_headers("account/account_menu", Self::web_remix_context(),
+            session.request_headers("https://music.youtube.com"))
             .await
     }
 
