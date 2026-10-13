@@ -8,7 +8,8 @@ import "./PointerDemo.css";
  *
  * It is a still picture under reduced motion, and it stops while it is out of sight.
  */
-export type PointerDemoScene = "pick-range" | "pick-toggle" | "drag-in" | "search" | "viz-tune" | "pip" | "player-keys";
+export type PointerDemoScene = "pick-range" | "pick-toggle" | "drag-in" | "search" | "viz-tune" | "pip" | "player-keys"
+  | "menu-toss" | "multi-copy" | "add-folder" | "analyze";
 
 /** What the picture shows for one moment; the next moment is `move` + `stay` later. */
 interface Beat {
@@ -24,7 +25,7 @@ interface Beat {
   /** Rows that are picked (pick scenes). */
   picked?: readonly number[];
   /** The song chip (drag-in): at home, carried by the pointer, or gone into the tray. */
-  chip?: "home" | "held" | "landed";
+  chip?: "home" | "held" | "lift" | "landed";
   /** How much of the query is typed, 0–3 (search). */
   typed?: number;
   /** How many results have come in (search). */
@@ -35,6 +36,17 @@ interface Beat {
   win?: readonly [number, number];
   /** The player bar's toggle keys that are on, 0–2 (player-keys). */
   keys?: readonly number[];
+  /** The right-click menu is open, and which of its items the pointer is on (menu-toss). */
+  menu?: boolean;
+  item?: number;
+  /** What the held key says, in place of the scene's own (multi-copy: ⌘C, ⌘V). */
+  keyText?: string;
+  /** The folder that is copied into: chosen, then done (multi-copy). */
+  folder?: "on" | "done";
+  /** How many new folders have come into the list, 0–2 (add-folder). */
+  added?: number;
+  /** Key and tempo: 0 waiting, 1 working, 2 tempo in, 3 both in (analyze). */
+  analysis?: number;
 }
 
 interface Scene {
@@ -50,6 +62,8 @@ const AWAY: readonly [number, number] = [176, 70];
 const CHIP_HOME = [46, 40] as const;
 const TRAY = [169, 56] as const;
 const CORNER: readonly [number, number] = [30, 88];
+const LIFT: readonly [number, number] = [100, 18];
+const mod = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 
 const SCENES: Record<PointerDemoScene, Scene> = {
   "pick-range": {
@@ -134,6 +148,58 @@ const SCENES: Record<PointerDemoScene, Scene> = {
       { move: 600, stay: 300, cursor: AWAY, keys: [] },
     ],
   },
+  "menu-toss": {
+    rest: 6,
+    beats: [
+      { move: 600, stay: 300, cursor: CORNER, chip: "home" },
+      { move: 600, stay: 150, cursor: CHIP_HOME, chip: "home" },
+      { move: 80, stay: 350, cursor: CHIP_HOME, press: true, chip: "home", menu: true },
+      { move: 450, stay: 200, cursor: [66, 74], chip: "home", menu: true, item: 1 },
+      { move: 80, stay: 150, cursor: [66, 74], press: true, chip: "home", menu: true, item: 1 },
+      { move: 380, stay: 0, cursor: [66, 74], chip: "lift" },
+      { move: 380, stay: 1000, cursor: [66, 74], chip: "landed" },
+      { move: 600, stay: 300, cursor: CORNER, chip: "landed" },
+      { move: 0, stay: 500, cursor: CORNER, chip: "home" },
+    ],
+  },
+  "multi-copy": {
+    rest: 10,
+    beats: [
+      { move: 600, stay: 300, cursor: AWAY },
+      { move: 600, stay: 200, cursor: rowAt(0) },
+      { move: 80, stay: 300, cursor: rowAt(0), press: true, picked: [0] },
+      { move: 200, stay: 400, cursor: rowAt(0), key: true, picked: [0] },
+      { move: 500, stay: 150, cursor: rowAt(2), key: true, picked: [0] },
+      { move: 80, stay: 300, cursor: rowAt(2), key: true, press: true, picked: [0, 2] },
+      { move: 0, stay: 600, cursor: rowAt(2), key: true, keyText: `${mod()}C`, picked: [0, 2] },
+      { move: 700, stay: 150, cursor: [186, 74], picked: [0, 2] },
+      { move: 80, stay: 250, cursor: [186, 74], press: true, folder: "on", picked: [0, 2] },
+      { move: 0, stay: 500, cursor: [186, 74], key: true, keyText: `${mod()}V`, folder: "on", picked: [0, 2] },
+      { move: 0, stay: 1300, cursor: [186, 74], key: true, keyText: `${mod()}V`, folder: "done", picked: [0, 2] },
+      { move: 300, stay: 300, cursor: [186, 74], folder: "done" },
+    ],
+  },
+  "add-folder": {
+    rest: 5,
+    beats: [
+      { move: 600, stay: 300, cursor: AWAY, added: 0 },
+      { move: 650, stay: 200, cursor: [138, 17], added: 0 },
+      { move: 80, stay: 400, cursor: [138, 17], press: true, added: 1 },
+      { move: 0, stay: 700, cursor: [138, 17], added: 1 },
+      { move: 0, stay: 300, cursor: [138, 17], added: 2 },
+      { move: 0, stay: 1300, cursor: [138, 17], added: 2 },
+      { move: 500, stay: 300, cursor: AWAY, added: 2 },
+    ],
+  },
+  analyze: {
+    rest: 4,
+    beats: [
+      { move: 0, stay: 900, cursor: AWAY, analysis: 0 },
+      { move: 0, stay: 1100, cursor: AWAY, analysis: 1 },
+      { move: 0, stay: 600, cursor: AWAY, analysis: 2 },
+      { move: 0, stay: 1800, cursor: AWAY, analysis: 3 },
+    ],
+  },
   "drag-in": {
     rest: 4,
     beats: [
@@ -155,6 +221,7 @@ function keyLabel(scene: PointerDemoScene): string | null {
   if (scene === "pick-range") return "Shift";
   if (scene === "pick-toggle") return isMac() ? "⌘" : "Ctrl";
   if (scene === "search") return "Enter";
+  if (scene === "multi-copy") return mod();
   return null;
 }
 
@@ -189,7 +256,7 @@ export function PointerDemo({ scene, label, tray = "download" }: {
   /** What the picture says, for assistive technology. */
   label?: string;
   /** The tray's mark in `drag-in`: what the thing is dropped on. */
-  tray?: "download" | "export";
+  tray?: "download" | "export" | "visualize";
 }) {
   const root = useRef<SVGSVGElement>(null);
   const seen = useSeen(root);
@@ -210,11 +277,13 @@ export function PointerDemo({ scene, label, tray = "download" }: {
   const picked = beat.picked ?? [];
   const press = !!beat.press;
   const key = keyLabel(scene);
+  const keyText = beat.keyText ?? key;
   const duration = `${beat.move}ms`;
-  const drag = scene === "drag-in";
+  const drag = scene === "drag-in" || scene === "menu-toss";
   const chip = beat.chip ?? "home";
   const carried: readonly [number, number] = chip === "held"
     ? [beat.cursor[0] - CHIP_HOME[0], beat.cursor[1] - CHIP_HOME[1]]
+    : chip === "lift" ? [LIFT[0] - CHIP_HOME[0], LIFT[1] - CHIP_HOME[1]]
     : chip === "landed" ? [TRAY[0] - CHIP_HOME[0], TRAY[1] - CHIP_HOME[1]] : [0, 0];
   const gone = chip === "landed";
   const hot = drag && (chip === "held" && at >= 3 || gone);
@@ -233,6 +302,32 @@ export function PointerDemo({ scene, label, tray = "download" }: {
         <rect className="kd-demo-cover" x="4" y="3.5" width="10" height="10" rx="2" />
         <rect className="kd-demo-line" x="20" y="4.5" width="60" height="3" rx="1.5" />
         <rect className="kd-demo-line" data-faint="" x="20" y="10" width="36" height="2.5" rx="1.25" />
+      </g>)}
+    </g> : scene === "add-folder" ? <g>
+      {[0, 1, 2, 3, 4].map(i => {
+        const isNew = i >= 3;
+        const shown = !isNew || (beat.added ?? 0) > i - 3;
+        return <g key={i} transform={`translate(8 ${32 + 20 * i})`} className="kd-demo-result" style={{ opacity: shown ? 1 : 0 }}>
+          <rect className="kd-demo-row-base" width="120" height="15" rx="4" />
+          <path className="kd-demo-folder-tab" d="M5 4 h5 l2 2 h-7 Z" />
+          <rect className="kd-demo-folder-body" x="4" y="5.5" width="10" height="7" rx="1.8" />
+          <rect className="kd-demo-line" x="20" y="6" width={[56, 40, 64, 48, 36][i]} height="3.4" rx="1.7" />
+          <path className="kd-demo-tick" data-on={isNew && (beat.added ?? 0) > i - 3 && (beat.added ?? 0) === 2 || undefined} d="M104 7.6 l3 3 l6 -6.6" />
+        </g>;
+      })}
+      <g transform="translate(138 17)">
+        <circle className="kd-demo-add" r="9" data-on={press || undefined} />
+        <path className="kd-demo-tray-mark" d="M-4 0 H4 M0 -4 V4" />
+      </g>
+    </g> : scene === "analyze" ? <g>
+      <rect className="kd-demo-row-base" x="8" y="38" width="204" height="36" rx="10" />
+      <rect className="kd-demo-cover" x="16" y="46" width="20" height="20" rx="4" />
+      <rect className="kd-demo-line" x="42" y="49" width="56" height="4" rx="2" />
+      <rect className="kd-demo-line" data-faint="" x="42" y="58" width="34" height="3.4" rx="1.7" />
+      {[0, 1].map(i => <g key={i} transform={`translate(${140 + 38 * i} 47)`}>
+        <rect className="kd-demo-pill" data-work={(beat.analysis ?? 0) === 1 || undefined} width="32" height="18" rx="9" />
+        <text className="kd-demo-pill-text" x="16" y="12.6" textAnchor="middle"
+          style={{ opacity: (beat.analysis ?? 0) >= 2 + i ? 1 : 0 }}>{i === 0 ? "128" : "Am"}</text>
       </g>)}
     </g> : scene === "pip" ? <g>
       <rect className="kd-demo-row-base" x="8" y="8" width="204" height="96" rx="8" />
@@ -275,7 +370,8 @@ export function PointerDemo({ scene, label, tray = "download" }: {
         <g className="kd-demo-tray-pop">
           <rect className="kd-demo-tray-box" x="-43" y="-42" width="86" height="84" rx="12" />
           <path className="kd-demo-tray-mark" data-gone={gone || undefined}
-            d={tray === "download" ? "M0 -9 V6 M-6.5 0 L0 7 L6.5 0" : "M-6 6 L6 -6 M-1 -6.5 H6.5 V1"} />
+            d={tray === "download" ? "M0 -9 V6 M-6.5 0 L0 7 L6.5 0"
+              : tray === "visualize" ? "M-7 7 V1 M-2.5 7 V-6 M2 7 V-2 M6.5 7 V-8" : "M-6 6 L6 -6 M-1 -6.5 H6.5 V1"} />
           <path className="kd-demo-tick" data-on={gone || undefined} d="M-8 0 l5.5 5.5 l10.5 -11.5" />
         </g>
       </g>
@@ -291,6 +387,13 @@ export function PointerDemo({ scene, label, tray = "download" }: {
           <rect className="kd-demo-line" data-faint="" x="30" y="17" width="24" height="3.4" rx="1.7" />
         </g>
       </g>
+      {scene === "menu-toss" && <g className="kd-demo-menu" data-on={beat.menu || undefined}>
+        <rect className="kd-demo-menu-body" x="52" y="52" width="70" height="52" rx="7" />
+        {[0, 1, 2].map(i => <g key={i}>
+          <rect className="kd-demo-menu-item" data-on={beat.item === i || undefined} x="56" y={56 + 15 * i} width="62" height="13" rx="4" />
+          <rect className="kd-demo-line" x="62" y={60.5 + 15 * i} width={[34, 40, 28][i]} height="3.4" rx="1.7" />
+        </g>)}
+      </g>}
     </g> : <g>
       {ROWS.map(row => <g key={row} transform={`translate(8 ${8 + 20 * row})`}>
         <rect className="kd-demo-row-base" width="140" height="15" rx="4" />
@@ -300,19 +403,24 @@ export function PointerDemo({ scene, label, tray = "download" }: {
         <rect className="kd-demo-line" data-faint="" x="18" y="9" width="32" height="2.5" rx="1.25" />
         <path className="kd-demo-tick" data-on={picked.includes(row) || undefined} d="M126 7.6 l3 3 l6 -6.6" />
       </g>)}
+      {scene === "multi-copy" && <g transform="translate(162 48)" className="kd-demo-folder" data-on={beat.folder || undefined}>
+        <path className="kd-demo-folder-tab" d="M0 8 a5 5 0 0 1 5 -5 h14 l5 5 Z" />
+        <rect className="kd-demo-folder-body" y="8" width="50" height="38" rx="7" />
+        <path className="kd-demo-tick" data-on={beat.folder === "done" || undefined} d="M17 28 l6 6 l11 -12" />
+      </g>}
     </g>}
     {key && <g transform="translate(162 6)">
       <g className="kd-demo-key" data-down={beat.key || undefined}>
         <rect className="kd-demo-key-lip" y="3" width="50" height="20" rx="6" />
         <g className="kd-demo-key-top">
           <rect className="kd-demo-key-face" width="50" height="20" rx="6" />
-          <text className="kd-demo-key-text" x="25" y="13.6" textAnchor="middle">{key}</text>
+          <text className="kd-demo-key-text" x="25" y="13.6" textAnchor="middle">{keyText}</text>
         </g>
       </g>
     </g>}
-    <g className="kd-demo-pointer" style={{ transform: `translate(${beat.cursor[0]}px, ${beat.cursor[1]}px)`, transitionDuration: duration }}>
+    {scene !== "analyze" && <g className="kd-demo-pointer" style={{ transform: `translate(${beat.cursor[0]}px, ${beat.cursor[1]}px)`, transitionDuration: duration }}>
       {press && <circle key={at} className="kd-demo-ping" r="7" />}
       <path className="kd-demo-cursor" d="M0 0 V12.5 L3.4 9.6 L5.6 14.6 L8 13.5 L5.8 8.7 H10 Z" />
-    </g>
+    </g>}
   </svg>;
 }
