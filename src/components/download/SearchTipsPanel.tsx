@@ -1,4 +1,4 @@
-import { PointerDemo, type PointerDemoScene } from "../common/PointerDemo";
+import { chord, PointerDemo, type PointerDemoScene } from "../common/PointerDemo";
 import { SlidePages } from "../drawer/SlidePages";
 import { tipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
 
@@ -39,7 +39,7 @@ const LESSONS: Record<TipsPage, Lesson[]> = {
     { scene: "mini-player", caption: "还能把整个窗口收成迷你播放器，放在桌面角落" },
   ],
   library: [
-    { scene: "multi-copy", caption: `多选后 ${mod}C，到目标文件夹 ${mod}V，就复制进去` },
+    { scene: "multi-copy", caption: `多选后 ${chord("C")}，到目标文件夹 ${chord("V")}，就复制进去` },
     { scene: "analyze", caption: "调性和 BPM 会自动分析，不用手动标" },
     { scene: "menu-toss", tray: "share", caption: "右键一首歌就能分享，会附上歌曲信息和小封面" },
   ],
