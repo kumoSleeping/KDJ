@@ -50,6 +50,8 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
     const settle = window.setTimeout(place, 340);
     const watch = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
     watch?.observe(frame);
+    // The words change size as the switch plays, and with them the row.
+    watch?.observe(row);
     return () => { window.clearTimeout(settle); watch?.disconnect(); };
   }, [value, tabs]);
   const pick = (id: T) => { if (id !== value) onChange?.(id); };
