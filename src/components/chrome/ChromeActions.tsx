@@ -8,7 +8,6 @@ import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { ChromeMiniPlayerKey } from "../player/MiniPlayer";
 import { HintBulbIcon } from "../download/HintBulbIcon";
-import { MouseFace } from "../common/MouseDemo";
 import { useTipsNudge } from "../../lib/tipsNudge";
 
 export interface ChromeActionsProps {
@@ -79,7 +78,9 @@ export function ChromeActions({
       {onTips && <button type="button" className="kd-chrome-btn" title="使用提示" aria-label="使用提示"
         aria-pressed={tipsOpen} data-open={tipsOpen || undefined} data-fresh={tipsFresh || undefined} onClick={onTips}>
         <HintBulbIcon size={17} aria-hidden="true" />
-        {tipsFresh && <span className="kd-fresh-mouse" aria-hidden="true"><MouseFace /></span>}
+        {tipsFresh && <span className="kd-fresh-pointer" aria-hidden="true">
+          <svg viewBox="0 0 10 15"><path d="M0 0 V12.5 L3.4 9.6 L5.6 14.6 L8 13.5 L5.8 8.7 H10 Z" /></svg>
+        </span>}
       </button>}
       <button type="button" className="kd-chrome-btn" title="工具箱" aria-label="工具箱"
         aria-haspopup="menu" aria-expanded={!!tools} data-open={compositionOpen || undefined}

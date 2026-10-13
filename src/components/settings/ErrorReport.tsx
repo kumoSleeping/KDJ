@@ -1,0 +1,74 @@
+import { useEffect, useRef, useState } from "react";
+import { Send } from "lucide-react";
+import { api } from "../../lib/api";
+import { flushDiagnostics } from "../../lib/diagnostics";
+import { Button, InlineNotice } from "../common";
+import "./DiagnosticsPanel.css";
+
+type Preview = Awaited<ReturnType<typeof api.diagnostics.prepare>>;
+
+/**
+ * 把错误报告交给开发者，一步完成：写一句话（可以不写），按「发送」。
+ *
+ * 发送前的内容是冻结的：「查看内容」和「发送」用的是同一份脱敏后的报告，改了描述才会重新生成。
+ * 失败后再按一次发送的是同一份报告（服务端按报告 ID 去重）。没有勾选、没有二次确认窗口，
+ * 也没有自动上传：只有这个按键会联网。设置里的日志页和崩溃页共用它。
+ */
+export function ErrorReport() {
+  const [note, setNote] = useState("");
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [shown, setShown] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "preparing" | "sending" | "sent">("idle");
+  const [error, setError] = useState("");
+  const [receipt, setReceipt] = useState("");
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+
+  const freeze = async (): Promise<Preview> => {
+    if (preview) return preview;
+    await flushDiagnostics();
+    const next = await api.diagnostics.prepare(note);
+    if (alive.current) setPreview(next);
+    return next;
+  };
+  const fail = (cause: unknown) => {
+    if (alive.current) { setError(cause instanceof Error ? cause.message : String(cause)); setPhase("idle"); }
+  };
+  const look = async () => {
+    if (shown) { setShown(false); return; }
+    setError(""); setPhase("preparing");
+    try { await freeze(); if (alive.current) { setShown(true); setPhase("idle"); } } catch (cause) { fail(cause); }
+  };
+  const send = async () => {
+    setError(""); setPhase("preparing");
+    try {
+      const frozen = await freeze();
+      if (!alive.current) return;
+      setPhase("sending");
+      const result = await api.diagnostics.submit(frozen.id);
+      if (alive.current) { setReceipt(result.id); setPhase("sent"); }
+    } catch (cause) { fail(cause); }
+  };
+
+  const busy = phase === "preparing" || phase === "sending";
+  if (phase === "sent") return <section className="kd-report" aria-label="上报错误">
+    <p className="kd-report-status" role="status">已发送 · {receipt.slice(0, 8)}</p>
+  </section>;
+  return <section className="kd-report" aria-label="上报错误">
+    <textarea className="kd-report-note" rows={3} maxLength={2000} aria-label="问题描述" value={note} disabled={busy}
+      autoComplete="off" spellCheck={false}
+      onChange={event => { setNote(event.currentTarget.value); setPreview(null); setShown(false); }} />
+    <div className="kd-report-actions">
+      <span className="kd-report-status" role="status">
+        {phase === "preparing" ? "正在整理" : phase === "sending" ? "正在发送" : preview ? `${Math.ceil(preview.bytes / 1024)} KB` : ""}
+      </span>
+      <Button size="sm" variant="ghost" disabled={busy} aria-expanded={shown} onClick={() => void look()}>
+        {shown ? "收起内容" : "查看内容"}
+      </Button>
+      <Button size="sm" variant="ghost" disabled={busy} onClick={() => void send()}><Send size={14} />发送</Button>
+    </div>
+    {shown && preview && <pre className="kd-report-body" tabIndex={0} aria-label="将发送的内容">{preview.body}</pre>}
+    <p className="kd-report-privacy">发送近期错误、软件版本和系统信息，不含媒体、曲库、账号或设置。</p>
+    <InlineNotice text={error} block onDismiss={() => setError("")} />
+  </section>;
+}
