@@ -9,7 +9,7 @@ test("the pointer demos play every scene, survive a change of scene mid-loop, an
   const dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "http://localhost/" });
   Object.assign(globalThis, {
     window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement,
-    navigator: dom.window.navigator, Element: dom.window.Element,
+    Element: dom.window.Element,
     IS_REACT_ACT_ENVIRONMENT: true,
   });
   const { createRoot } = await import("react-dom/client");
