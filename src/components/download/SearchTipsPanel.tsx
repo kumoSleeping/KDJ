@@ -34,14 +34,14 @@ const LESSONS: Record<TipsPage, Lesson[]> = {
     { scene: "menu-toss", tray: "visualize", caption: "右键一首歌，导出可视化，同样飞进队列" },
   ],
   player: [
-    { scene: "player-keys", caption: "底部是标准播放器；自动切歌、歌词、小窗，点一下就亮" },
+    { scene: "player-keys", caption: "底部是标准播放器；自动切歌、歌词、小窗，点一下就开关" },
     { scene: "pip", caption: "小窗里可以看视频，自由移动、放大缩小；播放歌曲时展示你调好的可视化" },
     { scene: "mini-player", caption: "还能把整个窗口收成迷你播放器，放在桌面角落" },
   ],
   library: [
     { scene: "multi-copy", caption: `多选后 ${mod}C，到目标文件夹 ${mod}V，就复制进去` },
     { scene: "analyze", caption: "调性和 BPM 会自动分析，不用手动标" },
-    { scene: "menu-toss", tray: "share", caption: "右键一首歌可以分享；分享的内容在设置里调整" },
+    { scene: "menu-toss", tray: "share", caption: "右键一首歌就能分享，会附上歌曲信息和小封面" },
   ],
 };
 

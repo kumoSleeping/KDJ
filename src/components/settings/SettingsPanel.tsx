@@ -32,7 +32,6 @@ import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { clearStreamAnalysisCache } from "../../lib/streamAnalysis";
 import { clearStreamCacheProgressCache } from "../../lib/streamCacheProgress";
-import { useSharePrefs, type ShareContentMode } from "../../lib/sharePrefs";
 import { clearAllWaveformCaches } from "../../lib/waveformCache";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
@@ -300,8 +299,6 @@ export function SettingsPanel({ preferences = false, page }: {
   const setHorizontalArrowKeyMode = useArrowKeyControl((state) => state.setHorizontalMode);
   const verticalArrowKeyMode = useArrowKeyControl((state) => state.verticalMode);
   const setVerticalArrowKeyMode = useArrowKeyControl((state) => state.setVerticalMode);
-  const shareContentMode = useSharePrefs((state) => state.contentMode);
-  const setShareContentMode = useSharePrefs((state) => state.setContentMode);
   const lyricsEngines = useLyricsPrefs((state) => state.engines);
   const setLyricsEngines = useLyricsPrefs((state) => state.setEngines);
   const tryOnlineWhenMissing = useLyricsPrefs((state) => state.tryOnlineWhenMissing);
@@ -539,17 +536,6 @@ export function SettingsPanel({ preferences = false, page }: {
                 ]}
                 title="本地歌曲拖出 KDJ 时，选择交给其他应用真实歌曲文件或可公开打开的来源链接。"
                 onChange={setLocalExternalDragMode}
-              />
-              <CycleToggle<ShareContentMode>
-                label="分享内容"
-                value={shareContentMode}
-                options={[
-                  { id: "link_only", text: "原链接" },
-                  { id: "song_info", text: "包含信息" },
-                  { id: "more_info", text: "更多信息" },
-                ]}
-                title="原链接仅分享网址；包含信息会附上歌曲名与艺术家；更多信息沿用相同文字，并额外附上 Share from KDJ 版本水印和小尺寸缩略封面。"
-                onChange={setShareContentMode}
               />
               {/* The rail over the list carries this control only while analysis has work to do. */}
               <CycleToggle<AutoAnalysisMode>

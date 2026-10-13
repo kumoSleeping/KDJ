@@ -72,7 +72,7 @@ interface Scene {
 
 const ROWS = [0, 1, 2, 3, 4] as const;
 const rowAt = (row: number): readonly [number, number] => [96, 15.5 + 20 * row];
-const AWAY: readonly [number, number] = [176, 70];
+const AWAY: readonly [number, number] = [200, 96];
 
 const CHIP_HOME = [46, 40] as const;
 const TRAY = [169, 56] as const;
@@ -129,12 +129,12 @@ const SCENES: Record<PointerDemoScene, Scene> = {
   "viz-tune": {
     rest: 4,
     beats: [
-      { move: 600, stay: 300, cursor: [20, 100], knob: 0 },
-      { move: 80, stay: 250, cursor: [20, 100], press: true, knob: 0 },
-      { move: 1100, stay: 300, cursor: [124, 100], press: true, knob: 1 },
-      { move: 0, stay: 400, cursor: [124, 100], knob: 1 },
-      { move: 0, stay: 1100, cursor: [124, 100], knob: 1 },
-      { move: 900, stay: 300, cursor: [20, 100], knob: 0 },
+      { move: 600, stay: 300, cursor: [20, 93], knob: 0 },
+      { move: 80, stay: 250, cursor: [20, 93], press: true, knob: 0 },
+      { move: 1100, stay: 300, cursor: [124, 93], press: true, knob: 1 },
+      { move: 0, stay: 400, cursor: [124, 93], knob: 1 },
+      { move: 0, stay: 1100, cursor: [124, 93], knob: 1 },
+      { move: 900, stay: 300, cursor: [20, 93], knob: 0 },
     ],
   },
   pip: {
@@ -264,12 +264,12 @@ const SCENES: Record<PointerDemoScene, Scene> = {
   "viz-export": {
     rest: 3,
     beats: [
-      { move: 600, stay: 300, cursor: AWAY },
+      { move: 600, stay: 300, cursor: [196, 36] },
       { move: 700, stay: 200, cursor: [192, 92] },
       { move: 80, stay: 300, cursor: [192, 92], press: true, exported: true },
       { move: 0, stay: 1500, cursor: [192, 92], exported: true },
-      { move: 500, stay: 300, cursor: AWAY, exported: true },
-      { move: 0, stay: 100, cursor: AWAY },
+      { move: 500, stay: 300, cursor: [196, 36], exported: true },
+      { move: 0, stay: 100, cursor: [196, 36] },
     ],
   },
   "mini-player": {
@@ -466,12 +466,12 @@ export function PointerDemo({ scene, label, tray = "download" }: {
       {[0, 1, 2, 3, 4].map(i => {
         const isNew = i >= 3;
         const shown = !isNew || (beat.added ?? 0) > i - 3;
-        return <g key={i} transform={`translate(8 ${32 + 20 * i})`} className="kd-demo-result" style={{ opacity: shown ? 1 : 0 }}>
-          <rect className="kd-demo-row-base" width="120" height="15" rx="4" />
-          <path className="kd-demo-folder-tab" d="M5 4 h5 l2 2 h-7 Z" />
-          <rect className="kd-demo-folder-body" x="4" y="5.5" width="10" height="7" rx="1.8" />
-          <rect className="kd-demo-line" x="20" y="6" width={[56, 40, 64, 48, 36][i]} height="3.4" rx="1.7" />
-          <path className="kd-demo-tick" data-on={isNew && (beat.added ?? 0) > i - 3 && (beat.added ?? 0) === 2 || undefined} d="M104 7.6 l3 3 l6 -6.6" />
+        return <g key={i} transform={`translate(8 ${32 + 15.5 * i})`} className="kd-demo-result" style={{ opacity: shown ? 1 : 0 }}>
+          <rect className="kd-demo-row-base" width="120" height="13" rx="4" />
+          <path className="kd-demo-folder-tab" d="M5 3.4 h5 l2 2 h-7 Z" />
+          <rect className="kd-demo-folder-body" x="4" y="4.6" width="10" height="6" rx="1.8" />
+          <rect className="kd-demo-line" x="20" y="4.8" width={[56, 40, 64, 48, 36][i]} height="3.4" rx="1.7" />
+          <path className="kd-demo-tick" data-on={isNew && (beat.added ?? 0) === 2 || undefined} d="M104 6.6 l2.6 2.6 l5 -5.6" />
         </g>;
       })}
       <g transform="translate(138 17)">
@@ -516,13 +516,13 @@ export function PointerDemo({ scene, label, tray = "download" }: {
       </g>)}
     </g> : scene === "viz-tune" ? <g>
       <g className="kd-demo-bars" style={{ transform: `scaleY(${0.35 + 0.65 * (beat.knob ?? 0)})`, transitionDuration: `${beat.move}ms` }}>
-        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => <rect key={i} className="kd-demo-bar" x={10 + 14.2 * i} y="8" width="9" height="78" rx="4.5"
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => <rect key={i} className="kd-demo-bar" x={10 + 14.2 * i} y="6" width="9" height="76" rx="4.5"
           style={{ animationDelay: `${-((i * 337) % 1000)}ms`, animationDuration: `${900 + (i * 131) % 500}ms` }} />)}
       </g>
-      <rect className="kd-demo-row-base" x="8" y="97" width="132" height="6" rx="3" />
-      <rect className="kd-demo-fill" x="8" y="97" width="132" height="6" rx="3"
+      <rect className="kd-demo-row-base" x="8" y="90" width="132" height="6" rx="3" />
+      <rect className="kd-demo-fill" x="8" y="90" width="132" height="6" rx="3"
         style={{ transform: `scaleX(${0.12 + 0.76 * (beat.knob ?? 0)})`, transitionDuration: `${beat.move}ms` }} />
-      <circle className="kd-demo-knob" cy="100" r="6.5" cx="20"
+      <circle className="kd-demo-knob" cy="93" r="6.5" cx="20"
         style={{ transform: `translateX(${104 * (beat.knob ?? 0)}px)`, transitionDuration: `${beat.move}ms` }} />
     </g> : drag ? <g>
       <g className="kd-demo-tray" data-hot={hot || undefined} transform={`translate(${TRAY[0]} ${TRAY[1]})`}>

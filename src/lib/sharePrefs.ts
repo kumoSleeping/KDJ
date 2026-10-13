@@ -1,61 +1,15 @@
 import { create } from "zustand";
 
-const STORAGE_KEY = "kd-share-prefs";
-
-/** 分享到外部应用时，普通文本里附带多少歌曲信息。 */
+/** 分享到外部应用时，普通文本里附带多少歌曲信息（见 shareLink.ts / shareClipboard.ts）。 */
 export type ShareContentMode = "link_only" | "song_info" | "more_info";
-export const DEFAULT_SHARE_CONTENT_MODE: ShareContentMode = "more_info";
 
-interface SharePrefs {
-  contentMode: ShareContentMode;
-}
+/**
+ * 分享固定为「更多信息」：歌曲名、艺术家、Share from KDJ 版本水印和小尺寸缩略封面。
+ * 设置里不再有这个选项，原链接与包含信息两种方式不再使用；这里只保留一个固定值，
+ * 让分享的各处入口读同一个来源。以前存下的选择（`kd-share-prefs`）被忽略。
+ */
+export const SHARE_CONTENT_MODE: ShareContentMode = "more_info";
 
-interface SharePrefsState extends SharePrefs {
-  setContentMode(value: ShareContentMode): void;
-}
-
-const DEFAULTS: SharePrefs = {
-  contentMode: DEFAULT_SHARE_CONTENT_MODE,
-};
-
-export function normalizeShareContentMode(value: unknown): ShareContentMode {
-  return value === "link_only" || value === "song_info" || value === "more_info" ? value : DEFAULT_SHARE_CONTENT_MODE;
-}
-
-function storage(): Storage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-function load(): SharePrefs {
-  try {
-    const raw: unknown = JSON.parse(storage()?.getItem(STORAGE_KEY) ?? "null");
-    if (!raw || typeof raw !== "object") return { ...DEFAULTS };
-    return {
-      contentMode: normalizeShareContentMode((raw as Partial<SharePrefs>).contentMode),
-    };
-  } catch {
-    return { ...DEFAULTS };
-  }
-}
-
-function save(prefs: SharePrefs): void {
-  try {
-    storage()?.setItem(STORAGE_KEY, JSON.stringify(prefs));
-  } catch {
-    // 存储不可用时仍保留本次会话里的选择。
-  }
-}
-
-export const useSharePrefs = create<SharePrefsState>((set) => ({
-  ...load(),
-  setContentMode(contentMode) {
-    const next = { contentMode: normalizeShareContentMode(contentMode) };
-    set(next);
-    save(next);
-  },
+export const useSharePrefs = create<{ contentMode: ShareContentMode }>(() => ({
+  contentMode: SHARE_CONTENT_MODE,
 }));
