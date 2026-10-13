@@ -169,6 +169,8 @@ import {
   SearchBar,
 } from "../download/SearchBar";
 import { SearchTipsPanel } from "../download/SearchTipsPanel";
+import { tipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
+import { useTipsNudge } from "../../lib/tipsNudge";
 import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
 import { DETAIL_EVENT } from "../library/TrackTable";
 import { NetworkVideoDetail } from "../player/NetworkVideoDetail";
@@ -309,6 +311,9 @@ function loadWorkspacePanes(): WorkspacePaneState {
  * 这么排的理由：找歌 → 下载 → 进曲库 → 排 set 本来就是一条线上的动作，
  * 搜的时候本地还在眼前，也不被队列面板打断。
  */
+// The tips page in view, read by the drawer's title row itself (see DrawerSpec.usePage).
+const useTipsPageInView = () => useTipsPage(state => state.page);
+
 export function Workspace() {
   const downloadsOpen = useSidePanels(state => state.downloads);
   const lyricsOpen = useSidePanels(state => state.lyrics);
@@ -1480,7 +1485,7 @@ export function Workspace() {
       const target = event.target as HTMLElement | null;
       if (
         target?.closest(
-          ".kd-search-tip-action, .kd-split-aside, .kd-sheet",
+          ".kd-search-tip-action, .kd-split-aside, .kd-sheet, .kd-drawer, .kd-drawer-entry",
         )
       ) return;
       setShowSearchTips(false);
@@ -1772,7 +1777,7 @@ export function Workspace() {
     })().catch(error => useWorkshopStore.setState({error: String(error)}));
   };
   const asidePanel = showSearchTips ? (
-    <SearchTipsPanel />
+    <SearchTipsPanel stacked={layout !== "wide"} />
   ) : showFolders ? (
     <FolderTree
       onNavigate={onFolderNavigate}
@@ -1805,12 +1810,20 @@ export function Workspace() {
     // 网络视频下面的歌词没有自己的高度，所以铺到底。
     extent: showSearchTips ? "fit" : showFolders ? "at-least-half" : showDuplicates ? "fit" : "full",
     tools: asideTools,
+    // 使用提示按功能分页：页签在标题上，选哪一类就教哪一类。
+    ...(showSearchTips ? {
+      pages: tipsPages,
+      usePage: useTipsPageInView,
+      onPage: (id: string) => useTipsPage.getState().setPage(id as TipsPage),
+    } : {}),
     body: <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>,
     close: () => {
       if (showSearchTips) setShowSearchTips(false);
       else useAppStore.getState().dismissOverlay();
     },
   });
+  // The tips' first greeting is for as long as they have not been opened once.
+  useEffect(() => { if (showSearchTips) useTipsNudge.getState().dismiss(); }, [showSearchTips]);
   const dockOrder = useDrawerOrder(drawerApps.map(app => app.id), dockRaised);
   // download-toss: a parcel in flight holds the drawer on the app it is aimed at; what was asked
   // for meanwhile is shown, and the other apps closed, once it has landed (lib/drawerHold.ts).
@@ -2539,6 +2552,8 @@ export function Workspace() {
           }
           actions={
             <ChromeActions
+              tipsOpen={showSearchTips}
+              onTips={toggleSearchTipsPanel}
               tasksOpen={downloadsOpen}
               onTasks={() => {
                 useSidePanels.getState().setDownloads(!downloadsOpen);

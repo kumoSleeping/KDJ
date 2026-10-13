@@ -9,13 +9,12 @@
   align-self: center;
 }
 
-.kd-queue-empty-message {
-  min-height: 100%;
+/* The picture has a height of its own: a blank that fills the list would tell the drawer's
+   measure that the page needs all of it, and the panel would stay as tall as the history was. */
+.kd-queue-empty {
   display: grid;
   place-items: center;
-  padding: 1rem;
+  padding: 1.5rem 1rem 1rem;
   box-sizing: border-box;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  text-align: center;
 }
+.kd-queue-empty > .kd-demo { max-width: 13rem; }

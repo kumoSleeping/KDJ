@@ -7,6 +7,9 @@ import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePa
 import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { ChromeMiniPlayerKey } from "../player/MiniPlayer";
+import { HintBulbIcon } from "../download/HintBulbIcon";
+import { MouseFace } from "../common/MouseDemo";
+import { useTipsNudge } from "../../lib/tipsNudge";
 
 export interface ChromeActionsProps {
   settingsOpen: boolean;
@@ -18,6 +21,9 @@ export interface ChromeActionsProps {
   /** 下载与导出任务列表：固定在右栏，由这里开关。 */
   tasksOpen: boolean;
   onTasks(): void;
+  /** 使用提示（小灯泡）：按功能分页的教学，由小鼠标演示。没有这个入口的窗口不传。 */
+  tipsOpen?: boolean;
+  onTips?(): void;
 }
 
 /** 顶栏提供设置及工具箱入口；工具箱弹出小菜单，从中进入 VJ 剪辑或 VJ 投放。 */
@@ -28,7 +34,10 @@ export function ChromeActions({
   onOpenUpdate,
   tasksOpen,
   onTasks,
+  tipsOpen = false,
+  onTips,
 }: ChromeActionsProps) {
+  const tipsFresh = useTipsNudge(state => state.fresh);
   const compositionMode = useAppStore(state => state.compositionMode);
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
   const latest = useUpdateStore((s) => s.info?.latest ?? "");
@@ -67,6 +76,11 @@ export function ChromeActions({
       >
         <Settings size={16} />
       </button>
+      {onTips && <button type="button" className="kd-chrome-btn" title="使用提示" aria-label="使用提示"
+        aria-pressed={tipsOpen} data-open={tipsOpen || undefined} data-fresh={tipsFresh || undefined} onClick={onTips}>
+        <HintBulbIcon size={17} aria-hidden="true" />
+        {tipsFresh && <span className="kd-fresh-mouse" aria-hidden="true"><MouseFace /></span>}
+      </button>}
       <button type="button" className="kd-chrome-btn" title="工具箱" aria-label="工具箱"
         aria-haspopup="menu" aria-expanded={!!tools} data-open={compositionOpen || undefined}
         onClick={event => {
