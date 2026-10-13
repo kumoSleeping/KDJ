@@ -3,7 +3,6 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { StoreApi } from "zustand";
 import { usePlaybackPrefs } from "./playbackPrefs";
 import { useArrowKeyControl } from "./arrowKeyControl";
-import { useSharePrefs } from "./sharePrefs";
 import { useLyricsPrefs } from "./lyricsPrefs";
 import { useUpdateStore } from "../stores/updateStore";
 import { applyAppFontScale, readAppFontScale, APP_FONT_SCALE_EVENT } from "./fontScale";
@@ -43,7 +42,6 @@ export function startPreferenceWindowSync(): Promise<void> {
     const bindings = [
       bind("playback", usePlaybackPrefs, ["tempoRange", "playingDetailPinned", "detailWaveformVisible", "detailControlVisible", "localExternalDragMode", "timeDisplayMode"]),
       bind("keyboard", useArrowKeyControl, ["enabled", "horizontalMode", "verticalMode"]),
-      bind("share", useSharePrefs, ["contentMode"]),
       bind("lyrics", useLyricsPrefs, ["engines", "displaySource", "tryOnlineWhenMissing"], patch => {
         useLyricsPrefs.getState().syncFromSnapshot({ ...useLyricsPrefs.getState(), ...patch });
       }),

@@ -5,7 +5,8 @@
   width: 100%;
   max-width: 15rem;
   height: auto;
-  overflow: visible;
+  /* A picture never paints over the line under it: whatever is drawn stays in its frame. */
+  overflow: hidden;
   color: var(--kd-text);
 }
 .kd-demo-row-base,
@@ -124,7 +125,7 @@
 /* The floating window's play mark, and the player bar's toggle keys. */
 .kd-demo-playmark { fill: var(--kd-muted); }
 .kd-demo-togglekey > * { fill: none; stroke: var(--kd-muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: stroke 140ms ease; }
-.kd-demo-togglekey[data-on] > * { stroke: var(--kd-red, var(--kd-text)); }
+.kd-demo-togglekey[data-on] > * { stroke: var(--kd-text); stroke-width: 2.1; }
 
 /* The first greeting of a new build: the bulb itself flashes, a few times, and stops. No words,
    nothing beside it. */
