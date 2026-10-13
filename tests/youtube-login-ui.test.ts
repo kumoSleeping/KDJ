@@ -110,9 +110,13 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
         const beforeOpen = calls.length;
         await click("登录");
-        assert.ok(calls.slice(beforeOpen).every(call => call.startsWith("GET:")), "opening looks for browsers and reads no login");
-        assert.ok(calls.includes(`GET:/api/accounts/${platform}/login/browsers`));
         assert.deepEqual(methods(), ["复用浏览器", "登录窗口", "请求头"]);
+        assert.equal(calls.length, beforeOpen, "opening shows the ways and asks for nothing");
+        assert.equal(document.querySelector(".kd-account-login-panel"), null, "no way is open until one is chosen");
+        assert.equal(document.querySelector(".kd-account-login-methods button[data-active]"), null);
+        await click("复用浏览器");
+        assert.ok(calls.slice(beforeOpen).every(call => call.startsWith("GET:")), "choosing it looks for browsers and reads no login");
+        assert.ok(calls.includes(`GET:/api/accounts/${platform}/login/browsers`));
         assert.equal(panel().getAttribute("aria-label"), `${browserAccount(platform).label} · 复用浏览器`);
         assert.equal(document.querySelector("dialog, [role=dialog]"), null, "a login is never a window over the settings");
         assert.deepEqual([...panel().querySelectorAll("select")[0].querySelectorAll("option")].map(option => option.textContent), ["Edge", "Safari", "Fork"]);
@@ -146,6 +150,10 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         await fillHeaders();
         await click("登录", panel());
         assert.ok(calls.includes(`POST:/api/accounts/${platform}/login/headers`));
+        await click("请求头");
+        assert.equal(document.querySelector(".kd-account-login-panel"), null, "choosing the open way again puts it away");
+        await click("请求头");
+        assert.equal(document.querySelector("textarea")?.value, "", "what was pasted does not come back");
 
         const windowsBefore = calls.filter(call => call.startsWith("window:")).length;
         await click("登录窗口");
@@ -160,6 +168,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     dom.window.kdj.platform = "win32";
     await render("success", browserAccount("soundcloud"));
     await click("登录");
+    await click("复用浏览器");
     answer = () => new Response(JSON.stringify(signedIn("soundcloud")), { headers: { "content-type": "application/json" } });
     let before = loginPosts().length;
     await click("登录", panel());
@@ -171,6 +180,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     // 取消 stops the request it belongs to; nothing is reported and no window follows.
     await render("cancel", browserAccount("soundcloud"));
     await click("登录");
+    await click("复用浏览器");
     let finish: ((response: Response) => void) | undefined;
     answer = () => new Promise<Response>(resolve => { finish = resolve; });
     before = loginPosts().length;
@@ -196,6 +206,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     dom.window.kdj.platform = "darwin";
     await render("permission", browserAccount("ytm"));
     await click("登录");
+    await click("复用浏览器");
     await choose(panel().querySelectorAll("select")[0], "safari");
     answer = () => new Response(JSON.stringify({ detail: permissionError }), { status: 400 });
     await click("登录", panel());
@@ -236,8 +247,12 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     for (const platform of ["wyy", "qqm", "bilibili"] as const) {
       await render(`qr-${platform}`, qrAccount(platform));
       assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
+      const beforeQr = calls.length;
       await click("登录");
       assert.deepEqual(methods(), ["扫码", "复用浏览器"]);
+      assert.equal(calls.length, beforeQr, "no code is asked for before 扫码 is chosen");
+      assert.equal(document.querySelector(".kd-account-login-qr, .kd-account-login-panel"), null);
+      await click("扫码");
       assert.ok(calls.includes(`POST:/api/accounts/${platform}/login/qr`));
       const codes = document.querySelectorAll(".kd-account-login-qr img");
       assert.equal(codes.length, platform === "qqm" ? 2 : 1);
@@ -257,6 +272,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     emptyCatalog = true;
     await render("empty", browserAccount("soundcloud"));
     await click("登录");
+    await click("复用浏览器");
     assert.equal(buttons(panel()).find(button => button.textContent === "登录")?.disabled, true);
     assert.equal(panel().querySelector("select"), null, "no browsers is an empty choice, not a message");
   } finally {

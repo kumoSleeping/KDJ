@@ -42,15 +42,16 @@ export function loginMethods(account: Account): Method[] {
 }
 
 /**
- * Logging in to one account, in place under its row: the ways it has, and under them the one that
- * is open. The open way is the one written in full-strength text. There is no window and no mask
- * over the settings; a code to scan comes up here as well.
+ * Logging in to one account, in place under its row: the ways it has, and under them the one the
+ * user chose. Nothing is open, fetched or looked for until a way is chosen; the chosen way is the
+ * one written in full-strength text, and choosing it again puts it away. There is no window and no
+ * mask over the settings; a code to scan comes up here as well.
  */
 export function AccountLogin({ account, sourceEnabled, onDone }: {
   account: Account; sourceEnabled: boolean; onDone(): void;
 }) {
   const methods = loginMethods(account);
-  const [method, setMethod] = useState<Method>(methods[0]);
+  const [method, setMethod] = useState<Method | null>(null);
   const [panelBusy, setPanelBusy] = useState(false);
   const [windowBusy, setWindowBusy] = useState(false);
   const [windowNotice, setWindowNotice] = useState("");
@@ -101,7 +102,7 @@ export function AccountLogin({ account, sourceEnabled, onDone }: {
             if (busy) return;
             setWindowNotice("");
             if (id === "webview") void openLoginWindow();
-            else setMethod(id);
+            else setMethod(current => current === id ? null : id);
           }}>
             <Icon size={14} aria-hidden="true" />
             <span>{METHODS[id].label}</span>
