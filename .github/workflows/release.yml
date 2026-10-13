@@ -1,5 +1,5 @@
 # 自动发行：推送 main 时检测版本号，出现新版本就打 tag + 建 Release，
-# 再把两条打包线（桌面 rust-build.yml / 安卓 rust-android.yml）调度到 tag 上跑。
+# 再把桌面打包线 rust-build.yml 调度到 tag 上跑（安卓 rust-android.yml 只手动触发）。
 #
 # 版本号以 **src-tauri/tauri.conf.json 的 .version** 为发版入口，但
 # package.json / Cargo.toml 必须同步：Tauri 安装包读前者，内置 Rust health/update
@@ -185,5 +185,5 @@ jobs:
           # --ref 指到 tag，两条线里的 github.ref 就是 refs/tags/v$VERSION，
           # 它们各自"仅 tag 才发布"的条件因此成立，产物会传进上面那个 Release
           gh workflow run rust-build.yml --ref "v$VERSION"
-          gh workflow run rust-android.yml --ref "v$VERSION"
-          echo "已调度桌面 + 安卓打包，进度看 Actions 页"
+          # 安卓不再随发版自动跑；要补 APK：gh workflow run rust-android.yml --ref "v$VERSION"
+          echo "已调度桌面打包，进度看 Actions 页"

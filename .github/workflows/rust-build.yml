@@ -96,7 +96,7 @@ jobs:
 
   desktop:
     name: ${{ matrix.label }}
-    needs: quality
+    # 不等门禁：打包和门禁并行跑，发布才要求两边都过（见 publish 的 needs）。
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -197,34 +197,17 @@ jobs:
             || sudo apt-get install -y libappindicator3-dev
 
       # 桌面矩阵只负责各平台真实 release 编译、签名和安装包验证，不再在四个平台
-      # 重复冷编整套 workspace 测试。Tauri 打包本身仍会完整编译当前平台的 Rust
+      # 重复冷编整套 workspace 测试（2026-10-13：媒体工具包与 Windows 播放回归也从这里
+      # 拿掉了——它们在 Windows 上要先单独冷编一遍测试版，约 27 分钟，且 quality 已经
+      # 在 Linux 上跑 kdj-core/library/providers/server 的 --lib）。Tauri 打包本身仍会完整编译当前平台的 Rust
       # 代码，任何平台编译或链接错误仍会让该 job 失败。
 
       - name: 安装前端依赖
         run: npm ci
 
-      - name: 媒体工具包导入与恢复回归
-        run: cargo test -p kdj-providers --lib ffmpeg::managed --locked
-
       - name: 桌面浏览器发现回归
         if: runner.os == 'Windows' || runner.os == 'macOS'
-        run: cargo test -p kdj-providers --lib browser:: --locked
-
-      - name: Windows 播放与文件恢复回归
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test -p kdj-player --lib pipeline_reports_decoder
-          cargo test -p kdj-playback --lib platform::tests
-          cargo test -p kdj-playback --lib device_ -- --test-threads=1
-          cargo test -p kdj-playback --lib output_permission -- --test-threads=1
-          cargo test -p kdj-app --lib diagnostics::tests
-          cargo test -p kdj-app --lib release_version::tests --locked
-          cargo test -p kdj-app --lib data_recovery::tests
-          cargo test -p kdj-app --lib live_vj::audio_input::tests
-          cargo test -p kdj-providers --lib net::tests::strict_publication_keeps_source_and_destination_on_collision
-          cargo test -p kdj-providers --lib net::tests::concurrent_downloads_keep_independent_bytes_and_existing_files
+        run: "cargo test -p kdj-providers --lib browser:: --locked"
 
       # M7（Tauri 壳）落地之前 src-tauri/ 还不完整。这里探测一下而不是硬跑，
       # 让这条流水线在壳做好之前仍然能当"三平台 Rust 测试"用，红叉只留给真问题。
@@ -434,7 +417,7 @@ jobs:
 
   publish:
     name: 发布桌面安装包
-    needs: desktop
+    needs: [quality, desktop]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
