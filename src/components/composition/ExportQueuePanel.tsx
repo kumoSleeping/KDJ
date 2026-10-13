@@ -17,7 +17,7 @@ import { TaskCoverStack } from "../common/TaskCover";
 import { QueueEntry, QueueFrame, QueueOverview } from "../queue/QueuePrimitives";
 import { QueueTaskList, type QueueListPosition } from "../queue/QueueTaskList";
 import { VisualizerExportRow } from "./VisualizerExportTasks";
-import { PointerDemo } from "../common/PointerDemo";
+import { QueueEmptyDemo } from "../common/PointerDemo";
 import "./ExportQueuePanel.css";
 
 const phases: Record<string, string> = {
@@ -181,7 +181,7 @@ export function ExportQueuePanel({ history = false, position }: { history?: bool
     </section>}
     <InlineNotice text={error} onDismiss={() => useWorkshopStore.setState({ error: "" })} block />
     <InlineNotice text={visualizerError} onDismiss={() => useVisualizerExportStore.setState({ error: "" })} block />
-    <QueueTaskList empty={history ? undefined : <PointerDemo scene="drag-in" tray="export" label="将本地歌曲拖入此处准备导出" />} count={pending.length + visibleJobs.length + visibleVisualizerTasks.length} position={position}
+    <QueueTaskList empty={history ? undefined : <QueueEmptyDemo tray="export" label="将本地歌曲拖入此处准备导出，或右键导出" />} count={pending.length + visibleJobs.length + visibleVisualizerTasks.length} position={position}
       getKey={index => index < pending.length ? `project:${pending[index].id}`
         : index < pending.length + visibleJobs.length ? `job:${visibleJobs[index - pending.length].id}`
         : `visualizer:${visibleVisualizerTasks[index - pending.length - visibleJobs.length].id}`}>
