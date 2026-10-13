@@ -9,7 +9,8 @@ import "./PointerDemo.css";
  * It is a still picture under reduced motion, and it stops while it is out of sight.
  */
 export type PointerDemoScene = "pick-range" | "pick-toggle" | "drag-in" | "search" | "viz-tune" | "pip" | "player-keys"
-  | "menu-toss" | "multi-copy" | "add-folder" | "analyze";
+  | "menu-toss" | "multi-copy" | "add-folder" | "analyze"
+  | "platforms" | "kind-switch" | "sidebar-online" | "viz-export" | "mini-player";
 
 /** What the picture shows for one moment; the next moment is `move` + `stay` later. */
 interface Beat {
@@ -47,6 +48,20 @@ interface Beat {
   added?: number;
   /** Key and tempo: 0 waiting, 1 working, 2 tempo in, 3 both in (analyze). */
   analysis?: number;
+  /** The place of each source mark in the row, by mark; the one that is carried; the ones off (platforms). */
+  order?: readonly number[];
+  held?: number;
+  off?: readonly number[];
+  /** Which search type the field has, 0–2 (kind-switch). */
+  kind?: number;
+  /** The sidebar row that is open, or -1 (sidebar-online). */
+  side?: number;
+  /** The window is taken down to the desktop's corner (mini-player). */
+  mini?: boolean;
+  /** The floating window's size, 1 = as it opens (pip). */
+  winScale?: number;
+  /** The export has been asked for (viz-export). */
+  exported?: boolean;
 }
 
 interface Scene {
@@ -123,15 +138,19 @@ const SCENES: Record<PointerDemoScene, Scene> = {
     ],
   },
   pip: {
-    rest: 4,
+    rest: 6,
     beats: [
       { move: 600, stay: 300, cursor: AWAY, win: [150, 66] },
       { move: 600, stay: 200, cursor: [160, 71], win: [150, 66] },
       { move: 80, stay: 250, cursor: [160, 71], press: true, win: [150, 66] },
       { move: 1000, stay: 250, cursor: [28, 19], press: true, win: [18, 14] },
-      { move: 0, stay: 1400, cursor: [28, 19], win: [18, 14] },
-      { move: 700, stay: 300, cursor: AWAY, win: [18, 14] },
-      { move: 400, stay: 100, cursor: AWAY, win: [150, 66] },
+      { move: 0, stay: 300, cursor: [28, 19], win: [18, 14] },
+      { move: 500, stay: 150, cursor: [64, 44], win: [18, 14] },
+      { move: 80, stay: 200, cursor: [64, 44], press: true, win: [18, 14] },
+      { move: 700, stay: 200, cursor: [101, 68], press: true, win: [18, 14], winScale: 1.8 },
+      { move: 0, stay: 1300, cursor: [101, 68], win: [18, 14], winScale: 1.8 },
+      { move: 700, stay: 300, cursor: AWAY, win: [18, 14], winScale: 1.8 },
+      { move: 400, stay: 100, cursor: AWAY, win: [150, 66], winScale: 1 },
     ],
   },
   "player-keys": {
@@ -200,6 +219,72 @@ const SCENES: Record<PointerDemoScene, Scene> = {
       { move: 0, stay: 1800, cursor: AWAY, analysis: 3 },
     ],
   },
+  platforms: {
+    rest: 7,
+    beats: [
+      { move: 600, stay: 300, cursor: AWAY, order: [0, 1, 2, 3] },
+      { move: 600, stay: 150, cursor: [110, 40], order: [0, 1, 2, 3] },
+      { move: 80, stay: 250, cursor: [110, 40], press: true, held: 2, order: [0, 1, 2, 3] },
+      { move: 700, stay: 150, cursor: [30, 40], press: true, held: 2, order: [1, 2, 0, 3] },
+      { move: 0, stay: 500, cursor: [30, 40], order: [1, 2, 0, 3] },
+      { move: 500, stay: 150, cursor: [150, 40], order: [1, 2, 0, 3] },
+      { move: 80, stay: 300, cursor: [150, 40], press: true, order: [1, 2, 0, 3], off: [3] },
+      { move: 0, stay: 1300, cursor: [150, 40], order: [1, 2, 0, 3], off: [3] },
+      { move: 500, stay: 300, cursor: AWAY, order: [1, 2, 0, 3], off: [3] },
+      { move: 300, stay: 100, cursor: AWAY, order: [0, 1, 2, 3] },
+    ],
+  },
+  "kind-switch": {
+    rest: 5,
+    beats: [
+      { move: 600, stay: 300, cursor: AWAY, kind: 0 },
+      { move: 600, stay: 200, cursor: [36, 19], kind: 0 },
+      { move: 80, stay: 450, cursor: [36, 19], press: true, kind: 1 },
+      { move: 0, stay: 600, cursor: [36, 19], kind: 1, results: 3 },
+      { move: 500, stay: 150, cursor: [70, 46], kind: 1, results: 3 },
+      { move: 80, stay: 1300, cursor: [70, 46], press: true, kind: 1, results: 3, picked: [0] },
+      { move: 500, stay: 300, cursor: AWAY, kind: 1, results: 3, picked: [0] },
+      { move: 0, stay: 100, cursor: AWAY, kind: 0 },
+    ],
+  },
+  "sidebar-online": {
+    rest: 6,
+    beats: [
+      { move: 600, stay: 300, cursor: AWAY, side: -1 },
+      { move: 600, stay: 200, cursor: [40, 46], side: -1 },
+      { move: 80, stay: 300, cursor: [40, 46], press: true, side: 0 },
+      { move: 0, stay: 900, cursor: [40, 46], side: 0, results: 3 },
+      { move: 500, stay: 150, cursor: [40, 66], side: 0, results: 3 },
+      { move: 80, stay: 200, cursor: [40, 66], press: true, side: 1 },
+      { move: 0, stay: 1300, cursor: [40, 66], side: 1, results: 3 },
+      { move: 500, stay: 300, cursor: AWAY, side: 1, results: 3 },
+      { move: 0, stay: 100, cursor: AWAY, side: -1 },
+    ],
+  },
+  "viz-export": {
+    rest: 3,
+    beats: [
+      { move: 600, stay: 300, cursor: AWAY },
+      { move: 700, stay: 200, cursor: [192, 92] },
+      { move: 80, stay: 300, cursor: [192, 92], press: true, exported: true },
+      { move: 0, stay: 1500, cursor: [192, 92], exported: true },
+      { move: 500, stay: 300, cursor: AWAY, exported: true },
+      { move: 0, stay: 100, cursor: AWAY },
+    ],
+  },
+  "mini-player": {
+    rest: 3,
+    beats: [
+      { move: 600, stay: 300, cursor: AWAY },
+      { move: 600, stay: 200, cursor: [198, 18] },
+      { move: 80, stay: 300, cursor: [198, 18], press: true },
+      { move: 650, stay: 1500, cursor: [198, 18], mini: true },
+      { move: 500, stay: 150, cursor: [176, 92], mini: true },
+      { move: 80, stay: 250, cursor: [176, 92], press: true, mini: true },
+      { move: 650, stay: 1000, cursor: [176, 92] },
+      { move: 400, stay: 100, cursor: AWAY },
+    ],
+  },
   "drag-in": {
     rest: 4,
     beats: [
@@ -256,7 +341,7 @@ export function PointerDemo({ scene, label, tray = "download" }: {
   /** What the picture says, for assistive technology. */
   label?: string;
   /** The tray's mark in `drag-in`: what the thing is dropped on. */
-  tray?: "download" | "export" | "visualize";
+  tray?: "download" | "export" | "visualize" | "share";
 }) {
   const root = useRef<SVGSVGElement>(null);
   const seen = useSeen(root);
@@ -303,6 +388,80 @@ export function PointerDemo({ scene, label, tray = "download" }: {
         <rect className="kd-demo-line" x="20" y="4.5" width="60" height="3" rx="1.5" />
         <rect className="kd-demo-line" data-faint="" x="20" y="10" width="36" height="2.5" rx="1.25" />
       </g>)}
+    </g> : scene === "platforms" ? <g>
+      <rect className="kd-demo-row-base" x="8" y="20" width="204" height="40" rx="20" />
+      {[0, 1, 2, 3].map(i => {
+        const slot = (beat.order ?? [0, 1, 2, 3])[i];
+        const held = beat.held === i;
+        const x = held ? beat.cursor[0] : 30 + 40 * slot;
+        return <g key={i} className="kd-demo-chip" style={{
+          transform: `translate(${x}px, 40px) scale(${held ? 1.12 : 1})`,
+          opacity: (beat.off ?? []).includes(i) ? 0.3 : 1,
+          transitionDuration: `${held ? beat.move : Math.max(beat.move, 280)}ms, 260ms`,
+        }}>
+          <circle className="kd-demo-chip-body" r="12" />
+          <text className="kd-demo-key-text" x="0" y="3.6" textAnchor="middle" style={{ fill: "var(--kd-text)" }}>{["●", "▲", "■", "◆"][i]}</text>
+        </g>;
+      })}
+      <rect className="kd-demo-line" x="178" y="38" width="26" height="4" rx="2" />
+    </g> : scene === "kind-switch" ? <g>
+      <rect className="kd-demo-row-base" x="8" y="8" width="204" height="22" rx="11" />
+      <rect className="kd-demo-chip-body" x="13" y="11.5" width="46" height="15" rx="7.5" />
+      <text className="kd-demo-key-text" x="36" y="22.2" textAnchor="middle" style={{ fill: "var(--kd-text)" }}>{["单曲", "歌单", "艺术家"][beat.kind ?? 0]}</text>
+      <rect className="kd-demo-line" x="68" y="17" width="56" height="4" rx="2" />
+      {[0, 1, 2].map(i => <g key={i} transform={`translate(8 ${38 + 22 * i})`} className="kd-demo-result"
+        style={{ opacity: (beat.results ?? 0) > i ? 1 : 0, transitionDelay: `${i * 90}ms` }}>
+        <rect className="kd-demo-row-base" width="204" height="18" rx="5" />
+        <rect className="kd-demo-row-pick" data-on={picked.includes(i) || undefined} width="204" height="18" rx="5" />
+        <rect className="kd-demo-cover" x="5" y="4" width="10" height="10" rx="2" />
+        <rect className="kd-demo-line" x="22" y="5" width="70" height="3.4" rx="1.7" />
+        <rect className="kd-demo-line" data-faint="" x="22" y="11" width="40" height="2.8" rx="1.4" />
+        <path className="kd-demo-tick" data-on={picked.includes(i) || undefined} d="M186 9 l3 3 l6 -6.6" />
+      </g>)}
+    </g> : scene === "sidebar-online" ? <g>
+      <rect className="kd-demo-row-base" x="8" y="8" width="64" height="96" rx="8" />
+      {[0, 1, 2, 3].map(i => <g key={i} transform={`translate(13 ${20 + 20 * i})`}>
+        <rect className="kd-demo-row-pick" data-on={beat.side === i || undefined} width="54" height="15" rx="4" />
+        <rect className="kd-demo-cover" x="4" y="3.5" width="8" height="8" rx="2" />
+        <rect className="kd-demo-line" x="17" y="5.5" width={[26, 20, 30, 22][i]} height="3.4" rx="1.7" />
+      </g>)}
+      {[0, 1, 2].map(i => <g key={`${beat.side}-${i}`} transform={`translate(80 ${20 + 22 * i})`} className="kd-demo-result"
+        style={{ opacity: (beat.results ?? 0) > i ? 1 : 0, transitionDelay: `${i * 90}ms` }}>
+        <rect className="kd-demo-row-base" width="132" height="18" rx="5" />
+        <rect className="kd-demo-cover" x="5" y="4" width="10" height="10" rx="2" />
+        <rect className="kd-demo-line" x="22" y="5" width={[56, 44, 64][i]} height="3.4" rx="1.7" />
+        <rect className="kd-demo-line" data-faint="" x="22" y="11" width="34" height="2.8" rx="1.4" />
+      </g>)}
+    </g> : scene === "viz-export" ? <g>
+      <rect className="kd-demo-row-base" x="8" y="8" width="204" height="96" rx="8" />
+      <g className="kd-demo-bars" style={{ transform: "scaleY(0.9)" }}>
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => <rect key={i} className="kd-demo-bar" x={20 + 17 * i} y="16" width="10" height="70" rx="5"
+          style={{ animationDelay: `${-((i * 337) % 1000)}ms`, animationDuration: `${900 + (i * 131) % 500}ms` }} />)}
+      </g>
+      <g transform="translate(168 84)" className="kd-demo-folder" data-on={beat.exported || undefined}>
+        <rect className="kd-demo-folder-body" width="38" height="15" rx="5" />
+        <path className="kd-demo-tray-mark" data-gone={beat.exported || undefined} d="M19 3.5 V9.5 M16 7 L19 10 L22 7" />
+        <path className="kd-demo-tick" data-on={beat.exported || undefined} d="M14 7.5 l3.4 3.4 l7 -7.4" />
+      </g>
+    </g> : scene === "mini-player" ? <g>
+      <g className="kd-demo-chip" style={{
+        transform: beat.mini ? "translate(122px, 80px) scale(0.42, 0.24)" : "translate(8px, 8px) scale(1, 1)",
+        transitionDuration: `${beat.move}ms, 0ms`, transformBox: "view-box", transformOrigin: "0 0",
+      }}>
+        <rect className="kd-demo-chip-body" width="204" height="96" rx={beat.mini ? 20 : 8} />
+        <g style={{ opacity: beat.mini ? 0 : 1, transition: "opacity 200ms" }}>
+          <rect className="kd-demo-cover" x="12" y="12" width="36" height="36" rx="6" />
+          <rect className="kd-demo-line" x="58" y="18" width="70" height="5" rx="2.5" />
+          <rect className="kd-demo-line" data-faint="" x="58" y="30" width="44" height="4" rx="2" />
+          <rect className="kd-demo-line" x="12" y="70" width="180" height="4" rx="2" />
+          <circle className="kd-demo-line" cx="190" cy="10" r="4" />
+        </g>
+      </g>
+      <g style={{ opacity: beat.mini ? 1 : 0, transition: "opacity 260ms 360ms" }}>
+        <rect className="kd-demo-cover" x="128" y="85" width="14" height="14" rx="3" />
+        <rect className="kd-demo-line" x="148" y="87" width="38" height="3.4" rx="1.7" />
+        <rect className="kd-demo-line" data-faint="" x="148" y="94" width="24" height="2.8" rx="1.4" />
+      </g>
     </g> : scene === "add-folder" ? <g>
       {[0, 1, 2, 3, 4].map(i => {
         const isNew = i >= 3;
@@ -334,7 +493,7 @@ export function PointerDemo({ scene, label, tray = "download" }: {
       <rect className="kd-demo-line" x="18" y="82" width="60" height="3.4" rx="1.7" />
       <rect className="kd-demo-line" data-faint="" x="18" y="90" width="38" height="3" rx="1.5" />
       <g className="kd-demo-chip" style={{
-        transform: `translate(${(beat.win ?? [150, 66])[0]}px, ${(beat.win ?? [150, 66])[1]}px)`,
+        transform: `translate(${(beat.win ?? [150, 66])[0]}px, ${(beat.win ?? [150, 66])[1]}px) scale(${beat.winScale ?? 1})`,
         transitionDuration: `${beat.win && beat.win[0] > 90 && beat.move === 400 ? 0 : beat.move}ms, 0ms`,
         transformBox: "view-box", transformOrigin: "0 0",
       }}>
@@ -371,10 +530,13 @@ export function PointerDemo({ scene, label, tray = "download" }: {
           <rect className="kd-demo-tray-box" x="-43" y="-42" width="86" height="84" rx="12" />
           <path className="kd-demo-tray-mark" data-gone={gone || undefined}
             d={tray === "download" ? "M0 -9 V6 M-6.5 0 L0 7 L6.5 0"
-              : tray === "visualize" ? "M-7 7 V1 M-2.5 7 V-6 M2 7 V-2 M6.5 7 V-8" : "M-6 6 L6 -6 M-1 -6.5 H6.5 V1"} />
+              : tray === "visualize" ? "M-7 7 V1 M-2.5 7 V-6 M2 7 V-2 M6.5 7 V-8"
+              : tray === "share" ? "M5 -5 L-6 1 L5 8 M7 -5 a2 2 0 1 0 -4 0 a2 2 0 1 0 4 0 M-4 1 a2 2 0 1 0 -4 0 a2 2 0 1 0 4 0 M7 8 a2 2 0 1 0 -4 0 a2 2 0 1 0 4 0"
+              : "M-6 6 L6 -6 M-1 -6.5 H6.5 V1"} />
           <path className="kd-demo-tick" data-on={gone || undefined} d="M-8 0 l5.5 5.5 l10.5 -11.5" />
         </g>
       </g>
+      {[4, 60, 78].map(y => <rect key={y} className="kd-demo-ghost-row" x="8" y={y} width="76" height="14" rx="5" />)}
       <g className="kd-demo-chip" style={{
         transform: `translate(${carried[0]}px, ${carried[1]}px) scale(${gone ? 0.5 : chip === "held" ? 1.05 : 1})`,
         opacity: gone ? 0 : 1,

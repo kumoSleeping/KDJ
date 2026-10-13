@@ -4,7 +4,7 @@ const STORAGE_KEY = "kd-share-prefs";
 
 /** 分享到外部应用时，普通文本里附带多少歌曲信息。 */
 export type ShareContentMode = "link_only" | "song_info" | "more_info";
-export const DEFAULT_SHARE_CONTENT_MODE: ShareContentMode = "song_info";
+export const DEFAULT_SHARE_CONTENT_MODE: ShareContentMode = "more_info";
 
 interface SharePrefs {
   contentMode: ShareContentMode;
@@ -19,7 +19,7 @@ const DEFAULTS: SharePrefs = {
 };
 
 export function normalizeShareContentMode(value: unknown): ShareContentMode {
-  return value === "link_only" || value === "more_info" ? value : DEFAULT_SHARE_CONTENT_MODE;
+  return value === "link_only" || value === "song_info" || value === "more_info" ? value : DEFAULT_SHARE_CONTENT_MODE;
 }
 
 function storage(): Storage | null {

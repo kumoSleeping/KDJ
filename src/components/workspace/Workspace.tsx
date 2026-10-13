@@ -1686,7 +1686,6 @@ export function Workspace() {
       burstNonce={searchBurstNonce}
       platforms={platforms}
       onTogglePlatform={togglePlatform}
-      presentation="bar"
       stacked={chrome === "stacked"}
     />
   );
