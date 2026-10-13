@@ -162,3 +162,6 @@
   to { opacity: 1; }
 }
 .kd-demo-pill-text { fill: var(--kd-text); font-size: 9.5px; font-weight: 700; transition: opacity 240ms ease; }
+
+/* The other rows of a list a song is taken from (drag-in, menu-toss). */
+.kd-demo-ghost-row { fill: color-mix(in srgb, var(--kd-text) 4%, transparent); }

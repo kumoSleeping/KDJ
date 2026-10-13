@@ -4,7 +4,7 @@ import { tipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
 
 interface Lesson {
   scene: PointerDemoScene;
-  tray?: "download" | "export" | "visualize";
+  tray?: "download" | "export" | "visualize" | "share";
   caption: string;
 }
 
@@ -14,26 +14,34 @@ const mod = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator
 const LESSONS: Record<TipsPage, Lesson[]> = {
   search: [
     { scene: "search", caption: "输入歌名、歌手或链接，按 Enter 开始搜索~" },
-    { scene: "pick-range", caption: "Shift 点两下，中间整段一起选中" },
-    { scene: "pick-toggle", caption: `${mod} 点选，一首一首加进来或拿出去` },
+    { scene: "platforms", caption: "拖动平台图标调整优先级，点一下选中或取消；不用的平台可以在设置里关掉" },
+    { scene: "kind-switch", caption: "点「单曲」切换歌单、艺术家等类型，搜到后点进去查看相关内容" },
+  ],
+  sidebar: [
+    { scene: "add-folder", caption: "本地：点 + 添加文件夹，歌曲自动入库" },
+    { scene: "sidebar-online", caption: "在线：点一个歌单，在右边查看里面的歌" },
   ],
   download: [
-    { scene: "drag-in", tray: "download", caption: "把搜索结果拖进下载，就排进队列~" },
+    { scene: "pick-range", caption: "Shift 点两下，中间整段一起选中" },
+    { scene: "pick-toggle", caption: `${mod} 点选，一首一首加进来或拿出去` },
     { scene: "menu-toss", tray: "download", caption: "右键一首歌，加入下载队列，它会飞进去" },
+    { scene: "drag-in", tray: "download", caption: "也可以直接把歌拖进下载队列" },
   ],
   viz: [
+    { scene: "viz-export", caption: "在小窗里，右下角有导出，点一下就排进队列" },
+    { scene: "viz-tune", caption: "拖动滑块调整参数，画面实时跟着变" },
     { scene: "drag-in", tray: "visualize", caption: "把本地歌曲拖进可视化，就排进导出" },
     { scene: "menu-toss", tray: "visualize", caption: "右键一首歌，导出可视化，同样飞进队列" },
-    { scene: "viz-tune", caption: "拖动滑块，可视化的画面跟着变" },
   ],
   player: [
-    { scene: "player-keys", caption: "自动切歌、歌词、小窗，点一下就亮" },
-    { scene: "pip", caption: "小窗可以拖到喜欢的位置" },
+    { scene: "player-keys", caption: "底部是标准播放器；自动切歌、歌词、小窗，点一下就亮" },
+    { scene: "pip", caption: "小窗里可以看视频，自由移动、放大缩小；播放歌曲时展示你调好的可视化" },
+    { scene: "mini-player", caption: "还能把整个窗口收成迷你播放器，放在桌面角落" },
   ],
   library: [
-    { scene: "add-folder", caption: "点 + 添加文件夹，歌曲自动入库" },
     { scene: "multi-copy", caption: `多选后 ${mod}C，到目标文件夹 ${mod}V，就复制进去` },
     { scene: "analyze", caption: "调性和 BPM 会自动分析，不用手动标" },
+    { scene: "menu-toss", tray: "share", caption: "右键一首歌可以分享；分享的内容在设置里调整" },
   ],
 };
 

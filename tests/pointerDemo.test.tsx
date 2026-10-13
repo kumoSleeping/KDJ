@@ -17,7 +17,7 @@ test("the pointer demos play every scene, survive a change of scene mid-loop, an
   const { SearchTipsPanel } = await import("../src/components/download/SearchTipsPanel");
   const { useTipsPage, tipsPages } = await import("../src/lib/tipsPages");
   const root = createRoot(document.getElementById("root")!);
-  const scenes = ["search", "pick-range", "pick-toggle", "drag-in", "viz-tune", "pip", "player-keys", "menu-toss", "multi-copy", "add-folder", "analyze"] as const;
+  const scenes = ["search", "pick-range", "pick-toggle", "drag-in", "viz-tune", "pip", "player-keys", "menu-toss", "multi-copy", "add-folder", "analyze", "platforms", "kind-switch", "sidebar-online", "viz-export", "mini-player"] as const;
   try {
     // The same element changes scene while it is deep in the longest scene's beats: the place it
     // was at does not exist in a shorter scene (this crashed the tips drawer once).

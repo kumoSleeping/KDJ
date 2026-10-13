@@ -11,7 +11,7 @@ import {
 } from "react";
 import type { Platform, SearchKind, TrackSummary } from "../../types";
 import { useSearchPresets } from "./useSearchPresets";
-import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
+import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
   DEFAULT_PRIORITY,
   DEFAULT_SEARCH_PLATFORMS,
@@ -45,12 +45,7 @@ export {
 export interface SearchPlatformProps {
   platforms: Platform[];
   onTogglePlatform(platform: Platform): void;
-  /**
-   * 不传则读写 settings.platform_priority（顶栏搜索）。
-   * Explore 传入自己的 priority / onReorder，与顶栏互不同步。
-   */
-  priority?: readonly string[];
-  onReorder?: (next: Platform[]) => void;
+  /** 顺序与启用都读写 settings.platform_priority：拖动排序就是下载来源的优先级。 */
   /** 手机顶栏的重叠预览；第一次点只展开，不误切来源。 */
   collapsed?: boolean;
   onExpand?: () => void;
@@ -75,8 +70,7 @@ export interface SearchBarProps extends SearchPlatformProps {
   onTips(): void;
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
-  presentation?: "bar" | "detail";
-  /** A search started outside the field (Explore fills and submits); a new value launches the motion. */
+  /** A search started outside the field (同名搜索 fills and submits); a new value launches the motion. */
   burstNonce?: number;
 }
 
@@ -121,16 +115,15 @@ export const SEARCH_TIPS = [
   "KDJ可以播放视频，甚至可以全屏！（应 DJ BanGo 要求）",
   "DJ BanGo是 KDJ 第一位用户！没有他就没有今天的KDJ！",
   "测试搜索的时候，搜出来的第一个视频是羽月澪的。",
-  "分析面板右上角的两个按钮可用于定位和固定面板。",
   "搜索/在线歌单可以直接拖动到任意本地板块!",
   "您可以直接在 KDJ 中，从自己的歌单或收藏中移除歌曲！",
   "请不要在社交平台公开传播本软件，谢谢理解！",
   "右键歌曲复制来源链接, 和小程序卡片一样!",
   "如果歌曲没有封面, 详情板块有很多方法补充~",
   "开发者认为「水果篮子」老版比新版好看太多了。",
-  "音量条左侧按钮包含智能过渡、歌词和视频小窗功能！",
+  "传输键右边有三个开关：自动切歌、歌词和视频小窗！",
   "可通过系统媒体控制快捷键、Android 控制中心或灵动岛操控播放哟~",
-  "不喜欢视频小窗？播放视频时，点击与歌词共用的按钮关闭小窗!",
+  "不喜欢视频小窗？再点一次小窗键就能关掉。",
   "视频支持系统级小窗! 详情界面也有视频播放哟~",
   "为了无缝跳转, 我们实现了一个播放器引擎!",
   "复制粘贴多选快捷键都可用哦, 也可以右键选择。",
@@ -286,11 +279,9 @@ export function SearchBar({
   tipsOpen,
   onTips,
   stacked = false,
-  presentation = "bar",
   burstNonce = 0,
   ...platformProps
 }: SearchBarProps) {
-  const detail = presentation === "detail";
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const presets = useSearchPresets({ query, onQueryChange, track: presetTrack, playingTrack, inputRef });
   // Some third-party dictation IMEs report Enter before React's isComposing
@@ -319,7 +310,7 @@ export function SearchBar({
   // The search's colours: the selected sources' own, in the order of their marks. Set once per
   // selection as --kd-search-tones; the stylesheet has a neutral pair for an empty selection.
   const settingsPriority = useAppStore((state) => state.settings?.platform_priority);
-  const markOrder = platformProps.priority ?? settingsPriority ?? DEFAULT_PRIORITY;
+  const markOrder = settingsPriority ?? DEFAULT_PRIORITY;
   const selectedPlatforms = platformProps.platforms;
   const barStyle = useMemo(() => {
     const tones = searchTones(normalizePriority(markOrder), selectedPlatforms);
@@ -388,7 +379,6 @@ export function SearchBar({
   return (
     <form
       className="kd-search-command"
-      data-presentation={presentation}
       data-stacked={stacked || undefined}
       aria-busy={wavePhase === "run" || undefined}
       onSubmit={(event) => {
@@ -396,7 +386,6 @@ export function SearchBar({
         fireSubmit();
       }}
     >
-      {detail && <label className="kd-detail-search-label" htmlFor={presets.aria.id}>搜索内容</label>}
       <div
         className="kd-searchbar kd-grow"
         data-batch={batch || undefined}
@@ -424,7 +413,7 @@ export function SearchBar({
           )}
           <SearchPlatforms
             {...platformProps}
-            collapsed={!detail && stacked && !platformsExpanded}
+            collapsed={stacked && !platformsExpanded}
             onExpand={expandPlatforms}
             searchPhase={wavePhase}
             searchOutcome={searchOutcome}
@@ -526,8 +515,6 @@ export function SearchBar({
 export const SearchPlatforms = memo(function SearchPlatforms({
   platforms,
   onTogglePlatform,
-  priority: priorityProp,
-  onReorder,
   collapsed = false,
   onExpand,
   searchPhase = null,
@@ -536,7 +523,7 @@ export const SearchPlatforms = memo(function SearchPlatforms({
   const saveSettings = useAppStore((state) => state.saveSettings);
   const settings = useAppStore((state) => state.settings);
   const settingsPriority = settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]);
-  const priority = priorityProp ?? settingsPriority;
+  const priority = settingsPriority;
   const [dragging, setDragging] = useState<Platform | null>(null);
   const [over, setOver] = useState<Platform | null>(null);
   const dragRef = useRef<{
@@ -549,14 +536,12 @@ export const SearchPlatforms = memo(function SearchPlatforms({
     el: HTMLElement;
   } | null>(null);
 
-  /** 传入 onReorder = Explore 独立条：勾选/排序自管，不跟顶栏同步。 */
-  const independent = Boolean(onReorder);
   const orderedIds = normalizePriority(priority);
-  // 顶栏：设置里关掉的源直接不出现；Explore 独立条仍列出全部，点选时可顺手启用。
+  // 设置里关掉的源直接不出现。
   const ordered = orderedIds
     .map((id) => SEARCH_PLATFORMS.find((item) => item.id === id))
     .filter((item): item is (typeof SEARCH_PLATFORMS)[number] => Boolean(item))
-    .filter((item) => independent || isPlatformEnabled(settings, item.id));
+    .filter((item) => isPlatformEnabled(settings, item.id));
   // 收起态只摘要真正参与本次搜索的来源；把所有未选中的灰图标叠在一起既占位，
   // 也无法辨认。没有勾选来源时保留首项作为展开入口。
   const selectedOrdered = ordered.filter((item) => platforms.includes(item.id));
@@ -577,10 +562,6 @@ export const SearchPlatforms = memo(function SearchPlatforms({
     const insertAt = current.indexOf(to);
     if (insertAt < 0) return;
     current.splice(insertAt, 0, from);
-    if (onReorder) {
-      onReorder(current);
-      return;
-    }
     void saveSettings({ platform_priority: current }).catch(() => undefined);
   };
 
@@ -608,18 +589,8 @@ export const SearchPlatforms = memo(function SearchPlatforms({
       const target = session.over;
       if (target) reorder(session.from, target);
     } else {
-      const id = session.from;
-      const snap = useAppStore.getState().settings;
-      if (independent) {
-        // Explore：勾选独立；若全局未开该源则顺手启用，方便真正发出请求。
-        if (!platforms.includes(id) && snap && !isPlatformEnabled(snap, id)) {
-          void saveSettings(patchEnabledPlatform(snap, id, true)).catch(() => undefined);
-        }
-        onTogglePlatform(id);
-      } else {
-        // 顶栏只渲染已启用源，点击只切换搜索勾选。
-        onTogglePlatform(id);
-      }
+      // 只渲染已启用的源，点击只切换这次搜索的勾选。
+      onTogglePlatform(session.from);
     }
     setDragging(null);
     setOver(null);
@@ -694,11 +665,7 @@ export const SearchPlatforms = memo(function SearchPlatforms({
         event.stopPropagation();
         onExpand?.();
       }}
-      aria-label={
-        independent
-          ? "Explore 平台（拖动排序 = 来源优先级，与顶栏搜索独立）"
-          : "搜索平台（拖动排序 = 来源优先级）"
-      }
+      aria-label="搜索平台（拖动排序 = 来源优先级）"
     >
       {rendered.map((item, index) => (
           <button
