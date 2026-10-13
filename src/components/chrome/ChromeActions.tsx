@@ -48,6 +48,10 @@ export function ChromeActions({
   const liveVjOpen = compositionOpen && compositionMode === "live-vj";
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
+      {onTips && <button type="button" className="kd-chrome-btn" title="使用提示" aria-label="使用提示"
+        aria-pressed={tipsOpen} data-open={tipsOpen || undefined} data-fresh={tipsFresh || undefined} onClick={onTips}>
+        <HintBulbIcon size={17} aria-hidden="true" />
+      </button>}
       <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
         data-kd-search-queue-drop="entry" aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
       {updateReady ? (
@@ -76,10 +80,6 @@ export function ChromeActions({
       >
         <Settings size={16} />
       </button>
-      {onTips && <button type="button" className="kd-chrome-btn" title="使用提示" aria-label="使用提示"
-        aria-pressed={tipsOpen} data-open={tipsOpen || undefined} data-fresh={tipsFresh || undefined} onClick={onTips}>
-        <HintBulbIcon size={17} aria-hidden="true" />
-      </button>}
       <button type="button" className="kd-chrome-btn" title="工具箱" aria-label="工具箱"
         aria-haspopup="menu" aria-expanded={!!tools} data-open={compositionOpen || undefined}
         onClick={event => {
