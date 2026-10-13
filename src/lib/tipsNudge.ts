@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { readLocalStorage, writeLocalStorageNow } from "./storageWrite";
 
 /** The version the tips entry last greeted on; a different one is a build it has not met. */
-const KEY = "kd-tips-greeted-version";
+const KEY = "kd-tips-greeted-build";
 
 /**
  * Whether the tips key (the bulb) flashes. It does, a few times, the first time a build is opened
