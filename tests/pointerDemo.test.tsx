@@ -35,7 +35,7 @@ test("the pointer demos play every scene, survive a change of scene mid-loop, an
       await act(async () => useTipsPage.getState().setPage(page.id));
       await act(async () => root.render(createElement(SearchTipsPanel)));
       assert.ok(document.querySelector(".kd-tips-panel"), `${page.id} page`);
-      if (page.id !== "all") assert.ok(document.querySelector("svg.kd-demo"), `${page.id} has a picture`);
+      assert.ok(document.querySelector("svg.kd-demo"), `${page.id} has a picture`);
     }
     await act(async () => root.render(createElement(SearchTipsPanel, { stacked: true })));
     assert.equal(document.querySelectorAll(".kd-tips-panel section").length, tipsPages.length);

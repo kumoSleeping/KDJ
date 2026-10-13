@@ -1,4 +1,3 @@
-import { SEARCH_TIPS } from "./SearchBar";
 import { PointerDemo, type PointerDemoScene } from "../common/PointerDemo";
 import { SlidePages } from "../drawer/SlidePages";
 import { tipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
@@ -12,7 +11,7 @@ interface Lesson {
 const mod = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 
 /** What each page teaches: a picture of the little mouse doing it, and one line. */
-const LESSONS: Record<Exclude<TipsPage, "all">, Lesson[]> = {
+const LESSONS: Record<TipsPage, Lesson[]> = {
   search: [
     { scene: "search", caption: "输入歌名、歌手或链接，按 Enter 开始搜索~" },
     { scene: "pick-range", caption: "Shift 点两下，中间整段一起选中" },
@@ -29,7 +28,7 @@ const LESSONS: Record<Exclude<TipsPage, "all">, Lesson[]> = {
   ],
 };
 
-function Lessons({ page }: { page: Exclude<TipsPage, "all"> }) {
+function Lessons({ page }: { page: TipsPage }) {
   return <div className="kd-tips-lessons">
     {LESSONS[page].map((lesson, index) => <figure key={`${page}-${index}`} className="kd-tips-lesson">
       <PointerDemo scene={lesson.scene} tray={lesson.tray} label={lesson.caption} />
@@ -38,17 +37,11 @@ function Lessons({ page }: { page: Exclude<TipsPage, "all"> }) {
   </div>;
 }
 
-function AllTips() {
-  return <ul className="kd-tips-list" aria-label={`全部 ${SEARCH_TIPS.length} 条使用提示`}>
-    {SEARCH_TIPS.map(tip => <li key={tip}>{tip}</li>)}
-  </ul>;
-}
-
 const pageIds = tipsPages.map(page => page.id);
 
 /**
- * 使用提示：每一页教一类功能，由抽屉标题上的页签切换（搜索、下载、可视化、小窗、播放器），
- * 最后一页是搜索框里轮播文案的完整索引。窄屏没有抽屉标题，所以把各页依次排开。
+ * 使用提示：每一页教一类功能，由抽屉标题上的页签切换（搜索、下载、可视化、播放器）。
+ * 窄屏没有抽屉标题，所以把各页依次排开。
  *
  * 它只负责展示，不持久化任何打开状态；Workspace 会把它当作临时旁路面板，
  * 关闭后仍可回到原先钉住的曲目详情。
@@ -57,12 +50,12 @@ export function SearchTipsPanel({ stacked = false }: { stacked?: boolean }) {
   const page = useTipsPage(state => state.page);
   if (stacked) return <div className="kd-tips-panel">
     {tipsPages.map(item => <section key={item.id} aria-label={item.title ?? item.label}>
-      {item.id === "all" ? <AllTips /> : <Lessons page={item.id} />}
+      <Lessons page={item.id} />
     </section>)}
   </div>;
   return <div className="kd-tips-panel">
     <SlidePages page={page} order={pageIds}>
-      {page === "all" ? <AllTips /> : <Lessons page={page} />}
+      <Lessons page={page} />
     </SlidePages>
   </div>;
 }

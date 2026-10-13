@@ -126,36 +126,15 @@
 .kd-demo-togglekey > * { fill: none; stroke: var(--kd-muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: stroke 140ms ease; }
 .kd-demo-togglekey[data-on] > * { stroke: var(--kd-red, var(--kd-text)); }
 
-/* The first greeting of a new app: the pointer comes up to the key, presses it (a ring) and the
-   icon bobs. No words; it ends for good once the app has been opened. */
-.kd-chrome-btn[data-fresh] { position: relative; color: var(--kd-text); }
-.kd-chrome-btn[data-fresh] > svg:first-child { animation: kd-fresh-bob 1800ms ease-in-out infinite; }
-.kd-fresh-pointer {
-  position: absolute;
-  top: 55%;
-  left: 55%;
-  width: 14px;
-  height: 18px;
-  pointer-events: none;
-  animation: kd-fresh-point 1800ms ease-in-out infinite;
-}
-.kd-fresh-pointer > svg { display: block; width: 100%; height: 100%; overflow: visible; fill: var(--kd-text); stroke: var(--kd-panel); stroke-width: 1; stroke-linejoin: round; }
-@keyframes kd-fresh-point {
-  from { opacity: 0; transform: translate(10px, 12px); }
-  20% { opacity: 1; transform: translate(0, 0); }
-  42% { opacity: 1; transform: translate(0, 0) scale(1); }
-  50% { opacity: 1; transform: translate(0, 0) scale(0.8); }
-  60% { opacity: 1; transform: translate(0, 0) scale(1); }
-  85% { opacity: 1; transform: translate(0, 0); }
-  to { opacity: 0; transform: translate(10px, 12px); }
-}
-@keyframes kd-fresh-bob {
-  from { transform: scale(1); }
-  45% { transform: scale(1); }
-  52% { transform: scale(0.88); }
-  64% { transform: scale(1.06); }
-  to { transform: scale(1); }
+/* The first greeting of a new build: the bulb itself flashes, a few times, and stops. No words,
+   nothing beside it. */
+.kd-chrome-btn[data-fresh] { color: var(--kd-text); }
+.kd-chrome-btn[data-fresh] > svg:first-child { animation: kd-fresh-flash 1100ms ease-in-out 3 both; }
+@keyframes kd-fresh-flash {
+  from { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.25; transform: scale(1.18); }
+  to { opacity: 1; transform: scale(1); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .kd-chrome-btn[data-fresh] > svg:first-child, .kd-fresh-pointer { animation: none; }
+  .kd-chrome-btn[data-fresh] > svg:first-child { animation: none; }
 }
