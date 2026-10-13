@@ -79,6 +79,8 @@ const TRAY = [169, 56] as const;
 const CORNER: readonly [number, number] = [30, 88];
 const LIFT: readonly [number, number] = [100, 18];
 const mod = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+/** A key with the modifier, as the platform writes it: ⌘C on a Mac, Ctrl+C elsewhere. */
+export const chord = (key: string) => mod() === "⌘" ? `⌘${key}` : `Ctrl+${key}`;
 
 const SCENES: Record<PointerDemoScene, Scene> = {
   "pick-range": {
@@ -190,11 +192,11 @@ const SCENES: Record<PointerDemoScene, Scene> = {
       { move: 200, stay: 400, cursor: rowAt(0), key: true, picked: [0] },
       { move: 500, stay: 150, cursor: rowAt(2), key: true, picked: [0] },
       { move: 80, stay: 300, cursor: rowAt(2), key: true, press: true, picked: [0, 2] },
-      { move: 0, stay: 600, cursor: rowAt(2), key: true, keyText: `${mod()}C`, picked: [0, 2] },
+      { move: 0, stay: 600, cursor: rowAt(2), key: true, keyText: chord("C"), picked: [0, 2] },
       { move: 700, stay: 150, cursor: [186, 74], picked: [0, 2] },
       { move: 80, stay: 250, cursor: [186, 74], press: true, folder: "on", picked: [0, 2] },
-      { move: 0, stay: 500, cursor: [186, 74], key: true, keyText: `${mod()}V`, folder: "on", picked: [0, 2] },
-      { move: 0, stay: 1300, cursor: [186, 74], key: true, keyText: `${mod()}V`, folder: "done", picked: [0, 2] },
+      { move: 0, stay: 500, cursor: [186, 74], key: true, keyText: chord("V"), folder: "on", picked: [0, 2] },
+      { move: 0, stay: 1300, cursor: [186, 74], key: true, keyText: chord("V"), folder: "done", picked: [0, 2] },
       { move: 300, stay: 300, cursor: [186, 74], folder: "done" },
     ],
   },
