@@ -338,8 +338,10 @@ function useSeen(node: { current: Element | null }): boolean {
   return seen;
 }
 
-export function PointerDemo({ scene, label, tray = "download" }: {
+export function PointerDemo({ scene, label, tray = "download", onLoop }: {
   scene: PointerDemoScene;
+  /** Called each time the picture has played through and starts over. */
+  onLoop?(): void;
   /** What the picture says, for assistive technology. */
   label?: string;
   /** The tray's mark in `drag-in`: what the thing is dropped on. */
@@ -348,6 +350,8 @@ export function PointerDemo({ scene, label, tray = "download" }: {
   const root = useRef<SVGSVGElement>(null);
   const seen = useSeen(root);
   const [still] = useState(prefersReducedMotion);
+  const loop = useRef(onLoop);
+  loop.current = onLoop;
   const { beats, rest } = SCENES[scene];
   const [place, setPlace] = useState({ scene, at: still ? rest : 0 });
   // A scene has its own number of beats: a place that belongs to another scene starts over.
@@ -356,7 +360,11 @@ export function PointerDemo({ scene, label, tray = "download" }: {
   useEffect(() => {
     if (!moving) return;
     const beat = beats[at];
-    const timer = window.setTimeout(() => setPlace({ scene, at: (at + 1) % beats.length }), beat.move + beat.stay);
+    const timer = window.setTimeout(() => {
+      const next = (at + 1) % beats.length;
+      setPlace({ scene, at: next });
+      if (next === 0) loop.current?.();
+    }, beat.move + beat.stay);
     return () => window.clearTimeout(timer);
   }, [moving, at, beats, scene]);
 
@@ -587,4 +595,14 @@ export function PointerDemo({ scene, label, tray = "download" }: {
       <path className="kd-demo-cursor" d="M0 0 V12.5 L3.4 9.6 L5.6 14.6 L8 13.5 L5.8 8.7 H10 Z" />
     </g>}
   </svg>;
+}
+
+/**
+ * What an empty download or export queue shows: the two ways a song gets in, one after the other —
+ * dragged into the list, then thrown in from the right-click menu.
+ */
+export function QueueEmptyDemo({ tray, label }: { tray: "download" | "export"; label: string }) {
+  const [scene, setScene] = useState<"drag-in" | "menu-toss">("drag-in");
+  return <PointerDemo scene={scene} tray={tray} label={label}
+    onLoop={() => setScene(current => current === "drag-in" ? "menu-toss" : "drag-in")} />;
 }
