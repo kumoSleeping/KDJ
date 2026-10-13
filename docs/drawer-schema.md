@@ -95,6 +95,11 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   itself. Never pass the page down from the component that lists the apps — a switch of page
   would then redraw the whole workspace before the drawer could answer. A page word answers the
   press, not its release, and the panel's height starts for the new page as the slide starts.
+- **Many pages: the row is carried.** When the page words are more than the title row has room
+  for, the row travels so that the page in view stands in the middle (`TitleTabs`,
+  `--kd-tabs-carry`): choosing a word to the right brings those after it into reach, and a word
+  beyond an edge fades out there instead of being painted over the tools. Nothing is added to
+  the row for it — no arrows, no overflow menu. A row that fits is not moved.
 - **The title row names the app, nothing more.** What the app is about right now (a song, a
   folder) is not written beside the title or the page words, and never on a line of its own
   under them: the body shows it where it is used. A song's name squeezed after four page
