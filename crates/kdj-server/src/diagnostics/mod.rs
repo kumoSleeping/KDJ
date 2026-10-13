@@ -257,7 +257,7 @@ pub fn category(source: &str) -> &'static str {
     }
 }
 
-/// Records WARN/ERROR independently of the terminal's RUST_LOG filter.
+/// Records WARN/ERROR plus fixed-vocabulary login progress, independently of RUST_LOG.
 pub struct DiagnosticLayer;
 #[derive(Default)]
 struct Fields(String);
@@ -276,7 +276,7 @@ impl Visit for Fields {
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for DiagnosticLayer {
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
         let meta = event.metadata();
-        if *meta.level() > tracing::Level::WARN {
+        if *meta.level() > tracing::Level::WARN && meta.target() != "kdj::login" {
             return;
         }
         let mut fields = Fields::default();

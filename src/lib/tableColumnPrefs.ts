@@ -211,7 +211,7 @@ export function beginColumnPointerReorder(
     moveEvent.preventDefault();
     const hit = document
       .elementFromPoint(moveEvent.clientX, moveEvent.clientY)
-      ?.closest<HTMLElement>("thead th[data-col]");
+      ?.closest<HTMLElement>('[role="columnheader"][data-col]');
     const key = hit?.dataset.col ?? null;
     targetKey = key && key !== sourceKey && allowed.has(key) ? key : null;
     callbacks.onOver(targetKey);

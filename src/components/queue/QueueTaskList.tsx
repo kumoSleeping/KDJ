@@ -11,8 +11,9 @@ export interface QueueListPosition {
 }
 
 /** Task rows use the same bounded window and presentation gesture as the workspace lists. */
-export function QueueTaskList({ count, getKey, children, position }: {
+export function QueueTaskList({ count, getKey, children, position, emptyMessage }: {
   count: number;
+  emptyMessage?: string;
   getKey(index: number): string;
   children(index: number): ReactNode;
   position: QueueListPosition;
@@ -73,6 +74,7 @@ export function QueueTaskList({ count, getKey, children, position }: {
   });
 
   return <QueueList ref={attachScroller}>
+    {!count && emptyMessage && <div className="kd-queue-empty-message">{emptyMessage}</div>}
     <div style={rowListPadding(items, virtualizer.getTotalSize(), 0)}>
       {items.map(item => <div key={item.key} data-index={item.index} data-queue-key={item.key} ref={register}>
         {children(item.index)}

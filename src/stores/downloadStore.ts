@@ -329,6 +329,7 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
 
   async remove(taskId) {
     await api.removeDownload(taskId);
+    forgetQueueDraft(taskId);
     rememberRemovedTask(taskId);
     const map = new Map(get().tasks);
     map.delete(taskId);

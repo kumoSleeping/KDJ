@@ -13,15 +13,20 @@ export function QueueList({ children, className = "", style, ...props }: Compone
   return <div {...props} className={`kd-scroll kd-grow kd-download-task-list ${className}`} style={{ minHeight: 0, ...style }}>{children}</div>;
 }
 /**
- * One task row, the same on every task page: order number, cover, title with the row's actions,
- * a detail line that ends in the state, the facts, and a progress line while the task runs.
- * Extra lines (an error, a notice) are children and start under the text column. The root
- * element takes any attribute a caller passes, such as `data-task-id`.
+ * One task row, the same on every task page and as tall in every state: order number, cover,
+ * title with the row's actions, a detail line that ends in the state, the facts, and a progress
+ * line along the row's foot while the task runs. What went wrong (`problem`) is one line in the
+ * detail line's place, behind the amber mark, with the whole text as its title. Extra lines are
+ * children and start under the text column. The root element takes any attribute a caller
+ * passes, such as `data-task-id`.
  */
-export function QueueEntry({ order, title, titleTooltip = title, subtitle, state, status, stateTitle, missing,
+export function QueueEntry({ order, title, titleTooltip = title, subtitle, state, status, stateTitle, missing, problem, problemTitle = problem,
   percent, progress, cover, metadata, actions, children, className = "", ...props }: Omit<ComponentProps<"article">, "title"> & {
   order: string; title: string; titleTooltip?: string; subtitle?: string;
+  /** The state in words; empty when the mark alone says it (a failure), and `stateTitle` then names it. */
   state: string; status: string; stateTitle?: string; missing?: boolean;
+  /** Why the task failed or what could not be done to it; stands where the state does. */
+  problem?: string; problemTitle?: string;
   percent?: string;
   /** 0..1 while the task is running and how far it has come is known; draws the progress line. */
   progress?: number;
@@ -35,15 +40,18 @@ export function QueueEntry({ order, title, titleTooltip = title, subtitle, state
         {cover}
         <span className="kd-download-task-copy">
           <span className="kd-download-task-title" title={titleTooltip}>{title}</span>
-          <span className="kd-download-task-byline">
+          <span className="kd-download-task-byline" data-problem={problem ? "" : undefined}>
             {subtitle && <span className="kd-download-task-artist kd-truncate" title={subtitle}>{subtitle}</span>}
-            <span className="kd-download-task-state">
-              <span className="kd-download-task-state-label">
+            {problem ? <span className="kd-download-task-problem" title={problemTitle}>
+              <QueueStateMark state="failed" />
+              <span>{problem}</span>
+            </span> : <span className="kd-download-task-state">
+              <span className="kd-download-task-state-label" title={stateTitle} role={status ? undefined : "img"} aria-label={status ? undefined : stateTitle}>
                 <QueueStateMark state={missing ? "failed" : state} />
-                <span className="kd-download-task-state-text" title={stateTitle}>{status}</span>
+                {status && <span className="kd-download-task-state-text">{status}</span>}
               </span>
               {percent && <span className="kd-download-task-percent kd-mono">{percent}</span>}
-            </span>
+            </span>}
           </span>
           {metadata && <span className="kd-download-task-meta">{metadata}</span>}
           {ratio !== undefined && <span className="kd-download-task-progress" role="progressbar" aria-label={`${title} 进度`}

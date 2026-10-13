@@ -56,7 +56,7 @@ WKWebView 的合成器自己滚，显示的是主线程事先画好的瓦片。�
 ## 规则
 
 1. 滚动帧里不读布局（`getBoundingClientRect`、`offsetTop`、`scrollHeight`）、不画 canvas、不切祖先的属性；位置从 `useScrollMotion` 读。交给 WebView 滚的列表在滚动帧里也不渲染、不 `flushSync`；自己滚的列表只由虚拟化器在 scroll 事件里渲染进出窗口的那几行。
-2. 行要便宜：只渲染可见列；格里不套包装层；每行不订阅 store（曲库的响度基准由表读一次下发）；封面是普通 `<img>`，显示过的同步解码。在 WebKit 里每个裁切溢出的盒子都是一个层，每次滚动都要遍历全部层，所以只有文字可能超长的格才带 `data-clip`（省略号），数字和日期格不裁切；封面框不裁切，图片自己圆角；评分是一个元素两张遮罩，不是五个 SVG 按钮。
+2. 行要便宜：只渲染可见列；格里不套包装层；每行不订阅 store（曲库的响度基准由表读一次下发）；封面是普通 `<img>`，显示过的同步解码。在 WebKit 里每个裁切溢出的盒子都是一个层，每次滚动都要遍历全部层，所以只有文字可能超长的格才带 `data-clip`（省略号），数字格不裁切；文件创建和入库时间会超出可拖窄的列宽，因此也带 `data-clip`，并用 `title` 保留完整时间；封面框不裁切，图片自己圆角；评分是一个元素两张遮罩，不是五个 SVG 按钮。
 3. 行和块永远不定位（没有 `position`、`top`、`transform`、`contain`）；到场动画用 transform 动行本身。
 4. 动画的标记在行上（`data-kd-arrive*`、`--kd-arrive-*`），结束后去掉；不在 `.kd-scroll`、`.kd-list`、`.kd-list-body` 上放任何会被后代选择器用到的属性。
 5. 新的一张列表：给 `useRowList` 一个 `count`、`getKey`、行高（或块估算）和表头高，用 `getVirtualItems()` 渲染，`getTotalSize()` 撑 body；在 layout effect 里按"呈现"与"追上"的规则调用 `listArrival`（建过一次的行不再追上）；外部要找行用 `.kd-list-row[...]`，不要假定没挂载的行在 DOM 里（Shift 区间、MIDI 步进这类要用数据模型，不要用 DOM 顺序）。

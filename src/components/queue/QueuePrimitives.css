@@ -8,3 +8,14 @@
 :root[data-theme-pack="sakulaptop98"] .kd-download-task-title {
   align-self: center;
 }
+
+.kd-queue-empty-message {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  box-sizing: border-box;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  text-align: center;
+}

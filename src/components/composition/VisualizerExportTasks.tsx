@@ -1,6 +1,6 @@
 import { CircleMinus, Download, FolderOpen, RotateCcw, Trash2, Video } from "lucide-react";
 import { getBridge } from "../../lib/bridge";
-import { folderName, formatPercent } from "../../lib/format";
+import { folderName, formatFrameRate, formatPercent } from "../../lib/format";
 import { visualizerExportActive, visualizerExportStartable, type VisualizerExportTask } from "../../lib/visualizerExportQueue";
 import { useVisualizerExportStore } from "../../stores/visualizerExportStore";
 import { useVisualizerExportCovers } from "../../lib/useTaskCovers";
@@ -33,12 +33,12 @@ export function VisualizerExportRow({ task, order }: { task: VisualizerExportTas
   const active = visualizerExportActive(task);
   const running = active && task.phase !== "queued";
   const directory = task.outputPath.replace(/[\\/][^\\/]*$/, "");
-  return <QueueEntry data-task-id={task.id} order={String(order)} title={task.name} subtitle="可视化"
+  return <QueueEntry className="kd-export-task" data-task-id={task.id} order={String(order)} title={task.name} subtitle="可视化"
     state={running ? "processing" : task.phase} status={task.status}
     percent={running ? formatPercent(task.progress) : undefined} progress={running ? task.progress : undefined}
     cover={<VisualizerExportCover task={task} />}
     metadata={<>
-      <span className="kd-download-task-quality kd-mono"><Video size={10} />{task.width} × {task.height} · {task.fps} fps</span>
+      <span className="kd-download-task-quality kd-mono"><Video size={10} />{task.width} × {task.height} · {formatFrameRate(task.fps)} fps</span>
       {directory && <span className="kd-download-task-target kd-mono" title={task.outputPath}><FolderOpen size={10} />{folderName(directory)}</span>}
     </>}
     actions={<>
@@ -51,9 +51,9 @@ export function VisualizerExportRow({ task, order }: { task: VisualizerExportTas
         : <>
           {task.phase === "done" && <Button variant="ghost" size="sm" iconOnly aria-label={`打开所在文件夹 ${task.name}`} title={`打开所在文件夹：${task.outputPath}`}
             onClick={() => void getBridge().revealPath(task.outputPath).catch(fail)}><FolderOpen size={12} /></Button>}
-          <Button variant="ghost" size="sm" iconOnly aria-label={`删除可视化任务 ${task.name}`} title="只移除记录，不删除导出文件"
-            onClick={() => void useVisualizerExportStore.getState().remove(task.id).catch(fail)}><Trash2 size={12} /></Button>
         </>}
+      <Button variant="ghost" size="sm" iconOnly aria-label={`清除可视化任务 ${task.name}`} title="停止并清除任务，保留导出文件"
+        onClick={() => void useVisualizerExportStore.getState().remove(task.id).catch(fail)}><Trash2 size={12} /></Button>
     </>}>
     {task.error && <div className="kd-download-task-error" role="status">{task.error}</div>}
   </QueueEntry>;

@@ -15,6 +15,7 @@ pub fn router(manager: Arc<Workshop>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/workshop", get(list).post(create))
         .route("/api/workshop/recovery/ack", post(acknowledge_recovery))
+        .route("/api/workshop/exports/clear", post(clear_exports))
         .route("/api/workshop/align/{request}/cancel", post(cancel_alignment))
         .route("/api/workshop/intake", post(intake))
         .route(
@@ -55,6 +56,14 @@ async fn list(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapshot
     m.refresh_video_geometry().await?;
     Ok(Json(m.snapshot()))
 }
+#[derive(Deserialize)]
+struct ClearExports {
+    projects: HashMap<String, u64>,
+    job_ids: Vec<String>,
+}
+async fn clear_exports(Extension(m): Extension<Arc<Workshop>>, Json(body): Json<ClearExports>) -> ApiResult<Json<Snapshot>> {
+    Ok(Json(m.clear_exports(&body.projects, &body.job_ids).await?))
+}
 async fn create(Extension(m): Extension<Arc<Workshop>>) -> ApiResult<Json<Snapshot>> {
     Ok(Json(m.create()?))
 }
@@ -82,6 +91,8 @@ async fn delete(
     Path(id): Path<String>,
     Json(p): Json<Revision>,
 ) -> ApiResult<Json<Snapshot>> {
+    let jobs = m.snapshot().jobs;
+    for job in jobs.iter().filter(|job| job.project_id == id) { m.cancel(&job.id).await?; }
     Ok(Json(m.delete(&id, p.revision)?))
 }
 #[derive(Deserialize)]

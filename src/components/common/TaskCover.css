@@ -50,19 +50,20 @@
   width: var(--kd-task-cover-size, 3rem);
   height: var(--kd-task-cover-size, 3rem);
 }
+.kd-task-cover-stack > .kd-task-cover[data-stack-index="-1"] { visibility: hidden; pointer-events: none; }
 .kd-task-cover-stack > .kd-task-cover {
   position: absolute;
   /* Each cover is cut out of the one behind it by a ring in the sheet's own tone. */
   box-shadow: 0 0 0 1.5px var(--kd-task-cover-ring);
 }
 .kd-task-cover-stack[data-layout="fan"] > .kd-task-cover { border-radius: 4px; }
-.kd-task-cover-stack[data-layout="fan"][data-count="1"] > .kd-task-cover { width: 82%; height: 82%; }
+.kd-task-cover-stack[data-layout="fan"][data-count="1"] > .kd-task-cover { width: 100%; height: 100%; }
 .kd-task-cover-stack[data-layout="fan"][data-count="2"] > .kd-task-cover { width: 72%; height: 72%; }
 .kd-task-cover-stack[data-layout="fan"][data-count="3"] > .kd-task-cover { width: 62%; height: 62%; }
-.kd-task-cover-stack[data-layout="fan"] > .kd-task-cover:nth-child(1) { top: 0; left: 0; z-index: 3; }
-.kd-task-cover-stack[data-layout="fan"][data-count="2"] > .kd-task-cover:nth-child(2) { top: 28%; left: 28%; z-index: 2; }
-.kd-task-cover-stack[data-layout="fan"][data-count="3"] > .kd-task-cover:nth-child(2) { top: 19%; left: 19%; z-index: 2; }
-.kd-task-cover-stack[data-layout="fan"][data-count="3"] > .kd-task-cover:nth-child(3) { top: 38%; left: 38%; z-index: 1; }
+.kd-task-cover-stack[data-layout="fan"] > .kd-task-cover[data-stack-index="0"] { top: 0; left: 0; z-index: 3; }
+.kd-task-cover-stack[data-layout="fan"][data-count="2"] > .kd-task-cover[data-stack-index="1"] { top: 28%; left: 28%; z-index: 2; }
+.kd-task-cover-stack[data-layout="fan"][data-count="3"] > .kd-task-cover[data-stack-index="1"] { top: 19%; left: 19%; z-index: 2; }
+.kd-task-cover-stack[data-layout="fan"][data-count="3"] > .kd-task-cover[data-stack-index="2"] { top: 38%; left: 38%; z-index: 1; }
 .kd-task-cover-more {
   position: absolute;
   z-index: 4;
@@ -85,10 +86,13 @@
   height: auto;
 }
 .kd-task-cover-stack[data-layout="row"] > .kd-task-cover { position: relative; }
-.kd-task-cover-stack[data-layout="row"] > .kd-task-cover + .kd-task-cover { margin-left: calc(var(--kd-task-cover-size, 3rem) * -0.45); }
-.kd-task-cover-stack[data-layout="row"] > .kd-task-cover:nth-child(1) { z-index: 3; }
-.kd-task-cover-stack[data-layout="row"] > .kd-task-cover:nth-child(2) { z-index: 2; }
-.kd-task-cover-stack[data-layout="row"] > .kd-task-cover:nth-child(3) { z-index: 1; }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover[data-stack-index="-1"] { position: absolute; }
+.kd-task-cover-stack[data-layout="row"][data-count="0"] { width: var(--kd-task-cover-size, 3rem); height: var(--kd-task-cover-size, 3rem); }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover[data-stack-index="1"],
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover[data-stack-index="2"] { margin-left: calc(var(--kd-task-cover-size, 3rem) * -0.45); }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover[data-stack-index="0"] { z-index: 3; }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover[data-stack-index="1"] { z-index: 2; }
+.kd-task-cover-stack[data-layout="row"] > .kd-task-cover[data-stack-index="2"] { z-index: 1; }
 .kd-task-cover-stack[data-layout="row"] > .kd-task-cover-more { position: static; margin-left: 0.3rem; }
 
 /* Sakura98: covers are small bevelled plates like the pack's other thumbnails. */

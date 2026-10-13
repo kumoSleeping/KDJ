@@ -120,6 +120,14 @@ function appStore(api: Record<string, unknown>) {
   const noStore = { getState: () => ({ restorePlatforms() {} }) };
   const modules: Record<string, unknown> = {
     zustand: { create },
+    "./taskPanelStore": { useTaskPanelStore: noStore },
+    "../lib/windowRole": { usesKvjWindow: () => false, isEditorWindow: false },
+    "../lib/kvjWindow": { showKvj() {}, requestSettingsSave() { assert.fail("main window owns settings writes"); } },
+    "../lib/themePack": {
+      THEME_CHANGE_EVENT: "theme-change", activeThemePack: () => null,
+      resolveThemeMode: (_pack: unknown, base: string) => base, themePackSignature: () => "",
+    },
+    "../lib/storageWrite": { readLocalStorage: () => null, writeLocalStorageNow() {} },
     "../lib/api": { api, events: { subscribe: () => () => {} } },
     "../lib/settingsWriteBarrier": {
       enqueueSettingsWrite: barrier.enqueue,
@@ -139,7 +147,7 @@ function appStore(api: Record<string, unknown>) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText, {
     exports, require(name: string) { assert.ok(name in modules, name); return modules[name]; },
-    window: { matchMedia: () => ({ matches: false }) },
+    window: { matchMedia: () => ({ matches: false }), dispatchEvent() {} }, Event,
     document: { documentElement: { dataset: {} } },
     localStorage: { setItem() {} }, console, setTimeout, clearTimeout,
   });

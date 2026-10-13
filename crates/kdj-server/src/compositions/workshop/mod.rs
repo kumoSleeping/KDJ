@@ -57,6 +57,8 @@ struct Journal {
     #[serde(default)]
     migrated: Vec<String>,
     #[serde(default)]
+    cleared_exports: HashMap<String, u64>,
+    #[serde(default)]
     checked_video_geometry: HashSet<String>,
     #[serde(default)]
     position_bases: HashMap<String, Layer>,
@@ -71,6 +73,7 @@ struct Journal {
 }
 #[derive(Clone, Serialize)]
 pub struct Snapshot {
+    cleared_exports: HashMap<String, u64>,
     session: String,
     revision: u64,
     projects: Vec<CompositionProject>,
@@ -277,6 +280,7 @@ impl Workshop {
     pub fn snapshot(&self) -> Snapshot {
         let j = self.journal.lock().unwrap();
         Snapshot {
+            cleared_exports: j.cleared_exports.clone(),
             session: self.session.clone(),
             revision: j.revision,
             projects: j.projects.clone(),
@@ -372,7 +376,13 @@ impl Workshop {
     pub fn delete(&self, pid: &str, revision: u64) -> Result<Snapshot> {
         self.project(pid, revision)?;
         let s = self.change(|j| {
+            let p = j.projects.iter().find(|p| p.id == pid).context("作品不存在")?;
+            if p.revision != revision { bail!("作品已更新，请重试当前操作") }
+            if j.jobs.iter().any(|job| job.project_id == pid && matches!(job.phase.as_str(), "queued" | "rendering" | "validating" | "committing" | "importing")) {
+                bail!("请等待导出结束");
+            }
             j.projects.retain(|p| p.id != pid);
+            j.cleared_exports.remove(pid);
             j.pending_positions.retain(|key, _| !key.starts_with(&format!("{pid}:")));
             j.stopped_positions.retain(|key| !key.starts_with(&format!("{pid}:")));
             Ok(())
@@ -658,6 +668,7 @@ impl Workshop {
             }) {
                 bail!("作品正在导出")
             }
+            j.cleared_exports.remove(pid);
             j.jobs.push(Job {
                 id: job_id.clone(),
                 project_id: pid.into(),
@@ -708,6 +719,22 @@ impl Workshop {
             m.jobs.lock().unwrap().remove(&job_id);
         });
         Ok(s)
+    }
+    /// Clear only the requested queue snapshot, never editable projects or published files.
+    pub async fn clear_exports(&self, projects: &HashMap<String, u64>, ids: &[String]) -> Result<Snapshot> {
+        for jid in ids { self.cancel(jid).await?; }
+        self.change(|j| {
+            if j.jobs.iter().any(|job| ids.contains(&job.id) && matches!(job.phase.as_str(), "queued" | "rendering" | "validating" | "committing" | "importing")) {
+                bail!("请等待导出保存或入库完成后重试清除");
+            }
+            for (pid, revision) in projects {
+                if j.projects.iter().any(|p| &p.id == pid && &p.revision == revision) {
+                    j.cleared_exports.insert(pid.clone(), *revision);
+                }
+            }
+            j.jobs.retain(|job| !ids.contains(&job.id));
+            Ok(())
+        })
     }
     pub async fn cancel(&self, jid: &str) -> Result<Snapshot> {
         let control = self.jobs.lock().unwrap().get(jid).cloned();

@@ -17,7 +17,6 @@ import {
   Download,
   LoaderCircle,
   Music2,
-  Palette,
   Pause,
   Play,
   RefreshCw,
@@ -188,7 +187,6 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { PlayerEq } from "./NowPlayingControls";
 import { NowPlayingTask } from "./NowPlayingTask";
-import { useSongColor, useSongColorAvailable } from "../../lib/songColor";
 import { PlayerBarCollapseKey, playerBarPhaseProps, usePlayerBarPhase } from "./PlayerBarAway";
 import { BarLyricsEntry, BarMetaEntry } from "./BarSongEntries";
 import { useDeckSongSwap } from "./deckSongSwap";
@@ -448,22 +446,6 @@ const BarInfoHost = memo(NowPlayingTask);
 const BarModeButton = memo(PlaybackModeButton);
 const BarEq = memo(PlayerEq);
 const BarCollapseKey = memo(PlayerBarCollapseKey);
-const BarSongColorKey = memo(function BarSongColorKey() {
-  const available = useSongColorAvailable();
-  const on = useSongColor(state => state.on);
-  if (!available) return null;
-  const label = on ? "关闭歌曲色彩" : "打开歌曲色彩";
-  return <button
-    type="button"
-    className="kd-player-step kd-player-colorbtn"
-    aria-label={label}
-    title={label}
-    aria-pressed={on}
-    onClick={event => useSongColor.getState().toggle(event.currentTarget)}
-  >
-    <Palette size={14} aria-hidden="true" />
-  </button>;
-});
 /** The face key that had the keyboard's focus when it was pressed: the other face's key takes it over. */
 let handFaceFocus = false;
 /**
@@ -4922,7 +4904,6 @@ export function PlayerBar() {
           <div className="kd-player-face" data-face="tools" hidden={barFace !== "tools"}>
             <div className="kd-player-float-tools">
               <BarLyricsEntry />
-              <BarSongColorKey />
               {/* 歌词和弹窗各管各的：歌词键只开关悬浮歌词，弹窗键只开关画面小窗。 */}
               {canDesktopLyrics && !video ? (
                 <button

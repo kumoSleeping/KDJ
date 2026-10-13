@@ -62,7 +62,8 @@
 }
 /* Only a cell whose text can run long clips it with an ellipsis (data-clip): a box that clips
    its overflow is a layer in WebKit, and every scroll walks every layer, so the number and
-   date cells, whose columns are wide enough for them, do not. */
+   other compact cells do not. Timestamps opt in because their resizable columns can be
+   narrower than the full date and time. */
 .kd-list-hcell,
 .kd-list-cell[data-clip] {
   overflow: hidden;

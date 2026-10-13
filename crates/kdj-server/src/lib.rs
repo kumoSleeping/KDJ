@@ -27,6 +27,7 @@ pub mod stream_waveform;
 pub mod themes;
 pub mod waveform;
 pub mod ws;
+mod soundcloud_bridge;
 pub mod youtube_hls;
 #[cfg(test)]
 #[path = "../../test-support/peak_alloc.rs"]
@@ -411,6 +412,7 @@ pub fn build_app(state: Arc<AppState>, control: AuthToken, media: MediaToken) ->
     let compositions = compositions::CompositionManager::open(state.clone())?;
     let workshop = compositions::workshop::Workshop::open(state.clone(), &compositions)?;
     let router = routes::router(ctx)
+        .merge(soundcloud_bridge::router())
         .merge(compositions::workshop::routes::router(workshop))
         .merge(compositions::audio_visualizer::studio::router())
         .merge(themes::router())

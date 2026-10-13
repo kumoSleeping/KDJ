@@ -337,7 +337,7 @@ impl YoutubeAuth {
     }
 }
 
-fn parse_headers(raw: &str) -> Result<BTreeMap<String, String>> {
+pub(crate) fn parse_headers(raw: &str) -> Result<BTreeMap<String, String>> {
     if raw.starts_with('{') {
         let value: serde_json::Value =
             serde_json::from_str(raw).context("请求头 JSON 格式不正确")?;

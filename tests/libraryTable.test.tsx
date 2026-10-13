@@ -415,12 +415,18 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
 
     // —— A fast scroll, and the rows catching up with it ——
     {
-      const scrollBy = (pixels: number) => scrollTo(restored, restored.scrollTop + pixels);
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
       await flush();
-      // The clock of timers stands still in this part and is moved by hand.
+      // Timers and animation elapsed time share a deterministic clock; CI may spend
+      // several milliseconds mounting rows within one simulated scroll frame.
+      let now = performance.now();
+      const clock = t.mock.method(performance, "now", () => now);
       t.mock.timers.enable({ apis: ["setTimeout"] });
-      const pass = (ms: number) => act(async () => { t.mock.timers.tick(ms); });
+      const pass = (ms: number) => act(async () => { now += ms; t.mock.timers.tick(ms); });
+      const scrollBy = async (pixels: number) => {
+        await pass(16);
+        await scrollTo(restored, restored.scrollTop + pixels);
+      };
       /** Long enough without a scroll frame for the list to take the scroll as over. */
       const rest = async () => { await pass(220); await flush(); };
       // Every change of the rows React makes.
@@ -510,6 +516,7 @@ test("real list/store: direct jump, full selection, shrink, empty result, and bo
       await rest();
       await pass(2000);
       t.mock.timers.reset();
+      clock.mock.restore();
       watch.disconnect();
     }
 

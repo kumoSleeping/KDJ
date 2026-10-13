@@ -83,6 +83,12 @@ opt-level = 2
 [profile.release.package.symphonia-format-riff]
 opt-level = 2
 
+# 本地保留增量编译速度，但不生成完整调试信息，避免历史目标文件膨胀。
+# test 默认继承 dev；需要源码级调试时临时设置 CARGO_PROFILE_DEV_DEBUG=2。
+[profile.dev]
+debug = 0
+incremental = true
+
 # tauri:dev 默认是 debug：波形/分析在未优化下单曲要几十秒，播放条会一直空着。
 # `package."*"` 只覆盖 crates.io 依赖，不覆盖 workspace member——所以分析、STEM 和
 # callback 前的实时播放热路径必须单独开。业务 UI / 路由 crate 仍保持未优化，增量编译友好。
