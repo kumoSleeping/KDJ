@@ -5,7 +5,8 @@ import { deleteVisualizerExport, loadVisualizerExports, loadVisualizerExportSnap
   visualizerExportActive, visualizerExportStartable, type VisualizerExportTask } from "../lib/visualizerExportQueue";
 import { waitForSettingsWrites } from "../lib/settingsWriteBarrier";
 import { useAppStore } from "./appStore";
-import { usesVisualizerWindow } from "../lib/windowRole";
+import { isEditorWindow, usesVisualizerWindow } from "../lib/windowRole";
+import { ensureFfmpegForExport } from "../lib/ffmpegRequired";
 import { requestVisualizerExports, type VisualizerExportCommand } from "../lib/kvjWindow";
 
 interface State {
@@ -42,6 +43,13 @@ async function fromOwner(command: VisualizerExportCommand): Promise<void> {
   useVisualizerExportStore.setState(snapshot);
 }
 function report(error: unknown) { captureDiagnostic("visualizer-export", "queue.persistence", error); useVisualizerExportStore.setState({ error: message(error) }); }
+
+function startTasks(id?: string): void {
+  if (usesVisualizerWindow()) { void fromOwner({ action: "start", id }).catch(report); return; }
+  useVisualizerExportStore.setState(state => ({ tasks: state.tasks.map(task => (!id || task.id === id) && !removals.has(task.id) && visualizerExportStartable(task)
+    ? { ...task, phase: "queued", progress: 0, status: "等待导出", error: "" } : task) }));
+  void pump().catch(report);
+}
 
 /** One frame producer at a time, independent of editor/component lifetimes.
  * The backend still arbitrates encoder resources with mixing exports. */
@@ -140,10 +148,9 @@ export const useVisualizerExportStore = create<State>((set, get) => ({
     } finally { reservedPaths.delete(task.outputPath.toLowerCase()); }
   },
   start(id) {
-    if (usesVisualizerWindow()) { void fromOwner({ action: "start", id }).catch(report); return; }
-    set(state => ({ tasks: state.tasks.map(task => (!id || task.id === id) && !removals.has(task.id) && visualizerExportStartable(task)
-      ? { ...task, phase: "queued", progress: 0, status: "等待导出", error: "" } : task) }));
-    void pump().catch(report);
+    // The window the user pressed in answers a missing FFmpeg (the render window has no settings).
+    if (!isEditorWindow) { void ensureFfmpegForExport().then(ready => { if (ready) startTasks(id); }).catch(report); return; }
+    startTasks(id);
   },
   async cancel(id) {
     if (usesVisualizerWindow()) { await fromOwner({ action: "cancel", id }); return; }

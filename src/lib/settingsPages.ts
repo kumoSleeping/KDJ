@@ -14,3 +14,14 @@ export const useSettingsPage = create<{ page: SettingsPage; setPage(page: Settin
   page: "general",
   setPage: page => set({ page }),
 }));
+
+/** A section of a settings page that opening settings should bring into view. */
+export type SettingsSection = "ffmpeg";
+
+/** Asks the settings drawer to land on a section: `focus` bumps the epoch the panel reacts to. */
+export const useSettingsFocus = create<{ section: SettingsSection | null; epoch: number; focus(section: SettingsSection): void; clear(): void }>(set => ({
+  section: null,
+  epoch: 0,
+  focus: section => set(state => ({ section, epoch: state.epoch + 1 })),
+  clear: () => set({ section: null }),
+}));

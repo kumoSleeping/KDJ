@@ -1,4 +1,4 @@
-import { useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
+import { useSettingsFocus, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import {
@@ -471,6 +471,31 @@ export function SettingsPanel({ preferences = false, page }: {
     scrollToUpdate();
   }, [focusEpoch]);
 
+  const ffmpegFocusEpoch = useSettingsFocus((s) => (s.section === "ffmpeg" ? s.epoch : 0));
+  const ffmpegSectionRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!ffmpegFocusEpoch) return;
+    // The media tools sit at the end of the system page: open it, then scroll down to them.
+    useSettingsPage.getState().setPage("system");
+    useSettingsFocus.getState().clear(); // one request, one scroll: a later opening starts at the top
+    let frame = 0;
+    const scrollToFfmpeg = () => {
+      const section = ffmpegSectionRef.current;
+      if (!section) {
+        if (frame++ < 30) requestAnimationFrame(scrollToFfmpeg);
+        return;
+      }
+      const scrollHost = section.closest(".kd-scroll") as HTMLElement | null;
+      if (!scrollHost) return;
+      const top =
+        section.getBoundingClientRect().top -
+        scrollHost.getBoundingClientRect().top +
+        scrollHost.scrollTop;
+      scrollHost.scrollTo({ top: Math.max(0, top), behavior: frame > 0 ? "auto" : "smooth" });
+    };
+    scrollToFfmpeg();
+  }, [ffmpegFocusEpoch]);
+
   return (
     <div className={preferences ? "kd-col kd-preferences" : "kd-col"} style={{ height: "100%", minHeight: 0 }}>
       <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}
@@ -751,7 +776,8 @@ export function SettingsPanel({ preferences = false, page }: {
 
         {on("system") && <ActivityLogPanel />}
 
-        {on("system") && ["darwin", "win32", "linux"].includes(getBridge().platform) ? <FfmpegPanel /> : null}
+        {on("system") && ["darwin", "win32", "linux"].includes(getBridge().platform)
+          ? <div ref={ffmpegSectionRef} id="kd-settings-ffmpeg"><FfmpegPanel /></div> : null}
       </div>
     </div>
   );
