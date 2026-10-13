@@ -12,23 +12,23 @@ frame and its motion). macOS and Windows run the same steps through the same win
 
 - **Down.** The key 收成迷你播放器 among the window's keys at the top right (ChromeActions);
   it is there only with a song. A bubble that is down (its peek over) is raised and let arrive
-  first, since its place and width are the mini player's. The whole window is gone at once, and the mini player pops out of the nearest corner of its screen at
-  the place it was last left at (a short way, fading in). With no place of its own yet, that
+  first, since its place and width are the mini player's. The whole window fades out where it
+  is, and the mini player pops out of the nearest corner of its screen at the place it was last
+  left at (a short way, fading in). With no place of its own yet, that
   is where the bubble stood.
 - **As the mini player.** The window is the bubble: cover, title, the mini transport. Under the
   title is the lyric that is being sung while the song has lyrics, the artist otherwise. It is
   moved by dragging it anywhere that is not a key or the transport. It floats over other
-  windows and is on every desktop unless 置顶 is switched off (remembered). Its height follows
-  the bubble's.
+  windows and is on every desktop. Its height follows the bubble's. Its corners are the
+  window's: macOS rounds them itself, and Windows 11 is asked to (`round_corners`), since it
+  only rounds a window that can be sized; Windows 10 has square windows.
 - **Another song.** The mini player stays where it is. Once the next cover is prepared, the
   cover, the song's text and the seek line cross-fade in place (the `turn` gesture's times,
   none of its travel: a half-rem lift reads as the strip being bumped); its surface, window
   keys and transport keys stay put. It never sends the window off screen and back. In the
   whole window the bubble keeps its usual roll down and rise.
-- **Its keys.** 置顶 and 展开窗口 stand in a column at the right edge, as tall as the cover and
-  level with its top and bottom edges (MiniPlayer.css); the title has the whole width between
-  the cover and them. In the whole window they are not shown; the bubble's tool row has the
-  song's keys only.
+- **Its key.** 展开窗口 is in the bubble's tool row, where the bubble's keys stand; the others
+  are not shown as the mini player. In the whole window it is not shown either.
 - **Back.** The key 展开窗口. The mini player goes into that corner again, and the whole
   window fades in as it was. The place the mini player was left at is remembered for next
   time, across launches (`mini-player.json` in the data directory); a place on a display that
@@ -38,15 +38,16 @@ frame and its motion). macOS and Windows run the same steps through the same win
 
 ## Rules
 
-- **Two things are seen, and no more: the pop and a fade.** Down: the whole window is gone
-  at once, then the mini player pops out of its corner. Back: it goes into the corner, then
+- **Two things are seen, and no more: a fade and the pop.** Down: the whole window fades out
+  where it is, then the mini player pops out of its corner. Back: it goes into the corner, then
   the whole window fades in. This is the listener's own design (2026-10-12), after four
   others: do not add a step, and do not bring back anything that travels between the bubble's
-  corner of the whole window and the mini player's place. What was there before and was
-  taken out: the bar sliding away first, the bubble flying inside the page and then the window
-  flying in an arc ("跳来跳去"), a second window standing in for the bubble, pauses that only
-  made the result look calmer, and the mini player leaving the screen and coming back on
-  every change of song.
+  corner of the whole window and the mini player's place. The whole window's fade out was
+  taken out on 2026-10-12 in favour of an instant going, and put back the same day at the
+  listener's request (110 ms). What was there before and was taken out: the bar sliding away
+  first, the bubble flying inside the page and then the window flying in an arc ("跳来跳去"), a
+  second window standing in for the bubble, pauses that only made the result look calmer, and
+  the mini player leaving the screen and coming back on every change of song.
 - **The window never changes size where it can be seen.** A WebView shows its last picture,
   from the top-left corner, until the page has drawn for the new size. So the native side
   takes the window out of sight, gives it its size, and shows it when the page says it has

@@ -1,0 +1,9 @@
+:root { color-scheme: light dark; font: 13px system-ui, sans-serif; color: light-dark(#242424, #eee); background: light-dark(#fafafa, #202020); }
+body { width: 320px; margin: 0; padding: 18px; }
+h1 { margin: 0 0 20px; font-size: 16px; }
+form { display: grid; gap: 10px; }
+input { min-width: 0; padding: 8px; border: 1px solid GrayText; border-radius: 5px; color: inherit; background: transparent; }
+button { justify-self: start; padding: 6px 12px; border: 1px solid GrayText; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
+p { margin: 0; line-height: 1.5; }
+#status:not(:empty) { margin-top: 14px; }
+:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

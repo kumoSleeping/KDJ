@@ -118,7 +118,8 @@ import {
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, InlineNotice } from "../common";
 import { useVisualizerStudioStore } from "../../stores/visualizerStudioStore";
-import { useVisualizerPopup } from "../../lib/visualizerPopup";
+import { canVisualizeTrack, useVisualizerPopup } from "../../lib/visualizerPopup";
+import { exportVisualizerTracks, reportVisualizerExportError } from "../../lib/visualizerExportActions";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { dragPreviewFromBlob, vinylDragPreview } from "../../lib/dragPreview";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
@@ -229,7 +230,8 @@ const COLUMNS: Column[] = [
   { id: "duration", label: "时长", width: "4rem", align: "num", key: "duration" },
   { id: null, label: "格式", width: "3.4rem", key: "format" },
   { id: null, label: "大小", width: "4.6rem", align: "num", key: "size" },
-  { id: "file_created_at", label: "文件创建", width: "8.5rem", key: "file_created_at" },
+  // 日期加时间是 16 个等宽字符，约 8.5rem；再加两侧内边距。窄了它会压到下一列上。
+  { id: "file_created_at", label: "文件创建", width: "10rem", key: "file_created_at" },
   { id: "rating", label: "评分", width: "4.2rem", key: "rating" },
   { id: null, label: "采样率", width: "5.5rem", key: "samplerate" },
   { id: null, label: "声道", width: "3.4rem", key: "channels" },
@@ -237,7 +239,7 @@ const COLUMNS: Column[] = [
   { id: null, label: "流派", width: "6rem", key: "genre" },
   { id: null, label: "年份", width: "4rem", key: "year" },
   { id: null, label: "来源", width: "6rem", key: "source_platform" },
-  { id: "added_at", label: "入库", width: "8.5rem", key: "added_at" },
+  { id: "added_at", label: "入库", width: "10rem", key: "added_at" },
   { id: null, label: "文件名", width: "14rem", key: "filename" },
   { id: null, label: "路径", width: "20rem", key: "path" },
 ];
@@ -576,11 +578,14 @@ function trackCell(
         </div>
       );
     case "file_created_at":
+    case "added_at": {
+      const value = formatDate(track[key]);
       return (
-        <div key={key} className="kd-list-cell kd-mono kd-muted" role="gridcell" data-col="file_created_at">
-          {formatDate(track.file_created_at)}
+        <div key={key} className="kd-list-cell kd-mono kd-muted" role="gridcell" data-col={key} data-clip="" title={value}>
+          {value}
         </div>
       );
+    }
     case "samplerate":
     case "channels":
     case "bitrate": {
@@ -599,8 +604,6 @@ function trackCell(
       const value = track[key] || (key === "source_platform" ? "local" : "");
       return <div key={key} className="kd-list-cell" role="gridcell" data-col={key} data-clip="" title={value}>{value || DASH}</div>;
     }
-    case "added_at":
-      return <div key={key} className="kd-list-cell kd-mono kd-muted" role="gridcell" data-col={key}>{formatDate(track.added_at)}</div>;
     case "rating":
       return (
         <div key={key} className="kd-list-cell" role="gridcell" data-col="rating" data-flex="">
@@ -1307,6 +1310,9 @@ export const TrackTable = memo(function TrackTable({
         return;
       }
       const hit = hitAt(x, y);
+      const exports = hit?.closest<HTMLElement>("[data-kd-visualizer-export-drop]");
+      ghost?.hint(exports ? "导出可视化" : null);
+      if (exports) return;
       const sampler = hit?.closest<HTMLElement>(`[${TRACK_SAMPLER_DROP_TARGET_ATTR}]`);
       if (sampler) {
         sampler.setAttribute("data-kd-pointer-track-over", "sampler");
@@ -1441,6 +1447,13 @@ export const TrackTable = memo(function TrackTable({
       cleanup();
       if (!dragging) return;
       up.preventDefault();
+      if (hit?.closest("[data-kd-visualizer-export-drop]")) {
+        finishTrackDrop();
+        void libraryStore.getState().resolveSummaries(ids)
+          .then(tracks => exportVisualizerTracks(tracks, { x: up.clientX, y: up.clientY }))
+          .catch(reportVisualizerExportError);
+        return;
+      }
       if (dropWorkshopTracks(up.clientX, up.clientY)) return;
 
       if (deckSide !== null) {
@@ -2600,17 +2613,19 @@ export const TrackTable = memo(function TrackTable({
               编辑 Meta
             </button>
           )}
+          <button type="button" disabled={menuIds.length !== 1 || !canVisualizeTrack(rowMenu.track)} onClick={event => {
+            const track = rowMenu.track;
+            const from = event.currentTarget.getBoundingClientRect();
+            setRowMenu(null);
+            void exportVisualizerTracks([track], from).catch(reportVisualizerExportError);
+          }}><Download size={12} />导出可视化</button>
           <button type="button" disabled={menuIds.length !== 1 || isImageTrack(rowMenu.track.format)} onClick={() => {
-            // The song's visualizer is the floating window of the playing song, with its
-            // controls in the drawer: no picture is embedded in the drawer. A video has no
-            // visualizer, so it still opens the editor.
             const track = rowMenu.track;
             setRowMenu(null);
             if (isVideoTrack(track.format)) { useVisualizerStudioStore.getState().open(track); return; }
-            if (getPlayingTrack()?.id !== track.id) playFromTable(track);
-            useVisualizerPopup.getState().setOpen(true);
+            useVisualizerPopup.getState().openTrack(track);
             useVisualizerStudioStore.getState().openInlineSettings(track, { editorIfNoWindow: true });
-          }}><BarChart3 size={12} />新建可视化</button>
+          }}><BarChart3 size={12} />展开可视化</button>
           <WorkshopAddMenu ids={() => {
             const chosen = new Set(menuIds);
             return orderedIds.filter(id => chosen.has(id));

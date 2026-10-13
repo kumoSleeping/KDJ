@@ -17,6 +17,7 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSMinimumSystemVersion</key><string>10.15</string>
+<key>NSAppleEventsUsageDescription</key><string>KDJ 需要在你点击登录时控制 Arc，读取所选 SoundCloud 或 YouTube 站点的当前登录状态。</string>
 <key>NSDownloadsFolderUsageDescription</key><string>KDJ 需要读取你选择的下载目录中的音乐和视频，以便播放和剪辑。</string>
 <key>NSMicrophoneUsageDescription</key><string>KDJ 实时 VJ 需要读取你选择的麦克风或声卡输入，以便匹配素材并同步画面；不会保存录音。</string>
 <key>NSBluetoothAlwaysUsageDescription</key><string>KDJ 使用蓝牙在配对电脑之间传输音频识别特征，以同步实时 VJ；不传输录音。</string>

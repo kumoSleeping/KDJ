@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>KDJ 需要在你点击登录时控制 Arc，读取所选 SoundCloud 或 YouTube 站点的当前登录状态。</string>
   <key>NSDownloadsFolderUsageDescription</key>
   <string>KDJ 需要读取你选择的下载目录中的音乐和视频，以便播放和剪辑。</string>
   <key>NSMicrophoneUsageDescription</key>

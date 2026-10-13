@@ -15,7 +15,9 @@ const VisualizerStudioPanel = lazy(() => import("../composition/VisualizerStudio
  */
 export function VisualizerPopup() {
   const open = useVisualizerPopup(state => state.open);
-  const track = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  const playingTrack = useSyncExternalStore(subscribePlayingTrack, getPlayingTrack, getPlayingTrack);
+  const pinnedTrack = useVisualizerPopup(state => state.track);
+  const track = pinnedTrack ?? playingTrack;
   // A draft must have only one editor; the studio owns it while explicitly open.
   const editingTrackId = useVisualizerStudioStore(state => state.inlineSettings ? null : state.track?.id ?? null);
   const inlineSettings = useVisualizerStudioStore(state => state.inlineSettings);

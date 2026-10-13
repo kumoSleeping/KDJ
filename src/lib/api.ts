@@ -870,18 +870,28 @@ export const api = {
     post<Account>("/accounts/soundcloud/login/oauth/callback", body),
   soundcloudBrowserCatalog: () =>
     request<BrowserCatalog>("/accounts/soundcloud/login/browsers"),
+  soundcloudExtensionPair: () =>
+    post<{ code: string; expires_in: number }>("/accounts/soundcloud/login/extension"),
   soundcloudBrowserLogin: (browser: string, profile?: string) =>
     post<Account>("/accounts/soundcloud/login/browser", { browser, profile }),
+  soundcloudBrowserAuthorize: (browser: string) =>
+    post<Account>("/accounts/soundcloud/login/browser/authorize", { browser }),
+  soundcloudHeadersLogin: (headers: string) =>
+    post<Account>("/accounts/soundcloud/login/headers", { headers }),
   ytmBrowserCatalog: () =>
     request<BrowserCatalog>("/accounts/ytm/login/browsers"),
   ytmBrowserLogin: (browser: string, profile?: string) =>
     post<Account>("/accounts/ytm/login/browser", { browser, profile }),
+  ytmBrowserAuthorize: (browser: string) =>
+    post<Account>("/accounts/ytm/login/browser/authorize", { browser }),
   ytmHeadersLogin: (headers: string) =>
     post<Account>("/accounts/ytm/login/headers", { headers }),
   youtubeBrowserCatalog: () =>
     request<BrowserCatalog>("/accounts/youtube/login/browsers"),
   youtubeBrowserLogin: (browser: string, profile?: string) =>
     post<Account>("/accounts/youtube/login/browser", { browser, profile }),
+  youtubeBrowserAuthorize: (browser: string) =>
+    post<Account>("/accounts/youtube/login/browser/authorize", { browser }),
   youtubeHeadersLogin: (headers: string) =>
     post<Account>("/accounts/youtube/login/headers", { headers }),
 
@@ -966,6 +976,7 @@ export const api = {
   exportWorkshop: (id: string, revision: number) => post<WorkshopSnapshot>(`/workshop/${encodeURIComponent(id)}/export`, {revision}),
   cancelWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/cancel`, {}),
   importWorkshopExport: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/import`, {}),
+  clearWorkshopExports: (projects: Record<string, number>, job_ids: string[]) => post<WorkshopSnapshot>("/workshop/exports/clear", { projects, job_ids }),
   discardWorkshopReceipt: (id: string) => post<WorkshopSnapshot>(`/workshop/jobs/${encodeURIComponent(id)}/discard`, {}),
   compositions: () => request<CompositionSnapshot>("/compositions"),
   enqueueCompositions: async (trackIds: number[]) => {

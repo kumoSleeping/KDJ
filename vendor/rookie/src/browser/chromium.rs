@@ -47,14 +47,13 @@ pub fn chromium_based(
 
     #[cfg(feature = "appbound")]
     {
-        let keys = if !appbound_key.is_empty() {
-            if !privilege::user::privileged() {
-                bail!("Chrome cookies from version v130 can be decrypted only when running as admin due to appbound encryption!")
-            }
-            crate::windows::appbound::get_keys(appbound_key)?
-        } else {
-            get_keys(legacy_key)?
-        };
+        // A profile can contain both legacy and application-bound cookies. The
+        // presence of an APPB key alone does not say how the requested site is
+        // encrypted. Try the user's ordinary DPAPI key without elevating.
+        let mut keys = get_keys(legacy_key)?;
+        if !appbound_key.is_empty() && privilege::user::privileged() {
+            keys.extend(crate::windows::appbound::get_keys(appbound_key)?);
+        }
         query_cookies(keys, db_path, domains)
     }
 
@@ -90,6 +89,9 @@ fn create_pbkdf2_key(password: &str, salt: &[u8; 9], iterations: u32) -> Vec<u8>
 #[cfg(target_os = "windows")]
 fn get_keys(key64: &str) -> Result<Vec<Vec<u8>>> {
     let mut keydpapi: Vec<u8> = general_purpose::STANDARD.decode(key64)?;
+    if !keydpapi.starts_with(b"DPAPI") {
+        bail!("Browser legacy key has an unsupported format")
+    }
     let keydpapi = &mut keydpapi[5..];
     let v10_key = crate::windows::dpapi::decrypt(keydpapi)?;
     let keys: Vec<Vec<u8>> = vec![v10_key];
@@ -158,7 +160,12 @@ fn decrypt_encrypted_value(
     value: String,
     encrypted_value: &[u8],
     keys: Vec<Vec<u8>>,
+    domain: &str,
+    database_version: i64,
 ) -> Result<String> {
+    if encrypted_value.len() < 3 {
+        bail!("Browser cookie ciphertext is truncated")
+    }
     let key_type = &encrypted_value[..3];
     if !value.is_empty() || !(key_type == b"v11" || key_type == b"v10" || key_type == b"v20") {
         // unknown key_type or value isn't encrypted
@@ -167,6 +174,9 @@ fn decrypt_encrypted_value(
     }
     log::debug!("key type: {:?}", key_type);
 
+    if encrypted_value.len() < 3 + 12 + 16 {
+        bail!("Browser cookie ciphertext is truncated")
+    }
     let encrypted_value = &encrypted_value[3..];
     let nonce = &encrypted_value[..12]; // iv
     let ciphertext = &encrypted_value[12..];
@@ -180,12 +190,7 @@ fn decrypt_encrypted_value(
         match cipher.decrypt(nonce, ciphertext.as_ref()) {
             Ok(plaintext) => {
                 // Successfully decrypted, try to convert to string
-                let plaintext = if key_type == b"v20" {
-                    String::from_utf8(plaintext[32..].to_vec())
-                        .context("Can't decode encrypted value")
-                } else {
-                    String::from_utf8(plaintext).context("Can't decode encrypted value")
-                };
+                let plaintext = windows_cookie_payload(&plaintext, domain, database_version);
 
                 match plaintext {
                     Ok(text) => return Ok(text),
@@ -199,7 +204,28 @@ fn decrypt_encrypted_value(
             }
         }
     }
-    bail!("decrypt_encrypted_value failed")
+    if key_type == b"v20" {
+        bail!("Browser application-bound encryption prevented reading this session")
+    }
+    bail!("Browser session decryption failed")
+}
+
+// Chromium schema 24 binds every encrypted value to its domain, including v10.
+// This is a database format change, independent of App-Bound Encryption.
+#[cfg(any(windows, test))]
+fn windows_cookie_payload(plaintext: &[u8], domain: &str, database_version: i64) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let payload = if database_version >= 24 {
+        let expected = Sha256::digest(domain.as_bytes());
+        if !plaintext.starts_with(expected.as_slice()) {
+            bail!("Browser cookie domain validation failed")
+        }
+        &plaintext[32..]
+    } else {
+        plaintext
+    };
+    String::from_utf8(payload.to_vec())
+        .map_err(|_| eyre::eyre!("Browser cookie is not valid UTF-8"))
 }
 
 /// Decrypt cookie value using aes cbc
@@ -279,12 +305,10 @@ fn unlock_file(mut path: PathBuf) -> Result<PathBuf> {
         }
     }
 
-    // Elegantly restart the process which lock the cookies file (And unlock it) using restart manager API
+    // Never force-close the user's browser to read its session. Let SQLite
+    // report a locked/inaccessible database if a snapshot was unavailable.
     if !shadow_copy_success {
-        log::warn!("Unlocking Chrome database... This may take a while (sometimes up to a minute)");
-        unsafe {
-            crate::windows::restart_manager::release_file_lock(path.to_str().unwrap());
-        }
+        log::debug!("Reading browser database without a shadow copy");
     }
     Ok(path)
 }
@@ -306,6 +330,12 @@ fn query_cookies(
         db_path.to_str().unwrap_or("")
     );
     let connection = sqlite::connect(db_path)?;
+    #[cfg(windows)]
+    let database_version: i64 = connection.query_row(
+        "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'version'",
+        [],
+        |row| row.get(0),
+    )?;
     let mut query =
         "SELECT host_key, path, is_secure, expires_utc, name, value, CAST(encrypted_value AS BLOB), is_httponly, samesite FROM cookies ".to_string();
 
@@ -339,6 +369,15 @@ fn query_cookies(
         if encrypted_value.is_empty() {
             continue;
         }
+        #[cfg(windows)]
+        let decrypted_value = decrypt_encrypted_value(
+            value,
+            &encrypted_value,
+            keys.to_owned(),
+            &host_key,
+            database_version,
+        )?;
+        #[cfg(unix)]
         let decrypted_value = decrypt_encrypted_value(value, &encrypted_value, keys.to_owned())?;
         let http_only: bool = row.get(7)?;
 
@@ -356,4 +395,27 @@ fn query_cookies(
         cookies.push(cookie);
     }
     Ok(cookies)
+}
+
+#[cfg(test)]
+mod windows_payload_tests {
+    use super::windows_cookie_payload;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn schema_controls_domain_prefix_and_rejects_wrong_domain() {
+        let token = b"test-session";
+        assert_eq!(
+            windows_cookie_payload(token, ".soundcloud.com", 23).unwrap(),
+            "test-session"
+        );
+        let mut payload = Sha256::digest(b".soundcloud.com").to_vec();
+        payload.extend_from_slice(token);
+        assert_eq!(
+            windows_cookie_payload(&payload, ".soundcloud.com", 24).unwrap(),
+            "test-session"
+        );
+        assert!(windows_cookie_payload(&payload, ".youtube.com", 24).is_err());
+        assert!(windows_cookie_payload(&payload[..20], ".soundcloud.com", 24).is_err());
+    }
 }

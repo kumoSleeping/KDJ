@@ -52,7 +52,7 @@ import { LiveVjPanel } from "../composition/LiveVjPanel";
 import { SidePanels } from "../player/SidePanels";
 import { useDrawerOrder } from "../drawer/useDrawerOrder";
 import { releaseDrawerHolds, useHeldDrawer } from "../../lib/drawerHold";
-import { useDrawerApps, useDrawerEntries } from "./drawerApps";
+import { useDrawerApps } from "./drawerApps";
 import { DrawerHost } from "../drawer/Drawer";
 import type { DrawerSpec } from "../drawer/drawerSchema";
 import { VisualizerPopup } from "../player/VisualizerPopup";
@@ -1811,7 +1811,6 @@ export function Workspace() {
       else useAppStore.getState().dismissOverlay();
     },
   });
-  const drawerEntries = useDrawerEntries();
   const dockOrder = useDrawerOrder(drawerApps.map(app => app.id), dockRaised);
   // download-toss: a parcel in flight holds the drawer on the app it is aimed at; what was asked
   // for meanwhile is shown, and the other apps closed, once it has landed (lib/drawerHold.ts).
@@ -2540,7 +2539,6 @@ export function Workspace() {
           }
           actions={
             <ChromeActions
-              sideApps={layout !== "wide"}
               tasksOpen={downloadsOpen}
               onTasks={() => {
                 useSidePanels.getState().setDownloads(!downloadsOpen);
@@ -2595,8 +2593,8 @@ export function Workspace() {
 
           <div className="kd-main-slot">
             <div className="kd-table-wrap" data-aside={showAside ? "open" : "closed"} data-drawer-head={layout === "wide" || undefined}>
-            {/* The drawer's entries sit at the end of the search row; its panel floats over the list. */}
-            {layout === "wide" && <DrawerHost spec={drawerSpec} entries={drawerEntries}
+            {/* The search spans this row; drawer apps open from the chrome and player bar. */}
+            {layout === "wide" && <DrawerHost spec={drawerSpec}
               hostRef={drawerHostRef} onResizeStart={startColumnDrag("right")} />}
             <div className="kd-panel-dock kd-panel-dock-top">
             {/* 搜索带可收起；查询文字、来源选择和已有结果都保留。 */}

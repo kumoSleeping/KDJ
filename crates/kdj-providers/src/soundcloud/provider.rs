@@ -29,6 +29,7 @@ use crate::provider::{
     MusicProvider, ProviderContext,
 };
 use crate::tags;
+use crate::browser::login_trace::LoginTrace;
 
 const LABEL: &str = "SoundCloud";
 const DISABLED_MESSAGE: &str = "未启用，在「下载」里打开开关";
@@ -186,13 +187,38 @@ impl SoundCloudProvider {
     /// blocking 线程；验证通过后才落盘，不会用无效 Cookie 覆盖现有登录态。
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub async fn import_browser(&self, browser: String, profile_id: Option<String>) -> Result<()> {
-        self.ensure_enabled()?;
-        let session = tokio::task::spawn_blocking(move || {
-            read_browser_session(&browser, profile_id.as_deref())
-        })
-        .await
-        .context("读取 SoundCloud 浏览器会话任务失败")??;
-        self.import_browser_session(session).await
+        let trace = LoginTrace::new("soundcloud", "direct");
+        trace.browser(&browser);
+        trace.run(async {
+            self.ensure_enabled()?;
+            trace.step("read_profile");
+            let session = tokio::task::spawn_blocking(move || {
+                read_browser_session(&browser, profile_id.as_deref())
+            }).await.context("读取 SoundCloud 浏览器会话任务失败")??;
+            self.import_browser_session(session, &trace).await
+        }).await
+    }
+
+    /// Chrome/Edge authorizes this connection itself. No cookie database or OS keychain access.
+    pub async fn import_authorized_browser(&self, browser: String) -> Result<()> {
+        let trace = LoginTrace::new("soundcloud", "authorize");
+        trace.run(async {
+            self.ensure_enabled()?;
+            let imported = crate::browser::authorization::read_soundcloud(&browser, &trace).await?;
+            let session = browser_session_from_token(imported.token, imported.expires_at, imported.imported_from)?;
+            self.import_browser_session(session, &trace).await
+        }).await
+    }
+
+    pub async fn import_headers(&self, headers: &str) -> Result<()> {
+        let trace = LoginTrace::new("soundcloud", "headers");
+        trace.run(async {
+            self.ensure_enabled()?;
+            trace.step("parse_headers");
+            let token = super::headers::token(headers)?;
+            let session = browser_session_from_token(token, 0, "手动导入请求头".into())?;
+            self.import_browser_session(session, &trace).await
+        }).await
     }
 
     /// 导入 KDJ 隔离登录窗口取得的 SoundCloud 网页会话。窗口本身只打开
@@ -201,18 +227,29 @@ impl SoundCloudProvider {
         self.ensure_enabled()?;
         let session =
             browser_session_from_token(token, expires_at, "KDJ · SoundCloud 登录窗口".into())?;
-        self.import_browser_session(session).await
+        let trace = LoginTrace::new("soundcloud", "webview");
+        trace.run(self.import_browser_session(session, &trace)).await
     }
 
-    async fn import_browser_session(&self, session: SoundCloudSession) -> Result<()> {
-        let (status, profile) = self
-            .authenticated_get_once(&session.access_token, "/me", &[], true)
-            .await?;
+    /// The extension reads only SoundCloud's cookie via the browser's own cookie API.
+    pub async fn import_extension_session(&self, token: String, expires_at: i64) -> Result<()> {
+        self.ensure_enabled()?;
+        let session = browser_session_from_token(token, expires_at, "浏览器扩展 · SoundCloud".into())?;
+        let trace = LoginTrace::new("soundcloud", "extension");
+        trace.run(self.import_browser_session(session, &trace)).await
+    }
+
+    async fn import_browser_session(&self, session: SoundCloudSession, trace: &LoginTrace) -> Result<()> {
+        trace.step("validate_account");
+        let (status, profile) = tokio::time::timeout(Duration::from_secs(45),
+            self.authenticated_get_once(&session.access_token, "/me", &[], true))
+            .await.context("SoundCloud 账号验证超时，请重试登录")??;
         anyhow::ensure!(
             status.is_success(),
             "浏览器里的 SoundCloud 登录态无效：{}",
             oauth_error(&profile)
         );
+        trace.step("save_session");
         self.set_session(session_with_profile(session, &profile))
     }
 

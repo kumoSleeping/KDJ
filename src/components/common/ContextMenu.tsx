@@ -9,6 +9,24 @@ import { createPortal } from "react-dom";
 import { leaveAfterUnmount, MOTION_STAGGER_TOTAL_MS } from "../../lib/motion";
 
 const PAD = 8;
+const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
+type MenuInput = "pointer" | "keyboard";
+
+// Track the opening gesture before a menu mounts. WebKit can carry :focus-visible
+// from a previously focused input into a programmatically focused menu button.
+let lastInput: MenuInput = "keyboard";
+if (typeof window !== "undefined") {
+  const pointer = () => { lastInput = "pointer"; };
+  const keyboard = (event: KeyboardEvent) => {
+    if (!MODIFIER_KEYS.has(event.key)) lastInput = "keyboard";
+  };
+  window.addEventListener("pointerdown", pointer, true);
+  window.addEventListener("keydown", keyboard, true);
+  (import.meta as ImportMeta & { hot?: { dispose(callback: () => void): void } }).hot?.dispose(() => {
+    window.removeEventListener("pointerdown", pointer, true);
+    window.removeEventListener("keydown", keyboard, true);
+  });
+}
 
 export interface ContextMenuProps {
   /** 视口坐标（通常来自 contextmenu 的 clientX/Y）。 */
@@ -25,7 +43,7 @@ export interface ContextMenuProps {
   label?: string;
   initialFocus?: "selected" | "first" | "last" | "none";
   /** Pointer-opened menus keep keyboard focus without drawing a keyboard focus ring until
-   * a key is used. Omitted: preserve the browser's usual focus-visible behavior. */
+   * a key is used. Omitted: infer from the latest pointer or keyboard gesture. */
   input?: "pointer" | "keyboard";
   role?: "menu" | "listbox";
   /** A menu opened from an item of another menu unfolds out of that item's side. */
@@ -48,7 +66,7 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = fal
   const ref = useRef<HTMLDivElement | null>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
   const search = useRef({ text: "", time: 0 });
-  const [inputMode, setInputMode] = useState(input);
+  const [inputMode, setInputMode] = useState(input ?? lastInput);
   /** Where the menu is, and the point inside it that it unfolds from (`ox`, `oy`, in px). */
   const [pos, setPos] = useState({ x, y, ox: 0, oy: 0, up: false });
   /** True while the items follow the surface in; afterwards an added item simply appears. */
@@ -172,12 +190,12 @@ export function ContextMenu({ x, y, anchorTop, anchorElement, toggleAnchor = fal
       role={role}
       aria-label={label}
       onPointerDown={event => {
-        if (input !== undefined) setInputMode("pointer");
+        setInputMode("pointer");
         event.stopPropagation();
       }}
       onClick={event => event.stopPropagation()}
       onKeyDown={event => {
-        if (input !== undefined && !["Shift", "Control", "Alt", "Meta"].includes(event.key)) setInputMode("keyboard");
+        if (!MODIFIER_KEYS.has(event.key)) setInputMode("keyboard");
         if (event.defaultPrevented) return;
         if (event.key === "Escape" || event.key === "Tab") {
           if (event.key === "Escape") event.preventDefault();

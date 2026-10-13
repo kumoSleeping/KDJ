@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Select } from "../common/Select";
-import { FolderOpen, LoaderCircle, RefreshCw } from "lucide-react";
+import { FolderOpen, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { motion } from "../../lib/motion";
@@ -10,13 +9,13 @@ import { useAppStore } from "../../stores/appStore";
 import type {
   Account,
   AccountState,
-  BrowserCatalog,
   Platform,
   QrStateValue,
   QrVariant,
 } from "../../types";
 import { Button, InlineNotice } from "../common";
 import { PLATFORM_BRAND, PlatformMark } from "../download/PlatformMark";
+import { BrowserLogin } from "./BrowserLogin";
 
 const POLL_INTERVAL_MS = 1500;
 
@@ -182,19 +181,11 @@ export function AccountRow({
   onToggleSource(): void;
 }) {
   const setAccount = useAppStore((state) => state.setAccount);
-  const refreshAccounts = useAppStore((state) => state.refreshAccounts);
   const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
   const [busy, setBusy] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
-  const [youtubeBusy, setYoutubeBusy] = useState(false);
-  const [webLoginBusy, setWebLoginBusy] = useState(false);
-  const [youtubeLoginOpen, setYoutubeLoginOpen] = useState(false);
-  const [youtubeAdvancedOpen, setYoutubeAdvancedOpen] = useState(false);
-  const [youtubeCatalog, setYoutubeCatalog] = useState<BrowserCatalog | null>(null);
-  const [youtubeBrowser, setYoutubeBrowser] = useState("");
-  const [youtubeProfile, setYoutubeProfile] = useState("");
-  const [youtubeHeaders, setYoutubeHeaders] = useState("");
+  const [browserLoginOpen, setBrowserLoginOpen] = useState(false);
   /** 打开用（安卓可能是 content URI）。 */
   const [savedPath, setSavedPath] = useState("");
   /** 给用户看的路径；没有就退化成 savedPath。 */
@@ -205,7 +196,6 @@ export function AccountRow({
   const [qrOpen, setQrOpen] = useState(false);
   const qrGenerationRef = useRef(0);
   const oauthUnlistenRef = useRef<UnlistenFn | null>(null);
-  const webLoginUnlistenRef = useRef<UnlistenFn | null>(null);
   /** 退出失败就贴在这一行自己底下：状态还写着"已登录"，得说清楚为什么。 */
   const [notice, setNotice] = useState("");
 
@@ -217,12 +207,7 @@ export function AccountRow({
   const soundcloudAccount = account.platform === "soundcloud";
   const browserMobile = ["android", "ios"].includes(String(getBridge().platform));
   const qrInApp = !browserMobile && getBridge().platform !== "browser";
-  const soundcloudWebLoginAvailable =
-    soundcloudAccount && Boolean(getBridge().openSoundcloudWebLogin);
-  const youtubeWebLogin = account.platform === "ytm"
-    ? getBridge().openYtmWebLogin
-    : account.platform === "youtube" ? getBridge().openYoutubeWebLogin : undefined;
-  const ytmWebLoginAvailable = Boolean(youtubeWebLogin);
+  const browserLoginAvailable = (youtubeAccount || soundcloudAccount) && browserAccount && !browserMobile;
   const stateLabel = browserAccount
     ? account.state === "valid"
       ? account.credential_kind === "ytm_oauth"
@@ -247,8 +232,6 @@ export function AccountRow({
       qrGenerationRef.current += 1;
       oauthUnlistenRef.current?.();
       oauthUnlistenRef.current = null;
-      webLoginUnlistenRef.current?.();
-      webLoginUnlistenRef.current = null;
     },
     [],
   );
@@ -478,181 +461,6 @@ export function AccountRow({
   // OAuth / deep-link 登录作为回退。
   const oauthAccount =
     account.login_method === "oauth" || (soundcloudAccount && browserMobile);
-  const selectedYoutubeBrowser = youtubeCatalog?.browsers.find(
-    (browser) => browser.id === youtubeBrowser,
-  );
-  const selectedYoutubeProfile = selectedYoutubeBrowser?.profiles.find(
-    (profile) => profile.id === youtubeProfile,
-  );
-
-  const detectYoutubeBrowsers = async () => {
-    setYoutubeBusy(true);
-    setNotice("");
-    try {
-      const catalog = soundcloudAccount
-        ? await api.soundcloudBrowserCatalog()
-        : account.platform === "ytm"
-          ? await api.ytmBrowserCatalog()
-          : await api.youtubeBrowserCatalog();
-      setYoutubeCatalog(catalog);
-      if (!catalog.supported) {
-        setYoutubeBrowser("");
-        setYoutubeProfile("");
-        setNotice(`移动端无法读取其它应用的浏览器会话，${account.label} 将继续匿名访问。`);
-        return;
-      }
-      const selected =
-        catalog.browsers.find((browser) => browser.id === youtubeBrowser) ?? catalog.browsers[0];
-      setYoutubeBrowser(selected?.id ?? "");
-      setYoutubeProfile(
-        selected?.profiles.some((profile) => profile.id === youtubeProfile)
-          ? youtubeProfile
-          : selected?.profiles[0]?.id ?? "",
-      );
-      if (catalog.browsers.length === 0) {
-        setNotice("没有检测到可读取的浏览器 Profile。");
-      }
-    } catch (error) {
-      setNotice(`检测浏览器失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setYoutubeBusy(false);
-    }
-  };
-
-  const openSoundcloudWebLogin = async () => {
-    if (!sourceEnabled) {
-      setNotice("请先开启 SoundCloud 搜索与下载，再连接账号。");
-      return;
-    }
-    const bridge = getBridge();
-    if (!bridge.openSoundcloudWebLogin) {
-      setNotice("当前系统没有可用的 SoundCloud 登录窗口。");
-      return;
-    }
-    const generation = ++qrGenerationRef.current;
-    setWebLoginBusy(true);
-    setNotice("");
-    try {
-      const unlisten = await listen<SoundCloudOAuthWindowResult>(
-        "soundcloud-web-login://result",
-        (event) => {
-          if (generation !== qrGenerationRef.current) return;
-          webLoginUnlistenRef.current?.();
-          webLoginUnlistenRef.current = null;
-          setWebLoginBusy(false);
-          if (event.payload.status === "done") {
-            setYoutubeLoginOpen(false);
-            void refreshAccounts();
-          } else {
-            setNotice(event.payload.message || "SoundCloud 登录未完成");
-          }
-        },
-      );
-      webLoginUnlistenRef.current = unlisten;
-      await bridge.openSoundcloudWebLogin();
-    } catch (error) {
-      if (generation === qrGenerationRef.current) {
-        webLoginUnlistenRef.current?.();
-        webLoginUnlistenRef.current = null;
-        setWebLoginBusy(false);
-        setNotice(
-          `打开 SoundCloud 登录失败：${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  };
-
-  const openYtmWebLogin = async () => {
-    if (!sourceEnabled) {
-      setNotice(`请先开启 ${account.label} 搜索与下载，再连接账号。`);
-      return;
-    }
-    if (!youtubeWebLogin) {
-      setNotice(`当前系统没有可用的 ${account.label} 登录窗口。`);
-      return;
-    }
-    const generation = ++qrGenerationRef.current;
-    setWebLoginBusy(true);
-    setNotice("");
-    try {
-      const unlisten = await listen<SoundCloudOAuthWindowResult>(
-        account.platform === "ytm" ? "ytm-web-login://result" : "youtube-web-login://result",
-        (event) => {
-          if (generation !== qrGenerationRef.current) return;
-          webLoginUnlistenRef.current?.();
-          webLoginUnlistenRef.current = null;
-          setWebLoginBusy(false);
-          if (event.payload.status === "done") {
-            setYoutubeLoginOpen(false);
-            void refreshAccounts();
-          } else {
-            setNotice(event.payload.message || `${account.label} 登录未完成`);
-          }
-        },
-      );
-      webLoginUnlistenRef.current = unlisten;
-      await youtubeWebLogin();
-    } catch (error) {
-      if (generation === qrGenerationRef.current) {
-        webLoginUnlistenRef.current?.();
-        webLoginUnlistenRef.current = null;
-        setWebLoginBusy(false);
-        setNotice(
-          `打开 ${account.label} 登录失败：${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  };
-
-  const toggleYoutubeLogin = () => {
-    if (youtubeLoginOpen) {
-      setYoutubeLoginOpen(false);
-      return;
-    }
-    setYoutubeLoginOpen(true);
-    if (!youtubeCatalog) void detectYoutubeBrowsers();
-  };
-
-  const importYoutubeBrowser = async () => {
-    if (!youtubeBrowser || !youtubeProfile) return;
-    setYoutubeBusy(true);
-    setNotice("");
-    try {
-      if (soundcloudAccount) {
-        setAccount(await api.soundcloudBrowserLogin(youtubeBrowser, youtubeProfile));
-      } else if (account.platform === "ytm") {
-        setAccount(await api.ytmBrowserLogin(youtubeBrowser, youtubeProfile));
-      } else {
-        setAccount(await api.youtubeBrowserLogin(youtubeBrowser, youtubeProfile));
-      }
-      setYoutubeLoginOpen(false);
-      setYoutubeAdvancedOpen(false);
-    } catch (error) {
-      setNotice(`连接 ${account.label} 浏览器会话失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setYoutubeBusy(false);
-    }
-  };
-
-  const importYoutubeHeaders = async () => {
-    if (!youtubeHeaders.trim()) return;
-    setYoutubeBusy(true);
-    setNotice("");
-    try {
-      if (account.platform === "ytm") {
-        setAccount(await api.ytmHeadersLogin(youtubeHeaders));
-      } else {
-        setAccount(await api.youtubeHeadersLogin(youtubeHeaders));
-      }
-      setYoutubeHeaders("");
-      setYoutubeLoginOpen(false);
-    } catch (error) {
-      setNotice(`导入 ${account.label} 请求头失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setYoutubeBusy(false);
-    }
-  };
-
   useEffect(() => {
     if (!qrOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -723,9 +531,6 @@ export function AccountRow({
                 : (qrState && QR_STATE_TEXT[qrState]) || "等待扫码"}
             </div>
           )}
-          {/* 贴在状态行下面，而不是塞进右边那一列：那一列只有按钮那么宽，
-              一句"退出失败：连接被拒绝"进去就只剩省略号了 */}
-          <InlineNotice text={notice} className="kd-account-notice" onDismiss={() => setNotice("")} />
         </div>
       </div>
       <div
@@ -764,28 +569,21 @@ export function AccountRow({
           </span>
         ) : hasCredential ? (
           <>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>
-              退出
-            </Button>
+            {browserLoginAvailable && <Button size="sm" variant="ghost" onClick={() => setBrowserLoginOpen(open => !open)}>
+              {browserLoginOpen ? "收起" : "重新登录"}
+            </Button>}
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>退出</Button>
           </>
         ) : oauthAccount ? (
           <Button size="sm" variant="ghost" disabled={oauthBusy} onClick={() => void oauthLogin()}>
             {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
-            {oauthBusy ? "等待授权" : "使用 SoundCloud 登录"}
+            {oauthBusy ? "正在登录" : "登录"}
           </Button>
         ) : browserAccount && browserMobile ? (
-          <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
-            匿名可用
-          </span>
+          <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>匿名可用</span>
         ) : browserAccount ? (
-          <Button
-            size="sm"
-            variant={youtubeLoginOpen ? "ghost" : "primary"}
-            disabled={youtubeBusy || webLoginBusy}
-            onClick={toggleYoutubeLogin}
-          >
-            {(youtubeBusy || webLoginBusy) && <LoaderCircle size={13} className="kd-spin" />}
-            {webLoginBusy ? "等待登录" : youtubeLoginOpen ? "取消" : "连接"}
+          <Button size="sm" variant="ghost" onClick={() => setBrowserLoginOpen(open => !open)}>
+            {browserLoginOpen ? "收起" : "登录"}
           </Button>
         ) : qrInApp ? (
           <Button size="sm" variant="ghost" disabled={qrBusy} onClick={() => {
@@ -817,174 +615,13 @@ export function AccountRow({
           </Button>
         )}
       </div>
-      {browserAccount && youtubeLoginOpen && !hasCredential && !browserMobile && (
-        <div
-          style={{
-            gridColumn: "1 / -1",
-            minWidth: 0,
-            display: "grid",
-            gap: "0.3rem",
-            padding: "0 0 0.45rem 2.4rem",
-          }}
-        >
-          {(soundcloudWebLoginAvailable || ytmWebLoginAvailable) && (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "0.35rem",
-                minHeight: "1.8rem",
-              }}
-            >
-              <small className="kd-faint" style={{ minWidth: "5.4rem" }}>
-                WebView 登录
-              </small>
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={webLoginBusy}
-                onClick={() =>
-                  void (ytmWebLoginAvailable ? openYtmWebLogin() : openSoundcloudWebLogin())
-                }
-              >
-                {webLoginBusy && <LoaderCircle size={13} className="kd-spin" />}
-                {webLoginBusy ? "等待登录" : "打开登录窗口"}
-              </Button>
-            </div>
-          )}
-          {youtubeBusy && !youtubeCatalog && (
-            <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
-              正在查找浏览器…
-            </span>
-          )}
-          {youtubeCatalog && youtubeCatalog.browsers.length > 0 && (
-            <>
-              {(soundcloudAccount || ytmWebLoginAvailable) && (
-                <small className="kd-faint" style={{ lineHeight: 1.35 }}>
-                  {ytmWebLoginAvailable ? "其它方式 · 浏览器 Profile" : "直接连接浏览器"}
-                </small>
-              )}
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "minmax(0, 4.8rem) minmax(0, 5.5rem) auto auto",
-                  alignItems: "center",
-                  gap: "0.25rem",
-                  maxWidth: "18rem",
-                }}
-              >
-                <Select
-                  className="kd-account-browser-select"
-                  aria-label="浏览器"
-                  title="浏览器"
-                  value={youtubeBrowser}
-                  disabled={youtubeBusy || webLoginBusy}
-                  onChange={(event) => {
-                    const browser = youtubeCatalog.browsers.find(
-                      (candidate) => candidate.id === event.currentTarget.value,
-                    );
-                    setYoutubeBrowser(event.currentTarget.value);
-                    setYoutubeProfile(browser?.profiles[0]?.id ?? "");
-                  }}
-                >
-                  {youtubeCatalog.browsers.map((browser) => (
-                    <option key={browser.id} value={browser.id}>
-                      {browser.label}
-                    </option>
-                  ))}
-                </Select>
-                <Select
-                  className="kd-account-browser-select"
-                  aria-label="浏览器 Profile"
-                  title="Profile"
-                  value={youtubeProfile}
-                  disabled={youtubeBusy || webLoginBusy}
-                  onChange={(event) => setYoutubeProfile(event.currentTarget.value)}
-                >
-                  {selectedYoutubeBrowser?.profiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.label}
-                    </option>
-                  ))}
-                </Select>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  iconOnly
-                  aria-label="重新检测浏览器"
-                  title="重新检测浏览器"
-                  disabled={youtubeBusy || webLoginBusy}
-                  onClick={() => void detectYoutubeBrowsers()}
-                >
-                  <RefreshCw size={13} />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={
-                    youtubeBusy || webLoginBusy || !youtubeBrowser || !youtubeProfile
-                  }
-                  onClick={() => void importYoutubeBrowser()}
-                >
-                  {youtubeBusy && <LoaderCircle size={13} className="kd-spin" />}
-                  {soundcloudAccount ? "尝试连接" : "连接"}
-                </Button>
-              </div>
-              <small className="kd-faint" style={{ lineHeight: 1.35 }}>
-                {soundcloudAccount
-                  ? "读取所选 Profile 的 SoundCloud 登录状态，不读取密码。"
-                  : `只连接 ${account.label}；不会改变另一个 YouTube 来源的登录状态。`}
-              </small>
-              {selectedYoutubeProfile?.requires_elevation && (
-                <small style={{ color: "var(--kd-warn)", lineHeight: 1.35 }}>
-                  此 Windows Profile 使用应用绑定加密；请以管理员运行，或改用 Firefox。
-                </small>
-              )}
-            </>
-          )}
-          {youtubeAccount && (
-            <div>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={youtubeBusy}
-                onClick={() => setYoutubeAdvancedOpen((open) => !open)}
-              >
-                {youtubeAdvancedOpen ? "收起请求头导入" : "手动导入请求头…"}
-              </Button>
-            </div>
-          )}
-          {youtubeAccount && youtubeAdvancedOpen && (
-            <div style={{ display: "grid", gap: "0.25rem" }}>
-              <textarea
-                className="kd-textarea"
-                value={youtubeHeaders}
-                disabled={youtubeBusy}
-                rows={4}
-                aria-label={`${account.label} 请求头`}
-                placeholder={
-                  account.platform === "ytm"
-                    ? "粘贴 music.youtube.com 的 browse 请求头"
-                    : "粘贴 www.youtube.com 的 browse 请求头"
-                }
-                onChange={(event) => setYoutubeHeaders(event.target.value)}
-                style={{ width: "100%", fontSize: "var(--kd-size-xs)" }}
-              />
-              <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={youtubeBusy || !youtubeHeaders.trim()}
-                  onClick={() => void importYoutubeHeaders()}
-                >
-                  {youtubeBusy && <LoaderCircle size={13} className="kd-spin" />}
-                  导入
-                </Button>
-              </div>
-            </div>
-          )}
+      {notice && (
+        <div style={{ gridColumn: "1 / -1", minWidth: 0, paddingLeft: "2.4rem" }}>
+          <InlineNotice text={notice} className="kd-account-notice" onDismiss={() => setNotice("")} />
         </div>
       )}
+      {browserLoginAvailable && browserLoginOpen && <BrowserLogin account={account} sourceEnabled={sourceEnabled}
+        onDone={() => setBrowserLoginOpen(false)} />}
     </div>
     {qrInApp && qrOpen && createPortal(
       <div className="kd-login-qr-backdrop" {...motion("fade")} onClick={() => setQrOpen(false)}>

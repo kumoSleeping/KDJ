@@ -11,9 +11,9 @@ import { useWindowTaken } from "./windowTaken";
  * they are; the window's frame is the native side's (src-tauri/src/mini_player.rs) and what is
  * drawn, and in which order, is decided here.
  *
- * Down: the whole window is gone at once, and the mini player pops out of the nearest corner
- * of its screen at the place the listener last left it at. Back: it goes into that corner
- * again, and the whole window fades in as it was. The pop and the fade are the window's own
+ * Down: the whole window fades out where it is, and the mini player pops out of the nearest
+ * corner of its screen at the place the listener last left it at. Back: it goes into that
+ * corner again, and the whole window fades in as it was. The pop and the fade are the window's own
  * (the native side's); nothing flies from one place to another and nothing else is seen to
  * move.
  *
@@ -49,7 +49,7 @@ const BAR_FRAMES = 6;
 /** How long the page may take to learn the window's new size, in ms. */
 const RESIZE_WAIT_MS = 700;
 
-export const useMiniPlayer = create<{ phase: MiniPlayerPhase; onTop: boolean }>(() => ({ phase: "off", onTop: true }));
+export const useMiniPlayer = create<{ phase: MiniPlayerPhase }>(() => ({ phase: "off" }));
 
 /** Only the desktop's main window can become one. */
 export function miniPlayerOffered(): boolean {
@@ -104,6 +104,13 @@ async function drawnFor(width: number, height: number): Promise<void> {
   await drawn();
 }
 
+/**
+ * Whether the bubble is still moving into place. An endless animation (the song's colour drifting
+ * behind it, a cover's loading pulse) is not an arrival and is not waited for: it never ends.
+ */
+const arriving = (bubble: HTMLElement): boolean => bubble.getAnimations({ subtree: true })
+  .some(animation => animation.playState === "running" && animation.effect?.getComputedTiming().iterations !== Infinity);
+
 /** The bubble once it is the transport (the bar has been sent away), or as it is if it never is. */
 /** The playing song's bubble slot, raised if it is down, once its arrival is over. */
 async function bubbleSlot(): Promise<HTMLElement | null> {
@@ -111,8 +118,7 @@ async function bubbleSlot(): Promise<HTMLElement | null> {
   if (!nowPlayingInfoVisible(info)) info.toggle();
   for (let waited = 0; waited < READY_FRAMES * 4; waited += 1) {
     const bubble = document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE);
-    if (bubble?.parentElement && bubble.getAttribute("data-phase") === "in"
-      && !bubble.getAnimations({ subtree: true }).some(animation => animation.playState === "running")) return bubble.parentElement;
+    if (bubble?.parentElement && bubble.getAttribute("data-phase") === "in" && !arriving(bubble)) return bubble.parentElement;
     await frame();
   }
   return document.querySelector<HTMLElement>(MINI_PLAYER_BUBBLE)?.parentElement ?? null;
@@ -181,15 +187,17 @@ export async function collapseToMiniPlayer(): Promise<void> {
     const box = slot.getBoundingClientRect();
     whole = { width: window.innerWidth, height: window.innerHeight };
     const marks = [performance.now()];
-    // The whole window is gone at once, as it is: nothing in it has moved, and it keeps its size.
-    const state = await bridge.collapse({ x: box.left, y: box.top, width: box.width, height: box.height }, animated);
+    // The whole window fades out where it is: nothing in it has moved, and it keeps its size.
+    await bridge.collapse({ x: box.left, y: box.top, width: box.width, height: box.height }, animated);
     marks.push(performance.now());
-    useMiniPlayer.setState({ onTop: state.onTop });
     // Out of sight, and before the window is any smaller: the page keeps the whole window's
     // layout, the bar goes, and the bubble is the transport, as wide as it stood.
     keepLayout(whole, box.width);
     useWindowTaken.getState().take(MINI_PLAYER, () => { void expandFromMiniPlayer(); });
     setPhase("on");
+    // The bar goes away out of sight, as it does on the way back: its slide is ended here, so it
+    // is not seen sliding down as the mini player pops out.
+    await barAtRest();
     const bubble = await transportBubble();
     if (!bubble) throw new Error("no playing song to show");
     // The window takes the bubble's size, which is known before it has it.
@@ -248,14 +256,6 @@ export async function expandFromMiniPlayer(): Promise<void> {
   }
 }
 
-export async function setMiniPlayerOnTop(onTop: boolean): Promise<void> {
-  const bridge = window.kdj?.miniPlayer;
-  if (!bridge) return;
-  useMiniPlayer.setState({ onTop });
-  const state = await bridge.setOnTop(onTop).catch(() => null);
-  if (state) useMiniPlayer.setState({ onTop: state.onTop });
-}
-
 /**
  * What the native side says at launch. A page that was loaded again while its window was the
  * mini player (a reload) takes up where the window is.
@@ -263,7 +263,6 @@ export async function setMiniPlayerOnTop(onTop: boolean): Promise<void> {
 export async function syncMiniPlayer(): Promise<void> {
   const state = await window.kdj?.miniPlayer?.state().catch(() => null);
   if (!state) return;
-  useMiniPlayer.setState({ onTop: state.onTop });
   if (!state.active || switching || useMiniPlayer.getState().phase !== "off") return;
   if (state.fullWidth && state.fullHeight) {
     whole = { width: state.fullWidth, height: state.fullHeight };

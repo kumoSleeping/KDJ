@@ -3148,8 +3148,7 @@ pub fn run() {
         mini_player::mini_player_collapse,
         mini_player::mini_player_reveal,
         mini_player::mini_player_expand,
-        mini_player::mini_player_fit,
-        mini_player::mini_player_set_on_top
+        mini_player::mini_player_fit
     ]);
     #[cfg(all(mobile, target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![

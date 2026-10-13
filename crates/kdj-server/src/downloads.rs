@@ -2024,6 +2024,22 @@ impl DownloadManager {
         updated.len()
     }
 
+    /// Explicit removal is durable before it becomes visible; never touch downloaded files.
+    pub fn clear_task(&self, id: &str) -> Result<()> {
+        {
+            let mut entries = self.entries.lock().unwrap();
+            let Some(entry) = entries.remove(id) else { return Ok(()) };
+            if let Err(error) = self.persist_locked(&entries) {
+                entries.insert(id.to_owned(), entry);
+                return Err(error);
+            }
+            entry.cancel.cancel();
+            // Late worker updates cannot resurrect a removed entry.
+        }
+        self.broadcast_list();
+        Ok(())
+    }
+
     /// 只移除一条已结束任务。用于清理某次导出记录，不能误伤同队列中的其他任务。
     pub fn remove_finished(&self, id: &str) -> Option<DownloadTask> {
         let removed = {

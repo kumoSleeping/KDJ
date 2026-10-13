@@ -59,7 +59,7 @@ export function useWorkshopExportCovers(project: CompositionProject | undefined,
     layers.flatMap((layer) => layer.clips).map((clip) => `${clip.source_id}@${clip.source_in_ms}`).join(","),
   ].join("|"), [sources, layers]);
   const revision = useTrackRevisions([job?.track_id, ...(sources ?? []).map((source) => source.track_id)]);
-  return useMemo(() => taskCoverStack(workshopExportCovers(project, job, appCoverAddresses)),
+  return useMemo(() => ({ covers: workshopExportCovers(project, job, appCoverAddresses), more: 0 }),
     [project?.id, shape, job?.track_id, revision]);
 }
 

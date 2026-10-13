@@ -47,6 +47,19 @@ export function usePlayerShortcuts(handlers: PlayerShortcutHandlers): void {
   arrowKeyPrefsRef.current = arrowKeyPrefs;
 
   useEffect(() => {
+    // Windows keeps a clicked button focused. A later transport shortcut can make
+    // that old mouse focus visible; release it only when we actually consume Space.
+    // Tab navigation and focus moved by a dialog/menu must keep their focus cue.
+    let pointerButton: HTMLButtonElement | null = null;
+    const onPointerDown = (event: PointerEvent) => {
+      pointerButton = (event.target as Element | null)?.closest?.("button") ?? null;
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (event.target !== pointerButton) pointerButton = null;
+    };
+    const onNavigationKey = (event: KeyboardEvent) => {
+      if (event.key === "Tab") pointerButton = null;
+    };
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -62,6 +75,10 @@ export function usePlayerShortcuts(handlers: PlayerShortcutHandlers): void {
 
       if (key === " " || key === "Spacebar" || code === "Space" || key === "MediaPlayPause") {
         event.preventDefault();
+        if (key !== "MediaPlayPause" && pointerButton === document.activeElement) {
+          pointerButton?.blur();
+          pointerButton = null;
+        }
         if (event.repeat) return;
         api.togglePlay(key === "MediaPlayPause" ? "media-key" : undefined);
         return;
@@ -110,7 +127,15 @@ export function usePlayerShortcuts(handlers: PlayerShortcutHandlers): void {
       }
     };
 
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("focusin", onFocusIn, true);
+    window.addEventListener("keydown", onNavigationKey, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("focusin", onFocusIn, true);
+      window.removeEventListener("keydown", onNavigationKey, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, []);
 }

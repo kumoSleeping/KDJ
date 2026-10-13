@@ -4,11 +4,11 @@ On a wide window everything that used to take the right column — lyrics, downl
 settings, the visualizer configuration, the Meta editor, search tips, duplicate analysis, a
 network-video preview — is an **app of one drawer**.
 
-The drawer is a **floating panel** with two parts:
+The drawer is a **floating panel** opened by controls elsewhere in the window:
 
-- **The entries** are icons at the right end of the aggregate search's row and are always there
-  and always usable (下载, 歌词, 设置 — `DrawerEntry`; icons only, no words). The open app's icon
-  is written in full-strength text colour, the others muted.
+- **The entries** for downloads and settings live in the top window chrome at every width.
+  Lyrics use the existing player controls. The aggregate search row has no drawer entry
+  buttons or reserved space for them and uses the full available width.
 - **The panel** slides in from the right over the list, below that row, and rests free of
   every edge, with a gap all round, rounded corners, a hairline edge and a soft shadow — the same
   floating surface as a task bubble or a menu (`--kd-float-edge`, `--kd-float-shadow`). It is the
@@ -37,11 +37,11 @@ Code: `src/components/drawer/` (`drawerSchema.ts`, `Drawer.tsx`, `TitleTabs.tsx`
   switches lyrics off. The phone's shared lyrics/downloads sheet also omits unavailable lyrics.
 - **An app never draws its own shell.** No head, no close button, no frame, no background, no
   entrance or exit motion. It supplies a `DrawerSpec` and a body; `DrawerHost` draws the rest.
-- **Opened from an entry or from elsewhere.** An app that people open by hand has an entry beside
-  the search (`useDrawerEntries`): clicking it opens the app, clicking the open app's entry closes
-  it (as do the roll-up button and Esc). An app that is only opened from elsewhere — a row's
-  menu, a button on the picture — has no entry and comes down as the same panel. Do not add a second button for an app that has
-  an entry (the window chrome keeps 下载 and 设置 only where there is no drawer, on a phone).
+- **Opened from the chrome or from elsewhere.** Downloads and settings use the window chrome;
+  lyrics use the player controls. Clicking an open app's toggle closes it (as do the roll-up
+  button and Esc). Other apps open from their relevant controls, such as a row's menu or a
+  button on the picture, and come down as the same panel. Do not add duplicate entries beside
+  the search.
 - **How far it comes down** is the spec's `extent`, measured from under the search row to the
   bottom of the list, less the gap (never lower than a bottom task bubble that is kept up,
   `--kd-info-lift`):

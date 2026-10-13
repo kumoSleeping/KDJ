@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { AudioLines, Layers2, ListMusic, Music2, Video, type LucideIcon } from "lucide-react";
 import { useCoverLoad } from "../../lib/coverLoad";
 import type { TaskCoverKind } from "../../lib/taskCovers";
@@ -47,6 +47,8 @@ export interface TaskCoverProps {
   /** The addresses are still being worked out: keep the plain tile instead of the glyph. */
   pending?: boolean;
   className?: string;
+  stackIndex?: number;
+  onFaceChange?(owner: string | number, face: "image" | "loading" | "missing"): void;
 }
 
 /**
@@ -54,14 +56,15 @@ export interface TaskCoverProps {
  * that arrives late moves nothing. Until one has loaded the box is a plain tinted tile; when none
  * can be shown it carries the glyph of its kind.
  */
-export const TaskCover = memo(function TaskCover({ urls, owner = "", kind = "song", pending = false, className = "" }: TaskCoverProps) {
+export const TaskCover = memo(function TaskCover({ urls, owner = "", kind = "song", pending = false, className = "", stackIndex, onFaceChange }: TaskCoverProps) {
   const host = useRef<HTMLSpanElement>(null);
   const near = useNearViewport(host);
   const load = useCoverLoad(owner, near && !pending ? urls : NO_URLS);
   const face = pending || !near ? "loading" : load.face;
   const Glyph = GLYPHS[kind];
+  useEffect(() => { onFaceChange?.(owner, face); }, [onFaceChange, owner, face]);
   return (
-    <span ref={host} className={`kd-task-cover ${className}`.trim()} data-face={face} data-kind={kind} aria-hidden="true">
+    <span ref={host} className={`kd-task-cover ${className}`.trim()} data-face={face} data-kind={kind} data-stack-index={stackIndex} aria-hidden="true">
       {face === "missing" && <Glyph className="kd-task-cover-glyph" strokeWidth={1.6} />}
       {load.src && (
         <img
@@ -79,11 +82,11 @@ export const TaskCover = memo(function TaskCover({ urls, owner = "", kind = "son
     </span>
   );
 }, (before, after) => before.owner === after.owner && before.kind === after.kind && before.pending === after.pending
-  && before.className === after.className
+  && before.className === after.className && before.stackIndex === after.stackIndex && before.onFaceChange === after.onFaceChange
   && (before.urls === after.urls || before.urls.join("\n") === after.urls.join("\n")));
 
 export interface TaskCoverStackProps {
-  /** One list of addresses per picture, front first: `taskCoverStack(...).covers`. */
+  /** Candidate pictures, front first. Failed candidates are skipped until three load. */
   covers: readonly (readonly string[])[];
   /** How many more tasks the batch has than pictures shown: `taskCoverStack(...).more`. */
   more?: number;
@@ -100,19 +103,31 @@ export interface TaskCoverStackProps {
 }
 
 /**
- * Up to three overlapped covers for a batch of tasks. With one picture or none it is exactly a
- * `TaskCover`, so a list can use it for every row of a kind that may be a batch.
+ * Up to three successfully loaded pictures. Missing sources never become stacked placeholders;
+ * the reserved box keeps row text aligned while pictures are loading or when none exist.
  */
 export const TaskCoverStack = memo(function TaskCoverStack({ covers, more = 0, owner = "", kind = "song", pending = false, layout = "fan", className = "" }: TaskCoverStackProps) {
-  const shown = covers.slice(0, 3);
-  const extra = more + covers.length - shown.length;
-  if (shown.length <= 1 && extra <= 0) {
-    return <TaskCover urls={shown[0] ?? NO_URLS} owner={owner} kind={kind} pending={pending} className={className} />;
+  const [faces, setFaces] = useState<Record<string, string>>({});
+  const report = useCallback((key: string | number, face: "image" | "loading" | "missing") => {
+    setFaces(previous => previous[key] === face ? previous : { ...previous, [key]: face });
+  }, []);
+  // A missing library cover still has a URL. Only successful loads earn a stack position.
+  // Probe at most three unresolved pictures at once, advancing past failures to later sources.
+  const candidates = covers.filter(urls => urls.some(url => url.trim()));
+  const shown: { urls: readonly string[]; key: string; slot: number }[] = [];
+  let unresolved = 0, count = 0;
+  for (const urls of candidates) {
+    if (unresolved >= 3) break;
+    const key = JSON.stringify([owner, urls]);
+    const face = faces[key];
+    if (face !== "missing") unresolved++;
+    shown.push({ urls, key, slot: face === "image" ? count++ : -1 });
   }
+  const extra = count > 1 ? more : 0;
   return (
-    <span className={`kd-task-cover-stack ${className}`.trim()} data-layout={layout} data-count={shown.length} aria-hidden="true">
-      {shown.map((urls, index) => (
-        <TaskCover key={index} urls={urls} owner={`${owner}:${index}`} kind={kind} pending={pending} />
+    <span className={`kd-task-cover-stack ${className}`.trim()} data-layout={layout} data-count={count} aria-hidden="true">
+      {shown.map(({ urls, key, slot }) => (
+        <TaskCover key={key} urls={urls} owner={key} kind={kind} pending={pending} stackIndex={slot} onFaceChange={report} />
       ))}
       {extra > 0 && <span className="kd-task-cover-more">+{extra > 99 ? "99" : extra}</span>}
     </span>

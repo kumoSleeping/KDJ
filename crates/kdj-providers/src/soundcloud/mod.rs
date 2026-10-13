@@ -8,5 +8,6 @@
 //! SoundCloud 使用 OAuth 2.1 + PKCE 登录，公开搜索仍可在未登录时使用。
 
 pub mod provider;
+mod headers;
 
 pub use provider::{OAuthStatus, SoundCloudProvider};
