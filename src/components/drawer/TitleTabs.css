@@ -33,10 +33,28 @@
 .kd-title-tabs-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The page words keep their room whatever stands beside them. */
 .kd-title-tabs-list {
+  position: relative;
   display: flex;
   align-items: baseline;
   gap: 0.85rem;
   flex: none;
+  /* TitleTabs.tsx sets --kd-tabs-carry when there are more words than room: the page in view is
+     carried to the middle. */
+  transform: translateX(var(--kd-tabs-carry, 0px));
+  transition: transform 300ms cubic-bezier(0.22, 0.9, 0.26, 1);
+}
+/* What lies beyond an edge of the row fades there, so that it is known to be reachable. */
+.kd-title-tabs-text[data-fade="left"] {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 1.4rem);
+  mask-image: linear-gradient(to right, transparent 0, #000 1.4rem);
+}
+.kd-title-tabs-text[data-fade="right"] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 1.4rem), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 1.4rem), transparent 100%);
+}
+.kd-title-tabs-text[data-fade="both"] {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 1.4rem, #000 calc(100% - 1.4rem), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 1.4rem, #000 calc(100% - 1.4rem), transparent 100%);
 }
 /* A quiet word is a real smaller word, so the row is evenly spaced whichever page is in view;
    only this one short row is laid out again while a switch plays. */
@@ -88,5 +106,5 @@
 .kd-title-tabs-tools > button[aria-pressed="true"] { color: var(--kd-text); }
 .kd-title-tabs-tools > button:disabled { opacity: 0.4; cursor: default; }
 @media (prefers-reduced-motion: reduce) {
-  .kd-title-tabs-list > button { transition: none; }
+  .kd-title-tabs-list > button, .kd-title-tabs-list { transition: none; }
 }

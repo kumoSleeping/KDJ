@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import "./TitleTabs.css";
 
 export interface TitleTab<T extends string = string> {
@@ -27,6 +27,31 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
   children?: ReactNode;
 }) {
   const list = useRef<HTMLDivElement>(null);
+  const view = useRef<HTMLDivElement>(null);
+  // More page words than the row has room for: the row is carried so that the page in view
+  // stands in the middle, and what lies beyond an edge fades out there. Choosing a word to the
+  // right brings the ones after it into reach.
+  const [carry, setCarry] = useState({ x: 0, left: false, right: false });
+  useEffect(() => {
+    const frame = view.current, row = list.current;
+    if (!frame || !row) return;
+    const place = () => {
+      const room = frame.clientWidth, full = row.offsetWidth;
+      const word = row.querySelector<HTMLElement>('[aria-selected="true"]');
+      const next = !word || full <= room ? { x: 0, left: false, right: false } : (() => {
+        const middle = word.offsetLeft + word.offsetWidth / 2;
+        const x = Math.round(Math.min(Math.max(middle - room / 2, 0), full - room));
+        return { x, left: x > 0, right: x < full - room };
+      })();
+      setCarry(now => now.x === next.x && now.left === next.left && now.right === next.right ? now : next);
+    };
+    place();
+    // The word in view grows while the switch plays: place the row again once it has.
+    const settle = window.setTimeout(place, 340);
+    const watch = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    watch?.observe(frame);
+    return () => { window.clearTimeout(settle); watch?.disconnect(); };
+  }, [value, tabs]);
   const pick = (id: T) => { if (id !== value) onChange?.(id); };
   const move = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!tabs?.length || event.altKey || event.ctrlKey || event.metaKey) return;
@@ -41,8 +66,10 @@ export function TitleTabs<T extends string>({ label, title, tabs, value, onChang
     list.current?.querySelector<HTMLElement>(`[data-tab="${target.id}"]`)?.focus({ preventScroll: true });
   };
   return <header className="kd-title-tabs">
-    <div className="kd-title-tabs-text">
-      {tabs?.length ? <div ref={list} className="kd-title-tabs-list" role="tablist" aria-label={label} onKeyDown={move}>
+    <div ref={view} className="kd-title-tabs-text"
+      data-fade={carry.left && carry.right ? "both" : carry.left ? "left" : carry.right ? "right" : undefined}>
+      {tabs?.length ? <div ref={list} className="kd-title-tabs-list" role="tablist" aria-label={label} onKeyDown={move}
+        style={{ "--kd-tabs-carry": `${-carry.x}px` } as CSSProperties}>
         {tabs.map(tab => <button key={tab.id} type="button" role="tab" data-tab={tab.id}
           aria-selected={tab.id === value} aria-controls={panelId} aria-label={tab.title} title={tab.title}
           tabIndex={tab.id === value ? 0 : -1}
