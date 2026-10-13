@@ -50,6 +50,15 @@ impl LoginTrace {
             "Chrome" | "chrome" => "chrome",
             "Edge" | "edge" => "edge",
             "Arc" | "arc" => "arc",
+            "firefox" => "firefox",
+            "zen" => "zen",
+            "librewolf" => "librewolf",
+            "brave" => "brave",
+            "chromium" => "chromium",
+            "vivaldi" => "vivaldi",
+            "opera" => "opera",
+            "opera_gx" => "opera_gx",
+            "safari" => "safari",
             _ => "other",
         };
         tracing::info!(target: "kdj::login", attempt_id = %self.id, browser, "login browser");

@@ -58,6 +58,8 @@ impl LoginSite {
 
 struct Browser {
     label: String,
+    /// The vendor it is known as, for the trace; an installation's label is the user's data.
+    adapter: Option<String>,
     executable: PathBuf,
     gecko: bool,
 }
@@ -76,6 +78,7 @@ fn installed_browser(id: &str) -> Option<Browser> {
         })?;
     installation.window_supported.then(|| Browser {
         label: installation.label.clone(),
+        adapter: installation.adapter_id.clone(),
         executable: installation.executable.clone(),
         gecko: installation.engine == Some(super::discovery::BrowserEngine::Gecko),
     })
@@ -438,7 +441,7 @@ where F: FnMut(AuthorizedSession) -> Fut, Fut: std::future::Future<Output = Resu
         bail!("当前系统不支持此浏览器登录");
     }
     let browser = installed_browser(browser_id).context("这个浏览器不能打开登录窗口")?;
-    trace.browser(&browser.label);
+    trace.browser(browser.adapter.as_deref().unwrap_or("other"));
     open_window(&browser, LoginSite::Soundcloud, trace, |cookies, _| {
         let session = cookie_from_response(&cookies).map(|mut session| {
             session.imported_from = format!("{} · 新窗口", browser.label);
@@ -472,7 +475,7 @@ where F: FnMut(BrowserSession) -> Fut, Fut: std::future::Future<Output = Result<
         bail!("当前系统不支持此浏览器登录");
     }
     let browser = installed_browser(browser_id).context("这个浏览器不能打开登录窗口")?;
-    trace.browser(&browser.label);
+    trace.browser(browser.adapter.as_deref().unwrap_or("other"));
     open_window(&browser, site, trace, |cookies, metadata| {
         let session = youtube_session(&cookies, &metadata,
             format!("{} · 新窗口", browser.label), site);

@@ -95,9 +95,30 @@ async fn executable(browser: &Browser) -> Result<PathBuf> {
         );
         Ok(browser.executable.join("Contents/MacOS").join(name))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        Ok(plain_path(&browser.executable))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Ok(browser.executable.clone())
+    }
+}
+
+/// Discovery keeps canonical paths, and on Windows a canonical path carries the `\\?\` prefix.
+/// A browser started under that name does not come up (it resolves its own files from the path
+/// it was started with), so it is started under the ordinary spelling of the same path.
+#[cfg(any(windows, test))]
+fn plain_path(path: &std::path::Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_owned();
+    };
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{share}"))
+    } else if let Some(local) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(local)
+    } else {
+        path.to_owned()
     }
 }
 
@@ -130,6 +151,11 @@ async fn launch(browser: &Browser, gecko: bool, headless: bool) -> Result<(Sessi
                 "user_pref(\"zen.welcome-screen.seen\", true);\n",
             ),
         )?;
+        // On Windows the program started is Firefox's launcher, which leaves once the browser is
+        // up unless it is told to stay; the window is watched through this process.
+        if cfg!(windows) {
+            command.arg("-wait-for-browser");
+        }
         command
             .args(["--no-remote", "--profile"])
             .arg(profile.path())
@@ -200,7 +226,12 @@ async fn launch(browser: &Browser, gecko: bool, headless: bool) -> Result<(Sessi
             .join("DevToolsActivePort");
         timeout(Duration::from_secs(30), async {
             loop {
-                anyhow::ensure!(child.try_wait()?.is_none(), "浏览器登录窗口已关闭");
+                if let Some(status) = child.try_wait()? {
+                    // The number alone: it tells a refusal to start from a window the user closed.
+                    tracing::warn!(target: "kdj::login", exit_code = ?status.code(),
+                        "login browser left before its window was ready");
+                    bail!("浏览器登录窗口已关闭");
+                }
                 if let Ok(file) = tokio::fs::File::open(&path).await {
                     let mut text = String::new();
                     file.take(4097).read_to_string(&mut text).await?;
@@ -461,6 +492,17 @@ mod tests {
         .await
         .expect("temporary profile cleaned after process exit");
     }
+    #[test]
+    fn windows_canonical_paths_are_started_under_their_ordinary_spelling() {
+        for (canonical, plain) in [
+            (r"\\?\C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+            (r"\\?\UNC\server\share\browser.exe", r"\\server\share\browser.exe"),
+            (r"C:\Browser\browser.exe", r"C:\Browser\browser.exe"),
+        ] {
+            assert_eq!(plain_path(std::path::Path::new(canonical)), PathBuf::from(plain));
+        }
+    }
+
     #[test]
     fn endpoint_only_accepts_browser_loopback_announcement() {
         assert_eq!(
