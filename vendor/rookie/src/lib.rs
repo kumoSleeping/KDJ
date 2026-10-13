@@ -7,6 +7,7 @@ mod profile;
 mod utils;
 pub use common::enums;
 pub use profile::{browser_profile_cookies, browser_profiles, BrowserProfile};
+pub use profile::{mozilla_profiles_from_roots, mozilla_profile_cookies};
 
 // Browser
 #[cfg(all(target_os = "windows", feature = "internet-explorer"))]

@@ -209,6 +209,13 @@ impl YoutubeClient {
         body
     }
 
+    /// Same selected browser account as the library check; an anonymous menu is not proof
+    /// of login. The provider parses only activeAccountHeaderRenderer from this response.
+    pub async fn account_menu(&self, session: &BrowserSession) -> Result<Value> {
+        self.post_web_with_headers("account/account_menu", &Self::web_context(),
+            session.request_headers("https://www.youtube.com")).await
+    }
+
     /// 账号侧栏真正依赖的私人播放列表目录；它本身就是这份会话能力的判据。
     pub async fn account_playlist_directory(&self) -> Result<Value> {
         let body = self.post_web("browse", &Self::account_playlist_directory_body()).await?;

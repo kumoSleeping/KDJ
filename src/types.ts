@@ -220,7 +220,7 @@ export interface BrowserCatalog {
   supported: boolean;
   platform: string;
   browsers: BrowserOption[];
-  authorization_browsers?: { id: string; label: string; method?: "remote_debugging" | "system_automation" }[];
+  authorization_browsers?: { id: string; label: string; method?: "remote_debugging" | "system_automation" | "gecko_rdp" | "isolated_window" | "profile_confirmation"; profiles?: { id: string; label: string; requires_elevation: boolean }[] }[];
   installed_browsers?: {
     id: string;
     label: string;

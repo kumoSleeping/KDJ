@@ -5,6 +5,7 @@
 //! 播放器也要靠 Range 请求才能拖进度条。
 
 pub mod activity_log;
+mod browser_login;
 pub mod diagnostics;
 pub mod aggregate;
 pub mod cache_overview;

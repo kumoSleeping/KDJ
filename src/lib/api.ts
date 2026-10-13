@@ -874,24 +874,27 @@ export const api = {
     post<{ code: string; expires_in: number }>("/accounts/soundcloud/login/extension"),
   soundcloudBrowserLogin: (browser: string, profile?: string) =>
     post<Account>("/accounts/soundcloud/login/browser", { browser, profile }),
-  soundcloudBrowserAuthorize: (browser: string) =>
-    post<Account>("/accounts/soundcloud/login/browser/authorize", { browser }),
+  soundcloudBrowserAuthorize: (browser: string, request_id: string, profile?: string, profile_read_confirmed = false, new_window = false) =>
+    post<Account>("/accounts/soundcloud/login/browser/authorize", { browser, request_id, profile, profile_read_confirmed, new_window }),
   soundcloudHeadersLogin: (headers: string) =>
     post<Account>("/accounts/soundcloud/login/headers", { headers }),
   ytmBrowserCatalog: () =>
     request<BrowserCatalog>("/accounts/ytm/login/browsers"),
   ytmBrowserLogin: (browser: string, profile?: string) =>
     post<Account>("/accounts/ytm/login/browser", { browser, profile }),
-  ytmBrowserAuthorize: (browser: string) =>
-    post<Account>("/accounts/ytm/login/browser/authorize", { browser }),
+  ytmBrowserAuthorize: (browser: string, request_id: string, profile?: string, profile_read_confirmed = false, new_window = false) =>
+    post<Account>("/accounts/ytm/login/browser/authorize", { browser, request_id, profile, profile_read_confirmed, new_window }),
   ytmHeadersLogin: (headers: string) =>
     post<Account>("/accounts/ytm/login/headers", { headers }),
   youtubeBrowserCatalog: () =>
     request<BrowserCatalog>("/accounts/youtube/login/browsers"),
   youtubeBrowserLogin: (browser: string, profile?: string) =>
     post<Account>("/accounts/youtube/login/browser", { browser, profile }),
-  youtubeBrowserAuthorize: (browser: string) =>
-    post<Account>("/accounts/youtube/login/browser/authorize", { browser }),
+  youtubeBrowserAuthorize: (browser: string, request_id: string, profile?: string, profile_read_confirmed = false, new_window = false) =>
+    post<Account>("/accounts/youtube/login/browser/authorize", { browser, request_id, profile, profile_read_confirmed, new_window }),
+  cancelBrowserLogin: (request_id: string) => request("/accounts/browser/login/cancel", {
+    method: "POST", body: JSON.stringify({ request_id }), keepalive: true,
+  }),
   youtubeHeadersLogin: (headers: string) =>
     post<Account>("/accounts/youtube/login/headers", { headers }),
 

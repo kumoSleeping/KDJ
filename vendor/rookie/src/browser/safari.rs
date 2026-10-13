@@ -1,6 +1,6 @@
 use crate::common::{date, enums::*};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use eyre::{anyhow, bail, Context, Result};
+use eyre::{anyhow, bail, Result};
 use std::{fs::File, io::Read, path::PathBuf, vec::Vec};
 
 /// 1. open cookies file
@@ -10,19 +10,15 @@ use std::{fs::File, io::Read, path::PathBuf, vec::Vec};
 /// 5. parse each cookie
 /// 6. add each cookie based on domain filter
 pub fn safari_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-    let mut file = File::open(&db_path).context(format!(
-        "Failed to open {}\n\
-      Make sure you have full disk access for the current process.\n\
-      For example, in VSCode or Terminal:\n\
-      1. Open Settings\n\
-      2. Privacy & Security\n\
-      3. Full Disk Access\n\
-      ---\n\
-      You can also open the disk access page with: \n\
-      open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n\
-      ",
-        db_path.display()
-    ))?;
+    let mut file = File::open(&db_path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::PermissionDenied => anyhow!(
+            "macOS 拒绝访问 Safari 登录数据；请在系统设置「隐私与安全性 → 完全磁盘访问权限」中允许当前运行的 KDJ（开发版可能需要允许启动它的终端），重启后再试"
+        ),
+        std::io::ErrorKind::NotFound => anyhow!(
+            "Safari 登录数据文件不存在；请先在 Safari 打开目标网站并登录后重试"
+        ),
+        _ => anyhow!("无法打开 Safari 登录数据（系统错误 {}）", error.raw_os_error().map_or_else(|| "未知".into(), |code| code.to_string())),
+    })?;
     let mut bs: Vec<u8> = Vec::new();
     file.read_to_end(&mut bs)?;
     let cookies = parse_content(&bs)?;

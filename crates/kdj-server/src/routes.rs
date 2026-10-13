@@ -109,6 +109,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             post(youtube_browser_login),
         )
         .route("/api/accounts/youtube/login/browser/authorize", post(youtube_browser_authorize))
+        .route("/api/accounts/browser/login/cancel", post(cancel_browser_login))
         .route(
             "/api/accounts/youtube/login/headers",
             post(youtube_headers_login),
@@ -740,7 +741,13 @@ async fn soundcloud_oauth_callback(
 struct BrowserLoginBody {
     browser: String,
     #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
     profile: Option<String>,
+    #[serde(default)]
+    profile_read_confirmed: bool,
+    #[serde(default)]
+    new_window: bool,
 }
 
 #[derive(Deserialize)]
@@ -788,7 +795,7 @@ async fn soundcloud_browser_authorize(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<BrowserLoginBody>,
 ) -> ApiResult<Json<Account>> {
-    state.soundcloud.import_authorized_browser(payload.browser).await?;
+    crate::browser_login::run(payload.request_id.as_deref(), state.soundcloud.import_authorized_browser(payload.browser, payload.profile, payload.profile_read_confirmed, payload.new_window)).await?;
     let account = state.soundcloud.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
@@ -828,6 +835,11 @@ fn youtube_login_site(platform: Platform) -> &'static str {
 }
 
 async fn save_youtube_login(state: &AppState, platform: Platform, session: BrowserSession, trace: &LoginTrace) -> anyhow::Result<Account> {
+    validate_youtube_login(state, platform, &session, trace).await?;
+    commit_youtube_login(state, platform, session, trace).await
+}
+
+async fn validate_youtube_login(state: &AppState, platform: Platform, session: &BrowserSession, trace: &LoginTrace) -> anyhow::Result<()> {
     trace.step("validate_account");
     // Each platform validates and commits its own session. An HTTP 200 anonymous response is rejected.
     let validation = async {
@@ -836,6 +848,10 @@ async fn save_youtube_login(state: &AppState, platform: Platform, session: Brows
     };
     tokio::time::timeout(std::time::Duration::from_secs(45), validation).await
         .map_err(|_| anyhow::anyhow!("账号验证超时，请重试登录"))??;
+    Ok(())
+}
+
+async fn commit_youtube_login(state: &AppState, platform: Platform, session: BrowserSession, trace: &LoginTrace) -> anyhow::Result<Account> {
     trace.step("save_session");
     if platform == Platform::Ytm { state.ytm_auth.save(session)?; }
     else { state.youtube_auth.save(session)?; }
@@ -858,10 +874,24 @@ async fn youtube_direct_login(state: &AppState, platform: Platform, payload: Bro
 
 async fn youtube_authorized_login(state: &AppState, platform: Platform, payload: BrowserLoginBody) -> anyhow::Result<Account> {
     let trace = LoginTrace::new(youtube_login_site(platform), "authorize");
-    trace.run(async {
-        let session = kdj_providers::browser::authorization::read_youtube(&payload.browser, platform, &trace).await?;
-        save_youtube_login(state, platform, session, &trace).await
-    }).await
+    trace.run(crate::browser_login::run(payload.request_id.as_deref(), async {
+        let session = kdj_providers::browser::authorization::read_youtube(&payload.browser, platform, &trace, payload.profile.as_deref(), payload.profile_read_confirmed, payload.new_window, |session| {
+            let trace = &trace;
+            async move {
+                validate_youtube_login(state, platform, &session, trace).await?;
+                Ok(session)
+            }
+        }).await?;
+        commit_youtube_login(state, platform, session, &trace).await
+    })).await
+}
+
+#[derive(Deserialize)]
+struct CancelBrowserLoginBody { request_id: String }
+
+async fn cancel_browser_login(Json(payload): Json<CancelBrowserLoginBody>) -> ApiResult<Json<serde_json::Value>> {
+    crate::browser_login::cancel(&payload.request_id)?;
+    Ok(Json(json!({"cancelled": true})))
 }
 
 async fn youtube_pasted_login(state: &AppState, platform: Platform, raw: &str) -> anyhow::Result<Account> {

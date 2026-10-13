@@ -73,6 +73,9 @@ version = "1"
 [dependencies.rusqlite]
 version = "0.35"
 
+[dependencies.tempfile]
+version = "3.27"
+
 [dependencies.rust-ini]
 version = "0.21"
 

@@ -10,14 +10,43 @@ use std::{
 
 /// Returns cookies from mozilla based browsers
 pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<Vec<Cookie>> {
-    // Firefox keeps recent logins in the WAL while it is running. immutable=1 ignores
-    // that WAL and can return an old/empty session even though the browser is signed in.
-    // Use SQLite's read-only snapshot/locking instead; never alter the browser database.
+    firefox_scoped(db_path, domains, false)
+}
+
+/// KDJ confirmation covers ordinary tabs only, never private/container/partitioned sessions.
+pub(crate) fn firefox_default_context(db_path: PathBuf, domains: Vec<String>) -> Result<Vec<Cookie>> {
+    firefox_scoped(db_path, Some(domains), true)
+}
+
+fn firefox_scoped(db_path: PathBuf, domains: Option<Vec<String>>, default_only: bool) -> Result<Vec<Cookie>> {
+    let mut cookies = match read_database_cookies(&db_path, &domains, default_only) {
+        Ok(cookies) => cookies,
+        Err(error) if error.downcast_ref::<rusqlite::Error>().is_some_and(|error| {
+            matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+        }) => {
+            // Zen/Firefox can hold an exclusive WAL lock for the entire browser session.
+            // Read a verified, private copy including committed WAL records; never use
+            // immutable=1 on the live database, which would omit recent logins.
+            let snapshot = crate::common::sqlite::wal_snapshot(&db_path)?;
+            read_database_cookies(&snapshot.path().join("cookies.sqlite"), &domains, default_only)?
+        }
+        Err(error) => return Err(error),
+    };
+    let parent_path = db_path.parent().unwrap_or(Path::new("")).to_path_buf();
+    if let Ok(session_cookies) = session_cookies_lz4(domains.clone(), parent_path.clone(), default_only) {
+        cookies.extend(session_cookies);
+    }
+    if let Ok(session_cookies) = session_cookies(domains, parent_path, default_only) {
+        cookies.extend(session_cookies);
+    }
+    Ok(cookies)
+}
+
+fn read_database_cookies(db_path: &Path, domains: &Option<Vec<String>>, default_only: bool) -> Result<Vec<Cookie>> {
     let connection = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    connection.busy_timeout(std::time::Duration::from_secs(2))?;
+    connection.busy_timeout(std::time::Duration::from_millis(250))?;
     let mut query = "
         SELECT host, path, isSecure, expiry, name, value, isHttpOnly, sameSite from moz_cookies 
     "
@@ -35,6 +64,17 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
         }
     }
 
+    if default_only {
+        let has_attributes: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('moz_cookies') WHERE name = 'originAttributes')",
+            [], |row| row.get(0),
+        )?;
+        // Old schemas predate containers; modern schemas must stay within ordinary tabs.
+        if has_attributes {
+            query += if query.contains("WHERE") { " AND " } else { " WHERE " };
+            query += "COALESCE(originAttributes, '') = ''";
+        }
+    }
     query += ";";
 
     let mut cookies: Vec<Cookie> = vec![];
@@ -73,22 +113,10 @@ pub fn firefox_based(db_path: PathBuf, domains: Option<Vec<String>>) -> Result<V
         cookies.push(cookie);
     }
 
-    let parent_path = db_path.parent().unwrap_or(&PathBuf::from("")).to_path_buf();
-    if let Ok(session_cookies) = get_session_cookies_lz4(domains.to_owned(), parent_path.to_owned())
-    {
-        cookies.extend(session_cookies);
-    }
-
-    if let Ok(session_cookies) = get_session_cookies(domains, parent_path) {
-        cookies.extend(session_cookies);
-    }
     Ok(cookies)
 }
 
-pub fn get_session_cookies(
-    domains: Option<Vec<String>>,
-    cookies_dir: PathBuf,
-) -> Result<Vec<Cookie>> {
+fn session_cookies(domains: Option<Vec<String>>, cookies_dir: PathBuf, default_only: bool) -> Result<Vec<Cookie>> {
     let mut cookies: Vec<Cookie> = vec![];
     let session_file = cookies_dir.join("sessionstore.js");
     let plain = fs::read_to_string(session_file)?;
@@ -104,6 +132,7 @@ pub fn get_session_cookies(
             let cookies_json = cookies_json.as_array();
             if let Some(cookies_json) = cookies_json {
                 for json_cookie in cookies_json {
+                    if default_only && !ordinary_session_cookie(json_cookie) { continue; }
                     let domain = json_cookie
                         .get("host")
                         .and_then(|v| v.as_str())
@@ -123,10 +152,7 @@ pub fn get_session_cookies(
     Ok(cookies)
 }
 
-pub fn get_session_cookies_lz4(
-    domains: Option<Vec<String>>,
-    cookies_dir: PathBuf,
-) -> Result<Vec<Cookie>> {
+fn session_cookies_lz4(domains: Option<Vec<String>>, cookies_dir: PathBuf, default_only: bool) -> Result<Vec<Cookie>> {
     let mut cookies: Vec<Cookie> = vec![];
     let session_file_lz4 = cookies_dir.join("sessionstore-backups/recovery.jsonlz4");
     let compressed = fs::read(session_file_lz4)?;
@@ -140,6 +166,7 @@ pub fn get_session_cookies_lz4(
         .as_array()
         .ok_or(anyhow!("cookies is not list"))?;
     for json_cookie in cookies_json {
+        if default_only && !ordinary_session_cookie(json_cookie) { continue; }
         let domain = json_cookie
             .get("host")
             .and_then(|v| v.as_str())
@@ -154,6 +181,11 @@ pub fn get_session_cookies_lz4(
         }
     }
     Ok(cookies)
+}
+
+fn ordinary_session_cookie(cookie: &Value) -> bool {
+    // SessionStore serializes originAttributes as a suffix string (older versions omit it).
+    cookie.get("originAttributes").is_none_or(|attrs| attrs.as_str() == Some(""))
 }
 
 pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {

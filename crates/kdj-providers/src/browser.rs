@@ -10,6 +10,15 @@ pub mod authorization;
 pub mod discovery;
 pub mod login_trace;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod gecko_profiles;
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod profile_tests;
+
+#[cfg(test)]
+mod gecko_rdp_probe;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserProfileOption {
     pub id: String,

@@ -48,3 +48,7 @@
   gap: 0.75rem;
 }
 .kd-account-login-status { min-width: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); }
+
+.kd-account-browser-setup { min-width: 0; margin: 0; padding: 0; border: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); }
+.kd-account-browser-setup legend { padding: 0; color: var(--kd-text); font-weight: 600; }
+.kd-account-browser-setup p { margin: 0.5rem 0 0; }

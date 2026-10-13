@@ -829,12 +829,18 @@ fn login_qr_save_dir() -> Result<(PathBuf, &'static str), String> {
     Ok((kdj_core::config::system_download_dir(), "downloads"))
 }
 
-/// 用系统浏览器开外链（Release 下载页）。只放行 http(s)——
-/// opener 什么 scheme 都肯开，file:// 之类的从网页侧透进来就是提权。
+fn allowed_external_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+        || (cfg!(target_os = "macos")
+            && url == "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+}
+
+/// 外链仅允许 http(s)，以及 macOS 完全磁盘访问的固定设置页。
+/// 不放开系统设置 scheme 的其他地址或任意本地 URL。
 #[tauri::command]
 fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err(format!("拒绝打开非 http(s) 链接：{url}"));
+    if !allowed_external_url(&url) {
+        return Err(format!("拒绝打开未允许的链接：{url}"));
     }
     app.opener()
         .open_url(url, None::<&str>)
@@ -1027,7 +1033,8 @@ fn soundcloud_web_login_navigation_allowed(url: &tauri::Url) -> bool {
     if url.scheme() == "about" && url.path() == "blank" {
         return true;
     }
-    if url.scheme() != "https" {
+    if url.scheme() != "https" || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty() || url.password().is_some() {
         return false;
     }
     url.host_str().is_some_and(|host| {
@@ -1035,6 +1042,33 @@ fn soundcloud_web_login_navigation_allowed(url: &tauri::Url) -> bool {
             .iter()
             .any(|domain| domain_matches(host, domain))
     })
+}
+
+// Google OAuth does not support embedded user agents. Hand back to the browser flow
+// before displaying a password page that cannot reliably finish in WKWebView/WebView2.
+#[cfg(desktop)]
+fn soundcloud_requires_external_browser(url: &tauri::Url) -> bool {
+    url.scheme() == "https" && url.host_str() == Some("accounts.google.com")
+}
+
+#[cfg(desktop)]
+fn soundcloud_login_navigation(app: &tauri::AppHandle, url: &tauri::Url) -> bool {
+    if !soundcloud_requires_external_browser(url) {
+        return soundcloud_web_login_navigation_allowed(url);
+    }
+    let app = app.clone();
+    let dispatch = app.clone();
+    let _ = dispatch.run_on_main_thread(move || {
+        let _ = app.emit(SOUNDCLOUD_WEB_LOGIN_EVENT, SoundCloudOAuthWindowResult {
+            status: "browser_required", message: "Google 登录需使用浏览器".into(),
+        });
+        // Close only this temporary web login and its children, never the main KDJ window.
+        close_soundcloud_web_login_popups(&app);
+        if let Some(window) = app.get_webview_window(SOUNDCLOUD_WEB_LOGIN_WINDOW) {
+            let _ = window.close();
+        }
+    });
+    false
 }
 
 #[cfg(desktop)]
@@ -1137,7 +1171,7 @@ fn open_soundcloud_web_login_popup(
 
     static NEXT_POPUP: AtomicU64 = AtomicU64::new(0);
 
-    if !soundcloud_web_login_navigation_allowed(url) {
+    if !soundcloud_login_navigation(app, url) {
         return NewWindowResponse::Deny;
     }
     let Ok(blank) = tauri::Url::parse("about:blank") else {
@@ -1155,12 +1189,13 @@ fn open_soundcloud_web_login_popup(
     if features.position().is_none() {
         builder = builder.center();
     }
+    let navigation_app = app.clone();
     let window = builder
         // 页面要的位置和尺寸优先；这一步同时把弹窗接到登录窗口的 WebView 配置上。
         .window_features(features)
         // Windows 上无痕是每个 WebView 自己的开关；不设就落到另一个 profile。
         .incognito(true)
-        .on_navigation(soundcloud_web_login_navigation_allowed)
+        .on_navigation(move |url| soundcloud_login_navigation(&navigation_app, url))
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .build();
     match window {
@@ -1228,6 +1263,7 @@ fn open_soundcloud_web_login_window(app: tauri::AppHandle) -> Result<(), String>
     let client = local_api_client()?;
     let completed = Arc::new(AtomicBool::new(false));
     let app_on_popup = app.clone();
+    let navigation_app = app.clone();
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         SOUNDCLOUD_WEB_LOGIN_WINDOW,
@@ -1240,7 +1276,7 @@ fn open_soundcloud_web_login_window(app: tauri::AppHandle) -> Result<(), String>
     .resizable(true)
     // 登录凭证只在这个窗口的生命周期内存在；验证后的最小会话由 provider 单独保存。
     .incognito(true)
-    .on_navigation(soundcloud_web_login_navigation_allowed)
+    .on_navigation(move |url| soundcloud_login_navigation(&navigation_app, url))
     .on_new_window(move |url, features| {
         open_soundcloud_web_login_popup(&app_on_popup, &url, features)
     })
@@ -3261,10 +3297,21 @@ mod tests {
     };
     #[cfg(desktop)]
     use super::{
-        soundcloud_oauth_callback_request, soundcloud_web_login_navigation_allowed,
+        soundcloud_oauth_callback_request, soundcloud_web_login_navigation_allowed, soundcloud_requires_external_browser,
         soundcloud_web_login_request, soundcloud_web_session, ytm_web_cookie_header,
         ytm_web_login_navigation_allowed, ytm_web_login_request, YoutubeLoginSource, SoundCloudWebSession,
     };
+
+    #[cfg(desktop)]
+    #[test]
+    fn external_urls_only_allow_the_exact_permission_settings_page() {
+        use super::allowed_external_url;
+        assert!(allowed_external_url("https://example.com"));
+        assert_eq!(allowed_external_url("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"), cfg!(target_os = "macos"));
+        for url in ["file:///etc/passwd", "x-apple.systempreferences:com.apple.preference.security", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles&other=1"] {
+            assert!(!allowed_external_url(url));
+        }
+    }
 
     #[cfg(desktop)]
     #[test]
@@ -3303,6 +3350,16 @@ mod tests {
         assert!(!soundcloud_web_login_navigation_allowed(
             &tauri::Url::parse("https://soundcloud.com.evil.example/signin").unwrap()
         ));
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn soundcloud_google_handoff_and_navigation_boundaries() {
+        assert!(soundcloud_requires_external_browser(&tauri::Url::parse("https://accounts.google.com/signin").unwrap()));
+        assert!(!soundcloud_requires_external_browser(&tauri::Url::parse("https://accounts.google.com.evil.test/").unwrap()));
+        for value in ["https://soundcloud.com:8443/", "https://user@soundcloud.com/", "https://user:pass@soundcloud.com/"] {
+            assert!(!soundcloud_web_login_navigation_allowed(&tauri::Url::parse(value).unwrap()));
+        }
     }
 
     #[cfg(desktop)]
