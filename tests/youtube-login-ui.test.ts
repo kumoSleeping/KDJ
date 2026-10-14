@@ -136,6 +136,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         await choose(profile, "work");
         assert.equal(loginPosts().length, before, "choosing a browser or a profile reads nothing");
         assert.deepEqual(stepKeys(), [], "a browser that can be read shows no steps");
+        assert.ok(buttons(panel()).some(button => button.textContent === "用 Cookie-Editor 导入"), "the other way is there before any read");
         await click("登录", panel());
         const attempts = loginPosts().slice(before);
         assert.deepEqual(attempts.map(post => [post.path, post.body.browser, post.body.profile, post.body.window]),
@@ -143,7 +144,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         assert.match(String(attempts[0].body.request_id), /^[0-9a-f-]{36}$/);
         assert.equal(notice(), `登录失败：无法连接本地服务：${detail}`);
 
-        // After a read that failed the same browser can hand its login over by the extension.
+        // A browser that can be read can hand its login over by the extension as well, asked or failed.
         await click("用 Cookie-Editor 导入", panel());
         assert.deepEqual(stepKeys(), ["在 Edge 打开", "安装", "粘贴"]);
         assert.equal(notice(), undefined);

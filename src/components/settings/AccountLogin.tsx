@@ -181,7 +181,7 @@ function QrPanel({ account, onDone }: { account: Account; onDone(): void }) {
 
 /**
  * 复用浏览器. The browser is chosen first. One whose login KDJ can read is read on 登录. One it
- * cannot read (or, when the user asks, one whose read failed) goes on in that same browser: KDJ
+ * cannot read (or any other, when the user asks with 用 Cookie-Editor 导入) goes on in that same browser: KDJ
  * opens the site there, the user exports the login with the Cookie-Editor extension, and KDJ takes
  * it from the clipboard when its window is returned to.
  */
@@ -197,7 +197,6 @@ function BrowserPanel({ account, sourceEnabled, onBusy, onDone }: {
   const [profile, setProfile] = useState("");
   const [notice, setNotice] = useState("");
   const [permissionRequired, setPermissionRequired] = useState(false);
-  const [readFailed, setReadFailed] = useState(false);
   const [byExport, setByExport] = useState(false);
   const [pasteBox, setPasteBox] = useState(false);
   const permissionReturn = useRef(false);
@@ -270,7 +269,6 @@ function BrowserPanel({ account, sourceEnabled, onBusy, onDone }: {
     setBusy(true);
     setNotice("");
     setPermissionRequired(false);
-    setReadFailed(false);
     const id = crypto.randomUUID();
     attempt.current = id;
     try {
@@ -291,7 +289,6 @@ function BrowserPanel({ account, sourceEnabled, onBusy, onDone }: {
           : "macOS 仍拒绝访问 Safari 登录数据；请核对当前 KDJ 的完全磁盘访问权限，已允许则退出并重新打开 KDJ。");
         return;
       }
-      setReadFailed(true);
       setNotice(`登录失败：${message}`);
     } finally {
       if (attempt.current === id) attempt.current = null;
@@ -368,7 +365,6 @@ function BrowserPanel({ account, sourceEnabled, onBusy, onDone }: {
 
   useEffect(() => {
     setPermissionRequired(false);
-    setReadFailed(false);
     setByExport(false);
     setPasteBox(false);
     permissionReturn.current = false;
@@ -440,7 +436,8 @@ function BrowserPanel({ account, sourceEnabled, onBusy, onDone }: {
         void cancel().catch(error => { if (alive.current) setNotice(`取消失败：${error instanceof Error ? error.message : String(error)}`); });
       }}>取消</Button>}
       {permissionRequired && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openPermissionSettings()}>开启权限</Button>}
-      {readFailed && !busy && <Button size="sm" variant="ghost" onClick={() => { setNotice(""); setByExport(true); }}>用 Cookie-Editor 导入</Button>}
+      {/* Always beside 登录: the same browser can hand its login over by the extension instead. */}
+      {!!selected && !exporting && !busy && <Button size="sm" variant="ghost" onClick={() => { setNotice(""); setByExport(true); }}>用 Cookie-Editor 导入</Button>}
       {!exporting && <Button size="sm" variant="ghost" disabled={busy || loading || !selected} onClick={() => void login()}>
         {busy && <LoaderCircle size={13} className="kd-spin" />}{busy ? "正在登录" : "登录"}
       </Button>}
