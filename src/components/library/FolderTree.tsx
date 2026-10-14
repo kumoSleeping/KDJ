@@ -1966,7 +1966,6 @@ export function FolderTree({
           data-sidebar-root-row={depth === 0 ? "" : undefined}
           role={expandableRoot ? "button" : undefined}
           tabIndex={expandableRoot ? 0 : undefined}
-          aria-expanded={expandableRoot ? open : undefined}
           {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
           {...midiBrowseItemProps("local", `local:folder:${node.path}`)}
           data-active={active}
@@ -1999,11 +1998,11 @@ export function FolderTree({
           onClick={(event) => {
             if (hasTextSelectionWithin(event.currentTarget)) return;
             if (selectFolderRow(event, node)) return;
-            // 根目录整行与在线来源一致；MIDI 激活仍保留曲目导航语义。
-            if (expandableRoot && !isMidiBrowseActivate()) {
+            // 根目录也是一个文件夹：整行打开它的曲目（含子文件夹），收起/展开交给箭头。
+            // 第一次进来时顺手展开，子文件夹就在眼前。
+            if (expandableRoot && !active && !open) {
               setAllMenu(null);
               toggle(node.path);
-              return;
             }
             // 进文件夹默认按手排顺序看（set 是按演出顺序排的）；
             // 回到全库时手排没有意义，还原成默认的文件创建顺序。
