@@ -1,5 +1,7 @@
+/* The block under an account's row: the ways, or the page of the way that was chosen. One at a
+   time; they change places sideways. */
+.kd-account-login { grid-column: 1 / -1; min-width: 0; }
 .kd-account-login-methods {
-  grid-column: 1 / -1;
   min-width: 0;
   list-style: none;
   margin: 0;
@@ -23,14 +25,33 @@
   cursor: pointer;
 }
 .kd-account-login-methods button:hover:not(:disabled) { color: var(--kd-text); }
-/* The way that is open is written in full strength and heavier; its neighbours stay quiet. */
-.kd-account-login-methods button[data-active] { color: var(--kd-text); font-weight: 600; }
-.kd-account-login-methods button:disabled { cursor: default; opacity: 0.55; }
-.kd-account-login-methods button:focus-visible { outline: 2px solid var(--kd-text); outline-offset: 2px; }
-/* The way that is open unfolds under the choices, in the account's own row: the same column,
-   no window and no mask. */
+.kd-account-login-methods button:focus-visible,
+.kd-account-login-back:focus-visible { outline: 2px solid var(--kd-text); outline-offset: -2px; }
+/* The page of the chosen way has the block to itself. Its head is the way's name, in full strength
+   where the name stood among the ways, with the way back where its icon stood. */
+.kd-account-login-way { min-width: 0; display: grid; padding-top: 0.2rem; }
+.kd-account-login-back {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.4rem 0 0.4rem 2.4rem;
+  border: 0;
+  background: none;
+  color: var(--kd-text);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+/* A notice of the page itself keeps the column of its panels. */
+.kd-account-login-way > .kd-account-notice { margin-left: 2.4rem; }
+.kd-account-login-back > svg { color: var(--kd-muted); }
+.kd-account-login-back:hover:not(:disabled) > svg { color: var(--kd-text); }
+.kd-account-login-back:disabled { cursor: default; }
+.kd-account-login-back:disabled > svg { opacity: 0.4; }
 .kd-account-login-panel {
-  grid-column: 1 / -1;
   min-width: 0;
   box-sizing: border-box;
   display: grid;
@@ -58,6 +79,8 @@
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
+/* The picture of a step stands under its words. */
+.kd-account-login-steps .kd-demo { grid-column: 2 / -1; margin: 0.25rem 0 0.5rem; }
 .kd-account-login-actions {
   display: flex;
   align-items: center;

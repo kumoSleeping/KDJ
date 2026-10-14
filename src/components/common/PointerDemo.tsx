@@ -3,14 +3,14 @@ import "./PointerDemo.css";
 
 /**
  * A little looping picture of a gesture: a small pointer does the thing on a drawn list, with the
- * key it needs beside it. One drawing serves every place that teaches the gesture — the empty download queue (`drag-in`) and the tips drawer
- * (`src/components/download/SearchTipsPanel.tsx`) — so a new lesson is a new scene here.
+ * key it needs beside it. One drawing serves every place that teaches the gesture — the empty download queue (`drag-in`), the tips drawer
+ * (`src/components/download/SearchTipsPanel.tsx`) and the login by Cookie-Editor (`cookie-export`) — so a new lesson is a new scene here.
  *
  * It is a still picture under reduced motion, and it stops while it is out of sight.
  */
 export type PointerDemoScene = "pick-range" | "pick-toggle" | "drag-in" | "search" | "viz-tune" | "pip" | "player-keys"
   | "menu-toss" | "multi-copy" | "add-folder" | "analyze"
-  | "platforms" | "kind-switch" | "sidebar-online" | "viz-export" | "mini-player";
+  | "platforms" | "kind-switch" | "sidebar-online" | "viz-export" | "mini-player" | "cookie-export";
 
 /** What the picture shows for one moment; the next moment is `move` + `stay` later. */
 interface Beat {
@@ -60,8 +60,11 @@ interface Beat {
   mini?: boolean;
   /** The floating window's size, 1 = as it opens (pip). */
   winScale?: number;
-  /** The export has been asked for (viz-export). */
+  /** The export has been asked for (viz-export); the login is on the clipboard (cookie-export). */
   exported?: boolean;
+  /** The extension's little window is open, and what in it the pointer is on (cookie-export; `menu` is its Export menu). */
+  pop?: boolean;
+  over?: "export" | "json";
 }
 
 interface Scene {
@@ -78,6 +81,7 @@ const CHIP_HOME = [46, 40] as const;
 const TRAY = [169, 56] as const;
 const CORNER: readonly [number, number] = [30, 88];
 const LIFT: readonly [number, number] = [100, 18];
+const COOKIE: readonly [number, number] = [179, 19];
 const mod = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
 /** A key with the modifier, as the platform writes it: ⌘C on a Mac, Ctrl+C elsewhere. */
 export const chord = (key: string) => mod() === "⌘" ? `⌘${key}` : `Ctrl+${key}`;
@@ -287,6 +291,21 @@ const SCENES: Record<PointerDemoScene, Scene> = {
       { move: 400, stay: 100, cursor: AWAY },
     ],
   },
+  "cookie-export": {
+    rest: 7,
+    beats: [
+      { move: 600, stay: 300, cursor: [112, 76] },
+      { move: 700, stay: 250, cursor: COOKIE },
+      { move: 80, stay: 500, cursor: COOKIE, press: true, pop: true },
+      { move: 650, stay: 250, cursor: [184, 96], pop: true, over: "export" },
+      { move: 80, stay: 450, cursor: [184, 96], press: true, pop: true, over: "export", menu: true },
+      { move: 400, stay: 250, cursor: [172, 62], pop: true, menu: true, over: "json" },
+      { move: 80, stay: 300, cursor: [172, 62], press: true, pop: true, menu: true, over: "json" },
+      { move: 0, stay: 1700, cursor: [172, 62], pop: true, exported: true },
+      { move: 600, stay: 500, cursor: [112, 76], exported: true },
+      { move: 0, stay: 200, cursor: [112, 76] },
+    ],
+  },
   "drag-in": {
     rest: 4,
     beats: [
@@ -452,6 +471,39 @@ export function PointerDemo({ scene, label, tray = "download", onLoop }: {
         <rect className="kd-demo-folder-body" width="38" height="15" rx="5" />
         <path className="kd-demo-tray-mark" data-gone={beat.exported || undefined} d="M19 3.5 V9.5 M16 7 L19 10 L22 7" />
         <path className="kd-demo-tick" data-on={beat.exported || undefined} d="M14 7.5 l3.4 3.4 l7 -7.4" />
+      </g>
+    </g> : scene === "cookie-export" ? <g>
+      {/* A browser's toolbar: the address, then its extensions, the cookie among them. */}
+      <rect className="kd-demo-row-base" x="8" y="8" width="148" height="18" rx="9" />
+      <rect className="kd-demo-line" x="18" y="15.2" width="64" height="3.6" rx="1.8" />
+      <g transform="translate(176 17)">
+        <circle className="kd-demo-cookie" r="9" />
+        <circle className="kd-demo-cookie-bite" cx="7.8" cy="-6.8" r="4.2" />
+        {[[-3.8, -2.6, 1.6], [2, 1.6, 1.5], [-3, 3.8, 1.4], [0.8, -4.6, 1.1], [4.6, 5, 1]].map(([cx, cy, r]) =>
+          <circle key={`${cx}`} className="kd-demo-cookie-chip" cx={cx} cy={cy} r={r} />)}
+      </g>
+      <circle className="kd-demo-line" data-faint="" cx="202" cy="17" r="5" />
+      {/* What ends up on the clipboard. */}
+      <g transform="translate(22 44)" className="kd-demo-folder" data-on={beat.exported || undefined}>
+        <rect className="kd-demo-folder-body" y="5" width="46" height="54" rx="7" />
+        <rect className="kd-demo-folder-tab" x="14" width="18" height="10" rx="4" />
+        {[18, 26, 14].map((w, i) => <rect key={i} className="kd-demo-line" x="9" y={20 + 9 * i} width={w} height="3.4" rx="1.7"
+          style={{ opacity: beat.exported ? 1 : 0, transitionDelay: `${i * 70}ms` }} />)}
+        <path className="kd-demo-tick" data-on={beat.exported || undefined} d="M14 47 l5 5 l11 -11.5" />
+      </g>
+      {/* The extension's window under the cookie: the site's cookies, and Export at its foot. */}
+      <g className="kd-demo-menu" data-on={beat.pop || undefined}>
+        <rect className="kd-demo-menu-body" x="98" y="32" width="114" height="76" rx="8" />
+        {[62, 46, 70].map((w, i) => <rect key={i} className="kd-demo-line" data-faint={i === 1 ? "" : undefined} x="106" y={41 + 12 * i} width={w} height="3.6" rx="1.8" />)}
+        <rect className="kd-demo-line" data-faint="" x="106" y="93" width="30" height="4" rx="2" />
+        <rect className="kd-demo-menu-item" data-on={beat.over === "export" || undefined} x="160" y="87" width="46" height="16" rx="5" />
+        <text className="kd-demo-key-text" x="183" y="98.4" textAnchor="middle" style={{ fill: "var(--kd-text)" }}>Export</text>
+      </g>
+      <g className="kd-demo-menu" data-on={beat.menu || undefined}>
+        <rect className="kd-demo-menu-body" data-raised="" x="140" y="48" width="66" height="36" rx="7" />
+        <rect className="kd-demo-menu-item" data-on={beat.over === "json" || undefined} x="144" y="52" width="58" height="14" rx="4" />
+        <text className="kd-demo-key-text" x="152" y="62.4" style={{ fill: "var(--kd-text)" }}>JSON</text>
+        <rect className="kd-demo-line" data-faint="" x="152" y="72" width="34" height="3.4" rx="1.7" />
       </g>
     </g> : scene === "mini-player" ? <g>
       <g className="kd-demo-chip" style={{

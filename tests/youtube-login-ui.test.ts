@@ -105,6 +105,10 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     state, nickname: "", avatar: "", detail: "", supports_login: true, login_method: "browser" });
   const qrAccount = (platform: "wyy" | "qqm" | "bilibili"): Account => ({ platform, label: platform, state: "missing",
     nickname: "", avatar: "", detail: "", supports_login: true, login_method: "qr" });
+  const COOKIES = "从 Cookie-Editor 导入", BROWSER = "从浏览器导入（部分支持）";
+  const way = () => document.querySelector<HTMLElement>(".kd-account-login-way");
+  const backKey = () => document.querySelector<HTMLButtonElement>(".kd-account-login-back")!;
+  const back = () => act(async () => backKey().click());
   try {
     // A row has its switch and one key: 登录, or 退出 once there is a login. Nothing else.
     await render("signed-in", browserAccount("soundcloud", "valid"));
@@ -115,103 +119,103 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     for (const os of ["win32", "darwin"]) {
       dom.window.kdj.platform = os;
       for (const platform of ["soundcloud", "ytm", "youtube"] as const) {
+        const label = browserAccount(platform).label;
         await render(`${os}-${platform}`, browserAccount(platform));
         assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
         const beforeOpen = calls.length;
         await click("登录");
-        assert.deepEqual(methods(), ["复用浏览器", "登录窗口", "请求头"]);
+        assert.deepEqual(methods(), [COOKIES, BROWSER, "登录窗口", "请求头"]);
         assert.equal(calls.length, beforeOpen, "opening shows the ways and asks for nothing");
-        assert.equal(document.querySelector(".kd-account-login-panel"), null, "no way is open until one is chosen");
-        assert.equal(document.querySelector(".kd-account-login-methods button[data-active]"), null);
-        await click("复用浏览器");
+        assert.equal(way(), null, "no way is open until one is chosen");
+
+        // The chosen way takes the whole block: the ways are gone, and its name is the way back.
+        await click(BROWSER);
+        assert.equal(document.querySelector(".kd-account-login-methods"), null, "the ways give their place to the page");
+        assert.equal(way()!.getAttribute("aria-label"), `${label} · ${BROWSER}`);
+        assert.equal(backKey().textContent, BROWSER);
         assert.ok(calls.slice(beforeOpen).every(call => call.startsWith("GET:")), "choosing it looks for browsers and reads no login");
         assert.ok(calls.includes(`GET:/api/accounts/${platform}/login/browsers`));
-        assert.equal(panel().getAttribute("aria-label"), `${browserAccount(platform).label} · 复用浏览器`);
         assert.equal(document.querySelector("dialog, [role=dialog]"), null, "a login is never a window over the settings");
         assert.deepEqual([...panel().querySelectorAll("select")[0].querySelectorAll("option")].map(option => option.textContent), ["Edge", "Safari", "Fork"]);
 
-        // A press reads the chosen browser once, on every platform; no window of it follows.
+        // A press reads the chosen browser once, on every platform; nothing else follows it.
         let before = loginPosts().length;
-        const profile = panel().querySelectorAll("select")[1];
-        await choose(profile, "work");
+        await choose(panel().querySelectorAll("select")[1], "work");
         assert.equal(loginPosts().length, before, "choosing a browser or a profile reads nothing");
-        assert.deepEqual(stepKeys(), [], "a browser that can be read shows no steps");
-        assert.ok(buttons(panel()).some(button => button.textContent === "用 Cookie-Editor 导入"), "the other way is there before any read");
         await click("登录", panel());
         const attempts = loginPosts().slice(before);
         assert.deepEqual(attempts.map(post => [post.path, post.body.browser, post.body.profile, post.body.window]),
           [[`/api/accounts/${platform}/login/browser`, "edge", "work", undefined]]);
         assert.match(String(attempts[0].body.request_id), /^[0-9a-f-]{36}$/);
         assert.equal(notice(), `登录失败：无法连接本地服务：${detail}`);
-
-        // A browser that can be read can hand its login over by the extension as well, asked or failed.
-        await click("用 Cookie-Editor 导入", panel());
-        assert.deepEqual(stepKeys(), ["在 Edge 打开", "安装", "粘贴"]);
-        assert.equal(notice(), undefined);
-        assert.equal(buttons(panel()).some(button => button.textContent === "登录"), false);
+        assert.equal(panel().querySelector(".kd-account-login-steps"), null, "reading a browser has no steps of the other way");
 
         before = loginPosts().length;
         await choose(panel().querySelectorAll("select")[0], "safari");
-        assert.deepEqual(stepKeys(), [], "another browser starts from its own reading");
         assert.equal(panel().querySelectorAll("select").length, 1, "one profile is not a choice");
         await click("登录", panel());
         assert.deepEqual(loginPosts().slice(before).map(post => [post.body.browser, post.body.profile]), [["safari", "default"]]);
-        // A browser whose login cannot be read is not asked for it: its steps stand there at once.
+        // A browser whose login cannot be read is not asked for it: the other way is named.
         before = loginPosts().length;
         await choose(panel().querySelectorAll("select")[0], "fork");
-        assert.deepEqual(stepKeys(), ["在 Fork 打开", "安装", "粘贴"]);
-        assert.equal(panel().querySelectorAll("select").length, 1, "its profiles are no choice either");
-        assert.equal(buttons(panel()).some(button => button.textContent === "登录"), false);
+        await click("登录", panel());
         assert.equal(loginPosts().length, before);
+        assert.equal(notice(), `Fork 的登录在这台电脑上读不了，请改用「${COOKIES}」`);
+        await back();
+        assert.equal(way(), null);
+        assert.equal(methods().length, 4, "the way back returns to the ways");
 
         await click("请求头");
-        assert.equal(panel().getAttribute("aria-label"), `${browserAccount(platform).label} · 请求头`);
+        assert.equal(way()!.getAttribute("aria-label"), `${label} · 请求头`);
         await fillHeaders();
         await click("登录", panel());
         assert.ok(calls.includes(`POST:/api/accounts/${platform}/login/headers`));
-        await click("请求头");
-        assert.equal(document.querySelector(".kd-account-login-panel"), null, "choosing the open way again puts it away");
+        await back();
         await click("请求头");
         assert.equal(document.querySelector("textarea")?.value, "", "what was pasted does not come back");
+        await back();
 
         const windowsBefore = calls.filter(call => call.startsWith("window:")).length;
         await click("登录窗口");
-        assert.equal(document.querySelector(".kd-account-login-panel"), null, "the login window opens at once, with no second panel");
-        assert.equal(calls.filter(call => call.startsWith("window:")).length, windowsBefore + 1);
+        assert.equal(way()!.getAttribute("aria-label"), `${label} · 登录窗口`, "the login window has its page as well");
+        assert.equal(calls.filter(call => call.startsWith("window:")).length, windowsBefore + 1, "and opens at once");
         assert.ok(calls.includes(`window:${platform}`) && calls.includes(`${platform}-web-login://result`));
         assert.equal(notice(), `登录失败：${detail}`);
+        await click("重新打开", panel());
+        assert.equal(calls.filter(call => call.startsWith("window:")).length, windowsBefore + 2);
       }
     }
 
-    // A login that is read succeeds, and the row puts its ways away.
+    // A login that is read succeeds, and the row puts its block away.
     dom.window.kdj.platform = "win32";
     await render("success", browserAccount("soundcloud"));
     await click("登录");
-    await click("复用浏览器");
+    await click(BROWSER);
     answer = () => new Response(JSON.stringify(signedIn("soundcloud")), { headers: { "content-type": "application/json" } });
     let before = loginPosts().length;
     await click("登录", panel());
     assert.equal(loginPosts().length, before + 1);
-    assert.equal(document.querySelector(".kd-account-login-panel"), null);
+    assert.equal(document.querySelector(".kd-account-login"), null);
     assert.equal(dom.window.localStorage.getItem("kdj.login.browser.soundcloud"), "edge");
     answer = () => undefined;
 
     // 取消 stops the request it belongs to; nothing is reported.
     await render("cancel", browserAccount("soundcloud"));
     await click("登录");
-    await click("复用浏览器");
+    await click(BROWSER);
     let finish: ((response: Response) => void) | undefined;
     answer = () => new Promise<Response>(resolve => { finish = resolve; });
     before = loginPosts().length;
     await click("登录", panel());
     assert.equal(document.querySelector(".kd-account-login-status")?.textContent, "正在读取浏览器登录");
-    assert.ok(buttons(document.querySelector(".kd-account-login-methods")!).every(button => button.disabled), "the other ways stay still meanwhile");
+    assert.equal(backKey().disabled, true, "the way back stays still meanwhile");
     await click("取消");
     assert.deepEqual(posts.at(-1), { path: "/api/accounts/browser/login/cancel", body: { request_id: loginPosts().at(-1)!.body.request_id } });
     await act(async () => finish!(new Response(JSON.stringify({ detail: "浏览器登录已取消" }), { status: 400 })));
     assert.equal(loginPosts().length, before + 1, "a stopped login is not retried");
     assert.equal(notice(), undefined);
     assert.equal(buttons(panel()).find(button => button.textContent === "登录")?.disabled, false);
+    assert.equal(backKey().disabled, false);
     // Leaving the page stops the work.
     answer = () => new Promise<Response>(resolve => { finish = resolve; });
     await click("登录", panel());
@@ -220,12 +224,21 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     assert.equal(calls.filter(call => call.endsWith("/cancel")).length, cancels + 1, "unmount cancels the server's work");
     answer = () => undefined;
 
-    // A browser whose login cannot be read goes on in that browser: its site is opened there, not
-    // in the default one, and the export is taken from the clipboard when the window is returned to.
+    // Cookie-Editor is a way of its own. The browser is chosen there as well: its site is opened in
+    // that browser, not in the default one; a little picture shows where to press in it; and the
+    // export is taken from the clipboard when the window is returned to.
     await render("export", browserAccount("youtube"));
     await click("登录");
-    await click("复用浏览器");
+    const beforeCookies = calls.length;
+    await click(COOKIES);
+    assert.equal(way()!.getAttribute("aria-label"), `YouTube Video · ${COOKIES}`);
+    assert.deepEqual(calls.slice(beforeCookies), ["GET:/api/accounts/youtube/login/browsers"], "it looks for browsers and nothing else");
+    assert.deepEqual(stepKeys(), ["在 Edge 打开", "安装", "粘贴"]);
+    assert.ok(panel().querySelector(".kd-account-login-steps li:nth-child(2) .kd-demo[data-scene='cookie-export']"), "the export step has its picture");
     await choose(panel().querySelectorAll("select")[0], "fork");
+    assert.deepEqual(stepKeys(), ["在 Fork 打开", "安装", "粘贴"], "a browser KDJ cannot read is as good as any here");
+    assert.equal(panel().querySelectorAll("select").length, 1, "profiles are no choice on this page");
+    assert.equal(buttons(panel()).some(button => button.textContent === "登录"), false);
     clipboard = JSON.stringify([
       { domain: ".youtube.com", path: "/", name: "SAPISID", value: "test-only", expirationDate: 4102444800 },
       { domain: ".example.com", path: "/", name: "other", value: "test-only" },
@@ -251,14 +264,14 @@ test("an account logs in from its own row: one key, the ways in place, one reque
       ? new Response(JSON.stringify(signedIn("youtube")), { headers: { "content-type": "application/json" } }) : undefined;
     await comeBack();
     assert.deepEqual(exports().map(post => post.body), [{ headers: "Cookie: SAPISID=test-only" }], "only the site's own cookies are handed over");
-    assert.equal(document.querySelector(".kd-account-login-panel"), null);
+    assert.equal(document.querySelector(".kd-account-login"), null);
     answer = () => undefined;
 
     // Safari's refusal on macOS leads to the one system setting, and coming back retries once.
     dom.window.kdj.platform = "darwin";
     await render("permission", browserAccount("ytm"));
     await click("登录");
-    await click("复用浏览器");
+    await click(BROWSER);
     await choose(panel().querySelectorAll("select")[0], "safari");
     answer = () => new Response(JSON.stringify({ detail: permissionError }), { status: 400 });
     await click("登录", panel());
@@ -267,10 +280,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     await click("开启权限");
     assert.equal(calls.at(-1), "external:x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles");
     before = loginPosts().length;
-    await act(async () => {
-      dom.window.dispatchEvent(new dom.window.Event("focus"));
-      document.dispatchEvent(new dom.window.Event("visibilitychange"));
-    });
+    await comeBack();
     assert.equal(loginPosts().length, before + 1, "returning from Settings retries the selected login exactly once");
     assert.match(notice()!, /已允许则退出并重新打开 KDJ/);
     await act(async () => dom.window.dispatchEvent(new dom.window.Event("focus")));
@@ -289,19 +299,20 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     await click("登录");
     webviewPending = true;
     await click("登录窗口");
-    assert.equal(document.querySelector(".kd-account-login-panel"), null);
+    assert.equal(document.querySelector(".kd-account-login-status")?.textContent, "请在打开的登录窗口里登录");
+    assert.equal(backKey().disabled, true);
     await act(async () => windowEvent?.({ payload: { status: "browser_required", message: "Google 登录需使用浏览器" } }));
-    assert.equal(panel().getAttribute("aria-label"), "SoundCloud · 复用浏览器");
+    assert.equal(way()!.getAttribute("aria-label"), `SoundCloud · ${BROWSER}`);
     assert.equal(notice(), "Google 登录需使用浏览器");
     webviewPending = false;
 
-    // A code to scan comes up in the row, and the same browsers can be reused beside it.
+    // A code to scan comes up in the row, and the same two ways from a browser stand beside it.
     for (const platform of ["wyy", "qqm", "bilibili"] as const) {
       await render(`qr-${platform}`, qrAccount(platform));
       assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
       const beforeQr = calls.length;
       await click("登录");
-      assert.deepEqual(methods(), ["扫码", "复用浏览器"]);
+      assert.deepEqual(methods(), ["扫码", COOKIES, BROWSER]);
       assert.equal(calls.length, beforeQr, "no code is asked for before 扫码 is chosen");
       assert.equal(document.querySelector(".kd-account-login-qr, .kd-account-login-panel"), null);
       await click("扫码");
@@ -311,7 +322,8 @@ test("an account logs in from its own row: one key, the ways in place, one reque
       assert.ok(panel().contains(codes[0]), "the code stands in the account's own row");
       assert.equal(document.querySelector(".kd-login-qr-backdrop, dialog, [role=dialog]"), null, "no mask over the page");
       assert.equal(document.querySelector(".kd-account-login-qr")?.getAttribute("data-kd-motion"), "pop");
-      await click("复用浏览器");
+      await back();
+      await click(BROWSER);
       assert.equal(document.querySelector(".kd-account-login-qr"), null);
       assert.ok(calls.includes(`GET:/api/accounts/${platform}/login/browsers`));
       before = loginPosts().length;
@@ -324,7 +336,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     emptyCatalog = true;
     await render("empty", browserAccount("soundcloud"));
     await click("登录");
-    await click("复用浏览器");
+    await click(BROWSER);
     assert.equal(buttons(panel()).find(button => button.textContent === "登录")?.disabled, true);
     assert.equal(panel().querySelector("select"), null, "no browsers is an empty choice, not a message");
   } finally {

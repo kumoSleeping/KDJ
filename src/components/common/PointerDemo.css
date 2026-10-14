@@ -164,5 +164,11 @@
 }
 .kd-demo-pill-text { fill: var(--kd-text); font-size: 9.5px; font-weight: 700; transition: opacity 240ms ease; }
 
+/* The cookie on a browser's toolbar, and a menu that lies over another surface (cookie-export). */
+.kd-demo-cookie { fill: color-mix(in srgb, var(--kd-text) 42%, var(--kd-panel)); }
+.kd-demo-cookie-bite { fill: var(--kd-panel); }
+.kd-demo-cookie-chip { fill: var(--kd-panel); }
+.kd-demo-menu-body[data-raised] { fill: color-mix(in srgb, var(--kd-text) 22%, var(--kd-panel)); }
+
 /* The other rows of a list a song is taken from (drag-in, menu-toss). */
 .kd-demo-ghost-row { fill: color-mix(in srgb, var(--kd-text) 4%, transparent); }
