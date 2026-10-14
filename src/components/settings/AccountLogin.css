@@ -88,8 +88,21 @@
   justify-content: space-between;
   gap: 0.75rem;
 }
-/* The status takes the room that is left, so the keys of the row stand together at its end. */
-.kd-account-login-status { flex: 1; min-width: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); }
+/* Everything here is one line. The status takes the room that is left and is cut when there is
+   none; the keys of the row stand together at its end and keep their one word while they work. */
+.kd-account-login-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.kd-account-login-actions > button,
+.kd-account-login-steps button,
+.kd-account-login-controls > button { flex: none; white-space: nowrap; }
+.kd-account-login-back > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
 /* The code to scan stands in the account's own row. Its paper is white because a code has to be. */
 .kd-account-login-qr { display: flex; gap: 0.75rem; }

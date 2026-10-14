@@ -207,7 +207,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     answer = () => new Promise<Response>(resolve => { finish = resolve; });
     before = loginPosts().length;
     await click("登录", panel());
-    assert.equal(document.querySelector(".kd-account-login-status")?.textContent, "正在读取浏览器登录");
+    assert.equal(document.querySelector(".kd-account-login-status")?.textContent, "正在读取");
     assert.equal(backKey().disabled, true, "the way back stays still meanwhile");
     await click("取消");
     assert.deepEqual(posts.at(-1), { path: "/api/accounts/browser/login/cancel", body: { request_id: loginPosts().at(-1)!.body.request_id } });
@@ -233,11 +233,11 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     await click(COOKIES);
     assert.equal(way()!.getAttribute("aria-label"), `YouTube Video · ${COOKIES}`);
     assert.deepEqual(calls.slice(beforeCookies), ["GET:/api/accounts/youtube/login/browsers"], "it looks for browsers and nothing else");
-    assert.deepEqual(stepKeys(), ["打开安装页", "在 Edge 打开", "粘贴"]);
+    assert.deepEqual(stepKeys(), ["安装", "打开", "粘贴"]);
     assert.equal(panel().querySelectorAll(".kd-account-login-steps li").length, 4, "four steps, one thing each");
     assert.ok(panel().querySelector(".kd-account-login-steps li:nth-child(3) .kd-demo[data-scene='cookie-export']"), "the export step has its picture");
     await choose(panel().querySelectorAll("select")[0], "fork");
-    assert.deepEqual(stepKeys(), ["打开安装页", "在 Fork 打开", "粘贴"], "a browser KDJ cannot read is as good as any here");
+    assert.equal(buttons(panel()).find(button => button.textContent === "打开")?.title, "在 Fork 打开 YouTube Video", "a browser KDJ cannot read is as good as any here");
     assert.equal(panel().querySelectorAll("select").length, 1, "profiles are no choice on this page");
     assert.equal(buttons(panel()).some(button => button.textContent === "登录"), false);
     clipboard = JSON.stringify([
@@ -247,7 +247,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     clipboardReads = 0;
     await comeBack();
     assert.equal(clipboardReads, 0, "the clipboard is not looked at before the user has gone to the browser");
-    await click("打开安装页", panel());
+    await click("安装", panel());
     assert.deepEqual(posts.at(-1), { path: "/api/accounts/youtube/login/browser/open", body: { browser: "fork", page: "extension" } });
     const exported = clipboard;
     clipboard = "https://example.com/?a=b";
@@ -258,7 +258,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     assert.equal(notice(), undefined, "and nothing is said about it");
     await click("粘贴", panel());
     assert.match(notice()!, /不是 Cookie-Editor 导出的内容/);
-    await click("在 Fork 打开", panel());
+    await click("打开", panel());
     assert.deepEqual(posts.at(-1), { path: "/api/accounts/youtube/login/browser/open", body: { browser: "fork", page: "site" } });
     clipboard = exported;
     answer = (_body, path) => path.endsWith("/login/cookies")

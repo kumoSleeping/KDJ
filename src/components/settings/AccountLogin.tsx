@@ -358,14 +358,14 @@ function BrowserPanel({ account, sourceEnabled, onBusy, onDone }: {
     {notice && <InlineNotice text={notice} className="kd-account-notice" onDismiss={() => setNotice("")} />}
     <div className="kd-account-login-actions">
       <span role="status" className="kd-account-login-status">
-        {loading ? "正在查找浏览器" : busy ? "正在读取浏览器登录" : permissionRequired ? "需要完全磁盘访问权限" : ""}
+        {loading ? "正在查找浏览器" : busy ? "正在读取" : permissionRequired ? "需要完全磁盘访问权限" : ""}
       </span>
       {busy && <Button size="sm" variant="ghost" onClick={() => {
         void cancel().catch(error => { if (alive.current) setNotice(`取消失败：${error instanceof Error ? error.message : String(error)}`); });
       }}>取消</Button>}
       {permissionRequired && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openPermissionSettings()}>开启权限</Button>}
       <Button size="sm" variant="ghost" disabled={busy || loading || !selected} onClick={() => void login()}>
-        {busy && <LoaderCircle size={13} className="kd-spin" />}{busy ? "正在登录" : "登录"}
+        {busy && <LoaderCircle size={13} className="kd-spin" />}登录
       </Button>
     </div>
   </div>;
@@ -479,20 +479,23 @@ function CookieEditorPanel({ account, sourceEnabled, onBusy, onDone }: {
         disabled={busy || loading} onClick={() => void detect()}><RefreshCw size={14} /></Button>
     </div>
     <ol className="kd-account-login-steps">
+      {/* The browser is named once, in the choice above: a key is one word, and the line is the step's. */}
       <li>
-        <span>安装 Cookie-Editor 扩展</span>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openInBrowser("extension")}>打开安装页</Button>
+        <span className="kd-truncate">安装 Cookie-Editor 扩展</span>
+        <Button size="sm" variant="ghost" disabled={busy} title={`在 ${where} 打开安装页`}
+          onClick={() => void openInBrowser("extension")}>安装</Button>
       </li>
       <li>
-        <span>打开 {account.label} 并登录</span>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openInBrowser("site")}>在 {where} 打开</Button>
+        <span className="kd-truncate" title={`登录 ${account.label}`}>登录 {account.label}</span>
+        <Button size="sm" variant="ghost" disabled={busy} title={`在 ${where} 打开 ${account.label}`}
+          onClick={() => void openInBrowser("site")}>打开</Button>
       </li>
       <li>
-        <span>点小饼干 → Export → JSON</span>
+        <span className="kd-truncate">点小饼干 → Export → JSON</span>
         <PointerDemo scene="cookie-export" label="在浏览器的工具栏上点 Cookie-Editor 的小饼干，点 Export，再选 JSON，登录就复制好了" />
       </li>
       <li>
-        <span>回到 KDJ，自动登录</span>
+        <span className="kd-truncate">回到 KDJ，自动登录</span>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void takeClipboard(true)}>粘贴</Button>
       </li>
     </ol>
@@ -549,7 +552,7 @@ function HeadersPanel({ account, sourceEnabled, onBusy, onDone }: {
     <div className="kd-account-login-actions">
       <span role="status" className="kd-account-login-status">{busy ? "正在登录" : ""}</span>
       <Button size="sm" variant="ghost" disabled={busy || !headers.trim()} onClick={() => void login()}>
-        {busy && <LoaderCircle size={13} className="kd-spin" />}{busy ? "正在登录" : "登录"}
+        {busy && <LoaderCircle size={13} className="kd-spin" />}登录
       </Button>
     </div>
   </div>;
