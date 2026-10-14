@@ -333,9 +333,10 @@ impl NeteaseProvider {
             self.recent_voices(),
         );
         let mut podcasts = Vec::new();
-        // 和「我喜欢的音乐」一样带红心排在最前；origin 不是 favorite，所以不会给出移除。
+        // 和「我喜欢的音乐」一样带红心排在最前，一条没有也在；origin 不是 favorite，
+        // 所以不会给出移除。
         match liked {
-            Ok(songs) if !songs.is_empty() => podcasts.push(StreamPlaylist {
+            Ok(songs) => podcasts.push(StreamPlaylist {
                 platform: Platform::Wyy,
                 key: LIKED_VOICES_KEY.into(),
                 title: LIKED_VOICES_TITLE.into(),
@@ -344,7 +345,6 @@ impl NeteaseProvider {
                 is_favorite: true,
                 origin: "podcast_liked".into(),
             }),
-            Ok(_) => {}
             Err(err) => tracing::warn!("读取网易云喜欢的声音失败：{err:#}"),
         }
         let mut seen = std::collections::HashSet::new();
