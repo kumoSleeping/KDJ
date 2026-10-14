@@ -166,9 +166,11 @@ function sameSong(a: TrackSummary, b: TrackSummary): boolean {
 
 /** 曲目是否落在接歌范围指定的文件夹（含子目录）内。 */
 function trackInFolderScope(track: TrackSummary, folder: string): boolean {
-  const normalized = folder.trim().replace(/\/+$/, "");
+  // Windows 上曲目的 folder 是 D:\Music\Set1，范围可能写成 D:/Music：统一成正斜杠再比。
+  const slashes = (path: string) => path.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalized = slashes(folder);
   if (!normalized) return true;
-  const trackFolder = track.folder?.trim() ?? "";
+  const trackFolder = slashes(track.folder ?? "");
   if (!trackFolder) return false;
   return trackFolder === normalized || trackFolder.startsWith(`${normalized}/`);
 }
@@ -350,7 +352,7 @@ async function firstInOrder(folder: string): Promise<Track | null> {
   try {
     let offset=0;
     for (;;) {
-      const page=await api.tracks({folder,sort,order,limit:100,offset});
+      const page=await api.tracks({folder,folder_deep:folder?true:undefined,sort,order,limit:100,offset});
       const candidate=page.items.find(t=>!isImageTrack(t.format));
       if(candidate) return await detailFor(candidate);
       offset+=page.items.length;if(!page.items.length || offset>=page.total) return null;
@@ -393,14 +395,14 @@ async function randomPick(
   excludeIds: ReadonlySet<number> = new Set(),
 ): Promise<Track | null> {
   try {
-    const probe = await api.tracks({ folder, limit: 1, offset: 0 });
+    const probe = await api.tracks({ folder, folder_deep: folder ? true : undefined, limit: 1, offset: 0 });
     if (probe.total <= 1) return null;
     let fallback: TrackSummary | null = null;
     const fresh: TrackSummary[] = [];
     const seen = new Set<number>();
     for (let attempt = 0; attempt < 8 && fresh.length < 4; attempt++) {
       const offset = Math.floor(Math.random() * probe.total);
-      const candidate = (await api.tracks({ folder, limit: 1, offset })).items[0];
+      const candidate = (await api.tracks({ folder, folder_deep: folder ? true : undefined, limit: 1, offset })).items[0];
       if (
         !candidate || isImageTrack(candidate.format) ||
         candidate.id === current.id ||
