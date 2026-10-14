@@ -3249,6 +3249,8 @@ dependencies = [
  "futures-util",
  "hex",
  "hls-transmux",
+ "http",
+ "hyper-util",
  "image",
  "kdj-core",
  "libc",

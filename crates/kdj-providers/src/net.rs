@@ -3,7 +3,8 @@
 //! 这里的三件事都是**修过的真实漏洞**，不是理论上的加固，改之前先读注释：
 //! 1. [`host_is`]：判断"是不是本平台链接"必须比对 host，不能用子串。
 //! 2. [`media_target`] + [`expand_short_link`]：短链逐跳展开，每一跳都独立校验
-//!    域名和目标 IP；代理软件的 fake-ip 不算内网目标（真实目的地由本机代理解析）。
+//!    域名和目标 IP；代理软件的 fake-ip 不算内网目标（真实目的地由本机代理解析），
+//!    系统代理生效的地址也交给代理连（见 [`system_proxy_for`]）。
 //! 3. [`AtomicDownload`]：独占临时文件，再原子且不覆盖地提交。
 
 use std::net::{IpAddr, SocketAddr};
@@ -53,8 +54,8 @@ pub fn http_timeouts(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder 
 /// 远程媒体 GET 的统一安全策略。
 ///
 /// 每一跳都会重新解析公网地址并把结果固定到该次请求；因此这里不能复用 provider
-/// 的普通 API client。普通 client 会自动重定向、使用系统代理并再次解析 DNS，恰好
-/// 绕过媒体 URL 在请求前做的安全检查。
+/// 的普通 API client。普通 client 会自动重定向并再次解析 DNS，恰好绕过媒体 URL
+/// 在请求前做的安全检查。系统代理只在它对本跳地址生效时才用，见 [`system_proxy_for`]。
 #[derive(Debug, Clone, Copy)]
 pub struct GuardedMediaPolicy {
     pub max_redirects: usize,
@@ -118,8 +119,8 @@ fn strip_cross_origin_headers(headers: &mut HeaderMap) {
     }
 }
 
-/// HTTPS 媒体 GET：禁用系统代理、自动重定向和自动 Referer，每跳校验全部 DNS
-/// 结果并通过 `resolve_to_addrs` 固定，再手动处理下一跳。
+/// HTTPS 媒体 GET：禁用自动重定向和自动 Referer，每跳校验全部 DNS 结果并通过
+/// `resolve_to_addrs` 固定，再手动处理下一跳。系统代理对本跳生效时改由代理连接。
 pub async fn guarded_media_get(
     url: &str,
     headers: &HeaderMap,
@@ -147,7 +148,8 @@ pub async fn guarded_media_get_with_host(
         let target = media_target(&current)
             .await
             .context("远程媒体地址被拒绝")?;
-        let client = guarded_media_client(host, &target, &policy)?;
+        let proxy = system_proxy_for(&current);
+        let client = guarded_media_client(host, &target, proxy, &policy)?;
         let response = client
             .get(current.clone())
             .headers(request_headers.clone())
@@ -175,18 +177,34 @@ pub async fn guarded_media_get_with_host(
     unreachable!("有限重定向循环一定会返回")
 }
 
-/// 已固定地址的受控 client 缓存。键是“主机 + 本跳校验通过的全部地址 + 超时”，
-/// 只有本跳重新解析、重新校验后得到完全相同的地址集合才会复用，复用的连接池因此
-/// 只可能连到这组已校验地址；地址集合一变就是另一个键。逐请求新建 client 会让
-/// 每次 Range seek 都重复 TCP/TLS 建链。
+/// 本跳地址该走的系统代理（环境变量优先，其次是系统设置，与普通 client 的读法相同）。
+///
+/// 起因：Windows 上常见的“系统代理”模式不改 DNS，本机解析到的是真实公网 IP；受控
+/// client 绕开代理直连这个 IP，在需要代理才能访问的网络里会在握手时被重置
+/// （`os error 10054`，SoundCloud 播放失败），而走代理的搜索却一切正常。
+///
+/// 走代理时 `resolve_to_addrs` 不再决定连到哪里，真实目的地由代理解析：与 fake-ip
+/// 一样，用户自己的代理是这台机器的信任边界。本机解析结果仍须先通过公网校验，
+/// 允许的主机、HTTPS 和逐跳重定向检查也都不变。每跳重新读取，代理开关随时生效。
+fn system_proxy_for(url: &Url) -> Option<String> {
+    let uri: http::Uri = url.as_str().parse().ok()?;
+    let intercept = hyper_util::client::proxy::matcher::Matcher::from_system().intercept(&uri)?;
+    Some(intercept.uri().to_string())
+}
+
+/// 已固定地址的受控 client 缓存。键是“主机 + 本跳校验通过的全部地址 + 代理 + 超时”，
+/// 只有本跳重新解析、重新校验后得到完全相同的地址集合才会复用，不走代理的连接池
+/// 因此只可能连到这组已校验地址；地址集合或代理一变就是另一个键。逐请求新建 client
+/// 会让每次 Range seek 都重复 TCP/TLS 建链。
 const GUARDED_MEDIA_CLIENTS: usize = 8;
-type GuardedMediaClientKey = (String, Vec<SocketAddr>, Duration, Duration);
+type GuardedMediaClientKey = (String, Vec<SocketAddr>, Option<String>, Duration, Duration);
 static GUARDED_MEDIA_CLIENT_CACHE: std::sync::Mutex<Vec<(GuardedMediaClientKey, reqwest::Client)>> =
     std::sync::Mutex::new(Vec::new());
 
 fn guarded_media_client(
     host: &str,
     target: &MediaTarget,
+    proxy: Option<String>,
     policy: &GuardedMediaPolicy,
 ) -> Result<reqwest::Client> {
     let builder = reqwest::Client::builder()
@@ -200,7 +218,13 @@ fn guarded_media_client(
         return builder.build().context("构建受控媒体客户端失败");
     };
     // `lookup_addrs` 已排序去重，同一组地址换了返回顺序仍是同一个键。
-    let key = (host.to_owned(), addrs.clone(), policy.connect_timeout, policy.read_timeout);
+    let key = (
+        host.to_owned(),
+        addrs.clone(),
+        proxy,
+        policy.connect_timeout,
+        policy.read_timeout,
+    );
     let cached = || {
         GUARDED_MEDIA_CLIENT_CACHE
             .lock()
@@ -215,10 +239,14 @@ fn guarded_media_client(
             return Ok(client);
         }
     }
-    // 建 client 要装载根证书，不占着锁做。系统代理会绕过 `resolve_to_addrs` 并让代理替我们
-    // 访问私网目标。
+    // 建 client 要装载根证书，不占着锁做。没有代理生效时必须 `no_proxy`：代理会绕过
+    // `resolve_to_addrs`；有代理时由 builder 自己读系统代理（带上代理的账号密码）。
+    let builder = if key.2.is_some() {
+        builder
+    } else {
+        builder.no_proxy()
+    };
     let client = builder
-        .no_proxy()
         .resolve_to_addrs(host, addrs)
         .build()
         .context("构建受控媒体客户端失败")?;
@@ -799,16 +827,19 @@ mod tests {
             let cache = GUARDED_MEDIA_CLIENT_CACHE.lock().unwrap();
             cache.iter().filter(|(key, _)| key.0 == host).count()
         };
-        guarded_media_client("reuse.test", &pinned([1, 1, 1, 1]), &policy).unwrap();
-        guarded_media_client("reuse.test", &pinned([1, 1, 1, 1]), &policy).unwrap();
+        guarded_media_client("reuse.test", &pinned([1, 1, 1, 1]), None, &policy).unwrap();
+        guarded_media_client("reuse.test", &pinned([1, 1, 1, 1]), None, &policy).unwrap();
         assert_eq!(entries("reuse.test"), 1, "同一组已校验地址必须复用同一个 client");
-        guarded_media_client("reuse.test", &pinned([1, 0, 0, 1]), &policy).unwrap();
+        guarded_media_client("reuse.test", &pinned([1, 0, 0, 1]), None, &policy).unwrap();
         assert_eq!(entries("reuse.test"), 2, "地址集合变化不得复用旧 client");
-        guarded_media_client("reuse.test", &MediaTarget::ProxyManaged, &policy).unwrap();
-        assert_eq!(entries("reuse.test"), 2, "fake-ip 代理模式不进缓存");
+        let proxy = Some("http://127.0.0.1:7890/".to_owned());
+        guarded_media_client("reuse.test", &pinned([1, 1, 1, 1]), proxy, &policy).unwrap();
+        assert_eq!(entries("reuse.test"), 3, "开关系统代理后不得复用直连的 client");
+        guarded_media_client("reuse.test", &MediaTarget::ProxyManaged, None, &policy).unwrap();
+        assert_eq!(entries("reuse.test"), 3, "fake-ip 代理模式不进缓存");
         for index in 0..=GUARDED_MEDIA_CLIENTS {
-            guarded_media_client(&format!("evict{index}.test"), &pinned([1, 1, 1, 1]), &policy)
-                .unwrap();
+            let host = format!("evict{index}.test");
+            guarded_media_client(&host, &pinned([1, 1, 1, 1]), None, &policy).unwrap();
         }
         assert!(GUARDED_MEDIA_CLIENT_CACHE.lock().unwrap().len() <= GUARDED_MEDIA_CLIENTS);
     }

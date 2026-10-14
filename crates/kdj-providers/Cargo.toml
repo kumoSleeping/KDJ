@@ -17,6 +17,9 @@ flate2 = "1.1.9"
 futures-util = "0.3.33"
 hex = "0.4.3"
 hls-transmux = { version = "=0.2.1", default-features = false }
+# 受控媒体请求判断系统代理是否对本跳生效，与 reqwest 读代理用的是同一个匹配器。
+http = "1"
+hyper-util = { version = "=0.1.20", default-features = false, features = ["client-proxy"] }
 # default features 会把 AVIF 编码器（rav1e）、OpenEXR、TIFF 全编进来，
 # 一次都没用到却占 597KB（实测，见 docs/rust-port/06-packaging-results.md §3）。
 # webp/gif/bmp 必须留：load_from_memory 靠嗅探魔数选解码器，
@@ -47,8 +50,10 @@ url = "2.5.8"
 rookie = { version = "0.5.6", path = "../../vendor/rookie" }
 rust-ini = "0.21"
 # GUI launches do not inherit shell proxy variables. Honor desktop OS proxies
-# for provider/tool downloads; guarded media and loopback clients opt out explicitly.
+# for provider/tool downloads and for guarded media when a proxy covers the host;
+# loopback clients opt out explicitly.
 reqwest = { version = "=0.13.4", default-features = false, features = ["system-proxy"] }
+hyper-util = { version = "=0.1.20", default-features = false, features = ["client-proxy", "client-proxy-system"] }
 tempfile = "3.27"
 zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2"] }
 # Decode only; includes the malformed-archive fixes in 0.21.3/0.21.4 and 0.22.1.
