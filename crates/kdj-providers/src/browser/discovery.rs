@@ -27,6 +27,23 @@ pub struct InstalledBrowser {
     pub(crate) executable: PathBuf,
 }
 
+/// Discovery keeps canonical paths, and on Windows a canonical path carries the `\\?\` prefix.
+/// A browser started under that name does not come up (it resolves its own files from the path
+/// it was started with), so it is started under the ordinary spelling of the same path.
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) fn plain_path(path: &std::path::Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_owned();
+    };
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{share}"))
+    } else if let Some(local) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(local)
+    } else {
+        path.to_owned()
+    }
+}
+
 pub fn installed() -> Vec<InstalledBrowser> {
     #[cfg(target_os = "macos")]
     let candidates = macos::discover();

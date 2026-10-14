@@ -16,6 +16,7 @@ use objc2_foundation::{
 };
 const MAX_SHARE_TEXT_BYTES: usize = 64 * 1024;
 const MAX_SHARE_PNG_BYTES: usize = 1024 * 1024;
+const MAX_CLIPBOARD_TEXT_BYTES: usize = 256 * 1024;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 #[cfg(target_os = "macos")]
@@ -124,6 +125,17 @@ pub fn write_share_clipboard(text: String, png: String) -> Result<(), String> {
 #[tauri::command]
 pub fn write_share_clipboard(_text: String, _png: String) -> Result<(), String> {
     Err("当前系统不支持原生图文剪贴板".into())
+}
+
+/// 剪贴板里的文字，交给登录面板。只在用户正按步骤把浏览器里导出的登录带回来时读一次：
+/// 认不出是导出内容的，面板当场丢掉。不是文字或过大时给空串；内容不进日志。
+#[tauri::command]
+pub fn read_clipboard_text() -> Result<String, String> {
+    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+        Ok(text) if text.len() <= MAX_CLIPBOARD_TEXT_BYTES => Ok(text),
+        Ok(_) | Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[cfg(test)]

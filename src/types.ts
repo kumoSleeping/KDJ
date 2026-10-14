@@ -213,6 +213,8 @@ export interface LoginBrowser {
   reuse: boolean;
   /** It can show a login window on a fresh profile. */
   window: boolean;
+  /** KDJ can open a page in it. */
+  open: boolean;
 }
 
 export interface BrowserCatalog {
@@ -1167,6 +1169,8 @@ export interface KdjBridge {
   mediaPermissionGranted: () => Promise<boolean>;
   /** 用系统浏览器开外链（Release 页等）。 */
   openExternal?: (url: string) => Promise<void>;
+  /** 剪贴板里的文字；只给登录面板取回用户导出的登录。 */
+  readClipboardText?: () => Promise<string>;
   /** 桌面独立 OAuth 窗口；同进程拦截回调，开发态无需注册 kdj://。 */
   openSoundcloudOAuth?: (url: string) => Promise<void>;
   /** 桌面：在一次性 soundcloud.com WebView 中登录，不读取外部浏览器数据。 */

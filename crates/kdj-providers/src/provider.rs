@@ -313,9 +313,13 @@ pub trait MusicProvider: Send + Sync {
         anyhow::bail!("这个平台不支持复用浏览器登录")
     }
 
-    /// Import explicitly supplied Cookie-Editor credentials through the provider's login validator.
-    async fn import_cookie_login(&self, _cookies: std::collections::BTreeMap<String, String>) -> Result<()> {
-        anyhow::bail!("这个平台不支持 Cookie 导入")
+    /// 用户自己从浏览器里导出的这个平台的登录 Cookie（名字 → 值）。和上面一样，验证通过才
+    /// 替换现有登录态。SoundCloud 和 YouTube 另有自己的入口。
+    async fn import_cookie_login(
+        &self,
+        _cookies: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        anyhow::bail!("这个平台不支持导入浏览器里导出的登录")
     }
 
     async fn search(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>>;

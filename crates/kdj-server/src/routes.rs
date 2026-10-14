@@ -82,7 +82,8 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         )
         .route("/api/accounts/{platform}/login/browsers", get(browser_catalog))
         .route("/api/accounts/{platform}/login/browser", post(browser_login))
-        .route("/api/accounts/{platform}/login/cookies", post(cookie_editor_login))
+        .route("/api/accounts/{platform}/login/browser/open", post(browser_open))
+        .route("/api/accounts/{platform}/login/cookies", post(exported_login))
         .route(
             "/api/accounts/soundcloud/login/webview",
             post(soundcloud_webview_login),
@@ -825,8 +826,39 @@ async fn soundcloud_webview_login(
     Ok(Json(account))
 }
 
-/// Explicit Cookie-Editor import. The browser extension never connects to KDJ.
-async fn cookie_editor_login(
+#[derive(Deserialize)]
+struct BrowserOpenBody {
+    browser: String,
+    /// `site`：这个平台的网站；`extension`：Cookie-Editor 的安装页。
+    page: String,
+}
+
+/// 在用户选定的浏览器里打开这个平台的网站或扩展的安装页。网址只从这里的表里取；KDJ 不从
+/// 那个浏览器读回任何东西。
+async fn browser_open(
+    AxumPath(platform): AxumPath<String>,
+    Json(payload): Json<BrowserOpenBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let url = match (payload.page.as_str(), parse_platform(&platform)?) {
+        ("extension", _) => "https://cookie-editor.com/#download",
+        ("site", Platform::Wyy) => "https://music.163.com/",
+        ("site", Platform::Qqm) => "https://y.qq.com/",
+        ("site", Platform::Bilibili) => "https://www.bilibili.com/",
+        ("site", Platform::Soundcloud) => "https://soundcloud.com/",
+        ("site", Platform::Ytm) => "https://music.youtube.com/",
+        ("site", Platform::Youtube) => "https://www.youtube.com/",
+        _ => return Err(ApiError::bad_request("没有这个页面")),
+    };
+    let browser = payload.browser;
+    tokio::task::spawn_blocking(move || kdj_providers::browser::open_page(browser.trim(), url))
+        .await
+        .map_err(|error| ApiError::bad_request(format!("打开浏览器失败：{error}")))??;
+    Ok(Json(json!({"opened": true})))
+}
+
+/// 用户在自己的浏览器里用 Cookie-Editor 导出、再交给 KDJ 的登录，前端已整理成一行
+/// `Cookie: a=b; c=d`。KDJ 和那个扩展之间没有连接。验证通过才替换现有登录态。
+async fn exported_login(
     State(state): State<Arc<AppState>>,
     AxumPath(platform): AxumPath<String>,
     Json(payload): Json<YoutubeHeadersLoginBody>,
@@ -834,21 +866,28 @@ async fn cookie_editor_login(
     let platform = parse_platform(&platform)?;
     let raw = payload.headers.trim();
     if raw.is_empty() || raw.len() > 256 * 1024 || raw.contains(['\r', '\n']) {
-        return Err(ApiError::bad_request("Cookie 内容为空、过大或包含非法换行"));
+        return Err(ApiError::bad_request("导出的内容为空、过大或带有换行"));
     }
     let mut cookies = BTreeMap::new();
     for pair in raw.strip_prefix("Cookie:").unwrap_or(raw).split(';') {
         let Some((name, value)) = pair.trim().split_once('=') else {
-            return Err(ApiError::bad_request("Cookie 格式无效"));
+            return Err(ApiError::bad_request("导出的内容格式不对"));
         };
         let (name, value) = (name.trim(), value.trim());
-        if name.is_empty() || value.is_empty()
-            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&b))
-            || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
-            return Err(ApiError::bad_request("Cookie 格式无效"));
+        if name.is_empty()
+            || value.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+.^_`|~-".contains(&b))
+            || value.chars().any(|c| c.is_control() || c.is_whitespace())
+        {
+            return Err(ApiError::bad_request("导出的内容格式不对"));
         }
-        if cookies.insert(name.to_owned(), value.to_owned()).is_some_and(|old| old != value) {
-            return Err(ApiError::bad_request("Cookie 包含冲突的登录状态"));
+        if cookies
+            .insert(name.to_owned(), value.to_owned())
+            .is_some_and(|old| old != value)
+        {
+            return Err(ApiError::bad_request("导出的内容里有两份不同的登录"));
         }
     }
     let account = match platform {
@@ -856,9 +895,13 @@ async fn cookie_editor_login(
             state.soundcloud.import_headers(raw).await?;
             state.soundcloud.account().await
         }
-        Platform::Ytm | Platform::Youtube => return Ok(Json(youtube_pasted_login(&state, platform, raw).await?)),
+        Platform::Ytm | Platform::Youtube => {
+            return Ok(Json(youtube_pasted_login(&state, platform, raw).await?))
+        }
         _ => {
-            let provider = state.provider(platform).ok_or_else(|| ApiError::bad_request("平台不可用"))?;
+            let provider = state
+                .provider(platform)
+                .ok_or_else(|| ApiError::bad_request("平台不可用"))?;
             provider.import_cookie_login(cookies).await?;
             provider.account().await
         }

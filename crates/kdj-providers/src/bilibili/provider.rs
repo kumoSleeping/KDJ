@@ -39,6 +39,8 @@ use crate::provider::{
 };
 
 const LABEL: &str = "哔哩哔哩";
+/// bilibili.com 网页登录留下的 Cookie 名单；别的一概不收。
+const WEB_LOGIN_COOKIES: &[&str] = &["SESSDATA", "bili_jct", "DedeUserID", "buvid3", "buvid4", "b_nut"];
 const BILIBILI_COVER_MAX_BYTES: usize = 12 * 1024 * 1024;
 const CHUNK_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 const QR_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -1238,6 +1240,39 @@ impl BilibiliProvider {
     }
 }
 
+impl BilibiliProvider {
+    /// 网页登录的 Cookie 换掉现有登录；验证不过就把原来的放回去。`source` 是它们的来处
+    /// （某个浏览器的配置，或用户导出的内容），只用在给用户看的话里。
+    async fn accept_web_login(
+        &self,
+        cookies: BTreeMap<String, String>,
+        source: &str,
+        trace: &crate::browser::login_trace::LoginTrace,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            cookies.contains_key("SESSDATA"),
+            "没有从{source}读取到已登录的哔哩哔哩；请先在这个浏览器登录"
+        );
+        trace.step("validate_account");
+        let previous = self.client.replace_login(&cookies)?;
+        let checked = self.client.nav().await;
+        if !checked
+            .as_ref()
+            .is_ok_and(|data| data.get("isLogin").and_then(Value::as_bool) == Some(true))
+        {
+            self.client.restore_login(previous)?;
+            return match checked {
+                Err(error) => Err(error.context("验证哔哩哔哩登录失败")),
+                Ok(_) => bail!("{source}里的哔哩哔哩登录已失效；请在浏览器重新登录后再试"),
+            };
+        }
+        self.qr_sessions.lock().unwrap().clear();
+        self.favorite_folders.lock().await.clear();
+        self.preview_urls.lock().unwrap().clear();
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl MusicProvider for BilibiliProvider {
     fn platform(&self) -> Platform {
@@ -1382,44 +1417,25 @@ impl MusicProvider for BilibiliProvider {
         trace
             .run(async {
                 trace.step("read_profile");
-                let (cookies, _source) = crate::browser::reuse_named_cookies(
+                let (cookies, source) = crate::browser::reuse_named_cookies(
                     browser,
                     profile,
                     &["bilibili.com"],
-                    &["SESSDATA", "bili_jct", "DedeUserID", "buvid3", "buvid4", "b_nut"],
+                    WEB_LOGIN_COOKIES,
                 )
                 .await?;
-                self.import_cookie_login(cookies).await
+                self.accept_web_login(cookies, &source, &trace).await
             })
             .await
     }
 
-    async fn import_cookie_login(&self, cookies: std::collections::BTreeMap<String, String>) -> Result<()> {
+    async fn import_cookie_login(&self, mut cookies: BTreeMap<String, String>) -> Result<()> {
         let trace = crate::browser::login_trace::LoginTrace::new("bilibili", "cookies");
-        let source = "导入的 Cookie";
-        trace.run(async {
-
-                anyhow::ensure!(
-                    cookies.contains_key("SESSDATA"),
-                    "没有从{source}读取到已登录的哔哩哔哩；请先在这个浏览器登录"
-                );
-                trace.step("validate_account");
-                let previous = self.client.replace_login(&cookies)?;
-                let checked = self.client.nav().await;
-                if !checked
-                    .as_ref()
-                    .is_ok_and(|data| data.get("isLogin").and_then(Value::as_bool) == Some(true))
-                {
-                    self.client.restore_login(previous)?;
-                    return match checked {
-                        Err(error) => Err(error.context("验证哔哩哔哩登录失败")),
-                        Ok(_) => bail!("{source}里的哔哩哔哩登录已失效；请在浏览器重新登录后再试"),
-                    };
-                }
-                self.qr_sessions.lock().unwrap().clear();
-                self.favorite_folders.lock().await.clear();
-                self.preview_urls.lock().unwrap().clear();
-                Ok(())
+        trace
+            .run(async {
+                cookies.retain(|name, _| WEB_LOGIN_COOKIES.contains(&name.as_str()));
+                self.accept_web_login(cookies, crate::browser::EXPORTED_LOGIN, &trace)
+                    .await
             })
             .await
     }

@@ -198,6 +198,7 @@ async function createTauriBridge(): Promise<KdjBridge> {
             image: options.image,
           }),
     openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
+    readClipboardText: desktop ? () => tauriInvoke<string>("read_clipboard_text") : undefined,
     openSoundcloudOAuth: desktop
       ? (url: string) => tauriInvoke<void>("open_soundcloud_oauth_window", { url })
       : undefined,
@@ -405,6 +406,7 @@ function createBrowserBridge(): KdjBridge {
     openExternal: async (url: string) => {
       window.open(url, "_blank", "noopener");
     },
+    readClipboardText: () => navigator.clipboard.readText(),
     checkUpdate: null,
     applyUpdate: null,
     windowControl: () => {},

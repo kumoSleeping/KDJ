@@ -32,6 +32,8 @@ use crate::provider::{
 use crate::tags;
 
 const LABEL: &str = "网易云音乐";
+/// music.163.com 网页登录留下的 Cookie 名单；别的一概不收。
+const WEB_LOGIN_COOKIES: &[&str] = &["MUSIC_U", "__csrf", "NMTID"];
 const QR_SESSION_TTL_SECS: u64 = 15 * 60;
 const SEARCH_KINDS: &[SearchKind] = &[
     SearchKind::Song,
@@ -527,6 +529,44 @@ impl NeteaseProvider {
     }
 }
 
+impl NeteaseProvider {
+    /// 网页登录的 Cookie 换掉现有登录；验证不过就把原来的放回去。`source` 是它们的来处
+    /// （某个浏览器的配置，或用户导出的内容），只用在给用户看的话里。
+    async fn accept_web_login(
+        &self,
+        cookies: std::collections::BTreeMap<String, String>,
+        source: &str,
+        trace: &crate::browser::login_trace::LoginTrace,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            cookies.contains_key("MUSIC_U"),
+            "没有从{source}读取到已登录的网易云音乐；请先在这个浏览器登录"
+        );
+        trace.step("validate_account");
+        let previous = self.client.replace_login(cookies)?;
+        let status = self
+            .client
+            .weapi("/weapi/w/nuser/account/get", Map::new())
+            .await;
+        let signed_in = status.as_ref().is_ok_and(|status| {
+            let data = status.get("data").unwrap_or(status);
+            data.get("profile").is_some_and(|profile| !profile.is_null())
+                && data.pointer("/account/id").is_some()
+        });
+        if !signed_in {
+            self.client.restore_login(previous)?;
+            return match status {
+                Err(error) => Err(error.context("验证网易云登录失败")),
+                Ok(_) => bail!("{source}里的网易云登录已失效；请在浏览器重新登录后再试"),
+            };
+        }
+        trace.step("save_session");
+        self.client.set_profile(status.ok())?;
+        self.qr_sessions.lock().unwrap().clear();
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl MusicProvider for NeteaseProvider {
     fn platform(&self) -> Platform {
@@ -752,50 +792,28 @@ impl MusicProvider for NeteaseProvider {
         trace
             .run(async {
                 trace.step("read_profile");
-                let (cookies, _source) = crate::browser::reuse_named_cookies(
+                let (cookies, source) = crate::browser::reuse_named_cookies(
                     browser,
                     profile,
                     &["163.com"],
-                    &["MUSIC_U", "__csrf", "NMTID"],
+                    WEB_LOGIN_COOKIES,
                 )
                 .await?;
-                self.import_cookie_login(cookies).await
+                self.accept_web_login(cookies, &source, &trace).await
             })
             .await
     }
 
-    async fn import_cookie_login(&self, mut cookies: std::collections::BTreeMap<String, String>) -> Result<()> {
+    async fn import_cookie_login(
+        &self,
+        mut cookies: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
         let trace = crate::browser::login_trace::LoginTrace::new("wyy", "cookies");
-        let source = "导入的 Cookie";
-        trace.run(async {
-                cookies.retain(|name, _| matches!(name.as_str(), "MUSIC_U" | "__csrf" | "NMTID"));
-
-                anyhow::ensure!(
-                    cookies.contains_key("MUSIC_U"),
-                    "没有从{source}读取到已登录的网易云音乐；请先在这个浏览器登录"
-                );
-                trace.step("validate_account");
-                let previous = self.client.replace_login(cookies)?;
-                let status = self
-                    .client
-                    .weapi("/weapi/w/nuser/account/get", Map::new())
-                    .await;
-                let signed_in = status.as_ref().is_ok_and(|status| {
-                    let data = status.get("data").unwrap_or(status);
-                    data.get("profile").is_some_and(|profile| !profile.is_null())
-                        && data.pointer("/account/id").is_some()
-                });
-                if !signed_in {
-                    self.client.restore_login(previous)?;
-                    return match status {
-                        Err(error) => Err(error.context("验证网易云登录失败")),
-                        Ok(_) => bail!("{source}里的网易云登录已失效；请在浏览器重新登录后再试"),
-                    };
-                }
-                trace.step("save_session");
-                self.client.set_profile(status.ok())?;
-                self.qr_sessions.lock().unwrap().clear();
-                Ok(())
+        trace
+            .run(async {
+                cookies.retain(|name, _| WEB_LOGIN_COOKIES.contains(&name.as_str()));
+                self.accept_web_login(cookies, crate::browser::EXPORTED_LOGIN, &trace)
+                    .await
             })
             .await
     }

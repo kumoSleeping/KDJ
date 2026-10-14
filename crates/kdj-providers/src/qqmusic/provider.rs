@@ -884,6 +884,46 @@ impl QqMusicProvider {
     }
 }
 
+impl QqMusicProvider {
+    /// y.qq.com 网页登录的 Cookie 换掉现有登录；验证不过就把原来的放回去。`source` 是它们
+    /// 的来处（某个浏览器的配置，或用户导出的内容），只用在给用户看的话里。
+    async fn accept_web_login(
+        &self,
+        cookies: std::collections::BTreeMap<String, String>,
+        source: &str,
+        trace: &crate::browser::login_trace::LoginTrace,
+    ) -> Result<()> {
+        let credential = super::client::credential_from_web_cookies(&cookies).with_context(|| {
+            format!("没有从{source}读取到已登录的 QQ 音乐；请先在这个浏览器登录 y.qq.com")
+        })?;
+        trace.step("validate_account");
+        let previous = self.client.credential();
+        let uin = credential.str_musicid();
+        self.client.store_credential(credential)?;
+        // 读自己的歌单要登录态；票据无效时接口回 1000，这里就不留下这份凭证。
+        let checked = self
+            .client
+            .call(
+                "music.musicasset.PlaylistBaseRead",
+                "GetPlaylistByUin",
+                json!({ "uin": uin }),
+                QqPlatform::Desktop,
+            )
+            .await;
+        if let Err(error) = checked {
+            if previous.is_present() {
+                self.client.store_credential(previous)?;
+            } else {
+                self.client.clear_credential()?;
+            }
+            return Err(error.context(format!("{source}里的 QQ 音乐登录没有通过验证")));
+        }
+        *self.profile.lock().unwrap() = None;
+        self.qr_sessions.lock().unwrap().clear();
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl MusicProvider for QqMusicProvider {
     fn platform(&self) -> Platform {
@@ -1084,53 +1124,25 @@ impl MusicProvider for QqMusicProvider {
         trace
             .run(async {
                 trace.step("read_profile");
-                let (cookies, _source) = crate::browser::reuse_named_cookies(
+                let (cookies, source) = crate::browser::reuse_named_cookies(
                     browser,
                     profile,
                     &["qq.com"],
                     super::client::WEB_LOGIN_COOKIES,
                 )
                 .await?;
-                self.import_cookie_login(cookies).await
+                self.accept_web_login(cookies, &source, &trace).await
             })
             .await
     }
 
-    async fn import_cookie_login(&self, cookies: std::collections::BTreeMap<String, String>) -> Result<()> {
+    async fn import_cookie_login(
+        &self,
+        cookies: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
         let trace = crate::browser::login_trace::LoginTrace::new("qqm", "cookies");
-        let source = "导入的 Cookie";
-        trace.run(async {
-
-                let credential = super::client::credential_from_web_cookies(&cookies)
-                    .with_context(|| {
-                        format!("没有从{source}读取到已登录的 QQ 音乐；请先在这个浏览器登录 y.qq.com")
-                    })?;
-                trace.step("validate_account");
-                let previous = self.client.credential();
-                let uin = credential.str_musicid();
-                self.client.store_credential(credential)?;
-                // 读自己的歌单要登录态；票据无效时接口回 1000，这里就不留下这份凭证。
-                let checked = self
-                    .client
-                    .call(
-                        "music.musicasset.PlaylistBaseRead",
-                        "GetPlaylistByUin",
-                        json!({ "uin": uin }),
-                        QqPlatform::Desktop,
-                    )
-                    .await;
-                if let Err(error) = checked {
-                    if previous.is_present() {
-                        self.client.store_credential(previous)?;
-                    } else {
-                        self.client.clear_credential()?;
-                    }
-                    return Err(error.context(format!("{source}里的 QQ 音乐登录没有通过验证")));
-                }
-                *self.profile.lock().unwrap() = None;
-                self.qr_sessions.lock().unwrap().clear();
-                Ok(())
-            })
+        trace
+            .run(self.accept_web_login(cookies, crate::browser::EXPORTED_LOGIN, &trace))
             .await
     }
 

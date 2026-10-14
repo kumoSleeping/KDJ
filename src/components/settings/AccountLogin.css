@@ -41,14 +41,31 @@
 .kd-account-login-panel .kd-textarea { display: block; width: 100%; box-sizing: border-box; font-size: var(--kd-size-xs); resize: vertical; }
 .kd-account-login-controls { display: flex; align-items: center; gap: 0.5rem; }
 .kd-account-login-controls .kd-select-control { flex: 1; min-width: 0; }
-.kd-account-cookie-guide { margin: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); line-height: 1.6; }
+/* Bringing a login over by hand: each step is its number, what to do, and the key that does it.
+   The numbers stand in the column of the icons of the ways above. */
+.kd-account-login-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.15rem; counter-reset: kd-login-step; }
+.kd-account-login-steps li {
+  counter-increment: kd-login-step;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 1.75rem;
+}
+.kd-account-login-steps li::before {
+  content: counter(kd-login-step);
+  color: var(--kd-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
 .kd-account-login-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
 }
-.kd-account-login-status { min-width: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); }
+/* The status takes the room that is left, so the keys of the row stand together at its end. */
+.kd-account-login-status { flex: 1; min-width: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); }
 
 /* The code to scan stands in the account's own row. Its paper is white because a code has to be. */
 .kd-account-login-qr { display: flex; gap: 0.75rem; }

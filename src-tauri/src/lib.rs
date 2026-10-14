@@ -3152,6 +3152,7 @@ pub fn run() {
         open_path,
         reveal_path,
         share_clipboard::write_share_clipboard,
+        share_clipboard::read_clipboard_text,
         desktop_lyrics_hit_test::set_desktop_lyrics_drag_regions,
         start_native_file_drag,
         workshop_import_files,

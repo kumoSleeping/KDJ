@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ClipboardPaste, Globe2, LoaderCircle, LogIn, QrCode, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
-import { cookieEditorHeaders, MAX_COOKIE_IMPORT_BYTES } from "../../lib/cookieEditorImport";
+import { exportedLoginHeaders, LOGIN_SITES } from "../../lib/cookieEditorImport";
 import { motion } from "../../lib/motion";
 import { useAppStore } from "../../stores/appStore";
 import type { Account, BrowserCatalog, Platform, QrStateValue, QrVariant } from "../../types";
@@ -11,13 +11,12 @@ import { Button, InlineNotice } from "../common";
 import { Select } from "../common/Select";
 import "./AccountLogin.css";
 
-type Method = "qr" | "cookies" | "browser" | "webview" | "headers";
+type Method = "qr" | "browser" | "webview" | "headers";
 interface WindowResult { status: "done" | "error" | "cancelled" | "browser_required"; message: string }
 
 const METHODS: Record<Method, { label: string; icon: typeof Globe2 }> = {
   qr: { label: "扫码", icon: QrCode },
-  cookies: { label: "从 Cookie-Editor 导入", icon: ClipboardPaste },
-  browser: { label: "从浏览器导入（部分支持）", icon: Globe2 },
+  browser: { label: "复用浏览器", icon: Globe2 },
   webview: { label: "登录窗口", icon: LogIn },
   headers: { label: "请求头", icon: ClipboardPaste },
 };
@@ -40,7 +39,7 @@ const QR_POLL_MS = 1500;
 
 /** The ways one account can be logged in on a desktop, in the order they are offered. */
 export function loginMethods(account: Account): Method[] {
-  return account.login_method === "qr" ? ["qr", "cookies", "browser"] : ["cookies", "browser", "webview", "headers"];
+  return account.login_method === "qr" ? ["qr", "browser"] : ["browser", "webview", "headers"];
 }
 
 /**
@@ -114,9 +113,8 @@ export function AccountLogin({ account, sourceEnabled, onDone }: {
     </ul>
     {windowNotice && <InlineNotice text={windowNotice} className="kd-account-notice" onDismiss={() => setWindowNotice("")} />}
     {method === "qr" && <QrPanel account={account} onDone={onDone} />}
-    {method === "cookies" && <CookieEditorPanel account={account} sourceEnabled={sourceEnabled} onBusy={setPanelBusy} onDone={onDone} />}
-    {(method === "browser" || method === "headers") && <LoginPanel key={method} account={account} method={method}
-      sourceEnabled={sourceEnabled} onBusy={setPanelBusy} onDone={onDone} />}
+    {method === "browser" && <BrowserPanel account={account} sourceEnabled={sourceEnabled} onBusy={setPanelBusy} onDone={onDone} />}
+    {method === "headers" && <HeadersPanel account={account} sourceEnabled={sourceEnabled} onBusy={setPanelBusy} onDone={onDone} />}
   </>;
 }
 
@@ -181,32 +179,38 @@ function QrPanel({ account, onDone }: { account: Account; onDone(): void }) {
   </div>;
 }
 
-function LoginPanel({ account, method, sourceEnabled, onBusy, onDone }: {
-  account: Account; method: "browser" | "headers"; sourceEnabled: boolean;
-  onBusy(busy: boolean): void; onDone(): void;
+/**
+ * 复用浏览器. The browser is chosen first. One whose login KDJ can read is read on 登录. One it
+ * cannot read (or, when the user asks, one whose read failed) goes on in that same browser: KDJ
+ * opens the site there, the user exports the login with the Cookie-Editor extension, and KDJ takes
+ * it from the clipboard when its window is returned to.
+ */
+function BrowserPanel({ account, sourceEnabled, onBusy, onDone }: {
+  account: Account; sourceEnabled: boolean; onBusy(busy: boolean): void; onDone(): void;
 }) {
   const platform = account.platform;
   const setAccount = useAppStore(state => state.setAccount);
   const [catalog, setCatalog] = useState<BrowserCatalog | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusyState] = useState(false);
-  const [inWindow, setInWindow] = useState(false);
   const [browser, setBrowser] = useState("");
   const [profile, setProfile] = useState("");
-  const [headers, setHeaders] = useState("");
   const [notice, setNotice] = useState("");
   const [permissionRequired, setPermissionRequired] = useState(false);
+  const [readFailed, setReadFailed] = useState(false);
+  const [byExport, setByExport] = useState(false);
+  const [pasteBox, setPasteBox] = useState(false);
   const permissionReturn = useRef(false);
   const alive = useRef(true);
   const detection = useRef(0);
   const attempt = useRef<string | null>(null);
   const cancelled = useRef(false);
-  const reuse = method === "browser";
+  // The user has gone to the browser from here: on their return the clipboard is looked at.
+  const awaited = useRef(false);
+  const taking = useRef(false);
   const selected = catalog?.browsers.find(item => item.id === browser);
-  const profiles = selected?.profiles ?? [];
-  // Only SoundCloud goes on in a window of the chosen browser when its login cannot be read:
-  // Google refuses to sign in to a browser started that way, and the others have a code to scan.
-  const windowFallback = platform === "soundcloud";
+  const profiles = selected?.reuse ? selected.profiles : [];
+  const exporting = !!selected && (!selected.reuse || byExport);
 
   // The parent keeps the other choices still while a login is under way.
   const setBusy = (value: boolean) => { setBusyState(value); onBusy(value); };
@@ -243,66 +247,54 @@ function LoginPanel({ account, method, sourceEnabled, onBusy, onDone }: {
     }
   };
 
-  useEffect(() => { if (reuse) void detect(); }, []);
+  useEffect(() => { void detect(); }, []);
 
-  /** One request the 取消 key can stop. */
-  const request = async (fresh: boolean) => {
-    const id = crypto.randomUUID();
-    attempt.current = id;
-    try {
-      return await api.browserLogin(platform, {
-        browser, request_id: id, window: fresh,
-        profile: fresh ? undefined : profiles.find(item => item.id === profile)?.id ?? profiles[0]?.id,
-      });
-    } finally { attempt.current = null; }
+  // SoundCloud and YouTube refuse a login while their source is switched off.
+  const sourceReady = () => {
+    if (account.login_method === "qr" || sourceEnabled) return true;
+    setNotice(`请先开启 ${account.label} 下载源`);
+    return false;
   };
 
-  const fromBrowser = async (): Promise<Account> => {
-    if (!selected) throw new Error("请选择浏览器");
-    const canOpenWindow = windowFallback && selected.window;
-    if (!selected.reuse && !canOpenWindow) throw new Error(`${selected.label} 里没有可读取的登录`);
-    if (selected.reuse) {
-      try { return await request(false); }
-      catch (error) {
-        // What could not be read is not reported while the same browser can still log in afresh.
-        if (!canOpenWindow || cancelled.current || !alive.current) throw error;
-      }
-    }
-    setInWindow(true);
-    return await request(true);
+  const finish = (result: Account) => {
+    try { localStorage.setItem(`kdj.login.browser.${platform}`, browser); } catch { /* login remains valid */ }
+    setBusy(false);
+    setAccount(result);
+    onDone();
   };
 
   const login = async (afterPermissionSettings = false) => {
     permissionReturn.current = false;
-    // SoundCloud and YouTube refuse a login while their source is switched off.
-    if (account.login_method !== "qr" && !sourceEnabled) { setNotice(`请先开启 ${account.label} 下载源`); return; }
+    if (!selected || !sourceReady()) return;
     cancelled.current = false;
     setBusy(true);
-    setInWindow(false);
     setNotice("");
     setPermissionRequired(false);
+    setReadFailed(false);
+    const id = crypto.randomUUID();
+    attempt.current = id;
     try {
-      const result = reuse ? await fromBrowser()
-        : await (platform === "soundcloud" ? api.soundcloudHeadersLogin(headers)
-          : platform === "ytm" ? api.ytmHeadersLogin(headers) : api.youtubeHeadersLogin(headers));
-      if (reuse) {
-        try { localStorage.setItem(`kdj.login.browser.${platform}`, browser); } catch { /* login remains valid */ }
-      }
-      if (alive.current) { setHeaders(""); setBusy(false); setAccount(result); onDone(); }
+      const result = await api.browserLogin(platform, {
+        browser, request_id: id, profile: profiles.find(item => item.id === profile)?.id ?? profiles[0]?.id,
+      });
+      if (alive.current) finish(result);
     } catch (error) {
       if (!alive.current) return;
       const message = error instanceof Error ? error.message : String(error);
       setBusy(false);
       // A login the user stopped is not a failure to report.
       if (cancelled.current) return;
-      if (reuse && getBridge().platform === "darwin" && message.includes("macOS 拒绝访问 Safari 登录数据")) {
+      if (getBridge().platform === "darwin" && message.includes("macOS 拒绝访问 Safari 登录数据")) {
         setPermissionRequired(true);
         if (afterPermissionSettings) setNotice(import.meta.env.DEV
           ? "macOS 仍拒绝访问 Safari 登录数据。当前是开发版；请核对 KDJ Dev 或启动它的应用是否获准，正式版 KDJ 的权限不代表开发版已获准。"
           : "macOS 仍拒绝访问 Safari 登录数据；请核对当前 KDJ 的完全磁盘访问权限，已允许则退出并重新打开 KDJ。");
         return;
       }
+      setReadFailed(true);
       setNotice(`登录失败：${message}`);
+    } finally {
+      if (attempt.current === id) attempt.current = null;
     }
   };
 
@@ -322,18 +314,77 @@ function LoginPanel({ account, method, sourceEnabled, onBusy, onDone }: {
     }
   };
 
+  /** The site, or the extension's page, in the chosen browser: never in whichever is the default. */
+  const openInBrowser = async (page: "site" | "extension") => {
+    if (!selected) return;
+    setNotice("");
+    try {
+      await api.browserOpen(platform, selected.id, page);
+      awaited.current = true;
+    } catch (error) {
+      if (alive.current) setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  /** Logs in with an export. What is not one is said only when the user handed it over (`asked`). */
+  const takeExport = async (text: string, asked: boolean) => {
+    let headers: string;
+    try { headers = exportedLoginHeaders(text, platform); }
+    catch (error) {
+      if (asked) setNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (!sourceReady()) return;
+    awaited.current = false;
+    setBusy(true);
+    setNotice("");
+    try {
+      const result = await api.exportedLogin(platform, headers);
+      if (alive.current) finish(result);
+    } catch (error) {
+      if (!alive.current) return;
+      setBusy(false);
+      setNotice(`登录失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const takeClipboard = async (asked: boolean) => {
+    if (taking.current) return;
+    taking.current = true;
+    try {
+      let text: string;
+      try {
+        const read = getBridge().readClipboardText;
+        if (!read) throw new Error("no clipboard");
+        text = await read();
+      } catch {
+        // The clipboard cannot be read here: the user pastes into a field instead.
+        if (asked && alive.current) setPasteBox(true);
+        return;
+      }
+      if (alive.current) await takeExport(text, asked);
+    } finally { taking.current = false; }
+  };
+
   useEffect(() => {
     setPermissionRequired(false);
+    setReadFailed(false);
+    setByExport(false);
+    setPasteBox(false);
     permissionReturn.current = false;
-  }, [browser, profile]);
+    awaited.current = false;
+  }, [browser, profile, catalog]);
 
-  // Returning from Settings resumes only the login the user explicitly started.
+  // Coming back to the window goes on with what the user started from here, and only that: the
+  // login after the permission page, or the export after the browser.
   // Consume the intent before requesting so focus + visibility events cannot duplicate it.
   useEffect(() => {
     const resume = () => {
-      if (!alive.current || busy || !permissionReturn.current || document.visibilityState === "hidden") return;
-      permissionReturn.current = false;
-      void login(true);
+      if (!alive.current || busy || document.visibilityState === "hidden") return;
+      if (permissionReturn.current) {
+        permissionReturn.current = false;
+        void login(true);
+      } else if (exporting && awaited.current) void takeClipboard(false);
     };
     window.addEventListener("focus", resume);
     document.addEventListener("visibilitychange", resume);
@@ -343,11 +394,9 @@ function LoginPanel({ account, method, sourceEnabled, onBusy, onDone }: {
     };
   });
 
-  const canLogin = !busy && !loading && (reuse ? !!selected : !!headers.trim());
-
-  return <div className="kd-account-login-panel" role="group" aria-label={`${account.label} · ${METHODS[method].label}`} {...motion("fade")}
+  return <div className="kd-account-login-panel" role="group" aria-label={`${account.label} · ${METHODS.browser.label}`} {...motion("fade")}
     onKeyDown={event => event.stopPropagation()}>
-    {reuse && <div className="kd-account-login-controls">
+    <div className="kd-account-login-controls">
       {!!catalog?.browsers.length && <Select aria-label={`${account.label} 浏览器`} value={browser}
         disabled={busy || loading} onChange={event => { setBrowser(event.currentTarget.value); setProfile(""); setNotice(""); }}>
         {catalog.browsers.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
@@ -359,114 +408,87 @@ function LoginPanel({ account, method, sourceEnabled, onBusy, onDone }: {
       </Select>}
       <Button size="sm" variant="ghost" iconOnly aria-label="重新检测浏览器" title="重新检测浏览器"
         disabled={busy || loading} onClick={() => void detect()}><RefreshCw size={14} /></Button>
-    </div>}
-    {!reuse && <textarea className="kd-textarea" rows={6} aria-label={`${account.label} 请求头`}
-      autoFocus autoComplete="off" autoCorrect="off" spellCheck={false} value={headers} disabled={busy}
-      onChange={event => setHeaders(event.currentTarget.value)} />}
+    </div>
+    {exporting && <ol className="kd-account-login-steps" aria-label={`从 ${selected.label} 带回登录`} {...motion("fade")}>
+      <li>
+        <span>登录 {account.label}{selected.open ? "" : `（${LOGIN_SITES[platform]}）`}</span>
+        {selected.open && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openInBrowser("site")}>在 {selected.label} 打开</Button>}
+      </li>
+      <li>
+        <span>点 Cookie-Editor → Export → JSON</span>
+        {selected.open && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openInBrowser("extension")}>安装</Button>}
+      </li>
+      <li>
+        <span>回到 KDJ，自动登录</span>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void takeClipboard(true)}>粘贴</Button>
+      </li>
+    </ol>}
+    {/* What is pasted is taken, never shown: it is a login. */}
+    {exporting && pasteBox && <textarea className="kd-textarea" rows={2} aria-label={`${account.label} 导出的登录`}
+      placeholder="在这里粘贴" autoFocus autoComplete="off" autoCorrect="off" spellCheck={false} value="" disabled={busy}
+      onChange={() => {}} onPaste={event => {
+        event.preventDefault();
+        void takeExport(event.clipboardData.getData("text"), true);
+      }} />}
     {notice && <InlineNotice text={notice} className="kd-account-notice" onDismiss={() => setNotice("")} />}
-    <div className="kd-account-login-actions">
+    {(!exporting || busy) && <div className="kd-account-login-actions">
       <span role="status" className="kd-account-login-status">
-        {loading ? "正在查找浏览器" : busy ? inWindow ? "请在打开的浏览器窗口登录" : reuse ? "正在读取浏览器登录" : "正在登录"
+        {loading ? "正在查找浏览器" : busy ? exporting ? "正在登录" : "正在读取浏览器登录"
           : permissionRequired ? "需要完全磁盘访问权限" : ""}
       </span>
-      {busy && reuse && <Button size="sm" variant="ghost" onClick={() => {
+      {busy && !exporting && <Button size="sm" variant="ghost" onClick={() => {
         void cancel().catch(error => { if (alive.current) setNotice(`取消失败：${error instanceof Error ? error.message : String(error)}`); });
       }}>取消</Button>}
       {permissionRequired && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openPermissionSettings()}>开启权限</Button>}
-      <Button size="sm" variant="ghost" disabled={!canLogin} onClick={() => void login()}>
+      {readFailed && !busy && <Button size="sm" variant="ghost" onClick={() => { setNotice(""); setByExport(true); }}>用 Cookie-Editor 导入</Button>}
+      {!exporting && <Button size="sm" variant="ghost" disabled={busy || loading || !selected} onClick={() => void login()}>
         {busy && <LoaderCircle size={13} className="kd-spin" />}{busy ? "正在登录" : "登录"}
-      </Button>
-    </div>
+      </Button>}
+    </div>}
   </div>;
 }
 
-function CookieEditorPanel({ account, sourceEnabled, onBusy, onDone }: {
-  account: Account; sourceEnabled: boolean; onBusy(value: boolean): void; onDone(): void;
+/** 请求头: the request headers copied out of a browser's developer tools, for when nothing else works. */
+function HeadersPanel({ account, sourceEnabled, onBusy, onDone }: {
+  account: Account; sourceEnabled: boolean; onBusy(busy: boolean): void; onDone(): void;
 }) {
-  const [content, setContent] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [reading, setReading] = useState(false);
-  const [notice, setNotice] = useState("");
-  const fileInput = useRef<HTMLInputElement>(null);
-  const alive = useRef(true);
-  const working = useRef(false);
+  const platform = account.platform;
   const setAccount = useAppStore(state => state.setAccount);
-  const locked = busy || reading;
+  const [headers, setHeaders] = useState("");
+  const [busy, setBusyState] = useState(false);
+  const [notice, setNotice] = useState("");
+  const alive = useRef(true);
+  const setBusy = (value: boolean) => { setBusyState(value); onBusy(value); };
   useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; onBusy(false); };
   }, []);
 
-  const install = async () => {
+  const login = async () => {
+    if (!sourceEnabled) { setNotice(`请先开启 ${account.label} 下载源`); return; }
+    setBusy(true);
     setNotice("");
     try {
-      const open = getBridge().openExternal;
-      if (!open) throw new Error("当前环境无法打开浏览器");
-      await open("https://cookie-editor.com/#download");
-    } catch { if (alive.current) setNotice("无法打开安装页面"); }
-  };
-
-  const importCookies = async (clipboard = false) => {
-    if (working.current) return;
-    if (account.login_method !== "qr" && !sourceEnabled) {
-      setNotice(`请先开启 ${account.label} 下载源`); return;
-    }
-    working.current = true;
-    setBusy(true); onBusy(true); setNotice("");
-    try {
-      let raw = content;
-      if (clipboard) {
-        try { raw = await navigator.clipboard.readText(); }
-        catch { throw new Error("无法读取剪贴板，请直接粘贴到输入框后导入"); }
-      }
-      if (!alive.current) return;
-      const headers = cookieEditorHeaders(raw, account.platform);
-      const result = await api.cookieEditorLogin(account.platform, headers);
-      if (alive.current) { setContent(""); setAccount(result); onDone(); }
+      const result = await (platform === "soundcloud" ? api.soundcloudHeadersLogin(headers)
+        : platform === "ytm" ? api.ytmHeadersLogin(headers) : api.youtubeHeadersLogin(headers));
+      if (alive.current) { setHeaders(""); setBusy(false); setAccount(result); onDone(); }
     } catch (error) {
-      if (alive.current) setNotice(error instanceof Error ? error.message : "导入失败");
-    } finally {
-      working.current = false;
-      if (alive.current) { setBusy(false); onBusy(false); }
+      if (!alive.current) return;
+      setBusy(false);
+      setNotice(`登录失败：${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
-  const readFile = async (file: File) => {
-    if (working.current) return;
-    setNotice(""); setContent("");
-    if (file.size > MAX_COOKIE_IMPORT_BYTES) { setNotice("Cookie 文件过大，请只导出当前站点"); return; }
-    working.current = true; setReading(true); onBusy(true);
-    try { const text = await file.text(); if (alive.current) setContent(text); }
-    catch { if (alive.current) setNotice("无法读取 Cookie 文件"); }
-    finally {
-      working.current = false;
-      if (alive.current) { setReading(false); onBusy(false); }
-    }
-  };
-
-  return <div className="kd-account-login-panel" role="group" aria-label={`${account.label} · Cookie-Editor`}
-    {...motion("fade")} onKeyDown={event => event.stopPropagation()}>
-    <div className="kd-account-login-controls">
-      <Button size="sm" variant="ghost" disabled={locked} onClick={() => void install()}>安装 Cookie-Editor</Button>
-      <input ref={fileInput} type="file" accept=".json,.txt,application/json,text/plain" hidden disabled={locked}
-        onChange={event => {
-          const file = event.currentTarget.files?.[0]; event.currentTarget.value = "";
-          if (file) void readFile(file);
-        }} />
-      <Button size="sm" variant="ghost" disabled={locked} onClick={() => fileInput.current?.click()}>选择文件</Button>
-    </div>
-    <p className="kd-account-cookie-guide">
-      在已登录的{account.label}站点打开 Cookie-Editor，选择导出 → JSON，回到这里粘贴并导入。Cookie 等同登录凭证，请勿分享。
-    </p>
-    <textarea className="kd-textarea" rows={6} aria-label={`${account.label} Cookie-Editor 导出内容`}
-      autoFocus autoComplete="off" autoCorrect="off" spellCheck={false} value={content} disabled={locked}
-      onChange={event => setContent(event.currentTarget.value)} />
+  return <div className="kd-account-login-panel" role="group" aria-label={`${account.label} · ${METHODS.headers.label}`} {...motion("fade")}
+    onKeyDown={event => event.stopPropagation()}>
+    <textarea className="kd-textarea" rows={6} aria-label={`${account.label} 请求头`}
+      autoFocus autoComplete="off" autoCorrect="off" spellCheck={false} value={headers} disabled={busy}
+      onChange={event => setHeaders(event.currentTarget.value)} />
     {notice && <InlineNotice text={notice} className="kd-account-notice" onDismiss={() => setNotice("")} />}
     <div className="kd-account-login-actions">
-      <span role="status" className="kd-account-login-status">{reading ? "正在读取文件" : busy ? "正在验证登录" : ""}</span>
-      <Button size="sm" variant="ghost" disabled={locked} onClick={() => void importCookies(true)}>粘贴并导入</Button>
-      <Button size="sm" variant="ghost" disabled={locked || !content.trim()} onClick={() => void importCookies()}>
-        {busy && <LoaderCircle size={13} className="kd-spin" />}导入
+      <span role="status" className="kd-account-login-status">{busy ? "正在登录" : ""}</span>
+      <Button size="sm" variant="ghost" disabled={busy || !headers.trim()} onClick={() => void login()}>
+        {busy && <LoaderCircle size={13} className="kd-spin" />}{busy ? "正在登录" : "登录"}
       </Button>
     </div>
   </div>;

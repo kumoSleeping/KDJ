@@ -1,5 +1,7 @@
 //! 桌面浏览器登录的复用：枚举本机浏览器和它们的配置，从用户选定的那一个里读限定域名的
 //! Cookie。读不到磁盘配置的两种情况（Arc 的系统自动化、临时登录窗口）在 `authorization`。
+//! 哪条路都读不了的浏览器，KDJ 只替用户在它里面打开网页（`open_page`），登录由用户自己用
+//! 扩展导出再交回来。
 //!
 //! 前端只接触短 id 和可读名称；数据库路径、Cookie 内容与解密过程始终留在 Rust 进程内。
 //! 所有 provider 共用这里，避免各自维护一份浏览器名单和配置选择规则。
@@ -23,7 +25,7 @@ pub struct BrowserProfileOption {
 }
 
 /// 一个可以拿来登录的浏览器。`reuse`：它已有的登录可以直接读；`window`：它能开一个
-/// 临时登录窗口。两者都是能力，不代表这一次一定成功。
+/// 临时登录窗口；`open`：KDJ 能在它里面打开一个网页。都是能力，不代表这一次一定成功。
 #[derive(Debug, Clone, Serialize)]
 pub struct LoginBrowser {
     pub id: String,
@@ -31,7 +33,11 @@ pub struct LoginBrowser {
     pub profiles: Vec<BrowserProfileOption>,
     pub reuse: bool,
     pub window: bool,
+    pub open: bool,
 }
+
+/// 用户导出的登录在给用户看的话里叫什么（对应读取时的「Chrome · 默认」）。
+pub(crate) const EXPORTED_LOGIN: &str = "导出的内容";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserCatalog {
@@ -41,8 +47,8 @@ pub struct BrowserCatalog {
 }
 
 /// 只枚举本机实际存在的浏览器和配置，不打开 Cookie 数据库，也不会触发钥匙串。
-/// `windows`：这个平台读不到已有登录时会在浏览器里开临时窗口（SoundCloud、YouTube），所以
-/// 只能开窗口的浏览器也列出来，Arc 走它的系统自动化、不选配置。其余平台只列读得到登录的。
+/// 认得出是浏览器的安装都列出来：读不了已有登录的那些，用户仍可以在里面导出登录。
+/// `windows`：这个平台能在浏览器里开临时窗口（SoundCloud），Arc 走它的系统自动化、不选配置。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn catalog(windows: bool) -> BrowserCatalog {
     let mut browsers = Vec::new();
@@ -57,16 +63,23 @@ pub fn catalog(windows: bool) -> BrowserCatalog {
         } else {
             installation_profiles(&installation)
         };
-        let reuse = automated || !profiles.is_empty();
+        // Windows 上的 Chromium 运行时锁住 Cookie 库，密钥又绑定在浏览器自身：不去试。
+        let locked = cfg!(target_os = "windows")
+            && installation.engine == Some(discovery::BrowserEngine::Chromium);
+        let reuse = automated || (!profiles.is_empty() && !locked);
         let window = windows && installation.window_supported;
-        if reuse || window {
-            browsers.push(login_browser(
+        // 系统登记的网页处理应用不都是浏览器：认得内核或认得厂商的才算。
+        let open = installation.engine.is_some() || installation.adapter_id.is_some();
+        if reuse || window || open {
+            let (newest, mut browser) = login_browser(
                 installation.id,
                 installation.label,
                 profiles,
                 reuse,
                 window,
-            ));
+            );
+            browser.open = open;
+            browsers.push((newest, browser));
         }
     }
     // 配置数据可以比应用活得久，Linux 上也没有安装登记可查：按 vendor id 补上其余的。
@@ -143,8 +156,48 @@ fn login_browser(
             profiles,
             reuse,
             window,
+            open: false,
         },
     )
+}
+
+/// 在用户选定的那个浏览器里打开一个网页：它平时的窗口、平时的配置。KDJ 不带任何启动参数，
+/// 也不从它读回任何东西。`url` 由调用方从固定的表里取，不来自请求。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn open_page(browser: &str, url: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::process::{Command, Stdio};
+
+    let installation = discovery::installed()
+        .into_iter()
+        .find(|installation| installation.id == browser)
+        .context("没有找到这个浏览器，请重新检测")?;
+    // macOS 的安装是一个应用包，交给系统去打开；别处直接启动它的程序，已在运行的浏览器会
+    // 把网址接过去。
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("/usr/bin/open");
+        command.arg("-a").arg(&installation.executable);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut command = Command::new(discovery::plain_path(&installation.executable));
+    command
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let failed = || format!("没能打开 {}", installation.label);
+    #[cfg(target_os = "macos")]
+    anyhow::ensure!(command.status().with_context(failed)?.success(), failed());
+    #[cfg(not(target_os = "macos"))]
+    command.spawn().with_context(failed)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn open_page(_browser: &str, _url: &str) -> anyhow::Result<()> {
+    anyhow::bail!("移动端没有可选的浏览器")
 }
 
 /// 从用户明确选择的一个配置读取限定域名的 Cookie；没选配置就是最近用过的那个。调用方

@@ -876,7 +876,11 @@ export const api = {
   cancelBrowserLogin: (request_id: string) => request("/accounts/browser/login/cancel", {
     method: "POST", body: JSON.stringify({ request_id }), keepalive: true,
   }),
-  cookieEditorLogin: (platform: Platform, headers: string) =>
+  /** Opens the platform's site, or the Cookie-Editor install page, in the chosen browser. */
+  browserOpen: (platform: string, browser: string, page: "site" | "extension") =>
+    post<{ opened: boolean }>(`/accounts/${platform}/login/browser/open`, { browser, page }),
+  /** A login the user exported from their own browser, as one `Cookie:` line. */
+  exportedLogin: (platform: Platform, headers: string) =>
     post<Account>(`/accounts/${platform}/login/cookies`, { headers }),
   soundcloudHeadersLogin: (headers: string) =>
     post<Account>("/accounts/soundcloud/login/headers", { headers }),

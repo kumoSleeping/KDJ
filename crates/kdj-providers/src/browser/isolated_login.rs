@@ -97,28 +97,11 @@ async fn executable(browser: &Browser) -> Result<PathBuf> {
     }
     #[cfg(windows)]
     {
-        Ok(plain_path(&browser.executable))
+        Ok(crate::browser::discovery::plain_path(&browser.executable))
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         Ok(browser.executable.clone())
-    }
-}
-
-/// Discovery keeps canonical paths, and on Windows a canonical path carries the `\\?\` prefix.
-/// A browser started under that name does not come up (it resolves its own files from the path
-/// it was started with), so it is started under the ordinary spelling of the same path.
-#[cfg(any(windows, test))]
-fn plain_path(path: &std::path::Path) -> PathBuf {
-    let Some(text) = path.to_str() else {
-        return path.to_owned();
-    };
-    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{share}"))
-    } else if let Some(local) = text.strip_prefix(r"\\?\") {
-        PathBuf::from(local)
-    } else {
-        path.to_owned()
     }
 }
 
@@ -499,7 +482,7 @@ mod tests {
             (r"\\?\UNC\server\share\browser.exe", r"\\server\share\browser.exe"),
             (r"C:\Browser\browser.exe", r"C:\Browser\browser.exe"),
         ] {
-            assert_eq!(plain_path(std::path::Path::new(canonical)), PathBuf::from(plain));
+            assert_eq!(crate::browser::discovery::plain_path(std::path::Path::new(canonical)), PathBuf::from(plain));
         }
     }
 
