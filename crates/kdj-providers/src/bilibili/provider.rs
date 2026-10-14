@@ -1291,6 +1291,12 @@ impl MusicProvider for BilibiliProvider {
         if !self.client.has_credential() {
             return Account::new(Platform::Bilibili, LABEL, AccountState::Missing, "未登录");
         }
+        // 扫码登录在这里按网页端的节奏续期；失败不算登录失效，交给下面的 nav 判断。
+        match self.client.refresh_login_if_due().await {
+            Ok(true) => tracing::info!("B 站登录已刷新"),
+            Ok(false) => {}
+            Err(error) => tracing::warn!("B 站登录刷新失败：{error:#}"),
+        }
         let data = match self.client.nav().await {
             Ok(data) => data,
             Err(err) => {

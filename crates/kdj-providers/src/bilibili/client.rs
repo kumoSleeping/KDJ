@@ -25,6 +25,13 @@ const COOKIE_KEYS: [&str; 7] = [
     "ac_time_value",
 ];
 
+/// 三项登录 Cookie。响应里删它们的 Set-Cookie 不照办：登录是否失效交给 nav 判断，
+/// 界面才说得出「已失效」而不是悄悄变成「未登录」。
+const LOGIN_COOKIES: [&str; 3] = ["sessdata", "bili_jct", "dedeuserid"];
+
+/// 多久问一次 B 站要不要刷新登录。网页端是每天第一次访问时问。
+const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// B 站账号 API 串行且限速。媒体 CDN 不走这里，不会拖慢实际视频传输。
 const API_MIN_INTERVAL: Duration = Duration::from_millis(250);
 pub struct BiliClient {
@@ -34,6 +41,8 @@ pub struct BiliClient {
     wbi: WbiKeyCache,
     api_gate: tokio::sync::Mutex<Instant>,
     device_cookie_init: tokio::sync::Mutex<()>,
+    /// 上次问「要不要刷新」的时刻；同时只有一次刷新在走。
+    refresh_checked: tokio::sync::Mutex<Option<Instant>>,
 }
 
 impl BiliClient {
@@ -55,6 +64,7 @@ impl BiliClient {
                     .unwrap_or_else(Instant::now),
             ),
             device_cookie_init: tokio::sync::Mutex::new(()),
+            refresh_checked: tokio::sync::Mutex::new(None),
         };
         client.load_session();
         Ok(client)
@@ -167,6 +177,46 @@ impl BiliClient {
         Ok(())
     }
 
+    /// 收下 B 站在响应里换下的 Cookie（刷新后的整套登录、设备 Cookie），变了才落盘。`sent_user`
+    /// 是发请求时的账号：期间退出或换了账号的，旧响应不碰新登录。
+    fn absorb(&self, sent_user: &str, headers: &http::HeaderMap) {
+        use crate::cookie_jar::Change;
+        let changes: Vec<_> = crate::cookie_jar::changes(headers, "bilibili.com")
+            .into_iter()
+            .filter_map(|change| match change {
+                Change::Set(name, value) => Some(Change::Set(name.to_ascii_lowercase(), value)),
+                Change::Remove(name) => {
+                    let name = name.to_ascii_lowercase();
+                    (!LOGIN_COOKIES.contains(&name.as_str())).then_some(Change::Remove(name))
+                }
+            })
+            .collect();
+        if changes.is_empty() {
+            return;
+        }
+        let mut current = self.cookies.write().unwrap();
+        if current.get("dedeuserid").map_or("", String::as_str) != sent_user {
+            return;
+        }
+        let mut cookies = current.clone();
+        if !crate::cookie_jar::apply(&mut cookies, &changes, |name| {
+            COOKIE_KEYS.contains(&name) && name != "ac_time_value"
+        }) {
+            return;
+        }
+        if let Err(error) = self.save_session(&cookies) {
+            tracing::warn!("保存 B 站换下的 Cookie 失败：{error:#}");
+            return;
+        }
+        let login_changed = LOGIN_COOKIES
+            .iter()
+            .any(|name| current.get(*name) != cookies.get(*name));
+        *current = cookies;
+        if login_changed {
+            self.wbi.invalidate();
+        }
+    }
+
     fn save_session(&self, cookies: &BTreeMap<String, String>) -> Result<()> {
         let body = serde_json::to_vec_pretty(cookies).context("序列化 B 站登录态失败")?;
         crate::session_fs::write_private_atomic(&self.session_path, &body)
@@ -241,18 +291,7 @@ impl BiliClient {
     /// 取接口的 `data`，只接受 `code == 0`。
     async fn get_json(&self, url: &str) -> Result<Value> {
         let (status, body) = self.get_json_body(url).await?;
-        let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
-        if code == 0 && status.is_success() {
-            return Ok(body.get("data").cloned().unwrap_or(Value::Null));
-        }
-        let message = body
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("未知错误");
-        anyhow::bail!(
-            "B 站接口 {} 返回 HTTP {status} code={code}：{message}",
-            request_label(url)
-        )
+        json_data(url, status, body)
     }
 
     /// 发请求 + 风控判定 + JSON 解析，但**不断言 `code`**。
@@ -273,10 +312,12 @@ impl BiliClient {
         if !cookie.is_empty() {
             request = request.header(reqwest::header::COOKIE, cookie);
         }
+        let user = self.credential_user_id();
         let response = request
             .send()
             .await
             .with_context(|| format!("B 站请求失败：{label}"))?;
+        self.absorb(&user, response.headers());
         let status = response.status();
         let voucher_header = has_voucher_header(response.headers());
         let content_type = response
@@ -323,6 +364,7 @@ impl BiliClient {
         anyhow::ensure!(self.has_credential(), "请先登录哔哩哔哩");
         let _slot = self.api_slot().await?;
         let label = request_label(url);
+        let user = self.credential_user_id();
         let response = self
             .http
             .post(url)
@@ -333,6 +375,7 @@ impl BiliClient {
             .send()
             .await
             .with_context(|| format!("B 站写接口请求失败：{label}"))?;
+        self.absorb(&user, response.headers());
         let status = response.status();
         let voucher_header = has_voucher_header(response.headers());
         let bytes = response
@@ -362,10 +405,119 @@ impl BiliClient {
         Ok(body.get("data").cloned().unwrap_or(Value::Null))
     }
 
-    /// 当前是否登录（顺带拿昵称/头像）。
+    /// 当前是否登录（顺带拿昵称/头像）。未登录时 B 站回 `code=-101`，这里照样给出
+    /// `isLogin: false` 的 data，由调用方判断：「登录已失效」和「接口出错」要分得开。
     pub async fn nav(&self) -> Result<Value> {
-        self.get_json("https://api.bilibili.com/x/web-interface/nav")
+        let url = "https://api.bilibili.com/x/web-interface/nav";
+        let (status, body) = self.get_json_body(url).await?;
+        if status.is_success() && body.get("code").and_then(Value::as_i64) == Some(-101) {
+            let mut data = match body.get("data") {
+                Some(Value::Object(map)) => map.clone(),
+                _ => serde_json::Map::new(),
+            };
+            data.insert("isLogin".into(), Value::Bool(false));
+            return Ok(Value::Object(data));
+        }
+        json_data(url, status, body)
+    }
+
+    /// 扫码登录带回了刷新令牌（`ac_time_value`）时，按网页端的做法问 B 站要不要刷新，要就换一套新
+    /// Cookie：取 refresh_csrf → `cookie/refresh`（新 Cookie 由 [`Self::absorb`] 收下）→ 存新令牌 →
+    /// `confirm/refresh` 让旧的作废。至多每 [`REFRESH_CHECK_INTERVAL`] 问一次。返回是否换了。
+    ///
+    /// 导入、复用来的登录没有这个令牌（它在浏览器的 localStorage 里），只能靠 absorb 跟着走。
+    pub async fn refresh_login_if_due(&self) -> Result<bool> {
+        let mut checked = self.refresh_checked.lock().await;
+        if checked.is_some_and(|at| at.elapsed() < REFRESH_CHECK_INTERVAL) {
+            return Ok(false);
+        }
+        let old_token = self
+            .cookies
+            .read()
+            .unwrap()
+            .get("ac_time_value")
+            .cloned()
+            .filter(|token| !token.is_empty());
+        let Some(old_token) = old_token.filter(|_| self.has_credential()) else {
+            return Ok(false);
+        };
+        *checked = Some(Instant::now());
+
+        let info = self
+            .get_json(&format!(
+                "https://passport.bilibili.com/x/passport-login/web/cookie/info?csrf={}",
+                self.csrf_token()
+            ))
             .await
+            .context("询问 B 站是否需要刷新登录失败")?;
+        if info.get("refresh").and_then(Value::as_bool) != Some(true) {
+            return Ok(false);
+        }
+        let timestamp = info
+            .get("timestamp")
+            .and_then(Value::as_i64)
+            .context("B 站刷新信息缺少时间戳")?;
+        let refresh_csrf = self.refresh_csrf(timestamp).await?;
+        let user = self.credential_user_id();
+        let data = self
+            .post_form_json(
+                "https://passport.bilibili.com/x/passport-login/web/cookie/refresh",
+                &[
+                    ("csrf", self.csrf_token()),
+                    ("refresh_csrf", refresh_csrf),
+                    ("source", "main_web".into()),
+                    ("refresh_token", old_token.clone()),
+                ],
+            )
+            .await
+            .context("刷新 B 站登录失败")?;
+        let new_token = data
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .context("B 站刷新登录后没有给新的刷新令牌")?;
+        anyhow::ensure!(self.credential_user_id() == user, "刷新 B 站登录时账号变了");
+        self.store_cookies(&BTreeMap::from([(
+            "ac_time_value".to_string(),
+            new_token.to_string(),
+        )]))?;
+        // 新 Cookie 已经存下；确认只是让旧的那套作废，失败不影响现在的登录。
+        if let Err(error) = self
+            .post_form_json(
+                "https://passport.bilibili.com/x/passport-login/web/confirm/refresh",
+                &[("csrf", self.csrf_token()), ("refresh_token", old_token)],
+            )
+            .await
+        {
+            tracing::warn!("确认 B 站登录刷新失败：{error:#}");
+        }
+        Ok(true)
+    }
+
+    async fn refresh_csrf(&self, timestamp_ms: i64) -> Result<String> {
+        let _slot = self.api_slot().await?;
+        let url = format!(
+            "https://www.bilibili.com/correspond/1/{}",
+            super::refresh::correspond_path(timestamp_ms)
+        );
+        let user = self.credential_user_id();
+        let response = self
+            .http
+            .get(url)
+            .header(reqwest::header::REFERER, "https://www.bilibili.com/")
+            .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml")
+            .header(reqwest::header::COOKIE, self.cookie_header())
+            .send()
+            .await
+            .context("取 B 站刷新口令失败")?;
+        self.absorb(&user, response.headers());
+        let html = response
+            .error_for_status()
+            .context("取 B 站刷新口令失败")?
+            .text()
+            .await
+            .context("读取 B 站刷新口令失败")?;
+        super::refresh::refresh_csrf(&html).context("B 站没有给出刷新口令")
     }
 
     async fn wbi_key(&self) -> Result<String> {
@@ -585,6 +737,22 @@ fn query_url(base: &str, params: &[(&str, String)]) -> Result<String> {
     Ok(url.into())
 }
 
+/// 只接受 `code == 0` 的 `data`。
+fn json_data(url: &str, status: reqwest::StatusCode, body: Value) -> Result<Value> {
+    let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+    if code == 0 && status.is_success() {
+        return Ok(body.get("data").cloned().unwrap_or(Value::Null));
+    }
+    let message = body
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("未知错误");
+    anyhow::bail!(
+        "B 站接口 {} 返回 HTTP {status} code={code}：{message}",
+        request_label(url)
+    )
+}
+
 pub(super) fn collect_response_cookies(response: &reqwest::Response) -> BTreeMap<String, String> {
     response
         .headers()
@@ -650,6 +818,48 @@ mod tests {
         assert!(header.contains("SESSDATA=abc"), "发出去要用大写：{header}");
         assert!(header.contains("DedeUserID=42"), "{header}");
         assert!(!header.contains("junk"), "白名单之外的键不该带出去");
+    }
+
+    #[test]
+    fn rotated_cookies_are_absorbed_for_the_same_account_only() {
+        let dir = scratch("absorb");
+        let client = BiliClient::new(&dir).unwrap();
+        client
+            .store_cookies(&BTreeMap::from([
+                ("SESSDATA".to_string(), "old".to_string()),
+                ("bili_jct".to_string(), "jct".to_string()),
+                ("DedeUserID".to_string(), "42".to_string()),
+                ("ac_time_value".to_string(), "token".to_string()),
+            ]))
+            .unwrap();
+        let headers = |lines: &[&str]| {
+            let mut map = http::HeaderMap::new();
+            for line in lines {
+                map.append(http::header::SET_COOKIE, line.parse().unwrap());
+            }
+            map
+        };
+
+        client.absorb(
+            "42",
+            &headers(&[
+                "SESSDATA=new; Path=/; Domain=bilibili.com; HttpOnly; Secure",
+                "bili_jct=; Max-Age=0; Domain=.bilibili.com",
+                "buvid3=device; Domain=.bilibili.com",
+                "ac_time_value=forged; Domain=.bilibili.com",
+                "sid=other; Domain=.example.com",
+            ]),
+        );
+        let header = client.cookie_header();
+        assert!(header.contains("SESSDATA=new"), "{header}");
+        assert!(header.contains("bili_jct=jct"), "登录 Cookie 不因响应删除：{header}");
+        assert!(header.contains("buvid3=device"), "{header}");
+        assert!(header.contains("ac_time_value=token"), "刷新令牌只从刷新接口的正文来：{header}");
+        assert!(BiliClient::new(&dir).unwrap().cookie_header().contains("SESSDATA=new"));
+
+        // 换了账号后到的旧响应不碰新登录。
+        client.absorb("7", &headers(&["SESSDATA=stale; Domain=.bilibili.com"]));
+        assert!(client.cookie_header().contains("SESSDATA=new"));
     }
 
     #[test]
