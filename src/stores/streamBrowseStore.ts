@@ -35,6 +35,8 @@ export const STREAM_PLAYLIST_SECTION_IDS = [
   "podcast_created",
   "podcast_subscribed",
   "podcast_recent",
+  /** A platform's own folder inside a sidebar root that stands for several (YouTube). */
+  "group",
 ] as const;
 export type StreamPlaylistSectionId =
   (typeof STREAM_PLAYLIST_SECTION_IDS)[number];
@@ -172,6 +174,7 @@ function defaultSectionExpanded(): SectionMap<boolean> {
     podcast_created: true,
     podcast_subscribed: true,
     podcast_recent: true,
+    group: true,
   };
 }
 

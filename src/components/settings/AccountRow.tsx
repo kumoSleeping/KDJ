@@ -8,6 +8,7 @@ import { useAppStore } from "../../stores/appStore";
 import type {
   Account,
   AccountState,
+  Platform,
   QrStateValue,
 } from "../../types";
 import { Button, InlineNotice } from "../common";
@@ -32,6 +33,24 @@ const STATE_COLOR: Record<AccountState, string> = {
 };
 
 const INTERNAL_UNVERIFIED_DETAIL = "登录状态尚未联网核验";
+
+/** The platforms one account row stands for: YouTube Music and YouTube share one login and one row. */
+export function linkedPlatforms(platform: Platform): Platform[] {
+  return platform === "ytm" || platform === "youtube" ? ["ytm", "youtube"] : [platform];
+}
+
+/**
+ * The account one row shows for the platforms it stands for. For YouTube that is the one signed in
+ * (or the most telling state), named YouTube; its login and sign-out act on both.
+ */
+export function linkedAccount(platforms: Platform[], accounts: Map<Platform, Account>): Account | undefined {
+  const all = platforms.flatMap((platform) => accounts.get(platform) ?? []);
+  if (all.length <= 1) return all[0];
+  const best = (["valid", "unknown", "expired"] as AccountState[])
+    .map((state) => all.find((account) => account.state === state))
+    .find(Boolean) ?? all[0];
+  return { ...best, platform: platforms[platforms.length - 1], label: "YouTube" };
+}
 
 /** How long a login has left, in whole days; nothing once it has ended or when it is not known. */
 export function loginRemaining(expiresAt: number | undefined, now = Date.now()): string {
@@ -195,7 +214,8 @@ export function AccountRow({
     : (youtubeAccount || soundcloudAccount) && browserAccount && !browserMobile;
   // The sidebar's 登录 of this source: its ways are opened, and the row is brought into view.
   const rowRef = useRef<HTMLDivElement>(null);
-  const loginAsked = useLoginRequest((state) => (state.platform === account.platform ? state.epoch : 0));
+  const loginAsked = useLoginRequest((state) =>
+    state.platform && linkedPlatforms(account.platform).includes(state.platform as Platform) ? state.epoch : 0);
   useEffect(() => {
     if (!loginAsked) return;
     useLoginRequest.getState().clear();
@@ -319,8 +339,10 @@ export function AccountRow({
     setBusy(true);
     setNotice("");
     try {
-      const loggedOut = await api.logout(account.platform);
-      setAccount(loggedOut);
+      // YouTube Music and YouTube are one login: signing out of the row signs out of both.
+      for (const platform of linkedPlatforms(account.platform)) {
+        setAccount(await api.logout(platform));
+      }
       // 成功不用报：这一行的状态当场从"已登录"变成"未登录"，按钮也换成登录
     } catch (error) {
       setNotice(`退出失败：${(error as Error).message}`);

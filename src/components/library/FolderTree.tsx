@@ -88,7 +88,7 @@ import {
   type StreamBrowsePlatform,
   type StreamPlaylistSectionId,
 } from "../../stores/streamBrowseStore";
-import type { AccountState, FolderNode, FolderTree as FolderTreeData, StreamPlaylist } from "../../types";
+import type { Account, AccountState, FolderNode, FolderTree as FolderTreeData, StreamPlaylist } from "../../types";
 import { ContextMenu, InlineNotice, Sheet } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
 import { isMidiBrowseActivate, MIDI_BROWSE_ID_ATTR, midiBrowseItemProps } from "../../lib/midiLibraryNav";
@@ -125,14 +125,51 @@ const ALL_TRACKS_DROP_TARGET = "__kd_all_tracks__";
 const ALL_TRACKS_ROOT_ID = "library:all";
 const OUTSIDE_ROOT_ID = "library:outside";
 
-const STREAM_ROOTS: ReadonlyArray<{ id: StreamBrowsePlatform; label: string }> = [
+interface StreamRoot {
+  id: StreamBrowsePlatform;
+  label: string;
+  /** A root that stands for more than one platform: each has its own folder inside it. */
+  members?: readonly StreamBrowsePlatform[];
+}
+
+const STREAM_ROOTS: ReadonlyArray<StreamRoot> = [
   { id: "wyy", label: "NetEase" },
   { id: "qqm", label: "Q Music" },
   { id: "soundcloud", label: "SoundCloud" },
-  { id: "ytm", label: "YouTube Music" },
-  { id: "youtube", label: "YouTube Video" },
+  // YouTube Music and YouTube share one login, so they share one row; the music and the video
+  // playlists stay apart in a folder each.
+  { id: "youtube", label: "YouTube", members: ["ytm", "youtube"] },
   { id: "bilibili", label: "Bilibili" },
 ];
+
+/** The name of a platform's own folder inside a root that stands for several. */
+const STREAM_MEMBER_LABEL: Partial<Record<StreamBrowsePlatform, string>> = {
+  ytm: "音乐",
+  youtube: "视频",
+};
+
+function rootMembers(root: StreamRoot): StreamBrowsePlatform[] {
+  return root.members ? [...root.members] : [root.id];
+}
+
+/** The sidebar root a platform's playlists are shown under. */
+function streamRootOf(platform: StreamBrowsePlatform): StreamRoot {
+  return STREAM_ROOTS.find((root) => rootMembers(root).includes(platform)) ?? { id: platform, label: platform };
+}
+
+function streamRootEnabled(settings: Parameters<typeof isPlatformEnabled>[0], root: StreamRoot): boolean {
+  return rootMembers(root).some((platform) => isPlatformEnabled(settings, platform));
+}
+
+/** The account state a root shows: a member that can be browsed wins, then an expired one. */
+function rootAccountState(
+  accounts: Account[],
+  members: StreamBrowsePlatform[],
+): AccountState | undefined {
+  const states = members.map((platform) => accounts.find((account) => account.platform === platform)?.state);
+  return states.find(accountCanBrowse)
+    ?? (states.includes(undefined) ? undefined : states.includes("expired") ? "expired" : states[0]);
+}
 
 function useStreamRootMenu() {
   const [menu, setMenu] = useState<{
@@ -169,7 +206,7 @@ type SidebarRootItem =
   | {
       id: `stream:${StreamBrowsePlatform}`;
       kind: "stream";
-      streamRoot: (typeof STREAM_ROOTS)[number];
+      streamRoot: StreamRoot;
     }
   | { id: `local:${string}`; kind: "local"; root: FolderNode }
   | { id: typeof OUTSIDE_ROOT_ID; kind: "outside" };
@@ -272,7 +309,7 @@ function readNarrowRailSource(): NarrowRailSource | null {
       typeof record.platform === "string" &&
       STREAM_BROWSE_PLATFORMS.includes(record.platform as StreamBrowsePlatform)
     ) {
-      return { kind: "stream", platform: record.platform as StreamBrowsePlatform };
+      return { kind: "stream", platform: streamRootOf(record.platform as StreamBrowsePlatform).id };
     }
     if (
       record.kind === "local" &&
@@ -536,7 +573,7 @@ export function NarrowFolderRail({
     const storedSource = readNarrowRailSource();
     if (storedSource) return storedSource;
     if (effectiveActiveStreamPlaylist) {
-      return { kind: "stream", platform: effectiveActiveStreamPlaylist.platform };
+      return { kind: "stream", platform: streamRootOf(effectiveActiveStreamPlaylist.platform).id };
     }
     return { kind: "local", rootPath: "" };
   });
@@ -554,13 +591,13 @@ export function NarrowFolderRail({
     // 初次挂载优先恢复用户上次停留的来源；只有运行期间真正打开了另一份
     // 在线歌单，才跟随到对应平台。否则刷新/横竖屏切换会被旧播放状态抢走。
     if (!effectiveActiveStreamPlaylist || effectiveActiveStreamKey === previousKey) return;
-    if (!isPlatformEnabled(settings, effectiveActiveStreamPlaylist.platform)) return;
-    if (hiddenPlatforms.includes(effectiveActiveStreamPlaylist.platform)) return;
+    const activeRoot = streamRootOf(effectiveActiveStreamPlaylist.platform);
+    if (!streamRootEnabled(settings, activeRoot)) return;
+    if (hiddenPlatforms.includes(activeRoot.id)) return;
     setNarrowSource((current) =>
-      current.kind === "stream" &&
-      current.platform === effectiveActiveStreamPlaylist.platform
+      current.kind === "stream" && current.platform === activeRoot.id
         ? current
-        : { kind: "stream", platform: effectiveActiveStreamPlaylist.platform },
+        : { kind: "stream", platform: activeRoot.id },
     );
   }, [effectiveActiveStreamKey, effectiveActiveStreamPlaylist, hiddenPlatforms, settings]);
 
@@ -577,7 +614,7 @@ export function NarrowFolderRail({
   useEffect(() => {
     if (narrowSource.kind !== "stream") return;
     if (
-      isPlatformEnabled(settings, narrowSource.platform) &&
+      streamRootEnabled(settings, streamRootOf(narrowSource.platform)) &&
       !hiddenPlatforms.includes(narrowSource.platform)
     ) return;
     const fallback = roots[0];
@@ -588,7 +625,7 @@ export function NarrowFolderRail({
 
   const enabledStreamRoots = useMemo(
     () => STREAM_ROOTS.filter((streamRoot) =>
-      isPlatformEnabled(settings, streamRoot.id) && !hiddenPlatforms.includes(streamRoot.id),
+      streamRootEnabled(settings, streamRoot) && !hiddenPlatforms.includes(streamRoot.id),
     ),
     [hiddenPlatforms, settings],
   );
@@ -612,7 +649,8 @@ export function NarrowFolderRail({
   const railSourceKey =
     narrowSource.kind === "stream" ? `stream:${narrowSource.platform}` : `local:${narrowSource.rootPath}`;
   const railPlaylistsRead =
-    narrowSource.kind === "stream" && streamPlaylists[narrowSource.platform] !== null;
+    narrowSource.kind === "stream" &&
+    rootMembers(streamRootOf(narrowSource.platform)).some((platform) => streamPlaylists[platform] !== null);
   const railShownRef = useRef<{ source: string; read: boolean } | null>(null);
   useLayoutEffect(() => {
     const before = railShownRef.current;
@@ -891,6 +929,45 @@ export function NarrowFolderRail({
     );
   };
 
+  /** A root's list in the rail; a root of several platforms puts each in a folder of its own. */
+  const renderStreamRootChildren = (root: StreamRoot) => {
+    const members = rootMembers(root);
+    if (members.length === 1) return renderStreamChildren(root.id);
+    const shown = members.filter((platform) => {
+      const state = accounts.find((candidate) => candidate.platform === platform)?.state;
+      return state === undefined || accountCanBrowse(state);
+    });
+    // Nothing to browse yet: the first platform's rows say how to get in (登录 or 读取账号).
+    if (shown.length === 0) return renderStreamChildren(members[0]);
+    return shown.map((platform) => {
+      const label = STREAM_MEMBER_LABEL[platform] ?? platform;
+      const groupOpen = streamSectionExpanded[platform].group;
+      return (
+        <div key={`narrow-stream-group:${platform}`} className="kd-narrow-stream-section">
+          <button
+            type="button"
+            aria-expanded={groupOpen}
+            title={`${groupOpen ? "收起" : "展开"}${label}`}
+            onClick={() => {
+              railMotion.expect(`group:${platform}`, !groupOpen);
+              setStreamSectionExpanded(platform, "group", !groupOpen);
+            }}
+          >
+            <RailContent
+              icon={groupOpen ? <FolderOpen {...RAIL_ICON} /> : <Folder {...RAIL_ICON} />}
+              label={label}
+            />
+          </button>
+          {groupOpen && (
+            <div className="kd-narrow-branch" ref={railMotion.branch(`group:${platform}`)}>
+              {renderStreamChildren(platform)}
+            </div>
+          )}
+        </div>
+      );
+    });
+  };
+
   const renderChildren = () => (
       <div
         className="kd-narrow-source-children kd-scroll"
@@ -917,7 +994,7 @@ export function NarrowFolderRail({
         )}
         {narrowSource.kind === "stream" &&
           !hiddenPlatforms.includes(narrowSource.platform) &&
-          renderStreamChildren(narrowSource.platform)}
+          renderStreamRootChildren(streamRootOf(narrowSource.platform))}
       </div>
   );
   const pickerHost = railRef.current?.closest(".kd-stage");
@@ -986,11 +1063,9 @@ export function NarrowFolderRail({
             onClick={() => {
               setNarrowSource({ kind: "stream", platform: streamRoot.id });
               if (portrait) setPickerOpen(true);
-              const account = accounts.find(
-                (candidate) => candidate.platform === streamRoot.id,
-              );
-              if (accountCanBrowse(account?.state)) {
-                void loadStreamPlaylists(streamRoot.id);
+              for (const platform of rootMembers(streamRoot)) {
+                const account = accounts.find((candidate) => candidate.platform === platform);
+                if (accountCanBrowse(account?.state)) void loadStreamPlaylists(platform);
               }
             }}
           >
@@ -1178,10 +1253,28 @@ export function FolderTree({
   const roots = folders?.roots ?? [];
   const enabledStreamRoots = useMemo(
     () => STREAM_ROOTS.filter((streamRoot) =>
-      isPlatformEnabled(settings, streamRoot.id) && !hiddenPlatforms.includes(streamRoot.id),
+      streamRootEnabled(settings, streamRoot) && !hiddenPlatforms.includes(streamRoot.id),
     ),
     [hiddenPlatforms, settings],
   );
+  // A root of several platforms can be open while one of them has nothing read yet (signed in
+  // later, or its cache was dropped): reading it is what opening the root would have done.
+  useEffect(() => {
+    for (const root of enabledStreamRoots) {
+      if (!root.members || !streamExpanded[root.id]) continue;
+      for (const platform of root.members) {
+        const state = accounts.find((account) => account.platform === platform)?.state;
+        if (
+          accountCanBrowse(state) &&
+          streamPlaylists[platform] === null &&
+          !streamLoading[platform] &&
+          !streamErrors[platform]
+        ) {
+          void loadStreamPlaylists(platform);
+        }
+      }
+    }
+  }, [accounts, enabledStreamRoots, loadStreamPlaylists, streamErrors, streamExpanded, streamLoading, streamPlaylists]);
   const [rootOrder, setRootOrder] = useState(readSidebarRootOrder);
   const sidebarRootItems = useMemo<SidebarRootItem[]>(
     () => [
@@ -1642,21 +1735,25 @@ export function FolderTree({
       .finally(() => setRenaming((latest) => (latest?.node.path === node.path ? null : latest)));
   };
 
-  const toggleStreamRoot = (
-    platform: StreamBrowsePlatform,
-    accountState: AccountState | undefined,
-  ) => {
-    const opening = !streamExpanded[platform];
-    treeMotion.expect(`stream:${platform}`, opening);
-    setStreamExpanded(platform, opening);
-    if (opening && accountCanBrowse(accountState)) {
-      void loadStreamPlaylists(platform);
+  /** Opening a root reads the playlists of every platform under it that can be browsed. */
+  const toggleStreamRoot = (root: StreamRoot) => {
+    const opening = !streamExpanded[root.id];
+    treeMotion.expect(`stream:${root.id}`, opening);
+    setStreamExpanded(root.id, opening);
+    if (!opening) return;
+    for (const platform of rootMembers(root)) {
+      const state = accounts.find((account) => account.platform === platform)?.state;
+      if (accountCanBrowse(state)) void loadStreamPlaylists(platform);
     }
   };
 
-  const refreshStreamRoot = (platform: StreamBrowsePlatform) => {
-    refreshAskedRef.current.add(platform);
-    void loadStreamPlaylists(platform, true);
+  const refreshStreamRoot = (root: StreamRoot) => {
+    for (const platform of rootMembers(root)) {
+      const state = accounts.find((account) => account.platform === platform)?.state;
+      if (!accountCanBrowse(state)) continue;
+      refreshAskedRef.current.add(platform);
+      void loadStreamPlaylists(platform, true);
+    }
   };
 
   const openStreamPlaylist = (
@@ -1696,8 +1793,8 @@ export function FolderTree({
     </button>
   );
 
-  const renderStreamRoot = (streamRoot: (typeof STREAM_ROOTS)[number]) => {
-    const platform = streamRoot.id;
+  /** One platform's part of a root: how its account stands, its favourites, then its sections. */
+  const renderStreamPlatform = (platform: StreamBrowsePlatform, depth: number) => {
     const playlists = streamPlaylists[platform];
     const orderedPlaylists = orderStreamPlaylistsByRecent(
       withForegroundStreamPlaceholder(playlists ?? [], platform, startupForeground),
@@ -1711,26 +1808,6 @@ export function FolderTree({
       (playlist) => playlist.is_favorite || playlist.origin === "favorite",
     );
     const sections = streamPlaylistSections(orderedPlaylists, platform);
-    const count = playlists?.length;
-    // A signed-out source has nothing to unfold: its row is the way in to the account settings.
-    const needsLogin = accountState === "missing" || accountState === "expired";
-    const open = streamExpanded[platform] && !needsLogin;
-    const rootHint = !accountState
-      ? accountsError || "正在读取账号状态"
-      : accountState === "missing"
-        ? `登录${streamRoot.label}后查看收藏和歌单`
-        : accountState === "expired"
-          ? `${streamRoot.label}登录已失效`
-          : error || `${streamRoot.label}远程收藏和歌单`;
-    const activateRoot = () => {
-      if (needsLogin) {
-        // 旋钮只负责浏览，不替用户弹出设置面板。
-        if (!isMidiBrowseActivate()) openLoginSettings(platform);
-        return;
-      }
-      if (isMidiBrowseActivate() && streamExpanded[platform]) return;
-      toggleStreamRoot(platform, accountState);
-    };
     const playlistRow = (playlist: StreamPlaylist, depth: number) => {
       const favorite = playlist.is_favorite || playlist.origin === "favorite";
       const active =
@@ -1766,6 +1843,186 @@ export function FolderTree({
       );
     };
 
+    return (
+      <>
+        {!accountState && (
+          <button
+            type="button"
+            className="kd-folder kd-folder-action kd-stream-status"
+            style={depthStyle(depth)}
+            title={accountsError || "正在读取账号状态"}
+            disabled={!accountsError}
+            onClick={() => void useAppStore.getState().refreshAccounts()}
+          >
+            <span className="kd-folder-caret" />
+            <span className="kd-folder-icon">
+              {accountsError ? (
+                <AlertTriangle {...ROW_ICON} />
+              ) : (
+                <LoaderCircle className="kd-spin" {...ROW_ICON} />
+              )}
+            </span>
+            <span className="kd-folder-name kd-truncate">
+              {accountsError ? "账号状态读取失败，点此重试" : "正在读取账号状态"}
+            </span>
+          </button>
+        )}
+
+        {canBrowse && loading && playlists === null && (
+          <div className="kd-folder kd-stream-status" style={depthStyle(depth)} aria-live="polite">
+            <span className="kd-folder-caret" />
+            <span className="kd-folder-icon">
+              <LoaderCircle className="kd-spin" {...ROW_ICON} />
+            </span>
+            <span className="kd-folder-name kd-truncate">正在读取歌单</span>
+          </div>
+        )}
+
+        {canBrowse && error && (
+          <div
+            className="kd-folder kd-stream-status kd-stream-error"
+            style={depthStyle(depth)}
+            title={error}
+          >
+            <span className="kd-folder-caret" />
+            <span className="kd-folder-icon">
+              <AlertTriangle {...ROW_ICON} />
+            </span>
+            <span className="kd-folder-name kd-truncate">{error}</span>
+            <span className="kd-folder-trail">
+              <button
+                type="button"
+                className="kd-stream-inline-action"
+                disabled={loading}
+                onClick={() => void loadStreamPlaylists(platform, true)}
+              >
+                重试
+              </button>
+            </span>
+          </div>
+        )}
+
+        {/* 平台的默认收藏直接作为可点击项展示；不再套一层只有一个子项的目录。 */}
+        {canBrowse && favoritePlaylists.map((playlist) => playlistRow(playlist, depth))}
+
+        {canBrowse &&
+          sections.map((section) => {
+            const sectionOpen = streamSectionExpanded[platform][section.id];
+            return (
+              <div key={`stream-section:${platform}:${section.id}`} className="kd-stream-section">
+                <button
+                  type="button"
+                  className="kd-folder kd-folder-action kd-stream-section-label"
+                  style={depthStyle(depth)}
+                  aria-expanded={sectionOpen}
+                  title={`${sectionOpen ? "收起" : "展开"}${section.label}`}
+                  onClick={() => {
+                    treeMotion.expect(`section:${platform}:${section.id}`, !sectionOpen);
+                    setStreamSectionExpanded(platform, section.id, !sectionOpen);
+                  }}
+                >
+                  <span className="kd-folder-caret">
+                    <Disclosure open={sectionOpen} />
+                  </span>
+                  <span className="kd-folder-icon">
+                    {sectionOpen ? <FolderOpen {...ROW_ICON} /> : <Folder {...ROW_ICON} />}
+                  </span>
+                  <span className="kd-folder-name kd-truncate">{section.label}</span>
+                  <span className="kd-folder-trail">
+                    {countsShown && (
+                      <span className="kd-folder-count">{section.playlists.length}</span>
+                    )}
+                  </span>
+                </button>
+                {sectionOpen && (
+                  <div
+                    className="kd-tree-branch"
+                    ref={treeMotion.branch(`section:${platform}:${section.id}`)}
+                  >
+                    {section.playlists.map((playlist) => playlistRow(playlist, depth + 1))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+      </>
+    );
+  };
+
+  /** A platform's own folder inside a root that stands for several. */
+  const renderStreamGroup = (platform: StreamBrowsePlatform) => {
+    const label = STREAM_MEMBER_LABEL[platform] ?? platform;
+    const groupOpen = streamSectionExpanded[platform].group;
+    const count = streamPlaylists[platform]?.length;
+    return (
+      <div key={`stream-group:${platform}`} className="kd-stream-section">
+        <button
+          type="button"
+          className="kd-folder kd-folder-action kd-stream-section-label"
+          data-stream-platform={platform}
+          style={depthStyle(1)}
+          aria-expanded={groupOpen}
+          title={`${groupOpen ? "收起" : "展开"}${label}`}
+          onClick={() => {
+            treeMotion.expect(`group:${platform}`, !groupOpen);
+            setStreamSectionExpanded(platform, "group", !groupOpen);
+          }}
+        >
+          <span className="kd-folder-caret">
+            <Disclosure open={groupOpen} />
+          </span>
+          <span className="kd-folder-icon">
+            {groupOpen ? <FolderOpen {...ROW_ICON} /> : <Folder {...ROW_ICON} />}
+          </span>
+          <span className="kd-folder-name kd-truncate">{label}</span>
+          <span className="kd-folder-trail">
+            {countsShown && count !== undefined && count > 0 && (
+              <span className="kd-folder-count">{count}</span>
+            )}
+          </span>
+        </button>
+        {groupOpen && (
+          <div className="kd-tree-branch" ref={treeMotion.branch(`group:${platform}`)}>
+            {renderStreamPlatform(platform, 2)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderStreamRoot = (streamRoot: StreamRoot) => {
+    const platform = streamRoot.id;
+    const members = rootMembers(streamRoot);
+    const accountState = rootAccountState(accounts, members);
+    const canBrowse = accountCanBrowse(accountState);
+    const browsable = members.filter((member) =>
+      accountCanBrowse(accounts.find((account) => account.platform === member)?.state),
+    );
+    const loading = browsable.some((member) => streamLoading[member]);
+    const error = members.map((member) => streamErrors[member]).find(Boolean) ?? "";
+    const counted = members.map((member) => streamPlaylists[member]).filter((list) => list !== null);
+    const count = counted.length > 0
+      ? counted.reduce((sum, list) => sum + (list?.length ?? 0), 0)
+      : undefined;
+    // A signed-out source has nothing to unfold: its row is the way in to the account settings.
+    const needsLogin = accountState === "missing" || accountState === "expired";
+    const open = streamExpanded[platform] && !needsLogin;
+    const rootHint = !accountState
+      ? accountsError || "正在读取账号状态"
+      : accountState === "missing"
+        ? `登录${streamRoot.label}后查看收藏和歌单`
+        : accountState === "expired"
+          ? `${streamRoot.label}登录已失效`
+          : error || `${streamRoot.label}远程收藏和歌单`;
+    const activateRoot = () => {
+      if (needsLogin) {
+        // 旋钮只负责浏览，不替用户弹出设置面板。
+        if (!isMidiBrowseActivate()) openLoginSettings(members[0]);
+        return;
+      }
+      if (isMidiBrowseActivate() && streamExpanded[platform]) return;
+      toggleStreamRoot(streamRoot);
+    };
     return (
       <div key={`stream-root:${platform}`} className="kd-stream-root">
         <div
@@ -1823,7 +2080,7 @@ export function FolderTree({
                 title={`刷新${streamRoot.label}歌单`}
                 onClick={(event) => {
                   event.stopPropagation();
-                  refreshStreamRoot(platform);
+                  refreshStreamRoot(streamRoot);
                 }}
               >
                 {loading ? (
@@ -1839,106 +2096,11 @@ export function FolderTree({
         {/* Everything a source unfolds is one branch, so it can arrive and fold as one. */}
         {open && (
           <div className="kd-tree-branch" ref={treeMotion.branch(`stream:${platform}`)}>
-            {!accountState && (
-              <button
-                type="button"
-                className="kd-folder kd-folder-action kd-stream-status"
-                style={depthStyle(1)}
-                title={accountsError || "正在读取账号状态"}
-                disabled={!accountsError}
-                onClick={() => void useAppStore.getState().refreshAccounts()}
-              >
-                <span className="kd-folder-caret" />
-                <span className="kd-folder-icon">
-                  {accountsError ? (
-                    <AlertTriangle {...ROW_ICON} />
-                  ) : (
-                    <LoaderCircle className="kd-spin" {...ROW_ICON} />
-                  )}
-                </span>
-                <span className="kd-folder-name kd-truncate">
-                  {accountsError ? "账号状态读取失败，点此重试" : "正在读取账号状态"}
-                </span>
-              </button>
-            )}
-
-            {canBrowse && loading && playlists === null && (
-              <div className="kd-folder kd-stream-status" style={depthStyle(1)} aria-live="polite">
-                <span className="kd-folder-caret" />
-                <span className="kd-folder-icon">
-                  <LoaderCircle className="kd-spin" {...ROW_ICON} />
-                </span>
-                <span className="kd-folder-name kd-truncate">正在读取歌单</span>
-              </div>
-            )}
-
-            {canBrowse && error && (
-              <div
-                className="kd-folder kd-stream-status kd-stream-error"
-                style={depthStyle(1)}
-                title={error}
-              >
-                <span className="kd-folder-caret" />
-                <span className="kd-folder-icon">
-                  <AlertTriangle {...ROW_ICON} />
-                </span>
-                <span className="kd-folder-name kd-truncate">{error}</span>
-                <span className="kd-folder-trail">
-                  <button
-                    type="button"
-                    className="kd-stream-inline-action"
-                    disabled={loading}
-                    onClick={() => refreshStreamRoot(platform)}
-                  >
-                    重试
-                  </button>
-                </span>
-              </div>
-            )}
-
-            {/* 平台的默认收藏直接作为可点击项展示；不再套一层只有一个子项的目录。 */}
-            {canBrowse && favoritePlaylists.map((playlist) => playlistRow(playlist, 1))}
-
-            {canBrowse &&
-              sections.map((section) => {
-                const sectionOpen = streamSectionExpanded[platform][section.id];
-                return (
-                  <div key={`stream-section:${platform}:${section.id}`} className="kd-stream-section">
-                    <button
-                      type="button"
-                      className="kd-folder kd-folder-action kd-stream-section-label"
-                      style={depthStyle(1)}
-                      aria-expanded={sectionOpen}
-                      title={`${sectionOpen ? "收起" : "展开"}${section.label}`}
-                      onClick={() => {
-                        treeMotion.expect(`section:${platform}:${section.id}`, !sectionOpen);
-                        setStreamSectionExpanded(platform, section.id, !sectionOpen);
-                      }}
-                    >
-                      <span className="kd-folder-caret">
-                        <Disclosure open={sectionOpen} />
-                      </span>
-                      <span className="kd-folder-icon">
-                        {sectionOpen ? <FolderOpen {...ROW_ICON} /> : <Folder {...ROW_ICON} />}
-                      </span>
-                      <span className="kd-folder-name kd-truncate">{section.label}</span>
-                      <span className="kd-folder-trail">
-                        {countsShown && (
-                          <span className="kd-folder-count">{section.playlists.length}</span>
-                        )}
-                      </span>
-                    </button>
-                    {sectionOpen && (
-                      <div
-                        className="kd-tree-branch"
-                        ref={treeMotion.branch(`section:${platform}:${section.id}`)}
-                      >
-                        {section.playlists.map((playlist) => playlistRow(playlist, 2))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+            {members.length === 1
+              ? renderStreamPlatform(platform, 1)
+              : browsable.length > 0
+                ? browsable.map(renderStreamGroup)
+                : renderStreamPlatform(members[0], 1)}
           </div>
         )}
       </div>

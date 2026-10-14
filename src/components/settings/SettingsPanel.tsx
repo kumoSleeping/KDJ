@@ -45,10 +45,11 @@ import type {
   KeyNotation,
   Quality,
   StreamCacheStats,
+  Settings,
 } from "../../types";
 import { useUpdateStore } from "../../stores/updateStore";
 import { Button, InlineNotice, Panel } from "../common";
-import { AccountRow } from "./AccountRow";
+import { AccountRow, linkedAccount, linkedPlatforms } from "./AccountRow";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
 import { FfmpegPanel } from "./FfmpegPanel";
@@ -706,23 +707,31 @@ export function SettingsPanel({ preferences = false, page }: {
           <InlineNotice text={accountsError} block />
           <div className="kd-djp-switch-list" aria-label="下载源与账号">
             {SEARCH_PLATFORMS.map((item) => {
-              const enabled = normalizeEnabledPlatforms(settings?.enabled_platforms).includes(
-                item.id,
-              );
-              const account = accountsByPlatform.get(item.id);
-              if (!account) return null;
+              // YouTube Music and YouTube are one row: one login, one switch for both sources.
+              // Search keeps them apart.
+              if (item.id === "ytm") return null;
+              const platforms = linkedPlatforms(item.id);
               const current = normalizeEnabledPlatforms(settings?.enabled_platforms);
+              const enabled = platforms.some((platform) => current.includes(platform));
+              const account = linkedAccount(platforms, accountsByPlatform);
+              if (!account) return null;
+              const others = current.filter((platform) => !platforms.includes(platform));
               return (
                 <AccountRow
                   key={item.id}
                   account={account}
                   sourceEnabled={enabled}
-                  sourceToggleDisabled={!settings || (enabled && current.length <= 1)}
+                  sourceToggleDisabled={!settings || (enabled && others.length === 0)}
                   onToggleSource={() => {
                     if (!settings) return;
-                    void saveSettings(patchEnabledPlatform(settings, item.id, !enabled)).catch(
-                      () => undefined,
+                    const next = platforms.reduce<Partial<Settings>>(
+                      (patch, platform) => ({
+                        ...patch,
+                        ...patchEnabledPlatform({ ...settings, ...patch }, platform, !enabled),
+                      }),
+                      {},
                     );
+                    void saveSettings(next).catch(() => undefined);
                   }}
                 />
               );

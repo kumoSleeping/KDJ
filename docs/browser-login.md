@@ -16,7 +16,7 @@
 | --- | --- |
 | 网易云、哔哩哔哩 | 扫码（推荐） · 从 Cookie-Editor 导入 · 从浏览器导入（部分支持） · 请求头 |
 | QQ 音乐 | 扫码（推荐） · 从 Cookie-Editor 导入（容易掉线） · 从浏览器导入（部分支持） · 请求头（容易掉线） |
-| YouTube、YouTube Music | 从 Cookie-Editor 导入（容易掉线） · 从浏览器导入（推荐，部分支持） · 请求头（容易掉线） |
+| YouTube（YouTube Music 和 YouTube 合成一行） | 从 Cookie-Editor 导入（容易掉线） · 从浏览器导入（推荐，部分支持） · 请求头（容易掉线） |
 | SoundCloud | 从 Cookie-Editor 导入 · 从浏览器导入（推荐，部分支持） · 请求头 |
 
 括号里只写两样（`methodLabel`）：「推荐」是这个账号能在线最久的那一种（扫码 KDJ 自己续期；没有
@@ -27,7 +27,9 @@
 窗口都会被 Google 判为有风险。登录只走用户自己的浏览器：读它已有的登录，或用户自己导出交回来。
 
 YouTube 和 YouTube Music 用同一份 youtube.com 登录：登上其中一个，另一个用这份登录自己验证，
-通过就一起登上（`link_youtube_sibling`）。
+通过就一起登上（`link_youtube_sibling`）。设置里它们是一行「YouTube」（`linkedAccount`），开关同时开关
+两个来源，「退出」两个都退；侧栏里也是一个「YouTube」，里面「音乐」「视频」各一个文件夹，播放列表
+不混在一起（`STREAM_ROOTS` 的 `members`）。顶上的搜索仍然分 YouTube Music 和 YouTube 两个来源。
 
 账号一行在「已登录」时，状态后面只写这份登录还能用多久（「还剩 N 天」，`Account.expires_at`，
 平台没告诉 KDJ 就不写）；别的状态写原因。不写登录来源。到期时刻的来处：QQ 是票据的有效期，
