@@ -1,7 +1,7 @@
 //! SoundCloud provider 实现。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -45,6 +45,10 @@ const STREAM_AUTH_MAX_BYTES: usize = 256 * 1024;
 const COVER_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// client_id 大约每几周换一次，缓存半天足够。
 const CLIENT_ID_TTL: Duration = Duration::from_secs(12 * 3600);
+/// 网页的公开 client_id 记在磁盘上：放网页脚本的 CDN（a-v2.sndcdn.com）连不上时，先用上次找到的。
+const CLIENT_ID_FILE: &str = "soundcloud-client-id.json";
+/// 找 client_id 时一个网页脚本最多等多久；几个脚本一起取，连不上时尽快说明白，不让登录卡住。
+const CLIENT_ID_SCRIPT_TIMEOUT: Duration = Duration::from_secs(10);
 const OAUTH_STATE_TTL: Duration = Duration::from_secs(10 * 60);
 const OAUTH_API: &str = "https://api.soundcloud.com";
 const CREDENTIAL_OAUTH: &str = "oauth";
@@ -125,7 +129,7 @@ pub struct OAuthStatus {
 pub struct SoundCloudProvider {
     ctx: ProviderContext,
     http: reqwest::Client,
-    client_id: RwLock<Option<(String, Instant)>>,
+    client_id: RwLock<Option<(String, std::time::SystemTime)>>,
     session: RwLock<Option<SoundCloudSession>>,
     oauth: Mutex<HashMap<String, OAuthAttempt>>,
     /// SoundCloud refresh token 是 single-use；所有账户/歌单并发请求必须共用一次刷新。
@@ -160,9 +164,9 @@ impl SoundCloudProvider {
                 },
             );
         Ok(SoundCloudProvider {
-            ctx,
             http,
-            client_id: RwLock::new(None),
+            client_id: RwLock::new(load_client_id(&ctx.session_file(CLIENT_ID_FILE))),
+            ctx,
             session: RwLock::new(session),
             oauth: Mutex::new(HashMap::new()),
             refresh: tokio::sync::Mutex::new(()),
@@ -448,11 +452,31 @@ impl SoundCloudProvider {
     /// SoundCloud 不发官方 key，网页端就是把它硬编码在 bundle 里。
     /// bundle 的文件名带 hash、每次发版都变，所以只能先取首页再逐个扫。
     async fn client_id(&self) -> Result<String> {
-        if let Some((id, at)) = self.client_id.read().unwrap().as_ref() {
-            if at.elapsed() < CLIENT_ID_TTL {
+        let cached = self.client_id.read().unwrap().clone();
+        if let Some((id, at)) = &cached {
+            if at.elapsed().is_ok_and(|age| age < CLIENT_ID_TTL) {
                 return Ok(id.clone());
             }
         }
+        match self.discover_client_id().await {
+            Ok(found) => {
+                let at = std::time::SystemTime::now();
+                *self.client_id.write().unwrap() = Some((found.clone(), at));
+                save_client_id(&self.ctx.session_file(CLIENT_ID_FILE), &found, at);
+                Ok(found)
+            }
+            // 过了 12 小时的那个多半还能用；真失效了接口回 401，清掉再找。
+            Err(error) => match cached {
+                Some((id, _)) => {
+                    tracing::warn!("重新查找 SoundCloud client_id 失败，先用上次的：{error:#}");
+                    Ok(id)
+                }
+                None => Err(error),
+            },
+        }
+    }
+
+    async fn discover_client_id(&self) -> Result<String> {
         let home = {
             self.http
                 .get("https://soundcloud.com/")
@@ -464,23 +488,33 @@ impl SoundCloudProvider {
                 .context("读取 SoundCloud 首页失败")?
         };
 
-        // 越靠后的 bundle 越可能带 client_id，倒着扫命中更快
+        // 越靠后的 bundle 越可能带 client_id，倒着排；几个一起取，先找到的为准。
         let mut scripts = extract_script_urls(&home);
         scripts.reverse();
-        for url in scripts.into_iter().take(12) {
-            let response = self.http.get(&url).send().await;
-            let Ok(response) = response else {
-                continue;
-            };
-            let Ok(body) = response.text().await else {
-                continue;
-            };
+        let mut bodies = futures_util::stream::iter(scripts.into_iter().take(12))
+            .map(|url| async move {
+                let response = self
+                    .http
+                    .get(&url)
+                    .timeout(CLIENT_ID_SCRIPT_TIMEOUT)
+                    .send()
+                    .await
+                    .ok()?;
+                response.text().await.ok()
+            })
+            .buffer_unordered(6);
+        let mut reached = false;
+        while let Some(body) = bodies.next().await {
+            let Some(body) = body else { continue };
+            reached = true;
             if let Some(found) = extract_client_id(&body) {
-                *self.client_id.write().unwrap() = Some((found.clone(), Instant::now()));
                 return Ok(found);
             }
         }
-        bail!("没能从 SoundCloud 页面里找到 client_id")
+        if reached {
+            bail!("没能从 SoundCloud 页面里找到 client_id")
+        }
+        bail!("连不上 SoundCloud 的网页脚本（a-v2.sndcdn.com），取不到 client_id；请检查代理是否放行这个域名")
     }
 
     /// client_id 过期时接口回 401，清掉缓存重来一次。
@@ -1451,6 +1485,21 @@ fn session_expired(session: &SoundCloudSession) -> bool {
     session.expires_at > 0 && session.expires_at <= unix_now()
 }
 
+fn load_client_id(path: &Path) -> Option<(String, std::time::SystemTime)> {
+    let saved: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let id = saved.get("client_id")?.as_str()?.trim();
+    let at = std::time::UNIX_EPOCH + Duration::from_secs(saved.get("found_at")?.as_u64()?);
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())).then(|| (id.to_owned(), at))
+}
+
+fn save_client_id(path: &Path, id: &str, at: std::time::SystemTime) {
+    let found_at = at.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let body = json!({ "client_id": id, "found_at": found_at }).to_string();
+    if let Err(error) = crate::session_fs::write_private_atomic(path, body.as_bytes()) {
+        tracing::warn!("保存 SoundCloud client_id 失败：{error:#}");
+    }
+}
+
 fn browser_session_expired(session: &SoundCloudSession) -> bool {
     session.credential_kind == CREDENTIAL_BROWSER && session_expired(session)
 }
@@ -1818,6 +1867,19 @@ fn to_source(track: &Value) -> Option<SongSource> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn found_client_id_survives_a_restart_and_rejects_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CLIENT_ID_FILE);
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(1_760_000_000);
+        save_client_id(&path, "AbC123xyz", at);
+        assert_eq!(load_client_id(&path), Some(("AbC123xyz".into(), at)));
+        std::fs::write(&path, r#"{"client_id":"bad id;","found_at":1}"#).unwrap();
+        assert_eq!(load_client_id(&path), None);
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(load_client_id(&path), None);
+    }
 
     #[test]
     fn guarded_soundcloud_targets_stay_on_official_hosts() {
