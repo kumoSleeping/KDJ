@@ -60,10 +60,15 @@ impl SessionState {
     }
 }
 
+/// 多久续一次登录。网页端和客户端都会定期调 `login/token/refresh`。
+const LOGIN_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 pub struct NeteaseClient {
     http: reqwest::Client,
     session_path: PathBuf,
     state: RwLock<SessionState>,
+    /// 上次续登录的时刻；同时只有一次续期在走。
+    login_refreshed: tokio::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl NeteaseClient {
@@ -78,6 +83,7 @@ impl NeteaseClient {
             http,
             session_path,
             state: RwLock::new(SessionState::default()),
+            login_refreshed: tokio::sync::Mutex::new(None),
         };
         client.load_session(session_dir);
         Ok(client)
@@ -89,6 +95,20 @@ impl NeteaseClient {
 
     pub fn logged_in(&self) -> bool {
         self.state.read().unwrap().logged_in()
+    }
+
+    /// 续登录：新的 MUSIC_U 在响应的 Set-Cookie 里，由 [`Self::absorb_cookies`] 收下。导入的、扫码的、
+    /// 复用来的登录都一样续。至多每 [`LOGIN_REFRESH_INTERVAL`] 一次；返回是否续上了。
+    pub async fn refresh_login_if_due(&self) -> Result<bool> {
+        let mut refreshed = self.login_refreshed.lock().await;
+        if !self.logged_in() || refreshed.is_some_and(|at| at.elapsed() < LOGIN_REFRESH_INTERVAL) {
+            return Ok(false);
+        }
+        *refreshed = Some(std::time::Instant::now());
+        let body = self.weapi("/weapi/login/token/refresh", Map::new()).await?;
+        let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+        anyhow::ensure!(code == 200, "网易云续登录返回 code={code}");
+        Ok(true)
     }
 
     pub fn profile(&self) -> Option<Value> {
@@ -208,7 +228,14 @@ impl NeteaseClient {
             if name.is_empty() {
                 continue;
             }
-            if value.is_empty() || value.eq_ignore_ascii_case("EXPIRED") {
+            if value.is_empty()
+                || value.eq_ignore_ascii_case("EXPIRED")
+                || crate::cookie_jar::removes_set_cookie(text)
+            {
+                // 登录 Cookie 不因响应删除：是否失效交给账号接口判断，界面才说得出「已失效」。
+                if name == "MUSIC_U" {
+                    continue;
+                }
                 changed |= state.cookies.remove(name).is_some();
                 if name == "__csrf" && !state.csrf_token.is_empty() {
                     state.csrf_token.clear();
@@ -441,6 +468,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn rotated_cookies_are_kept_and_expired_ones_dropped_but_never_the_login() {
+        let dir = scratch("absorb");
+        let client = NeteaseClient::new(&dir).unwrap();
+        client
+            .replace_login(std::collections::BTreeMap::from([
+                ("MUSIC_U".to_string(), "old".to_string()),
+                ("NMTID".to_string(), "device".to_string()),
+            ]))
+            .unwrap();
+        let response = |lines: &[&str]| {
+            let mut builder = http::Response::builder();
+            for line in lines {
+                builder = builder.header(http::header::SET_COOKIE, *line);
+            }
+            reqwest::Response::from(builder.body(String::new()).unwrap())
+        };
+
+        client
+            .absorb_cookies(&response(&["MUSIC_U=new; Max-Age=31536000; Domain=.music.163.com"]))
+            .unwrap();
+        assert!(client.cookie_header().contains("MUSIC_U=new"));
+        client
+            .absorb_cookies(&response(&[
+                "NMTID=gone; Max-Age=0; Domain=.music.163.com",
+                "MUSIC_U=new; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Domain=.music.163.com",
+            ]))
+            .unwrap();
+        let header = client.cookie_header();
+        assert!(!header.contains("NMTID"), "Max-Age=0 是删除：{header}");
+        assert!(header.contains("MUSIC_U=new"), "登录 Cookie 留给账号接口判断：{header}");
+        assert!(NeteaseClient::new(&dir).unwrap().cookie_header().contains("MUSIC_U=new"));
     }
 
     #[test]

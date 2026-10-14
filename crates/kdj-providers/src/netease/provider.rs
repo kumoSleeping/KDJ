@@ -837,6 +837,12 @@ impl MusicProvider for NeteaseProvider {
         if !self.client.logged_in() {
             return Account::new(Platform::Wyy, LABEL, AccountState::Missing, "未登录");
         }
+        // 按客户端的节奏续登录；失败不算失效，交给下面的账号接口判断。
+        match self.client.refresh_login_if_due().await {
+            Ok(true) => tracing::info!("网易云登录已续期"),
+            Ok(false) => {}
+            Err(error) => tracing::warn!("网易云续登录失败：{error:#}"),
+        }
         let status = match self
             .client
             .weapi("/weapi/w/nuser/account/get", Map::new())

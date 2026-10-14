@@ -15,7 +15,6 @@ pub(crate) enum Change {
 /// `site` 是这份登录所属的注册域（`youtube.com`、`bilibili.com`）。带 Domain 的只认这个域和它的
 /// 子域；不带的是发这条响应的主机自己的，调用方只拿这个站点的响应来问。
 pub(crate) fn changes(headers: &http::HeaderMap, site: &str) -> Vec<Change> {
-    let now = cookie::time::OffsetDateTime::now_utc();
     headers
         .get_all(http::header::SET_COOKIE)
         .iter()
@@ -24,10 +23,7 @@ pub(crate) fn changes(headers: &http::HeaderMap, site: &str) -> Vec<Change> {
         .filter(|cookie| cookie.domain().is_none_or(|domain| within(domain, site)))
         .filter(|cookie| !cookie.name().is_empty() && valid_value(cookie.value()))
         .map(|cookie| {
-            let expired = cookie.value().is_empty()
-                || cookie.max_age().is_some_and(|age| age.is_zero() || age.is_negative())
-                || cookie.expires_datetime().is_some_and(|at| at <= now);
-            if expired {
+            if removes(&cookie) {
                 Change::Remove(cookie.name().to_owned())
             } else {
                 Change::Set(cookie.name().to_owned(), cookie.value().to_owned())
@@ -56,6 +52,20 @@ pub(crate) fn apply(
         }
     }
     changed
+}
+
+/// 这条 Set-Cookie 是在删 Cookie：值为空、Max-Age 不为正、Expires 已过。
+fn removes(cookie: &cookie::Cookie) -> bool {
+    cookie.value().is_empty()
+        || cookie.max_age().is_some_and(|age| age.is_zero() || age.is_negative())
+        || cookie
+            .expires_datetime()
+            .is_some_and(|at| at <= cookie::time::OffsetDateTime::now_utc())
+}
+
+/// 一行 Set-Cookie 是不是在删 Cookie（给自己解析名值的调用方用）。
+pub(crate) fn removes_set_cookie(text: &str) -> bool {
+    cookie::Cookie::parse(text).is_ok_and(|cookie| removes(&cookie))
 }
 
 fn within(domain: &str, site: &str) -> bool {
