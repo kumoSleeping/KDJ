@@ -12,8 +12,8 @@
 #   3. dispatch 两条打包线到 refs/tags/v{version} 上——它们各自的
 #      「发布 Release（仅 tag）」步骤会把产物传进同一个 Release；
 #      rust-build 的 latest-json 写入本版清单后再提升为 Latest。
-#   4. update-readme-release-sizes.yml 等四平台产物到齐后读取真实体积，
-#      自动更新 main 上中英文 README 的下载按钮。
+#   4. update-readme-release-sizes.yml 等桌面产物到齐后读取真实体积，
+#      自动更新 main 上中英文 README 的下载按钮（安卓取最近一个带 APK 的 Release）。
 #
 # 为什么不是"打了 tag 自动触发打包"而要显式 dispatch：
 # 用 GITHUB_TOKEN push 的 tag **不会**触发任何 on:tags 工作流

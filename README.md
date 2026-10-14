@@ -33,10 +33,10 @@ KDJ 是一款面向音乐收集、整理、分析、播放和可视化的跨平�
 
 <!-- release-package-size-badges:start -->
 <p>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest/download/KDJ_1.0.2-rc3_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-8.5_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 8.5 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest/download/KDJ_1.0.2-rc3_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-6.8_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 6.8 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest/download/KDJ_1.0.2-rc3_amd64.deb"><img src="https://img.shields.io/badge/Linux-9.7_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 9.7 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest/download/app-arm64-release.apk"><img src="https://img.shields.io/badge/Android-23.9_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 23.9 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-9.1_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 9.1 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-7.3_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 7.3 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_amd64.deb"><img src="https://img.shields.io/badge/Linux-10.4_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 10.4 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.0.2-rc8/app-arm64-release.apk"><img src="https://img.shields.io/badge/Android-23.8_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 23.8 MB"></a>
   <a href="https://github.com/kumoSleeping/KDJ/releases"><img src="https://img.shields.io/badge/More-Releases-555555?style=for-the-badge&logo=github&logoColor=white" alt="More releases"></a>
 </p>
 <!-- release-package-size-badges:end -->
@@ -44,9 +44,6 @@ KDJ 是一款面向音乐收集、整理、分析、播放和可视化的跨平�
 安装时可能需要在系统中允许安装来自未知来源的应用。macOS 可在“系统设置 → 隐私与安全性”中允许打开。
 
 当软件所在环境可以联通 GitHub 时，KDJ 会在启动时自动检查更新。也可以在“设置”中手动检查。
-
-> [!NOTE]
-> 常规曲库管理、音乐分析和音频播放不依赖 FFmpeg；混音编辑器的媒体读取、变速、导出，以及视频音画合并和音轨提取需要 FFmpeg。Mac（Apple Silicon / Intel）和 Windows x64 用户可在“设置 → 媒体工具”一键安装，也可直接导入 ZIP、7Z / 选择解压后的文件夹，无需终端、Homebrew 或配置 Path，安装后立即生效。Linux 可在同一面板查看 [FFmpeg 安装方式](https://ffmpeg.org/download.html)。
 
 ## 核心功能
 
@@ -73,7 +70,7 @@ KDJ 是一款面向音乐收集、整理、分析、播放和可视化的跨平�
 - 可视化在可移动、可缩放的浮动小窗中实时预览，小窗右下角可直接导出。
 - 可视化配置抽屉提供「画面」「图片」「文字」「输出」四页，可调整参数并实时看到效果。
 - 右键歌曲选择「导出可视化」，或把本地歌曲拖进导出队列；队列显示分辨率与帧率，完成后在「成品」中查看。
-- 导出需要 FFmpeg，见上方说明。
+- 导出需要 FFmpeg，可在“设置 → 媒体工具”安装。
 
 ### 播放与控制
 

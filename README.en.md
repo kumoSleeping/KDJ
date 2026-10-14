@@ -31,10 +31,10 @@ Choose your platform below to download the latest installer. The macOS button de
 
 <!-- release-package-size-badges:start -->
 <p>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest/download/KDJ_1.0.2-rc3_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-8.5_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 8.5 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest/download/KDJ_1.0.2-rc3_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-6.8_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 6.8 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest/download/KDJ_1.0.2-rc3_amd64.deb"><img src="https://img.shields.io/badge/Linux-9.7_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 9.7 MB"></a>
-  <a href="https://github.com/kumoSleeping/KDJ/releases/latest/download/app-arm64-release.apk"><img src="https://img.shields.io/badge/Android-23.9_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 23.9 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_aarch64.dmg"><img src="https://img.shields.io/badge/macOS-9.1_MB-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 9.1 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_x64-setup.exe"><img src="https://img.shields.io/badge/Windows-7.3_MB-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 7.3 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.1.0-rc5/KDJ_1.1.0-rc5_amd64.deb"><img src="https://img.shields.io/badge/Linux-10.4_MB-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux 10.4 MB"></a>
+  <a href="https://github.com/kumoSleeping/KDJ/releases/download/v1.0.2-rc8/app-arm64-release.apk"><img src="https://img.shields.io/badge/Android-23.8_MB-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 23.8 MB"></a>
   <a href="https://github.com/kumoSleeping/KDJ/releases"><img src="https://img.shields.io/badge/More-Releases-555555?style=for-the-badge&logo=github&logoColor=white" alt="More releases"></a>
 </p>
 <!-- release-package-size-badges:end -->
@@ -42,9 +42,6 @@ Choose your platform below to download the latest installer. The macOS button de
 You may need to allow apps from unidentified developers. On macOS, allow the app under System Settings → Privacy & Security → General.
 
 When GitHub is reachable, KDJ checks for updates on launch. You can also check manually in Settings.
-
-> [!NOTE]
-> Everyday library management and music analysis do not require FFmpeg. Video remuxing, extracting audio from video, and VJ export need [FFmpeg](https://ffmpeg.org/download.html). On macOS and Windows, Settings → Media tools can install it or import existing ZIP / 7Z archives and extracted folders.
 
 KDJ packs cross-platform search, download, local library management, and music analysis into one desktop app. Instead of jumping between websites, downloaders, and tagging tools, preparing music can stay one continuous workflow.
 

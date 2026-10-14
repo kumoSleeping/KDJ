@@ -5,12 +5,27 @@ import { fileURLToPath } from "node:url";
 const INCOMPLETE_RELEASE_EXIT_CODE = 2;
 const START_MARKER = "<!-- release-package-size-badges:start -->";
 const END_MARKER = "<!-- release-package-size-badges:end -->";
-const LATEST_RELEASE_URL =
-  "https://github.com/kumoSleeping/KDJ/releases/latest";
 const ALL_RELEASES_URL = "https://github.com/kumoSleeping/KDJ/releases";
+const ANDROID_APK = "app-arm64-release.apk";
 
-function latestAssetUrl(name) {
-  return `${LATEST_RELEASE_URL}/download/${encodeURIComponent(name)}`;
+// 链接固定到具体 tag：`releases/latest/download/<带版本号的文件名>` 在下一版成为
+// Latest、README 还没同步的那段时间里全部 404，同步一旦跳过就一直 404。
+function releaseAssetUrl(tag, name) {
+  return `${ALL_RELEASES_URL}/download/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`;
+}
+
+function usableAsset(asset) {
+  return Boolean(asset) && Number.isSafeInteger(asset.size) && asset.size > 0;
+}
+
+// 安卓只手动构建（release.yml），Latest 常常没有 APK：取最近一个带 APK 的正式 Release。
+function newestAndroidApk(latest, releases) {
+  for (const release of [latest, ...releases]) {
+    if (release.draft || typeof release.tag_name !== "string") continue;
+    const apk = (release.assets ?? []).find((asset) => asset.name === ANDROID_APK);
+    if (usableAsset(apk)) return { tag: release.tag_name, asset: apk };
+  }
+  return null;
 }
 
 function fail(message) {
@@ -19,7 +34,7 @@ function fail(message) {
 
 function getAsset(assetsByName, name, missing) {
   const asset = assetsByName.get(name);
-  if (!asset || !Number.isSafeInteger(asset.size) || asset.size <= 0) {
+  if (!usableAsset(asset)) {
     missing.push(name);
     return null;
   }
@@ -60,11 +75,20 @@ function replaceGeneratedBlock(source, generatedBlock, readmePath) {
 
 async function main() {
   const releaseJsonPath = process.argv[2];
+  const releasesJsonPath = process.argv[3];
   if (!releaseJsonPath) {
-    fail("用法：node scripts/update-readme-release-sizes.mjs <release.json>");
+    fail(
+      "用法：node scripts/update-readme-release-sizes.mjs <latest-release.json> [releases.json]",
+    );
   }
 
   const release = JSON.parse(await readFile(releaseJsonPath, "utf8"));
+  const releases = releasesJsonPath
+    ? JSON.parse(await readFile(releasesJsonPath, "utf8"))
+    : [];
+  if (!Array.isArray(releases)) {
+    fail(`${releasesJsonPath} 不是 Release 数组`);
+  }
   const tag = release.tag_name;
   if (
     typeof tag !== "string" ||
@@ -82,8 +106,9 @@ async function main() {
   );
   const missing = [];
 
-  // macOS / Windows / Android 使用用户最常下载的安装包；Linux 在三种正式包中
-  // 选择体积最小的一个。所有文件名都精确匹配，避免把 Labs、签名或更新清单算入。
+  // macOS / Windows 使用用户最常下载的安装包；Linux 在三种正式包中选择体积最小的
+  // 一个。所有文件名都精确匹配，避免把 Labs、签名或更新清单算入。桌面三平台必须
+  // 都在 Latest 里；安卓见 `newestAndroidApk`，一个 APK 都没有就不放安卓按钮。
   const macOSArm64 = getAsset(
     assetsByName,
     `KDJ_${version}_aarch64.dmg`,
@@ -99,7 +124,7 @@ async function main() {
     `KDJ_${version}_x64-setup.exe`,
     missing,
   );
-  const android = getAsset(assetsByName, "app-arm64-release.apk", missing);
+  const android = newestAndroidApk(release, releases);
   const linuxCandidates = [
     `KDJ_${version}_amd64.deb`,
     `KDJ-${version}-1.x86_64.rpm`,
@@ -115,7 +140,7 @@ async function main() {
   }
   if (missing.length > 0) {
     console.error(
-      `${tag} 的四平台 Release 资产尚未到齐：${missing.join(", ")}`,
+      `${tag} 的桌面 Release 资产尚未到齐：${missing.join(", ")}`,
     );
     process.exitCode = INCOMPLETE_RELEASE_EXIT_CODE;
     return;
@@ -131,7 +156,7 @@ async function main() {
     macOSX64: sizeInMb(macOSX64.size),
     Windows: sizeInMb(windows.size),
     Linux: sizeInMb(linux.size),
-    Android: sizeInMb(android.size),
+    Android: android ? sizeInMb(android.asset.size) : null,
   };
 
   const generatedBlock = [
@@ -142,7 +167,7 @@ async function main() {
       color: "black",
       logo: "apple",
       logoColor: "white",
-      href: latestAssetUrl(macOSArm64.name),
+      href: releaseAssetUrl(tag, macOSArm64.name),
     }),
     renderBadge({
       label: "Windows",
@@ -150,7 +175,7 @@ async function main() {
       color: "0078D4",
       logo: "windows",
       logoColor: "white",
-      href: latestAssetUrl(windows.name),
+      href: releaseAssetUrl(tag, windows.name),
     }),
     renderBadge({
       label: "Linux",
@@ -158,19 +183,22 @@ async function main() {
       color: "FCC624",
       logo: "linux",
       logoColor: "black",
-      href: latestAssetUrl(linux.name),
+      href: releaseAssetUrl(tag, linux.name),
     }),
-    renderBadge({
-      label: "Android",
-      size: sizes.Android,
-      color: "3DDC84",
-      logo: "android",
-      logoColor: "white",
-      href: latestAssetUrl(android.name),
-    }),
+    android &&
+      renderBadge({
+        label: "Android",
+        size: sizes.Android,
+        color: "3DDC84",
+        logo: "android",
+        logoColor: "white",
+        href: releaseAssetUrl(android.tag, android.asset.name),
+      }),
     renderMoreBadge(),
     "</p>",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -188,7 +216,10 @@ async function main() {
   console.log(
     `${tag}: macOS arm64 DMG ${sizes.macOSArm64} MB, x64 DMG ${sizes.macOSX64} MB; ` +
       `Windows EXE ${sizes.Windows} MB; ` +
-      `Linux ${linux.name} ${sizes.Linux} MB; Android APK ${sizes.Android} MB`,
+      `Linux ${linux.name} ${sizes.Linux} MB; ` +
+      (android
+        ? `Android APK ${sizes.Android} MB (${android.tag})`
+        : "Android APK none"),
   );
 }
 

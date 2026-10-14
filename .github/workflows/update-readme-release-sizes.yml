@@ -1,6 +1,6 @@
-# Release 的桌面与 Android 打包线相互独立，谁先完成不确定。本工作流在任一条
-# 成功结束后检查一次：只有触发标签已经成为 Latest，且四个平台的目标资产全部
-# 到齐，才把真实体积写回 README。缺一项时正常跳过，另一条打包线结束会再检查。
+# 桌面打包线随发版跑，安卓只手动跑。本工作流在任一条成功结束后检查一次：只有
+# 触发标签已经成为 Latest，且桌面三平台的目标资产全部到齐，才把真实体积和下载
+# 链接写回 README；安卓按钮指向最近一个带 APK 的 Release。缺桌面资产时正常跳过。
 name: update-readme-release-sizes
 
 on:
@@ -61,13 +61,15 @@ jobs:
 
           release_json="$RUNNER_TEMP/kdj-latest-release.json"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$latest_tag" > "$release_json"
+          releases_json="$RUNNER_TEMP/kdj-releases.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_json"
 
           set +e
-          node scripts/update-readme-release-sizes.mjs "$release_json"
+          node scripts/update-readme-release-sizes.mjs "$release_json" "$releases_json"
           update_status=$?
           set -e
           if [ "$update_status" -eq 2 ]; then
-            echo "四平台资产尚未到齐，本次正常跳过"
+            echo "桌面资产尚未到齐，本次正常跳过"
             echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
