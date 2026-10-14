@@ -50,6 +50,11 @@ const OAUTH_API: &str = "https://api.soundcloud.com";
 const CREDENTIAL_OAUTH: &str = "oauth";
 const CREDENTIAL_BROWSER: &str = "browser_session";
 
+/// SoundCloud 用 401 拒绝了这份登录，又没有刷新令牌可换：账号状态要报「已失效」而不是「未知」。
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct SessionRejected(&'static str);
+
 fn default_credential_kind() -> String {
     CREDENTIAL_OAUTH.into()
 }
@@ -627,9 +632,9 @@ impl SoundCloudProvider {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             if current.refresh_token.is_empty() {
                 if current.credential_kind == CREDENTIAL_BROWSER {
-                    bail!("SoundCloud 浏览器会话已失效，请重新连接浏览器");
+                    return Err(SessionRejected("SoundCloud 浏览器会话已失效，请重新连接浏览器").into());
                 }
-                bail!("SoundCloud 登录已失效，请重新登录");
+                return Err(SessionRejected("SoundCloud 登录已失效，请重新登录").into());
             }
             let refreshed = self.refresh_access_token(Some(&token)).await?;
             let (retry_status, retry_body) = self
@@ -851,7 +856,9 @@ impl MusicProvider for SoundCloudProvider {
                 account.avatar = avatar;
             }
             Err(error) => {
-                account.state = if session_expired(&cached) {
+                account.state = if session_expired(&cached)
+                    || error.downcast_ref::<SessionRejected>().is_some()
+                {
                     AccountState::Expired
                 } else {
                     AccountState::Unknown
