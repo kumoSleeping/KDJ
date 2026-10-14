@@ -11,6 +11,8 @@ async-trait = "0.1.91"
 base64 = "0.22"
 # 预览流转发：不让 server 层依赖 reqwest 的类型，字节流用裸 Bytes 传出去
 bytes = "1"
+# 登录 Cookie 的轮换：解析平台响应里的 Set-Cookie（reqwest 已经带进来同一个版本）。
+cookie = "0.18"
 cbc = "0.1"
 ecb = { version = "0.1", features = ["alloc"] }
 flate2 = "1.1.9"

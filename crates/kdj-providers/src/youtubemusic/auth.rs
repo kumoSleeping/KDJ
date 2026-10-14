@@ -160,6 +160,14 @@ impl BrowserSession {
             .cloned()
     }
 
+    /// 同一次登录：网站轮换 Cookie 的值不算换了账号，重新导入或换了账号才算。
+    pub fn same_login(&self, other: &Self) -> bool {
+        self.created_at == other.created_at
+            && self.imported_from == other.imported_from
+            && self.x_goog_authuser == other.x_goog_authuser
+            && self.sid() == other.sid()
+    }
+
     pub fn authorization(&self, origin: &str) -> Option<String> {
         let sid = self.sid()?;
         let timestamp = unix_now();
@@ -247,7 +255,7 @@ impl YoutubeAuth {
     /// identity after logout or attach it to a newly imported account.
     pub(crate) fn save_profile(&self, expected: &BrowserSession, profile: &super::account_profile::AccountProfile) -> Result<bool> {
         let current = self.session.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if current.as_ref() != Some(expected) { return Ok(false); }
+        if !current.as_ref().is_some_and(|current| current.same_login(expected)) { return Ok(false); }
         super::account_profile::save(&self.path.with_extension("profile.json"), expected, profile)?;
         Ok(true)
     }
@@ -272,6 +280,45 @@ impl YoutubeAuth {
         Ok(())
     }
 
+    /// 这份会话还是当前保存的那次登录（Cookie 轮换过也算）。
+    pub fn is_current(&self, session: &BrowserSession) -> bool {
+        self.snapshot().is_some_and(|current| current.same_login(session))
+    }
+
+    /// 收下用 `sent` 发出的请求的响应里 YouTube 发来的新 Cookie，变了才落盘。期间退出或换了
+    /// 登录的，旧响应不碰新登录；合完不再是一份有效登录（SAPISID 被删）的不收。
+    pub(crate) fn absorb(&self, sent: &BrowserSession, headers: &http::HeaderMap) {
+        let changes = crate::cookie_jar::changes(headers, "youtube.com");
+        if changes.is_empty() {
+            return;
+        }
+        let mut current = self
+            .session
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(session) = current.as_ref().filter(|current| current.same_login(sent)) else {
+            return;
+        };
+        let mut cookies = cookie_map(&session.cookie);
+        if !crate::cookie_jar::apply(&mut cookies, &changes, |_| true) {
+            return;
+        }
+        let mut next = session.clone();
+        next.cookie = cookies
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if next.cookie.len() > MAX_HEADERS_BYTES || next.validate().is_err() {
+            tracing::warn!("YouTube 发来的 Cookie 会让登录失效，没有收下");
+            return;
+        }
+        match write_session_file(&self.path, &next) {
+            Ok(()) => *current = Some(next),
+            Err(error) => tracing::warn!("保存 YouTube 轮换后的 Cookie 失败：{error:#}"),
+        }
+    }
+
     pub fn clear(&self) -> Result<()> {
         let mut current = self
             .session
@@ -287,12 +334,6 @@ impl YoutubeAuth {
         }
         *current = None;
         Ok(())
-    }
-
-    pub fn request_headers(&self, origin: &str) -> Vec<(String, String)> {
-        self.snapshot()
-            .map(|session| session.request_headers(origin))
-            .unwrap_or_default()
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -560,6 +601,72 @@ mod tests {
         assert!(video.is_logged_in());
         assert!(!ctx.session_file(YTM_SESSION_FILE).exists());
         assert!(ctx.session_file(YOUTUBE_SESSION_FILE).exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rotated_cookies_are_kept_for_the_same_login_only() {
+        use crate::provider::ProviderLiveSettings;
+
+        let root = std::env::temp_dir().join(format!(
+            "kdj-youtube-auth-rotate-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let ctx = ProviderContext::new(
+            root.clone(),
+            ProviderLiveSettings {
+                download_dir: root.join("downloads"),
+                filename_template: "{title}".into(),
+                default_quality: kdj_core::models::Quality::Q128,
+                netease_use_download_api: false,
+                soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
+                ytm_enabled: true,
+                youtube_enabled: true,
+                video_dir: None,
+                video_format: "mp4".into(),
+            },
+        );
+        let auth = YoutubeAuth::new(&ctx, Platform::Ytm).unwrap();
+        let headers = |lines: &[&str]| {
+            let mut map = http::HeaderMap::new();
+            for line in lines {
+                map.append(http::header::SET_COOKIE, line.parse().unwrap());
+            }
+            map
+        };
+        let sent = BrowserSession::from_cookie_header("SAPISID=keep; SIDCC=old; YSC=gone", "测试").unwrap();
+        auth.save(sent.clone()).unwrap();
+        let file = ctx.session_file(YTM_SESSION_FILE);
+
+        auth.absorb(&sent, &headers(&[
+            "SIDCC=new; Domain=.youtube.com; Path=/",
+            "YSC=; Max-Age=0; Domain=.youtube.com",
+            "NID=google; Domain=.google.com",
+        ]));
+        let rotated = auth.snapshot().unwrap();
+        assert_eq!(rotated.cookie, "SAPISID=keep; SIDCC=new");
+        assert!(auth.is_current(&sent), "轮换过 Cookie 仍是同一次登录");
+        let reopened = YoutubeAuth::new(&ctx, Platform::Ytm).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().cookie, rotated.cookie);
+
+        // 没变就不写文件；删掉 SAPISID 会让登录失效，不收。
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        auth.absorb(&sent, &headers(&["SIDCC=new; Domain=.youtube.com"]));
+        auth.absorb(&sent, &headers(&["SAPISID=; Max-Age=0; Domain=.youtube.com"]));
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), modified);
+        assert_eq!(auth.snapshot().unwrap().cookie, "SAPISID=keep; SIDCC=new");
+
+        // 换了登录以后，旧登录的响应不碰新登录。
+        let mut replacement = BrowserSession::from_cookie_header("SAPISID=other", "测试").unwrap();
+        replacement.created_at = sent.created_at + 1;
+        auth.save(replacement.clone()).unwrap();
+        auth.absorb(&sent, &headers(&["SIDCC=stale; Domain=.youtube.com"]));
+        assert_eq!(auth.snapshot().unwrap(), replacement);
+        assert!(!auth.is_current(&sent));
 
         let _ = std::fs::remove_dir_all(root);
     }

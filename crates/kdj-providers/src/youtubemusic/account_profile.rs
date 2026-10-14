@@ -63,7 +63,11 @@ impl AccountProfile {
 
 fn binding(session: &BrowserSession) -> String {
     let mut hash = Sha256::new();
-    hash.update(session.cookie.as_bytes());
+    // 绑定到这次登录，不绑整串 Cookie：网站轮换 Cookie 后资料缓存仍属于同一个账号。
+    hash.update(session.created_at.to_le_bytes());
+    hash.update(session.sid().unwrap_or_default().as_bytes());
+    hash.update([0]);
+    hash.update(session.imported_from.as_bytes());
     hash.update([0]);
     hash.update(session.x_goog_authuser.as_bytes());
     hex::encode(hash.finalize())
@@ -167,6 +171,9 @@ mod tests {
         assert!(load(&path, &other).is_none());
         other = BrowserSession::from_cookie_header("SAPISID=other", "Test").unwrap();
         assert!(load(&path, &other).is_none());
+        let mut rotated = session.clone();
+        rotated.cookie = "SAPISID=test; SIDCC=rotated".into();
+        assert_eq!(load(&path, &rotated), Some(profile.clone()), "轮换过 Cookie 仍是这次登录");
         std::fs::write(&path, b"invalid").unwrap();
         assert!(save(&path, &session, &profile).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"invalid");

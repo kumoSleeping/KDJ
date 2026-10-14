@@ -186,30 +186,35 @@ impl YtmClient {
     }
 
     async fn post_with_auth(&self, endpoint: &str, body: Value, with_auth: bool) -> Result<Value> {
-        let headers = with_auth
-            .then(|| self.auth.request_headers("https://music.youtube.com"))
-            .unwrap_or_default();
-        self.post_with_headers(endpoint, body, headers).await
+        let session = with_auth.then(|| self.auth.snapshot()).flatten();
+        self.post_with_session(endpoint, body, session.as_ref()).await
     }
 
-    async fn post_with_headers(
+    /// 带 `session` 的请求，响应里 YouTube 换下的 Cookie 收进这次登录。
+    async fn post_with_session(
         &self,
         endpoint: &str,
         body: Value,
-        headers: Vec<(String, String)>,
+        session: Option<&BrowserSession>,
     ) -> Result<Value> {
         let url = format!(
             "{BASE}/{endpoint}?key={}&prettyPrint=false",
             self.innertube_key
         );
         let mut request = self.http.post(&url).json(&body);
-        for (name, value) in headers {
+        for (name, value) in session
+            .map(|session| session.request_headers("https://music.youtube.com"))
+            .unwrap_or_default()
+        {
             request = request.header(name, value);
         }
         let response = request
             .send()
             .await
             .with_context(|| format!("YouTube Music 请求失败：{endpoint}"))?;
+        if let Some(session) = session {
+            self.auth.absorb(session, response.headers());
+        }
         let status = response.status();
         let payload: Value = response
             .json()
@@ -366,7 +371,12 @@ impl YtmClient {
             .header("X-Youtube-Client-Name", "67")
             .header("X-Youtube-Client-Version", PLAYBACK_WEB_VERSION)
             .json(&body);
-        for (name, value) in self.auth.request_headers("https://music.youtube.com") {
+        let session = self.auth.snapshot();
+        for (name, value) in session
+            .as_ref()
+            .map(|session| session.request_headers("https://music.youtube.com"))
+            .unwrap_or_default()
+        {
             if name.eq_ignore_ascii_case("user-agent")
                 || name.eq_ignore_ascii_case("x-goog-visitor-id")
             {
@@ -378,6 +388,9 @@ impl YtmClient {
             .send()
             .await
             .context("YouTube Music 请求失败：受保护 player")?;
+        if let Some(session) = &session {
+            self.auth.absorb(session, response.headers());
+        }
         let status = response.status();
         let payload: Value = response
             .json()
@@ -592,8 +605,7 @@ impl YtmClient {
     /// 登录账号菜单只用于补充真实姓名和头像，不能用于判断会话有效性：失效 Cookie 也可能
     /// 得到一个匿名的 HTTP 200 菜单。
     pub async fn account_menu(&self, session: &BrowserSession) -> Result<Value> {
-        self.post_with_headers("account/account_menu", Self::web_remix_context(),
-            session.request_headers("https://music.youtube.com"))
+        self.post_with_session("account/account_menu", Self::web_remix_context(), Some(session))
             .await
     }
 
@@ -606,11 +618,7 @@ impl YtmClient {
             Value::String("FEmusic_liked_playlists".into()),
         );
         let response = self
-            .post_with_headers(
-                "browse",
-                body,
-                session.request_headers("https://music.youtube.com"),
-            )
+            .post_with_session("browse", body, Some(session))
             .await?;
         ensure_authenticated_library_response(response)?;
         Ok(())
@@ -653,13 +661,20 @@ impl YtmClient {
 
     async fn fetch_homepage(&self) -> Result<String> {
         let mut request = self.http.get(HOMEPAGE);
-        for (name, value) in self.auth.request_headers("https://music.youtube.com") {
-            request = request.header(name, value);
+        let session = self.auth.snapshot();
+        if let Some(session) = &session {
+            for (name, value) in session.request_headers("https://music.youtube.com") {
+                request = request.header(name, value);
+            }
         }
-        request
+        let response = request
             .send()
             .await
-            .context("打开 YouTube Music 首页失败")?
+            .context("打开 YouTube Music 首页失败")?;
+        if let Some(session) = &session {
+            self.auth.absorb(session, response.headers());
+        }
+        response
             .error_for_status()
             .context("YouTube Music 首页返回错误")?
             .text()

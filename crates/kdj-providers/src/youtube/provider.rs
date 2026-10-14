@@ -487,7 +487,7 @@ impl MusicProvider for YoutubeProvider {
         }
         let Some(session) = self.auth.snapshot() else { return self.cached_account_snapshot(); };
         let library = self.client.account_playlist_directory().await;
-        if self.auth.snapshot().as_ref() != Some(&session) { return self.cached_account_snapshot(); }
+        if !self.auth.is_current(&session) { return self.cached_account_snapshot(); }
         match library {
             Ok(_) => {
                 let profile = self.client.account_menu(&session).await
@@ -504,7 +504,7 @@ impl MusicProvider for YoutubeProvider {
                     }
                     Err(_) => account.detail.push_str(" · 账号资料读取失败"),
                 }
-                if self.auth.snapshot().as_ref() != Some(&session) { return self.cached_account_snapshot(); }
+                if !self.auth.is_current(&session) { return self.cached_account_snapshot(); }
                 account
             },
             Err(error) if is_auth_rejection(&error) => {

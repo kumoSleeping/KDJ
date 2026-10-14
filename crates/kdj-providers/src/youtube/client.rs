@@ -176,26 +176,33 @@ impl YoutubeClient {
     }
 
     pub async fn post_web(&self, endpoint: &str, body: &Value) -> Result<Value> {
-        self.post_web_with_headers(
-            endpoint,
-            body,
-            self.auth.request_headers("https://www.youtube.com"),
-        )
-        .await
+        self.post_web_with_session(endpoint, body, self.auth.snapshot().as_ref())
+            .await
     }
 
-    async fn post_web_with_headers(
+    /// 带 `session` 的请求，响应里 YouTube 换下的 Cookie 收进这次登录。
+    async fn post_web_with_session(
         &self,
         endpoint: &str,
         body: &Value,
-        headers: Vec<(String, String)>,
+        session: Option<&BrowserSession>,
     ) -> Result<Value> {
         let url = format!("{BASE}/{endpoint}?key={}&prettyPrint=false", self.key);
         let mut request = self.http.post(url).json(body);
-        for (name, value) in headers {
+        for (name, value) in session
+            .map(|session| session.request_headers("https://www.youtube.com"))
+            .unwrap_or_default()
+        {
             request = request.header(name, value);
         }
-        read_json(request, endpoint).await
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("YouTube 请求失败：{endpoint}"))?;
+        if let Some(session) = session {
+            self.auth.absorb(session, response.headers());
+        }
+        read_json(response, endpoint).await
     }
 
     fn account_playlist_directory_body() -> Value {
@@ -212,8 +219,8 @@ impl YoutubeClient {
     /// Same selected browser account as the library check; an anonymous menu is not proof
     /// of login. The provider parses only activeAccountHeaderRenderer from this response.
     pub async fn account_menu(&self, session: &BrowserSession) -> Result<Value> {
-        self.post_web_with_headers("account/account_menu", &Self::web_context(),
-            session.request_headers("https://www.youtube.com")).await
+        self.post_web_with_session("account/account_menu", &Self::web_context(), Some(session))
+            .await
     }
 
     /// 账号侧栏真正依赖的私人播放列表目录；它本身就是这份会话能力的判据。
@@ -225,11 +232,9 @@ impl YoutubeClient {
 
     /// 候选会话必须先联网验证，成功后上层才允许替换已保存的登录态。
     pub async fn validate_browser_session(&self, session: &BrowserSession) -> Result<()> {
-        let body = self.post_web_with_headers(
-            "browse",
-            &Self::account_playlist_directory_body(),
-            session.request_headers("https://www.youtube.com"),
-        ).await?;
+        let body = self
+            .post_web_with_session("browse", &Self::account_playlist_directory_body(), Some(session))
+            .await?;
         crate::youtubemusic::auth::validate_account_library(&body)
 
     }
@@ -326,10 +331,12 @@ impl YoutubeClient {
             .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml")
             .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.7")
             .header(reqwest::header::USER_AGENT, user_agent)
-            .header(reqwest::header::COOKIE, session.cookie)
+            .header(reqwest::header::COOKIE, &session.cookie)
             .send()
             .await
-            .context("打开 YouTube 页面失败")?
+            .context("打开 YouTube 页面失败")?;
+        self.auth.absorb(&session, response.headers());
+        let response = response
             .error_for_status()
             .context("YouTube 页面返回错误")?;
         let bytes = response.bytes().await.context("读取 YouTube 页面失败")?;
@@ -418,7 +425,11 @@ impl YoutubeClient {
             .header("X-Youtube-Client-Name", "5")
             .header("X-Youtube-Client-Version", IOS_VERSION)
             .json(&body);
-        read_json(request, "player/ios").await
+        let response = request
+            .send()
+            .await
+            .context("YouTube 请求失败：player/ios")?;
+        read_json(response, "player/ios").await
     }
 
     async fn parse_player(&self, player: &Value) -> Result<VideoInfo> {
@@ -673,13 +684,20 @@ impl YoutubeClient {
 
     async fn homepage_html(&self) -> Result<String> {
         let mut request = self.http.get("https://www.youtube.com/");
-        for (name, value) in self.auth.request_headers("https://www.youtube.com") {
-            request = request.header(name, value);
+        let session = self.auth.snapshot();
+        if let Some(session) = &session {
+            for (name, value) in session.request_headers("https://www.youtube.com") {
+                request = request.header(name, value);
+            }
         }
-        request
+        let response = request
             .send()
             .await
-            .context("打开 YouTube 首页失败")?
+            .context("打开 YouTube 首页失败")?;
+        if let Some(session) = &session {
+            self.auth.absorb(session, response.headers());
+        }
+        response
             .error_for_status()
             .context("YouTube 首页返回错误")?
             .text()
@@ -701,11 +719,7 @@ impl YoutubeClient {
     }
 }
 
-async fn read_json(request: reqwest::RequestBuilder, endpoint: &str) -> Result<Value> {
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("YouTube 请求失败：{endpoint}"))?;
+async fn read_json(response: reqwest::Response, endpoint: &str) -> Result<Value> {
     let status = response.status();
     let content_type = response
         .headers()

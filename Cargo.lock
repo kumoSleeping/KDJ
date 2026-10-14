@@ -3244,6 +3244,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cbc",
+ "cookie",
  "ecb",
  "flate2",
  "futures-util",
