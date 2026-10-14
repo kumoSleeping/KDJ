@@ -24,6 +24,19 @@ const METHODS: Record<Method, { label: string; icon: typeof Globe2 }> = {
   headers: { label: "请求头", icon: ClipboardPaste },
 };
 
+/**
+ * A login handed over from the user's browser (Cookie-Editor, request headers) is a copy of the
+ * browser's session. On these platforms KDJ cannot renew such a copy itself: Bilibili's refresh token
+ * stays in the browser's storage, QQ's web login carries no refresh key, and YouTube keeps rotating
+ * the session in the browser. The way says so in its name.
+ */
+const NO_RENEWAL = new Set<Platform>(["bilibili", "qqm", "ytm", "youtube"]);
+
+function methodLabel(method: Method, platform: Platform): string {
+  const label = METHODS[method].label;
+  return (method === "cookies" || method === "headers") && NO_RENEWAL.has(platform) ? `${label}（无法自动续期）` : label;
+}
+
 export const SCAN_WITH: Partial<Record<Platform, string>> = {
   wyy: "用网易云音乐 App 扫码",
   qqm: "用对应 App 扫码",
@@ -111,16 +124,16 @@ export function AccountLogin({ account, sourceEnabled, onDone }: {
             else setMethod(id);
           }}>
             <Icon size={14} aria-hidden="true" />
-            <span>{METHODS[id].label}</span>
+            <span>{methodLabel(id, account.platform)}</span>
           </button>
         </li>;
       })}
-    </ul> : <div className="kd-account-login-way" role="group" aria-label={`${account.label} · ${METHODS[method].label}`}
+    </ul> : <div className="kd-account-login-way" role="group" aria-label={`${account.label} · ${methodLabel(method, account.platform)}`}
       onKeyDown={event => event.stopPropagation()}>
       <button type="button" className="kd-account-login-back" disabled={busy} title="返回登录方式"
         onClick={() => { setWindowNotice(""); setMethod(null); }}>
         <ChevronLeft size={14} aria-hidden="true" />
-        <span>{METHODS[method].label}</span>
+        <span>{methodLabel(method, account.platform)}</span>
       </button>
       {windowNotice && <InlineNotice text={windowNotice} className="kd-account-notice" onDismiss={() => setWindowNotice("")} />}
       {method === "qr" && <QrPanel account={account} onDone={onDone} />}

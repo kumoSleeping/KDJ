@@ -105,7 +105,10 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     state, nickname: "", avatar: "", detail: "", supports_login: true, login_method: "browser" });
   const qrAccount = (platform: "wyy" | "qqm" | "bilibili"): Account => ({ platform, label: platform, state: "missing",
     nickname: "", avatar: "", detail: "", supports_login: true, login_method: "qr" });
-  const COOKIES = "从 Cookie-Editor 导入", BROWSER = "从浏览器导入（部分支持）";
+  const COOKIES = "从 Cookie-Editor 导入", BROWSER = "从浏览器导入（部分支持）", HEADERS = "请求头";
+  // A copy of the browser's login that KDJ cannot renew says so on these platforms.
+  const renewable = (platform: Account["platform"]) => platform === "soundcloud" || platform === "wyy";
+  const named = (way: string, platform: Account["platform"]) => renewable(platform) ? way : `${way}（无法自动续期）`;
   const way = () => document.querySelector<HTMLElement>(".kd-account-login-way");
   const backKey = () => document.querySelector<HTMLButtonElement>(".kd-account-login-back")!;
   const back = () => act(async () => backKey().click());
@@ -124,7 +127,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
         const beforeOpen = calls.length;
         await click("登录");
-        assert.deepEqual(methods(), [COOKIES, BROWSER, "登录窗口", "请求头"]);
+        assert.deepEqual(methods(), [named(COOKIES, platform), BROWSER, "登录窗口", named(HEADERS, platform)]);
         assert.equal(calls.length, beforeOpen, "opening shows the ways and asks for nothing");
         assert.equal(way(), null, "no way is open until one is chosen");
 
@@ -165,13 +168,13 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         assert.equal(way(), null);
         assert.equal(methods().length, 4, "the way back returns to the ways");
 
-        await click("请求头");
-        assert.equal(way()!.getAttribute("aria-label"), `${label} · 请求头`);
+        await click(named(HEADERS, platform));
+        assert.equal(way()!.getAttribute("aria-label"), `${label} · ${named(HEADERS, platform)}`);
         await fillHeaders();
         await click("登录", panel());
         assert.ok(calls.includes(`POST:/api/accounts/${platform}/login/headers`));
         await back();
-        await click("请求头");
+        await click(named(HEADERS, platform));
         assert.equal(document.querySelector("textarea")?.value, "", "what was pasted does not come back");
         await back();
 
@@ -230,8 +233,8 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     await render("export", browserAccount("youtube"));
     await click("登录");
     const beforeCookies = calls.length;
-    await click(COOKIES);
-    assert.equal(way()!.getAttribute("aria-label"), `YouTube Video · ${COOKIES}`);
+    await click(named(COOKIES, "youtube"));
+    assert.equal(way()!.getAttribute("aria-label"), `YouTube Video · ${named(COOKIES, "youtube")}`);
     assert.deepEqual(calls.slice(beforeCookies), ["GET:/api/accounts/youtube/login/browsers"], "it looks for browsers and nothing else");
     assert.deepEqual(stepKeys(), ["安装", "打开", "粘贴"]);
     assert.equal(panel().querySelectorAll(".kd-account-login-steps li").length, 4, "four steps, one thing each");
@@ -313,7 +316,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
       assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
       const beforeQr = calls.length;
       await click("登录");
-      assert.deepEqual(methods(), ["扫码", COOKIES, BROWSER, "请求头"]);
+      assert.deepEqual(methods(), ["扫码", named(COOKIES, platform), BROWSER, named(HEADERS, platform)]);
       assert.equal(calls.length, beforeQr, "no code is asked for before 扫码 is chosen");
       assert.equal(document.querySelector(".kd-account-login-qr, .kd-account-login-panel"), null);
       await click("扫码");
@@ -334,7 +337,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
       assert.equal(notice(), `登录失败：无法连接本地服务：${detail}`);
       // The request headers of the site are a way here as well, through the same one route.
       await back();
-      await click("请求头");
+      await click(named(HEADERS, platform));
       await fillHeaders();
       await click("登录", panel());
       assert.ok(calls.includes(`POST:/api/accounts/${platform}/login/headers`));
