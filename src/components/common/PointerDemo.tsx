@@ -10,7 +10,7 @@ import "./PointerDemo.css";
  */
 export type PointerDemoScene = "pick-range" | "pick-toggle" | "drag-in" | "search" | "viz-tune" | "pip" | "player-keys"
   | "menu-toss" | "multi-copy" | "add-folder" | "analyze"
-  | "platforms" | "kind-switch" | "sidebar-online" | "viz-export" | "mini-player" | "cookie-export";
+  | "platforms" | "kind-switch" | "sidebar-online" | "viz-export" | "mini-player" | "cookie-export" | "login";
 
 /** What the picture shows for one moment; the next moment is `move` + `stay` later. */
 interface Beat {
@@ -291,6 +291,18 @@ const SCENES: Record<PointerDemoScene, Scene> = {
       { move: 400, stay: 100, cursor: AWAY },
     ],
   },
+  login: {
+    rest: 4,
+    beats: [
+      { move: 600, stay: 300, cursor: AWAY },
+      { move: 650, stay: 200, cursor: [132, 25] },
+      { move: 80, stay: 350, cursor: [132, 25], press: true },
+      { move: 0, stay: 500, cursor: [132, 25], picked: [0] },
+      { move: 0, stay: 1500, cursor: [132, 25], picked: [0], exported: true },
+      { move: 500, stay: 400, cursor: AWAY, picked: [0], exported: true },
+      { move: 0, stay: 100, cursor: AWAY },
+    ],
+  },
   "cookie-export": {
     rest: 7,
     beats: [
@@ -471,6 +483,21 @@ export function PointerDemo({ scene, label, tray = "download", onLoop }: {
         <rect className="kd-demo-folder-body" width="38" height="15" rx="5" />
         <path className="kd-demo-tray-mark" data-gone={beat.exported || undefined} d="M19 3.5 V9.5 M16 7 L19 10 L22 7" />
         <path className="kd-demo-tick" data-on={beat.exported || undefined} d="M14 7.5 l3.4 3.4 l7 -7.4" />
+      </g>
+    </g> : scene === "login" ? <g>
+      {/* The sources of the sidebar, signed out: 登录 beside one, and downloading comes within reach. */}
+      {[0, 1, 2].map(i => <g key={i} transform={`translate(8 ${12 + 28 * i})`}>
+        <rect className="kd-demo-row-base" width="140" height="22" rx="6" />
+        <circle className="kd-demo-cover" cx="13" cy="11" r="6" />
+        <rect className="kd-demo-line" x="26" y="9" width={[42, 54, 36][i]} height="4" rx="2" />
+        <text className="kd-demo-key-text" x="124" y="14.6" textAnchor="middle"
+          style={{ opacity: picked.includes(i) ? 0 : 1, transition: "opacity 180ms ease" }}>登录</text>
+        <path className="kd-demo-tick" data-on={picked.includes(i) || undefined} d="M118 11 l3.6 3.6 l7.2 -7.8" />
+      </g>)}
+      <g transform="translate(184 51)" className="kd-demo-folder" data-on={beat.exported || undefined}>
+        <rect className="kd-demo-folder-body" x="-24" y="-24" width="48" height="48" rx="12" />
+        <path className="kd-demo-tray-mark" d="M0 -9 V6 M-6.5 0 L0 7 L6.5 0"
+          style={{ opacity: beat.exported ? 1 : 0.3, stroke: beat.exported ? "var(--kd-text)" : undefined }} />
       </g>
     </g> : scene === "cookie-export" ? <g>
       {/* A browser's toolbar: the address, then its extensions, the cookie among them. */}

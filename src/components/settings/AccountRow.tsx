@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FolderOpen, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
+import { useLoginRequest } from "../../lib/settingsPages";
 import { useAppStore } from "../../stores/appStore";
 import type {
   Account,
@@ -188,6 +189,17 @@ export function AccountRow({
   const loginInPlace = account.login_method === "qr"
     ? !browserMobile && getBridge().platform !== "browser"
     : (youtubeAccount || soundcloudAccount) && browserAccount && !browserMobile;
+  // The sidebar's 登录 of this source: its ways are opened, and the row is brought into view.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const loginAsked = useLoginRequest((state) => (state.platform === account.platform ? state.epoch : 0));
+  useEffect(() => {
+    if (!loginAsked) return;
+    useLoginRequest.getState().clear();
+    if (hasCredential) return;
+    if (loginInPlace) setLoginOpen(true);
+    const frame = window.requestAnimationFrame(() => rowRef.current?.scrollIntoView?.({ block: "nearest" }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [loginAsked]);
   const stateLabel = browserAccount
     ? account.state === "valid"
       ? account.credential_kind === "ytm_oauth"
@@ -432,7 +444,7 @@ export function AccountRow({
   const oauthAccount =
     account.login_method === "oauth" || (soundcloudAccount && browserMobile);
   return (
-    <div style={settingRow.row}>
+    <div ref={rowRef} style={settingRow.row}>
       <div style={settingRow.text}>
         <span
           className="kd-account-avatar"

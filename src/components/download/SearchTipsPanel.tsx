@@ -22,6 +22,7 @@ const LESSONS: Record<TipsPage, Lesson[]> = {
     { scene: "sidebar-online", caption: "在线：点一个歌单，在右边查看里面的歌" },
   ],
   download: [
+    { scene: "login", caption: "大部分平台要先登录账号才能下载：点侧栏平台旁的「登录」" },
     { scene: "pick-range", caption: "Shift 点两下，中间整段一起选中" },
     { scene: "pick-toggle", caption: `${mod} 点选，一首一首加进来或拿出去` },
     { scene: "menu-toss", tray: "download", caption: "右键一首歌，加入下载队列，它会飞进去" },

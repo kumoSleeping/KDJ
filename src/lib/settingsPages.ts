@@ -25,3 +25,14 @@ export const useSettingsFocus = create<{ section: SettingsSection | null; epoch:
   focus: section => set(state => ({ section, epoch: state.epoch + 1 })),
   clear: () => set({ section: null }),
 }));
+
+/**
+ * Asks the 登录 page to open one account's ways to log in: the sidebar's 登录 of a source lands on
+ * that source's own block, not at the top of the page. The row takes the request and clears it.
+ */
+export const useLoginRequest = create<{ platform: string | null; epoch: number; ask(platform: string): void; clear(): void }>(set => ({
+  platform: null,
+  epoch: 0,
+  ask: platform => set(state => ({ platform, epoch: state.epoch + 1 })),
+  clear: () => set({ platform: null }),
+}));

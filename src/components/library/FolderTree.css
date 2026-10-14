@@ -262,9 +262,6 @@ button.kd-folder-caret:hover:not(:disabled) {
 .kd-folder-trail[data-eye] > .kd-folder-count {
   grid-area: 1 / 1 / 2 / 3;
 }
-.kd-folder-trail[data-eye] > .kd-folder-login {
-  margin-left: 0.2rem;
-}
 /* Without a pointer that hovers the eye would be a key nobody sees under a tap on the row:
    it is not there, and a row whose only key it is keeps its count. */
 @media (hover: none) {

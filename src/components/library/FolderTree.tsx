@@ -69,10 +69,11 @@ import {
   TRACK_DND_TYPE,
 } from "../../lib/trackDrag";
 import { useAppStore } from "../../stores/appStore";
-import { useSettingsPage } from "../../lib/settingsPages";
+import { useLoginRequest, useSettingsPage } from "../../lib/settingsPages";
 
-/** 登录在设置的「登录」页：先翻到那一页，再打开设置。 */
-function openLoginSettings(): void {
+/** 登录在设置的「登录」页：先翻到那一页，再打开设置；给了平台，就把那个账号的登录方式展开。 */
+function openLoginSettings(platform?: string): void {
+  if (platform) useLoginRequest.getState().ask(platform);
   useSettingsPage.getState().setPage("sources");
   useAppStore.getState().openSettingsPanel();
 }
@@ -762,7 +763,7 @@ export function NarrowFolderRail({
           <button
             type="button"
             title="打开设置登录账号"
-            onClick={openLoginSettings}
+            onClick={() => openLoginSettings(platform)}
           >
             <RailContent
               icon={<LogIn {...RAIL_ICON} />}
@@ -1695,7 +1696,7 @@ export function FolderTree({
     const activateRoot = () => {
       if (needsLogin) {
         // 旋钮只负责浏览，不替用户弹出设置面板。
-        if (!isMidiBrowseActivate()) openLoginSettings();
+        if (!isMidiBrowseActivate()) openLoginSettings(platform);
         return;
       }
       if (isMidiBrowseActivate() && streamExpanded[platform]) return;
@@ -1761,10 +1762,11 @@ export function FolderTree({
             <PlatformMark id={platform} size={ROW_ICON.size} />
           </span>
           <span className="kd-folder-name kd-truncate">{streamRoot.label}</span>
+          {/* A signed-out row has no count to hide, so no eye either: its name runs up to 登录. */}
           <span
             className="kd-folder-trail"
-            data-action={canBrowse ? "true" : "eye"}
-            data-eye=""
+            data-action={canBrowse ? "true" : needsLogin ? undefined : "eye"}
+            data-eye={needsLogin ? undefined : ""}
             data-busy={(canBrowse && loading) || undefined}
           >
             {needsLogin ? (
@@ -1776,7 +1778,7 @@ export function FolderTree({
                 <span className="kd-folder-count">{count}</span>
               )
             )}
-            {countsEye}
+            {!needsLogin && countsEye}
             {canBrowse && (
               <button
                 type="button"
