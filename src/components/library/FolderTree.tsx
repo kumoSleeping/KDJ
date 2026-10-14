@@ -514,6 +514,7 @@ export function NarrowFolderRail({
   const hiddenPlatforms = useSidebarVisibilityStore((state) => state.hiddenPlatforms);
   const { openStreamRootMenu, streamRootMenu } = useStreamRootMenu();
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
+  const startScan = useLibraryStore((state) => state.startScan);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
   const streamLoading = useStreamBrowseStore((state) => state.loading);
   const streamErrors = useStreamBrowseStore((state) => state.errors);
@@ -681,6 +682,14 @@ export function NarrowFolderRail({
     // 侧栏数字展示的是整棵子树的累计曲目数；点击后的列表必须使用同一口径。
     // 旧版窄轨在这里悄悄切成“仅当前层”，父目录便会出现有数字却无曲目的假空态。
     setFilter({ folder, folderDeep: true });
+    // 和宽侧栏一样：点开还有文件没进曲库的目录 = 顺手导入。
+    const pending = flattenFolders(roots).find((node) => node.path === folder);
+    if (pending && pending.pending_count > 0 && folder !== filter.folder) {
+      setError("");
+      void startScan([folder], true).catch((reason: unknown) =>
+        setError(`导入「${pending.name}」失败：${(reason as Error).message}`),
+      );
+    }
     onNavigate?.();
   };
 
@@ -728,11 +737,11 @@ export function NarrowFolderRail({
         aria-expanded={sourceRoot && portrait ? sourceActive && pickerOpen : undefined}
         onClick={() => {
           if (sourceRoot) {
-            // 收起态的根目录和 NetEase / Q Music 一样只负责切换下方目录。
-            // 真正打开内容留给下方具体文件夹，避免根目录没有直属曲目时
-            // 把中间列表意外清成“这个文件夹是空的”。
+            // 竖屏的选单里第一项就是根目录本身；横屏没有选单，根目录行直接打开
+            // 整棵树的曲目（列表含子文件夹，不会因为根目录没有直属曲目而变空）。
             setNarrowSource({ kind: "local", rootPath: node.path });
             if (portrait) setPickerOpen(true);
+            else choose(node.path);
             return;
           }
           choose(node.path);
