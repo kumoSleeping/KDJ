@@ -171,8 +171,10 @@ case "$label" in
         "$(dirname "$0")/check-windows-runtime.ps1" -Binary "$app"
     fi
     # NSIS is the default installer/updater. MSI is also a promised release format.
-    # Static CRT build cdca611 measured 7.61 MB; retain about 1% headroom.
-    check_artifact "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe" 6551661 7700000
+    # Static CRT build cdca611 measured 7.61 MB. 1.1.0-rc3 measured 7.70 MB (login by
+    # Cookie-Editor, the clipboard reader, the report entry) and missed the 7.70 MB limit by
+    # under 5 kB; the limit keeps the same rule, about 1% headroom over the measured installer.
+    check_artifact "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe" 6551661 7780000
     check_signature "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe"
     check_artifact "Windows MSI" msi "KDJ_${version}_x64_en-US.msi" 8884224 10300000
     check_signature "Windows MSI" msi "KDJ_${version}_x64_en-US.msi"
