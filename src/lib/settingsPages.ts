@@ -16,7 +16,7 @@ export const useSettingsPage = create<{ page: SettingsPage; setPage(page: Settin
 }));
 
 /** A section of a settings page that opening settings should bring into view. */
-export type SettingsSection = "ffmpeg";
+export type SettingsSection = "ffmpeg" | "report";
 
 /** Asks the settings drawer to land on a section: `focus` bumps the epoch the panel reacts to. */
 export const useSettingsFocus = create<{ section: SettingsSection | null; epoch: number; focus(section: SettingsSection): void; clear(): void }>(set => ({

@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Send } from "lucide-react";
 import { getBridge } from "../../lib/bridge";
 import { api } from "../../lib/api";
+import { useSettingsFocus } from "../../lib/settingsPages";
 import { Button, InlineNotice, Panel } from "../common";
 import { ErrorReport } from "./ErrorReport";
 import "./DiagnosticsPanel.css";
@@ -14,8 +15,30 @@ export function ActivityLogPanel() {
   const [reporting, setReporting] = useState(false);
   const [error, setError] = useState("");
   const [opening, setOpening] = useState(false);
+  // 「上报」 of an error's notice lands here: the report unfolds and is brought into view.
+  const asked = useSettingsFocus(state => (state.section === "report" ? state.epoch : 0));
+  const anchor = useRef<HTMLDivElement>(null);
+  const landing = useRef<number[]>([]);
+  useEffect(() => {
+    if (!asked) return;
+    useSettingsFocus.getState().clear();
+    setReporting(true);
+    const show = () => {
+      const node = anchor.current;
+      const host = node?.closest(".kd-scroll") as HTMLElement | null;
+      if (!node || !host) return;
+      const top = node.getBoundingClientRect().top - host.getBoundingClientRect().top + host.scrollTop;
+      host.scrollTop = Math.max(0, top - 12);
+    };
+    // The page may still be changing places with the one before it, and the report has just been
+    // unfolded: the place is taken again once both have settled. (Taking the request above runs
+    // this effect once more, so the timers are the panel's, not this run's.)
+    landing.current.forEach(timer => window.clearTimeout(timer));
+    landing.current = [0, 150, 450].map(wait => window.setTimeout(show, wait));
+  }, [asked]);
+  useEffect(() => () => landing.current.forEach(timer => window.clearTimeout(timer)), []);
   return <Panel heading="日志" dense>
-    <div className="kd-diagnostic-actions">
+    <div ref={anchor} className="kd-diagnostic-actions">
       <Button variant="ghost" size="sm" disabled={opening} onClick={() => {
         setOpening(true); setError("");
         void api.diagnostics.directory().then(({ path }) => getBridge().openPath(path))

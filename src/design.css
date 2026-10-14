@@ -2763,10 +2763,27 @@ body[data-kd-search-pointer-dragging="true"] * {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.kd-account-notice { align-items: flex-start; }
-.kd-account-notice .kd-notice-text {
+/* The keys of a notice are as small as its words: they add nothing to its height. */
+.kd-notice > .kd-btn { flex: none; height: 1.2rem; }
+.kd-notice > .kd-notice-report { padding: 0 0.25rem; white-space: nowrap; }
+/* A notice whose words may wrap is one run of text: the mark begins its first line, the words
+   wrap across the whole width at their own breaks, and the keys follow the last word. Nothing
+   holds a column beside the words. */
+.kd-notice:is(.kd-account-notice, .vj-operation-notice, .kd-ffmpeg-error) { display: block; }
+.kd-notice:is(.kd-account-notice, .vj-operation-notice, .kd-ffmpeg-error) > .kd-chip {
+  display: inline;
+  margin-right: 0.4rem;
+  padding: 0;
+}
+.kd-notice:is(.kd-account-notice, .vj-operation-notice, .kd-ffmpeg-error) > .kd-notice-text {
+  display: inline;
+  overflow: visible;
   white-space: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+}
+.kd-notice:is(.kd-account-notice, .vj-operation-notice, .kd-ffmpeg-error) > .kd-btn {
+  vertical-align: middle;
+  margin-left: 0.2rem;
 }
 /* 独占一行时（面板底部、按钮下面）自己撑开一点内边距 */
 .kd-notice[data-block="true"] {
@@ -7762,7 +7779,6 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .vj-export-range { position: absolute; top: 0; height: 3px; border-radius: 0 0 2px 2px; background: var(--kd-theme); opacity: .55; pointer-events: none; }
 .vj-error { color: var(--kd-danger); font-size: var(--kd-size-xs); overflow-wrap: anywhere; }
 .vj-operation-notice { position: absolute; z-index: 35; left: 12px; bottom: 28px; max-width: calc(100% - 24px); padding: 6px 8px; background: var(--kd-panel); border: 1px solid var(--kd-line-soft); border-radius: 6px; box-shadow: var(--kd-shadow-float); }
-.vj-operation-notice .kd-notice-text { white-space: normal; overflow-wrap: anywhere; }
 .vj-dialog-backdrop { position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 1rem; background: #0005; }
 .vj-dialog { width: 410px; max-width: 100%; max-height: 100%; overflow: auto; border: 1px solid var(--kd-line); border-radius: 8px; background: var(--kd-panel); box-shadow: var(--kd-shadow-float); padding: 1rem; display: flex; flex-direction: column; gap: .65rem; }
 .vj-dialog > header { display: flex; align-items: center; justify-content: space-between; }
@@ -8101,11 +8117,8 @@ button.kd-camelot-grid-key { cursor: pointer; }
 .kd-ffmpeg-settings,
 .kd-ffmpeg-guide { grid-template-columns: minmax(0, 1fr); }
 .kd-ffmpeg-error { align-items: flex-start; }
-.kd-ffmpeg-error .kd-notice-text {
+.kd-notice.kd-ffmpeg-error > .kd-notice-text {
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  overflow: visible;
-  text-overflow: clip;
   user-select: text;
 }
 

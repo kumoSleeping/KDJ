@@ -351,6 +351,18 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     assert.equal(way(), null, "and chooses none for the user");
     assert.equal(useLoginRequest.getState().platform, null);
 
+    // A notice of an error offers the way to the report, in a window that has the report.
+    const { useReportEntry } = await import("../src/lib/errorReport");
+    const { useSettingsFocus, useSettingsPage } = await import("../src/lib/settingsPages");
+    await click(BROWSER);
+    await click("登录", panel());
+    assert.equal(notice(), `登录失败：无法连接本地服务：${detail}`);
+    assert.equal(buttons().some(button => button.textContent === "上报"), false, "a window without the report offers none");
+    await act(async () => useReportEntry.getState().setReady(true));
+    await click("上报");
+    assert.deepEqual([useSettingsPage.getState().page, useSettingsFocus.getState().section], ["system", "report"]);
+    await act(async () => { useReportEntry.getState().setReady(false); useSettingsFocus.getState().clear(); });
+
     emptyCatalog = true;
     await render("empty", browserAccount("soundcloud"));
     await click("登录");

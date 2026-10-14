@@ -1,3 +1,4 @@
+import { useReportEntry } from "../../lib/errorReport";
 import { PanelStack } from "../common/PanelStack";
 import { useSidePanels } from "../../lib/sidePanels";
 import { useWindowTaken, windowTaken } from "../../lib/windowTaken";
@@ -388,6 +389,11 @@ export function Workspace() {
   const refresh = useLibraryStore((state) => state.refresh);
 
   // 首次进来拉一次曲库；之后的刷新由筛选变化和 WS 事件驱动
+  // This window has the settings' report: its notices of errors offer the way there.
+  useEffect(() => {
+    useReportEntry.getState().setReady(true);
+    return () => useReportEntry.getState().setReady(false);
+  }, []);
   useEffect(() => {
     if (useLibraryStore.getState().orderedIds.length === 0) void refresh();
   }, [refresh]);

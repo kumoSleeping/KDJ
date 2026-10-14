@@ -8,7 +8,8 @@ import "./DiagnosticsPanel.css";
 type Preview = Awaited<ReturnType<typeof api.diagnostics.prepare>>;
 
 /**
- * 把错误报告交给开发者，一步完成：写一句话（可以不写），按「发送」。
+ * 把错误报告交给开发者，一步完成：简要说明发生的问题（可以不写），按「发送」。
+ * 从上到下：说明、会发什么的一句话、状态和两个键、要看时展开的内容。
  *
  * 发送前的内容是冻结的：「查看内容」和「发送」用的是同一份脱敏后的报告，改了描述才会重新生成。
  * 失败后再按一次发送的是同一份报告（服务端按报告 ID 去重）。没有勾选、没有二次确认窗口，
@@ -55,9 +56,13 @@ export function ErrorReport() {
     <p className="kd-report-status" role="status">已发送 · {receipt.slice(0, 8)}</p>
   </section>;
   return <section className="kd-report" aria-label="上报错误">
-    <textarea className="kd-report-note" rows={3} maxLength={2000} aria-label="问题描述" value={note} disabled={busy}
-      autoComplete="off" spellCheck={false}
-      onChange={event => { setNote(event.currentTarget.value); setPreview(null); setShown(false); }} />
+    <label className="kd-report-field">
+      <span>简要说明发生的问题</span>
+      <textarea className="kd-report-note" rows={3} maxLength={2000} value={note} disabled={busy}
+        autoFocus autoComplete="off" spellCheck={false}
+        onChange={event => { setNote(event.currentTarget.value); setPreview(null); setShown(false); }} />
+    </label>
+    <p className="kd-report-privacy">发送近期错误、软件版本和系统信息，不含媒体、曲库、账号或设置。</p>
     <div className="kd-report-actions">
       <span className="kd-report-status" role="status">
         {phase === "preparing" ? "正在整理" : phase === "sending" ? "正在发送" : preview ? `${Math.ceil(preview.bytes / 1024)} KB` : ""}
@@ -68,7 +73,6 @@ export function ErrorReport() {
       <Button size="sm" variant="ghost" disabled={busy} onClick={() => void send()}><Send size={14} />发送</Button>
     </div>
     {shown && preview && <pre className="kd-report-body" tabIndex={0} aria-label="将发送的内容">{preview.body}</pre>}
-    <p className="kd-report-privacy">发送近期错误、软件版本和系统信息，不含媒体、曲库、账号或设置。</p>
-    <InlineNotice text={error} block onDismiss={() => setError("")} />
+    <InlineNotice text={error} block report={false} onDismiss={() => setError("")} />
   </section>;
 }
