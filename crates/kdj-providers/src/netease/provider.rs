@@ -325,13 +325,28 @@ impl NeteaseProvider {
     /// 账号目录里的播客：创建的、订阅的、最近播放的，同一个播客只出现在最前的
     /// 那一组。哪一路读不到只记日志，不能连累歌单目录。
     async fn account_podcasts(&self, uid: &str) -> Vec<StreamPlaylist> {
-        let (created, subscribed, recent, voices) = tokio::join!(
+        let (liked, created, subscribed, recent, voices) = tokio::join!(
+            self.liked_voices(),
             self.created_radios(uid),
             self.subscribed_radios(),
             self.recent_radios(),
             self.recent_voices(),
         );
         let mut podcasts = Vec::new();
+        // 和「我喜欢的音乐」一样带红心排在最前；origin 不是 favorite，所以不会给出移除。
+        match liked {
+            Ok(songs) if !songs.is_empty() => podcasts.push(StreamPlaylist {
+                platform: Platform::Wyy,
+                key: LIKED_VOICES_KEY.into(),
+                title: LIKED_VOICES_TITLE.into(),
+                cover: String::new(),
+                count: songs.len(),
+                is_favorite: true,
+                origin: "podcast_liked".into(),
+            }),
+            Ok(_) => {}
+            Err(err) => tracing::warn!("读取网易云喜欢的声音失败：{err:#}"),
+        }
         let mut seen = std::collections::HashSet::new();
         for (radios, origin, what) in [
             (created, "podcast_created", "创建的播客"),
@@ -359,6 +374,41 @@ impl NeteaseProvider {
             }
         }
         podcasts
+    }
+
+    /// 我喜欢的声音。接口与字段照 Scopify 的 api-enhanced 分支
+    /// （module/(voice)/content_my_liked_voice.js 与其前端的 toLikedVoiceSong）。
+    async fn liked_voices(&self) -> Result<Vec<Value>> {
+        const PAGE: usize = 200;
+        const MAX_PAGES: usize = 10;
+        let mut songs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for page in 0..MAX_PAGES {
+            let body = self
+                .client
+                .eapi(
+                    "/eapi/content/my/liked/voice",
+                    payload([
+                        ("e_r", Value::Bool(true)),
+                        ("limit", Value::from(PAGE)),
+                        ("offset", Value::from(page * PAGE)),
+                    ]),
+                )
+                .await?;
+            expect_ok(&body, "读取网易云喜欢的声音")?;
+            let items = liked_voice_items(&body);
+            let len = items.len();
+            for song in items.iter().filter_map(liked_voice_song) {
+                let id = song.get("id").map(stringify_id).unwrap_or_default();
+                if !id.is_empty() && seen.insert(id) {
+                    songs.push(song.clone());
+                }
+            }
+            if len < PAGE || body.pointer("/data/hasMore").and_then(Value::as_bool) != Some(true) {
+                break;
+            }
+        }
+        Ok(songs)
     }
 
     /// 播放记录里的播客；每条记录的 `data` 才是播客本身。
@@ -1137,7 +1187,9 @@ impl MusicProvider for NeteaseProvider {
             return Ok(None);
         }
         let limit = full_listing(limit);
-        let (title, songs) = if key == RECENT_VOICES_KEY {
+        let (title, songs) = if key == LIKED_VOICES_KEY {
+            (LIKED_VOICES_TITLE.to_string(), self.liked_voices().await?)
+        } else if key == RECENT_VOICES_KEY {
             (RECENT_VOICES_TITLE.to_string(), self.recent_voices().await?)
         } else if let Some(radio_id) = podcast_key_id(key) {
             self.radio_programs(radio_id, limit).await?
@@ -1523,6 +1575,33 @@ fn podcast_key_id(key: &str) -> Option<&str> {
 /// 不会被当成播客 id。
 const RECENT_VOICES_KEY: &str = "radio:recent-voices";
 const RECENT_VOICES_TITLE: &str = "最近播放的声音";
+const LIKED_VOICES_KEY: &str = "radio:liked-voices";
+const LIKED_VOICES_TITLE: &str = "我喜欢的声音";
+
+/// 喜欢的声音列表在 `data.data`；Scopify 另认几处旧位置，一并照收。
+fn liked_voice_items(body: &Value) -> Vec<Value> {
+    let data = body.get("data");
+    if let Some(list) = data.and_then(Value::as_array) {
+        return list.clone();
+    }
+    [
+        "/data/contentVOList",
+        "/data/contentList",
+        "/data/data",
+        "/data/list",
+        "/contentVOList",
+    ]
+    .iter()
+    .find_map(|pointer| body.pointer(pointer).and_then(Value::as_array))
+    .cloned()
+    .unwrap_or_default()
+}
+
+fn liked_voice_song(item: &Value) -> Option<&Value> {
+    item.get("mainSong")
+        .or_else(|| item.pointer("/djProgram/mainSong"))
+        .filter(|song| song.get("id").is_some_and(|id| !id.is_null()))
+}
 
 fn play_records(body: &Value) -> impl Iterator<Item = &Value> {
     body.pointer("/data/list")
@@ -2068,6 +2147,27 @@ mod tests {
         assert_eq!(podcast_key_id("radio:"), None);
         assert_eq!(podcast_key_id("radio:12a"), None);
         assert_eq!(podcast_key_id(RECENT_VOICES_KEY), None);
+        assert_eq!(podcast_key_id(LIKED_VOICES_KEY), None);
+    }
+
+    #[test]
+    fn liked_voices_are_read_where_scopify_reads_them() {
+        let body = json!({ "code": 200, "data": { "count": 2, "hasMore": false, "data": [
+            { "voiceId": 1, "mainSong": { "id": 11, "name": "a" } },
+            { "voiceId": 2, "djProgram": { "mainSong": { "id": 22, "name": "b" } } },
+            { "voiceId": 3 },
+        ] } });
+        let items = liked_voice_items(&body);
+        let ids: Vec<_> = items
+            .iter()
+            .filter_map(liked_voice_song)
+            .map(|song| song["id"].clone())
+            .collect();
+        assert_eq!(ids, vec![json!(11), json!(22)]);
+        let empty = json!({ "code": 200, "data": { "count": 0, "hasMore": false, "data": null } });
+        assert!(liked_voice_items(&empty).is_empty());
+        let flat = json!({ "code": 200, "data": [{ "mainSong": { "id": 5 } }] });
+        assert_eq!(liked_voice_items(&flat).len(), 1);
     }
 
     #[test]

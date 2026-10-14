@@ -199,8 +199,9 @@ const PODCAST_SECTIONS: { id: StreamPlaylistSectionId; label: string }[] = [
   { id: "podcast_recent", label: "最近播放的播客" },
 ];
 
+/** 网易云的播客和声音列表（含红心的「我喜欢的声音」）；数量按期计。 */
 function isPodcast(playlist: StreamPlaylist): boolean {
-  return PODCAST_SECTIONS.some((section) => section.id === playlist.origin);
+  return playlist.origin?.startsWith("podcast_") === true;
 }
 
 function streamPlaylistSections(
@@ -218,7 +219,9 @@ function streamPlaylistSections(
   );
   const podcasts = PODCAST_SECTIONS.map((section) => ({
     ...section,
-    playlists: playlists.filter((playlist) => playlist.origin === section.id),
+    playlists: playlists.filter(
+      (playlist) => !playlist.is_favorite && playlist.origin === section.id,
+    ),
   }));
   const known = new Set([
     ...favorite,
