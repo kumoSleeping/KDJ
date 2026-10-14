@@ -924,6 +924,17 @@ impl QqMusicProvider {
     }
 }
 
+/// 失效的账号。扫码登录带着续期用的 `refresh_key`；从网页导入的登录没有它，票据一到期就续不上，
+/// 直说该用哪种方式才能长期在线。
+fn expired_account(credential: &Credential) -> Account {
+    let detail = if credential.refresh_key.is_empty() {
+        "网页导入的登录已到期；扫码登录可以自动续期"
+    } else {
+        "登录凭证已失效，请重新扫码"
+    };
+    Account::new(Platform::Qqm, LABEL, AccountState::Expired, detail)
+}
+
 #[async_trait]
 impl MusicProvider for QqMusicProvider {
     fn platform(&self) -> Platform {
@@ -948,22 +959,20 @@ impl MusicProvider for QqMusicProvider {
         }
         // 接口已经明说过这份凭证死了，别再显示"已登录"
         if self.client.credential_invalid() {
-            return Account::new(
-                Platform::Qqm,
-                LABEL,
-                AccountState::Expired,
-                "登录凭证已失效，请重新扫码",
-            );
+            return expired_account(&credential);
         }
         if credential.is_expired() {
             match self.client.ensure_valid_credential().await {
                 Ok(refreshed) => { *self.profile.lock().unwrap() = None; credential = refreshed; }
-                Err(error) => return Account::new(Platform::Qqm, LABEL,
-                    if self.client.credential_invalid() { AccountState::Expired } else { AccountState::Unknown },
-                    &error.to_string()),
+                Err(_) if self.client.credential_invalid() => return expired_account(&credential),
+                Err(error) => return Account::new(Platform::Qqm, LABEL, AccountState::Unknown, &error.to_string()),
             }
         }
         let (nickname, avatar) = self.fetch_profile().await;
+        // 拉资料是这次唯一的联网请求：凭证在这一步被接口拒绝、续期也失败的，如实报失效。
+        if self.client.credential_invalid() {
+            return expired_account(&credential);
+        }
         let mut account = Account::new(Platform::Qqm, LABEL, AccountState::Valid, "");
         account.account_key = credential.str_musicid();
         account.nickname = nickname;
@@ -973,6 +982,9 @@ impl MusicProvider for QqMusicProvider {
 
     async fn cached_account(&self) -> Account {
         let credential = self.client.credential();
+        if self.client.credential_invalid() {
+            return expired_account(&credential);
+        }
         if !credential.is_present() {
             return Account::new(Platform::Qqm, LABEL, AccountState::Missing, "未登录");
         }
@@ -2239,6 +2251,16 @@ const _: fn() -> Credential = Credential::default;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_web_imports_point_to_the_qr_login() {
+        let imported = Credential { musickey: "Q_H_L_web".into(), musicid: 1, ..Default::default() };
+        let account = expired_account(&imported);
+        assert_eq!(account.state, AccountState::Expired);
+        assert!(account.detail.contains("扫码登录可以自动续期"), "{}", account.detail);
+        let scanned = Credential { refresh_key: "key".into(), ..imported };
+        assert_eq!(expired_account(&scanned).detail, "登录凭证已失效，请重新扫码");
+    }
 
     #[test]
     fn media_mid_empty_null_and_wrong_type_do_not_shadow_valid_top_level() {
