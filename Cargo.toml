@@ -24,7 +24,7 @@ hls-transmux = { path = "vendor/hls-transmux" }
 cpal = { path = "vendor/cpal-0.18.1" }
 
 [workspace.package]
-version = "1.1.0-rc4"
+version = "1.1.0-rc5"
 edition = "2021"
 rust-version = "1.93"
 license = "GPL-3.0-or-later"
