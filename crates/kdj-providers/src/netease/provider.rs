@@ -322,6 +322,205 @@ impl NeteaseProvider {
         Ok(song)
     }
 
+    /// 账号目录里的播客：创建的、订阅的、最近播放的，同一个播客只出现在最前的
+    /// 那一组。哪一路读不到只记日志，不能连累歌单目录。
+    async fn account_podcasts(&self, uid: &str) -> Vec<StreamPlaylist> {
+        let (created, subscribed, recent, voices) = tokio::join!(
+            self.created_radios(uid),
+            self.subscribed_radios(),
+            self.recent_radios(),
+            self.recent_voices(),
+        );
+        let mut podcasts = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (radios, origin, what) in [
+            (created, "podcast_created", "创建的播客"),
+            (subscribed, "podcast_subscribed", "订阅的播客"),
+            (recent, "podcast_recent", "最近播放的播客"),
+        ] {
+            if origin == "podcast_recent" {
+                match &voices {
+                    Ok(songs) if !songs.is_empty() => podcasts.push(StreamPlaylist {
+                        platform: Platform::Wyy,
+                        key: RECENT_VOICES_KEY.into(),
+                        title: RECENT_VOICES_TITLE.into(),
+                        cover: String::new(),
+                        count: songs.len(),
+                        is_favorite: false,
+                        origin: origin.into(),
+                    }),
+                    Ok(_) => {}
+                    Err(err) => tracing::warn!("读取网易云最近播放的声音失败：{err:#}"),
+                }
+            }
+            match radios {
+                Ok(radios) => push_podcasts(&mut podcasts, &mut seen, &radios, origin),
+                Err(err) => tracing::warn!("读取网易云{what}失败：{err:#}"),
+            }
+        }
+        podcasts
+    }
+
+    /// 播放记录里的播客；每条记录的 `data` 才是播客本身。
+    async fn recent_radios(&self) -> Result<Vec<Value>> {
+        let body = self
+            .client
+            .weapi(
+                "/weapi/play-record/djradio/list",
+                payload([("limit", Value::String("100".into()))]),
+            )
+            .await?;
+        expect_ok(&body, "读取网易云最近播放的播客")?;
+        Ok(play_records(&body)
+            .filter_map(|record| {
+                record
+                    .get("data")
+                    .filter(|radio| radio.is_object())
+                    .cloned()
+            })
+            .collect())
+    }
+
+    /// 最近播放的声音（单期节目），给出能直接 to_source 的 mainSong。
+    async fn recent_voices(&self) -> Result<Vec<Value>> {
+        let body = self
+            .client
+            .weapi(
+                "/weapi/play-record/voice/list",
+                payload([("limit", Value::String("100".into()))]),
+            )
+            .await?;
+        expect_ok(&body, "读取网易云最近播放的声音")?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(play_records(&body)
+            .filter_map(|record| {
+                record
+                    .pointer("/data/pubDJProgramData/mainSong")
+                    .filter(|song| song.is_object())
+            })
+            .filter(|song| {
+                let id = song.get("id").map(stringify_id).unwrap_or_default();
+                !id.is_empty() && seen.insert(id)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// 账号自己的歌单目录（不含播客），连同账号 uid 一起给出；未登录时两者都空。
+    async fn user_playlists(&self) -> Result<(String, Vec<StreamPlaylist>)> {
+        if !self.client.logged_in() {
+            return Ok((String::new(), Vec::new()));
+        }
+        let uid = self
+            .client
+            .profile()
+            .and_then(|profile| {
+                profile
+                    .pointer("/data/account/id")
+                    .or_else(|| profile.pointer("/account/id"))
+                    .map(stringify_id)
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default();
+        if uid.is_empty() {
+            return Ok((String::new(), Vec::new()));
+        }
+        let owner_uid = uid.clone();
+        let body = self
+            .client
+            .weapi(
+                "/weapi/user/playlist",
+                payload([
+                    ("uid", Value::String(uid)),
+                    ("limit", Value::String("1000".into())),
+                    ("offset", Value::String("0".into())),
+                    ("includeVideo", Value::String("true".into())),
+                ]),
+            )
+            .await?;
+        expect_ok(&body, "读取网易云歌单")?;
+        let playlists: Vec<StreamPlaylist> = body
+            .get("playlist")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let key = entry
+                    .get("id")
+                    .map(stringify_id)
+                    .filter(|value| !value.is_empty())?;
+                let title = str_field(entry, "name")?.to_string();
+                Some(StreamPlaylist {
+                    platform: Platform::Wyy,
+                    key,
+                    title,
+                    cover: str_field(entry, "coverImgUrl")
+                        .unwrap_or_default()
+                        .to_string(),
+                    count: loose_int(entry.get("trackCount")).max(0) as usize,
+                    is_favorite: loose_int(entry.get("specialType")) == 5,
+                    origin: if loose_int(entry.get("specialType")) == 5 {
+                        "favorite".into()
+                    } else {
+                        let creator_id = entry
+                            .pointer("/creator/userId")
+                            .or_else(|| entry.get("userId"))
+                            .map(stringify_id)
+                            .unwrap_or_default();
+                        if creator_id == owner_uid {
+                            "created".into()
+                        } else {
+                            "collected".into()
+                        }
+                    },
+                })
+            })
+            .collect();
+        // 最近打开顺序由前端本地记录维护。目录刷新只请求目录本身，不再为了排序
+        // 额外读取网易云播放历史。
+        Ok((owner_uid, playlists))
+    }
+
+    async fn created_radios(&self, uid: &str) -> Result<Vec<Value>> {
+        let body = self
+            .client
+            .weapi(
+                "/weapi/djradio/get/byuser",
+                payload([("userId", Value::String(uid.to_string()))]),
+            )
+            .await?;
+        expect_ok(&body, "读取网易云创建的播客")?;
+        Ok(radio_list(&body))
+    }
+
+    async fn subscribed_radios(&self) -> Result<Vec<Value>> {
+        const PAGE: usize = 100;
+        // 上限只防接口一直回 hasMore；两千个订阅远超正常账号。
+        const MAX_PAGES: usize = 20;
+        let mut radios = Vec::new();
+        for page in 0..MAX_PAGES {
+            let body = self
+                .client
+                .weapi(
+                    "/weapi/djradio/get/subed",
+                    payload([
+                        ("limit", Value::String(PAGE.to_string())),
+                        ("offset", Value::String((page * PAGE).to_string())),
+                        ("total", Value::String("true".into())),
+                    ]),
+                )
+                .await?;
+            expect_ok(&body, "读取网易云订阅的播客")?;
+            let batch = radio_list(&body);
+            let len = batch.len();
+            radios.extend(batch);
+            if len < PAGE || body.get("hasMore").and_then(Value::as_bool) == Some(false) {
+                break;
+            }
+        }
+        Ok(radios)
+    }
+
     async fn album_tracks(&self, album_id: &str, limit: usize) -> Result<(String, Vec<Value>)> {
         let body: Value = self
             .client
@@ -921,76 +1120,10 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn stream_playlists(&self) -> Result<Vec<StreamPlaylist>> {
-        if !self.client.logged_in() {
-            return Ok(Vec::new());
+        let (uid, mut playlists) = self.user_playlists().await?;
+        if !uid.is_empty() {
+            playlists.extend(self.account_podcasts(&uid).await);
         }
-        let uid = self
-            .client
-            .profile()
-            .and_then(|profile| {
-                profile
-                    .pointer("/data/account/id")
-                    .or_else(|| profile.pointer("/account/id"))
-                    .map(stringify_id)
-            })
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default();
-        if uid.is_empty() {
-            return Ok(Vec::new());
-        }
-        let owner_uid = uid.clone();
-        let body = self
-            .client
-            .weapi(
-                "/weapi/user/playlist",
-                payload([
-                    ("uid", Value::String(uid)),
-                    ("limit", Value::String("1000".into())),
-                    ("offset", Value::String("0".into())),
-                    ("includeVideo", Value::String("true".into())),
-                ]),
-            )
-            .await?;
-        expect_ok(&body, "读取网易云歌单")?;
-        let playlists: Vec<StreamPlaylist> = body
-            .get("playlist")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| {
-                let key = entry
-                    .get("id")
-                    .map(stringify_id)
-                    .filter(|value| !value.is_empty())?;
-                let title = str_field(entry, "name")?.to_string();
-                Some(StreamPlaylist {
-                    platform: Platform::Wyy,
-                    key,
-                    title,
-                    cover: str_field(entry, "coverImgUrl")
-                        .unwrap_or_default()
-                        .to_string(),
-                    count: loose_int(entry.get("trackCount")).max(0) as usize,
-                    is_favorite: loose_int(entry.get("specialType")) == 5,
-                    origin: if loose_int(entry.get("specialType")) == 5 {
-                        "favorite".into()
-                    } else {
-                        let creator_id = entry
-                            .pointer("/creator/userId")
-                            .or_else(|| entry.get("userId"))
-                            .map(stringify_id)
-                            .unwrap_or_default();
-                        if creator_id == owner_uid {
-                            "created".into()
-                        } else {
-                            "collected".into()
-                        }
-                    },
-                })
-            })
-            .collect();
-        // 最近打开顺序由前端本地记录维护。目录刷新只请求目录本身，不再为了排序
-        // 额外读取网易云播放历史。
         Ok(playlists)
     }
 
@@ -1004,7 +1137,13 @@ impl MusicProvider for NeteaseProvider {
             return Ok(None);
         }
         let limit = full_listing(limit);
-        let (title, songs) = self.playlist_tracks(key, limit).await?;
+        let (title, songs) = if key == RECENT_VOICES_KEY {
+            (RECENT_VOICES_TITLE.to_string(), self.recent_voices().await?)
+        } else if let Some(radio_id) = podcast_key_id(key) {
+            self.radio_programs(radio_id, limit).await?
+        } else {
+            self.playlist_tracks(key, limit).await?
+        };
         Ok(Some(StreamPlaylistResponse {
             platform: Platform::Wyy,
             key: key.to_string(),
@@ -1019,6 +1158,10 @@ impl MusicProvider for NeteaseProvider {
         let playlist_id = key.trim();
         let track_id = source.key.trim();
         anyhow::ensure!(
+            !playlist_id.starts_with(PODCAST_KEY_PREFIX),
+            "播客里的节目不能从这里移除"
+        );
+        anyhow::ensure!(
             !playlist_id.is_empty() && playlist_id.chars().all(|ch| ch.is_ascii_digit()),
             "网易云歌单 ID 无效"
         );
@@ -1029,7 +1172,7 @@ impl MusicProvider for NeteaseProvider {
 
         // 不能相信前端保存的 origin：每次写之前重读当前账号目录，确保它仍然是
         // “我喜欢的音乐”或本人创建的歌单，而不是收藏的他人歌单。
-        let playlists = self.stream_playlists().await?;
+        let (_, playlists) = self.user_playlists().await?;
         let target = playlists
             .iter()
             .find(|playlist| playlist.key == playlist_id)
@@ -1366,6 +1509,66 @@ fn parse_netease_path(text: &str) -> Option<(ResolveKind, String)> {
 fn netease_radio_id(text: &str) -> Option<String> {
     let lowered = text.to_ascii_lowercase();
     digits_after(&lowered, "djradio?id=").or_else(|| digits_after(&lowered, "radio?id="))
+}
+
+/// 账号目录里播客的 key。播客 id 和歌单 id 都是数字但不同源，前缀把两者分开。
+const PODCAST_KEY_PREFIX: &str = "radio:";
+
+fn podcast_key_id(key: &str) -> Option<&str> {
+    key.strip_prefix(PODCAST_KEY_PREFIX)
+        .filter(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+/// 「最近播放的声音」不是哪个播客，是播放记录里的单期节目；key 不带数字，
+/// 不会被当成播客 id。
+const RECENT_VOICES_KEY: &str = "radio:recent-voices";
+const RECENT_VOICES_TITLE: &str = "最近播放的声音";
+
+fn play_records(body: &Value) -> impl Iterator<Item = &Value> {
+    body.pointer("/data/list")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
+fn radio_list(body: &Value) -> Vec<Value> {
+    body.get("djRadios")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 同一个播客既是自己创建的又被自己订阅时，只留先放进来的那一条。
+fn push_podcasts(
+    out: &mut Vec<StreamPlaylist>,
+    seen: &mut std::collections::HashSet<String>,
+    radios: &[Value],
+    origin: &str,
+) {
+    for entry in radios {
+        let Some(id) = entry
+            .get("id")
+            .map(stringify_id)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let Some(title) = str_field(entry, "name") else {
+            continue;
+        };
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(StreamPlaylist {
+            platform: Platform::Wyy,
+            key: format!("{PODCAST_KEY_PREFIX}{id}"),
+            title: title.to_string(),
+            cover: str_field(entry, "picUrl").unwrap_or_default().to_string(),
+            count: loose_int(entry.get("programCount")).max(0) as usize,
+            is_favorite: false,
+            origin: origin.into(),
+        });
+    }
 }
 
 fn netease_program_id(text: &str) -> Option<String> {
@@ -1825,6 +2028,46 @@ mod tests {
         assert!(lyric.word_lrc.is_empty());
         assert_eq!(lyric.translated_lrc, "[00:01.00]翻译");
         assert_eq!(lyric.romaji_lrc, "[00:01.00]roma");
+    }
+
+    #[test]
+    fn account_podcasts_keep_their_own_keys_and_the_first_origin() {
+        let created = vec![json!({
+            "id": 336355127,
+            "name": "我的播客",
+            "picUrl": "https://p1.music.126.net/a.jpg",
+            "programCount": 12
+        })];
+        let subscribed = vec![
+            json!({ "id": 336355127, "name": "我的播客", "programCount": 12 }),
+            json!({ "id": "794062371", "name": "订阅的播客", "programCount": "3" }),
+            json!({ "name": "没有 id" }),
+        ];
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        push_podcasts(&mut out, &mut seen, &created, "podcast_created");
+        push_podcasts(&mut out, &mut seen, &subscribed, "podcast_subscribed");
+        let rows: Vec<_> = out
+            .iter()
+            .map(|p| (p.key.as_str(), p.origin.as_str(), p.count, p.cover.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "radio:336355127",
+                    "podcast_created",
+                    12,
+                    "https://p1.music.126.net/a.jpg"
+                ),
+                ("radio:794062371", "podcast_subscribed", 3, ""),
+            ]
+        );
+        assert_eq!(podcast_key_id("radio:794062371"), Some("794062371"));
+        assert_eq!(podcast_key_id("794062371"), None);
+        assert_eq!(podcast_key_id("radio:"), None);
+        assert_eq!(podcast_key_id("radio:12a"), None);
+        assert_eq!(podcast_key_id(RECENT_VOICES_KEY), None);
     }
 
     #[test]

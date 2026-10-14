@@ -27,6 +27,7 @@ import {
   MoreHorizontal,
   Music2,
   PencilLine,
+  Podcast,
   RefreshCw,
   Trash2,
   Undo2,
@@ -191,6 +192,17 @@ interface StreamPlaylistSection {
   playlists: StreamPlaylist[];
 }
 
+/** 网易云账号里的播客，排在歌单之后；展开后是一期期节目。 */
+const PODCAST_SECTIONS: { id: StreamPlaylistSectionId; label: string }[] = [
+  { id: "podcast_created", label: "创建的播客" },
+  { id: "podcast_subscribed", label: "订阅的播客" },
+  { id: "podcast_recent", label: "最近播放的播客" },
+];
+
+function isPodcast(playlist: StreamPlaylist): boolean {
+  return PODCAST_SECTIONS.some((section) => section.id === playlist.origin);
+}
+
 function streamPlaylistSections(
   playlists: StreamPlaylist[],
   platform: StreamBrowsePlatform,
@@ -204,7 +216,16 @@ function streamPlaylistSections(
   const favorite = playlists.filter(
     (playlist) => playlist.is_favorite || playlist.origin === "favorite",
   );
-  const known = new Set([...favorite, ...created, ...collected]);
+  const podcasts = PODCAST_SECTIONS.map((section) => ({
+    ...section,
+    playlists: playlists.filter((playlist) => playlist.origin === section.id),
+  }));
+  const known = new Set([
+    ...favorite,
+    ...created,
+    ...collected,
+    ...podcasts.flatMap((section) => section.playlists),
+  ]);
   const other = playlists.filter((playlist) => !known.has(playlist));
   return [
     {
@@ -218,6 +239,7 @@ function streamPlaylistSections(
       label: platform === "ytm" || platform === "youtube" ? "播放列表" : "其他歌单",
       playlists: other,
     },
+    ...podcasts,
   ].filter((section) => section.playlists.length > 0) as StreamPlaylistSection[];
 }
 
@@ -227,6 +249,7 @@ function accountCanBrowse(state: AccountState | undefined): boolean {
 
 function streamPlaylistCountLabel(playlist: StreamPlaylist): string {
   if (playlist.platform === "bilibili") return `${playlist.count} videos`;
+  if (isPodcast(playlist)) return `${playlist.count} 期`;
   const unit = playlist.platform === "youtube" ? "个视频" : "首";
   return `${playlist.count} ${unit}`;
 }
@@ -849,7 +872,10 @@ export function NarrowFolderRail({
                           title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
                           onClick={() => openStreamPlaylist(platform, playlist)}
                         >
-                          <RailContent icon={<ListMusic {...RAIL_ICON} />} label={playlist.title} />
+                          <RailContent
+                            icon={isPodcast(playlist) ? <Podcast {...RAIL_ICON} /> : <ListMusic {...RAIL_ICON} />}
+                            label={playlist.title}
+                          />
                         </button>
                       );
                     })}
@@ -1721,7 +1747,13 @@ export function FolderTree({
         >
           <span className="kd-folder-caret" />
           <span className="kd-folder-icon">
-            {favorite ? <Heart {...ROW_ICON} /> : <ListMusic {...ROW_ICON} />}
+            {favorite ? (
+              <Heart {...ROW_ICON} />
+            ) : isPodcast(playlist) ? (
+              <Podcast {...ROW_ICON} />
+            ) : (
+              <ListMusic {...ROW_ICON} />
+            )}
           </span>
           <span className="kd-folder-name kd-truncate">{playlist.title}</span>
           <span className="kd-folder-trail">

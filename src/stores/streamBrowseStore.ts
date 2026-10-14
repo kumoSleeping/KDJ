@@ -32,6 +32,9 @@ export const STREAM_PLAYLIST_SECTION_IDS = [
   "created",
   "collected",
   "other",
+  "podcast_created",
+  "podcast_subscribed",
+  "podcast_recent",
 ] as const;
 export type StreamPlaylistSectionId =
   (typeof STREAM_PLAYLIST_SECTION_IDS)[number];
@@ -161,7 +164,15 @@ function platformMap<T>(create: (platform: StreamBrowsePlatform) => T): Platform
 }
 
 function defaultSectionExpanded(): SectionMap<boolean> {
-  return { favorite: true, created: true, collected: true, other: true };
+  return {
+    favorite: true,
+    created: true,
+    collected: true,
+    other: true,
+    podcast_created: true,
+    podcast_subscribed: true,
+    podcast_recent: true,
+  };
 }
 
 interface PersistedBrowseLayout {
