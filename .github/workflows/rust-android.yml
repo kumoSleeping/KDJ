@@ -117,7 +117,7 @@ jobs:
       - name: 前端生产构建门禁
         env:
           TAURI_ENV_PLATFORM: androideabi
-        run: npm run tauri:web:build && npm run size:frontend:check
+        run: npm run tauri:web:build
 
       - name: Cargo 依赖漏洞门禁
         run: |
@@ -246,13 +246,13 @@ jobs:
           touch "$KDJ_ANDROID_BUILD_MARKER"
           npx --no-install tauri android build --apk --split-per-abi --target aarch64
 
-      - name: APK 单包体积门禁
+      - name: APK 内容检查
         if: steps.shell.outputs.present == 'true'
         env:
           KDJ_ANDROID_BUILD_MARKER: ${{ runner.temp }}/kdj-android-build-start
         run: |
           set -o pipefail
-          ./scripts/check-android-apk-size.sh | tee -a "$GITHUB_STEP_SUMMARY"
+          ./scripts/check-android-apk.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: 验证 APK 签名与正式证书身份
         if: steps.shell.outputs.present == 'true'

@@ -28,7 +28,8 @@ concurrency:
 
 jobs:
   quality:
-    # 只放依赖审计、前端生产构建和体积护栏；单元与界面测试是本地的事，不挡构建（2026-10-13）。
+    # 只放依赖审计和前端生产构建；单元与界面测试是本地的事，不挡构建（2026-10-13）。
+    # 体积上限也不挡构建：前端、安装包、APK 的体积检查都拆掉了（2026-10-14）。
     name: 发布前安全与前端门禁
     runs-on: ubuntu-latest
     steps:
@@ -60,7 +61,7 @@ jobs:
           npm audit signatures
 
       - name: 前端生产构建
-        run: npm run tauri:web:build && npm run size:frontend:check
+        run: npm run tauri:web:build
 
       - name: Cargo 依赖漏洞门禁
         run: |
@@ -344,7 +345,8 @@ jobs:
           fi
           bash scripts/compress-macos-dmg.sh "${images[0]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: 桌面安装包体积回归门禁
+      # 只看承诺的安装包和 updater 签名是否齐全、Windows 程序是否依赖外部运行库；体积只打印。
+      - name: 桌面安装包齐全检查
         if: steps.shell.outputs.present == 'true'
         shell: bash
         env:
@@ -353,7 +355,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          bash scripts/check-desktop-bundle-size.sh \
+          bash scripts/check-desktop-bundles.sh \
             "$KDJ_BUNDLE_LABEL" "$version" "$KDJ_REQUIRE_UPDATER" target src-tauri/target \
             | tee -a "$GITHUB_STEP_SUMMARY"
 

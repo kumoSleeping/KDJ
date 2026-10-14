@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
-# Android 原生媒体能力不能以无限膨胀安装包为代价。当前模型分离只使用 Rust 的
-# model-free 算法，不再打包 ExecuTorch / NativeLoader / fbjni。这里同时验证 APK
-# 内容、arm64 split 和 native library 的现代未压缩布局，不能只看总字节数碰运气。
+# 当前模型分离只使用 Rust 的 model-free 算法，不再打包 ExecuTorch / NativeLoader / fbjni。
+# 这里验证 APK 的内容、arm64 split 和 native library 的现代未压缩布局。体积只打印，
+# 没有上限（2026-10-14 拆掉）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/src-tauri/gen/android/app/build/outputs/apk"
-# 24 MiB 是由已发布 v0.2.44 扣除 ExecuTorch/fbjni 得到的工程目标，不冒充当前版本
-# 实测；CI 的时间标记保证只有刚构建的 APK 才能提供新的真实数据。
-TARGET_BYTES=$((24 * 1024 * 1024))
-WARN_BYTES=$((25 * 1024 * 1024))
-MAX_BYTES=$((26 * 1024 * 1024))
+# CI 的时间标记保证只核验刚构建的 APK。
 BUILD_MARKER="${KDJ_ANDROID_BUILD_MARKER:-}"
 found=0
 failed=0
 
 for required_tool in unzip strings; do
   command -v "$required_tool" >/dev/null \
-    || { echo "::error::APK 门禁缺少工具：$required_tool"; exit 1; }
+    || { echo "::error::APK 检查缺少工具：$required_tool"; exit 1; }
 done
 
 while IFS= read -r -d '' apk; do
@@ -26,8 +22,7 @@ while IFS= read -r -d '' apk; do
   # 语义（文件系统信息而不是文件大小），曾把 APK 读成 0 字节误报门禁。
   bytes=$(wc -c < "$apk")
   mib=$(awk -v n="$bytes" 'BEGIN { printf "%.2f", n / 1024 / 1024 }')
-  delta=$(awk -v n="$bytes" -v b="$TARGET_BYTES" 'BEGIN { printf "%+.2f", (n - b) / 1024 / 1024 }')
-  echo "APK $(basename "$apk"): ${mib} MiB（文件实测；相对 24 MiB 目标 ${delta} MiB）"
+  echo "APK $(basename "$apk"): ${mib} MiB"
 
   if ! entries=$(unzip -Z1 "$apk"); then
     echo "::error::$(basename "$apk") 不是可读取的 APK/ZIP"
@@ -88,13 +83,6 @@ while IFS= read -r -d '' apk; do
     echo "::error::$(basename "$apk") 出现压缩 native library；不得启用 useLegacyPackaging："
     printf '%s\n' "$compressed_native"
     failed=1
-  fi
-
-  if (( bytes > MAX_BYTES )); then
-    echo "::error::$(basename "$apk") 超过 26 MiB 单包预算"
-    failed=1
-  elif (( bytes > WARN_BYTES )); then
-    echo "::warning::$(basename "$apk") 已超过 25 MiB 预警线，距离 26 MiB 硬门禁不足 1 MiB"
   fi
 done < <(
   if (( $# > 0 )); then

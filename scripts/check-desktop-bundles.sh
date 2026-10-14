@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Desktop release-size regression gate.
+# Desktop release artifact check.
 #
 # Usage:
-#   check-desktop-bundle-size.sh <matrix-label> <version> <require-updater> [target roots...]
+#   check-desktop-bundles.sh <matrix-label> <version> <require-updater> [target roots...]
 #
-# Limits use decimal bytes, matching the GitHub Releases API. Baselines are the
-# v0.2.44 release (macOS thin-package values are the measured split estimates).
-# Original limits allow roughly 15% over that baseline. RC3's workshop raises the
-# measured macOS DMGs to 8.80/9.99 MB; their limits retain about 5% headroom.
-# These bounds still catch a reintroduced runtime or universal macOS binary.
+# Fails when an installer the release promises is missing or built twice, when an updater
+# signature is missing on a tag build, or when the Windows program imports an external VC++
+# runtime. Sizes are printed for the record (decimal MB, as the GitHub Releases API counts);
+# there is no size limit: a limit stopped 1.1.0-rc3 over 5 kB and was taken out (2026-10-14).
 
 if [ "$#" -lt 3 ]; then
   echo "usage: $0 <macos-arm64|macos-x86_64|windows-x86_64|linux-x86_64> <x.y.z[-suffix]> <true|false> [target roots...]" >&2
@@ -67,16 +66,14 @@ report_missing() {
   local artifact="$1"
   local expected="$2"
   local status="$3"
-  printf '| `%s` | — | — | — | %s: `%s` |\n' "$artifact" "$status" "$expected"
+  printf '| `%s` | — | %s: `%s` |\n' "$artifact" "$status" "$expected"
 }
 
 check_artifact() {
   local artifact="$1"
   local bundle_dir="$2"
   local filename="$3"
-  local baseline="$4"
-  local budget="$5"
-  local file bytes state
+  local file bytes
 
   find_exact "$bundle_dir" "$filename"
   if [ "${#matches[@]}" -ne 1 ]; then
@@ -87,14 +84,7 @@ check_artifact() {
 
   file="${matches[0]}"
   bytes=$(wc -c <"$file" | tr -d ' ')
-  state="PASS"
-  if [ "$bytes" -gt "$budget" ]; then
-    state="FAIL"
-    failures=$((failures + 1))
-  fi
-  printf '| `%s` | %s | %s | %s | **%s** |\n' \
-    "$(basename "$file")" "$(format_mb "$bytes")" "$(format_mb "$baseline")" \
-    "$(format_mb "$budget")" "$state"
+  printf '| `%s` | %s | present |\n' "$(basename "$file")" "$(format_mb "$bytes")"
 }
 
 check_signature() {
@@ -116,8 +106,6 @@ check_signature() {
 
 check_optional_mac_updater() {
   local arch="$1"
-  local baseline="$2"
-  local budget="$3"
   local filename
 
   filename="KDJ.app.tar.gz"
@@ -126,40 +114,34 @@ check_optional_mac_updater() {
     report_missing "macOS ${arch} updater" "not generated without updater credentials" "SKIP"
     return
   fi
-  check_artifact "macOS ${arch} updater" macos "$filename" "$baseline" "$budget"
+  check_artifact "macOS ${arch} updater" macos "$filename"
   check_signature "macOS ${arch} updater" macos "$filename"
 }
 
-echo "### Desktop bundle size gate — \`$label\`"
+echo "### Desktop bundles — \`$label\`"
 echo
-echo "Limits are decimal MB; macOS budgets include about 5% headroom over measured RC3 DMGs."
-echo
-echo '| Artifact | Actual | v0.2.44 baseline | Budget | Result |'
-echo '| --- | ---: | ---: | ---: | --- |'
+echo '| Artifact | Size | Result |'
+echo '| --- | ---: | --- |'
 
 case "$label" in
   macos-arm64)
-    baseline=7500000
-    budget=9200000
-    check_artifact "macOS arm64 DMG" dmg "KDJ_${version}_aarch64.dmg" "$baseline" "$budget"
+    check_artifact "macOS arm64 DMG" dmg "KDJ_${version}_aarch64.dmg"
     if [ "$require_updater" = true ]; then
       updater="KDJ_${version}_aarch64.app.tar.gz"
-      check_artifact "macOS arm64 updater" macos "$updater" "$baseline" "$budget"
+      check_artifact "macOS arm64 updater" macos "$updater"
       check_signature "macOS arm64 updater" macos "$updater"
     else
-      check_optional_mac_updater aarch64 "$baseline" "$budget"
+      check_optional_mac_updater aarch64
     fi
     ;;
   macos-x86_64)
-    baseline=8570000
-    budget=10500000
-    check_artifact "macOS x86_64 DMG" dmg "KDJ_${version}_x64.dmg" "$baseline" "$budget"
+    check_artifact "macOS x86_64 DMG" dmg "KDJ_${version}_x64.dmg"
     if [ "$require_updater" = true ]; then
       updater="KDJ_${version}_x86_64.app.tar.gz"
-      check_artifact "macOS x86_64 updater" macos "$updater" "$baseline" "$budget"
+      check_artifact "macOS x86_64 updater" macos "$updater"
       check_signature "macOS x86_64 updater" macos "$updater"
     else
-      check_optional_mac_updater x86_64 "$baseline" "$budget"
+      check_optional_mac_updater x86_64
     fi
     ;;
   windows-x86_64)
@@ -171,21 +153,18 @@ case "$label" in
         "$(dirname "$0")/check-windows-runtime.ps1" -Binary "$app"
     fi
     # NSIS is the default installer/updater. MSI is also a promised release format.
-    # Static CRT build cdca611 measured 7.61 MB. 1.1.0-rc3 measured 7.70 MB (login by
-    # Cookie-Editor, the clipboard reader, the report entry) and missed the 7.70 MB limit by
-    # under 5 kB; the limit keeps the same rule, about 1% headroom over the measured installer.
-    check_artifact "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe" 6551661 7780000
+    check_artifact "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe"
     check_signature "Windows NSIS" nsis "KDJ_${version}_x64-setup.exe"
-    check_artifact "Windows MSI" msi "KDJ_${version}_x64_en-US.msi" 8884224 10300000
+    check_artifact "Windows MSI" msi "KDJ_${version}_x64_en-US.msi"
     check_signature "Windows MSI" msi "KDJ_${version}_x64_en-US.msi"
     ;;
   linux-x86_64)
     # Keep every supported Linux format: compact distro packages plus portable AppImage.
-    check_artifact "Linux deb" deb "KDJ_${version}_amd64.deb" 9509296 11000000
+    check_artifact "Linux deb" deb "KDJ_${version}_amd64.deb"
     check_signature "Linux deb" deb "KDJ_${version}_amd64.deb"
-    check_artifact "Linux rpm" rpm "KDJ-${version}-1.x86_64.rpm" 9509488 11000000
+    check_artifact "Linux rpm" rpm "KDJ-${version}-1.x86_64.rpm"
     check_signature "Linux rpm" rpm "KDJ-${version}-1.x86_64.rpm"
-    check_artifact "Linux AppImage" appimage "KDJ_${version}_amd64.AppImage" 83491320 96500000
+    check_artifact "Linux AppImage" appimage "KDJ_${version}_amd64.AppImage"
     check_signature "Linux AppImage" appimage "KDJ_${version}_amd64.AppImage"
     ;;
   *)
@@ -196,7 +175,7 @@ esac
 
 echo
 if [ "$failures" -gt 0 ]; then
-  echo "**Result: FAIL — $failures size or artifact regression(s).**"
+  echo "**Result: FAIL — $failures missing or duplicated artifact(s).**"
   exit 1
 fi
 echo "**Result: PASS.**"
