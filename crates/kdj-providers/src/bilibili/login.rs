@@ -57,7 +57,10 @@ pub async fn poll_qr(http: &reqwest::Client, qrcode_key: &str) -> Result<QrPoll>
         .context("轮询 B 站二维码失败")?;
 
     // cookie 要在读 body 之前拿，body 一读 response 就被消费了
-    let cookies = collect_response_cookies(&response);
+    let mut cookies = collect_response_cookies(&response);
+    if let Some(at) = crate::cookie_jar::expiry(response.headers(), "SESSDATA") {
+        cookies.insert(super::client::LOGIN_EXPIRY.into(), at.to_string());
+    }
     let body: Value = response
         .json()
         .await

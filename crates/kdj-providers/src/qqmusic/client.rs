@@ -77,14 +77,15 @@ impl Credential {
     /// 本地判断是否过期。`expired_at` 有时是时长有时是时间戳，
     /// 只有看着像 epoch 才当过期时间用。
     pub fn is_expired(&self) -> bool {
-        let now = now_secs();
+        self.expires_at().is_some_and(|at| now_secs() >= at)
+    }
+
+    /// 票据到期的时刻（Unix 秒）；本地判断不了时为 None。
+    pub fn expires_at(&self) -> Option<i64> {
         if self.musickey_create_time > 0 && self.key_expires_in > 0 {
-            return now >= self.musickey_create_time.saturating_add(self.key_expires_in);
+            return Some(self.musickey_create_time.saturating_add(self.key_expires_in));
         }
-        if self.expired_at > 1_000_000_000 {
-            return now >= self.expired_at;
-        }
-        false
+        (self.expired_at > 1_000_000_000).then_some(self.expired_at)
     }
 }
 

@@ -202,6 +202,8 @@ export interface Account {
   login_method?: "qr" | "oauth" | "browser";
   /** anonymous / browser_session / oauth / ytm_oauth：UI 据此展示真实的凭证能力。 */
   credential_kind?: "anonymous" | "browser_session" | "oauth" | "ytm_oauth" | string;
+  /** When this login ends (Unix seconds), when the platform has told KDJ. */
+  expires_at?: number;
 }
 
 /** A browser of this computer that an account can be logged in from. */
@@ -1171,13 +1173,6 @@ export interface KdjBridge {
   openExternal?: (url: string) => Promise<void>;
   /** 剪贴板里的文字；只给登录面板取回用户导出的登录。 */
   readClipboardText?: () => Promise<string>;
-  /** 桌面独立 OAuth 窗口；同进程拦截回调，开发态无需注册 kdj://。 */
-  openSoundcloudOAuth?: (url: string) => Promise<void>;
-  /** 桌面：在一次性 soundcloud.com WebView 中登录，不读取外部浏览器数据。 */
-  openSoundcloudWebLogin?: () => Promise<void>;
-  /** 桌面：在一次性 music.youtube.com WebView 中登录，Cookie 只留在 Rust。 */
-  openYtmWebLogin?: () => Promise<void>;
-  openYoutubeWebLogin?: () => Promise<void>;
   /**
    * 桌面直接问 Tauri Updater 的清单；只有当前安装格式真的存在签名更新包时
    * 才会返回 newer=true。移动端/浏览器没有它，继续走 GitHub Release API。

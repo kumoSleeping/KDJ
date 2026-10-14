@@ -24,15 +24,14 @@ pub struct BrowserProfileOption {
     pub label: String,
 }
 
-/// 一个可以拿来登录的浏览器。`reuse`：它已有的登录可以直接读；`window`：它能开一个
-/// 临时登录窗口；`open`：KDJ 能在它里面打开一个网页。都是能力，不代表这一次一定成功。
+/// 一个可以拿来登录的浏览器。`reuse`：它已有的登录可以直接读；`open`：KDJ 能在它里面打开一个
+/// 网页。都是能力，不代表这一次一定成功。KDJ 不开自己的登录窗口。
 #[derive(Debug, Clone, Serialize)]
 pub struct LoginBrowser {
     pub id: String,
     pub label: String,
     pub profiles: Vec<BrowserProfileOption>,
     pub reuse: bool,
-    pub window: bool,
     pub open: bool,
 }
 
@@ -77,16 +76,16 @@ pub struct BrowserCatalog {
 
 /// 只枚举本机实际存在的浏览器和配置，不打开 Cookie 数据库，也不会触发钥匙串。
 /// 认得出是浏览器的安装都列出来：读不了已有登录的那些，用户仍可以在里面导出登录。
-/// `windows`：这个平台能在浏览器里开临时窗口（SoundCloud），Arc 走它的系统自动化、不选配置。
+/// `arc_automation`：这个平台的登录在 Arc 里走它的系统自动化读取（SoundCloud），不选配置。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn catalog(windows: bool) -> BrowserCatalog {
+pub fn catalog(arc_automation: bool) -> BrowserCatalog {
     let mut browsers = Vec::new();
     let mut covered = std::collections::HashSet::new();
     for installation in discovery::installed() {
         if let Some(adapter) = &installation.adapter_id {
             covered.insert(adapter.clone());
         }
-        let automated = windows && authorization::automated(&installation);
+        let automated = arc_automation && authorization::automated(&installation);
         let profiles = if automated {
             Vec::new()
         } else {
@@ -96,17 +95,11 @@ pub fn catalog(windows: bool) -> BrowserCatalog {
         let locked = cfg!(target_os = "windows")
             && installation.engine == Some(discovery::BrowserEngine::Chromium);
         let reuse = automated || (!profiles.is_empty() && !locked);
-        let window = windows && installation.window_supported;
         // 系统登记的网页处理应用不都是浏览器：认得内核或认得厂商的才算。
         let open = installation.engine.is_some() || installation.adapter_id.is_some();
-        if reuse || window || open {
-            let (newest, mut browser) = login_browser(
-                installation.id,
-                installation.label,
-                profiles,
-                reuse,
-                window,
-            );
+        if reuse || open {
+            let (newest, mut browser) =
+                login_browser(installation.id, installation.label, profiles, reuse);
             browser.open = open;
             browsers.push((newest, browser));
         }
@@ -118,7 +111,7 @@ pub fn catalog(windows: bool) -> BrowserCatalog {
         }
         let profiles = rookie::browser_profiles(id).unwrap_or_default();
         if !profiles.is_empty() {
-            browsers.push(login_browser(id.into(), label.into(), profiles, true, false));
+            browsers.push(login_browser(id.into(), label.into(), profiles, true));
         }
     }
     // 最近使用的 Cookie 库排前面，通常就是用户此刻登录目标站点的那个浏览器。
@@ -136,7 +129,7 @@ pub fn catalog(windows: bool) -> BrowserCatalog {
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-pub fn catalog(_windows: bool) -> BrowserCatalog {
+pub fn catalog(_arc_automation: bool) -> BrowserCatalog {
     BrowserCatalog {
         supported: false,
         platform: std::env::consts::OS.into(),
@@ -163,7 +156,6 @@ fn login_browser(
     label: String,
     profiles: Vec<rookie::BrowserProfile>,
     reuse: bool,
-    window: bool,
 ) -> (u64, LoginBrowser) {
     let newest = profiles
         .iter()
@@ -184,7 +176,6 @@ fn login_browser(
             label,
             profiles,
             reuse,
-            window,
             open: false,
         },
     )

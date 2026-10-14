@@ -16,11 +16,6 @@ import { AccountLogin, QR_FINAL_STATES, QR_STATE_TEXT, SCAN_WITH } from "./Accou
 
 const POLL_INTERVAL_MS = 1500;
 
-interface SoundCloudOAuthWindowResult {
-  status: "done" | "error" | "cancelled";
-  message: string;
-}
-
 const STATE_LABEL: Record<AccountState, string> = {
   valid: "已登录",
   expired: "登录已过期",
@@ -37,6 +32,15 @@ const STATE_COLOR: Record<AccountState, string> = {
 };
 
 const INTERNAL_UNVERIFIED_DETAIL = "登录状态尚未联网核验";
+
+/** How long a login has left, in whole days; nothing once it has ended or when it is not known. */
+export function loginRemaining(expiresAt: number | undefined, now = Date.now()): string {
+  if (!expiresAt) return "";
+  const left = expiresAt * 1000 - now;
+  if (left <= 0) return "";
+  const days = Math.floor(left / 86_400_000);
+  return days >= 1 ? `还剩 ${days} 天` : "不到 1 天";
+}
 
 /**
  * 账号面板这一行的排版就地写死，不再走 design.css 的 `.kd-set-*`。
@@ -200,6 +204,7 @@ export function AccountRow({
     const frame = window.requestAnimationFrame(() => rowRef.current?.scrollIntoView?.({ block: "nearest" }));
     return () => window.cancelAnimationFrame(frame);
   }, [loginAsked]);
+  const remaining = loginRemaining(account.expires_at);
   const stateLabel = browserAccount
     ? account.state === "valid"
       ? account.credential_kind === "ytm_oauth"
@@ -333,27 +338,7 @@ export function AccountRow({
       if (generation !== qrGenerationRef.current) return;
       const bridge = getBridge();
 
-      // 桌面用独立原生窗口：Rust 在同一进程里截住 kdj:// 回调并直接交给本地后端，
-      // 不依赖 macOS dev 的协议注册，也不会在 Win/Linux 被第二实例截走。
-      if (bridge.openSoundcloudOAuth) {
-        const unlisten = await listen<SoundCloudOAuthWindowResult>(
-          "soundcloud-oauth://result",
-          (event) => {
-            if (generation !== qrGenerationRef.current) return;
-            oauthUnlistenRef.current?.();
-            oauthUnlistenRef.current = null;
-            setOauthBusy(false);
-            if (event.payload.status !== "done") {
-              setNotice(event.payload.message || "SoundCloud 登录未完成");
-            }
-          },
-        );
-        oauthUnlistenRef.current = unlisten;
-        await bridge.openSoundcloudOAuth(session.authorization_url);
-        return;
-      }
-
-      // 移动端发行包保留系统浏览器 + deep-link 路径。
+      // 官方授权在系统浏览器里完成，回调经 deep-link 交回；KDJ 不开自己的登录窗口。
       if (!bridge.openExternal) throw new Error("当前壳没有系统浏览器打开能力");
       const unlisten = await listen<string[]>("deep-link://new-url", (event) => {
         for (const rawUrl of event.payload) {
@@ -484,12 +469,15 @@ export function AccountRow({
             {/* 状态本身就是这行的说明，不再另起一个彩色标签 */}
             <span style={{ color: stateColor }}>{stateLabel}</span>
             {account.nickname && ` · ${account.nickname}`}
-            {/* detail 常常就是状态本身（"未登录"），或 UID/musicid 这类机器码——都不展示 */}
-            {account.detail &&
-              account.detail !== INTERNAL_UNVERIFIED_DETAIL &&
-              account.detail !== stateLabel &&
-              !isMachineIdDetail(account.detail) &&
-              ` · ${account.detail}`}
+            {/* 已登录的一行只说还能用多久（知道才说）；别的状态说原因。detail 常常就是状态本身
+                （"未登录"），或 UID/musicid 这类机器码——都不展示 */}
+            {account.state === "valid"
+              ? remaining && ` · ${remaining}`
+              : account.detail &&
+                account.detail !== INTERNAL_UNVERIFIED_DETAIL &&
+                account.detail !== stateLabel &&
+                !isMachineIdDetail(account.detail) &&
+                ` · ${account.detail}`}
           </div>
           {savedPath && !hasCredential && (
             <div style={settingRow.hint} title={savedDisplayPath || savedPath}>

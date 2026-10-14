@@ -195,12 +195,12 @@ impl SoundCloudProvider {
     /// 复用桌面浏览器里已有的 SoundCloud 登录，或在该浏览器的临时窗口里登录一次
     /// （`window`）。验证通过后才落盘，不会用无效会话覆盖现有登录态。
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub async fn import_browser(&self, browser: String, profile_id: Option<String>, window: bool) -> Result<()> {
-        let trace = LoginTrace::new("soundcloud", if window { "window" } else { "reuse" });
+    pub async fn import_browser(&self, browser: String, profile_id: Option<String>) -> Result<()> {
+        let trace = LoginTrace::new("soundcloud", "reuse");
         trace.run(async {
             self.ensure_enabled()?;
-            let session = if window || crate::browser::authorization::reads_existing(&browser) {
-                crate::browser::authorization::read_soundcloud(&browser, window, &trace, |imported| {
+            let session = if crate::browser::authorization::reads_existing(&browser) {
+                crate::browser::authorization::read_soundcloud(&browser, &trace, |imported| {
                     let trace = &trace;
                     async move {
                         let session = browser_session_from_token(imported.token, imported.expires_at, imported.imported_from)?;
@@ -230,16 +230,6 @@ impl SoundCloudProvider {
         }).await
     }
 
-    /// 导入 KDJ 隔离登录窗口取得的 SoundCloud 网页会话。窗口本身只打开
-    /// `soundcloud.com`，凭证不经过前端；这里仍联网验证后才落盘。
-    pub async fn import_webview_session(&self, token: String, expires_at: i64) -> Result<()> {
-        self.ensure_enabled()?;
-        let session =
-            browser_session_from_token(token, expires_at, "KDJ · SoundCloud 登录窗口".into())?;
-        let trace = LoginTrace::new("soundcloud", "webview");
-        trace.run(self.import_browser_session(session, &trace)).await
-    }
-
     async fn import_browser_session(&self, session: SoundCloudSession, trace: &LoginTrace) -> Result<()> {
         let session = self.validate_browser_import(session, trace).await?;
         trace.step("save_session");
@@ -260,12 +250,7 @@ impl SoundCloudProvider {
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    pub async fn import_browser(
-        &self,
-        _browser: String,
-        _profile_id: Option<String>,
-        _window: bool,
-    ) -> Result<()> {
+    pub async fn import_browser(&self, _browser: String, _profile_id: Option<String>) -> Result<()> {
         bail!("移动端无法读取其它应用的浏览器会话；SoundCloud 继续使用匿名访问")
     }
 
@@ -870,7 +855,7 @@ impl MusicProvider for SoundCloudProvider {
                     .filter(|value| !value.is_empty())
                     .unwrap_or(current.user_urn.clone());
                 let credential_kind = current.credential_kind.clone();
-                let imported_from = current.imported_from.clone();
+                let expires_at = browser_session_expiry(&current);
                 let mut next = current;
                 next.nickname = nickname.clone();
                 next.avatar = avatar.clone();
@@ -881,11 +866,8 @@ impl MusicProvider for SoundCloudProvider {
                 account.state = AccountState::Valid;
                 account.account_key = user_urn;
                 account.credential_kind = credential_kind;
-                account.detail = if imported_from.is_empty() {
-                    "已登录".into()
-                } else {
-                    format!("登录来源：{imported_from}")
-                };
+                account.detail = String::new();
+                account.expires_at = expires_at;
                 account.nickname = nickname;
                 account.avatar = avatar;
             }
@@ -927,11 +909,10 @@ impl MusicProvider for SoundCloudProvider {
         };
         account.detail = if expired {
             "浏览器会话已过期，请重新连接".into()
-        } else if session.imported_from.is_empty() {
-            "登录状态尚未联网核验".into()
         } else {
-            format!("登录来源：{}", session.imported_from)
+            "登录状态尚未联网核验".into()
         };
+        account.expires_at = browser_session_expiry(&session);
         account.account_key = session.user_urn;
         account.credential_kind = session.credential_kind;
         account.nickname = session.nickname;
@@ -1498,6 +1479,12 @@ fn save_client_id(path: &Path, id: &str, at: std::time::SystemTime) {
     if let Err(error) = crate::session_fs::write_private_atomic(path, body.as_bytes()) {
         tracing::warn!("保存 SoundCloud client_id 失败：{error:#}");
     }
+}
+
+/// 浏览器会话带着网站给的到期时刻；官方 OAuth 的令牌会自己续，不算。
+fn browser_session_expiry(session: &SoundCloudSession) -> Option<i64> {
+    (session.credential_kind == CREDENTIAL_BROWSER && session.expires_at > 0)
+        .then_some(session.expires_at)
 }
 
 fn browser_session_expired(session: &SoundCloudSession) -> bool {

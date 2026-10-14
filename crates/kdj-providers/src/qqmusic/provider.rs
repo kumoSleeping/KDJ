@@ -974,6 +974,7 @@ impl MusicProvider for QqMusicProvider {
             return expired_account(&credential);
         }
         let mut account = Account::new(Platform::Qqm, LABEL, AccountState::Valid, "");
+        account.expires_at = credential.expires_at();
         account.account_key = credential.str_musicid();
         account.nickname = nickname;
         account.avatar = avatar;
@@ -1009,6 +1010,7 @@ impl MusicProvider for QqMusicProvider {
             AccountState::Valid,
             "登录状态尚未联网核验",
         );
+        account.expires_at = credential.expires_at();
         account.account_key = credential.str_musicid();
         account.nickname = cached_profile.0;
         account.avatar = cached_profile.1;

@@ -98,11 +98,7 @@ impl YoutubeProvider {
             }
             account.account_key = session.x_goog_authuser;
             account.credential_kind = "browser_session".into();
-            account.detail = if session.imported_from.is_empty() {
-                "登录状态尚未联网核验".into()
-            } else {
-                format!("登录来源：{}", session.imported_from)
-            };
+            account.detail = String::new();
         } else if !self.ctx.youtube_enabled() {
             account.detail = DISABLED_MESSAGE.into();
         } else {
@@ -1463,7 +1459,7 @@ mod tests {
         assert_eq!(account.state, AccountState::Valid);
         assert_eq!(account.account_key, "2");
         assert_eq!(account.credential_kind, "browser_session");
-        assert_eq!(account.detail, "登录来源：测试浏览器");
+        assert_eq!(account.detail, "", "已登录的一行不写登录来源");
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -884,6 +884,7 @@ impl MusicProvider for NeteaseProvider {
                     },
                 );
                 account.account_key = account_key_value(account_id).unwrap_or_default();
+                account.expires_at = self.client.login_expires_at();
                 account.nickname = profile
                     .get("nickname")
                     .and_then(Value::as_str)
@@ -917,6 +918,7 @@ impl MusicProvider for NeteaseProvider {
             "登录状态尚未联网核验",
         );
         account.account_key = cached_account_key(&cached).unwrap_or_default();
+        account.expires_at = self.client.login_expires_at();
         account.nickname = cached_nickname(&cached).unwrap_or_default();
         account.avatar = cached
             .as_ref()

@@ -1315,6 +1315,7 @@ impl MusicProvider for BilibiliProvider {
             );
         }
         let mut account = Account::new(Platform::Bilibili, LABEL, AccountState::Valid, "");
+        account.expires_at = self.client.login_expires_at();
         account.account_key = data
             .get("mid")
             .map(|value| match value {
@@ -1343,6 +1344,7 @@ impl MusicProvider for BilibiliProvider {
             AccountState::Valid,
             "登录状态尚未联网核验",
         );
+        account.expires_at = self.client.login_expires_at();
         account.account_key = self.client.credential_user_id();
         account
     }

@@ -50,6 +50,9 @@ pub struct SessionState {
     /// 上次拿到的 profile，重启后不用发请求就能显示昵称
     #[serde(default)]
     pub profile: Option<Value>,
+    /// MUSIC_U 到期的时刻（Unix 秒），取自网易云发来它的那条 Set-Cookie；导入的登录在第一次续期前不知道。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_expires_at: Option<i64>,
 }
 
 impl SessionState {
@@ -109,6 +112,10 @@ impl NeteaseClient {
         let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
         anyhow::ensure!(code == 200, "网易云续登录返回 code={code}");
         Ok(true)
+    }
+
+    pub fn login_expires_at(&self) -> Option<i64> {
+        self.state.read().unwrap().login_expires_at
     }
 
     pub fn profile(&self) -> Option<Value> {
@@ -171,6 +178,7 @@ impl NeteaseClient {
             csrf_token: cookies.get("__csrf").cloned().unwrap_or_default(),
             cookies,
             profile: None,
+            login_expires_at: None,
         };
         self.persist_state(&next)?;
         *current = next;
@@ -256,6 +264,15 @@ impl NeteaseClient {
                     state.csrf_token = value.to_string();
                     changed = true;
                 }
+            }
+        }
+        if let Some(at) = crate::cookie_jar::expiry(response.headers(), "MUSIC_U") {
+            // Max-Age 每次算出来差几秒，差得多了才算变了，免得每次请求都写盘。
+            if state.cookies.contains_key("MUSIC_U")
+                && state.login_expires_at.is_none_or(|old| (old - at).abs() > 60)
+            {
+                state.login_expires_at = Some(at);
+                changed = true;
             }
         }
         if state.logged_in() && state.logged_out {
@@ -414,6 +431,7 @@ fn parse_pyncm_dump(dump: &str) -> Result<SessionState> {
         cookies,
         csrf_token,
         profile,
+        login_expires_at: None,
     })
 }
 

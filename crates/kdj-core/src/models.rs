@@ -260,6 +260,9 @@ pub struct Account {
     /// 当前凭证能力，不把浏览器完整会话与仅限单一 provider 的 OAuth 混成一个“已登录”。
     #[serde(default)]
     pub credential_kind: String,
+    /// 这份登录凭证到期的时刻（Unix 秒）。平台没告诉 KDJ 的就没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
 }
 
 impl Account {
@@ -275,6 +278,7 @@ impl Account {
             supports_login: true,
             login_method: "qr".into(),
             credential_kind: String::new(),
+            expires_at: None,
         }
     }
 }

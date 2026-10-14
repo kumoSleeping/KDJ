@@ -8,7 +8,6 @@ test("an account logs in from its own row: one key, the ways in place, one reque
   const calls: string[] = [];
   const posts: { path: string; body: Record<string, unknown> }[] = [];
   const originalFetch = globalThis.fetch;
-  let webviewPending = false;
   let clipboard = "";
   let clipboardReads = 0;
   let settingsUnavailable = false;
@@ -26,9 +25,6 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         calls.push(`external:${url}`);
         if (settingsUnavailable) throw new Error("系统设置不可用");
       },
-      openYtmWebLogin: async () => { calls.push("window:ytm"); throw new Error(detail); },
-      openYoutubeWebLogin: async () => { calls.push("window:youtube"); throw new Error(detail); },
-      openSoundcloudWebLogin: async () => { calls.push("window:soundcloud"); if (!webviewPending) throw new Error(detail); },
     },
     __TAURI_INTERNALS__: { transformCallback: (callback: typeof windowEvent) => { windowEvent = callback; return 1; }, unregisterCallback: () => {},
       invoke: async (command: string, args: { event?: string }) => {
@@ -105,10 +101,12 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     state, nickname: "", avatar: "", detail: "", supports_login: true, login_method: "browser" });
   const qrAccount = (platform: "wyy" | "qqm" | "bilibili"): Account => ({ platform, label: platform, state: "missing",
     nickname: "", avatar: "", detail: "", supports_login: true, login_method: "qr" });
-  const COOKIES = "从 Cookie-Editor 导入", BROWSER = "从浏览器导入（部分支持）", HEADERS = "请求头";
-  // A copy of the browser's login that KDJ cannot renew says so on these platforms.
-  const renewable = (platform: Account["platform"]) => platform === "soundcloud" || platform === "wyy";
-  const named = (way: string, platform: Account["platform"]) => renewable(platform) ? way : `${way}（无法自动续期）`;
+  // The way that stays signed in longest is 推荐; a copy handed over by hand says it drops soon on
+  // QQ and YouTube.
+  const COOKIES = "从 Cookie-Editor 导入", HEADERS = "请求头";
+  const BROWSER = "从浏览器导入（推荐，部分支持）", QR_BROWSER = "从浏览器导入（部分支持）", QR = "扫码（推荐）";
+  const named = (way: string, platform: Account["platform"]) =>
+    ["qqm", "ytm", "youtube"].includes(platform) ? `${way}（容易掉线）` : way;
   const way = () => document.querySelector<HTMLElement>(".kd-account-login-way");
   const backKey = () => document.querySelector<HTMLButtonElement>(".kd-account-login-back")!;
   const back = () => act(async () => backKey().click());
@@ -119,6 +117,17 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     await render("signed-in-qr", { ...qrAccount("wyy"), state: "valid" });
     assert.deepEqual(buttons().map(node => node.textContent), ["开", "退出"]);
 
+    // A signed-in row says how long the login has left when that is known, and nothing else.
+    const { loginRemaining } = await import("../src/components/settings/AccountRow");
+    assert.equal(loginRemaining(undefined), "");
+    assert.equal(loginRemaining(1_000 + 3.5 * 86_400, 1_000_000), "还剩 3 天");
+    assert.equal(loginRemaining(1_000 + 3_600, 1_000_000), "不到 1 天");
+    assert.equal(loginRemaining(999, 1_000_000), "");
+    await render("signed-in-days", { ...browserAccount("soundcloud", "valid"), detail: "登录来源：Zen · 默认",
+      expires_at: Math.floor(Date.now() / 1000) + 10 * 86_400 + 60 });
+    assert.ok(document.body.textContent!.includes("还剩 10 天"));
+    assert.ok(!document.body.textContent!.includes("登录来源"));
+
     for (const os of ["win32", "darwin"]) {
       dom.window.kdj.platform = os;
       for (const platform of ["soundcloud", "ytm", "youtube"] as const) {
@@ -127,7 +136,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
         const beforeOpen = calls.length;
         await click("登录");
-        assert.deepEqual(methods(), [named(COOKIES, platform), BROWSER, "登录窗口", named(HEADERS, platform)]);
+        assert.deepEqual(methods(), [named(COOKIES, platform), BROWSER, named(HEADERS, platform)]);
         assert.equal(calls.length, beforeOpen, "opening shows the ways and asks for nothing");
         assert.equal(way(), null, "no way is open until one is chosen");
 
@@ -166,7 +175,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         assert.equal(notice(), `Fork 的登录在这台电脑上读不了，请改用「${COOKIES}」`);
         await back();
         assert.equal(way(), null);
-        assert.equal(methods().length, 4, "the way back returns to the ways");
+        assert.equal(methods().length, 3, "the way back returns to the ways");
 
         await click(named(HEADERS, platform));
         assert.equal(way()!.getAttribute("aria-label"), `${label} · ${named(HEADERS, platform)}`);
@@ -177,15 +186,6 @@ test("an account logs in from its own row: one key, the ways in place, one reque
         await click(named(HEADERS, platform));
         assert.equal(document.querySelector("textarea")?.value, "", "what was pasted does not come back");
         await back();
-
-        const windowsBefore = calls.filter(call => call.startsWith("window:")).length;
-        await click("登录窗口");
-        assert.equal(way()!.getAttribute("aria-label"), `${label} · 登录窗口`, "the login window has its page as well");
-        assert.equal(calls.filter(call => call.startsWith("window:")).length, windowsBefore + 1, "and opens at once");
-        assert.ok(calls.includes(`window:${platform}`) && calls.includes(`${platform}-web-login://result`));
-        assert.equal(notice(), `登录失败：${detail}`);
-        await click("重新打开", panel());
-        assert.equal(calls.filter(call => call.startsWith("window:")).length, windowsBefore + 2);
       }
     }
 
@@ -297,29 +297,16 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     settingsUnavailable = false;
     answer = () => undefined;
 
-    // SoundCloud's own window hands a Google sign-in over to the browser the user already has.
-    dom.window.kdj.platform = "win32";
-    await render("google-handoff", browserAccount("soundcloud"));
-    await click("登录");
-    webviewPending = true;
-    await click("登录窗口");
-    assert.equal(document.querySelector(".kd-account-login-status")?.textContent, "请在打开的登录窗口里登录");
-    assert.equal(backKey().disabled, true);
-    await act(async () => windowEvent?.({ payload: { status: "browser_required", message: "Google 登录需使用浏览器" } }));
-    assert.equal(way()!.getAttribute("aria-label"), `SoundCloud · ${BROWSER}`);
-    assert.equal(notice(), "Google 登录需使用浏览器");
-    webviewPending = false;
-
     // A code to scan comes up in the row, and the same two ways from a browser stand beside it.
     for (const platform of ["wyy", "qqm", "bilibili"] as const) {
       await render(`qr-${platform}`, qrAccount(platform));
       assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
       const beforeQr = calls.length;
       await click("登录");
-      assert.deepEqual(methods(), ["扫码", named(COOKIES, platform), BROWSER, named(HEADERS, platform)]);
+      assert.deepEqual(methods(), [QR, named(COOKIES, platform), QR_BROWSER, named(HEADERS, platform)]);
       assert.equal(calls.length, beforeQr, "no code is asked for before 扫码 is chosen");
       assert.equal(document.querySelector(".kd-account-login-qr, .kd-account-login-panel"), null);
-      await click("扫码");
+      await click(QR);
       assert.ok(calls.includes(`POST:/api/accounts/${platform}/login/qr`));
       const codes = document.querySelectorAll(".kd-account-login-qr img");
       assert.equal(codes.length, platform === "qqm" ? 2 : 1);
@@ -327,7 +314,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
       assert.equal(document.querySelector(".kd-login-qr-backdrop, dialog, [role=dialog]"), null, "no mask over the page");
       assert.equal(document.querySelector(".kd-account-login-qr")?.getAttribute("data-kd-motion"), "pop");
       await back();
-      await click(BROWSER);
+      await click(QR_BROWSER);
       assert.equal(document.querySelector(".kd-account-login-qr"), null);
       assert.ok(calls.includes(`GET:/api/accounts/${platform}/login/browsers`));
       before = loginPosts().length;
@@ -350,7 +337,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     await act(async () => useLoginRequest.getState().ask("ytm"));
     assert.equal(document.querySelector(".kd-account-login"), null, "another account's request is not this row's");
     await act(async () => useLoginRequest.getState().ask("soundcloud"));
-    assert.equal(methods().length, 4, "the row opens its ways");
+    assert.equal(methods().length, 3, "the row opens its ways");
     assert.equal(way(), null, "and chooses none for the user");
     assert.equal(useLoginRequest.getState().platform, null);
 

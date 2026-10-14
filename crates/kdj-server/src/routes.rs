@@ -84,15 +84,9 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/accounts/{platform}/login/browser", post(browser_login))
         .route("/api/accounts/{platform}/login/browser/open", post(browser_open))
         .route("/api/accounts/{platform}/login/cookies", post(exported_login))
-        .route(
-            "/api/accounts/soundcloud/login/webview",
-            post(soundcloud_webview_login),
-        )
         .route("/api/accounts/soundcloud/login/headers", post(soundcloud_headers_login))
         .route("/api/accounts/{platform}/login/headers", post(provider_headers_login))
         .route("/api/accounts/ytm/login/headers", post(ytm_headers_login))
-        .route("/api/accounts/ytm/login/webview", post(ytm_webview_login))
-        .route("/api/accounts/youtube/login/webview", post(youtube_webview_login))
         .route("/api/accounts/browser/login/cancel", post(cancel_browser_login))
         .route(
             "/api/accounts/youtube/login/headers",
@@ -731,16 +725,6 @@ struct BrowserLoginBody {
     request_id: Option<String>,
     #[serde(default)]
     profile: Option<String>,
-    /// 不读已有登录，改在所选浏览器的临时窗口里登录一次。
-    #[serde(default)]
-    window: bool,
-}
-
-#[derive(Deserialize)]
-struct SoundCloudWebviewLoginBody {
-    access_token: String,
-    #[serde(default)]
-    expires_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -748,26 +732,20 @@ struct YoutubeHeadersLoginBody {
     headers: String,
 }
 
-#[derive(Deserialize)]
-struct YoutubeWebviewLoginBody {
-    cookie: String,
-}
-
 /// 只探测本机浏览器与配置；不会读取 Cookie 内容或触发系统钥匙串。
 async fn browser_catalog(
     AxumPath(platform): AxumPath<String>,
 ) -> ApiResult<Json<kdj_providers::browser::BrowserCatalog>> {
-    // SoundCloud 读不到已有登录时在浏览器里开临时窗口。Google 不让这样启动的浏览器登录
-    // （Windows 实测，2026-10-14），所以 YouTube 不开；其余平台另有扫码。
-    let windows = parse_platform(&platform)? == Platform::Soundcloud;
-    let catalog = tokio::task::spawn_blocking(move || kdj_providers::browser::catalog(windows))
+    // SoundCloud 在 Arc 里走它的系统自动化读取，不选配置。
+    let arc_automation = parse_platform(&platform)? == Platform::Soundcloud;
+    let catalog =
+        tokio::task::spawn_blocking(move || kdj_providers::browser::catalog(arc_automation))
         .await
         .map_err(|error| ApiError::bad_request(format!("检测浏览器失败：{error}")))?;
     Ok(Json(catalog))
 }
 
-/// 复用所选浏览器里这个平台已有的登录；`window` 时改在该浏览器的临时窗口里登录一次。
-/// 验证通过才替换现有登录态。
+/// 复用所选浏览器里这个平台已有的登录，验证通过才替换现有登录态。
 async fn browser_login(
     State(state): State<Arc<AppState>>,
     AxumPath(platform): AxumPath<String>,
@@ -782,14 +760,10 @@ async fn browser_login(
         .profile
         .map(|profile| profile.trim().to_string())
         .filter(|profile| !profile.is_empty());
-    let window = payload.window;
-    let account = crate::browser_login::run(payload.request_id.as_deref(), async {
-        if window {
-            browser_window_login(&state, platform, browser).await
-        } else {
-            reuse_browser_login(&state, platform, browser, profile).await
-        }
-    })
+    let account = crate::browser_login::run(
+        payload.request_id.as_deref(),
+        reuse_browser_login(&state, platform, browser, profile),
+    )
     .await?;
     Ok(Json(account))
 }
@@ -808,11 +782,11 @@ pub(crate) async fn reuse_browser_login(
     };
     let account = match platform {
         Platform::Soundcloud => {
-            state.soundcloud.import_browser(browser, profile, false).await?;
+            state.soundcloud.import_browser(browser, profile).await?;
             state.soundcloud.account().await
         }
         Platform::Ytm | Platform::Youtube => {
-            youtube_browser_login(state, platform, browser, profile, false).await?
+            youtube_browser_login(state, platform, browser, profile).await?
         }
         _ => {
             let provider = state
@@ -822,50 +796,19 @@ pub(crate) async fn reuse_browser_login(
             provider.account().await
         }
     };
-    state.login_sources.set(platform, Some(source));
+    for platform in linked_logins(platform) {
+        state.login_sources.set(platform, Some(source.clone()));
+    }
     state.hub.publish("account.changed", &account);
     Ok(account)
 }
 
-/// 在所选浏览器的临时窗口里登录一次（只有 SoundCloud）。
-async fn browser_window_login(
-    state: &AppState,
-    platform: Platform,
-    browser: String,
-) -> anyhow::Result<Account> {
+/// 一次登录换掉的账号：YouTube Music 和 YouTube 用同一份 youtube.com 登录，总是一起登录。
+fn linked_logins(platform: Platform) -> Vec<Platform> {
     match platform {
-        Platform::Soundcloud => {
-            state.soundcloud.import_browser(browser, None, true).await?;
-            state.login_sources.set(platform, None);
-            let account = state.soundcloud.account().await;
-            state.hub.publish("account.changed", &account);
-            Ok(account)
-        }
-        Platform::Ytm | Platform::Youtube => {
-            anyhow::bail!("YouTube 不能在临时窗口登录，请用「登录窗口」")
-        }
-        _ => anyhow::bail!("这个平台用扫码登录，没有登录窗口"),
+        Platform::Ytm | Platform::Youtube => vec![Platform::Ytm, Platform::Youtube],
+        other => vec![other],
     }
-}
-
-/// KDJ 原生隔离窗口只把 SoundCloud 的网页登录会话交回本机后端；令牌不经过
-/// renderer。provider 会先请求 `/me` 验证，成功后才替换已有登录态。
-async fn soundcloud_webview_login(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<SoundCloudWebviewLoginBody>,
-) -> ApiResult<Json<Account>> {
-    let access_token = payload.access_token.trim().to_string();
-    if access_token.is_empty() || access_token.len() > 4096 {
-        return Err(ApiError::bad_request("SoundCloud 登录窗口没有返回有效会话"));
-    }
-    state
-        .soundcloud
-        .import_webview_session(access_token, payload.expires_at)
-        .await?;
-    state.login_sources.set(Platform::Soundcloud, None);
-    let account = state.soundcloud.account().await;
-    state.hub.publish("account.changed", &account);
-    Ok(Json(account))
 }
 
 #[derive(Deserialize)]
@@ -1006,24 +949,49 @@ async fn validate_youtube_login(state: &AppState, platform: Platform, session: &
 
 async fn commit_youtube_login(state: &AppState, platform: Platform, session: BrowserSession, trace: &LoginTrace) -> anyhow::Result<Account> {
     trace.step("save_session");
-    if platform == Platform::Ytm { state.ytm_auth.save(session)?; }
-    else { state.youtube_auth.save(session)?; }
+    if platform == Platform::Ytm { state.ytm_auth.save(session.clone())?; }
+    else { state.youtube_auth.save(session.clone())?; }
     let account = state.provider(platform).ok_or_else(|| anyhow::anyhow!("登录来源不可用"))?.account().await;
     state.hub.publish("account.changed", &account);
+    link_youtube_sibling(state, platform, session).await;
     Ok(account)
 }
 
-async fn youtube_browser_login(state: &AppState, platform: Platform, browser: String, profile: Option<String>, window: bool) -> anyhow::Result<Account> {
-    let trace = LoginTrace::new(youtube_login_site(platform), if window { "window" } else { "reuse" });
+/// 登上 YouTube Music 或 YouTube 中的一个，另一个也用这份登录：它自己验证通过才存。验证不过
+/// （比如这个账号在当地用不了 YouTube Music）不影响刚完成的这次登录。
+async fn link_youtube_sibling(state: &AppState, platform: Platform, session: BrowserSession) {
+    let sibling = if platform == Platform::Ytm { Platform::Youtube } else { Platform::Ytm };
+    let trace = LoginTrace::new(youtube_login_site(sibling), "linked");
+    let linked = trace
+        .run(async {
+            validate_youtube_login(state, sibling, &session, &trace).await?;
+            trace.step("save_session");
+            if sibling == Platform::Ytm { state.ytm_auth.save(session)?; }
+            else { state.youtube_auth.save(session)?; }
+            anyhow::Ok(())
+        })
+        .await;
+    match linked {
+        Ok(()) => {
+            if let Some(provider) = state.provider(sibling) {
+                state.hub.publish("account.changed", &provider.account().await);
+            }
+        }
+        Err(error) => tracing::info!("另一个 YouTube 没有一起登录：{error:#}"),
+    }
+}
+
+async fn youtube_browser_login(state: &AppState, platform: Platform, browser: String, profile: Option<String>) -> anyhow::Result<Account> {
+    let trace = LoginTrace::new(youtube_login_site(platform), "reuse");
     trace.run(async {
-        if !window && !kdj_providers::browser::authorization::reads_existing(&browser) {
+        if !kdj_providers::browser::authorization::reads_existing(&browser) {
             trace.step("read_profile");
             let auth = if platform == Platform::Ytm { state.ytm_auth.clone() } else { state.youtube_auth.clone() };
             let session = tokio::task::spawn_blocking(move || auth.import_browser(&browser, profile.as_deref()))
                 .await.map_err(|_| anyhow::anyhow!("读取浏览器会话任务失败"))??;
             return save_youtube_login(state, platform, session, &trace).await;
         }
-        let session = kdj_providers::browser::authorization::read_youtube(&browser, platform, window, &trace, |session| {
+        let session = kdj_providers::browser::authorization::read_youtube(&browser, platform, &trace, |session| {
             let trace = &trace;
             async move {
                 validate_youtube_login(state, platform, &session, trace).await?;
@@ -1048,20 +1016,9 @@ async fn youtube_pasted_login(state: &AppState, platform: Platform, raw: &str) -
         trace.step("parse_headers");
         let session = BrowserSession::from_headers(raw)?;
         let account = save_youtube_login(state, platform, session, &trace).await?;
-        state.login_sources.set(platform, None);
-        Ok(account)
-    }).await
-}
-
-async fn youtube_window_login(state: &AppState, platform: Platform, raw: &str) -> anyhow::Result<Account> {
-    let trace = LoginTrace::new(youtube_login_site(platform), "webview");
-    trace.run(async {
-        trace.step("read_window_session");
-        anyhow::ensure!(!raw.trim().is_empty() && raw.len() <= 256 * 1024, "登录窗口没有返回有效会话");
-        let label = if platform == Platform::Ytm { "登录窗口 · music.youtube.com" } else { "登录窗口 · www.youtube.com" };
-        let session = BrowserSession::from_cookie_header(raw.trim(), label)?;
-        let account = save_youtube_login(state, platform, session, &trace).await?;
-        state.login_sources.set(platform, None);
+        for platform in linked_logins(platform) {
+            state.login_sources.set(platform, None);
+        }
         Ok(account)
     }).await
 }
@@ -1071,12 +1028,6 @@ async fn ytm_headers_login(State(state): State<Arc<AppState>>, Json(payload): Js
 }
 async fn youtube_headers_login(State(state): State<Arc<AppState>>, Json(payload): Json<YoutubeHeadersLoginBody>) -> ApiResult<Json<Account>> {
     Ok(Json(youtube_pasted_login(&state, Platform::Youtube, &payload.headers).await?))
-}
-async fn ytm_webview_login(State(state): State<Arc<AppState>>, Json(payload): Json<YoutubeWebviewLoginBody>) -> ApiResult<Json<Account>> {
-    Ok(Json(youtube_window_login(&state, Platform::Ytm, &payload.cookie).await?))
-}
-async fn youtube_webview_login(State(state): State<Arc<AppState>>, Json(payload): Json<YoutubeWebviewLoginBody>) -> ApiResult<Json<Account>> {
-    Ok(Json(youtube_window_login(&state, Platform::Youtube, &payload.cookie).await?))
 }
 
 // ---------------------------------------------------------------- 搜索

@@ -25,6 +25,15 @@ const COOKIE_KEYS: [&str; 7] = [
     "ac_time_value",
 ];
 
+/// SESSDATA 到期的时刻（Unix 秒），取自 B 站发它的那条 Set-Cookie。和登录存在同一个文件里，
+/// 一起换、一起放回，但不是 Cookie：不发出去。
+pub(super) const LOGIN_EXPIRY: &str = "sessdata_expires_at";
+
+/// 存进 `bilibili.json` 的条目：Cookie 名单，加上登录的到期时刻。
+fn stored(name: &str) -> bool {
+    COOKIE_KEYS.contains(&name) || name == LOGIN_EXPIRY
+}
+
 /// 三项登录 Cookie。响应里删它们的 Set-Cookie 不照办：登录是否失效交给 nav 判断，
 /// 界面才说得出「已失效」而不是悄悄变成「未登录」。
 const LOGIN_COOKIES: [&str; 3] = ["sessdata", "bili_jct", "dedeuserid"];
@@ -95,11 +104,16 @@ impl BiliClient {
         let cookies = self.cookies.read().unwrap();
         cookies
             .iter()
-            .filter(|(_, value)| !value.is_empty())
+            .filter(|(name, value)| !value.is_empty() && name.as_str() != LOGIN_EXPIRY)
             // B 站认的是大写的 SESSDATA / DedeUserID，落盘用小写、发出去时还原
             .map(|(name, value)| format!("{}={}", wire_cookie_name(name), value))
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    /// SESSDATA 到期的时刻；B 站还没把它发给过 KDJ（导入的登录）时为 None。
+    pub fn login_expires_at(&self) -> Option<i64> {
+        self.cookies.read().unwrap().get(LOGIN_EXPIRY)?.parse().ok()
     }
 
     fn csrf_token(&self) -> String {
@@ -121,7 +135,7 @@ impl BiliClient {
         let mut cookies = self.cookies.write().unwrap();
         for (key, value) in map {
             let key = key.to_ascii_lowercase();
-            if COOKIE_KEYS.contains(&key.as_str()) {
+            if stored(&key) {
                 if let Some(text) = value.as_str().filter(|text| !text.is_empty()) {
                     cookies.insert(key, text.to_string());
                 }
@@ -134,7 +148,7 @@ impl BiliClient {
         let mut cookies = current.clone();
         for (name, value) in incoming {
             let name = name.to_ascii_lowercase();
-            if COOKIE_KEYS.contains(&name.as_str()) && !value.is_empty() {
+            if stored(&name) && !value.is_empty() {
                 cookies.insert(name, value.clone());
             }
         }
@@ -154,12 +168,12 @@ impl BiliClient {
         let mut current = self.cookies.write().unwrap();
         let previous = current.clone();
         let mut cookies = previous.clone();
-        for name in ["sessdata", "bili_jct", "dedeuserid", "ac_time_value"] {
+        for name in ["sessdata", "bili_jct", "dedeuserid", "ac_time_value", LOGIN_EXPIRY] {
             cookies.remove(name);
         }
         for (name, value) in incoming {
             let name = name.to_ascii_lowercase();
-            if COOKIE_KEYS.contains(&name.as_str()) && !value.is_empty() {
+            if stored(&name) && !value.is_empty() {
                 cookies.insert(name, value.clone());
             }
         }
@@ -199,9 +213,17 @@ impl BiliClient {
             return;
         }
         let mut cookies = current.clone();
-        if !crate::cookie_jar::apply(&mut cookies, &changes, |name| {
+        let mut changed = crate::cookie_jar::apply(&mut cookies, &changes, |name| {
             COOKIE_KEYS.contains(&name) && name != "ac_time_value"
-        }) {
+        });
+        if let Some(at) = crate::cookie_jar::expiry(headers, "SESSDATA") {
+            let at = at.to_string();
+            if cookies.get(LOGIN_EXPIRY) != Some(&at) {
+                cookies.insert(LOGIN_EXPIRY.to_owned(), at);
+                changed = true;
+            }
+        }
+        if !changed {
             return;
         }
         if let Err(error) = self.save_session(&cookies) {
@@ -843,7 +865,7 @@ mod tests {
         client.absorb(
             "42",
             &headers(&[
-                "SESSDATA=new; Path=/; Domain=bilibili.com; HttpOnly; Secure",
+                "SESSDATA=new; Path=/; Domain=bilibili.com; Expires=Fri, 01 Jan 2100 00:00:00 GMT; HttpOnly",
                 "bili_jct=; Max-Age=0; Domain=.bilibili.com",
                 "buvid3=device; Domain=.bilibili.com",
                 "ac_time_value=forged; Domain=.bilibili.com",
@@ -855,7 +877,10 @@ mod tests {
         assert!(header.contains("bili_jct=jct"), "登录 Cookie 不因响应删除：{header}");
         assert!(header.contains("buvid3=device"), "{header}");
         assert!(header.contains("ac_time_value=token"), "刷新令牌只从刷新接口的正文来：{header}");
-        assert!(BiliClient::new(&dir).unwrap().cookie_header().contains("SESSDATA=new"));
+        assert!(!header.contains(LOGIN_EXPIRY), "到期时刻不是 Cookie，不发出去：{header}");
+        let reopened = BiliClient::new(&dir).unwrap();
+        assert!(reopened.cookie_header().contains("SESSDATA=new"));
+        assert_eq!(reopened.login_expires_at(), Some(4_102_444_800));
 
         // 换了账号后到的旧响应不碰新登录。
         client.absorb("7", &headers(&["SESSDATA=stale; Domain=.bilibili.com"]));

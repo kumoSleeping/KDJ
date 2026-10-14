@@ -102,9 +102,8 @@ Windows/Linux 的最终差值应在 CI 产物生成后与同版本基线安装�
 - Windows/Linux 目前只能由 CI 证明编译与打包成立；发布前仍应各用一台真实设备做
   proof/player 与 YTM 试听 smoke。普通 YouTube 预览若未检测到原生 HLS，应明确显示
   不支持，而不是把它列为这两个平台的成功门禁。
-- 内嵌 Google 登录仍受 Google 的设备、账号与风险策略控制；无 capability 的登录窗口
-  可以承载流程，但不能保证每个账号/网络都被 Google 接受。已有浏览器 profile/header
-  导入路径仍是受风控时的可用替代，不应把一次登录成功写成全量兼容保证。
+- KDJ 不开内嵌的 Google 登录窗口（2026-10-15 撤掉，Google 把它判为有风险）。登录只走
+  用户自己浏览器里的会话：读已有配置，或用 Cookie-Editor / 请求头导出交回来。
 
 ## 收口执行计划
 

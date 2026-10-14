@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ChevronLeft, ClipboardPaste, Cookie, Globe2, LoaderCircle, LogIn, QrCode, RefreshCw } from "lucide-react";
+import { ChevronLeft, ClipboardPaste, Cookie, Globe2, LoaderCircle, QrCode, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { exportedLoginHeaders, LOGIN_SITES } from "../../lib/cookieEditorImport";
@@ -13,28 +12,33 @@ import { Select } from "../common/Select";
 import { SlidePages } from "../drawer/SlidePages";
 import "./AccountLogin.css";
 
-type Method = "qr" | "cookies" | "browser" | "webview" | "headers";
-interface WindowResult { status: "done" | "error" | "cancelled" | "browser_required"; message: string }
+type Method = "qr" | "cookies" | "browser" | "headers";
 
 const METHODS: Record<Method, { label: string; icon: typeof Globe2 }> = {
   qr: { label: "扫码", icon: QrCode },
   cookies: { label: "从 Cookie-Editor 导入", icon: Cookie },
-  browser: { label: "从浏览器导入（部分支持）", icon: Globe2 },
-  webview: { label: "登录窗口", icon: LogIn },
+  browser: { label: "从浏览器导入", icon: Globe2 },
   headers: { label: "请求头", icon: ClipboardPaste },
 };
 
 /**
- * A login handed over from the user's browser (Cookie-Editor, request headers) is a copy of the
- * browser's session. On these platforms KDJ cannot renew such a copy itself: Bilibili's refresh token
- * stays in the browser's storage, QQ's web login carries no refresh key, and YouTube keeps rotating
- * the session in the browser. The way says so in its name.
+ * Each account's way that stays signed in longest is 推荐: the code to scan, which KDJ renews itself,
+ * or for the sites without one the browser's own login, which KDJ reads again when its copy ends.
+ * A copy handed over by hand (Cookie-Editor, request headers) ends soon on QQ (no key to renew it)
+ * and YouTube (the browser keeps replacing the session); the way says so.
  */
-const NO_RENEWAL = new Set<Platform>(["bilibili", "qqm", "ytm", "youtube"]);
+const RECOMMENDED: Partial<Record<Platform, Method>> = {
+  wyy: "qr", qqm: "qr", bilibili: "qr", ytm: "browser", youtube: "browser", soundcloud: "browser",
+};
+const DROPS_SOON = new Set<Platform>(["qqm", "ytm", "youtube"]);
 
 function methodLabel(method: Method, platform: Platform): string {
-  const label = METHODS[method].label;
-  return (method === "cookies" || method === "headers") && NO_RENEWAL.has(platform) ? `${label}（无法自动续期）` : label;
+  const notes: string[] = [];
+  if (RECOMMENDED[platform] === method) notes.push("推荐");
+  if (method === "browser") notes.push("部分支持");
+  if ((method === "cookies" || method === "headers") && DROPS_SOON.has(platform)) notes.push("容易掉线");
+  const label = method === "browser" ? "从浏览器导入" : METHODS[method].label;
+  return notes.length ? `${label}（${notes.join("，")}）` : label;
 }
 
 export const SCAN_WITH: Partial<Record<Platform, string>> = {
@@ -56,7 +60,7 @@ const WAYS = "ways";
 
 /** The ways one account can be logged in on a desktop, in the order they are offered. */
 export function loginMethods(account: Account): Method[] {
-  return account.login_method === "qr" ? ["qr", "cookies", "browser", "headers"] : ["cookies", "browser", "webview", "headers"];
+  return account.login_method === "qr" ? ["qr", "cookies", "browser", "headers"] : ["cookies", "browser", "headers"];
 }
 
 /**
@@ -72,57 +76,14 @@ export function AccountLogin({ account, sourceEnabled, onDone }: {
   const methods = loginMethods(account);
   const [method, setMethod] = useState<Method | null>(null);
   const [panelBusy, setPanelBusy] = useState(false);
-  const [windowBusy, setWindowBusy] = useState(false);
-  const [windowNotice, setWindowNotice] = useState("");
-  const windowListener = useRef<UnlistenFn | null>(null);
-  const alive = useRef(true);
-  const refreshAccounts = useAppStore(state => state.refreshAccounts);
-  const busy = panelBusy || windowBusy;
-  useEffect(() => {
-    alive.current = true;
-    return () => { alive.current = false; windowListener.current?.(); windowListener.current = null; };
-  }, []);
-  const openLoginWindow = async () => {
-    setMethod("webview");
-    setWindowNotice("");
-    if (!sourceEnabled) { setWindowNotice(`请先开启 ${account.label} 下载源`); return; }
-    const bridge = getBridge();
-    const openWindow = account.platform === "soundcloud" ? bridge.openSoundcloudWebLogin
-      : account.platform === "ytm" ? bridge.openYtmWebLogin : bridge.openYoutubeWebLogin;
-    setWindowBusy(true);
-    try {
-      if (!openWindow) throw new Error("当前系统没有可用的登录窗口");
-      windowListener.current = await listen<WindowResult>(`${account.platform}-web-login://result`, event => {
-        if (!alive.current) return;
-        windowListener.current?.(); windowListener.current = null;
-        setWindowBusy(false);
-        if (event.payload.status === "browser_required") {
-          setMethod("browser");
-          setWindowNotice(event.payload.message);
-        } else if (event.payload.status === "done") { void refreshAccounts(); onDone(); }
-        else if (event.payload.status !== "cancelled") setWindowNotice(event.payload.message || "登录未完成");
-      });
-      if (!alive.current) { windowListener.current?.(); windowListener.current = null; return; }
-      await openWindow();
-    } catch (error) {
-      windowListener.current?.(); windowListener.current = null;
-      if (alive.current) {
-        setWindowBusy(false);
-        setWindowNotice(`登录失败：${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-  };
+  const busy = panelBusy;
   const panel = { account, sourceEnabled, onBusy: setPanelBusy, onDone };
   return <SlidePages className="kd-account-login" page={method ?? WAYS} order={[WAYS, ...methods]}>
     {!method ? <ul className="kd-account-login-methods" aria-label={`${account.label} 登录方式`}>
       {methods.map(id => {
         const Icon = METHODS[id].icon;
         return <li key={id}>
-          <button type="button" onClick={() => {
-            setWindowNotice("");
-            if (id === "webview") void openLoginWindow();
-            else setMethod(id);
-          }}>
+          <button type="button" onClick={() => setMethod(id)}>
             <Icon size={14} aria-hidden="true" />
             <span>{methodLabel(id, account.platform)}</span>
           </button>
@@ -131,21 +92,14 @@ export function AccountLogin({ account, sourceEnabled, onDone }: {
     </ul> : <div className="kd-account-login-way" role="group" aria-label={`${account.label} · ${methodLabel(method, account.platform)}`}
       onKeyDown={event => event.stopPropagation()}>
       <button type="button" className="kd-account-login-back" disabled={busy} title="返回登录方式"
-        onClick={() => { setWindowNotice(""); setMethod(null); }}>
+        onClick={() => setMethod(null)}>
         <ChevronLeft size={14} aria-hidden="true" />
         <span>{methodLabel(method, account.platform)}</span>
       </button>
-      {windowNotice && <InlineNotice text={windowNotice} className="kd-account-notice" onDismiss={() => setWindowNotice("")} />}
       {method === "qr" && <QrPanel account={account} onDone={onDone} />}
       {method === "cookies" && <CookieEditorPanel {...panel} />}
       {method === "browser" && <BrowserPanel {...panel} />}
       {method === "headers" && <HeadersPanel {...panel} />}
-      {method === "webview" && <div className="kd-account-login-panel">
-        <div className="kd-account-login-actions">
-          <span role="status" className="kd-account-login-status">{windowBusy ? "请在打开的登录窗口里登录" : ""}</span>
-          {!windowBusy && <Button size="sm" variant="ghost" onClick={() => void openLoginWindow()}>重新打开</Button>}
-        </div>
-      </div>}
     </div>}
   </SlidePages>;
 }

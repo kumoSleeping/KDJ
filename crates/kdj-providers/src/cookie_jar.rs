@@ -63,6 +63,21 @@ fn removes(cookie: &cookie::Cookie) -> bool {
             .is_some_and(|at| at <= cookie::time::OffsetDateTime::now_utc())
 }
 
+/// 响应里给 `name` 的那条 Set-Cookie 的到期时刻（Unix 秒）：Max-Age 优先，其次 Expires。
+/// 没有这条、或它是会话 Cookie（两者都没给）时为 None。
+pub(crate) fn expiry(headers: &http::HeaderMap, name: &str) -> Option<i64> {
+    headers
+        .get_all(http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|text| cookie::Cookie::parse(text.to_owned()).ok())
+        .filter(|cookie| cookie.name().eq_ignore_ascii_case(name) && !removes(cookie))
+        .find_map(|cookie| match cookie.max_age() {
+            Some(age) => Some(cookie::time::OffsetDateTime::now_utc().unix_timestamp() + age.whole_seconds()),
+            None => cookie.expires_datetime().map(|at| at.unix_timestamp()),
+        })
+}
+
 /// 一行 Set-Cookie 是不是在删 Cookie（给自己解析名值的调用方用）。
 pub(crate) fn removes_set_cookie(text: &str) -> bool {
     cookie::Cookie::parse(text).is_ok_and(|cookie| removes(&cookie))
@@ -132,6 +147,26 @@ mod tests {
                 Change::Set("D".into(), "kept".into()),
             ]
         );
+    }
+
+    #[test]
+    fn expiry_reads_max_age_before_expires() {
+        let now = cookie::time::OffsetDateTime::now_utc().unix_timestamp();
+        let found = expiry(
+            &headers(&[
+                "MUSIC_U=a; Max-Age=86400; Expires=Fri, 01 Jan 2100 00:00:00 GMT",
+                "OTHER=b; Max-Age=10",
+            ]),
+            "music_u",
+        )
+        .unwrap();
+        assert!((found - now - 86_400).abs() <= 5, "{found}");
+        assert_eq!(
+            expiry(&headers(&["SESSDATA=x; Expires=Fri, 01 Jan 2100 00:00:00 GMT"]), "SESSDATA"),
+            Some(4_102_444_800)
+        );
+        assert_eq!(expiry(&headers(&["SESSDATA=x; Path=/"]), "SESSDATA"), None);
+        assert_eq!(expiry(&headers(&["SESSDATA=; Max-Age=0"]), "SESSDATA"), None);
     }
 
     #[test]

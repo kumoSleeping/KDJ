@@ -460,8 +460,7 @@ impl MusicProvider for YoutubeMusicProvider {
         account.account_key = session.x_goog_authuser;
         account.state = AccountState::Valid;
         account.credential_kind = "browser_session".into();
-        account.detail = if session.imported_from.is_empty() { String::new() }
-            else { format!("登录来源：{}", session.imported_from) };
+        account.detail = String::new();
         account
     }
 

@@ -21,8 +21,6 @@ pub struct InstalledBrowser {
     pub label: String,
     /// The vendor whose profile layout and key storage this installation is known to use.
     pub adapter_id: Option<String>,
-    /// Whether it can show a login window on a fresh profile (`authorization`).
-    pub window_supported: bool,
     pub(crate) engine: Option<BrowserEngine>,
     pub(crate) executable: PathBuf,
 }
@@ -30,7 +28,7 @@ pub struct InstalledBrowser {
 /// Discovery keeps canonical paths, and on Windows a canonical path carries the `\\?\` prefix.
 /// A browser started under that name does not come up (it resolves its own files from the path
 /// it was started with), so it is started under the ordinary spelling of the same path.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn plain_path(path: &std::path::Path) -> PathBuf {
     let Some(text) = path.to_str() else {
         return path.to_owned();
@@ -112,8 +110,6 @@ fn candidate(
         id,
         label,
         adapter_id: adapter.map(str::to_owned),
-        // A login window needs the engine's own protocol; a name alone never grants one.
-        window_supported: cfg!(any(target_os = "macos", target_os = "windows")) && engine.is_some(),
         executable,
     })
 }
@@ -186,7 +182,6 @@ mod tests {
             id: id.into(),
             label: "Browser".into(),
             adapter_id: None,
-            window_supported: false,
             executable: PathBuf::from(path),
         };
         let result = normalize(vec![
@@ -196,6 +191,5 @@ mod tests {
         ]);
         assert_eq!(result.len(), 2);
         assert_eq!(result[1].label, "Browser (2)");
-        assert!(!result[0].window_supported);
     }
 }
