@@ -36,8 +36,37 @@ pub struct LoginBrowser {
     pub open: bool,
 }
 
-/// 用户导出的登录在给用户看的话里叫什么（对应读取时的「Chrome · 默认」）。
-pub(crate) const EXPORTED_LOGIN: &str = "导出的内容";
+/// 用户自己交来的登录（扩展导出的、从请求头里取的）在给用户看的话里叫什么，对应读取时的
+/// 「Chrome · 默认」。
+pub(crate) const IMPORTED_LOGIN: &str = "导入的内容";
+
+/// 浏览器开发者工具里复制出来的请求头（或只有 Cookie 那一行）里的 Cookie，名字 → 值。
+/// 内容不进日志，报错里也不引用它。
+pub fn cookies_from_headers(raw: &str) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let raw = raw.trim();
+    anyhow::ensure!(!raw.is_empty(), "请粘贴请求头");
+    anyhow::ensure!(
+        raw.len() <= 256 * 1024,
+        "请求头内容过大，请只粘贴这个站点的请求头"
+    );
+    let headers = crate::youtubemusic::auth::parse_headers(raw)?;
+    let cookie = match headers.get("cookie") {
+        Some(cookie) => cookie.as_str(),
+        // 只粘了 Cookie 的值，没有带名字的那一行。
+        None if !raw.contains('\n') && raw.contains('=') => raw,
+        None => anyhow::bail!("请求头里没有 Cookie 这一行"),
+    };
+    let cookies: std::collections::BTreeMap<String, String> = cookie
+        .split(';')
+        .filter_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            let (name, value) = (name.trim(), value.trim());
+            (!name.is_empty() && !value.is_empty()).then(|| (name.to_owned(), value.to_owned()))
+        })
+        .collect();
+    anyhow::ensure!(!cookies.is_empty(), "请求头里没有 Cookie 这一行");
+    Ok(cookies)
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BrowserCatalog {
@@ -406,6 +435,19 @@ mod tests {
             value: value.into(),
             http_only: true,
             same_site: 0,
+        }
+    }
+
+    #[test]
+    fn cookies_come_out_of_pasted_headers_or_a_bare_cookie_line() {
+        let pasted = "accept: */*\ncookie: MUSIC_U=abc; __csrf=def\nuser-agent: test";
+        let expected: std::collections::BTreeMap<String, String> =
+            [("MUSIC_U", "abc"), ("__csrf", "def")].map(|(name, value)| (name.to_owned(), value.to_owned())).into();
+        assert_eq!(cookies_from_headers(pasted).unwrap(), expected);
+        assert_eq!(cookies_from_headers("MUSIC_U=abc; __csrf=def").unwrap(), expected);
+        assert_eq!(cookies_from_headers("Cookie: MUSIC_U=abc; __csrf=def").unwrap(), expected);
+        for refused in ["", "accept: */*\nuser-agent: test", "plain words"] {
+            assert!(cookies_from_headers(refused).is_err(), "{refused}");
         }
     }
 

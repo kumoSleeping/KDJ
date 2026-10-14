@@ -89,6 +89,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             post(soundcloud_webview_login),
         )
         .route("/api/accounts/soundcloud/login/headers", post(soundcloud_headers_login))
+        .route("/api/accounts/{platform}/login/headers", post(provider_headers_login))
         .route("/api/accounts/ytm/login/headers", post(ytm_headers_login))
         .route("/api/accounts/ytm/login/webview", post(ytm_webview_login))
         .route("/api/accounts/youtube/login/webview", post(youtube_webview_login))
@@ -906,6 +907,24 @@ async fn exported_login(
             provider.account().await
         }
     };
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+/// 网易云、QQ 音乐、哔哩哔哩的「请求头」：从粘贴的请求头里取出 Cookie，走和导出登录同一个
+/// 验证。SoundCloud 和 YouTube 的请求头各有自己的路由。
+async fn provider_headers_login(
+    State(state): State<Arc<AppState>>,
+    AxumPath(platform): AxumPath<String>,
+    Json(payload): Json<YoutubeHeadersLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let platform = parse_platform(&platform)?;
+    let cookies = kdj_providers::browser::cookies_from_headers(&payload.headers)?;
+    let provider = state
+        .provider(platform)
+        .ok_or_else(|| ApiError::bad_request("平台不可用"))?;
+    provider.import_cookie_login(cookies).await?;
+    let account = provider.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }

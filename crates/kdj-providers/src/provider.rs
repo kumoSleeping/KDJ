@@ -313,7 +313,7 @@ pub trait MusicProvider: Send + Sync {
         anyhow::bail!("这个平台不支持复用浏览器登录")
     }
 
-    /// 用户自己从浏览器里导出的这个平台的登录 Cookie（名字 → 值）。和上面一样，验证通过才
+    /// 用户自己从浏览器里带来的这个平台的登录 Cookie（名字 → 值）：扩展导出的，或请求头里的。和上面一样，验证通过才
     /// 替换现有登录态。SoundCloud 和 YouTube 另有自己的入口。
     async fn import_cookie_login(
         &self,

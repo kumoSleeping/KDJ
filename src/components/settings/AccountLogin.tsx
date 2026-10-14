@@ -43,7 +43,7 @@ const WAYS = "ways";
 
 /** The ways one account can be logged in on a desktop, in the order they are offered. */
 export function loginMethods(account: Account): Method[] {
-  return account.login_method === "qr" ? ["qr", "cookies", "browser"] : ["cookies", "browser", "webview", "headers"];
+  return account.login_method === "qr" ? ["qr", "cookies", "browser", "headers"] : ["cookies", "browser", "webview", "headers"];
 }
 
 /**
@@ -373,10 +373,10 @@ function BrowserPanel({ account, sourceEnabled, onBusy, onDone }: {
 
 /**
  * 从 Cookie-Editor 导入: the login stays in the browser the user chose and is handed over by the
- * Cookie-Editor extension. Three steps, each with the key that does it: KDJ opens the site in that
- * browser (never in whichever is the default), the user exports there (the little picture shows
- * where: the cookie on the toolbar, Export, JSON), and KDJ takes the export from the clipboard
- * when its window is returned to.
+ * Cookie-Editor extension. Four steps, one thing each, with the key that does it: KDJ opens the
+ * extension's install page and then the platform's site in that browser (never in whichever is the
+ * default), the user exports there (the little picture shows where: the cookie on the toolbar,
+ * Export, JSON), and KDJ takes the export from the clipboard when its window is returned to.
  */
 function CookieEditorPanel({ account, sourceEnabled, onBusy, onDone }: {
   account: Account; sourceEnabled: boolean; onBusy(busy: boolean): void; onDone(): void;
@@ -480,12 +480,15 @@ function CookieEditorPanel({ account, sourceEnabled, onBusy, onDone }: {
     </div>
     <ol className="kd-account-login-steps">
       <li>
-        <span>登录 {account.label}</span>
+        <span>安装 Cookie-Editor 扩展</span>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openInBrowser("extension")}>打开安装页</Button>
+      </li>
+      <li>
+        <span>打开 {account.label} 并登录</span>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openInBrowser("site")}>在 {where} 打开</Button>
       </li>
       <li>
         <span>点小饼干 → Export → JSON</span>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void openInBrowser("extension")}>安装</Button>
         <PointerDemo scene="cookie-export" label="在浏览器的工具栏上点 Cookie-Editor 的小饼干，点 Export，再选 JSON，登录就复制好了" />
       </li>
       <li>
@@ -524,12 +527,12 @@ function HeadersPanel({ account, sourceEnabled, onBusy, onDone }: {
   }, []);
 
   const login = async () => {
-    if (!sourceEnabled) { setNotice(`请先开启 ${account.label} 下载源`); return; }
+    // SoundCloud and YouTube refuse a login while their source is switched off.
+    if (account.login_method !== "qr" && !sourceEnabled) { setNotice(`请先开启 ${account.label} 下载源`); return; }
     setBusy(true);
     setNotice("");
     try {
-      const result = await (platform === "soundcloud" ? api.soundcloudHeadersLogin(headers)
-        : platform === "ytm" ? api.ytmHeadersLogin(headers) : api.youtubeHeadersLogin(headers));
+      const result = await api.headersLogin(platform, headers);
       if (alive.current) { setHeaders(""); setBusy(false); setAccount(result); onDone(); }
     } catch (error) {
       if (!alive.current) return;

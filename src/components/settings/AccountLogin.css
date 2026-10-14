@@ -69,9 +69,10 @@
   counter-increment: kd-login-step;
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr) auto;
+  /* A step without a key keeps the height of one that has it. */
+  grid-template-rows: minmax(1.75rem, auto);
   align-items: center;
-  gap: 0.65rem;
-  min-height: 1.75rem;
+  column-gap: 0.65rem;
 }
 .kd-account-login-steps li::before {
   content: counter(kd-login-step);

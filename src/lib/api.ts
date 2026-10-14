@@ -882,12 +882,9 @@ export const api = {
   /** A login the user exported from their own browser, as one `Cookie:` line. */
   exportedLogin: (platform: Platform, headers: string) =>
     post<Account>(`/accounts/${platform}/login/cookies`, { headers }),
-  soundcloudHeadersLogin: (headers: string) =>
-    post<Account>("/accounts/soundcloud/login/headers", { headers }),
-  ytmHeadersLogin: (headers: string) =>
-    post<Account>("/accounts/ytm/login/headers", { headers }),
-  youtubeHeadersLogin: (headers: string) =>
-    post<Account>("/accounts/youtube/login/headers", { headers }),
+  /** The request headers of the platform's site, pasted from a browser's developer tools. */
+  headersLogin: (platform: Platform, headers: string) =>
+    post<Account>(`/accounts/${platform}/login/headers`, { headers }),
 
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
   searchCapabilities: () => request<SearchCapabilities>("/search/capabilities"),

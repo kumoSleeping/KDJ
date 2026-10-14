@@ -812,7 +812,7 @@ impl MusicProvider for NeteaseProvider {
         trace
             .run(async {
                 cookies.retain(|name, _| WEB_LOGIN_COOKIES.contains(&name.as_str()));
-                self.accept_web_login(cookies, crate::browser::EXPORTED_LOGIN, &trace)
+                self.accept_web_login(cookies, crate::browser::IMPORTED_LOGIN, &trace)
                     .await
             })
             .await

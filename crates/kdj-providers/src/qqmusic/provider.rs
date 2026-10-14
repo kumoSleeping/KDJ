@@ -1142,7 +1142,7 @@ impl MusicProvider for QqMusicProvider {
     ) -> Result<()> {
         let trace = crate::browser::login_trace::LoginTrace::new("qqm", "cookies");
         trace
-            .run(self.accept_web_login(cookies, crate::browser::EXPORTED_LOGIN, &trace))
+            .run(self.accept_web_login(cookies, crate::browser::IMPORTED_LOGIN, &trace))
             .await
     }
 

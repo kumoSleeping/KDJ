@@ -233,10 +233,11 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     await click(COOKIES);
     assert.equal(way()!.getAttribute("aria-label"), `YouTube Video · ${COOKIES}`);
     assert.deepEqual(calls.slice(beforeCookies), ["GET:/api/accounts/youtube/login/browsers"], "it looks for browsers and nothing else");
-    assert.deepEqual(stepKeys(), ["在 Edge 打开", "安装", "粘贴"]);
-    assert.ok(panel().querySelector(".kd-account-login-steps li:nth-child(2) .kd-demo[data-scene='cookie-export']"), "the export step has its picture");
+    assert.deepEqual(stepKeys(), ["打开安装页", "在 Edge 打开", "粘贴"]);
+    assert.equal(panel().querySelectorAll(".kd-account-login-steps li").length, 4, "four steps, one thing each");
+    assert.ok(panel().querySelector(".kd-account-login-steps li:nth-child(3) .kd-demo[data-scene='cookie-export']"), "the export step has its picture");
     await choose(panel().querySelectorAll("select")[0], "fork");
-    assert.deepEqual(stepKeys(), ["在 Fork 打开", "安装", "粘贴"], "a browser KDJ cannot read is as good as any here");
+    assert.deepEqual(stepKeys(), ["打开安装页", "在 Fork 打开", "粘贴"], "a browser KDJ cannot read is as good as any here");
     assert.equal(panel().querySelectorAll("select").length, 1, "profiles are no choice on this page");
     assert.equal(buttons(panel()).some(button => button.textContent === "登录"), false);
     clipboard = JSON.stringify([
@@ -246,7 +247,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
     clipboardReads = 0;
     await comeBack();
     assert.equal(clipboardReads, 0, "the clipboard is not looked at before the user has gone to the browser");
-    await click("安装", panel());
+    await click("打开安装页", panel());
     assert.deepEqual(posts.at(-1), { path: "/api/accounts/youtube/login/browser/open", body: { browser: "fork", page: "extension" } });
     const exported = clipboard;
     clipboard = "https://example.com/?a=b";
@@ -312,7 +313,7 @@ test("an account logs in from its own row: one key, the ways in place, one reque
       assert.deepEqual(buttons().map(node => node.textContent), ["开", "登录"]);
       const beforeQr = calls.length;
       await click("登录");
-      assert.deepEqual(methods(), ["扫码", COOKIES, BROWSER]);
+      assert.deepEqual(methods(), ["扫码", COOKIES, BROWSER, "请求头"]);
       assert.equal(calls.length, beforeQr, "no code is asked for before 扫码 is chosen");
       assert.equal(document.querySelector(".kd-account-login-qr, .kd-account-login-panel"), null);
       await click("扫码");
@@ -331,7 +332,24 @@ test("an account logs in from its own row: one key, the ways in place, one reque
       assert.deepEqual(loginPosts().slice(before).map(post => [post.path, post.body.browser, post.body.window]),
         [[`/api/accounts/${platform}/login/browser`, "edge", undefined]], "a platform with a code to scan opens no login window");
       assert.equal(notice(), `登录失败：无法连接本地服务：${detail}`);
+      // The request headers of the site are a way here as well, through the same one route.
+      await back();
+      await click("请求头");
+      await fillHeaders();
+      await click("登录", panel());
+      assert.ok(calls.includes(`POST:/api/accounts/${platform}/login/headers`));
     }
+
+    // The sidebar's 登录 of a source lands on that account's own ways, once.
+    const { useLoginRequest } = await import("../src/lib/settingsPages");
+    await render("asked", browserAccount("soundcloud"));
+    assert.equal(document.querySelector(".kd-account-login"), null);
+    await act(async () => useLoginRequest.getState().ask("ytm"));
+    assert.equal(document.querySelector(".kd-account-login"), null, "another account's request is not this row's");
+    await act(async () => useLoginRequest.getState().ask("soundcloud"));
+    assert.equal(methods().length, 4, "the row opens its ways");
+    assert.equal(way(), null, "and chooses none for the user");
+    assert.equal(useLoginRequest.getState().platform, null);
 
     emptyCatalog = true;
     await render("empty", browserAccount("soundcloud"));
