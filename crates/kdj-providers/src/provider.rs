@@ -313,6 +313,11 @@ pub trait MusicProvider: Send + Sync {
         anyhow::bail!("这个平台不支持复用浏览器登录")
     }
 
+    /// Import explicitly supplied Cookie-Editor credentials through the provider's login validator.
+    async fn import_cookie_login(&self, _cookies: std::collections::BTreeMap<String, String>) -> Result<()> {
+        anyhow::bail!("这个平台不支持 Cookie 导入")
+    }
+
     async fn search(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>>;
 
     /// 搜索歌单/艺术家/专辑集合。默认不支持，避免把集合 ID 伪装成歌曲 ID。

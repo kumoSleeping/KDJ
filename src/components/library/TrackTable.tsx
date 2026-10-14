@@ -127,7 +127,7 @@ import { useSharePrefs } from "../../lib/sharePrefs";
 import { requestExploreSearch } from "../../lib/vjSearch";
 import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
-import { removeLocalStorage } from "../../lib/storageWrite";
+import { readLocalStorage } from "../../lib/storageWrite";
 
 /** @deprecated 请从 `lib/playTrack` 引用；保留 re-export 以免旧 import 断掉。 */
 export { PLAY_EVENT, playTrack, parsePlayRequest, type PlayRequest } from "../../lib/playTrack";
@@ -227,12 +227,12 @@ const COLUMNS: Column[] = [
   { id: "camelot", label: "KEY", width: "4rem", key: "camelot" },
   // 现在只显示彩色百分比，不再为已经删除的响度轨道预留宽度。
   { id: "energy", label: "响度", width: "3.8rem", key: "energy" },
+  { id: "rating", label: "评分", width: "4.2rem", key: "rating" },
   { id: "duration", label: "时长", width: "4rem", align: "num", key: "duration" },
   { id: null, label: "格式", width: "3.4rem", key: "format" },
   { id: null, label: "大小", width: "4.6rem", align: "num", key: "size" },
   // 日期加时间是 16 个等宽字符，约 8.5rem；再加两侧内边距。窄了它会压到下一列上。
   { id: "file_created_at", label: "文件创建", width: "10rem", key: "file_created_at" },
-  { id: "rating", label: "评分", width: "4.2rem", key: "rating" },
   { id: null, label: "采样率", width: "5.5rem", key: "samplerate" },
   { id: null, label: "声道", width: "3.4rem", key: "channels" },
   { id: null, label: "码率", width: "5.5rem", key: "bitrate" },
@@ -251,7 +251,9 @@ const COLUMNS: Column[] = [
  * 拖一次、勾一次、拉一次，永远不用再想。存的是 id 列表而不是完整快照，
  * 理由同 PanelStack：以后加新列时旧存档不作废，新列自动排在默认位置。
  */
-const COLUMN_PREFS_KEY = "kd-library-columns";
+// 新版默认布局只应用一次；旧 key 原样保留，新 key 存在后始终以用户设置为准。
+const LEGACY_COLUMN_PREFS_KEY = "kd-library-columns";
+const COLUMN_PREFS_KEY = "kd-library-columns-v2";
 const INDEX_COL_KEY = "index";
 const INDEX_DEFAULT_WIDTH = "1.75rem";
 
@@ -291,9 +293,25 @@ const COLUMN_PREFS_SCHEMA: TableColumnPrefsSchema = {
   maxWidth: COLUMN_MAX_WIDTH,
 };
 
+function defaultColumnPrefs(): ColumnPrefs {
+  return {
+    order: COLUMNS.map((column) => column.key),
+    hidden: [
+      "file_created_at", "samplerate", "channels", "bitrate", "genre",
+      "year", "source_platform", "added_at", "filename", "path",
+    ],
+    widths: {},
+  };
+}
+
 function loadColumnPrefs(): ColumnPrefs {
-  // 标题列永远不准藏：它是唯一说明「这行是哪首歌」的列。
-  return loadTableColumnPrefs(COLUMN_PREFS_KEY, COLUMN_PREFS_SCHEMA);
+  if (readLocalStorage(COLUMN_PREFS_KEY) !== null) {
+    return loadTableColumnPrefs(COLUMN_PREFS_KEY, COLUMN_PREFS_SCHEMA);
+  }
+  const defaults = defaultColumnPrefs();
+  // 升级只调整顺序和显隐，不覆盖用户拖过的列宽，也不改写旧版存档。
+  defaults.widths = loadTableColumnPrefs(LEGACY_COLUMN_PREFS_KEY, COLUMN_PREFS_SCHEMA).widths;
+  return saveTableColumnPrefs(COLUMN_PREFS_KEY, defaults, COLUMN_PREFS_SCHEMA);
 }
 
 export interface TrackTableProps {
@@ -2481,10 +2499,7 @@ export const TrackTable = memo(function TrackTable({
           <button
             type="button"
             onClick={() => {
-              removeLocalStorage(COLUMN_PREFS_KEY);
-              const defaults = loadColumnPrefs();
-              colPrefsRef.current = defaults;
-              setColPrefs(defaults);
+              saveColPrefs(defaultColumnPrefs());
               setColMenu(null);
             }}
           >

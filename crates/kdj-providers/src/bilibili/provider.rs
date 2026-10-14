@@ -1382,13 +1382,23 @@ impl MusicProvider for BilibiliProvider {
         trace
             .run(async {
                 trace.step("read_profile");
-                let (cookies, source) = crate::browser::reuse_named_cookies(
+                let (cookies, _source) = crate::browser::reuse_named_cookies(
                     browser,
                     profile,
                     &["bilibili.com"],
                     &["SESSDATA", "bili_jct", "DedeUserID", "buvid3", "buvid4", "b_nut"],
                 )
                 .await?;
+                self.import_cookie_login(cookies).await
+            })
+            .await
+    }
+
+    async fn import_cookie_login(&self, cookies: std::collections::BTreeMap<String, String>) -> Result<()> {
+        let trace = crate::browser::login_trace::LoginTrace::new("bilibili", "cookies");
+        let source = "导入的 Cookie";
+        trace.run(async {
+
                 anyhow::ensure!(
                     cookies.contains_key("SESSDATA"),
                     "没有从{source}读取到已登录的哔哩哔哩；请先在这个浏览器登录"

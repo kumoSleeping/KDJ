@@ -1084,13 +1084,23 @@ impl MusicProvider for QqMusicProvider {
         trace
             .run(async {
                 trace.step("read_profile");
-                let (cookies, source) = crate::browser::reuse_named_cookies(
+                let (cookies, _source) = crate::browser::reuse_named_cookies(
                     browser,
                     profile,
                     &["qq.com"],
                     super::client::WEB_LOGIN_COOKIES,
                 )
                 .await?;
+                self.import_cookie_login(cookies).await
+            })
+            .await
+    }
+
+    async fn import_cookie_login(&self, cookies: std::collections::BTreeMap<String, String>) -> Result<()> {
+        let trace = crate::browser::login_trace::LoginTrace::new("qqm", "cookies");
+        let source = "导入的 Cookie";
+        trace.run(async {
+
                 let credential = super::client::credential_from_web_cookies(&cookies)
                     .with_context(|| {
                         format!("没有从{source}读取到已登录的 QQ 音乐；请先在这个浏览器登录 y.qq.com")

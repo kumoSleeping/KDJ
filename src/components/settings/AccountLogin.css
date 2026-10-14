@@ -41,6 +41,7 @@
 .kd-account-login-panel .kd-textarea { display: block; width: 100%; box-sizing: border-box; font-size: var(--kd-size-xs); resize: vertical; }
 .kd-account-login-controls { display: flex; align-items: center; gap: 0.5rem; }
 .kd-account-login-controls .kd-select-control { flex: 1; min-width: 0; }
+.kd-account-cookie-guide { margin: 0; color: var(--kd-muted); font-size: var(--kd-size-xs); line-height: 1.6; }
 .kd-account-login-actions {
   display: flex;
   align-items: center;
