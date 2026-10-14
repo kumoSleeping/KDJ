@@ -1144,8 +1144,20 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 只删没有用户文件的目录。`.kdj/` 和旧 `.kdj.json` 是应用自己的元数据，
+/// 访达、资源管理器自己往文件夹里写的东西：`.DS_Store`、非 HFS 盘上的 `._*` 资源分叉、
+/// `Thumbs.db`、`desktop.ini`。用户看不见也没放过它们，不能因此把空文件夹当成非空。
+fn is_system_clutter(name: &str) -> bool {
+    name == ".DS_Store"
+        || name == ".localized"
+        || name.starts_with("._")
+        || name.eq_ignore_ascii_case("Thumbs.db")
+        || name.eq_ignore_ascii_case("ehthumbs.db")
+        || name.eq_ignore_ascii_case("desktop.ini")
+}
+
+/// 只删没有用户文件的目录（含同样为空的子目录）。`.kdj/`、旧 `.kdj.json` 和系统杂项
 /// 不该让一个肉眼看起来为空的文件夹永远删不掉；但 `.kdj/` 里出现未知文件时仍拒绝。
+/// 先把整棵树查完再动手，查到一半被拒时不会已经删掉了子目录的手排清单。
 pub fn delete_folder(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     let target = ensure_inside(path, roots)?;
     anyhow::ensure!(
@@ -1154,52 +1166,80 @@ pub fn delete_folder(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     );
     anyhow::ensure!(target.is_dir(), "文件夹不存在");
 
-    for entry in std::fs::read_dir(&target).context("读文件夹失败")? {
+    check_empty_folder(&target, &target)?;
+    remove_empty_folder(&target)?;
+    Ok(target)
+}
+
+fn check_empty_folder(directory: &Path, top: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(directory).context("读文件夹失败")? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        anyhow::ensure!(
-            name == METADATA_DIR_NAME || name == LEGACY_MANIFEST_NAME,
-            "文件夹非空或删不掉"
-        );
+        // 符号链接既不是目录也不是文件：不跟进去，也不算空。
+        let kind = entry.file_type()?;
+        if kind.is_dir() && name == METADATA_DIR_NAME {
+            check_metadata_dir(&entry.path())?;
+        } else if kind.is_dir() {
+            check_empty_folder(&entry.path(), top)?;
+        } else if !(kind.is_file() && (name == LEGACY_MANIFEST_NAME || is_system_clutter(&name))) {
+            let path = entry.path();
+            let shown = path.strip_prefix(top).unwrap_or(&path);
+            anyhow::bail!("文件夹里还有「{}」，没有删除", shown.display());
+        }
     }
-    let meta = metadata_dir(&target);
-    if meta.is_dir() {
-        for entry in std::fs::read_dir(&meta).context("读 KDJ 元数据目录失败")? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == LYRICS_DIR_NAME {
+    Ok(())
+}
+
+/// 只在 [`check_empty_folder`] 通过后调用。目录逐个 `remove_dir`：检查之后又有文件
+/// 放进来时删除会失败，而不是连新文件一起抹掉。
+fn remove_empty_folder(directory: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(directory).context("读文件夹失败")? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let kind = entry.file_type()?;
+        if kind.is_dir() && name == METADATA_DIR_NAME {
+            std::fs::remove_dir_all(entry.path()).context("删除 KDJ 元数据失败")?;
+        } else if kind.is_dir() {
+            remove_empty_folder(&entry.path())?;
+        } else if kind.is_file() && (name == LEGACY_MANIFEST_NAME || is_system_clutter(&name)) {
+            std::fs::remove_file(entry.path()).context("删除文件夹里的系统文件失败")?;
+        }
+    }
+    std::fs::remove_dir(directory).context("文件夹删除时里面又有了新文件，没有删除")
+}
+
+fn check_metadata_dir(meta: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(meta).context("读 KDJ 元数据目录失败")? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == LYRICS_DIR_NAME {
+            anyhow::ensure!(
+                entry.file_type()?.is_dir(),
+                "KDJ 歌词目录类型不正确，拒绝删除"
+            );
+            for lyric in std::fs::read_dir(entry.path()).context("读 KDJ 歌词目录失败")?
+            {
+                let lyric = lyric?;
                 anyhow::ensure!(
-                    entry.file_type()?.is_dir(),
-                    "KDJ 歌词目录类型不正确，拒绝删除"
-                );
-                for lyric in std::fs::read_dir(entry.path()).context("读 KDJ 歌词目录失败")?
-                {
-                    let lyric = lyric?;
-                    anyhow::ensure!(
-                        lyric.file_type()?.is_file()
-                            && (lyric.file_name().to_string_lossy().ends_with(".lrc")
-                                || lyric.file_name().to_string_lossy().ends_with(".partial")),
-                        "KDJ 歌词目录里有未知内容，拒绝删除"
-                    );
-                }
-            } else {
-                anyhow::ensure!(
-                    entry.file_type()?.is_file()
-                        && (name == MANIFEST_NAME
-                            || name == LEGACY_BACKUP_NAME
-                            || name.ends_with(".partial")),
-                    "KDJ 元数据目录里有未知内容，拒绝删除"
+                    lyric.file_type()?.is_file()
+                        && (lyric.file_name().to_string_lossy().ends_with(".lrc")
+                            || lyric.file_name().to_string_lossy().ends_with(".partial")
+                            || is_system_clutter(&lyric.file_name().to_string_lossy())),
+                    "KDJ 歌词目录里有未知内容，拒绝删除"
                 );
             }
+        } else {
+            anyhow::ensure!(
+                entry.file_type()?.is_file()
+                    && (name == MANIFEST_NAME
+                        || name == LEGACY_BACKUP_NAME
+                        || name.ends_with(".partial")
+                        || is_system_clutter(&name)),
+                "KDJ 元数据目录里有未知内容，拒绝删除"
+            );
         }
-        std::fs::remove_dir_all(&meta).context("删除 KDJ 元数据失败")?;
     }
-    let legacy = legacy_manifest_path(&target);
-    if legacy.is_file() {
-        std::fs::remove_file(legacy).context("删除旧 KDJ 清单失败")?;
-    }
-    std::fs::remove_dir(&target).context("文件夹非空或删不掉")?;
-    Ok(target)
+    Ok(())
 }
 
 // ------------------------------------------------------------------ 文件操作
@@ -1838,6 +1878,45 @@ mod tests {
         assert!(!empty.exists());
         assert!(delete_folder(&full, &roots).is_err(), "非空目录不能删");
         assert!(full.join("a.mp3").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn delete_ignores_system_clutter_and_empty_subfolders() {
+        let base = scratch("delete-clutter");
+        let root = base.join("lib");
+        let target = root.join("set");
+        let inner = target.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(target.join(".DS_Store"), b"x").unwrap();
+        std::fs::write(target.join("Thumbs.db"), b"x").unwrap();
+        std::fs::write(inner.join("._a.mp3"), b"x").unwrap();
+        write_manifest(&target, &["inner".into()]).unwrap();
+        write_manifest(&inner, &[]).unwrap();
+        let roots = vec![root];
+
+        delete_folder(&target, &roots).unwrap();
+        assert!(!target.exists(), "访达写的 .DS_Store 和空子目录不算内容");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn delete_checks_the_whole_tree_before_removing_anything() {
+        let base = scratch("delete-deep");
+        let root = base.join("lib");
+        let target = root.join("set");
+        let empty = target.join("a");
+        let full = target.join("b");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&full).unwrap();
+        write_manifest(&empty, &[]).unwrap();
+        std::fs::write(full.join("cover.jpg"), b"x").unwrap();
+        let roots = vec![root];
+
+        let err = delete_folder(&target, &roots).unwrap_err().to_string();
+        assert!(err.contains("cover.jpg"), "{err}");
+        assert!(manifest_path(&empty).is_file(), "被拒时不能先删掉别的子目录的清单");
+        assert!(full.join("cover.jpg").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
