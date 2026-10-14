@@ -1358,11 +1358,26 @@ textarea {
 }
 /* Windows / Linux：系统标题栏关掉后，右侧自绘最小化 / 最大化 / 关闭。 */
 .kd-window-controls {
+  position: relative;
   display: inline-flex;
   align-items: stretch;
   align-self: stretch;
   margin-left: 0.35rem;
   -webkit-app-region: no-drag;
+}
+/* The window's three keys are the system's, not the app's. Where the app's keys stand before
+   them (on a Mac the system's are on the other side), a short line keeps the two groups apart:
+   the one separator line of the top bar. */
+.kd-app-chrome-actions > :not(.kd-window-controls) ~ .kd-window-controls { margin-left: 0.9rem; }
+.kd-app-chrome-actions > :not(.kd-window-controls) ~ .kd-window-controls::before {
+  content: "";
+  position: absolute;
+  left: -0.45rem;
+  top: 50%;
+  width: 1px;
+  height: 1rem;
+  background: color-mix(in srgb, var(--kd-text) 18%, transparent);
+  transform: translateY(-50%);
 }
 .kd-window-btn {
   appearance: none;
