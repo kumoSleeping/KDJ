@@ -5,6 +5,7 @@
 //! 播放器也要靠 Range 请求才能拖进度条。
 
 pub mod activity_log;
+mod account_upkeep;
 mod browser_login;
 pub mod diagnostics;
 pub mod aggregate;
@@ -486,6 +487,8 @@ pub async fn serve(
     // 首轮补扫会等 WebSocket 连好再做，避免刷新事件发在前端订阅之前。
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     library_watch::spawn(state.clone());
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    account_upkeep::spawn(state.clone());
     let control = AuthToken::generate();
     let media = MediaToken::generate();
     let activity_log = state.activity_log.clone();

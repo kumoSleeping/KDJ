@@ -248,6 +248,8 @@ pub struct AppState {
     /// One-shot handshakes keep the raw GoogleVideo capability in Rust while the isolated native
     /// player transforms only the non-secret `n` challenge.
     youtube_hls_preparations: Mutex<HashMap<String, YoutubeHlsPreparation>>,
+    /// 每个平台的登录从哪个浏览器复用来的，登录失效时据此再读一次（`account_upkeep`）。
+    pub login_sources: crate::account_upkeep::LoginSources,
     /// 所有 provider 共享的 live 设置句柄；`PUT /api/settings` 后刷这份即可。
     provider_ctx: ProviderContext,
     /// 在线歌曲试听的短期代理票据：浏览器只拿本地 URL，不直接碰各平台 CDN。
@@ -370,6 +372,9 @@ impl AppState {
                 youtube_auth,
                 youtube_hls_resources: Mutex::new(HashMap::new()),
                 youtube_hls_preparations: Mutex::new(HashMap::new()),
+                login_sources: crate::account_upkeep::LoginSources::load(
+                    ctx.session_file("login-sources.json"),
+                ),
                 provider_ctx: ctx,
                 song_previews: Mutex::new(SongPreviewTickets::default()),
                 lyric_lookups: Default::default(),

@@ -642,6 +642,7 @@ async fn login_qr_state(
 
     let mut account = None;
     if value == QrStateValue::Done {
+        state.login_sources.set(platform, None);
         let fresh = provider.account().await;
         state.hub.publish("account.changed", &fresh);
         account = Some(fresh);
@@ -663,6 +664,7 @@ async fn logout(
         .provider(platform)
         .ok_or_else(|| ApiError::not_found("平台不可用"))?;
     provider.logout().await?;
+    state.login_sources.set(platform, None);
     let account = provider.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
@@ -716,6 +718,7 @@ async fn soundcloud_oauth_callback(
         .soundcloud
         .finish_oauth(oauth_state, code, SOUNDCLOUD_REDIRECT_URI)
         .await?;
+    state.login_sources.set(Platform::Soundcloud, None);
     let account = state.soundcloud.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
@@ -781,31 +784,68 @@ async fn browser_login(
         .filter(|profile| !profile.is_empty());
     let window = payload.window;
     let account = crate::browser_login::run(payload.request_id.as_deref(), async {
-        match platform {
-            Platform::Soundcloud => {
-                state.soundcloud.import_browser(browser, profile, window).await?;
-                let account = state.soundcloud.account().await;
-                state.hub.publish("account.changed", &account);
-                Ok(account)
-            }
-            Platform::Ytm | Platform::Youtube => {
-                anyhow::ensure!(!window, "YouTube 不能在临时窗口登录，请用「登录窗口」");
-                youtube_browser_login(&state, platform, browser, profile, window).await
-            }
-            _ => {
-                anyhow::ensure!(!window, "这个平台用扫码登录，没有登录窗口");
-                let provider = state
-                    .provider(platform)
-                    .ok_or_else(|| anyhow::anyhow!("平台不可用"))?;
-                provider.import_browser_login(&browser, profile.as_deref()).await?;
-                let account = provider.account().await;
-                state.hub.publish("account.changed", &account);
-                Ok(account)
-            }
+        if window {
+            browser_window_login(&state, platform, browser).await
+        } else {
+            reuse_browser_login(&state, platform, browser, profile).await
         }
     })
     .await?;
     Ok(Json(account))
+}
+
+/// 复用所选浏览器里这个平台已有的登录，验证通过才替换，并记下来源：这份登录日后失效时，
+/// `account_upkeep` 从同一个浏览器再读一次。
+pub(crate) async fn reuse_browser_login(
+    state: &AppState,
+    platform: Platform,
+    browser: String,
+    profile: Option<String>,
+) -> anyhow::Result<Account> {
+    let source = crate::account_upkeep::ReuseSource {
+        browser: browser.clone(),
+        profile: profile.clone(),
+    };
+    let account = match platform {
+        Platform::Soundcloud => {
+            state.soundcloud.import_browser(browser, profile, false).await?;
+            state.soundcloud.account().await
+        }
+        Platform::Ytm | Platform::Youtube => {
+            youtube_browser_login(state, platform, browser, profile, false).await?
+        }
+        _ => {
+            let provider = state
+                .provider(platform)
+                .ok_or_else(|| anyhow::anyhow!("平台不可用"))?;
+            provider.import_browser_login(&browser, profile.as_deref()).await?;
+            provider.account().await
+        }
+    };
+    state.login_sources.set(platform, Some(source));
+    state.hub.publish("account.changed", &account);
+    Ok(account)
+}
+
+/// 在所选浏览器的临时窗口里登录一次（只有 SoundCloud）。
+async fn browser_window_login(
+    state: &AppState,
+    platform: Platform,
+    browser: String,
+) -> anyhow::Result<Account> {
+    match platform {
+        Platform::Soundcloud => {
+            state.soundcloud.import_browser(browser, None, true).await?;
+            state.login_sources.set(platform, None);
+            let account = state.soundcloud.account().await;
+            state.hub.publish("account.changed", &account);
+            Ok(account)
+        }
+        Platform::Ytm | Platform::Youtube => {
+            anyhow::bail!("YouTube 不能在临时窗口登录，请用「登录窗口」")
+        }
+        _ => anyhow::bail!("这个平台用扫码登录，没有登录窗口"),
+    }
 }
 
 /// KDJ 原生隔离窗口只把 SoundCloud 的网页登录会话交回本机后端；令牌不经过
@@ -822,6 +862,7 @@ async fn soundcloud_webview_login(
         .soundcloud
         .import_webview_session(access_token, payload.expires_at)
         .await?;
+    state.login_sources.set(Platform::Soundcloud, None);
     let account = state.soundcloud.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
@@ -907,6 +948,7 @@ async fn exported_login(
             provider.account().await
         }
     };
+    state.login_sources.set(platform, None);
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }
@@ -924,6 +966,7 @@ async fn provider_headers_login(
         .provider(platform)
         .ok_or_else(|| ApiError::bad_request("平台不可用"))?;
     provider.import_cookie_login(cookies).await?;
+    state.login_sources.set(platform, None);
     let account = provider.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
@@ -934,6 +977,7 @@ async fn soundcloud_headers_login(
     Json(payload): Json<YoutubeHeadersLoginBody>,
 ) -> ApiResult<Json<Account>> {
     state.soundcloud.import_headers(&payload.headers).await?;
+    state.login_sources.set(Platform::Soundcloud, None);
     let account = state.soundcloud.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
@@ -1003,7 +1047,9 @@ async fn youtube_pasted_login(state: &AppState, platform: Platform, raw: &str) -
     trace.run(async {
         trace.step("parse_headers");
         let session = BrowserSession::from_headers(raw)?;
-        save_youtube_login(state, platform, session, &trace).await
+        let account = save_youtube_login(state, platform, session, &trace).await?;
+        state.login_sources.set(platform, None);
+        Ok(account)
     }).await
 }
 
@@ -1014,7 +1060,9 @@ async fn youtube_window_login(state: &AppState, platform: Platform, raw: &str) -
         anyhow::ensure!(!raw.trim().is_empty() && raw.len() <= 256 * 1024, "登录窗口没有返回有效会话");
         let label = if platform == Platform::Ytm { "登录窗口 · music.youtube.com" } else { "登录窗口 · www.youtube.com" };
         let session = BrowserSession::from_cookie_header(raw.trim(), label)?;
-        save_youtube_login(state, platform, session, &trace).await
+        let account = save_youtube_login(state, platform, session, &trace).await?;
+        state.login_sources.set(platform, None);
+        Ok(account)
     }).await
 }
 
@@ -5587,6 +5635,18 @@ async fn reconcile_stream_account_failure(
     error: anyhow::Error,
 ) -> ApiError {
     let account = provider.account().await;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if account.state == AccountState::Expired {
+        // 复用来的登录还活在原来的浏览器里时，读回来就不必让用户重新登录；这一次请求仍按失败报。
+        if let Some(fresh) =
+            crate::account_upkeep::resync_from_browser(state, provider.platform()).await
+        {
+            return ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{} 已重新读到登录，请重试", fresh.label),
+            );
+        }
+    }
     if account.state == AccountState::Expired {
         state.hub.publish("account.changed", &account);
         let detail = if account.detail.trim().is_empty() {

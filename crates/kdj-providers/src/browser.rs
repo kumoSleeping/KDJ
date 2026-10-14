@@ -343,6 +343,29 @@ pub(crate) fn named_cookies(
     )
 }
 
+/// 读这个浏览器的登录不会弹出任何东西：Gecko 内核的 Cookie 库不加密，Safari 只看完全磁盘访问权限。
+/// Chromium 内核要钥匙串 / 系统密钥环（可能弹授权框），Arc 走它的自动化，都不算。
+/// 账号掉线后后台自动从原来的浏览器再读一次，只对这些浏览器做。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn reads_without_prompt(browser: &str) -> bool {
+    if let Some(installation) = discovery::installed()
+        .into_iter()
+        .find(|installation| installation.id == browser)
+    {
+        return installation.engine == Some(discovery::BrowserEngine::Gecko)
+            || installation.adapter_id.as_deref() == Some("safari");
+    }
+    matches!(
+        browser.trim().to_ascii_lowercase().as_str(),
+        "firefox" | "zen" | "librewolf" | "cachy" | "safari"
+    )
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn reads_without_prompt(_browser: &str) -> bool {
+    false
+}
+
 /// 读选定配置里一个站点的具名登录 Cookie；磁盘读取放在 blocking 线程。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) async fn reuse_named_cookies(
