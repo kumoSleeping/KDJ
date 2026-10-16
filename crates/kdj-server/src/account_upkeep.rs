@@ -7,6 +7,10 @@
 //! 用「复用浏览器」登录的账号，登录其实还活在那个浏览器里：KDJ 这份失效了，就从同一个浏览器
 //! 再读一次。只对读取时不弹任何东西的浏览器这么做（[`kdj_providers::browser::reads_without_prompt`]），
 //! 后台不能冒出钥匙串授权框。来源记在 `sessions/login-sources.json`，只有浏览器 id 和配置 id。
+//!
+//! YouTube 还要更勤一些：浏览器里开着的 YouTube 标签页会不断轮换账号 Cookie，同一份登录 KDJ
+//! 手里那份很快就成了旧的，被 Google 收回，所以它看上去比在浏览器里短命得多。复用来的 YouTube
+//! 登录每隔 [`YOUTUBE_FRESHEN`] 从原来的浏览器安静地读一次，那边轮换过才重新验证、换上。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -87,8 +91,18 @@ mod desktop {
     const FIRST_CHECK: Duration = Duration::from_secs(20);
     /// 之后的间隔。各平台自己的续期另有节奏（B 站 6 小时问一次），这里只保证隔一阵就有请求。
     const INTERVAL: Duration = Duration::from_secs(3 * 60 * 60);
+    /// 复用来的 YouTube 登录多久跟浏览器对一次。只读本机的 Cookie 库，没变就不发请求。
+    pub(super) const YOUTUBE_FRESHEN: Duration = Duration::from_secs(20 * 60);
 
     pub fn spawn(state: Arc<AppState>) {
+        let youtube = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(FIRST_CHECK + YOUTUBE_FRESHEN).await;
+            loop {
+                freshen_youtube(&youtube).await;
+                tokio::time::sleep(YOUTUBE_FRESHEN).await;
+            }
+        });
         tokio::spawn(async move {
             tokio::time::sleep(FIRST_CHECK).await;
             let mut published: HashMap<Platform, serde_json::Value> = HashMap::new();
@@ -128,6 +142,46 @@ mod desktop {
         }
     }
 
+    /// 复用来的 YouTube 登录在原来的浏览器里轮换过，就换上那边的新一份。读不到、那边已经退出、
+    /// 或者新的验证不过，都留着手里这份。
+    async fn freshen_youtube(state: &Arc<AppState>) {
+        let Some((platform, source)) = [Platform::Youtube, Platform::Ytm]
+            .into_iter()
+            .find_map(|platform| state.login_sources.get(platform).map(|source| (platform, source)))
+        else {
+            return;
+        };
+        if kdj_providers::browser::authorization::reads_existing(&source.browser) {
+            return;
+        }
+        let auth = if platform == Platform::Ytm { state.ytm_auth.clone() } else { state.youtube_auth.clone() };
+        let Some(held) = auth.snapshot() else {
+            return;
+        };
+        let (browser, profile) = (source.browser.clone(), source.profile.clone());
+        let read = tokio::task::spawn_blocking(move || {
+            kdj_providers::browser::reads_without_prompt(&browser)
+                .then(|| auth.import_browser(&browser, profile.as_deref()).ok())
+                .flatten()
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(read) = read else {
+            return;
+        };
+        if !super::youtube_login_moved(&held.cookie, &read.cookie) {
+            return;
+        }
+        match crate::routes::reuse_browser_login(state, platform, source.browser, source.profile).await {
+            Ok(account) if account.state == AccountState::Valid => {
+                tracing::info!("YouTube 的登录在浏览器里轮换过，已换上新的一份");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!("换上浏览器里轮换过的 YouTube 登录失败：{error:#}"),
+        }
+    }
+
     /// 失效的登录是从浏览器复用来的、那个浏览器又能安静地读，就再读一次。拿到有效登录才返回。
     pub async fn resync_from_browser(state: &Arc<AppState>, platform: Platform) -> Option<Account> {
         let source = state.login_sources.get(platform)?;
@@ -156,9 +210,40 @@ mod desktop {
     }
 }
 
+/// The cookies that name a youtube.com login and the turn of its rotation it is on.
+const YOUTUBE_LOGIN_COOKIES: &[&str] = &[
+    "SID", "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+    "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID", "LOGIN_INFO",
+];
+
+/// The browser holds a login whose cookies differ from the ones KDJ sends: it has rotated (or is
+/// another login). A browser that holds none of them has nothing to offer.
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+fn youtube_login_moved(held: &str, browser: &str) -> bool {
+    let login = |cookie: &str| -> BTreeMap<String, String> {
+        cookie
+            .split(';')
+            .filter_map(|pair| pair.trim().split_once('='))
+            .filter(|(name, _)| YOUTUBE_LOGIN_COOKIES.contains(name))
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect()
+    };
+    let browser = login(browser);
+    !browser.is_empty() && login(held) != browser
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_rotated_browser_login_replaces_the_one_kdj_holds() {
+        let held = "SID=a; __Secure-1PSIDTS=t1; SAPISID=s; PREF=x; __Secure-3PSIDCC=c1";
+        assert!(!youtube_login_moved(held, "SID=a; __Secure-1PSIDTS=t1; SAPISID=s; PREF=y; __Secure-3PSIDCC=c2"));
+        assert!(youtube_login_moved(held, "SID=a; __Secure-1PSIDTS=t2; SAPISID=s"));
+        assert!(youtube_login_moved(held, "SID=b; __Secure-1PSIDTS=t1; SAPISID=s"));
+        assert!(!youtube_login_moved(held, "PREF=x; YSC=y"));
+    }
 
     #[test]
     fn sources_persist_and_are_dropped_by_other_logins() {
