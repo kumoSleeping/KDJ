@@ -50,6 +50,7 @@ import {
   attachYoutubeVideoPreview,
   type YoutubeVideoPreviewController,
 } from "../../lib/youtubeVideoPreview";
+import { reportLoginNeeded } from "../../lib/loginNeeded";
 import {
   APPLY_VIDEO_MODE_EVENT,
   LOCAL_VIDEO_EVENT,
@@ -925,6 +926,7 @@ export function VideoPipHost() {
             .catch((reason: unknown) => {
               if (youtubePreviewRef.current !== controller) return;
               if (reason instanceof DOMException && reason.name === "AbortError") return;
+              reportLoginNeeded("youtube", reason);
               failNetworkHost(
                 playingVideo,
                 `视频预览加载失败：${reason instanceof Error ? reason.message : String(reason)}`,

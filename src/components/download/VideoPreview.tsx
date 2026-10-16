@@ -13,6 +13,7 @@ import { djEngine } from "../../lib/djMix";
 import { formatDuration } from "../../lib/format";
 import { bindMediaMasterVolume, getDeckOutputGain } from "../../lib/masterVolume";
 import { attachYoutubeVideoPreview } from "../../lib/youtubeVideoPreview";
+import { reportLoginNeeded } from "../../lib/loginNeeded";
 import {
   MEDIA_SYNC_EVENT,
   broadcastMediaSync,
@@ -114,6 +115,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     void controller.done.catch((reason: unknown) => {
       if (!active) return;
       if (reason instanceof DOMException && reason.name === "AbortError") return;
+      reportLoginNeeded("youtube", reason);
       setPlaying(false);
       setError(reason instanceof Error ? reason.message : String(reason));
     });

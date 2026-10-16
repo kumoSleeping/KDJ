@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { loginNeededCode } from "./loginNeeded";
 
 const HLS_MIME = "application/vnd.apple.mpegurl";
 const PREPARATION_CACHE_TTL_MS = 2 * 60 * 1_000;
@@ -58,7 +59,11 @@ function preparedHls(input: YoutubeVideoPreviewInput): Promise<string> {
   // Keep a rejected preparation for the same short lease. Pointer prewarm and the subsequent
   // double-click are one playback attempt: deleting the rejection here would silently turn the
   // double-click into an automatic second request and hide a first-attempt failure.
-  void promise.catch(() => undefined);
+  // A login failure is the exception: only a new login can answer it, so the next attempt after
+  // logging in must ask again instead of meeting the cached refusal.
+  void promise.catch((error: unknown) => {
+    if (loginNeededCode(error) && preparationCache.get(key) === entry) preparationCache.delete(key);
+  });
   while (preparationCache.size > PREPARATION_CACHE_MAX_ENTRIES) {
     const oldest = preparationCache.keys().next().value as string | undefined;
     if (!oldest) break;

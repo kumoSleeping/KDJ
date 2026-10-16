@@ -706,6 +706,10 @@ async function prepareDownloadItem(
       if (preparedYoutubeTicket) {
         await post(`/video/youtube/hls/${preparedYoutubeTicket}/revoke`).catch(() => undefined);
       }
+      if (item.platform === "youtube") {
+        // Loaded on demand: the bubble's login key reaches the app store, which imports this file.
+        void import("./loginNeeded").then(({ reportLoginNeeded }) => reportLoginNeeded("youtube", error));
+      }
       const message = error instanceof Error ? error.message : String(error);
       await post(`/downloads/${encodeURIComponent(item.id)}/preparation-failed`, {
         attempt: item.attempt,

@@ -250,4 +250,5 @@ Name the source in the `sources` of the window's `<TaskBubbleHost>`.
 | The playing song has no lyrics to open ("没有找到歌词") | `lyrics-entry`, small, 3 s | top when asked from the drawer's 歌词 entry; bottom from the bar's key or the song's bubble | `lyricsEntry.ts` `requestPlayingLyrics(onOpened, near)` |
 | A search result dropped on the 下载 entry could not be queued ("加入队列失败…") | `notice:<text>` | top | `downloadDropEntry.ts` |
 | Cancelling an import from the list's work rail failed ("取消导入失败…") | `notice:<text>` | top | `LibraryWorkRail.tsx` |
+| A YouTube video, its preview or its download stopped for a login ("YouTube 登录已失效", "YouTube 需要先登录") | `login-needed:youtube`, its 登录 key opens that source's ways to log in | bottom | `loginNeeded.tsx` `reportLoginNeeded` |
 | Every other former toast (window, fullscreen, import-drop, visualizer memory errors) | `notice:<text>` | bottom | `showNotice` |
