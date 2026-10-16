@@ -38,9 +38,20 @@ pub struct MqttWsClient {
     packet_id: u16,
 }
 
+/// HTTP/1.1 only: an Upgrade cannot ride an HTTP/2 connection, and the provider's shared
+/// client offers h2 by ALPN, which mu.y.qq.com accepts — the handshake would never see 101.
+/// Its proxy settings are the same defaults as the shared client's.
+fn upgrade_client() -> Result<reqwest::Client> {
+    kdj_core::ensure_rustls_ring();
+    reqwest::Client::builder()
+        .http1_only()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .context("构建 MQTT WebSocket 客户端失败")
+}
+
 impl MqttWsClient {
     pub async fn connect(
-        http: &reqwest::Client,
         host: &str,
         path: &str,
         client_id: &str,
@@ -49,10 +60,11 @@ impl MqttWsClient {
         user_properties: &[(&str, &str)],
         max_redirects: usize,
     ) -> Result<Self> {
+        let http = upgrade_client()?;
         let mut current_path = path.to_string();
         for _ in 0..=max_redirects {
             let mut client = Self::connect_once(
-                http,
+                &http,
                 host,
                 &current_path,
                 client_id,
@@ -106,8 +118,7 @@ impl MqttWsClient {
             ),
         );
 
-        // Use the same HTTP client as QR creation: DNS, TLS and desktop proxies must
-        // agree. A raw tungstenite connection bypasses OS HTTP proxies.
+        // reqwest rather than a raw tungstenite connection, so desktop proxies apply here too.
         let expected_accept = derive_accept_key(request.headers()["Sec-WebSocket-Key"].as_bytes());
         let stream = timeout(Duration::from_secs(20), async {
             let response = http

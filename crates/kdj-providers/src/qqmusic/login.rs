@@ -67,6 +67,8 @@ enum MobileWatchState {
 #[derive(Debug, Clone)]
 pub enum DualQrOutcome {
     Waiting,
+    /// QQ 互联还在等，QQ 音乐 App 那一路已经坏了：那张码扫了也没用，要告诉用户用 QQ 扫。
+    QqOnly,
     Scanned,
     Refused,
     Expired,
@@ -446,15 +448,20 @@ pub async fn poll_dual_qr(
     }
 
     // 2) 合并 QQ 音乐 App / 存活状态
+    Ok(merge_mobile_state(mobile_state, qq_alive))
+}
+
+fn merge_mobile_state(mobile_state: DualQrOutcome, qq_alive: bool) -> DualQrOutcome {
     match mobile_state {
-        DualQrOutcome::Scanned => Ok(DualQrOutcome::Scanned),
-        DualQrOutcome::Refused if !qq_alive => Ok(DualQrOutcome::Refused),
-        DualQrOutcome::Waiting | DualQrOutcome::Refused => Ok(DualQrOutcome::Waiting),
-        DualQrOutcome::Expired if qq_alive => Ok(DualQrOutcome::Waiting),
-        DualQrOutcome::Expired => Ok(DualQrOutcome::Expired),
-        DualQrOutcome::Error(_) if qq_alive => Ok(DualQrOutcome::Waiting),
-        DualQrOutcome::Done(credential) => Ok(DualQrOutcome::Done(credential)),
-        DualQrOutcome::Error(message) => Ok(DualQrOutcome::Error(message)),
+        DualQrOutcome::Scanned => DualQrOutcome::Scanned,
+        DualQrOutcome::Refused if !qq_alive => DualQrOutcome::Refused,
+        DualQrOutcome::Waiting | DualQrOutcome::Refused => DualQrOutcome::Waiting,
+        DualQrOutcome::Expired if qq_alive => DualQrOutcome::Waiting,
+        DualQrOutcome::Expired => DualQrOutcome::Expired,
+        DualQrOutcome::Error(_) | DualQrOutcome::QqOnly if qq_alive => DualQrOutcome::QqOnly,
+        DualQrOutcome::QqOnly => DualQrOutcome::Expired,
+        DualQrOutcome::Done(credential) => DualQrOutcome::Done(credential),
+        DualQrOutcome::Error(message) => DualQrOutcome::Error(message),
     }
 }
 
@@ -472,6 +479,7 @@ pub async fn create_mobile_qr(http: &reqwest::Client) -> Result<MobileQrSession>
                 *state_bg.lock().unwrap() = MobileWatchState::Done(credential);
             }
             Err(err) => {
+                tracing::warn!("QQ 音乐 App 扫码通道结束：{err:#}");
                 let mut guard = state_bg.lock().unwrap();
                 if matches!(
                     *guard,
@@ -579,7 +587,6 @@ async fn watch_mobile_qr(
     );
 
     let mut mqtt = MqttWsClient::connect(
-        http,
         MQTT_HOST,
         MQTT_PATH,
         &client_id,
@@ -729,6 +736,17 @@ fn truncate(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_broken_app_channel_is_reported_while_qq_still_waits() {
+        use DualQrOutcome as O;
+        let broken = || O::Error("MQTT WebSocket 握手失败".into());
+        assert!(matches!(merge_mobile_state(broken(), true), O::QqOnly));
+        assert!(matches!(merge_mobile_state(broken(), false), O::Error(_)));
+        assert!(matches!(merge_mobile_state(O::Waiting, true), O::Waiting));
+        assert!(matches!(merge_mobile_state(O::Expired, true), O::Waiting));
+        assert!(matches!(merge_mobile_state(O::Expired, false), O::Expired));
+    }
 
     #[test]
     fn waiting_states_are_recognized() {

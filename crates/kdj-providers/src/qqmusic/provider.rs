@@ -1076,6 +1076,9 @@ impl MusicProvider for QqMusicProvider {
             Ok(login::DualQrOutcome::Waiting) => {
                 Ok((QrStateValue::Waiting, "等待手机扫码（QQ 音乐或 QQ）".into()))
             }
+            Ok(login::DualQrOutcome::QqOnly) => {
+                Ok((QrStateValue::Waiting, "QQ 音乐码不可用，请用 QQ 扫码".into()))
+            }
             Ok(login::DualQrOutcome::Scanned) => {
                 Ok((QrStateValue::Scanned, "已扫码，请在手机上确认".into()))
             }
