@@ -1872,19 +1872,19 @@ async fn prepare_song_preview(
             }
         }
     }
-    if body.source.platform == Platform::Soundcloud {
-        if let Some(spool) = prepare_segmented_preview(provider.as_ref(), &body.source, quality).await? {
-            if context.account_epoch != provider.preview_account_epoch() {
-                return Err(ApiError::bad_request("SoundCloud 账号已变化，请重新播放"));
-            }
-            context.mime = Some(spool.content_type().to_string());
-            schedule_protected_spool_cache(state.clone(), spool.clone(), body.source.clone(), quality, cache_key.clone());
-            return Ok(insert_song_preview_ticket(state, SongPreviewTicket {
-                context, source: body.source, quality, cache_key: Some(cache_key), cached: false,
-                url: String::new(), browser_resolved: false, protected_spool: Some(spool),
-                last_used_at: std::time::Instant::now(),
-            }));
+    if let Some(spool) = prepare_segmented_preview(state, provider.as_ref(), &body.source, quality).await? {
+        if context.account_epoch != provider.preview_account_epoch() {
+            return Err(ApiError::from(anyhow::Error::new(kdj_providers::qqmusic::error::QqError::AccountChanged)));
         }
+        context.mime = Some(spool.content_type().to_string());
+        // Keyed with the post-preparation scope, as below: preparing may have refreshed the login.
+        let cache_key = crate::stream_cache::StreamCache::scoped_key(&body.source, quality, &provider.preview_cache_scope());
+        schedule_protected_spool_cache(state.clone(), spool.clone(), body.source.clone(), quality, cache_key.clone());
+        return Ok(insert_song_preview_ticket(state, SongPreviewTicket {
+            context, source: body.source, quality, cache_key: Some(cache_key), cached: false,
+            url: String::new(), browser_resolved: false, protected_spool: Some(spool),
+            last_used_at: std::time::Instant::now(),
+        }));
     }
     let preview = provider.preview_media_at_quality(&body.source, quality).await?;
     if context.account_epoch != provider.preview_account_epoch() {
@@ -1906,18 +1906,79 @@ async fn prepare_song_preview(
     }
 }
 
+/// A segmented source (SoundCloud HLS) becomes one local byte-addressable file. When every part
+/// said its size it is published at once and filled while it plays; otherwise it is joined whole
+/// first. The pump holds the spool weakly, so a ticket that goes away ends the transfer.
 async fn prepare_segmented_preview(
-    provider: &dyn MusicProvider, source: &SongSource, quality: Quality,
+    state: &AppState, provider: &dyn MusicProvider, source: &SongSource, quality: Quality,
 ) -> ApiResult<Option<Arc<crate::protected_media::ProtectedMediaSpool>>> {
-    // A segmented source must become a complete byte-addressable entity before publication.
-    // The temporary-file guard also covers timeout and cancelled preparation futures.
-    let file = tempfile::Builder::new().prefix("kdj-soundcloud-").tempfile()
-        .map_err(anyhow::Error::from)?;
-    let prepared = tokio::time::timeout(std::time::Duration::from_secs(120),
-        provider.prepare_preview_file(source, quality, file.path())).await
-        .map_err(|_| ApiError::new(StatusCode::GATEWAY_TIMEOUT, "SoundCloud 试听准备超时").coded("UPSTREAM_TIMEOUT"))??;
-    prepared.map(|mime| crate::protected_media::ProtectedMediaSpool::from_prepared(file, mime)
-        .map_err(ApiError::from)).transpose()
+    use crate::protected_media::ProtectedMediaSpool;
+    let timed_out = || ApiError::new(StatusCode::GATEWAY_TIMEOUT, "分片音源准备超时").coded("UPSTREAM_TIMEOUT");
+    let Some(media) = tokio::time::timeout(std::time::Duration::from_secs(30), provider.segmented_preview(source, quality))
+        .await
+        .map_err(|_| timed_out())??
+    else {
+        return Ok(None);
+    };
+    let extension = if media.content_type == "audio/mp4" { "m4a" } else { "mp3" };
+    let path = crate::protected_media::spool_path(&state.config.data_dir, extension);
+    let mut body = media.body;
+    let Some(total) = media.total else {
+        let directory = path.parent().ok_or_else(|| ApiError::bad_request("媒体会话目录无效"))?;
+        tokio::fs::create_dir_all(directory).await.map_err(anyhow::Error::from)?;
+        // Named like the other spools, so a file left by a crash is swept at the next start.
+        let file = tempfile::Builder::new().prefix("ytm-").suffix(&format!(".{extension}"))
+            .tempfile_in(directory).map_err(anyhow::Error::from)?;
+        let mut writer = tokio::fs::File::from_std(file.reopen().map_err(anyhow::Error::from)?);
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            while let Some(chunk) = body.next().await {
+                tokio::io::AsyncWriteExt::write_all(&mut writer, &chunk?).await?;
+            }
+            tokio::io::AsyncWriteExt::flush(&mut writer).await?;
+            anyhow::Ok(())
+        })
+        .await
+        .map_err(|_| timed_out())??;
+        drop(writer);
+        return Ok(Some(ProtectedMediaSpool::from_prepared(file, media.content_type)?));
+    };
+    let spool = ProtectedMediaSpool::start_segmented(path, total, media.content_type).await?;
+    tokio::spawn(pump_segmented(Arc::downgrade(&spool), body));
+    Ok(Some(spool))
+}
+
+async fn pump_segmented(
+    spool: std::sync::Weak<crate::protected_media::ProtectedMediaSpool>,
+    mut body: futures_util::stream::BoxStream<'static, anyhow::Result<Bytes>>,
+) {
+    // A few network chunks per append: the decoder's first read waits for 64 KiB anyway.
+    const BATCH: usize = 64 * 1024;
+    let mut pending = Vec::with_capacity(BATCH);
+    let outcome = async {
+        loop {
+            let next = body.next().await.transpose()?;
+            if let Some(chunk) = &next {
+                pending.extend_from_slice(chunk);
+            }
+            if pending.len() >= BATCH || (next.is_none() && !pending.is_empty()) {
+                let Some(spool) = spool.upgrade() else { return anyhow::Ok(()) };
+                for piece in pending.chunks(2 * 1024 * 1024) {
+                    spool.append_upload(piece).await?;
+                }
+                pending.clear();
+            }
+            if next.is_none() {
+                if let Some(spool) = spool.upgrade() {
+                    spool.finish_upload()?;
+                }
+                return Ok(());
+            }
+        }
+    }
+    .await;
+    if let (Err(error), Some(spool)) = (outcome, spool.upgrade()) {
+        spool.fail_upload(format!("{error:#}"));
+    }
 }
 
 fn ensure_generic_song_preview_platform(platform: Platform) -> ApiResult<()> {
@@ -2653,18 +2714,16 @@ async fn resolve_ticket_media(state: &AppState, ticket: &mut SongPreviewTicket, 
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "YouTube Music WebPO 地址已失效，请重新播放"));
     }
     let provider = state.provider(ticket.source.platform).ok_or_else(|| ApiError::bad_request("不认识的平台"))?;
-    if ticket.source.platform == Platform::Soundcloud {
-        if let Some(spool) = prepare_segmented_preview(provider.as_ref(), &ticket.source, quality).await? {
-            ensure_preview_account(state, ticket)?;
-            ticket.context.mime = Some(spool.content_type().to_string());
-            ticket.context.actual_quality = None;
-            ticket.context.alternatives.clear();
-            ticket.protected_spool = Some(spool);
-            ticket.url.clear();
-            ticket.cached = false;
-            ticket.last_used_at = std::time::Instant::now();
-            return Ok(());
-        }
+    if let Some(spool) = prepare_segmented_preview(state, provider.as_ref(), &ticket.source, quality).await? {
+        ensure_preview_account(state, ticket)?;
+        ticket.context.mime = Some(spool.content_type().to_string());
+        ticket.context.actual_quality = None;
+        ticket.context.alternatives.clear();
+        ticket.protected_spool = Some(spool);
+        ticket.url.clear();
+        ticket.cached = false;
+        ticket.last_used_at = std::time::Instant::now();
+        return Ok(());
     }
     let media = provider.preview_media_at_quality(&ticket.source, quality).await?
         .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "这个平台暂时无法刷新试听地址"))?;
@@ -8393,6 +8452,26 @@ async fn library_waveform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_segmented_source_is_readable_while_it_arrives_and_a_broken_one_fails_its_reads() {
+        use crate::protected_media::ProtectedMediaSpool;
+        let dir = tempfile::tempdir().unwrap();
+        let parts: Vec<anyhow::Result<Bytes>> = (0..40u8).map(|n| Ok(Bytes::from(vec![n; 4096]))).collect();
+        let total = 40 * 4096;
+        let spool = ProtectedMediaSpool::start_segmented(dir.path().join("whole.mp3"), total, "audio/mpeg").await.unwrap();
+        pump_segmented(Arc::downgrade(&spool), futures_util::stream::iter(parts).boxed()).await;
+        spool.wait_complete().await.unwrap();
+        let slice = spool.read_range(4096 * 39, None).await.unwrap();
+        assert_eq!(slice.bytes, vec![39u8; 4096]);
+        assert_eq!(slice.total, total);
+
+        let broken: Vec<anyhow::Result<Bytes>> = vec![Ok(Bytes::from(vec![1u8; 100])), Err(anyhow::anyhow!("SoundCloud 分片提前结束"))];
+        let spool = ProtectedMediaSpool::start_segmented(dir.path().join("broken.mp3"), 200, "audio/mpeg").await.unwrap();
+        pump_segmented(Arc::downgrade(&spool), futures_util::stream::iter(broken).boxed()).await;
+        assert!(spool.wait_complete().await.unwrap_err().to_string().contains("提前结束"));
+        assert!(ProtectedMediaSpool::start_segmented(dir.path().join("x.webm"), 10, "audio/webm").await.is_err());
+    }
 
     use crate::peak_alloc::peak_allocated;
 

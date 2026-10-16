@@ -186,12 +186,14 @@ impl ProtectedMediaSpool {
         Ok(spool)
     }
 
-    /// Adopt a fully prepared segmented source. Ownership transfers without an await, so
-    /// cancellation cannot leave an unowned file between preparation and ticket publication.
-    pub fn from_prepared(file: tempfile::NamedTempFile, content_type: String) -> Result<Arc<Self>> {
+    /// Adopt a fully prepared segmented source, for parts that did not say their sizes up front.
+    /// Ownership transfers without an await, so cancellation cannot leave an unowned file between
+    /// preparation and ticket publication.
+    pub fn from_prepared(file: tempfile::NamedTempFile, content_type: &str) -> Result<Arc<Self>> {
         let total = file.as_file().metadata()?.len();
         anyhow::ensure!(total > 0 && total <= 512 * 1024 * 1024, "试听文件长度无效");
-        anyhow::ensure!(matches!(content_type.as_str(), "audio/mp4" | "audio/mpeg"), "试听文件类型无效");
+        anyhow::ensure!(matches!(content_type, "audio/mp4" | "audio/mpeg"), "试听文件类型无效");
+        let content_type = content_type.to_string();
         let path = file.into_temp_path().keep()?;
         Ok(Arc::new(Self {
             path, total, content_type,
@@ -213,11 +215,22 @@ impl ProtectedMediaSpool {
         total: u64,
         content_type: String,
     ) -> Result<Arc<Self>> {
-        anyhow::ensure!(total > 0 && total <= 512 * 1024 * 1024, "媒体上传长度无效");
         anyhow::ensure!(
             matches!(content_type.as_str(), "audio/mp4" | "audio/webm"),
             "媒体上传类型无效"
         );
+        Self::growing(path, total, content_type).await
+    }
+
+    /// An empty growing file for a segmented source the server joins itself (SoundCloud HLS):
+    /// its parts arrive through [`Self::append_upload`] while the decoder already reads the start.
+    pub async fn start_segmented(path: PathBuf, total: u64, content_type: &str) -> Result<Arc<Self>> {
+        anyhow::ensure!(matches!(content_type, "audio/mp4" | "audio/mpeg"), "分片音源类型无效");
+        Self::growing(path, total, content_type.to_string()).await
+    }
+
+    async fn growing(path: PathBuf, total: u64, content_type: String) -> Result<Arc<Self>> {
+        anyhow::ensure!(total > 0 && total <= 512 * 1024 * 1024, "媒体上传长度无效");
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await

@@ -273,6 +273,15 @@ pub struct ProtectedPreviewIdentity {
     pub gvs_binding: ProtectedPoTokenBinding,
 }
 
+/// The parts of a segmented source in order, as one byte stream.
+pub struct SegmentedMedia {
+    /// The exact length when every part said its size up front; None when the whole stream has
+    /// to arrive before the file can be published.
+    pub total: Option<u64>,
+    pub content_type: &'static str,
+    pub body: futures_util::stream::BoxStream<'static, Result<bytes::Bytes>>,
+}
+
 /// Resolved media facts remain distinct from the user's requested quality. URLs stay server-side.
 #[derive(Debug, Clone)]
 pub struct PreviewMedia {
@@ -392,9 +401,9 @@ pub trait MusicProvider: Send + Sync {
         self.preview_url(source).await
     }
 
-    /// Prepare segmented media as a complete seekable file. The caller owns and cleans up
-    /// `path`, including when this future is cancelled. None keeps the normal direct-URL path.
-    async fn prepare_preview_file(&self, _source: &SongSource, _quality: Quality, _path: &Path) -> Result<Option<String>> {
+    /// Segmented media (HLS) joined into one byte stream, which the server publishes as a local
+    /// file while the parts are still arriving. None keeps the normal direct-URL path.
+    async fn segmented_preview(&self, _source: &SongSource, _quality: Quality) -> Result<Option<SegmentedMedia>> {
         Ok(None)
     }
 
