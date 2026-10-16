@@ -1872,6 +1872,20 @@ async fn prepare_song_preview(
             }
         }
     }
+    if body.source.platform == Platform::Soundcloud {
+        if let Some(spool) = prepare_segmented_preview(provider.as_ref(), &body.source, quality).await? {
+            if context.account_epoch != provider.preview_account_epoch() {
+                return Err(ApiError::bad_request("SoundCloud 账号已变化，请重新播放"));
+            }
+            context.mime = Some(spool.content_type().to_string());
+            schedule_protected_spool_cache(state.clone(), spool.clone(), body.source.clone(), quality, cache_key.clone());
+            return Ok(insert_song_preview_ticket(state, SongPreviewTicket {
+                context, source: body.source, quality, cache_key: Some(cache_key), cached: false,
+                url: String::new(), browser_resolved: false, protected_spool: Some(spool),
+                last_used_at: std::time::Instant::now(),
+            }));
+        }
+    }
     let preview = provider.preview_media_at_quality(&body.source, quality).await?;
     if context.account_epoch != provider.preview_account_epoch() {
         return Err(ApiError::from(anyhow::Error::new(kdj_providers::qqmusic::error::QqError::AccountChanged)));
@@ -1890,6 +1904,20 @@ async fn prepare_song_preview(
         }
         None => Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "这个平台不支持歌曲试听")),
     }
+}
+
+async fn prepare_segmented_preview(
+    provider: &dyn MusicProvider, source: &SongSource, quality: Quality,
+) -> ApiResult<Option<Arc<crate::protected_media::ProtectedMediaSpool>>> {
+    // A segmented source must become a complete byte-addressable entity before publication.
+    // The temporary-file guard also covers timeout and cancelled preparation futures.
+    let file = tempfile::Builder::new().prefix("kdj-soundcloud-").tempfile()
+        .map_err(anyhow::Error::from)?;
+    let prepared = tokio::time::timeout(std::time::Duration::from_secs(120),
+        provider.prepare_preview_file(source, quality, file.path())).await
+        .map_err(|_| ApiError::new(StatusCode::GATEWAY_TIMEOUT, "SoundCloud 试听准备超时").coded("UPSTREAM_TIMEOUT"))??;
+    prepared.map(|mime| crate::protected_media::ProtectedMediaSpool::from_prepared(file, mime)
+        .map_err(ApiError::from)).transpose()
 }
 
 fn ensure_generic_song_preview_platform(platform: Platform) -> ApiResult<()> {
@@ -2625,6 +2653,19 @@ async fn resolve_ticket_media(state: &AppState, ticket: &mut SongPreviewTicket, 
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "YouTube Music WebPO 地址已失效，请重新播放"));
     }
     let provider = state.provider(ticket.source.platform).ok_or_else(|| ApiError::bad_request("不认识的平台"))?;
+    if ticket.source.platform == Platform::Soundcloud {
+        if let Some(spool) = prepare_segmented_preview(provider.as_ref(), &ticket.source, quality).await? {
+            ensure_preview_account(state, ticket)?;
+            ticket.context.mime = Some(spool.content_type().to_string());
+            ticket.context.actual_quality = None;
+            ticket.context.alternatives.clear();
+            ticket.protected_spool = Some(spool);
+            ticket.url.clear();
+            ticket.cached = false;
+            ticket.last_used_at = std::time::Instant::now();
+            return Ok(());
+        }
+    }
     let media = provider.preview_media_at_quality(&ticket.source, quality).await?
         .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "这个平台暂时无法刷新试听地址"))?;
     ensure_preview_account(state, ticket)?;
@@ -2676,6 +2717,9 @@ async fn retry_song_preview_ticket(state: &AppState, token: &str, ticket: &mut S
 async fn open_song_preview_checked(state: &Arc<AppState>, token: &str, ticket: &mut SongPreviewTicket, range: Option<&str>)
     -> ApiResult<(reqwest::Response, String, Vec<Bytes>)> {
     'attempt: loop {
+        if ticket.protected_spool.is_some() {
+            return Err(ApiError::new(StatusCode::CONFLICT, "在线音频已切换为分片音源，需要重新打开媒体").coded("MEDIA_ENTITY_CHANGED"));
+        }
         if ticket.context.is_rate_limited() {
             return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, "本次试听已被限流，自动请求已停止").coded("RATE_LIMITED"));
         }

@@ -14,7 +14,7 @@ use kdj_core::models::{
     ResolveResponse, SongSource,
 };
 use kdj_core::paths::render_filename;
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -1290,30 +1290,47 @@ impl MusicProvider for SoundCloudProvider {
         Ok(Some(self.authorize_stream(&transcoding).await?))
     }
 
+    async fn prepare_preview_file(&self, source: &SongSource, _quality: Quality, path: &Path) -> Result<Option<String>> {
+        self.ensure_enabled()?;
+        if source.payload_str("transcoding_url").split('?').next().is_some_and(|url| url.ends_with("/progressive")) {
+            return Ok(None);
+        }
+        let url = self.preview_url(source).await?.context("SoundCloud 没有可用的试听流")?;
+        let body = open_soundcloud_media(&url).await?;
+        // Preserve progressive playback; only segmented sources need a complete local entity.
+        let MediaBody::Hls(media) = body else { return Ok(None); };
+        let ext = media.extension();
+        let mut file = create_download_writer(path).await?;
+        write_hls_parts(&media, &mut file, &|| Ok(()), &|_, _| {}).await?;
+        file.flush().await.context("提交 SoundCloud 试听文件失败")?;
+        Ok(Some(if ext == "m4a" { "audio/mp4" } else { "audio/mpeg" }.into()))
+    }
+
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
         self.ensure_enabled()?;
         job.check_canceled()?;
         let source = job.source;
 
         let transcoding = source.payload_str("transcoding_url");
-        let (transcoding, ext) = if transcoding.is_empty() {
+        let transcoding = if transcoding.is_empty() {
             // 搜索结果里的 payload 可能是别的版本存下来的，回查一次详情
             let permalink = source.payload_str("permalink_url");
             anyhow::ensure!(!permalink.is_empty(), "SoundCloud 音轨缺少下载链接。");
             let body = self.api_get("/resolve", &[("url", permalink)]).await?;
-            let picked = pick_transcoding(&body).context("SoundCloud 没有可用的音频流")?;
-            picked
+            pick_transcoding(&body).context("SoundCloud 没有可用的音频流")?.0
         } else {
-            (transcoding, source.payload_str("transcoding_ext"))
-        };
-        let ext = if ext.is_empty() {
-            "mp3".to_string()
-        } else {
-            ext
+            transcoding
         };
 
         let url = self.authorize_stream(&transcoding).await?;
         job.check_canceled()?;
+
+        let body = open_soundcloud_media(&url).await?;
+        // Never trust the persisted extension: older builds labelled AAC HLS as MP3.
+        let ext = match &body {
+            MediaBody::Stream { extension, .. } => (*extension).to_string(),
+            MediaBody::Hls(media) => media.extension().to_string(),
+        };
 
         let output_dir = self.ctx.platform_dir(Platform::Soundcloud)?;
         let filename = render_filename(
@@ -1327,26 +1344,26 @@ impl MusicProvider for SoundCloudProvider {
         let final_path = unique_download_path(&output_dir, &filename);
 
         let guard = AtomicDownload::new(&final_path)?;
-        let response =
-            guarded_media_get(&url, &soundcloud_media_headers(), soundcloud_media_policy())
-                .await
-                .context("SoundCloud 音频下载失败")?
-                .error_for_status()
-                .context("SoundCloud 音频下载失败")?;
-        let total = response.content_length().unwrap_or(0);
-        job.report(0, total);
-
         let mut file = create_download_writer(guard.partial())
             .await
             .context("创建下载临时文件失败")?;
-        let mut downloaded = 0u64;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            job.check_canceled()?;
-            let chunk = chunk.context("SoundCloud 音频流中断")?;
-            file.write_all(&chunk).await.context("写入下载文件失败")?;
-            downloaded += chunk.len() as u64;
-            job.report(downloaded, total.max(downloaded));
+        match body {
+            MediaBody::Hls(media) => write_hls_parts(&media, &mut file, &|| job.check_canceled(), &|done, total| job.report(done, total)).await?,
+            MediaBody::Stream { response, prefix, total, .. } => {
+                let mut downloaded = prefix.len() as u64;
+                file.write_all(&prefix).await.context("写入下载文件失败")?;
+                job.report(downloaded, total.unwrap_or(downloaded));
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    job.check_canceled()?;
+                    let chunk = chunk.context("SoundCloud 音频流中断")?;
+                    downloaded += chunk.len() as u64;
+                    anyhow::ensure!(downloaded <= SOUNDCLOUD_MEDIA_MAX_BYTES, "SoundCloud 音频超过大小限制");
+                    file.write_all(&chunk).await.context("写入下载文件失败")?;
+                    job.report(downloaded, total.unwrap_or(downloaded));
+                }
+                anyhow::ensure!(total.is_none_or(|total| total == downloaded), "SoundCloud 音频流提前结束");
+            }
         }
         file.flush().await.context("提交下载缓冲失败")?;
         drop(file);
@@ -1750,8 +1767,9 @@ fn extract_client_id(js: &str) -> Option<String> {
 
 /// 从 `media.transcodings[]` 里挑一个能直接流式下载的。
 ///
-/// 优先 progressive（就是一个 MP3 直链）。HLS 要自己拼分片，
-/// 而 SoundCloud 免费流基本都提供 progressive，所以先不实现 HLS。
+/// 优先 progressive（就是一个 MP3 直链）。不少曲目现在只给 HLS，下载时
+/// 由 [`write_hls_parts`] 把分片按顺序拼起来；HLS 里 Opus 排在最后，
+/// 播放器解不了它。
 fn pick_transcoding(track: &Value) -> Option<(String, String)> {
     let list = track
         .pointer("/media/transcodings")
@@ -1778,15 +1796,175 @@ fn pick_transcoding(track: &Value) -> Option<(String, String)> {
             .unwrap_or_default();
         let ext = if mime.contains("ogg") || mime.contains("opus") {
             "opus"
+        } else if mime.contains("mp4") || mime.contains("aac") {
+            "m4a"
         } else {
             "mp3"
         };
         if protocol == "progressive" {
             return Some((url.to_string(), ext.to_string()));
         }
-        fallback.get_or_insert((url.to_string(), ext.to_string()));
+        let better = match &fallback {
+            None => true,
+            Some((_, current)) => current == "opus" && ext != "opus",
+        };
+        if better {
+            fallback = Some((url.to_string(), ext.to_string()));
+        }
     }
     fallback
+}
+
+const HLS_PLAYLIST_MAX_BYTES: usize = 2 * 1024 * 1024;
+const SOUNDCLOUD_MEDIA_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+enum MediaBody {
+    Stream { response: reqwest::Response, prefix: Vec<u8>, total: Option<u64>, extension: &'static str },
+    Hls(HlsMedia),
+}
+
+fn audio_extension(prefix: &[u8]) -> Option<&'static str> {
+    if prefix.get(4..8) == Some(b"ftyp".as_slice()) { Some("m4a") }
+    else if prefix.starts_with(b"ID3") || (prefix.len() >= 2 && prefix[0] == 0xff && prefix[1] & 0xe0 == 0xe0) { Some("mp3") }
+    else { None }
+}
+
+async fn open_soundcloud_media(url: &str) -> Result<MediaBody> {
+    let mut response = guarded_media_get(url, &soundcloud_media_headers(), soundcloud_media_policy())
+        .await.context("SoundCloud 音频请求失败")?.error_for_status().context("SoundCloud 音频请求失败")?;
+    let total = response.content_length();
+    anyhow::ensure!(total.is_none_or(|n| n <= SOUNDCLOUD_MEDIA_MAX_BYTES), "SoundCloud 音频超过大小限制");
+    let mut prefix = Vec::new();
+    while prefix.len() < 16 {
+        let Some(chunk) = response.chunk().await.context("读取 SoundCloud 音频头失败")? else { break; };
+        prefix.extend_from_slice(&chunk);
+    }
+    anyhow::ensure!(!prefix.is_empty(), "SoundCloud 返回空音频");
+    if is_hls_response(&response) || String::from_utf8_lossy(&prefix).trim_start().starts_with("#EXTM3U") {
+        let base = response.url().clone();
+        anyhow::ensure!(prefix.len() <= HLS_PLAYLIST_MAX_BYTES, "SoundCloud 播放清单过大");
+        while let Some(chunk) = response.chunk().await.context("读取 SoundCloud 播放清单失败")? {
+            anyhow::ensure!(prefix.len() + chunk.len() <= HLS_PLAYLIST_MAX_BYTES, "SoundCloud 播放清单过大");
+            prefix.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8(prefix).context("SoundCloud 播放清单不是 UTF-8")?;
+        Ok(MediaBody::Hls(parse_hls_media_playlist(&base, &text)?))
+    } else {
+        let extension = audio_extension(&prefix).context("SoundCloud 返回的不是支持的音频内容")?;
+        Ok(MediaBody::Stream { response, prefix, total, extension })
+    }
+}
+
+/// HLS 媒体清单里要按顺序拼起来的东西：fMP4 的初始化分片和各个媒体分片。
+struct HlsMedia {
+    init: Option<url::Url>,
+    segments: Vec<url::Url>,
+}
+
+impl HlsMedia {
+    fn extension(&self) -> &'static str {
+        if self.init.is_some() { "m4a" } else { "mp3" }
+    }
+}
+
+fn is_hls_response(response: &reqwest::Response) -> bool {
+    let mpegurl = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("mpegurl"));
+    mpegurl || response.url().path().ends_with(".m3u8")
+}
+
+/// 只接受能原样拼接的 VOD 媒体清单；主清单、加密和字节范围分片都直接报错，
+/// 宁可下载失败，也不留下一个打不开的"成品"。
+fn parse_hls_media_playlist(base: &url::Url, text: &str) -> Result<HlsMedia> {
+    anyhow::ensure!(
+        text.trim_start().starts_with("#EXTM3U"),
+        "SoundCloud HLS 清单无效"
+    );
+    let mut init = None;
+    let mut segments = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(attrs) = line.strip_prefix("#EXT-X-MAP:") {
+            anyhow::ensure!(
+                init.is_none() && hls_attr(attrs, "BYTERANGE").is_none(),
+                "SoundCloud HLS 的初始化分片格式暂不支持"
+            );
+            let uri = hls_attr(attrs, "URI").context("SoundCloud HLS 初始化分片缺少地址")?;
+            anyhow::ensure!(segments.is_empty(), "SoundCloud HLS 初始化分片顺序无效");
+            init = Some(base.join(uri).context("SoundCloud HLS 分片地址无效")?);
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-KEY:") {
+            anyhow::ensure!(
+                hls_attr(attrs, "METHOD") == Some("NONE"),
+                "SoundCloud HLS 分片已加密，无法直接保存"
+            );
+        } else if line.starts_with("#EXT-X-STREAM-INF") || line.starts_with("#EXT-X-BYTERANGE")
+            || line.starts_with("#EXT-X-DISCONTINUITY") || line.starts_with("#EXT-X-GAP") {
+            bail!("SoundCloud HLS 清单格式暂不支持");
+        } else if !line.starts_with('#') {
+            segments.push(base.join(line).context("SoundCloud HLS 分片地址无效")?);
+        }
+    }
+    anyhow::ensure!(text.lines().any(|line| line.trim() == "#EXT-X-ENDLIST"), "SoundCloud 试听和下载只支持完整的点播清单");
+    anyhow::ensure!(!segments.is_empty() && segments.len() <= 4096, "SoundCloud HLS 分片数量无效");
+    Ok(HlsMedia { init, segments })
+}
+
+fn hls_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    // 引号里的 URI 可能带逗号，所以先认引号再按逗号切
+    let rest = attrs.split_once(&format!("{name}="))?.1;
+    match rest.strip_prefix('"') {
+        Some(quoted) => quoted.split('"').next(),
+        None => rest.split(',').next(),
+    }
+}
+
+/// 分片按清单顺序写进同一个文件：init + `moof/mdat` 分片就是一个 fMP4，
+/// MP3 分片首尾相接就是 MP3。第一块数据先验一下真是音频再往下写。
+async fn write_hls_parts(
+    media: &HlsMedia,
+    file: &mut tokio::io::BufWriter<tokio::fs::File>,
+    check_canceled: &(impl Fn() -> Result<()> + Sync),
+    report: &(impl Fn(u64, u64) + Sync),
+) -> Result<()> {
+    let parts: Vec<&url::Url> = media.init.iter().chain(&media.segments).collect();
+    let count = parts.len() as u64;
+    let mut downloaded = 0u64;
+    report(0, 0);
+    for (index, part) in parts.into_iter().enumerate() {
+        check_canceled()?;
+        let mut response = guarded_media_get(part.as_str(), &soundcloud_media_headers(), soundcloud_media_policy())
+            .await.context("SoundCloud 分片下载失败")?.error_for_status().context("SoundCloud 分片下载失败")?;
+        let expected = response.content_length();
+        anyhow::ensure!(expected.is_none_or(|n| n <= SOUNDCLOUD_MEDIA_MAX_BYTES - downloaded), "SoundCloud 音频超过大小限制");
+        // HTTP chunk boundaries are arbitrary; accumulate a prefix before inspecting every part.
+        let mut prefix = Vec::new();
+        while prefix.len() < 16 {
+            check_canceled()?;
+            let Some(chunk) = response.chunk().await.context("读取 SoundCloud 分片头失败")? else { break; };
+            prefix.extend_from_slice(&chunk);
+        }
+        let valid = if media.init.is_some() && index > 0 {
+            matches!(prefix.get(4..8), Some(b"styp" | b"moof" | b"sidx"))
+        } else {
+            audio_extension(&prefix) == Some(media.extension())
+        };
+        anyhow::ensure!(valid, "SoundCloud 分片为空或不是支持的音频内容");
+        let mut received = prefix.len() as u64;
+        anyhow::ensure!(downloaded + received <= SOUNDCLOUD_MEDIA_MAX_BYTES, "SoundCloud 音频超过大小限制");
+        file.write_all(&prefix).await.context("写入下载文件失败")?;
+        while let Some(chunk) = response.chunk().await.context("SoundCloud 音频流中断")? {
+            check_canceled()?;
+            received += chunk.len() as u64;
+            anyhow::ensure!(downloaded + received <= SOUNDCLOUD_MEDIA_MAX_BYTES, "SoundCloud 音频超过大小限制");
+            file.write_all(&chunk).await.context("写入下载文件失败")?;
+        }
+        anyhow::ensure!(expected.is_none_or(|total| total == received), "SoundCloud 分片提前结束");
+        downloaded += received;
+        report(downloaded, downloaded * count / (index as u64 + 1));
+    }
+    Ok(())
 }
 
 fn to_source(track: &Value) -> Option<SongSource> {

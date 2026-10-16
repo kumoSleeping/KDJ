@@ -186,6 +186,25 @@ impl ProtectedMediaSpool {
         Ok(spool)
     }
 
+    /// Adopt a fully prepared segmented source. Ownership transfers without an await, so
+    /// cancellation cannot leave an unowned file between preparation and ticket publication.
+    pub fn from_prepared(file: tempfile::NamedTempFile, content_type: String) -> Result<Arc<Self>> {
+        let total = file.as_file().metadata()?.len();
+        anyhow::ensure!(total > 0 && total <= 512 * 1024 * 1024, "试听文件长度无效");
+        anyhow::ensure!(matches!(content_type.as_str(), "audio/mp4" | "audio/mpeg"), "试听文件类型无效");
+        let path = file.into_temp_path().keep()?;
+        Ok(Arc::new(Self {
+            path, total, content_type,
+            write_lock: tokio::sync::Mutex::new(()),
+            state: Mutex::new(TransferState { available: total, complete: true, error: None }),
+            changed: Notify::new(),
+            persistent: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            consumer: Mutex::new(ConsumerLease::default()),
+            released: AtomicBool::new(false),
+        }))
+    }
+
     /// Creates an empty growing file for a browser SABR/UMP producer. The browser owns the
     /// proprietary session state; Rust owns the bounded local file, decoder ranges, caching, and
     /// cleanup. The first read blocks until the first complete fMP4 prefix is appended.

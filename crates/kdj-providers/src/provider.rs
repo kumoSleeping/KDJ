@@ -392,6 +392,12 @@ pub trait MusicProvider: Send + Sync {
         self.preview_url(source).await
     }
 
+    /// Prepare segmented media as a complete seekable file. The caller owns and cleans up
+    /// `path`, including when this future is cancelled. None keeps the normal direct-URL path.
+    async fn prepare_preview_file(&self, _source: &SongSource, _quality: Quality, _path: &Path) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     async fn preview_media_at_quality(&self, source: &SongSource, quality: Quality) -> Result<Option<PreviewMedia>> {
         Ok(self.preview_url_at_quality(source, quality).await?.map(|url| PreviewMedia {
             url, actual_quality: None, mime: None, alternatives: Vec::new(),
