@@ -34,8 +34,20 @@ struct YoutubeApiError {
     detail: String,
 }
 
+/// YouTube playback that needs the listener to log in (again). The server answers it with 401
+/// and a code the player turns into a login key; an unplayable video is never one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum YoutubeLoginNeeded {
+    #[error("YouTube 需要先登录")]
+    Missing,
+    /// The watch page came back signed out although the stored login was sent.
+    #[error("YouTube 登录已失效")]
+    SignedOut,
+}
+
 pub(super) fn is_auth_rejection(error: &anyhow::Error) -> bool {
-    error.is::<crate::youtubemusic::auth::SignedOutLibrary>() || error
+    matches!(error.downcast_ref::<YoutubeLoginNeeded>(), Some(YoutubeLoginNeeded::SignedOut))
+        || error.is::<crate::youtubemusic::auth::SignedOutLibrary>() || error
         .downcast_ref::<YoutubeApiError>()
         .is_some_and(|error| {
             matches!(
@@ -324,7 +336,7 @@ impl YoutubeClient {
         let session = self
             .auth
             .snapshot()
-            .context("YouTube 播放需要先连接浏览器会话")?;
+            .ok_or(YoutubeLoginNeeded::Missing)?;
         let response = self
             .http
             .get(url)
@@ -382,8 +394,9 @@ impl YoutubeClient {
                 user_agent,
             )
             .await?;
-        let manifest = extract_json_string_value(&html, "hlsManifestUrl")
-            .context("YouTube 登录会话没有返回 WebKit HLS 播放清单")?;
+        let Some(manifest) = extract_json_string_value(&html, "hlsManifestUrl") else {
+            return Err(missing_hls_reason(&html));
+        };
         let player_url = extract_player_url(&html).context("YouTube 页面没有播放器脚本地址")?;
         Ok(ProtectedHlsContext {
             manifest: trusted_hls_url(&manifest)?,
@@ -756,6 +769,41 @@ async fn read_json(response: reqwest::Response, endpoint: &str) -> Result<Value>
     Ok(payload)
 }
 
+/// Why a watch page carries no HLS manifest: the page was served signed out (log in again), the
+/// video itself cannot be played (YouTube's own reason), or neither, which is reported as such.
+fn missing_hls_reason(html: &str) -> anyhow::Error {
+    if ytcfg_flag(html, "LOGGED_IN") == Some(false) {
+        return YoutubeLoginNeeded::SignedOut.into();
+    }
+    match initial_player_response(html).map(|player| ensure_playable(&player)) {
+        Some(Err(error)) => error,
+        _ => anyhow::anyhow!("YouTube 没有为这个视频提供 HLS 播放清单"),
+    }
+}
+
+fn ytcfg_flag(html: &str, key: &str) -> Option<bool> {
+    let marker = format!("\"{key}\":");
+    let rest = &html[html.find(&marker)? + marker.len()..];
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The page's `ytInitialPlayerResponse` object; the JSON reader stops at its closing brace.
+fn initial_player_response(html: &str) -> Option<Value> {
+    let marker = "ytInitialPlayerResponse = ";
+    let rest = html[html.find(marker)? + marker.len()..].trim_start();
+    serde_json::Deserializer::from_str(rest)
+        .into_iter::<Value>()
+        .next()?
+        .ok()
+        .filter(Value::is_object)
+}
+
 fn ensure_playable(player: &Value) -> Result<()> {
     let status = player
         .pointer("/playabilityStatus/status")
@@ -966,6 +1014,24 @@ fn web_client_version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_without_hls_says_whether_to_log_in_or_why_the_video_cannot_play() {
+        let page = |cfg: &str, status: &str| format!(
+            r#"<script>ytcfg.set({{{cfg}"VISITOR_DATA":"x"}});var ytInitialPlayerResponse = {{"playabilityStatus":{{"status":"{status}","reason":"Video unavailable"}}}};var meta = {{}};</script>"#
+        );
+        let signed_out = missing_hls_reason(&page(r#""LOGGED_IN":false,"#, "LOGIN_REQUIRED"));
+        assert_eq!(signed_out.downcast_ref::<YoutubeLoginNeeded>(), Some(&YoutubeLoginNeeded::SignedOut));
+        assert!(is_auth_rejection(&signed_out));
+
+        let unplayable = missing_hls_reason(&page(r#""LOGGED_IN":true,"#, "UNPLAYABLE"));
+        assert!(unplayable.downcast_ref::<YoutubeLoginNeeded>().is_none());
+        assert_eq!(unplayable.to_string(), "YouTube 视频不可播放：Video unavailable");
+
+        let unknown = missing_hls_reason(&page("", "OK"));
+        assert!(!is_auth_rejection(&unknown));
+        assert_eq!(unknown.to_string(), "YouTube 没有为这个视频提供 HLS 播放清单");
+    }
 
     #[test]
     fn player_parser_keeps_only_kdj_fields() {

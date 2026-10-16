@@ -4,5 +4,7 @@ mod client;
 mod hls_download;
 mod provider;
 
-pub use client::{valid_browser_user_agent, valid_proof_token, ProtectedHlsContext, VideoFormat};
+pub use client::{
+    valid_browser_user_agent, valid_proof_token, ProtectedHlsContext, VideoFormat, YoutubeLoginNeeded,
+};
 pub use provider::YoutubeProvider;

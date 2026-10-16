@@ -70,6 +70,14 @@ impl From<anyhow::Error> for ApiError {
         if let Some(error) = err.downcast_ref::<kdj_providers::qqmusic::error::QqError>() {
             return ApiError::new(StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_GATEWAY), error.to_string()).coded(error.code());
         }
+        if let Some(error) = err.downcast_ref::<kdj_providers::youtube::YoutubeLoginNeeded>() {
+            use kdj_providers::youtube::YoutubeLoginNeeded;
+            let code = match error {
+                YoutubeLoginNeeded::Missing => "AUTH_REQUIRED",
+                YoutubeLoginNeeded::SignedOut => "AUTH_EXPIRED",
+            };
+            return ApiError::new(StatusCode::UNAUTHORIZED, error.to_string()).coded(code);
+        }
         ApiError::new(StatusCode::BAD_REQUEST, format!("{err:#}"))
     }
 }
@@ -90,6 +98,18 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["code"], "RATE_LIMITED"); assert_eq!(value["stage"], "resolve");
         assert_eq!(value["attempt_id"], "0123456789abcdef");
+    }
+
+    #[tokio::test]
+    async fn youtube_login_failures_are_401_with_a_code_the_player_can_act_on() {
+        use kdj_providers::youtube::YoutubeLoginNeeded;
+        let error = anyhow::Error::new(YoutubeLoginNeeded::SignedOut).context("打开 YouTube 视频");
+        let response = ApiError::from(error).into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["code"], "AUTH_EXPIRED");
+        assert_eq!(value["detail"], "YouTube 登录已失效");
     }
 
     #[tokio::test]

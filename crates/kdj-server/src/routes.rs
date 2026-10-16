@@ -4575,10 +4575,27 @@ async fn youtube_begin_hls(
     }
     // Identity, HLS and player assets come from the exact same watch page. A second homepage
     // request adds latency and can observe a different upstream session epoch.
-    let context = state
+    let context = match state
         .youtube
         .protected_hls_context(&body.bvid, &body.user_agent)
-        .await?;
+        .await
+    {
+        Err(error) if matches!(
+            error.downcast_ref::<kdj_providers::youtube::YoutubeLoginNeeded>(),
+            Some(kdj_providers::youtube::YoutubeLoginNeeded::SignedOut)
+        ) => {
+            // A login reused from a browser that has since rotated it is read back once and the
+            // page asked for again; otherwise the listener is told, and the account row follows.
+            if !youtube_login_read_back(&state).await {
+                return Err(error.into());
+            }
+            state
+                .youtube
+                .protected_hls_context(&body.bvid, &body.user_agent)
+                .await?
+        }
+        context => context?,
+    };
     let identity = context.identity.clone();
     let n_challenge = hls_n_challenge(&context.manifest)?.unwrap_or_default();
     let preparation_id = state.issue_youtube_hls_preparation(
@@ -5620,6 +5637,24 @@ async fn library_track_index(
     let query = library_track_query(&state, params)?;
     let library = Arc::clone(&state.library);
     Ok(Json(run_library_bulk_read(move || library.track_index(&query)).await?))
+}
+
+/// The watch page came back signed out: check the login once, as `reconcile_stream_account_failure`
+/// does, and read a reused one back from its browser. True only when a fresh login was read.
+async fn youtube_login_read_back(state: &Arc<AppState>) -> bool {
+    let Some(provider) = state.provider(Platform::Youtube) else {
+        return false;
+    };
+    let account = provider.account().await;
+    if account.state != AccountState::Expired {
+        return false;
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if crate::account_upkeep::resync_from_browser(state, Platform::Youtube).await.is_some() {
+        return true;
+    }
+    state.hub.publish("account.changed", &account);
+    false
 }
 
 /// 私人目录操作失败后只做一次账号核验。明确失效才广播登出态；网络抖动或平台
