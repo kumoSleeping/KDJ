@@ -27,6 +27,7 @@ import {
 } from "./trackDrag";
 import type { SongSource, VideoDownloadRequest } from "../types";
 import { dragPreviewFromBlob, vinylDragPreview } from "./dragPreview";
+import { pointerAccepts } from "./dragRefusal";
 import { firstSourceShareLink, formatShareText, writeShareLinkDrag } from "./shareLink";
 import { useSharePrefs } from "./sharePrefs";
 import { pointerDragGhost, setDragGhost, type PointerDragGhost } from "../components/common/dragGhost";
@@ -340,7 +341,9 @@ export function beginAudioPointerDrag(
       || move.clientY <= edgeThreshold
       || move.clientX >= window.innerWidth - edgeThreshold
       || move.clientY >= window.innerHeight - edgeThreshold;
-    if (outsideWindow && launchSystemLinkDrag()) return;
+    // A place of the app that takes the drop (the downloads key in the top bar sits in that strip)
+    // keeps it: a shake there on the way in must not hand the drag to the system.
+    if (outsideWindow && !pointerAccepts("search", move.clientX, move.clientY) && launchSystemLinkDrag()) return;
     ghost?.move(move.clientX, move.clientY);
     paintTarget(move.clientX, move.clientY);
   };

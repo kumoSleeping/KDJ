@@ -436,6 +436,21 @@ fn reveal_path(
         .map_err(|err| err.to_string())
 }
 
+/// The press that asked for a system drag ended before the main thread got to it (a quick shake at
+/// the window's edge, then let go). A session started now has no button to end it: its picture
+/// follows the pointer until the next click. Such a drag is over and is not started.
+#[cfg(all(desktop, any(target_os = "macos", windows)))]
+fn mouse_released_before_native_drag() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_app_kit::NSEvent::pressedMouseButtons() & 1 == 0
+    }
+    #[cfg(windows)]
+    {
+        false
+    }
+}
+
 /// 把已有本地文件作为真正的系统拖放载荷交给 Finder / Explorer。
 ///
 /// 只声明 Copy：外部播放器仍会直接打开原文件，文件管理器则复制它；绝不能让一次
@@ -498,6 +513,14 @@ async fn start_native_file_drag(
         let pending = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
         let main_thread_pending = std::sync::Arc::clone(&pending);
         app.run_on_main_thread(move || {
+            if mouse_released_before_native_drag() {
+                if let Ok(mut sender) = main_thread_pending.lock() {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(Ok(()));
+                    }
+                }
+                return;
+            }
             let drop_pending = std::sync::Arc::clone(&main_thread_pending);
             let started = drag::start_drag(
                 &window,
@@ -581,6 +604,14 @@ async fn start_native_link_drag(
         let pending = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
         let main_thread_pending = std::sync::Arc::clone(&pending);
         app.run_on_main_thread(move || {
+            if mouse_released_before_native_drag() {
+                if let Ok(mut sender) = main_thread_pending.lock() {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(Ok(()));
+                    }
+                }
+                return;
+            }
             let rtfd = if include_artwork {
                 match share_clipboard::build_share_rtfd(&share_text, &preview) {
                     Ok(rich) => Some(rich),

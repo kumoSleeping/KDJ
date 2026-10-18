@@ -85,6 +85,7 @@ import {
   folderDropElementAt,
   FOLDER_DROP_PATH_ATTR,
 } from "../../lib/folderDrop";
+import { pointerAccepts } from "../../lib/dragRefusal";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isImageTrack, isVideoTrack, thumbUrl } from "../../lib/format";
@@ -1459,7 +1460,9 @@ export const TrackTable = memo(function TrackTable({
         || move.clientY <= edgeThreshold
         || move.clientX >= window.innerWidth - edgeThreshold
         || move.clientY >= window.innerHeight - edgeThreshold;
-      if (outsideWindow && launchSystemExternalDrag()) return;
+      // A place of the app that takes the drop (a key in the top bar sits in that strip) keeps it:
+      // a shake there on the way in must not hand the drag to the system.
+      if (outsideWindow && !pointerAccepts("track", move.clientX, move.clientY) && launchSystemExternalDrag()) return;
       ghost?.move(move.clientX, move.clientY);
       paintTarget(move.clientX, move.clientY);
     };
