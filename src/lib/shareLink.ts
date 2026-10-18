@@ -121,6 +121,16 @@ export function formatShareText(
   return compact;
 }
 
+/** 多首一起分享：每首一行；「更多信息」的落款只在末尾写一次。 */
+export function formatShareListText(
+  items: readonly { link: string; info: ShareSongInfo }[],
+  mode: ShareContentMode,
+): string {
+  const lines = items.map(({ link, info }) => formatShareText(link, info, mode === "more_info" ? "song_info" : mode));
+  if (mode === "more_info" && lines.length > 0) lines.push(`Share from KDJ v${packageVersion}`);
+  return lines.join("\n");
+}
+
 export interface ShareLinkDragOptions {
   /** 外部应用读取普通文本时拿到的内容；URL MIME 仍始终保留原链接。 */
   plainText?: string;

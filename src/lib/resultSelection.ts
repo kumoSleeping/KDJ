@@ -1,4 +1,5 @@
 import type { IntakeItem, MergedGroup } from "../types";
+import { firstSourceShareLink, type ShareSongInfo } from "./shareLink";
 
 /** 选中键：group_id 在不同 item 之间可能重复（同一首歌被两条关键词搜到）。 */
 export function selectionKey(itemIndex: number, groupId: string): string {
@@ -49,4 +50,24 @@ export function pickStateOf(
   for (const key of keys) if (selected.has(key)) picked += 1;
   if (picked === 0) return "none";
   return picked === keys.length ? "all" : "some";
+}
+
+/** A row inside a selection of several shares all of it from its menu. */
+export interface ShareSelection {
+  /** The picked rows that have a link to share. */
+  count: number;
+  copy(): void;
+}
+
+/** The share links of the picked rows, in the order the results stand; rows without one are left out. */
+export function selectedShareItems(
+  items: readonly IntakeItem[],
+  selected: ReadonlySet<string>,
+  sourceIndex: Readonly<Record<string, number>>,
+): { link: string; info: ShareSongInfo }[] {
+  return items.flatMap((item, itemIndex) => item.groups.flatMap((group) => {
+    if (!selected.has(selectionKey(itemIndex, group.group_id))) return [];
+    const link = firstSourceShareLink(group.sources, sourceIndex[group.group_id] ?? group.best_source_index);
+    return link ? [{ link, info: { title: group.title, artists: group.artists, album: group.album } }] : [];
+  }));
 }

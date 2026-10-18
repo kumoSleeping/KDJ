@@ -43,6 +43,7 @@ import { copyText } from "../../lib/copyText";
 import { copyShareContent } from "../../lib/shareClipboard";
 import {
   bilibiliVideoShareSearchQuery,
+  formatShareListText,
   formatShareText,
   matchedBilibiliVideoShareLink,
   matchedTrackShareLink,
@@ -445,6 +446,8 @@ function systemDragPreview(track: TrackSummary): Promise<string> {
 }
 
 const localTrackShareLinkCache = new Map<string, Promise<string | null>>();
+/** 多选分享时菜单打开后最多去平台找回几首的链接；其余只用直接链接和已找回的。 */
+const MENU_SHARE_LOOKUPS = 40;
 const resolvedLocalTrackShareLinks = new Map<string, string | null>();
 
 function localTrackShareCacheKey(track: TrackSummary): string {
@@ -1107,6 +1110,14 @@ export const TrackTable = memo(function TrackTable({
     link: string | null;
     loading: boolean;
   } | null>(null);
+  /** 右键落在多选里时，选中各首的分享链接（按列表顺序；找不到链接的不在里面）。 */
+  const [menuShareBatch, setMenuShareBatch] = useState<{
+    key: string;
+    items: { track: TrackSummary; link: string }[];
+    loading: boolean;
+    /** 选中的歌里有没有可能分享的：没有一首有来源时不摆这一项，和单首一样。 */
+    possible: boolean;
+  } | null>(null);
   const [pendingMenu, setPendingMenu] = useState<{
     x: number;
     y: number;
@@ -1587,6 +1598,71 @@ export const TrackTable = memo(function TrackTable({
   const rowSameNameQuery = rowMenu && !isVideoTrack(rowMenu.track.format)
     ? trackShareSearchQuery(rowMenu.track)
     : "";
+  // 多选时同样在菜单打开时备齐链接：直接链接立刻就有，SoundCloud / 旧 B 站视频去平台找回。
+  const shareBatchKey = menuIds.length > 1 ? menuIds.join(",") : "";
+  // Layout effect: the menu's first frame already knows whether there is anything to share.
+  useLayoutEffect(() => {
+    setMenuShareBatch(null);
+    if (!shareBatchKey) return;
+    let active = true;
+    const ids = shareBatchKey.split(",").map(Number)
+      .sort((a, b) => (indexById.get(a) ?? Infinity) - (indexById.get(b) ?? Infinity));
+    const known = new Map(summaryById);
+    const missing = ids.filter((id) => !known.has(id));
+    const lookups: Promise<unknown>[] = [];
+    const links = new Map<number, string>();
+    const publish = (loading: boolean) => {
+      if (!active) return;
+      const items = ids.flatMap((id) => {
+        const track = known.get(id);
+        const link = links.get(id);
+        return track && link ? [{ track, link }] : [];
+      });
+      setMenuShareBatch({ key: shareBatchKey, items, loading, possible: loading || items.length > 0 || lookups.length > 0 });
+    };
+    const collect = (tracks: readonly TrackSummary[]) => {
+      for (const track of tracks) {
+        known.set(track.id, track);
+        const direct = trackShareLink(track);
+        if (direct) {
+          links.set(track.id, direct);
+          continue;
+        }
+        if (!(soundCloudTrackId(track) || (isVideoTrack(track.format) && bilibiliVideoShareSearchQuery(track)))) continue;
+        if (lookups.length >= MENU_SHARE_LOOKUPS) continue;
+        lookups.push(resolveLocalTrackShareLink(track).then((link) => {
+          if (link) links.set(track.id, link);
+        }));
+      }
+    };
+    collect(ids.flatMap((id) => known.get(id) ?? []));
+    // 选区里还没滚到的行，曲库只载了它们的 id：取一次摘要再找链接。
+    const summaries = missing.length > 0
+      ? api.trackSummaries(missing).then(collect).catch(() => undefined)
+      : Promise.resolve();
+    publish(lookups.length > 0 || missing.length > 0);
+    void summaries.then(() => Promise.all(lookups)).then(() => publish(false));
+    return () => {
+      active = false;
+    };
+    // 菜单打开那一刻的选区与摘要就是要分享的内容；之后摘要刷新不重找。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shareBatchKey]);
+  const shareBatch = shareBatchKey && menuShareBatch?.key === shareBatchKey ? menuShareBatch : null;
+  const copyTrackShareList = async (items: readonly { track: TrackSummary; link: string }[]) => {
+    setRowMenu(null);
+    if (items.length === 0) return;
+    await copyShareContent(
+      formatShareListText(
+        items.map(({ track, link }) => ({
+          link,
+          info: { title: track.title || track.filename, artists: track.artist, album: track.album },
+        })),
+        shareContentMode,
+      ),
+      shareContentMode,
+    );
+  };
   const copyTrackShareLink = async (track: TrackSummary, link: string | null) => {
     setRowMenu(null);
     if (!link) return;
@@ -2578,7 +2654,22 @@ export const TrackTable = memo(function TrackTable({
             <Copy size={12} />
             复制标题
           </button>
-          {(rowShareLink || lookedUpShare) && (
+          {shareBatchKey ? shareBatch?.possible !== false && (
+            <button
+              type="button"
+              disabled={!shareBatch || shareBatch.loading || shareBatch.items.length === 0}
+              onClick={() => {
+                if (shareBatch) void copyTrackShareList(shareBatch.items);
+              }}
+            >
+              <Link2 size={12} />
+              {!shareBatch || shareBatch.loading
+                ? "查找分享链接…"
+                : shareBatch.items.length > 0
+                  ? `复制分享内容（${shareBatch.items.length} 首）`
+                  : "没有找到分享链接"}
+            </button>
+          ) : (rowShareLink || lookedUpShare) && (
             <button
               type="button"
               disabled={!rowShareLink}

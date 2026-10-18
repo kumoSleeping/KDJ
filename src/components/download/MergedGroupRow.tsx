@@ -23,6 +23,7 @@ import { copyText } from "../../lib/copyText";
 import { copyShareContent, songSourcesArtwork } from "../../lib/shareClipboard";
 import { firstSourceShareLink, formatShareText } from "../../lib/shareLink";
 import { useSharePrefs } from "../../lib/sharePrefs";
+import type { ShareSelection } from "../../lib/resultSelection";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
@@ -49,6 +50,8 @@ export { SEARCH_DOWNLOAD_DND_TYPE } from "../../lib/searchDrag";
 
 export interface MergedGroupRowProps {
   group: MergedGroup;
+  /** The row is in a selection of several: its menu shares all of it. */
+  shareSelection?: ShareSelection;
   /** 当前选中的来源下标（用户可在展开后改）。 */
   sourceIndex: number;
   selected: boolean;
@@ -127,6 +130,7 @@ export function MergedGroupRow({
   onInspect,
   onDownload,
   onDownloadSingle,
+  shareSelection,
   onRemoveFromStreamPlaylist,
   removeFromStreamPlaylistLabel,
   removingFromStreamPlaylist = false,
@@ -655,7 +659,18 @@ export function MergedGroupRow({
             <Copy size={12} />
             复制标题
           </button>
-          {shareLink && (
+          {shareSelection ? shareSelection.count > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                shareSelection.copy();
+                setRowMenu(null);
+              }}
+            >
+              <Link2 size={12} />
+              复制分享内容（{shareSelection.count} 首）
+            </button>
+          ) : shareLink && (
             <button
               type="button"
               onClick={() => {

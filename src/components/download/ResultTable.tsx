@@ -62,9 +62,14 @@ import {
   pickStateOf,
   resultRowActionUsesSelection,
   selectableGroups,
+  selectedShareItems,
   selectionKey,
   selectionRun,
+  type ShareSelection,
 } from "../../lib/resultSelection";
+import { copyShareContent } from "../../lib/shareClipboard";
+import { formatShareListText } from "../../lib/shareLink";
+import { useSharePrefs } from "../../lib/sharePrefs";
 import { tossItemKey } from "../../lib/downloadToss";
 import { removeLocalStorage } from "../../lib/storageWrite";
 import { isEditable } from "../../lib/useLibraryClipboard";
@@ -780,6 +785,17 @@ const ResultTableView = memo(function ResultTableView({
     return () => window.removeEventListener("keydown", onKey);
   }, [selectionMode, selected.size, onSelectionModeChange]);
 
+  // A row in a selection of several shares all of it from its menu, in the order the results stand.
+  const shareContentMode = useSharePrefs((state) => state.contentMode);
+  const shareSelection = useMemo<ShareSelection | undefined>(() => {
+    if (selected.size < 2) return undefined;
+    const shared = selectedShareItems(items, selected, sourceIndex);
+    return {
+      count: shared.length,
+      copy: () => { void copyShareContent(formatShareListText(shared, shareContentMode), shareContentMode); },
+    };
+  }, [items, selected, sourceIndex, shareContentMode]);
+
   if (waiting) {
     return (
       <div
@@ -977,6 +993,7 @@ const ResultTableView = memo(function ResultTableView({
             ? onDownloadSelected
             : undefined
         }
+        shareSelection={resultRowActionUsesSelection(selected, selectionKey(index, group.group_id)) ? shareSelection : undefined}
         onRemoveFromStreamPlaylist={
           onRemoveStreamGroup
             ? () => onRemoveStreamGroup(group, 0)
@@ -1018,6 +1035,7 @@ const ResultTableView = memo(function ResultTableView({
           else onDownloadGroup(group);
         }}
         onDownloadSingle={() => onDownloadGroup(group)}
+        shareSelection={resultRowActionUsesSelection(selected, selectionKey(index, group.group_id)) ? shareSelection : undefined}
         onRemoveFromStreamPlaylist={
           onRemoveStreamGroup
             ? () => onRemoveStreamGroup(

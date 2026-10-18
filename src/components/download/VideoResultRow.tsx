@@ -12,6 +12,7 @@ import { copyText } from "../../lib/copyText";
 import { copyShareContent, remoteArtwork } from "../../lib/shareClipboard";
 import { formatShareText, platformShareLink } from "../../lib/shareLink";
 import { useSharePrefs } from "../../lib/sharePrefs";
+import type { ShareSelection } from "../../lib/resultSelection";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { rememberVideoEnqueue } from "../../lib/queueTaskDraft";
 import { beginVideoPointerDrag } from "../../lib/searchDrag";
@@ -192,6 +193,8 @@ export interface VideoResultRowProps extends VideoSeed {
   onEnterSelection?(): void;
   /** 当前行位于现有选区内时，右键下载应交给整组选区入口。 */
   onDownloadSelected?(): void;
+  /** The row is in a selection of several: its menu shares all of it. */
+  shareSelection?: ShareSelection;
   onRemoveFromStreamPlaylist?(): void;
   removeFromStreamPlaylistLabel?: string;
   removingFromStreamPlaylist?: boolean;
@@ -227,6 +230,7 @@ export function VideoResultRow({
   onToggleSelect,
   onEnterSelection,
   onDownloadSelected,
+  shareSelection,
   onRemoveFromStreamPlaylist,
   removeFromStreamPlaylistLabel,
   removingFromStreamPlaylist = false,
@@ -755,7 +759,18 @@ export function VideoResultRow({
             <Copy size={12} />
             复制标题
           </button>
-          {platformShareLink(
+          {!rowMenu.part && shareSelection ? shareSelection.count > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                shareSelection.copy();
+                setRowMenu(null);
+              }}
+            >
+              <Link2 size={12} />
+              复制分享内容（{shareSelection.count} 首）
+            </button>
+          ) : null : platformShareLink(
             platform,
             bvid,
             rowMenu.part || hasMultiplePages

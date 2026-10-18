@@ -10,8 +10,9 @@ test("the library table: picking rows opens no column, a plain click picks, the 
     title: `Song ${id}`, artist: "Artist", album: "Album", format: "mp3", size: 1000,
     camelot: "8A", modified_at: "a", duration: 100, rating: 0, bpm: 128,
     file_created_at: id, analyzed_at: "now",
-    // Song 3 was downloaded from SoundCloud: the library keeps its URN, not its page.
-    source_platform: id === 3 ? "soundcloud" : "local", source_key: id === 3 ? "soundcloud:tracks:777" : "" } as TrackSummary);
+    // Song 3 was downloaded from SoundCloud: the library keeps its URN, not its page. Song 6 came from NetEase.
+    source_platform: id === 3 ? "soundcloud" : id === 6 ? "wyy" : "local",
+    source_key: id === 3 ? "soundcloud:tracks:777" : id === 6 ? "1234" : "" } as TrackSummary);
   const ids = Array.from({ length: 30 }, (_, index) => index + 1);
   const resolved: string[] = [];
   const originalFetch = globalThis.fetch;
@@ -156,8 +157,39 @@ test("the library table: picking rows opens no column, a plain click picks, the 
     const share = menuItem("复制分享内容");
     assert.ok(share && !share.disabled);
     await key("Escape", document.querySelector(".kd-context-menu")!);
+
+    // Several picked: the menu shares each of them that has a link, one line a song, in list order.
+    const copied: string[] = [];
+    Object.defineProperty(navigator, "clipboard", { configurable: true,
+      value: { writeText: async (text: string) => { copied.push(text); } } });
+    await click(row(7));
+    await click(row(6), { metaKey: true });
+    await click(row(3), { metaKey: true });
+    await act(async () => { row(6).dispatchEvent(mouse("contextmenu", { clientX: 200, clientY: 200 })); });
+    await flush(); await flush();
+    const shareAll = menuItem("复制分享内容（2 首）");
+    assert.ok(shareAll && !shareAll.disabled, [...document.querySelectorAll(".kd-context-menu button")].map(b => b.textContent).join(" | "));
+    await click(shareAll);
+    await flush();
+    assert.equal(copied.length, 1);
+    const lines = copied[0].split("\n");
+    assert.deepEqual(lines.slice(0, 2), [
+      "Song 3 - Artist https://soundcloud.com/artist/song-3",
+      "Song 6 - Artist https://y.music.163.com/m/song?id=1234",
+    ], "in the order of the list, not of the picking");
+    assert.match(lines[2], /^Share from KDJ v/, "the footer is written once, at the end");
+    assert.equal(lines.length, 3);
+    await key("Escape");
+    // Picked songs none of which came from a platform: nothing to share, as for one song.
+    await click(row(7));
+    await click(row(8), { metaKey: true });
+    await act(async () => { row(8).dispatchEvent(mouse("contextmenu", { clientX: 200, clientY: 200 })); });
+    await flush();
+    assert.equal(menuItem("分享"), undefined);
+    await key("Escape", document.querySelector(".kd-context-menu")!);
   } finally {
     await act(async () => root.unmount());
+    delete (navigator as { clipboard?: unknown }).clipboard;
     globalThis.fetch = originalFetch;
     dom.window.close();
   }
