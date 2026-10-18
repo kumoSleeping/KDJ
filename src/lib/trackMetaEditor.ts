@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { getPlayingTrack, subscribePlayingTrack } from "./playingTrack";
 
 /** What the editor was asked for from: a panel it should stand beside, or the pointer. */
 export type TrackMetaEditorAnchor =
@@ -69,6 +70,44 @@ export const useTrackMetaEditor = create<TrackMetaEditorState>((set, get) => ({
   setDirty: dirty => { if (get().dirty !== dirty) set({ dirty }); },
   setPosition: position => set({ position }),
 }));
+
+/**
+ * An open editor moves to the song that starts playing, so it never stays on the one before.
+ * An unsaved draft holds it on its track: the move waits until the draft is saved or
+ * cancelled. An online song has no record to edit, so the editor stays where it is.
+ */
+export function followPlayingTrack(): () => void {
+  let playingId = getPlayingTrack()?.id ?? null;
+  let waiting: number | null = null;
+  const move = (id: number) => {
+    const editor = useTrackMetaEditor.getState();
+    if (editor.trackId === null || editor.trackId === id) {
+      waiting = null;
+      return;
+    }
+    if (editor.dirty) {
+      waiting = id;
+      return;
+    }
+    waiting = null;
+    editor.open(id);
+  };
+  const stopPlaying = subscribePlayingTrack(() => {
+    const id = getPlayingTrack()?.id ?? null;
+    if (id === playingId) return;
+    playingId = id;
+    if (id === null || !Number.isFinite(id) || id <= 0) return;
+    move(id);
+  });
+  const stopEditor = useTrackMetaEditor.subscribe((state, previous) => {
+    if (state.trackId === null) waiting = null;
+    else if (waiting !== null && previous.dirty && !state.dirty && waiting === playingId) move(waiting);
+  });
+  return () => {
+    stopPlaying();
+    stopEditor();
+  };
+}
 
 /** The panel an entry sits in, so the editor opens beside the whole panel instead of over it. */
 export function trackMetaEditorAnchor(element: Element): TrackMetaEditorAnchor {

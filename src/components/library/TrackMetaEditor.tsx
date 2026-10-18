@@ -3,7 +3,7 @@ import { Pencil, RotateCcw, Search, Star, Upload } from "lucide-react";
 import { api } from "../../lib/api";
 import { DASH, formatDate, isImageTrack } from "../../lib/format";
 import { consumeSuppressedCoverClick } from "../../lib/trackDrag";
-import { placeTrackMetaEditor, useTrackMetaEditor } from "../../lib/trackMetaEditor";
+import { followPlayingTrack, placeTrackMetaEditor, useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice } from "../common";
@@ -122,6 +122,7 @@ function playerBarInset(): number {
  */
 export function TrackMetaEditorHost() {
   const trackId = useTrackMetaEditor((state) => state.trackId);
+  useEffect(followPlayingTrack, []);
   // A wide main window edits in its drawer instead (see TrackMetaEditorDrawer).
   const docked = useTrackMetaEditor((state) => state.docked);
   return trackId === null || docked ? null : <TrackMetaEditorLoader trackId={trackId} />;

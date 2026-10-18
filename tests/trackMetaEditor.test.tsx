@@ -194,3 +194,40 @@ test("the floating editor edits one track, writes only changed fields and holds 
     dom.window.close();
   }
 });
+
+test("an open editor follows the song that starts playing, after an unsaved draft is settled", async () => {
+  const { followPlayingTrack, useTrackMetaEditor } = await import("../src/lib/trackMetaEditor");
+  const { setPlayingTrack } = await import("../src/lib/playingTrack");
+  const store = () => useTrackMetaEditor.getState();
+  useTrackMetaEditor.setState({ trackId: null, dirty: false, refused: 0 });
+  setPlayingTrack(makeTrack(1));
+  const stop = followPlayingTrack();
+  try {
+    setPlayingTrack(makeTrack(2));
+    assert.equal(store().trackId, null, "a closed editor does not open for playback");
+
+    store().open(2);
+    setPlayingTrack(makeTrack(3));
+    assert.equal(store().trackId, 3, "the editor moves to the new song");
+
+    setPlayingTrack({ ...makeTrack(-5), source_platform: "youtube" } as Track);
+    assert.equal(store().trackId, 3, "an online song has no record: the editor stays");
+
+    store().setDirty(true);
+    setPlayingTrack(makeTrack(4));
+    assert.equal(store().trackId, 3, "an unsaved draft holds the editor on its song");
+    assert.equal(store().refused, 0, "playback is not a refused request");
+    store().setDirty(false);
+    assert.equal(store().trackId, 4, "once the draft is saved or cancelled it moves on");
+
+    store().setDirty(true);
+    setPlayingTrack(makeTrack(5));
+    setPlayingTrack({ ...makeTrack(-6), source_platform: "youtube" } as Track);
+    store().setDirty(false);
+    assert.equal(store().trackId, 4, "a song that stopped playing while the draft was held is not opened");
+  } finally {
+    stop();
+    useTrackMetaEditor.setState({ trackId: null, dirty: false });
+    setPlayingTrack(null);
+  }
+});
