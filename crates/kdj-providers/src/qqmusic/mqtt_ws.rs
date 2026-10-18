@@ -8,8 +8,7 @@ use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::time::{interval, timeout};
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
+    tungstenite::{client::IntoClientRequest, handshake::derive_accept_key, http::HeaderValue, protocol::Role, Message},
 };
 
 const PROP_SERVER_KEEP_ALIVE: u8 = 0x13;
@@ -29,7 +28,7 @@ pub struct MqttPublish {
 }
 
 type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+    tokio_tungstenite::WebSocketStream<reqwest::Upgraded>;
 
 pub struct MqttWsClient {
     write: futures_util::stream::SplitSink<WsStream, Message>,
@@ -41,6 +40,7 @@ pub struct MqttWsClient {
 
 impl MqttWsClient {
     pub async fn connect(
+        http: &reqwest::Client,
         host: &str,
         path: &str,
         client_id: &str,
@@ -52,6 +52,7 @@ impl MqttWsClient {
         let mut current_path = path.to_string();
         for _ in 0..=max_redirects {
             let mut client = Self::connect_once(
+                http,
                 host,
                 &current_path,
                 client_id,
@@ -80,6 +81,7 @@ impl MqttWsClient {
     }
 
     async fn connect_once(
+        http: &reqwest::Client,
         host: &str,
         path: &str,
         client_id: &str,
@@ -104,10 +106,38 @@ impl MqttWsClient {
             ),
         );
 
-        let (stream, _) = timeout(Duration::from_secs(20), connect_async(request))
-            .await
-            .context("连接 MQTT WebSocket 超时")?
-            .with_context(|| format!("连接 MQTT WebSocket 失败：{url}"))?;
+        // Use the same HTTP client as QR creation: DNS, TLS and desktop proxies must
+        // agree. A raw tungstenite connection bypasses OS HTTP proxies.
+        let expected_accept = derive_accept_key(request.headers()["Sec-WebSocket-Key"].as_bytes());
+        let stream = timeout(Duration::from_secs(20), async {
+            let response = http
+                .get(format!("https://{host}{path}"))
+                .version(reqwest::Version::HTTP_11)
+                .headers(request.headers().clone())
+                .send()
+                .await
+                .context("连接 MQTT WebSocket 失败")?;
+            anyhow::ensure!(
+                response.status() == reqwest::StatusCode::SWITCHING_PROTOCOLS,
+                "MQTT WebSocket 握手失败：HTTP {}", response.status()
+            );
+            let headers = response.headers();
+            let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
+            anyhow::ensure!(
+                header("Upgrade").eq_ignore_ascii_case("websocket")
+                    && header("Connection").split(',').any(|v| v.trim().eq_ignore_ascii_case("upgrade"))
+                    && header("Sec-WebSocket-Accept") == expected_accept
+                    && header("Sec-WebSocket-Protocol") == "mqtt"
+                    && !headers.contains_key("Sec-WebSocket-Extensions"),
+                "MQTT WebSocket 握手响应无效"
+            );
+            let upgraded = response.upgrade().await.context("升级 MQTT WebSocket 失败")?;
+            Ok::<_, anyhow::Error>(
+                tokio_tungstenite::WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await
+            )
+        })
+        .await
+        .context("连接 MQTT WebSocket 超时")??;
         let (mut write, read) = stream.split();
 
         let connect_packet = encode_connect(client_id, keep_alive, auth_method, user_properties);

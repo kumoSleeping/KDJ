@@ -180,6 +180,8 @@ pub async fn authorize(http: &reqwest::Client, uin: &str, sigx: &str) -> Result<
     kdj_core::ensure_rustls_ring();
     let no_redirect = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(30))
         .build()
         .context("构建 QQ 登录客户端失败")?;
 
@@ -349,15 +351,25 @@ const MOBILE_WATCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// 两路并行；单路失败不拖垮另一路，两路都失败才返回 Err。
 pub async fn create_dual_qr(http: &reqwest::Client) -> Result<DualQrSession> {
     let (qq_res, mobile_res) = tokio::join!(create_qq_qr(http), create_mobile_qr(http));
+    if let (Err(qq), Err(mobile)) = (&qq_res, &mobile_res) {
+        let describe = |error: &anyhow::Error| {
+            match error.downcast_ref::<reqwest::Error>() {
+                Some(error) if error.is_timeout() => "请求超时",
+                Some(error) if error.is_connect() => "连接失败（请检查网络、代理或证书）",
+                Some(_) => "请求或响应读取失败",
+                None => "接口响应异常（详见日志）",
+            }
+        };
+        tracing::warn!("QQ 互联二维码创建失败：{qq:#}");
+        tracing::warn!("QQ 音乐客户端二维码创建失败：{mobile:#}");
+        bail!("获取二维码失败：QQ：{}；QQ 音乐：{}", describe(qq), describe(mobile));
+    }
     let qq = qq_res
         .map_err(|err| tracing::warn!("QQ 互联二维码创建失败：{err:#}"))
         .ok();
     let mobile = mobile_res
         .map_err(|err| tracing::warn!("QQ 音乐客户端二维码创建失败：{err:#}"))
         .ok();
-    if qq.is_none() && mobile.is_none() {
-        bail!("QQ 音乐与 QQ 二维码均获取失败");
-    }
     Ok(DualQrSession { qq, mobile })
 }
 
@@ -379,12 +391,11 @@ pub async fn poll_dual_qr(
         .map(poll_mobile_qr)
         .unwrap_or(DualQrOutcome::Expired);
 
-    // App 侧已经拿到凭证 / 明确失败时，直接采纳（不阻塞在互联轮询上）。
+    // App 侧成功可直接采纳；失败不能终止仍可用的 QQ 互联通道。
     match &mobile_state {
         DualQrOutcome::Done(credential) => {
             return Ok(DualQrOutcome::Done(credential.clone()));
         }
-        DualQrOutcome::Error(message) => return Ok(DualQrOutcome::Error(message.clone())),
         _ => {}
     }
 
@@ -441,7 +452,7 @@ pub async fn poll_dual_qr(
         DualQrOutcome::Waiting | DualQrOutcome::Refused => Ok(DualQrOutcome::Waiting),
         DualQrOutcome::Expired if qq_alive => Ok(DualQrOutcome::Waiting),
         DualQrOutcome::Expired => Ok(DualQrOutcome::Expired),
-        // Done / Error 已在前面 return
+        DualQrOutcome::Error(_) if qq_alive => Ok(DualQrOutcome::Waiting),
         DualQrOutcome::Done(credential) => Ok(DualQrOutcome::Done(credential)),
         DualQrOutcome::Error(message) => Ok(DualQrOutcome::Error(message)),
     }
@@ -568,6 +579,7 @@ async fn watch_mobile_qr(
     );
 
     let mut mqtt = MqttWsClient::connect(
+        http,
         MQTT_HOST,
         MQTT_PATH,
         &client_id,
