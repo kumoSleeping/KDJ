@@ -6795,15 +6795,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font-size: var(--kd-size-xs);
   line-height: 1.55;
 }
-.kd-ai-prompt-textarea {
-  width: 100%;
-  min-height: 15rem;
-  box-sizing: border-box;
-  font-family: var(--kd-font-code, var(--kd-font-mono));
-  font-size: var(--kd-size-xs);
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
 .kd-ai-prompt-actions {
   display: flex;
   justify-content: flex-start;

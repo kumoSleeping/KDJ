@@ -223,7 +223,7 @@ pub(super) async fn stderr_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -
     tail
 }
 
-pub(super) async fn capture(
+pub(crate) async fn capture(
     binary: &Path,
     args: &[String],
     limit: u64,

@@ -52,6 +52,11 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/ai/abort", post(crate::ai::abort))
         .route("/api/ai/reset", post(crate::ai::reset))
         .route("/api/ai/answer", post(crate::ai::answer))
+        .route("/api/cli/status", get(crate::cli_api::status))
+        .route("/api/cli/search", post(crate::cli_api::search))
+        .route("/api/cli/download", post(crate::cli_api::download))
+        .route("/api/cli/peek", post(crate::cli_media::peek))
+        .route("/api/cli/align", post(crate::cli_media::align))
         .route("/api/control/show", post(control_show))
         .route("/api/control/quit", post(control_quit))
         .route("/api/settings", get(get_settings).put(put_settings))
@@ -284,7 +289,10 @@ async fn guard_download_writes(
 ) -> Response {
     let path = request.uri().path();
     if !request.method().is_safe()
-        && (path == "/api/downloads" || path.starts_with("/api/downloads/") || path == "/api/video/download")
+        && (path == "/api/downloads"
+            || path.starts_with("/api/downloads/")
+            || path == "/api/video/download"
+            || path == "/api/cli/download")
     {
         if let Some(error) = downloads.read_only_error() {
             return ApiError::new(StatusCode::CONFLICT, error).into_response();
@@ -3587,7 +3595,7 @@ async fn intake(
     }))
 }
 
-async fn intake_one(state: &Arc<AppState>, entry: &str, payload: &IntakeRequest) -> IntakeItem {
+pub(crate) async fn intake_one(state: &Arc<AppState>, entry: &str, payload: &IntakeRequest) -> IntakeItem {
     let mut item = IntakeItem {
         entry: entry.to_string(),
         kind: IntakeKind::Search,
@@ -3963,6 +3971,15 @@ async fn enqueue(
     axum::Extension(ctx): axum::Extension<Ctx>,
     Json(payload): Json<DownloadRequest>,
 ) -> ApiResult<Json<Vec<DownloadTask>>> {
+    enqueue_sources(&state, &ctx.downloads, payload).map(Json)
+}
+
+/// 界面与 CLI 共用的入队：B 站 / YouTube 来源按视频任务入队，其余按歌曲。
+pub(crate) fn enqueue_sources(
+    state: &Arc<AppState>,
+    downloads: &Arc<DownloadManager>,
+    payload: DownloadRequest,
+) -> ApiResult<Vec<DownloadTask>> {
     if payload.sources.is_empty() {
         // 空数组回 200 + [] 的话，前端那句"已加入队列"照样会弹，
         // 而队列里什么都没有——这是最容易被当成"下载坏了"的一种表现
@@ -4037,11 +4054,11 @@ async fn enqueue(
                     cover: source.cover.clone(),
                     ..Default::default()
                 };
-                enqueue_video(state.clone(), ctx.downloads.clone(), request, hold)
+                enqueue_video(state.clone(), downloads.clone(), request, hold)
             } else {
                 enqueue_audio(
                     state.clone(),
-                    ctx.downloads.clone(),
+                    downloads.clone(),
                     source,
                     quality,
                     analyze,
@@ -4053,8 +4070,8 @@ async fn enqueue(
         })
         .collect();
     // 整批入队后广播一次完整队列：超过上限被裁掉的旧条目只能靠这条事件让前端知道
-    ctx.downloads.broadcast_list();
-    Ok(Json(tasks))
+    downloads.broadcast_list();
+    Ok(tasks)
 }
 
 async fn cancel_download(
@@ -5166,7 +5183,7 @@ async fn video_resolve(
 ///
 /// 单独摘出来是为了能测：`max_height <= 0` 必须落回设置里的值，
 /// 否则会拿一个 0 去挑流，结果是"下下来的是最低画质"。
-fn apply_video_defaults(req: &mut VideoDownloadRequest, settings: &Settings) {
+pub(crate) fn apply_video_defaults(req: &mut VideoDownloadRequest, settings: &Settings) {
     if req.max_height <= 0 {
         req.max_height = settings.video_max_height;
     }
@@ -6347,7 +6364,7 @@ fn require_roots(state: &AppState) -> ApiResult<Vec<PathBuf>> {
 }
 
 /// 校验下载目标文件夹：空串放行；非空必须是曲库根内的真实目录。
-fn normalize_dest_dir(state: &AppState, raw: &str) -> ApiResult<String> {
+pub(crate) fn normalize_dest_dir(state: &AppState, raw: &str) -> ApiResult<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(String::new());

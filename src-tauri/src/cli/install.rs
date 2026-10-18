@@ -48,23 +48,19 @@ pub fn install() -> Result<CliInstallStatus> {
 
 fn probe_version(executable: &Path) -> Result<String> {
     let output = Command::new(executable)
-        .arg("spec")
+        .arg("--version")
         .output()
         .with_context(|| format!("无法运行 CLI：{}", executable.display()))?;
     if !output.status.success() {
         bail!("CLI 版本检测失败：{}", executable.display());
     }
-    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("CLI 没有返回 JSON：{}", executable.display()))?;
-    if payload.get("ok").and_then(|value| value.as_bool()) != Some(true) {
-        bail!("CLI 版本检测返回失败：{}", executable.display());
-    }
-    payload
-        .pointer("/data/version")
-        .and_then(|value| value.as_str())
-        .filter(|version| !version.trim().is_empty())
-        .map(str::to_string)
-        .context("CLI spec 缺少 data.version")
+    // clap 的版本行是 `kdj <version>`。
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("kdj "))
+        .map(|version| version.trim().to_string())
+        .filter(|version| !version.is_empty())
+        .with_context(|| format!("CLI 没有返回版本号：{}", executable.display()))
 }
 
 fn state_for_version(version: Option<&str>) -> CliInstallState {
@@ -325,13 +321,13 @@ mod platform {
         }
 
         #[test]
-        fn probes_the_version_from_machine_readable_spec_output() {
+        fn probes_the_version_from_the_version_flag() {
             let dir = scratch("probe");
             fs::create_dir_all(&dir).unwrap();
             let executable = dir.join("kdj-app");
             fs::write(
                 &executable,
-                b"#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"data\":{\"version\":\"7.8.9\"}}'\n",
+                b"#!/bin/sh\n[ \"$1\" = --version ] && printf 'kdj 7.8.9\\n'\n",
             )
             .unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();

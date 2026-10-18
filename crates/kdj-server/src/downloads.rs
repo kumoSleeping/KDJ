@@ -1,6 +1,6 @@
 //! 下载队列：并发控制、进度上报、取消。
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,9 @@ const SPEED_WINDOW: f64 = 3.0;
 
 /// 滑窗最多留这么多个采样点，够覆盖 3 秒还不至于无限涨。
 const SPEED_SAMPLES: usize = 64;
+
+/// CLI 自己的并发槽。AI 发起的下载立即开始，不排在用户队列后面，也不占用户的额度。
+const CLI_LANE_CONCURRENCY: usize = 3;
 
 const DOWNLOAD_JOURNAL_VERSION: u32 = 1;
 const DOWNLOAD_JOURNAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -697,6 +700,9 @@ pub struct DownloadManager {
     start_generation: watch::Sender<u64>,
     admission_changed: watch::Sender<u64>,
     admission_batch: Mutex<()>,
+    /// CLI 发起、仍由一条 CLI 连接持有的任务。它们走 `cli_permits`，不参与用户队列的排序。
+    cli_lane: Mutex<HashSet<String>>,
+    cli_permits: Arc<Semaphore>,
 }
 
 struct AdmissionWake(Arc<DownloadManager>);
@@ -855,6 +861,8 @@ impl DownloadManager {
             start_generation: watch::channel(0).0,
             admission_changed: watch::channel(0).0,
             admission_batch: Mutex::new(()),
+            cli_lane: Mutex::new(HashSet::new()),
+            cli_permits: Arc::new(Semaphore::new(CLI_LANE_CONCURRENCY)),
         }
     }
 
@@ -1038,14 +1046,35 @@ impl DownloadManager {
         let _batch = self.admission_batch.lock().unwrap();
         let started = self.start_generation();
         let auto_start = self.auto_start_enabled();
+        let cli_lane = self.cli_lane.lock().unwrap().clone();
         let entries = self.entries.lock().unwrap();
         entries.values().filter(|entry| {
             entry.task.state == TaskState::Queued && !entry.cancel.is_cancelled()
+                && !cli_lane.contains(&entry.task.id)
                 && entry.admission.is_some_and(|(worker, queued, auto, immediate)| {
                     worker == entry.worker_generation && (immediate || started > queued || (auto && auto_start))
                 })
         }).min_by(|a, b| a.task.created_at.total_cmp(&b.task.created_at).then_with(|| a.task.id.cmp(&b.task.id)))
             .is_some_and(|entry| entry.task.id == id && entry.worker_generation == generation)
+    }
+
+    /// 把任务交给 CLI 通道。必须在 `start_tasks` 之前调用，新 worker 才会走 CLI 的并发槽。
+    pub fn join_cli_lane(&self, ids: &[String]) {
+        self.cli_lane.lock().unwrap().extend(ids.iter().cloned());
+        self.wake_admission();
+    }
+
+    pub fn leave_cli_lane(&self, ids: &[String]) {
+        let mut lane = self.cli_lane.lock().unwrap();
+        for id in ids {
+            lane.remove(id);
+        }
+        drop(lane);
+        self.wake_admission();
+    }
+
+    fn in_cli_lane(&self, id: &str) -> bool {
+        self.cli_lane.lock().unwrap().contains(id)
     }
 
     /// 按创建时间升序列出，前端队列面板要的就是这个顺序。
@@ -2181,6 +2210,14 @@ async fn acquire_ordered_download_permit(
     generation: u64,
     cancel: &CancellationToken,
 ) -> Option<OwnedSemaphorePermit> {
+    if manager.in_cli_lane(id) {
+        let permits = manager.cli_permits.clone();
+        return tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            permit = permits.acquire_owned() => permit.ok(),
+        };
+    }
     let mut changed = manager.admission_changed.subscribe();
     loop {
         if cancel.is_cancelled() { return None; }

@@ -1,155 +1,408 @@
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use clap::Parser;
+use anyhow::{Context, Result};
+use clap::{CommandFactory, Parser};
 use serde_json::{json, Value};
 
-use super::args::{
-    AccountCmd, Cli, Commands, DownloadCmd, DownloadFlowArgs, FolderCmd, LibraryCmd, MixCmd,
-    SettingsCmd,
-};
+use super::args::{Cli, Commands, LibraryCmd};
 use super::http::HttpClient;
-use super::runtime;
+use super::{runtime, CliError};
+
+const QR_PLATFORMS: [&str; 3] = ["wyy", "qqm", "bilibili"];
+const BROWSER_PLATFORMS: [&str; 3] = ["youtube", "ytm", "soundcloud"];
+const POLL: Duration = Duration::from_millis(500);
+
+/// `kdj status` 里唯一的说明文字。命令和参数从 clap 生成，这里只写 clap 表达不了的约定。
+const NOTES: [&str; 9] = [
+    "输出都是一行 JSON：成功 {\"ok\":true,\"data\":…}；失败 {\"ok\":false,\"error\":{\"code\",\"message\"}}，code 为 usage / not_found / ambiguous / failed。",
+    "search 的结果和 status 的 playlists 都带 ref：把 ref 交给 download 下载，或交给 search 展开歌单、专辑、歌手。ref 存在 KDJ 内存里，KDJ 重启后请重新 search；bilibili:BV…[:pN] 与 youtube:<id> 这类视频 ref 随时可用。",
+    "download 和 login 会一直运行到结束才输出。整张歌单或长视频可能要好几分钟，请放到后台运行或调大命令超时；中断命令就会取消。",
+    "下载完成后 KDJ 自动入库并分析。移动、改名、删除、整理文件请直接用你自己的文件工具；放进 download.library_roots 下的文件会被 KDJ 自动跟上。",
+    "library get 缺少分析时会当场补齐再返回（可能要几十秒）；时间单位都是秒，grid.downbeats 是小节线。",
+    "peek 把截图存成 JPEG 文件并返回路径（多张时另有一张按时间顺序拼好的 sheet），用你看图片的工具打开即可；截图只用来核对画面内容，判断不了音画是否同步。",
+    "align 返回几套 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）。evidence 为 verified 的是声学核实过的，auto=true 的可以直接采用；melody / partial 只是候选，需要用户试听确认。ref_bar 是参考曲的小节号。剪辑请用你自己的工具（例如 ffmpeg）按这些时间去做。",
+    "扫码登录会在用户屏幕上打开二维码图片，请让用户用对应 App 扫码；youtube / ytm / soundcloud 从本机浏览器导入登录状态，需要用户先在该浏览器里登录。",
+    "除了 KDJ，也可以结合你自己的网络搜索或浏览器工具寻找素材，再把链接交给 search 或 download。",
+];
 
 pub fn run() -> i32 {
     attach_windows_console();
-    match run_inner() {
-        Ok(code) => code,
-        Err(err) => {
-            emit_err(1, "failed", &format!("{err:#}"), None);
-            1
-        }
-    }
-}
-
-fn run_inner() -> Result<i32> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        Err(err) => {
+        Err(err) if err.exit_code() == 0 => {
+            // --help / --version
             let _ = err.print();
-            return Ok(if err.exit_code() == 0 { 0 } else { 2 });
+            return 0;
+        }
+        Err(err) => {
+            // clap 的报错：说明行之后是缺了哪些参数，到 Usage 为止。
+            let rendered = err.render().to_string();
+            let message = rendered
+                .lines()
+                .take_while(|line| !line.starts_with("Usage:") && !line.starts_with("For more"))
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with("tip:"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let message = message.trim_start_matches("error: ");
+            return emit_err(&CliError::new("usage", message), Some("运行 kdj status 查看用法"));
         }
     };
-    match cli.command {
-        Commands::Spec => Ok(emit_ok(spec_doc())),
-        other => {
-            let runtime = runtime::ensure_running(cli.data_dir.as_deref(), cli.url.as_deref())?;
-            let http = HttpClient::new(&runtime.base_url, &runtime.auth_token)?;
-            dispatch(&http, other)
-        }
+    match run_inner(cli) {
+        Ok(()) => 0,
+        Err(err) => match err.downcast_ref::<CliError>() {
+            Some(coded) => emit_err(coded, None),
+            None => emit_err(&CliError::new("failed", format!("{err:#}")), None),
+        },
     }
 }
 
-fn dispatch(http: &HttpClient, command: Commands) -> Result<i32> {
-    match command {
-        Commands::Status => Ok(emit_ok(status_payload(http)?)),
-        Commands::Show => {
-            http.post_json("/api/control/show", &json!({}))?;
-            Ok(emit_ok(json!({ "shown": true })))
-        }
-        Commands::Quit => {
-            http.post_json("/api/control/quit", &json!({}))?;
-            Ok(emit_ok(json!({ "quit": true })))
-        }
-        Commands::Library { command } => library(http, command),
+fn run_inner(cli: Cli) -> Result<()> {
+    if let Commands::Status = cli.command {
+        emit_ok(status(cli.data_dir.as_deref(), cli.url.as_deref()));
+        return Ok(());
+    }
+    let runtime = runtime::ensure_running(cli.data_dir.as_deref(), cli.url.as_deref())?;
+    let http = HttpClient::new(&runtime.base_url, &runtime.auth_token)?;
+    let data = match cli.command {
+        Commands::Status => unreachable!(),
         Commands::Search {
-            query,
+            text,
             kind,
             platform,
-            no_merge,
             limit,
-            capabilities,
-            download,
-            pick,
-            transfer,
-        } => {
-            if capabilities {
-                if query.is_some()
-                    || download
-                    || !pick.is_empty()
-                    || has_download_options(&transfer)
-                {
-                    bail!("search --capabilities 不和搜索或下载参数一起使用");
-                }
-                return Ok(emit_ok(http.get_value("/api/search/capabilities")?));
-            }
-            if !download && (!pick.is_empty() || has_download_options(&transfer)) {
-                bail!("search 的 --pick 和下载参数必须和 --download 一起使用");
-            }
-            if download && kind != "song" {
-                bail!("搜索集合请先取得 key，再用 collection --download");
-            }
-            let query = query.context("search 需要关键词")?;
-            let platforms = parse_platforms(platform.as_deref());
-            let body = json!({
-                "query": query,
-                "kind": kind,
-                "merge": !no_merge,
-                "limit": limit,
-                "platforms": platforms,
-            });
-            let searched = http.post_json("/api/search", &body)?;
-            if !download {
-                return Ok(emit_ok(project_search(searched)));
-            }
-            let sources = pick_search_sources(&searched, &pick)?;
-            let dest = resolve_dest(http, transfer.to.as_deref())?;
-            let tasks = enqueue(
-                http,
-                sources,
-                dest,
-                transfer.quality.as_deref(),
-                transfer.no_analyze.then_some(false),
-            )?;
-            let mut result = run_download_flow(http, tasks, &transfer)?;
-            result["search"] = project_search(searched);
-            Ok(emit_ok(result))
-        }
-        Commands::Collection {
+        } => http.post_json(
+            "/api/cli/search",
+            &json!({ "text": text, "kind": kind, "platforms": platform, "limit": limit }),
+        )?,
+        Commands::Download {
+            refs,
+            to,
+            quality,
+            as_kind,
+            height,
+        } => download(&http, refs, to, quality, as_kind, height)?,
+        Commands::Login {
             platform,
-            kind,
-            key,
-            download,
-            transfer,
-        } => collection(http, platform, kind, key, download, transfer),
-        Commands::Resolve {
-            input,
-            download,
-            transfer,
+            browser,
+            profile,
+        } => login(&http, &platform, browser, profile)?,
+        Commands::Peek {
+            source,
+            at,
+            every,
+            width,
         } => {
-            if !download && has_download_options(&transfer) {
-                bail!("resolve 的下载参数必须和 --download 一起使用");
-            }
-            let resolved = http.post_json("/api/resolve", &json!({ "url": input, "limit": 0 }))?;
-            if download {
-                let dest = resolve_dest(http, transfer.to.as_deref())?;
-                let sources = resolved
-                    .get("sources")
-                    .cloned()
-                    .unwrap_or(Value::Array(vec![]));
-                let tasks = enqueue(
-                    http,
-                    sources,
-                    dest,
-                    transfer.quality.as_deref(),
-                    transfer.no_analyze.then_some(false),
-                )?;
-                let mut result = run_download_flow(http, tasks, &transfer)?;
-                result["resolved"] = resolved;
-                return Ok(emit_ok(result));
-            }
-            Ok(emit_ok(resolved))
+            let at = at.iter().map(|t| parse_time(t)).collect::<Result<Vec<_>>>()?;
+            http.post_json_long(
+                "/api/cli/peek",
+                &json!({ "source": media_arg(&source), "at": at, "every": every, "width": width }),
+            )?
         }
-        Commands::Download { command } => download_cmd(http, command),
-        Commands::Mix { command } => mix(http, command),
-        Commands::Folder { command } => folder(http, command),
-        Commands::Settings { command } => settings(http, command),
-        Commands::Account { command } => account(http, command),
-        Commands::Spec => unreachable!(),
+        Commands::Align { reference, video } => http.post_json_long(
+            "/api/cli/align",
+            &json!({ "reference": media_arg(&reference), "video": media_arg(&video) }),
+        )?,
+        Commands::Library { command } => library(&http, command)?,
+    };
+    emit_ok(data);
+    Ok(())
+}
+
+// ---------------------------------------------------------------- status
+
+fn status(data_dir: Option<&Path>, url: Option<&str>) -> Value {
+    let invocation = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "kdj".into());
+    let mut doc = json!({
+        "cli": { "version": kdj_core::VERSION, "path": invocation },
+        "commands": usage(),
+        "notes": NOTES,
+    });
+    let running = runtime::find_running(data_dir, url);
+    let Some(info) = running else {
+        doc["running"] = json!(false);
+        doc["hint"] = json!("KDJ 没在运行；除 status 外的命令会自动在后台启动它。");
+        return doc;
+    };
+    doc["running"] = json!(true);
+    let live = HttpClient::new(&info.base_url, &info.auth_token)
+        .and_then(|http| Ok((http.get_value("/api/health")?, http.get_value("/api/cli/status")?)));
+    match live {
+        Ok((health, live)) => {
+            let version = health["version"].as_str().unwrap_or_default().to_string();
+            doc["kdj"] = json!({ "version": version, "matches_cli": version == kdj_core::VERSION });
+            if let Value::Object(fields) = live {
+                for (key, value) in fields {
+                    doc[key] = value;
+                }
+            }
+        }
+        Err(err) => doc["error"] = json!(format!("{err:#}")),
+    }
+    doc
+}
+
+/// 从 clap 定义生成命令清单，说明永远和实际参数一致。
+fn usage() -> Vec<Value> {
+    let root = Cli::command();
+    let mut out = Vec::new();
+    for command in root.get_subcommands() {
+        collect_usage(command, "kdj", &mut out);
+    }
+    out
+}
+
+fn collect_usage(command: &clap::Command, prefix: &str, out: &mut Vec<Value>) {
+    let name = format!("{prefix} {}", command.get_name());
+    if command.has_subcommands() {
+        for sub in command.get_subcommands() {
+            collect_usage(sub, &name, out);
+        }
+        return;
+    }
+    let mut line = name;
+    let mut options = serde_json::Map::new();
+    for arg in command.get_arguments() {
+        if arg.is_hide_set() || matches!(arg.get_id().as_str(), "help" | "version") {
+            continue;
+        }
+        let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+        let values: Vec<String> = arg
+            .get_possible_values()
+            .iter()
+            .map(|value| value.get_name().to_string())
+            .collect();
+        let value_name = arg
+            .get_value_names()
+            .and_then(|names| names.first())
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| arg.get_id().as_str().to_ascii_uppercase());
+        if arg.is_positional() {
+            let many = matches!(arg.get_action(), clap::ArgAction::Append);
+            line.push_str(&format!(" <{value_name}>{}", if many { "..." } else { "" }));
+            options.insert(format!("<{value_name}>"), json!(help));
+            continue;
+        }
+        let long = arg.get_long().unwrap_or_default();
+        let takes_value = arg.get_action().takes_values();
+        let flag = match (takes_value, values.is_empty()) {
+            (false, _) => format!("--{long}"),
+            (true, true) => format!("--{long} <{value_name}>"),
+            (true, false) => format!("--{long} {}", values.join("|")),
+        };
+        let default = arg
+            .get_default_values()
+            .first()
+            .map(|value| format!("（默认 {}）", value.to_string_lossy()))
+            .unwrap_or_default();
+        options.insert(flag, json!(format!("{help}{default}")));
+    }
+    let mut entry = json!({
+        "usage": line,
+        "about": command.get_about().map(|a| a.to_string()).unwrap_or_default(),
+    });
+    if !options.is_empty() {
+        entry["options"] = Value::Object(options);
+    }
+    out.push(entry);
+}
+
+// ---------------------------------------------------------------- download
+
+fn download(
+    http: &HttpClient,
+    refs: Vec<String>,
+    to: Option<String>,
+    quality: Option<String>,
+    as_kind: Option<String>,
+    height: Option<i64>,
+) -> Result<Value> {
+    let to = to.map(|dir| absolute(&dir)).unwrap_or_default();
+    let result = http.post_ndjson(
+        "/api/cli/download",
+        &json!({ "refs": refs, "to": to, "quality": quality, "as": as_kind, "height": height }),
+    )?;
+    if result["event"] != "result" {
+        return Err(CliError::new("failed", "KDJ 在下载结束前断开了连接").into());
+    }
+    Ok(json!({ "complete": result["complete"], "items": result["items"] }))
+}
+
+/// 曲库 id 和引用原样交给 KDJ；本地存在的相对路径换成绝对路径。
+fn media_arg(source: &str) -> String {
+    if source.parse::<i64>().is_err() && Path::new(source).exists() {
+        absolute(source)
+    } else {
+        source.to_string()
     }
 }
 
-fn library(http: &HttpClient, command: LibraryCmd) -> Result<i32> {
+/// 秒、分:秒 或 时:分:秒。
+fn parse_time(text: &str) -> Result<f64> {
+    let usage = || anyhow::Error::from(CliError::new("usage", format!("时间无效：{text}")));
+    text.trim()
+        .split(':')
+        .try_fold(0.0, |total, part| {
+            part.trim().parse::<f64>().map(|value| total * 60.0 + value)
+        })
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(usage)
+}
+
+fn absolute(path: &str) -> String {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        return path.display().to_string();
+    }
+    std::env::current_dir()
+        .map(|dir| dir.join(&path))
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+// ---------------------------------------------------------------- login
+
+fn login(
+    http: &HttpClient,
+    platform: &str,
+    browser: Option<String>,
+    profile: Option<String>,
+) -> Result<Value> {
+    // 指定了 --browser 就从浏览器导入，哪个平台支持由 KDJ 判断；否则扫码平台扫码。
+    if browser.is_none() && QR_PLATFORMS.contains(&platform) {
+        return qr_login(http, platform);
+    }
+    if browser.is_some() || BROWSER_PLATFORMS.contains(&platform) {
+        let browser = match browser {
+            Some(browser) => browser,
+            None => only_browser(http, platform)?,
+        };
+        let request_id = format!("cli-{:016x}", rand::random::<u64>());
+        let account = http.post_json(
+            &format!("/api/accounts/{platform}/login/browser"),
+            &json!({ "browser": browser, "profile": profile, "request_id": request_id }),
+        )?;
+        return Ok(json!({ "platform": platform, "state": "done", "account": brief_account(&account) }));
+    }
+    Err(CliError::new(
+        "usage",
+        format!("不支持的平台：{platform}；可用 {} / {}", QR_PLATFORMS.join(" "), BROWSER_PLATFORMS.join(" ")),
+    )
+    .into())
+}
+
+/// 没指定 --browser 时，本机只有一个浏览器才替用户选；否则列出候选。
+fn only_browser(http: &HttpClient, platform: &str) -> Result<String> {
+    let catalog = http.get_value(&format!("/api/accounts/{platform}/login/browsers"))?;
+    let browsers: Vec<Value> = catalog["browsers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|browser| browser["profiles"].as_array().is_some_and(|p| !p.is_empty()))
+        .collect();
+    if let [only] = browsers.as_slice() {
+        if let Some(id) = only["id"].as_str() {
+            return Ok(id.to_string());
+        }
+    }
+    let mut error = CliError::new("usage", "请用 --browser 指定从哪个浏览器导入登录状态");
+    error.candidates = Some(json!(browsers
+        .iter()
+        .map(|b| json!({ "browser": b["id"], "label": b["label"], "profiles": b["profiles"] }))
+        .collect::<Vec<_>>()));
+    Err(error.into())
+}
+
+fn qr_login(http: &HttpClient, platform: &str) -> Result<Value> {
+    let session = http.post_json(&format!("/api/accounts/{platform}/login/qr"), &json!({}))?;
+    let session_id = session["session_id"].as_str().context("扫码会话缺少 id")?.to_string();
+    let mut images: Vec<(String, String)> = session["variants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| Some((v["label"].as_str()?.to_string(), v["image"].as_str()?.to_string())))
+        .collect();
+    if images.is_empty() {
+        images.push((platform.to_string(), session["image"].as_str().unwrap_or_default().to_string()));
+    }
+    let files: Vec<PathBuf> = images
+        .iter()
+        .filter_map(|(label, image)| write_qr(platform, label, image).ok())
+        .collect();
+    let Some(first) = files.first() else {
+        return Err(CliError::new("failed", "没有拿到二维码图片").into());
+    };
+    open_file(first);
+    eprintln!("二维码已在屏幕上打开：{}", first.display());
+    let path = format!("/api/accounts/{platform}/login/qr/{session_id}");
+    let state = loop {
+        let state = http.get_value(&path)?;
+        if matches!(state["state"].as_str(), Some("done" | "expired" | "refused" | "error")) {
+            break state;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    for file in &files {
+        let _ = std::fs::remove_file(file);
+    }
+    let value = state["state"].as_str().unwrap_or_default();
+    if value != "done" {
+        let message = state["message"].as_str().filter(|m| !m.is_empty()).unwrap_or(value);
+        return Err(CliError::new("failed", format!("扫码登录未完成：{message}")).into());
+    }
+    Ok(json!({ "platform": platform, "state": "done", "account": brief_account(&state["account"]) }))
+}
+
+fn write_qr(platform: &str, label: &str, data_url: &str) -> Result<PathBuf> {
+    use base64::Engine as _;
+    let encoded = data_url.split_once(',').map(|(_, b)| b).unwrap_or(data_url);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .context("二维码图片无效")?;
+    let safe: String = label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let path = std::env::temp_dir().join(format!("kdj-login-{platform}-{safe}.png"));
+    std::fs::write(&path, bytes).context("写二维码图片失败")?;
+    Ok(path)
+}
+
+/// 用系统默认看图程序打开，用户才能在屏幕上扫码；失败不影响等待。
+fn open_file(path: &Path) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+fn brief_account(account: &Value) -> Value {
+    json!({
+        "platform": account.get("platform"),
+        "state": account.get("state"),
+        "nickname": account.get("nickname"),
+    })
+}
+
+// ---------------------------------------------------------------- library
+
+fn library(http: &HttpClient, command: LibraryCmd) -> Result<Value> {
     match command {
         LibraryCmd::List {
             q,
@@ -157,7 +410,6 @@ fn library(http: &HttpClient, command: LibraryCmd) -> Result<i32> {
             bpm,
             energy,
             folder,
-            analyzed,
             limit,
             offset,
         } => {
@@ -166,889 +418,192 @@ fn library(http: &HttpClient, command: LibraryCmd) -> Result<i32> {
                 ("limit".into(), limit.to_string()),
                 ("offset".into(), offset.to_string()),
             ];
-            if let Some(q) = q {
-                pairs.push(("q".into(), q));
-            }
-            if let Some(key) = key {
-                pairs.push(("key".into(), key));
-            }
-            if let Some(min) = bpm_min {
-                pairs.push(("bpm_min".into(), min.to_string()));
-            }
-            if let Some(max) = bpm_max {
-                pairs.push(("bpm_max".into(), max.to_string()));
-            }
-            if let Some(energy) = energy {
-                pairs.push(("energy_min".into(), energy.to_string()));
-            }
+            let mut push = |name: &str, value: Option<String>| {
+                if let Some(value) = value {
+                    pairs.push((name.into(), value));
+                }
+            };
+            push("q", q);
+            push("key", key);
+            push("bpm_min", bpm_min.map(|v| v.to_string()));
+            push("bpm_max", bpm_max.map(|v| v.to_string()));
+            push("energy_min", energy.map(|v| v.to_string()));
             if let Some(folder) = folder {
-                pairs.push(("folder".into(), folder));
-                pairs.push(("folder_deep".into(), "true".into()));
-            }
-            if let Some(analyzed) = analyzed {
-                pairs.push(("analyzed".into(), analyzed.to_string()));
+                push("folder", Some(absolute(&folder)));
+                push("folder_deep", Some("true".into()));
             }
             let page = http.get_query("/api/library/tracks", &pairs)?;
-            Ok(emit_ok(project_track_page(page)))
+            Ok(json!({
+                "items": page["items"].as_array().into_iter().flatten().map(brief_track).collect::<Vec<_>>(),
+                "total": page.get("total"),
+                "offset": page.get("offset"),
+                "limit": page.get("limit"),
+            }))
         }
-        LibraryCmd::Get { id, path, q } => {
-            let track = resolve_track(http, id, path.as_deref(), q.as_deref())?;
-            Ok(emit_ok(brief_track(&track)))
-        }
-        LibraryCmd::Stats => Ok(emit_ok(http.get_value("/api/library/stats")?)),
-        LibraryCmd::Move {
-            id,
-            path,
-            q,
-            to,
-            dry_run,
-        } => {
-            let ids = resolve_ids(http, id, path.as_deref(), q.as_deref())?;
-            let dest = resolve_dest(http, Some(&to))?;
-            if dry_run {
-                return Ok(emit_ok(
-                    json!({ "dry_run": true, "track_ids": ids, "to": dest }),
-                ));
-            }
-            Ok(emit_ok(http.post_json(
-                "/api/library/folders/apply",
-                &json!({ "track_ids": ids, "dest": dest, "op": "move" }),
-            )?))
-        }
-        LibraryCmd::Forget {
-            id,
-            path,
-            q,
-            folder,
-            dry_run,
-        } => {
-            if let Some(folder) = folder {
-                if dry_run {
-                    return Ok(emit_ok(json!({ "dry_run": true, "folder": folder })));
-                }
-                return Ok(emit_ok(http.post_json(
-                    "/api/library/folders/forget",
-                    &json!({ "path": folder }),
-                )?));
-            }
-            let ids = resolve_ids(http, id, path.as_deref(), q.as_deref())?;
-            if dry_run {
-                return Ok(emit_ok(
-                    json!({ "dry_run": true, "track_ids": ids, "file": "keep" }),
-                ));
-            }
-            Ok(emit_ok(http.post_json(
-                "/api/library/tracks/delete",
-                &json!({ "track_ids": ids, "file": "keep" }),
-            )?))
-        }
-        LibraryCmd::Delete {
-            id,
-            path,
-            q,
-            yes,
-            dry_run,
-        } => {
-            if !yes && !dry_run {
-                emit_err(
-                    2,
-                    "usage",
-                    "彻底删除必须加 --yes",
-                    Some("先 --dry-run 看名单，确认后加 --yes"),
-                );
-                return Ok(2);
-            }
-            let ids = resolve_ids(http, id, path.as_deref(), q.as_deref())?;
-            if dry_run {
-                return Ok(emit_ok(
-                    json!({ "dry_run": true, "track_ids": ids, "file": "remove" }),
-                ));
-            }
-            Ok(emit_ok(http.post_json(
-                "/api/library/tracks/delete",
-                &json!({ "track_ids": ids, "file": "remove" }),
-            )?))
-        }
-        LibraryCmd::Undo => Ok(emit_ok(
-            http.post_json("/api/library/folders/undo", &json!({}))?,
-        )),
-        LibraryCmd::Scan { paths, analyze } => {
-            if paths.is_empty() {
-                bail!("scan 需要至少一个路径");
-            }
-            Ok(emit_ok(http.post_json(
-                "/api/library/scan",
-                &json!({ "paths": paths, "recursive": true, "analyze": analyze }),
-            )?))
-        }
-        LibraryCmd::Analyze { id, force, version } => {
-            let track_ids = if id.is_empty() {
-                Value::Null
-            } else {
-                json!(id)
-            };
-            Ok(emit_ok(http.post_json(
-                "/api/library/analyze",
-                &json!({ "track_ids": track_ids, "force": force, "version": version }),
-            )?))
-        }
-    }
-}
-
-fn collection(
-    http: &HttpClient,
-    platform: String,
-    kind: String,
-    key: String,
-    download: bool,
-    transfer: DownloadFlowArgs,
-) -> Result<i32> {
-    if !download && has_download_options(&transfer) {
-        bail!("collection 的下载参数必须和 --download 一起使用");
-    }
-    let resolved = http.post_json(
-        "/api/search/collection",
-        &json!({ "platform": platform, "kind": kind, "key": key, "limit": 0 }),
-    )?;
-    if !download {
-        return Ok(emit_ok(resolved));
-    }
-    let dest = resolve_dest(http, transfer.to.as_deref())?;
-    let sources = filter_new_sources(&resolved);
-    let tasks = enqueue(
-        http,
-        sources,
-        dest,
-        transfer.quality.as_deref(),
-        transfer.no_analyze.then_some(false),
-    )?;
-    let mut result = run_download_flow(http, tasks, &transfer)?;
-    result["collection"] = project_collection(&resolved);
-    Ok(emit_ok(result))
-}
-
-fn download_cmd(http: &HttpClient, command: DownloadCmd) -> Result<i32> {
-    match command {
-        DownloadCmd::Destinations => Ok(emit_ok(download_dests(http)?)),
-        DownloadCmd::List => Ok(emit_ok(http.get_value("/api/downloads")?)),
-        DownloadCmd::Start { id, wait, timeout } => {
-            // 不带 id 沿用整队放行：排队任务全部开始，可重试的失败任务一并重试。
-            let body = if id.is_empty() {
-                json!({})
-            } else {
-                json!({ "ids": &id })
-            };
-            let ids = if id.is_empty() {
-                start_download_ids(&http.get_value("/api/downloads")?)
-            } else {
+        LibraryCmd::Get { id, path, q, beats } => {
+            let ids = if !id.is_empty() {
                 id
-            };
-            http.post_json("/api/downloads/start", &body)?;
-            let tasks = if wait {
-                wait_for_downloads(http, &ids, timeout)?
+            } else if let Some(path) = path {
+                vec![track_by_path(http, &absolute(&path))?]
+            } else if let Some(q) = q {
+                vec![track_by_text(http, &q)?]
             } else {
-                select_downloads(&http.get_value("/api/downloads")?, &ids)?
+                return Err(CliError::new("usage", "需要 --id、--path 或 --q").into());
             };
-            Ok(emit_ok(download_summary(tasks, true, wait)))
-        }
-        DownloadCmd::Wait { id, timeout } => {
-            let ids = if id.is_empty() {
-                active_download_ids(&http.get_value("/api/downloads")?)
-            } else {
-                id
-            };
-            let tasks = wait_for_downloads(http, &ids, timeout)?;
-            Ok(emit_ok(download_summary(tasks, false, true)))
-        }
-        DownloadCmd::Cancel { id } => Ok(emit_ok(
-            http.post_json(&format!("/api/downloads/{id}/cancel"), &json!({}))?,
-        )),
-        DownloadCmd::CancelAll => Ok(emit_ok(
-            http.post_json("/api/downloads/cancel-all", &json!({}))?,
-        )),
-        DownloadCmd::Retry { id, wait, timeout } => {
-            let task = http.post_json(&format!("/api/downloads/{id}/retry"), &json!({}))?;
-            let tasks = if wait {
-                wait_for_downloads(http, std::slice::from_ref(&id), timeout)?
-            } else {
-                Value::Array(vec![task])
-            };
-            Ok(emit_ok(download_summary(tasks, true, wait)))
-        }
-        DownloadCmd::Remove { id } => Ok(emit_ok(
-            http.delete_query(&format!("/api/downloads/{id}"), &[] as &[(String, String)])?,
-        )),
-        DownloadCmd::Clear => Ok(emit_ok(http.post_json("/api/downloads/clear", &json!({}))?)),
-    }
-}
-
-fn mix(http: &HttpClient, command: MixCmd) -> Result<i32> {
-    match command {
-        MixCmd::Next {
-            id,
-            path,
-            q,
-            bpm_tolerance,
-            limit,
-            folder,
-        } => {
-            let track = resolve_track(http, id, path.as_deref(), q.as_deref())?;
-            let id = track["id"].as_i64().context("曲目没有 id")?;
-            let mut pairs: Vec<(String, String)> = vec![
-                ("bpm_tolerance".into(), bpm_tolerance.to_string()),
-                ("limit".into(), limit.to_string()),
-            ];
-            if let Some(folder) = folder {
-                pairs.push(("folder".into(), folder));
-            }
-            let matches = http.get_query(&format!("/api/library/harmonic/{id}"), &pairs)?;
-            Ok(emit_ok(project_harmonic(matches)))
-        }
-    }
-}
-
-fn folder(http: &HttpClient, command: FolderCmd) -> Result<i32> {
-    match command {
-        FolderCmd::Tree => Ok(emit_ok(http.get_value("/api/library/folders")?)),
-        FolderCmd::Create { parent, name } => Ok(emit_ok(http.post_json(
-            "/api/library/folders/create",
-            &json!({ "parent": parent, "name": name }),
-        )?)),
-        FolderCmd::Rename { path, name } => Ok(emit_ok(http.post_json(
-            "/api/library/folders/rename",
-            &json!({ "path": path, "name": name }),
-        )?)),
-        FolderCmd::Move { path, to } => Ok(emit_ok(http.post_json(
-            "/api/library/folders/move",
-            &json!({ "path": path, "dest_parent": to }),
-        )?)),
-        FolderCmd::Remove { path } => Ok(emit_ok(
-            http.post_json("/api/library/folders/delete", &json!({ "path": path }))?,
-        )),
-    }
-}
-
-fn settings(http: &HttpClient, command: SettingsCmd) -> Result<i32> {
-    match command {
-        SettingsCmd::Get => Ok(emit_ok(http.get_value("/api/settings")?)),
-        SettingsCmd::Set {
-            download_dir,
-            filename_template,
-        } => {
-            let mut current = http.get_value("/api/settings")?;
-            if let Some(dir) = download_dir {
-                current["download_dir"] = json!(dir);
-            }
-            if let Some(template) = filename_template {
-                current["filename_template"] = json!(template);
-            }
-            Ok(emit_ok(http.send_json(
-                reqwest::Method::PUT,
-                "/api/settings",
-                &current,
-            )?))
-        }
-    }
-}
-
-fn account(http: &HttpClient, command: AccountCmd) -> Result<i32> {
-    match command {
-        AccountCmd::List => Ok(emit_ok(http.get_value("/api/accounts")?)),
-        AccountCmd::Login { platform } => Ok(emit_ok(
-            http.post_json(&format!("/api/accounts/{platform}/login/qr"), &json!({}))?,
-        )),
-        AccountCmd::LoginStatus {
-            platform,
-            session,
-            wait,
-            timeout,
-        } => {
-            let state = if wait {
-                wait_for_login(http, &platform, &session, timeout)?
-            } else {
-                http.get_value(&format!("/api/accounts/{platform}/login/qr/{session}"))?
-            };
-            Ok(emit_ok(state))
-        }
-        AccountCmd::Logout { platform } => Ok(emit_ok(
-            http.post_json(&format!("/api/accounts/{platform}/logout"), &json!({}))?,
-        )),
-        AccountCmd::Playlists { platform } => Ok(emit_ok(
-            http.get_value(&format!("/api/stream/playlists/{platform}"))?,
-        )),
-        AccountCmd::Playlist {
-            platform,
-            key,
-            download,
-            transfer,
-        } => {
-            if !download && has_download_options(&transfer) {
-                bail!("account playlist 的下载参数必须和 --download 一起使用");
-            }
-            let resolved = http.post_json(
-                "/api/stream/playlist",
-                &json!({ "platform": platform, "key": key, "limit": 0 }),
-            )?;
-            if !download {
-                return Ok(emit_ok(resolved));
-            }
-            let dest = resolve_dest(http, transfer.to.as_deref())?;
-            let sources = resolved
-                .get("sources")
-                .cloned()
-                .unwrap_or(Value::Array(vec![]));
-            let tasks = enqueue(
-                http,
-                sources,
-                dest,
-                transfer.quality.as_deref(),
-                transfer.no_analyze.then_some(false),
-            )?;
-            let mut result = run_download_flow(http, tasks, &transfer)?;
-            result["playlist"] = resolved.get("title").cloned().unwrap_or(Value::Null);
-            Ok(emit_ok(result))
-        }
-    }
-}
-
-fn status_payload(http: &HttpClient) -> Result<Value> {
-    let health = http.get_value("/api/health")?;
-    Ok(json!({
-        "health": health,
-        "cli": { "version": kdj_core::VERSION },
-    }))
-}
-
-fn spec_doc() -> Value {
-    json!({
-        "version": kdj_core::VERSION,
-        "binary": "kdj-app（应用包）/ kdj（设置页安装的 CLI 入口）",
-        "handbook": "设置 → 让 AI 操作 KDJ → 复制 Prompt",
-        "highlights": [
-            "同一份已安装的 KDJ 二进制：有子命令当客户端，没有则驻留；未就绪拉起 --no-gui",
-            "关窗不等于退出；kdj show 唤回主窗，kdj quit 真退出",
-            "二维码登录：account login 返回 URL / PNG data URL；account login-status 可等待结果",
-            "所有下载入口共享 --to / --quality / --no-analyze / --start / --wait / --timeout",
-            "不加 --start/--wait 只返回待下载清单；--start/--wait 只开始本次创建的任务，--wait 等待并返回最终 paths",
-            "download start [ID...] 只开始点名任务；不带 id 放行整个队列并重试失败和暂停的任务",
-            "下载 --to = 侧栏文件夹；先 download destinations 再下",
-            "曲库写操作只有 move / forget / delete --yes；forget 不删磁盘",
-            "搜索 --kind song|playlist|album|artist|radio；集合用同一条 collection，加 --download 才下载",
-        ],
-        "qr_login": {
-            "platforms": ["wyy", "qqm", "bilibili"],
-            "create": "account login --platform <PLATFORM>",
-            "poll": "account login-status --platform <PLATFORM> --session <ID> [--wait]",
-            "result": "wyy/bilibili 返回 url + image；qqm 返回 image + variants"
-        },
-        "download_flow": {
-            "producers": ["search --download", "collection --download", "resolve --download", "account playlist --download"],
-            "shared_options": ["--to", "--quality", "--no-analyze", "--start", "--wait", "--timeout"],
-            "planned": "默认只入队；data.tasks 包含 title/platform/output_dir",
-            "completed": "--wait 只开始本次任务并等待；data.paths 是最终本地绝对路径"
-        },
-        "commands": [
-            "status", "show", "quit", "spec",
-            "library list|get|stats|move|forget|delete|undo|scan|analyze",
-            "search [--download --pick N]", "collection [--download]", "resolve [--download]",
-            "download destinations|list|start [ID...]|wait [ID...]|cancel|cancel-all|retry|remove|clear",
-            "mix next", "folder tree|create|rename|move|remove",
-            "settings get|set",
-            "account list|login|login-status|logout|playlists|playlist [--download]"
-        ],
-    })
-}
-
-fn resolve_track(
-    http: &HttpClient,
-    id: Option<i64>,
-    path: Option<&str>,
-    q: Option<&str>,
-) -> Result<Value> {
-    if let Some(id) = id {
-        return http.get_value(&format!("/api/library/tracks/{id}"));
-    }
-    let mut pairs: Vec<(String, String)> = vec![("limit".into(), "8".into())];
-    if let Some(path) = path {
-        pairs.push(("q".into(), path.to_string()));
-    } else if let Some(q) = q {
-        pairs.push(("q".into(), q.to_string()));
-    } else {
-        bail!("需要 --id / --path / --q");
-    }
-    let page = http.get_query("/api/library/tracks", &pairs)?;
-    let items = page["items"].as_array().cloned().unwrap_or_default();
-    if let Some(path) = path {
-        let exact: Vec<_> = items
-            .iter()
-            .filter(|item| item["path"].as_str() == Some(path))
-            .cloned()
-            .collect();
-        return unique_track(exact, path);
-    }
-    unique_track(items, q.unwrap_or(""))
-}
-
-fn resolve_ids(
-    http: &HttpClient,
-    ids: Vec<i64>,
-    path: Option<&str>,
-    q: Option<&str>,
-) -> Result<Vec<i64>> {
-    if !ids.is_empty() {
-        return Ok(ids);
-    }
-    let track = resolve_track(http, None, path, q)?;
-    Ok(vec![track["id"].as_i64().context("曲目没有 id")?])
-}
-
-fn unique_track(items: Vec<Value>, label: &str) -> Result<Value> {
-    match items.len() {
-        0 => bail!("没有匹配：{label}"),
-        1 => Ok(items.into_iter().next().unwrap()),
-        _ => {
-            let names: Vec<_> = items
+            let tracks = analyzed_tracks(http, &ids)?;
+            let items: Vec<Value> = tracks
                 .iter()
-                .filter_map(|item| {
-                    Some(json!({
-                        "id": item.get("id"),
-                        "title": item.get("title"),
-                        "path": item.get("path"),
-                    }))
-                })
+                .map(|(track, rhythm)| full_track(track, rhythm, beats))
                 .collect();
-            bail!(
-                "匹配不唯一（{} 首），请改用 --id：{}",
-                names.len(),
-                serde_json::Value::Array(names)
-            );
+            Ok(if items.len() == 1 {
+                items.into_iter().next().unwrap()
+            } else {
+                json!({ "items": items })
+            })
         }
     }
 }
 
-fn parse_bpm(raw: Option<&str>) -> Result<(Option<f64>, Option<f64>)> {
-    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok((None, None));
-    };
-    if let Some((lo, hi)) = raw.split_once("..") {
-        return Ok((Some(lo.trim().parse()?), Some(hi.trim().parse()?)));
-    }
-    let value: f64 = raw.parse()?;
-    Ok((Some(value), Some(value)))
-}
-
-fn parse_platforms(raw: Option<&str>) -> Value {
-    match raw {
-        None => json!(["wyy", "qqm"]),
-        Some(text) => json!(text
-            .split(',')
-            .map(|part| part.trim())
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()),
-    }
-}
-
-fn resolve_dest(http: &HttpClient, to: Option<&str>) -> Result<String> {
-    let Some(to) = to.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(String::new());
-    };
-    if to.eq_ignore_ascii_case("default") {
-        // 空 dest_dir 是后端“使用任务入队时的默认下载目录”的稳定契约。
-        // 把设置里的绝对路径重新传回去会被当成显式曲库目标；全新安装还没有
-        // library root 时反而会拒绝默认目录。
-        return Ok(String::new());
-    }
-    let dests = download_dests(http)?;
-    let items = dests["items"].as_array().cloned().unwrap_or_default();
-    if let Some(hit) = items.iter().find(|item| item["path"].as_str() == Some(to)) {
-        if hit["id"].as_str() == Some("default") {
-            return Ok(String::new());
-        }
-        return Ok(hit["path"].as_str().unwrap_or(to).to_string());
-    }
-    let named: Vec<_> = items
-        .iter()
-        .filter(|item| item["name"].as_str() == Some(to))
-        .cloned()
-        .collect();
-    match named.len() {
-        1 if named[0]["id"].as_str() == Some("default") => Ok(String::new()),
-        1 => Ok(named[0]["path"].as_str().unwrap_or(to).to_string()),
-        0 => Ok(to.to_string()),
-        _ => bail!("文件夹名 {to} 不唯一，请改用 download destinations 里的绝对路径"),
-    }
-}
-
-fn download_dests(http: &HttpClient) -> Result<Value> {
-    let settings = http.get_value("/api/settings")?;
-    let tree = http.get_value("/api/library/folders")?;
-    let mut items = vec![json!({
-        "id": "default",
-        "name": "默认下载文件夹",
-        "path": settings["download_dir"],
-    })];
-    flatten_folders(tree.get("roots").and_then(Value::as_array), &mut items);
-    Ok(json!({ "items": items }))
-}
-
-fn flatten_folders(nodes: Option<&Vec<Value>>, out: &mut Vec<Value>) {
-    let Some(nodes) = nodes else {
-        return;
-    };
-    for node in nodes {
-        out.push(json!({
-            "name": node.get("name"),
-            "path": node.get("path"),
-            "track_count": node.get("track_count"),
-            "parent": node.get("parent"),
-        }));
-        flatten_folders(node.get("children").and_then(Value::as_array), out);
-    }
-}
-
-fn enqueue(
-    http: &HttpClient,
-    sources: Value,
-    dest: String,
-    quality: Option<&str>,
-    analyze: Option<bool>,
-) -> Result<Value> {
-    let mut body = json!({
-        "sources": sources,
-        "dest_dir": dest,
-        // CLI 的默认语义是“返回计划后等待显式开始”。即使界面
-        // 设置里开了自动下载，这批任务也不能在 JSON 返回前抢跑。
-        "hold": true,
-    });
-    if let Some(quality) = quality {
-        body["quality"] = json!(quality);
-    }
-    if let Some(analyze) = analyze {
-        body["analyze"] = json!(analyze);
-    }
-    http.post_json("/api/downloads", &body)
-}
-
-fn has_download_options(options: &DownloadFlowArgs) -> bool {
-    options.to.is_some()
-        || options.quality.is_some()
-        || options.no_analyze
-        || options.start
-        || options.wait
-        || options.timeout.is_some()
-}
-
-fn run_download_flow(http: &HttpClient, tasks: Value, options: &DownloadFlowArgs) -> Result<Value> {
-    let ids = download_ids(&tasks)?;
-    if ids.is_empty() {
-        bail!("没有生成下载任务");
-    }
-    let started = options.start || options.wait;
-    if started {
-        // 只放行本次入队的任务；用户自己排着的队列和失败记录留给 UI 的「开始」。
-        http.post_json("/api/downloads/start", &json!({ "ids": &ids }))?;
-    }
-    let latest = if options.wait {
-        wait_for_downloads(http, &ids, options.timeout.unwrap_or(3600))?
-    } else if started {
-        select_downloads(&http.get_value("/api/downloads")?, &ids)?
-    } else {
-        tasks
-    };
-    Ok(download_summary(latest, started, options.wait))
-}
-
-fn download_ids(tasks: &Value) -> Result<Vec<String>> {
-    let items = tasks.as_array().context("下载接口没有返回任务数组")?;
-    items
-        .iter()
-        .map(|task| {
-            task["id"]
-                .as_str()
-                .map(str::to_string)
-                .context("下载任务缺少 id")
-        })
-        .collect()
-}
-
-fn active_download_ids(tasks: &Value) -> Vec<String> {
-    tasks
+/// 精确路径：用文件名缩小范围，再按完整路径比对。曲库的文本搜索不匹配目录部分。
+fn track_by_path(http: &HttpClient, path: &str) -> Result<i64> {
+    let name = Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let page = http.get_query(
+        "/api/library/tracks",
+        &[("q".to_string(), name), ("limit".to_string(), "200".to_string())],
+    )?;
+    page["items"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|task| !download_terminal(task))
-        .filter_map(|task| task["id"].as_str().map(str::to_string))
-        .collect()
+        .find(|item| item["path"].as_str() == Some(path))
+        .and_then(|item| item["id"].as_i64())
+        .ok_or_else(|| CliError::new("not_found", format!("曲库里没有这个文件：{path}")).into())
 }
 
-fn start_download_ids(tasks: &Value) -> Vec<String> {
-    tasks
-        .as_array()
-        .into_iter()
-        .flatten()
-        // start 会同时放行 queued 任务并重试 failed 音频任务。
-        // done/canceled 才是这次操作明确不会触及的记录。
-        .filter(|task| !matches!(task["state"].as_str(), Some("done" | "canceled")))
-        .filter_map(|task| task["id"].as_str().map(str::to_string))
-        .collect()
-}
-
-fn select_downloads(tasks: &Value, ids: &[String]) -> Result<Value> {
-    let items = tasks.as_array().context("下载列表不是数组")?;
-    let selected = ids
-        .iter()
-        .filter_map(|id| {
-            items
+fn track_by_text(http: &HttpClient, q: &str) -> Result<i64> {
+    let page = http.get_query(
+        "/api/library/tracks",
+        &[("q".to_string(), q.to_string()), ("limit".to_string(), "8".to_string())],
+    )?;
+    let items = page["items"].as_array().cloned().unwrap_or_default();
+    match items.as_slice() {
+        [] => Err(CliError::new("not_found", format!("没有匹配：{q}")).into()),
+        [only] => only["id"].as_i64().context("曲目没有 id"),
+        many => {
+            let mut error = CliError::new("ambiguous", format!("匹配不唯一（{} 首），请改用 --id", many.len()));
+            error.candidates = Some(json!(many
                 .iter()
-                .find(|task| task["id"].as_str() == Some(id.as_str()))
-                .cloned()
+                .map(|item| json!({ "id": item["id"], "title": item["title"], "artist": item["artist"], "path": item["path"] }))
+                .collect::<Vec<_>>()));
+            Err(error.into())
+        }
+    }
+}
+
+/// 缺分析的曲目当场插队分析（基础分析 + 节拍网格），全部有结果或失败后返回。
+/// 中断命令只是不再等待；已经开始的分析照常在 KDJ 里跑完。
+fn analyzed_tracks(http: &HttpClient, ids: &[i64]) -> Result<Vec<(Value, Value)>> {
+    let mut pending_basic = Vec::new();
+    let mut pending_grid = Vec::new();
+    for &id in ids {
+        let track = http.get_value(&format!("/api/library/tracks/{id}"))?;
+        if !analyzed(&track) {
+            let queued = http.post_json(
+                "/api/library/analyze",
+                &json!({ "track_ids": [id], "priority": true, "version": "v1" }),
+            )?;
+            if queued["queued"].as_u64().unwrap_or(0) > 0 {
+                pending_basic.push(id);
+            }
+        }
+        let rhythm = http.get_value(&format!("/api/library/rhythm/{id}"))?;
+        if rhythm["analysis"].is_null() {
+            let started = http.post_json(&format!("/api/library/rhythm/{id}"), &json!({}))?;
+            if started["queued"].as_u64().unwrap_or(0) > 0 || !started["job_id"].is_null() {
+                pending_grid.push(id);
+            }
+        }
+    }
+    while !pending_basic.is_empty() || !pending_grid.is_empty() {
+        std::thread::sleep(POLL);
+        let mut still = Vec::new();
+        for id in pending_basic {
+            if !analyzed(&http.get_value(&format!("/api/library/tracks/{id}"))?) {
+                still.push(id);
+            }
+        }
+        pending_basic = still;
+        let mut still = Vec::new();
+        for id in pending_grid {
+            let rhythm = http.get_value(&format!("/api/library/rhythm/{id}"))?;
+            let phase = rhythm["status"]["phase"].as_str().unwrap_or_default();
+            if rhythm["analysis"].is_null() && matches!(phase, "queued" | "analyzing") {
+                still.push(id);
+            }
+        }
+        pending_grid = still;
+    }
+    ids.iter()
+        .map(|&id| {
+            Ok((
+                http.get_value(&format!("/api/library/tracks/{id}"))?,
+                http.get_value(&format!("/api/library/rhythm/{id}"))?,
+            ))
         })
-        .collect::<Vec<_>>();
-    if selected.len() != ids.len() {
-        let found = selected
-            .iter()
-            .filter_map(|task| task["id"].as_str())
-            .collect::<Vec<_>>();
-        bail!("部分下载任务已不在队列中；找到：{}", json!(found));
-    }
-    Ok(Value::Array(selected))
+        .collect()
 }
 
-fn download_terminal(task: &Value) -> bool {
-    matches!(
-        task["state"].as_str(),
-        Some("paused" | "done" | "failed" | "canceled")
-    )
+fn analyzed(track: &Value) -> bool {
+    track["analyzed_at"].as_str().is_some_and(|s| !s.is_empty())
+        || track["analysis_error"].as_str().is_some_and(|s| !s.is_empty())
 }
 
-fn wait_for_downloads(http: &HttpClient, ids: &[String], timeout: u64) -> Result<Value> {
-    if ids.is_empty() {
-        return Ok(Value::Array(Vec::new()));
-    }
-    let deadline = Instant::now() + Duration::from_secs(timeout.max(1));
-    loop {
-        let selected = select_downloads(&http.get_value("/api/downloads")?, ids)?;
-        if selected
-            .as_array()
-            .is_some_and(|items| items.iter().all(download_terminal))
-        {
-            return Ok(selected);
-        }
-        if Instant::now() >= deadline {
-            bail!("等待下载超时；当前任务：{selected}");
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-}
-
-fn download_summary(tasks: Value, started: bool, waited: bool) -> Value {
-    let items = tasks.as_array().cloned().unwrap_or_default();
-    let paths = items
-        .iter()
-        .filter_map(|task| task["path"].as_str())
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let failures = items
-        .iter()
-        .filter(|task| matches!(task["state"].as_str(), Some("failed" | "canceled")))
-        .map(|task| {
-            json!({
-                "id": task.get("id"),
-                "title": task.get("title"),
-                "state": task.get("state"),
-                "error": task.get("error"),
-                "path": task.get("path"),
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "started": started,
-        "waited": waited,
-        "complete": items.iter().all(download_terminal),
-        "tasks": items,
-        "paths": paths,
-        "failures": failures,
-    })
-}
-
-fn wait_for_login(http: &HttpClient, platform: &str, session: &str, timeout: u64) -> Result<Value> {
-    let path = format!("/api/accounts/{platform}/login/qr/{session}");
-    let deadline = Instant::now() + Duration::from_secs(timeout.max(1));
-    loop {
-        let state = http.get_value(&path)?;
-        if matches!(
-            state["state"].as_str(),
-            Some("done" | "expired" | "refused" | "error")
-        ) {
-            return Ok(state);
-        }
-        if Instant::now() >= deadline {
-            bail!("等待扫码登录超时；当前状态：{state}");
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    }
-}
-
-fn filter_new_sources(resolved: &Value) -> Value {
-    let known = resolved
-        .get("in_library_source_keys")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let known: Vec<String> = known
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    let sources = resolved
-        .get("sources")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    Value::Array(
-        sources
-            .into_iter()
-            .filter(|source| {
-                let token = format!(
-                    "{}:{}",
-                    source["platform"].as_str().unwrap_or(""),
-                    source["key"].as_str().unwrap_or("")
-                );
-                !known.contains(&token)
-            })
-            .collect(),
-    )
-}
-
-fn pick_search_sources(search: &Value, picks: &[usize]) -> Result<Value> {
-    let groups = search["groups"]
+fn seconds(values: &Value) -> Vec<f64> {
+    values
         .as_array()
-        .context("搜索没有返回结果列表")?;
-    if groups.is_empty() {
-        bail!("没有可下载的搜索结果");
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_f64)
+        .map(|t| (t * 1000.0).round() / 1000.0)
+        .collect()
+}
+
+fn full_track(track: &Value, rhythm: &Value, beats: bool) -> Value {
+    let mut item = brief_track(track);
+    for field in ["album", "music_key", "comment", "tags", "cue_points"] {
+        item[field] = track[field].clone();
     }
-    let picks = if picks.is_empty() { &[1][..] } else { picks };
-    let mut seen = Vec::new();
-    let mut sources = Vec::with_capacity(picks.len());
-    for &pick in picks {
-        if pick == 0 {
-            bail!("--pick 从 1 开始");
-        }
-        if seen.contains(&pick) {
-            bail!("--pick {pick} 重复");
-        }
-        seen.push(pick);
-        let group = groups
-            .get(pick - 1)
-            .with_context(|| format!("--pick {pick} 超出搜索结果数 {}", groups.len()))?;
-        let group_sources = group["sources"]
-            .as_array()
-            .with_context(|| format!("第 {pick} 条结果没有可用来源"))?;
-        let best = group["best_source_index"].as_u64().unwrap_or(0) as usize;
-        let source = group_sources
-            .get(best)
-            .with_context(|| format!("第 {pick} 条结果的最佳来源不存在"))?;
-        sources.push(source.clone());
+    if let Some(platform) = track["source_platform"].as_str().filter(|p| !p.is_empty()) {
+        item["source"] = json!({ "platform": platform, "key": track["source_key"] });
     }
-    Ok(Value::Array(sources))
-}
-
-fn project_search(value: Value) -> Value {
-    let groups = value
-        .get("groups")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|group| {
-            json!({
-                "group_id": group.get("group_id"),
-                "title": group.get("title"),
-                "artists": group.get("artists"),
-                "duration": group.get("duration"),
-                "in_library": group.get("in_library"),
-                "best_source": group.get("sources")
-                    .and_then(Value::as_array)
-                    .and_then(|sources| {
-                        let index = group["best_source_index"].as_u64().unwrap_or(0) as usize;
-                        sources.get(index).cloned()
-                    })
-                    .map(|source| json!({
-                        "platform": source.get("platform"),
-                        "key": source.get("key"),
-                        "max_quality": source.get("max_quality"),
-                    })),
-            })
-        })
-        .collect::<Vec<_>>();
-    let collections = value
-        .get("collections")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|item| {
-            json!({
-                "kind": item.get("kind"),
-                "platform": item.get("platform"),
-                "key": item.get("key"),
-                "title": item.get("title"),
-                "count": item.get("count"),
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "query": value.get("query"),
-        "groups": groups,
-        "collections": collections,
-        "errors": value.get("errors"),
-        "elapsed_ms": value.get("elapsed_ms"),
-    })
-}
-
-fn project_collection(value: &Value) -> Value {
-    json!({
-        "kind": value.get("kind"),
-        "platform": value.get("platform"),
-        "title": value.get("title"),
-        "count": value.get("sources").and_then(Value::as_array).map(Vec::len),
-    })
-}
-
-fn project_track_page(page: Value) -> Value {
-    let items = page
-        .get("items")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(brief_track)
-        .collect::<Vec<_>>();
-    json!({
-        "items": items,
-        "total": page.get("total"),
-        "offset": page.get("offset"),
-        "limit": page.get("limit"),
-    })
-}
-
-fn project_harmonic(matches: Value) -> Value {
-    let items = matches
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|item| {
-            json!({
-                "relation": item.get("relation"),
-                "relation_label": item.get("relation_label"),
-                "bpm_delta": item.get("bpm_delta"),
-                "score": item.get("score"),
-                "track": brief_track(item.get("track").unwrap_or(&Value::Null)),
-            })
-        })
-        .collect::<Vec<_>>();
-    json!(items)
+    if let Some(error) = track["analysis_error"].as_str().filter(|e| !e.is_empty()) {
+        item["analysis_error"] = json!(error);
+    }
+    let analysis = &rhythm["analysis"];
+    item["grid"] = if analysis.is_null() {
+        if let Some(error) = rhythm["status"]["error"].as_str().filter(|e| !e.is_empty()) {
+            item["grid_error"] = json!(error);
+        }
+        Value::Null
+    } else {
+        let mut grid = json!({
+            "bpm": analysis["bpm"],
+            "confidence": analysis["confidence"],
+            "downbeat_confidence": analysis["downbeat_confidence"],
+            "downbeats": seconds(&analysis["downbeats"]),
+            "segments": analysis["segments"].as_array().into_iter().flatten().map(|s| json!({
+                "start": s["start_seconds"], "end": s["end_seconds"], "bpm": s["bpm"],
+            })).collect::<Vec<_>>(),
+        });
+        if beats {
+            grid["beats"] = json!(seconds(&analysis["beats"]));
+        }
+        grid
+    };
+    item
 }
 
 fn brief_track(track: &Value) -> Value {
@@ -1056,8 +611,9 @@ fn brief_track(track: &Value) -> Value {
         "id": track.get("id"),
         "title": track.get("title"),
         "artist": track.get("artist"),
+        "duration": track.get("duration"),
         "bpm": track.get("bpm"),
-        "camelot": track.get("camelot"),
+        "key": track.get("camelot"),
         "energy": track.get("energy"),
         "rating": track.get("rating"),
         "path": track.get("path"),
@@ -1066,21 +622,42 @@ fn brief_track(track: &Value) -> Value {
     })
 }
 
-fn emit_ok(data: Value) -> i32 {
-    emit(&json!({ "ok": true, "data": data }));
-    0
+fn parse_bpm(raw: Option<&str>) -> Result<(Option<f64>, Option<f64>)> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((None, None));
+    };
+    let parse = |text: &str| {
+        text.trim()
+            .parse::<f64>()
+            .map_err(|_| anyhow::Error::from(CliError::new("usage", format!("--bpm 无效：{raw}"))))
+    };
+    if let Some((lo, hi)) = raw.split_once("..") {
+        return Ok((Some(parse(lo)?), Some(parse(hi)?)));
+    }
+    let value = parse(raw)?;
+    Ok((Some(value), Some(value)))
 }
 
-fn emit_err(code: i32, err: &str, message: &str, hint: Option<&str>) -> i32 {
-    emit(&json!({
-        "ok": false,
-        "error": { "code": err, "message": message, "hint": hint },
-    }));
-    code
+// ---------------------------------------------------------------- output
+
+fn emit_ok(data: Value) {
+    println!("{}", json!({ "ok": true, "data": data }));
 }
 
-fn emit(value: &Value) {
-    println!("{value}");
+fn emit_err(error: &CliError, hint: Option<&str>) -> i32 {
+    let mut body = json!({ "code": error.code, "message": error.message });
+    if let Some(hint) = hint {
+        body["hint"] = json!(hint);
+    }
+    if let Some(candidates) = &error.candidates {
+        body["candidates"] = candidates.clone();
+    }
+    println!("{}", json!({ "ok": false, "error": body }));
+    if error.code == "usage" {
+        2
+    } else {
+        1
+    }
 }
 
 fn attach_windows_console() {
@@ -1095,161 +672,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn download_summary_returns_final_paths_and_failures() {
-        let summary = download_summary(
-            json!([
-                {
-                    "id": "done-1",
-                    "title": "Finished",
-                    "state": "done",
-                    "path": "/music/Finished.flac"
-                },
-                {
-                    "id": "failed-1",
-                    "title": "Broken",
-                    "state": "failed",
-                    "error": "upstream failed",
-                    "path": ""
-                }
-            ]),
-            true,
-            true,
-        );
-        assert_eq!(summary["complete"], true);
-        assert_eq!(summary["paths"], json!(["/music/Finished.flac"]));
-        assert_eq!(summary["failures"][0]["id"], "failed-1");
-    }
-
-    #[test]
-    fn start_tracks_queued_running_and_retryable_failed_tasks() {
-        let ids = start_download_ids(&json!([
-            {"id": "queued", "state": "queued"},
-            {"id": "running", "state": "running"},
-            {"id": "failed", "state": "failed"},
-            {"id": "done", "state": "done"},
-            {"id": "canceled", "state": "canceled"}
-        ]));
-        assert_eq!(ids, vec!["queued", "running", "failed"]);
-    }
-
-    #[test]
-    fn search_download_uses_the_selected_groups_best_sources() {
-        let search = json!({
-            "groups": [
-                {
-                    "best_source_index": 1,
-                    "sources": [
-                        {"platform": "qqm", "key": "q1"},
-                        {"platform": "wyy", "key": "w1"}
-                    ]
-                },
-                {
-                    "best_source_index": 0,
-                    "sources": [{"platform": "wyy", "key": "w2"}]
-                }
-            ]
-        });
+    fn usage_lists_every_command_with_its_options() {
+        let commands = usage();
+        let lines: Vec<&str> = commands.iter().filter_map(|c| c["usage"].as_str()).collect();
         assert_eq!(
-            pick_search_sources(&search, &[]).unwrap(),
-            json!([{"platform": "wyy", "key": "w1"}])
-        );
-        assert_eq!(
-            pick_search_sources(&search, &[2]).unwrap(),
-            json!([{"platform": "wyy", "key": "w2"}])
-        );
-        assert!(pick_search_sources(&search, &[1, 1]).is_err());
-    }
-
-    /// 逐个连接应答；每次都 `Connection: close`，reqwest 才不会复用连接把第二个请求粘到第一个上。
-    fn stub_server(
-        listener: std::net::TcpListener,
-        responses: Vec<Value>,
-    ) -> std::thread::JoinHandle<Vec<(String, String)>> {
-        use std::io::{Read, Write};
-        std::thread::spawn(move || {
-            responses
-                .into_iter()
-                .map(|response| {
-                    let (mut stream, _) = listener.accept().unwrap();
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(5)))
-                        .unwrap();
-                    let mut head = Vec::new();
-                    let mut byte = [0];
-                    while !head.ends_with(b"\r\n\r\n") {
-                        stream.read_exact(&mut byte).unwrap();
-                        head.push(byte[0]);
-                    }
-                    let head = String::from_utf8(head).unwrap();
-                    let length = head
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|value| value.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap_or(0);
-                    let mut body = vec![0; length];
-                    stream.read_exact(&mut body).unwrap();
-                    let payload = response.to_string();
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                        payload.len()
-                    )
-                    .unwrap();
-                    (head, String::from_utf8(body).unwrap())
-                })
-                .collect()
-        })
-    }
-
-    #[test]
-    fn download_flow_starts_only_the_tasks_it_enqueued() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = stub_server(
-            listener,
+            lines,
             vec![
-                json!({"started": true, "retried": 0}),
-                json!([
-                    {"id": "a", "state": "running"},
-                    {"id": "b", "state": "queued"},
-                    {"id": "theirs", "state": "queued"}
-                ]),
-            ],
+                "kdj status",
+                "kdj search <TEXT>",
+                "kdj download <REF>...",
+                "kdj login <PLATFORM>",
+                "kdj peek <SOURCE>",
+                "kdj align",
+                "kdj library list",
+                "kdj library get",
+            ]
         );
-        let http = HttpClient::new(&format!("http://{address}"), "test-token").unwrap();
-        let options = DownloadFlowArgs {
-            to: None,
-            quality: None,
-            no_analyze: false,
-            start: true,
-            wait: false,
-            timeout: None,
-        };
-        let result = run_download_flow(
-            &http,
-            json!([{"id": "a", "state": "queued"}, {"id": "b", "state": "queued"}]),
-            &options,
-        )
-        .unwrap();
+        let download = &commands[2]["options"];
+        assert!(download.get("--as audio|video").is_some(), "{download}");
+        assert!(download.get("--to <DIR>").is_some(), "{download}");
+        assert!(commands[1]["options"]["--kind song|playlist|album|artist|radio"]
+            .as_str()
+            .unwrap()
+            .contains("默认 song"));
+        // 隐藏的调试参数不进说明
+        assert!(!commands.iter().any(|c| c.to_string().contains("--data-dir")));
+    }
 
-        let requests = server.join().unwrap();
-        assert!(
-            requests[0].0.starts_with("POST /api/downloads/start "),
-            "{}",
-            requests[0].0
-        );
-        assert_eq!(
-            serde_json::from_str::<Value>(&requests[0].1).unwrap(),
-            json!({"ids": ["a", "b"]})
-        );
-        assert!(
-            requests[1].0.starts_with("GET /api/downloads "),
-            "{}",
-            requests[1].0
-        );
-        assert_eq!(result["tasks"].as_array().unwrap().len(), 2);
+    #[test]
+    fn full_track_keeps_downbeats_and_beats_only_on_request() {
+        let track = json!({ "id": 1, "title": "t", "analyzed_at": "now", "source_platform": "" });
+        let rhythm = json!({ "analysis": {
+            "bpm": 128.0, "confidence": 0.9, "downbeat_confidence": 0.8,
+            "beats": [0.1234, 0.5921], "downbeats": [0.1234],
+            "segments": [{ "start_seconds": 0.0, "end_seconds": 1.0, "bpm": 128.0, "confidence": 1.0 }],
+        }});
+        let item = full_track(&track, &rhythm, false);
+        assert_eq!(item["grid"]["downbeats"], json!([0.123]));
+        assert!(item["grid"].get("beats").is_none());
+        assert!(item.get("source").is_none());
+        assert_eq!(full_track(&track, &rhythm, true)["grid"]["beats"], json!([0.123, 0.592]));
+    }
+
+    #[test]
+    fn times_accept_seconds_and_clock_forms() {
+        assert_eq!(parse_time("75.5").unwrap(), 75.5);
+        assert_eq!(parse_time("1:30").unwrap(), 90.0);
+        assert_eq!(parse_time("1:02:03").unwrap(), 3723.0);
+        assert_eq!(parse_time("soon").unwrap_err().downcast_ref::<CliError>().unwrap().code, "usage");
+    }
+
+    #[test]
+    fn bpm_ranges_parse_or_fail_as_usage() {
+        assert_eq!(parse_bpm(Some("124..130")).unwrap(), (Some(124.0), Some(130.0)));
+        let err = parse_bpm(Some("fast")).unwrap_err();
+        assert_eq!(err.downcast_ref::<CliError>().unwrap().code, "usage");
     }
 }
