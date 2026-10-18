@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
-import { Download, Settings, Sparkles, TextQuote } from "lucide-react";
+import { Download, Settings, TextQuote } from "lucide-react";
 import { shownLyricsExtent, useLyricsExtent, useLyricsExtentShape } from "../../lib/lyricsExtent";
 import type { PlayingLyrics } from "../../lib/playingLyrics";
 import { settingsPages, useSettingsPage, type SettingsPage } from "../../lib/settingsPages";
@@ -7,7 +7,6 @@ import { useSidePanels } from "../../lib/sidePanels";
 import { useTrackMetaEditor } from "../../lib/trackMetaEditor";
 import { visualizerExportActive } from "../../lib/visualizerExportQueue";
 import { studioTabs, useStudioTab, type StudioTab } from "../../lib/visualizerStudioTabs";
-import { aiOffered, useAiStore } from "../../stores/aiStore";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useTaskPanelStore, type TaskPanelView } from "../../stores/taskPanelStore";
@@ -125,7 +124,6 @@ export function useDrawerEntries(): DrawerEntry[] {
   const exporting = useWorkshopStore(state => state.jobs.reduce((count, job) => count + (exportRunning(job.phase) ? 1 : 0), 0));
   const rendering = useVisualizerExportStore(state => state.tasks.reduce((count, task) => count + (visualizerExportActive(task) ? 1 : 0), 0));
   const running = downloading + exporting + rendering;
-  const aiOpen = useAiStore(state => state.open);
   return useMemo(() => [
     {
       id: "downloads",
@@ -142,19 +140,11 @@ export function useDrawerEntries(): DrawerEntry[] {
       // No lyrics: a small note says so, under this entry; an empty panel does not come out.
       open: () => requestPlayingLyrics(undefined, "top"),
     },
-    ...(aiOffered() ? [{
-      id: "ai",
-      label: "AI",
-      icon: <Sparkles size={15} aria-hidden="true" />,
-      // The corner at the bottom right, not a drawer app (docs/ai-dock.md).
-      pressed: aiOpen,
-      open: () => useAiStore.getState().toggle(),
-    }] : []),
     {
       id: "settings",
       label: "设置",
       icon: <Settings size={15} aria-hidden="true" />,
       open: () => useAppStore.getState().openSettingsPanel(),
     },
-  ], [running, aiOpen]);
+  ], [running]);
 }

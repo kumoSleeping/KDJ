@@ -10,8 +10,7 @@ KDJ 里的 AI 是用户自己装的 [pi](https://pi.dev)，由 kdj-server 以 `p
 
 ## 位置
 
-- 入口是抽屉入口行里的 **AI**（`DrawerEntry.pressed`：它不是抽屉应用，按下状态由它自己给）。
-  只在桌面端出现。
+- 入口是顶栏右侧按键里的 **AI**（`ChromeActions.tsx`，下载与导出之后），按下时浮层在。只在桌面端出现。
 - 浮层在右下角，和底部气泡同样的间距，站在播放条上；播放条收起时随它下到窗口底边（`translate`，
   播放条自己的时钟）。从播放条后面滑上来（`motion("slide", { edge: "bottom" })`），宽度与普通气泡相同。
 - **底部气泡给它让位**（`useAiDockPlace`，`TaskBubbleHost` 读）：

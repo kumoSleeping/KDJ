@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { usesKvjWindow } from "../../lib/windowRole";
 import { showKvj } from "../../lib/kvjWindow";
-import { BriefcaseBusiness, Radio, Moon, Settings, Sun, Upload, Palette, Clapperboard, Download } from "lucide-react";
+import { BriefcaseBusiness, Radio, Moon, Settings, Sun, Upload, Palette, Clapperboard, Download, Sparkles } from "lucide-react";
 import { ContextMenu } from "../common/ContextMenu";
 import { cycleThemePack, OFFICIAL_THEMES, useThemePack } from "../../lib/themePack";
+import { aiOffered, useAiStore } from "../../stores/aiStore";
 import { useAppStore } from "../../stores/appStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { ChromeMiniPlayerKey } from "../player/MiniPlayer";
@@ -39,6 +40,7 @@ export function ChromeActions({
   const tipsFresh = useTipsNudge(state => state.fresh);
   useEffect(() => { if (onTips) greetTipsOnNewBuild(); }, [onTips]);
   const compositionMode = useAppStore(state => state.compositionMode);
+  const aiOpen = useAiStore(state => state.open);
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
   const latest = useUpdateStore((s) => s.info?.latest ?? "");
   const openUpdateSection = useUpdateStore((s) => s.openUpdateSection);
@@ -54,6 +56,11 @@ export function ChromeActions({
       </button>}
       <button type="button" className="kd-chrome-btn" title="下载与导出" aria-label="下载与导出"
         data-kd-search-queue-drop="entry" aria-pressed={tasksOpen} data-open={tasksOpen || undefined} onClick={onTasks}><Download size={16} /></button>
+      {/* The AI corner at the bottom right (docs/ai-dock.md); desktop only. */}
+      {aiOffered() && <button type="button" className="kd-chrome-btn" title="AI" aria-label="AI"
+        aria-pressed={aiOpen} data-open={aiOpen || undefined} onClick={() => useAiStore.getState().toggle()}>
+        <Sparkles size={16} />
+      </button>}
       {updateReady ? (
         <button
           type="button"
