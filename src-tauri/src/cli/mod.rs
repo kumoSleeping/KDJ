@@ -27,6 +27,32 @@ pub fn launch_mode() -> Launch {
     Launch::Client
 }
 
+/// 带错误码的失败。AI 按 `error.code` 分支，不去解析中文消息。
+#[derive(Debug)]
+pub struct CliError {
+    pub code: &'static str,
+    pub message: String,
+    pub candidates: Option<serde_json::Value>,
+}
+
+impl CliError {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        CliError {
+            code,
+            message: message.into(),
+            candidates: None,
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CliError {}
+
 pub fn run_client() -> i32 {
     commands::run()
 }
