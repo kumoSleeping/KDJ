@@ -1,0 +1,399 @@
+/* The AI corner (docs/ai-dock.md). A floating surface at the bottom right, the task bubble's own
+   kind: the list's colour, the float edge and shadow, round on every corner, the bottom stack's
+   gap to the window's edge and to the bar. It slides up from behind the bar (z-index under the
+   bar's 60), stands on it, and rides it down and up when the bar is put away or brought back
+   (--kd-ai-floor, as `translate`, which leaves the arriving gesture's transform alone). */
+.kd-ai-dock {
+  --kd-ai-gap: 12px;
+  position: fixed;
+  z-index: 59;
+  right: var(--kd-ai-gap);
+  bottom: var(--kd-ai-gap);
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(24rem, calc(100vw - 2 * var(--kd-ai-gap)));
+  max-height: min(36rem, calc(100dvh - var(--kd-ai-floor, 0px) - var(--kd-chrome-top, 3rem) - 3rem));
+  overflow: hidden;
+  border: 1px solid var(--kd-float-edge, var(--kd-line));
+  border-radius: 12px;
+  background: var(--kd-panel);
+  box-shadow: var(--kd-float-shadow);
+  color: var(--kd-text);
+  font: var(--kd-size-sm)/1.45 var(--kd-font);
+  translate: 0 calc(-1 * var(--kd-ai-floor, 0px));
+  transition: translate var(--kd-motion-in) var(--kd-ease-out);
+}
+/* Put away, the bar leaves on the leaving clock and the dock goes down with it. */
+.kd-ai-dock[data-bar="leaving"] {
+  transition: translate var(--kd-motion-out) var(--kd-ease-in);
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-ai-dock { transition: none; }
+}
+
+.kd-ai-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 2.25rem;
+  padding: 4px 6px 2px 12px;
+}
+.kd-ai-name { font-weight: 700; }
+.kd-ai-busy { flex: none; color: var(--kd-text); }
+.kd-ai-model {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-ai-update {
+  flex: none;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  cursor: pointer;
+}
+.kd-ai-update:hover { color: var(--kd-text); }
+.kd-ai-keys {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.kd-ai-key {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-ai-key:hover:not(:disabled) { background: var(--kd-hover); color: var(--kd-text); }
+.kd-ai-key:disabled { opacity: 0.45; cursor: default; }
+
+/* The conversation: the listener's lines on a quiet tone at the right, the model's text in the
+   body ink, and one step per tool. Spacing separates them; nothing is ruled. */
+.kd-ai-log {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 4px 12px 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.kd-ai-user,
+.kd-ai-text,
+.kd-ai-note {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.kd-ai-user {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 5px 10px;
+  border-radius: 10px;
+  background: var(--kd-hover);
+}
+.kd-ai-text { color: var(--kd-text-body); }
+.kd-ai-note { color: var(--kd-muted); font-size: var(--kd-size-xs); }
+.kd-ai-note[data-tone="error"] { color: var(--kd-warn); }
+.kd-ai-thinking {
+  display: grid;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-faint);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.kd-ai-thinking-text { color: var(--kd-muted); white-space: pre-wrap; }
+
+/* A step: what the tool does, written as it runs, and what it brought back under it. */
+.kd-ai-step { display: grid; gap: 4px; }
+.kd-ai-step-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.kd-ai-step-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 14px;
+  color: var(--kd-muted);
+}
+.kd-ai-step[data-state="running"] .kd-ai-step-mark { color: var(--kd-text); }
+.kd-ai-step[data-state="error"] .kd-ai-step-mark { color: var(--kd-warn); }
+.kd-ai-step-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-ai-step-facts {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-ai-step-toggle { width: 1.25rem; height: 1.25rem; margin-left: auto; }
+.kd-ai-step-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding-left: 20px;
+}
+.kd-ai-step-caption { color: var(--kd-muted); font-size: var(--kd-size-xs); }
+.kd-ai-step-text {
+  max-height: 10rem;
+  margin: 0;
+  overflow: auto;
+  color: var(--kd-muted);
+  font: var(--kd-size-xs)/1.45 var(--kd-font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.kd-ai-rows {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.kd-ai-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 1.5rem;
+}
+.kd-ai-row-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 12px;
+  color: var(--kd-muted);
+}
+.kd-ai-row[data-state="done"] .kd-ai-row-mark { color: var(--kd-ok); }
+.kd-ai-row[data-state="failed"] .kd-ai-row-mark { color: var(--kd-warn); }
+.kd-ai-row-copy {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.kd-ai-row-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-ai-row-sub {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-ai-row-sub[data-tone="error"] { color: var(--kd-warn); }
+.kd-ai-row-tail {
+  flex: none;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+.kd-ai-more {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+.kd-ai-more:hover { color: var(--kd-text); }
+.kd-ai-errors {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--kd-warn);
+  font-size: var(--kd-size-xs);
+}
+.kd-ai-progress {
+  display: block;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kd-text) 12%, transparent);
+}
+.kd-ai-progress > i {
+  display: block;
+  height: 100%;
+  background: var(--kd-text);
+  transform-origin: left center;
+  transition: transform var(--kd-motion-micro) var(--kd-ease-out);
+}
+
+/* A question from pi: its choices as plain keys. */
+.kd-ai-ask {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--kd-hover);
+}
+.kd-ai-ask-title { font-weight: 600; }
+.kd-ai-ask-message,
+.kd-ai-ask-answer { color: var(--kd-muted); font-size: var(--kd-size-xs); white-space: pre-wrap; }
+.kd-ai-ask-keys,
+.kd-ai-ask-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.kd-ai-ask-input {
+  flex: 1 1 8rem;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--kd-line);
+  border-radius: 6px;
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  font: inherit;
+}
+.kd-ai-choice {
+  padding: 2px 10px;
+  border: 1px solid var(--kd-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  cursor: pointer;
+}
+.kd-ai-choice:hover { background: var(--kd-hover); }
+.kd-ai-choice[data-quiet] { border-color: transparent; color: var(--kd-muted); }
+
+/* What is written to pi: a quiet field at the foot. A line sent while pi works steers it; with
+   nothing written the key stops it. */
+.kd-ai-composer {
+  display: flex;
+  flex: none;
+  align-items: flex-end;
+  gap: 6px;
+  margin: 0 8px 8px;
+  padding: 4px 4px 4px 10px;
+  border-radius: 10px;
+  background: var(--kd-hover);
+}
+.kd-ai-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 7.5em;
+  padding: 4px 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  line-height: 1.45;
+  resize: none;
+}
+.kd-ai-send { width: 1.75rem; height: 1.75rem; border-radius: 50%; color: var(--kd-text); }
+.kd-ai-blocked {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 12px 12px;
+  color: var(--kd-muted);
+}
+.kd-ai-blocked > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+
+/* 使用提示 → AI: steps to follow, numbered, in the tips' own type; links in ink, underlined. */
+.kd-ai-lessons {
+  justify-items: stretch;
+  margin: 0;
+  padding-left: 2.1rem;
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+  line-height: 1.6;
+}
+.kd-ai-lessons > li { display: list-item; }
+.kd-ai-lessons > li > * + * { margin-top: 0.5rem; }
+.kd-ai-lessons > li::marker { color: var(--kd-muted); font-weight: 700; }
+.kd-ai-lessons p { margin: 0; }
+.kd-ai-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.kd-ai-lesson-command {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 4px 4px 10px;
+  border-radius: 8px;
+  background: var(--kd-hover);
+}
+.kd-ai-lesson-command > code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  font: var(--kd-size-xs)/1.5 var(--kd-font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+}
+.kd-ai-examples { display: grid; gap: 6px; }
+.kd-ai-example {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--kd-hover);
+  color: var(--kd-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kd-ai-example:hover { background: color-mix(in srgb, var(--kd-hover), var(--kd-text) 6%); }

@@ -330,7 +330,7 @@ function DrawerEntries({ entries, front, onAsk }: {
   return <>{entries.map(entry => {
     const name = entry.title ?? entry.label;
     return <button key={entry.id} type="button" className="kd-drawer-entry" data-drawer-entry={entry.id}
-      aria-pressed={front === entry.id} aria-label={entry.count ? `${name}，${entry.count} 项进行中` : name}
+      aria-pressed={front === entry.id || !!entry.pressed} aria-label={entry.count ? `${name}，${entry.count} 项进行中` : name}
       title={name} onClick={() => onAsk(entry)}>
       {entry.icon}
       {entry.count ? <span className="kd-drawer-entry-count" aria-hidden="true">{entry.count > 99 ? "99+" : entry.count}</span> : null}

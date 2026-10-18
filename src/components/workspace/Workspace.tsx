@@ -170,7 +170,7 @@ import {
   SearchBar,
 } from "../download/SearchBar";
 import { SearchTipsPanel } from "../download/SearchTipsPanel";
-import { tipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
+import { shownTipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
 import { useTipsNudge } from "../../lib/tipsNudge";
 import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
 import { DETAIL_EVENT } from "../library/TrackTable";
@@ -1817,7 +1817,7 @@ export function Workspace() {
     tools: asideTools,
     // 使用提示按功能分页：页签在标题上，选哪一类就教哪一类。
     ...(showSearchTips ? {
-      pages: tipsPages,
+      pages: shownTipsPages(),
       usePage: useTipsPageInView,
       onPage: (id: string) => useTipsPage.getState().setPage(id as TipsPage),
     } : {}),

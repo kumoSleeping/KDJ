@@ -17,10 +17,18 @@
   z-index: 120;
   top: 0;
   right: 0;
-  bottom: var(--kd-task-floor, 0px);
+  bottom: calc(var(--kd-task-floor, 0px) + var(--kd-task-under, 0px));
   left: 0;
   overflow: hidden;
   pointer-events: none;
+}
+/* The AI dock stands at the bottom right (docs/ai-dock.md): the bottom stack moves to its left
+   (--kd-task-aside, the dock's width and the gap to it) or, in a window without room for both,
+   onto it (--kd-task-under, added to the floor above). Moving aside follows the dock in or out
+   on the large-surface clock. */
+.kd-task-host[data-place="bottom"] {
+  right: var(--kd-task-aside, 0px);
+  transition: right var(--kd-motion-in) var(--kd-ease-out);
 }
 /* The top host hangs under the search row, where the drawer's panels have their place: it
    clips at that row's bottom edge and ends at the right edge of the list's column

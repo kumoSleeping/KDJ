@@ -1315,6 +1315,24 @@ export const visualizerApi = {
   cancel: (id: string, keepalive = false) => request<VisualizerJobStatus>(`/visualizer/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST", keepalive }),
 };
 
+/**
+ * The AI corner (docs/ai-dock.md). Nothing here is written to the activity log: the provider key
+ * and the conversation stay out of it.
+ */
+export const aiApi = {
+  status: (refresh = false) => request<import("../types/ai").AiStatus>(`/ai/status${refresh ? "?refresh=1" : ""}`, {}, null),
+  models: (provider: string) =>
+    request<{ models: import("../types/ai").AiModel[] }>(`/ai/models?provider=${encodeURIComponent(provider)}`, {}, null),
+  saveProvider: (body: { provider: string; key?: string; model?: string | null }) =>
+    request<import("../types/ai").AiStatus>("/ai/provider", { method: "PUT", body: JSON.stringify(body) }, null),
+  prompt: (message: string) =>
+    request<{ disposition: string }>("/ai/prompt", { method: "POST", body: JSON.stringify({ message }) }, null),
+  abort: () => request<void>("/ai/abort", { method: "POST" }, null),
+  reset: () => request<void>("/ai/reset", { method: "POST" }, null),
+  answer: (body: { id: string; value?: string; confirmed?: boolean; cancelled?: boolean }) =>
+    request<void>("/ai/answer", { method: "POST", body: JSON.stringify(body) }, null),
+};
+
 /* ---------------------------------------------------------------- WebSocket */
 
 type Listener = (event: WsEvent) => void;

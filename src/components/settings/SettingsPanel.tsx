@@ -53,6 +53,8 @@ import { AccountRow, linkedAccount, linkedPlatforms } from "./AccountRow";
 import { ActivityLogPanel } from "./ActivityLogPanel";
 import { UpdateRow } from "./UpdateRow";
 import { FfmpegPanel } from "./FfmpegPanel";
+import { AiPanel } from "./AiPanel";
+import { aiOffered } from "../../stores/aiStore";
 
 import "./Preferences.css";
 
@@ -474,6 +476,30 @@ export function SettingsPanel({ preferences = false, page }: {
 
   const ffmpegFocusEpoch = useSettingsFocus((s) => (s.section === "ffmpeg" ? s.epoch : 0));
   const ffmpegSectionRef = useRef<HTMLDivElement>(null);
+  const aiFocusEpoch = useSettingsFocus((s) => (s.section === "ai" ? s.epoch : 0));
+  const aiSectionRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!aiFocusEpoch) return;
+    // The AI section follows the media tools at the end of the system page.
+    useSettingsPage.getState().setPage("system");
+    useSettingsFocus.getState().clear();
+    let frame = 0;
+    const scrollToAi = () => {
+      const section = aiSectionRef.current;
+      if (!section) {
+        if (frame++ < 30) requestAnimationFrame(scrollToAi);
+        return;
+      }
+      const scrollHost = section.closest(".kd-scroll") as HTMLElement | null;
+      if (!scrollHost) return;
+      const top =
+        section.getBoundingClientRect().top -
+        scrollHost.getBoundingClientRect().top +
+        scrollHost.scrollTop;
+      scrollHost.scrollTo({ top: Math.max(0, top), behavior: frame > 0 ? "auto" : "smooth" });
+    };
+    scrollToAi();
+  }, [aiFocusEpoch]);
   useEffect(() => {
     if (!ffmpegFocusEpoch) return;
     // The media tools sit at the end of the system page: open it, then scroll down to them.
@@ -787,6 +813,8 @@ export function SettingsPanel({ preferences = false, page }: {
 
         {on("system") && ["darwin", "win32", "linux"].includes(getBridge().platform)
           ? <div ref={ffmpegSectionRef} id="kd-settings-ffmpeg"><FfmpegPanel /></div> : null}
+        {on("system") && aiOffered()
+          ? <div ref={aiSectionRef} id="kd-settings-ai"><AiPanel /></div> : null}
       </div>
     </div>
   );

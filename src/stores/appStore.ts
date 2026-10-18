@@ -1,6 +1,6 @@
 /**
  * 应用级状态：当前板块、health、设置、账号。
- * WS 事件也在这里统一分发给三个 store（见 connectEvents），
+ * WS 事件也在这里统一分发给各个 store（见 connectEvents），
  * 组件不要自己 events.subscribe——那样每个组件都会各自处理一遍同一条事件。
  */
 
@@ -24,6 +24,7 @@ import { useDownloadStore } from "./downloadStore";
 import { useWorkshopStore } from "./workshopStore";
 import { useCompositionStore } from "./compositionStore";
 import { useLibraryStore } from "./libraryStore";
+import { useAiStore } from "./aiStore";
 import { useStreamBrowseStore } from "./streamBrowseStore";
 import { useSidebarVisibilityStore } from "./sidebarVisibilityStore";
 
@@ -751,5 +752,6 @@ export function connectEvents(): () => void {
     useCompositionStore.getState().handleEvent(event);
     useWorkshopStore.getState().handleEvent(event);
     useLibraryStore.getState().handleEvent(event);
+    useAiStore.getState().handleEvent(event);
   });
 }

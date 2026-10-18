@@ -975,7 +975,9 @@ export type WsEvent =
   | { type: "maintenance.progress"; payload: MaintenanceProgress }
   | { type: "library.updated"; payload: { track_ids: number[] } }
   | { type: "library.folders.updated"; payload: Record<string, never> }
-  | { type: "account.changed"; payload: Account };
+  | { type: "account.changed"; payload: Account }
+  | { type: "ai.event"; payload: import("./types/ai").PiEvent }
+  | { type: "ai.status"; payload: import("./types/ai").AiStatus };
 
 /* ---------------------------------------------------------------- preload */
 

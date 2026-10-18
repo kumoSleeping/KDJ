@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, Check, ChevronsDown, ChevronsUp, ChevronsUpDown, Info, LoaderCircle } from "lucide-react";
+import { useAiDockPlace } from "../../lib/aiDockPlace";
 import { useCoverLoad } from "../../lib/coverLoad";
 import { useMiniPlayer } from "../../lib/miniPlayer";
 import { MOTION_MICRO_MS, MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS } from "../../lib/motion";
 import { playerBarMoving, usePlayerBarAway } from "../../lib/playerBarAway";
+import { usePlayerBarHeight } from "../../lib/playerBarHeight";
 import { prefersReducedSeekMotion } from "../../lib/seekTransition";
 import {
   SONG_SWAP_IN_EASE,
@@ -448,7 +450,6 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
   // transform on the same clock. That is settled when the slide starts: with nothing standing
   // on the bar there is nothing to carry, and a bubble the slide itself brings (the playing
   // song, as the bar goes) rises from the window's edge while the bar sinks behind it.
-  const [floor, setFloor] = useState(0);
   const barPhase = usePlayerBarAway(state => state.phase);
   const ride = useRef({ phase: barPhase, on: false });
   if (ride.current.phase !== barPhase) {
@@ -462,23 +463,14 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
   const underBar = barPhase === "returning" && !riding;
   const [root, setRoot] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => { setRoot(document.querySelector<HTMLElement>(".kd-app")); }, []);
-  useLayoutEffect(() => {
-    if (!root) return;
-    let bar: HTMLElement | null = null;
-    const size = new ResizeObserver(() => setFloor(bar?.offsetHeight ?? 0));
-    const find = () => {
-      const next = root.querySelector<HTMLElement>(":scope > .kd-player");
-      if (next === bar) return;
-      if (bar) size.unobserve(bar);
-      bar = next;
-      if (bar) size.observe(bar);
-      setFloor(bar?.offsetHeight ?? 0);
-    };
-    find();
-    const children = new MutationObserver(find);
-    children.observe(root, { childList: true });
-    return () => { children.disconnect(); size.disconnect(); };
-  }, [root]);
+  const floor = usePlayerBarHeight(root);
+
+  // The AI dock stands at the bottom right, where this stack would (docs/ai-dock.md). The stack
+  // moves to its left when the window has room for both side by side, and otherwise stands on
+  // top of it, rising from behind its top edge as it does from behind the bar's.
+  const dock = useAiDockPlace(state => state.place);
+  const aside = dock?.beside ? dock.width + EDGE_GAP.bottom : 0;
+  const under = dock && !dock.beside ? dock.height + EDGE_GAP.bottom : 0;
 
   // The top stack hangs from the top edge of the place the drawer's panels have: the list's
   // column under the search row (.kd-drawer-area, see Drawer.css), which is two rows down in a
@@ -515,7 +507,13 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
   // While a stack rides the sliding bar, the list already reaches the window's bottom and the
   // stack is still on the bar: the drawer keeps clear of the bar's height as well, and takes
   // that room when the bar is gone.
-  const lift = bottom.kept > 0 ? Math.round(bottom.kept + (riding ? floor : 0)) : 0;
+  // The dock is kept up as well: beside it the drawer clears the taller of the two, on top of
+  // it the two together.
+  const dockReach = dock ? dock.height + EDGE_GAP.bottom * 2 : 0;
+  const kept = !dock ? bottom.kept
+    : dock.beside ? Math.max(bottom.kept, dockReach)
+      : bottom.kept > 0 ? bottom.kept + dock.height + EDGE_GAP.bottom : dockReach;
+  const lift = kept > 0 ? Math.round(kept + (riding ? floor : 0)) : 0;
   useEffect(() => {
     if (lift > 0) document.documentElement.style.setProperty("--kd-info-lift", `${lift}px`);
     else document.documentElement.style.removeProperty("--kd-info-lift");
@@ -556,7 +554,8 @@ export function TaskBubbleHost({ sources }: { sources?: readonly TaskSource[] })
       {bottom.ordered.length > 0 && <div className="kd-task-host" data-place="bottom"
         data-floor={riding && !prefersReducedSeekMotion() ? (barPhase === "leaving" ? "down" : "up") : undefined}
         data-under-bar={underBar ? "true" : undefined}
-        style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px` } as CSSProperties}>
+        style={{ ...TASK_CLOCK, "--kd-task-floor": `${barPhase === "up" ? floor : 0}px`, "--kd-task-ride": `${floor}px`,
+          "--kd-task-aside": aside ? `${aside}px` : undefined, "--kd-task-under": under ? `${under}px` : undefined } as CSSProperties}>
         {bubbles(bottom)}
       </div>}
       {top.ordered.length > 0 && <div className="kd-task-host" data-place="top"

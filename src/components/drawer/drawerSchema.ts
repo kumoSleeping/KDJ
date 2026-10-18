@@ -100,4 +100,9 @@ export interface DrawerEntry {
   count?: number;
   /** Asks for the app. Putting it away again is the open app's own `close`. */
   open(): void;
+  /**
+   * For an entry whose surface is not a drawer app (the AI corner, docs/ai-dock.md): it is up.
+   * The entry is then shown pressed and asking again calls `open`, which puts it away.
+   */
+  pressed?: boolean;
 }
