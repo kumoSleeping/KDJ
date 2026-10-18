@@ -16,8 +16,14 @@ import * as browser from "./kdj-browser.ts";
 const CLI = process.env.KDJ_CLI || "kdj";
 const DATA_DIR = process.env.KDJ_DATA_DIR;
 
-/** Runs one CLI command to its end. Aborting the tool ends the command, which KDJ takes as a cancel. */
-function kdj(args: string[], signal?: AbortSignal): Promise<unknown> {
+type Progress = { event: "progress"; done: number; total: number };
+
+/**
+ * Runs one CLI command to its end. Aborting the tool ends the command, which KDJ takes as a
+ * cancel. `kdj download` writes `{"event":"progress",…}` lines to stderr while it runs; they go
+ * to `onProgress`, everything else on stderr is kept for an error message.
+ */
+function kdj(args: string[], signal?: AbortSignal, onProgress?: (progress: Progress) => void): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const child = spawn(CLI, DATA_DIR ? ["--data-dir", DATA_DIR, ...args] : args, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -25,8 +31,21 @@ function kdj(args: string[], signal?: AbortSignal): Promise<unknown> {
     });
     let out = "";
     let err = "";
+    let partial = "";
     child.stdout.setEncoding("utf8").on("data", chunk => { out += chunk; });
-    child.stderr.setEncoding("utf8").on("data", chunk => { err += chunk; });
+    child.stderr.setEncoding("utf8").on("data", chunk => {
+      const lines = (partial + chunk).split("\n");
+      partial = lines.pop() ?? "";
+      for (const line of lines) {
+        let progress: Progress | null = null;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed?.event === "progress") progress = parsed;
+        } catch { /* a plain line */ }
+        if (progress) onProgress?.(progress);
+        else err += `${line}\n`;
+      }
+    });
     const abort = () => child.kill();
     signal?.addEventListener("abort", abort, { once: true });
     child.on("error", error => {
@@ -42,7 +61,7 @@ function kdj(args: string[], signal?: AbortSignal): Promise<unknown> {
       const error = reply?.error;
       const message = typeof error === "string" ? error
         : error && typeof error === "object" ? JSON.stringify(error)
-          : err.trim() || `kdj 退出码 ${code}`;
+          : (err + partial).trim() || `kdj 退出码 ${code}`;
       reject(new Error(message));
     });
   });
@@ -99,8 +118,13 @@ const download = defineTool({
     as: Type.Optional(Type.Union([Type.Literal("audio"), Type.Literal("video")], { description: "视频只要音轨（audio）或保留画面（video，默认）" })),
     height: Type.Optional(Type.Integer({ description: "视频最高画面高度，例如 1080" })),
   }),
-  async execute(_id, params, signal) {
-    return result(await kdj(["download", ...params.refs, ...flags({ to: params.to, quality: params.quality, as: params.as, height: params.height })], signal));
+  async execute(_id, params, signal, onUpdate) {
+    const args = ["download", ...params.refs, ...flags({ to: params.to, quality: params.quality, as: params.as, height: params.height })];
+    // Each progress line becomes a partial result: the AI corner draws its bar from `details`.
+    return result(await kdj(args, signal, ({ done, total }) => onUpdate?.({
+      content: [{ type: "text", text: `${done}/${total}` }],
+      details: { done, total },
+    })));
   },
 });
 

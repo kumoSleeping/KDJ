@@ -43,7 +43,8 @@ KDJ 里的 AI 是用户自己装的 [pi](https://pi.dev)，由 kdj-server 以 `p
 
 `kdj-tools.ts` 把 `kdj` CLI（`docs/ai-cli.md`，同一个桌面二进制带子命令）的命令一一注册成工具：
 `kdj_status`、`kdj_search`、`kdj_download`、`kdj_login`、`kdj_library_list`、`kdj_library_get`、
-`kdj_peek`、`kdj_align`。CLI 的 `download` 结束才输出，所以下载那一步运行时只转圈，进度在下载栏和下载气泡里。
+`kdj_peek`、`kdj_align`。`kdj download` 运行时往 stderr 写 `{"event":"progress","done","total"}`，扩展把它当作
+工具的中途结果（`onUpdate`），下载那一步因此画出进度条。
 
 `kdj-browser.ts` 是只读的浏览器，经 CDP 驱动用户自己的 Chrome / Edge / Brave / Chromium（无头，KDJ 自己的
 配置目录 `<data>/ai/browser-profile`，不碰用户的浏览数据）：
