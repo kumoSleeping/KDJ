@@ -57,10 +57,17 @@ impl HttpClient {
             return Err(status_error(status, &text));
         }
         let mut last = serde_json::Value::Null;
+        let mut shown = serde_json::Value::Null;
         for line in std::io::BufReader::new(response).lines() {
             let line = line.context("读取 KDJ 进度失败")?;
-            if !line.trim().is_empty() {
-                last = serde_json::from_str(&line).context("解析 JSON 失败")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            last = serde_json::from_str(&line).context("解析 JSON 失败")?;
+            // 进度行进 stderr，stdout 只留最终结果；每秒的心跳只在数字变了时才打。
+            if last["event"] == "progress" && last != shown {
+                eprintln!("{last}");
+                shown = last.clone();
             }
         }
         Ok(last)

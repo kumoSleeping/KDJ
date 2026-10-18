@@ -15,6 +15,7 @@ KDJ 只提供 AI 自己做不到的事：平台搜索、登录、下载，曲库
 - KDJ 没在运行时，除 `status` 外的命令会在后台拉起 `--no-gui` 驻留进程。
 - `download`、`login`、`peek`、`align` 跑到结束才输出；中断命令（进程退出、连接断开）即取消，KDJ 停掉对应任务、ffmpeg 和分析。
   `library get` 中断只是不再等待，分析照常跑完。
+- `download` 运行中往 stderr 写进度行 `{"event":"progress","done":N,"total":M}`，只在数字变化时写；stdout 仍只有最终结果。
 - `ref`：`search` 结果和 `status.playlists` 里的短引用，交给 `download` 或 `search`。
   形如 `wyy:17455790`、`bilibili:BV1GJ411x7h7[:p2]`、`youtube:<id>`、`wyy:playlist:42`、`qqm:mine:7`（账号歌单）。
   存在 KDJ 内存里，重启后需重新 search；视频 ref 不依赖缓存，随时可用。
