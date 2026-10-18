@@ -8180,8 +8180,8 @@ html:root[data-theme-pack="sakulaptop98"] {
 .kd-list-hcell .kd-col-resize {
   position: absolute;
   top: 0;
-  right: -3px;
-  width: 7px;
+  right: -5px;
+  width: 10px;
   height: 100%;
   cursor: col-resize;
   z-index: 3;

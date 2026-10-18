@@ -64,7 +64,6 @@
    its overflow is a layer in WebKit, and every scroll walks every layer, so the number and
    other compact cells do not. Timestamps opt in because their resizable columns can be
    narrower than the full date and time. */
-.kd-list-hcell,
 .kd-list-cell[data-clip] {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -80,6 +79,14 @@
   align-items: center;
   line-height: normal;
 }
+/* A head cell does not clip: its resize handle reaches over the column line into the next
+   cell, so the drag takes on either side of the line. The words clip inside the cell instead. */
 .kd-list-hcell {
   position: relative;
+}
+.kd-list-hcell > .kd-hcell-text,
+.kd-list-hcell > .kd-th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

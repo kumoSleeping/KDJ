@@ -2408,15 +2408,17 @@ export const TrackTable = memo(function TrackTable({
                   : "拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
               }
             >
-              {column.label}
-              {/* 主、副排序仍由 store 中的 sort / sort2 区分；表头只显示方向，
-                  避免带圈数字与列名字号不协调。层级说明保留在表头 title 中。 */}
-              {column.id !== null && column.id === sort && (
-                <TableSortMark order={order} />
-              )}
-              {column.id !== null && column.id !== sort && column.id === sort2 && (
-                <TableSortMark order={order2} secondary />
-              )}
+              <span className="kd-hcell-text">
+                {column.label}
+                {/* 主、副排序仍由 store 中的 sort / sort2 区分；表头只显示方向，
+                    避免带圈数字与列名字号不协调。层级说明保留在表头 title 中。 */}
+                {column.id !== null && column.id === sort && (
+                  <TableSortMark order={order} />
+                )}
+                {column.id !== null && column.id !== sort && column.id === sort2 && (
+                  <TableSortMark order={order2} secondary />
+                )}
+              </span>
               <span
                 className="kd-col-resize"
                 data-active={resizingCol === column.key ? "true" : undefined}

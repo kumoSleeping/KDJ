@@ -1264,7 +1264,7 @@ const ResultTableView = memo(function ResultTableView({
       }
       title="拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
     >
-      {column.label}
+      <span className="kd-hcell-text">{column.label}</span>
       <span
         className="kd-col-resize"
         data-active={resizingCol === column.key ? "true" : undefined}
