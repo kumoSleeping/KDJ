@@ -8,6 +8,7 @@ pub mod activity_log;
 pub mod diagnostics;
 pub mod aggregate;
 pub mod cache_overview;
+pub mod cli_api;
 pub mod compositions;
 pub mod downloads;
 pub mod error;
