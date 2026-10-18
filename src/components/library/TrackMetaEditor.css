@@ -45,6 +45,8 @@
   border-bottom: 0;
 }
 .kd-meta-editor-head .kd-cover-tools-head { flex-wrap: wrap; }
+/* Beside the cover: a song dragged onto it gives the track that song's picture. */
+.kd-meta-editor-head > .kd-cover-tools > .kd-demo { max-width: 9.5rem; }
 .kd-meta-editor-summary {
   display: flex;
   flex: 1 1 0;

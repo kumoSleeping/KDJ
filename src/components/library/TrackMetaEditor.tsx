@@ -8,6 +8,7 @@ import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice } from "../common";
 import { FloatingPanelWindow } from "../common/FloatingPanelWindow";
+import { PointerDemo } from "../common/PointerDemo";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { COVER_PLATFORM_LABEL, coverPreviewUrl, TrackCoverBox, useTrackCover } from "./trackCover";
 import "./TrackMetaEditor.css";
@@ -364,6 +365,7 @@ function TrackMetaForm({ track, onUpdated, onBusy }: {
           {cover.searching ? "匹配中…" : "在线匹配"}
         </Button>
       </div>
+      <PointerDemo scene="drag-in" tray="cover" label="把曲库里的一首歌拖到封面上，就换成那首歌的封面" />
     </div>
   );
 

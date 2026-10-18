@@ -4,7 +4,8 @@ import "./PointerDemo.css";
 /**
  * A little looping picture of a gesture: a small pointer does the thing on a drawn list, with the
  * key it needs beside it. One drawing serves every place that teaches the gesture — the empty download queue (`drag-in`), the tips drawer
- * (`src/components/download/SearchTipsPanel.tsx`) and the login by Cookie-Editor (`cookie-export`) — so a new lesson is a new scene here.
+ * (`src/components/download/SearchTipsPanel.tsx`), the login by Cookie-Editor (`cookie-export`) and the Meta editor's cover
+ * (`drag-in` onto a `cover` tray) — so a new lesson is a new scene here.
  *
  * It is a still picture under reduced motion, and it stops while it is out of sight.
  */
@@ -375,8 +376,8 @@ export function PointerDemo({ scene, label, tray = "download", onLoop }: {
   onLoop?(): void;
   /** What the picture says, for assistive technology. */
   label?: string;
-  /** The tray's mark in `drag-in`: what the thing is dropped on. */
-  tray?: "download" | "export" | "visualize" | "share";
+  /** The tray's mark in `drag-in`: what the thing is dropped on. A `cover` takes the song's picture. */
+  tray?: "download" | "export" | "visualize" | "share" | "cover";
 }) {
   const root = useRef<SVGSVGElement>(null);
   const seen = useSeen(root);
@@ -621,8 +622,12 @@ export function PointerDemo({ scene, label, tray = "download", onLoop }: {
             d={tray === "download" ? "M0 -9 V6 M-6.5 0 L0 7 L6.5 0"
               : tray === "visualize" ? "M-7 7 V1 M-2.5 7 V-6 M2 7 V-2 M6.5 7 V-8"
               : tray === "share" ? "M5 -5 L-6 1 L5 8 M7 -5 a2 2 0 1 0 -4 0 a2 2 0 1 0 4 0 M-4 1 a2 2 0 1 0 -4 0 a2 2 0 1 0 4 0 M7 8 a2 2 0 1 0 -4 0 a2 2 0 1 0 4 0"
+              : tray === "cover" ? "M-9 -7 H9 V7 H-9 Z M-9 5 L-3.5 -0.5 L0.5 3.5 L3.5 0.5 L9 6 M4.5 -3.5 h0.01"
               : "M-6 6 L6 -6 M-1 -6.5 H6.5 V1"} />
-          <path className="kd-demo-tick" data-on={gone || undefined} d="M-8 0 l5.5 5.5 l10.5 -11.5" />
+          {tray === "cover" ? <g className="kd-demo-tray-cover" data-on={gone || undefined}>
+            <rect className="kd-demo-cover" x="-32" y="-32" width="64" height="64" rx="8" />
+            <rect className="kd-demo-line" x="-22" y="14" width="28" height="4" rx="2" />
+          </g> : <path className="kd-demo-tick" data-on={gone || undefined} d="M-8 0 l5.5 5.5 l10.5 -11.5" />}
         </g>
       </g>
       {[4, 60, 78].map(y => <rect key={y} className="kd-demo-ghost-row" x="8" y={y} width="76" height="14" rx="5" />)}

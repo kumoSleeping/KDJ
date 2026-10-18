@@ -56,6 +56,9 @@
   transition: opacity 200ms ease;
 }
 .kd-demo-tray-mark[data-gone] { opacity: 0; }
+/* A cover tray: the song's picture takes the place of the empty frame. */
+.kd-demo-tray-cover { opacity: 0; transition: opacity 260ms ease; }
+.kd-demo-tray-cover[data-on] { opacity: 1; }
 .kd-demo-chip {
   transform-box: fill-box;
   transform-origin: center;
