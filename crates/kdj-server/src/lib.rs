@@ -9,6 +9,7 @@ pub mod diagnostics;
 pub mod aggregate;
 pub mod cache_overview;
 pub mod cli_api;
+pub mod cli_media;
 pub mod compositions;
 pub mod downloads;
 pub mod error;

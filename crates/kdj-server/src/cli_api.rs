@@ -31,7 +31,7 @@ const COLLECTION_KINDS: [&str; 5] = ["playlist", "album", "artist", "radio", "mi
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
-enum Cached {
+pub(crate) enum Cached {
     Song(SongSource),
     Collection {
         platform: Platform,
@@ -65,7 +65,7 @@ fn remember(reference: &str, value: Cached) {
     }
 }
 
-fn recall(reference: &str) -> Option<Cached> {
+pub(crate) fn recall(reference: &str) -> Option<Cached> {
     refs().lock().unwrap().map.get(reference).cloned()
 }
 
@@ -96,7 +96,7 @@ fn is_video(platform: Platform) -> bool {
 }
 
 /// 视频引用即使不在缓存里也能下载：`bilibili:BV…[:pN]`、`youtube:<id>`。
-fn video_ref_source(reference: &str) -> Option<SongSource> {
+pub(crate) fn video_ref_source(reference: &str) -> Option<SongSource> {
     let (platform, rest) = reference.split_once(':')?;
     let platform = Platform::parse(platform).filter(|p| is_video(*p))?;
     let (key, page) = match rest.rsplit_once(":p") {
@@ -205,7 +205,7 @@ fn project_video(info: &VideoInfo) -> Vec<Value> {
 }
 
 /// 和搜索框一致：B 站单视频走视频解析，收藏夹和其余输入走 intake。
-fn bilibili_video_input(text: &str) -> bool {
+pub(crate) fn bilibili_video_input(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let link = lower.contains("bilibili.com") || lower.contains("b23.tv");
     let id = (text.len() == 12 && text.starts_with("BV"))

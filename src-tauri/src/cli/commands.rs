@@ -14,12 +14,14 @@ const BROWSER_PLATFORMS: [&str; 3] = ["youtube", "ytm", "soundcloud"];
 const POLL: Duration = Duration::from_millis(500);
 
 /// `kdj status` 里唯一的说明文字。命令和参数从 clap 生成，这里只写 clap 表达不了的约定。
-const NOTES: [&str; 7] = [
+const NOTES: [&str; 9] = [
     "输出都是一行 JSON：成功 {\"ok\":true,\"data\":…}；失败 {\"ok\":false,\"error\":{\"code\",\"message\"}}，code 为 usage / not_found / ambiguous / failed。",
     "search 的结果和 status 的 playlists 都带 ref：把 ref 交给 download 下载，或交给 search 展开歌单、专辑、歌手。ref 存在 KDJ 内存里，KDJ 重启后请重新 search；bilibili:BV…[:pN] 与 youtube:<id> 这类视频 ref 随时可用。",
     "download 和 login 会一直运行到结束才输出。整张歌单或长视频可能要好几分钟，请放到后台运行或调大命令超时；中断命令就会取消。",
     "下载完成后 KDJ 自动入库并分析。移动、改名、删除、整理文件请直接用你自己的文件工具；放进 download.library_roots 下的文件会被 KDJ 自动跟上。",
     "library get 缺少分析时会当场补齐再返回（可能要几十秒）；时间单位都是秒，grid.downbeats 是小节线。",
+    "peek 把截图存成 JPEG 文件并返回路径（多张时另有一张按时间顺序拼好的 sheet），用你看图片的工具打开即可；截图只用来核对画面内容，判断不了音画是否同步。",
+    "align 返回几套 plans：segments 里 ref = ref_at + (video - video_in) / speed（秒）。evidence 为 verified 的是声学核实过的，auto=true 的可以直接采用；melody / partial 只是候选，需要用户试听确认。ref_bar 是参考曲的小节号。剪辑请用你自己的工具（例如 ffmpeg）按这些时间去做。",
     "扫码登录会在用户屏幕上打开二维码图片，请让用户用对应 App 扫码；youtube / ytm / soundcloud 从本机浏览器导入登录状态，需要用户先在该浏览器里登录。",
     "除了 KDJ，也可以结合你自己的网络搜索或浏览器工具寻找素材，再把链接交给 search 或 download。",
 ];
@@ -86,6 +88,22 @@ fn run_inner(cli: Cli) -> Result<()> {
             browser,
             profile,
         } => login(&http, &platform, browser, profile)?,
+        Commands::Peek {
+            source,
+            at,
+            every,
+            width,
+        } => {
+            let at = at.iter().map(|t| parse_time(t)).collect::<Result<Vec<_>>>()?;
+            http.post_json_long(
+                "/api/cli/peek",
+                &json!({ "source": media_arg(&source), "at": at, "every": every, "width": width }),
+            )?
+        }
+        Commands::Align { reference, video } => http.post_json_long(
+            "/api/cli/align",
+            &json!({ "reference": media_arg(&reference), "video": media_arg(&video) }),
+        )?,
         Commands::Library { command } => library(&http, command)?,
     };
     emit_ok(data);
@@ -211,6 +229,28 @@ fn download(
         return Err(CliError::new("failed", "KDJ 在下载结束前断开了连接").into());
     }
     Ok(json!({ "complete": result["complete"], "items": result["items"] }))
+}
+
+/// 曲库 id 和引用原样交给 KDJ；本地存在的相对路径换成绝对路径。
+fn media_arg(source: &str) -> String {
+    if source.parse::<i64>().is_err() && Path::new(source).exists() {
+        absolute(source)
+    } else {
+        source.to_string()
+    }
+}
+
+/// 秒、分:秒 或 时:分:秒。
+fn parse_time(text: &str) -> Result<f64> {
+    let usage = || anyhow::Error::from(CliError::new("usage", format!("时间无效：{text}")));
+    text.trim()
+        .split(':')
+        .try_fold(0.0, |total, part| {
+            part.trim().parse::<f64>().map(|value| total * 60.0 + value)
+        })
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(usage)
 }
 
 fn absolute(path: &str) -> String {
@@ -642,6 +682,8 @@ mod tests {
                 "kdj search <TEXT>",
                 "kdj download <REF>...",
                 "kdj login <PLATFORM>",
+                "kdj peek <SOURCE>",
+                "kdj align",
                 "kdj library list",
                 "kdj library get",
             ]
@@ -670,6 +712,14 @@ mod tests {
         assert!(item["grid"].get("beats").is_none());
         assert!(item.get("source").is_none());
         assert_eq!(full_track(&track, &rhythm, true)["grid"]["beats"], json!([0.123, 0.592]));
+    }
+
+    #[test]
+    fn times_accept_seconds_and_clock_forms() {
+        assert_eq!(parse_time("75.5").unwrap(), 75.5);
+        assert_eq!(parse_time("1:30").unwrap(), 90.0);
+        assert_eq!(parse_time("1:02:03").unwrap(), 3723.0);
+        assert_eq!(parse_time("soon").unwrap_err().downcast_ref::<CliError>().unwrap().code, "usage");
     }
 
     #[test]

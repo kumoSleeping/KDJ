@@ -46,6 +46,8 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/cli/status", get(crate::cli_api::status))
         .route("/api/cli/search", post(crate::cli_api::search))
         .route("/api/cli/download", post(crate::cli_api::download))
+        .route("/api/cli/peek", post(crate::cli_media::peek))
+        .route("/api/cli/align", post(crate::cli_media::align))
         .route("/api/control/show", post(control_show))
         .route("/api/control/quit", post(control_quit))
         .route("/api/settings", get(get_settings).put(put_settings))

@@ -62,6 +62,29 @@ pub enum Commands {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// 截取视频画面；在线 B 站视频不用下载
+    Peek {
+        /// 曲库 id、文件路径、bilibili 引用或链接
+        source: String,
+        /// 时间点，逗号分隔，秒或 分:秒，例如 75,1:30
+        #[arg(long, value_delimiter = ',')]
+        at: Vec<String>,
+        /// 每隔多少秒截一张（最多 48 张）
+        #[arg(long)]
+        every: Option<f64>,
+        /// 画面宽度（像素），默认 480
+        #[arg(long)]
+        width: Option<u32>,
+    },
+    /// 把视频对齐到参考曲，返回几套定位方案；在线 B 站视频只读音轨
+    Align {
+        /// 参考曲：曲库 id 或音频文件路径
+        #[arg(long = "ref", value_name = "REF")]
+        reference: String,
+        /// 视频：曲库 id、文件路径、bilibili 引用或链接
+        #[arg(long)]
+        video: String,
+    },
     /// 查询本地曲库
     Library {
         #[command(subcommand)]

@@ -21,6 +21,21 @@ impl HttpClient {
         })
     }
 
+    /// 截图、对齐这类可能跑几分钟的请求：不设总超时，中断命令即断开连接、KDJ 停止计算。
+    pub fn post_json_long<T: Serialize>(&self, path: &str, body: &T) -> Result<serde_json::Value> {
+        let client = client_builder(&self.base)?
+            .timeout(None::<std::time::Duration>)
+            .build()
+            .context("构建 HTTP 客户端失败")?;
+        self.read(
+            client
+                .post(self.url(path))
+                .bearer_auth(&self.auth_token)
+                .json(body)
+                .send(),
+        )
+    }
+
     /// 长任务接口逐行回 NDJSON，最后一行是结果。不设总超时：命令被中断时进程退出、
     /// 连接随之断开，KDJ 那边据此取消任务。
     pub fn post_ndjson<T: Serialize>(&self, path: &str, body: &T) -> Result<serde_json::Value> {
