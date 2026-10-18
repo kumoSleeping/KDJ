@@ -448,7 +448,7 @@ function KdjAiPromptPanel() {
     void copyText(prompt)
       .then(() => {
         setOk(true);
-        setNotice("已复制完整 Prompt");
+        setNotice("已复制提示词");
       })
       .catch((error) => {
         setOk(false);
@@ -514,18 +514,10 @@ function KdjAiPromptPanel() {
             </Button>
           ) : null}
         </div>
-        <p className="kd-ai-prompt-copy">把下面整段发给 AI，它会先读取当前 CLI 能力，再操作 KDJ。</p>
-        <textarea
-          className="kd-textarea kd-ai-prompt-textarea"
-          value={prompt}
-          readOnly
-          spellCheck={false}
-          aria-label="KDJ AI 操作 Prompt"
-        />
         <div className="kd-ai-prompt-actions">
           <Button variant="ghost" size="sm" disabled={!cliStatus || cliBusy} onClick={copyPrompt}>
             <Copy size={12} aria-hidden="true" />
-            复制 Prompt
+            复制提示词
           </Button>
         </div>
       </div>
