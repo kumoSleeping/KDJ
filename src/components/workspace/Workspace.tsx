@@ -170,7 +170,8 @@ import {
   SearchBar,
 } from "../download/SearchBar";
 import { SearchTipsPanel } from "../download/SearchTipsPanel";
-import { AI_SEARCH_EVENT, type AiSearchDetail } from "../../lib/aiSearch";
+import { AI_LIBRARY_EVENT, AI_SEARCH_EVENT, type AiLibraryDetail, type AiSearchDetail } from "../../lib/aiSearch";
+import { beginAiMove, registerSearchText } from "../../lib/aiPlace";
 import { interleaveSearches } from "../../lib/searchInterleave";
 import { useAiStore } from "../../stores/aiStore";
 import { shownTipsPages, useTipsPage, type TipsPage } from "../../lib/tipsPages";
@@ -2089,11 +2090,15 @@ export function Workspace() {
   const [searchBurstNonce, setSearchBurstNonce] = useState(0);
   // The AI searched (docs/ai-dock.md): the pane runs the same search, as the listener would.
   const [aiSearchPending, setAiSearchPending] = useState<AiSearchDetail | null>(null);
+  // The AI's move in the window (aiPlace.ts): from its search until that search has answered.
+  const aiSearchMoveRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     const onAiSearch = (event: Event) => {
       const detail = (event as CustomEvent<AiSearchDetail>).detail;
       const q = detail?.query?.trim();
       if (!q) return;
+      aiSearchMoveRef.current?.();
+      aiSearchMoveRef.current = beginAiMove(q);
       setQuery(q);
       if (detail.kind && searchKinds.includes(detail.kind)) setSearchKind(detail.kind);
       setAiSearchPending({ ...detail, query: q });
@@ -2109,16 +2114,29 @@ export function Workspace() {
     setSearchBurstNonce((n) => n + 1);
     // Sources named by the AI apply to a song search, the only kind submit takes them for.
     const plats = aiSearchPending.platforms?.length && (kind ?? "song") === "song" ? aiSearchPending.platforms : undefined;
-    void submit(plats);
+    const moved = aiSearchMoveRef.current;
+    aiSearchMoveRef.current = null;
+    void submit(plats).finally(() => moved?.());
   }, [aiSearchPending, query, searchKind, searchKinds, submit]);
-  // The listener comes first: leaving the results for the library while the AI works is told
-  // to it, and it goes on from there. The AI itself never leaves them.
-  const paneWas = useRef(activeWorkspacePane);
+  // The AI looked something up in the library: the library shows the same lookup, as if the
+  // listener had typed it in the rail. What the listener does meanwhile is told to the AI by
+  // aiPlace.ts, which also puts the window back when the task is done.
   useEffect(() => {
-    if (paneWas.current === activeWorkspacePane) return;
-    paneWas.current = activeWorkspacePane;
-    if (activeWorkspacePane === "local") useAiStore.getState().noteUserChange("用户切到了本地曲库");
-  }, [activeWorkspacePane]);
+    const onAiLibrary = (event: Event) => {
+      const detail = (event as CustomEvent<AiLibraryDetail>).detail;
+      if (!detail) return;
+      const moved = beginAiMove();
+      const { folder, ...lookup } = detail;
+      activateWorkspacePane("local");
+      useLibraryStore.getState().setFilter(folder ? { ...lookup, folder } : lookup);
+      moved();
+    };
+    window.addEventListener(AI_LIBRARY_EVENT, onAiLibrary);
+    return () => window.removeEventListener(AI_LIBRARY_EVENT, onAiLibrary);
+  }, [activateWorkspacePane]);
+  const queryNowRef = useRef(query);
+  queryNowRef.current = query;
+  useEffect(() => registerSearchText({ read: () => queryNowRef.current, write: setQuery }), []);
 
   useEffect(() => {
     const onExplore = (event: Event) => {

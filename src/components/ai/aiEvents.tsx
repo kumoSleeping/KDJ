@@ -3,7 +3,9 @@
  *
  * - each tool call is a bubble at the top while it runs and for a moment after (aiTasks.ts says
  *   what it reads); downloads report in the download list and its bubbles like any other;
- * - `kdj_search` runs the same search in the search pane, `kdj_play` plays the track;
+ * - `kdj_search` runs the same search in the search pane, `kdj_library_list` the same lookup in
+ *   the library, `kdj_play` plays the track; when the task is done and the listener has not
+ *   moved the window, it goes back to where they were (aiPlace.ts);
  * - `ask_user` is a bubble at the bottom right: the question, songs as cards (cover, title,
  *   artists, where they come from) and/or text choices, one or several to pick, a line for the
  *   listener's own words, and when the AI gave one, a countdown after which its default is taken;
@@ -17,7 +19,8 @@
 import { useState, type ReactNode } from "react";
 import { Check, FileVideo, Globe, Library, LoaderCircle, LogIn, Search, Settings2, Sparkles, Wrench } from "lucide-react";
 import { aiApi } from "../../lib/api";
-import { requestAiSearch } from "../../lib/aiSearch";
+import { requestAiLibrary, requestAiSearch } from "../../lib/aiSearch";
+import { aiTaskBegan, aiTaskEnded } from "../../lib/aiPlace";
 import { openAiSettings } from "../../lib/aiSettings";
 import { noticeOnEnd, noticeOnStart, resultText, type AiNotice, type AiNoticeIcon } from "../../lib/aiTasks";
 import { formatDuration, thumbUrl } from "../../lib/format";
@@ -393,6 +396,7 @@ function userText(message: Fields): string {
 export function handlePiEvent(event: PiEvent) {
   switch (event.type) {
     case "agent_start":
+      aiTaskBegan();
       if (mainTask && !mainTask.working) {
         mainTask.working = true;
         drawMain();
@@ -416,6 +420,7 @@ export function handlePiEvent(event: PiEvent) {
       if (!id) return;
       calls.set(id, { tool, args });
       if (tool === "kdj_search") gatherSearch(args);
+      if (tool === "kdj_library_list") requestAiLibrary(args);
       if (tool === "kdj_play") {
         const trackId = Number(args.track_id);
         void import("../../lib/aiPlay").then(module => module.playLibraryTrack(trackId));
@@ -471,6 +476,9 @@ export function handlePiEvent(event: PiEvent) {
         waiting = [];
         mainTask = { id: first.id, text: first.text, supplements: rest.map(line => line.text), working: false };
         drawMain();
+      } else {
+        // Nothing follows: the window goes back to where the listener was, if they left it be.
+        aiTaskEnded();
       }
       return;
     case "kdj_exit":
@@ -483,6 +491,7 @@ export function handlePiEvent(event: PiEvent) {
       for (const line of waiting) dismissTask(`ai-task:${line.id}`, "caller");
       mainTask = null;
       waiting = [];
+      aiTaskEnded();
       aiProblem(str(event.message) || "pi 已退出");
       return;
   }
