@@ -18,17 +18,17 @@ import { basename, relative } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { folderScore, walk } from "./kdj-folders.ts";
-import { blindLine, registerVideo } from "./kdj-video.ts";
+import { blindLine, registerVideo, videoHeight } from "./kdj-video.ts";
 import { registerWeb } from "./kdj-web.ts";
 
 const CLI = process.env.KDJ_CLI || "kdj";
 const DATA_DIR = process.env.KDJ_DATA_DIR;
 
-type Progress = { event: "progress"; done: number; total: number };
+type Progress = { event: "progress"; done: number; total: number; detail?: string };
 
 /**
  * Runs one CLI command to its end. Aborting the tool ends the command, which KDJ takes as a
- * cancel. `kdj download` writes `{"event":"progress",…}` lines to stderr while it runs; they go
+ * cancel. `kdj download` and `kdj project render` write `{"event":"progress",…}` lines to stderr while they run; they go
  * to `onProgress`, everything else on stderr is kept for an error message.
  */
 function kdj(args: string[], signal?: AbortSignal, onProgress?: (progress: Progress) => void): Promise<unknown> {
@@ -192,7 +192,9 @@ function remember(data: unknown) {
 const search = defineTool({
   name: "kdj_search",
   label: "搜索",
-  description: "在 KDJ 的聚合搜索里搜索，搜索页同时显示这次搜索。text 可以是关键词、分享链接或之前给出的 ref；集合 ref 会直接展开。结果里的 ref 交给 kdj_download。",
+  description: "在 KDJ 的聚合搜索里搜索，搜索页同时显示这次搜索。text 可以是关键词、分享链接或之前给出的 ref；集合 ref 会直接展开。结果里的 ref 交给 kdj_download。" +
+    "只用来找要下载的东西（新歌、别的版本、视频素材）。曲库里已有的歌（用户拖进来的、kdj_library_list 找到的）不要搜它本身：" +
+    "歌名、歌手、专辑、出自哪部作品看 kdj_library_get，段落看它的小节线和段落，还不清楚用网页搜索。",
   parameters: Type.Object({
     text: Type.String({ description: "关键词、链接或 ref" }),
     kind: Type.Optional(Type.Union([Type.Literal("song"), Type.Literal("playlist"), Type.Literal("album"), Type.Literal("artist"), Type.Literal("radio")])),
@@ -206,24 +208,50 @@ const search = defineTool({
   },
 });
 
+/** Videos are fetched at this height unless the AI asks for another; the best below it otherwise. */
+const VIDEO_HEIGHT = 1080;
+const VIDEO_FILE = /\.(mp4|mov|m4v|mkv|webm)$/i;
+
+/** Each downloaded video's picture height, and a word when one came smaller than asked for. */
+async function withHeights(data: unknown, asked: number, signal?: AbortSignal): Promise<unknown> {
+  const done = data as { items?: unknown[] } | null;
+  if (!done || !Array.isArray(done.items)) return data;
+  const smaller: string[] = [];
+  const items = await Promise.all(done.items.map(async raw => {
+    const item = raw as { path?: unknown; title?: unknown };
+    if (typeof item.path !== "string" || !VIDEO_FILE.test(item.path)) return raw;
+    const height = await videoHeight(item.path, signal);
+    if (height !== null && height < asked) smaller.push(`${typeof item.title === "string" ? item.title : basename(item.path)}：${height}p`);
+    return { ...(raw as object), height };
+  }));
+  const note = smaller.length > 0
+    ? { note: `没有 ${asked}p，下到的是更低的画质（${smaller.join("、")}）。照常使用，在给用户的报告里写明画质。` }
+    : {};
+  return { ...done, items, ...note };
+}
+
 const download = defineTool({
   name: "kdj_download",
   label: "下载",
-  description: "立即下载 kdj_search 给出的 ref（或链接），用户能在下载栏看到，全部结束才返回路径和 track_id。",
+  description: "立即下载 kdj_search 给出的 ref（或链接），用户能在下载栏看到，全部结束才返回路径和 track_id。" +
+    "视频默认按 1080p 下载（height 可改）；没有 1080p 时自动取最接近的较低画质（通常 720p），返回里每个视频带 height，" +
+    "画质低于要的会有 note：照常使用，在给用户的报告里写明。",
   parameters: Type.Object({
     refs: Type.Array(Type.String(), { minItems: 1 }),
     to: Type.Optional(Type.String({ description: "目标文件夹的绝对路径，须在曲库根目录内；默认下载文件夹" })),
     quality: Type.Optional(Type.Union([Type.Literal("flac"), Type.Literal("320"), Type.Literal("128")])),
     as: Type.Optional(Type.Union([Type.Literal("audio"), Type.Literal("video")], { description: "视频只要音轨（audio）或保留画面（video，默认）" })),
-    height: Type.Optional(Type.Integer({ description: "视频最高画面高度，例如 1080" })),
+    height: Type.Optional(Type.Integer({ description: "视频最高画面高度，默认 1080" })),
   }),
   async execute(_id, params, signal, onUpdate) {
-    const args = ["download", ...params.refs, ...flags({ to: params.to, quality: params.quality, as: params.as, height: params.height })];
+    const height = params.as === "audio" ? undefined : params.height ?? VIDEO_HEIGHT;
+    const args = ["download", ...params.refs, ...flags({ to: params.to, quality: params.quality, as: params.as, height })];
     // Each progress line becomes a partial result: the AI corner draws its bar from `details`.
-    return result(await kdj(args, signal, ({ done, total }) => onUpdate?.({
+    const data = await kdj(args, signal, ({ done, total }) => onUpdate?.({
       content: [{ type: "text", text: `${done}/${total}` }],
       details: { done, total },
-    })));
+    }));
+    return result(height ? await withHeights(data, height, signal) : data);
   },
 });
 
@@ -279,7 +307,7 @@ const libraryGet = defineTool({
 const peek = defineTool({
   name: "kdj_peek",
   label: "截帧",
-  description: "看视频的画面：从曲库视频、文件路径、bilibili ref 或链接截帧（在线 B 站不用下载），截下的画面直接给你看（多张时是按时间顺序拼好的一张）。at 是逗号分隔的时间（75,1:30），或用 every 秒数均匀截取。画面只用来核对内容，判断不了音画是否同步。",
+  description: "看视频的画面：从曲库视频、文件路径、bilibili ref 或链接截帧（只有在线 B 站不用下载；YouTube 等其它在线视频截不了，先 kdj_download 下载再截），截下的画面直接给你看（多张时是按时间顺序拼好的一张）。at 是逗号分隔的时间（75,1:30），或用 every 秒数均匀截取。画面只用来核对内容，判断不了音画是否同步。",
   parameters: Type.Object({
     source: Type.String(),
     at: Type.Optional(Type.String()),
@@ -414,7 +442,8 @@ const askUser = defineTool({
     "要用户选的地方嵌进标签，系统负责画出来：\n" +
     "- <choice q=\"问题id\" value=\"值\">按钮上的字</choice>：一个按钮，点了就选这个值；\n" +
     "- <media q=\"问题id\" ref=\"ref\"/>：一张素材卡片（封面、标题、来源、时长、打开链接），ref 是 kdj_search 给的或 kdj_library_list 的 library:<id>；不给 q 只展示；\n" +
-    "- <shot src=\"kdj_peek 给出的帧路径\">这张图说明什么</shot>：你判断时依据的截图（比如能看到字幕），直接贴给用户看。\n" +
+    "- <shot src=\"kdj_peek 给出的帧路径\">这张图说明什么</shot>：你看过的画面，贴给用户自己判断（字幕、水印、是不是原作）。" +
+    "方案里有视频素材时必须给：每个推荐的视频素材至少一张；能截帧的（在线 B 站、曲库视频）没贴截图，方案会被退回。\n" +
     "同一个问题默认单选；questions 里给 {id, multiple, default} 改成多选或预选。返回 answers（每个问题选中的值）和 note。方案不给 timeout。\n" +
     "用户还可以写一句补充（note），要照着做。用户关掉或点「暂停」则 cancelled 为 true，停下。",
   parameters: Type.Object({
@@ -446,6 +475,11 @@ const askUser = defineTool({
     });
     if (!params.question && !body && !params.preview && questions.length === 0) throw new Error("没有要问的：给 question，或 body");
     const unknown = [...parts.refs].filter(ref => !songs.has(ref));
+    // A plan offering footage shows the listener what it looked like, not only the AI's verdict.
+    const peekable = [...parts.refs].filter(ref => songs.get(ref)?.kind === "video" && /^(bilibili|library):/.test(ref));
+    if (peekable.length > 0 && ![...parts.shots].some(src => peeked.has(src))) {
+      throw new Error(`方案里有视频素材（${peekable.join("、")}），但没有贴出你看过的画面：先用 kdj_peek 截帧，再用 <shot src="帧路径">说明</shot> 贴进 body，然后再问`);
+    }
     const asked = {
       question: params.question ?? "",
       body,

@@ -4,6 +4,9 @@
 
 - 找歌：kdj_search。KDJ 的搜索页会显示你搜的内容；同一首歌的几种写法可以一起搜。
 - 下载：先用 kdj_library_list 查曲库里是否已有，已有就不再下。没有就用 kdj_download，ref 用 kdj_search 给出的。
+- 曲库里已有的歌（用户拖进来的、kdj_library_list 找到的）不要再用 kdj_search 搜它本身：它已经在曲库里，搜索页还会白白显示一次。
+  歌名、歌手、专辑、出自哪部作品用 kdj_library_get 读；段落、副歌在哪看 kdj_library_get 的段落和小节线；还不清楚就用网页搜索。
+  kdj_search 只用来找要下载的新东西（视频素材、别的版本）。
 - 下到哪里：用户说了文件夹，先用 kdj_folders 按那个名字搜（会搜所有子文件夹），不要自己猜路径。只有一个合适的就把它的 path 填进 kdj_download 的 to；几个同样合适就 ask_user 让用户选（options 用它们的相对路径）；一个都没有就 ask_user 问用户。没说文件夹就用默认下载文件夹。
 - 想听：kdj_play，用下载或曲库给出的 track_id。
 - 名字不确定（新番、简称、错字、中文译名）：用网页搜索工具查到准确的歌名，再 kdj_search。

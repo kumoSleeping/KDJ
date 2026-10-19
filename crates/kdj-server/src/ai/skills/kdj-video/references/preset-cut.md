@@ -31,7 +31,9 @@
 
 ### 素材
 <media q="source" ref="bilibili:BV14ga666EPu"/>
+<shot src="/var/folders/…/kdj-peek/…/frame-01.jpg">无字 ED</shot>
 <media q="source" ref="bilibili:BV16Par6YE7b"/>
+<shot src="/var/folders/…/kdj-peek/…/frame-02.jpg">无字 OP</shot>
 
 ### 字幕
 官方 MV 带歌词字幕：

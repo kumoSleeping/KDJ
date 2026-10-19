@@ -26,16 +26,18 @@
 `body`：
 
 ```markdown
-**完整 VJ**：用《FX战士久留美》的原作画面按段落剪整首 3:38，副歌进入处做切换；下载约 1 GB，先给 .kdjv 预览。
+**完整 VJ**：用《FX战士久留美》的原作画面按段落剪整首 3:38，副歌进入处做切换；按 1080p 下载（没有就 720p），约 1 GB，先给 .kdjv 预览。
 
 ### 素材（可多选）
 <media q="source" ref="bilibili:BV14ga666EPu"/>
+<shot src="/var/folders/…/kdj-peek/…/frame-01.jpg">无字 ED，画面干净</shot>
 <media q="source" ref="bilibili:BV16Par6YE7b"/>
+<shot src="/var/folders/…/kdj-peek/…/frame-04.jpg">无字 OP，右上角有台标</shot>
 <media q="source" ref="bilibili:BV1mUa66CE5h"/>
+<shot src="/var/folders/…/kdj-peek/…/frame-07.jpg">正片剪辑，带中日字幕</shot>
 
-真人 MV 也有，但风格不同，带字幕：
+真人 MV 也有，但风格不同（YouTube，下载前看不到画面，只看了封面）：
 <media q="source" ref="youtube:WJ_gcQl1QL0"/>
-<shot src="/var/folders/…/kdj-peek/…/frame-02.jpg">真人出镜，下方有歌词字幕</shot>
 
 ### 效果
 <choice q="effects" value="cut">只剪拼</choice> <choice q="effects" value="transitions">段落处转场</choice> <choice q="effects" value="drop">配合 drop 的强效果</choice>
