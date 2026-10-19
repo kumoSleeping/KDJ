@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -376,9 +377,34 @@ export function SearchBar({
   const waveSawBusyRef = useRef(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
-  // Agent Mode's request grows with its lines (Shift + Enter) like a batch of keywords does.
+  // Agent Mode's request grows with its lines like a batch of keywords does: the lines it breaks
+  // (Shift + Enter) and the ones a long sentence wraps into, measured from the field itself.
   const shown = aiMode ? request : query;
-  const inputRows = aiMode ? Math.min(5, Math.max(1, request.split("\n").length))
+  const [wrapRows, setWrapRows] = useState(1);
+  useLayoutEffect(() => {
+    const element = inputRef.current;
+    if (!aiMode || !element) {
+      setWrapRows(1);
+      return;
+    }
+    const measure = () => {
+      const style = getComputedStyle(element);
+      const leading = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4;
+      const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      // Collapsed for the measure, the field's scroll height is what its text needs.
+      const height = element.style.height;
+      element.style.height = "0px";
+      const lines = Math.max(1, Math.round((element.scrollHeight - padding) / leading));
+      element.style.height = height;
+      setWrapRows(current => (current === lines ? current : lines));
+    };
+    measure();
+    // A narrower or wider row wraps the sentence again.
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [aiMode, request]);
+  const inputRows = aiMode ? Math.min(5, Math.max(1, request.split("\n").length, wrapRows))
     : batch ? Math.min(5, Math.max(2, query.split("\n").length)) : 1;
   const currentKindIndex = searchKinds.indexOf(searchKind);
   const nextSearchKind = searchKinds.length
