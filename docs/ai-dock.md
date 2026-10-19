@@ -188,8 +188,8 @@ bash 以当前用户权限运行，并非文件沙箱；保存工程、导出仍
 
 - **做法与方案**：四种做法（完整 VJ、简洁剪辑、音视频合并、可视化）、素材顺序、先探索再交方案、报告，见
   `docs/ai-video-presets.md`。
-- **技能**：`crates/kdj-server/src/ai/prompts/skills/kdj-video/`（`SKILL.md` 和 `references/` 下的 `kdjv.md`、`ffmpeg.md`、
-  `remotion.md`、四种做法的 `preset-*.md`），由 kdj-server 写进 pi 目录。pi 只把名字和描述放进系统提示，模型遇到视频的事才用 `read` 读全文。pi 只在有
+- **技能**：`crates/kdj-server/src/ai/prompts/skills/kdj-video/`（`SKILL.md` 和 `references/` 下的 `kdjv.md`、
+  四种做法的 `preset-*.md`），由 kdj-server 写进 pi 目录。pi 只把名字和描述放进系统提示，模型遇到视频的事才用 `read` 读全文。pi 只在有
   名为 `read`（或 `bash`）的工具时才列出技能，所以 KDJ 自己注册了一个只读得到技能、工作目录和 `.kdjv` 的 `read`。
 - **视频工具**（`kdj-video.ts`；shell 由 pi 提供）：`read`；`write`（只写工作目录，`remotion/node_modules` 除外）；`kdj_probe`（ffprobe）；
   `kdj_ffmpeg`（参数 + 输出文件，输出只能在工作目录，相对路径进 `renders/`，KDJ 自己的 FFmpeg，经 `KDJ_FFMPEG`）；

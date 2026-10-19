@@ -24,8 +24,8 @@ KDJ 交给模型的话都在这个文件夹里，改提示词只改这里。代�
 选了 pi-web-access 做网页搜索时，`kdj_web_search` / `kdj_web_fetch` 换成它自己的工具和说明。
 
 **视频技能** `skills/kdj-video/`：`SKILL.md` 是总纲；`references/` 下是工程格式（`kdjv.md`，也是 .kdjv 格式的唯一说明）、
-FFmpeg 和 Remotion 的写法、四种做法（`preset-vj.md`、`preset-cut.md`、`preset-merge.md`、`preset-visualizer.md`）。
-模型照 SKILL.md 的指引按需读。
+四种做法（`preset-vj.md`、`preset-cut.md`、`preset-merge.md`、`preset-visualizer.md`）。模型照 SKILL.md 的指引按需读。
+FFmpeg 和 Remotion 怎么写不教：SKILL.md 只写放进工程的片段要满足什么，工具的用法在 `tools.md`。
 
 ## 不在这里、但模型也看得到的
 

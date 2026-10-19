@@ -69,6 +69,11 @@ NCOP，要主歌、副歌用 NCOP 对上 remix，其余用干净的动画剪影�
 
 同时把散在代码里的工具说明全部搬进 `prompts/tools.md`，系统提示的各段也进了 `prompts/`，人能在一处看到模型收到的每一句话。
 
+2026-10-20 删掉了 `references/ffmpeg.md` 和 `references/remotion.md`：滤镜配方和组件示例教不会本来不懂 FFmpeg、Remotion 的模型，
+懂的模型又用不着，而且怎么列也列不全。FFmpeg 和 Remotion 怎么写交给模型自己；SKILL.md「做工程」只留 KDJ 自己的要求
+（片段和画布同尺寸同帧率、不透明用 H.264 `.mp4`、透明叠层用 ProRes 4444 `.mov`、过渡片段盖在上一层、不带声音、和底下逐帧接得上），
+工具的用法在 `tools.md`。已装好的数据目录里的这两份由 `write_extension` 删掉。
+
 ## 还没做的
 
 - **.kdjv 的波形、BPM、调性**：现在工程被排除在分析之外（`kdj-library/src/service.rs` 的 7 处 `NOT IN (…'kdjv')`、`rhythm.rs:77`、

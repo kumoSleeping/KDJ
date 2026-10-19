@@ -48,8 +48,6 @@ const PROMPTS: &[(&str, &str)] = &[
     ("tools.md", include_str!("prompts/tools.md")),
     ("skills/kdj-video/SKILL.md", include_str!("prompts/skills/kdj-video/SKILL.md")),
     ("skills/kdj-video/references/kdjv.md", include_str!("prompts/skills/kdj-video/references/kdjv.md")),
-    ("skills/kdj-video/references/ffmpeg.md", include_str!("prompts/skills/kdj-video/references/ffmpeg.md")),
-    ("skills/kdj-video/references/remotion.md", include_str!("prompts/skills/kdj-video/references/remotion.md")),
     ("skills/kdj-video/references/preset-vj.md", include_str!("prompts/skills/kdj-video/references/preset-vj.md")),
     ("skills/kdj-video/references/preset-cut.md", include_str!("prompts/skills/kdj-video/references/preset-cut.md")),
     ("skills/kdj-video/references/preset-merge.md", include_str!("prompts/skills/kdj-video/references/preset-merge.md")),
@@ -479,6 +477,10 @@ impl AiBridge {
         // Where the prompt and the skill were written before they moved into prompts/.
         let _ = std::fs::remove_file(paths.agent.join("kdj").join("kdj-prompt.md"));
         let _ = std::fs::remove_dir_all(paths.agent.join("kdj").join("skills"));
+        // FFmpeg and Remotion are the model's own to write; their recipes are gone.
+        for gone in ["ffmpeg.md", "remotion.md"] {
+            let _ = std::fs::remove_file(paths.skill().join("references").join(gone));
+        }
         Ok(())
     }
 
@@ -1247,9 +1249,10 @@ mod tests {
         bridge.write_extension().unwrap();
         let skill = std::fs::read_to_string(bridge.paths.skill().join("SKILL.md")).unwrap();
         assert!(skill.starts_with("---\nname: kdj-video\n"), "{skill}");
-        for reference in ["kdjv.md", "ffmpeg.md", "remotion.md"] {
-            assert!(bridge.paths.skill().join("references").join(reference).is_file(), "{reference}");
-        }
+        assert!(bridge.paths.skill().join("references").join("kdjv.md").is_file());
+        std::fs::write(bridge.paths.skill().join("references").join("ffmpeg.md"), "old").unwrap();
+        bridge.write_extension().unwrap();
+        assert!(!bridge.paths.skill().join("references").join("ffmpeg.md").exists(), "the old recipes are cleared");
         assert!(bridge.paths.skill().starts_with(bridge.paths.prompts()));
         for prompt in ["README.md", "preamble.md", "system.md", "blind.md", "tools.md"] {
             assert!(bridge.paths.prompts().join(prompt).is_file(), "{prompt}");
