@@ -391,11 +391,16 @@ export function SearchBar({
       const style = getComputedStyle(element);
       const leading = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4;
       const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
-      // Collapsed for the measure, the field's scroll height is what its text needs.
-      const height = element.style.height;
+      // Collapsed for the measure, the field's scroll height is what its text needs. The height's
+      // transition is held off meanwhile: under it the collapse still reads the old height, and a
+      // field that grew never came back to one line once its sentence was sent.
+      const { height, transition } = element.style;
+      element.style.transition = "none";
       element.style.height = "0px";
-      const lines = Math.max(1, Math.round((element.scrollHeight - padding) / leading));
+      const lines = request ? Math.max(1, Math.round((element.scrollHeight - padding) / leading)) : 1;
       element.style.height = height;
+      void element.offsetHeight;
+      element.style.transition = transition;
       setWrapRows(current => (current === lines ? current : lines));
     };
     measure();
