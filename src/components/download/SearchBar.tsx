@@ -22,6 +22,7 @@ import {
   SEARCH_PLATFORMS,
 } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
+import { MOTION_MICRO_OUT_MS, MOTION_REDUCED_MS, prefersReducedMotion } from "../../lib/motion";
 import { PlatformMark } from "./PlatformMark";
 import { HintBulbIcon } from "./HintBulbIcon";
 import {
@@ -292,7 +293,21 @@ export function SearchBar({
   // AI mode (docs/ai-dock.md): the same field takes a request for the AI. The search's own
   // query is kept and comes back with the mode.
   const offered = aiOffered();
-  const aiMode = useAiStore(state => state.mode) && offered;
+  const aiWanted = useAiStore(state => state.mode) && offered;
+  // The whole row turns over between the two modes by the schema's `turn`: the search row
+  // lifts away, and the Agent Mode row comes up in its place, laid out at once. The row shows
+  // one mode at a time, so what is drawn (`aiMode`) follows the store a gesture later.
+  const [aiMode, setAiMode] = useState(aiWanted);
+  const [rowTurn, setRowTurn] = useState<"out" | "in" | null>(null);
+  if (aiWanted !== aiMode && rowTurn !== "out") setRowTurn("out");
+  useEffect(() => {
+    if (rowTurn !== "out") return;
+    const timer = window.setTimeout(() => {
+      setAiMode(useAiStore.getState().mode && offered);
+      setRowTurn("in");
+    }, prefersReducedMotion() ? MOTION_REDUCED_MS : MOTION_MICRO_OUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [rowTurn, offered]);
   const aiRunning = useAiStore(state => state.running);
   const [request, setRequest] = useState("");
   const seed = useAiStore(state => state.seed);
@@ -428,7 +443,11 @@ export function SearchBar({
         data-stacked={stacked || undefined}
         data-platforms-expanded={stacked && platformsExpanded ? "true" : undefined}
         data-searching={wavePhase ?? undefined}
+        data-kd-turn={rowTurn ?? undefined}
         style={barStyle}
+        onAnimationEnd={(event) => {
+          if (event.target === event.currentTarget && rowTurn === "in") setRowTurn(null);
+        }}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
           inputRef.current?.focus();
@@ -445,9 +464,10 @@ export function SearchBar({
               title={aiMode ? undefined : `${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
               onClick={() => onSearchKindChange(nextSearchKind)}
             >
-              {/* The kind turns over into Agent Mode; while the agent works the field's edge runs. */}
+              {/* The row turns over into Agent Mode as a whole, so the kind does not roll on its own
+                  then (keyed by the mode); while the agent works the field's edge runs. */}
               {aiMode && <Sparkles size={12} className="kd-search-agent-mark" aria-hidden="true" />}
-              <RollText text={aiMode ? "Agent Mode" : SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
+              <RollText key={aiMode ? "ai" : "search"} text={aiMode ? "Agent Mode" : SEARCH_KIND_LABEL[searchKind]} className="kd-search-kind-text" />
             </button>
           )}
           <SearchPlatforms

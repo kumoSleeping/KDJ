@@ -653,52 +653,25 @@
 }
 
 /* —— Agent Mode (docs/ai-dock.md) ——
-   A key at the end of the row turns the field into a request for the agent: the kind turns over
-   into "Agent Mode" by its own roll, the sources fold away on the large-surface clock, and the
-   field keeps its place. While the agent works, a short light runs round the field's edge and
-   the key stops it. Ink only: the key that is on is full ink and heavier, like any selected
+   A key at the end of the row turns the field into a request for the agent. The whole row turns
+   over (the schema's `turn`, set by SearchBar on .kd-searchbar): the search row lifts away and
+   the Agent Mode row comes up in its place, already laid out — no part rolls, folds or grows on
+   its own. While the agent works, a short light runs round the field's edge and the key stops
+   it. The key itself is ink: the key that is on is full ink and heavier, like any selected
    control. */
 .kd-searchbar[data-has-ai] { grid-template-columns: auto minmax(0, 1fr) auto; }
-/* The sources fold away into Agent Mode and come back out of it: the row's width moves on the
-   large-surface clock, and each mark fades and slides back into place one step after the one
-   before it (--kd-plat-n), so they come back as a row instead of appearing at once. Leaving,
-   they go together, without the stagger. */
-.kd-searchbar .kd-plats {
-  max-width: 40rem;
-  transition: max-width var(--kd-motion-in) var(--kd-ease-out);
-}
-.kd-searchbar[data-has-ai] .kd-plat {
-  transition:
-    color 0.12s, border-color 0.12s, background 0.12s,
-    opacity var(--kd-motion-in) var(--kd-ease-out) calc(80ms + var(--kd-plat-n, 0) * 36ms),
-    translate var(--kd-motion-in) var(--kd-ease-out) calc(80ms + var(--kd-plat-n, 0) * 36ms),
-    scale var(--kd-motion-in) var(--kd-ease-out) calc(80ms + var(--kd-plat-n, 0) * 36ms);
-}
-.kd-searchbar[data-ai] .kd-plats {
-  max-width: 0;
-  overflow: hidden;
-  pointer-events: none;
-  transition-timing-function: var(--kd-ease-in);
-  transition-duration: var(--kd-motion-out);
-}
-.kd-searchbar[data-ai] .kd-plat {
-  opacity: 0;
-  translate: -6px 0;
-  scale: 0.86;
-  transition:
-    color 0.12s, border-color 0.12s, background 0.12s,
-    opacity var(--kd-motion-micro-out) var(--kd-ease-in),
-    translate var(--kd-motion-micro-out) var(--kd-ease-in),
-    scale var(--kd-motion-micro-out) var(--kd-ease-in);
-}
-/* Agent Mode's own look: an iridescent field — cool blue, violet and teal mixed thinly into the
-   panel, drifting slowly — and the name written in the same light. No warm hues: the interface
-   has no red. */
+.kd-searchbar[data-ai] .kd-plats { display: none; }
+/* Agent Mode's own look, the one warm surface the interface has (AGENTS.md): a field of red,
+   orange and yellow mixed thinly into the panel, drifting slowly, the name and its spark
+   written in the same light, and the running edge in it too. Only these; the key and
+   everything around the field stay ink. */
 .kd-searchbar[data-ai] {
-  --kd-agent-a: #5b7cfa;
-  --kd-agent-b: #9a6bff;
-  --kd-agent-c: #2fbfb8;
+  --kd-agent-a: #e8412f;
+  --kd-agent-b: #f2811d;
+  --kd-agent-c: #f2b822;
 }
+/* Written on a light panel, the yellow end is taken deeper so the name stays legible. */
+:root[data-theme="light"] .kd-searchbar[data-ai] { --kd-agent-c: #d99a06; }
 .kd-searchbar[data-ai] .kd-searchbar-copy,
 .kd-searchbar[data-ai]:hover .kd-searchbar-copy {
   background:
@@ -725,7 +698,7 @@
   padding-inline: 0.2rem;
   cursor: default;
 }
-.kd-search-agent-mark { flex: none; color: var(--kd-agent-b); }
+.kd-search-agent-mark { flex: none; color: var(--kd-agent-a); }
 .kd-searchbar[data-ai] .kd-search-kind-text .kd-roll-line {
   background: linear-gradient(90deg, var(--kd-agent-a), var(--kd-agent-b) 55%, var(--kd-agent-c));
   -webkit-background-clip: text;
@@ -734,8 +707,9 @@
   font-weight: 700;
   letter-spacing: 0.01em;
 }
-/* The running edge: one soft arc of ink, a hairline wide, going round the field once every few
-   seconds. Drawn on the field's own outline (a masked ring), so nothing moves or is laid out. */
+/* The running edge: one soft arc of the field's light — red into orange into yellow, fading at
+   both ends — going round the field once every few seconds. Drawn on the field's own outline (a
+   masked ring), so nothing moves or is laid out. */
 @property --kd-agent-sweep {
   syntax: "<angle>";
   inherits: false;
@@ -746,13 +720,15 @@
   position: absolute;
   z-index: 2;
   inset: 0;
-  padding: 1px;
+  padding: 1.5px;
   border-radius: inherit;
   background: conic-gradient(from var(--kd-agent-sweep),
     transparent 0deg,
-    color-mix(in srgb, var(--kd-text) 18%, transparent) 60deg,
-    color-mix(in srgb, var(--kd-text) 62%, transparent) 110deg,
-    transparent 150deg,
+    color-mix(in srgb, var(--kd-agent-a) 55%, transparent) 40deg,
+    var(--kd-agent-a) 80deg,
+    var(--kd-agent-b) 120deg,
+    var(--kd-agent-c) 160deg,
+    transparent 200deg,
     transparent 360deg);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
@@ -795,13 +771,11 @@
   justify-self: end;
 }
 @media (prefers-reduced-motion: reduce) {
-  .kd-searchbar .kd-plats,
-  .kd-searchbar[data-has-ai] .kd-plat,
-  .kd-searchbar[data-ai] .kd-plat { transition: none; }
   .kd-searchbar[data-ai] .kd-searchbar-copy { animation: none; }
-  /* Still: the edge stays lit instead of running. */
+  /* Still: the whole edge stays lit in the field's light instead of running. */
   .kd-searchbar[data-ai-running] .kd-searchbar-copy::before {
     animation: none;
-    background: color-mix(in srgb, var(--kd-text) 30%, transparent);
+    background: linear-gradient(115deg, var(--kd-agent-a), var(--kd-agent-b) 50%, var(--kd-agent-c));
+    opacity: 0.6;
   }
 }
