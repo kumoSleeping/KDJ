@@ -495,6 +495,8 @@ impl AiBridge {
         command
             // Extensions stay on: the only package in KDJ's directory is the one KDJ installs.
             .args(["--mode", "rpc", "--no-skills", "--no-context-files", "--no-builtin-tools"])
+            // Add only pi's shell; retain KDJ/web extensions and KDJ's scoped read/write.
+            .args(["--tools", "+bash"])
             .arg("--session-dir")
             .arg(&paths.sessions)
             .arg("--extension")

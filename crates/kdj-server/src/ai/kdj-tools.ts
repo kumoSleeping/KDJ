@@ -23,7 +23,7 @@ import { registerWeb } from "./kdj-web.ts";
 
 /** The opening of the system prompt, in place of pi's coding-assistant one. */
 const PREAMBLE = "你是 KDJ 里的 AI 助手，在用户自己的电脑上替用户完成音乐和视频的事。" +
-  "你没有 shell，也不能随意读写文件：你能做的只有下面这些工具做得到的事。";
+  "你可以使用 KDJ 工具和 bash 执行本机命令；只做用户授权的操作，遵守下文的文件与路径规则。";
 
 const CLI = process.env.KDJ_CLI || "kdj";
 const DATA_DIR = process.env.KDJ_DATA_DIR;
