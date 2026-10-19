@@ -75,7 +75,9 @@ const DEFAULT_THINKING: &str = "high";
 const WEB_MODES: &[&str] = &["access", "deepseek", "deepseek-jina", "jina"];
 
 /// pi-web-access with everything but searching and reading pages turned off: no browser cookies,
-/// no video, GitHub clones, PDFs or commands, and no requests to this machine.
+/// no video, GitHub clones, PDFs or commands, and no requests to this machine. Its domain policy
+/// takes host names and IPv4 only — an IPv6 entry such as `::1` makes it refuse the whole file, and
+/// every page read fails — while its own guard already refuses loopback and private addresses.
 const ACCESS_CONFIG: &str = r#"{
   "allowBrowserCookies": false,
   "video": { "enabled": false },
@@ -85,7 +87,7 @@ const ACCESS_CONFIG: &str = r#"{
   "pdf": { "enabled": false },
   "workflow": "none",
   "fetchRouting": { "allowRemoteHostedProviders": true },
-  "fetchContent": { "domainPolicy": { "deny": ["localhost", "127.0.0.1", "0.0.0.0", "::1"] } },
+  "fetchContent": { "domainPolicy": { "deny": ["localhost", "127.0.0.1", "0.0.0.0"] } },
   "commands": {
     "websearch": { "enabled": false },
     "curator": { "enabled": false },
